@@ -7,6 +7,7 @@ import {
   isValidSlug,
   RUNTIME_UNAVAILABLE_LINE,
   RUNTIME_TECHNICAL_TROUBLE_LINE,
+  RUNTIME_CANNOT_HEAR_LINE,
   VOICE_STREAM_PATH,
   type WebhookRequest,
 } from "./voiceWebhook";
@@ -196,6 +197,24 @@ describe("the post-stream redirect", () => {
       deps({ registry }),
     );
     expect(spoken(res.body)).toBe(RUNTIME_TECHNICAL_TROUBLE_LINE);
+  });
+
+  it("signs off, and does NOT apologise for a fault, when the silence ladder gave up (v65)", () => {
+    // Three prompts and the caller never spoke. Nothing failed on our side,
+    // so the trouble line would be a claim about us the evidence does not
+    // support — and it is said HERE rather than by the agent because teardown
+    // closes the media stream and would cut the line mid-word, which is the
+    // reasoning `blindTransfer` records for its own warning.
+    const registry = new CallSessionRegistry();
+    registry.register({ callSid: "CA123", slug: "optical", callerPhone: "", dialedNumber: "" });
+    registry.recordOutcome("CA123", "caller_silent");
+    const res = handleAfterRedirect(
+      signedRequest("/voice/optical/after", { CallSid: "CA123" }),
+      deps({ registry }),
+    );
+    expect(spoken(res.body)).toBe(RUNTIME_CANNOT_HEAR_LINE);
+    expect(spoken(res.body)).not.toBe(RUNTIME_TECHNICAL_TROUBLE_LINE);
+    expect(res.body).toContain("<Hangup/>");
   });
 
   it("hangs up cleanly after a normal ending — no invented apology", () => {

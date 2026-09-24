@@ -70,7 +70,18 @@ describe("the follow-up summary", () => {
 
   it("carries only counts and the outcome — nothing a caller said", () => {
     const ev = followUpEvent(record({ owed: 1, requested: 1, toolCallsAfterDone: 1, lastUnanswered: true }))!;
-    expect(ev.data).toEqual({ owed: 1, requested: 1, toolCallsAfterDone: 1, lastUnanswered: true, hangupsHeld: 0, outcome: "dead_air" });
+    // An EXACT key set, so a field carrying anything a caller said cannot be
+    // added without this going red. v65's two are counts, like the rest.
+    expect(ev.data).toEqual({
+      owed: 1,
+      requested: 1,
+      toolCallsAfterDone: 1,
+      lastUnanswered: true,
+      hangupsHeld: 0,
+      silencePrompts: 0,
+      silenceCut: false,
+      outcome: "dead_air",
+    });
   });
 
   it("emits one call_events row keyed on the call and flushes it, then releases the buffer", async () => {

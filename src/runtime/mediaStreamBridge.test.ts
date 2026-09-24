@@ -75,6 +75,8 @@ function makeBridge(
     endCallToolNames?: string[];
     maxCallMs?: number;
     deadAirMs?: number;
+    silencePromptMs?: number;
+    silenceStrikeLimit?: number;
     guardrailMode?: "enforce" | "log";
     toolCeiling?: { identicalFailures?: number; perToolFailures?: number; identicalSuccesses?: number; perToolSuccesses?: number; perCallDispatches?: number };
     /** A REAL Twilio SID, for the stores that refuse anything else. */
@@ -137,6 +139,8 @@ function makeBridge(
     guardrailMode: over.guardrailMode,
     maxCallMs: over.maxCallMs ?? 600_000,
     deadAirMs: over.deadAirMs ?? 30_000,
+    silencePromptMs: over.silencePromptMs ?? 12_000,
+    silenceStrikeLimit: over.silenceStrikeLimit,
     setTimer: timers.setTimer,
     clearTimer: timers.clearTimer,
     toolCeiling: over.toolCeiling,
@@ -817,7 +821,7 @@ describe("VoiceCallBridge — dead-air watchdog", () => {
     expect(h.outcomes).toEqual(["dead_air"]);
   });
 
-  it("clears once the opening line is actually delivered", () => {
+  it("clears the AGENT's clock once the opening line is delivered — the caller's is armed instead (v65)", () => {
     const h = makeBridge({ deadAirMs: 30_000 });
     h.handlers().onConfigured();
     speakUtterance(h, "Thank you for calling Azul Vision.");
@@ -849,7 +853,7 @@ describe("VoiceCallBridge — dead-air watchdog", () => {
     expect(armed).toHaveLength(1);
   });
 
-  it("a caller thinking about the answer never trips it — the agent already replied", () => {
+  it("a caller thinking about the answer never trips the AGENT's clock — the agent already replied", () => {
     const h = makeBridge({ deadAirMs: 30_000 });
     h.handlers().onSpeechStopped(); // a response is owed
     speakUtterance(h, "How can I help you today?"); // and the agent gave one
@@ -869,7 +873,7 @@ describe("VoiceCallBridge — dead-air watchdog", () => {
     expect(h.outcomes).toEqual(["dead_air"]);
   });
 
-  it("clears once a full utterance is delivered and nothing is owed", () => {
+  it("clears the AGENT's clock once a full utterance is delivered and nothing is owed", () => {
     const h = makeBridge({ deadAirMs: 30_000 });
     speakUtterance(h, "How can I help?");
     expect([...h.timers.pending.values()].some((t) => t.ms === 30_000)).toBe(false);

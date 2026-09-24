@@ -26,20 +26,40 @@ export interface FollowUpEvent {
   data: Record<string, unknown>;
 }
 
-/** Null when the call never owed a follow-up — nothing to say. */
-export function followUpEvent(record: Pick<VoiceCallRecord, "followUps" | "outcome" | "hangupsHeld">): FollowUpEvent | null {
+/**
+ * Null when the call has NOTHING to say about turn-taking — no follow-up was
+ * ever owed and the silence ladder never spoke.
+ *
+ * THE SILENCE HALF WIDENED THE GATE, and it had to (v65). A caller who never
+ * speaks runs no tools, so `owed` is 0 and this row was skipped on exactly
+ * the population the ladder exists for — the v58 shape, an instrument blind
+ * to its own subject. The row's name is historical; what it has carried since
+ * v56's `hangupsHeld` is this call's turn-taking bookkeeping, and silence
+ * prompts are that.
+ */
+export function followUpEvent(
+  record: Pick<VoiceCallRecord, "followUps" | "outcome" | "hangupsHeld" | "silencePrompts" | "silenceCut">,
+): FollowUpEvent | null {
   const f = record.followUps;
-  if (!f || f.owed === 0) return null;
-  const suspicious = f.lastUnanswered || f.toolCallsAfterDone > 0;
+  const prompts = record.silencePrompts ?? 0;
+  if ((!f || f.owed === 0) && prompts === 0) return null;
+  const suspicious =
+    (f?.lastUnanswered ?? false) || (f?.toolCallsAfterDone ?? 0) > 0 || record.silenceCut === true;
   return {
     level: suspicious ? "warn" : "info",
     data: {
-      owed: f.owed,
-      requested: f.requested,
-      toolCallsAfterDone: f.toolCallsAfterDone,
-      lastUnanswered: f.lastUnanswered,
+      owed: f?.owed ?? 0,
+      requested: f?.requested ?? 0,
+      toolCallsAfterDone: f?.toolCallsAfterDone ?? 0,
+      lastUnanswered: f?.lastUnanswered ?? false,
       // v56: end-call tool calls refused because a tool answer was never voiced.
       hangupsHeld: record.hangupsHeld ?? 0,
+      // v65: silence prompts SPOKEN, and whether they ran out. The second is
+      // also readable as `runtime_outcome = 'caller_silent'`; the first is
+      // the guard number and lives nowhere else — a prompt on a call that
+      // then carried on is the false positive, and the window is its dial.
+      silencePrompts: prompts,
+      silenceCut: record.silenceCut === true,
       outcome: record.outcome,
     },
   };

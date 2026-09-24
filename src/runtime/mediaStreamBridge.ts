@@ -241,6 +241,73 @@ export const DEFAULT_DEAD_AIR_MS = 30_000;
 export const TOOL_DISPATCH_GRACE_MS = 15_000;
 
 /**
+ * THE SILENCE LADDER — three prompts, then the call ends.
+ *
+ * Operator, 2026-09-24, describing behaviour he remembers and wants back:
+ * *"I've heard the agent speak several times before, I cannot hear you,
+ * after the third time, the agent cuts the call. That's how it was and
+ * always should be to protect against malicious users, bots and things."*
+ * **It does not exist anywhere in this repo** — grepped before building, and
+ * the only hits for that phrase are a cue list that detects the CALLER
+ * saying it and the scheduling lane's hold filler. It may have lived in the
+ * `src/core` pipeline deleted on 2026-09-01, or predate this system.
+ *
+ * AND IT CLOSES A MEASURED GAP, which is why it goes here rather than in a
+ * prompt. `handleResponseDone` used to CLEAR the watchdog once the agent's
+ * line was delivered and nothing was owed — deliberately, so *"a caller
+ * quietly thinking about a question can never trip it"* — and nothing
+ * re-armed it until the caller spoke. So a caller who NEVER speaks was
+ * detected by nothing at all: measured over 2026-09-17..23 on the three
+ * busiest runtime lanes, of 138 substantive calls whose transcript held no
+ * caller line the watchdog fired on **1**, the rest ended `caller_hangup` at
+ * 68 seconds average, and two optical calls sat open to the ten-minute
+ * ceiling. The clock is no longer cleared there; it is re-armed as the
+ * caller's, with a shorter window and a ladder on the end of it.
+ *
+ * DETERMINISTIC, NOT MODEL-SPOKEN, and that is the v22/v39 reasoning: a line
+ * in the prompt is a line the model MAY say, and a protection against bots
+ * cannot be optional. `session.speak` puts these words on the wire verbatim,
+ * the way the greeting's are.
+ *
+ * `interruptible: true`, unlike the greeting: the whole purpose is to make a
+ * caller talk, so their first syllable must be able to cut it off.
+ */
+export const SILENCE_PROMPT_LINE = "I'm sorry, I cannot hear you. Are you still there?";
+
+/**
+ * How long the caller may say nothing before each prompt.
+ *
+ * A JUDGEMENT, not a measurement, and nothing in production can inform it
+ * yet because nothing has ever counted silence: 12 seconds is long enough
+ * that a caller reading a date of birth off a card is not interrupted and
+ * short enough that they have not already given up. Three prompts plus the
+ * cut is therefore ~48 seconds against the ten-minute ceiling those two
+ * optical calls actually reached.
+ *
+ * `RUNTIME_SILENCE_PROMPT_MS` moves it without a deploy — the
+ * `RUNTIME_VAD_THRESHOLD` pattern, and for the same reason: the number to
+ * watch is how often a prompt is followed by a caller who was there all
+ * along, and that dial is what answers it. Clamped so a typo cannot disarm
+ * the ladder or make it fire over the agent.
+ */
+export const SILENCE_PROMPT_MS = clampSilenceWindow(
+  Number(process.env.RUNTIME_SILENCE_PROMPT_MS ?? 12_000),
+);
+
+export function clampSilenceWindow(ms: number): number {
+  if (!Number.isFinite(ms)) return 12_000;
+  return Math.min(60_000, Math.max(5_000, Math.round(ms)));
+}
+
+/**
+ * Prompts a caller gets before the call ends — the operator's "third time".
+ *
+ * The cut is the FOURTH expiry: three prompts are spoken and the call ends
+ * when the third goes unanswered, which is what his sentence describes.
+ */
+export const SILENCE_STRIKE_LIMIT = 3;
+
+/**
  * A function-call event that arrives AFTER its response's `response.done`
  * has no done ahead of it to say when its batch is complete, so the bridge
  * holds the follow-up for this long after the LAST such event ARRIVES; a
@@ -307,7 +374,25 @@ export type CallOutcome =
   | "transferred"
   | "provider_failure"
   | "dead_air"
+  /**
+   * Three prompts and the caller never spoke. DISTINCT from `dead_air` on
+   * purpose: that one means the AGENT owed something and never delivered it,
+   * and folding a silent caller into it would move a number this repo
+   * already tracks (the v54 refusal-then-silence count) without the defect
+   * behind it moving at all.
+   */
+  | "caller_silent"
   | "max_duration";
+
+/**
+ * What the dead-air clock is waiting for.
+ *
+ * `utterance` and `response` are the AGENT's debts and expire into a
+ * teardown. `caller` is the opposite: the agent has finished, nothing is
+ * owed, and the ball is in the caller's court — that one expires into the
+ * silence ladder, which speaks before it ever ends a call.
+ */
+type DeadAirCause = "utterance" | "response" | "caller";
 
 /** One tool call as the runtime saw it. Names and outcomes only — the
  * runtime never interprets a tool's arguments or its result. */
@@ -407,6 +492,10 @@ export interface VoiceCallRecord {
   /** End-call tool calls the bridge refused because the model held a tool
    * answer it had not voiced (v56, HANGUP_HOLD_LIMIT). */
   hangupsHeld?: number;
+  /** Silence prompts actually SPOKEN to the caller (v65). */
+  silencePrompts?: number;
+  /** True when the ladder ran out of prompts and ended the call. */
+  silenceCut?: boolean;
 }
 
 /**
@@ -517,6 +606,10 @@ export interface VoiceCallBridgeDeps {
   guardrailMode?: "enforce" | "log";
   maxCallMs?: number;
   deadAirMs?: number;
+  /** The silence ladder's window and its strike count. Injected for tests;
+   * the window's production value comes from `SILENCE_PROMPT_MS`. */
+  silencePromptMs?: number;
+  silenceStrikeLimit?: number;
   /**
    * When the call actually began — the moment the stream was claimed.
    *
@@ -704,6 +797,31 @@ export class VoiceCallBridge {
    * derived from its own audio rather than a constant. */
   private lastCompletedUtteranceBytes = 0;
 
+  /**
+   * Audio bytes sent whose playback Twilio has NOT yet confirmed — the upper
+   * bound on what is still queued ahead of the newest mark.
+   *
+   * COUNTED AS THE BYTES ARE FORWARDED (`handleAudioDelta`), which is the only
+   * place that survives every way an utterance can end. Two earlier shapes did
+   * not, and both were P1s on the same PR:
+   *
+   *   - `done.bytes` at the arm alone (round 1) saw only the NEWEST utterance,
+   *     so a long line followed by a short one armed a window shorter than the
+   *     audio still queued ahead of it;
+   *   - accumulating at `response.done` (round 2) missed an utterance
+   *     SUPERSEDED by a new response epoch, which `openOrGetCurrent` drops
+   *     without a completion event although its audio was already sent.
+   *
+   * `awaitingMark`'s sum is not the answer either: its second push is behind
+   * `else if (text)`, so an utterance with audio and no transcript sends a mark
+   * and leaves NO entry, and its bytes would be invisible to it.
+   *
+   * ONLY THE NEWEST MARK'S ECHO CLEARS IT, so an intermediate echo — or audio
+   * discarded by a barge-in `clear` — leaves this reading high. That is the
+   * safe direction: too patient never speaks over the agent.
+   */
+  private unechoedAudioBytes = 0;
+
   private maxCallTimer: unknown = null;
   private deadAirTimer: unknown = null;
   /** WHY the watchdog is armed. 'utterance' = an utterance's audio is
@@ -712,7 +830,25 @@ export class VoiceCallBridge {
    * completion can arrive after the caller's next turn armed the response
    * clock, and an unconditional clear would disarm exactly the protection
    * that sequence needs. */
-  private deadAirCause: "utterance" | "response" | null = null;
+  private deadAirCause: DeadAirCause | null = null;
+  /**
+   * CONSECUTIVE unanswered prompts — the ladder's own position. Reset the
+   * moment the caller is actually heard, because a caller who answers has
+   * earned a fresh three: the ladder is for a line nobody is talking on.
+   */
+  private silenceStrikes = 0;
+  /**
+   * Prompts SPOKEN on this call, cumulatively, and NEVER reset (Codex P2,
+   * #328). The two were one counter, and the reset erased the prompt that
+   * WORKED — so a call where the ladder spoke and the caller came back read
+   * zero, `followUpEvent` skipped the row on a call that owed no follow-up,
+   * and this row's own guard number (prompts on calls that carried on
+   * normally, which is the false-positive rate and the window's dial) was
+   * unmeasurable by construction. The ladder needs the consecutive count;
+   * the instrument needs the total; they are not the same number.
+   */
+  private silencePrompts = 0;
+  private silenceCut = false;
 
   private readonly transcriptLog = new CallTranscriptLog();
   /** What the provider says this call cost. See tokenUsage.ts. */
@@ -747,6 +883,16 @@ export class VoiceCallBridge {
       onCallerTranscript: (text, itemId) => {
         if (this.ended) return;
         this.noteTranscript("caller");
+        // HEARD, so the LADDER starts again from zero — and only the ladder.
+        // `silencePrompts` is the cumulative count and is deliberately not
+        // touched: a prompt that brought a caller back is the single most
+        // useful thing this instrument records, and resetting it erased
+        // exactly that (Codex P2, #328).
+        //
+        // Deliberately keyed on a transcript rather than on `speech_stopped`:
+        // the VAD fires on a cough and on hold music, and a ladder reset by
+        // noise is a ladder a dialler can hold open for ever.
+        this.silenceStrikes = 0;
         // Straight through, greeting or no greeting. Where the greeting's own
         // line sits was settled when its audio started, so there is no
         // "before or after it" left to decide here — which is the point:
@@ -855,6 +1001,16 @@ export class VoiceCallBridge {
     // one is playing proves nothing about current audio.
     if (name === this.latestMarkName && !this.mediaSinceLastMark) {
       this.assistantAudioPlaying = false;
+      // Everything sent has now played, so nothing is queued ahead.
+      this.unechoedAudioBytes = 0;
+      // AND THIS IS WHERE THE CALLER'S SILENCE ACTUALLY BEGINS (v65). The
+      // window armed at `response.done` carries the whole line's duration as
+      // a safe upper bound on what was still buffered; here Twilio has proved
+      // the audio landed, so the clock restarts from the true moment the
+      // caller was left holding the turn. Only when the caller's clock is the
+      // one running: an agent debt (a pending tool, a response owed) is not
+      // this timer's business and must not be extended by a playback echo.
+      if (this.deadAirCause === "caller") this.armDeadAir("caller");
     }
     // The greeting reached the caller in full. Barge-in works normally from
     // here — this protects the opening, not the conversation.
@@ -1079,8 +1235,7 @@ export class VoiceCallBridge {
       this.finalFallbackTimer = null;
     }
     this.session.cancelResponse();
-    this.sendFrame({ event: "clear", streamSid: this.deps.context.streamSid });
-    this.assistantAudioPlaying = false;
+    this.discardBufferedAudio();
     // The replacement turn. Content decided here, phrasing left to the
     // model — the case speakNatural exists for. The rule's own policyHint
     // is the instruction, so each guardrail corrects in its own terms.
@@ -1101,7 +1256,20 @@ export class VoiceCallBridge {
     // cancelled line straight back is the one thing `clear` exists to
     // prevent.
     if (!current) return;
-    current.bytes += Buffer.from(base64Audio, "base64").length;
+    const forwarded = Buffer.from(base64Audio, "base64").length;
+    current.bytes += forwarded;
+    // AND THE CALLER'S SILENCE BOUND COUNTS IT HERE, at the moment it is handed
+    // to Twilio, NOT when its utterance completes (Codex P1, #328 round 3). An
+    // utterance superseded by a new response epoch is dropped by
+    // `openOrGetCurrent` WITHOUT a completion event, and its audio was already
+    // sent — so accumulating at `response.done` missed it entirely and the next
+    // completion armed a window shorter than the audio still queued. Counting
+    // as forwarded makes completion irrelevant: every byte the caller might
+    // still be hearing is counted exactly once, however its utterance ended.
+    //
+    // Audio from a cancelled epoch never reaches this line (`!current` returns
+    // above), which is correct — it is not forwarded, so it cannot be queued.
+    this.unechoedAudioBytes += forwarded;
     // PLAYBACK BEGINS HERE — and for the greeting that is when its line is
     // written. Its words are scripted, so none of them is waiting on the
     // wire, and this is the one moment that sits in its true place among the
@@ -1277,7 +1445,36 @@ export class VoiceCallBridge {
       // words, and this completion did not deliver them — the greeting was
       // already speaking when they spoke.
       else if (this.responseOwedFromGreeting) this.armDeadAir("response");
-      else this.clearDeadAir();
+      // NOTHING IS OWED, so the ball is in the caller's court — and until
+      // v65 that meant no clock at all until they spoke, which is how a
+      // caller who never speaks went undetected on 137 of 138 calls. The
+      // agent's debt is discharged; what is armed now is the caller's own
+      // window, and it speaks to them before it ever ends the call.
+      //
+      // AND IT CARRIES THE PLAYBACK STILL QUEUED, because `response.done`
+      // means the PROVIDER has finished GENERATING — not that the caller has
+      // finished HEARING (Codex P1, #328). Grok streams faster than real time,
+      // so at this moment up to the whole line can still be buffered inside
+      // Twilio; a bare 12-second window would then expire while the agent is
+      // still talking, prompt over its own question, and on the third one hang
+      // up on a caller who was listening. The 30-second watchdog this branch
+      // used to clear outlasted any plausible tail, which is why the trap only
+      // became reachable when the window shrank.
+      //
+      // EVERY UNECHOED UTTERANCE COUNTS, NOT JUST THIS ONE (Codex P1, #328
+      // round 2). Several can complete before the newest mark echoes — a
+      // response carrying two utterances is enough — and the first fix bounded
+      // on `done.bytes` alone, so the second completion re-armed a window
+      // shorter than the audio still queued ahead of it and the prompt landed
+      // over the agent mid-line. `unplayedAudioMs` totals what Twilio has not
+      // confirmed; see `unechoedAudioBytes` for why that is not read off
+      // `awaitingMark`.
+      //
+      // It is an UPPER bound, so this can only ever be too patient — and the
+      // mark echo below corrects it downward the moment Twilio proves the audio
+      // landed. A mark that never echoes costs at most the queue's own
+      // duration in extra patience, and never a word spoken over the agent.
+      else this.armDeadAir("caller", this.unplayedAudioMs());
     }
     this.responseOwedFromGreeting = false;
 
@@ -1497,8 +1694,7 @@ export class VoiceCallBridge {
       this.finalFallbackTimer = null;
     }
     this.session.cancelResponse();
-    this.sendFrame({ event: "clear", streamSid: this.deps.context.streamSid });
-    this.assistantAudioPlaying = false;
+    this.discardBufferedAudio();
   }
 
   private handleCallerSpeechStopped(): void {
@@ -1880,16 +2076,107 @@ export class VoiceCallBridge {
 
   // ── Dead-air watchdog ────────────────────────────────────────────────
 
-  private armDeadAir(cause: "utterance" | "response", extraMs = 0): void {
+  /**
+   * The upper bound, in milliseconds, on agent audio the caller has not
+   * finished hearing yet.
+   *
+   * `response.done` means the PROVIDER finished GENERATING; Twilio's mark echo
+   * is the only ground truth that audio reached the caller, and Grok streams
+   * faster than real time. So at the moment the caller's window is armed, up
+   * to every unechoed byte can still be sitting in Twilio's buffer.
+   *
+   * Deliberately an OVER-estimate: it counts audio a barge-in `clear` may have
+   * already discarded, and it is not reduced by an intermediate mark echo.
+   * Being too patient costs one line's worth of extra silence; being too eager
+   * speaks over the agent's own question and, three strikes later, hangs up on
+   * a caller who was listening.
+   */
+  private unplayedAudioMs(): number {
+    return Math.ceil(this.unechoedAudioBytes / MULAW_BYTES_PER_MS);
+  }
+
+  /**
+   * Tell Twilio to drop everything it has buffered, and forget it.
+   *
+   * ONE PLACE, because it is one fact with three consequences and the two
+   * callers (a barge-in, a guardrail trip) had identical copies of it. A
+   * `clear` that reset the accumulator at one site and not the other is the
+   * drift this repo has already paid for elsewhere.
+   *
+   * THE ACCUMULATOR RESET IS NOT TIDINESS (Codex P2, #328 round 4). No mark is
+   * emitted for discarded audio, and `unechoedAudioBytes` is otherwise cleared
+   * only when the NEWEST mark echoes — so a caller who keeps interrupting never
+   * lets one echo and every cleared turn stayed counted. The caller's silence
+   * window then grows without limit and the ladder stops firing at all, which
+   * defeats the protection it exists to provide. An earlier version of this
+   * change claimed the over-estimate was "bounded to one agent turn"; it was
+   * bounded to one turn that actually finished playing, which is not the same
+   * thing and is not what a persistent interrupter produces.
+   */
+  private discardBufferedAudio(): void {
+    this.sendFrame({ event: "clear", streamSid: this.deps.context.streamSid });
+    // Twilio dropped it, so none of it can still be reaching the caller.
+    this.unechoedAudioBytes = 0;
+    this.assistantAudioPlaying = false;
+  }
+
+  private armDeadAir(cause: DeadAirCause, extraMs = 0): void {
     this.clearDeadAir();
     this.deadAirCause = cause;
+    // The caller's own window is SHORTER than the agent's, because it is not
+    // a failure bound: it is how long a person is left in silence before
+    // being spoken to. Everything else is unchanged.
+    const base =
+      cause === "caller"
+        ? (this.deps.silencePromptMs ?? SILENCE_PROMPT_MS)
+        : (this.deps.deadAirMs ?? DEFAULT_DEAD_AIR_MS);
     this.deadAirTimer = this.setTimer(
-      () => this.teardown("dead_air"),
+      () => (cause === "caller" ? this.handleCallerSilence() : this.teardown("dead_air")),
       // transferWaitExtraMs joins EVERY window while a transfer attempt is
       // open — see noteTransferWaitStarting for why it is a state and not
       // a one-shot extension.
-      (this.deps.deadAirMs ?? DEFAULT_DEAD_AIR_MS) + extraMs + this.transferWaitExtraMs,
+      base + extraMs + this.transferWaitExtraMs,
     );
+  }
+
+  /**
+   * The caller has said nothing for a whole window. Speak, or let them go.
+   *
+   * Nothing here tears the call down until the prompts are spent, which is
+   * the difference between this and the agent-side causes: silence on the
+   * caller's side is not a fault to be bounded, it is a person who may not
+   * be able to hear us — or a dialler that was never going to say anything.
+   *
+   * THE SIGN-OFF IS NOT SPOKEN HERE. Teardown closes the media stream, so a
+   * line started now is cut mid-word; `handleAfterRedirect` says it over
+   * TwiML once the stream is gone, which is the same reasoning
+   * `blindTransfer` records for its own warning.
+   */
+  private handleCallerSilence(): void {
+    if (this.ended) return;
+    const limit = this.deps.silenceStrikeLimit ?? SILENCE_STRIKE_LIMIT;
+    if (this.silenceStrikes >= limit) {
+      this.silenceCut = true;
+      console.warn(
+        `[bridge] the caller said nothing after ${this.silenceStrikes} prompt(s) on ` +
+          `${this.deps.context.callSid} — ending the call`,
+      );
+      this.teardown("caller_silent");
+      return;
+    }
+    this.silenceStrikes += 1;
+    this.silencePrompts += 1;
+    console.info(
+      `[bridge] no caller audio for one window on ${this.deps.context.callSid} — ` +
+        `prompt ${this.silenceStrikes} of ${limit}`,
+    );
+    this.session.speak(SILENCE_PROMPT_LINE, { interruptible: true });
+    // Re-armed HERE as well as by that line's own completion, which lands in
+    // the same branch of `handleResponseDone`. Both, because a `speak` the
+    // wire never turns into a response would otherwise leave the ladder with
+    // nothing running and the call silent to the ceiling — and `armDeadAir`
+    // clears first, so arming twice is one clock either way.
+    this.armDeadAir("caller");
   }
 
   private clearDeadAir(): void {
@@ -2065,6 +2352,8 @@ export class VoiceCallBridge {
         agentTurns: this.agentTurns,
         interruptions: this.interruptions,
         hangupsHeld: this.hangupsHeld,
+        silencePrompts: this.silencePrompts,
+        silenceCut: this.silenceCut,
         followUps: {
           ...this.followUps,
           lastUnanswered:

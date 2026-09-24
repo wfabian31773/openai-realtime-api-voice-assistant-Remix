@@ -349,7 +349,7 @@ import { callEnvironment } from "./callRecord";
  * words (bounded at HANGUP_HOLD_LIMIT), and record_automated_resolution
  * tells the model to say what the lookup found.
  *
- * v63: the callback number says where it came from. Traced from a referral
+ * v67: the callback number says where it came from. Traced from a referral
  * coordinator's emailed complaint that her requests file and nobody calls
  * back. `asked_callback` is FALSE on every one of her office's calls —
  * pcpAgent seeds callbackNumber from caller ID and the intake then skips a
@@ -361,7 +361,7 @@ import { callEnvironment } from "./callRecord";
  * pre-filing question with 10 leaving no ticket at all.
  */
 /**
- * v60 — WHY NO DIAL WENT OUT IS ON THE TICKET, so an ordinary task on a
+ * v62 — WHY NO DIAL WENT OUT IS ON THE TICKET, so an ordinary task on a
  * handoff-default purpose stops being an HTTP 500 the model retries. Measured
  * 2026-09-19 in `voice_agent_api_logs`: 7 calls, 41 refused POSTs, worst storm
  * 8 on one call, 2026-09-15..18 — and 4 of the 7 never attempted a handoff at
@@ -370,7 +370,16 @@ import { callEnvironment } from "./callRecord";
  *
  * v57 IS RETIRED (the withdrawn surgeon claim), v58 is claimed by #322 and v59
  * by #293 — both OPEN branches, so this is a SIBLING of both and contains
- * neither. v60 > v59 numerically and says nothing about containment.
+ * neither. v62 > v59 numerically and says nothing about containment.
+ *
+ * v68: THE SILENCE LADDER. Nothing in the runtime ever spoke to a caller it
+ * could not hear. `handleResponseDone` clears the dead-air watchdog when the
+ * greeting completes and nothing re-arms it until the caller speaks, so a
+ * caller who never speaks is never detected: 278 zero-caller-line runtime
+ * calls over 09-17..23 ended `caller_hangup` at 74s average, and four sat
+ * open to the 602-second ceiling. The agent now says "I'm sorry, I cannot
+ * hear you. Are you still there?" after 12s of silence and ends the call on
+ * the third strike — the operator's own wording and his own bound.
  *
  * v64: the caller's audio is COUNTED. `handleTwilioFrame`'s media case was
  * `session.appendAudio(payload)` and nothing else, so nothing anywhere could
@@ -380,7 +389,7 @@ import { callEnvironment } from "./callRecord";
  * gate, no tool, no spoken line. See `callerAudioEnergy.ts`.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v67-the-callback-says-where-it-came-from-20260924";
+  "voice-runtime-v68-the-silence-ladder-20260924";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can
