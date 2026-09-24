@@ -1171,6 +1171,18 @@ GROUP BY 1 ORDER BY 2 DESC;
 It fell 16.1 → 9.7 across the tech cutover while the callers actually said
 MORE. Count `CALLER:` lines in the transcript instead.
 
+**AND `call_logs.interruption_count` IS THE SAME TRAP IN A SECOND COLUMN — it
+is NOT comparable across the pipelines.** Measured 2026-09-23 over 09-17..09-22,
+substantive queue calls: on the RUNTIME the column averages 0.61 against 0.73
+transcript `[interrupted]` marks and **never once exceeds the marks** on 2,268
+calls (under-counting them on 261); on the OLD CORE the column averages 1.59
+while the transcript carries **0.00 marks on 109 of 109** — that pipeline never
+writes the marker at all, so nothing validates its column. The old core's
+1.86-3.32 against the runtime's 0.71-1.13 is therefore an instrument difference
+of unknown size and NOT a behaviour comparison. Within one pipeline it is
+usable; across the cutover it is not. **Count `[interrupted]` marks in the
+transcript when the question is whether interruptions moved.**
+
 ---
 
 ## THE SAME TICKET NUMBER READ TO TWO CALLERS — answered 2026-09-15
@@ -1751,9 +1763,9 @@ field, that patient's answer would have been refused.
 
 ### The other large bucket: the caller is never heard
 
-77 of the 191 (0 or 1 `CALLER:` lines). Some are hangups and wrong numbers;
-**the split has not been established.** Barely-heard rate (`duration >= 30`,
-<= 1 caller line), by lane:
+77 of the 191 (0 or 1 `CALLER:` lines). Some are hangups and wrong numbers.
+**THE SPLIT IS NOW MEASURED, WITH A FLOOR — see the ring-back control below.**
+Barely-heard rate (`duration >= 30`, <= 1 caller line), by lane:
 
 | lane | 09-02 old core | 09-03 old core | 09-03 grok | 09-04 grok | 09-08 grok |
 |---|---|---|---|---|---|
@@ -1761,8 +1773,44 @@ field, that patient's answer would have been refused.
 | surgery | 13.0% (92) | 13.0% (46) | 37.2% (43) | 27.5% (80) | 21.6% (134) |
 | tech | 10.4% (163) | 9.3% (75) | 30.1% (83) | 19.7% (183) | 16.4% (183) |
 
-Dropping `RUNTIME_VAD_THRESHOLD` to 0.6 moved surgery and tech a long way.
-Neither is back to its old-core rate, and **optical has gone the other way.**
+**RE-MEASURED 2026-09-23 OVER THE WHOLE PERIOD — that is W3, and the full
+working is `docs/observatory/W3-BARELY-HEARD-20260923.md`. Do not quote a day
+from the table above as current.** The single-day columns are small-n; these
+are the aggregates, and they are split into THREE arms because v39's recording
+disclosure went live 2026-09-17 and lengthens the greeting the caller talks
+over — an "after" window that runs to today folds the threshold and the
+greeting together:
+
+| lane | 0.85 (09-03) | 0.6, short greeting (09-04..16) | 0.6 + disclosure (09-17..22) |
+|---|---|---|---|
+| optical | 11.7% (60) | 16.7% (646) | **18.9% (349)** |
+| surgery | **37.2% (43)** | **16.6% (844)** | **14.6% (424)** |
+| tech | **30.1% (83)** | **16.4% (1,470)** | **13.8% (643)** |
+
+**Dropping to 0.6 halved surgery and tech and did not fix optical.** Caller
+lines per call rose with it (surgery 3.8 -> 5.8, tech 4.8 -> 6.1), so the
+caller is heard more rather than merely counted more. **Optical rose on the
+threshold change and rose again on the disclosure**, and against its own
+old-core 8.5% it has more than doubled; it is the only lane where 0.6 did not
+work, and WHY is not established — greeting length is ruled out, because
+optical's is the SHORTEST of the three (190/251 median chars) and its rate is
+the worst.
+
+**AND THE SECOND ARM PASSED, which is the part that was feared:** interruptions
+per call FELL when the threshold dropped (optical 1.42 -> 0.90, surgery 1.28 ->
+1.01, tech 1.14 -> 0.89 transcript `[interrupted]` marks), so the more
+sensitive VAD did not buy fewer missed callers with an agent that stops for a
+cough. The disclosure then put some back (tech to 1.13/call, 0.51/min against
+0.52 at 0.85). **Read those off the TRANSCRIPT, never the column** — see the
+`interruption_count` trap above.
+
+**The old-core control moved too, and it is the honest caveat:** `records` is
+still on the old core so the threshold cannot touch it, and its rate ran 10.7%
+-> 3.0% -> 19.1% -> 14.4% -> 11.9% across the same five windows. A lane the
+dial cannot reach swings 16 points on n = 28-146. The threshold is still the
+leading explanation for surgery and tech — the move is bigger than records'
+whole range, on twenty times the sample — but it is NOT proven against that
+control.
 
 **DO NOT ALARM ON ONE HOUR OF THIS.** Surgery's hourly barely-heard rate on
 2026-09-08 ran 16.7 · 14.3 · 42.9 · 31.6 · 36.4 · 5.9 · 31.6 · 7.7 · 0.0
@@ -1782,9 +1830,35 @@ share of substantive calls with ZERO caller lines, every day:
 On 2026-09-09 those 10 calls averaged 95s (33–246s) with 1.4 `AGENT:` lines
 and `agent_outcome = 'inconclusive'` on all 10. **Whether these are dead air
 (robocalls, wrong numbers, abandoned legs) or real callers we never heard is
-NOT established** — the shape is consistent with both, and `RUNTIME_VAD_THRESHOLD`
-does not apply to this pipeline. The control that would settle it: whether the
-same number rings back within 24h and IS heard on the later call.
+NOT established for no-ivr in 2026-09-09's terms** — the shape is consistent
+with both, and `RUNTIME_VAD_THRESHOLD` does not apply to this pipeline.
+
+**THE CONTROL NAMED HERE HAS NOW BEEN RUN, 2026-09-23, AND IT DISCRIMINATES.**
+Of each lane's barely-heard calls over 09-10..09-22, the share whose number
+rang back within 24 hours and WAS heard on the later call — searched across
+EVERY lane, so an overnight caller who tries again in business hours counts:
+
+| lane | barely-heard | rang back and was heard | share |
+|---|---|---|---|
+| tech | 232 | 78 | **33.6%** |
+| surgery | 127 | 40 | **31.5%** |
+| optical | 131 | 35 | **26.7%** |
+| **no-ivr** | 142 | 13 | **9.2%** |
+
+**On the queue lanes at least one barely-heard call in four is a real person
+who had to ring again; on the after-hours line it is one in eleven.** So
+no-ivr's population really does look mostly like dead air, which is what this
+paragraph suspected, and the queue lanes' does not. Restricting the ring-back
+to the same lane barely moves no-ivr (7.7% against 9.2%), so the gap is not an
+artefact of the widening.
+
+**It is a FLOOR on real callers, not a share.** A caller who gave up entirely,
+rang back after 24 hours, or rang from another number is invisible to it, and
+that residue is unresolved in the worse direction. Beside it: **13 of 490**
+queue-lane barely-heard calls filed a ticket, while **114 of the 140** whose
+caller rang back onto the same lane and was heard DID file — so a barely-heard
+call is a lost request or a patient made to ring twice, and only persistence
+recovers it.
 
 ---
 
@@ -2161,6 +2235,7 @@ voice-runtime-v62-the-ticket-says-why-nobody-was-dialled-20260923
 voice-runtime-v64-the-callers-audio-is-counted-20260924
 voice-runtime-v67-the-callback-says-where-it-came-from-20260924
 voice-runtime-v68-the-silence-ladder-20260924
+voice-runtime-v69-the-pcp-floor-is-wired-20260924
 ```
 
 Also printed at boot as `[voice-runtime] <marker>`. Anything ending in an
@@ -2232,6 +2307,8 @@ on it is evidence about current code.
 | **v64** or earlier, and **v65** and **v66** are SIBLINGS of this — NOT the date (v59 is claimed by the open #293; v57, v60 and v63 are retired; this ship is **v67**) | any sign on the ticket that the callback number is one NOBODY GAVE US. **TRACED 2026-09-24 from a referral coordinator's emailed complaint** — her office has patients to book, the agent files a ticket, and nobody calls back. Her calls all FILED: eight of them, every one with a ticket. **`asked_callback` is FALSE on all eight**, because `pcpAgent.ts:583` seeds `callbackNumber` from caller ID whenever the ANI is E.164 and the intake then skips a field that already reads answered — the behaviour standing instruction 12 asks for, and correct in the common case. Her ANI is an out-of-state area code on a Southern California referral office, i.e. a trunk identifier rather than a desk, and a staffer rang it and closed the ticket *"Processed callback but line is unavailable… little to no information provided"* while a ticket from the same office on a different ANI resolved *"Called back and assisted the caller"*. **So the loss is not the filing and not the routing — it is that the number on the ticket was never vouched for and the ticket does not say so.** `callbackFromCallerIdOnly` is set in the SAME update that seeds the number, CLEARED in the same update whenever `record_pcp_intake` carries one the caller stated, and read where a staffer actually looks: the cross-queue ticket body now says the callback *reaches the requesting office, not the patient* — which was always right and stays verbatim — plus either *UNVERIFIED — this is the inbound caller ID, not a number the caller gave; if it does not answer, ask them for a direct line* or *Given by the caller.* **NO QUESTION IS ADDED, AND THAT IS THE DECISION, NOT AN OMISSION.** The obvious fix is to ask a professional caller to confirm the number, and v37 measures what that costs on this lane: **18 of 25 PCP calls ENDED ON a pre-filing question and 10 left NO ticket of any provenance**, and the teardown sweep caught none of them. My own earlier reasoning — that the sweep is a floor under one more question — is refuted by that measurement and is withdrawn. Whether to confirm the number, and on WHICH SIDE of the filing (the v37 ordering lever already exists as `ENRICHMENT_AFTER_FILING`), collides with the prompt's own *THE NUMBER COMES BEFORE THE TICKET, ALWAYS* and is therefore **OPEN FOR WAYNE**. Labelling the provenance is the zero-risk half and is what makes either answer measurable. `src/pcp/callbackNumberSaysWhereItCameFrom.test.ts` — 8 assertions. **THE FIRST VERSION OF ONE OF THEM PROVED NOTHING and is recorded because the shape recurs:** it anchored on the ANI guard's own source text and sliced to the first `}`, which is the one inside the regex quantifier `{10,15}` — so the window ended before the object literal and `toContain` ran against an empty haystack. It failed loudly here; pointed the other way it is a green test asserting nothing, which is failure mode 10. **NOT MEASURED IN PRODUCTION**, `docs/BACKEND_HANDOFF.md` applies — this writes a line on a ticket and changes no gate, no tool and nothing a caller hears. The numbers: PCP tickets whose callback line says UNVERIFIED, which is the first count of how large this population is (8 of 8 on the traced office, fleet share unknown); and PCP tickets resolved *line is unavailable* or equivalent, which should FALL as staff stop ringing trunk identifiers blind. The guard: `asked_callback` must not move and PCP tickets per substantive call must not fall — this adds no question, so a change in either means the label is being read as a gate. **THIS ROW HAS BEEN RE-KEYED TWICE BY SIBLING MERGES, AND THE DRIFT GUARD CAUGHT THE FIRST COLLISION.** Both branches came off v61, so both wrote a `v61 or earlier` row; `markerTableIsIntact.test.ts` failed with *a union merge kept two copies of a row*, which is the exact failure the sweep note warned about and the exact thing a union merge hides. v63 merged the v62 `main`, so it contains v62 and this row is keyed there | **AND RE-KEYED AGAIN WHEN #327 MERGED, 2026-09-24.** That merge moved `main` to **v64**, which put this branch's v63 BELOW `main` — a marker below `main` reads as a failed pull, the one thing the constant exists to prevent. So v63 joins v57 and v60 as RETIRED rather than reused (a build must never read it), this ship takes **v67**, and the row is keyed on the v64 it now contains. **v65 (#328) and v66 (#325) are open SIBLINGS off the v62 `main`**, so this number being the highest of the four says nothing whatever about containment — it says only that it was allocated last.
 
 | **v67** or earlier, and **v66** is a SIBLING of this — NOT the date (v59 is claimed by the open #293; v57, v60 and v63 are retired; this ship is **v68**) | any bound on how long a caller may say nothing. **OPERATOR, 2026-09-24, describing behaviour he remembers and asking for it back: *"I've heard the agent speak several times before, I cannot hear you, after the third time, the agent cuts the call. That's how it was and always should be to protect against malicious users, bots and things."*** **IT DOES NOT EXIST ANYWHERE IN THIS REPO** — grepped before building rather than assumed (failure mode 9), and the only hits for that phrase are `afterHoursEscalationGate.ts`'s cue list, which detects the CALLER saying it, and `azulSchedulingAgent`'s `HOLD_LADDER`, which fills silence while a transfer dials. It may have lived in the `src/core` pipeline deleted on 2026-09-01, or predate this system; I could not find it and said so rather than pretending to. **AND IT CLOSES A MEASURED GAP, which is why it goes in the runtime and not in a prompt.** `handleResponseDone` CLEARED the dead-air watchdog once the agent's line was delivered and nothing was owed — deliberately, and its comment says why: *"a caller quietly thinking about a question can never trip it"* — and **nothing re-armed it until the caller spoke**. So a caller who NEVER speaks was detected by nothing at all: measured over 2026-09-17..23 on optical, surgery and tech, of **138 substantive calls whose transcript held no caller line the watchdog fired on ONE**, the rest ended `caller_hangup` at 68 seconds average, and **two optical calls sat open to the 602-second ceiling**. That gap is recorded in the v64 row as OPEN FOR WAYNE on the one question I would not answer myself — the words spoken to a patient — and his message answers it in his own words. **THE CLOCK GAINS A THIRD CAUSE RATHER THAN A SECOND TIMER.** `armDeadAir` already clears before it arms, and every path that matters already calls it, so `"caller"` rides the existing lifecycle: a caller who speaks arms `"response"` and the ladder's clock is gone by construction, `transferWaitExtraMs` still joins every window, and no new teardown path exists. A second timer with its own arming and clearing would have had to re-derive all of that. The `else this.clearDeadAir()` branch becomes `else this.armDeadAir("caller")` — the agent's debt is still discharged there, which was always right; what is new is that the caller's own window takes its place. **DETERMINISTIC, NEVER MODEL-SPOKEN**, the v22/v39 reasoning: a line in the prompt is a line the model MAY say, and a protection against diallers cannot be optional. `session.speak(SILENCE_PROMPT_LINE, { interruptible: true })` puts it on the wire verbatim the way the greeting's words go — and `interruptible: true` unlike the greeting, because the whole purpose is to make somebody talk, so their first syllable must cut it off. **THE CUT IS A NEW OUTCOME, NOT `dead_air`**, and that distinction is this file's own rule twice over: `dead_air` means the AGENT owed something and never delivered it, and folding a silent caller into it would move the v54 refusal-then-silence count with no defect behind it moving — the `total_turns` mistake. `caller_silent` takes `statusFor`'s dead_air RULE rather than a flat `failed`, for the reason dead_air stopped taking one: the ladder resets when a caller is heard, so it can also end a call that HELD a conversation and then went quiet, and that call must still be graded and synced. **THE SIGN-OFF IS SPOKEN BY THE TwiML, NOT THE AGENT** (`RUNTIME_CANNOT_HEAR_LINE`), because teardown closes the media stream and a line started as the call ends is cut mid-word — `blindTransfer.ts` records exactly that reasoning for its own warning. It is deliberately NOT the technical-trouble line: nothing failed, we could not hear them, and telling a caller we had a fault is a claim about our own side the evidence does not support. **THE WINDOW STARTS WHEN THE CALLER FINISHED HEARING, NOT WHEN THE PROVIDER FINISHED GENERATING** — see the Codex round at the end of this row; the first version got that wrong and it was the one error in this change that could have hung up on a caller who was listening. **12 SECONDS IS A JUDGEMENT AND NOTHING IN PRODUCTION CAN INFORM IT YET**, because nothing has ever counted silence: long enough that a caller reading a date of birth off a card is not interrupted, short enough that they have not already given up. `RUNTIME_SILENCE_PROMPT_MS` moves it without a deploy (the `RUNTIME_VAD_THRESHOLD` pattern), clamped to 5–60s so a typo can neither disarm the ladder nor let it fire over the agent. **THE RESET IS KEYED ON A TRANSCRIPT, NOT ON `speech_stopped`:** the VAD fires on a cough and on hold music, and a ladder reset by noise is a ladder a dialler holds open for ever. **THE HONEST RISK, stated rather than buried:** if optical's zero-caller-line population turns out to be callers who WERE speaking and we did not hear them, this ladder tells them three times that we cannot hear them and then hangs up on a real patient. **v64's caller-audio instrument is what answers that** (`voiced` against `silent_line` on exactly those calls), and if the answer is `voiced` the fix is the transcriber and this window should be widened or the cut removed — the dial is there for that. Against it: those callers get 68 seconds of silence and hang up themselves today, so three sentences telling them what is wrong is strictly more than they get now, and only the cut costs them anything. **COUNTABLE FROM SQL**, unlike the tool ceiling's stops, which are console-only and are why nobody could ever prove that ceiling fired: `silencePrompts` and `silenceCut` ride the existing `follow_up_summary` `call_events` row, the way v56 put `hangupsHeld` there. **ITS GATE HAD TO WIDEN AND THAT IS THE PART TO READ** — `followUpEvent` returned null when `owed === 0`, and a caller who never speaks runs no tools, so the row was skipped on exactly the population the ladder exists for: the v58 shape, an instrument blind to its own subject. `src/runtime/silenceLadder.test.ts` (15) plus one in `voiceWebhook.test.ts`. **13 mutations, 13 caught:** the clock cleared again instead of armed for the caller (8 fail), the ladder never speaking (3), the prompt locked like the greeting, the ladder never re-arming (5), the cut never happening (3), the cut recorded as `dead_air` (2), the caller's window taking the agent's 30 seconds (14), the reset on being heard removed (2), the counts never reaching the record (2), the telemetry gate staying closed on a silence-only call (2), `caller_silent` reading failed regardless, the sign-off reverting to the technical-trouble line, and the clamp letting any value through. Beside them, **three existing bridge test NAMES were corrected rather than loosened** — "clears once the opening line is delivered" is no longer what happens, and they now say the AGENT's clock clears, which is the property they always proved. `followUpTelemetry.test.ts`'s exact-key-set PHI guard gained the two counts rather than being relaxed, so a field carrying anything a caller SAID still goes red. **NOT MEASURED IN PRODUCTION**, `docs/BACKEND_HANDOFF.md` applies — this changes when a call may END, on every runtime lane. The numbers: runtime substantive calls with zero caller lines where nothing detected it — **137 of 138 over 2026-09-17..23, target ~0**, replaced by `caller_silent`; and `silencePrompts > 0` rows, which is how often the ladder spoke at all. The guards: **prompts on calls that then carried on normally** (`silencePrompts > 0` with `silenceCut` false and a caller line) is the false-positive rate and the window is its dial — a high number means 12 seconds is too short; `dead_air` must not FALL by more than the silent-caller population moves into `caller_silent`, because the two must not be trading places; and filing rate per lane must not fall, since a call cut at ~48 seconds must never be one that was going to file. **CODEX ROUND 1 ON #328 — A P1 AND A P2, BOTH REAL, BOTH TAKEN, AND THE P1 IS THE ONE THIS CHANGE COULD NOT AFFORD TO GET WRONG.** (1) **THE CLOCK STARTED AT THE PROVIDER'S `response.done`, WHICH IS NOT WHEN THE CALLER STOPPED HEARING.** `onAudioDone` means Grok finished GENERATING; this file's own architecture notes say *"Twilio `mark` events are the ONLY ground truth that audio actually played to a caller"*, and Grok streams faster than real time, so at that moment up to the whole line can still be sitting in Twilio's buffer. A bare 12-second window would therefore expire while the agent was still talking, speak the prompt over its own question, and on the third one **hang up on a caller who was listening attentively** — the exact failure this ladder exists to avoid, arriving through the timer meant to prevent it. **IT WAS LATENT AT 30 SECONDS AND SHRINKING THE WINDOW MADE IT REACHABLE:** the watchdog this branch used to CLEAR was 30s, which outlasts any plausible buffered tail, so nothing in the old code had to think about playback. That is the v28 round-2 lesson again — *a fix that changes the shape of a rule invalidates the sentence that justified the old shape* — and this time the shape that changed was a duration. **THE FIX IS TWO-SIDED AND DEGRADES SAFELY IN BOTH DIRECTIONS:** the arm at `response.done` carries the utterance's OWN playback duration (`bytes / MULAW_BYTES_PER_MS`) as the upper bound on what is still unplayed, so it can only ever be too patient and never too eager; and `handleTwilioMark`, at the exact line where it already proves playback is over (`assistantAudioPlaying = false`, newest mark, no media after it), RESTARTS the window from the true moment the caller was left holding the turn. A mark that never echoes therefore costs at most one line's worth of extra patience and never a word over the agent. **The echo re-arms ONLY while the CALLER's clock is the one running** — an agent debt (a pending tool, a response owed from the greeting) is not this timer's business, and a playback echo must not extend it. Chosen over a bare `assistantAudioPlaying` guard on the prompt, which looked simpler and has a silent failure mode: that flag is cleared ONLY by the mark echo, so a dropped mark would have left the ladder re-arming for ever and never firing at all. (2) **THE LADDER'S RESET ERASED THE PROMPT THAT WORKED.** `silencePrompts` was one field doing two jobs, and resetting it when the caller was heard destroyed the record of the prompt that brought them back — so a call where the ladder spoke and the caller answered read ZERO, `followUpEvent` skipped its row (owed 0, prompts 0), and **this row's own guard number was unmeasurable by construction**: prompts on calls that then carried on normally is the false-positive rate and the window's dial, and it is the number that says whether 12 seconds is too short. Two counters now: `silenceStrikes` consecutive and reset on a heard caller, which drives the ladder; `silencePrompts` cumulative and never reset, which is what the record and the telemetry row carry. **ONE TEST ASSERTED THE DEFECT AS THOUGH IT WERE THE DESIGN** — *"records a prompt that was answered as spoken but NOT as a cut"* expected `silencePrompts` to be 0 and its comment called that *"the point"*; the point was the LADDER resetting, and the test is rewritten to the property rather than loosened. **AND THE TEST HELPER WAS MEASURING THE WRONG STATE:** its `speak()` stopped at `onAudioDone`, which is a line still buffered inside Twilio — so every ladder test was driving the state the P1 is about and calling it "the agent has spoken". It now echoes the mark, and `generate()` exists separately for the buffered case, which has three tests of its own. **7 mutations, 7 caught:** the window armed at the provider's done (the P1 defect itself — 2 fail), the mark echo never restarting it (10), the echo re-arming unconditionally and extending an agent debt (1), the two counters collapsed back into one (the P2 defect — 2), the ladder reading the cumulative count so it can never reset (1), the cumulative count never advancing (3), and the ladder never resetting on a heard caller (1). Full suite 4,815 | **RE-KEYED WHEN #327 MERGED, 2026-09-24.** That merge moved `main` to **v64**, so this branch merged it and the row is keyed on the v64 it now contains; v65 was already above `main` and did not need re-bumping. The remaining siblings are **v66** (#325, the PCP floor) and **v67** (#326, the callback provenance, re-bumped from v63 by the same merge because v63 fell BELOW `main`). **#326 AND THIS BRANCH NOW BOTH KEY ON v64, WHICH IS CORRECT FOR EACH AND WILL COLLIDE WHEN THE SECOND ONE MERGES** — `markerTableIsIntact.test.ts` will fail with *a union merge kept two copies of a row*, which is the guard working and is exactly what it caught between v63 and #323. Whichever lands second re-keys onto whatever `main` then carries; do not resolve it by deleting a row.
+
+| **v68** or earlier — NOT the date (v59 is claimed by the open #293; v57, v60, v63, v65 and v66 are retired; this ship is **v69**, the LAST of the four siblings off the v62 `main`, so `main` now contains the other three) | any teardown filer at all on the PCP lane. **`sweepPcpUnfiledCall` had never run.** Three ships of work went into its admissions — v18 (the caller who asked for a person and was refused), v30 and v31 (the call nobody classified, and the narrative clamp) — and its ONLY caller was `voiceAgentRoutes.ts:4713`, inside the OLD CORE's OpenAI SIP teardown. **PCP moved to this runtime on 2026-09-04.** The runtime's own teardown sweep declines the lane by table: `DEPARTMENT_BY_SLUG` in `requestSweep.ts` holds optical, surgery, tech and records, so `decideSweep` returns `not-a-queue-lane` for pcp before any other test. So the lane that carries the go-live had no teardown filer on the pipeline that serves it, and a filer nobody calls files nothing. **READ FROM PRODUCTION RATHER THAN INFERRED: across ALL of `voice_agent_api_logs`, 0 POSTs have ever carried `failureInformation` = `caller_hung_up_before_completion` or `call_not_classified`** — the two literals only that function writes. Full corpus and the before-arm: `docs/observatory/W2-CORPUS-20260922.md`. **THE BEFORE-ARM: 38 PCP calls on 2026-09-22 ran the intake, filed nothing, and carry no ticket of any provenance; 24-53 a day over six business days.** Wiring the floor as it stands rescues **16 of the 38 certainly and 17 probably (~45%)**, with no new rule and no new admission — resolved from `askBudgetSpent` rather than from transcripts, because `missing` returns the FIRST unset askable field in the required order, so a `nextField` past `callerName` with `callerName` absent from the spent list means the name was ANSWERED and `toldUsSomething` is true. **BOTH SWEEPS NOW RUN AND CANNOT DOUBLE-FILE:** the generic one declines pcp at its first line and this one runs only for pcp. **Adding `pcp` to `DEPARTMENT_BY_SLUG` would have been the smaller diff and the wrong one** — that path builds a queue-lane payload against a department id, where this lane has its own endpoint (`/api/voice-agent/pcp-ticket`), its own payload and its own disposition rules. **AWAITED like the generic sweep and unlike the telemetry beside it**, because it files a caller's request rather than describing one, and bounded at `PCP_FLOOR_BUDGET_MS` = 25s — the same bound the old core has always raced this call against — so a wedged ticketing app cannot hold teardown open. It also frees the lane's per-call state: the sweep's `finally` is the only caller of `pcpDirector.clear` this runtime ever reaches, since `terminate_call`'s success branch needs an `ok` from OpenAI's SIP hangup endpoint and got 400 on 94 of 94 PCP calls on 2026-09-22. **WHAT IS STILL INERT, stated rather than left to be discovered:** the runtime supplies no `getTranscript` in its lane context — only the old core does — so inside the sweep `transcript` is `''`, `saidMoreThanTheirOwnIdentity` is false, and the v31 `unclassified` admission CANNOT fire on this pipeline. That costs nothing on the measured population (all 38 carried a `callPurpose` at teardown, and `unclassified` requires the purpose to be ABSENT), and a floor-filed ticket still gets the caller's words, because `ticketingSyncService.syncCall` puts the transcript on the ticket after the call regardless — just not in the same request. Supplying the getter is a separate change with its own arm and is NOT smuggled in behind this one. `src/runtime/pcpFloor.test.ts` plus the runtime pin in `voiceRuntime.test.ts`, because a helper proven in isolation proves the helper and not that anything invokes it (failure mode 10, and the wiring IS the defect here). The seam defaults to the REAL sweep and a test asserts so: a seam defaulted to a no-op would pass every behavioural test in that file and file nothing in production — the fix reintroduced through its own test seam. **NOT MEASURED IN PRODUCTION**, `docs/BACKEND_HANDOFF.md` applies — this files tickets. The numbers: PCP substantive calls with no ticket of any provenance — **38 on 2026-09-22, target down by the ~16-17 the floor admits**; and POSTs carrying `caller_hung_up_before_completion` or `call_not_classified`, which are 0 all-time and should become non-zero from the first call on this build. The guards: **PCP tickets a staffer closes as junk must not rise materially** — that is the azul 2026-07-28 shape, where 9 of 12 spurious sweep tickets were callbacks for patients already helped; department-16 and department-9 tickets from PCP must not rise, since an unclassified call must never be auto-routed to a specialist queue; and two tickets on one call SID must stay 0, because both sweeps now run on every PCP teardown |
 
 ### THE SURGEON CLAIM — BUILT, REVIEWED SIX TIMES, WITHDRAWN 2026-09-17
 
@@ -2311,34 +2388,33 @@ v10 (the person base and the join), v11 (the locked record, #290) and v12
 (optical's office ladder) are a CHAIN on `main`: each merged after the one
 before and brought it in, so v12 contains both.
 
-**AND THE SEQUENCE HAS A HOLE IN IT ON PURPOSE: v13 IS SKIPPED. v68 IS THE
-NEWEST, v67 IS WHAT `main` CARRIES SINCE #326 MERGED 2026-09-24 (`a5815ca`),
-AND v57, v60, v63 AND v65 ARE ALL RETIRED RATHER THAN REUSED — see THE SURGEON
-CLAIM below the table for v57.** **THIS LINE GOES STALE EVERY TIME A MARKER
-LANDS, SO RE-READ IT AGAINST `main` RATHER THAN TRUSTING IT.** Four corrections
-have landed on it in four days and every one was the same trap: it read `v58 IS
-WHAT main CARRIES` after #324 moved `main` to v61, `v61` after #323 moved it to
-v62, `v62` after #327 moved it to v64, and `v64` after #326 moved it to v67 —
-those last two arrived ON `main` already wrong, because a branch's own prose
-does not update itself when that branch merges. Left any of those ways, a
-reader accepts a superseded deployment as current, which is the one thing this
-table exists to prevent.
+**AND THE SEQUENCE HAS A HOLE IN IT ON PURPOSE: v13 IS SKIPPED. v69 IS THE
+NEWEST, v68 IS WHAT `main` CARRIES SINCE #328 MERGED 2026-09-24 (`c56f53b`),
+AND v57, v60, v63, v65 AND v66 ARE ALL RETIRED RATHER THAN REUSED — see THE
+SURGEON CLAIM below the table for v57.** **THIS LINE GOES STALE EVERY TIME A
+MARKER LANDS, SO RE-READ IT AGAINST `main` RATHER THAN TRUSTING IT.** Five
+corrections have landed on it in four days and every one was the same trap: it
+read `v58 IS WHAT main CARRIES` after #324 moved `main` to v61, `v61` after
+#323 moved it to v62, `v62` after #327 moved it to v64, `v64` after #326 moved
+it to v67, and `v67` after #328 moved it to v68 — three of those arrived ON
+`main` already wrong, because a branch's own prose does not update itself when
+that branch merges.
 
-**NEWEST IS NOT THE SAME AS CONTAINED.** v68 contains v67 because `main` was
-merged into it on 2026-09-24, not because 68 > 67, and this branch held **v65**
-until that merge put it BELOW `main`, which reads as a failed pull. **v66
-(#325, the PCP lost-request floor) is the one remaining OPEN SIBLING**: it sits
-below the v67 `main`, contains none of this, and must merge `main` and re-bump
-above it before it lands — **to v69**, which is reserved for it. Both numbers
-then sit above `main`, so only one ordering costs anything: if v69 merges
-first, this branch falls below `main` again and re-bumps to **v70**; if this
-one merges first, v69 needs nothing. **A build must never read v60, v63 or
-v65:** v60 described #323's change, v63 described #326's and v65 described this
-one, and none of the three ever reached `main`. **v59 IS STILL CLAIMED BY AN
-OPEN BRANCH**, #293 (RULE ZERO 2a's gate), which branched off v10, contains
-none of this, sits far BELOW `main`, and must merge and re-bump above whatever
-`main` carries at that moment; its number says nothing about what it holds. The
-next ship after v69 takes **v70**. v19-v24 were siblings off v18 on 2026-09-15 — v19 the PCP lost-requestfloor (#300), v20 the blind transfer telemetry (#302), v21 the ask detection
+**THIS IS THE LAST OF FOUR SIBLINGS OFF THE v62 `main`, so `main` now CONTAINS
+the other three** — v64 (#327, the caller-audio meter), v67 (#326, the callback
+provenance) and v68 (#328, the silence ladder). This branch has moved three
+times and now stays put: v61 below the v58 `main`, v66 when `main` reached v62,
+KEPT at v66 when #327 took `main` to v64 because 66 > 64, v69 when #326 put
+`main` at v67, and v69 still, now that #328 has taken `main` to v68 — a marker
+re-bumps only when it falls BELOW `main`, where it would read as a failed pull.
+**NEWEST IS NOT THE SAME AS CONTAINED:** v69 contains v68 because `main` was
+merged into it, not because 69 > 68. **A build must never read v60, v63, v65 or
+v66:** v60 described #323's change, v63 #326's, v65 #328's and v66 this one, and
+none of the four ever reached `main` — each was given up the moment a merge put
+it below. **v59 IS STILL CLAIMED BY AN OPEN BRANCH**, #293 (RULE ZERO 2a's
+gate), which branched off v10, contains none of this, sits far BELOW `main`, and
+must merge and re-bump above whatever `main` carries at that moment. The next
+ship takes **v70**. v19-v24 were siblings off v18 on 2026-09-15 — v19 the PCP lost-requestfloor (#300), v20 the blind transfer telemetry (#302), v21 the ask detection
 (#301), v22 the question format (#303), v23 the recording disclosure (#304),
 v24 the answerable queue choice (#306). Distinct numbers were assigned UP FRONT
 precisely so six open branches could never make six different builds read alike
@@ -2473,14 +2549,16 @@ never read v57; **v58 was that next ship** — the identity probe, an instrument
 and no behaviour change (see the v56 row below for what it measures). It is no
 longer the current marker: see the paragraph beneath this one.
 
-**v63 IS THE CURRENT MARKER. v62 (#323) IS WHAT `main` CARRIES, AND 59 AND 60
-ARE NOT TAKEN.** v59 is reserved for the open #293; v60 was #323's own number
-while it sat below `main` and is retired rather than reused, because two
-branches carrying one version make two builds indistinguishable at
-`/voice/health` and a number BELOW `main` reads as a failed pull. **v63
-branched off v61 and merged the v62 `main`, so it contains both.** Containment
-is stated once, in the sequence sentence above; see the v56 row for what v61
-measures and the v61 row for what v63 changes.
+**v67 (#326) IS WHAT `main` CARRIES (merged 2026-09-24, `a5815ca`), AND v57,
+v60, v63, v65 AND v66 ARE RETIRED RATHER THAN REUSED.** Each of the last four
+was a branch's own number while it sat below `main`, and each was given up the
+moment a merge put it there: two branches carrying one version make two builds
+indistinguishable at `/voice/health` — the single thing this constant exists to
+prevent — and a number BELOW `main` reads as a failed pull. **This branch is
+v69 for exactly that reason**, with **v68** (#328) the one open sibling above
+the same `main`. **v59 is still claimed by the open #293** and stays reserved
+for it. Containment is stated once, in the sequence sentence above; see the v56
+row for what v61 measures.
 
 **AND THE TWO FIXES BELOW ARE v58'S, NOT v61'S** — they rode in with the
 identity probe on #322 and are recorded here because the surgeon claim was

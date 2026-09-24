@@ -387,9 +387,31 @@ import { callEnvironment } from "./callRecord";
  * barely-heard rate survived three attempts. An instrument, not a fix: two
  * integers per inbound frame and one PHI-free `call_events` row per call, no
  * gate, no tool, no spoken line. See `callerAudioEnergy.ts`.
+ *
+ * v69 — THE PCP LOST-REQUEST FLOOR IS WIRED INTO THIS RUNTIME'S TEARDOWN.
+ * `sweepPcpUnfiledCall` had three ships of work behind it (v18, v30, v31) and
+ * had never once run: its only caller was the OLD CORE's SIP teardown, and PCP
+ * moved to this runtime on 2026-09-04. The generic sweep declines the lane by
+ * table, so PCP had no teardown filer at all on the pipeline serving it. Read
+ * from production rather than inferred: across ALL of `voice_agent_api_logs`,
+ * 0 POSTs have ever carried `caller_hung_up_before_completion` or
+ * `call_not_classified`, the two literals only that function writes.
+ *
+ * WHY 69, AND WHY IT HAS MOVED THREE TIMES AND NOW STAYS PUT. This branch held
+ * v61 below the v58 `main`, took v66 when `main` reached v62, KEPT v66 when
+ * #327 moved `main` to v64 — a marker only reads as a failed pull when it is
+ * BELOW `main`, and 66 > 64 — took v69 when #326 moved `main` to v67 and 66
+ * fell below it, and KEEPS v69 now that #328 has merged and `main` reads v68,
+ * because 69 > 68. It is the last of the four siblings off the v62 `main`, so
+ * `main` now CONTAINS the other three: v64 (#327), v67 (#326) and v68 (#328).
+ * v65 and v66 are RETIRED rather than reused, along with v57, v60 and v63, and
+ * a build must never read any of the five; v59 is still claimed by the open
+ * #293, which branched off v10 and must merge and re-bump above whatever `main`
+ * carries when it lands. A higher number says nothing about containment — this
+ * one contains v68 because `main` was merged into it, not because 69 > 68.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v68-the-silence-ladder-20260924";
+  "voice-runtime-v69-the-pcp-floor-is-wired-20260924";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can
