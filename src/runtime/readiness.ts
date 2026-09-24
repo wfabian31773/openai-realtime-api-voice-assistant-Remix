@@ -348,9 +348,20 @@ import { callEnvironment } from "./callRecord";
  * end-call tool while the model has a tool result it has not put into
  * words (bounded at HANGUP_HOLD_LIMIT), and record_automated_resolution
  * tells the model to say what the lookup found.
+ *
+ * v67: the callback number says where it came from. Traced from a referral
+ * coordinator's emailed complaint that her requests file and nobody calls
+ * back. `asked_callback` is FALSE on every one of her office's calls —
+ * pcpAgent seeds callbackNumber from caller ID and the intake then skips a
+ * field that already reads answered, so a staffer rang her ANI and closed
+ * the ticket "line is unavailable". The state now records whether the
+ * number is caller ID only, record_pcp_intake clears that the moment the
+ * caller states one, and the ticket tells the staffer which it is holding.
+ * No question is added: v37 measured 18 of 25 PCP calls ending ON a
+ * pre-filing question with 10 leaving no ticket at all.
  */
 /**
- * v60 — WHY NO DIAL WENT OUT IS ON THE TICKET, so an ordinary task on a
+ * v62 — WHY NO DIAL WENT OUT IS ON THE TICKET, so an ordinary task on a
  * handoff-default purpose stops being an HTTP 500 the model retries. Measured
  * 2026-09-19 in `voice_agent_api_logs`: 7 calls, 41 refused POSTs, worst storm
  * 8 on one call, 2026-09-15..18 — and 4 of the 7 never attempted a handoff at
@@ -359,7 +370,7 @@ import { callEnvironment } from "./callRecord";
  *
  * v57 IS RETIRED (the withdrawn surgeon claim), v58 is claimed by #322 and v59
  * by #293 — both OPEN branches, so this is a SIBLING of both and contains
- * neither. v60 > v59 numerically and says nothing about containment.
+ * neither. v62 > v59 numerically and says nothing about containment.
  *
  * v64: the caller's audio is COUNTED. `handleTwilioFrame`'s media case was
  * `session.appendAudio(payload)` and nothing else, so nothing anywhere could
@@ -368,7 +379,7 @@ import { callEnvironment } from "./callRecord";
  * integers per inbound frame and one PHI-free `call_events` row per call, no
  * gate, no tool, no spoken line. See `callerAudioEnergy.ts`.
  *
- * v66 — THE PCP LOST-REQUEST FLOOR IS WIRED INTO THIS RUNTIME'S TEARDOWN.
+ * v69 — THE PCP LOST-REQUEST FLOOR IS WIRED INTO THIS RUNTIME'S TEARDOWN.
  * `sweepPcpUnfiledCall` had three ships of work behind it (v18, v30, v31) and
  * had never once run: its only caller was the OLD CORE's SIP teardown, and PCP
  * moved to this runtime on 2026-09-04. The generic sweep declines the lane by
@@ -377,17 +388,20 @@ import { callEnvironment } from "./callRecord";
  * 0 POSTs have ever carried `caller_hung_up_before_completion` or
  * `call_not_classified`, the two literals only that function writes.
  *
- * WHY 66, AND WHY IT DID NOT MOVE WHEN #327 LANDED. This branch held v61 while
- * it sat below the v58 `main`, took v66 when `main` reached v62, and KEEPS it
- * now that #327 has moved `main` to v64 — a marker only reads as a failed pull
- * when it is BELOW `main`, and 66 > 64. The open siblings are v65 (#328) and
- * v67 (#326, re-bumped from v63 by that same merge because v63 fell below
- * `main`). v57, v60 and v63 are RETIRED rather than reused and a build must
- * never read them; v59 is still claimed by the open #293. A higher number says
- * nothing about containment: this contains v64, and neither sibling.
+ * WHY 69, AND WHY IT HAS MOVED THREE TIMES. This branch held v61 below the v58
+ * `main`, took v66 when `main` reached v62, KEPT v66 when #327 moved `main` to
+ * v64 — a marker only reads as a failed pull when it is BELOW `main`, and
+ * 66 > 64 — and now takes v69, because #326 has moved `main` to v67 and 66 is
+ * below it. v65 and v66 are RETIRED rather than reused, along with v57, v60
+ * and v63, and a build must never read any of the five; v59 is still claimed
+ * by the open #293. The one remaining sibling is **v68** (#328, the silence
+ * ladder), already re-bumped above the same `main`. Both now sit above it, so
+ * only one ordering costs anything: if v68 merges first, `main` reaches v68 and
+ * 69 is still above it; this branch needs nothing either way. A higher number
+ * says nothing about containment: this contains v67, and not the sibling.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v66-the-pcp-floor-is-wired-20260924";
+  "voice-runtime-v69-the-pcp-floor-is-wired-20260924";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can
