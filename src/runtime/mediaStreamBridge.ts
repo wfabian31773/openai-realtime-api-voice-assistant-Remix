@@ -801,13 +801,20 @@ export class VoiceCallBridge {
    * Audio bytes sent whose playback Twilio has NOT yet confirmed — the upper
    * bound on what is still queued ahead of the newest mark.
    *
-   * WHY THIS IS NOT `awaitingMark`'s SUM (Codex P1, #328 round 2). Several
-   * utterances can complete before the newest mark echoes, and the caller's
-   * silence window has to outlast ALL of the audio queued ahead of it, not
-   * just the newest line's. `awaitingMark` looks like the right place to total
-   * that from and is not: its second push is behind `else if (text)`, so an
-   * utterance that carried audio and no transcript sends a mark and leaves NO
-   * entry, and its bytes would be invisible to the sum.
+   * COUNTED AS THE BYTES ARE FORWARDED (`handleAudioDelta`), which is the only
+   * place that survives every way an utterance can end. Two earlier shapes did
+   * not, and both were P1s on the same PR:
+   *
+   *   - `done.bytes` at the arm alone (round 1) saw only the NEWEST utterance,
+   *     so a long line followed by a short one armed a window shorter than the
+   *     audio still queued ahead of it;
+   *   - accumulating at `response.done` (round 2) missed an utterance
+   *     SUPERSEDED by a new response epoch, which `openOrGetCurrent` drops
+   *     without a completion event although its audio was already sent.
+   *
+   * `awaitingMark`'s sum is not the answer either: its second push is behind
+   * `else if (text)`, so an utterance with audio and no transcript sends a mark
+   * and leaves NO entry, and its bytes would be invisible to it.
    *
    * ONLY THE NEWEST MARK'S ECHO CLEARS IT, so an intermediate echo — or audio
    * discarded by a barge-in `clear` — leaves this reading high. That is the
@@ -1244,7 +1251,20 @@ export class VoiceCallBridge {
     // cancelled line straight back is the one thing `clear` exists to
     // prevent.
     if (!current) return;
-    current.bytes += Buffer.from(base64Audio, "base64").length;
+    const forwarded = Buffer.from(base64Audio, "base64").length;
+    current.bytes += forwarded;
+    // AND THE CALLER'S SILENCE BOUND COUNTS IT HERE, at the moment it is handed
+    // to Twilio, NOT when its utterance completes (Codex P1, #328 round 3). An
+    // utterance superseded by a new response epoch is dropped by
+    // `openOrGetCurrent` WITHOUT a completion event, and its audio was already
+    // sent — so accumulating at `response.done` missed it entirely and the next
+    // completion armed a window shorter than the audio still queued. Counting
+    // as forwarded makes completion irrelevant: every byte the caller might
+    // still be hearing is counted exactly once, however its utterance ended.
+    //
+    // Audio from a cancelled epoch never reaches this line (`!current` returns
+    // above), which is correct — it is not forwarded, so it cannot be queued.
+    this.unechoedAudioBytes += forwarded;
     // PLAYBACK BEGINS HERE — and for the greeting that is when its line is
     // written. Its words are scripted, so none of them is waiting on the
     // wire, and this is the one moment that sits in its true place among the
@@ -1403,7 +1423,6 @@ export class VoiceCallBridge {
     if (done.bytes > 0) this.noteAgentWords();
     this.agentTurns += 1;
     this.lastCompletedUtteranceBytes = done.bytes;
-    this.unechoedAudioBytes += done.bytes;
 
     // The utterance is delivered: the agent owes nothing for IT, so a
     // caller taking their time over the question can never trip the

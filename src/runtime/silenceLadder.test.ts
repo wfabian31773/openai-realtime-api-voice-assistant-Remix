@@ -221,6 +221,53 @@ describe("the clock after the agent has finished and nothing is owed", () => {
     expect(h.session.speak).not.toHaveBeenCalled();
   });
 
+  it("counts an utterance SUPERSEDED without a completion event", async () => {
+    // CODEX P1, ROUND 3. `openOrGetCurrent` drops the previous `current` when a
+    // new response epoch starts, WITHOUT a completion event — and its audio was
+    // already forwarded to Twilio. Accumulating at `response.done` therefore
+    // missed those bytes entirely, so the next completion armed a window
+    // shorter than the audio still queued and the prompt landed over the agent.
+    // The third variant of the same error: count the audio the caller may still
+    // be hearing, not the audio that happened to reach a completion.
+    const h = await ladder();
+    // Ten seconds forwarded, then a NEW epoch supersedes it with no onAudioDone.
+    h.handlers().onAudioDelta(Buffer.alloc(8 * 10_000).toString("base64"));
+    h.generate("The reply that replaced it.", 8 * 1_000);
+    // Both must be in the bound: 10s superseded + 1s completed.
+    expect(h.timers.armed(WINDOW + 1_000)).toBe(0);
+    expect(h.timers.fire(WINDOW + 1_000)).toBe(false);
+    expect(h.timers.armed(WINDOW + 11_000)).toBe(1);
+    expect(h.session.speak).not.toHaveBeenCalled();
+  });
+
+  it("does not count audio from a cancelled epoch, which is never forwarded", async () => {
+    // The other direction, and it matters: over-patience is safe but not free,
+    // because a bound that only ever grows stops the ladder firing at all. A
+    // barge-in cancels the epoch, so `openOrGetCurrent` returns null and those
+    // deltas are DROPPED rather than sent — they cannot be queued inside Twilio
+    // and must not inflate the bound.
+    //
+    // Driven through the REAL barge-in path, which needs the agent's audio to
+    // be playing: `handleCallerSpeechStarted` returns early unless
+    // `assistantAudioPlaying`, so a mark echo before the barge-in would make
+    // this test silently exercise nothing. The first version of it called an
+    // optional method that does not exist and passed either way.
+    const h = await ladder();
+    h.generate("A line the caller talks over.", 8 * 1_000); // 1s sent, playing
+    h.handlers().onSpeechStarted(); // a real barge-in: the epoch is cancelled
+    // Twenty seconds of stale audio on the CANCELLED epoch: dropped, not sent.
+    h.handlers().onAudioDelta(Buffer.alloc(8 * 20_000).toString("base64"));
+    h.generate("The reply after the barge-in.", 8 * 1_000); // new epoch, 1s
+    // Two seconds of forwarded audio, never twenty-two.
+    expect(h.timers.armed(WINDOW + 2_000)).toBe(1);
+    expect(h.timers.armed(WINDOW + 22_000)).toBe(0);
+    // AND THE FIRST SECOND IS STILL COUNTED, deliberately: the barge-in told
+    // Twilio to `clear`, so that audio was discarded and no mark will ever
+    // echo for it. Nothing decrements the accumulator, which leaves the bound
+    // an over-estimate until the next echo resets it — the safe direction, and
+    // bounded to one agent turn rather than the whole call.
+  });
+
   it("counts an utterance that carried audio and no transcript", async () => {
     // WHY THE TOTAL IS NOT READ OFF `awaitingMark`, which is the obvious place
     // and the wrong one: its second push sits behind `else if (text)`, so an
