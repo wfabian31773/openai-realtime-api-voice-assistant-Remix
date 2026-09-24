@@ -68,6 +68,7 @@ async function ladder(
   const timers = makeTimers();
   const outcomes: string[] = [];
   const records: VoiceCallRecord[] = [];
+  const marks: string[] = [];
   let epoch = 0;
   const session = {
     appendAudio: vi.fn(),
@@ -102,7 +103,12 @@ async function ladder(
       guardrails: [],
     } as never,
     greeting: over.greeting,
-    twilio: { sendFrame: () => undefined, close: () => undefined },
+    twilio: {
+      sendFrame: (f: { event: string; mark?: { name: string } }) => {
+        if (f.event === "mark" && f.mark) marks.push(f.mark.name);
+      },
+      close: () => undefined,
+    },
     createSession: (h: BridgeSessionHandlers) => {
       handlers = h;
       return session as never;
@@ -119,14 +125,42 @@ async function ladder(
     clearTimer: timers.clearTimer,
   } as never);
 
-  /** One complete agent line: a new response, transcript, audio, completion. */
-  const speak = (text: string) => {
+  /**
+   * One agent line the caller has FINISHED HEARING: a new response,
+   * transcript, audio, the provider's completion — and then Twilio's mark
+   * echo, which is the only ground truth that the audio actually played
+   * (CLAUDE.md, and Codex P1 on this PR). A test that stops at `onAudioDone`
+   * is a test of a line still buffered inside Twilio, which is a different
+   * state and has its own test below.
+   */
+  const speak = (text: string, bytes = 800) => {
+    generate(text, bytes);
+    echoMark();
+  };
+  /** The provider finished GENERATING. Twilio may still be playing it. */
+  const generate = (text: string, bytes = 800) => {
     epoch += 1;
     handlers.onAgentTranscriptDelta(text);
-    handlers.onAudioDelta(Buffer.alloc(800).toString("base64"));
+    handlers.onAudioDelta(Buffer.alloc(bytes).toString("base64"));
     handlers.onAudioDone(text);
   };
-  return { bridge, session, timers, outcomes, records, speak, handlers: () => handlers };
+  /** Twilio echoes the newest mark: the caller has heard everything sent. */
+  const echoMark = () => {
+    const name = marks[marks.length - 1];
+    bridge.handleTwilioFrame({ event: "mark", streamSid: "MZ-test", mark: { name } } as never);
+  };
+  return {
+    bridge,
+    session,
+    timers,
+    outcomes,
+    records,
+    marks,
+    speak,
+    generate,
+    echoMark,
+    handlers: () => handlers,
+  };
 }
 
 describe("the clock after the agent has finished and nothing is owed", () => {
@@ -137,6 +171,52 @@ describe("the clock after the agent has finished and nothing is owed", () => {
     // And the agent's own failure bound is gone, which was always right: the
     // line was delivered, so the agent owes nothing.
     expect(h.timers.armed(AGENT_WINDOW)).toBe(0);
+  });
+
+  it("does not start counting until the caller has FINISHED HEARING the line", async () => {
+    // CODEX P1. `response.done` means the PROVIDER finished GENERATING; Grok
+    // streams faster than real time, so the whole line can still be sitting
+    // in Twilio's buffer. A window that started here would expire while the
+    // agent was still talking, prompt over its own question, and on the third
+    // one hang up on a caller who was listening. The 30-second watchdog this
+    // branch used to clear outlasted any plausible tail; shrinking the window
+    // is what made it reachable.
+    const h = await ladder();
+    // Eight seconds of μ-law at 8 bytes/ms.
+    h.generate("A long question the caller is still hearing.", 8 * 8_000);
+    expect(h.timers.armed(WINDOW)).toBe(0);
+    // The bare window cannot fire: the clock carries the unplayed duration.
+    expect(h.timers.fire(WINDOW)).toBe(false);
+    expect(h.session.speak).not.toHaveBeenCalled();
+    expect(h.timers.armed(WINDOW + 8_000)).toBe(1);
+  });
+
+  it("restarts from the mark echo, so the caller gets a FULL window of silence", async () => {
+    // The conservative arm above can only be too patient. Twilio's echo is
+    // the ground truth that the audio landed, so the clock restarts from the
+    // true moment the caller was left holding the turn.
+    const h = await ladder();
+    h.generate("A long question.", 8 * 8_000);
+    h.echoMark();
+    expect(h.timers.armed(WINDOW + 8_000)).toBe(0);
+    expect(h.timers.armed(WINDOW)).toBe(1);
+  });
+
+  it("a mark that never echoes still fires, one line's patience later and never over the agent", async () => {
+    const h = await ladder();
+    h.generate("A long question.", 8 * 8_000);
+    expect(h.timers.fire(WINDOW + 8_000)).toBe(true);
+    expect(h.session.speak).toHaveBeenCalledTimes(1);
+  });
+
+  it("an echo does NOT extend a clock the AGENT owes — that is not this timer's business", async () => {
+    const h = await ladder();
+    h.generate("What is your date of birth?");
+    h.handlers().onSpeechStopped(); // the caller answered: a reply is owed
+    expect(h.timers.armed(AGENT_WINDOW)).toBe(1);
+    h.echoMark();
+    expect(h.timers.armed(AGENT_WINDOW)).toBe(1);
+    expect(h.timers.armed(WINDOW)).toBe(0);
   });
 
   it("does NOT arm it while the agent still owes a reply", async () => {
@@ -210,10 +290,13 @@ describe("the ladder itself", () => {
     h.handlers().onCallerTranscript("Sorry, I am here.", "item-1");
     h.speak("No problem. What can I do for you?");
 
-    // A fresh three, not a cut on the next window.
+    // A fresh three, not a cut on the next window — the LADDER reset.
     expect(h.timers.fire(WINDOW)).toBe(true);
     expect(h.outcomes).toEqual([]);
     expect(h.session.speak).toHaveBeenCalledTimes(4);
+    // And the cumulative count kept every one of them.
+    h.bridge.handleTwilioFrame({ event: "stop", streamSid: "MZ-test" } as never);
+    expect(h.records[0].silencePrompts).toBe(4);
   });
 
   it("counts the prompts it SPOKE, and says whether they ran out, on the record", async () => {
@@ -227,16 +310,20 @@ describe("the ladder itself", () => {
     expect(h.records[0].silenceCut).toBe(true);
   });
 
-  it("records a prompt that was answered as spoken but NOT as a cut", async () => {
+  it("REMEMBERS a prompt the caller answered — that is the guard number (Codex P2)", async () => {
+    // The ladder and the count were one field, and the reset erased the
+    // prompt that WORKED. So a call where the ladder spoke and the caller
+    // came back read zero prompts, `followUpEvent` skipped its row on a call
+    // that owed no follow-up, and this PR's own guard — prompts on calls that
+    // then carried on normally, the false-positive rate and the window's dial
+    // — could not be measured at all.
     const h = await ladder();
     h.speak("How can I help you today?");
     h.timers.fire(WINDOW);
     h.handlers().onCallerTranscript("I am here.", "item-1");
     h.bridge.handleTwilioFrame({ event: "stop", streamSid: "MZ-test" } as never);
     expect(h.records[0].silenceCut).toBe(false);
-    // Reset on being heard, which is the point — the guard number is prompts
-    // on calls that carried on, and it is read off the telemetry row.
-    expect(h.records[0].silencePrompts).toBe(0);
+    expect(h.records[0].silencePrompts).toBe(1);
   });
 });
 

@@ -806,9 +806,22 @@ export class VoiceCallBridge {
    * clock, and an unconditional clear would disarm exactly the protection
    * that sequence needs. */
   private deadAirCause: DeadAirCause | null = null;
-  /** Silence prompts SPOKEN so far on this call. Reset the moment the caller
-   * is actually heard, because a caller who answers has earned a fresh three
-   * — the ladder is for a line nobody is talking on, not a running total. */
+  /**
+   * CONSECUTIVE unanswered prompts — the ladder's own position. Reset the
+   * moment the caller is actually heard, because a caller who answers has
+   * earned a fresh three: the ladder is for a line nobody is talking on.
+   */
+  private silenceStrikes = 0;
+  /**
+   * Prompts SPOKEN on this call, cumulatively, and NEVER reset (Codex P2,
+   * #328). The two were one counter, and the reset erased the prompt that
+   * WORKED — so a call where the ladder spoke and the caller came back read
+   * zero, `followUpEvent` skipped the row on a call that owed no follow-up,
+   * and this row's own guard number (prompts on calls that carried on
+   * normally, which is the false-positive rate and the window's dial) was
+   * unmeasurable by construction. The ladder needs the consecutive count;
+   * the instrument needs the total; they are not the same number.
+   */
   private silencePrompts = 0;
   private silenceCut = false;
 
@@ -845,11 +858,16 @@ export class VoiceCallBridge {
       onCallerTranscript: (text, itemId) => {
         if (this.ended) return;
         this.noteTranscript("caller");
-        // HEARD, so the ladder starts again from zero. Deliberately keyed on
-        // a transcript rather than on `speech_stopped`: the VAD fires on a
-        // cough and on hold music, and a ladder reset by noise is a ladder a
-        // dialler can hold open for ever.
-        this.silencePrompts = 0;
+        // HEARD, so the LADDER starts again from zero — and only the ladder.
+        // `silencePrompts` is the cumulative count and is deliberately not
+        // touched: a prompt that brought a caller back is the single most
+        // useful thing this instrument records, and resetting it erased
+        // exactly that (Codex P2, #328).
+        //
+        // Deliberately keyed on a transcript rather than on `speech_stopped`:
+        // the VAD fires on a cough and on hold music, and a ladder reset by
+        // noise is a ladder a dialler can hold open for ever.
+        this.silenceStrikes = 0;
         // Straight through, greeting or no greeting. Where the greeting's own
         // line sits was settled when its audio started, so there is no
         // "before or after it" left to decide here — which is the point:
@@ -952,6 +970,14 @@ export class VoiceCallBridge {
     // one is playing proves nothing about current audio.
     if (name === this.latestMarkName && !this.mediaSinceLastMark) {
       this.assistantAudioPlaying = false;
+      // AND THIS IS WHERE THE CALLER'S SILENCE ACTUALLY BEGINS (v65). The
+      // window armed at `response.done` carries the whole line's duration as
+      // a safe upper bound on what was still buffered; here Twilio has proved
+      // the audio landed, so the clock restarts from the true moment the
+      // caller was left holding the turn. Only when the caller's clock is the
+      // one running: an agent debt (a pending tool, a response owed) is not
+      // this timer's business and must not be extended by a playback echo.
+      if (this.deadAirCause === "caller") this.armDeadAir("caller");
     }
     // The greeting reached the caller in full. Barge-in works normally from
     // here — this protects the opening, not the conversation.
@@ -1379,7 +1405,23 @@ export class VoiceCallBridge {
       // caller who never speaks went undetected on 137 of 138 calls. The
       // agent's debt is discharged; what is armed now is the caller's own
       // window, and it speaks to them before it ever ends the call.
-      else this.armDeadAir("caller");
+      //
+      // AND IT CARRIES THIS UTTERANCE'S PLAYBACK DURATION, because
+      // `response.done` means the PROVIDER has finished GENERATING — not that
+      // the caller has finished HEARING (Codex P1, #328). Grok streams faster
+      // than real time, so at this moment up to the whole line can still be
+      // buffered inside Twilio; a bare 12-second window would then expire
+      // while the agent is still talking, prompt over its own question, and
+      // on the third one hang up on a caller who was listening. The 30-second
+      // watchdog this branch used to clear outlasted any plausible tail,
+      // which is why the trap only became reachable when the window shrank.
+      //
+      // The whole duration is the UPPER bound on what is still unplayed, so
+      // this can only ever be too patient — and the mark echo below corrects
+      // it downward the moment Twilio proves the audio actually landed. A
+      // mark that never echoes therefore costs at most one line's worth of
+      // extra patience, and never a word spoken over the agent.
+      else this.armDeadAir("caller", Math.ceil(done.bytes / MULAW_BYTES_PER_MS));
     }
     this.responseOwedFromGreeting = false;
 
@@ -2017,19 +2059,20 @@ export class VoiceCallBridge {
   private handleCallerSilence(): void {
     if (this.ended) return;
     const limit = this.deps.silenceStrikeLimit ?? SILENCE_STRIKE_LIMIT;
-    if (this.silencePrompts >= limit) {
+    if (this.silenceStrikes >= limit) {
       this.silenceCut = true;
       console.warn(
-        `[bridge] the caller said nothing after ${this.silencePrompts} prompt(s) on ` +
+        `[bridge] the caller said nothing after ${this.silenceStrikes} prompt(s) on ` +
           `${this.deps.context.callSid} — ending the call`,
       );
       this.teardown("caller_silent");
       return;
     }
+    this.silenceStrikes += 1;
     this.silencePrompts += 1;
     console.info(
       `[bridge] no caller audio for one window on ${this.deps.context.callSid} — ` +
-        `prompt ${this.silencePrompts} of ${limit}`,
+        `prompt ${this.silenceStrikes} of ${limit}`,
     );
     this.session.speak(SILENCE_PROMPT_LINE, { interruptible: true });
     // Re-armed HERE as well as by that line's own completion, which lands in
