@@ -119,3 +119,38 @@ describe('a critical alert reaches an inbox', () => {
     expect(source).not.toMatch(/email integration can be added later/);
   });
 });
+
+/**
+ * A TERMINAL 4xx IS FOLLOW-UP, NOT A STALL — 2026-09-25.
+ *
+ * checkTicketFilingAlert used to send ticket_filing_stalled for any
+ * dead_letter. The notice must run on every tick, including a healthy one,
+ * and it must not go through sendAlert or a row is lost to the cooldown.
+ */
+describe('terminal refusals are notified beside the filing alarm, not through it', () => {
+  const check = source.slice(
+    source.indexOf('async checkTicketFilingAlert'),
+    source.indexOf('startTicketFilingSchedule'),
+  );
+
+  it('always calls notifyTerminalRefusals, including when the verdict is not stalled', () => {
+    expect(check).toMatch(/notifyTerminalRefusals/);
+    const notifyAt = check.indexOf('await notifyTerminalRefusals()');
+    const stallAt = check.indexOf('if (!verdict.stalled)');
+    const sendAt = check.indexOf('await this.sendAlert');
+    expect(notifyAt).toBeGreaterThan(-1);
+    expect(stallAt).toBeGreaterThan(notifyAt);
+    expect(sendAt).toBeGreaterThan(stallAt);
+  });
+
+  it('does not send the follow-up through sendAlert', () => {
+    expect(check).not.toMatch(/ticket_needs_followup/);
+    expect(check).not.toMatch(/sendAlert\(\{[\s\S]*ticket_needs_followup/);
+  });
+
+  it('the boot line names the split so a failed pull is visible', () => {
+    expect(source).toMatch(
+      /Starting ticket-filing alarm \(every 5 minutes; a terminal 4xx is follow-up, not a stall\)/,
+    );
+  });
+});

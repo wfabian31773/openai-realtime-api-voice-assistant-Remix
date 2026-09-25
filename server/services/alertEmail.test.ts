@@ -8,7 +8,12 @@
  * executed here instead.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { alertEmailRecipient, shouldEmailAlert, buildAlertEmail } from './alertEmail';
+import {
+  alertEmailRecipient,
+  shouldEmailAlert,
+  buildAlertEmail,
+  EMAILED_ALERT_TYPES,
+} from './alertEmail';
 
 const AT = new Date('2026-09-02T11:45:00.000Z');
 
@@ -82,6 +87,15 @@ describe('which alerts email at all', () => {
     // Severity still gates, on top of type: a non-critical filing notice is
     // not an outage and does not belong in an inbox.
     expect(shouldEmailAlert('ticket_filing_stalled', sev)).toBe(false);
+  });
+
+  it('does not email ticket_needs_followup through sendAlert — that path would throttle a row', () => {
+    // The follow-up notice uses emailService.sendEmail directly so the
+    // 5-minute cooldown and 10/hour cap cannot swallow it. Adding the type
+    // here would double-email AND make a second row wait on the cap.
+    expect(shouldEmailAlert('ticket_needs_followup', 'critical')).toBe(false);
+    expect(shouldEmailAlert('ticket_needs_followup', 'warning')).toBe(false);
+    expect(EMAILED_ALERT_TYPES.has('ticket_needs_followup')).toBe(false);
   });
 });
 

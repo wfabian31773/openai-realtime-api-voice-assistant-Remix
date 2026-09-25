@@ -20,6 +20,7 @@ import {
   isGreetingOnly,
   type TicketFilingSnapshot,
 } from './ticketFilingHealth';
+import { PAYLOAD_REFUSAL_STATUSES, payloadRefusalSqlList } from '../../src/services/terminalRefusal';
 
 const MIN = 60_000;
 const NOW = Date.parse('2026-08-31T20:23:06Z');
@@ -50,6 +51,7 @@ function snapshot(over: Partial<TicketFilingSnapshot> = {}): TicketFilingSnapsho
     outboxPending: 0,
     outboxFailed: 0,
     outboxDeadLetter: 0,
+    outboxTerminalDeadLetter: 0,
     lastTicketFiledAtMs: null,
     nowMs: NOW,
     ...over,
@@ -104,7 +106,7 @@ describe('plane A — calls arriving and leaving without a ticket', () => {
 });
 
 describe('plane B — our own POSTs failing, before any run builds up', () => {
-  it('fires on a dead letter even while calls are filing normally', () => {
+  it('fires on a transport dead letter even while calls are filing normally', () => {
     // A request that exhausted every retry. The table held no non-sent row at
     // all between 2026-05-12 and 2026-09-01, so one is already abnormal.
     const v = assessTicketFiling(snapshot({ outboxDeadLetter: 1 }));
@@ -112,6 +114,41 @@ describe('plane B — our own POSTs failing, before any run builds up', () => {
     expect(v.reason).toMatch(/gave up after every retry/);
     // And it says the thing a person needs to hear next.
     expect(v.reason).toMatch(/replayable|nothing is lost/i);
+  });
+
+  it('does not stall on a terminal payload refusal — that is follow-up, not an outage', () => {
+    // 2026-09-25: three 400s (office / surgeon) re-fired ticket_filing_stalled
+    // all evening while tickets were landing 1–4 minutes before every alert.
+    const v = assessTicketFiling(snapshot({ outboxTerminalDeadLetter: 3 }));
+    expect(v.stalled).toBe(false);
+    expect(v.outboxHeld).toBe(0);
+    expect(v.outboxTerminalDeadLetter).toBe(3);
+  });
+
+  it('still stalls when a transport dead letter sits beside terminal ones', () => {
+    const v = assessTicketFiling(
+      snapshot({ outboxDeadLetter: 1, outboxTerminalDeadLetter: 3 }),
+    );
+    expect(v.stalled).toBe(true);
+    expect(v.reason).toMatch(/gave up after every retry/);
+    expect(v.outboxTerminalDeadLetter).toBe(3);
+  });
+
+  it('does not count terminal refusals toward the held-outbox threshold', () => {
+    // Two pending + one 400 would have tripped OUTBOX_HELD_ALARM = 3 if the
+    // refusal were folded into held. Held is the transport plane.
+    const v = assessTicketFiling(
+      snapshot({ outboxPending: 2, outboxTerminalDeadLetter: 1 }),
+    );
+    expect(v.stalled).toBe(false);
+    expect(v.outboxHeld).toBe(2);
+  });
+
+  it('treats an omitted terminal count as zero so older snapshots stay valid', () => {
+    const { outboxTerminalDeadLetter: _drop, ...cold } = snapshot();
+    const v = assessTicketFiling(cold);
+    expect(v.stalled).toBe(false);
+    expect(v.outboxTerminalDeadLetter).toBe(0);
   });
 
   it('fires when the outbox is holding requests it cannot send', () => {
@@ -153,7 +190,10 @@ describe('plane B — our own POSTs failing, before any run builds up', () => {
  */
 describe('what the snapshot query is allowed to forget', () => {
   const source = readFileSync(new URL('./ticketFilingHealth.ts', import.meta.url), 'utf8');
-  const outboxQuery = source.slice(source.indexOf('FROM ticket_outbox'), source.indexOf('GROUP BY status'));
+  const outboxQuery = source.slice(
+    source.indexOf('const outbox = await db.execute'),
+    source.indexOf('GROUP BY 1'),
+  );
 
   it('counts a dead letter however old it is', () => {
     expect(outboxQuery).toMatch(/status = 'dead_letter'/);
@@ -167,20 +207,32 @@ describe('what the snapshot query is allowed to forget', () => {
     expect(outboxQuery).toMatch(/INTERVAL '6 hours'/);
   });
 
-  it('is the same predicate the Observatory uses', () => {
+  it('drops a resolved row out of both dead-letter buckets', () => {
+    expect(outboxQuery).toMatch(/resolved_at IS NULL/);
+  });
+
+  it('splits terminal refusals on the persisted status, not last_error', () => {
+    expect(outboxQuery).toMatch(/terminal_dead_letter/);
+    expect(outboxQuery).toMatch(/refusal_status_code IN/);
+    expect(outboxQuery).toMatch(/payloadRefusalSqlList|refusalIn/);
+    expect(outboxQuery).not.toMatch(/last_error/);
+    // The integers live in ONE list. Interpolating them here a second time
+    // is how 401 would sneak back in. payloadRefusalSqlList is pinned in
+    // terminalRefusal.test.ts as "400, 422".
+    for (const status of PAYLOAD_REFUSAL_STATUSES) {
+      expect(payloadRefusalSqlList()).toContain(String(status));
+    }
+  });
+
+  it('is the same predicate the Observatory uses — because the Observatory calls it', () => {
     // Two copies of one rule is how a banner goes green while an alarm is red.
+    // The Observatory no longer has its own FROM ticket_outbox.
     const observatory = readFileSync(
       new URL('../observatory/queries.ts', import.meta.url),
       'utf8',
     );
-    const theirs = observatory.slice(
-      observatory.indexOf('FROM ticket_outbox'),
-      observatory.indexOf('GROUP BY 1`'),
-    );
-    const normalise = (q: string) => q.replace(/\s+/g, ' ').trim();
-    expect(normalise(theirs)).toContain("status = 'dead_letter'");
-    expect(normalise(theirs)).toContain("NOT IN ('sent', 'dead_letter')");
-    expect(normalise(theirs)).toContain("INTERVAL '6 hours'");
+    expect(observatory).toMatch(/readTicketFilingSnapshot/);
+    expect(observatory).not.toMatch(/FROM ticket_outbox/);
   });
 });
 
@@ -223,17 +275,14 @@ describe('which calls the alarm is allowed to count', () => {
 
   it('is the same restriction the Observatory banner uses', () => {
     // Two copies of one rule is how a banner goes red while the alarm is green.
-    //
-    // ANCHORED ON `AS has_ticket`, which appears exactly once in that file.
-    // The first version of this test sliced from `FROM call_logs` — which
-    // occurs SIXTEEN times in queries.ts — so it read an unrelated query and
-    // passed no matter what. It only came out because removing the filter from
-    // the Observatory copy failed to redden anything.
+    // The banner used to have its own `AS has_ticket` query; it now calls
+    // readTicketFilingSnapshot, so the completed-only filter lives in ONE
+    // place. Asserting the old column here would pass a revert that
+    // re-duplicates the SQL.
     const observatory = readFileSync(new URL('../observatory/queries.ts', import.meta.url), 'utf8');
-    const anchor = observatory.indexOf('AS has_ticket');
-    expect(anchor).toBeGreaterThan(-1);
-    const theirs = observatory.slice(anchor, observatory.indexOf('LIMIT 40`', anchor));
-    expect(theirs.replace(/\s+/g, ' ')).toContain("status = 'completed'");
+    expect(observatory).toMatch(/readTicketFilingSnapshot/);
+    expect(observatory).not.toMatch(/AS has_ticket/);
+    expect(callsQuery).toMatch(/status = 'completed'/);
   });
 });
 

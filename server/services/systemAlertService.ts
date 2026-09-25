@@ -568,6 +568,18 @@ class SystemAlertService {
       if (!snapshot) return; // it logged its own reason
 
       const verdict = assessTicketFiling(snapshot);
+      /**
+       * Terminal 4xx dead letters are a follow-up, not a stall. The notice
+       * runs on every tick so a row is not waiting on the critical plane,
+       * and it records followup_notified_at itself — sendAlert's cooldown
+       * must not be the thing that decides whether a row is emailed.
+       */
+      try {
+        const { notifyTerminalRefusals } = await import('./ticketFollowupNotice');
+        await notifyTerminalRefusals();
+      } catch (followupErr) {
+        console.error('[ALERT SERVICE] ticket follow-up notice failed:', followupErr);
+      }
       if (!verdict.stalled) {
         /**
          * The marker for the 2026-09-03 precision work, and a live counter:
@@ -608,7 +620,9 @@ class SystemAlertService {
   }
 
   startTicketFilingSchedule(): void {
-    console.log('[ALERT SERVICE] Starting ticket-filing alarm (every 5 minutes)');
+    console.log(
+      '[ALERT SERVICE] Starting ticket-filing alarm (every 5 minutes; a terminal 4xx is follow-up, not a stall)',
+    );
     setInterval(() => {
       this.checkTicketFilingAlert();
     }, 5 * 60 * 1000);

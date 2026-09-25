@@ -41,8 +41,13 @@
  * dead-lettering a recoverable one costs a patient their request until
  * somebody replays it by hand.
  */
-const PAYLOAD_REFUSAL_STATUSES: ReadonlySet<number> = new Set([400, 422]);
+export const PAYLOAD_REFUSAL_STATUSES: ReadonlySet<number> = new Set([400, 422]);
 
 export function isTerminalRefusal(status?: number): boolean {
   return typeof status === 'number' && PAYLOAD_REFUSAL_STATUSES.has(status);
+}
+
+/** Comma list for SQL `IN (...)`. Integers only — never interpolate caller data. */
+export function payloadRefusalSqlList(): string {
+  return [...PAYLOAD_REFUSAL_STATUSES].sort((a, b) => a - b).join(', ');
 }
