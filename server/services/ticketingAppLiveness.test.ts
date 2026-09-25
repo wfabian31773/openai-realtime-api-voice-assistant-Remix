@@ -9,11 +9,13 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import {
   assessTicketingAppLiveness,
+  assessReadFailure,
   nextLivenessAction,
   STALE_MS,
   HEAP_LIMIT_RATIO,
   RSS_VM_RATIO,
   EVENT_LOOP_P99_MS,
+  READ_FAILURE_THRESHOLD,
   NEXT_SERVICE,
   GATEWAY_SERVICE,
   type HeartbeatReading,
@@ -165,7 +167,7 @@ describe('(b) memory rising for 15 minutes', () => {
       readings: risingSeries(400, 20, 10),
       nowMs: LAST_BEAT + 30_000,
     });
-    expect(v.conditions).not.toContain('memory_rising');
+    expect(v.conditions).not.toMatch && expect(v.conditions).not.toContain('memory_rising');
   });
 
   it('does not fire when heap dips in the window', () => {
@@ -236,6 +238,19 @@ describe('debounce and recovery', () => {
     );
     expect(heapAndStale.conditions).toEqual(expect.arrayContaining(['stale', 'heap_high']));
     expect(nextLivenessAction(['stale'], heapAndStale)).toBe('alert');
+  });
+});
+
+describe('a dark watcher is itself an outage', () => {
+  it('stays quiet for the first two failed reads', () => {
+    expect(assessReadFailure(READ_FAILURE_THRESHOLD - 1)).toBeNull();
+  });
+
+  it('alerts on the third consecutive failed read', () => {
+    const v = assessReadFailure(READ_FAILURE_THRESHOLD);
+    expect(v?.alerting).toBe(true);
+    expect(v?.conditions).toEqual(['read_failed']);
+    expect(v?.reason).toMatch(/watcher is dark/);
   });
 });
 
