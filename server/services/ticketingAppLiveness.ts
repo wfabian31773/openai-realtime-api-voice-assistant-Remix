@@ -46,7 +46,11 @@ export type LivenessCondition =
   | 'rss_high'
   | 'memory_rising'
   | 'stale'
-  | 'event_loop_delay';
+  | 'event_loop_delay'
+  | 'read_failed';
+
+/** Consecutive failed reads before the watcher itself is an outage. */
+export const READ_FAILURE_THRESHOLD = 3;
 
 export interface HeartbeatReading {
   service: string;
@@ -196,7 +200,29 @@ function reasonFor(conditions: LivenessCondition[], latest: HeartbeatReading | n
   if (conditions.includes('event_loop_delay') && latest) {
     return `event-loop delay p99 has been over 1s for 3 minutes (now ${latest.eventLoopDelayP99Ms} ms)`;
   }
+  if (conditions.includes('read_failed')) {
+    return 'could not read app_heartbeat — the watcher is dark (URL, permissions, or table missing)';
+  }
   return 'ticketing-app liveness alarm';
+}
+
+/**
+ * The reader returned null. After three consecutive failures the watch
+ * itself is the outage — a permanently dark watcher is how 20:09 happened
+ * with no email. Unset URL and a refused connection look the same from
+ * here; both stay dark until a person sets the URL or the table exists.
+ */
+export function assessReadFailure(consecutiveFailures: number): LivenessVerdict | null {
+  if (consecutiveFailures < READ_FAILURE_THRESHOLD) return null;
+  return {
+    alerting: true,
+    conditions: ['read_failed'],
+    reason: reasonFor(['read_failed'], null, null),
+    recoveryReason: 'app_heartbeat is readable again',
+    latest: null,
+    minutesSinceLastBeat: null,
+    details: buildDetails(null, ['read_failed'], null, null),
+  };
 }
 
 /** Pure: no clock, no database, so the 20:09 hang can be replayed against it. */
@@ -319,14 +345,7 @@ export async function readTicketingAppLivenessSnapshot(): Promise<LivenessSnapsh
     });
     await client.connect();
     const result = await client.query(
-      `SELECT service,
-              instance_id,
-              (EXTRACT(EPOCH FROM recorded_at) * 1000)::bigint AS recorded_ms,
-              rss_mb, heap_used_mb, heap_total_mb, heap_limit_mb, vm_limit_mb,
-              event_loop_delay_p99_ms, uptime_seconds
-         FROM app_heartbeat
-        WHERE recorded_at > NOW() - ($1 * INTERVAL '1 minute')
-        ORDER BY recorded_at DESC`,
+      `SELECT service,\n              instance_id,\n              (EXTRACT(EPOCH FROM recorded_at) * 1000)::bigint AS recorded_ms,\n              rss_mb, heap_used_mb, heap_total_mb, heap_limit_mb, vm_limit_mb,\n              event_loop_delay_p99_ms, uptime_seconds\n         FROM app_heartbeat\n        WHERE recorded_at > NOW() - ($1 * INTERVAL '1 minute')\n        ORDER BY recorded_at DESC`,
       [LOOKBACK_MINUTES],
     );
     return {
