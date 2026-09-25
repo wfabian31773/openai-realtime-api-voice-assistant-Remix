@@ -62,10 +62,42 @@
  * itself. So it checks the two things it can: no claim may name a version ABOVE
  * this build's marker (a branch cannot be behind its own prose), and every
  * claim must cite a commit, which is what lets a reader settle it in one
- * command instead of trusting the sentence. Note what this does NOT catch: all
- * five historical arrivals were stale-LOW (prose said v67 while `main` was
- * v70), and the ceiling admits those. The sha is the part that bites, because a
- * stale claim carries a stale sha.
+ * command instead of trusting the sentence.
+ *
+ * AND THAT PAIR WAS STILL NOT ENOUGH — Codex P2 on #329, on the review the
+ * ready-mark triggered, and it is the ORIGINAL defect reachable through my own
+ * weakening. The ceiling admits every stale-LOW claim, which is what all five
+ * historical arrivals were; the citation check asks only whether a sha is
+ * PRESENT, and a stale claim carries a stale sha, which still looks like one.
+ * So two claims could disagree with each other while both passed. Reproduced
+ * before fixing, by putting 2026-09-24's actual prose back: three claims, `main`
+ * carrying v67 (`a5815ca`) and v70 (`c247479`) in the same file, suite green.
+ *
+ * SO THE FOURTH ASSERTION IS AGREEMENT, and it is the strongest check that is
+ * honest on a branch. "What `main` carries" is a present-tense fact with one
+ * value; restating it is legitimate — the docblock above says why — but two
+ * restatements differing never is. Internal consistency needs no knowledge of
+ * `main`, so it holds wherever this suite runs, and it compares the SHA as well
+ * as the version, because the sha is the half that moves on every merge.
+ *
+ * ALL THREE EARN THEIR PLACE, which is why none of them is folded into another:
+ * the ceiling catches a SINGLE claim that is too high (the marker was not
+ * bumped), and agreement cannot see that — one claim always agrees with itself;
+ * the citation check catches a claim with no sha at all, which agreement reads
+ * as merely another value; and agreement catches the multi-claim drift that is
+ * invisible to both. That is not asserted on faith: with claim 1 mutated out of
+ * the readable form so exactly ONE remains, dropping its sha fails the citation
+ * check alone and raising its version fails the ceiling alone, while agreement
+ * stays green in both — and a single correct claim passes all three.
+ *
+ * TWO MUTATIONS ARE GREEN BY DESIGN and are recorded rather than counted as
+ * caught, because when the deliverable IS a test there is no meta-test above it.
+ * Narrowing the comparison to the version alone, with two claims differing only
+ * in their sha, is green — and the same prose against the full comparison is
+ * red, so the PAIR is what proves the sha is load-bearing rather than
+ * decoration. And removing the agreement assertion with 2026-09-24's prose in
+ * place is green, which is the reachability proof: it is how the defect was
+ * confirmed before any of this was written.
  */
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
@@ -92,8 +124,7 @@ const CLAIM =
   /\bv(\d+)\b(?:(?!\bv\d+\b)[^.]){0,80}?\bIS (?:ALSO )?WHAT `main` CARRIES/gi;
 
 const claims = () =>
-  [...flat.matchAll(CLAIM)].map((m) => ({
-    version: Number(m[1]),
+  [...flat.matchAll(CLAIM)].map((m) => {
     /**
      * The 80 characters after the claim, where the provenance sits: the file's
      * own convention is "(merged 2026-09-24, `c247479`)", and the sequence
@@ -101,10 +132,15 @@ const claims = () =>
      * window truncates the closing backtick and fails a correctly cited claim.
      * Read from the whitespace-collapsed text for the same reason the claim is.
      */
-    tail: flat.slice(m.index! + m[0].length, m.index! + m[0].length + 80),
-  }));
+    const tail = flat.slice(m.index! + m[0].length, m.index! + m[0].length + 80);
+    return { version: Number(m[1]), tail, sha: /`([0-9a-f]{7,40})`/.exec(tail)?.[1] };
+  });
 
 const versionsClaimingToBeOnMain = () => claims().map((c) => `v${c.version}`);
+
+/** How a claim is named when one of these assertions has to print it. */
+const cited = (c: { version: number; sha?: string }) =>
+  `v${c.version} (${c.sha ?? 'no commit cited'})`;
 
 describe("CLAUDE.md's claim about what `main` carries", () => {
   it('is stated at least once, in the form this guard can read', () => {
@@ -133,11 +169,27 @@ describe("CLAUDE.md's claim about what `main` carries", () => {
   });
 
   it('cites a commit, so a reader can settle it without trusting the sentence', () => {
-    const uncited = claims().filter((c) => !/`[0-9a-f]{7,40}`/.test(c.tail));
+    const uncited = claims().filter((c) => !c.sha);
     expect(
       uncited.map((c) => `v${c.version}`),
       'a claim about what `main` carries names no commit — the numeric check cannot ' +
         'catch a stale-low claim, so the sha is what makes it verifiable',
+    ).toEqual([]);
+  });
+
+  it('states ONE version and ONE commit, however many times it is stated', () => {
+    // Zero claims is assertion 1's business, not this one's: one assertion, one
+    // property, or a failure stops naming what is actually wrong.
+    const distinct = [...new Set(claims().map(cited))];
+    const disagreeing = distinct.length > 1 ? distinct : [];
+
+    expect(
+      disagreeing,
+      'CLAUDE.md states what `main` carries more than once and the statements DISAGREE — ' +
+        'one was updated after a merge and the other was left behind, which is the exact ' +
+        'defect this guard exists for. Neither the ceiling nor the citation check can see ' +
+        'it: both versions sit below the branch marker, and a stale claim carries a stale ' +
+        'sha, which still looks like a sha',
     ).toEqual([]);
   });
 });
