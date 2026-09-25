@@ -2668,8 +2668,8 @@ pull took:
 
 ```
 [TICKET OUTBOX] Starting retry worker (every 60s; up to 12 attempts,
-  backoff 30s → 30m; queue payloads re-sent verbatim)
-[ALERT SERVICE] Starting ticket-filing alarm (every 5 minutes)
+  backoff 30s → 30m; queue payloads re-sent verbatim; a 400/422 writes refusal_status_code)
+[ALERT SERVICE] Starting ticket-filing alarm (every 5 minutes; a terminal 4xx is follow-up, not a stall)
 ```
 
 The other three print only when the thing they watch happens, which makes each
@@ -2916,6 +2916,38 @@ live counter of false alarms prevented:
 The alarm email now carries `greetingOnlySkipped` beside `unfiledRun`, so a
 future alert says how much of its run was hangups without anyone re-deriving
 it. On 2026-09-03 18:24:56 that ratio was 4 of 12.
+
+**A PAYLOAD REFUSAL IS NOT A STALL — 2026-09-25.** Three `ticket_outbox`
+rows (optical office, two surgery surgeon) were dead-lettered by terminal
+400s after the ticketing app recovered. `assessTicketFiling` treated ANY
+`dead_letter` as `ticket_filing_stalled` and re-emailed every five minutes
+while tickets were still landing 1–4 minutes before each alert. Same false
+alarm shape as 2026-09-02.
+
+The split is the persisted `refusal_status_code` (400 or 422 only — never
+inferred from `last_error`). A transport dead letter (timeout, 5xx, network,
+or a NULL status) still stalls. A terminal 4xx does not; it sends ONE
+`ticket_needs_followup` email via `emailService.sendEmail` (not `sendAlert`,
+so the cooldown and hourly cap cannot throttle a row), recorded on
+`followup_notified_at`. Resolved rows (`resolved_at`) drop out of both
+planes. The Observatory amber banner lists every unresolved dead letter;
+Resolve is admin-only (`POST /api/ticket-outbox/:id/resolve`).
+
+The three 2026-09-25 rows were written BEFORE the column existed, so their
+`refusal_status_code` is NULL. They still count as transport until Wayne
+resolves them from the Observatory after this deploys. The migration does
+not backfill or auto-resolve. Apply the SQL (`migrations/add_ticket_outbox_refusal_and_resolution.sql`)
+on the same pull; if the columns are missing, the snapshot falls back to
+counting every dead letter as transport so the run plane stays armed rather
+than returning null and going silent. The follow-up notice runs before the
+snapshot read, so a `call_logs` blip cannot skip it.
+
+New marker on the same boot line:
+
+```
+[ALERT SERVICE] Starting ticket-filing alarm (every 5 minutes; a terminal 4xx is follow-up, not a stall)
+[TICKET FOLLOW-UP] notified N terminal refusal(s) as CA…
+```
 
 ---
 

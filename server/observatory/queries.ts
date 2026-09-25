@@ -10,8 +10,11 @@
  */
 import { pool } from '../db';
 import { fivestarQuery } from './fivestarDb';
-import { assessTicketFiling, type TicketFilingVerdict } from '../services/ticketFilingHealth';
-import { lastTicketFiledAtMs } from '../services/ticketFilingPulse';
+import {
+  assessTicketFiling,
+  readTicketFilingSnapshot,
+  type TicketFilingVerdict,
+} from '../services/ticketFilingHealth';
 
 // ────────────────────────────────────────────────────────────────────────
 // Ops Hub agents — six-pillar scorecards
@@ -1044,59 +1047,13 @@ export async function todayOverview(): Promise<TodayOverview> {
    */
   let ticketFiling: TicketFilingVerdict | null = null;
   try {
-    const recent = await pool.query(
-      // `status = 'completed'` matches readTicketFilingSnapshot and has to stay
-      // that way. The row is created at call START as 'in_progress', so without
-      // it every call currently on the line counts as one that filed nothing —
-      // a busy morning alone would paint this banner red. See the long note in
-      // ticketFilingHealth.ts for why the filter is 'completed' exactly and not
-      // "anything not in-flight".
-      // total_turns/duration join the SAME sync rule: isGreetingOnly reads
-      // them, so a copy without them would count greeting-only hangups the
-      // alarm skips and this banner would disagree with the email.
-      `SELECT (EXTRACT(EPOCH FROM created_at) * 1000)::bigint AS created_ms,
-              (ticket_number IS NOT NULL) AS has_ticket,
-              total_turns,
-              duration
-         FROM call_logs
-        WHERE agent_used IN ('optical', 'surgery', 'tech', 'records')
-          AND status = 'completed'
-        ORDER BY created_at DESC
-        LIMIT 40`,
-    );
-    // Same predicate as readTicketFilingSnapshot, and it has to stay that way:
-    // a dead letter is counted for ever, the transient states only while they
-    // are recent. Codex found these two drifting apart on PR #244 — the banner
-    // would have gone green overnight while requests sat unfiled.
-    const held = await pool.query(
-      `SELECT status::text AS status, COUNT(*)::int AS n
-         FROM ticket_outbox
-        WHERE status = 'dead_letter'
-           OR (status NOT IN ('sent', 'dead_letter') AND created_at > NOW() - INTERVAL '6 hours')
-        GROUP BY 1`,
-    );
-    const byStatus: Record<string, number> = {};
-    for (const r of held.rows) byStatus[r.status] = Number(r.n) || 0;
-    ticketFiling = assessTicketFiling({
-      recentQueueCalls: recent.rows.map(
-        (r: {
-          created_ms: string;
-          has_ticket: boolean;
-          total_turns: number | null;
-          duration: number | null;
-        }) => ({
-          createdAtMs: Number(r.created_ms),
-          hasTicket: Boolean(r.has_ticket),
-          totalTurns: r.total_turns === null ? null : Number(r.total_turns),
-          durationSeconds: r.duration === null ? null : Number(r.duration),
-        }),
-      ),
-      lastTicketFiledAtMs: lastTicketFiledAtMs(),
-      outboxPending: (byStatus.pending ?? 0) + (byStatus.sending ?? 0),
-      outboxFailed: byStatus.failed ?? 0,
-      outboxDeadLetter: byStatus.dead_letter ?? 0,
-      nowMs: Date.now(),
-    });
+    // ONE snapshot, not a second copy of the SQL. Two predicates drifted
+    // apart on PR #244 (the banner went green overnight while requests sat
+    // unfiled) and would have drifted again the moment terminal refusals
+    // stopped counting as a stall. The alarm and this banner now share
+    // readTicketFilingSnapshot.
+    const snapshot = await readTicketFilingSnapshot();
+    ticketFiling = snapshot ? assessTicketFiling(snapshot) : null;
   } catch (err) {
     // A widget that cannot read is not a system that is healthy — say nothing
     // rather than green.

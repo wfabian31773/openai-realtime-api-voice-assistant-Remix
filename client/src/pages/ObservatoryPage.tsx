@@ -1,8 +1,9 @@
-import { useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useEffect, useState } from 'react'
 import apiClient from '@/lib/apiClient'
 import { describePipeline } from '@/lib/pipelineSplit'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { Button } from '@/components/ui/button'
 import {
   Telescope,
   Database,
@@ -174,7 +175,19 @@ interface TodayOverview {
     lastFiledAtMs: number | null
     minutesSinceLastFiled: number | null
     outboxHeld: number
+    outboxTerminalDeadLetter?: number
   } | null
+}
+
+interface UnresolvedOutboxRow {
+  id: string
+  callSid: string | null
+  createdAt: string
+  lastError: string | null
+  refusalStatusCode: number | null
+  kind: 'terminal' | 'transport'
+  departmentId: string
+  agentUsed: string
 }
 interface BriefAgentMetric {
   agentId: string
@@ -1670,6 +1683,21 @@ function CommandCenterTab({
     queryFn: async () => (await apiClient.get('/observatory/today')).data,
     refetchInterval: 15_000,
   })
+  const queryClient = useQueryClient()
+  const unresolvedOutbox = useQuery<{ rows: UnresolvedOutboxRow[] }>({
+    queryKey: ['obs-outbox-unresolved'],
+    queryFn: async () => (await apiClient.get('/ticket-outbox/unresolved')).data,
+    refetchInterval: 15_000,
+    retry: false,
+  })
+  const resolveOutbox = useMutation({
+    mutationFn: async (id: string) =>
+      (await apiClient.post(`/ticket-outbox/${id}/resolve`, { note: 'Resolved from Observatory' })).data,
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['obs-outbox-unresolved'] })
+      void queryClient.invalidateQueries({ queryKey: ['obs-today'] })
+    },
+  })
 
   // "Live" must be confirmed by the carrier. A database row can miss its
   // completion callback and remain in_progress indefinitely; that produced
@@ -1799,6 +1827,42 @@ function CommandCenterTab({
                 Callers are still being answered. Check{' '}
                 <code>[TICKETING API]</code> and <code>[TICKET OUTBOX]</code> in the deployment logs.
               </p>
+            </div>
+          )
+        })()}
+        {(() => {
+          const rows = unresolvedOutbox.data?.rows ?? []
+          if (rows.length === 0) return null
+          return (
+            <div className="mb-3 rounded-lg border border-amber-500/60 bg-amber-500/10 p-3 text-sm">
+              <p className="font-semibold text-amber-800 dark:text-amber-300">
+                Ticket requests need follow-up — {rows.length} unresolved dead letter
+                {rows.length === 1 ? '' : 's'}. Filing itself may still be healthy.
+              </p>
+              <ul className="mt-2 space-y-2">
+                {rows.map((row) => (
+                  <li key={row.id} className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="text-muted-foreground">
+                      <code>{row.callSid ?? row.id}</code>
+                      {' · '}
+                      {row.agentUsed} / dept {row.departmentId}
+                      {' · '}
+                      {row.kind === 'terminal'
+                        ? `HTTP ${row.refusalStatusCode ?? '?'}`
+                        : 'transport (no refusal status)'}
+                      {row.lastError ? ` — ${row.lastError}` : ''}
+                    </span>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      disabled={resolveOutbox.isPending}
+                      onClick={() => resolveOutbox.mutate(row.id)}
+                    >
+                      Resolve
+                    </Button>
+                  </li>
+                ))}
+              </ul>
             </div>
           )
         })()}

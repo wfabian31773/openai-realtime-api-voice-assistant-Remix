@@ -563,6 +563,20 @@ class SystemAlertService {
    */
   async checkTicketFilingAlert(): Promise<void> {
     try {
+      /**
+       * Terminal 4xx dead letters are a follow-up, not a stall. The notice
+       * runs on every tick so a row is not waiting on the critical plane
+       * OR on the snapshot read — a call_logs blip must not skip a notice
+       * that only needs ticket_outbox. It records followup_notified_at
+       * itself; sendAlert's cooldown must not decide whether a row is emailed.
+       */
+      try {
+        const { notifyTerminalRefusals } = await import('./ticketFollowupNotice');
+        await notifyTerminalRefusals();
+      } catch (followupErr) {
+        console.error('[ALERT SERVICE] ticket follow-up notice failed:', followupErr);
+      }
+
       const { readTicketFilingSnapshot, assessTicketFiling } = await import('./ticketFilingHealth');
       const snapshot = await readTicketFilingSnapshot();
       if (!snapshot) return; // it logged its own reason
@@ -608,7 +622,9 @@ class SystemAlertService {
   }
 
   startTicketFilingSchedule(): void {
-    console.log('[ALERT SERVICE] Starting ticket-filing alarm (every 5 minutes)');
+    console.log(
+      '[ALERT SERVICE] Starting ticket-filing alarm (every 5 minutes; a terminal 4xx is follow-up, not a stall)',
+    );
     setInterval(() => {
       this.checkTicketFilingAlert();
     }, 5 * 60 * 1000);

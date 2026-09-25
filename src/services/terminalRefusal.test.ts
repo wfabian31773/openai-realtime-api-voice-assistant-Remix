@@ -17,7 +17,11 @@
  * patient their request until somebody replays it by hand.
  */
 import { describe, it, expect } from 'vitest';
-import { isTerminalRefusal } from './terminalRefusal';
+import {
+  isTerminalRefusal,
+  PAYLOAD_REFUSAL_STATUSES,
+  payloadRefusalSqlList,
+} from './terminalRefusal';
 
 describe('a payload the server read and refused', () => {
   it('treats 400 as final — all 664 measured refusals were 400s', () => {
@@ -57,5 +61,16 @@ describe('everything else is held and retried', () => {
     for (const status of [402, 405, 410, 415, 418, 423, 451]) {
       expect(isTerminalRefusal(status)).toBe(false);
     }
+  });
+});
+
+describe('the SQL list is the same enumerated set, integers only', () => {
+  it('is 400 and 422, comma-separated, nothing else', () => {
+    expect(payloadRefusalSqlList()).toBe('400, 422');
+    expect([...PAYLOAD_REFUSAL_STATUSES].sort((a, b) => a - b)).toEqual([400, 422]);
+  });
+
+  it('cannot grow a non-integer — the alarm interpolates this into SQL', () => {
+    expect(payloadRefusalSqlList()).toMatch(/^\d+(, \d+)*$/);
   });
 });

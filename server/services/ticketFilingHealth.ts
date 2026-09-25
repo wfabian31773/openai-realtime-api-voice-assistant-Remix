@@ -60,6 +60,11 @@
  *   B. The outbox holding entries it has not sent — catches our own POSTs
  *      failing within a minute, before any run has built up. Before
  *      2026-09-01 that table had never held a non-sent row.
+ *
+ *   A payload refusal (400/422) is not plane B. Measured 2026-09-25: three
+ *   terminal 400s re-fired ticket_filing_stalled all evening while tickets
+ *   were still landing. Those rows are `outboxTerminalDeadLetter` and a
+ *   follow-up notice, not a stall. Transport dead letters still are.
  */
 
 /** One queue call, as the alarm needs to see it. */
@@ -113,7 +118,18 @@ export interface TicketFilingSnapshot {
   /** Outbox rows from the recent window that have not been sent. */
   outboxPending: number;
   outboxFailed: number;
+  /**
+   * TRANSPORT dead letters only — retries exhausted on a timeout, 5xx, or
+   * network error. A payload refusal (400/422) is `outboxTerminalDeadLetter`
+   * and is not a stall. Optional so existing tests that omit it stay valid.
+   */
   outboxDeadLetter: number;
+  /**
+   * Dead-lettered by an enumerated payload refusal (400/422) that has not
+   * been resolved. Filing itself is healthy; a staffer still has to follow
+   * up. Defaults to 0 when a test snapshot omits it.
+   */
+  outboxTerminalDeadLetter?: number;
   /**
    * When a ticket was last ACTUALLY filed, as recorded by the filing path
    * itself (ticketFilingPulse.ts) rather than inferred from call_logs. Null
@@ -131,8 +147,13 @@ export interface TicketFilingVerdict {
   unfiledRun: number;
   lastFiledAtMs: number | null;
   minutesSinceLastFiled: number | null;
-  /** Outbox rows waiting, failed or dead-lettered in the window. */
+  /** Outbox rows waiting, failed or transport-dead-lettered in the window. */
   outboxHeld: number;
+  /**
+   * Unresolved payload-refusal dead letters (400/422). Not a stall — the
+   * follow-up notice is what pages a staffer about these.
+   */
+  outboxTerminalDeadLetter: number;
   /** Greeting-only calls skipped while counting the run. */
   greetingOnlySkipped: number;
   /** True when a confirmed filing inside the run's span held the alarm back. */
@@ -217,6 +238,10 @@ export function assessTicketFiling(snapshot: TicketFilingSnapshot): TicketFiling
   const minutesSinceLastFiled =
     lastFiledAtMs === null ? null : Math.round((snapshot.nowMs - lastFiledAtMs) / 60_000);
 
+  const outboxTerminalDeadLetter = snapshot.outboxTerminalDeadLetter ?? 0;
+  // A 400/422 is a request a staffer must follow up — not a row we are
+  // still trying to send, and not proof the pipe is down. Held stays the
+  // transport plane: pending + failed + transport dead letters.
   const outboxHeld = snapshot.outboxPending + snapshot.outboxFailed + snapshot.outboxDeadLetter;
 
   // Plane B first: it is the earlier signal, and it names our own POSTs rather
@@ -231,6 +256,7 @@ export function assessTicketFiling(snapshot: TicketFilingSnapshot): TicketFiling
       lastFiledAtMs,
       minutesSinceLastFiled,
       outboxHeld,
+      outboxTerminalDeadLetter,
       greetingOnlySkipped,
       suppressedByConfirmedFiling: false,
     };
@@ -245,6 +271,7 @@ export function assessTicketFiling(snapshot: TicketFilingSnapshot): TicketFiling
       lastFiledAtMs,
       minutesSinceLastFiled,
       outboxHeld,
+      outboxTerminalDeadLetter,
       greetingOnlySkipped,
       suppressedByConfirmedFiling: false,
     };
@@ -292,6 +319,7 @@ export function assessTicketFiling(snapshot: TicketFilingSnapshot): TicketFiling
       lastFiledAtMs,
       minutesSinceLastFiled,
       outboxHeld,
+      outboxTerminalDeadLetter,
       greetingOnlySkipped,
       suppressedByConfirmedFiling: false,
     };
@@ -306,6 +334,7 @@ export function assessTicketFiling(snapshot: TicketFilingSnapshot): TicketFiling
     lastFiledAtMs,
     minutesSinceLastFiled,
     outboxHeld,
+    outboxTerminalDeadLetter,
   };
 }
 
@@ -322,6 +351,13 @@ export const ALARMED_QUEUE_AGENTS = ['optical', 'surgery', 'tech', 'records'] as
 
 /** How many recent calls to look back over. Comfortably past the run alarm. */
 const LOOKBACK_CALLS = 40;
+
+/** Postgres 42703 — the additive migration has not been applied yet. */
+export function isMissingOutboxColumn(err: unknown): boolean {
+  const e = err as { code?: string; message?: string } | null;
+  if (e?.code === '42703') return true;
+  return /column .* does not exist/i.test(String(e?.message ?? err ?? ''));
+}
 
 /** Reads both planes. Never throws — a broken alarm must not break the server. */
 export async function readTicketFilingSnapshot(): Promise<TicketFilingSnapshot | null> {
@@ -376,18 +412,65 @@ export async function readTicketFilingSnapshot(): Promise<TicketFilingSnapshot |
      * The window stays for the transient states — a pending or failed row is
      * mid-retry, and an old one is either about to send or about to become a
      * dead letter, which is the state this now counts for ever.
+     *
+     * A PAYLOAD REFUSAL IS NOT A STALL — 2026-09-25. Three 400s (office /
+     * surgeon) dead-lettered after the app recovered, and this query counted
+     * them as `dead_letter` forever, so ticket_filing_stalled re-fired all
+     * evening while tickets were still landing. The split is the persisted
+     * `refusal_status_code` (400/422), never last_error text. Resolved rows
+     * drop out of both buckets.
      */
-    const outbox = await db.execute(sql`
-      SELECT status::text AS status, COUNT(*)::int AS n
+    const { payloadRefusalSqlList } = await import('../../src/services/terminalRefusal');
+    const refusalIn = sql.raw(payloadRefusalSqlList());
+    const held = {
+      pending: 0,
+      sending: 0,
+      failed: 0,
+      dead_letter: 0,
+      terminal_dead_letter: 0,
+    } as Record<string, number>;
+    try {
+      const outbox = await db.execute(sql`
+      SELECT
+        CASE
+          WHEN status = 'dead_letter'
+               AND refusal_status_code IN (${refusalIn})
+            THEN 'terminal_dead_letter'
+          ELSE status::text
+        END AS status,
+        COUNT(*)::int AS n
       FROM ticket_outbox
-      WHERE status = 'dead_letter'
-         OR (status NOT IN ('sent', 'dead_letter') AND created_at > NOW() - INTERVAL '6 hours')
-      GROUP BY status
+      WHERE resolved_at IS NULL
+        AND (
+          status = 'dead_letter'
+          OR (status NOT IN ('sent', 'dead_letter') AND created_at > NOW() - INTERVAL '6 hours')
+        )
+      GROUP BY 1
     `);
-
-    const held = { pending: 0, sending: 0, failed: 0, dead_letter: 0 } as Record<string, number>;
-    for (const row of outbox.rows as Array<{ status: string; n: number }>) {
-      held[row.status] = Number(row.n) || 0;
+      for (const row of outbox.rows as Array<{ status: string; n: number }>) {
+        held[row.status] = Number(row.n) || 0;
+      }
+    } catch (outboxErr) {
+      // Code can land before the additive migration. A missing column must
+      // NOT return null for the whole snapshot — that disarms the run plane
+      // and the alarm goes silent, the opposite of the 2026-09-25 stuck
+      // alarm. Fall back to the pre-split count: every dead letter is
+      // transport, which is today's behaviour and keeps the three NULL-status
+      // rows stalling until Wayne applies the SQL and resolves them.
+      if (!isMissingOutboxColumn(outboxErr)) throw outboxErr;
+      console.warn(
+        '[TICKET FILING HEALTH] outbox refusal columns missing — counting every dead letter as transport until the migration is applied',
+      );
+      const outboxPreMigration = await db.execute(sql`
+        SELECT status::text AS status, COUNT(*)::int AS n
+        FROM ticket_outbox
+        WHERE status = 'dead_letter'
+           OR (status NOT IN ('sent', 'dead_letter') AND created_at > NOW() - INTERVAL '6 hours')
+        GROUP BY 1
+      `);
+      for (const row of outboxPreMigration.rows as Array<{ status: string; n: number }>) {
+        held[row.status] = Number(row.n) || 0;
+      }
     }
 
     const { lastTicketFiledAtMs } = await import('./ticketFilingPulse');
@@ -414,6 +497,7 @@ export async function readTicketFilingSnapshot(): Promise<TicketFilingSnapshot |
       outboxPending: (held.pending ?? 0) + (held.sending ?? 0),
       outboxFailed: held.failed ?? 0,
       outboxDeadLetter: held.dead_letter ?? 0,
+      outboxTerminalDeadLetter: held.terminal_dead_letter ?? 0,
       nowMs: Date.now(),
     };
   } catch (err) {
