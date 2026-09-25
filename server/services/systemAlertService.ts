@@ -33,6 +33,8 @@ interface AlertState {
   lastProviderMissCount: number;
   /** Last ticketing-app liveness conditions, for edge-triggered email. */
   ticketingLivenessConditions: LivenessCondition[];
+  /** Consecutive app_heartbeat read failures. Reset on a successful read. */
+  ticketingLivenessReadFailures: number;
 }
 
 const ALERT_COOLDOWN_MS = 5 * 60 * 1000; // 5 minutes between same-type alerts
@@ -66,6 +68,7 @@ class SystemAlertService {
     lastEmergencyMissCount: 0,
     lastProviderMissCount: 0,
     ticketingLivenessConditions: [],
+    ticketingLivenessReadFailures: 0,
   };
 
   private alertHistory: AlertEvent[] = [];
@@ -170,7 +173,7 @@ class SystemAlertService {
   /**
    * Send alert via SMS and/or email
    */
-  private async sendAlert(event: AlertEvent): Promise<void> {
+  private async sendAlert(event: AlertEvent): Promise<boolean> {
     const alertKey = `${event.type}:${event.severity}`;
     
     // Check cooldown
@@ -203,14 +206,14 @@ class SystemAlertService {
     
     if (timeSinceLastAlert < ALERT_COOLDOWN_MS) {
       console.log(`[ALERT SERVICE] Skipping alert (cooldown): ${event.message}`);
-      return;
+      return false;
     }
     
     // Check hourly limit
     const hourlyCount = this.state.alertCounts.get(alertKey) || 0;
     if (hourlyCount >= MAX_ALERTS_PER_HOUR) {
       console.log(`[ALERT SERVICE] Skipping alert (hourly limit): ${event.message}`);
-      return;
+      return false;
     }
     
     // Update state
@@ -232,6 +235,7 @@ class SystemAlertService {
       message: event.message,
       timestamp: event.timestamp.toISOString(),
     });
+    return true;
   }
 
   /**
@@ -633,38 +637,55 @@ class SystemAlertService {
       const {
         readTicketingAppLivenessSnapshot,
         assessTicketingAppLiveness,
+        assessReadFailure,
         nextLivenessAction,
       } = await import('./ticketingAppLiveness');
       const snapshot = await readTicketingAppLivenessSnapshot();
-      if (!snapshot) return;
-
-      const verdict = assessTicketingAppLiveness(snapshot);
-      const action = nextLivenessAction(this.state.ticketingLivenessConditions, verdict);
-
-      if (action === 'alert') {
-        await this.sendAlert({
-          type: 'ticketing_app_liveness',
-          severity: 'critical',
-          message: `TICKETING APP: ${verdict.reason}`,
-          details: { ...verdict.details },
-          timestamp: new Date(),
-        });
-      } else if (action === 'recover') {
-        await this.sendAlert({
-          type: 'ticketing_app_liveness_recovered',
-          severity: 'info',
-          message: `TICKETING APP recovered: ${verdict.recoveryReason}`,
-          details: { ...verdict.details },
-          timestamp: new Date(),
-        });
-      } else {
+      /**
+       * ONLY ADVANCE THE EDGE AFTER A SEND IS ELIGIBLE — Codex, PR #330.
+       * sendAlert records even when cooldown/hourly suppress delivery. If we
+       * still marked the condition handled, a stale hang that followed a
+       * memory alert inside five minutes would never email. Retry the same
+       * edge until the gates let it through.
+       */
+      const apply = async (verdict: import('./ticketingAppLiveness').LivenessVerdict) => {
+        const action = nextLivenessAction(this.state.ticketingLivenessConditions, verdict);
+        if (action === 'alert') {
+          const sent = await this.sendAlert({
+            type: 'ticketing_app_liveness',
+            severity: 'critical',
+            message: `TICKETING APP: ${verdict.reason}`,
+            details: { ...verdict.details },
+            timestamp: new Date(),
+          });
+          if (sent) this.state.ticketingLivenessConditions = [...verdict.conditions];
+          return;
+        }
+        if (action === 'recover') {
+          const sent = await this.sendAlert({
+            type: 'ticketing_app_liveness_recovered',
+            severity: 'info',
+            message: `TICKETING APP recovered: ${verdict.recoveryReason}`,
+            details: { ...verdict.details },
+            timestamp: new Date(),
+          });
+          if (sent) this.state.ticketingLivenessConditions = [];
+          return;
+        }
         console.log(
           `[ALERT SERVICE] Ticketing app liveness ${verdict.alerting ? 'still alerting' : 'OK'} — ` +
             `${verdict.reason ?? 'fresh heartbeat'}`,
         );
-      }
+      };
 
-      this.state.ticketingLivenessConditions = [...verdict.conditions];
+      if (!snapshot) {
+        this.state.ticketingLivenessReadFailures += 1;
+        const failure = assessReadFailure(this.state.ticketingLivenessReadFailures);
+        if (failure) await apply(failure);
+        return;
+      }
+      this.state.ticketingLivenessReadFailures = 0;
+      await apply(assessTicketingAppLiveness(snapshot));
     } catch (error) {
       console.error('[ALERT SERVICE] Error checking ticketing app liveness:', error);
     }
