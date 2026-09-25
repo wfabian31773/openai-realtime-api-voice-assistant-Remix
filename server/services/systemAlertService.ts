@@ -219,8 +219,10 @@ class SystemAlertService {
     // Update state
     console.log(`[ALERT SERVICE] Sending ${event.severity} alert: ${event.message}`);
 
-    // Send SMS alert for critical issues
-    if (event.severity === 'critical') {
+    // Liveness is the email Wayne asked for on 2026-09-25. Engineering SMS
+    // has been off since 2026-07-27; sending it here on every SMTP retry
+    // would recreate the personal-phone spam that ruling ended.
+    if (event.severity === 'critical' && event.type !== 'ticketing_app_liveness') {
       await this.sendSmsAlert(event);
     }
 
@@ -639,7 +641,11 @@ class SystemAlertService {
    *
    * Reads TICKETING_APP_DATABASE_URL. HTTP to Next is not a substitute.
    */
+  private livenessCheckInFlight = false;
+
   async checkTicketingAppLiveness(): Promise<void> {
+    if (this.livenessCheckInFlight) return;
+    this.livenessCheckInFlight = true;
     try {
       const {
         readTicketingAppLivenessSnapshot,
@@ -695,6 +701,8 @@ class SystemAlertService {
       await apply(assessTicketingAppLiveness(snapshot));
     } catch (error) {
       console.error('[ALERT SERVICE] Error checking ticketing app liveness:', error);
+    } finally {
+      this.livenessCheckInFlight = false;
     }
   }
 
