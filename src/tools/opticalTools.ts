@@ -20,6 +20,7 @@ import { str, isTwilioCallSid, normalizePhone } from './sharedPatientTools';
 import { createTicketDurable, postFailureToolResult } from '../services/durableTicketFiling';
 import { gateRefusalsSoFar, noteGateRefusal } from './gateAttempts';
 import { decideDobEscape, dobStatusNote, dobEscapeMarker, type DobStatus } from './dobEscape';
+import { usualOfficeFor, verifiedDobFor } from './verifiedIdentity';
 
 /** This tool's own name, for the per-call gate counter. */
 const OPTICAL_FILE_TOOL = 'file_optical_ticket';
@@ -314,7 +315,6 @@ registerTool({
       | undefined;
     let officeFromRecord: string | undefined;
     if (!cleanLocation) {
-      const { usualOfficeFor } = await import('./verifiedIdentity');
       // `dob` is what the ticket is being filed under. Passed so an explicit,
       // parseable conflict with the verified record withholds the office
       // rather than routing a same-named relative's ticket (Codex P1, #291).
@@ -386,7 +386,6 @@ registerTool({
        * Only ever for the SAME NAME as the verified match, and only from a
        * match the lookup was certain about. See verifiedIdentity.ts.
        */
-      const { verifiedDobFor } = await import('./verifiedIdentity');
       const known = verifiedDobFor(callSid, first, last);
       parts = known ? normalizeDobParts(known) : null;
       if (parts) {

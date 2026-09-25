@@ -46,14 +46,26 @@
  * this pattern, as a present-tense claim, which is the confusion the whole
  * guard exists to prevent. The red says keep the quote quoted.
  *
- * WHAT IT CANNOT DO, stated rather than implied: it proves the prose agrees
- * with THIS BUILD's marker, not that the marker matches the deployed `main`.
- * A branch legitimately carries a HIGHER number than `main` while it is open —
- * that is the whole re-bump rule — so on such a branch this test is satisfied
- * by prose that says the branch's own number is what `main` carries, which is
- * false until it merges. The residue is the open-sibling window, and the
- * table's own instruction covers it: re-read the sentence against `main`
- * rather than trusting it.
+ * THE EQUALITY RULE THIS TEST SHIPPED WITH WAS WRONG, and the ship that bumped
+ * the marker to v71 is what proved it. It required every claim to name the
+ * version THIS BUILD's marker carries — sound only while the branch and `main`
+ * agree, which was true for one day and is a condition the marker table itself
+ * records as temporary. The moment a branch ships above `main`, that rule
+ * demands prose saying the branch's own number is what `main` carries, which is
+ * false. A guard that forces the file into a false statement to stay green is
+ * worse than no guard: it manufactures exactly the stale claim it was built to
+ * catch. My own docblock called this a "residue" and left it standing; it was a
+ * defect, not a residue.
+ *
+ * WHAT REPLACES IT, and why it is weaker on purpose. A test running on a branch
+ * cannot know what `main` carries — there is no honest way to check the fact
+ * itself. So it checks the two things it can: no claim may name a version ABOVE
+ * this build's marker (a branch cannot be behind its own prose), and every
+ * claim must cite a commit, which is what lets a reader settle it in one
+ * command instead of trusting the sentence. Note what this does NOT catch: all
+ * five historical arrivals were stale-LOW (prose said v67 while `main` was
+ * v70), and the ceiling admits those. The sha is the part that bites, because a
+ * stale claim carries a stale sha.
  */
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
@@ -79,8 +91,20 @@ const flat = CLAUDE_MD.replace(/\s+/g, ' ');
 const CLAIM =
   /\bv(\d+)\b(?:(?!\bv\d+\b)[^.]){0,80}?\bIS (?:ALSO )?WHAT `main` CARRIES/gi;
 
-const versionsClaimingToBeOnMain = () =>
-  [...flat.matchAll(CLAIM)].map((m) => `v${m[1]}`);
+const claims = () =>
+  [...flat.matchAll(CLAIM)].map((m) => ({
+    version: Number(m[1]),
+    /**
+     * The 80 characters after the claim, where the provenance sits: the file's
+     * own convention is "(merged 2026-09-24, `c247479`)", and the sequence
+     * sentence puts a PR number and a date in front of the sha, so a shorter
+     * window truncates the closing backtick and fails a correctly cited claim.
+     * Read from the whitespace-collapsed text for the same reason the claim is.
+     */
+    tail: flat.slice(m.index! + m[0].length, m.index! + m[0].length + 80),
+  }));
+
+const versionsClaimingToBeOnMain = () => claims().map((c) => `v${c.version}`);
 
 describe("CLAUDE.md's claim about what `main` carries", () => {
   it('is stated at least once, in the form this guard can read', () => {
@@ -91,17 +115,29 @@ describe("CLAUDE.md's claim about what `main` carries", () => {
     ).not.toEqual([]);
   });
 
-  it('names the version this build\'s marker carries, everywhere it is stated', async () => {
+  it('never claims `main` is AHEAD of this build', async () => {
     const { VOICE_RUNTIME_DEPLOY_MARKER } = await import('./readiness');
-    const version = /^voice-runtime-(v\d+)-/.exec(VOICE_RUNTIME_DEPLOY_MARKER)?.[1];
-    expect(version, 'the marker does not start with a version').toBeTruthy();
+    const marker = /^voice-runtime-v(\d+)-/.exec(VOICE_RUNTIME_DEPLOY_MARKER)?.[1];
+    expect(marker, 'the marker does not start with a version').toBeTruthy();
 
-    const claimed = versionsClaimingToBeOnMain();
-    const disagreeing = claimed.filter((v) => v !== version);
+    // Equal is the ordinary state (nothing shipped on this branch yet); below is
+    // the state while this branch ships above `main`. Above is impossible: a
+    // branch always contains what it says `main` carries.
+    const ahead = claims().filter((c) => c.version > Number(marker));
     expect(
-      disagreeing,
-      `the marker is ${version} but CLAUDE.md says \`main\` carries ${claimed.join(', ')} — ` +
-        'a branch merged and its own prose did not follow it',
+      ahead.map((c) => `v${c.version}`),
+      `this build's marker is v${marker} and CLAUDE.md says \`main\` carries something ` +
+        'newer, which cannot be true — the marker was not bumped, or the claim names the ' +
+        'wrong version',
+    ).toEqual([]);
+  });
+
+  it('cites a commit, so a reader can settle it without trusting the sentence', () => {
+    const uncited = claims().filter((c) => !/`[0-9a-f]{7,40}`/.test(c.tail));
+    expect(
+      uncited.map((c) => `v${c.version}`),
+      'a claim about what `main` carries names no commit — the numeric check cannot ' +
+        'catch a stale-low claim, so the sha is what makes it verifiable',
     ).toEqual([]);
   });
 });

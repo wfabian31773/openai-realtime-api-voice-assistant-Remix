@@ -261,7 +261,7 @@ import { resolveAppDomain } from "../config/environment";
 import { callEnvironment } from "./callRecord";
 import { openRuntimeCall, persistRuntimeCall, type CallLogInsert, type RuntimeCallIdentity } from "./callRecord";
 import { identityForRow } from "./runtimeIdentity";
-import { identityStoreProbe } from "../tools/verifiedIdentity";
+import { identityStoreProbe, rememberVerifiedIdentity } from "../tools/verifiedIdentity";
 import { logRuntimeIdentity } from "./identityTelemetry";
 import { runRequestSweep } from "./sweepRunner";
 import { runPcpFloor } from "./pcpFloor";
@@ -986,7 +986,6 @@ export function mountVoiceRuntime(
          */
         const record = matchedRecord(precontext);
         if (record) {
-          const { rememberVerifiedIdentity } = await import("../tools/verifiedIdentity");
           precontextWrite = rememberVerifiedIdentity(entry.callSid, {
             ...record,
             certain: false,

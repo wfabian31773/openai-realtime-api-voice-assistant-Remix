@@ -440,9 +440,25 @@ import { callEnvironment } from "./callRecord";
  * 70 is the largest number — that distinction is the hazard the CLAUDE.md
  * marker table documents for v19-v24, and it is why every re-bump above is
  * justified by what the branch had merged rather than by arithmetic.
+ *
+ * WHY 71. The identity store is now imported ONE way everywhere: the ten
+ * `await import('./verifiedIdentity')` sites in the tools and the runtime's
+ * pre-context write are static imports, like the readers always were. It
+ * stacks on v70 (`main` at `c247479`), so this build contains it and every
+ * marker below it.
+ *
+ * AND WHAT v71 IS NOT, because the claim that motivated it does not survive
+ * its own reproduction. I published that the two import styles were two module
+ * instances and that this explained `precontextWrite = 'stored'` on 325 of 625
+ * `identity_summary` rows against `storeSize` 0 on all 625. A probe inside this
+ * package, run the way `npm start` runs it, gets ONE instance both ways — so
+ * the split was not the cause and that finding is still open. This ship removes
+ * a drift hazard and changes no gate, no tool answer and nothing a caller
+ * hears; the marker moves so a deploy can still be told apart, not because a
+ * number should move with it. See identityStoreHasOneImportStyle.test.ts.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v70-new-or-existing-gates-the-lookup-20260924";
+  "voice-runtime-v71-one-import-style-for-the-identity-store-20260925";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can
