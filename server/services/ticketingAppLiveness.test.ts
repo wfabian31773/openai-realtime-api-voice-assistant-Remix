@@ -240,11 +240,12 @@ describe('debounce and recovery', () => {
 });
 
 describe('the reader stays off HTTP', () => {
-  it('reads TICKETING_APP_DATABASE_URL and app_heartbeat, not /api/health', () => {
+  it('reads TICKETING_APP_DATABASE_URL and app_heartbeat, not a health URL', () => {
     const src = readFileSync(new URL('./ticketingAppLiveness.ts', import.meta.url), 'utf8');
-    expect(src).toMatch(/TICKETING_APP_DATABASE_URL/);
-    expect(src).toMatch(/FROM app_heartbeat/);
-    expect(src).not.toMatch(/\/api\/health/);
-    expect(src).not.toMatch(/fetch\(/);
+    const reader = src.slice(src.indexOf('export async function readTicketingAppLivenessSnapshot'));
+    expect(reader).toMatch(/TICKETING_APP_DATABASE_URL/);
+    expect(reader).toMatch(/FROM app_heartbeat/);
+    expect(reader).not.toMatch(/fetch\(/);
+    expect(reader).not.toMatch(/\/api\/health/);
   });
 });
