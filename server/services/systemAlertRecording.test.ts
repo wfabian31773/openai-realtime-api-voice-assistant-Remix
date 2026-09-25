@@ -134,8 +134,9 @@ describe('ticketing-app liveness is watched from this process', () => {
       source.indexOf('async checkTicketingAppLiveness'),
       source.indexOf('startTicketingAppLivenessSchedule'),
     );
-    expect(check).toMatch(/const sent = await this\.sendAlert/);
-    expect(check).toMatch(/if \(sent\) this\.state\.ticketingLivenessConditions/);
+    expect(check).toMatch(/nextStoredConditions/);
     expect(check).toMatch(/assessReadFailure/);
+    expect(sendAlert).toMatch(/const emailed = await this\.sendEmailAlert/);
+    expect(sendAlert).toMatch(/if \(!emailed\) return false/);
   });
 });

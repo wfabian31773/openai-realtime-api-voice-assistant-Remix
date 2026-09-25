@@ -101,7 +101,12 @@ export interface LivenessVerdict {
 export type LivenessAction = 'alert' | 'recover' | 'quiet';
 
 function forService(snapshot: LivenessSnapshot, service: string): HeartbeatReading[] {
-  return snapshot.readings.filter((r) => r.service === service);
+  const rows = snapshot.readings.filter((r) => r.service === service);
+  const current = rows[0];
+  if (!current) return [];
+  // One boot at a time. Mixing a dead instance with a new one after a
+  // republish invented both false rises and false recoveries.
+  return rows.filter((r) => r.instanceId === current.instanceId);
 }
 
 function newest(readings: HeartbeatReading[]): HeartbeatReading | null {
@@ -283,6 +288,25 @@ export function nextLivenessAction(
     return previous.length === 0 || grew ? 'alert' : 'quiet';
   }
   return previous.length > 0 ? 'recover' : 'quiet';
+}
+
+/**
+ * What to remember after this check.
+ *
+ * A send that did not deliver must not consume the edge. A quiet check
+ * that is still alerting must drop conditions that cleared, or a stale
+ * hang that returns after heap-only would look already handled.
+ */
+export function nextStoredConditions(
+  previous: readonly LivenessCondition[],
+  verdict: LivenessVerdict,
+  action: LivenessAction,
+  sent: boolean,
+): LivenessCondition[] {
+  if (action === 'alert') return sent ? [...verdict.conditions] : [...previous];
+  if (action === 'recover') return sent ? [] : [...previous];
+  if (verdict.alerting) return verdict.conditions.filter((c) => previous.includes(c));
+  return [...previous];
 }
 
 const LOOKBACK_MINUTES = 20;

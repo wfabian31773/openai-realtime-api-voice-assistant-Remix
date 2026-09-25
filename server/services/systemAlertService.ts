@@ -217,9 +217,6 @@ class SystemAlertService {
     }
     
     // Update state
-    this.state.lastAlertTime.set(alertKey, Date.now());
-    this.state.alertCounts.set(alertKey, hourlyCount + 1);
-    
     console.log(`[ALERT SERVICE] Sending ${event.severity} alert: ${event.message}`);
 
     // Send SMS alert for critical issues
@@ -227,7 +224,14 @@ class SystemAlertService {
       await this.sendSmsAlert(event);
     }
 
-    await this.sendEmailAlert(event);
+    const emailed = await this.sendEmailAlert(event);
+    if (!emailed) return false;
+
+    // Only after a channel that can reach Wayne accepted the message.
+    // Setting these first made a failed SMTP send look delivered, so the
+    // liveness edge was consumed and the next minute hit cooldown.
+    this.state.lastAlertTime.set(alertKey, Date.now());
+    this.state.alertCounts.set(alertKey, hourlyCount + 1);
 
     console.log(`[ALERT SERVICE] Alert sent:`, {
       type: event.type,
@@ -266,10 +270,11 @@ class SystemAlertService {
    * `sendEmail` already swallows its own errors and returns false, so the
    * catch here is for the import and the body build.
    */
-  private async sendEmailAlert(event: AlertEvent): Promise<void> {
+  /** True when Wayne does not need email, or when the mailer accepted it. */
+  private async sendEmailAlert(event: AlertEvent): Promise<boolean> {
     try {
       const { shouldEmailAlert, buildAlertEmail } = await import('./alertEmail');
-      if (!shouldEmailAlert(event.type, event.severity)) return;
+      if (!shouldEmailAlert(event.type, event.severity)) return true;
 
       const { sendEmail } = await import('./emailService');
       const message = buildAlertEmail(event);
@@ -277,14 +282,16 @@ class SystemAlertService {
 
       if (delivered) {
         console.log(`[ALERT SERVICE] Alert emailed to ${message.to}: ${event.type}`);
-      } else {
-        console.error(
-          `[ALERT SERVICE] ✗ Alert email FAILED for ${event.type} to ${message.to} — ` +
-            `the alert is recorded but nobody has been told. Check SMTP_PASSWORD.`,
-        );
+        return true;
       }
+      console.error(
+        `[ALERT SERVICE] ✗ Alert email FAILED for ${event.type} to ${message.to} — ` +
+          `the alert is recorded but nobody has been told. Check SMTP_PASSWORD.`,
+      );
+      return false;
     } catch (error) {
       console.error('[ALERT SERVICE] ✗ Alert email threw (alert still recorded):', error);
+      return false;
     }
   }
 
@@ -639,6 +646,7 @@ class SystemAlertService {
         assessTicketingAppLiveness,
         assessReadFailure,
         nextLivenessAction,
+        nextStoredConditions,
       } = await import('./ticketingAppLiveness');
       const snapshot = await readTicketingAppLivenessSnapshot();
       /**
@@ -649,33 +657,32 @@ class SystemAlertService {
        * edge until the gates let it through.
        */
       const apply = async (verdict: import('./ticketingAppLiveness').LivenessVerdict) => {
-        const action = nextLivenessAction(this.state.ticketingLivenessConditions, verdict);
+        const previous = this.state.ticketingLivenessConditions;
+        const action = nextLivenessAction(previous, verdict);
+        let sent = false;
         if (action === 'alert') {
-          const sent = await this.sendAlert({
+          sent = await this.sendAlert({
             type: 'ticketing_app_liveness',
             severity: 'critical',
             message: `TICKETING APP: ${verdict.reason}`,
             details: { ...verdict.details },
             timestamp: new Date(),
           });
-          if (sent) this.state.ticketingLivenessConditions = [...verdict.conditions];
-          return;
-        }
-        if (action === 'recover') {
-          const sent = await this.sendAlert({
+        } else if (action === 'recover') {
+          sent = await this.sendAlert({
             type: 'ticketing_app_liveness_recovered',
             severity: 'info',
             message: `TICKETING APP recovered: ${verdict.recoveryReason}`,
             details: { ...verdict.details },
             timestamp: new Date(),
           });
-          if (sent) this.state.ticketingLivenessConditions = [];
-          return;
+        } else {
+          console.log(
+            `[ALERT SERVICE] Ticketing app liveness ${verdict.alerting ? 'still alerting' : 'OK'} — ` +
+              `${verdict.reason ?? 'fresh heartbeat'}`,
+          );
         }
-        console.log(
-          `[ALERT SERVICE] Ticketing app liveness ${verdict.alerting ? 'still alerting' : 'OK'} — ` +
-            `${verdict.reason ?? 'fresh heartbeat'}`,
-        );
+        this.state.ticketingLivenessConditions = nextStoredConditions(previous, verdict, action, sent);
       };
 
       if (!snapshot) {

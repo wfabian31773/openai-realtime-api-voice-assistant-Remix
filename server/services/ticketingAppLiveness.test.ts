@@ -11,6 +11,7 @@ import {
   assessTicketingAppLiveness,
   assessReadFailure,
   nextLivenessAction,
+  nextStoredConditions,
   STALE_MS,
   HEAP_LIMIT_RATIO,
   RSS_VM_RATIO,
@@ -72,6 +73,27 @@ describe('2026-09-25 hang — stale by 20:13', () => {
     expect(v.details.lastRecordedAt).toBe('2026-09-25T20:09:00.000Z');
     expect(v.details.heapUsedMb).toBe(400);
     expect(v.details.rssMb).toBe(700);
+  });
+
+  it('does not stitch two boots into one memory-rise series', () => {
+    const oldBoot: HeartbeatReading[] = [];
+    for (let i = 0; i < 16; i++) {
+      oldBoot.push(
+        beat({
+          instanceId: 'old-boot',
+          recordedAtMs: LAST_BEAT - (15 - i) * 60_000,
+          heapUsedMb: 400 + i * 20,
+        }),
+      );
+    }
+    const v = assessTicketingAppLiveness({
+      readings: [
+        beat({ instanceId: 'new-boot', recordedAtMs: LAST_BEAT + 30_000, heapUsedMb: 400 }),
+        ...oldBoot.reverse(),
+      ],
+      nowMs: LAST_BEAT + 60_000,
+    });
+    expect(v.conditions).not.toContain('memory_rising');
   });
 
   it('a live gateway row does not hide a dead Next — that is how 20:09 presented', () => {
@@ -238,6 +260,22 @@ describe('debounce and recovery', () => {
     );
     expect(heapAndStale.conditions).toEqual(expect.arrayContaining(['stale', 'heap_high']));
     expect(nextLivenessAction(['stale'], heapAndStale)).toBe('alert');
+  });
+
+  it('forgets a cleared condition so it can email again if it returns', () => {
+    const stored = nextStoredConditions(
+      ['stale', 'heap_high'],
+      { ...healthy, alerting: true, conditions: ['heap_high'] },
+      'quiet',
+      false,
+    );
+    expect(stored).toEqual(['heap_high']);
+    expect(nextLivenessAction(stored, alerting)).toBe('alert');
+  });
+
+  it('does not consume an edge when the mailer refused the send', () => {
+    expect(nextStoredConditions([], alerting, 'alert', false)).toEqual([]);
+    expect(nextStoredConditions(['stale'], healthy, 'recover', false)).toEqual(['stale']);
   });
 });
 
