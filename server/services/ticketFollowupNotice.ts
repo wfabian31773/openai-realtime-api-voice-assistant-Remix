@@ -80,6 +80,7 @@ export async function notifyTerminalRefusals(): Promise<{ notified: number }> {
             ticketOutbox.id,
             eligible.map((r) => r.id),
           ),
+          eq(ticketOutbox.status, 'dead_letter'),
           isNull(ticketOutbox.followupNotifiedAt),
           isNull(ticketOutbox.resolvedAt),
         ),
@@ -95,42 +96,53 @@ export async function notifyTerminalRefusals(): Promise<{ notified: number }> {
 
     if (claimed.length === 0) return { notified: 0 };
 
-    const noticeRows: FollowupNoticeRow[] = claimed.map((row) => {
-      const facts = followupFactsFromPayload(row.payload);
-      return {
-        id: row.id,
-        callSid: row.callSid,
-        createdAt: row.createdAt,
-        lastError: row.lastError,
-        refusalStatusCode: row.refusalStatusCode,
-        departmentId: facts.departmentId,
-        agentUsed: facts.agentUsed,
-      };
-    });
+    try {
+      const noticeRows: FollowupNoticeRow[] = claimed.map((row) => {
+        const facts = followupFactsFromPayload(row.payload);
+        return {
+          id: row.id,
+          callSid: row.callSid,
+          createdAt: row.createdAt,
+          lastError: row.lastError,
+          refusalStatusCode: row.refusalStatusCode,
+          departmentId: facts.departmentId,
+          agentUsed: facts.agentUsed,
+        };
+      });
 
-    const sent = await sendEmail(buildFollowupEmail(noticeRows));
-    if (!sent) {
-      await db
-        .update(ticketOutbox)
-        .set({ followupNotifiedAt: null, updatedAt: new Date() })
-        .where(
-          inArray(
-            ticketOutbox.id,
-            claimed.map((r) => r.id),
-          ),
+      const sent = await sendEmail(buildFollowupEmail(noticeRows));
+      if (!sent) {
+        await unclaimFollowup(claimed.map((r) => r.id));
+        console.error(
+          `[TICKET FOLLOW-UP] send failed — unclaimed ${claimed.length} row(s) so the next cycle can retry`,
         );
+        return { notified: 0 };
+      }
+
+      console.info(
+        `[TICKET FOLLOW-UP] notified ${claimed.length} terminal refusal(s) as ${noticeRows.map((r) => r.callSid ?? r.id).join(', ')}`,
+      );
+      return { notified: claimed.length };
+    } catch (sendErr) {
+      // A throw after the claim used to leave followup_notified_at set and
+      // the row never emailed again — the grading-claim shape, one door over.
+      await unclaimFollowup(claimed.map((r) => r.id));
       console.error(
-        `[TICKET FOLLOW-UP] send failed — unclaimed ${claimed.length} row(s) so the next cycle can retry`,
+        `[TICKET FOLLOW-UP] send threw — unclaimed ${claimed.length} row(s):`,
+        sendErr,
       );
       return { notified: 0 };
     }
-
-    console.info(
-      `[TICKET FOLLOW-UP] notified ${claimed.length} terminal refusal(s) as ${noticeRows.map((r) => r.callSid ?? r.id).join(', ')}`,
-    );
-    return { notified: claimed.length };
   } catch (err) {
     console.error('[TICKET FOLLOW-UP] could not send notices:', err);
     return { notified: 0 };
   }
+}
+
+async function unclaimFollowup(ids: string[]): Promise<void> {
+  if (ids.length === 0) return;
+  await db
+    .update(ticketOutbox)
+    .set({ followupNotifiedAt: null, updatedAt: new Date() })
+    .where(inArray(ticketOutbox.id, ids));
 }

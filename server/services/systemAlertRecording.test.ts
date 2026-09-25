@@ -136,9 +136,12 @@ describe('terminal refusals are notified beside the filing alarm, not through it
   it('always calls notifyTerminalRefusals, including when the verdict is not stalled', () => {
     expect(check).toMatch(/notifyTerminalRefusals/);
     const notifyAt = check.indexOf('await notifyTerminalRefusals()');
+    const snapshotMissAt = check.indexOf('if (!snapshot)');
     const stallAt = check.indexOf('if (!verdict.stalled)');
     const sendAt = check.indexOf('await this.sendAlert');
     expect(notifyAt).toBeGreaterThan(-1);
+    // A call_logs blip must not skip a notice that only needs ticket_outbox.
+    expect(snapshotMissAt).toBeGreaterThan(notifyAt);
     expect(stallAt).toBeGreaterThan(notifyAt);
     expect(sendAt).toBeGreaterThan(stallAt);
   });

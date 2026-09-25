@@ -563,16 +563,12 @@ class SystemAlertService {
    */
   async checkTicketFilingAlert(): Promise<void> {
     try {
-      const { readTicketFilingSnapshot, assessTicketFiling } = await import('./ticketFilingHealth');
-      const snapshot = await readTicketFilingSnapshot();
-      if (!snapshot) return; // it logged its own reason
-
-      const verdict = assessTicketFiling(snapshot);
       /**
        * Terminal 4xx dead letters are a follow-up, not a stall. The notice
-       * runs on every tick so a row is not waiting on the critical plane,
-       * and it records followup_notified_at itself — sendAlert's cooldown
-       * must not be the thing that decides whether a row is emailed.
+       * runs on every tick so a row is not waiting on the critical plane
+       * OR on the snapshot read — a call_logs blip must not skip a notice
+       * that only needs ticket_outbox. It records followup_notified_at
+       * itself; sendAlert's cooldown must not decide whether a row is emailed.
        */
       try {
         const { notifyTerminalRefusals } = await import('./ticketFollowupNotice');
@@ -580,6 +576,12 @@ class SystemAlertService {
       } catch (followupErr) {
         console.error('[ALERT SERVICE] ticket follow-up notice failed:', followupErr);
       }
+
+      const { readTicketFilingSnapshot, assessTicketFiling } = await import('./ticketFilingHealth');
+      const snapshot = await readTicketFilingSnapshot();
+      if (!snapshot) return; // it logged its own reason
+
+      const verdict = assessTicketFiling(snapshot);
       if (!verdict.stalled) {
         /**
          * The marker for the 2026-09-03 precision work, and a live counter:

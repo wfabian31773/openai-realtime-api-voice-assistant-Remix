@@ -2936,7 +2936,13 @@ Resolve is admin-only (`POST /api/ticket-outbox/:id/resolve`).
 The three 2026-09-25 rows were written BEFORE the column existed, so their
 `refusal_status_code` is NULL. They still count as transport until Wayne
 resolves them from the Observatory after this deploys. The migration does
-not backfill or auto-resolve. New marker on the same boot line:
+not backfill or auto-resolve. Apply the SQL (`migrations/add_ticket_outbox_refusal_and_resolution.sql`)
+on the same pull; if the columns are missing, the snapshot falls back to
+counting every dead letter as transport so the run plane stays armed rather
+than returning null and going silent. The follow-up notice runs before the
+snapshot read, so a `call_logs` blip cannot skip it.
+
+New marker on the same boot line:
 
 ```
 [ALERT SERVICE] Starting ticket-filing alarm (every 5 minutes; a terminal 4xx is follow-up, not a stall)

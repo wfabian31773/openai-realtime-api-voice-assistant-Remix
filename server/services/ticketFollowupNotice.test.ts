@@ -199,6 +199,19 @@ describe('notifyTerminalRefusals', () => {
     expect(setPayloads[1]?.followupNotifiedAt).toBeNull();
   });
 
+  it('unclaims when the send throws so a crash cannot lock the row', async () => {
+    const row = pending();
+    selectResults.push([row]);
+    updateResults.push([row], undefined);
+    sendEmail.mockRejectedValue(new Error('smtp down'));
+
+    const res = await notifyTerminalRefusals();
+
+    expect(res).toEqual({ notified: 0 });
+    expect(setPayloads[0]?.followupNotifiedAt).toBeInstanceOf(Date);
+    expect(setPayloads[1]?.followupNotifiedAt).toBeNull();
+  });
+
   it('sends nothing when the store is empty', async () => {
     selectResults.push([]);
     const res = await notifyTerminalRefusals();
@@ -274,13 +287,19 @@ describe('the notice is wired so a row cannot be throttled or inferred', () => {
 
   it('claims only a row nobody has notified and nobody has resolved', () => {
     const claim = source.slice(source.indexOf('const claimed'), source.indexOf('if (claimed.length'));
+    expect(claim).toMatch(/eq\(ticketOutbox\.status, 'dead_letter'\)/);
     expect(claim).toMatch(/isNull\(ticketOutbox\.followupNotifiedAt\)/);
     expect(claim).toMatch(/isNull\(ticketOutbox\.resolvedAt\)/);
     expect(claim).toMatch(/followupNotifiedAt: now/);
+    expect(claim).not.toMatch(/\/\/ eq\(ticketOutbox\.status/);
   });
 
-  it('clears the claim when the send fails', () => {
+  it('clears the claim when the send fails or throws', () => {
     const fail = source.slice(source.indexOf('if (!sent)'), source.indexOf('console.info'));
-    expect(fail).toMatch(/followupNotifiedAt: null/);
+    expect(fail).toMatch(/unclaimFollowup\(claimed\.map/);
+    const threw = source.slice(source.indexOf('} catch (sendErr)'), source.indexOf('} catch (err)'));
+    expect(threw).toMatch(/unclaimFollowup\(claimed\.map/);
+    const helper = source.slice(source.indexOf('async function unclaimFollowup'));
+    expect(helper).toMatch(/followupNotifiedAt: null/);
   });
 });

@@ -14,6 +14,7 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import {
   assessTicketFiling,
+  isMissingOutboxColumn,
   UNFILED_RUN_ALARM,
   OUTBOX_HELD_ALARM,
   TRAFFIC_RECENCY_MS,
@@ -233,6 +234,31 @@ describe('what the snapshot query is allowed to forget', () => {
     );
     expect(observatory).toMatch(/readTicketFilingSnapshot/);
     expect(observatory).not.toMatch(/FROM ticket_outbox/);
+  });
+
+  it('falls back to the pre-split count when the additive columns are missing', () => {
+    // Code can land before Wayne applies the SQL. Returning null here would
+    // disarm the run plane and the alarm would go silent — the opposite of
+    // the stuck alarm this change exists to fix.
+    expect(source).toMatch(/isMissingOutboxColumn/);
+    expect(source).toMatch(/outboxPreMigration/);
+    const fallback = source.slice(
+      source.indexOf('const outboxPreMigration'),
+      source.indexOf('for (const row of outboxPreMigration'),
+    );
+    expect(fallback).toMatch(/status = 'dead_letter'/);
+    expect(fallback).not.toMatch(/refusal_status_code/);
+    expect(fallback).not.toMatch(/resolved_at/);
+    expect(fallback).not.toMatch(/last_error/);
+  });
+});
+
+describe('isMissingOutboxColumn', () => {
+  it('accepts Postgres 42703 and the "does not exist" wording', () => {
+    expect(isMissingOutboxColumn({ code: '42703' })).toBe(true);
+    expect(isMissingOutboxColumn({ message: 'column "resolved_at" does not exist' })).toBe(true);
+    expect(isMissingOutboxColumn({ code: '42P01' })).toBe(false);
+    expect(isMissingOutboxColumn({ message: 'connection refused' })).toBe(false);
   });
 });
 

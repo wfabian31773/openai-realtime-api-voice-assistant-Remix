@@ -352,6 +352,13 @@ export const ALARMED_QUEUE_AGENTS = ['optical', 'surgery', 'tech', 'records'] as
 /** How many recent calls to look back over. Comfortably past the run alarm. */
 const LOOKBACK_CALLS = 40;
 
+/** Postgres 42703 — the additive migration has not been applied yet. */
+export function isMissingOutboxColumn(err: unknown): boolean {
+  const e = err as { code?: string; message?: string } | null;
+  if (e?.code === '42703') return true;
+  return /column .* does not exist/i.test(String(e?.message ?? err ?? ''));
+}
+
 /** Reads both planes. Never throws — a broken alarm must not break the server. */
 export async function readTicketFilingSnapshot(): Promise<TicketFilingSnapshot | null> {
   try {
@@ -415,7 +422,15 @@ export async function readTicketFilingSnapshot(): Promise<TicketFilingSnapshot |
      */
     const { payloadRefusalSqlList } = await import('../../src/services/terminalRefusal');
     const refusalIn = sql.raw(payloadRefusalSqlList());
-    const outbox = await db.execute(sql`
+    const held = {
+      pending: 0,
+      sending: 0,
+      failed: 0,
+      dead_letter: 0,
+      terminal_dead_letter: 0,
+    } as Record<string, number>;
+    try {
+      const outbox = await db.execute(sql`
       SELECT
         CASE
           WHEN status = 'dead_letter'
@@ -432,16 +447,30 @@ export async function readTicketFilingSnapshot(): Promise<TicketFilingSnapshot |
         )
       GROUP BY 1
     `);
-
-    const held = {
-      pending: 0,
-      sending: 0,
-      failed: 0,
-      dead_letter: 0,
-      terminal_dead_letter: 0,
-    } as Record<string, number>;
-    for (const row of outbox.rows as Array<{ status: string; n: number }>) {
-      held[row.status] = Number(row.n) || 0;
+      for (const row of outbox.rows as Array<{ status: string; n: number }>) {
+        held[row.status] = Number(row.n) || 0;
+      }
+    } catch (outboxErr) {
+      // Code can land before the additive migration. A missing column must
+      // NOT return null for the whole snapshot — that disarms the run plane
+      // and the alarm goes silent, the opposite of the 2026-09-25 stuck
+      // alarm. Fall back to the pre-split count: every dead letter is
+      // transport, which is today's behaviour and keeps the three NULL-status
+      // rows stalling until Wayne applies the SQL and resolves them.
+      if (!isMissingOutboxColumn(outboxErr)) throw outboxErr;
+      console.warn(
+        '[TICKET FILING HEALTH] outbox refusal columns missing — counting every dead letter as transport until the migration is applied',
+      );
+      const outboxPreMigration = await db.execute(sql`
+        SELECT status::text AS status, COUNT(*)::int AS n
+        FROM ticket_outbox
+        WHERE status = 'dead_letter'
+           OR (status NOT IN ('sent', 'dead_letter') AND created_at > NOW() - INTERVAL '6 hours')
+        GROUP BY 1
+      `);
+      for (const row of outboxPreMigration.rows as Array<{ status: string; n: number }>) {
+        held[row.status] = Number(row.n) || 0;
+      }
     }
 
     const { lastTicketFiledAtMs } = await import('./ticketFilingPulse');
