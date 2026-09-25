@@ -167,7 +167,7 @@ describe('(b) memory rising for 15 minutes', () => {
       readings: risingSeries(400, 20, 10),
       nowMs: LAST_BEAT + 30_000,
     });
-    expect(v.conditions).not.toMatch && expect(v.conditions).not.toContain('memory_rising');
+    expect(v.conditions).not.toContain('memory_rising');
   });
 
   it('does not fire when heap dips in the window', () => {
