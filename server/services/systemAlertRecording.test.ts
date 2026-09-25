@@ -119,3 +119,13 @@ describe('a critical alert reaches an inbox', () => {
     expect(source).not.toMatch(/email integration can be added later/);
   });
 });
+
+describe('ticketing-app liveness is watched from this process', () => {
+  it('checks every minute and emails on enter and on recover', () => {
+    expect(source).toMatch(/startTicketingAppLivenessSchedule/);
+    expect(source).toMatch(/}, 60 \* 1000\)/);
+    expect(source).toMatch(/ticketing_app_liveness_recovered/);
+    expect(source).toMatch(/TICKETING_APP_DATABASE_URL/);
+    expect(source).not.toMatch(/\/api\/health/);
+  });
+});
