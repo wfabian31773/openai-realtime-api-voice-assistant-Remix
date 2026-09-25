@@ -12,9 +12,10 @@ import { getTwilioClient, getTwilioFromPhoneNumber } from '../../src/lib/twilioC
 import { getEnvironmentConfig } from '../../src/config/environment';
 import { db } from '../../server/db';
 import { sql } from 'drizzle-orm';
+import type { LivenessCondition } from './ticketingAppLiveness';
 
 interface AlertEvent {
-  type: 'database_failure' | 'call_log_failure' | 'circuit_breaker_open' | 'system_degraded' | 'recovery' | 'emergency_miss' | 'provider_miss' | 'handoff_failure_spike' | 'high_mismatch_ratio' | 'grader_critical_failure' | 'ticket_filing_stalled';
+  type: 'database_failure' | 'call_log_failure' | 'circuit_breaker_open' | 'system_degraded' | 'recovery' | 'emergency_miss' | 'provider_miss' | 'handoff_failure_spike' | 'high_mismatch_ratio' | 'grader_critical_failure' | 'ticket_filing_stalled' | 'ticketing_app_liveness' | 'ticketing_app_liveness_recovered';
   severity: 'critical' | 'warning' | 'info';
   message: string;
   details?: Record<string, any>;
@@ -30,6 +31,8 @@ interface AlertState {
   /** Last observed 24h grader miss counts, so alerts fire on a RISE rather than on every check. */
   lastEmergencyMissCount: number;
   lastProviderMissCount: number;
+  /** Last ticketing-app liveness conditions, for edge-triggered email. */
+  ticketingLivenessConditions: LivenessCondition[];
 }
 
 const ALERT_COOLDOWN_MS = 5 * 60 * 1000; // 5 minutes between same-type alerts
@@ -62,6 +65,7 @@ class SystemAlertService {
     lastRecoverySentAt: 0,
     lastEmergencyMissCount: 0,
     lastProviderMissCount: 0,
+    ticketingLivenessConditions: [],
   };
 
   private alertHistory: AlertEvent[] = [];
@@ -612,6 +616,69 @@ class SystemAlertService {
     setInterval(() => {
       this.checkTicketFilingAlert();
     }, 5 * 60 * 1000);
+  }
+
+  /**
+   * Ticketing-app memory and liveness, watched from THIS process.
+   *
+   * 2026-09-25: Next froze at 20:09 UTC. Everything that lived inside
+   * ticketing-app went silent with it. A last heartbeat at 20:09 fires
+   * stale here by 20:13. Every minute, not five: three minutes of
+   * detection is only worth having if the check runs inside it.
+   *
+   * Reads TICKETING_APP_DATABASE_URL. HTTP to Next is not a substitute.
+   */
+  async checkTicketingAppLiveness(): Promise<void> {
+    try {
+      const {
+        readTicketingAppLivenessSnapshot,
+        assessTicketingAppLiveness,
+        nextLivenessAction,
+      } = await import('./ticketingAppLiveness');
+      const snapshot = await readTicketingAppLivenessSnapshot();
+      if (!snapshot) return;
+
+      const verdict = assessTicketingAppLiveness(snapshot);
+      const action = nextLivenessAction(this.state.ticketingLivenessConditions, verdict);
+
+      if (action === 'alert') {
+        await this.sendAlert({
+          type: 'ticketing_app_liveness',
+          severity: 'critical',
+          message: `TICKETING APP: ${verdict.reason}`,
+          details: { ...verdict.details },
+          timestamp: new Date(),
+        });
+      } else if (action === 'recover') {
+        await this.sendAlert({
+          type: 'ticketing_app_liveness_recovered',
+          severity: 'info',
+          message: `TICKETING APP recovered: ${verdict.recoveryReason}`,
+          details: { ...verdict.details },
+          timestamp: new Date(),
+        });
+      } else {
+        console.log(
+          `[ALERT SERVICE] Ticketing app liveness ${verdict.alerting ? 'still alerting' : 'OK'} — ` +
+            `${verdict.reason ?? 'fresh heartbeat'}`,
+        );
+      }
+
+      this.state.ticketingLivenessConditions = [...verdict.conditions];
+    } catch (error) {
+      console.error('[ALERT SERVICE] Error checking ticketing app liveness:', error);
+    }
+  }
+
+  startTicketingAppLivenessSchedule(): void {
+    console.log('[ALERT SERVICE] Starting ticketing-app liveness watch (every 1 minute)');
+    const first = setTimeout(() => {
+      void this.checkTicketingAppLiveness();
+    }, 90 * 1000);
+    first.unref?.();
+    setInterval(() => {
+      void this.checkTicketingAppLiveness();
+    }, 60 * 1000);
   }
 
   async runSyntheticAlertTest(): Promise<Array<{ alertType: string; delivered: boolean; detail: string }>> {
