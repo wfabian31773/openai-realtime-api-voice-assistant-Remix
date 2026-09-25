@@ -345,7 +345,14 @@ export async function readTicketingAppLivenessSnapshot(): Promise<LivenessSnapsh
     });
     await client.connect();
     const result = await client.query(
-      `SELECT service,\n              instance_id,\n              (EXTRACT(EPOCH FROM recorded_at) * 1000)::bigint AS recorded_ms,\n              rss_mb, heap_used_mb, heap_total_mb, heap_limit_mb, vm_limit_mb,\n              event_loop_delay_p99_ms, uptime_seconds\n         FROM app_heartbeat\n        WHERE recorded_at > NOW() - ($1 * INTERVAL '1 minute')\n        ORDER BY recorded_at DESC`,
+      `SELECT service,
+              instance_id,
+              (EXTRACT(EPOCH FROM recorded_at) * 1000)::bigint AS recorded_ms,
+              rss_mb, heap_used_mb, heap_total_mb, heap_limit_mb, vm_limit_mb,
+              event_loop_delay_p99_ms, uptime_seconds
+         FROM app_heartbeat
+        WHERE recorded_at > NOW() - ($1 * INTERVAL '1 minute')
+        ORDER BY recorded_at DESC`,
       [LOOKBACK_MINUTES],
     );
     return {
