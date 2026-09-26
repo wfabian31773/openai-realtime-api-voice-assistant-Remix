@@ -71,7 +71,9 @@ describe("the follow-up summary", () => {
   it("carries only counts and the outcome — nothing a caller said", () => {
     const ev = followUpEvent(record({ owed: 1, requested: 1, toolCallsAfterDone: 1, lastUnanswered: true }))!;
     // An EXACT key set, so a field carrying anything a caller said cannot be
-    // added without this going red. v65's two are counts, like the rest.
+    // added without this going red. v65's two are counts, like the rest, and
+    // v72's is a boolean — GAINED here rather than the assertion loosened,
+    // which is the point of an exact set: adding a field is a deliberate act.
     expect(ev.data).toEqual({
       owed: 1,
       requested: 1,
@@ -80,6 +82,7 @@ describe("the follow-up summary", () => {
       hangupsHeld: 0,
       silencePrompts: 0,
       silenceCut: false,
+      silenceStoodDown: false,
       outcome: "dead_air",
     });
   });

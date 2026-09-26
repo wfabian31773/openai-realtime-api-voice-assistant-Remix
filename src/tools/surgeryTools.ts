@@ -31,6 +31,7 @@ import { str, isTwilioCallSid, normalizePhone } from './sharedPatientTools';
 import { createTicketDurable, postFailureToolResult } from '../services/durableTicketFiling';
 import { gateRefusalsSoFar, noteGateRefusal } from './gateAttempts';
 import { decideDobEscape, dobStatusNote, dobEscapeMarker, type DobStatus } from './dobEscape';
+import { verifiedDobFor } from './verifiedIdentity';
 
 /** This tool's own name, for the per-call gate counter. */
 const SURGERY_FILE_TOOL = 'file_surgery_ticket';
@@ -270,7 +271,6 @@ registerTool({
        * Only ever for the SAME NAME as the verified match, and only from a
        * match the lookup was certain about. See verifiedIdentity.ts.
        */
-      const { verifiedDobFor } = await import('./verifiedIdentity');
       const known = verifiedDobFor(callSid, first, last);
       parts = known ? normalizeDobParts(known) : null;
       if (parts) {
