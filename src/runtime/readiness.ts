@@ -458,7 +458,7 @@ import { callEnvironment } from "./callRecord";
  * number should move with it. See identityStoreHasOneImportStyle.test.ts.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v71-one-import-style-for-the-identity-store-20260925";
+  "voice-runtime-v72-a-heard-caller-is-not-cut-off-20260926";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

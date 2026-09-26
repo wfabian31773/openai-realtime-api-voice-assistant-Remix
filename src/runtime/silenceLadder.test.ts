@@ -549,3 +549,145 @@ describe("the window is a dial, and a typo cannot disarm the ladder", () => {
     expect(clampSilenceWindow(Number.NaN)).toBe(12_000);
   });
 });
+
+/**
+ * A CALLER WE HAVE HEARD IS NOT CUT OFF — v72.
+ *
+ * OPERATOR RULING, 2026-09-26: *"stop cutting calls where the caller has been
+ * heard."* Measured over the four days v68 had been live: on 2026-09-25 the
+ * ladder cut 13 of 495 runtime substantive calls and EIGHT of those were on
+ * calls where the caller had already been transcribed, six of the eight
+ * leaving no ticket of any provenance; 6 harmful of 12 on 09-24.
+ *
+ * The never-heard arm is what the ladder was asked for on 2026-09-24 and is
+ * deliberately unchanged — the tests above are its guard, and one below
+ * proves the new latch cannot disarm it.
+ */
+describe("the prompts are spent, and who is on the line decides what that means", () => {
+  it("STANDS DOWN instead of cutting a caller it has heard", async () => {
+    const h = await ladder({ silenceStrikeLimit: 1 });
+    h.speak("How can I help you today?");
+    h.handlers().onCallerTranscript("I need to check on my glasses order.", "i1");
+    h.speak("Of course — one moment.");
+    h.timers.fire(WINDOW); // prompt 1
+    expect(h.session.speak).toHaveBeenCalledWith(SILENCE_PROMPT_LINE, { interruptible: true });
+    h.timers.fire(WINDOW); // prompts spent
+    // The call is STILL OPEN. This is the whole ruling.
+    expect(h.outcomes).toEqual([]);
+  });
+
+  it("stops re-arming once it has stood down, so it cannot prompt for ever", async () => {
+    // The other half of the ruling as measured: at a 12-second window an
+    // unbounded ladder would speak ~50 times inside the ten-minute ceiling,
+    // against a worst observed nineteen. Not cutting is not a licence to talk
+    // over somebody indefinitely.
+    const h = await ladder({ silenceStrikeLimit: 1 });
+    h.speak("How can I help you today?");
+    h.handlers().onCallerTranscript("Yes, hello.", "i1");
+    h.speak("How can I help?");
+    h.timers.fire(WINDOW);
+    const spokenBefore = h.session.speak.mock.calls.length;
+    h.timers.fire(WINDOW); // stands down
+    expect(h.timers.armed(WINDOW)).toBe(0);
+    expect(h.session.speak.mock.calls.length).toBe(spokenBefore);
+  });
+
+  it("STILL CUTS a caller it has never heard — the protection is untouched", async () => {
+    // The latch must not be readable as "somebody was on the line". If this
+    // goes green while the test above also passes, the ladder has stopped
+    // protecting against the diallers it was built for.
+    const h = await ladder({ silenceStrikeLimit: 1 });
+    h.speak("How can I help you today?");
+    h.timers.fire(WINDOW);
+    h.timers.fire(WINDOW);
+    expect(h.outcomes).toEqual(["caller_silent"]);
+  });
+
+  it("is a WHOLE-CALL latch, not the strike counter", async () => {
+    // `silenceStrikes` is reset by every caller turn, so at the moment the
+    // ladder fires it reads the same non-zero value whether the caller spoke
+    // once and stopped or never spoke at all — it cannot answer the question
+    // the ruling turns on. Here the caller speaks, then goes quiet for the
+    // FULL three prompts, which resets nothing and must still not cut.
+    const h = await ladder();
+    h.speak("How can I help you today?");
+    h.handlers().onCallerTranscript("It is about my order.", "i1");
+    h.speak("One moment.");
+    for (let i = 0; i < SILENCE_STRIKE_LIMIT; i += 1) expect(h.timers.fire(WINDOW)).toBe(true);
+    expect(h.session.speak).toHaveBeenCalledTimes(SILENCE_STRIKE_LIMIT);
+    expect(h.timers.fire(WINDOW)).toBe(true);
+    expect(h.outcomes).toEqual([]);
+  });
+
+  it("records standing down on the call record, so the ruling has an after-number", async () => {
+    const h = await ladder({ silenceStrikeLimit: 1 });
+    h.speak("How can I help you today?");
+    h.handlers().onCallerTranscript("Hi there.", "i1");
+    h.speak("How can I help?");
+    h.timers.fire(WINDOW);
+    h.timers.fire(WINDOW);
+    await h.bridge.handleTwilioFrame({ event: "stop", streamSid: "MZ-test" } as never);
+    const r = h.records[0];
+    expect(r.silenceStoodDown).toBe(true);
+    expect(r.silenceCut).not.toBe(true);
+    // The prompt that was spoken is still counted — v65's cumulative counter.
+    expect(r.silencePrompts).toBe(1);
+  });
+
+  it("leaves silenceStoodDown false on a call that was cut, and on a quiet one", async () => {
+    const cut = await ladder({ silenceStrikeLimit: 1 });
+    cut.speak("How can I help you today?");
+    cut.timers.fire(WINDOW);
+    cut.timers.fire(WINDOW);
+    await cut.bridge.handleTwilioFrame({ event: "stop", streamSid: "MZ-test" } as never);
+    expect(cut.records[0].silenceCut).toBe(true);
+    expect(cut.records[0].silenceStoodDown).not.toBe(true);
+
+    const calm = await ladder();
+    calm.speak("How can I help you today?");
+    calm.handlers().onCallerTranscript("All good, thanks.", "i1");
+    await calm.bridge.handleTwilioFrame({ event: "stop", streamSid: "MZ-test" } as never);
+    expect(calm.records[0].silenceStoodDown).not.toBe(true);
+    expect(calm.records[0].silenceCut).not.toBe(true);
+  });
+
+  it("carries it onto the telemetry row without promoting the level", async () => {
+    // Standing down is the DESIGNED outcome for this population now, not a
+    // suspicion. `silenceCut` still warns, because that arm ends a call.
+    const stood = followUpEvent({
+      followUps: { owed: 0, requested: 0, toolCallsAfterDone: 0, lastUnanswered: false },
+      outcome: "caller_hangup",
+      hangupsHeld: 0,
+      silencePrompts: 3,
+      silenceCut: false,
+      silenceStoodDown: true,
+    } as never);
+    expect(stood?.data.silenceStoodDown).toBe(true);
+    expect(stood?.level).toBe("info");
+
+    const wasCut = followUpEvent({
+      followUps: { owed: 0, requested: 0, toolCallsAfterDone: 0, lastUnanswered: false },
+      outcome: "caller_silent",
+      hangupsHeld: 0,
+      silencePrompts: 3,
+      silenceCut: true,
+      silenceStoodDown: false,
+    } as never);
+    expect(wasCut?.data.silenceStoodDown).toBe(false);
+    expect(wasCut?.level).toBe("warn");
+  });
+
+  it("a stood-down call is bounded by the ten-minute ceiling, not by nothing", async () => {
+    // "The call ends the way it did before v68 existed" is only honest if
+    // something still ends it. That is DEFAULT_MAX_CALL_MS, armed at start.
+    const h = await ladder({ silenceStrikeLimit: 1 });
+    h.speak("How can I help you today?");
+    h.handlers().onCallerTranscript("Hello?", "i1");
+    h.speak("Hello — how can I help?");
+    h.timers.fire(WINDOW);
+    h.timers.fire(WINDOW);
+    expect(h.timers.armed(600_000)).toBe(1);
+    expect(h.timers.fire(600_000)).toBe(true);
+    expect(h.outcomes).toEqual(["max_duration"]);
+  });
+});

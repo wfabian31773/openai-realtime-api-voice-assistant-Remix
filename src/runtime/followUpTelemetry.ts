@@ -38,7 +38,10 @@ export interface FollowUpEvent {
  * prompts are that.
  */
 export function followUpEvent(
-  record: Pick<VoiceCallRecord, "followUps" | "outcome" | "hangupsHeld" | "silencePrompts" | "silenceCut">,
+  record: Pick<
+    VoiceCallRecord,
+    "followUps" | "outcome" | "hangupsHeld" | "silencePrompts" | "silenceCut" | "silenceStoodDown"
+  >,
 ): FollowUpEvent | null {
   const f = record.followUps;
   const prompts = record.silencePrompts ?? 0;
@@ -60,6 +63,16 @@ export function followUpEvent(
       // then carried on is the false positive, and the window is its dial.
       silencePrompts: prompts,
       silenceCut: record.silenceCut === true,
+      /**
+       * v72: the ladder spent its prompts on a caller it HAD heard and stood
+       * down instead of cutting. This is the operator's 2026-09-26 ruling as
+       * a number — every true here is a call the previous build ended.
+       *
+       * It does NOT raise the level. Standing down is now the designed
+       * outcome for that population, not a suspicion; `silenceCut` still
+       * warns, because that arm ends a call.
+       */
+      silenceStoodDown: record.silenceStoodDown === true,
       outcome: record.outcome,
     },
   };
