@@ -136,20 +136,37 @@ document.
 
 **Nothing assigns or announces a new voice case.** Every case lands with
 `assigned_team = records_retrieval`, `state = received`, and waits for a person
-to open it. The screens do show it — the six-lane worklist puts a `received`
-case under **"New — needs triage"** — but the **Today board** does not: its
-three lanes are *decide* (unconfirmed classification), *field* (a fulfilled
-case short a CAP value) and *ready*, and a fresh voice case whose review status
-is `not_required` is in none of them. It is counted in the "elsewhere" line
-under the board, not shown as a card. If that is the screen the operator
-looked at, a new voice request is literally not there.
+to open it. One screen does show it and one does not, and the first draft of
+this paragraph had them the wrong way round: **`/medical-records/today`, the
+six-lane worklist (`MrWorklistClient`), puts a `received` case under "New —
+needs triage"**; **the landing page at `/medical-records`, the command board
+(`MrCommandClient`), does not** — its three owner-approved lanes are *decide*
+(unconfirmed classification), *field* (a fulfilled case short a CAP value) and
+*ready*, pinned by `command-parity.test.ts`, and a fresh voice case whose
+review status is `not_required` is in none of them. It is counted in the
+"elsewhere" line under the board, not shown as a card. If the landing page is
+the screen the operator looked at, a new voice request is literally not there.
+
+**Measured 2026-09-27 in the Support Center, the three switches that would make
+a case somebody's the moment it lands are all off for department 16:**
+`departments.notifications_enabled = false`, **0** rows in
+`department_notification_recipients`, and **0** active `auto_assignment_rules`.
+Every other configuration a new case could trigger is downstream of those.
 
 **Ticket-side lane attribution is broken and it bit this review.** Of the 307
 agent-filed dept-16 tickets in the window, **126 carry an `agents`-table UUID in
 `agent_used`** instead of a lane slug — pcp 99, records 10, tech 10, surgery 6,
-optical 1 — so the PCP lane's medical-records route (v15/v16) is stamping the
-id, not the slug. CLAUDE.md already says never to attribute by that column;
-§ 7 records how I did anyway.
+optical 1. **CORRECTED LATER THE SAME DAY:** the first draft blamed the PCP
+lane's medical-records route (v15/v16). The route was innocent — every filing
+tool CREATES the ticket with the slug. The writer is the voice repo's post-call
+sync, `server/services/ticketingSyncService.ts`, which posted
+`agentUsed: call.agentId || "unknown"` to `update-call-data`, and that route
+writes whatever arrives onto `tickets.agent_used`. Same line, two branches:
+the uuid where the row had an `agent_id`, the literal `unknown` where it did
+not (the 91 rows CLAUDE.md records on 2026-09-03). Fixed on #333 (v73): the
+sync sends `call.agentUsed`, the lane slug, and omits the field when the row
+has none. CLAUDE.md already says never to attribute by that column; § 7
+records how I did anyway.
 
 ---
 
@@ -173,24 +190,81 @@ request is exactly the failure the CAP exists to prevent."*
 
 ## 5. What to do, in order — recommendation
 
+**APPROVED IN FULL BY THE OPERATOR, 2026-09-27:** *"go ahead and flip records
+to the runtime and the other 5 points you made."* Status of each point is
+recorded beneath it.
+
 1. **Move the records lane to the runtime.** A Twilio webhook repoint (standing
    instruction 11), the operator's to make. It brings the sweep, the ceiling,
    the lookup bound, the hangup hold and the silence ladder to the lane that
    loses 43% of its calls. Before-arm: § 1. Guard: filing rate must rise, not
    fall; barely-heard must not rise.
+
+   **HOW TO FLIP IT — the operator performs this; nothing in either repo can.**
+   In the Twilio console, Phone Numbers → the records line's number (the one
+   whose Voice Configuration URL currently ends in `/api/voice/incoming-call`,
+   the OLD CORE's webhook). Change *A call comes in* to:
+
+   ```
+   https://openai-realtime-api-voice-assistant-remix--fabianwayne1.replit.app/voice/records
+   ```
+
+   method **HTTP POST**. Nothing else on the number changes. `records` is
+   already registered in `src/runtime/laneRegistry.ts`, and `/voice/health` on
+   that host lists it among the lanes. **Deploy v73 first** (this is the build
+   with the name exit, § 5.2), then flip. **Verification is one call:** the
+   first records call after the flip writes a `call_logs` row with
+   `voice_provider = 'grok'`; before it, every records row has NULL there.
+   **Revert is the same field set back** to the old URL. The ticketing app's
+   #320 must be live before v73 takes a call (§ 5.2).
+
 2. **Give the name refusal an exit** — file with `NOT CAPTURED` the way the
    date of birth already does. **Policy:** the "no name, no ticket" question has
    been open since 2026-09-03 and this line is the clearest cost of it (11 of
    21 refusals, every one a real conversation).
+
+   **SHIPPED on #333 (v73) and #320.** The tool takes the name from the CERTAIN
+   identity `lookup_patient` established on the call, otherwise asks ONCE, one
+   field at a time, and the next invocation files without a name and with a
+   staff note (`callData.transcript`, never the description). The teardown
+   sweep does the same on this lane only. **Ship order: #320 (the app) first** —
+   its create-ticket schema had `min(1)` on both names, so a nameless payload
+   against the deployed app is HTTP 400. Twelve mutations, twelve caught; the
+   CLAUDE.md v72 row has the list.
+
 3. **Stop the on-clock gate ending a patient's request with nothing.** Either
    allow the `on_clock_ask_exhausted` exit on the records lane after one ask,
    or move destination and dates onto the form (doc 17, decision 2). **Policy:**
    it is the operator's 2026-08-13 gate.
+
+   **SHIPPED on #333 (v73), the first way:** the gate still asks once; the next
+   invocation on the same call files with `Send to: NOT CAPTURED` / `Dates
+   needed: NOT CAPTURED` in the PCP exit's words. The PCP flag is untouched.
+
 4. **Make a new voice case somebody's, the moment it lands** — an owner or a
-   notification, and a card on the Today board. Which person or rota is the
+   notification, and a card on the landing board. Which person or rota is the
    department's call; that nothing happens for 29 hours is the finding.
-5. **Fix the UUID stamping** on the PCP records route (small, app-side).
+
+   **CONFIGURATION, NOT CODE — for the operator, in the ticketing app's admin
+   UI** (§ 3 has the measurement): (a) turn ON `notifications_enabled` for
+   Medical Records (department 16); (b) add at least one row to
+   `department_notification_recipients` for it — WHO is his call; (c)
+   optionally one active `auto_assignment_rules` row for department 16 so a
+   new case has an owner and not just a team. **ONE DESIGN QUESTION, his:**
+   whether the landing command board (`/medical-records`) gains a fourth lane
+   for `received` voice cases. Its three lanes are owner-approved and pinned by
+   `command-parity.test.ts`, so that is a design change and not a bug fix; the
+   `/today` worklist already shows them. Recommendation: do (a) and (b) today,
+   and decide the lane once the flipped lane has a week of cases.
+
+5. **Fix the UUID stamping.** **SHIPPED on #333 (v73)** — and it was in the
+   voice repo's post-call sync, not the PCP route (§ 3, corrected). The 126
+   existing rows are NOT rewritten by this; a snapshot-backed backfill from
+   `call_logs.agent_used` by call SID is one statement and is offered, not run.
+
 6. **Then** the form-at-call-time plan (doc 17), on a lane that files.
+   **Not started as of v73** — doc 17 in the ticketing app carries the plan
+   with a PAUSED preface until points 1–3 are live and measured.
 
 ---
 
