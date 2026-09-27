@@ -71,7 +71,8 @@ The system utilizes a three-server architecture comprising an API Server, a Voic
 -   **Webhook Durable Inbox:** `webhook_events` table replaces in-memory idempotency map for persistent webhook event recording and retry.
 -   **DB State Machine Constraints:** PostgreSQL trigger and unique indexes enforce state transitions.
 -   **Replay/Backfill Idempotency:** `processed_version` columns prevent re-processing.
--   **Push Alerting:** `systemAlertService` sends SMS alerts for critical grader failures and anomalies.
+-   **Push Alerting:** `systemAlertService` emails Wayne-asked types (`ticket_filing_stalled`, `ticketing_app_liveness`, recovery) via `notifications@me.azulvision.com`. SMS for engineering telemetry stays off (2026-07-27).
+-   **Ticketing-app liveness watch:** `ticketingAppLiveness.ts` reads ticketing-app `app_heartbeat` on `TICKETING_APP_DATABASE_URL` every minute. Alerts on heap/RSS ≥80%, 15-minute memory rise, heartbeat stale ≥3 minutes, or event-loop p99 >1s for 3 minutes. Replayed against the 2026-09-25 hang, a last beat at 20:09 UTC fires by 20:13. HTTP to Next is not a substitute.
 -   **PHI Exports + Retention:** `phiExportSanitizer.ts` for redacting exports and `retentionPolicyService.ts` for configurable data retention and purging.
 -   **Prompt/Version Governance:** `prompt_versions` table tracks prompt version metadata with create/promote/rollback functionalities.
 -   **Data Quality SLOs:** Tracks transcript coverage, reconciliation lag, and webhook processing latency against configurable thresholds.

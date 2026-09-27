@@ -50,12 +50,17 @@ export interface AlertEmailInput {
 }
 
 /**
- * The alert types Wayne asked to be emailed about. Exactly one, so far.
+ * The alert types Wayne asked to be emailed about. Adding a type here is
+ * HIS decision, not a judgement call while building something adjacent.
  *
- * Adding a type here is HIS decision, not a judgement call to be made while
- * building something adjacent. That is the whole lesson of the entry below.
+ *   ticket_filing_stalled — 2026-09-02, the n8n-cap outage
+ *   ticketing_app_liveness / _recovered — 2026-09-25, the Next hang
  */
-export const EMAILED_ALERT_TYPES: ReadonlySet<string> = new Set(['ticket_filing_stalled']);
+export const EMAILED_ALERT_TYPES: ReadonlySet<string> = new Set([
+  'ticket_filing_stalled',
+  'ticketing_app_liveness',
+  'ticketing_app_liveness_recovered',
+]);
 
 /**
  * BY TYPE, then by severity. Not by severity alone.
@@ -72,12 +77,18 @@ export const EMAILED_ALERT_TYPES: ReadonlySet<string> = new Set(['ticket_filing_
  * said so — while gating on the one axis that does not bound volume. An
  * inbox is not a quieter phone.
  *
+ * 2026-09-25: he asked for two more types — the ticketing-app hang email
+ * and its recovery note. Recovery is info, not critical; it still emails
+ * because he asked for the note, not because info alerts as a class do.
+ *
  * Delivery is additionally bounded by `sendAlert`'s 5-minute cooldown and
  * 10-per-hour cap, because this is called from below both of those gates.
  * Those bound REPETITION of one alert; only this bounds how many KINDS.
  */
 export function shouldEmailAlert(type: string, severity: string): boolean {
-  return severity === 'critical' && EMAILED_ALERT_TYPES.has(type);
+  if (!EMAILED_ALERT_TYPES.has(type)) return false;
+  if (type === 'ticketing_app_liveness_recovered') return severity === 'info';
+  return severity === 'critical';
 }
 
 /** Primitives only. Anything structured is dropped — see the PHI note above. */
@@ -104,6 +115,13 @@ function escapeHtml(s: string): string {
 export function buildAlertEmail(event: AlertEmailInput): EmailOptions {
   const when = event.timestamp.toISOString();
   const rows = renderDetails(event.details);
+  const recovered = event.type === 'ticketing_app_liveness_recovered' || event.severity === 'info';
+  const banner = recovered ? 'Azul Vision — recovered' : 'Azul Vision — critical alert';
+  const bannerColor = recovered ? '#047857' : '#b91c1c';
+  const textBanner = recovered ? 'AZUL VISION — RECOVERY' : 'AZUL VISION — CRITICAL ALERT';
+  const footer = recovered
+    ? 'Sent because a watched ticketing-app condition cleared. Repeats are limited to one every five minutes and ten an hour.'
+    : 'Sent because this alert is critical. Repeats are limited to one every five minutes and ten an hour.';
 
   const detailRows = rows
     .map(
@@ -115,8 +133,8 @@ export function buildAlertEmail(event: AlertEmailInput): EmailOptions {
 
   const html = `
 <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#1f2937;">
-  <p style="margin:0 0 4px;font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:#b91c1c;font-weight:600;">
-    Azul Vision — critical alert
+  <p style="margin:0 0 4px;font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:${bannerColor};font-weight:600;">
+    ${banner}
   </p>
   <p style="margin:0 0 16px;font-size:17px;font-weight:600;">${escapeHtml(event.message)}</p>
   <table style="border-collapse:collapse;margin-bottom:16px;">
@@ -127,12 +145,12 @@ export function buildAlertEmail(event: AlertEmailInput): EmailOptions {
     ${detailRows}
   </table>
   <p style="margin:0;font-size:12px;color:#9ca3af;">
-    Sent because this alert is critical. Repeats are limited to one every five minutes and ten an hour.
+    ${footer}
   </p>
 </div>`.trim();
 
   const text = [
-    `AZUL VISION — CRITICAL ALERT`,
+    textBanner,
     ``,
     event.message,
     ``,

@@ -38,7 +38,7 @@ Two Supabase projects. They are not the same database and nothing joins across t
 | | project id | holds |
 |---|---|---|
 | **Operations Hub** | `pslzngjciiifowemrzza` | `Schedule` (the NextGen mirror), `call_logs`, `call_turns`, `agents`, `agent_prompts`, `agent_tools`, `drs_slots`, cost tables |
-| **Support Center** | `vsmcxhxeirkoobmjcrbn` | `tickets`, `departments`, `providers`, `locations`, `request_types`, `request_reasons`, `ticket_events`, `mr_cases` |
+| **Support Center** | `vsmcxhxeirkoobmjcrbn` | `tickets`, `departments`, `providers`, `locations`, `request_types`, `request_reasons`, `ticket_events`, `mr_cases`, `app_heartbeat` |
 
 ### The mirror
 
@@ -393,6 +393,14 @@ Recorded so they are not repeated.
 - `voice_agent_api_logs.request_body` (ticketing side) — the request as received.
 - Shadow tap (`src/shadow/`) — disabled by default (`SHADOW_MODE_ENABLED=false`,
   0% capture) and spools to the server filesystem.
+- `app_heartbeat` (Support Center) — one row a minute from ticketing-app Next
+  (and the gateway). This process reads it on `TICKETING_APP_DATABASE_URL`
+  (`server/services/ticketingAppLiveness.ts`) and emails
+  `ticketing_app_liveness` when the newest Next row is ≥3 minutes old, heap
+  or RSS is ≥80% of its limit, memory has risen for 15 minutes, or event-loop
+  p99 stays over 1s for 3 minutes. **Do not HTTP-probe Next for this.** That
+  is what stayed green at 2026-09-25 20:09. Replayed: last beat 20:09 → stale
+  email by 20:13.
 
 ---
 

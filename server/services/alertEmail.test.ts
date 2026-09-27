@@ -69,6 +69,15 @@ describe('which alerts email at all', () => {
     expect(shouldEmailAlert('ticket_filing_stalled', 'critical')).toBe(true);
   });
 
+  it('emails the ticketing-app liveness alarm Wayne asked for on 2026-09-25', () => {
+    expect(shouldEmailAlert('ticketing_app_liveness', 'critical')).toBe(true);
+  });
+
+  it('emails the liveness recovery note at info — he asked for the note', () => {
+    expect(shouldEmailAlert('ticketing_app_liveness_recovered', 'info')).toBe(true);
+    expect(shouldEmailAlert('ticketing_app_liveness_recovered', 'critical')).toBe(false);
+  });
+
   it.each(['provider_miss', 'emergency_miss', 'database_failure', 'call_log_failure'])(
     'does NOT email %s, however critical it is',
     (type) => {
@@ -132,5 +141,26 @@ describe('what the alert says', () => {
   it('caps a runaway detail value', () => {
     const mail = buildAlertEmail({ ...filingStalled, details: { error: 'x'.repeat(5000) } });
     expect(mail.html.length).toBeLessThan(4000);
+  });
+
+  it('the recovery note carries the last readings and does not say critical', () => {
+    const mail = buildAlertEmail({
+      type: 'ticketing_app_liveness_recovered',
+      severity: 'info',
+      message: 'TICKETING APP recovered: heartbeat is fresh and memory / event-loop are back inside limits',
+      details: {
+        heapUsedMb: 420,
+        heapLimitMb: 1400,
+        rssMb: 710,
+        lastRecordedAt: '2026-09-25T20:32:00.000Z',
+      },
+      timestamp: AT,
+    });
+    expect(mail.subject).toContain('recovered');
+    expect(mail.html).toContain('Azul Vision — recovered');
+    expect(mail.html).not.toContain('critical alert');
+    expect(mail.text).toContain('AZUL VISION — RECOVERY');
+    expect(mail.text).toContain('heapUsedMb: 420');
+    expect(mail.text).toContain('2026-09-25T20:32:00.000Z');
   });
 });

@@ -119,3 +119,44 @@ describe('a critical alert reaches an inbox', () => {
     expect(source).not.toMatch(/email integration can be added later/);
   });
 });
+
+describe('ticketing-app liveness is watched from this process', () => {
+  it('checks every minute and emails on enter and on recover', () => {
+    expect(source).toMatch(/startTicketingAppLivenessSchedule/);
+    expect(source).toMatch(/}, 60 \* 1000\)/);
+    expect(source).toMatch(/ticketing_app_liveness_recovered/);
+    expect(source).toMatch(/TICKETING_APP_DATABASE_URL/);
+    expect(source).not.toMatch(/\/api\/health/);
+  });
+
+  it('does not mark a liveness edge handled when sendAlert suppresses delivery', () => {
+    const check = source.slice(
+      source.indexOf('async checkTicketingAppLiveness'),
+      source.indexOf('startTicketingAppLivenessSchedule'),
+    );
+    expect(check).toMatch(/nextStoredConditions/);
+    expect(check).toMatch(/assessReadFailure/);
+    expect(sendAlert).toMatch(/const emailed = await this\.sendEmailAlert/);
+    expect(sendAlert).toMatch(/if \(!emailed\) return false/);
+  });
+
+  it('never texts ticketing-app liveness — July 27 ruling', () => {
+    // SMTP fail + SMS success would page the personal phone on every retry.
+    expect(sendAlert).toMatch(/event\.type !== 'ticketing_app_liveness'/);
+    const smsGate = sendAlert.slice(
+      sendAlert.indexOf('event.severity === \'critical\''),
+      sendAlert.indexOf('await this.sendSmsAlert'),
+    );
+    expect(smsGate).toMatch(/ticketing_app_liveness/);
+  });
+
+  it('does not start a second liveness check while the first is still mailing', () => {
+    const check = source.slice(
+      source.indexOf('async checkTicketingAppLiveness'),
+      source.indexOf('startTicketingAppLivenessSchedule'),
+    );
+    expect(check).toMatch(/if \(this\.livenessCheckInFlight\) return/);
+    expect(check).toMatch(/this\.livenessCheckInFlight = true/);
+    expect(check).toMatch(/finally \{[\s\S]*this\.livenessCheckInFlight = false/);
+  });
+});
