@@ -21,6 +21,7 @@ import { decideDobEscape, dobStatusNote, dobEscapeMarker, type DobStatus } from 
 // One retry per call on a ticket-API timeout; keyed on the call SID like every
 // other bounded ask in this repo.
 import { gateRefusalsSoFar, noteGateRefusal } from "../tools/gateAttempts";
+import { missingFieldsFromRefusal, spokenMissingFields } from "../services/missingFieldsRefusal";
 import { buildCompactLocationReference } from "../config/azulVisionKnowledge";
 import { getNextBusinessDayContext } from "../utils/timeAware";
 import { type TriageOutcome } from "../config/afterHoursTicketing";
@@ -30,6 +31,52 @@ import { judgeEscalation } from "../services/afterHoursEscalationGate";
 import { corroborate } from "../services/symptomCorroboration";
 import { markCallConcluded } from "../services/callConclusion";
 import { callMetadataForDB } from "../services/callMetadataStore";
+
+/**
+ * AN EMAIL PREFERENCE WITHOUT AN ADDRESS IS A QUESTION, NOT A FAILURE.
+ *
+ * `CA42f5b35d3924b8a1e5e66c00ee927742`, no-ivr, 2026-09-27 20:48 UTC, 217 s,
+ * 14 caller lines. A reschedule request; the caller asked to be reached by
+ * email and spelled the address out on the call. The model called
+ * `create_ticket` with `preferred_contact: "email"` and no `email` argument.
+ * The ticketing app requires `patientEmail` when the contact method is email
+ * (its `voice-agent-ticket-service.ts`), refused the POST with HTTP 400, and
+ * the refusal reached this handler in the app's own spelling — "Missing
+ * required fields" — which nothing here matched. So it fell to the generic
+ * branch and the agent said *"I'm experiencing a technical issue on my end
+ * right now. I have your information and our team will call you back."* No
+ * ticket of any provenance exists for that call.
+ *
+ * 14-day control, `voice_agent_api_logs`: of the no-ivr POSTs carrying an
+ * email preference, 8 were accepted (every one with an address) and 2 were
+ * refused for `patientEmail`. Small, and each one is a request lost after a
+ * caller has spent three minutes on the phone.
+ *
+ * THE ASK IS BOUNDED THE WAY THE DATE-OF-BIRTH ASK IS: once per call, keyed on
+ * the CallSid through `gateAttempts`, and on the next attempt the request
+ * FILES — for a phone callback at the number already on it, with a note for
+ * the staffer. A missing email must never hold a request; the callback number
+ * is required on every call and the app accepts a phone preference with it.
+ * The caller's words never reach the note; the recording has them.
+ */
+export const EMAIL_ASK_ONCE =
+  "Missing required information: email address. The caller asked to be reached by EMAIL " +
+  "and no address was sent, so the request cannot be filed that way yet. Ask ONCE, in " +
+  "these words: \"What email address should we use? Please spell it out for me, letter " +
+  "by letter.\" Then call create_ticket again with the address in the email field. If " +
+  "they would rather not, or cannot, call create_ticket again with preferred_contact set " +
+  "to \"phone\" — the callback number is already on the request. Nothing has failed: do " +
+  "not apologise and do not say there was a problem.";
+
+export const EMAIL_ESCAPE_NOTE =
+  "CONTACT PREFERENCE: the caller asked to be reached by EMAIL and no address was " +
+  "captured on the call — filed for a PHONE callback at the number on this ticket. " +
+  "The call recording has what they said.";
+
+export function emailEscapeMarker(callSid: string): string {
+  return `[EMAIL ESCAPE] create_ticket: asked once and still no email address — `
+    + `filing for a phone callback instead (${callSid})`;
+}
 
 const CONTEXT_LOOKUP_TIMEOUT_MS = 2000;
 
@@ -558,6 +605,10 @@ IF name wrong: "What is your full name?"
 📞 PREFERRED CONTACT METHOD:
 Ask: "Would you prefer we call, text, or email you back?"
 Use caller's answer in create_ticket contact_method field
+IF EMAIL: "What email address should we use? Please spell
+it out for me, letter by letter." → create_ticket email field.
+No address = it cannot go by email: ask once, then offer a
+phone callback instead. Never say anything failed.
 IF caller history shows preference, confirm: "Last time
 we reached you by [method]. Is that still best?"
 
@@ -1257,6 +1308,29 @@ The ticket will include schedule context (last appointment info) automatically.`
         console.log("[No-IVR Agent] B2B caller — skipping DOB validation, proceeding without DOB");
       }
 
+      // ASK FOR THE EMAIL ONCE, THEN FILE FOR A PHONE CALLBACK. The app
+      // refuses an email preference with no address; until 2026-09-27 that
+      // refusal arrived here in a spelling nothing matched and was spoken as
+      // a technical failure (CA42f5b35d3924b8a1e5e66c00ee927742). Checked
+      // BEFORE the schedule lookup so the question comes back in
+      // milliseconds and no lookup is spent on a payload that cannot file.
+      // See EMAIL_ASK_ONCE above for the measurement.
+      const wantsEmail = params.preferred_contact === 'email';
+      const emailGiven = (params.email ?? '').trim();
+      let emailEscaped = false;
+      if (wantsEmail && !emailGiven) {
+        if (gateRefusalsSoFar(metadata.callSid, 'create_ticket', 'email') < 1) {
+          noteGateRefusal(metadata.callSid, 'create_ticket', 'email');
+          return {
+            success: false,
+            validation_errors: ["email address"],
+            message: EMAIL_ASK_ONCE,
+          };
+        }
+        emailEscaped = true;
+        console.info(emailEscapeMarker(metadata.callSid ?? ''));
+      }
+
       // SECONDARY LOOKUP: Enrich schedule context using name+DOB
       // This catches cases where caller phone doesn't match patient record (family member calling)
       let enrichedContext = scheduleContext;
@@ -1366,9 +1440,14 @@ The ticket will include schedule context (last appointment info) automatically.`
         patientFullName,
         patientDOB: (isB2bNoDob || dobEscapeStatus) ? 'Unknown' : params.date_of_birth, // B2B callers may not have DOB; the escape never sends unreadable words in a date field
         reasonForCalling: finalSummary,
-        preferredContactMethod: preferredContactSimplified,
+        // An email preference the caller could not complete files for a PHONE
+        // callback — the number is on every request — never as an email
+        // ticket with no address, which the app refuses.
+        preferredContactMethod: emailEscaped ? 'phone' : preferredContactSimplified,
         patientPhone: callbackNormalized,
-        patientEmail: params.email,
+        // Never an empty string: the app reads `.trim()` and refuses a blank,
+        // while an absent key is simply no email.
+        patientEmail: emailGiven || undefined,
         lastProviderSeen: params.doctor_name || enrichedContext?.lastProviderSeen,
         locationOfLastVisit: params.location || enrichedContext?.lastLocationSeen,
         // The status note goes HERE and not at the head of reasonForCalling:
@@ -1376,6 +1455,7 @@ The ticket will include schedule context (last appointment info) automatically.`
         // (operator, 2026-07-25). The note never carries the caller's words.
         additionalDetails: [
           dobEscapeStatus ? dobStatusNote(dobEscapeStatus) : null,
+          emailEscaped ? EMAIL_ESCAPE_NOTE : null,
           params.appointment_time ? `Appointment: ${params.appointment_time}` : null,
         ].filter(Boolean).join('\n') || undefined,
         callSid: metadata.callSid,
@@ -1406,12 +1486,23 @@ The ticket will include schedule context (last appointment info) automatically.`
         // still ended up with a summary — 100%. Nothing is lost by waiting.
       });
 
-      if (result.error?.includes('Missing required information')) {
+      // A FIELD REFUSAL IS A QUESTION, in whichever spelling it arrived. The
+      // sink normalises the app's wording now, and this reads the field list
+      // again so the model is told WHAT to ask for in words rather than in the
+      // app's column names — and is told plainly that nothing failed, because
+      // the branch below this one speaks the technical-issue apology, and on
+      // CA42f5b35d3924b8a1e5e66c00ee927742 that is what a refusal became.
+      const missingFromApi = missingFieldsFromRefusal(result.error);
+      if (missingFromApi) {
         console.log("[No-IVR Agent] VALIDATION FAILED:", result.error);
         return {
           success: false,
-          validation_errors: [result.error],
-          message: result.message || 'Please collect missing information and try again.',
+          validation_errors: missingFromApi,
+          message:
+            `Missing required information: ${spokenMissingFields(missingFromApi)}. Ask the caller ` +
+            "for it — one field per question, with the format in the question — then call " +
+            "create_ticket again with it. Nothing has failed: do not apologise and do not say " +
+            "there was a technical issue.",
         };
       }
 
