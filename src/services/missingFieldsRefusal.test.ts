@@ -23,13 +23,13 @@ describe("the app's own wording", () => {
     expect(missingFieldsFromRefusal(APP_EMAIL_REFUSAL)).toEqual(['patientEmail']);
   });
 
-  it('reads several fields, from the machine-readable tail', () => {
+  it('reads several fields', () => {
     const two =
       'Missing required fields: patientFullName, patientDOB. Please collect these from the patient before submitting., missing: patientFullName, patientDOB';
     expect(missingFieldsFromRefusal(two)).toEqual(['patientFullName', 'patientDOB']);
   });
 
-  it('falls back to the head when the tail is absent', () => {
+  it('reads the head with or without the app\'s repeating tail', () => {
     expect(missingFieldsFromRefusal('Missing required fields: patientPhone.')).toEqual(['patientPhone']);
     expect(missingFieldsFromRefusal('Missing required fields: patientPhone, patientEmail')).toEqual([
       'patientPhone',

@@ -73,20 +73,20 @@ export function spokenMissingFields(fields: string[]): string {
  *   "Missing required fields: a, b. Please collect …, missing: a, b"
  *                                                       — the app's, verbatim
  *
- * The app's shape is read from its `missing:` tail when it has one — that is
- * the machine-readable half of the sentence, and the head repeats it — and
- * from the head otherwise. Anything that is not a field refusal answers null,
- * so a caller cannot mistake an outage or a timeout for a question: the two
- * are handled differently downstream and only one of them is the caller's to
- * answer.
+ * Both are read from the head — the list after the colon, up to the first
+ * sentence end. The app's shape also carries a `missing:` tail that repeats
+ * the head word for word; it is not read separately, because a second arm
+ * that can never disagree with the first is a second thing to keep right.
+ * Anything that is not a field refusal answers null, so a caller cannot
+ * mistake an outage or a timeout for a question: the two are handled
+ * differently downstream and only one of them is the caller's to answer.
  */
 export function missingFieldsFromRefusal(error: string | null | undefined): string[] | null {
   if (!error) return null;
   const text = String(error).trim();
 
-  const tail = /\bmissing:\s*([^.\n]+?)\s*\.?\s*$/i.exec(text);
   const head = /^Missing required (?:information|fields):\s*([^.\n]+)/i.exec(text);
-  const list = tail?.[1] ?? head?.[1];
+  const list = head?.[1];
   if (!list) return null;
 
   const fields = list

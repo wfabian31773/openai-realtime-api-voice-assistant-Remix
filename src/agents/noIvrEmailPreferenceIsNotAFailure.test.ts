@@ -173,12 +173,20 @@ describe('an email preference with no address is asked for ONCE', () => {
     expect(h.submitSimplifiedTicket).not.toHaveBeenCalled();
   });
 
-  it('whitespace is "no address", so it is asked for', async () => {
+  it('whitespace is "no address": asked for once, then filed with NO patientEmail key at all', async () => {
     const agent = await agentFor(freshSid());
     const r = await call(agent, 'create_ticket', request({ email: '   ' }));
     expect(r.success).toBe(false);
     expect(r.validation_errors).toEqual(['email address']);
     expect(h.submitSimplifiedTicket).not.toHaveBeenCalled();
+
+    const r2 = await call(agent, 'create_ticket', request({ email: '   ' }));
+    expect(r2.success).toBe(true);
+    const sent = h.submitSimplifiedTicket.mock.calls[0]![0];
+    expect(sent.preferredContactMethod).toBe('phone');
+    // Omitted, not blanked — the app reads `.trim()` and refuses a blank, so a
+    // whitespace value forwarded as-is would be the 400 all over again.
+    expect(sent.patientEmail).toBeUndefined();
   });
 
   it('the caller who then gives the address files by EMAIL, with no note', async () => {
