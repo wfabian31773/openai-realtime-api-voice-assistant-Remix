@@ -456,9 +456,26 @@ import { callEnvironment } from "./callRecord";
  * a drift hazard and changes no gate, no tool answer and nothing a caller
  * hears; the marker moves so a deploy can still be told apart, not because a
  * number should move with it. See identityStoreHasOneImportStyle.test.ts.
+ *
+ * v74, 2026-09-27: AN EMAIL PREFERENCE WITHOUT AN ADDRESS IS A QUESTION, NOT A
+ * FAILURE. `CA42f5b35d3924b8a1e5e66c00ee927742` (no-ivr, 20:48 UTC, 217 s): the
+ * caller asked to be reached by email, the model called `create_ticket` with
+ * no `email` argument, the ticketing app refused HTTP 400 for `patientEmail`,
+ * and the refusal reached the handler in the app's own spelling ("Missing
+ * required fields") which nothing matched — so it fell to the generic branch
+ * and the agent spoke the technical-issue apology, claiming to have the
+ * caller's information, over a request that was never filed. The no-ivr
+ * handler now asks for the address ONCE (keyed on the CallSid, the
+ * date-of-birth escape's own budget) and on the next attempt files for a
+ * phone callback with a note for the staffer; one parser
+ * (`missingFieldsRefusal.ts`) reads both spellings for the sink and for the
+ * handler, so a field refusal on any lane through `submitSimplifiedTicket`
+ * comes back as a question naming the field. no-ivr is on the OLD CORE, so
+ * this marker dates the build the way v18, v41, v47 and v53 do. It stacks on
+ * v73 (`main` at `0039a9d`) and contains every marker below it.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v73-the-records-line-asks-once-then-files-20260927";
+  "voice-runtime-v74-an-email-preference-is-not-a-failure-20260927";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

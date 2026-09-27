@@ -1,4 +1,5 @@
 import { ticketingApiClient } from '../../server/services/ticketingApiClient';
+import { missingFieldsFromRefusal, spokenMissingFields } from './missingFieldsRefusal';
 import { storage } from '../../server/storage';
 import { 
   AFTER_HOURS_DEPARTMENT_ID, 
@@ -838,12 +839,26 @@ export class SyncAgentService {
         // thing that cannot happen for the next minute.
         await releaseOnFailure();
 
-        // If missing fields, return helpful message for agent
-        if (response.missingFields && response.missingFields.length > 0) {
+        // A FIELD REFUSAL IS A QUESTION FOR THE CALLER, in whichever spelling
+        // it arrived. The app's 400 reaches this method as TEXT ONLY — the
+        // client throws on a 4xx with the body's `error` and `submitTicket`
+        // catches it into `{ errorCode: 'request_failed', error }` — so
+        // `response.missingFields` is undefined for every real refusal and
+        // the array branch alone fired on nothing. The agents on this path
+        // all match the shape written HERE (`Missing required information:`),
+        // so a refusal that arrived in the app's own words fell through to
+        // their "technical system error" branch. CA42f5b35d3924b8a1e5e66c00ee927742
+        // (no-ivr, 2026-09-27): the caller asked for email, the model sent no
+        // address, the app refused, and the agent told the caller its systems
+        // were down. See missingFieldsRefusal.ts.
+        const missing = response.missingFields?.length
+          ? response.missingFields
+          : missingFieldsFromRefusal(errorMsg);
+        if (missing && missing.length > 0) {
           return {
             success: false,
-            error: `Missing required information: ${response.missingFields.join(', ')}`,
-            message: `I need to collect more information. Please provide: ${response.missingFields.join(', ')}`,
+            error: `Missing required information: ${missing.join(', ')}`,
+            message: `I need to collect more information. Please ask the caller for: ${spokenMissingFields(missing)}.`,
           };
         }
 
