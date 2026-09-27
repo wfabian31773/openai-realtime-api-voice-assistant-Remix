@@ -550,6 +550,15 @@ describe("an anonymous caller who only answered the identity questions (records)
     expect(d).toEqual({ file: false, reason: "identity-only" });
   });
 
+  it("treats a LONG spelled surname as identity too — the letters are not words", () => {
+    // The first mutation run survived dropping the single-letter filter, because
+    // a five-letter surname leaves three letters once "s" and "i" are removed as
+    // scaffolding — inside the name-sized bound by accident. Seven letters are
+    // not, so this is the test that makes the filter load-bearing.
+    const d = anon("AGENT: Could you spell the patient's last name?\nCALLER: G, O, N, Z, A, L, E, Z.");
+    expect(d).toEqual({ file: false, reason: "identity-only" });
+  });
+
   it("treats the new-or-existing answer as identity", () => {
     const d = anon("AGENT: Are you a new patient or an existing patient?\nCALLER: Existing.");
     expect(d).toEqual({ file: false, reason: "identity-only" });
