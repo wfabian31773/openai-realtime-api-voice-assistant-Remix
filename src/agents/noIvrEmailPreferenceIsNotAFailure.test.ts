@@ -156,6 +156,14 @@ describe('an email preference with no address is asked for ONCE', () => {
     // The staffer is told WHY the method changed, in additionalDetails …
     expect(String(sent.additionalDetails)).toContain(EMAIL_ESCAPE_NOTE);
     expect(String(sent.additionalDetails)).toMatch(/PHONE callback/);
+    // THE NOTE CLAIMS ONLY WHAT THE CODE KNOWS (Codex P2, #335). On the corpus
+    // call the caller spelled the address out and the model dropped it, so a
+    // note saying it was "not captured on the call" was false on the call it
+    // was written for. It says the address did not reach the TICKET, and
+    // sends the staffer to the recording, where it may be sitting.
+    expect(EMAIL_ESCAPE_NOTE).not.toMatch(/captured on the call/i);
+    expect(EMAIL_ESCAPE_NOTE).toMatch(/no address reached this ticket/);
+    expect(EMAIL_ESCAPE_NOTE).toMatch(/recording/);
     // … and never at the head of reasonForCalling, where the Request Type
     // header must stay the first line (operator, 2026-07-25).
     expect(String(sent.reasonForCalling).split('\n')[0]).toBe('Request Type: Appointment Request');

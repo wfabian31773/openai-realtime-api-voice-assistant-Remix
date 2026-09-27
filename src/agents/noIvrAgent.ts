@@ -58,6 +58,15 @@ import { callMetadataForDB } from "../services/callMetadataStore";
  * the staffer. A missing email must never hold a request; the callback number
  * is required on every call and the app accepts a phone preference with it.
  * The caller's words never reach the note; the recording has them.
+ *
+ * THE NOTE SAYS WHAT THE CODE KNOWS AND NO MORE (Codex P2, #335): on the
+ * corpus call the caller DID spell the address out, and the model sent no
+ * `email` argument anyway. This handler cannot tell "the caller never gave
+ * one" from "the model dropped it", so the note says no address reached the
+ * TICKET and points the staffer at the recording, rather than claiming the
+ * address was absent from the call — a claim that was false on the very call
+ * this was written for, and that would have sent a staffer past an address
+ * sitting in the recording.
  */
 export const EMAIL_ASK_ONCE =
   "Missing required information: email address. The caller asked to be reached by EMAIL " +
@@ -69,12 +78,12 @@ export const EMAIL_ASK_ONCE =
   "not apologise and do not say there was a problem.";
 
 export const EMAIL_ESCAPE_NOTE =
-  "CONTACT PREFERENCE: the caller asked to be reached by EMAIL and no address was " +
-  "captured on the call — filed for a PHONE callback at the number on this ticket. " +
-  "The call recording has what they said.";
+  "CONTACT PREFERENCE: the caller asked to be reached by EMAIL, but no address reached " +
+  "this ticket — filed for a PHONE callback at the number on this ticket. The caller may " +
+  "well have given the address on the call; the recording has what they said.";
 
 export function emailEscapeMarker(callSid: string): string {
-  return `[EMAIL ESCAPE] create_ticket: asked once and still no email address — `
+  return `[EMAIL ESCAPE] create_ticket: asked once and still no email address reached the tool — `
     + `filing for a phone callback instead (${callSid})`;
 }
 
