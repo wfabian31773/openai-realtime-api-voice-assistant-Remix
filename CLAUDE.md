@@ -2190,6 +2190,52 @@ in the new build. Current marker:
 
 **ON THE RUNTIME, ASK `/voice/health` — AND THE MARKER NOW CARRIES ITS DATE.**
 
+**ASK THE PUBLISHED DEPLOYMENT, AND IT IS THIS HOST:**
+
+```
+https://openai-realtime-api-voice-assistant-remix--fabianwayne1.replit.app/voice/health
+```
+
+**THIS FILE DID NOT RECORD THAT HOST UNTIL 2026-09-27, AND THE OMISSION COST A
+FALSE OUTAGE REPORT THE SAME DAY.** Asked to verify a republish, I had no
+published host to read, took one out of this repo's own docs, and got
+`dcf9f10f-…-3uh0nmdcvfbs6.spock.replit.dev` — a **WORKSPACE** URL. It answered
+HTTP 200 with a complete, coherent payload (`liveReady: true`, `missing: []`,
+all eight lanes registered) reading `v70`, so I reported that the pull had not
+taken and that four merges were not deployed. The published deployment was
+serving `v72` the whole time. Every one of those claims was withdrawn.
+
+**THE WORKSPACE HOST IS NOT THE DEPLOYMENT, AND IT ANSWERS ANYWAY.** That is
+what makes the mistake reachable rather than obvious: a Replit workspace runs
+its own process on a `*.replit.dev` domain, it serves a byte-identical
+`/voice/health` shape, and it can sit on a marker generations behind the
+published build — at the time of writing it was two markers behind. `200 OK`
+plus a healthy payload is NOT evidence you are looking at production.
+
+**THE THREE `*.replit.dev` URLs ELSEWHERE IN THIS REPO ARE WORKSPACE URLS AND
+SOME ARE STALE.** They appear beside webhook paths (`/api/voice/no-ivr`,
+`/api/sms/incoming`, `/api/voice/twiml`) and read like configuration; do not
+resolve a production question with any of them. **Whether a live Twilio lane
+still points at one is UNSETTLED and is not answerable from here** — both
+processes write to the same database, so `call_logs` cannot tell you. It is one
+look at the Twilio console and it is worth taking.
+
+**REPLIT HAS TWO MORE `.replit.app` NAMES AND NEITHER IS THIS SERVICE:**
+`ticketing-app--fabianwayne1.replit.app` is the ticketing app and
+`sms-app--fabianwayne1.replit.app` is the SMS app. `azul.replit.app` and
+`azul-voice.replit.app` appear only as TEST FIXTURES in `readiness.test.ts`,
+`callRecord.test.ts` and `voiceRuntime.test.ts`; `azul-voice` answers *"This
+app isn't live yet."*
+
+```bash
+# The check. Anything other than the current marker means the pull did not take
+# — but confirm the HOST before concluding that, which is the whole point of
+# this block.
+curl -s https://openai-realtime-api-voice-assistant-remix--fabianwayne1.replit.app/voice/health \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["marker"])'
+```
+
+
 ```
 voice-runtime-v19-pcp-lost-request-floor-20260915
 voice-runtime-v20-blind-transfer-is-not-a-human-20260915
