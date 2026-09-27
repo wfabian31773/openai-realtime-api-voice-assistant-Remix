@@ -276,3 +276,36 @@ describe('a failed pass increments the retry count in the database, never from a
     expect(SRC).not.toMatch(/const newRetryCount = currentRetries \+ 1;\s*const retriesExhausted = newRetryCount >= MAX_RETRIES;/);
   });
 });
+
+/**
+ * THE POST-CALL SYNC SENDS THE LANE SLUG, NEVER THE AGENTS-TABLE UUID AND
+ * NEVER "unknown" — point 5 of the records-line review, 2026-09-27.
+ *
+ * The payload line read `agentUsed: call.agentId || "unknown"`, and the
+ * ticketing app's update-call-data writes whatever arrives straight onto
+ * `tickets.agent_used`. Measured 2026-09-27: 126 of 307 agent-filed Medical
+ * Records tickets in 09-08..09-25 carry a uuid there, and CLAUDE.md records
+ * 91 rows reading "unknown" on 2026-09-03 — both branches of that one line.
+ * The ticket is CREATED with the slug by every filing tool; the sync was the
+ * only writer turning it into something no report can group by.
+ *
+ * Pinned from the source, as this file's other selection pins are and for
+ * the reason they give: the query is a Drizzle chain against a live `db`.
+ */
+describe('the sync carries the lane slug onto the ticket, not the agents-table id (2026-09-27)', () => {
+  const SRC = readFileSync(join(__dirname, 'ticketingSyncService.ts'), 'utf8');
+
+  it('selects call_logs.agent_used so it has the slug to send', () => {
+    expect(SRC).toMatch(/agentUsed:\s*callLogs\.agentUsed/);
+  });
+
+  it('sends call.agentUsed and omits the field when the row has none', () => {
+    expect(SRC).toMatch(/agentUsed:\s*call\.agentUsed\s*\|\|\s*undefined/);
+  });
+
+  it('never sends the agents-table id or a sentinel in its place', () => {
+    // The two branches of the old line, each of which stamped tickets.
+    expect(SRC).not.toMatch(/agentUsed:\s*call\.agentId/);
+    expect(SRC).not.toMatch(/agentUsed:[^\n]*"unknown"/);
+  });
+});

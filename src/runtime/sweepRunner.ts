@@ -23,6 +23,9 @@
  *    the classification (operator, 2026-08-11).
  * 4. No name, no ticket (operator, 2026-09-03) — the identity comes from the
  *    record `lookup_patient` verified, never from reading the transcript.
+ *    EXCEPT on the records lane (operator, 2026-09-27): there an unnamed
+ *    request files with a staff note, because an unlogged access request is
+ *    the failure the department's Corrective Action Plan polices.
  * 5. Its log lines carry a lane, a call reference and a skip reason. Never a
  *    name, never a number, never the transcript.
  */
@@ -69,8 +72,10 @@ const defaultFiler: SweepFiler = async (ticket) => {
     departmentId: ticket.departmentId,
     requestTypeId: ticket.requestTypeId,
     requestReasonId: ticket.requestReasonId,
-    patientFirstName: ticket.patientFirstName,
-    patientLastName: ticket.patientLastName,
+    // Absent on an unnamed records-lane request: the app treats a missing name
+    // as missing and a blank one as a name.
+    ...(ticket.patientFirstName ? { patientFirstName: ticket.patientFirstName } : {}),
+    ...(ticket.patientLastName ? { patientLastName: ticket.patientLastName } : {}),
     patientPhone: ticket.patientPhone,
     preferredContactMethod: "phone",
     description: ticket.description,

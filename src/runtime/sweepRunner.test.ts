@@ -196,6 +196,38 @@ describe("no name, no ticket", () => {
     expect(String(warn.mock.calls[0]?.[0])).toContain("needs a callback");
   });
 
+  it("EXCEPT on records, where a nameless request files with a staff note (operator, 2026-09-27)", async () => {
+    resetVerifiedIdentities();
+    const file = filer();
+    const out = await runRequestSweep(
+      record({ slug: "records", transcript: "AGENT: How can I help?\nCALLER: I need a copy of my records sent to my new doctor." }),
+      file,
+    );
+    expect(out).toEqual({ filed: true, ticketNumber: "VA-99001" });
+    expect(file.calls).toHaveLength(1);
+    const ticket = file.calls[0] as Record<string, unknown>;
+    expect(ticket).not.toHaveProperty("patientFirstName");
+    expect(ticket).not.toHaveProperty("patientLastName");
+    expect(String(ticket.staffNote)).toContain("PATIENT NAME NOT CAPTURED");
+  });
+
+  it("on records a name-only CANDIDATE still does not become the name — the request files unnamed", async () => {
+    resetVerifiedIdentities();
+    rememberVerifiedIdentity(SID, {
+      firstName: "Testpatient",
+      lastName: "Example",
+      dateOfBirth: "1950-01-02",
+      certain: false,
+    });
+    const file = filer();
+    await runRequestSweep(
+      record({ slug: "records", transcript: "AGENT: How can I help?\nCALLER: I need a copy of my records." }),
+      file,
+    );
+    expect(file.calls).toHaveLength(1);
+    expect(file.calls[0]).not.toHaveProperty("patientFirstName");
+  });
+
   it("skips a greeting-only hangup quietly", async () => {
     const file = filer();
     const out = await runRequestSweep(

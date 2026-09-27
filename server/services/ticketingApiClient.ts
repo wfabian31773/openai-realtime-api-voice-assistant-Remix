@@ -53,8 +53,14 @@ export interface CreateTicketParams {
    */
   requestTypeId?: number;
   requestReasonId?: number;
-  patientFirstName: string;
-  patientLastName: string;
+  /**
+   * OPTIONAL since 2026-09-27, for the records lane only: a request nobody
+   * identified files without a name rather than not at all. Every other
+   * filing tool still refuses before it gets here. The ticketing app's
+   * create-ticket accepts the omission (its own change, shipped first).
+   */
+  patientFirstName?: string;
+  patientLastName?: string;
   patientPhone: string;
   patientEmail?: string;
   preferredContactMethod?: "phone" | "text" | "email";

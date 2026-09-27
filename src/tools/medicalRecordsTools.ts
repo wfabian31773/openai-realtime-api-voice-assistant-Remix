@@ -34,9 +34,52 @@ import { registerTool, missing, refuseDob, dobRefusalCopy, type ToolResult } fro
 import { str, isTwilioCallSid, normalizePhone } from './sharedPatientTools';
 import { decideDobEscape, dobStatusNote, dobEscapeMarker, type DobStatus } from './dobEscape';
 import { createTicketDurable, postFailureToolResult } from '../services/durableTicketFiling';
-import { verifiedDobFor } from './verifiedIdentity';
+import { verifiedDobFor, verifiedIdentityFor } from './verifiedIdentity';
+import { gateRefusalsSoFar, noteGateRefusal } from './gateAttempts';
 
 // ---------------------------------------------------------------- what kind
+
+/**
+ * HOW OFTEN THIS LINE MAY ASK BEFORE IT FILES ANYWAY.
+ *
+ * Operator, 2026-09-27, approving the records-line review's points 2 and 3:
+ * *"go ahead and flip records to the runtime and the other 5 points."*
+ *
+ * Measured over 09-08..09-25 on the records line (RECORDS-LINE-REVIEW-20260927):
+ * 21 real conversations were refused by this tool and never filed — eleven
+ * for a NAME (`first_name`+`last_name` were `required`, so `validateInput`
+ * refused before the handler could look at anything, and there was no escape
+ * of any kind), five for the on-clock `deliver_to`/`date_range` gate (whose
+ * only exit, `on_clock_ask_exhausted`, was opt-in and PCP-only by design),
+ * one for a date of birth (whose escape already existed and was working).
+ * Twenty of the twenty-one lasted ninety seconds or more. On the old core
+ * nothing sweeps them up afterwards.
+ *
+ * ONE is a judgement, and it is the same one `decideDobEscape` made on
+ * 2026-09-04 and `RESOLVE_ASK_LIMIT` made on 2026-09-10: the tool asks, the
+ * caller answers or does not, and the second invocation files with the gap
+ * written on the ticket rather than refusing again. The measured shape on
+ * these lanes is that the second invocation often never comes at all (42 of
+ * 75 refusals were the last tool event of their call), which is the
+ * argument for the runtime's teardown sweep, not for a second ask here.
+ *
+ * Keyed on the CallSid through `gateAttempts`, so a sentinel or missing SID
+ * keeps the old ask-every-time behaviour rather than sharing a counter
+ * across calls.
+ */
+export const RECORDS_ASK_LIMIT = 1;
+const RECORDS_TOOL = 'file_records_ticket';
+const PATIENT_NAME_ASK = 'patient_name';
+const ON_CLOCK_ASK = 'on_clock_fields';
+
+/**
+ * The staff note when the ticket files without a patient name. Goes in
+ * `callData.transcript` — the ticket's own call-metadata column — and NEVER
+ * the description, which becomes the body of a patient-facing SMS.
+ */
+export const NAME_NOT_CAPTURED_NOTE =
+  'PATIENT NAME NOT CAPTURED — the caller was asked once and the request was filed without one. ' +
+  'Take the name from the call recording before matching this to a chart.';
 
 registerTool({
   name: 'classify_records_request',
@@ -204,15 +247,69 @@ registerTool({
      * The handler still refuses when it has neither the caller's answer nor a
      * verified record for that same name, in the same words as before.
      */
-    required: ['first_name', 'last_name', 'callback_number', 'request_description', 'requester'],
+    /**
+     * `first_name` and `last_name` LEFT this list on 2026-09-27. While they sat
+     * here `validateInput` refused before the handler ran, so a call whose
+     * patient had already been identified by `lookup_patient` was refused for
+     * a name the process was holding, and a caller who would not give one was
+     * refused for ever — eleven real conversations in fourteen business days,
+     * none of them filed. The handler now asks ONCE and then files without.
+     */
+    required: ['callback_number', 'request_description', 'requester'],
   },
   handler: async (input): Promise<ToolResult> => {
-    const first = str(input.first_name);
-    const last = str(input.last_name);
+    let first = str(input.first_name);
+    let last = str(input.last_name);
     const dob = str(input.date_of_birth);
     const phone = str(input.callback_number);
     const description = str(input.request_description);
     const callSid = str(input.call_sid);
+
+    /**
+     * THE NAME: the record first, one ask second, the request regardless.
+     *
+     * 1. RULE ZERO — if `lookup_patient` established WHO this is on this call,
+     *    the name is on file and nobody is asked for it. `verifiedIdentityFor`
+     *    answers only a CERTAIN match (a phone candidate is refused by design,
+     *    standing instruction 6), which is the same source `verifiedDobFor`
+     *    already trusts for the date of birth two screens down.
+     * 2. Otherwise the caller is asked ONCE, one field per question (RULE ZERO
+     *    2b), and the refusal's `fix` tells the model this is the one ask.
+     * 3. The next invocation files with no name and a staff note. A records
+     *    request with a callback number and no name is workable; a caller
+     *    turned away is not. The description never carries the note — it is
+     *    an SMS body.
+     */
+    let nameNote: string | undefined;
+    if (!first || !last) {
+      const known = verifiedIdentityFor(callSid);
+      if (known) {
+        first = known.firstName;
+        last = known.lastName;
+        // No name in the log line: this is the one place a masked identifier
+        // would still be the patient.
+        console.info('[records] patient name taken from the verified record for this call');
+      } else if (gateRefusalsSoFar(callSid, RECORDS_TOOL, PATIENT_NAME_ASK) >= RECORDS_ASK_LIMIT) {
+        first = '';
+        last = '';
+        nameNote = NAME_NOT_CAPTURED_NOTE;
+        console.warn(
+          `[RECORDS] patient name not captured and the ask is spent — filing to Medical Records without one (${callSid || 'no sid'})`,
+        );
+      } else {
+        noteGateRefusal(callSid, RECORDS_TOOL, PATIENT_NAME_ASK);
+        const absent = [!first ? 'first_name' : null, !last ? 'last_name' : null].filter(
+          (f): f is string => f !== null,
+        );
+        return missing(
+          absent,
+          !first ? "May I please have the patient's first name?" : 'May I please have the last name?',
+          'Ask for the name ONCE, one field at a time. If they cannot or will not give it, call ' +
+            'file_records_ticket again with everything else — it will file without a name and the ' +
+            'records team will take it from the recording. Never refuse to file over a name.',
+        );
+      }
+    }
 
     const digits = phone.replace(/\D/g, '');
     if (digits.length < 10) {
@@ -309,9 +406,10 @@ registerTool({
        * (#288): take the request unassigned and let a human triage it, because
        * a row a clerk can chase beats a row in the wrong queue.
        *
-       * OPT-IN, so the records lane is untouched. That lane CAN ask and does,
-       * and its gate still refuses — nothing here relaxes it. Only a caller
-       * that says it has exhausted the ask gets the exit.
+       * OPT-IN, and until 2026-09-27 the records lane was untouched by it: that
+       * lane CAN ask and does, so only a caller that said it had exhausted the
+       * ask got the exit. The records lane now has its own exit — the
+       * per-call ask below — and this flag stays for PCP, which never asks.
        *
        * AND IT FIRES ON THE FIRST INVOCATION, not the second. That is the whole
        * lesson of `decideDobEscape` and of #291's Codex P1: an escape reachable
@@ -319,12 +417,23 @@ registerTool({
        * were the LAST tool event of their call. An escape that needs the model
        * to come back is not an escape.
        */
-      if (gaps.length && askExhausted) {
+      /**
+       * AND THE EXIT IS NO LONGER OPT-IN ON THIS LANE. Operator, 2026-09-27
+       * (point 3 of the records-line review): five patients' own requests in
+       * fourteen business days were refused here and never filed. The gate
+       * still asks — once — and the next invocation files with the gap written
+       * on the ticket in the same words the PCP exit uses, so a clerk chases
+       * the destination instead of a request that never existed.
+       */
+      const onClockAskSpent = gateRefusalsSoFar(callSid, RECORDS_TOOL, ON_CLOCK_ASK) >= RECORDS_ASK_LIMIT;
+      if (gaps.length && (askExhausted || onClockAskSpent)) {
         console.warn(
-          `[RECORDS] on-clock fields not captured (${gaps.join(', ')}) and the ask is spent — ` +
-            'filing to Medical Records with the gap recorded rather than refusing',
+          `[RECORDS] on-clock fields not captured (${gaps.join(', ')}) and the ask is spent ` +
+            `(${askExhausted ? 'caller flagged it' : 'asked once on this call'}) — ` +
+            `filing to Medical Records with the gap recorded rather than refusing (${callSid || 'no sid'})`,
         );
       } else if (gaps.length) {
+        noteGateRefusal(callSid, RECORDS_TOOL, ON_CLOCK_ASK);
         return missing(
           gaps,
           gaps.length === 2
@@ -332,6 +441,8 @@ registerTool({
             : gaps[0] === 'deliver_to'
               ? 'And where should these be sent — to you, or to an office?'
               : 'And which dates do you need covered? "Everything" is a fine answer.',
+          'Ask ONCE. Whatever they answer — or if they cannot — call file_records_ticket again ' +
+            'with everything you have; it will file with the gap noted for the records team.',
         );
       }
     }
@@ -602,8 +713,10 @@ registerTool({
       departmentId: filedDepartmentId,
       requestTypeId: filedTypeId,
       requestReasonId: filedReasonId,
-      patientFirstName: first,
-      patientLastName: last,
+      // Omitted, not blanked, when the ask was spent: the app treats a missing
+      // name as missing and a blank one as a name.
+      ...(first ? { patientFirstName: first } : {}),
+      ...(last ? { patientLastName: last } : {}),
       // Last ten digits, not the raw string and not all of `digits` — see
       // normalizePhone() in utils/phone.ts. The floor+ceiling above already
       // refused anything that isn't one plausible phone number, so this is
@@ -654,12 +767,14 @@ registerTool({
       // which is where the organisation usually sits ("SCAN Health Plan",
       // "an attorney at Lexitas").
       requestorName:
-        cap.requesterType === 'patient' ? `${first} ${last}`.trim() : requesterRaw,
+        cap.requesterType === 'patient' ? `${first} ${last}`.trim() || undefined : requesterRaw,
       callData: {
         agentUsed: 'records',
         ...(callSid ? { callSid } : {}),
         // Staff-only. Never the description — that is an SMS body.
-        ...(dobStaffNote ? { transcript: dobStaffNote } : {}),
+        ...(nameNote || dobStaffNote
+          ? { transcript: [nameNote, dobStaffNote].filter(Boolean).join('\n') }
+          : {}),
       },
       // Guarded: callSid can be a sentinel ("unknown", "latest", ...), never
       // a real Twilio SID, when the retry lands on someone else's key.

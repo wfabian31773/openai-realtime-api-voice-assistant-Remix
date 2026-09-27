@@ -294,6 +294,69 @@ describe("no name, no ticket", () => {
 });
 
 /**
+ * THE ONE LANE THAT FILES WITHOUT A NAME — operator, 2026-09-27, point 2 of
+ * the records-line review. Fourteen business days on the records line: 45
+ * conversations ran `lookup_patient` and never filed, eleven were refused by
+ * the filing tool for a name, and nothing swept them up. The department is
+ * under a Corrective Action Plan whose first rule is that every request is
+ * logged; an unlogged request is the failure, an unnamed one is a chase.
+ *
+ * ONE lane. The 2026-09-03 ruling stands everywhere else, and the tests
+ * above prove it does.
+ */
+describe("the records lane files without a name", () => {
+  it("files a nameless records request, with no name on it rather than half of one", () => {
+    const d = decideSweep(call({ slug: "records", verifiedName: undefined }));
+    expect(d.file).toBe(true);
+    expect(d).not.toHaveProperty("firstName");
+    expect(d).not.toHaveProperty("lastName");
+  });
+
+  it("drops a half name rather than filing under it", () => {
+    const d = decideSweep(call({ slug: "records", verifiedName: { firstName: "Given", lastName: "" } }));
+    expect(d.file).toBe(true);
+    expect(d).not.toHaveProperty("firstName");
+  });
+
+  it("still carries a verified name when there is one", () => {
+    const d = decideSweep(call({ slug: "records" }));
+    expect(d).toMatchObject({ file: true, firstName: "Testpatient", lastName: "Example" });
+  });
+
+  it("is ONLY records — tech, optical and surgery still refuse", () => {
+    for (const slug of ["tech", "optical", "surgery"]) {
+      expect(decideSweep(call({ slug, verifiedName: undefined })), slug).toEqual({
+        file: false,
+        reason: "no-name",
+      });
+    }
+  });
+
+  it("the other gates still run first on records — a silent line is not a nameless request", () => {
+    const silent = decideSweep(call({ slug: "records", verifiedName: undefined, transcript: "AGENT: Thank you for calling." }));
+    expect(silent).toEqual({ file: false, reason: "caller-said-nothing" });
+    const filed = decideSweep(call({ slug: "records", verifiedName: undefined, ticketAlreadyFiled: true }));
+    expect(filed).toEqual({ file: false, reason: "already-filed" });
+  });
+
+  it("the swept ticket omits the name keys and says so in the STAFF note, never the description", () => {
+    const input = call({ slug: "records", verifiedName: undefined });
+    const d = decideSweep(input);
+    if (!d.file) throw new Error("expected a filing decision");
+    const t = buildSweptTicket(input, d);
+    expect(t).not.toHaveProperty("patientFirstName");
+    expect(t).not.toHaveProperty("patientLastName");
+    expect(t.staffNote).toContain("PATIENT NAME NOT CAPTURED");
+    expect(t.description).not.toContain("NOT CAPTURED");
+    // And a named records ticket carries no such note.
+    const named = call({ slug: "records" });
+    const dn = decideSweep(named);
+    if (!dn.file) throw new Error("expected a filing decision");
+    expect(buildSweptTicket(named, dn).staffNote).not.toContain("NOT CAPTURED");
+  });
+});
+
+/**
  * THE CALLER CHASING A REQUEST THEY ALREADY MADE.
  *
  * Codex, PR #268 — the finding with a human cost. `check_open_tickets`

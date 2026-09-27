@@ -98,8 +98,32 @@ export interface SweepInput {
 }
 
 export type SweepDecision =
-  | { file: true; callerSaid: string; firstName: string; lastName: string }
+  /**
+   * `firstName`/`lastName` are OPTIONAL as of 2026-09-27, for ONE lane. On
+   * `records` a request with no verified name files without one (see the
+   * name gate in `decideSweep`); on every other lane the gate still refuses,
+   * so a filing decision there always carries both.
+   */
+  | { file: true; callerSaid: string; firstName?: string; lastName?: string }
   | { file: false; reason: SweepSkipReason };
+
+/**
+ * THE LANE WHOSE REQUESTS FILE WITHOUT A NAME.
+ *
+ * Operator, 2026-09-27, approving point 2 of the records-line review: *"go
+ * ahead and flip records to the runtime and the other 5 points."* The review
+ * measured fourteen business days on the records line: 45 conversations ran
+ * `lookup_patient` and never filed, 21 were refused by the filing tool — eleven
+ * of them for a name — and on the old core nothing swept any of them up. The
+ * "no name, no ticket" ruling of 2026-09-03 was written for the queue lanes'
+ * callback tickets, where a name is what a clerk rings back with; a records
+ * request has a callback number on every call, and the department is under a
+ * Corrective Action Plan whose first rule is that every request is LOGGED.
+ * An unlogged request is the failure; an unnamed one is a chase.
+ *
+ * ONE lane, by name, so the ruling stands everywhere it was made.
+ */
+const FILES_WITHOUT_A_NAME: ReadonlySet<string> = new Set(["records"]);
 
 export type SweepSkipReason =
   | "not-a-queue-lane"
@@ -309,7 +333,15 @@ export function decideSweep(input: SweepInput): SweepDecision {
    */
   const first = input.verifiedName?.firstName?.trim();
   const last = input.verifiedName?.lastName?.trim();
-  if (!first || !last) return { file: false, reason: "no-name" };
+  if (!first || !last) {
+    // The records lane files anyway — see FILES_WITHOUT_A_NAME. The ticket
+    // carries no name at all rather than a half of one: a first name with no
+    // surname is a search a clerk cannot run, and the ticket says why.
+    if (FILES_WITHOUT_A_NAME.has(input.slug)) {
+      return { file: true, callerSaid: callerLines(input.transcript).join(" ") };
+    }
+    return { file: false, reason: "no-name" };
+  }
   return {
     file: true,
     callerSaid: callerLines(input.transcript).join(" "),
@@ -359,8 +391,9 @@ export interface SweptTicket {
   departmentId: number;
   requestTypeId: number;
   requestReasonId: number;
-  patientFirstName: string;
-  patientLastName: string;
+  /** Absent on a records-lane request nobody identified — never a placeholder. */
+  patientFirstName?: string;
+  patientLastName?: string;
   patientPhone: string;
   description: string;
   priority: "low" | "medium" | "high";
@@ -386,8 +419,8 @@ export function buildSweptTicket(
     departmentId,
     requestTypeId: other.requestTypeId,
     requestReasonId: other.requestReasonId,
-    patientFirstName: decision.firstName,
-    patientLastName: decision.lastName,
+    ...(decision.firstName ? { patientFirstName: decision.firstName } : {}),
+    ...(decision.lastName ? { patientLastName: decision.lastName } : {}),
     patientPhone: input.callerPhone,
     /**
      * THE DESCRIPTION IS A PATIENT-FACING SMS BODY. Nothing from the call
@@ -426,6 +459,9 @@ export function buildSweptTicket(
      */
     staffNote:
       `Recovered at teardown — the agent did not file this request.\n` +
+      (decision.firstName && decision.lastName
+        ? ""
+        : `PATIENT NAME NOT CAPTURED — nobody was identified on this call; take the name from the recording before matching this to a chart.\n`) +
       `Call back on ${input.callerPhone}. Call reference ${input.callSid}.\n` +
       `What the caller said: ${callerSaid}`,
     // Not "medium". Nobody has looked at this request yet and the caller has
