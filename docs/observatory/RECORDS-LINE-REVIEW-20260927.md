@@ -205,6 +205,14 @@ recorded beneath it.
    whose Voice Configuration URL currently ends in `/api/voice/incoming-call`,
    the OLD CORE's webhook). Change *A call comes in* to:
 
+   **ADDED 2026-09-27 23:50 UTC — THE NUMBER IS THE ONE ENDING 5645.** It
+   carried 364 of the 365 records calls of 2026-09-13..27. The number ending
+   3027, repointed and test-called at 19:19 UTC on 09-27, has carried ONE call
+   in that fortnight: the test. At 22:26 UTC the same evening a real caller
+   reached 5645 and the OLD CORE answered — `CA76358a5f79fe7b9d0028a924d8db1ab4`,
+   158 s, 20 caller lines, no ticket. Until 5645 points at the URL below, the
+   lane has not moved.
+
    ```
    https://openai-realtime-api-voice-assistant-remix--fabianwayne1.replit.app/voice/records
    ```
