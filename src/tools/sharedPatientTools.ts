@@ -30,6 +30,7 @@
  */
 import { registerTool, missing, type MissingFields, type ToolResult } from './registry';
 import { gateRefusalsSoFar, noteGateRefusal, noteCallFact, callFactNoted } from './gateAttempts';
+import { forgetIfSameName, nameKey, rememberVerifiedIdentity, verifiedIdentityFor } from './verifiedIdentity';
 
 /** Which queue is asking. Injected as call context, never a model argument. */
 export type ToolQueue = 'optical' | 'surgery';
@@ -260,7 +261,6 @@ registerTool({
      * and expected rather than a gap.
      */
     const { patientStatusFor, noteStatusOverride } = await import('./spokenPatientStatus');
-    const { verifiedIdentityFor } = await import('./verifiedIdentity');
     const { LANES_THAT_ASK } = await import('../runtime/newOrExistingAsk');
     // Only the way back is honoured. A model that sends `new` against the
     // schema's single value changes nothing — the store cannot hold it and this
@@ -405,7 +405,6 @@ registerTool({
      * son), or a name matching nobody, leave the match the guess it was.
      */
     if (resolved.patientFound && resolved.identity && !resolved.identity.unique && first) {
-      const { nameKey } = await import('./verifiedIdentity');
       const affirmed = nameKey(first);
       const hits = resolved.identity.candidates.filter((c) => nameKey(c.firstName) === affirmed);
       const one = hits.length === 1 ? hits[0] : undefined;
@@ -638,7 +637,6 @@ registerTool({
      */
     let identityWrite: string | undefined;
     if (uniqueMatch) {
-      const { rememberVerifiedIdentity } = await import('./verifiedIdentity');
       identityWrite = rememberVerifiedIdentity(str(input.call_sid), {
         firstName: resolved.patientData?.firstName,
         lastName: resolved.patientData?.lastName,
@@ -692,7 +690,6 @@ registerTool({
        * moment the model ran a vaguer second search, and that entry is what
        * carries the date of birth past the gate that cost 53 of 75 calls.
        */
-      const { forgetIfSameName } = await import('./verifiedIdentity');
       const dropped = forgetIfSameName(
         str(input.call_sid),
         resolved.patientData?.firstName,

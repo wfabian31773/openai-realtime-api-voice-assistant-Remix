@@ -497,6 +497,13 @@ export interface VoiceCallRecord {
   silencePrompts?: number;
   /** True when the ladder ran out of prompts and ended the call. */
   silenceCut?: boolean;
+  /**
+   * True when the ladder spent its prompts on a caller who HAD been heard and
+   * therefore stood down instead of cutting (v72, operator ruling 2026-09-26).
+   * It is the after-number for that ruling: every one of these is a call the
+   * previous build would have ended.
+   */
+  silenceStoodDown?: boolean;
 }
 
 /**
@@ -850,6 +857,27 @@ export class VoiceCallBridge {
    */
   private silencePrompts = 0;
   private silenceCut = false;
+  /**
+   * Has this caller EVER been transcribed on this call?
+   *
+   * OPERATOR RULING, 2026-09-26: "stop cutting calls where the caller has
+   * been heard." Measured over the four days the ladder had been live, it cut
+   * 13 calls on 2026-09-25 and EIGHT of those were on calls where the caller
+   * had already spoken; six of the eight left no ticket of any provenance.
+   * Across the days before: 6 harmful of 12 cuts on 09-24, and single
+   * instances on the two days before that.
+   *
+   * WHY A SEPARATE FLAG AND NOT `silenceStrikes === 0`. The strike counter is
+   * reset by every caller turn, so at the moment the ladder fires it reads
+   * the same (non-zero) value whether the caller has spoken once and stopped
+   * or has never spoken at all. The question the ruling turns on is about the
+   * WHOLE CALL, so it needs a latch over the whole call. Set from the same
+   * transcript event that resets the strikes, and never cleared — the same
+   * reasoning `silencePrompts` carries for not being reset.
+   */
+  private callerEverHeard = false;
+  /** See VoiceCallRecord.silenceStoodDown. */
+  private silenceStoodDown = false;
 
   private readonly transcriptLog = new CallTranscriptLog();
   /** What the provider says this call cost. See tokenUsage.ts. */
@@ -884,6 +912,9 @@ export class VoiceCallBridge {
       onCallerTranscript: (text, itemId) => {
         if (this.ended) return;
         this.noteTranscript("caller");
+        // HEARD — for the rest of the call, whatever happens next. This is the
+        // latch the operator's 2026-09-26 ruling turns on; see the field.
+        this.callerEverHeard = true;
         // HEARD, so the LADDER starts again from zero — and only the ladder.
         // `silencePrompts` is the cumulative count and is deliberately not
         // touched: a prompt that brought a caller back is the single most
@@ -2166,10 +2197,40 @@ export class VoiceCallBridge {
     if (this.ended) return;
     const limit = this.deps.silenceStrikeLimit ?? SILENCE_STRIKE_LIMIT;
     if (this.silenceStrikes >= limit) {
+      /**
+       * THE PROMPTS ARE SPENT. WHO IS ON THE LINE DECIDES WHAT THAT MEANS.
+       *
+       * A caller we have never heard is what this ladder was asked for: a
+       * dialler, a robocall, an open line nobody spoke into. Ending that call
+       * is the protection, and it is unchanged.
+       *
+       * A caller we HAVE heard is a person, and ending their call ends their
+       * request — measured, six such calls left no ticket on 2026-09-25 alone.
+       * Operator ruling, 2026-09-26: do not cut them. So the ladder STANDS
+       * DOWN: it stops speaking and stops re-arming, and the call ends the way
+       * it would have before v68 existed — when the caller hangs up, or at
+       * `DEFAULT_MAX_CALL_MS`, which is what keeps standing down bounded.
+       *
+       * Standing down rather than prompting for ever is the other half of the
+       * ruling as measured: at a 12-second window an unbounded ladder would
+       * speak roughly fifty times inside the ten-minute ceiling, against a
+       * worst observed nineteen. Not cutting a caller is not a licence to
+       * talk over them indefinitely.
+       */
+      if (this.callerEverHeard) {
+        this.silenceStoodDown = true;
+        this.clearDeadAir();
+        console.info(
+          `[bridge] the caller went quiet after ${this.silenceStrikes} prompt(s) on ` +
+            `${this.deps.context.callSid} — they HAVE been heard, so the ladder stands ` +
+            `down instead of ending the call`,
+        );
+        return;
+      }
       this.silenceCut = true;
       console.warn(
         `[bridge] the caller said nothing after ${this.silenceStrikes} prompt(s) on ` +
-          `${this.deps.context.callSid} — ending the call`,
+          `${this.deps.context.callSid} — never transcribed, ending the call`,
       );
       this.teardown("caller_silent");
       return;
@@ -2364,6 +2425,7 @@ export class VoiceCallBridge {
         hangupsHeld: this.hangupsHeld,
         silencePrompts: this.silencePrompts,
         silenceCut: this.silenceCut,
+        silenceStoodDown: this.silenceStoodDown,
         followUps: {
           ...this.followUps,
           lastUnanswered:

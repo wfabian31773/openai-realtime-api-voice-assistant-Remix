@@ -34,6 +34,7 @@ import { registerTool, missing, refuseDob, dobRefusalCopy, type ToolResult } fro
 import { str, isTwilioCallSid, normalizePhone } from './sharedPatientTools';
 import { decideDobEscape, dobStatusNote, dobEscapeMarker, type DobStatus } from './dobEscape';
 import { createTicketDurable, postFailureToolResult } from '../services/durableTicketFiling';
+import { verifiedDobFor } from './verifiedIdentity';
 
 // ---------------------------------------------------------------- what kind
 
@@ -423,7 +424,6 @@ registerTool({
        * Only ever for the SAME NAME as the verified match, and only from a
        * match the lookup was certain about. See verifiedIdentity.ts.
        */
-      const { verifiedDobFor } = await import('./verifiedIdentity');
       const known = verifiedDobFor(callSid, first, last);
       parts = known ? normalizeDobParts(known) : null;
       if (parts) {
