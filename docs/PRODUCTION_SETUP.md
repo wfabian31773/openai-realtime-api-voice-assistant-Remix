@@ -122,6 +122,7 @@ Both environments can share the same Twilio account, but ensure:
 | `TWILIO_AUTH_TOKEN` | Twilio auth token |
 | `TICKETING_API_KEY` | Production ticketing key |
 | `TICKETING_SYSTEM_URL` | Production ticketing URL |
+| `TICKETING_APP_DATABASE_URL` | Ticketing-app Postgres URL (read-only). The liveness watcher reads `app_heartbeat` here. HTTP to Next is not a substitute — that stayed green at 2026-09-25 20:09. |
 | `SESSION_SECRET` | Session signing secret |
 | `HUMAN_AGENT_NUMBER` | Human agent handoff number |
 

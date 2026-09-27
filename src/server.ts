@@ -153,6 +153,9 @@ async function startVoiceServer() {
     // an unset SMTP_PASSWORD means a critical filing outage detects correctly
     // and still reaches nobody — which is the failure that alarm exists to end.
     { name: 'SMTP_PASSWORD', present: !!process.env.SMTP_PASSWORD },
+    // 2026-09-25: the ticketing-app hang watch reads this URL. HTTP to Next
+    // is not a substitute. Unset means the watch logs once and stays dark.
+    { name: 'TICKETING_APP_DATABASE_URL', present: !!process.env.TICKETING_APP_DATABASE_URL },
   ];
   const missingSecrets = secretChecks.filter(s => !s.present);
   const isProd = process.env.APP_ENV === 'production';
@@ -221,6 +224,11 @@ async function startVoiceServer() {
     // filing stopped at 20:16 UTC and nothing noticed for three and a half
     // hours; replayed against that night's rows this fires at 20:23:06.
     systemAlertService.startTicketFilingSchedule();
+
+    // Ticketing-app memory / freeze watch (every 1 min). 2026-09-25 Next
+    // hung at 20:09 UTC and nothing in that process could say so; a last
+    // heartbeat at 20:09 fires here by 20:13. Reads TICKETING_APP_DATABASE_URL.
+    systemAlertService.startTicketingAppLivenessSchedule();
     
     // Start data retention policy scheduler (purges expired data daily)
     import('./services/retentionPolicyService').then(({ retentionPolicyService }) => {
