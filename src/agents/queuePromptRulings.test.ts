@@ -457,8 +457,18 @@ describe('the trim actually happened', () => {
     expect(Math.round(optical.length / 4)).toBeLessThan(1500);
   });
 
-  it('records stays under 1,750 prompt tokens', () => {
-    expect(Math.round(records.length / 4)).toBeLessThan(1750);
+  /**
+   * RAISED 1,750 → 1,900 ON 2026-09-27, WITH THE REASON, and the reason is
+   * the operator's own top priority that day: *"we need the voice agent to
+   * send SMS or emails with the link whenever a patient is requesting
+   * records."* The funnel block — offer the link with the format in the
+   * question, the email ask, the verbal directions, the re-send — costs ~160
+   * tokens after tightening (1,697 → 1,857), and every pinned records ruling
+   * above survives it. The ceiling is the operator's; the decision to trim the
+   * offices block instead is recorded as open in the records funnel spec.
+   */
+  it('records stays under 1,900 prompt tokens', () => {
+    expect(Math.round(records.length / 4)).toBeLessThan(1900);
   });
 });
 
@@ -478,7 +488,7 @@ describe('the trim actually happened', () => {
  *   surgery      1800   1298         1652   -- inside
  *   tech         1600   1594         1948        348
  *   optical      1500   1385         1739        239
- *   records      1750   1697         2051        301
+ *   records      1750   1697         2051        301   (2026-09-27: the funnel block adds ~160; cold 1857, recognised 2235 — both ceilings raised once, see the records test above)
  *
  * THOSE THREE NUMBERS WERE RAISED ONCE, DELIBERATELY, AND THIS IS THE RECORD
  * OF IT. They were first pinned at 1936 / 1727 / 2040. Codex's round-2 P1 on
@@ -538,7 +548,7 @@ describe('the recognised-caller prompt is measured too', () => {
   for (const [lane, baseline] of [
     ['tech', 1973],
     ['optical', 1764],
-    ['records', 2076],
+    ['records', 2280],
   ] as const) {
     it(`${lane}'s recognised prompt does not grow past ${baseline} tokens`, () => {
       expect(warm[lane]).toBeLessThanOrEqual(baseline);

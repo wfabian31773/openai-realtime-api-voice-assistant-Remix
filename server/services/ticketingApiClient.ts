@@ -40,9 +40,20 @@ export interface CreateTicketParams {
    * payload, which is what makes sending them safe today.
    */
   requestorType?: 'patient' | 'personal_representative' | 'provider' | 'health_plan' | 'legal' | 'other';
-  requestPathway?: 'roa_patient' | 'third_party_treatment' | 'third_party_plan' | 'third_party_legal' | 'third_party_other';
+  requestPathway?:
+    | 'roa_patient' | 'third_party_treatment' | 'third_party_plan' | 'third_party_legal' | 'third_party_other'
+    /** Logged, clock not started: the agent sent the signing link and the signature starts the clock (owner, 2026-09-27). */
+    | 'pending_authorization';
   capClockApplies?: boolean;
   requestorName?: string;
+  /**
+   * THE FORM AT CALL TIME (owner, 2026-09-27). Medical Records only: the app
+   * sends the patient the signing link — by text to `patientPhone` or by email
+   * to `patientEmail` — in the same request that files the ticket. The
+   * response's `form` says what happened. A send that fails never fails the
+   * ticket. The app must be deployed with #320 before this field is sent.
+   */
+  formChannel?: 'sms' | 'email';
   departmentId: number;
   /**
    * Omit both when the request genuinely does not fit the department's
@@ -101,6 +112,14 @@ export interface CreateTicketResponse {
   ticketId?: number;
   ticketNumber?: string;
   error?: string;
+  /** What create-ticket did with `formChannel`; absent when none was sent. */
+  form?: {
+    requested: boolean;
+    sent: boolean;
+    channel?: 'sms' | 'email';
+    statusMove?: string | null;
+    error?: string;
+  };
   /**
    * The HTTP status, when the request reached the server and it said no.
    *
@@ -1063,6 +1082,32 @@ export class TicketingApiClient {
   }
 
   /** PCP uses a caller-first contract and always bypasses the n8n/patient path. */
+  /**
+   * RE-SEND THE SIGNING LINK for the records request this call already filed —
+   * the caller says the text did not arrive, or wants it by email instead.
+   * The first send rides inside `createTicket` (`formChannel`); this is the
+   * second chance. The app re-mints (the earlier link stops working) and never
+   * returns the URL. Never throws: a failed re-send is a sentence to the
+   * caller, not a fault.
+   */
+  async sendRecordsIntakeLink(params: {
+    callSid?: string;
+    ticketNumber?: string;
+    channel: 'sms' | 'email';
+    email?: string;
+  }): Promise<{ success: boolean; error?: string; statusCode?: number; channel?: string; expiresAt?: string; ticketNumber?: string }> {
+    try {
+      const response = await this.makeRequest<{
+        success: boolean; error?: string; channel?: string; expiresAt?: string; ticketNumber?: string;
+      }>('/api/voice-agent/records-intake-link', 'POST', params, 15_000);
+      return response;
+    } catch (err) {
+      const e = err as Error & { statusCode?: number };
+      console.warn(`[TICKETING API] records intake link re-send failed: ${e.message}`);
+      return { success: false, error: e.message, ...(e.statusCode ? { statusCode: e.statusCode } : {}) };
+    }
+  }
+
   async createPcpTicket(params: PcpTicketPayload): Promise<PcpTicketResponse> {
     try {
       const response = await this.makeRequest<PcpTicketResponse>(
