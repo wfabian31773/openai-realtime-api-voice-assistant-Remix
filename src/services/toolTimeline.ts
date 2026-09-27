@@ -290,6 +290,10 @@ function summarizeResult(tool: string, resultJson: string): Record<string, unkno
      * nobody can tune, and this one has a dial the operator will want.
      */
     'suppressed',
+    // The form at call time (2026-09-27): which channel the patient chose and
+    // whether the ticketing app confirmed the link went out. Both PHI-free.
+    'form_channel',
+    'form_sent',
     /**
      * WHAT THE IDENTITY CARRY-FORWARD WRITE DID: `stored` | `merged` |
      * `refused_sid` | `refused_name`, absent when the branch was not reached.

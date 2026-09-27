@@ -98,8 +98,32 @@ export interface SweepInput {
 }
 
 export type SweepDecision =
-  | { file: true; callerSaid: string; firstName: string; lastName: string }
+  /**
+   * `firstName`/`lastName` are OPTIONAL as of 2026-09-27, for ONE lane. On
+   * `records` a request with no verified name files without one (see the
+   * name gate in `decideSweep`); on every other lane the gate still refuses,
+   * so a filing decision there always carries both.
+   */
+  | { file: true; callerSaid: string; firstName?: string; lastName?: string }
   | { file: false; reason: SweepSkipReason };
+
+/**
+ * THE LANE WHOSE REQUESTS FILE WITHOUT A NAME.
+ *
+ * Operator, 2026-09-27, approving point 2 of the records-line review: *"go
+ * ahead and flip records to the runtime and the other 5 points."* The review
+ * measured fourteen business days on the records line: 45 conversations ran
+ * `lookup_patient` and never filed, 21 were refused by the filing tool — eleven
+ * of them for a name — and on the old core nothing swept any of them up. The
+ * "no name, no ticket" ruling of 2026-09-03 was written for the queue lanes'
+ * callback tickets, where a name is what a clerk rings back with; a records
+ * request has a callback number on every call, and the department is under a
+ * Corrective Action Plan whose first rule is that every request is LOGGED.
+ * An unlogged request is the failure; an unnamed one is a chase.
+ *
+ * ONE lane, by name, so the ruling stands everywhere it was made.
+ */
+const FILES_WITHOUT_A_NAME: ReadonlySet<string> = new Set(["records"]);
 
 export type SweepSkipReason =
   | "not-a-queue-lane"
@@ -180,11 +204,11 @@ export function saidMoreThanTheirOwnIdentity(
       .flatMap((n) => (n ?? "").toLowerCase().split(/\s+/))
       .filter(Boolean),
   );
-  for (const line of callerLines(transcript)) {
-    if (isFiller(line)) continue;
-    const words = line
+  for (const turn of callerTurns(transcript)) {
+    if (isFiller(turn.text)) continue;
+    const words = turn.text
       .toLowerCase()
-      .replace(/[.,!?¿¡'"]/g, " ")
+      .replace(/[.,!?¿¡'"-]/g, " ")
       .split(/\s+/)
       .filter(Boolean);
     const leftover = words.filter(
@@ -195,11 +219,78 @@ export function saidMoreThanTheirOwnIdentity(
         // Bare numbers and ordinals: a spoken date, a year, "the 17th".
         !/^\d{1,4}(st|nd|rd|th)?$/.test(w) &&
         monthNumberFromWord(w) === undefined &&
-        !NUMBER_WORDS.has(w),
+        !NUMBER_WORDS.has(w) &&
+        // A single letter is a caller spelling their name ("S, M, I, T, H").
+        w.length > 1,
     );
-    if (leftover.length > 0) return true;
+    if (leftover.length === 0) continue;
+    /**
+     * THE ANSWER TO AN IDENTITY QUESTION IS IDENTITY, whatever the words are.
+     *
+     * Codex P1 on #333: the records lane now files with no verified name, and
+     * with no name to subtract the loop above could not tell "Mary Smith" from
+     * a request — so a caller who was asked their name, gave it and hung up
+     * would have produced a HIGH-priority Medical Records ticket and, through
+     * `ensureCaseForTicket`, a regulated case on a statutory clock, for a call
+     * that made no request. The protection above only ever worked because the
+     * name was known.
+     *
+     * The fix reads the QUESTION, not the answer — RULE ZERO 2c, and the same
+     * device `spokenDob.ts` and `spokenPatientStatus.ts` use: the agent's own
+     * ask opens a window, the caller's turns inside it are answers to it, and
+     * a name-sized answer (up to three words once the scaffolding, dates and
+     * spelled letters are gone) is identity. Anything LONGER than a name inside
+     * the window is more than an answer and still counts — "Mary Smith, and I
+     * need my records sent" files. There is no name detector here and no list
+     * of request words: standing instruction 3 stands.
+     *
+     * MEASURED before choosing three, records lane 09-08..09-25, the 150
+     * no-ticket calls whose caller spoke: 6 are exhausted by answers to
+     * identity asks and are now skipped as identity-only; 3 answered a name
+     * question with more than a name and still file; 141 said something
+     * outside every window and file as before. The residue Codex named — a
+     * bare name VOLUNTEERED with no question asked — is not closed, because
+     * closing it needs a name detector; it is the same residue v31 accepted on
+     * the PCP sweep, and on this lane it costs a clerk a cancellation.
+     */
+    if (turn.answersIdentityAsk && leftover.length <= NAME_SIZED_ANSWER) continue;
+    return true;
   }
   return false;
+}
+
+/** Up to first, middle and last. A fourth leftover word is not a name. */
+const NAME_SIZED_ANSWER = 3;
+
+/**
+ * An AGENT line that asks the caller to identify themselves. One list, so the
+ * sweep and the tests agree on what opens a window. English and the Spanish
+ * the lanes translate their questions into; a language not listed opens no
+ * window, and the caller's answer then simply counts as speech — the direction
+ * that costs an identity-only ticket rather than a lost request.
+ */
+const IDENTITY_ASK =
+  /\b(?:your|the patient'?s|patient'?s) (?:first |last |full )?name\b|\bfirst and last name\b|\blast name\b|\bspell\b|\bdate of birth\b|\bmonth,? then the day\b|\bphone number\b|\bnumber to reach\b|\bnew patient or\b|\bexisting patient\b|\bam i speaking with\b|\bwho am i speaking\b|\bsu nombre\b|\bapellido\b|\bfecha de nacimiento\b|\bn[uú]mero de tel[eé]fono\b|\bpaciente nuevo\b/i;
+
+/**
+ * The caller's turns, each marked with whether it sits inside an identity-ask
+ * window: opened by an AGENT line that matches IDENTITY_ASK, closed by the
+ * next AGENT line. Same line shape `callerLines` reads.
+ */
+export function callerTurns(transcript: string): Array<{ text: string; answersIdentityAsk: boolean }> {
+  const turns: Array<{ text: string; answersIdentityAsk: boolean }> = [];
+  let window = false;
+  for (const raw of transcript.split("\n")) {
+    if (raw.startsWith("AGENT:")) {
+      window = IDENTITY_ASK.test(raw.slice("AGENT:".length));
+      continue;
+    }
+    if (!raw.startsWith("CALLER:")) continue;
+    const text = raw.slice("CALLER:".length).trim();
+    if (!text) continue;
+    turns.push({ text, answersIdentityAsk: window });
+  }
+  return turns;
 }
 
 /** The scaffolding around an identity answer: "this is", "my name is". */
@@ -309,7 +400,15 @@ export function decideSweep(input: SweepInput): SweepDecision {
    */
   const first = input.verifiedName?.firstName?.trim();
   const last = input.verifiedName?.lastName?.trim();
-  if (!first || !last) return { file: false, reason: "no-name" };
+  if (!first || !last) {
+    // The records lane files anyway — see FILES_WITHOUT_A_NAME. The ticket
+    // carries no name at all rather than a half of one: a first name with no
+    // surname is a search a clerk cannot run, and the ticket says why.
+    if (FILES_WITHOUT_A_NAME.has(input.slug)) {
+      return { file: true, callerSaid: callerLines(input.transcript).join(" ") };
+    }
+    return { file: false, reason: "no-name" };
+  }
   return {
     file: true,
     callerSaid: callerLines(input.transcript).join(" "),
@@ -359,8 +458,9 @@ export interface SweptTicket {
   departmentId: number;
   requestTypeId: number;
   requestReasonId: number;
-  patientFirstName: string;
-  patientLastName: string;
+  /** Absent on a records-lane request nobody identified — never a placeholder. */
+  patientFirstName?: string;
+  patientLastName?: string;
   patientPhone: string;
   description: string;
   priority: "low" | "medium" | "high";
@@ -386,8 +486,8 @@ export function buildSweptTicket(
     departmentId,
     requestTypeId: other.requestTypeId,
     requestReasonId: other.requestReasonId,
-    patientFirstName: decision.firstName,
-    patientLastName: decision.lastName,
+    ...(decision.firstName ? { patientFirstName: decision.firstName } : {}),
+    ...(decision.lastName ? { patientLastName: decision.lastName } : {}),
     patientPhone: input.callerPhone,
     /**
      * THE DESCRIPTION IS A PATIENT-FACING SMS BODY. Nothing from the call
@@ -426,6 +526,9 @@ export function buildSweptTicket(
      */
     staffNote:
       `Recovered at teardown — the agent did not file this request.\n` +
+      (decision.firstName && decision.lastName
+        ? ""
+        : `PATIENT NAME NOT CAPTURED — nobody was identified on this call; take the name from the recording before matching this to a chart.\n`) +
       `Call back on ${input.callerPhone}. Call reference ${input.callSid}.\n` +
       `What the caller said: ${callerSaid}`,
     // Not "medium". Nobody has looked at this request yet and the caller has

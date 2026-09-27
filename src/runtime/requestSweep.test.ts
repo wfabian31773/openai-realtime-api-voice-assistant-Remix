@@ -6,6 +6,7 @@
 import { describe, it, expect } from "vitest";
 import {
   callerLines,
+  callerTurns,
   callerSaidSomething,
   alreadyFiledByTool,
   decideSweep,
@@ -294,6 +295,69 @@ describe("no name, no ticket", () => {
 });
 
 /**
+ * THE ONE LANE THAT FILES WITHOUT A NAME — operator, 2026-09-27, point 2 of
+ * the records-line review. Fourteen business days on the records line: 45
+ * conversations ran `lookup_patient` and never filed, eleven were refused by
+ * the filing tool for a name, and nothing swept them up. The department is
+ * under a Corrective Action Plan whose first rule is that every request is
+ * logged; an unlogged request is the failure, an unnamed one is a chase.
+ *
+ * ONE lane. The 2026-09-03 ruling stands everywhere else, and the tests
+ * above prove it does.
+ */
+describe("the records lane files without a name", () => {
+  it("files a nameless records request, with no name on it rather than half of one", () => {
+    const d = decideSweep(call({ slug: "records", verifiedName: undefined }));
+    expect(d.file).toBe(true);
+    expect(d).not.toHaveProperty("firstName");
+    expect(d).not.toHaveProperty("lastName");
+  });
+
+  it("drops a half name rather than filing under it", () => {
+    const d = decideSweep(call({ slug: "records", verifiedName: { firstName: "Given", lastName: "" } }));
+    expect(d.file).toBe(true);
+    expect(d).not.toHaveProperty("firstName");
+  });
+
+  it("still carries a verified name when there is one", () => {
+    const d = decideSweep(call({ slug: "records" }));
+    expect(d).toMatchObject({ file: true, firstName: "Testpatient", lastName: "Example" });
+  });
+
+  it("is ONLY records — tech, optical and surgery still refuse", () => {
+    for (const slug of ["tech", "optical", "surgery"]) {
+      expect(decideSweep(call({ slug, verifiedName: undefined })), slug).toEqual({
+        file: false,
+        reason: "no-name",
+      });
+    }
+  });
+
+  it("the other gates still run first on records — a silent line is not a nameless request", () => {
+    const silent = decideSweep(call({ slug: "records", verifiedName: undefined, transcript: "AGENT: Thank you for calling." }));
+    expect(silent).toEqual({ file: false, reason: "caller-said-nothing" });
+    const filed = decideSweep(call({ slug: "records", verifiedName: undefined, ticketAlreadyFiled: true }));
+    expect(filed).toEqual({ file: false, reason: "already-filed" });
+  });
+
+  it("the swept ticket omits the name keys and says so in the STAFF note, never the description", () => {
+    const input = call({ slug: "records", verifiedName: undefined });
+    const d = decideSweep(input);
+    if (!d.file) throw new Error("expected a filing decision");
+    const t = buildSweptTicket(input, d);
+    expect(t).not.toHaveProperty("patientFirstName");
+    expect(t).not.toHaveProperty("patientLastName");
+    expect(t.staffNote).toContain("PATIENT NAME NOT CAPTURED");
+    expect(t.description).not.toContain("NOT CAPTURED");
+    // And a named records ticket carries no such note.
+    const named = call({ slug: "records" });
+    const dn = decideSweep(named);
+    if (!dn.file) throw new Error("expected a filing decision");
+    expect(buildSweptTicket(named, dn).staffNote).not.toContain("NOT CAPTURED");
+  });
+});
+
+/**
  * THE CALLER CHASING A REQUEST THEY ALREADY MADE.
  *
  * Codex, PR #268 — the finding with a human cost. `check_open_tickets`
@@ -445,5 +509,105 @@ describe("a caller who only identified themselves", () => {
       }),
     );
     expect(d.file).toBe(true);
+  });
+});
+
+/**
+ * CODEX P1 ON #333. The records lane files with no verified name, and with no
+ * name to subtract `saidMoreThanTheirOwnIdentity` could not tell "Mary Smith"
+ * from a request — an identity-only hang-up would have filed a high-priority
+ * Medical Records ticket and opened a regulated case. The answer to an identity
+ * QUESTION is identity: the agent's ask opens a window, a name-sized answer
+ * inside it is not a request, and anything longer than a name still is.
+ *
+ * Measured on the records lane 09-08..09-25 (150 no-ticket calls whose caller
+ * spoke): 6 are exhausted by such answers and are skipped here; 3 answered a
+ * name question with more than a name and still file; 141 said something
+ * outside every window and file as before.
+ */
+describe("an anonymous caller who only answered the identity questions (records)", () => {
+  const anon = (transcript: string, slug = "records") =>
+    decideSweep(
+      call({
+        slug,
+        transcript,
+        verifiedName: undefined,
+        toolEvents: [{ name: "lookup_patient", succeeded: false }],
+      }),
+    );
+
+  it("is skipped as identity-only, not filed, when every line answers an ask", () => {
+    const d = anon(
+      "AGENT: May I have the patient's first name?\nCALLER: Mary.\n" +
+        "AGENT: And the last name?\nCALLER: Smith.\n" +
+        "AGENT: And your date of birth, month then day then year?\nCALLER: March seventeenth, nineteen fifty.",
+    );
+    expect(d).toEqual({ file: false, reason: "identity-only" });
+  });
+
+  it("treats a spelled surname as identity", () => {
+    const d = anon("AGENT: Could you spell your last name?\nCALLER: S, M, I, T, H.");
+    expect(d).toEqual({ file: false, reason: "identity-only" });
+  });
+
+  it("treats a LONG spelled surname as identity too — the letters are not words", () => {
+    // The first mutation run survived dropping the single-letter filter, because
+    // a five-letter surname leaves three letters once "s" and "i" are removed as
+    // scaffolding — inside the name-sized bound by accident. Seven letters are
+    // not, so this is the test that makes the filter load-bearing.
+    const d = anon("AGENT: Could you spell the patient's last name?\nCALLER: G, O, N, Z, A, L, E, Z.");
+    expect(d).toEqual({ file: false, reason: "identity-only" });
+  });
+
+  it("treats the new-or-existing answer as identity", () => {
+    const d = anon("AGENT: Are you a new patient or an existing patient?\nCALLER: Existing.");
+    expect(d).toEqual({ file: false, reason: "identity-only" });
+  });
+
+  it("reads the Spanish ask too", () => {
+    const d = anon("AGENT: ¿Cuál es su nombre completo?\nCALLER: María García.");
+    expect(d).toEqual({ file: false, reason: "identity-only" });
+  });
+
+  it("STILL files when the answer to the name question is more than a name", () => {
+    const d = anon("AGENT: May I have your full name?\nCALLER: Mary Smith, and I need my records sent to my new doctor.");
+    expect(d.file).toBe(true);
+  });
+
+  it("STILL files a request said outside any identity window", () => {
+    const d = anon(
+      "AGENT: May I have your last name?\nCALLER: Smith.\n" +
+        "AGENT: How can I help today?\nCALLER: I need a copy of my chart.",
+    );
+    expect(d.file).toBe(true);
+  });
+
+  it("a window closes at the next agent line — a request after an unrelated agent line is a request", () => {
+    const d = anon("AGENT: Your name?\nCALLER: Smith.\nAGENT: One moment.\nCALLER: Records please.");
+    expect(d.file).toBe(true);
+  });
+
+  it("the residue is stated, not hidden: a bare name VOLUNTEERED with no ask still files", () => {
+    // Closing this needs a name detector, which standing instruction 3 forbids.
+    // It is the residue v31 accepted on the PCP sweep; on this lane it costs a
+    // clerk a cancellation, and it is recorded here so nobody re-derives it.
+    const d = anon("AGENT: How can I help you today?\nCALLER: Mary Smith.");
+    expect(d.file).toBe(true);
+  });
+
+  it("does not change what the other lanes DO — an anonymous identity-only call on tech is still not filed", () => {
+    const d = anon("AGENT: May I have your last name?\nCALLER: Smith.", "tech");
+    expect(d.file).toBe(false);
+  });
+
+  it("callerTurns marks exactly the turns inside a window", () => {
+    expect(
+      callerTurns("AGENT: Hi.\nCALLER: Hello.\nAGENT: Your date of birth?\nCALLER: 03 17 1950\nCALLER: Sorry, 1951.\nAGENT: Thanks.\nCALLER: Records please."),
+    ).toEqual([
+      { text: "Hello.", answersIdentityAsk: false },
+      { text: "03 17 1950", answersIdentityAsk: true },
+      { text: "Sorry, 1951.", answersIdentityAsk: true },
+      { text: "Records please.", answersIdentityAsk: false },
+    ]);
   });
 });

@@ -78,6 +78,7 @@ export class TicketingSyncService {
           from: callLogs.from,
           to: callLogs.to,
           agentId: callLogs.agentId,
+          agentUsed: callLogs.agentUsed,
           direction: callLogs.direction,
           status: callLogs.status,
           startTime: callLogs.startTime,
@@ -175,7 +176,26 @@ export class TicketingSyncService {
         transcript: call.transcript || undefined,
         callerPhone: call.from,
         dialedNumber: sanitizedDialedNumber,
-        agentUsed: call.agentId || "unknown",
+        /**
+         * THE LANE SLUG, NEVER THE AGENTS-TABLE UUID — AND NEVER "unknown".
+         *
+         * This read `call.agentId || "unknown"` and the ticketing app writes
+         * whatever arrives here straight onto `tickets.agent_used`
+         * (update-call-data, `if (payload.agentUsed) updateData.agentUsed`).
+         * So every ticket the sync touched was re-stamped with the uuid the
+         * runtime resolves for `call_logs.agent_id`, or with the literal
+         * "unknown" where a row had none. Measured 2026-09-27: 126 of 307
+         * agent-filed Medical Records tickets in 09-08..09-25 carry a uuid
+         * (pcp 99, records 10, tech 10, surgery 6, optical 1), and CLAUDE.md
+         * already records 91 rows reading "unknown" on 2026-09-03 — the same
+         * line, the other branch. The ticket is CREATED with the slug by every
+         * filing tool; this was the only writer turning it into something no
+         * report can group by.
+         *
+         * Omitted rather than defaulted: the app skips a falsy value and keeps
+         * what the filing wrote, which is always better than a sentinel.
+         */
+        agentUsed: call.agentUsed || undefined,
         callStartTime: call.startTime?.toISOString(),
         callEndTime: call.endTime?.toISOString(),
         callDurationSeconds: call.duration || 0,

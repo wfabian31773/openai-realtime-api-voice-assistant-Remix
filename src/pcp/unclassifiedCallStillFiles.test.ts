@@ -250,9 +250,31 @@ describe('the narrowness is the point', () => {
     ).not.toHaveBeenCalled();
   });
 
-  it('over-files an identity-only call when the name was NOT captured, and that is the accepted cost', async () => {
+  /**
+   * NARROWED BY #333 (2026-09-27). The accepted over-file used to include a
+   * caller who was ASKED their name, gave it and hung up — with no captured
+   * name there was nothing to subtract. `saidMoreThanTheirOwnIdentity` now
+   * reads the agent's QUESTION: a name-sized answer inside an identity-ask
+   * window is identity whatever the words are, so that call is suppressed on
+   * this lane too, with no name detector involved. What remains of the cost is
+   * the case below it — a bare name VOLUNTEERED with no question asked.
+   */
+  it('suppresses an identity answer to the agent\u2019s own question even when the name was NOT captured', async () => {
     const { callId } = unclassifiedCall(
       ['AGENT: May I have your name?', 'CALLER: This is Jordan Rivers.'].join('\n'),
+    );
+
+    await sweep(callId);
+
+    expect(
+      ticketing.createPcpTicket,
+      'the answer to "your name?" is a name, not a request — Codex P1, #333',
+    ).not.toHaveBeenCalled();
+  });
+
+  it('over-files a bare name VOLUNTEERED with no question asked, and that is the accepted cost', async () => {
+    const { callId } = unclassifiedCall(
+      ['AGENT: How can I help you today?', 'CALLER: This is Jordan Rivers.'].join('\n'),
     );
 
     await sweep(callId);
