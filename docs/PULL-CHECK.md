@@ -29,8 +29,8 @@ no credential yet; once the two variables are set it changes to
 Alongside them, from earlier builds, both still expected:
 
 ```
-[TICKET OUTBOX] Starting retry worker (every 60s; up to 12 attempts, backoff 30s → 30m …)
-[ALERT SERVICE] Starting ticket-filing alarm (every 5 minutes)
+[TICKET OUTBOX] Starting retry worker (every 60s; up to 12 attempts, backoff 30s → 30m; queue payloads re-sent verbatim; a 400/422 writes refusal_status_code)
+[ALERT SERVICE] Starting ticket-filing alarm (every 5 minutes; a terminal 4xx is follow-up, not a stall)
 ```
 
 ## 2. One line per lane, on its first call after the pull

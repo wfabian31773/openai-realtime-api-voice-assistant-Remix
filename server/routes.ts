@@ -278,6 +278,40 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  // Unresolved outbox dead letters — both terminal 4xx and transport — so
+  // Wayne can see the 2026-09-25 rows (NULL refusal_status_code) and mark
+  // them handled. Does not replay or mutate payload.
+  app.get('/api/ticket-outbox/unresolved', isAuthenticated, requireRole('admin'), async (_req, res) => {
+    try {
+      const { listUnresolvedDeadLetters } = await import('../src/services/ticketOutboxResolve');
+      res.json({ rows: await listUnresolvedDeadLetters() });
+    } catch (error) {
+      console.error('[ticket-outbox] list unresolved failed:', error);
+      res.status(500).json({ error: 'Failed to list unresolved outbox rows' });
+    }
+  });
+
+  app.post('/api/ticket-outbox/:id/resolve', isAuthenticated, requireRole('admin'), async (req, res) => {
+    try {
+      const { actorFromRequest, resolveOutboxRow } = await import('../src/services/ticketOutboxResolve');
+      const actor = actorFromRequest(req);
+      if (!actor) {
+        return res.status(401).json({ error: 'Authentication required' });
+      }
+      const note = typeof req.body?.note === 'string' ? req.body.note : undefined;
+      const result = await resolveOutboxRow({ id: req.params.id, resolvedBy: actor, note });
+      if (!result.ok) {
+        const status =
+          result.reason === 'not_found' ? 404 : result.reason === 'already_resolved' ? 409 : 400;
+        return res.status(status).json({ error: result.reason });
+      }
+      res.json(result);
+    } catch (error) {
+      console.error('[ticket-outbox] resolve failed:', error);
+      res.status(500).json({ error: 'Failed to resolve outbox row' });
+    }
+  });
+
   // Silent listen-in: dial the supervisor's phone into a live call's
   // conference, muted (Wayne 2026-08-07: "join in the conversation
   // silently and monitor"). Explicit per-call button click on the command

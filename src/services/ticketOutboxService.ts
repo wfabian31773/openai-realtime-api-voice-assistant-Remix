@@ -170,6 +170,11 @@ export class TicketOutboxService {
                 status: 'pending',
                 retryCount: 0,
                 lastError: null,
+                refusalStatusCode: null,
+                followupNotifiedAt: null,
+                resolvedAt: null,
+                resolvedBy: null,
+                resolutionNote: null,
                 nextRetryAt: reopenedAt,
                 updatedAt: reopenedAt,
               })
@@ -384,7 +389,13 @@ export class TicketOutboxService {
           `[TICKET OUTBOX] ☠ REFUSED (HTTP ${response.statusCode}) — dead-lettering ${outboxId} ` +
             `without retrying: ${error}`,
         );
-        const refused = await TicketOutboxService.markFailed(outboxId, entry.retryCount, error, true);
+        const refused = await TicketOutboxService.markFailed(
+          outboxId,
+          entry.retryCount,
+          error,
+          true,
+          response.statusCode,
+        );
         return { ...refused, statusCode: response.statusCode };
       }
       return await TicketOutboxService.markFailed(outboxId, entry.retryCount, error);
@@ -503,6 +514,9 @@ export class TicketOutboxService {
     /** The server refused the payload itself. Retrying cannot change that, so
      *  it goes straight to dead_letter regardless of attempts remaining. */
     terminal = false,
+    /** HTTP status behind a terminal refusal. Persisted so the alarm can
+     *  tell a 400 from a transport dead letter without reading last_error. */
+    statusCode?: number,
   ): Promise<OutboxSendResult> {
     const newRetryCount = currentRetryCount + 1;
     const isDeadLetter = terminal || newRetryCount >= MAX_RETRIES;
@@ -512,6 +526,8 @@ export class TicketOutboxService {
           Date.now() +
             Math.min(RETRY_BACKOFF_BASE_MS * Math.pow(2, newRetryCount - 1), RETRY_BACKOFF_CAP_MS),
         );
+    const persistedRefusal =
+      terminal && isTerminalRefusal(statusCode) ? statusCode : undefined;
 
     await db
       .update(ticketOutbox)
@@ -519,6 +535,7 @@ export class TicketOutboxService {
         status: isDeadLetter ? 'dead_letter' : 'failed',
         retryCount: newRetryCount,
         lastError: error,
+        ...(persistedRefusal !== undefined ? { refusalStatusCode: persistedRefusal } : {}),
         nextRetryAt,
         updatedAt: new Date(),
       })
@@ -614,7 +631,8 @@ export class TicketOutboxService {
     console.info(
       `[TICKET OUTBOX] Starting retry worker (every ${WORKER_INTERVAL_MS / 1000}s; ` +
         `up to ${MAX_RETRIES} attempts, backoff ${RETRY_BACKOFF_BASE_MS / 1000}s → ` +
-        `${RETRY_BACKOFF_CAP_MS / 60_000}m; queue payloads re-sent verbatim)`,
+        `${RETRY_BACKOFF_CAP_MS / 60_000}m; queue payloads re-sent verbatim; ` +
+        `a 400/422 writes refusal_status_code)`,
     );
     TicketOutboxService.workerTimer = setInterval(async () => {
       try {

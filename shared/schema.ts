@@ -1363,6 +1363,17 @@ export const ticketOutbox = pgTable("ticket_outbox", {
   retryCount: integer("retry_count").notNull().default(0),
   maxRetries: integer("max_retries").notNull().default(5),
   lastError: text("last_error"),
+  /**
+   * HTTP status when the far side READ the payload and refused it (400/422).
+   * Null on a transport dead letter (timeouts, 5xx, no status) and on every
+   * row that is still retrying. The filing alarm keys on this column — never
+   * on last_error text — so a payload refusal cannot look like an outage.
+   */
+  refusalStatusCode: integer("refusal_status_code"),
+  followupNotifiedAt: timestamp("followup_notified_at"),
+  resolvedAt: timestamp("resolved_at"),
+  resolvedBy: varchar("resolved_by"),
+  resolutionNote: text("resolution_note"),
   nextRetryAt: timestamp("next_retry_at"),
   createdAt: timestamp("created_at").notNull().defaultNow(),
   updatedAt: timestamp("updated_at").notNull().defaultNow(),

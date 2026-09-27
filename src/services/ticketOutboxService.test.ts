@@ -292,6 +292,9 @@ describe('a refusal from the far side is not retried', () => {
     expect(written?.status).toBe('dead_letter');
     // No next attempt is scheduled: there is nothing to wait for.
     expect(written?.nextRetryAt).toBeNull();
+    // Persisted so the alarm can tell this from a transport dead letter
+    // without reading last_error.
+    expect(written?.refusalStatusCode).toBe(400);
   });
 
   it('leaves the payload intact so it can be replayed by hand', async () => {
@@ -315,6 +318,7 @@ describe('a refusal from the far side is not retried', () => {
     const written = setPayloads.find((p) => p.status === 'failed' || p.status === 'dead_letter');
     expect(written?.status).toBe('failed');
     expect(written?.nextRetryAt).toBeInstanceOf(Date);
+    expect(written?.refusalStatusCode).toBeUndefined();
   });
 
   it('still retries a transport failure that carries no status at all', async () => {
@@ -432,8 +436,27 @@ describe('the terminal verdict leaves the outbox with the result', () => {
 
     const res = await TicketOutboxService.attemptSend('ob-1');
 
-    expect(setPayloads.find((p) => p.status === 'dead_letter')).toBeTruthy();
+    const written = setPayloads.find((p) => p.status === 'dead_letter');
+    expect(written).toBeTruthy();
     expect(res.terminal).toBeUndefined();
+    expect(written?.refusalStatusCode).toBeUndefined();
+  });
+
+  it('writes refusal_status_code only for an enumerated payload refusal', () => {
+    // markFailed is private and the public path already gates on
+    // isTerminalRefusal, so a 401 never reaches terminal=true today. The
+    // inner guard is what keeps a later call site from stamping 401 onto
+    // the column the alarm keys on. Pin the source, not the sink.
+    const source = readFileSync(new URL('./ticketOutboxService.ts', import.meta.url), 'utf8');
+    const markFailed = source.slice(
+      source.indexOf('private static async markFailed'),
+      source.indexOf('static async processRetries'),
+    );
+    expect(markFailed).toMatch(
+      /terminal && isTerminalRefusal\(statusCode\) \? statusCode : undefined/,
+    );
+    expect(markFailed).toMatch(/persistedRefusal !== undefined \? \{ refusalStatusCode: persistedRefusal \}/);
+    expect(markFailed).not.toMatch(/terminal \? statusCode/);
   });
 });
 
@@ -475,6 +498,9 @@ describe('a dead letter must not hold the key its own correction needs', () => {
     const reopen = setPayloads.find((p) => p.status === 'pending' && 'payload' in p);
     expect(reopen).toBeTruthy();
     expect(reopen!.retryCount).toBe(0);
+    expect(reopen!.refusalStatusCode).toBeNull();
+    expect(reopen!.followupNotifiedAt).toBeNull();
+    expect(reopen!.resolvedAt).toBeNull();
     // The CORRECTED words, not the ones the API refused.
     expect((reopen!.payload as { params: { description: string } }).params.description).toBe(
       'Dr. Nguyen is the surgeon',

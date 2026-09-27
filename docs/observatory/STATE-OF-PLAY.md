@@ -10,7 +10,9 @@
 
 **Companion to `/CLAUDE.md`. Read both at the start of every session.**
 
-Last updated: **2026-09-17 11:10 UTC** (section 12). Earlier: **2026-09-09 17:40 UTC** (section 11), **2026-08-11 01:15 UTC** (Wayne: *"go through this entire
+Last updated: **2026-09-25** (section 13 — terminal 4xx is follow-up, not a
+stall). Earlier: **2026-09-17 11:10 UTC** (section 12), **2026-09-09 17:40 UTC**
+(section 11), **2026-08-11 01:15 UTC** (Wayne: *"go through this entire
 conversation… and log and create an MD file… and force every time that you read
 that"*).
 
@@ -1250,3 +1252,50 @@ transcript **must be rotated**; `LOOKUP_MISS_LIMIT` (2), `HANGUP_HOLD_LIMIT`
 (*detached retina* firing on a scheduling call); and whether the recognised
 arm is trimmed to the stated ceilings or the ceilings restated for the arm
 that serves most callers.
+
+---
+
+## 13. The filing alarm treated a 400 as an outage — 2026-09-25
+
+Measured that evening, read-only: three `ticket_outbox` rows were
+dead-lettered by `markFailed(..., terminal=true)` after the ticketing app
+recovered.
+
+| call_sid | lane | refusal |
+|---|---|---|
+| `CAf1c375ee5dc57dd6d705939a7f15cee7` | optical | 400, missing office |
+| `CA4707e391198147df5032f2e72884e998` | surgery | 400, missing surgeon |
+| `CAb751a4f668f9f33e4c15dc9c34e8fcfa` | surgery | 400, missing surgeon |
+
+Filing itself was healthy — tickets landed 1–4 minutes before every alert.
+`readTicketFilingSnapshot` counted every `dead_letter` forever with no
+age-out (that part is still right — a dead letter must not look healthy
+because it is old). `assessTicketFiling` stalled whenever
+`outboxDeadLetter > 0`. `checkTicketFilingAlert` emailed
+`ticket_filing_stalled` every five minutes (cooldown 5 min, cap 10/hour).
+The same false-alarm shape happened on 2026-09-02.
+
+**What changed.** `refusal_status_code` is persisted on a 400/422 dead
+letter only (`isTerminalRefusal`, enumerated, never inferred from
+`last_error`). The snapshot splits those into `terminal_dead_letter`.
+`assessTicketFiling` stalls on a *transport* dead letter, on
+`outboxHeld >= 3` of pending/failed/transport-dead-letter, and on the
+unfiled-run plane. A terminal 4xx does not stall.
+
+Each terminal row gets one `ticket_needs_followup` email through
+`emailService.sendEmail` (not `sendAlert` — that cooldown would throttle
+a row). `followup_notified_at` is the once-only lock; a failed send
+unclaims. Resolved rows (`resolved_at` / `resolved_by` /
+`resolution_note`) drop out of both the alarm and the notice.
+Admin-only: `GET /api/ticket-outbox/unresolved`,
+`POST /api/ticket-outbox/:id/resolve`. Observatory amber banner with a
+Resolve button.
+
+**The three rows above wait for Wayne.** They were written before the
+column existed, so `refusal_status_code` is NULL and they still count as
+transport until he resolves them after deploy. The migration does not
+backfill or auto-resolve. After the pull: Observatory → amber follow-up
+list → Resolve on each of the three. Do not replay them from here.
+
+Migration (do not apply from this session):
+`migrations/add_ticket_outbox_refusal_and_resolution.sql`.
