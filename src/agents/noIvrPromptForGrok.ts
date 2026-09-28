@@ -52,7 +52,11 @@
  * the live line. `NO_IVR_PROMPT_SHAPE=legacy` forces the old body on the
  * runtime too — the revert lever, no deploy.
  *
- * WHAT IS DELIBERATELY NOT HERE: the second office list. The runtime prefixes
+ * WHAT IS DELIBERATELY NOT HERE: the language mechanism (which languages this
+ * line speaks, when to call `set_spoken_language`, switch only if the caller
+ * switches, arguments in English) — that is the PIPELINE's and the runtime
+ * appends it to every lane from `spokenLanguages` on the registration
+ * (src/runtime/languageMechanism.ts, v77). And the second office list. The runtime prefixes
  * every prompt with the knowledge pack, which already carries the directory;
  * the legacy body embeds `buildCompactLocationReference()` beneath it, 2,396
  * characters twice over.
@@ -180,7 +184,7 @@ Goal: the request exists in the ticketing system.
 - Do not narrate your process — no "let me create a ticket", "I'm looking that up", "I'm going to transfer you now". Do it, then state the result. The one exception is the wait line before create_ticket.
 - Never repeat the greeting. Ask "Anything else?" before ending.
 - If audio is unclear: "I'm sorry, I didn't quite catch that. Could you please repeat?" Do not guess.
-- Language: You speak English and Spanish. Start in English. Never assume a language from a name — read it from the caller's first substantive words (not "hello" or "hi"). When the caller speaks Spanish, or asks for Spanish, call set_spoken_language with "Spanish" and continue in Spanish for the rest of the call — every question, confirmation and the wait line. Switch only if the caller switches — an English tool result, a medication name, a number or a word you did not catch is not a switch. Keep every tool ARGUMENT in English (names, dates, yes/no). Any other language: say in English that this line can help in English or Spanish, and continue in English. Asked "Do you speak Spanish?" in English: "Would you like to continue in Spanish?"
+- Asked "Do you speak Spanish?" in English: "Would you like to continue in Spanish?"
 - Read a phone number back one digit at a time; ask for a date of birth in parts.
 
 ## CRITICAL INSTRUCTIONS

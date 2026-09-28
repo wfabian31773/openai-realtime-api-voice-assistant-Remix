@@ -144,7 +144,7 @@ describe("the Grok body is the shape xAI's Prompting Guide prescribes", () => {
       const phantom = named.filter((t) => !onAgent.has(t));
       expect(phantom, `${JSON.stringify(meta)} scripts a tool it does not have`).toEqual([]);
       // And it scripts the ones that matter, so this is not passing vacuously.
-      expect(named).toEqual(expect.arrayContaining(['create_ticket', 'escalate_to_human', 'terminate_call', 'set_spoken_language']));
+      expect(named).toEqual(expect.arrayContaining(['create_ticket', 'escalate_to_human', 'terminate_call']));
     }
   });
 });
@@ -171,14 +171,17 @@ const RULINGS: Array<[string, RegExp]> = [
   ['never promise a recording', /Never promise a recording/],
   ['the full name in one question', /"What is your full name\?"/],
   ['the email funnel, once, then a phone callback', /spell\s*\n?\s*it out for me, letter by letter/],
-  ['the language lock names the tool', /call set_spoken_language\s+with "Spanish"/],
-  ['switch only if the caller switches', /Switch only if the caller switches/],
+  // The language MECHANISM (call set_spoken_language, switch only if the caller
+  // switches, arguments in English) is the RUNTIME's since v77 and is asserted
+  // on every bound lane in src/runtime/promptShapeIsTheDocs.test.ts. The
+  // legacy body still states this line's POLICY in its own words for the old
+  // core; the Grok body gets the policy from `spokenLanguages` at binding.
   ['anything else before ending', /Anything else\?/],
   ['no "is that correct?"', /DO NOT ask "Is that correct\?"|Do not ask "Is that correct\?"/],
   ['the ticket number is not read out', /(DO NOT|Do not) read (out )?the ticket number/],
   ['the technical-issue line is a fixed sentence', /I'm sorry, I'm having a technical issue on my end right now\. I have your information and our team will call you back at \[callback number\] as soon as possible\./],
   ['the urgent-symptom list is present', /URGENT SYMPTOMS/],
-  ['the triage block is present', /TRIAGE — ASK ONE QUESTION, THEN DECIDE/],
+  ['the triage block is present', /Triage — ask one question, then decide/i],
 ];
 
 describe('every ruling survives in both bodies', () => {

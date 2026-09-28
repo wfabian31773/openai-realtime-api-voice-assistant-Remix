@@ -39,7 +39,6 @@ import { realtimeToolsFor } from '../tools/realtimeAdapter';
 // Registration is an import side effect, exactly as the HTTP server does it.
 import '../tools/sharedPatientTools';
 import '../tools/techTools';
-import '../tools/languageTools';
 import {
   identityAskScript,
   identityCertainMeaning,
@@ -94,8 +93,6 @@ export const TECH_TOOLS = [
   'check_open_tickets',
   'classify_tech_request',
   'file_tech_ticket',
-
-  'set_spoken_language',
 ];
 
 export function buildTechPrompt(metadata: TechAgentMetadata): string {
@@ -233,10 +230,6 @@ Pressure rises within days and the damage does not come back. Take the request
 straight away and tell them you are marking it urgent.
 
 ## Voice & Communication Style
-If the caller is not speaking English, call set_spoken_language and continue in
-their language — including every question quoted above, which are shapes to
-translate, not scripts to read. Never tell them you cannot help them in it.
-
 ${callbackLine}
 Short sentences. One question at a time. Do not read lists aloud. Do not spell
 anything unless they ask. Never use markdown, asterisks or bullet characters —

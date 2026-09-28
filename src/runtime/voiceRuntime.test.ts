@@ -27,6 +27,13 @@ import type { GrokServerEvent } from "./wireTypes";
 import type { LaneConfig, LaneSource } from "./laneRegistry";
 import { registerCallHandoff, registeredHandoffCount } from "../tools/handoffBroker";
 
+// v77: resolveLane binds the PIPELINE's own tools (set_spoken_language) through
+// the tool library, whose telemetry module validates the environment at import.
+// A dummy connection string satisfies that validation; nothing here queries it.
+process.env.DATABASE_URL ||= 'postgresql://unused:unused@127.0.0.1:5432/unused';
+process.env.OPENAI_API_KEY ||= 'test-unused';
+process.env.XAI_API_KEY ||= 'test-unused';
+
 const AUTH_TOKEN = "test-auth-token";
 const ENV = {
   TWILIO_AUTH_TOKEN: AUTH_TOKEN,
@@ -400,8 +407,9 @@ describe("one whole call, end to end, offline", () => {
     // The agent's own words, and the practice knowledge in front of them.
     expect(update.session.instructions).toContain("You are the optical queue agent");
     expect(update.session.instructions).toContain("YOU WORK FOR AZUL VISION");
-    // The agent's own tool, with its own schema and no strict mode.
-    expect(update.session.tools.map((t) => t.name)).toEqual(["create_ticket"]);
+    // The agent's own tool, with its own schema and no strict mode — then the
+    // pipeline's own (v77): the runtime binds set_spoken_language to every lane.
+    expect(update.session.tools.map((t) => t.name)).toEqual(["create_ticket", "set_spoken_language"]);
     expect(JSON.stringify(update.session.tools)).not.toContain('"strict"');
 
     // 4. Caller audio reaches Grok untouched.

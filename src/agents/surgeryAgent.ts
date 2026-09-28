@@ -54,7 +54,6 @@ import { realtimeToolsFor } from '../tools/realtimeAdapter';
 // check_open_tickets; surgeryTools brings the two this queue owns.
 import '../tools/sharedPatientTools';
 import '../tools/surgeryTools';
-import '../tools/languageTools';
 import {
   identityAskScript,
   identityCertainMeaning,
@@ -119,8 +118,6 @@ export const SURGERY_TOOLS = [
   'check_open_tickets',
   'classify_surgery_request',
   'file_surgery_ticket',
-
-  'set_spoken_language',
 ];
 
 export function buildSurgeryPrompt(metadata: SurgeryAgentMetadata): string {
@@ -255,10 +252,6 @@ number, and never file a ticket with a detail you invented.
 
 ## Voice & Communication Style
 ${callbackLine}
-If the caller is not speaking English, call set_spoken_language and continue in
-their language — including the two asks above, which are a shape, not a script.
-Never tell them you cannot help them in it.
-
 Short sentences. One question at a time. Do not read lists aloud. Do not spell
 anything unless they ask. Never use markdown, asterisks or bullet characters —
 everything you say is spoken out loud.

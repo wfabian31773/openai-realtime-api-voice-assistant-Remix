@@ -511,9 +511,32 @@ import { callEnvironment } from "./callRecord";
  * the operator: the pre-context block asks for the last name and then the
  * date of birth, one field per question (RULE ZERO 2b), instead of both in
  * one breath. It stacks on v75 and contains every marker below it.
+ *
+ * v77, 2026-09-28: THE LANGUAGE MECHANISM IS THE RUNTIME'S, AND SO IS THE SHAPE
+ * GUARD. Operator, of v75/v76: *"Shouldn't this be for the runtime in
+ * general?"* Yes — and the 2026-09-15 ruling already said where: *"the things
+ * that are applicable to any conversation should be in the runtime; things
+ * applicable to that agent itself should be in the prompt."* Following the
+ * caller's language is applicable to any conversation, and it was written into
+ * five prompts and listed by five tool lists (pcp had neither). Now
+ * `laneRegistry` binds `set_spoken_language` to EVERY lane
+ * (RUNTIME_OWNED_TOOLS) and `agentBinding` appends ONE copy of the mechanism
+ * into the guide's own place for it — the end of `## Voice & Communication
+ * Style` — rendering each lane's language POLICY from `spokenLanguages` on
+ * its registration (the after-hours line: English and Spanish; every queue
+ * lane: follow the caller). The knowledge pack moves from a preamble to
+ * `## Business Facts` after Role & Persona, the docs' order, on any
+ * five-section prompt (voice is billed by the minute, so the token-cache
+ * prefix the old order bought was worth nothing). PCP's prompt is
+ * re-sectioned into the five headings with its sentences unchanged. And
+ * `promptShapeIsTheDocs.test.ts` holds every lane the runtime serves — the
+ * BOUND prompt, through the real registry — to the five sections in order,
+ * Business Facts once, no H1, CRITICAL at most once, only tools that exist,
+ * the language tool bound and the mechanism present exactly once. It stacks
+ * on v76 and contains every marker below it.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v76-the-after-hours-prompt-in-the-docs-shape-20260928";
+  "voice-runtime-v77-the-language-mechanism-is-the-runtimes-20260928";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { z } from 'zod';
-import { bindAgent, toGrokTools, toJsonSchema, type LiveTool } from './agentBinding';
+import { bindAgent, toGrokTools, toJsonSchema, type LiveTool, composeWithBusinessFacts } from './agentBinding';
+import { LANGUAGE_MECHANISM_MARKER } from './languageMechanism';
 
 function tool(over: Partial<LiveTool> = {}): LiveTool {
   return {
@@ -13,9 +14,15 @@ function tool(over: Partial<LiveTool> = {}): LiveTool {
 }
 
 describe('bindAgent — borrows the real agent, changes nothing', () => {
-  it('takes the agent\'s own instructions verbatim', async () => {
+  it('takes the agent\'s own instructions verbatim, then adds only the runtime\'s own language block', async () => {
     const bound = await bindAgent({ instructions: 'You are Sage.', tools: [] });
-    expect(bound.instructions).toBe('You are Sage.');
+    // v77: following the caller's language is the PIPELINE's mechanism, so the
+    // binding appends it once (languageMechanism.ts); the agent's words are
+    // untouched ahead of it.
+    expect(bound.instructions.startsWith('You are Sage.')).toBe(true);
+    expect(bound.instructions).toContain('## Voice & Communication Style');
+    expect(bound.instructions).toContain(LANGUAGE_MECHANISM_MARKER);
+    expect(bound.instructions.split(LANGUAGE_MECHANISM_MARKER).length - 1).toBe(1);
   });
 
   it('refuses to run an agent with no instructions — that would put a nameless improviser on a patient line', async () => {
@@ -25,13 +32,37 @@ describe('bindAgent — borrows the real agent, changes nothing', () => {
     await expect(bindAgent({ tools: [] })).rejects.toThrow(/no instructions/);
   });
 
-  it('prepends the runtime prefix but leaves the agent\'s prompt intact and last', async () => {
+  it('prepends the runtime prefix to a prompt that is not in the five-section shape, agent\'s text intact after it', async () => {
     const bound = await bindAgent(
       { instructions: 'You are Sage.', tools: [] },
       { instructionsPrefix: 'PRACTICE KNOWLEDGE' },
     );
-    expect(bound.instructions.startsWith('PRACTICE KNOWLEDGE')).toBe(true);
-    expect(bound.instructions.endsWith('You are Sage.')).toBe(true);
+    expect(bound.instructions.startsWith('PRACTICE KNOWLEDGE\n\nYou are Sage.')).toBe(true);
+  });
+
+  it('places the prefix as Business Facts after Role & Persona on a five-section prompt (the docs\' order)', async () => {
+    const own = '## Role & Persona\nYou are Sage.\n\n## Objective\nFile it.\n\n## Conversation Flow\nAsk.\n\n## Guardrails & Escalation\nNone.\n\n## Voice & Communication Style\nShort.';
+    const bound = await bindAgent({ instructions: own, tools: [] }, { instructionsPrefix: 'PRACTICE KNOWLEDGE' });
+    expect(bound.instructions.startsWith('## Role & Persona\nYou are Sage.')).toBe(true);
+    const facts = bound.instructions.indexOf('## Business Facts\nPRACTICE KNOWLEDGE');
+    expect(facts).toBeGreaterThan(0);
+    expect(facts).toBeLessThan(bound.instructions.indexOf('## Objective'));
+    // The mechanism lands INSIDE the Voice section, not after it.
+    const voice = bound.instructions.indexOf('## Voice & Communication Style');
+    expect(bound.instructions.indexOf(LANGUAGE_MECHANISM_MARKER)).toBeGreaterThan(voice);
+    expect(bound.instructions.indexOf('\n## ', voice + 1)).toBe(-1);
+    expect(composeWithBusinessFacts('plain prompt', 'FACTS')).toBe('FACTS\n\nplain prompt');
+  });
+
+  it('binds the runtime\'s own tools alongside the agent\'s, never twice under one name', async () => {
+    const mine = tool({ name: 'set_spoken_language', invoke: async () => ({ mine: true }) });
+    const runtimes = tool({ name: 'set_spoken_language', invoke: async () => ({ mine: false }) });
+    const withOwn = await bindAgent({ instructions: 'You are Sage.', tools: [mine] }, { runtimeTools: [runtimes] });
+    expect(withOwn.toolNames.filter((n) => n === 'set_spoken_language')).toHaveLength(1);
+    expect(JSON.parse((await withOwn.dispatch('set_spoken_language', {})).output)).toEqual({ mine: true });
+    const without = await bindAgent({ instructions: 'You are Sage.', tools: [] }, { runtimeTools: [runtimes] });
+    expect(without.toolNames).toEqual(['set_spoken_language']);
+    expect(JSON.parse((await without.dispatch('set_spoken_language', {})).output)).toEqual({ mine: false });
   });
 });
 

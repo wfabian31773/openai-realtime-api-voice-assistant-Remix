@@ -44,6 +44,7 @@
  */
 
 import { zodToJsonSchema } from 'zod-to-json-schema';
+import { withLanguageMechanism } from './languageMechanism';
 import type { GrokToolDefinition } from './wireTypes';
 
 /** A live tool as the Agents SDK holds it: name, schema, and the real
@@ -215,20 +216,65 @@ async function resolveInstructions(agent: BorrowableAgent): Promise<string> {
   return '';
 }
 
+/**
+ * WHERE THE PRACTICE FACTS GO. xAI's Prompting Guide: *"Facts are baked in
+ * verbatim … usually under Role & Persona or a small `## Business Facts`
+ * section"*, and the five sections come *"in this order"* with Role & Persona
+ * first. Until v77 the knowledge pack was prepended ahead of everything
+ * (ADR-001: a byte-identical prefix per lane so the prefix caches). That
+ * reasoning was written for a token-billed API; the voice model is billed by
+ * the minute and *"contributes no measurable tokens"* (CLAUDE.md, the cost
+ * section), so the prefix bought nothing the docs' order does not. A prompt
+ * in the five-section shape gets the pack as `## Business Facts` right after
+ * its Role & Persona; any other prompt keeps the pack in front, as before.
+ * Exported so the fleet guard can assert the placement rather than infer it.
+ */
+export function composeWithBusinessFacts(own: string, pack: string | undefined): string {
+  const facts = pack?.trim();
+  if (!facts) return own;
+  const ROLE = '## Role & Persona';
+  if (own.startsWith(ROLE)) {
+    const next = own.indexOf('\n## ', ROLE.length);
+    if (next !== -1) {
+      return `${own.slice(0, next).replace(/\s+$/, '')}\n\n## Business Facts\n${facts}\n${own.slice(next)}`;
+    }
+  }
+  return `${facts}\n\n${own}`;
+}
+
 export async function bindAgent(
   agent: BorrowableAgent,
-  opts: { instructionsPrefix?: string } = {},
+  opts: {
+    instructionsPrefix?: string;
+    /**
+     * Tools the PIPELINE owns and every lane carries (laneRegistry's
+     * `RUNTIME_OWNED_TOOLS`). Added by name only when the agent does not
+     * already declare one of the same name, so a lane can never end up
+     * offering the model two tools called the same thing.
+     */
+    runtimeTools?: LiveTool[];
+    /** The lane's language policy, from its registration — see languageMechanism.ts. */
+    spokenLanguages?: readonly string[];
+  } = {},
 ): Promise<BoundAgent> {
-  const own = await resolveInstructions(agent);
-  if (!own.trim()) {
+  const resolved = await resolveInstructions(agent);
+  if (!resolved.trim()) {
     // The agent's prompt IS the agent. Running without it would put a
     // nameless improviser on a patient line.
     throw new Error('agentBinding: the agent produced no instructions');
   }
-  const prefix = opts.instructionsPrefix?.trim() ? `${opts.instructionsPrefix.trim()}\n\n` : '';
-  const instructions = `${prefix}${own}`;
+  // The runtime's own copy of the language mechanism, then the practice facts
+  // in the docs' place. Both are the pipeline's, so both are done here and
+  // nowhere else.
+  const own = withLanguageMechanism(resolved, opts.spokenLanguages);
+  const instructions = composeWithBusinessFacts(own, opts.instructionsPrefix);
 
-  const live = (Array.isArray(agent.tools) ? agent.tools : []) as LiveTool[];
+  const declared = (Array.isArray(agent.tools) ? agent.tools : []) as LiveTool[];
+  const declaredNames = new Set(declared.map((t) => t?.name).filter(Boolean));
+  const live: LiveTool[] = [
+    ...declared,
+    ...(opts.runtimeTools ?? []).filter((t) => t?.name && !declaredNames.has(t.name)),
+  ];
   const { defs, skipped } = toGrokTools(live);
   const byName = new Map<string, LiveTool>();
   for (const t of live) if (t?.name && typeof t.invoke === 'function') byName.set(t.name, t);

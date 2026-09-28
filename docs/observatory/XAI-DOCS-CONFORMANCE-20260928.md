@@ -272,9 +272,49 @@ rewrite.
 | the language a switch went TO reaches `tool_timeline` | `toolTimeline.ts` allow-list | the 66 no-cue switch calls: what language, and whether it was a switch at all |
 | the after-hours language block in the guide's lock shape | `noIvrAgent.ts` | prompt size −0.3%; nothing measurable until the lane moves |
 | **v76:** the after-hours prompt in the five-section shape, built only for `pipeline: 'runtime'` | `noIvrPromptForGrok.ts`, `noIvrAgent.ts`, `voiceRuntime.ts` | inert until the repoint; then no-ivr tickets per substantive call must not fall (56.1% before), escalations per substantive call must not rise, ghost/robot terminations must not fall |
+| **v77:** the language tool bound and the mechanism appended by the runtime on every lane; the pack as Business Facts; PCP re-sectioned; the fleet shape guard | `laneRegistry.ts`, `agentBinding.ts`, `languageMechanism.ts`, `pcpAgent.ts`, `promptShapeIsTheDocs.test.ts` | filing rate per lane must not move; pcp gains `set_spoken_language` events; PCP tickets per substantive call must not fall |
 
 Revert lever for the seed, no deploy: `XAI_VOICE_LANGUAGE=en` (fleet) or
 `XAI_VOICE_LANGUAGE_<SLUG>=en` (one lane).
+
+## 6b. v77 — the mechanism and the shape guard move into the runtime
+
+**Operator, 2026-09-28, of v75/v76: *"Shouldn't this be for the runtime in
+general?"*** Yes. The 2026-09-15 ruling already said where each rule lives:
+what applies to any conversation is the runtime's; what applies to one agent
+is that agent's prompt. Following the caller's language applies to any
+conversation, and it had been written into five prompts and five tool lists,
+with pcp — live on the runtime since 09-04 — carrying neither.
+
+| moved | from | to |
+|---|---|---|
+| the `set_spoken_language` tool | four `*_TOOLS` lists + the after-hours lane's v75 hand-built copy; pcp had none | `laneRegistry` binds it to every lane it resolves (`RUNTIME_OWNED_TOOLS`), through the same adapter and telemetry as a lane's own tools |
+| the mechanism (call the tool the moment they switch, switch only if they switch, quoted asks are shapes to translate, arguments in English) | five prompt copies, worded four ways | `src/runtime/languageMechanism.ts`, ONE copy, appended by the binding to the end of `## Voice & Communication Style` — the guide's own place for language control |
+| the language POLICY (which languages the line speaks) | prose in each prompt | `spokenLanguages` on the agent's registration: no-ivr `['en','es']` (an old-core-era rule, not revisited); every queue lane and pcp undeclared, i.e. follow the caller |
+| the knowledge pack | a preamble in front of every prompt (ADR-001's cache prefix) | `## Business Facts` right after `## Role & Persona` on a five-section prompt — the docs' placement and order; voice is billed by the minute, so the prefix bought nothing |
+| PCP's headings | `#` H1s (`# WHAT YOU DO`, `# SAFETY`, `# HOW YOU SPEAK` …) | the five `##` sections with `###` sub-sections, sentences unchanged; its own *"Speak English unless the caller asks"* line deleted (two instructions on one subject) |
+| the shared triage block's `# TRIAGE` header | H1 | `###` |
+
+**The guard** — `src/runtime/promptShapeIsTheDocs.test.ts` — resolves all six
+served lanes through the real registry the way `voiceRuntime` does and holds
+the BOUND prompt and tool list to the docs. It is not gated behind an env var.
+
+**All six lanes as the runtime builds them, 2026-09-28** (chars; tokens ≈ chars/4;
+the pack is 9,317 on each):
+
+| lane | total | own | tools | sections |
+|---|---|---|---|---|
+| optical | 15,457 | 6,140 | 6 | Role & Persona · Business Facts · Objective · Conversation Flow · Guardrails & Escalation · Voice & Communication Style |
+| surgery | 15,110 | 5,793 | 6 | same |
+| tech | 16,265 | 6,948 | 6 | same |
+| records | 17,340 | 8,023 | 7 | same |
+| pcp | 19,731 | 10,414 | 9 | same |
+| no-ivr (Grok body) | 23,607 | 14,290 | 7 | same, then CRITICAL INSTRUCTIONS |
+
+**After-arm additions:** `set_spoken_language` events should now appear on
+pcp (it had no tool); on the queue lanes the 94.7% switch share must not fall;
+PCP tickets per substantive call must not fall on the re-sectioned prompt;
+an English caller answered in another language must stay 0.
 
 ## 7. Measurement traps for whoever re-runs this
 

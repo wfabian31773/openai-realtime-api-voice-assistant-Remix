@@ -96,7 +96,9 @@ describe.skipIf(!ENABLED)("every served lane resolves against the real agent reg
     // A real prompt, not a stringified closure and not an empty string.
     expect(lane!.agent.instructions.length).toBeGreaterThan(2_000);
     expect(lane!.agent.instructions).not.toContain("=>");
-    expect(lane!.agent.instructions.startsWith(buildKnowledgePack())).toBe(true);
+    // The pack is carried once — as `## Business Facts` after Role & Persona
+    // on a five-section prompt, in front on any other (agentBinding.ts, v77).
+    expect(lane!.agent.instructions.split(buildKnowledgePack()).length - 1).toBe(1);
 
     // Real tools, all convertible, none silently dropped.
     expect(lane!.agent.tools.length).toBeGreaterThan(0);
@@ -128,7 +130,9 @@ describe.skipIf(!ENABLED)("every served lane resolves against the real agent reg
     });
     expect(lane, `${slug} should resolve once a transfer is injected`).not.toBeNull();
     expect(lane!.voice.voiceName).not.toBe("sage");
-    expect(lane!.agent.instructions.startsWith(buildKnowledgePack())).toBe(true);
+    // The pack is carried once — as `## Business Facts` after Role & Persona
+    // on a five-section prompt, in front on any other (agentBinding.ts, v77).
+    expect(lane!.agent.instructions.split(buildKnowledgePack()).length - 1).toBe(1);
     expect(lane!.agent.instructions).not.toContain("=>");
     expect(lane!.agent.skipped).toEqual([]);
     expect(JSON.stringify(lane!.agent.tools)).not.toContain('"strict"');

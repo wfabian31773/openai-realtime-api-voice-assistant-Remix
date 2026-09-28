@@ -33,15 +33,18 @@ describe('it cannot transfer, and must not imply that it can', () => {
       expect(name).not.toMatch(/transfer|handoff|escalat|human|operator/i);
     }
     /**
-     * SIX SINCE 2026-09-03. The count is pinned so a tool cannot join this
-     * lane unnoticed — which is what it just caught. The sixth is
-     * `set_spoken_language`: it retargets the provider's speech recognition
-     * and nothing else. It cannot move the call, cannot reach a person, and
-     * cannot promise one, so it does not weaken standing instruction 9. The
-     * pattern above is the guard that matters; this is the tripwire.
+     * FIVE SINCE v77. The count is pinned so a tool cannot join this lane
+     * unnoticed — which is what it caught on 2026-09-03, when the sixth was
+     * `set_spoken_language`. That tool is the PIPELINE's now: the runtime
+     * binds it to every lane (laneRegistry RUNTIME_OWNED_TOOLS, asserted in
+     * src/runtime/promptShapeIsTheDocs.test.ts), so this list stops naming
+     * it. It retargets the provider's speech recognition and nothing else —
+     * it cannot move the call, cannot reach a person, and cannot promise one,
+     * so it never weakened standing instruction 9. The pattern above is the
+     * guard that matters; this is the tripwire.
      */
-    expect(OPTICAL_TOOLS).toHaveLength(6);
-    expect(OPTICAL_TOOLS).toContain('set_spoken_language');
+    expect(OPTICAL_TOOLS).toHaveLength(5);
+    expect(OPTICAL_TOOLS).not.toContain('set_spoken_language');
   });
 
   it('is told to say so plainly and offer the callback instead', () => {
