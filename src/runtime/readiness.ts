@@ -473,9 +473,30 @@ import { callEnvironment } from "./callRecord";
  * comes back as a question naming the field. no-ivr is on the OLD CORE, so
  * this marker dates the build the way v18, v41, v47 and v53 do. It stacks on
  * v73 (`main` at `0039a9d`) and contains every marker below it.
+ *
+ * v75, 2026-09-28: THE TRANSCRIBER DETECTS THE LANGUAGE. Operator: *"xai
+ * specifically states that large prompts are unnecessary, they also have
+ * their recommendations for handling spanish calls, we need to ensure the
+ * runtime follows those docs to the letter."* Read against docs.x.ai
+ * (Speech to Speech, Prompting Guide) — the audit is
+ * docs/observatory/XAI-DOCS-CONFORMANCE-20260928.md — the runtime departed in
+ * one place on Spanish: it seeded `audio.input.transcription.language_hint:
+ * "en"` on EVERY call, from a registry default copied off the old core, where
+ * the docs say the model *"automatically detects the input language ... no
+ * configuration required"* and the hint exists to *"bias ASR transcription
+ * toward a specific language"*. A defaulted English now seeds nothing; an
+ * env-set language or a non-English lane still seeds its regional hint;
+ * `set_spoken_language` still retargets mid-call (es-MX, as the docs require
+ * for Spanish). Beside it: the after-hours lane gains `set_spoken_language`
+ * (it built its tools by hand and never had it, so on the runtime its hint
+ * could never follow a Spanish caller), its language block is restated in
+ * the guide's language-lock shape, and the tag a switch went TO reaches
+ * `tool_timeline` so the 76 non-Spanish switches of the last fortnight stop
+ * being uncountable. Revert lever for the seed: `XAI_VOICE_LANGUAGE=en`. It
+ * stacks on v74 (`main` at `f998a0b`) and contains every marker below it.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v74-an-email-preference-is-not-a-failure-20260927";
+  "voice-runtime-v75-the-transcriber-detects-the-language-20260928";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

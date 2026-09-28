@@ -23,6 +23,12 @@ import { decideDobEscape, dobStatusNote, dobEscapeMarker, type DobStatus } from 
 import { gateRefusalsSoFar, noteGateRefusal } from "../tools/gateAttempts";
 import { missingFieldsFromRefusal, spokenMissingFields } from "../services/missingFieldsRefusal";
 import { buildCompactLocationReference } from "../config/azulVisionKnowledge";
+import {
+  SET_SPOKEN_LANGUAGE_TOOL_NAME,
+  SET_SPOKEN_LANGUAGE_DESCRIPTION,
+  SET_SPOKEN_LANGUAGE_ARG_DESCRIPTION,
+  spokenLanguageResult,
+} from "../tools/languageTools";
 import { getNextBusinessDayContext } from "../utils/timeAware";
 import { type TriageOutcome } from "../config/afterHoursTicketing";
 import { storage } from "../../server/storage";
@@ -444,14 +450,20 @@ Use check_open_tickets tool before creating new tickets to avoid duplicates.
 If caller has pending tickets, acknowledge them first.
 
 🗣️ LANGUAGE:
-⚠️ ALWAYS start in ENGLISH — never assume a language from a name, however the
-name looks. Wait to HEAR the caller, and read the language from their FIRST
-substantive words (not "hello" or "hi").
-English and Spanish are the ONLY languages you speak. Switch to Spanish only if
-the caller clearly and unambiguously speaks it. EVERYTHING else — French,
-Chinese, Vietnamese, unrecognised, ambiguous — stays in ENGLISH. Once set, STAY
-in that language for the ENTIRE call.
-If asked "Do you speak Spanish?" in English → Ask: "Would you like to continue in Spanish?"
+- You speak English and Spanish. Start in English. Never assume a language
+  from a name — read it from the caller's first substantive words (not
+  "hello" or "hi").
+- When the caller speaks Spanish, or asks for Spanish, call set_spoken_language
+  with "Spanish" and continue in Spanish for the rest of the call — every
+  question, confirmation and the wait line before create_ticket.
+- Switch only if the caller switches. An English tool result, a medication
+  name, a number or a word you did not catch is not a switch.
+- Keep every tool ARGUMENT in English (names, dates, yes/no) whatever language
+  you are speaking.
+- Any other language — French, Chinese, Vietnamese, unrecognised, ambiguous —
+  say in English that this line can help in English or Spanish, and continue
+  in English.
+- If asked "Do you speak Spanish?" in English → Ask: "Would you like to continue in Spanish?"
 
 🚫 GHOST CALL & ROBOT/SPAM DETECTION — END THESE CALLS, NEVER ESCALATE:
 
@@ -1894,6 +1906,36 @@ For healthcare provider calls — escalate immediately with whatever info you ha
     ? callerMemoryService.buildContextForPrompt(callerMemory)
     : "";
 
+  /**
+   * FOLLOW THE CALLER'S LANGUAGE — the after-hours lane's copy of the tool
+   * the four queue lanes have carried since 2026-09-03 (v75).
+   *
+   * This lane never had it: it built its tools by hand and the registry tool
+   * never reached it, so on the runtime its transcription hint could never
+   * follow a Spanish caller — the wire kept whatever the handshake seeded for
+   * the whole call, on the lane that takes all overnight and weekend volume.
+   * xAI's Speech to Speech docs: the model *"automatically detects the input
+   * language"*, and the `language_hint` that biases transcription *"can be
+   * updated mid-session"* — *"For Spanish ... you must specify a regional
+   * variant (e.g. "es-MX")"*. This tool is how the model tells the bridge to
+   * send it (mediaStreamBridge.ts, DEFAULT_LANGUAGE_TOOL_NAMES); the bridge
+   * matches on the NAME, so the name, the words and the result shape are
+   * imported from languageTools.ts rather than retyped.
+   *
+   * On the OLD CORE this tool returns its result and changes nothing on the
+   * wire — that pipeline has its own transcription configuration — which is
+   * harmless: the prompt already tells the model to continue in Spanish, and
+   * the lane moves to the runtime on the build this ships with.
+   */
+  const setSpokenLanguageTool = recordedTool({
+    name: SET_SPOKEN_LANGUAGE_TOOL_NAME,
+    description: SET_SPOKEN_LANGUAGE_DESCRIPTION,
+    parameters: z.object({
+      language: z.string().describe(SET_SPOKEN_LANGUAGE_ARG_DESCRIPTION),
+    }),
+    execute: async (params) => spokenLanguageResult(String(params.language ?? "")),
+  });
+
   console.log(`[${agentTag}] CHECKPOINT 3: Building system prompt...`);
   const instructions = buildNoIvrSystemPrompt(metadata, scheduleContext, variant, callerMemory, callerHistorySection);
   console.log(`[${agentTag}] CHECKPOINT 4: Prompt built (${instructions.length} chars), creating RealtimeAgent...`);
@@ -1910,6 +1952,7 @@ For healthcare provider calls — escalate immediately with whatever info you ha
       createTicketTool,
       escalateToHumanTool,
       terminateCallTool,
+      setSpokenLanguageTool,
     ],
   });
 
@@ -1918,9 +1961,12 @@ For healthcare provider calls — escalate immediately with whatever info you ha
 
   console.log(`[${agentTag}] ✓ Agent created with tools:`, [
     "lookup_schedule",
+    "check_open_tickets",
     "emit_decision",
     "create_ticket",
     "escalate_to_human",
+    "terminate_call",
+    SET_SPOKEN_LANGUAGE_TOOL_NAME,
   ]);
   console.log(`[${agentTag}] ✓ Version: ${versionString}`);
 

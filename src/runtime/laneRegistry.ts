@@ -315,6 +315,7 @@ export async function resolveLane(
 
   const env = deps.env ?? process.env;
   const voice = loadGrokRuntimeVoiceConfig(env, slug);
+  const envLanguage = pickLaneEnv(env, "XAI_VOICE_LANGUAGE", slug);
   return {
     slug,
     agent: bound,
@@ -331,9 +332,14 @@ export async function resolveLane(
       voiceName: pickLaneEnv(env, "XAI_VOICE_NAME", slug) ?? voice.voiceName,
       // Language IS provider-neutral ('en', 'es'), so the lane's own
       // registered value still counts.
-      language: normalizeSpokenLanguage(
-        pickLaneEnv(env, "XAI_VOICE_LANGUAGE", slug) ?? config.language ?? voice.language,
-      ),
+      language: normalizeSpokenLanguage(envLanguage ?? config.language ?? voice.language),
+      // But only an ENV value is a choice. Every registered lane carries
+      // `language: 'en'` from the old core, where the prompt did the
+      // detecting; on this runtime that value would seed an English
+      // transcription bias against every caller who opens in Spanish. The
+      // handshake seeds a hint only for an explicit setting or a non-English
+      // lane — see `seedsLanguageHint` (grokSession.ts) and the docs it cites.
+      languageExplicit: envLanguage !== undefined,
     },
     version: config.version ?? null,
     greeting: config.greeting?.trim() || null,

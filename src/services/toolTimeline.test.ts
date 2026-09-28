@@ -119,6 +119,28 @@ describe('PHI discipline — the allow-list is the safety mechanism', () => {
     expect(JSON.stringify(ev)).not.toContain('Kolterman');
   });
 
+  /**
+   * v75: WHICH language a switch went TO is countable. 574 switch events in
+   * the fourteen days to 2026-09-27 and not one said; 76 of them were on
+   * calls with no Spanish cue — the worst filing arm — and nothing could say
+   * what they were. The tag is the normaliser's output, never the caller's
+   * word for it (which is the argument, and stays dropped).
+   */
+  it('keeps the language a set_spoken_language switch went to, not the word the caller used', () => {
+    const callId = freshCall();
+    recordToolEvent(
+      callId,
+      'set_spoken_language',
+      { language: 'Spanish, please, my mother does not speak English' },
+      JSON.stringify({ success: true, language: 'es', message: 'Now speaking es. Continue in that language.' }),
+      1,
+      { agentSlug: 'no-ivr' },
+    );
+    const [ev] = getAzulTimeline(callId)!;
+    expect(ev.outcome).toMatchObject({ language: 'es' });
+    expect(JSON.stringify(ev)).not.toContain('my mother');
+  });
+
   it('keeps the diagnostic signal as booleans instead of the caller\'s words', () => {
     const callId = freshCall();
     recordToolEvent(callId, 'create_ticket', TICKET_ARGS, '{}', 1, { agentSlug: 'answering-service' });

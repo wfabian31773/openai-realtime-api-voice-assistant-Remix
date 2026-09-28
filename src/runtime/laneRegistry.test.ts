@@ -229,6 +229,35 @@ describe("per-lane voice and language", () => {
     expect(lane!.voice.language).toBe("en");
   });
 
+  /**
+   * v75: the registry's `language: 'en'` is the OLD CORE's default, copied
+   * onto every lane, and it must not read as a choice — on this runtime a
+   * chosen language seeds a transcription bias (grokSession.ts,
+   * `seedsLanguageHint`). Only an env value is a choice.
+   */
+  it("does not treat the registry's default English as a language somebody chose", async () => {
+    const lane = await resolveLane("optical", META, {
+      source: source({ id: "optical", language: "en" }),
+      env: {},
+    });
+    expect(lane!.voice.language).toBe("en");
+    expect(lane!.voice.languageExplicit).toBe(false);
+  });
+
+  it("an env language IS a choice, per lane or fleet-wide", async () => {
+    const perLane = await resolveLane("optical", META, {
+      source: source({ id: "optical" }),
+      env: { XAI_VOICE_LANGUAGE_OPTICAL: "en" },
+    });
+    expect(perLane!.voice.languageExplicit).toBe(true);
+    const fleet = await resolveLane("optical", META, {
+      source: source({ id: "optical" }),
+      env: { XAI_VOICE_LANGUAGE: "es" },
+    });
+    expect(fleet!.voice.language).toBe("es");
+    expect(fleet!.voice.languageExplicit).toBe(true);
+  });
+
   it("keeps the lane's version for the record", async () => {
     const lane = await resolveLane("optical", META, {
       source: source({ id: "optical", version: "v1.4.0" }),

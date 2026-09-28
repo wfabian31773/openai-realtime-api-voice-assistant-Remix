@@ -197,6 +197,33 @@ const TURN_DETECTION = {
  * audio passes through the bridge with no transcoding. */
 const AUDIO_FORMAT = { type: "audio/pcmu", rate: 8000 };
 
+/**
+ * WHETHER THE HANDSHAKE SEEDS A TRANSCRIPTION `language_hint` AT ALL.
+ *
+ * xAI, Speech to Speech → Supported Languages: *"The model automatically
+ * detects the input language and responds naturally in the same language —
+ * no configuration required."* And under Language Hint: the hint exists to
+ * *"bias ASR transcription toward a specific language"*; *"Unrecognized codes
+ * are silently ignored and fall back to automatic language detection."*
+ *
+ * Until v75 every lane seeded `language_hint: "en"` on every call, because
+ * every registered lane carries `language: 'en'` from the old core — a
+ * default nobody chose, sent as a bias against the caller's first turns
+ * before anyone had heard them. Measured 2026-09-14..27 on the runtime queue
+ * lanes: 507 substantive calls carried a Spanish cue in the caller's own
+ * lines (8.9%), and the model called `set_spoken_language` on 480 of them —
+ * so the switch WAS happening, but only after the model had heard Spanish
+ * through an English-biased transcriber. The operator's own guidance
+ * (2026-09-05) was *"After you hear Spanish, send es-MX"* — after, not
+ * before. So: a language somebody SET (env) or a non-English lane seeds its
+ * regional hint; a defaulted English seeds nothing and the transcriber
+ * detects. `set_spoken_language` still retargets the hint mid-call exactly
+ * as before. The revert lever is `XAI_VOICE_LANGUAGE=en`, no deploy.
+ */
+export function seedsLanguageHint(config: Pick<GrokRuntimeVoiceConfig, "language" | "languageExplicit">): boolean {
+  return config.languageExplicit === true || normalizeSpokenLanguage(config.language) !== "en";
+}
+
 /** Builds the session.update payload from the lane's voice config plus the
  * agent's OWN instructions and tools (agentBinding.ts produces both). Kept
  * as its own function so the runtime and its tests can inspect exactly what
@@ -214,21 +241,25 @@ export function buildSessionConfig(
    */
   keyterms?: string[],
 ): GrokSessionConfig {
+  // The lane's configured language seeds the STT hint ONLY when it was set
+  // or is not English (seedsLanguageHint above); a mid-call switch retargets
+  // it via setSpokenLanguage(). REGIONAL here too — the bridge drops a switch
+  // to the language already in use, so a lane configured `es` would
+  // otherwise never send es-MX at all (Codex, 2026-09-05).
+  const transcription = {
+    ...(seedsLanguageHint(config) ? { language_hint: sttLanguageHint(config.language) } : {}),
+    ...(keyterms && keyterms.length > 0 ? { keyterms } : {}),
+  };
   return {
     voice: config.voiceName,
     instructions,
     audio: {
       input: {
         format: AUDIO_FORMAT,
-        // The lane's configured language seeds the STT hint; a mid-call
-        // switch retargets it via setSpokenLanguage(). REGIONAL here too —
-        // the bridge drops a switch to the language already in use, so a
-        // lane configured `es` would otherwise never send es-MX at all
-        // (Codex, 2026-09-05).
-        transcription: {
-          language_hint: sttLanguageHint(config.language),
-          ...(keyterms && keyterms.length > 0 ? { keyterms } : {}),
-        },
+        // An empty `transcription` is omitted rather than sent as `{}`: the
+        // docs describe the block by its two keys, and an empty object
+        // says nothing the absence does not.
+        ...(Object.keys(transcription).length > 0 ? { transcription } : {}),
         transport: "json",
       },
       output: {

@@ -307,6 +307,19 @@ function summarizeResult(tool: string, resultJson: string): Record<string, unkno
      * stays unanswerable from SQL, which is the v28/v48 mistake.
      */
     'identity_write',
+    /**
+     * WHICH LANGUAGE `set_spoken_language` switched the call TO — the tag
+     * `normalizeSpokenLanguage` produced ('es', 'tl', 'ko'), never the
+     * caller's word for it (that is the ARGUMENT, and it stays dropped).
+     *
+     * Measured 2026-09-14..27, runtime queue lanes: 574 switch events, and
+     * 76 of them on calls whose caller lines carry no Spanish cue — the
+     * lane's WORST filing arm at 45.5% — and not one of the 574 says what it
+     * switched to, because this key was not here. Without it the question
+     * "what are the non-Spanish switches?" cannot be asked from SQL, which
+     * is the v28/v48 mistake again.
+     */
+    'language',
     'say', // directive text — kept so the Phase 7 rubric can grade say-verbatim compliance
     /**
      * What a refused PCP gate told the model to do instead (src/pcp/refusals.ts).

@@ -60,45 +60,69 @@ export function normalizeRequestedLanguage(requested: string): string | undefine
   return to && to.trim() ? to : undefined;
 }
 
+/**
+ * ONE COPY OF THE TOOL'S WORDS. The registry lanes get it through
+ * `registerTool` below; the after-hours lane builds its tools by hand
+ * (`recordedTool` in noIvrAgent.ts) and imports these two so the model on
+ * every lane reads the same sentence — two near-identical copies is the
+ * `explicitAsk.ts` noun-list drift this repo has already paid for.
+ */
+export const SET_SPOKEN_LANGUAGE_TOOL_NAME = 'set_spoken_language';
+export const SET_SPOKEN_LANGUAGE_DESCRIPTION =
+  'Switch the language you speak and listen in, for the rest of this call. ' +
+  'Call this the moment the caller speaks a language other than the one you ' +
+  'are using, or asks to be helped in another language — then carry on in ' +
+  'that language and take their request as normal. Do not announce the ' +
+  'switch or ask permission; just answer them in their language. Keep the ' +
+  'ARGUMENTS you send to every other tool in English (names, dates, yes/no) ' +
+  'no matter what language you are speaking.';
+export const SET_SPOKEN_LANGUAGE_ARG_DESCRIPTION =
+  'The language the caller is speaking, as a name or an ISO code — ' +
+  '"Spanish", "es", "Tagalog", "Korean", "Armenian".';
+
+/** The result the bridge acts on: `language` is the normalized tag the wire
+ * accepts, never the caller's word for it. Shared with the after-hours
+ * lane's hand-built copy for the same one-copy reason as the description. */
+export function spokenLanguageResult(requested: string): ToolResult {
+  const to = normalizeRequestedLanguage(requested);
+  if (!to) {
+    return missing(['language'], 'Which language would you like me to use?');
+  }
+  return {
+    success: true,
+    language: to,
+    message: `Now speaking ${to}. Continue in that language.`,
+  };
+}
+
+// The LITERAL name on the next line, not the constant: serverRegistration.test.ts
+// reads `registerTool({\n  name: '…'` off the source to prove every tool a lane
+// declares is reachable over HTTP, and a guard that reads source cannot follow
+// an identifier (or see past a comment between the two lines).
+// noIvrSpeaksTheCallersLanguage.test.ts pins the constant to the bridge's own
+// name table, so the two spellings cannot drift apart without a test going red.
 registerTool({
   name: 'set_spoken_language',
   layer: 'agent',
   timeoutMs: 2000,
-  description:
-    'Switch the language you speak and listen in, for the rest of this call. ' +
-    'Call this the moment the caller speaks a language other than the one you ' +
-    'are using, or asks to be helped in another language — then carry on in ' +
-    'that language and take their request as normal. Do not announce the ' +
-    'switch or ask permission; just answer them in their language. Keep the ' +
-    'ARGUMENTS you send to every other tool in English (names, dates, yes/no) ' +
-    'no matter what language you are speaking.',
+  description: SET_SPOKEN_LANGUAGE_DESCRIPTION,
   input_schema: {
     type: 'object',
     properties: {
       language: {
         type: 'string',
-        description:
-          'The language the caller is speaking, as a name or an ISO code — ' +
-          '"Spanish", "es", "Tagalog", "Korean", "Armenian".',
+        description: SET_SPOKEN_LANGUAGE_ARG_DESCRIPTION,
         askAs: 'Which language would you prefer?',
       },
     },
     required: ['language'],
   },
   async handler(input): Promise<ToolResult> {
-    const to = normalizeRequestedLanguage(String(input.language ?? ''));
-    if (!to) {
-      return missing(['language'], 'Which language would you like me to use?');
-    }
     /**
-     * `language` is what the bridge reads to perform the transport step. It is
-     * the normalized tag, never the caller's word for it, so the wire always
-     * gets something the provider accepts.
+     * `language` on the result is what the bridge reads to perform the
+     * transport step. It is the normalized tag, never the caller's word for
+     * it, so the wire always gets something the provider accepts.
      */
-    return {
-      success: true,
-      language: to,
-      message: `Now speaking ${to}. Continue in that language.`,
-    };
+    return spokenLanguageResult(String(input.language ?? ''));
   },
 });
