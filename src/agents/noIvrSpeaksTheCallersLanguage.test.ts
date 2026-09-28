@@ -47,7 +47,7 @@ const { resolveLane, defaultLaneSource } = await import('../runtime/laneRegistry
 const { createNoIvrAgent } = await import('./noIvrAgent');
 const { sttLanguageHint } = await import('../runtime/language');
 const { languageToSwitchTo } = await import('../runtime/mediaStreamBridge');
-const { LANGUAGE_NOT_SPOKEN_HERE } = await import('../tools/languageTools');
+const { LANGUAGE_NOT_SPOKEN_HERE, languageAllowedOnThisLine, spokenLanguageResult } = await import('../tools/languageTools');
 
 async function noIvrOnTheRuntime() {
   const source = await defaultLaneSource();
@@ -121,6 +121,20 @@ describe("the after-hours lane speaks the caller's language, by the runtime's ha
       expect(parsed, asked).toMatchObject({ success: true, language: tag });
       expect(languageToSwitchTo(parsed), asked).toBe(tag);
     }
+  });
+
+  it('the policy is compared on normalised tags — a registration written as names or regional codes still means the same languages', () => {
+    // The registered lane's list is already ['en','es'], so the dispatch tests
+    // above cannot see this: a mutation comparing raw strings survived them.
+    // The predicate's own contract is that "Spanish", "es" and "es-MX" are one
+    // language, whichever side of the comparison spells it which way.
+    expect(languageAllowedOnThisLine('es', ['English', 'Spanish'])).toBe(true);
+    expect(languageAllowedOnThisLine('es', ['en', 'es-MX'])).toBe(true);
+    expect(languageAllowedOnThisLine('tl', ['English', 'Spanish'])).toBe(false);
+    expect(languageAllowedOnThisLine('tl', undefined)).toBe(true);
+    expect(languageAllowedOnThisLine('tl', [])).toBe(true);
+    expect(spokenLanguageResult('Spanish', ['English', 'es-MX'])).toMatchObject({ success: true, language: 'es' });
+    expect(spokenLanguageResult('Korean', ['English', 'es-MX'])).toMatchObject({ success: false, suppressed: LANGUAGE_NOT_SPOKEN_HERE });
   });
 
   it("the tool's own words carry this line's policy, so the description and the prompt agree", async () => {
