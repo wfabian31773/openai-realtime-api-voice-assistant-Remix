@@ -78,11 +78,33 @@ describe('which pipeline gets which body', () => {
     expect(legacy).not.toContain('## Role & Persona');
   });
 
-  it('NO_IVR_PROMPT_SHAPE=legacy is the revert lever on the runtime, and =grok the other way', () => {
+  it('NO_IVR_PROMPT_SHAPE=legacy is the revert lever on the runtime; =grok cannot force the Grok body onto the SIP core', () => {
     expect(noIvrPromptShape({ pipeline: 'runtime' }, {})).toBe('grok');
     expect(noIvrPromptShape({}, {})).toBe('legacy');
     expect(noIvrPromptShape({ pipeline: 'runtime' }, { NO_IVR_PROMPT_SHAPE: 'legacy' })).toBe('legacy');
-    expect(noIvrPromptShape({}, { NO_IVR_PROMPT_SHAPE: 'grok' })).toBe('grok');
+    // Codex P2 on #336: the Grok body is not self-contained — it leans on the
+    // runtime's binding for the knowledge pack, the language mechanism and the
+    // language tool, and the SIP path binds nothing. A forced `grok` there
+    // would answer from facts it was never given, so the pipeline decides.
+    expect(noIvrPromptShape({}, { NO_IVR_PROMPT_SHAPE: 'grok' })).toBe('legacy');
+    expect(noIvrPromptShape({ pipeline: 'runtime' }, { NO_IVR_PROMPT_SHAPE: 'grok' })).toBe('grok');
+  });
+
+  it('a forced grok on the old core still builds the legacy body, tools and all', async () => {
+    const saved = process.env.NO_IVR_PROMPT_SHAPE;
+    process.env.NO_IVR_PROMPT_SHAPE = 'grok';
+    try {
+      const agent = await createNoIvrAgent(async () => {}, { ...base, callId: 'forced-grok-sip' } as any);
+      const p = String((agent as any).instructions);
+      expect(p).toContain('INTERNAL WORKFLOW PLAYBOOK');
+      expect(p).not.toContain('## Role & Persona');
+      // The legacy body carries its own policy statement, because nothing
+      // appends the runtime's mechanism on this pipeline.
+      expect(p).toMatch(/You speak English and Spanish\. Start in English\./);
+    } finally {
+      if (saved === undefined) delete process.env.NO_IVR_PROMPT_SHAPE;
+      else process.env.NO_IVR_PROMPT_SHAPE = saved;
+    }
   });
 
   it("the runtime's own metadata carries the pipeline, so the pick is not left to a test", () => {

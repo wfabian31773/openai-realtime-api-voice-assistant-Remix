@@ -329,7 +329,7 @@ export async function resolveLane(
     instructionsPrefix: buildKnowledgePack(),
     // The pipeline's own tools, on every lane, recorded to the timeline the
     // way the lane's own are.
-    runtimeTools: await runtimeOwnedTools(slug, metadata),
+    runtimeTools: await runtimeOwnedTools(slug, metadata, config.spokenLanguages),
     spokenLanguages: config.spokenLanguages,
   });
 
@@ -383,19 +383,49 @@ export const RUNTIME_OWNED_TOOLS = ["set_spoken_language"] as const;
 async function runtimeOwnedTools(
   slug: string,
   metadata: LaneCallMetadata,
+  /** The lane's language POLICY, from its registration. Undeclared means the
+   * lane follows the caller into any language. */
+  spokenLanguages?: readonly string[],
 ): Promise<LiveTool[]> {
-  await import("../tools/languageTools");
+  const { SET_SPOKEN_LANGUAGE_TOOL_NAME, spokenLanguageToolDescription } =
+    await import("../tools/languageTools");
   const { realtimeToolsFor } = await import("../tools/realtimeAdapter");
-  return realtimeToolsFor([...RUNTIME_OWNED_TOOLS], {}, {
-    callId: metadata.callId,
-    callSid: metadata.callSid,
-    // A getter, for the same reason the factories read it as one: the row
-    // does not exist when the agent is built.
-    get callLogId() {
-      return metadata.callLogId;
+  const tools = realtimeToolsFor(
+    [...RUNTIME_OWNED_TOOLS],
+    {
+      /**
+       * THE POLICY REACHES THE TOOL AS INJECTED CONTEXT (Codex P2 on #336).
+       *
+       * Merged UNDER the model's arguments by the adapter, like `lane` on
+       * `lookup_patient`: not a schema field, so the model can neither set it
+       * nor be asked for it. The tool refuses a language outside the list at
+       * dispatch and returns no `language` key, so the bridge's transport
+       * step (`languageToSwitchTo`) has nothing to act on — the after-hours
+       * line's English-and-Spanish rule holds against a model that calls the
+       * tool for Tagalog anyway. Undefined is filtered out by the adapter, so
+       * a lane with no policy hands the tool nothing and it follows any caller.
+       */
+      spoken_languages: spokenLanguages ? [...spokenLanguages] : undefined,
     },
-    agentSlug: slug,
-  }) as unknown as LiveTool[];
+    {
+      callId: metadata.callId,
+      callSid: metadata.callSid,
+      // A getter, for the same reason the factories read it as one: the row
+      // does not exist when the agent is built.
+      get callLogId() {
+        return metadata.callLogId;
+      },
+      agentSlug: slug,
+    },
+  ) as unknown as LiveTool[];
+  // And the tool's WORDS agree with the policy: a lane that speaks English
+  // and Spanish is not told "call this the moment the caller speaks another
+  // language". One description per policy, composed in languageTools.ts.
+  return tools.map((t) =>
+    t.name === SET_SPOKEN_LANGUAGE_TOOL_NAME
+      ? { ...t, description: spokenLanguageToolDescription(spokenLanguages) }
+      : t,
+  );
 }
 
 /** The real registry, imported lazily so a health check or a unit test

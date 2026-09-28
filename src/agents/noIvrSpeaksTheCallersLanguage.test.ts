@@ -46,6 +46,8 @@ vi.mock('../services/callerMemoryService', () => ({
 const { resolveLane, defaultLaneSource } = await import('../runtime/laneRegistry');
 const { createNoIvrAgent } = await import('./noIvrAgent');
 const { sttLanguageHint } = await import('../runtime/language');
+const { languageToSwitchTo } = await import('../runtime/mediaStreamBridge');
+const { LANGUAGE_NOT_SPOKEN_HERE } = await import('../tools/languageTools');
 
 async function noIvrOnTheRuntime() {
   const source = await defaultLaneSource();
@@ -85,6 +87,50 @@ describe("the after-hours lane speaks the caller's language, by the runtime's ha
     // The lane's own text no longer carries a second copy of the mechanism.
     expect(p.match(/set_spoken_language/g)!.length).toBe(1);
     expect(p).not.toMatch(/English and Spanish are the ONLY languages you speak/);
+  });
+
+  /**
+   * CODEX P2 ON #336: the runtime bound the SAME tool to every lane, so this
+   * lane's prompt said "for any other language, continue in English" while
+   * its tool said "call this the moment the caller speaks another language —
+   * then carry on in that language", and the tool's result is the newer
+   * instruction. A Tagalog caller would have had the whole session retargeted
+   * into Tagalog against the policy. The policy now reaches the tool as
+   * injected context and the tool refuses at dispatch.
+   */
+  it('refuses a language this line does not speak — no `language` key, so the wire does not move', async () => {
+    const lane = await noIvrOnTheRuntime();
+    const out = await lane.agent.dispatch('set_spoken_language', { language: 'Tagalog' });
+    expect(out.ok).toBe(true); // a refusal is an ANSWER to the model, not a tool failure
+    const parsed = JSON.parse(out.output);
+    expect(parsed.success).toBe(false);
+    expect(parsed).not.toHaveProperty('language');
+    expect(parsed).not.toHaveProperty('message'); // v43: nothing for the caller to hear from a rule
+    expect(parsed.suppressed).toBe(LANGUAGE_NOT_SPOKEN_HERE);
+    expect(parsed.fix).toContain('This line speaks English and Spanish.');
+    expect(parsed.fix).toMatch(/Tagalog/);
+    expect(parsed.fix).toMatch(/NOTHING was switched/);
+    // The bridge's own reader — the ONE place a switch reaches the session.
+    expect(languageToSwitchTo(parsed)).toBeUndefined();
+  });
+
+  it('still switches to either language it does speak, by name or by tag', async () => {
+    const lane = await noIvrOnTheRuntime();
+    for (const [asked, tag] of [['Spanish', 'es'], ['es-MX', 'es'], ['English', 'en'], ['en', 'en']] as const) {
+      const parsed = JSON.parse((await lane.agent.dispatch('set_spoken_language', { language: asked })).output);
+      expect(parsed, asked).toMatchObject({ success: true, language: tag });
+      expect(languageToSwitchTo(parsed), asked).toBe(tag);
+    }
+  });
+
+  it("the tool's own words carry this line's policy, so the description and the prompt agree", async () => {
+    const lane = await noIvrOnTheRuntime();
+    const def = lane.agent.tools.find((t) => t.name === 'set_spoken_language')!;
+    expect(def.description).toContain('This line speaks English and Spanish.');
+    expect(def.description).toMatch(/Do NOT call it for any other language/);
+    expect(def.description).not.toMatch(/speaks a language other than the one you are using/);
+    // The shared tail survives on both shapes of the description.
+    expect(def.description).toMatch(/Keep the ARGUMENTS you send to every other tool in English/);
   });
 
   it('the old-core body scripts no tool it does not have, and still states the policy', async () => {

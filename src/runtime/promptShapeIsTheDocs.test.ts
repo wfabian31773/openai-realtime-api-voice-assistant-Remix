@@ -165,6 +165,25 @@ describe.each(LANES)('%s — the bound prompt is the shape the docs prescribe', 
     expect(JSON.parse(out.output)).toMatchObject({ success: true, language: 'es' });
   });
 
+  it("the tool honours the lane's own policy at dispatch (Codex P2 on #336)", async () => {
+    const lane = await bound(slug);
+    const source = await defaultLaneSource();
+    const policy = source.getAgentConfig(slug)!.spokenLanguages;
+    const parsed = JSON.parse((await lane.agent.dispatch('set_spoken_language', { language: 'Tagalog' })).output);
+    const def = lane.agent.tools.find((t) => t.name === 'set_spoken_language')!;
+    if (policy) {
+      // A lane that names its languages refuses the rest, with no `language`
+      // key for the bridge to act on, and its tool description says so.
+      expect(parsed, slug).toMatchObject({ success: false, suppressed: 'language_not_spoken_here' });
+      expect(parsed, slug).not.toHaveProperty('language');
+      expect(def.description, slug).toContain(renderLanguagePolicy(policy));
+    } else {
+      // A lane with no policy follows the caller — the words and the tool unchanged.
+      expect(parsed, slug).toMatchObject({ success: true, language: 'tl' });
+      expect(def.description, slug).toMatch(/speaks a language other than the one you are using/);
+    }
+  });
+
   it("carries the runtime's language mechanism exactly once, inside Voice & Communication Style, with the lane's own policy", async () => {
     const lane = await bound(slug);
     const p = lane.agent.instructions;

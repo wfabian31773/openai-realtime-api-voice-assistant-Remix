@@ -52,6 +52,16 @@
  * the live line. `NO_IVR_PROMPT_SHAPE=legacy` forces the old body on the
  * runtime too — the revert lever, no deploy.
  *
+ * THE LEVER ONLY EVER POINTS AT LEGACY (Codex P2 on #336). The first version
+ * also honoured `NO_IVR_PROMPT_SHAPE=grok` on the SIP core, and this body is
+ * NOT self-contained there: it leans on `bindAgent` for the knowledge pack,
+ * the language mechanism and the language tool, and the SIP path in
+ * `voiceAgentRoutes.ts` calls the factory directly and binds nothing. Forced
+ * onto that pipeline it would answer from practice facts it was never given
+ * and lose its English-and-Spanish rule. So `grok` is ignored off the
+ * runtime — where it is the default anyway — and the shape is decided by the
+ * pipeline alone.
+ *
  * WHAT IS DELIBERATELY NOT HERE: the language mechanism (which languages this
  * line speaks, when to call `set_spoken_language`, switch only if the caller
  * switches, arguments in English) — that is the PIPELINE's and the runtime
@@ -72,7 +82,8 @@ export function noIvrPromptShape(
 ): NoIvrPromptShape {
   const forced = (env.NO_IVR_PROMPT_SHAPE ?? '').trim().toLowerCase();
   if (forced === 'legacy') return 'legacy';
-  if (forced === 'grok') return 'grok';
+  // `grok` is not a lever: the Grok body needs the runtime's binding (the
+  // pack, the mechanism, the tool), so only the pipeline can grant it.
   return metadata.pipeline === 'runtime' ? 'grok' : 'legacy';
 }
 
