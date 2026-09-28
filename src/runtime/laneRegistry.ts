@@ -46,6 +46,7 @@ import {
   pickLaneEnv,
   type GrokRuntimeVoiceConfig,
 } from "./config";
+import type { LiveTool } from "./agentBinding";
 import { normalizeSpokenLanguage } from "./language";
 
 /** What the runtime needs from a lane's registry entry. Structurally a
@@ -56,6 +57,13 @@ export interface LaneConfig {
   factory: (...args: never[]) => unknown;
   voice?: string;
   language?: string;
+  /**
+   * The languages this line SPEAKS, as codes ('en', 'es'). Absent means the
+   * lane follows the caller into any language. Rendered by the runtime into
+   * the one language block every lane carries (languageMechanism.ts); the
+   * mechanism is the pipeline's, the list is the lane's policy.
+   */
+  spokenLanguages?: readonly string[];
   version?: string;
   agentType?: "inbound" | "outbound";
   /** The line the practice answers with. Present on every registered
@@ -214,6 +222,14 @@ export interface LaneCallMetadata {
    * bug recorded in that agent's own comments.
    */
   readonly callLogId?: string;
+  /**
+   * Which pipeline built this call. The runtime says `'runtime'`; the SIP
+   * core never sets it. An agent whose prompt exists in two shapes — the
+   * after-hours lane, whose Grok-shaped body is written for THIS pipeline
+   * (src/agents/noIvrPromptForGrok.ts) — reads it to pick, so a build can
+   * be deployed before a repoint without changing the live line.
+   */
+  readonly pipeline?: 'runtime';
 }
 
 export interface ResolvedLane {
@@ -307,14 +323,19 @@ export async function resolveLane(
   const agent = created as BorrowableAgent;
 
   const bound = await bindAgent(agent, {
-    // The knowledge pack leads, byte-identical on every call and every
-    // lane, so the cache prefix is shared across the whole fleet before
-    // the agent's own instructions make it lane-specific (ADR-001).
+    // The knowledge pack, placed by the binding as `## Business Facts` after
+    // a five-section prompt's Role & Persona (the docs' order), or in front
+    // of any other prompt (ADR-001's original arrangement).
     instructionsPrefix: buildKnowledgePack(),
+    // The pipeline's own tools, on every lane, recorded to the timeline the
+    // way the lane's own are.
+    runtimeTools: await runtimeOwnedTools(slug, metadata, config.spokenLanguages),
+    spokenLanguages: config.spokenLanguages,
   });
 
   const env = deps.env ?? process.env;
   const voice = loadGrokRuntimeVoiceConfig(env, slug);
+  const envLanguage = pickLaneEnv(env, "XAI_VOICE_LANGUAGE", slug);
   return {
     slug,
     agent: bound,
@@ -331,13 +352,80 @@ export async function resolveLane(
       voiceName: pickLaneEnv(env, "XAI_VOICE_NAME", slug) ?? voice.voiceName,
       // Language IS provider-neutral ('en', 'es'), so the lane's own
       // registered value still counts.
-      language: normalizeSpokenLanguage(
-        pickLaneEnv(env, "XAI_VOICE_LANGUAGE", slug) ?? config.language ?? voice.language,
-      ),
+      language: normalizeSpokenLanguage(envLanguage ?? config.language ?? voice.language),
+      // But only an ENV value is a choice. Every registered lane carries
+      // `language: 'en'` from the old core, where the prompt did the
+      // detecting; on this runtime that value would seed an English
+      // transcription bias against every caller who opens in Spanish. The
+      // handshake seeds a hint only for an explicit setting or a non-English
+      // lane — see `seedsLanguageHint` (grokSession.ts) and the docs it cites.
+      languageExplicit: envLanguage !== undefined,
     },
     version: config.version ?? null,
     greeting: config.greeting?.trim() || null,
   };
+}
+
+/**
+ * TOOLS THE PIPELINE OWNS, bound to every lane it serves.
+ *
+ * `set_spoken_language` is how the model asks the bridge to retarget the
+ * provider's transcription mid-call (mediaStreamBridge.ts does the transport
+ * step by this NAME for any lane). Until v77 each lane listed it — four queue
+ * lanes did, the after-hours lane got a hand-built copy on v75, pcp never
+ * had it — which is the same decision written five times. The runtime binds
+ * it here, once, so a lane that forgets is not a lane that cannot follow a
+ * Spanish caller. Imported lazily, like the registry itself, so a health
+ * check does not pull the tool library into the process.
+ */
+export const RUNTIME_OWNED_TOOLS = ["set_spoken_language"] as const;
+
+async function runtimeOwnedTools(
+  slug: string,
+  metadata: LaneCallMetadata,
+  /** The lane's language POLICY, from its registration. Undeclared means the
+   * lane follows the caller into any language. */
+  spokenLanguages?: readonly string[],
+): Promise<LiveTool[]> {
+  const { SET_SPOKEN_LANGUAGE_TOOL_NAME, spokenLanguageToolDescription } =
+    await import("../tools/languageTools");
+  const { realtimeToolsFor } = await import("../tools/realtimeAdapter");
+  const tools = realtimeToolsFor(
+    [...RUNTIME_OWNED_TOOLS],
+    {
+      /**
+       * THE POLICY REACHES THE TOOL AS INJECTED CONTEXT (Codex P2 on #336).
+       *
+       * Merged UNDER the model's arguments by the adapter, like `lane` on
+       * `lookup_patient`: not a schema field, so the model can neither set it
+       * nor be asked for it. The tool refuses a language outside the list at
+       * dispatch and returns no `language` key, so the bridge's transport
+       * step (`languageToSwitchTo`) has nothing to act on — the after-hours
+       * line's English-and-Spanish rule holds against a model that calls the
+       * tool for Tagalog anyway. Undefined is filtered out by the adapter, so
+       * a lane with no policy hands the tool nothing and it follows any caller.
+       */
+      spoken_languages: spokenLanguages ? [...spokenLanguages] : undefined,
+    },
+    {
+      callId: metadata.callId,
+      callSid: metadata.callSid,
+      // A getter, for the same reason the factories read it as one: the row
+      // does not exist when the agent is built.
+      get callLogId() {
+        return metadata.callLogId;
+      },
+      agentSlug: slug,
+    },
+  ) as unknown as LiveTool[];
+  // And the tool's WORDS agree with the policy: a lane that speaks English
+  // and Spanish is not told "call this the moment the caller speaks another
+  // language". One description per policy, composed in languageTools.ts.
+  return tools.map((t) =>
+    t.name === SET_SPOKEN_LANGUAGE_TOOL_NAME
+      ? { ...t, description: spokenLanguageToolDescription(spokenLanguages) }
+      : t,
+  );
 }
 
 /** The real registry, imported lazily so a health check or a unit test

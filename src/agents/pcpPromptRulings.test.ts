@@ -404,15 +404,22 @@ describe('the caller-ID seeded callback number', () => {
  * them silently.
  */
 const NO_UNIQUE_RULING: Record<string, string> = {
-  '# WHAT YOU DO':
+  '## Role & Persona':
+    'The docs\' first section (xAI Prompting Guide, v77): who answers and who ' +
+    'rings this number. Every ruling is worded from the sections below it; the ' +
+    'persona is what they are rulings FOR.',
+  '## Conversation Flow':
+    'A heading the docs\' shape requires, with no body of its own — its content ' +
+    'is the ### sections beneath it, each of which carries its rulings.',
+  '## Objective':
     'A 49-token framing of the capability boundary — answer from a lookup, file, ' +
     'or connect, "Nothing else". Kept deliberately: the boundary is real even ' +
     'though no ruling below is worded from it.',
-  '# THE DIRECTOR DECIDES, NOT YOU':
-    'Overlaps "## HOW YOU KNOW WHAT TO ASK" on "ask only the next question ' +
+  '### The director decides, not you':
+    'Overlaps "### How you know what to ask" on "ask only the next question ' +
     'record_pcp_intake gives you". It alone says the director also decides ' +
     'whether a TRANSFER is available, so it is not a pure duplicate.',
-  '## HOW YOU KNOW WHAT TO ASK':
+  '### How you know what to ask':
     'The other half of the same overlap. It alone carries the four-step loop ' +
     'and "you do not have the list" — the #201 lesson, where showing the model ' +
     'the intake order stopped it inventing a sequence and started it reciting one.',

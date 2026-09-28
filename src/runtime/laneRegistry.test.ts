@@ -1,7 +1,14 @@
 import { describe, it, expect, vi } from "vitest";
 import { z } from "zod";
-import { resolveLane, laneSupportStatus, type LaneConfig, type LaneSource } from "./laneRegistry";
+import { resolveLane, laneSupportStatus, RUNTIME_OWNED_TOOLS, type LaneConfig, type LaneSource } from "./laneRegistry";
 import { buildKnowledgePack } from "./knowledgePack";
+
+// v77: resolveLane binds the PIPELINE's own tools (set_spoken_language) through
+// the tool library, whose telemetry module validates the environment at import.
+// A dummy connection string satisfies that validation; nothing here queries it.
+process.env.DATABASE_URL ||= 'postgresql://unused:unused@127.0.0.1:5432/unused';
+process.env.OPENAI_API_KEY ||= 'test-unused';
+process.env.XAI_API_KEY ||= 'test-unused';
 
 /** A stand-in for one of the real agents: an object with `instructions`
  * and `tools`, which is all the runtime borrows. */
@@ -77,7 +84,9 @@ describe("resolving a lane through the registry that already exists", () => {
       source: source({ id: "optical" }),
       env: {},
     });
-    expect(lane!.agent.toolNames).toEqual(["create_ticket"]);
+    // The agent's own tools first, verbatim; then the PIPELINE's, which every
+    // lane carries (v77, RUNTIME_OWNED_TOOLS) — never a second copy of a name.
+    expect(lane!.agent.toolNames).toEqual(["create_ticket", ...RUNTIME_OWNED_TOOLS]);
     const schema = JSON.stringify(lane!.agent.tools[0]);
     expect(schema).not.toContain('"strict"');
     // A real Zod .optional() must stay out of `required` — the exact shape
@@ -229,6 +238,35 @@ describe("per-lane voice and language", () => {
     expect(lane!.voice.language).toBe("en");
   });
 
+  /**
+   * v75: the registry's `language: 'en'` is the OLD CORE's default, copied
+   * onto every lane, and it must not read as a choice — on this runtime a
+   * chosen language seeds a transcription bias (grokSession.ts,
+   * `seedsLanguageHint`). Only an env value is a choice.
+   */
+  it("does not treat the registry's default English as a language somebody chose", async () => {
+    const lane = await resolveLane("optical", META, {
+      source: source({ id: "optical", language: "en" }),
+      env: {},
+    });
+    expect(lane!.voice.language).toBe("en");
+    expect(lane!.voice.languageExplicit).toBe(false);
+  });
+
+  it("an env language IS a choice, per lane or fleet-wide", async () => {
+    const perLane = await resolveLane("optical", META, {
+      source: source({ id: "optical" }),
+      env: { XAI_VOICE_LANGUAGE_OPTICAL: "en" },
+    });
+    expect(perLane!.voice.languageExplicit).toBe(true);
+    const fleet = await resolveLane("optical", META, {
+      source: source({ id: "optical" }),
+      env: { XAI_VOICE_LANGUAGE: "es" },
+    });
+    expect(fleet!.voice.language).toBe("es");
+    expect(fleet!.voice.languageExplicit).toBe(true);
+  });
+
   it("keeps the lane's version for the record", async () => {
     const lane = await resolveLane("optical", META, {
       source: source({ id: "optical", version: "v1.4.0" }),
@@ -238,8 +276,14 @@ describe("per-lane voice and language", () => {
   });
 });
 
-describe("the cache prefix the whole fleet shares", () => {
-  it("is byte-identical across lanes up to each agent's own instructions", async () => {
+describe("the knowledge pack every lane carries", () => {
+  // v77: the pack's PLACE now depends on the prompt's shape — as `## Business
+  // Facts` after Role & Persona on a five-section prompt, in front on any
+  // other (agentBinding.ts, composeWithBusinessFacts; the fleet guard in
+  // promptShapeIsTheDocs.test.ts asserts the real lanes). These fake agents
+  // are not five-section, so here it is in front on both — and the BYTES are
+  // the same on every lane, which is the property that still matters.
+  it("is the same bytes on every lane, wherever the shape places it", async () => {
     const optical = await resolveLane("optical", META, {
       source: source({ id: "optical" }),
       env: {},

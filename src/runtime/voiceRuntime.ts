@@ -1008,6 +1008,10 @@ export function mountVoiceRuntime(
             get callLogId(): string | undefined {
               return callLogId;
             },
+            // This pipeline names itself, so an agent with a prompt written
+            // for Grok (the after-hours lane, v76) can pick it here and keep
+            // the old core's prompt on the old core.
+            pipeline: "runtime" as const,
             // The queue agents choose their opening from this: with a
             // unique match they confirm ("Am I speaking with…?") instead of
             // asking cold, which is the behaviour the SIP path already

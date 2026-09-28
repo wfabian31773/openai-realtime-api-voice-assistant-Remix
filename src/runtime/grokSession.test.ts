@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { GrokVoiceSession, buildSessionConfig, PRE_CONFIG_AUDIO_CAP } from "./grokSession";
+import { GrokVoiceSession, buildSessionConfig, PRE_CONFIG_AUDIO_CAP, seedsLanguageHint } from "./grokSession";
 import type { GrokTransport, GrokVoiceSessionHandlers } from "./grokSession";
 import type { GrokClientEvent, GrokServerEvent } from "./wireTypes";
 import { loadGrokRuntimeVoiceConfig } from "./config";
@@ -837,6 +837,40 @@ describe("GrokVoiceSession.setSpokenLanguage", () => {
     const config = { ...loadGrokRuntimeVoiceConfig({}), language: "ko" };
     const built = buildSessionConfig(config, "instructions", [...FIXTURE_TOOLS]);
     expect(built.audio.input.transcription?.language_hint).toBe("ko");
+  });
+
+  /**
+   * THE TRANSCRIBER DETECTS THE LANGUAGE (v75). xAI, Speech to Speech →
+   * Supported Languages: *"The model automatically detects the input language
+   * and responds naturally in the same language — no configuration
+   * required."* The hint exists to *"bias ASR transcription toward a specific
+   * language"*. Until v75 every lane seeded `language_hint: "en"` — a value
+   * copied from the old core's registry, not a choice — so every caller who
+   * opened in Spanish was transcribed through an English bias until the model
+   * noticed and called set_spoken_language (480 of 507 Spanish-cue calls,
+   * 2026-09-14..27). A defaulted English now seeds nothing at all.
+   */
+  it("seeds NO language hint for a defaulted English lane — the transcriber detects (v75)", () => {
+    const built = buildSessionConfig(loadGrokRuntimeVoiceConfig({}), "instructions", [...FIXTURE_TOOLS]);
+    expect(built.audio.input.transcription?.language_hint).toBeUndefined();
+    // Nothing else in the block either, so the block itself is not sent.
+    expect(built.audio.input).not.toHaveProperty("transcription");
+    expect(seedsLanguageHint(loadGrokRuntimeVoiceConfig({}))).toBe(false);
+  });
+
+  it("an English somebody SET still seeds the hint — XAI_VOICE_LANGUAGE=en is the revert lever", () => {
+    const config = loadGrokRuntimeVoiceConfig({ XAI_VOICE_LANGUAGE: "en" });
+    expect(config.languageExplicit).toBe(true);
+    const built = buildSessionConfig(config, "instructions", [...FIXTURE_TOOLS]);
+    expect(built.audio.input.transcription?.language_hint).toBe("en");
+  });
+
+  it("keyterms still ride the handshake when no hint is seeded", () => {
+    const built = buildSessionConfig(loadGrokRuntimeVoiceConfig({}), "instructions", [...FIXTURE_TOOLS], [
+      "Azul Vision",
+    ]);
+    expect(built.audio.input.transcription).toEqual({ keyterms: ["Azul Vision"] });
+    expect(built.audio.input.transcription).not.toHaveProperty("language_hint");
   });
 
   it("sends a REGIONAL Spanish hint, not the bare primary subtag", () => {

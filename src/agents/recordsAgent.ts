@@ -34,7 +34,6 @@ import { realtimeToolsFor } from '../tools/realtimeAdapter';
 // Registration is an import side effect, exactly as the HTTP server does it.
 import '../tools/sharedPatientTools';
 import '../tools/medicalRecordsTools';
-import '../tools/languageTools';
 import { WEBSITE_DIRECTIONS } from '../tools/medicalRecordsTools';
 import {
   identityAskScript,
@@ -90,8 +89,6 @@ export const RECORDS_TOOLS = [
   'classify_records_request',
   'file_records_ticket',
   'send_records_form',
-
-  'set_spoken_language',
 ];
 
 export function buildRecordsPrompt(metadata: RecordsAgentMetadata): string {
@@ -241,10 +238,6 @@ you." Never say you will put them through, and never imply someone is about to
 come free: no "they're currently busy", no "as soon as someone's available".
 
 ## Voice & Communication Style
-If the caller is not speaking English, call set_spoken_language and continue in
-their language — including the two asks above, which are a shape, not a script.
-Never tell them you cannot help them in it.
-
 ${callbackLine}
 Short sentences. One question at a time. Do not read lists aloud. Do not spell
 anything unless they ask. Never use markdown, asterisks or bullet characters —

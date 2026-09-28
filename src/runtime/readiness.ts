@@ -473,9 +473,70 @@ import { callEnvironment } from "./callRecord";
  * comes back as a question naming the field. no-ivr is on the OLD CORE, so
  * this marker dates the build the way v18, v41, v47 and v53 do. It stacks on
  * v73 (`main` at `0039a9d`) and contains every marker below it.
+ *
+ * v75, 2026-09-28: THE TRANSCRIBER DETECTS THE LANGUAGE. Operator: *"xai
+ * specifically states that large prompts are unnecessary, they also have
+ * their recommendations for handling spanish calls, we need to ensure the
+ * runtime follows those docs to the letter."* Read against docs.x.ai
+ * (Speech to Speech, Prompting Guide) — the audit is
+ * docs/observatory/XAI-DOCS-CONFORMANCE-20260928.md — the runtime departed in
+ * one place on Spanish: it seeded `audio.input.transcription.language_hint:
+ * "en"` on EVERY call, from a registry default copied off the old core, where
+ * the docs say the model *"automatically detects the input language ... no
+ * configuration required"* and the hint exists to *"bias ASR transcription
+ * toward a specific language"*. A defaulted English now seeds nothing; an
+ * env-set language or a non-English lane still seeds its regional hint;
+ * `set_spoken_language` still retargets mid-call (es-MX, as the docs require
+ * for Spanish). Beside it: the after-hours lane gains `set_spoken_language`
+ * (it built its tools by hand and never had it, so on the runtime its hint
+ * could never follow a Spanish caller), its language block is restated in
+ * the guide's language-lock shape, and the tag a switch went TO reaches
+ * `tool_timeline` so the 76 non-Spanish switches of the last fortnight stop
+ * being uncountable. Revert lever for the seed: `XAI_VOICE_LANGUAGE=en`. It
+ * stacks on v74 (`main` at `f998a0b`) and contains every marker below it. *
+ * v76, 2026-09-28: THE AFTER-HOURS PROMPT IN THE SHAPE xAI PRESCRIBES. Ships
+ * with v75 in one PR; only v76 reaches a deployment, a build reading v75 does
+ * not exist (the v34/v35 shape). The docs' migration text — *"your prompt
+ * should be much shorter … Remove workaround prompting"* — and the Prompting
+ * Guide's five `##` sections describe the after-hours prompt's departure
+ * exactly: it was the OpenAI-era body, never rewritten for Grok (28,478 own
+ * chars, a six-phase playbook, six CRITICAL banners). The Grok-shaped body
+ * (src/agents/noIvrPromptForGrok.ts) carries the same rulings in the docs'
+ * shape at under half the size — 14,082 built chars against 28,801 — and
+ * noIvrPromptShapeForGrok.test.ts holds BOTH bodies to one rulings map. THE
+ * GROK PIPELINE GETS IT AND ONLY THE GROK PIPELINE: voiceRuntime marks its
+ * calls `pipeline: 'runtime'`, the old core never does, so deploying this
+ * changes nothing on the live after-hours line until the repoint; revert
+ * lever `NO_IVR_PROMPT_SHAPE=legacy`. One deliberate rule change, named for
+ * the operator: the pre-context block asks for the last name and then the
+ * date of birth, one field per question (RULE ZERO 2b), instead of both in
+ * one breath. It stacks on v75 and contains every marker below it.
+ *
+ * v77, 2026-09-28: THE LANGUAGE MECHANISM IS THE RUNTIME'S, AND SO IS THE SHAPE
+ * GUARD. Operator, of v75/v76: *"Shouldn't this be for the runtime in
+ * general?"* Yes — and the 2026-09-15 ruling already said where: *"the things
+ * that are applicable to any conversation should be in the runtime; things
+ * applicable to that agent itself should be in the prompt."* Following the
+ * caller's language is applicable to any conversation, and it was written into
+ * five prompts and listed by five tool lists (pcp had neither). Now
+ * `laneRegistry` binds `set_spoken_language` to EVERY lane
+ * (RUNTIME_OWNED_TOOLS) and `agentBinding` appends ONE copy of the mechanism
+ * into the guide's own place for it — the end of `## Voice & Communication
+ * Style` — rendering each lane's language POLICY from `spokenLanguages` on
+ * its registration (the after-hours line: English and Spanish; every queue
+ * lane: follow the caller). The knowledge pack moves from a preamble to
+ * `## Business Facts` after Role & Persona, the docs' order, on any
+ * five-section prompt (voice is billed by the minute, so the token-cache
+ * prefix the old order bought was worth nothing). PCP's prompt is
+ * re-sectioned into the five headings with its sentences unchanged. And
+ * `promptShapeIsTheDocs.test.ts` holds every lane the runtime serves — the
+ * BOUND prompt, through the real registry — to the five sections in order,
+ * Business Facts once, no H1, CRITICAL at most once, only tools that exist,
+ * the language tool bound and the mechanism present exactly once. It stacks
+ * on v76 and contains every marker below it.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v74-an-email-preference-is-not-a-failure-20260927";
+  "voice-runtime-v77-the-language-mechanism-is-the-runtimes-20260928";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

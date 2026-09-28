@@ -26,6 +26,9 @@ export interface AgentConfig {
   version?: string;
   voice?: string;      // Voice to use for this agent (e.g., 'sage', 'coral')
   language?: string;   // Language code for transcription (e.g., 'en', 'es')
+  /** The languages this line SPEAKS ('en', 'es'); absent = follow the caller
+   *  into any language. Read by the voice runtime's language block. */
+  spokenLanguages?: readonly string[];
   greeting?: string;   // Agent greeting message
 }
 
@@ -44,6 +47,7 @@ export class AgentRegistry {
       version: noIvrAgentConfig.version, // v1.13.0: after-hours routing mandate — Request Type pinning, transcript at filing, urgent-transfer record ticket
       voice: noIvrAgentConfig.voice,
       language: noIvrAgentConfig.language,
+      spokenLanguages: noIvrAgentConfig.spokenLanguages,
       greeting: noIvrAgentConfig.greeting,
     });
 

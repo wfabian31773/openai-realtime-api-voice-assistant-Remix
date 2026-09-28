@@ -39,7 +39,6 @@ import { getPacificTimeContext, formatPhoneForSpeech, formatPhoneLast4 } from '.
 import { realtimeToolsFor } from '../tools/realtimeAdapter';
 // Registration is an import side effect, exactly as the HTTP server does it.
 import '../tools/opticalTools';
-import '../tools/languageTools';
 import {
   identityAskScript,
   identityCertainMeaning,
@@ -105,8 +104,6 @@ export const OPTICAL_TOOLS = [
   'check_open_tickets',
   'classify_optical_request',
   'file_optical_ticket',
-
-  'set_spoken_language',
 ];
 
 export function buildOpticalPrompt(metadata: OpticalAgentMetadata): string {
@@ -232,10 +229,6 @@ someone is about to come free: no "they're currently busy", no "as soon as
 someone's available".
 
 ## Voice & Communication Style
-If the caller is not speaking English, call set_spoken_language and continue in
-their language — including the two asks above, which are a shape, not a script.
-Never tell them you cannot help them in it.
-
 ${callbackLine}
 Short sentences. One question at a time. Do not read lists aloud. Do not spell
 anything unless they ask. Never use markdown, asterisks or bullet characters —

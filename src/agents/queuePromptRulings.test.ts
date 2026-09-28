@@ -58,27 +58,11 @@ const SHARED: readonly Ruling[] = [
     source: 'Standing instruction 7 — capability boundary, file a ticket instead',
     requires: [['call you back', 'callback', 'call back']],
   },
-  {
-    /**
-     * Codex, PR #272 round 2. Tech's identity block read "one at a time, in
-     * these words" while its language line said only "continue in their
-     * language" — so a Spanish caller who triggered set_spoken_language could
-     * still be asked for a last name and a date of birth in English, because
-     * the more concrete instruction said to use those words. The other three
-     * lanes had carried the qualifier since the language fix and tech had it
-     * reverted for four characters of ceiling headroom; the restructure gave
-     * the room back.
-     *
-     * Asserted here because this ruling had NO test at all — nothing stopped
-     * a trim from dropping it on all four lanes at once, which is precisely
-     * what this file exists to prevent.
-     */
-    source: 'Codex, 2026-09-05 (PR #272) — a translated call translates the quoted asks too',
-    requires: [
-      ['set_spoken_language'],
-      ['shape, not a script', 'shapes to translate', 'not scripts to read'],
-    ],
-  },
+  // The 2026-09-05 (PR #272) ruling that a translated call translates the
+  // quoted asks too — "a shape, not a script" — is the RUNTIME's since v77:
+  // src/runtime/languageMechanism.ts appends it to every lane and
+  // src/runtime/promptShapeIsTheDocs.test.ts asserts it on every BOUND prompt,
+  // so a lane cannot drop it and a trim of a lane's own text cannot reach it.
   {
     /**
      * Operator ruling, 2026-09-03: when a caller asks for a representative the

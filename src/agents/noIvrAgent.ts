@@ -23,6 +23,7 @@ import { decideDobEscape, dobStatusNote, dobEscapeMarker, type DobStatus } from 
 import { gateRefusalsSoFar, noteGateRefusal } from "../tools/gateAttempts";
 import { missingFieldsFromRefusal, spokenMissingFields } from "../services/missingFieldsRefusal";
 import { buildCompactLocationReference } from "../config/azulVisionKnowledge";
+import { buildNoIvrGrokBody, noIvrPromptShape } from "./noIvrPromptForGrok";
 import { getNextBusinessDayContext } from "../utils/timeAware";
 import { type TriageOutcome } from "../config/afterHoursTicketing";
 import { storage } from "../../server/storage";
@@ -125,6 +126,9 @@ export interface NoIvrAgentMetadata {
   precontext?: import('./azulSchedulingAgent').AzulPrecontext;
   /** Live transcript up to the moment of filing — lets the ticketing app generate its staff-facing summary at creation instead of waiting for post-call enrichment. */
   getTranscript?: () => string;
+  /** Set by the Grok runtime (voiceRuntime.ts) and by nothing else. Picks the
+   *  prompt body written for that pipeline — see noIvrPromptForGrok.ts. */
+  pipeline?: 'runtime';
 }
 
 // Operator mandate 2026-07-25: department-by-call-content, urgents-only in
@@ -444,14 +448,20 @@ Use check_open_tickets tool before creating new tickets to avoid duplicates.
 If caller has pending tickets, acknowledge them first.
 
 🗣️ LANGUAGE:
-⚠️ ALWAYS start in ENGLISH — never assume a language from a name, however the
-name looks. Wait to HEAR the caller, and read the language from their FIRST
-substantive words (not "hello" or "hi").
-English and Spanish are the ONLY languages you speak. Switch to Spanish only if
-the caller clearly and unambiguously speaks it. EVERYTHING else — French,
-Chinese, Vietnamese, unrecognised, ambiguous — stays in ENGLISH. Once set, STAY
-in that language for the ENTIRE call.
-If asked "Do you speak Spanish?" in English → Ask: "Would you like to continue in Spanish?"
+- You speak English and Spanish. Start in English. Never assume a language
+  from a name — read it from the caller's first substantive words (not
+  "hello" or "hi").
+- When the caller speaks Spanish, or asks for Spanish, continue in Spanish for
+  the rest of the call — every question, confirmation and the wait line before
+  create_ticket.
+- Switch only if the caller switches. An English tool result, a medication
+  name, a number or a word you did not catch is not a switch.
+- Keep every tool ARGUMENT in English (names, dates, yes/no) whatever language
+  you are speaking.
+- Any other language — French, Chinese, Vietnamese, unrecognised, ambiguous —
+  say in English that this line can help in English or Spanish, and continue
+  in English.
+- If asked "Do you speak Spanish?" in English → Ask: "Would you like to continue in Spanish?"
 
 🚫 GHOST CALL & ROBOT/SPAM DETECTION — END THESE CALLS, NEVER ESCALATE:
 
@@ -491,6 +501,25 @@ This caller has ${callerMemory.openTickets.length} pending ticket(s): ${callerMe
 If they're calling about the same issue, acknowledge you see their previous request is being processed.
 Avoid creating duplicate tickets for the same issue.
 ` : '';
+
+  // THE GROK PIPELINE GETS THE PROMPT WRITTEN FOR IT (v76). Same rulings, the
+  // shape xAI's Prompting Guide prescribes, under half the size; the body
+  // below stays for the OpenAI SIP core until that pipeline is retired.
+  // noIvrPromptShapeForGrok.test.ts holds both bodies to one list of rulings.
+  if (noIvrPromptShape(metadata) === 'grok') {
+    return buildNoIvrGrokBody({
+      versionString,
+      timeContext,
+      nextBusinessDayPhrase: nextBizDay.contextPhrase,
+      phoneContext,
+      callerHistorySection,
+      openTicketsContext,
+      scheduleContextSection,
+      precontextFirstName: pc?.matched && pc.firstName ? pc.firstName : null,
+      urgentSymptomsList: URGENT_SYMPTOMS.symptoms.map((s) => `• ${s}`).join("\n"),
+      triageBlock: renderTriagePrompt(),
+    });
+  }
 
   // PROMPT CACHING: Static content FIRST (cacheable prefix), dynamic context LAST
   return `You are the AFTER-HOURS AGENT for Azul Vision. VERSION: ${versionString}
@@ -1918,9 +1947,11 @@ For healthcare provider calls — escalate immediately with whatever info you ha
 
   console.log(`[${agentTag}] ✓ Agent created with tools:`, [
     "lookup_schedule",
+    "check_open_tickets",
     "emit_decision",
     "create_ticket",
     "escalate_to_human",
+    "terminate_call",
   ]);
   console.log(`[${agentTag}] ✓ Version: ${versionString}`);
 
@@ -1940,4 +1971,10 @@ export const noIvrAgentConfig = {
   greeting: "Thank you for calling Azul Vision, all of our offices are currently closed, you have reached the after hours call service. If this is a medical emergency, please dial 911. All calls are being recorded for quality assurance purposes, how can I help you?",
   voice: "sage",
   language: "en", // Default to English - prompt handles language detection/switching
+  /** The languages this line SPEAKS. An old-core-era rule the operator has
+   *  not revisited: English and Spanish only, any other language answered in
+   *  English. On the runtime this renders into the pipeline's own language
+   *  block (src/runtime/languageMechanism.ts); the queue lanes declare no
+   *  list and follow the caller into any language. */
+  spokenLanguages: ["en", "es"] as const,
 };

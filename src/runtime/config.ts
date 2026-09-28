@@ -25,6 +25,18 @@ export interface GrokRuntimeVoiceConfig {
   model: string;
   voiceName: string;
   language: SpokenLanguage;
+  /**
+   * Whether `language` was SET (an `XAI_VOICE_LANGUAGE[_<SLUG>]` value) or
+   * merely defaulted. It decides whether the session handshake seeds a
+   * transcription `language_hint` at all — see `seedsLanguageHint` in
+   * grokSession.ts. xAI's Speech to Speech docs: *"The model automatically
+   * detects the input language and responds naturally in the same language
+   * — no configuration required"*, and the hint exists to *"bias ASR
+   * transcription toward a specific language"*. A defaulted English is not a
+   * choice anybody made, so it must not become a bias against every caller
+   * who opens in Spanish; an English somebody set on purpose still is.
+   */
+  languageExplicit: boolean;
   reasoningEffort: GrokReasoningEffort;
 }
 
@@ -63,11 +75,13 @@ export function loadGrokRuntimeVoiceConfig(
   // Only an explicit "none" disables reasoning; anything else keeps the
   // default high effort that the live lanes run on today.
   const effortRaw = (pickLaneEnv(env, "XAI_VOICE_REASONING_EFFORT", slug) ?? "").toLowerCase();
+  const envLanguage = pickLaneEnv(env, "XAI_VOICE_LANGUAGE", slug);
   return {
     apiKey: env.XAI_API_KEY ?? "",
     model: pickLaneEnv(env, "XAI_VOICE_MODEL", slug) ?? DEFAULT_MODEL,
     voiceName: pickLaneEnv(env, "XAI_VOICE_NAME", slug) ?? DEFAULT_VOICE,
-    language: normalizeSpokenLanguage(pickLaneEnv(env, "XAI_VOICE_LANGUAGE", slug) ?? "en"),
+    language: normalizeSpokenLanguage(envLanguage ?? "en"),
+    languageExplicit: envLanguage !== undefined,
     reasoningEffort: effortRaw === "none" ? "none" : "high",
   };
 }
