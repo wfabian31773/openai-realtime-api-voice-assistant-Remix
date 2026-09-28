@@ -188,6 +188,18 @@ describe('ticketing-app liveness is watched from this process', () => {
     expect(smsGate).toMatch(/ticketing_app_liveness/);
   });
 
+  it('does not email or clear real outage conditions when the heartbeat read fails', () => {
+    const check = source.slice(
+      source.indexOf('async checkTicketingAppLiveness'),
+      source.indexOf('startTicketingAppLivenessSchedule'),
+    );
+    const failedRead = check.slice(check.indexOf('if (!snapshot)'), check.indexOf('this.state.ticketingLivenessReadFailures = 0'));
+    expect(failedRead).toContain('console.warn');
+    expect(failedRead).toContain('return;');
+    expect(failedRead).not.toMatch(/await apply|sendAlert|ticketingLivenessConditions\s*=/);
+    expect(check).toContain('await apply(assessTicketingAppLiveness(snapshot))');
+  });
+
   it('does not start a second liveness check while the first is still mailing', () => {
     const check = source.slice(
       source.indexOf('async checkTicketingAppLiveness'),

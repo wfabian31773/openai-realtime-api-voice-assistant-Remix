@@ -710,7 +710,12 @@ class SystemAlertService {
       if (!snapshot) {
         this.state.ticketingLivenessReadFailures += 1;
         const failure = assessReadFailure(this.state.ticketingLivenessReadFailures);
-        if (failure) await apply(failure);
+        // A broken monitoring connection is not evidence of an app outage.
+        // Keep the last observed outage conditions: a failed read must neither
+        // email a new outage nor invent a recovery or consume an alert edge.
+        if (failure && this.state.ticketingLivenessReadFailures === 3) {
+          console.warn('[ALERT SERVICE] Ticketing-app monitoring unavailable; read-failure emails suppressed. App health is unknown.');
+        }
         return;
       }
       this.state.ticketingLivenessReadFailures = 0;
