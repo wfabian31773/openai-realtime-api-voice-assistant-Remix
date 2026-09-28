@@ -548,8 +548,22 @@ import { callEnvironment } from "./callRecord";
  * refuses the shape from now on. A build reading v77 is the outage build; v78
  * stacks on it and contains every marker below it.
  */
+/**
+ * v79 — THE RECORDS TOOL ASKS THE CHANNEL. The lane's first business day on
+ * this runtime (2026-09-28): the prompt told the model to offer the signing
+ * link and on real patient calls it did not — every create-ticket POST
+ * answered `form: {requested:false}`, every patient case opened ON the
+ * fifteen-day clock with no link, no funnel line in any transcript. Now
+ * `file_records_ticket`'s FIRST refusal on a patient request with no
+ * `form_channel` is the channel question itself (once, keyed on the call;
+ * a second omission texts the callback number). Third parties and redirected
+ * requests are never asked. Beside it on the ticketing app: a lock on the
+ * idempotency key, because the same day's batched filings raced past the
+ * key check and opened duplicate CAP cases, and a backfill that sends the
+ * form to every patient the funnel missed.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v78-the-language-tool-is-registered-once-20260928";
+  "voice-runtime-v79-the-records-tool-asks-the-channel-20260928";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

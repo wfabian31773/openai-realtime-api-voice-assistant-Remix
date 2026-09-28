@@ -231,3 +231,119 @@ describe('the plumbing', () => {
     expect(src).toMatch(/\.\.\.\(formChannel && !redirect \? \{ formChannel \} : \{\}\)/);
   });
 });
+
+describe('v79 — the tool asks the channel when the model did not', () => {
+  // The records lane's first business day on the runtime, 2026-09-28: four
+  // real patient calls in the first hour, every create-ticket POST answering
+  // `form: {requested:false}`, every patient case opened ON the clock with no
+  // link, and not one funnel line in the transcripts. The model filed with no
+  // channel, took the on-clock refusal for destination and dates, and walked
+  // the old path. So the FIRST refusal on a patient request with no channel is
+  // now the channel question itself.
+  it('refuses a patient request with no channel by asking the channel question — nothing is filed', async () => {
+    const api = await client();
+    const create = vi.spyOn(api, 'createTicket');
+    const r = (await runTool('file_records_ticket', { ...PATIENT, call_sid: freshSid() })) as Out;
+
+    expect(r.success).toBe(false);
+    expect(r.missingFields).toEqual(['form_channel']);
+    expect(String(r.message)).toMatch(/mobile number that receives texts/i);
+    expect(String(r.message)).toMatch(/by email/i);
+    expect(String(r.fix)).toMatch(/verbal/);
+    expect(String(r.fix)).toMatch(/do not ask where/i);
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it('asks ONCE: a second invocation still carrying no channel files with a text to the callback number, off the clock', async () => {
+    const api = await client();
+    const create = vi.spyOn(api, 'createTicket').mockResolvedValueOnce(
+      filed('VA-FORM-V79', { requested: true, sent: true, channel: 'sms' }),
+    );
+    const sid = freshSid();
+    const first = (await runTool('file_records_ticket', { ...PATIENT, call_sid: sid })) as Out;
+    expect(first.missingFields).toEqual(['form_channel']);
+
+    const r = (await runTool('file_records_ticket', { ...PATIENT, call_sid: sid })) as Out;
+    expect(r.success).toBe(true);
+    const p = create.mock.calls[0][0] as unknown as Record<string, unknown>;
+    expect(p.formChannel).toBe('sms');
+    expect(p.requestPathway).toBe('pending_authorization');
+    expect(p.capClockApplies).toBe(false);
+    expect(String(p.description)).toContain('Send to: on the signed form');
+    expect(r.form_channel).toBe('sms');
+    expect(r.form_sent).toBe(true);
+  });
+
+  it('the ask is keyed on the call: another call is asked afresh', async () => {
+    const a = (await runTool('file_records_ticket', { ...PATIENT, call_sid: freshSid() })) as Out;
+    const b = (await runTool('file_records_ticket', { ...PATIENT, call_sid: freshSid() })) as Out;
+    expect(a.missingFields).toEqual(['form_channel']);
+    expect(b.missingFields).toEqual(['form_channel']);
+  });
+
+  it('a sentinel CallSid is asked every time — a shared counter would spend one caller’s ask on another', async () => {
+    const a = (await runTool('file_records_ticket', { ...PATIENT, call_sid: 'unknown' })) as Out;
+    const b = (await runTool('file_records_ticket', { ...PATIENT, call_sid: 'unknown' })) as Out;
+    expect(a.missingFields).toEqual(['form_channel']);
+    expect(b.missingFields).toEqual(['form_channel']);
+  });
+
+  it('"declined" is an answer: not asked again, the destination-and-dates gate takes over as before', async () => {
+    const r = (await runTool('file_records_ticket', { ...PATIENT, form_channel: 'declined', call_sid: freshSid() })) as Out;
+    expect(r.success).toBe(false);
+    expect(r.missingFields).toEqual(['deliver_to', 'date_range']);
+  });
+
+  it('a lane that declares it cannot ask (on_clock_ask_exhausted — PCP) is not asked: files as today, gap noted', async () => {
+    const api = await client();
+    const create = vi.spyOn(api, 'createTicket').mockResolvedValueOnce(filed('VA-PCP-V79'));
+    const r = (await runTool('file_records_ticket', { ...PATIENT, on_clock_ask_exhausted: true, call_sid: freshSid() })) as Out;
+    expect(r.success, JSON.stringify(r)).toBe(true);
+    const p = create.mock.calls[0][0] as unknown as Record<string, unknown>;
+    expect(p.formChannel).toBeUndefined();
+    expect(p.requestPathway).toBe('roa_patient');
+    expect(String(p.description)).toContain('Dates needed: NOT CAPTURED');
+  });
+
+  it('a third party is never asked: files with no channel and no question', async () => {
+    const api = await client();
+    const create = vi.spyOn(api, 'createTicket').mockResolvedValueOnce(filed('VA-3P-V79'));
+    const r = (await runTool('file_records_ticket', {
+      ...PATIENT,
+      requester: 'I am an attorney at Lexitas',
+      requester_type: 'legal',
+      call_sid: freshSid(),
+    })) as Out;
+    expect(r.success).toBe(true);
+    const p = create.mock.calls[0][0] as unknown as Record<string, unknown>;
+    expect(p.formChannel).toBeUndefined();
+  });
+
+  it('a caller who pressed the wrong option is not offered a form: an appointment request is redirected, not asked', async () => {
+    const api = await client();
+    const create = vi.spyOn(api, 'createTicket').mockResolvedValueOnce(filed('VA-HUB-V79'));
+    const r = (await runTool('file_records_ticket', {
+      ...PATIENT,
+      request_description: 'I need to make an appointment for an eye exam',
+      // The destination-and-dates gate predates v79 and still runs on a
+      // redirected patient request; this test is about the CHANNEL question.
+      deliver_to: 'to me',
+      date_range: 'everything',
+      call_sid: freshSid(),
+    })) as Out;
+    expect(r.success, JSON.stringify(r)).toBe(true);
+    const p = create.mock.calls[0][0] as unknown as Record<string, unknown>;
+    expect(p.formChannel).toBeUndefined();
+    expect(p.departmentId).not.toBe(16);
+  });
+
+  it('the source: the redirect is decided BEFORE the channel ask, on the same words', () => {
+    const src = readFileSync(join(__dirname, 'medicalRecordsTools.ts'), 'utf8');
+    const redirectAt = src.indexOf("const redirect = detectCrossQueue(description, MEDICAL_RECORDS_DEPARTMENT_ID)");
+    const askAt = src.indexOf("gateRefusalsSoFar(callSid, RECORDS_TOOL, FORM_CHANNEL_ASK)");
+    expect(redirectAt).toBeGreaterThan(0);
+    expect(askAt).toBeGreaterThan(redirectAt);
+    // and it is decided exactly once
+    expect(src.split('detectCrossQueue(description').length - 1).toBe(1);
+  });
+});
