@@ -535,8 +535,21 @@ import { callEnvironment } from "./callRecord";
  * the language tool bound and the mechanism present exactly once. It stacks
  * on v76 and contains every marker below it.
  */
+/**
+ * v78 — THE LANGUAGE TOOL IS REGISTERED ONCE. The outage fix. v77 bound the
+ * runtime-owned `set_spoken_language` through `await import("../tools/languageTools")`
+ * inside `resolveLane`; on Node 20 (Replit) that evaluated the module a second
+ * time in a process that had already loaded it through `src/tools/server.ts`,
+ * `registerTool` threw `[TOOLS] duplicate tool name: set_spoken_language`, and
+ * every runtime lane failed at call setup from the 14:17 UTC republish of
+ * 2026-09-28 until the rollback. The import is static now (one loader, one
+ * cache, one evaluation), `pcpAgent`'s same-shaped import of
+ * `medicalRecordsTools` is static too, and `toolModulesAreImportedOneWay.test.ts`
+ * refuses the shape from now on. A build reading v77 is the outage build; v78
+ * stacks on it and contains every marker below it.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v77-the-language-mechanism-is-the-runtimes-20260928";
+  "voice-runtime-v78-the-language-tool-is-registered-once-20260928";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

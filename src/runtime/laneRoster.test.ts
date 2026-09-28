@@ -6,7 +6,15 @@
  * the next lane being prepared, and it can pass every check here while still
  * having nowhere to dial.
  */
-import { describe, it, expect } from "vitest";
+import {describe, it, expect, vi } from "vitest";
+// HOISTED above every import: since v78 `laneRegistry` imports the tool
+// library STATICALLY and its telemetry module validates DATABASE_URL at
+// import, so the environment has to exist before the import graph loads.
+vi.hoisted(() => {
+  process.env.DATABASE_URL ||= 'postgresql://unused:unused@127.0.0.1:5432/unused';
+  process.env.OPENAI_API_KEY ||= 'test-unused';
+  process.env.XAI_API_KEY ||= 'test-unused';
+});
 import { laneRoster, formatLaneRoster, REPORTED_LANES } from "./laneRoster";
 import type { LaneSource } from "./laneRegistry";
 

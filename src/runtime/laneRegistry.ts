@@ -48,6 +48,26 @@ import {
 } from "./config";
 import type { LiveTool } from "./agentBinding";
 import { normalizeSpokenLanguage } from "./language";
+/**
+ * STATIC, ON PURPOSE — THIS LINE IS THE v78 FIX.
+ *
+ * v77 imported these two lazily inside `runtimeOwnedTools` (`await import(…)`)
+ * "so a health check does not pull the tool library into the process". On
+ * Node 20 — the version Replit runs — that dynamic import evaluated
+ * `languageTools.ts` a SECOND time in a process that had already loaded it
+ * through `src/tools/server.ts`'s static import, and the module's top-level
+ * `registerTool` threw `[TOOLS] duplicate tool name: set_spoken_language`
+ * inside `resolveLane`. Every runtime lane failed at call setup from the
+ * 14:17 UTC republish of 2026-09-28 until the rollback. It does not reproduce
+ * on Node 22, which is why every test and every local probe passed.
+ *
+ * A static import goes through the same loader and the same cache as the
+ * boot-time one, so the module is evaluated once. `toolModulesAreImportedOneWay`
+ * (its test) keeps any dynamic import of a tool-registering module out of the
+ * runtime and the agents from now on.
+ */
+import { SET_SPOKEN_LANGUAGE_TOOL_NAME, spokenLanguageToolDescription } from "../tools/languageTools";
+import { realtimeToolsFor } from "../tools/realtimeAdapter";
 
 /** What the runtime needs from a lane's registry entry. Structurally a
  * subset of AgentConfig in src/config/agents.ts. */
@@ -375,8 +395,9 @@ export async function resolveLane(
  * lanes did, the after-hours lane got a hand-built copy on v75, pcp never
  * had it — which is the same decision written five times. The runtime binds
  * it here, once, so a lane that forgets is not a lane that cannot follow a
- * Spanish caller. Imported lazily, like the registry itself, so a health
- * check does not pull the tool library into the process.
+ * Spanish caller. The tool library is imported STATICALLY at the top of this
+ * file — see the note there: the lazy import this used to carry is what took
+ * every runtime lane down on 2026-09-28.
  */
 export const RUNTIME_OWNED_TOOLS = ["set_spoken_language"] as const;
 
@@ -387,9 +408,6 @@ async function runtimeOwnedTools(
    * lane follows the caller into any language. */
   spokenLanguages?: readonly string[],
 ): Promise<LiveTool[]> {
-  const { SET_SPOKEN_LANGUAGE_TOOL_NAME, spokenLanguageToolDescription } =
-    await import("../tools/languageTools");
-  const { realtimeToolsFor } = await import("../tools/realtimeAdapter");
   const tools = realtimeToolsFor(
     [...RUNTIME_OWNED_TOOLS],
     {
