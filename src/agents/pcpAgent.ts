@@ -44,6 +44,15 @@ import {
 import { ticketReadiness, nextRequiredAsk, annotationFor, MAX_BLOCKS } from '../pcp/ticketRequirements';
 import { submitPcpTicket, type PcpTicketPayload } from '../pcp/pcpTicketing';
 import { getPacificTimeContext, formatPhoneForSpeech, formatPhoneLast4 } from '../utils/timeAware';
+// STATIC, NOT `await import(…)` — the v78 rule. A dynamic import of a module
+// that registers tools at load evaluated it a second time on Node 20 (Replit)
+// and threw `[TOOLS] duplicate tool name` inside call setup; that is what took
+// every runtime lane down on 2026-09-28 (laneRegistry.ts, same shape). This
+// file carried the same shape for the records route since v15, so on that
+// pipeline the route may have been refusing with `records_tool_unavailable`
+// rather than filing to Medical Records — the after-number in CLAUDE.md.
+import { getTool } from '../tools/registry';
+import '../tools/medicalRecordsTools';
 
 export const pcpAgentConfig = {
   slug: 'pcp',
@@ -2476,8 +2485,6 @@ async function fileToMedicalRecords(
   const recordsHit = classifyRecords(narrative);
   if (!recordsHit) return null;
 
-  const { getTool } = await import('../tools/registry');
-  await import('../tools/medicalRecordsTools');
   const fileRecords = getTool('file_records_ticket');
   if (!fileRecords) return refusePcp('records_tool_unavailable', { retryable: true }) as never;
 
