@@ -1909,14 +1909,17 @@ describe("the runtime's turns and recording reach the Observatory", () => {
     const CERTAIN = "CA0000000000000000000000000000005a";
     const CANDIDATE = "CA0000000000000000000000000000005b";
     rememberVerifiedIdentity(CERTAIN, { firstName: "Zelda", lastName: "Quixote", dateOfBirth: "1958-01-04", certain: true });
-    rememberVerifiedIdentity(CANDIDATE, { firstName: "Zed", lastName: "Quixote", certain: false });
+    rememberVerifiedIdentity(CANDIDATE, { firstName: "Zed", lastName: "Quixote", dateOfBirth: "1958-01-04", certain: false });
     const h = await harness();
     for (const sid of [CERTAIN, CANDIDATE]) {
+      const expectedCalls = h.transports.length + 1;
       const answered = await post(h, "/voice/optical", { CallSid: sid, From: "+1", To: "+2" });
       const { ws } = await openStream(h, sid, tokenFrom(answered.text));
-      await waitFor(() => h.transports.length >= 1, "the transport to register");
+      // Wait for THIS call: the first call's transport remains in the array.
+      // Closing during setup exercises the no-bridge path, not identity teardown.
+      await waitFor(() => h.transports.length === expectedCalls, "this call's transport to register");
       ws.close();
-      await settle(8);
+      await waitFor(() => h.persisted.length === expectedCalls, "this call to persist");
     }
     expect(h.persistedIdentity).toHaveLength(2);
     expect(h.persistedIdentity[0]).toEqual({ patientFound: true, patientName: "Zelda Quixote", patientDob: "1958-01-04" });

@@ -492,6 +492,18 @@ which is the half that was actually wrong.
 
 ---
 
+## Offline test boundaries
+
+Adapter tests should stub the service dispatch boundary rather than merely spy
+on it, while retaining assertions on the tool name and arguments.
+
+**Why:** A spy still executes its implementation. An adapter test's apparent
+import timeout turned out to include real database/service work, making its
+result depend on the environment rather than the adapter's behavior.
+
+**How to apply:** For timeout investigations, distinguish module loading from
+handler execution before increasing a timeout or changing production behavior.
+
 ## "The agent did something impossible" — check the caller first
 
 2026-09-15. I reported that the PCP agent had read one ticket number to five

@@ -1,11 +1,17 @@
 /**
  * The Optical agent: what it can do, and what it must never claim it can do.
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 vi.hoisted(() => {
   process.env.DATABASE_URL ??= 'postgres://test:test@127.0.0.1:5432/test';
 });
+
+// Adapter assertions exercise context injection, not timeline persistence.
+// Even a stubbed dispatch otherwise triggers a real database write at teardown.
+vi.mock('../services/toolTimeline', () => ({
+  recordingExecute: (_ctx: unknown, _name: string, fn: (input: unknown) => Promise<string>) => fn,
+}));
 
 import {
   buildOpticalPrompt,
@@ -13,10 +19,16 @@ import {
   opticalAgentConfig,
   OPTICAL_TOOLS,
 } from './opticalAgent';
-import { manifest } from '../tools/registry';
+import * as registry from '../tools/registry';
+
+const { manifest } = registry;
 
 beforeEach(() => {
   vi.spyOn(console, 'info').mockImplementation(() => {});
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
 });
 
 describe('it cannot transfer, and must not imply that it can', () => {
@@ -342,8 +354,9 @@ describe('the call id must not depend on the model remembering it', () => {
   // to the call, so the recording, transcript and summary are not late, they
   // are unattachable forever.
   it('injects call_sid, caller_phone and dialed_number into every tool', async () => {
-    const { runTool } = await import('../tools/registry');
-    const spy = vi.spyOn(await import('../tools/registry'), 'runTool');
+    // This is an adapter/context test, not an integration test of the ticketing
+    // service. A bare spy still executes the real handler (and its network I/O).
+    const spy = vi.spyOn(registry, 'runTool').mockResolvedValue({ success: true });
 
     const agent = await createOpticalAgent(undefined, {
       callId: 'call-1',
@@ -370,7 +383,7 @@ describe('the call id must not depend on the model remembering it', () => {
     expect(passed.call_sid, 'a null from the model must not blank the injected id').toBe('CAreal123');
     expect(passed.caller_phone).toBe('8455317471');
     expect(passed.dialed_number).toBe('8186193692');
-    void runTool;
+    expect(spy).toHaveBeenCalledWith('file_optical_ticket', expect.any(Object));
   });
 
   /**
@@ -390,7 +403,7 @@ describe('the call id must not depend on the model remembering it', () => {
    * different thing from inventing one.
    */
   it('sends no call_sid at all rather than an id that is not a Twilio SID', async () => {
-    const spy = vi.spyOn(await import('../tools/registry'), 'runTool');
+    const spy = vi.spyOn(registry, 'runTool').mockResolvedValue({ success: true });
     const agent = await createOpticalAgent(undefined, { callId: 'call-only' });
     const t = ((agent as { tools?: Array<{ name: string; invoke?: Function }> }).tools ?? []).find(
       (x) => x.name === 'check_open_tickets',
@@ -398,6 +411,7 @@ describe('the call id must not depend on the model remembering it', () => {
     await t!.invoke?.({} as never, JSON.stringify({ phone: '845-531-7471' }));
     const calls = spy.mock.calls;
     const passed = calls[calls.length - 1][1] as Record<string, unknown>;
+    expect(spy).toHaveBeenCalledWith('check_open_tickets', expect.any(Object));
     expect(passed.call_sid).toBeUndefined();
     // The call is still identified where identification actually works — the
     // telemetry carries callId, and the timeline row is keyed on callLogId.
