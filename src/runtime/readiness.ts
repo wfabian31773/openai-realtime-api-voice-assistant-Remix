@@ -493,10 +493,27 @@ import { callEnvironment } from "./callRecord";
  * the guide's language-lock shape, and the tag a switch went TO reaches
  * `tool_timeline` so the 76 non-Spanish switches of the last fortnight stop
  * being uncountable. Revert lever for the seed: `XAI_VOICE_LANGUAGE=en`. It
- * stacks on v74 (`main` at `f998a0b`) and contains every marker below it.
+ * stacks on v74 (`main` at `f998a0b`) and contains every marker below it. *
+ * v76, 2026-09-28: THE AFTER-HOURS PROMPT IN THE SHAPE xAI PRESCRIBES. Ships
+ * with v75 in one PR; only v76 reaches a deployment, a build reading v75 does
+ * not exist (the v34/v35 shape). The docs' migration text — *"your prompt
+ * should be much shorter … Remove workaround prompting"* — and the Prompting
+ * Guide's five `##` sections describe the after-hours prompt's departure
+ * exactly: it was the OpenAI-era body, never rewritten for Grok (28,478 own
+ * chars, a six-phase playbook, six CRITICAL banners). The Grok-shaped body
+ * (src/agents/noIvrPromptForGrok.ts) carries the same rulings in the docs'
+ * shape at under half the size — 14,082 built chars against 28,801 — and
+ * noIvrPromptShapeForGrok.test.ts holds BOTH bodies to one rulings map. THE
+ * GROK PIPELINE GETS IT AND ONLY THE GROK PIPELINE: voiceRuntime marks its
+ * calls `pipeline: 'runtime'`, the old core never does, so deploying this
+ * changes nothing on the live after-hours line until the repoint; revert
+ * lever `NO_IVR_PROMPT_SHAPE=legacy`. One deliberate rule change, named for
+ * the operator: the pre-context block asks for the last name and then the
+ * date of birth, one field per question (RULE ZERO 2b), instead of both in
+ * one breath. It stacks on v75 and contains every marker below it.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v75-the-transcriber-detects-the-language-20260928";
+  "voice-runtime-v76-the-after-hours-prompt-in-the-docs-shape-20260928";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

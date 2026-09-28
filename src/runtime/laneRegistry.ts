@@ -214,6 +214,14 @@ export interface LaneCallMetadata {
    * bug recorded in that agent's own comments.
    */
   readonly callLogId?: string;
+  /**
+   * Which pipeline built this call. The runtime says `'runtime'`; the SIP
+   * core never sets it. An agent whose prompt exists in two shapes — the
+   * after-hours lane, whose Grok-shaped body is written for THIS pipeline
+   * (src/agents/noIvrPromptForGrok.ts) — reads it to pick, so a build can
+   * be deployed before a repoint without changing the live line.
+   */
+  readonly pipeline?: 'runtime';
 }
 
 export interface ResolvedLane {

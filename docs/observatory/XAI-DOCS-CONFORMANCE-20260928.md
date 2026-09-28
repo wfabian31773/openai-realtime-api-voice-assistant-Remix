@@ -31,12 +31,17 @@ text was pulled to disk and diffed against `src/`.
    6,374–7,421 for the lanes that were, none of the five sections the guide
    prescribes, and the workaround prompting the guide says to strip. **PCP
    is live on the runtime and does not carry the five sections either.**
-4. **What is NOT changed here, and why:** the after-hours prompt rewrite is
-   the next piece of work and is drafted for the operator to read, because
-   its content is policy (escalation triggers, 911, ghost calls); the PCP
-   prompt's shape is a ticket-path change on a live lane and needs its own
-   before/after; the knowledge pack moving to `file_search` is an
-   architecture change with a latency cost nobody has measured.
+4. **The after-hours rewrite is on this branch too (v76), gated to the
+   runtime.** `src/agents/noIvrPromptForGrok.ts` carries the same rulings in
+   the docs' five sections at 49% of the size, and is built only when the
+   call's metadata says `pipeline: 'runtime'` — so it deploys inert on the
+   old core and is live from the first runtime call after the repoint. Its
+   content is policy (escalation triggers, 911, ghost calls), so § 4 lists
+   what moved where and the one rule that changed, for the operator to read
+   before the repoint. **Not changed:** the PCP prompt's shape (a ticket-path
+   change on a live lane, needs its own before/after) and the knowledge pack
+   moving to `file_search` (an architecture change with a latency cost nobody
+   has measured).
 
 ## 1. What xAI actually says
 
@@ -206,15 +211,26 @@ history pins for this lane — the three-case escalation, the 1 AM robocall
 rule, B2B DOB optional, the 2026-07-25 `Request Type:` header, the wait
 line before `create_ticket`, full name in one question.
 
-**Not yet done, deliberately.** It is a rewrite of the prompt on the line that
-takes every overnight call, and its content is escalation policy. It is
-drafted next as its own commit for the operator to read line by line, with a
-rulings map (old sentence → new location) and the existing pinned tests
-re-pointed rather than loosened. It should ship on the build that moves the
-lane, so the migration is done the way the docs describe it — a rewrite, not
-a port — and the after-arm compares the old core with the old prompt against
-the runtime with the new one, the same two-variable shape as the 2026-09-03
-queue cutover.
+**Done on v76, as its own module and its own commit, and gated so it cannot
+reach the live line before the operator has read it.** `noIvrPromptShape`
+picks the Grok body only when the runtime marks the call `pipeline:
+'runtime'`; the old core never does. Measured built with no caller context:
+**14,082 characters against 28,801 for the legacy body (49%)** — 23,399
+against 38,118 once the runtime prefixes the knowledge pack — of which 2,489
+is the triage block and the urgent-symptom list shared verbatim; the body's
+own text is ~9,600 of it. That is still above the queue
+lanes' 6,374–7,421 because this line carries escalation, ghost-call and
+triage policy they do not — what is left to cut is policy. The rulings map
+is a test (`noIvrPromptShapeForGrok.test.ts`): twenty-three operator rulings
+that BOTH bodies must carry, the carve-out-before-technical-error ordering,
+the five sections once each in order, CRITICAL exactly once, no second
+office list, and every tool the prompt names present on the agent. **The one
+deliberate rule change:** the recognised-caller block no longer asks for the
+last name and the date of birth "IN ONE question" — it takes the last name,
+then the date of birth in parts (RULE ZERO 2b). Everything else in that block
+survives. The after-arm compares the old core with the old prompt against the
+runtime with the new one — the same two-variable shape as the 2026-09-03
+queue cutover, and the way the docs say a migration is done.
 
 ### PCP — live, and departs in shape only
 
@@ -255,6 +271,7 @@ rewrite.
 | the after-hours lane carries `set_spoken_language`, one description shared with the registry copy | `noIvrAgent.ts`, `languageTools.ts` | after the move: no-ivr `set_spoken_language` events per Spanish-cue call, target ≈ the queue lanes' 94.7% |
 | the language a switch went TO reaches `tool_timeline` | `toolTimeline.ts` allow-list | the 66 no-cue switch calls: what language, and whether it was a switch at all |
 | the after-hours language block in the guide's lock shape | `noIvrAgent.ts` | prompt size −0.3%; nothing measurable until the lane moves |
+| **v76:** the after-hours prompt in the five-section shape, built only for `pipeline: 'runtime'` | `noIvrPromptForGrok.ts`, `noIvrAgent.ts`, `voiceRuntime.ts` | inert until the repoint; then no-ivr tickets per substantive call must not fall (56.1% before), escalations per substantive call must not rise, ghost/robot terminations must not fall |
 
 Revert lever for the seed, no deploy: `XAI_VOICE_LANGUAGE=en` (fleet) or
 `XAI_VOICE_LANGUAGE_<SLUG>=en` (one lane).

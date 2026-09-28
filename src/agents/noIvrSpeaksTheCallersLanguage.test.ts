@@ -91,8 +91,8 @@ describe('the after-hours lane speaks the caller\'s language', () => {
 
   it('carries the SAME words as the registry copy — one description, not two', async () => {
     const agent = await createNoIvrAgent(async () => {}, META);
-    const t = agent.tools.find((x: any) => x.name === SET_SPOKEN_LANGUAGE_TOOL_NAME);
-    expect(t.description).toBe(SET_SPOKEN_LANGUAGE_DESCRIPTION);
+    const t = (agent as any).tools.find((x: any) => x.name === SET_SPOKEN_LANGUAGE_TOOL_NAME);
+    expect(t?.description).toBe(SET_SPOKEN_LANGUAGE_DESCRIPTION);
   });
 
   /**

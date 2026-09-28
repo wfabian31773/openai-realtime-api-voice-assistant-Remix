@@ -23,6 +23,7 @@ import { decideDobEscape, dobStatusNote, dobEscapeMarker, type DobStatus } from 
 import { gateRefusalsSoFar, noteGateRefusal } from "../tools/gateAttempts";
 import { missingFieldsFromRefusal, spokenMissingFields } from "../services/missingFieldsRefusal";
 import { buildCompactLocationReference } from "../config/azulVisionKnowledge";
+import { buildNoIvrGrokBody, noIvrPromptShape } from "./noIvrPromptForGrok";
 import {
   SET_SPOKEN_LANGUAGE_TOOL_NAME,
   SET_SPOKEN_LANGUAGE_DESCRIPTION,
@@ -131,6 +132,9 @@ export interface NoIvrAgentMetadata {
   precontext?: import('./azulSchedulingAgent').AzulPrecontext;
   /** Live transcript up to the moment of filing — lets the ticketing app generate its staff-facing summary at creation instead of waiting for post-call enrichment. */
   getTranscript?: () => string;
+  /** Set by the Grok runtime (voiceRuntime.ts) and by nothing else. Picks the
+   *  prompt body written for that pipeline — see noIvrPromptForGrok.ts. */
+  pipeline?: 'runtime';
 }
 
 // Operator mandate 2026-07-25: department-by-call-content, urgents-only in
@@ -503,6 +507,25 @@ This caller has ${callerMemory.openTickets.length} pending ticket(s): ${callerMe
 If they're calling about the same issue, acknowledge you see their previous request is being processed.
 Avoid creating duplicate tickets for the same issue.
 ` : '';
+
+  // THE GROK PIPELINE GETS THE PROMPT WRITTEN FOR IT (v76). Same rulings, the
+  // shape xAI's Prompting Guide prescribes, under half the size; the body
+  // below stays for the OpenAI SIP core until that pipeline is retired.
+  // noIvrPromptShapeForGrok.test.ts holds both bodies to one list of rulings.
+  if (noIvrPromptShape(metadata) === 'grok') {
+    return buildNoIvrGrokBody({
+      versionString,
+      timeContext,
+      nextBusinessDayPhrase: nextBizDay.contextPhrase,
+      phoneContext,
+      callerHistorySection,
+      openTicketsContext,
+      scheduleContextSection,
+      precontextFirstName: pc?.matched && pc.firstName ? pc.firstName : null,
+      urgentSymptomsList: URGENT_SYMPTOMS.symptoms.map((s) => `• ${s}`).join("\n"),
+      triageBlock: renderTriagePrompt(),
+    });
+  }
 
   // PROMPT CACHING: Static content FIRST (cacheable prefix), dynamic context LAST
   return `You are the AFTER-HOURS AGENT for Azul Vision. VERSION: ${versionString}
