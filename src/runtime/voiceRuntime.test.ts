@@ -10,6 +10,16 @@
  * post-stream TwiML reads. Only the two sockets are fakes.
  */
 import { describe, it, expect, vi, afterEach } from "vitest";
+// HOISTED above every import (vi.hoisted runs before the hoisted import
+// graph loads): since v78 `laneRegistry` imports the tool library STATICALLY,
+// and its telemetry module validates DATABASE_URL at import. The plain
+// assignments below this file's imports ran too late once the lazy import
+// was gone — the v77 outage fix would have failed this file to load.
+vi.hoisted(() => {
+  process.env.DATABASE_URL ||= 'postgresql://unused:unused@127.0.0.1:5432/unused';
+  process.env.OPENAI_API_KEY ||= 'test-unused';
+  process.env.XAI_API_KEY ||= 'test-unused';
+});
 import express from "express";
 import http from "node:http";
 import { z } from "zod";
