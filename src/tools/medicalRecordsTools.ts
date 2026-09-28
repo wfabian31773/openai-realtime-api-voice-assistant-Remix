@@ -35,7 +35,7 @@ import { str, isTwilioCallSid, normalizePhone } from './sharedPatientTools';
 import { decideDobEscape, dobStatusNote, dobEscapeMarker, type DobStatus } from './dobEscape';
 import { createTicketDurable, postFailureToolResult } from '../services/durableTicketFiling';
 import { verifiedDobFor, verifiedIdentityFor } from './verifiedIdentity';
-import { gateRefusalsSoFar, noteGateRefusal, noteCallFact, callFactNoted } from './gateAttempts';
+import { gateRefusalsSoFar, gateRefusalAgeMs, noteGateRefusal, noteCallFact, callFactNoted } from './gateAttempts';
 
 // ---------------------------------------------------------------- what kind
 
@@ -72,6 +72,60 @@ const RECORDS_TOOL = 'file_records_ticket';
 const PATIENT_NAME_ASK = 'patient_name';
 const ON_CLOCK_ASK = 'on_clock_fields';
 const FORM_EMAIL_ASK = 'form_email';
+const FORM_CHANNEL_ASK = 'form_channel';
+
+/**
+ * A REFUSAL NOTED LESS THAN THIS LONG AGO WAS NOTED FOR A BATCH SIBLING, NOT
+ * FOR A TURN THE CALLER HAS HAD.
+ *
+ * Codex P1 on #338, and it is the surgeon-claim shape (v57) on a new ask: when
+ * the model emits two `file_records_ticket` calls in ONE response, the runtime
+ * dispatches them side by side, the first notes the channel ask, and the
+ * sibling reads it as spent milliseconds later — before the refusal has been
+ * returned, let alone spoken — so under the first v79 build it defaulted to a
+ * text and filed before the caller had answered the question. Measured on the
+ * records lane's first runtime day (2026-09-27 19:00 → 09-28 22:00 UTC), the
+ * gaps between consecutive `file_records_ticket` events on one call: FOURTEEN
+ * sibling gaps of 3 · 12 · 16 · 19 · 21 · 80 · 87 · 103 · 111 · 221 · 468 ·
+ * 625 · 702 · 1,178 ms (end-to-end, so an upper bound on how far apart two
+ * siblings START), then NOTHING until the first genuine re-ask at 4,807 ms;
+ * the rest run 5 s → 6 min. The two populations do not touch, and 2 s sits in
+ * the gap with room either side. A sibling inside the window is answered with
+ * the SAME question and spends no second ask; only an invocation past it is
+ * the model coming back with no answer, which is the fallback v79 built. It
+ * is NOT the serialisation v57 tried and withdrew after six review rounds —
+ * nothing here waits on anything, so nothing can interleave.
+ *
+ * SCOPED TO THE TWO FORM ASKS, deliberately. The name ask and the on-clock
+ * ask keep spending on a sibling: their fallback FILES the request (nameless,
+ * or with NOT CAPTURED), which is the direction a records request must err
+ * in, and `recordsFilesWithoutAName.test.ts` invokes the name ask twice at one
+ * instant and expects the second to file — that test is the pin. Here the
+ * fallback SENDS something, to a channel the caller has not chosen.
+ */
+export const ASK_BATCH_WINDOW_MS = 2_000;
+
+type FormAsk = 'ask' | 'sibling' | 'spent';
+
+/**
+ * Ask (and spend the one ask), answer a batched sibling with the same question
+ * (spending nothing), or fall back. Sync by design — see ASK_BATCH_WINDOW_MS.
+ */
+function formAskOutcome(callSid: string | undefined, field: string): FormAsk {
+  if (gateRefusalsSoFar(callSid, RECORDS_TOOL, field) < RECORDS_ASK_LIMIT) {
+    noteGateRefusal(callSid, RECORDS_TOOL, field);
+    return 'ask';
+  }
+  const age = gateRefusalAgeMs(callSid, RECORDS_TOOL, field);
+  if (age !== undefined && age < ASK_BATCH_WINDOW_MS) {
+    console.warn(
+      `[RECORDS] a batched sibling of the ${field} ask, ${age}ms after it — answered with the same ` +
+        `question, nothing spent (${callSid || 'no sid'})`,
+    );
+    return 'sibling';
+  }
+  return 'spent';
+}
 /** Per-call latch: a records request has been filed on this call, so a re-send has something to re-send. */
 const RECORDS_FILED_FACT = 'records_ticket_filed';
 
@@ -407,24 +461,93 @@ registerTool({
     const requesterType = resolveRequesterType(str(input.requester_type), classifyRequester(requesterRaw));
     const cap = determineCapClock(requesterType);
 
+    // A CALLER WHO PRESSED THE WRONG OPTION IS NOT SENT AWAY — and is not
+    // offered a records form either. Decided HERE, before the channel ask,
+    // on the same words the redirect below reads, so the one question this
+    // tool adds is never put to somebody who rang about an appointment.
+    const { detectCrossQueue } = await import('./queueRouting');
+    const redirect = detectCrossQueue(description, MEDICAL_RECORDS_DEPARTMENT_ID);
+
     // THE LINK, decided here so the on-clock gate below can stand down for it.
     // Only an on-clock requester ever gets one; a third party's `form_channel`
     // is ignored rather than refused, because the model may send it and the
     // answer is simply "no form for you".
-    const formChannelRaw = str(input.form_channel).toLowerCase();
+    let formChannelRaw = str(input.form_channel).toLowerCase();
+
+    /**
+     * THE CHANNEL IS ASKED BY THE TOOL, NOT LEFT TO THE PROMPT — v79.
+     *
+     * The records lane's first business day on the runtime, 2026-09-28: the
+     * prompt told the model to offer the link (RULE ZERO 2c, the format in
+     * the question), and on the four real patient calls of the first hour it
+     * did not — every create-ticket POST answered `form: {requested:false}`,
+     * every patient case opened ON the fifteen-day clock with no signing link,
+     * and the transcripts carry no funnel line at all. What the model DID do
+     * was file with no channel, take the on-clock refusal for destination and
+     * dates, and walk down the old path: a refusal is a question, and the
+     * question it was asked was the wrong one. So the FIRST refusal on a
+     * patient's request with no channel stated is now the channel question
+     * itself, in the prompt's own words (askAs on the schema), and only a
+     * spoken "verbal" or "declined" reaches the destination-and-dates gate.
+     *
+     * ONCE, keyed on the call like every other ask here (`RECORDS_ASK_LIMIT`) —
+     * and a batched sibling inside `ASK_BATCH_WINDOW_MS` is the SAME invocation,
+     * not a second one (Codex P1, #338; that constant's docblock has the numbers).
+     * A second invocation still carrying no channel is the model failing to
+     * relay the answer, not the caller failing to give one — and the
+     * fallback is the one the email ask already uses: a text to the callback
+     * number, which a landline turns into a delivery failure on the case for
+     * the staff button to pick up. The alternative — an on-clock case with no
+     * link — is the thing the operator called unacceptable (2026-09-28,
+     * *"these are cap cases"*).
+     *
+     * Not asked of a third party (no form for them), not asked when the
+     * request is redirected out of Medical Records (no form on a ticket that
+     * left), NOT asked of a lane that has declared it cannot ask
+     * (`on_clock_ask_exhausted` — PCP, which sets it on every records filing
+     * because it collects neither a destination nor a range; its patients
+     * get the form from the app's backfill, not from a question the lane
+     * has no place to put), and a sentinel CallSid asks every time —
+     * gateAttempts' own rule.
+     */
+    const askExhausted = input.on_clock_ask_exhausted === true;
+    const channelStated =
+      formChannelRaw === 'sms' || formChannelRaw === 'email' ||
+      formChannelRaw === 'verbal' || formChannelRaw === 'declined';
+    if (cap.onClock && !redirect && !channelStated && !askExhausted) {
+      if (formAskOutcome(callSid, FORM_CHANNEL_ASK) === 'spent') {
+        console.warn(
+          `[RECORDS] form channel not stated after one ask — sending the link by text to the ` +
+            `callback number rather than opening an on-clock case with no link (${callSid || 'no sid'})`,
+        );
+        formChannelRaw = 'sms';
+      } else {
+        // 'ask' has spent the one ask; 'sibling' is a batched invocation that
+        // gets the same question and spends nothing.
+        return missing(
+          ['form_channel'],
+          'I can send you a short link to finish and sign this request — is this a mobile number ' +
+            'that receives texts, or would you rather have it by email?',
+          'Ask exactly that, ONCE. Then call file_records_ticket again with form_channel "sms", ' +
+            'or "email" plus the address spelled out, or "verbal" if they have neither or decline ' +
+            'the link. Do not ask where the records should be sent or which dates — the form ' +
+            'collects both.',
+        );
+      }
+    }
+
     let formChannel: 'sms' | 'email' | undefined =
       cap.onClock && (formChannelRaw === 'sms' || formChannelRaw === 'email')
         ? (formChannelRaw as 'sms' | 'email')
         : undefined;
     const spokenDirections = cap.onClock && formChannelRaw === 'verbal';
     if (formChannel === 'email' && !str(input.email)) {
-      if (gateRefusalsSoFar(callSid, RECORDS_TOOL, FORM_EMAIL_ASK) >= RECORDS_ASK_LIMIT) {
+      if (formAskOutcome(callSid, FORM_EMAIL_ASK) === 'spent') {
         // Asked once and no address came. A text to the callback number is the
         // fallback the caller can still act on; if it is a landline the delivery
         // failure lands on the case and the staff button is the fallback.
         formChannel = 'sms';
       } else {
-        noteGateRefusal(callSid, RECORDS_TOOL, FORM_EMAIL_ASK);
         return missing(
           ['email'],
           "What's the email address? Please spell it out for me.",
@@ -451,7 +574,6 @@ registerTool({
     // The gate is on PRESENCE, not content. "All of it" and "I'm not sure" are
     // both valid answers; the agent asks once, the caller says something, it
     // files. What is not acceptable is silence in a column the CAP report reads.
-    const askExhausted = input.on_clock_ask_exhausted === true;
     // THE FORM COLLECTS DESTINATION AND DATES, better than the phone does
     // (owner, 2026-09-27, doc 17 decision 2), so the gate stands down when a
     // link is going out. A caller who declines the link still gets both asks.
@@ -742,8 +864,7 @@ registerTool({
     // cataract surgery"), and queueRouting holds those here. What it still
     // catches is the genuinely different request — someone who reached records
     // and wants an appointment.
-    const { detectCrossQueue } = await import('./queueRouting');
-    const redirect = detectCrossQueue(description, MEDICAL_RECORDS_DEPARTMENT_ID);
+    // `redirect` was decided above the channel ask, on these same words.
     const filedDepartmentId = redirect?.departmentId ?? MEDICAL_RECORDS_DEPARTMENT_ID;
     const filedTypeId = redirect?.requestTypeId ?? cls.requestTypeId;
     const filedReasonId = redirect?.requestReasonId ?? cls.requestReasonId;

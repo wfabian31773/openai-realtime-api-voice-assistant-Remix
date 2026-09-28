@@ -36,6 +36,9 @@ function freshSid(): string {
 // what these tests measure.
 const NAMELESS = {
   requester: 'I am the patient',
+  // v79 asks a patient the form-channel question first; "declined" keeps
+  // every path these tests measure exactly as it was.
+  form_channel: 'declined',
   deliver_to: 'to me',
   date_range: 'everything',
   date_of_birth: '01/02/1950',
@@ -209,6 +212,7 @@ describe('RULE ZERO: a name the process already holds is never asked for', () =>
 describe('the on-clock gate asks once and then files with the gap written on the ticket', () => {
   const NAMED_BARE = {
     requester: 'I am the patient',
+    form_channel: 'declined', // v79 — see NAMELESS
     first_name: 'Testpatient',
     last_name: 'Example',
     date_of_birth: '01/02/1950',

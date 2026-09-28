@@ -46,6 +46,9 @@ const fileRecords = getTool('file_records_ticket')!;
 
 /** Exactly what pcpAgent now passes, minus whatever a case is testing. */
 const PCP_CALL = {
+  // v79: the library asks a patient the form-channel question first; these
+  // tests are about the destination-and-dates gate, so the fixture answers it.
+  form_channel: 'declined',
   first_name: 'Wayne',
   last_name: 'Fabian',
   date_of_birth: '03/17/1973',

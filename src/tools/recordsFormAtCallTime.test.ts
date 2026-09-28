@@ -20,8 +20,8 @@ import { join } from 'node:path';
 import { runTool } from './registry';
 import './sharedPatientTools';
 import './medicalRecordsTools';
-import { WEBSITE_DIRECTIONS } from './medicalRecordsTools';
-import { resetGateAttempts } from './gateAttempts';
+import { ASK_BATCH_WINDOW_MS, WEBSITE_DIRECTIONS } from './medicalRecordsTools';
+import { gateRefusalsSoFar, resetGateAttempts } from './gateAttempts';
 import { resetVerifiedIdentities } from './verifiedIdentity';
 
 let sidCounter = 0x900;
@@ -44,10 +44,28 @@ type Out = Record<string, unknown>;
 const filed = (n: string, form?: Record<string, unknown>) =>
   ({ success: true, ticketNumber: n, ...(form ? { form } : {}) }) as never;
 
+/**
+ * THE CLOCK IS THE TURN. gateAttempts stamps every ask with Date.now(), and the
+ * tool reads a refusal noted inside ASK_BATCH_WINDOW_MS as a batched SIBLING's
+ * (the same question again, nothing spent), not as a turn the caller has had.
+ * Two back-to-back invocations at one instant are therefore a batch; a genuine
+ * later turn has to move the clock. `laterTurn()` is that move; `sibling()` is
+ * the tens of milliseconds the runtime puts between two dispatches of one
+ * response.
+ */
+let clock = 1_790_000_000_000;
+const laterTurn = () => {
+  clock += 5_000;
+};
+const sibling = (ms = 40) => {
+  clock += ms;
+};
+
 beforeEach(() => {
   vi.restoreAllMocks();
   resetGateAttempts();
   resetVerifiedIdentities();
+  vi.spyOn(Date, 'now').mockImplementation(() => clock);
 });
 
 describe('a patient who takes the link', () => {
@@ -87,6 +105,7 @@ describe('a patient who takes the link', () => {
     expect(String(first.message)).toMatch(/spell it out/i);
     expect(create).not.toHaveBeenCalled();
 
+    laterTurn(); // the caller has had the turn; this is the model coming back with no address
     const second = (await runTool('file_records_ticket', { ...PATIENT, form_channel: 'email', call_sid: sid })) as Out;
     expect(second.success).toBe(true);
     expect((create.mock.calls[0][0] as unknown as Record<string, unknown>).formChannel).toBe('sms');
@@ -229,5 +248,219 @@ describe('the plumbing', () => {
     const src = readFileSync(join(__dirname, 'medicalRecordsTools.ts'), 'utf8');
     expect(src).toMatch(/formChannel && !redirect \? 'pending_authorization' : cap\.pathway/);
     expect(src).toMatch(/\.\.\.\(formChannel && !redirect \? \{ formChannel \} : \{\}\)/);
+  });
+});
+
+describe('v79 — the tool asks the channel when the model did not', () => {
+  // The records lane's first business day on the runtime, 2026-09-28: four
+  // real patient calls in the first hour, every create-ticket POST answering
+  // `form: {requested:false}`, every patient case opened ON the clock with no
+  // link, and not one funnel line in the transcripts. The model filed with no
+  // channel, took the on-clock refusal for destination and dates, and walked
+  // the old path. So the FIRST refusal on a patient request with no channel is
+  // now the channel question itself.
+  it('refuses a patient request with no channel by asking the channel question — nothing is filed', async () => {
+    const api = await client();
+    const create = vi.spyOn(api, 'createTicket');
+    const r = (await runTool('file_records_ticket', { ...PATIENT, call_sid: freshSid() })) as Out;
+
+    expect(r.success).toBe(false);
+    expect(r.missingFields).toEqual(['form_channel']);
+    expect(String(r.message)).toMatch(/mobile number that receives texts/i);
+    expect(String(r.message)).toMatch(/by email/i);
+    expect(String(r.fix)).toMatch(/verbal/);
+    expect(String(r.fix)).toMatch(/do not ask where/i);
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it('asks ONCE: a second invocation still carrying no channel files with a text to the callback number, off the clock', async () => {
+    const api = await client();
+    const create = vi.spyOn(api, 'createTicket').mockResolvedValueOnce(
+      filed('VA-FORM-V79', { requested: true, sent: true, channel: 'sms' }),
+    );
+    const sid = freshSid();
+    const first = (await runTool('file_records_ticket', { ...PATIENT, call_sid: sid })) as Out;
+    expect(first.missingFields).toEqual(['form_channel']);
+
+    laterTurn(); // the caller has had the turn; this is the model coming back with no channel
+    const r = (await runTool('file_records_ticket', { ...PATIENT, call_sid: sid })) as Out;
+    expect(r.success).toBe(true);
+    const p = create.mock.calls[0][0] as unknown as Record<string, unknown>;
+    expect(p.formChannel).toBe('sms');
+    expect(p.requestPathway).toBe('pending_authorization');
+    expect(p.capClockApplies).toBe(false);
+    expect(String(p.description)).toContain('Send to: on the signed form');
+    expect(r.form_channel).toBe('sms');
+    expect(r.form_sent).toBe(true);
+  });
+
+  it('the ask is keyed on the call: another call is asked afresh', async () => {
+    const a = (await runTool('file_records_ticket', { ...PATIENT, call_sid: freshSid() })) as Out;
+    const b = (await runTool('file_records_ticket', { ...PATIENT, call_sid: freshSid() })) as Out;
+    expect(a.missingFields).toEqual(['form_channel']);
+    expect(b.missingFields).toEqual(['form_channel']);
+  });
+
+  it('a sentinel CallSid is asked every time — a shared counter would spend one caller’s ask on another', async () => {
+    const a = (await runTool('file_records_ticket', { ...PATIENT, call_sid: 'unknown' })) as Out;
+    const b = (await runTool('file_records_ticket', { ...PATIENT, call_sid: 'unknown' })) as Out;
+    expect(a.missingFields).toEqual(['form_channel']);
+    expect(b.missingFields).toEqual(['form_channel']);
+  });
+
+  it('"declined" is an answer: not asked again, the destination-and-dates gate takes over as before', async () => {
+    const r = (await runTool('file_records_ticket', { ...PATIENT, form_channel: 'declined', call_sid: freshSid() })) as Out;
+    expect(r.success).toBe(false);
+    expect(r.missingFields).toEqual(['deliver_to', 'date_range']);
+  });
+
+  it('a lane that declares it cannot ask (on_clock_ask_exhausted — PCP) is not asked: files as today, gap noted', async () => {
+    const api = await client();
+    const create = vi.spyOn(api, 'createTicket').mockResolvedValueOnce(filed('VA-PCP-V79'));
+    const r = (await runTool('file_records_ticket', { ...PATIENT, on_clock_ask_exhausted: true, call_sid: freshSid() })) as Out;
+    expect(r.success, JSON.stringify(r)).toBe(true);
+    const p = create.mock.calls[0][0] as unknown as Record<string, unknown>;
+    expect(p.formChannel).toBeUndefined();
+    expect(p.requestPathway).toBe('roa_patient');
+    expect(String(p.description)).toContain('Dates needed: NOT CAPTURED');
+  });
+
+  it('a third party is never asked: files with no channel and no question', async () => {
+    const api = await client();
+    const create = vi.spyOn(api, 'createTicket').mockResolvedValueOnce(filed('VA-3P-V79'));
+    const r = (await runTool('file_records_ticket', {
+      ...PATIENT,
+      requester: 'I am an attorney at Lexitas',
+      requester_type: 'legal',
+      call_sid: freshSid(),
+    })) as Out;
+    expect(r.success).toBe(true);
+    const p = create.mock.calls[0][0] as unknown as Record<string, unknown>;
+    expect(p.formChannel).toBeUndefined();
+  });
+
+  it('a caller who pressed the wrong option is not offered a form: an appointment request is redirected, not asked', async () => {
+    const api = await client();
+    const create = vi.spyOn(api, 'createTicket').mockResolvedValueOnce(filed('VA-HUB-V79'));
+    const r = (await runTool('file_records_ticket', {
+      ...PATIENT,
+      request_description: 'I need to make an appointment for an eye exam',
+      // The destination-and-dates gate predates v79 and still runs on a
+      // redirected patient request; this test is about the CHANNEL question.
+      deliver_to: 'to me',
+      date_range: 'everything',
+      call_sid: freshSid(),
+    })) as Out;
+    expect(r.success, JSON.stringify(r)).toBe(true);
+    const p = create.mock.calls[0][0] as unknown as Record<string, unknown>;
+    expect(p.formChannel).toBeUndefined();
+    expect(p.departmentId).not.toBe(16);
+  });
+
+  it('the source: the redirect is decided BEFORE the channel ask, on the same words', () => {
+    const src = readFileSync(join(__dirname, 'medicalRecordsTools.ts'), 'utf8');
+    const redirectAt = src.indexOf("const redirect = detectCrossQueue(description, MEDICAL_RECORDS_DEPARTMENT_ID)");
+    const askAt = src.indexOf("formAskOutcome(callSid, FORM_CHANNEL_ASK)");
+    expect(redirectAt).toBeGreaterThan(0);
+    expect(askAt).toBeGreaterThan(redirectAt);
+    // and it is decided exactly once
+    expect(src.split('detectCrossQueue(description').length - 1).toBe(1);
+  });
+});
+
+describe('#338 Codex P1 — a batched sibling is not a second turn', () => {
+  // The surgeon-claim shape (v57) on a new ask. When the model emits two
+  // file_records_ticket calls in ONE response, the runtime dispatches them
+  // side by side: the first notes the channel ask, the sibling reads it as
+  // spent milliseconds later — before the refusal is returned, let alone
+  // spoken — and under 7635f60 defaulted to a text and filed before the
+  // caller had answered. Measured 2026-09-27/28 on the records lane: fourteen
+  // sibling gaps of 3–1,178 ms, then nothing until 4,807 ms. The window sits
+  // in the gap; a sibling inside it gets the SAME question and spends nothing.
+  //
+  // SCOPE PIN, in another file: recordsFilesWithoutAName.test.ts invokes the
+  // NAME ask twice at one instant and expects the second to FILE — the window
+  // is the two form asks' and not the gate's, and that test goes red if it
+  // widens.
+  it('a sibling inside the window gets the channel question again, and nothing is filed', async () => {
+    const api = await client();
+    const create = vi.spyOn(api, 'createTicket');
+    const sid = freshSid();
+    const first = (await runTool('file_records_ticket', { ...PATIENT, call_sid: sid })) as Out;
+    sibling();
+    const second = (await runTool('file_records_ticket', { ...PATIENT, call_sid: sid })) as Out;
+    expect(first.missingFields).toEqual(['form_channel']);
+    expect(second.success).toBe(false);
+    expect(second.missingFields).toEqual(['form_channel']);
+    expect(String(second.message)).toMatch(/mobile number that receives texts/i);
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it('a batch of five (one real call had five inside 221 ms) all get the question, and the ask is still spent ONCE', async () => {
+    const api = await client();
+    const create = vi.spyOn(api, 'createTicket').mockResolvedValueOnce(
+      filed('VA-FORM-BATCH', { requested: true, sent: true, channel: 'sms' }),
+    );
+    const sid = freshSid();
+    for (let i = 0; i < 5; i++) {
+      const r = (await runTool('file_records_ticket', { ...PATIENT, call_sid: sid })) as Out;
+      expect(r.missingFields).toEqual(['form_channel']);
+      sibling(50);
+    }
+    expect(create).not.toHaveBeenCalled();
+    // Four siblings, and the ask is spent exactly once — a sibling that re-noted
+    // would restart the clock and could carry a batch past the window.
+    expect(gateRefusalsSoFar(sid, 'file_records_ticket', 'form_channel')).toBe(1);
+    // The caller has had the turn and the model STILL sent no channel: the
+    // fallback v79 built, and the four siblings spent nothing extra to reach it.
+    laterTurn();
+    const r = (await runTool('file_records_ticket', { ...PATIENT, call_sid: sid })) as Out;
+    expect(r.success).toBe(true);
+    expect((create.mock.calls[0][0] as unknown as Record<string, unknown>).formChannel).toBe('sms');
+  });
+
+  it('the window is a bound, not a grace: at exactly ASK_BATCH_WINDOW_MS the ask is spent', async () => {
+    const api = await client();
+    const create = vi.spyOn(api, 'createTicket').mockResolvedValueOnce(
+      filed('VA-FORM-EDGE', { requested: true, sent: true, channel: 'sms' }),
+    );
+    const sid = freshSid();
+    await runTool('file_records_ticket', { ...PATIENT, call_sid: sid });
+    sibling(ASK_BATCH_WINDOW_MS);
+    const r = (await runTool('file_records_ticket', { ...PATIENT, call_sid: sid })) as Out;
+    expect(r.success).toBe(true);
+    expect((create.mock.calls[0][0] as unknown as Record<string, unknown>).formChannel).toBe('sms');
+  });
+
+  it('the email ask has the same shape and the same fix: a sibling gets the address question, not a text', async () => {
+    const api = await client();
+    const create = vi.spyOn(api, 'createTicket');
+    const sid = freshSid();
+    const first = (await runTool('file_records_ticket', { ...PATIENT, form_channel: 'email', call_sid: sid })) as Out;
+    sibling();
+    const second = (await runTool('file_records_ticket', { ...PATIENT, form_channel: 'email', call_sid: sid })) as Out;
+    expect(first.missingFields).toEqual(['email']);
+    expect(second.success).toBe(false);
+    expect(second.missingFields).toEqual(['email']);
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it('the window is measured, not chosen: it sits between the slowest sibling and the fastest genuine turn', () => {
+    // 2026-09-27 19:00 → 09-28 22:00 UTC, records lane, consecutive
+    // file_records_ticket events on one call — end-to-end gaps, so an upper
+    // bound on how far apart two siblings START.
+    const slowestSibling = 1_178;
+    const fastestGenuineTurn = 4_807;
+    expect(ASK_BATCH_WINDOW_MS).toBeGreaterThan(slowestSibling);
+    expect(ASK_BATCH_WINDOW_MS).toBeLessThan(fastestGenuineTurn);
+  });
+
+  it('the source: this is not the serialisation v57 tried — the ask decision awaits nothing', () => {
+    const src = readFileSync(join(__dirname, 'medicalRecordsTools.ts'), 'utf8');
+    const start = src.indexOf('function formAskOutcome(');
+    expect(start).toBeGreaterThan(0);
+    const body = src.slice(start, src.indexOf('\n}\n', start));
+    expect(body).not.toMatch(/\bawait\b/);
+    expect(body).toContain('gateRefusalAgeMs(callSid, RECORDS_TOOL, field)');
   });
 });

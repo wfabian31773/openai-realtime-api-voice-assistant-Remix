@@ -17,6 +17,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import {
   gateRefusalsSoFar,
+  gateRefusalAgeMs,
   noteGateRefusal,
   noteCallFact,
   callFactNoted,
@@ -186,5 +187,39 @@ describe("facts and counts share the map without colliding", () => {
     noteCallFact(CALL, "spoke_a_date");
     noteCallFact(CALL, "spoke_a_date");
     expect(callFactNoted(CALL, "spoke_a_date")).toBe(true);
+  });
+});
+
+describe("the age of a refusal — what tells a batched sibling from a later turn (Codex P1, #338)", () => {
+  /**
+   * The count says WHETHER an ask was spent; the age says WHEN. When the model
+   * emits two invocations of one tool in a single response, the runtime
+   * dispatches them side by side, so the second reads a refusal the first
+   * noted milliseconds earlier and no caller has heard yet. Only the age can
+   * tell that sibling from a genuine later turn.
+   */
+  it("is undefined before any refusal, and for a sentinel", () => {
+    expect(gateRefusalAgeMs(CALL, "t", "f")).toBeUndefined();
+    noteGateRefusal("unknown", "t", "f");
+    expect(gateRefusalAgeMs("unknown", "t", "f")).toBeUndefined();
+  });
+
+  it("is the milliseconds since the last note, per call, tool and field", () => {
+    noteGateRefusal(CALL, "t", "f");
+    vi.advanceTimersByTime(37);
+    expect(gateRefusalAgeMs(CALL, "t", "f")).toBe(37);
+    expect(gateRefusalAgeMs(CALL, "t", "other")).toBeUndefined();
+    expect(gateRefusalAgeMs(sid(2), "t", "f")).toBeUndefined();
+    vi.advanceTimersByTime(5_000);
+    expect(gateRefusalAgeMs(CALL, "t", "f")).toBe(5_037);
+  });
+
+  it("a second note restarts the clock, and past the TTL there is no age to read", () => {
+    noteGateRefusal(CALL, "t", "f");
+    vi.advanceTimersByTime(10_000);
+    noteGateRefusal(CALL, "t", "f");
+    expect(gateRefusalAgeMs(CALL, "t", "f")).toBe(0);
+    vi.advanceTimersByTime(TTL_MS + 1);
+    expect(gateRefusalAgeMs(CALL, "t", "f")).toBeUndefined();
   });
 });

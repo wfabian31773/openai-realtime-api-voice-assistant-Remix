@@ -116,6 +116,25 @@ export function callFactNoted(callSid: string | undefined, fact: string): boolea
   return gateRefusalsSoFar(callSid, FACT_TOOL, fact) > 0;
 }
 
+/**
+ * HOW LONG AGO this call was last refused for this field, in ms — or
+ * `undefined` when it never was (or the CallSid is a sentinel, which is not a
+ * call). The count above says WHETHER an ask was spent; this says WHEN, and
+ * the difference is a batch: when the model emits two invocations of one tool
+ * in a single response, the runtime dispatches them side by side, so the
+ * second reads a refusal the first noted milliseconds earlier and no caller
+ * has heard yet. A reader that only counts cannot tell that sibling from a
+ * genuine later turn; one that reads the age can (Codex P1, #338).
+ */
+export function gateRefusalAgeMs(callSid: string | undefined, tool: string, field: string): number | undefined {
+  if (!isTwilioCallSid(callSid)) return undefined;
+  const entry = attempts.get(key(callSid, tool, field));
+  if (!entry) return undefined;
+  const age = Date.now() - entry.at;
+  if (age > TTL_MS) return undefined;
+  return age;
+}
+
 /** Tests only. */
 export function resetGateAttempts(): void {
   attempts.clear();

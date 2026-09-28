@@ -16,6 +16,11 @@ const BASE = {
   // here because the CAP gate refuses a patient request without them — see the
   // gate tests at the bottom, which strip them deliberately.
   requester: 'I am the patient',
+  // v79: the tool asks a patient the channel question FIRST when none is
+  // stated. These tests are about everything after that question, so the
+  // fixture answers it — "declined" is the one answer that leaves every
+  // other path exactly as it was (on the clock, gate asks, no link).
+  form_channel: 'declined',
   deliver_to: 'to me',
   date_range: 'everything',
   first_name: 'Wayne',
