@@ -12,10 +12,9 @@ import { getTwilioClient, getTwilioFromPhoneNumber } from '../../src/lib/twilioC
 import { getEnvironmentConfig } from '../../src/config/environment';
 import { db } from '../../server/db';
 import { sql } from 'drizzle-orm';
-import type { LivenessCondition } from './ticketingAppLiveness';
 
 interface AlertEvent {
-  type: 'database_failure' | 'call_log_failure' | 'circuit_breaker_open' | 'system_degraded' | 'recovery' | 'emergency_miss' | 'provider_miss' | 'handoff_failure_spike' | 'high_mismatch_ratio' | 'grader_critical_failure' | 'ticket_filing_stalled' | 'ticketing_app_liveness' | 'ticketing_app_liveness_recovered';
+  type: 'database_failure' | 'call_log_failure' | 'circuit_breaker_open' | 'system_degraded' | 'recovery' | 'emergency_miss' | 'provider_miss' | 'handoff_failure_spike' | 'high_mismatch_ratio' | 'grader_critical_failure' | 'ticket_filing_stalled';
   severity: 'critical' | 'warning' | 'info';
   message: string;
   details?: Record<string, any>;
@@ -31,10 +30,6 @@ interface AlertState {
   /** Last observed 24h grader miss counts, so alerts fire on a RISE rather than on every check. */
   lastEmergencyMissCount: number;
   lastProviderMissCount: number;
-  /** Last ticketing-app liveness conditions, for edge-triggered email. */
-  ticketingLivenessConditions: LivenessCondition[];
-  /** Consecutive app_heartbeat read failures. Reset on a successful read. */
-  ticketingLivenessReadFailures: number;
 }
 
 const ALERT_COOLDOWN_MS = 5 * 60 * 1000; // 5 minutes between same-type alerts
@@ -67,8 +62,6 @@ class SystemAlertService {
     lastRecoverySentAt: 0,
     lastEmergencyMissCount: 0,
     lastProviderMissCount: 0,
-    ticketingLivenessConditions: [],
-    ticketingLivenessReadFailures: 0,
   };
 
   private alertHistory: AlertEvent[] = [];
@@ -219,19 +212,14 @@ class SystemAlertService {
     // Update state
     console.log(`[ALERT SERVICE] Sending ${event.severity} alert: ${event.message}`);
 
-    // Liveness is the email Wayne asked for on 2026-09-25. Engineering SMS
-    // has been off since 2026-07-27; sending it here on every SMTP retry
-    // would recreate the personal-phone spam that ruling ended.
-    if (event.severity === 'critical' && event.type !== 'ticketing_app_liveness') {
+    if (event.severity === 'critical') {
       await this.sendSmsAlert(event);
     }
 
     const emailed = await this.sendEmailAlert(event);
     if (!emailed) return false;
 
-    // Only after a channel that can reach Wayne accepted the message.
-    // Setting these first made a failed SMTP send look delivered, so the
-    // liveness edge was consumed and the next minute hit cooldown.
+    // Only after the email channel accepted the message.
     this.state.lastAlertTime.set(alertKey, Date.now());
     this.state.alertCounts.set(alertKey, hourlyCount + 1);
 
@@ -645,97 +633,6 @@ class SystemAlertService {
     setInterval(() => {
       this.checkTicketFilingAlert();
     }, 5 * 60 * 1000);
-  }
-
-  /**
-   * Ticketing-app memory and liveness, watched from THIS process.
-   *
-   * 2026-09-25: Next froze at 20:09 UTC. Everything that lived inside
-   * ticketing-app went silent with it. A last heartbeat at 20:09 fires
-   * stale here by 20:13. Every minute, not five: three minutes of
-   * detection is only worth having if the check runs inside it.
-   *
-   * Reads TICKETING_APP_DATABASE_URL. HTTP to Next is not a substitute.
-   */
-  private livenessCheckInFlight = false;
-
-  async checkTicketingAppLiveness(): Promise<void> {
-    if (this.livenessCheckInFlight) return;
-    this.livenessCheckInFlight = true;
-    try {
-      const {
-        readTicketingAppLivenessSnapshot,
-        assessTicketingAppLiveness,
-        assessReadFailure,
-        nextLivenessAction,
-        nextStoredConditions,
-      } = await import('./ticketingAppLiveness');
-      const snapshot = await readTicketingAppLivenessSnapshot();
-      /**
-       * ONLY ADVANCE THE EDGE AFTER A SEND IS ELIGIBLE — Codex, PR #330.
-       * sendAlert records even when cooldown/hourly suppress delivery. If we
-       * still marked the condition handled, a stale hang that followed a
-       * memory alert inside five minutes would never email. Retry the same
-       * edge until the gates let it through.
-       */
-      const apply = async (verdict: import('./ticketingAppLiveness').LivenessVerdict) => {
-        const previous = this.state.ticketingLivenessConditions;
-        const action = nextLivenessAction(previous, verdict);
-        let sent = false;
-        if (action === 'alert') {
-          sent = await this.sendAlert({
-            type: 'ticketing_app_liveness',
-            severity: 'critical',
-            message: `TICKETING APP: ${verdict.reason}`,
-            details: { ...verdict.details },
-            timestamp: new Date(),
-          });
-        } else if (action === 'recover') {
-          sent = await this.sendAlert({
-            type: 'ticketing_app_liveness_recovered',
-            severity: 'info',
-            message: `TICKETING APP recovered: ${verdict.recoveryReason}`,
-            details: { ...verdict.details },
-            timestamp: new Date(),
-          });
-        } else {
-          console.log(
-            `[ALERT SERVICE] Ticketing app liveness ${verdict.alerting ? 'still alerting' : 'OK'} — ` +
-              `${verdict.reason ?? 'fresh heartbeat'}`,
-          );
-        }
-        this.state.ticketingLivenessConditions = nextStoredConditions(previous, verdict, action, sent);
-      };
-
-      if (!snapshot) {
-        this.state.ticketingLivenessReadFailures += 1;
-        const failure = assessReadFailure(this.state.ticketingLivenessReadFailures);
-        // A broken monitoring connection is not evidence of an app outage.
-        // Keep the last observed outage conditions: a failed read must neither
-        // email a new outage nor invent a recovery or consume an alert edge.
-        if (failure && this.state.ticketingLivenessReadFailures === 3) {
-          console.warn('[ALERT SERVICE] Ticketing-app monitoring unavailable; read-failure emails suppressed. App health is unknown.');
-        }
-        return;
-      }
-      this.state.ticketingLivenessReadFailures = 0;
-      await apply(assessTicketingAppLiveness(snapshot));
-    } catch (error) {
-      console.error('[ALERT SERVICE] Error checking ticketing app liveness:', error);
-    } finally {
-      this.livenessCheckInFlight = false;
-    }
-  }
-
-  startTicketingAppLivenessSchedule(): void {
-    console.log('[ALERT SERVICE] Starting ticketing-app liveness watch (every 1 minute)');
-    const first = setTimeout(() => {
-      void this.checkTicketingAppLiveness();
-    }, 90 * 1000);
-    first.unref?.();
-    setInterval(() => {
-      void this.checkTicketingAppLiveness();
-    }, 60 * 1000);
   }
 
   async runSyntheticAlertTest(): Promise<Array<{ alertType: string; delivered: boolean; detail: string }>> {

@@ -50,16 +50,13 @@ export interface AlertEmailInput {
 }
 
 /**
- * The alert types Wayne asked to be emailed about. Adding a type here is
- * HIS decision, not a judgement call while building something adjacent.
+ * The ticket-filing alarm is the only alert type approved for email.
+ * Adding a type here requires an operator decision.
  *
  *   ticket_filing_stalled — 2026-09-02, the n8n-cap outage
- *   ticketing_app_liveness / _recovered — 2026-09-25, the Next hang
  */
 export const EMAILED_ALERT_TYPES: ReadonlySet<string> = new Set([
   'ticket_filing_stalled',
-  'ticketing_app_liveness',
-  'ticketing_app_liveness_recovered',
 ]);
 
 /**
@@ -77,17 +74,12 @@ export const EMAILED_ALERT_TYPES: ReadonlySet<string> = new Set([
  * said so — while gating on the one axis that does not bound volume. An
  * inbox is not a quieter phone.
  *
- * 2026-09-25: he asked for two more types — the ticketing-app hang email
- * and its recovery note. Recovery is info, not critical; it still emails
- * because he asked for the note, not because info alerts as a class do.
- *
  * Delivery is additionally bounded by `sendAlert`'s 5-minute cooldown and
  * 10-per-hour cap, because this is called from below both of those gates.
  * Those bound REPETITION of one alert; only this bounds how many KINDS.
  */
 export function shouldEmailAlert(type: string, severity: string): boolean {
   if (!EMAILED_ALERT_TYPES.has(type)) return false;
-  if (type === 'ticketing_app_liveness_recovered') return severity === 'info';
   return severity === 'critical';
 }
 
@@ -115,13 +107,10 @@ function escapeHtml(s: string): string {
 export function buildAlertEmail(event: AlertEmailInput): EmailOptions {
   const when = event.timestamp.toISOString();
   const rows = renderDetails(event.details);
-  const recovered = event.type === 'ticketing_app_liveness_recovered' || event.severity === 'info';
-  const banner = recovered ? 'Azul Vision — recovered' : 'Azul Vision — critical alert';
-  const bannerColor = recovered ? '#047857' : '#b91c1c';
-  const textBanner = recovered ? 'AZUL VISION — RECOVERY' : 'AZUL VISION — CRITICAL ALERT';
-  const footer = recovered
-    ? 'Sent because a watched ticketing-app condition cleared. Repeats are limited to one every five minutes and ten an hour.'
-    : 'Sent because this alert is critical. Repeats are limited to one every five minutes and ten an hour.';
+  const banner = 'Azul Vision — critical alert';
+  const bannerColor = '#b91c1c';
+  const textBanner = 'AZUL VISION — CRITICAL ALERT';
+  const footer = 'Sent because this alert is critical. Repeats are limited to one every five minutes and ten an hour.';
 
   const detailRows = rows
     .map(

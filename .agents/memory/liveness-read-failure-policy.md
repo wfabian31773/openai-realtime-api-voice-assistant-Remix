@@ -1,9 +1,7 @@
 ---
-name: Liveness read failure policy
-description: Operator decision on failed heartbeat reads versus genuine outage emails.
+name: Ticketing-app liveness watcher removed
+description: Superseding operator decision to remove the watcher and its emails entirely.
 ---
-Do not email ticketing-app outage or recovery alerts solely because the heartbeat reader cannot connect. Log the monitoring failure and preserve the last observed outage conditions.
+The operator explicitly requested removal of the ticketing-app liveness watcher entirely. This supersedes the earlier policy about handling failed heartbeat reads: there is no watcher to read, schedule, or send outage/recovery emails.
 
-**Why:** The operator explicitly requested stopping false emails from a misconfigured watcher, without disabling real outage alerts.
-
-**How to apply:** A failed read means app health is unknown, not healthy or down. Successful reads must still evaluate stale heartbeat, memory, and event-loop conditions normally.
+Do not restore the watcher or its email types unsolicited. The independent ticket-filing alarm and other alerts are not part of this decision.

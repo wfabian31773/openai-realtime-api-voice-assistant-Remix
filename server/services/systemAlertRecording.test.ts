@@ -22,6 +22,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
+import { shouldEmailAlert } from './alertEmail';
 
 const source = readFileSync(new URL('./systemAlertService.ts', import.meta.url), 'utf8');
 // Anchored at the method signature, not at a comment inside it: round eight
@@ -158,55 +159,31 @@ describe('terminal refusals are notified beside the filing alarm, not through it
   });
 });
 
-describe('ticketing-app liveness is watched from this process', () => {
-  it('checks every minute and emails on enter and on recover', () => {
-    expect(source).toMatch(/startTicketingAppLivenessSchedule/);
-    expect(source).toMatch(/}, 60 \* 1000\)/);
-    expect(source).toMatch(/ticketing_app_liveness_recovered/);
-    expect(source).toMatch(/TICKETING_APP_DATABASE_URL/);
-    expect(source).not.toMatch(/\/api\/health/);
+describe('the ticketing-app liveness watcher is removed', () => {
+  it('does not schedule the watcher at startup, while still scheduling ticket filing', () => {
+    const startup = readFileSync(new URL('../../src/server.ts', import.meta.url), 'utf8');
+    expect(startup).not.toMatch(/startTicketingAppLivenessSchedule|checkTicketingAppLiveness/);
+    expect(startup).toMatch(/systemAlertService\.startTicketFilingSchedule\(\)/);
   });
 
-  it('does not mark a liveness edge handled when sendAlert suppresses delivery', () => {
-    const check = source.slice(
-      source.indexOf('async checkTicketingAppLiveness'),
-      source.indexOf('startTicketingAppLivenessSchedule'),
-    );
-    expect(check).toMatch(/nextStoredConditions/);
-    expect(check).toMatch(/assessReadFailure/);
+  it('has no watcher methods, state, imports, or alert types in the alert service', () => {
+    expect(source).not.toMatch(/ticketingAppLiveness|ticketingLiveness|livenessCheckInFlight/);
+    expect(source).not.toMatch(/ticketing_app_liveness|TICKETING_APP_DATABASE_URL/);
+    expect(source).toMatch(/startTicketFilingSchedule/);
+    expect(source).toMatch(/type: 'ticket_filing_stalled'/);
+  });
+
+  it('forbids both former liveness emails while leaving the filing alarm email enabled', () => {
+    for (const type of ['ticketing_app_liveness', 'ticketing_app_liveness_recovered']) {
+      for (const severity of ['critical', 'warning', 'info']) {
+        expect(shouldEmailAlert(type, severity)).toBe(false);
+      }
+    }
+    expect(shouldEmailAlert('ticket_filing_stalled', 'critical')).toBe(true);
+  });
+
+  it('still treats failed SMTP delivery as undelivered', () => {
     expect(sendAlert).toMatch(/const emailed = await this\.sendEmailAlert/);
     expect(sendAlert).toMatch(/if \(!emailed\) return false/);
-  });
-
-  it('never texts ticketing-app liveness — July 27 ruling', () => {
-    // SMTP fail + SMS success would page the personal phone on every retry.
-    expect(sendAlert).toMatch(/event\.type !== 'ticketing_app_liveness'/);
-    const smsGate = sendAlert.slice(
-      sendAlert.indexOf('event.severity === \'critical\''),
-      sendAlert.indexOf('await this.sendSmsAlert'),
-    );
-    expect(smsGate).toMatch(/ticketing_app_liveness/);
-  });
-
-  it('does not email or clear real outage conditions when the heartbeat read fails', () => {
-    const check = source.slice(
-      source.indexOf('async checkTicketingAppLiveness'),
-      source.indexOf('startTicketingAppLivenessSchedule'),
-    );
-    const failedRead = check.slice(check.indexOf('if (!snapshot)'), check.indexOf('this.state.ticketingLivenessReadFailures = 0'));
-    expect(failedRead).toContain('console.warn');
-    expect(failedRead).toContain('return;');
-    expect(failedRead).not.toMatch(/await apply|sendAlert|ticketingLivenessConditions\s*=/);
-    expect(check).toContain('await apply(assessTicketingAppLiveness(snapshot))');
-  });
-
-  it('does not start a second liveness check while the first is still mailing', () => {
-    const check = source.slice(
-      source.indexOf('async checkTicketingAppLiveness'),
-      source.indexOf('startTicketingAppLivenessSchedule'),
-    );
-    expect(check).toMatch(/if \(this\.livenessCheckInFlight\) return/);
-    expect(check).toMatch(/this\.livenessCheckInFlight = true/);
-    expect(check).toMatch(/finally \{[\s\S]*this\.livenessCheckInFlight = false/);
   });
 });

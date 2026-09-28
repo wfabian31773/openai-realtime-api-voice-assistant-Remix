@@ -74,13 +74,18 @@ describe('which alerts email at all', () => {
     expect(shouldEmailAlert('ticket_filing_stalled', 'critical')).toBe(true);
   });
 
-  it('emails the ticketing-app liveness alarm Wayne asked for on 2026-09-25', () => {
-    expect(shouldEmailAlert('ticketing_app_liveness', 'critical')).toBe(true);
-  });
+  it.each(['ticketing_app_liveness', 'ticketing_app_liveness_recovered'])(
+    'forbids %s emails at every severity after the watcher was removed',
+    (type) => {
+      expect(EMAILED_ALERT_TYPES.has(type)).toBe(false);
+      for (const severity of ['critical', 'warning', 'info']) {
+        expect(shouldEmailAlert(type, severity)).toBe(false);
+      }
+    },
+  );
 
-  it('emails the liveness recovery note at info — he asked for the note', () => {
-    expect(shouldEmailAlert('ticketing_app_liveness_recovered', 'info')).toBe(true);
-    expect(shouldEmailAlert('ticketing_app_liveness_recovered', 'critical')).toBe(false);
+  it('keeps the email allowlist restricted to the independent filing alarm', () => {
+    expect([...EMAILED_ALERT_TYPES]).toEqual(['ticket_filing_stalled']);
   });
 
   it.each(['provider_miss', 'emergency_miss', 'database_failure', 'call_log_failure'])(
@@ -157,24 +162,10 @@ describe('what the alert says', () => {
     expect(mail.html.length).toBeLessThan(4000);
   });
 
-  it('the recovery note carries the last readings and does not say critical', () => {
-    const mail = buildAlertEmail({
-      type: 'ticketing_app_liveness_recovered',
-      severity: 'info',
-      message: 'TICKETING APP recovered: heartbeat is fresh and memory / event-loop are back inside limits',
-      details: {
-        heapUsedMb: 420,
-        heapLimitMb: 1400,
-        rssMb: 710,
-        lastRecordedAt: '2026-09-25T20:32:00.000Z',
-      },
-      timestamp: AT,
-    });
-    expect(mail.subject).toContain('recovered');
-    expect(mail.html).toContain('Azul Vision — recovered');
-    expect(mail.html).not.toContain('critical alert');
-    expect(mail.text).toContain('AZUL VISION — RECOVERY');
-    expect(mail.text).toContain('heapUsedMb: 420');
-    expect(mail.text).toContain('2026-09-25T20:32:00.000Z');
+  it('uses only critical alert copy for the ticket-filing alarm', () => {
+    const mail = buildAlertEmail(filingStalled);
+    expect(mail.html).toContain('Azul Vision — critical alert');
+    expect(mail.text).toContain('AZUL VISION — CRITICAL ALERT');
+    expect(mail.html).not.toContain('watched ticketing-app condition');
   });
 });
