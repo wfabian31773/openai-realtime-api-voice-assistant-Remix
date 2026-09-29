@@ -63,6 +63,7 @@ const {
   refusedEscalationResult,
   REFUSED_ESCALATION_LINE,
   knownNumber,
+  transferRecordCrossReference,
 } = await import('./noIvrAgent');
 const { resetGateAttempts } = await import('../tools/gateAttempts');
 const { recordCallerSpeech, releaseCallerSpeech } = await import('../services/symptomCorroboration');
@@ -222,6 +223,96 @@ describe('a refused escalation files the ticket itself', () => {
     expect(r.ticket_filed).toBe(false);
     expect(r.message).toMatch(/socket hang up/);
     expect(r.message).toMatch(/Call create_ticket now/);
+  });
+});
+
+describe('the urgent transfer record beside a refused-escalation ticket (Codex P1 on #339)', () => {
+  const INVENTED_SYMPTOMS = {
+    reason: 'Patient reports severe pain and sudden vision loss in the right eye',
+    caller_type: 'patient_urgent_medical',
+    symptoms_summary: 'severe pain, sudden vision loss',
+  };
+  const recordFiled = async () =>
+    vi.waitFor(() => expect(h.submitSimplifiedTicket).toHaveBeenCalledTimes(2));
+
+  it('a sanctioned escalation after a refusal files the record BESIDE the earlier ticket, not into it', async () => {
+    const sid = freshSid();
+    const { agent, handoff } = await agentFor(sid);
+    h.submitSimplifiedTicket.mockResolvedValueOnce({ success: true, ticketNumber: 'VA-EARLIER', message: 'VA-EARLIER' } as any);
+    const refused = await call(agent, 'escalate_to_human', ROUTINE);
+    expect(refused.ticketNumber).toBe('VA-EARLIER');
+
+    h.submitSimplifiedTicket.mockResolvedValueOnce({ success: true, ticketNumber: 'VA-RECORD', message: 'VA-RECORD' } as any);
+    const r = await call(agent, 'escalate_to_human', CLINICIAN);
+    expect(r.success).toBe(true);
+    expect(handoff).toHaveBeenCalledTimes(1);
+    await recordFiled();
+
+    const record = h.submitSimplifiedTicket.mock.calls[1][0];
+    expect(record.priority).toBe('urgent');
+    expect(record.reasonForCalling).toMatch(/^Request Type: Urgent\/Emergency Transfer/);
+    // Its own key and no per-call claim — otherwise the sink hands VA-EARLIER back and posts nothing.
+    expect(record.secondTicketOnThisCall).toEqual({ keySuffix: 'urgent-transfer' });
+    expect(record.additionalDetails).toMatch(/SEE ALSO VA-EARLIER/);
+    expect(record.additionalDetails).toMatch(/administrative_request/);
+    expect(record.additionalDetails).toMatch(/still stands/);
+    expect(record.additionalDetails).not.toMatch(/SUPERSEDES/);
+  });
+
+  it('after the uncorroborated-symptoms arm the record says the earlier ticket is superseded', async () => {
+    const sid = freshSid();
+    const { agent } = await agentFor(sid);
+    recordCallerSpeech(`call-${sid}`, 'I need to know when my glasses will be ready for pickup');
+    h.submitSimplifiedTicket.mockResolvedValueOnce({ success: true, ticketNumber: 'VA-EARLIER', message: 'VA-EARLIER' } as any);
+    const refused = await call(agent, 'escalate_to_human', INVENTED_SYMPTOMS);
+    expect(refused.refused).toBe('symptoms_not_stated_by_caller');
+    releaseCallerSpeech(`call-${sid}`);
+
+    h.submitSimplifiedTicket.mockResolvedValueOnce({ success: true, ticketNumber: 'VA-RECORD', message: 'VA-RECORD' } as any);
+    await call(agent, 'escalate_to_human', CLINICIAN);
+    await recordFiled();
+
+    const record = h.submitSimplifiedTicket.mock.calls[1][0];
+    expect(record.secondTicketOnThisCall).toEqual({ keySuffix: 'urgent-transfer' });
+    expect(record.additionalDetails).toMatch(/SUPERSEDES VA-EARLIER/);
+    expect(record.additionalDetails).toMatch(/No callback is needed on VA-EARLIER/);
+    expect(record.additionalDetails).not.toMatch(/SEE ALSO/);
+  });
+
+  it('with no refusal on the call the record files exactly as before — one ticket, the call\'s own key', async () => {
+    const { agent } = await agentFor(freshSid());
+    await call(agent, 'escalate_to_human', CLINICIAN);
+    await vi.waitFor(() => expect(h.submitSimplifiedTicket).toHaveBeenCalledTimes(1));
+    const record = h.submitSimplifiedTicket.mock.calls[0][0];
+    expect(record.priority).toBe('urgent');
+    expect(record.secondTicketOnThisCall).toBeUndefined();
+    expect(record.additionalDetails).toBeUndefined();
+  });
+
+  it('a refusal whose filing FAILED leaves nothing to file beside — the record is the call\'s ticket', async () => {
+    const sid = freshSid();
+    const { agent } = await agentFor(sid);
+    h.submitSimplifiedTicket.mockResolvedValueOnce({ success: false, error: 'Validation failed', message: 'x' } as any);
+    const refused = await call(agent, 'escalate_to_human', ROUTINE);
+    expect(refused.ticket_filed).toBe(false);
+
+    await call(agent, 'escalate_to_human', CLINICIAN);
+    await recordFiled();
+    const record = h.submitSimplifiedTicket.mock.calls[1][0];
+    expect(record.secondTicketOnThisCall).toBeUndefined();
+    expect(record.additionalDetails).toBeUndefined();
+  });
+
+  it('the cross-reference is a pure function of the ticket and the arm', () => {
+    const symptoms = transferRecordCrossReference({ ticketNumber: 'VA-1', code: 'symptoms_not_stated_by_caller' });
+    expect(symptoms).toMatch(/^SUPERSEDES VA-1/);
+    expect(symptoms).toMatch(/WAS connected/);
+    for (const code of ['communication_failure', 'administrative_request'] as const) {
+      const other = transferRecordCrossReference({ ticketNumber: 'VA-2', code });
+      expect(other).toMatch(/^SEE ALSO VA-2/);
+      expect(other).toContain(code);
+      expect(other).not.toMatch(/No callback is needed/);
+    }
   });
 });
 

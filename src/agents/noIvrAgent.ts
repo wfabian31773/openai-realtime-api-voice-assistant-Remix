@@ -283,6 +283,64 @@ export function refusedEscalationResult(args: {
   };
 }
 
+/**
+ * THE URGENT TRANSFER RECORD BESIDE A REFUSED-ESCALATION TICKET (Codex P1 on
+ * #339, 2026-09-29).
+ *
+ * A refusal files under the call's own key, and that key is what makes a later
+ * `create_ticket` return the same ticket. It would ALSO have made the
+ * sanctioned path's urgent record return it: `submitSimplifiedTicket`'s
+ * per-call claim hands back the existing number without posting. So a caller
+ * refused first (a symptom the agent invented, a detail it could not collect)
+ * who then described the emergency in their own words and WAS connected would
+ * have ended the call with ONE ticket — the refusal's, reading NOT SANCTIONED
+ * at normal priority, with no word that a transfer happened. Measured
+ * 2026-09-29 over thirty days of no-ivr: 26 calls had an escalation refused,
+ * and 3 of them went on to a sanctioned transfer on the same call.
+ *
+ * So the record files BESIDE the earlier ticket, under its own key, and says
+ * what the earlier one still is: on the uncorroborated-symptoms arm the
+ * model's own sentence, now superseded; on the other two arms the caller's
+ * request, which still stands. Keyed on the call id like the escalation map;
+ * ticket numbers and codes only, never a caller's words.
+ */
+export interface RefusedEscalationRecord {
+  ticketNumber: string;
+  code: RefusedEscalationCode;
+}
+
+const refusedEscalationTicketByCall = new Map<string, RefusedEscalationRecord>();
+const REFUSED_ESCALATION_TICKETS_CAP = 500;
+
+export function rememberRefusedEscalationTicket(callId: string, record: RefusedEscalationRecord): void {
+  if (refusedEscalationTicketByCall.size >= REFUSED_ESCALATION_TICKETS_CAP) {
+    const oldest = refusedEscalationTicketByCall.keys().next().value;
+    if (oldest !== undefined) refusedEscalationTicketByCall.delete(oldest);
+  }
+  refusedEscalationTicketByCall.set(callId, record);
+}
+
+export function refusedEscalationTicketFor(callId: string): RefusedEscalationRecord | undefined {
+  return refusedEscalationTicketByCall.get(callId);
+}
+
+/** What the urgent record says about the ticket the refusal already filed. */
+export function transferRecordCrossReference(earlier: RefusedEscalationRecord): string {
+  const t = earlier.ticketNumber;
+  if (earlier.code === 'symptoms_not_stated_by_caller') {
+    return (
+      `SUPERSEDES ${t}: that ticket was filed automatically when a first escalation attempt was refused ` +
+      'because the symptoms the agent wrote were not corroborated. The caller then described the emergency ' +
+      `in their own words and WAS connected to the on-call provider. No callback is needed on ${t}.`
+    );
+  }
+  return (
+    `SEE ALSO ${t}: the caller's own request on this call, filed automatically when a first escalation ` +
+    `attempt was refused (${earlier.code}). That request still stands and should be read with this one; ` +
+    'this ticket records only that the caller was later connected to the on-call provider.'
+  );
+}
+
 const CATEGORY_TO_REQUEST_TYPE: Partial<Record<string, string>> = {
   // Appointment family → Appointment Request (routes per the app's taxonomy).
   new_appointment: 'Appointment Request',
@@ -1860,7 +1918,10 @@ Always say a brief goodbye phrase BEFORE calling this tool.`,
    * File the ticket a refused escalation stands for. Same endpoint and shape
    * as the sanctioned path's record ticket below, same idempotency key as
    * create_ticket (call-<sid>), so it can never open a second ticket beside
-   * one this call already holds. Returns what happened; never throws.
+   * one this call already holds. Returns what happened; never throws. The
+   * ticket it files is remembered per call so a LATER sanctioned transfer's
+   * record files BESIDE it instead of being swallowed by it — see
+   * transferRecordCrossReference.
    */
   async function fileRefusedEscalationTicket(
     params: {
@@ -1922,6 +1983,7 @@ Always say a brief goodbye phrase BEFORE calling this tool.`,
         console.info(
           `[HANDOFF] refused escalation (${code}) filed as ${result.ticketNumber ?? 'a ticket'} on ${metadata.callSid}`,
         );
+        if (result.ticketNumber) rememberRefusedEscalationTicket(callId, { ticketNumber: result.ticketNumber, code });
         return { ok: true, ...(result.ticketNumber ? { ticketNumber: result.ticketNumber } : {}) };
       }
       console.error(
@@ -2115,6 +2177,10 @@ For healthcare provider calls — escalate immediately with whatever info you ha
             const name = [params.patient_first_name, params.patient_last_name]
               .filter(Boolean).join(' ').trim() || 'Unknown Caller';
             const phone = normalizePhoneNumber(params.callback_number || metadata.callerPhone || '');
+            // A refusal earlier on this call may already have filed a ticket under
+            // the call's key; the record must not be swallowed by it (Codex P1,
+            // #339). See transferRecordCrossReference.
+            const earlier = refusedEscalationTicketFor(callId);
             const result = await SyncAgentService.submitSimplifiedTicket({
               patientFullName: name,
               patientDOB: params.patient_dob || 'Unknown',
@@ -2131,6 +2197,12 @@ For healthcare provider calls — escalate immediately with whatever info you ha
               // provider calling about a patient. The 'medium' branch existed
               // solely for patient_unresponsive, which no longer exists.
               priority: 'urgent',
+              ...(earlier
+                ? {
+                    additionalDetails: transferRecordCrossReference(earlier),
+                    secondTicketOnThisCall: { keySuffix: 'urgent-transfer' },
+                  }
+                : {}),
               callSid: metadata.callSid,
               callerPhone: metadata.callerPhone,
               dialedNumber: metadata.dialedNumber,
@@ -2140,7 +2212,9 @@ For healthcare provider calls — escalate immediately with whatever info you ha
               // path above. The post-call update carries the complete one.
             });
             if (result.success) {
-              console.info(`[HANDOFF] ✓ Urgent transfer record ticket: ${result.ticketNumber}`);
+              console.info(
+                `[HANDOFF] ✓ Urgent transfer record ticket: ${result.ticketNumber}${earlier ? ` (beside ${earlier.ticketNumber})` : ''}`,
+              );
             } else {
               console.error(`[HANDOFF] ✗ Urgent transfer record ticket failed: ${result.error}`);
             }
