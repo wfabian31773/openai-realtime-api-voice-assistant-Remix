@@ -138,6 +138,209 @@ export interface NoIvrAgentMetadata {
 // the triage category it collects, leaving routing to keyword guessing. A
 // "Request Type:" header pins the unambiguous cases so the app's PRIORITY-1
 // database lookup wins. Labels must match the afterHoursAgent map exactly.
+/**
+ * A REFUSED ESCALATION FILES THE TICKET.
+ *
+ * Operator, 2026-09-29: "fix the no-ivr refused escalation so it files a
+ * ticket." The corpus is CA05daa62fd6c7156a322ea4810d590923 (00:09 UTC that
+ * morning, 417 seconds, 26 caller lines): escalate_to_human was refused twice
+ * by the gate in under 3 ms, the agent then said TWICE that it would connect
+ * the caller with the on-call team, create_ticket never ran, and the call
+ * ended on terminate_call with no ticket of any provenance. Over the fourteen
+ * days before it, 9 after-hours calls had an escalation refused and 3 of them
+ * left no ticket — every one of the 3 spoke a promise to connect and never
+ * called create_ticket. The refusal's directive already SAID "call
+ * create_ticket now"; a directive is a sentence the model may obey. So the
+ * refusal now files the ticket itself, from the escalation's own arguments
+ * plus caller ID, and its result tells the model what has ALREADY happened
+ * and what to say — never a transfer it cannot make.
+ *
+ * WHAT IT FILES: the reason the model gave (with symptoms and provider lines
+ * where it gave them), the name and date of birth if collected, the callback
+ * number or the caller ID, and a note in additionalDetails saying the
+ * escalation was asked for and not sanctioned. Never at the head of
+ * reasonForCalling: the `Request Type:` header rule (operator, 2026-07-25).
+ * On `symptoms_not_stated_by_caller` the reason is NOT the model's — that
+ * arm exists because the model wrote symptoms the caller never said, and
+ * the on-call provider acts on what is written — so the ticket says the
+ * claims were uncorroborated and points a staffer at the recording.
+ *
+ * WHAT IT DOES NOT DO: it does not make the escalation succeed (the three
+ * cases are the operator's, unchanged), it does not page anybody, and it
+ * does not open a second ticket beside one the model already filed —
+ * submitSimplifiedTicket sends `idempotencyKey: call-<sid>`, so a call that
+ * already holds a ticket gets that ticket's number back. A later
+ * create_ticket on the same call returns the same cached ticket; the
+ * post-call sync then carries the whole transcript onto it, so nothing the
+ * caller says afterwards is lost to the team.
+ *
+ * WHAT IT SAYS: the spoken line carries no promise of a connection and names
+ * where the callback goes — the number they gave, this number, or a question
+ * for one when neither is known (a withheld caller ID arrives as a WORD, the
+ * v40 lesson, so "known" means ten digits and not a truthy string).
+ */
+export type RefusedEscalationCode =
+  | 'communication_failure'
+  | 'administrative_request'
+  | 'symptoms_not_stated_by_caller';
+
+export const REFUSED_ESCALATION_WHY: Record<RefusedEscalationCode, string> = {
+  communication_failure:
+    'not being able to collect a detail is not an emergency, and this line does not transfer for it',
+  administrative_request:
+    'this is a routine request however urgently the caller phrased it, and this line transfers only for ' +
+    'an eye emergency or a clinician calling about a patient',
+  symptoms_not_stated_by_caller:
+    'the caller did not describe the symptoms you wrote, and the on-call provider acts on what you write',
+};
+
+export const REFUSED_ESCALATION_LINE = {
+  gave:
+    "I'm not able to put you through to the on-call team for this, but I've logged your message and " +
+    'our team will call you back at the number you gave me.',
+  callerId:
+    "I'm not able to put you through to the on-call team for this, but I've logged your message and " +
+    'our team will call you back at this number.',
+  none:
+    "I'm not able to put you through to the on-call team for this, but I've logged your message. " +
+    'What is the best number to reach you on?',
+} as const;
+
+export function refusedEscalationNote(code: RefusedEscalationCode): string {
+  return (
+    `ESCALATION REQUESTED, NOT SANCTIONED (${code}): the caller asked for the on-call team. ` +
+    'This line transfers only for an eye emergency or a clinician calling about a patient. ' +
+    'Filed automatically at the refusal so the request is not lost.'
+  );
+}
+
+/** Ten digits or nothing — "anonymous" is a word, not a number (v40). */
+export function knownNumber(value: string | undefined): boolean {
+  return (value ?? '').replace(/\D/g, '').length >= 10;
+}
+
+export type RefusedEscalationFiling =
+  | { ok: true; ticketNumber?: string }
+  | { ok: false; error?: string };
+
+/**
+ * The tool result for a refused escalation. `message` is this agent's
+ * model-facing channel (its quoted sentences are what gets spoken — see
+ * noIvrFalseFailure.test.ts's control), so it carries the instruction, the
+ * line to say, and never a promise of a connection.
+ */
+export function refusedEscalationResult(args: {
+  code: RefusedEscalationCode;
+  filed: RefusedEscalationFiling;
+  number: 'gave' | 'callerId' | 'none';
+}): {
+  success: false;
+  refused: RefusedEscalationCode;
+  ticket_filed: boolean;
+  ticketNumber?: string;
+  message: string;
+} {
+  const { code, filed, number } = args;
+  const why = REFUSED_ESCALATION_WHY[code];
+  const noPromise =
+    'Do NOT say you will connect, transfer or put anyone through — no transfer is happening.';
+  const onceMore =
+    code === 'symptoms_not_stated_by_caller'
+      ? ' Ask ONE question at a time and wait for a real answer; if the caller then describes an ' +
+        'emergency in their own words — vision loss, severe pain, an injury, chemical exposure — ' +
+        'you may call escalate_to_human once more.'
+      : '';
+  if (filed.ok) {
+    const ticket = filed.ticketNumber ? ` (${filed.ticketNumber})` : '';
+    const afterLine =
+      number === 'none'
+        ? ' When they give a number, read it back one digit at a time; it reaches the team with ' +
+          "this call's transcript."
+        : '';
+    return {
+      success: false,
+      refused: code,
+      ticket_filed: true,
+      ...(filed.ticketNumber ? { ticketNumber: filed.ticketNumber } : {}),
+      message:
+        `Escalation is not available: ${why}. A ticket has ALREADY been filed for this caller with ` +
+        `what you gave me${ticket}. Do NOT call create_ticket for this request. ${noPromise} ` +
+        `Say: "${REFUSED_ESCALATION_LINE[number]}"${afterLine} Then ask if there is anything else.` +
+        onceMore,
+    };
+  }
+  const error = filed.error ? ` (${filed.error})` : '';
+  return {
+    success: false,
+    refused: code,
+    ticket_filed: false,
+    message:
+      `Escalation is not available: ${why}. The ticket could NOT be filed automatically${error}, so ` +
+      `nothing is on record yet. ${noPromise} Call create_ticket now with whatever you have, and ` +
+      'only after it returns success=true tell the caller their message is going to the team and ' +
+      'someone will call them back.' +
+      onceMore,
+  };
+}
+
+/**
+ * THE URGENT TRANSFER RECORD BESIDE A REFUSED-ESCALATION TICKET (Codex P1 on
+ * #339, 2026-09-29).
+ *
+ * A refusal files under the call's own key, and that key is what makes a later
+ * `create_ticket` return the same ticket. It would ALSO have made the
+ * sanctioned path's urgent record return it: `submitSimplifiedTicket`'s
+ * per-call claim hands back the existing number without posting. So a caller
+ * refused first (a symptom the agent invented, a detail it could not collect)
+ * who then described the emergency in their own words and WAS connected would
+ * have ended the call with ONE ticket — the refusal's, reading NOT SANCTIONED
+ * at normal priority, with no word that a transfer happened. Measured
+ * 2026-09-29 over thirty days of no-ivr: 26 calls had an escalation refused,
+ * and 3 of them went on to a sanctioned transfer on the same call.
+ *
+ * So the record files BESIDE the earlier ticket, under its own key, and says
+ * what the earlier one still is: on the uncorroborated-symptoms arm the
+ * model's own sentence, now superseded; on the other two arms the caller's
+ * request, which still stands. Keyed on the call id like the escalation map;
+ * ticket numbers and codes only, never a caller's words.
+ */
+export interface RefusedEscalationRecord {
+  ticketNumber: string;
+  code: RefusedEscalationCode;
+}
+
+const refusedEscalationTicketByCall = new Map<string, RefusedEscalationRecord>();
+const REFUSED_ESCALATION_TICKETS_CAP = 500;
+
+export function rememberRefusedEscalationTicket(callId: string, record: RefusedEscalationRecord): void {
+  if (refusedEscalationTicketByCall.size >= REFUSED_ESCALATION_TICKETS_CAP) {
+    const oldest = refusedEscalationTicketByCall.keys().next().value;
+    if (oldest !== undefined) refusedEscalationTicketByCall.delete(oldest);
+  }
+  refusedEscalationTicketByCall.set(callId, record);
+}
+
+export function refusedEscalationTicketFor(callId: string): RefusedEscalationRecord | undefined {
+  return refusedEscalationTicketByCall.get(callId);
+}
+
+/** What the urgent record says about the ticket the refusal already filed. */
+export function transferRecordCrossReference(earlier: RefusedEscalationRecord): string {
+  const t = earlier.ticketNumber;
+  if (earlier.code === 'symptoms_not_stated_by_caller') {
+    return (
+      `SUPERSEDES ${t}: that ticket was filed automatically when a first escalation attempt was refused ` +
+      'because the symptoms the agent wrote were not corroborated. The caller then described the emergency ' +
+      `in their own words and WAS connected to the on-call provider. No callback is needed on ${t}.`
+    );
+  }
+  return (
+    `SEE ALSO ${t}: the caller's own request on this call, filed automatically when a first escalation ` +
+    `attempt was refused (${earlier.code}). That request still stands and should be read with this one; ` +
+    'this ticket records only that the caller was later connected to the on-call provider.'
+  );
+}
+
 const CATEGORY_TO_REQUEST_TYPE: Partial<Record<string, string>> = {
   // Appointment family → Appointment Request (routes per the app's taxonomy).
   new_appointment: 'Appointment Request',
@@ -728,9 +931,12 @@ could not understand the language, they would not answer
 Filing a partial ticket IS the job. Waking the on-call
 provider because you missed a detail is not.
 
-Say: "Based on what you're describing, I want to connect you
-with our on-call team right away."
-Then call escalate_to_human — ONCE. Never twice on one call.
+Call escalate_to_human FIRST — ONCE, never twice on one call — and
+say nothing about connecting anyone until it answers. If it returns
+success=true, say: "Based on what you're describing, I'm connecting you
+with our on-call team right now." If it is refused, it has ALREADY filed
+a ticket for the caller: say exactly what its message tells you to say,
+and never say you will connect, transfer or put anyone through.
 
 CLOSING (CRITICAL: SAY THIS ONLY ONCE)
 After a SUCCESSFUL ticket, give the success line above — once. Promise only
@@ -845,7 +1051,8 @@ MINIMUM FOR ESCALATION: caller must be a real human with a genuine need
   IF you have all 4 required fields (name, DOB, callback, reason):
     → "Let me note what you've shared." → call create_ticket → close
   ELSE IF caller has shown ANY coherent intent (mentioned a doctor, appointment, surgery, eye issue):
-    → "Let me connect you with someone who can help." → call escalate_to_human
+    → call escalate_to_human, and say nothing about connecting anyone until it
+      answers: if it is refused it has ALREADY filed a ticket and tells you what to say
   ELSE (no coherent intent, just noise/gibberish/random words):
     → "We were unable to connect. Goodbye." → END THE CALL (do NOT escalate)
 
@@ -1707,6 +1914,88 @@ Always say a brief goodbye phrase BEFORE calling this tool.`,
     },
   });
 
+  /**
+   * File the ticket a refused escalation stands for. Same endpoint and shape
+   * as the sanctioned path's record ticket below, same idempotency key as
+   * create_ticket (call-<sid>), so it can never open a second ticket beside
+   * one this call already holds. Returns what happened; never throws. The
+   * ticket it files is remembered per call so a LATER sanctioned transfer's
+   * record files BESIDE it instead of being swallowed by it — see
+   * transferRecordCrossReference.
+   */
+  async function fileRefusedEscalationTicket(
+    params: {
+      reason: string;
+      patient_first_name?: string;
+      patient_last_name?: string;
+      patient_dob?: string;
+      callback_number?: string;
+      symptoms_summary?: string;
+      provider_info?: string;
+    },
+    code: RefusedEscalationCode,
+    uncorroborated: string[],
+  ): Promise<RefusedEscalationFiling> {
+    try {
+      const { SyncAgentService } = await import("../services/syncAgentService");
+      const { classifyAfterHoursRequest } = await import('../tools/afterHoursTaxonomy');
+      const name =
+        [params.patient_first_name, params.patient_last_name].filter(Boolean).join(' ').trim() ||
+        'Unknown Caller';
+      const phone = normalizePhoneNumber(params.callback_number || metadata.callerPhone || '');
+      const reasonForCalling =
+        code === 'symptoms_not_stated_by_caller'
+          ? 'Caller asked to reach the on-call team. The symptoms the agent wrote ' +
+            `(${uncorroborated.join(', ') || 'unspecified'}) were NOT stated by the caller — ` +
+            'read the recording for what they actually said.'
+          : [
+              params.reason,
+              params.symptoms_summary ? `Symptoms: ${params.symptoms_summary}` : null,
+              params.provider_info ? `Provider: ${params.provider_info}` : null,
+            ]
+              .filter(Boolean)
+              .join('\n');
+      const ahHint = classifyAfterHoursRequest(reasonForCalling);
+      const result = await SyncAgentService.submitSimplifiedTicket({
+        patientFullName: name,
+        patientDOB: params.patient_dob || 'Unknown',
+        reasonForCalling,
+        preferredContactMethod: 'phone',
+        patientPhone: phone || undefined,
+        // The note goes HERE and not at the head of reasonForCalling — the
+        // `Request Type:` header rule (operator, 2026-07-25).
+        additionalDetails: refusedEscalationNote(code),
+        callSid: metadata.callSid,
+        callerPhone: metadata.callerPhone,
+        dialedNumber: metadata.dialedNumber,
+        agentUsed: 'no-ivr',
+        ...(ahHint.isCatchAll
+          ? {}
+          : {
+              suggestedRequestTypeId: ahHint.classification.requestTypeId,
+              suggestedRequestReasonId: ahHint.classification.requestReasonId,
+              suggestedRequestReason: ahHint.classification.requestReason,
+              suggestedUrgent: Boolean(ahHint.classification.urgent),
+            }),
+        callStartTime: new Date().toISOString(),
+      });
+      if (result.success) {
+        console.info(
+          `[HANDOFF] refused escalation (${code}) filed as ${result.ticketNumber ?? 'a ticket'} on ${metadata.callSid}`,
+        );
+        if (result.ticketNumber) rememberRefusedEscalationTicket(callId, { ticketNumber: result.ticketNumber, code });
+        return { ok: true, ...(result.ticketNumber ? { ticketNumber: result.ticketNumber } : {}) };
+      }
+      console.error(
+        `[HANDOFF] refused escalation (${code}) could NOT be filed on ${metadata.callSid}: ${result.error}`,
+      );
+      return { ok: false, ...(result.error ? { error: result.error } : {}) };
+    } catch (err) {
+      console.error(`[HANDOFF] refused escalation (${code}) filing threw on ${metadata.callSid}:`, err);
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  }
+
   const escalateToHumanTool = recordedTool({
     name: "escalate_to_human",
     description: `Transfer the call to a human on-call provider. 
@@ -1829,20 +2118,33 @@ For healthcare provider calls — escalate immediately with whatever info you ha
        * needless transfer costs a phone call and a wrongly refused one could
        * cost somebody their sight.
        */
+      // What the caller actually said, so a symptom the AGENT supplied
+      // cannot page the on-call provider. See symptomCorroboration.
+      const corroboration = corroborate(
+        callId,
+        [params.reason, params.symptoms_summary].filter(Boolean).join(' '),
+      );
       const verdict = judgeEscalation({
         callerType: params.caller_type,
         reason: params.reason,
         symptomsSummary: params.symptoms_summary,
         providerInfo: params.provider_info,
-        // What the caller actually said, so a symptom the AGENT supplied
-        // cannot page the on-call provider. See symptomCorroboration.
-        corroboration: corroborate(callId, [params.reason, params.symptoms_summary].filter(Boolean).join(' ')),
+        corroboration,
       });
       if (!verdict.allowed) {
         console.warn(
           `[HANDOFF] escalation refused for ${callId} — ${verdict.code}: ${params.reason?.substring(0, 120)}`,
         );
-        return { success: false, refused: verdict.code, message: verdict.directive };
+        // A REFUSED ESCALATION FILES THE TICKET — see the rules above
+        // CATEGORY_TO_REQUEST_TYPE. The directive alone was a sentence the
+        // model could ignore, and on 3 of 9 refusals in fourteen days it did.
+        const filed = await fileRefusedEscalationTicket(params, verdict.code, corroboration.unsupported);
+        const number: 'gave' | 'callerId' | 'none' = knownNumber(params.callback_number)
+          ? 'gave'
+          : knownNumber(metadata.callerPhone)
+            ? 'callerId'
+            : 'none';
+        return refusedEscalationResult({ code: verdict.code, filed, number });
       }
       console.info(`[HANDOFF] escalation sanctioned for ${callId} — basis: ${verdict.basis}`);
 
@@ -1875,6 +2177,10 @@ For healthcare provider calls — escalate immediately with whatever info you ha
             const name = [params.patient_first_name, params.patient_last_name]
               .filter(Boolean).join(' ').trim() || 'Unknown Caller';
             const phone = normalizePhoneNumber(params.callback_number || metadata.callerPhone || '');
+            // A refusal earlier on this call may already have filed a ticket under
+            // the call's key; the record must not be swallowed by it (Codex P1,
+            // #339). See transferRecordCrossReference.
+            const earlier = refusedEscalationTicketFor(callId);
             const result = await SyncAgentService.submitSimplifiedTicket({
               patientFullName: name,
               patientDOB: params.patient_dob || 'Unknown',
@@ -1891,6 +2197,12 @@ For healthcare provider calls — escalate immediately with whatever info you ha
               // provider calling about a patient. The 'medium' branch existed
               // solely for patient_unresponsive, which no longer exists.
               priority: 'urgent',
+              ...(earlier
+                ? {
+                    additionalDetails: transferRecordCrossReference(earlier),
+                    secondTicketOnThisCall: { keySuffix: 'urgent-transfer' },
+                  }
+                : {}),
               callSid: metadata.callSid,
               callerPhone: metadata.callerPhone,
               dialedNumber: metadata.dialedNumber,
@@ -1900,7 +2212,9 @@ For healthcare provider calls — escalate immediately with whatever info you ha
               // path above. The post-call update carries the complete one.
             });
             if (result.success) {
-              console.info(`[HANDOFF] ✓ Urgent transfer record ticket: ${result.ticketNumber}`);
+              console.info(
+                `[HANDOFF] ✓ Urgent transfer record ticket: ${result.ticketNumber}${earlier ? ` (beside ${earlier.ticketNumber})` : ''}`,
+              );
             } else {
               console.error(`[HANDOFF] ✗ Urgent transfer record ticket failed: ${result.error}`);
             }

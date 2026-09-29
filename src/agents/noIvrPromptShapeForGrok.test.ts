@@ -190,6 +190,9 @@ const RULINGS: Array<[string, RegExp]> = [
   ['new-or-existing on a lookup miss', /are you a new patient with us, or have you been seen/],
   ['filing a partial ticket is the job', /Filing a partial ticket IS the job/],
   ['a failed tool is never an escalation', /A failed tool is NOT an escalation case/],
+  // 2026-09-29: the refusal files the ticket itself; the prompt must say so and
+  // must not script a promise to connect before the tool has answered.
+  ['a refused escalation has already filed the ticket', /it has ALREADY filed\s*\n?\s*a ticket/],
   ['never promise a recording', /Never promise a recording/],
   ['the full name in one question', /"What is your full name\?"/],
   ['the email funnel, once, then a phone callback', /spell\s*\n?\s*it out for me, letter by letter/],

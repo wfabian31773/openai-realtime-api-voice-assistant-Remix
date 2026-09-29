@@ -626,6 +626,17 @@ export class SyncAgentService {
     suggestedRequestReasonId?: number;
     suggestedRequestReason?: string;
     suggestedUrgent?: boolean;
+    /**
+     * A SECOND ticket on a call that already holds one — today only the
+     * urgent transfer record the after-hours line files after a
+     * refused-escalation ticket (noIvrAgent, Codex P1 on #339, 2026-09-29).
+     * The per-call claim below would hand back the EXISTING ticket without
+     * posting, so it is skipped; the idempotency key becomes
+     * `call-<sid>-<keySuffix>` so the app still dedupes a retry of THIS
+     * filing; and call_logs.ticket_number is NOT written back, so the
+     * caller's request ticket stays the call's ticket for the post-call sync.
+     */
+    secondTicketOnThisCall?: { keySuffix: string };
   }): Promise<SyncAgentResponse> {
     const { callSid } = params;
 
@@ -684,8 +695,9 @@ export class SyncAgentService {
       }
     };
 
-    // DEDUPLICATION: Atomic lock to prevent race conditions
-    if (callSid) {
+    // DEDUPLICATION: Atomic lock to prevent race conditions. A second
+    // ticket on this call skips it on purpose — see secondTicketOnThisCall.
+    if (callSid && !params.secondTicketOnThisCall) {
       try {
         const claimResult = await storage.claimTicketCreation(callSid, 60000);
         weHoldTheLock = claimResult.claimed;
@@ -806,14 +818,19 @@ export class SyncAgentService {
         ...(params.suggestedRequestReasonId ? { suggestedRequestReasonId: params.suggestedRequestReasonId } : {}),
         ...(params.suggestedRequestReason ? { suggestedRequestReason: params.suggestedRequestReason } : {}),
         ...(params.suggestedUrgent !== undefined ? { suggestedUrgent: params.suggestedUrgent } : {}),
-        idempotencyKey: callSid ? `call-${callSid}` : undefined,
+        idempotencyKey: !callSid
+          ? undefined
+          : params.secondTicketOnThisCall
+            ? `call-${callSid}-${params.secondTicketOnThisCall.keySuffix}`
+            : `call-${callSid}`,
       });
 
       if (response.success && response.ticketNumber) {
         console.info(`[SYNC AGENT] ✓ Ticket created via simplified endpoint: ${response.ticketNumber}`);
         
-        // Update local database with ticket number and mark ticketing_synced
-        if (callSid) {
+        // Update local database with ticket number and mark ticketing_synced.
+        // Never for a second ticket: the call's ticket stays the first one.
+        if (callSid && !params.secondTicketOnThisCall) {
           try {
             await storage.releaseTicketCreationLock(callSid, response.ticketNumber);
             console.info(`[SYNC AGENT] ✓ ticketing_synced=true set for callSid ${callSid}`);
