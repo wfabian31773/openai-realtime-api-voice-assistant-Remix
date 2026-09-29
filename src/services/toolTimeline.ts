@@ -295,6 +295,15 @@ function summarizeResult(tool: string, resultJson: string): Record<string, unkno
     'form_channel',
     'form_sent',
     /**
+     * WHY escalate_to_human was refused (one of the gate's three codes) and
+     * whether the refusal FILED the ticket (2026-09-29). Both PHI-free. Until
+     * now a refused escalation and a sanctioned one were byte-identical in
+     * the timeline but for `success`, so "how many refusals left no ticket"
+     * was a transcript read; with these two it is a count.
+     */
+    'refused',
+    'ticket_filed',
+    /**
      * WHAT THE IDENTITY CARRY-FORWARD WRITE DID: `stored` | `merged` |
      * `refused_sid` | `refused_name`, absent when the branch was not reached.
      *
