@@ -189,43 +189,64 @@ export class CallerMemoryService {
     return notes.join(". ");
   }
 
+  /**
+   * THE CALLER-HISTORY SECTION IS KEYED ON A PHONE NUMBER, SO IT IS A
+   * CANDIDATE — the same thing RULE ZERO step 2, standing instruction 6 and
+   * the v47 schedule redaction say about a match on the calling number.
+   * Several people share a phone, and nobody has confirmed that the person
+   * speaking is the person who called last time.
+   *
+   * Until 2026-09-30 this section wrote the previous call's full name and
+   * date of birth into the prompt as `KNOWN PATIENT: <name> (DOB: …)`, with
+   * "Don't re-ask for information you already have (name, DOB)" underneath,
+   * plus the last provider and office seen and each previous call's summary.
+   * On `CA32108e28bc5b21ca1514a126303d0671` (after-hours, 2026-09-30 13:31
+   * UTC) that defeated the v47 redaction through a side door: the schedule
+   * section correctly withheld the appointment behind a name-and-date lookup,
+   * and this section handed the model the surname and the date it needed to
+   * make that lookup by itself. The caller affirmed a first name and spoke a
+   * date of birth; the surname never came from their mouth; the appointment
+   * was read; the full name was asked AFTER. The pre-context block's own rule
+   * is that a first name confirms no last name and that nothing from anyone's
+   * record is disclosed on the strength of a phone match — and `patientName`
+   * here can even be Twilio's CNAM (`callerName`), the name on the phone bill.
+   *
+   * So the section now carries only what is true of the NUMBER and discloses
+   * nothing from anyone's record: how many times it has called, the outcome
+   * of each recent call (a ticket number at most), open tickets, a contact
+   * preference, and the counts in `notes`. No name, no date of birth, no
+   * provider, no office, no previous-call summary, and no instruction to skip
+   * the identity questions. The caller's identity comes from the caller, the
+   * way the schedule's does: pre-context supplies a first name to confirm and
+   * `lookup_schedule` needs the surname and the date of birth to return
+   * anything. `callerMemoryIsACandidate.test.ts` pins the renderer and
+   * `noIvrMemoryIsACandidate.test.ts` pins it on both pipelines' prompts.
+   */
   buildContextForPrompt(memory: CallerMemory): string {
     if (!memory || memory.totalCalls === 0) {
       return "";
     }
 
     let context = `
-===== CALLER HISTORY (${memory.totalCalls} previous call${memory.totalCalls > 1 ? "s" : ""}) =====
-This caller has contacted us before. Use this history to provide personalized service.
+===== CALLER HISTORY (${memory.totalCalls} previous call${memory.totalCalls > 1 ? "s" : ""} from this NUMBER) =====
+This phone number has contacted us before. That is a fact about the NUMBER, not the caller:
+several people share a phone, and nothing here identifies who is speaking. Nobody's name, date
+of birth, doctor, office or previous request is listed here, on purpose — collect the caller's
+identity from the caller, exactly as you would on a first-time call.
 `;
 
-    if (memory.patientName) {
-      context += `\nKNOWN PATIENT: ${memory.patientName}`;
-      if (memory.patientDob) {
-        context += ` (DOB: ${memory.patientDob})`;
-      }
-    }
-
     if (memory.preferredContactMethod) {
-      context += `\nPREFERRED CONTACT: ${memory.preferredContactMethod} (from previous call)`;
+      context += `\nPREFERRED CONTACT: ${memory.preferredContactMethod} (from a previous call on this number)`;
     }
 
-    if (memory.lastProviderSeen) {
-      context += `\nLAST PROVIDER SEEN: ${memory.lastProviderSeen}`;
-    }
-
-    if (memory.lastLocationSeen) {
-      context += `\nLAST LOCATION SEEN: ${memory.lastLocationSeen}`;
-    }
-
-    context += `\n\nRECENT INTERACTIONS:`;
+    context += `\n\nRECENT INTERACTIONS FROM THIS NUMBER (outcome only):`;
     for (const call of memory.recentCalls.slice(0, 3)) {
-      context += `\n- ${call.date}: ${call.reason} → ${call.outcome}`;
+      context += `\n- ${call.date}: ${call.outcome}`;
     }
 
     if (memory.openTickets.length > 0) {
       context += `\n\nOPEN TICKETS: ${memory.openTickets.join(", ")}`;
-      context += `\n(If caller is following up on an existing ticket, acknowledge it)`;
+      context += `\n(If the caller is following up on an existing ticket, acknowledge it)`;
     }
 
     if (memory.notes) {
@@ -234,11 +255,11 @@ This caller has contacted us before. Use this history to provide personalized se
 
     context += `
 
-PERSONALIZATION GUIDANCE:
-- Greet by name if known: "Hi ${memory.patientName?.split(" ")[0] || "there"}, I see you've called us before."
-- If they called recently about the same issue, acknowledge: "I see you reached out about [X] recently..."
-- Use their preferred contact method when creating tickets
-- Don't re-ask for information you already have (name, DOB) unless confirming
+HOW TO USE THIS:
+- Do NOT greet by name from this section, and do NOT skip the name or date-of-birth
+  questions because of it. A previous call on this number is not this caller's identity.
+- Use the preferred contact method when creating a ticket, if the caller does not state one.
+- If they are following up on an open ticket, acknowledge it.
 `;
 
     return context;
