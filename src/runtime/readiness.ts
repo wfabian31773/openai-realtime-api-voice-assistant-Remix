@@ -562,8 +562,21 @@ import { callEnvironment } from "./callRecord";
  * key check and opened duplicate CAP cases, and a backfill that sends the
  * form to every patient the funnel missed.
  */
+/**
+ * v81 — THE SURGEON EXIT OPENS ON THE SECOND REFUSAL. Operator, 2026-09-30:
+ * "lower the surgeon exit to the second refusal." From 2026-09-02 the
+ * surgery filing tool sent `routingAskExhausted` only once TWO surgeon
+ * refusals were noted on the call, so the exit needed a third attempt.
+ * Measured 2026-09-29: seven surgery calls died holding exactly two refusals
+ * and never made the third; four of them were spaced pairs a threshold of one
+ * files on their last attempt, three were concurrent pairs no threshold
+ * reaches. Three tickets that were routed on a later attempt now file
+ * unassigned with the caller's spoken surgeon in the description. One line
+ * changed, `surgeryTools.ts`; `surgeryUnassignedExit.test.ts` pins the new
+ * threshold and records the concurrent pair as the residue it is.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v80-a-refused-escalation-files-the-ticket-20260929";
+  "voice-runtime-v81-the-surgeon-exit-opens-on-the-second-refusal-20260930";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

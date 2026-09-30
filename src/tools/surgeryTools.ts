@@ -394,7 +394,7 @@ registerTool({
      * Read BEFORE this attempt can record anything, so the first pass through
      * always reads 0.
      *
-     * TWO REFUSALS, NOT ONE — and the threshold is the whole design.
+     * ONE PRIOR REFUSAL SINCE 2026-09-30 — and the threshold is the whole design.
      *
      * A refusal is not proof the caller was asked. Traced on
      * CA101be0fe842e77fd83a6024ae06df244 (2026-09-02), whose tool_timeline
@@ -409,21 +409,48 @@ registerTool({
      * median 35.3s when nothing changed. The distributions sit on top of
      * each other, so there is no floor to put a clock at.
      *
-     * What the counter can do is refuse to fire on the attempt where the ask
-     * usually lands. Same 14 days, 196 surgery calls took a surgeon refusal:
+     * THE THRESHOLD WAS TWO FROM 2026-09-02 TO 2026-09-30, on this measurement
+     * (14 days to 2026-09-02, 196 surgery calls took a surgeon refusal):
      *
      *   139 ended with no ticket at all      <- what this exit is for
      *    38 were rescued ON ATTEMPT 2        <- the ask worked; do not pre-empt it
      *    19 were rescued on attempt 3+
      *
-     * Firing at >= 1 would take all 139, but it fires exactly where those 38
-     * rescues happen, so it would file them unassigned instead of routed.
-     * Firing at >= 2 takes 111 of the 139 (80%) and risks 19 rather than 38.
-     * The 28 calls that hang up after a single refusal are the cost, and the
-     * better trade — dept 2 provider fill has been driven from ~98% to 49%
-     * once already (docs/BACKEND_HANDOFF.md).
+     * Firing at >= 1 would have taken all 139 but fired where those 38
+     * rescues happened; >= 2 took 111 of the 139 and risked 19 rather than 38.
+     *
+     * WHAT >= 2 ACTUALLY DID, measured 2026-09-29 (one business day, surgery,
+     * every call that took a surgeon refusal): 7 calls died holding TWO
+     * refusals — one attempt short of the exit — and the calls that filed
+     * were the ones that made that next attempt. The model asks once, the
+     * caller answers, the second attempt is refused (a name the roster cannot
+     * match, or no name), and the caller is gone before a third. Read by the
+     * event timestamps: 4 of the 7 were SPACED pairs (the second attempt
+     * started 10–23 s after the first refusal, so it read a count of 1) and a
+     * threshold of one files all four on their last attempt; 3 were
+     * CONCURRENT pairs — two identical filing calls in one model response,
+     * the second STARTING before the first refusal returned, both reading 0 —
+     * which no threshold reaches (the v57 shape; CLAUDE.md, THE SURGEON
+     * CLAIM). Of the calls that filed after two spaced refusals, 3 were routed
+     * to a surgeon the roster matched on a third or fourth attempt; at >= 1
+     * those file UNASSIGNED with the caller's spoken surgeon in the
+     * description and a coordinator assigns by hand — which is what happens to
+     * 37 of 55 exit tickets already (ticket_events, 2026-09-17). Four requests
+     * saved against three tickets routed by a person instead of the roster.
+     *
+     * OPERATOR RULING, 2026-09-30: "lower the surgeon exit to the second
+     * refusal." So: ONE prior surgeon refusal on this call, and the next
+     * attempt says the ask is spent. The first refusal is still the ask — the
+     * exit never fires on a call that has not been refused for the surgeon at
+     * all — and a refusal for any OTHER field, an outage, or a sentinel
+     * CallSid still spends nothing (`surgeryUnassignedExit.test.ts`).
+     * Department 2's provider fill is the guard, as it was at >= 2
+     * (docs/BACKEND_HANDOFF.md): tickets carrying `routingAskExhausted`
+     * should rise by about 3 a day, and surgery calls lost on a surgeon
+     * refusal should fall from 7 a day toward the 3 the concurrent pairs
+     * still cost.
      */
-    const surgeonAskExhausted = gateRefusalsSoFar(callSid, SURGERY_FILE_TOOL, 'surgeon') >= 2;
+    const surgeonAskExhausted = gateRefusalsSoFar(callSid, SURGERY_FILE_TOOL, 'surgeon') >= 1;
     const filedTypeId = redirect?.requestTypeId ?? cls.requestTypeId;
     const filedReasonId = redirect?.requestReasonId ?? cls.requestReasonId;
     const filedDescription = redirect
