@@ -117,6 +117,15 @@ finding, verified against the trace, not mine alone.
 That is what makes it safe to release our local lock and retry — see
 [ticket-creation-lock.md](ticket-creation-lock.md).
 
+**A second, concrete cost of the sentinel callSid, found 2026-08-21 while
+investigating an unrelated location-refusal call:** `VA-53731` filed
+correctly (a real ticket, for a real patient) but carries `call_sid:
+"unknown"` in the Support Center DB. Because `call_logs.ticket_number` syncs
+back by matching call_sid, and the ticket's stored call_sid is the sentinel
+rather than the real one, that sync had nothing to match and never ran. Our
+own call log shows a call that produced nothing, for a call that in fact
+filed a ticket. Evidence for the sentinel piece; not started.
+
 **Separately, not fixed:** the four tools return `retryable: true`
 unconditionally on any failed `createTicket()` — including a permanent 4xx
 Zod rejection that will fail identically on every retry. `makeRequest()`
