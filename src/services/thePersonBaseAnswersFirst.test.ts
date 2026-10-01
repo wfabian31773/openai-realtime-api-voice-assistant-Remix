@@ -108,7 +108,7 @@ describe('with the Console configured, the person base is the first rung', () =>
     expect(ctx.identity).toBeUndefined();
     // Asked FIRST and not again at the end: a second lookup cannot change the answer.
     expect(findByPhone).toHaveBeenCalledTimes(1);
-    expect(bookCalls(s)).toBe(2); // phone and name; no date of birth was given
+    expect(bookCalls(s)).toBe(1); // only the phone rung can run: no name, no date of birth
   });
 });
 
