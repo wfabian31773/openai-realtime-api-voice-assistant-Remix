@@ -402,6 +402,28 @@ const LOOKUP_ROW_LIMIT = 60;
  * history. Must stay COMFORTABLY UNDER `lookup_patient`'s 6s tool budget — the
  * point is to answer before that race does, so the fallback still runs.
  */
+/**
+ * How much of the join budget is kept back for the Hub fallback when the
+ * Console attempt is bounded. The Hub read on `PersonID` is an index scan
+ * measured at 15-79 ms; 300 ms is four times the slowest of those.
+ */
+const HUB_FALLBACK_RESERVE_MS = 300;
+
+/** Reject after `ms`, and never leave the timer running past the work. */
+async function withDeadline<T>(work: Promise<T>, ms: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      work,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(label)), ms);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 function joinDeadlineMs(): number {
   const n = Number(process.env.PERSON_JOIN_TIMEOUT_MS);
   return Number.isFinite(n) && n > 0 ? n : 1_500;
@@ -761,9 +783,21 @@ export class ScheduleLookupService {
           .where(byPerson(personId))
           .orderBy(desc(schedule.appointmentDate))
           .limit(LOOKUP_ROW_LIMIT);
+      /**
+       * THE CONSOLE GETS ITS OWN, SHORTER DEADLINE (Codex P2 on #342). The Console
+       * pool allows 2.5 s statements and 5 s connection waits, both longer than
+       * this join's whole budget, so a Console query that STALLS rather than
+       * rejecting would eat the budget before the catch below could run, the
+       * outer deadline would win, and the advertised Hub fallback would never be
+       * attempted — identity without history, on a day the Console is merely
+       * slow. The Console attempt is therefore bounded at the budget minus a
+       * reserve for the Hub read (measured 15-79 ms on five people), floored at
+       * half the budget so a small budget still gives the Console a real try.
+       */
+      const consoleAllowed = Math.max(allowed - HUB_FALLBACK_RESERVE_MS, Math.floor(allowed / 2));
       const consoleThenHub = async (): Promise<any[]> => {
         try {
-          return await fetchFactsForPerson(personId, LOOKUP_ROW_LIMIT);
+          return await withDeadline(fetchFactsForPerson(personId, LOOKUP_ROW_LIMIT), consoleAllowed, 'Console join deadline');
         } catch (error) {
           // Loud, because a silent fallback hides a Console outage behind a working
           // answer. Counted by this line; the Hub copy answers until it is dropped.

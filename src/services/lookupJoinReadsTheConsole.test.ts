@@ -101,6 +101,26 @@ describe('lookupByPersonId', () => {
     expect(warned).toMatch(/CONSOLE did not answer, falling back to the Hub copy/);
   });
 
+  it('a Console that STALLS still gets the Hub fallback inside the join budget (Codex P2, #342)', async () => {
+    // The Console pool allows 2.5 s statements; the join budget is shorter. A
+    // stall must not eat the whole budget and leave the fallback unattempted.
+    process.env.PERSON_JOIN_TIMEOUT_MS = '400';
+    try {
+      fetchFactsForPerson.mockImplementation(() => new Promise(() => {})); // never settles
+      hubLimit.mockResolvedValue([consoleRow({ officeLocation: 'Monrovia' })]);
+      const { scheduleLookupService } = await import('./scheduleLookupService');
+      const started = Date.now();
+      const ctx = await scheduleLookupService.lookupByPersonId(PERSON, 'phone');
+      expect(ctx.patientFound).toBe(true);
+      expect(ctx.upcomingAppointments[0]?.location).toBe('Monrovia');
+      expect(Date.now() - started).toBeLessThan(400);
+      const warned = (console.warn as any).mock.calls.map((c: any[]) => c.join(' ')).join('\n');
+      expect(warned).toMatch(/Console join deadline/);
+    } finally {
+      delete process.env.PERSON_JOIN_TIMEOUT_MS;
+    }
+  });
+
   it('an identified person with no facts is still identified — empty is not failure', async () => {
     fetchFactsForPerson.mockResolvedValue([]);
     const { scheduleLookupService } = await import('./scheduleLookupService');
