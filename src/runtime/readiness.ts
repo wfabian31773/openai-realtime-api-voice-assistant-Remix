@@ -562,8 +562,35 @@ import { callEnvironment } from "./callRecord";
  * key check and opened duplicate CAP cases, and a backfill that sends the
  * form to every patient the funnel missed.
  */
+/**
+ * v81 — THE SURGEON EXIT OPENS ON THE SECOND REFUSAL. Operator, 2026-09-30:
+ * "lower the surgeon exit to the second refusal." From 2026-09-02 the
+ * surgery filing tool sent `routingAskExhausted` only once TWO surgeon
+ * refusals were noted on the call, so the exit needed a third attempt.
+ * Measured 2026-09-29: seven surgery calls died holding exactly two refusals
+ * and never made the third; four of them were spaced pairs a threshold of one
+ * files on their last attempt, three were concurrent pairs no threshold
+ * reaches. Three tickets that were routed on a later attempt now file
+ * unassigned with the caller's spoken surgeon in the description. One line
+ * changed, `surgeryTools.ts`; `surgeryUnassignedExit.test.ts` pins the new
+ * threshold and records the concurrent pair as the residue it is.
+ */
+/**
+ * v82 — CALLER MEMORY IS A CANDIDATE. The after-hours prompt's CALLER HISTORY
+ * section wrote the previous call's full name and date of birth into the
+ * prompt as `KNOWN PATIENT: <name> (DOB: …)` with "don't re-ask" underneath —
+ * keyed on the calling number, so a candidate exactly like the schedule match
+ * v47 redacts. On `CA32108e28bc5b21ca1514a126303d0671` (2026-09-30 13:31 UTC)
+ * that handed the model the surname and the date it used to look the caller
+ * up by itself and read an appointment before the caller had said either;
+ * the full name was asked afterwards. The section now carries only what is
+ * true of the NUMBER — call count, outcomes, open tickets, a contact
+ * preference — and says not to skip the identity questions. One renderer,
+ * `callerMemoryService.buildContextForPrompt`, so both pipelines get it;
+ * `noIvrMemoryIsACandidate.test.ts` drives the real agent on each.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v80-a-refused-escalation-files-the-ticket-20260929";
+  "voice-runtime-v82-caller-memory-is-a-candidate-20260930";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can
