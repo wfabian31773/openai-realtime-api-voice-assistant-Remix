@@ -744,13 +744,38 @@ export class ScheduleLookupService {
       // than logs, so it corrupts no counter — but it still holds its closure
       // for up to `allowed` ms after a query that already came back.
       let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
-      const appointments = await Promise.race([
+      /**
+       * THE SOURCE IS THE CONSOLE (standing instruction 14). `si_appointment_facts`
+       * is the schedule mirror; the Hub's `Schedule` copy was fed by an EDW job the
+       * operator retired on 2026-10-01 and is read here only as the fallback when
+       * the Console pool is not configured or does not answer. The rows come back
+       * already in the Hub's shape (`consoleScheduleFacts.toScheduleRow`), so the
+       * same `buildContext` runs on either and nothing downstream changes.
+       */
+      const { isConsoleScheduleConfigured, fetchFactsForPerson } = await import('./consoleScheduleFacts');
+      const source: 'console' | 'hub' = isConsoleScheduleConfigured() ? 'console' : 'hub';
+      const hubRows = () =>
         db
           .select()
           .from(schedule)
           .where(byPerson(personId))
           .orderBy(desc(schedule.appointmentDate))
-          .limit(LOOKUP_ROW_LIMIT),
+          .limit(LOOKUP_ROW_LIMIT);
+      const consoleThenHub = async (): Promise<any[]> => {
+        try {
+          return await fetchFactsForPerson(personId, LOOKUP_ROW_LIMIT);
+        } catch (error) {
+          // Loud, because a silent fallback hides a Console outage behind a working
+          // answer. Counted by this line; the Hub copy answers until it is dropped.
+          console.warn(
+            '[ScheduleLookup] PersonID join: the CONSOLE did not answer, falling back to the Hub copy:',
+            error instanceof Error ? error.message : 'unknown',
+          );
+          return hubRows();
+        }
+      };
+      const appointments = await Promise.race([
+        source === 'console' ? consoleThenHub() : hubRows(),
         new Promise<never>((_, reject) => {
           deadlineTimer = setTimeout(() => reject(new Error('PersonID join deadline')), allowed);
         }),
@@ -761,11 +786,11 @@ export class ScheduleLookupService {
       if (appointments.length === 0) {
         // Not a failure. This is the caller who really is on file and really
         // has never had an appointment — we still know exactly who they are.
-        console.log('[ScheduleLookup] PersonID join: identified, and genuinely no appointments on file');
+        console.log(`[ScheduleLookup] PersonID join (${source}): identified, and genuinely no appointments on file`);
         return this.emptyContext();
       }
 
-      console.log(`[ScheduleLookup] PersonID join returned ${appointments.length} row(s) — no name matching`);
+      console.log(`[ScheduleLookup] PersonID join (${source}) returned ${appointments.length} row(s) — no name matching`);
       return this.buildContext(appointments, matchedBy, { keyedByPerson: true });
     } catch (error) {
       // A failed join is NOT an empty history, and the caller above must not

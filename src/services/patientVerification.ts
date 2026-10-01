@@ -377,6 +377,15 @@ export function describeForLog(callId: string, r: VerificationResult): string {
 }
 
 /** Tests only: drop the pool so a fake connection string can be installed. */
+/**
+ * The Console pool, for readers that need the schedule MIRROR as well as the
+ * person base (`consoleScheduleFacts`). One pool per process; the breaker and
+ * the reset helper below govern it for every caller.
+ */
+export function getConsolePool(): pg.Pool {
+  return getPool();
+}
+
 export function __resetPoolForTests(): void {
   void pool?.end().catch(() => undefined);
   pool = null;
