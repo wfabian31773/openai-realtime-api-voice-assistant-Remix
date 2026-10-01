@@ -1008,6 +1008,31 @@ export class ScheduleLookupService {
     const p = result.patient!;
 
     /**
+     * ONE PERSON IS CERTAIN, SEVERAL IS AMBIGUOUS — v86, and v85 got this
+     * wrong for forty minutes of live traffic.
+     *
+     * v10 marked every person-base phone match `identityUnconfirmed` (Codex
+     * P1 on #292: a caller-ID hit "establishes only who OWNS the number"),
+     * and that was harmless while the person base was the LAST rung, reached
+     * only after the Schedule's own phone rung had missed. v85 made it the
+     * FIRST rung, so from the moment it deployed (17:21:57 UTC, 2026-10-01)
+     * every phone match on every runtime lane read `identity_is_certain:
+     * false` — 3 of the first 3 — and the queue prompts did what that flag
+     * tells them to: ask the recognised caller for their name and date of
+     * birth (CA4f3e821538bbe16aaa83bc19b92cb51b, surgery, asked both and
+     * only then matched by name_and_dob). RULE ZERO's own named loss, back
+     * through a rung reorder, on every lane at once.
+     *
+     * The rule is now the Schedule rung's, which production ran for months:
+     * `findByPhone` answers `verified` ONLY when the number resolves to
+     * exactly ONE person — unique across all 915,843, or narrowed to one by
+     * the caller's affirmed first name (RULE ZERO step 2, the validation) —
+     * and several people stays `ambiguous` above and never reaches here. A
+     * unique hit picks nobody, which is what standing instruction 6 forbids.
+     * `verifiedDobFor`'s name guard still refuses a stored date for a caller
+     * who gives a different name, so a household member saying "no, that's
+     * my father" is not filed under the father's chart.
+     *
      * IDENTIFIED — SO PULL THE RECORD. This is the join, and it is the point
      * of verifying against the person base at all: the mirror answers WHO on
      * its own key, and `Schedule.PersonID` is that same key.
@@ -1022,8 +1047,7 @@ export class ScheduleLookupService {
       );
       return {
         ...joined,
-        // Caller ID alone established WHO is on file, not who is calling.
-        identityUnconfirmed: matchedBy === 'phone',
+        identityUnconfirmed: false,
         /**
          * The mirror wins on WHO, the schedule supplies everything else.
          *
@@ -1058,7 +1082,7 @@ export class ScheduleLookupService {
       patientFound: true,
       patientName: `${p.firstName} ${p.lastName}`.trim(),
       matchedBy,
-      identityUnconfirmed: matchedBy === 'phone',
+      identityUnconfirmed: false,
       upcomingAppointments: [],
       pastAppointments: [],
       totalAppointmentsFound: 0,
