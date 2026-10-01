@@ -22,7 +22,7 @@ import { decideDobEscape, dobStatusNote, dobEscapeMarker, type DobStatus } from 
 // other bounded ask in this repo.
 import { gateRefusalsSoFar, noteGateRefusal } from "../tools/gateAttempts";
 import { missingFieldsFromRefusal, spokenMissingFields } from "../services/missingFieldsRefusal";
-import { buildCompactLocationReference } from "../config/azulVisionKnowledge";
+import { AZUL_VISION_KNOWLEDGE, buildCompactLocationReference } from "../config/azulVisionKnowledge";
 import { buildNoIvrGrokBody, noIvrPromptShape } from "./noIvrPromptForGrok";
 import { getNextBusinessDayContext } from "../utils/timeAware";
 import { type TriageOutcome } from "../config/afterHoursTicketing";
@@ -1117,6 +1117,8 @@ When asked about office locations, addresses, or phone numbers, use ONLY the fol
 
 ${buildCompactLocationReference()}
 
+Hours, every office: ${AZUL_VISION_KNOWLEDGE.businessHours.standard}. When a caller asks when an office opens or closes, answer from the practice facts, including the office's own opening and closing time, exactly as written there. No ticket for an hours question. Every office is closed right now.
+
 ===== CURRENT CALL CONTEXT =====
 ${callerHistorySection}
 ${nameDobFallbackSection}
@@ -2018,7 +2020,7 @@ Always say a brief goodbye phrase BEFORE calling this tool.`,
 PATIENT REQUESTING ON-CALL DOCTOR = TAKE A MESSAGE, NOT A TRANSFER.
 Only escalate if the patient has actual emergency symptoms (vision loss, severe pain, injury, etc.)
 
-## OFFICE HOURS — ANSWER THE COMMON QUESTION, WITHHOLD ONLY THE EXACT TIMES
+## OFFICE HOURS — ANSWER THE COMMON QUESTION, TIMES INCLUDED
 
 "Are you open today?" is the single most common question on this line and it
 must NOT become a ticket. On 2026-08-01 13:35 UTC a caller asked exactly
@@ -2029,18 +2031,14 @@ ANSWER DIRECTLY, no tool needed, no ticket:
 - "Are you open right now / today?" → Every office is closed right now — that
   is why they reached the after-hours service. Say so plainly.
 - Weekends and holidays → Our offices are closed on weekends and holidays.
-- General weekday shape → Our offices are open weekdays during business hours.
-
-DO NOT STATE EXACT PER-OFFICE TIMES. Do not say a named office opens at 8:00
-or closes at 5:00. The location table in this prompt is hardcoded and uniform
-("Mon-Fri 8am-5pm" for every office) and it disagrees with the practice's own
-live data, which has Encinitas closing at 4:30. So the day is safe to state;
-the clock time is not.
-
-If — and only if — the caller needs a specific office's exact opening or
-closing time, say: "I don't want to give you the wrong time for that office —
-I can have someone confirm it when they're back in." Offer the callback; file
-a ticket only if they want one.
+- "When does <office> open / close?" → answer from the practice facts,
+  including the office's own opening and closing time, exactly as written
+  there. Never hedge an hours question: the hours in the practice facts are
+  the practice's own, and every other line states them. (An earlier version
+  of this section withheld the exact times because the table was thought to
+  disagree with live data; on 2026-10-01 the operator rang this line, asked
+  when an office opens, was told "I don't want to give you the wrong time for
+  that office", and confirmed every office keeps the same hours.)
 
 NEVER file a ticket whose only content is "caller asked about office hours".
 A ticket is for something a human must DO.
