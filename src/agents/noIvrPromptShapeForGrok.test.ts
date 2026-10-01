@@ -202,6 +202,10 @@ const RULINGS: Array<[string, RegExp]> = [
   // legacy body still states this line's POLICY in its own words for the old
   // core; the Grok body gets the policy from `spokenLanguages` at binding.
   ['anything else before ending', /Anything else\?/],
+  // 2026-10-01: the operator rang the line, asked when an office opens and
+  // was told "I don't want to give you the wrong time for that office". The
+  // hours are the practice's own and every other lane states them.
+  ['office hours are answered with the times, never hedged', /including the office's own opening and closing time, exactly as written\s*\n?\s*there/],
   ['no "is that correct?"', /DO NOT ask "Is that correct\?"|Do not ask "Is that correct\?"/],
   ['the ticket number is not read out', /(DO NOT|Do not) read (out )?the ticket number/],
   ['the technical-issue line is a fixed sentence', /I'm sorry, I'm having a technical issue on my end right now\. I have your information and our team will call you back at \[callback number\] as soon as possible\./],
