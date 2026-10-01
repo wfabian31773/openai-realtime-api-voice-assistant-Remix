@@ -120,6 +120,26 @@ describe('PHI discipline — the allow-list is the safety mechanism', () => {
   });
 
   /**
+   * v87: the one-call-one-ticket guard is countable. A second filing on a call
+   * already filed through create-ticket answers `alreadyFiled: true` and posts
+   * nothing — without this key that is a console line no query can find.
+   */
+  it('keeps alreadyFiled on a filing outcome, and still nothing about who', () => {
+    const callId = freshCall();
+    recordToolEvent(
+      callId,
+      'create_pcp_task',
+      { narrative: 'Patient Paula Kolterman asking about a refill.' },
+      JSON.stringify({ success: true, alreadyFiled: true, ticketNumber: 'VA-1', guidance: 'already filed' }),
+      5,
+      { agentSlug: 'pcp' },
+    );
+    const [ev] = getAzulTimeline(callId)!;
+    expect(ev.outcome).toMatchObject({ alreadyFiled: true });
+    expect(JSON.stringify(ev)).not.toContain('Kolterman');
+  });
+
+  /**
    * v75: WHICH language a switch went TO is countable. 574 switch events in
    * the fourteen days to 2026-09-27 and not one said; 76 of them were on
    * calls with no Spanish cue — the worst filing arm — and nothing could say

@@ -198,6 +198,71 @@ describe('a create-ticket filing is never repeated', () => {
   });
 });
 
+describe('every create-ticket door latches, and the first door wins', () => {
+  /** Medical Records is a create-ticket door: a second call must not re-file it. */
+  it('a Medical Records filing is handed back, not filed twice', async () => {
+    const { agent } = freshCall();
+    await call(agent, 'record_pcp_intake', { ...UNIDENTIFIED_CLINIC, callerRole: 'medical assistant' });
+    const first = await call(agent, 'create_pcp_task', RECORDS);
+    expect(first.routed_to).toBe('Medical Records');
+
+    const second = await call(agent, 'create_pcp_task', RECORDS);
+
+    expect(ticketing.createTicket).toHaveBeenCalledTimes(1);
+    expect(second.alreadyFiled).toBe(true);
+    expect(second.ticketNumber).toBe('VA-70002');
+  });
+
+  const COORDINATOR = {
+    callerName: 'Test Coordinator',
+    callerRole: 'referral coordinator',
+    callerOrganization: 'Example Family Practice',
+    callerFacilityType: 'pcp_office' as const,
+    callPurpose: 'schedule_appointment' as const,
+    callbackNumber: '5005550006',
+    patientFirstName: 'Test',
+    patientLastName: 'Patient',
+  };
+
+  /** The HVA Hub is a create-ticket door too. */
+  it('a Hub filing is handed back, not filed twice', async () => {
+    const { agent } = freshCall();
+    await call(agent, 'record_pcp_intake', COORDINATOR);
+    const first = await call(agent, 'create_pcp_task', { narrative: 'Coordinator wants their patient booked in.' });
+    expect(first.routed_to).toBe('HVA Hub');
+
+    const second = await call(agent, 'create_pcp_task', { narrative: 'Coordinator wants their patient booked in.' });
+
+    expect(ticketing.createTicket).toHaveBeenCalledTimes(1);
+    expect(second.alreadyFiled).toBe(true);
+  });
+
+  /** And a PCP filing is not joined by a Hub ticket when the purpose moves later. */
+  it('a purpose that turns into scheduling after a PCP filing enriches the PCP row', async () => {
+    const { agent, callId } = freshCall();
+    await call(agent, 'record_pcp_intake', { ...COORDINATOR, callPurpose: 'service_inquiry' });
+    await call(agent, 'create_pcp_task', { narrative: 'Coordinator asking about a mutual patient.' });
+    pcpDirector.update(callId, { callPurpose: 'schedule_appointment' } as never);
+
+    await call(agent, 'create_pcp_task', { narrative: 'Coordinator now wants the patient booked in.' });
+
+    expect(ticketing.createTicket, 'no Hub ticket beside the PCP one').not.toHaveBeenCalled();
+    expect(ticketing.createPcpTicket).toHaveBeenCalledTimes(2);
+  });
+
+  /**
+   * FIRST WRITE WINS. A create-ticket filing followed by any PCP write must not
+   * re-label the call as enrichable on the PCP endpoint — that would turn the
+   * next filing into a PCP- ticket beside the VA- one.
+   */
+  it('a later PCP write cannot re-label a create-ticket call', () => {
+    const callId = `CAlatch${++n}`;
+    pcpDirector.markTicketFiled(callId, 'create_ticket', 'VA-1');
+    pcpDirector.markTicketFiled(callId, 'pcp', 'PCP-2');
+    expect(pcpDirector.get(callId).ticketFiled).toEqual({ door: 'create_ticket', ticketNumber: 'VA-1' });
+  });
+});
+
 describe('on a records request the title is asked before filing', () => {
   /**
    * The ordering half. The intake stops naming fields when it is done, and the
