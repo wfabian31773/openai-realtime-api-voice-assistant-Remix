@@ -832,6 +832,27 @@ export class ScheduleLookupService {
     const { phone, firstName, lastName, dateOfBirth, deadlineAt, logIdentifiers } = params;
     const logging = { logIdentifiers };
 
+    /**
+     * THE PERSON BASE ANSWERS FIRST (v85). RULE ZERO: MATCH on `patients_master`,
+     * VALIDATE, JOIN on `PersonID`. Until v84 the person base was the LAST rung,
+     * consulted only after three string searches of the appointment book had
+     * missed — so a caller's identity was whatever the book's phone or surname
+     * strings said, and `patients_master` only ever ADDED a match. With the join
+     * reading the Console (v84), the person base is the source of truth for WHO
+     * and the Console mirror for WHAT, and the book's string rungs are the
+     * fallback: they run only when the person base finds nobody (or is not
+     * configured, which keeps every old-core agent exactly where it was).
+     * Ambiguity from the person base is an ANSWER (several people on the number,
+     * none picked) and is returned, never discarded for a string match.
+     */
+    const { isConsoleScheduleConfigured } = await import('./consoleScheduleFacts');
+    const personBaseFirst = isConsoleScheduleConfigured();
+    if (personBaseFirst) {
+      const first = await this.lookupInPersonBase({ phone, firstName, lastName, dateOfBirth, deadlineAt });
+      if (first.patientFound || first.identity) return first;
+      console.info('[ScheduleLookup] the PERSON BASE found nobody for this lookup; trying the appointment book');
+    }
+
     if (firstName && lastName && dateOfBirth) {
       const result = await this.lookupByNameAndDOB(firstName, lastName, dateOfBirth, logging);
       if (result.patientFound) return result;
@@ -883,6 +904,9 @@ export class ScheduleLookupService {
      * `verifyPatient` both refuse to choose between two people and report a
      * candidate count instead — instruction 6, unchanged.
      */
+    // Already asked first when the Console is configured; asking again would spend
+    // a second lookup on an answer that cannot have changed.
+    if (personBaseFirst) return this.emptyContext();
     const fromMirror = await this.lookupInPersonBase({ phone, firstName, lastName, dateOfBirth, deadlineAt });
     // `identity` alone is a real answer: it is the AMBIGUOUS case, where the
     // person base holds several people for this lookup. Returning only on
@@ -922,7 +946,9 @@ export class ScheduleLookupService {
 
     if (!result || (!result.verified && result.reason !== 'ambiguous')) {
       if (phone) {
-        const byPhone = await findByPhone(phone);
+        // The affirmed first name narrows a shared number inside the person base
+        // (RULE ZERO step 2); without one, several people stay several people.
+        const byPhone = await findByPhone(phone, firstName);
         if (byPhone.verified || byPhone.reason === 'ambiguous') {
           result = byPhone;
           matchedBy = 'phone';
