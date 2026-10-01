@@ -61,3 +61,20 @@ GROUP BY 1;
 Same windows, same queries, plus the console log: `[ScheduleLookup] PersonID
 join (console)` must appear on recognised calls, and `[ScheduleLookup]
 PersonID join: the CONSOLE did not answer` must read 0.
+
+## v85 before-arm: who answered `lookup_patient`, same ten days
+
+`lookup_patient` events on the same 2,838 calls, by the outcome's `matched_by`
+and `identity_is_certain`. The timeline cannot say which table a `phone`
+match came from; after v85 the console line `the PERSON BASE identified this
+caller` is the count.
+
+| matched_by | certain | events | calls |
+|---|---|---|---|
+| phone | true | 1,921 | 1,778 |
+| (none) — found nobody | (null) | 838 | 411 |
+| phone | false | 318 | 207 |
+| name_and_dob | true | 182 | 178 |
+| name | false | 79 | 60 |
+| (none) — person base ambiguous | false | 65 | 27 |
+| name_and_dob | false | 9 | 7 |
