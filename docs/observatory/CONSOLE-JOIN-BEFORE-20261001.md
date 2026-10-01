@@ -78,3 +78,38 @@ caller` is the count.
 | name | false | 79 | 60 |
 | (none) — person base ambiguous | false | 65 | 27 |
 | name_and_dob | false | 9 | 7 |
+
+## After-arm, first reading: v85 (16 minutes) and v86 (2h20m)
+
+**v85 shipped every phone match as unconfirmed.** It was live 17:21:57 to
+17:37:45 UTC. Its first 14 runtime calls carried 10 phone matches, and all
+10 read `identity_is_certain: false`. The agent said "date of birth" on 4 of
+the 9 substantive calls. `CA4f3e821538bbe16aaa83bc19b92cb51b` (surgery) is the
+worked example: phone/false, phone/false, then name_and_dob/true after the
+caller was asked for both. v86 corrected it.
+
+**v86, 17:37:45 to 20:00:55 UTC.** 167 runtime calls, 143 substantive, 86 on
+the queue lanes. PCP runs no lookup.
+
+| | v86 | before-arm |
+|---|---|---|
+| phone matches carried as certain | 60 of 60 events | v85: 0 of 10 |
+| lookup calls with a certain phone match | 59 of 73 (81%) | 1,778 of 2,425 (73%) |
+| lookup calls that found nobody | 7 of 73 (10%) | 14.4% |
+| ambiguous numbers resolved later in the call | 6 of 6 | — |
+| `lookup_patient` p50 / p95 / at 6 s | 502 ms / 942 ms / 0 of 98 | 250 ms / 2,038 ms / 86 |
+| `patient_found` on queue-lane rows | 65 of 86 (76%) | 282 of 404 (70%), 09-28 |
+| date-of-birth refusals on greeted callers | 1 of 56 | 26 a day, 09-16 |
+| Optical Support tickets with no office | 0 of 10 | 15 of 391 |
+| Surgery Coordination tickets with no provider | 0 of 15 | 8 of 428 |
+| provider failures | 0 of 167 | — |
+
+Deployment log over the same window: 69 `PersonID join (console)`, 0
+`(hub)`, 69 `the PERSON BASE identified this caller`, 0 `the CONSOLE did not
+answer`, 0 setup failures. One call was lost to the republish itself
+(`CA82fd58ab734d87e153a606f980b341b6`, on the v85 process when it was
+replaced); the caller rang back and was filed.
+
+The median lookup doubled because it now crosses the network to the Console.
+The tail halved and nothing reached the budget. The full-day reading is taken
+at 2026-10-02 00:30 UTC.
