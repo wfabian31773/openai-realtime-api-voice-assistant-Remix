@@ -106,6 +106,9 @@ describe('with the Console configured, the person base is the first rung', () =>
     const ctx = await s.lookupPatient({ phone: '+15555550100' });
     expect(ctx.patientFound).toBe(false);
     expect(ctx.identity).toBeUndefined();
+    // Asked FIRST and not again at the end: a second lookup cannot change the answer.
+    expect(findByPhone).toHaveBeenCalledTimes(1);
+    expect(bookCalls(s)).toBe(2); // phone and name; no date of birth was given
   });
 });
 
