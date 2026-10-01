@@ -377,6 +377,15 @@ export function describeForLog(callId: string, r: VerificationResult): string {
 }
 
 /** Tests only: drop the pool so a fake connection string can be installed. */
+/**
+ * The Console pool, for readers that need the schedule MIRROR as well as the
+ * person base (`consoleScheduleFacts`). One pool per process; the breaker and
+ * the reset helper below govern it for every caller.
+ */
+export function getConsolePool(): pg.Pool {
+  return getPool();
+}
+
 export function __resetPoolForTests(): void {
   void pool?.end().catch(() => undefined);
   pool = null;
@@ -419,7 +428,18 @@ export function __resetPoolForTests(): void {
  * Two or more people means `ambiguous` and a candidate count — never a guess,
  * which is instruction 6 and the rule the rest of this file already keeps.
  */
-export async function findByPhone(rawPhone: string | undefined | null): Promise<VerificationResult> {
+/**
+ * `firstName` is RULE ZERO step 2 inside the person base: a number shared by
+ * several people (28 of 135 phone matches resolve to 2-3, the operator's own to
+ * eight) is a candidate to CONFIRM, and the greeting's own question — "Am I
+ * speaking with <first name>?" — is the confirmation. When exactly one of the
+ * people on the number carries the affirmed first name, that one is the match;
+ * when none or several do, the answer stays `ambiguous` and nobody is picked.
+ * Same narrowing `verifyPatient` has always used (`narrow`), applied one rung
+ * earlier, so the tool no longer has to do it on the appointment book's
+ * candidates (v54) once this rung answers first (v85).
+ */
+export async function findByPhone(rawPhone: string | undefined | null, firstName?: string | null): Promise<VerificationResult> {
   const digits = phoneDigits(rawPhone);
   // Ten is the shortest thing that can identify a US line. Anything shorter is
   // a fragment, and a LIKE on a fragment matches strangers.
@@ -477,6 +497,13 @@ export async function findByPhone(rawPhone: string | undefined | null): Promise<
   if (people.length === 0) return { verified: false, reason: 'no_match', candidates: 0 };
   if (people.length === 1) {
     return { verified: true, reason: 'match', candidates: 1, patient: toPatient(people[0]), source: 'mirror' };
+  }
+  if (firstName && firstName.trim()) {
+    const picked = narrow(people, firstName.trim(), undefined);
+    if (picked.length === 1) {
+      console.info(`[VERIFY] ${people.length} people share this number; the affirmed first name picked one`);
+      return { verified: true, reason: 'match', candidates: people.length, patient: toPatient(picked[0]), source: 'mirror' };
+    }
   }
   return { verified: false, reason: 'ambiguous', candidates: people.length };
 }

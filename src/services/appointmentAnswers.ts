@@ -110,6 +110,23 @@ function toFact(r: Record<string, any>): AppointmentFact {
 export async function appointmentsForPerson(personId: string): Promise<AppointmentAnswer | null> {
   const today = new Date().toISOString().slice(0, 10);
   try {
+    /**
+     * THE SOURCE IS THE CONSOLE (standing instruction 14) — the same mirror and
+     * the same Hub-shaped rows the PersonID join reads, so "your last visit"
+     * and "your next appointment" come from the table everyone else uses. The
+     * Hub copy answers only when the Console pool is not configured.
+     */
+    const { isConsoleScheduleConfigured, fetchFactsForPerson } = await import('./consoleScheduleFacts');
+    if (isConsoleScheduleConfigured()) {
+      const rows = await fetchFactsForPerson(personId, 60);
+      const kept = rows.filter((r) => r.appointmentStatus !== REMOVED);
+      const past = kept.filter((r) => r.appointmentDate < today).sort((a, b) => b.appointmentDate.localeCompare(a.appointmentDate));
+      const upcoming = kept.filter((r) => r.appointmentDate >= today).sort((a, b) => a.appointmentDate.localeCompare(b.appointmentDate));
+      return {
+        last: past[0] ? toFact(past[0] as unknown as Record<string, any>) : null,
+        next: upcoming[0] ? toFact(upcoming[0] as unknown as Record<string, any>) : null,
+      };
+    }
     const { db } = await import('../../server/db');
     const [past, upcoming] = await Promise.all([
       db

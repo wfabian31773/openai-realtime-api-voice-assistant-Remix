@@ -402,6 +402,28 @@ const LOOKUP_ROW_LIMIT = 60;
  * history. Must stay COMFORTABLY UNDER `lookup_patient`'s 6s tool budget — the
  * point is to answer before that race does, so the fallback still runs.
  */
+/**
+ * How much of the join budget is kept back for the Hub fallback when the
+ * Console attempt is bounded. The Hub read on `PersonID` is an index scan
+ * measured at 15-79 ms; 300 ms is four times the slowest of those.
+ */
+const HUB_FALLBACK_RESERVE_MS = 300;
+
+/** Reject after `ms`, and never leave the timer running past the work. */
+async function withDeadline<T>(work: Promise<T>, ms: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      work,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(label)), ms);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 function joinDeadlineMs(): number {
   const n = Number(process.env.PERSON_JOIN_TIMEOUT_MS);
   return Number.isFinite(n) && n > 0 ? n : 1_500;
@@ -744,13 +766,50 @@ export class ScheduleLookupService {
       // than logs, so it corrupts no counter — but it still holds its closure
       // for up to `allowed` ms after a query that already came back.
       let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
-      const appointments = await Promise.race([
+      /**
+       * THE SOURCE IS THE CONSOLE (standing instruction 14). `si_appointment_facts`
+       * is the schedule mirror; the Hub's `Schedule` copy was fed by an EDW job the
+       * operator retired on 2026-10-01 and is read here only as the fallback when
+       * the Console pool is not configured or does not answer. The rows come back
+       * already in the Hub's shape (`consoleScheduleFacts.toScheduleRow`), so the
+       * same `buildContext` runs on either and nothing downstream changes.
+       */
+      const { isConsoleScheduleConfigured, fetchFactsForPerson } = await import('./consoleScheduleFacts');
+      const source: 'console' | 'hub' = isConsoleScheduleConfigured() ? 'console' : 'hub';
+      const hubRows = () =>
         db
           .select()
           .from(schedule)
           .where(byPerson(personId))
           .orderBy(desc(schedule.appointmentDate))
-          .limit(LOOKUP_ROW_LIMIT),
+          .limit(LOOKUP_ROW_LIMIT);
+      /**
+       * THE CONSOLE GETS ITS OWN, SHORTER DEADLINE (Codex P2 on #342). The Console
+       * pool allows 2.5 s statements and 5 s connection waits, both longer than
+       * this join's whole budget, so a Console query that STALLS rather than
+       * rejecting would eat the budget before the catch below could run, the
+       * outer deadline would win, and the advertised Hub fallback would never be
+       * attempted — identity without history, on a day the Console is merely
+       * slow. The Console attempt is therefore bounded at the budget minus a
+       * reserve for the Hub read (measured 15-79 ms on five people), floored at
+       * half the budget so a small budget still gives the Console a real try.
+       */
+      const consoleAllowed = Math.max(allowed - HUB_FALLBACK_RESERVE_MS, Math.floor(allowed / 2));
+      const consoleThenHub = async (): Promise<any[]> => {
+        try {
+          return await withDeadline(fetchFactsForPerson(personId, LOOKUP_ROW_LIMIT), consoleAllowed, 'Console join deadline');
+        } catch (error) {
+          // Loud, because a silent fallback hides a Console outage behind a working
+          // answer. Counted by this line; the Hub copy answers until it is dropped.
+          console.warn(
+            '[ScheduleLookup] PersonID join: the CONSOLE did not answer, falling back to the Hub copy:',
+            error instanceof Error ? error.message : 'unknown',
+          );
+          return hubRows();
+        }
+      };
+      const appointments = await Promise.race([
+        source === 'console' ? consoleThenHub() : hubRows(),
         new Promise<never>((_, reject) => {
           deadlineTimer = setTimeout(() => reject(new Error('PersonID join deadline')), allowed);
         }),
@@ -761,11 +820,11 @@ export class ScheduleLookupService {
       if (appointments.length === 0) {
         // Not a failure. This is the caller who really is on file and really
         // has never had an appointment — we still know exactly who they are.
-        console.log('[ScheduleLookup] PersonID join: identified, and genuinely no appointments on file');
+        console.log(`[ScheduleLookup] PersonID join (${source}): identified, and genuinely no appointments on file`);
         return this.emptyContext();
       }
 
-      console.log(`[ScheduleLookup] PersonID join returned ${appointments.length} row(s) — no name matching`);
+      console.log(`[ScheduleLookup] PersonID join (${source}) returned ${appointments.length} row(s) — no name matching`);
       return this.buildContext(appointments, matchedBy, { keyedByPerson: true });
     } catch (error) {
       // A failed join is NOT an empty history, and the caller above must not
@@ -806,6 +865,27 @@ export class ScheduleLookupService {
   }): Promise<PatientScheduleContext> {
     const { phone, firstName, lastName, dateOfBirth, deadlineAt, logIdentifiers } = params;
     const logging = { logIdentifiers };
+
+    /**
+     * THE PERSON BASE ANSWERS FIRST (v85). RULE ZERO: MATCH on `patients_master`,
+     * VALIDATE, JOIN on `PersonID`. Until v84 the person base was the LAST rung,
+     * consulted only after three string searches of the appointment book had
+     * missed — so a caller's identity was whatever the book's phone or surname
+     * strings said, and `patients_master` only ever ADDED a match. With the join
+     * reading the Console (v84), the person base is the source of truth for WHO
+     * and the Console mirror for WHAT, and the book's string rungs are the
+     * fallback: they run only when the person base finds nobody (or is not
+     * configured, which keeps every old-core agent exactly where it was).
+     * Ambiguity from the person base is an ANSWER (several people on the number,
+     * none picked) and is returned, never discarded for a string match.
+     */
+    const { isConsoleScheduleConfigured } = await import('./consoleScheduleFacts');
+    const personBaseFirst = isConsoleScheduleConfigured();
+    if (personBaseFirst) {
+      const first = await this.lookupInPersonBase({ phone, firstName, lastName, dateOfBirth, deadlineAt });
+      if (first.patientFound || first.identity) return first;
+      console.info('[ScheduleLookup] the PERSON BASE found nobody for this lookup; trying the appointment book');
+    }
 
     if (firstName && lastName && dateOfBirth) {
       const result = await this.lookupByNameAndDOB(firstName, lastName, dateOfBirth, logging);
@@ -858,6 +938,9 @@ export class ScheduleLookupService {
      * `verifyPatient` both refuse to choose between two people and report a
      * candidate count instead — instruction 6, unchanged.
      */
+    // Already asked first when the Console is configured; asking again would spend
+    // a second lookup on an answer that cannot have changed.
+    if (personBaseFirst) return this.emptyContext();
     const fromMirror = await this.lookupInPersonBase({ phone, firstName, lastName, dateOfBirth, deadlineAt });
     // `identity` alone is a real answer: it is the AMBIGUOUS case, where the
     // person base holds several people for this lookup. Returning only on
@@ -897,7 +980,9 @@ export class ScheduleLookupService {
 
     if (!result || (!result.verified && result.reason !== 'ambiguous')) {
       if (phone) {
-        const byPhone = await findByPhone(phone);
+        // The affirmed first name narrows a shared number inside the person base
+        // (RULE ZERO step 2); without one, several people stay several people.
+        const byPhone = await findByPhone(phone, firstName);
         if (byPhone.verified || byPhone.reason === 'ambiguous') {
           result = byPhone;
           matchedBy = 'phone';
