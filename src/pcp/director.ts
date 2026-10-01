@@ -147,6 +147,34 @@ export interface PcpConversationState {
    */
   handoffRefusedAsIneligible?: boolean;
   /**
+   * THIS CALL ALREADY HAS ITS TICKET, AND THIS IS THE DOOR IT WENT THROUGH.
+   *
+   * Operator, 2026-10-01: *"fix the PCP double ticket."* Measured the same
+   * evening over the PCP calls of 2026-09-17..10-01: 61 of 793 calls with an
+   * agent ticket carried two or more, 72 surplus tickets in all, and NOT ONE
+   * of them was a queue transfer. Three shapes, one cause — every later
+   * `create_pcp_task` re-ran every routing door, so a call that had filed
+   * through one door filed again through another:
+   *
+   *   35  a PCP ticket, then a Medical Records ticket — the enrichment
+   *       question (the caller's title) arrived after the first filing, and
+   *       the title is what lets the professional records route identify
+   *       the caller, so the SECOND call took the records door;
+   *   11  a PCP ticket, then a create-ticket ticket in another department;
+   *   15  the patient path filing again on every call (worst: ten tickets on
+   *       one call, CA743da180, four seconds apart).
+   *
+   * The pcp-ticket endpoint upserts on `callSid`, so a second POST there is
+   * ENRICHMENT; create-ticket has no such upsert, so a second POST there is a
+   * second ticket. That difference is why the latch records the door, not
+   * just the fact: `pcp` means a later filing may land on the same row,
+   * `create_ticket` means a later filing must not POST at all.
+   *
+   * FIRST WRITE WINS. Server-owned for the v17 reason — the model can
+   * neither set nor clear it.
+   */
+  ticketFiled?: { door: 'pcp' | 'create_ticket'; ticketNumber?: string };
+  /**
    * THE CALLER IS THE PATIENT, and it stays true once established.
    *
    * `callPurpose` is not safe to read for this. The records tool reclassifies
@@ -730,6 +758,16 @@ export class PcpDirector {
     this.get(callId).handoffRefusedAsIneligible = true;
   }
 
+  /**
+   * Record that this call's request is filed, and through which door.
+   * First write wins — see `ticketFiled`.
+   */
+  markTicketFiled(callId: string, door: 'pcp' | 'create_ticket', ticketNumber?: string): void {
+    const state = this.get(callId);
+    if (state.ticketFiled) return;
+    state.ticketFiled = { door, ...(ticketNumber ? { ticketNumber } : {}) };
+  }
+
   clear(callId: string): void {
     this.states.delete(callId);
   }
@@ -946,8 +984,29 @@ export class PcpDirector {
      * operator withdrew on 2026-09-04 two questions sooner. Only what the
      * agent SAYS changes here; who we dial does not move at all.
      */
+    /**
+     * EXCEPT THE TITLE ON A RECORDS REQUEST, which is not enrichment there —
+     * it is the routing. 2026-10-01, the double-ticket fix.
+     *
+     * The professional records route (v16) files to Medical Records only when
+     * it can tell WHO is asking, and on this line it reads that from the
+     * caller's title: `callerFacilityType` and `statedRelationship` are no
+     * longer asked (v34). Deferring the title past the filing therefore sent
+     * every such request to PCP Support first, and the enrichment re-file
+     * then took the records door — 35 calls with two tickets in two weeks.
+     * The one-ticket latch stops the second ticket; this is what makes the
+     * one ticket land where the operator ruled records go (2026-09-12/14).
+     *
+     * The email stays deferred: on this purpose it is satisfied by the
+     * delivery method and is never asked at all (SATISFIED_BY). A caller who
+     * hangs up on the title question is still filed by the teardown floor,
+     * because purpose and name are already in hand.
+     */
+    const deferredUntilFiled = state.callPurpose === 'patient_medical_records_request'
+      ? ENRICHMENT_AFTER_FILING.filter((field) => field !== 'callerRole')
+      : ENRICHMENT_AFTER_FILING;
     const askableNow = stillUnset.filter(
-      (field) => Boolean(state.dispositionRecorded) || !ENRICHMENT_AFTER_FILING.includes(field),
+      (field) => Boolean(state.dispositionRecorded) || !deferredUntilFiled.includes(field),
     );
     /**
      * TWO QUESTIONS, TWO ANSWERS — AND WELDING THEM IS THE BUG THIS AVOIDS.

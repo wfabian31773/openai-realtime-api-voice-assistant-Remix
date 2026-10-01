@@ -2299,6 +2299,7 @@ voice-runtime-v83-the-after-hours-line-states-the-hours-20261001
 voice-runtime-v84-the-join-reads-the-console-20261001
 voice-runtime-v85-the-person-base-answers-first-20261001
 voice-runtime-v86-one-person-on-the-number-is-certain-20261001
+voice-runtime-v87-one-call-one-ticket-20261001
 ```
 
 Also printed at boot as `[voice-runtime] <marker>`. Anything ending in an
@@ -2476,14 +2477,15 @@ v10 (the person base and the join), v11 (the locked record, #290) and v12
 (optical's office ladder) are a CHAIN on `main`: each merged after the one
 before and brought it in, so v12 contains both.
 
-**AND THE SEQUENCE HAS TWO HOLES IN IT ON PURPOSE: v13 AND v57. v86 IS THE
-NEWEST — one person on the number is certain, the correction to v85 (the
-person base answers first, stacked on v84, the PersonID join reading the
-Console's schedule mirror, in ONE PR, #342); v86 is on the #343 branch ABOVE
+**AND THE SEQUENCE HAS TWO HOLES IN IT ON PURPOSE: v13 AND v57. v87 IS THE
+NEWEST — one call, one ticket on the PCP lane, and no ticket for a caller who
+chooses the PCP queue (operator, 2026-10-01); v87 is on its own branch ABOVE
 `main` —
 AND
-v85 IS WHAT `main` CARRIES, SINCE #342 MERGED 2026-10-01 (`c086b3c`), on top
-of v83 (#341, `5b2eed4`, the after-hours line stating the office hours), v82
+v86 IS WHAT `main` CARRIES, SINCE #343 MERGED 2026-10-01 (`655de97`), on top
+of v85 (#342, `c086b3c`, the person base answering first, stacked on v84, the
+PersonID join reading the Console's schedule mirror), v83 (#341, `5b2eed4`,
+the after-hours line stating the office hours), v82
 (#340, `dfb036c`,
 caller memory as a candidate stacked on v81), v80 (#339, `480c0b9`), v79 (#338,
 `df07335`), v78 (#337, `d89e3b5` — the fix for the outage that a build reading
@@ -2491,7 +2493,7 @@ v77 IS), v77 (#336, `df9b6b1`), v74 (#335, `f998a0b`) and v73 (#333,
 `0039a9d`); AND v57, v59, v60, v63, v65 AND v66 ARE ALL RETIRED RATHER
 THAN REUSED — see THE SURGEON CLAIM below the table for v57.** **THIS LINE
 GOES STALE EVERY TIME A MARKER LANDS, SO RE-READ IT AGAINST `main` RATHER
-THAN TRUSTING IT.** SEVENTEEN corrections have landed on it in eleven days and every
+THAN TRUSTING IT.** EIGHTEEN corrections have landed on it in eleven days and every
 one was the same trap: it read `v58 IS WHAT main CARRIES` after #324 moved
 `main` to v61, `v61` after #323 moved it to v62, `v62` after #327 moved it to
 v64, `v64` after #326 moved it to v67, `v67` after #328 moved it to v68, `v68`
@@ -2500,7 +2502,8 @@ after #325 moved it to v69, `v69` after #293 moved it to v70, `v70` after
 moved it to v74, `v74` after #336 moved it to v77, `v77` after #337
 moved it to v78, `v78` after #338 moved it to v79, `v79` after #339 moved
 it to v80, `v80` after #340 moved it to v82, `v82` after #341 moved it to
-v83, and `v83` after #342 moved it to v85 — **FIFTEEN of
+v83, `v83` after #342 moved it to v85, and `v85` after #343 moved it to
+v86 — **SIXTEEN of
 those arrived ON `main` already wrong**, because a branch's own prose does not
 update itself when that branch merges, and the branch that writes it cannot
 know it will be the last to land. **THE EIGHTH AND NINTH ARE THE ONES THE #329
@@ -2553,7 +2556,7 @@ re-bumps only when it falls BELOW `main`, where it would read as a failed pull.
 **NEWEST IS NOT THE SAME AS CONTAINED:** v70 contains v69 because `main` was
 merged into it, not because 70 > 69. **A build must never read v13, v57, v59,
 v60, v63, v65 or v66** — v13 and v57 were withdrawn, and the other five were
-branch numbers given up the moment a merge put them below `main`. The next ship takes **v87**. v19-v24 were siblings off v18 on 2026-09-15 — v19 the PCP lost-requestfloor (#300), v20 the blind transfer telemetry (#302), v21 the ask detection
+branch numbers given up the moment a merge put them below `main`. The next ship takes **v88**. v19-v24 were siblings off v18 on 2026-09-15 — v19 the PCP lost-requestfloor (#300), v20 the blind transfer telemetry (#302), v21 the ask detection
 (#301), v22 the question format (#303), v23 the recording disclosure (#304),
 v24 the answerable queue choice (#306). Distinct numbers were assigned UP FRONT
 precisely so six open branches could never make six different builds read alike
@@ -2688,7 +2691,7 @@ never read v57; **v58 was that next ship** — the identity probe, an instrument
 and no behaviour change (see the v56 row below for what it measures). It is no
 longer the current marker: see the paragraph beneath this one.
 
-**v85 (#342) IS WHAT `main` CARRIES (merged 2026-10-01, `c086b3c`), AND v57,
+**v86 (#343) IS WHAT `main` CARRIES (merged 2026-10-01, `655de97`), AND v57,
 v59, v60, v63, v65 AND v66 ARE RETIRED RATHER THAN REUSED.** Each of the last
 five was a branch's own number while it sat below `main`, and each was given up
 the moment a merge put it there: two branches carrying one version make two
@@ -2696,15 +2699,16 @@ builds indistinguishable at `/voice/health` — the single thing this constant
 exists to prevent — and a number BELOW `main` reads as a failed pull. **v59 is
 the newest addition to that list** — it was #293's number from 2026-09-19 until
 #325 moved `main` to v69, at which point it fell below and the branch re-bumped
-to v70. **THIS PARAGRAPH ITSELF HAS ARRIVED ON `main` WRONG TEN TIMES**, once naming
+to v70. **THIS PARAGRAPH ITSELF HAS ARRIVED ON `main` WRONG ELEVEN TIMES**, once naming
 v67 as what `main` carried, once describing #328 and #293 as open siblings,
 once naming v70 after #329 had moved `main` to v72, once naming v72 after
 #333 had moved `main` to v73, once naming v73 after #335 had moved `main`
 to v74, once naming v78 after #338 had moved `main` to v79, once naming
 v79 after #339 had moved `main` to v80, once naming v80 after #340 had
-moved `main` to v82, once naming v82 after #341 had moved `main` to v83, and
-once naming v83 after #342 had moved `main` to v85 — the fourth through
-thirteenth of the fifteen the sequence sentence counts.
+moved `main` to v82, once naming v82 after #341 had moved `main` to v83,
+once naming v83 after #342 had moved `main` to v85, and once naming v85
+after #343 had moved `main` to v86 — the fourth through fourteenth of the
+sixteen the sequence sentence counts.
 Containment is stated once, in the sequence sentence above; see the v56 row for
 what v61 measures.
 

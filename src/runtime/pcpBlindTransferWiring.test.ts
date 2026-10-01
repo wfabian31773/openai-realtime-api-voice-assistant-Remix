@@ -52,6 +52,7 @@ import {
 import type { TransferTwilioOps } from "./warmTransfer";
 import { peekRuntimeTransferOutcome, clearRuntimeTransferOutcomes } from "./transferOutcomeLog";
 import { escalationDetailsMap } from "../services/escalationStore";
+import { BLIND_TRANSFER_WARNING, BLIND_TRANSFER_WARNING_UNRECORDED } from "./blindTransfer";
 
 import type { RuntimeTransferOutcome } from "./transferOutcomeLog";
 import type { WebhookRequest } from "./voiceWebhook";
@@ -217,6 +218,42 @@ describe("a PCP transfer dials nobody and moves the caller", () => {
 
     expect(calls).toContain("createOfficeLeg");
     expect(calls).not.toContain("redirectCallerToQueue");
+  });
+});
+
+/**
+ * THE SENTENCE TWILIO SPEAKS FOLLOWS THE LANE'S RECORD FLAG — link 2 of the
+ * 2026-10-01 chain. `performBlindTransfer` choosing the right copy is proven in
+ * blindTransfer.test.ts; this proves the runtime actually hands it the flag the
+ * agent wrote, which is the middle link v20 records going uncovered.
+ */
+describe("the redirect's warning follows the side channel", () => {
+  function opsCapturingWarnings() {
+    const warnings: string[] = [];
+    const { ops } = fakeOps();
+    const capturing: TransferTwilioOps = {
+      ...ops,
+      redirectCallerToQueue: async (input) => {
+        warnings.push(input.warning);
+      },
+    };
+    return { capturing, warnings };
+  }
+
+  it("does not say the details were taken down when the lane filed nothing", async () => {
+    const { capturing, warnings } = opsCapturingWarnings();
+    pcpEscalation({ requestOnRecord: false });
+    await transferWith(capturing).handoffFor("pcp", META)();
+    expect(warnings).toEqual([BLIND_TRANSFER_WARNING_UNRECORDED]);
+  });
+
+  it("keeps the approved sentence when a ticket exists or the lane says nothing", async () => {
+    for (const over of [{ requestOnRecord: true }, {}]) {
+      const { capturing, warnings } = opsCapturingWarnings();
+      pcpEscalation(over);
+      await transferWith(capturing).handoffFor("pcp", META)();
+      expect(warnings, JSON.stringify(over)).toEqual([BLIND_TRANSFER_WARNING]);
+    }
   });
 });
 

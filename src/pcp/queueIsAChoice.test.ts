@@ -17,6 +17,17 @@
  * 36% and nobody works the voicemails, so a ticket filed behind a transfer is
  * a record nobody reads.
  *
+ * WITHDRAWN 2026-09-15 ("yes to the v14 reversal") AND RESTORED 2026-10-01:
+ *
+ *   "if the caller chooses to go into the queue, do not create the ticket ...
+ *    if you choose the queue, we dont generate a ticket. As long as we are
+ *    explaining this on the call as we should, we should be fine."
+ *
+ * So the accepted arm files nothing again. ONE case still files, and it is
+ * what keeps a spoken sentence true rather than an exception to the ruling: a
+ * queue that never picks up leaves the caller hearing "I have your request
+ * recorded" on a leg we no longer hold — see `queueChoiceOwesATicket`.
+ *
  * ─────────────────────────────────────────────────────────────────────────
  * WHAT THIS FILE IS DEFENDING, and why each test is not decoration.
  *
@@ -69,6 +80,7 @@ const ticketing = vi.hoisted(() => ({
 vi.mock('../../server/services/ticketingApiClient', () => ({ ticketingApiClient: ticketing }));
 
 const { createPcpAgent, sweepPcpUnfiledCall, markPcpCallEnded } = await import('../agents/pcpAgent');
+const { escalationDetailsMap } = await import('../services/escalationStore');
 const { QUEUE_CHOICE_WARNING } = await import('./queueChoice');
 
 async function call(agent: any, name: string, args: Record<string, unknown> = {}) {
@@ -152,86 +164,124 @@ describe('the caller is asked before anything is filed or dialled', () => {
 });
 
 /**
- * THE v14 REVERSAL — operator, 2026-09-15: "yes to the v14 reversal."
+ * THE 2026-10-01 RULING — no ticket for a caller who chose the queue.
  *
- * These assertions used to pin the OPPOSITE: `createPcpTicket` NOT called at
- * all on an accepted transfer. That was the 2026-09-13 ruling, and the
- * operator withdrew its filing half on 09-15 in favour of Rosa's 09-08
- * design. They are REWRITTEN rather than loosened, because a test that merely
- * stopped asserting "no ticket" would pass whether or not the ticket carries
- * a status that lies about reaching a human — which is the whole risk of
- * filing again.
+ * These assertions pinned the OPPOSITE from 2026-09-15 (a pre-dial and a
+ * post-dial write, at DIALING). They are REWRITTEN rather than deleted: the
+ * behaviour flipped, and a file that simply stopped asserting anything about
+ * the accepted arm would pass under either ruling.
+ *
+ * The settle callback is driven DIRECTLY, off the side channel the agent wrote
+ * before the dial, because that closure is the only thing that can still file
+ * once the caller is in the queue — and a source-pin cannot tell a callback
+ * that files from one that only looks as if it would.
  */
-describe('an explicit yes: the queue, AND a ticket that does not claim a human', () => {
-  it('transfers and files, at DIALING and never CONNECTED', async () => {
-    const dial = vi.fn(QUEUE_OK);
-    const { agent } = freshCall(dial);
+describe('an explicit yes: the queue, and NO ticket — operator 2026-10-01', () => {
+  async function acceptAndCapture(dialResult: () => Promise<unknown> = QUEUE_OK) {
+    let captured: any;
+    let callId = '';
+    const dial = vi.fn(async () => {
+      captured = { ...escalationDetailsMap.get(callId) };
+      return dialResult();
+    });
+    const made = freshCall(dial);
+    callId = made.callId;
+    const r = await askThenAnswer(made.agent, true);
+    return { r, dial, captured, callId: made.callId };
+  }
 
-    const r = await askThenAnswer(agent, true);
+  it('transfers and files nothing at all', async () => {
+    const { r, dial } = await acceptAndCapture();
 
     expect(r.success).toBe(true);
     expect(r.handoffStatus).toBe('DIALING');
     expect(dial).toHaveBeenCalledTimes(1);
-    expect(
-      ticketing.createPcpTicket,
-      'Rosa 2026-09-08, restored 09-15: a ticket is created even when they are transferred',
-    ).toHaveBeenCalled();
-
-    /**
-     * THE PRE-DIAL WRITE IS THE ONE THAT SURVIVES A CALLER WHO HANGS UP IN
-     * hold music, so it has to happen BEFORE the redirect, not only after.
-     */
-    const payloads = ticketing.createPcpTicket.mock.calls.map((c: any[]) => c[0]);
-    const first = payloads[0];
-    expect(first.handoff.finalStatus, 'filed before the dial goes out').toBe('REQUESTED');
-    expect(first.handoff.attempted).toBe(false);
-
-    const last = payloads[payloads.length - 1];
-    expect(last.handoff.finalStatus, 'a queue is not a person').toBe('DIALING');
-    expect(last.handoff.humanAnswerStatus).toBe('TRANSFERRED_TO_QUEUE');
-    expect(
-      last.handoff.connectedAt,
-      'nothing on the blind path observes a human answering — v20',
-    ).toBeUndefined();
-
-    /**
-     * THE APP KEYS ITS UPSERT ON callSid, so both writes must carry the SAME
-     * one or the second opens a second ticket instead of updating the first.
-     */
-    for (const payload of payloads) {
-      expect(payload.callSid).toBe(first.callSid);
-    }
+    expect(ticketing.createPcpTicket, '"if you choose the queue, we dont generate a ticket"').not.toHaveBeenCalled();
+    expect(ticketing.createTicket).not.toHaveBeenCalled();
   });
 
   /**
-   * CONNECTED IS RESERVED FOR THE WARM PATH'S KEYPRESS, and the ticketing app
-   * computes `humanHandoffOccurred` from exactly that word. Asserting the
-   * absence separately from the presence above, because a future change that
-   * "improves" the status to CONNECTED would still satisfy every assertion
-   * that only checks DIALING is somewhere in the payload.
+   * THE REDIRECT'S OWN SENTENCE. `BLIND_TRANSFER_WARNING` says "I've taken your
+   * details down" and plays on a leg the agent no longer holds — so the lane
+   * must tell the transport there is nothing to mention.
    */
-  it('no write on this path ever says CONNECTED', async () => {
-    const { agent } = freshCall(QUEUE_OK);
-    await askThenAnswer(agent, true);
+  it('tells the transport nothing is on record, so the warning does not claim it', async () => {
+    const { captured } = await acceptAndCapture();
+    expect(captured.requestOnRecord).toBe(false);
+  });
 
-    for (const call of ticketing.createPcpTicket.mock.calls as any[][]) {
-      expect(call[0].handoff?.finalStatus).not.toBe('CONNECTED');
-      expect(call[0].handoff?.connectedAt).toBeUndefined();
-    }
+  it('a queue that picks up still files nothing', async () => {
+    const { captured } = await acceptAndCapture();
+    await captured.onBlindDialSettled({
+      outcome: 'queue_answered', status: 'COMPLETED', connected: true, talkSeconds: 240, ringSeconds: 3,
+      dialedNumber: '+17149564300',
+    });
+    expect(ticketing.createPcpTicket).not.toHaveBeenCalled();
+  });
+
+  /** They left while it rang — "if they drop off, their record is lost. Their choice." */
+  it('a caller who hangs up while it rings files nothing', async () => {
+    const { captured } = await acceptAndCapture();
+    await captured.onBlindDialSettled({
+      outcome: 'failed', status: 'CANCELED', connected: false, ringSeconds: 9, dialedNumber: '+17149564300',
+    });
+    expect(ticketing.createPcpTicket).not.toHaveBeenCalled();
   });
 
   /**
-   * The sweep exit SURVIVES the reversal, and for its original reason.
-   *
-   * On the blind path the redirect ends the Media Stream, so the sweep runs
-   * seconds later on a caller whose status is DIALING, not CONNECTED. Without
-   * the exit it would file "CALLER HUNG UP BEFORE THE REQUEST WAS COMPLETE"
-   * over somebody sitting in the queue where they asked to be — wrong prose
-   * on a ticket that now exists, rather than a ticket that should not.
+   * THE ONE CASE THAT FILES. The dial-result TwiML answers a dial that did not
+   * bridge with "I have your request recorded and the team will follow up" —
+   * true only if this lands. One ticket, an OPEN task, never CONNECTED.
    */
-  it('the teardown sweep does not file AGAIN behind them', async () => {
-    const { agent, callId } = freshCall(QUEUE_OK);
-    await askThenAnswer(agent, true);
+  it('a queue that never picks up files ONE ticket, so the spoken line is true', async () => {
+    const { captured } = await acceptAndCapture();
+    await captured.onBlindDialSettled({
+      outcome: 'no_answer', status: 'NO-ANSWER', connected: false, ringSeconds: 45, dialedNumber: '+17149564300',
+    });
+
+    expect(ticketing.createPcpTicket).toHaveBeenCalledTimes(1);
+    const payload = (ticketing.createPcpTicket.mock.calls[0] as any[])[0];
+    expect(payload.disposition).toBe('CREATE_TASK');
+    expect(payload.handoff.finalStatus).toBe('NO_ANSWER');
+    expect(payload.handoff.fallbackTicketStatus).toBe('OPEN');
+    expect(payload.handoff.connectedAt, 'nothing on the blind path observes a human — v20').toBeUndefined();
+  });
+
+  /**
+   * A TICKET FILED EARLIER STANDS, AND THE WARNING MAY SAY SO. The ruling is
+   * "we dont generate a ticket" for the transfer — it does not unfile a request
+   * the caller already made before asking for a person.
+   */
+  it('a caller who filed before asking keeps that ticket, and nothing new is written', async () => {
+    let captured: any;
+    let callId = '';
+    const dial = vi.fn(async () => {
+      captured = { ...escalationDetailsMap.get(callId) };
+      return QUEUE_OK();
+    });
+    const made = freshCall(dial);
+    callId = made.callId;
+    await call(made.agent, 'record_pcp_intake', INTAKE);
+    const filed = await call(made.agent, 'create_pcp_task', { narrative: 'Coordinator asking about a referral.' });
+    expect(filed.success).toBe(true);
+    ticketing.createPcpTicket.mockClear();
+
+    await call(made.agent, 'handoff_to_pcp', { narrative: ASKED });
+    const r = await call(made.agent, 'handoff_to_pcp', { narrative: 'Caller said connect me.', callerAcceptedQueue: true });
+
+    expect(r.success).toBe(true);
+    expect(ticketing.createPcpTicket, 'no second write for the transfer').not.toHaveBeenCalled();
+    expect(captured.requestOnRecord, 'a ticket exists, so the warning is true').toBe(true);
+  });
+
+  /**
+   * The sweep exit SURVIVES, for its original reason: the redirect ends the
+   * Media Stream, so teardown runs seconds later on a caller who is in the
+   * queue where they asked to be, with no disposition recorded — which is now
+   * the design, not a gap.
+   */
+  it('the teardown sweep does not file behind them', async () => {
+    const { callId } = await acceptAndCapture();
     ticketing.createPcpTicket.mockClear();
 
     markPcpCallEnded(callId);
@@ -275,17 +325,11 @@ describe('a caller who said yes is asked nothing else', () => {
     expect(r.success).toBe(true);
     expect(dial).toHaveBeenCalledTimes(1);
     /**
-     * AND THE SKIPPED ROUND DOES NOT SKIP THE RECORD. This line asserted the
-     * opposite until the 2026-09-15 reversal, which put v14's FILING rule
-     * inside a test about what we ASK — the two questions this file now keeps
-     * apart (`choseTheQueue` vs the ticket writes). Asserted positively here
-     * so the thin intake and the ticket are pinned together: a caller who was
-     * asked nothing is exactly the caller whose ticket is easiest to lose.
+     * AND NOTHING IS WRITTEN, on the 2026-10-01 ruling. This flipped twice
+     * with the filing rule (09-15 asserted a ticket); the round and the
+     * record are both governed by the one choice again.
      */
-    expect(
-      ticketing.createPcpTicket,
-      'no questions asked is not the same as nothing written down',
-    ).toHaveBeenCalled();
+    expect(ticketing.createPcpTicket, 'they chose the queue — no ticket').not.toHaveBeenCalled();
   });
 
   /**

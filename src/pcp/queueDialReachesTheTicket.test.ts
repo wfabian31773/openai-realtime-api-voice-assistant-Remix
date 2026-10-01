@@ -281,11 +281,16 @@ describe('the callback is wired from the agent to the webhook', () => {
       /handoffAfterQueueDial\(settlement,/,
     );
     /**
-     * ONLY WHEN THE PRE-DIAL WRITE SUCCEEDED. The ticketing app INSERTS when
-     * it cannot find the callSid, so registering after a failed write could
-     * open a second ticket minutes later carrying a dial outcome and no
-     * intake.
+     * TWO REGISTRATIONS, ONE PER RULING (2026-10-01). A caller who chose the
+     * queue has no ticket, so their callback can only FILE (and only when the
+     * queue never picks up — `queueChoiceOwesATicket`); everybody else's
+     * UPDATES the pre-dial row, and only when that write succeeded, because the
+     * app INSERTS on an unknown callSid and a failed write followed by a settle
+     * would open a second ticket carrying a dial outcome and no intake. The
+     * accepted arm's behaviour is driven for real in queueIsAChoice.test.ts.
      */
-    expect(src).toMatch(/onBlindDialSettled:\s*initial\.success/);
+    expect(src).toMatch(/onBlindDialSettled:\s*callerChoseTheQueue/);
+    expect(src).toMatch(/:\s*initial\?\.success/);
+    expect(src).toMatch(/queueChoiceOwesATicket\(settlement\)/);
   });
 });

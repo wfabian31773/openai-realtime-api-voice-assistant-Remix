@@ -21,39 +21,44 @@
  * already made rather than the first the caller hears of the wait.
  *
  * ─────────────────────────────────────────────────────────────────────────
- * THE TICKET IS NO LONGER WITHHELD — OPERATOR, 2026-09-15, REVERSING HIMSELF.
+ * THE TICKET IS WITHHELD — 2026-09-13, reversed 09-15, RESTORED 2026-10-01.
  *
- * The 09-13 ruling had a second half: *"We Will Not create tickets for anyone
- * that chooses to be transferred. if they drop off, their record is lost.
- * Their choice."* Asked on 09-15 whether to go back to Rosa's 09-08 design —
- * file the ticket anyway, with a status that does not claim a person was
- * reached — the answer was **"yes to the v14 reversal."**
+ * Operator, 2026-10-01:
  *
- * WHAT THAT COST WHILE IT STOOD, and why it is the right reversal. The
- * accepted arm became invisible in `tickets`, and `tickets.pcp_handoff_*` is
- * the only working PCP transfer instrument we have — CLAUDE.md says to measure
- * transfers from there and never from `call_logs`. So the arm the ruling
- * created could not be counted, and "the queue answers at 36%" — the very
- * number the ruling rests on — could not be re-measured on the callers it
- * applied to.
+ *   "if the caller chooses to go into the queue, do not create the ticket. i
+ *    know that may differ from the record but update the md and let's get this
+ *    squared away, if you choose the queue, we dont generate a ticket. As long
+ *    as we are explaining this on the call as we should, we should be fine."
  *
- * ROSA'S REASON WAS NEVER ANSWERED, ONLY OUTVOTED: *"a ticket should be
- * created even when they are transferred and it should be searchable by phone
- * number."* A caller who gives up in hold music has no record anywhere, and
- * nobody knows to call them back.
+ * THE EXPLANATION IS ALREADY ON THE CALL: `QUEUE_CHOICE_WARNING` below tells
+ * the caller "nothing we've gone over transfers with you" before they choose,
+ * and it was written for the 09-13 no-ticket rule and never changed. The
+ * prompt never changed either ("Yes means the queue, no ticket and nothing
+ * kept"). From 09-15 to 10-01 the CODE filed anyway, at DIALING — so this is
+ * the code moving back into line with the words the caller hears.
  *
- * THE STATUS IS WHAT MAKES BOTH TRUE AT ONCE. `DIALING` with
- * `humanAnswerStatus = TRANSFERRED_TO_QUEUE` says exactly what happened: we
- * put them through and stopped being able to see. It is never `CONNECTED`, so
- * `humanHandoffOccurred` stays false and no staffer reads it as a
- * conversation that already happened — the one thing Rosa's ticket exists to
- * prevent, and the v20 rule this does not touch.
+ * THE HISTORY, because it flipped twice and the next reader will ask: 09-13
+ * no ticket (the queue answers at 36% and nobody works the voicemails); 09-15
+ * "yes to the v14 reversal", Rosa's file-it-anyway design, at DIALING so no
+ * staffer reads it as a conversation; 10-01 no ticket again. What the 09-15
+ * reversal bought — the accepted arm countable in `tickets.pcp_handoff_*` — is
+ * given back: count accepted transfers from `call_logs.runtime_outcome =
+ * 'transferred'` on the pcp lane, never from tickets, where they now read as
+ * a fall.
+ *
+ * ONE CASE STILL FILES, AND IT IS NOT AN EXCEPTION TO THE RULING. A queue that
+ * never picks up is answered with "I have your request recorded and the team
+ * will follow up" on a leg the agent no longer holds; a ticket is filed then
+ * so that sentence is true. A caller who hangs up while it rings files
+ * nothing — "if they drop off, their record is lost, their choice" (09-13).
+ * See `queueChoiceOwesATicket` in queueDialSettlement.ts.
+ *
+ * AND THE REDIRECT'S OWN SENTENCE CHANGES WITH IT: the approved TwiML line
+ * ends "I've taken your details down", which is false with nothing filed, so
+ * the transport drops that clause for this caller (`requestOnRecord: false`).
  *
  * ─────────────────────────────────────────────────────────────────────────
- * WHAT THE CHOICE STILL GOVERNS, AND IT IS NOT THE TICKET.
- *
- * Two behaviours keyed on "the caller chose the queue" are UNCHANGED, because
- * the operator reversed the filing rule and nothing else:
+ * WHAT THE CHOICE GOVERNS — THREE THINGS, NAMED AT THEIR OWN SITES.
  *
  *   1. THE EMPTY ROUND. A caller who said yes is asked nothing further —
  *      *"they asked for a person, get them to a person"* (2026-09-13). The
@@ -63,13 +68,15 @@
  *   2. THE SWEEP'S EXIT. Teardown does not file "CALLER HUNG UP BEFORE THE
  *      REQUEST WAS COMPLETE" behind somebody sitting in the queue where they
  *      asked to be.
+ *   3. THE FILING. No pre-dial write, no post-dial write, and a settle
+ *      callback that files only when the queue never picks up.
  *
- * `suppressesTicket` used to answer all three questions with one boolean.
- * That is the welding this file has been bitten by before — `connectsToHuman`
- * reading `defaultDisposition` welded the LENGTH OF THE INTAKE to WHETHER WE
- * DIAL, and flipping one silently moved the other. So the function is GONE
- * rather than changed to return false: every call site has to be re-read, and
- * the two that remain now ask `choseTheQueue`, which names what it decides.
+ * `suppressesTicket` used to answer all three with one boolean, and that is
+ * the welding this file has been bitten by before — `connectsToHuman` reading
+ * `defaultDisposition` welded the LENGTH OF THE INTAKE to WHETHER WE DIAL. So
+ * each consequence reads `choseTheQueue` at its own site: the ruling ties them
+ * together today, and a future one that splits them has three places to
+ * change rather than one boolean to untangle.
  *
  * ─────────────────────────────────────────────────────────────────────────
  * THE ONE THING THIS MODULE REFUSES TO INFER: SILENCE IS NOT CONSENT.
@@ -79,13 +86,12 @@
  * back — 42 of 75 date-of-birth refusals on 2026-09-08 were the LAST tool
  * event of their call.
  *
- * THE REVERSAL ABOVE CHANGED WHAT THE TRI-STATE PROTECTS, AND DID NOT MAKE IT
- * POINTLESS. It used to guard a lost request: a model that wandered off would
- * have had its silence read as yes, suppressing the ticket, and the request
- * would be gone with nothing anywhere. The ticket now files on every arm, so
- * that particular loss is closed by the filing rule rather than by this one.
+ * WHAT THE TRI-STATE PROTECTS, under the 2026-10-01 rule, is two things. An
+ * `accepted` reading suppresses the ticket again — so silence read as yes
+ * would lose a request with nothing written anywhere — and it REDIRECTS THE
+ * CALLER, which cannot be taken back.
  *
- * What is left is worse to get wrong, not better. An `accepted` reading is
+ * The redirect is the worse of the two to get wrong. An `accepted` reading is
  * what REDIRECTS THE CALLER — it ends the Media Stream, drops them into an
  * ACD that answers 36% of the time, and we let go of the leg. Reading silence
  * as consent would put a caller who never agreed into a hold queue we cannot
@@ -155,10 +161,10 @@ export function readQueueChoice(callerAcceptedQueue: boolean | undefined): Queue
 /**
  * Whether the caller chose the live queue over having us take it here.
  *
- * This decides what is ASKED and what TEARDOWN does — never whether a ticket
- * is filed. See the reversal note at the top of this file: since 2026-09-15
- * the ticket files on every arm, and a call site reaching for this to skip a
- * write is reintroducing the rule the operator withdrew.
+ * Since 2026-10-01 this decides what is ASKED, what TEARDOWN does, AND whether
+ * a ticket is filed — the operator's ruling ties all three to the one choice.
+ * See the note at the top of this file for the history and the one case that
+ * still files.
  */
 export function choseTheQueue(choice: QueueChoice): boolean {
   return choice === 'accepted';

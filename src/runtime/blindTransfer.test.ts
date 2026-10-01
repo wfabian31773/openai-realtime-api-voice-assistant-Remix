@@ -21,6 +21,7 @@ import { describe, it, expect } from "vitest";
 import {
   BLIND_TRANSFER_NO_ANSWER,
   BLIND_TRANSFER_WARNING,
+  BLIND_TRANSFER_WARNING_UNRECORDED,
   QUEUE_DIAL_TIMEOUT_SECONDS,
   performBlindTransfer,
 } from "./blindTransfer";
@@ -93,7 +94,7 @@ describe("the caller is told, in the operator's own words", () => {
    * rather than in a prompt.
    */
   it("neither copy claims availability or asks the caller to ring again", () => {
-    for (const copy of [BLIND_TRANSFER_WARNING, BLIND_TRANSFER_NO_ANSWER]) {
+    for (const copy of [BLIND_TRANSFER_WARNING, BLIND_TRANSFER_WARNING_UNRECORDED, BLIND_TRANSFER_NO_ANSWER]) {
       const said = copy.toLowerCase();
       expect(said).not.toMatch(/busy/);
       expect(said).not.toMatch(/shortly|right with you|as soon as they/);
@@ -102,6 +103,46 @@ describe("the caller is told, in the operator's own words", () => {
     // And the no-answer line still promises the follow-up, which is the half
     // that makes the refusal survivable.
     expect(BLIND_TRANSFER_NO_ANSWER.toLowerCase()).toMatch(/follow up with you/);
+  });
+});
+
+/**
+ * A CALLER WITH NOTHING FILED IS NOT TOLD THEIR DETAILS WERE TAKEN DOWN.
+ *
+ * Operator ruling, 2026-10-01: a PCP caller who chooses the live queue gets no
+ * ticket. The approved sentence's third clause — "I've taken your details down,
+ * so they have them either way" — is then false, and it plays on a leg the
+ * agent no longer holds, so nothing can take it back. The lane says so per dial
+ * with `requestOnRecord: false`; anything else keeps the approved sentence.
+ */
+describe("the warning only claims a record that exists", () => {
+  it("drops the details clause when nothing is filed", async () => {
+    const { deps, redirects } = harness();
+    await performBlindTransfer(
+      { callerCallSid: "CAcaller", destination: "+17149564300", requestOnRecord: false },
+      deps,
+    );
+    expect(redirects[0].warning).toBe(BLIND_TRANSFER_WARNING_UNRECORDED);
+    expect(redirects[0].warning.toLowerCase()).not.toMatch(/details|taken|recorded|either way/);
+  });
+
+  it("keeps the approved sentence when a ticket exists, and when the lane says nothing", async () => {
+    for (const requestOnRecord of [true, undefined]) {
+      const { deps, redirects } = harness();
+      await performBlindTransfer(
+        { callerCallSid: "CAcaller", destination: "+17149564300", requestOnRecord },
+        deps,
+      );
+      expect(redirects[0].warning, `requestOnRecord=${requestOnRecord}`).toBe(BLIND_TRANSFER_WARNING);
+    }
+  });
+
+  /**
+   * NOTHING NEW IS SAID — only a clause is withheld. Writing new copy to a
+   * caller is the operator's; removing a false clause is not new copy.
+   */
+  it("is the approved sentence's first two clauses, word for word", () => {
+    expect(BLIND_TRANSFER_WARNING.startsWith(BLIND_TRANSFER_WARNING_UNRECORDED.replace(/\.$/, ""))).toBe(true);
   });
 });
 

@@ -590,7 +590,7 @@ import { callEnvironment } from "./callRecord";
  * `noIvrMemoryIsACandidate.test.ts` drives the real agent on each.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v86-one-person-on-the-number-is-certain-20261001";
+  "voice-runtime-v87-one-call-one-ticket-20261001";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

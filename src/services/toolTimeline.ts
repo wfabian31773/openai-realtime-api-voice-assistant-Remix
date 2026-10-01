@@ -304,6 +304,13 @@ function summarizeResult(tool: string, resultJson: string): Record<string, unkno
     'refused',
     'ticket_filed',
     /**
+     * ONE CALL, ONE TICKET (2026-10-01): a PCP filing tool called again on a
+     * call whose request is already filed through create-ticket answers with
+     * the existing number and POSTs nothing. A boolean, no PHI — it is what
+     * makes "the double ticket stopped" a count rather than a console line.
+     */
+    'alreadyFiled',
+    /**
      * WHAT THE IDENTITY CARRY-FORWARD WRITE DID: `stored` | `merged` |
      * `refused_sid` | `refused_name`, absent when the branch was not reached.
      *

@@ -30,7 +30,7 @@ import { asksForAPerson } from '../pcp/explicitAsk';
 import { preTransferGaps, preTransferQuestion } from '../pcp/preTransferIntake';
 import { QUEUE_CHOICE_WARNING, readQueueChoice, choseTheQueue } from '../pcp/queueChoice';
 import { defaultDispositionFor, handoffNotAttemptedReason } from '../pcp/handoffNotAttempted';
-import { handoffAfterQueueDial } from '../pcp/queueDialSettlement';
+import { handoffAfterQueueDial, queueChoiceOwesATicket } from '../pcp/queueDialSettlement';
 import { callerLines, saidMoreThanTheirOwnIdentity } from '../runtime/requestSweep';
 import { NARRATIVE_MAX_CHARS } from '../pcp/pcpTicketing';
 import { persistSettlement, trimToBudget } from '../pcp/queueDialSettlement';
@@ -928,6 +928,25 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
       // what routes the request to the right desk. Everything else degrades.
       if (!state.callPurpose) return refusePcp('call_purpose_required');
       /**
+       * ONE CALL, ONE TICKET — operator, 2026-10-01: "fix the PCP double ticket."
+       *
+       * Every door below decides WHERE a request goes, and they were re-run on
+       * every invocation, so the second call — most often the enrichment re-file
+       * this tool itself asks for — could pick a different door than the first
+       * and open a second ticket. See `ticketFiled` in director.ts for the 61
+       * calls in two weeks that did exactly that.
+       *
+       * The doors are for the FIRST filing. After it:
+       *   - filed through create-ticket: nothing to POST. That endpoint has no
+       *     upsert, so any POST is a new ticket. Hand the number back.
+       *   - filed through the PCP endpoint: skip every routing door and land on
+       *     `submitPcpTicket`, which upserts on callSid — the enrichment v37
+       *     always said it was.
+       */
+      const filedAlready = state.ticketFiled;
+      if (filedAlready?.door === 'create_ticket') return alreadyFiledOnThisCall(callId, filedAlready.ticketNumber);
+      const enrichingTheTicket = filedAlready?.door === 'pcp';
+      /**
        * WHO IS CALLING, WHO IT IS ABOUT, HOW TO REACH THEM.
        *
        * Operator, 2026-08-17: "we should not create a ticket unless we have
@@ -986,7 +1005,7 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
       // The latch, not just the purpose — a patient whose call was later
       // reclassified is still a patient, and their request still does not
       // belong sitting in department 18. Same reason as director.next().
-      if (state.callPurpose === 'patient_caller' || state.callerIsThePatient) {
+      if (!enrichingTheTicket && (state.callPurpose === 'patient_caller' || state.callerIsThePatient)) {
         const [{ detectCrossQueue }, { otherReasonFor }, { ticketingApiClient }, { sanitizeForSms }] =
           await Promise.all([
             import('../tools/queueRouting'),
@@ -1086,6 +1105,7 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
           });
         }
         pcpDirector.recordDisposition(callId, 'CREATE_TASK');
+        pcpDirector.markTicketFiled(callId, 'create_ticket', patientResult.ticketNumber);
         console.info(
           `[PCP] patient caller filed to ${redirect ? redirect.departmentName : 'PCP Support'} ` +
             `(dept ${redirect?.departmentId ?? PCP_DEPARTMENT_ID}) as ${patientResult.ticketNumber}`,
@@ -1140,7 +1160,7 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
        */
       const recordsByNarrative =
         (await import('../tools/medicalRecordsTaxonomy')).mentionsRecordsIntent(narrative);
-      const deliveryAsk = deliveryAskFor(state, recordsByNarrative);
+      const deliveryAsk = enrichingTheTicket ? undefined : deliveryAskFor(state, recordsByNarrative);
       if (deliveryAsk && ticketBlocksUsed < MAX_BLOCKS) {
         ticketBlocksUsed += 1;
         return refusePcp(`missing_required_field:${deliveryAsk.field}`, {
@@ -1162,11 +1182,13 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
        * records request, or the caller cannot be established as a professional
        * one, or Medical Records refuses and the strike budget is spent.
        */
-      const toMedicalRecords = await fileToMedicalRecords(callId, metadata, state, narrative, {
-        route: 'professional',
-        floorReached: ticketBlocksUsed >= MAX_BLOCKS,
-        spendBlock: () => (ticketBlocksUsed += 1),
-      });
+      const toMedicalRecords = enrichingTheTicket
+        ? null
+        : await fileToMedicalRecords(callId, metadata, state, narrative, {
+            route: 'professional',
+            floorReached: ticketBlocksUsed >= MAX_BLOCKS,
+            spendBlock: () => (ticketBlocksUsed += 1),
+          });
       if (toMedicalRecords) return toMedicalRecords as never;
 
       /**
@@ -1178,9 +1200,11 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
        * operational one. Before `submitPcpTicket` because that is the floor
        * this route falls back to; see `fileSchedulingToHub`.
        */
-      const toSchedulingHub = await fileSchedulingToHub(
-        callId, metadata, state, narrative, disposition, urgency, missing, transferAwaitingTicket,
-      );
+      const toSchedulingHub: HubRouteOutcome = enrichingTheTicket
+        ? { filed: null }
+        : await fileSchedulingToHub(
+            callId, metadata, state, narrative, disposition, urgency, missing, transferAwaitingTicket,
+          );
       if (toSchedulingHub.filed) return toSchedulingHub.filed as never;
       // Only ever set when the Hub's answer was AMBIGUOUS — see the note on
       // that branch. A proven 4xx carries nothing, because warning a staffer
@@ -1193,6 +1217,7 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
       );
       if (!response.success) return response;
       pcpDirector.recordDisposition(callId, disposition);
+      pcpDirector.markTicketFiled(callId, 'pcp', response.ticketNumber);
       /**
        * THE REQUEST IS SAFE, SO NOW WE MAY ASK FOR THE CREDENTIALS — and this
        * tool has to hand the question over, because nothing else will.
@@ -1360,7 +1385,10 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
         const fallback = await submitPcpTicket(
           buildPayload(metadata, state, 'CREATE_TASK', narrative, urgency, undefined, 'handoff_not_eligible', missing),
         );
-        if (fallback.success) pcpDirector.recordDisposition(callId, 'CREATE_TASK');
+        if (fallback.success) {
+          pcpDirector.recordDisposition(callId, 'CREATE_TASK');
+          pcpDirector.markTicketFiled(callId, 'pcp', fallback.ticketNumber);
+        }
         // Which failure copy: the one that CONFIRMS a number, or the one that
         // ASKS for one. `callbackNumber` is seeded from caller ID above, so it
         // is empty only when the ANI was withheld, blocked or non-E.164 — and
@@ -1505,13 +1533,13 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
        * caller never asked for — still gets the round, unchanged.
        */
       /**
-       * ONE NAME, ONE JOB. This decides what we ASK — not whether we FILE.
-       *
-       * It was `transferWithoutATicket` and it answered both questions with
-       * one boolean until the operator reversed the filing half on
-       * 2026-09-15. Keeping the old name while only one of its two meanings
-       * survived is how `connectsToHuman` welded the length of the intake to
-       * whether we dial; see the reversal note in `queueChoice.ts`.
+       * ONE CHOICE, THREE CONSEQUENCES — and since 2026-10-01 they are the
+       * operator's, stated together: what we ASK (nothing more), what teardown
+       * does (no sweep behind them), and whether we FILE (no, unless the queue
+       * never picks up). From 09-15 to 10-01 this decided only the first two;
+       * see the history in `queueChoice.ts`. Each consequence still reads this
+       * one value at its own site, so a future ruling that splits them again
+       * has three places to change rather than one boolean to untangle.
        */
       const callerChoseTheQueue = choseTheQueue(choice);
       if (!callerChoseTheQueue && !preTransferAskUsed) {
@@ -1531,17 +1559,24 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
         ? state
         : { ...state, callPurpose: 'service_inquiry' as const };
       /**
-       * THE PRE-DIAL TICKET, ON EVERY PATH — Rosa's design, restored by the
-       * operator on 2026-09-15 ("yes to the v14 reversal").
+       * THE PRE-DIAL TICKET — EXCEPT FOR A CALLER WHO CHOSE THE QUEUE.
        *
-       * This was `transferWithoutATicket ? undefined : ...` from 09-13, so a
-       * caller who chose the queue was dialled with nothing written anywhere.
-       * `initial` is now always defined, which means the two gates below —
-       * "the request is on record" and "the call is still live" — protect the
-       * accepted arm again as well. That is not a side effect to tolerate, it
-       * is the invariant those gates exist for: CAa37f1a42 is a caller told
-       * "give me one moment while I connect you" and connected to nobody,
-       * with no record of the request anywhere.
+       * Operator ruling, 2026-10-01, withdrawing the 2026-09-15 reversal:
+       * *"if the caller chooses to go into the queue, do not create the ticket
+       * ... if you choose the queue, we dont generate a ticket. As long as we
+       * are explaining this on the call as we should, we should be fine."*
+       *
+       * The explanation is `QUEUE_CHOICE_WARNING`, which the caller has just
+       * heard and said yes to: "nothing we've gone over transfers with you".
+       * It was written for the 2026-09-13 no-ticket rule and never changed, and
+       * the prompt still says "Yes means the queue, no ticket and nothing kept"
+       * — so the code is what moves back into line, not the words.
+       *
+       * The payload is still BUILT on every path, because the settle callback
+       * below files it if the queue never picks up — see
+       * `queueChoiceOwesATicket`. It is only SENT here for everybody else:
+       * an unanswered choice and a transfer nobody asked for keep the durable
+       * ticket and both gates below, unchanged (CAa37f1a42).
        *
        * `REQUESTED` is what it says before the dial. The line below turns it
        * into DIALING / TRANSFERRED_TO_QUEUE once the redirect goes out, and
@@ -1550,7 +1585,8 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
       const preDialPayload = buildPayload(metadata, handoffState, 'HAND_OFF', narrative, urgency, {
         requested: true, requestedAt, attempted: false, finalStatus: 'REQUESTED',
       }, undefined, missing);
-      const initial = await submitPcpTicket(preDialPayload);
+      const initial = callerChoseTheQueue ? undefined : await submitPcpTicket(preDialPayload);
+      if (initial?.success) pcpDirector.markTicketFiled(callId, 'pcp', initial.ticketNumber);
       /**
        * THE PRECONDITION IS "THE REQUEST IS ON RECORD" — NOT "THIS WRITE
        * RETURNED 200". CAa37f1a42, 2026-09-04 16:11.
@@ -1633,14 +1669,16 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
         );
       }
       /**
-       * THE INVARIANT NOW HAS A SECOND SATISFIER, AND ONLY ONE.
+       * THE INVARIANT HAS A SECOND SATISFIER AGAIN, AND ONLY ONE (2026-10-01).
        *
        * The gate above exists so we never dial a caller whose request is
        * recorded nowhere — CAa37f1a42, where a coordinator was told "give me
        * one moment while I connect you" and connected to nobody, with the
        * refusal reading its own failed write instead of the invariant. That
        * invariant is unchanged for every caller who did not choose the queue:
-       * `initial` is defined for them, so both branches above still run.
+       * `initial` is defined for them, so both branches above still run. For a
+       * caller who did, `initial` is undefined and both branches are skipped
+       * by construction.
        *
        * What the operator's ruling changes is not the invariant but who it
        * protects. A caller on this path was told, in the turn immediately
@@ -1676,7 +1714,34 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
          * this process holds those fields; it is the same payload the call
          * already built, and the entry is dropped the moment the dial settles.
          */
-        onBlindDialSettled: initial.success
+        onBlindDialSettled: callerChoseTheQueue
+          ? async (settlement) => {
+              /**
+               * NOTHING TO UPDATE, AND ONE CASE TO FILE. No ticket exists for
+               * this caller — that is the ruling — so a queue that picks up
+               * writes nothing at all. A queue that never does leaves the
+               * caller hearing "I have your request recorded", so THAT is when
+               * the ticket the ruling withheld is owed; see
+               * `queueChoiceOwesATicket` for why, and for the cancel exception.
+               * The app INSERTS on an unknown callSid, which is exactly right
+               * here: there is no earlier row to collide with.
+               */
+              if (!queueChoiceOwesATicket(settlement)) {
+                console.info(
+                  `[PCP] queue dial on the caller's own choice settled ${settlement.outcome} — no ticket, by ruling (${callId})`,
+                );
+                return;
+              }
+              const { handoff, disposition } = handoffAfterQueueDial(settlement, { requestedAt, attemptedAt });
+              const res = await persistSettlement(
+                () => submitPcpTicket({ ...preDialPayload, disposition, handoff }),
+              );
+              console.info(
+                `[PCP] the queue the caller chose never picked up (${settlement.outcome}) — ticket ` +
+                  `${res.ok ? `filed on attempt ${res.attempts}` : 'NOT filed'} so the spoken line is true (${callId})`,
+              );
+            }
+          : initial?.success
           ? async (settlement) => {
               // No `destination` here on purpose: at registration time the
               // dial has not happened. `settlement.dialedNumber` carries the
@@ -1709,6 +1774,15 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
               );
             }
           : undefined,
+        /**
+         * WHETHER THE REDIRECT'S OWN SENTENCE MAY SAY THE DETAILS ARE TAKEN
+         * DOWN. `BLIND_TRANSFER_WARNING` ends "I've taken your details down, so
+         * they have them either way" — true when a ticket exists, false for a
+         * caller who chose the queue and has nothing filed. A ticket filed
+         * EARLIER on the call (they filed, then asked for a person) makes it
+         * true again, which is why this is not simply `!callerChoseTheQueue`.
+         */
+        requestOnRecord: requestIsOnRecord || Boolean(initial?.success),
         callerRequestedHuman: askedForAPerson,
         callerType: state.callPurpose,
         reason: narrative,
@@ -1827,14 +1901,15 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
         ? rawFinalState
         : { ...rawFinalState, callPurpose: 'service_inquiry' as const };
       /**
-       * THE POST-DIAL WRITE, ON EVERY PATH — the other half of the reversal.
+       * THE POST-DIAL WRITE, ON EVERY PATH BUT ONE.
        *
-       * This was `transferWithoutATicket && ok ? undefined : ...`, so an
-       * accepted transfer wrote nothing here either and the arm was INVISIBLE
-       * in `tickets` — which is the instrument CLAUDE.md says to measure PCP
-       * transfers from, and never `call_logs`. The 09-13 baseline (72
-       * attempted, 12 reached a human) could not be continued past that line
-       * for the callers it applied to.
+       * From 2026-09-15 to 2026-10-01 this ran for an accepted transfer too, so
+       * the queue arm was countable in `tickets`. The operator withdrew that on
+       * 2026-10-01 (see the pre-dial note above), and the cost is the one the
+       * 09-13 ruling already carried: accepted transfers are INVISIBLE in
+       * `tickets.pcp_handoff_*`. Count them from `call_logs.runtime_outcome =
+       * 'transferred'` on the pcp lane, and from the `[PCP] handed to the queue`
+       * console line — never from tickets, where they will read as a fall.
        *
        * The fields carry Rosa's vocabulary exactly, and none of it is new:
        * `handedToQueue` gives `DIALING` with `humanAnswerStatus =
@@ -1847,7 +1922,14 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
        * The app upserts on `callSid`, so this is an UPDATE of the pre-dial
        * row rather than a second ticket.
        */
-      const updated = await submitPcpTicket(buildPayload(metadata, finalState, finalDisposition, narrative, urgency, {
+      /**
+       * AND NOTHING AFTER IT EITHER, ON THE SAME RULING — but only when the
+       * caller actually went. A redirect that FAILED leaves them on the line
+       * with the agent, not in the queue they chose: the exemption above is
+       * withdrawn, and this write files the CREATE_TASK `handoff_no_answer`
+       * then tells them about ("I have your request recorded").
+       */
+      const updated = callerChoseTheQueue && ok ? undefined : await submitPcpTicket(buildPayload(metadata, finalState, finalDisposition, narrative, urgency, {
         requested: true,
         requestedAt,
         attempted: true,
@@ -1861,10 +1943,13 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
         failureReason: outcome && !outcome.ok ? outcome.reason : undefined,
         fallbackTicketStatus: ok ? undefined : 'OPEN',
       }, outcome && !outcome.ok ? outcome.reason : undefined, finalMissing));
-      if (updated?.success) pcpDirector.recordDisposition(callId, finalDisposition);
+      if (updated?.success) {
+        pcpDirector.recordDisposition(callId, finalDisposition);
+        pcpDirector.markTicketFiled(callId, 'pcp', updated.ticketNumber);
+      }
       if (callerChoseTheQueue && ok) {
         console.info(
-          `[PCP] handed to the queue on the caller's own choice — ticket filed at ${finalStatus}, not CONNECTED (${callId})`,
+          `[PCP] handed to the queue on the caller's own choice — no ticket filed, by ruling 2026-10-01 (${callId})`,
         );
       }
       const settled = {
@@ -1910,6 +1995,15 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
     description: 'Create an isolated PCP manual-review task only for an explicit request for copies or release of a patient medical record. Never use for peer-to-peer or medical-group requests.',
     parameters: z.object({ narrative: z.string().min(1).max(12000) }),
     execute: async ({ narrative }) => {
+      /**
+       * ONE CALL, ONE TICKET — the same rule as create_pcp_task, read first,
+       * before this tool reclassifies anything. A request already filed through
+       * create-ticket gets its number back; one already on the PCP endpoint is
+       * enriched there rather than routed to Medical Records as a second ticket.
+       */
+      const filedAlready = pcpDirector.get(callId).ticketFiled;
+      if (filedAlready?.door === 'create_ticket') return alreadyFiledOnThisCall(callId, filedAlready.ticketNumber);
+      const enrichingTheTicket = filedAlready?.door === 'pcp';
       pcpDirector.update(callId, { callPurpose: 'patient_medical_records_request' });
       /**
        * THE 27-SECOND TICKET, and why this tool now waits.
@@ -2018,17 +2112,22 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
        * routing change must not cost a filing, and a request in the wrong
        * department is recoverable while a request nowhere is not.
        */
-      const toMedicalRecords = await fileToMedicalRecords(callId, metadata, state, narrative, {
-          route: 'patient',
-          floorReached: ticketBlocksUsed >= MAX_BLOCKS,
-          spendBlock: () => (ticketBlocksUsed += 1),
-        });
+      const toMedicalRecords = enrichingTheTicket
+        ? null
+        : await fileToMedicalRecords(callId, metadata, state, narrative, {
+            route: 'patient',
+            floorReached: ticketBlocksUsed >= MAX_BLOCKS,
+            spendBlock: () => (ticketBlocksUsed += 1),
+          });
       if (toMedicalRecords) return toMedicalRecords as never;
 
       const response = await submitPcpTicket(
         buildPayload(metadata, state, 'CREATE_TASK', narrative, 'high', undefined, 'patient_medical_records_request_isolated', missing),
       );
-      if (response.success) pcpDirector.recordDisposition(callId, 'CREATE_TASK');
+      if (response.success) {
+        pcpDirector.recordDisposition(callId, 'CREATE_TASK');
+        pcpDirector.markTicketFiled(callId, 'pcp', response.ticketNumber);
+      }
       /**
        * SAY SOMETHING BEFORE THE LINE GOES QUIET.
        *
@@ -2119,6 +2218,29 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
  * written out by hand is how two routing rules start disagreeing.
  */
 const PCP_DEPARTMENT_ID = 18;
+
+/**
+ * THE ANSWER TO A SECOND FILING ON A CALL THAT ALREADY HAS ITS TICKET THROUGH
+ * CREATE-TICKET. Nothing is POSTed: that endpoint has no upsert, so a POST is
+ * a new ticket, which is the double ticket this exists to stop.
+ *
+ * `success: true` because the request IS filed — telling the model otherwise
+ * would send it round again. `alreadyFiled` reaches the timeline so the guard
+ * firing is a count rather than a console line.
+ */
+function alreadyFiledOnThisCall(callId: string, ticketNumber: string | undefined): Record<string, unknown> {
+  console.info(`[PCP] one call, one ticket — already filed as ${ticketNumber ?? '(number not returned)'}, nothing new created (${callId})`);
+  return {
+    success: true,
+    alreadyFiled: true,
+    ...(ticketNumber ? { ticketNumber } : {}),
+    guidance:
+      `This request is ALREADY FILED on this call${ticketNumber ? ` as ${ticketNumber}` : ''} — nothing new was ` +
+      'created and you must not file it again. If you have not read the number back, read it now. Anything the ' +
+      'caller added is on the call recording and reaches the team with the transcript after the call. Ask if there ' +
+      'is anything else before ending the call.',
+  };
+}
 
 /**
  * A SCHEDULING REQUEST REACHES THE TEAM THAT SCHEDULES — standing instruction
@@ -2388,6 +2510,7 @@ async function fileSchedulingToHub(
   }
 
   pcpDirector.recordDisposition(callId, 'CREATE_TASK');
+  pcpDirector.markTicketFiled(callId, 'create_ticket', result.ticketNumber);
   console.info(
     `[PCP] ${intent} appointment filed to the HVA Hub (dept ${redirect.departmentId}, ` +
       `reason ${redirect.requestReasonId}) as ${result.ticketNumber}`,
@@ -2692,6 +2815,7 @@ async function fileToMedicalRecords(
   const filedNumber = recordsResult.ticket_number ?? recordsResult.ticketNumber;
 
   pcpDirector.recordDisposition(callId, 'CREATE_TASK');
+  pcpDirector.markTicketFiled(callId, 'create_ticket', filedNumber);
   console.info(
     `[PCP] records request filed to Medical Records as ${filedNumber} ` +
       `(${recordsHit.requestReason}, requester ${recordsResult.requester_type}, ` +

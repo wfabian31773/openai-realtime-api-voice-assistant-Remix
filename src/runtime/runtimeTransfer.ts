@@ -527,6 +527,11 @@ export function createRuntimeTransfer(options: RuntimeTransferOptions): RuntimeT
               {
                 callerCallSid: metadata.callSid,
                 destination: policy.allowed ? policy.destination : null,
+                // Read off the side channel like the rest, at invoke time: the
+                // lane decides per dial whether a ticket exists to mention.
+                ...(details?.requestOnRecord !== undefined
+                  ? { requestOnRecord: details.requestOnRecord }
+                  : {}),
               },
               {
                 twilio: ops,
