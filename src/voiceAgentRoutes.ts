@@ -42,7 +42,6 @@ import { director, directorEnabledFor, type DirectorAction } from './director/di
 import { getEnvironmentConfig, resolveAppDomain } from './config/environment';
 import { CallDiagnostics } from './services/callDiagnostics';
 import {
-  preferredCallbackNumber,
   resolveClinicalTransferNumber,
   resolveHandoffDestination,
   resolvePcpDialSequence,
@@ -1152,6 +1151,12 @@ const aircallDTMFSent = new Set<string>();
 
 // Import escalation details from shared store (avoids circular dependency with noIvrAgent.ts)
 import { escalationDetailsMap, type EscalationDetails } from './services/escalationStore';
+import {
+  buildUrgentTransferSms,
+  urgentAlertTime,
+  urgentFallbackTicketParams,
+  type UrgentTransferSmsOptions,
+} from './services/urgentTransferAlert';
 import { markCallConcluded, getCallConclusion, linkConferenceToCall, callIdForConference } from './services/callConclusion';
 import { filesTickets } from './config/agentCapabilities';
 import { recordCallerSpeech, releaseCallerSpeech } from './services/symptomCorroboration';
@@ -1230,50 +1235,20 @@ async function fileUrgentHandoffFallbackTicket(
   console.warn(`[HANDOFF] Creating urgent fallback ticket — ${ctx.why}`);
   try {
     const { SyncAgentService } = await import('./services/syncAgentService');
-    const { AFTER_HOURS_DEPARTMENT_ID, TRIAGE_OUTCOME_MAPPINGS } = await import('./config/afterHoursTicketing');
-
-    const urgentMapping = TRIAGE_OUTCOME_MAPPINGS['sudden_vision_loss']; // generic urgent
-    const patientFirst = escalationDetails?.patientFirstName || 'Unknown';
-    const patientLast = escalationDetails?.patientLastName || 'Caller';
-    // The number to CALL BACK is the one the patient gave, when they gave one
-    // AND it is dialable. It is frequently not the phone they are calling from
-    // — a spouse's mobile, a nurse's station, a caller on a landline who wants
-    // their cell — but it arrives as free text, so an unvalidated preference
-    // can swap a good caller ID for a fragment. The policy decides; see
-    // preferredCallbackNumber (standing instruction 12; Codex review, PR #238).
-    // `callData.callerPhone` below keeps the true inbound number regardless, so
-    // nothing loses the provenance.
-    const rawPhone = preferredCallbackNumber({
-      collected: escalationDetails?.callbackNumber,
-      callerId: callerID,
-    }) || '';
-    const digits = rawPhone.replace(/\D/g, '');
-    const formattedPhone = digits.length === 10
-      ? `+1${digits}`
-      : rawPhone.startsWith('+') ? rawPhone : `+${digits}`;
-
-    const descParts: string[] = [ctx.why, 'Please call the patient back immediately.'];
-    if (ctx.dialTarget) descParts.push(`Attempted transfer to: ${ctx.dialTarget}`);
-    if (escalationDetails?.reason) descParts.push(`Reason: ${escalationDetails.reason}`);
-    if (escalationDetails?.symptomsSummary) descParts.push(`Symptoms: ${escalationDetails.symptomsSummary}`);
-
     const conferenceName = getConferenceName(openAiCallId);
-    const ticketResult = await SyncAgentService.createTicket({
-      departmentId: AFTER_HOURS_DEPARTMENT_ID,
-      requestTypeId: urgentMapping.requestTypeId,
-      requestReasonId: urgentMapping.requestReasonId,
-      patientFirstName: patientFirst,
-      patientLastName: patientLast,
-      patientPhone: formattedPhone,
-      description: descParts.join('\n'),
-      priority: 'urgent',
-      callData: {
+    // The payload lives in one module both pipelines read
+    // (src/services/urgentTransferAlert.ts) — the runtime files the same ticket.
+    const ticketResult = await SyncAgentService.createTicket(
+      urgentFallbackTicketParams({
+        why: ctx.why,
+        dialTarget: ctx.dialTarget,
+        escalationDetails,
+        callerId: callerID,
         callSid: conferenceName ? getTwilioCallSid(conferenceName) : undefined,
-        callerPhone: callerID || undefined,
         // Label with the agent actually on the call, not a hardcoded slug.
         agentUsed: callMetadataForDB.get(openAiCallId)?.agentSlug || 'after-hours',
-      },
-    });
+      }),
+    );
 
     if (ticketResult.success) {
       console.log('[HANDOFF] ✓ Urgent fallback ticket created:', ticketResult.ticketNumber);
@@ -1300,30 +1275,7 @@ async function fileUrgentHandoffFallbackTicket(
  * Callers pass whatever context they have; escalation details are included
  * when the call got far enough to record them.
  */
-function sendUrgentTransferSms(opts: {
-  callerNumber?: string;
-  escalationDetails?: EscalationDetails;
-  /** Extra context line for fallback paths, e.g. why this is a direct dial. */
-  note?: string;
-  /**
-   * What this alert is actually announcing.
-   *
-   * 'transfer' (default) — a leg is being dialled TO THIS RECIPIENT; their
-   * phone is about to ring and they should pick up.
-   * 'callback' — nothing was dialled and nothing will be. The recipient has to
-   * call out. Sending the 'transfer' wording here told them to expect an
-   * inbound call that was never coming, so they would wait instead of dialling
-   * the urgent patient (Codex review, PR #238).
-   * 'routed' — the call is ringing SOMEWHERE ELSE, at the office queue the
-   * rules engine chose. The recipient is being kept informed, not summoned:
-   * during business hours the office takes it, and telling the on-call phone
-   * "connecting patient to you now" left it waiting on a call ringing in
-   * another building (Codex review, PR #238).
-   */
-  kind?: 'transfer' | 'callback' | 'routed';
-  /** For 'routed': where it actually went, e.g. "Glendale Front". */
-  routedTo?: string;
-}): void {
+function sendUrgentTransferSms(opts: UrgentTransferSmsOptions): void {
   const to = envConfig.twilio.urgentNotificationNumber;
   const from = envConfig.twilio.phoneNumber;
   if (!to || !from) {
@@ -1333,38 +1285,9 @@ function sendUrgentTransferSms(opts: {
   (async () => {
     try {
       const client = twilioClient ?? (twilioClient = await getTwilioClient());
-      const callTime = new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true, timeZone: 'America/Los_Angeles' });
-      const d = opts.escalationDetails;
-
-      const callbackOnly = opts.kind === 'callback';
-      const routedElsewhere = opts.kind === 'routed';
-      let smsBody = callbackOnly
-        ? `📵 NO TRANSFER — CALL THIS PATIENT - ${callTime}\n`
-        : routedElsewhere
-          ? `🏥 URGENT — ROUTED TO OFFICE - ${callTime}\n`
-          : `📞 INCOMING TRANSFER - ${callTime}\n`;
-      smsBody += `From: ${opts.callerNumber || 'Unknown'}\n`;
-      if (opts.note) {
-        smsBody += `\n⚠️ ${opts.note}\n`;
-      }
-      if (d) {
-        if (d.callerType === 'healthcare_provider' && d.providerInfo) {
-          smsBody += `\n👨‍⚕️ PROVIDER CALL\nProvider: ${d.providerInfo}\n`;
-        } else if (d.callerType === 'patient_urgent') {
-          smsBody += `\n🚨 URGENT PATIENT\n`;
-        }
-        if (d.patientFirstName) smsBody += `Patient: ${d.patientFirstName} ${d.patientLastName || ''}\n`;
-        if (d.patientDob) smsBody += `DOB: ${d.patientDob}\n`;
-        if (d.callbackNumber) smsBody += `Callback: ${d.callbackNumber}\n`;
-        if (d.reason) smsBody += `\nReason: ${d.reason}\n`;
-        if (d.symptomsSummary) smsBody += `Symptoms: ${d.symptomsSummary}\n`;
-      }
-      smsBody += callbackOnly
-        ? `\n📱 Nobody is being connected to you. Please call this patient back now.`
-        : routedElsewhere
-          ? `\n📱 Ringing ${opts.routedTo || 'the office queue'} — not your phone. ` +
-            `For your awareness; no action needed unless they do not pick it up.`
-          : `\n📱 Connecting patient to you now...`;
+      // The text itself lives in one module both pipelines read
+      // (src/services/urgentTransferAlert.ts) — the runtime sends the same words.
+      const smsBody = buildUrgentTransferSms(opts, urgentAlertTime());
 
       await client.messages.create({ body: smsBody, from, to });
       console.log('[HANDOFF] ✓ SMS notification sent to', to);

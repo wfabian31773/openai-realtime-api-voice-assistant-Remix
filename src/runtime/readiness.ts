@@ -589,8 +589,19 @@ import { callEnvironment } from "./callRecord";
  * `callerMemoryService.buildContextForPrompt`, so both pipelines get it;
  * `noIvrMemoryIsACandidate.test.ts` drives the real agent on each.
  */
+/**
+ * v88 — THE ON-CALL TEXT BEFORE THE RING. The old core texts
+ * URGENT_NOTIFICATION_NUMBER who is calling and why before a clinical transfer
+ * rings the on-call phone, and files an urgent After Hours ticket when nobody
+ * takes it. The runtime did neither, and the after-hours line moved here at
+ * ~00:23 UTC on 2026-10-01: `CA3a8fd9cc0f2f79eae30f5785ceba6d22` (2026-10-02
+ * 00:15 UTC) rang the on-call phone 40 seconds with no text and left no
+ * ticket. Both now run in `runtimeTransfer.ts` from one shared copy of the
+ * words (`services/urgentTransferAlert.ts`); `urgentTransferAlerts.test.ts`
+ * pins the order (text, then dial) and the ticket on a dial that rang out.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v87-one-call-one-ticket-20261001";
+  "voice-runtime-v88-the-on-call-text-before-the-ring-20261002";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

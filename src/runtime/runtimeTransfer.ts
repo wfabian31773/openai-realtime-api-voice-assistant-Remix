@@ -34,6 +34,8 @@ import {
 } from "./transferOutcomeLog";
 import { ACCEPT_WINDOW_MS, conferenceNameFor, performWarmTransfer } from "./warmTransfer";
 import { performBlindTransfer } from "./blindTransfer";
+import { defaultUrgentTransferAlerts, type UrgentTransferAlerts } from "./urgentTransferAlerts";
+import { URGENT_TRANSFER_NOT_ANSWERED } from "../services/urgentTransferAlert";
 import {
   handleBlindDialResult,
   type PendingBlindDial,
@@ -114,6 +116,15 @@ export interface RuntimeTransferOptions {
    * rest the only proof of a write on.
    */
   persistOutcome?: (callerCallSid: string, outcome: RuntimeTransferOutcome) => void;
+  /**
+   * The heads-up text before a clinical dial and the urgent ticket after one
+   * that rang out. Injected for tests; production gets the env-built sender in
+   * `urgentTransferAlerts.ts`. A SEAM for the same reason `persistOutcome` is:
+   * both are fire-and-forget, and a test that cannot see them cannot tell a
+   * wired alert from a missing one — which is exactly how the after-hours line
+   * moved here on 2026-10-01 without either.
+   */
+  urgentAlerts?: UrgentTransferAlerts;
   log?: (line: string) => void;
 }
 
@@ -405,6 +416,7 @@ export function createRuntimeTransfer(options: RuntimeTransferOptions): RuntimeT
   });
 
   const ops = options.ops ?? defaultOps(env, log);
+  const urgentAlerts = options.urgentAlerts ?? defaultUrgentTransferAlerts(env, log);
   const accepts = new TransferAcceptRegistry({ windowMs: ACCEPT_WINDOW_MS, log });
   /** officeCallSid -> the conference its caller will be sent to. Written when
    * the wait begins, read by the accept webhook BEFORE the settle, dropped
@@ -511,6 +523,23 @@ export function createRuntimeTransfer(options: RuntimeTransferOptions): RuntimeT
           });
           if (!policy.allowed) {
             log(`[runtime-xfer] policy refused ${slug}/${metadata.callId}: ${policy.reason}`);
+          }
+          /**
+           * THE HEADS-UP TEXT, BEFORE THE PHONE RINGS — the old core's
+           * `sendUrgentTransferSms`, which the runtime never sent.
+           *
+           * The after-hours line moved here at ~00:23 UTC on 2026-10-01 and the
+           * first urgent escalation it dialled (CA3a8fd9cc0f2f79eae30f5785ceba6d22,
+           * 2026-10-02 00:15 UTC) rang the on-call phone for 40 seconds with no
+           * text in front of it. Operator: "I need those alert sms to let me know
+           * who is calling and why." Same text, same recipient, same rule as the
+           * old core: only for a dial that is really going to happen (policy
+           * allowed it), and never for PCP, whose professional callers go to a
+           * call centre that has its own briefing. Fire-and-forget: a text that
+           * fails must never delay the dial.
+           */
+          if (policy.allowed && policy.policy !== "pcp") {
+            urgentAlerts.smsBeforeDial({ callerNumber: metadata.callerPhone, escalationDetails: details });
           }
           if (mode === "blind") {
             /**
@@ -669,6 +698,32 @@ export function createRuntimeTransfer(options: RuntimeTransferOptions): RuntimeT
            * refusals as dials.
            */
           if (!outcome.ok && outcome.status === "UNAVAILABLE") return outcome;
+          /**
+           * THE URGENT SAFETY NET — the old core's `fileUrgentHandoffFallbackTicket`.
+           *
+           * A clinical transfer that rang and was not taken left NO record on
+           * the runtime: CA3a8fd9cc0f2f79eae30f5785ceba6d22 rang out at 00:16 UTC
+           * on 2026-10-02, the caller hung up while the agent was offering to
+           * take a message, and no ticket of any provenance exists. The old core
+           * has filed an URGENT After Hours ticket on exactly this since July.
+           * Placed after the UNAVAILABLE return because a refusal rang nobody,
+           * and PCP is excluded for the old core's reason: it files its own
+           * structured ticket before dialling. The per-call claim lock in
+           * `SyncAgentService` makes this and a later `create_ticket` one ticket.
+           */
+          if (!outcome.ok && slug !== "pcp") {
+            urgentAlerts.fallbackTicket({
+              callSid: metadata.callSid,
+              callerNumber: metadata.callerPhone,
+              escalationDetails: briefed,
+              why:
+                outcome.status === "NO_ANSWER" || outcome.status === "DECLINED"
+                  ? URGENT_TRANSFER_NOT_ANSWERED
+                  : `Transfer dial failed: ${outcome.reason}`,
+              dialTarget: outcome.destination,
+              agentUsed: slug,
+            });
+          }
           /**
            * RECORD IT, THEN WRITE IT. One writer, at the moment the answer
            * exists.
