@@ -29,6 +29,12 @@ import { type TriageOutcome } from "../config/afterHoursTicketing";
 import { storage } from "../../server/storage";
 import { escalationDetailsMap } from "../services/escalationStore";
 import { judgeEscalation } from "../services/afterHoursEscalationGate";
+import {
+  afterHoursRouteNote,
+  POST_PROCEDURE_REQUEST,
+  routeAfterHoursTicket,
+} from "../services/afterHoursRouting";
+import { AFTER_HOURS_DEPARTMENT_ID as AFTER_HOURS_ROUTE_DEPARTMENT_ID } from "../tools/afterHoursTaxonomy";
 import { corroborate } from "../services/symptomCorroboration";
 import { markCallConcluded } from "../services/callConclusion";
 import { callMetadataForDB } from "../services/callMetadataStore";
@@ -182,7 +188,8 @@ export interface NoIvrAgentMetadata {
 export type RefusedEscalationCode =
   | 'communication_failure'
   | 'administrative_request'
-  | 'symptoms_not_stated_by_caller';
+  | 'symptoms_not_stated_by_caller'
+  | 'post_op_medication';
 
 export const REFUSED_ESCALATION_WHY: Record<RefusedEscalationCode, string> = {
   communication_failure:
@@ -192,6 +199,9 @@ export const REFUSED_ESCALATION_WHY: Record<RefusedEscalationCode, string> = {
     'an eye emergency or a clinician calling about a patient',
   symptoms_not_stated_by_caller:
     'the caller did not describe the symptoms you wrote, and the on-call provider acts on what you write',
+  post_op_medication:
+    'a post-operative medication or prescription problem with no new symptom is filed URGENT for the After ' +
+    'Hours team rather than transferred (operator ruling 2026-10-02)',
 };
 
 export const REFUSED_ESCALATION_LINE = {
@@ -249,7 +259,11 @@ export function refusedEscalationResult(args: {
       ? ' Ask ONE question at a time and wait for a real answer; if the caller then describes an ' +
         'emergency in their own words — vision loss, severe pain, an injury, chemical exposure — ' +
         'you may call escalate_to_human once more.'
-      : '';
+      : code === 'post_op_medication'
+        ? ' If the caller then describes a NEW SYMPTOM in their own words — pain, a change in vision, ' +
+          'redness, swelling, discharge — that is post-surgical trouble and you may call ' +
+          'escalate_to_human once more with the symptom as they said it.'
+        : '';
   if (filed.ok) {
     const ticket = filed.ticketNumber ? ` (${filed.ticketNumber})` : '';
     const afterLine =
@@ -920,14 +934,25 @@ ESCALATION — EXACTLY THREE CASES, NOTHING ELSE
 2. A hospital, ER or urgent care calling about a patient
 3. A TRUE eye emergency happening now: vision loss, severe
 pain, injury, chemical exposure, flashes or floaters,
-post-surgical trouble
+post-surgical trouble (a NEW symptom after surgery, never a
+medication or prescription problem on its own)
 
 NOT a transfer, however the caller phrases it:
 ❌ "urgent" appointment, refill, glasses, authorization, fax
 ❌ billing, insurance, records, office hours
 ❌ you could not hear them, could not get a date of birth,
 could not understand the language, they would not answer
+❌ a patient who ALREADY had surgery or a procedure and whose only
+problem is a medication or prescription — post-op drops not at the
+pharmacy, a prescription that never arrived, run out — with no new
+symptom: create_ticket with post_op_prescription true. It files URGENT
+for the After Hours team.
 → ALL of these are create_ticket with whatever you have.
+
+SAME-DAY: if the request is about an appointment TODAY — confirming,
+cancelling or moving it, running late, at the office now, or needing
+to be seen today — set appointment_today true on create_ticket.
+Same-day tickets go to the After Hours team, who work them.
 Filing a partial ticket IS the job. Waking the on-call
 provider because you missed a detail is not.
 
@@ -1481,6 +1506,14 @@ The ticket will include schedule context (last appointment info) automatically.`
       doctor_name: z.string().optional().describe("Doctor they want to see or usually see"),
       location: z.string().optional().describe("Location they prefer or usually visit"),
       appointment_time: z.string().optional().describe("Relevant appointment date/time if applicable"),
+      appointment_today: z
+        .boolean()
+        .optional()
+        .describe("TRUE when the request is about an appointment or visit TODAY: confirming, cancelling or moving today's appointment, running late for it, being at the office now, or needing to be seen today. Same-day tickets go to the After Hours team, who work them."),
+      post_op_prescription: z
+        .boolean()
+        .optional()
+        .describe("TRUE when a patient who has ALREADY had surgery or a procedure has a medication or prescription problem — post-op drops not at the pharmacy, a prescription that never arrived, run out of post-op drops. It files URGENT for the After Hours team. It is NOT a reason to call escalate_to_human."),
       requires_callback: z.boolean().optional().describe("Whether staff needs to call the patient back. Set to FALSE for simple confirmations where the patient's request was fully handled. Defaults to TRUE."),
     }),
     execute: async (params) => {
@@ -1682,6 +1715,28 @@ The ticket will include schedule context (last appointment info) automatically.`
       const { classifyAfterHoursRequest } = await import('../tools/afterHoursTaxonomy');
       const ahHint = classifyAfterHoursRequest(finalSummary);
 
+      // THE TWO KINDS OF CALL THE OPERATOR ROUTED HIMSELF (2026-10-02), and
+      // nothing else: a post-op medication problem files URGENT to After
+      // Hours, and a same-day request files to After Hours, who work them.
+      // Every other call sends no department and the app decides as before.
+      // See afterHoursRouting.ts. Only a CONFIRMED record's appointments count
+      // — a phone candidate's appointments are somebody's, not the caller's.
+      const recordConfirmed =
+        !!enrichedContext?.patientFound &&
+        !phoneMatchIsUnconfirmed(enrichedContext) &&
+        enrichedContext.identity?.unique !== false;
+      const route = routeAfterHoursTicket({
+        postOpMedication: params.post_op_prescription,
+        appointmentToday: params.appointment_today,
+        text: [params.request_summary, params.appointment_time].filter(Boolean).join(' '),
+        confirmedUpcoming: recordConfirmed ? enrichedContext?.upcomingAppointments : undefined,
+        appointmentIntent: CATEGORY_TO_REQUEST_TYPE[params.request_category] === 'Appointment Request',
+      });
+      if (route.kind !== 'default') {
+        console.info(`[AFTER-HOURS ROUTE] ${route.kind} -> department ${route.departmentId} on ${metadata.callSid}`);
+      }
+      const routeNote = afterHoursRouteNote(route.kind);
+
       // Use NEW SIMPLIFIED ENDPOINT - more reliable, all mapping done server-side
       const result = await SyncAgentService.submitSimplifiedTicket({
         patientFullName,
@@ -1701,6 +1756,7 @@ The ticket will include schedule context (last appointment info) automatically.`
         // the `Request Type:` header must stay the first line of that field
         // (operator, 2026-07-25). The note never carries the caller's words.
         additionalDetails: [
+          routeNote,
           dobEscapeStatus ? dobStatusNote(dobEscapeStatus) : null,
           emailEscaped ? EMAIL_ESCAPE_NOTE : null,
           params.appointment_time ? `Appointment: ${params.appointment_time}` : null,
@@ -1709,14 +1765,26 @@ The ticket will include schedule context (last appointment info) automatically.`
         callerPhone: metadata.callerPhone,
         dialedNumber: metadata.dialedNumber,
         agentUsed: 'no-ivr',
-        ...(ahHint.isCatchAll
-          ? {}
-          : {
-              suggestedRequestTypeId: ahHint.classification.requestTypeId,
-              suggestedRequestReasonId: ahHint.classification.requestReasonId,
-              suggestedRequestReason: ahHint.classification.requestReason,
-              suggestedUrgent: Boolean(ahHint.classification.urgent),
-            }),
+        ...(route.kind === 'default' ? {} : { departmentId: route.departmentId }),
+        ...(route.kind === 'post_op_medication'
+          ? {
+              priority: route.priority,
+              // The department-8 pair for it, so the hint and the department
+              // agree in one payload (the app logs AGENT CONTRACT CONFLICT
+              // when they do not).
+              suggestedRequestTypeId: POST_PROCEDURE_REQUEST.requestTypeId,
+              suggestedRequestReasonId: POST_PROCEDURE_REQUEST.requestReasonId,
+              suggestedRequestReason: POST_PROCEDURE_REQUEST.requestReason,
+              suggestedUrgent: true,
+            }
+          : ahHint.isCatchAll
+            ? {}
+            : {
+                suggestedRequestTypeId: ahHint.classification.requestTypeId,
+                suggestedRequestReasonId: ahHint.classification.requestReasonId,
+                suggestedRequestReason: ahHint.classification.requestReason,
+                suggestedUrgent: Boolean(ahHint.classification.urgent),
+              }),
         callStartTime: new Date().toISOString(),
         // Transcript deliberately NOT sent at filing.
         //
@@ -1958,6 +2026,11 @@ Always say a brief goodbye phrase BEFORE calling this tool.`,
               .filter(Boolean)
               .join('\n');
       const ahHint = classifyAfterHoursRequest(reasonForCalling);
+      // A post-op medication refusal files URGENT to After Hours (operator,
+      // 2026-10-02) — the same route create_ticket takes for it, so the
+      // ticket lands in the same place whichever tool the model reached for.
+      const postOp = code === 'post_op_medication';
+      const routeNote = postOp ? afterHoursRouteNote('post_op_medication') : null;
       const result = await SyncAgentService.submitSimplifiedTicket({
         patientFullName: name,
         patientDOB: params.patient_dob || 'Unknown',
@@ -1966,19 +2039,28 @@ Always say a brief goodbye phrase BEFORE calling this tool.`,
         patientPhone: phone || undefined,
         // The note goes HERE and not at the head of reasonForCalling — the
         // `Request Type:` header rule (operator, 2026-07-25).
-        additionalDetails: refusedEscalationNote(code),
+        additionalDetails: [routeNote, refusedEscalationNote(code)].filter(Boolean).join('\n'),
         callSid: metadata.callSid,
         callerPhone: metadata.callerPhone,
         dialedNumber: metadata.dialedNumber,
         agentUsed: 'no-ivr',
-        ...(ahHint.isCatchAll
-          ? {}
-          : {
-              suggestedRequestTypeId: ahHint.classification.requestTypeId,
-              suggestedRequestReasonId: ahHint.classification.requestReasonId,
-              suggestedRequestReason: ahHint.classification.requestReason,
-              suggestedUrgent: Boolean(ahHint.classification.urgent),
-            }),
+        ...(postOp
+          ? {
+              departmentId: AFTER_HOURS_ROUTE_DEPARTMENT_ID,
+              priority: 'urgent' as const,
+              suggestedRequestTypeId: POST_PROCEDURE_REQUEST.requestTypeId,
+              suggestedRequestReasonId: POST_PROCEDURE_REQUEST.requestReasonId,
+              suggestedRequestReason: POST_PROCEDURE_REQUEST.requestReason,
+              suggestedUrgent: true,
+            }
+          : ahHint.isCatchAll
+            ? {}
+            : {
+                suggestedRequestTypeId: ahHint.classification.requestTypeId,
+                suggestedRequestReasonId: ahHint.classification.requestReasonId,
+                suggestedRequestReason: ahHint.classification.requestReason,
+                suggestedUrgent: Boolean(ahHint.classification.urgent),
+              }),
         callStartTime: new Date().toISOString(),
       });
       if (result.success) {
@@ -2010,6 +2092,8 @@ Always say a brief goodbye phrase BEFORE calling this tool.`,
 ❌ NEVER ESCALATE FOR:
 - Appointment confirmations, scheduling, rescheduling, cancellations
 - Medication refills or prescription questions  
+- A post-op medication or prescription problem (drops not at the pharmacy) with no new symptom
+  → create_ticket with post_op_prescription true. It files URGENT for the After Hours team.
 - Billing or insurance questions
 - General questions about office hours, locations, fax numbers
 - Patient frustration or impatience (be patient, handle it yourself)

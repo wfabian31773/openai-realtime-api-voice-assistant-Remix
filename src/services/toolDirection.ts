@@ -166,7 +166,15 @@ export async function gateBeforeExecution(
   const argText = JSON.stringify(toolArgs ?? '').toLowerCase();
   // Request-type requirements (live retest 2026-08-07): a refill ticket
   // without the medication name is a message worth nothing — block filing.
-  if (toolName === 'create_ticket' && /refill|medication/.test(argText)) {
+  // A post-op prescription problem is exempt (operator ruling 2026-10-02, v89):
+  // it files URGENT to After Hours, and the corpus caller did not know the
+  // drug's name ("we don't know the name", CAa2e451aba415a1deb97a72374e3e1784)
+  // — blocking that ticket for a name is the request lost.
+  if (
+    toolName === 'create_ticket' &&
+    /refill|medication/.test(argText) &&
+    !/"post_op_prescription":true/.test(argText)
+  ) {
     const namedMed = /\b(latanoprost|timolol|brimonidine|dorzolamide|prednisolone|atropine|restasis|xiidra|[a-z]{6,}(ol|ide|pine|mycin|floxacin|prost|zolamide))\b/.test(argText);
     if (!namedMed) {
       console.warn(`[TOOL-GATE] create_ticket BLOCKED on ${agentSlug} — refill request without a medication name`);
