@@ -1730,6 +1730,7 @@ The ticket will include schedule context (last appointment info) automatically.`
         appointmentToday: params.appointment_today,
         text: [params.request_summary, params.appointment_time].filter(Boolean).join(' '),
         confirmedUpcoming: recordConfirmed ? enrichedContext?.upcomingAppointments : undefined,
+        appointmentIntent: CATEGORY_TO_REQUEST_TYPE[params.request_category] === 'Appointment Request',
       });
       if (route.kind !== 'default') {
         console.info(`[AFTER-HOURS ROUTE] ${route.kind} -> department ${route.departmentId} on ${metadata.callSid}`);

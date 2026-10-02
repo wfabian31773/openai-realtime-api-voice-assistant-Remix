@@ -66,8 +66,15 @@ const POST_OP_TERMS = [
   'postoperatorio', 'post operatorio', 'post-operatorio', 'me operaron', 'me opere',
   'despues de la cirugia', 'despues de mi cirugia', 'despues de la operacion',
 ];
+/**
+ * "Had surgery", "after the procedure" — and NOT "had surgery scheduled for
+ * tomorrow" or "after my surgery next week", where the trigger word is there
+ * and the operation has not happened (Codex P2, #345). The lookahead reads
+ * only the words straight after the operation, so a completed operation
+ * followed later in the sentence by a scheduled follow-up still counts.
+ */
 const POST_OP_PATTERN =
-  /\b(recent|recently|after|following|post|had|since|from)\s+(\w+\s+){0,2}(surgery|surgical|operation|procedure)/;
+  /\b(recent|recently|after|following|post|had|since|from)\s+(\w+\s+){0,2}(surgery|surgical|operation|procedure)\b(?!\s+(is\s+|was\s+|has been\s+)?(scheduled|booked|set|planned|tomorrow|next|coming|upcoming|later)\b)/;
 
 /** A medication or prescription is the subject. */
 const MEDICATION_TERMS = [
@@ -99,6 +106,14 @@ const ON_THE_WAY =
 export function soundsSameDay(text: string): boolean {
   const t = fold(text);
   return (TODAY.test(t) && VISIT.test(t)) || ON_THE_WAY.test(t);
+}
+
+/** The request is ABOUT an appointment — the words, not the procedure or the subject. */
+const APPOINTMENT_WORD = /\b(appointment|appt|cita|visit|consulta|check[- ]?in)\b/;
+
+export function soundsAboutAnAppointment(text: string): boolean {
+  const t = fold(text);
+  return APPOINTMENT_WORD.test(t) || ON_THE_WAY.test(t);
 }
 
 /** The practice's clock, whatever the server's is. */
@@ -155,6 +170,8 @@ export function routeAfterHoursTicket(input: {
   text: string;
   /** Only a CONFIRMED record's appointments; a phone candidate's are not the caller's. */
   confirmedUpcoming?: ReadonlyArray<{ isoDate?: string; startTime?: string }>;
+  /** The request's own category is an appointment one (confirm, cancel, move, book). */
+  appointmentIntent?: boolean;
   now?: Date;
 }): AfterHoursRoute {
   const now = input.now ?? new Date();
@@ -162,10 +179,15 @@ export function routeAfterHoursTicket(input: {
     return { kind: 'post_op_medication', departmentId: AFTER_HOURS_DEPARTMENT_ID, priority: 'urgent' };
   }
   if (pacificNow(now).minutes >= OFFICE_DAY_ENDS_AT) return { kind: 'default' };
+  // The record says WHEN the caller is due, never WHAT they are calling about:
+  // a refill or a billing question from a patient who happens to be due this
+  // afternoon is not a same-day ticket (Codex P2, #345). So the record only
+  // backs up a request that is already about an appointment.
+  const aboutAnAppointment = input.appointmentIntent === true || soundsAboutAnAppointment(input.text);
   if (
     input.appointmentToday === true ||
     soundsSameDay(input.text) ||
-    recordHasAppointmentLaterToday(input.confirmedUpcoming, now)
+    (aboutAnAppointment && recordHasAppointmentLaterToday(input.confirmedUpcoming, now))
   ) {
     return { kind: 'same_day', departmentId: AFTER_HOURS_DEPARTMENT_ID };
   }

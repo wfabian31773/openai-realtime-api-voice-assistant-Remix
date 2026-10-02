@@ -218,6 +218,40 @@ describe('a same-day request files to After Hours', () => {
     expect(lastSubmit().departmentId).toBe(8);
   });
 
+  it('the record backs up an appointment CATEGORY even with no appointment word in the summary', async () => {
+    h.byNameAndDob.mockResolvedValue({
+      ...NOT_FOUND,
+      patientFound: true,
+      matchedBy: 'name_and_dob',
+      identity: { unique: true, candidateCount: 1, candidates: [] },
+      upcomingAppointments: [{ isoDate: '2026-10-02', startTime: '9:20 AM' }],
+    });
+    const { agent } = await agentFor();
+    await call(agent, 'create_ticket', {
+      ...TICKET,
+      request_category: 'cancel_appointment',
+      request_summary: 'Wants to cancel, feeling unwell',
+    });
+    expect(lastSubmit().departmentId).toBe(8);
+  });
+
+  it('but never routes a request that is not about the appointment (Codex P2, #345)', async () => {
+    h.byNameAndDob.mockResolvedValue({
+      ...NOT_FOUND,
+      patientFound: true,
+      matchedBy: 'name_and_dob',
+      identity: { unique: true, candidateCount: 1, candidates: [] },
+      upcomingAppointments: [{ isoDate: '2026-10-02', startTime: '9:20 AM' }],
+    });
+    const { agent } = await agentFor();
+    await call(agent, 'create_ticket', {
+      ...TICKET,
+      request_category: 'billing_question',
+      request_summary: 'Question about a charge on the last statement',
+    });
+    expect(lastSubmit().departmentId).toBeUndefined();
+  });
+
   it('a record that matched several people is not the caller\'s, so it routes nothing', async () => {
     h.byNameAndDob.mockResolvedValue({
       ...NOT_FOUND,

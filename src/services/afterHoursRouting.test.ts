@@ -45,6 +45,22 @@ describe('post-op medication', () => {
     expect(mentionsPostOpMedication('My surgery is tomorrow and the pharmacy has not got my drops')).toBe(false);
   });
 
+  it('"had surgery scheduled" is still a future operation (Codex P2, #345)', () => {
+    expect(
+      mentionsPostOpMedication('I had surgery scheduled for tomorrow and my drops are not at the pharmacy'),
+    ).toBe(false);
+    expect(mentionsPostOpMedication('After my surgery next week I will need the drops from the pharmacy')).toBe(false);
+    expect(mentionsPostOpMedication('Had a procedure booked for Monday, pharmacy has no prescription')).toBe(false);
+  });
+
+  it('a completed operation still counts when a follow-up is scheduled later in the sentence', () => {
+    expect(
+      mentionsPostOpMedication(
+        'I had surgery today, my follow-up is scheduled for tomorrow, and the drops are not at the pharmacy',
+      ),
+    ).toBe(true);
+  });
+
   it('routes URGENT to After Hours on the model flag or the words, at any hour', () => {
     for (const now of [MORNING, EVENING]) {
       expect(routeAfterHoursTicket({ postOpMedication: true, text: 'prescription problem', now })).toEqual({
@@ -105,9 +121,22 @@ describe('same-day', () => {
     expect(recordHasAppointmentLaterToday(earlier, MORNING)).toBe(false);
     expect(recordHasAppointmentLaterToday(tomorrow, MORNING)).toBe(false);
     expect(recordHasAppointmentLaterToday([{ isoDate: '2026-10-02' }], MORNING)).toBe(true);
-    expect(routeAfterHoursTicket({ text: 'a question', confirmedUpcoming: later, now: MORNING }).kind).toBe(
-      'same_day',
-    );
+    expect(
+      routeAfterHoursTicket({ text: 'a question', appointmentIntent: true, confirmedUpcoming: later, now: MORNING })
+        .kind,
+    ).toBe('same_day');
+    expect(
+      routeAfterHoursTicket({ text: 'question about my appointment', confirmedUpcoming: later, now: MORNING }).kind,
+    ).toBe('same_day');
+  });
+
+  it('the record says WHEN they are due, not WHAT they are calling about (Codex P2, #345)', () => {
+    const later = [{ isoDate: '2026-10-02', startTime: '2:00 PM' }];
+    for (const text of ['refill of my glaucoma drops', 'question about my bill']) {
+      expect(routeAfterHoursTicket({ text, confirmedUpcoming: later, now: MORNING }), text).toEqual({
+        kind: 'default',
+      });
+    }
   });
 
   it('everything else is the app\'s to decide, as before', () => {
