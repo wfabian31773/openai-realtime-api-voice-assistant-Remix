@@ -21,7 +21,6 @@ import {
   URGENT_TRANSFER_NOT_ANSWERED,
   urgentFallbackTicketParams,
 } from "../services/urgentTransferAlert";
-import { AFTER_HOURS_DEPARTMENT_ID } from "../config/afterHoursTicketing";
 
 const writes = vi.hoisted(() => ({ persistTransferOutcome: vi.fn(async () => true) }));
 vi.mock("./callRecord", () => writes);
@@ -268,8 +267,13 @@ describe("the sender the runtime uses in production", () => {
       agentUsed: "no-ivr",
     });
     await vi.waitFor(() => expect(filed).toHaveLength(1));
+    // After Hours is department 8 in the Support Center. The config constant
+    // of the same name is 3 (Technicians Support), and until v89 this ticket
+    // went there with a retinal-surgery request type — see urgentTransferAlert.ts.
     expect(filed[0]).toMatchObject({
-      departmentId: AFTER_HOURS_DEPARTMENT_ID,
+      departmentId: 8,
+      requestTypeId: 34,
+      requestReasonId: 159,
       priority: "urgent",
       patientFirstName: "Test",
       patientPhone: URGENT.callbackNumber,

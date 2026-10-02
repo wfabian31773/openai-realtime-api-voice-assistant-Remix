@@ -24,7 +24,7 @@
  */
 import type { EscalationDetails } from './escalationStore';
 import type { SyncAgentTicketParams } from './syncAgentService';
-import { AFTER_HOURS_DEPARTMENT_ID, TRIAGE_OUTCOME_MAPPINGS } from '../config/afterHoursTicketing';
+import { AFTER_HOURS_DEPARTMENT_ID } from '../tools/afterHoursTaxonomy';
 import { preferredCallbackNumber } from './handoffPolicy';
 
 export interface UrgentTransferSmsOptions {
@@ -98,10 +98,26 @@ export function buildUrgentTransferSms(opts: UrgentTransferSmsOptions, callTime:
 }
 
 /**
- * The urgent fallback ticket's payload. Moved verbatim from the old core's
- * `fileUrgentHandoffFallbackTicket`: After Hours department, the generic urgent
- * mapping, priority urgent, and a description that tells a staffer to call
- * back now and what was attempted.
+ * The department-8 pair for an attempted transfer to the on-call provider —
+ * read from the Support Center's `request_reasons` for type 34 on 2026-10-02.
+ */
+export const ON_CALL_TRANSFER_REQUEST = { requestTypeId: 34, requestReasonId: 159 } as const;
+
+/**
+ * The urgent fallback ticket's payload, shared by both pipelines: After Hours,
+ * priority urgent, and a description that tells a staffer to call back now and
+ * what was attempted.
+ *
+ * IT WAS NOT REACHING AFTER HOURS, AND THE COMMENT HERE SAID IT WAS. Until
+ * v89 it sent `config/afterHoursTicketing`'s AFTER_HOURS_DEPARTMENT_ID — which
+ * is 3, Technicians Support — with the `sudden_vision_loss` triage mapping,
+ * request type 12 / reason 53, a RETINAL SURGERY pair owned by department 2.
+ * Three departments in one payload. Measured 2026-10-02 in the Support
+ * Center: of the 17 "URGENT TRANSFER NOT ANSWERED" / "Transfer dial failed"
+ * tickets since 2026-05-12, 14 landed in Technicians Support, 2 in the HVA Hub
+ * and 1 in After Hours. Operator, the same day, of an urgent after-hours case:
+ * "it should record an urgent ticket in after hours." Department 8, type 34,
+ * reason 159 "Transferred to On-Call Provider" — which is what happened.
  */
 export function urgentFallbackTicketParams(input: {
   why: string;
@@ -115,7 +131,6 @@ export function urgentFallbackTicketParams(input: {
   agentUsed: string;
 }): SyncAgentTicketParams {
   const d = input.escalationDetails;
-  const urgentMapping = TRIAGE_OUTCOME_MAPPINGS['sudden_vision_loss']; // generic urgent
   // The number to CALL BACK is the one the patient gave, when they gave one
   // AND it is dialable. It is frequently not the phone they are calling from
   // — a spouse's mobile, a nurse's station, a caller on a landline who wants
@@ -135,8 +150,8 @@ export function urgentFallbackTicketParams(input: {
 
   return {
     departmentId: AFTER_HOURS_DEPARTMENT_ID,
-    requestTypeId: urgentMapping.requestTypeId,
-    requestReasonId: urgentMapping.requestReasonId,
+    requestTypeId: ON_CALL_TRANSFER_REQUEST.requestTypeId,
+    requestReasonId: ON_CALL_TRANSFER_REQUEST.requestReasonId,
     patientFirstName: d?.patientFirstName || 'Unknown',
     patientLastName: d?.patientLastName || 'Caller',
     patientPhone: formattedPhone,

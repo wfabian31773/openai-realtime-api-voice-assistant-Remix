@@ -45,6 +45,8 @@
  * a phone call and a wrongly refused one could cost somebody their sight.
  */
 
+import { mentionsPostOpMedication } from './afterHoursRouting';
+
 export type AfterHoursCallerType =
   | 'patient_urgent_medical'
   | 'healthcare_provider';
@@ -66,7 +68,7 @@ export type EscalationVerdict =
   | { allowed: true; basis: 'provider_or_facility' | 'acute_clinical' | 'unclassified_default_open' }
   | {
       allowed: false;
-      code: 'communication_failure' | 'administrative_request' | 'symptoms_not_stated_by_caller';
+      code: 'communication_failure' | 'administrative_request' | 'symptoms_not_stated_by_caller' | 'post_op_medication';
       directive: string;
     };
 
@@ -153,6 +155,13 @@ const ADMINISTRATIVE_SUBJECTS = [
   'office hours', 'directions', 'parking', 'address',
 ];
 
+/**
+ * ANY symptom, for the post-op medication carve-out only. Deliberately wide —
+ * a word here sends the call back to the acute check, i.e. toward ringing.
+ */
+const SYMPTOM_PATTERN =
+  /\b(pain|painful|hurt|hurts|hurting|ache|aching|sore|red|redness|swollen|swelling|vision|blur|blurry|blurred|see|seeing|sight|light|flash|flashes|floater|floaters|curtain|shadow|discharge|pus|bleed|bleeding|blood|pressure|itch|itchy|burning|watering|nausea|vomit|fever|dolor|duele|rojo|roja|hinchad\w*|vision|borros\w*|sangr\w*|veo|ver)\b/;
+
 const norm = (s?: string) => ` ${(s ?? '').toLowerCase().replace(/\s+/g, ' ')} `;
 const hits = (haystack: string, needles: string[]) => needles.some((n) => haystack.includes(n));
 
@@ -202,6 +211,39 @@ export function judgeEscalation(req: EscalationRequest): EscalationVerdict {
         'real answer: "Is there any pain?" then, separately, "Has your vision changed?" A single "yes" to a ' +
         'two-part question answers neither. If the caller has not described an emergency, call create_ticket ' +
         'with what they actually said and tell them the team will call them back.',
+    };
+  }
+
+  /**
+   * A POST-OP MEDICATION PROBLEM WITH NO SYMPTOM IS NOT A TRANSFER.
+   *
+   * Operator, 2026-10-02, asked whether a patient whose post-op drops never
+   * reached the pharmacy is "post-surgical trouble": "no, it should record an
+   * urgent ticket in after hours." Checked BEFORE the acute terms because
+   * "post-op" and "after surgery" ARE acute terms here — on their own they
+   * mean post-surgical trouble and ring the on-call provider, which is right
+   * when the patient describes a symptom and wrong when the subject is a
+   * prescription.
+   *
+   * So the carve-out needs all three: the operation already happened, a
+   * medication is the subject, and NO symptom is named. Any symptom word —
+   * pain, vision, redness, swelling, discharge — and this steps aside and the
+   * acute check below rings as before. It errs toward ringing on purpose: a
+   * needless call costs the on-call provider a phone call, a wrongly refused
+   * one could cost somebody their sight. A provider or a hospital calling
+   * about a post-op patient never reaches here (case 1/2 above).
+   *
+   * The refusal files the ticket itself (v80), URGENT and to After Hours —
+   * see the no-IVR agent's fileRefusedEscalationTicket.
+   */
+  if (mentionsPostOpMedication(text) && !SYMPTOM_PATTERN.test(text)) {
+    return {
+      allowed: false,
+      code: 'post_op_medication',
+      directive:
+        'A post-operative medication or prescription problem with no new symptom is not a transfer on this ' +
+        'line. It files URGENT for the After Hours team. If the caller then describes a symptom in their own ' +
+        'words — pain, a change in vision, redness, swelling, discharge — that is post-surgical trouble.',
     };
   }
 

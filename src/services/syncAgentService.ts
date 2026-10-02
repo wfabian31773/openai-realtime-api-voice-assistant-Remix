@@ -621,6 +621,8 @@ export class SyncAgentService {
     callDurationSeconds?: number;
     transcript?: string;
     priority?: 'low' | 'normal' | 'medium' | 'high' | 'urgent';
+    /** An operator-ruled department — see SubmitTicketParams.departmentId. Usually absent. */
+    departmentId?: number;
     /** Classification hint — see SubmitTicketParams. Never a routing decision. */
     suggestedRequestTypeId?: number;
     suggestedRequestReasonId?: number;
@@ -803,6 +805,7 @@ export class SyncAgentService {
         locationOfLastVisit: lookupFields.locationOfLastVisit,
         additionalDetails: smsSafe(params.additionalDetails),
         priority: params.priority,
+        ...(params.departmentId ? { departmentId: params.departmentId } : {}),
         callData: callSid ? {
           callSid,
           callerPhone: params.callerPhone,

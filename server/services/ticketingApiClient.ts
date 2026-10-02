@@ -185,6 +185,14 @@ export interface SubmitTicketParams {
   additionalDetails?: string;
   /** Ticket priority — the app defaults urgent for Urgent/Emergency Transfer tickets and medium otherwise. */
   priority?: 'low' | 'normal' | 'medium' | 'high' | 'urgent';
+  /**
+   * A DEPARTMENT THE OPERATOR HAS RULED ON, never a guess. Absent on nearly
+   * every call, which leaves the derivation above where it is. Sent only for
+   * the two kinds of after-hours call the operator routed himself on
+   * 2026-10-02 — see `afterHoursRouting.ts`. The endpoint validates it and
+   * lets it win over its own derivation (`resolveSuppliedDepartment`).
+   */
+  departmentId?: number;
   callData?: {
     callSid?: string;
     callerPhone?: string;

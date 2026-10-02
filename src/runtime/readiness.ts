@@ -600,8 +600,19 @@ import { callEnvironment } from "./callRecord";
  * words (`services/urgentTransferAlert.ts`); `urgentTransferAlerts.test.ts`
  * pins the order (text, then dial) and the ticket on a dial that rang out.
  */
+/**
+ * v89 — THE AFTER-HOURS LINE ROUTES WHAT THE OPERATOR RULED (2026-10-02). A
+ * post-op prescription problem with no new symptom files URGENT to After Hours
+ * and the escalation gate refuses to ring for it ("1, no, it should record an
+ * urgent ticket in after hours"); a same-day request files to After Hours
+ * ("same day tickets are worked in the after hours department"); and the
+ * urgent ring-out ticket now reaches After Hours (department 8) — it was going
+ * to Technicians Support (3) with a retinal-surgery request type, 14 of 17 such
+ * tickets since May. `services/afterHoursRouting.ts` decides;
+ * `noIvrAfterHoursRouting.test.ts` drives the real agent.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v88-the-on-call-text-before-the-ring-20261002";
+  "voice-runtime-v89-the-after-hours-line-routes-what-was-ruled-20261002";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can
