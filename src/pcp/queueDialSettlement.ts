@@ -103,6 +103,37 @@ export function handoffAfterQueueDial(
 }
 
 /**
+ * A CALLER WHO CHOSE THE QUEUE IS OWED A TICKET IN EXACTLY ONE CASE: the queue
+ * never picked up. Operator ruling, 2026-10-01: *"if you choose the queue, we
+ * dont generate a ticket. As long as we are explaining this on the call as we
+ * should, we should be fine."*
+ *
+ * The one case is not an exception to the ruling, it is what keeps a spoken
+ * sentence true. When the dial ends without a bridge, Twilio is answered with
+ * `BLIND_TRANSFER_NO_ANSWER` — *"I wasn't able to get someone on the line just
+ * now, but I have your request recorded and the team will follow up with
+ * you"* — on a leg the agent no longer holds. With no ticket behind it that is
+ * the broken promise this line has been corrected for since CAa37f1a42.
+ * The caller chose the queue and did not get it.
+ *
+ * MEASURED BEFORE CHOOSING IT, 2026-10-01: of 425 PCP transfer tickets since
+ * 2026-09-17, 405 settled `QUEUE_ANSWERED` and the other 20 never settled — the
+ * ACD answers essentially every dial. So this files close to never, and when
+ * it does it is the caller the system failed rather than the caller who left.
+ *
+ * NOT ON A CANCEL. `CANCELED` is the caller hanging up while it rang: they
+ * left, which is the "if they drop off, their record is lost, their choice"
+ * half of the 2026-09-13 ruling, and nobody is on the leg to hear the line.
+ * Everything else that did not bridge — no-answer, busy, a failed dial —
+ * leaves a caller listening to that sentence.
+ */
+export function queueChoiceOwesATicket(settlement: BlindDialSettlement): boolean {
+  if (settlement.connected) return false;
+  const status = settlement.status.trim().toUpperCase();
+  return status !== 'CANCELED' && status !== 'CANCELLED';
+}
+
+/**
  * Written onto a narrative whose excerpt had to be cut, so a staffer reading
  * a sentence that stops mid-word knows it was us and not the caller.
  */

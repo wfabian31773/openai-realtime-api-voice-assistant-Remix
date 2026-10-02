@@ -77,6 +77,25 @@ export const BLIND_TRANSFER_WARNING =
   "so they have them either way.";
 
 /**
+ * THE SAME SENTENCE WITHOUT ITS THIRD CLAUSE, for a caller with nothing filed.
+ *
+ * Operator ruling, 2026-10-01: a PCP caller who chooses the live queue gets NO
+ * ticket. "I've taken your details down, so they have them either way" is then
+ * false, and it is spoken by TwiML on a leg the agent no longer holds, so
+ * nothing can correct it afterwards. The other two clauses are the operator's
+ * 2026-09-08 words unchanged — say what is about to happen, refuse to promise a
+ * wait — and nothing is added, because a new clause would be new copy to a
+ * caller and that is the operator's to write.
+ *
+ * The caller has ALREADY been told what this omission means: the choice they
+ * just said yes to was `QUEUE_CHOICE_WARNING`, "nothing we've gone over
+ * transfers with you".
+ */
+export const BLIND_TRANSFER_WARNING_UNRECORDED =
+  "I'm going to put you through to our PCP team's line now. " +
+  "I can't tell you how long the wait will be.";
+
+/**
  * What the caller hears when the queue never answered at all.
  *
  * Same sentence as the `handoff_no_answer` refusal in `src/pcp/refusals.ts`,
@@ -104,6 +123,12 @@ export interface BlindTransferRequest {
   callerCallSid: string;
   /** Where to send them. Resolved by policy; the model never supplies it. */
   destination: string | null | undefined;
+  /**
+   * `false` when nothing is filed for this caller, so the warning must not say
+   * their details were taken down. Unset keeps the original sentence — every
+   * caller that never sets it hears exactly what they heard before.
+   */
+  requestOnRecord?: boolean;
 }
 
 export interface BlindTransferDeps {
@@ -159,7 +184,7 @@ export async function performBlindTransfer(
     await deps.twilio.redirectCallerToQueue({
       callerCallSid: request.callerCallSid,
       destination,
-      warning: BLIND_TRANSFER_WARNING,
+      warning: request.requestOnRecord === false ? BLIND_TRANSFER_WARNING_UNRECORDED : BLIND_TRANSFER_WARNING,
       actionUrl: deps.dialResultUrl,
       timeoutSeconds: QUEUE_DIAL_TIMEOUT_SECONDS,
       callerId: deps.callerId,

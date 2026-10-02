@@ -39,6 +39,17 @@ export interface EscalationDetails {
    * DIALING once the queue answers or rings out.
    */
   onBlindDialSettled?: (settlement: BlindDialSettlement) => void | Promise<void>;
+  /**
+   * WHETHER THE CALLER'S REQUEST IS FILED AT THE MOMENT OF THE REDIRECT.
+   *
+   * The blind transfer's spoken warning tells the caller "I've taken your
+   * details down" — a claim only true when a ticket exists. `false` makes the
+   * transport say the same sentence without that clause; unset keeps the
+   * original for every lane that never set it. Since 2026-10-01 a PCP caller
+   * who chooses the queue has nothing filed (operator ruling), so pcpAgent
+   * sets this per dial.
+   */
+  requestOnRecord?: boolean;
 }
 
 /**
