@@ -547,7 +547,6 @@ export function mountVoiceRuntime(
   // boot or in a health check.
   const persistCall = options.persistCall ?? persistRuntimeCall;
   const sweepCall = options.sweepCall ?? runRequestSweep;
-  const sweepPcpFloor = options.sweepPcpFloor ?? runPcpFloor;
   const persistTurns = options.persistTurns ?? persistRuntimeTurns;
   const startRecording = options.startRecording ?? makeRecordingStarter(env);
   const gradeCall = options.gradeCall ?? gradeRuntimeCall;
@@ -560,6 +559,11 @@ export function mountVoiceRuntime(
     laneSourcePromise ??= defaultLaneSource();
     return laneSourcePromise;
   };
+  // The PCP floor reads its sweep off the SAME source the call's agent was
+  // resolved from, so the sweep and the factory are one module (v90 —
+  // pcpFloor.ts says why a separate import of pcpAgent never filed on Node 20).
+  const sweepPcpFloor =
+    options.sweepPcpFloor ?? ((record: VoiceCallRecord) => runPcpFloor(record, { source: laneSource }));
   /** Lanes proven available at least once, so the webhook's own check does
    * not have to await the agent tree on Twilio's clock. A slug is only
    * added here after a successful resolve. */

@@ -118,3 +118,42 @@ describe('a module that registers tools at load is imported one way', () => {
     expect(registry).toMatch(/if \(registry\.has\(def\.name\)\) \{\s*throw new Error\(`\[TOOLS\] duplicate tool name: \$\{def\.name\}`\);/);
   });
 });
+
+/**
+ * AND AN AGENT MODULE IS NEVER REACHED THROUGH `import()` FROM THE RUNTIME (v90).
+ *
+ * The same Node 20 double evaluation, in a second module family, and this one
+ * fired silently for nine days instead of loudly for one afternoon. Every agent
+ * module keeps per-call state at module level (pcpAgent's `pcpCallMetadata`,
+ * the director handles, the identity stores it reads). The runtime builds each
+ * call's agent from `src/config/agents.ts`, which imports the agents
+ * statically and is itself reached through ONE lazy `import("../config/agents")`
+ * in laneRegistry. pcpFloor.ts then reached pcpAgent with its own
+ * `import("../agents/pcpAgent")`, and on Node 20 that was a second copy with an
+ * empty metadata map: the PCP floor logged "has intake but no metadata" on
+ * every call and filed nothing (13 lines on 2026-10-02; 0 floor POSTs since
+ * v69). Nothing threw, so nothing alarmed.
+ *
+ * THE RULE. The runtime reaches an agent ONLY through the registry. Anything
+ * it needs from an agent module travels on that agent's registration (as
+ * `teardownSweep` now does), so it is the factory's own module by construction.
+ */
+describe('an agent module is reached only through the registry', () => {
+  it('no runtime source dynamic-imports anything under src/agents', () => {
+    const agentsDir = join(SRC, 'agents');
+    const offenders: string[] = [];
+    for (const file of productionSources(join(SRC, 'runtime'))) {
+      for (const target of dynamicImportTargets(file)) {
+        if (target.startsWith(agentsDir + '/')) offenders.push(`${file.slice(SRC.length + 1)} -> ${basename(target)}`);
+      }
+    }
+    expect(offenders).toEqual([]);
+  });
+
+  it('the scan sees a dynamic import when there is one (not vacuous)', () => {
+    // laneRegistry's one lazy import of the registry must be found, or the
+    // rule above is passing because the scanner reads nothing.
+    const lane = dynamicImportTargets(join(SRC, 'runtime/laneRegistry.ts')).map((t) => t.slice(SRC.length + 1));
+    expect(lane).toContain('config/agents');
+  });
+});

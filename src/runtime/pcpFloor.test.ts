@@ -96,33 +96,70 @@ describe("the wiring facts a behavioural test cannot see", () => {
   const floor = readFileSync(new URL("./pcpFloor.ts", import.meta.url), "utf8");
   const runtime = readFileSync(new URL("./voiceRuntime.ts", import.meta.url), "utf8");
 
-  it("defaults to the REAL sweep, not a stub", () => {
-    // The seam exists for tests. If its default drifted to a no-op every test
-    // above would still pass and production would file nothing — which is
-    // precisely the failure being fixed, reintroduced through the seam.
+  it("defaults to the lane's OWN teardownSweep, not a stub and not a second import", () => {
+    // THE SEAM'S DEFAULT IS THE PROPERTY THAT MATTERS. If it drifted to a no-op
+    // every behavioural test above would still pass and production would file
+    // nothing — v69's failure. v90 found the default WAS doing that on Node 20:
+    // it was `await import("../agents/pcpAgent")`, which evaluated a second
+    // copy of the module with an empty metadata map, so every call logged
+    // "has intake but no metadata" and filed nothing. The default now reads
+    // the sweep off the lane's registration, which is the only route that is
+    // the factory's own module by construction.
     //
-    // COMMENTS ARE STRIPPED FIRST, because this file's own docstring names
-    // `sweepPcpUnfiledCall` several times and an assertion a comment can
-    // satisfy is not an assertion — the device recognisedCallerBlock.test.ts
-    // uses for the same reason.
-    //
-    // AND IT ASSERTS THE PROPERTY, NOT ONE SPELLING OF IT. The first version
-    // banned the literal `m.sweepPcpUnfiledCall`, which went red the moment
-    // the access form changed from `.then((m) => m.x)` to `(await …).x` for a
-    // typecheck fix that changed no behaviour at all. Banning one spelling of
-    // a right answer is the mirror of banning one spelling of a wrong one
-    // (the v37 round-2 lesson).
+    // Comments are stripped first: this file's docstring quotes the old import
+    // and an assertion a comment can satisfy is not an assertion.
     const code = floor
       .replace(/\/\*[\s\S]*?\*\//g, "")
       .split("\n")
       .filter((l) => !l.trim().startsWith("//"))
       .join("\n");
-    expect(code).toMatch(/import\(["']\.\.\/agents\/pcpAgent["']\)/);
-    expect(code).toMatch(/\bsweepPcpUnfiledCall\b/);
+    expect(code).not.toMatch(/import\(["']\.\.\/agents\//);
+    expect(code).toMatch(/getAgentConfig\(PCP_FLOOR_LANE\)\?\.teardownSweep/);
+  });
+
+  it("registers the sweep from the SAME import statement as the factory", () => {
+    // One import statement is one module evaluation, whatever the loader does
+    // underneath — that is the whole fix. Two statements (or a dynamic import
+    // anywhere) can be two evaluations on Node 20.
+    const agents = readFileSync(new URL("../config/agents.ts", import.meta.url), "utf8");
+    const statement = agents.match(/import\s*\{([^}]*)\}\s*from\s*'\.\.\/agents\/pcpAgent';/);
+    expect(statement).not.toBeNull();
+    expect(statement![1]).toMatch(/\bcreatePcpAgent\b/);
+    expect(statement![1]).toMatch(/\bsweepPcpUnfiledCall\b/);
+    expect(agents.match(/from\s*'\.\.\/agents\/pcpAgent'/g)).toHaveLength(1);
+    const entry = agents.slice(agents.indexOf("id: pcpAgentConfig.slug"));
+    const block = entry.slice(0, entry.indexOf("});"));
+    expect(block).toMatch(/factory:\s*createPcpAgent\b/);
+    expect(block).toMatch(/teardownSweep:\s*sweepPcpUnfiledCall\b/);
+  });
+
+  it("reads the sweep off the source it is given, keyed on the call's own SID", async () => {
+    const teardownSweep = vi.fn(async () => undefined);
+    const getAgentConfig = vi.fn(() => ({ id: "pcp", enabled: true, factory: () => undefined, teardownSweep }));
+    await runPcpFloor(record(), { source: async () => ({ getAgentConfig }) as never });
+    expect(getAgentConfig).toHaveBeenCalledWith("pcp");
+    expect(teardownSweep).toHaveBeenCalledWith("CA0000000000000000000000000000ab01");
+  });
+
+  it("says so loudly, and does not throw, when the lane registers no sweep or no source is given", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      await expect(
+        runPcpFloor(record(), { source: async () => ({ getAgentConfig: () => ({ id: "pcp", enabled: true, factory: () => undefined }) }) as never }),
+      ).resolves.toBeUndefined();
+      expect(error.mock.calls.some((c) => String(c[0]).includes("registers no teardownSweep"))).toBe(true);
+      error.mockClear();
+      await expect(runPcpFloor(record())).resolves.toBeUndefined();
+      expect(error.mock.calls.some((c) => String(c[0]).includes("registers no teardownSweep"))).toBe(true);
+    } finally {
+      error.mockRestore();
+    }
   });
 
   it("is wired into the runtime's teardown, awaited, and after the row", () => {
-    expect(runtime).toMatch(/const sweepPcpFloor = options\.sweepPcpFloor \?\? runPcpFloor;/);
+    // The runtime hands the floor the SAME lane source it resolved the call's
+    // agent from — that is what makes the sweep the factory's own module.
+    expect(runtime).toMatch(/options\.sweepPcpFloor \?\? \(\(record: VoiceCallRecord\) => runPcpFloor\(record, \{ source: laneSource \}\)\)/);
     const persist = runtime.indexOf("const persisted = await withinOrNull(");
     const floorCall = runtime.indexOf("await sweepPcpFloor(record)");
     expect(persist).toBeGreaterThan(-1);
