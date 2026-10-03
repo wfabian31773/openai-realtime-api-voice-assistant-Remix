@@ -41,8 +41,33 @@
  * after the call regardless, so a staffer still gets the caller's words, just
  * not in the same request. Supplying the getter is a separate change with its
  * own arm; it is not smuggled in behind this one.
+ *
+ * v90 — AND THEN IT STILL NEVER FILED, BECAUSE IT WAS READING THE WRONG COPY.
+ * From v69 (2026-09-24) to v89 this function loaded the sweep with
+ * `await import("../agents/pcpAgent")`. The PCP agent itself is built from
+ * `src/config/agents.ts`, which imports pcpAgent STATICALLY and is itself
+ * reached through laneRegistry's lazy `import("../config/agents")`. On Node 20
+ * — the version Replit runs — the floor's dynamic import evaluated pcpAgent a
+ * SECOND time: a fresh module with an EMPTY `pcpCallMetadata` map, while the
+ * director state it imports was shared. So on every call the sweep found the
+ * intake and no metadata, logged "has intake but no metadata — cannot build a
+ * payload", and filed nothing. 2026-10-02: 13 such lines in the deployment
+ * log, 12 on substantive calls, none with a ticket of any provenance; and
+ * since v69, 0 POSTs have ever carried `caller_hung_up_before_completion`.
+ * It does not reproduce on Node 22, which every test runs on — the v77
+ * outage's mechanism (readiness.ts, v78) in a second module.
+ *
+ * THE FIX IS NOT A SECOND IMPORT STYLE, IT IS NO IMPORT. The sweep now travels
+ * WITH the factory: `src/config/agents.ts` registers `teardownSweep` on the
+ * pcp entry from the same import statement as `createPcpAgent`, and this
+ * function reads it off the SAME lane source the runtime resolved the call's
+ * agent from. One import statement is one module evaluation whatever the
+ * loader does underneath, so the metadata the factory wrote is the metadata
+ * the sweep reads — by construction, not by Node version. It also keeps the
+ * lazy boundary laneRegistry exists for: nothing here pulls the agent tree in.
  */
 import type { VoiceCallRecord } from "./mediaStreamBridge";
+import type { LaneSource } from "./laneRegistry";
 
 /** Only this lane has a PCP director, PCP metadata and a PCP endpoint. */
 export const PCP_FLOOR_LANE = "pcp";
@@ -63,8 +88,17 @@ export const PCP_FLOOR_BUDGET_MS = 25_000;
 type PcpSweep = (callId: string) => Promise<void>;
 
 interface PcpFloorOptions {
-  /** Injected for tests. Defaults to the real sweep, lazily imported. */
+  /** Injected for tests. Defaults to the lane's own `teardownSweep`. */
   sweep?: PcpSweep;
+  /**
+   * Where the lane's registration — and so its `teardownSweep` — comes from.
+   * The runtime passes the SAME source it resolved the call's agent from
+   * (voiceRuntime.ts), which is what makes the sweep and the factory one
+   * module. Deliberately NO default: a default would need a value import of
+   * laneRegistry here, and a source other than the runtime's is not
+   * guaranteed to be the factory's module.
+   */
+  source?: () => Promise<LaneSource>;
   budgetMs?: number;
 }
 
@@ -73,7 +107,7 @@ interface PcpFloorOptions {
  *
  * NEVER THROWS and never rejects: the call is already over, and a failed sweep
  * must not surface anywhere near the caller. `sweepPcpUnfiledCall` has its own
- * try/catch, so the guard here is for the dynamic import and for an injected
+ * try/catch, so the guard here is for the lane source and for an injected
  * seam that misbehaves.
  *
  * KEYED ON THE CallSid, which is what makes this work at all: the runtime
@@ -89,8 +123,15 @@ export async function runPcpFloor(
   const budgetMs = options.budgetMs ?? PCP_FLOOR_BUDGET_MS;
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    const sweep: PcpSweep =
-      options.sweep ?? (await import("../agents/pcpAgent")).sweepPcpUnfiledCall;
+    const sweep: PcpSweep | undefined =
+      options.sweep ??
+      (options.source ? (await options.source()).getAgentConfig(PCP_FLOOR_LANE)?.teardownSweep : undefined);
+    if (!sweep) {
+      // A registration without its sweep is a wiring defect, not a quiet
+      // call: say so loudly, because the alternative is v69's silence.
+      console.error(`[PCP FLOOR] the pcp lane registers no teardownSweep — nothing can file for ${record.callSid}`);
+      return;
+    }
     await Promise.race([
       sweep(record.callSid),
       new Promise<void>((resolve) => {

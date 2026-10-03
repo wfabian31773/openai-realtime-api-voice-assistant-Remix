@@ -89,6 +89,9 @@ export interface LaneConfig {
   /** The line the practice answers with. Present on every registered
    * inbound agent; the SIP path plays it and the prompts assume it. */
   greeting?: string;
+  /** The lane's teardown filer (PCP's floor), from the same module as
+   * `factory`. See src/runtime/pcpFloor.ts. */
+  teardownSweep?: (callId: string) => Promise<void>;
 }
 
 /**
