@@ -7,7 +7,7 @@ import { createFantasyFootballAgent } from '../agents/fantasyFootballAgent';
 import { createNoIvrAgent, noIvrAgentConfig, type NoIvrAgentMetadata } from '../agents/noIvrAgent';
 import { createNoIvrAgentV2, noIvrAgentV2Config } from '../agents/noIvrAgentV2';
 import { createAzulSchedulingAgent, azulSchedulingAgentConfig } from '../agents/azulSchedulingAgent';
-import { createPcpAgent, pcpAgentConfig } from '../agents/pcpAgent';
+import { createPcpAgent, pcpAgentConfig, sweepPcpUnfiledCall } from '../agents/pcpAgent';
 import { createOpticalAgent, opticalAgentConfig } from '../agents/opticalAgent';
 import { createSurgeryAgent, surgeryAgentConfig } from '../agents/surgeryAgent';
 import { createTechAgent, techAgentConfig } from '../agents/techAgent';
@@ -30,6 +30,14 @@ export interface AgentConfig {
    *  into any language. Read by the voice runtime's language block. */
   spokenLanguages?: readonly string[];
   greeting?: string;   // Agent greeting message
+  /**
+   * The lane's teardown filer, when it has one (PCP's lost-request floor).
+   * Carried HERE, beside `factory`, so the runtime gets it from the same
+   * import statement the factory came from — one module evaluation, so the
+   * per-call state the factory wrote is the state the sweep reads. See
+   * src/runtime/pcpFloor.ts for the Node 20 double evaluation this prevents.
+   */
+  teardownSweep?: (callId: string) => Promise<void>;
 }
 
 export class AgentRegistry {
@@ -218,6 +226,7 @@ export class AgentRegistry {
       voice: pcpAgentConfig.voice,
       language: pcpAgentConfig.language,
       greeting: pcpAgentConfig.greeting,
+      teardownSweep: sweepPcpUnfiledCall,
     });
 
     // Outbound agents

@@ -171,6 +171,8 @@ async function harness(
     resolveGreeting?: (slug: string) => Promise<string | null>;
     sweepCall?: (record: unknown) => Promise<unknown>;
     sweepPcpFloor?: (record: unknown) => Promise<unknown>;
+    /** Leave the runtime's OWN floor default in place (v90). */
+    realPcpFloor?: boolean;
     persistCall?: (record: unknown) => Promise<boolean>;
     persistTurns?: (record: unknown, ids: unknown) => Promise<unknown>;
     gradeCall?: (record: unknown, ids: unknown) => Promise<unknown>;
@@ -240,8 +242,9 @@ async function harness(
         persistedIdentity.push(identity);
         return true;
       }),
-    sweepPcpFloor:
-      over.sweepPcpFloor ??
+    sweepPcpFloor: over.realPcpFloor
+      ? undefined
+      : over.sweepPcpFloor ??
       (async (record) => {
         // The floor files a request, so like sweepCall it must run AFTER the
         // durable record — asserted, not assumed.
@@ -916,6 +919,28 @@ describe("one whole call, end to end, offline", () => {
     // The durable record landed before the floor saw the call, exactly as for
     // the generic sweep: the row is the evidence every measurement rests on.
     expect(h.pcpSwept[0]!.persistedFirst).toBe(1);
+  });
+
+  /**
+   * v90 — AND THE DEFAULT HANDS THE LANE'S OWN SWEEP THE CALL. Every test above
+   * replaces the floor with a stub, so none of them could see what production
+   * actually ran: a floor that imported pcpAgent separately and, on Node 20,
+   * read a second copy with no call metadata (0 floor POSTs since v69). The
+   * floor now takes `teardownSweep` off the lane's registration, through the
+   * SAME source the call's agent was resolved from — asserted here with the
+   * runtime's real default left in place.
+   */
+  it("hands the pcp lane's own teardownSweep the CallSid, through the runtime's default", async () => {
+    const teardownSweep = vi.fn(async () => undefined);
+    const h = await harness({ realPcpFloor: true, laneSource: laneSource({ id: "pcp", teardownSweep }), env: { ...ENV, PCP_HUMAN_AGENT_NUMBER: "+18185551234", TWILIO_ACCOUNT_SID: "AC00000000000000000000000000000000", TWILIO_PHONE_NUMBER: "+18185550000", DOMAIN: "voice.example.test" } });
+    const answered = await post(h, "/voice/pcp", { CallSid: "CA-floor-real", From: "+1", To: "+2" });
+    const { ws } = await openStream(h, "CA-floor-real", tokenFrom(answered.text));
+    await settle(2);
+    ws.close();
+    await settle(8);
+    expect(h.persisted).toHaveLength(1);
+    expect(teardownSweep).toHaveBeenCalledTimes(1);
+    expect(teardownSweep).toHaveBeenCalledWith("CA-floor-real");
   });
 
   it("finishes teardown even when the PCP floor rejects", async () => {

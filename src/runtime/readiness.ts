@@ -611,8 +611,25 @@ import { callEnvironment } from "./callRecord";
  * tickets since May. `services/afterHoursRouting.ts` decides;
  * `noIvrAfterHoursRouting.test.ts` drives the real agent.
  */
+/**
+ * v90 — THE PCP FLOOR READS THE FACTORY'S OWN MODULE (2026-10-03). v69 wired
+ * `sweepPcpUnfiledCall` into this runtime's teardown and it has never filed:
+ * 0 POSTs ever carried its literals, and on 2026-10-02 the deployment log shows
+ * 13 "has intake but no metadata — cannot build a payload" lines, 12 on
+ * substantive PCP calls with a purpose on record and no ticket of any
+ * provenance. `pcpFloor.ts` loaded the sweep with its own
+ * `import("../agents/pcpAgent")`; on Node 20 (Replit) that evaluated pcpAgent
+ * a second time, with an empty `pcpCallMetadata` map, while the factory that
+ * built the call came from `src/config/agents.ts`'s static import. The v77
+ * outage's mechanism in a second module, silent this time. The sweep now
+ * travels with the factory: `teardownSweep` on the pcp registration, from the
+ * same import statement as `createPcpAgent`, read off the same lane source the
+ * runtime resolved the call from. Reproduced on Node 20 and proven fixed there;
+ * `toolModulesAreImportedOneWay.test.ts` now also refuses any runtime
+ * `import()` of an agent module.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v89-the-after-hours-line-routes-what-was-ruled-20261002";
+  "voice-runtime-v90-the-pcp-floor-reads-the-factorys-own-module-20261003";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can
