@@ -51,6 +51,14 @@ import {
   vadBootMarker,
   type GrokTransport,
 } from "./grokSession";
+import {
+  connectWithFirstEventRetry,
+  connectRetries,
+  firstEventTimeoutMs,
+  noteFirstEventWait,
+  ProviderConnectAbortedError,
+} from "./providerConnect";
+import { runSetupFailureFloor } from "./setupFailureFloor";
 import { resolveLane, defaultLaneSource, type LaneSource } from "./laneRegistry";
 import { laneRoster, formatLaneRoster, type LaneReadiness } from "./laneRoster";
 import {
@@ -477,6 +485,23 @@ export interface VoiceRuntimeOptions {
    */
   createTransport?: (config: { apiKey: string; model: string }) => RuntimeTransport;
   /**
+   * How long to wait for the FIRST inbound event after the WebSocket
+   * upgrades. Defaults to RUNTIME_FIRST_EVENT_TIMEOUT_MS (2.5 s). The
+   * 15 s PROVIDER_SETUP_DEADLINE_MS still covers session.updated after
+   * that first event.
+   */
+  firstEventTimeoutMs?: number;
+  /**
+   * Retries AFTER the first connect attempt. Defaults to
+   * RUNTIME_CONNECT_RETRIES (2) — three attempts in total.
+   */
+  connectRetries?: number;
+  /**
+   * Files a stand-in ticket when setup never reached a configured
+   * session. Injected for tests. Default is runSetupFailureFloor.
+   */
+  fileSetupFailure?: (record: VoiceCallRecord) => Promise<unknown>;
+  /**
    * Twilio operations for the warm transfer. Injected for tests; when
    * omitted, a client is built lazily from TWILIO_ACCOUNT_SID/AUTH_TOKEN.
    * Whether transfers are OFFERED at all is decided by
@@ -564,6 +589,24 @@ export function mountVoiceRuntime(
   // pcpFloor.ts says why a separate import of pcpAgent never filed on Node 20).
   const sweepPcpFloor =
     options.sweepPcpFloor ?? ((record: VoiceCallRecord) => runPcpFloor(record, { source: laneSource }));
+  const fileSetupFailure = options.fileSetupFailure ?? runSetupFailureFloor;
+  /**
+   * Bound persist, then ALWAYS file the setup-failure ticket.
+   *
+   * Codex P1 on #347: the no-bridge path used to chain
+   * `persistCall(...).then(() => fileSetupFailure(...))`. A rejected write
+   * skipped the ticket (empty catch). A hung write waited forever. Both are
+   * the outage this floor exists to cover. Same bound as bridge teardown
+   * (`withinOrNull` + persistBeforeSweepMs). The floor is idempotent on
+   * `call-<sid>-setup-failure`.
+   */
+  const persistBoundThenFileSetup = async (record: VoiceCallRecord): Promise<void> => {
+    await withinOrNull(
+      persistCall(record),
+      options.persistBeforeSweepMs ?? PERSIST_BEFORE_SWEEP_MS,
+    );
+    await fileSetupFailure(record).catch(() => undefined);
+  };
   /** Lanes proven available at least once, so the webhook's own check does
    * not have to await the agent tree on Twilio's clock. A slug is only
    * added here after a successful resolve. */
@@ -1064,7 +1107,7 @@ export function mountVoiceRuntime(
           // sits BEFORE that catch, and the registry copy is consumed by
           // the redirect — a claimed call for an unknown or disabled lane
           // would otherwise vanish (Codex review, PR #227 round 18).
-          void persistCall({
+          const unknownLaneRecord: VoiceCallRecord = {
             callSid: entry.callSid,
             streamSid,
             slug: entry.slug,
@@ -1077,7 +1120,8 @@ export function mountVoiceRuntime(
             interruptions: 0,
             startedAtMs,
             endedAtMs: Date.now(),
-          }).catch(() => undefined);
+          };
+          void persistBoundThenFileSetup(unknownLaneRecord);
           // And what the caller's audio did, on an exit that never built a
           // bridge (Codex P2, #327). Part of the no-audio population, so the
           // row goes here too or the instrument's claim of one per call is
@@ -1176,9 +1220,6 @@ export function mountVoiceRuntime(
           );
         }
 
-        const transport = options.createTransport
-          ? options.createTransport({ apiKey: lane.voice.apiKey, model: lane.voice.model })
-          : new WebSocketGrokTransport(lane.voice.apiKey, lane.voice.model);
         /**
          * ONE GREETING, KNOWN TO BOTH SIDES.
          *
@@ -1192,6 +1233,50 @@ export function mountVoiceRuntime(
             recognisedFirstName(precontext),
             greetingStyleFor(entry.slug),
           ) || null;
+        /**
+         * FIRST-EVENT RETRY, BEFORE THE BRIDGE (v91).
+         *
+         * xAI accepts the WebSocket (~0.2 s, 101) and sometimes never
+         * sends `session.created`. Waiting the 15 s handshake deadline
+         * then dropping the call left the caller in silence with no
+         * ticket. Open, wait ~2.5 s for the first inbound event, detach
+         * a stalled socket so its close cannot end the call, try again.
+         * The winning transport is the one the session is built on.
+         *
+         * createSession binds onMessage in the constructor, so
+         * commitBuffered MUST run after the session exists — otherwise
+         * the buffered session.created lands on a null handler.
+         */
+        // Holder, not a `let`, so the assignment inside `open` is visible
+        // to the type checker after the await. A `let live = null` assigned
+        // only in a closure stays `null` forever to tsc, and the null-check
+        // then narrows the transport to `never`.
+        const opened: { transport?: RuntimeTransport } = {};
+        await connectWithFirstEventRetry({
+          open: async () => {
+            if (socketGone) throw new ProviderConnectAbortedError();
+            const t = options.createTransport
+              ? options.createTransport({ apiKey: lane.voice.apiKey, model: lane.voice.model })
+              : new WebSocketGrokTransport(lane.voice.apiKey, lane.voice.model);
+            opened.transport = t;
+            await t.connect();
+            return {
+              headers: t.upgradeHeaders?.() ?? {},
+              waitForFirstEvent: (ms) =>
+                t.waitForFirstEvent?.(ms) ?? Promise.resolve(true),
+              detachAndClose: () => {
+                if (t.detachAndClose) t.detachAndClose();
+                else t.close();
+              },
+            };
+          },
+          shouldAbort: () => socketGone,
+          firstEventTimeoutMs: options.firstEventTimeoutMs ?? firstEventTimeoutMs(env),
+          maxRetries: options.connectRetries ?? connectRetries(env),
+          noteFirstEventWait,
+        });
+        const transport = opened.transport;
+        if (!transport) throw new Error("provider connect returned no transport");
         bridge = new VoiceCallBridge({
           context,
           startedAtMs,
@@ -1345,6 +1430,14 @@ export function mountVoiceRuntime(
              * of 94 PCP calls on 2026-09-22.
              */
             await sweepPcpFloor(record).catch(() => undefined);
+            /**
+             * AND THE SETUP-FAILURE FLOOR (v91). A call that never reached
+             * a configured session used to persist provider_failure and
+             * file nothing. The retry absorbs most stalls; this is what
+             * runs when they do not. Gated inside the helper — a call
+             * that already spoke or hung up during the factory is a no-op.
+             */
+            await fileSetupFailure(record).catch(() => undefined);
             // Telemetry last: the per-turn record lights up the Observatory's
             // call page but must never delay a caller's request.
             void persistTurns(record, { callLogId }).catch(() => undefined);
@@ -1406,12 +1499,13 @@ export function mountVoiceRuntime(
               .catch(() => undefined);
           },
         });
-        // Connect AFTER the bridge exists: a connection that fails then has
-        // somewhere to report to and the call tears down cleanly, instead
-        // of leaving the caller on an open socket in silence.
-        // The handshake gets its own deadline: the dead-air watchdog only
-        // arms once the session is configured, so without this the window
-        // before that is covered by nothing but the ten-minute ceiling.
+        // The session is constructed above, so its onMessage is bound.
+        // Flush the first-event buffer now — session.created included —
+        // or the handshake never starts.
+        transport.commitBuffered?.();
+        // The 15 s deadline now covers session.updated AFTER the first
+        // event, not the wait for session.created. A stall is already
+        // absorbed (or thrown) by the retry above.
         setupDeadline = setTimeout(() => {
           setupDeadline = null;
           console.error(`[voice-runtime] provider setup timed out for ${entry.callSid}`);
@@ -1419,11 +1513,16 @@ export function mountVoiceRuntime(
         }, options.providerSetupDeadlineMs ?? PROVIDER_SETUP_DEADLINE_MS);
         (setupDeadline as unknown as { unref?: () => void }).unref?.();
         (bridge.getSession() as GrokVoiceSession).markConnecting();
-        await transport.connect();
+        bridge.noteProviderConnecting();
+        // First event already arrived. Ready BEFORE pending-frame replay
+        // so a queued Twilio `stop` stays caller_hangup (the caller left
+        // after we had a live session), not provider_failure.
+        bridge.noteProviderReady();
         if (socketGone) {
           // Twilio went away while the provider socket was opening. Route it
           // through the bridge's own teardown so the transport is closed and
-          // exactly one outcome is recorded.
+          // exactly one outcome is recorded. Ready is already set, so this
+          // is caller_hangup — they hung up after we had a session.
           bridge.handleSocketClosed();
           return;
         }
@@ -1447,7 +1546,7 @@ export function mountVoiceRuntime(
           // would vanish entirely (Codex review, PR #227 round 17).
           // Minimal record, fire-and-forget: failing to log a failure
           // must not block closing the caller's socket.
-          void persistCall({
+          const setupFailRecord: VoiceCallRecord = {
             callSid: entry.callSid,
             streamSid,
             slug: entry.slug,
@@ -1460,7 +1559,8 @@ export function mountVoiceRuntime(
             interruptions: 0,
             startedAtMs,
             endedAtMs: Date.now(),
-          }).catch(() => undefined);
+          };
+          void persistBoundThenFileSetup(setupFailRecord);
           // And what the caller's audio did, on an exit that never built a
           // bridge (Codex P2, #327). Part of the no-audio population, so the
           // row goes here too or the instrument's claim of one per call is

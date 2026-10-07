@@ -36,6 +36,8 @@ import { transferDestinationStatus, transferUnavailableReason } from "./runtimeT
 import type { GrokServerEvent } from "./wireTypes";
 import type { LaneConfig, LaneSource } from "./laneRegistry";
 import { registerCallHandoff, registeredHandoffCount } from "../tools/handoffBroker";
+import { runSetupFailureFloor } from "./setupFailureFloor";
+import type { VoiceCallRecord } from "./mediaStreamBridge";
 
 // v77: resolveLane binds the PIPELINE's own tools (set_spoken_language) through
 // the tool library, whose telemetry module validates the environment at import.
@@ -52,13 +54,21 @@ const ENV = {
 };
 
 /** A fake Grok socket: records what the runtime sends and lets the test
- * play server events back in wire order. */
+ * play server events back in wire order. Buffers inbound events until
+ * commitBuffered, the same way WebSocketGrokTransport does — otherwise
+ * a connect-time session.created is lost before GrokVoiceSession binds
+ * onMessage. */
 class FakeGrokTransport implements RuntimeTransport {
   public sent: Array<Record<string, unknown>> = [];
   public closed = false;
+  public detached = false;
   private onMsg: ((data: string) => void) | null = null;
   private onErr: ((err: Error) => void) | null = null;
   private onCls: (() => void) | null = null;
+  private buffer: string[] = [];
+  private committed = false;
+  private firstEventArrived = false;
+  private firstEventWaiters: Array<(arrived: boolean) => void> = [];
 
   /** True when connect() ran AFTER close(). A `closed` flag alone cannot
    * see this: teardown closes the transport, then a connect behind it
@@ -66,15 +76,25 @@ class FakeGrokTransport implements RuntimeTransport {
    * owning it. The order is the defect, so the fake records the order. */
   public connectedAfterClose = false;
 
-  /** Set to stall: connect resolves but the handshake never completes,
-   * which is the failure the setup deadline exists for. */
+  /** Connect resolves and session.created is emitted, but session.updated
+   * never arrives — the failure the 15 s setup deadline exists for.
+   * MUST still emit session.created: if it does not, waitForFirstEvent
+   * times out and the first-event retry fires instead of the deadline. */
   public stallHandshake = false;
+
+  /** Connect resolves and NO first event is emitted — the xAI 101-then-
+   * silence stall. Independent of stallHandshake. */
+  public stallFirstEvent = false;
+
+  public headers = { xTraceId: "trace-test", cfRay: "ray-test" };
 
   async connect(): Promise<void> {
     if (this.closed) this.connectedAfterClose = true;
-    if (this.stallHandshake) return;
-    // The handshake the real wire performs on open.
-    queueMicrotask(() => this.emit({ type: "session.created" } as GrokServerEvent));
+    if (this.stallFirstEvent) return;
+    // Synchronous so waitForFirstEvent (called after connect returns)
+    // already sees firstEventArrived. A microtask race here is what
+    // the real buffer exists to close.
+    this.emit({ type: "session.created" } as GrokServerEvent);
   }
   send(data: string): void {
     this.sent.push(JSON.parse(data));
@@ -92,7 +112,53 @@ class FakeGrokTransport implements RuntimeTransport {
     this.onCls = cb;
   }
   emit(event: GrokServerEvent): void {
-    this.onMsg?.(JSON.stringify(event));
+    this.handleInbound(JSON.stringify(event));
+  }
+  private handleInbound(data: string): void {
+    if (!this.firstEventArrived) {
+      this.firstEventArrived = true;
+      this.wakeFirstEventWaiters(true);
+    }
+    if (!this.committed) {
+      this.buffer.push(data);
+      return;
+    }
+    this.onMsg?.(data);
+  }
+  private wakeFirstEventWaiters(arrived: boolean) {
+    const waiters = this.firstEventWaiters.splice(0);
+    for (const w of waiters) w(arrived);
+  }
+  async waitForFirstEvent(ms: number): Promise<boolean> {
+    if (this.firstEventArrived) return true;
+    if (this.closed || this.detached) return false;
+    return new Promise((resolve) => {
+      const t = setTimeout(() => {
+        this.firstEventWaiters = this.firstEventWaiters.filter((w) => w !== onArrive);
+        resolve(this.firstEventArrived);
+      }, ms);
+      const onArrive = (arrived: boolean) => {
+        clearTimeout(t);
+        resolve(arrived);
+      };
+      this.firstEventWaiters.push(onArrive);
+    });
+  }
+  commitBuffered(): void {
+    this.committed = true;
+    const pending = this.buffer.splice(0);
+    for (const data of pending) this.onMsg?.(data);
+  }
+  detachAndClose(): void {
+    this.detached = true;
+    this.closed = true;
+    this.onMsg = null;
+    this.onErr = null;
+    this.onCls = null;
+    this.wakeFirstEventWaiters(false);
+  }
+  upgradeHeaders(): { xTraceId?: string; cfRay?: string } {
+    return { ...this.headers };
   }
   emitError(err: Error): void {
     this.onErr?.(err);
@@ -153,6 +219,11 @@ interface Harness {
   wsUrl: string;
   registry: CallSessionRegistry;
   transports: FakeGrokTransport[];
+  /**
+   * Setup-failure tickets the stubbed floor accepted. The real floor
+   * POSTs; incidental provider_failure fixtures must not.
+   */
+  setupFailures: Array<Record<string, unknown>>;
   close: () => Promise<void>;
 }
 
@@ -166,6 +237,13 @@ async function harness(
   over: {
     laneSource?: LaneSource;
     stallHandshake?: boolean;
+    /** Every transport stalls after 101 — no first event. */
+    stallFirstEvent?: boolean;
+    /** Stall the first N transports; later ones emit session.created. */
+    firstEventStalls?: number;
+    firstEventTimeoutMs?: number;
+    connectRetries?: number;
+    fileSetupFailure?: (record: VoiceCallRecord) => Promise<unknown>;
     providerSetupDeadlineMs?: number;
     fetchPrecontext?: (phone: string) => Promise<unknown>;
     resolveGreeting?: (slug: string) => Promise<string | null>;
@@ -196,6 +274,7 @@ async function harness(
   const audioRows: Array<{ callSid: string; outcome: string; counts: unknown }> = [];
   const swept: Array<Record<string, unknown>> = [];
   const pcpSwept: Array<Record<string, unknown>> = [];
+  const setupFailures: Array<Record<string, unknown>> = [];
   mountVoiceRuntime(app, server, {
     env: over.env ?? ENV,
     // Short so the deadline test does not wait on a production-length one.
@@ -205,9 +284,21 @@ async function harness(
     createTransport: () => {
       const t = new FakeGrokTransport();
       t.stallHandshake = over.stallHandshake ?? false;
+      // Flags BEFORE push: firstEventStalls: 1 stalls while length is still 0.
+      if (over.stallFirstEvent) t.stallFirstEvent = true;
+      else if ((over.firstEventStalls ?? 0) > transports.length) t.stallFirstEvent = true;
       transports.push(t);
       return t;
     },
+    firstEventTimeoutMs: over.firstEventTimeoutMs,
+    connectRetries: over.connectRetries,
+    fileSetupFailure:
+      over.fileSetupFailure ??
+      (async (record) =>
+        runSetupFailureFloor(record, async (ticket) => {
+          setupFailures.push(ticket);
+          return { success: true, ticketNumber: "VA-SETUP-1" };
+        })),
     providerSetupDeadlineMs: over.providerSetupDeadlineMs,
     callRowDeadlineMs: over.callRowDeadlineMs,
     fetchPrecontext: over.fetchPrecontext,
@@ -278,6 +369,7 @@ async function harness(
     wsUrl: `ws://127.0.0.1:${port}/voice/stream`,
     registry,
     transports,
+    setupFailures,
     close: () =>
       new Promise<void>((resolve) => {
         // A media stream left open would hold server.close() forever —
@@ -759,6 +851,105 @@ describe("one whole call, end to end, offline", () => {
     expect(h.registry.get("CA11")?.outcome ?? null).toBeNull();
     await new Promise((r) => setTimeout(r, 350));
     expect(h.registry.consumeOutcome("CA11")).toBe("provider_failure");
+  });
+
+  it("retries a first-event stall and opens the session on the next attempt", async () => {
+    const h = await harness({ firstEventStalls: 1, firstEventTimeoutMs: 80, connectRetries: 2 });
+    const answered = await post(h, "/voice/optical", { CallSid: "CA91A", From: "+15551234567", To: "+2" });
+    await openStream(h, "CA91A", tokenFrom(answered.text));
+    await waitFor(() => h.transports.length === 2, "the retry transport to register");
+    expect(h.transports[0].detached).toBe(true);
+    expect(h.transports[1].detached).toBe(false);
+    h.transports[1].emit({ type: "session.updated" } as GrokServerEvent);
+    await settle(4);
+    expect(h.registry.get("CA91A")?.outcome ?? null).toBeNull();
+    expect(h.setupFailures).toHaveLength(0);
+  });
+
+  it("files a setup-failure ticket and speaks the apology when every retry stalls", async () => {
+    const h = await harness({ stallFirstEvent: true, firstEventTimeoutMs: 80, connectRetries: 2 });
+    const answered = await post(h, "/voice/optical", { CallSid: "CA91B", From: "+15551234567", To: "+2" });
+    await openStream(h, "CA91B", tokenFrom(answered.text));
+    await waitFor(
+      () => h.transports.length === 3 && h.persisted.length >= 1 && h.setupFailures.length >= 1,
+      "every retry to stall and the floor to file",
+      3000,
+    );
+    expect(h.transports.every((t) => t.detached)).toBe(true);
+    expect(h.persisted[0].outcome).toBe("provider_failure");
+    expect(h.setupFailures[0]).toMatchObject({
+      departmentId: 1,
+      requestTypeId: 66,
+      requestReasonId: 536,
+      patientFirstName: "Unnamed",
+      patientLastName: "Caller",
+      idempotencyKey: "call-CA91B-setup-failure",
+    });
+    const after = await post(h, "/voice/optical/after", { CallSid: "CA91B" });
+    expect(after.text).toContain("technical trouble");
+  });
+
+  it("files the setup-failure ticket when persistCall rejects", async () => {
+    // Codex P1 on #347: persist-then-file meant a rejected write skipped
+    // the ticket — the outage the floor exists to cover.
+    const h = await harness({
+      stallFirstEvent: true,
+      firstEventTimeoutMs: 80,
+      connectRetries: 2,
+      persistCall: async () => {
+        throw new Error("db down");
+      },
+    });
+    const answered = await post(h, "/voice/optical", { CallSid: "CA91C", From: "+15551234567", To: "+2" });
+    await openStream(h, "CA91C", tokenFrom(answered.text));
+    await waitFor(
+      () => h.transports.length === 3 && h.setupFailures.length >= 1,
+      "every retry to stall and the floor to file despite persist rejecting",
+      3000,
+    );
+    expect(h.persisted).toHaveLength(0);
+    expect(h.setupFailures).toHaveLength(1);
+    expect(h.setupFailures[0]).toMatchObject({
+      departmentId: 1,
+      requestTypeId: 66,
+      requestReasonId: 536,
+      patientFirstName: "Unnamed",
+      patientLastName: "Caller",
+      idempotencyKey: "call-CA91C-setup-failure",
+    });
+    const after = await post(h, "/voice/optical/after", { CallSid: "CA91C" });
+    expect(after.text).toContain("technical trouble");
+  });
+
+  it("files the setup-failure ticket when persistCall never settles", async () => {
+    // Same P1, the hang arm: an unbounded persist waited forever for the
+    // ticket. Bound the write the way teardown already does.
+    const h = await harness({
+      stallFirstEvent: true,
+      firstEventTimeoutMs: 80,
+      connectRetries: 2,
+      persistCall: () => new Promise<boolean>(() => {}),
+      persistBeforeSweepMs: 40,
+    });
+    const answered = await post(h, "/voice/optical", { CallSid: "CA91D", From: "+15551234567", To: "+2" });
+    await openStream(h, "CA91D", tokenFrom(answered.text));
+    await waitFor(
+      () => h.transports.length === 3 && h.setupFailures.length >= 1,
+      "every retry to stall and the floor to file despite persist hanging",
+      3000,
+    );
+    expect(h.persisted).toHaveLength(0);
+    expect(h.setupFailures).toHaveLength(1);
+    expect(h.setupFailures[0]).toMatchObject({
+      departmentId: 1,
+      requestTypeId: 66,
+      requestReasonId: 536,
+      patientFirstName: "Unnamed",
+      patientLastName: "Caller",
+      idempotencyKey: "call-CA91D-setup-failure",
+    });
+    const after = await post(h, "/voice/optical/after", { CallSid: "CA91D" });
+    expect(after.text).toContain("technical trouble");
   });
 
   it("does NOT fire the setup deadline on a healthy handshake", async () => {
