@@ -590,6 +590,23 @@ export function mountVoiceRuntime(
   const sweepPcpFloor =
     options.sweepPcpFloor ?? ((record: VoiceCallRecord) => runPcpFloor(record, { source: laneSource }));
   const fileSetupFailure = options.fileSetupFailure ?? runSetupFailureFloor;
+  /**
+   * Bound persist, then ALWAYS file the setup-failure ticket.
+   *
+   * Codex P1 on #347: the no-bridge path used to chain
+   * `persistCall(...).then(() => fileSetupFailure(...))`. A rejected write
+   * skipped the ticket (empty catch). A hung write waited forever. Both are
+   * the outage this floor exists to cover. Same bound as bridge teardown
+   * (`withinOrNull` + persistBeforeSweepMs). The floor is idempotent on
+   * `call-<sid>-setup-failure`.
+   */
+  const persistBoundThenFileSetup = async (record: VoiceCallRecord): Promise<void> => {
+    await withinOrNull(
+      persistCall(record),
+      options.persistBeforeSweepMs ?? PERSIST_BEFORE_SWEEP_MS,
+    );
+    await fileSetupFailure(record).catch(() => undefined);
+  };
   /** Lanes proven available at least once, so the webhook's own check does
    * not have to await the agent tree on Twilio's clock. A slug is only
    * added here after a successful resolve. */
@@ -1104,9 +1121,7 @@ export function mountVoiceRuntime(
             startedAtMs,
             endedAtMs: Date.now(),
           };
-          void persistCall(unknownLaneRecord)
-            .then(() => fileSetupFailure(unknownLaneRecord))
-            .catch(() => undefined);
+          void persistBoundThenFileSetup(unknownLaneRecord);
           // And what the caller's audio did, on an exit that never built a
           // bridge (Codex P2, #327). Part of the no-audio population, so the
           // row goes here too or the instrument's claim of one per call is
@@ -1545,9 +1560,7 @@ export function mountVoiceRuntime(
             startedAtMs,
             endedAtMs: Date.now(),
           };
-          void persistCall(setupFailRecord)
-            .then(() => fileSetupFailure(setupFailRecord))
-            .catch(() => undefined);
+          void persistBoundThenFileSetup(setupFailRecord);
           // And what the caller's audio did, on an exit that never built a
           // bridge (Codex P2, #327). Part of the no-audio population, so the
           // row goes here too or the instrument's claim of one per call is

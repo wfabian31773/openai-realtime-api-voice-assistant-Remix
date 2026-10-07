@@ -1362,6 +1362,11 @@ the same SID cannot collide. Description is the sweep's callback-only
 sentence. Priority high. Staff note says the name is a stand-in and
 caller ID is the number to ring.
 
+The ticket files even if the call-row write rejects or never settles
+(Codex P1 on #347). Persist is bounded the same way as bridge teardown
+(`withinOrNull` + `PERSIST_BEFORE_SWEEP_MS`); the floor always runs
+after that bound. Same key.
+
 **Wayne does not have to set anything.** The defaults work. The three
 env knobs above are optional dials if 2500 ms is too short or two
 retries are too few. No new secret.

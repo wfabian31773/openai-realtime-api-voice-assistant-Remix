@@ -889,6 +889,69 @@ describe("one whole call, end to end, offline", () => {
     expect(after.text).toContain("technical trouble");
   });
 
+  it("files the setup-failure ticket when persistCall rejects", async () => {
+    // Codex P1 on #347: persist-then-file meant a rejected write skipped
+    // the ticket — the outage the floor exists to cover.
+    const h = await harness({
+      stallFirstEvent: true,
+      firstEventTimeoutMs: 80,
+      connectRetries: 2,
+      persistCall: async () => {
+        throw new Error("db down");
+      },
+    });
+    const answered = await post(h, "/voice/optical", { CallSid: "CA91C", From: "+15551234567", To: "+2" });
+    await openStream(h, "CA91C", tokenFrom(answered.text));
+    await waitFor(
+      () => h.transports.length === 3 && h.setupFailures.length >= 1,
+      "every retry to stall and the floor to file despite persist rejecting",
+      3000,
+    );
+    expect(h.persisted).toHaveLength(0);
+    expect(h.setupFailures).toHaveLength(1);
+    expect(h.setupFailures[0]).toMatchObject({
+      departmentId: 1,
+      requestTypeId: 66,
+      requestReasonId: 536,
+      patientFirstName: "Unnamed",
+      patientLastName: "Caller",
+      idempotencyKey: "call-CA91C-setup-failure",
+    });
+    const after = await post(h, "/voice/optical/after", { CallSid: "CA91C" });
+    expect(after.text).toContain("technical trouble");
+  });
+
+  it("files the setup-failure ticket when persistCall never settles", async () => {
+    // Same P1, the hang arm: an unbounded persist waited forever for the
+    // ticket. Bound the write the way teardown already does.
+    const h = await harness({
+      stallFirstEvent: true,
+      firstEventTimeoutMs: 80,
+      connectRetries: 2,
+      persistCall: () => new Promise<boolean>(() => {}),
+      persistBeforeSweepMs: 40,
+    });
+    const answered = await post(h, "/voice/optical", { CallSid: "CA91D", From: "+15551234567", To: "+2" });
+    await openStream(h, "CA91D", tokenFrom(answered.text));
+    await waitFor(
+      () => h.transports.length === 3 && h.setupFailures.length >= 1,
+      "every retry to stall and the floor to file despite persist hanging",
+      3000,
+    );
+    expect(h.persisted).toHaveLength(0);
+    expect(h.setupFailures).toHaveLength(1);
+    expect(h.setupFailures[0]).toMatchObject({
+      departmentId: 1,
+      requestTypeId: 66,
+      requestReasonId: 536,
+      patientFirstName: "Unnamed",
+      patientLastName: "Caller",
+      idempotencyKey: "call-CA91D-setup-failure",
+    });
+    const after = await post(h, "/voice/optical/after", { CallSid: "CA91D" });
+    expect(after.text).toContain("technical trouble");
+  });
+
   it("does NOT fire the setup deadline on a healthy handshake", async () => {
     const h = await harness({ providerSetupDeadlineMs: 200 });
     const answered = await post(h, "/voice/optical", { CallSid: "CA12", From: "+1", To: "+2" });
