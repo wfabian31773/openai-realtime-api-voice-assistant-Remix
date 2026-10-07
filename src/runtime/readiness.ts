@@ -628,8 +628,27 @@ import { callEnvironment } from "./callRecord";
  * `toolModulesAreImportedOneWay.test.ts` now also refuses any runtime
  * `import()` of an agent module.
  */
+/**
+ * v91 — THE SESSION STALL RECONNECTS (2026-10-06). xAI accepts the WebSocket
+ * (HTTP 101) and sometimes never sends `session.created`. The runtime used to
+ * wait the 15 s setup deadline, then tear the call down: the caller heard
+ * nothing and no ticket filed. ~1 in 18 connections (worst ~1 in 7,
+ * 2026-10-05/06). `connectWithFirstEventRetry` now waits 2500 ms for the
+ * FIRST event (env `RUNTIME_FIRST_EVENT_TIMEOUT_MS`, clamp 1000–10000),
+ * detaches the stalled socket so its later close cannot end the call, and
+ * opens a new one. Two retries after the first attempt (three attempts;
+ * `RUNTIME_CONNECT_RETRIES`, clamp 0–4). A handshake that never upgrades is
+ * bounded at 5000 ms (`RUNTIME_WS_HANDSHAKE_TIMEOUT_MS`, clamp 2000–15000).
+ * Inbound frames buffer until `commitBuffered` after the session binds
+ * `onMessage`, so a late-commit first event is not dropped. Upgrade headers
+ * (`x-trace-id`, `CF-RAY`) and `[SESSION] created session=… conversation=…`
+ * are logged PHI-free. When every retry stalls, `runSetupFailureFloor` files
+ * one ticket in the lane's department (optical Other 66/536, Unnamed/Caller,
+ * `call-<sid>-setup-failure`) and the TwiML speaks the technical-trouble
+ * apology. Defaults work; no new secret is required.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v90-the-pcp-floor-reads-the-factorys-own-module-20261003";
+  "voice-runtime-v91-the-session-stall-reconnects-20261006";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

@@ -672,6 +672,33 @@ export class VoiceCallBridge {
   private ended = false;
   private endedOutcome: CallOutcome | null = null;
 
+  /**
+   * First-event retry window (v91). A hangup AFTER connect started and
+   * BEFORE the first inbound event is a provider stall, not an abandonment
+   * — the caller never heard anything. `noteProviderReady` is first-event,
+   * not `session.updated`.
+   */
+  private providerConnecting = false;
+  private providerReady = false;
+
+  /**
+   * Hangup while the provider socket is open but has not spoken is the
+   * stall, not the caller giving up. Both the Twilio `stop` frame and a
+   * raw socket close read this — there is no separate stop handler.
+   */
+  private hangupOutcome(): CallOutcome {
+    if (this.providerConnecting && !this.providerReady) return "provider_failure";
+    return "caller_hangup";
+  }
+
+  noteProviderConnecting(): void {
+    this.providerConnecting = true;
+  }
+
+  noteProviderReady(): void {
+    this.providerReady = true;
+  }
+
   private utteranceSeq = 0;
   /** The utterance currently being spoken, opened by its first audio or
    * transcript delta and closed by its completion. `epoch` is what makes a
@@ -999,7 +1026,7 @@ export class VoiceCallBridge {
         this.handleTwilioMark(frame.mark.name);
         break;
       case "stop":
-        this.teardown("caller_hangup");
+        this.teardown(this.hangupOutcome());
         break;
       case "connected":
       case "start":
@@ -1012,7 +1039,7 @@ export class VoiceCallBridge {
   /** Raw WebSocket close without a stop frame = the caller (or Twilio) is
    * gone. Same single teardown path. */
   handleSocketClosed(): void {
-    this.teardown("caller_hangup");
+    this.teardown(this.hangupOutcome());
   }
 
   /** For the server glue: a session that failed before/while connecting

@@ -10,8 +10,9 @@
 
 **Companion to `/CLAUDE.md`. Read both at the start of every session.**
 
-Last updated: **2026-09-25** (section 13 — terminal 4xx is follow-up, not a
-stall). Earlier: **2026-09-17 11:10 UTC** (section 12), **2026-09-09 17:40 UTC**
+Last updated: **2026-10-06** (section 14 — the session stall reconnects).
+Earlier: **2026-09-25** (section 13 — terminal 4xx is follow-up, not a
+stall), **2026-09-17 11:10 UTC** (section 12), **2026-09-09 17:40 UTC**
 (section 11), **2026-08-11 01:15 UTC** (Wayne: *"go through this entire
 conversation… and log and create an MD file… and force every time that you read
 that"*).
@@ -1299,3 +1300,73 @@ list → Resolve on each of the three. Do not replay them from here.
 
 Migration (do not apply from this session):
 `migrations/add_ticket_outbox_refusal_and_resolution.sql`.
+
+---
+
+## 14. The session stall reconnects — 2026-10-06
+
+xAI accepts the realtime WebSocket (HTTP 101, typically ~0.2 s) and
+sometimes never sends `session.created`. The runtime used to wait the
+15-second setup deadline, then tear the call down. The caller heard
+nothing and no ticket filed. Production on 2026-10-05/06: about **1 in
+18** connections (worst about **1 in 7**). Ninety off-production probes
+of the same model and session setup hung 5 of 90 for 20 seconds with no
+error and no close — the stall is on their side.
+
+**What the runtime does now.**
+
+`connectWithFirstEventRetry` (`src/runtime/providerConnect.ts`) opens
+the socket, waits for the **first** inbound event, and if none arrives
+it **detaches** that socket (so a later close cannot end the call) and
+opens a new one.
+
+| | default | env | clamp |
+|---|---|---|---|
+| first-event wait | **2500 ms** | `RUNTIME_FIRST_EVENT_TIMEOUT_MS` | 1000–10000 |
+| retries after the first attempt | **2** (three attempts) | `RUNTIME_CONNECT_RETRIES` | 0–4 |
+| handshake that never upgrades | **5000 ms** | `RUNTIME_WS_HANDSHAKE_TIMEOUT_MS` | 2000–15000 |
+
+Inbound frames buffer until `commitBuffered` after the session binds
+`onMessage`. A first event that arrives before that bind is not dropped.
+
+**What gets logged — PHI-free, names and numbers never.**
+
+- `[PROVIDER CONNECT] attempt n/N connecting at <iso>`
+- the HTTP 101 upgrade headers, when present:
+  `x-trace-id=…` and `cf-ray=…` (Cloudflare `CF-RAY`). A miss prints
+  `no-upgrade-headers`.
+- `[PROVIDER CONNECT] first-event stall` on a discarded socket, with
+  the same headers so a hang can be matched to xAI's side.
+- `[SESSION] created session=<id> conversation=<id>` once a session
+  actually starts.
+
+A sliding window of 30 connect outcomes texts Wayne if stalls reach 4,
+with a 15-minute cooldown. That uses the existing urgent-notification
+path; it is not a new secret.
+
+**When every retry stalls.**
+
+`runSetupFailureFloor` (`src/runtime/setupFailureFloor.ts`) files one
+ticket in the lane's department and the TwiML speaks the existing
+technical-trouble apology. It files only when:
+
+- the outcome is `provider_failure`, AND
+- the agent never spoke (`agentTurns === 0`), AND
+- the lane has a department, AND
+- there is a callback number.
+
+Stand-in name `Unnamed` / `Caller` (the app refuses a blank name
+everywhere except Medical Records). Optical uses Other 66/536.
+Idempotency is `call-<sid>-setup-failure`, so a later real filing on
+the same SID cannot collide. Description is the sweep's callback-only
+sentence. Priority high. Staff note says the name is a stand-in and
+caller ID is the number to ring.
+
+**Wayne does not have to set anything.** The defaults work. The three
+env knobs above are optional dials if 2500 ms is too short or two
+retries are too few. No new secret.
+
+**Not measured in production.** `docs/BACKEND_HANDOFF.md` applies.
+The after-arm starts with the republish: `provider_failure` with zero
+agent turns and no ticket should go to 0; setup-failure tickets should
+appear on the residue; filing rate per lane must not fall.

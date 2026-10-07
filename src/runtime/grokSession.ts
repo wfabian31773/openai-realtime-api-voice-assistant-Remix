@@ -50,6 +50,7 @@
 import { normalizeSpokenLanguage, sttLanguageHint, type SpokenLanguage } from "./language";
 import type { GrokRuntimeVoiceConfig } from "./config";
 import type { GrokClientEvent, GrokServerEvent, GrokSessionConfig, GrokToolDefinition } from "./wireTypes";
+import { handshakeTimeoutMs } from "./providerConnect";
 
 export interface GrokTransport {
   send(data: string): void;
@@ -57,6 +58,28 @@ export interface GrokTransport {
   onMessage(cb: (data: string) => void): void;
   onError(cb: (err: Error) => void): void;
   onClose(cb: () => void): void;
+  /**
+   * Wait for the first inbound event. Used by the first-event retry so a
+   * socket that opened (HTTP 101) but never spoke can be torn down without
+   * waiting the 15 s handshake deadline. Optional: a fake that already
+   * emits on connect may omit it.
+   */
+  waitForFirstEvent?(ms: number): Promise<boolean>;
+  /**
+   * Strip every listener, then close. A stalled socket's close must not
+   * reach the session that will own the replacement. Optional for fakes
+   * that never share a live socket across retries.
+   */
+  detachAndClose?(): void;
+  /**
+   * Flush events held while the first-event wait ran. The session is
+   * constructed AFTER the winning socket is known, so inbound
+   * `session.created` is buffered until this is called — otherwise it
+   * lands on a null handler and the handshake never starts.
+   */
+  commitBuffered?(): void;
+  /** xAI / Cloudflare upgrade headers. PHI-free. */
+  upgradeHeaders?(): { xTraceId?: string; cfRay?: string };
 }
 
 export type GrokSessionState =
@@ -489,6 +512,9 @@ export class GrokVoiceSession {
       case "session.created":
         this.state = "connected";
         this.sessionId = event.conversation?.id ?? null;
+        console.log(
+          `[SESSION] created session=${this.sessionId ?? "none"} conversation=${event.conversation?.id ?? "none"}`,
+        );
         this.send({ type: "session.update", session: this.sessionConfig });
         break;
       case "session.updated":
@@ -838,6 +864,11 @@ export class WebSocketGrokTransport implements GrokTransport {
   private messageHandler: ((data: string) => void) | null = null;
   private errorHandler: ((err: Error) => void) | null = null;
   private closeHandler: (() => void) | null = null;
+  private buffer: string[] = [];
+  private firstEventArrived = false;
+  private committed = false;
+  private firstEventWaiters: Array<(arrived: boolean) => void> = [];
+  private headers: { xTraceId?: string; cfRay?: string } = {};
 
   constructor(private readonly apiKey: string, private readonly model: string) {}
 
@@ -846,15 +877,93 @@ export class WebSocketGrokTransport implements GrokTransport {
     const url = `wss://api.x.ai/v1/realtime?model=${encodeURIComponent(this.model)}`;
     this.ws = new WebSocket(url, {
       headers: { Authorization: `Bearer ${this.apiKey}` },
+      handshakeTimeout: handshakeTimeoutMs(),
     });
-    this.ws.on("message", (data: Buffer) => this.messageHandler?.(data.toString("utf8")));
-    this.ws.on("error", (err: Error) => this.errorHandler?.(err));
-    this.ws.on("close", () => this.closeHandler?.());
-
+    this.ws.on("upgrade", (res: { headers: Record<string, string | string[] | undefined> }) => {
+      const raw = res.headers;
+      const headerValue = (v: string | string[] | undefined) =>
+        Array.isArray(v) ? v[0] : v;
+      const trace = headerValue(raw["x-trace-id"]);
+      const ray = headerValue(raw["cf-ray"]);
+      this.headers = {
+        ...(trace ? { xTraceId: trace } : {}),
+        ...(ray ? { cfRay: ray } : {}),
+      };
+    });
+    this.ws.on("message", (data: Buffer) => this.handleInbound(data.toString("utf8")));
+    this.ws.on("error", (err: Error) => {
+      this.wakeFirstEventWaiters(false);
+      this.errorHandler?.(err);
+    });
+    this.ws.on("close", (code: number, reason: Buffer) => {
+      const why = reason?.toString("utf8") ?? "";
+      console.log(`[SESSION] closed code=${code} reason=${why || "none"}`);
+      this.wakeFirstEventWaiters(false);
+      this.closeHandler?.();
+    });
     await new Promise<void>((resolve, reject) => {
       this.ws!.once("open", () => resolve());
       this.ws!.once("error", (err: Error) => reject(err));
     });
+  }
+
+  private handleInbound(data: string): void {
+    if (!this.firstEventArrived) {
+      this.firstEventArrived = true;
+      this.wakeFirstEventWaiters(true);
+    }
+    if (!this.committed) {
+      this.buffer.push(data);
+      return;
+    }
+    this.messageHandler?.(data);
+  }
+
+  private wakeFirstEventWaiters(arrived: boolean): void {
+    const waiters = this.firstEventWaiters.splice(0);
+    for (const w of waiters) w(arrived);
+  }
+
+  async waitForFirstEvent(ms: number): Promise<boolean> {
+    if (this.firstEventArrived) return true;
+    if (!this.ws || this.ws.readyState === this.ws.CLOSED) return false;
+    return new Promise((resolve) => {
+      const t = setTimeout(() => {
+        this.firstEventWaiters = this.firstEventWaiters.filter((w) => w !== onArrive);
+        resolve(this.firstEventArrived);
+      }, ms);
+      const onArrive = (arrived: boolean) => {
+        clearTimeout(t);
+        resolve(arrived);
+      };
+      this.firstEventWaiters.push(onArrive);
+    });
+  }
+
+  commitBuffered(): void {
+    this.committed = true;
+    const pending = this.buffer.splice(0);
+    for (const data of pending) this.messageHandler?.(data);
+  }
+
+  detachAndClose(): void {
+    this.messageHandler = null;
+    this.errorHandler = null;
+    this.closeHandler = null;
+    this.wakeFirstEventWaiters(false);
+    if (this.ws) {
+      this.ws.removeAllListeners();
+      try {
+        this.ws.close();
+      } catch {
+        /* already closed */
+      }
+      this.ws = null;
+    }
+  }
+
+  upgradeHeaders(): { xTraceId?: string; cfRay?: string } {
+    return { ...this.headers };
   }
 
   send(data: string): void {
