@@ -66,6 +66,7 @@ const {
   transferRecordCrossReference,
 } = await import('./noIvrAgent');
 const { resetGateAttempts } = await import('../tools/gateAttempts');
+const { STAND_IN_NAME_NOTE } = await import('../services/standInName');
 const { recordCallerSpeech, releaseCallerSpeech } = await import('../services/symptomCorroboration');
 
 async function call(agent: any, name: string, args: Record<string, unknown>) {
@@ -134,7 +135,10 @@ describe('a refused escalation files the ticket itself', () => {
     expect(p.agentUsed).toBe('no-ivr');
     expect(p.patientPhone, 'caller ID is the callback when nothing else was given').toBe('5551234567');
     expect(p.patientDOB).toBe('Unknown');
-    expect(p.patientFullName).toBe('Unknown Caller');
+    // Not "Unknown Caller" — /submit-ticket refuses it (v93). The stand-in,
+    // and the note that says it is one.
+    expect(p.patientFullName).toBe('Unnamed Caller');
+    expect(p.additionalDetails).toMatch(/NAME NOT CAPTURED/);
     expect(p.preferredContactMethod).toBe('phone');
   });
 
@@ -151,16 +155,19 @@ describe('a refused escalation files the ticket itself', () => {
     const { agent } = await agentFor(freshSid());
     const r = await call(agent, 'escalate_to_human', {
       ...COULD_NOT_UNDERSTAND,
-      patient_first_name: 'Test',
-      patient_last_name: 'Caller',
+      // Synthetic. Not "Test Caller": both of those words are on the app's
+      // placeholder list, so it is a name /submit-ticket refuses (v93).
+      patient_first_name: 'Dana',
+      patient_last_name: 'Example',
       patient_dob: '01/04/1958',
     });
     expect(r.refused).toBe('communication_failure');
     expect(r.ticket_filed).toBe(true);
     const p = h.submitSimplifiedTicket.mock.calls[0][0];
-    expect(p.patientFullName).toBe('Test Caller');
+    expect(p.patientFullName).toBe('Dana Example');
     expect(p.patientDOB).toBe('01/04/1958');
     expect(p.additionalDetails).toMatch(/\(communication_failure\)/);
+    expect(p.additionalDetails, 'a real name carries no stand-in note').not.toMatch(/NAME NOT CAPTURED/);
   });
 
   it('a number the caller GAVE beats caller ID, in the ticket and in the spoken line', async () => {
@@ -279,14 +286,15 @@ describe('the urgent transfer record beside a refused-escalation ticket (Codex P
     expect(record.additionalDetails).not.toMatch(/SEE ALSO/);
   });
 
-  it('with no refusal on the call the record files exactly as before — one ticket, the call\'s own key', async () => {
+  it('with no refusal on the call the record files as one ticket on the call\'s own key, with no cross-reference', async () => {
     const { agent } = await agentFor(freshSid());
     await call(agent, 'escalate_to_human', CLINICIAN);
     await vi.waitFor(() => expect(h.submitSimplifiedTicket).toHaveBeenCalledTimes(1));
     const record = h.submitSimplifiedTicket.mock.calls[0][0];
     expect(record.priority).toBe('urgent');
     expect(record.secondTicketOnThisCall).toBeUndefined();
-    expect(record.additionalDetails).toBeUndefined();
+    // The clinician named no patient, so the only note is the stand-in's (v93).
+    expect(record.additionalDetails).toBe(STAND_IN_NAME_NOTE);
   });
 
   it('a refusal whose filing FAILED leaves nothing to file beside — the record is the call\'s ticket', async () => {
@@ -300,7 +308,7 @@ describe('the urgent transfer record beside a refused-escalation ticket (Codex P
     await recordFiled();
     const record = h.submitSimplifiedTicket.mock.calls[1][0];
     expect(record.secondTicketOnThisCall).toBeUndefined();
-    expect(record.additionalDetails).toBeUndefined();
+    expect(record.additionalDetails, 'nothing to cross-reference').not.toMatch(/SEE ALSO|SUPERSEDES/);
   });
 
   it('the cross-reference is a pure function of the ticket and the arm', () => {

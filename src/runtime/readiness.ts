@@ -662,8 +662,20 @@ import { callEnvironment } from "./callRecord";
  * length, so a setup we fail fast still files.
  * `teardownTakesTheUnassignedExit.test.ts` reads the payload that leaves.
  */
+/**
+ * v93 — THE URGENT TRANSFER RECORD FILES, IN AFTER HOURS (2026-10-09). On a
+ * connected after-hours transfer the record ticket fell back to the name
+ * "Unknown Caller", which /submit-ticket refuses (both words are on its
+ * placeholder list): 22 connected transfers in 60 days left no ticket at all.
+ * And it named no department, so 9 more were classified as Surgery and
+ * refused for a surgeon, and of 54 that filed only 32 reached After Hours.
+ * It now files under the fleet's one stand-in ("Unnamed Caller",
+ * `standInName.ts`, with a note saying so) and names department 8, which wins
+ * over the app's derivation. The refused-escalation filing takes the stand-in
+ * too. `noIvrTransferRecordFiles.test.ts` drives the real agent.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v92-the-teardown-filers-take-the-unassigned-exit-20261009";
+  "voice-runtime-v93-the-urgent-transfer-record-files-in-after-hours-20261009";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

@@ -59,6 +59,7 @@ import { otherReasonFor } from "../tools/otherReason";
 import { SWEPT_TICKET_DESCRIPTION, TEARDOWN_UNASSIGNED_EXIT_DEPARTMENTS } from "./requestSweep";
 import type { VoiceCallRecord } from "./mediaStreamBridge";
 import { DEFAULT_FIRST_EVENT_TIMEOUT_MS } from "./providerConnect";
+import { STAND_IN_FIRST_NAME, STAND_IN_LAST_NAME } from "../services/standInName";
 
 const DEPARTMENT_BY_SLUG: Record<string, number> = {
   optical: 1,
@@ -69,8 +70,10 @@ const DEPARTMENT_BY_SLUG: Record<string, number> = {
   "no-ivr": 8,
 };
 
-const STAND_IN_FIRST = "Unnamed";
-const STAND_IN_LAST = "Caller";
+// One stand-in across the fleet — see standInName.ts for why it is not
+// "Unknown Caller".
+const STAND_IN_FIRST = STAND_IN_FIRST_NAME;
+const STAND_IN_LAST = STAND_IN_LAST_NAME;
 
 export const SETUP_FAILURE_STAFF_NOTE =
   "PROVIDER SETUP FAILED — the realtime session never started. " +
