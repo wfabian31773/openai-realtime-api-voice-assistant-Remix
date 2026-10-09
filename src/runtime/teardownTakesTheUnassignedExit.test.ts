@@ -20,6 +20,8 @@
  * exactly that reason).
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 
 process.env.DATABASE_URL ||= "postgresql://unused:unused@127.0.0.1:5432/unused";
 
@@ -151,10 +153,24 @@ describe("the setup-failure floor", () => {
   );
 
   it("files nothing for a caller who hung up inside the first-event wait", async () => {
-    const out = await runSetupFailureFloor(silentSetup("no-ivr"), undefined, {
+    const out = await runSetupFailureFloor(silentSetup("no-ivr"), {
       callerLeftAfterMs: 1_000,
     });
     expect(out).toEqual({ filed: false, reason: "left-before-the-first-event-wait" });
     expect(createTicketDurable).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * THE RUNTIME'S OWN DEFAULT, which the runtime suite cannot see: its harness
+ * injects a `fileSetupFailure` of its own, so a default that dropped the
+ * context survived every behavioural test (mutation run, v92). The floor's
+ * signature IS `(record, ctx)`, so the default is the floor itself, unwrapped
+ * — and this pin goes red the moment a wrapper is put back.
+ */
+describe("the runtime hands the floor its context", () => {
+  it("uses runSetupFailureFloor itself as the default, with no wrapper to lose ctx", () => {
+    const src = readFileSync(join(__dirname, "voiceRuntime.ts"), "utf8");
+    expect(src).toMatch(/options\.fileSetupFailure \?\? runSetupFailureFloor;/);
   });
 });

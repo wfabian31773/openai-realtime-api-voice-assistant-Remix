@@ -95,7 +95,7 @@ describe("shouldFileSetupFailure", () => {
 
   it("runSetupFailureFloor honours the context and posts nothing", async () => {
     const filer = vi.fn(async () => ({ success: true, ticketNumber: "VA-1" }));
-    const out = await runSetupFailureFloor(record(), filer, { callerLeftAfterMs: 1_000 });
+    const out = await runSetupFailureFloor(record(), { callerLeftAfterMs: 1_000 }, filer);
     expect(out).toEqual({ filed: false, reason: "left-before-the-first-event-wait" });
     expect(filer).not.toHaveBeenCalled();
   });
@@ -116,7 +116,7 @@ describe("runSetupFailureFloor", () => {
     const filer = vi.fn(async (ticket) => {
       return { success: true, ticketNumber: "VA-SETUP-1" };
     });
-    const out = await runSetupFailureFloor(record(), filer);
+    const out = await runSetupFailureFloor(record(), {}, filer);
     expect(out).toEqual({ filed: true, ticketNumber: "VA-SETUP-1" });
     expect(filer).toHaveBeenCalledTimes(1);
     expect(filer.mock.calls[0][0]).toMatchObject({
@@ -148,7 +148,7 @@ describe("runSetupFailureFloor", () => {
         success: true,
         ticketNumber: "VA-1",
       }));
-      await runSetupFailureFloor(record({ slug }), filer);
+      await runSetupFailureFloor(record({ slug }), {}, filer);
       expect(filer.mock.calls[0][0]).toMatchObject({
         departmentId,
         requestTypeId,
@@ -162,14 +162,14 @@ describe("runSetupFailureFloor", () => {
   });
 
   it("does not throw when the filer throws", async () => {
-    const out = await runSetupFailureFloor(record(), async () => {
+    const out = await runSetupFailureFloor(record(), {}, async () => {
       throw new Error("ticketing app down");
     });
     expect(out).toEqual({ filed: false, reason: "threw" });
   });
 
   it("reports create-failed when the filer declines", async () => {
-    const out = await runSetupFailureFloor(record(), async () => ({
+    const out = await runSetupFailureFloor(record(), {}, async () => ({
       success: false,
       error: "timeout",
     }));
@@ -180,6 +180,7 @@ describe("runSetupFailureFloor", () => {
     const filer = vi.fn(async () => ({ success: true, ticketNumber: "VA-1" }));
     const out = await runSetupFailureFloor(
       record({ outcome: "caller_hangup" }),
+      {},
       filer,
     );
     expect(out).toEqual({ filed: false, reason: "not-provider-failure" });

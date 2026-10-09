@@ -295,14 +295,10 @@ async function harness(
     fileSetupFailure:
       over.fileSetupFailure ??
       (async (record, ctx) =>
-        runSetupFailureFloor(
-          record,
-          async (ticket) => {
-            setupFailures.push(ticket);
-            return { success: true, ticketNumber: "VA-SETUP-1" };
-          },
-          ctx,
-        )),
+        runSetupFailureFloor(record, ctx, async (ticket) => {
+          setupFailures.push(ticket);
+          return { success: true, ticketNumber: "VA-SETUP-1" };
+        })),
     providerSetupDeadlineMs: over.providerSetupDeadlineMs,
     callRowDeadlineMs: over.callRowDeadlineMs,
     fetchPrecontext: over.fetchPrecontext,

@@ -178,10 +178,18 @@ const defaultFiler: SetupFailureFiler = async (ticket) => {
   };
 };
 
+/**
+ * The context comes SECOND and the filer LAST, deliberately: this is the
+ * runtime's default `fileSetupFailure` exactly as written, `(record, ctx)`,
+ * so no wrapper sits between the runtime and the floor that could drop the
+ * context — the first draft had one, and mutation testing showed nothing
+ * could see it go (the test harness injects its own). The filer is the test
+ * seam and nothing else.
+ */
 export async function runSetupFailureFloor(
   record: VoiceCallRecord,
-  filer: SetupFailureFiler = defaultFiler,
   ctx: SetupFailureContext = {},
+  filer: SetupFailureFiler = defaultFiler,
 ): Promise<SetupFailureOutcome> {
   try {
     const skip = shouldFileSetupFailure(record, ctx);

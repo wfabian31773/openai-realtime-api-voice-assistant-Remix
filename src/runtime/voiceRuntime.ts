@@ -589,10 +589,9 @@ export function mountVoiceRuntime(
   // pcpFloor.ts says why a separate import of pcpAgent never filed on Node 20).
   const sweepPcpFloor =
     options.sweepPcpFloor ?? ((record: VoiceCallRecord) => runPcpFloor(record, { source: laneSource }));
-  const fileSetupFailure =
-    options.fileSetupFailure ??
-    ((record: VoiceCallRecord, ctx?: SetupFailureContext) =>
-      runSetupFailureFloor(record, undefined, ctx));
+  // Passed as is: `(record, ctx)` IS runSetupFailureFloor's signature, so
+  // there is no wrapper here to lose the context (setupFailureFloor.ts).
+  const fileSetupFailure = options.fileSetupFailure ?? runSetupFailureFloor;
   /**
    * Bound persist, then ALWAYS file the setup-failure ticket.
    *
