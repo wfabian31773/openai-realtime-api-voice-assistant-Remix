@@ -58,7 +58,7 @@ import {
   noteFirstEventWait,
   ProviderConnectAbortedError,
 } from "./providerConnect";
-import { runSetupFailureFloor } from "./setupFailureFloor";
+import { runSetupFailureFloor, type SetupFailureContext } from "./setupFailureFloor";
 import { resolveLane, defaultLaneSource, type LaneSource } from "./laneRegistry";
 import { laneRoster, formatLaneRoster, type LaneReadiness } from "./laneRoster";
 import {
@@ -500,7 +500,7 @@ export interface VoiceRuntimeOptions {
    * Files a stand-in ticket when setup never reached a configured
    * session. Injected for tests. Default is runSetupFailureFloor.
    */
-  fileSetupFailure?: (record: VoiceCallRecord) => Promise<unknown>;
+  fileSetupFailure?: (record: VoiceCallRecord, ctx?: SetupFailureContext) => Promise<unknown>;
   /**
    * Twilio operations for the warm transfer. Injected for tests; when
    * omitted, a client is built lazily from TWILIO_ACCOUNT_SID/AUTH_TOKEN.
@@ -589,6 +589,8 @@ export function mountVoiceRuntime(
   // pcpFloor.ts says why a separate import of pcpAgent never filed on Node 20).
   const sweepPcpFloor =
     options.sweepPcpFloor ?? ((record: VoiceCallRecord) => runPcpFloor(record, { source: laneSource }));
+  // Passed as is: `(record, ctx)` IS runSetupFailureFloor's signature, so
+  // there is no wrapper here to lose the context (setupFailureFloor.ts).
   const fileSetupFailure = options.fileSetupFailure ?? runSetupFailureFloor;
   /**
    * Bound persist, then ALWAYS file the setup-failure ticket.
@@ -600,12 +602,15 @@ export function mountVoiceRuntime(
    * (`withinOrNull` + persistBeforeSweepMs). The floor is idempotent on
    * `call-<sid>-setup-failure`.
    */
-  const persistBoundThenFileSetup = async (record: VoiceCallRecord): Promise<void> => {
+  const persistBoundThenFileSetup = async (
+    record: VoiceCallRecord,
+    ctx: SetupFailureContext,
+  ): Promise<void> => {
     await withinOrNull(
       persistCall(record),
       options.persistBeforeSweepMs ?? PERSIST_BEFORE_SWEEP_MS,
     );
-    await fileSetupFailure(record).catch(() => undefined);
+    await fileSetupFailure(record, ctx).catch(() => undefined);
   };
   /** Lanes proven available at least once, so the webhook's own check does
    * not have to await the agent tree on Twilio's clock. A slug is only
@@ -813,6 +818,13 @@ export function mountVoiceRuntime(
      */
     let socketGone = false;
     /**
+     * WHEN the caller's socket closed. `socketGone` says whether; the
+     * setup-failure floor needs when, because a hangup during the
+     * first-event wait is only NOTICED at the end of the wait — so the
+     * record's own end time reads as a caller who waited when they did not.
+     */
+    let socketGoneAtMs: number | undefined;
+    /**
      * Caller audio that arrives between the `start` frame and the bridge
      * existing. Building the agent and opening the Grok socket takes real
      * time, and a caller who begins talking during it would otherwise be
@@ -908,12 +920,14 @@ export function mountVoiceRuntime(
       clearClaimDeadline();
       clearSetupDeadline();
       socketGone = true;
+      socketGoneAtMs ??= Date.now();
       bridge?.handleSocketClosed();
     });
     ws.on("error", () => {
       clearClaimDeadline();
       clearSetupDeadline();
       socketGone = true;
+      socketGoneAtMs ??= Date.now();
       bridge?.handleSocketClosed();
     });
 
@@ -1121,7 +1135,8 @@ export function mountVoiceRuntime(
             startedAtMs,
             endedAtMs: Date.now(),
           };
-          void persistBoundThenFileSetup(unknownLaneRecord);
+          // No context: the floor skips an unknown lane before it reads one.
+          void persistBoundThenFileSetup(unknownLaneRecord, {});
           // And what the caller's audio did, on an exit that never built a
           // bridge (Codex P2, #327). Part of the no-audio population, so the
           // row goes here too or the instrument's claim of one per call is
@@ -1560,7 +1575,14 @@ export function mountVoiceRuntime(
             startedAtMs,
             endedAtMs: Date.now(),
           };
-          void persistBoundThenFileSetup(setupFailRecord);
+          void persistBoundThenFileSetup(setupFailRecord, {
+            // A caller who hung up inside the first-event wait left; one who
+            // stayed past it, or whose call WE failed (no hangup), is filed.
+            ...(socketGone && socketGoneAtMs !== undefined
+              ? { callerLeftAfterMs: socketGoneAtMs - startedAtMs }
+              : {}),
+            firstEventWaitMs: options.firstEventTimeoutMs ?? firstEventTimeoutMs(env),
+          });
           // And what the caller's audio did, on an exit that never built a
           // bridge (Codex P2, #327). Part of the no-audio population, so the
           // row goes here too or the instrument's claim of one per call is

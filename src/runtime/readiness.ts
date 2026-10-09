@@ -647,8 +647,35 @@ import { callEnvironment } from "./callRecord";
  * `call-<sid>-setup-failure`) and the TwiML speaks the technical-trouble
  * apology. Defaults work; no new secret is required.
  */
+/**
+ * v92 — THE TEARDOWN FILERS TAKE THE UNASSIGNED EXIT (2026-10-09). The request
+ * sweep and the setup-failure floor file after the caller has gone, and on
+ * optical (1) and surgery (2) create-ticket refused them for an office or a
+ * surgeon nobody was left to give: 36 optical and 51 surgery swept requests
+ * refused HTTP 400, 2026-09-28..10-08, against 5 accepted. Both now send
+ * `routingAskExhausted` on those two departments only, from one shared set
+ * (`TEARDOWN_UNASSIGNED_EXIT_DEPARTMENTS`); the app still derives the field
+ * from the patient's record first, so no ticket loses a routing it would have
+ * had. Beside it the setup floor stops filing for a caller who HUNG UP inside
+ * the configured first-event wait — 3 of its first 4 tickets were 1–2 s
+ * hangups. Keyed on the moment the caller's socket closed, not on the call's
+ * length, so a setup we fail fast still files.
+ * `teardownTakesTheUnassignedExit.test.ts` reads the payload that leaves.
+ */
+/**
+ * v93 — THE URGENT TRANSFER RECORD FILES, IN AFTER HOURS (2026-10-09). On a
+ * connected after-hours transfer the record ticket fell back to the name
+ * "Unknown Caller", which /submit-ticket refuses (both words are on its
+ * placeholder list): 22 connected transfers in 60 days left no ticket at all.
+ * And it named no department, so 9 more were classified as Surgery and
+ * refused for a surgeon, and of 54 that filed only 32 reached After Hours.
+ * It now files under the fleet's one stand-in ("Unnamed Caller",
+ * `standInName.ts`, with a note saying so) and names department 8, which wins
+ * over the app's derivation. The refused-escalation filing takes the stand-in
+ * too. `noIvrTransferRecordFiles.test.ts` drives the real agent.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v91-the-session-stall-reconnects-20261006";
+  "voice-runtime-v93-the-urgent-transfer-record-files-in-after-hours-20261009";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

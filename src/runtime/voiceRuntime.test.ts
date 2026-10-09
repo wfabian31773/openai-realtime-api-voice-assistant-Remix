@@ -36,7 +36,7 @@ import { transferDestinationStatus, transferUnavailableReason } from "./runtimeT
 import type { GrokServerEvent } from "./wireTypes";
 import type { LaneConfig, LaneSource } from "./laneRegistry";
 import { registerCallHandoff, registeredHandoffCount } from "../tools/handoffBroker";
-import { runSetupFailureFloor } from "./setupFailureFloor";
+import { runSetupFailureFloor, type SetupFailureContext } from "./setupFailureFloor";
 import type { VoiceCallRecord } from "./mediaStreamBridge";
 
 // v77: resolveLane binds the PIPELINE's own tools (set_spoken_language) through
@@ -243,7 +243,7 @@ async function harness(
     firstEventStalls?: number;
     firstEventTimeoutMs?: number;
     connectRetries?: number;
-    fileSetupFailure?: (record: VoiceCallRecord) => Promise<unknown>;
+    fileSetupFailure?: (record: VoiceCallRecord, ctx?: SetupFailureContext) => Promise<unknown>;
     providerSetupDeadlineMs?: number;
     fetchPrecontext?: (phone: string) => Promise<unknown>;
     resolveGreeting?: (slug: string) => Promise<string | null>;
@@ -294,8 +294,8 @@ async function harness(
     connectRetries: over.connectRetries,
     fileSetupFailure:
       over.fileSetupFailure ??
-      (async (record) =>
-        runSetupFailureFloor(record, async (ticket) => {
+      (async (record, ctx) =>
+        runSetupFailureFloor(record, ctx, async (ticket) => {
           setupFailures.push(ticket);
           return { success: true, ticketNumber: "VA-SETUP-1" };
         })),
@@ -950,6 +950,49 @@ describe("one whole call, end to end, offline", () => {
     });
     const after = await post(h, "/voice/optical/after", { CallSid: "CA91D" });
     expect(after.text).toContain("technical trouble");
+  });
+
+  /**
+   * v92 — A CALLER WHO HUNG UP INSIDE THE FIRST-EVENT WAIT LEFT; THEY WERE
+   * NOT FAILED. 3 of the floor's first 4 tickets were 1–2 s after-hours
+   * hangups. The hangup is only NOTICED at the end of the wait (the retry
+   * checks for an abort between attempts), so the record's own end time
+   * reads as a caller who waited — the runtime has to hand over the moment
+   * the socket closed, and these two tests are what prove it does.
+   */
+  it("files nothing when the caller hangs up inside the first-event wait", async () => {
+    const h = await harness({ stallFirstEvent: true, firstEventTimeoutMs: 400, connectRetries: 2 });
+    const answered = await post(h, "/voice/optical", { CallSid: "CA92A", From: "+15551234567", To: "+2" });
+    const { ws } = await openStream(h, "CA92A", tokenFrom(answered.text));
+    await new Promise((r) => setTimeout(r, 40));
+    ws.close();
+    await waitFor(
+      () => h.persisted.some((r) => r.callSid === "CA92A"),
+      "the abandoned setup to persist",
+      3000,
+    );
+    // The floor runs after the bounded persist; give it the same room.
+    await new Promise((r) => setTimeout(r, 120));
+    expect(h.persisted.find((r) => r.callSid === "CA92A")?.outcome).toBe("provider_failure");
+    expect(h.setupFailures).toHaveLength(0);
+  });
+
+  it("still files for a caller who hung up only AFTER the wait had expired", async () => {
+    const h = await harness({ stallFirstEvent: true, firstEventTimeoutMs: 80, connectRetries: 2 });
+    const answered = await post(h, "/voice/optical", { CallSid: "CA92B", From: "+15551234567", To: "+2" });
+    const { ws } = await openStream(h, "CA92B", tokenFrom(answered.text));
+    await waitFor(() => h.transports.length >= 2, "a second attempt after the first stalled", 3000);
+    ws.close();
+    await waitFor(
+      () => h.setupFailures.length >= 1,
+      "the floor to file for a caller who waited",
+      3000,
+    );
+    expect(h.setupFailures[0]).toMatchObject({
+      departmentId: 1,
+      idempotencyKey: "call-CA92B-setup-failure",
+      routingAskExhausted: true,
+    });
   });
 
   it("does NOT fire the setup deadline on a healthy handshake", async () => {

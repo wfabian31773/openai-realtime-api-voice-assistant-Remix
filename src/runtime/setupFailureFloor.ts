@@ -10,7 +10,29 @@
  * IT FILES WHEN, AND ONLY WHEN:
  *   - the outcome is `provider_failure` (the runtime caused the end), AND
  *   - the agent never spoke (`agentTurns === 0`), AND
+ *   - the caller did not HANG UP before the first-event wait had elapsed
+ *     (see SetupFailureContext), AND
  *   - the lane has a department we can file into.
+ *
+ * THE WAIT IS THE LINE BETWEEN A CALLER WE FAILED AND A CALLER WHO LEFT.
+ * Inside the first-event wait (2.5 s by default) even a HEALTHY session has
+ * not been declared late, so a caller who hung up by then was not failed by
+ * the stall this floor exists for — they rang off before anything could
+ * have answered. Measured over the floor's first 30 days (2026-10-07..09):
+ * 4 tickets filed, and 3 of them were after-hours callers on the line for
+ * 1–2 seconds (VA-68899, VA-68900, VA-69923) — callbacks with a stand-in
+ * name to somebody who never waited. The fourth, a 14-second optical caller,
+ * is exactly who the floor is for and still files.
+ *
+ * IT KEYS ON THE CALLER HANGING UP, NOT ON THE CALL'S LENGTH. A setup that
+ * fails FAST on our side — the agent tree throwing, a lane that will not
+ * bind — is also short, and that caller is still on the line hearing the
+ * technical-trouble apology: we failed them, so they get the ticket. And
+ * the record's own `endedAtMs` is when the runtime NOTICED, which for a
+ * hangup during the first-event wait is the end of the wait, not the moment
+ * the caller left — so the runtime hands over the moment the caller's
+ * socket closed. No context, or no hangup, files: the fail-safe direction
+ * is a ticket, not a skip.
  *
  * A caller who hung up while the agent was still being built is
  * `caller_hangup` and is not this floor — that path never opened a
@@ -34,8 +56,10 @@
  */
 
 import { otherReasonFor } from "../tools/otherReason";
-import { SWEPT_TICKET_DESCRIPTION } from "./requestSweep";
+import { SWEPT_TICKET_DESCRIPTION, TEARDOWN_UNASSIGNED_EXIT_DEPARTMENTS } from "./requestSweep";
 import type { VoiceCallRecord } from "./mediaStreamBridge";
+import { DEFAULT_FIRST_EVENT_TIMEOUT_MS } from "./providerConnect";
+import { STAND_IN_FIRST_NAME, STAND_IN_LAST_NAME } from "../services/standInName";
 
 const DEPARTMENT_BY_SLUG: Record<string, number> = {
   optical: 1,
@@ -46,8 +70,10 @@ const DEPARTMENT_BY_SLUG: Record<string, number> = {
   "no-ivr": 8,
 };
 
-const STAND_IN_FIRST = "Unnamed";
-const STAND_IN_LAST = "Caller";
+// One stand-in across the fleet — see standInName.ts for why it is not
+// "Unknown Caller".
+const STAND_IN_FIRST = STAND_IN_FIRST_NAME;
+const STAND_IN_LAST = STAND_IN_LAST_NAME;
 
 export const SETUP_FAILURE_STAFF_NOTE =
   "PROVIDER SETUP FAILED — the realtime session never started. " +
@@ -68,11 +94,15 @@ export type SetupFailureFiler = (ticket: {
   callSid: string;
   staffNote: string;
   idempotencyKey: string;
+  /** Optical and surgery only — the caller never reached a session, so
+   * nobody could be asked for the office or the surgeon. */
+  routingAskExhausted?: true;
 }) => Promise<{ success: boolean; ticketNumber?: string; queued?: boolean; error?: string }>;
 
 export type SetupFailureSkip =
   | "not-provider-failure"
   | "agent-spoke"
+  | "left-before-the-first-event-wait"
   | "unknown-lane"
   | "no-other-reason"
   | "no-callback"
@@ -90,9 +120,33 @@ export function setupFailureIdempotencyKey(callSid: string): string {
   return `call-${callSid}-setup-failure`;
 }
 
-export function shouldFileSetupFailure(record: VoiceCallRecord): SetupFailureSkip | null {
+/**
+ * What only the runtime knows about how the call ended. Both fields are
+ * optional and their absence FILES — see the module doc.
+ */
+export interface SetupFailureContext {
+  /**
+   * Milliseconds from the stream starting to the CALLER's socket closing.
+   * Undefined when the caller did not hang up (the runtime gave up first).
+   */
+  callerLeftAfterMs?: number;
+  /** The first-event wait this call was configured with
+   * (`RUNTIME_FIRST_EVENT_TIMEOUT_MS`); defaults to the module default. */
+  firstEventWaitMs?: number;
+}
+
+export function shouldFileSetupFailure(
+  record: VoiceCallRecord,
+  ctx: SetupFailureContext = {},
+): SetupFailureSkip | null {
   if (record.outcome !== "provider_failure") return "not-provider-failure";
   if (record.agentTurns > 0) return "agent-spoke";
+  if (
+    ctx.callerLeftAfterMs !== undefined &&
+    ctx.callerLeftAfterMs < (ctx.firstEventWaitMs ?? DEFAULT_FIRST_EVENT_TIMEOUT_MS)
+  ) {
+    return "left-before-the-first-event-wait";
+  }
   if (DEPARTMENT_BY_SLUG[record.slug] === undefined) return "unknown-lane";
   if (!record.callerPhone) return "no-callback";
   return null;
@@ -116,6 +170,7 @@ const defaultFiler: SetupFailureFiler = async (ticket) => {
       transcript: ticket.staffNote,
     },
     idempotencyKey: ticket.idempotencyKey,
+    ...(ticket.routingAskExhausted ? { routingAskExhausted: true } : {}),
   });
   const queued = (res as { queued?: boolean }).queued === true;
   return {
@@ -126,12 +181,21 @@ const defaultFiler: SetupFailureFiler = async (ticket) => {
   };
 };
 
+/**
+ * The context comes SECOND and the filer LAST, deliberately: this is the
+ * runtime's default `fileSetupFailure` exactly as written, `(record, ctx)`,
+ * so no wrapper sits between the runtime and the floor that could drop the
+ * context — the first draft had one, and mutation testing showed nothing
+ * could see it go (the test harness injects its own). The filer is the test
+ * seam and nothing else.
+ */
 export async function runSetupFailureFloor(
   record: VoiceCallRecord,
+  ctx: SetupFailureContext = {},
   filer: SetupFailureFiler = defaultFiler,
 ): Promise<SetupFailureOutcome> {
   try {
-    const skip = shouldFileSetupFailure(record);
+    const skip = shouldFileSetupFailure(record, ctx);
     if (skip) {
       console.log(`[SETUP FLOOR] ${record.slug} ${record.callSid}: skipped (${skip})`);
       return { filed: false, reason: skip };
@@ -155,6 +219,13 @@ export async function runSetupFailureFloor(
       callSid: record.callSid,
       staffNote: SETUP_FAILURE_STAFF_NOTE,
       idempotencyKey: setupFailureIdempotencyKey(record.callSid),
+      // The same teardown rule as the sweep, from the same set: a session
+      // that never started asked nobody anything, so on optical and surgery
+      // the app's unassigned exit is the only way this ticket files at all.
+      // 2026-10-08: the floor's one optical filing was refused for "office".
+      ...(TEARDOWN_UNASSIGNED_EXIT_DEPARTMENTS.has(departmentId)
+        ? { routingAskExhausted: true as const }
+        : {}),
     };
     const res = await filer(ticket);
     if (res.success) {

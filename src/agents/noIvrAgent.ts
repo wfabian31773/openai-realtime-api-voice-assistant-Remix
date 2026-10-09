@@ -35,6 +35,7 @@ import {
   routeAfterHoursTicket,
 } from "../services/afterHoursRouting";
 import { AFTER_HOURS_DEPARTMENT_ID as AFTER_HOURS_ROUTE_DEPARTMENT_ID } from "../tools/afterHoursTaxonomy";
+import { nameOrStandIn, STAND_IN_NAME_NOTE } from "../services/standInName";
 import { corroborate } from "../services/symptomCorroboration";
 import { markCallConcluded } from "../services/callConclusion";
 import { callMetadataForDB } from "../services/callMetadataStore";
@@ -2009,9 +2010,9 @@ Always say a brief goodbye phrase BEFORE calling this tool.`,
     try {
       const { SyncAgentService } = await import("../services/syncAgentService");
       const { classifyAfterHoursRequest } = await import('../tools/afterHoursTaxonomy');
-      const name =
-        [params.patient_first_name, params.patient_last_name].filter(Boolean).join(' ').trim() ||
-        'Unknown Caller';
+      // "Unknown Caller" was refused by /submit-ticket — both words are on its
+      // placeholder list — so a refusal with no name filed nothing (v93).
+      const { fullName: name, standIn } = nameOrStandIn(params.patient_first_name, params.patient_last_name);
       const phone = normalizePhoneNumber(params.callback_number || metadata.callerPhone || '');
       const reasonForCalling =
         code === 'symptoms_not_stated_by_caller'
@@ -2039,7 +2040,9 @@ Always say a brief goodbye phrase BEFORE calling this tool.`,
         patientPhone: phone || undefined,
         // The note goes HERE and not at the head of reasonForCalling — the
         // `Request Type:` header rule (operator, 2026-07-25).
-        additionalDetails: [routeNote, refusedEscalationNote(code)].filter(Boolean).join('\n'),
+        additionalDetails: [routeNote, refusedEscalationNote(code), standIn ? STAND_IN_NAME_NOTE : null]
+          .filter(Boolean)
+          .join('\n'),
         callSid: metadata.callSid,
         callerPhone: metadata.callerPhone,
         dialedNumber: metadata.dialedNumber,
@@ -2256,13 +2259,15 @@ For healthcare provider calls — escalate immediately with whatever info you ha
         void (async () => {
           try {
             const { SyncAgentService } = await import("../services/syncAgentService");
-            const name = [params.patient_first_name, params.patient_last_name]
-              .filter(Boolean).join(' ').trim() || 'Unknown Caller';
+            const { fullName: name, standIn } = nameOrStandIn(params.patient_first_name, params.patient_last_name);
             const phone = normalizePhoneNumber(params.callback_number || metadata.callerPhone || '');
             // A refusal earlier on this call may already have filed a ticket under
             // the call's key; the record must not be swallowed by it (Codex P1,
             // #339). See transferRecordCrossReference.
             const earlier = refusedEscalationTicketFor(callId);
+            const notes = [earlier ? transferRecordCrossReference(earlier) : null, standIn ? STAND_IN_NAME_NOTE : null]
+              .filter(Boolean)
+              .join('\n');
             const result = await SyncAgentService.submitSimplifiedTicket({
               patientFullName: name,
               patientDOB: params.patient_dob || 'Unknown',
@@ -2279,12 +2284,19 @@ For healthcare provider calls — escalate immediately with whatever info you ha
               // provider calling about a patient. The 'medium' branch existed
               // solely for patient_unresponsive, which no longer exists.
               priority: 'urgent',
-              ...(earlier
-                ? {
-                    additionalDetails: transferRecordCrossReference(earlier),
-                    secondTicketOnThisCall: { keySuffix: 'urgent-transfer' },
-                  }
-                : {}),
+              // PINNED TO AFTER HOURS, which is what the mandate above says and
+              // what this payload never did: with no department named the app
+              // classified the description, and of the 54 record tickets traced
+              // 2026-08-11..10-09 only 32 landed in After Hours — 22 went to
+              // Technicians, the HVA Hub, Surgery and elsewhere, and 9 more
+              // classified as Surgery were REFUSED for a surgeon. A supplied
+              // department wins over the derivation (resolveSuppliedDepartment)
+              // and the surgeon gate is department 2's alone. No reason hint:
+              // the app refuses 159 as a hint by design (a disposition, not a
+              // request reason), so the description still picks the reason.
+              departmentId: AFTER_HOURS_ROUTE_DEPARTMENT_ID,
+              ...(notes ? { additionalDetails: notes } : {}),
+              ...(earlier ? { secondTicketOnThisCall: { keySuffix: 'urgent-transfer' } } : {}),
               callSid: metadata.callSid,
               callerPhone: metadata.callerPhone,
               dialedNumber: metadata.dialedNumber,

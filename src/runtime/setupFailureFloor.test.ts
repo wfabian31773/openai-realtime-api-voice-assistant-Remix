@@ -48,6 +48,58 @@ describe("shouldFileSetupFailure", () => {
     expect(shouldFileSetupFailure(record({ agentTurns: 1 }))).toBe("agent-spoke");
   });
 
+  /**
+   * THE FIRST-EVENT WAIT. 3 of the floor's 4 tickets in its first 30 days
+   * were after-hours callers on the line for 1–2 s (VA-68899, VA-68900,
+   * VA-69923). Inside the wait even a healthy session has not been declared
+   * late, so a caller who HUNG UP by then left; they were not failed.
+   */
+  it.each([1_000, 2_000, 2_499])(
+    "skips a caller who hung up %i ms in, before the default first-event wait",
+    (ms) => {
+      expect(shouldFileSetupFailure(record(), { callerLeftAfterMs: ms })).toBe(
+        "left-before-the-first-event-wait",
+      );
+    },
+  );
+
+  it("files for a caller who hung up exactly at the wait, or later", () => {
+    expect(shouldFileSetupFailure(record(), { callerLeftAfterMs: 2_500 })).toBeNull();
+    expect(shouldFileSetupFailure(record(), { callerLeftAfterMs: 14_000 })).toBeNull();
+  });
+
+  it("reads the wait the call was CONFIGURED with, not the default", () => {
+    expect(
+      shouldFileSetupFailure(record(), { callerLeftAfterMs: 3_000, firstEventWaitMs: 5_000 }),
+    ).toBe("left-before-the-first-event-wait");
+    expect(
+      shouldFileSetupFailure(record(), { callerLeftAfterMs: 120, firstEventWaitMs: 80 }),
+    ).toBeNull();
+  });
+
+  /**
+   * A SHORT CALL IS NOT A CALLER WHO LEFT. A setup that fails fast on OUR
+   * side (the agent tree throwing) is short too, and that caller is still on
+   * the line hearing the apology. The fixture here lasts 1 ms and files.
+   */
+  it("files a fast failure on our side, where the caller never hung up", () => {
+    expect(shouldFileSetupFailure(record(), {})).toBeNull();
+    expect(shouldFileSetupFailure(record(), { firstEventWaitMs: 2_500 })).toBeNull();
+  });
+
+  it("checks the wait AFTER the agent-spoke gate, so its skip reason stays honest", () => {
+    expect(shouldFileSetupFailure(record({ agentTurns: 2 }), { callerLeftAfterMs: 500 })).toBe(
+      "agent-spoke",
+    );
+  });
+
+  it("runSetupFailureFloor honours the context and posts nothing", async () => {
+    const filer = vi.fn(async () => ({ success: true, ticketNumber: "VA-1" }));
+    const out = await runSetupFailureFloor(record(), { callerLeftAfterMs: 1_000 }, filer);
+    expect(out).toEqual({ filed: false, reason: "left-before-the-first-event-wait" });
+    expect(filer).not.toHaveBeenCalled();
+  });
+
   it("skips an unknown lane", () => {
     expect(shouldFileSetupFailure(record({ slug: "answering-service" }))).toBe(
       "unknown-lane",
@@ -64,7 +116,7 @@ describe("runSetupFailureFloor", () => {
     const filer = vi.fn(async (ticket) => {
       return { success: true, ticketNumber: "VA-SETUP-1" };
     });
-    const out = await runSetupFailureFloor(record(), filer);
+    const out = await runSetupFailureFloor(record(), {}, filer);
     expect(out).toEqual({ filed: true, ticketNumber: "VA-SETUP-1" });
     expect(filer).toHaveBeenCalledTimes(1);
     expect(filer.mock.calls[0][0]).toMatchObject({
@@ -96,7 +148,7 @@ describe("runSetupFailureFloor", () => {
         success: true,
         ticketNumber: "VA-1",
       }));
-      await runSetupFailureFloor(record({ slug }), filer);
+      await runSetupFailureFloor(record({ slug }), {}, filer);
       expect(filer.mock.calls[0][0]).toMatchObject({
         departmentId,
         requestTypeId,
@@ -110,14 +162,14 @@ describe("runSetupFailureFloor", () => {
   });
 
   it("does not throw when the filer throws", async () => {
-    const out = await runSetupFailureFloor(record(), async () => {
+    const out = await runSetupFailureFloor(record(), {}, async () => {
       throw new Error("ticketing app down");
     });
     expect(out).toEqual({ filed: false, reason: "threw" });
   });
 
   it("reports create-failed when the filer declines", async () => {
-    const out = await runSetupFailureFloor(record(), async () => ({
+    const out = await runSetupFailureFloor(record(), {}, async () => ({
       success: false,
       error: "timeout",
     }));
@@ -128,6 +180,7 @@ describe("runSetupFailureFloor", () => {
     const filer = vi.fn(async () => ({ success: true, ticketNumber: "VA-1" }));
     const out = await runSetupFailureFloor(
       record({ outcome: "caller_hangup" }),
+      {},
       filer,
     );
     expect(out).toEqual({ filed: false, reason: "not-provider-failure" });
