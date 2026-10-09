@@ -449,6 +449,36 @@ export function decideSweep(input: SweepInput): SweepDecision {
 export const SWEPT_TICKET_DESCRIPTION =
   "Callback request taken during your call. A team member will follow up with you.";
 
+/**
+ * THE QUEUES THAT ASSIGN BY A FIELD THE CALL HAS TO SUPPLY.
+ *
+ * Optical (1) routes by OFFICE and Surgery (2) by SURGEON, and create-ticket
+ * refuses a ticket in either that carries neither — *"Missing required
+ * information: office"* / *"…: surgeon"*. That refusal is a QUESTION for a
+ * caller who is still on the line. Everything that files at TEARDOWN — this
+ * sweep and the setup-failure floor — runs after the caller has gone, so
+ * there is nobody left to ask and the refusal is final: the request the
+ * floor exists to save is lost on the last step.
+ *
+ * MEASURED in `voice_agent_api_logs`, 2026-09-28..10-08: **36 optical and 51
+ * surgery swept requests were refused HTTP 400 for exactly that, against 2
+ * and 3 accepted** (the app derived the field from the patient's record on
+ * those). Tech (3) and records (16) carry no routing field and filed every
+ * swept request in the same window (101 and 88).
+ *
+ * `routingAskExhausted` is the app's own unassigned exit (operator ruling
+ * 2026-09-02, honoured for departments 1 and 2 by the app's
+ * `DEPARTMENTS_WITH_UNASSIGNED_EXIT`). The app still tries to DERIVE the
+ * office or surgeon from the verified patient first and takes the exit only
+ * when that fails (`routing-gate.ts`, the derive step runs before the exit),
+ * so the flag can never cost a ticket a routing it would otherwise have got.
+ *
+ * Exported because the setup-failure floor files at teardown too and must
+ * read the SAME set — two copies of a department list is the drift this repo
+ * has already paid for (`explicitAsk.ts`).
+ */
+export const TEARDOWN_UNASSIGNED_EXIT_DEPARTMENTS: ReadonlySet<number> = new Set([1, 2]);
+
 export interface SweptTicket {
   /** Staff-only. Travels in callData, never in the patient-facing description. */
   staffNote: string;
@@ -466,6 +496,13 @@ export interface SweptTicket {
   priority: "low" | "medium" | "high";
   callSid: string;
   idempotencyKey: string;
+  /**
+   * Present only on a queue that routes by a field the call must supply —
+   * see TEARDOWN_UNASSIGNED_EXIT_DEPARTMENTS. Never sent elsewhere: on any
+   * other department it means nothing to the app and would only claim an
+   * ask that did not happen.
+   */
+  routingAskExhausted?: true;
 }
 
 /**
@@ -552,6 +589,15 @@ export function buildSweptTicket(
      * who hit it, and the second one's request would be silently dropped.
      */
     idempotencyKey: `call-${input.callSid}`,
+    /**
+     * THE CALLER IS GONE, SO THE ASK IS EXHAUSTED BY DEFINITION. A refusal
+     * for the office or the surgeon is a question, and at teardown there is
+     * nobody to put it to. See TEARDOWN_UNASSIGNED_EXIT_DEPARTMENTS for the
+     * measurement and for why the flag cannot cost a ticket its routing.
+     */
+    ...(TEARDOWN_UNASSIGNED_EXIT_DEPARTMENTS.has(departmentId)
+      ? { routingAskExhausted: true as const }
+      : {}),
   };
 }
 

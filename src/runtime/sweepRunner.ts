@@ -88,6 +88,10 @@ const defaultFiler: SweepFiler = async (ticket) => {
       transcript: ticket.staffNote,
     },
     idempotencyKey: ticket.idempotencyKey,
+    // Optical and surgery only, decided in buildSweptTicket. Without it the
+    // app refuses a swept request for an office or a surgeon nobody is left
+    // to give — 87 of 92 on those two queues, 2026-09-28..10-08.
+    ...(ticket.routingAskExhausted ? { routingAskExhausted: true } : {}),
   });
   /**
    * A QUEUED REQUEST IS A RECOVERED REQUEST.

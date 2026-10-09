@@ -647,8 +647,23 @@ import { callEnvironment } from "./callRecord";
  * `call-<sid>-setup-failure`) and the TwiML speaks the technical-trouble
  * apology. Defaults work; no new secret is required.
  */
+/**
+ * v92 — THE TEARDOWN FILERS TAKE THE UNASSIGNED EXIT (2026-10-09). The request
+ * sweep and the setup-failure floor file after the caller has gone, and on
+ * optical (1) and surgery (2) create-ticket refused them for an office or a
+ * surgeon nobody was left to give: 36 optical and 51 surgery swept requests
+ * refused HTTP 400, 2026-09-28..10-08, against 5 accepted. Both now send
+ * `routingAskExhausted` on those two departments only, from one shared set
+ * (`TEARDOWN_UNASSIGNED_EXIT_DEPARTMENTS`); the app still derives the field
+ * from the patient's record first, so no ticket loses a routing it would have
+ * had. Beside it the setup floor stops filing for a caller who HUNG UP inside
+ * the configured first-event wait — 3 of its first 4 tickets were 1–2 s
+ * hangups. Keyed on the moment the caller's socket closed, not on the call's
+ * length, so a setup we fail fast still files.
+ * `teardownTakesTheUnassignedExit.test.ts` reads the payload that leaves.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v91-the-session-stall-reconnects-20261006";
+  "voice-runtime-v92-the-teardown-filers-take-the-unassigned-exit-20261009";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can
