@@ -46,6 +46,7 @@ afterAll(() => {
 import twilio from "twilio";
 import {
   createRuntimeTransfer,
+  queueCallerIdFor,
   transferModeFor,
   TRANSFER_DIAL_RESULT_PATH,
 } from "./runtimeTransfer";
@@ -403,5 +404,68 @@ describe("a blind transfer that never left the ground", () => {
       dialedNumber: "+17149564300",
       method: "blind",
     });
+  });
+});
+
+/**
+ * THE QUEUE SEES WHO IS CALLING. Operator, 2026-10-10: *"is there anyway to
+ * maintain the original calling number? Right now all calls to the queue get
+ * our number."* Proved through `createRuntimeTransfer`, the object the runtime
+ * mounts, because the helper being right proves nothing if the call site still
+ * passes `TWILIO_PHONE_NUMBER` (CLAUDE.md failure mode 10).
+ */
+describe("the queue sees the caller's number, not ours", () => {
+  function opsCapturingCallerId() {
+    const callerIds: Array<string | undefined> = [];
+    const { ops } = fakeOps();
+    const capturing: TransferTwilioOps = {
+      ...ops,
+      redirectCallerToQueue: async (input) => {
+        callerIds.push(input.callerId);
+      },
+    };
+    return { capturing, callerIds };
+  }
+
+  it("hands the queue <Dial> the caller's own number", async () => {
+    const { capturing, callerIds } = opsCapturingCallerId();
+    pcpEscalation();
+    await transferWith(capturing).handoffFor("pcp", META)();
+    expect(callerIds).toEqual([META.callerPhone]);
+  });
+
+  /**
+   * A withheld caller ID arrives as a WORD, and a callerId Twilio refuses
+   * fails the dial — a caller who asked for a person would be stranded. So
+   * anything that is not a plain E.164 subscriber number keeps ours.
+   */
+  it("keeps our number when caller ID is withheld, empty or not a subscriber number", async () => {
+    for (const callerPhone of ["anonymous", "", "+1234", "7145551234", "+0145551234"]) {
+      const { capturing, callerIds } = opsCapturingCallerId();
+      pcpEscalation();
+      await transferWith(capturing).handoffFor("pcp", { ...META, callerPhone })();
+      expect(callerIds, JSON.stringify(callerPhone)).toEqual([ENV.TWILIO_PHONE_NUMBER]);
+    }
+  });
+
+  it("RUNTIME_QUEUE_CALLER_ID=ours puts every call back on our number", async () => {
+    const { capturing, callerIds } = opsCapturingCallerId();
+    pcpEscalation();
+    await transferWith(capturing, { ...ENV, RUNTIME_QUEUE_CALLER_ID: " OURS " }).handoffFor(
+      "pcp",
+      META,
+    )();
+    expect(callerIds).toEqual([ENV.TWILIO_PHONE_NUMBER]);
+  });
+
+  it("anything else in the lever, including unset, is the caller's number", () => {
+    for (const lever of [undefined, "", "caller", "theirs", "sideways"]) {
+      expect(
+        queueCallerIdFor("+15551234567", { ...ENV, RUNTIME_QUEUE_CALLER_ID: lever }),
+        String(lever),
+      ).toBe("+15551234567");
+    }
+    // An international caller is still a caller.
+    expect(queueCallerIdFor("+447700900123", ENV)).toBe("+447700900123");
   });
 });
