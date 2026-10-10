@@ -674,8 +674,19 @@ import { callEnvironment } from "./callRecord";
  * over the app's derivation. The refused-escalation filing takes the stand-in
  * too. `noIvrTransferRecordFiles.test.ts` drives the real agent.
  */
+/**
+ * v94 — THE QUEUE SEES THE CALLER'S NUMBER (2026-10-10). The PCP blind
+ * transfer's `<Dial>` carried `callerId` = our Twilio number, so all 392 queue
+ * transfers of the fourteen days to 2026-10-10 rang the call centre showing
+ * the AI line instead of the office that called. `queueCallerIdFor` now passes
+ * the caller's own inbound `From` (Twilio permits it on a dial from that
+ * inbound leg), and our number when caller ID is withheld or not a plain
+ * E.164 number, because a refused callerId would fail the dial. The warm path
+ * is untouched. `RUNTIME_QUEUE_CALLER_ID=ours` reverts without a deploy.
+ * `pcpBlindTransferWiring.test.ts` drives the real transfer.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v93-the-urgent-transfer-record-files-in-after-hours-20261009";
+  "voice-runtime-v94-the-queue-sees-the-callers-number-20261010";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can
