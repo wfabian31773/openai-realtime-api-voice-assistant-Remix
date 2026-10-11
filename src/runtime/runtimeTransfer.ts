@@ -746,8 +746,11 @@ export function createRuntimeTransfer(options: RuntimeTransferOptions): RuntimeT
            * has filed an URGENT After Hours ticket on exactly this since July.
            * Placed after the UNAVAILABLE return because a refusal rang nobody,
            * and PCP is excluded for the old core's reason: it files its own
-           * structured ticket before dialling. The per-call claim lock in
-           * `SyncAgentService` makes this and a later `create_ticket` one ticket.
+           * structured ticket before dialling. When the call holds no ticket
+           * yet, the per-call claim lock in `SyncAgentService` makes this and a
+           * later `create_ticket` one ticket; when the caller's request was
+           * filed FIRST, the record is filed beside it (v95) — the claim used to
+           * swallow it, which left an urgent ring-out with only a medium ticket.
            */
           if (!outcome.ok && slug !== "pcp") {
             urgentAlerts.fallbackTicket({

@@ -685,8 +685,21 @@ import { callEnvironment } from "./callRecord";
  * is untouched. `RUNTIME_QUEUE_CALLER_ID=ours` reverts without a deploy.
  * `pcpBlindTransferWiring.test.ts` drives the real transfer.
  */
+/**
+ * v95 — THE RING-OUT RECORD FILES BESIDE THE REQUEST (2026-10-11). When an
+ * after-hours caller's request was filed BEFORE their urgent transfer rang
+ * out, the runtime's urgent fallback went through `createTicket`, whose
+ * per-call claim handed back the request ticket and posted nothing — so the
+ * call's only ticket was a medium one in the HVA Hub and no urgent record of
+ * the failed transfer existed. 2 of the 8 failed after-hours transfers from
+ * 2026-10-10 to 2026-10-11 17:20 UTC (VA-70426, VA-70441). The fallback now
+ * reads whether the call already holds a ticket and, when it does, files the
+ * urgent After Hours record beside it with `secondTicketOnThisCall` — the v93
+ * mechanism, on the arm where nobody is on the phone with the patient.
+ * `ringOutFilesBesideTheRequest.test.ts` runs the production defaults.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v94-the-queue-sees-the-callers-number-20261010";
+  "voice-runtime-v95-the-ring-out-record-files-beside-the-request-20261011";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can
