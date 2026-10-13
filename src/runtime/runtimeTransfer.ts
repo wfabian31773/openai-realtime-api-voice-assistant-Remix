@@ -80,6 +80,44 @@ export function transferModeFor(
   return slug === "pcp" ? "blind" : "warm";
 }
 
+/**
+ * WHOSE NUMBER THE QUEUE SEES WHEN THE BLIND TRANSFER RINGS IT.
+ *
+ * The caller's own, whenever caller ID gave us a real one. Operator,
+ * 2026-10-10: *"is there anyway to maintain the original calling number? Right
+ * now all calls to the queue get our number."* They did because this file
+ * passed `TWILIO_PHONE_NUMBER` as the `<Dial callerId>`, so every one of the
+ * 392 PCP queue transfers of the fourteen days to 2026-10-10 reached the call
+ * centre showing the AI line's number rather than the office that rang.
+ *
+ * WHY THIS IS ALLOWED, and why only on the blind path: the blind transfer
+ * redirects the caller's OWN inbound leg into a `<Dial>`, and Twilio permits
+ * an inbound call's `From` as the caller ID of a dial it makes — the same
+ * value it uses when `callerId` is left off, and the shape Twilio recommends
+ * for forwarding under STIR/SHAKEN. The warm path dials a NEW REST leg, where
+ * presenting a number we do not own needs a `CallToken`; it is not touched.
+ *
+ * TEN TO FIFTEEN DIGITS OR OURS. A withheld caller ID arrives as a word
+ * ("anonymous") — 22 of 2,112 PCP calls in the same window — and a callerId
+ * Twilio refuses fails the dial, which would strand a caller who asked for a
+ * person. So anything that is not a plain E.164 subscriber number keeps the
+ * number we have always sent.
+ *
+ * `RUNTIME_QUEUE_CALLER_ID=ours` restores the previous behaviour on every
+ * call without a code change, the `RUNTIME_TRANSFER_MODE` revert pattern.
+ * Anything else, including unset, is the caller's number.
+ */
+export function queueCallerIdFor(
+  callerPhone: string | undefined,
+  env: Record<string, string | undefined>,
+): string | undefined {
+  const ours = env.TWILIO_PHONE_NUMBER;
+  if (env.RUNTIME_QUEUE_CALLER_ID?.trim().toLowerCase() === "ours") return ours;
+  const theirs = callerPhone?.trim();
+  if (theirs && /^\+[1-9]\d{9,14}$/.test(theirs)) return theirs;
+  return ours;
+}
+
 /** Per-call hooks the runtime supplies so the CALL's own record survives
  * the transfer — see WarmTransferDeps for why the mark precedes the
  * redirect (Codex, PR #230 round 2). */
@@ -565,7 +603,7 @@ export function createRuntimeTransfer(options: RuntimeTransferOptions): RuntimeT
               {
                 twilio: ops,
                 dialResultUrl,
-                callerId: env.TWILIO_PHONE_NUMBER,
+                callerId: queueCallerIdFor(metadata.callerPhone, env),
                 onCallerRedirectStarting: hooks?.onCallerRedirectStarting,
                 onCallerRedirectFailed: hooks?.onCallerRedirectFailed,
                 log,
@@ -708,8 +746,11 @@ export function createRuntimeTransfer(options: RuntimeTransferOptions): RuntimeT
            * has filed an URGENT After Hours ticket on exactly this since July.
            * Placed after the UNAVAILABLE return because a refusal rang nobody,
            * and PCP is excluded for the old core's reason: it files its own
-           * structured ticket before dialling. The per-call claim lock in
-           * `SyncAgentService` makes this and a later `create_ticket` one ticket.
+           * structured ticket before dialling. When the call holds no ticket
+           * yet, the per-call claim lock in `SyncAgentService` makes this and a
+           * later `create_ticket` one ticket; when the caller's request was
+           * filed FIRST, the record is filed beside it (v95) — the claim used to
+           * swallow it, which left an urgent ring-out with only a medium ticket.
            */
           if (!outcome.ok && slug !== "pcp") {
             urgentAlerts.fallbackTicket({

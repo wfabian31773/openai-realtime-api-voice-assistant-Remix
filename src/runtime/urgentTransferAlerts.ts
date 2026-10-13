@@ -16,6 +16,8 @@ import {
   buildUrgentTransferSms,
   urgentAlertTime,
   urgentFallbackTicketParams,
+  urgentRingOutBesideParams,
+  type UrgentRingOutBesideParams,
 } from "../services/urgentTransferAlert";
 
 export interface UrgentTransferAlerts {
@@ -46,6 +48,16 @@ export function defaultUrgentTransferAlerts(
     createTicket?: (
       params: ReturnType<typeof urgentFallbackTicketParams>,
     ) => Promise<{ success: boolean; ticketNumber?: string; error?: string }>;
+    /**
+     * Injected for tests; defaults to the ticket number already written back
+     * onto this call's `call_logs` row — the same value `createTicket`'s claim
+     * would hand back instead of posting.
+     */
+    ticketAlreadyOnCall?: (callSid: string) => Promise<string | undefined>;
+    /** Injected for tests; defaults to SyncAgentService.submitSimplifiedTicket. */
+    submitBeside?: (
+      params: UrgentRingOutBesideParams,
+    ) => Promise<{ success: boolean; ticketNumber?: string; error?: string }>;
     now?: () => Date;
   } = {},
 ): UrgentTransferAlerts {
@@ -68,6 +80,19 @@ export function defaultUrgentTransferAlerts(
       // reaches the database, and that must stay off the runtime's boot path.
       const { SyncAgentService } = await import("../services/syncAgentService");
       return SyncAgentService.createTicket(params);
+    });
+  const ticketAlreadyOnCall =
+    deps.ticketAlreadyOnCall ??
+    (async (callSid: string) => {
+      // Dynamic for the same reason: storage validates the database URL on load.
+      const { storage } = await import("../../server/storage");
+      return (await storage.getCallLogBySid(callSid))?.ticketNumber ?? undefined;
+    });
+  const submitBeside =
+    deps.submitBeside ??
+    (async (params: UrgentRingOutBesideParams) => {
+      const { SyncAgentService } = await import("../services/syncAgentService");
+      return SyncAgentService.submitSimplifiedTicket(params);
     });
   const now = deps.now ?? (() => new Date());
 
@@ -99,18 +124,54 @@ export function defaultUrgentTransferAlerts(
       log(`[runtime-xfer] filing the urgent fallback ticket for ${input.callSid}`);
       void (async () => {
         try {
-          const result = await createTicket(
-            urgentFallbackTicketParams({
-              why: input.why,
-              dialTarget: input.dialTarget,
-              escalationDetails: input.escalationDetails,
-              callerId: input.callerNumber,
-              callSid: input.callSid,
-              agentUsed: input.agentUsed,
-            }),
-          );
+          /**
+           * DOES THE CALL ALREADY HOLD A TICKET? If it does, `createTicket`'s
+           * per-call claim returns that ticket and posts nothing — so a caller
+           * whose request was filed before the urgent transfer rang out was
+           * left with a medium ticket and no urgent record (VA-70426 on
+           * 2026-10-10, VA-70441 on 2026-10-11). The record is filed BESIDE it
+           * instead. With no ticket yet, it files as the call's own ticket
+           * exactly as before, so a later `create_ticket` still returns it.
+           *
+           * A read that fails falls back to the old path: the worst case is
+           * the behaviour this replaces, never a ticket lost to the lookup.
+           */
+          let earlier: string | undefined;
+          try {
+            earlier = await ticketAlreadyOnCall(input.callSid);
+          } catch (err) {
+            log(
+              `[runtime-xfer] ⚠️ could not read whether ${input.callSid} already holds a ticket ` +
+                `(${String(err)}) — filing the urgent record as the call's own ticket`,
+            );
+          }
+          const result = earlier
+            ? await submitBeside(
+                urgentRingOutBesideParams({
+                  why: input.why,
+                  dialTarget: input.dialTarget,
+                  escalationDetails: input.escalationDetails,
+                  callerId: input.callerNumber,
+                  callSid: input.callSid,
+                  agentUsed: input.agentUsed,
+                  earlierTicket: earlier,
+                }),
+              )
+            : await createTicket(
+                urgentFallbackTicketParams({
+                  why: input.why,
+                  dialTarget: input.dialTarget,
+                  escalationDetails: input.escalationDetails,
+                  callerId: input.callerNumber,
+                  callSid: input.callSid,
+                  agentUsed: input.agentUsed,
+                }),
+              );
           if (result.success) {
-            log(`[runtime-xfer] ✓ urgent fallback ticket ${result.ticketNumber ?? "(no number)"} for ${input.callSid}`);
+            log(
+              `[runtime-xfer] ✓ urgent fallback ticket ${result.ticketNumber ?? "(no number)"} for ${input.callSid}` +
+                (earlier ? ` (beside ${earlier})` : ""),
+            );
           } else {
             log(`[runtime-xfer] ✗ urgent fallback ticket failed for ${input.callSid}: ${result.error ?? "unknown"}`);
           }

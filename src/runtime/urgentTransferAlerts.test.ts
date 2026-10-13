@@ -18,9 +18,12 @@ import { ACCEPT_WINDOW_MS, type TransferTwilioOps } from "./warmTransfer";
 import { escalationDetailsMap } from "../services/escalationStore";
 import {
   buildUrgentTransferSms,
+  ringOutCrossReference,
   URGENT_TRANSFER_NOT_ANSWERED,
   urgentFallbackTicketParams,
+  type UrgentRingOutBesideParams,
 } from "../services/urgentTransferAlert";
+import { STAND_IN_NAME_NOTE } from "../services/standInName";
 
 const writes = vi.hoisted(() => ({ persistTransferOutcome: vi.fn(async () => true) }));
 vi.mock("./callRecord", () => writes);
@@ -252,10 +255,17 @@ describe("the sender the runtime uses in production", () => {
 
   it("files the old core's urgent After Hours ticket", async () => {
     const filed: Array<ReturnType<typeof urgentFallbackTicketParams>> = [];
+    const besides: UrgentRingOutBesideParams[] = [];
     const alerts = defaultUrgentTransferAlerts(ENV, () => undefined, {
       createTicket: async (p) => {
         filed.push(p);
         return { success: true, ticketNumber: "VA-1" };
+      },
+      // The call holds no ticket yet: this one becomes the call's own.
+      ticketAlreadyOnCall: async () => undefined,
+      submitBeside: async (p) => {
+        besides.push(p);
+        return { success: true, ticketNumber: "VA-2" };
       },
     });
     alerts.fallbackTicket({
@@ -281,6 +291,115 @@ describe("the sender the runtime uses in production", () => {
     });
     expect(filed[0].description).toContain(URGENT_TRANSFER_NOT_ANSWERED);
     expect(filed[0].description).toContain("Please call the patient back immediately.");
+    expect(besides).toEqual([]);
+  });
+});
+
+/**
+ * THE RING-OUT ON A CALL THAT ALREADY FILED THE CALLER'S REQUEST.
+ *
+ * The corpus is CAe32e2450544737d1d77868f4c36aeebf (2026-10-11 16:28 UTC) and
+ * CAc9167374d847e9090f8f1872734d989a (2026-10-10 20:36 UTC): `create_ticket`
+ * filed the caller's request first (VA-70441, VA-70426 — both medium, HVA Hub),
+ * `escalate_to_human` was sanctioned, the on-call phone rang out, and the
+ * fallback's per-call claim handed back the request ticket without posting.
+ * No urgent record of the failed transfer exists for either call.
+ */
+describe("a ring-out after the caller's request was filed files the urgent record BESIDE it", () => {
+  const RING_OUT = {
+    callSid: "CAcaller",
+    callerNumber: META.callerPhone,
+    why: URGENT_TRANSFER_NOT_ANSWERED,
+    dialTarget: ENV.HUMAN_AGENT_NUMBER,
+    agentUsed: "no-ivr",
+  };
+
+  function alertsWith(earlier: () => Promise<string | undefined>) {
+    const lines: string[] = [];
+    const own: Array<ReturnType<typeof urgentFallbackTicketParams>> = [];
+    const besides: UrgentRingOutBesideParams[] = [];
+    const alerts = defaultUrgentTransferAlerts(ENV, (l) => lines.push(l), {
+      createTicket: async (p) => {
+        own.push(p);
+        return { success: true, ticketNumber: "VA-70441" };
+      },
+      ticketAlreadyOnCall: earlier,
+      submitBeside: async (p) => {
+        besides.push(p);
+        return { success: true, ticketNumber: "VA-90001" };
+      },
+    });
+    return { alerts, lines, own, besides };
+  }
+
+  it("files an urgent After Hours record beside the request, not through the claim that swallowed it", async () => {
+    const { alerts, lines, own, besides } = alertsWith(async () => "VA-70441");
+    alerts.fallbackTicket({ ...RING_OUT, escalationDetails: { ...URGENT, patientFirstName: "Rosa", patientLastName: "Example" } });
+    await vi.waitFor(() => expect(besides).toHaveLength(1));
+
+    expect(own).toEqual([]);
+    expect(besides[0]).toMatchObject({
+      departmentId: 8,
+      priority: "urgent",
+      secondTicketOnThisCall: { keySuffix: "urgent-ringout" },
+      patientFullName: "Rosa Example",
+      patientPhone: URGENT.callbackNumber,
+      preferredContactMethod: "phone",
+      callSid: "CAcaller",
+      callerPhone: META.callerPhone,
+      agentUsed: "no-ivr",
+    });
+    expect(besides[0].reasonForCalling.split("\n")[0]).toBe("Request Type: Urgent/Emergency Transfer");
+    expect(besides[0].reasonForCalling).toContain(URGENT_TRANSFER_NOT_ANSWERED);
+    expect(besides[0].reasonForCalling).toContain("Please call the patient back immediately.");
+    expect(besides[0].reasonForCalling).toContain(`Reason: ${URGENT.reason}`);
+    expect(besides[0].additionalDetails).toBe(ringOutCrossReference("VA-70441"));
+    expect(lines.join("\n")).toContain("✓ urgent fallback ticket VA-90001 for CAcaller (beside VA-70441)");
+  });
+
+  it("carries the stand-in name and its note when the agent recorded no usable name", async () => {
+    const { alerts, besides } = alertsWith(async () => "VA-70426");
+    // "Test Caller" is every word on the app's placeholder list.
+    alerts.fallbackTicket({ ...RING_OUT, escalationDetails: URGENT });
+    await vi.waitFor(() => expect(besides).toHaveLength(1));
+    expect(besides[0].patientFullName).toBe("Unnamed Caller");
+    expect(besides[0].additionalDetails).toBe(`${ringOutCrossReference("VA-70426")}\n${STAND_IN_NAME_NOTE}`);
+  });
+
+  it("sends no reason hint — the app refuses 159 as a hint, and the description picks the reason", async () => {
+    const { alerts, besides } = alertsWith(async () => "VA-70441");
+    alerts.fallbackTicket({ ...RING_OUT, escalationDetails: URGENT });
+    await vi.waitFor(() => expect(besides).toHaveLength(1));
+    expect(besides[0]).not.toHaveProperty("suggestedRequestReasonId");
+    expect(besides[0]).not.toHaveProperty("suggestedRequestTypeId");
+    expect(besides[0].patientDOB).toBe("Unknown");
+  });
+
+  it("with no ticket on the call, files as the call's own ticket exactly as before", async () => {
+    const { alerts, own, besides } = alertsWith(async () => undefined);
+    alerts.fallbackTicket({ ...RING_OUT, escalationDetails: URGENT });
+    await vi.waitFor(() => expect(own).toHaveLength(1));
+    expect(besides).toEqual([]);
+  });
+
+  it("a lookup that fails falls back to the old path rather than losing the record", async () => {
+    const { alerts, lines, own, besides } = alertsWith(async () => {
+      throw new Error("database unreachable");
+    });
+    alerts.fallbackTicket({ ...RING_OUT, escalationDetails: URGENT });
+    await vi.waitFor(() => expect(own).toHaveLength(1));
+    expect(besides).toEqual([]);
+    expect(lines.join("\n")).toMatch(/could not read whether CAcaller already holds a ticket/);
+  });
+
+  it("never throws into the caller's path when the beside filing fails", async () => {
+    const lines: string[] = [];
+    const alerts = defaultUrgentTransferAlerts(ENV, (l) => lines.push(l), {
+      ticketAlreadyOnCall: async () => "VA-70441",
+      submitBeside: async () => ({ success: false, error: "HTTP 500" }),
+    });
+    expect(() => alerts.fallbackTicket({ ...RING_OUT, escalationDetails: URGENT })).not.toThrow();
+    await vi.waitFor(() => expect(lines.join("\n")).toMatch(/urgent fallback ticket failed for CAcaller: HTTP 500/));
   });
 });
 

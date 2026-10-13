@@ -114,6 +114,33 @@ describe("the adapter", () => {
     expect(String(updated[0].opts.twiml)).not.toContain("+15551111111");
   });
 
+  /**
+   * THE QUEUE REDIRECT TOO, and this one carries a caller's number. Production
+   * builds these ops with OUR number as the default (`defaultOps` in
+   * runtimeTransfer.ts), so if the per-call value lost to the default here the
+   * runtime could hand over the caller's number and the queue would still ring
+   * showing ours — every test upstream of this line green.
+   */
+  it("puts the per-call callerId on the queue <Dial>, over the configured default", async () => {
+    const { client, updated } = fakeClient();
+    const ops = createTransferTwilioOps(client, {
+      fromNumber: "+15550000000",
+      callerId: "+15550000000",
+      log: () => undefined,
+    });
+    await ops.redirectCallerToQueue({
+      callerCallSid: "CAcaller",
+      destination: "+17149564300",
+      warning: "w",
+      actionUrl: "https://x.test/r",
+      timeoutSeconds: 60,
+      callerId: "+15552222222",
+    });
+    const twiml = String(updated[0].opts.twiml);
+    expect(twiml).toContain('<Dial callerId="+15552222222"');
+    expect(twiml).not.toContain("+15550000000");
+  });
+
   it("hangs up an office leg by completing it, not by redirecting it", async () => {
     const { client, updated } = fakeClient();
     const ops = createTransferTwilioOps(client, { fromNumber: "+1", log: () => undefined });

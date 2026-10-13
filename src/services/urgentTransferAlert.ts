@@ -23,9 +23,10 @@
  * and its own idea of the call.
  */
 import type { EscalationDetails } from './escalationStore';
-import type { SyncAgentTicketParams } from './syncAgentService';
+import type { SyncAgentService, SyncAgentTicketParams } from './syncAgentService';
 import { AFTER_HOURS_DEPARTMENT_ID } from '../tools/afterHoursTaxonomy';
 import { preferredCallbackNumber } from './handoffPolicy';
+import { nameOrStandIn, STAND_IN_NAME_NOTE } from './standInName';
 
 export interface UrgentTransferSmsOptions {
   callerNumber?: string;
@@ -131,22 +132,8 @@ export function urgentFallbackTicketParams(input: {
   agentUsed: string;
 }): SyncAgentTicketParams {
   const d = input.escalationDetails;
-  // The number to CALL BACK is the one the patient gave, when they gave one
-  // AND it is dialable. It is frequently not the phone they are calling from
-  // — a spouse's mobile, a nurse's station, a caller on a landline who wants
-  // their cell — but it arrives as free text, so an unvalidated preference
-  // can swap a good caller ID for a fragment. The policy decides; see
-  // preferredCallbackNumber (standing instruction 12; Codex review, PR #238).
-  // `callData.callerPhone` below keeps the true inbound number regardless, so
-  // nothing loses the provenance.
-  const rawPhone = preferredCallbackNumber({ collected: d?.callbackNumber, callerId: input.callerId }) || '';
-  const digits = rawPhone.replace(/\D/g, '');
-  const formattedPhone = digits.length === 10 ? `+1${digits}` : rawPhone.startsWith('+') ? rawPhone : `+${digits}`;
-
-  const descParts: string[] = [input.why, 'Please call the patient back immediately.'];
-  if (input.dialTarget) descParts.push(`Attempted transfer to: ${input.dialTarget}`);
-  if (d?.reason) descParts.push(`Reason: ${d.reason}`);
-  if (d?.symptomsSummary) descParts.push(`Symptoms: ${d.symptomsSummary}`);
+  const formattedPhone = fallbackCallbackPhone(d?.callbackNumber, input.callerId);
+  const descParts = fallbackDescriptionLines(input);
 
   return {
     departmentId: AFTER_HOURS_DEPARTMENT_ID,
@@ -162,6 +149,117 @@ export function urgentFallbackTicketParams(input: {
       callerPhone: input.callerId || undefined,
       agentUsed: input.agentUsed,
     },
+  };
+}
+
+/**
+ * The number to CALL BACK is the one the patient gave, when they gave one AND
+ * it is dialable. It is frequently not the phone they are calling from — a
+ * spouse's mobile, a nurse's station, a caller on a landline who wants their
+ * cell — but it arrives as free text, so an unvalidated preference can swap a
+ * good caller ID for a fragment. The policy decides; see
+ * preferredCallbackNumber (standing instruction 12; Codex review, PR #238).
+ * The true inbound number travels separately as `callerPhone` on both payloads,
+ * so nothing loses the provenance.
+ */
+function fallbackCallbackPhone(collected: string | undefined, callerId: string | null | undefined): string {
+  const rawPhone = preferredCallbackNumber({ collected, callerId }) || '';
+  const digits = rawPhone.replace(/\D/g, '');
+  return digits.length === 10 ? `+1${digits}` : rawPhone.startsWith('+') ? rawPhone : `+${digits}`;
+}
+
+/** What happened, what to do, what was attempted — one copy for both payloads. */
+function fallbackDescriptionLines(input: {
+  why: string;
+  dialTarget?: string;
+  escalationDetails?: Pick<EscalationDetails, 'reason' | 'symptomsSummary'>;
+}): string[] {
+  const d = input.escalationDetails;
+  const lines: string[] = [input.why, 'Please call the patient back immediately.'];
+  if (input.dialTarget) lines.push(`Attempted transfer to: ${input.dialTarget}`);
+  if (d?.reason) lines.push(`Reason: ${d.reason}`);
+  if (d?.symptomsSummary) lines.push(`Symptoms: ${d.symptomsSummary}`);
+  return lines;
+}
+
+/** The parameters `SyncAgentService.submitSimplifiedTicket` takes. */
+export type UrgentRingOutBesideParams = Parameters<typeof SyncAgentService.submitSimplifiedTicket>[0];
+
+/**
+ * The line that ties a ring-out record to the caller's own request ticket.
+ * Both tickets stand: the request is still the caller's request, and this one
+ * is the only place the failed urgent transfer is written down.
+ */
+export function ringOutCrossReference(earlierTicket: string): string {
+  return (
+    `SEE ALSO ${earlierTicket}: the caller's request was filed earlier on this call. ` +
+    `This record exists because the urgent transfer to the on-call provider was not ` +
+    `answered — that ticket does not say so.`
+  );
+}
+
+/**
+ * THE RING-OUT RECORD FILED BESIDE A TICKET THE CALL ALREADY HOLDS.
+ *
+ * `urgentFallbackTicketParams` goes through `SyncAgentService.createTicket`,
+ * whose per-call claim hands back the EXISTING ticket without posting anything
+ * when the call already has one. So when the after-hours agent filed the
+ * caller's request FIRST and the urgent transfer then rang out, the urgent
+ * record was swallowed: the call's only ticket was the request — medium
+ * priority, in whichever department the request routed to — and nothing told
+ * After Hours that an urgent patient had been dialled to the on-call phone and
+ * nobody answered.
+ *
+ * Measured over every failed runtime after-hours transfer from 2026-10-10 (v93
+ * live) to 2026-10-11 17:20 UTC: 2 of 8 left only a medium HVA Hub ticket and no
+ * urgent record — CAc9167374d847e9090f8f1872734d989a (VA-70426) and
+ * CAe32e2450544737d1d77868f4c36aeebf (VA-70441). On both, `create_ticket` ran
+ * before `escalate_to_human`, which is the order the shape needs.
+ *
+ * This is the v93 fix applied to the other arm. v93 files the CONNECTED
+ * transfer's record beside an earlier refused-escalation ticket with
+ * `secondTicketOnThisCall`; a ring-out is the arm where the record matters
+ * more, because nobody is on the phone with the patient. Operator mandate
+ * 2026-07-25: every urgent outcome leaves a record ticket in After Hours.
+ *
+ * Through `/submit-ticket`, because that is where `secondTicketOnThisCall`
+ * lives and v93 has proven it in production with department 8, priority
+ * urgent and the stand-in name. No reason hint, for v93's reason: the app
+ * refuses 159 as a hint by design, so the description picks the reason.
+ */
+export function urgentRingOutBesideParams(input: {
+  why: string;
+  dialTarget?: string;
+  escalationDetails?: Pick<
+    EscalationDetails,
+    'reason' | 'symptomsSummary' | 'patientFirstName' | 'patientLastName' | 'patientDob' | 'callbackNumber'
+  >;
+  callerId?: string | null;
+  callSid: string;
+  agentUsed: string;
+  earlierTicket: string;
+}): UrgentRingOutBesideParams {
+  const d = input.escalationDetails;
+  const { fullName, standIn } = nameOrStandIn(d?.patientFirstName, d?.patientLastName);
+  const phone = fallbackCallbackPhone(d?.callbackNumber, input.callerId);
+  const notes = [ringOutCrossReference(input.earlierTicket), standIn ? STAND_IN_NAME_NOTE : null]
+    .filter(Boolean)
+    .join('\n');
+  return {
+    patientFullName: fullName,
+    patientDOB: d?.patientDob || 'Unknown',
+    // `Request Type:` stays the first line of an after-hours description
+    // (operator, 2026-07-25) — the same header the v93 record uses.
+    reasonForCalling: ['Request Type: Urgent/Emergency Transfer', ...fallbackDescriptionLines(input)].join('\n'),
+    preferredContactMethod: 'phone',
+    ...(phone && phone !== '+' ? { patientPhone: phone } : {}),
+    priority: 'urgent',
+    departmentId: AFTER_HOURS_DEPARTMENT_ID,
+    additionalDetails: notes,
+    secondTicketOnThisCall: { keySuffix: 'urgent-ringout' },
+    callSid: input.callSid,
+    callerPhone: input.callerId || undefined,
+    agentUsed: input.agentUsed,
   };
 }
 
