@@ -698,8 +698,20 @@ import { callEnvironment } from "./callRecord";
  * mechanism, on the arm where nobody is on the phone with the patient.
  * `ringOutFilesBesideTheRequest.test.ts` runs the production defaults.
  */
+/**
+ * v96 — THE PCP LOOKUP NEEDS NAME AND DATE OF BIRTH (2026-10-15). When the
+ * name and date of birth matched nobody, `lookupPatient` fell through to the
+ * appointment book's name-only rung and `lookup_patient_appointments` read that
+ * person's schedule to the outside office on the line. CA23f7d0724863d9566e5d638041246160:
+ * a name shared by 126 people, no date of birth from the caller, five upcoming
+ * appointments read out. 18 of 48 PCP calls whose lookup found someone over
+ * 10-08..10-14 had no date-like word from the caller. Appointments are now
+ * handed over only on a single-person name-and-date-of-birth match; anything
+ * else is withheld (`suppressed: 'not_name_and_dob'`) and the model is sent
+ * back for the date of birth. `src/pcp/lookupNeedsNameAndDob.test.ts`.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v95-the-ring-out-record-files-beside-the-request-20261011";
+  "voice-runtime-v96-the-pcp-lookup-needs-name-and-dob-20261015";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can
