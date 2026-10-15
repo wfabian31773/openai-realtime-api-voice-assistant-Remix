@@ -858,7 +858,10 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
     parameters: z.object({
       patientFirstName: z.string().min(1),
       patientLastName: z.string().min(1),
-      patientDob: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+      patientDob: z
+        .string()
+        .regex(/^\d{4}-\d{2}-\d{2}$/)
+        .describe('The patient date of birth exactly as the caller said it, as YYYY-MM-DD. If you have not heard it, ask for it first. Never send a date the caller did not say.'),
     }),
     execute: async (patient) => {
       pcpDirector.update(callId, patient);
@@ -900,6 +903,56 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
           logIdentifiers: false,
         });
         pcpDirector.recordToolSuccess(callId, 'scheduling');
+        /**
+         * NAME AND DATE OF BIRTH, ONE PERSON, OR NOTHING IS READ (v96).
+         *
+         * `lookupPatient` is a ladder. When the name AND date of birth match
+         * nobody, it keeps going: the appointment book's NAME-ONLY rung answers
+         * with the most recently seen person who carries that name. On a patient
+         * line a name-only hit is a candidate the agent goes on to confirm. On
+         * this line the subject is a third party and the answer is read straight
+         * to an outside office, so a name-only hit is somebody's schedule read to
+         * a stranger.
+         *
+         * CA23f7d0724863d9566e5d638041246160, 2026-10-14: an outside office gave
+         * a first and last name and no date of birth. 126 people in the person
+         * base share that name. The schema requires `patientDob`, so the model
+         * supplied a date the caller never said, the name+date rungs missed, the
+         * name-only rung answered, and the agent read five upcoming appointments,
+         * surgeries included. The office rang back with the real date of birth
+         * and got a different answer. Over 10-08..10-14, 18 of the 48 PCP calls
+         * whose lookup found someone had no date-like word in anything the
+         * caller said.
+         *
+         * So the appointments are handed over only when the match was made on
+         * name and date of birth TOGETHER and settles on one person. Anything
+         * else is withheld, says why, and sends the model back to ask for the
+         * date of birth in the caller's own words. It never claims the patient
+         * has no appointments, because that is not what happened.
+         */
+        const confirmed =
+          context.patientFound &&
+          context.matchedBy === 'name_and_dob' &&
+          context.identity?.unique !== false;
+        if (context.patientFound && !confirmed) {
+          console.warn(
+            `[PCP] ${callId}: appointment lookup matched by ${context.matchedBy ?? 'unknown'}` +
+              `${context.identity?.unique === false ? ', several people' : ''} — withheld, not name and date of birth`,
+          );
+          return {
+            success: true,
+            patientFound: false,
+            identityConfirmed: false,
+            suppressed: 'not_name_and_dob',
+            upcomingAppointments: [],
+            pastAppointments: [],
+            guidance:
+              'Do NOT read, confirm or deny any appointment. The patient could not be matched on their name AND date of birth together, so nothing about them may be shared yet. ' +
+              'If the caller has not said the patient\'s date of birth, ask: "And the patient\'s date of birth, starting with the month, then the day, then the year?" ' +
+              'and call lookup_patient_appointments again with exactly what they said. Never send a date of birth the caller did not say. ' +
+              'If they gave it and it still does not match, tell them you cannot confirm that patient\'s details on this call and offer to take the request for the team.',
+          };
+        }
         return {
           success: true,
           patientFound: context.patientFound,

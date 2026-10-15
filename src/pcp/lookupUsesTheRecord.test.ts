@@ -82,6 +82,10 @@ async function readyForLookup(agent: any, callId: string) {
 
 const found = {
   patientFound: true,
+  // What a real match on the patient's own name and date of birth returns.
+  // Since v96 nothing else is read to the caller (lookupNeedsNameAndDob.test.ts).
+  matchedBy: 'name_and_dob',
+  identity: { unique: true, candidateCount: 1, candidates: [] },
   upcomingAppointments: [],
   pastAppointments: [],
   totalAppointmentsFound: 0,
