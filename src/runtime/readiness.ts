@@ -710,8 +710,20 @@ import { callEnvironment } from "./callRecord";
  * else is withheld (`suppressed: 'not_name_and_dob'`) and the model is sent
  * back for the date of birth. `src/pcp/lookupNeedsNameAndDob.test.ts`.
  */
+/**
+ * v97 — THE FILING LINE IS NOT A STAGE DIRECTION, AND HEALTH NAMES THE MODEL
+ * (2026-10-16). All four queue prompts said "…one moment." and then "file
+ * quietly"; grok-voice-3.0, run offline against the bound prompts and tools,
+ * said "Quietly filing." aloud on 15 of 62 simulated calls (0 on 2.0). The
+ * line now says to call the filing tool straight away and say nothing else
+ * until it answers — 0 on 3.0 in the same harness, unchanged on 2.0.
+ * `/voice/health` reports each lane's `voiceModel`, so a 3.0 canary set by
+ * `XAI_VOICE_MODEL_<SLUG>` is confirmed the moment the republish takes.
+ * `src/agents/theFilingLineIsNotAStageDirection.test.ts`,
+ * `src/runtime/laneRoster.test.ts`.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v96-the-pcp-lookup-needs-name-and-dob-20261015";
+  "voice-runtime-v97-the-filing-line-is-not-a-stage-direction-20261016";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

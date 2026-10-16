@@ -440,7 +440,11 @@ describe('what the operator heard on a live call', () => {
   it('gives it a line to say before the silence, not after', () => {
     expect(live).toMatch(/NEVER GO SILENT WHILE FILING/);
     expect(live).toMatch(/Let me get this logged for you/);
-    expect(live).toMatch(/FIRST, then file/);
+    // The ORDER is the ruling: the line first, then the filing. The wording
+    // after FIRST changed in v97 — "then file quietly" was read aloud by
+    // grok-voice-3.0 as "Quietly filing." on 15 of 62 offline calls.
+    expect(live).toMatch(/FIRST, then call the\s+filing tool/);
+    expect(live).not.toMatch(/file\s+quietly/i);
   });
 
   it('does not call patients "customers"', () => {

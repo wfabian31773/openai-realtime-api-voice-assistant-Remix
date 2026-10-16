@@ -40,6 +40,19 @@ export interface GrokRuntimeVoiceConfig {
   reasoningEffort: GrokReasoningEffort;
 }
 
+/**
+ * STILL THE 2.0 MODEL, AND xAI HAS DEPRECATED IT (2026-10-14). The session
+ * xAI opens for this name reports `model: "grok-voice-2.0"`, and the
+ * 2026-10-14 invoice billed most of the day under that name — the same model,
+ * renamed. xAI's release note: "grok-voice-2.0 is deprecated. To upgrade, set
+ * model to grok-voice-3.0", same endpoint, same session parameters, same
+ * price. No retirement date was given.
+ *
+ * Deliberately NOT flipped here yet. The 3.0 canary is one environment
+ * variable (`XAI_VOICE_MODEL_<SLUG>=grok-voice-3.0`), which needs no deploy to
+ * revert and can be read back off `/voice/health` (`lanes[].voiceModel`). The
+ * default moves after the canary's after-number, per docs/BACKEND_HANDOFF.md.
+ */
 const DEFAULT_MODEL = "grok-voice-think-fast-2.0";
 const DEFAULT_VOICE = "eve";
 
