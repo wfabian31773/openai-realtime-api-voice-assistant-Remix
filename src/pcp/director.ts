@@ -677,7 +677,7 @@ function currentPatient(state: PcpConversationState): PatientIdentity {
   return { firstName: state.patientFirstName, lastName: state.patientLastName, dob: state.patientDob };
 }
 
-type PatientPatch = Partial<Pick<PcpConversationState, 'patientFirstName' | 'patientLastName' | 'patientDob' | 'patientMrn'>>;
+type PatientPatch = Partial<Pick<PcpConversationState, 'patientFirstName' | 'patientLastName' | 'patientDob' | 'patientMrn' | 'callerIsThePatient'>>;
 
 function named(p: PatientIdentity): boolean {
   return Boolean(nameKey(p.firstName) || nameKey(p.lastName));
@@ -740,7 +740,41 @@ function forgetThePreviousPatient(state: PcpConversationState, patch: PatientPat
     state[field] = undefined;
     if (state.askCounts?.[field] !== undefined) state.askCounts = { ...state.askCounts, [field]: 0 };
   }
+  /**
+   * WHAT ELSE BELONGS TO ONE PATIENT, and what deliberately does not. Codex
+   * rounds 2 and 3 on #351 each found one more field; this is the whole list,
+   * so the next field is a decision rather than a discovery.
+   *
+   * Cleared for somebody new:
+   * - A scheduling lookup. `record_automated_resolution` accepts a resolution
+   *   only after its authoritative tool succeeded, and a lookup for Ana must
+   *   not let Bo be marked resolved without one (Codex P1, round 3). Its
+   *   failure count resets with it.
+   * - `callerIsThePatient`. One caller can be at most one of the patients, so
+   *   once the call moves to somebody else it cannot still be true.
+   * - The disposition, in `update` (round 2).
+   *
+   * Kept, because they belong to the CALLER or to the call:
+   * - The records delivery method and destination. It is the same office on
+   *   the same call, and a clinic asking for several patients' records wants
+   *   them where it said; re-asking would cost a question per patient on the
+   *   calls where questions cost requests. A different destination, once
+   *   stated, replaces it.
+   * - `callPurpose`. `lookup_patient_appointments` refuses without one, so
+   *   clearing it would refuse every later patient's lookup on a clinic's
+   *   confirmation list. The model restates it when the request changes.
+   * - Caller identity, callback, title, email, relationship, the knowledge
+   *   base read, the queue choice and the handoff result.
+   */
+  for (const tool of PATIENT_EVIDENCE) {
+    state.completedTools = state.completedTools.filter((t) => t !== tool);
+    delete state.toolFailures[tool];
+  }
+  if (patch.callerIsThePatient === undefined) state.callerIsThePatient = undefined;
 }
+
+/** Authoritative tools whose success is about one patient. */
+const PATIENT_EVIDENCE = ['scheduling'] as const;
 
 /**
  * KEEP A FILING'S IDENTITY UP TO DATE. Codex P1, #351.

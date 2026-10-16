@@ -346,6 +346,42 @@ describe('the disposition belongs to its patient — Codex P1, #351', () => {
     expect(pcpDirector.get(callId).dispositionRecorded).toBe('HAND_OFF');
   });
 
+  it('a lookup for one patient does not let the next be marked resolved without one — Codex P1, round 3', async () => {
+    const { agent, callId } = freshCall();
+    await call(agent, 'record_pcp_intake', { ...CLINIC, ...ANA, callPurpose: 'check_patient_scheduled' });
+    pcpDirector.recordToolSuccess(callId, 'scheduling');
+    pcpDirector.recordToolSuccess(callId, 'knowledge_base');
+    pcpDirector.recordToolFailure(callId, 'scheduling');
+
+    await call(agent, 'record_pcp_intake', BO);
+    const s = pcpDirector.get(callId);
+    expect(s.completedTools, 'Ana’s lookup is not Bo’s').not.toContain('scheduling');
+    expect(s.completedTools, 'the public knowledge base is nobody’s').toContain('knowledge_base');
+    expect(s.toolFailures.scheduling).toBeUndefined();
+
+    const r = await call(agent, 'record_automated_resolution', { narrative: 'Confirmed the second patient’s visit.' });
+    expect(r.success).toBe(false);
+    expect(JSON.stringify(r)).toContain('authoritative_tool_success_required');
+  });
+
+  it('the caller cannot still be the patient once the call is about somebody else', () => {
+    const callId = `CAcallerIsPatient${++n}`;
+    pcpDirector.update(callId, { ...ANA, callerIsThePatient: true } as never);
+    pcpDirector.update(callId, BO as never);
+    expect(pcpDirector.get(callId).callerIsThePatient).toBeUndefined();
+
+    pcpDirector.update(callId, { ...ANA, callerIsThePatient: true } as never);
+    expect(pcpDirector.get(callId).callerIsThePatient, 'restated with the switch, it stands').toBe(true);
+  });
+
+  it('control: the records destination is the caller’s and carries to the next patient', () => {
+    const callId = `CAdestination${++n}`;
+    pcpDirector.update(callId, { ...RECORDS_FOR_BO } as never);
+    pcpDirector.update(callId, ANA as never);
+    const s = pcpDirector.get(callId);
+    expect([s.recordsDeliveryMethod, s.recordsDeliveryDestination]).toEqual(['fax', '9095550199']);
+  });
+
   it('the teardown floor files a second patient whose request was never filed', async () => {
     const { agent, callId } = freshCall();
     await call(agent, 'record_pcp_intake', { ...CLINIC, ...ANA });
