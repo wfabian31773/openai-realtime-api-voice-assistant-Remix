@@ -136,6 +136,21 @@ describe('a second patient on the call is a second request', () => {
     expect(ticketing.createTicket).toHaveBeenCalledTimes(1);
   });
 
+  it('the records tool for a second patient files to Medical Records, not onto the first patient’s ticket', async () => {
+    const { agent } = freshCall();
+    await call(agent, 'record_pcp_intake', { ...CLINIC, ...ANA });
+    await call(agent, 'create_pcp_task', { narrative: 'Confirm an upcoming visit for the first patient.' });
+
+    await call(agent, 'record_pcp_intake', RECORDS_FOR_BO);
+    const r = await call(agent, 'handle_patient_medical_records_request', {
+      narrative: 'Requesting a copy of the records for a second mutual patient, to be faxed.',
+    });
+
+    expect(r.alreadyFiled, JSON.stringify(r)).toBeUndefined();
+    expect(ticketing.createTicket, 'Bo’s records request reached Medical Records').toHaveBeenCalledTimes(1);
+    expect(ticketing.createPcpTicket, 'and did not re-POST onto Ana’s PCP ticket').toHaveBeenCalledTimes(1);
+  });
+
   it('coming back to the first patient finds the first patient’s filing again', async () => {
     const { agent } = freshCall();
     await call(agent, 'record_pcp_intake', { ...CLINIC, ...RECORDS_FOR_BO });
@@ -165,6 +180,14 @@ describe('the director keeps one filing per patient', () => {
     expect(filed.map((f) => [f.door, f.ticketNumber])).toEqual([['pcp', 'PCP-1'], ['create_ticket', 'VA-2']]);
     expect(pcpDirector.get(callId).ticketFiled?.ticketNumber).toBe('PCP-1');
     expect(pcpDirector.filedForCurrentPatient(callId)?.ticketNumber).toBe('VA-2');
+  });
+
+  it('a father and a son with one name are two patients — the birthday is part of who it is', () => {
+    const callId = `CAsameName${++n}`;
+    pcpDirector.update(callId, { patientFirstName: 'Luis', patientLastName: 'Ortega', patientDob: '1940-01-01' } as never);
+    pcpDirector.markTicketFiled(callId, 'pcp', 'PCP-1');
+    pcpDirector.update(callId, { patientDob: '1975-06-30' } as never);
+    expect(pcpDirector.filedForCurrentPatient(callId)).toBeUndefined();
   });
 
   it('a filing made before the patient was named is claimed by them, so the next patient is new', () => {
