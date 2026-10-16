@@ -7,7 +7,7 @@
  * and tools on 2026-10-16, SPOKE it: "Quietly filing." / "Filing quietly." on
  * 15 of 62 simulated calls (and 19 of 92 across every batch), against 0 on
  * 2.0. With the line reworded to "call the filing tool straight away. Say
- * nothing else until it answers.", the same harness produced it on 0 runs.
+ * nothing else until it answers.", the same harness produced it on 0 of 29.
  *
  * 2.0 behaves the same either way, so the rewording is safe today and is
  * what makes the 3.0 canary safe to switch on. Asserted on the BUILT prompts,
