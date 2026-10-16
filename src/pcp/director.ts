@@ -19,6 +19,8 @@ export type FiledTicket = {
   door: 'pcp' | 'create_ticket';
   ticketNumber?: string;
   patient: PatientIdentity;
+  /** The disposition recorded for this patient, restored when the call comes back to them. */
+  disposition?: PcpDisposition;
 };
 
 export interface PcpConversationState {
@@ -190,6 +192,20 @@ export interface PcpConversationState {
    * for the nine-patient call that made one latch per call wrong.
    */
   ticketsFiled?: FiledTicket[];
+  /**
+   * HOW MANY TIMES THE CALL HAS MOVED ON TO ANOTHER PATIENT. Codex P1, #351.
+   *
+   * The create-ticket doors key their POSTs on the call: the Hub on
+   * `<sid>-scheduling-hub` and Medical Records on `call-<sid>`. With one
+   * filing per patient, a second patient through the same door would send the
+   * same key, and the app would hand back the first patient's ticket as a
+   * retry. `patientKeySuffix` appends this count, so each patient gets their
+   * own key while retries for one patient keep theirs. It is a count, not the
+   * patient: nothing about who they are goes into a key. Unset (0) until the
+   * first switch, so every single-patient call sends exactly the key it
+   * always has.
+   */
+  patientOrdinal?: number;
   /**
    * THE CALLER IS THE PATIENT, and it stays true once established.
    *
@@ -796,7 +812,23 @@ export class PcpDirector {
     const switching = switchesPatient(state, patch);
     if (switching) forgetThePreviousPatient(state, patch);
     Object.assign(state, patch);
-    if (!switching) refreshFiledIdentity(state);
+    if (!switching) {
+      refreshFiledIdentity(state);
+      return state;
+    }
+    state.patientOrdinal = (state.patientOrdinal ?? 0) + 1;
+    /**
+     * THE DISPOSITION BELONGS TO THE PATIENT IT WAS RECORDED FOR. Codex P1,
+     * #351.
+     *
+     * `mayTerminate` and the teardown floor both read `dispositionRecorded`.
+     * Left standing across a switch, the first patient's filing would let the
+     * agent end the call, and the floor skip, while the second patient's
+     * request is still unfiled. So it follows the patient: none for somebody
+     * new, and the one recorded on their filing when the call comes back to a
+     * patient already filed.
+     */
+    state.dispositionRecorded = filingForPatient(state.ticketsFiled ?? [], currentPatient(state))?.disposition;
     return state;
   }
 
@@ -890,9 +922,16 @@ export class PcpDirector {
       // is CLAIMED by the patient named now — the app does the same with the
       // ticket — so the next patient after them is recognised as new.
       if (!hasIdentity(mine.patient) && hasIdentity(patient)) mine.patient = patient;
+      // The pre-dial handoff write files before any disposition exists.
+      mine.disposition ??= state.dispositionRecorded;
       return;
     }
-    const filed: FiledTicket = { door, ...(ticketNumber ? { ticketNumber } : {}), patient };
+    const filed: FiledTicket = {
+      door,
+      ...(ticketNumber ? { ticketNumber } : {}),
+      patient,
+      ...(state.dispositionRecorded ? { disposition: state.dispositionRecorded } : {}),
+    };
     filings.push(filed);
     state.ticketFiled ??= filed;
   }
@@ -905,6 +944,15 @@ export class PcpDirector {
   filedForCurrentPatient(callId: string): FiledTicket | undefined {
     const state = this.get(callId);
     return filingForPatient(state.ticketsFiled ?? [], currentPatient(state));
+  }
+
+  /**
+   * What a create-ticket door appends to its idempotency key: nothing for the
+   * call's first patient, `-p<n>` after the n-th switch. See `patientOrdinal`.
+   */
+  patientKeySuffix(callId: string): string {
+    const n = this.get(callId).patientOrdinal ?? 0;
+    return n > 0 ? `-p${n}` : '';
   }
 
   clear(callId: string): void {

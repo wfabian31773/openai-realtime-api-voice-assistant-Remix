@@ -36,7 +36,8 @@ vi.mock('../../server/services/ticketingApiClient', () => ({
   lookupWasUnavailable: () => false,
 }));
 
-const { createPcpAgent } = await import('../agents/pcpAgent');
+const { createPcpAgent, sweepPcpUnfiledCall } = await import('../agents/pcpAgent');
+const { patientScope } = await import('../tools/medicalRecordsTools');
 const { pcpDirector } = await import('./director');
 
 async function call(agent: any, name: string, args: Record<string, unknown> = {}) {
@@ -261,6 +262,89 @@ describe('a filing learns who it is about — Codex P1, #351', () => {
     pcpDirector.update(callId, { patientLastName: 'Rivera' });
     expect(pcpDirector.get(callId).ticketsFiled![0].patient.lastName).toBe('Riviera');
     expect(pcpDirector.filedForCurrentPatient(callId)?.ticketNumber).toBe('PCP-1');
+  });
+});
+
+describe('each patient gets their own idempotency key — Codex P1, #351', () => {
+  /**
+   * THE DEFECT. Both create-ticket doors keyed their POST on the call, so a
+   * second patient through the same door sent the first patient's key and the
+   * app answered with the first patient's ticket as a retry, which the agent
+   * then read out for the second patient.
+   */
+  it('two patients’ records requests send two keys, and the first keeps the call’s own', async () => {
+    const { agent } = freshCall();
+    await call(agent, 'record_pcp_intake', { ...CLINIC, ...RECORDS_FOR_BO });
+    await call(agent, 'create_pcp_task', { narrative: 'Requesting a copy of the records for a mutual patient, to be faxed.' });
+
+    await call(agent, 'record_pcp_intake', { ...ANA, callPurpose: 'patient_medical_records_request' });
+    ticketing.createTicket.mockResolvedValueOnce({ success: true, ticketNumber: 'VA-70003' });
+    const second = await call(agent, 'create_pcp_task', { narrative: 'Requesting a copy of the records for a second mutual patient, to be faxed.' });
+
+    const keys = (ticketing.createTicket.mock.calls as any[]).map((c) => c[0].idempotencyKey);
+    expect(keys).toHaveLength(2);
+    expect(keys[0]).toMatch(/^call-CA\d{32}$/);
+    expect(keys[1]).toBe(`${keys[0]}-p1`);
+    expect(second.ticketNumber).toBe('VA-70003');
+  });
+
+  it('two patients’ bookings send two Hub keys', async () => {
+    const { agent } = freshCall();
+    const coordinator = {
+      callerName: 'Test Coordinator',
+      callerRole: 'referral coordinator',
+      callerOrganization: 'Example Family Practice',
+      callerFacilityType: 'pcp_office' as const,
+      callPurpose: 'schedule_appointment' as const,
+      callbackNumber: '5005550006',
+    };
+    await call(agent, 'record_pcp_intake', { ...coordinator, ...ANA });
+    const first = await call(agent, 'create_pcp_task', { narrative: 'Coordinator wants their patient booked in.' });
+    expect(first.routed_to).toBe('HVA Hub');
+
+    await call(agent, 'record_pcp_intake', { patientFirstName: 'Bo', patientLastName: 'Kim' });
+    await call(agent, 'create_pcp_task', { narrative: 'Coordinator wants a second patient booked in.' });
+
+    const keys = (ticketing.createTicket.mock.calls as any[]).map((c) => c[0].idempotencyKey);
+    expect(keys).toEqual([expect.stringMatching(/-scheduling-hub$/), expect.stringMatching(/-scheduling-hub-p1$/)]);
+  });
+
+  it('nothing but the count can reach a key', () => {
+    expect(patientScope('-p2')).toBe('-p2');
+    expect(patientScope('Rivera')).toBe('');
+    expect(patientScope('-p1-Rivera')).toBe('');
+    expect(patientScope(undefined)).toBe('');
+  });
+});
+
+describe('the disposition belongs to its patient — Codex P1, #351', () => {
+  it('a switch to somebody new leaves nothing on record; coming back restores the first patient’s', () => {
+    const callId = `CAdisposition${++n}`;
+    pcpDirector.update(callId, ANA as never);
+    pcpDirector.recordDisposition(callId, 'CREATE_TASK');
+    pcpDirector.markTicketFiled(callId, 'pcp', 'PCP-1');
+    expect(pcpDirector.next(callId).mayTerminate).toBe(true);
+
+    pcpDirector.update(callId, BO as never);
+    expect(pcpDirector.get(callId).dispositionRecorded).toBeUndefined();
+    expect(pcpDirector.next(callId).mayTerminate, 'Bo’s request is not on record yet').toBe(false);
+
+    pcpDirector.update(callId, ANA as never);
+    expect(pcpDirector.get(callId).dispositionRecorded).toBe('CREATE_TASK');
+    expect(pcpDirector.next(callId).mayTerminate).toBe(true);
+  });
+
+  it('the teardown floor files a second patient whose request was never filed', async () => {
+    const { agent, callId } = freshCall();
+    await call(agent, 'record_pcp_intake', { ...CLINIC, ...ANA });
+    await call(agent, 'create_pcp_task', { narrative: 'Confirm an upcoming visit for the first patient.' });
+    await call(agent, 'record_pcp_intake', { patientFirstName: 'Bo', patientLastName: 'Kim' });
+
+    ticketing.createPcpTicket.mockResolvedValueOnce({ success: true, ticketNumber: 'PCP-72765' });
+    await sweepPcpUnfiledCall(callId);
+
+    expect(ticketing.createPcpTicket).toHaveBeenCalledTimes(2);
+    expect((ticketing.createPcpTicket.mock.calls as any[])[1][0].patientFirstName).toBe('Bo');
   });
 });
 

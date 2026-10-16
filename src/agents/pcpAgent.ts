@@ -2522,7 +2522,9 @@ async function fileSchedulingToHub(
      * back — and without a key each attempt opens another department-9 ticket.
      * CLAUDE.md measured the keyed duplicate rate at 3 calls in 2,086 (0.14%).
      */
-    idempotencyKey: `${metadata.callSid || callId}-scheduling-hub`,
+    // Per patient, not per call: a second patient's booking must not come back
+    // as the first patient's ticket. See `patientOrdinal`. Codex P1, #351.
+    idempotencyKey: `${metadata.callSid || callId}-scheduling-hub${pcpDirector.patientKeySuffix(callId)}`,
     callData: { agentUsed: 'pcp', ...(metadata.callSid ? { callSid: metadata.callSid } : {}) },
   });
 
@@ -2830,6 +2832,9 @@ async function fileToMedicalRecords(
      * its gate is untouched.
      */
     on_clock_ask_exhausted: true,
+    // Not a schema field: the records tool keys its POST on the call, and a
+    // second patient on this call needs their own key. Codex P1, #351.
+    ...(pcpDirector.patientKeySuffix(callId) ? { patient_scope: pcpDirector.patientKeySuffix(callId) } : {}),
     ...(metadata.callSid ? { call_sid: metadata.callSid } : {}),
     ...(metadata.callerPhone ? { caller_phone: metadata.callerPhone } : {}),
   })) as Record<string, any>;
