@@ -677,7 +677,7 @@ function currentPatient(state: PcpConversationState): PatientIdentity {
   return { firstName: state.patientFirstName, lastName: state.patientLastName, dob: state.patientDob };
 }
 
-type PatientPatch = Partial<Pick<PcpConversationState, 'patientFirstName' | 'patientLastName' | 'patientDob' | 'patientMrn' | 'callerIsThePatient'>>;
+type PatientPatch = Partial<Pick<PcpConversationState, 'patientFirstName' | 'patientLastName' | 'patientDob' | 'patientMrn'>>;
 
 function named(p: PatientIdentity): boolean {
   return Boolean(nameKey(p.firstName) || nameKey(p.lastName));
@@ -770,7 +770,7 @@ function forgetThePreviousPatient(state: PcpConversationState, patch: PatientPat
     state.completedTools = state.completedTools.filter((t) => t !== tool);
     delete state.toolFailures[tool];
   }
-  if (patch.callerIsThePatient === undefined) state.callerIsThePatient = undefined;
+  state.callerIsThePatient = undefined;
 }
 
 /** Authoritative tools whose success is about one patient. */
