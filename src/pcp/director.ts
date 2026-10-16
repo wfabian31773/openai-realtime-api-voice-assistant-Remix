@@ -5,6 +5,7 @@ import {
   type PcpVerificationStatus,
 } from './policy';
 import { isLunchClosure } from '../utils/timeAware';
+import { filingForPatient, hasIdentity, type PatientIdentity } from './samePatient';
 
 export const PCP_FACILITY_TYPES = [
   'pcp_office', 'referring_provider', 'health_plan', 'ipa_medical_group',
@@ -12,6 +13,13 @@ export const PCP_FACILITY_TYPES = [
   'other_healthcare_organization',
 ] as const;
 export type PcpFacilityType = (typeof PCP_FACILITY_TYPES)[number];
+
+/** One filing on a call: which door it went through, and who it was about. */
+export type FiledTicket = {
+  door: 'pcp' | 'create_ticket';
+  ticketNumber?: string;
+  patient: PatientIdentity;
+};
 
 export interface PcpConversationState {
   callerName?: string;
@@ -173,7 +181,15 @@ export interface PcpConversationState {
    * FIRST WRITE WINS. Server-owned for the v17 reason — the model can
    * neither set nor clear it.
    */
-  ticketFiled?: { door: 'pcp' | 'create_ticket'; ticketNumber?: string };
+  ticketFiled?: FiledTicket;
+  /**
+   * EVERY FILING ON THIS CALL, ONE PER PATIENT, oldest first — since
+   * 2026-10-16. `ticketFiled` above is the first of them and stays for
+   * readers that only ask whether the call filed at all; the doors ask
+   * `filedForCurrentPatient`, which reads this list. See `samePatient.ts`
+   * for the nine-patient call that made one latch per call wrong.
+   */
+  ticketsFiled?: FiledTicket[];
   /**
    * THE CALLER IS THE PATIENT, and it stays true once established.
    *
@@ -641,6 +657,10 @@ export function deliveryDestinationNeeded(state: PcpConversationState): boolean 
   return Boolean(state.recordsDeliveryMethod) && state.recordsDeliveryMethod !== 'unspecified';
 }
 
+function currentPatient(state: PcpConversationState): PatientIdentity {
+  return { firstName: state.patientFirstName, lastName: state.patientLastName, dob: state.patientDob };
+}
+
 export class PcpDirector {
   private states = new Map<string, PcpConversationState>();
 
@@ -764,8 +784,29 @@ export class PcpDirector {
    */
   markTicketFiled(callId: string, door: 'pcp' | 'create_ticket', ticketNumber?: string): void {
     const state = this.get(callId);
-    if (state.ticketFiled) return;
-    state.ticketFiled = { door, ...(ticketNumber ? { ticketNumber } : {}) };
+    const patient = currentPatient(state);
+    const filings = (state.ticketsFiled ??= []);
+    const mine = filingForPatient(filings, patient);
+    if (mine) {
+      // First write wins for a patient. A filing made before anybody was named
+      // is CLAIMED by the patient named now — the app does the same with the
+      // ticket — so the next patient after them is recognised as new.
+      if (!hasIdentity(mine.patient) && hasIdentity(patient)) mine.patient = patient;
+      return;
+    }
+    const filed: FiledTicket = { door, ...(ticketNumber ? { ticketNumber } : {}), patient };
+    filings.push(filed);
+    state.ticketFiled ??= filed;
+  }
+
+  /**
+   * The filing that a request about the CURRENT patient belongs to, or
+   * undefined when this patient has not been filed for yet on this call. The
+   * routing doors run only when this is undefined.
+   */
+  filedForCurrentPatient(callId: string): FiledTicket | undefined {
+    const state = this.get(callId);
+    return filingForPatient(state.ticketsFiled ?? [], currentPatient(state));
   }
 
   clear(callId: string): void {

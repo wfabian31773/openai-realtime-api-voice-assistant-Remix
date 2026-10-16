@@ -995,8 +995,10 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
        *   - filed through the PCP endpoint: skip every routing door and land on
        *     `submitPcpTicket`, which upserts on callSid — the enrichment v37
        *     always said it was.
+       * Per PATIENT since 2026-10-16 — a second patient runs the doors afresh
+       * (`samePatient.ts`).
        */
-      const filedAlready = state.ticketFiled;
+      const filedAlready = pcpDirector.filedForCurrentPatient(callId);
       if (filedAlready?.door === 'create_ticket') return alreadyFiledOnThisCall(callId, filedAlready.ticketNumber);
       const enrichingTheTicket = filedAlready?.door === 'pcp';
       /**
@@ -2054,7 +2056,7 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
        * create-ticket gets its number back; one already on the PCP endpoint is
        * enriched there rather than routed to Medical Records as a second ticket.
        */
-      const filedAlready = pcpDirector.get(callId).ticketFiled;
+      const filedAlready = pcpDirector.filedForCurrentPatient(callId);
       if (filedAlready?.door === 'create_ticket') return alreadyFiledOnThisCall(callId, filedAlready.ticketNumber);
       const enrichingTheTicket = filedAlready?.door === 'pcp';
       pcpDirector.update(callId, { callPurpose: 'patient_medical_records_request' });
