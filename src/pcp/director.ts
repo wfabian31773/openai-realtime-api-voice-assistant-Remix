@@ -718,8 +718,9 @@ function forgetThePreviousPatient(state: PcpConversationState, patch: PatientPat
     && nameKey(patch.patientFirstName) !== nameKey(state.patientFirstName);
   const cleared: Array<keyof PatientPatch> = ['patientMrn', 'patientDob'];
   if (firstChanged) cleared.push('patientLastName');
+  // `update` lays the patch over the state straight after this, so a field
+  // this update restates comes back with its new value.
   for (const field of cleared) {
-    if (patch[field] !== undefined) continue;
     state[field] = undefined;
     if (state.askCounts?.[field] !== undefined) state.askCounts = { ...state.askCounts, [field]: 0 };
   }
