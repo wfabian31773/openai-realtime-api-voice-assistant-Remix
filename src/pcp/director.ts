@@ -719,21 +719,25 @@ function switchesPatient(state: PcpConversationState, patch: PatientPatch): bool
  *
  * - The MRN and the date of birth always go unless restated. They describe
  *   one person and nothing about them carries to the next.
- * - The surname goes only when the FIRST name changed. A father and a son who
- *   share a name differ by birthday alone, and the model may send only the
- *   new date; wiping the name there would leave a date-only patient, which
- *   `filingForPatient` sends back to the call's first filing.
+ * - Both names go when a NAME caused the switch — a new first name or a new
+ *   surname. Whichever half the caller did not restate belongs to the last
+ *   patient; keeping it would give Kim the first name Ana (Codex P1, round
+ *   4). They stay when only the BIRTHDAY changed: a father and a son share a
+ *   name, the model may send only the new date, and wiping the name there
+ *   would leave a date-only patient that `filingForPatient` sends back to the
+ *   call's first filing.
  *
  * The ask count for a cleared field resets as well, because it is a question
  * about somebody new. Each patient still gets at most `MAX_ASKS_PER_FIELD`.
  */
 function forgetThePreviousPatient(state: PcpConversationState, patch: PatientPatch): void {
-  const firstChanged =
-    patch.patientFirstName !== undefined
-    && nameKey(state.patientFirstName) !== undefined
-    && nameKey(patch.patientFirstName) !== nameKey(state.patientFirstName);
+  const conflicts = (now: string | undefined, next: string | undefined) =>
+    next !== undefined && nameKey(now) !== undefined && nameKey(next) !== nameKey(now);
+  const nameChanged =
+    conflicts(state.patientFirstName, patch.patientFirstName)
+    || conflicts(state.patientLastName, patch.patientLastName);
   const cleared: Array<keyof PatientPatch> = ['patientMrn', 'patientDob'];
-  if (firstChanged) cleared.push('patientLastName');
+  if (nameChanged) cleared.push('patientFirstName', 'patientLastName');
   // `update` lays the patch over the state straight after this, so a field
   // this update restates comes back with its new value.
   for (const field of cleared) {

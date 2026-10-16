@@ -202,6 +202,14 @@ describe('moving on to another patient forgets the last one — Codex P1, #351',
     expect(s.askCounts?.patientLastName, 'a question about somebody new').toBe(0);
   });
 
+  it('a new surname alone forgets the old first name — Codex P1, round 4', () => {
+    const callId = `CAsurnameSwitch${++n}`;
+    pcpDirector.update(callId, { patientFirstName: 'Ana', patientLastName: 'Rivera' });
+    pcpDirector.update(callId, { patientLastName: 'Kim' });
+    const s = pcpDirector.get(callId);
+    expect([s.patientFirstName, s.patientLastName], 'never “Ana Kim”').toEqual([undefined, 'Kim']);
+  });
+
   it('a new birthday on the same name keeps the name — father and son', () => {
     const callId = `CAson${++n}`;
     pcpDirector.update(callId, { patientFirstName: 'Luis', patientLastName: 'Ortega', patientDob: '1940-01-01', patientMrn: 'MRN-1' });
