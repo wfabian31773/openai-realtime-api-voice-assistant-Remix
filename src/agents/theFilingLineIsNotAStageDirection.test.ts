@@ -44,7 +44,8 @@ describe.each(Object.keys(PROMPTS))('%s — the filing line', (lane) => {
     const line = p.indexOf('Let me get this logged for you');
     const tool = p.search(/call the\s+filing tool straight away/);
     expect(line, 'the filler line is missing').toBeGreaterThan(-1);
-    expect(tool, 'the filing instruction is missing').toBeGreaterThan(line);
+    expect(tool, 'the filing instruction is missing').toBeGreaterThan(-1);
+    expect(tool, 'the filing instruction comes before the line it follows').toBeGreaterThan(line);
     expect(p.slice(tool, tool + 160)).toMatch(/saying\s+nothing else until it answers|Say nothing else until\s+it answers/);
   });
 });
