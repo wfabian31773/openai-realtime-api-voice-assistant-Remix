@@ -334,6 +334,18 @@ describe('the disposition belongs to its patient — Codex P1, #351', () => {
     expect(pcpDirector.next(callId).mayTerminate).toBe(true);
   });
 
+  it('a disposition recorded after the filing — the pre-dial handoff write — is the one restored', () => {
+    const callId = `CAlateDisposition${++n}`;
+    pcpDirector.update(callId, ANA as never);
+    pcpDirector.markTicketFiled(callId, 'pcp', 'PCP-1');
+    pcpDirector.recordDisposition(callId, 'HAND_OFF');
+    pcpDirector.markTicketFiled(callId, 'pcp', 'PCP-1');
+
+    pcpDirector.update(callId, BO as never);
+    pcpDirector.update(callId, ANA as never);
+    expect(pcpDirector.get(callId).dispositionRecorded).toBe('HAND_OFF');
+  });
+
   it('the teardown floor files a second patient whose request was never filed', async () => {
     const { agent, callId } = freshCall();
     await call(agent, 'record_pcp_intake', { ...CLINIC, ...ANA });
