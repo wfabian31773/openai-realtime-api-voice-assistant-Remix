@@ -5,7 +5,7 @@ import {
   type PcpVerificationStatus,
 } from './policy';
 import { isLunchClosure } from '../utils/timeAware';
-import { filingForPatient, hasIdentity, type PatientIdentity } from './samePatient';
+import { filingForPatient, hasIdentity, nameKey, samePatient, type PatientIdentity } from './samePatient';
 
 export const PCP_FACILITY_TYPES = [
   'pcp_office', 'referring_provider', 'health_plan', 'ipa_medical_group',
@@ -661,6 +661,100 @@ function currentPatient(state: PcpConversationState): PatientIdentity {
   return { firstName: state.patientFirstName, lastName: state.patientLastName, dob: state.patientDob };
 }
 
+type PatientPatch = Partial<Pick<PcpConversationState, 'patientFirstName' | 'patientLastName' | 'patientDob' | 'patientMrn'>>;
+
+function named(p: PatientIdentity): boolean {
+  return Boolean(nameKey(p.firstName) || nameKey(p.lastName));
+}
+
+/**
+ * DOES THIS UPDATE MOVE THE CALL ON TO A DIFFERENT PATIENT? Codex P1, #351.
+ *
+ * `update` merges, and `record_pcp_intake` sends only what was just said. So a
+ * clinic that moves from Ana Rivera to "Bo Kim" leaves Ana's date of birth and
+ * MRN in the state. `currentPatient` would read Bo with Ana's birthday, and
+ * `buildPayload` would put Ana's date of birth on Bo's ticket. Before v98 both
+ * patients folded onto one ticket, which hid it. Once each patient has their
+ * own ticket, it writes the wrong birthday onto a separate record.
+ *
+ * The test is the shared rule, not a new one. The patient as they stand, with
+ * the update laid over them, is compared with the patient before it. If
+ * `samePatient` says those are two people, the call has moved on. An update
+ * against a patient nobody has named yet never switches; there is no one to
+ * switch away from.
+ */
+function switchesPatient(state: PcpConversationState, patch: PatientPatch): boolean {
+  const before = currentPatient(state);
+  if (!named(before)) return false;
+  if (patch.patientFirstName === undefined && patch.patientLastName === undefined && patch.patientDob === undefined) {
+    return false;
+  }
+  const after: PatientIdentity = {
+    firstName: patch.patientFirstName ?? before.firstName,
+    lastName: patch.patientLastName ?? before.lastName,
+    dob: patch.patientDob ?? before.dob,
+  };
+  return !samePatient(before, after);
+}
+
+/**
+ * Clear what belongs to the previous patient and was not restated in this
+ * update — the `clearRecordsDestination` move, applied to the patient.
+ *
+ * - The MRN and the date of birth always go unless restated. They describe
+ *   one person and nothing about them carries to the next.
+ * - The surname goes only when the FIRST name changed. A father and a son who
+ *   share a name differ by birthday alone, and the model may send only the
+ *   new date; wiping the name there would leave a date-only patient, which
+ *   `filingForPatient` sends back to the call's first filing.
+ *
+ * The ask count for a cleared field resets as well, because it is a question
+ * about somebody new. Each patient still gets at most `MAX_ASKS_PER_FIELD`.
+ */
+function forgetThePreviousPatient(state: PcpConversationState, patch: PatientPatch): void {
+  const firstChanged =
+    patch.patientFirstName !== undefined
+    && nameKey(state.patientFirstName) !== undefined
+    && nameKey(patch.patientFirstName) !== nameKey(state.patientFirstName);
+  const cleared: Array<keyof PatientPatch> = ['patientMrn', 'patientDob'];
+  if (firstChanged) cleared.push('patientLastName');
+  for (const field of cleared) {
+    if (patch[field] !== undefined) continue;
+    state[field] = undefined;
+    if (state.askCounts?.[field] !== undefined) state.askCounts = { ...state.askCounts, [field]: 0 };
+  }
+}
+
+/**
+ * KEEP A FILING'S IDENTITY UP TO DATE. Codex P1, #351.
+ *
+ * A filing records who it was about at the moment it was made, and the date of
+ * birth is often not known yet. Without this, Luis Ortega filed with no
+ * birthday stays birthday-less. His son, also Luis Ortega, then matches that
+ * snapshot and is handed his father's ticket: the father-and-son split
+ * `samePatient` exists for, lost because the snapshot went stale.
+ *
+ * So when an update fills in the patient the call is ALREADY on, the filing
+ * that is about them takes the new fields. Only fields it lacks are filled;
+ * nothing it holds is replaced. The app's enrichment does the same with the
+ * ticket's patient columns. A filing made before anybody was named is claimed
+ * here by the first patient named, the premise the claim in `markTicketFiled`
+ * and the app's chooser already rest on.
+ */
+function refreshFiledIdentity(state: PcpConversationState): void {
+  const filings = state.ticketsFiled;
+  if (!filings?.length) return;
+  const now = currentPatient(state);
+  if (!named(now)) return;
+  const mine = filings.find((f) => samePatient(f.patient, now)) ?? filings.find((f) => !hasIdentity(f.patient));
+  if (!mine) return;
+  mine.patient = {
+    firstName: mine.patient.firstName || now.firstName,
+    lastName: mine.patient.lastName || now.lastName,
+    dob: mine.patient.dob || now.dob,
+  };
+}
+
 export class PcpDirector {
   private states = new Map<string, PcpConversationState>();
 
@@ -698,7 +792,10 @@ export class PcpDirector {
      * would never be asked for. Only the model's explicit signal writes it —
      * it is the one that knows which of the two is on the phone.
      */
+    const switching = switchesPatient(state, patch);
+    if (switching) forgetThePreviousPatient(state, patch);
     Object.assign(state, patch);
+    if (!switching) refreshFiledIdentity(state);
     return state;
   }
 

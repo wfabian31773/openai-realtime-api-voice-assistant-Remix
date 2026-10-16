@@ -167,6 +167,103 @@ describe('a second patient on the call is a second request', () => {
   });
 });
 
+describe('moving on to another patient forgets the last one — Codex P1, #351', () => {
+  /**
+   * THE DEFECT. `update` merged, so naming Bo Kim after Ana Rivera left Ana's
+   * date of birth and MRN in the state, and `buildPayload` put them on Bo's
+   * ticket. With one ticket per patient that is a wrong birthday on a separate
+   * record. Driven through the real agent, asserted on the payload that leaves.
+   */
+  it('a second patient named without a birthday does not carry the first patient’s', async () => {
+    const { agent } = freshCall();
+    await call(agent, 'record_pcp_intake', { ...CLINIC, ...ANA, patientMrn: 'MRN-ANA' });
+    await call(agent, 'create_pcp_task', { narrative: 'Confirm an upcoming visit for the first patient.' });
+
+    await call(agent, 'record_pcp_intake', { patientFirstName: 'Bo', patientLastName: 'Kim' });
+    ticketing.createPcpTicket.mockResolvedValueOnce({ success: true, ticketNumber: 'PCP-72765' });
+    await call(agent, 'create_pcp_task', { narrative: 'Confirm a visit for the second patient.' });
+
+    const second = (ticketing.createPcpTicket.mock.calls as any[])[1][0];
+    expect(second.patientFirstName).toBe('Bo');
+    expect(second.patientDob, 'Bo’s ticket must not carry Ana’s birthday').toBeUndefined();
+    expect(second.patientMrn, 'or Ana’s MRN').toBeUndefined();
+  });
+
+  it('a new first name alone forgets the old surname, and the surname may be asked again', () => {
+    const callId = `CAswitch${++n}`;
+    pcpDirector.update(callId, ANA as never);
+    pcpDirector.noteAsked(callId, 'patientLastName');
+    pcpDirector.noteAsked(callId, 'patientLastName');
+    pcpDirector.update(callId, { patientFirstName: 'Bo' });
+
+    const s = pcpDirector.get(callId);
+    expect([s.patientFirstName, s.patientLastName, s.patientDob]).toEqual(['Bo', undefined, undefined]);
+    expect(s.askCounts?.patientLastName, 'a question about somebody new').toBe(0);
+  });
+
+  it('a new birthday on the same name keeps the name — father and son', () => {
+    const callId = `CAson${++n}`;
+    pcpDirector.update(callId, { patientFirstName: 'Luis', patientLastName: 'Ortega', patientDob: '1940-01-01', patientMrn: 'MRN-1' });
+    pcpDirector.update(callId, { patientDob: '1975-06-30' });
+
+    const s = pcpDirector.get(callId);
+    expect([s.patientFirstName, s.patientLastName, s.patientDob, s.patientMrn]).toEqual(['Luis', 'Ortega', '1975-06-30', undefined]);
+  });
+
+  it('control: filling in the same patient forgets nothing', () => {
+    const callId = `CAfill${++n}`;
+    pcpDirector.update(callId, { patientDob: '1950-03-04' });
+    pcpDirector.update(callId, { patientFirstName: 'Ana', patientMrn: 'MRN-ANA' });
+    pcpDirector.update(callId, { patientLastName: 'Rivera' });
+    // A corrected surname, vouched for by the same first name and birthday.
+    pcpDirector.update(callId, { patientLastName: 'Riviera' });
+
+    const s = pcpDirector.get(callId);
+    expect([s.patientFirstName, s.patientLastName, s.patientDob, s.patientMrn]).toEqual(['Ana', 'Riviera', '1950-03-04', 'MRN-ANA']);
+  });
+});
+
+describe('a filing learns who it is about — Codex P1, #351', () => {
+  it('a birthday learned after filing keeps the son off the father’s ticket', () => {
+    const callId = `CAlearn${++n}`;
+    pcpDirector.update(callId, { patientFirstName: 'Luis', patientLastName: 'Ortega' });
+    pcpDirector.markTicketFiled(callId, 'pcp', 'PCP-1');
+    pcpDirector.update(callId, { patientDob: '1940-01-01' });
+    expect(pcpDirector.get(callId).ticketsFiled![0].patient.dob).toBe('1940-01-01');
+
+    pcpDirector.update(callId, { patientDob: '1975-06-30' });
+    expect(pcpDirector.filedForCurrentPatient(callId)).toBeUndefined();
+  });
+
+  it('a surname learned after filing keeps a second patient with the same first name apart', () => {
+    const callId = `CAsurname${++n}`;
+    pcpDirector.update(callId, { patientFirstName: 'Ana' });
+    pcpDirector.markTicketFiled(callId, 'pcp', 'PCP-1');
+    pcpDirector.update(callId, { patientLastName: 'Rivera' });
+
+    pcpDirector.update(callId, { patientFirstName: 'Ana', patientLastName: 'Kim' });
+    expect(pcpDirector.filedForCurrentPatient(callId)).toBeUndefined();
+    expect(pcpDirector.get(callId).ticketsFiled![0].patient).toEqual({ firstName: 'Ana', lastName: 'Rivera', dob: undefined });
+  });
+
+  it('a filing made before anyone was named belongs to the first patient named, even if they never re-file', () => {
+    const callId = `CAclaimAtName${++n}`;
+    pcpDirector.markTicketFiled(callId, 'pcp', 'PCP-1');
+    pcpDirector.update(callId, ANA as never);
+    pcpDirector.update(callId, BO as never);
+    expect(pcpDirector.filedForCurrentPatient(callId), 'Bo is a new patient, not the owner of Ana’s filing').toBeUndefined();
+  });
+
+  it('fills what the filing lacks and never replaces what it holds', () => {
+    const callId = `CAnoreplace${++n}`;
+    pcpDirector.update(callId, { patientFirstName: 'Ana', patientLastName: 'Riviera', patientDob: '1950-03-04' });
+    pcpDirector.markTicketFiled(callId, 'pcp', 'PCP-1');
+    pcpDirector.update(callId, { patientLastName: 'Rivera' });
+    expect(pcpDirector.get(callId).ticketsFiled![0].patient.lastName).toBe('Riviera');
+    expect(pcpDirector.filedForCurrentPatient(callId)?.ticketNumber).toBe('PCP-1');
+  });
+});
+
 describe('the director keeps one filing per patient', () => {
   it('records each patient once, first write wins, oldest first', () => {
     const callId = `CAlist${++n}`;
