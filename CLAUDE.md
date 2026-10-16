@@ -1,3 +1,16 @@
+## Shared AI notes (ai-bridge)
+
+Before starting work, read AGENTS.md, STATE.md, and HANDOFF.md in the private repo wfabian31773/ai-bridge, and follow AGENTS.md.
+
+At the end of any session that changed something, made a decision, hit a blocker, or left work half done:
+- Append a dated entry to HANDOFF.md saying what you did, what you decided, and what's next.
+- Update STATE.md with the current status, "Last touched by: Claude (Claude Code)", and next steps.
+- Open it as a draft pull request on ai-bridge. Never push to main.
+
+Skip the notes for quick questions that changed nothing. Never put secrets or patient data in ai-bridge.
+
+---
+
 # RULE ZERO — THE RECORD AND THE FUNNEL
 
 **Wayne, 2026-09-12. These two rules are BINDING. They SUPERSEDE everything
