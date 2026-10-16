@@ -698,8 +698,32 @@ import { callEnvironment } from "./callRecord";
  * mechanism, on the arm where nobody is on the phone with the patient.
  * `ringOutFilesBesideTheRequest.test.ts` runs the production defaults.
  */
+/**
+ * v96 — THE PCP LOOKUP NEEDS NAME AND DATE OF BIRTH (2026-10-15). When the
+ * name and date of birth matched nobody, `lookupPatient` fell through to the
+ * appointment book's name-only rung and `lookup_patient_appointments` read that
+ * person's schedule to the outside office on the line. CA23f7d0724863d9566e5d638041246160:
+ * a name shared by 126 people, no date of birth from the caller, five upcoming
+ * appointments read out. 18 of 48 PCP calls whose lookup found someone over
+ * 10-08..10-14 had no date-like word from the caller. Appointments are now
+ * handed over only on a single-person name-and-date-of-birth match; anything
+ * else is withheld (`suppressed: 'not_name_and_dob'`) and the model is sent
+ * back for the date of birth. `src/pcp/lookupNeedsNameAndDob.test.ts`.
+ */
+/**
+ * v97 — THE FILING LINE IS NOT A STAGE DIRECTION, AND HEALTH NAMES THE MODEL
+ * (2026-10-16). All four queue prompts said "…one moment." and then "file
+ * quietly"; grok-voice-3.0, run offline against the bound prompts and tools,
+ * said "Quietly filing." aloud on 15 of 62 simulated calls (0 on 2.0). The
+ * line now says to call the filing tool straight away and say nothing else
+ * until it answers — 0 on 3.0 in the same harness, unchanged on 2.0.
+ * `/voice/health` reports each lane's `voiceModel`, so a 3.0 canary set by
+ * `XAI_VOICE_MODEL_<SLUG>` is confirmed the moment the republish takes.
+ * `src/agents/theFilingLineIsNotAStageDirection.test.ts`,
+ * `src/runtime/laneRoster.test.ts`.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v95-the-ring-out-record-files-beside-the-request-20261011";
+  "voice-runtime-v97-the-filing-line-is-not-a-stage-direction-20261016";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

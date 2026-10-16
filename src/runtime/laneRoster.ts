@@ -24,6 +24,7 @@
  */
 import { laneSupportStatus, type LaneSource } from "./laneRegistry";
 import { transferDestinationStatus } from "./runtimeTransfer";
+import { loadGrokRuntimeVoiceConfig } from "./config";
 
 /**
  * The lanes worth reporting on: the four queues, the two after-hours agents,
@@ -64,6 +65,22 @@ export interface LaneReadiness {
    * Null when the lane never transfers, or when its destination is set.
    */
   transferWarning: string | null;
+  /**
+   * The xAI model this lane would open a session with right now: the
+   * per-lane `XAI_VOICE_MODEL_<SLUG>` if set, else `XAI_VOICE_MODEL`, else
+   * the pinned default — read through the same `loadGrokRuntimeVoiceConfig`
+   * `resolveLane` uses, so it cannot disagree with what a call gets. Null for
+   * a lane that is not registered.
+   *
+   * Reported because a model change is otherwise invisible from outside:
+   * xAI's own session reports the model, nothing of ours did, and the first
+   * sign that `grok-voice-think-fast-2.0` had become the deprecated
+   * `grok-voice-2.0` was a renamed line on the 2026-10-14 invoice. A canary
+   * set by environment variable is confirmed here the moment the republish
+   * takes, the same way the deploy marker confirms a pull. Model names are
+   * not secrets.
+   */
+  voiceModel: string | null;
 }
 
 export function laneRoster(
@@ -81,6 +98,7 @@ export function laneRoster(
         servable: false,
         blockedBy: `lane '${slug}' is not registered in this build`,
         transferWarning: null,
+        voiceModel: null,
       };
     }
     /**
@@ -108,6 +126,7 @@ export function laneRoster(
             `configured (${which === "pcp" ? "PCP_HUMAN_AGENT_NUMBER" : "HUMAN_AGENT_NUMBER"}) — ` +
             `every transfer it attempts will fail at resolveHandoffDestination`
           : null,
+      voiceModel: loadGrokRuntimeVoiceConfig(env, slug).model,
     };
   });
 }

@@ -33,16 +33,20 @@ process.env.DATABASE_URL ||= 'postgresql://unused:unused@127.0.0.1:5432/unused';
 process.env.OPENAI_API_KEY ||= 'test-unused';
 
 /** What the schedule says about the number that is calling. Every string is
- *  deliberately one that appears nowhere else in the prompt. */
+ *  deliberately one that appears nowhere else in the prompt — INCLUDING the
+ *  prompt's own "current date" header, which is why the appointment is not
+ *  dated anywhere near the present: it read "October 15, 2026" until that was
+ *  the real date in Pacific time, and on that day the header itself carried
+ *  "October 15" and this file went red on code nobody had touched. */
 const PHONE_MATCH = {
   patientFound: true,
   patientName: 'Zelda Quixote',
   matchedBy: 'phone' as const,
   upcomingAppointments: [
     {
-      date: 'Thursday, October 15, 2026',
-      isoDate: '2026-10-15',
-      dayOfWeek: 'Thursday',
+      date: 'Tuesday, December 31, 2041',
+      isoDate: '2041-12-31',
+      dayOfWeek: 'Tuesday',
       timeOfDay: 'afternoon',
       startTime: '3:10 PM',
       location: 'Quixotic Vision Testville',
@@ -56,7 +60,7 @@ const PHONE_MATCH = {
   lastLocationSeen: 'Quixotic Vision Testville',
   lastProviderSeen: 'Dr. Xavier Zebrastripe',
 };
-const SECRETS = ['October 15', '2026-10-15', '3:10 PM', 'Quixotic Vision Testville', 'Zebrastripe', 'Dilated Exam', 'Quixote'];
+const SECRETS = ['December 31', '2041-12-31', '3:10 PM', 'Quixotic Vision Testville', 'Zebrastripe', 'Dilated Exam', 'Quixote'];
 
 const h = vi.hoisted(() => ({
   lookupByPhone: vi.fn(async () => ({ patientFound: false, upcomingAppointments: [], pastAppointments: [], totalAppointmentsFound: 0 })),
