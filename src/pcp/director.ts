@@ -5,6 +5,7 @@ import {
   type PcpVerificationStatus,
 } from './policy';
 import { isLunchClosure } from '../utils/timeAware';
+import { filingForPatient, hasIdentity, nameKey, samePatient, type PatientIdentity } from './samePatient';
 
 export const PCP_FACILITY_TYPES = [
   'pcp_office', 'referring_provider', 'health_plan', 'ipa_medical_group',
@@ -12,6 +13,15 @@ export const PCP_FACILITY_TYPES = [
   'other_healthcare_organization',
 ] as const;
 export type PcpFacilityType = (typeof PCP_FACILITY_TYPES)[number];
+
+/** One filing on a call: which door it went through, and who it was about. */
+export type FiledTicket = {
+  door: 'pcp' | 'create_ticket';
+  ticketNumber?: string;
+  patient: PatientIdentity;
+  /** The disposition recorded for this patient, restored when the call comes back to them. */
+  disposition?: PcpDisposition;
+};
 
 export interface PcpConversationState {
   callerName?: string;
@@ -173,7 +183,29 @@ export interface PcpConversationState {
    * FIRST WRITE WINS. Server-owned for the v17 reason — the model can
    * neither set nor clear it.
    */
-  ticketFiled?: { door: 'pcp' | 'create_ticket'; ticketNumber?: string };
+  ticketFiled?: FiledTicket;
+  /**
+   * EVERY FILING ON THIS CALL, ONE PER PATIENT, oldest first — since
+   * 2026-10-16. `ticketFiled` above is the first of them and stays for
+   * readers that only ask whether the call filed at all; the doors ask
+   * `filedForCurrentPatient`, which reads this list. See `samePatient.ts`
+   * for the nine-patient call that made one latch per call wrong.
+   */
+  ticketsFiled?: FiledTicket[];
+  /**
+   * HOW MANY TIMES THE CALL HAS MOVED ON TO ANOTHER PATIENT. Codex P1, #351.
+   *
+   * The create-ticket doors key their POSTs on the call: the Hub on
+   * `<sid>-scheduling-hub` and Medical Records on `call-<sid>`. With one
+   * filing per patient, a second patient through the same door would send the
+   * same key, and the app would hand back the first patient's ticket as a
+   * retry. `patientKeySuffix` appends this count, so each patient gets their
+   * own key while retries for one patient keep theirs. It is a count, not the
+   * patient: nothing about who they are goes into a key. Unset (0) until the
+   * first switch, so every single-patient call sends exactly the key it
+   * always has.
+   */
+  patientOrdinal?: number;
   /**
    * THE CALLER IS THE PATIENT, and it stays true once established.
    *
@@ -641,6 +673,143 @@ export function deliveryDestinationNeeded(state: PcpConversationState): boolean 
   return Boolean(state.recordsDeliveryMethod) && state.recordsDeliveryMethod !== 'unspecified';
 }
 
+function currentPatient(state: PcpConversationState): PatientIdentity {
+  return { firstName: state.patientFirstName, lastName: state.patientLastName, dob: state.patientDob };
+}
+
+type PatientPatch = Partial<Pick<PcpConversationState, 'patientFirstName' | 'patientLastName' | 'patientDob' | 'patientMrn'>>;
+
+function named(p: PatientIdentity): boolean {
+  return Boolean(nameKey(p.firstName) || nameKey(p.lastName));
+}
+
+/**
+ * DOES THIS UPDATE MOVE THE CALL ON TO A DIFFERENT PATIENT? Codex P1, #351.
+ *
+ * `update` merges, and `record_pcp_intake` sends only what was just said. So a
+ * clinic that moves from Ana Rivera to "Bo Kim" leaves Ana's date of birth and
+ * MRN in the state. `currentPatient` would read Bo with Ana's birthday, and
+ * `buildPayload` would put Ana's date of birth on Bo's ticket. Before v98 both
+ * patients folded onto one ticket, which hid it. Once each patient has their
+ * own ticket, it writes the wrong birthday onto a separate record.
+ *
+ * The test is the shared rule, not a new one. The patient as they stand, with
+ * the update laid over them, is compared with the patient before it. If
+ * `samePatient` says those are two people, the call has moved on. An update
+ * against a patient nobody has named yet never switches; there is no one to
+ * switch away from.
+ */
+function switchesPatient(state: PcpConversationState, patch: PatientPatch): boolean {
+  const before = currentPatient(state);
+  if (!named(before)) return false;
+  if (patch.patientFirstName === undefined && patch.patientLastName === undefined && patch.patientDob === undefined) {
+    return false;
+  }
+  const after: PatientIdentity = {
+    firstName: patch.patientFirstName ?? before.firstName,
+    lastName: patch.patientLastName ?? before.lastName,
+    dob: patch.patientDob ?? before.dob,
+  };
+  return !samePatient(before, after);
+}
+
+/**
+ * Clear what belongs to the previous patient and was not restated in this
+ * update — the `clearRecordsDestination` move, applied to the patient.
+ *
+ * - The MRN and the date of birth always go unless restated. They describe
+ *   one person and nothing about them carries to the next.
+ * - Both names go when a NAME caused the switch — a new first name or a new
+ *   surname. Whichever half the caller did not restate belongs to the last
+ *   patient; keeping it would give Kim the first name Ana (Codex P1, round
+ *   4). They stay when only the BIRTHDAY changed: a father and a son share a
+ *   name, the model may send only the new date, and wiping the name there
+ *   would leave a date-only patient that `filingForPatient` sends back to the
+ *   call's first filing.
+ *
+ * The ask count for a cleared field resets as well, because it is a question
+ * about somebody new. Each patient still gets at most `MAX_ASKS_PER_FIELD`.
+ */
+function forgetThePreviousPatient(state: PcpConversationState, patch: PatientPatch): void {
+  const conflicts = (now: string | undefined, next: string | undefined) =>
+    next !== undefined && nameKey(now) !== undefined && nameKey(next) !== nameKey(now);
+  const nameChanged =
+    conflicts(state.patientFirstName, patch.patientFirstName)
+    || conflicts(state.patientLastName, patch.patientLastName);
+  const cleared: Array<keyof PatientPatch> = ['patientMrn', 'patientDob'];
+  if (nameChanged) cleared.push('patientFirstName', 'patientLastName');
+  // `update` lays the patch over the state straight after this, so a field
+  // this update restates comes back with its new value.
+  for (const field of cleared) {
+    state[field] = undefined;
+    if (state.askCounts?.[field] !== undefined) state.askCounts = { ...state.askCounts, [field]: 0 };
+  }
+  /**
+   * WHAT ELSE BELONGS TO ONE PATIENT, and what deliberately does not. Codex
+   * rounds 2 and 3 on #351 each found one more field; this is the whole list,
+   * so the next field is a decision rather than a discovery.
+   *
+   * Cleared for somebody new:
+   * - A scheduling lookup. `record_automated_resolution` accepts a resolution
+   *   only after its authoritative tool succeeded, and a lookup for Ana must
+   *   not let Bo be marked resolved without one (Codex P1, round 3). Its
+   *   failure count resets with it.
+   * - `callerIsThePatient`. One caller can be at most one of the patients, so
+   *   once the call moves to somebody else it cannot still be true.
+   * - The disposition, in `update` (round 2).
+   *
+   * Kept, because they belong to the CALLER or to the call:
+   * - The records delivery method and destination. It is the same office on
+   *   the same call, and a clinic asking for several patients' records wants
+   *   them where it said; re-asking would cost a question per patient on the
+   *   calls where questions cost requests. A different destination, once
+   *   stated, replaces it.
+   * - `callPurpose`. `lookup_patient_appointments` refuses without one, so
+   *   clearing it would refuse every later patient's lookup on a clinic's
+   *   confirmation list. The model restates it when the request changes.
+   * - Caller identity, callback, title, email, relationship, the knowledge
+   *   base read, the queue choice and the handoff result.
+   */
+  for (const tool of PATIENT_EVIDENCE) {
+    state.completedTools = state.completedTools.filter((t) => t !== tool);
+    delete state.toolFailures[tool];
+  }
+  state.callerIsThePatient = undefined;
+}
+
+/** Authoritative tools whose success is about one patient. */
+const PATIENT_EVIDENCE = ['scheduling'] as const;
+
+/**
+ * KEEP A FILING'S IDENTITY UP TO DATE. Codex P1, #351.
+ *
+ * A filing records who it was about at the moment it was made, and the date of
+ * birth is often not known yet. Without this, Luis Ortega filed with no
+ * birthday stays birthday-less. His son, also Luis Ortega, then matches that
+ * snapshot and is handed his father's ticket: the father-and-son split
+ * `samePatient` exists for, lost because the snapshot went stale.
+ *
+ * So when an update fills in the patient the call is ALREADY on, the filing
+ * that is about them takes the new fields. Only fields it lacks are filled;
+ * nothing it holds is replaced. The app's enrichment does the same with the
+ * ticket's patient columns. A filing made before anybody was named is claimed
+ * here by the first patient named, the premise the claim in `markTicketFiled`
+ * and the app's chooser already rest on.
+ */
+function refreshFiledIdentity(state: PcpConversationState): void {
+  const filings = state.ticketsFiled;
+  if (!filings?.length) return;
+  const now = currentPatient(state);
+  if (!named(now)) return;
+  const mine = filings.find((f) => samePatient(f.patient, now)) ?? filings.find((f) => !hasIdentity(f.patient));
+  if (!mine) return;
+  mine.patient = {
+    firstName: mine.patient.firstName || now.firstName,
+    lastName: mine.patient.lastName || now.lastName,
+    dob: mine.patient.dob || now.dob,
+  };
+}
+
 export class PcpDirector {
   private states = new Map<string, PcpConversationState>();
 
@@ -678,7 +847,26 @@ export class PcpDirector {
      * would never be asked for. Only the model's explicit signal writes it —
      * it is the one that knows which of the two is on the phone.
      */
+    const switching = switchesPatient(state, patch);
+    if (switching) forgetThePreviousPatient(state, patch);
     Object.assign(state, patch);
+    if (!switching) {
+      refreshFiledIdentity(state);
+      return state;
+    }
+    state.patientOrdinal = (state.patientOrdinal ?? 0) + 1;
+    /**
+     * THE DISPOSITION BELONGS TO THE PATIENT IT WAS RECORDED FOR. Codex P1,
+     * #351.
+     *
+     * `mayTerminate` and the teardown floor both read `dispositionRecorded`.
+     * Left standing across a switch, the first patient's filing would let the
+     * agent end the call, and the floor skip, while the second patient's
+     * request is still unfiled. So it follows the patient: none for somebody
+     * new, and the one recorded on their filing when the call comes back to a
+     * patient already filed.
+     */
+    state.dispositionRecorded = filingForPatient(state.ticketsFiled ?? [], currentPatient(state))?.disposition;
     return state;
   }
 
@@ -764,8 +952,45 @@ export class PcpDirector {
    */
   markTicketFiled(callId: string, door: 'pcp' | 'create_ticket', ticketNumber?: string): void {
     const state = this.get(callId);
-    if (state.ticketFiled) return;
-    state.ticketFiled = { door, ...(ticketNumber ? { ticketNumber } : {}) };
+    const patient = currentPatient(state);
+    const filings = (state.ticketsFiled ??= []);
+    const mine = filingForPatient(filings, patient);
+    if (mine) {
+      // First write wins for a patient. A filing made before anybody was named
+      // is CLAIMED by the patient named now — the app does the same with the
+      // ticket — so the next patient after them is recognised as new.
+      if (!hasIdentity(mine.patient) && hasIdentity(patient)) mine.patient = patient;
+      // The pre-dial handoff write files before any disposition exists.
+      mine.disposition ??= state.dispositionRecorded;
+      return;
+    }
+    const filed: FiledTicket = {
+      door,
+      ...(ticketNumber ? { ticketNumber } : {}),
+      patient,
+      ...(state.dispositionRecorded ? { disposition: state.dispositionRecorded } : {}),
+    };
+    filings.push(filed);
+    state.ticketFiled ??= filed;
+  }
+
+  /**
+   * The filing that a request about the CURRENT patient belongs to, or
+   * undefined when this patient has not been filed for yet on this call. The
+   * routing doors run only when this is undefined.
+   */
+  filedForCurrentPatient(callId: string): FiledTicket | undefined {
+    const state = this.get(callId);
+    return filingForPatient(state.ticketsFiled ?? [], currentPatient(state));
+  }
+
+  /**
+   * What a create-ticket door appends to its idempotency key: nothing for the
+   * call's first patient, `-p<n>` after the n-th switch. See `patientOrdinal`.
+   */
+  patientKeySuffix(callId: string): string {
+    const n = this.get(callId).patientOrdinal ?? 0;
+    return n > 0 ? `-p${n}` : '';
   }
 
   clear(callId: string): void {

@@ -995,8 +995,10 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
        *   - filed through the PCP endpoint: skip every routing door and land on
        *     `submitPcpTicket`, which upserts on callSid — the enrichment v37
        *     always said it was.
+       * Per PATIENT since 2026-10-16 — a second patient runs the doors afresh
+       * (`samePatient.ts`).
        */
-      const filedAlready = state.ticketFiled;
+      const filedAlready = pcpDirector.filedForCurrentPatient(callId);
       if (filedAlready?.door === 'create_ticket') return alreadyFiledOnThisCall(callId, filedAlready.ticketNumber);
       const enrichingTheTicket = filedAlready?.door === 'pcp';
       /**
@@ -2054,7 +2056,7 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
        * create-ticket gets its number back; one already on the PCP endpoint is
        * enriched there rather than routed to Medical Records as a second ticket.
        */
-      const filedAlready = pcpDirector.get(callId).ticketFiled;
+      const filedAlready = pcpDirector.filedForCurrentPatient(callId);
       if (filedAlready?.door === 'create_ticket') return alreadyFiledOnThisCall(callId, filedAlready.ticketNumber);
       const enrichingTheTicket = filedAlready?.door === 'pcp';
       pcpDirector.update(callId, { callPurpose: 'patient_medical_records_request' });
@@ -2520,7 +2522,9 @@ async function fileSchedulingToHub(
      * back — and without a key each attempt opens another department-9 ticket.
      * CLAUDE.md measured the keyed duplicate rate at 3 calls in 2,086 (0.14%).
      */
-    idempotencyKey: `${metadata.callSid || callId}-scheduling-hub`,
+    // Per patient, not per call: a second patient's booking must not come back
+    // as the first patient's ticket. See `patientOrdinal`. Codex P1, #351.
+    idempotencyKey: `${metadata.callSid || callId}-scheduling-hub${pcpDirector.patientKeySuffix(callId)}`,
     callData: { agentUsed: 'pcp', ...(metadata.callSid ? { callSid: metadata.callSid } : {}) },
   });
 
@@ -2828,6 +2832,9 @@ async function fileToMedicalRecords(
      * its gate is untouched.
      */
     on_clock_ask_exhausted: true,
+    // Not a schema field: the records tool keys its POST on the call, and a
+    // second patient on this call needs their own key. Codex P1, #351.
+    ...(pcpDirector.patientKeySuffix(callId) ? { patient_scope: pcpDirector.patientKeySuffix(callId) } : {}),
     ...(metadata.callSid ? { call_sid: metadata.callSid } : {}),
     ...(metadata.callerPhone ? { caller_phone: metadata.callerPhone } : {}),
   })) as Record<string, any>;

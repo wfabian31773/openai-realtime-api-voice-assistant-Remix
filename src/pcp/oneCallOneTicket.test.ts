@@ -259,7 +259,9 @@ describe('every create-ticket door latches, and the first door wins', () => {
     const callId = `CAlatch${++n}`;
     pcpDirector.markTicketFiled(callId, 'create_ticket', 'VA-1');
     pcpDirector.markTicketFiled(callId, 'pcp', 'PCP-2');
-    expect(pcpDirector.get(callId).ticketFiled).toEqual({ door: 'create_ticket', ticketNumber: 'VA-1' });
+    // toMatchObject since 2026-10-16: the filing also records who it was about.
+    expect(pcpDirector.get(callId).ticketFiled).toMatchObject({ door: 'create_ticket', ticketNumber: 'VA-1' });
+    expect(pcpDirector.get(callId).ticketsFiled).toHaveLength(1);
   });
 });
 

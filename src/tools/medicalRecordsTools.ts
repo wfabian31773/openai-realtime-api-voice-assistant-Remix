@@ -37,6 +37,14 @@ import { createTicketDurable, postFailureToolResult } from '../services/durableT
 import { verifiedDobFor, verifiedIdentityFor } from './verifiedIdentity';
 import { gateRefusalsSoFar, gateRefusalAgeMs, noteGateRefusal, noteCallFact, callFactNoted } from './gateAttempts';
 
+/**
+ * The per-patient suffix PCP passes for a call's second and later patients.
+ * Only the `-p<n>` shape is accepted, so nothing else can reach a key.
+ */
+export function patientScope(value: unknown): string {
+  return typeof value === 'string' && /^-p\d{1,3}$/.test(value) ? value : '';
+}
+
 // ---------------------------------------------------------------- what kind
 
 /**
@@ -981,7 +989,11 @@ registerTool({
       },
       // Guarded: callSid can be a sentinel ("unknown", "latest", ...), never
       // a real Twilio SID, when the retry lands on someone else's key.
-      ...(isTwilioCallSid(callSid) ? { idempotencyKey: `call-${callSid}` } : {}),
+      // `patient_scope` is PCP's: a clinic asking for two patients' records on
+      // one call needs two keys, or the second comes back as the first's
+      // ticket. Not a schema field, so no model on any lane is offered it.
+      // Codex P1, #351.
+      ...(isTwilioCallSid(callSid) ? { idempotencyKey: `call-${callSid}${patientScope(input.patient_scope)}` } : {}),
     });
 
     if (!res.success || !res.ticketNumber) {
