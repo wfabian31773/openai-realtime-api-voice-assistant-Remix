@@ -349,6 +349,12 @@ describe('a turn that answers refusal 3 names a facility anywhere in it (review 
     'This is the emergency room at Westside Memorial calling about a patient',
     'No, this is the ER at Huntington',
     "We're calling from our clinic, the Covina Medical Group",
+    // Round 7: "my patient" is a provider's word, not a relative's; and a
+    // provider's "would like" or "have" is not a want of the facility.
+    "I'm calling for my patient from Methodist Hospital ER.",
+    "I'd like to report a patient from Kaiser hospital ER.",
+    'We have a patient from Kaiser ER.',
+    'We have the ER at Huntington on the line for the on-call.',
   ];
   for (const t of ANSWERS) it(`counts: ${t}`, () => expect(answered(t)).toBe(true));
 
@@ -403,6 +409,14 @@ describe('a turn that answers refusal 3 names a facility anywhere in it (review 
     "I'd like to talk to somebody from the Covina clinic.",
     "Yes, I'm calling for my husband from Kaiser hospital.",
     'Quiero que me llame mi clínica.',
+    // Round 7: "would like" and causative "have" are wants.
+    "I'd like the doctor's office to call me back.",
+    'Please have the Covina clinic call me.',
+    'Can you have the Pasadena clinic call me back?',
+    'Could you please have the Covina clinic call me.',
+    'Have the Covina clinic call me.',
+    'Sure, have the Pasadena clinic call me back.',
+    "Yes, I'm calling for my husband from Kaiser hospital, he's a patient there.",
   ];
   for (const t of NOT_ANSWERS) it(`does not count: ${t}`, () => expect(answered(t)).toBe(false));
 

@@ -390,10 +390,14 @@ const REFUSAL_OPENER = /^(?:no|nope|nah|not)(?![a-z])/;
  * patient from Kaiser Fontana ER." governs the ER with "from", so it answers;
  * "I need Dr. Shah's office" and "I want the Covina clinic" still want it.
  * "calling for" is staff speaking for their doctor ("I'm calling for Dr. Lee's
- * office"), so like "work for" it is not a want.
+ * office"), so like "work for" it is not a want. "I'd like the doctor's office
+ * to call me back" and "please have the Covina clinic call me" are wants too
+ * (round 7). "have" counts only as a request (after please / can you / could
+ * you / would you, or opening its sentence: "Have the Covina clinic call me"),
+ * because "we have a patient from Kaiser ER" is a provider.
  */
 const WANTS_IT = new RegExp(
-  String.raw`(?:^|[^a-z])(?:want|wanna|need|looking for|trying to (?:reach|get)|speak (?:to|with)|talk (?:to|with)|` +
+  String.raw`(?:^|[^a-z])(?:want|wanna|need|(?:i'?d|we'?d|would) like|(?:(?:please|can you|could you|would you) |(?<![a-z] ))have|looking for|trying to (?:reach|get)|speak (?:to|with)|talk (?:to|with)|` +
     String.raw`patient (?:of|at|with)|about|soy paciente(?: de| del)?|quiero|necesito|busco|` +
     String.raw`(?<!\b(?:work|works|working|calling) )for)` +
     String.raw`(?: (?:the|a|an|to|el|la|un|una|al|del|de))?(?: ${NAME_TOKEN}){0,3}[\s,]*$`,
@@ -431,7 +435,7 @@ const WANTS_FROM_IT = new RegExp(
  * - "calling for my husband / mi esposo …": a relative, not a provider.
  */
 const MY_FACILITY = new RegExp(String.raw`(?:^|[^a-z])(?:my|mi|mis)(?: ${NAME_TOKEN}){0,2}[\s,]*$`);
-const CALLING_FOR_A_RELATIVE = new RegExp(String.raw`\bcalling for (?:my|mi) ${NOT_THEIR_PROVIDER}`);
+const CALLING_FOR_A_RELATIVE = new RegExp(String.raw`\bcalling for (?:my|mi) (?!patients?\b|pacientes?\b)${NOT_THEIR_PROVIDER}`);
 /**
  * "please" asks for something only when it is all the turn adds to a bare
  * facility ("Doctor Shah's office, please."). "Yes, Pomona Valley Hospital ER,
