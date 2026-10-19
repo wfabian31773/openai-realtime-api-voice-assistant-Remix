@@ -357,6 +357,12 @@ interface AttemptSample {
   failure?: string;
   /** Which call made the attempt, so the alert can count calls, not attempts. */
   call?: number;
+  /**
+   * How that call ended, written onto its samples when it settles. Kept ON the
+   * samples rather than in a side map so it leaves the window with them —
+   * nothing to prune, nothing to leak.
+   */
+  outcome?: ConnectOutcome;
 }
 
 export interface StallWindowNote {
@@ -391,22 +397,19 @@ export function createStallRateWindow(opts?: {
   const size = opts?.window ?? STALL_WINDOW;
   const alertAt = opts?.alertAt ?? STALL_ALERT_AT;
   const samples: AttemptSample[] = [];
-  const outcomes = new Map<number, ConnectOutcome>();
   let lastAlertAt = 0;
   const now = opts?.now ?? Date.now;
   const log = opts?.log ?? ((line: string) => console.warn(line));
 
-  const inWindow = (call: number) => samples.some((s) => s.call === call);
-
   const alertText = (stalls: number): string => {
     const rate = samples.length > 0 ? stalls / samples.length : 0;
     const kinds = new Map<string, number>();
-    const hit = new Set<number>();
+    const hit = new Map<number, ConnectOutcome | undefined>();
     for (const s of samples) {
       if (s.arrived) continue;
       const kind = s.failure ?? "failed";
       kinds.set(kind, (kinds.get(kind) ?? 0) + 1);
-      if (s.call != null) hit.add(s.call);
+      if (s.call != null) hit.set(s.call, s.outcome);
     }
     const kindText = [...kinds.entries()]
       .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
@@ -419,8 +422,7 @@ export function createStallRateWindow(opts?: {
       let reconnected = 0;
       let lost = 0;
       let connecting = 0;
-      for (const call of hit) {
-        const outcome = outcomes.get(call);
+      for (const outcome of hit.values()) {
         if (outcome === "connected") reconnected += 1;
         else if (outcome === "lost") lost += 1;
         else connecting += 1;
@@ -439,10 +441,7 @@ export function createStallRateWindow(opts?: {
   return {
     note(arrived: boolean, failure?: string, call?: number) {
       samples.push({ arrived, failure, call });
-      if (samples.length > size) {
-        const gone = samples.shift();
-        if (gone?.call != null && !inWindow(gone.call)) outcomes.delete(gone.call);
-      }
+      if (samples.length > size) samples.shift();
       const stalls = samples.filter((s) => !s.arrived).length;
       let alerted = false;
       if (
@@ -458,9 +457,9 @@ export function createStallRateWindow(opts?: {
       return { stalls, samples: samples.length, alerted };
     },
     settle(call: number, outcome: ConnectOutcome) {
-      // A call whose attempts have already left the window says nothing
-      // about the attempts in it, and keeping it would leak.
-      if (inWindow(call)) outcomes.set(call, outcome);
+      // A call whose attempts have already left the window has no sample to
+      // carry it, and says nothing about the attempts that are in it.
+      for (const s of samples) if (s.call === call) s.outcome = outcome;
     },
   };
 }
