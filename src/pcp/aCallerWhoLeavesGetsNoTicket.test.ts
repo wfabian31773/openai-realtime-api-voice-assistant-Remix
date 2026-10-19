@@ -213,6 +213,86 @@ describe('4 — a withdrawal that fails costs only the withdrawal', () => {
   });
 });
 
+describe('6 — a filing still in flight at the hang-up cannot outlive the withdrawal (review P2, #353)', () => {
+  const NARRATIVE = { narrative: 'Coordinator wants to speak with someone about a referral.' };
+
+  /** The next PCP POST hangs until `release()` is called. */
+  function holdTheNextFiling() {
+    let release!: () => void;
+    ticketing.createPcpTicket.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          release = () => resolve({ success: true, ticketNumber: 'PCP-60002' });
+        }) as never,
+    );
+    return () => release();
+  }
+
+  it('the sweep waits for it, then withdraws once it has landed', async () => {
+    const release = holdTheNextFiling();
+    const { agent, callId } = freshCall();
+    await call(agent, 'record_pcp_intake', INTAKE);
+    const filing = call(agent, 'create_pcp_task', NARRATIVE);
+    await vi.waitFor(() => expect(ticketing.createPcpTicket).toHaveBeenCalled());
+
+    const swept = endedWith(callId, 'caller_hangup');
+    await new Promise((r) => setTimeout(r, 50));
+    expect(ticketing.withdrawPcpTickets, 'not while the POST is still out').not.toHaveBeenCalled();
+
+    release();
+    await filing;
+    await swept;
+    expect(ticketing.withdrawPcpTickets).toHaveBeenCalledTimes(1);
+    expect(ticketing.withdrawPcpTickets).toHaveBeenCalledWith({ callSid: callId, reason: 'caller_hung_up' });
+  });
+
+  it('one that outlasts the bound asks again itself when it lands', async () => {
+    const release = holdTheNextFiling();
+    const { agent, callId } = freshCall();
+    await call(agent, 'record_pcp_intake', INTAKE);
+    const filing = call(agent, 'create_pcp_task', NARRATIVE);
+    await vi.waitFor(() => expect(ticketing.createPcpTicket).toHaveBeenCalled());
+
+    await endedWith(callId, 'caller_hangup'); // returns at the bound
+    expect(ticketing.withdrawPcpTickets, 'the sweep did not wait for ever').toHaveBeenCalledTimes(1);
+
+    release();
+    await filing;
+    await vi.waitFor(() => expect(ticketing.withdrawPcpTickets).toHaveBeenCalledTimes(2));
+    expect(ticketing.withdrawPcpTickets).toHaveBeenLastCalledWith({ callSid: callId, reason: 'caller_hung_up' });
+  }, 15_000);
+
+  it('a filing that lands while the call is live asks for nothing', async () => {
+    const { agent, callId } = freshCall();
+    await call(agent, 'record_pcp_intake', INTAKE);
+    await call(agent, 'create_pcp_task', NARRATIVE);
+    await new Promise((r) => setTimeout(r, 20));
+    expect(ticketing.withdrawPcpTickets).not.toHaveBeenCalled();
+    await endedWith(callId, 'agent_ended');
+    expect(ticketing.withdrawPcpTickets, 'nor does an ending the agent chose').not.toHaveBeenCalled();
+  });
+
+  it('a transfer neither waits for nor withdraws an in-flight filing at teardown', async () => {
+    const release = holdTheNextFiling();
+    const { agent, callId } = freshCall();
+    await call(agent, 'record_pcp_intake', INTAKE);
+    const filing = call(agent, 'create_pcp_task', NARRATIVE);
+    await vi.waitFor(() => expect(ticketing.createPcpTicket).toHaveBeenCalled());
+    await endedWith(callId, 'transferred');
+    release();
+    await filing;
+    await new Promise((r) => setTimeout(r, 20));
+    expect(ticketing.withdrawPcpTickets).not.toHaveBeenCalled();
+  });
+
+  it('the bound is a few seconds, well inside the floor budget', async () => {
+    const { PCP_INFLIGHT_FILING_WAIT_MS } = await import('../agents/pcpAgent');
+    const { PCP_FLOOR_BUDGET_MS } = await import('../runtime/pcpFloor');
+    expect(PCP_INFLIGHT_FILING_WAIT_MS).toBeGreaterThanOrEqual(3_000);
+    expect(PCP_INFLIGHT_FILING_WAIT_MS).toBeLessThan(PCP_FLOOR_BUDGET_MS / 2);
+  });
+});
+
 describe('5 — naming a patient, for what the caller is told on the way to the queue', () => {
   it.each([
     [{ patientFirstName: 'Robin' }, true],
@@ -221,6 +301,9 @@ describe('5 — naming a patient, for what the caller is told on the way to the 
     [{ patientFirstName: 'Unknown', patientLastName: 'Patient' }, false],
     [{ patientFirstName: 'patient' }, false],
     [{ patientFirstName: '  ' }, false],
+    [{ patientDob: 'unknown' }, false],
+    [{ patientDob: 'Not provided' }, false],
+    [{ patientDob: 'N/A' }, false],
     [{}, false],
   ])('%j → %s', (state, expected) => {
     expect(namesAPatient(state)).toBe(expected);

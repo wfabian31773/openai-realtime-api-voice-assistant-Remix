@@ -701,7 +701,11 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
     tool({
       ...def,
       // CP-3: the approved next line rides inside the tool result (script-listing §6).
-      execute: withToolDirection('pcp', callId, def.name, recordingExecute(timelineCtx, def.name, def.execute)),
+      execute: trackPcpFiling(
+        callId,
+        def.name,
+        withToolDirection('pcp', callId, def.name, recordingExecute(timelineCtx, def.name, def.execute)),
+      ),
     })) as typeof tool;
 
   const recordIntake = recordedTool({
@@ -2964,6 +2968,91 @@ export function pcpCallIsLive(callId: string): boolean {
 }
 
 /**
+ * A FILING STILL IN FLIGHT WHEN THE CALLER HANGS UP MUST NOT OUTLIVE THE
+ * WITHDRAWAL (review P2, #353).
+ *
+ * Teardown does not wait for tool dispatches, so a create_pcp_task or
+ * handoff_to_pcp POST — the handoff_not_eligible fallback among them — still
+ * running at hang-up could commit after the app had answered the hang-up
+ * withdrawal "nothing to do", and the empty ticket the ruling removes would
+ * stand. Two halves:
+ *
+ *   1. the hang-up sweep waits for the call's in-flight filings, bounded by
+ *      PCP_INFLIGHT_FILING_WAIT_MS, before it asks the app to withdraw;
+ *   2. a filing that settles AFTER that withdrawal was sent asks again itself,
+ *      with the same reason. The app decides from its own rows, so a second
+ *      ask on a call whose ticket names a patient changes nothing.
+ *
+ * A transfer is not withdrawn here: the dial result decides, as before. The
+ * old core passes no ending, so it neither waits nor withdraws.
+ */
+export const PCP_INFLIGHT_FILING_WAIT_MS = 4_500;
+
+/** The tools whose dispatch POSTs a ticket for this call. */
+const PCP_FILING_TOOLS = new Set(['create_pcp_task', 'handoff_to_pcp', 'handle_patient_medical_records_request']);
+
+/** In-flight filings per call. An entry leaves when it settles, and the sweep drops the call's set. */
+const inFlightPcpFilings = new Map<string, Set<Promise<unknown>>>();
+
+/**
+ * Calls whose hang-up withdrawal is pending ('awaiting') or has gone ('sent').
+ * Needed AFTER teardown, by a filing that lands late, so the sweep cannot
+ * clear it; capped like endedPcpCalls instead.
+ */
+const hangUpWithdrawals = new Map<string, 'awaiting' | 'sent'>();
+
+function markHangUpWithdrawal(callId: string, state: 'awaiting' | 'sent'): void {
+  hangUpWithdrawals.delete(callId);
+  hangUpWithdrawals.set(callId, state);
+  while (hangUpWithdrawals.size > 500) {
+    const oldest = hangUpWithdrawals.keys().next().value;
+    if (oldest === undefined) break;
+    hangUpWithdrawals.delete(oldest);
+  }
+}
+
+/** Wraps a filing tool's execute so the hang-up sweep can see it in flight. */
+function trackPcpFiling(
+  callId: string,
+  toolName: string,
+  run: (...args: any[]) => Promise<any>,
+): (...args: any[]) => Promise<any> {
+  if (!callId || !PCP_FILING_TOOLS.has(toolName)) return run;
+  return async (...args: any[]) => {
+    const pending = run(...args);
+    let calls = inFlightPcpFilings.get(callId);
+    if (!calls) {
+      calls = new Set();
+      inFlightPcpFilings.set(callId, calls);
+    }
+    calls.add(pending);
+    try {
+      return await pending;
+    } finally {
+      calls.delete(pending);
+      if (calls.size === 0 && inFlightPcpFilings.get(callId) === calls) inFlightPcpFilings.delete(callId);
+      if (hangUpWithdrawals.get(callId) === 'sent') {
+        console.info(`[PCP] ${toolName} settled after ${callId}'s hang-up withdrawal — asking the app to withdraw again`);
+        void submitPcpWithdrawal(callId, 'caller_hung_up');
+      }
+    }
+  };
+}
+
+/** Wait for these filings to settle, or for the bound. Never throws. */
+async function settleWithin(pending: Promise<unknown>[], ms: number): Promise<void> {
+  if (pending.length === 0) return;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  await Promise.race([
+    Promise.allSettled(pending),
+    new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, ms);
+    }),
+  ]);
+  if (timer) clearTimeout(timer);
+}
+
+/**
  * THE HANGUP FALLBACK — what makes "file later" safe to do at all.
  *
  * Blocking a ticket until we know who is calling, who it is about and how to
@@ -2995,6 +3084,10 @@ export type PcpTeardownContext = { outcome?: string };
 export async function sweepPcpUnfiledCall(callId: string, ctx: PcpTeardownContext = {}): Promise<void> {
   const metadata = pcpCallMetadata.get(callId);
   pcpCallMetadata.delete(callId);
+  // Released here on every ending; a filing that settles later removes only
+  // its own entry and finds the call's set gone.
+  const inFlight = [...(inFlightPcpFilings.get(callId) ?? [])];
+  inFlightPcpFilings.delete(callId);
   try {
     const state = pcpDirector.get(callId);
     /**
@@ -3035,6 +3128,12 @@ export async function sweepPcpUnfiledCall(callId: string, ctx: PcpTeardownContex
       // The app decides from its own rows and answers a call with no ticket
       // with nothing to do, so asking costs one request per hang-up.
       if (ctx.outcome === 'caller_hangup') {
+        // A filing still in flight is waited for, bounded, so its ticket
+        // exists when the app is asked; one that outlasts the bound asks
+        // again itself when it lands (see trackPcpFiling).
+        markHangUpWithdrawal(callId, 'awaiting');
+        await settleWithin(inFlight, PCP_INFLIGHT_FILING_WAIT_MS);
+        markHangUpWithdrawal(callId, 'sent');
         await submitPcpWithdrawal(callId, 'caller_hung_up');
       }
       console.info(`[PCP] SWEEP: ${callId} ended ${ctx.outcome} — nothing filed after the caller left, by ruling`);

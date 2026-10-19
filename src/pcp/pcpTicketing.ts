@@ -147,7 +147,9 @@ const PLACEHOLDER_NAME =
 /** Did the call name a patient — a real first or last name, or a date of birth? */
 export function namesAPatient(state: { patientFirstName?: string; patientLastName?: string; patientDob?: string }): boolean {
   const real = (v?: string) => Boolean(v && v.trim() && !PLACEHOLDER_NAME.test(v.trim()));
-  return real(state.patientFirstName) || real(state.patientLastName) || Boolean(state.patientDob?.trim());
+  // The date of birth takes the same placeholder test: "unknown" or "not
+  // provided" in that slot names nobody, and the app judges it the same way.
+  return real(state.patientFirstName) || real(state.patientLastName) || real(state.patientDob);
 }
 export type PcpWithdrawRequest = { callSid: string; reason: PcpWithdrawReason };
 export type PcpWithdrawResponse = {
