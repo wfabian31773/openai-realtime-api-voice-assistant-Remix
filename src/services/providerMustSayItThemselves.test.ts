@@ -336,6 +336,14 @@ describe('a turn that answers refusal 3 names a facility anywhere in it (review 
     'Sí, del Hospital General, por favor comuníqueme con el doctor de guardia.',
     'Yes, calling about a patient from Kaiser Fontana ER.',
     "I'm calling for Dr. Lee's office.",
+    // A provider's "from", "need" or "by" still answers.
+    'Hi, this is Sarah from Kaiser ER.',
+    'I need a callback for a patient from Kaiser ER.',
+    'Kaiser hospital, by the way.',
+    "It's Pomona Valley Hospital, we need the on-call.",
+    // The want-from reading ends AT the facility: an earlier want in the
+    // sentence does not reach a facility named after it.
+    'We need a call back from the on-call doc, Kaiser hospital ER.',
   ];
   for (const t of ANSWERS) it(`counts: ${t}`, () => expect(answered(t)).toBe(true));
 
@@ -373,6 +381,15 @@ describe('a turn that answers refusal 3 names a facility anywhere in it (review 
     'Please, Doctor Shah’s office.',
     "I'm with my mom at the ER, they told me to call the eye doctor.",
     "I'm calling from my dad's room at Cedars hospital.",
+    // "from" after a want, after "me", and "by": the facility is what the
+    // patient wants something from, or what acted on them.
+    'Please, I need someone from the Covina clinic to call me.',
+    'I need my results from the Pasadena clinic, please.',
+    'I want a call back from the Covina office.',
+    'They sent me home from Kaiser hospital.',
+    'They discharged me from the ER at Kaiser.',
+    'I was told to call by the Covina clinic.',
+    'Necesito que alguien de la clínica me llame.',
   ];
   for (const t of NOT_ANSWERS) it(`does not count: ${t}`, () => expect(answered(t)).toBe(false));
 

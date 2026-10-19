@@ -399,6 +399,28 @@ const WANTS_IT = new RegExp(
     String.raw`(?: (?:the|a|an|to|el|la|un|una|al|del|de))?(?: ${NAME_TOKEN}){0,3}[\s,]*$`,
 );
 /**
+ * "FROM" IS NOT ALWAYS "I AM CALLING FROM". Narrowing the want to the words
+ * governing the facility let "from" stand for the caller's own facility even
+ * when the caller WANTS something from it — "I need someone from the Covina
+ * clinic to call me", "I need my results from the Pasadena clinic, please" —
+ * or tells what it did to them — "They sent me home from Kaiser hospital", "I
+ * was told to call by the Covina clinic". Each is a patient replying to the
+ * facility question, and each rang the on-call phone. A facility is not an
+ * answer when it is governed by:
+ *  - "from" (or "de/del/desde") straight after a want and a short object
+ *    ("need someone from", "want a call from", "necesito que alguien de");
+ *  - "from" after "me" ("sent me home from", "discharged me from");
+ *  - "by" — the facility as the one acting on the caller.
+ * "about" is not a want here: "calling about a patient from Kaiser Fontana ER"
+ * is a provider's answer. A provider who says where they are calling from is
+ * also read by the self-identification patterns, which this does not touch.
+ */
+const WANTS_FROM_IT = new RegExp(
+  String.raw`(?:(?:^|[^a-z])(?:want|wanna|need|needs|looking for|trying to (?:reach|get)|quiero|necesito|busco)(?: [a-z'\u00e0-\u00ff-]+){1,3} (?:from|de|del|desde)` +
+    String.raw`|(?:^|[^a-z])me(?: [a-z'-]+){0,2} from|(?:^|[^a-z])by)` +
+    String.raw`(?: (?:the|a|an|el|la|un|una))?(?: ${NAME_TOKEN}){0,3}[\s,]*$`,
+);
+/**
  * "please" asks for something only when it is all the turn adds to a bare
  * facility ("Doctor Shah's office, please."). "Yes, Pomona Valley Hospital ER,
  * please have the on-call call me back." answers, then asks (review r5 P2).
@@ -427,7 +449,8 @@ function clauseThrough(text: string, start: number, end: number): string {
  */
 function deniesOrWantsTheFacility(text: string, start: number, end: number): boolean {
   if (REFUSAL_OPENER.test(text) || asksForItAlone(text)) return true;
-  return DENIES.test(clauseThrough(text, start, end)) || WANTS_IT.test(clauseThrough(text, start, start));
+  const governing = clauseThrough(text, start, start);
+  return DENIES.test(clauseThrough(text, start, end)) || WANTS_IT.test(governing) || WANTS_FROM_IT.test(governing);
 }
 
 function answersWithAFacility(line: string): boolean {
