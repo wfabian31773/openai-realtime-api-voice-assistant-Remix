@@ -55,7 +55,7 @@ import {
   connectWithFirstEventRetry,
   connectRetries,
   firstEventTimeoutMs,
-  noteFirstEventWait,
+  trackConnect,
   ProviderConnectAbortedError,
 } from "./providerConnect";
 import { runSetupFailureFloor, type SetupFailureContext } from "./setupFailureFloor";
@@ -1289,7 +1289,9 @@ export function mountVoiceRuntime(
           shouldAbort: () => socketGone,
           firstEventTimeoutMs: options.firstEventTimeoutMs ?? firstEventTimeoutMs(env),
           maxRetries: options.connectRetries ?? connectRetries(env),
-          noteFirstEventWait,
+          // One call id for every attempt and the outcome, so the
+          // connect-failure alert counts calls dropped, not just attempts.
+          ...trackConnect(),
         });
         const transport = opened.transport;
         if (!transport) throw new Error("provider connect returned no transport");
