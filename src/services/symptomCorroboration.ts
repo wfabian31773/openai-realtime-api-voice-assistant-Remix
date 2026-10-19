@@ -120,9 +120,22 @@ export function releaseCallerSpeech(callId: string | undefined): void {
 /**
  * The agent asking refusal 3's question, in the gate's words or close to them,
  * in English or Spanish. It opens a window the way spokenDob's ask does.
+ *
+ * Loose on purpose (review r4 P3, #353): an Oxford comma, a small paraphrase
+ * or a barge-in that cuts the line after "calling from a doctor's" must still
+ * open it, or a real provider's answer falls back to the strict form. Every
+ * branch still needs "calling from" near a facility word, or the gate's own
+ * "doctor's office, hospital or clinic" list.
  */
-const FACILITY_QUESTION =
-  /calling from a doctor'?s office, a hospital or a clinic|which (?:office|hospital|clinic|facility) are you calling from|(?:llama|habla) (?:usted )?(?:de|desde) (?:un |una |el |la )?(?:consultorio|hospital|cl[ií]nica)/;
+const FACILITY_QUESTION = new RegExp(
+  [
+    String.raw`calling from [^.?!]{0,40}?(?:office|hospital|clinic|facility)`,
+    String.raw`calling from (?:a |the )?doctor'?s?\b`,
+    String.raw`doctor'?s office,? (?:a )?hospital,? or (?:a )?clinic`,
+    String.raw`which (?:office|hospital|clinic|facility) are you calling from`,
+    String.raw`(?:llama|habla) (?:usted )?(?:de|desde) (?:un |una |el |la )?(?:consultorio|hospital|cl[ií]nica)`,
+  ].join('|'),
+);
 
 /**
  * The caller turns between an agent line asking the facility question and the
@@ -354,8 +367,53 @@ function normaliseAnswer(line: string): string {
     .trim();
 }
 
+/**
+ * A FACILITY WORD THE CALLER DENIES OR ASKS FOR IS NOT AN ANSWER (review r4
+ * P2, #353). Refusal 3's question is put to the very callers the ruling is
+ * about — a patient the model wrote up as a clinician, a patient asking for
+ * their own doctor — and their natural replies echo the question's words:
+ * "No, I'm not calling from a hospital", "No, I'm a patient of the Covina
+ * clinic", "I want Dr. Shah's office", "No, no llamo de un hospital". Each of
+ * those counted, and a provider answer rings the on-call phone ahead of every
+ * other check.
+ *
+ * "Doctor Shah's office, please." is ambiguous as the answer to "which one?",
+ * but "please" asks for something, and a provider names where they ARE; read
+ * it as a want, the direction that does not wake the on-call provider.
+ * "Dr. Lee's office." with no "please" still counts.
+ */
+const REFUSAL_OPENER = /^(?:no|nope|nah|not)(?![a-z])/;
+const WANTS_IT = new RegExp(
+  String.raw`\b(?:want|wanna|need|looking for|trying to (?:reach|get)|speak (?:to|with)|talk (?:to|with)|` +
+    String.raw`patient (?:of|at|with)|about|soy paciente|quiero|necesito|busco)\b|(?<!\bwork |\bworks |\bworking )\bfor\b`,
+);
+const ASKS_FOR_IT = /\bplease\b|\bpor favor\b/;
+/** A sentence end that is not an abbreviation's dot ("Dr.", "St."). */
+const SENTENCE_END = /(?<!\b(?:dr|st|mr|mrs|ms|mt|jr|sr))[.?!]\s/g;
+
+/** The sentence holding text[start, end), from its beginning up to end. */
+function clauseThrough(text: string, start: number, end: number): string {
+  let from = 0;
+  for (const m of text.slice(0, start).matchAll(SENTENCE_END)) from = (m.index ?? 0) + m[0].length;
+  return text.slice(from, end);
+}
+
+/**
+ * The caller refuses the facility, denies it, or names it as what they want.
+ * The negator test is DENIES (below), the one negation list, scoped to the
+ * facility's own sentence so "Sorry, I can't hear you well. Yes, Pomona Valley
+ * Hospital." still answers; a turn that OPENS with a refusal is refused
+ * whatever follows.
+ */
+function deniesOrWantsTheFacility(text: string, start: number, end: number): boolean {
+  if (REFUSAL_OPENER.test(text) || ASKS_FOR_IT.test(text)) return true;
+  const clause = clauseThrough(text, start, end);
+  return DENIES.test(clause) || WANTS_IT.test(clause);
+}
+
 function answersWithAFacility(line: string): boolean {
-  return BARE_FACILITY_ANSWER.test(normaliseAnswer(line));
+  const text = normaliseAnswer(line);
+  return BARE_FACILITY_ANSWER.test(text) && !deniesOrWantsTheFacility(text, text.length, text.length);
 }
 
 /**
@@ -387,10 +445,10 @@ const DENIES = /(?:^|[^a-z])(?:no|nope|nah|not|never|neither|none|nunca|tampoco|
 
 function answerNamesAFacility(turn: string): boolean {
   const text = normaliseAnswer(turn);
-  if (!FACILITY_ANYWHERE.test(text)) return false;
-  if (DENIES.test(text)) return false;
+  const hit = FACILITY_ANYWHERE.exec(text);
+  if (!hit) return false;
   if (ASKS_BACK.test(text) || BARE_AT_A_FACILITY.test(text) || SOMEONE_AT_A_FACILITY.test(text)) return false;
-  return true;
+  return !deniesOrWantsTheFacility(text, hit.index, hit.index + hit[0].length);
 }
 
 const PROVIDER_SELF_IDENTIFICATION: RegExp[] = [
@@ -470,11 +528,15 @@ const NEGATED_BEFORE = /(?:^|[^a-z])(?:not|never|n't)\s+(?:[a-z']+\s+)?$/;
 const SPANISH_VERB_FIRST = /^(?:soy|llamo|hablo|estoy|le |llamamos|hablamos|tengo)\b/;
 const NO_STRAIGHT_BEFORE = /(?:^|[^a-z])no\s+$/;
 function affirmed(text: string, re: RegExp): boolean {
-  const m = re.exec(text);
-  if (!m) return false;
-  const before = text.slice(Math.max(0, m.index - 24), m.index);
-  if (DENIES.test(m[0]) || NEGATED_BEFORE.test(before)) return false;
-  return !(SPANISH_VERB_FIRST.test(m[0]) && NO_STRAIGHT_BEFORE.test(before));
+  // Every occurrence, not only the first: in "I'm not calling from Mercy. I'm
+  // calling from St. Joe's hospital." the second one stands.
+  const all = new RegExp(re.source, re.flags.includes('g') ? re.flags : `${re.flags}g`);
+  return [...text.matchAll(all)].some((m) => {
+    const at = m.index ?? 0;
+    const before = text.slice(Math.max(0, at - 24), at);
+    if (DENIES.test(m[0]) || NEGATED_BEFORE.test(before)) return false;
+    return !(SPANISH_VERB_FIRST.test(m[0]) && NO_STRAIGHT_BEFORE.test(before));
+  });
 }
 
 /**

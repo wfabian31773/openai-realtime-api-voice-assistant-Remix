@@ -151,6 +151,15 @@ describe('asking for a doctor, an operator or a page is not saying you are one',
     'Uh, my husband is in the hospital.',
     'Yeah, hospital bill.',
     'The ER yesterday.',
+    // Review r4 P2, #353: the strict forms refuse a denial or a want too.
+    "No, I'm not calling from a hospital.",
+    "No, it's not a doctor's office, I'm the patient.",
+    "No, I'm a patient of the Covina clinic.",
+    "I want Dr. Shah's office.",
+    "Doctor Shah's office, please.",
+    'Need Dr. Shah’s office.',
+    'No, no llamo de un hospital.',
+    "I'm not calling from a doctor's office, I need Dr. Shah",
   ];
   for (const t of PATIENTS) it(t, () => expect(callerSaysTheyAreAProvider(t)).toBe(false));
 });
@@ -332,8 +341,45 @@ describe('a turn that answers refusal 3 names a facility anywhere in it (review 
     'Nope, not a hospital.',
     "I'm not from a doctor's office.",
     'No soy de una clínica, soy paciente.',
+    // Review r4 P2, #353: the same NO, or naming the office they WANT. "Doctor
+    // Shah's office, please." is ambiguous as an answer to "which one?";
+    // "please" asks for something, so it is read as a want and does not ring.
+    "No, it's not a doctor's office, I'm the patient.",
+    "No, I'm a patient of the Covina clinic.",
+    "I want Dr. Shah's office.",
+    "Doctor Shah's office, please.",
+    'No, no llamo de un hospital.',
+    "I'm not calling from a doctor's office, I need Dr. Shah",
+    'I need to talk to the hospital about my bill.',
   ];
   for (const t of NOT_ANSWERS) it(`does not count: ${t}`, () => expect(answered(t)).toBe(false));
+
+  it('the negation guard is scoped to its own sentence', () => {
+    expect(answered("Sorry, I can't hear you well. Yes, Pomona Valley Hospital.")).toBe(true);
+    expect(callerSaysTheyAreAProvider("I can't hear you. I'm calling from Mercy General Hospital.")).toBe(true);
+    expect(callerSaysTheyAreAProvider("I'm calling from St. Joe's hospital, the patient can't see.")).toBe(true);
+    expect(callerSaysTheyAreAProvider("I'm not calling from St. Joe's hospital.")).toBe(false);
+    expect(callerSaysTheyAreAProvider('Yes, I work for Kaiser hospital, calling from the ER.')).toBe(true);
+  });
+
+  it('the window opens on close paraphrases and a cut-off ask, not on unrelated agent lines (review r4 P3)', () => {
+    const opens = [
+      "AGENT: Are you calling from a doctor's office, a hospital, or a clinic, and which one?",
+      'AGENT: Are you calling from a hospital or a doctor’s office?',
+      "AGENT: Are you calling from a doctor's",
+      "AGENT: Is that a doctor's office, hospital, or clinic?",
+      'AGENT: Which hospital are you calling from?',
+    ];
+    for (const ask of opens) expect(answered('Yes, Pomona Valley Hospital.', ask), ask).toBe(true);
+    const closed = [
+      'AGENT: What number are you calling from? I will pass it to the office.',
+      'AGENT: Our Covina office opens at 8 in the morning.',
+      'AGENT: I can take a message for the clinic.',
+    ];
+    for (const ask of closed) {
+      expect(answersToTheFacilityQuestion([ask, 'CALLER: Kaiser hospital, the main one.']), ask).toEqual([]);
+    }
+  });
 
   it('outside the window the same loose answer is not read', () => {
     releaseCallerSpeech(CALL);
