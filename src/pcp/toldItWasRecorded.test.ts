@@ -187,6 +187,21 @@ describe('the decision is made on what was filed by the time the app is asked', 
     expect(ticketing.withdrawPcpTickets).not.toHaveBeenCalled();
   });
 
+  it("every patient's filing counts, not only the call's first", async () => {
+    // A clinic asking about two patients gets two tickets (v98); the agent
+    // reading out the second one's number is still telling the caller.
+    const { agent, callId } = freshCall();
+    await call(agent, 'record_pcp_intake', { ...INTAKE, patientFirstName: 'Robin', patientLastName: 'Ortega' });
+    await call(agent, 'create_pcp_task', NARRATIVE);
+    ticketing.createPcpTicket.mockImplementationOnce(async () => ({ success: true, ticketNumber: 'PCP-90003' }));
+    await call(agent, 'record_pcp_intake', { patientFirstName: 'Dana', patientLastName: 'Whitlock' });
+    await call(agent, 'create_pcp_task', NARRATIVE);
+    expect(ticketing.createPcpTicket, 'the second patient filed their own ticket').toHaveBeenCalledTimes(2);
+
+    await hungUp(callId, 'AGENT: And for the second patient, that is P-C-P-nine-zero-zero-zero-three.');
+    expect(ticketing.withdrawPcpTickets).not.toHaveBeenCalled();
+  });
+
   it('a number nobody filed on this call does not hold back the withdrawal', async () => {
     const { agent, callId } = freshCall();
     await call(agent, 'record_pcp_intake', INTAKE);

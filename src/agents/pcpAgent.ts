@@ -3148,7 +3148,7 @@ export async function sweepPcpUnfiledCall(callId: string, ctx: PcpTeardownContex
           .map((f) => f.ticketNumber)
           .filter((t): t is string => Boolean(t));
         if (toldTheCallerItWasRecorded(ctx.transcript ?? '', filedNumbers)) {
-          hangUpWithdrawals.delete(callId);
+          // Left at 'awaiting': only 'sent' makes a late filing ask again.
           console.info(`[PCP] SWEEP: ${callId} hung up after being told the request is recorded — its ticket stands`);
           return;
         }
