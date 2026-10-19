@@ -76,6 +76,7 @@ vi.mock('../../server/db', () => ({ db: {} }));
 const ticketing = vi.hoisted(() => ({
   createPcpTicket: vi.fn(async () => ({ success: true, ticketNumber: 'PCP-58001' })),
   createTicket: vi.fn(async () => ({ success: true, ticketNumber: 'VA-1' })),
+  withdrawPcpTickets: vi.fn(async () => ({ success: true, withdrawn: [], kept: [] })),
 }));
 vi.mock('../../server/services/ticketingApiClient', () => ({ ticketingApiClient: ticketing }));
 
@@ -127,6 +128,7 @@ async function askThenAnswer(agent: any, answer: boolean | undefined) {
 beforeEach(() => {
   ticketing.createPcpTicket.mockClear();
   ticketing.createTicket.mockClear();
+  ticketing.withdrawPcpTickets.mockClear();
   ticketing.createPcpTicket.mockImplementation(async () => ({
     success: true,
     ticketNumber: 'PCP-58001',
@@ -248,11 +250,15 @@ describe('an explicit yes: the queue, and NO ticket — operator 2026-10-01', ()
   });
 
   /**
-   * A TICKET FILED EARLIER STANDS, AND THE WARNING MAY SAY SO. The ruling is
-   * "we dont generate a ticket" for the transfer — it does not unfile a request
-   * the caller already made before asking for a person.
+   * A TICKET FILED EARLIER STANDS WHILE THE QUEUE RINGS — and what happens to
+   * it once the dial settles turns on whether it names a patient (operator,
+   * 2026-10-19: a caller who goes to the queue gets no ticket, and one that
+   * cannot say who it is about is withdrawn). The ruling was "we dont generate
+   * a ticket" for the transfer; this file used to assert that an earlier
+   * filing always stands and the warning may always claim it. Rewritten, not
+   * loosened: the patient-named half keeps that assertion word for word.
    */
-  it('a caller who filed before asking keeps that ticket, and nothing new is written', async () => {
+  async function fileThenAccept(intake: Record<string, unknown>) {
     let captured: any;
     let callId = '';
     const dial = vi.fn(async () => {
@@ -261,17 +267,61 @@ describe('an explicit yes: the queue, and NO ticket — operator 2026-10-01', ()
     });
     const made = freshCall(dial);
     callId = made.callId;
-    await call(made.agent, 'record_pcp_intake', INTAKE);
+    await call(made.agent, 'record_pcp_intake', intake);
     const filed = await call(made.agent, 'create_pcp_task', { narrative: 'Coordinator asking about a referral.' });
     expect(filed.success).toBe(true);
     ticketing.createPcpTicket.mockClear();
 
     await call(made.agent, 'handoff_to_pcp', { narrative: ASKED });
     const r = await call(made.agent, 'handoff_to_pcp', { narrative: 'Caller said connect me.', callerAcceptedQueue: true });
+    return { r, captured, callId };
+  }
+  // Synthetic patient. No real person enters the repo.
+  const WITH_PATIENT = { ...INTAKE, patientFirstName: 'Robin', patientLastName: 'Ortega' };
 
+  it('a caller who filed about a patient keeps that ticket, nothing new is written, and the warning may say so', async () => {
+    const { r, captured } = await fileThenAccept(WITH_PATIENT);
     expect(r.success).toBe(true);
     expect(ticketing.createPcpTicket, 'no second write for the transfer').not.toHaveBeenCalled();
     expect(captured.requestOnRecord, 'a ticket exists, so the warning is true').toBe(true);
+  });
+
+  it('a caller whose earlier ticket names no patient is not told their details are taken down', async () => {
+    const { r, captured } = await fileThenAccept(INTAKE);
+    expect(r.success).toBe(true);
+    expect(ticketing.createPcpTicket, 'no second write for the transfer').not.toHaveBeenCalled();
+    expect(captured.requestOnRecord, 'that ticket goes once the queue answers').toBe(false);
+  });
+
+  it('once the queue answers, or they leave while it rings, the earlier ticket is put up for withdrawal', async () => {
+    for (const settlement of [
+      { outcome: 'queue_answered', status: 'COMPLETED', connected: true, talkSeconds: 120, ringSeconds: 3 },
+      { outcome: 'failed', status: 'CANCELED', connected: false, ringSeconds: 9 },
+    ]) {
+      ticketing.withdrawPcpTickets.mockClear();
+      const { captured, callId } = await fileThenAccept(INTAKE);
+      await captured.onBlindDialSettled({ ...settlement, dialedNumber: '+17149564300' });
+      expect(ticketing.withdrawPcpTickets).toHaveBeenCalledTimes(1);
+      expect(ticketing.withdrawPcpTickets).toHaveBeenCalledWith({ callSid: callId, reason: 'sent_to_queue' });
+    }
+  });
+
+  it('a queue that never picks up withdraws nothing — the caller was just told their request is recorded', async () => {
+    const { captured } = await fileThenAccept(INTAKE);
+    await captured.onBlindDialSettled({
+      outcome: 'no_answer', status: 'NO-ANSWER', connected: false, ringSeconds: 45, dialedNumber: '+17149564300',
+    });
+    expect(ticketing.withdrawPcpTickets).not.toHaveBeenCalled();
+    expect(ticketing.createPcpTicket, 'the ticket is still owed and lands').toHaveBeenCalledTimes(1);
+  });
+
+  it('a caller with nothing filed asks the app to withdraw nothing when the queue answers', async () => {
+    const { captured } = await acceptAndCapture();
+    await captured.onBlindDialSettled({
+      outcome: 'queue_answered', status: 'COMPLETED', connected: true, talkSeconds: 240, ringSeconds: 3,
+      dialedNumber: '+17149564300',
+    });
+    expect(ticketing.withdrawPcpTickets).not.toHaveBeenCalled();
   });
 
   /**
@@ -421,6 +471,39 @@ describe('no answer is not a yes — the unchanged path', () => {
       ticketing.createPcpTicket.mock.calls.length,
       'an unanswered choice keeps the durable ticket',
     ).toBeGreaterThan(0);
+  });
+
+  /**
+   * THE DURABLE TICKET STANDS WHILE IT RINGS, AND GOES ONCE THE QUEUE HAS THEM
+   * when it names no patient (operator, 2026-10-19) — the settle callback on
+   * this path updates it first, then asks the app to withdraw. The app keeps
+   * one that names a patient; the test for that rule lives in the ticketing
+   * app beside the rule.
+   */
+  async function vagueThenSettle(settlement: Record<string, unknown>) {
+    let captured: any;
+    let callId = '';
+    const dial = vi.fn(async () => {
+      captured = { ...escalationDetailsMap.get(callId) };
+      return QUEUE_OK();
+    });
+    const made = freshCall(dial);
+    callId = made.callId;
+    await askThenAnswer(made.agent, undefined);
+    expect(captured.requestOnRecord, 'the durable ticket names no patient, so the warning does not claim it').toBe(false);
+    ticketing.withdrawPcpTickets.mockClear();
+    await captured.onBlindDialSettled({ ...settlement, dialedNumber: '+17149564300' });
+    return callId;
+  }
+
+  it('the queue answering withdraws the durable ticket', async () => {
+    const callId = await vagueThenSettle({ outcome: 'queue_answered', status: 'COMPLETED', connected: true, talkSeconds: 60, ringSeconds: 4 });
+    expect(ticketing.withdrawPcpTickets).toHaveBeenCalledWith({ callSid: callId, reason: 'sent_to_queue' });
+  });
+
+  it('a queue that never answers keeps it — re-opened as a task, and the caller was told it is recorded', async () => {
+    await vagueThenSettle({ outcome: 'no_answer', status: 'NO-ANSWER', connected: false, ringSeconds: 45 });
+    expect(ticketing.withdrawPcpTickets).not.toHaveBeenCalled();
   });
 });
 

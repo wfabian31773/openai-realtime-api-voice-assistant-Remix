@@ -62,8 +62,54 @@ describe('the call that started this', () => {
     expect(result.supported).toEqual([]);
   });
 
-  it('refuses the escalation that woke the on-call provider', () => {
+  it('still refuses it: "discharge" is a symptom to ask about, not an acute event (operator, 2026-08-15)', () => {
+    /**
+     * The operator's ruling on this very call: "This is not a reason for the
+     * agent to pass the call through as urgent." A review fix on #353 let any
+     * symptom word in the caller's lines lift the refusal, and this caller
+     * said "discharge", so the call rang. Only an ACUTE event in the caller's
+     * own words lifts it now (see the gate).
+     */
     for (const line of REAL_CALL_LINES) recordCallerSpeech(CALL, line);
+    const c = corroborate(CALL, 'red eye with pain and vision changes reported');
+    expect(c.symptomStated, 'the caller did describe a symptom').toBe(true);
+    expect(c.acuteStated, 'but not an acute event').toBe(false);
+    expect(
+      judgeEscalation({
+        callerType: 'patient_urgent_medical',
+        reason: 'red eye with pain and vision changes reported',
+        corroboration: c,
+      }),
+    ).toMatchObject({ allowed: false, code: 'symptoms_not_stated_by_caller' });
+  });
+
+  it.each([
+    ['My eye is red and itchy, can someone call me back.'],
+    ['It keeps watering. I want a callback.'],
+    ['I need my eye pressure checked.'],
+    ['Me duele la cabeza y quiero una cita.'],
+  ])('a non-acute symptom does not license the vision loss the agent added: %s', (said) => {
+    recordCallerSpeech(CALL, said);
+    const c = corroborate(CALL, 'sudden vision loss');
+    expect(c.acuteStated).toBe(false);
+    expect(judgeEscalation({ callerType: 'patient_urgent_medical', reason: 'sudden vision loss', corroboration: c })).toMatchObject({
+      allowed: false,
+      code: 'symptoms_not_stated_by_caller',
+    });
+  });
+
+  it('an acute event in the caller\'s own words still lifts it', () => {
+    recordCallerSpeech(CALL, 'And my right eye. With discharge. And now it is bleeding.');
+    const c = corroborate(CALL, 'red eye with pain and vision changes reported');
+    expect(c.acuteStated).toBe(true);
+    expect(
+      judgeEscalation({ callerType: 'patient_urgent_medical', reason: 'red eye with pain and vision changes reported', corroboration: c })
+        .allowed,
+    ).toBe(true);
+  });
+
+  it('refuses the same write-up for a caller who said nothing symptomatic', () => {
+    for (const line of REAL_CALL_LINES.filter((l) => !/discharge/i.test(l))) recordCallerSpeech(CALL, line);
 
     const verdict = judgeEscalation({
       callerType: 'patient_urgent_medical',

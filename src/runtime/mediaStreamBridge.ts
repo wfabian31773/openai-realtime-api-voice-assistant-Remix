@@ -110,6 +110,7 @@ import type { BoundAgent } from "./agentBinding";
 import { CallTranscriptLog, type TranscriptTurn } from "./transcriptLog";
 import { noteSpokenDob } from "../tools/spokenDob";
 import { notePatientStatus } from "../tools/spokenPatientStatus";
+import { noteCallerTranscript } from "../services/symptomCorroboration";
 import { CallUsage, usageSummaryMarker, type UsageTotals } from "./tokenUsage";
 import type { TwilioInboundFrame, TwilioOutboundFrame } from "./twilioFrames";
 import {
@@ -983,6 +984,17 @@ export class VoiceCallBridge {
          * spokenPatientStatus.ts for the window rule and why it is not a sweep.
          */
         notePatientStatus(this.deps.context.callSid, this.transcriptLog.lines);
+        /**
+         * WHAT THE CALLER SAID, FOR THE AFTER-HOURS ESCALATION GATE (v99).
+         *
+         * The gate refuses symptoms the caller never described and, since the
+         * operator's 2026-10-19 ruling, a provider call the caller never
+         * identified. Both read symptomCorroboration's ledger, and only the
+         * old core fed it, so on this pipeline both found no caller speech and
+         * failed open from the day the after-hours line moved here
+         * (2026-10-01). The whole record every time, like the two above.
+         */
+        noteCallerTranscript(this.deps.context.callSid, this.transcriptLog.lines);
       },
       onError: (err) => this.handleSessionFailure(err),
       onClosed: () => this.handleSessionClosed(),

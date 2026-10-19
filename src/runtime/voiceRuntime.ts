@@ -69,6 +69,7 @@ import {
   TRANSFER_STATUS_PATH,
 } from "./runtimeTransfer";
 import { releaseCallHandoff } from "../tools/handoffBroker";
+import { releaseCallerSpeech } from "../services/symptomCorroboration";
 import {
   greetingStyleFor,
   missingMandatoryCopy,
@@ -1363,6 +1364,9 @@ export function mountVoiceRuntime(
             // with the call — an entry outliving its call would let a later
             // call's tool dial a dead leg.
             releaseCallHandoff(entry.callSid);
+            // The caller's words the escalation gate reads die with the call
+            // too (v99: the bridge now feeds them on this pipeline).
+            releaseCallerSpeech(entry.callSid);
             // The call is over, whatever ended it: any office leg still
             // ringing for this caller is abandoned NOW, not after the
             // accept window — the staffer must not keep ringing toward,

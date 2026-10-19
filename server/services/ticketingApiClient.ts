@@ -1,7 +1,7 @@
 import { getEnvironmentConfig } from '../../src/config/environment';
 import { shadowTap } from '../../src/shadow/tap'; // observation-only tap; no-op unless SHADOW_MODE_ENABLED
 import { isNoTicketError } from './ticketingSyncPolicy';
-import type { PcpTicketPayload, PcpTicketResponse } from '../../src/pcp/pcpTicketing';
+import type { PcpTicketPayload, PcpTicketResponse, PcpWithdrawRequest, PcpWithdrawResponse } from '../../src/pcp/pcpTicketing';
 import { noteTicketFiled } from './ticketFilingPulse';
 
 export interface CallData {
@@ -1163,6 +1163,20 @@ export class TicketingApiClient {
       return response;
     } catch (error) {
       return { success: false, error: error instanceof Error ? error.message : 'pcp_ticket_request_failed' };
+    }
+  }
+
+  /**
+   * Ask the ticketing app to withdraw this call's PCP tickets that name no
+   * patient — the caller hung up, or the PCP queue answered (operator,
+   * 2026-10-19). The app decides which tickets go from its own rows; this only
+   * says the call ended that way. Never throws.
+   */
+  async withdrawPcpTickets(params: PcpWithdrawRequest): Promise<PcpWithdrawResponse> {
+    try {
+      return await this.makeRequest<PcpWithdrawResponse>('/api/voice-agent/pcp-ticket/withdraw', 'POST', params, 10_000, true);
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'pcp_withdraw_request_failed' };
     }
   }
 

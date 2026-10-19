@@ -91,7 +91,7 @@ export interface LaneConfig {
   greeting?: string;
   /** The lane's teardown filer (PCP's floor), from the same module as
    * `factory`. See src/runtime/pcpFloor.ts. */
-  teardownSweep?: (callId: string) => Promise<void>;
+  teardownSweep?: (callId: string, ctx?: { outcome?: string }) => Promise<void>;
 }
 
 /**

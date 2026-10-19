@@ -722,8 +722,33 @@ import { callEnvironment } from "./callRecord";
  * `src/agents/theFilingLineIsNotAStageDirection.test.ts`,
  * `src/runtime/laneRoster.test.ts`.
  */
+/**
+ * v99 — THE CALLER SAYS THEY ARE A PROVIDER, OR THE AFTER-HOURS LINE DOES NOT
+ * RING FOR ONE (2026-10-19). Operator: "no escalation unless the caller
+ * themselves said they are a provider." The gate's provider case took the
+ * agent's word for it, so a caller who said only "Operator." connected to the
+ * on-call phone (CA4079341a0d7e7cbbc9daf36da56bb7c0) and patients asking for
+ * their own doctor by name rang through as "clinician calls". The provider
+ * case now needs the caller's own self-identification, and the runtime now
+ * FEEDS the caller's words to the gate: only the old core did, so from
+ * 2026-10-01 the symptom check that refuses invented symptoms was inert too.
+ * `src/services/providerMustSayItThemselves.test.ts`,
+ * `src/agents/noIvrProviderMustSayIt.test.ts`.
+ */
+/**
+ * v100 — A PCP CALLER WHO LEAVES GETS NO TICKET (2026-10-19). Operator: "any
+ * caller that hangs up will not get their ticket submitted, plain and simple"
+ * — and a caller transferred to the queue leaves none that names no patient.
+ * The teardown floor files nothing on a hang-up or a transfer (it still files
+ * when the call ended on our side); on a hang-up, and when the queue answers
+ * or the caller leaves it while it rings, the ticketing app is asked to
+ * withdraw the call's PCP Support tickets that name no patient and nobody has
+ * touched (`/api/voice-agent/pcp-ticket/withdraw`, ticketing-app). 2026-10-12..16:
+ * 110 of 147 agent tickets on hung-up PCP calls named no patient.
+ * `src/pcp/aCallerWhoLeavesGetsNoTicket.test.ts`, `src/pcp/queueIsAChoice.test.ts`.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v98-one-ticket-per-patient-20261016";
+  "voice-runtime-v100-a-caller-who-leaves-gets-no-ticket-20261019";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can
