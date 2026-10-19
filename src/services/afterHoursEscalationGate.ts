@@ -338,7 +338,7 @@ export function judgeEscalation(req: EscalationRequest): EscalationVerdict {
   // REFUSAL 3 — the agent called this a provider call and the caller never
   // said so. Last, so an emergency the caller described still rings above,
   // and never when the reason describes a symptom (see REASON_SYMPTOM).
-  if (providerUnstated && !REASON_SYMPTOM.test(text.replace(/azul vision/g, ' '))) {
+  if (providerUnstated && !REASON_SYMPTOM.test(text)) {
     return {
       allowed: false,
       code: 'provider_not_stated_by_caller',

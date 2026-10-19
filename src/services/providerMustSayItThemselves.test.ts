@@ -189,6 +189,15 @@ describe('the runtime feeds the ledger the gate reads', () => {
     expect(corroborate(CALL, '').haveSpeech).toBe(false);
   });
 
+  it('holds at most 500 calls, dropping the oldest, so a call nobody released cannot grow it for ever', () => {
+    const sid = (i: number) => `CA${i.toString(16).padStart(32, '0')}`;
+    for (let i = 1; i <= 501; i++) noteCallerTranscript(sid(i), ['CALLER: Operator.']);
+    expect(callerSaid(sid(1))).toBe('');
+    expect(callerSaid(sid(2))).toBe('operator.');
+    expect(callerSaid(sid(501))).toBe('operator.');
+    for (let i = 1; i <= 501; i++) releaseCallerSpeech(sid(i));
+  });
+
   const read = (p: string) => readFileSync(join(__dirname, '..', p), 'utf8');
 
   it('the bridge posts the record from the same seam as the date of birth and the patient status', () => {
