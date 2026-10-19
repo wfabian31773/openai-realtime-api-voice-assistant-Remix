@@ -70,6 +70,12 @@ describe('a caller who says who they are is a provider', () => {
     "I'm Dr. Kim's nurse.",
     "I'm Doctor Patel's MA, calling about a patient.",
     "This is Dr. Lee's surgical coordinator.",
+    // A leading English "no" is an interjection, answering "are you the
+    // patient?" — not a denial of what follows, comma or no comma.
+    'No this is the ER at Huntington.',
+    "No I'm Dr. Lee from the emergency room.",
+    "No I'm calling from Kaiser hospital about a patient.",
+    "No, I'm calling from Kaiser hospital about a patient.",
     // Review r2 P2, #353: the bare answer to refusal 3's own question.
     'Yes, Pomona Valley Hospital.',
     "Dr. Lee's office.",
@@ -121,6 +127,13 @@ describe('asking for a doctor, an operator or a page is not saying you are one',
     "I'm the doctor's patient.",
     'I am a resident of Covina.',
     'I have been a patient there for years.',
+    // A denied self-identification is not one (the negation guard, #353).
+    "I'm not calling from a hospital.",
+    'No llamo de una clínica, soy paciente.',
+    'This is not the hospital, right?',
+    "No I'm not calling from a hospital.",
+    'No soy la doctora, soy la paciente.',
+    'No tengo un paciente, yo soy el paciente.',
     'We have a patient appointment tomorrow.',
     // Review r2 P2, #353: still patients once office staff count.
     "I'm Dr. Shah's wife.",
@@ -310,6 +323,15 @@ describe('a turn that answers refusal 3 names a facility anywhere in it (review 
     'At the hospital.',
     'Cedars-Sinai.',
     'No, I just need my doctor.',
+    // A patient's NO to the question still names the facility it denies; each
+    // of these rang the on-call phone before the denial guard.
+    "No, I'm not calling from a hospital.",
+    "No, I'm a patient of the Pasadena clinic.",
+    "No, not a clinic, I'm a patient.",
+    "No, it's not a hospital.",
+    'Nope, not a hospital.',
+    "I'm not from a doctor's office.",
+    'No soy de una clínica, soy paciente.',
   ];
   for (const t of NOT_ANSWERS) it(`does not count: ${t}`, () => expect(answered(t)).toBe(false));
 

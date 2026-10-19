@@ -373,10 +373,22 @@ const SOMEONE_AT_A_FACILITY = new RegExp(
 );
 const BARE_AT_A_FACILITY = new RegExp(String.raw`^(?:at|in|en|al) (?:the |el |la )?${ANY_FACILITY}[\s.,!?]*$`);
 const ASKS_BACK = /^(?:is|are|was|do|does|can|could|es|est[aá])\b[^?]*\?/;
+/**
+ * A NO IS NOT A YES. The question is a yes-or-no question, and a patient's
+ * answer to it names the facility while denying it: "No, I'm not calling from
+ * a hospital", "No, I'm a patient of the Pasadena clinic", "Nope, not a
+ * hospital", "No soy de una clínica, soy paciente". Read as a facility
+ * answer, each of those rang the on-call phone for a patient — the ruling
+ * this window exists to serve, reversed. Any negator in the turn refuses it:
+ * a provider answering the question does not say no, and one who somehow
+ * does is asked again or taken as a message, the ruling's safe direction.
+ */
+const DENIES = /(?:^|[^a-z])(?:no|nope|nah|not|never|neither|none|nunca|tampoco|ni)(?![a-z])|n't(?![a-z])/;
 
 function answerNamesAFacility(turn: string): boolean {
   const text = normaliseAnswer(turn);
   if (!FACILITY_ANYWHERE.test(text)) return false;
+  if (DENIES.test(text)) return false;
   if (ASKS_BACK.test(text) || BARE_AT_A_FACILITY.test(text) || SOMEONE_AT_A_FACILITY.test(text)) return false;
   return true;
 }
@@ -436,7 +448,33 @@ const PROVIDER_SELF_IDENTIFICATION: RegExp[] = [
 export function callerSaysTheyAreAProvider(spoken: string | readonly string[]): boolean {
   const turns = typeof spoken === 'string' ? [spoken ?? ''] : spoken;
   const text = ` ${turns.join(' ').toLowerCase().replace(/[’‘]/g, "'").replace(/\s+/g, ' ')} `;
-  return PROVIDER_SELF_IDENTIFICATION.some((re) => re.test(text)) || turns.some(answersWithAFacility);
+  return PROVIDER_SELF_IDENTIFICATION.some((re) => affirmed(text, re)) || turns.some(answersWithAFacility);
+}
+
+/**
+ * A self-identification the caller DENIED is not one. "I'm not calling from a
+ * hospital", "no llamo de una clínica" and "this is not the hospital" all
+ * contain a pattern above, and each is a patient answering refusal 3's
+ * question — read as a provider, the on-call phone rang for them. A match is
+ * refused when a negator sits inside it or straight before it (one word may
+ * come between: "not really calling from").
+ *
+ * "NO" IS A NEGATOR ONLY IN SPANISH. In English it opens a sentence as an
+ * interjection — "No this is the ER at Huntington", "No it's Dr. Lee from the
+ * emergency room", answering "are you the patient?" — and refusing those turned
+ * a real clinician away, comma or no comma. In Spanish it negates the verb
+ * straight after it ("no llamo de", "no soy", "no tengo"), so it counts there
+ * and only there.
+ */
+const NEGATED_BEFORE = /(?:^|[^a-z])(?:not|never|n't)\s+(?:[a-z']+\s+)?$/;
+const SPANISH_VERB_FIRST = /^(?:soy|llamo|hablo|estoy|le |llamamos|hablamos|tengo)\b/;
+const NO_STRAIGHT_BEFORE = /(?:^|[^a-z])no\s+$/;
+function affirmed(text: string, re: RegExp): boolean {
+  const m = re.exec(text);
+  if (!m) return false;
+  const before = text.slice(Math.max(0, m.index - 24), m.index);
+  if (DENIES.test(m[0]) || NEGATED_BEFORE.test(before)) return false;
+  return !(SPANISH_VERB_FIRST.test(m[0]) && NO_STRAIGHT_BEFORE.test(before));
 }
 
 /**
