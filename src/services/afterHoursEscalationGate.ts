@@ -167,19 +167,6 @@ const ADMINISTRATIVE_SUBJECTS = [
 const SYMPTOM_PATTERN =
   /\b(pain|painful|hurt|hurts|hurting|ache|aching|sore|red|redness|swollen|swelling|vision|blur|blurry|blurred|see|seeing|sight|light|flash|flashes|floater|floaters|curtain|shadow|discharge|pus|bleed|bleeding|blood|pressure|itch|itchy|burning|watering|nausea|vomit|fever|dolor|duele|rojo|roja|hinchad\w*|vision|borros\w*|sangr\w*|veo|ver)\b/;
 
-/**
- * ANY SYMPTOM IN THE REASON, for the unstated-provider refusal only. A reason
- * that describes a symptom is judged as a patient call, the way it was before
- * the 2026-10-19 ruling, so the refusal can never catch a caller who is
- * describing an emergency in words the acute lists above happen to miss
- * ("extreme pain after surgery today" is in neither). Narrower than
- * SYMPTOM_PATTERN on purpose: "see" and "vision" would match "wants to see
- * Doctor Shah" and "calling from Azul Vision", which are exactly the calls
- * this refusal exists for.
- */
-const REASON_SYMPTOM =
-  /\b(pain|painful|hurt|hurts|hurting|ache|aching|sore|red|redness|swollen|swelling|blur|blurry|blurred|flash|flashes|floaters?|curtain|shadow|discharge|pus|bleed|bleeding|blood|pressure|itch|itchy|burning|watering|nausea|vomit\w*|fever|injur\w*|trauma|chemical|can'?t see|cannot see|vision (?:loss|change|changes|problem|problems)|lost (?:his |her |my |their )?(?:vision|sight)|dolor|duele|rojo|roja|hinchad\w*|sangr\w*)\b/;
-
 const norm = (s?: string) => ` ${(s ?? '').toLowerCase().replace(/\s+/g, ' ')} `;
 const hits = (haystack: string, needles: string[]) => needles.some((n) => haystack.includes(n));
 
@@ -337,8 +324,12 @@ export function judgeEscalation(req: EscalationRequest): EscalationVerdict {
 
   // REFUSAL 3 — the agent called this a provider call and the caller never
   // said so. Last, so an emergency the caller described still rings above,
-  // and never when the reason describes a symptom (see REASON_SYMPTOM).
-  if (providerUnstated && !REASON_SYMPTOM.test(text)) {
+  // and never when the CALLER described a symptom (see symptomStated). The
+  // reason is the model's sentence, so a symptom in it proves nothing: a
+  // model that writes "redness" into the reason of a caller who said only
+  // "Operator." would otherwise skip this refusal and ring through
+  // default-open (Codex P1, #353).
+  if (providerUnstated && !corrForProvider?.symptomStated) {
     return {
       allowed: false,
       code: 'provider_not_stated_by_caller',

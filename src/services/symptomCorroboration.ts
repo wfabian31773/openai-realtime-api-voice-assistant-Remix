@@ -139,7 +139,32 @@ export interface CorroborationResult {
    * callerSaysTheyAreAProvider. False whenever haveSpeech is false.
    */
   providerStated: boolean;
+  /**
+   * The caller described a symptom in their own words (CALLER_SYMPTOM). The
+   * unstated-provider refusal steps aside for this and only this — never for a
+   * symptom the model wrote into its reason. False whenever haveSpeech is false.
+   */
+  symptomStated: boolean;
 }
+
+/**
+ * ANY SYMPTOM IN THE CALLER'S OWN WORDS, for the gate's unstated-provider
+ * refusal only. A caller who describes a symptom is judged as a patient call,
+ * the way it was before the 2026-10-19 ruling, so the refusal can never catch
+ * somebody describing an emergency in words the gate's acute lists happen to
+ * miss ("he had surgery today and he is in extreme pain").
+ *
+ * It reads the CALLER, not the reason. It first read the reason, and the
+ * reason is the model's sentence: a model that wrote "redness" into the reason
+ * of a caller who said only "Operator." skipped the refusal and rang through
+ * default-open (Codex P1, #353).
+ *
+ * Narrower than the gate's SYMPTOM_PATTERN on purpose: "see" and "vision"
+ * would match "can you speak to Doctor Shah, I want to see him" and "Azul
+ * Vision", which are exactly the calls the refusal exists for.
+ */
+export const CALLER_SYMPTOM =
+  /\b(pain|painful|hurt|hurts|hurting|ache|aching|sore|red|redness|swollen|swelling|blur|blurry|blurred|flash|flashes|floaters?|curtain|shadow|discharge|pus|bleed|bleeding|blood|pressure|itch|itchy|burning|watering|nausea|vomit\w*|fever|injur\w*|trauma|chemical|can'?t see|cannot see|vision (?:loss|change|changes|problem|problems)|lost (?:his |her |my |their )?(?:vision|sight)|dolor|duele|rojo|roja|hinchad\w*|sangr\w*)\b/;
 
 /**
  * WHO IS CALLING, IN THE CALLER'S OWN WORDS.
@@ -228,6 +253,7 @@ export function corroborate(callId: string | undefined, claimText: string): Corr
     supported: [],
     haveSpeech: Boolean(spoken.trim()),
     providerStated: callerSaysTheyAreAProvider(spoken),
+    symptomStated: CALLER_SYMPTOM.test(spoken.toLowerCase().replace(/[’‘]/g, "'")),
   };
 
   // No record of caller speech — a transcription gap, a very short call, or a

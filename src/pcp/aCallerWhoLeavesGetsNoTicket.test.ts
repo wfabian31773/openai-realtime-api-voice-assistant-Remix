@@ -18,8 +18,9 @@
  * Pinned here, in the order a call ends:
  *   1. the floor files nothing on a hang-up or a transfer, and still files on
  *      an ending WE caused, and on the old core (no context) exactly as before;
- *   2. a hang-up after the call filed asks the ticketing app to withdraw — the
- *      app keeps anything that names a patient (its own test file pins that);
+ *   2. every hang-up asks the ticketing app to withdraw — the app keeps
+ *      anything that names a patient (its own test file pins that), and a
+ *      filing whose response never arrived may still have committed there;
  *   3. a transfer does not withdraw at teardown: the queue is still ringing;
  *   4. a withdrawal that fails costs nothing but the withdrawal;
  *   5. what counts as naming a patient, on this side, for the spoken warning.
@@ -94,7 +95,10 @@ describe('1 — the floor files nothing behind a caller who left', () => {
     await call(agent, 'record_pcp_intake', INTAKE);
     await endedWith(callId, 'caller_hangup');
     expect(ticketing.createPcpTicket, '"any caller that hangs up will not get their ticket submitted"').not.toHaveBeenCalled();
-    expect(ticketing.withdrawPcpTickets, 'nothing was filed, so there is nothing to withdraw').not.toHaveBeenCalled();
+    expect(
+      ticketing.withdrawPcpTickets,
+      'the app is asked anyway: it decides from its own rows, and has nothing to do on a call with no ticket',
+    ).toHaveBeenCalledWith({ callSid: callId, reason: 'caller_hung_up' });
   });
 
   it('a call that went to the queue gets no "caller hung up" ticket behind it', async () => {
@@ -147,6 +151,21 @@ describe('2 — a hang-up after the call filed puts the filing up for withdrawal
 
     await endedWith(callId, 'caller_hangup');
     expect(ticketing.createPcpTicket).not.toHaveBeenCalled();
+    expect(ticketing.withdrawPcpTickets).toHaveBeenCalledWith({ callSid: callId, reason: 'caller_hung_up' });
+  });
+
+  it('a filing whose response never came back is still put up for withdrawal (Codex P2, #353)', async () => {
+    // The POST can commit on the app while the agent sees a timeout, so
+    // nothing on this side records the filing. Asking only when this side
+    // believes it filed would leave that ticket standing.
+    ticketing.createPcpTicket.mockImplementationOnce(async () => ({ success: false, error: 'timeout' }) as never);
+    const { agent, callId } = freshCall();
+    await call(agent, 'record_pcp_intake', INTAKE);
+    await call(agent, 'create_pcp_task', { narrative: 'Coordinator wants to speak with someone about a referral.' });
+    ticketing.createPcpTicket.mockClear();
+
+    await endedWith(callId, 'caller_hangup');
+    expect(ticketing.createPcpTicket, 'and nothing new is filed behind the caller').not.toHaveBeenCalled();
     expect(ticketing.withdrawPcpTickets).toHaveBeenCalledWith({ callSid: callId, reason: 'caller_hung_up' });
   });
 

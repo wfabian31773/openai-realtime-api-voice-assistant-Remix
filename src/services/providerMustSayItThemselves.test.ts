@@ -146,6 +146,37 @@ describe('the gate', () => {
     expect(v.allowed).toBe(true);
   });
 
+  it('a symptom only the MODEL wrote does not lift the refusal (Codex P1, #353)', () => {
+    // The caller said one word. The reason carries "redness" and "swelling",
+    // which corroborate() does not check (it checks pain and vision) — so
+    // reading the symptom off the reason rang this through default-open.
+    const v = judgeEscalation({
+      callerType: 'healthcare_provider',
+      reason: 'Clinician caller reports patient eye redness and swelling, requests on-call doctor',
+      corroboration: corr('Operator.'),
+    });
+    expect(v).toMatchObject({ allowed: false, code: 'provider_not_stated_by_caller' });
+  });
+
+  it('a symptom the CALLER described still lifts it, in either language', () => {
+    for (const spoken of ['My eye is red and swollen, I need the doctor.', 'Me duele mucho el ojo, necesito al doctor.']) {
+      const v = judgeEscalation({
+        callerType: 'healthcare_provider',
+        reason: 'Caller requests the on-call doctor',
+        corroboration: corr(spoken),
+      });
+      expect(v.allowed, spoken).toBe(true);
+    }
+  });
+
+  it('symptomStated reads the caller, never the claim, and is false with no speech', () => {
+    expect(corr('Operator.', 'redness and swelling').symptomStated).toBe(false);
+    expect(corr('my eye is red').symptomStated).toBe(true);
+    expect(corr("I can’t see out of it").symptomStated, 'a curly apostrophe still reads').toBe(true);
+    expect(corr('', 'redness').symptomStated).toBe(false);
+    expect(corr('Quiero hablar con alguien de la oficina de Azul Visión.').symptomStated, 'the brand').toBe(false);
+  });
+
   it('the brand name is not a symptom: "calling from Azul Vision" is still refused', () => {
     const v = judgeEscalation({
       callerType: 'healthcare_provider',

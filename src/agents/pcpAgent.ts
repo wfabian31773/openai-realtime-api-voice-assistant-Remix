@@ -3028,12 +3028,13 @@ export async function sweepPcpUnfiledCall(callId: string, ctx: PcpTeardownContex
      * recorded". The dial result decides — see `onBlindDialSettled`.
      */
     if (ctx.outcome === 'caller_hangup' || ctx.outcome === 'transferred') {
-      const filedSomething =
-        Boolean(state.ticketFiled) ||
-        (state.ticketsFiled?.length ?? 0) > 0 ||
-        state.dispositionRecorded === 'CREATE_TASK' ||
-        state.dispositionRecorded === 'HAND_OFF';
-      if (ctx.outcome === 'caller_hangup' && filedSomething) {
+      // EVERY hang-up asks, not only one this side believes filed. A filing
+      // whose response timed out or dropped can still have committed on the
+      // app, and the director never learns of it — so the empty ticket this
+      // exists to remove would survive on exactly that call (Codex P2, #353).
+      // The app decides from its own rows and answers a call with no ticket
+      // with nothing to do, so asking costs one request per hang-up.
+      if (ctx.outcome === 'caller_hangup') {
         await submitPcpWithdrawal(callId, 'caller_hung_up');
       }
       console.info(`[PCP] SWEEP: ${callId} ended ${ctx.outcome} — nothing filed after the caller left, by ruling`);
