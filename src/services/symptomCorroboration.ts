@@ -332,7 +332,7 @@ const OFFICE_STAFF =
  * hospital yesterday" do not.
  */
 const NAME_TOKEN =
-  String.raw`(?!(?:i|i'?m|he|he'?s|she|she'?s|we|they|my|his|her|our|their|is|was|were|are|am|be|been|in|at|to|on|of|for|went|go|going|this|that|it|it'?s|a|an|and|but|not|no|bill|bills|billing|records?|visit|stay|yesterday|today|tonight|tomorrow|last|ago|there|here|mi|su|en|es|esta|está|estoy|ayer|hoy)(?![a-z0-9'&-]))[a-z0-9'&.-]+`;
+  String.raw`(?!(?:i|i'?m|he|he'?s|she|she'?s|we|they|my|his|her|our|their|is|was|were|are|am|be|been|in|at|to|on|of|for|from|about|with|went|go|going|this|that|it|it'?s|a|an|and|but|not|no|bill|bills|billing|records?|visit|stay|yesterday|today|tonight|tomorrow|last|ago|there|here|mi|su|en|es|esta|está|estoy|ayer|hoy)(?![a-z0-9'&-]))[a-z0-9'&.-]+`;
 const NAME_WORD = String.raw`${NAME_TOKEN} `;
 const ANY_FACILITY = String.raw`(?:${FACILITY}|cl[ií]nica|consultorio|sala de emergencias?)(?![a-z])`;
 /**
@@ -383,11 +383,31 @@ function normaliseAnswer(line: string): string {
  * "Dr. Lee's office." with no "please" still counts.
  */
 const REFUSAL_OPENER = /^(?:no|nope|nah|not)(?![a-z])/;
+/**
+ * Review r5 P2 (#353): a want is read only from the words that GOVERN the
+ * facility (the governor, an article, at most three name words straight
+ * before it), never from the rest of its sentence. "Yes, calling about a
+ * patient from Kaiser Fontana ER." governs the ER with "from", so it answers;
+ * "I need Dr. Shah's office" and "I want the Covina clinic" still want it.
+ * "calling for" is staff speaking for their doctor ("I'm calling for Dr. Lee's
+ * office"), so like "work for" it is not a want.
+ */
 const WANTS_IT = new RegExp(
-  String.raw`\b(?:want|wanna|need|looking for|trying to (?:reach|get)|speak (?:to|with)|talk (?:to|with)|` +
-    String.raw`patient (?:of|at|with)|about|soy paciente|quiero|necesito|busco)\b|(?<!\bwork |\bworks |\bworking )\bfor\b`,
+  String.raw`(?:^|[^a-z])(?:want|wanna|need|looking for|trying to (?:reach|get)|speak (?:to|with)|talk (?:to|with)|` +
+    String.raw`patient (?:of|at|with)|about|soy paciente(?: de| del)?|quiero|necesito|busco|` +
+    String.raw`(?<!\b(?:work|works|working|calling) )for)` +
+    String.raw`(?: (?:the|a|an|to|el|la|un|una|al|del|de))?(?: ${NAME_TOKEN}){0,3}[\s,]*$`,
 );
-const ASKS_FOR_IT = /\bplease\b|\bpor favor\b/;
+/**
+ * "please" asks for something only when it is all the turn adds to a bare
+ * facility ("Doctor Shah's office, please."). "Yes, Pomona Valley Hospital ER,
+ * please have the on-call call me back." answers, then asks (review r5 P2).
+ */
+const PLEASE_AROUND = /^(?:please|por favor),?\s+|,?\s*(?:please|por favor)[\s.!]*$/;
+function asksForItAlone(text: string): boolean {
+  const bare = text.replace(PLEASE_AROUND, '').trim();
+  return bare !== text && BARE_FACILITY_ANSWER.test(bare);
+}
 /** A sentence end that is not an abbreviation's dot ("Dr.", "St."). */
 const SENTENCE_END = /(?<!\b(?:dr|st|mr|mrs|ms|mt|jr|sr))[.?!]\s/g;
 
@@ -406,14 +426,15 @@ function clauseThrough(text: string, start: number, end: number): string {
  * whatever follows.
  */
 function deniesOrWantsTheFacility(text: string, start: number, end: number): boolean {
-  if (REFUSAL_OPENER.test(text) || ASKS_FOR_IT.test(text)) return true;
-  const clause = clauseThrough(text, start, end);
-  return DENIES.test(clause) || WANTS_IT.test(clause);
+  if (REFUSAL_OPENER.test(text) || asksForItAlone(text)) return true;
+  return DENIES.test(clauseThrough(text, start, end)) || WANTS_IT.test(clauseThrough(text, start, start));
 }
 
 function answersWithAFacility(line: string): boolean {
   const text = normaliseAnswer(line);
-  return BARE_FACILITY_ANSWER.test(text) && !deniesOrWantsTheFacility(text, text.length, text.length);
+  if (!BARE_FACILITY_ANSWER.test(text)) return false;
+  const hit = FACILITY_ANYWHERE.exec(text);
+  return !deniesOrWantsTheFacility(text, hit?.index ?? text.length, text.length);
 }
 
 /**
@@ -472,14 +493,14 @@ const PROVIDER_SELF_IDENTIFICATION: RegExp[] = [
   // "calling from St. Joe's emergency room", "speaking on behalf of a clinic"
   new RegExp(
     String.raw`\b(?:calling|speaking|reaching out)\s+(?:from|with|on behalf of)\s+(?:the |a |an |our )?` +
-      String.raw`(?:[a-z0-9'&.-]+ ){0,5}?${FACILITY}(?![a-z])`,
+      String.raw`(?:${NAME_WORD}){0,5}?${FACILITY}(?![a-z])`,
   ),
   // "this is the emergency room", "this is St. Joe's hospital"
-  new RegExp(String.raw`\bthis is (?:the |a |an )?(?:[a-z0-9'&.-]+ ){0,4}?${FACILITY}(?![a-z])`),
+  new RegExp(String.raw`\bthis is (?:the |a |an )?(?:${NAME_WORD}){0,4}?${FACILITY}(?![a-z])`),
   // "the emergency room at Huntington calling"
   new RegExp(String.raw`${FACILITY}(?![a-z])(?: [a-z0-9'&.-]+){0,3} calling\b`),
   // "I'm with the ER", "we're from the clinic"
-  new RegExp(String.raw`\b(?:i'?m|i am|we'?re|we are) (?:from|with) (?:the |a |an )?(?:[a-z0-9'&.-]+ ){0,5}?${FACILITY}(?![a-z])`),
+  new RegExp(String.raw`\b(?:i'?m|i am|we'?re|we are) (?:from|with) (?:the |a |an )?(?:${NAME_WORD}){0,5}?${FACILITY}(?![a-z])`),
   // "calling on behalf of Dr. Smith"
   /\bon behalf of (?:dr\.?|doctor) [a-z]/,
   // "our mutual patient", "I have a post-operative patient", "the patient is on our ER"

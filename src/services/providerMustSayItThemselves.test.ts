@@ -92,6 +92,11 @@ describe('a caller who says who they are is a provider', () => {
     "Yeah, it's Kaiser hospital.",
     'Yes, I’m calling from Pomona Valley Hospital',
     'Sí, del Hospital General.',
+    // Review r5 P2 (#353): kept true once the gap words exclude pronouns.
+    "I'm calling from St. Joe's emergency room.",
+    'Calling from Pomona Valley Hospital ER.',
+    'This is the emergency room at Westside Memorial calling about a patient.',
+    "I'm with Kaiser Fontana ER.",
   ];
   for (const t of PROVIDERS) it(t, () => expect(callerSaysTheyAreAProvider(t)).toBe(true));
 });
@@ -160,6 +165,12 @@ describe('asking for a doctor, an operator or a page is not saying you are one',
     'Need Dr. Shah’s office.',
     'No, no llamo de un hospital.',
     "I'm not calling from a doctor's office, I need Dr. Shah",
+    // Review r5 P2, #353: a relative AT a facility is not calling FROM it.
+    "I'm with my mom at the ER, they told me to call the eye doctor.",
+    "I'm calling from my husband's room at Kaiser hospital.",
+    "I'm here with my son at the emergency room.",
+    'Estoy con mi mamá en el hospital.',
+    "I'm calling from my dad's room at Cedars hospital.",
   ];
   for (const t of PATIENTS) it(t, () => expect(callerSaysTheyAreAProvider(t)).toBe(false));
 });
@@ -319,6 +330,12 @@ describe('a turn that answers refusal 3 names a facility anywhere in it (review 
     'Sí, del Hospital General.',
     'Uh, yeah, we are over at the Kaiser hospital in Fontana, the main one.',
     'Yes, it is the Pomona Valley hospital emergency department, I am the charge person.',
+    // Review r5 P2, #353: a request after the answer, and a want read only
+    // from the words governing the facility.
+    'Yes, Pomona Valley Hospital ER, please have the on-call call me back.',
+    'Sí, del Hospital General, por favor comuníqueme con el doctor de guardia.',
+    'Yes, calling about a patient from Kaiser Fontana ER.',
+    "I'm calling for Dr. Lee's office.",
   ];
   for (const t of ANSWERS) it(`counts: ${t}`, () => expect(answered(t)).toBe(true));
 
@@ -351,6 +368,11 @@ describe('a turn that answers refusal 3 names a facility anywhere in it (review 
     'No, no llamo de un hospital.',
     "I'm not calling from a doctor's office, I need Dr. Shah",
     'I need to talk to the hospital about my bill.',
+    "I need Dr. Shah's office.",
+    'I want the Covina clinic.',
+    'Please, Doctor Shah’s office.',
+    "I'm with my mom at the ER, they told me to call the eye doctor.",
+    "I'm calling from my dad's room at Cedars hospital.",
   ];
   for (const t of NOT_ANSWERS) it(`does not count: ${t}`, () => expect(answered(t)).toBe(false));
 
