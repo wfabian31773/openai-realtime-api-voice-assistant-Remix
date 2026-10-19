@@ -414,12 +414,24 @@ const WANTS_IT = new RegExp(
  * "about" is not a want here: "calling about a patient from Kaiser Fontana ER"
  * is a provider's answer. A provider who says where they are calling from is
  * also read by the self-identification patterns, which this does not touch.
+ * "like", "talk", "speak" and "hablar" are wants too ("I'd like to talk to
+ * somebody from the Covina clinic", review r6 P2).
  */
 const WANTS_FROM_IT = new RegExp(
-  String.raw`(?:(?:^|[^a-z])(?:want|wanna|need|needs|looking for|trying to (?:reach|get)|quiero|necesito|busco)(?: [a-z'\u00e0-\u00ff-]+){1,3} (?:from|de|del|desde)` +
+  String.raw`(?:(?:^|[^a-z])(?:want|wanna|need|needs|like|talk|speak|looking for|trying to (?:reach|get)|quiero|necesito|busco|hablar)(?: [a-z'\u00e0-\u00ff-]+){1,3} (?:from|de|del|desde)` +
     String.raw`|(?:^|[^a-z])me(?: [a-z'-]+){0,2} from|(?:^|[^a-z])by)` +
     String.raw`(?: (?:the|a|an|el|la|un|una))?(?: ${NAME_TOKEN}){0,3}[\s,]*$`,
 );
+/**
+ * Review r6 P2 (#353): two more shapes are not an answer, whatever governs the
+ * facility:
+ * - a first-person possessive straight before it ("I just want MY doctor's
+ *   office to call me back", "quiero que me llame mi clínica"); a provider
+ *   says "our" or "the";
+ * - "calling for my husband / mi esposo …": a relative, not a provider.
+ */
+const MY_FACILITY = new RegExp(String.raw`(?:^|[^a-z])(?:my|mi|mis)(?: ${NAME_TOKEN}){0,2}[\s,]*$`);
+const CALLING_FOR_A_RELATIVE = new RegExp(String.raw`\bcalling for (?:my|mi) ${NOT_THEIR_PROVIDER}`);
 /**
  * "please" asks for something only when it is all the turn adds to a bare
  * facility ("Doctor Shah's office, please."). "Yes, Pomona Valley Hospital ER,
@@ -449,8 +461,15 @@ function clauseThrough(text: string, start: number, end: number): string {
  */
 function deniesOrWantsTheFacility(text: string, start: number, end: number): boolean {
   if (REFUSAL_OPENER.test(text) || asksForItAlone(text)) return true;
+  const clause = clauseThrough(text, start, end);
   const governing = clauseThrough(text, start, start);
-  return DENIES.test(clauseThrough(text, start, end)) || WANTS_IT.test(governing) || WANTS_FROM_IT.test(governing);
+  return (
+    DENIES.test(clause) ||
+    CALLING_FOR_A_RELATIVE.test(clause) ||
+    WANTS_IT.test(governing) ||
+    WANTS_FROM_IT.test(governing) ||
+    MY_FACILITY.test(governing)
+  );
 }
 
 function answersWithAFacility(line: string): boolean {

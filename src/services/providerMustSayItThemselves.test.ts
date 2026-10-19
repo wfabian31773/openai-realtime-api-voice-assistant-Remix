@@ -344,6 +344,11 @@ describe('a turn that answers refusal 3 names a facility anywhere in it (review 
     // The want-from reading ends AT the facility: an earlier want in the
     // sentence does not reach a facility named after it.
     'We need a call back from the on-call doc, Kaiser hospital ER.',
+    // Review r6 P2, #353: the r6 guards must not cost these.
+    'Yes, Pomona Valley Hospital.',
+    'This is the emergency room at Westside Memorial calling about a patient',
+    'No, this is the ER at Huntington',
+    "We're calling from our clinic, the Covina Medical Group",
   ];
   for (const t of ANSWERS) it(`counts: ${t}`, () => expect(answered(t)).toBe(true));
 
@@ -390,6 +395,14 @@ describe('a turn that answers refusal 3 names a facility anywhere in it (review 
     'They discharged me from the ER at Kaiser.',
     'I was told to call by the Covina clinic.',
     'Necesito que alguien de la clínica me llame.',
+    // Review r6 P2, #353: a want r5's narrowing let through — a possessive
+    // before the facility, or a want of someone FROM it — and a relative.
+    "I just want my doctor's office to call me back.",
+    "I need a call back from my doctor's office.",
+    "I'm looking for my doctor's office.",
+    "I'd like to talk to somebody from the Covina clinic.",
+    "Yes, I'm calling for my husband from Kaiser hospital.",
+    'Quiero que me llame mi clínica.',
   ];
   for (const t of NOT_ANSWERS) it(`does not count: ${t}`, () => expect(answered(t)).toBe(false));
 
