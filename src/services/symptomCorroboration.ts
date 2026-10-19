@@ -45,6 +45,15 @@ import { describesAcuteEvent } from './afterHoursEscalationGate';
 /** Caller utterances for a live call, lowercased, most recent last. */
 const callerSpeech = new Map<string, string[]>();
 
+/**
+ * Caller turns that ANSWER refusal 3's own question ("Are you calling from a
+ * doctor's office, a hospital or a clinic, and which one?"), lowercased. Only
+ * the runtime fills it, because only the runtime hands this module the agent's
+ * lines in order (noteCallerTranscript); the old core's feed is caller lines
+ * alone and keeps the anchored bare-answer reading.
+ */
+const providerAnswers = new Map<string, string[]>();
+
 /** Cap per call: a long call must not grow unbounded in memory. */
 const MAX_LINES = 400;
 
@@ -61,6 +70,7 @@ function store(callId: string, lines: string[]): void {
     const oldest = callerSpeech.keys().next().value;
     if (oldest === undefined) break;
     callerSpeech.delete(oldest);
+    providerAnswers.delete(oldest);
   }
 }
 
@@ -96,10 +106,40 @@ export function noteCallerTranscript(callId: string | undefined, lines: readonly
     .slice(-MAX_LINES);
   if (caller.length === 0) return;
   store(callId, caller);
+  const answers = answersToTheFacilityQuestion(lines);
+  if (answers.length > 0) providerAnswers.set(callId, answers);
+  else providerAnswers.delete(callId);
 }
 
 export function releaseCallerSpeech(callId: string | undefined): void {
-  if (callId) callerSpeech.delete(callId);
+  if (!callId) return;
+  callerSpeech.delete(callId);
+  providerAnswers.delete(callId);
+}
+
+/**
+ * The agent asking refusal 3's question, in the gate's words or close to them,
+ * in English or Spanish. It opens a window the way spokenDob's ask does.
+ */
+const FACILITY_QUESTION =
+  /calling from a doctor'?s office, a hospital or a clinic|which (?:office|hospital|clinic|facility) are you calling from|(?:llama|habla) (?:usted )?(?:de|desde) (?:un |una |el |la )?(?:consultorio|hospital|cl[ií]nica)/;
+
+/**
+ * The caller turns between an agent line asking the facility question and the
+ * next agent line. Exported for tests.
+ */
+export function answersToTheFacilityQuestion(lines: readonly string[]): string[] {
+  const out: string[] = [];
+  let open = false;
+  for (const line of lines) {
+    if (line.startsWith('AGENT:')) {
+      open = FACILITY_QUESTION.test(line.slice('AGENT:'.length).toLowerCase().replace(/[’‘]/g, "'"));
+    } else if (open && line.startsWith('CALLER:')) {
+      const turn = line.slice('CALLER:'.length).trim().toLowerCase();
+      if (turn) out.push(turn);
+    }
+  }
+  return out.slice(-MAX_LINES);
 }
 
 /** Everything the caller said on this call, joined. Empty when unknown. */
@@ -124,8 +164,9 @@ const CLAIM_EVIDENCE: Array<{ claim: RegExp; spoken: RegExp; label: string }> = 
     // And the words people use for pain without saying "pain": "my eye is
     // killing me", "it's agony", "it's stabbing", "the worst", "unbearable"
     // (review r2 P2, #353).
+    // "my head is pounding", "a headache", "it's on fire" (review r3 P3, #353).
     spoken:
-      /\bpain|\bhurt|\bach(e|es|ing|y)\b|\bsore\b|\bsting|\bburn|\bthrob|\bpressure\b|\bkill|\bagon|\bstab|\bsharp|\bsevere|\bworst|\bterrible|\bexcruciat|\bunbearab|\bdolor|\bduele|\barde|\bardor|\bmolest/,
+      /\bpain|\bhurt|\bach(e|es|ing|y)\b|\bsore\b|\bsting|\bburn|\bthrob|\bpressure\b|\bkill|\bagon|\bstab|\bsharp|\bsevere|\bworst|\bterrible|\bexcruciat|\bunbearab|\bpound|\bheadache|\bon fire\b|\bdolor|\bduele|\barde|\bardor|\bmolest/,
   },
   {
     label: 'vision change',
@@ -135,9 +176,10 @@ const CLAIM_EVIDENCE: Array<{ claim: RegExp; spoken: RegExp; label: string }> = 
     // their EYESIGHT (`sight` takes no leading \b so it matches inside it),
     // everything went black or dark, a curtain or a shadow came down, it's
     // gone, or "estoy ciego", "no veo", "perdí la vista", "se me nubló",
-    // "todo se puso negro" (review P1, #353).
+    // "todo se puso negro" (review P1, #353). And hazy, foggy, fuzzy, milky,
+    // wavy, distorted, it went white, halos (review r3 P3, #353).
     spoken:
-      /\bvision\b|\bsee\b|\bseeing\b|sight\b|\bblind|\bblurr?|\bcloudy\b|\bdouble\b|\bdark|\bblack|\bcurtain|\bshadow|\bveil\b|\bgone\b|\bspots?\b|\bfloaters?\b|\bflash|\bvista\b|\bver\b|\bveo\b|\bborros|\bcieg[oa]s?\b|\bnubl|\bcortina|\bsombra|\bnegr[oa]\b/,
+      /\bhaz|\bfog|\bfuzz|\bmilk|\bwav|\bdistort|\bwent white\b|\bhalo|\bvision\b|\bsee\b|\bseeing\b|sight\b|\bblind|\bblurr?|\bcloudy\b|\bdouble\b|\bdark|\bblack|\bcurtain|\bshadow|\bveil\b|\bgone\b|\bspots?\b|\bfloaters?\b|\bflash|\bvista\b|\bver\b|\bveo\b|\bborros|\bcieg[oa]s?\b|\bnubl|\bcortina|\bsombra|\bnegr[oa]\b/,
   },
 ];
 
@@ -199,7 +241,10 @@ export const CALLER_SYMPTOM = new RegExp(
     String.raw`\bit'?s (?:all |just )?gone\b|\bno (?:veo|puedo ver|ve)\b|\bperd[ií] la vista\b`,
     // Pain and injury in the caller's words, without the word "pain".
     String.raw`\bkilling me\b|\bagon|\bstab(?:bing|bed|s)?\b|\bexcruciat|\bunbearab`,
-    String.raw`\bflew in|\bgot hit\b|\bhit in (?:the|my) eye|\bpoked?\b|\bscratch|\bsplash|\bsomething in my eye|\bforeign (?:object|body)`,
+    // "flew in" and "scratch" only about an EYE: "my son flew in from Texas"
+    // and "I scratched my glasses" are not symptoms (review r3 P3, #353).
+    String.raw`\bflew in(?:to)? (?:my|the|his|her|their) eyes?\b|\bscratch\w*(?: [a-z']+){0,2} (?:eyes?|cornea)\b|\b(?:eyes?|cornea)(?: [a-z']+){0,2} scratch`,
+    String.raw`\bgot hit\b|\bhit in (?:the|my) eye|\bpoked?\b|\bsplash|\bsomething in my eye|\bforeign (?:object|body)`,
   ].join('|'),
 );
 
@@ -273,18 +318,67 @@ const OFFICE_STAFF =
  * "my husband is in the hospital", "he's in the hospital" and "I was at the
  * hospital yesterday" do not.
  */
-const NAME_WORD =
-  String.raw`(?!(?:i|i'?m|he|he'?s|she|she'?s|we|they|my|his|her|our|their|is|was|were|are|am|be|been|in|at|to|on|of|for|went|go|going|this|that|it|it'?s|a|an|and|but|not|no|mi|su|en|es|esta|estoy)\b)[a-z0-9'&.-]+ `;
+const NAME_TOKEN =
+  String.raw`(?!(?:i|i'?m|he|he'?s|she|she'?s|we|they|my|his|her|our|their|is|was|were|are|am|be|been|in|at|to|on|of|for|went|go|going|this|that|it|it'?s|a|an|and|but|not|no|bill|bills|billing|records?|visit|stay|yesterday|today|tonight|tomorrow|last|ago|there|here|mi|su|en|es|esta|está|estoy|ayer|hoy)(?![a-z0-9'&-]))[a-z0-9'&.-]+`;
+const NAME_WORD = String.raw`${NAME_TOKEN} `;
+const ANY_FACILITY = String.raw`(?:${FACILITY}|cl[ií]nica|consultorio|sala de emergencias?)(?![a-z])`;
+/**
+ * Also widened in review r3 (#353), because STT and real answers are messier
+ * than the first form: fillers ("Yeah, uh, Pomona Valley Hospital."), a
+ * subject before the answer ("Yes I am, …", "Yeah, it's Kaiser hospital."),
+ * the facility FIRST ("Hospital, Kaiser Fontana.", "The ER at Cedars.",
+ * "Hospital — Cedars-Sinai.") and a name after it ("Sí, del Hospital
+ * General."). Still anchored to the whole turn, and every name word still
+ * excludes pronouns, verbs, prepositions and time words.
+ */
 const BARE_FACILITY_ANSWER = new RegExp(
   String.raw`^(?:(?:yes|yeah|yep|yup|s[ií])(?![a-z])[,.!]?\s*)?` +
-    String.raw`(?:(?:we'?re |i'?m )?(?:from|calling from|with) |del |de la |desde (?:el |la )?)?(?:the |el |la )?` +
+    String.raw`(?:(?:i am|i'?m|it is|it'?s|we are|we'?re|this is)(?![a-z])[,.!]?\s+)?` +
+    String.raw`(?:(?:from|calling from|with) |del |de la |desde (?:el |la )?)?(?:the |el |la )?` +
     String.raw`(?:${NAME_WORD}){0,4}?` +
-    String.raw`(?:${FACILITY}|cl[ií]nica|consultorio|sala de emergencias?)(?![a-z])[\s.,!?]*$`,
+    ANY_FACILITY +
+    String.raw`(?:(?:\s*,\s*|\s+(?:at|in|de|del)\s+|\s+)(?:the |el |la )?${NAME_TOKEN}(?: ${NAME_TOKEN}){0,3})?` +
+    String.raw`[\s.,!?]*$`,
 );
 
+/** Lowercase, straight apostrophes, dashes to commas, STT fillers out. */
+function normaliseAnswer(line: string): string {
+  return line
+    .toLowerCase()
+    .replace(/[’‘]/g, "'")
+    .replace(/\s*[—–]\s*|\s+-\s+/g, ', ')
+    .replace(/\b(?:uh+|um+|uhm|ah+|hmm+|erm)\b/g, ' ')
+    .replace(/\s+/g, ' ')
+    .replace(/\s*,(?:\s*,)*\s*/g, ', ')
+    .replace(/^[,\s]+/, '')
+    .trim();
+}
+
 function answersWithAFacility(line: string): boolean {
-  const text = line.toLowerCase().replace(/[’‘]/g, "'").replace(/\s+/g, ' ').trim();
-  return BARE_FACILITY_ANSWER.test(text);
+  return BARE_FACILITY_ANSWER.test(normaliseAnswer(line));
+}
+
+/**
+ * INSIDE A PROVEN ANSWER WINDOW — the caller's turn after the agent asked
+ * refusal 3's question — a facility word anywhere in the turn is the answer.
+ * Three shapes still are not: a person who IS somewhere ("my husband is in
+ * the hospital", "I was at the ER yesterday", "mi esposo está en el
+ * hospital"), a bare "At the hospital." with no name, and a question back
+ * ("Is this Dr. Lee's office?").
+ */
+const FACILITY_ANYWHERE = new RegExp(String.raw`(?:^|[^a-z])${ANY_FACILITY}`);
+const SOMEONE_AT_A_FACILITY = new RegExp(
+  String.raw`\b(?:i|he|she|they|you|my|his|her|their|mi|su|[eé]l|ella|yo)\b[^.?!]*?` +
+    String.raw`\b(?:in|at|to|into|en|al|a la)\s+(?:the |el |la |a |an )?(?:[a-z0-9'&.-]+ ){0,3}?${ANY_FACILITY}`,
+);
+const BARE_AT_A_FACILITY = new RegExp(String.raw`^(?:at|in|en|al) (?:the |el |la )?${ANY_FACILITY}[\s.,!?]*$`);
+const ASKS_BACK = /^(?:is|are|was|do|does|can|could|es|est[aá])\b[^?]*\?/;
+
+function answerNamesAFacility(turn: string): boolean {
+  const text = normaliseAnswer(turn);
+  if (!FACILITY_ANYWHERE.test(text)) return false;
+  if (ASKS_BACK.test(text) || BARE_AT_A_FACILITY.test(text) || SOMEONE_AT_A_FACILITY.test(text)) return false;
+  return true;
 }
 
 const PROVIDER_SELF_IDENTIFICATION: RegExp[] = [
@@ -361,7 +455,9 @@ export function corroborate(callId: string | undefined, claimText: string): Corr
     unsupported: [],
     supported: [],
     haveSpeech: Boolean(spoken.trim()),
-    providerStated: callerSaysTheyAreAProvider(callId ? (callerSpeech.get(callId) ?? []) : []),
+    providerStated:
+      callerSaysTheyAreAProvider(callId ? (callerSpeech.get(callId) ?? []) : []) ||
+      (callId ? (providerAnswers.get(callId) ?? []) : []).some(answerNamesAFacility),
     symptomStated: CALLER_SYMPTOM.test(spoken),
     acuteStated: Boolean(spoken.trim()) && describesAcuteEvent(spoken),
   };

@@ -33,6 +33,8 @@ import {
   recordCallerSpeech,
   releaseCallerSpeech,
   callerSaid,
+  answersToTheFacilityQuestion,
+  CALLER_SYMPTOM,
 } from './symptomCorroboration';
 import { judgeEscalation } from './afterHoursEscalationGate';
 
@@ -74,6 +76,16 @@ describe('a caller who says who they are is a provider', () => {
     "St. Joe's ER.",
     'Sí, del hospital.',
     "Yeah, from the Westside Eye Clinic.",
+    // Review r3 P2, #353: fillers, a subject before the answer, the facility
+    // first, a name after it.
+    'Yeah, uh, Pomona Valley Hospital.',
+    'Hospital, Kaiser Fontana.',
+    'The ER at Cedars.',
+    'Hospital — Cedars-Sinai.',
+    'Yes I am, Pomona Valley Hospital.',
+    "Yeah, it's Kaiser hospital.",
+    'Yes, I’m calling from Pomona Valley Hospital',
+    'Sí, del Hospital General.',
   ];
   for (const t of PROVIDERS) it(t, () => expect(callerSaysTheyAreAProvider(t)).toBe(true));
 });
@@ -120,6 +132,12 @@ describe('asking for a doctor, an operator or a page is not saying you are one',
     'Yes, I went to the ER.',
     "Is this Dr. Lee's office?",
     'Mi esposo está en el hospital.',
+    // Review r3 P2, #353: still not answers once the bare form widened.
+    'At the hospital.',
+    'Cedars-Sinai.',
+    'Uh, my husband is in the hospital.',
+    'Yeah, hospital bill.',
+    'The ER yesterday.',
   ];
   for (const t of PATIENTS) it(t, () => expect(callerSaysTheyAreAProvider(t)).toBe(false));
 });
@@ -257,6 +275,117 @@ describe('the gate', () => {
     expect(
       judgeEscalation({ callerType: 'healthcare_provider', reason: 'Clinician calling about a patient' }),
     ).toEqual({ allowed: true, basis: 'provider_or_facility' });
+  });
+});
+
+describe('a turn that answers refusal 3 names a facility anywhere in it (review r3 P2, #353)', () => {
+  const ASK = "AGENT: Are you calling from a doctor's office, a hospital or a clinic, and which one?";
+  const answered = (answer: string, ask = ASK) => {
+    releaseCallerSpeech(CALL);
+    noteCallerTranscript(CALL, ['AGENT: Thank you for calling.', 'CALLER: Paging on-call physician.', ask, `CALLER: ${answer}`]);
+    return corroborate(CALL, '').providerStated;
+  };
+
+  const ANSWERS = [
+    'Yeah, uh, Pomona Valley Hospital.',
+    'Hospital, Kaiser Fontana.',
+    'The ER at Cedars.',
+    'Hospital — Cedars-Sinai.',
+    'Yes I am, Pomona Valley Hospital.',
+    "Yeah, it's Kaiser hospital.",
+    "Yes, I'm calling from Pomona Valley Hospital",
+    'Sí, del Hospital General.',
+    'Uh, yeah, we are over at the Kaiser hospital in Fontana, the main one.',
+    'Yes, it is the Pomona Valley hospital emergency department, I am the charge person.',
+  ];
+  for (const t of ANSWERS) it(`counts: ${t}`, () => expect(answered(t)).toBe(true));
+
+  const NOT_ANSWERS = [
+    'My husband is in the hospital.',
+    "He's in the hospital.",
+    'I was at the ER yesterday.',
+    'Yes, I went to the ER.',
+    "Is this Dr. Lee's office?",
+    'Mi esposo está en el hospital.',
+    'At the hospital.',
+    'Cedars-Sinai.',
+    'No, I just need my doctor.',
+  ];
+  for (const t of NOT_ANSWERS) it(`does not count: ${t}`, () => expect(answered(t)).toBe(false));
+
+  it('outside the window the same loose answer is not read', () => {
+    releaseCallerSpeech(CALL);
+    noteCallerTranscript(CALL, [
+      'AGENT: How can I help?',
+      'CALLER: Uh, yeah, we are over at the Kaiser hospital in Fontana, the main one.',
+    ]);
+    expect(corroborate(CALL, '').providerStated).toBe(false);
+  });
+
+  it('the window closes at the next agent line', () => {
+    expect(
+      answersToTheFacilityQuestion([ASK, 'CALLER: Kaiser hospital, the main one.', 'AGENT: Thank you.', 'CALLER: Bye, see the hospital.']),
+    ).toEqual(['kaiser hospital, the main one.']);
+  });
+
+  it('the gate: refused, then the answering turn, then allowed', () => {
+    const reason = 'Clinician paging the on-call physician about a patient';
+    releaseCallerSpeech(CALL);
+    const before = ['AGENT: Thank you for calling.', 'CALLER: Paging on-call physician.'];
+    noteCallerTranscript(CALL, before);
+    expect(judgeEscalation({ callerType: 'healthcare_provider', reason, corroboration: corroborate(CALL, '') })).toMatchObject({
+      allowed: false,
+      code: 'provider_not_stated_by_caller',
+    });
+    noteCallerTranscript(CALL, [...before, ASK, 'CALLER: Uh, we are over at the Kaiser hospital in Fontana, the main one.']);
+    expect(judgeEscalation({ callerType: 'healthcare_provider', reason, corroboration: corroborate(CALL, '') })).toEqual({
+      allowed: true,
+      basis: 'provider_or_facility',
+    });
+    releaseCallerSpeech(CALL);
+    expect(corroborate(CALL, '').providerStated, 'release clears the answers too').toBe(false);
+  });
+});
+
+describe('the symptom evidence lists (review r3 P3, #353)', () => {
+  const heard = (spoken: string, claim: string) => {
+    releaseCallerSpeech(CALL);
+    recordCallerSpeech(CALL, spoken);
+    return corroborate(CALL, claim);
+  };
+  const CASES: Array<[string, string]> = [
+    ['Everything is hazy.', 'vision changes'],
+    ["It's all foggy and fuzzy.", 'vision changes'],
+    ['It looks milky.', 'vision changes'],
+    ['The lines look wavy and distorted.', 'vision changes'],
+    ['It went white.', 'vision changes'],
+    ['I see halos around the lights.', 'vision changes'],
+    ['My head is pounding.', 'severe pain'],
+    ['I have a terrible headache.', 'severe pain'],
+    ['My eye is on fire.', 'severe pain'],
+  ];
+  for (const [spoken, claim] of CASES) {
+    it(`"${spoken}" corroborates the model's "${claim}"`, () => {
+      const c = heard(spoken, claim);
+      expect(c.unsupported).toEqual([]);
+      const v = judgeEscalation({ callerType: 'patient_urgent_medical', reason: `Patient reports ${claim}`, corroboration: c });
+      expect(v).not.toMatchObject({ code: 'symptoms_not_stated_by_caller' });
+    });
+  }
+
+  it('d30ca58b is still refused: discharge and a callback do not corroborate pain and vision changes', () => {
+    const c = heard('Reaction | And my right eye. With discharge. | Hello | Yes.', 'red eye with pain and vision changes');
+    const v = judgeEscalation({ reason: 'red eye with pain and vision changes reported', corroboration: c });
+    expect(v).toMatchObject({ allowed: false, code: 'symptoms_not_stated_by_caller' });
+  });
+
+  it('"flew in" and "scratch" are symptoms only about an eye', () => {
+    for (const t of ['my son flew in from texas', 'i scratched my glasses', 'the scratch on my car']) {
+      expect(CALLER_SYMPTOM.test(t), t).toBe(false);
+    }
+    for (const t of ['something flew in my eye', 'a bug flew into my eye', 'i scratched my eye', 'i think i scratched my cornea', 'my eye is scratchy']) {
+      expect(CALLER_SYMPTOM.test(t), t).toBe(true);
+    }
   });
 });
 
