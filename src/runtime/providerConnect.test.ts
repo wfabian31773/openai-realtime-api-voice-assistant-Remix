@@ -267,65 +267,95 @@ describe("the connect-failure alert names the failure and counts the calls", () 
     expect(connectFailureKind("getaddrinfo ENOTFOUND api.x.ai")).toBe("handshake error");
   });
 
-  it("hands each attempt's failure kind to the counter, then settles the call", async () => {
+  it("hands each attempt's failure kind to the counter, and the attempt that connects carries the outcome", async () => {
     const queue: Array<() => OpenedProviderSocket> = [
       () => { throw new Error("Unexpected server response: 503"); },
       () => socket({ arrived: false }),
       () => socket({ throwOnWait: new Error("socket closed") }),
       () => socket({ arrived: true }),
     ];
-    const waits: Array<[boolean, string | undefined]> = [];
+    const waits: Array<[boolean, string | undefined, ConnectOutcome | undefined]> = [];
     const settled: ConnectOutcome[] = [];
     await connectWithFirstEventRetry({
       open: async () => queue.shift()!(),
       firstEventTimeoutMs: 80,
       maxRetries: 3,
       log: () => undefined,
-      noteFirstEventWait: (arrived, failure) => waits.push([arrived, failure]),
+      noteFirstEventWait: (arrived, failure, settles) => waits.push([arrived, failure, settles]),
       noteConnectSettled: (outcome) => settled.push(outcome),
     });
     expect(waits).toEqual([
-      [false, "HTTP 503"],
-      [false, SILENT_STALL],
-      [false, DROPPED_AFTER_OPEN],
-      [true, undefined],
+      [false, "HTTP 503", undefined],
+      [false, SILENT_STALL, undefined],
+      [false, DROPPED_AFTER_OPEN, undefined],
+      [true, undefined, "connected"],
     ]);
-    expect(settled).toEqual(["connected"]);
+    // The outcome rode on the attempt; nothing was left to settle separately.
+    expect(settled).toEqual([]);
   });
 
   it.each([
     ["a handshake failure", () => { throw new Error("Opening handshake has timed out"); }],
     ["a silent socket", () => socket({ arrived: false })],
     ["a socket that drops after open", () => socket({ throwOnWait: new Error("closed") })],
-  ])("settles the call as lost when the last attempt is %s", async (_label, last) => {
+  ])("the last attempt carries the call as lost when it is %s", async (_label, last) => {
     const queue: Array<() => OpenedProviderSocket> = [
       () => { throw new Error("Unexpected server response: 503"); },
       last as () => OpenedProviderSocket,
     ];
-    const settled: ConnectOutcome[] = [];
+    const settles: Array<ConnectOutcome | undefined> = [];
     await expect(
       connectWithFirstEventRetry({
         open: async () => queue.shift()!(),
         firstEventTimeoutMs: 80,
         maxRetries: 1,
         log: () => undefined,
-        noteConnectSettled: (outcome) => settled.push(outcome),
+        noteFirstEventWait: (_arrived, _failure, settles_) => settles.push(settles_),
       }),
     ).rejects.toBeInstanceOf(FirstEventStallError);
-    expect(settled).toEqual(["lost"]);
+    // Only the deciding attempt carries it; the first one decided nothing.
+    expect(settles).toEqual([undefined, "lost"]);
   });
 
-  it("does not settle a call the Twilio side abandoned", async () => {
+  // Every abort path, each after a first attempt that failed — the shape that
+  // left a call reading "still connecting" until it aged out of the window.
+  type Gone = { gone: boolean };
+  it.each<[string, (g: Gone) => OpenedProviderSocket]>([
+    ["before the next attempt", () => socket()], // gone is set by the first note, below
+    ["during the handshake", () => { throw new ProviderConnectAbortedError(); }],
+    ["right after the socket opens", (g) => { g.gone = true; return socket(); }],
+    ["during the first-event wait", () => socket({ throwOnWait: new ProviderConnectAbortedError() })],
+    ["right after the first-event wait", (g) => {
+      const s = socket({ arrived: false });
+      const wait = s.waitForFirstEvent.bind(s);
+      s.waitForFirstEvent = async (ms) => { const r = await wait(ms); g.gone = true; return r; };
+      return s;
+    }],
+  ])("settles a call the Twilio side abandoned %s as abandoned (Codex P2, #354)", async (label, second) => {
+    const g: Gone = { gone: false };
+    let opens = 0;
     const settled: ConnectOutcome[] = [];
+    const noted: boolean[] = [];
     await expect(
       connectWithFirstEventRetry({
-        open: async () => socket(),
-        shouldAbort: () => true,
+        open: async () => {
+          opens += 1;
+          if (opens === 1) throw new Error("Unexpected server response: 503");
+          return second(g);
+        },
+        shouldAbort: () => g.gone,
+        firstEventTimeoutMs: 80,
+        maxRetries: 2,
         log: () => undefined,
+        noteFirstEventWait: (arrived) => {
+          noted.push(arrived);
+          if (label === "before the next attempt") g.gone = true;
+        },
         noteConnectSettled: (outcome) => settled.push(outcome),
       }),
     ).rejects.toBeInstanceOf(ProviderConnectAbortedError);
-    expect(settled).toEqual([]);
+    expect(noted).toEqual([false]);
+    expect(settled).toEqual(["abandoned"]);
   });
 
   it("the 2026-10-19 shape: names 503s and the timeout, counts rescued, dropped and in-flight calls", () => {
@@ -337,19 +367,18 @@ describe("the connect-failure alert names the failure and counts the calls", () 
       alert: (text) => alerts.push(text),
       log: () => undefined,
     });
-    // Call 1 drops: three 503s, every retry.
-    for (let i = 0; i < 3; i++) window.note(false, "HTTP 503", 1);
-    window.settle(1, "lost");
+    // Call 1 drops: three 503s, every retry — the last attempt carries it.
+    window.note(false, "HTTP 503", 1);
+    window.note(false, "HTTP 503", 1);
+    window.note(false, "HTTP 503", 1, "lost");
     // Calls 2–7 each take one 503 and reconnect on the retry.
     for (let call = 2; call <= 7; call++) {
       window.note(false, "HTTP 503", call);
-      window.note(true, undefined, call);
-      window.settle(call, "connected");
+      window.note(true, undefined, call, "connected");
     }
     // Call 8 takes a handshake timeout and reconnects.
     window.note(false, "handshake timeout", 8);
-    window.note(true, undefined, 8);
-    window.settle(8, "connected");
+    window.note(true, undefined, 8, "connected");
     expect(alerts).toEqual([]);
     // Call 9's 503 is the eleventh failure; it is still mid-retry when this fires.
     window.note(false, "HTTP 503", 9);
@@ -363,6 +392,41 @@ describe("the connect-failure alert names the failure and counts the calls", () 
     expect(text).not.toMatch(/stall|not absorbing/i);
   });
 
+  it("counts the call dropped BY the attempt that fires the alert as dropped, not still connecting (Codex P2, #354)", () => {
+    const alerts: string[] = [];
+    const window = createStallRateWindow({
+      window: 30,
+      alertAt: 3,
+      now: () => 1_000,
+      alert: (text) => alerts.push(text),
+      log: () => undefined,
+    });
+    window.note(false, "HTTP 503", 1);
+    window.note(false, "HTTP 503", 1);
+    window.note(false, "HTTP 503", 1, "lost");
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0]).toContain("Calls affected: 1 (1 dropped after every retry).");
+    expect(alerts[0]).not.toContain("still connecting");
+  });
+
+  it("names a call the caller abandoned mid-retry instead of calling it still connecting (Codex P2, #354)", () => {
+    const alerts: string[] = [];
+    let now = 1_000;
+    const window = createStallRateWindow({
+      window: 30,
+      alertAt: 2,
+      now: () => now,
+      alert: (text) => alerts.push(text),
+      log: () => undefined,
+    });
+    window.note(false, "HTTP 503", 1);
+    window.settle(1, "abandoned");
+    now += 15 * 60 * 1000;
+    window.note(false, "HTTP 503", 2);
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0]).toContain("Calls affected: 2 (none dropped, 1 hung up while reconnecting, 1 still connecting).");
+  });
+
   it('says "none dropped" when every affected call reconnected', () => {
     const alerts: string[] = [];
     const window = createStallRateWindow({
@@ -373,8 +437,7 @@ describe("the connect-failure alert names the failure and counts the calls", () 
       log: () => undefined,
     });
     window.note(false, SILENT_STALL, 1);
-    window.note(true, undefined, 1);
-    window.settle(1, "connected");
+    window.note(true, undefined, 1, "connected");
     window.note(false, SILENT_STALL, 2);
     expect(alerts[0]).toContain(`${SILENT_STALL} x2.`);
     expect(alerts[0]).toContain("Calls affected: 2 (1 reconnected on a retry, none dropped, 1 still connecting).");
@@ -450,8 +513,7 @@ describe("the production counter", () => {
       const b = trackConnect();
       a.noteFirstEventWait!(false, "HTTP 503");
       b.noteFirstEventWait!(false, "HTTP 503");
-      a.noteFirstEventWait!(true);
-      a.noteConnectSettled!("connected");
+      a.noteFirstEventWait!(true, undefined, "connected");
       b.noteFirstEventWait!(false, "HTTP 503");
       b.noteFirstEventWait!(false, "handshake timeout");
       const lines = warn.mock.calls.map((c) => String(c[0]));
