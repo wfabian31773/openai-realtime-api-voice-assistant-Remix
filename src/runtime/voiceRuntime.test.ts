@@ -1174,7 +1174,9 @@ describe("one whole call, end to end, offline", () => {
     await settle(8);
     expect(h.persisted).toHaveLength(1);
     expect(teardownSweep).toHaveBeenCalledTimes(1);
-    expect(teardownSweep).toHaveBeenCalledWith("CA-floor-real");
+    // The caller closed the socket, so the record says caller_hangup — and the
+    // sweep must be told, or it files behind a caller who left (2026-10-19).
+    expect(teardownSweep).toHaveBeenCalledWith("CA-floor-real", { outcome: "caller_hangup" });
   });
 
   it("finishes teardown even when the PCP floor rejects", async () => {

@@ -123,6 +123,66 @@ export type PcpTicketResponse = { success: boolean; ticketId?: number; ticketNum
 type Client = { createPcpTicket(payload: PcpTicketPayload): Promise<PcpTicketResponse> };
 
 /**
+ * HOW A PCP CALL ENDED, WHEN THAT ENDING TAKES ITS EMPTY TICKETS WITH IT.
+ *
+ * Operator, 2026-10-19: "any caller that hangs up will not get their ticket
+ * submitted, plain and simple" — and, from 2026-10-01, a caller who goes to
+ * the queue gets no ticket either. The ticketing app's
+ * `/api/voice-agent/pcp-ticket/withdraw` closes and archives this call's PCP
+ * Support tickets that name no patient and nobody has touched; it decides from
+ * its own rows (`lib/pcp/withdraw-on-leave.ts` in that repo), so a ticket that
+ * names a patient is kept whatever the agent sends here.
+ */
+export type PcpWithdrawReason = 'caller_hung_up' | 'sent_to_queue';
+
+/**
+ * Names the agent writes when it has none. The ticketing app's
+ * `withdraw-on-leave.ts` carries the same list and is the authority; this copy
+ * only decides what the caller is TOLD on the way to the queue, so a drift
+ * here can cost a clause of the warning, never a ticket.
+ */
+const PLACEHOLDER_NAME =
+  /^(unknown|patient|caller|none|n\/?a|unnamed|unnamed caller|unknown patient|unknown caller|not provided|not provided by caller|unclassified_caller|-)$/i;
+
+/** Did the call name a patient — a real first or last name, or a date of birth? */
+export function namesAPatient(state: { patientFirstName?: string; patientLastName?: string; patientDob?: string }): boolean {
+  const real = (v?: string) => Boolean(v && v.trim() && !PLACEHOLDER_NAME.test(v.trim()));
+  return real(state.patientFirstName) || real(state.patientLastName) || Boolean(state.patientDob?.trim());
+}
+export type PcpWithdrawRequest = { callSid: string; reason: PcpWithdrawReason };
+export type PcpWithdrawResponse = {
+  success: boolean;
+  withdrawn?: string[];
+  kept?: Array<{ ticketNumber: string; why: string }>;
+  error?: string;
+};
+type WithdrawClient = { withdrawPcpTickets(params: PcpWithdrawRequest): Promise<PcpWithdrawResponse> };
+
+/**
+ * Never throws: it runs after the call is over, and a failed withdrawal leaves
+ * the ticket where a staffer can close it, which is where it was before.
+ */
+export async function submitPcpWithdrawal(
+  callSid: string,
+  reason: PcpWithdrawReason,
+  client?: WithdrawClient,
+): Promise<PcpWithdrawResponse> {
+  try {
+    const effectiveClient = client ?? (await import('../../server/services/ticketingApiClient')).ticketingApiClient;
+    const res = await effectiveClient.withdrawPcpTickets({ callSid, reason });
+    if (res.success && res.withdrawn?.length) {
+      console.info(`[PCP-TICKET] ${reason}: withdrew ${res.withdrawn.join(', ')} — named no patient (${callSid})`);
+    } else if (!res.success) {
+      console.warn(`[PCP-TICKET] ${reason}: withdrawal not applied (${res.error ?? 'unknown'}) — any ticket stays (${callSid})`);
+    }
+    return res;
+  } catch (e) {
+    console.warn(`[PCP-TICKET] ${reason}: withdrawal failed — any ticket stays (${callSid}):`, e);
+    return { success: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+/**
  * Make a payload filable without losing the request.
  *
  * The schema is strict by design, but on 2026-08-06 that strictness was

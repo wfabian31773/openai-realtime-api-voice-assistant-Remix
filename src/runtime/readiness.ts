@@ -735,8 +735,20 @@ import { callEnvironment } from "./callRecord";
  * `src/services/providerMustSayItThemselves.test.ts`,
  * `src/agents/noIvrProviderMustSayIt.test.ts`.
  */
+/**
+ * v100 — A PCP CALLER WHO LEAVES GETS NO TICKET (2026-10-19). Operator: "any
+ * caller that hangs up will not get their ticket submitted, plain and simple"
+ * — and a caller transferred to the queue leaves none that names no patient.
+ * The teardown floor files nothing on a hang-up or a transfer (it still files
+ * when the call ended on our side); on a hang-up, and when the queue answers
+ * or the caller leaves it while it rings, the ticketing app is asked to
+ * withdraw the call's PCP Support tickets that name no patient and nobody has
+ * touched (`/api/voice-agent/pcp-ticket/withdraw`, ticketing-app). 2026-10-12..16:
+ * 110 of 147 agent tickets on hung-up PCP calls named no patient.
+ * `src/pcp/aCallerWhoLeavesGetsNoTicket.test.ts`, `src/pcp/queueIsAChoice.test.ts`.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v99-the-caller-says-they-are-a-provider-20261019";
+  "voice-runtime-v100-a-caller-who-leaves-gets-no-ticket-20261019";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

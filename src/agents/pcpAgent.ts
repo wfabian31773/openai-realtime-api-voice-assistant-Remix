@@ -42,7 +42,7 @@ import {
   ticketDeliveryNote,
 } from '../pcp/recordsDelivery';
 import { ticketReadiness, nextRequiredAsk, annotationFor, MAX_BLOCKS } from '../pcp/ticketRequirements';
-import { submitPcpTicket, type PcpTicketPayload } from '../pcp/pcpTicketing';
+import { namesAPatient, submitPcpTicket, submitPcpWithdrawal, type PcpTicketPayload } from '../pcp/pcpTicketing';
 import { getPacificTimeContext, formatPhoneForSpeech, formatPhoneLast4 } from '../utils/timeAware';
 // STATIC, NOT `await import(…)` — the v78 rule. A dynamic import of a module
 // that registers tools at load evaluated it a second time on Node 20 (Replit)
@@ -1745,6 +1745,9 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
        * model's word, is what makes this safe.
        */
 
+      /** Something is already on file for this caller as the dial goes out. */
+      const filedBeforeTheDial = requestIsOnRecord || Boolean(initial?.success);
+
       escalationDetailsMap.set(callId, {
         agentSlug: 'pcp',
         /**
@@ -1782,6 +1785,14 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
                * here: there is no earlier row to collide with.
                */
               if (!queueChoiceOwesATicket(settlement)) {
+                /**
+                 * AND A TICKET FILED EARLIER ON THE CALL GOES TOO, when it names
+                 * no patient (operator, 2026-10-19). The queue has them, or they
+                 * left while it rang; either way nobody is owed a callback on a
+                 * ticket that cannot say who it is about. The app keeps one
+                 * that names a patient.
+                 */
+                if (filedBeforeTheDial) await submitPcpWithdrawal(callId, 'sent_to_queue');
                 console.info(
                   `[PCP] queue dial on the caller's own choice settled ${settlement.outcome} — no ticket, by ruling (${callId})`,
                 );
@@ -1822,6 +1833,14 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
               const res = await persistSettlement(
                 () => submitPcpTicket({ ...preDialPayload, disposition, handoff }),
               );
+              /**
+               * THE QUEUE HAS THEM, OR THEY LEFT WHILE IT RANG — so the
+               * pre-dial ticket goes if it names no patient (operator,
+               * 2026-10-19). A dial that did not land keeps it: the caller was
+               * just told "I have your request recorded", and it is re-opened
+               * as a task above.
+               */
+              if (!queueChoiceOwesATicket(settlement)) await submitPcpWithdrawal(callId, 'sent_to_queue');
               console.info(
                 `[PCP] queue dial settled ${settlement.outcome} after ${settlement.ringSeconds}s ringing` +
                   `${settlement.connected ? `, ${settlement.talkSeconds ?? 0}s bridged` : ''}` +
@@ -1837,7 +1856,13 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
          * EARLIER on the call (they filed, then asked for a person) makes it
          * true again, which is why this is not simply `!callerChoseTheQueue`.
          */
-        requestOnRecord: requestIsOnRecord || Boolean(initial?.success),
+        /**
+         * AND ONLY WHEN IT NAMES A PATIENT (2026-10-19). A ticket that names
+         * none is withdrawn the moment the queue answers (above), so telling
+         * the caller "I've taken your details down" on the way there would be
+         * a sentence the system is about to make false.
+         */
+        requestOnRecord: filedBeforeTheDial && namesAPatient(state),
         callerRequestedHuman: askedForAPerson,
         callerType: state.callPurpose,
         reason: narrative,
@@ -2961,11 +2986,59 @@ export function pcpCallIsLive(callId: string): boolean {
  * Never throws: the call is already over, and a failed sweep must not surface
  * anywhere near the caller.
  */
-export async function sweepPcpUnfiledCall(callId: string): Promise<void> {
+/**
+ * How the call ended, from the runtime's record. The old core calls the sweep
+ * with no context and keeps its behaviour exactly.
+ */
+export type PcpTeardownContext = { outcome?: string };
+
+export async function sweepPcpUnfiledCall(callId: string, ctx: PcpTeardownContext = {}): Promise<void> {
   const metadata = pcpCallMetadata.get(callId);
   pcpCallMetadata.delete(callId);
   try {
     const state = pcpDirector.get(callId);
+    /**
+     * THE CALLER LEFT, SO NOTHING IS FILED FOR THEM — AND WHAT WAS FILED WITH
+     * NO PATIENT ON IT IS WITHDRAWN. Operator, 2026-10-19:
+     *
+     *   "we are still receiving tickets for callers that hang up or are
+     *    transferred to the q with a ticket that has no identifying
+     *    information, any caller that hangs up will not get their ticket
+     *    submitted, plain and simple."
+     *
+     * Two halves, both measured over 2026-10-12..16 (PCP Support, agent
+     * tickets, calls the caller hung up on or that went to the queue):
+     *
+     *   - THIS FLOOR filed 38 of them after the caller had gone, 4 of those
+     *     on calls that were in the queue, under a headline saying the caller
+     *     hung up. It files nothing on either ending now. A call WE ended — a
+     *     silent agent, the duration ceiling — is not a caller leaving, and
+     *     still reaches the filing below.
+     *   - THE CALL'S OWN FILINGS: the intake files as soon as it has a purpose
+     *     (ungated, operator 2026-09-16) and a refused transfer files on the
+     *     spot, so a caller who asks for a person and hangs up leaves a ticket
+     *     that says little more than that. On a hang-up the ticketing app is
+     *     asked to withdraw them; it closes and archives only the ones that
+     *     name no patient and nobody has touched, judged from its own rows. A
+     *     request taken in full from a caller who then hung up on a follow-up
+     *     question names its patient and stays.
+     *
+     * A transfer is NOT withdrawn here: at this moment the queue is still
+     * ringing, and if it never answers the caller hears "I have your request
+     * recorded". The dial result decides — see `onBlindDialSettled`.
+     */
+    if (ctx.outcome === 'caller_hangup' || ctx.outcome === 'transferred') {
+      const filedSomething =
+        Boolean(state.ticketFiled) ||
+        (state.ticketsFiled?.length ?? 0) > 0 ||
+        state.dispositionRecorded === 'CREATE_TASK' ||
+        state.dispositionRecorded === 'HAND_OFF';
+      if (ctx.outcome === 'caller_hangup' && filedSomething) {
+        await submitPcpWithdrawal(callId, 'caller_hung_up');
+      }
+      console.info(`[PCP] SWEEP: ${callId} ended ${ctx.outcome} — nothing filed after the caller left, by ruling`);
+      return;
+    }
     if (state.dispositionRecorded) return; // something durable already exists
     /**
      * A CONNECTED TRANSFER IS NOT AN UNFILED CALL.

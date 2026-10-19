@@ -37,7 +37,7 @@ export interface AgentConfig {
    * per-call state the factory wrote is the state the sweep reads. See
    * src/runtime/pcpFloor.ts for the Node 20 double evaluation this prevents.
    */
-  teardownSweep?: (callId: string) => Promise<void>;
+  teardownSweep?: (callId: string, ctx?: { outcome?: string }) => Promise<void>;
 }
 
 export class AgentRegistry {

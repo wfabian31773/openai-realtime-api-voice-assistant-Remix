@@ -39,8 +39,23 @@ describe("the PCP floor runs for the PCP lane and no other", () => {
     // `callId: entry.callSid`, so the director state and metadata the sweep
     // reads live under exactly this string. Any other key reads an empty state
     // and files nothing, silently.
-    expect(sweep).toHaveBeenCalledWith("CA0000000000000000000000000000ab01");
+    expect(sweep).toHaveBeenCalledWith("CA0000000000000000000000000000ab01", { outcome: "caller_hangup" });
   });
+
+  /**
+   * THE ENDING TRAVELS WITH THE KEY (operator, 2026-10-19). A caller who hangs
+   * up or goes to the queue gets nothing filed behind them, and only the
+   * record knows which ending this was — a sweep handed the SID alone would
+   * file for every one of them, which is the floor this ruling switched off.
+   */
+  it.each(["caller_hangup", "transferred", "dead_air", "max_duration"])(
+    "hands the sweep how the call ended (%s)",
+    async (outcome) => {
+      const sweep = vi.fn(async () => undefined);
+      await runPcpFloor(record({ outcome } as Partial<VoiceCallRecord>), { sweep });
+      expect(sweep).toHaveBeenCalledWith("CA0000000000000000000000000000ab01", { outcome });
+    },
+  );
 
   it.each(["optical", "surgery", "tech", "records", "no-ivr"])(
     "is a no-op on %s",
@@ -138,7 +153,7 @@ describe("the wiring facts a behavioural test cannot see", () => {
     const getAgentConfig = vi.fn(() => ({ id: "pcp", enabled: true, factory: () => undefined, teardownSweep }));
     await runPcpFloor(record(), { source: async () => ({ getAgentConfig }) as never });
     expect(getAgentConfig).toHaveBeenCalledWith("pcp");
-    expect(teardownSweep).toHaveBeenCalledWith("CA0000000000000000000000000000ab01");
+    expect(teardownSweep).toHaveBeenCalledWith("CA0000000000000000000000000000ab01", { outcome: "caller_hangup" });
   });
 
   it("says so loudly, and does not throw, when the lane registers no sweep or no source is given", async () => {
