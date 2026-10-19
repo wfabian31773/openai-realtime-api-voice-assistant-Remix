@@ -472,6 +472,39 @@ describe('no answer is not a yes — the unchanged path', () => {
       'an unanswered choice keeps the durable ticket',
     ).toBeGreaterThan(0);
   });
+
+  /**
+   * THE DURABLE TICKET STANDS WHILE IT RINGS, AND GOES ONCE THE QUEUE HAS THEM
+   * when it names no patient (operator, 2026-10-19) — the settle callback on
+   * this path updates it first, then asks the app to withdraw. The app keeps
+   * one that names a patient; the test for that rule lives in the ticketing
+   * app beside the rule.
+   */
+  async function vagueThenSettle(settlement: Record<string, unknown>) {
+    let captured: any;
+    let callId = '';
+    const dial = vi.fn(async () => {
+      captured = { ...escalationDetailsMap.get(callId) };
+      return QUEUE_OK();
+    });
+    const made = freshCall(dial);
+    callId = made.callId;
+    await askThenAnswer(made.agent, undefined);
+    expect(captured.requestOnRecord, 'the durable ticket names no patient, so the warning does not claim it').toBe(false);
+    ticketing.withdrawPcpTickets.mockClear();
+    await captured.onBlindDialSettled({ ...settlement, dialedNumber: '+17149564300' });
+    return callId;
+  }
+
+  it('the queue answering withdraws the durable ticket', async () => {
+    const callId = await vagueThenSettle({ outcome: 'queue_answered', status: 'COMPLETED', connected: true, talkSeconds: 60, ringSeconds: 4 });
+    expect(ticketing.withdrawPcpTickets).toHaveBeenCalledWith({ callSid: callId, reason: 'sent_to_queue' });
+  });
+
+  it('a queue that never answers keeps it — re-opened as a task, and the caller was told it is recorded', async () => {
+    await vagueThenSettle({ outcome: 'no_answer', status: 'NO-ANSWER', connected: false, ringSeconds: 45 });
+    expect(ticketing.withdrawPcpTickets).not.toHaveBeenCalled();
+  });
 });
 
 describe('a dial that never landed owes them the ticket after all', () => {
