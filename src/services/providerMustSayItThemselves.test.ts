@@ -64,6 +64,16 @@ describe('a caller who says who they are is a provider', () => {
     "I'm calling from Doctor Lee's office about a patient.",
     "I'm the resident on call at County.",
     "I'm an NP with the clinic on Main Street.",
+    // Review r2 P2, #353: office staff who name their doctor.
+    "I'm Dr. Kim's nurse.",
+    "I'm Doctor Patel's MA, calling about a patient.",
+    "This is Dr. Lee's surgical coordinator.",
+    // Review r2 P2, #353: the bare answer to refusal 3's own question.
+    'Yes, Pomona Valley Hospital.',
+    "Dr. Lee's office.",
+    "St. Joe's ER.",
+    'Sí, del hospital.',
+    "Yeah, from the Westside Eye Clinic.",
   ];
   for (const t of PROVIDERS) it(t, () => expect(callerSaysTheyAreAProvider(t)).toBe(true));
 });
@@ -100,6 +110,16 @@ describe('asking for a doctor, an operator or a page is not saying you are one',
     'I am a resident of Covina.',
     'I have been a patient there for years.',
     'We have a patient appointment tomorrow.',
+    // Review r2 P2, #353: still patients once office staff count.
+    "I'm Dr. Shah's wife.",
+    "I'm Dr. Shah's patient, and my eye hurts.",
+    // Review r2 P2, #353: a facility in a patient's sentence is not an answer.
+    'My husband is in the hospital.',
+    "He's in the hospital.",
+    'I was at the hospital yesterday.',
+    'Yes, I went to the ER.',
+    "Is this Dr. Lee's office?",
+    'Mi esposo está en el hospital.',
   ];
   for (const t of PATIENTS) it(t, () => expect(callerSaysTheyAreAProvider(t)).toBe(false));
 });
@@ -196,6 +216,30 @@ describe('the gate', () => {
       callerType: 'healthcare_provider',
       reason: 'Provider office calling about a patient from Azul Vision office',
       corroboration: corr('Quiero hablar con alguien de la oficina de Azul Visión.'),
+    });
+    expect(v).toMatchObject({ allowed: false, code: 'provider_not_stated_by_caller' });
+  });
+
+  it('a bare answer to refusal 3, in its own turn, lets the second escalation through (review r2 P2)', () => {
+    const reason = 'Clinician paging the on-call physician about a patient';
+    releaseCallerSpeech(CALL);
+    recordCallerSpeech(CALL, 'Paging on-call physician.');
+    expect(judgeEscalation({ callerType: 'healthcare_provider', reason, corroboration: corroborate(CALL, '') })).toMatchObject({
+      allowed: false,
+      code: 'provider_not_stated_by_caller',
+    });
+    recordCallerSpeech(CALL, 'Yes, Pomona Valley Hospital.');
+    expect(judgeEscalation({ callerType: 'healthcare_provider', reason, corroboration: corroborate(CALL, '') })).toEqual({
+      allowed: true,
+      basis: 'provider_or_facility',
+    });
+  });
+
+  it('a facility inside a patient\'s own sentence does not', () => {
+    const v = judgeEscalation({
+      callerType: 'healthcare_provider',
+      reason: 'Caller requesting the on-call physician',
+      corroboration: corr('My husband is in the hospital.'),
     });
     expect(v).toMatchObject({ allowed: false, code: 'provider_not_stated_by_caller' });
   });

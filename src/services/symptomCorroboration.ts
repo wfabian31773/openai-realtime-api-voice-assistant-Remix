@@ -121,7 +121,11 @@ const CLAIM_EVIDENCE: Array<{ claim: RegExp; spoken: RegExp; label: string }> = 
     // STEMS, not whole words. "it stings so much" did not match `\bstinging\b`
     // and would have been read as an invented symptom — the exact false
     // accusation this module must never make.
-    spoken: /\bpain|\bhurt|\bach(e|es|ing|y)\b|\bsore\b|\bsting|\bburn|\bthrob|\bpressure\b|\bdolor|\bduele|\barde|\bmolest/,
+    // And the words people use for pain without saying "pain": "my eye is
+    // killing me", "it's agony", "it's stabbing", "the worst", "unbearable"
+    // (review r2 P2, #353).
+    spoken:
+      /\bpain|\bhurt|\bach(e|es|ing|y)\b|\bsore\b|\bsting|\bburn|\bthrob|\bpressure\b|\bkill|\bagon|\bstab|\bsharp|\bsevere|\bworst|\bterrible|\bexcruciat|\bunbearab|\bdolor|\bduele|\barde|\bardor|\bmolest/,
   },
   {
     label: 'vision change',
@@ -182,8 +186,22 @@ export interface CorroborationResult {
  * would match "can you speak to Doctor Shah, I want to see him" and "Azul
  * Vision", which are exactly the calls the refusal exists for.
  */
-export const CALLER_SYMPTOM =
-  /\b(pain|painful|hurt|hurts|hurting|ache|aching|sore|red|redness|swollen|swelling|blur|blurry|blurred|flash|flashes|floaters?|curtain|shadow|discharge|pus|bleed|bleeding|blood|pressure|itch|itchy|burning|watering|nausea|vomit\w*|fever|injur\w*|trauma|chemical|can'?t see|cannot see|vision (?:loss|change|changes|problem|problems)|lost (?:his |her |my |their )?(?:vision|sight)|dolor|duele|rojo|roja|hinchad\w*|sangr\w*)\b/;
+export const CALLER_SYMPTOM = new RegExp(
+  [
+    String.raw`\b(pain|painful|hurt|hurts|hurting|ache|aching|sore|red|redness|swollen|swelling|blur|blurry|blurred|flash|flashes|floaters?|curtain|shadow|discharge|pus|bleed|bleeding|blood|pressure|itch|itchy|burning|watering|nausea|vomit\w*|fever|injur\w*|trauma|chemical|can'?t see|cannot see|can not see|vision (?:loss|change|changes|problem|problems)|lost (?:his |her |my |their )?(?:vision|sight)|dolor|duele|ardor|arde|rojo|roja|hinchad\w*|sangr\w*)\b`,
+    // Every specific sight-loss word the vision evidence above counts, so the
+    // two cannot drift apart again (review r2 P1, #353). The GENERIC words
+    // that list also counts — "see", "vision", "dark", "gone", "ver" — are
+    // left out, or "I want to see Doctor Shah" would be a symptom; they count
+    // here only inside a phrase.
+    String.raw`\b(?:blind|eyesight|cieg[oa]|nubl|cortina|sombra|borros|veil\b|cloudy\b|double vision)`,
+    String.raw`\bwent (?:black|dark)\b|\b(?:all|everything) (?:went |is |turned )?(?:black|dark)\b|\btodo (?:se puso |est[aá] )?negro\b`,
+    String.raw`\bit'?s (?:all |just )?gone\b|\bno (?:veo|puedo ver|ve)\b|\bperd[ií] la vista\b`,
+    // Pain and injury in the caller's words, without the word "pain".
+    String.raw`\bkilling me\b|\bagon|\bstab(?:bing|bed|s)?\b|\bexcruciat|\bunbearab`,
+    String.raw`\bflew in|\bgot hit\b|\bhit in (?:the|my) eye|\bpoked?\b|\bscratch|\bsplash|\bsomething in my eye|\bforeign (?:object|body)`,
+  ].join('|'),
+);
 
 /**
  * WHO IS CALLING, IN THE CALLER'S OWN WORDS.
@@ -227,10 +245,47 @@ const STRONG_ROLE =
   String.raw`ophthalmologist|optometrist|rn|charge nurse|(?:er|emergency(?: room)?) (?:doctor|physician|nurse))`;
 /**
  * A role that is somebody ELSE's: "I'm Dr. Shah's patient", "I'm the
- * doctor's patient". Rejects a possessive straight after the role, or after
- * the role and one name.
+ * doctor's patient", "I'm Dr. Shah's wife". Rejects a possessive straight
+ * after the role, or after the role and one name, ONLY when what is possessed
+ * is a patient or a family member. "I'm Dr. Kim's nurse" and "this is Dr.
+ * Lee's surgical coordinator" are office staff and must still count (review
+ * r2 P2, #353).
  */
-const NOT_POSSESSIVE = String.raw`(?!'?s\b)(?!\.? ?[a-z-]+'s\b)`;
+const NOT_THEIR_PROVIDER =
+  String.raw`(?:patients?|wife|husband|spouse|partner|son|daughter|mother|father|mom|mum|dad|parents?|kids?|child|children|` +
+  String.raw`grandson|granddaughter|grandmother|grandfather|grandma|grandpa|grandchild|brother|sister|aunt|uncle|` +
+  String.raw`niece|nephew|boyfriend|girlfriend|friend|neighbou?r|family)\b`;
+const NOT_POSSESSIVE = String.raw`(?!'?s ${NOT_THEIR_PROVIDER})(?!\.? ?[a-z-]+'s ${NOT_THEIR_PROVIDER})`;
+const OFFICE_STAFF =
+  String.raw`(?:nurse|ma|medical assistant|assistant|coordinator|surgical coordinator|surgery coordinator|office|staff|` +
+  String.raw`tech|technician|scheduler|front desk)\b`;
+
+/**
+ * THE BARE ANSWER TO THE REFUSAL'S OWN QUESTION. Refusal 3 asks "Are you
+ * calling from a doctor's office, a hospital or a clinic, and which one?",
+ * and the natural answers are "Yes, Pomona Valley Hospital.", "Dr. Lee's
+ * office.", "St. Joe's ER.", "Sí, del hospital." — none of which carries a
+ * lead-in the patterns below need (review r2 P2, #353).
+ *
+ * So a WHOLE caller turn that is nothing but an optional yes, an optional
+ * "from"/"del", up to four name words and a facility counts. Anchored to the
+ * whole turn, and the name words exclude pronouns, verbs and prepositions, so
+ * "my husband is in the hospital", "he's in the hospital" and "I was at the
+ * hospital yesterday" do not.
+ */
+const NAME_WORD =
+  String.raw`(?!(?:i|i'?m|he|he'?s|she|she'?s|we|they|my|his|her|our|their|is|was|were|are|am|be|been|in|at|to|on|of|for|went|go|going|this|that|it|it'?s|a|an|and|but|not|no|mi|su|en|es|esta|estoy)\b)[a-z0-9'&.-]+ `;
+const BARE_FACILITY_ANSWER = new RegExp(
+  String.raw`^(?:(?:yes|yeah|yep|yup|s[ií])(?![a-z])[,.!]?\s*)?` +
+    String.raw`(?:(?:we'?re |i'?m )?(?:from|calling from|with) |del |de la |desde (?:el |la )?)?(?:the |el |la )?` +
+    String.raw`(?:${NAME_WORD}){0,4}?` +
+    String.raw`(?:${FACILITY}|cl[ií]nica|consultorio|sala de emergencias?)(?![a-z])[\s.,!?]*$`,
+);
+
+function answersWithAFacility(line: string): boolean {
+  const text = line.toLowerCase().replace(/[’‘]/g, "'").replace(/\s+/g, ' ').trim();
+  return BARE_FACILITY_ANSWER.test(text);
+}
 
 const PROVIDER_SELF_IDENTIFICATION: RegExp[] = [
   // "this is Dr. Brown", "this is an emergency room doctor"
@@ -239,6 +294,12 @@ const PROVIDER_SELF_IDENTIFICATION: RegExp[] = [
   new RegExp(
     String.raw`\b(?:this is|i'?m|i am)\s+(?:a |an |the |your )?${AMBIGUOUS_ROLE}\b` +
       String.raw`(?: [a-z-]+)?? (?:calling|on call|from|with|at|on behalf)\b`,
+  ),
+  // "I'm Dr. Kim's nurse", "this is Dr. Lee's surgical coordinator", "I'm
+  // Doctor Patel's MA, calling about a patient" — office staff naming their
+  // doctor (review r2 P2, #353).
+  new RegExp(
+    String.raw`\b(?:this is|i'?m|i am)\s+(?:a |an |the |your )?${STRONG_ROLE}(?:\.? ?[a-z-]+)?'s ${OFFICE_STAFF}`,
   ),
   // "my name is Doctor Perez"
   new RegExp(String.raw`\bmy name is (?:a |an |the )?${PROVIDER_ROLE}\b${NOT_POSSESSIVE}`),
@@ -273,10 +334,15 @@ const PROVIDER_SELF_IDENTIFICATION: RegExp[] = [
   /\b(?:nuestr[oa]|tengo un[a]?) paciente\b/,
 ];
 
-/** Pure, for tests: does this caller text identify the caller as a provider? */
-export function callerSaysTheyAreAProvider(spoken: string): boolean {
-  const text = ` ${(spoken ?? '').toLowerCase().replace(/[’‘]/g, "'").replace(/\s+/g, ' ')} `;
-  return PROVIDER_SELF_IDENTIFICATION.some((re) => re.test(text));
+/**
+ * Pure, for tests: does this caller text identify the caller as a provider?
+ * Given the caller's turns one by one, a turn that is only a facility answer
+ * ("Yes, Pomona Valley Hospital.") counts too; a single string is one turn.
+ */
+export function callerSaysTheyAreAProvider(spoken: string | readonly string[]): boolean {
+  const turns = typeof spoken === 'string' ? [spoken ?? ''] : spoken;
+  const text = ` ${turns.join(' ').toLowerCase().replace(/[’‘]/g, "'").replace(/\s+/g, ' ')} `;
+  return PROVIDER_SELF_IDENTIFICATION.some((re) => re.test(text)) || turns.some(answersWithAFacility);
 }
 
 /**
@@ -295,7 +361,7 @@ export function corroborate(callId: string | undefined, claimText: string): Corr
     unsupported: [],
     supported: [],
     haveSpeech: Boolean(spoken.trim()),
-    providerStated: callerSaysTheyAreAProvider(spoken),
+    providerStated: callerSaysTheyAreAProvider(callId ? (callerSpeech.get(callId) ?? []) : []),
     symptomStated: CALLER_SYMPTOM.test(spoken),
     acuteStated: Boolean(spoken.trim()) && describesAcuteEvent(spoken),
   };

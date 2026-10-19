@@ -30,8 +30,7 @@ function heard(spoken: string, claim: string) {
   return corroborate(CALL, claim);
 }
 
-describe('P1 — every way a caller says they lost their sight is the caller saying it', () => {
-  const SAID = [
+const SAID = [
     'I went blind in my right eye.',
     "I'm blind in my eye all of a sudden.",
     'I lost my eyesight this evening.',
@@ -59,6 +58,7 @@ describe('P1 — every way a caller says they lost their sight is the caller say
     'Todo se puso negro.',
   ];
 
+describe('P1 — every way a caller says they lost their sight is the caller saying it', () => {
   for (const said of SAID) {
     it(`"${said}" corroborates the model's "sudden vision loss" and the call rings`, () => {
       const c = heard(said, 'sudden vision loss');
@@ -139,6 +139,18 @@ describe('P2 — an acute word only the model wrote does not ring an unstated pr
     expect(v).toEqual({ allowed: true, basis: 'provider_or_facility' });
   });
 
+  it('a vision or pain claim the model INVENTED for "Operator. Page Dr. Hart." is still refused', () => {
+    for (const reason of [
+      'Clinician reports patient with sudden vision loss, requesting the on-call physician',
+      'Provider calling about a post-op patient in severe eye pain',
+    ]) {
+      const c = heard('Operator. Page Dr. Hart.', reason);
+      expect(c.supported, reason).toEqual([]);
+      const v = judgeEscalation({ callerType: 'healthcare_provider', reason, corroboration: c });
+      expect(v.allowed, reason).toBe(false);
+    }
+  });
+
   it('with no record of the caller speaking, nothing changes: a post-op patient rings as acute', () => {
     const v = judgeEscalation({
       callerType: 'patient_urgent_medical',
@@ -151,4 +163,91 @@ describe('P2 — an acute word only the model wrote does not ring an unstated pr
       basis: 'provider_or_facility',
     });
   });
+});
+
+/**
+ * Review r2 of #353 at 1adedc4a:
+ *
+ *   P1 — when the model's reason names a provider ("requesting the on-call
+ *   physician", "wants Dr. Shah"), a patient who described sight loss in words
+ *   only the CLAIM evidence knew was refused as an unstated provider.
+ *
+ *   P2 — pain in the caller's words without "pain" ("my eye is killing me",
+ *   "it's agony") was refused as a symptom the model invented.
+ */
+describe('r2 P1 — a provider word in the model\'s reason never refuses a patient describing sight loss', () => {
+  const CASES: Array<{ label: string; callerType: string; reason: string }> = [
+    { label: 'the agent called them a provider', callerType: 'healthcare_provider', reason: 'Caller reports sudden vision loss' },
+    {
+      label: 'a patient requesting the on-call physician',
+      callerType: 'patient_urgent_medical',
+      reason: 'Patient reports sudden vision loss, requesting the on-call physician',
+    },
+    { label: 'a patient who wants Dr. Shah', callerType: 'patient_urgent_medical', reason: 'Patient reports sudden vision loss, wants Dr. Shah' },
+  ];
+
+  for (const { label, callerType, reason } of CASES) {
+    for (const said of SAID) {
+      it(`${label}: "${said}" rings`, () => {
+        const v = judgeEscalation({ callerType, reason, symptomsSummary: 'sudden vision loss', corroboration: heard(said, reason) });
+        expect(v.allowed, said).toBe(true);
+      });
+    }
+  }
+
+  it('the lists cannot drift: every sight-loss wording is a symptom in the caller\'s own words', () => {
+    for (const said of SAID) expect(heard(said, '').symptomStated, said).toBe(true);
+  });
+
+  it('the generic words stay out: asking to see a doctor is not a symptom', () => {
+    for (const said of ['Can I see Doctor Shah?', "The doctor's gone home?", 'Operator. Page Dr. Hart.', "It's dark out, is anyone there?"]) {
+      expect(heard(said, '').symptomStated, said).toBe(false);
+    }
+  });
+
+  it('injury words in the caller\'s mouth are symptoms', () => {
+    for (const said of [
+      'Something flew in my eye.',
+      'My eye got hit with a ball.',
+      'I poked my eye.',
+      'I scratched my eye.',
+      'Bleach got splashed in it.',
+      'There is a foreign object in there.',
+    ]) {
+      expect(heard(said, '').symptomStated, said).toBe(true);
+    }
+  });
+});
+
+describe('r2 P2 — pain without the word "pain" is the caller saying it', () => {
+  const PAIN = [
+    'My eye is killing me.',
+    "It's agony.",
+    "It's stabbing.",
+    'A sharp feeling behind the eye.',
+    "It's the worst, I can't stand it.",
+    "It's excruciating.",
+    "It's unbearable.",
+    "It's terrible, it really is.",
+    'Me duele mucho.',
+    'Tengo un dolor fuerte.',
+    'Siento ardor.',
+    'Me arde el ojo.',
+  ];
+  for (const said of PAIN) {
+    it(`"${said}" corroborates the model's "severe eye pain" and rings`, () => {
+      const c = heard(said, 'severe eye pain');
+      expect(c.supported).toContain('pain');
+      const v = judgeEscalation({ callerType: 'patient_urgent_medical', reason: 'Caller reports severe eye pain', corroboration: c });
+      expect(v.allowed, said).toBe(true);
+      expect(
+        judgeEscalation({
+          callerType: 'patient_urgent_medical',
+          reason: 'Caller reports severe eye pain, requesting the on-call physician',
+          corroboration: c,
+        }).allowed,
+        said,
+      ).toBe(true);
+    });
+  }
 });

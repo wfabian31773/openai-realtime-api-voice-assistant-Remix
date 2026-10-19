@@ -259,8 +259,18 @@ export function judgeEscalation(req: EscalationRequest): EscalationVerdict {
    * about one question at a time — the directive below — not a licence for
    * the symptoms the agent added. The refusal costs a real emergency one
    * question, after which an honest re-escalation passes.
+   *
+   * A SUPPORTED claim counts as the caller describing something for the
+   * provider refusal and the acute door below: the caller's own words backed
+   * what the model wrote. Without it, a patient who said "I lost my eyesight"
+   * while the model wrote "sudden vision loss, requesting the on-call
+   * physician" was refused as an unstated provider — "physician" made it a
+   * provider claim, and the acute door and refusal 3 read only
+   * symptomStated/acuteStated (review r2 P1, #353).
    */
-  const callerDescribedSomething = Boolean(corr?.symptomStated || corr?.acuteStated);
+  const callerDescribedSomething = Boolean(
+    corr?.symptomStated || corr?.acuteStated || (corr?.supported.length ?? 0) > 0,
+  );
   if (
     corr &&
     corr.haveSpeech &&
