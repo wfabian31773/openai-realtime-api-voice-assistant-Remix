@@ -44,12 +44,54 @@ const callerSpeech = new Map<string, string[]>();
 /** Cap per call: a long call must not grow unbounded in memory. */
 const MAX_LINES = 400;
 
+/**
+ * Cap on calls held at once. Each pipeline releases its own call at the end,
+ * so this only bites if a release is ever missed; the oldest call goes first.
+ */
+const MAX_CALLS = 500;
+
+function store(callId: string, lines: string[]): void {
+  callerSpeech.delete(callId); // re-insert so insertion order tracks recency
+  callerSpeech.set(callId, lines);
+  while (callerSpeech.size > MAX_CALLS) {
+    const oldest = callerSpeech.keys().next().value;
+    if (oldest === undefined) break;
+    callerSpeech.delete(oldest);
+  }
+}
+
 export function recordCallerSpeech(callId: string, text: string): void {
   if (!callId || !text?.trim()) return;
   const lines = callerSpeech.get(callId) ?? [];
   lines.push(text.toLowerCase());
   if (lines.length > MAX_LINES) lines.shift();
-  callerSpeech.set(callId, lines);
+  store(callId, lines);
+}
+
+/**
+ * THE RUNTIME'S WAY IN, which it did not have until v99.
+ *
+ * `recordCallerSpeech` is fed by the old core's transcript handler and by
+ * nothing else, and the after-hours line moved to the runtime on 2026-10-01.
+ * From that day `corroborate` found no caller speech on any after-hours call,
+ * failed open as designed, and the check that refuses symptoms the caller
+ * never said did nothing at all.
+ *
+ * The runtime posts its WHOLE transcript record on every caller turn, the way
+ * it already feeds spokenDob and spokenPatientStatus, because a caller turn
+ * is replaced in place as its transcript is re-emitted. So this replaces the
+ * ledger rather than appending to it: appending would keep a caller's first
+ * partial words beside their final ones.
+ */
+export function noteCallerTranscript(callId: string | undefined, lines: readonly string[]): void {
+  if (!callId) return;
+  const caller = lines
+    .filter((line) => line.startsWith('CALLER:'))
+    .map((line) => line.slice('CALLER:'.length).trim().toLowerCase())
+    .filter(Boolean)
+    .slice(-MAX_LINES);
+  if (caller.length === 0) return;
+  store(callId, caller);
 }
 
 export function releaseCallerSpeech(callId: string | undefined): void {
@@ -91,6 +133,82 @@ export interface CorroborationResult {
   supported: string[];
   /** False when we have no record of the caller speaking at all. */
   haveSpeech: boolean;
+  /**
+   * The caller said, in their own words, that they are a provider or are
+   * calling from a doctor's office, hospital, ER or clinic. See
+   * callerSaysTheyAreAProvider. False whenever haveSpeech is false.
+   */
+  providerStated: boolean;
+}
+
+/**
+ * WHO IS CALLING, IN THE CALLER'S OWN WORDS.
+ *
+ * Operator, 2026-10-19: "no escalation unless the caller themselves said they
+ * are a provider." The gate's provider case took the agent's word for it, and
+ * the agent's word was cheap: a caller who said only "Operator." was written
+ * up as "operator/clinician" and rang the on-call phone, and patients asking
+ * for their own doctor by name ("can you speak to Doctor Sean please?") were
+ * written up as "clinician calls" and rang it too, because the reason then
+ * names a doctor.
+ *
+ * So this asks for SELF-IDENTIFICATION, not for the word "doctor". A patient
+ * says "doctor" all the time ("I need the doctor to call me back", "I'm a
+ * patient of Dr. Choi"); a provider says who they are or where they are
+ * calling from ("this is Dr. Brown", "I'm a PA calling from St. Joe's
+ * emergency room", "the patient is on our ER", "peer-to-peer"). Paging
+ * language on its own ("page the on-call physician") is NOT counted: the
+ * refusal asks the caller which office or facility they are calling from,
+ * and their answer is what lets the transfer through.
+ *
+ * English and Spanish, like the symptom evidence above.
+ */
+const PROVIDER_ROLE =
+  String.raw`(?:dr\.?|doctor|doctora|nurse|nurse practitioner|physician|physician assistant|surgeon|resident|` +
+  String.raw`ophthalmologist|optometrist|np|pa|rn|md|charge nurse|(?:er|emergency(?: room)?) (?:doctor|physician|nurse))`;
+const FACILITY =
+  String.raw`(?:hospital|medical (?:center|group|office|clinic)|clinic|e\.? ?r\b\.?|emergency (?:room|department)|` +
+  String.raw`urgent care|surgery center|surgical center|nursing (?:home|facility)|skilled nursing|` +
+  String.raw`rehab(?:ilitation)? (?:center|facility)|doctor'?s office|dr\.? [a-z'-]+'?s office|` +
+  String.raw`office of (?:dr\.?|doctor) [a-z'-]+|optometry|ophthalmology|eye (?:center|clinic|institute)|icu|intensive care)`;
+
+const PROVIDER_SELF_IDENTIFICATION: RegExp[] = [
+  // "this is Dr. Brown", "I'm a PA", "this is an emergency room doctor"
+  new RegExp(String.raw`\b(?:this is|i'?m|i am)\s+(?:a |an |the |your )?${PROVIDER_ROLE}\b`),
+  // "my name is Doctor Perez"
+  new RegExp(String.raw`\bmy name is (?:a |an |the )?${PROVIDER_ROLE}\b`),
+  // "referring doctor on the phone", "a doctor calling"
+  new RegExp(String.raw`\b${PROVIDER_ROLE} (?:here|calling|on the (?:phone|line))\b`),
+  // "calling from St. Joe's emergency room", "speaking on behalf of a clinic"
+  new RegExp(
+    String.raw`\b(?:calling|speaking|reaching out)\s+(?:from|with|on behalf of)\s+(?:the |a |an |our )?` +
+      String.raw`(?:[a-z0-9'&.-]+ ){0,5}?${FACILITY}(?![a-z])`,
+  ),
+  // "this is the emergency room", "this is St. Joe's hospital"
+  new RegExp(String.raw`\bthis is (?:the |a |an )?(?:[a-z0-9'&.-]+ ){0,4}?${FACILITY}(?![a-z])`),
+  // "the emergency room at Huntington calling"
+  new RegExp(String.raw`${FACILITY}(?![a-z])(?: [a-z0-9'&.-]+){0,3} calling\b`),
+  // "I'm with the ER", "we're from the clinic"
+  new RegExp(String.raw`\b(?:i'?m|i am|we'?re|we are) (?:from|with) (?:the |a |an )?(?:[a-z0-9'&.-]+ ){0,5}?${FACILITY}(?![a-z])`),
+  // "calling on behalf of Dr. Smith"
+  /\bon behalf of (?:dr\.?|doctor) [a-z]/,
+  // "our mutual patient", "I have a post-operative patient", "the patient is on our ER"
+  /\b(?:our|a mutual) (?:mutual )?patients?\b/,
+  /\b(?:i|we) (?:have|'?ve got|got) (?:a |an |the |this )?(?:[a-z-]+ ){0,3}?patient\b(?! portal| id\b| number| account)/,
+  /\bpatient (?:is |that'?s |who'?s |who is )?(?:on|in|at) (?:our|the) (?:e\.? ?r\b|emergency|unit|floor|icu|facility)/,
+  /\b(?:on|in) our (?:e\.? ?r\b|emergency|unit|floor|icu)/,
+  /\bour (?:physician|provider|surgeon|nurse)\b/,
+  /\bpeer[- ]?to[- ]?peer\b/,
+  // Spanish: "soy la doctora", "llamo del hospital", "nuestro paciente"
+  /\bsoy (?:el |la |un |una )?(?:doctor|doctora|dr\.?|m[eé]dic[oa]|enfermer[oa])\b/,
+  /\b(?:llamo|hablo|estoy llamando|le llamo|le hablo|llamamos|hablamos) (?:de|del|desde) (?:el |la |un |una )?(?:[a-z\u00e0-\u00ff'.-]+ ){0,4}?(?:hospital|cl[ií]nica|consultorio|sala de emergencias?|emergencias|centro m[eé]dico|oficina del (?:doctor|dr\.?))/,
+  /\b(?:nuestr[oa]|tengo un[a]?) paciente\b/,
+];
+
+/** Pure, for tests: does this caller text identify the caller as a provider? */
+export function callerSaysTheyAreAProvider(spoken: string): boolean {
+  const text = ` ${(spoken ?? '').toLowerCase().replace(/[’‘]/g, "'").replace(/\s+/g, ' ')} `;
+  return PROVIDER_SELF_IDENTIFICATION.some((re) => re.test(text));
 }
 
 /**
@@ -105,7 +223,12 @@ export interface CorroborationResult {
 export function corroborate(callId: string | undefined, claimText: string): CorroborationResult {
   const spoken = callerSaid(callId);
   const claim = (claimText ?? '').toLowerCase();
-  const out: CorroborationResult = { unsupported: [], supported: [], haveSpeech: Boolean(spoken.trim()) };
+  const out: CorroborationResult = {
+    unsupported: [],
+    supported: [],
+    haveSpeech: Boolean(spoken.trim()),
+    providerStated: callerSaysTheyAreAProvider(spoken),
+  };
 
   // No record of caller speech — a transcription gap, a very short call, or a
   // path that does not feed this ledger. Never treat that as evidence of

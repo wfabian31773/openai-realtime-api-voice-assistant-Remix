@@ -68,7 +68,12 @@ export type EscalationVerdict =
   | { allowed: true; basis: 'provider_or_facility' | 'acute_clinical' | 'unclassified_default_open' }
   | {
       allowed: false;
-      code: 'communication_failure' | 'administrative_request' | 'symptoms_not_stated_by_caller' | 'post_op_medication';
+      code:
+        | 'communication_failure'
+        | 'administrative_request'
+        | 'symptoms_not_stated_by_caller'
+        | 'post_op_medication'
+        | 'provider_not_stated_by_caller';
       directive: string;
     };
 
@@ -162,22 +167,60 @@ const ADMINISTRATIVE_SUBJECTS = [
 const SYMPTOM_PATTERN =
   /\b(pain|painful|hurt|hurts|hurting|ache|aching|sore|red|redness|swollen|swelling|vision|blur|blurry|blurred|see|seeing|sight|light|flash|flashes|floater|floaters|curtain|shadow|discharge|pus|bleed|bleeding|blood|pressure|itch|itchy|burning|watering|nausea|vomit|fever|dolor|duele|rojo|roja|hinchad\w*|vision|borros\w*|sangr\w*|veo|ver)\b/;
 
+/**
+ * ANY SYMPTOM IN THE REASON, for the unstated-provider refusal only. A reason
+ * that describes a symptom is judged as a patient call, the way it was before
+ * the 2026-10-19 ruling, so the refusal can never catch a caller who is
+ * describing an emergency in words the acute lists above happen to miss
+ * ("extreme pain after surgery today" is in neither). Narrower than
+ * SYMPTOM_PATTERN on purpose: "see" and "vision" would match "wants to see
+ * Doctor Shah" and "calling from Azul Vision", which are exactly the calls
+ * this refusal exists for.
+ */
+const REASON_SYMPTOM =
+  /\b(pain|painful|hurt|hurts|hurting|ache|aching|sore|red|redness|swollen|swelling|blur|blurry|blurred|flash|flashes|floaters?|curtain|shadow|discharge|pus|bleed|bleeding|blood|pressure|itch|itchy|burning|watering|nausea|vomit\w*|fever|injur\w*|trauma|chemical|can'?t see|cannot see|vision (?:loss|change|changes|problem|problems)|lost (?:his |her |my |their )?(?:vision|sight)|dolor|duele|rojo|roja|hinchad\w*|sangr\w*)\b/;
+
 const norm = (s?: string) => ` ${(s ?? '').toLowerCase().replace(/\s+/g, ' ')} `;
 const hits = (haystack: string, needles: string[]) => needles.some((n) => haystack.includes(n));
 
 /**
  * Decide whether this escalation is one of the operator's three cases.
  *
- * Order matters and encodes the ruling: identity first (a provider gets
- * through regardless of what else the sentence says), then acuity, then the
- * two refusals, then open.
+ * Order matters and encodes the ruling: identity first (a provider who SAID
+ * so gets through regardless of what else the sentence says), then acuity,
+ * then the refusals (a provider claim the caller never made is the last of
+ * them), then open.
  */
 export function judgeEscalation(req: EscalationRequest): EscalationVerdict {
   const text = norm([req.reason, req.symptomsSummary, req.providerInfo].filter(Boolean).join(' . '));
   const callerType = (req.callerType ?? '').toLowerCase();
 
-  // CASE 1 + 2 — a provider's office or a hospital. Highest precedence.
-  if (callerType === 'healthcare_provider' || hits(text, PROVIDER_TERMS)) {
+  /**
+   * CASE 1 + 2 — a provider's office or a hospital. Highest precedence, BUT
+   * ONLY WHEN THE CALLER SAID SO.
+   *
+   * Operator, 2026-10-19: "no escalation unless the caller themselves said
+   * they are a provider." Until then this case took the agent's word for it,
+   * and the agent's word was cheap. `callerType` is the agent's guess and the
+   * reason is the agent's sentence, so a reason that merely NAMES a doctor
+   * ("caller requesting Doctor Nair") matched `dr.` above and rang the
+   * on-call phone. Over 75 days of after-hours escalations, patients asking
+   * for their own doctor by name rang through this way, and on 2026-10-18 a
+   * caller who said only "Operator." was written up as "operator/clinician"
+   * and connected (CA4079341a0d7e7cbbc9daf36da56bb7c0).
+   *
+   * So the provider case now needs the caller's own self-identification (see
+   * callerSaysTheyAreAProvider). Without it the call is judged on everything
+   * else below — a patient who describes an eye emergency in their own words
+   * still rings, as case 3 — and only if nothing else lets it through is it
+   * refused, with a directive to ask the caller which office or facility they
+   * are calling from. No record of the caller speaking at all still fails
+   * open, as every check here does.
+   */
+  const providerClaimed = callerType === 'healthcare_provider' || hits(text, PROVIDER_TERMS);
+  const corrForProvider = req.corroboration;
+  const providerUnstated = providerClaimed && Boolean(corrForProvider?.haveSpeech) && !corrForProvider?.providerStated;
+  if (providerClaimed && !providerUnstated) {
     return { allowed: true, basis: 'provider_or_facility' };
   }
 
@@ -289,6 +332,22 @@ export function judgeEscalation(req: EscalationRequest): EscalationVerdict {
         'authorizations, faxes and billing are never transfers on this line. Call create_ticket now and tell ' +
         'the caller the team will follow up. Transfer only for an eye emergency, or a provider or hospital ' +
         'calling about a patient.',
+    };
+  }
+
+  // REFUSAL 3 — the agent called this a provider call and the caller never
+  // said so. Last, so an emergency the caller described still rings above,
+  // and never when the reason describes a symptom (see REASON_SYMPTOM).
+  if (providerUnstated && !REASON_SYMPTOM.test(text.replace(/azul vision/g, ' '))) {
+    return {
+      allowed: false,
+      code: 'provider_not_stated_by_caller',
+      directive:
+        'The caller has not said they are a doctor, a nurse, or calling from a doctor\'s office, hospital, ER ' +
+        'or clinic, and this line transfers a provider call only when the caller says so. Asking for a ' +
+        'doctor by name, or for an operator, does not make someone a provider. Ask ONE question: "Are you ' +
+        'calling from a doctor\'s office, a hospital or a clinic, and which one?" If they name one, call ' +
+        'escalate_to_human once more. If not, take their message.',
     };
   }
 

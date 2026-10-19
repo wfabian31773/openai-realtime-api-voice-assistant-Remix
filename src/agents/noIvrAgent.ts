@@ -190,7 +190,8 @@ export type RefusedEscalationCode =
   | 'communication_failure'
   | 'administrative_request'
   | 'symptoms_not_stated_by_caller'
-  | 'post_op_medication';
+  | 'post_op_medication'
+  | 'provider_not_stated_by_caller';
 
 export const REFUSED_ESCALATION_WHY: Record<RefusedEscalationCode, string> = {
   communication_failure:
@@ -203,6 +204,9 @@ export const REFUSED_ESCALATION_WHY: Record<RefusedEscalationCode, string> = {
   post_op_medication:
     'a post-operative medication or prescription problem with no new symptom is filed URGENT for the After ' +
     'Hours team rather than transferred (operator ruling 2026-10-02)',
+  provider_not_stated_by_caller:
+    'the caller has not said they are a doctor, a nurse, or calling from a doctor\'s office, hospital, ER or ' +
+    'clinic, and this line transfers a provider call only when the caller says so (operator ruling 2026-10-19)',
 };
 
 export const REFUSED_ESCALATION_LINE = {
@@ -264,7 +268,12 @@ export function refusedEscalationResult(args: {
         ? ' If the caller then describes a NEW SYMPTOM in their own words — pain, a change in vision, ' +
           'redness, swelling, discharge — that is post-surgical trouble and you may call ' +
           'escalate_to_human once more with the symptom as they said it.'
-        : '';
+        : code === 'provider_not_stated_by_caller'
+          ? ' BEFORE you say that line, ask ONE question: "Are you calling from a doctor\'s office, a ' +
+            'hospital or a clinic, and which one?" If they name one, do not say the line: call ' +
+            'escalate_to_human once more with what they told you. Asking for a doctor by name, or for an ' +
+            'operator, does not make someone a provider.'
+          : '';
   if (filed.ok) {
     const ticket = filed.ticketNumber ? ` (${filed.ticketNumber})` : '';
     const afterLine =
@@ -347,6 +356,13 @@ export function transferRecordCrossReference(earlier: RefusedEscalationRecord): 
       `SUPERSEDES ${t}: that ticket was filed automatically when a first escalation attempt was refused ` +
       'because the symptoms the agent wrote were not corroborated. The caller then described the emergency ' +
       `in their own words and WAS connected to the on-call provider. No callback is needed on ${t}.`
+    );
+  }
+  if (earlier.code === 'provider_not_stated_by_caller') {
+    return (
+      `SUPERSEDES ${t}: that ticket was filed automatically when a first escalation attempt was refused ` +
+      'because the caller had not yet said they were calling from a provider\'s office or facility. They ' +
+      `then said so and WERE connected to the on-call provider. No callback is needed on ${t}.`
     );
   }
   return (
@@ -2019,6 +2035,15 @@ Always say a brief goodbye phrase BEFORE calling this tool.`,
           ? 'Caller asked to reach the on-call team. The symptoms the agent wrote ' +
             `(${uncorroborated.join(', ') || 'unspecified'}) were NOT stated by the caller — ` +
             'read the recording for what they actually said.'
+          : code === 'provider_not_stated_by_caller'
+            ? [
+                'Caller asked to reach the on-call team. The agent described them as a provider, but the ' +
+                  'caller never said they were one; read the recording for what they actually said.',
+                `Agent's summary (unverified): ${params.reason}`,
+                params.symptoms_summary ? `Symptoms: ${params.symptoms_summary}` : null,
+              ]
+                .filter(Boolean)
+                .join('\n')
           : [
               params.reason,
               params.symptoms_summary ? `Symptoms: ${params.symptoms_summary}` : null,
@@ -2154,7 +2179,7 @@ For healthcare provider calls — escalate immediately with whatever info you ha
        */
       caller_type: z
         .enum(["patient_urgent_medical", "healthcare_provider"])
-        .describe("patient_urgent_medical=a true eye emergency happening now, healthcare_provider=a doctor, nurse, hospital, ER or clinic calling about a patient. There is no third option: if you could not understand the caller or could not collect a detail, that is create_ticket, never this tool."),
+        .describe("patient_urgent_medical=a true eye emergency happening now, healthcare_provider=a doctor, nurse, hospital, ER or clinic calling about a patient, and ONLY when the caller has said so in their own words (asking for a doctor by name, or for an operator, does not make someone a provider: ask which office or facility they are calling from first). There is no third option: if you could not understand the caller or could not collect a detail, that is create_ticket, never this tool."),
       patient_first_name: z.string().optional().describe("Patient first name if collected"),
       patient_last_name: z.string().optional().describe("Patient last name if collected"),
       patient_dob: z.string().optional().describe("Patient date of birth if collected"),
