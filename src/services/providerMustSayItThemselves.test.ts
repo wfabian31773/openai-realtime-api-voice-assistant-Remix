@@ -57,6 +57,13 @@ describe('a caller who says who they are is a provider', () => {
     'Le llamo desde la sala de emergencias por un paciente.',
     'This is the emergency room at Huntington calling.',
     "Hi, this is St. Vincent's hospital, we have a patient of yours here.",
+    // Kept true by the review P2 tightening (#353).
+    'This is Dr. Patel from Pomona Valley.',
+    "I'm a nurse calling from Pomona Valley Hospital.",
+    "I'm calling from Dr. Lee's office about a patient.",
+    "I'm calling from Doctor Lee's office about a patient.",
+    "I'm the resident on call at County.",
+    "I'm an NP with the clinic on Main Street.",
   ];
   for (const t of PROVIDERS) it(t, () => expect(callerSaysTheyAreAProvider(t)).toBe(true));
 });
@@ -86,6 +93,13 @@ describe('asking for a doctor, an operator or a page is not saying you are one',
     'I have a patient portal question.',
     '¿Es la clínica azul? ¿Puedo hacer la cita?',
     "There's a clinic. This is clinical. It's a clinical.",
+    // Review P2, #353: patient sentences the first version read as providers.
+    "I'm Dr. Shah's patient.",
+    'I’m Dr. Shah’s patient.',
+    "I'm the doctor's patient.",
+    'I am a resident of Covina.',
+    'I have been a patient there for years.',
+    'We have a patient appointment tomorrow.',
   ];
   for (const t of PATIENTS) it(t, () => expect(callerSaysTheyAreAProvider(t)).toBe(false));
 });

@@ -62,8 +62,29 @@ describe('the call that started this', () => {
     expect(result.supported).toEqual([]);
   });
 
-  it('refuses the escalation that woke the on-call provider', () => {
+  it('no longer refuses it: the caller described DISCHARGE, and a described symptom always lets them in', () => {
+    /**
+     * Review P1, #353: the refusal fires only on a caller who said nothing
+     * symptomatic at all, because the per-claim evidence lists can always be
+     * one wording short and a miss there refused a real vision-loss caller.
+     * This caller said "discharge", so the call is judged on the rest of the
+     * gate (and goes through default-open). The lists above still report the
+     * pain and vision as unsupported, for the record.
+     */
     for (const line of REAL_CALL_LINES) recordCallerSpeech(CALL, line);
+    const c = corroborate(CALL, 'red eye with pain and vision changes reported');
+    expect(c.symptomStated).toBe(true);
+    expect(
+      judgeEscalation({
+        callerType: 'patient_urgent_medical',
+        reason: 'red eye with pain and vision changes reported',
+        corroboration: c,
+      }).allowed,
+    ).toBe(true);
+  });
+
+  it('refuses the same write-up for a caller who said nothing symptomatic', () => {
+    for (const line of REAL_CALL_LINES.filter((l) => !/discharge/i.test(l))) recordCallerSpeech(CALL, line);
 
     const verdict = judgeEscalation({
       callerType: 'patient_urgent_medical',

@@ -38,6 +38,10 @@
  * the defect.
  */
 
+// The gate owns the acute lists; it imports only a TYPE from this module, so
+// this is not a runtime cycle.
+import { describesAcuteEvent } from './afterHoursEscalationGate';
+
 /** Caller utterances for a live call, lowercased, most recent last. */
 const callerSpeech = new Map<string, string[]>();
 
@@ -122,7 +126,14 @@ const CLAIM_EVIDENCE: Array<{ claim: RegExp; spoken: RegExp; label: string }> = 
   {
     label: 'vision change',
     claim: /vision (change|loss|blurr)|blurr(ed|y) vision|can'?t see|cannot see|losing (my )?(sight|vision)|lost (my )?(sight|vision)/,
-    spoken: /\bvision\b|\bsee\b|\bseeing\b|\bsight\b|\bblurr?|\bcloudy\b|\bdouble\b|\bdark\b|\bspots?\b|\bfloaters?\b|\bflash|\bvista\b|\bver\b|\bveo\b|\bborros/,
+    // WIDE ON PURPOSE, because a miss here refuses an emergency. A caller who
+    // lost their sight rarely says "vision": they say they went blind, lost
+    // their EYESIGHT (`sight` takes no leading \b so it matches inside it),
+    // everything went black or dark, a curtain or a shadow came down, it's
+    // gone, or "estoy ciego", "no veo", "perdí la vista", "se me nubló",
+    // "todo se puso negro" (review P1, #353).
+    spoken:
+      /\bvision\b|\bsee\b|\bseeing\b|sight\b|\bblind|\bblurr?|\bcloudy\b|\bdouble\b|\bdark|\bblack|\bcurtain|\bshadow|\bveil\b|\bgone\b|\bspots?\b|\bfloaters?\b|\bflash|\bvista\b|\bver\b|\bveo\b|\bborros|\bcieg[oa]s?\b|\bnubl|\bcortina|\bsombra|\bnegr[oa]\b/,
   },
 ];
 
@@ -145,6 +156,14 @@ export interface CorroborationResult {
    * symptom the model wrote into its reason. False whenever haveSpeech is false.
    */
   symptomStated: boolean;
+  /**
+   * The caller's own lines carry one of the gate's acute terms or phrases
+   * ("went blind", "curtain", "after surgery", "something in my eye"). Like
+   * symptomStated, it lets the caller back in on every check that would
+   * otherwise refuse them for words the model wrote. False whenever haveSpeech
+   * is false.
+   */
+  acuteStated: boolean;
 }
 
 /**
@@ -194,14 +213,35 @@ const PROVIDER_ROLE =
 const FACILITY =
   String.raw`(?:hospital|medical (?:center|group|office|clinic)|clinic|e\.? ?r\b\.?|emergency (?:room|department)|` +
   String.raw`urgent care|surgery center|surgical center|nursing (?:home|facility)|skilled nursing|` +
-  String.raw`rehab(?:ilitation)? (?:center|facility)|doctor'?s office|dr\.? [a-z'-]+'?s office|` +
+  String.raw`rehab(?:ilitation)? (?:center|facility)|doctor'?s office|(?:dr\.?|doctor) [a-z'-]+'?s office|` +
   String.raw`office of (?:dr\.?|doctor) [a-z'-]+|optometry|ophthalmology|eye (?:center|clinic|institute)|icu|intensive care)`;
 
+/**
+ * The roles a patient also says about themselves: "I am a resident of
+ * Covina", "I'm on my PA's list". Counted only with a calling or facility word
+ * after them (review P2, #353).
+ */
+const AMBIGUOUS_ROLE = String.raw`(?:resident|np|pa|md)`;
+const STRONG_ROLE =
+  String.raw`(?:dr\.?|doctor|doctora|nurse|nurse practitioner|physician|physician assistant|surgeon|` +
+  String.raw`ophthalmologist|optometrist|rn|charge nurse|(?:er|emergency(?: room)?) (?:doctor|physician|nurse))`;
+/**
+ * A role that is somebody ELSE's: "I'm Dr. Shah's patient", "I'm the
+ * doctor's patient". Rejects a possessive straight after the role, or after
+ * the role and one name.
+ */
+const NOT_POSSESSIVE = String.raw`(?!'?s\b)(?!\.? ?[a-z-]+'s\b)`;
+
 const PROVIDER_SELF_IDENTIFICATION: RegExp[] = [
-  // "this is Dr. Brown", "I'm a PA", "this is an emergency room doctor"
-  new RegExp(String.raw`\b(?:this is|i'?m|i am)\s+(?:a |an |the |your )?${PROVIDER_ROLE}\b`),
+  // "this is Dr. Brown", "this is an emergency room doctor"
+  new RegExp(String.raw`\b(?:this is|i'?m|i am)\s+(?:a |an |the |your )?${STRONG_ROLE}\b${NOT_POSSESSIVE}`),
+  // "I'm a PA calling", "I'm the resident on call", "I'm an NP with the clinic"
+  new RegExp(
+    String.raw`\b(?:this is|i'?m|i am)\s+(?:a |an |the |your )?${AMBIGUOUS_ROLE}\b` +
+      String.raw`(?: [a-z-]+)?? (?:calling|on call|from|with|at|on behalf)\b`,
+  ),
   // "my name is Doctor Perez"
-  new RegExp(String.raw`\bmy name is (?:a |an |the )?${PROVIDER_ROLE}\b`),
+  new RegExp(String.raw`\bmy name is (?:a |an |the )?${PROVIDER_ROLE}\b${NOT_POSSESSIVE}`),
   // "referring doctor on the phone", "a doctor calling"
   new RegExp(String.raw`\b${PROVIDER_ROLE} (?:here|calling|on the (?:phone|line))\b`),
   // "calling from St. Joe's emergency room", "speaking on behalf of a clinic"
@@ -219,7 +259,10 @@ const PROVIDER_SELF_IDENTIFICATION: RegExp[] = [
   /\bon behalf of (?:dr\.?|doctor) [a-z]/,
   // "our mutual patient", "I have a post-operative patient", "the patient is on our ER"
   /\b(?:our|a mutual) (?:mutual )?patients?\b/,
-  /\b(?:i|we) (?:have|'?ve got|got) (?:a |an |the |this )?(?:[a-z-]+ ){0,3}?patient\b(?! portal| id\b| number| account)/,
+  // At most ONE word between the article and "patient" ("a post-operative
+  // patient"), never "been": "I have been a patient there for years" and "we
+  // have a patient appointment tomorrow" are patients (review P2, #353).
+  /\b(?:i|we) (?:have|'?ve got|got) (?:a |an |the |this )?(?:(?!been )[a-z-]+ )?patient\b(?! portal| id\b| number| account| appointment| here\b| there\b| of\b)/,
   /\bpatient (?:is |that'?s |who'?s |who is )?(?:on|in|at) (?:our|the) (?:e\.? ?r\b|emergency|unit|floor|icu|facility)/,
   /\b(?:on|in) our (?:e\.? ?r\b|emergency|unit|floor|icu)/,
   /\bour (?:physician|provider|surgeon|nurse)\b/,
@@ -246,14 +289,15 @@ export function callerSaysTheyAreAProvider(spoken: string): boolean {
  * the agent invented is treated as supported.
  */
 export function corroborate(callId: string | undefined, claimText: string): CorroborationResult {
-  const spoken = callerSaid(callId);
+  const spoken = callerSaid(callId).toLowerCase().replace(/[’‘]/g, "'");
   const claim = (claimText ?? '').toLowerCase();
   const out: CorroborationResult = {
     unsupported: [],
     supported: [],
     haveSpeech: Boolean(spoken.trim()),
     providerStated: callerSaysTheyAreAProvider(spoken),
-    symptomStated: CALLER_SYMPTOM.test(spoken.toLowerCase().replace(/[’‘]/g, "'")),
+    symptomStated: CALLER_SYMPTOM.test(spoken),
+    acuteStated: Boolean(spoken.trim()) && describesAcuteEvent(spoken),
   };
 
   // No record of caller speech — a transcription gap, a very short call, or a

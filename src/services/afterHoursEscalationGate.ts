@@ -171,6 +171,17 @@ const norm = (s?: string) => ` ${(s ?? '').toLowerCase().replace(/\s+/g, ' ')} `
 const hits = (haystack: string, needles: string[]) => needles.some((n) => haystack.includes(n));
 
 /**
+ * One of the acute terms or phrases above, in any text. Exported so the
+ * corroboration ledger can ask it of the CALLER's own lines (`acuteStated`):
+ * a caller who said "I went blind" or "a curtain came down" has described an
+ * emergency whatever the model wrote.
+ */
+export function describesAcuteEvent(raw: string): boolean {
+  const text = norm(raw.replace(/[’‘]/g, "'"));
+  return hits(text, ACUTE_TERMS) || ACUTE_PATTERNS.some((re) => re.test(text));
+}
+
+/**
  * Decide whether this escalation is one of the operator's three cases.
  *
  * Order matters and encodes the ruling: identity first (a provider who SAID
@@ -231,7 +242,23 @@ export function judgeEscalation(req: EscalationRequest): EscalationVerdict {
    * — see CLAIM_EVIDENCE, where "stings", "burns" and "cloudy" all count.
    */
   const corr = req.corroboration;
-  if (corr && corr.haveSpeech && corr.unsupported.length > 0 && corr.supported.length === 0) {
+  /**
+   * AND NEVER WHEN THE CALLER DESCRIBED A SYMPTOM OR AN ACUTE EVENT in their
+   * own words, whatever the claim lists matched. A caller who said "I went
+   * blind" or "everything went black" while the model wrote "sudden vision
+   * loss" is the call this line exists to ring through; the per-claim
+   * evidence lists can always be one wording short, and a miss there refused
+   * an emergency (review P1, #353). The refusal now fires only on a caller
+   * who said nothing symptomatic at all.
+   */
+  const callerDescribedSomething = Boolean(corr?.symptomStated || corr?.acuteStated);
+  if (
+    corr &&
+    corr.haveSpeech &&
+    corr.unsupported.length > 0 &&
+    corr.supported.length === 0 &&
+    !callerDescribedSomething
+  ) {
     return {
       allowed: false,
       code: 'symptoms_not_stated_by_caller',
@@ -279,8 +306,22 @@ export function judgeEscalation(req: EscalationRequest): EscalationVerdict {
 
   const administrative = hits(text, ADMINISTRATIVE_SUBJECTS);
 
+  /**
+   * A PROVIDER CLAIM THE CALLER NEVER MADE MUST NOT RING THROUGH THE ACUTE
+   * DOOR EITHER. The acute lists read the model's sentence, so "clinician
+   * calling about a post-op patient" for a caller who said "Operator. Page
+   * Dr. Hart." rang as acute_clinical and skipped refusal 3 below (review P2,
+   * #353). When the provider claim is unstated, an acute match counts only if
+   * the CALLER described a symptom or an acute event; otherwise the call falls
+   * through to refusal 3, which asks one question and lets a real provider or
+   * a described emergency back in. A provider who said so never reaches here,
+   * and with no record of the caller speaking `providerUnstated` is false, so
+   * that path — the old core's when it feeds nothing — is unchanged.
+   */
+  const acuteCorroborated = !providerUnstated || callerDescribedSomething;
+
   // CASE 3 — a truly urgent patient. An unambiguous acute term wins outright.
-  if (hits(text, ACUTE_TERMS) || ACUTE_PATTERNS.some((re) => re.test(text))) {
+  if (acuteCorroborated && (hits(text, ACUTE_TERMS) || ACUTE_PATTERNS.some((re) => re.test(text)))) {
     return { allowed: true, basis: 'acute_clinical' };
   }
 
@@ -292,7 +333,7 @@ export function judgeEscalation(req: EscalationRequest): EscalationVerdict {
    * urgently needs to know when their glasses will be ready").
    */
   const softVision = /(cannot|can't|can not|couldn't|unable to) see|blurr|double vision|vision (is |has )?(gone|worse|blurry)/.test(text);
-  if (softVision && !administrative) {
+  if (softVision && !administrative && acuteCorroborated) {
     return { allowed: true, basis: 'acute_clinical' };
   }
 
@@ -329,7 +370,7 @@ export function judgeEscalation(req: EscalationRequest): EscalationVerdict {
   // model that writes "redness" into the reason of a caller who said only
   // "Operator." would otherwise skip this refusal and ring through
   // default-open (Codex P1, #353).
-  if (providerUnstated && !corrForProvider?.symptomStated) {
+  if (providerUnstated && !callerDescribedSomething) {
     return {
       allowed: false,
       code: 'provider_not_stated_by_caller',
