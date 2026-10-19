@@ -352,7 +352,9 @@ describe('a turn that answers refusal 3 names a facility anywhere in it (review 
     // Round 7: "my patient" is a provider's word, not a relative's; and a
     // provider's "would like" or "have" is not a want of the facility.
     "I'm calling for my patient from Methodist Hospital ER.",
+    'Yes, calling for my patient from Kaiser Fontana ER',
     "I'd like to report a patient from Kaiser hospital ER.",
+    "Yes, Kaiser Fontana ER, I'd like to speak with the on-call",
     'We have a patient from Kaiser ER.',
     'We have the ER at Huntington on the line for the on-call.',
   ];
@@ -409,16 +411,31 @@ describe('a turn that answers refusal 3 names a facility anywhere in it (review 
     "I'd like to talk to somebody from the Covina clinic.",
     "Yes, I'm calling for my husband from Kaiser hospital.",
     'Quiero que me llame mi clínica.',
-    // Round 7: "would like" and causative "have" are wants.
+    // Round 7: "would like" and a causative "have/get" are wants.
     "I'd like the doctor's office to call me back.",
+    "I would like Dr. Shah's office to call me.",
+    "I'd like Dr. Lee's office, please.",
+    'I would like the hospital to call me back.',
     'Please have the Covina clinic call me.',
     'Can you have the Pasadena clinic call me back?',
+    'Can you have the Pasadena clinic call me back',
     'Could you please have the Covina clinic call me.',
+    "Could you get the doctor's office to call me",
     'Have the Covina clinic call me.',
     'Sure, have the Pasadena clinic call me back.',
+    'Me gustaría que la clínica me llame.',
+    'Que me llame el consultorio, por favor.',
+    // Round 7: "calling for my" a relative is still not a provider.
     "Yes, I'm calling for my husband from Kaiser hospital, he's a patient there.",
+    'Calling for my mom from the ER.',
   ];
   for (const t of NOT_ANSWERS) it(`does not count: ${t}`, () => expect(answered(t)).toBe(false));
+
+  it('a self-identified provider who would "like" the on-call still counts (review r7)', () => {
+    expect(
+      callerSaysTheyAreAProvider("This is Dr. Patel, I'd like the on-call to call me back about a post-op patient"),
+    ).toBe(true);
+  });
 
   it('the negation guard is scoped to its own sentence', () => {
     expect(answered("Sorry, I can't hear you well. Yes, Pomona Valley Hospital.")).toBe(true);
