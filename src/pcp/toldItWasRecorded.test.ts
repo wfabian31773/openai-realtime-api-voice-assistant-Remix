@@ -117,12 +117,14 @@ describe('what counts as telling the caller it is recorded', () => {
   });
 
   it('digit words inside other words are left alone', () => {
-    // "someone", "tone", "often" must not fold into digits.
-    expect(toldTheCallerItWasRecorded('AGENT: Someone from the team, often within a day, will call.', ['PCP-1010'])).toBe(false);
+    // "anyone" must stay a word: folded as "any1" it would run into the
+    // "999" after it and read as ticket 1999.
+    expect(toldTheCallerItWasRecorded('AGENT: Anyone, nine nine nine times in a thousand, gets a call back.', ['PCP-1999'])).toBe(false);
   });
 
   it('a number too short to be distinctive is never matched', () => {
-    expect(toldTheCallerItWasRecorded('AGENT: Office 12 is open at nine.', ['PCP-129'])).toBe(false);
+    // Three digits turn up in ordinary sentences — a suite, an extension.
+    expect(toldTheCallerItWasRecorded('AGENT: That office is suite 129, open at nine.', ['PCP-129'])).toBe(false);
   });
 
   it('an empty transcript, or none at all, tells nobody anything', () => {
