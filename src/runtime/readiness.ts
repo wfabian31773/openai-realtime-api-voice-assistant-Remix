@@ -760,8 +760,18 @@ import { callEnvironment } from "./callRecord";
  * connecting. It fires on the same attempt it always did.
  * `src/runtime/providerConnect.test.ts`, `src/runtime/laneRoster.test.ts`.
  */
+/**
+ * v102 — A PCP CALLER TOLD THEIR REQUEST IS RECORDED KEEPS IT WHEN THEY HANG
+ * UP (2026-10-19). Operator: "yes, build the readback exemption for the
+ * hang-up withdrawal." v100's withdrawal removed six PCP tickets on its first
+ * afternoon, four from callers who had heard a ticket number or "I've taken
+ * this down". The hang-up sweep now reads the agent's lines and does not ask
+ * the app to withdraw when the call filed a number the agent read out — in any
+ * rendering, since grok-voice-3.0 spells numbers — or when the refused
+ * transfer's claim was spoken. `src/pcp/toldItWasRecorded.test.ts`.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v101-every-lane-on-grok-voice-3-20261019";
+  "voice-runtime-v102-a-caller-told-it-is-recorded-keeps-it-20261019";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can
