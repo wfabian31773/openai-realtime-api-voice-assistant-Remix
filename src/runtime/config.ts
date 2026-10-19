@@ -41,19 +41,29 @@ export interface GrokRuntimeVoiceConfig {
 }
 
 /**
- * STILL THE 2.0 MODEL, AND xAI HAS DEPRECATED IT (2026-10-14). The session
- * xAI opens for this name reports `model: "grok-voice-2.0"`, and the
- * 2026-10-14 invoice billed most of the day under that name — the same model,
- * renamed. xAI's release note: "grok-voice-2.0 is deprecated. To upgrade, set
- * model to grok-voice-3.0", same endpoint, same session parameters, same
- * price. No retirement date was given.
+ * grok-voice-3.0 ON EVERY LANE — operator, 2026-10-19: "switch the entire
+ * runtime to 3.0".
  *
- * Deliberately NOT flipped here yet. The 3.0 canary is one environment
- * variable (`XAI_VOICE_MODEL_<SLUG>=grok-voice-3.0`), which needs no deploy to
- * revert and can be read back off `/voice/health` (`lanes[].voiceModel`). The
- * default moves after the canary's after-number, per docs/BACKEND_HANDOFF.md.
+ * The model this replaced, `grok-voice-think-fast-2.0`, is the one xAI
+ * deprecated on 2026-10-14: the session it opens reports
+ * `model: "grok-voice-2.0"`, and xAI's note says "grok-voice-2.0 is
+ * deprecated. To upgrade, set model to grok-voice-3.0" — same endpoint, same
+ * session parameters, same price.
+ *
+ * The flip rests on the tech canary (`XAI_VOICE_MODEL_TECH=grok-voice-3.0`,
+ * live 2026-10-16), measured 2026-10-19 on `call_logs` against tech's own
+ * 2.0 days, substantive calls: 3.0 filed 86.8% of 257 against 84.5% of 1,267
+ * (10-06..15), barely heard 5.1% against 7.2%, dead air 1 against 23,
+ * provider failures 0 against 2. The offline A/B before it: 3.0 filed every
+ * run it could finish and never went silent after a refusal, where 2.0 went
+ * silent on 10 of 60.
+ *
+ * THE REVERT IS NOT A DEPLOY: `XAI_VOICE_MODEL_<SLUG>=grok-voice-think-fast-2.0`
+ * puts one lane back, `XAI_VOICE_MODEL` the whole fleet, and
+ * `/voice/health` (`lanes[].voiceModel`) shows which model each lane opens.
+ * An `XAI_VOICE_MODEL` left set in the environment OUTRANKS this default.
  */
-const DEFAULT_MODEL = "grok-voice-think-fast-2.0";
+const DEFAULT_MODEL = "grok-voice-3.0";
 const DEFAULT_VOICE = "eve";
 
 /** Env keys are upper-snake: `azul-scheduling` -> `AZUL_SCHEDULING`. */

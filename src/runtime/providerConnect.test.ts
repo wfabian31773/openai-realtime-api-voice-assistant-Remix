@@ -17,6 +17,11 @@ import {
   firstEventTimeoutMs,
   handshakeTimeoutMs,
   ProviderConnectAbortedError,
+  connectFailureKind,
+  DROPPED_AFTER_OPEN,
+  SILENT_STALL,
+  trackConnect,
+  type ConnectOutcome,
   type OpenedProviderSocket,
 } from "./providerConnect";
 
@@ -235,11 +240,227 @@ describe("the stall-rate window", () => {
     expect(second.alerted).toBe(true);
     expect(second.stalls).toBe(2);
     expect(alerts).toHaveLength(1);
-    expect(alerts[0]).toMatch(/STALL RATE 2\/3/);
+    expect(alerts[0]).toMatch(/CONNECT FAILURES 2\/3 attempts/);
     now += 60_000;
     expect(window.note(false).alerted).toBe(false);
     now += 15 * 60 * 1000;
     expect(window.note(false).alerted).toBe(true);
     expect(alerts).toHaveLength(2);
+  });
+});
+
+/**
+ * THE ALERT SAYS WHAT FAILED — 2026-10-19 18:34–18:49 UTC.
+ *
+ * It read "STALL RATE 11/30 (37%) — reconnecting is not absorbing it". The
+ * deployment log said ten of the eleven were xAI answering the upgrade with
+ * HTTP 503 and one was a handshake timeout: nothing stalled, and seven of
+ * the eight calls behind them reconnected on a retry. These pin the words,
+ * the per-attempt kinds the retry loop hands over, and the call outcomes —
+ * and that WHEN it fires did not move.
+ */
+describe("the connect-failure alert names the failure and counts the calls", () => {
+  it("reads the ws library's own handshake messages", () => {
+    expect(connectFailureKind("Unexpected server response: 503")).toBe("HTTP 503");
+    expect(connectFailureKind("Unexpected server response: 429")).toBe("HTTP 429");
+    expect(connectFailureKind("Opening handshake has timed out")).toBe("handshake timeout");
+    expect(connectFailureKind("getaddrinfo ENOTFOUND api.x.ai")).toBe("handshake error");
+  });
+
+  it("hands each attempt's failure kind to the counter, then settles the call", async () => {
+    const queue: Array<() => OpenedProviderSocket> = [
+      () => { throw new Error("Unexpected server response: 503"); },
+      () => socket({ arrived: false }),
+      () => socket({ throwOnWait: new Error("socket closed") }),
+      () => socket({ arrived: true }),
+    ];
+    const waits: Array<[boolean, string | undefined]> = [];
+    const settled: ConnectOutcome[] = [];
+    await connectWithFirstEventRetry({
+      open: async () => queue.shift()!(),
+      firstEventTimeoutMs: 80,
+      maxRetries: 3,
+      log: () => undefined,
+      noteFirstEventWait: (arrived, failure) => waits.push([arrived, failure]),
+      noteConnectSettled: (outcome) => settled.push(outcome),
+    });
+    expect(waits).toEqual([
+      [false, "HTTP 503"],
+      [false, SILENT_STALL],
+      [false, DROPPED_AFTER_OPEN],
+      [true, undefined],
+    ]);
+    expect(settled).toEqual(["connected"]);
+  });
+
+  it.each([
+    ["a handshake failure", () => { throw new Error("Opening handshake has timed out"); }],
+    ["a silent socket", () => socket({ arrived: false })],
+    ["a socket that drops after open", () => socket({ throwOnWait: new Error("closed") })],
+  ])("settles the call as lost when the last attempt is %s", async (_label, last) => {
+    const queue: Array<() => OpenedProviderSocket> = [
+      () => { throw new Error("Unexpected server response: 503"); },
+      last as () => OpenedProviderSocket,
+    ];
+    const settled: ConnectOutcome[] = [];
+    await expect(
+      connectWithFirstEventRetry({
+        open: async () => queue.shift()!(),
+        firstEventTimeoutMs: 80,
+        maxRetries: 1,
+        log: () => undefined,
+        noteConnectSettled: (outcome) => settled.push(outcome),
+      }),
+    ).rejects.toBeInstanceOf(FirstEventStallError);
+    expect(settled).toEqual(["lost"]);
+  });
+
+  it("does not settle a call the Twilio side abandoned", async () => {
+    const settled: ConnectOutcome[] = [];
+    await expect(
+      connectWithFirstEventRetry({
+        open: async () => socket(),
+        shouldAbort: () => true,
+        log: () => undefined,
+        noteConnectSettled: (outcome) => settled.push(outcome),
+      }),
+    ).rejects.toBeInstanceOf(ProviderConnectAbortedError);
+    expect(settled).toEqual([]);
+  });
+
+  it("the 2026-10-19 shape: names 503s and the timeout, counts rescued, dropped and in-flight calls", () => {
+    const alerts: string[] = [];
+    const window = createStallRateWindow({
+      window: 30,
+      alertAt: 11,
+      now: () => 1_000,
+      alert: (text) => alerts.push(text),
+      log: () => undefined,
+    });
+    // Call 1 drops: three 503s, every retry.
+    for (let i = 0; i < 3; i++) window.note(false, "HTTP 503", 1);
+    window.settle(1, "lost");
+    // Calls 2–7 each take one 503 and reconnect on the retry.
+    for (let call = 2; call <= 7; call++) {
+      window.note(false, "HTTP 503", call);
+      window.note(true, undefined, call);
+      window.settle(call, "connected");
+    }
+    // Call 8 takes a handshake timeout and reconnects.
+    window.note(false, "handshake timeout", 8);
+    window.note(true, undefined, 8);
+    window.settle(8, "connected");
+    expect(alerts).toEqual([]);
+    // Call 9's 503 is the eleventh failure; it is still mid-retry when this fires.
+    window.note(false, "HTTP 503", 9);
+    expect(alerts).toHaveLength(1);
+    const text = alerts[0];
+    expect(text).toContain("CONNECT FAILURES 11/18 attempts (61%)");
+    expect(text).toContain("HTTP 503 x10, handshake timeout x1.");
+    expect(text).toContain(
+      "Calls affected: 9 (7 reconnected on a retry, 1 dropped after every retry, 1 still connecting).",
+    );
+    expect(text).not.toMatch(/stall|not absorbing/i);
+  });
+
+  it('says "none dropped" when every affected call reconnected', () => {
+    const alerts: string[] = [];
+    const window = createStallRateWindow({
+      window: 30,
+      alertAt: 2,
+      now: () => 1_000,
+      alert: (text) => alerts.push(text),
+      log: () => undefined,
+    });
+    window.note(false, SILENT_STALL, 1);
+    window.note(true, undefined, 1);
+    window.settle(1, "connected");
+    window.note(false, SILENT_STALL, 2);
+    expect(alerts[0]).toContain(`${SILENT_STALL} x2.`);
+    expect(alerts[0]).toContain("Calls affected: 2 (1 reconnected on a retry, none dropped, 1 still connecting).");
+  });
+
+  it("forgets a call once its attempts leave the window", () => {
+    const alerts: string[] = [];
+    const window = createStallRateWindow({
+      window: 3,
+      alertAt: 2,
+      now: () => 1_000,
+      alert: (text) => alerts.push(text),
+      log: () => undefined,
+    });
+    window.note(false, "HTTP 503", 1);
+    window.settle(1, "lost");
+    // Three attempts from call 2 push call 1 out entirely.
+    window.note(true, undefined, 2);
+    window.note(true, undefined, 2);
+    window.note(true, undefined, 2);
+    window.settle(2, "connected");
+    // A settle for a call no longer in the window records nothing.
+    window.settle(1, "lost");
+    window.note(false, "HTTP 503", 3);
+    window.note(false, "HTTP 503", 4);
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0]).toContain("Calls affected: 2 (none dropped, 2 still connecting).");
+  });
+
+  it("fires on exactly the attempt it always did", () => {
+    // Same window, same threshold, same cooldown as the pre-2026-10-19 test:
+    // the words changed, the moment did not.
+    const fired: number[] = [];
+    let now = 1_000;
+    const window = createStallRateWindow({
+      window: 5,
+      alertAt: 2,
+      now: () => now,
+      alert: () => undefined,
+      log: () => undefined,
+    });
+    const script = [true, false, false, false, true];
+    script.forEach((ok, i) => {
+      if (window.note(ok, ok ? undefined : "HTTP 503").alerted) fired.push(i);
+    });
+    now += 15 * 60 * 1000;
+    // A SUCCESS after the cooldown still fires while the window holds enough
+    // failures — unchanged, deliberately.
+    if (window.note(true).alerted) fired.push(5);
+    expect(fired).toEqual([2, 5]);
+  });
+});
+
+describe("the runtime hands every call its own counter", () => {
+  it("voiceRuntime spreads trackConnect() into the retry, so attempts and the outcome share a call id", async () => {
+    const { readFileSync } = await import("node:fs");
+    const src = readFileSync(new URL("./voiceRuntime.ts", import.meta.url), "utf8");
+    const call = src.slice(src.indexOf("await connectWithFirstEventRetry({"));
+    const opts = call.slice(0, call.indexOf("});"));
+    expect(opts).toContain("...trackConnect(),");
+    // The bare module-level counter would drop the call id and the outcome.
+    expect(src).not.toMatch(/^\s*noteFirstEventWait,\s*$/m);
+  });
+});
+
+describe("the production counter", () => {
+  it("gives each call its own id on the process's window, so two calls read as two", () => {
+    // The only test in this file that touches the module-level window, so its
+    // first alert is this one. SMS is skipped under VITEST; the log line is not.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      const a = trackConnect();
+      const b = trackConnect();
+      a.noteFirstEventWait!(false, "HTTP 503");
+      b.noteFirstEventWait!(false, "HTTP 503");
+      a.noteFirstEventWait!(true);
+      a.noteConnectSettled!("connected");
+      b.noteFirstEventWait!(false, "HTTP 503");
+      b.noteFirstEventWait!(false, "handshake timeout");
+      const lines = warn.mock.calls.map((c) => String(c[0]));
+      const alert = lines.find((l) => l.includes("CONNECT FAILURES"));
+      expect(alert).toBeDefined();
+      expect(alert).toContain("HTTP 503 x3, handshake timeout x1.");
+      expect(alert).toContain("Calls affected: 2 (1 reconnected on a retry, none dropped, 1 still connecting).");
+    } finally {
+      warn.mockRestore();
+    }
   });
 });

@@ -139,9 +139,38 @@ export interface ConnectWithFirstEventRetryOpts {
   now?: () => number;
   log?: (line: string) => void;
   noteStall?: () => void;
-  /** Called once per first-event wait: true = event arrived. */
-  noteFirstEventWait?: (arrived: boolean) => void;
+  /**
+   * Called once per attempt: true = the first event arrived. On a failure the
+   * second argument names WHAT failed (`connectFailureKind`), so the alert
+   * can say "HTTP 503" instead of calling every failure a stall.
+   */
+  noteFirstEventWait?: (arrived: boolean, failure?: string) => void;
+  /** Called once per call: connected (on any attempt) or lost after every retry. */
+  noteConnectSettled?: (outcome: ConnectOutcome) => void;
 }
+
+export type ConnectOutcome = "connected" | "lost";
+
+/**
+ * What a failed attempt was, in words an operator reads on an SMS.
+ *
+ * 2026-10-19 18:34–18:49 UTC is why: the alert said "STALL RATE 11/30 —
+ * reconnecting is not absorbing it", and the deployment log said ten of the
+ * eleven were xAI answering the upgrade with HTTP 503 and one was a handshake
+ * timeout. No socket stalled, and seven of the eight calls behind them
+ * reconnected on a retry. The message strings are the `ws` library's own.
+ */
+export function connectFailureKind(message: string): string {
+  const http = /Unexpected server response:\s*(\d{3})/i.exec(message);
+  if (http) return `HTTP ${http[1]}`;
+  if (/handshake has timed out/i.test(message)) return "handshake timeout";
+  return "handshake error";
+}
+
+/** An open socket that sent nothing — the shape v91 was built for. */
+export const SILENT_STALL = "silent (open, no first event)";
+/** The first-event wait itself threw: the socket errored or closed after the upgrade. */
+export const DROPPED_AFTER_OPEN = "dropped after open";
 
 function iso(now: () => number): string {
   return new Date(now()).toISOString();
@@ -207,8 +236,11 @@ export async function connectWithFirstEventRetry(
       });
       log(`[PROVIDER CONNECT] attempt ${n} handshake failed: ${message}`);
       opts.noteStall?.();
-      opts.noteFirstEventWait?.(false);
-      if (n === maxAttempts) throw new FirstEventStallError(attempts);
+      opts.noteFirstEventWait?.(false, connectFailureKind(message));
+      if (n === maxAttempts) {
+        opts.noteConnectSettled?.("lost");
+        throw new FirstEventStallError(attempts);
+      }
       continue;
     }
 
@@ -261,8 +293,11 @@ export async function connectWithFirstEventRetry(
       });
       log(`[PROVIDER CONNECT] attempt ${n} first-event wait threw: ${message}`);
       opts.noteStall?.();
-      opts.noteFirstEventWait?.(false);
-      if (n === maxAttempts) throw new FirstEventStallError(attempts);
+      opts.noteFirstEventWait?.(false, DROPPED_AFTER_OPEN);
+      if (n === maxAttempts) {
+        opts.noteConnectSettled?.("lost");
+        throw new FirstEventStallError(attempts);
+      }
       continue;
     }
 
@@ -279,7 +314,8 @@ export async function connectWithFirstEventRetry(
       throw new ProviderConnectAbortedError();
     }
 
-    opts.noteFirstEventWait?.(arrived);
+    if (arrived) opts.noteFirstEventWait?.(true);
+    else opts.noteFirstEventWait?.(false, SILENT_STALL);
 
     if (arrived) {
       const firstEventAt = iso(now);
@@ -294,6 +330,7 @@ export async function connectWithFirstEventRetry(
       log(
         `[PROVIDER CONNECT] attempt ${n} first event at ${firstEventAt} ${headerBits(socket.headers)}`,
       );
+      opts.noteConnectSettled?.("connected");
       return { socket, attempts };
     }
 
@@ -311,30 +348,102 @@ export async function connectWithFirstEventRetry(
     );
   }
 
+  opts.noteConnectSettled?.("lost");
   throw new FirstEventStallError(attempts);
 }
 
-/** Sliding window of the last N first-event waits. Testable; one process. */
+interface AttemptSample {
+  arrived: boolean;
+  failure?: string;
+  /** Which call made the attempt, so the alert can count calls, not attempts. */
+  call?: number;
+}
+
+export interface StallWindowNote {
+  stalls: number;
+  samples: number;
+  alerted: boolean;
+}
+
+/**
+ * Sliding window of the last N connection attempts. Testable; one process.
+ *
+ * WHEN IT FIRES IS UNCHANGED: a failed attempt that takes the window to
+ * `alertAt` failures, at most once per cooldown. What changed on
+ * 2026-10-19 is WHAT IT SAYS. Every failure used to be called a stall and
+ * every alert said "reconnecting is not absorbing it" — on the first one
+ * that fired, xAI was refusing the upgrade with HTTP 503, nothing stalled,
+ * and seven of the eight calls behind it reconnected. The text now names
+ * each kind of failure with its count, and counts the CALLS behind them:
+ * how many reconnected on a retry, how many dropped after every retry, and
+ * how many were still connecting when it fired.
+ */
 export function createStallRateWindow(opts?: {
   window?: number;
   alertAt?: number;
   alert?: (text: string) => void;
   now?: () => number;
   log?: (line: string) => void;
-}): { note: (arrived: boolean) => { stalls: number; samples: number; alerted: boolean } } {
+}): {
+  note: (arrived: boolean, failure?: string, call?: number) => StallWindowNote;
+  settle: (call: number, outcome: ConnectOutcome) => void;
+} {
   const size = opts?.window ?? STALL_WINDOW;
   const alertAt = opts?.alertAt ?? STALL_ALERT_AT;
-  const samples: boolean[] = [];
+  const samples: AttemptSample[] = [];
+  const outcomes = new Map<number, ConnectOutcome>();
   let lastAlertAt = 0;
   const now = opts?.now ?? Date.now;
   const log = opts?.log ?? ((line: string) => console.warn(line));
 
+  const inWindow = (call: number) => samples.some((s) => s.call === call);
+
+  const alertText = (stalls: number): string => {
+    const rate = samples.length > 0 ? stalls / samples.length : 0;
+    const kinds = new Map<string, number>();
+    const hit = new Set<number>();
+    for (const s of samples) {
+      if (s.arrived) continue;
+      const kind = s.failure ?? "failed";
+      kinds.set(kind, (kinds.get(kind) ?? 0) + 1);
+      if (s.call != null) hit.add(s.call);
+    }
+    const kindText = [...kinds.entries()]
+      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+      .map(([kind, count]) => `${kind} x${count}`)
+      .join(", ");
+    let text =
+      `[PROVIDER CONNECT] CONNECT FAILURES ${stalls}/${samples.length}` +
+      ` attempts (${(rate * 100).toFixed(0)}%): ${kindText}.`;
+    if (hit.size > 0) {
+      let reconnected = 0;
+      let lost = 0;
+      let connecting = 0;
+      for (const call of hit) {
+        const outcome = outcomes.get(call);
+        if (outcome === "connected") reconnected += 1;
+        else if (outcome === "lost") lost += 1;
+        else connecting += 1;
+      }
+      const parts: string[] = [];
+      if (reconnected > 0) parts.push(`${reconnected} reconnected on a retry`);
+      parts.push(
+        lost > 0 ? `${lost} dropped after every retry` : "none dropped",
+      );
+      if (connecting > 0) parts.push(`${connecting} still connecting`);
+      text += ` Calls affected: ${hit.size} (${parts.join(", ")}).`;
+    }
+    return text;
+  };
+
   return {
-    note(arrived: boolean) {
-      samples.push(arrived);
-      if (samples.length > size) samples.shift();
-      const stalls = samples.filter((ok) => !ok).length;
-      const rate = samples.length > 0 ? stalls / samples.length : 0;
+    note(arrived: boolean, failure?: string, call?: number) {
+      samples.push({ arrived, failure, call });
+      if (samples.length > size) {
+        const gone = samples.shift();
+        if (gone?.call != null && !inWindow(gone.call)) outcomes.delete(gone.call);
+      }
+      const stalls = samples.filter((s) => !s.arrived).length;
       let alerted = false;
       if (
         stalls >= alertAt &&
@@ -342,13 +451,16 @@ export function createStallRateWindow(opts?: {
       ) {
         lastAlertAt = now();
         alerted = true;
-        const text =
-          `[PROVIDER CONNECT] STALL RATE ${stalls}/${samples.length}` +
-          ` (${(rate * 100).toFixed(0)}%) — reconnecting is not absorbing it`;
+        const text = alertText(stalls);
         log(text);
         opts?.alert?.(text);
       }
       return { stalls, samples: samples.length, alerted };
+    },
+    settle(call: number, outcome: ConnectOutcome) {
+      // A call whose attempts have already left the window says nothing
+      // about the attempts in it, and keeping it would leak.
+      if (inWindow(call)) outcomes.set(call, outcome);
     },
   };
 }
@@ -358,10 +470,24 @@ const defaultStallWindow = createStallRateWindow({
     void sendStallRateSms(text);
   },
 });
+let nextConnectCall = 0;
 
-/** Production counter. Tests build their own window. */
-export function noteFirstEventWait(arrived: boolean): void {
-  defaultStallWindow.note(arrived);
+/**
+ * Production counter, one per call: spread into `connectWithFirstEventRetry`
+ * so every attempt and the call's outcome land on the process's window under
+ * one call id. Tests build their own window.
+ */
+export function trackConnect(): Pick<
+  ConnectWithFirstEventRetryOpts,
+  "noteFirstEventWait" | "noteConnectSettled"
+> {
+  const call = ++nextConnectCall;
+  return {
+    noteFirstEventWait: (arrived, failure) => {
+      defaultStallWindow.note(arrived, failure, call);
+    },
+    noteConnectSettled: (outcome) => defaultStallWindow.settle(call, outcome),
+  };
 }
 
 async function sendStallRateSms(text: string): Promise<void> {
@@ -376,13 +502,13 @@ async function sendStallRateSms(text: string): Promise<void> {
     if (!sid || !token || !from) return;
     const client = twilio(sid, token);
     await client.messages.create({
-      body: `Azul voice: xAI session stall spike. ${text}`.slice(0, 1600),
+      body: `Azul voice: xAI connection trouble. ${text}`.slice(0, 1600),
       from,
       to,
     });
-    console.log("[PROVIDER CONNECT] stall-rate SMS sent");
+    console.log("[PROVIDER CONNECT] connect-failure SMS sent");
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    console.warn(`[PROVIDER CONNECT] stall-rate SMS failed: ${message}`);
+    console.warn(`[PROVIDER CONNECT] connect-failure SMS failed: ${message}`);
   }
 }

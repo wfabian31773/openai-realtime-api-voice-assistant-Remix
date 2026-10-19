@@ -747,8 +747,21 @@ import { callEnvironment } from "./callRecord";
  * 110 of 147 agent tickets on hung-up PCP calls named no patient.
  * `src/pcp/aCallerWhoLeavesGetsNoTicket.test.ts`, `src/pcp/queueIsAChoice.test.ts`.
  */
+/**
+ * v101 — EVERY LANE ON grok-voice-3.0, AND THE CONNECT ALERT SAYS WHAT FAILED
+ * (2026-10-19). Operator: "switch the entire runtime to 3.0". The default
+ * model moves off the deprecated 2.0 on the tech canary's numbers (3.0 filed
+ * 86.8% of 257 substantive calls against 84.5% of 1,267 on 2.0; dead air 1
+ * against 23); `XAI_VOICE_MODEL_<SLUG>` is still the no-deploy revert. And the
+ * alert that read "STALL RATE 11/30 — reconnecting is not absorbing it" during
+ * xAI's 18:34–18:49 UTC outage — ten HTTP 503s and a handshake timeout, no
+ * stalls, seven of eight calls reconnected — now names each failure kind and
+ * counts the calls that reconnected, dropped after every retry, or were still
+ * connecting. It fires on the same attempt it always did.
+ * `src/runtime/providerConnect.test.ts`, `src/runtime/laneRoster.test.ts`.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v100-a-caller-who-leaves-gets-no-ticket-20261019";
+  "voice-runtime-v101-every-lane-on-grok-voice-3-20261019";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

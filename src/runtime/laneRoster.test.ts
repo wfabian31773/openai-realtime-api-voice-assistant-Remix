@@ -166,29 +166,35 @@ describe("the boot lines", () => {
  * inferred from the next day's bill.
  */
 describe("the voice model each lane would use", () => {
-  it("reports the pinned default on every registered lane when nothing overrides it", () => {
+  it("reports grok-voice-3.0 on every registered lane when nothing overrides it (operator, 2026-10-19)", () => {
     const rows = laneRoster(ALL, {}, { transferAvailable: false });
-    for (const row of rows) expect(row.voiceModel, row.slug).toBe("grok-voice-think-fast-2.0");
+    for (const row of rows) expect(row.voiceModel, row.slug).toBe("grok-voice-3.0");
   });
 
-  it("shows a per-lane canary on that lane only", () => {
-    const r = bySlug(laneRoster(ALL, { XAI_VOICE_MODEL_TECH: "grok-voice-3.0" }, { transferAvailable: false }));
-    expect(r.tech.voiceModel).toBe("grok-voice-3.0");
-    expect(r.surgery.voiceModel).toBe("grok-voice-think-fast-2.0");
+  it("a per-lane setting puts that lane back, and only that lane — the no-deploy revert", () => {
+    const r = bySlug(
+      laneRoster(ALL, { XAI_VOICE_MODEL_PCP: "grok-voice-think-fast-2.0" }, { transferAvailable: false }),
+    );
     expect(r.pcp.voiceModel).toBe("grok-voice-think-fast-2.0");
+    expect(r.tech.voiceModel).toBe("grok-voice-3.0");
+    expect(r["no-ivr"].voiceModel).toBe("grok-voice-3.0");
   });
 
   it("lets the fleet-wide setting move every lane, with a per-lane setting still winning", () => {
     const r = bySlug(
-      laneRoster(ALL, { XAI_VOICE_MODEL: "grok-voice-3.0", XAI_VOICE_MODEL_PCP: "grok-voice-2.0" }, { transferAvailable: false }),
+      laneRoster(
+        ALL,
+        { XAI_VOICE_MODEL: "grok-voice-think-fast-2.0", XAI_VOICE_MODEL_TECH: "grok-voice-3.0" },
+        { transferAvailable: false },
+      ),
     );
-    expect(r.optical.voiceModel).toBe("grok-voice-3.0");
-    expect(r.pcp.voiceModel).toBe("grok-voice-2.0");
+    expect(r.optical.voiceModel).toBe("grok-voice-think-fast-2.0");
+    expect(r.tech.voiceModel).toBe("grok-voice-3.0");
   });
 
   it("reports no model for a lane this build does not register", () => {
     const r = bySlug(laneRoster(source(["optical"]), {}, { transferAvailable: false }));
-    expect(r.optical.voiceModel).toBe("grok-voice-think-fast-2.0");
+    expect(r.optical.voiceModel).toBe("grok-voice-3.0");
     expect(r.pcp.voiceModel).toBeNull();
   });
 });

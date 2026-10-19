@@ -2328,6 +2328,7 @@ voice-runtime-v97-the-filing-line-is-not-a-stage-direction-20261016
 voice-runtime-v98-one-ticket-per-patient-20261016
 voice-runtime-v99-the-caller-says-they-are-a-provider-20261019
 voice-runtime-v100-a-caller-who-leaves-gets-no-ticket-20261019
+voice-runtime-v101-every-lane-on-grok-voice-3-20261019
 ```
 
 Also printed at boot as `[voice-runtime] <marker>`. Anything ending in an
@@ -2519,14 +2520,16 @@ v10 (the person base and the join), v11 (the locked record, #290) and v12
 (optical's office ladder) are a CHAIN on `main`: each merged after the one
 before and brought it in, so v12 contains both.
 
-**AND THE SEQUENCE HAS TWO HOLES IN IT ON PURPOSE: v13 AND v57. v100 IS THE
-NEWEST — a PCP caller who hangs up, or goes to the queue, leaves no ticket
-that names no patient: the floor files nothing behind them and the ticketing
-app withdraws what the call filed — stacked on v99 in #353 (the after-hours
-line rings the on-call phone for a provider only when the CALLER said they
-are one, and the runtime feeds the caller's words to the escalation gate at
-all), both ABOVE `main`'s v98 — AND
-v98 IS WHAT `main` CARRIES, SINCE #351 MERGED 2026-10-17 (`f20b300`): one
+**AND THE SEQUENCE HAS TWO HOLES IN IT ON PURPOSE: v13 AND v57. v101 IS THE
+NEWEST — every runtime lane on grok-voice-3.0, and the xAI connect alert
+naming what failed and how many calls dropped — on its own branch ABOVE
+`main`'s v100 — AND v100 IS WHAT `main` CARRIES, SINCE #353 MERGED
+2026-10-19 (`295dfcf`): a PCP caller who hangs up, or goes to the queue,
+leaves no ticket that names no patient (the floor files nothing behind them
+and the ticketing app withdraws what the call filed), stacked on v99 in the
+same PR (the after-hours line rings the on-call phone for a provider only
+when the CALLER said they are one, and the runtime feeds the caller's words
+to the escalation gate at all); on top of v98, from #351 (`f20b300`): one
 ticket per patient on a PCP call, the agent's one-ticket latch kept per
 patient so a clinic's second patient runs the routing doors afresh; on top of
 v97, from #350 (`83168e5`): the
@@ -2566,7 +2569,7 @@ v77 IS), v77 (#336, `df9b6b1`), v74 (#335, `f998a0b`) and v73 (#333,
 `0039a9d`); AND v57, v59, v60, v63, v65 AND v66 ARE ALL RETIRED RATHER
 THAN REUSED — see THE SURGEON CLAIM below the table for v57.** **THIS LINE
 GOES STALE EVERY TIME A MARKER LANDS, SO RE-READ IT AGAINST `main` RATHER
-THAN TRUSTING IT.** TWENTY-FIVE corrections have landed on it in twenty-seven days and every
+THAN TRUSTING IT.** TWENTY-SIX corrections have landed on it in twenty-nine days and every
 one was the same trap: it read `v58 IS WHAT main CARRIES` after #324 moved
 `main` to v61, `v61` after #323 moved it to v62, `v62` after #327 moved it to
 v64, `v64` after #326 moved it to v67, `v67` after #328 moved it to v68, `v68`
@@ -2577,7 +2580,7 @@ moved it to v78, `v78` after #338 moved it to v79, `v79` after #339 moved
 it to v80, `v80` after #340 moved it to v82, `v82` after #341 moved it to
 v83, `v83` after #342 moved it to v85, `v85` after #343 moved it to
 v86, `v86` after #344 moved it to v88, `v88` after #345 moved it
-to v89, `v90` after #347 moved it to v91, `v91` after #348 moved it to v93, `v93` after #349 moved it to v95, `v95` after #350 moved it to v97, and `v97` after #351 moved it to v98 — **TWENTY-THREE of those arrived ON `main` already wrong**, because a branch's own prose does not
+to v89, `v90` after #347 moved it to v91, `v91` after #348 moved it to v93, `v93` after #349 moved it to v95, `v95` after #350 moved it to v97, `v97` after #351 moved it to v98, and `v98` after #353 moved it to v100 — **TWENTY-FOUR of those arrived ON `main` already wrong**, because a branch's own prose does not
 update itself when that branch merges, and the branch that writes it cannot
 know it will be the last to land. **THE EIGHTH AND NINTH ARE THE ONES THE #329
 GUARD WAS BUILT FOR AND COULD NOT SEE:** both claims went stale-LOW together, so they
@@ -2629,7 +2632,7 @@ re-bumps only when it falls BELOW `main`, where it would read as a failed pull.
 **NEWEST IS NOT THE SAME AS CONTAINED:** v70 contains v69 because `main` was
 merged into it, not because 70 > 69. **A build must never read v13, v57, v59,
 v60, v63, v65 or v66** — v13 and v57 were withdrawn, and the other five were
-branch numbers given up the moment a merge put them below `main`. The next ship takes **v101**. v19-v24 were siblings off v18 on 2026-09-15 — v19 the PCP lost-requestfloor (#300), v20 the blind transfer telemetry (#302), v21 the ask detection
+branch numbers given up the moment a merge put them below `main`. The next ship takes **v102**. v19-v24 were siblings off v18 on 2026-09-15 — v19 the PCP lost-requestfloor (#300), v20 the blind transfer telemetry (#302), v21 the ask detection
 (#301), v22 the question format (#303), v23 the recording disclosure (#304),
 v24 the answerable queue choice (#306). Distinct numbers were assigned UP FRONT
 precisely so six open branches could never make six different builds read alike
@@ -2764,7 +2767,7 @@ never read v57; **v58 was that next ship** — the identity probe, an instrument
 and no behaviour change (see the v56 row below for what it measures). It is no
 longer the current marker: see the paragraph beneath this one.
 
-**v98 (#351) IS WHAT `main` CARRIES (merged 2026-10-17, `f20b300`), AND v57,
+**v100 (#353) IS WHAT `main` CARRIES (merged 2026-10-19, `295dfcf`), AND v57,
 v59, v60, v63, v65 AND v66 ARE RETIRED RATHER THAN REUSED.** Each of the last
 five was a branch's own number while it sat below `main`, and each was given up
 the moment a merge put it there: two branches carrying one version make two
@@ -2772,7 +2775,7 @@ builds indistinguishable at `/voice/health` — the single thing this constant
 exists to prevent — and a number BELOW `main` reads as a failed pull. **v59 is
 the newest addition to that list** — it was #293's number from 2026-09-19 until
 #325 moved `main` to v69, at which point it fell below and the branch re-bumped
-to v70. **THIS PARAGRAPH ITSELF HAS ARRIVED ON `main` WRONG EIGHTEEN TIMES**, once naming
+to v70. **THIS PARAGRAPH ITSELF HAS ARRIVED ON `main` WRONG NINETEEN TIMES**, once naming
 v67 as what `main` carried, once describing #328 and #293 as open siblings,
 once naming v70 after #329 had moved `main` to v72, once naming v72 after
 #333 had moved `main` to v73, once naming v73 after #335 had moved `main`
@@ -2784,9 +2787,10 @@ after #343 had moved `main` to v86, once naming v86 after #344 had moved
 `main` to v88, once naming v88 after #345 had moved `main` to v89, once
 naming v90 after #347 had moved `main` to v91, once naming v91 after
 #348 had moved `main` to v93, once naming v93 after #349 had moved `main`
-to v95, once naming v95 after #350 had moved `main` to v97, and once naming
-v97 after #351 had moved `main` to v98 — the fourth through twenty-first of the
-twenty-three the sequence sentence counts.
+to v95, once naming v95 after #350 had moved `main` to v97, once naming
+v97 after #351 had moved `main` to v98, and once naming v98 after #353 had
+moved `main` to v100 — the fourth through twenty-second of the twenty-four the
+sequence sentence counts.
 Containment is stated once, in the sequence sentence above; see the v56 row for
 what v61 measures.
 
