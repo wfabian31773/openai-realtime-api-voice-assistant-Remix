@@ -243,13 +243,22 @@ export function judgeEscalation(req: EscalationRequest): EscalationVerdict {
    */
   const corr = req.corroboration;
   /**
-   * AND NEVER WHEN THE CALLER DESCRIBED A SYMPTOM OR AN ACUTE EVENT in their
-   * own words, whatever the claim lists matched. A caller who said "I went
-   * blind" or "everything went black" while the model wrote "sudden vision
+   * AND NEVER WHEN THE CALLER DESCRIBED AN ACUTE EVENT in their own words,
+   * whatever the claim lists matched. A caller who said "my eye is bleeding"
+   * or "there's something in my eye" while the model wrote "sudden vision
    * loss" is the call this line exists to ring through; the per-claim
    * evidence lists can always be one wording short, and a miss there refused
-   * an emergency (review P1, #353). The refusal now fires only on a caller
-   * who said nothing symptomatic at all.
+   * an emergency (review P1, #353).
+   *
+   * ACUTE, NOT ANY SYMPTOM. An earlier fix let any symptom word lift this
+   * refusal, and that reopened the call it was built for: d30ca58b's caller
+   * said "discharge" and asked for a callback, the agent wrote "pain and
+   * vision changes", and the operator ruled on 2026-08-15 that this "is not a
+   * reason for the agent to pass the call through as urgent". Red, itchy,
+   * watering, discharge and pressure are what the caller should be ASKED
+   * about one question at a time — the directive below — not a licence for
+   * the symptoms the agent added. The refusal costs a real emergency one
+   * question, after which an honest re-escalation passes.
    */
   const callerDescribedSomething = Boolean(corr?.symptomStated || corr?.acuteStated);
   if (
@@ -257,7 +266,7 @@ export function judgeEscalation(req: EscalationRequest): EscalationVerdict {
     corr.haveSpeech &&
     corr.unsupported.length > 0 &&
     corr.supported.length === 0 &&
-    !callerDescribedSomething
+    !corr.acuteStated
   ) {
     return {
       allowed: false,
