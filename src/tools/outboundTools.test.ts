@@ -64,10 +64,21 @@ describe("record_call_outcome", () => {
   });
 
   it("queues call_back_later for tomorrow and nothing else for a retry", async () => {
-    const s = store();
+    // Two calls, two fresh claims: an outcome is recorded once per call.
+    const later = store();
     await getTool(RECORD_OUTCOME_TOOL_NAME)!.handler({ ...INJECTED, outcome: "call_back_later" });
-    expect(s.contacts.get("c1")!.nextAttemptAt).not.toBeNull();
+    expect(later.contacts.get("c1")!.nextAttemptAt).not.toBeNull();
+    const no = store();
     await getTool(RECORD_OUTCOME_TOOL_NAME)!.handler({ ...INJECTED, outcome: "not_interested" });
+    expect(no.contacts.get("c1")!.nextAttemptAt).toBeNull();
+  });
+
+  it("never turns an opt-out on this call back into a row the queue would ring", async () => {
+    const s = store();
+    await getTool(OPT_OUT_TOOL_NAME)!.handler({ ...INJECTED });
+    const r = await getTool(RECORD_OUTCOME_TOOL_NAME)!.handler({ ...INJECTED, outcome: "call_back_later" });
+    expect(r).toMatchObject({ success: true, recorded: "already_settled" });
+    expect(s.contacts.get("c1")!.status).toBe("do_not_call");
     expect(s.contacts.get("c1")!.nextAttemptAt).toBeNull();
   });
 

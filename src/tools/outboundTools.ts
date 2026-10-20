@@ -134,7 +134,20 @@ registerTool({
     // inside the window, through the same caps as every other attempt.
     const nextAttemptAt =
       status === 'callback_scheduled' ? new Date(Date.now() + 24 * 60 * 60 * 1000) : null;
-    await store.settleContact(who.contactId, status, { nextAttemptAt });
+    // Only while the call still holds the row: an opt-out recorded earlier on
+    // this call settled it as do_not_call, and nothing the model says after
+    // that may turn it back into something the queue would ring again.
+    const settled = await store.settleContact(who.contactId, status, {
+      nextAttemptAt,
+      onlyIfCalling: true,
+    });
+    if (!settled) {
+      return {
+        success: true,
+        recorded: 'already_settled',
+        fix: "This call's outcome is already on record. Do not record it again; say goodbye.",
+      };
+    }
     return { success: true, recorded: outcome };
   },
 });
