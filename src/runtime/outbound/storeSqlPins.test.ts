@@ -1,0 +1,103 @@
+/**
+ * The production store's SQL, pinned from the source.
+ *
+ * Every behavioural test drives FakeOutboundStore, so a predicate dropped
+ * from the real SQL would leave the suite green while the database did the
+ * wrong thing — failure mode 10, testing the sink instead of the source. The
+ * statements themselves were PREPAREd against the live Hub on 2026-10-20
+ * (all sixteen that touch existing tables parsed, nothing executed); these
+ * pins keep the predicates that make them safe from being edited away.
+ */
+import { readFileSync } from "node:fs";
+import { describe, expect, it } from "vitest";
+import { dncKey, rowToContact } from "./store";
+
+const SRC = readFileSync("src/runtime/outbound/store.ts", "utf8");
+
+/** The body of one store method, from its name to the next method. */
+function method(name: string): string {
+  const start = SRC.indexOf(`async ${name}(`);
+  expect(start, `${name} not found in store.ts`).toBeGreaterThan(0);
+  const next = SRC.indexOf("\n    async ", start + 1);
+  return SRC.slice(start, next > 0 ? next : undefined);
+}
+
+describe("the claim is the only door to a dial", () => {
+  it("re-checks the dialable statuses and the due time inside the UPDATE", () => {
+    const claim = method("claimContact");
+    expect(claim).toContain("SET outreach_status = 'calling'");
+    expect(claim).toContain("outreach_status::text IN ('pending', 'no_answer', 'voicemail', 'callback_scheduled')");
+    expect(claim).toContain("next_attempt_at IS NULL OR next_attempt_at <=");
+    expect(claim).toContain("RETURNING *");
+  });
+
+  it("hands a row back only while this process still holds it", () => {
+    expect(method("releaseContact")).toContain("AND outreach_status = 'calling'");
+  });
+
+  it("lets a settle that must not overwrite an outcome say so", () => {
+    expect(method("settleContact")).toContain("::boolean OR outreach_status = 'calling')");
+  });
+
+  it("reaps only rows stuck in 'calling' since before the cut-off", () => {
+    const reap = method("reapStaleClaims");
+    expect(reap).toContain("outreach_status = 'calling'");
+    expect(reap).toContain("updated_at <");
+  });
+});
+
+describe("the attempt row keeps the answer webhook's verdict", () => {
+  it("never lets a later 'completed' overwrite a voicemail, fax or not-ready", () => {
+    expect(method("finishAttempt")).toContain(
+      "CASE WHEN status IN ('voicemail', 'fax', 'not_ready') THEN status",
+    );
+  });
+
+  it("counts only outbound attempts against the caps", () => {
+    expect(method("priorAttemptTimes")).toContain("direction = 'outbound'");
+  });
+});
+
+describe("the do-not-contact list", () => {
+  it("refuses a number it cannot read rather than dialling it", () => {
+    const check = method("isDoNotContact");
+    expect(check).toMatch(/if \(!key\) return true;/);
+  });
+
+  it("keys every spelling of a US number on its ten digits", () => {
+    expect(dncKey("+1 (714) 555-0100")).toBe("7145550100");
+    expect(dncKey("714.555.0100")).toBe("7145550100");
+    expect(dncKey("17145550100")).toBe("7145550100");
+    expect(dncKey("anonymous")).toBeNull();
+    expect(dncKey("555-0100")).toBeNull();
+    expect(dncKey("+447911123456")).toBeNull();
+  });
+});
+
+describe("the timestamps", () => {
+  it("binds every instant as ISO and converts in SQL, never as a process-zone Date", () => {
+    expect(SRC).toContain("::timestamptz AT TIME ZONE 'UTC')");
+    // Every comparison against a campaign timestamp goes through utc().
+    for (const m of ["dialableContacts", "claimContact", "callsInFlight", "reapStaleClaims"]) {
+      expect(method(m), m).toContain("${utc(");
+    }
+  });
+});
+
+describe("a row read back", () => {
+  it("defaults what the table leaves null", () => {
+    expect(
+      rowToContact({ id: "c1", campaign_id: "k1", phone_number: "+15555550111", custom_data: null }),
+    ).toEqual({
+      id: "c1",
+      campaignId: "k1",
+      phone: "+15555550111",
+      firstName: null,
+      lastName: null,
+      status: "pending",
+      attempts: 0,
+      nextAttemptAt: null,
+      customData: {},
+    });
+  });
+});
