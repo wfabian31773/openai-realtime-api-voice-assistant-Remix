@@ -31,7 +31,9 @@ vi.mock('./patientVerification', () => ({
 
 const PERSON = '00000000-0000-4000-8000-0000000000aa';
 const consoleRow = (over: Record<string, any> = {}) => ({
-  appointmentDate: '2026-10-20',
+  // Far future: a dated default goes past and turns every 'upcoming' assertion
+  // in this file red the day after it was written (it was 2026-10-20).
+  appointmentDate: '2099-10-20',
   appointmentStart: '0900',
   appointmentEnd: '0915',
   sessionPartOfDay: null,

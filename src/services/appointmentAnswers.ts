@@ -119,9 +119,18 @@ export async function appointmentsForPerson(personId: string): Promise<Appointme
     const { isConsoleScheduleConfigured, fetchFactsForPerson } = await import('./consoleScheduleFacts');
     if (isConsoleScheduleConfigured()) {
       const rows = await fetchFactsForPerson(personId, 60);
-      const kept = rows.filter((r) => r.appointmentStatus !== REMOVED);
-      const past = kept.filter((r) => r.appointmentDate < today).sort((a, b) => b.appointmentDate.localeCompare(a.appointmentDate));
-      const upcoming = kept.filter((r) => r.appointmentDate >= today).sort((a, b) => a.appointmentDate.localeCompare(b.appointmentDate));
+      // A moved appointment arrives here already 'Removed' (NextGen hides it;
+      // `statusOf`). One already marked kept today is a visit, not the next
+      // appointment (NextGen Bible §2: today is Upcoming until it is kept).
+      const live = rows.filter((r) => r.appointmentStatus !== REMOVED);
+      const keptToday = (r: { appointmentDate: string; appointmentKept: boolean | null }) =>
+        r.appointmentDate === today && r.appointmentKept === true;
+      const past = live
+        .filter((r) => r.appointmentDate < today || keptToday(r))
+        .sort((a, b) => b.appointmentDate.localeCompare(a.appointmentDate));
+      const upcoming = live
+        .filter((r) => r.appointmentDate >= today && !keptToday(r))
+        .sort((a, b) => a.appointmentDate.localeCompare(b.appointmentDate));
       return {
         last: past[0] ? toFact(past[0] as unknown as Record<string, any>) : null,
         next: upcoming[0] ? toFact(upcoming[0] as unknown as Record<string, any>) : null,

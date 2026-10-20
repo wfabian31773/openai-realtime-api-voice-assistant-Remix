@@ -29,9 +29,31 @@
  * copy agree by construction. A Console name with no entry falls back to the
  * Console name with the brand prefix removed, and is logged once.
  *
- * STATUS. The operator ruled on 2026-10-01: "no show or kept is determined by
- * an active status post appointment date." So `is_cancelled` -> 'Removed',
- * everything else -> 'Active'. There is no NoShow on this path.
+ * STATUS FOLLOWS THE NEXTGEN BIBLE'S §2 RULE (ai-bridge NEXTGEN_BIBLE.md,
+ * Wayne's definitive reference, 2026-10-20): kept > rescheduled > cancelled,
+ * then a past date that was never kept is a no-show and a future one is
+ * upcoming. In the row shape that means:
+ *
+ *   - `is_cancelled`                    -> 'Removed'
+ *   - `is_rescheduled` and not kept     -> 'Removed'. NextGen does not cancel
+ *     the appointment it moves: it flags it and HIDES it, and the replacement
+ *     is a new row. Read as 'Active' (as it was until v104), a moved
+ *     appointment was an upcoming appointment the caller does not have, or a
+ *     "last visit" that never happened. Measured 2026-10-20: 13,508 of
+ *     106,605 future rows the agent read as live were moved (10,571 of 75,510
+ *     people with anything upcoming), and of the 122 queue and after-hours
+ *     callers the agent recognised that day, 12 of 81 with an upcoming
+ *     appointment carried a moved one and 26 of 111 had a moved appointment as
+ *     their "last visit".
+ *   - everything else                   -> 'Active', with `appointmentKept`
+ *     carrying `is_kept` so `buildContext` can tell a visit from a no-show
+ *     once the date has passed. NULL stays NULL: unknown, never a no-show
+ *     (Bible §2.4), and counted as before.
+ *
+ * The operator's 2026-10-01 rule ("no show or kept is determined by an active
+ * status post appointment date") is the same rule; `is_kept` is the
+ * determination, filled since migration 0114 and being backfilled to July 2025
+ * (Bible §2.6).
  *
  * EQUIPMENT. A fact with no rendering provider and a resource is a diagnostic
  * slot (OCT, visual field). The Hub typed those `DoctorType = 'Equipment'`
@@ -58,6 +80,7 @@ export interface ConsoleFactRow {
   event_name: string | null;
   is_cancelled: boolean | null;
   is_rescheduled: boolean | null;
+  is_kept: boolean | null;
   person_id: string;
   equipment_only: boolean | null;
   location_name: string | null;
@@ -80,6 +103,13 @@ export interface ScheduleShapedRow {
   appointmentEnd: string | null;
   sessionPartOfDay: string | null;
   appointmentStatus: 'Active' | 'Removed';
+  /**
+   * NextGen's kept flag (`si_appointment_facts.is_kept`). true = the visit
+   * happened; false = not kept (a no-show once the date has passed); null =
+   * unknown. Hub `Schedule` rows do not carry it, which leaves every reader's
+   * behaviour on that path exactly as it was.
+   */
+  appointmentKept: boolean | null;
   personId: string;
   officeLocation: string | null;
   officeLocationType: string | null;
@@ -103,7 +133,7 @@ export interface ScheduleShapedRow {
 export const FACTS_FOR_PERSON_SQL = `
 SELECT f.appointment_id::text                                   AS appointment_id,
        to_char(f.appointment_date, 'YYYY-MM-DD')                AS appointment_date,
-       f.begin_time, f.duration, f.event_name, f.is_cancelled, f.is_rescheduled,
+       f.begin_time, f.duration, f.event_name, f.is_cancelled, f.is_rescheduled, f.is_kept,
        f.person_id::text                                        AS person_id,
        (f.rendering_provider_id IS NULL AND f.resource_id IS NOT NULL) AS equipment_only,
        l.nextgen_name                                           AS location_name,
@@ -221,6 +251,19 @@ export function endTimeHHMM(begin: string | null | undefined, durationMin: numbe
   return `${String(eh).padStart(2, '0')}${String(em).padStart(2, '0')}`;
 }
 
+/**
+ * The Bible's §2 order, as far as a row can take it without knowing today:
+ * kept wins over everything, a moved appointment that was not kept is hidden,
+ * a cancelled one is gone. The date half (no-show vs upcoming) is the
+ * reader's, because only the reader knows what today is.
+ */
+export function statusOf(f: Pick<ConsoleFactRow, 'is_cancelled' | 'is_rescheduled' | 'is_kept'>): 'Active' | 'Removed' {
+  if (f.is_kept) return 'Active';
+  if (f.is_rescheduled) return 'Removed';
+  if (f.is_cancelled) return 'Removed';
+  return 'Active';
+}
+
 /** One Console fact -> one Hub-shaped row. Pure; no I/O. */
 export function toScheduleRow(f: ConsoleFactRow): ScheduleShapedRow {
   const office = hubOfficeLabel(f.location_name);
@@ -236,7 +279,8 @@ export function toScheduleRow(f: ConsoleFactRow): ScheduleShapedRow {
     appointmentStart: f.begin_time && /^\d{4}$/.test(f.begin_time) ? f.begin_time : null,
     appointmentEnd: endTimeHHMM(f.begin_time, f.duration),
     sessionPartOfDay: null,
-    appointmentStatus: f.is_cancelled ? 'Removed' : 'Active',
+    appointmentStatus: statusOf(f),
+    appointmentKept: f.is_kept ?? null,
     personId: f.person_id,
     officeLocation: office,
     officeLocationType: hubOfficeType(f.facility_kind),

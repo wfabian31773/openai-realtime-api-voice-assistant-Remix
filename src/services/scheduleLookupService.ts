@@ -1149,14 +1149,24 @@ export class ScheduleLookupService {
       // caller on 2026-08-10 that their last appointment was four months in
       // the future, in the same breath as "you have no upcoming
       // appointments". Both sentences came from that one row.
+      // NextGen's kept flag, when the row carries one (Console rows do, Hub
+      // rows do not). The NextGen Bible's §2 rule: today is Upcoming UNTIL it
+      // is marked kept, and a past date never kept is a no-show.
+      const kept: boolean | null | undefined = apt.appointmentKept;
+
       if (aptDateStr >= todayStr) {
-        if (status === 'Active') upcoming.push(summary);
+        if (status !== 'Active') continue;
+        // Seen this morning: a visit, not an appointment still to come.
+        if (kept === true && aptDateStr === todayStr) past.push(summary);
+        else upcoming.push(summary);
         continue;
       }
 
       // Only a visit the patient actually had is reported as one. Cancelled
-      // (Removed) and NoShow rows are history, not appointments they attended.
-      if (status === 'Active') past.push(summary);
+      // (Removed) and NoShow rows are history, not appointments they attended,
+      // and neither is a past row NextGen says was never kept. Unknown (null,
+      // or a Hub row with no flag) is counted as before: never a no-show.
+      if (status === 'Active' && kept !== false) past.push(summary);
     }
 
     upcoming.sort((a, b) => a.isoDate.localeCompare(b.isoDate));

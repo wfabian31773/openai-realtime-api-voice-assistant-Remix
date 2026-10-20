@@ -770,8 +770,18 @@ import { callEnvironment } from "./callRecord";
  * rendering, since grok-voice-3.0 spells numbers — or when the refused
  * transfer's claim was spoken. `src/pcp/toldItWasRecorded.test.ts`.
  */
+/**
+ * v104 — A MOVED APPOINTMENT IS NOT AN APPOINTMENT (2026-10-20). The NextGen
+ * Bible's §2 rule: kept > rescheduled > cancelled, then a past date never
+ * kept is a no-show. NextGen hides the appointment it moves, and the Console
+ * row mapping read it as live — so 12 of the 81 recognised callers with an
+ * upcoming appointment on 2026-10-20 carried one they did not have, and for
+ * 26 of 111 the "last visit" was a moved appointment. `statusOf` hides it; the
+ * readers count a past row only when it was kept (or unknown).
+ * `src/services/theMovedAppointmentIsNotUpcoming.test.ts`.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v103-a-routed-records-request-carries-no-form-20261020";
+  "voice-runtime-v104-a-moved-appointment-is-not-an-appointment-20261020";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can
