@@ -140,6 +140,25 @@ describe('PHI discipline — the allow-list is the safety mechanism', () => {
   });
 
   /**
+   * v103: a records filing routed out of Medical Records is countable. Without
+   * the key the only trace is a transcript line naming another team.
+   */
+  it('keeps form_applies on a records filing, and still nothing about who', () => {
+    const callId = freshCall();
+    recordToolEvent(
+      callId,
+      'file_records_ticket',
+      { description: 'Paula Kolterman wants to confirm tomorrow.' },
+      JSON.stringify({ success: true, ticket_number: 'VA-1', routed_to: 'HVA Hub', form_applies: false }),
+      5,
+      { agentSlug: 'records' },
+    );
+    const [ev] = getAzulTimeline(callId)!;
+    expect(ev.outcome).toMatchObject({ form_applies: false });
+    expect(JSON.stringify(ev)).not.toContain('Kolterman');
+  });
+
+  /**
    * v75: WHICH language a switch went TO is countable. 574 switch events in
    * the fourteen days to 2026-09-27 and not one said; 76 of them were on
    * calls with no Spanish cue — the worst filing arm — and nothing could say
