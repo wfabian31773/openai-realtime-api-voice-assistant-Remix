@@ -85,7 +85,7 @@ export const PCP_FLOOR_LANE = "pcp";
 export const PCP_FLOOR_BUDGET_MS = 25_000;
 
 /** The floor's one dependency: the lane's own teardown filer. */
-type PcpSweep = (callId: string, ctx?: { outcome?: string }) => Promise<void>;
+type PcpSweep = (callId: string, ctx?: { outcome?: string; transcript?: string }) => Promise<void>;
 
 interface PcpFloorOptions {
   /** Injected for tests. Defaults to the lane's own `teardownSweep`. */
@@ -135,7 +135,9 @@ export async function runPcpFloor(
     await Promise.race([
       // The ending travels with the CallSid: a hang-up or a transfer files
       // nothing and withdraws what names no patient (operator, 2026-10-19).
-      sweep(record.callSid, { outcome: record.outcome }),
+      // The transcript travels too: a caller who hung up after being told the
+      // request is recorded keeps it (v102, toldItWasRecorded.ts).
+      sweep(record.callSid, { outcome: record.outcome, transcript: record.transcript }),
       new Promise<void>((resolve) => {
         timer = setTimeout(resolve, budgetMs);
         (timer as unknown as { unref?: () => void }).unref?.();

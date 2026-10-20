@@ -39,7 +39,21 @@ describe("the PCP floor runs for the PCP lane and no other", () => {
     // `callId: entry.callSid`, so the director state and metadata the sweep
     // reads live under exactly this string. Any other key reads an empty state
     // and files nothing, silently.
-    expect(sweep).toHaveBeenCalledWith("CA0000000000000000000000000000ab01", { outcome: "caller_hangup" });
+    expect(sweep).toHaveBeenCalledWith("CA0000000000000000000000000000ab01", { outcome: "caller_hangup", transcript: "" });
+  });
+
+  /**
+   * AND SO DOES WHAT WAS SAID (v102). A caller who hung up after the agent read
+   * them a ticket number, or said "I've taken this down", keeps the ticket —
+   * and only the record holds the agent's words. A sweep handed the ending
+   * alone would withdraw every one of them, which is what the first afternoon
+   * of v100 did to four callers.
+   */
+  it("hands the sweep the call's transcript", async () => {
+    const sweep = vi.fn(async () => undefined);
+    const transcript = "CALLER: Representative.\nAGENT: I've logged your request on ticket PCP-90001.";
+    await runPcpFloor(record({ transcript } as Partial<VoiceCallRecord>), { sweep });
+    expect(sweep).toHaveBeenCalledWith("CA0000000000000000000000000000ab01", { outcome: "caller_hangup", transcript });
   });
 
   /**
@@ -53,7 +67,7 @@ describe("the PCP floor runs for the PCP lane and no other", () => {
     async (outcome) => {
       const sweep = vi.fn(async () => undefined);
       await runPcpFloor(record({ outcome } as Partial<VoiceCallRecord>), { sweep });
-      expect(sweep).toHaveBeenCalledWith("CA0000000000000000000000000000ab01", { outcome });
+      expect(sweep).toHaveBeenCalledWith("CA0000000000000000000000000000ab01", { outcome, transcript: "" });
     },
   );
 
@@ -153,7 +167,7 @@ describe("the wiring facts a behavioural test cannot see", () => {
     const getAgentConfig = vi.fn(() => ({ id: "pcp", enabled: true, factory: () => undefined, teardownSweep }));
     await runPcpFloor(record(), { source: async () => ({ getAgentConfig }) as never });
     expect(getAgentConfig).toHaveBeenCalledWith("pcp");
-    expect(teardownSweep).toHaveBeenCalledWith("CA0000000000000000000000000000ab01", { outcome: "caller_hangup" });
+    expect(teardownSweep).toHaveBeenCalledWith("CA0000000000000000000000000000ab01", { outcome: "caller_hangup", transcript: "" });
   });
 
   it("says so loudly, and does not throw, when the lane registers no sweep or no source is given", async () => {

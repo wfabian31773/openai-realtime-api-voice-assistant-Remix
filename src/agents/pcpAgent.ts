@@ -43,6 +43,7 @@ import {
 } from '../pcp/recordsDelivery';
 import { ticketReadiness, nextRequiredAsk, annotationFor, MAX_BLOCKS } from '../pcp/ticketRequirements';
 import { namesAPatient, submitPcpTicket, submitPcpWithdrawal, type PcpTicketPayload } from '../pcp/pcpTicketing';
+import { toldTheCallerItWasRecorded } from '../pcp/toldItWasRecorded';
 import { getPacificTimeContext, formatPhoneForSpeech, formatPhoneLast4 } from '../utils/timeAware';
 // STATIC, NOT `await import(…)` — the v78 rule. A dynamic import of a module
 // that registers tools at load evaluated it a second time on Node 20 (Replit)
@@ -3076,10 +3077,10 @@ async function settleWithin(pending: Promise<unknown>[], ms: number): Promise<vo
  * anywhere near the caller.
  */
 /**
- * How the call ended, from the runtime's record. The old core calls the sweep
- * with no context and keeps its behaviour exactly.
+ * How the call ended, and what was said on it, from the runtime's record. The
+ * old core calls the sweep with no context and keeps its behaviour exactly.
  */
-export type PcpTeardownContext = { outcome?: string };
+export type PcpTeardownContext = { outcome?: string; transcript?: string };
 
 export async function sweepPcpUnfiledCall(callId: string, ctx: PcpTeardownContext = {}): Promise<void> {
   const metadata = pcpCallMetadata.get(callId);
@@ -3133,6 +3134,24 @@ export async function sweepPcpUnfiledCall(callId: string, ctx: PcpTeardownContex
         // again itself when it lands (see trackPcpFiling).
         markHangUpWithdrawal(callId, 'awaiting');
         await settleWithin(inFlight, PCP_INFLIGHT_FILING_WAIT_MS);
+        /**
+         * A CALLER TOLD THEIR REQUEST IS RECORDED KEEPS IT. Operator,
+         * 2026-10-19: "yes, build the readback exemption for the hang-up
+         * withdrawal." Four of the withdrawal's first six were callers who had
+         * heard a ticket number or "I've taken this down" — see
+         * toldItWasRecorded.ts. Read AFTER the wait, so a filing that landed
+         * in it has its number on the list. Decided for the call, because the
+         * app withdraws for the call; a filing that lands later still asks
+         * again, since nobody can have told a caller who had already gone.
+         */
+        const filedNumbers = (state.ticketsFiled ?? [])
+          .map((f) => f.ticketNumber)
+          .filter((t): t is string => Boolean(t));
+        if (toldTheCallerItWasRecorded(ctx.transcript ?? '', filedNumbers)) {
+          // Left at 'awaiting': only 'sent' makes a late filing ask again.
+          console.info(`[PCP] SWEEP: ${callId} hung up after being told the request is recorded — its ticket stands`);
+          return;
+        }
         markHangUpWithdrawal(callId, 'sent');
         await submitPcpWithdrawal(callId, 'caller_hung_up');
       }
