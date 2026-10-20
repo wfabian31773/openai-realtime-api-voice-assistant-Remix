@@ -2,24 +2,40 @@
  * A CALLER TOLD THEIR REQUEST IS RECORDED KEEPS IT, EVEN IF THEY HANG UP.
  *
  * Operator, 2026-10-19: "yes, build the readback exemption for the hang-up
- * withdrawal." The withdrawal (v100) went live that afternoon and withdrew six
- * PCP tickets by 21:20 UTC; on four of them the caller had already heard that
- * the request was recorded. RULE THREE: those calls are the test. Their real
- * SIDs are below with the SHAPE of each; the words are synthetic stand-ins,
- * because transcripts stay on disk and in call_logs, never in git.
+ * withdrawal." The withdrawal (v100) went live that afternoon. By the close
+ * it had withdrawn 12 PCP tickets at a hang-up, and on 7 of them the caller had
+ * already been told the request was recorded. RULE THREE: those calls are the
+ * test. Their real SIDs are below with the SHAPE of each; the words are
+ * synthetic stand-ins, because transcripts stay on disk and in call_logs, never
+ * in git. The verdict column is this detector run over the real transcripts.
  *
- *   CA50d11c65cda76504450e4a94e1fed2a9  ticket number read, then "anything
- *                                       else?", then the caller hung up  KEEP
- *   CA7aafe2bd35a016c34fb9620f4517d271  refused transfer's "I've taken this
- *                                       down", then the caller hung up   KEEP
- *   CA7122a5500e2219b618bde2f07a2824eb  the same                          KEEP
  *   CAb651aef19a2763e3d2cb61e8d95cf5ef  "taken this down", then the email
  *                                       question, then the caller hung up KEEP
- *   CAe52d08dca2e650a6f5c3cad0cd740faa  office hours read out, no claim
- *                                       of a record, caller hung up      WITHDRAW
+ *   CA7aafe2bd35a016c34fb9620f4517d271  refused transfer's "I've taken this
+ *                                       down", then the caller hung up   KEEP
+ *   CA50d11c65cda76504450e4a94e1fed2a9  ticket number read, then "anything
+ *                                       else?", then the caller hung up  KEEP
+ *   CAe52d08dca2e650a6f5c3cad0cd740faa  ticket number read and cut off by
+ *                                       the caller, who only wanted an
+ *                                       address; office hours read, hung
+ *                                       up                               KEEP
+ *   CA7122a5500e2219b618bde2f07a2824eb  the same as CA7aafe2              KEEP
+ *   CAa044874845e5484c93d970976689b871  ticket number read, hung up      KEEP
+ *   CAdc2e4c6c408859ed4e6e1f20b1532888  ticket number read, hung up      KEEP
+ *   CA88252c3c69fa350810533706037f7c65  hung up during the intake        WITHDRAW
+ *   CA4bf0a666f1fbaf4e3dd96ec89d2bee57  hung up during the intake        WITHDRAW
+ *   CA9d361fe492aad75fbe84642a184b1fad  heard the queue-choice warning,
+ *                                       then hung up                     WITHDRAW
+ *   CA8e211880b6428825bdfc07a3a3517068  hung up during the intake        WITHDRAW
+ *   CAba58883f4cc489e2295f4b03e6fe8bc7  hung up during the intake        WITHDRAW
  *
- * (The sixth, CA0fc953048ba93d2223ec20f9cf2aae8b, went to the queue and was
- * withdrawn at the dial result — not this arm, and unchanged.)
+ * CAe52d08 was first written up as "told nothing". It was told: the agent read
+ * its ticket number before the caller cut in. The ticket had been filed for an
+ * address question, so keeping it costs a staffer a few seconds, which is the
+ * direction this exemption accepts.
+ *
+ * (Four more were withdrawn when the queue answered a transfer, e.g.
+ * CA0fc953048ba93d2223ec20f9cf2aae8b. That is the other arm, and unchanged.)
  */
 import { describe, it, expect, vi, beforeEach, beforeAll, afterAll } from 'vitest';
 import { readFileSync } from 'node:fs';
@@ -50,6 +66,7 @@ const { toldTheCallerItWasRecorded } = await import('./toldItWasRecorded');
 const { PCP_REFUSALS } = await import('./refusals');
 
 const TAKEN_DOWN = PCP_REFUSALS.handoff_not_eligible_task_created.say!;
+const { QUEUE_CHOICE_WARNING } = await import('./queueChoice');
 
 async function call(agent: any, name: string, args: Record<string, unknown> = {}) {
   const t = agent.tools.find((x: any) => x.name === name);
@@ -142,7 +159,6 @@ describe('the 2026-10-19 corpus, through the real sweep', () => {
       false,
     ],
     ['CA7aafe2bd35a016c34fb9620f4517d271', 'taken this down after a refused transfer', `CALLER: Representative.\nAGENT: ${TAKEN_DOWN}`, false],
-    ['CA7122a5500e2219b618bde2f07a2824eb', 'taken this down after a refused transfer', `CALLER: Can I talk to someone?\nAGENT: ${TAKEN_DOWN}`, false],
     [
       'CAb651aef19a2763e3d2cb61e8d95cf5ef',
       'taken this down, then the email question',
@@ -151,10 +167,18 @@ describe('the 2026-10-19 corpus, through the real sweep', () => {
     ],
     [
       'CAe52d08dca2e650a6f5c3cad0cd740faa',
-      'office hours read out, no claim of a record',
-      'CALLER: Where is your office?\nAGENT: The office is open Monday through Friday, 8 to 5, closed for lunch from',
-      true,
+      'ticket number read and cut off, the caller only wanted an address',
+      "CALLER: I just need the address.\nAGENT: Your request has been logged under ticket PCP-90001. [interrupted]\nCALLER: Just the address.\nAGENT: That office is open Monday through Friday, 8 to 5. [interrupted]",
+      false,
     ],
+    ['CA7122a5500e2219b618bde2f07a2824eb', 'taken this down after a refused transfer', `CALLER: Can I talk to someone?\nAGENT: ${TAKEN_DOWN}`, false],
+    ['CAa044874845e5484c93d970976689b871', 'ticket number read', 'AGENT: Your request has been logged under ticket PCP-90001.', false],
+    ['CAdc2e4c6c408859ed4e6e1f20b1532888', 'ticket number read', 'AGENT: I have filed this under ticket PCP-90001 for the team.', false],
+    ['CA88252c3c69fa350810533706037f7c65', 'hung up during the intake', 'AGENT: And who is this in regards to — the patient’s name?', true],
+    ['CA4bf0a666f1fbaf4e3dd96ec89d2bee57', 'hung up during the intake', 'AGENT: And who am I speaking with, and where are you calling from?', true],
+    ['CA9d361fe492aad75fbe84642a184b1fad', 'heard the queue-choice warning', `CALLER: Representative.\nAGENT: ${QUEUE_CHOICE_WARNING}`, true],
+    ['CA8e211880b6428825bdfc07a3a3517068', 'hung up during the intake', 'AGENT: What is the purpose of your call?', true],
+    ['CAba58883f4cc489e2295f4b03e6fe8bc7', 'hung up during the intake', 'AGENT: Which organization are you calling from?', true],
   ];
 
   it.each(CORPUS)('%s — %s', async (_sid, _shape, transcript, withdrawn) => {

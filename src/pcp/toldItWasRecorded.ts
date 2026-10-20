@@ -6,9 +6,9 @@
  * simple"): *"yes, build the readback exemption for the hang-up withdrawal."*
  *
  * The hang-up withdrawal (v100) asks the ticketing app to close and archive
- * every ticket on the call that names no patient. On its first afternoon it
- * withdrew six tickets, and on four of them the caller had already been told
- * the request was recorded:
+ * every ticket on the call that names no patient. On its first afternoon and
+ * evening it withdrew 12 tickets at a hang-up, and on 7 of them the caller had
+ * already been told the request was recorded. For example:
  *
  *   - CA50d11c65cda76504450e4a94e1fed2a9: "I've logged your request on ticket
  *     PCP-…. Is there anything else I can help you with?", then the caller
@@ -18,6 +18,8 @@
  *     team will follow up with you", then the caller hung up;
  *   - CAb651aef19a2763e3d2cb61e8d95cf5ef: the same line, then the caller hung
  *     up on the follow-up email question.
+ *
+ * The whole day is the corpus in toldItWasRecorded.test.ts.
  *
  * Each of those callers was promised a follow-up, and the withdrawal removed
  * the only record of it — the v18 shape, a caller told their request is filed
