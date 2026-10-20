@@ -32,9 +32,16 @@
  *      where the literal number appears nowhere in the transcript. So the line
  *      is folded first: digit words become digits and everything that is not a
  *      letter or a digit goes, which turns "P-C-P seven three six seven nine",
- *      "PCP-73679" and "P C P 7 3 6 7 9" into the same "pcp73679". Only a
- *      number filed on THIS call counts — a number read from an older ticket
- *      is not this request.
+ *      "PCP-73679" and "P C P 7 3 6 7 9" into the same "pcp73679". THE
+ *      PREFIX IS PART OF THE MATCH, not only the digits (Codex P2, #355): the
+ *      fold runs separate numbers together, so a callback number, a ZIP code
+ *      or "suite 736, 79" can carry a ticket's five digits in a line that read
+ *      out no ticket at all. Measured before choosing it, every filed call on
+ *      optical, surgery, tech, records and pcp from 2026-10-13 to 10-20:
+ *      1,813 read their number aloud, on 2.0 and 3.0 alike, and the prefix
+ *      sat directly in front of the digits on all 1,813 — 0 read the digits
+ *      without it. Only a number filed on THIS call counts — a number read
+ *      from an older ticket is not this request.
  *   2. THE REFUSED TRANSFER'S OWN CLAIM, "taken this down" — the
  *      `handoff_not_eligible_task_created` line in refusals.ts, which is only
  *      reached once the fallback filing has succeeded. Its failure sibling
@@ -78,12 +85,12 @@ function fold(line: string): string {
 }
 
 /**
- * The digits that identify a ticket — "PCP-73679" → "73679". Fewer than four
- * digits could turn up in any sentence, so such a number is never matched.
+ * A ticket number folded the way a line is — "PCP-73679" → "pcp73679" — so the
+ * prefix and the digits must be read together. Fewer than four digits could
+ * turn up in any sentence, so such a number is never matched.
  */
-function ticketDigits(ticketNumber: string): string | undefined {
-  const digits = ticketNumber.replace(/\D/g, '');
-  return digits.length >= 4 ? digits : undefined;
+function ticketKey(ticketNumber: string): string | undefined {
+  return ticketNumber.replace(/\D/g, '').length >= 4 ? fold(ticketNumber) : undefined;
 }
 
 function agentLines(transcript: string): string[] {
@@ -94,13 +101,13 @@ function agentLines(transcript: string): string[] {
 }
 
 export function toldTheCallerItWasRecorded(transcript: string, filedTicketNumbers: readonly string[]): boolean {
-  const numbers = filedTicketNumbers.map(ticketDigits).filter((d): d is string => Boolean(d));
+  const numbers = filedTicketNumbers.map(ticketKey).filter((k): k is string => Boolean(k));
   for (const line of agentLines(transcript)) {
     const lower = line.toLowerCase();
     if (RECORDED_CLAIMS.some((claim) => lower.includes(claim))) return true;
     if (numbers.length === 0) continue;
     const folded = fold(line);
-    if (numbers.some((digits) => folded.includes(digits))) return true;
+    if (numbers.some((key) => folded.includes(key))) return true;
   }
   return false;
 }

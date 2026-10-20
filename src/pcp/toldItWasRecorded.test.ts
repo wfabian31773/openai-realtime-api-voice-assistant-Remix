@@ -135,13 +135,33 @@ describe('what counts as telling the caller it is recorded', () => {
 
   it('digit words inside other words are left alone', () => {
     // "anyone" must stay a word: folded as "any1" it would run into the
-    // "999" after it and read as ticket 1999.
+    // "999" after it. Since the prefix became part of the match this is
+    // defended twice — "any1999" does not contain "pcp1999" either — so
+    // dropping the word boundary is now an equivalence, recorded rather than
+    // hidden. The boundary stays because it is what the fold means.
     expect(toldTheCallerItWasRecorded('AGENT: Anyone, nine nine nine times in a thousand, gets a call back.', ['PCP-1999'])).toBe(false);
   });
 
   it('a number too short to be distinctive is never matched', () => {
-    // Three digits turn up in ordinary sentences — a suite, an extension.
-    expect(toldTheCallerItWasRecorded('AGENT: That office is suite 129, open at nine.', ['PCP-129'])).toBe(false);
+    // Three digits turn up in ordinary sentences — a suite, an extension. The
+    // line carries the prefix right before them, so only the length floor can
+    // refuse it.
+    expect(toldTheCallerItWasRecorded('AGENT: The PCP 129 form is on its way.', ['PCP-129'])).toBe(false);
+  });
+
+  it("the other prefix reads the same way — a ticket the call filed through create-ticket", () => {
+    expect(toldTheCallerItWasRecorded('AGENT: Your ticket is V-A-seven-three-six-zero-one.', ['VA-73601'])).toBe(true);
+  });
+
+  // Codex P2, #355: the fold runs separate numbers together, so a ticket's
+  // digits can sit in a line that read out no ticket at all.
+  it.each([
+    ['a ZIP code', 'AGENT: That office is at 100 Main Street, Pasadena, CA 91101.', 'PCP-91101'],
+    ['a callback number', 'AGENT: Is 714-973-6791 the best number to reach you?', 'PCP-73679'],
+    ['a callback number, spelled', 'AGENT: Is seven one four, nine seven three, six seven nine one the best number?', 'PCP-73679'],
+    ['two numbers the fold runs together', "AGENT: It's suite 736, 79 Main Street.", 'PCP-73679'],
+  ])("the digits alone are not a readback: %s", (_label, line, ticket) => {
+    expect(toldTheCallerItWasRecorded(line, [ticket])).toBe(false);
   });
 
   it('an empty transcript, or none at all, tells nobody anything', () => {
