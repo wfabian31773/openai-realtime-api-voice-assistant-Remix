@@ -447,6 +447,8 @@ export interface VoiceCallRecord {
   slug: string;
   callerPhone: string;
   dialedNumber: string;
+  /** Copied from the context; see VoiceCallContext.direction. */
+  direction?: "inbound" | "outbound";
   outcome: CallOutcome;
   /**
    * HOW the caller was moved, on a `transferred` outcome — and therefore
@@ -542,6 +544,13 @@ export interface VoiceCallContext {
    * identity — the agent's own prompt owns what is done with it. */
   callerPhone: string;
   dialedNumber: string;
+  /**
+   * "outbound" on a call the runtime dialled (src/runtime/outbound/). There,
+   * `callerPhone` is the person we rang and `dialedNumber` is the number we
+   * rang FROM; the call record turns them back into Twilio's from/to.
+   * Absent means inbound, which is every call before the outbound layer.
+   */
+  direction?: "inbound" | "outbound";
 }
 
 /** The narrow session surface the bridge needs. GrokVoiceSession satisfies
@@ -2451,6 +2460,7 @@ export class VoiceCallBridge {
         slug: this.deps.context.slug,
         callerPhone: this.deps.context.callerPhone,
         dialedNumber: this.deps.context.dialedNumber,
+        ...(this.deps.context.direction ? { direction: this.deps.context.direction } : {}),
         outcome,
         ...(outcome === "transferred" && this.transferMethod
           ? { transferMethod: this.transferMethod }

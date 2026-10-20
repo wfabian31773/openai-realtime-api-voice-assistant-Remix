@@ -108,7 +108,7 @@ function headerValue(
   return Array.isArray(v) ? v[0] : v;
 }
 
-function xmlEscape(value: string): string {
+export function xmlEscape(value: string): string {
   return value
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
@@ -117,7 +117,7 @@ function xmlEscape(value: string): string {
     .replace(/'/g, "&apos;");
 }
 
-function twimlResponse(status: number, innerXml: string): WebhookResponse {
+export function twimlResponse(status: number, innerXml: string): WebhookResponse {
   return {
     status,
     contentType: "text/xml",

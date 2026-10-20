@@ -40,6 +40,13 @@ export interface CallEntry {
   createdAtMs: number;
   streamStarted: boolean;
   outcome: CallOutcome | null;
+  /**
+   * Present only on a call the runtime DIALLED (src/runtime/outbound/): which
+   * contact and attempt it is. Set by the outbound answer webhook from the
+   * query Twilio signed, never from anything the stream sends — the stream
+   * names a callSid and a token, and this is looked up from the callSid.
+   */
+  outbound?: { campaignKey: string; contactId: string; attemptId: string };
 }
 
 /** How long a webhook-issued entry may wait for its stream and its after-
@@ -76,6 +83,7 @@ export class CallSessionRegistry {
     slug: string;
     callerPhone: string;
     dialedNumber: string;
+    outbound?: CallEntry["outbound"];
   }): CallEntry {
     this.sweep();
     const existing = this.entries.get(input.callSid);
@@ -89,6 +97,7 @@ export class CallSessionRegistry {
       createdAtMs: this.now(),
       streamStarted: false,
       outcome: null,
+      ...(input.outbound ? { outbound: { ...input.outbound } } : {}),
     };
     this.entries.set(input.callSid, entry);
     return entry;

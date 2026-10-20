@@ -271,6 +271,11 @@ export const campaignContacts = pgTable("campaign_contacts", {
   
   // Agent notes from conversation
   agentNotes: text("agent_notes"),
+
+  // The source system's id for this person or appointment, so importing the
+  // same list twice never queues anybody twice (runtime outbound layer,
+  // src/runtime/outbound/store.ts — which also adds it if absent).
+  externalRef: varchar("external_ref"),
   
   createdAt: timestamp("created_at").defaultNow(),
   updatedAt: timestamp("updated_at").defaultNow(),
@@ -278,7 +283,24 @@ export const campaignContacts = pgTable("campaign_contacts", {
   index("idx_campaign_contacts_outreach").on(table.outreachStatus),
   index("idx_campaign_contacts_next_attempt").on(table.nextAttemptAt),
   index("idx_campaign_contacts_phone").on(table.phoneNumber),
+  uniqueIndex("campaign_contacts_campaign_external_ref_uidx")
+    .on(table.campaignId, table.externalRef)
+    .where(sql`external_ref IS NOT NULL`),
 ]);
+
+/**
+ * Phone numbers that asked not to be called, phone-wide and across every
+ * runtime outbound campaign (src/runtime/outbound/). Keyed on the last ten
+ * digits so every spelling of a number is one request. Every outbound dial
+ * checks it first; the voice tool `opt_out_of_calls` writes it. Created on
+ * first use by the outbound store as well, so a missing `db:push` cannot turn
+ * the check into a pass.
+ */
+export const doNotContact = pgTable("do_not_contact", {
+  phoneKey: varchar("phone_key", { length: 10 }).primaryKey(),
+  source: varchar("source", { length: 64 }).notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
 
 export type CampaignContact = typeof campaignContacts.$inferSelect;
 export type InsertCampaignContact = typeof campaignContacts.$inferInsert;

@@ -283,6 +283,7 @@ import { CallerAudioMeter, type CallerAudioCounts } from "./callerAudioEnergy";
 import { withGreetingAlreadyPlayed } from "./greetingAlreadyPlayed";
 import { withNewOrExistingAsk } from "./newOrExistingAsk";
 import {
+  buildUnavailableTwiml,
   handleAfterRedirect,
   handleVoiceWebhook,
   isValidSlug,
@@ -301,6 +302,18 @@ import {
   type TwilioOutboundFrame,
 } from "./twilioFrames";
 import { KNOWLEDGE_PACK_VERSION } from "./knowledgePack";
+import type { OutboundContact } from "./outbound/campaign";
+import type { OutboundStore } from "./outbound/store";
+import { createDbOutboundStore } from "./outbound/store";
+import { OUTBOUND_PATH_PREFIX, type OutboundTwilio } from "./outbound/dialer";
+import {
+  OUTBOUND_UNAVAILABLE_LINE,
+  handleOutboundAnswer,
+  handleOutboundStatus,
+  type OutboundWebhookDeps,
+} from "./outbound/outboundWebhook";
+import { startOutboundScheduler, type DialerLock } from "./outbound/scheduler";
+import { defaultDialerLock } from "./outbound/defaultLock";
 
 /**
  * Twilio media frames held while the agent is being built — 10 seconds of
@@ -427,6 +440,17 @@ export interface VoiceRuntimeOptions {
    * settable to a no-op to turn the floor off without a deploy.
    */
   sweepPcpFloor?: (record: VoiceCallRecord) => Promise<unknown>;
+  /**
+   * The outbound layer's database (src/runtime/outbound/store.ts). Injected
+   * for tests; production builds the Hub store on first use, so an inbound-
+   * only deployment never opens it.
+   */
+  outboundStore?: OutboundStore;
+  /** Places outbound calls. Injected for tests; production wraps the Twilio
+   * client, and only when RUNTIME_OUTBOUND_DIALING=1 starts the scheduler. */
+  outboundTwilio?: () => Promise<OutboundTwilio>;
+  /** The fleet-wide dialler lock. Injected for tests. */
+  outboundLock?: DialerLock;
   /**
    * Writes the call's timed turns to `call_turns` — telemetry, after the row
    * and after the sweep, never awaited by teardown. Injected for tests.
@@ -618,6 +642,26 @@ export function mountVoiceRuntime(
    * added here after a successful resolve. */
   const knownLanes = new Set<string>();
 
+  /** The outbound layer's store, built on first use (an inbound-only
+   * deployment never opens it). A failed build is not cached. */
+  let outboundStorePromise: Promise<OutboundStore> | null = null;
+  const outboundStore = (): Promise<OutboundStore> => {
+    if (options.outboundStore) return Promise.resolve(options.outboundStore);
+    outboundStorePromise ??= createDbOutboundStore().catch((error) => {
+      outboundStorePromise = null;
+      throw error;
+    });
+    return outboundStorePromise;
+  };
+  /** The policy of a registered, enabled outbound lane — null for any other
+   * slug, so an inbound lane can never be reached through the outbound path. */
+  const outboundPolicyFor = async (slug: string) => {
+    const config = (await laneSource()).getAgentConfig(slug);
+    return config?.enabled && config.agentType === "outbound" && config.outbound
+      ? config.outbound
+      : null;
+  };
+
   for (const line of formatReadinessLines(computeRuntimeReadiness(env))) {
     console.log(line);
   }
@@ -730,6 +774,62 @@ export function mountVoiceRuntime(
       lanes,
       activeCalls: registry.activeCount(),
     });
+  });
+
+  /**
+   * THE OUTBOUND LAYER'S WEBHOOKS (src/runtime/outbound/). Mounted before
+   * `/voice/:slug` so a three-segment outbound path is never read as a lane.
+   * Async because the answer has to read the contact; a failure answers with
+   * the controlled line or an empty 204, never a 5xx Twilio would retry into
+   * dead air.
+   */
+  const outboundDeps = async (): Promise<OutboundWebhookDeps> => ({
+    env,
+    registry,
+    store: await outboundStore(),
+    policyFor: outboundPolicyFor,
+  });
+  app.post(`${OUTBOUND_PATH_PREFIX}/:slug/status`, async (req: Request, res: Response) => {
+    try {
+      send(res, await handleOutboundStatus(String(req.params.slug ?? ""), toWebhookRequest(req), await outboundDeps()));
+    } catch (error) {
+      console.error("[outbound] status webhook failed:", error instanceof Error ? error.message : error);
+      res.status(204).end();
+    }
+  });
+  app.post(`${OUTBOUND_PATH_PREFIX}/:slug`, async (req: Request, res: Response) => {
+    try {
+      send(res, await handleOutboundAnswer(String(req.params.slug ?? ""), toWebhookRequest(req), await outboundDeps()));
+    } catch (error) {
+      console.error("[outbound] answer webhook failed:", error instanceof Error ? error.message : error);
+      send(res, buildUnavailableTwiml(200, OUTBOUND_UNAVAILABLE_LINE));
+    }
+  });
+
+  /**
+   * THE DIALLER. Started only when RUNTIME_OUTBOUND_DIALING=1; with the switch
+   * off there is no timer, no lock and no query. Each campaign also needs its
+   * own enable variable and caller ID before it rings anybody (dialer.ts).
+   */
+  startOutboundScheduler({
+    env,
+    host: transferDomain ?? "",
+    laneSource,
+    slugs: async () => {
+      const source = (await laneSource()) as LaneSource & {
+        getOutboundAgents?: () => Array<{ id: string }>;
+      };
+      return (source.getOutboundAgents?.() ?? []).map((a) => a.id);
+    },
+    store: outboundStore,
+    twilio:
+      options.outboundTwilio ??
+      (async () => {
+        const { getTwilioClient } = await import("../lib/twilioClient");
+        const client = await getTwilioClient();
+        return { createCall: (opts) => client.calls.create(opts) };
+      }),
+    lock: options.outboundLock ?? defaultDialerLock,
   });
 
   app.post("/voice/:slug/after", (req: Request, res: Response) => {
@@ -972,6 +1072,9 @@ export function mountVoiceRuntime(
         slug: entry.slug,
         callerPhone: entry.callerPhone,
         dialedNumber: entry.dialedNumber,
+        // A call this runtime DIALLED says so, and the call record writes
+        // Twilio's from/to the right way round (callRecord.callEnds).
+        ...(entry.outbound ? { direction: "outbound" as const } : {}),
       };
       try {
         // Started BEFORE the agent is built so the two overlap, and bounded
@@ -979,8 +1082,11 @@ export function mountVoiceRuntime(
         // Both together: the greeting resolver is a warm Map read after
         // boot, but on a cold miss it can wait on the database, and that
         // must overlap the pre-context lookup rather than follow it.
-        const [precontext, configuredGreeting] = await Promise.all([
-          options.fetchPrecontext
+        const [precontext, configuredGreeting, outboundContact] = await Promise.all([
+          // A DIALLED call already knows who it rang: the contact row names
+          // them, so there is no caller-ID lookup to make — and a household
+          // phone's other members are exactly what that lookup would surface.
+          options.fetchPrecontext && !entry.outbound
             ? withinOrNull(
                 options.fetchPrecontext(entry.callerPhone) as Promise<unknown>,
                 PRECONTEXT_DEADLINE_MS,
@@ -992,6 +1098,14 @@ export function mountVoiceRuntime(
                 PRECONTEXT_DEADLINE_MS,
               )
             : Promise.resolve(null),
+          entry.outbound
+            ? withinOrNull(
+                outboundStore().then((store) =>
+                  store.loadCallContact(entry.outbound!.contactId, entry.outbound!.attemptId),
+                ),
+                PRECONTEXT_DEADLINE_MS,
+              ).catch(() => null)
+            : Promise.resolve(null as OutboundContact | null),
         ]);
         // WHICH of the three pre-context outcomes happened. Without this the
         // runbook's own diagnosis step is not performable: every failure —
@@ -1053,7 +1167,33 @@ export function mountVoiceRuntime(
             certain: false,
           });
         }
-        const lane = await resolveLane(
+        /**
+         * A DIALLED CALL REACHES ONLY ITS CAMPAIGN'S LANE, and an inbound call
+         * never reaches an outbound lane. Decided from the registration BEFORE
+         * the agent is built, like every other refusal (laneRegistry): an
+         * outbound agent answering an inbound caller would open with a greeting
+         * about somebody else's appointment, and an inbound agent on a dialled
+         * call would not know why it rang. A dialled call whose contact could
+         * not be loaded is refused the same way — the agent must never be
+         * guessing who it called.
+         */
+        const registered = (await laneSource()).getAgentConfig(entry.slug);
+        const isOutboundLane = registered?.agentType === "outbound" && Boolean(registered.outbound);
+        const directionMismatch =
+          registered !== undefined &&
+          (isOutboundLane !== Boolean(entry.outbound) ||
+            (entry.outbound !== undefined && !outboundContact));
+        if (directionMismatch) {
+          console.warn(
+            `[voice-runtime] ${entry.slug}: refused — ` +
+              (entry.outbound
+                ? isOutboundLane
+                  ? "the dialled contact could not be loaded"
+                  : "a dialled call reached an inbound lane"
+                : "an inbound call reached an outbound lane"),
+          );
+        }
+        const lane = directionMismatch ? null : await resolveLane(
           entry.slug,
           {
             callSid: entry.callSid,
@@ -1081,6 +1221,10 @@ export function mountVoiceRuntime(
             // confirm, never an identity — the agent's own prompt decides
             // what to do with it (Codex review, PR #227).
             ...(precontext ? { precontext } : {}),
+            // Who a dialled call is for, from the contact row (outbound/).
+            ...(entry.outbound && outboundContact
+              ? { outbound: { ...outboundContact, campaignKey: entry.outbound.campaignKey } }
+              : {}),
           },
           {
             source: await laneSource(),
@@ -1244,11 +1388,16 @@ export function mountVoiceRuntime(
          * has to be told it was spoken.
          */
         const spokenGreeting =
-          personaliseGreeting(
-            chooseGreeting(entry.slug, configuredGreeting, lane.greeting),
-            recognisedFirstName(precontext),
-            greetingStyleFor(entry.slug),
-          ) || null;
+          // A dialled call opens with its campaign's own greeting, built for
+          // the person it rang: who is calling, that it is automated, and
+          // that the call is recorded, before anything else (outbound/).
+          lane.outbound && outboundContact
+            ? lane.outbound.greeting(outboundContact) || null
+            : personaliseGreeting(
+                chooseGreeting(entry.slug, configuredGreeting, lane.greeting),
+                recognisedFirstName(precontext),
+                greetingStyleFor(entry.slug),
+              ) || null;
         /**
          * FIRST-EVENT RETRY, BEFORE THE BRIDGE (v91).
          *

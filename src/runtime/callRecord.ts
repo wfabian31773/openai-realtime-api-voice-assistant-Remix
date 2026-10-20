@@ -61,7 +61,7 @@ export interface RuntimeCallIdentity {
  * column at runtime. */
 export interface RuntimeCallLogRow {
   callSid: string;
-  direction: "inbound";
+  direction: "inbound" | "outbound";
   from: string;
   to: string;
   dialedNumber: string;
@@ -209,6 +209,24 @@ export function statusFor(
   return "completed";
 }
 
+/**
+ * Twilio's from/to for the row. On an inbound call the caller rang the
+ * practice; on a call the runtime DIALLED (src/runtime/outbound/) the
+ * practice rang the person, so `from` is our number and `to` — and the
+ * number dialled — is theirs. The context names the person `callerPhone`
+ * either way, because that is the number every downstream reader means.
+ */
+export function callEnds(c: {
+  callerPhone: string;
+  dialedNumber: string;
+  direction?: "inbound" | "outbound";
+}): { direction: "inbound" | "outbound"; from: string; to: string; dialedNumber: string } {
+  if (c.direction === "outbound") {
+    return { direction: "outbound", from: c.dialedNumber, to: c.callerPhone, dialedNumber: c.callerPhone };
+  }
+  return { direction: "inbound", from: c.callerPhone, to: c.dialedNumber, dialedNumber: c.dialedNumber };
+}
+
 /** Pure mapping, exported so it can be asserted without a database. */
 export function toCallLogRow(
   record: VoiceCallRecord,
@@ -219,12 +237,13 @@ export function toCallLogRow(
     0,
     Math.round((record.endedAtMs - record.startedAtMs) / 1000),
   );
+  const ends = callEnds(record);
   return {
     callSid: record.callSid,
-    direction: "inbound",
-    from: record.callerPhone,
-    to: record.dialedNumber,
-    dialedNumber: record.dialedNumber,
+    direction: ends.direction,
+    from: ends.from,
+    to: ends.to,
+    dialedNumber: ends.dialedNumber,
     agentUsed: record.slug,
     status: statusFor(record.outcome, record.transcript),
     startTime: new Date(record.startedAtMs),
@@ -358,7 +377,7 @@ export function toCallLogRow(
 /** The row opened when a call starts, before the agent can do anything. */
 export interface RuntimeCallOpenRow {
   callSid: string;
-  direction: "inbound";
+  direction: "inbound" | "outbound";
   from: string;
   to: string;
   dialedNumber: string;
@@ -450,12 +469,13 @@ export async function openRuntimeCall(
     // call on each lane, and a failure yields undefined rather than
     // throwing, so the call is still logged exactly as it is today.
     const agentId = await resolveAgentId(context.slug, agentIdLookup);
+    const ends = callEnds(context);
     return await insert({
       callSid: context.callSid,
-      direction: "inbound",
-      from: context.callerPhone,
-      to: context.dialedNumber,
-      dialedNumber: context.dialedNumber,
+      direction: ends.direction,
+      from: ends.from,
+      to: ends.to,
+      dialedNumber: ends.dialedNumber,
       agentUsed: context.slug,
       ...(agentId ? { agentId } : {}),
       ...(context.agentVersion ? { agentVersion: context.agentVersion } : {}),

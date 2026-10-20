@@ -68,6 +68,10 @@ import { normalizeSpokenLanguage } from "./language";
  */
 import { SET_SPOKEN_LANGUAGE_TOOL_NAME, spokenLanguageToolDescription } from "../tools/languageTools";
 import { realtimeToolsFor } from "../tools/realtimeAdapter";
+// Static, like languageTools above: a module that registers tools at load
+// must reach the process through one loader (the v78 outage).
+import { END_CALL_TOOL_NAME, OPT_OUT_TOOL_NAME, RECORD_OUTCOME_TOOL_NAME } from "../tools/outboundTools";
+import type { OutboundContact, OutboundLanePolicy } from "./outbound/campaign";
 
 /** What the runtime needs from a lane's registry entry. Structurally a
  * subset of AgentConfig in src/config/agents.ts. */
@@ -86,6 +90,12 @@ export interface LaneConfig {
   spokenLanguages?: readonly string[];
   version?: string;
   agentType?: "inbound" | "outbound";
+  /**
+   * Present on a lane the runtime DIALS (src/runtime/outbound/): its calling
+   * window, caps, caller ID, greeting and voicemail. An outbound lane with no
+   * policy is refused, as every outbound agent was before the outbound layer.
+   */
+  outbound?: OutboundLanePolicy;
   /** The line the practice answers with. Present on every registered
    * inbound agent; the SIP path plays it and the prompts assume it. */
   greeting?: string;
@@ -192,7 +202,10 @@ export function laneSupportStatus(
   config: LaneConfig,
   opts: { transferAvailable?: boolean } = {},
 ): string | null {
-  if (config.agentType && config.agentType !== "inbound") {
+  if (config.agentType === "outbound" && config.outbound) {
+    // A registered campaign: answered only through /voice/outbound/:slug,
+    // which the voice runtime checks against the call's own registry entry.
+  } else if (config.agentType && config.agentType !== "inbound") {
     return `lane '${config.id}' is an ${config.agentType} agent; this runtime answers inbound calls`;
   }
   if (TRANSFER_CAPABLE_LANES.has(config.id) && !opts.transferAvailable) {
@@ -253,6 +266,12 @@ export interface LaneCallMetadata {
    * be deployed before a repoint without changing the live line.
    */
   readonly pipeline?: 'runtime';
+  /**
+   * On a call the runtime dialled: who it is calling, loaded from
+   * `campaign_contacts` by the contact and attempt the answer webhook was
+   * given. Absent on every inbound call.
+   */
+  readonly outbound?: OutboundContact & { campaignKey: string };
 }
 
 export interface ResolvedLane {
@@ -276,6 +295,8 @@ export interface ResolvedLane {
    * and so a lane that has no greeting simply has none.
    */
   greeting: string | null;
+  /** The lane's outbound policy, or null on an inbound lane. */
+  outbound: OutboundLanePolicy | null;
 }
 
 /** The handoff callback every factory's first parameter expects. It is a
@@ -352,7 +373,10 @@ export async function resolveLane(
     instructionsPrefix: buildKnowledgePack(),
     // The pipeline's own tools, on every lane, recorded to the timeline the
     // way the lane's own are.
-    runtimeTools: await runtimeOwnedTools(slug, metadata, config.spokenLanguages),
+    runtimeTools: [
+      ...(await runtimeOwnedTools(slug, metadata, config.spokenLanguages)),
+      ...outboundRuntimeTools(slug, metadata, config),
+    ],
     spokenLanguages: config.spokenLanguages,
   });
 
@@ -386,6 +410,7 @@ export async function resolveLane(
     },
     version: config.version ?? null,
     greeting: config.greeting?.trim() || null,
+    outbound: config.outbound ?? null,
   };
 }
 
@@ -447,6 +472,39 @@ async function runtimeOwnedTools(
       ? { ...t, description: spokenLanguageToolDescription(spokenLanguages) }
       : t,
   );
+}
+
+/**
+ * TOOLS EVERY DIALLED CALL CARRIES: opt out, record how the call ended, hang up.
+ * Bound only when the lane is an outbound campaign AND this call was dialled
+ * (the metadata carries its contact), so an inbound lane never sees them.
+ * Who the call is about is injected context, merged UNDER the model's
+ * arguments — see src/tools/outboundTools.ts.
+ */
+export const RUNTIME_OUTBOUND_TOOLS = [OPT_OUT_TOOL_NAME, RECORD_OUTCOME_TOOL_NAME, END_CALL_TOOL_NAME] as const;
+
+function outboundRuntimeTools(
+  slug: string,
+  metadata: LaneCallMetadata,
+  config: LaneConfig,
+): LiveTool[] {
+  if (!config.outbound || !metadata.outbound) return [];
+  return realtimeToolsFor(
+    [...RUNTIME_OUTBOUND_TOOLS],
+    {
+      outbound_contact_id: metadata.outbound.contactId,
+      outbound_phone: metadata.outbound.phone,
+      outbound_campaign: metadata.outbound.campaignKey,
+    },
+    {
+      callId: metadata.callId,
+      callSid: metadata.callSid,
+      get callLogId() {
+        return metadata.callLogId;
+      },
+      agentSlug: slug,
+    },
+  ) as unknown as LiveTool[];
 }
 
 /** The real registry, imported lazily so a health check or a unit test
