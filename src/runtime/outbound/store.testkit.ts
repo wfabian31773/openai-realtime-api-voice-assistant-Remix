@@ -4,7 +4,16 @@
  * it is still dialable and due, and only one caller gets it.
  */
 import type { OutboundContact } from "./campaign";
-import { DIALABLE_STATUSES, dncKey, type AttemptFinish, type ContactRow, type ContactStatus, type OutboundStore } from "./store";
+import {
+  DIALABLE_STATUSES,
+  dncKey,
+  type AttemptFinish,
+  type ContactRow,
+  type ContactStatus,
+  type OutboundStore,
+  type PriorAttempt,
+  type SettleOptions,
+} from "./store";
 
 export interface FakeAttempt {
   id: string;
@@ -74,8 +83,20 @@ export class FakeOutboundStore implements OutboundStore {
     c.nextAttemptAt = nextAttemptAt;
   }
 
-  async priorAttemptTimes(contactId: string): Promise<Date[]> {
-    return this.attempts.filter((a) => a.contactId === contactId).map((a) => a.at);
+  async priorAttempts(contactId: string): Promise<PriorAttempt[]> {
+    // Same rule as the SQL: every row in this contact's campaign whose phone
+    // reads as the same ten digits.
+    const me = this.contacts.get(contactId);
+    if (!me) return [];
+    const key = (phone: string) => phone.replace(/\D/g, "").slice(-10);
+    const siblings = new Set(
+      [...this.contacts.values()]
+        .filter((c) => c.campaignId === me.campaignId && key(c.phone) === key(me.phone))
+        .map((c) => c.id),
+    );
+    return this.attempts
+      .filter((a) => siblings.has(a.contactId))
+      .map((a) => ({ at: a.at, open: !a.endedAt }));
   }
 
   async startAttempt(contactId: string, campaignId: string, attemptNumber: number): Promise<string> {
@@ -115,14 +136,15 @@ export class FakeOutboundStore implements OutboundStore {
     };
   }
 
-  async settleContact(
-    contactId: string,
-    status: ContactStatus,
-    opts: { nextAttemptAt?: Date | null; onlyIfCalling?: boolean; notes?: string } = {},
-  ): Promise<boolean> {
+  async settleContact(contactId: string, status: ContactStatus, opts: SettleOptions = {}): Promise<boolean> {
     const c = this.contacts.get(contactId);
     if (!c) return false;
     if (opts.onlyIfCalling && c.status !== "calling") return false;
+    if (opts.onlyIfCurrentAttempt) {
+      // Same rule as the SQL: the contact's newest attempt.
+      const mine = this.attempts.filter((a) => a.contactId === contactId);
+      if (mine[mine.length - 1]?.id !== opts.onlyIfCurrentAttempt) return false;
+    }
     c.status = status;
     c.nextAttemptAt = opts.nextAttemptAt ?? null;
     if (opts.notes) c.notes = opts.notes;

@@ -26,7 +26,10 @@
  *
  * FINISHED: the attempt gets Twilio's verdict; the contact is settled from it
  * ONLY if the call itself has not already settled it (`onlyIfCalling`) —
- * a voicemail left, an opt-out, a booking all outrank "the call ended".
+ * a voicemail left, an opt-out, a booking all outrank "the call ended" —
+ * and ONLY if this attempt is still the contact's newest
+ * (`onlyIfCurrentAttempt`): a callback that arrives after the stale-claim
+ * reaper has handed the row on must not settle the call that came after it.
  * ─────────────────────────────────────────────────────────────────────────────
  */
 
@@ -102,17 +105,17 @@ export async function handleOutboundAnswer(
 
   if (answeredBy === "fax") {
     await deps.store.finishAttempt(attemptId, { status: "fax", answeredBy, ended: false });
-    await deps.store.settleContact(contactId, "wrong_number", { onlyIfCalling: true });
+    await deps.store.settleContact(contactId, "wrong_number", { onlyIfCalling: true, onlyIfCurrentAttempt: attemptId });
     return hangup();
   }
 
   if (answeredBy.startsWith("machine")) {
     await deps.store.finishAttempt(attemptId, { status: "voicemail", answeredBy, ended: false });
-    const prior = await deps.store.priorAttemptTimes(contactId);
+    const prior = await deps.store.priorAttempts(contactId);
     await deps.store.settleContact(
       contactId,
       prior.length >= policy.caps.total ? "max_attempts" : "voicemail",
-      { onlyIfCalling: true, nextAttemptAt: nextLookAt(now, "too_soon", policy) },
+      { onlyIfCalling: true, onlyIfCurrentAttempt: attemptId, nextAttemptAt: nextLookAt(now, "too_soon", policy) },
     );
     return twimlResponse(200, `<Say>${xmlEscape(policy.voicemail())}</Say><Hangup/>`);
   }
@@ -121,6 +124,7 @@ export async function handleOutboundAnswer(
     await deps.store.finishAttempt(attemptId, { status: "not_ready", answeredBy, ended: false });
     await deps.store.settleContact(contactId, "no_answer", {
       onlyIfCalling: true,
+      onlyIfCurrentAttempt: attemptId,
       nextAttemptAt: nextLookAt(now, "too_soon", policy),
     });
     return twimlResponse(200, `<Say>${xmlEscape(OUTBOUND_UNAVAILABLE_LINE)}</Say><Hangup/>`);
@@ -179,15 +183,15 @@ export async function handleOutboundStatus(
     // A person answered and the call ended without the agent settling the
     // contact. Not retried automatically: somebody heard us, and ringing
     // them again on a guess is how a campaign becomes a nuisance.
-    await deps.store.settleContact(contactId, "answered", { onlyIfCalling: true });
+    await deps.store.settleContact(contactId, "answered", { onlyIfCalling: true, onlyIfCurrentAttempt: attemptId });
     return ok;
   }
 
-  const prior = await deps.store.priorAttemptTimes(contactId);
+  const prior = await deps.store.priorAttempts(contactId);
   await deps.store.settleContact(
     contactId,
     prior.length >= policy.caps.total ? "max_attempts" : "no_answer",
-    { onlyIfCalling: true, nextAttemptAt: nextLookAt(now, "too_soon", policy) },
+    { onlyIfCalling: true, onlyIfCurrentAttempt: attemptId, nextAttemptAt: nextLookAt(now, "too_soon", policy) },
   );
   return ok;
 }

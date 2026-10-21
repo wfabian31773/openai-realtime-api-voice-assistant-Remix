@@ -39,6 +39,14 @@ describe("the claim is the only door to a dial", () => {
     expect(method("settleContact")).toContain("::boolean OR outreach_status = 'calling')");
   });
 
+  it("lets a callback settle only the call it belongs to: the contact's newest attempt", () => {
+    const settle = method("settleContact");
+    expect(settle).toContain("${opts.onlyIfCurrentAttempt ?? null}::varchar IS NULL");
+    expect(settle).toContain("WHERE x.contact_id = campaign_contacts.id AND x.direction = 'outbound'");
+    expect(settle).toContain("ORDER BY x.attempted_at DESC, x.id DESC");
+    expect(settle).toContain("LIMIT 1))");
+  });
+
   it("reaps only rows stuck in 'calling' since before the cut-off", () => {
     const reap = method("reapStaleClaims");
     expect(reap).toContain("outreach_status = 'calling'");
@@ -67,7 +75,19 @@ describe("the attempt row keeps the answer webhook's verdict", () => {
   });
 
   it("counts only outbound attempts against the caps", () => {
-    expect(method("priorAttemptTimes")).toContain("direction = 'outbound'");
+    expect(method("priorAttempts")).toContain("a.direction = 'outbound'");
+  });
+
+  it("counts the caps over the PHONE across the campaign, not over one row", () => {
+    const prior = method("priorAttempts");
+    expect(prior).toContain("ON c.campaign_id = me.campaign_id");
+    expect(prior).toContain("right(regexp_replace(c.phone_number, '[^0-9]', '', 'g'), 10)");
+    expect(prior).toContain("= right(regexp_replace(me.phone_number, '[^0-9]', '', 'g'), 10)");
+    expect(prior).toContain("JOIN campaign_contact_attempts a ON a.contact_id = c.id");
+    expect(prior).toContain("WHERE me.id = ${contactId}::varchar");
+    // Not filtered to the one row: the attempts come from every sibling.
+    expect(prior).not.toMatch(/a\.contact_id = \$\{contactId\}/);
+    expect(prior).toContain("(a.ended_at IS NULL) AS open");
   });
 });
 

@@ -12,13 +12,16 @@
  *   2. CHECK, holding the claim:
  *        - the phone is not on the do-not-contact list (phone-wide, every
  *          campaign, and an unreadable number is refused);
- *        - the calling window and the per-person caps (./callingWindow.ts).
+ *        - the calling window and the per-person caps (./callingWindow.ts),
+ *          counted over every row in the campaign carrying the same phone;
+ *        - no call to that phone is still on the line.
  *      A failed check hands the row back with the reason's next chance.
  *   3. DIAL: an attempt row first, then Twilio, then the attempt's CallSid.
  *      The attempt row exists before Twilio is asked so a call that rings
  *      while we are still waiting for Twilio's reply has something to land
  *      on. A Twilio refusal settles the attempt as failed and hands the row
- *      back for a later try.
+ *      back for a later try. Once Twilio has ACCEPTED, nothing hands the
+ *      row back — the phone is ringing.
  *
  * Twilio is asked for answering-machine detection that waits for the
  * greeting to end (`DetectMessageEnd`), the 5Star lane's setting since it
@@ -198,12 +201,22 @@ async function dialOne(
     return "do_not_contact";
   }
 
-  const prior = await deps.store.priorAttemptTimes(contact.id);
+  // Every attempt on this phone in this campaign, not only this row's: an
+  // import can carry one person on two rows, and the caps are per person.
+  const prior = await deps.store.priorAttempts(contact.id);
   if (prior.length >= policy.caps.total) {
     await deps.store.settleContact(contact.id, "max_attempts");
     return "total_cap";
   }
-  const decision = mayDialNow(now, prior.map((at) => ({ at })), policy.window, policy.caps);
+  // A call to this phone still on the line (another row of the same person):
+  // never ring them twice at once. Bounded like the concurrency count, so a
+  // lost status callback cannot hold the phone past the stale-claim window.
+  const since = now.getTime() - STALE_CLAIM_MS;
+  if (prior.some((p) => p.open && p.at.getTime() >= since)) {
+    await deps.store.releaseContact(contact.id, candidate.status, nextLookAt(now, "too_soon", policy));
+    return "call_in_progress";
+  }
+  const decision = mayDialNow(now, prior.map((p) => ({ at: p.at })), policy.window, policy.caps);
   if (!decision.ok) {
     // Back to the status it had before the claim, not 'pending': a row that
     // has already had a voicemail left keeps saying so.
@@ -212,8 +225,9 @@ async function dialOne(
   }
 
   const attemptId = await deps.store.startAttempt(contact.id, campaignId, prior.length + 1);
+  let call: { sid: string };
   try {
-    const call = await deps.twilio.createCall({
+    call = await deps.twilio.createCall({
       to: contact.phone,
       from,
       url: answerUrl(deps.host, slug, contact.id, attemptId),
@@ -225,8 +239,6 @@ async function dialOne(
       statusCallbackMethod: "POST",
       statusCallbackEvent: ["completed"],
     });
-    await deps.store.setAttemptCallSid(attemptId, call.sid);
-    return null;
   } catch (error) {
     (deps.log ?? console.log)(
       `[outbound] ${policy.campaignKey}: Twilio refused the dial — ${error instanceof Error ? error.message : String(error)}`,
@@ -235,4 +247,16 @@ async function dialOne(
     await deps.store.releaseContact(contact.id, "no_answer", nextLookAt(now, "too_soon", policy));
     return "twilio_refused";
   }
+  // Twilio accepted: the phone is ringing, so nothing below may hand the row
+  // back. The webhooks find the contact and the attempt by the ids in their
+  // URLs, not by the CallSid, so a CallSid that could not be saved costs a
+  // column and nothing else.
+  try {
+    await deps.store.setAttemptCallSid(attemptId, call.sid);
+  } catch (error) {
+    (deps.log ?? console.log)(
+      `[outbound] ${policy.campaignKey}: call ${call.sid} placed but its CallSid could not be saved — the claim stands and the webhooks settle it (${error instanceof Error ? error.message : String(error)})`,
+    );
+  }
+  return null;
 }

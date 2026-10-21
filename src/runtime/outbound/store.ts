@@ -81,6 +81,18 @@ export interface AttemptFinish {
   ended?: boolean;
 }
 
+export interface PriorAttempt {
+  at: Date;
+  open: boolean;
+}
+
+export interface SettleOptions {
+  nextAttemptAt?: Date | null;
+  onlyIfCalling?: boolean;
+  onlyIfCurrentAttempt?: string;
+  notes?: string;
+}
+
 export interface OutboundStore {
   /** The campaigns row for this key, created on first use. Null when the
    * lane has no agents row to hang it on (the campaign cannot run). */
@@ -92,7 +104,14 @@ export interface OutboundStore {
   claimContact(contactId: string, now: Date): Promise<ContactRow | null>;
   /** Hand a claimed row back without having dialled it. */
   releaseContact(contactId: string, status: ContactStatus, nextAttemptAt: Date | null): Promise<void>;
-  priorAttemptTimes(contactId: string): Promise<Date[]>;
+  /**
+   * Every outbound attempt on this contact's PHONE in this contact's
+   * campaign — not only this row's. An import can carry one person on two
+   * rows (two appointments, two `external_ref`s), and the caps are per
+   * person. `open` is an attempt with no terminal status yet: a call still on
+   * the line.
+   */
+  priorAttempts(contactId: string): Promise<PriorAttempt[]>;
   startAttempt(contactId: string, campaignId: string, attemptNumber: number): Promise<string>;
   setAttemptCallSid(attemptId: string, callSid: string): Promise<void>;
   finishAttempt(attemptId: string, finish: AttemptFinish): Promise<void>;
@@ -101,13 +120,12 @@ export interface OutboundStore {
   /**
    * Settle a contact. `onlyIfCalling` makes it a no-op unless the row is
    * still 'calling', which is how a late status callback leaves alone an
-   * outcome the call itself already recorded.
+   * outcome the call itself already recorded. `onlyIfCurrentAttempt` makes
+   * it a no-op unless that attempt is still the contact's newest: a callback
+   * for an old attempt, delayed past the stale-claim reaper, must not settle
+   * the newer call that has since put the row back in 'calling'.
    */
-  settleContact(
-    contactId: string,
-    status: ContactStatus,
-    opts?: { nextAttemptAt?: Date | null; onlyIfCalling?: boolean; notes?: string },
-  ): Promise<boolean>;
+  settleContact(contactId: string, status: ContactStatus, opts?: SettleOptions): Promise<boolean>;
   /** This campaign's dialled attempts still on the line (no terminal status
    * yet), started after `since`. */
   callsInFlight(campaignId: string, since: Date): Promise<number>;
@@ -250,12 +268,23 @@ export async function createDbOutboundStore(): Promise<OutboundStore> {
          WHERE id = ${contactId}::varchar AND outreach_status = 'calling'`);
     },
 
-    async priorAttemptTimes(contactId) {
+    async priorAttempts(contactId) {
       return rows(
         await db.execute(sql`
-          SELECT (attempted_at AT TIME ZONE 'UTC') AS attempted_at FROM campaign_contact_attempts
-           WHERE contact_id = ${contactId}::varchar AND direction = 'outbound'`),
-      ).map((r) => new Date(r.attempted_at as string));
+          -- The phone, not the row: every contact in this campaign whose
+          -- number reads as the same ten digits. right(…, 10) agrees with
+          -- dncKey on every number that can carry an attempt, because an
+          -- unreadable number is refused before it is ever dialled.
+          SELECT (a.attempted_at AT TIME ZONE 'UTC') AS attempted_at,
+                 (a.ended_at IS NULL) AS open
+            FROM campaign_contacts me
+            JOIN campaign_contacts c
+              ON c.campaign_id = me.campaign_id
+             AND right(regexp_replace(c.phone_number, '[^0-9]', '', 'g'), 10)
+               = right(regexp_replace(me.phone_number, '[^0-9]', '', 'g'), 10)
+            JOIN campaign_contact_attempts a ON a.contact_id = c.id AND a.direction = 'outbound'
+           WHERE me.id = ${contactId}::varchar`),
+      ).map((r) => ({ at: new Date(r.attempted_at as string), open: r.open === true }));
     },
 
     async startAttempt(contactId, campaignId, attemptNumber) {
@@ -328,6 +357,12 @@ export async function createDbOutboundStore(): Promise<OutboundStore> {
                  updated_at = NOW()
            WHERE id = ${contactId}::varchar
              AND (${!opts.onlyIfCalling}::boolean OR outreach_status = 'calling')
+             AND (${opts.onlyIfCurrentAttempt ?? null}::varchar IS NULL
+                  OR ${opts.onlyIfCurrentAttempt ?? null}::varchar = (
+                       SELECT x.id FROM campaign_contact_attempts x
+                        WHERE x.contact_id = campaign_contacts.id AND x.direction = 'outbound'
+                        ORDER BY x.attempted_at DESC, x.id DESC
+                        LIMIT 1))
           RETURNING id`),
       );
       return settled.length > 0;

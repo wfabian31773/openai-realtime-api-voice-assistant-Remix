@@ -194,11 +194,37 @@ describe("the status webhook", () => {
   });
 
   it("stops at the total cap instead of queueing another try", async () => {
-    const { deps, store, attemptId } = await setup();
+    const { deps, store } = await setup();
     await store.startAttempt("c1", "campaign-1", 2);
-    await store.startAttempt("c1", "campaign-1", 3);
-    await handleOutboundStatus("test-lane", finished(attemptId, { CallStatus: "busy" }), deps);
+    const third = await store.startAttempt("c1", "campaign-1", 3);
+    // The callback for the attempt that reached the cap — the contact's newest.
+    await handleOutboundStatus("test-lane", finished(third, { CallStatus: "busy" }), deps);
     expect(store.contacts.get("c1")!.status).toBe("max_attempts");
+  });
+
+  it("does not let a late callback for an old attempt settle the newer call (Codex round 3, #357)", async () => {
+    const { deps, store, attemptId: first } = await setup();
+    // The first attempt's callback is lost; the reaper hands the row back and
+    // a later tick dials again, putting the row back in 'calling'.
+    store.contacts.get("c1")!.status = "no_answer";
+    await store.claimContact("c1", NOW);
+    const second = await store.startAttempt("c1", "campaign-1", 2);
+    // Now the first attempt's callback arrives, late.
+    await handleOutboundStatus("test-lane", finished(first, { CallStatus: "no-answer" }), deps);
+    expect(store.attempts.find((a) => a.id === first)!.finish?.status).toBe("no-answer");
+    expect(store.contacts.get("c1")!.status).toBe("calling");
+    // The newer call's own callback still settles it.
+    await handleOutboundStatus("test-lane", finished(second, { CallStatus: "completed", AnsweredBy: "human" }), deps);
+    expect(store.contacts.get("c1")!.status).toBe("answered");
+  });
+
+  it("does not let a late answer verdict for an old attempt settle the newer call", async () => {
+    const { deps, store, attemptId: first } = await setup();
+    store.contacts.get("c1")!.status = "no_answer";
+    await store.claimContact("c1", NOW);
+    await store.startAttempt("c1", "campaign-1", 2);
+    await handleOutboundAnswer("test-lane", answered(first, { AnsweredBy: "fax" }), deps);
+    expect(store.contacts.get("c1")!.status).toBe("calling");
   });
 
   it("ignores progress events", async () => {

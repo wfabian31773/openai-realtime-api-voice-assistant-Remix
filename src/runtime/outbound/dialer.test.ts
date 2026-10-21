@@ -163,6 +163,25 @@ describe("a dial", () => {
     expect(store.contacts.get("c1")!.nextAttemptAt).not.toBeNull();
   });
 
+  it("never hands back a call Twilio accepted when its CallSid cannot be saved (Codex round 3, #357)", async () => {
+    const { store, createCall, deps } = setup();
+    const lines: string[] = [];
+    store.setAttemptCallSid = async () => {
+      throw new Error("connection reset");
+    };
+    store.addContact({ id: "c1", phone: "+15555550111" });
+    const r = await runCampaignTick("test-lane", policy, { ...deps, log: (l: string) => lines.push(l) });
+    // The phone is ringing: the call counts as placed, nothing is held.
+    expect(r.dialled).toBe(1);
+    expect(r.held).toEqual({});
+    expect(store.contacts.get("c1")!.status).toBe("calling");
+    expect(store.attempts[0].finish).toBeUndefined();
+    expect(lines.some((l) => l.includes("placed but its CallSid could not be saved"))).toBe(true);
+    // And the next tick does not ring them again.
+    await runCampaignTick("test-lane", policy, deps);
+    expect(createCall).toHaveBeenCalledTimes(1);
+  });
+
   it("starts no more calls than the campaign's concurrency", async () => {
     const { store, createCall, deps } = setup();
     for (let i = 1; i <= 5; i++) store.addContact({ id: `c${i}`, phone: `+1555555011${i}` });
@@ -215,6 +234,78 @@ describe("a dial", () => {
     store.addContact({ id: "c1", phone: "+15555550111" });
     expect((await runCampaignTick("test-lane", policy, deps)).skipped).toMatch(/agents row/);
     expect(createCall).not.toHaveBeenCalled();
+  });
+});
+
+describe("one person on two rows (Codex round 3, #357)", () => {
+  // An import can carry one phone on two contact rows; the caps are per
+  // person, so the attempts are counted over the phone, not the row.
+  const loose: OutboundLanePolicy = {
+    ...policy,
+    caps: { perDay: 5, perWeek: 10, total: 10, minHoursBetween: 0 },
+  };
+
+  it("spends the total cap once across both rows", async () => {
+    const { store, createCall, deps } = setup();
+    store.addContact({ id: "c1", phone: "+15555550111" });
+    store.addContact({ id: "c2", phone: "(555) 555-0111" });
+    for (let i = 1; i <= 3; i++) {
+      store.attempts.push({
+        id: `a${i}`,
+        contactId: "c1",
+        campaignId: "campaign-1",
+        attemptNumber: i,
+        at: new Date(`2041-02-0${i}T18:00:00Z`),
+        endedAt: new Date(`2041-02-0${i}T18:01:00Z`),
+      });
+    }
+    store.contacts.get("c1")!.status = "max_attempts";
+    const r = await runCampaignTick("test-lane", policy, deps);
+    expect(createCall).not.toHaveBeenCalled();
+    expect(r.held).toEqual({ total_cap: 1 });
+    expect(store.contacts.get("c2")!.status).toBe("max_attempts");
+  });
+
+  it("spends the daily cap once across both rows", async () => {
+    const { store, createCall, deps } = setup();
+    store.addContact({ id: "c1", phone: "+15555550111", status: "voicemail" });
+    store.addContact({ id: "c2", phone: "15555550111" });
+    store.attempts.push({
+      id: "a1",
+      contactId: "c1",
+      campaignId: "campaign-1",
+      attemptNumber: 1,
+      at: new Date("2041-03-05T17:00:00Z"),
+      endedAt: new Date("2041-03-05T17:01:00Z"),
+    });
+    store.contacts.get("c1")!.nextAttemptAt = new Date("2041-03-06T17:00:00Z");
+    const r = await runCampaignTick("test-lane", policy, deps);
+    expect(createCall).not.toHaveBeenCalled();
+    expect(r.held).toEqual({ daily_cap: 1 });
+  });
+
+  it("never rings the same phone twice at once, even inside the caps", async () => {
+    const { store, createCall, deps } = setup();
+    store.addContact({ id: "c1", phone: "+15555550111" });
+    store.addContact({ id: "c2", phone: "+1 555-555-0111" });
+    const r = await runCampaignTick("test-lane", loose, deps);
+    expect(r.dialled).toBe(1);
+    expect(r.held).toEqual({ call_in_progress: 1 });
+    expect(createCall).toHaveBeenCalledTimes(1);
+    const second = [...store.contacts.values()].find((c) => c.status !== "calling")!;
+    expect(second.status).toBe("pending");
+    // Once the first call has ended, the second row may ring.
+    await store.finishAttempt(store.attempts[0].id, { status: "completed" });
+    expect((await runCampaignTick("test-lane", loose, deps)).dialled).toBe(1);
+    expect(createCall).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps a different phone's rows apart", async () => {
+    const { store, createCall, deps } = setup();
+    store.addContact({ id: "c1", phone: "+15555550111" });
+    store.addContact({ id: "c2", phone: "+15555550112" });
+    expect((await runCampaignTick("test-lane", loose, deps)).dialled).toBe(2);
+    expect(createCall).toHaveBeenCalledTimes(2);
   });
 });
 
