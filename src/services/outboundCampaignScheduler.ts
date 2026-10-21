@@ -4,6 +4,7 @@ import type { CampaignContact, Campaign } from '../../shared/schema';
 import { distributedLockService } from './distributedLock';
 import { createLogger } from './structuredLogger';
 import { budgetGuardService } from './budgetGuardService';
+import { RUNTIME_OUTBOUND_CAMPAIGN_TYPE } from '../runtime/outbound/campaign';
 
 const logger = createLogger('SCHEDULER');
 
@@ -91,6 +92,18 @@ export class OutboundCampaignScheduler {
     if (this.isRunning) {
       logger.info('Already running');
       return;
+    }
+
+    // A runtime outbound campaign (src/runtime/outbound/) is dialled by the
+    // voice runtime under its own claim, window, caps and do-not-contact
+    // list. This scheduler has none of those, so it never starts one, by any
+    // route (Codex P1 on #357: the Campaigns screen starts it here, not
+    // through the campaign executor).
+    const campaign = await storage.getCampaign(this.config.campaignId);
+    if (campaign?.campaignType === RUNTIME_OUTBOUND_CAMPAIGN_TYPE) {
+      throw new Error(
+        `Campaign ${this.config.campaignId} is a runtime outbound campaign; the voice runtime dials it, not this scheduler`,
+      );
     }
 
     const lockName = `campaign-scheduler:${this.config.campaignId}`;

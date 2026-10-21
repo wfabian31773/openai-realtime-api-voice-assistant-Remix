@@ -1470,6 +1470,15 @@ export async function registerRoutes(app: Express): Promise<Server> {
       if (!campaign) {
         return res.status(404).json({ success: false, message: 'Campaign not found' });
       }
+      // A runtime outbound campaign is dialled by the voice runtime, never by
+      // this scheduler (src/services/outboundCampaignScheduler.ts refuses it
+      // too). Refused here, before a scheduler is created and remembered.
+      if (campaign.campaignType === 'runtime_outbound') {
+        return res.status(409).json({
+          success: false,
+          message: 'This is a runtime outbound campaign; the voice runtime dials it. It cannot be started here.',
+        });
+      }
       
       const { createScheduler } = await import('../src/services/outboundCampaignScheduler');
       

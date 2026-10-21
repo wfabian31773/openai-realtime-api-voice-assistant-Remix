@@ -34,6 +34,7 @@ import './techTools';
 import './medicalRecordsTools';
 import './generalServiceTools';
 import './languageTools';
+import './outboundTools';
 
 function authorised(req: Request): boolean {
   const expected = process.env.VOICE_TOOL_API_KEY;

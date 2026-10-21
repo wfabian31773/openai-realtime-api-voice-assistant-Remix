@@ -9,7 +9,7 @@
  * wire handling, the bridge's barge-in and teardown, the outcome the
  * post-stream TwiML reads. Only the two sockets are fakes.
  */
-import { describe, it, expect, vi, afterEach } from "vitest";
+import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
 // HOISTED above every import (vi.hoisted runs before the hoisted import
 // graph loads): since v78 `laneRegistry` imports the tool library STATICALLY,
 // and its telemetry module validates DATABASE_URL at import. The plain
@@ -31,6 +31,11 @@ import {
   chooseGreeting,
   type RuntimeTransport,
 } from "./voiceRuntime";
+import type { OutboundStore } from "./outbound/store";
+import { FakeOutboundStore } from "./outbound/store.testkit";
+import { answerUrl } from "./outbound/dialer";
+import type { OutboundLanePolicy } from "./outbound/campaign";
+import { DEFAULT_ATTEMPT_CAPS, DEFAULT_CALLING_WINDOW } from "./outbound/callingWindow";
 import { CallSessionRegistry } from "./sessionRegistry";
 import { transferDestinationStatus, transferUnavailableReason } from "./runtimeTransfer";
 import type { GrokServerEvent } from "./wireTypes";
@@ -261,6 +266,8 @@ async function harness(
     openCallRow?: (row: unknown) => Promise<string | undefined>;
     callRowDeadlineMs?: number;
     env?: Record<string, string | undefined>;
+    /** The outbound layer's store (src/runtime/outbound/). */
+    outboundStore?: OutboundStore;
   } = {},
 ): Promise<Harness> {
   const app = express();
@@ -303,6 +310,7 @@ async function harness(
     callRowDeadlineMs: over.callRowDeadlineMs,
     fetchPrecontext: over.fetchPrecontext,
     resolveGreeting: over.resolveGreeting,
+    outboundStore: over.outboundStore,
     openCallRow:
       over.openCallRow ??
       (async (row) => {
@@ -2391,5 +2399,129 @@ describe("the caller-audio summary, on every exit", () => {
     expect(rows).toHaveLength(1);
     expect(rows[0].counts).toEqual({ frames: 1, voiced: 0 });
     await h.close();
+  });
+});
+
+
+describe("a call the runtime dialled (src/runtime/outbound/)", () => {
+  const PATIENT = "+15555550111";
+  const OURS = "+15555550100";
+  const policy: OutboundLanePolicy = {
+    campaignKey: "test-campaign",
+    enableEnv: "OUTBOUND_CAMPAIGN_TEST",
+    callerIdEnv: "OUTBOUND_TEST_FROM",
+    window: DEFAULT_CALLING_WINDOW,
+    caps: DEFAULT_ATTEMPT_CAPS,
+    concurrency: 1,
+    greeting: (c) =>
+      `Hello, this is an automated assistant calling for Azul Vision. This call is recorded. Am I speaking with ${c.firstName}?`,
+    voicemail: () => "Hello, this is Azul Vision.",
+  };
+  const seenMetadata: Array<Record<string, unknown>> = [];
+  const outboundLane = (over: Partial<LaneConfig> = {}): LaneSource => {
+    const config: LaneConfig = {
+      id: "test-lane",
+      enabled: true,
+      agentType: "outbound",
+      outbound: policy,
+      factory: (async (_h: unknown, md: Record<string, unknown>) => {
+        seenMetadata.push(md);
+        return { instructions: "You are the test outbound agent.", tools: [] };
+      }) as unknown as LaneConfig["factory"],
+      ...over,
+    };
+    return { getAgentConfig: (id) => (id === config.id ? config : undefined) };
+  };
+  const spokenText = (h: Harness): string[] =>
+    h.transports[0].sent
+      .filter((m) => m.type === "conversation.item.create")
+      .map((m) => (m.item as { content?: Array<{ text?: string }> })?.content?.[0]?.text ?? "");
+
+  async function dialled(store: FakeOutboundStore) {
+    store.addContact({ id: "c1", phone: PATIENT, firstName: "Testa" });
+    await store.claimContact("c1", new Date());
+    return store.startAttempt("c1", "campaign-1", 1);
+  }
+
+  /** The answer webhook as Twilio would post it: the signed URL the dialler made. */
+  async function answer(h: Harness, slug: string, attemptId: string, callSid: string) {
+    const path = new URL(answerUrl("x.invalid", slug, "c1", attemptId)).pathname +
+      new URL(answerUrl("x.invalid", slug, "c1", attemptId)).search;
+    return post(h, path, { CallSid: callSid, From: OURS, To: PATIENT, AnsweredBy: "human" });
+  }
+
+  beforeEach(() => {
+    seenMetadata.length = 0;
+  });
+
+  it("opens with the campaign's greeting for the person it rang, and hands the agent who that is", async () => {
+    const store = new FakeOutboundStore();
+    const attemptId = await dialled(store);
+    const fetchPrecontext = vi.fn(async () => ({ matched: true, firstName: "Somebody Else" }));
+    const opened: Record<string, unknown>[] = [];
+    const h = await harness({
+      laneSource: outboundLane(),
+      outboundStore: store,
+      fetchPrecontext,
+      openCallRow: async (row) => {
+        opened.push(row as Record<string, unknown>);
+        return "row-1";
+      },
+    });
+    const answered = await answer(h, "test-lane", attemptId, "CA90");
+    const { ws } = await openStream(h, "CA90", tokenFrom(answered.text));
+    await waitFor(() => h.transports.length === 1, "the provider transport");
+    await settle(4);
+    h.transports[0].emit({ type: "session.updated" } as GrokServerEvent);
+    await settle(4);
+
+    expect(spokenText(h)).toEqual([
+      "Hello, this is an automated assistant calling for Azul Vision. This call is recorded. Am I speaking with Testa?",
+    ]);
+    expect(seenMetadata[0].outbound).toMatchObject({ contactId: "c1", attemptId, campaignKey: "test-campaign", phone: PATIENT });
+    // The contact row says who was rung; no caller-ID lookup is made.
+    expect(fetchPrecontext).not.toHaveBeenCalled();
+    ws.close();
+    await waitFor(() => h.persisted.length === 1, "the call record");
+    expect(h.persisted[0]).toMatchObject({ direction: "outbound", callerPhone: PATIENT, dialedNumber: OURS });
+    // The row OPENED at setup is outbound too, with Twilio's ends the right
+    // way round: the teardown upsert never rewrites direction, from or to,
+    // so a row opened as inbound would stay inbound (Codex P1 on #357).
+    expect(opened[0]).toMatchObject({ direction: "outbound", from: OURS, to: PATIENT, dialedNumber: PATIENT });
+  });
+
+  it("refuses an INBOUND call that reaches an outbound lane", async () => {
+    const store = new FakeOutboundStore();
+    const h = await harness({ laneSource: outboundLane(), outboundStore: store });
+    const answered = await post(h, "/voice/test-lane", { CallSid: "CA91", From: PATIENT, To: OURS });
+    await openStream(h, "CA91", tokenFrom(answered.text));
+    await settle(8);
+    expect(h.transports).toHaveLength(0);
+    expect(seenMetadata).toHaveLength(0);
+    expect(h.persisted.find((r) => r.callSid === "CA91")?.outcome).toBe("provider_failure");
+  });
+
+  it("refuses a dialled call that reaches an inbound lane", async () => {
+    const store = new FakeOutboundStore();
+    const attemptId = await dialled(store);
+    // An inbound lane registered under the slug the answer URL names.
+    const inbound = laneSource({ id: "test-lane", agentType: "inbound" });
+    const h = await harness({ laneSource: inbound, outboundStore: store });
+    const answered = await answer(h, "test-lane", attemptId, "CA92");
+    // The outbound webhook itself refuses a slug with no outbound policy.
+    expect(answered.text).toContain("<Hangup/>");
+    expect(answered.text).not.toContain("<Stream");
+  });
+
+  it("refuses a dialled call whose contact cannot be loaded, rather than guess who it rang", async () => {
+    const store = new FakeOutboundStore();
+    const attemptId = await dialled(store);
+    const h = await harness({ laneSource: outboundLane(), outboundStore: store });
+    const answered = await answer(h, "test-lane", attemptId, "CA93");
+    store.contacts.delete("c1");
+    await openStream(h, "CA93", tokenFrom(answered.text));
+    await settle(8);
+    expect(h.transports).toHaveLength(0);
+    expect(seenMetadata).toHaveLength(0);
   });
 });

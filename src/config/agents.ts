@@ -1,3 +1,5 @@
+import type { OutboundLanePolicy } from '../runtime/outbound/campaign';
+import { createOutboundProofAgent, outboundProofAgentConfig, outboundProofPolicy } from '../agents/outboundProofAgent';
 import { RealtimeAgent } from '@openai/agents/realtime';
 import { createAfterHoursAgent } from '../agents/afterHoursAgent';
 import { createDRSSchedulerAgent } from '../agents/drsSchedulerAgent';
@@ -38,6 +40,11 @@ export interface AgentConfig {
    * src/runtime/pcpFloor.ts for the Node 20 double evaluation this prevents.
    */
   teardownSweep?: (callId: string, ctx?: { outcome?: string }) => Promise<void>;
+  /**
+   * On an `agentType: 'outbound'` lane the voice runtime DIALS: its calling
+   * window, caps, caller ID, greeting and voicemail (src/runtime/outbound/).
+   */
+  outbound?: OutboundLanePolicy;
 }
 
 export class AgentRegistry {
@@ -195,6 +202,23 @@ export class AgentRegistry {
       voice: runtimeProofAgentConfig.voice,
       language: runtimeProofAgentConfig.language,
       greeting: runtimeProofAgentConfig.greeting,
+    });
+
+    // The operator's OUTBOUND proving lane: the runtime outbound layer
+    // (src/runtime/outbound/) end to end, on a campaign only his own numbers
+    // are queued in. Dials nothing unless RUNTIME_OUTBOUND_DIALING=1,
+    // OUTBOUND_CAMPAIGN_OUTBOUND_PROOF=1 and OUTBOUND_CALLER_ID are set.
+    this.register({
+      id: outboundProofAgentConfig.slug,
+      factory: createOutboundProofAgent as AgentFactory,
+      enabled: true,
+      description: outboundProofAgentConfig.description,
+      twilioNumbers: [],
+      agentType: 'outbound',
+      version: outboundProofAgentConfig.version,
+      voice: outboundProofAgentConfig.voice,
+      language: outboundProofAgentConfig.language,
+      outbound: outboundProofPolicy,
     });
 
     // Azul Vision NextGen scheduling line (San Diego pilot).
