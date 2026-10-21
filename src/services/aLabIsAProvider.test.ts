@@ -154,11 +154,16 @@ describe('review r2 (#359): every exclusion holds through fillers, punctuation a
     expect(both('Del laboratorio, eh, Ejemplo.').window).toBe(true);
   });
 
-  it('a long run of punctuation or fillers does not stall the matcher', () => {
-    const nasty = 'optical' + '.'.repeat(400) + ' lab' + ', uh'.repeat(200) + ' resultsx laboratorio' + ' mm'.repeat(200) + 'z';
+  it('a run of punctuation does not stall the matcher', () => {
+    // Round 1's gap nested a repeat inside a repeat, which doubles its time
+    // with every extra dot: about a second at 27 dots, and a hang at a few
+    // dozen. The gap now takes one character per repetition. 27 keeps the
+    // broken form failing in about a second instead of hanging the suite.
+    both('Example lab.');
+    const nasty = 'optical' + '.'.repeat(27) + 'x lab' + '.'.repeat(27) + 'x';
     const t0 = Date.now();
     both(nasty);
-    expect(Date.now() - t0).toBeLessThan(500);
+    expect(Date.now() - t0).toBeLessThan(150);
   });
 });
 
