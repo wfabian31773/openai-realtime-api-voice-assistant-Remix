@@ -218,12 +218,25 @@ describe("the status webhook", () => {
     expect(store.contacts.get("c1")!.status).toBe("answered");
   });
 
-  it("does not let a late answer verdict for an old attempt settle the newer call", async () => {
+  it("does not let a late 'completed' for an old attempt mark the newer call answered", async () => {
     const { deps, store, attemptId: first } = await setup();
     store.contacts.get("c1")!.status = "no_answer";
     await store.claimContact("c1", NOW);
     await store.startAttempt("c1", "campaign-1", 2);
-    await handleOutboundAnswer("test-lane", answered(first, { AnsweredBy: "fax" }), deps);
+    await handleOutboundStatus("test-lane", finished(first, { CallStatus: "completed", AnsweredBy: "human" }), deps);
+    expect(store.contacts.get("c1")!.status).toBe("calling");
+  });
+
+  it.each([
+    ["a fax", { AnsweredBy: "fax" }, LIVE_ENV],
+    ["a machine", { AnsweredBy: "machine_end_beep" }, LIVE_ENV],
+    ["a process that cannot run the call", { AnsweredBy: "human" }, { ...LIVE_ENV, XAI_API_KEY: "" }],
+  ])("does not let a late answer verdict (%s) for an old attempt settle the newer call", async (_what, body, env) => {
+    const { deps, store, attemptId: first } = await setup();
+    store.contacts.get("c1")!.status = "no_answer";
+    await store.claimContact("c1", NOW);
+    await store.startAttempt("c1", "campaign-1", 2);
+    await handleOutboundAnswer("test-lane", answered(first, body), { ...deps, env });
     expect(store.contacts.get("c1")!.status).toBe("calling");
   });
 
