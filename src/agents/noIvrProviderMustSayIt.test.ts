@@ -190,6 +190,42 @@ describe('"Operator." is not a provider', () => {
   });
 });
 
+describe('review r1 (#359): the prompt tells the model a reporting lab is a clinician', () => {
+  // The gate only runs once the model calls escalate_to_human. The legacy body
+  // listed "we are a lab" as a business caller and neither body nor the tool
+  // named a lab as a provider, so a lab would normally have been ticketed and
+  // never reached the gate. Read from the REAL agent on both pipelines.
+  async function built(pipeline?: 'runtime') {
+    const sid = freshSid();
+    const agent: any = await createNoIvrAgent(async () => {}, {
+      callId: sid, callSid: sid, callerPhone: '5551234567', ...(pipeline ? { pipeline } : {}),
+    } as any);
+    return { instructions: String(agent.instructions) };
+  }
+
+  it('the runtime body lists a laboratory calling in results with the clinicians and keeps optical labs as businesses', async () => {
+    const { instructions } = await built('runtime');
+    expect(instructions).toMatch(/A clinician —[^\n]*a medical laboratory calling in a patient's results[^\n]*escalate NOW/);
+    expect(instructions).toMatch(/A business — an optical lab \(frames, lenses, orders\)/);
+  });
+
+  it('the legacy body no longer files "we are a lab" as a business caller', async () => {
+    const { instructions } = await built();
+    expect(instructions).toMatch(/A medical laboratory calling in a patient's results/);
+    expect(instructions).not.toMatch(/"we are a lab"/);
+    expect(instructions).not.toMatch(/\[lab\/optical\/office\]/);
+    expect(instructions).toMatch(/"we are an optical lab"/);
+  });
+
+  // The escalate_to_human field descriptions are NOT asserted here, on purpose:
+  // @openai/agents 0.3.7 falls back to a converter that drops every zod
+  // .describe() whenever a tool has an optional field, so on the runtime 1 of
+  // this agent's 31 field descriptions reaches the model (measured 2026-10-21).
+  // The prompt is the channel that does, and it is what the two tests above
+  // read. The caller_type description is updated anyway, for when the
+  // conversion is fixed.
+});
+
 describe('the symptom check the runtime never fed is live again', () => {
   it('pain the caller never mentioned no longer rings on the runtime', async () => {
     const sid = freshSid();

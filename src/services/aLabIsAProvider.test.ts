@@ -81,6 +81,44 @@ describe('an optical lab is a supplier, not a provider', () => {
   });
 });
 
+describe('review r1 (#359): the exclusions hold through fillers and in Spanish', () => {
+  const inTheWindow = (answer: string) => {
+    noteCallerTranscript(CALL, ['AGENT: Thank you for calling.', 'CALLER: I need some help.', ASK, `CALLER: ${answer}`]);
+    return corroborate(CALL, '').providerStated;
+  };
+
+  it('an optical lab with a filler or a sentence break before "lab" is still not a provider', () => {
+    for (const answer of ['The optical, uh, lab.', 'Optical. Lab.', 'Optical, um, lab, about a frame.']) {
+      expect(inTheWindow(answer), answer).toBe(false);
+      expect(callerSaysTheyAreAProvider([answer]), answer).toBe(false);
+    }
+  });
+
+  it('a Spanish-speaking patient asking about their own lab results is not a provider', () => {
+    for (const answer of [
+      'Resultados del laboratorio.',
+      'Los resultados de laboratorio.',
+      'Mis resultados del laboratorio.',
+      'Examen de laboratorio.',
+      'Las pruebas del laboratorio.',
+    ]) {
+      expect(inTheWindow(answer), answer).toBe(false);
+      expect(callerSaysTheyAreAProvider([answer]), answer).toBe(false);
+    }
+  });
+
+  it('a Spanish optical lab is not a provider either', () => {
+    expect(inTheWindow('Del laboratorio óptico.')).toBe(false);
+    expect(callerSaysTheyAreAProvider('Llamo del laboratorio óptico por unos lentes.')).toBe(false);
+  });
+
+  it('a lab that answers the question still counts, in both languages', () => {
+    expect(inTheWindow('From Example Diagnostics, uh, lab.')).toBe(true);
+    expect(inTheWindow('Del laboratorio Ejemplo.')).toBe(true);
+    expect(inTheWindow('Del laboratorio.')).toBe(true);
+  });
+});
+
 describe('the gate, on the corpus call', () => {
   const reason = 'Diagnostics laboratory calling with stat lab results for the on-call physician';
 

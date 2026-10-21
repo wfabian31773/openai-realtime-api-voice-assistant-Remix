@@ -297,7 +297,18 @@ export const CALLER_SYMPTOM = new RegExp(
  *    escalated since July, and routine business has its own refusal.)
  *  - "lab results", "lab work", "lab test" are a patient's words about their
  *    own care, not a place: "I had lab work I'm calling about".
+ * Both exclusions hold through the punctuation and fillers an answer carries
+ * ("The optical, uh, lab.", "Optical. Lab.") and in Spanish, where the noun
+ * comes first ("resultados del laboratorio", "laboratorio óptico") — review
+ * r1 on #359: each of those read as a provider and rang the on-call phone.
  */
+const FILLER_GAP = String.raw`(?:[\s,.;:!?-]+|uh+|um+|uhm|ah+|erm)*`;
+const LAB_WORD =
+  String.raw`(?<!optical${FILLER_GAP})(?:laboratory|lab)` +
+  String.raw`(?! (?:results?|work|tests?|reports?|draws?|orders?|values?|slips?|appointments?)\b)`;
+const LABORATORIO =
+  String.raw`(?<!(?:resultados?|an[aá]lisis|ex[aá]men(?:es)?|pruebas?|estudios?|[oó]rden(?:es)?|trabajos?|citas?)` +
+  String.raw` (?:de|del|de la)(?: el)? )laboratorio(?! [oó]ptico)`;
 const PROVIDER_ROLE =
   String.raw`(?:dr\.?|doctor|doctora|nurse|nurse practitioner|physician|physician assistant|surgeon|resident|` +
   String.raw`ophthalmologist|optometrist|np|pa|rn|md|charge nurse|(?:er|emergency(?: room)?) (?:doctor|physician|nurse))`;
@@ -306,7 +317,7 @@ const FACILITY =
   String.raw`urgent care|surgery center|surgical center|nursing (?:home|facility)|skilled nursing|` +
   String.raw`rehab(?:ilitation)? (?:center|facility)|doctor'?s office|(?:dr\.?|doctor) [a-z'-]+'?s office|` +
   String.raw`office of (?:dr\.?|doctor) [a-z'-]+|optometry|ophthalmology|eye (?:center|clinic|institute)|icu|intensive care|` +
-  String.raw`(?<!optical )(?:laboratory|lab)(?! (?:results?|work|tests?|reports?|draws?|orders?|values?|slips?|appointments?)\b))`;
+  LAB_WORD + String.raw`)`;
 
 /**
  * The roles a patient also says about themselves: "I am a resident of
@@ -351,7 +362,7 @@ const OFFICE_STAFF =
 const NAME_TOKEN =
   String.raw`(?!(?:i|i'?m|he|he'?s|she|she'?s|we|they|my|his|her|our|their|is|was|were|are|am|be|been|in|at|to|on|of|for|from|about|with|went|go|going|this|that|it|it'?s|a|an|and|but|not|no|bill|bills|billing|records?|visit|stay|yesterday|today|tonight|tomorrow|last|ago|there|here|mi|su|en|es|esta|está|estoy|ayer|hoy)(?![a-z0-9'&-]))[a-z0-9'&.-]+`;
 const NAME_WORD = String.raw`${NAME_TOKEN} `;
-const ANY_FACILITY = String.raw`(?:${FACILITY}|cl[ií]nica|consultorio|laboratorio|sala de emergencias?)(?![a-z])`;
+const ANY_FACILITY = String.raw`(?:${FACILITY}|cl[ií]nica|consultorio|${LABORATORIO}|sala de emergencias?)(?![a-z])`;
 /**
  * Also widened in review r3 (#353), because STT and real answers are messier
  * than the first form: fillers ("Yeah, uh, Pomona Valley Hospital."), a
@@ -585,7 +596,7 @@ const PROVIDER_SELF_IDENTIFICATION: RegExp[] = [
   /\bpeer[- ]?to[- ]?peer\b/,
   // Spanish: "soy la doctora", "llamo del hospital", "nuestro paciente"
   /\bsoy (?:el |la |un |una )?(?:doctor|doctora|dr\.?|m[eé]dic[oa]|enfermer[oa])\b/,
-  /\b(?:llamo|hablo|estoy llamando|le llamo|le hablo|llamamos|hablamos) (?:de|del|desde) (?:el |la |un |una )?(?:[a-z\u00e0-\u00ff'.-]+ ){0,4}?(?:hospital|cl[ií]nica|consultorio|laboratorio|sala de emergencias?|emergencias|centro m[eé]dico|oficina del (?:doctor|dr\.?))/,
+  /\b(?:llamo|hablo|estoy llamando|le llamo|le hablo|llamamos|hablamos) (?:de|del|desde) (?:el |la |un |una )?(?:[a-z\u00e0-\u00ff'.-]+ ){0,4}?(?:hospital|cl[ií]nica|consultorio|laboratorio(?! [oó]ptico)|sala de emergencias?|emergencias|centro m[eé]dico|oficina del (?:doctor|dr\.?))/,
   /\b(?:nuestr[oa]|tengo un[a]?) paciente\b/,
 ];
 
