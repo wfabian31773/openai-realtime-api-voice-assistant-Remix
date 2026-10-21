@@ -205,7 +205,7 @@ export interface CorroborationResult {
   haveSpeech: boolean;
   /**
    * The caller said, in their own words, that they are a provider or are
-   * calling from a doctor's office, hospital, ER or clinic. See
+   * calling from a doctor's office, hospital, ER, lab or clinic. See
    * callerSaysTheyAreAProvider. False whenever haveSpeech is false.
    */
   providerStated: boolean;
@@ -282,6 +282,21 @@ export const CALLER_SYMPTOM = new RegExp(
  * and their answer is what lets the transfer through.
  *
  * English and Spanish, like the symptom evidence above.
+ *
+ * A LABORATORY IS A PROVIDER FACILITY (operator, 2026-10-21: "add lab and
+ * laboratory to the provider list"). The corpus call is
+ * CA02cebe2231c3f8208c099c8736ea5c7a (2026-10-21 00:20 UTC): a reference lab
+ * calling stat results for one of our doctors named itself, answered the
+ * refusal's question with the lab's name and "lab", and was taken as a
+ * message because "lab" was not a facility word. Since July, 4 of the 6
+ * after-hours escalations from callers who said "lab" were labs calling in
+ * results. Two shapes are kept OUT, both measured on the same calls:
+ *  - an OPTICAL lab is a supplier chasing a frame, not a provider: "optical
+ *    lab" does not count. (A lab that names itself without "optical" — "the
+ *    Bartley lab" — still reads as a facility; none of those callers has
+ *    escalated since July, and routine business has its own refusal.)
+ *  - "lab results", "lab work", "lab test" are a patient's words about their
+ *    own care, not a place: "I had lab work I'm calling about".
  */
 const PROVIDER_ROLE =
   String.raw`(?:dr\.?|doctor|doctora|nurse|nurse practitioner|physician|physician assistant|surgeon|resident|` +
@@ -290,7 +305,8 @@ const FACILITY =
   String.raw`(?:hospital|medical (?:center|group|office|clinic)|clinic|e\.? ?r\b\.?|emergency (?:room|department)|` +
   String.raw`urgent care|surgery center|surgical center|nursing (?:home|facility)|skilled nursing|` +
   String.raw`rehab(?:ilitation)? (?:center|facility)|doctor'?s office|(?:dr\.?|doctor) [a-z'-]+'?s office|` +
-  String.raw`office of (?:dr\.?|doctor) [a-z'-]+|optometry|ophthalmology|eye (?:center|clinic|institute)|icu|intensive care)`;
+  String.raw`office of (?:dr\.?|doctor) [a-z'-]+|optometry|ophthalmology|eye (?:center|clinic|institute)|icu|intensive care|` +
+  String.raw`(?<!optical )(?:laboratory|lab)(?! (?:results?|work|tests?|reports?|draws?|orders?|values?|slips?|appointments?)\b))`;
 
 /**
  * The roles a patient also says about themselves: "I am a resident of
@@ -335,7 +351,7 @@ const OFFICE_STAFF =
 const NAME_TOKEN =
   String.raw`(?!(?:i|i'?m|he|he'?s|she|she'?s|we|they|my|his|her|our|their|is|was|were|are|am|be|been|in|at|to|on|of|for|from|about|with|went|go|going|this|that|it|it'?s|a|an|and|but|not|no|bill|bills|billing|records?|visit|stay|yesterday|today|tonight|tomorrow|last|ago|there|here|mi|su|en|es|esta|está|estoy|ayer|hoy)(?![a-z0-9'&-]))[a-z0-9'&.-]+`;
 const NAME_WORD = String.raw`${NAME_TOKEN} `;
-const ANY_FACILITY = String.raw`(?:${FACILITY}|cl[ií]nica|consultorio|sala de emergencias?)(?![a-z])`;
+const ANY_FACILITY = String.raw`(?:${FACILITY}|cl[ií]nica|consultorio|laboratorio|sala de emergencias?)(?![a-z])`;
 /**
  * Also widened in review r3 (#353), because STT and real answers are messier
  * than the first form: fillers ("Yeah, uh, Pomona Valley Hospital."), a
@@ -569,7 +585,7 @@ const PROVIDER_SELF_IDENTIFICATION: RegExp[] = [
   /\bpeer[- ]?to[- ]?peer\b/,
   // Spanish: "soy la doctora", "llamo del hospital", "nuestro paciente"
   /\bsoy (?:el |la |un |una )?(?:doctor|doctora|dr\.?|m[eé]dic[oa]|enfermer[oa])\b/,
-  /\b(?:llamo|hablo|estoy llamando|le llamo|le hablo|llamamos|hablamos) (?:de|del|desde) (?:el |la |un |una )?(?:[a-z\u00e0-\u00ff'.-]+ ){0,4}?(?:hospital|cl[ií]nica|consultorio|sala de emergencias?|emergencias|centro m[eé]dico|oficina del (?:doctor|dr\.?))/,
+  /\b(?:llamo|hablo|estoy llamando|le llamo|le hablo|llamamos|hablamos) (?:de|del|desde) (?:el |la |un |una )?(?:[a-z\u00e0-\u00ff'.-]+ ){0,4}?(?:hospital|cl[ií]nica|consultorio|laboratorio|sala de emergencias?|emergencias|centro m[eé]dico|oficina del (?:doctor|dr\.?))/,
   /\b(?:nuestr[oa]|tengo un[a]?) paciente\b/,
 ];
 

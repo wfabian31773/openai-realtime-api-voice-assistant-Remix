@@ -394,11 +394,11 @@ export function judgeEscalation(req: EscalationRequest): EscalationVerdict {
       allowed: false,
       code: 'provider_not_stated_by_caller',
       directive:
-        'The caller has not said they are a doctor, a nurse, or calling from a doctor\'s office, hospital, ER ' +
-        'or clinic, and this line transfers a provider call only when the caller says so. Asking for a ' +
+        'The caller has not said they are a doctor, a nurse, or calling from a doctor\'s office, hospital, ER, ' +
+        'lab or clinic, and this line transfers a provider call only when the caller says so. Asking for a ' +
         'doctor by name, or for an operator, does not make someone a provider. Ask ONE question: "Are you ' +
-        'calling from a doctor\'s office, a hospital or a clinic, and which one?" If they name one, call ' +
-        'escalate_to_human once more. If not, take their message.',
+        'calling from a doctor\'s office, a hospital or a clinic, and which one?" If they name one — a ' +
+        'laboratory reporting results counts — call escalate_to_human once more. If not, take their message.',
     };
   }
 

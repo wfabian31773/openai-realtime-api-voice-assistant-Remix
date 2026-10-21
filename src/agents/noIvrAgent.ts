@@ -205,8 +205,9 @@ export const REFUSED_ESCALATION_WHY: Record<RefusedEscalationCode, string> = {
     'a post-operative medication or prescription problem with no new symptom is filed URGENT for the After ' +
     'Hours team rather than transferred (operator ruling 2026-10-02)',
   provider_not_stated_by_caller:
-    'the caller has not said they are a doctor, a nurse, or calling from a doctor\'s office, hospital, ER or ' +
-    'clinic, and this line transfers a provider call only when the caller says so (operator ruling 2026-10-19)',
+    'the caller has not said they are a doctor, a nurse, or calling from a doctor\'s office, hospital, ER, ' +
+    'lab or clinic, and this line transfers a provider call only when the caller says so (operator rulings ' +
+    '2026-10-19 and 2026-10-21)',
 };
 
 export const REFUSED_ESCALATION_LINE = {
@@ -270,7 +271,8 @@ export function refusedEscalationResult(args: {
           'escalate_to_human once more with the symptom as they said it.'
         : code === 'provider_not_stated_by_caller'
           ? ' BEFORE you say that line, ask ONE question: "Are you calling from a doctor\'s office, a ' +
-            'hospital or a clinic, and which one?" If they name one, do not say the line: call ' +
+            'hospital or a clinic, and which one?" If they name one — a laboratory reporting results ' +
+            'counts — do not say the line: call ' +
             'escalate_to_human once more with what they told you. Asking for a doctor by name, or for an ' +
             'operator, does not make someone a provider.'
           : '';

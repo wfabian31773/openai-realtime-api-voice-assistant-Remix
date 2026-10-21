@@ -135,6 +135,33 @@ describe('"Operator." is not a provider', () => {
     releaseCallerSpeech(sid);
   });
 
+  it('v108: a lab with stat results is asked once, names the lab, and is connected (CA02cebe22 shape)', async () => {
+    const sid = freshSid();
+    const { agent, handoff } = await runtimeAgent(sid);
+    const intro = 'CALLER: Hi, this is Dana with Example Diagnostics calling on a recorded line. I have stat labs for Dr. Lin.';
+    noteCallerTranscript(sid, [GREETING, intro]);
+    const escalation = {
+      reason: 'Diagnostics laboratory calling with stat lab results for the on-call physician',
+      caller_type: 'healthcare_provider',
+    };
+    const refused = await call(agent, 'escalate_to_human', escalation);
+    expect(refused.refused).toBe('provider_not_stated_by_caller');
+    // The model is told a lab counts, so it calls again instead of saying the refusal line.
+    expect(refused.message).toMatch(/a laboratory reporting results counts/);
+    expect(refused.message).toMatch(/hospital, ER, lab or clinic/);
+
+    noteCallerTranscript(sid, [
+      GREETING,
+      intro,
+      "AGENT: Are you calling from a doctor's office, a hospital or a clinic, and which one?",
+      'CALLER: From Example Diagnostics, uh, lab.',
+    ]);
+    const r = await call(agent, 'escalate_to_human', escalation);
+    expect(r.success).toBe(true);
+    expect(handoff).toHaveBeenCalledTimes(1);
+    releaseCallerSpeech(sid);
+  });
+
   it('a caller who says who they are from the start rings straight through', async () => {
     const sid = freshSid();
     const { agent, handoff } = await runtimeAgent(sid);
