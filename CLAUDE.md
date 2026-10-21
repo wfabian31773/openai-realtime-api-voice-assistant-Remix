@@ -1819,25 +1819,39 @@ would leave surgery looping.**
    `file_*_ticket`'s own escape takes the request unassigned at high priority
    rather than losing it.
 
-   **READ THE EXCEPTION, BECAUSE IT LANDS ON THE COHORT THIS WAS AIMED AT.**
-   `gateRefusalsSoFar` opens with `if (!isTwilioCallSid(callSid)) return 0`,
-   so on a call with an absent or sentinel SID `officeAskSpent` can never
-   become true, the passthrough is unreachable, and `resolve_location` goes
-   on refusing exactly as before. That is by design in `gateAttempts` — a
-   sentinel is not a call, and sharing one counter across callers would file
-   somebody's request unassigned without ever asking them — but the
-   consequence here is specific and uncomfortable: **the ~4% invalid-SID
-   population is the standing suspect behind the eleven looping calls, and
-   change 2 is structurally incapable of helping it.**
+   **READ THE EXCEPTION.** `gateRefusalsSoFar` opens with
+   `if (!isTwilioCallSid(callSid)) return 0`, so on a call with an absent or
+   sentinel SID `officeAskSpent` can never become true, the passthrough is
+   unreachable, and `resolve_location` goes on refusing exactly as before.
+   That is by design in `gateAttempts` — a sentinel is not a call, and
+   sharing one counter across callers would file somebody's request
+   unassigned without ever asking them — but it means **change 2 does
+   nothing on any call whose SID, as the tools saw it, was not a real
+   CallSid.**
 
-   So of the two changes, only **change 1** — the wrong-facility refusal —
-   can reach those calls, by removing the `success: true` envelope that
-   invites the retry in the first place. Change 2 protects every call that
-   does carry a real SID. Both are worth having; neither is the whole fix,
-   and the after-measurement should not be read as though change 2 covers
-   the loop cohort. Found by Codex on #283, AFTER #282 merged — the facts
-   were in the #282 description (it says the passthrough needs a real SID)
-   and were not carried through to what the bound therefore does not cover.
+   **Which calls that is has NOT been established, and there are two
+   different "elevens" here — do not merge them.** The ELEVEN CEILING-LOOP
+   calls are the table above (`tool_call_count >= 40`). The invalid-SID
+   suspicion belongs to a different eleven: the **11 of 72 optical calls
+   that never reached `file_optical_ticket`'s own escape** (see STILL OPEN
+   below), and even there it is only that an absent or sentinel SID
+   *reproduces* their shape. **The SIDs the tools saw on the ceiling-loop
+   calls have not been checked.** Nothing ties those loops to invalid SIDs,
+   and the table leans the other way: a sentinel SID sends `resolve_location`
+   down the `!hit` branch, which REFUSES, while most of those loops are
+   `resolve_location` returning SUCCESS 30-odd times — the shape of the
+   wrong-facility branch change 1 fixed.
+
+   So, stated only from the code: **change 1 applies to every call whatever
+   its SID; change 2 applies only to calls with a real one.** Whether change
+   2 reaches the ceiling-loop calls depends on their SIDs, which is
+   unchecked; for the 11-of-72, if their SID was in fact invalid, change 2
+   cannot help them. Neither change is the whole fix, and the
+   after-measurement must not be read as though change 2 covers either
+   cohort until the SIDs are looked at. Found by Codex on #283, AFTER #282
+   merged — the facts were in the #282 description (it says the passthrough
+   needs a real SID) and were not carried through to what the bound
+   therefore does not cover.
 
 **MERGED WITHOUT THE AFTER-NUMBER, on Wayne's explicit instruction**, with the
 Codex P1 saying so left OPEN on #282. `docs/BACKEND_HANDOFF.md` forbids that
@@ -1864,7 +1878,8 @@ before merge.
 which needs a real CallSid (see the exception above), so it can only ever
 count calls that have one. Read it together with the `[voice-runtime]` build
 marker: an absent line means either that no call exhausted its two asks, or
-that the ones which did had no usable SID. It cannot distinguish those, and
+that calls refused more than twice had no usable SID, so the bound never
+engaged. It cannot distinguish those, and
 it says nothing about whether change 1 is live.
 
 **STILL OPEN, and #282 did not touch it:** why 11 of 72 optical calls hitting
