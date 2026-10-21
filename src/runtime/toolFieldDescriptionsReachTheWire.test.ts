@@ -244,7 +244,7 @@ describe('what the descriptions cost on the wire', () => {
    * not grow while nobody is looking. Measured 2026-10-21 as
    * JSON.stringify(lane.agent.tools).length, runtime-owned tools included:
    *
-   *   no-ivr   9,026 chars before -> 12,162 after   (+3,136, ~780 tokens)
+   *   no-ivr   9,026 chars before -> 12,205 after   (+3,179, ~795 tokens)
    *   pcp      5,793 chars before ->  6,135 after   (+342,   ~85 tokens)
    *
    * For scale, the bound instructions are 24,437 (no-ivr) and 19,735 (pcp)

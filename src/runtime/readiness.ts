@@ -803,6 +803,14 @@ import { callEnvironment } from "./callRecord";
  * `src/runtime/outbound/consoleMovable.ts`.
  */
 /**
+ * v108 — A LAB THAT NAMES ITSELF IS A PROVIDER (2026-10-21). Operator: "add
+ * lab and laboratory to the provider list." A reference lab calling stat
+ * results named itself and was taken as a message because "lab" was not a
+ * facility word (CA02cebe2231c3f8208c099c8736ea5c7a). "optical lab" does not
+ * count (a supplier chasing a frame), nor do "lab results" / "lab work" (a
+ * patient's own care). `src/services/symptomCorroboration.ts`.
+ */
+/**
  * v109 — THE FIELD DESCRIPTIONS REACH THE MODEL (2026-10-21). The SDK's
  * `tool()` drops every zod `.describe()` from a schema with an optional
  * field, so on no-ivr and pcp — the two live lanes that build tools by hand —
@@ -810,7 +818,7 @@ import { callEnvironment } from "./callRecord";
  * `escalate_to_human.caller_type`'s "ONLY when the caller has said so in
  * their own words" (v99). They are now copied back onto the SDK's own schema;
  * no type, enum or required list moves, and validation is still the zod
- * parse. A sibling of #359 (v108), not stacked on it.
+ * parse. On top of v108 (#359), which it contains.
  * `src/services/toolFieldDescriptions.ts`.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =

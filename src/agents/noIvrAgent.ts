@@ -206,8 +206,9 @@ export const REFUSED_ESCALATION_WHY: Record<RefusedEscalationCode, string> = {
     'a post-operative medication or prescription problem with no new symptom is filed URGENT for the After ' +
     'Hours team rather than transferred (operator ruling 2026-10-02)',
   provider_not_stated_by_caller:
-    'the caller has not said they are a doctor, a nurse, or calling from a doctor\'s office, hospital, ER or ' +
-    'clinic, and this line transfers a provider call only when the caller says so (operator ruling 2026-10-19)',
+    'the caller has not said they are a doctor, a nurse, or calling from a doctor\'s office, hospital, ER, ' +
+    'lab or clinic, and this line transfers a provider call only when the caller says so (operator rulings ' +
+    '2026-10-19 and 2026-10-21)',
 };
 
 export const REFUSED_ESCALATION_LINE = {
@@ -271,7 +272,8 @@ export function refusedEscalationResult(args: {
           'escalate_to_human once more with the symptom as they said it.'
         : code === 'provider_not_stated_by_caller'
           ? ' BEFORE you say that line, ask ONE question: "Are you calling from a doctor\'s office, a ' +
-            'hospital or a clinic, and which one?" If they name one, do not say the line: call ' +
+            'hospital, a clinic or a laboratory, and which one?" If they name one — a laboratory reporting ' +
+            'results counts — do not say the line: call ' +
             'escalate_to_human once more with what they told you. Asking for a doctor by name, or for an ' +
             'operator, does not make someone a provider.'
           : '';
@@ -797,6 +799,8 @@ someone else? What is the patient's name?"
 Detect ANY of these signals immediately:
 • Caller says "Dr.", "doctor", "nurse", "NP", "PA"
 • "calling from a hospital / clinic / ER / office"
+• A medical laboratory calling in a patient's results
+("stat labs", "critical result") — not an optical lab
 • "I need to page Dr. [name]" / "paging"
 • "peer-to-peer" / "peer to peer"
 • "I'm calling from [medical facility name]"
@@ -811,8 +815,8 @@ Provider calls are time-sensitive — every second matters.
 
 🟡 B2B / BUSINESS CALLER (optical lab, referring office,
 outside vendor, other clinic or pharmacy):
-"I'm calling from [lab/optical/office]", "this is [name]
-at [business]", "we are a lab", "Bartley Optical",
+"I'm calling from [optical lab/office]", "this is [name]
+at [business]", "we are an optical lab", "Bartley Optical",
 "we need an invoice", "tint density", "lens order"
 
 B2B PROTOCOL — DOB IS OPTIONAL FOR BUSINESS CALLERS:
@@ -2186,7 +2190,7 @@ For healthcare provider calls — escalate immediately with whatever info you ha
        */
       caller_type: z
         .enum(["patient_urgent_medical", "healthcare_provider"])
-        .describe("patient_urgent_medical=a true eye emergency happening now, healthcare_provider=a doctor, nurse, hospital, ER or clinic calling about a patient, and ONLY when the caller has said so in their own words (asking for a doctor by name, or for an operator, does not make someone a provider: ask which office or facility they are calling from first). There is no third option: if you could not understand the caller or could not collect a detail, that is create_ticket, never this tool."),
+        .describe("patient_urgent_medical=a true eye emergency happening now, healthcare_provider=a doctor, nurse, hospital, ER, clinic or medical laboratory (never an optical lab) calling about a patient, and ONLY when the caller has said so in their own words (asking for a doctor by name, or for an operator, does not make someone a provider: ask which office or facility they are calling from first). There is no third option: if you could not understand the caller or could not collect a detail, that is create_ticket, never this tool."),
       patient_first_name: z.string().optional().describe("Patient first name if collected"),
       patient_last_name: z.string().optional().describe("Patient last name if collected"),
       patient_dob: z.string().optional().describe("Patient date of birth if collected"),

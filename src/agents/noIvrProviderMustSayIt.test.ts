@@ -95,7 +95,7 @@ describe('"Operator." is not a provider', () => {
     expect(handoff).not.toHaveBeenCalled();
     // It asks before it says the refusal line, so a real clinician gets one question, not a goodbye.
     expect(r.message).toMatch(/BEFORE you say that line, ask ONE question/);
-    expect(r.message).toMatch(/doctor's office, a hospital or a clinic, and which one/);
+    expect(r.message).toMatch(/doctor's office, a hospital, a clinic or a laboratory, and which one/);
 
     expect(h.submitSimplifiedTicket).toHaveBeenCalledTimes(1);
     const ticket = h.submitSimplifiedTicket.mock.calls[0][0] as Record<string, string>;
@@ -117,7 +117,7 @@ describe('"Operator." is not a provider', () => {
     noteCallerTranscript(sid, [
       GREETING,
       'CALLER: Operator.',
-      "AGENT: Are you calling from a doctor's office, a hospital or a clinic, and which one?",
+      "AGENT: Are you calling from a doctor's office, a hospital, a clinic or a laboratory, and which one?",
       'CALLER: This is the emergency room at Westside Memorial calling about a patient.',
     ]);
     h.submitSimplifiedTicket.mockResolvedValueOnce({ success: true, ticketNumber: 'VA-RECORD', message: 'VA-RECORD' } as any);
@@ -132,6 +132,33 @@ describe('"Operator." is not a provider', () => {
     expect(record.secondTicketOnThisCall).toEqual({ keySuffix: 'urgent-transfer' });
     expect(record.additionalDetails).toMatch(/SUPERSEDES VA-EARLIER/);
     expect(record.additionalDetails).toMatch(/No callback is needed on VA-EARLIER/);
+    releaseCallerSpeech(sid);
+  });
+
+  it('v108: a lab with stat results is asked once, names the lab, and is connected (CA02cebe22 shape)', async () => {
+    const sid = freshSid();
+    const { agent, handoff } = await runtimeAgent(sid);
+    const intro = 'CALLER: Hi, this is Dana with Example Diagnostics calling on a recorded line. I have stat labs for Dr. Lin.';
+    noteCallerTranscript(sid, [GREETING, intro]);
+    const escalation = {
+      reason: 'Diagnostics laboratory calling with stat lab results for the on-call physician',
+      caller_type: 'healthcare_provider',
+    };
+    const refused = await call(agent, 'escalate_to_human', escalation);
+    expect(refused.refused).toBe('provider_not_stated_by_caller');
+    // The model is told a lab counts, so it calls again instead of saying the refusal line.
+    expect(refused.message).toMatch(/a laboratory reporting results counts/);
+    expect(refused.message).toMatch(/hospital, ER, lab or clinic/);
+
+    noteCallerTranscript(sid, [
+      GREETING,
+      intro,
+      "AGENT: Are you calling from a doctor's office, a hospital, a clinic or a laboratory, and which one?",
+      'CALLER: From Example Diagnostics, uh, lab.',
+    ]);
+    const r = await call(agent, 'escalate_to_human', escalation);
+    expect(r.success).toBe(true);
+    expect(handoff).toHaveBeenCalledTimes(1);
     releaseCallerSpeech(sid);
   });
 
@@ -161,6 +188,42 @@ describe('"Operator." is not a provider', () => {
     expect(handoff).not.toHaveBeenCalled();
     releaseCallerSpeech(sid);
   });
+});
+
+describe('review r1 (#359): the prompt tells the model a reporting lab is a clinician', () => {
+  // The gate only runs once the model calls escalate_to_human. The legacy body
+  // listed "we are a lab" as a business caller and neither body nor the tool
+  // named a lab as a provider, so a lab would normally have been ticketed and
+  // never reached the gate. Read from the REAL agent on both pipelines.
+  async function built(pipeline?: 'runtime') {
+    const sid = freshSid();
+    const agent: any = await createNoIvrAgent(async () => {}, {
+      callId: sid, callSid: sid, callerPhone: '5551234567', ...(pipeline ? { pipeline } : {}),
+    } as any);
+    return { instructions: String(agent.instructions) };
+  }
+
+  it('the runtime body lists a laboratory calling in results with the clinicians and keeps optical labs as businesses', async () => {
+    const { instructions } = await built('runtime');
+    expect(instructions).toMatch(/A clinician —[^\n]*a medical laboratory calling in a patient's results[^\n]*escalate NOW/);
+    expect(instructions).toMatch(/A business — an optical lab \(frames, lenses, orders\)/);
+  });
+
+  it('the legacy body no longer files "we are a lab" as a business caller', async () => {
+    const { instructions } = await built();
+    expect(instructions).toMatch(/A medical laboratory calling in a patient's results/);
+    expect(instructions).not.toMatch(/"we are a lab"/);
+    expect(instructions).not.toMatch(/\[lab\/optical\/office\]/);
+    expect(instructions).toMatch(/"we are an optical lab"/);
+  });
+
+  // The escalate_to_human field descriptions are NOT asserted here, on purpose:
+  // @openai/agents 0.3.7 falls back to a converter that drops every zod
+  // .describe() whenever a tool has an optional field, so on the runtime 1 of
+  // this agent's 31 field descriptions reaches the model (measured 2026-10-21).
+  // The prompt is the channel that does, and it is what the two tests above
+  // read. The caller_type description is updated anyway, for when the
+  // conversion is fixed.
 });
 
 describe('the symptom check the runtime never fed is live again', () => {
