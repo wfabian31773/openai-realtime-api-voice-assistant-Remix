@@ -10,7 +10,8 @@
  */
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { dncKey, rowToContact } from "./store";
+import { SURNAME_INITIAL_FOLD, dncKey, rowToContact } from "./store";
+import { nameKey } from "../../tools/verifiedIdentity";
 
 const SRC = readFileSync("src/runtime/outbound/store.ts", "utf8");
 
@@ -235,5 +236,24 @@ describe("a queue fed live from a source (v107)", () => {
 
   it("diffs against this campaign's source-fed rows only", () => {
     expect(method("sourceRows")).toContain("WHERE campaign_id = ${campaignId}::varchar AND external_ref IS NOT NULL");
+  });
+});
+
+describe("a caller ringing from another phone, whose surname begins with an accent (Codex P2, #358)", () => {
+  it("is prefiltered on the surname initial FOLDED in SQL, the way the code folds it", () => {
+    expect(method("contactsByName")).toContain(
+      "translate(lower(left(trim(c.last_name), 1)),\n                           ${SURNAME_INITIAL_FOLD.from}::text, ${SURNAME_INITIAL_FOLD.to}::text) = ${initial}::varchar",
+    );
+  });
+
+  it("folds every listed letter exactly as nameKey does, and nothing nameKey leaves alone", () => {
+    const from = [...SURNAME_INITIAL_FOLD.from];
+    const to = [...SURNAME_INITIAL_FOLD.to];
+    expect(from).toHaveLength(to.length);
+    from.forEach((ch, i) => expect(nameKey(ch), ch).toBe(to[i]));
+    for (const ch of ["ø", "đ", "ł"]) expect(nameKey(ch)).toBe(ch);
+    // The worked case: Álvarez's initial, lower-cased as SQL does, folds to nameKey's.
+    const sqlInitial = "Álvarez".charAt(0).toLowerCase();
+    expect(to[from.indexOf(sqlInitial)]).toBe(nameKey("Álvarez").charAt(0));
   });
 });

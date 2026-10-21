@@ -235,6 +235,20 @@ export interface OutboundStore {
   updateContactPhone(contactId: string, phone: string): Promise<void>;
 }
 
+/**
+ * The surname-initial folding the name read applies IN SQL, written to agree
+ * with `nameKey` character for character (a test holds them together): a
+ * lower-cased initial in FROM becomes the letter at the same place in TO.
+ * Without it the prefilter compared a raw "á" against nameKey's folded "a",
+ * and a caller named Álvarez ringing from another phone could never be found
+ * (Codex P2, #358). Only letters nameKey itself folds are listed — it leaves
+ * ø, đ and ł alone, so this does too.
+ */
+export const SURNAME_INITIAL_FOLD = {
+  from: "áàâäãåāăąéèêëēėęěíìîïīįóòôöõōúùûüūůųñńçćčďğľňřśšşťţýÿźžż",
+  to: "aaaaaaaaaeeeeeeeeiiiiiioooooouuuuuuunncccdglnrsssttyyzzz",
+} as const;
+
 /** A candidate from a contact row plus its newest placed dial. Pure. */
 export function rowToCandidate(r: Record<string, unknown>): CallbackCandidate {
   const c = rowToContact(r);
@@ -642,7 +656,8 @@ export async function createDbOutboundStore(): Promise<OutboundStore> {
             FROM campaign_contacts c
             ${lastPlacedDial}
            WHERE c.campaign_id = ${campaignId}::varchar
-             AND lower(left(trim(c.last_name), 1)) = ${initial}::varchar
+             AND translate(lower(left(trim(c.last_name), 1)),
+                           ${SURNAME_INITIAL_FOLD.from}::text, ${SURNAME_INITIAL_FOLD.to}::text) = ${initial}::varchar
            LIMIT 500`),
       );
       const first = nameKey(firstName);
