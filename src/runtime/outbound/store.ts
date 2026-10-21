@@ -34,7 +34,7 @@
  * ─────────────────────────────────────────────────────────────────────────────
  */
 
-import type { OutboundContact } from "./campaign";
+import type { OutboundContact, SourceContact } from "./campaign";
 import { RUNTIME_OUTBOUND_CAMPAIGN_TYPE } from "./campaign";
 import type { CallbackCandidate } from "./callback";
 import { nameKey } from "../../tools/verifiedIdentity";
@@ -70,6 +70,19 @@ export interface ContactRow {
   contacted: boolean;
   nextAttemptAt: Date | null;
   customData: Record<string, unknown>;
+  /** The source's id for this row (v107), or null for an imported row. */
+  externalRef: string | null;
+}
+
+/** A source-fed row as the queue holds it now, for the refresh's diff. */
+export interface SourceRow {
+  id: string;
+  externalRef: string;
+  phone: string;
+  firstName: string | null;
+  lastName: string | null;
+  customData: Record<string, unknown>;
+  status: ContactStatus;
 }
 
 export interface AttemptFinish {
@@ -204,6 +217,22 @@ export interface OutboundStore {
    * priorAttempts reads outbound attempts only).
    */
   openCallbackAttempt(contactId: string, campaignId: string, callSid: string): Promise<string>;
+  /** Every source-fed row in this campaign (external_ref set), for the
+   * refresh to diff the live list against (v107). */
+  sourceRows(campaignId: string): Promise<SourceRow[]>;
+  /**
+   * Add or refresh source-fed rows by `external_ref`: new people queue as
+   * 'pending'; an existing row's phone, name and fields follow the source,
+   * and its STATUS is never touched — an outcome is the call's, not the
+   * source's. One fixed statement however many rows (a jsonb list), so a
+   * refresh never writes a new statement shape to the Hub.
+   */
+  upsertSourceContacts(campaignId: string, rows: Array<SourceContact & { phone: string }>): Promise<number>;
+  /** Rows that left the live list wait until `until` before they are looked
+   * at again — dialable rows only, and never brought forward. */
+  parkContacts(campaignId: string, externalRefs: string[], until: Date): Promise<number>;
+  /** The number the source holds for this person today. */
+  updateContactPhone(contactId: string, phone: string): Promise<void>;
 }
 
 /** A candidate from a contact row plus its newest placed dial. Pure. */
@@ -246,6 +275,7 @@ export function rowToContact(r: Record<string, unknown>): ContactRow {
     contacted: Boolean(r.contacted),
     nextAttemptAt: r.next_attempt_at ? new Date(r.next_attempt_at as string) : null,
     customData: data && typeof data === "object" ? (data as Record<string, unknown>) : {},
+    externalRef: (r.external_ref as string | null) ?? null,
   };
 }
 
@@ -632,6 +662,79 @@ export async function createDbOutboundStore(): Promise<OutboundStore> {
           RETURNING id`),
       );
       return String(inserted[0].id);
+    },
+
+    async sourceRows(campaignId) {
+      await ensureSchema();
+      return rows(
+        await db.execute(sql`
+          SELECT id, external_ref, phone_number, first_name, last_name, custom_data, outreach_status
+            FROM campaign_contacts
+           WHERE campaign_id = ${campaignId}::varchar AND external_ref IS NOT NULL`),
+      ).map((r) => {
+        const c = rowToContact(r);
+        return {
+          id: c.id,
+          externalRef: String(r.external_ref),
+          phone: c.phone,
+          firstName: c.firstName,
+          lastName: c.lastName,
+          customData: c.customData,
+          status: c.status,
+        };
+      });
+    },
+
+    async upsertSourceContacts(campaignId, list) {
+      if (list.length === 0) return 0;
+      await ensureSchema();
+      const payload = JSON.stringify(
+        list.map((c) => ({
+          external_ref: c.externalRef,
+          phone_number: c.phone,
+          first_name: c.firstName,
+          last_name: c.lastName,
+          custom_data: c.data,
+        })),
+      );
+      const written = rows(
+        await db.execute(sql`
+          INSERT INTO campaign_contacts
+            (campaign_id, external_ref, phone_number, first_name, last_name, custom_data, outreach_status)
+          SELECT ${campaignId}::varchar, x.external_ref, x.phone_number, x.first_name, x.last_name,
+                 x.custom_data, 'pending'
+            FROM jsonb_to_recordset(${payload}::jsonb)
+                 AS x(external_ref varchar, phone_number varchar, first_name varchar, last_name varchar, custom_data jsonb)
+          ON CONFLICT (campaign_id, external_ref) WHERE external_ref IS NOT NULL
+          DO UPDATE SET phone_number = EXCLUDED.phone_number,
+                        first_name = EXCLUDED.first_name,
+                        last_name = EXCLUDED.last_name,
+                        custom_data = EXCLUDED.custom_data,
+                        updated_at = NOW()
+          RETURNING id`),
+      );
+      return written.length;
+    },
+
+    async parkContacts(campaignId, externalRefs, until) {
+      if (externalRefs.length === 0) return 0;
+      const parked = rows(
+        await db.execute(sql`
+          UPDATE campaign_contacts
+             SET next_attempt_at = GREATEST(COALESCE(next_attempt_at, ${utc(until)}), ${utc(until)}),
+                 updated_at = NOW()
+           WHERE campaign_id = ${campaignId}::varchar
+             AND external_ref IN (SELECT jsonb_array_elements_text(${JSON.stringify(externalRefs)}::jsonb))
+             AND outreach_status::text IN ('pending', 'no_answer', 'voicemail', 'callback_scheduled')
+          RETURNING id`),
+      );
+      return parked.length;
+    },
+
+    async updateContactPhone(contactId, phone) {
+      await db.execute(sql`
+        UPDATE campaign_contacts SET phone_number = ${phone}::varchar, updated_at = NOW()
+         WHERE id = ${contactId}::varchar`);
     },
 
     async stampDoNotContact(phone, source) {

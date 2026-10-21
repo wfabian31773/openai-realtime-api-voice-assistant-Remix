@@ -792,8 +792,18 @@ import { callEnvironment } from "./callRecord";
  * dialler rings nobody until the caller-ID number's Voice URL points back at
  * that lane on this deployment. `src/runtime/outbound/callback.ts`.
  */
+/**
+ * v107 — THE MOVABLE LIST, LIVE FROM THE CONSOLE (2026-10-21). Operator:
+ * "create a direct connection to the eye care patient console where the
+ * movable list is located so it is always fresh." A campaign can now be fed
+ * from a live source instead of an import: the queue is refreshed from the
+ * Console's movable list every fifteen minutes (only what changed is
+ * written), and each person is re-checked against the Console at the moment
+ * of the dial — still booked, still movable, today's phone — failing closed.
+ * `src/runtime/outbound/consoleMovable.ts`.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v106-the-person-we-called-can-call-back-20261021";
+  "voice-runtime-v107-the-movable-list-is-live-20261021";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

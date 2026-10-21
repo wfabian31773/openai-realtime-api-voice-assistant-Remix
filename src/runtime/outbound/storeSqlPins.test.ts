@@ -172,6 +172,8 @@ describe("a row read back", () => {
       contacted: false,
       nextAttemptAt: null,
       customData: {},
+      // An imported row has no source id (v107).
+      externalRef: null,
     });
   });
 });
@@ -211,5 +213,27 @@ describe("a returned call (v106, ./callback.ts)", () => {
     const settle = method("settleContact");
     expect(settle).toContain("NOT (outreach_status::text = ANY (string_to_array(${csv(opts.exceptStatus)}::text, ',')))");
     expect(settle).toContain("outreach_status::text = ANY (string_to_array(${csv(opts.onlyIfStatusIn)}::text, ','))");
+  });
+});
+
+describe("a queue fed live from a source (v107)", () => {
+  it("adds or refreshes by external_ref in one fixed statement, and never touches the status of a row it already has", () => {
+    const up = method("upsertSourceContacts");
+    expect(up).toContain("FROM jsonb_to_recordset(${payload}::jsonb)");
+    expect(up).toContain("ON CONFLICT (campaign_id, external_ref) WHERE external_ref IS NOT NULL");
+    const onConflict = up.slice(up.indexOf("DO UPDATE SET"), up.indexOf("RETURNING"));
+    expect(onConflict).not.toContain("outreach_status");
+    expect(onConflict).not.toContain("next_attempt_at");
+  });
+
+  it("parks only dialable rows, and never brings a later look forward", () => {
+    const park = method("parkContacts");
+    expect(park).toContain("GREATEST(COALESCE(next_attempt_at, ${utc(until)}), ${utc(until)})");
+    expect(park).toContain("outreach_status::text IN ('pending', 'no_answer', 'voicemail', 'callback_scheduled')");
+    expect(park).toContain("jsonb_array_elements_text(${JSON.stringify(externalRefs)}::jsonb)");
+  });
+
+  it("diffs against this campaign's source-fed rows only", () => {
+    expect(method("sourceRows")).toContain("WHERE campaign_id = ${campaignId}::varchar AND external_ref IS NOT NULL");
   });
 });

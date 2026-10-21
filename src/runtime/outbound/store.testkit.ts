@@ -17,7 +17,9 @@ import {
   type OutboundStore,
   type PriorAttempt,
   type SettleOptions,
+  type SourceRow,
 } from "./store";
+import type { SourceContact } from "./campaign";
 
 export interface FakeAttempt {
   id: string;
@@ -55,6 +57,7 @@ export class FakeOutboundStore implements OutboundStore {
       contacted: false,
       nextAttemptAt: null,
       customData: {},
+      externalRef: null,
       ...c,
       updatedAt: this.clock(),
     });
@@ -289,5 +292,71 @@ export class FakeOutboundStore implements OutboundStore {
       lastAttemptAt: placed[0]?.at ?? null,
       lastAttemptStatus: placed[0]?.finish?.status ?? (placed[0] ? "initiated" : null),
     };
+  }
+
+  /** How many times upsertSourceContacts was called, and with how many rows. */
+  upserts: number[] = [];
+
+  async sourceRows(campaignId: string): Promise<SourceRow[]> {
+    return [...this.contacts.values()]
+      .filter((c) => c.campaignId === campaignId && c.externalRef !== null)
+      .map((c) => ({
+        id: c.id,
+        externalRef: c.externalRef!,
+        phone: c.phone,
+        firstName: c.firstName,
+        lastName: c.lastName,
+        customData: c.customData,
+        status: c.status,
+      }));
+  }
+
+  async upsertSourceContacts(campaignId: string, list: Array<SourceContact & { phone: string }>): Promise<number> {
+    if (list.length === 0) return 0;
+    this.upserts.push(list.length);
+    for (const s of list) {
+      const existing = [...this.contacts.values()].find((c) => c.campaignId === campaignId && c.externalRef === s.externalRef);
+      if (existing) {
+        // Same rule as the SQL: the source's fields follow, the status never.
+        existing.phone = s.phone;
+        existing.firstName = s.firstName;
+        existing.lastName = s.lastName;
+        existing.customData = s.data;
+      } else {
+        const id = `src-${++this.seq}`;
+        this.addContact({
+          id,
+          phone: s.phone,
+          firstName: s.firstName,
+          lastName: s.lastName,
+          customData: s.data,
+          externalRef: s.externalRef,
+          campaignId,
+        });
+      }
+    }
+    return list.length;
+  }
+
+  async parkContacts(campaignId: string, externalRefs: string[], until: Date): Promise<number> {
+    let n = 0;
+    for (const c of this.contacts.values()) {
+      if (
+        c.campaignId === campaignId &&
+        c.externalRef !== null &&
+        externalRefs.includes(c.externalRef) &&
+        (DIALABLE_STATUSES as readonly string[]).includes(c.status)
+      ) {
+        // Same rule as the SQL: later of the two, never brought forward.
+        c.nextAttemptAt = c.nextAttemptAt && c.nextAttemptAt > until ? c.nextAttemptAt : until;
+        n += 1;
+      }
+    }
+    return n;
+  }
+
+  async updateContactPhone(contactId: string, phone: string): Promise<void> {
+    const c = this.contacts.get(contactId);
+    if (c) c.phone = phone;
   }
 }

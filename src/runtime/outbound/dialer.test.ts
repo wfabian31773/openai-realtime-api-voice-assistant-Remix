@@ -912,3 +912,157 @@ describe("the caller ID takes the calls back", () => {
     expect(voiceUrlFor).not.toHaveBeenCalled();
   });
 });
+
+/**
+ * A CAMPAIGN FED LIVE FROM A SOURCE (v107): the queue follows the source, and
+ * each person is re-checked against it at the moment of the dial. Operator,
+ * 2026-10-21: "create a direct connection to the eye care patient console
+ * where the movable list is located so it is always fresh."
+ */
+describe("a campaign fed live from a source", () => {
+  type SC = import("./campaign").SourceContact;
+  type RC = import("./campaign").SourceRecheck;
+  const person = (ref: string, phone: string | null = "+15555550111", data: Record<string, unknown> = {}): SC => ({
+    externalRef: ref,
+    phone,
+    firstName: "Testa",
+    lastName: "Synthetic",
+    data: { date_of_birth: "1950-01-02", ...data },
+  });
+  function sourced(listed: SC[], recheck: (ref: string) => Promise<RC> = async (ref) => ({ state: "current", contact: listed.find((p) => p.externalRef === ref) ?? person(ref) })) {
+    const reads = { list: 0, recheck: 0 };
+    const source: import("./campaign").ContactSource = {
+      name: "test source",
+      refreshEveryMs: 15 * 60 * 1000,
+      parkMs: 60 * 60 * 1000,
+      list: async () => {
+        reads.list += 1;
+        return listed;
+      },
+      recheck: async (ref) => {
+        reads.recheck += 1;
+        return recheck(ref);
+      },
+    };
+    return { source, reads, policy: { ...policy, source: async () => source } };
+  }
+
+  it("queues the source's people as pending rows keyed on the source's id, and dials them", async () => {
+    const { store, createCall, deps } = setup();
+    const { policy: p } = sourced([person("appt-1")]);
+    const r = await runCampaignTick("test-lane", p, { ...deps, sourceRefreshedAt: new Map() });
+    expect(r.refreshed).toEqual({ written: 1, parked: 0, listed: 1 });
+    const row = [...store.contacts.values()][0];
+    expect(row).toMatchObject({ externalRef: "appt-1", phone: "+15555550111" });
+    expect(row.customData).toMatchObject({ date_of_birth: "1950-01-02" });
+    expect(createCall).toHaveBeenCalledTimes(1);
+  });
+
+  it("refreshes at most once per interval, and a quiet refresh writes nothing", async () => {
+    const { store, deps } = setup();
+    const { policy: p, reads } = sourced([person("appt-1")]);
+    const cache = new Map<string, number>();
+    await runCampaignTick("test-lane", p, { ...deps, sourceRefreshedAt: cache });
+    await runCampaignTick("test-lane", p, { ...deps, sourceRefreshedAt: cache });
+    expect(reads.list).toBe(1);
+    const later = { ...deps, sourceRefreshedAt: cache, now: () => new Date(NOW.getTime() + 16 * 60 * 1000) };
+    await runCampaignTick("test-lane", p, later);
+    expect(reads.list).toBe(2);
+    expect(store.upserts).toEqual([1]); // the unchanged second read wrote nothing
+  });
+
+  it("follows the source's phone and fields, and never its status", async () => {
+    const { store, deps } = setup();
+    store.addContact({ id: "c1", phone: "+15555550111", externalRef: "appt-1", status: "voicemail", customData: { date_of_birth: "1950-01-02" }, firstName: "Testa", lastName: "Synthetic" });
+    const { policy: p } = sourced([person("appt-1", "+15555550133")], async () => ({ state: "off_list" }));
+    await runCampaignTick("test-lane", p, { ...deps, sourceRefreshedAt: new Map() });
+    expect(store.contacts.get("c1")).toMatchObject({ phone: "+15555550133", status: "voicemail" });
+  });
+
+  it("parks a row that left the list until the next rebuild — dialable rows only — and never deletes it", async () => {
+    const { store, createCall, deps } = setup();
+    store.addContact({ id: "c1", phone: "+15555550111", externalRef: "appt-gone", status: "no_answer" });
+    store.addContact({ id: "c2", phone: "+15555550112", externalRef: "appt-done", status: "completed" });
+    const { policy: p } = sourced([]);
+    const r = await runCampaignTick("test-lane", p, { ...deps, sourceRefreshedAt: new Map() });
+    expect(r.refreshed).toMatchObject({ parked: 1 });
+    expect(store.contacts.get("c1")!.nextAttemptAt!.getTime()).toBe(NOW.getTime() + 60 * 60 * 1000);
+    expect(store.contacts.get("c2")!.nextAttemptAt).toBeNull();
+    expect(createCall).not.toHaveBeenCalled();
+  });
+
+  it("dials nobody when the source is not available in this process", async () => {
+    const { store, createCall, deps } = setup();
+    store.addContact({ id: "c1", phone: "+15555550111", externalRef: "appt-1" });
+    const r = await runCampaignTick("test-lane", { ...policy, source: async () => null }, deps);
+    expect(r.skipped).toBe("contact source not available");
+    expect(createCall).not.toHaveBeenCalled();
+  });
+
+  it("writes and parks nothing when the list cannot be read", async () => {
+    const { store, deps } = setup();
+    store.addContact({ id: "c1", phone: "+15555550111", externalRef: "appt-1", status: "no_answer" });
+    const { source } = sourced([]);
+    source.list = async () => Promise.reject(new Error("console down"));
+    const r = await runCampaignTick("test-lane", { ...policy, source: async () => source }, { ...deps, sourceRefreshedAt: new Map() });
+    expect(r.refreshed).toBeUndefined();
+    expect(store.contacts.get("c1")!.nextAttemptAt).toBeNull();
+  });
+
+  describe("the re-check at the dial", () => {
+    it("settles a row whose appointment is over and rings nobody", async () => {
+      const { store, createCall, deps } = setup();
+      store.addContact({ id: "c1", phone: "+15555550111", externalRef: "appt-1" });
+      const { policy: p } = sourced([person("appt-1")], async () => ({ state: "gone" }));
+      const r = await runCampaignTick("test-lane", p, deps);
+      expect(r.held).toEqual({ source_gone: 1 });
+      expect(store.contacts.get("c1")!.status).toBe("rescheduled");
+      expect(createCall).not.toHaveBeenCalled();
+    });
+
+    it("parks a row that is off the list right now, keeping its status", async () => {
+      const { store, createCall, deps } = setup();
+      store.addContact({ id: "c1", phone: "+15555550111", externalRef: "appt-1", status: "voicemail" });
+      const { policy: p } = sourced([person("appt-1")], async () => ({ state: "off_list" }));
+      expect((await runCampaignTick("test-lane", p, deps)).held).toEqual({ off_list: 1 });
+      expect(store.contacts.get("c1")).toMatchObject({ status: "voicemail" });
+      expect(store.contacts.get("c1")!.nextAttemptAt!.getTime()).toBe(NOW.getTime() + 60 * 60 * 1000);
+      expect(createCall).not.toHaveBeenCalled();
+    });
+
+    it("rings nobody when the source cannot answer — fail closed", async () => {
+      const { store, createCall, deps } = setup();
+      store.addContact({ id: "c1", phone: "+15555550111", externalRef: "appt-1", status: "voicemail" });
+      const { policy: p } = sourced([person("appt-1")], async () => Promise.reject(new Error("console down")));
+      expect((await runCampaignTick("test-lane", p, deps)).held).toEqual({ source_unavailable: 1 });
+      expect(store.contacts.get("c1")!.status).toBe("voicemail");
+      expect(createCall).not.toHaveBeenCalled();
+    });
+
+    it("rings today's number from the source, after checking it against the do-not-contact list", async () => {
+      const { store, createCall, deps } = setup();
+      store.addContact({ id: "c1", phone: "+15555550111", externalRef: "appt-1" });
+      const { policy: p } = sourced([person("appt-1")], async () => ({ state: "current", contact: person("appt-1", "+15555550144") }));
+      await runCampaignTick("test-lane", p, deps);
+      expect(store.contacts.get("c1")!.phone).toBe("+15555550144");
+      expect(createCall).toHaveBeenCalledWith(expect.objectContaining({ to: "+15555550144" }));
+    });
+
+    it("refuses today's number when it is on the do-not-contact list", async () => {
+      const { store, createCall, deps } = setup();
+      store.addContact({ id: "c1", phone: "+15555550111", externalRef: "appt-1" });
+      store.dnc.set("5555550144", "voice:test");
+      const { policy: p } = sourced([person("appt-1")], async () => ({ state: "current", contact: person("appt-1", "+15555550144") }));
+      expect((await runCampaignTick("test-lane", p, deps)).held).toEqual({ do_not_contact: 1 });
+      expect(createCall).not.toHaveBeenCalled();
+    });
+
+    it("never dials a row on a source-fed campaign that the source did not write", async () => {
+      const { store, createCall, deps } = setup();
+      store.addContact({ id: "c1", phone: "+15555550111" });
+      const { policy: p } = sourced([]);
+      expect((await runCampaignTick("test-lane", p, deps)).held).toEqual({ not_from_source: 1 });
+      expect(createCall).not.toHaveBeenCalled();
+    });
+  });
+});

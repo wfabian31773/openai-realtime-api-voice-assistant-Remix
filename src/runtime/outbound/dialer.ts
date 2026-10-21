@@ -54,7 +54,7 @@
  * ─────────────────────────────────────────────────────────────────────────────
  */
 
-import type { OutboundLanePolicy } from "./campaign";
+import type { ContactSource, OutboundLanePolicy, SourceContact } from "./campaign";
 import {
   REFUSAL_STREAK_WINDOW_MS,
   campaignEnabled,
@@ -165,6 +165,9 @@ export interface DialerDeps {
   host: string;
   /** Kept by the scheduler across ticks; absent, Twilio is asked every tick. */
   routeCache?: CallbackRouteCache;
+  /** When each source-fed campaign last refreshed its queue (v107). Kept by
+   * the scheduler; absent, the queue is refreshed on every tick. */
+  sourceRefreshedAt?: Map<string, number>;
   now?: () => Date;
   log?: (line: string) => void;
 }
@@ -175,6 +178,8 @@ export interface TickResult {
   reaped: number;
   dialled: number;
   held: Record<string, number>;
+  /** A source refresh this tick: rows written and rows parked. */
+  refreshed?: { written: number; parked: number; listed: number };
 }
 
 /** Where Twilio posts when the call is answered. */
@@ -281,6 +286,18 @@ export async function runCampaignTick(
     const campaignId = await deps.store.ensureCampaign(policy.campaignKey, slug);
     if (!campaignId) return { ...result, skipped: `no agents row for ${slug}` };
 
+    // A campaign fed live from a source refreshes its queue from it first,
+    // and re-checks each person at the dial (dialOne). A source that is not
+    // configured in this process means the campaign does not dial: a list
+    // nobody can re-check is a list that may be stale.
+    let source: ContactSource | null = null;
+    if (policy.source) {
+      source = await policy.source().catch(() => null);
+      if (!source) return { ...result, skipped: "contact source not available" };
+      const refreshed = await refreshFromSource(policy, source, campaignId, now, deps);
+      if (refreshed) result.refreshed = refreshed;
+    }
+
     result.reaped = await deps.store.reapStaleClaims(
       campaignId,
       new Date(now.getTime() - STALE_CLAIM_MS),
@@ -297,7 +314,7 @@ export async function runCampaignTick(
     const due = await deps.store.dialableContacts(campaignId, now, capacity * 3);
     for (const candidate of due) {
       if (result.dialled >= capacity) break;
-      const held = await dialOne(slug, policy, candidate, campaignId, from, now, deps);
+      const held = await dialOne(slug, policy, candidate, campaignId, from, now, deps, source);
       if (held) result.held[held] = (result.held[held] ?? 0) + 1;
       else result.dialled += 1;
     }
@@ -315,6 +332,56 @@ export async function runCampaignTick(
   return result;
 }
 
+/** The fields a refresh compares, in a fixed key order. */
+function sourceKey(c: { phone: string | null; firstName: string | null; lastName: string | null; data: Record<string, unknown> }): string {
+  const ordered = Object.fromEntries(Object.entries(c.data).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)));
+  return JSON.stringify([dncKey(c.phone ?? ""), c.firstName ?? "", c.lastName ?? "", ordered]);
+}
+
+/**
+ * REFRESH THE QUEUE FROM THE LIVE SOURCE (v107), at most once per
+ * `refreshEveryMs`. Only what changed is written — a new person, a new
+ * phone, new fields — so a quiet refresh writes nothing to the Hub; and a
+ * row that has left the list is parked until the next rebuild rather than
+ * deleted, because its history stays with it and the list can change back.
+ * A source that cannot be read writes nothing and parks nobody: the per-dial
+ * re-check, which fails closed, is what guarantees nobody is rung on it.
+ */
+export async function refreshFromSource(
+  policy: OutboundLanePolicy,
+  source: ContactSource,
+  campaignId: string,
+  now: Date,
+  deps: Pick<DialerDeps, "store" | "sourceRefreshedAt" | "log">,
+): Promise<{ written: number; parked: number; listed: number } | null> {
+  const last = deps.sourceRefreshedAt?.get(policy.campaignKey);
+  if (last !== undefined && now.getTime() - last < source.refreshEveryMs) return null;
+  const log = deps.log ?? console.log;
+  let listed: SourceContact[];
+  try {
+    listed = await source.list(now);
+  } catch (error) {
+    log(`[outbound] ${policy.campaignKey}: could not read ${source.name} — ${error instanceof Error ? error.message : String(error)}`);
+    return null;
+  }
+  const have = new Map((await deps.store.sourceRows(campaignId)).map((r) => [r.externalRef, r]));
+  const live = new Map(listed.map((c) => [c.externalRef, c]));
+  const changed: Array<SourceContact & { phone: string }> = [];
+  for (const c of listed) {
+    if (!c.phone) continue; // nothing to ring; the row is not created
+    const row = have.get(c.externalRef);
+    if (!row || sourceKey({ ...row, data: row.customData }) !== sourceKey(c)) changed.push(c as SourceContact & { phone: string });
+  }
+  const written = await deps.store.upsertSourceContacts(campaignId, changed);
+  const leftList = [...have.values()].filter((r) => !live.has(r.externalRef)).map((r) => r.externalRef);
+  const parked = await deps.store.parkContacts(campaignId, leftList, new Date(now.getTime() + source.parkMs));
+  deps.sourceRefreshedAt?.set(policy.campaignKey, now.getTime());
+  if (written > 0 || parked > 0) {
+    log(`[outbound] ${policy.campaignKey}: ${source.name} — ${listed.length} listed, ${written} written, ${parked} parked`);
+  }
+  return { written, parked, listed: listed.length };
+}
+
 /**
  * Claim, check, dial one contact. Returns null when a call was placed, or
  * the reason it was not (and the row has been handed back or settled).
@@ -327,9 +394,43 @@ async function dialOne(
   from: string,
   now: Date,
   deps: DialerDeps,
+  source: ContactSource | null = null,
 ): Promise<string | null> {
   const contact = await deps.store.claimContact(candidate.id, now);
   if (!contact) return "claimed_elsewhere";
+
+  // THE LIVE RE-CHECK (v107), holding the claim and before anything else:
+  // the list the queue was refreshed from can be fifteen minutes old, and an
+  // appointment cancelled since must not be the reason we ring somebody.
+  if (source) {
+    if (!contact.externalRef) {
+      // A row the source never wrote has nothing to re-check against.
+      await deps.store.releaseContact(contact.id, candidate.status, new Date(now.getTime() + source.parkMs));
+      return "not_from_source";
+    }
+    let live;
+    try {
+      live = await source.recheck(contact.externalRef, now);
+    } catch {
+      await deps.store.releaseContact(contact.id, candidate.status, nextLookAt(now, "twilio_refused", policy));
+      return "source_unavailable";
+    }
+    if (live.state === "gone") {
+      await deps.store.settleContact(contact.id, "rescheduled", {
+        notes: `${source.name}: the reason for this call is over (cancelled or moved at the source)`,
+      });
+      return "source_gone";
+    }
+    if (live.state === "off_list" || !live.contact.phone) {
+      await deps.store.releaseContact(contact.id, candidate.status, new Date(now.getTime() + source.parkMs));
+      return live.state === "off_list" ? "off_list" : "no_phone";
+    }
+    if (dncKey(live.contact.phone) !== dncKey(contact.phone)) {
+      // Today's number from the source, before the do-not-contact check reads it.
+      await deps.store.updateContactPhone(contact.id, live.contact.phone);
+      contact.phone = live.contact.phone;
+    }
+  }
 
   if (await deps.store.isDoNotContact(contact.phone)) {
     await deps.store.settleContact(contact.id, "do_not_call");

@@ -110,10 +110,12 @@ export function startOutboundScheduler(deps: SchedulerDeps, intervalMs = OUTBOUN
   // One per scheduler, so a confirmed callback route is trusted for a while
   // and a wrong one is logged once rather than every minute.
   const routeCache = deps.routeCache ?? new Map();
+  // And when each live-fed campaign last refreshed its queue (v107).
+  const sourceRefreshedAt = deps.sourceRefreshedAt ?? new Map<string, number>();
   const timer = setInterval(() => {
     if (running) return; // a slow tick is never overlapped by the next
     running = true;
-    void runOutboundTick({ ...deps, routeCache }).finally(() => {
+    void runOutboundTick({ ...deps, routeCache, sourceRefreshedAt }).finally(() => {
       running = false;
     });
   }, intervalMs);
