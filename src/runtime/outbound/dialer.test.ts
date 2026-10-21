@@ -1,22 +1,31 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import twilio from "twilio";
 import type { OutboundLanePolicy } from "./campaign";
 import { DEFAULT_ATTEMPT_CAPS, DEFAULT_CALLING_WINDOW } from "./callingWindow";
 import {
   DEFAULT_INFRA_RETRY_MINUTES,
   DEFAULT_MAX_CONSECUTIVE_INFRA_RETRIES,
+  MAX_INFRA_RETRY_MINUTES,
+  REFUSAL_STREAK_WINDOW_MS,
   resolvedInfraRetryMinutes,
   resolvedMaxConsecutiveInfraRetries,
 } from "./campaign";
 import {
+  STALE_CLAIM_MS,
   answerUrl,
   isClearTwilioRefusal,
   nextLookAt,
+  reapNextAttemptAt,
   runCampaignTick,
   statusUrl,
   type OutboundTwilio,
 } from "./dialer";
+import { handleOutboundStatus } from "./outboundWebhook";
 import { NOT_PLACED } from "./store";
 import { FakeOutboundStore } from "./store.testkit";
+import { getTool } from "../../tools/registry";
+import { RECORD_OUTCOME_TOOL_NAME, setOutboundToolStoreForTests } from "../../tools/outboundTools";
+import type { WebhookRequest } from "../voiceWebhook";
 
 /** The Twilio SDK's RestException: `name` is the class, `status` is HTTP. */
 function restException(status: number, message = "refused"): Error & { status: number } {
@@ -268,6 +277,10 @@ describe("a dial", () => {
     store.contacts.get("c1")!.updatedAt = new Date(NOW.getTime() - 31 * 60 * 1000);
     const r = await runCampaignTick("test-lane", policy, deps);
     expect(r.reaped).toBe(1);
+    expect(store.contacts.get("c1")!.status).toBe("no_answer");
+    expect(store.contacts.get("c1")!.nextAttemptAt?.toISOString()).toBe(
+      reapNextAttemptAt(NOW, policy).toISOString(),
+    );
   });
 
   it("does nothing for a lane with no agents row", async () => {
@@ -480,6 +493,18 @@ describe("nextLookAt", () => {
     expect(resolvedInfraRetryMinutes({ infraRetryMinutes: 0 })).toBe(DEFAULT_INFRA_RETRY_MINUTES);
     expect(resolvedInfraRetryMinutes({ infraRetryMinutes: 7 })).toBe(7);
   });
+
+  it("clamps a huge infraRetryMinutes so nextLookAt stays a real date", () => {
+    expect(resolvedInfraRetryMinutes({ infraRetryMinutes: 1e20 })).toBe(MAX_INFRA_RETRY_MINUTES);
+    expect(resolvedInfraRetryMinutes({ infraRetryMinutes: MAX_INFRA_RETRY_MINUTES + 1 })).toBe(
+      MAX_INFRA_RETRY_MINUTES,
+    );
+    const next = nextLookAt(NOW, "twilio_refused", { ...policy, infraRetryMinutes: 1e20 });
+    expect(Number.isNaN(next.getTime())).toBe(false);
+    expect(next.toISOString()).toBe(
+      new Date(NOW.getTime() + MAX_INFRA_RETRY_MINUTES * 60 * 1000).toISOString(),
+    );
+  });
 });
 
 describe("a refused dial is not a contact and is retried shortly (Codex round 5, #357)", () => {
@@ -550,13 +575,44 @@ describe("isClearTwilioRefusal", () => {
     expect(isClearTwilioRefusal({ name: "RestException", status: "400" })).toBe(false);
     expect(isClearTwilioRefusal(null)).toBe(false);
   });
+
+  it("accepts a real SDK RestException that does not set name", () => {
+    const RestException = (
+      twilio as unknown as {
+        RestException: new (response: { statusCode: number; body: unknown }) => Error & { status: number };
+      }
+    ).RestException;
+    const err = new RestException({
+      statusCode: 400,
+      body: { message: "Invalid 'To' phone number", code: 21211 },
+    });
+    expect(err.name).not.toBe("RestException");
+    expect(err.constructor.name).toBe("RestException");
+    expect(isClearTwilioRefusal(err)).toBe(true);
+  });
 });
 
-describe("an ambiguous createCall throw is not a refusal (stand-in review of 652e777)", () => {
-  const hour = 60 * 60 * 1000;
-  const personCooldown = new Date(NOW.getTime() + DEFAULT_ATTEMPT_CAPS.minHoursBetween * hour);
+describe("an ambiguous createCall throw is not a refusal (stand-in review of 652e777 / 50ac955)", () => {
+  const AUTH = "test-auth-token";
+  const LIVE = { TWILIO_AUTH_TOKEN: AUTH, XAI_API_KEY: "k", DATABASE_URL: "postgres://x" };
 
-  it("leaves the attempt open and uses the person cooldown on a socket reset", async () => {
+  function signed(url: string, body: Record<string, string>): WebhookRequest {
+    const sig = (
+      twilio as unknown as {
+        getExpectedTwilioSignature: (t: string, u: string, p: Record<string, string>) => string;
+      }
+    ).getExpectedTwilioSignature(AUTH, url, body);
+    const u = new URL(url);
+    return {
+      headers: { host: u.host, "x-forwarded-proto": "https", "x-twilio-signature": sig },
+      body,
+      originalUrl: `${u.pathname}${u.search}`,
+    };
+  }
+
+  afterEach(() => setOutboundToolStoreForTests(null));
+
+  it("leaves the attempt open and the contact in calling on a socket reset", async () => {
     const { store, deps } = setup();
     const fail = vi.fn(async () => {
       throw new Error("socket hang up");
@@ -572,10 +628,11 @@ describe("an ambiguous createCall throw is not a refusal (stand-in review of 652
     expect(store.attempts[0].finish).toBeUndefined();
     expect(store.attempts[0].endedAt).toBeUndefined();
     const c = store.contacts.get("c1")!;
-    expect(c.status).toBe("voicemail");
+    // Still 'calling': the status callback and record_call_outcome both
+    // require that, and releasing here would drop a real call's outcome.
+    expect(c.status).toBe("calling");
     expect(c.attempts).toBe(0);
     expect(c.contacted).toBe(false);
-    expect(c.nextAttemptAt?.toISOString()).toBe(personCooldown.toISOString());
   });
 
   it("treats a RestException 5xx the same way — Twilio may have accepted", async () => {
@@ -587,10 +644,10 @@ describe("an ambiguous createCall throw is not a refusal (stand-in review of 652
     expect((await runCampaignTick("test-lane", policy, deps)).held).toEqual({ twilio_uncertain: 1 });
     expect(store.attempts[0].finish).toBeUndefined();
     expect(store.attempts[0].endedAt).toBeUndefined();
-    expect(store.contacts.get("c1")!.nextAttemptAt?.toISOString()).toBe(personCooldown.toISOString());
+    expect(store.contacts.get("c1")!.status).toBe("calling");
   });
 
-  it("blocks a 15-minute retry while the open attempt is still inside the stale window", async () => {
+  it("does not ring again while the claim is still in calling", async () => {
     const { store, deps } = setup();
     const first = vi.fn(async () => {
       throw new Error("read ECONNRESET");
@@ -600,16 +657,90 @@ describe("an ambiguous createCall throw is not a refusal (stand-in review of 652
     expect((await runCampaignTick("test-lane", policy, deps)).held).toEqual({ twilio_uncertain: 1 });
     expect(first).toHaveBeenCalledTimes(1);
 
-    // Force the row due as if the short retry had been written. The live
-    // attempt must still hold the phone.
     const in15 = new Date(NOW.getTime() + DEFAULT_INFRA_RETRY_MINUTES * 60 * 1000);
-    store.contacts.get("c1")!.nextAttemptAt = in15;
     const later = vi.fn(async () => ({ sid: `CA${"2".repeat(32)}` }));
     deps.twilio.createCall = later;
     const again = await runCampaignTick("test-lane", policy, { ...deps, now: () => in15 });
-    expect(again.held).toEqual({ call_in_progress: 1 });
+    expect(again.dialled).toBe(0);
     expect(later).not.toHaveBeenCalled();
-    expect(store.contacts.get("c1")!.attempts).toBe(0);
+    expect(store.contacts.get("c1")!.status).toBe("calling");
+  });
+
+  it("lets a completed status callback settle the contact after an ambiguous throw", async () => {
+    const { store, deps } = setup();
+    deps.twilio.createCall = vi.fn(async () => {
+      throw new Error("socket hang up");
+    });
+    store.addContact({ id: "c1", phone: "+15555550111" });
+    expect((await runCampaignTick("test-lane", policy, deps)).held).toEqual({ twilio_uncertain: 1 });
+    const attemptId = store.attempts[0]!.id;
+    const url = statusUrl("voice.example.test", "test-lane", "c1", attemptId);
+    const body = {
+      CallSid: "CA00000000000000000000000000000001",
+      CallStatus: "completed",
+      CallDuration: "42",
+    };
+    await handleOutboundStatus("test-lane", signed(url, body), {
+      env: LIVE,
+      registry: { register: () => ({ streamToken: "t" }) } as never,
+      store,
+      policyFor: () => policy,
+      now: () => NOW,
+    });
+    expect(store.contacts.get("c1")!.status).toBe("answered");
+    expect(store.attempts[0]!.finish?.status).toBe("completed");
+    expect(store.attempts[0]!.endedAt).toBeDefined();
+  });
+
+  it("lets record_call_outcome stick after an ambiguous throw", async () => {
+    const { store, deps } = setup();
+    deps.twilio.createCall = vi.fn(async () => {
+      throw new Error("socket hang up");
+    });
+    store.addContact({ id: "c1", phone: "+15555550111" });
+    expect((await runCampaignTick("test-lane", policy, deps)).held).toEqual({ twilio_uncertain: 1 });
+    expect(store.contacts.get("c1")!.status).toBe("calling");
+    setOutboundToolStoreForTests(store);
+    const r = await getTool(RECORD_OUTCOME_TOOL_NAME)!.handler({
+      outbound_contact_id: "c1",
+      outbound_phone: "+15555550111",
+      outbound_campaign: "test-campaign",
+      outcome: "not_interested",
+    });
+    expect(r).toMatchObject({ success: true, recorded: "not_interested" });
+    expect(store.contacts.get("c1")!.status).toBe("declined");
+  });
+
+  it("reaps a stale ambiguous claim with a next look, so it is not dialled on the same tick", async () => {
+    const { store, deps } = setup();
+    deps.twilio.createCall = vi.fn(async () => {
+      throw new Error("socket hang up");
+    });
+    store.addContact({ id: "c1", phone: "+15555550111" });
+    expect((await runCampaignTick("test-lane", policy, deps)).held).toEqual({ twilio_uncertain: 1 });
+    const later = new Date(NOW.getTime() + 31 * 60 * 1000);
+    store.contacts.get("c1")!.updatedAt = NOW;
+    store.attempts[0]!.at = NOW;
+    const accept = vi.fn(async () => ({ sid: `CA${"9".repeat(32)}` }));
+    deps.twilio.createCall = accept;
+    const r = await runCampaignTick("test-lane", policy, { ...deps, now: () => later });
+    expect(r.reaped).toBe(1);
+    expect(r.dialled).toBe(0);
+    expect(accept).not.toHaveBeenCalled();
+    expect(store.contacts.get("c1")!.status).toBe("no_answer");
+    expect(store.contacts.get("c1")!.nextAttemptAt?.toISOString()).toBe(
+      reapNextAttemptAt(later, policy).toISOString(),
+    );
+  });
+
+  it("floors the reaper's next look at the stale window when the person cooldown is 0", () => {
+    const zero: OutboundLanePolicy = {
+      ...policy,
+      caps: { ...DEFAULT_ATTEMPT_CAPS, minHoursBetween: 0 },
+    };
+    expect(reapNextAttemptAt(NOW, zero).toISOString()).toBe(
+      new Date(NOW.getTime() + STALE_CLAIM_MS).toISOString(),
+    );
   });
 });
 
@@ -636,7 +767,9 @@ describe("consecutive Twilio refusals fall back to the person cooldown", () => {
     });
     expect(store.contacts.get("c1")!.nextAttemptAt?.getTime()).toBe(now.getTime() + cooldownMs);
     expect(store.contacts.get("c1")!.attempts).toBe(0);
-    expect(await store.consecutiveRefusedAttempts("c1")).toBe(DEFAULT_MAX_CONSECUTIVE_INFRA_RETRIES + 1);
+    expect(await store.consecutiveRefusedAttempts("c1", new Date(NOW.getTime() - REFUSAL_STREAK_WINDOW_MS))).toBe(
+      DEFAULT_MAX_CONSECUTIVE_INFRA_RETRIES + 1,
+    );
   });
 
   it("resets the streak after a call Twilio accepted", async () => {
@@ -663,7 +796,24 @@ describe("consecutive Twilio refusals fall back to the person cooldown", () => {
     now = new Date(now.getTime() + retryMs);
     expect((await runCampaignTick("test-lane", loose, { ...deps, now: () => now })).dialled).toBe(1);
     await store.finishAttempt(store.attempts[store.attempts.length - 1]!.id, { status: "completed" });
-    expect(await store.consecutiveRefusedAttempts("c1")).toBe(0);
+    expect(await store.consecutiveRefusedAttempts("c1", new Date(NOW.getTime() - REFUSAL_STREAK_WINDOW_MS))).toBe(0);
+  });
+
+  it("does not count refusals older than the streak window", async () => {
+    const { store } = setup();
+    store.addContact({ id: "c1", phone: "+15555550111" });
+    store.attempts.push({
+      id: "old",
+      contactId: "c1",
+      campaignId: "campaign-1",
+      attemptNumber: 1,
+      at: new Date(NOW.getTime() - REFUSAL_STREAK_WINDOW_MS - 1000),
+      finish: { status: NOT_PLACED },
+      endedAt: NOW,
+    });
+    expect(
+      await store.consecutiveRefusedAttempts("c1", new Date(NOW.getTime() - REFUSAL_STREAK_WINDOW_MS)),
+    ).toBe(0);
   });
 
   it("falls back to the default cap when the policy value is not a positive number", () => {

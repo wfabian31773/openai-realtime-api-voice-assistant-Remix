@@ -65,7 +65,9 @@ export interface OutboundLanePolicy {
    * The person cooldown (`caps.minHoursBetween`) is for real call
    * outcomes only — a Twilio outage must not spend the rest of the
    * calling day. Default DEFAULT_INFRA_RETRY_MINUTES (15). A non-number
-   * or a value of 0 or less falls back to that default.
+   * or a value of 0 or less falls back to that default. Values above
+   * MAX_INFRA_RETRY_MINUTES (24 hours) are clamped so nextLookAt cannot
+   * build an Invalid Date.
    */
   infraRetryMinutes?: number;
   /**
@@ -100,9 +102,19 @@ export const DEFAULT_INFRA_RETRY_MINUTES = 15;
  * cannot sit on the 15-minute loop for the whole calling day. */
 export const DEFAULT_MAX_CONSECUTIVE_INFRA_RETRIES = 3;
 
+/** Upper bound for the infrastructure retry, in minutes. A huge finite
+ * value (1e20) would otherwise make `new Date(now + minutes * 60_000)`
+ * an Invalid Date and throw inside releaseContact. */
+export const MAX_INFRA_RETRY_MINUTES = 24 * 60;
+
+/** How far back consecutiveRefusedAttempts looks. A self-referencing
+ * NOT EXISTS over a contact's whole history is more than the cap needs. */
+export const REFUSAL_STREAK_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+
 /** A usable infrastructure-retry wait. Non-numbers, non-finite values
  * and anything 0 or less fall back to DEFAULT_INFRA_RETRY_MINUTES so a
- * bad policy cannot produce an Invalid Date or a retry on every tick. */
+ * bad policy cannot produce an Invalid Date or a retry on every tick.
+ * Anything above MAX_INFRA_RETRY_MINUTES is clamped to that max. */
 export function resolvedInfraRetryMinutes(
   policy: Pick<OutboundLanePolicy, "infraRetryMinutes">,
 ): number {
@@ -110,7 +122,7 @@ export function resolvedInfraRetryMinutes(
   if (typeof n !== "number" || !Number.isFinite(n) || n <= 0) {
     return DEFAULT_INFRA_RETRY_MINUTES;
   }
-  return n;
+  return Math.min(n, MAX_INFRA_RETRY_MINUTES);
 }
 
 /** A usable consecutive-refusal cap. Same fallback rule as the retry

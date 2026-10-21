@@ -51,6 +51,7 @@ describe("the claim is the only door to a dial", () => {
     const reap = method("reapStaleClaims");
     expect(reap).toContain("outreach_status = 'calling'");
     expect(reap).toContain("updated_at <");
+    expect(reap).toContain("next_attempt_at = ${utc(nextAttemptAt)}");
   });
 });
 
@@ -99,6 +100,8 @@ describe("the attempt row keeps the answer webhook's verdict", () => {
     expect(streak).toContain("a.direction = 'outbound'");
     expect(streak).toContain("a.status = ${NOT_PLACED}::varchar");
     expect(streak).toContain("newer.status IS DISTINCT FROM ${NOT_PLACED}::varchar");
+    expect(streak).toContain("a.attempted_at >= ${utc(since)}");
+    expect(streak).toContain("newer.attempted_at >= ${utc(since)}");
     expect(streak).not.toContain("campaign_id");
   });
 
@@ -146,7 +149,7 @@ describe("the timestamps", () => {
   it("binds every instant as ISO and converts in SQL, never as a process-zone Date", () => {
     expect(SRC).toContain("::timestamptz AT TIME ZONE 'UTC')");
     // Every comparison against a campaign timestamp goes through utc().
-    for (const m of ["dialableContacts", "claimContact", "callsInFlight", "reapStaleClaims"]) {
+    for (const m of ["dialableContacts", "claimContact", "callsInFlight", "reapStaleClaims", "consecutiveRefusedAttempts"]) {
       expect(method(m), m).toContain("${utc(");
     }
   });

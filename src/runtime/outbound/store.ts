@@ -124,13 +124,14 @@ export interface OutboundStore {
   priorAttempts(contactId: string): Promise<PriorAttempt[]>;
   /**
    * Trailing NOT_PLACED attempts on THIS contact row, newest first, until
-   * a placed (or still-open) attempt breaks the streak. The short
-   * infrastructure retry uses this count: after
-   * DEFAULT_MAX_CONSECUTIVE_INFRA_RETRIES the person cooldown applies,
-   * so a permanently refused number cannot retry every 15 minutes for
-   * the whole calling window.
+   * a placed (or still-open) attempt breaks the streak. Bounded by
+   * `since` so the self-referencing NOT EXISTS does not scan the
+   * contact's whole history. The short infrastructure retry uses this
+   * count: after DEFAULT_MAX_CONSECUTIVE_INFRA_RETRIES the person
+   * cooldown applies, so a permanently refused number cannot retry
+   * every 15 minutes for the whole calling window.
    */
-  consecutiveRefusedAttempts(contactId: string): Promise<number>;
+  consecutiveRefusedAttempts(contactId: string, since: Date): Promise<number>;
   /**
    * Whether a dialled call to this contact's PHONE is still on the line, in
    * ANY campaign. The caps are per campaign; ringing a person twice at once
@@ -165,8 +166,10 @@ export interface OutboundStore {
   /** This campaign's dialled attempts still on the line (no terminal status
    * yet), started after `since`. */
   callsInFlight(campaignId: string, since: Date): Promise<number>;
-  /** Rows stuck in 'calling' since before `before` go back to 'no_answer'. */
-  reapStaleClaims(campaignId: string, before: Date): Promise<number>;
+  /** Rows stuck in 'calling' since before `before` go back to 'no_answer'
+   * with `nextAttemptAt` set, so a claim whose call never existed is not
+   * re-dialled on the same tick. */
+  reapStaleClaims(campaignId: string, before: Date, nextAttemptAt: Date): Promise<number>;
   isDoNotContact(phone: string): Promise<boolean>;
   stampDoNotContact(phone: string, source: string): Promise<void>;
 }
@@ -325,22 +328,25 @@ export async function createDbOutboundStore(): Promise<OutboundStore> {
       ).map((r) => ({ at: new Date(r.attempted_at as string) }));
     },
 
-    async consecutiveRefusedAttempts(contactId) {
+    async consecutiveRefusedAttempts(contactId, since) {
       const found = rows(
         await db.execute(sql`
-          -- Trailing not_placed rows on this contact, newest first. A
-          -- newer attempt that is anything else (placed, or still
-          -- initiated after an ambiguous createCall) breaks the streak.
+          -- Trailing not_placed rows on this contact, newest first, and
+          -- only inside the window. A newer attempt that is anything
+          -- else (placed, or still initiated after an ambiguous
+          -- createCall) breaks the streak.
           SELECT count(*)::int AS n
             FROM campaign_contact_attempts a
            WHERE a.contact_id = ${contactId}::varchar
              AND a.direction = 'outbound'
              AND a.status = ${NOT_PLACED}::varchar
+             AND a.attempted_at >= ${utc(since)}
              AND NOT EXISTS (
                SELECT 1
                  FROM campaign_contact_attempts newer
                 WHERE newer.contact_id = a.contact_id
                   AND newer.direction = 'outbound'
+                  AND newer.attempted_at >= ${utc(since)}
                   AND (newer.attempted_at > a.attempted_at
                        OR (newer.attempted_at = a.attempted_at AND newer.id > a.id))
                   AND newer.status IS DISTINCT FROM ${NOT_PLACED}::varchar
@@ -469,10 +475,13 @@ export async function createDbOutboundStore(): Promise<OutboundStore> {
       return Number(counted[0]?.n ?? 0);
     },
 
-    async reapStaleClaims(campaignId, before) {
+    async reapStaleClaims(campaignId, before, nextAttemptAt) {
       const reaped = rows(
         await db.execute(sql`
-          UPDATE campaign_contacts SET outreach_status = 'no_answer', updated_at = NOW()
+          UPDATE campaign_contacts
+             SET outreach_status = 'no_answer',
+                 next_attempt_at = ${utc(nextAttemptAt)},
+                 updated_at = NOW()
            WHERE campaign_id = ${campaignId}::varchar AND outreach_status = 'calling'
              AND updated_at < ${utc(before)}
           RETURNING id`),

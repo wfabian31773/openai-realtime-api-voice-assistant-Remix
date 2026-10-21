@@ -27,9 +27,12 @@
  *      number cannot sit on the 15-minute loop. An AMBIGUOUS createCall
  *      error (a socket reset, a lost response, a 5xx) may have already
  *      created the call: the attempt is left open so callOpenOnPhone
- *      still sees it, and the next look is the person cooldown. Contact
- *      bookkeeping (attempts++, contacted) waits until Twilio has
- *      ACCEPTED. Once Twilio has ACCEPTED, nothing hands the row back.
+ *      still sees it, and the contact stays 'calling' so the status
+ *      callback and record_call_outcome can settle it. If no callback
+ *      ever arrives, the stale-claim reaper hands the row back after
+ *      30 minutes with a fresh next_attempt_at. Contact bookkeeping
+ *      (attempts++, contacted) waits until Twilio has ACCEPTED. Once
+ *      Twilio has ACCEPTED, nothing hands the row back.
  *
  * Twilio is asked for answering-machine detection that waits for the
  * greeting to end (`DetectMessageEnd`), the 5Star lane's setting since it
@@ -45,6 +48,7 @@
 
 import type { OutboundLanePolicy } from "./campaign";
 import {
+  REFUSAL_STREAK_WINDOW_MS,
   campaignEnabled,
   resolvedInfraRetryMinutes,
   resolvedMaxConsecutiveInfraRetries,
@@ -157,6 +161,16 @@ export function nextLookAt(now: Date, reason: string, policy: OutboundLanePolicy
   }
 }
 
+/** When the stale-claim reaper hands a row back, it must not be due
+ * again on the same tick. A campaign with minHoursBetween 0 (the
+ * proving lane) would otherwise be re-dialled immediately. Floor at
+ * the stale window; a real person cooldown that is longer still wins. */
+export function reapNextAttemptAt(now: Date, policy: OutboundLanePolicy): Date {
+  const cooldown = nextLookAt(now, "too_soon", policy);
+  const floor = new Date(now.getTime() + STALE_CLAIM_MS);
+  return cooldown.getTime() > floor.getTime() ? cooldown : floor;
+}
+
 /** One tick of one campaign. Never throws: a dialler failure is a log line,
  * and the next tick tries again. */
 export async function runCampaignTick(
@@ -186,6 +200,7 @@ export async function runCampaignTick(
     result.reaped = await deps.store.reapStaleClaims(
       campaignId,
       new Date(now.getTime() - STALE_CLAIM_MS),
+      reapNextAttemptAt(now, policy),
     );
     const inFlight = await deps.store.callsInFlight(
       campaignId,
@@ -286,7 +301,10 @@ async function dialOne(
       // person changed. The next look is an infrastructure retry, unless
       // this contact has already had the consecutive-refusal cap of them.
       await deps.store.finishAttempt(attemptId, { status: NOT_PLACED });
-      const consecutive = await deps.store.consecutiveRefusedAttempts(contact.id);
+      const consecutive = await deps.store.consecutiveRefusedAttempts(
+        contact.id,
+        new Date(now.getTime() - REFUSAL_STREAK_WINDOW_MS),
+      );
       const reason =
         consecutive > resolvedMaxConsecutiveInfraRetries(policy) ? "too_soon" : "twilio_refused";
       await deps.store.releaseContact(contact.id, candidate.status, nextLookAt(now, reason, policy));
@@ -294,13 +312,14 @@ async function dialOne(
     }
     // Ambiguous: client.calls.create can throw after Twilio has already
     // created the call (socket reset, lost response, 5xx). Ending the
-    // attempt would hide a live ring from callOpenOnPhone and, with the
-    // short retry, ring them again in 15 minutes. Leave it open and use
-    // the person cooldown.
+    // attempt would hide a live ring from callOpenOnPhone. Releasing the
+    // claim would drop every webhook and record_call_outcome, because
+    // they all require 'calling'. Leave the attempt open and the row
+    // claimed; the status callback settles a real call, and the
+    // stale-claim reaper hands back a call that never existed.
     log(
       `[outbound] ${policy.campaignKey}: Twilio createCall did not return — the call may already be ringing (${detail})`,
     );
-    await deps.store.releaseContact(contact.id, candidate.status, nextLookAt(now, "too_soon", policy));
     return "twilio_uncertain";
   }
   // Twilio accepted: the phone is ringing, so nothing below may hand the row

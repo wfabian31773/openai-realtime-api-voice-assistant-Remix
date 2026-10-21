@@ -107,10 +107,11 @@ export class FakeOutboundStore implements OutboundStore {
       .map((a) => ({ at: a.at }));
   }
 
-  async consecutiveRefusedAttempts(contactId: string): Promise<number> {
-    // Same rule as the SQL: this contact row, trailing not_placed only.
+  async consecutiveRefusedAttempts(contactId: string, since: Date): Promise<number> {
+    // Same rule as the SQL: this contact row, trailing not_placed only,
+    // inside the window.
     const mine = this.attempts
-      .filter((a) => a.contactId === contactId)
+      .filter((a) => a.contactId === contactId && a.at >= since)
       .slice()
       .sort((a, b) => b.at.getTime() - a.at.getTime() || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0));
     let n = 0;
@@ -192,11 +193,12 @@ export class FakeOutboundStore implements OutboundStore {
     ).length;
   }
 
-  async reapStaleClaims(campaignId: string, before: Date): Promise<number> {
+  async reapStaleClaims(campaignId: string, before: Date, nextAttemptAt: Date): Promise<number> {
     let n = 0;
     for (const c of this.contacts.values()) {
       if (c.campaignId === campaignId && c.status === "calling" && c.updatedAt < before) {
         c.status = "no_answer";
+        c.nextAttemptAt = nextAttemptAt;
         n += 1;
       }
     }
