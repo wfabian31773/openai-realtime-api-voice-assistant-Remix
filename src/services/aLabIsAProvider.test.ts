@@ -255,18 +255,29 @@ describe('review r4 (#359): the question itself offers a laboratory', () => {
     expect(agentSource).toContain("hospital, a clinic or a laboratory, and which one?");
   });
 
+  // These answers count only inside the window (a control below proves it),
+  // so each test turns on the window opening rather than on the bare answer.
+  const WINDOW_ONLY = 'Uh yes, Example Diagnostics, the lab.';
+  const WINDOW_ONLY_ES = 'Sí, el laboratorio Ejemplo en la calle Main.';
+
+  it('control: those answers do not count without the question', () => {
+    expect(opened('AGENT: How can I help?', WINDOW_ONLY)).toBe(false);
+    expect(opened('AGENT: How can I help?', WINDOW_ONLY_ES)).toBe(false);
+  });
+
   it('a lab answering the new question counts, however it phrases it', () => {
-    for (const answer of ['Example Diagnostics Lab.', 'A laboratory, Example Diagnostics.', 'Yes, the Example laboratory.']) {
+    for (const answer of [WINDOW_ONLY, 'Example Diagnostics Lab.', 'A laboratory, Example Diagnostics.']) {
       expect(opened(ASK, answer)).toBe(true);
     }
   });
 
   it('the old question still opens the window, for a call that straddles the deploy', () => {
-    expect(opened(OLD_ASK, 'Example Diagnostics Lab.')).toBe(true);
+    expect(opened(OLD_ASK, WINDOW_ONLY)).toBe(true);
   });
 
-  it('a Spanish paraphrase naming a laboratorio opens the window', () => {
-    expect(opened('AGENT: ¿Llama desde un laboratorio o una clínica?', 'Del laboratorio Ejemplo.')).toBe(true);
+  it('a paraphrase that names only a laboratory opens the window, in English and Spanish', () => {
+    expect(opened('AGENT: Are you calling from a laboratory?', WINDOW_ONLY)).toBe(true);
+    expect(opened('AGENT: ¿Llama desde un laboratorio?', WINDOW_ONLY_ES)).toBe(true);
   });
 
   it('a patient answering the new question with their own results still does not count', () => {
