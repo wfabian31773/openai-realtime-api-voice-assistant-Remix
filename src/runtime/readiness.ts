@@ -802,8 +802,16 @@ import { callEnvironment } from "./callRecord";
  * of the dial — still booked, still movable, today's phone — failing closed.
  * `src/runtime/outbound/consoleMovable.ts`.
  */
+/**
+ * v108 — A LAB THAT NAMES ITSELF IS A PROVIDER (2026-10-21). Operator: "add
+ * lab and laboratory to the provider list." A reference lab calling stat
+ * results named itself and was taken as a message because "lab" was not a
+ * facility word (CA02cebe2231c3f8208c099c8736ea5c7a). "optical lab" does not
+ * count (a supplier chasing a frame), nor do "lab results" / "lab work" (a
+ * patient's own care). `src/services/symptomCorroboration.ts`.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v107-the-movable-list-is-live-20261021";
+  "voice-runtime-v108-a-lab-that-names-itself-is-a-provider-20261021";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

@@ -47,10 +47,10 @@ const callerSpeech = new Map<string, string[]>();
 
 /**
  * Caller turns that ANSWER refusal 3's own question ("Are you calling from a
- * doctor's office, a hospital or a clinic, and which one?"), lowercased. Only
- * the runtime fills it, because only the runtime hands this module the agent's
- * lines in order (noteCallerTranscript); the old core's feed is caller lines
- * alone and keeps the anchored bare-answer reading.
+ * doctor's office, a hospital, a clinic or a laboratory, and which one?"),
+ * lowercased. Only the runtime fills it, because only the runtime hands this
+ * module the agent's lines in order (noteCallerTranscript); the old core's
+ * feed is caller lines alone and keeps the anchored bare-answer reading.
  */
 const providerAnswers = new Map<string, string[]>();
 
@@ -129,11 +129,11 @@ export function releaseCallerSpeech(callId: string | undefined): void {
  */
 const FACILITY_QUESTION = new RegExp(
   [
-    String.raw`calling from [^.?!]{0,40}?(?:office|hospital|clinic|facility)`,
+    String.raw`calling from [^.?!]{0,40}?(?:office|hospital|clinic|facility|lab(?:oratory)?\b)`,
     String.raw`calling from (?:a |the )?doctor'?s?\b`,
-    String.raw`doctor'?s office,? (?:a )?hospital,? or (?:a )?clinic`,
-    String.raw`which (?:office|hospital|clinic|facility) are you calling from`,
-    String.raw`(?:llama|habla) (?:usted )?(?:de|desde) (?:un |una |el |la )?(?:consultorio|hospital|cl[ií]nica)`,
+    String.raw`doctor'?s office,? (?:a )?hospital,? (?:or )?(?:a )?clinic`,
+    String.raw`which (?:office|hospital|clinic|facility|laboratory|lab) are you calling from`,
+    String.raw`(?:llama|habla) (?:usted )?(?:de|desde) (?:un |una |el |la )?(?:consultorio|hospital|cl[ií]nica|laboratorio)`,
   ].join('|'),
 );
 
@@ -205,7 +205,7 @@ export interface CorroborationResult {
   haveSpeech: boolean;
   /**
    * The caller said, in their own words, that they are a provider or are
-   * calling from a doctor's office, hospital, ER or clinic. See
+   * calling from a doctor's office, hospital, ER, lab or clinic. See
    * callerSaysTheyAreAProvider. False whenever haveSpeech is false.
    */
   providerStated: boolean;
@@ -282,7 +282,54 @@ export const CALLER_SYMPTOM = new RegExp(
  * and their answer is what lets the transfer through.
  *
  * English and Spanish, like the symptom evidence above.
+ *
+ * A LABORATORY IS A PROVIDER FACILITY (operator, 2026-10-21: "add lab and
+ * laboratory to the provider list"). The corpus call is
+ * CA02cebe2231c3f8208c099c8736ea5c7a (2026-10-21 00:20 UTC): a reference lab
+ * calling stat results for one of our doctors named itself, answered the
+ * refusal's question with the lab's name and "lab", and was taken as a
+ * message because "lab" was not a facility word. Since July, 4 of the 6
+ * after-hours escalations from callers who said "lab" were labs calling in
+ * results. Two shapes are kept OUT, both measured on the same calls:
+ *  - an OPTICAL lab is a supplier chasing a frame, not a provider: "optical
+ *    lab" does not count. (A lab that names itself without "optical" — "the
+ *    Bartley lab" — still reads as a facility; none of those callers has
+ *    escalated since July, and routine business has its own refusal.)
+ *  - "lab results", "lab work", "lab test" are a patient's words about their
+ *    own care, not a place: "I had lab work I'm calling about".
+ * Every exclusion holds through the punctuation, sentence breaks and fillers
+ * a spoken answer carries, in both languages: "The optical, uh, lab.",
+ * "Lab, uh, results.", "Resultados, eh, del laboratorio.", "Llamo del
+ * laboratorio, uh, óptico" (Codex r1 and r2 on #359 — each read as a provider
+ * and rang the on-call phone). ONE gap is used at every place two words of an
+ * exclusion meet, so a fifth adjacency cannot be missed. A sentence break
+ * counts as a gap on purpose: "Example lab. Results for Dr. Lin." then does
+ * not count on its own, and that caller is asked which facility — the
+ * direction that does not wake the on-call provider.
+ *
+ * The gap takes ONE separator character or ONE WHOLE filler word per
+ * repetition, and a filler must end where its word ends, so every run of
+ * dots, spaces or "mmmm" has exactly one way to be read: a long run cannot
+ * backtrack exponentially (Codex r3 on #359: 64 m's took 0.7 s, 72 took
+ * several, on a synchronous call made per caller turn).
+ *
+ * A PATIENT'S OWN RESULTS, IN EITHER ORDER (Codex r3): "lab results" was
+ * excluded by looking after the word, and "My results are from the lab" came
+ * before it. So a lab is not a facility when its own sentence (up to 40
+ * characters before it) talks about results, tests or work, whatever the
+ * order and in both languages. A real lab that says "I have results from
+ * Example Lab" is then asked which facility it is calling from, and its
+ * answer ("Example Lab.") counts.
  */
+const FILLER_GAP = String.raw`(?:[\s,.;:!?-]|(?:uhh?|umm?|uhm|ahh?|erm|ehh?|mmm?)(?![a-z]))*`;
+const RESULT_WORDS = String.raw`(?:results?|work|tests?|reports?|draws?|orders?|values?|slips?|appointments?)`;
+const LAB_WORD =
+  String.raw`(?<!optical${FILLER_GAP})(?<!\b${RESULT_WORDS}\b[^.?!]{0,40})(?:laboratory|lab)` +
+  String.raw`(?!${FILLER_GAP}${RESULT_WORDS}\b)`;
+const NOT_OPTICAL_ES = String.raw`(?!${FILLER_GAP}[oó]ptico)`;
+const LABORATORIO =
+  String.raw`(?<!\b(?:resultados?|an[aá]lisis|ex[aá]men(?:es)?|pruebas?|estudios?|[oó]rden(?:es)?|trabajos?|citas?)\b[^.?!]{0,40})` +
+  String.raw`laboratorio${NOT_OPTICAL_ES}`;
 const PROVIDER_ROLE =
   String.raw`(?:dr\.?|doctor|doctora|nurse|nurse practitioner|physician|physician assistant|surgeon|resident|` +
   String.raw`ophthalmologist|optometrist|np|pa|rn|md|charge nurse|(?:er|emergency(?: room)?) (?:doctor|physician|nurse))`;
@@ -290,7 +337,8 @@ const FACILITY =
   String.raw`(?:hospital|medical (?:center|group|office|clinic)|clinic|e\.? ?r\b\.?|emergency (?:room|department)|` +
   String.raw`urgent care|surgery center|surgical center|nursing (?:home|facility)|skilled nursing|` +
   String.raw`rehab(?:ilitation)? (?:center|facility)|doctor'?s office|(?:dr\.?|doctor) [a-z'-]+'?s office|` +
-  String.raw`office of (?:dr\.?|doctor) [a-z'-]+|optometry|ophthalmology|eye (?:center|clinic|institute)|icu|intensive care)`;
+  String.raw`office of (?:dr\.?|doctor) [a-z'-]+|optometry|ophthalmology|eye (?:center|clinic|institute)|icu|intensive care|` +
+  LAB_WORD + String.raw`)`;
 
 /**
  * The roles a patient also says about themselves: "I am a resident of
@@ -321,10 +369,10 @@ const OFFICE_STAFF =
 
 /**
  * THE BARE ANSWER TO THE REFUSAL'S OWN QUESTION. Refusal 3 asks "Are you
- * calling from a doctor's office, a hospital or a clinic, and which one?",
- * and the natural answers are "Yes, Pomona Valley Hospital.", "Dr. Lee's
- * office.", "St. Joe's ER.", "Sí, del hospital." — none of which carries a
- * lead-in the patterns below need (review r2 P2, #353).
+ * calling from a doctor's office, a hospital, a clinic or a laboratory, and
+ * which one?", and the natural answers are "Yes, Pomona Valley Hospital.",
+ * "Dr. Lee's office.", "St. Joe's ER.", "Sí, del hospital." — none of which
+ * carries a lead-in the patterns below need (review r2 P2, #353).
  *
  * So a WHOLE caller turn that is nothing but an optional yes, an optional
  * "from"/"del", up to four name words and a facility counts. Anchored to the
@@ -335,7 +383,7 @@ const OFFICE_STAFF =
 const NAME_TOKEN =
   String.raw`(?!(?:i|i'?m|he|he'?s|she|she'?s|we|they|my|his|her|our|their|is|was|were|are|am|be|been|in|at|to|on|of|for|from|about|with|went|go|going|this|that|it|it'?s|a|an|and|but|not|no|bill|bills|billing|records?|visit|stay|yesterday|today|tonight|tomorrow|last|ago|there|here|mi|su|en|es|esta|está|estoy|ayer|hoy)(?![a-z0-9'&-]))[a-z0-9'&.-]+`;
 const NAME_WORD = String.raw`${NAME_TOKEN} `;
-const ANY_FACILITY = String.raw`(?:${FACILITY}|cl[ií]nica|consultorio|sala de emergencias?)(?![a-z])`;
+const ANY_FACILITY = String.raw`(?:${FACILITY}|cl[ií]nica|consultorio|${LABORATORIO}|sala de emergencias?)(?![a-z])`;
 /**
  * Also widened in review r3 (#353), because STT and real answers are messier
  * than the first form: fillers ("Yeah, uh, Pomona Valley Hospital."), a
@@ -569,7 +617,10 @@ const PROVIDER_SELF_IDENTIFICATION: RegExp[] = [
   /\bpeer[- ]?to[- ]?peer\b/,
   // Spanish: "soy la doctora", "llamo del hospital", "nuestro paciente"
   /\bsoy (?:el |la |un |una )?(?:doctor|doctora|dr\.?|m[eé]dic[oa]|enfermer[oa])\b/,
-  /\b(?:llamo|hablo|estoy llamando|le llamo|le hablo|llamamos|hablamos) (?:de|del|desde) (?:el |la |un |una )?(?:[a-z\u00e0-\u00ff'.-]+ ){0,4}?(?:hospital|cl[ií]nica|consultorio|sala de emergencias?|emergencias|centro m[eé]dico|oficina del (?:doctor|dr\.?))/,
+  new RegExp(
+    String.raw`\b(?:llamo|hablo|estoy llamando|le llamo|le hablo|llamamos|hablamos) (?:de|del|desde) (?:el |la |un |una )?(?:[a-z\u00e0-\u00ff'.-]+ ){0,4}?` +
+      String.raw`(?:hospital|cl[ií]nica|consultorio|laboratorio${NOT_OPTICAL_ES}|sala de emergencias?|emergencias|centro m[eé]dico|oficina del (?:doctor|dr\.?))`,
+  ),
   /\b(?:nuestr[oa]|tengo un[a]?) paciente\b/,
 ];
 
