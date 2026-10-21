@@ -14,6 +14,7 @@ export interface FakeAttempt {
   at: Date;
   callSid?: string;
   finish?: AttemptFinish;
+  endedAt?: Date;
 }
 
 export class FakeOutboundStore implements OutboundStore {
@@ -96,6 +97,7 @@ export class FakeOutboundStore implements OutboundStore {
     // Same rule as the SQL: the answer webhook's verdict outranks "completed".
     const kept = a.finish && ["voicemail", "fax", "not_ready"].includes(a.finish.status);
     a.finish = { ...a.finish, ...finish, ...(kept ? { status: a.finish!.status } : {}) };
+    if (finish.ended ?? true) a.endedAt ??= this.clock();
   }
 
   async loadCallContact(contactId: string, attemptId: string): Promise<OutboundContact | null> {
@@ -128,8 +130,9 @@ export class FakeOutboundStore implements OutboundStore {
   }
 
   async callsInFlight(campaignId: string, since: Date): Promise<number> {
-    return [...this.contacts.values()].filter(
-      (c) => c.campaignId === campaignId && c.status === "calling" && c.updatedAt >= since,
+    // Same rule as the SQL: the live attempt, not the contact's status.
+    return this.attempts.filter(
+      (a) => a.campaignId === campaignId && !a.endedAt && a.at >= since,
     ).length;
   }
 

@@ -17,7 +17,14 @@ const policy: OutboundLanePolicy = {
   greeting: () => "Hello, this is an automated assistant calling for Azul Vision. This call is recorded.",
   voicemail: () => "Hello, this is Azul Vision.",
 };
-const ON = { RUNTIME_OUTBOUND_DIALING: "1", OUTBOUND_CAMPAIGN_TEST: "1", OUTBOUND_TEST_FROM: "+15555550100" };
+// A live-ready process: the voice, webhook auth and a database (readiness.ts).
+const LIVE = { XAI_API_KEY: "k", TWILIO_AUTH_TOKEN: "t", DATABASE_URL: "postgres://x" };
+const ON = {
+  ...LIVE,
+  RUNTIME_OUTBOUND_DIALING: "1",
+  OUTBOUND_CAMPAIGN_TEST: "1",
+  OUTBOUND_TEST_FROM: "+15555550100",
+};
 
 function source(configs: LaneConfig[]): LaneSource {
   return { getAgentConfig: (id) => configs.find((c) => c.id === id) };
@@ -82,6 +89,49 @@ describe("the outbound scheduler", () => {
     });
     expect(await runOutboundTick(d)).toEqual([]);
     expect(lock.release).toHaveBeenCalledTimes(1);
+  });
+
+  it("dials nobody on a process with no public host — not even the lock", async () => {
+    // Twilio refuses an empty callback URL only after the attempt row exists,
+    // so a host-less tick would spend a person's attempts on calls that never
+    // ring (Codex round 2, #357).
+    const { d, createCall, lock, store } = deps(ON, { host: "" });
+    expect(await runOutboundTick(d)).toEqual([]);
+    expect(lock.acquire).not.toHaveBeenCalled();
+    expect(createCall).not.toHaveBeenCalled();
+    expect(store.attempts).toHaveLength(0);
+  });
+
+  it("dials nobody on a process that is not live-ready", async () => {
+    // It could only tell the person who answered that it is unavailable.
+    const { d, createCall, lock, store } = deps({ ...ON, XAI_API_KEY: "" });
+    expect(await runOutboundTick(d)).toEqual([]);
+    expect(lock.acquire).not.toHaveBeenCalled();
+    expect(createCall).not.toHaveBeenCalled();
+    expect(store.attempts).toHaveLength(0);
+  });
+
+  it("starts no timer without a public host or a live-ready runtime, and says why", () => {
+    const spy = vi.spyOn(globalThis, "setInterval");
+    for (const [env, host, why] of [
+      [ON, "", /no public host/],
+      [{ ...ON, TWILIO_AUTH_TOKEN: "" }, "voice.example.test", /not live-ready \(missing: TWILIO_AUTH_TOKEN\)/],
+    ] as const) {
+      const lines: string[] = [];
+      const { d } = deps(env, { host, log: (l) => lines.push(l) });
+      startOutboundScheduler(d)();
+      expect(lines.join("\n")).toMatch(why);
+    }
+    expect(spy).not.toHaveBeenCalled();
+    spy.mockRestore();
+  });
+
+  it("starts the timer when everything it needs is there", () => {
+    const { d } = deps(ON);
+    const spy = vi.spyOn(globalThis, "setInterval");
+    startOutboundScheduler(d)();
+    expect(spy).toHaveBeenCalledTimes(1);
+    spy.mockRestore();
   });
 
   it("starts no timer with the switch off", () => {

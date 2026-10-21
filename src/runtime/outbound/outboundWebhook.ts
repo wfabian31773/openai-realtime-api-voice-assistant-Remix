@@ -101,13 +101,13 @@ export async function handleOutboundAnswer(
   const now = (deps.now ?? (() => new Date()))();
 
   if (answeredBy === "fax") {
-    await deps.store.finishAttempt(attemptId, { status: "fax", answeredBy });
+    await deps.store.finishAttempt(attemptId, { status: "fax", answeredBy, ended: false });
     await deps.store.settleContact(contactId, "wrong_number", { onlyIfCalling: true });
     return hangup();
   }
 
   if (answeredBy.startsWith("machine")) {
-    await deps.store.finishAttempt(attemptId, { status: "voicemail", answeredBy });
+    await deps.store.finishAttempt(attemptId, { status: "voicemail", answeredBy, ended: false });
     const prior = await deps.store.priorAttemptTimes(contactId);
     await deps.store.settleContact(
       contactId,
@@ -118,7 +118,7 @@ export async function handleOutboundAnswer(
   }
 
   if (!computeRuntimeReadiness(deps.env).liveReady) {
-    await deps.store.finishAttempt(attemptId, { status: "not_ready", answeredBy });
+    await deps.store.finishAttempt(attemptId, { status: "not_ready", answeredBy, ended: false });
     await deps.store.settleContact(contactId, "no_answer", {
       onlyIfCalling: true,
       nextAttemptAt: nextLookAt(now, "too_soon", policy),

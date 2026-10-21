@@ -50,6 +50,16 @@ describe("nothing dials unless it is switched on", () => {
     expect(createCall).not.toHaveBeenCalled();
   });
 
+  it("claims nobody without a public host", async () => {
+    const { store, createCall, deps } = setup();
+    store.addContact({ id: "c1", phone: "+15555550111" });
+    const r = await runCampaignTick("test-lane", policy, { ...deps, host: "" });
+    expect(r.skipped).toBe("no public host");
+    expect(store.contacts.get("c1")!.status).toBe("pending");
+    expect(store.attempts).toHaveLength(0);
+    expect(createCall).not.toHaveBeenCalled();
+  });
+
   it("claims nobody outside the window", async () => {
     const { store, createCall, deps } = setup();
     store.addContact({ id: "c1", phone: "+15555550111" });
@@ -162,6 +172,33 @@ describe("a dial", () => {
     // and the next tick, with both still ringing, starts none
     const again = await runCampaignTick("test-lane", policy, deps);
     expect(again.skipped).toBe("at concurrency");
+  });
+
+  it("keeps a call's slot while it is connected, even after a tool settled the contact", async () => {
+    // The agent can record an outcome or an opt-out before the call ends;
+    // only Twilio's terminal status frees the slot (Codex round 2, #357).
+    const { store, createCall, deps } = setup();
+    const one = { ...policy, concurrency: 1 };
+    store.addContact({ id: "c1", phone: "+15555550111" });
+    store.addContact({ id: "c2", phone: "+15555550112" });
+    expect((await runCampaignTick("test-lane", one, deps)).dialled).toBe(1);
+    const first = store.attempts[0];
+    await store.settleContact(first.contactId, "callback_scheduled");
+    expect((await runCampaignTick("test-lane", one, deps)).skipped).toBe("at concurrency");
+    expect(createCall).toHaveBeenCalledTimes(1);
+    await store.finishAttempt(first.id, { status: "completed" });
+    expect((await runCampaignTick("test-lane", one, deps)).dialled).toBe(1);
+    expect(createCall).toHaveBeenCalledTimes(2);
+  });
+
+  it("stops counting a call nobody ever closed once the stale window has passed", async () => {
+    const { store, deps } = setup();
+    const one = { ...policy, concurrency: 1 };
+    store.addContact({ id: "c1", phone: "+15555550111" });
+    await runCampaignTick("test-lane", one, deps);
+    store.attempts[0].at = new Date(NOW.getTime() - 31 * 60 * 1000);
+    store.addContact({ id: "c2", phone: "+15555550112" });
+    expect((await runCampaignTick("test-lane", one, deps)).dialled).toBe(1);
   });
 
   it("hands back a claim stuck in 'calling' from a process that died", async () => {

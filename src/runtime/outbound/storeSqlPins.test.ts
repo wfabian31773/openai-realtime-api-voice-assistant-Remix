@@ -53,6 +53,19 @@ describe("the attempt row keeps the answer webhook's verdict", () => {
     );
   });
 
+  it("ends an attempt only when told the call is over", () => {
+    expect(method("finishAttempt")).toContain(
+      "ended_at = CASE WHEN ${f.ended ?? true}::boolean THEN COALESCE(ended_at, NOW()) ELSE ended_at END",
+    );
+  });
+
+  it("counts the live attempt for concurrency, not the contact's status", () => {
+    const inFlight = method("callsInFlight");
+    expect(inFlight).toContain("FROM campaign_contact_attempts");
+    expect(inFlight).toContain("ended_at IS NULL");
+    expect(inFlight).not.toContain("outreach_status");
+  });
+
   it("counts only outbound attempts against the caps", () => {
     expect(method("priorAttemptTimes")).toContain("direction = 'outbound'");
   });

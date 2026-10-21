@@ -129,6 +129,7 @@ describe("the answer webhook", () => {
     const { deps, registry, store, attemptId } = await setup();
     const r = await handleOutboundAnswer("test-lane", answered(attemptId, { AnsweredBy: "fax" }), deps);
     expect(r.body).toContain("<Hangup/>");
+    expect(store.attempts[0].endedAt).toBeUndefined(); // the status callback ends it
     expect(registry.activeCount()).toBe(0);
     expect(store.contacts.get("c1")!.status).toBe("wrong_number");
   });
@@ -184,7 +185,10 @@ describe("the status webhook", () => {
   it("keeps a voicemail verdict when the completed status follows it", async () => {
     const { deps, store, attemptId } = await setup();
     await handleOutboundAnswer("test-lane", answered(attemptId, { AnsweredBy: "machine_end_silence" }), deps);
+    // The voicemail line is still playing: the attempt holds its slot.
+    expect(store.attempts[0].endedAt).toBeUndefined();
     await handleOutboundStatus("test-lane", finished(attemptId, { CallStatus: "completed", CallDuration: "22" }), deps);
+    expect(store.attempts[0].endedAt).toBeDefined();
     expect(store.attempts[0].finish?.status).toBe("voicemail");
     expect(store.contacts.get("c1")!.status).toBe("voicemail");
   });

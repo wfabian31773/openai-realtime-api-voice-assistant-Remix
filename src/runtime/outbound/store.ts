@@ -74,6 +74,11 @@ export interface AttemptFinish {
   answeredBy?: string | null;
   outcome?: string | null;
   durationSeconds?: number | null;
+  /** False when the call is still on the line: the answer webhook records a
+   * machine, a fax or a not-ready verdict while its TwiML is still playing.
+   * Only Twilio's terminal status callback ends the attempt, so the
+   * concurrency count holds the slot until the call is really over. */
+  ended?: boolean;
 }
 
 export interface OutboundStore {
@@ -103,7 +108,8 @@ export interface OutboundStore {
     status: ContactStatus,
     opts?: { nextAttemptAt?: Date | null; onlyIfCalling?: boolean; notes?: string },
   ): Promise<boolean>;
-  /** Contacts of this campaign currently 'calling' and claimed after `since`. */
+  /** This campaign's dialled attempts still on the line (no terminal status
+   * yet), started after `since`. */
   callsInFlight(campaignId: string, since: Date): Promise<number>;
   /** Rows stuck in 'calling' since before `before` go back to 'no_answer'. */
   reapStaleClaims(campaignId: string, before: Date): Promise<number>;
@@ -285,7 +291,7 @@ export async function createDbOutboundStore(): Promise<OutboundStore> {
                answered_by = COALESCE(${f.answeredBy ?? null}::varchar, answered_by),
                outcome = COALESCE(${f.outcome ?? null}::varchar, outcome),
                duration = COALESCE(${f.durationSeconds ?? null}::int, duration),
-               ended_at = COALESCE(ended_at, NOW())
+               ended_at = CASE WHEN ${f.ended ?? true}::boolean THEN COALESCE(ended_at, NOW()) ELSE ended_at END
          WHERE id = ${attemptId}::varchar`);
     },
 
@@ -330,9 +336,15 @@ export async function createDbOutboundStore(): Promise<OutboundStore> {
     async callsInFlight(campaignId, since) {
       const counted = rows(
         await db.execute(sql`
-          SELECT count(*)::int AS n FROM campaign_contacts
-           WHERE campaign_id = ${campaignId}::varchar AND outreach_status = 'calling'
-             AND updated_at >= ${utc(since)}`),
+          -- The live ATTEMPT, not the contact's status: a tool can settle the
+          -- contact (an outcome, an opt-out) while the call is still
+          -- connected, and only Twilio's terminal status callback ends the
+          -- attempt. Bounded by \`since\` so a lost callback cannot hold a
+          -- slot past the stale-claim window.
+          SELECT count(*)::int AS n FROM campaign_contact_attempts
+           WHERE campaign_id = ${campaignId}::varchar AND direction = 'outbound'
+             AND ended_at IS NULL
+             AND attempted_at >= ${utc(since)}`),
       );
       return Number(counted[0]?.n ?? 0);
     },

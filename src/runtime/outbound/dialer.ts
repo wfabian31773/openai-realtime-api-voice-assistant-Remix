@@ -132,6 +132,9 @@ export async function runCampaignTick(
   if (!campaignEnabled(policy, deps.env)) return { ...result, skipped: "disabled" };
   const from = deps.env[policy.callerIdEnv];
   if (!from) return { ...result, skipped: `no caller ID (${policy.callerIdEnv})` };
+  // No public host means callback URLs Twilio refuses after the attempt row
+  // already exists: a person's attempt spent on a call that never rang.
+  if (!deps.host) return { ...result, skipped: "no public host" };
 
   // The window first, with no attempts: outside it nobody is claimed at all.
   const window = mayDialNow(now, [], policy.window, policy.caps);

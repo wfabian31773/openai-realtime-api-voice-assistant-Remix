@@ -8,6 +8,14 @@
  * Started by the voice runtime ONLY when RUNTIME_OUTBOUND_DIALING=1. With
  * the switch off nothing here runs — no timer, no lock, no query.
  *
+ * AND ONLY ON A PROCESS THAT CAN TAKE THE CALL IT PLACES. Two things are
+ * checked before anybody is claimed (outboundPrerequisiteMissing): a public
+ * host Twilio can post the answer and the status back to, and a runtime that
+ * is live-ready. A call placed without either still rings a person and
+ * spends one of their attempts — Twilio refuses an empty callback URL only
+ * after the attempt row exists, and a not-live-ready process can only tell
+ * the person who answered that it is unavailable (Codex round 2, #357).
+ *
  * ONE DIALLER AT A TIME. The atomic claim already guarantees a person is
  * never rung twice by two processes; the lock is what keeps a campaign's
  * concurrency honest when the deployment runs more than one instance, and it
@@ -18,6 +26,7 @@
 
 import type { LaneSource } from "../laneRegistry";
 import type { OutboundLanePolicy } from "./campaign";
+import { computeRuntimeReadiness } from "../readiness";
 import { campaignEnabled, outboundDialingEnabled } from "./campaign";
 import { runCampaignTick, type DialerDeps, type TickResult } from "./dialer";
 
@@ -39,6 +48,17 @@ export interface SchedulerDeps extends Omit<DialerDeps, "store" | "twilio"> {
   slugs: () => Promise<string[]>;
 }
 
+/** Why this process must not dial at all, or null when it may. Names
+ * only, never a value — the same rule as /voice/health. */
+export function outboundPrerequisiteMissing(
+  deps: Pick<SchedulerDeps, "env" | "host">,
+): string | null {
+  if (!deps.host) return "no public host (DOMAIN, REPLIT_DOMAINS or REPLIT_DEV_DOMAIN)";
+  const readiness = computeRuntimeReadiness(deps.env);
+  if (!readiness.liveReady) return `runtime not live-ready (missing: ${readiness.missing.join(", ")})`;
+  return null;
+}
+
 /** The outbound lanes whose campaigns may dial right now, with their policy. */
 export async function enabledCampaigns(
   deps: Pick<SchedulerDeps, "laneSource" | "slugs" | "env">,
@@ -57,6 +77,7 @@ export async function enabledCampaigns(
 /** One pass over every enabled campaign, under the lock. Never throws. */
 export async function runOutboundTick(deps: SchedulerDeps): Promise<TickResult[]> {
   if (!outboundDialingEnabled(deps.env)) return [];
+  if (outboundPrerequisiteMissing(deps)) return [];
   const campaigns = await enabledCampaigns(deps).catch(() => []);
   if (campaigns.length === 0) return [];
   if (!(await deps.lock.acquire().catch(() => false))) return [];
@@ -80,6 +101,11 @@ export async function runOutboundTick(deps: SchedulerDeps): Promise<TickResult[]
 /** Start the minute clock. Returns the stop function. */
 export function startOutboundScheduler(deps: SchedulerDeps, intervalMs = OUTBOUND_TICK_MS): () => void {
   if (!outboundDialingEnabled(deps.env)) return () => undefined;
+  const missing = outboundPrerequisiteMissing(deps);
+  if (missing) {
+    (deps.log ?? console.log)(`[outbound] dialler NOT started — ${missing}; nothing will be dialled`);
+    return () => undefined;
+  }
   let running = false;
   const timer = setInterval(() => {
     if (running) return; // a slow tick is never overlapped by the next
