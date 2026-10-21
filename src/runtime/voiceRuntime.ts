@@ -313,6 +313,7 @@ import {
   type CallbackContext,
 } from "./outbound/callback";
 import { closeCallbackSession, openCallbackSession } from "../tools/outboundTools";
+import { closeOutreachSession } from "../tools/npxOutreachTools";
 import type { OutboundStore } from "./outbound/store";
 import { createDbOutboundStore } from "./outbound/store";
 import { OUTBOUND_PATH_PREFIX, type OutboundTwilio } from "./outbound/dialer";
@@ -1623,6 +1624,9 @@ export function mountVoiceRuntime(
             // The caller's words the escalation gate reads die with the call
             // too (v99: the bridge now feeds them on this pipeline).
             releaseCallerSpeech(entry.callSid);
+            // And an outreach call's session (v109): it holds the patient's
+            // record and their offered slots, and must not outlive the call.
+            closeOutreachSession(entry.callSid);
             // The call is over, whatever ended it: any office leg still
             // ringing for this caller is abandoned NOW, not after the
             // accept window — the staffer must not keep ringing toward,

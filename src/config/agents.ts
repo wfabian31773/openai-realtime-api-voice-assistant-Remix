@@ -1,5 +1,6 @@
 import type { OutboundLanePolicy } from '../runtime/outbound/campaign';
 import { createOutboundProofAgent, outboundProofAgentConfig, outboundProofPolicy } from '../agents/outboundProofAgent';
+import { createNpxOutreachAgent, npxOutreachAgentConfig, npxOutreachPolicy } from '../agents/npxOutreachAgent';
 import { RealtimeAgent } from '@openai/agents/realtime';
 import { createAfterHoursAgent } from '../agents/afterHoursAgent';
 import { createDRSSchedulerAgent } from '../agents/drsSchedulerAgent';
@@ -219,6 +220,24 @@ export class AgentRegistry {
       voice: outboundProofAgentConfig.voice,
       language: outboundProofAgentConfig.language,
       outbound: outboundProofPolicy,
+    });
+
+    // The NPX outreach campaign (v109): a sooner routine exam at an NPX
+    // partner for patients on the Console's movable list. Dials nothing
+    // unless RUNTIME_OUTBOUND_DIALING=1, OUTBOUND_CAMPAIGN_NPX_OUTREACH=1 and
+    // NPX_OUTREACH_CALLER_ID are set and that number's Voice URL points here.
+    this.register({
+      id: npxOutreachAgentConfig.slug,
+      factory: createNpxOutreachAgent as AgentFactory,
+      enabled: true,
+      description: npxOutreachAgentConfig.description,
+      twilioNumbers: [],
+      agentType: 'outbound',
+      version: npxOutreachAgentConfig.version,
+      voice: npxOutreachAgentConfig.voice,
+      language: npxOutreachAgentConfig.language,
+      spokenLanguages: ['en', 'es'],
+      outbound: npxOutreachPolicy,
     });
 
     // Azul Vision NextGen scheduling line (San Diego pilot).

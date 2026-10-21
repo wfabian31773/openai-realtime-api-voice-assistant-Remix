@@ -76,6 +76,8 @@ import {
   OPT_OUT_TOOL_NAME,
   RECORD_OUTCOME_TOOL_NAME,
 } from "../tools/outboundTools";
+// The NPX outreach lane's own tools (v109): static for the same reason.
+import "../tools/npxOutreachTools";
 import type { OutboundContact, OutboundLanePolicy } from "./outbound/campaign";
 import type { CallbackContext } from "./outbound/callback";
 
@@ -523,20 +525,23 @@ function outboundRuntimeTools(
     },
     agentSlug: slug,
   };
+  const laneTools = [...(config.outbound.tools ?? [])];
   if (metadata.callback) {
     return realtimeToolsFor(
-      [...RUNTIME_CALLBACK_TOOLS],
+      [...RUNTIME_CALLBACK_TOOLS, ...laneTools],
       { outbound_callback_sid: metadata.callSid },
       telemetry,
     ) as unknown as LiveTool[];
   }
   if (!metadata.outbound) return [];
   return realtimeToolsFor(
-    [...RUNTIME_OUTBOUND_TOOLS],
+    [...RUNTIME_OUTBOUND_TOOLS, ...laneTools],
     {
       outbound_contact_id: metadata.outbound.contactId,
       outbound_phone: metadata.outbound.phone,
       outbound_campaign: metadata.outbound.campaignKey,
+      outbound_attempt_id: metadata.outbound.attemptId,
+      outbound_call_sid: metadata.callSid,
     },
     telemetry,
   ) as unknown as LiveTool[];
