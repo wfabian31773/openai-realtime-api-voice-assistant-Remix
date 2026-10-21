@@ -87,7 +87,22 @@ describe("the attempt row keeps the answer webhook's verdict", () => {
     expect(prior).toContain("WHERE me.id = ${contactId}::varchar");
     // Not filtered to the one row: the attempts come from every sibling.
     expect(prior).not.toMatch(/a\.contact_id = \$\{contactId\}/);
-    expect(prior).toContain("(a.ended_at IS NULL) AS open");
+  });
+
+  it("spends no cap on a dial Twilio refused (Codex round 4, #357)", () => {
+    expect(method("priorAttempts")).toContain("AND a.status IS DISTINCT FROM ${NOT_PLACED}::varchar");
+  });
+
+  it("looks for a call still on the line across EVERY campaign, bounded by the stale window (Codex round 4, #357)", () => {
+    const open = method("callOpenOnPhone");
+    // The phone, matched exactly as the caps match it…
+    expect(open).toContain("ON right(regexp_replace(c.phone_number, '[^0-9]', '', 'g'), 10)");
+    expect(open).toContain("= right(regexp_replace(me.phone_number, '[^0-9]', '', 'g'), 10)");
+    // …with no campaign restriction at all.
+    expect(open).not.toContain("campaign_id");
+    expect(open).toContain("a.direction = 'outbound'");
+    expect(open).toContain("AND a.ended_at IS NULL");
+    expect(open).toContain("AND a.attempted_at >= ${utc(since)}");
   });
 });
 

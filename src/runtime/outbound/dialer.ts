@@ -14,14 +14,15 @@
  *          campaign, and an unreadable number is refused);
  *        - the calling window and the per-person caps (./callingWindow.ts),
  *          counted over every row in the campaign carrying the same phone;
- *        - no call to that phone is still on the line.
+ *        - no call to that phone is still on the line, in any campaign.
  *      A failed check hands the row back with the reason's next chance.
  *   3. DIAL: an attempt row first, then Twilio, then the attempt's CallSid.
  *      The attempt row exists before Twilio is asked so a call that rings
  *      while we are still waiting for Twilio's reply has something to land
- *      on. A Twilio refusal settles the attempt as failed and hands the row
- *      back for a later try. Once Twilio has ACCEPTED, nothing hands the
- *      row back — the phone is ringing.
+ *      on. A Twilio refusal records the attempt as NOT_PLACED — kept for
+ *      the audit, counted against no cap, because nobody was rung — and
+ *      hands the row back for a later try. Once Twilio has ACCEPTED,
+ *      nothing hands the row back — the phone is ringing.
  *
  * Twilio is asked for answering-machine detection that waits for the
  * greeting to end (`DetectMessageEnd`), the 5Star lane's setting since it
@@ -38,7 +39,7 @@
 import type { OutboundLanePolicy } from "./campaign";
 import { campaignEnabled } from "./campaign";
 import { mayDialNow, pacificParts } from "./callingWindow";
-import type { ContactRow, OutboundStore } from "./store";
+import { NOT_PLACED, dncKey, type ContactRow, type OutboundStore } from "./store";
 
 export const OUTBOUND_PATH_PREFIX = "/voice/outbound";
 
@@ -203,20 +204,19 @@ async function dialOne(
 
   // Every attempt on this phone in this campaign, not only this row's: an
   // import can carry one person on two rows, and the caps are per person.
+  // A dial Twilio refused is not among them — nobody was rung.
   const prior = await deps.store.priorAttempts(contact.id);
   if (prior.length >= policy.caps.total) {
     await deps.store.settleContact(contact.id, "max_attempts");
     return "total_cap";
   }
-  // A call to this phone still on the line (another row of the same person):
-  // never ring them twice at once. Bounded like the concurrency count, so a
-  // lost status callback cannot hold the phone past the stale-claim window.
-  const since = now.getTime() - STALE_CLAIM_MS;
-  if (prior.some((p) => p.open && p.at.getTime() >= since)) {
+  // A call to this phone still on the line, from this campaign or any other:
+  // never ring a person twice at once.
+  if (await deps.store.callOpenOnPhone(contact.id, new Date(now.getTime() - STALE_CLAIM_MS))) {
     await deps.store.releaseContact(contact.id, candidate.status, nextLookAt(now, "too_soon", policy));
     return "call_in_progress";
   }
-  const decision = mayDialNow(now, prior.map((p) => ({ at: p.at })), policy.window, policy.caps);
+  const decision = mayDialNow(now, prior, policy.window, policy.caps);
   if (!decision.ok) {
     // Back to the status it had before the claim, not 'pending': a row that
     // has already had a voicemail left keeps saying so.
@@ -228,7 +228,9 @@ async function dialOne(
   let call: { sid: string };
   try {
     call = await deps.twilio.createCall({
-      to: contact.phone,
+      // E.164, the form Twilio requires. The do-not-contact check above has
+      // already refused any number dncKey cannot read as ten digits.
+      to: `+1${dncKey(contact.phone)}`,
       from,
       url: answerUrl(deps.host, slug, contact.id, attemptId),
       method: "POST",
@@ -243,8 +245,10 @@ async function dialOne(
     (deps.log ?? console.log)(
       `[outbound] ${policy.campaignKey}: Twilio refused the dial — ${error instanceof Error ? error.message : String(error)}`,
     );
-    await deps.store.finishAttempt(attemptId, { status: "failed" });
-    await deps.store.releaseContact(contact.id, "no_answer", nextLookAt(now, "too_soon", policy));
+    // Kept for the audit trail, counted against no cap, and handed back with
+    // the status it had: nobody was rung, so nothing about the person changed.
+    await deps.store.finishAttempt(attemptId, { status: NOT_PLACED });
+    await deps.store.releaseContact(contact.id, candidate.status, nextLookAt(now, "too_soon", policy));
     return "twilio_refused";
   }
   // Twilio accepted: the phone is ringing, so nothing below may hand the row

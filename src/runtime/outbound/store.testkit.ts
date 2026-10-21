@@ -6,6 +6,7 @@
 import type { OutboundContact } from "./campaign";
 import {
   DIALABLE_STATUSES,
+  NOT_PLACED,
   dncKey,
   type AttemptFinish,
   type ContactRow,
@@ -83,20 +84,32 @@ export class FakeOutboundStore implements OutboundStore {
     c.nextAttemptAt = nextAttemptAt;
   }
 
-  async priorAttempts(contactId: string): Promise<PriorAttempt[]> {
-    // Same rule as the SQL: every row in this contact's campaign whose phone
-    // reads as the same ten digits.
+  /** Contact ids whose phone reads as the same ten digits as this one's,
+   * in this contact's campaign only, or in every campaign. */
+  private samePhone(contactId: string, everyCampaign: boolean): Set<string> {
     const me = this.contacts.get(contactId);
-    if (!me) return [];
+    if (!me) return new Set();
     const key = (phone: string) => phone.replace(/\D/g, "").slice(-10);
-    const siblings = new Set(
+    return new Set(
       [...this.contacts.values()]
-        .filter((c) => c.campaignId === me.campaignId && key(c.phone) === key(me.phone))
+        .filter((c) => (everyCampaign || c.campaignId === me.campaignId) && key(c.phone) === key(me.phone))
         .map((c) => c.id),
     );
+  }
+
+  async priorAttempts(contactId: string): Promise<PriorAttempt[]> {
+    // Same rule as the SQL: the phone in this campaign, and a dial Twilio
+    // refused spends nothing.
+    const siblings = this.samePhone(contactId, false);
     return this.attempts
-      .filter((a) => siblings.has(a.contactId))
-      .map((a) => ({ at: a.at, open: !a.endedAt }));
+      .filter((a) => siblings.has(a.contactId) && a.finish?.status !== NOT_PLACED)
+      .map((a) => ({ at: a.at }));
+  }
+
+  async callOpenOnPhone(contactId: string, since: Date): Promise<boolean> {
+    // Same rule as the SQL: the phone in EVERY campaign, still on the line.
+    const siblings = this.samePhone(contactId, true);
+    return this.attempts.some((a) => siblings.has(a.contactId) && !a.endedAt && a.at >= since);
   }
 
   async startAttempt(contactId: string, campaignId: string, attemptNumber: number): Promise<string> {

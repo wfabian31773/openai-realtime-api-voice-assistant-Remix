@@ -11,6 +11,7 @@ import {
   handleOutboundStatus,
   type OutboundWebhookDeps,
 } from "./outboundWebhook";
+import { NOT_PLACED } from "./store";
 import { FakeOutboundStore } from "./store.testkit";
 
 const AUTH_TOKEN = "test-auth-token";
@@ -200,6 +201,24 @@ describe("the status webhook", () => {
     // The callback for the attempt that reached the cap — the contact's newest.
     await handleOutboundStatus("test-lane", finished(third, { CallStatus: "busy" }), deps);
     expect(store.contacts.get("c1")!.status).toBe("max_attempts");
+  });
+
+  it("counts no dial Twilio refused when deciding the cap is reached (Codex round 4, #357)", async () => {
+    const { deps, store, attemptId } = await setup();
+    // Two refusals before the call that rang: they rang nobody.
+    for (const id of ["r1", "r2"]) {
+      store.attempts.unshift({
+        id,
+        contactId: "c1",
+        campaignId: "campaign-1",
+        attemptNumber: 1,
+        at: new Date(NOW.getTime() - 60 * 60 * 1000),
+        finish: { status: NOT_PLACED },
+        endedAt: new Date(NOW.getTime() - 60 * 60 * 1000),
+      });
+    }
+    await handleOutboundStatus("test-lane", finished(attemptId, { CallStatus: "busy" }), deps);
+    expect(store.contacts.get("c1")!.status).toBe("no_answer");
   });
 
   it("does not let a late callback for an old attempt settle the newer call (Codex round 3, #357)", async () => {

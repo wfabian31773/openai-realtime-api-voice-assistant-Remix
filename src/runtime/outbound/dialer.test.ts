@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { OutboundLanePolicy } from "./campaign";
 import { DEFAULT_ATTEMPT_CAPS, DEFAULT_CALLING_WINDOW } from "./callingWindow";
 import { answerUrl, nextLookAt, runCampaignTick, statusUrl, type OutboundTwilio } from "./dialer";
+import { NOT_PLACED } from "./store";
 import { FakeOutboundStore } from "./store.testkit";
 
 // Tuesday 10 AM Pacific.
@@ -150,17 +151,27 @@ describe("a dial", () => {
     expect(c.nextAttemptAt?.toISOString()).toBe("2041-03-06T17:00:00.000Z");
   });
 
-  it("settles a Twilio refusal as a failed attempt and tries again later", async () => {
+  it("records a Twilio refusal as not placed and hands the row back as it was", async () => {
     const { store, deps } = setup();
     deps.twilio.createCall = vi.fn(async () => {
-      throw new Error("21217 invalid number");
+      throw new Error("service unavailable");
     });
-    store.addContact({ id: "c1", phone: "+15555550111" });
+    store.addContact({ id: "c1", phone: "+15555550111", status: "voicemail" });
     const r = await runCampaignTick("test-lane", policy, deps);
     expect(r.held).toEqual({ twilio_refused: 1 });
-    expect(store.attempts[0].finish?.status).toBe("failed");
-    expect(store.contacts.get("c1")!.status).toBe("no_answer");
+    // Kept for the audit trail, under a status no cap reads.
+    expect(store.attempts[0].finish?.status).toBe(NOT_PLACED);
+    expect(store.attempts[0].endedAt).toBeDefined();
+    // Nobody was rung, so nothing about the person changed.
+    expect(store.contacts.get("c1")!.status).toBe("voicemail");
     expect(store.contacts.get("c1")!.nextAttemptAt).not.toBeNull();
+  });
+
+  it("dials a number stored in any spelling as E.164", async () => {
+    const { store, createCall, deps } = setup();
+    store.addContact({ id: "c1", phone: "(555) 555-0111" });
+    expect((await runCampaignTick("test-lane", policy, deps)).dialled).toBe(1);
+    expect(createCall).toHaveBeenCalledWith(expect.objectContaining({ to: "+15555550111" }));
   });
 
   it("never hands back a call Twilio accepted when its CallSid cannot be saved (Codex round 3, #357)", async () => {
@@ -306,6 +317,91 @@ describe("one person on two rows (Codex round 3, #357)", () => {
     store.addContact({ id: "c2", phone: "+15555550112" });
     expect((await runCampaignTick("test-lane", loose, deps)).dialled).toBe(2);
     expect(createCall).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("a dial Twilio refused spends none of the person's attempts (Codex round 4, #357)", () => {
+  const refuseThen = (store: FakeOutboundStore, refusals: number) => {
+    let n = 0;
+    return vi.fn(async () => {
+      if (++n <= refusals) throw new Error("service unavailable");
+      return { sid: `CA${String(n).padStart(32, "0")}` };
+    });
+  };
+
+  it("rings them after an outage as long as the outage lasted", async () => {
+    const { store, deps } = setup();
+    const noGap: OutboundLanePolicy = { ...policy, caps: { ...DEFAULT_ATTEMPT_CAPS, minHoursBetween: 0 } };
+    deps.twilio.createCall = refuseThen(store, DEFAULT_ATTEMPT_CAPS.total);
+    store.addContact({ id: "c1", phone: "+15555550111" });
+    for (let i = 0; i < DEFAULT_ATTEMPT_CAPS.total; i++) {
+      expect((await runCampaignTick("test-lane", noGap, deps)).held).toEqual({ twilio_refused: 1 });
+      expect(store.contacts.get("c1")!.status).toBe("pending");
+    }
+    // As many refusals as the total cap, and the person is still dialled.
+    expect((await runCampaignTick("test-lane", noGap, deps)).dialled).toBe(1);
+    expect(store.contacts.get("c1")!.status).toBe("calling");
+    expect(await store.priorAttempts("c1")).toHaveLength(1);
+  });
+
+  it("does not spend the daily cap on a refusal", async () => {
+    const { store, deps } = setup();
+    const oncePerDay: OutboundLanePolicy = {
+      ...policy,
+      caps: { perDay: 1, perWeek: 3, total: 3, minHoursBetween: 0 },
+    };
+    deps.twilio.createCall = refuseThen(store, 1);
+    store.addContact({ id: "c1", phone: "+15555550111" });
+    expect((await runCampaignTick("test-lane", oncePerDay, deps)).held).toEqual({ twilio_refused: 1 });
+    expect((await runCampaignTick("test-lane", oncePerDay, deps)).dialled).toBe(1);
+  });
+});
+
+describe("one person in two campaigns (Codex round 4, #357)", () => {
+  const otherCampaignContact = (store: FakeOutboundStore, attempt: Partial<{ at: Date; endedAt: Date }>) => {
+    store.addContact({ id: "x1", phone: "(555) 555-0111", campaignId: "campaign-2" });
+    store.attempts.push({ id: "x-a1", contactId: "x1", campaignId: "campaign-2", attemptNumber: 1, at: NOW, ...attempt });
+  };
+
+  it("never rings a phone another campaign has on the line", async () => {
+    const { store, createCall, deps } = setup();
+    otherCampaignContact(store, { at: new Date(NOW.getTime() - 60 * 1000) });
+    store.addContact({ id: "c1", phone: "+15555550111" });
+    const r = await runCampaignTick("test-lane", policy, deps);
+    expect(r.held).toEqual({ call_in_progress: 1 });
+    expect(createCall).not.toHaveBeenCalled();
+    expect(store.contacts.get("c1")!.status).toBe("pending");
+  });
+
+  it("stops holding the phone once the other campaign's call has ended", async () => {
+    const { store, deps } = setup();
+    otherCampaignContact(store, { at: new Date(NOW.getTime() - 60 * 1000), endedAt: NOW });
+    store.addContact({ id: "c1", phone: "+15555550111" });
+    expect((await runCampaignTick("test-lane", policy, deps)).dialled).toBe(1);
+  });
+
+  it("stops holding the phone past the stale window, like the concurrency count", async () => {
+    const { store, deps } = setup();
+    otherCampaignContact(store, { at: new Date(NOW.getTime() - 31 * 60 * 1000) });
+    store.addContact({ id: "c1", phone: "+15555550111" });
+    expect((await runCampaignTick("test-lane", policy, deps)).dialled).toBe(1);
+  });
+
+  it("keeps the caps per campaign: another campaign's attempts spend none of this one's", async () => {
+    const { store, deps } = setup();
+    store.addContact({ id: "x1", phone: "+15555550111", campaignId: "campaign-2" });
+    for (let i = 1; i <= DEFAULT_ATTEMPT_CAPS.total; i++) {
+      store.attempts.push({
+        id: `x-a${i}`,
+        contactId: "x1",
+        campaignId: "campaign-2",
+        attemptNumber: i,
+        at: new Date(`2041-02-0${i}T18:00:00Z`),
+        endedAt: new Date(`2041-02-0${i}T18:01:00Z`),
+      });
+    }
+    store.addContact({ id: "c1", phone: "+15555550111" });
+    expect((await runCampaignTick("test-lane", policy, deps)).dialled).toBe(1);
   });
 });
 

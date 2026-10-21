@@ -83,8 +83,17 @@ export interface AttemptFinish {
 
 export interface PriorAttempt {
   at: Date;
-  open: boolean;
 }
+
+/**
+ * The attempt status for a dial Twilio REFUSED before it accepted the call.
+ * Nobody was rung, so it is kept for the audit trail and counted against
+ * no cap: a Twilio outage, or a caller-ID misconfiguration, must not spend a
+ * person's attempts or settle them 'max_attempts' (Codex round 4, #357).
+ * Distinct from Twilio's own "failed" status callback, which follows a call
+ * Twilio accepted.
+ */
+export const NOT_PLACED = "not_placed";
 
 export interface SettleOptions {
   nextAttemptAt?: Date | null;
@@ -108,10 +117,18 @@ export interface OutboundStore {
    * Every outbound attempt on this contact's PHONE in this contact's
    * campaign — not only this row's. An import can carry one person on two
    * rows (two appointments, two `external_ref`s), and the caps are per
-   * person. `open` is an attempt with no terminal status yet: a call still on
-   * the line.
+   * person. A dial Twilio refused (NOT_PLACED) rang nobody and is not
+   * counted.
    */
   priorAttempts(contactId: string): Promise<PriorAttempt[]>;
+  /**
+   * Whether a dialled call to this contact's PHONE is still on the line, in
+   * ANY campaign. The caps are per campaign; ringing a person twice at once
+   * is wrong whichever campaigns the two rows sit in (Codex round 4, #357).
+   * Bounded by `since` like callsInFlight, so an attempt whose terminal
+   * status never arrived cannot hold the phone past the stale-claim window.
+   */
+  callOpenOnPhone(contactId: string, since: Date): Promise<boolean>;
   startAttempt(contactId: string, campaignId: string, attemptNumber: number): Promise<string>;
   setAttemptCallSid(attemptId: string, callSid: string): Promise<void>;
   finishAttempt(attemptId: string, finish: AttemptFinish): Promise<void>;
@@ -275,16 +292,37 @@ export async function createDbOutboundStore(): Promise<OutboundStore> {
           -- number reads as the same ten digits. right(…, 10) agrees with
           -- dncKey on every number that can carry an attempt, because an
           -- unreadable number is refused before it is ever dialled.
-          SELECT (a.attempted_at AT TIME ZONE 'UTC') AS attempted_at,
-                 (a.ended_at IS NULL) AS open
+          -- A dial Twilio refused rang nobody, so it spends no cap.
+          SELECT (a.attempted_at AT TIME ZONE 'UTC') AS attempted_at
             FROM campaign_contacts me
             JOIN campaign_contacts c
               ON c.campaign_id = me.campaign_id
              AND right(regexp_replace(c.phone_number, '[^0-9]', '', 'g'), 10)
                = right(regexp_replace(me.phone_number, '[^0-9]', '', 'g'), 10)
             JOIN campaign_contact_attempts a ON a.contact_id = c.id AND a.direction = 'outbound'
-           WHERE me.id = ${contactId}::varchar`),
-      ).map((r) => ({ at: new Date(r.attempted_at as string), open: r.open === true }));
+           WHERE me.id = ${contactId}::varchar
+             AND a.status IS DISTINCT FROM ${NOT_PLACED}::varchar`),
+      ).map((r) => ({ at: new Date(r.attempted_at as string) }));
+    },
+
+    async callOpenOnPhone(contactId, since) {
+      const found = rows(
+        await db.execute(sql`
+          -- Every campaign, not only this one: the same ten digits on any
+          -- contact row, with a dialled attempt that has not ended.
+          SELECT EXISTS (
+            SELECT 1
+              FROM campaign_contacts me
+              JOIN campaign_contacts c
+                ON right(regexp_replace(c.phone_number, '[^0-9]', '', 'g'), 10)
+                 = right(regexp_replace(me.phone_number, '[^0-9]', '', 'g'), 10)
+              JOIN campaign_contact_attempts a ON a.contact_id = c.id AND a.direction = 'outbound'
+             WHERE me.id = ${contactId}::varchar
+               AND a.ended_at IS NULL
+               AND a.attempted_at >= ${utc(since)}
+          ) AS open`),
+      );
+      return found[0]?.open === true;
     },
 
     async startAttempt(contactId, campaignId, attemptNumber) {
