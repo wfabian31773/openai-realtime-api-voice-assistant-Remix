@@ -44,6 +44,7 @@ export class FakeOutboundStore implements OutboundStore {
       lastName: null,
       status: "pending",
       attempts: 0,
+      contacted: false,
       nextAttemptAt: null,
       customData: {},
       ...c,
@@ -115,9 +116,15 @@ export class FakeOutboundStore implements OutboundStore {
   async startAttempt(contactId: string, campaignId: string, attemptNumber: number): Promise<string> {
     const id = `attempt-${++this.seq}`;
     this.attempts.push({ id, contactId, campaignId, attemptNumber, at: this.clock() });
-    const c = this.contacts.get(contactId);
-    if (c) c.attempts += 1;
     return id;
+  }
+
+  async markContactDialled(contactId: string): Promise<void> {
+    const c = this.contacts.get(contactId);
+    if (c) {
+      c.attempts += 1;
+      c.contacted = true;
+    }
   }
 
   async setAttemptCallSid(attemptId: string, callSid: string): Promise<void> {

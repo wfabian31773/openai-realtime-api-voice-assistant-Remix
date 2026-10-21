@@ -93,6 +93,17 @@ describe("the attempt row keeps the answer webhook's verdict", () => {
     expect(method("priorAttempts")).toContain("AND a.status IS DISTINCT FROM ${NOT_PLACED}::varchar");
   });
 
+  it("does not count the contact as attempted until Twilio accepts (Codex round 5, #357)", () => {
+    const start = method("startAttempt");
+    expect(start).toContain("INSERT INTO campaign_contact_attempts");
+    expect(start).not.toContain("contacted");
+    expect(start).not.toContain("attempts =");
+    const marked = method("markContactDialled");
+    expect(marked).toContain("attempts = COALESCE(attempts, 0) + 1");
+    expect(marked).toContain("contacted = true");
+    expect(marked).toContain("last_attempt_at = NOW()");
+  });
+
   it("looks for a call still on the line across EVERY campaign, bounded by the stale window (Codex round 4, #357)", () => {
     const open = method("callOpenOnPhone");
     // The phone, matched exactly as the caps match it…
@@ -144,6 +155,7 @@ describe("a row read back", () => {
       lastName: null,
       status: "pending",
       attempts: 0,
+      contacted: false,
       nextAttemptAt: null,
       customData: {},
     });

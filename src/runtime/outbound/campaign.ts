@@ -61,6 +61,13 @@ export interface OutboundLanePolicy {
   /** Calls this campaign may have ringing or in progress at once. */
   concurrency: number;
   /**
+   * Minutes to wait after Twilio refuses a dial before trying again.
+   * The person cooldown (`caps.minHoursBetween`) is for real call
+   * outcomes only — a Twilio outage must not spend the rest of the
+   * calling day. Default DEFAULT_INFRA_RETRY_MINUTES (15).
+   */
+  infraRetryMinutes?: number;
+  /**
    * The first words the person hears, built for them. Must say that this is
    * an automated assistant calling for Azul Vision and that the call is
    * recorded (OUTBOUND_RECORDING_CLAUSE), before anything else.
@@ -73,6 +80,11 @@ export interface OutboundLanePolicy {
    */
   voicemail(): string;
 }
+
+/** Minutes to wait after Twilio refuses a dial before retrying the same
+ * person. Not the person cooldown: nobody was rung. A policy may set
+ * `infraRetryMinutes` to override. */
+export const DEFAULT_INFRA_RETRY_MINUTES = 15;
 
 /** The fleet-wide switch. Nothing in this layer places a call unless it is
  * exactly "1"; a typo is off, never on. */

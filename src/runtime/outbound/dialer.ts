@@ -16,13 +16,17 @@
  *          counted over every row in the campaign carrying the same phone;
  *        - no call to that phone is still on the line, in any campaign.
  *      A failed check hands the row back with the reason's next chance.
- *   3. DIAL: an attempt row first, then Twilio, then the attempt's CallSid.
- *      The attempt row exists before Twilio is asked so a call that rings
- *      while we are still waiting for Twilio's reply has something to land
- *      on. A Twilio refusal records the attempt as NOT_PLACED — kept for
- *      the audit, counted against no cap, because nobody was rung — and
- *      hands the row back for a later try. Once Twilio has ACCEPTED,
- *      nothing hands the row back — the phone is ringing.
+ *   3. DIAL: an attempt row first, then Twilio. The attempt row exists
+ *      before Twilio is asked so a call that rings while we are still
+ *      waiting for Twilio's reply has something to land on. A Twilio
+ *      refusal records the attempt as NOT_PLACED — kept for the audit,
+ *      counted against no cap, because nobody was rung — and hands the
+ *      row back for a short infrastructure retry (DEFAULT_INFRA_RETRY_MINUTES,
+ *      overridable on the policy), not the person cooldown. Contact
+ *      bookkeeping (attempts++, contacted) waits until Twilio has ACCEPTED,
+ *      so a call that was never placed is not counted as an attempt and
+ *      does not show as Failed. Once Twilio has ACCEPTED, nothing hands
+ *      the row back — the phone is ringing.
  *
  * Twilio is asked for answering-machine detection that waits for the
  * greeting to end (`DetectMessageEnd`), the 5Star lane's setting since it
@@ -37,7 +41,7 @@
  */
 
 import type { OutboundLanePolicy } from "./campaign";
-import { campaignEnabled } from "./campaign";
+import { DEFAULT_INFRA_RETRY_MINUTES, campaignEnabled } from "./campaign";
 import { mayDialNow, pacificParts } from "./callingWindow";
 import { NOT_PLACED, dncKey, type ContactRow, type OutboundStore } from "./store";
 
@@ -117,6 +121,13 @@ export function nextLookAt(now: Date, reason: string, policy: OutboundLanePolicy
     }
     case "weekly_cap":
       return new Date(now.getTime() + 24 * hour);
+    case "twilio_refused": {
+      // A Twilio / infrastructure refusal rang nobody, so it must not
+      // spend the person cooldown. Retry shortly; a policy may shorten
+      // or lengthen it (Codex round 5, #357).
+      const minutes = policy.infraRetryMinutes ?? DEFAULT_INFRA_RETRY_MINUTES;
+      return new Date(now.getTime() + Math.max(0, minutes) * 60 * 1000);
+    }
     default:
       return new Date(now.getTime() + policy.caps.minHoursBetween * hour);
   }
@@ -247,14 +258,24 @@ async function dialOne(
     );
     // Kept for the audit trail, counted against no cap, and handed back with
     // the status it had: nobody was rung, so nothing about the person changed.
+    // The next look is an infrastructure retry, not the person cooldown.
     await deps.store.finishAttempt(attemptId, { status: NOT_PLACED });
-    await deps.store.releaseContact(contact.id, candidate.status, nextLookAt(now, "too_soon", policy));
+    await deps.store.releaseContact(contact.id, candidate.status, nextLookAt(now, "twilio_refused", policy));
     return "twilio_refused";
   }
   // Twilio accepted: the phone is ringing, so nothing below may hand the row
-  // back. The webhooks find the contact and the attempt by the ids in their
-  // URLs, not by the CallSid, so a CallSid that could not be saved costs a
-  // column and nothing else.
+  // back. Bookkeeping (attempts / contacted) and the CallSid are each their
+  // own try: a database blip after an accepted call must not release it.
+  // The webhooks find the contact and the attempt by the ids in their URLs,
+  // not by the CallSid, so a CallSid that could not be saved costs a column
+  // and nothing else.
+  try {
+    await deps.store.markContactDialled(contact.id);
+  } catch (error) {
+    (deps.log ?? console.log)(
+      `[outbound] ${policy.campaignKey}: call ${call.sid} placed but the contact could not be marked dialled — the claim stands and the webhooks settle it (${error instanceof Error ? error.message : String(error)})`,
+    );
+  }
   try {
     await deps.store.setAttemptCallSid(attemptId, call.sid);
   } catch (error) {

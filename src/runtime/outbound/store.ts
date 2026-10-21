@@ -65,6 +65,7 @@ export interface ContactRow {
   lastName: string | null;
   status: ContactStatus;
   attempts: number;
+  contacted: boolean;
   nextAttemptAt: Date | null;
   customData: Record<string, unknown>;
 }
@@ -129,7 +130,16 @@ export interface OutboundStore {
    * status never arrived cannot hold the phone past the stale-claim window.
    */
   callOpenOnPhone(contactId: string, since: Date): Promise<boolean>;
+  /** Write the attempt row. Does not increment the contact's counter or
+   * mark them contacted — that waits until Twilio has accepted the call. */
   startAttempt(contactId: string, campaignId: string, attemptNumber: number): Promise<string>;
+  /**
+   * After Twilio has accepted the call: increment the contact's attempt
+   * counter and mark them contacted. A dial Twilio refused never reaches
+   * this, so a call that was never placed is not counted as an attempt
+   * and does not show as Failed (Codex round 5, #357).
+   */
+  markContactDialled(contactId: string): Promise<void>;
   setAttemptCallSid(attemptId: string, callSid: string): Promise<void>;
   finishAttempt(attemptId: string, finish: AttemptFinish): Promise<void>;
   /** The contact for an answered call, only if the attempt belongs to it. */
@@ -173,6 +183,7 @@ export function rowToContact(r: Record<string, unknown>): ContactRow {
     lastName: (r.last_name as string | null) ?? null,
     status: String(r.outreach_status ?? "pending") as ContactStatus,
     attempts: Number(r.attempts ?? 0),
+    contacted: Boolean(r.contacted),
     nextAttemptAt: r.next_attempt_at ? new Date(r.next_attempt_at as string) : null,
     customData: data && typeof data === "object" ? (data as Record<string, unknown>) : {},
   };
@@ -332,11 +343,14 @@ export async function createDbOutboundStore(): Promise<OutboundStore> {
           VALUES (${contactId}::varchar, ${campaignId}::varchar, ${attemptNumber}::int, 'outbound', 'initiated')
           RETURNING id`),
       );
+      return String(inserted[0].id);
+    },
+
+    async markContactDialled(contactId) {
       await db.execute(sql`
         UPDATE campaign_contacts
            SET attempts = COALESCE(attempts, 0) + 1, last_attempt_at = NOW(), contacted = true
          WHERE id = ${contactId}::varchar`);
-      return String(inserted[0].id);
     },
 
     async setAttemptCallSid(attemptId, callSid) {

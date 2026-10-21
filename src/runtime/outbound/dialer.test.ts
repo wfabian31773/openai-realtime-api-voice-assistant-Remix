@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { OutboundLanePolicy } from "./campaign";
 import { DEFAULT_ATTEMPT_CAPS, DEFAULT_CALLING_WINDOW } from "./callingWindow";
+import { DEFAULT_INFRA_RETRY_MINUTES } from "./campaign";
 import { answerUrl, nextLookAt, runCampaignTick, statusUrl, type OutboundTwilio } from "./dialer";
 import { NOT_PLACED } from "./store";
 import { FakeOutboundStore } from "./store.testkit";
@@ -92,6 +93,8 @@ describe("a dial", () => {
     });
     expect(attempt.callSid).toMatch(/^CA/);
     expect(store.contacts.get("c1")!.status).toBe("calling");
+    expect(store.contacts.get("c1")!.attempts).toBe(1);
+    expect(store.contacts.get("c1")!.contacted).toBe(true);
   });
 
   it("names the contact and the attempt in the query Twilio signs", () => {
@@ -162,9 +165,16 @@ describe("a dial", () => {
     // Kept for the audit trail, under a status no cap reads.
     expect(store.attempts[0].finish?.status).toBe(NOT_PLACED);
     expect(store.attempts[0].endedAt).toBeDefined();
-    // Nobody was rung, so nothing about the person changed.
-    expect(store.contacts.get("c1")!.status).toBe("voicemail");
-    expect(store.contacts.get("c1")!.nextAttemptAt).not.toBeNull();
+    // Nobody was rung, so nothing about the person changed: not contacted,
+    // not an attempt, and the next look is the short infrastructure retry
+    // rather than the 20-hour person cooldown (Codex round 5, #357).
+    const c = store.contacts.get("c1")!;
+    expect(c.status).toBe("voicemail");
+    expect(c.attempts).toBe(0);
+    expect(c.contacted).toBe(false);
+    expect(c.nextAttemptAt?.toISOString()).toBe(
+      new Date(NOW.getTime() + DEFAULT_INFRA_RETRY_MINUTES * 60 * 1000).toISOString(),
+    );
   });
 
   it("dials a number stored in any spelling as E.164", async () => {
@@ -186,6 +196,8 @@ describe("a dial", () => {
     expect(r.dialled).toBe(1);
     expect(r.held).toEqual({});
     expect(store.contacts.get("c1")!.status).toBe("calling");
+    expect(store.contacts.get("c1")!.attempts).toBe(1);
+    expect(store.contacts.get("c1")!.contacted).toBe(true);
     expect(store.attempts[0].finish).toBeUndefined();
     expect(lines.some((l) => l.includes("placed but its CallSid could not be saved"))).toBe(true);
     // And the next tick does not ring them again.
@@ -331,7 +343,11 @@ describe("a dial Twilio refused spends none of the person's attempts (Codex roun
 
   it("rings them after an outage as long as the outage lasted", async () => {
     const { store, deps } = setup();
-    const noGap: OutboundLanePolicy = { ...policy, caps: { ...DEFAULT_ATTEMPT_CAPS, minHoursBetween: 0 } };
+    const noGap: OutboundLanePolicy = {
+      ...policy,
+      caps: { ...DEFAULT_ATTEMPT_CAPS, minHoursBetween: 0 },
+      infraRetryMinutes: 0,
+    };
     deps.twilio.createCall = refuseThen(store, DEFAULT_ATTEMPT_CAPS.total);
     store.addContact({ id: "c1", phone: "+15555550111" });
     for (let i = 0; i < DEFAULT_ATTEMPT_CAPS.total; i++) {
@@ -349,6 +365,7 @@ describe("a dial Twilio refused spends none of the person's attempts (Codex roun
     const oncePerDay: OutboundLanePolicy = {
       ...policy,
       caps: { perDay: 1, perWeek: 3, total: 3, minHoursBetween: 0 },
+      infraRetryMinutes: 0,
     };
     deps.twilio.createCall = refuseThen(store, 1);
     store.addContact({ id: "c1", phone: "+15555550111" });
@@ -410,5 +427,72 @@ describe("nextLookAt", () => {
     // 2041-03-09 is the spring-forward Saturday night into Sunday 2041-03-10.
     const sat = new Date("2041-03-09T19:00:00Z"); // 11 AM PST
     expect(nextLookAt(sat, "daily_cap", policy).toISOString()).toBe("2041-03-10T16:00:00.000Z"); // 9 AM PDT
+  });
+
+  it("retries a Twilio refusal in fifteen minutes, not the person cooldown (Codex round 5, #357)", () => {
+    expect(nextLookAt(NOW, "twilio_refused", policy).toISOString()).toBe(
+      new Date(NOW.getTime() + DEFAULT_INFRA_RETRY_MINUTES * 60 * 1000).toISOString(),
+    );
+    expect(nextLookAt(NOW, "too_soon", policy).toISOString()).toBe(
+      new Date(NOW.getTime() + DEFAULT_ATTEMPT_CAPS.minHoursBetween * 60 * 60 * 1000).toISOString(),
+    );
+  });
+
+  it("lets a campaign set a shorter infrastructure retry", () => {
+    expect(nextLookAt(NOW, "twilio_refused", { ...policy, infraRetryMinutes: 5 }).toISOString()).toBe(
+      new Date(NOW.getTime() + 5 * 60 * 1000).toISOString(),
+    );
+  });
+});
+
+describe("a refused dial is not a contact and is retried shortly (Codex round 5, #357)", () => {
+  it("does not count or mark a contact when Twilio refuses the dial", async () => {
+    const { store, deps } = setup();
+    const refuse = vi.fn(async () => {
+      throw new Error("service unavailable");
+    });
+    deps.twilio.createCall = refuse;
+    store.addContact({ id: "c1", phone: "+15555550111" });
+    await runCampaignTick("test-lane", policy, deps);
+    const c = store.contacts.get("c1")!;
+    expect(c.attempts).toBe(0);
+    expect(c.contacted).toBe(false);
+    expect(c.status).toBe("pending");
+    expect(refuse).toHaveBeenCalledTimes(1);
+    // The attempt row is kept for the audit, but it is not a placed call.
+    expect(store.attempts).toHaveLength(1);
+    expect(store.attempts[0].finish?.status).toBe(NOT_PLACED);
+  });
+
+  it("holds the row for the infrastructure retry, then rings once Twilio accepts", async () => {
+    const { store, deps } = setup();
+    deps.twilio.createCall = vi.fn(async () => {
+      throw new Error("service unavailable");
+    });
+    store.addContact({ id: "c1", phone: "+15555550111" });
+    expect((await runCampaignTick("test-lane", policy, deps)).held).toEqual({ twilio_refused: 1 });
+    // Same instant: still inside the 15-minute retry, so nobody is claimed.
+    expect((await runCampaignTick("test-lane", policy, deps)).dialled).toBe(0);
+    expect(store.contacts.get("c1")!.attempts).toBe(0);
+    expect(store.contacts.get("c1")!.contacted).toBe(false);
+
+    const later = new Date(NOW.getTime() + DEFAULT_INFRA_RETRY_MINUTES * 60 * 1000);
+    deps.twilio.createCall = vi.fn(async () => ({ sid: `CA${"1".repeat(32)}` }));
+    const after = await runCampaignTick("test-lane", policy, { ...deps, now: () => later });
+    expect(after.dialled).toBe(1);
+    expect(store.contacts.get("c1")!.status).toBe("calling");
+    expect(store.contacts.get("c1")!.attempts).toBe(1);
+    expect(store.contacts.get("c1")!.contacted).toBe(true);
+  });
+
+  it("still marks a contact when the CallSid cannot be saved after Twilio accepts", async () => {
+    const { store, deps } = setup();
+    store.setAttemptCallSid = async () => {
+      throw new Error("connection reset");
+    };
+    store.addContact({ id: "c1", phone: "+15555550111" });
+    expect((await runCampaignTick("test-lane", policy, deps)).dialled).toBe(1);
+    expect(store.contacts.get("c1")!.attempts).toBe(1);
+    expect(store.contacts.get("c1")!.contacted).toBe(true);
   });
 });
