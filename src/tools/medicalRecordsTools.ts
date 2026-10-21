@@ -565,8 +565,12 @@ registerTool({
       cap.onClock && (formChannelRaw === 'sms' || formChannelRaw === 'email')
         ? (formChannelRaw as 'sms' | 'email')
         : undefined;
-    const spokenDirections = cap.onClock && formChannelRaw === 'verbal';
-    if (formChannel === 'email' && !str(input.email)) {
+    // Neither the email question nor the spoken directions belong on a request
+    // routed out of Medical Records: no form applies to it, so the model
+    // having offered the link earlier must not cost the caller a question
+    // about an address nobody will use (Codex P2 on #356).
+    const spokenDirections = cap.onClock && !redirect && formChannelRaw === 'verbal';
+    if (formChannel === 'email' && !str(input.email) && !redirect) {
       if (formAskOutcome(callSid, FORM_EMAIL_ASK) === 'spent') {
         // Asked once and no address came. A text to the callback number is the
         // fallback the caller can still act on; if it is a landline the delivery
@@ -1071,7 +1075,9 @@ registerTool({
       // ends rather than a clerk chasing it tomorrow.
       requester_type: cap.requesterType,
       cap_clock_applies: cap.onClock,
-      ...(deliverTo ? {} : { note_destination: 'No destination captured — ask where these should be sent.' }),
+      // Not on a routed-away ticket: there is no records destination to ask
+      // for, and the note would contradict the `fix` below (Codex P2 on #356).
+      ...(deliverTo || redirect ? {} : { note_destination: 'No destination captured — ask where these should be sent.' }),
       ...(redirect
         ? {
             routed_to: redirect.departmentName,

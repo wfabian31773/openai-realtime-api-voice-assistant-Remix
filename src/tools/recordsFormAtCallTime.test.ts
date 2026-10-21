@@ -456,6 +456,39 @@ describe('v103 — a request routed out of Medical Records', () => {
     expect(resend).toHaveBeenCalledTimes(1);
   });
 
+  // Codex P2 x2 on #356: the email gate and the destination note both ran
+  // ahead of, or beside, the redirect.
+  it('a redirected request carrying form_channel "email" and no address still files first time', async () => {
+    const api = await client();
+    const create = vi.spyOn(api, 'createTicket').mockResolvedValueOnce(filed('VA-HUB-V103E'));
+    const r = (await runTool('file_records_ticket', { ...APPOINTMENT, form_channel: 'email', call_sid: freshSid() })) as Out;
+
+    expect(r.success, JSON.stringify(r)).toBe(true);
+    expect(r).not.toHaveProperty('missingFields');
+    expect(create).toHaveBeenCalledTimes(1);
+    expect((create.mock.calls[0][0] as unknown as Record<string, unknown>).formChannel).toBeUndefined();
+  });
+
+  it('a redirected ticket carries no records-destination note and no spoken form directions', async () => {
+    const api = await client();
+    vi.spyOn(api, 'createTicket')
+      .mockResolvedValueOnce(filed('VA-HUB-V103F'))
+      .mockResolvedValueOnce(filed('VA-HUB-V103G'));
+    const plain = (await runTool('file_records_ticket', { ...APPOINTMENT, call_sid: freshSid() })) as Out;
+    expect(plain).not.toHaveProperty('note_destination');
+    const verbal = (await runTool('file_records_ticket', { ...APPOINTMENT, form_channel: 'verbal', call_sid: freshSid() })) as Out;
+    expect(verbal).not.toHaveProperty('form_channel');
+    expect(String(verbal.message)).not.toMatch(/authorization|website/i);
+  });
+
+  it('a records request with no destination still gets the note (the control)', async () => {
+    const api = await client();
+    vi.spyOn(api, 'createTicket').mockResolvedValueOnce(filed('VA-FORM-V103H', { requested: true, sent: true, channel: 'sms' }));
+    const r = (await runTool('file_records_ticket', { ...PATIENT, form_channel: 'sms', call_sid: freshSid() })) as Out;
+    expect(r.success, JSON.stringify(r)).toBe(true);
+    expect(String(r.note_destination)).toMatch(/ask where these should be sent/);
+  });
+
   it('the timeline carries form_applies', () => {
     const src = readFileSync(join(__dirname, '..', 'services', 'toolTimeline.ts'), 'utf8');
     expect(src).toContain("'form_applies',");
