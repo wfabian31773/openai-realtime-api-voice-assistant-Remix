@@ -297,18 +297,27 @@ export const CALLER_SYMPTOM = new RegExp(
  *    escalated since July, and routine business has its own refusal.)
  *  - "lab results", "lab work", "lab test" are a patient's words about their
  *    own care, not a place: "I had lab work I'm calling about".
- * Both exclusions hold through the punctuation and fillers an answer carries
- * ("The optical, uh, lab.", "Optical. Lab.") and in Spanish, where the noun
- * comes first ("resultados del laboratorio", "laboratorio óptico") — review
- * r1 on #359: each of those read as a provider and rang the on-call phone.
+ * Every exclusion holds through the punctuation, sentence breaks and fillers
+ * a spoken answer carries, in both languages: "The optical, uh, lab.",
+ * "Lab, uh, results.", "Resultados, eh, del laboratorio.", "Llamo del
+ * laboratorio, uh, óptico" (Codex r1 and r2 on #359 — each read as a provider
+ * and rang the on-call phone). ONE gap is used at every place two words of an
+ * exclusion meet, so a fifth adjacency cannot be missed. A sentence break
+ * counts as a gap on purpose: "Example lab. Results for Dr. Lin." then does
+ * not count on its own, and that caller is asked which facility — the
+ * direction that does not wake the on-call provider.
+ *
+ * The gap takes ONE separator character or ONE filler word per repetition, so
+ * a long run of dots or spaces cannot backtrack exponentially.
  */
-const FILLER_GAP = String.raw`(?:[\s,.;:!?-]+|uh+|um+|uhm|ah+|erm)*`;
+const FILLER_GAP = String.raw`(?:[\s,.;:!?-]|uhh?|umm?|uhm|ahh?|erm|ehh?|mmm?)*`;
 const LAB_WORD =
   String.raw`(?<!optical${FILLER_GAP})(?:laboratory|lab)` +
-  String.raw`(?! (?:results?|work|tests?|reports?|draws?|orders?|values?|slips?|appointments?)\b)`;
+  String.raw`(?!${FILLER_GAP}(?:results?|work|tests?|reports?|draws?|orders?|values?|slips?|appointments?)\b)`;
+const NOT_OPTICAL_ES = String.raw`(?!${FILLER_GAP}[oó]ptico)`;
 const LABORATORIO =
   String.raw`(?<!(?:resultados?|an[aá]lisis|ex[aá]men(?:es)?|pruebas?|estudios?|[oó]rden(?:es)?|trabajos?|citas?)` +
-  String.raw` (?:de|del|de la)(?: el)? )laboratorio(?! [oó]ptico)`;
+  String.raw`${FILLER_GAP}(?:del|de(?:${FILLER_GAP}la)?)(?:${FILLER_GAP}el)?${FILLER_GAP})laboratorio${NOT_OPTICAL_ES}`;
 const PROVIDER_ROLE =
   String.raw`(?:dr\.?|doctor|doctora|nurse|nurse practitioner|physician|physician assistant|surgeon|resident|` +
   String.raw`ophthalmologist|optometrist|np|pa|rn|md|charge nurse|(?:er|emergency(?: room)?) (?:doctor|physician|nurse))`;
@@ -596,7 +605,10 @@ const PROVIDER_SELF_IDENTIFICATION: RegExp[] = [
   /\bpeer[- ]?to[- ]?peer\b/,
   // Spanish: "soy la doctora", "llamo del hospital", "nuestro paciente"
   /\bsoy (?:el |la |un |una )?(?:doctor|doctora|dr\.?|m[eé]dic[oa]|enfermer[oa])\b/,
-  /\b(?:llamo|hablo|estoy llamando|le llamo|le hablo|llamamos|hablamos) (?:de|del|desde) (?:el |la |un |una )?(?:[a-z\u00e0-\u00ff'.-]+ ){0,4}?(?:hospital|cl[ií]nica|consultorio|laboratorio(?! [oó]ptico)|sala de emergencias?|emergencias|centro m[eé]dico|oficina del (?:doctor|dr\.?))/,
+  new RegExp(
+    String.raw`\b(?:llamo|hablo|estoy llamando|le llamo|le hablo|llamamos|hablamos) (?:de|del|desde) (?:el |la |un |una )?(?:[a-z\u00e0-\u00ff'.-]+ ){0,4}?` +
+      String.raw`(?:hospital|cl[ií]nica|consultorio|laboratorio${NOT_OPTICAL_ES}|sala de emergencias?|emergencias|centro m[eé]dico|oficina del (?:doctor|dr\.?))`,
+  ),
   /\b(?:nuestr[oa]|tengo un[a]?) paciente\b/,
 ];
 

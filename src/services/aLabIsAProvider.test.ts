@@ -125,6 +125,43 @@ describe('review r1 (#359): the exclusions hold through fillers and in Spanish',
   });
 });
 
+describe('review r2 (#359): every exclusion holds through fillers, punctuation and sentence breaks', () => {
+  const both = (answer: string) => {
+    noteCallerTranscript(CALL, ['AGENT: Thank you for calling.', 'CALLER: I need some help.', ASK, `CALLER: ${answer}`]);
+    return { window: corroborate(CALL, '').providerStated, raw: callerSaysTheyAreAProvider([answer]) };
+  };
+
+  it('a patient\'s own lab results with a filler or a break before "results" are not a provider', () => {
+    for (const answer of ['Lab, uh, results.', 'Lab. Results.', 'Laboratory, um, results.', 'My lab, uh, work.']) {
+      expect(both(answer), answer).toEqual({ window: false, raw: false });
+    }
+  });
+
+  it('a Spanish patient\'s results with a filler anywhere before "laboratorio" are not a provider', () => {
+    for (const answer of ['Resultados, uh, del laboratorio.', 'Resultados del, eh, laboratorio.', 'Examen, mm, de laboratorio.']) {
+      expect(both(answer), answer).toEqual({ window: false, raw: false });
+    }
+  });
+
+  it('a Spanish optical lab with a filler before "óptico" is not a provider, introduced or answering', () => {
+    expect(both('Llamo del laboratorio, uh, óptico por unos lentes.')).toEqual({ window: false, raw: false });
+    expect(both('Del laboratorio, eh, óptico.')).toEqual({ window: false, raw: false });
+  });
+
+  it('a real lab with a filler in its answer still counts', () => {
+    expect(both('From Example Diagnostics, uh, lab.').window).toBe(true);
+    expect(both('Yes, Example lab, uh, calling about a patient.').window).toBe(true);
+    expect(both('Del laboratorio, eh, Ejemplo.').window).toBe(true);
+  });
+
+  it('a long run of punctuation or fillers does not stall the matcher', () => {
+    const nasty = 'optical' + '.'.repeat(400) + ' lab' + ', uh'.repeat(200) + ' resultsx laboratorio' + ' mm'.repeat(200) + 'z';
+    const t0 = Date.now();
+    both(nasty);
+    expect(Date.now() - t0).toBeLessThan(500);
+  });
+});
+
 describe('the gate, on the corpus call', () => {
   const reason = 'Diagnostics laboratory calling with stat lab results for the on-call physician';
 
