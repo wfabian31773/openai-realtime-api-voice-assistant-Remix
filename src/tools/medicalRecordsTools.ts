@@ -138,6 +138,23 @@ function formAskOutcome(callSid: string | undefined, field: string): FormAsk {
 const RECORDS_FILED_FACT = 'records_ticket_filed';
 
 /**
+ * Per-call latch: the request filed on this call was ROUTED OUT of Medical
+ * Records (an appointment, a glasses order), so no signing form applies to it.
+ *
+ * The prompt tells the model to offer the link once classify_records_request
+ * confirms a records request, and the route out is only decided at filing — so
+ * the model can have offered a link the ticket can never carry. Measured
+ * 2026-09-28..10-19 on the records lane: 24 of 462 calls were routed away, 8 of
+ * those 24 were offered a signing link, and 3 then heard "the records team
+ * will send the form to you instead" from a re-send the ticketing app had
+ * correctly refused (CAcd3cb871e27852961800131082473100 to Optical,
+ * CA84db2ea14706c3594cd31b1293f53c58 to the HVA Hub). Kept apart from
+ * RECORDS_FILED_FACT so the re-send can refuse with the true reason instead of
+ * asking the app and repeating a promise nobody will keep.
+ */
+const RECORDS_ROUTED_AWAY_FACT = 'records_ticket_routed_away';
+
+/**
  * THE FORM AT CALL TIME — owner, 2026-09-27.
  *
  * *"Any patient that is requesting their records should be redirected directly
@@ -548,8 +565,12 @@ registerTool({
       cap.onClock && (formChannelRaw === 'sms' || formChannelRaw === 'email')
         ? (formChannelRaw as 'sms' | 'email')
         : undefined;
-    const spokenDirections = cap.onClock && formChannelRaw === 'verbal';
-    if (formChannel === 'email' && !str(input.email)) {
+    // Neither the email question nor the spoken directions belong on a request
+    // routed out of Medical Records: no form applies to it, so the model
+    // having offered the link earlier must not cost the caller a question
+    // about an address nobody will use (Codex P2 on #356).
+    const spokenDirections = cap.onClock && !redirect && formChannelRaw === 'verbal';
+    if (formChannel === 'email' && !str(input.email) && !redirect) {
       if (formAskOutcome(callSid, FORM_EMAIL_ASK) === 'spent') {
         // Asked once and no address came. A text to the callback number is the
         // fallback the caller can still act on; if it is a landline the delivery
@@ -585,7 +606,17 @@ registerTool({
     // THE FORM COLLECTS DESTINATION AND DATES, better than the phone does
     // (owner, 2026-09-27, doc 17 decision 2), so the gate stands down when a
     // link is going out. A caller who declines the link still gets both asks.
-    if (cap.onClock && !formChannel) {
+    //
+    // AND IT STANDS DOWN FOR A REQUEST ROUTED OUT OF MEDICAL RECORDS (v103).
+    // Destination and dates exist for the `mr_cases` row, and a ticket filed
+    // with another team never opens one — so asking a caller who rang to
+    // confirm an appointment "where should these be sent, and which dates?"
+    // is a records question about a request that is not one. Measured
+    // 2026-09-28..10-19: 16 of the 24 records-lane calls routed out of
+    // Medical Records took this refusal (CA84db2ea14706c3594cd31b1293f53c58,
+    // an appointment confirmation, is the worked example). `redirect` is
+    // decided above, once, on the same words.
+    if (cap.onClock && !formChannel && !redirect) {
       const gaps: string[] = [];
       if (!str(input.deliver_to)) gaps.push('deliver_to');
       if (!str(input.date_range)) gaps.push('date_range');
@@ -1000,8 +1031,10 @@ registerTool({
       return postFailureToolResult(res, 'file_records_ticket');
     }
 
-    // A records request exists on this call: `send_records_form` may now re-send.
-    noteCallFact(callSid, RECORDS_FILED_FACT);
+    // A records request exists on this call: `send_records_form` may now
+    // re-send. A request routed out of Medical Records is not one — it
+    // carries no form — so it gets its own fact and the re-send refuses it.
+    noteCallFact(callSid, redirect ? RECORDS_ROUTED_AWAY_FACT : RECORDS_FILED_FACT);
 
     const sendForm = Boolean(formChannel) && !redirect;
     const formSent = sendForm && res.form?.sent === true;
@@ -1042,9 +1075,22 @@ registerTool({
       // ends rather than a clerk chasing it tomorrow.
       requester_type: cap.requesterType,
       cap_clock_applies: cap.onClock,
-      ...(deliverTo ? {} : { note_destination: 'No destination captured — ask where these should be sent.' }),
+      // Not on a routed-away ticket: there is no records destination to ask
+      // for, and the note would contradict the `fix` below (Codex P2 on #356).
+      ...(deliverTo || redirect ? {} : { note_destination: 'No destination captured — ask where these should be sent.' }),
       ...(redirect
-        ? { routed_to: redirect.departmentName, routed_department_id: redirect.departmentId }
+        ? {
+            routed_to: redirect.departmentName,
+            routed_department_id: redirect.departmentId,
+            form_applies: false,
+            // The model channel, not `message` (v43). The link may already
+            // have been offered on the prompt's say-so before this answer.
+            fix:
+              `This request was routed to the ${redirect.departmentName} team, not Medical Records, so no ` +
+              `signing form applies to it. Do not offer a link, do not ask text or email, and do not call ` +
+              `send_records_form. If you already offered a link, tell the caller no form is needed for this ` +
+              `request and that the ${redirect.departmentName} team will follow up.`,
+          }
         : {}),
       message: redirect
         ? `Filed as ${res.ticketNumber} with our ${redirect.departmentName} team. Read the ticket number back and say that team will follow up.`
@@ -1106,6 +1152,19 @@ registerTool({
     const channel = str(input.channel).toLowerCase();
     if (channel !== 'sms' && channel !== 'email') {
       return refuse('channel must be "sms" or "email"', { fix: 'Call again with channel "sms" or "email".' });
+    }
+    if (!callFactNoted(callSid, RECORDS_FILED_FACT) && callFactNoted(callSid, RECORDS_ROUTED_AWAY_FACT)) {
+      // The request on this call left Medical Records, so there is nothing to
+      // sign. Refused here rather than asked of the ticketing app, whose
+      // (correct) refusal used to come back as "the records team will send the
+      // form to you instead" — a promise to a caller whose ticket is with
+      // another team. The message is true, so it may be spoken.
+      return refuse('the request on this call was routed out of Medical Records', {
+        message: 'This request went to another team, so there is no form for you to sign — they will follow up with you.',
+        fix:
+          'The request filed on this call was routed out of Medical Records (see routed_to on the filing), so ' +
+          'no signing form applies. Do not offer a link again and do not call send_records_form again.',
+      });
     }
     if (!callFactNoted(callSid, RECORDS_FILED_FACT)) {
       // No `message`: an instruction to the model must never sit in the channel

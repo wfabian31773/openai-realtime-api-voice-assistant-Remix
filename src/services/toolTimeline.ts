@@ -294,6 +294,10 @@ function summarizeResult(tool: string, resultJson: string): Record<string, unkno
     // whether the ticketing app confirmed the link went out. Both PHI-free.
     'form_channel',
     'form_sent',
+    // v103: a records filing ROUTED OUT of Medical Records answers
+    // `form_applies: false`, so "how often is a routed-away caller offered a
+    // link" is a count, not a transcript scan. A boolean, no PHI.
+    'form_applies',
     /**
      * WHY escalate_to_human was refused (one of the gate's three codes) and
      * whether the refusal FILED the ticket (2026-09-29). Both PHI-free. Until

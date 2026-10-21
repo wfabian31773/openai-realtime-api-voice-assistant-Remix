@@ -24,6 +24,7 @@ const fact = (over: Partial<ConsoleFactRow> = {}): ConsoleFactRow => ({
   event_name: 'Follow Up',
   is_cancelled: false,
   is_rescheduled: false,
+  is_kept: null,
   person_id: '00000000-0000-4000-8000-0000000000aa',
   equipment_only: false,
   location_name: 'Azul Vision San Bernardino',
@@ -102,10 +103,21 @@ describe('doctor type feeds the surgeon rule exactly as the Hub column did', () 
 });
 
 describe('the row buildContext receives', () => {
-  it('is Active unless the Console says cancelled, and there is no NoShow (operator, 2026-10-01)', () => {
+  it('follows the NextGen Bible §2 order: kept > rescheduled > cancelled (rewritten for v104)', () => {
+    // Until v104 this asserted a moved appointment was Active — which is how a
+    // caller heard about an appointment NextGen had already moved.
     expect(toScheduleRow(fact()).appointmentStatus).toBe('Active');
     expect(toScheduleRow(fact({ is_cancelled: true })).appointmentStatus).toBe('Removed');
-    expect(toScheduleRow(fact({ is_rescheduled: true })).appointmentStatus).toBe('Active');
+    expect(toScheduleRow(fact({ is_rescheduled: true })).appointmentStatus).toBe('Removed');
+    expect(toScheduleRow(fact({ is_rescheduled: true, is_cancelled: true })).appointmentStatus).toBe('Removed');
+    // Kept wins even on a rescheduled row: the screen shows it Kept (Bible §2.1).
+    expect(toScheduleRow(fact({ is_rescheduled: true, is_kept: true })).appointmentStatus).toBe('Active');
+  });
+  it('carries the kept flag as it came, unknown included', () => {
+    expect(toScheduleRow(fact({ is_kept: true })).appointmentKept).toBe(true);
+    expect(toScheduleRow(fact({ is_kept: false })).appointmentKept).toBe(false);
+    expect(toScheduleRow(fact()).appointmentKept).toBeNull();
+    expect(FACTS_FOR_PERSON_SQL).toMatch(/f\.is_kept/);
   });
   it('carries the Hub labels, the HHMM start, the computed end, and the person', () => {
     const row = toScheduleRow(fact());
