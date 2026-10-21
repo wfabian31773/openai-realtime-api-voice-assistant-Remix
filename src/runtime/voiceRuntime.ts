@@ -1314,6 +1314,7 @@ export function mountVoiceRuntime(
             slug: entry.slug,
             callerPhone: entry.callerPhone,
             dialedNumber: entry.dialedNumber,
+            ...(entry.outbound ? { direction: "outbound" as const } : {}),
             agentVersion: lane.version,
             startedAtMs,
           },

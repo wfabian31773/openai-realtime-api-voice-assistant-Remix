@@ -2458,7 +2458,16 @@ describe("a call the runtime dialled (src/runtime/outbound/)", () => {
     const store = new FakeOutboundStore();
     const attemptId = await dialled(store);
     const fetchPrecontext = vi.fn(async () => ({ matched: true, firstName: "Somebody Else" }));
-    const h = await harness({ laneSource: outboundLane(), outboundStore: store, fetchPrecontext });
+    const opened: Record<string, unknown>[] = [];
+    const h = await harness({
+      laneSource: outboundLane(),
+      outboundStore: store,
+      fetchPrecontext,
+      openCallRow: async (row) => {
+        opened.push(row as Record<string, unknown>);
+        return "row-1";
+      },
+    });
     const answered = await answer(h, "test-lane", attemptId, "CA90");
     const { ws } = await openStream(h, "CA90", tokenFrom(answered.text));
     await waitFor(() => h.transports.length === 1, "the provider transport");
@@ -2475,6 +2484,10 @@ describe("a call the runtime dialled (src/runtime/outbound/)", () => {
     ws.close();
     await waitFor(() => h.persisted.length === 1, "the call record");
     expect(h.persisted[0]).toMatchObject({ direction: "outbound", callerPhone: PATIENT, dialedNumber: OURS });
+    // The row OPENED at setup is outbound too, with Twilio's ends the right
+    // way round: the teardown upsert never rewrites direction, from or to,
+    // so a row opened as inbound would stay inbound (Codex P1 on #357).
+    expect(opened[0]).toMatchObject({ direction: "outbound", from: OURS, to: PATIENT, dialedNumber: PATIENT });
   });
 
   it("refuses an INBOUND call that reaches an outbound lane", async () => {

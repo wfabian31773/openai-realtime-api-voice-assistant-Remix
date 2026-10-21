@@ -93,6 +93,25 @@ describe("the outbound scheduler", () => {
   });
 });
 
+describe("the old core's appointment-confirmation scheduler", () => {
+  // The Campaigns screen starts THIS, not the executor (Codex P1 on #357).
+  it("refuses a runtime outbound campaign before it takes its lock", () => {
+    const src = readFileSync("src/services/outboundCampaignScheduler.ts", "utf8");
+    const start = src.indexOf("async start(): Promise<void> {");
+    const guard = src.indexOf("campaign?.campaignType === RUNTIME_OUTBOUND_CAMPAIGN_TYPE", start);
+    expect(guard).toBeGreaterThan(start);
+    expect(guard).toBeLessThan(src.indexOf("distributedLockService.acquireLock", start));
+  });
+
+  it("is refused by its start route before a scheduler is created", () => {
+    const src = readFileSync("server/routes.ts", "utf8");
+    const route = src.indexOf("'/api/campaigns/:id/start-outbound-scheduler'");
+    const guard = src.indexOf("campaign.campaignType === 'runtime_outbound'", route);
+    expect(guard).toBeGreaterThan(route);
+    expect(guard).toBeLessThan(src.indexOf("createScheduler({", route));
+  });
+});
+
 describe("the old core's campaign executor", () => {
   it("refuses a runtime outbound campaign before dialling anything", () => {
     const src = readFileSync("server/services/campaignExecutor.ts", "utf8");

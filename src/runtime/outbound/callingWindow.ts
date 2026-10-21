@@ -125,6 +125,10 @@ export function holidaysFor(year: number): string[] {
   dayAfter.setUTCDate(dayAfter.getUTCDate() + 1);
   return [
     observed(year, 1, 1),
+    // When January 1 falls on a Saturday the holiday is observed on the
+    // Friday before, December 31 of THIS year (Codex P2 on #357). The filter
+    // below drops this year's own New Year when it lands in the year before.
+    observed(year + 1, 1, 1),
     nthWeekday(year, 1, 1, 3),
     nthWeekday(year, 2, 1, 3),
     lastWeekday(year, 5, 1),
@@ -136,8 +140,8 @@ export function holidaysFor(year: number): string[] {
     thanksgiving,
     iso(dayAfter),
     observed(year, 12, 25),
-    ...PRACTICE_CLOSURES.filter((d) => d.startsWith(`${year}-`)),
-  ];
+    ...PRACTICE_CLOSURES,
+  ].filter((d) => d.startsWith(`${year}-`));
 }
 
 /** One-off practice closures, YYYY-MM-DD. Human-edited on purpose. */

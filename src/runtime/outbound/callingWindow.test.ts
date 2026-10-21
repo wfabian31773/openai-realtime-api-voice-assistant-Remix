@@ -37,6 +37,17 @@ describe("holidays", () => {
     expect(h).toContain("2026-11-27");
   });
 
+  it("closes December 31 when the next New Year's Day is a Saturday", () => {
+    // January 1, 2028 is a Saturday, so the federal holiday is observed on
+    // Friday, December 31, 2027 (Codex P2 on #357). And that observed day
+    // belongs to 2027, not to 2028's own list.
+    expect(isHoliday("2027-12-31")).toBe(true);
+    expect(holidaysFor(2028)).not.toContain("2027-12-31");
+    expect(holidaysFor(2028)).not.toContain("2028-01-01");
+    // An ordinary year still observes its own New Year's Day.
+    expect(isHoliday("2027-01-01")).toBe(true);
+  });
+
   it("does not close an ordinary Tuesday", () => {
     expect(isHoliday("2041-03-05")).toBe(false);
   });

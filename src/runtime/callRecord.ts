@@ -453,6 +453,11 @@ export async function openRuntimeCall(
     slug: string;
     callerPhone: string;
     dialedNumber: string;
+    /** A call this runtime DIALLED. The row is opened with Twilio's from/to
+     * the right way round, and the teardown upsert cannot repair it later:
+     * `toConflictUpdate` deliberately leaves direction and both ends alone
+     * (Codex P1 on #357). */
+    direction?: "inbound" | "outbound";
     agentVersion?: string | null;
     /** When the stream was claimed — NOT when this insert runs. */
     startedAtMs: number;
