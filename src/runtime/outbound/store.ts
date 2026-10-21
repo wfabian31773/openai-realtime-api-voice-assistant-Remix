@@ -36,6 +36,8 @@
 
 import type { OutboundContact } from "./campaign";
 import { RUNTIME_OUTBOUND_CAMPAIGN_TYPE } from "./campaign";
+import type { CallbackCandidate } from "./callback";
+import { nameKey } from "../../tools/verifiedIdentity";
 
 /** Statuses a contact may be dialled from. Everything else is either in
  * progress ('calling') or settled. */
@@ -100,8 +102,17 @@ export interface SettleOptions {
   nextAttemptAt?: Date | null;
   onlyIfCalling?: boolean;
   onlyIfCurrentAttempt?: string;
+  /** A no-op when the row is already in one of these statuses. A returned
+   * call's outcome supersedes every earlier one but an opt-out. */
+  exceptStatus?: readonly ContactStatus[];
+  /** A no-op unless the row is in one of these statuses. */
+  onlyIfStatusIn?: readonly ContactStatus[];
   notes?: string;
 }
+
+/** The attempt_number written on a returned call: it is not a dial, so it
+ * is not one of the person's attempts and no cap counts it. */
+export const CALLBACK_ATTEMPT_NUMBER = 0;
 
 export interface OutboundStore {
   /** The campaigns row for this key, created on first use. Null when the
@@ -172,6 +183,43 @@ export interface OutboundStore {
   reapStaleClaims(campaignId: string, before: Date, nextAttemptAt: Date): Promise<number>;
   isDoNotContact(phone: string): Promise<boolean>;
   stampDoNotContact(phone: string, source: string): Promise<void>;
+  /**
+   * A RETURNED CALL (./callback.ts): the campaign's id, and every contact on
+   * its list whose number reads as the caller's ten digits, each with the
+   * newest dial that reached the network. Never creates the campaign — a
+   * campaign that has never run has nobody on its list.
+   */
+  callbackCandidates(
+    campaignKey: string,
+    phone: string,
+  ): Promise<{ campaignId: string | null; candidates: CallbackCandidate[] }>;
+  /** This campaign's contacts with this first and last name, folded the way
+   * the identity store folds names. For a caller ringing from another phone. */
+  contactsByName(campaignId: string, firstName: string, lastName: string): Promise<CallbackCandidate[]>;
+  /**
+   * The returned call, written as an INBOUND attempt on the contact once the
+   * caller is identified: the history says they called back, and
+   * callOpenOnPhone sees the call so the dialler does not ring them while
+   * they are on the line with us. Spends no cap (CALLBACK_ATTEMPT_NUMBER;
+   * priorAttempts reads outbound attempts only).
+   */
+  openCallbackAttempt(contactId: string, campaignId: string, callSid: string): Promise<string>;
+}
+
+/** A candidate from a contact row plus its newest placed dial. Pure. */
+export function rowToCandidate(r: Record<string, unknown>): CallbackCandidate {
+  const c = rowToContact(r);
+  return {
+    contactId: c.id,
+    campaignId: c.campaignId,
+    phone: c.phone,
+    firstName: c.firstName,
+    lastName: c.lastName,
+    status: c.status,
+    data: c.customData,
+    lastAttemptAt: r.last_attempt_at ? new Date(r.last_attempt_at as string) : null,
+    lastAttemptStatus: (r.last_attempt_status as string | null) ?? null,
+  };
 }
 
 /** Ten digits, the repo's one phone identity (src/utils/phone.ts). The
@@ -237,6 +285,32 @@ export async function createDbOutboundStore(): Promise<OutboundStore> {
 
   const rows = (result: unknown): Record<string, unknown>[] =>
     ((result as { rows?: unknown[] }).rows ?? []) as Record<string, unknown>[];
+
+  /** A status list as one comma-joined text, or null for "no condition". */
+  const csv = (list: readonly string[] | undefined): string | null =>
+    list && list.length > 0 ? list.join(",") : null;
+
+  /** The newest dial on a contact that reached the network, as columns. */
+  const lastPlacedDial = sql`
+    LEFT JOIN LATERAL (
+      SELECT (a.attempted_at AT TIME ZONE 'UTC') AS last_attempt_at, a.status AS last_attempt_status
+        FROM campaign_contact_attempts a
+       WHERE a.contact_id = c.id AND a.direction = 'outbound'
+         AND a.status IS DISTINCT FROM ${NOT_PLACED}::varchar
+       ORDER BY a.attempted_at DESC, a.id DESC
+       LIMIT 1) la ON true`;
+
+  const campaignIdFor = async (campaignKey: string): Promise<string | null> => {
+    const found = rows(
+      await db.execute(sql`
+        SELECT id FROM campaigns
+         WHERE name = ${campaignKey}::varchar
+           AND campaign_type = ${RUNTIME_OUTBOUND_CAMPAIGN_TYPE}::varchar
+           AND deleted_at IS NULL
+         ORDER BY created_at LIMIT 1`),
+    );
+    return found[0] ? String(found[0].id) : null;
+  };
 
   return {
     async ensureCampaign(campaignKey, agentSlug) {
@@ -359,14 +433,16 @@ export async function createDbOutboundStore(): Promise<OutboundStore> {
       const found = rows(
         await db.execute(sql`
           -- Every campaign, not only this one: the same ten digits on any
-          -- contact row, with a dialled attempt that has not ended.
+          -- contact row, with a call that has not ended — a dial we placed,
+          -- or the person calling us back (an inbound attempt, ./callback.ts).
           SELECT EXISTS (
             SELECT 1
               FROM campaign_contacts me
               JOIN campaign_contacts c
                 ON right(regexp_replace(c.phone_number, '[^0-9]', '', 'g'), 10)
                  = right(regexp_replace(me.phone_number, '[^0-9]', '', 'g'), 10)
-              JOIN campaign_contact_attempts a ON a.contact_id = c.id AND a.direction = 'outbound'
+              JOIN campaign_contact_attempts a
+                ON a.contact_id = c.id AND a.direction IN ('outbound', 'inbound')
              WHERE me.id = ${contactId}::varchar
                AND a.ended_at IS NULL
                AND a.attempted_at >= ${utc(since)}
@@ -448,6 +524,12 @@ export async function createDbOutboundStore(): Promise<OutboundStore> {
                  updated_at = NOW()
            WHERE id = ${contactId}::varchar
              AND (${!opts.onlyIfCalling}::boolean OR outreach_status = 'calling')
+             -- Status lists travel as one comma-joined text and are split in
+             -- SQL: a bound JS array is not a portable parameter here.
+             AND (${csv(opts.exceptStatus)}::text IS NULL
+                  OR NOT (outreach_status::text = ANY (string_to_array(${csv(opts.exceptStatus)}::text, ','))))
+             AND (${csv(opts.onlyIfStatusIn)}::text IS NULL
+                  OR outreach_status::text = ANY (string_to_array(${csv(opts.onlyIfStatusIn)}::text, ',')))
              AND (${opts.onlyIfCurrentAttempt ?? null}::varchar IS NULL
                   OR ${opts.onlyIfCurrentAttempt ?? null}::varchar = (
                        SELECT x.id FROM campaign_contact_attempts x
@@ -499,6 +581,57 @@ export async function createDbOutboundStore(): Promise<OutboundStore> {
         await db.execute(sql`SELECT 1 FROM do_not_contact WHERE phone_key = ${key}::varchar`),
       );
       return found.length > 0;
+    },
+
+    async callbackCandidates(campaignKey, phone) {
+      const campaignId = await campaignIdFor(campaignKey);
+      const key = dncKey(phone);
+      if (!campaignId || !key) return { campaignId, candidates: [] };
+      const found = rows(
+        await db.execute(sql`
+          SELECT c.*, la.last_attempt_at, la.last_attempt_status
+            FROM campaign_contacts c
+            ${lastPlacedDial}
+           WHERE c.campaign_id = ${campaignId}::varchar
+             AND right(regexp_replace(c.phone_number, '[^0-9]', '', 'g'), 10) = ${key}::varchar
+           ORDER BY la.last_attempt_at DESC NULLS LAST, c.created_at
+           LIMIT 20`),
+      );
+      return { campaignId, candidates: found.map(rowToCandidate) };
+    },
+
+    async contactsByName(campaignId, firstName, lastName) {
+      // Narrowed in SQL by the surname's first letter, then matched exactly
+      // in JS with the identity store's folding — accents and hyphens are
+      // folded there, not in SQL. Bounded, because a common initial is not.
+      const initial = nameKey(lastName).charAt(0);
+      if (!initial) return [];
+      const found = rows(
+        await db.execute(sql`
+          SELECT c.*, la.last_attempt_at, la.last_attempt_status
+            FROM campaign_contacts c
+            ${lastPlacedDial}
+           WHERE c.campaign_id = ${campaignId}::varchar
+             AND lower(left(trim(c.last_name), 1)) = ${initial}::varchar
+           LIMIT 500`),
+      );
+      const first = nameKey(firstName);
+      const last = nameKey(lastName);
+      return found
+        .map(rowToCandidate)
+        .filter((c) => nameKey(c.firstName ?? undefined) === first && nameKey(c.lastName ?? undefined) === last);
+    },
+
+    async openCallbackAttempt(contactId, campaignId, callSid) {
+      const inserted = rows(
+        await db.execute(sql`
+          INSERT INTO campaign_contact_attempts
+            (contact_id, campaign_id, attempt_number, direction, status, call_sid, answered_at, answered_by)
+          VALUES (${contactId}::varchar, ${campaignId}::varchar, ${CALLBACK_ATTEMPT_NUMBER}::int,
+                  'inbound', 'answered', ${callSid}::varchar, NOW(), 'human')
+          RETURNING id`),
+      );
+      return String(inserted[0].id);
     },
 
     async stampDoNotContact(phone, source) {

@@ -2490,15 +2490,99 @@ describe("a call the runtime dialled (src/runtime/outbound/)", () => {
     expect(opened[0]).toMatchObject({ direction: "outbound", from: OURS, to: PATIENT, dialedNumber: PATIENT });
   });
 
-  it("refuses an INBOUND call that reaches an outbound lane", async () => {
-    const store = new FakeOutboundStore();
+  /**
+   * A RETURNED CALL IS ANSWERED BY THE SAME LANE (v106). v105 refused this
+   * call and the person heard "unavailable"; the operator's rule is that the
+   * agent handles it and knows who is on the line and why (outbound/callback.ts).
+   */
+  async function returnedCall(store: FakeOutboundStore, callSid: string, from = PATIENT) {
     const h = await harness({ laneSource: outboundLane(), outboundStore: store });
-    const answered = await post(h, "/voice/test-lane", { CallSid: "CA91", From: PATIENT, To: OURS });
-    await openStream(h, "CA91", tokenFrom(answered.text));
-    await settle(8);
-    expect(h.transports).toHaveLength(0);
-    expect(seenMetadata).toHaveLength(0);
-    expect(h.persisted.find((r) => r.callSid === "CA91")?.outcome).toBe("provider_failure");
+    const answered = await post(h, "/voice/test-lane", { CallSid: callSid, From: from, To: OURS });
+    const { ws } = await openStream(h, callSid, tokenFrom(answered.text));
+    await waitFor(() => h.transports.length === 1, "the provider transport");
+    await settle(4);
+    h.transports[0].emit({ type: "session.created" } as GrokServerEvent);
+    await settle(4);
+    h.transports[0].emit({ type: "session.updated" } as GrokServerEvent);
+    await settle(4);
+    const update = h.transports[0].sent.find((m) => m.type === "session.update") as
+      | { session: { instructions: string; tools: Array<{ name: string }> } }
+      | undefined;
+    return { h, ws, update };
+  }
+
+  it("answers an INBOUND call on an outbound lane as the person ringing back, and confirms them by first name", async () => {
+    const store = new FakeOutboundStore();
+    await dialled(store);
+    const { h, ws, update } = await returnedCall(store, "CA91");
+    expect(spokenText(h)).toEqual([
+      "Thank you for calling Azul Vision. This is an automated assistant. This call is recorded. Am I speaking with Testa?",
+    ]);
+    // The agent knows who the number belongs to and why we called — as a
+    // candidate, with nothing said until they are identified.
+    expect(seenMetadata[0].callback).toMatchObject({
+      campaignKey: "test-campaign",
+      campaignId: "campaign-1",
+      callerPhone: PATIENT,
+      match: { kind: "one", contact: { contactId: "c1", firstName: "Testa" } },
+    });
+    expect(seenMetadata[0].outbound).toBeUndefined();
+    expect(update?.session.instructions).toContain("### Returned call");
+    expect(update?.session.instructions).toContain('call identify_callback_caller with first_name "Testa"');
+    expect(update?.session.tools.map((t) => t.name)).toEqual(
+      expect.arrayContaining(["identify_callback_caller", "opt_out_of_calls", "record_call_outcome", "end_call"]),
+    );
+    ws.close();
+    await waitFor(() => h.persisted.some((r) => r.callSid === "CA91"), "the call record");
+    // An ordinary inbound call record: from them, to us.
+    expect(h.persisted.find((r) => r.callSid === "CA91")).toMatchObject({ callerPhone: PATIENT, dialedNumber: OURS });
+    expect(h.persisted.find((r) => r.callSid === "CA91")?.outcome).not.toBe("provider_failure");
+  });
+
+  it("asks who is calling when the number belongs to more than one person, and never names them", async () => {
+    const store = new FakeOutboundStore();
+    store.addContact({ id: "c1", phone: PATIENT, firstName: "Testa", lastName: "One" });
+    store.addContact({ id: "c2", phone: PATIENT, firstName: "Other", lastName: "Two" });
+    const { h, ws, update } = await returnedCall(store, "CA94");
+    expect(spokenText(h)).toEqual([
+      "Thank you for calling Azul Vision. This is an automated assistant. This call is recorded. May I have your first and last name?",
+    ]);
+    expect(update?.session.instructions).toContain("more than one person we called");
+    expect(update?.session.instructions).not.toContain("Testa");
+    expect(update?.session.instructions).not.toContain("Other");
+    ws.close();
+  });
+
+  it("asks who is calling when the number is not on the list — they may be ringing from another phone", async () => {
+    const store = new FakeOutboundStore();
+    await dialled(store);
+    const { h, ws, update } = await returnedCall(store, "CA95", "+15555550199");
+    expect(spokenText(h)[0]).toMatch(/May I have your first and last name\?$/);
+    expect(update?.session.instructions).toContain("This number is not one we called");
+    ws.close();
+  });
+
+  it("writes the identified caller's returned call into the campaign's history, and ends it at hangup", async () => {
+    const store = new FakeOutboundStore();
+    await dialled(store);
+    await store.finishAttempt(store.attempts[0].id, { status: "voicemail" });
+    await store.settleContact("c1", "voicemail");
+    const { h, ws } = await returnedCall(store, "CA96");
+    const { getTool } = await import("../tools/registry");
+    const r = await getTool("identify_callback_caller")!.handler({
+      outbound_callback_sid: "CA96",
+      first_name: "Testa",
+    });
+    expect(r).toMatchObject({ success: true, identified: true });
+    const inbound = store.attempts.find((a) => a.direction === "inbound");
+    expect(inbound).toMatchObject({ contactId: "c1", callSid: "CA96" });
+    expect(inbound?.endedAt).toBeUndefined();
+    ws.close();
+    await waitFor(() => store.attempts.find((a) => a.direction === "inbound")?.endedAt !== undefined, "the returned call ended");
+    // Identified, no outcome recorded: answered, so the dialler does not ring
+    // somebody who has just spoken with us.
+    expect(store.contacts.get("c1")!.status).toBe("answered");
+    void h;
   });
 
   it("refuses a dialled call that reaches an inbound lane", async () => {

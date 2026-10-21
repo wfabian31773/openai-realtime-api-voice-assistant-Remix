@@ -123,7 +123,9 @@ describe("the attempt row keeps the answer webhook's verdict", () => {
     expect(open).toContain("= right(regexp_replace(me.phone_number, '[^0-9]', '', 'g'), 10)");
     // …with no campaign restriction at all.
     expect(open).not.toContain("campaign_id");
-    expect(open).toContain("a.direction = 'outbound'");
+    // A dial we placed, or the person calling us back (v106): either is a
+    // call on that phone, and the dialler must not ring into it.
+    expect(open).toContain("a.direction IN ('outbound', 'inbound')");
     expect(open).toContain("AND a.ended_at IS NULL");
     expect(open).toContain("AND a.attempted_at >= ${utc(since)}");
   });
@@ -171,5 +173,43 @@ describe("a row read back", () => {
       nextAttemptAt: null,
       customData: {},
     });
+  });
+});
+
+describe("a returned call (v106, ./callback.ts)", () => {
+  it("finds the caller on this campaign's list by their ten digits, and never creates the campaign", () => {
+    const found = method("callbackCandidates");
+    expect(found).toContain("WHERE c.campaign_id = ${campaignId}::varchar");
+    expect(found).toContain("right(regexp_replace(c.phone_number, '[^0-9]', '', 'g'), 10) = ${key}::varchar");
+    expect(found).not.toContain("INSERT");
+    // An unreadable number finds nobody rather than everybody.
+    expect(found).toContain("if (!campaignId || !key) return { campaignId, candidates: [] };");
+  });
+
+  it("describes the last call by the newest dial that reached the network", () => {
+    expect(SRC).toMatch(/LEFT JOIN LATERAL \(\s+SELECT \(a\.attempted_at AT TIME ZONE 'UTC'\) AS last_attempt_at/);
+    const lateral = SRC.slice(SRC.indexOf("const lastPlacedDial"), SRC.indexOf("const campaignIdFor"));
+    expect(lateral).toContain("a.direction = 'outbound'");
+    expect(lateral).toContain("a.status IS DISTINCT FROM ${NOT_PLACED}::varchar");
+    expect(lateral).toContain("ORDER BY a.attempted_at DESC, a.id DESC");
+  });
+
+  it("finds a caller ringing from another phone only within this campaign, matched exactly in code", () => {
+    const byName = method("contactsByName");
+    expect(byName).toContain("WHERE c.campaign_id = ${campaignId}::varchar");
+    expect(byName).toContain("LIMIT 500");
+    expect(byName).toContain("nameKey(c.firstName ?? undefined) === first && nameKey(c.lastName ?? undefined) === last");
+  });
+
+  it("writes the returned call as an INBOUND attempt that is not one of the person's dials", () => {
+    const opened = method("openCallbackAttempt");
+    expect(opened).toContain("'inbound', 'answered'");
+    expect(opened).toContain("${CALLBACK_ATTEMPT_NUMBER}::int");
+  });
+
+  it("lets a settle skip a status it must never overwrite, and require one it may", () => {
+    const settle = method("settleContact");
+    expect(settle).toContain("NOT (outreach_status::text = ANY (string_to_array(${csv(opts.exceptStatus)}::text, ',')))");
+    expect(settle).toContain("outreach_status::text = ANY (string_to_array(${csv(opts.onlyIfStatusIn)}::text, ','))");
   });
 });

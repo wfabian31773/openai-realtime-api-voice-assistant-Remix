@@ -4,7 +4,10 @@
  * it is still dialable and due, and only one caller gets it.
  */
 import type { OutboundContact } from "./campaign";
+import type { CallbackCandidate } from "./callback";
+import { nameKey } from "../../tools/verifiedIdentity";
 import {
+  CALLBACK_ATTEMPT_NUMBER,
   DIALABLE_STATUSES,
   NOT_PLACED,
   dncKey,
@@ -21,6 +24,8 @@ export interface FakeAttempt {
   contactId: string;
   campaignId: string;
   attemptNumber: number;
+  /** "outbound" unless written by openCallbackAttempt. */
+  direction?: "outbound" | "inbound";
   at: Date;
   callSid?: string;
   finish?: AttemptFinish;
@@ -32,6 +37,9 @@ export class FakeOutboundStore implements OutboundStore {
   attempts: FakeAttempt[] = [];
   dnc = new Map<string, string>();
   campaignId = "campaign-1";
+  /** The campaign key ensureCampaign/callbackCandidates answer for; any key
+   * when null (the dialer's tests never name one). */
+  campaignKey: string | null = null;
   agentRowMissing = false;
   private seq = 0;
 
@@ -103,7 +111,7 @@ export class FakeOutboundStore implements OutboundStore {
     // refused spends nothing.
     const siblings = this.samePhone(contactId, false);
     return this.attempts
-      .filter((a) => siblings.has(a.contactId) && a.finish?.status !== NOT_PLACED)
+      .filter((a) => siblings.has(a.contactId) && (a.direction ?? "outbound") === "outbound" && a.finish?.status !== NOT_PLACED)
       .map((a) => ({ at: a.at }));
   }
 
@@ -111,7 +119,7 @@ export class FakeOutboundStore implements OutboundStore {
     // Same rule as the SQL: this contact row, trailing not_placed only,
     // inside the window.
     const mine = this.attempts
-      .filter((a) => a.contactId === contactId && a.at >= since)
+      .filter((a) => a.contactId === contactId && (a.direction ?? "outbound") === "outbound" && a.at >= since)
       .slice()
       .sort((a, b) => b.at.getTime() - a.at.getTime() || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0));
     let n = 0;
@@ -123,7 +131,8 @@ export class FakeOutboundStore implements OutboundStore {
   }
 
   async callOpenOnPhone(contactId: string, since: Date): Promise<boolean> {
-    // Same rule as the SQL: the phone in EVERY campaign, still on the line.
+    // Same rule as the SQL: the phone in EVERY campaign, still on the line,
+    // a dial or a returned call alike.
     const siblings = this.samePhone(contactId, true);
     return this.attempts.some((a) => siblings.has(a.contactId) && !a.endedAt && a.at >= since);
   }
@@ -175,9 +184,11 @@ export class FakeOutboundStore implements OutboundStore {
     const c = this.contacts.get(contactId);
     if (!c) return false;
     if (opts.onlyIfCalling && c.status !== "calling") return false;
+    if (opts.exceptStatus?.includes(c.status)) return false;
+    if (opts.onlyIfStatusIn && opts.onlyIfStatusIn.length > 0 && !opts.onlyIfStatusIn.includes(c.status)) return false;
     if (opts.onlyIfCurrentAttempt) {
-      // Same rule as the SQL: the contact's newest attempt.
-      const mine = this.attempts.filter((a) => a.contactId === contactId);
+      // Same rule as the SQL: the contact's newest outbound attempt.
+      const mine = this.attempts.filter((a) => a.contactId === contactId && (a.direction ?? "outbound") === "outbound");
       if (mine[mine.length - 1]?.id !== opts.onlyIfCurrentAttempt) return false;
     }
     c.status = status;
@@ -189,7 +200,7 @@ export class FakeOutboundStore implements OutboundStore {
   async callsInFlight(campaignId: string, since: Date): Promise<number> {
     // Same rule as the SQL: the live attempt, not the contact's status.
     return this.attempts.filter(
-      (a) => a.campaignId === campaignId && !a.endedAt && a.at >= since,
+      (a) => a.campaignId === campaignId && (a.direction ?? "outbound") === "outbound" && !a.endedAt && a.at >= since,
     ).length;
   }
 
@@ -213,5 +224,70 @@ export class FakeOutboundStore implements OutboundStore {
   async stampDoNotContact(phone: string, source: string): Promise<void> {
     const key = dncKey(phone);
     if (key && !this.dnc.has(key)) this.dnc.set(key, source);
+  }
+
+  /** Same rules as the SQL: this campaign's rows on the caller's ten digits,
+   * each with its newest dial that reached the network, newest first. */
+  async callbackCandidates(
+    campaignKey: string,
+    phone: string,
+  ): Promise<{ campaignId: string | null; candidates: CallbackCandidate[] }> {
+    if (this.agentRowMissing || (this.campaignKey !== null && this.campaignKey !== campaignKey)) {
+      return { campaignId: null, candidates: [] };
+    }
+    const key = dncKey(phone);
+    if (!key) return { campaignId: this.campaignId, candidates: [] };
+    const candidates = [...this.contacts.values()]
+      .filter((c) => c.campaignId === this.campaignId && dncKey(c.phone) === key)
+      .map((c) => this.candidate(c.id)!)
+      .sort((a, b) => (b.lastAttemptAt?.getTime() ?? -Infinity) - (a.lastAttemptAt?.getTime() ?? -Infinity));
+    return { campaignId: this.campaignId, candidates };
+  }
+
+  async contactsByName(campaignId: string, firstName: string, lastName: string): Promise<CallbackCandidate[]> {
+    const first = nameKey(firstName);
+    const last = nameKey(lastName);
+    if (!last) return [];
+    return [...this.contacts.values()]
+      .filter(
+        (c) =>
+          c.campaignId === campaignId &&
+          nameKey(c.firstName ?? undefined) === first &&
+          nameKey(c.lastName ?? undefined) === last,
+      )
+      .map((c) => this.candidate(c.id)!);
+  }
+
+  async openCallbackAttempt(contactId: string, campaignId: string, callSid: string): Promise<string> {
+    const id = `attempt-${++this.seq}`;
+    this.attempts.push({
+      id,
+      contactId,
+      campaignId,
+      attemptNumber: CALLBACK_ATTEMPT_NUMBER,
+      direction: "inbound",
+      at: this.clock(),
+      callSid,
+    });
+    return id;
+  }
+
+  private candidate(contactId: string): CallbackCandidate | null {
+    const c = this.contacts.get(contactId);
+    if (!c) return null;
+    const placed = this.attempts
+      .filter((a) => a.contactId === contactId && (a.direction ?? "outbound") === "outbound" && a.finish?.status !== NOT_PLACED)
+      .sort((a, b) => b.at.getTime() - a.at.getTime());
+    return {
+      contactId: c.id,
+      campaignId: c.campaignId,
+      phone: c.phone,
+      firstName: c.firstName,
+      lastName: c.lastName,
+      status: c.status,
+      data: c.customData,
+      lastAttemptAt: placed[0]?.at ?? null,
+      lastAttemptStatus: placed[0]?.finish?.status ?? (placed[0] ? "initiated" : null),
+    };
   }
 }

@@ -90,6 +90,16 @@ export interface OutboundLanePolicy {
    * it back. Pure: no PHI may reach it, so it takes no contact.
    */
   voicemail(): string;
+  /**
+   * Why this campaign called, as the agent says it to somebody who rang
+   * back — ONLY once they are identified (./callback.ts). One sentence,
+   * ending in a full stop. The caller-ID number takes the calls back: its
+   * Twilio Voice URL must point at this lane's /voice/<slug>, and the
+   * dialler will not ring anybody until it does (dialer.callbackRouting).
+   * Optional in the type so a test policy need not carry one; every
+   * registered lane must (outboundLanes.test.ts).
+   */
+  callbackPurpose?: string;
 }
 
 /** Minutes to wait after Twilio refuses a dial before retrying the same

@@ -107,10 +107,13 @@ export function startOutboundScheduler(deps: SchedulerDeps, intervalMs = OUTBOUN
     return () => undefined;
   }
   let running = false;
+  // One per scheduler, so a confirmed callback route is trusted for a while
+  // and a wrong one is logged once rather than every minute.
+  const routeCache = deps.routeCache ?? new Map();
   const timer = setInterval(() => {
     if (running) return; // a slow tick is never overlapped by the next
     running = true;
-    void runOutboundTick(deps).finally(() => {
+    void runOutboundTick({ ...deps, routeCache }).finally(() => {
       running = false;
     });
   }, intervalMs);

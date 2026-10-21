@@ -11,8 +11,10 @@ import {
   resolvedMaxConsecutiveInfraRetries,
 } from "./campaign";
 import {
+  CALLBACK_ROUTE_TTL_MS,
   STALE_CLAIM_MS,
   answerUrl,
+  callbackRoutingProblem,
   isClearTwilioRefusal,
   nextLookAt,
   reapNextAttemptAt,
@@ -53,9 +55,11 @@ function setup(env: Record<string, string> = ON) {
   const store = new FakeOutboundStore(() => NOW);
   let n = 0;
   const createCall = vi.fn(async () => ({ sid: `CA${String(++n).padStart(32, "0")}` }));
-  const twilio: OutboundTwilio = { createCall };
+  // The caller ID's Voice URL points back at the lane, as production's must.
+  const voiceUrlFor = vi.fn(async (_n: string): Promise<string | null> => "https://voice.example.test/voice/test-lane");
+  const twilio: OutboundTwilio = { createCall, voiceUrlFor };
   const deps = { store, twilio, env, host: "voice.example.test", now: () => NOW, log: () => undefined };
-  return { store, createCall, deps };
+  return { store, createCall, voiceUrlFor, deps };
 }
 
 describe("nothing dials unless it is switched on", () => {
@@ -828,5 +832,83 @@ describe("consecutive Twilio refusals fall back to the person cooldown", () => {
       DEFAULT_MAX_CONSECUTIVE_INFRA_RETRIES,
     );
     expect(resolvedMaxConsecutiveInfraRetries({ maxConsecutiveInfraRetries: 2 })).toBe(2);
+  });
+});
+
+
+/**
+ * A CALL BACK TO THE CALLER ID MUST REACH THIS LANE (v106). Operator,
+ * 2026-10-21: "There is no redirect. If a patient calls back, like we expect
+ * them to, the voice agent has to handle that call as well." So nothing is
+ * dialled until the caller-ID number's own Voice URL points at this lane, on
+ * this deployment.
+ */
+describe("the caller ID takes the calls back", () => {
+  it("is confirmed only for this lane's path on this deployment's host", () => {
+    expect(callbackRoutingProblem("https://voice.example.test/voice/test-lane", "voice.example.test", "test-lane")).toBeNull();
+    expect(callbackRoutingProblem("https://VOICE.example.test/voice/test-lane/", "voice.example.test", "test-lane")).toBeNull();
+    expect(callbackRoutingProblem("https://voice.example.test/voice/records", "voice.example.test", "test-lane")).toMatch(
+      /reach \/voice\/records, not \/voice\/test-lane/,
+    );
+    expect(callbackRoutingProblem("https://workspace.example.dev/voice/test-lane", "voice.example.test", "test-lane")).toMatch(
+      /not this deployment/,
+    );
+    expect(callbackRoutingProblem(null, "voice.example.test", "test-lane")).toMatch(/not on this Twilio account/);
+    expect(callbackRoutingProblem("", "voice.example.test", "test-lane")).toMatch(/no usable Voice URL/);
+  });
+
+  it.each([
+    ["another line", "https://voice.example.test/voice/records"],
+    ["a workspace process", "https://workspace.example.dev/voice/test-lane"],
+    ["nowhere on this account", null],
+  ])("dials nobody — and claims nobody — when callbacks would reach %s", async (_what, url) => {
+    const { store, createCall, voiceUrlFor, deps } = setup();
+    voiceUrlFor.mockResolvedValue(url);
+    store.addContact({ id: "c1", phone: "+15555550111" });
+    const r = await runCampaignTick("test-lane", policy, deps);
+    expect(r.skipped).toBeTruthy();
+    expect(createCall).not.toHaveBeenCalled();
+    expect(store.contacts.get("c1")!.status).toBe("pending");
+    expect(store.attempts).toHaveLength(0);
+  });
+
+  it("fails closed when Twilio cannot say where the number points", async () => {
+    const { store, createCall, voiceUrlFor, deps } = setup();
+    voiceUrlFor.mockRejectedValue(new Error("Twilio down"));
+    store.addContact({ id: "c1", phone: "+15555550111" });
+    expect((await runCampaignTick("test-lane", policy, deps)).skipped).toMatch(/could not read/);
+    expect(createCall).not.toHaveBeenCalled();
+  });
+
+  it("asks Twilio about the caller ID itself", async () => {
+    const { store, voiceUrlFor, deps } = setup();
+    store.addContact({ id: "c1", phone: "+15555550111" });
+    await runCampaignTick("test-lane", policy, deps);
+    expect(voiceUrlFor).toHaveBeenCalledWith("+15555550100");
+  });
+
+  it("trusts a confirmed route for a while, and logs a wrong one once rather than every minute", async () => {
+    const { store, voiceUrlFor, deps } = setup();
+    store.addContact({ id: "c1", phone: "+15555550111" });
+    const lines: string[] = [];
+    const routeCache = new Map();
+    const t = { ...deps, routeCache, log: (l: string) => lines.push(l) };
+    await runCampaignTick("test-lane", policy, t);
+    await runCampaignTick("test-lane", policy, t);
+    expect(voiceUrlFor).toHaveBeenCalledTimes(1);
+
+    voiceUrlFor.mockResolvedValue("https://voice.example.test/voice/records");
+    const later = { ...t, now: () => new Date(NOW.getTime() + CALLBACK_ROUTE_TTL_MS + 1) };
+    await runCampaignTick("test-lane", policy, later);
+    await runCampaignTick("test-lane", policy, later);
+    expect(voiceUrlFor).toHaveBeenCalledTimes(3);
+    expect(lines.filter((l) => l.includes("NOT dialling"))).toHaveLength(1);
+  });
+
+  it("is checked only inside the calling window, so Twilio is not asked overnight", async () => {
+    const { voiceUrlFor, deps } = setup();
+    const night = { ...deps, now: () => new Date("2041-03-05T08:00:00Z") }; // midnight Pacific
+    await runCampaignTick("test-lane", policy, night);
+    expect(voiceUrlFor).not.toHaveBeenCalled();
   });
 });

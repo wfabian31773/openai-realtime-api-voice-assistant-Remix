@@ -42,7 +42,15 @@
  * the webhook's signature check also proves the query is the one we sent.
  *
  * NOTHING DIALS unless RUNTIME_OUTBOUND_DIALING=1 AND the campaign's own
- * enable variable is "1" AND a caller-ID number is configured.
+ * enable variable is "1" AND a caller-ID number is configured AND that
+ * number's Twilio Voice URL points back at this lane on this deployment.
+ *
+ * THAT LAST CONDITION IS THE OPERATOR'S RULE, 2026-10-21: "There is no
+ * redirect. If a patient calls back, like we expect them to, the voice agent
+ * has to handle that call as well." The person we ring sees the caller ID and
+ * rings it back, so it must reach the same lane, which answers returned calls
+ * (./callback.ts). A campaign whose callbacks would land on another line, on a
+ * stale workspace process, or nowhere does not dial at all (callbackRouting).
  * ─────────────────────────────────────────────────────────────────────────────
  */
 
@@ -55,6 +63,7 @@ import {
 } from "./campaign";
 import { mayDialNow, pacificParts } from "./callingWindow";
 import { NOT_PLACED, dncKey, type ContactRow, type OutboundStore } from "./store";
+import { VOICE_PATH_PREFIX } from "../voiceWebhook";
 
 export const OUTBOUND_PATH_PREFIX = "/voice/outbound";
 
@@ -78,6 +87,74 @@ export interface OutboundTwilio {
     statusCallbackMethod: "POST";
     statusCallbackEvent: string[];
   }): Promise<{ sid: string }>;
+  /**
+   * The Voice URL configured on one of the account's own numbers, or null
+   * when the number is not on this account. Read before dialling: a call
+   * back to the caller ID goes wherever this points (callbackRouting).
+   */
+  voiceUrlFor(phoneNumber: string): Promise<string | null>;
+}
+
+/** How long a confirmed callback route is trusted before Twilio is asked
+ * again. A route that is wrong is re-read on every tick. */
+export const CALLBACK_ROUTE_TTL_MS = 10 * 60 * 1000;
+
+/** Per campaign: the last route Twilio confirmed, and the last problem
+ * logged, so a wrong route is said once rather than every minute. */
+export type CallbackRouteCache = Map<string, { okAt?: number; lastProblem?: string | null }>;
+
+/**
+ * Why a call back to the caller ID would NOT reach this lane on this
+ * deployment, or null when it would. Pure, so every refusal is tested.
+ * The host matters as much as the path: a number pointed at a workspace URL
+ * reaches a different process, which can run a different build (CLAUDE.md,
+ * "How to tell whether a deploy actually took").
+ */
+export function callbackRoutingProblem(voiceUrl: string | null, host: string, slug: string): string | null {
+  if (voiceUrl === null) return "the caller-ID number is not on this Twilio account";
+  let url: URL;
+  try {
+    url = new URL(voiceUrl);
+  } catch {
+    return "the caller-ID number has no usable Voice URL";
+  }
+  const want = `${VOICE_PATH_PREFIX}/${slug}`;
+  const path = url.pathname.replace(/\/+$/, "");
+  if (path !== want) {
+    return `calls back to the caller ID reach ${path || "/"}, not ${want} — a person ringing back would not reach this lane`;
+  }
+  if (url.host.toLowerCase() !== host.toLowerCase()) {
+    return `calls back to the caller ID reach ${url.host}, not this deployment (${host})`;
+  }
+  return null;
+}
+
+/** Twilio asked, cached, and logged once per change. Fails closed: a route
+ * that cannot be read is a route that is not confirmed. */
+export async function callbackRouting(
+  slug: string,
+  from: string,
+  deps: Pick<DialerDeps, "twilio" | "host" | "routeCache" | "log">,
+  now: number,
+): Promise<string | null> {
+  const key = `${slug}|${from}`;
+  const cached = deps.routeCache?.get(key);
+  if (cached?.okAt !== undefined && now - cached.okAt < CALLBACK_ROUTE_TTL_MS) return null;
+  let problem: string | null;
+  try {
+    problem = callbackRoutingProblem(await deps.twilio.voiceUrlFor(from), deps.host, slug);
+  } catch (error) {
+    problem = `could not read the caller-ID number's Voice URL from Twilio (${
+      error instanceof Error ? error.message : String(error)
+    })`;
+  }
+  if (deps.routeCache) {
+    if (problem !== null && cached?.lastProblem !== problem) {
+      (deps.log ?? console.log)(`[outbound] ${slug}: NOT dialling — ${problem}`);
+    }
+    deps.routeCache.set(key, problem === null ? { okAt: now, lastProblem: null } : { lastProblem: problem });
+  }
+  return problem;
 }
 
 export interface DialerDeps {
@@ -86,6 +163,8 @@ export interface DialerDeps {
   env: Record<string, string | undefined>;
   /** The public host Twilio reaches this process on, no scheme. */
   host: string;
+  /** Kept by the scheduler across ticks; absent, Twilio is asked every tick. */
+  routeCache?: CallbackRouteCache;
   now?: () => Date;
   log?: (line: string) => void;
 }
@@ -192,6 +271,11 @@ export async function runCampaignTick(
   // The window first, with no attempts: outside it nobody is claimed at all.
   const window = mayDialNow(now, [], policy.window, policy.caps);
   if (!window.ok) return { ...result, skipped: window.reason };
+
+  // A person who rings the caller ID back must reach this lane. Checked
+  // before anybody is claimed, so a wrong route costs nobody an attempt.
+  const route = await callbackRouting(slug, from, deps, now.getTime());
+  if (route) return { ...result, skipped: route };
 
   try {
     const campaignId = await deps.store.ensureCampaign(policy.campaignKey, slug);

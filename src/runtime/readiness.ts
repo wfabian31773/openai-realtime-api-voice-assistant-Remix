@@ -780,8 +780,20 @@ import { callEnvironment } from "./callRecord";
  * readers count a past row only when it was kept (or unknown).
  * `src/services/theMovedAppointmentIsNotUpcoming.test.ts`.
  */
+/**
+ * v106 — THE PERSON WE CALLED CAN CALL US BACK (2026-10-21). Operator: "There
+ * is no redirect. If a patient calls back, like we expect them to, the voice
+ * agent has to handle that call as well and know exactly who is on the line
+ * and why they are calling." v105 refused every inbound call on an outbound
+ * lane. The same lane now answers it: the calling number is matched to the
+ * campaign's list (one person, several — never picked — or none), the
+ * greeting confirms rather than assumes, `identify_callback_caller` settles
+ * who it is, and nothing about why we called is said before that. And the
+ * dialler rings nobody until the caller-ID number's Voice URL points back at
+ * that lane on this deployment. `src/runtime/outbound/callback.ts`.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v105-the-runtime-can-dial-20261020";
+  "voice-runtime-v106-the-person-we-called-can-call-back-20261021";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can
