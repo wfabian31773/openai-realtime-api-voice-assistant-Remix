@@ -271,8 +271,8 @@ export function refusedEscalationResult(args: {
           'escalate_to_human once more with the symptom as they said it.'
         : code === 'provider_not_stated_by_caller'
           ? ' BEFORE you say that line, ask ONE question: "Are you calling from a doctor\'s office, a ' +
-            'hospital or a clinic, and which one?" If they name one — a laboratory reporting results ' +
-            'counts — do not say the line: call ' +
+            'hospital, a clinic or a laboratory, and which one?" If they name one — a laboratory reporting ' +
+            'results counts — do not say the line: call ' +
             'escalate_to_human once more with what they told you. Asking for a doctor by name, or for an ' +
             'operator, does not make someone a provider.'
           : '';

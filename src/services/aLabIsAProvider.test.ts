@@ -24,7 +24,9 @@ import {
 import { judgeEscalation } from './afterHoursEscalationGate';
 
 const CALL = 'CA00000000000000000000000000000108';
-const ASK = "AGENT: Are you calling from a doctor's office, a hospital or a clinic, and which one?";
+const ASK =
+  "AGENT: Are you calling from a doctor's office, a hospital, a clinic or a laboratory, and which one?";
+const OLD_ASK = "AGENT: Are you calling from a doctor's office, a hospital or a clinic, and which one?";
 beforeEach(() => releaseCallerSpeech(CALL));
 
 describe('a lab that names itself is a provider', () => {
@@ -224,5 +226,51 @@ describe('the gate, on the corpus call', () => {
         corroboration: corroborate(CALL, ''),
       }),
     ).toMatchObject({ allowed: false });
+  });
+});
+
+describe('review r4 (#359): the question itself offers a laboratory', () => {
+  // A lab asked "an office, a hospital or a clinic?" can truthfully answer
+  // "No, I'm calling from a lab", and a "no" is read as a denial. So the
+  // question names a laboratory, and the window still opens on the old words
+  // for a call that straddles the deploy.
+  const before = ['AGENT: Thank you for calling.', 'CALLER: I have stat results for the on-call doctor.'];
+  const opened = (ask: string, answer: string) => {
+    noteCallerTranscript(CALL, [...before, ask, `CALLER: ${answer}`]);
+    return corroborate(CALL, '').providerStated;
+  };
+
+  it('the gate and the agent both ask the question with a laboratory in it', async () => {
+    noteCallerTranscript(CALL, before);
+    const refused = judgeEscalation({
+      callerType: 'healthcare_provider',
+      reason: 'Lab calling with stat results',
+      corroboration: corroborate(CALL, ''),
+    });
+    expect(refused.allowed).toBe(false);
+    if (!refused.allowed) expect(refused.directive).toContain('a hospital, a clinic or a laboratory, and which one?');
+    const agentSource = await import('node:fs').then((fs) =>
+      fs.readFileSync(new URL('../agents/noIvrAgent.ts', import.meta.url), 'utf8'),
+    );
+    expect(agentSource).toContain("hospital, a clinic or a laboratory, and which one?");
+  });
+
+  it('a lab answering the new question counts, however it phrases it', () => {
+    for (const answer of ['Example Diagnostics Lab.', 'A laboratory, Example Diagnostics.', 'Yes, the Example laboratory.']) {
+      expect(opened(ASK, answer)).toBe(true);
+    }
+  });
+
+  it('the old question still opens the window, for a call that straddles the deploy', () => {
+    expect(opened(OLD_ASK, 'Example Diagnostics Lab.')).toBe(true);
+  });
+
+  it('a Spanish paraphrase naming a laboratorio opens the window', () => {
+    expect(opened('AGENT: ¿Llama desde un laboratorio o una clínica?', 'Del laboratorio Ejemplo.')).toBe(true);
+  });
+
+  it('a patient answering the new question with their own results still does not count', () => {
+    expect(opened(ASK, 'No, my lab results.')).toBe(false);
+    expect(opened(ASK, 'The optical lab.')).toBe(false);
   });
 });

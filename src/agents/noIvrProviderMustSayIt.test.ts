@@ -95,7 +95,7 @@ describe('"Operator." is not a provider', () => {
     expect(handoff).not.toHaveBeenCalled();
     // It asks before it says the refusal line, so a real clinician gets one question, not a goodbye.
     expect(r.message).toMatch(/BEFORE you say that line, ask ONE question/);
-    expect(r.message).toMatch(/doctor's office, a hospital or a clinic, and which one/);
+    expect(r.message).toMatch(/doctor's office, a hospital, a clinic or a laboratory, and which one/);
 
     expect(h.submitSimplifiedTicket).toHaveBeenCalledTimes(1);
     const ticket = h.submitSimplifiedTicket.mock.calls[0][0] as Record<string, string>;
@@ -117,7 +117,7 @@ describe('"Operator." is not a provider', () => {
     noteCallerTranscript(sid, [
       GREETING,
       'CALLER: Operator.',
-      "AGENT: Are you calling from a doctor's office, a hospital or a clinic, and which one?",
+      "AGENT: Are you calling from a doctor's office, a hospital, a clinic or a laboratory, and which one?",
       'CALLER: This is the emergency room at Westside Memorial calling about a patient.',
     ]);
     h.submitSimplifiedTicket.mockResolvedValueOnce({ success: true, ticketNumber: 'VA-RECORD', message: 'VA-RECORD' } as any);
@@ -153,7 +153,7 @@ describe('"Operator." is not a provider', () => {
     noteCallerTranscript(sid, [
       GREETING,
       intro,
-      "AGENT: Are you calling from a doctor's office, a hospital or a clinic, and which one?",
+      "AGENT: Are you calling from a doctor's office, a hospital, a clinic or a laboratory, and which one?",
       'CALLER: From Example Diagnostics, uh, lab.',
     ]);
     const r = await call(agent, 'escalate_to_human', escalation);

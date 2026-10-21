@@ -47,10 +47,10 @@ const callerSpeech = new Map<string, string[]>();
 
 /**
  * Caller turns that ANSWER refusal 3's own question ("Are you calling from a
- * doctor's office, a hospital or a clinic, and which one?"), lowercased. Only
- * the runtime fills it, because only the runtime hands this module the agent's
- * lines in order (noteCallerTranscript); the old core's feed is caller lines
- * alone and keeps the anchored bare-answer reading.
+ * doctor's office, a hospital, a clinic or a laboratory, and which one?"),
+ * lowercased. Only the runtime fills it, because only the runtime hands this
+ * module the agent's lines in order (noteCallerTranscript); the old core's
+ * feed is caller lines alone and keeps the anchored bare-answer reading.
  */
 const providerAnswers = new Map<string, string[]>();
 
@@ -129,11 +129,11 @@ export function releaseCallerSpeech(callId: string | undefined): void {
  */
 const FACILITY_QUESTION = new RegExp(
   [
-    String.raw`calling from [^.?!]{0,40}?(?:office|hospital|clinic|facility)`,
+    String.raw`calling from [^.?!]{0,40}?(?:office|hospital|clinic|facility|laboratory)`,
     String.raw`calling from (?:a |the )?doctor'?s?\b`,
-    String.raw`doctor'?s office,? (?:a )?hospital,? or (?:a )?clinic`,
-    String.raw`which (?:office|hospital|clinic|facility) are you calling from`,
-    String.raw`(?:llama|habla) (?:usted )?(?:de|desde) (?:un |una |el |la )?(?:consultorio|hospital|cl[ií]nica)`,
+    String.raw`doctor'?s office,? (?:a )?hospital,? (?:or )?(?:a )?clinic`,
+    String.raw`which (?:office|hospital|clinic|facility|laboratory|lab) are you calling from`,
+    String.raw`(?:llama|habla) (?:usted )?(?:de|desde) (?:un |una |el |la )?(?:consultorio|hospital|cl[ií]nica|laboratorio)`,
   ].join('|'),
 );
 
@@ -369,10 +369,10 @@ const OFFICE_STAFF =
 
 /**
  * THE BARE ANSWER TO THE REFUSAL'S OWN QUESTION. Refusal 3 asks "Are you
- * calling from a doctor's office, a hospital or a clinic, and which one?",
- * and the natural answers are "Yes, Pomona Valley Hospital.", "Dr. Lee's
- * office.", "St. Joe's ER.", "Sí, del hospital." — none of which carries a
- * lead-in the patterns below need (review r2 P2, #353).
+ * calling from a doctor's office, a hospital, a clinic or a laboratory, and
+ * which one?", and the natural answers are "Yes, Pomona Valley Hospital.",
+ * "Dr. Lee's office.", "St. Joe's ER.", "Sí, del hospital." — none of which
+ * carries a lead-in the patterns below need (review r2 P2, #353).
  *
  * So a WHOLE caller turn that is nothing but an optional yes, an optional
  * "from"/"del", up to four name words and a facility counts. Anchored to the
