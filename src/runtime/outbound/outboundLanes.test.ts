@@ -3,8 +3,13 @@
  * registry and the REAL agent registry — a helper proven alone proves the
  * helper, not that a lane is wired (failure mode 10).
  */
-import { describe, expect, it } from "vitest";
-process.env.DATABASE_URL ??= "postgres://stub:stub@ci-stub.invalid:5432/stub";
+import { describe, expect, it, vi } from "vitest";
+// HOISTED above every import: laneRegistry imports the tool library
+// statically, and its telemetry module validates DATABASE_URL at import, so a
+// plain assignment here would run after the import graph had already thrown.
+vi.hoisted(() => {
+  process.env.DATABASE_URL ||= "postgres://stub:stub@ci-stub.invalid:5432/stub";
+});
 
 import { laneSupportStatus, resolveLane, RUNTIME_OUTBOUND_TOOLS, type LaneConfig } from "../laneRegistry";
 import { OUTBOUND_RECORDING_CLAUSE, type OutboundContact } from "./campaign";
