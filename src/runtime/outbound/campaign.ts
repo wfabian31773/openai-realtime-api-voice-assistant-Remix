@@ -90,6 +90,64 @@ export interface OutboundLanePolicy {
    * it back. Pure: no PHI may reach it, so it takes no contact.
    */
   voicemail(): string;
+  /**
+   * Why this campaign called, as the agent says it to somebody who rang
+   * back — ONLY once they are identified (./callback.ts). One sentence,
+   * ending in a full stop. The caller-ID number takes the calls back: its
+   * Twilio Voice URL must point at this lane's /voice/<slug>, and the
+   * dialler will not ring anybody until it does (dialer.callbackRouting).
+   * Optional in the type so a test policy need not carry one; every
+   * registered lane must (outboundLanes.test.ts).
+   */
+  callbackPurpose?: string;
+  /**
+   * Where this campaign's people come from when it is not an import (v107):
+   * a live source the dialler refreshes the queue from every
+   * `refreshEveryMs`, and re-checks each person against at the moment of
+   * the dial. Built lazily — the Console connection is opened only by a
+   * campaign that dials. Null from the factory means the source is not
+   * configured in this process, and the campaign does not dial.
+   */
+  source?: () => Promise<ContactSource | null>;
+}
+
+/** One person a live source says the campaign may call. */
+export interface SourceContact {
+  /** The source's own id for this person or appointment: the row's
+   * `external_ref`, so the same person is never queued twice. */
+  externalRef: string;
+  /** E.164, or null when the source holds no number to ring. */
+  phone: string | null;
+  firstName: string | null;
+  lastName: string | null;
+  /** The campaign's own fields (`custom_data`). A date of birth goes under
+   * `date_of_birth` (YYYY-MM-DD), where a returned call looks for it. */
+  data: Record<string, unknown>;
+}
+
+/** What the source says about one person at the moment of the dial. */
+export type SourceRecheck =
+  /** Still on the list; `contact` carries today's phone and fields. */
+  | { state: "current"; contact: SourceContact }
+  /** The reason they were on the list is over (the appointment was cancelled
+   * or moved): the row is settled and never rung for it. */
+  | { state: "gone" }
+  /** Not on the list right now, for a reason that can change back: the row
+   * waits for the next rebuild rather than being rung on a stale list. */
+  | { state: "off_list" };
+
+export interface ContactSource {
+  /** For logs and `custom_data.source`. */
+  name: string;
+  /** How often the queue is refreshed from the source. */
+  refreshEveryMs: number;
+  /** How long a row that left the list waits before it is looked at again. */
+  parkMs: number;
+  /** Everyone the campaign may call right now. */
+  list(now: Date): Promise<SourceContact[]>;
+  /** One person, re-checked live. Throws when the source cannot answer —
+   * and the dialler then does not ring them. */
+  recheck(externalRef: string, now: Date): Promise<SourceRecheck>;
 }
 
 /** Minutes to wait after Twilio refuses a dial before retrying the same

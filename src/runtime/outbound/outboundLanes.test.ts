@@ -11,8 +11,15 @@ vi.hoisted(() => {
   process.env.DATABASE_URL ||= "postgres://stub:stub@ci-stub.invalid:5432/stub";
 });
 
-import { laneSupportStatus, resolveLane, RUNTIME_OUTBOUND_TOOLS, type LaneConfig } from "../laneRegistry";
+import {
+  laneSupportStatus,
+  resolveLane,
+  RUNTIME_CALLBACK_TOOLS,
+  RUNTIME_OUTBOUND_TOOLS,
+  type LaneConfig,
+} from "../laneRegistry";
 import { OUTBOUND_RECORDING_CLAUSE, type OutboundContact } from "./campaign";
+import { callbackGreeting, callbackSteps, withCallbackSteps, type CallbackContext } from "./callback";
 import { callEnds } from "../callRecord";
 
 const CONTACT: OutboundContact = {
@@ -68,6 +75,16 @@ describe("every registered outbound lane", () => {
     }
   });
 
+  it("says why it called, for the person who rings back — and nothing private in it before they are identified", async () => {
+    const r = await registry();
+    for (const lane of r.getOutboundAgents().filter((a) => a.outbound)) {
+      const why = lane.outbound!.callbackPurpose;
+      expect(why, lane.id).toBeTruthy();
+      expect(why!.trim().endsWith("."), lane.id).toBe(true);
+      expect(why, lane.id).not.toContain(CONTACT.firstName!);
+    }
+  });
+
   it("is off unless its own switch says so", async () => {
     const r = await registry();
     for (const lane of r.getOutboundAgents().filter((a) => a.outbound)) {
@@ -117,6 +134,58 @@ describe("the runtime and outbound lanes", () => {
       (t) => t.name === "opt_out_of_calls",
     );
     expect(Object.keys(optOut?.parameters?.properties ?? {})).toEqual([]);
+  });
+});
+
+describe("a returned call on an outbound lane (v106)", () => {
+  const CALLBACK: CallbackContext = {
+    campaignKey: "outbound-proof",
+    campaignId: "campaign-1",
+    callerPhone: "+15555550111",
+    match: {
+      kind: "one",
+      contact: {
+        contactId: "c1",
+        campaignId: "campaign-1",
+        phone: "+15555550111",
+        firstName: "Testa",
+        lastName: "Synthetic",
+        status: "voicemail",
+        data: {},
+        lastAttemptAt: null,
+        lastAttemptStatus: null,
+      },
+    },
+    purpose: "it was a test.",
+  };
+
+  it("binds identify, opt-out, outcome and hangup, with only the call's own id injected", async () => {
+    const lane = await resolveLane("outbound-proof", { ...META, callback: CALLBACK }, { source: await registry(), env: {} });
+    const tools = lane!.agent.tools as Array<{ name?: string; parameters?: { properties?: object } }>;
+    const names = tools.map((t) => t.name);
+    for (const tool of RUNTIME_CALLBACK_TOOLS) expect(names).toContain(tool);
+    // The model is asked for a name, never for who the call is about.
+    const identify = tools.find((t) => t.name === "identify_callback_caller");
+    expect(Object.keys(identify?.parameters?.properties ?? {}).sort()).toEqual(["date_of_birth", "first_name", "last_name"]);
+  });
+
+  it("gives the proving lane a prompt that does not assume who it dialled", async () => {
+    const lane = await resolveLane("outbound-proof", { ...META, callback: CALLBACK }, { source: await registry(), env: {} });
+    const prompt = withCallbackSteps(lane!.agent.instructions, callbackSteps(CALLBACK));
+    expect(prompt).not.toContain("whether you are speaking with");
+    expect(prompt).toContain("### Returned call");
+    // The steps sit inside the Conversation Flow, before the lane's own steps.
+    expect(prompt.indexOf("### Returned call")).toBeGreaterThan(prompt.indexOf("## Conversation Flow"));
+    expect(prompt.indexOf("### Returned call")).toBeLessThan(prompt.indexOf("### Greeting"));
+    expect(prompt.indexOf("## Guardrails & Escalation")).toBeGreaterThan(prompt.indexOf("### Close"));
+  });
+
+  it("opens by saying it is automated and recorded, before asking anything", () => {
+    for (const match of [CALLBACK.match, { kind: "none" } as const]) {
+      const g = callbackGreeting(match);
+      expect(g).toMatch(/Azul Vision/);
+      expect(g.indexOf(OUTBOUND_RECORDING_CLAUSE)).toBeLessThan(g.indexOf("?"));
+    }
   });
 });
 

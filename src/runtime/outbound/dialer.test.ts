@@ -11,8 +11,10 @@ import {
   resolvedMaxConsecutiveInfraRetries,
 } from "./campaign";
 import {
+  CALLBACK_ROUTE_TTL_MS,
   STALE_CLAIM_MS,
   answerUrl,
+  callbackRoutingProblem,
   isClearTwilioRefusal,
   nextLookAt,
   reapNextAttemptAt,
@@ -53,9 +55,11 @@ function setup(env: Record<string, string> = ON) {
   const store = new FakeOutboundStore(() => NOW);
   let n = 0;
   const createCall = vi.fn(async () => ({ sid: `CA${String(++n).padStart(32, "0")}` }));
-  const twilio: OutboundTwilio = { createCall };
+  // The caller ID's Voice URL points back at the lane, as production's must.
+  const voiceUrlFor = vi.fn(async (_n: string): Promise<string | null> => "https://voice.example.test/voice/test-lane");
+  const twilio: OutboundTwilio = { createCall, voiceUrlFor };
   const deps = { store, twilio, env, host: "voice.example.test", now: () => NOW, log: () => undefined };
-  return { store, createCall, deps };
+  return { store, createCall, voiceUrlFor, deps };
 }
 
 describe("nothing dials unless it is switched on", () => {
@@ -828,5 +832,237 @@ describe("consecutive Twilio refusals fall back to the person cooldown", () => {
       DEFAULT_MAX_CONSECUTIVE_INFRA_RETRIES,
     );
     expect(resolvedMaxConsecutiveInfraRetries({ maxConsecutiveInfraRetries: 2 })).toBe(2);
+  });
+});
+
+
+/**
+ * A CALL BACK TO THE CALLER ID MUST REACH THIS LANE (v106). Operator,
+ * 2026-10-21: "There is no redirect. If a patient calls back, like we expect
+ * them to, the voice agent has to handle that call as well." So nothing is
+ * dialled until the caller-ID number's own Voice URL points at this lane, on
+ * this deployment.
+ */
+describe("the caller ID takes the calls back", () => {
+  it("is confirmed only for this lane's path on this deployment's host", () => {
+    expect(callbackRoutingProblem("https://voice.example.test/voice/test-lane", "voice.example.test", "test-lane")).toBeNull();
+    expect(callbackRoutingProblem("https://VOICE.example.test/voice/test-lane/", "voice.example.test", "test-lane")).toBeNull();
+    expect(callbackRoutingProblem("https://voice.example.test/voice/records", "voice.example.test", "test-lane")).toMatch(
+      /reach \/voice\/records, not \/voice\/test-lane/,
+    );
+    expect(callbackRoutingProblem("https://workspace.example.dev/voice/test-lane", "voice.example.test", "test-lane")).toMatch(
+      /not this deployment/,
+    );
+    expect(callbackRoutingProblem(null, "voice.example.test", "test-lane")).toMatch(/not on this Twilio account/);
+    expect(callbackRoutingProblem("", "voice.example.test", "test-lane")).toMatch(/no usable Voice URL/);
+  });
+
+  it.each([
+    ["another line", "https://voice.example.test/voice/records"],
+    ["a workspace process", "https://workspace.example.dev/voice/test-lane"],
+    ["nowhere on this account", null],
+  ])("dials nobody — and claims nobody — when callbacks would reach %s", async (_what, url) => {
+    const { store, createCall, voiceUrlFor, deps } = setup();
+    voiceUrlFor.mockResolvedValue(url);
+    store.addContact({ id: "c1", phone: "+15555550111" });
+    const r = await runCampaignTick("test-lane", policy, deps);
+    expect(r.skipped).toBeTruthy();
+    expect(createCall).not.toHaveBeenCalled();
+    expect(store.contacts.get("c1")!.status).toBe("pending");
+    expect(store.attempts).toHaveLength(0);
+  });
+
+  it("fails closed when Twilio cannot say where the number points", async () => {
+    const { store, createCall, voiceUrlFor, deps } = setup();
+    voiceUrlFor.mockRejectedValue(new Error("Twilio down"));
+    store.addContact({ id: "c1", phone: "+15555550111" });
+    expect((await runCampaignTick("test-lane", policy, deps)).skipped).toMatch(/could not read/);
+    expect(createCall).not.toHaveBeenCalled();
+  });
+
+  it("asks Twilio about the caller ID itself", async () => {
+    const { store, voiceUrlFor, deps } = setup();
+    store.addContact({ id: "c1", phone: "+15555550111" });
+    await runCampaignTick("test-lane", policy, deps);
+    expect(voiceUrlFor).toHaveBeenCalledWith("+15555550100");
+  });
+
+  it("trusts a confirmed route for a while, and logs a wrong one once rather than every minute", async () => {
+    const { store, voiceUrlFor, deps } = setup();
+    store.addContact({ id: "c1", phone: "+15555550111" });
+    const lines: string[] = [];
+    const routeCache = new Map();
+    const t = { ...deps, routeCache, log: (l: string) => lines.push(l) };
+    await runCampaignTick("test-lane", policy, t);
+    await runCampaignTick("test-lane", policy, t);
+    expect(voiceUrlFor).toHaveBeenCalledTimes(1);
+
+    voiceUrlFor.mockResolvedValue("https://voice.example.test/voice/records");
+    const later = { ...t, now: () => new Date(NOW.getTime() + CALLBACK_ROUTE_TTL_MS + 1) };
+    await runCampaignTick("test-lane", policy, later);
+    await runCampaignTick("test-lane", policy, later);
+    expect(voiceUrlFor).toHaveBeenCalledTimes(3);
+    expect(lines.filter((l) => l.includes("NOT dialling"))).toHaveLength(1);
+  });
+
+  it("is checked only inside the calling window, so Twilio is not asked overnight", async () => {
+    const { voiceUrlFor, deps } = setup();
+    const night = { ...deps, now: () => new Date("2041-03-05T08:00:00Z") }; // midnight Pacific
+    await runCampaignTick("test-lane", policy, night);
+    expect(voiceUrlFor).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * A CAMPAIGN FED LIVE FROM A SOURCE (v107): the queue follows the source, and
+ * each person is re-checked against it at the moment of the dial. Operator,
+ * 2026-10-21: "create a direct connection to the eye care patient console
+ * where the movable list is located so it is always fresh."
+ */
+describe("a campaign fed live from a source", () => {
+  type SC = import("./campaign").SourceContact;
+  type RC = import("./campaign").SourceRecheck;
+  const person = (ref: string, phone: string | null = "+15555550111", data: Record<string, unknown> = {}): SC => ({
+    externalRef: ref,
+    phone,
+    firstName: "Testa",
+    lastName: "Synthetic",
+    data: { date_of_birth: "1950-01-02", ...data },
+  });
+  function sourced(listed: SC[], recheck: (ref: string) => Promise<RC> = async (ref) => ({ state: "current", contact: listed.find((p) => p.externalRef === ref) ?? person(ref) })) {
+    const reads = { list: 0, recheck: 0 };
+    const source: import("./campaign").ContactSource = {
+      name: "test source",
+      refreshEveryMs: 15 * 60 * 1000,
+      parkMs: 60 * 60 * 1000,
+      list: async () => {
+        reads.list += 1;
+        return listed;
+      },
+      recheck: async (ref) => {
+        reads.recheck += 1;
+        return recheck(ref);
+      },
+    };
+    return { source, reads, policy: { ...policy, source: async () => source } };
+  }
+
+  it("queues the source's people as pending rows keyed on the source's id, and dials them", async () => {
+    const { store, createCall, deps } = setup();
+    const { policy: p } = sourced([person("appt-1")]);
+    const r = await runCampaignTick("test-lane", p, { ...deps, sourceRefreshedAt: new Map() });
+    expect(r.refreshed).toEqual({ written: 1, parked: 0, listed: 1 });
+    const row = [...store.contacts.values()][0];
+    expect(row).toMatchObject({ externalRef: "appt-1", phone: "+15555550111" });
+    expect(row.customData).toMatchObject({ date_of_birth: "1950-01-02" });
+    expect(createCall).toHaveBeenCalledTimes(1);
+  });
+
+  it("refreshes at most once per interval, and a quiet refresh writes nothing", async () => {
+    const { store, deps } = setup();
+    const { policy: p, reads } = sourced([person("appt-1")]);
+    const cache = new Map<string, number>();
+    await runCampaignTick("test-lane", p, { ...deps, sourceRefreshedAt: cache });
+    await runCampaignTick("test-lane", p, { ...deps, sourceRefreshedAt: cache });
+    expect(reads.list).toBe(1);
+    const later = { ...deps, sourceRefreshedAt: cache, now: () => new Date(NOW.getTime() + 16 * 60 * 1000) };
+    await runCampaignTick("test-lane", p, later);
+    expect(reads.list).toBe(2);
+    expect(store.upserts).toEqual([1]); // the unchanged second read wrote nothing
+  });
+
+  it("follows the source's phone and fields, and never its status", async () => {
+    const { store, deps } = setup();
+    store.addContact({ id: "c1", phone: "+15555550111", externalRef: "appt-1", status: "voicemail", customData: { date_of_birth: "1950-01-02" }, firstName: "Testa", lastName: "Synthetic" });
+    const { policy: p } = sourced([person("appt-1", "+15555550133")], async () => ({ state: "off_list" }));
+    await runCampaignTick("test-lane", p, { ...deps, sourceRefreshedAt: new Map() });
+    expect(store.contacts.get("c1")).toMatchObject({ phone: "+15555550133", status: "voicemail" });
+  });
+
+  it("parks a row that left the list until the next rebuild — dialable rows only — and never deletes it", async () => {
+    const { store, createCall, deps } = setup();
+    store.addContact({ id: "c1", phone: "+15555550111", externalRef: "appt-gone", status: "no_answer" });
+    store.addContact({ id: "c2", phone: "+15555550112", externalRef: "appt-done", status: "completed" });
+    const { policy: p } = sourced([]);
+    const r = await runCampaignTick("test-lane", p, { ...deps, sourceRefreshedAt: new Map() });
+    expect(r.refreshed).toMatchObject({ parked: 1 });
+    expect(store.contacts.get("c1")!.nextAttemptAt!.getTime()).toBe(NOW.getTime() + 60 * 60 * 1000);
+    expect(store.contacts.get("c2")!.nextAttemptAt).toBeNull();
+    expect(createCall).not.toHaveBeenCalled();
+  });
+
+  it("dials nobody when the source is not available in this process", async () => {
+    const { store, createCall, deps } = setup();
+    store.addContact({ id: "c1", phone: "+15555550111", externalRef: "appt-1" });
+    const r = await runCampaignTick("test-lane", { ...policy, source: async () => null }, deps);
+    expect(r.skipped).toBe("contact source not available");
+    expect(createCall).not.toHaveBeenCalled();
+  });
+
+  it("writes and parks nothing when the list cannot be read", async () => {
+    const { store, deps } = setup();
+    store.addContact({ id: "c1", phone: "+15555550111", externalRef: "appt-1", status: "no_answer" });
+    const { source } = sourced([]);
+    source.list = async () => Promise.reject(new Error("console down"));
+    const r = await runCampaignTick("test-lane", { ...policy, source: async () => source }, { ...deps, sourceRefreshedAt: new Map() });
+    expect(r.refreshed).toBeUndefined();
+    expect(store.contacts.get("c1")!.nextAttemptAt).toBeNull();
+  });
+
+  describe("the re-check at the dial", () => {
+    it("settles a row whose appointment is over and rings nobody", async () => {
+      const { store, createCall, deps } = setup();
+      store.addContact({ id: "c1", phone: "+15555550111", externalRef: "appt-1" });
+      const { policy: p } = sourced([person("appt-1")], async () => ({ state: "gone" }));
+      const r = await runCampaignTick("test-lane", p, deps);
+      expect(r.held).toEqual({ source_gone: 1 });
+      expect(store.contacts.get("c1")!.status).toBe("rescheduled");
+      expect(createCall).not.toHaveBeenCalled();
+    });
+
+    it("parks a row that is off the list right now, keeping its status", async () => {
+      const { store, createCall, deps } = setup();
+      store.addContact({ id: "c1", phone: "+15555550111", externalRef: "appt-1", status: "voicemail" });
+      const { policy: p } = sourced([person("appt-1")], async () => ({ state: "off_list" }));
+      expect((await runCampaignTick("test-lane", p, deps)).held).toEqual({ off_list: 1 });
+      expect(store.contacts.get("c1")).toMatchObject({ status: "voicemail" });
+      expect(store.contacts.get("c1")!.nextAttemptAt!.getTime()).toBe(NOW.getTime() + 60 * 60 * 1000);
+      expect(createCall).not.toHaveBeenCalled();
+    });
+
+    it("rings nobody when the source cannot answer — fail closed", async () => {
+      const { store, createCall, deps } = setup();
+      store.addContact({ id: "c1", phone: "+15555550111", externalRef: "appt-1", status: "voicemail" });
+      const { policy: p } = sourced([person("appt-1")], async () => Promise.reject(new Error("console down")));
+      expect((await runCampaignTick("test-lane", p, deps)).held).toEqual({ source_unavailable: 1 });
+      expect(store.contacts.get("c1")!.status).toBe("voicemail");
+      expect(createCall).not.toHaveBeenCalled();
+    });
+
+    it("rings today's number from the source, after checking it against the do-not-contact list", async () => {
+      const { store, createCall, deps } = setup();
+      store.addContact({ id: "c1", phone: "+15555550111", externalRef: "appt-1" });
+      const { policy: p } = sourced([person("appt-1")], async () => ({ state: "current", contact: person("appt-1", "+15555550144") }));
+      await runCampaignTick("test-lane", p, deps);
+      expect(store.contacts.get("c1")!.phone).toBe("+15555550144");
+      expect(createCall).toHaveBeenCalledWith(expect.objectContaining({ to: "+15555550144" }));
+    });
+
+    it("refuses today's number when it is on the do-not-contact list", async () => {
+      const { store, createCall, deps } = setup();
+      store.addContact({ id: "c1", phone: "+15555550111", externalRef: "appt-1" });
+      store.dnc.set("5555550144", "voice:test");
+      const { policy: p } = sourced([person("appt-1")], async () => ({ state: "current", contact: person("appt-1", "+15555550144") }));
+      expect((await runCampaignTick("test-lane", p, deps)).held).toEqual({ do_not_contact: 1 });
+      expect(createCall).not.toHaveBeenCalled();
+    });
+
+    it("never dials a row on a source-fed campaign that the source did not write", async () => {
+      const { store, createCall, deps } = setup();
+      store.addContact({ id: "c1", phone: "+15555550111" });
+      const { policy: p } = sourced([]);
+      expect((await runCampaignTick("test-lane", p, deps)).held).toEqual({ not_from_source: 1 });
+      expect(createCall).not.toHaveBeenCalled();
+    });
   });
 });

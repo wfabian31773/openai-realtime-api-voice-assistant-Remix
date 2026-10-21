@@ -303,6 +303,16 @@ import {
 } from "./twilioFrames";
 import { KNOWLEDGE_PACK_VERSION } from "./knowledgePack";
 import type { OutboundContact } from "./outbound/campaign";
+import {
+  callbackGreeting,
+  callbackPurpose,
+  callbackSteps,
+  matchCallback,
+  withCallbackSteps,
+  type CallbackCandidate,
+  type CallbackContext,
+} from "./outbound/callback";
+import { closeCallbackSession, openCallbackSession } from "../tools/outboundTools";
 import type { OutboundStore } from "./outbound/store";
 import { createDbOutboundStore } from "./outbound/store";
 import { OUTBOUND_PATH_PREFIX, type OutboundTwilio } from "./outbound/dialer";
@@ -827,7 +837,14 @@ export function mountVoiceRuntime(
       (async () => {
         const { getTwilioClient } = await import("../lib/twilioClient");
         const client = await getTwilioClient();
-        return { createCall: (opts) => client.calls.create(opts) };
+        return {
+          createCall: (opts) => client.calls.create(opts),
+          // Where a call back to the caller ID goes (dialer.callbackRouting).
+          voiceUrlFor: async (phoneNumber) => {
+            const [number] = await client.incomingPhoneNumbers.list({ phoneNumber, limit: 1 });
+            return number?.voiceUrl ?? null;
+          },
+        };
       }),
     lock: options.outboundLock ?? defaultDialerLock,
   });
@@ -1082,7 +1099,7 @@ export function mountVoiceRuntime(
         // Both together: the greeting resolver is a warm Map read after
         // boot, but on a cold miss it can wait on the database, and that
         // must overlap the pre-context lookup rather than follow it.
-        const [precontext, configuredGreeting, outboundContact] = await Promise.all([
+        const [precontext, configuredGreeting, outboundContact, callbackLookup] = await Promise.all([
           // A DIALLED call already knows who it rang: the contact row names
           // them, so there is no caller-ID lookup to make — and a household
           // phone's other members are exactly what that lookup would surface.
@@ -1106,6 +1123,26 @@ export function mountVoiceRuntime(
                 PRECONTEXT_DEADLINE_MS,
               ).catch(() => null)
             : Promise.resolve(null as OutboundContact | null),
+          // A call somebody made TO an outbound lane is the person ringing
+          // back the number we call from (outbound/callback.ts): who on the
+          // campaign's list that number belongs to. Bounded like the rest;
+          // a miss here is retried by identify_callback_caller itself.
+          entry.outbound
+            ? Promise.resolve(null)
+            : laneSource()
+                .then((source) => {
+                  const cfg = source.getAgentConfig(entry.slug);
+                  if (!cfg?.enabled || cfg.agentType !== "outbound" || !cfg.outbound) return null;
+                  const campaignKey = cfg.outbound.campaignKey;
+                  return withinOrNull(
+                    outboundStore().then(async (store) => ({
+                      store,
+                      ...(await store.callbackCandidates(campaignKey, entry.callerPhone)),
+                    })),
+                    PRECONTEXT_DEADLINE_MS,
+                  );
+                })
+                .catch(() => null),
         ]);
         // WHICH of the three pre-context outcomes happened. Without this the
         // runbook's own diagnosis step is not performable: every failure —
@@ -1181,16 +1218,50 @@ export function mountVoiceRuntime(
         const isOutboundLane = registered?.agentType === "outbound" && Boolean(registered.outbound);
         const directionMismatch =
           registered !== undefined &&
-          (isOutboundLane !== Boolean(entry.outbound) ||
+          ((Boolean(entry.outbound) && !isOutboundLane) ||
             (entry.outbound !== undefined && !outboundContact));
         if (directionMismatch) {
           console.warn(
             `[voice-runtime] ${entry.slug}: refused — ` +
-              (entry.outbound
-                ? isOutboundLane
-                  ? "the dialled contact could not be loaded"
-                  : "a dialled call reached an inbound lane"
-                : "an inbound call reached an outbound lane"),
+              (isOutboundLane
+                ? "the dialled contact could not be loaded"
+                : "a dialled call reached an inbound lane"),
+          );
+        }
+        /**
+         * A RETURNED CALL IS ANSWERED, NOT REFUSED (v106).
+         *
+         * Operator, 2026-10-21: "There is no redirect. If a patient calls back,
+         * like we expect them to, the voice agent has to handle that call as
+         * well and know exactly who is on the line and why they are calling."
+         * v105 refused every inbound call on an outbound lane, so a patient
+         * ringing back the number on their caller ID heard "unavailable". The
+         * same lane, the same agent, answers it now: the calling number makes
+         * the people on it candidates, the greeting confirms rather than
+         * assumes, and nothing about why we called is said until the caller is
+         * identified (outbound/callback.ts, identify_callback_caller).
+         */
+        const callback: CallbackContext | null =
+          isOutboundLane && !entry.outbound && registered?.outbound
+            ? {
+                campaignKey: registered.outbound.campaignKey,
+                campaignId: callbackLookup?.campaignId ?? null,
+                callerPhone: entry.callerPhone,
+                match: matchCallback(callbackLookup?.candidates ?? []),
+                purpose: callbackPurpose(registered.outbound),
+              }
+            : null;
+        if (callback) {
+          // Counts and a verdict only: never a name, never the number.
+          console.info(
+            `[outbound] returned call ${entry.slug} ${entry.callSid}: ` +
+              (callbackLookup === null
+                ? "the campaign list could not be read in time — identify_callback_caller will try again"
+                : callback.match.kind === "one"
+                  ? "one person on this number — the greeting confirms them by first name"
+                  : callback.match.kind === "several"
+                    ? `${callback.match.people} people on this number — the greeting asks who is calling`
+                    : "this number is not on the campaign's list — the greeting asks who is calling"),
           );
         }
         const lane = directionMismatch ? null : await resolveLane(
@@ -1225,6 +1296,8 @@ export function mountVoiceRuntime(
             ...(entry.outbound && outboundContact
               ? { outbound: { ...outboundContact, campaignKey: entry.outbound.campaignKey } }
               : {}),
+            // And who may be ringing back, on a call made TO an outbound lane.
+            ...(callback ? { callback } : {}),
           },
           {
             source: await laneSource(),
@@ -1295,6 +1368,25 @@ export function mountVoiceRuntime(
           return;
         }
         knownLanes.add(entry.slug);
+        const callbackStore = callback
+          ? (callbackLookup?.store ?? (await outboundStore().catch(() => null)))
+          : null;
+        if (callback && callbackStore) {
+          // The tools find who this call is with here, by its CallSid. Opened
+          // only once the lane exists; closed at teardown, or below if the
+          // caller has already gone. With no store at all the agent can still
+          // take the call — it just cannot look anybody up.
+          openCallbackSession({
+            callSid: entry.callSid,
+            campaignKey: callback.campaignKey,
+            campaignId: callback.campaignId,
+            callerPhone: entry.callerPhone,
+            candidates: (callbackLookup?.candidates ?? []) as CallbackCandidate[],
+            candidatesLoaded: callbackLookup !== null,
+            purpose: callback.purpose,
+            store: callbackStore,
+          });
+        }
         // Open the call's row BEFORE the agent can run a tool. The agents'
         // own telemetry, identity stamping and ticket number all UPDATE
         // this row by call_sid, and a flush that lands on no row still
@@ -1340,6 +1432,7 @@ export function mountVoiceRuntime(
           // swept as a stale call rather than the hangup it was. Finalize
           // it here, on the one path that never reaches the bridge.
           registry.recordOutcome(entry.callSid, "caller_hangup");
+          void closeCallbackSession(entry.callSid);
           // Finalized unconditionally. Both writes are safe in either
           // order: the open does nothing on conflict, this updates on
           // conflict. So whether the row landed before the deadline, after
@@ -1394,7 +1487,11 @@ export function mountVoiceRuntime(
           // that the call is recorded, before anything else (outbound/).
           lane.outbound && outboundContact
             ? lane.outbound.greeting(outboundContact) || null
-            : personaliseGreeting(
+            : // A call made TO an outbound lane: confirm, never assume, and
+              // say nothing about why we called (outbound/callback.ts).
+              callback
+              ? callbackGreeting(callback.match)
+              : personaliseGreeting(
                 chooseGreeting(entry.slug, configuredGreeting, lane.greeting),
                 recognisedFirstName(precontext),
                 greetingStyleFor(entry.slug),
@@ -1487,7 +1584,14 @@ export function mountVoiceRuntime(
                  * are looking at their chart.
                  */
                 withNewOrExistingAsk(
-                  withGreetingAlreadyPlayed(lane.agent.instructions, spokenGreeting),
+                  withGreetingAlreadyPlayed(
+                    // A returned call: how to find out who rang, inside the
+                    // lane's own Conversation Flow (outbound/callback.ts).
+                    callback
+                      ? withCallbackSteps(lane.agent.instructions, callbackSteps(callback))
+                      : lane.agent.instructions,
+                    spokenGreeting,
+                  ),
                   entry.slug,
                   precontextMatched(precontext),
                 ),
@@ -1539,6 +1643,12 @@ export function mountVoiceRuntime(
            * socket open for a ticket POST.
            */
           persistCallRecord: async (record) => {
+            // A returned call's inbound attempt ends, and an identified caller
+            // with no recorded outcome is marked answered. Never awaited and
+            // never throws: it is the campaign's ledger, not the call's record.
+            void closeCallbackSession(record.callSid, {
+              durationSeconds: Math.max(0, Math.round((record.endedAtMs - record.startedAtMs) / 1000)),
+            });
             /**
              * BOUNDED, because an unbounded await here throws the request
              * away. `persistCall` is a database upsert, and a wedged pool

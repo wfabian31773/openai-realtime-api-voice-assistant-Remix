@@ -10,7 +10,8 @@
  */
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { dncKey, rowToContact } from "./store";
+import { SURNAME_INITIAL_FOLD, dncKey, rowToContact } from "./store";
+import { nameKey } from "../../tools/verifiedIdentity";
 
 const SRC = readFileSync("src/runtime/outbound/store.ts", "utf8");
 
@@ -123,7 +124,9 @@ describe("the attempt row keeps the answer webhook's verdict", () => {
     expect(open).toContain("= right(regexp_replace(me.phone_number, '[^0-9]', '', 'g'), 10)");
     // …with no campaign restriction at all.
     expect(open).not.toContain("campaign_id");
-    expect(open).toContain("a.direction = 'outbound'");
+    // A dial we placed, or the person calling us back (v106): either is a
+    // call on that phone, and the dialler must not ring into it.
+    expect(open).toContain("a.direction IN ('outbound', 'inbound')");
     expect(open).toContain("AND a.ended_at IS NULL");
     expect(open).toContain("AND a.attempted_at >= ${utc(since)}");
   });
@@ -170,6 +173,87 @@ describe("a row read back", () => {
       contacted: false,
       nextAttemptAt: null,
       customData: {},
+      // An imported row has no source id (v107).
+      externalRef: null,
     });
+  });
+});
+
+describe("a returned call (v106, ./callback.ts)", () => {
+  it("finds the caller on this campaign's list by their ten digits, and never creates the campaign", () => {
+    const found = method("callbackCandidates");
+    expect(found).toContain("WHERE c.campaign_id = ${campaignId}::varchar");
+    expect(found).toContain("right(regexp_replace(c.phone_number, '[^0-9]', '', 'g'), 10) = ${key}::varchar");
+    expect(found).not.toContain("INSERT");
+    // An unreadable number finds nobody rather than everybody.
+    expect(found).toContain("if (!campaignId || !key) return { campaignId, candidates: [] };");
+  });
+
+  it("describes the last call by the newest dial that reached the network", () => {
+    expect(SRC).toMatch(/LEFT JOIN LATERAL \(\s+SELECT \(a\.attempted_at AT TIME ZONE 'UTC'\) AS last_attempt_at/);
+    const lateral = SRC.slice(SRC.indexOf("const lastPlacedDial"), SRC.indexOf("const campaignIdFor"));
+    expect(lateral).toContain("a.direction = 'outbound'");
+    expect(lateral).toContain("a.status IS DISTINCT FROM ${NOT_PLACED}::varchar");
+    expect(lateral).toContain("ORDER BY a.attempted_at DESC, a.id DESC");
+  });
+
+  it("finds a caller ringing from another phone only within this campaign, matched exactly in code", () => {
+    const byName = method("contactsByName");
+    expect(byName).toContain("WHERE c.campaign_id = ${campaignId}::varchar");
+    expect(byName).toContain("LIMIT 500");
+    expect(byName).toContain("nameKey(c.firstName ?? undefined) === first && nameKey(c.lastName ?? undefined) === last");
+  });
+
+  it("writes the returned call as an INBOUND attempt that is not one of the person's dials", () => {
+    const opened = method("openCallbackAttempt");
+    expect(opened).toContain("'inbound', 'answered'");
+    expect(opened).toContain("${CALLBACK_ATTEMPT_NUMBER}::int");
+  });
+
+  it("lets a settle skip a status it must never overwrite, and require one it may", () => {
+    const settle = method("settleContact");
+    expect(settle).toContain("NOT (outreach_status::text = ANY (string_to_array(${csv(opts.exceptStatus)}::text, ',')))");
+    expect(settle).toContain("outreach_status::text = ANY (string_to_array(${csv(opts.onlyIfStatusIn)}::text, ','))");
+  });
+});
+
+describe("a queue fed live from a source (v107)", () => {
+  it("adds or refreshes by external_ref in one fixed statement, and never touches the status of a row it already has", () => {
+    const up = method("upsertSourceContacts");
+    expect(up).toContain("FROM jsonb_to_recordset(${payload}::jsonb)");
+    expect(up).toContain("ON CONFLICT (campaign_id, external_ref) WHERE external_ref IS NOT NULL");
+    const onConflict = up.slice(up.indexOf("DO UPDATE SET"), up.indexOf("RETURNING"));
+    expect(onConflict).not.toContain("outreach_status");
+    expect(onConflict).not.toContain("next_attempt_at");
+  });
+
+  it("parks only dialable rows, and never brings a later look forward", () => {
+    const park = method("parkContacts");
+    expect(park).toContain("GREATEST(COALESCE(next_attempt_at, ${utc(until)}), ${utc(until)})");
+    expect(park).toContain("outreach_status::text IN ('pending', 'no_answer', 'voicemail', 'callback_scheduled')");
+    expect(park).toContain("jsonb_array_elements_text(${JSON.stringify(externalRefs)}::jsonb)");
+  });
+
+  it("diffs against this campaign's source-fed rows only", () => {
+    expect(method("sourceRows")).toContain("WHERE campaign_id = ${campaignId}::varchar AND external_ref IS NOT NULL");
+  });
+});
+
+describe("a caller ringing from another phone, whose surname begins with an accent (Codex P2, #358)", () => {
+  it("is prefiltered on the surname initial FOLDED in SQL, the way the code folds it", () => {
+    expect(method("contactsByName")).toContain(
+      "translate(lower(left(trim(c.last_name), 1)),\n                           ${SURNAME_INITIAL_FOLD.from}::text, ${SURNAME_INITIAL_FOLD.to}::text) = ${initial}::varchar",
+    );
+  });
+
+  it("folds every listed letter exactly as nameKey does, and nothing nameKey leaves alone", () => {
+    const from = [...SURNAME_INITIAL_FOLD.from];
+    const to = [...SURNAME_INITIAL_FOLD.to];
+    expect(from).toHaveLength(to.length);
+    from.forEach((ch, i) => expect(nameKey(ch), ch).toBe(to[i]));
+    for (const ch of ["ø", "đ", "ł"]) expect(nameKey(ch)).toBe(ch);
+    // The worked case: Álvarez's initial, lower-cased as SQL does, folds to nameKey's.
+    const sqlInitial = "Álvarez".charAt(0).toLowerCase();
+    expect(to[from.indexOf(sqlInitial)]).toBe(nameKey("Álvarez").charAt(0));
   });
 });

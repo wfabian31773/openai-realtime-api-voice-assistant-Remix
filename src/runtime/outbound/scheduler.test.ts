@@ -47,7 +47,9 @@ function deps(env: Record<string, string>, over: Partial<SchedulerDeps> = {}) {
       ]),
     slugs: async () => ["test-lane", "optical"],
     store: async () => store,
-    twilio: async () => ({ createCall }),
+    // The caller ID's Voice URL points back at the lane, as production's
+    // must before anything dials (dialer.callbackRouting).
+    twilio: async () => ({ createCall, voiceUrlFor: async () => "https://voice.example.test/voice/test-lane" }),
     lock,
     ...over,
   };

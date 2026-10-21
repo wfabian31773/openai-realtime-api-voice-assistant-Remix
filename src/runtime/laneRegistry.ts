@@ -70,8 +70,14 @@ import { SET_SPOKEN_LANGUAGE_TOOL_NAME, spokenLanguageToolDescription } from "..
 import { realtimeToolsFor } from "../tools/realtimeAdapter";
 // Static, like languageTools above: a module that registers tools at load
 // must reach the process through one loader (the v78 outage).
-import { END_CALL_TOOL_NAME, OPT_OUT_TOOL_NAME, RECORD_OUTCOME_TOOL_NAME } from "../tools/outboundTools";
+import {
+  END_CALL_TOOL_NAME,
+  IDENTIFY_CALLBACK_TOOL_NAME,
+  OPT_OUT_TOOL_NAME,
+  RECORD_OUTCOME_TOOL_NAME,
+} from "../tools/outboundTools";
 import type { OutboundContact, OutboundLanePolicy } from "./outbound/campaign";
+import type { CallbackContext } from "./outbound/callback";
 
 /** What the runtime needs from a lane's registry entry. Structurally a
  * subset of AgentConfig in src/config/agents.ts. */
@@ -272,6 +278,13 @@ export interface LaneCallMetadata {
    * given. Absent on every inbound call.
    */
   readonly outbound?: OutboundContact & { campaignKey: string };
+  /**
+   * On an outbound lane, a call somebody made TO it — the person ringing
+   * back the number we call from (./outbound/callback.ts): who on the
+   * campaign's list the calling number belongs to, and why we called. Absent
+   * on a dialled call and on every inbound lane.
+   */
+  readonly callback?: CallbackContext;
 }
 
 export interface ResolvedLane {
@@ -483,12 +496,41 @@ async function runtimeOwnedTools(
  */
 export const RUNTIME_OUTBOUND_TOOLS = [OPT_OUT_TOOL_NAME, RECORD_OUTCOME_TOOL_NAME, END_CALL_TOOL_NAME] as const;
 
+/**
+ * AND EVERY RETURNED CALL: the same three, plus finding out who rang. Who the
+ * call is with is not known when the tools are bound, so the injected value
+ * is the call's own CallSid and the contact lives in the per-call session the
+ * runtime opened (src/tools/outboundTools.ts, openCallbackSession).
+ */
+export const RUNTIME_CALLBACK_TOOLS = [
+  IDENTIFY_CALLBACK_TOOL_NAME,
+  OPT_OUT_TOOL_NAME,
+  RECORD_OUTCOME_TOOL_NAME,
+  END_CALL_TOOL_NAME,
+] as const;
+
 function outboundRuntimeTools(
   slug: string,
   metadata: LaneCallMetadata,
   config: LaneConfig,
 ): LiveTool[] {
-  if (!config.outbound || !metadata.outbound) return [];
+  if (!config.outbound) return [];
+  const telemetry = {
+    callId: metadata.callId,
+    callSid: metadata.callSid,
+    get callLogId() {
+      return metadata.callLogId;
+    },
+    agentSlug: slug,
+  };
+  if (metadata.callback) {
+    return realtimeToolsFor(
+      [...RUNTIME_CALLBACK_TOOLS],
+      { outbound_callback_sid: metadata.callSid },
+      telemetry,
+    ) as unknown as LiveTool[];
+  }
+  if (!metadata.outbound) return [];
   return realtimeToolsFor(
     [...RUNTIME_OUTBOUND_TOOLS],
     {
@@ -496,14 +538,7 @@ function outboundRuntimeTools(
       outbound_phone: metadata.outbound.phone,
       outbound_campaign: metadata.outbound.campaignKey,
     },
-    {
-      callId: metadata.callId,
-      callSid: metadata.callSid,
-      get callLogId() {
-        return metadata.callLogId;
-      },
-      agentSlug: slug,
-    },
+    telemetry,
   ) as unknown as LiveTool[];
 }
 
