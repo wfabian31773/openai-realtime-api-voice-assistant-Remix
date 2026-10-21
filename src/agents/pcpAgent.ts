@@ -5,6 +5,7 @@ import { pcpSafetyGuardrails } from '../guardrails/pcpSafety';
 import { escalationDetailsMap } from '../services/escalationStore';
 import { markCallConcluded } from '../services/callConclusion';
 import { recordingExecute } from '../services/toolTimeline';
+import { keepFieldDescriptions } from '../services/toolFieldDescriptions';
 import { withToolDirection } from '../services/toolDirection';
 import { scheduleLookupService } from '../services/scheduleLookupService';
 import {
@@ -698,16 +699,22 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
   // No callLogId on PcpAgentMetadata; the flush resolves by callSid, which is
   // the same fallback the other agents rely on when the id arrives late.
   const timelineCtx = { callId, callSid: metadata.callSid, agentSlug: 'pcp' };
+  // v109: the SDK drops every field `.describe()` from a schema with an
+  // optional field, so they are copied back from the zod — see
+  // toolFieldDescriptions.ts. Validation stays the SDK's zod parse.
   const recordedTool: typeof tool = ((def: any) =>
-    tool({
-      ...def,
-      // CP-3: the approved next line rides inside the tool result (script-listing §6).
-      execute: trackPcpFiling(
-        callId,
-        def.name,
-        withToolDirection('pcp', callId, def.name, recordingExecute(timelineCtx, def.name, def.execute)),
-      ),
-    })) as typeof tool;
+    keepFieldDescriptions(
+      tool({
+        ...def,
+        // CP-3: the approved next line rides inside the tool result (script-listing §6).
+        execute: trackPcpFiling(
+          callId,
+          def.name,
+          withToolDirection('pcp', callId, def.name, recordingExecute(timelineCtx, def.name, def.execute)),
+        ),
+      }),
+      def.parameters,
+    )) as typeof tool;
 
   const recordIntake = recordedTool({
     name: 'record_pcp_intake',
