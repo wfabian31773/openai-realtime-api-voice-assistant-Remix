@@ -94,6 +94,12 @@ describe('review r1 (#359): the exclusions hold through fillers and in Spanish',
     }
   });
 
+  it('a self-introduction with a filler between "optical" and "lab" is not a provider either', () => {
+    // The self-identification path reads the caller's raw words, fillers and all.
+    expect(callerSaysTheyAreAProvider("I'm with the optical uh lab, about a frame.")).toBe(false);
+    expect(callerSaysTheyAreAProvider('This is the optical um lab calling about an order.')).toBe(false);
+  });
+
   it('a Spanish-speaking patient asking about their own lab results is not a provider', () => {
     for (const answer of [
       'Resultados del laboratorio.',
