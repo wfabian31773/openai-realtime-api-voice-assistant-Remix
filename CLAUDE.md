@@ -1837,10 +1837,16 @@ would leave surgery looping.**
    below), and even there it is only that an absent or sentinel SID
    *reproduces* their shape. **The SIDs the tools saw on the ceiling-loop
    calls have not been checked.** Nothing ties those loops to invalid SIDs,
-   and the table leans the other way: a sentinel SID sends `resolve_location`
-   down the `!hit` branch, which REFUSES, while most of those loops are
-   `resolve_location` returning SUCCESS 30-odd times — the shape of the
-   wrong-facility branch change 1 fixed.
+   and nothing in the table rules it out either. The SID does not choose
+   the branch: `hit` comes from `lookupLocation(cleaned.value)` alone, and
+   `callSid` is read only by `officeAskSpent`, after `!hit` or `!usable` has
+   already been selected. So an invalid-SID call naming a recognised, usable
+   office still gets SUCCESS, and a success-shaped loop says nothing about
+   the SID. Nor does it identify which branch ran: before #282 both the
+   usable-hit path and the wrong-facility path returned success, and which
+   one ran on those calls has not been read off their timelines. **Which branch the ceiling loops
+   went through is not established**, and the after-measurement must not
+   credit any remaining loops to one change or the other on that basis.
 
    So, stated only from the code: **change 1 applies to every call whatever
    its SID; change 2 applies only to calls with a real one.** Whether change
@@ -1876,11 +1882,18 @@ before merge.
 
 **A SILENT MARKER IS NOT A FAILED DEPLOY.** It prints from the passthrough,
 which needs a real CallSid (see the exception above), so it can only ever
-count calls that have one. Read it together with the `[voice-runtime]` build
-marker: an absent line means either that no call exhausted its two asks, or
-that calls refused more than twice had no usable SID, so the bound never
-engaged. It cannot distinguish those, and
-it says nothing about whether change 1 is live.
+count calls that have one. **And it counts calls that REACHED the
+passthrough, which is not the same as calls that used up their allowance.**
+The second refusal brings the counter to two; the passthrough, and the
+line, run only if the model calls `resolve_location` a THIRD time. A
+valid-SID call refused twice that then files, gives up, or hangs up has
+spent both asks and leaves no line. So an absent line means only that no
+call with a real SID reached a third `resolve_location` call. It does not
+mean no call exhausted its two asks, and it does not mean the calls refused
+repeatedly lacked a usable SID. Counting exhausted allowances needs a
+separate measure (two `spoken_location` refusals on one call in
+`tool_timeline`). Read the marker together with the `[voice-runtime]` build
+marker; it says nothing about whether change 1 is live.
 
 **STILL OPEN, and #282 did not touch it:** why 11 of 72 optical calls hitting
 the location gate never reached `file_optical_ticket`'s OWN CallSid-keyed
