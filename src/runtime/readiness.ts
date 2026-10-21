@@ -802,8 +802,19 @@ import { callEnvironment } from "./callRecord";
  * of the dial — still booked, still movable, today's phone — failing closed.
  * `src/runtime/outbound/consoleMovable.ts`.
  */
+/**
+ * v109 — THE FIELD DESCRIPTIONS REACH THE MODEL (2026-10-21). The SDK's
+ * `tool()` drops every zod `.describe()` from a schema with an optional
+ * field, so on no-ivr and pcp — the two live lanes that build tools by hand —
+ * 1 of 31 and 1 of 2 field descriptions reached Grok. Among the lost:
+ * `escalate_to_human.caller_type`'s "ONLY when the caller has said so in
+ * their own words" (v99). They are now copied back onto the SDK's own schema;
+ * no type, enum or required list moves, and validation is still the zod
+ * parse. A sibling of #359 (v108), not stacked on it.
+ * `src/services/toolFieldDescriptions.ts`.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v107-the-movable-list-is-live-20261021";
+  "voice-runtime-v109-the-field-descriptions-reach-the-model-20261021";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

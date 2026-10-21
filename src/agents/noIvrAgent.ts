@@ -15,6 +15,7 @@ import { URGENT_SYMPTOMS, getCurrentDateTimeContext } from "../config/knowledgeB
 // of its entries are conditionals written as prose. See afterHoursTriage.ts.
 import { renderTriagePrompt } from "../tools/afterHoursTriage";
 import { recordingExecute } from "../services/toolTimeline";
+import { keepFieldDescriptions } from "../services/toolFieldDescriptions";
 // The queue lanes' "ask once, then file anyway" ruling (operator, 2026-09-04),
 // which this lane never reached because it builds create_ticket by hand.
 import { decideDobEscape, dobStatusNote, dobEscapeMarker, type DobStatus } from "../tools/dobEscape";
@@ -1203,12 +1204,18 @@ export async function createNoIvrAgent(
     callLogId: metadata.callLogId,
     agentSlug: 'no-ivr',
   };
+  // v109: the SDK drops every field `.describe()` from a schema with an
+  // optional field, so they are copied back from the zod — see
+  // toolFieldDescriptions.ts. Validation stays the SDK's zod parse.
   const recordedTool: typeof tool = ((def: any) =>
-    tool({
-      ...def,
-      // CP-3: the approved next line rides inside the tool result (script-listing §6).
-      execute: withToolDirection('no-ivr', callId, def.name, recordingExecute(timelineCtx, def.name, def.execute)),
-    })) as typeof tool;
+    keepFieldDescriptions(
+      tool({
+        ...def,
+        // CP-3: the approved next line rides inside the tool result (script-listing §6).
+        execute: withToolDirection('no-ivr', callId, def.name, recordingExecute(timelineCtx, def.name, def.execute)),
+      }),
+      def.parameters,
+    )) as typeof tool;
 
   let scheduleContext: PatientScheduleContext | undefined;
   let callerMemory: CallerMemory | null = null;
