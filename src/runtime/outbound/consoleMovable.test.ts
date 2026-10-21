@@ -76,6 +76,18 @@ describe("the read itself", () => {
     expect(MOVABLE_SELECT).toContain("f.appointment_date >= $1::date");
   });
 
+  it("reads both dates as text, so the process's time zone cannot move them a day", () => {
+    expect(MOVABLE_SELECT).toContain("to_char(pm.date_of_birth, 'YYYY-MM-DD') as date_of_birth");
+    expect(MOVABLE_SELECT).toContain("to_char(f.appointment_date, 'YYYY-MM-DD') as appointment_date");
+    // No bare date column is selected beside them.
+    expect(MOVABLE_SELECT).not.toMatch(/\spm\.date_of_birth,/);
+    expect(MOVABLE_SELECT).not.toMatch(/\sf\.appointment_date,/);
+    expect(rowToMovable({ ...ROW, date_of_birth: "1950-01-02", appointment_date: "2041-03-20" })).toMatchObject({
+      dateOfBirth: "1950-01-02",
+      appointmentDate: "2041-03-20",
+    });
+  });
+
   it("asks for today's list, and for one appointment by its id", async () => {
     const calls: Array<{ text: string; values: unknown[] }> = [];
     const reader = movableReader(async (text, values) => {

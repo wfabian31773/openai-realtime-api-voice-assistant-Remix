@@ -107,10 +107,18 @@ export function rowToMovable(r: Record<string, unknown>): MovableAppointment {
  * `capacity_movable_worklist` joins them (0132), in-reach only, from today.
  * One fixed statement with bound parameters, so it costs the Console one
  * plan and one `pg_stat_statements` entry however often it runs.
+ *
+ * Both dates come back as TEXT (`to_char`), the way `patientVerification`
+ * and `consoleScheduleFacts` read them. node-postgres turns a bare `date`
+ * into a Date at LOCAL midnight, so in a process running east of UTC the
+ * ISO string is the day before, and a returned caller's date of birth
+ * would never match the one we stored.
  */
 export const MOVABLE_SELECT = `
-  select r.appointment_id, r.person_id, pm.first_name, pm.last_name, pm.date_of_birth,
-         pm.cell_phone, pm.home_phone, f.appointment_date, f.begin_time, r.office,
+  select r.appointment_id, r.person_id, pm.first_name, pm.last_name,
+         to_char(pm.date_of_birth, 'YYYY-MM-DD') as date_of_birth,
+         pm.cell_phone, pm.home_phone,
+         to_char(f.appointment_date, 'YYYY-MM-DD') as appointment_date, f.begin_time, r.office,
          f.event_name, r.provider_name, r.partners, r.built_at
     from public.capacity_movable_cache r
     join public.si_appointment_facts f on f.appointment_id = r.appointment_id
