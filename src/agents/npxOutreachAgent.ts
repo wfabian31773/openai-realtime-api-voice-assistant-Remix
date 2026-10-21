@@ -27,8 +27,10 @@ import { consoleMovableContactSource } from '../runtime/outbound/consoleMovable'
 import {
   BOOK_SOONER_TOOL_NAME,
   CONFIRM_DOB_TOOL_NAME,
+  DESCRIBE_TOOL_NAME,
   FIND_SOONER_TOOL_NAME,
   NPX_OUTREACH_TOOLS,
+  STAFF_CALLBACK_TOOL_NAME,
 } from '../tools/npxOutreachTools';
 
 export const npxOutreachAgentConfig = {
@@ -42,10 +44,15 @@ export const npxOutreachAgentConfig = {
   language: 'en',
 } as const;
 
-/** Confirms, never assumes: a phone answered by somebody else is the ordinary case. */
+/**
+ * Who is calling, that it is automated and that it is recorded, then asks
+ * for the patient by first name (operator, 2026-10-21: "may I speak to … I'm
+ * looking for whoever"). Asks, never assumes: a phone answered by somebody
+ * else is the ordinary case, and why we called waits for their answer.
+ */
 export function npxOutreachGreeting(contact: OutboundContact): string {
   const who = contact.firstName?.trim()
-    ? `Am I speaking with ${contact.firstName.trim()}?`
+    ? `May I speak with ${contact.firstName.trim()}?`
     : 'May I ask who I am speaking with?';
   return `Hello, this is an automated assistant calling for Azul Vision. ${OUTBOUND_RECORDING_CLAUSE}. ${who}`;
 }
@@ -55,10 +62,10 @@ export const NPX_OUTREACH_VOICEMAIL =
   'Hello, this is Azul Vision calling with a message. Please call us back at this number when you have a moment. Thank you.';
 
 /** Said to somebody who rang back, once identify_callback_caller has settled
- * who they are — still nothing about an appointment until their date of
- * birth is confirmed. */
+ * who they are: the same opening as a dialled call, from the same tool, so a
+ * returned call hears what the call they missed would have said. */
 export const NPX_OUTREACH_CALLBACK_PURPOSE =
-  'we were calling with some information for them, and before going over it you need to confirm their date of birth.';
+  `we called about their upcoming appointment. Call ${DESCRIBE_TOOL_NAME} and say what it gives you, word for word.`;
 
 /**
  * THE PILOT LEVERS, both optional, both read at every refresh:
@@ -106,40 +113,52 @@ export const npxOutreachPolicy: OutboundLanePolicy = {
   tools: NPX_OUTREACH_TOOLS,
 };
 
+/**
+ * THE ORDER IS THE OPERATOR'S (2026-10-21), the same both ways: the patient is
+ * asked for (or, on a returned call, greeted) by first name; on their answer
+ * the agent says the kind of visit they have booked and its date, that we
+ * would like to offer a sooner appointment, and asks if that interests them;
+ * on a yes it confirms their date of birth, month then day then year, and
+ * only then offers times. Before the date of birth matches, the visit and its
+ * date are all that is said — not the time, the office or the doctor — and
+ * both come from describe_upcoming_appointment, never from this prompt, which
+ * carries nothing from the record (the v47 lesson).
+ */
 function buildPrompt(contact: OutboundContact | undefined, returnedCall: boolean): string {
   const name = contact?.firstName?.trim() || 'the patient';
   const opening = returnedCall
     ? `### Greeting
-Your opening has already been spoken: that this is Azul Vision's automated assistant, that the call is recorded, and a question about who is calling. Do not say it again.
+Your opening has already been spoken: thanks for calling, that this is Azul Vision's automated assistant, and that the call is recorded. When their number matched one person it greeted them by first name. Do not say it again.
 ### Who rang
-Find out who is calling with identify_callback_caller. Once it answers identified, say why we called in the words it gives you, then ask for their date of birth.`
+Find out who is calling with identify_callback_caller, as the returned-call steps say. Once it answers identified, call ${DESCRIBE_TOOL_NAME} and say what it gives you, word for word.`
     : `### Greeting
-Your opening has already been spoken: who is calling, that it is automated, that the call is recorded, and whether you are speaking with ${name}. Do not say it again.
+Your opening has already been spoken: who is calling, that it is automated, that the call is recorded, and a request to speak with ${name}. Do not say it again.
 ### Who answered
-- Yes: ask for their date of birth.
+- It is ${name} ("yes", "speaking", "this is them"): call ${DESCRIBE_TOOL_NAME} and say what it gives you, word for word.
 - ${name} is not available: ask nothing else and say nothing about why we called. Call record_call_outcome with call_back_later, thank them, say goodbye and call end_call.
 - Nobody by that name at this number: apologise, call record_call_outcome with wrong_person, say goodbye and call end_call.`;
   return `## Role & Persona
 You are Azul Vision's automated calling assistant. You are warm, clear and brief, and you never pretend to be a person.
 
 ## Objective
-Offer the patient a sooner routine eye exam at a partner practice that takes their medical group, and book it if they want it. Booking it cancels their current appointment with Azul Vision.
+Offer the patient a sooner appointment at a partner practice that takes their medical group, and book it if they want it. Booking it cancels their current appointment with Azul Vision.
 
 ## Conversation Flow
 ${opening}
 ### Confirm who you are speaking with
-Ask: "And your date of birth, starting with the month, then the day, then the year?" Then call ${CONFIRM_DOB_TOOL_NAME} with what they say. Until it answers verified you know nothing about their appointments, so say nothing about any.
-### The offer
-When it answers verified, tell them what it says about their current appointment, and that we may be able to get them seen sooner. If they want to hear the options, call ${FIND_SOONER_TOOL_NAME} and read each option in order. If they would rather keep their current appointment, thank them, call record_call_outcome with not_interested, say goodbye and call end_call.
+If they want to hear about a sooner appointment, say: "In order to continue, let me confirm your identity. Can I please have your date of birth, starting with the month, then the day, then the year?" Then call ${CONFIRM_DOB_TOOL_NAME} with what they say. If they would rather keep their current appointment, thank them, call record_call_outcome with not_interested, say goodbye and call end_call.
+### The options
+When it answers verified, call ${FIND_SOONER_TOOL_NAME} and read each option in order.
 ### Booking
 When they choose, say the option back in full, say that booking it cancels their current appointment with us, and ask them to confirm. On a yes, call ${BOOK_SOONER_TOOL_NAME} with the option number and say the confirmation it gives you, word for word.
 ### Close
 Ask if there is anything else about this, then say goodbye and call end_call.
 
 ## Guardrails & Escalation
+- Until ${CONFIRM_DOB_TOOL_NAME} answers verified, say nothing about their appointment beyond what ${DESCRIBE_TOOL_NAME} gives you: the kind of visit and its date. Never the time, the office or the doctor.
 - Never say a date of birth, and never say whether one was close.
 - If they ask not to be called again, call opt_out_of_calls at once, say only what it tells you, then call end_call.
-- You cannot transfer calls. If they want to talk to someone, say you cannot transfer this call and that their current appointment stays exactly as it is unless they choose to move it.
+- You cannot transfer calls. If they ask for a person, or for something this call cannot do, call ${STAFF_CALLBACK_TOOL_NAME} with what they want and say what it tells you.
 - Medical questions: say you can only help with the appointment on this call.
 - When a tool tells you what to say or do next, do that.
 

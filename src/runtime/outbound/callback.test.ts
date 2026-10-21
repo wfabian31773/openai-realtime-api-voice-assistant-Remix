@@ -75,12 +75,14 @@ describe("who a returned call is from", () => {
 });
 
 describe("the greeting on a returned call", () => {
-  it("confirms a single match by first name, as a question", () => {
+  it("greets a single match by first name, never the last name (operator, 2026-10-21)", () => {
     const g = callbackGreeting({ kind: "one", contact: candidate({ contactId: "a" }) });
     expect(g).toBe(
-      `Thank you for calling Azul Vision. This is an automated assistant. ${OUTBOUND_RECORDING_CLAUSE}. Am I speaking with Testa?`,
+      `Hello, Testa. Thank you for calling Azul Vision. This is an automated assistant. ${OUTBOUND_RECORDING_CLAUSE}.`,
     );
     expect(g).not.toContain("Person"); // never the last name
+    // It asks nothing: the caller's reply is the answer the steps act on.
+    expect(g).not.toContain("?");
   });
 
   it("asks who is calling when there is no single person to confirm", () => {
@@ -93,11 +95,16 @@ describe("the greeting on a returned call", () => {
     }
   });
 
-  it("says it is automated and recorded before anything else, every time", () => {
+  it("says it is automated and recorded before it asks anything, every time", () => {
     for (const match of [{ kind: "none" } as const, { kind: "one", contact: candidate({ contactId: "a" }) } as const]) {
       const g = callbackGreeting(match);
-      expect(g.indexOf("automated")).toBeLessThan(g.indexOf("?"));
+      expect(g).toContain("automated");
       expect(g).toContain(OUTBOUND_RECORDING_CLAUSE);
+      const asks = g.indexOf("?");
+      if (asks >= 0) {
+        expect(g.indexOf("automated")).toBeLessThan(asks);
+        expect(g.indexOf(OUTBOUND_RECORDING_CLAUSE)).toBeLessThan(asks);
+      }
     }
   });
 });
@@ -118,6 +125,9 @@ describe("the steps on a returned call", () => {
   it("tells the agent to identify a single match by the first name they confirm", () => {
     const steps = callbackSteps(ctx({ kind: "one", contact: candidate({ contactId: "a" }) }));
     expect(steps).toContain('call identify_callback_caller with first_name "Testa"');
+    // The greeting asked nothing, so a reply that is not a denial is the answer.
+    expect(steps).toContain("Unless their reply says they are not Testa");
+    expect(steps).toContain("If they say they are not Testa");
     expect(steps).not.toContain("Person");
     expect(steps).toContain("Never tell them why we called");
     // Why we called comes only after identification.

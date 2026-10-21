@@ -2511,12 +2511,12 @@ describe("a call the runtime dialled (src/runtime/outbound/)", () => {
     return { h, ws, update };
   }
 
-  it("answers an INBOUND call on an outbound lane as the person ringing back, and confirms them by first name", async () => {
+  it("answers an INBOUND call on an outbound lane as the person ringing back, and greets them by first name", async () => {
     const store = new FakeOutboundStore();
     await dialled(store);
     const { h, ws, update } = await returnedCall(store, "CA91");
     expect(spokenText(h)).toEqual([
-      "Thank you for calling Azul Vision. This is an automated assistant. This call is recorded. Am I speaking with Testa?",
+      "Hello, Testa. Thank you for calling Azul Vision. This is an automated assistant. This call is recorded.",
     ]);
     // The agent knows who the number belongs to and why we called — as a
     // candidate, with nothing said until they are identified.

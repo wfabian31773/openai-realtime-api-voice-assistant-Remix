@@ -12,8 +12,16 @@ import { resolveLane, RUNTIME_CALLBACK_TOOLS, RUNTIME_OUTBOUND_TOOLS, type LaneC
 import type { ContactSource, OutboundContact, SourceContact } from '../runtime/outbound/campaign';
 import type { CallbackContext } from '../runtime/outbound/callback';
 import { FakeOutboundStore } from '../runtime/outbound/store.testkit';
-import { NPX_OUTREACH_TOOLS, CONFIRM_DOB_TOOL_NAME, setNpxOutreachDepsForTests, resetOutreachSessionsForTests } from '../tools/npxOutreachTools';
-import { npxOutreachPolicy, pilotSource } from './npxOutreachAgent';
+import {
+  NPX_OUTREACH_TOOLS,
+  CONFIRM_DOB_TOOL_NAME,
+  DESCRIBE_TOOL_NAME,
+  FIND_SOONER_TOOL_NAME,
+  STAFF_CALLBACK_TOOL_NAME,
+  setNpxOutreachDepsForTests,
+  resetOutreachSessionsForTests,
+} from '../tools/npxOutreachTools';
+import { npxOutreachGreeting, npxOutreachPolicy, pilotSource } from './npxOutreachAgent';
 import { outboundProofPolicy } from './outboundProofAgent';
 
 const DATA = {
@@ -101,7 +109,44 @@ describe('the lane as the runtime resolves it', () => {
     const lane = await resolveLane('npx-outreach', { ...META, outbound: { ...CONTACT, campaignKey: 'npx-outreach' } }, { source: await registry(), env: {} });
     const prompt = String(lane!.agent.instructions);
     for (const leak of ['2041', 'March', 'Test Office', '1950', 'Test Group', 'Partner One']) expect(prompt).not.toContain(leak);
-    expect(prompt).toMatch(/Until it answers verified you know nothing about their appointments/);
+  });
+
+  it("runs the operator's order (2026-10-21): the visit and its date, the offer, the date of birth, then the times", async () => {
+    for (const meta of [
+      { ...META, outbound: { ...CONTACT, campaignKey: 'npx-outreach' } },
+      {
+        ...META,
+        callback: {
+          campaignKey: 'npx-outreach',
+          campaignId: 'campaign-1',
+          callerPhone: '+15555550111',
+          match: { kind: 'none' },
+          purpose: npxOutreachPolicy.callbackPurpose!,
+        } satisfies CallbackContext,
+      },
+    ]) {
+      const lane = await resolveLane('npx-outreach', meta, { source: await registry(), env: {} });
+      const prompt = String(lane!.agent.instructions);
+      const describe = prompt.indexOf(`call ${DESCRIBE_TOOL_NAME}`);
+      const dob = prompt.indexOf('starting with the month, then the day, then the year');
+      const confirm = prompt.indexOf(`call ${CONFIRM_DOB_TOOL_NAME}`);
+      const options = prompt.indexOf(`call ${FIND_SOONER_TOOL_NAME}`);
+      expect(describe).toBeGreaterThan(-1);
+      expect(dob).toBeGreaterThan(describe);
+      expect(confirm).toBeGreaterThan(dob);
+      expect(options).toBeGreaterThan(confirm);
+      // Before the date of birth: the visit and its date, and nothing else.
+      expect(prompt).toContain('the kind of visit and its date. Never the time, the office or the doctor.');
+      // A request for a person is a ticket; this call never transfers.
+      expect(prompt).toContain(`call ${STAFF_CALLBACK_TOOL_NAME}`);
+      expect(prompt).toContain('You cannot transfer calls.');
+    }
+  });
+
+  it('asks for the patient by first name, after saying it is automated and recorded', () => {
+    const g = npxOutreachGreeting(CONTACT);
+    expect(g).toBe('Hello, this is an automated assistant calling for Azul Vision. This call is recorded. May I speak with Testa?');
+    expect(g).not.toContain('Synthetic'); // never the last name
   });
 });
 
@@ -113,9 +158,14 @@ describe('the policy', () => {
     expect(npxOutreachPolicy.caps).toMatchObject({ perDay: 1, perWeek: 3, total: 3 });
   });
 
-  it('its voicemail and its returned-call line say nothing about an appointment', () => {
+  it('its voicemail says nothing about an appointment — whoever plays the machine back hears it', () => {
     expect(npxOutreachPolicy.voicemail()).not.toMatch(/appointment|exam|eye|sooner|partner/i);
-    expect(npxOutreachPolicy.callbackPurpose).not.toMatch(/appointment|exam|eye|sooner|partner/i);
+  });
+
+  it('a returned call hears the same opening a dialled call would have, from the same tool', () => {
+    // Said only after identify_callback_caller has settled who rang (callback.ts).
+    expect(npxOutreachPolicy.callbackPurpose).toContain(DESCRIBE_TOOL_NAME);
+    expect(npxOutreachPolicy.callbackPurpose).toContain('word for word');
   });
 });
 

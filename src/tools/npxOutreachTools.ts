@@ -3,17 +3,30 @@
  * `npx-outreach` lane only (its OutboundLanePolicy.tools), on a call the lane
  * dialled AND on a call somebody made back to it.
  *
- *   confirm_patient_birthdate  the person who answered gives their date of
- *                              birth; it must match the record the call is
- *                              about. NOTHING about the appointment reaches
- *                              the model before it does — the appointment
- *                              is in this tool's answer, not the prompt.
+ *   describe_upcoming_appointment
+ *                              once the person says they are the patient (or
+ *                              a returned call is identified): the visit type
+ *                              and the date, and the offer of a sooner one.
+ *                              Nothing else — not the time, the office or the
+ *                              doctor — before the date of birth matches.
+ *   confirm_patient_birthdate  the person gives their date of birth; it must
+ *                              match the record the call is about. The full
+ *                              appointment is in this tool's answer.
  *   find_sooner_exam           asks NPX for up to two sooner routine exams at
  *                              a partner that takes the patient's medical
  *                              group, in reach of them.
  *   book_sooner_exam           books the one they chose in NPX, cancels the
  *                              Azul appointment it replaces, reports the
  *                              cancel to NPX, and says only what happened.
+ *   request_staff_callback     a person who asks for a person gets a ticket
+ *                              for the HVA Hub's schedulers (operator,
+ *                              2026-10-21: "if they ask for a person, we'll
+ *                              just submit a ticket").
+ *
+ * THE ORDER IS THE OPERATOR'S (2026-10-21): confirm who answered by name, say
+ * who we are and why we called — the visit and its date — offer a sooner
+ * appointment, and only once they want it ask the date of birth, "starting
+ * with the month, the day, and then the year". The same on a returned call.
  *
  * WHY THE APPOINTMENT IS NOT IN THE PROMPT. A sequencing instruction in front
  * of text the model can already see is not a gate (v47, the after-hours line
@@ -38,11 +51,30 @@ import type { OutboundContact } from '../runtime/outbound/campaign';
 import type { OutboundStore } from '../runtime/outbound/store';
 import { createNpxOutreachClient, type NpxOutreachClient, type NpxSlot } from '../services/npxOutreachClient';
 import { cancelAzulAppointment, type AzulCancelRequest, type AzulCancelResult } from '../services/outreachAzulCancel';
+import { fold, SCHEDULING } from './queueRouting';
+import { sanitizeForSms } from '../services/gsm7';
+import type { CreateTicketParams, CreateTicketResponse } from '../../server/services/ticketingApiClient';
 
+export const DESCRIBE_TOOL_NAME = 'describe_upcoming_appointment';
 export const CONFIRM_DOB_TOOL_NAME = 'confirm_patient_birthdate';
 export const FIND_SOONER_TOOL_NAME = 'find_sooner_exam';
 export const BOOK_SOONER_TOOL_NAME = 'book_sooner_exam';
-export const NPX_OUTREACH_TOOLS = [CONFIRM_DOB_TOOL_NAME, FIND_SOONER_TOOL_NAME, BOOK_SOONER_TOOL_NAME] as const;
+export const STAFF_CALLBACK_TOOL_NAME = 'request_staff_callback';
+export const NPX_OUTREACH_TOOLS = [
+  DESCRIBE_TOOL_NAME,
+  CONFIRM_DOB_TOOL_NAME,
+  FIND_SOONER_TOOL_NAME,
+  BOOK_SOONER_TOOL_NAME,
+  STAFF_CALLBACK_TOOL_NAME,
+] as const;
+
+/** The HVA Hub, where every schedule-related request goes (standing
+ * instruction 10), and its scheduling request type. */
+export const HVA_HUB_DEPARTMENT_ID = 9;
+export const HVA_HUB_SCHEDULING_REQUEST_TYPE_ID = 32;
+/** "Reschedule Existing Appointment": the request is about an appointment
+ * the patient already has, unless their own words say otherwise. */
+const DEFAULT_STAFF_REASON_ID = 147;
 
 /** Two tries at the date of birth: once to ask, once in case it was misheard. */
 export const MAX_DOB_TRIES = 2;
@@ -57,6 +89,7 @@ interface Deps {
   npx: NpxOutreachClient;
   cancel: (req: AzulCancelRequest) => Promise<AzulCancelResult>;
   store: () => Promise<OutboundStore>;
+  fileTicket: (params: CreateTicketParams) => Promise<CreateTicketResponse>;
 }
 
 let storePromise: Promise<OutboundStore> | null = null;
@@ -64,6 +97,10 @@ const defaultDeps = (): Deps => ({
   npx: createNpxOutreachClient(),
   cancel: (req) => cancelAzulAppointment(req),
   store: () => (storePromise ??= import('../runtime/outbound/store').then((m) => m.createDbOutboundStore())),
+  // Imported when used, as every registry tool does: the client reads its
+  // environment at import.
+  fileTicket: async (params) =>
+    (await import('../../server/services/ticketingApiClient')).ticketingApiClient.createTicket(params),
 });
 let deps: Deps | null = null;
 const live = (): Deps => (deps ??= defaultDeps());
@@ -77,11 +114,15 @@ export function setNpxOutreachDepsForTests(next: Partial<Deps> | null): void {
 
 interface OutreachSession {
   contact: OutboundContact;
+  /** describe_upcoming_appointment has told them the visit and its date. */
+  described: boolean;
   verified: boolean;
   dobTries: number;
   offers: number;
   slots: NpxSlot[];
   booking: { bookingId: string; slot: NpxSlot; cancel: AzulCancelResult } | null;
+  /** The HVA Hub ticket filed when they asked for a person. */
+  staffTicket: string | null;
   openedAtMs: number;
 }
 
@@ -160,7 +201,21 @@ async function sessionFor(input: Record<string, unknown>): Promise<{ sid: string
   if (!contact) return NOT_THIS_CALL;
   return {
     sid,
-    s: keep(sid, { contact, verified: false, dobTries: 0, offers: 0, slots: [], booking: null, openedAtMs: now }, now),
+    s: keep(
+      sid,
+      {
+        contact,
+        described: false,
+        verified: false,
+        dobTries: 0,
+        offers: 0,
+        slots: [],
+        booking: null,
+        staffTicket: null,
+        openedAtMs: now,
+      },
+      now,
+    ),
   };
 }
 
@@ -201,12 +256,92 @@ export function spokenSlot(slot: NpxSlot): string {
   return `${when}, at ${slot.partnerName}, ${slot.address}`;
 }
 
+/**
+ * The visit, as a person would say it. Keyed on NextGen's event names as the
+ * movable list carries them (measured 2026-10-21: Dilated Exam, Follow Up,
+ * Consult, IOP Check, Refraction Only, Ref+DFE, Diabetic Exam, New Patient
+ * Exam, GLE, Recheck). An event not listed is "an eye appointment", never a
+ * guess at what it might be. It is said before the date of birth, to whoever
+ * answered, so no name here may tell them a condition: a Diabetic Exam is "an
+ * eye exam", because "a diabetic eye exam" tells a household member the
+ * patient is diabetic.
+ */
+const SPOKEN_VISITS: Record<string, string> = {
+  'dilated exam': 'a dilated eye exam',
+  'follow up': 'a follow-up visit',
+  consult: 'a consultation',
+  'iop check': 'an eye pressure check',
+  'refraction only': 'a vision test for glasses',
+  'ref+dfe': 'an eye exam',
+  'diabetic exam': 'an eye exam',
+  'new patient exam': 'an eye exam',
+  recheck: 'a recheck visit',
+};
+export function spokenVisit(eventName: string): string {
+  return SPOKEN_VISITS[eventName.trim().toLowerCase().replace(/\s+/g, ' ')] ?? 'an eye appointment';
+}
+
+/** Before the date of birth: the visit and its date, nothing more. */
+function briefAppointment(c: OutboundContact): string {
+  return `${spokenVisit(field(c, 'event_name'))} on ${spokenDay(field(c, 'appointment_date'))}`;
+}
+
+/** After it: the time and the office as well. */
 function currentAppointment(c: OutboundContact): string {
-  const day = spokenDay(field(c, 'appointment_date'));
   const clock = spokenClock(field(c, 'begin_time'));
   const office = field(c, 'office');
-  return `an eye exam on ${day}${clock ? ` at ${clock}` : ''}${office ? ` at our ${office} office` : ''}`;
+  return `${briefAppointment(c)}${clock ? ` at ${clock}` : ''}${office ? ` at our ${office} office` : ''}`;
 }
+
+const DOB_ASK = 'Can I please have your date of birth, starting with the month, then the day, then the year?';
+
+// ── describe_upcoming_appointment ───────────────────────────────────────────
+
+registerTool({
+  name: DESCRIBE_TOOL_NAME,
+  layer: 'agent',
+  timeoutMs: 6000,
+  description:
+    'Say why we called: the patient\'s upcoming visit and its date, and the offer of a sooner appointment. ' +
+    'Call it once the person says they are the patient (on a returned call, once identify_callback_caller ' +
+    'has identified them), and before you say anything about any appointment.',
+  input_schema: { type: 'object', properties: {}, required: [] },
+  handler: async (input): Promise<ToolResult> => {
+    const found = await sessionFor(input);
+    if ('success' in found) return found;
+    const { s } = found;
+    if (!field(s.contact, 'appointment_date')) {
+      const r: Refusal = {
+        success: false,
+        error: 'record_incomplete',
+        fix: 'There is nothing to offer from this record. Say nothing about any appointment. Thank them, call record_call_outcome with done, say goodbye and call end_call.',
+      };
+      return r;
+    }
+    s.described = true;
+    const appointment = briefAppointment(s.contact);
+    if (s.verified) {
+      return {
+        success: true,
+        appointment,
+        verified: true,
+        next: 'Their identity is already confirmed. Call find_sooner_exam and read the options it gives you.',
+      };
+    }
+    return {
+      success: true,
+      appointment,
+      say:
+        `Our records show you have ${appointment}. The reason for this call is that we'd like to offer you ` +
+        'a sooner appointment. Does that interest you?',
+      next:
+        `If they say yes, say: "In order to continue, let me confirm your identity. ${DOB_ASK}" and call ` +
+        `${CONFIRM_DOB_TOOL_NAME} with what they say. If they would rather keep their appointment, thank them, call ` +
+        'record_call_outcome with not_interested, say goodbye and call end_call. Say nothing else about the ' +
+        'appointment — not the time, the office or the doctor — until the date of birth matches.',
+    };
+  },
+});
 
 // ── confirm_patient_birthdate ───────────────────────────────────────────────
 
@@ -224,7 +359,7 @@ registerTool({
       date_of_birth: {
         type: 'string',
         description: 'The date of birth exactly as the person said it, month first.',
-        askAs: 'And your date of birth, starting with the month, then the day, then the year?',
+        askAs: DOB_ASK,
       },
     },
     required: ['date_of_birth'],
@@ -233,7 +368,7 @@ registerTool({
     const found = await sessionFor(input);
     if ('success' in found) return found;
     const { sid, s } = found;
-    if (s.verified) return { success: true, verified: true, current_appointment: currentAppointment(s.contact) };
+    if (s.verified) return { success: true, verified: true, current_appointment: currentAppointment(s.contact), next: afterVerified(s) };
     // Spent tries stay spent: a third guess must not unlock what two wrong
     // dates closed, or the limit is one more call away from meaning nothing.
     if (s.dobTries >= MAX_DOB_TRIES) return notConfirmed();
@@ -257,7 +392,7 @@ registerTool({
         success: true,
         verified: true,
         current_appointment: currentAppointment(s.contact),
-        next: `Tell them we have ${currentAppointment(s.contact)}, and that we may be able to get them seen sooner at a partner practice that takes their medical group. Ask if they would like to hear the options; if yes, call find_sooner_exam.`,
+        next: afterVerified(s),
       };
     }
     if (s.dobTries < MAX_DOB_TRIES) {
@@ -272,6 +407,17 @@ registerTool({
     return notConfirmed();
   },
 });
+
+/** What follows a matching date of birth. They have already said they want
+ * a sooner appointment when the offer came first, so it goes straight to the
+ * options; otherwise the offer is made now. */
+function afterVerified(s: OutreachSession): string {
+  return s.described
+    ? `Their identity is confirmed. Call ${FIND_SOONER_TOOL_NAME} now and read the options it gives you.`
+    : `Tell them our records show they have ${currentAppointment(s.contact)}, and that we'd like to offer them a ` +
+        `sooner appointment at a partner practice that takes their medical group. Ask if that interests them; if yes, ` +
+        `call ${FIND_SOONER_TOOL_NAME}.`;
+}
 
 function notConfirmed(): Refusal {
   return {
@@ -484,5 +630,109 @@ registerTool({
       say: confirmation(s.booking.slot, cancel, currentDay),
       fix: 'Say the confirmation as given, ask if there is anything else, then say goodbye and call end_call. The outcome is already recorded.',
     };
+  },
+});
+
+// ── request_staff_callback ──────────────────────────────────────────────────
+
+/** The Hub's own reason for what they asked, by the cues the queue lanes
+ * already route on; "reschedule" when their words name none. */
+export function staffReasonFor(request: string): number {
+  const text = fold(request);
+  for (const cue of SCHEDULING) {
+    if (cue.cues.some((c) => text.includes(fold(c)))) return cue.reasonId;
+  }
+  return DEFAULT_STAFF_REASON_ID;
+}
+
+registerTool({
+  name: STAFF_CALLBACK_TOOL_NAME,
+  layer: 'agent',
+  timeoutMs: 15_000,
+  description:
+    'When the person asks to speak with a person, or for something this call cannot do, ask our scheduling ' +
+    'team to call them back. This call cannot transfer. Say what it tells you.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      request: {
+        type: 'string',
+        description: 'What they want, in a few words of their own.',
+        askAs: 'What would you like our team to help you with?',
+      },
+    },
+    required: ['request'],
+  },
+  handler: async (input): Promise<ToolResult> => {
+    const found = await sessionFor(input);
+    if ('success' in found) return found;
+    const { sid, s } = found;
+    const already = (ticket: string): ToolResult => ({
+      success: true,
+      ticket_number: ticket,
+      say: "I've asked our scheduling team to call you back. Your current appointment stays exactly as it is.",
+      fix: 'Say that, ask if there is anything else, then say goodbye and call end_call. The outcome is already recorded.',
+    });
+    if (s.staffTicket) return already(s.staffTicket);
+
+    const request = String(input.request ?? '').trim();
+    const callbackSid = typeof input.outbound_callback_sid === 'string' ? input.outbound_callback_sid : '';
+    const calledFrom = callbackSid ? callbackSessionFor(callbackSid)?.callerPhone ?? '' : '';
+    const dob = dobOnFile(s.contact);
+    const body = sanitizeForSms(
+      [
+        'Azul outreach call: an offer of a sooner appointment at an NPX partner practice.',
+        'The patient asked to speak with a person.',
+        request ? `What they asked: ${request}` : null,
+        `Their appointment: ${currentAppointment(s.contact)}.`,
+        `Date of birth confirmed on the call: ${s.verified ? 'yes' : 'no'}.`,
+        callbackSid ? 'They called us back.' : 'We called them.',
+        calledFrom && calledFrom !== s.contact.phone
+          ? `They called from ${calledFrom}; the number on file is ${s.contact.phone}.`
+          : null,
+        s.booking
+          ? `A sooner exam was booked on this call (NPX booking ${s.booking.bookingId}).`
+          : 'Their appointment has not been changed.',
+      ]
+        .filter((l) => l !== null)
+        .join('\n'),
+    ).value;
+
+    const result = await live().fileTicket({
+      departmentId: HVA_HUB_DEPARTMENT_ID,
+      requestTypeId: HVA_HUB_SCHEDULING_REQUEST_TYPE_ID,
+      requestReasonId: staffReasonFor(request),
+      patientFirstName: s.contact.firstName?.trim() || undefined,
+      patientLastName: s.contact.lastName?.trim() || undefined,
+      patientPhone: s.contact.phone,
+      preferredContactMethod: 'phone',
+      ...(dob ? { patientBirthMonth: dob.month, patientBirthDay: dob.day, patientBirthYear: dob.year } : {}),
+      description: body,
+      priority: 'medium',
+      idempotencyKey: `${sid}-outreach-staff`,
+      callData: { agentUsed: 'npx-outreach', callSid: sid },
+    });
+    if (!result.success || !result.ticketNumber) {
+      console.warn(`[NPX OUTREACH] staff callback ticket not filed (${result.error ?? 'no ticket number'})`);
+      const r: Refusal = {
+        success: false,
+        error: 'ticket_not_filed',
+        fix:
+          'The request could not be sent to the team just now. Do not say anyone will call. Say: "I wasn\'t able to ' +
+          'send that to our team just now. Your current appointment stays exactly as it is." Then call ' +
+          'record_call_outcome with call_back_later, say goodbye and call end_call.',
+      };
+      return r;
+    }
+    s.staffTicket = result.ticketNumber;
+    try {
+      await (await live().store()).settleContact(s.contact.contactId, 'completed', {
+        notes: `staff_callback:${result.ticketNumber}`,
+        exceptStatus: ['do_not_call'],
+      });
+    } catch (e) {
+      console.warn(`[NPX OUTREACH] staff callback ${result.ticketNumber}: could not settle the contact —`, e instanceof Error ? e.message : e);
+    }
+    return already(result.ticketNumber);
   },
 });

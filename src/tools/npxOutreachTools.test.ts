@@ -8,13 +8,20 @@ import { getTool } from './registry';
 import {
   BOOK_SOONER_TOOL_NAME,
   CONFIRM_DOB_TOOL_NAME,
+  DESCRIBE_TOOL_NAME,
   FIND_SOONER_TOOL_NAME,
+  HVA_HUB_DEPARTMENT_ID,
+  HVA_HUB_SCHEDULING_REQUEST_TYPE_ID,
   MIN_DAYS_SOONER,
+  NPX_OUTREACH_TOOLS,
+  STAFF_CALLBACK_TOOL_NAME,
   outreachSessionFor,
   resetOutreachSessionsForTests,
   setNpxOutreachDepsForTests,
   spokenClock,
   spokenDay,
+  spokenVisit,
+  staffReasonFor,
 } from './npxOutreachTools';
 import { callbackSessionFor, openCallbackSession } from './outboundTools';
 import { FakeOutboundStore } from '../runtime/outbound/store.testkit';
@@ -36,6 +43,7 @@ const DATA = {
   date_of_birth: '1950-01-02',
   appointment_date: '2041-03-20',
   begin_time: '0900',
+  event_name: 'Dilated Exam',
   office: 'Test Office',
   medical_group: 'Test Group CAP',
   partners: ['Partner One Optometry'],
@@ -45,6 +53,7 @@ let store: FakeOutboundStore;
 let attemptId: string;
 let npx: { offer: ReturnType<typeof vi.fn>; book: ReturnType<typeof vi.fn>; reportCancel: ReturnType<typeof vi.fn> };
 let cancel: ReturnType<typeof vi.fn>;
+let fileTicket: ReturnType<typeof vi.fn>;
 
 beforeEach(async () => {
   resetOutreachSessionsForTests();
@@ -57,10 +66,12 @@ beforeEach(async () => {
     reportCancel: vi.fn(async () => ({ ok: true })),
   };
   cancel = vi.fn(async (): Promise<AzulCancelResult> => ({ cancelled: true, alreadyCancelled: false }));
+  fileTicket = vi.fn(async () => ({ success: true, ticketNumber: 'VA-90001' }));
   setNpxOutreachDepsForTests({
     npx: { configured: true, ...npx } as unknown as NpxOutreachClient,
     cancel: cancel as never,
     store: async () => store,
+    fileTicket: fileTicket as never,
   });
 });
 
@@ -75,6 +86,136 @@ const DIALLED = () => ({
 });
 const run = (name: string, args: Record<string, unknown> = {}) => getTool(name)!.handler({ ...DIALLED(), ...args });
 const verify = () => run(CONFIRM_DOB_TOOL_NAME, { date_of_birth: 'January 2nd, 1950' });
+
+describe('describe_upcoming_appointment (operator, 2026-10-21: the visit and its date, then the offer)', () => {
+  it('says the kind of visit and its date and offers a sooner appointment — not the time, the office or the doctor', async () => {
+    const r = (await run(DESCRIBE_TOOL_NAME)) as Record<string, unknown>;
+    expect(r).toMatchObject({ success: true, appointment: 'a dilated eye exam on Wednesday, March 20' });
+    expect(r.say).toBe(
+      "Our records show you have a dilated eye exam on Wednesday, March 20. The reason for this call is that we'd like to offer you a sooner appointment. Does that interest you?",
+    );
+    expect(JSON.stringify(r)).not.toMatch(/9:00|Test Office|Partner One|1950|Test Group/);
+    expect(outreachSessionFor(SID)!.described).toBe(true);
+    expect(outreachSessionFor(SID)!.verified).toBe(false);
+  });
+
+  it('on a yes, the next step is the date of birth in parts, then confirm_patient_birthdate', async () => {
+    const r = (await run(DESCRIBE_TOOL_NAME)) as Record<string, unknown>;
+    const next = String(r.next);
+    expect(next).toContain('In order to continue, let me confirm your identity.');
+    expect(next).toContain('starting with the month, then the day, then the year');
+    expect(next.indexOf(CONFIRM_DOB_TOOL_NAME)).toBeGreaterThan(next.indexOf('starting with the month'));
+    expect(next).toContain('not_interested');
+  });
+
+  it('after the offer, a matching date of birth goes straight to the options', async () => {
+    await run(DESCRIBE_TOOL_NAME);
+    const r = (await verify()) as Record<string, unknown>;
+    expect(r).toMatchObject({ success: true, verified: true });
+    expect(JSON.stringify(r)).toContain(`Call ${FIND_SOONER_TOOL_NAME} now`);
+  });
+
+  it('without the offer first, a matching date of birth makes it then', async () => {
+    const r = (await verify()) as Record<string, unknown>;
+    expect(JSON.stringify(r)).toMatch(/we'd like to offer them a sooner appointment/);
+  });
+
+  it('once confirmed, says so instead of offering again', async () => {
+    await verify();
+    const r = (await run(DESCRIBE_TOOL_NAME)) as Record<string, unknown>;
+    expect(r).toMatchObject({ success: true, verified: true });
+    expect(r.say).toBeUndefined();
+    expect(String(r.next)).toContain(FIND_SOONER_TOOL_NAME);
+  });
+
+  it('a record with no appointment date offers nothing', async () => {
+    store.addContact({ id: 'c2', phone: '+15555550122', status: 'calling', firstName: 'Testb', lastName: 'Synthetic', customData: { ...DATA, appointment_date: '' } });
+    const a2 = await store.startAttempt('c2', store.campaignId, 1);
+    const r = await getTool(DESCRIBE_TOOL_NAME)!.handler({ ...DIALLED(), outbound_contact_id: 'c2', outbound_attempt_id: a2, outbound_call_sid: 'CA00000000000000000000000000000222' });
+    expect(r).toMatchObject({ success: false, error: 'record_incomplete' });
+  });
+
+  it('names a visit without naming a condition, and never guesses one it does not know', () => {
+    expect(spokenVisit('Dilated Exam')).toBe('a dilated eye exam');
+    expect(spokenVisit('  follow   up ')).toBe('a follow-up visit');
+    expect(spokenVisit('Diabetic Exam')).toBe('an eye exam');
+    expect(spokenVisit('GLE')).toBe('an eye appointment');
+    expect(spokenVisit('')).toBe('an eye appointment');
+  });
+
+  it('asks the model for nothing', () => {
+    expect(getTool(DESCRIBE_TOOL_NAME)!.input_schema.properties).toEqual({});
+  });
+});
+
+describe('request_staff_callback (operator, 2026-10-21: a request for a person is a ticket)', () => {
+  it('files one HVA Hub scheduling ticket with who, what and the state of the call, and settles the contact', async () => {
+    const r = (await run(STAFF_CALLBACK_TOOL_NAME, { request: 'I want to cancel my appointment' })) as Record<string, unknown>;
+    expect(r).toMatchObject({ success: true, ticket_number: 'VA-90001' });
+    expect(r.say).toBe("I've asked our scheduling team to call you back. Your current appointment stays exactly as it is.");
+    expect(fileTicket).toHaveBeenCalledTimes(1);
+    const params = fileTicket.mock.calls[0][0];
+    expect(params).toMatchObject({
+      departmentId: HVA_HUB_DEPARTMENT_ID,
+      requestTypeId: HVA_HUB_SCHEDULING_REQUEST_TYPE_ID,
+      requestReasonId: 148,
+      patientFirstName: 'Testa',
+      patientLastName: 'Synthetic',
+      patientPhone: '+15555550111',
+      preferredContactMethod: 'phone',
+      patientBirthMonth: '01',
+      patientBirthDay: '02',
+      patientBirthYear: '1950',
+      idempotencyKey: `${SID}-outreach-staff`,
+      callData: { agentUsed: 'npx-outreach', callSid: SID },
+    });
+    expect(params.description).toContain('The patient asked to speak with a person.');
+    expect(params.description).toContain('What they asked: I want to cancel my appointment');
+    expect(params.description).toContain('Date of birth confirmed on the call: no.');
+    expect(params.description).toContain('Their appointment has not been changed.');
+    expect(store.contacts.get('c1')).toMatchObject({ status: 'completed', notes: 'staff_callback:VA-90001' });
+  });
+
+  it('says when the date of birth was confirmed', async () => {
+    await verify();
+    await run(STAFF_CALLBACK_TOOL_NAME, { request: 'talk to someone' });
+    expect(fileTicket.mock.calls[0][0].description).toContain('Date of birth confirmed on the call: yes.');
+  });
+
+  it('asking twice on one call files once', async () => {
+    await run(STAFF_CALLBACK_TOOL_NAME, { request: 'a person please' });
+    const again = await run(STAFF_CALLBACK_TOOL_NAME, { request: 'a person please' });
+    expect(again).toMatchObject({ success: true, ticket_number: 'VA-90001' });
+    expect(fileTicket).toHaveBeenCalledTimes(1);
+  });
+
+  it('a ticket that did not file promises nobody will call, and records call back later', async () => {
+    fileTicket.mockResolvedValueOnce({ success: false, error: 'HTTP 500' });
+    const r = await run(STAFF_CALLBACK_TOOL_NAME, { request: 'a person please' });
+    expect(r).toMatchObject({ success: false, error: 'ticket_not_filed' });
+    const text = JSON.stringify(r);
+    expect(text).toContain("Do not say anyone will call");
+    expect(text).toContain('call_back_later');
+    expect(store.contacts.get('c1')!.status).toBe('calling');
+  });
+
+  it('never settles over an opt-out', async () => {
+    await store.settleContact('c1', 'do_not_call');
+    await run(STAFF_CALLBACK_TOOL_NAME, { request: 'a person please' });
+    expect(store.contacts.get('c1')!.status).toBe('do_not_call');
+  });
+
+  it('routes by what they asked, with reschedule when their words name nothing', () => {
+    expect(staffReasonFor('Quiero cancelar mi cita')).toBe(148);
+    expect(staffReasonFor('Can I reschedule instead')).toBe(147);
+    expect(staffReasonFor('can I just talk to somebody')).toBe(147);
+  });
+
+  it('is one of the lane\'s tools', () => {
+    expect(NPX_OUTREACH_TOOLS).toEqual([DESCRIBE_TOOL_NAME, CONFIRM_DOB_TOOL_NAME, FIND_SOONER_TOOL_NAME, BOOK_SOONER_TOOL_NAME, STAFF_CALLBACK_TOOL_NAME]);
+    expect(Object.keys(getTool(STAFF_CALLBACK_TOOL_NAME)!.input_schema.properties)).toEqual(['request']);
+  });
+});
 
 describe('confirm_patient_birthdate', () => {
   it('confirms on the date of birth on file, and only then hands over the appointment', async () => {
