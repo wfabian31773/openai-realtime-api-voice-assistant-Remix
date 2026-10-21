@@ -34,6 +34,7 @@ const ROW = {
   event_name: "Comprehensive Exam",
   provider_name: "Test Provider",
   partners: ["Partner One"],
+  payer: "Test Group CAP",
   built_at: "2041-03-05T18:17:00Z",
 };
 
@@ -61,6 +62,19 @@ describe("one movable appointment", () => {
     const c = movableToContact(rowToMovable(ROW));
     expect(c.externalRef).toBe(ROW.appointment_id);
     expect(c.data).toMatchObject({ source: "console_movable", date_of_birth: "1950-01-02", person_id: ROW.person_id });
+  });
+});
+
+describe("the medical group (the NPX outreach offer matches on it)", () => {
+  it("is read from the cache's payer, carried on the row and onto the queue row", () => {
+    expect(MOVABLE_SELECT).toMatch(/\br\.payer\b/);
+    expect(rowToMovable(ROW).medicalGroup).toBe("Test Group CAP");
+    expect(movableToContact(rowToMovable(ROW)).data).toMatchObject({ medical_group: "Test Group CAP" });
+  });
+
+  it("is null, not an empty string, when the cache has none", () => {
+    expect(rowToMovable({ ...ROW, payer: null }).medicalGroup).toBeNull();
+    expect(rowToMovable({ ...ROW, payer: "  " }).medicalGroup).toBeNull();
   });
 });
 

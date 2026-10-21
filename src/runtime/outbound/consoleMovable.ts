@@ -53,6 +53,10 @@ export interface MovableAppointment {
   providerName: string | null;
   /** NPX partners who could take this appointment. */
   partners: string[];
+  /** The patient's medical group as the Console writes it ("Regal CAP"). NPX's
+   * outreach offer matches it to its own groups by name; on 2026-10-21 all 17
+   * payer names on the list matched exactly one NPX group. */
+  medicalGroup: string | null;
   /** When the Console last rebuilt the movable list. */
   builtAt: Date | null;
 }
@@ -97,6 +101,7 @@ export function rowToMovable(r: Record<string, unknown>): MovableAppointment {
     eventName: String(r.event_name ?? ""),
     providerName: (r.provider_name as string | null) ?? null,
     partners: Array.isArray(r.partners) ? (r.partners as unknown[]).map(String) : [],
+    medicalGroup: typeof r.payer === "string" && r.payer.trim() ? r.payer.trim() : null,
     builtAt: r.built_at ? new Date(r.built_at as string) : null,
   };
 }
@@ -119,7 +124,7 @@ export const MOVABLE_SELECT = `
          to_char(pm.date_of_birth, 'YYYY-MM-DD') as date_of_birth,
          pm.cell_phone, pm.home_phone,
          to_char(f.appointment_date, 'YYYY-MM-DD') as appointment_date, f.begin_time, r.office,
-         f.event_name, r.provider_name, r.partners, r.built_at
+         f.event_name, r.provider_name, r.partners, r.payer, r.built_at
     from public.capacity_movable_cache r
     join public.si_appointment_facts f on f.appointment_id = r.appointment_id
     join public.patients_master pm on pm.person_id = r.person_id
@@ -217,6 +222,7 @@ export function movableToContact(m: MovableAppointment): SourceContact {
       event_name: m.eventName,
       provider_name: m.providerName,
       partners: m.partners,
+      medical_group: m.medicalGroup,
     },
   };
 }
