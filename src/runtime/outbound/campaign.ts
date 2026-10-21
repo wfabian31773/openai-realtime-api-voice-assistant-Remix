@@ -64,9 +64,18 @@ export interface OutboundLanePolicy {
    * Minutes to wait after Twilio refuses a dial before trying again.
    * The person cooldown (`caps.minHoursBetween`) is for real call
    * outcomes only — a Twilio outage must not spend the rest of the
-   * calling day. Default DEFAULT_INFRA_RETRY_MINUTES (15).
+   * calling day. Default DEFAULT_INFRA_RETRY_MINUTES (15). A non-number
+   * or a value of 0 or less falls back to that default.
    */
   infraRetryMinutes?: number;
+  /**
+   * How many consecutive Twilio refusals may use the short infrastructure
+   * retry before the person cooldown applies. A permanently refused
+   * number or a bad caller ID must not retry every 15 minutes for the
+   * whole calling window. Default DEFAULT_MAX_CONSECUTIVE_INFRA_RETRIES
+   * (3). A non-number or a value of 0 or less falls back to that default.
+   */
+  maxConsecutiveInfraRetries?: number;
   /**
    * The first words the person hears, built for them. Must say that this is
    * an automated assistant calling for Azul Vision and that the call is
@@ -85,6 +94,36 @@ export interface OutboundLanePolicy {
  * person. Not the person cooldown: nobody was rung. A policy may set
  * `infraRetryMinutes` to override. */
 export const DEFAULT_INFRA_RETRY_MINUTES = 15;
+
+/** Consecutive Twilio refusals that may use the short retry. After this,
+ * the next wait is the person cooldown so a permanently refused number
+ * cannot sit on the 15-minute loop for the whole calling day. */
+export const DEFAULT_MAX_CONSECUTIVE_INFRA_RETRIES = 3;
+
+/** A usable infrastructure-retry wait. Non-numbers, non-finite values
+ * and anything 0 or less fall back to DEFAULT_INFRA_RETRY_MINUTES so a
+ * bad policy cannot produce an Invalid Date or a retry on every tick. */
+export function resolvedInfraRetryMinutes(
+  policy: Pick<OutboundLanePolicy, "infraRetryMinutes">,
+): number {
+  const n = policy.infraRetryMinutes;
+  if (typeof n !== "number" || !Number.isFinite(n) || n <= 0) {
+    return DEFAULT_INFRA_RETRY_MINUTES;
+  }
+  return n;
+}
+
+/** A usable consecutive-refusal cap. Same fallback rule as the retry
+ * minutes: a missing or invalid value is the default, never 0. */
+export function resolvedMaxConsecutiveInfraRetries(
+  policy: Pick<OutboundLanePolicy, "maxConsecutiveInfraRetries">,
+): number {
+  const n = policy.maxConsecutiveInfraRetries;
+  if (typeof n !== "number" || !Number.isFinite(n) || n <= 0) {
+    return DEFAULT_MAX_CONSECUTIVE_INFRA_RETRIES;
+  }
+  return Math.floor(n);
+}
 
 /** The fleet-wide switch. Nothing in this layer places a call unless it is
  * exactly "1"; a typo is off, never on. */

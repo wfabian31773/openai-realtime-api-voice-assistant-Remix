@@ -18,15 +18,18 @@
  *      A failed check hands the row back with the reason's next chance.
  *   3. DIAL: an attempt row first, then Twilio. The attempt row exists
  *      before Twilio is asked so a call that rings while we are still
- *      waiting for Twilio's reply has something to land on. A Twilio
- *      refusal records the attempt as NOT_PLACED — kept for the audit,
- *      counted against no cap, because nobody was rung — and hands the
- *      row back for a short infrastructure retry (DEFAULT_INFRA_RETRY_MINUTES,
- *      overridable on the policy), not the person cooldown. Contact
- *      bookkeeping (attempts++, contacted) waits until Twilio has ACCEPTED,
- *      so a call that was never placed is not counted as an attempt and
- *      does not show as Failed. Once Twilio has ACCEPTED, nothing hands
- *      the row back — the phone is ringing.
+ *      waiting for Twilio's reply has something to land on. A CLEAR
+ *      Twilio refusal — a RestException with an HTTP 4xx status —
+ *      records the attempt as NOT_PLACED (nobody was rung) and hands the
+ *      row back for a short infrastructure retry, not the person
+ *      cooldown. After DEFAULT_MAX_CONSECUTIVE_INFRA_RETRIES of those
+ *      in a row, the person cooldown applies so a permanently refused
+ *      number cannot sit on the 15-minute loop. An AMBIGUOUS createCall
+ *      error (a socket reset, a lost response, a 5xx) may have already
+ *      created the call: the attempt is left open so callOpenOnPhone
+ *      still sees it, and the next look is the person cooldown. Contact
+ *      bookkeeping (attempts++, contacted) waits until Twilio has
+ *      ACCEPTED. Once Twilio has ACCEPTED, nothing hands the row back.
  *
  * Twilio is asked for answering-machine detection that waits for the
  * greeting to end (`DetectMessageEnd`), the 5Star lane's setting since it
@@ -41,7 +44,11 @@
  */
 
 import type { OutboundLanePolicy } from "./campaign";
-import { DEFAULT_INFRA_RETRY_MINUTES, campaignEnabled } from "./campaign";
+import {
+  campaignEnabled,
+  resolvedInfraRetryMinutes,
+  resolvedMaxConsecutiveInfraRetries,
+} from "./campaign";
 import { mayDialNow, pacificParts } from "./callingWindow";
 import { NOT_PLACED, dncKey, type ContactRow, type OutboundStore } from "./store";
 
@@ -99,6 +106,22 @@ export function statusUrl(host: string, slug: string, contactId: string, attempt
   return `https://${host}${OUTBOUND_PATH_PREFIX}/${slug}/status?${q.toString()}`;
 }
 
+/**
+ * A RestException whose HTTP status is 4xx is the only createCall throw
+ * that proves Twilio refused the request and created no call. Anything
+ * else — a socket reset, a lost response, a 5xx — can arrive after
+ * Twilio has already accepted, so it must not be treated as not_placed.
+ */
+export function isClearTwilioRefusal(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const name = "name" in error ? String((error as { name?: unknown }).name ?? "") : "";
+  const ctor = (error as { constructor?: { name?: string } }).constructor?.name ?? "";
+  if (name !== "RestException" && ctor !== "RestException") return false;
+  const raw = (error as { status?: unknown; statusCode?: unknown }).status
+    ?? (error as { statusCode?: unknown }).statusCode;
+  return typeof raw === "number" && Number.isFinite(raw) && raw >= 400 && raw < 500;
+}
+
 /** The next moment a held row should be looked at again. Coarse on purpose:
  * the window and the caps are re-checked at that moment anyway. */
 export function nextLookAt(now: Date, reason: string, policy: OutboundLanePolicy): Date {
@@ -124,9 +147,10 @@ export function nextLookAt(now: Date, reason: string, policy: OutboundLanePolicy
     case "twilio_refused": {
       // A Twilio / infrastructure refusal rang nobody, so it must not
       // spend the person cooldown. Retry shortly; a policy may shorten
-      // or lengthen it (Codex round 5, #357).
-      const minutes = policy.infraRetryMinutes ?? DEFAULT_INFRA_RETRY_MINUTES;
-      return new Date(now.getTime() + Math.max(0, minutes) * 60 * 1000);
+      // or lengthen it. A non-number or a value of 0 or less is the
+      // default, never NaN or a retry on every tick.
+      const minutes = resolvedInfraRetryMinutes(policy);
+      return new Date(now.getTime() + minutes * 60 * 1000);
     }
     default:
       return new Date(now.getTime() + policy.caps.minHoursBetween * hour);
@@ -253,15 +277,31 @@ async function dialOne(
       statusCallbackEvent: ["completed"],
     });
   } catch (error) {
-    (deps.log ?? console.log)(
-      `[outbound] ${policy.campaignKey}: Twilio refused the dial — ${error instanceof Error ? error.message : String(error)}`,
+    const log = deps.log ?? console.log;
+    const detail = error instanceof Error ? error.message : String(error);
+    if (isClearTwilioRefusal(error)) {
+      log(`[outbound] ${policy.campaignKey}: Twilio refused the dial — ${detail}`);
+      // Kept for the audit trail, counted against no cap, and handed back
+      // with the status it had: nobody was rung, so nothing about the
+      // person changed. The next look is an infrastructure retry, unless
+      // this contact has already had the consecutive-refusal cap of them.
+      await deps.store.finishAttempt(attemptId, { status: NOT_PLACED });
+      const consecutive = await deps.store.consecutiveRefusedAttempts(contact.id);
+      const reason =
+        consecutive > resolvedMaxConsecutiveInfraRetries(policy) ? "too_soon" : "twilio_refused";
+      await deps.store.releaseContact(contact.id, candidate.status, nextLookAt(now, reason, policy));
+      return "twilio_refused";
+    }
+    // Ambiguous: client.calls.create can throw after Twilio has already
+    // created the call (socket reset, lost response, 5xx). Ending the
+    // attempt would hide a live ring from callOpenOnPhone and, with the
+    // short retry, ring them again in 15 minutes. Leave it open and use
+    // the person cooldown.
+    log(
+      `[outbound] ${policy.campaignKey}: Twilio createCall did not return — the call may already be ringing (${detail})`,
     );
-    // Kept for the audit trail, counted against no cap, and handed back with
-    // the status it had: nobody was rung, so nothing about the person changed.
-    // The next look is an infrastructure retry, not the person cooldown.
-    await deps.store.finishAttempt(attemptId, { status: NOT_PLACED });
-    await deps.store.releaseContact(contact.id, candidate.status, nextLookAt(now, "twilio_refused", policy));
-    return "twilio_refused";
+    await deps.store.releaseContact(contact.id, candidate.status, nextLookAt(now, "too_soon", policy));
+    return "twilio_uncertain";
   }
   // Twilio accepted: the phone is ringing, so nothing below may hand the row
   // back. Bookkeeping (attempts / contacted) and the CallSid are each their

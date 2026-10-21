@@ -123,6 +123,15 @@ export interface OutboundStore {
    */
   priorAttempts(contactId: string): Promise<PriorAttempt[]>;
   /**
+   * Trailing NOT_PLACED attempts on THIS contact row, newest first, until
+   * a placed (or still-open) attempt breaks the streak. The short
+   * infrastructure retry uses this count: after
+   * DEFAULT_MAX_CONSECUTIVE_INFRA_RETRIES the person cooldown applies,
+   * so a permanently refused number cannot retry every 15 minutes for
+   * the whole calling window.
+   */
+  consecutiveRefusedAttempts(contactId: string): Promise<number>;
+  /**
    * Whether a dialled call to this contact's PHONE is still on the line, in
    * ANY campaign. The caps are per campaign; ringing a person twice at once
    * is wrong whichever campaigns the two rows sit in (Codex round 4, #357).
@@ -314,6 +323,30 @@ export async function createDbOutboundStore(): Promise<OutboundStore> {
            WHERE me.id = ${contactId}::varchar
              AND a.status IS DISTINCT FROM ${NOT_PLACED}::varchar`),
       ).map((r) => ({ at: new Date(r.attempted_at as string) }));
+    },
+
+    async consecutiveRefusedAttempts(contactId) {
+      const found = rows(
+        await db.execute(sql`
+          -- Trailing not_placed rows on this contact, newest first. A
+          -- newer attempt that is anything else (placed, or still
+          -- initiated after an ambiguous createCall) breaks the streak.
+          SELECT count(*)::int AS n
+            FROM campaign_contact_attempts a
+           WHERE a.contact_id = ${contactId}::varchar
+             AND a.direction = 'outbound'
+             AND a.status = ${NOT_PLACED}::varchar
+             AND NOT EXISTS (
+               SELECT 1
+                 FROM campaign_contact_attempts newer
+                WHERE newer.contact_id = a.contact_id
+                  AND newer.direction = 'outbound'
+                  AND (newer.attempted_at > a.attempted_at
+                       OR (newer.attempted_at = a.attempted_at AND newer.id > a.id))
+                  AND newer.status IS DISTINCT FROM ${NOT_PLACED}::varchar
+             )`),
+      );
+      return Number(found[0]?.n ?? 0);
     },
 
     async callOpenOnPhone(contactId, since) {

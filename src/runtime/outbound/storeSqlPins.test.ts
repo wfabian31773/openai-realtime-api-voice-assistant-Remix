@@ -93,6 +93,15 @@ describe("the attempt row keeps the answer webhook's verdict", () => {
     expect(method("priorAttempts")).toContain("AND a.status IS DISTINCT FROM ${NOT_PLACED}::varchar");
   });
 
+  it("counts trailing not_placed attempts on this contact for the infra-retry cap", () => {
+    const streak = method("consecutiveRefusedAttempts");
+    expect(streak).toContain("a.contact_id = ${contactId}::varchar");
+    expect(streak).toContain("a.direction = 'outbound'");
+    expect(streak).toContain("a.status = ${NOT_PLACED}::varchar");
+    expect(streak).toContain("newer.status IS DISTINCT FROM ${NOT_PLACED}::varchar");
+    expect(streak).not.toContain("campaign_id");
+  });
+
   it("does not count the contact as attempted until Twilio accepts (Codex round 5, #357)", () => {
     const start = method("startAttempt");
     expect(start).toContain("INSERT INTO campaign_contact_attempts");

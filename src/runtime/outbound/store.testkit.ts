@@ -107,6 +107,20 @@ export class FakeOutboundStore implements OutboundStore {
       .map((a) => ({ at: a.at }));
   }
 
+  async consecutiveRefusedAttempts(contactId: string): Promise<number> {
+    // Same rule as the SQL: this contact row, trailing not_placed only.
+    const mine = this.attempts
+      .filter((a) => a.contactId === contactId)
+      .slice()
+      .sort((a, b) => b.at.getTime() - a.at.getTime() || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0));
+    let n = 0;
+    for (const a of mine) {
+      if (a.finish?.status !== NOT_PLACED) break;
+      n += 1;
+    }
+    return n;
+  }
+
   async callOpenOnPhone(contactId: string, since: Date): Promise<boolean> {
     // Same rule as the SQL: the phone in EVERY campaign, still on the line.
     const siblings = this.samePhone(contactId, true);
