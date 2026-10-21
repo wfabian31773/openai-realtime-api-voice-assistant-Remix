@@ -307,17 +307,29 @@ export const CALLER_SYMPTOM = new RegExp(
  * not count on its own, and that caller is asked which facility — the
  * direction that does not wake the on-call provider.
  *
- * The gap takes ONE separator character or ONE filler word per repetition, so
- * a long run of dots or spaces cannot backtrack exponentially.
+ * The gap takes ONE separator character or ONE WHOLE filler word per
+ * repetition, and a filler must end where its word ends, so every run of
+ * dots, spaces or "mmmm" has exactly one way to be read: a long run cannot
+ * backtrack exponentially (Codex r3 on #359: 64 m's took 0.7 s, 72 took
+ * several, on a synchronous call made per caller turn).
+ *
+ * A PATIENT'S OWN RESULTS, IN EITHER ORDER (Codex r3): "lab results" was
+ * excluded by looking after the word, and "My results are from the lab" came
+ * before it. So a lab is not a facility when its own sentence (up to 40
+ * characters before it) talks about results, tests or work, whatever the
+ * order and in both languages. A real lab that says "I have results from
+ * Example Lab" is then asked which facility it is calling from, and its
+ * answer ("Example Lab.") counts.
  */
-const FILLER_GAP = String.raw`(?:[\s,.;:!?-]|uhh?|umm?|uhm|ahh?|erm|ehh?|mmm?)*`;
+const FILLER_GAP = String.raw`(?:[\s,.;:!?-]|(?:uhh?|umm?|uhm|ahh?|erm|ehh?|mmm?)(?![a-z]))*`;
+const RESULT_WORDS = String.raw`(?:results?|work|tests?|reports?|draws?|orders?|values?|slips?|appointments?)`;
 const LAB_WORD =
-  String.raw`(?<!optical${FILLER_GAP})(?:laboratory|lab)` +
-  String.raw`(?!${FILLER_GAP}(?:results?|work|tests?|reports?|draws?|orders?|values?|slips?|appointments?)\b)`;
+  String.raw`(?<!optical${FILLER_GAP})(?<!\b${RESULT_WORDS}\b[^.?!]{0,40})(?:laboratory|lab)` +
+  String.raw`(?!${FILLER_GAP}${RESULT_WORDS}\b)`;
 const NOT_OPTICAL_ES = String.raw`(?!${FILLER_GAP}[oó]ptico)`;
 const LABORATORIO =
-  String.raw`(?<!(?:resultados?|an[aá]lisis|ex[aá]men(?:es)?|pruebas?|estudios?|[oó]rden(?:es)?|trabajos?|citas?)` +
-  String.raw`${FILLER_GAP}(?:del|de(?:${FILLER_GAP}la)?)(?:${FILLER_GAP}el)?${FILLER_GAP})laboratorio${NOT_OPTICAL_ES}`;
+  String.raw`(?<!\b(?:resultados?|an[aá]lisis|ex[aá]men(?:es)?|pruebas?|estudios?|[oó]rden(?:es)?|trabajos?|citas?)\b[^.?!]{0,40})` +
+  String.raw`laboratorio${NOT_OPTICAL_ES}`;
 const PROVIDER_ROLE =
   String.raw`(?:dr\.?|doctor|doctora|nurse|nurse practitioner|physician|physician assistant|surgeon|resident|` +
   String.raw`ophthalmologist|optometrist|np|pa|rn|md|charge nurse|(?:er|emergency(?: room)?) (?:doctor|physician|nurse))`;

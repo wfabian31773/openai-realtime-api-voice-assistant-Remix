@@ -167,6 +167,33 @@ describe('review r2 (#359): every exclusion holds through fillers, punctuation a
   });
 });
 
+describe('review r3 (#359): results before the lab, and a filler held for a long time', () => {
+  const window = (answer: string) => {
+    noteCallerTranscript(CALL, ['AGENT: Thank you for calling.', 'CALLER: I need some help.', ASK, `CALLER: ${answer}`]);
+    return corroborate(CALL, '').providerStated;
+  };
+
+  it('a patient whose results come before the word "lab" is not a provider, in either language', () => {
+    for (const answer of ['My results are from the lab.', 'Results from the lab.', 'The test was at the lab.', 'Mis resultados son del laboratorio.', 'El examen fue en el laboratorio Ejemplo.']) {
+      expect(window(answer), answer).toBe(false);
+      expect(callerSaysTheyAreAProvider([answer]), answer).toBe(false);
+    }
+  });
+
+  it('a lab that mentions results later in its answer still counts', () => {
+    expect(window('Yes, Example lab, uh, calling about a patient\'s results.')).toBe(true);
+    expect(callerSaysTheyAreAProvider('This is Example Laboratory calling with critical results for Dr. Lin.')).toBe(true);
+  });
+
+  it('a filler held for a long time does not stall the matcher', () => {
+    callerSaysTheyAreAProvider('Example lab.');
+    const t0 = Date.now();
+    callerSaysTheyAreAProvider('This is Example lab ' + 'm'.repeat(62) + 'x');
+    window('Example lab ' + 'm'.repeat(62) + 'x');
+    expect(Date.now() - t0).toBeLessThan(150);
+  });
+});
+
 describe('the gate, on the corpus call', () => {
   const reason = 'Diagnostics laboratory calling with stat lab results for the on-call physician';
 
