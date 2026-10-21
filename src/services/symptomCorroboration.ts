@@ -129,7 +129,7 @@ export function releaseCallerSpeech(callId: string | undefined): void {
  */
 const FACILITY_QUESTION = new RegExp(
   [
-    String.raw`calling from [^.?!]{0,40}?(?:office|hospital|clinic|facility|laboratory)`,
+    String.raw`calling from [^.?!]{0,40}?(?:office|hospital|clinic|facility|lab(?:oratory)?\b)`,
     String.raw`calling from (?:a |the )?doctor'?s?\b`,
     String.raw`doctor'?s office,? (?:a )?hospital,? (?:or )?(?:a )?clinic`,
     String.raw`which (?:office|hospital|clinic|facility|laboratory|lab) are you calling from`,

@@ -280,6 +280,13 @@ describe('review r4 (#359): the question itself offers a laboratory', () => {
     expect(opened('AGENT: ¿Llama desde un laboratorio?', WINDOW_ONLY_ES)).toBe(true);
   });
 
+  // review r5 (#359): the paraphrase says "lab", not "laboratory".
+  it('a paraphrase that says "lab" opens the window too, and "label" does not', () => {
+    expect(opened('AGENT: Are you calling from a lab, and which one?', WINDOW_ONLY)).toBe(true);
+    expect(opened('AGENT: Are you calling from the lab?', WINDOW_ONLY)).toBe(true);
+    expect(opened("AGENT: Is the number you're calling from on the label?", WINDOW_ONLY)).toBe(false);
+  });
+
   it('a patient answering the new question with their own results still does not count', () => {
     expect(opened(ASK, 'No, my lab results.')).toBe(false);
     expect(opened(ASK, 'The optical lab.')).toBe(false);
