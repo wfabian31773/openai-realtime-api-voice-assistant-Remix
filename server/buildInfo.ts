@@ -17,6 +17,8 @@ export interface BuildInfo {
   gitShaFull?: string | null;
   /** Whether that commit is on origin/main, from local git at build time; null = could not tell. */
   traceable?: boolean | null;
+  /** True when the build ran from a workspace with uncommitted changes; then the SHA is null. */
+  dirty?: boolean | null;
 }
 
 export function getBuildInfo(file: string = path.join(process.cwd(), 'build-info.json')): BuildInfo {
@@ -28,8 +30,9 @@ export function getBuildInfo(file: string = path.join(process.cwd(), 'build-info
       gitSha: str(j.gitSha),
       gitShaFull: str(j.gitShaFull),
       traceable: typeof j.traceable === 'boolean' ? j.traceable : null,
+      dirty: typeof j.dirty === 'boolean' ? j.dirty : null,
     };
   } catch {
-    return { builtAt: null, gitSha: null, gitShaFull: null, traceable: null };
+    return { builtAt: null, gitSha: null, gitShaFull: null, traceable: null, dirty: null };
   }
 }

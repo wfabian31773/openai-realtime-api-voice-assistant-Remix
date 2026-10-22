@@ -21,6 +21,13 @@
  * there is no origin/main ref to compare with. No network fetch, so a build
  * can never hang or fail on GitHub. A workspace commit that never reached
  * GitHub reads false — the SHA is still the true SHA of what was built.
+ *
+ * A DIRTY WORKSPACE HAS NO SHA (Codex, #364). Replit publishes from the
+ * workspace, and a tracked edit or an untracked source file there means the
+ * bundle is NOT the commit HEAD names. So the SHA is reported only when
+ * `git status` confirms the tree is clean; dirty (or a status that cannot be
+ * read) writes gitSha/gitShaFull null, traceable false, dirty true, and the
+ * commit underneath as baseShaFull for a person to read — never as the build.
  */
 "use strict";
 
@@ -52,14 +59,24 @@ function isAncestorOfMain() {
   }
 }
 
+/** true = uncommitted changes (or status unreadable), false = clean. Ignored files never count. */
+function isDirty() {
+  const status = git(["status", "--porcelain", "--untracked-files=normal"]);
+  return status === null ? true : status.length > 0;
+}
+
 function buildInfo() {
   const full = git(["rev-parse", "HEAD"]);
   const sha = full && /^[0-9a-f]{40}$/.test(full) ? full : null;
+  if (sha && isDirty()) {
+    return { builtAt: new Date().toISOString(), gitSha: null, gitShaFull: null, traceable: false, dirty: true, baseShaFull: sha };
+  }
   return {
     builtAt: new Date().toISOString(),
     gitSha: sha ? sha.slice(0, 7) : null,
     gitShaFull: sha,
     traceable: sha ? isAncestorOfMain() : null,
+    dirty: sha ? false : null,
   };
 }
 
@@ -72,7 +89,11 @@ function main(out = path.join(process.cwd(), "build-info.json")) {
   try {
     const info = buildInfo();
     fs.writeFileSync(out, JSON.stringify(info));
-    console.log(`[build-info] ${info.gitSha ?? "unknown sha"} traceable=${info.traceable}`);
+    console.log(
+      info.dirty
+        ? `[build-info] workspace has uncommitted changes on ${info.baseShaFull.slice(0, 7)}; build SHA reported as unknown`
+        : `[build-info] ${info.gitSha ?? "unknown sha"} traceable=${info.traceable}`,
+    );
   } catch (error) {
     console.warn(`[build-info] not written: ${error && error.message}`);
   }

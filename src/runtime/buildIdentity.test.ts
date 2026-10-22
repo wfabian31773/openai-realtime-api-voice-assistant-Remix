@@ -173,6 +173,46 @@ describe("the build SHA is written at build time, never committed", () => {
     expect(info.gitSha).toBe(head.slice(0, 7));
     // No origin/main to compare with: unknown, not false.
     expect(info.traceable).toBeNull();
+    expect(info.dirty).toBe(false);
+  });
+
+  it("a dirty workspace reports NO SHA — the bundle is not the commit (Codex, #364)", () => {
+    for (const dirty of ["tracked", "untracked"] as const) {
+      const dir = tmp();
+      const git = (...a: string[]) => execFileSync("git", a, { cwd: dir, stdio: "pipe" }).toString().trim();
+      git("init", "-q");
+      fs.writeFileSync(path.join(dir, ".gitignore"), "build-info.json\nignored.log\n");
+      fs.writeFileSync(path.join(dir, "a.ts"), "export const a = 1;\n");
+      git("add", ".");
+      git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "x");
+      const head = git("rev-parse", "HEAD");
+      // An ignored file never makes the tree dirty.
+      fs.writeFileSync(path.join(dir, "ignored.log"), "noise");
+      if (dirty === "tracked") fs.writeFileSync(path.join(dir, "a.ts"), "export const a = 2;\n");
+      else fs.writeFileSync(path.join(dir, "b.ts"), "export const b = 1;\n");
+      execFileSync("node", [script], { cwd: dir, stdio: "pipe" });
+      const out = path.join(dir, "build-info.json");
+      const info = getBuildInfo(out);
+      expect(info.gitSha).toBeNull();
+      expect(info.gitShaFull).toBeNull();
+      expect(info.traceable).toBe(false);
+      expect(info.dirty).toBe(true);
+      expect(JSON.parse(fs.readFileSync(out, "utf8")).baseShaFull).toBe(head);
+    }
+  });
+
+  it("an ignored file alone leaves the tree clean and the SHA stands", () => {
+    const dir = tmp();
+    const git = (...a: string[]) => execFileSync("git", a, { cwd: dir, stdio: "pipe" }).toString().trim();
+    git("init", "-q");
+    fs.writeFileSync(path.join(dir, ".gitignore"), "build-info.json\nignored.log\n");
+    git("add", ".");
+    git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "x");
+    fs.writeFileSync(path.join(dir, "ignored.log"), "noise");
+    execFileSync("node", [script], { cwd: dir, stdio: "pipe" });
+    const info = getBuildInfo(path.join(dir, "build-info.json"));
+    expect(info.gitShaFull).toBe(git("rev-parse", "HEAD"));
+    expect(info.dirty).toBe(false);
   });
 
   it("outside a checkout a stale file is REMOVED and the SHA reads null, never the old value", () => {
@@ -202,7 +242,7 @@ describe("the build SHA is written at build time, never committed", () => {
 
   it("a missing file reads as null on every field", () => {
     expect(getBuildInfo(path.join(tmp(), "build-info.json"))).toEqual({
-      builtAt: null, gitSha: null, gitShaFull: null, traceable: null,
+      builtAt: null, gitSha: null, gitShaFull: null, traceable: null, dirty: null,
     });
   });
 
