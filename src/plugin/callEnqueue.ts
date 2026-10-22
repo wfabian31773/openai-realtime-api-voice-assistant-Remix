@@ -244,7 +244,8 @@ export async function reportCallNotPlaced(
   const approvalId = contact.customData.approval_id;
   if (!store || typeof approvalId !== "string" || !approvalId) return;
   const current = await store.getApproval(approvalId);
-  if (!current || current.status !== "committed") return;
+  if (!current) return;
+  // Only a committed approval moves: the conditional update is the check.
   const updated = await store.updateApproval(
     approvalId,
     {

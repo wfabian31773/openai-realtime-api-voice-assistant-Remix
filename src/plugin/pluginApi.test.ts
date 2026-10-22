@@ -1209,6 +1209,7 @@ describe("review findings", () => {
       body: JSON.stringify({ confirmToken: token.confirmToken }),
     });
     expect(committed.status).toBe(502);
+    expect(await committed.json()).toMatchObject({ outcome: "unknown" });
     const row = await store.getApproval(pending.approval.id);
     expect(row?.status).toBe("unknown");
     expect(row?.result).toEqual({ reason: "unknown" });
@@ -1744,6 +1745,54 @@ describe("a call commit needs a dialler that will place it (v115)", () => {
     expect(outbound.upserts).toEqual([1]);
   });
 
+  it("says the outcome is unknown when queueing throws after the claim (outcome unknown)", async () => {
+    const outbound = new FakeOutboundStore(() => noon());
+    outbound.upsertSourceContacts = async () => { throw new Error("hub timeout"); };
+    const ctx = await boot({ PLUGIN_WRITES_ENABLED: "true" }, { now: noon, outbound });
+    const bot = ctx.store.mint(["contacts:prepare", "contacts:commit"]);
+    const staff = ctx.store.mint(["contacts:approve"]);
+    const prep = await fetch(`${ctx.base}/api/plugin/v1/prepare_call`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${bot.plaintext}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ phone: PHONE, ticketNumber: TICKET, firstName: "Testa", dateOfBirth: CALL_DOB }),
+    });
+    const pending = (await prep.json()) as { approval: { id: string } };
+    const approved = await staffApprove(ctx.base, staff, ctx.store, pending.approval.id);
+    const token = (await approved.json()) as { confirmToken: string };
+    const committed = await fetch(`${ctx.base}/api/plugin/v1/commit_contact`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${bot.plaintext}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ confirmToken: token.confirmToken }),
+    });
+    expect(committed.status).toBe(502);
+    expect(await committed.json()).toEqual({ error: "The send outcome is unknown", outcome: "unknown" });
+    expect((await ctx.store.getApproval(pending.approval.id))?.status).toBe("unknown");
+  });
+
+  it("says nothing was sent when the approved payload no longer matches its lock (outcome not_sent)", async () => {
+    const ctx = await boot({ PLUGIN_WRITES_ENABLED: "true" }, { now: noon });
+    const bot = ctx.store.mint(["contacts:prepare", "contacts:commit"]);
+    const staff = ctx.store.mint(["contacts:approve"]);
+    const prep = await fetch(`${ctx.base}/api/plugin/v1/prepare_call`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${bot.plaintext}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ phone: PHONE, ticketNumber: TICKET, firstName: "Testa", dateOfBirth: CALL_DOB }),
+    });
+    const pending = (await prep.json()) as { approval: { id: string } };
+    const approved = await staffApprove(ctx.base, staff, ctx.store, pending.approval.id);
+    const token = (await approved.json()) as { confirmToken: string };
+    const row = await ctx.store.getApproval(pending.approval.id);
+    await ctx.store.updateApproval(pending.approval.id, { payload: { ...row!.payload, purpose: "changed after approval" } });
+    const committed = await fetch(`${ctx.base}/api/plugin/v1/commit_contact`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${bot.plaintext}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ confirmToken: token.confirmToken }),
+    });
+    expect(committed.status).toBe(409);
+    expect(await committed.json()).toEqual({ error: "Approved payload no longer matches the locked hash", outcome: "not_sent" });
+    expect(ctx.outbound.upserts).toEqual([]);
+  });
+
   it("carries no outcome on a refusal before the confirm token is consumed", async () => {
     const ctx = await boot({ PLUGIN_WRITES_ENABLED: "true" }, { now: noon });
     const bot = ctx.store.mint(["contacts:commit"]);
@@ -1812,6 +1861,19 @@ describe("a call that missed its place-by deadline fails its approval (v115)", (
     await committedApproval(store, "appr-x", status);
     await reportCallNotPlaced({ id: "c1", customData: { approval_id: "appr-x" } }, store, now);
     expect((await store.getApproval("appr-x"))?.status).toBe(status);
+    expect((await store.listAudit()).filter((e) => e.tool === "call_not_placed")).toHaveLength(0);
+  });
+
+  it("moves nothing when the approval left committed after it was read (the update is conditional)", async () => {
+    const store = new MemoryPluginStore();
+    await committedApproval(store, "appr-race", "unknown");
+    const real = store.getApproval.bind(store);
+    store.getApproval = async (id) => {
+      const row = await real(id);
+      return row ? { ...row, status: "committed" } : row;
+    };
+    await reportCallNotPlaced({ id: "c1", customData: { approval_id: "appr-race" } }, store, now);
+    expect((await real("appr-race"))?.status).toBe("unknown");
     expect((await store.listAudit()).filter((e) => e.tool === "call_not_placed")).toHaveLength(0);
   });
 
