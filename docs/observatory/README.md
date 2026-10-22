@@ -102,6 +102,19 @@ Status: `TODO` → `IN PROGRESS (PR)` → `DONE (PR, verified date)`.
 | OBS-C1 | Diagnosis cards v1 (rules in 02-diagnosis-rules.md) | Each rule fires correctly against its recorded historical episode (backtest) | TODO |
 | OBS-C2 | Daily "what changed & who's hurting" brief | Morning summary lists any pillar that crossed red/amber in the last 24h with links | TODO |
 
+**Daily Brief day picker (2026-10-22).** The Daily Brief tab can show any
+stored day: prev/next arrows, a dropdown of every `brief_date`, and clickable
+history chips. `GET /api/observatory/daily-brief?date=YYYY-MM-DD` is READ
+ONLY — it loads that row from `observatory_daily_briefs` or answers 404, and
+never generates or writes a past day; a malformed date is 400. With no date
+the route behaves as before (latest, generate-if-missing for the prior
+business day). "vs yesterday" is the stored brief immediately before the day
+shown; the baseline is still the earliest row. A day whose payload carries
+`correction` (written by a backfill) shows an amber "Backfilled/corrected"
+notice with its label and `correctedAt`; the originals it keeps are not shown.
+Logic and tests: `server/observatory/dailyBrief.logic.ts`,
+`dailyBrief.dayPicker.test.ts`, `client/src/lib/briefDayPicker.ts`.
+
 ## Documents
 
 - `01-data-contracts.md` — the exact tables/columns each pillar and funnel

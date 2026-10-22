@@ -227,11 +227,14 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // ("inch by inch we will get to stability", Wayne 2026-08-07).
   // The cron arms at boot so the brief exists by ~06:15 ET without a visit.
   void import('./observatory/dailyBrief').then((m) => m.scheduleDailyBriefCron()).catch(() => {});
-  app.get('/api/observatory/daily-brief', isAuthenticated, async (_req, res) => {
+  // ?date=YYYY-MM-DD reads one stored day, read only (400 malformed, 404 absent);
+  // no date keeps the latest-brief behaviour, generate-if-missing included.
+  app.get('/api/observatory/daily-brief', isAuthenticated, async (req, res) => {
     try {
-      const { getBriefBundle, scheduleDailyBriefCron } = await import('./observatory/dailyBrief');
+      const { dailyBriefResponse, scheduleDailyBriefCron } = await import('./observatory/dailyBrief');
       scheduleDailyBriefCron();
-      res.json(await getBriefBundle());
+      const { status, body } = await dailyBriefResponse(req.query.date);
+      res.status(status).json(body);
     } catch (error) {
       console.error('[observatory] daily-brief failed:', error);
       res.status(500).json({

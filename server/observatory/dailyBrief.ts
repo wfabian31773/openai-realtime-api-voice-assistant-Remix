@@ -12,6 +12,9 @@
  */
 import { pool } from '../db';
 import { fivestarQuery } from './fivestarDb';
+import { BriefNotFoundError, parseBriefDateParam, pickYesterday } from './dailyBrief.logic';
+
+export { BriefNotFoundError } from './dailyBrief.logic';
 
 // ── Proposal library: known failing checks → concrete remediations. ──────
 // Written once, referenced by stable category key; the brief tracks the
@@ -95,6 +98,17 @@ export interface DailyBriefPayload {
     hallucinations: number;
   } | { error: string };
   syncReds: Array<{ name: string; ageHours: number | null; detail: string | null }>;
+  /**
+   * Set only by a backfill that corrected a stored day after the fact. Loose by
+   * design: label / reason / correctedAt are what the UI reads; the originals
+   * (originalSage, originalCategories) ride along untyped.
+   */
+  correction?: {
+    label?: string;
+    reason?: string;
+    correctedAt?: string;
+    [key: string]: unknown;
+  };
 }
 
 /** The LA business day that "yesterday's brief" covers. */
@@ -301,25 +315,45 @@ export interface BriefBundle {
   baselineDate: string | null;
   daysTracked: number;
   history: Array<{ briefDate: string; totalCriticalCalls: number; totalCalls: number }>;
+  /** Every stored brief_date, ascending — what the day picker offers. */
+  availableDates: string[];
+  /** The day `today` describes. */
+  selectedDate: string;
 }
 
-/** Latest brief (generating it if today's prior business day has none), plus baseline + history. */
-export async function getBriefBundle(): Promise<BriefBundle> {
-  const wantDate = priorBusinessDayLA();
-  const existing = await pool.query(
-    `SELECT payload FROM observatory_daily_briefs WHERE brief_date = $1::date`,
-    [wantDate],
-  );
-  const today: DailyBriefPayload = existing.rows.length
-    ? existing.rows[0].payload
-    : await generateDailyBrief(wantDate);
+/**
+ * Without a date: the latest brief (generating it if the prior business day has
+ * none), exactly as before. With a date: READ ONLY — the stored row for that
+ * day, or BriefNotFoundError; a past day is never generated or written.
+ * `yesterday` is the stored brief immediately before the day shown.
+ */
+export async function getBriefBundle(selectedDate?: string): Promise<BriefBundle> {
+  let today: DailyBriefPayload;
+  let shownDate: string;
+  if (selectedDate) {
+    const existing = await pool.query(
+      `SELECT payload FROM observatory_daily_briefs WHERE brief_date = $1::date`,
+      [selectedDate],
+    );
+    if (!existing.rows.length) throw new BriefNotFoundError(selectedDate);
+    today = existing.rows[0].payload;
+    shownDate = selectedDate;
+  } else {
+    const wantDate = priorBusinessDayLA();
+    const existing = await pool.query(
+      `SELECT payload FROM observatory_daily_briefs WHERE brief_date = $1::date`,
+      [wantDate],
+    );
+    today = existing.rows.length ? existing.rows[0].payload : await generateDailyBrief(wantDate);
+    shownDate = wantDate;
+  }
 
   const rows = await pool.query(
     `SELECT brief_date::text AS d, payload FROM observatory_daily_briefs ORDER BY brief_date ASC`,
   );
   const all = rows.rows as Array<{ d: string; payload: DailyBriefPayload }>;
   const baselineRow = all[0] ?? null;
-  const yesterdayRow = all.filter((r) => r.d < wantDate).pop() ?? null;
+  const yesterdayRow = pickYesterday(all, shownDate);
 
   return {
     today,
@@ -332,7 +366,27 @@ export async function getBriefBundle(): Promise<BriefBundle> {
       totalCriticalCalls: (r.payload.agents ?? []).reduce((a, x) => a + (x.criticalCalls ?? 0), 0),
       totalCalls: (r.payload.agents ?? []).reduce((a, x) => a + (x.calls ?? 0), 0),
     })),
+    availableDates: all.map((r) => r.d),
+    selectedDate: shownDate,
   };
+}
+
+/**
+ * What GET /api/observatory/daily-brief answers, minus Express: 400 for a
+ * malformed ?date=, 404 for a day with no stored brief, else the bundle.
+ * Other errors propagate to the route's 500.
+ */
+export async function dailyBriefResponse(rawDate: unknown): Promise<{ status: number; body: unknown }> {
+  const param = parseBriefDateParam(rawDate);
+  if (param.kind === 'invalid') return { status: 400, body: { message: param.message, error: param.message } };
+  try {
+    return { status: 200, body: await getBriefBundle(param.kind === 'date' ? param.date : undefined) };
+  } catch (error) {
+    if (error instanceof BriefNotFoundError) {
+      return { status: 404, body: { message: error.message, error: error.message } };
+    }
+    throw error;
+  }
 }
 
 // ── Morning cron: write the brief by ~06:15 ET without waiting for a visit. ──

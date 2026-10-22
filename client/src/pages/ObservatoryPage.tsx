@@ -1,7 +1,8 @@
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useEffect, useState } from 'react'
 import apiClient from '@/lib/apiClient'
 import { describePipeline } from '@/lib/pipelineSplit'
+import { briefCorrectionNotice, briefNeighbours } from '@/lib/briefDayPicker'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import {
@@ -225,6 +226,8 @@ interface DailyBriefPayload {
       }
     | { error: string }
   syncReds: Array<{ name: string; ageHours: number | null; detail: string | null }>
+  /** Set only by a backfill that corrected the stored day; loose on purpose. */
+  correction?: { label?: string; reason?: string; correctedAt?: string; [key: string]: unknown }
 }
 interface BriefBundle {
   today: DailyBriefPayload
@@ -233,6 +236,8 @@ interface BriefBundle {
   baselineDate: string | null
   daysTracked: number
   history: Array<{ briefDate: string; totalCriticalCalls: number; totalCalls: number }>
+  availableDates: string[]
+  selectedDate: string
 }
 interface LiveOpsCall {
   id: string
@@ -2010,35 +2015,84 @@ function delta(now: number | null | undefined, base: number | null | undefined):
 }
 
 function DailyBriefTab() {
+  // null = the latest brief (the server may generate it); a date = that stored day, read only.
+  const [selected, setSelected] = useState<string | null>(null)
   const brief = useQuery<BriefBundle>({
-    queryKey: ['obs-daily-brief'],
-    queryFn: async () => (await apiClient.get('/observatory/daily-brief')).data,
+    queryKey: ['obs-daily-brief', selected ?? 'latest'],
+    queryFn: async () =>
+      (await apiClient.get('/observatory/daily-brief', { params: selected ? { date: selected } : undefined })).data,
     staleTime: 5 * 60 * 1000,
+    placeholderData: keepPreviousData,
   })
   if (brief.isLoading)
     return <p className="text-sm text-muted-foreground">Generating the brief (first view of the day computes it)…</p>
   if (brief.isError)
     return (
-      <p className="text-sm text-red-600">
-        Daily brief failed: {(brief.error as any)?.response?.data?.error ?? String(brief.error)}
-      </p>
+      <div className="space-y-2">
+        <p className="text-sm text-red-600">
+          Daily brief{selected ? ` for ${selected}` : ''} failed:{' '}
+          {(brief.error as any)?.response?.data?.error ?? String(brief.error)}
+        </p>
+        {selected && (
+          <Button size="sm" variant="outline" onClick={() => setSelected(null)}>
+            Back to the latest brief
+          </Button>
+        )}
+      </div>
     )
   const b = brief.data!
   const t = b.today
   const base = b.baseline && b.baseline.briefDate !== t.briefDate ? b.baseline : null
   const yest = b.yesterday
   const catFrom = (p: DailyBriefPayload | null, key: string) => p?.categories.find((c) => c.key === key)
+  const availableDates = b.availableDates ?? []
+  const shownDate = b.selectedDate ?? t.briefDate
+  const { prev, next } = briefNeighbours(availableDates, shownDate)
+  const dayIndex = availableDates.indexOf(shownDate) + 1
+  const correction = briefCorrectionNotice(t.correction)
 
   return (
     <section className="space-y-6">
-      <div>
+      <div className="space-y-2">
+        <div className="flex flex-wrap items-center gap-2 text-sm">
+          <Button size="sm" variant="outline" disabled={!prev} onClick={() => prev && setSelected(prev)} aria-label="Previous day">
+            ‹ Prev
+          </Button>
+          <select
+            className="rounded-md border bg-background px-2 py-1 font-mono text-sm"
+            value={availableDates.includes(shownDate) ? shownDate : ''}
+            onChange={(e) => setSelected(e.target.value || null)}
+            aria-label="Brief day"
+          >
+            {!availableDates.includes(shownDate) && <option value="">{shownDate}</option>}
+            {[...availableDates].reverse().map((d) => (
+              <option key={d} value={d}>
+                {d}
+                {d === availableDates[availableDates.length - 1] ? ' (latest)' : ''}
+              </option>
+            ))}
+          </select>
+          <Button size="sm" variant="outline" disabled={!next} onClick={() => next && setSelected(next)} aria-label="Next day">
+            Next ›
+          </Button>
+          {brief.isFetching && <span className="text-xs text-muted-foreground">loading…</span>}
+        </div>
         <h2 className="text-lg font-semibold">
           Morning brief — {t.briefDate}
           <span className="ml-2 text-sm font-normal text-muted-foreground">
-            day {b.daysTracked} of tracking{b.baselineDate ? ` · baseline ${b.baselineDate}` : ''} · inch by inch to
-            stability
+            day {dayIndex > 0 ? dayIndex : b.daysTracked} of {b.daysTracked} tracked
+            {b.baselineDate ? ` · baseline ${b.baselineDate}` : ''} · inch by inch to stability
           </span>
         </h2>
+        {correction && (
+          <div className="rounded-lg border border-amber-500/60 bg-amber-500/10 p-3 text-sm text-amber-900 dark:text-amber-200">
+            <span className="font-medium">Backfilled/corrected: </span>
+            {correction.label}
+            {correction.correctedAt && (
+              <span className="ml-1 text-xs opacity-80">(corrected {correction.correctedAt})</span>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Stability scoreboard */}
@@ -2187,10 +2241,18 @@ function DailyBriefTab() {
           <h3 className="mb-1.5 text-sm font-medium">Track record</h3>
           <div className="flex flex-wrap gap-2 text-xs">
             {b.history.slice(-14).map((h) => (
-              <span key={h.briefDate} className="rounded-md border px-2 py-1">
+              <button
+                type="button"
+                key={h.briefDate}
+                onClick={() => setSelected(h.briefDate)}
+                title={`Show the brief for ${h.briefDate}`}
+                className={`rounded-md border px-2 py-1 hover:bg-muted ${
+                  h.briefDate === shownDate ? 'border-primary bg-primary/10' : ''
+                }`}
+              >
                 <span className="font-mono">{h.briefDate.slice(5)}</span> · {h.totalCriticalCalls}/{h.totalCalls}{' '}
                 critical
-              </span>
+              </button>
             ))}
           </div>
         </div>
