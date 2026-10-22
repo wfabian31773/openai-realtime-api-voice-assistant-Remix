@@ -7,9 +7,16 @@ import type { Express } from "express";
 import { pool } from "../../server/db";
 import { agentRegistry } from "../config/agents";
 import { createDbOutboundStore } from "../runtime/outbound/store";
+import { bindOutboundStore, bindPluginStore } from "./bindings";
 import { createSqlFleetReader } from "./fleetReader";
+import { flushDueOutbox } from "./messageOutbox";
+import { reapStaleSending } from "./approvals";
 import { mountPluginApi } from "./routes";
 import { createSqlPluginStore, type SqlExec } from "./sqlStore";
+import type { PluginStore } from "./store";
+
+const OUTBOX_SWEEP_MS = 30_000;
+const SENDING_SWEEP_MS = 60_000;
 
 function sqlExecFromPool(): SqlExec {
   return async (text, params) => {
@@ -18,11 +25,36 @@ function sqlExecFromPool(): SqlExec {
   };
 }
 
+export function startPluginSweeps(store: PluginStore): { stop: () => void } {
+  const outbox = setInterval(() => {
+    void flushDueOutbox(store).catch(() => {
+      console.error("[plugin] outbox sweep failed");
+    });
+  }, OUTBOX_SWEEP_MS);
+  const sending = setInterval(() => {
+    void reapStaleSending(store).catch(() => {
+      console.error("[plugin] stale-send sweep failed");
+    });
+  }, SENDING_SWEEP_MS);
+  outbox.unref?.();
+  sending.unref?.();
+  return {
+    stop() {
+      clearInterval(outbox);
+      clearInterval(sending);
+    },
+  };
+}
+
 export async function mountProductionPluginApi(app: Express): Promise<void> {
   const exec = sqlExecFromPool();
+  const store = createSqlPluginStore(exec);
+  bindPluginStore(store);
+
   let outboundStore: Awaited<ReturnType<typeof createDbOutboundStore>> | undefined;
   try {
     outboundStore = await createDbOutboundStore();
+    bindOutboundStore(outboundStore);
   } catch (error) {
     console.error(
       "[plugin] outbound store unavailable; call commits will fail closed:",
@@ -30,8 +62,10 @@ export async function mountProductionPluginApi(app: Express): Promise<void> {
     );
   }
 
+  startPluginSweeps(store);
+
   mountPluginApi(app, {
-    store: createSqlPluginStore(exec),
+    store,
     agents: agentRegistry,
     fleet: createSqlFleetReader(exec),
     outboundStore,

@@ -3,9 +3,10 @@
 -- change — Wayne applies Hub migrations. Reversal is at the bottom.
 --
 -- Tables:
---   api_tokens          bearer tokens: jti + sha256(secret) + scopes
---   contact_approvals   pending/approved/rejected/committed contact requests
---   plugin_audit_log    append-only, NO phone numbers, bodies or transcripts
+--   api_tokens              bearer tokens: jti + sha256(secret) + scopes
+--   contact_approvals       pending/approved/sending/rejected/committed/failed
+--   plugin_audit_log        append-only, NO phone numbers, bodies or transcripts
+--   plugin_message_outbox   taken-message bodies (PHI). Never copy into audit.
 --
 -- The plaintext token is printed once at mint. Only the hash is stored.
 
@@ -29,6 +30,7 @@ CREATE TABLE IF NOT EXISTS contact_approvals (
   token_jti VARCHAR(32) NOT NULL,
   ticket_id VARCHAR(64),
   ticket_number VARCHAR(64),
+  phone_key VARCHAR(10),
   -- Bound payload for execution. Never written to plugin_audit_log or logs.
   payload JSONB NOT NULL,
   payload_hash VARCHAR(64) NOT NULL,
@@ -46,12 +48,13 @@ CREATE TABLE IF NOT EXISTS contact_approvals (
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   CONSTRAINT contact_approvals_channel_check CHECK (channel IN ('call', 'sms', 'email')),
-  CONSTRAINT contact_approvals_status_check CHECK (status IN ('pending', 'approved', 'rejected', 'cancelled', 'committed', 'failed'))
+  CONSTRAINT contact_approvals_status_check CHECK (status IN ('pending', 'approved', 'sending', 'rejected', 'cancelled', 'committed', 'failed'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_contact_approvals_status ON contact_approvals (status, created_at);
 CREATE INDEX IF NOT EXISTS idx_contact_approvals_ticket ON contact_approvals (ticket_number);
 CREATE INDEX IF NOT EXISTS idx_contact_approvals_confirm ON contact_approvals (confirm_token_hash);
+CREATE INDEX IF NOT EXISTS idx_contact_approvals_phone_key ON contact_approvals (phone_key);
 
 CREATE TABLE IF NOT EXISTS plugin_audit_log (
   id VARCHAR PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -69,7 +72,29 @@ CREATE TABLE IF NOT EXISTS plugin_audit_log (
 CREATE INDEX IF NOT EXISTS idx_plugin_audit_created ON plugin_audit_log (created_at);
 CREATE INDEX IF NOT EXISTS idx_plugin_audit_jti ON plugin_audit_log (token_jti);
 
+-- Taken-message outbox. The message column is PHI. Retry from this table;
+-- never log the body. A persist here is what lets the agent tell the caller
+-- the message was taken.
+CREATE TABLE IF NOT EXISTS plugin_message_outbox (
+  id VARCHAR PRIMARY KEY DEFAULT gen_random_uuid(),
+  call_sid VARCHAR(64),
+  ticket_id VARCHAR(64),
+  ticket_number VARCHAR(64),
+  approval_id VARCHAR(64),
+  message TEXT NOT NULL,
+  status VARCHAR(16) NOT NULL DEFAULT 'pending',
+  attempts INTEGER NOT NULL DEFAULT 0,
+  next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  last_error VARCHAR(64),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT plugin_message_outbox_status_check CHECK (status IN ('pending', 'sending', 'delivered', 'dead'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_plugin_outbox_due ON plugin_message_outbox (status, next_attempt_at);
+
 -- Reversal:
+--   DROP TABLE plugin_message_outbox;
 --   DROP TABLE plugin_audit_log;
 --   DROP TABLE contact_approvals;
 --   DROP TABLE api_tokens;

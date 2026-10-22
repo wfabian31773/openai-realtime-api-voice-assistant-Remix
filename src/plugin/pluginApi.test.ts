@@ -22,6 +22,8 @@ import { SI_ASSISTANT_EMAIL_DEFAULT } from "./siAssistantConstants";
 import { mintScopesCompatible } from "./scopes";
 import { createSqlPluginStore } from "./sqlStore";
 import { extrasFromContactData, reportSiAssistantCall } from "./callbackReport";
+import { markCommitted, markFailed, reapStaleSending } from "./approvals";
+import { STALE_SENDING_MS } from "./store";
 import type { SmsSender } from "./sms";
 
 const PHONE = "+15555550111";
@@ -614,6 +616,7 @@ describe("review findings", () => {
     expect(seen).toHaveLength(1);
     expect(seen[0].text).toMatch(/confirm_used_at IS NULL/);
     expect(seen[0].text).toMatch(/status = 'approved'/);
+    expect(seen[0].text).toMatch(/status = 'sending'/);
     expect(seen[0].text).toMatch(/confirm_expires_at > \$2/);
     expect(seen[0].text).toMatch(/RETURNING \*/);
   });
@@ -954,5 +957,74 @@ describe("review findings", () => {
     expect(migration).not.toContain("idx_api_tokens_jti");
     expect(migration).toContain("contact_approvals_channel_check");
     expect(migration).toContain("contact_approvals_status_check");
+    expect(migration).toContain("'sending'");
+    expect(schema).toContain("'sending'");
+    expect(migration).toContain("plugin_message_outbox");
+    expect(schema).toContain('pgTable("plugin_message_outbox"');
+  });
+
+  it("claims a confirm token into sending and will not resend a stale claim", async () => {
+    const store = new MemoryPluginStore();
+    const token = generateConfirmToken();
+    const now = new Date("2026-10-22T18:00:00Z");
+    await store.insertApproval({
+      id: "appr-stale",
+      channel: "sms",
+      status: "approved",
+      tokenJti: "preparer",
+      ticketId: "tid-stale",
+      ticketNumber: TICKET,
+      payload: { phone: PHONE, body: "Hi" },
+      payloadHash: hashPayload({ phone: PHONE, body: "Hi" }),
+      confirmTokenHash: token.hash,
+      confirmExpiresAt: new Date(now.getTime() + 60_000),
+      confirmUsedAt: null,
+      approvedBy: "staff",
+      approvedAt: now,
+      rejectedBy: null,
+      rejectedAt: null,
+      cancelledAt: null,
+      committedAt: null,
+      result: null,
+      createdAt: now,
+      updatedAt: now,
+    });
+    const claimed = await store.claimConfirmToken(token.hash, now);
+    expect(claimed?.status).toBe("sending");
+    expect(claimed?.confirmUsedAt).toEqual(now);
+    expect(await store.claimConfirmToken(token.hash, now)).toBeNull();
+
+    const stillFresh = await reapStaleSending(store, new Date(now.getTime() + STALE_SENDING_MS - 1));
+    expect(stillFresh).toEqual([]);
+    expect((await store.getApproval("appr-stale"))?.status).toBe("sending");
+
+    const sms: Array<{ to: string; body: string }> = [];
+    const swept = await reapStaleSending(store, new Date(now.getTime() + STALE_SENDING_MS + 1));
+    expect(swept).toHaveLength(1);
+    expect(swept[0].status).toBe("failed");
+    expect(swept[0].result).toEqual({ reason: "stale_send" });
+    expect((await store.getApproval("appr-stale"))?.status).toBe("failed");
+    expect(sms).toEqual([]);
+    expect(await markCommitted(store, "appr-stale", { queued: true }, now)).toBeNull();
+    expect(await markFailed(store, "appr-stale", { reason: "send_failed" }, now)).toBeNull();
+    const audit = await store.listAudit();
+    const row = audit.find((e) => e.tool === "reap_stale_sending");
+    expect(row).toMatchObject({ approvalId: "appr-stale", ticketId: "tid-stale", outcome: "failed" });
+    expect(JSON.stringify(row)).not.toContain("5555550111");
+    expect(JSON.stringify(row)).not.toContain("Hi");
+  });
+
+  it("the SQL stale sweep only marks failed", async () => {
+    const seen: string[] = [];
+    const store = createSqlPluginStore(async (text) => {
+      seen.push(text);
+      return [];
+    });
+    await store.reapStaleSending(new Date("2026-10-22T18:10:00Z"), new Date("2026-10-22T18:00:00Z"));
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toMatch(/status = 'failed'/);
+    expect(seen[0]).toMatch(/stale_send/);
+    expect(seen[0]).toMatch(/status = 'sending'/);
+    expect(seen[0]).not.toMatch(/executeApproved|sendApproved|enqueue|sendMail/);
   });
 });

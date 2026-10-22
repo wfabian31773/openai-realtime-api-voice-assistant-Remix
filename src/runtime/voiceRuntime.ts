@@ -1785,8 +1785,15 @@ export function mountVoiceRuntime(
             // SI Assistant callbacks (and the outbound leg) are reported to
             // the ticketing app so they land on the ticket and in My Messages.
             // Payload is PHI-bounded: no phone, body or transcript.
-            void import("../plugin/callbackReport").then(({ reportSiAssistantCall, extrasFromContactData }) =>
-              reportSiAssistantCall(
+            void Promise.all([
+              import("../plugin/callbackReport"),
+              import("../plugin/returnedCaller"),
+            ]).then(async ([{ reportSiAssistantCall, extrasFromContactData }, { extrasForReturnedCaller, hasTicketKeys }]) => {
+              let extras = extrasFromContactData(outboundContact?.data);
+              if (!hasTicketKeys(extras) && record.slug === "si-assistant" && entry.callerPhone) {
+                extras = await extrasForReturnedCaller(entry.callerPhone);
+              }
+              return reportSiAssistantCall(
                 {
                   slug: record.slug,
                   callSid: record.callSid,
@@ -1795,9 +1802,9 @@ export function mountVoiceRuntime(
                   startedAtMs: record.startedAtMs,
                   endedAtMs: record.endedAtMs,
                 },
-                extrasFromContactData(outboundContact?.data),
-              ),
-            ).catch(() => undefined);
+                extras,
+              );
+            }).catch(() => undefined);
           },
         });
         // The session is constructed above, so its onMessage is bound.

@@ -31,9 +31,11 @@ Write scopes are never implied. An empty scope list becomes `fleet:read` only.
 3. Approve submits that `payloadHash`. A mismatch, or a token approving
    its own request, is refused. Approve mints a confirm token that expires
    in **5 minutes** and is single-use. Consume is one atomic `UPDATE`.
-4. `commit_contact` claims the token, re-hashes the stored payload against
-   the lock, then sends exactly that payload. A thrown send moves the row
-   to `failed` and writes a PHI-free audit row.
+4. `commit_contact` claims the token (the row moves to `sending`), re-hashes
+   the stored payload against the lock, then sends exactly that payload. A
+   thrown send moves the row to `failed` and writes a PHI-free audit row.
+   A crash between claim and send leaves the row `sending`; a timeout sweep
+   marks it `failed` (PHI-free audit) and **never resends**.
 5. `cancel_contact` cancels a pending or approved request only while the
    confirm token is unused. Cancel and get are tied to the token that
    created the row (or to `contacts:approve`).
@@ -58,7 +60,16 @@ human. Each finished SI Assistant call is reported to the ticketing app
 `SI_ASSISTANT_CALLBACK_WEBHOOK_SECRET`, header `X-SI-Assistant-Signature`).
 The payload is PHI-bounded: callSid, outcome, duration, ticket number,
 ticket id, approval id. No phones, bodies or transcripts. A taken
-message is a separate `message` event on the same webhook.
+message is a separate `message` event on the same webhook. The agent
+persists that message in `plugin_message_outbox` first and only tells the
+caller it was taken after the row exists. Webhook misses retry from the
+outbox. If persist itself fails, the agent says so and gives the SI
+Assistant number.
+
+An inbound returned call has no outbound session contact. Teardown and
+`take_si_assistant_message` look up the most recent approved outbound
+contact to that caller in the last 72 hours and attach its ticket id,
+ticket number and approval id.
 
 `/api/test-call` and surgery-line routing are untouched.
 

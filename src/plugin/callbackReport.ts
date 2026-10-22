@@ -27,9 +27,15 @@ export interface CallbackReport {
   message?: string;
 }
 
+export type TicketExtras = {
+  ticketNumber?: string | null;
+  approvalId?: string | null;
+  ticketId?: string | null;
+};
+
 export function extrasFromContactData(
   data: Record<string, unknown> | null | undefined,
-): { ticketNumber?: string | null; approvalId?: string | null; ticketId?: string | null } {
+): TicketExtras {
   if (!data) return {};
   return {
     ticketNumber: typeof data.ticket_number === "string" ? data.ticket_number : null,

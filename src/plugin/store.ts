@@ -5,9 +5,11 @@
  * imported from tests.
  *
  * Tables (this app, Operations Hub — see migrations/add_plugin_api.sql):
- *   api_tokens, contact_approvals, plugin_audit_log
+ *   api_tokens, contact_approvals, plugin_audit_log, plugin_message_outbox
  *
  * plugin_audit_log holds no phone numbers, message bodies or transcripts.
+ * plugin_message_outbox is the one table that may hold a taken-message
+ * body — never copy that column into the audit log.
  */
 
 import { randomBytes } from "node:crypto";
@@ -31,12 +33,21 @@ export type ContactChannel = (typeof CONTACT_CHANNELS)[number];
 export const APPROVAL_STATUSES = [
   "pending",
   "approved",
+  "sending",
   "rejected",
   "cancelled",
   "committed",
   "failed",
 ] as const;
 export type ApprovalStatus = (typeof APPROVAL_STATUSES)[number];
+
+export const OUTBOX_STATUSES = ["pending", "sending", "delivered", "dead"] as const;
+export type OutboxStatus = (typeof OUTBOX_STATUSES)[number];
+
+/** How long a claim may sit in `sending` before the sweep marks it failed. Never resends. */
+export const STALE_SENDING_MS = 10 * 60 * 1000;
+export const OUTBOX_MAX_ATTEMPTS = 8;
+export const RETURNED_CALL_LOOKBACK_MS = 72 * 60 * 60 * 1000;
 
 export interface ApiTokenRow {
   jti: string;
@@ -55,6 +66,8 @@ export interface ContactApprovalRow {
   tokenJti: string;
   ticketId: string | null;
   ticketNumber: string | null;
+  /** Last-10 of the destination phone. Lookup key only; never written to audit. */
+  phoneKey?: string | null;
   payload: Record<string, unknown>;
   payloadHash: string;
   confirmTokenHash: string | null;
@@ -111,16 +124,48 @@ export interface PluginStore {
   /**
    * Single-use claim of an approved, unused, unexpired confirm token.
    * Must be one atomic check-and-set so two commits cannot both send.
+   * Moves the row to `sending`.
    */
   claimConfirmToken(hash: string, now: Date): Promise<ContactApprovalRow | null>;
   /** Cancel only while the request is still open and the confirm token is unused. */
   cancelIfOpen(id: string, now: Date): Promise<ContactApprovalRow | null>;
+  /**
+   * Mark `sending` rows whose claim is older than `staleBefore` as failed.
+   * Never resends. Audit separately, ids only.
+   */
+  reapStaleSending(now: Date, staleBefore: Date): Promise<ContactApprovalRow[]>;
+  /** Most recent approved/sending/committed contact to this last-10, since `since`. */
+  findRecentApprovedContactByPhone(phoneKey: string, since: Date): Promise<ContactApprovalRow | null>;
+
+  insertOutbox(row: MessageOutboxRow): Promise<MessageOutboxRow>;
+  claimDueOutbox(now: Date, limit: number): Promise<MessageOutboxRow[]>;
+  markOutbox(
+    id: string,
+    patch: Partial<MessageOutboxRow>,
+    onlyIfStatus?: OutboxStatus,
+  ): Promise<MessageOutboxRow | null>;
 
   isSmsOptedOut(phoneKey: string): Promise<boolean>;
   setSmsOptOut(phoneKey: string, optedOut: boolean): Promise<void>;
 
   writeAudit(entry: PluginAuditEntry): Promise<void>;
   listAudit(): Promise<PluginAuditEntry[]>;
+}
+
+export interface MessageOutboxRow {
+  id: string;
+  callSid: string | null;
+  ticketId: string | null;
+  ticketNumber: string | null;
+  approvalId: string | null;
+  /** Taken-message text. PHI. Never copy into plugin_audit_log. */
+  message: string;
+  status: OutboxStatus;
+  attempts: number;
+  nextAttemptAt: Date;
+  lastError: string | null;
+  createdAt: Date;
+  updatedAt: Date;
 }
 
 export function newId(): string {
@@ -148,8 +193,11 @@ export async function verifyStoredToken(
 export class MemoryPluginStore implements PluginStore {
   tokens = new Map<string, ApiTokenRow>();
   approvals = new Map<string, ContactApprovalRow>();
+  outbox = new Map<string, MessageOutboxRow>();
   smsOptOuts = new Set<string>();
   audit: PluginAuditEntry[] = [];
+  /** Tests only: persist-first path must be able to fail closed. */
+  outboxBroken = false;
 
   /** Mint a token and return the plaintext once. */
   mint(scopes: string[] = ["fleet:read"], label = "test"): { plaintext: string; jti: string; scopes: PluginScope[] } {
@@ -227,6 +275,7 @@ export class MemoryPluginStore implements PluginStore {
         row.confirmExpiresAt.getTime() > now.getTime()
       ) {
         row.confirmUsedAt = now;
+        row.status = "sending";
         row.updatedAt = now;
         return { ...row, payload: { ...row.payload } };
       }
@@ -244,6 +293,69 @@ export class MemoryPluginStore implements PluginStore {
     row.confirmExpiresAt = null;
     row.updatedAt = now;
     return { ...row, payload: { ...row.payload } };
+  }
+
+  async reapStaleSending(now: Date, staleBefore: Date): Promise<ContactApprovalRow[]> {
+    const marked: ContactApprovalRow[] = [];
+    for (const row of this.approvals.values()) {
+      if (row.status !== "sending") continue;
+      if (row.updatedAt.getTime() >= staleBefore.getTime()) continue;
+      row.status = "failed";
+      row.result = { reason: "stale_send" };
+      row.updatedAt = now;
+      marked.push({ ...row, payload: { ...row.payload } });
+    }
+    return marked;
+  }
+
+  async findRecentApprovedContactByPhone(phoneKey: string, since: Date): Promise<ContactApprovalRow | null> {
+    if (!phoneKey) return null;
+    const eligible = ["approved", "sending", "committed"] as const;
+    const matches = [...this.approvals.values()]
+      .filter((row) => {
+        if (!eligible.includes(row.status as (typeof eligible)[number])) return false;
+        const at = (row.approvedAt ?? row.createdAt).getTime();
+        if (at < since.getTime()) return false;
+        const key = row.phoneKey ?? phoneKeyOfPayload(row.payload);
+        return key === phoneKey;
+      })
+      .sort((a, b) => (b.approvedAt ?? b.createdAt).getTime() - (a.approvedAt ?? a.createdAt).getTime());
+    const row = matches[0];
+    return row ? { ...row, payload: { ...row.payload } } : null;
+  }
+
+  async insertOutbox(row: MessageOutboxRow): Promise<MessageOutboxRow> {
+    if (this.outboxBroken) throw new Error("outbox unavailable");
+    const stored = { ...row };
+    this.outbox.set(row.id, stored);
+    return { ...stored };
+  }
+
+  async claimDueOutbox(now: Date, limit: number): Promise<MessageOutboxRow[]> {
+    const due = [...this.outbox.values()]
+      .filter((r) => r.status === "pending" && r.nextAttemptAt.getTime() <= now.getTime())
+      .sort((a, b) => a.nextAttemptAt.getTime() - b.nextAttemptAt.getTime())
+      .slice(0, Math.max(0, limit));
+    const claimed: MessageOutboxRow[] = [];
+    for (const row of due) {
+      row.status = "sending";
+      row.attempts += 1;
+      row.updatedAt = now;
+      claimed.push({ ...row });
+    }
+    return claimed;
+  }
+
+  async markOutbox(
+    id: string,
+    patch: Partial<MessageOutboxRow>,
+    onlyIfStatus?: OutboxStatus,
+  ): Promise<MessageOutboxRow | null> {
+    const row = this.outbox.get(id);
+    if (!row) return null;
+    if (onlyIfStatus && row.status !== onlyIfStatus) return null;
+    Object.assign(row, patch, { updatedAt: patch.updatedAt ?? new Date() });
+    return { ...row };
   }
 
   async isSmsOptedOut(phoneKey: string): Promise<boolean> {
@@ -304,3 +416,11 @@ export function issueConfirmOnApprove(now = new Date()): {
 }
 
 export { isConfirmExpired, CONFIRM_TTL_MS };
+
+export function phoneKeyOfPayload(payload: Record<string, unknown> | null | undefined): string | null {
+  if (!payload || typeof payload.phone !== "string") return null;
+  const digits = payload.phone.replace(/\D/g, "");
+  if (digits.length === 10) return digits;
+  if (digits.length === 11 && digits.startsWith("1")) return digits.slice(1);
+  return null;
+}

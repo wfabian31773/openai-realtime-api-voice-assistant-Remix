@@ -18,6 +18,7 @@ import {
   markCommitted,
   markFailed,
   prepareContact,
+  reapStaleSending,
   rejectContact,
 } from "./approvals";
 import { hashPayload } from "./tokens";
@@ -316,6 +317,11 @@ export function mountPluginApi(app: Express, deps: PluginApiDeps): void {
   app.post(`${v1}/commit_contact`, requireAuth, requireScope("contacts:commit"), requireWrites, async (req: AuthedRequest, res) => {
     const confirmToken = String((req.body as { confirmToken?: string })?.confirmToken ?? "");
     const now = (deps.now ?? (() => new Date()))();
+    try {
+      await reapStaleSending(deps.store, now);
+    } catch {
+      console.error("[plugin] stale-send sweep failed");
+    }
     const consumed = await consumeConfirmToken(deps.store, confirmToken, now);
     if (!consumed.ok) {
       jsonError(res, consumed.status, consumed.error);
@@ -356,7 +362,7 @@ export function mountPluginApi(app: Express, deps: PluginApiDeps): void {
     }
     const committed = await markCommitted(deps.store, consumed.approval.id, executed.result, now);
     if (!committed) {
-      jsonError(res, 409, "Contact request is no longer approved");
+      jsonError(res, 409, "Contact request is no longer sending");
       await audit(deps, req.pluginAuth, req, "commit_contact", "error", 409, {
         approvalId: consumed.approval.id,
         ticketId: consumed.approval.ticketId,

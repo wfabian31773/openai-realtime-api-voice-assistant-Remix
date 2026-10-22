@@ -19,9 +19,9 @@ import {
   SI_ASSISTANT_ENABLE_ENV,
   SI_ASSISTANT_SLUG,
 } from '../plugin/siAssistantConstants';
-import { TAKE_MESSAGE_TOOL_NAME } from '../tools/siAssistantTools';
+import { SI_ASSISTANT_TOOLS } from '../tools/siAssistantTools';
 
-export const SI_ASSISTANT_TOOLS = [TAKE_MESSAGE_TOOL_NAME] as const;
+export { SI_ASSISTANT_TOOLS };
 
 export const siAssistantAgentConfig = {
   slug: SI_ASSISTANT_SLUG,

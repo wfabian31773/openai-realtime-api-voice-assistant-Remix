@@ -12,6 +12,8 @@ import type {
   ApprovalStatus,
   ContactApprovalRow,
   ContactChannel,
+  MessageOutboxRow,
+  OutboxStatus,
   PluginStore,
 } from "./store";
 
@@ -44,6 +46,7 @@ function approvalFrom(r: Record<string, unknown>): ContactApprovalRow {
     tokenJti: String(r.token_jti ?? r.tokenJti),
     ticketId: (r.ticket_id as string | null) ?? null,
     ticketNumber: (r.ticket_number as string | null) ?? null,
+    phoneKey: (r.phone_key as string | null) ?? null,
     payload,
     payloadHash: String(r.payload_hash),
     confirmTokenHash: (r.confirm_token_hash as string | null) ?? null,
@@ -56,6 +59,23 @@ function approvalFrom(r: Record<string, unknown>): ContactApprovalRow {
     cancelledAt: r.cancelled_at ? new Date(String(r.cancelled_at)) : null,
     committedAt: r.committed_at ? new Date(String(r.committed_at)) : null,
     result: (r.result as Record<string, unknown> | null) ?? null,
+    createdAt: new Date(String(r.created_at)),
+    updatedAt: new Date(String(r.updated_at)),
+  };
+}
+
+function outboxFrom(r: Record<string, unknown>): MessageOutboxRow {
+  return {
+    id: String(r.id),
+    callSid: (r.call_sid as string | null) ?? null,
+    ticketId: (r.ticket_id as string | null) ?? null,
+    ticketNumber: (r.ticket_number as string | null) ?? null,
+    approvalId: (r.approval_id as string | null) ?? null,
+    message: String(r.message ?? ""),
+    status: r.status as OutboxStatus,
+    attempts: Number(r.attempts ?? 0),
+    nextAttemptAt: new Date(String(r.next_attempt_at)),
+    lastError: (r.last_error as string | null) ?? null,
     createdAt: new Date(String(r.created_at)),
     updatedAt: new Date(String(r.updated_at)),
   };
@@ -86,8 +106,8 @@ export function createSqlPluginStore(exec: SqlExec): PluginStore {
     async insertApproval(row) {
       const rows = await exec(
         `INSERT INTO contact_approvals (
-            id, channel, status, token_jti, ticket_id, ticket_number, payload, payload_hash, created_at, updated_at
-          ) VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10) RETURNING *`,
+            id, channel, status, token_jti, ticket_id, ticket_number, phone_key, payload, payload_hash, created_at, updated_at
+          ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11) RETURNING *`,
         [
           row.id,
           row.channel,
@@ -95,6 +115,7 @@ export function createSqlPluginStore(exec: SqlExec): PluginStore {
           row.tokenJti,
           row.ticketId,
           row.ticketNumber,
+          row.phoneKey ?? null,
           JSON.stringify(row.payload),
           row.payloadHash,
           row.createdAt.toISOString(),
@@ -161,7 +182,7 @@ export function createSqlPluginStore(exec: SqlExec): PluginStore {
       const at = now.toISOString();
       const rows = await exec(
         `UPDATE contact_approvals
-            SET confirm_used_at = $2, updated_at = $2
+            SET confirm_used_at = $2, status = 'sending', updated_at = $2
           WHERE confirm_token_hash = $1
             AND status = 'approved'
             AND confirm_used_at IS NULL
@@ -187,6 +208,94 @@ export function createSqlPluginStore(exec: SqlExec): PluginStore {
         [id, at],
       );
       return rows[0] ? approvalFrom(rows[0]) : null;
+    },
+    async reapStaleSending(now, staleBefore) {
+      const rows = await exec(
+        `UPDATE contact_approvals
+            SET status = 'failed',
+                result = jsonb_build_object('reason', 'stale_send'),
+                updated_at = $1
+          WHERE status = 'sending'
+            AND updated_at < $2
+          RETURNING *`,
+        [now.toISOString(), staleBefore.toISOString()],
+      );
+      return rows.map(approvalFrom);
+    },
+    async findRecentApprovedContactByPhone(phoneKey, since) {
+      if (!phoneKey) return null;
+      const rows = await exec(
+        `SELECT * FROM contact_approvals
+          WHERE phone_key = $1
+            AND status IN ('approved', 'sending', 'committed')
+            AND COALESCE(approved_at, created_at) >= $2
+          ORDER BY COALESCE(approved_at, created_at) DESC
+          LIMIT 1`,
+        [phoneKey, since.toISOString()],
+      );
+      return rows[0] ? approvalFrom(rows[0]) : null;
+    },
+    async insertOutbox(row) {
+      const rows = await exec(
+        `INSERT INTO plugin_message_outbox (
+            id, call_sid, ticket_id, ticket_number, approval_id, message,
+            status, attempts, next_attempt_at, last_error, created_at, updated_at
+          ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *`,
+        [
+          row.id,
+          row.callSid,
+          row.ticketId,
+          row.ticketNumber,
+          row.approvalId,
+          row.message,
+          row.status,
+          row.attempts,
+          row.nextAttemptAt.toISOString(),
+          row.lastError,
+          row.createdAt.toISOString(),
+          row.updatedAt.toISOString(),
+        ],
+      );
+      return rows[0] ? outboxFrom(rows[0]) : row;
+    },
+    async claimDueOutbox(now, limit) {
+      const rows = await exec(
+        `UPDATE plugin_message_outbox
+            SET status = 'sending',
+                attempts = attempts + 1,
+                updated_at = $1
+          WHERE id IN (
+            SELECT id FROM plugin_message_outbox
+             WHERE status = 'pending'
+               AND next_attempt_at <= $1
+             ORDER BY next_attempt_at
+             LIMIT $2
+             FOR UPDATE SKIP LOCKED
+          )
+          RETURNING *`,
+        [now.toISOString(), limit],
+      );
+      return rows.map(outboxFrom);
+    },
+    async markOutbox(id, patch, onlyIfStatus) {
+      const rows = await exec(
+        `UPDATE plugin_message_outbox SET
+            status = COALESCE($2, status),
+            next_attempt_at = COALESCE($3, next_attempt_at),
+            last_error = $4,
+            updated_at = $5
+          WHERE id = $1 AND ($6::text IS NULL OR status = $6)
+          RETURNING *`,
+        [
+          id,
+          patch.status ?? null,
+          patch.nextAttemptAt?.toISOString() ?? null,
+          patch.lastError ?? null,
+          (patch.updatedAt ?? new Date()).toISOString(),
+          onlyIfStatus ?? null,
+        ],
+      );
+      return rows[0] ? outboxFrom(rows[0]) : null;
     },
     async isSmsOptedOut(phoneKey) {
       // Any DNC row blocks SMS — a call opt-out is also a text opt-out.

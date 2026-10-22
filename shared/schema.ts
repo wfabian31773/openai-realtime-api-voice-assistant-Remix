@@ -1503,6 +1503,7 @@ export type InsertCallTurn = typeof callTurns.$inferInsert;
  * with the Hub objects once Wayne applies that file.
  *
  * plugin_audit_log holds no phone numbers, message bodies or transcripts.
+ * plugin_message_outbox is the one table that may hold a taken-message body.
  */
 export const apiTokens = pgTable("api_tokens", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
@@ -1525,6 +1526,7 @@ export const contactApprovals = pgTable("contact_approvals", {
   tokenJti: varchar("token_jti", { length: 32 }).notNull(),
   ticketId: varchar("ticket_id", { length: 64 }),
   ticketNumber: varchar("ticket_number", { length: 64 }),
+  phoneKey: varchar("phone_key", { length: 10 }),
   payload: jsonb("payload").notNull(),
   payloadHash: varchar("payload_hash", { length: 64 }).notNull(),
   confirmTokenHash: varchar("confirm_token_hash", { length: 64 }),
@@ -1543,8 +1545,27 @@ export const contactApprovals = pgTable("contact_approvals", {
   index("idx_contact_approvals_status").on(table.status, table.createdAt),
   index("idx_contact_approvals_ticket").on(table.ticketNumber),
   index("idx_contact_approvals_confirm").on(table.confirmTokenHash),
+  index("idx_contact_approvals_phone_key").on(table.phoneKey),
   check("contact_approvals_channel_check", sql`channel IN ('call', 'sms', 'email')`),
-  check("contact_approvals_status_check", sql`status IN ('pending', 'approved', 'rejected', 'cancelled', 'committed', 'failed')`),
+  check("contact_approvals_status_check", sql`status IN ('pending', 'approved', 'sending', 'rejected', 'cancelled', 'committed', 'failed')`),
+]);
+
+export const pluginMessageOutbox = pgTable("plugin_message_outbox", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  callSid: varchar("call_sid", { length: 64 }),
+  ticketId: varchar("ticket_id", { length: 64 }),
+  ticketNumber: varchar("ticket_number", { length: 64 }),
+  approvalId: varchar("approval_id", { length: 64 }),
+  message: text("message").notNull(),
+  status: varchar("status", { length: 16 }).notNull().default("pending"),
+  attempts: integer("attempts").notNull().default(0),
+  nextAttemptAt: timestamp("next_attempt_at", { withTimezone: true }).notNull().defaultNow(),
+  lastError: varchar("last_error", { length: 64 }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => [
+  index("idx_plugin_outbox_due").on(table.status, table.nextAttemptAt),
+  check("plugin_message_outbox_status_check", sql`status IN ('pending', 'sending', 'delivered', 'dead')`),
 ]);
 
 export const pluginAuditLog = pgTable("plugin_audit_log", {
@@ -1566,3 +1587,4 @@ export const pluginAuditLog = pgTable("plugin_audit_log", {
 export type ApiToken = typeof apiTokens.$inferSelect;
 export type ContactApproval = typeof contactApprovals.$inferSelect;
 export type PluginAuditLogRow = typeof pluginAuditLog.$inferSelect;
+export type PluginMessageOutboxRow = typeof pluginMessageOutbox.$inferSelect;

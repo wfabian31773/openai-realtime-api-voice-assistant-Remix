@@ -9,7 +9,9 @@ import { hashPayload, hashSecret, isConfirmExpired } from "./tokens";
 import {
   issueConfirmOnApprove,
   newId,
+  phoneKeyOfPayload,
   publicApproval,
+  STALE_SENDING_MS,
   type CallPayload,
   type ContactApprovalRow,
   type ContactChannel,
@@ -113,6 +115,7 @@ export async function prepareContact(
     tokenJti,
     ticketId,
     ticketNumber,
+    phoneKey: input.channel === "email" ? null : phoneKeyOfPayload(picked.payload),
     payload: picked.payload,
     payloadHash: hashPayload(picked.payload),
     confirmTokenHash: null,
@@ -235,6 +238,9 @@ export async function consumeConfirmToken(
 
   const row = await store.findApprovalByConfirmHash(hash);
   if (!row) return { ok: false, status: 404, error: "Confirmation token not found" };
+  if (row.status === "sending" && row.confirmUsedAt) {
+    return { ok: false, status: 409, error: "Confirmation token has already been used" };
+  }
   if (row.status !== "approved") {
     return { ok: false, status: 409, error: "Contact request is not approved" };
   }
@@ -261,7 +267,7 @@ export async function markCommitted(
       result,
       updatedAt: now,
     },
-    "approved",
+    "sending",
   );
 }
 
@@ -278,8 +284,39 @@ export async function markFailed(
       result,
       updatedAt: now,
     },
-    "approved",
+    "sending",
   );
+}
+
+/**
+ * A claim that never reached markCommitted/markFailed stays `sending`
+ * forever unless we sweep it. Marks those stale rows failed. Never
+ * resends — a new prepare is the only way out.
+ */
+export async function reapStaleSending(
+  store: PluginStore,
+  now = new Date(),
+  staleMs = STALE_SENDING_MS,
+): Promise<ContactApprovalRow[]> {
+  const staleBefore = new Date(now.getTime() - staleMs);
+  const rows = await store.reapStaleSending(now, staleBefore);
+  for (const row of rows) {
+    try {
+      await store.writeAudit({
+        tokenJti: "system",
+        tool: "reap_stale_sending",
+        route: "/api/plugin/v1/commit_contact",
+        method: "SWEEP",
+        approvalId: row.id,
+        ticketId: row.ticketId,
+        outcome: "failed",
+        httpStatus: 408,
+      });
+    } catch {
+      console.error("[plugin] stale-send audit failed");
+    }
+  }
+  return rows;
 }
 
 export function channelOf(value: string): ContactChannel | null {
