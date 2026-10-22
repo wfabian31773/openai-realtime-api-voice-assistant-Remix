@@ -833,9 +833,15 @@ import { callEnvironment } from "./callRecord";
  * caller ID and NPX key are set. On top of v109 (#360), which it contains.
  * `src/agents/npxOutreachAgent.ts`,
  * `src/tools/npxOutreachTools.ts`.
+ *
+ * v111 — THE CALL ROW NAMES ITS BUILD (2026-10-22), Stage C step 1. Every
+ * call row carries runtime_marker, build_sha and voice_model, written by one
+ * fill-only statement once the A6 migration's columns exist; the deployment
+ * build writes build-info.json from git instead of serving a committed copy
+ * frozen at 3f4ec74. `src/runtime/buildIdentity.ts`. On top of v110 (#361).
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v110-the-npx-outreach-call-20261022";
+  "voice-runtime-v111-the-call-row-names-its-build-20261022";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

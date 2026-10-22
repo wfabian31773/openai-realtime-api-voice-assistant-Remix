@@ -1,0 +1,83 @@
+#!/usr/bin/env node
+/**
+ * Writes build-info.json at BUILD time: which commit this bundle was built
+ * from. Read at runtime by server/buildInfo.ts, served at /api/build-info, and
+ * stamped on every call row as call_logs.build_sha (Stage C, A6).
+ *
+ * WHY THIS FILE EXISTS. build-info.json used to be committed, and the
+ * deployment build in .replit never rewrote it, so from 2026-08-12 every
+ * deployment reported `3f4ec74` as its SHA — two months of builds wearing one
+ * stale commit. A stale SHA is worse than none, because it is believed. So:
+ *
+ *  1. The old file is DELETED FIRST. It is gitignored now and would otherwise
+ *     survive in the workspace from the previous build; if anything below
+ *     fails, there is no file and the runtime reports null ("unknown").
+ *  2. Every field is null when it cannot be read. Nothing is guessed.
+ *  3. It never fails the build. A deploy that cannot say its SHA is still a
+ *     deploy; it just says "unknown".
+ *
+ * `traceable` answers whether this commit is on GitHub's main: true or false
+ * from LOCAL git only (`merge-base --is-ancestor HEAD origin/main`), null when
+ * there is no origin/main ref to compare with. No network fetch, so a build
+ * can never hang or fail on GitHub. A workspace commit that never reached
+ * GitHub reads false — the SHA is still the true SHA of what was built.
+ */
+"use strict";
+
+const fs = require("fs");
+const path = require("path");
+const { execFileSync } = require("child_process");
+
+function git(args) {
+  try {
+    return execFileSync("git", args, { stdio: ["ignore", "pipe", "ignore"], timeout: 5000 })
+      .toString()
+      .trim();
+  } catch {
+    return null;
+  }
+}
+
+function isAncestorOfMain() {
+  if (git(["rev-parse", "--verify", "--quiet", "origin/main"]) === null) return null;
+  try {
+    execFileSync("git", ["merge-base", "--is-ancestor", "HEAD", "origin/main"], {
+      stdio: "ignore",
+      timeout: 5000,
+    });
+    return true;
+  } catch (error) {
+    // Exit status 1 is "not an ancestor"; anything else is "could not tell".
+    return error && error.status === 1 ? false : null;
+  }
+}
+
+function buildInfo() {
+  const full = git(["rev-parse", "HEAD"]);
+  const sha = full && /^[0-9a-f]{40}$/.test(full) ? full : null;
+  return {
+    builtAt: new Date().toISOString(),
+    gitSha: sha ? sha.slice(0, 7) : null,
+    gitShaFull: sha,
+    traceable: sha ? isAncestorOfMain() : null,
+  };
+}
+
+function main(out = path.join(process.cwd(), "build-info.json")) {
+  try {
+    fs.rmSync(out, { force: true });
+  } catch {
+    /* nothing to remove */
+  }
+  try {
+    const info = buildInfo();
+    fs.writeFileSync(out, JSON.stringify(info));
+    console.log(`[build-info] ${info.gitSha ?? "unknown sha"} traceable=${info.traceable}`);
+  } catch (error) {
+    console.warn(`[build-info] not written: ${error && error.message}`);
+  }
+}
+
+if (require.main === module) main();
+
+module.exports = { buildInfo, main };
