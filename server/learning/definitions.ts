@@ -21,9 +21,9 @@
  */
 
 /** Bump with DEFINITIONS_HASH whenever any text below changes. */
-export const METHOD_VERSION = "learning-v3";
+export const METHOD_VERSION = "learning-v4";
 /** sha256 of definitionsText(), first 16 hex. definitions.test.ts pins it. */
-export const DEFINITIONS_HASH = "73a1d2faf531f871";
+export const DEFINITIONS_HASH = "6326ab29f0fadd35";
 
 export const PACIFIC = "America/Los_Angeles";
 
@@ -220,16 +220,16 @@ hit AS (
 )
 SELECT h.k
 FROM hit h
--- The NextGen Bible's row rule (statusOf, v104): kept wins; moved and not kept
--- is not an appointment; cancelled is not. A moved booking counts only through
+-- The NextGen Bible's row rule, exactly statusOf (v104): kept wins over every
+-- flag; otherwise moved is not an appointment and cancelled is not. A moved booking counts only through
 -- a replacement that is itself a live appointment.
-WHERE (NOT coalesce(h.is_cancelled, false)
-       AND (NOT coalesce(h.is_rescheduled, false) OR coalesce(h.is_kept, false)))
+WHERE (coalesce(h.is_kept, false)
+       OR (NOT coalesce(h.is_cancelled, false) AND NOT coalesce(h.is_rescheduled, false)))
    OR (coalesce(h.is_rescheduled, false) AND h.person_id ~* '^[0-9a-f-]{36}$' AND EXISTS (
         SELECT 1 FROM si_appointment_facts g
         WHERE g.person_id = h.person_id::uuid
-          AND NOT coalesce(g.is_cancelled, false)
-          AND (NOT coalesce(g.is_rescheduled, false) OR coalesce(g.is_kept, false))
+          AND (coalesce(g.is_kept, false)
+               OR (NOT coalesce(g.is_cancelled, false) AND NOT coalesce(g.is_rescheduled, false)))
           AND g.appointment_date >= h.since))`;
 
 /** isFirmPartnerLink (5Star shared/partner-booking.ts), mirrored. */
