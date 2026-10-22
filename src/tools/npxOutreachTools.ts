@@ -49,7 +49,7 @@ import { callbackSessionFor } from './outboundTools';
 import { dobOnFile } from '../runtime/outbound/callback';
 import type { OutboundContact } from '../runtime/outbound/campaign';
 import type { OutboundStore } from '../runtime/outbound/store';
-import { createNpxOutreachClient, type NpxOutreachClient, type NpxSlot } from '../services/npxOutreachClient';
+import { createNpxOutreachClient, NPX_TIMEOUT_MS, type NpxOutreachClient, type NpxSlot } from '../services/npxOutreachClient';
 import { cancelAzulAppointment, type AzulCancelRequest, type AzulCancelResult } from '../services/outreachAzulCancel';
 import { fold, SCHEDULING } from './queueRouting';
 import { sanitizeForSms } from '../services/gsm7';
@@ -121,6 +121,9 @@ interface OutreachSession {
   offers: number;
   slots: NpxSlot[];
   booking: { bookingId: string; slot: NpxSlot; cancel: AzulCancelResult } | null;
+  /** A book_sooner_exam still running: a second call waits for it rather
+   * than booking twice. */
+  bookingInFlight: Promise<ToolResult> | null;
   /** The HVA Hub ticket filed when they asked for a person. */
   staffTicket: string | null;
   openedAtMs: number;
@@ -211,6 +214,7 @@ async function sessionFor(input: Record<string, unknown>): Promise<{ sid: string
         offers: 0,
         slots: [],
         booking: null,
+        bookingInFlight: null,
         staffTicket: null,
         openedAtMs: now,
       },
@@ -508,6 +512,34 @@ registerTool({
 
 // ── book_sooner_exam ────────────────────────────────────────────────────────
 
+/**
+ * THE WHOLE BOOKING ANSWERS INSIDE ONE BUDGET (Codex P1, #361). `runTool`
+ * races the handler against the tool's timeout and does not stop it, so a
+ * sequence longer than the timeout would tell the model "timed out" while
+ * the handler went on to cancel the caller's appointment and settle them —
+ * the caller never told, and a retry invited. Worst case in parts: the NPX
+ * booking 12 s, the three Azul steps 12 s each, the report 8 s — 56 s. So the
+ * cancel is given a deadline (what the budget leaves after the report and the
+ * settle are reserved), a step that would not fit is not started, and a
+ * cancel that runs out is told to the caller as "our team will cancel" —
+ * which NPX's backup list makes true. The budget sits under the tool's
+ * timeout, which sits under the bridge's tool-dispatch watchdog
+ * (DEFAULT_DEAD_AIR_MS + TOOL_DISPATCH_GRACE_MS, 45 s).
+ */
+export const BOOK_SEQUENCE_BUDGET_MS = 36_000;
+export const BOOK_TOOL_TIMEOUT_MS = 40_000;
+const SETTLE_BUDGET_MS = 2_000;
+
+/** `p`, or `fallback` once `ms` has passed — never later. */
+async function within<T>(p: Promise<T>, ms: number, fallback: T): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([p, new Promise<T>((resolve) => (timer = setTimeout(() => resolve(fallback), Math.max(0, ms))))]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 function confirmation(slot: NpxSlot, cancel: AzulCancelResult, currentDay: string): string {
   const booked = `You're booked for ${spokenSlot(slot)}. Their phone number is ${slot.phone}.`;
   return cancel.cancelled
@@ -518,7 +550,7 @@ function confirmation(slot: NpxSlot, cancel: AzulCancelResult, currentDay: strin
 registerTool({
   name: BOOK_SOONER_TOOL_NAME,
   layer: 'agent',
-  timeoutMs: 30_000,
+  timeoutMs: BOOK_TOOL_TIMEOUT_MS,
   description:
     'Book the sooner exam the person chose and confirmed, by its option number from find_sooner_exam. ' +
     'This also cancels their current appointment with us, so call it only after they have said yes to that.',
@@ -535,6 +567,7 @@ registerTool({
     required: ['option'],
   },
   handler: async (input): Promise<ToolResult> => {
+    const deadline = Date.now() + BOOK_SEQUENCE_BUDGET_MS;
     const found = await sessionFor(input);
     if ('success' in found) return found;
     const { sid, s } = found;
@@ -543,100 +576,133 @@ registerTool({
     if (s.booking) {
       return { success: true, booked: true, say: confirmation(s.booking.slot, s.booking.cancel, currentDay) };
     }
-    const index = Number(input.option) - 1;
-    const slot = s.slots[index];
-    if (!slot) {
-      const r: Refusal = {
-        success: false,
-        error: 'no_such_option',
-        fix: 'That option was not offered. Call find_sooner_exam first, read the options, and book only one they chose.',
-      };
-      return r;
-    }
-    const personId = field(s.contact, 'person_id');
-    const appointmentId = field(s.contact, 'appointment_id');
-    const dob = dobOnFile(s.contact);
-    if (!personId || !appointmentId || !dob || !s.contact.firstName || !s.contact.lastName) {
-      const r: Refusal = {
-        success: false,
-        error: 'record_incomplete',
-        fix: 'This record cannot be booked over the phone. Tell them their current appointment stays as it is, call record_call_outcome with done, say goodbye and call end_call.',
-      };
-      return r;
-    }
-    const book = await live().npx.book({
-      slotId: slot.slotId,
-      medicalGroupName: field(s.contact, 'medical_group'),
-      minDaysSooner: MIN_DAYS_SOONER,
-      patient: {
-        firstName: s.contact.firstName,
-        lastName: s.contact.lastName,
-        dateOfBirth: `${dob.year}-${dob.month}-${dob.day}`,
-        ngePersonId: personId,
-        phone: s.contact.phone,
-      },
-      replacedAppointment: { ngeAppointmentId: appointmentId, date: field(s.contact, 'appointment_date') },
-      callRef: sid,
+    if (s.bookingInFlight) return s.bookingInFlight;
+    const run = bookChosen(input, sid, s, currentDay, deadline).finally(() => {
+      s.bookingInFlight = null;
     });
-    if (!book.ok) {
-      if (book.next === 'offer_again') {
-        s.slots = [];
-        const r: Refusal = {
-          success: false,
-          error: 'slot_unavailable',
-          say: 'I\'m sorry, that time was just taken. Let me look again.',
-          fix: 'Call find_sooner_exam again and read the new options. Their current appointment has not been touched.',
-        };
-        return r;
-      }
-      const r: Refusal = {
-        success: false,
-        error: book.error,
-        fix:
-          'It could not be booked over the phone. Do not say anything failed and do not promise a call. Tell them their current appointment stays exactly as it is, ' +
-          'call record_call_outcome with done, say goodbye and call end_call.',
-      };
-      return r;
-    }
-
-    // Booked. Now the Azul appointment, then tell NPX how that went. A cancel
-    // that does not land is still safe: NPX lists the booking for CEC after
-    // 15 minutes with no `cancelled` report.
-    const cancel = await live().cancel({
-      appointmentId,
-      personId,
-      appointmentDate: field(s.contact, 'appointment_date'),
-      comment: `Moved to an NPX partner practice by the Azul outreach call (NPX booking ${book.bookingId}).`,
-    });
-    const report = await live().npx.reportCancel(
-      book.bookingId,
-      cancel.cancelled ? 'cancelled' : { failed: cancel.reason },
-    );
-    if (!report.ok) {
-      console.warn(`[NPX OUTREACH] booking ${book.bookingId}: the cancel report did not land (${report.error}); CEC's backup list will show it`);
-    }
-    s.booking = { bookingId: book.bookingId, slot: book.slot ?? slot, cancel };
-    try {
-      await (await live().store()).settleContact(s.contact.contactId, 'completed', {
-        notes: `npx_booking:${book.bookingId}`,
-        exceptStatus: ['do_not_call'],
-      });
-    } catch (e) {
-      console.warn(`[NPX OUTREACH] booking ${book.bookingId}: could not settle the contact —`, e instanceof Error ? e.message : e);
-    }
-    return {
-      success: true,
-      booked: true,
-      say: confirmation(s.booking.slot, cancel, currentDay),
-      fix: 'Say the confirmation as given, ask if there is anything else, then say goodbye and call end_call. The outcome is already recorded.',
-    };
+    s.bookingInFlight = run;
+    return run;
   },
 });
+
+async function bookChosen(
+  input: Record<string, unknown>,
+  sid: string,
+  s: OutreachSession,
+  currentDay: string,
+  deadline: number,
+): Promise<ToolResult> {
+  const index = Number(input.option) - 1;
+  const slot = s.slots[index];
+  if (!slot) {
+    const r: Refusal = {
+      success: false,
+      error: 'no_such_option',
+      fix: 'That option was not offered. Call find_sooner_exam first, read the options, and book only one they chose.',
+    };
+    return r;
+  }
+  const personId = field(s.contact, 'person_id');
+  const appointmentId = field(s.contact, 'appointment_id');
+  const dob = dobOnFile(s.contact);
+  if (!personId || !appointmentId || !dob || !s.contact.firstName || !s.contact.lastName) {
+    const r: Refusal = {
+      success: false,
+      error: 'record_incomplete',
+      fix: 'This record cannot be booked over the phone. Tell them their current appointment stays as it is, call record_call_outcome with done, say goodbye and call end_call.',
+    };
+    return r;
+  }
+  const book = await live().npx.book({
+    slotId: slot.slotId,
+    medicalGroupName: field(s.contact, 'medical_group'),
+    minDaysSooner: MIN_DAYS_SOONER,
+    patient: {
+      firstName: s.contact.firstName,
+      lastName: s.contact.lastName,
+      dateOfBirth: `${dob.year}-${dob.month}-${dob.day}`,
+      ngePersonId: personId,
+      phone: s.contact.phone,
+    },
+    replacedAppointment: { ngeAppointmentId: appointmentId, date: field(s.contact, 'appointment_date') },
+    callRef: sid,
+  });
+  if (!book.ok) {
+    if (book.next === 'offer_again') {
+      s.slots = [];
+      const r: Refusal = {
+        success: false,
+        error: 'slot_unavailable',
+        say: 'I\'m sorry, that time was just taken. Let me look again.',
+        fix: 'Call find_sooner_exam again and read the new options. Their current appointment has not been touched.',
+      };
+      return r;
+    }
+    const r: Refusal = {
+      success: false,
+      error: book.error,
+      fix:
+        'It could not be booked over the phone. Do not say anything failed and do not promise a call. Tell them their current appointment stays exactly as it is, ' +
+        'call record_call_outcome with done, say goodbye and call end_call.',
+    };
+    return r;
+  }
+
+  // Booked. Now the Azul appointment, then tell NPX how that went. A cancel
+  // that does not land is still safe: NPX lists the booking for CEC after
+  // 15 minutes with no `cancelled` report.
+  const cancel = await live().cancel({
+    appointmentId,
+    personId,
+    appointmentDate: field(s.contact, 'appointment_date'),
+    comment: `Moved to an NPX partner practice by the Azul outreach call (NPX booking ${book.bookingId}).`,
+    deadlineAt: deadline - NPX_TIMEOUT_MS.report - SETTLE_BUDGET_MS,
+  });
+  const report = await live().npx.reportCancel(
+    book.bookingId,
+    cancel.cancelled ? 'cancelled' : { failed: cancel.reason },
+  );
+  if (!report.ok) {
+    console.warn(`[NPX OUTREACH] booking ${book.bookingId}: the cancel report did not land (${report.error}); CEC's backup list will show it`);
+  }
+  s.booking = { bookingId: book.bookingId, slot: book.slot ?? slot, cancel };
+  const settle = (async () => {
+    await (await live().store()).settleContact(s.contact.contactId, 'completed', {
+      notes: `npx_booking:${book.bookingId}`,
+      exceptStatus: ['do_not_call'],
+    });
+    return true;
+  })().catch((e) => {
+    console.warn(`[NPX OUTREACH] booking ${book.bookingId}: could not settle the contact —`, e instanceof Error ? e.message : e);
+    return false;
+  });
+  if (!(await within(settle, Math.min(SETTLE_BUDGET_MS, deadline - Date.now()), false))) {
+    console.warn(`[NPX OUTREACH] booking ${book.bookingId}: the contact is not settled yet; the booking stands`);
+  }
+  return {
+    success: true,
+    booked: true,
+    say: confirmation(s.booking.slot, cancel, currentDay),
+    fix: 'Say the confirmation as given, ask if there is anything else, then say goodbye and call end_call. The outcome is already recorded.',
+  };
+}
 
 // ── request_staff_callback ──────────────────────────────────────────────────
 
 /** The Hub's own reason for what they asked, by the cues the queue lanes
  * already route on; "reschedule" when their words name none. */
+/**
+ * Where their appointments stand, said after a staff callback is asked for.
+ * A caller who booked on this call and then asked for a person must not be
+ * told their old appointment "stays exactly as it is" (Codex P2, #361).
+ */
+export function appointmentStateLine(booking: OutreachSession['booking']): string {
+  if (!booking) return 'Your current appointment stays exactly as it is.';
+  return booking.cancel.cancelled
+    ? 'Your new appointment stays booked, and your old one with us is cancelled.'
+    : 'Your new appointment stays booked, and our team will cancel your old one with us.';
+}
+
 export function staffReasonFor(request: string): number {
   const text = fold(request);
   for (const cue of SCHEDULING) {
@@ -670,7 +736,7 @@ registerTool({
     const already = (ticket: string): ToolResult => ({
       success: true,
       ticket_number: ticket,
-      say: "I've asked our scheduling team to call you back. Your current appointment stays exactly as it is.",
+      say: `I've asked our scheduling team to call you back. ${appointmentStateLine(s.booking)}`,
       fix: 'Say that, ask if there is anything else, then say goodbye and call end_call. The outcome is already recorded.',
     });
     if (s.staffTicket) return already(s.staffTicket);
@@ -719,8 +785,10 @@ registerTool({
         error: 'ticket_not_filed',
         fix:
           'The request could not be sent to the team just now. Do not say anyone will call. Say: "I wasn\'t able to ' +
-          'send that to our team just now. Your current appointment stays exactly as it is." Then call ' +
-          'record_call_outcome with call_back_later, say goodbye and call end_call.',
+          `send that to our team just now. ${appointmentStateLine(s.booking)}" Then ` +
+          (s.booking
+            ? 'say goodbye and call end_call. The booking is already recorded.'
+            : 'call record_call_outcome with call_back_later, say goodbye and call end_call.'),
       };
       return r;
     }

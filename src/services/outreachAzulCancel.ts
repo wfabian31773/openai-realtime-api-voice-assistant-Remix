@@ -27,6 +27,9 @@ const DEFAULT_EYECARE_BASE_URL = 'https://eyecare-scheduling-agent-wayne-fabians
  * little more on this side so its own fast-fail reply can arrive. */
 export const AZUL_CANCEL_DEADLINE_MS = 10_000;
 const CLIENT_TIMEOUT_MS = AZUL_CANCEL_DEADLINE_MS + 2_000;
+/** A step is not started with less than this left before the caller's
+ * deadline: the scheduling service needs a second, and its reply must arrive. */
+export const AZUL_CANCEL_MIN_STEP_MS = 3_000;
 
 export interface AzulCancelRequest {
   /** The NextGen appointment id (the Console's `appointment_id`). */
@@ -37,6 +40,15 @@ export interface AzulCancelRequest {
   appointmentDate: string;
   /** Recorded on the NextGen cancellation. No patient details. */
   comment: string;
+  /**
+   * Epoch ms by which the whole cancel must have answered. Each step's wait
+   * is cut to what is left, and no step starts once too little is: the
+   * outreach call books first and must still answer the caller inside its
+   * own budget (Codex P1, #361). Running out is `nextgen_timeout`, which is
+   * safe — NPX's backup list shows CEC a booking with no cancel. A step cut
+   * short on this side may still land in NextGen; that, too, CEC sees.
+   */
+  deadlineAt?: number;
 }
 
 export type AzulCancelResult =
@@ -61,17 +73,20 @@ async function tool(
   args: Record<string, unknown>,
   env: Record<string, string | undefined>,
   fetchImpl: Fetch,
+  deadlineAt?: number,
 ): Promise<Record<string, unknown> | 'timeout' | 'failed'> {
   const base = (env.EYECARE_SCHEDULING_BASE_URL?.trim() || DEFAULT_EYECARE_BASE_URL).replace(/\/+$/, '');
+  const waitMs = deadlineAt === undefined ? CLIENT_TIMEOUT_MS : Math.min(CLIENT_TIMEOUT_MS, deadlineAt - Date.now());
+  const serverDeadlineMs = Math.max(1_000, Math.min(AZUL_CANCEL_DEADLINE_MS, waitMs - 2_000));
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), CLIENT_TIMEOUT_MS);
+  const timer = setTimeout(() => controller.abort(), Math.max(0, waitMs));
   try {
     const r = await fetchImpl(`${base}/api/tools/${encodeURIComponent(name)}`, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${env.EYECARE_AGENT_API_KEY}`,
         'Content-Type': 'application/json',
-        'X-Deadline-Ms': String(AZUL_CANCEL_DEADLINE_MS),
+        'X-Deadline-Ms': String(serverDeadlineMs),
       },
       body: JSON.stringify(args),
       signal: controller.signal,
@@ -105,9 +120,12 @@ export async function cancelAzulAppointment(
   if (!env.EYECARE_AGENT_API_KEY) return refuse('scheduling_not_configured');
   const reasonName = env.OUTREACH_CANCEL_REASON?.trim();
   if (!reasonName) return refuse('cancel_reason_not_configured');
+  const outOfTime = (): boolean =>
+    req.deadlineAt !== undefined && req.deadlineAt - Date.now() < AZUL_CANCEL_MIN_STEP_MS;
 
   // 1. Whose appointment is it, and is it still the one we offered to move?
-  const details = await tool('get_appointment_details', { appointmentId: req.appointmentId }, env, fetchImpl);
+  if (outOfTime()) return refuse('nextgen_timeout');
+  const details = await tool('get_appointment_details', { appointmentId: req.appointmentId }, env, fetchImpl, req.deadlineAt);
   if (details === 'timeout') return refuse('nextgen_timeout');
   if (details === 'failed' || details.notFound === true || typeof details.personId !== 'string') {
     return refuse('appointment_not_found');
@@ -118,18 +136,21 @@ export async function cancelAzulAppointment(
   if (String(details.appointmentDate ?? '').slice(0, 10) !== req.appointmentDate) return refuse('appointment_moved');
 
   // 2. The configured NextGen reason, matched by its whole name.
-  const list = await tool('list_cancel_reasons', {}, env, fetchImpl);
+  if (outOfTime()) return refuse('nextgen_timeout');
+  const list = await tool('list_cancel_reasons', {}, env, fetchImpl, req.deadlineAt);
   if (list === 'timeout') return refuse('nextgen_timeout');
   const reasons = list === 'failed' || !Array.isArray(list.reasons) ? [] : (list.reasons as Array<{ id?: unknown; name?: unknown }>);
   const reason = reasons.find((r) => String(r.name ?? '').trim().toLowerCase() === reasonName.toLowerCase());
   if (!reason || typeof reason.id !== 'string') return refuse('cancel_reason_not_found');
 
   // 3. Cancel.
+  if (outOfTime()) return refuse('nextgen_timeout');
   const res = await tool(
     'cancel_appointment',
     { appointmentId: req.appointmentId, cancelReasonId: reason.id, comment: req.comment },
     env,
     fetchImpl,
+    req.deadlineAt,
   );
   if (res === 'timeout') return refuse('nextgen_timeout');
   if (res === 'failed') return refuse('nextgen_cancel_failed');

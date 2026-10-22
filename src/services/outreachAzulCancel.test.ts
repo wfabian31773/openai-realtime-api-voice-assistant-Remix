@@ -4,8 +4,8 @@
  * reason is configured; every refusal is a short code NPX accepts. Synthetic
  * ids only; no network.
  */
-import { describe, expect, it, vi } from 'vitest';
-import { cancelAzulAppointment, AZUL_CANCEL_DEADLINE_MS } from './outreachAzulCancel';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { cancelAzulAppointment, AZUL_CANCEL_DEADLINE_MS, AZUL_CANCEL_MIN_STEP_MS } from './outreachAzulCancel';
 import { NPX_REASON_CODE } from './npxOutreachClient';
 
 const ENV = { EYECARE_AGENT_API_KEY: 'k', OUTREACH_CANCEL_REASON: 'Seen Elsewhere' };
@@ -103,5 +103,48 @@ describe('a slow or failing service', () => {
     for (const r of ['scheduling_not_configured', 'cancel_reason_not_configured', 'cancel_reason_not_found', 'appointment_not_found', 'person_mismatch', 'appointment_moved', 'schedule_block', 'nextgen_timeout', 'nextgen_cancel_failed']) {
       expect(NPX_REASON_CODE.test(r), r).toBe(true);
     }
+  });
+});
+
+describe('a deadline from the caller (Codex P1, #361: the booking answers inside its own budget)', () => {
+  afterEach(() => vi.useRealTimers());
+
+  it('starts nothing when too little is left, and says so as a timeout', async () => {
+    const s = service({ get_appointment_details: DETAILS, list_cancel_reasons: REASONS, cancel_appointment: { cancelled: true } });
+    const r = await cancelAzulAppointment({ ...REQ, deadlineAt: Date.now() + AZUL_CANCEL_MIN_STEP_MS - 1 }, ENV, s.f);
+    expect(r).toEqual({ cancelled: false, reason: 'nextgen_timeout' });
+    expect(s.calls).toEqual([]);
+  });
+
+  it('tells the service only what is left, never the full ten seconds', async () => {
+    const s = service({ get_appointment_details: DETAILS, list_cancel_reasons: REASONS, cancel_appointment: { cancelled: true } });
+    await cancelAzulAppointment({ ...REQ, deadlineAt: Date.now() + 6_000 }, ENV, s.f);
+    for (const c of s.calls) expect(Number(c.headers['X-Deadline-Ms'])).toBeLessThanOrEqual(4_000);
+  });
+
+  it('does not start the next step once the time is spent — the cancel itself is never begun late', async () => {
+    vi.useFakeTimers();
+    const calls: string[] = [];
+    const f = vi.fn(async (url: string) => {
+      const name = decodeURIComponent(url.split('/api/tools/')[1]);
+      calls.push(name);
+      vi.advanceTimersByTime(2_500); // the read-back was slow
+      const result = name === 'get_appointment_details' ? DETAILS : REASONS;
+      return new Response(JSON.stringify({ tool: name, result }), { status: 200 });
+    });
+    const r = await cancelAzulAppointment({ ...REQ, deadlineAt: Date.now() + 5_000 }, ENV, f as never);
+    expect(r).toEqual({ cancelled: false, reason: 'nextgen_timeout' });
+    expect(calls).toEqual(['get_appointment_details']);
+  });
+
+  it('stops waiting for a hung step at the deadline, not twelve seconds later', async () => {
+    vi.useFakeTimers();
+    const f = vi.fn((_url: string, init: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => {
+        init.signal!.addEventListener('abort', () => reject(new Error('aborted')));
+      }));
+    const pending = cancelAzulAppointment({ ...REQ, deadlineAt: Date.now() + 4_000 }, ENV, f as never);
+    await vi.advanceTimersByTimeAsync(4_000);
+    expect(await pending).toEqual({ cancelled: false, reason: 'nextgen_timeout' });
   });
 });

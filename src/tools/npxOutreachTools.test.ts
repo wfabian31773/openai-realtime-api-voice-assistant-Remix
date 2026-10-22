@@ -6,7 +6,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { getTool } from './registry';
 import {
+  BOOK_SEQUENCE_BUDGET_MS,
   BOOK_SOONER_TOOL_NAME,
+  BOOK_TOOL_TIMEOUT_MS,
   CONFIRM_DOB_TOOL_NAME,
   DESCRIBE_TOOL_NAME,
   FIND_SOONER_TOOL_NAME,
@@ -25,8 +27,9 @@ import {
 } from './npxOutreachTools';
 import { callbackSessionFor, openCallbackSession } from './outboundTools';
 import { FakeOutboundStore } from '../runtime/outbound/store.testkit';
-import type { NpxOutreachClient, NpxSlot } from '../services/npxOutreachClient';
-import type { AzulCancelResult } from '../services/outreachAzulCancel';
+import { NPX_TIMEOUT_MS, type NpxOutreachClient, type NpxSlot } from '../services/npxOutreachClient';
+import { AZUL_CANCEL_MIN_STEP_MS, type AzulCancelResult } from '../services/outreachAzulCancel';
+import { DEFAULT_DEAD_AIR_MS, TOOL_DISPATCH_GRACE_MS } from '../runtime/mediaStreamBridge';
 
 const SID = 'CA00000000000000000000000000000109';
 const SLOT_A: NpxSlot = {
@@ -205,6 +208,38 @@ describe('request_staff_callback (operator, 2026-10-21: a request for a person i
     expect(store.contacts.get('c1')!.status).toBe('do_not_call');
   });
 
+  describe('after a booking on the same call (Codex P2, #361)', () => {
+    async function booked() {
+      await verify();
+      await run(FIND_SOONER_TOOL_NAME);
+      await run(BOOK_SOONER_TOOL_NAME, { option: '1' });
+    }
+
+    it('says the new appointment stands and the old one is cancelled — never that it "stays exactly as it is"', async () => {
+      await booked();
+      const r = (await run(STAFF_CALLBACK_TOOL_NAME, { request: 'a person please' })) as Record<string, unknown>;
+      expect(r.say).toBe("I've asked our scheduling team to call you back. Your new appointment stays booked, and your old one with us is cancelled.");
+      expect(JSON.stringify(r)).not.toContain('stays exactly as it is');
+    });
+
+    it('when the cancel did not land, says our team will cancel the old one', async () => {
+      cancel.mockResolvedValueOnce({ cancelled: false, reason: 'nextgen_timeout' });
+      await booked();
+      const r = (await run(STAFF_CALLBACK_TOOL_NAME, { request: 'a person please' })) as Record<string, unknown>;
+      expect(r.say).toBe("I've asked our scheduling team to call you back. Your new appointment stays booked, and our team will cancel your old one with us.");
+    });
+
+    it('a ticket that did not file says the same, and does not record call back later over the booking', async () => {
+      await booked();
+      fileTicket.mockResolvedValueOnce({ success: false, error: 'HTTP 500' });
+      const r = await run(STAFF_CALLBACK_TOOL_NAME, { request: 'a person please' });
+      const text = JSON.stringify(r);
+      expect(text).toContain('Your new appointment stays booked');
+      expect(text).not.toContain('stays exactly as it is');
+      expect(text).not.toContain('call_back_later');
+    });
+  });
+
   it('routes by what they asked, with reschedule when their words name nothing', () => {
     expect(staffReasonFor('Quiero cancelar mi cita')).toBe(148);
     expect(staffReasonFor('Can I reschedule instead')).toBe(147);
@@ -359,6 +394,63 @@ describe('book_sooner_exam', () => {
     expect(again).toMatchObject({ success: true, booked: true });
     expect(npx.book).toHaveBeenCalledTimes(1);
     expect(cancel).toHaveBeenCalledTimes(1);
+  });
+
+  describe('the whole booking answers inside one budget (Codex P1, #361)', () => {
+    afterEach(() => vi.useRealTimers());
+
+    it('sits under the tool timeout, which sits under the bridge\'s dispatch watchdog, with room left for the cancel', () => {
+      expect(getTool(BOOK_SOONER_TOOL_NAME)!.timeoutMs).toBe(BOOK_TOOL_TIMEOUT_MS);
+      expect(BOOK_SEQUENCE_BUDGET_MS).toBeLessThan(BOOK_TOOL_TIMEOUT_MS);
+      expect(BOOK_TOOL_TIMEOUT_MS).toBeLessThan(DEFAULT_DEAD_AIR_MS + TOOL_DISPATCH_GRACE_MS);
+      // The slowest booking NPX may take, then the report and the settle, still
+      // leave the cancel time to start a step.
+      const forCancel = BOOK_SEQUENCE_BUDGET_MS - NPX_TIMEOUT_MS.book - NPX_TIMEOUT_MS.report - 2_000;
+      expect(forCancel).toBeGreaterThanOrEqual(AZUL_CANCEL_MIN_STEP_MS);
+    });
+
+    it('hands the cancel a deadline that leaves the report and the settle their time', async () => {
+      await offered();
+      const before = Date.now();
+      await run(BOOK_SOONER_TOOL_NAME, { option: '1' });
+      const { deadlineAt } = cancel.mock.calls[0][0] as { deadlineAt: number };
+      expect(deadlineAt).toBeGreaterThan(before);
+      expect(deadlineAt).toBeLessThanOrEqual(Date.now() + BOOK_SEQUENCE_BUDGET_MS - NPX_TIMEOUT_MS.report - 2_000);
+    });
+
+    it('a settle that hangs does not hold the caller\'s answer', async () => {
+      await offered();
+      vi.useFakeTimers();
+      store.settleContact = (() => new Promise(() => {})) as never;
+      const pending = run(BOOK_SOONER_TOOL_NAME, { option: '1' });
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(await pending).toMatchObject({ success: true, booked: true });
+    });
+
+    it('a second call while the first is still booking waits for it, and books once', async () => {
+      await offered();
+      let release!: () => void;
+      npx.book.mockImplementationOnce(
+        () => new Promise((resolve) => {
+          release = () => resolve({ ok: true, bookingId: 'booking-1', alreadyBooked: false, recordGroupDiffers: false, slot: SLOT_A });
+        }),
+      );
+      const first = run(BOOK_SOONER_TOOL_NAME, { option: '1' });
+      const second = run(BOOK_SOONER_TOOL_NAME, { option: '2' });
+      await new Promise((r) => setTimeout(r, 0));
+      release();
+      expect(await first).toMatchObject({ success: true, booked: true });
+      expect(await second).toMatchObject({ success: true, booked: true });
+      expect(npx.book).toHaveBeenCalledTimes(1);
+      expect(cancel).toHaveBeenCalledTimes(1);
+    });
+
+    it('a booking that failed frees the next try', async () => {
+      await offered();
+      npx.book.mockResolvedValueOnce({ ok: false, error: 'slot_unavailable', next: 'offer_again' });
+      await run(BOOK_SOONER_TOOL_NAME, { option: '1' });
+      expect(outreachSessionFor(SID)!.bookingInFlight).toBeNull();
+    });
   });
 
   it('will not book an option that was never offered, or before the person is confirmed', async () => {

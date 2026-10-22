@@ -24,6 +24,7 @@ import type { ContactSource, OutboundContact, OutboundLanePolicy, SourceContact 
 import { OUTBOUND_RECORDING_CLAUSE } from '../runtime/outbound/campaign';
 import { DEFAULT_ATTEMPT_CAPS, DEFAULT_CALLING_WINDOW } from '../runtime/outbound/callingWindow';
 import { consoleMovableContactSource } from '../runtime/outbound/consoleMovable';
+import { createNpxOutreachClient } from '../services/npxOutreachClient';
 import {
   BOOK_SOONER_TOOL_NAME,
   CONFIRM_DOB_TOOL_NAME,
@@ -94,6 +95,31 @@ export function pilotSource(source: ContactSource, env: Record<string, string | 
   };
 }
 
+let warnedNoKey = false;
+
+/**
+ * The campaign's people, or null — and null means the dialler rings nobody.
+ * Without NPX_OUTREACH_API_KEY no slot can be offered, so a deployment with
+ * the two switches and the caller ID set but no key would ring patients, take
+ * their date of birth and spend their attempts on an offer that cannot exist
+ * (Codex P1, #361). The key is read through the client's own check, so the
+ * rule that refuses the call and the rule that refuses the offer are one rule.
+ */
+export async function npxOutreachSource(
+  env: Record<string, string | undefined> = process.env,
+  liveSource: () => Promise<ContactSource | null> = consoleMovableContactSource,
+): Promise<ContactSource | null> {
+  if (!createNpxOutreachClient(env).configured) {
+    if (!warnedNoKey) {
+      warnedNoKey = true;
+      console.warn('[NPX OUTREACH] NOT dialling: NPX_OUTREACH_API_KEY is not set, so no sooner exam could be offered');
+    }
+    return null;
+  }
+  const live = await liveSource();
+  return live ? pilotSource(live, env) : null;
+}
+
 export const npxOutreachPolicy: OutboundLanePolicy = {
   campaignKey: 'npx-outreach',
   enableEnv: 'OUTBOUND_CAMPAIGN_NPX_OUTREACH',
@@ -106,10 +132,7 @@ export const npxOutreachPolicy: OutboundLanePolicy = {
   greeting: npxOutreachGreeting,
   voicemail: () => NPX_OUTREACH_VOICEMAIL,
   callbackPurpose: NPX_OUTREACH_CALLBACK_PURPOSE,
-  source: async () => {
-    const live = await consoleMovableContactSource();
-    return live ? pilotSource(live) : null;
-  },
+  source: () => npxOutreachSource(),
   tools: NPX_OUTREACH_TOOLS,
 };
 

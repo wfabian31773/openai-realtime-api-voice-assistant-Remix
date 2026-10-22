@@ -7,6 +7,11 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 vi.hoisted(() => {
   process.env.DATABASE_URL ||= 'postgres://stub:stub@ci-stub.invalid:5432/stub';
 });
+const movable = vi.hoisted(() => ({ source: null as unknown }));
+vi.mock('../runtime/outbound/consoleMovable', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../runtime/outbound/consoleMovable')>()),
+  consoleMovableContactSource: vi.fn(async () => movable.source),
+}));
 
 import { resolveLane, RUNTIME_CALLBACK_TOOLS, RUNTIME_OUTBOUND_TOOLS, type LaneConfig } from '../runtime/laneRegistry';
 import type { ContactSource, OutboundContact, SourceContact } from '../runtime/outbound/campaign';
@@ -21,7 +26,7 @@ import {
   setNpxOutreachDepsForTests,
   resetOutreachSessionsForTests,
 } from '../tools/npxOutreachTools';
-import { npxOutreachGreeting, npxOutreachPolicy, pilotSource } from './npxOutreachAgent';
+import { npxOutreachGreeting, npxOutreachPolicy, npxOutreachSource, pilotSource } from './npxOutreachAgent';
 import { outboundProofPolicy } from './outboundProofAgent';
 
 const DATA = {
@@ -166,6 +171,41 @@ describe('the policy', () => {
     // Said only after identify_callback_caller has settled who rang (callback.ts).
     expect(npxOutreachPolicy.callbackPurpose).toContain(DESCRIBE_TOOL_NAME);
     expect(npxOutreachPolicy.callbackPurpose).toContain('word for word');
+  });
+});
+
+describe('dark without the NPX key (Codex P1, #361)', () => {
+  const base: ContactSource = {
+    name: 'test',
+    refreshEveryMs: 1,
+    parkMs: 1,
+    list: async () => [{ externalRef: 'a', phone: '+15555550111', firstName: 'T', lastName: 'S', data: { medical_group: 'Regal CAP' } }],
+    recheck: async () => ({ state: 'off_list' }),
+  };
+  afterEach(() => {
+    movable.source = null;
+    vi.unstubAllEnvs();
+  });
+
+  it('hands the dialler no one to ring when NPX_OUTREACH_API_KEY is unset or blank — and never reads the Console', async () => {
+    const live = vi.fn(async () => base);
+    expect(await npxOutreachSource({}, live)).toBeNull();
+    expect(await npxOutreachSource({ NPX_OUTREACH_API_KEY: '   ' }, live)).toBeNull();
+    expect(live).not.toHaveBeenCalled();
+  });
+
+  it('with the key, the live list through the pilot levers', async () => {
+    const src = await npxOutreachSource({ NPX_OUTREACH_API_KEY: 'k', NPX_OUTREACH_GROUPS: 'Lakeside CAP' }, async () => base);
+    expect(src).not.toBeNull();
+    expect(await src!.list(new Date())).toEqual([]);
+  });
+
+  it('the policy the dialler reads is that gate', async () => {
+    movable.source = base;
+    vi.stubEnv('NPX_OUTREACH_API_KEY', '');
+    expect(await npxOutreachPolicy.source!()).toBeNull();
+    vi.stubEnv('NPX_OUTREACH_API_KEY', 'k');
+    expect(await npxOutreachPolicy.source!()).not.toBeNull();
   });
 });
 
