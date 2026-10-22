@@ -119,6 +119,13 @@ export interface OutboundLanePolicy {
    * optional field, and a registry tool's JSON schema reaches the model whole.
    */
   tools?: readonly string[];
+  /**
+   * Whether the campaign is calling test data or real people right now, for
+   * /voice/health (v113): the one fact an operator must be able to confirm
+   * after a republish without placing a call. Read from the environment it is
+   * given. Optional: a campaign with one mode leaves it out.
+   */
+  mode?: (env?: Record<string, string | undefined>) => "demo" | "live";
 }
 
 /** One person a live source says the campaign may call. */

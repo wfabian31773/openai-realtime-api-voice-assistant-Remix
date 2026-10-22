@@ -841,17 +841,37 @@ import { callEnvironment } from "./callRecord";
  * frozen at 3f4ec74. `src/runtime/buildIdentity.ts`. On top of v110 (#361).
  */
 /**
- * v112 — THE SI ASSISTANT PLUGIN API (2026-10-22), DARK. The Support Center
+ * v112 — THE MEDICATION NAME IS ASKED ONCE (2026-10-22). The after-hours
+ * line's refill gate refused `create_ticket` on every attempt for the life of
+ * the call; it now refuses once, files on the next attempt, never asks about
+ * a contact lens, and the refusal reaches `tool_timeline`. On top of v111
+ * (#364), which it contains. `src/services/toolDirection.ts`.
+ */
+/**
+ * v113 — THE NPX DEMO LINE (2026-10-22). Operator: "No way we are going to do
+ * this without testing the line first", then "switching over to production
+ * should be a env switch". ONE lane, `npx-outreach`, and NPX_OUTREACH_MODE:
+ * unset (or anything but `live`) calls the synthetic patients on
+ * NPX_OUTREACH_DEMO_PHONES and books in the demo NPX, with the Azul cancel and
+ * the staff ticket simulated; `live` calls the Console's movable list and
+ * books for real. Same caller ID, Voice URL, agent, prompt, tools and voice
+ * (`eve`) in both. `/voice/health` names each lane's voice and the NPX lane's
+ * mode. On top of v112, which it contains.
+ * `src/agents/npxOutreachAgent.ts`, `src/agents/npxOutreachDemo.ts`,
+ * `src/tools/npxOutreachTools.ts`.
+ */
+/**
+ * v114 — THE SI ASSISTANT PLUGIN API (2026-10-22), DARK. The Support Center
  * bot prepares a call, text or email; a human approves it on Pending bot
  * actions; commit_contact then sends, using a 5-minute single-use token.
  * Calls enqueue into the existing outbound dialer from +1 909-255-3213.
  * Email is Graph app-only via SI_MAIL_TENANT_ID / SI_MAIL_CLIENT_ID /
  * SI_MAIL_CLIENT_SECRET from SI_ASSISTANT_EMAIL. PLUGIN_WRITES_ENABLED
- * defaults off. The migration is written, not applied. On top of v111
- * (#364), which it contains. `src/plugin/`, `src/agents/siAssistantAgent.ts`.
+ * defaults off. The migration is written, not applied. On top of v113
+ * (#363), which it contains. `src/plugin/`, `src/agents/siAssistantAgent.ts`.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v112-the-si-assistant-plugin-api-20261022";
+  "voice-runtime-v114-the-si-assistant-plugin-api-20261022";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

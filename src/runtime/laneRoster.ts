@@ -28,9 +28,12 @@ import { loadGrokRuntimeVoiceConfig } from "./config";
 
 /**
  * The lanes worth reporting on: the four queues, the two after-hours agents,
- * pcp, and scheduling. Deliberately not every registered agent — the
- * outbound and novelty ones would be noise in a health check whose job is to
- * answer one question at a glance.
+ * pcp, scheduling, and the NPX outreach campaign. Deliberately not every
+ * registered agent — the novelty ones would be noise in a health check whose
+ * job is to answer one question at a glance. The NPX lane is here because the
+ * operator has to confirm, before it rings a patient, which model and voice
+ * it opens with and whether it is in demo or live mode (2026-10-22: "I have
+ * never heard this agent, make sure it has a good voice").
  */
 export const REPORTED_LANES = [
   "optical",
@@ -41,6 +44,7 @@ export const REPORTED_LANES = [
   "no-ivr",
   "pcp",
   "azul-scheduling",
+  "npx-outreach",
 ] as const;
 
 /** Which env var holds the number a lane dials, when it dials one. */
@@ -81,6 +85,22 @@ export interface LaneReadiness {
    * not secrets.
    */
   voiceModel: string | null;
+  /**
+   * The xAI voice this lane would speak in right now, read the same way as
+   * `voiceModel` (`XAI_VOICE_NAME_<SLUG>`, else `XAI_VOICE_NAME`, else the
+   * runtime's default, `eve`). The registry's own `voice` is an OpenAI name
+   * and is never used (laneRegistry.ts). Null for a lane that is not
+   * registered.
+   */
+  voiceName: string | null;
+  /**
+   * For an outbound campaign with two modes (v113, NPX outreach): `demo`
+   * while it calls test data, `live` once it calls real people — read from
+   * the same environment the campaign reads, so after a republish this says
+   * which one is dialling without anybody placing a call. Null for every
+   * lane that has no such switch.
+   */
+  outboundMode: "demo" | "live" | null;
 }
 
 export function laneRoster(
@@ -99,6 +119,8 @@ export function laneRoster(
         blockedBy: `lane '${slug}' is not registered in this build`,
         transferWarning: null,
         voiceModel: null,
+        voiceName: null,
+        outboundMode: null,
       };
     }
     /**
@@ -127,6 +149,8 @@ export function laneRoster(
             `every transfer it attempts will fail at resolveHandoffDestination`
           : null,
       voiceModel: loadGrokRuntimeVoiceConfig(env, slug).model,
+      voiceName: loadGrokRuntimeVoiceConfig(env, slug).voiceName,
+      outboundMode: config.outbound?.mode?.(env) ?? null,
     };
   });
 }
@@ -146,6 +170,11 @@ export function formatLaneRoster(roster: LaneReadiness[]): string[] {
   for (const lane of roster) {
     if (lane.blockedBy) lines.push(`[voice-runtime]   ✗ ${lane.slug}: ${lane.blockedBy}`);
     else if (lane.transferWarning) lines.push(`[voice-runtime]   ! ${lane.transferWarning}`);
+    if (lane.outboundMode) {
+      lines.push(
+        `[voice-runtime]   ${lane.slug}: ${lane.outboundMode === "live" ? "LIVE — calls real patients" : "demo — calls the test numbers only"}`,
+      );
+    }
   }
   return lines;
 }

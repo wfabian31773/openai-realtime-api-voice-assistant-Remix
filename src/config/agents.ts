@@ -227,6 +227,7 @@ export class AgentRegistry {
     // partner for patients on the Console's movable list. Dials nothing
     // unless RUNTIME_OUTBOUND_DIALING=1, OUTBOUND_CAMPAIGN_NPX_OUTREACH=1 and
     // NPX_OUTREACH_CALLER_ID are set and that number's Voice URL points here.
+    // Calls the demo seed and the demo NPX until NPX_OUTREACH_MODE=live (v113).
     this.register({
       id: npxOutreachAgentConfig.slug,
       factory: createNpxOutreachAgent as AgentFactory,
@@ -241,7 +242,7 @@ export class AgentRegistry {
       outbound: npxOutreachPolicy,
     });
 
-    // SI Assistant (v112): approved single-contact calls, texts and emails
+    // SI Assistant (v114): approved single-contact calls, texts and emails
     // from the Support Center bot. Runtime outbound only — not on the old
     // core. Dials nothing unless RUNTIME_OUTBOUND_DIALING=1,
     // OUTBOUND_CAMPAIGN_SI_ASSISTANT=1 and SI_ASSISTANT_NUMBER are set and
