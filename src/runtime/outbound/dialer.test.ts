@@ -1092,7 +1092,8 @@ describe("a place-by deadline (v115)", () => {
 
   it("does not stop a retry after a first dial: the caps govern retries", async () => {
     const { store, createCall, deps } = setup();
-    store.addContact({ id: "c1", phone: "+15555550111", status: "no_answer", customData: { place_by: PAST } });
+    // attempts: 1 — production bumps it when Twilio accepts the first dial.
+    store.addContact({ id: "c1", phone: "+15555550111", status: "no_answer", attempts: 1, customData: { place_by: PAST } });
     store.attempts.push({
       id: "a0",
       contactId: "c1",
@@ -1102,6 +1103,47 @@ describe("a place-by deadline (v115)", () => {
     });
     expect((await runCampaignTick("test-lane", policy, deps)).dialled).toBe(1);
     expect(createCall).toHaveBeenCalledTimes(1);
+  });
+
+  it("settles a row never rung even when ANOTHER row on the same phone was rung (per row, not per phone)", async () => {
+    const { store, createCall, deps } = setup();
+    // An earlier approval for the same patient was dialled two days ago; this
+    // second approval's row has never rung and its deadline has passed.
+    store.addContact({ id: "c0", phone: "+15555550111", status: "answered", attempts: 1 });
+    store.attempts.push({
+      id: "a0",
+      contactId: "c0",
+      campaignId: "campaign-1",
+      attemptNumber: 1,
+      at: new Date(NOW.getTime() - 2 * 24 * 60 * 60 * 1000),
+    });
+    store.addContact({ id: "c1", phone: "+15555550111", customData: { place_by: PAST } });
+    const r = await runCampaignTick("test-lane", policy, deps);
+    expect(r.held).toEqual({ place_by_passed: 1 });
+    expect(r.dialled).toBe(0);
+    expect(createCall).not.toHaveBeenCalled();
+    expect(store.contacts.get("c1")!.status).toBe("rescheduled");
+  });
+
+  it("reports the expiry to the lane once, with the contact", async () => {
+    const { store, deps } = setup();
+    const reported: Array<{ id: string; customData: Record<string, unknown> }> = [];
+    store.addContact({ id: "c1", phone: "+15555550111", customData: { place_by: PAST, approval_id: "appr-1" } });
+    const p = { ...policy, onPlaceByPassed: async (c: { id: string; customData: Record<string, unknown> }) => void reported.push(c) };
+    await runCampaignTick("test-lane", p, deps);
+    expect(reported).toEqual([{ id: "c1", customData: { place_by: PAST, approval_id: "appr-1" } }]);
+    await runCampaignTick("test-lane", p, deps);
+    expect(reported).toHaveLength(1);
+  });
+
+  it("keeps the settle when the lane's report throws", async () => {
+    const { store, createCall, deps } = setup();
+    store.addContact({ id: "c1", phone: "+15555550111", customData: { place_by: PAST } });
+    const p = { ...policy, onPlaceByPassed: async () => { throw new Error("hub down"); } };
+    const r = await runCampaignTick("test-lane", p, deps);
+    expect(r.held).toEqual({ place_by_passed: 1 });
+    expect(createCall).not.toHaveBeenCalled();
+    expect(store.contacts.get("c1")!.status).toBe("rescheduled");
   });
 
   it("reads a missing or unreadable deadline as no deadline", async () => {

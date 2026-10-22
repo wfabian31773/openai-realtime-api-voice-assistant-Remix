@@ -126,6 +126,13 @@ export interface OutboundLanePolicy {
    * given. Optional: a campaign with one mode leaves it out.
    */
   mode?: (env?: Record<string, string | undefined>) => "demo" | "live";
+  /**
+   * Called once, after the dialler settles a row whose place-by deadline
+   * (PLACE_BY_KEY) passed before its first dial (v115), so whoever asked for
+   * the call can learn it never rang. Optional: a campaign that sets no
+   * deadline never reaches it. A throw is logged and the settle stands.
+   */
+  onPlaceByPassed?: (contact: { id: string; customData: Record<string, unknown> }) => Promise<void>;
 }
 
 /** One person a live source says the campaign may call. */

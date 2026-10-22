@@ -13,6 +13,8 @@ import {
 import { outboundDialingEnabled, PLACE_BY_KEY } from "../runtime/outbound/campaign";
 import { dncKey, type OutboundStore } from "../runtime/outbound/store";
 import { readDobQuietly } from "../tools/dobParts";
+import { boundPluginStore } from "./bindings";
+import type { PluginStore } from "./store";
 import {
   SI_ASSISTANT_CALLER_ID_ENV,
   SI_ASSISTANT_CAMPAIGN_KEY,
@@ -186,8 +188,13 @@ export async function evaluateAndEnqueueCall(
   if (!campaignId) return { ok: false, reason: "no_campaign" };
 
   const externalRef = `plugin:${input.approvalId}`;
-  const existing = (await store.sourceRows(campaignId)).find((r) => r.externalRef === externalRef);
-  const prior = existing ? await store.priorAttempts(existing.id) : [];
+  // The caps are per PHONE (priorAttempts reads every attempt in the campaign
+  // on the same ten digits), so any row on this number carries its history.
+  // Each approval is its own row, so reading only this approval's row would
+  // find none and let a second approval through the daily cap (v115).
+  const rows = await store.sourceRows(campaignId);
+  const onPhone = rows.find((r) => r.externalRef === externalRef) ?? rows.find((r) => dncKey(r.phone) === key);
+  const prior = onPhone ? await store.priorAttempts(onPhone.id) : [];
   const decision = mayDialNow(now, prior, SI_ASSISTANT_WINDOW, SI_ASSISTANT_CAPS);
   if (!decision.ok) return { ok: false, reason: decision.reason };
 
@@ -220,4 +227,46 @@ export function siAssistantMayDial(
   attempts: ReadonlyArray<{ at: Date }>,
 ): DialDecision {
   return mayDialNow(now, attempts, SI_ASSISTANT_WINDOW, SI_ASSISTANT_CAPS);
+}
+
+/**
+ * The dialler settled an SI Assistant call that missed its place-by deadline
+ * before its first dial (v115). The approval read `committed` with
+ * `queued: true`; it now reads `failed`, so nobody takes a call that never
+ * rang as made. Only a committed approval moves, and only once. A missing
+ * store or approval is a no-op: the contact row already says what happened.
+ */
+export async function reportCallNotPlaced(
+  contact: { id: string; customData: Record<string, unknown> },
+  store: PluginStore | null = boundPluginStore(),
+  now = new Date(),
+): Promise<void> {
+  const approvalId = contact.customData.approval_id;
+  if (!store || typeof approvalId !== "string" || !approvalId) return;
+  const current = await store.getApproval(approvalId);
+  if (!current || current.status !== "committed") return;
+  const updated = await store.updateApproval(
+    approvalId,
+    {
+      status: "failed",
+      result: { ...(current.result ?? {}), queued: false, placed: false, reason: "place_by_passed" },
+      updatedAt: now,
+    },
+    "committed",
+  );
+  if (!updated) return;
+  try {
+    await store.writeAudit({
+      tokenJti: "system",
+      tool: "call_not_placed",
+      route: "/api/plugin/v1/commit_contact",
+      method: "SWEEP",
+      approvalId,
+      ticketId: current.ticketId,
+      outcome: "failed",
+      httpStatus: 410,
+    });
+  } catch {
+    console.error("[si-assistant] call-not-placed audit failed");
+  }
 }

@@ -444,11 +444,22 @@ async function dialOne(
   const prior = await deps.store.priorAttempts(contact.id);
   // A contact that had to be FIRST rung by a deadline it has missed (v115):
   // settled, never rung late. An approval acted on hours after it was given
-  // is a call nobody asked for any more.
-  if (prior.length === 0 && placeByPassed(contact.customData, now)) {
+  // is a call nobody asked for any more. THIS ROW's own dials decide it, not
+  // the phone's: `prior` is every attempt on the number, so a second approval
+  // for a patient already called once would read as a retry and be rung the
+  // next morning. `attempts` counts only dials Twilio accepted
+  // (markContactDialled), so a refused dial still leaves the row unrung.
+  if (contact.attempts === 0 && placeByPassed(contact.customData, now)) {
     await deps.store.settleContact(contact.id, "rescheduled", {
       notes: "not placed before its place-by deadline; never rung",
     });
+    if (policy.onPlaceByPassed) {
+      try {
+        await policy.onPlaceByPassed({ id: contact.id, customData: contact.customData });
+      } catch {
+        (deps.log ?? console.log)(`[outbound] ${policy.campaignKey}: could not report a place-by expiry`);
+      }
+    }
     return "place_by_passed";
   }
   if (prior.length >= policy.caps.total) {

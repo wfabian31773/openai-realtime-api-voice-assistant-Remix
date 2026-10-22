@@ -77,8 +77,17 @@ async function audit(
   }
 }
 
-function jsonError(res: Response, status: number, error: string): void {
-  res.status(status).json({ error });
+/**
+ * What a commit error means for the contact (v115). Set only once the
+ * confirm token has been consumed, where the fleet knows: `not_sent` when it
+ * marked the request failed and nothing went out, `unknown` when the send may
+ * have gone out. A caller classifies on this, never on the HTTP status alone:
+ * a 503 "Calls are not being placed" sent nothing, a 502 may have.
+ */
+type CommitOutcome = "not_sent" | "unknown";
+
+function jsonError(res: Response, status: number, error: string, outcome?: CommitOutcome): void {
+  res.status(status).json(outcome ? { error, outcome } : { error });
 }
 
 function canAccessApproval(auth: VerifiedPluginToken | undefined, row: ContactApprovalRow): boolean {
@@ -333,7 +342,7 @@ export function mountPluginApi(app: Express, deps: PluginApiDeps): void {
 
     if (hashPayload(consumed.approval.payload) !== consumed.approval.payloadHash) {
       await markFailed(deps.store, consumed.approval.id, { reason: "payload_hash_mismatch" }, now);
-      jsonError(res, 409, "Approved payload no longer matches the locked hash");
+      jsonError(res, 409, "Approved payload no longer matches the locked hash", "not_sent");
       await audit(deps, req.pluginAuth, req, "commit_contact", "error", 409, {
         approvalId: consumed.approval.id,
         ticketId: consumed.approval.ticketId,
@@ -347,7 +356,7 @@ export function mountPluginApi(app: Express, deps: PluginApiDeps): void {
     } catch {
       // Timeout / throw after the send may already have gone out.
       await markUnknown(deps.store, consumed.approval.id, { reason: "send_unknown" }, now);
-      jsonError(res, 502, "The send outcome is unknown");
+      jsonError(res, 502, "The send outcome is unknown", "unknown");
       await audit(deps, req.pluginAuth, req, "commit_contact", "unknown", 502, {
         approvalId: consumed.approval.id,
         ticketId: consumed.approval.ticketId,
@@ -357,7 +366,7 @@ export function mountPluginApi(app: Express, deps: PluginApiDeps): void {
     if (!executed.ok) {
       if (executed.reason === "unknown") {
         await markUnknown(deps.store, consumed.approval.id, { reason: "unknown" }, now);
-        jsonError(res, executed.status, executed.error);
+        jsonError(res, executed.status, executed.error, "unknown");
         await audit(deps, req.pluginAuth, req, "commit_contact", "unknown", executed.status, {
           approvalId: consumed.approval.id,
           ticketId: consumed.approval.ticketId,
@@ -365,7 +374,7 @@ export function mountPluginApi(app: Express, deps: PluginApiDeps): void {
         return;
       }
       await markFailed(deps.store, consumed.approval.id, { reason: executed.reason }, now);
-      jsonError(res, executed.status, executed.error);
+      jsonError(res, executed.status, executed.error, "not_sent");
       await audit(deps, req.pluginAuth, req, "commit_contact", "failed", executed.status, {
         approvalId: consumed.approval.id,
         ticketId: consumed.approval.ticketId,

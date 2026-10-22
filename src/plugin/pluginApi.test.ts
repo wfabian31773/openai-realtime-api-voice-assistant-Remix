@@ -12,7 +12,9 @@ import twilio from "twilio";
 import { MemoryPluginStore } from "./store";
 import { mountPluginApi } from "./routes";
 import { createGraphMail, createMemoryGraphMail, type GraphMail } from "./email";
-import { evaluateAndEnqueueCall, siAssistantMayDial } from "./callEnqueue";
+import { evaluateAndEnqueueCall, reportCallNotPlaced, siAssistantMayDial } from "./callEnqueue";
+import { bindPluginStore } from "./bindings";
+import { siAssistantPolicy } from "../agents/siAssistantAgent";
 import { FakeOutboundStore } from "../runtime/outbound/store.testkit";
 import { ChannelDoNotContact } from "../runtime/outbound/channelDnc";
 import { auditContainsPhi, ticketResolvedLogFields } from "./phi";
@@ -1283,26 +1285,71 @@ describe("review findings", () => {
     expect(committed?.status).toBe("committed");
   });
 
-  it("does not let another approval's attempts cap a first call", async () => {
-    const outbound = new FakeOutboundStore();
+  it("caps a second approval on a number another approval rang today, as the dialler would (v115)", async () => {
+    // The dialler's caps are per PHONE (priorAttempts reads every attempt in
+    // the campaign on the number). A commit that read only its own row would
+    // answer "queued" for a call the dialler then holds until its place-by
+    // deadline lapses.
+    let clock = new Date("2026-10-22T16:30:00Z"); // 9:30 Pacific
+    const outbound = new FakeOutboundStore(() => clock);
     const campaignId = await outbound.ensureCampaign();
     await outbound.upsertSourceContacts(campaignId!, [
-      {
-        externalRef: "plugin:other-approval",
-        phone: PHONE,
-        firstName: "Other",
-        lastName: null,
-        data: {},
-      },
+      { externalRef: "plugin:other-approval", phone: PHONE, firstName: "Other", lastName: null, data: {} },
     ]);
     const other = (await outbound.sourceRows(campaignId!))[0];
     const attemptId = await outbound.startAttempt(other.id, campaignId!, 1);
     await outbound.finishAttempt(attemptId, { status: "no_answer" });
-    const result = await evaluateAndEnqueueCall(
-      outbound,
-      { approvalId: "new-approval", phone: PHONE, ticketNumber: TICKET },
-      new Date("2026-10-22T18:00:00Z"),
-    );
+    clock = new Date("2026-10-22T18:00:00Z");
+    const result = await evaluateAndEnqueueCall(outbound, { approvalId: "new-approval", phone: PHONE, ticketNumber: TICKET }, clock);
+    expect(result).toEqual({ ok: false, reason: "daily_cap" });
+    expect(outbound.upserts).toEqual([1]);
+  });
+
+  it("lets a second approval through once the earlier dial is days old: per-phone caps, not a ban", async () => {
+    let clock = new Date("2026-10-19T17:00:00Z");
+    const outbound = new FakeOutboundStore(() => clock);
+    const campaignId = await outbound.ensureCampaign();
+    await outbound.upsertSourceContacts(campaignId!, [
+      { externalRef: "plugin:other-approval", phone: PHONE, firstName: "Other", lastName: null, data: {} },
+    ]);
+    const other = (await outbound.sourceRows(campaignId!))[0];
+    const attemptId = await outbound.startAttempt(other.id, campaignId!, 1);
+    await outbound.finishAttempt(attemptId, { status: "no_answer" });
+    clock = new Date("2026-10-22T18:00:00Z");
+    const result = await evaluateAndEnqueueCall(outbound, { approvalId: "new-approval", phone: PHONE, ticketNumber: TICKET }, clock);
+    expect(result).toMatchObject({ ok: true, queued: true });
+  });
+
+  it("stops at the total cap across every approval on the number", async () => {
+    let clock = new Date("2026-09-01T17:00:00Z");
+    const outbound = new FakeOutboundStore(() => clock);
+    const campaignId = await outbound.ensureCampaign();
+    for (const [i, day] of ["2026-09-01", "2026-09-10", "2026-09-20"].entries()) {
+      clock = new Date(`${day}T17:00:00Z`);
+      await outbound.upsertSourceContacts(campaignId!, [
+        { externalRef: `plugin:old-${i}`, phone: PHONE, firstName: "Other", lastName: null, data: {} },
+      ]);
+      const row = (await outbound.sourceRows(campaignId!)).find((r) => r.externalRef === `plugin:old-${i}`)!;
+      const attemptId = await outbound.startAttempt(row.id, campaignId!, 1);
+      await outbound.finishAttempt(attemptId, { status: "no_answer" });
+    }
+    clock = new Date("2026-10-22T18:00:00Z");
+    const result = await evaluateAndEnqueueCall(outbound, { approvalId: "new-approval", phone: PHONE, ticketNumber: TICKET }, clock);
+    expect(result).toEqual({ ok: false, reason: "total_cap" });
+  });
+
+  it("does not count a dial Twilio refused on another approval's row", async () => {
+    let clock = new Date("2026-10-22T16:30:00Z");
+    const outbound = new FakeOutboundStore(() => clock);
+    const campaignId = await outbound.ensureCampaign();
+    await outbound.upsertSourceContacts(campaignId!, [
+      { externalRef: "plugin:other-approval", phone: PHONE, firstName: "Other", lastName: null, data: {} },
+    ]);
+    const other = (await outbound.sourceRows(campaignId!))[0];
+    const refused = await outbound.startAttempt(other.id, campaignId!, 1);
+    await outbound.finishAttempt(refused, { status: "not_placed" });
+    clock = new Date("2026-10-22T18:00:00Z");
+    const result = await evaluateAndEnqueueCall(outbound, { approvalId: "new-approval", phone: PHONE, ticketNumber: TICKET }, clock);
     expect(result).toMatchObject({ ok: true, queued: true });
   });
 
@@ -1659,6 +1706,142 @@ describe("a call commit needs a dialler that will place it (v115)", () => {
     expect(committed.status).toBe(200);
     const contact = [...outbound.contacts.values()][0];
     expect(contact.customData.place_by).toBe(new Date(noon().getTime() + 2 * 60 * 60 * 1000).toISOString());
+  });
+
+  it("says the call was not sent when dialing is off (outcome not_sent)", async () => {
+    const { committed } = await approveCall({ RUNTIME_OUTBOUND_DIALING: "0" });
+    expect(committed.status).toBe(503);
+    expect(await committed.json()).toMatchObject({ outcome: "not_sent" });
+  });
+
+  it("says the call was not sent when a cap refuses it (outcome not_sent)", async () => {
+    const outbound = new FakeOutboundStore(() => new Date("2026-10-22T16:30:00Z"));
+    const campaignId = await outbound.ensureCampaign();
+    await outbound.upsertSourceContacts(campaignId!, [
+      { externalRef: "plugin:earlier", phone: PHONE, firstName: "Testa", lastName: null, data: {} },
+    ]);
+    const earlier = (await outbound.sourceRows(campaignId!))[0];
+    await outbound.finishAttempt(await outbound.startAttempt(earlier.id, campaignId!, 1), { status: "no_answer" });
+    const ctx = await boot({ PLUGIN_WRITES_ENABLED: "true" }, { now: noon, outbound });
+    const bot = ctx.store.mint(["contacts:prepare", "contacts:commit"]);
+    const staff = ctx.store.mint(["contacts:approve"]);
+    const prep = await fetch(`${ctx.base}/api/plugin/v1/prepare_call`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${bot.plaintext}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ phone: PHONE, ticketNumber: TICKET, firstName: "Testa", dateOfBirth: CALL_DOB }),
+    });
+    const pending = (await prep.json()) as { approval: { id: string } };
+    const approved = await staffApprove(ctx.base, staff, ctx.store, pending.approval.id);
+    const token = (await approved.json()) as { confirmToken: string };
+    const committed = await fetch(`${ctx.base}/api/plugin/v1/commit_contact`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${bot.plaintext}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ confirmToken: token.confirmToken }),
+    });
+    expect(committed.status).toBe(422);
+    expect(await committed.json()).toEqual({ error: "Call was not placed: daily_cap", outcome: "not_sent" });
+    expect((await ctx.store.getApproval(pending.approval.id))?.status).toBe("failed");
+    expect(outbound.upserts).toEqual([1]);
+  });
+
+  it("carries no outcome on a refusal before the confirm token is consumed", async () => {
+    const ctx = await boot({ PLUGIN_WRITES_ENABLED: "true" }, { now: noon });
+    const bot = ctx.store.mint(["contacts:commit"]);
+    const committed = await fetch(`${ctx.base}/api/plugin/v1/commit_contact`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${bot.plaintext}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ confirmToken: "a".repeat(64) }),
+    });
+    expect(committed.status).toBe(404);
+    expect(await committed.json()).not.toHaveProperty("outcome");
+  });
+});
+
+describe("a call that missed its place-by deadline fails its approval (v115)", () => {
+  const now = new Date("2026-10-22T21:00:00Z");
+
+  async function committedApproval(store: MemoryPluginStore, id: string, status: "committed" | "failed" | "unknown" = "committed") {
+    const token = generateConfirmToken();
+    await store.insertApproval({
+      id,
+      channel: "call",
+      status,
+      tokenJti: "jti-bot",
+      ticketId: "tid-7",
+      ticketNumber: TICKET,
+      payload: { phone: PHONE },
+      payloadHash: hashPayload({ phone: PHONE }),
+      confirmTokenHash: token.hash,
+      confirmExpiresAt: now,
+      confirmUsedAt: now,
+      approvedBy: "staff",
+      approvedAt: now,
+      rejectedBy: null,
+      rejectedAt: null,
+      cancelledAt: null,
+      committedAt: now,
+      result: { queued: true, campaignId: "campaign-1" },
+      createdAt: now,
+      updatedAt: now,
+    });
+  }
+
+  it("moves a committed approval to failed, keeps its result, and audits without PHI", async () => {
+    const store = new MemoryPluginStore();
+    await committedApproval(store, "appr-late");
+    await reportCallNotPlaced({ id: "c1", customData: { approval_id: "appr-late", place_by: now.toISOString() } }, store, now);
+    const row = await store.getApproval("appr-late");
+    expect(row?.status).toBe("failed");
+    expect(row?.result).toEqual({ queued: false, campaignId: "campaign-1", placed: false, reason: "place_by_passed" });
+    const audit = (await store.listAudit()).filter((e) => e.tool === "call_not_placed");
+    expect(audit).toHaveLength(1);
+    expect(audit[0]).toMatchObject({ approvalId: "appr-late", ticketId: "tid-7", outcome: "failed", httpStatus: 410, method: "SWEEP" });
+    expect(JSON.stringify(audit)).not.toContain("5555550111");
+  });
+
+  it("reports once: a second report changes nothing and writes no second audit row", async () => {
+    const store = new MemoryPluginStore();
+    await committedApproval(store, "appr-late");
+    await reportCallNotPlaced({ id: "c1", customData: { approval_id: "appr-late" } }, store, now);
+    await reportCallNotPlaced({ id: "c1", customData: { approval_id: "appr-late" } }, store, now);
+    expect((await store.listAudit()).filter((e) => e.tool === "call_not_placed")).toHaveLength(1);
+  });
+
+  it.each(["failed", "unknown"] as const)("leaves a %s approval alone", async (status) => {
+    const store = new MemoryPluginStore();
+    await committedApproval(store, "appr-x", status);
+    await reportCallNotPlaced({ id: "c1", customData: { approval_id: "appr-x" } }, store, now);
+    expect((await store.getApproval("appr-x"))?.status).toBe(status);
+    expect((await store.listAudit()).filter((e) => e.tool === "call_not_placed")).toHaveLength(0);
+  });
+
+  it("does nothing without an approval id or a store", async () => {
+    const store = new MemoryPluginStore();
+    await committedApproval(store, "appr-late");
+    await reportCallNotPlaced({ id: "c1", customData: {} }, store, now);
+    await reportCallNotPlaced({ id: "c1", customData: { approval_id: "appr-late" } }, null, now);
+    expect((await store.getApproval("appr-late"))?.status).toBe("committed");
+  });
+
+  it("keeps the approval failed when its audit row cannot be written", async () => {
+    const store = new MemoryPluginStore();
+    await committedApproval(store, "appr-late");
+    store.writeAudit = async () => { throw new Error("audit down"); };
+    await expect(reportCallNotPlaced({ id: "c1", customData: { approval_id: "appr-late" } }, store, now)).resolves.toBeUndefined();
+    expect((await store.getApproval("appr-late"))?.status).toBe("failed");
+  });
+
+  it("is the SI Assistant lane's place-by hook, reading the bound store", async () => {
+    const store = new MemoryPluginStore();
+    await committedApproval(store, "appr-lane");
+    bindPluginStore(store);
+    try {
+      expect(siAssistantPolicy.onPlaceByPassed).toBeTypeOf("function");
+      await siAssistantPolicy.onPlaceByPassed!({ id: "c1", customData: { approval_id: "appr-lane" } });
+      expect((await store.getApproval("appr-lane"))?.status).toBe("failed");
+    } finally {
+      bindPluginStore(null);
+    }
   });
 });
 
