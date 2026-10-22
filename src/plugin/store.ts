@@ -159,6 +159,19 @@ export interface PluginStore {
   purgeDeliveredOutboxBodies(now: Date): Promise<number>;
   /** Delete undelivered rows older than `olderThan`. Returns the deleted ids. */
   purgeExpiredOutbox(now: Date, olderThan: Date): Promise<string[]>;
+  /** Ids that would be deleted — audit these first (P3-B). */
+  listExpiredOutboxIds(olderThan: Date): Promise<string[]>;
+  /** Delete only the ids that were audited. */
+  deleteOutboxIds(ids: string[]): Promise<number>;
+  /**
+   * Stamp ticket keys on unmatched rows for this call so a message taken
+   * before identification carries the same identity as the call report.
+   */
+  attachOutboxTickets(
+    callSid: string,
+    extras: { ticketId?: string | null; ticketNumber?: string | null; approvalId?: string | null },
+    now: Date,
+  ): Promise<MessageOutboxRow[]>;
 
   isSmsOptedOut(phoneKey: string): Promise<boolean>;
   setSmsOptOut(phoneKey: string, optedOut: boolean): Promise<void>;
@@ -403,15 +416,48 @@ export class MemoryPluginStore implements PluginStore {
     return n;
   }
 
-  async purgeExpiredOutbox(_now: Date, olderThan: Date): Promise<string[]> {
+  async listExpiredOutboxIds(olderThan: Date): Promise<string[]> {
     const ids: string[] = [];
     for (const [id, row] of this.outbox) {
       if (row.status === "delivered") continue;
       if (row.createdAt.getTime() >= olderThan.getTime()) continue;
-      this.outbox.delete(id);
       ids.push(id);
     }
     return ids;
+  }
+
+  async deleteOutboxIds(ids: string[]): Promise<number> {
+    let n = 0;
+    for (const id of ids) {
+      if (this.outbox.delete(id)) n += 1;
+    }
+    return n;
+  }
+
+  async purgeExpiredOutbox(_now: Date, olderThan: Date): Promise<string[]> {
+    const ids = await this.listExpiredOutboxIds(olderThan);
+    await this.deleteOutboxIds(ids);
+    return ids;
+  }
+
+  async attachOutboxTickets(
+    callSid: string,
+    extras: { ticketId?: string | null; ticketNumber?: string | null; approvalId?: string | null },
+    now: Date,
+  ): Promise<MessageOutboxRow[]> {
+    if (!callSid) return [];
+    const updated: MessageOutboxRow[] = [];
+    for (const row of this.outbox.values()) {
+      if (row.callSid !== callSid) continue;
+      if (row.ticketId || row.ticketNumber || row.approvalId) continue;
+      row.ticketId = extras.ticketId ?? null;
+      row.ticketNumber = extras.ticketNumber ?? null;
+      row.approvalId = extras.approvalId ?? null;
+      row.suggestions = [];
+      row.updatedAt = now;
+      updated.push({ ...row });
+    }
+    return updated;
   }
 
   async isSmsOptedOut(phoneKey: string): Promise<boolean> {

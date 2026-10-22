@@ -15,12 +15,16 @@ import { bindOutboundStore, bindPluginStore, boundOutboundStore, boundPluginStor
 import { createCallbackReporter, type CallbackReporter } from '../plugin/callbackReport';
 import type { PluginStore } from '../plugin/store';
 import { attachmentForSiAssistant, type TicketAttachment } from '../plugin/returnedCaller';
-import { flushOutboxRow, persistTakenMessage } from '../plugin/messageOutbox';
+import { flushOutboxRow, persistTakenMessage, reattachTakenMessages } from '../plugin/messageOutbox';
 import { siAssistantNumber } from '../plugin/siAssistantConstants';
+import { noteSiAssistantIdentity, siAssistantIdentityFor } from '../plugin/siAssistantIdentity';
 import { formatPhoneForSpeech } from '../utils/timeAware';
+import { dobOnFile } from '../runtime/outbound/callback';
+import { readDobQuietly } from './dobParts';
 
 export const TAKE_MESSAGE_TOOL_NAME = 'take_si_assistant_message';
-export const SI_ASSISTANT_TOOLS = [TAKE_MESSAGE_TOOL_NAME] as const;
+export const CONFIRM_IDENTITY_TOOL_NAME = 'confirm_si_assistant_identity';
+export const SI_ASSISTANT_TOOLS = [CONFIRM_IDENTITY_TOOL_NAME, TAKE_MESSAGE_TOOL_NAME] as const;
 
 let storeOverride: OutboundStore | null = null;
 let reporterOverride: CallbackReporter | null | undefined;
@@ -83,6 +87,7 @@ async function attachmentFor(input: Record<string, unknown>): Promise<TicketAtta
       console.error('[si-assistant] identified-contact load failed');
     }
   }
+  const identity = siAssistantIdentityFor(sid);
   return attachmentForSiAssistant({
     outboundContactData,
     chosen: session?.chosen,
@@ -90,6 +95,9 @@ async function attachmentFor(input: Record<string, unknown>): Promise<TicketAtta
     store: session?.store,
     attemptId: session?.attemptId ?? (attemptId || null),
     phone: callerPhoneOf(input, session?.callerPhone),
+    greetingAffirmed: identity?.greetingAffirmed,
+    dobMatched: identity?.dobMatched,
+    wrongPerson: identity?.wrongPerson,
   });
 }
 
@@ -151,9 +159,105 @@ registerTool({
       suggestions: attachment.identityConfirmed ? [] : attachment.suggestions,
     });
     if (!persisted) return persistFailedResult();
+    if (attachment.identityConfirmed) {
+      void reattachTakenMessages(callSidOf(input), attachment.extras, boundPluginStore(), reporter()).catch(() => {
+        console.error('[si-assistant] outbox reattach failed');
+      });
+    }
     void flushOutboxRow(persisted, boundPluginStore(), reporter()).catch(() => {
       console.error('[si-assistant] outbox flush failed');
     });
     return takenResult();
+  },
+});
+
+registerTool({
+  name: CONFIRM_IDENTITY_TOOL_NAME,
+  layer: 'agent',
+  timeoutMs: 5_000,
+  description:
+    'Record whether the person on the line said yes to "Am I speaking with" the named patient, ' +
+    'and match their date of birth to the patient on file. Call this after they answer. ' +
+    'Ticket keys attach only when they said yes AND the date matches.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      speaking_with_named_patient: {
+        type: 'boolean',
+        description: 'True only when they explicitly said yes they are the named patient.',
+        askAs: 'Are you speaking with the person we called for?',
+      },
+      date_of_birth: {
+        type: 'string',
+        description: 'Their date of birth, as they said it, month then day then year.',
+        askAs: 'And your date of birth, starting with the month, then the day, then the year?',
+      },
+    },
+    required: ['speaking_with_named_patient'],
+  },
+  handler: async (input): Promise<ToolResult> => {
+    const sid = callSidOf(input);
+    if (!sid) {
+      return { success: false, error: 'no_call', fix: 'This tool only works on an SI Assistant call.' };
+    }
+    const speaking = input.speaking_with_named_patient === true;
+    if (!speaking) {
+      noteSiAssistantIdentity(sid, { greetingAffirmed: false, dobMatched: false, wrongPerson: true });
+      return {
+        success: true,
+        confirmed: false,
+        fix:
+          'They are not the patient. Call record_call_outcome with wrong_person, apologise, say goodbye and call end_call. Do not attach a ticket.',
+      };
+    }
+    const spoken = typeof input.date_of_birth === 'string' ? readDobQuietly(input.date_of_birth) : null;
+    if (!spoken) {
+      return {
+        success: false,
+        error: 'need_date_of_birth',
+        fix:
+          'They said yes. Ask for their date of birth, starting with the month, then the day, then the year, then call this again with speaking_with_named_patient true and the date.',
+      };
+    }
+    let onFile: { month: string; day: string; year: string } | null = null;
+    const contactId = typeof input.outbound_contact_id === 'string' ? input.outbound_contact_id : '';
+    const attemptId = typeof input.outbound_attempt_id === 'string' ? input.outbound_attempt_id : '';
+    if (contactId && attemptId) {
+      try {
+        const store = await outboundStore();
+        const contact = await store.loadCallContact(contactId, attemptId);
+        onFile = contact ? dobOnFile({ data: contact.data ?? {} }) : null;
+      } catch {
+        console.error('[si-assistant] confirm-identity contact load failed');
+      }
+    }
+    const session = callbackSessionFor(sid);
+    if (!onFile && session?.chosen) {
+      const match = session.candidates.find((c) => c.contactId === session.chosen!.contactId);
+      onFile = match ? dobOnFile(match) : null;
+    }
+    const matched = Boolean(
+      onFile && spoken.year === onFile.year && spoken.month === onFile.month && spoken.day === onFile.day,
+    );
+    noteSiAssistantIdentity(sid, { greetingAffirmed: true, dobMatched: matched, wrongPerson: false });
+    if (!matched) {
+      return {
+        success: true,
+        confirmed: false,
+        fix:
+          'They said yes but the date of birth does not match the patient on file. Take a message if they have one; do not treat them as identified.',
+      };
+    }
+    const attachment = await attachmentFor(input);
+    if (attachment.identityConfirmed) {
+      void reattachTakenMessages(sid, attachment.extras, boundPluginStore(), reporter()).catch(() => {
+        console.error('[si-assistant] outbox reattach failed');
+      });
+    }
+    return {
+      success: true,
+      confirmed: true,
+      fix: 'They are the patient. Carry on with the request.',
+    };
   },
 });

@@ -161,21 +161,15 @@ export async function reclaimStaleOutboxSending(
   return store.reclaimStaleOutboxSending(now, new Date(now.getTime() - staleMs));
 }
 
-async function noteExpired(store: PluginStore, ids: string[]): Promise<void> {
-  for (const id of ids) {
-    try {
-      await store.writeAudit({
-        tokenJti: "system",
-        tool: "outbox_expired",
-        route: `/api/plugin/v1/message_outbox/${id}`,
-        method: "SWEEP",
-        outcome: "expired",
-        httpStatus: 410,
-      });
-    } catch {
-      console.error("[si-assistant] outbox expired audit failed");
-    }
-  }
+async function noteExpired(store: PluginStore, id: string): Promise<void> {
+  await store.writeAudit({
+    tokenJti: "system",
+    tool: "outbox_expired",
+    route: `/api/plugin/v1/message_outbox/${id}`,
+    method: "SWEEP",
+    outcome: "expired",
+    httpStatus: 410,
+  });
 }
 
 export async function purgeOutboxRetention(
@@ -184,9 +178,57 @@ export async function purgeOutboxRetention(
 ): Promise<{ bodies: number; expired: number }> {
   if (!store) return { bodies: 0, expired: 0 };
   const bodies = await store.purgeDeliveredOutboxBodies(now);
-  const expiredIds = await store.purgeExpiredOutbox(now, new Date(now.getTime() - OUTBOX_RETENTION_MS));
-  await noteExpired(store, expiredIds);
-  return { bodies, expired: expiredIds.length };
+  const expiredIds = await store.listExpiredOutboxIds(new Date(now.getTime() - OUTBOX_RETENTION_MS));
+  const audited: string[] = [];
+  for (const id of expiredIds) {
+    try {
+      await noteExpired(store, id);
+      audited.push(id);
+    } catch {
+      console.error("[si-assistant] outbox expired audit failed");
+    }
+  }
+  if (audited.length) await store.deleteOutboxIds(audited);
+  return { bodies, expired: audited.length };
+}
+
+/** Stamp ticket keys on a message taken before the caller was identified. */
+export async function reattachTakenMessages(
+  callSid: string | null | undefined,
+  extras: { ticketId?: string | null; ticketNumber?: string | null; approvalId?: string | null },
+  store: PluginStore | null = boundPluginStore(),
+  reporter: CallbackReporter | null = createCallbackReporter(),
+  now = new Date(),
+): Promise<number> {
+  if (!store || !callSid) return 0;
+  if (!extras.ticketId && !extras.ticketNumber && !extras.approvalId) return 0;
+  const rows = await store.attachOutboxTickets(callSid, extras, now);
+  for (const row of rows) {
+    if (row.status === "pending") {
+      void flushOutboxRow(row, store, reporter, now).catch(() => {
+        console.error("[si-assistant] outbox reattach flush failed");
+      });
+      continue;
+    }
+    if (row.status === "delivered" && reporter) {
+      try {
+        await reporter.report({
+          event: "message",
+          slug: SI_ASSISTANT_SLUG,
+          ticketNumber: row.ticketNumber,
+          approvalId: row.approvalId,
+          ticketId: row.ticketId,
+          message: row.message,
+          identityConfirmed: true,
+          outboxId: row.id,
+          idempotencyKey: row.idempotencyKey ?? undefined,
+        });
+      } catch {
+        console.error("[si-assistant] outbox reattach report failed");
+      }
+    }
+  }
+  return rows.length;
 }
 
 /** One delivery attempt of a just-persisted pending row. Sweep uses flushDueOutbox. */

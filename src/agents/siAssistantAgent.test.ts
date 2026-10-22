@@ -10,7 +10,7 @@ import { resolveLane, RUNTIME_CALLBACK_TOOLS, RUNTIME_OUTBOUND_TOOLS, type LaneC
 import type { OutboundContact } from "../runtime/outbound/campaign";
 import type { CallbackContext } from "../runtime/outbound/callback";
 import { siAssistantGreeting, siAssistantPolicy, SI_ASSISTANT_TOOLS, SI_ASSISTANT_VOICEMAIL } from "./siAssistantAgent";
-import { TAKE_MESSAGE_TOOL_NAME } from "../tools/siAssistantTools";
+import { CONFIRM_IDENTITY_TOOL_NAME, TAKE_MESSAGE_TOOL_NAME } from "../tools/siAssistantTools";
 
 const CONTACT: OutboundContact = {
   contactId: "c1",
@@ -46,6 +46,7 @@ describe("the SI Assistant lane", () => {
     expect(siAssistantPolicy.caps.perWeek).toBe(3);
     expect(siAssistantPolicy.tools).toEqual(SI_ASSISTANT_TOOLS);
     expect(SI_ASSISTANT_TOOLS).toContain(TAKE_MESSAGE_TOOL_NAME);
+    expect(SI_ASSISTANT_TOOLS).toContain(CONFIRM_IDENTITY_TOOL_NAME);
   });
 
   it("is registered as a runtime outbound lane", async () => {
@@ -58,7 +59,9 @@ describe("the SI Assistant lane", () => {
     const names = (lane!.agent.tools as Array<{ name?: string }>).map((t) => t.name);
     for (const tool of RUNTIME_OUTBOUND_TOOLS) expect(names).toContain(tool);
     expect(names).toContain(TAKE_MESSAGE_TOOL_NAME);
+    expect(names).toContain(CONFIRM_IDENTITY_TOOL_NAME);
     expect(lane!.agent.instructions).toMatch(/take_si_assistant_message/);
+    expect(lane!.agent.instructions).toMatch(/confirm_si_assistant_identity/);
     expect(lane!.agent.instructions).toMatch(/never pretend to be a person/i);
     expect(lane!.agent.instructions).toMatch(/## Role & Persona/);
     expect(lane!.agent.instructions).toMatch(/## Objective/);

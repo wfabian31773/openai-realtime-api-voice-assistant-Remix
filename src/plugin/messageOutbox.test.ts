@@ -108,6 +108,30 @@ describe("message outbox", () => {
     expect(JSON.stringify(expired)).not.toContain("gone");
   });
 
+  it("writes the expiry audit before deleting, and keeps the row if the audit throws", async () => {
+    const store = new MemoryPluginStore();
+    const now = new Date("2026-10-22T18:00:00Z");
+    const stale = await persistTakenMessage(
+      { callSid: "CA" + "7".repeat(32), message: "keep" },
+      new Date(now.getTime() - OUTBOX_RETENTION_MS - 1),
+      store,
+    );
+    expect(stale).toBeTruthy();
+    const original = store.writeAudit.bind(store);
+    store.writeAudit = async () => {
+      throw new Error("audit down");
+    };
+    const err = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const purged = await purgeOutboxRetention(store, now);
+    expect(purged.expired).toBe(0);
+    expect(store.outbox.has(stale!.id)).toBe(true);
+    store.writeAudit = original;
+    const ok = await purgeOutboxRetention(store, now);
+    expect(ok.expired).toBe(1);
+    expect(store.outbox.has(stale!.id)).toBe(false);
+    err.mockRestore();
+  });
+
   it("sends the outbox id and idempotency key so a redelivery can be deduped", async () => {
     const store = new MemoryPluginStore();
     const now = new Date("2026-10-22T18:00:00Z");
@@ -166,5 +190,13 @@ describe("message outbox", () => {
     seen.length = 0;
     await store.markOutbox("obx", { status: "sending", attempts: 2, updatedAt: new Date() }, "pending");
     expect(seen[0]).toMatch(/attempts = COALESCE/);
+    seen.length = 0;
+    await store.listExpiredOutboxIds(new Date());
+    expect(seen[0]).toMatch(/SELECT id FROM plugin_message_outbox/);
+    expect(seen[0]).not.toMatch(/DELETE/);
+    seen.length = 0;
+    await store.deleteOutboxIds(["obx"]);
+    expect(seen[0]).toMatch(/DELETE FROM plugin_message_outbox/);
+    expect(seen[0]).toMatch(/id = ANY/);
   });
 });

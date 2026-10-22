@@ -1523,7 +1523,7 @@ export function mountVoiceRuntime(
             : // A call made TO an outbound lane: confirm, never assume, and
               // say nothing about why we called (outbound/callback.ts).
               callback
-              ? callbackGreeting(callback.match)
+              ? callbackGreeting(callback.match, { sayName: entry.slug !== "si-assistant" })
               : personaliseGreeting(
                 chooseGreeting(entry.slug, configuredGreeting, lane.greeting),
                 recognisedFirstName(precontext),
@@ -1621,7 +1621,10 @@ export function mountVoiceRuntime(
                     // A returned call: how to find out who rang, inside the
                     // lane's own Conversation Flow (outbound/callback.ts).
                     callback
-                      ? withCallbackSteps(lane.agent.instructions, callbackSteps(callback))
+                      ? withCallbackSteps(
+                          lane.agent.instructions,
+                          callbackSteps(callback, { nameBeforeVerify: entry.slug !== "si-assistant" }),
+                        )
                       : lane.agent.instructions,
                     spokenGreeting,
                   ),
@@ -1827,7 +1830,16 @@ export function mountVoiceRuntime(
             void Promise.all([
               import("../plugin/callbackReport"),
               import("../plugin/returnedCaller"),
-            ]).then(async ([{ reportSiAssistantCall }, { attachmentForSiAssistant }]) => {
+              import("../plugin/messageOutbox"),
+              import("../plugin/siAssistantIdentity"),
+            ]).then(async ([
+              { reportSiAssistantCall, shouldReportSiAssistantCall },
+              { attachmentForSiAssistant },
+              { reattachTakenMessages },
+              { siAssistantIdentityFor, closeSiAssistantIdentity },
+            ]) => {
+              if (!shouldReportSiAssistantCall(record.slug)) return;
+              const identity = siAssistantIdentityFor(record.callSid);
               const attachment = await attachmentForSiAssistant({
                 outboundContactData: outboundContact?.data,
                 chosen: identified,
@@ -1835,7 +1847,14 @@ export function mountVoiceRuntime(
                 store: identifiedStore,
                 attemptId: identifiedAttemptId,
                 phone: entry.callerPhone,
+                greetingAffirmed: identity?.greetingAffirmed,
+                dobMatched: identity?.dobMatched,
+                wrongPerson: identity?.wrongPerson,
               });
+              if (attachment.identityConfirmed) {
+                await reattachTakenMessages(record.callSid, attachment.extras);
+              }
+              closeSiAssistantIdentity(record.callSid);
               return reportSiAssistantCall(
                 {
                   slug: record.slug,

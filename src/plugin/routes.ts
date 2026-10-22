@@ -421,7 +421,12 @@ async function executeApproved(
 > {
   if (!approval) return { ok: false, status: 404, error: "Contact request not found", reason: "missing" };
 
-  const heartbeat = await deps.store.updateApproval(approval.id, { updatedAt: now }, "sending");
+  let heartbeat: Awaited<ReturnType<PluginStore["updateApproval"]>>;
+  try {
+    heartbeat = await deps.store.updateApproval(approval.id, { updatedAt: now }, "sending");
+  } catch {
+    return { ok: false, status: 500, error: "Contact request could not be marked sending", reason: "heartbeat_failed" };
+  }
   if (!heartbeat) {
     return { ok: false, status: 409, error: "Contact request is no longer sending", reason: "not_sending" };
   }
@@ -459,7 +464,12 @@ async function executeApproved(
       { phone: String(approval.payload.phone ?? ""), body: String(approval.payload.body ?? "") },
       envOf(deps),
     );
-    if (!sent.ok) return { ok: false, status: 409, error: `SMS was not sent: ${sent.reason}`, reason: sent.reason };
+    if (!sent.ok) {
+      if (sent.mayHaveSent) {
+        return { ok: false, status: 502, error: `SMS outcome is unknown: ${sent.reason}`, reason: "unknown" };
+      }
+      return { ok: false, status: 409, error: `SMS was not sent: ${sent.reason}`, reason: sent.reason };
+    }
     return commitSend(deps, approval, { messageSid: sent.sid }, now);
   }
 
@@ -470,7 +480,12 @@ async function executeApproved(
     subject: String(approval.payload.subject ?? ""),
     body: String(approval.payload.body ?? ""),
   });
-  if (!sent.ok) return { ok: false, status: 409, error: `Email was not sent: ${sent.reason}`, reason: sent.reason };
+  if (!sent.ok) {
+    if (sent.mayHaveSent) {
+      return { ok: false, status: 502, error: `Email outcome is unknown: ${sent.reason}`, reason: "unknown" };
+    }
+    return { ok: false, status: 409, error: `Email was not sent: ${sent.reason}`, reason: sent.reason };
+  }
   return commitSend(deps, approval, { messageId: sent.id }, now);
 }
 

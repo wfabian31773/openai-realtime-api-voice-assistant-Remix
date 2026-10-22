@@ -447,7 +447,7 @@ describe("SMS and email", () => {
     await handleInboundSms(store, sender, { from: PHONE, body: "STOP" }, {});
     expect(await store.isSmsOptedOut("5555550111")).toBe(true);
     const blocked = await sendApprovedSms(store, sender, { phone: PHONE, body: "again" }, {});
-    expect(blocked).toEqual({ ok: false, reason: "sms_opted_out" });
+    expect(blocked).toEqual({ ok: false, reason: "sms_opted_out", mayHaveSent: false });
   });
 
   it("does not construct Graph mail without SI_MAIL_* credentials", () => {
@@ -679,6 +679,82 @@ describe("review findings", () => {
     expect(mintScopesCompatible(["fleet:read", "contacts:approve"]).ok).toBe(true);
   });
 
+  it("marks a Twilio 4xx before accept as failed, not unknown", async () => {
+    const now = () => new Date("2026-10-22T18:00:00Z");
+    const { base, store } = await boot(
+      { PLUGIN_WRITES_ENABLED: "true" },
+      {
+        now,
+        smsSender: {
+          async send() {
+            const err = Object.assign(new Error("21614"), { status: 400 });
+            throw err;
+          },
+        },
+      },
+    );
+    const bot = store.mint(["contacts:prepare", "contacts:commit"]);
+    const staff = store.mint(["contacts:approve"]);
+    const prep = await fetch(`${base}/api/plugin/v1/prepare_sms`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${bot.plaintext}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ phone: PHONE, body: "Patient secret text", ticketNumber: TICKET }),
+    });
+    const pending = (await prep.json()) as { approval: { id: string } };
+    const approved = await staffApprove(base, staff, store, pending.approval.id);
+    const token = (await approved.json()) as { confirmToken: string };
+    const committed = await fetch(`${base}/api/plugin/v1/commit_contact`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${bot.plaintext}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ confirmToken: token.confirmToken }),
+    });
+    expect(committed.status).toBe(409);
+    const row = await store.getApproval(pending.approval.id);
+    expect(row?.status).toBe("failed");
+    expect(row?.result).toEqual({ reason: "rejected" });
+  });
+
+  it("marks a Graph 4xx and a token-fetch failure as failed", async () => {
+    const { SendOutcomeError } = await import("./sendFailure");
+    const now = () => new Date("2026-10-22T18:00:00Z");
+    for (const err of [new SendOutcomeError("graph_token_failed", false), new SendOutcomeError("graph_send_failed", false)]) {
+      const { base, store } = await boot(
+        { PLUGIN_WRITES_ENABLED: "true" },
+        {
+          now,
+          mail: {
+            sent: [],
+            async sendMail() {
+              throw err;
+            },
+            async listReplies() {
+              return [];
+            },
+          } as ReturnType<typeof createMemoryGraphMail>,
+        },
+      );
+      const bot = store.mint(["contacts:prepare", "contacts:commit"]);
+      const staff = store.mint(["contacts:approve"]);
+      const prep = await fetch(`${base}/api/plugin/v1/prepare_email`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${bot.plaintext}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ to: "a@example.com", subject: "Hi", body: "Patient secret", ticketNumber: TICKET }),
+      });
+      const pending = (await prep.json()) as { approval: { id: string } };
+      const approved = await staffApprove(base, staff, store, pending.approval.id);
+      const token = (await approved.json()) as { confirmToken: string };
+      const committed = await fetch(`${base}/api/plugin/v1/commit_contact`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${bot.plaintext}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ confirmToken: token.confirmToken }),
+      });
+      expect(committed.status).toBe(409);
+      const row = await store.getApproval(pending.approval.id);
+      expect(row?.status).toBe("failed");
+      expect((row?.result as { reason?: string })?.reason).toBe(err.reason);
+    }
+  });
+
   it("moves a thrown send to unknown and audits without PHI", async () => {
     const now = () => new Date("2026-10-22T18:00:00Z");
     const { base, store } = await boot(
@@ -710,7 +786,7 @@ describe("review findings", () => {
     expect(committed.status).toBe(502);
     const row = await store.getApproval(pending.approval.id);
     expect(row?.status).toBe("unknown");
-    expect(row?.result).toEqual({ reason: "send_unknown" });
+    expect(row?.result).toEqual({ reason: "unknown" });
     const audit = await store.listAudit();
     const unknown = audit.find((e) => e.outcome === "unknown" && e.tool === "commit_contact");
     expect(unknown).toBeTruthy();

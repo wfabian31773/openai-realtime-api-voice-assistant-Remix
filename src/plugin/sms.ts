@@ -11,6 +11,7 @@
 import { dncKey } from "../runtime/outbound/store";
 import { siAssistantNumber, smsIdentifiedBody } from "./siAssistantConstants";
 import type { PluginStore } from "./store";
+import { SendOutcomeError, failureFromUnknown, type SendFailure } from "./sendFailure";
 
 export interface SmsSender {
   send(opts: { to: string; from: string; body: string }): Promise<{ sid: string }>;
@@ -40,14 +41,22 @@ export async function sendApprovedSms(
   sender: SmsSender,
   input: { phone: string; body: string },
   env: Record<string, string | undefined> = process.env,
-): Promise<{ ok: true; sid: string } | { ok: false; reason: string }> {
+): Promise<{ ok: true; sid: string } | SendFailure> {
   const key = dncKey(input.phone);
-  if (!key) return { ok: false, reason: "invalid_phone" };
-  if (await store.isSmsOptedOut(key)) return { ok: false, reason: "sms_opted_out" };
+  if (!key) return { ok: false, reason: "invalid_phone", mayHaveSent: false };
+  try {
+    if (await store.isSmsOptedOut(key)) return { ok: false, reason: "sms_opted_out", mayHaveSent: false };
+  } catch (err) {
+    return { ...failureFromUnknown(err), reason: "sms_opt_out_read_failed", mayHaveSent: false };
+  }
   const from = siAssistantNumber(env);
   const body = smsIdentifiedBody(input.body);
-  const sent = await sender.send({ to: `+1${key}`, from, body });
-  return { ok: true, sid: sent.sid };
+  try {
+    const sent = await sender.send({ to: `+1${key}`, from, body });
+    return { ok: true, sid: sent.sid };
+  } catch (err) {
+    return failureFromUnknown(err);
+  }
 }
 
 export async function handleInboundSms(
@@ -113,11 +122,26 @@ export function createTwilioSmsSender(env: Record<string, string | undefined> = 
     async send(opts) {
       const twilio = await import("twilio");
       const client = twilio.default(sid, token);
-      const msg = await withTimeout(
-        client.messages.create({ to: opts.to, from: opts.from, body: opts.body }),
-        SMS_TIMEOUT_MS,
-      );
-      return { sid: msg.sid };
+      try {
+        const msg = await withTimeout(
+          client.messages.create({ to: opts.to, from: opts.from, body: opts.body }),
+          SMS_TIMEOUT_MS,
+        );
+        return { sid: msg.sid };
+      } catch (err) {
+        if (err instanceof Error && err.name === "AbortError") {
+          throw new SendOutcomeError("sms_timeout", true);
+        }
+        const status =
+          err && typeof err === "object"
+            ? (err as { status?: number; statusCode?: number }).status ??
+              (err as { status?: number; statusCode?: number }).statusCode
+            : undefined;
+        if (typeof status === "number" && status >= 400 && status < 500) {
+          throw new SendOutcomeError("twilio_rejected", false);
+        }
+        throw err instanceof SendOutcomeError ? err : new SendOutcomeError("twilio_send_failed", true);
+      }
     },
   };
 }

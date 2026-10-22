@@ -364,15 +364,53 @@ export function createSqlPluginStore(exec: SqlExec): PluginStore {
       );
       return rows.length;
     },
-    async purgeExpiredOutbox(_now, olderThan) {
+    async listExpiredOutboxIds(olderThan) {
       const rows = await exec(
-        `DELETE FROM plugin_message_outbox
+        `SELECT id FROM plugin_message_outbox
           WHERE status IN ('pending', 'sending', 'dead')
-            AND created_at < $1
-          RETURNING id`,
+            AND created_at < $1`,
         [olderThan.toISOString()],
       );
       return rows.map((r) => String(r.id));
+    },
+    async deleteOutboxIds(ids) {
+      if (ids.length === 0) return 0;
+      const rows = await exec(
+        `DELETE FROM plugin_message_outbox
+          WHERE id = ANY($1::text[])
+          RETURNING id`,
+        [ids],
+      );
+      return rows.length;
+    },
+    async purgeExpiredOutbox(_now, olderThan) {
+      const ids = await this.listExpiredOutboxIds(olderThan);
+      await this.deleteOutboxIds(ids);
+      return ids;
+    },
+    async attachOutboxTickets(callSid, extras, now) {
+      if (!callSid) return [];
+      const rows = await exec(
+        `UPDATE plugin_message_outbox
+            SET ticket_id = $2,
+                ticket_number = $3,
+                approval_id = $4,
+                suggestions = '[]'::jsonb,
+                updated_at = $5
+          WHERE call_sid = $1
+            AND coalesce(ticket_id, '') = ''
+            AND coalesce(ticket_number, '') = ''
+            AND coalesce(approval_id, '') = ''
+          RETURNING *`,
+        [
+          callSid,
+          extras.ticketId ?? null,
+          extras.ticketNumber ?? null,
+          extras.approvalId ?? null,
+          now.toISOString(),
+        ],
+      );
+      return rows.map(outboxFrom);
     },
     async isSmsOptedOut(phoneKey) {
       // Any DNC row blocks SMS — a call opt-out is also a text opt-out.

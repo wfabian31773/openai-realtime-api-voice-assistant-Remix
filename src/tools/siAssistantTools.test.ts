@@ -7,12 +7,14 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { getTool } from "./registry";
 import {
+  CONFIRM_IDENTITY_TOOL_NAME,
   setSiAssistantPluginStoreForTests,
   setSiAssistantReporterForTests,
   setSiAssistantToolStoreForTests,
   SI_ASSISTANT_TOOLS,
   TAKE_MESSAGE_TOOL_NAME,
 } from "./siAssistantTools";
+import { resetSiAssistantIdentityForTests } from "../plugin/siAssistantIdentity";
 import { FakeOutboundStore } from "../runtime/outbound/store.testkit";
 import { MemoryPluginStore } from "../plugin/store";
 import { flushDueOutbox, outboxIdempotencyKey } from "../plugin/messageOutbox";
@@ -22,6 +24,7 @@ afterEach(() => {
   setSiAssistantToolStoreForTests(null);
   setSiAssistantReporterForTests(undefined);
   setSiAssistantPluginStoreForTests(null);
+  resetSiAssistantIdentityForTests();
 });
 
 function bindOutbox(): MemoryPluginStore {
@@ -37,7 +40,12 @@ describe("take_si_assistant_message", () => {
     store.addContact({
       id: "c1",
       phone: "+15555550111",
-      customData: { approval_id: "appr-1", ticket_number: "VA-61001", ticket_id: "tid-9" },
+      customData: {
+        approval_id: "appr-1",
+        ticket_number: "VA-61001",
+        ticket_id: "tid-9",
+        date_of_birth: "1950-03-17",
+      },
     });
     const attemptId = await store.startAttempt("c1", store.campaignId, 1);
     setSiAssistantToolStoreForTests(store);
@@ -48,12 +56,25 @@ describe("take_si_assistant_message", () => {
         return { ok: true, status: 200 };
       },
     });
+    const sid = "CA" + "a".repeat(32);
+    const confirm = getTool(CONFIRM_IDENTITY_TOOL_NAME);
+    expect(confirm).toBeTruthy();
+    expect(
+      await confirm!.handler({
+        speaking_with_named_patient: true,
+        date_of_birth: "March 17 1950",
+        outbound_contact_id: "c1",
+        outbound_attempt_id: attemptId,
+        outbound_call_sid: sid,
+      }),
+    ).toMatchObject({ success: true, confirmed: true });
     const tool = getTool(TAKE_MESSAGE_TOOL_NAME);
     expect(tool).toBeTruthy();
     const result = await tool!.handler({
       message: "Please call me about my glasses",
       outbound_contact_id: "c1",
       outbound_attempt_id: attemptId,
+      outbound_call_sid: sid,
     });
     expect(result).toMatchObject({ success: true, message_taken: true });
     await vi.waitFor(() => {
@@ -67,7 +88,7 @@ describe("take_si_assistant_message", () => {
     expect(posted[0].message).toBe("Please call me about my glasses");
     expect(posted[0].identityConfirmed).toBe(true);
     expect(posted[0].outboxId).toBeTruthy();
-    expect(posted[0].idempotencyKey).toBeFalsy();
+    expect(posted[0].idempotencyKey).toBe(outboxIdempotencyKey(sid, "Please call me about my glasses"));
     const rows = [...plugin.outbox.values()];
     expect(rows).toHaveLength(1);
     expect(rows[0].message).toBe("");
@@ -233,7 +254,13 @@ describe("take_si_assistant_message", () => {
       store,
     });
     const session = callbackSessionFor(sid)!;
-    session.chosen = { contactId: "alice", phone: "+15555550111", firstName: "Alice" };
+    session.chosen = {
+      contactId: "alice",
+      phone: "+15555550111",
+      firstName: "Alice",
+      lastName: "One",
+      verifiedBy: "full_name_dob",
+    };
     const tool = getTool(TAKE_MESSAGE_TOOL_NAME);
     const result = await tool!.handler({
       message: "This is Alice",
@@ -330,9 +357,112 @@ describe("take_si_assistant_message", () => {
   it("defines SI_ASSISTANT_TOOLS once", () => {
     const agent = readFileSync(join(__dirname, "../agents/siAssistantAgent.ts"), "utf8");
     const tools = readFileSync(join(__dirname, "./siAssistantTools.ts"), "utf8");
-    expect(tools).toMatch(/export const SI_ASSISTANT_TOOLS = \[TAKE_MESSAGE_TOOL_NAME\]/);
+    expect(tools).toMatch(/export const SI_ASSISTANT_TOOLS = \[CONFIRM_IDENTITY_TOOL_NAME, TAKE_MESSAGE_TOOL_NAME\]/);
     expect(agent).not.toMatch(/export const SI_ASSISTANT_TOOLS = \[/);
     expect(agent).toMatch(/import \{ SI_ASSISTANT_TOOLS \}/);
-    expect(SI_ASSISTANT_TOOLS).toEqual([TAKE_MESSAGE_TOOL_NAME]);
+    expect(SI_ASSISTANT_TOOLS).toEqual([CONFIRM_IDENTITY_TOOL_NAME, TAKE_MESSAGE_TOOL_NAME]);
+  });
+
+  it("does not attach a dialled ticket before yes plus a matching date of birth", async () => {
+    const plugin = bindOutbox();
+    const store = new FakeOutboundStore();
+    store.addContact({
+      id: "c1",
+      phone: "+15555550111",
+      customData: { approval_id: "appr-1", ticket_number: "VA-61001", date_of_birth: "1950-03-17" },
+    });
+    const attemptId = await store.startAttempt("c1", store.campaignId, 1);
+    setSiAssistantToolStoreForTests(store);
+    const posted: Array<Record<string, unknown>> = [];
+    setSiAssistantReporterForTests({
+      async report(payload) {
+        posted.push(payload as unknown as Record<string, unknown>);
+        return { ok: true, status: 200 };
+      },
+    });
+    const sid = "CA" + "7".repeat(32);
+    await getTool(TAKE_MESSAGE_TOOL_NAME)!.handler({
+      message: "Call me back",
+      outbound_contact_id: "c1",
+      outbound_attempt_id: attemptId,
+      outbound_call_sid: sid,
+    });
+    await vi.waitFor(() => expect(posted).toHaveLength(1));
+    expect(posted[0].ticketNumber ?? null).toBeNull();
+    expect(posted[0].unmatched).toBe(true);
+    expect([...plugin.outbox.values()][0].ticketNumber).toBeNull();
+  });
+
+  it("never attaches after wrong_person, and re-attaches an earlier unmatched message once identified", async () => {
+    const plugin = bindOutbox();
+    const store = new FakeOutboundStore();
+    store.addContact({
+      id: "c1",
+      phone: "+15555550111",
+      customData: { approval_id: "appr-1", ticket_number: "VA-61001", date_of_birth: "1950-03-17" },
+    });
+    const attemptId = await store.startAttempt("c1", store.campaignId, 1);
+    setSiAssistantToolStoreForTests(store);
+    const posted: Array<Record<string, unknown>> = [];
+    setSiAssistantReporterForTests({
+      async report(payload) {
+        posted.push(payload as unknown as Record<string, unknown>);
+        return { ok: true, status: 200 };
+      },
+    });
+    const sid = "CA" + "8".repeat(32);
+    await getTool(TAKE_MESSAGE_TOOL_NAME)!.handler({
+      message: "Leave this for the team",
+      outbound_contact_id: "c1",
+      outbound_attempt_id: attemptId,
+      outbound_call_sid: sid,
+    });
+    await vi.waitFor(() => expect(posted).toHaveLength(1));
+    expect(posted[0].unmatched).toBe(true);
+
+    expect(
+      await getTool(CONFIRM_IDENTITY_TOOL_NAME)!.handler({
+        speaking_with_named_patient: false,
+        outbound_contact_id: "c1",
+        outbound_attempt_id: attemptId,
+        outbound_call_sid: sid,
+      }),
+    ).toMatchObject({ confirmed: false });
+    const afterNo = await getTool(TAKE_MESSAGE_TOOL_NAME)!.handler({
+      message: "Still unmatched after no",
+      outbound_contact_id: "c1",
+      outbound_attempt_id: attemptId,
+      outbound_call_sid: sid,
+    });
+    expect(afterNo).toMatchObject({ success: true });
+    await vi.waitFor(() => expect(posted.length).toBeGreaterThanOrEqual(2));
+    expect(posted.every((p) => p.ticketNumber == null)).toBe(true);
+
+    resetSiAssistantIdentityForTests();
+    const sidYes = "CA" + "9".repeat(32);
+    await getTool(TAKE_MESSAGE_TOOL_NAME)!.handler({
+      message: "Taken before identify",
+      outbound_contact_id: "c1",
+      outbound_attempt_id: attemptId,
+      outbound_call_sid: sidYes,
+    });
+    await vi.waitFor(() => expect(posted.some((p) => p.message === "Taken before identify")).toBe(true));
+    const before = posted.filter((p) => p.message === "Taken before identify");
+    expect(before[0].ticketNumber ?? null).toBeNull();
+
+    await getTool(CONFIRM_IDENTITY_TOOL_NAME)!.handler({
+      speaking_with_named_patient: true,
+      date_of_birth: "March 17 1950",
+      outbound_contact_id: "c1",
+      outbound_attempt_id: attemptId,
+      outbound_call_sid: sidYes,
+    });
+    await vi.waitFor(() => {
+      const attached = posted.filter((p) => p.ticketNumber === "VA-61001" && p.identityConfirmed === true);
+      expect(attached.length).toBeGreaterThanOrEqual(1);
+    });
+    const row = [...plugin.outbox.values()].find((r) => r.callSid === sidYes);
+    expect(row?.ticketNumber).toBe("VA-61001");
+    expect(row?.approvalId).toBe("appr-1");
   });
 });

@@ -2810,7 +2810,7 @@ never read v57; **v58 was that next ship** — the identity probe, an instrument
 and no behaviour change (see the v56 row below for what it measures). It is no
 longer the current marker: see the paragraph beneath this one.
 
-**v110 (#361) IS WHAT `main` CARRIES (merged 2026-10-22, `e698f27`), AND v57,
+**v111 (#364) IS WHAT `main` CARRIES (merged 2026-10-22, `69e87eb`), AND v57,
 v59, v60, v63, v65 AND v66 ARE RETIRED RATHER THAN REUSED.** Each of the last
 five was a branch's own number while it sat below `main`, and each was given up
 the moment a merge put it there: two branches carrying one version make two

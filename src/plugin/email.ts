@@ -16,6 +16,7 @@ import {
   graphMailConfigured,
   siAssistantEmail,
 } from "./siAssistantConstants";
+import { SendOutcomeError, failureFromUnknown, type SendFailure } from "./sendFailure";
 
 export interface GraphMail {
   sendMail(input: { to: string; subject: string; body: string }): Promise<{ id: string }>;
@@ -38,15 +39,19 @@ export interface TokenSource {
 export async function sendApprovedEmail(
   mail: GraphMail,
   input: { to: string; subject: string; body: string },
-): Promise<{ ok: true; id: string } | { ok: false; reason: string }> {
+): Promise<{ ok: true; id: string } | SendFailure> {
   const to = input.to.trim();
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(to)) return { ok: false, reason: "invalid_email" };
-  const sent = await mail.sendMail({
-    to,
-    subject: input.subject.trim(),
-    body: emailIdentifiedBody(input.body),
-  });
-  return { ok: true, id: sent.id };
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(to)) return { ok: false, reason: "invalid_email", mayHaveSent: false };
+  try {
+    const sent = await mail.sendMail({
+      to,
+      subject: input.subject.trim(),
+      body: emailIdentifiedBody(input.body),
+    });
+    return { ok: true, id: sent.id };
+  } catch (err) {
+    return failureFromUnknown(err);
+  }
 }
 
 export function createMemoryGraphMail(): GraphMail & { sent: Array<{ to: string; subject: string; body: string; id: string }> } {
@@ -107,9 +112,9 @@ export function createGraphMail(
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body,
     });
-    if (!res.ok) throw new Error("graph_token_failed");
+    if (!res.ok) throw new SendOutcomeError("graph_token_failed", false);
     const json = (await res.json()) as { access_token?: string; expires_in?: number };
-    if (!json.access_token) throw new Error("graph_token_missing");
+    if (!json.access_token) throw new SendOutcomeError("graph_token_missing", false);
     cached = { token: json.access_token, exp: Date.now() + (json.expires_in ?? 3600) * 1000 };
     return cached.token;
   }
@@ -137,7 +142,7 @@ export function createGraphMail(
           }),
         },
       );
-      if (!res.ok) throw new Error("graph_send_failed");
+      if (!res.ok) throw new SendOutcomeError("graph_send_failed", res.status >= 500);
       return { id: res.headers.get("request-id") || `graph-${Date.now()}` };
     },
     async listReplies(input) {

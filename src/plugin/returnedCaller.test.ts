@@ -11,6 +11,7 @@ import {
   attachmentForSiAssistant,
   extrasForIdentifiedContact,
   hasTicketKeys,
+  identityIsConfirmed,
   mergeSuggestions,
   suggestionsForReturnedCaller,
   suggestionsFromPlacedContacts,
@@ -226,41 +227,63 @@ describe("suggestionsForReturnedCaller", () => {
 });
 
 describe("attachmentForSiAssistant", () => {
-  it("attaches the identified outbound contact and ignores phone suggestions", async () => {
+  it("does not attach a dialled contact until they said yes and the date of birth matches", async () => {
+    const data = { approval_id: "appr-out", ticket_number: "VA-out", ticket_id: "tid-out" };
+    const bare = await attachmentForSiAssistant({ outboundContactData: data, phone: PHONE }, NOW, new FakeOutboundStore(), null);
+    expect(bare.identityConfirmed).toBe(false);
+    expect(bare.extras).toEqual({});
+    const confirmed = await attachmentForSiAssistant(
+      { outboundContactData: data, greetingAffirmed: true, dobMatched: true, phone: PHONE },
+      NOW,
+      new FakeOutboundStore(),
+      null,
+    );
+    expect(confirmed).toEqual({
+      identityConfirmed: true,
+      extras: { approvalId: "appr-out", ticketNumber: "VA-out", ticketId: "tid-out" },
+      suggestions: [],
+    });
+    expect(identityIsConfirmed({ greetingAffirmed: true, dobMatched: false })).toBe(false);
+  });
+
+  it("never attaches after wrong_person, even with a yes and a date match", async () => {
     const attachment = await attachmentForSiAssistant(
       {
-        outboundContactData: { approval_id: "appr-out", ticket_number: "VA-out", ticket_id: "tid-out" },
+        outboundContactData: { approval_id: "appr-out", ticket_number: "VA-out" },
+        greetingAffirmed: true,
+        dobMatched: true,
+        wrongPerson: true,
         phone: PHONE,
       },
       NOW,
       new FakeOutboundStore(),
       null,
     );
-    expect(attachment).toEqual({
-      identityConfirmed: true,
-      extras: { approvalId: "appr-out", ticketNumber: "VA-out", ticketId: "tid-out" },
-      suggestions: [],
-    });
+    expect(attachment.identityConfirmed).toBe(false);
+    expect(attachment.extras).toEqual({});
   });
 
-  it("attaches the identified callback caller, not the other person on the number", async () => {
-    const attachment = await attachmentForSiAssistant(
+  it("attaches the identified callback caller only after a full-name and date-of-birth match", async () => {
+    const candidates = [
       {
-        chosen: { contactId: "alice" },
-        candidates: [
-          {
-            contactId: "bob",
-            lastAttemptAt: new Date("2026-10-22T16:00:00Z"),
-            data: { approval_id: "bob", ticket_number: "VA-bob" },
-          },
-          {
-            contactId: "alice",
-            lastAttemptAt: new Date("2026-10-22T10:00:00Z"),
-            data: { approval_id: "alice", ticket_number: "VA-alice", ticket_id: "ta" },
-          },
-        ],
-        phone: PHONE,
+        contactId: "bob",
+        lastAttemptAt: new Date("2026-10-22T16:00:00Z"),
+        data: { approval_id: "bob", ticket_number: "VA-bob" },
       },
+      {
+        contactId: "alice",
+        lastAttemptAt: new Date("2026-10-22T10:00:00Z"),
+        data: { approval_id: "alice", ticket_number: "VA-alice", ticket_id: "ta" },
+      },
+    ];
+    const firstNameOnly = await attachmentForSiAssistant(
+      { chosen: { contactId: "alice", verifiedBy: "first_name" }, candidates, phone: PHONE },
+      NOW,
+    );
+    expect(firstNameOnly.identityConfirmed).toBe(false);
+    expect(firstNameOnly.extras).toEqual({});
+    const attachment = await attachmentForSiAssistant(
+      { chosen: { contactId: "alice", verifiedBy: "full_name_dob" }, candidates, phone: PHONE },
       NOW,
     );
     expect(attachment.identityConfirmed).toBe(true);
@@ -295,5 +318,7 @@ describe("runtime teardown identity", () => {
     expect(src).not.toMatch(/matchPlacedContacts/);
     expect(src.indexOf("identified = returnedSession")).toBeLessThan(src.indexOf("closeCallbackSession(record.callSid"));
     expect(src.indexOf("identifiedAttemptId")).toBeLessThan(src.indexOf("closeCallbackSession(record.callSid"));
+    expect(src.indexOf("shouldReportSiAssistantCall")).toBeLessThan(src.indexOf("attachmentForSiAssistant"));
+    expect(src.indexOf("reattachTakenMessages")).toBeGreaterThan(src.indexOf("shouldReportSiAssistantCall"));
   });
 });

@@ -70,13 +70,18 @@ Assistant number.
 
 An inbound returned call has no outbound session contact. Teardown and
 `take_si_assistant_message` use the same identity. Ticket keys attach
-ONLY when the caller was identified on the call — the person we dialled,
-or name plus date of birth verified by `identify_callback_caller`. A
-phone match never attaches. Unidentified callbacks go to SI Assistant
-My Messages with up to three suggested tickets (ticket number and
-approval id only, no extra PHI) drawn from the union of placed dials
-(actually reached the network, not merely enqueued) and sent texts or
-emails in the last 72 hours.
+ONLY after a full name AND date of birth match the patient on file.
+A first name — including one the greeting said — is not identification.
+Having dialled a patient is not confirmation: that needs an explicit yes
+to "Am I speaking with <name>?" plus a matching date of birth
+(`confirm_si_assistant_identity`). If the call records `wrong_person`,
+nothing attaches. A phone match never attaches. A message taken before
+identification is re-attached to the same keys once they are identified.
+Unidentified callbacks go to SI Assistant My Messages with up to three
+suggested tickets (ticket number and approval id only, no extra PHI)
+drawn from the union of placed dials (actually reached the network, not
+merely enqueued) and sent texts or emails in the last 72 hours. The
+suggestion lookup runs only on the SI Assistant lane.
 
 `plugin_message_outbox` retries webhook delivery. Stale `sending` rows
 are reclaimed to `pending`. Dead rows write a PHI-free audit (`outbox_dead`).
@@ -88,8 +93,9 @@ Delivered bodies are purged; undelivered rows older than 30 days are
 deleted and audited (`outbox_expired`, ids only).
 
 A send that times out or throws after it may already have gone out is
-labelled `unknown`, never `failed`. Do not resend. A new prepare is
-the only way out.
+labelled `unknown`, never `failed`. Failures where nothing was sent —
+token fetch, Graph 4xx, Twilio 4xx before accept — stay `failed`. Do
+not resend an `unknown`. A new prepare is the only way out.
 
 `/api/test-call` and surgery-line routing are untouched.
 

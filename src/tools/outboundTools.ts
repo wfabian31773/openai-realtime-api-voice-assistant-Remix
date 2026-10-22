@@ -30,6 +30,8 @@ import { readDobQuietly } from './dobParts';
 import { nameKey } from './verifiedIdentity';
 import { DIALABLE_STATUSES, type ContactStatus, type OutboundStore } from '../runtime/outbound/store';
 import { IDENTIFY_TOOL, dobOnFile, personKey, type CallbackCandidate } from '../runtime/outbound/callback';
+import { SI_ASSISTANT_CAMPAIGN_KEY } from '../plugin/siAssistantConstants';
+import { noteSiAssistantIdentity } from '../plugin/siAssistantIdentity';
 
 let storeOverride: OutboundStore | null = null;
 let storePromise: Promise<OutboundStore> | null = null;
@@ -94,7 +96,13 @@ export interface CallbackSession {
   /** The store the runtime used to find them, so a test's fake is honoured. */
   store: OutboundStore;
   /** Whoever identify_callback_caller settled on. */
-  chosen: { contactId: string; phone: string; firstName: string | null } | null;
+  chosen: {
+    contactId: string;
+    phone: string;
+    firstName: string | null;
+    lastName?: string | null;
+    verifiedBy: 'first_name' | 'full_name_dob';
+  } | null;
   /** The inbound attempt row written when they were identified. */
   attemptId: string | null;
   outcomeRecorded: boolean;
@@ -288,6 +296,13 @@ registerTool({
     if (!session && !who) return NOT_AN_OUTBOUND_CALL;
     const outcome = String(input.outcome ?? '');
     const status = CALL_OUTCOMES[outcome];
+    const sid =
+      (typeof input.outbound_call_sid === 'string' && input.outbound_call_sid) ||
+      (typeof input.outbound_callback_sid === 'string' && input.outbound_callback_sid) ||
+      '';
+    if (sid && outcome === 'wrong_person') {
+      noteSiAssistantIdentity(sid, { wrongPerson: true });
+    }
     if (!status) {
       const refusal: OutboundRefusal = {
         success: false,
@@ -455,9 +470,18 @@ registerTool({
         : null;
     if (!first) return notYet('Ask for their first name, then call this again with it.', 'first_name');
 
-    const choose = async (rows: CallbackCandidate[]): Promise<ToolResult> => {
+    const choose = async (
+      rows: CallbackCandidate[],
+      verifiedBy: 'first_name' | 'full_name_dob',
+    ): Promise<ToolResult> => {
       const c = rows[0];
-      session.chosen = { contactId: c.contactId, phone: c.phone, firstName: c.firstName };
+      session.chosen = {
+        contactId: c.contactId,
+        phone: c.phone,
+        firstName: c.firstName,
+        lastName: c.lastName,
+        verifiedBy,
+      };
       try {
         session.attemptId = await session.store.openCallbackAttempt(c.contactId, c.campaignId, session.callSid);
       } catch (error) {
@@ -476,17 +500,37 @@ registerTool({
       };
     };
 
+    const requireFullId = session.campaignKey === SI_ASSISTANT_CAMPAIGN_KEY;
+    if (requireFullId) {
+      if (!last) return notYet('Ask for their last name, then call this again with their first and last name.', 'last_name');
+      if (!spokenDob) {
+        return notYet(
+          'Ask for their date of birth, starting with the month, then the day, then the year, then call this again ' +
+            'with their name and date of birth.',
+          'date_of_birth',
+        );
+      }
+    }
+
     // 1. The people on the number they rang from.
     const onPhone = people(
       session.candidates.filter(
         (c) => nameKey(c.firstName ?? undefined) === first && (!last || nameKey(c.lastName ?? undefined) === last),
       ),
     );
-    if (onPhone.length === 1) return choose(onPhone[0]);
+    if (onPhone.length === 1) {
+      const row = onPhone[0][0];
+      const lastMatches = Boolean(last && nameKey(row.lastName ?? undefined) === last);
+      const dobMatches = sameDob(dobOnFile(row), spokenDob);
+      if (requireFullId && !(lastMatches && dobMatches)) {
+        return notYet("We could not match that name and date of birth. Do not say why we called, and do not guess.");
+      }
+      return choose(onPhone[0], lastMatches && dobMatches ? 'full_name_dob' : 'first_name');
+    }
     if (onPhone.length > 1) {
       if (!last) return notYet('More than one person on this number has that first name. Ask for their last name, then call this again with both.', 'last_name');
       const byDob = onPhone.filter((rows) => sameDob(dobOnFile(rows[0]), spokenDob));
-      if (byDob.length === 1) return choose(byDob[0]);
+      if (byDob.length === 1) return choose(byDob[0], 'full_name_dob');
       if (!spokenDob) {
         return notYet(
           'More than one person on this number has that name. Ask for their date of birth, starting with the month, ' +
@@ -512,7 +556,7 @@ registerTool({
     const elsewhere = people(
       (await session.store.contactsByName(session.campaignId, first, last)).filter((c) => sameDob(dobOnFile(c), spokenDob)),
     );
-    if (elsewhere.length === 1) return choose(elsewhere[0]);
+    if (elsewhere.length === 1) return choose(elsewhere[0], 'full_name_dob');
     return notYet(
       "We could not find them on this line's list. Do not say why we called. Help with anything else this line can, " +
         'then end the call politely without recording an outcome.',

@@ -2,9 +2,11 @@
  * Ticket keys for a person ringing the SI Assistant number back.
  *
  * A phone match is a candidate to confirm, never an identity (RULE ZERO
- * step 2 / standing instruction 6). Ticket keys attach ONLY when the
- * caller was identified on the call — the person we dialled, or the
- * person identify_callback_caller settled after name and date of birth.
+ * step 2 / standing instruction 6). Ticket keys attach ONLY after a full
+ * name AND date of birth match the patient on file. A first name — even
+ * one the greeting just said — is not identification. Having dialled
+ * patient A is not confirmation: that needs an explicit yes to
+ * "Am I speaking with A?" plus a DOB match. wrong_person never attaches.
  * A phone match never attaches. Unidentified callbacks go to SI Assistant
  * My Messages with up to three suggested tickets (number + approval id,
  * no extra PHI) drawn from placed dials and sent texts/emails in 72 hours.
@@ -27,6 +29,12 @@ export type TicketExtras = {
 export type TicketSuggestion = {
   ticketNumber: string | null;
   approvalId: string | null;
+};
+
+export type ChosenIdentity = {
+  contactId: string;
+  /** Ticket attach requires a full-name + date-of-birth match. */
+  verifiedBy?: "first_name" | "full_name_dob";
 };
 
 export type TicketAttachment = {
@@ -114,28 +122,50 @@ export function identifiedAttachment(extras: TicketExtras): TicketAttachment {
   return { extras, suggestions: [], identityConfirmed: true };
 }
 
+export function identityIsConfirmed(input: {
+  greetingAffirmed?: boolean;
+  dobMatched?: boolean;
+  wrongPerson?: boolean;
+  chosen?: ChosenIdentity | null;
+}): boolean {
+  if (input.wrongPerson) return false;
+  if (input.chosen?.verifiedBy === "full_name_dob") return true;
+  return Boolean(input.greetingAffirmed && input.dobMatched);
+}
+
 /**
  * One attachment for the message and the call report. Confirmed identity
- * (the dialled contact, or the caller identify_callback_caller settled)
- * is the only path that may carry ticket keys. Otherwise suggestions only.
+ * (full name + DOB, and on a dialled call an explicit yes) is the only
+ * path that may carry ticket keys. Otherwise suggestions only.
  */
 export async function attachmentForSiAssistant(
   input: {
     outboundContactData?: Record<string, unknown> | null;
-    chosen?: { contactId: string } | null;
+    chosen?: ChosenIdentity | null;
     candidates?: Array<{ contactId: string; data?: Record<string, unknown> | null; lastAttemptAt?: Date | null }>;
     store?: OutboundStore | null;
     attemptId?: string | null;
     phone?: string;
+    greetingAffirmed?: boolean;
+    dobMatched?: boolean;
+    wrongPerson?: boolean;
   },
   now = new Date(),
   outbound: OutboundStore | null = boundOutboundStore(),
   plugin: PluginStore | null = boundPluginStore(),
 ): Promise<TicketAttachment> {
-  if (input.outboundContactData) {
+  const suggestionsOf = async () =>
+    input.phone
+      ? suggestionsForReturnedCaller(input.phone, now, outbound ?? input.store ?? null, plugin)
+      : [];
+
+  if (input.wrongPerson) return emptyAttachment(await suggestionsOf());
+
+  if (input.outboundContactData && input.greetingAffirmed && input.dobMatched) {
     return identifiedAttachment(extrasFromContactData(input.outboundContactData));
   }
-  if (input.chosen) {
+
+  if (input.chosen?.verifiedBy === "full_name_dob") {
     if (input.store && input.attemptId) {
       try {
         const contact = await input.store.loadCallContact(input.chosen.contactId, input.attemptId);
@@ -147,8 +177,8 @@ export async function attachmentForSiAssistant(
     }
     return identifiedAttachment(extrasForIdentifiedContact(input.chosen, input.candidates ?? []));
   }
-  if (!input.phone) return emptyAttachment();
-  return emptyAttachment(await suggestionsForReturnedCaller(input.phone, now, outbound ?? input.store ?? null, plugin));
+
+  return emptyAttachment(await suggestionsOf());
 }
 
 export async function suggestionsForReturnedCaller(

@@ -19,6 +19,7 @@ import {
 } from "./outboundTools";
 import { FakeOutboundStore } from "../runtime/outbound/store.testkit";
 import type { ContactRow } from "../runtime/outbound/store";
+import { resetSiAssistantIdentityForTests } from "../plugin/siAssistantIdentity";
 
 const CALLER = "+15555550111";
 const PURPOSE = "it was a test call, and nothing is needed from them.";
@@ -26,7 +27,7 @@ let n = 0;
 
 async function session(
   contacts: Array<Partial<ContactRow> & { id: string; phone: string }>,
-  opts: { callerPhone?: string; loaded?: boolean } = {},
+  opts: { callerPhone?: string; loaded?: boolean; campaignKey?: string } = {},
 ) {
   const store = new FakeOutboundStore();
   for (const c of contacts) store.addContact(c);
@@ -35,7 +36,7 @@ async function session(
   const { campaignId, candidates } = await store.callbackCandidates("test-campaign", callerPhone);
   openCallbackSession({
     callSid,
-    campaignKey: "test-campaign",
+    campaignKey: opts.campaignKey ?? "test-campaign",
     campaignId,
     callerPhone,
     candidates: opts.loaded === false ? [] : candidates,
@@ -48,7 +49,9 @@ async function session(
   return { store, callSid, call };
 }
 
-afterEach(() => undefined);
+afterEach(() => {
+  resetSiAssistantIdentityForTests();
+});
 
 describe("identify_callback_caller", () => {
   it("identifies the one person on the calling number by the first name they confirm", async () => {
@@ -251,5 +254,27 @@ describe("when the returned call ends", () => {
     await call(IDENTIFY_CALLBACK_TOOL_NAME, { first_name: "Testa" });
     await closeCallbackSession(callSid);
     expect(store.contacts.get("c1")!.status).toBe("declined");
+  });
+
+  it("on SI Assistant, first name alone is not identification — last name and date of birth are required", async () => {
+    const { call, callSid } = await session(
+      [{ id: "c1", phone: CALLER, firstName: "Testa", lastName: "One", customData: { date_of_birth: "1950-03-17" } }],
+      { campaignKey: "si-assistant" },
+    );
+    expect(await call(IDENTIFY_CALLBACK_TOOL_NAME, { first_name: "Testa" })).toMatchObject({
+      identified: false,
+      needs: "last_name",
+    });
+    expect(await call(IDENTIFY_CALLBACK_TOOL_NAME, { first_name: "Testa", last_name: "One" })).toMatchObject({
+      identified: false,
+      needs: "date_of_birth",
+    });
+    const r = await call(IDENTIFY_CALLBACK_TOOL_NAME, {
+      first_name: "Testa",
+      last_name: "One",
+      date_of_birth: "March 17 1950",
+    });
+    expect(r).toMatchObject({ identified: true });
+    expect(callbackSessionFor(callSid)?.chosen?.verifiedBy).toBe("full_name_dob");
   });
 });
