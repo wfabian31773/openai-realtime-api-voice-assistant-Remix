@@ -200,6 +200,14 @@ registerTool({
     if (!sid) {
       return { success: false, error: 'no_call', fix: 'This tool only works on an SI Assistant call.' };
     }
+    if (siAssistantIdentityFor(sid)?.wrongPerson) {
+      return {
+        success: true,
+        confirmed: false,
+        fix:
+          'They are not the patient. Call record_call_outcome with wrong_person, apologise, say goodbye and call end_call. Do not attach a ticket.',
+      };
+    }
     const speaking = input.speaking_with_named_patient === true;
     if (!speaking) {
       noteSiAssistantIdentity(sid, { greetingAffirmed: false, dobMatched: false, wrongPerson: true });
@@ -236,10 +244,18 @@ registerTool({
       const match = session.candidates.find((c) => c.contactId === session.chosen!.contactId);
       onFile = match ? dobOnFile(match) : null;
     }
-    const matched = Boolean(
-      onFile && spoken.year === onFile.year && spoken.month === onFile.month && spoken.day === onFile.day,
-    );
-    noteSiAssistantIdentity(sid, { greetingAffirmed: true, dobMatched: matched, wrongPerson: false });
+    if (!onFile) {
+      noteSiAssistantIdentity(sid, { greetingAffirmed: true, dobMatched: false });
+      return {
+        success: true,
+        confirmed: false,
+        cannot_verify: true,
+        fix:
+          'There is no date of birth on file, so you cannot verify identity. Do not say it does not match. Say you cannot verify who they are and offer to take a message.',
+      };
+    }
+    const matched = spoken.year === onFile.year && spoken.month === onFile.month && spoken.day === onFile.day;
+    noteSiAssistantIdentity(sid, { greetingAffirmed: true, dobMatched: matched });
     if (!matched) {
       return {
         success: true,

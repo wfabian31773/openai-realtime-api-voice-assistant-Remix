@@ -35,6 +35,11 @@ export interface CallbackReport {
   outboxId?: string;
   /** sha256(callSid + "\\n" + message). Receiver dedupes redelivery on this. */
   idempotencyKey?: string;
+  /**
+   * Same outbox row as an earlier `message` event, now with ticket keys.
+   * Ticketing must treat this as an UPDATE to that item, not a duplicate to drop.
+   */
+  attachmentUpdate?: boolean;
 }
 
 export type TicketExtras = {

@@ -521,9 +521,20 @@ registerTool({
     if (onPhone.length === 1) {
       const row = onPhone[0][0];
       const lastMatches = Boolean(last && nameKey(row.lastName ?? undefined) === last);
-      const dobMatches = sameDob(dobOnFile(row), spokenDob);
-      if (requireFullId && !(lastMatches && dobMatches)) {
-        return notYet("We could not match that name and date of birth. Do not say why we called, and do not guess.");
+      const onFile = dobOnFile(row);
+      const dobMatches = sameDob(onFile, spokenDob);
+      if (requireFullId) {
+        if (!lastMatches) {
+          return notYet("We could not match that name and date of birth. Do not say why we called, and do not guess.");
+        }
+        if (!onFile) {
+          return notYet(
+            "We cannot verify their identity because there is no date of birth on file. Do not say the date of birth does not match. Offer to take a message. Do not say why we called.",
+          );
+        }
+        if (!dobMatches) {
+          return notYet("We could not match that name and date of birth. Do not say why we called, and do not guess.");
+        }
       }
       return choose(onPhone[0], lastMatches && dobMatches ? 'full_name_dob' : 'first_name');
     }

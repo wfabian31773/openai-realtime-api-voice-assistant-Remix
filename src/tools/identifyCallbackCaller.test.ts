@@ -20,6 +20,7 @@ import {
 import { FakeOutboundStore } from "../runtime/outbound/store.testkit";
 import type { ContactRow } from "../runtime/outbound/store";
 import { resetSiAssistantIdentityForTests } from "../plugin/siAssistantIdentity";
+import { evaluateAndEnqueueCall } from "../plugin/callEnqueue";
 
 const CALLER = "+15555550111";
 const PURPOSE = "it was a test call, and nothing is needed from them.";
@@ -276,5 +277,85 @@ describe("when the returned call ends", () => {
     });
     expect(r).toMatchObject({ identified: true });
     expect(callbackSessionFor(callSid)?.chosen?.verifiedBy).toBe("full_name_dob");
+  });
+
+  it("on SI Assistant, returned-caller date of birth comes from the enqueue contact", async () => {
+    const store = new FakeOutboundStore();
+    await evaluateAndEnqueueCall(
+      store,
+      {
+        approvalId: "appr-1",
+        phone: CALLER,
+        firstName: "Testa",
+        lastName: "One",
+        dateOfBirth: "March 17, 1950",
+        ticketNumber: "VA-61001",
+      },
+      new Date("2026-10-22T18:00:00Z"),
+    );
+    const callSid = `CA${String(++n).padStart(32, "0")}`;
+    const { campaignId, candidates } = await store.callbackCandidates("si-assistant", CALLER);
+    expect(candidates[0]?.data.date_of_birth).toBe("1950-03-17");
+    openCallbackSession({
+      callSid,
+      campaignKey: "si-assistant",
+      campaignId,
+      callerPhone: CALLER,
+      candidates,
+      candidatesLoaded: true,
+      purpose: PURPOSE,
+      store,
+    });
+    const tool = getTool(IDENTIFY_CALLBACK_TOOL_NAME)!;
+    const r = await tool.handler({
+      first_name: "Testa",
+      last_name: "One",
+      date_of_birth: "March 17 1950",
+      outbound_callback_sid: callSid,
+    });
+    expect(r).toMatchObject({ identified: true });
+    expect(callbackSessionFor(callSid)?.chosen?.verifiedBy).toBe("full_name_dob");
+    await closeCallbackSession(callSid);
+  });
+
+  it("on SI Assistant, a contact with no date of birth cannot verify and does not say it does not match", async () => {
+    const store = new FakeOutboundStore();
+    await evaluateAndEnqueueCall(
+      store,
+      {
+        approvalId: "appr-1",
+        phone: CALLER,
+        firstName: "Testa",
+        lastName: "One",
+        ticketNumber: "VA-61001",
+      },
+      new Date("2026-10-22T18:00:00Z"),
+    );
+    const callSid = `CA${String(++n).padStart(32, "0")}`;
+    const { campaignId, candidates } = await store.callbackCandidates("si-assistant", CALLER);
+    expect(candidates[0]?.data.date_of_birth).toBeUndefined();
+    openCallbackSession({
+      callSid,
+      campaignKey: "si-assistant",
+      campaignId,
+      callerPhone: CALLER,
+      candidates,
+      candidatesLoaded: true,
+      purpose: PURPOSE,
+      store,
+    });
+    const r = await getTool(IDENTIFY_CALLBACK_TOOL_NAME)!.handler({
+      first_name: "Testa",
+      last_name: "One",
+      date_of_birth: "March 17 1950",
+      outbound_callback_sid: callSid,
+    });
+    expect(r).toMatchObject({ identified: false });
+    const fix = String((r as { fix: string }).fix);
+    expect(fix).toMatch(/cannot verify/i);
+    expect(fix).toMatch(/take a message/i);
+    expect(fix).toMatch(/do not say.{0,80}does not match/i);
+    expect(fix).not.toMatch(/could not match that name and date of birth/i);
+    await closeCallbackSession(callSid);
   });
 });

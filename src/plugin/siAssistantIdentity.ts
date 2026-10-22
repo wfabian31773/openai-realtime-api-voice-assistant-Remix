@@ -42,7 +42,11 @@ function row(callSid: string): SiAssistantIdentity {
 
 export function noteSiAssistantIdentity(callSid: string, patch: Partial<SiAssistantIdentity>): SiAssistantIdentity {
   const current = row(callSid);
-  Object.assign(current, patch);
+  if (current.wrongPerson) {
+    Object.assign(current, { ...patch, wrongPerson: true, greetingAffirmed: false, dobMatched: false });
+  } else {
+    Object.assign(current, patch);
+  }
   return { ...current };
 }
 

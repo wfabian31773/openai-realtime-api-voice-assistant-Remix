@@ -233,6 +233,45 @@ describe("the approval gate", () => {
     expect(outbound.upserts).toEqual([1]);
   });
 
+  it("enqueue writes the ticket patient's name and date of birth onto the contact", async () => {
+    const now = () => new Date("2026-10-22T18:00:00Z");
+    const { base, store, outbound } = await boot({ PLUGIN_WRITES_ENABLED: "true" }, { now });
+    const bot = store.mint(["contacts:prepare", "contacts:commit"]);
+    const staff = store.mint(["contacts:approve"]);
+    const prep = await fetch(`${base}/api/plugin/v1/prepare_call`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${bot.plaintext}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        phone: PHONE,
+        ticketNumber: TICKET,
+        ticketId: "tid-9",
+        firstName: "Testa",
+        lastName: "Patient",
+        dateOfBirth: "March 17, 1950",
+      }),
+    });
+    expect(prep.status).toBe(201);
+    const pending = (await prep.json()) as { approval: { id: string } };
+    const row = await store.getApproval(pending.approval.id);
+    expect(row?.payload).toMatchObject({ firstName: "Testa", lastName: "Patient", dateOfBirth: "March 17, 1950" });
+    const approved = await staffApprove(base, staff, store, pending.approval.id);
+    const token = (await approved.json()) as { confirmToken: string };
+    const committed = await fetch(`${base}/api/plugin/v1/commit_contact`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${bot.plaintext}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ confirmToken: token.confirmToken }),
+    });
+    expect(committed.status).toBe(200);
+    const contact = [...outbound.contacts.values()][0];
+    expect(contact.firstName).toBe("Testa");
+    expect(contact.lastName).toBe("Patient");
+    expect(contact.customData.date_of_birth).toBe("1950-03-17");
+    const audit = await store.listAudit();
+    expect(JSON.stringify(audit)).not.toContain("1950");
+    expect(JSON.stringify(audit)).not.toContain("March 17");
+    expect(JSON.stringify(audit)).not.toContain("Patient");
+  });
+
   it("a used confirm token cannot be reused", async () => {
     const now = () => new Date("2026-10-22T18:00:00Z");
     const { base, store } = await boot({ PLUGIN_WRITES_ENABLED: "true" }, { now });

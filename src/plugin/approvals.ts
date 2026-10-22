@@ -23,7 +23,7 @@ import {
 export const PREPARE_PAYLOAD_MAX_BYTES = 8192;
 
 const PREPARE_KEYS: Record<ContactChannel, readonly string[]> = {
-  call: ["phone", "firstName", "lastName", "ticketId", "ticketNumber", "purpose"],
+  call: ["phone", "firstName", "lastName", "dateOfBirth", "date_of_birth", "ticketId", "ticketNumber", "purpose"],
   sms: ["phone", "body", "ticketId", "ticketNumber"],
   email: ["to", "subject", "body", "ticketId", "ticketNumber"],
 };

@@ -11,7 +11,6 @@ import {
   attachmentForSiAssistant,
   extrasForIdentifiedContact,
   hasTicketKeys,
-  identityIsConfirmed,
   mergeSuggestions,
   suggestionsForReturnedCaller,
   suggestionsFromPlacedContacts,
@@ -243,7 +242,13 @@ describe("attachmentForSiAssistant", () => {
       extras: { approvalId: "appr-out", ticketNumber: "VA-out", ticketId: "tid-out" },
       suggestions: [],
     });
-    expect(identityIsConfirmed({ greetingAffirmed: true, dobMatched: false })).toBe(false);
+    const noDob = await attachmentForSiAssistant(
+      { outboundContactData: data, greetingAffirmed: true, dobMatched: false, phone: PHONE },
+      NOW,
+      new FakeOutboundStore(),
+      null,
+    );
+    expect(noDob.identityConfirmed).toBe(false);
   });
 
   it("never attaches after wrong_person, even with a yes and a date match", async () => {

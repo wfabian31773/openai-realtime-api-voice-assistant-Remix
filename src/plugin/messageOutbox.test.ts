@@ -2,16 +2,24 @@
  * Durable outbox: reclaim, dead audit, retention, idempotency.
  * Synthetic ids and messages only.
  */
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   flushDueOutbox,
   flushOutboxRow,
   persistTakenMessage,
   purgeOutboxRetention,
+  reattachTakenMessages,
   reclaimStaleOutboxSending,
+  resetAttachmentFollowUpsForTests,
+  settleOutboxDelivery,
 } from "./messageOutbox";
 import { MemoryPluginStore, OUTBOX_MAX_ATTEMPTS, OUTBOX_RETENTION_MS, STALE_SENDING_MS } from "./store";
 import { createSqlPluginStore } from "./sqlStore";
+import type { CallbackReporter } from "./callbackReport";
+
+afterEach(() => {
+  resetAttachmentFollowUpsForTests();
+});
 
 describe("message outbox", () => {
   it("reclaims a stale sending row so the sweep can retry", async () => {
@@ -198,5 +206,70 @@ describe("message outbox", () => {
     await store.deleteOutboxIds(["obx"]);
     expect(seen[0]).toMatch(/DELETE FROM plugin_message_outbox/);
     expect(seen[0]).toMatch(/id = ANY/);
+    expect(seen[0]).toMatch(/status IN \('pending', 'sending', 'dead'\)/);
+  });
+
+  it("queues a follow-up attach update when the row is mid-send, same outbox id and key", async () => {
+    const store = new MemoryPluginStore();
+    const now = new Date("2026-10-22T18:00:00Z");
+    const sid = "CA" + "8".repeat(32);
+    const persisted = await persistTakenMessage(
+      { callSid: sid, message: "Taken before identify" },
+      now,
+      store,
+    );
+    expect(persisted).toBeTruthy();
+    await store.markOutbox(persisted!.id, { status: "sending", attempts: 1, updatedAt: now }, "pending");
+
+    const posted: Array<Record<string, unknown>> = [];
+    const reporter: CallbackReporter = {
+      async report(payload) {
+        posted.push(payload as unknown as Record<string, unknown>);
+        return { ok: true, status: 200 };
+      },
+    };
+
+    const n = await reattachTakenMessages(
+      sid,
+      { ticketId: "tid-9", ticketNumber: "VA-61001", approvalId: "appr-1" },
+      store,
+      reporter,
+      now,
+    );
+    expect(n).toBe(1);
+    expect(store.outbox.get(persisted!.id)?.status).toBe("sending");
+    expect(store.outbox.get(persisted!.id)?.ticketNumber).toBe("VA-61001");
+    expect(posted).toEqual([]);
+
+    await settleOutboxDelivery(
+      store,
+      { ...store.outbox.get(persisted!.id)! },
+      { ok: true, error: "" },
+      now,
+      reporter,
+    );
+    expect(posted).toHaveLength(1);
+    expect(posted[0]).toMatchObject({
+      event: "message",
+      attachmentUpdate: true,
+      outboxId: persisted!.id,
+      idempotencyKey: persisted!.idempotencyKey,
+      ticketNumber: "VA-61001",
+      approvalId: "appr-1",
+      ticketId: "tid-9",
+      identityConfirmed: true,
+    });
+    expect(posted[0].message).toBeUndefined();
+    expect(store.outbox.get(persisted!.id)?.status).toBe("delivered");
+  });
+
+  it("does not delete a delivered row when expiry ids are re-checked", async () => {
+    const store = new MemoryPluginStore();
+    const now = new Date("2026-10-22T18:00:00Z");
+    const delivered = await persistTakenMessage({ callSid: "CA" + "9".repeat(32), message: "kept" }, now, store);
+    expect(delivered).toBeTruthy();
+    await store.markOutbox(delivered!.id, { status: "delivered", message: "", updatedAt: now });
+    expect(await store.deleteOutboxIds([delivered!.id])).toBe(0);
+    expect(store.outbox.has(delivered!.id)).toBe(true);
   });
 });

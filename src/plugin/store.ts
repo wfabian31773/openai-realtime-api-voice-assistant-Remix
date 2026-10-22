@@ -94,6 +94,8 @@ export interface CallPayload {
   phone: string;
   firstName?: string | null;
   lastName?: string | null;
+  dateOfBirth?: string | null;
+  date_of_birth?: string | null;
   ticketId?: string | null;
   ticketNumber?: string | null;
   purpose?: string | null;
@@ -429,6 +431,8 @@ export class MemoryPluginStore implements PluginStore {
   async deleteOutboxIds(ids: string[]): Promise<number> {
     let n = 0;
     for (const id of ids) {
+      const row = this.outbox.get(id);
+      if (!row || row.status === "delivered") continue;
       if (this.outbox.delete(id)) n += 1;
     }
     return n;

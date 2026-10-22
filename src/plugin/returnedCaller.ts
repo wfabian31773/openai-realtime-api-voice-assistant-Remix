@@ -122,17 +122,6 @@ export function identifiedAttachment(extras: TicketExtras): TicketAttachment {
   return { extras, suggestions: [], identityConfirmed: true };
 }
 
-export function identityIsConfirmed(input: {
-  greetingAffirmed?: boolean;
-  dobMatched?: boolean;
-  wrongPerson?: boolean;
-  chosen?: ChosenIdentity | null;
-}): boolean {
-  if (input.wrongPerson) return false;
-  if (input.chosen?.verifiedBy === "full_name_dob") return true;
-  return Boolean(input.greetingAffirmed && input.dobMatched);
-}
-
 /**
  * One attachment for the message and the call report. Confirmed identity
  * (full name + DOB, and on a dialled call an explicit yes) is the only

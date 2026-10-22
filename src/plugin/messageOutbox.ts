@@ -123,11 +123,51 @@ async function noteDead(store: PluginStore, row: MessageOutboxRow): Promise<void
   }
 }
 
+type AttachmentFollowUp = {
+  ticketId?: string | null;
+  ticketNumber?: string | null;
+  approvalId?: string | null;
+  idempotencyKey?: string | null;
+};
+
+const attachmentFollowUps = new Map<string, AttachmentFollowUp>();
+
+export function resetAttachmentFollowUpsForTests(): void {
+  attachmentFollowUps.clear();
+}
+
+function queueAttachmentFollowUp(row: MessageOutboxRow): void {
+  attachmentFollowUps.set(row.id, {
+    ticketId: row.ticketId,
+    ticketNumber: row.ticketNumber,
+    approvalId: row.approvalId,
+    idempotencyKey: row.idempotencyKey,
+  });
+}
+
+async function reportAttachmentUpdate(
+  row: { id: string } & AttachmentFollowUp,
+  reporter: CallbackReporter,
+): Promise<void> {
+  await reporter.report({
+    event: "message",
+    slug: SI_ASSISTANT_SLUG,
+    ticketNumber: row.ticketNumber,
+    approvalId: row.approvalId,
+    ticketId: row.ticketId,
+    identityConfirmed: true,
+    outboxId: row.id,
+    idempotencyKey: row.idempotencyKey ?? undefined,
+    attachmentUpdate: true,
+  });
+}
+
 async function settleDelivery(
   store: PluginStore,
   row: MessageOutboxRow,
   delivered: { ok: boolean; error: string },
   now: Date,
+  reporter: CallbackReporter | null = null,
 ): Promise<void> {
   if (delivered.ok) {
     await store.markOutbox(
@@ -135,6 +175,15 @@ async function settleDelivery(
       { status: "delivered", lastError: null, message: "", updatedAt: now },
       "sending",
     );
+    const follow = attachmentFollowUps.get(row.id);
+    attachmentFollowUps.delete(row.id);
+    if (follow && (follow.ticketId || follow.ticketNumber || follow.approvalId) && reporter) {
+      try {
+        await reportAttachmentUpdate({ id: row.id, ...follow }, reporter);
+      } catch {
+        console.error("[si-assistant] outbox attachment follow-up failed");
+      }
+    }
     return;
   }
   const dead = row.attempts >= OUTBOX_MAX_ATTEMPTS;
@@ -148,8 +197,22 @@ async function settleDelivery(
     },
     "sending",
   );
-  if (dead) await noteDead(store, row);
+  if (dead) {
+    attachmentFollowUps.delete(row.id);
+    await noteDead(store, row);
+  }
   console.error(`[si-assistant] outbox ${row.id} ${delivered.error}${dead ? " dead" : ""}`);
+}
+
+/** Test hook: finish an in-flight send the way flushOutboxRow does. */
+export async function settleOutboxDelivery(
+  store: PluginStore,
+  row: MessageOutboxRow,
+  delivered: { ok: boolean; error: string },
+  now: Date,
+  reporter: CallbackReporter | null = null,
+): Promise<void> {
+  await settleDelivery(store, row, delivered, now, reporter);
 }
 
 export async function reclaimStaleOutboxSending(
@@ -210,19 +273,15 @@ export async function reattachTakenMessages(
       });
       continue;
     }
+    if (row.status === "sending") {
+      // In-flight flush already captured the unmatched snapshot. Queue a
+      // follow-up so settleDelivery attaches the ticket keys after it lands.
+      queueAttachmentFollowUp(row);
+      continue;
+    }
     if (row.status === "delivered" && reporter) {
       try {
-        await reporter.report({
-          event: "message",
-          slug: SI_ASSISTANT_SLUG,
-          ticketNumber: row.ticketNumber,
-          approvalId: row.approvalId,
-          ticketId: row.ticketId,
-          message: row.message,
-          identityConfirmed: true,
-          outboxId: row.id,
-          idempotencyKey: row.idempotencyKey ?? undefined,
-        });
+        await reportAttachmentUpdate(row, reporter);
       } catch {
         console.error("[si-assistant] outbox reattach report failed");
       }
@@ -247,7 +306,7 @@ export async function flushOutboxRow(
     "pending",
   );
   if (!claimed) return;
-  await settleDelivery(store, claimed, await deliverRow(claimed, reporter), now);
+  await settleDelivery(store, claimed, await deliverRow(claimed, reporter), now, reporter);
 }
 
 export async function flushDueOutbox(
@@ -267,7 +326,7 @@ export async function flushDueOutbox(
   if (!reporter) return 0;
   const due = await store.claimDueOutbox(now, limit);
   for (const row of due) {
-    await settleDelivery(store, row, await deliverRow(row, reporter), now);
+    await settleDelivery(store, row, await deliverRow(row, reporter), now, reporter);
   }
   return due.length;
 }

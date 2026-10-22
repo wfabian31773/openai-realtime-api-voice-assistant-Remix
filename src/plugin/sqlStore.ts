@@ -378,6 +378,7 @@ export function createSqlPluginStore(exec: SqlExec): PluginStore {
       const rows = await exec(
         `DELETE FROM plugin_message_outbox
           WHERE id = ANY($1::text[])
+            AND status IN ('pending', 'sending', 'dead')
           RETURNING id`,
         [ids],
       );

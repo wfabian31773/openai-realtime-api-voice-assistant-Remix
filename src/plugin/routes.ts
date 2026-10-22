@@ -25,7 +25,7 @@ import {
 import { hashPayload } from "./tokens";
 import { checkTwilioSignature, type WebhookRequest } from "../runtime/voiceWebhook";
 import { agentHealth, emptyFleetReader, listAgents, outboundStatus, type AgentSource, type FleetReader } from "./reads";
-import { evaluateAndEnqueueCall } from "./callEnqueue";
+import { evaluateAndEnqueueCall, identityFromPreparePayload } from "./callEnqueue";
 import { createTwilioSmsSender, handleInboundSms, sendApprovedSms, type SmsSender } from "./sms";
 import { createGraphMail, sendApprovedEmail, type GraphMail } from "./email";
 import { createCallbackReporter, type CallbackReporter } from "./callbackReport";
@@ -435,13 +435,15 @@ async function executeApproved(
     if (!deps.outboundStore) {
       return { ok: false, status: 503, error: "Outbound store is not configured", reason: "no_outbound_store" };
     }
+    const identity = identityFromPreparePayload(approval.payload);
     const queued = await evaluateAndEnqueueCall(
       deps.outboundStore,
       {
         approvalId: approval.id,
         phone: String(approval.payload.phone ?? ""),
-        firstName: typeof approval.payload.firstName === "string" ? approval.payload.firstName : null,
-        lastName: typeof approval.payload.lastName === "string" ? approval.payload.lastName : null,
+        firstName: identity.firstName,
+        lastName: identity.lastName,
+        dateOfBirth: identity.dateOfBirth,
         ticketNumber: approval.ticketNumber,
         ticketId: approval.ticketId,
         purpose: typeof approval.payload.purpose === "string" ? approval.payload.purpose : null,

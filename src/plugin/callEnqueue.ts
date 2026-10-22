@@ -11,6 +11,7 @@ import {
   type DialDecision,
 } from "../runtime/outbound/callingWindow";
 import { dncKey, type OutboundStore } from "../runtime/outbound/store";
+import { readDobQuietly } from "../tools/dobParts";
 import { SI_ASSISTANT_CAMPAIGN_KEY, SI_ASSISTANT_SLUG } from "./siAssistantConstants";
 
 export const SI_ASSISTANT_CAPS = {
@@ -26,9 +27,34 @@ export interface EnqueueCallInput {
   phone: string;
   firstName?: string | null;
   lastName?: string | null;
+  /** Patient date of birth from the approved prepare payload (or the ticket). */
+  dateOfBirth?: string | null;
   ticketNumber?: string | null;
   ticketId?: string | null;
   purpose?: string | null;
+}
+
+/**
+ * Parse a spoken or ISO date into the Y-M-D string `dobOnFile` reads.
+ * Unparseable input is omitted — missing is not a mismatch.
+ */
+export function storedDobFromInput(raw: unknown): string | null {
+  if (typeof raw !== "string" || !raw.trim()) return null;
+  const parts = readDobQuietly(raw);
+  if (!parts) return null;
+  return `${parts.year}-${parts.month}-${parts.day}`;
+}
+
+/** Name + DOB from the locked prepare_call payload (ticket patient). */
+export function identityFromPreparePayload(payload: Record<string, unknown>): {
+  firstName: string | null;
+  lastName: string | null;
+  dateOfBirth: string | null;
+} {
+  const firstName = typeof payload.firstName === "string" ? payload.firstName.trim() || null : null;
+  const lastName = typeof payload.lastName === "string" ? payload.lastName.trim() || null : null;
+  const dateOfBirth = storedDobFromInput(payload.dateOfBirth ?? payload.date_of_birth);
+  return { firstName, lastName, dateOfBirth };
 }
 
 export type EnqueueCallResult =
@@ -68,18 +94,22 @@ export async function evaluateAndEnqueueCall(
   const decision = mayDialNow(now, prior, SI_ASSISTANT_WINDOW, SI_ASSISTANT_CAPS);
   if (!decision.ok) return { ok: false, reason: decision.reason };
 
+  const firstName = input.firstName?.trim() || null;
+  const lastName = input.lastName?.trim() || null;
+  const dateOfBirth = storedDobFromInput(input.dateOfBirth);
   await store.upsertSourceContacts(campaignId, [
     {
       externalRef,
       phone: `+1${key}`,
-      firstName: input.firstName?.trim() || null,
-      lastName: input.lastName?.trim() || null,
+      firstName,
+      lastName,
       data: {
         source: "si-assistant",
         approval_id: input.approvalId,
         ticket_number: input.ticketNumber ?? null,
         ticket_id: input.ticketId ?? null,
         purpose: input.purpose ?? null,
+        ...(dateOfBirth ? { date_of_birth: dateOfBirth } : {}),
       },
     },
   ]);

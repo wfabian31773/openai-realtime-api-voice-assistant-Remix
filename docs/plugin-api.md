@@ -49,7 +49,11 @@ prepare, approve, reject, cancel and commit.
 
 Approved calls enqueue **one** contact into the existing campaign dialer
 (`src/runtime/outbound/`). They go out from `SI_ASSISTANT_NUMBER`
-(+1 909-255-3213). The dialer already enforces:
+(+1 909-255-3213). `prepare_call` must send the ticket patient's
+`firstName`, `lastName` and `dateOfBirth` (from the ticket). Enqueue
+copies those into the contact row and `custom_data.date_of_birth` —
+memory and contact data only, never logs or `plugin_audit_log`. Returned
+callers read the same field on the campaign candidates. The dialer already enforces:
 
 - `do_not_contact`
 - 9:00 AM – 8:00 PM Pacific (federal holidays and practice closures skipped)
@@ -77,6 +81,15 @@ to "Am I speaking with <name>?" plus a matching date of birth
 (`confirm_si_assistant_identity`). If the call records `wrong_person`,
 nothing attaches. A phone match never attaches. A message taken before
 identification is re-attached to the same keys once they are identified.
+If the outbox row is mid-send (`sending`) when that happens, the in-flight
+delivery may still go out unmatched; a follow-up webhook then carries
+`attachmentUpdate: true` with the same `outboxId` and `idempotencyKey`
+and the ticket keys. **Ticketing contract:** that payload is an UPDATE
+to the existing My Messages item (attach the ticket keys), not a
+duplicate to drop and not a second message. A later identification
+with no date of birth on file cannot verify — the agent says so and
+takes a message; it must not say the date "does not match".
+`wrong_person` is sticky for the rest of the call.
 Unidentified callbacks go to SI Assistant My Messages with up to three
 suggested tickets (ticket number and approval id only, no extra PHI)
 drawn from the union of placed dials (actually reached the network, not
@@ -89,6 +102,9 @@ An unset webhook URL leaves rows pending (they do not expire toward dead).
 Retries with the same call SID and message reuse one idempotency key
 (`outbound_callback_sid` or `outbound_call_sid`). The webhook payload
 carries the outbox row id and that key so a redelivery can be deduped.
+A re-attach after identification is the same message (same `outboxId`
+and `idempotencyKey`) with `attachmentUpdate: true` and the ticket
+keys filled in. Ticketing must apply those keys to the existing item.
 Delivered bodies are purged; undelivered rows older than 30 days are
 deleted and audited (`outbox_expired`, ids only).
 

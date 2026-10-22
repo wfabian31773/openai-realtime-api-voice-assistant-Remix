@@ -62,6 +62,8 @@ describe("the SI Assistant lane", () => {
     expect(names).toContain(CONFIRM_IDENTITY_TOOL_NAME);
     expect(lane!.agent.instructions).toMatch(/take_si_assistant_message/);
     expect(lane!.agent.instructions).toMatch(/confirm_si_assistant_identity/);
+    expect(lane!.agent.instructions).toMatch(/cannot verify/);
+    expect(lane!.agent.instructions).toMatch(/do not say the date of birth does not match/i);
     expect(lane!.agent.instructions).toMatch(/never pretend to be a person/i);
     expect(lane!.agent.instructions).toMatch(/## Role & Persona/);
     expect(lane!.agent.instructions).toMatch(/## Objective/);

@@ -2618,7 +2618,7 @@ v77 IS), v77 (#336, `df9b6b1`), v74 (#335, `f998a0b`) and v73 (#333,
 `0039a9d`); AND v57, v59, v60, v63, v65 AND v66 ARE ALL RETIRED RATHER
 THAN REUSED — see THE SURGEON CLAIM below the table for v57.** **THIS LINE
 GOES STALE EVERY TIME A MARKER LANDS, SO RE-READ IT AGAINST `main` RATHER
-THAN TRUSTING IT.** THIRTY-FIVE corrections have landed on it in thirty-two days and every
+THAN TRUSTING IT.** THIRTY-SIX corrections have landed on it in thirty-two days and every
 one was the same trap: it read `v58 IS WHAT main CARRIES` after #324 moved
 `main` to v61, `v61` after #323 moved it to v62, `v62` after #327 moved it to
 v64, `v64` after #326 moved it to v67, `v67` after #328 moved it to v68, `v68`
@@ -2629,7 +2629,7 @@ moved it to v78, `v78` after #338 moved it to v79, `v79` after #339 moved
 it to v80, `v80` after #340 moved it to v82, `v82` after #341 moved it to
 v83, `v83` after #342 moved it to v85, `v85` after #343 moved it to
 v86, `v86` after #344 moved it to v88, `v88` after #345 moved it
-to v89, `v90` after #347 moved it to v91, `v91` after #348 moved it to v93, `v93` after #349 moved it to v95, `v95` after #350 moved it to v97, `v97` after #351 moved it to v98, `v98` after #353 moved it to v100, `v100` after #354 moved it to v101, `v101` after #355 moved it to v102, `v102` after #356 moved it to v104, `v104` after #357 moved it to v105, `v105` after #358 moved it to v107, `v107` after #359 moved it to v108, `v108` after #360 moved it to v109, `v109` after #361 moved it to v110, and `v110` after #364 moved it to v111 — **THIRTY-THREE of those arrived ON `main` already wrong**, because a branch's own prose does not
+to v89, `v90` after #347 moved it to v91, `v91` after #348 moved it to v93, `v93` after #349 moved it to v95, `v95` after #350 moved it to v97, `v97` after #351 moved it to v98, `v98` after #353 moved it to v100, `v100` after #354 moved it to v101, `v101` after #355 moved it to v102, `v102` after #356 moved it to v104, `v104` after #357 moved it to v105, `v105` after #358 moved it to v107, `v107` after #359 moved it to v108, `v108` after #360 moved it to v109, `v109` after #361 moved it to v110, `v110` after #364 moved it to v111, and `v111` after #363 moved it to v113 — **THIRTY-FOUR of those arrived ON `main` already wrong**, because a branch's own prose does not
 update itself when that branch merges, and the branch that writes it cannot
 know it will be the last to land. **THE EIGHTH AND NINTH ARE THE ONES THE #329
 GUARD WAS BUILT FOR AND COULD NOT SEE:** both claims went stale-LOW together, so they
@@ -2824,7 +2824,7 @@ builds indistinguishable at `/voice/health` — the single thing this constant
 exists to prevent — and a number BELOW `main` reads as a failed pull. **v59 is
 the newest addition to that list** — it was #293's number from 2026-09-19 until
 #325 moved `main` to v69, at which point it fell below and the branch re-bumped
-to v70. **THIS PARAGRAPH ITSELF HAS ARRIVED ON `main` WRONG TWENTY-EIGHT TIMES**, once naming
+to v70. **THIS PARAGRAPH ITSELF HAS ARRIVED ON `main` WRONG TWENTY-NINE TIMES**, once naming
 v67 as what `main` carried, once describing #328 and #293 as open siblings,
 once naming v70 after #329 had moved `main` to v72, once naming v72 after
 #333 had moved `main` to v73, once naming v73 after #335 had moved `main`

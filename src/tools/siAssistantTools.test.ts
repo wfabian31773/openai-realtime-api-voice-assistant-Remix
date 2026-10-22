@@ -19,6 +19,8 @@ import { FakeOutboundStore } from "../runtime/outbound/store.testkit";
 import { MemoryPluginStore } from "../plugin/store";
 import { flushDueOutbox, outboxIdempotencyKey } from "../plugin/messageOutbox";
 import { callbackSessionFor, openCallbackSession } from "./outboundTools";
+import { evaluateAndEnqueueCall } from "../plugin/callEnqueue";
+import { siAssistantIdentityFor } from "../plugin/siAssistantIdentity";
 
 afterEach(() => {
   setSiAssistantToolStoreForTests(null);
@@ -464,5 +466,112 @@ describe("take_si_assistant_message", () => {
     const row = [...plugin.outbox.values()].find((r) => r.callSid === sidYes);
     expect(row?.ticketNumber).toBe("VA-61001");
     expect(row?.approvalId).toBe("appr-1");
+  });
+
+  it("verifies a dialled patient from the real enqueue path, with no injected date of birth", async () => {
+    bindOutbox();
+    const store = new FakeOutboundStore();
+    const queued = await evaluateAndEnqueueCall(
+      store,
+      {
+        approvalId: "appr-1",
+        phone: "+15555550111",
+        firstName: "Testa",
+        lastName: "Patient",
+        dateOfBirth: "March 17, 1950",
+        ticketNumber: "VA-61001",
+        ticketId: "tid-9",
+      },
+      new Date("2026-10-22T18:00:00Z"),
+    );
+    expect(queued).toMatchObject({ ok: true });
+    const contact = [...store.contacts.values()][0];
+    expect(contact.customData.date_of_birth).toBe("1950-03-17");
+    expect(Object.keys(contact.customData)).not.toContain("injected");
+    const attemptId = await store.startAttempt(contact.id, store.campaignId, 1);
+    setSiAssistantToolStoreForTests(store);
+    const sid = "CA" + "b".repeat(32);
+    expect(
+      await getTool(CONFIRM_IDENTITY_TOOL_NAME)!.handler({
+        speaking_with_named_patient: true,
+        date_of_birth: "March 17 1950",
+        outbound_contact_id: contact.id,
+        outbound_attempt_id: attemptId,
+        outbound_call_sid: sid,
+      }),
+    ).toMatchObject({ success: true, confirmed: true });
+  });
+
+  it("when enqueue stored no date of birth, says it cannot verify and never says does not match", async () => {
+    const store = new FakeOutboundStore();
+    await evaluateAndEnqueueCall(
+      store,
+      {
+        approvalId: "appr-1",
+        phone: "+15555550111",
+        firstName: "Testa",
+        lastName: "Patient",
+        ticketNumber: "VA-61001",
+      },
+      new Date("2026-10-22T18:00:00Z"),
+    );
+    const contact = [...store.contacts.values()][0];
+    expect(contact.customData.date_of_birth).toBeUndefined();
+    const attemptId = await store.startAttempt(contact.id, store.campaignId, 1);
+    setSiAssistantToolStoreForTests(store);
+    const result = await getTool(CONFIRM_IDENTITY_TOOL_NAME)!.handler({
+      speaking_with_named_patient: true,
+      date_of_birth: "March 17 1950",
+      outbound_contact_id: contact.id,
+      outbound_attempt_id: attemptId,
+      outbound_call_sid: "CA" + "c".repeat(32),
+    });
+    expect(result).toMatchObject({ success: true, confirmed: false, cannot_verify: true });
+    const fix = String((result as { fix: string }).fix);
+    expect(fix).toMatch(/cannot verify/i);
+    expect(fix).toMatch(/take a message/i);
+    expect(fix).toMatch(/do not say.{0,40}does not match/i);
+    expect(fix).not.toMatch(/does not match the patient on file/i);
+  });
+
+  it("keeps wrong_person sticky so a later yes cannot attach", async () => {
+    bindOutbox();
+    const store = new FakeOutboundStore();
+    await evaluateAndEnqueueCall(
+      store,
+      {
+        approvalId: "appr-1",
+        phone: "+15555550111",
+        firstName: "Testa",
+        lastName: "Patient",
+        dateOfBirth: "1950-03-17",
+        ticketNumber: "VA-61001",
+      },
+      new Date("2026-10-22T18:00:00Z"),
+    );
+    const contact = [...store.contacts.values()][0];
+    const attemptId = await store.startAttempt(contact.id, store.campaignId, 1);
+    setSiAssistantToolStoreForTests(store);
+    const sid = "CA" + "d".repeat(32);
+    await getTool(CONFIRM_IDENTITY_TOOL_NAME)!.handler({
+      speaking_with_named_patient: false,
+      outbound_contact_id: contact.id,
+      outbound_attempt_id: attemptId,
+      outbound_call_sid: sid,
+    });
+    expect(siAssistantIdentityFor(sid)?.wrongPerson).toBe(true);
+    const later = await getTool(CONFIRM_IDENTITY_TOOL_NAME)!.handler({
+      speaking_with_named_patient: true,
+      date_of_birth: "March 17 1950",
+      outbound_contact_id: contact.id,
+      outbound_attempt_id: attemptId,
+      outbound_call_sid: sid,
+    });
+    expect(later).toMatchObject({ confirmed: false });
+    expect(siAssistantIdentityFor(sid)).toMatchObject({
+      wrongPerson: true,
+      greetingAffirmed: false,
+      dobMatched: false,
+    });
   });
 });
