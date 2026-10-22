@@ -144,8 +144,10 @@ export async function computeFivestar(day: string, src: Sources): Promise<DayRes
   for (const c of calls) if (c.substantive) bump(submitted, base("5star.submitted_rate_a", c.build), c.submitted ? 1 : 0, 1);
   const values = [...submitted.values()];
 
-  // Booked: only submitted, substantive calls can carry a booking here.
-  const candidates = calls.filter((c) => c.substantive && c.submitted);
+  // Booked: every substantive call is looked up. Submission is a separate,
+  // non-independent signal; a booking whose notes lost REQUEST_SUBMITTED (a
+  // failed write-back) still counts (Codex, #365: 2 such calls 10-01..10-22).
+  const candidates = calls.filter((c) => c.substantive);
   const bookedCalls = new Set<string>();
   if (!src.console) {
     unavailable["5star.booked_rate_a"] = "Patient Console connection not configured";

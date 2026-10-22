@@ -11,6 +11,7 @@
  * ai-bridge learning/vocab.json held to it by a parity test) only where one
  * clearly fits; anything else carries no shape and is classified by a person.
  */
+import { METHOD_VERSION } from "./definitions";
 import vocab from "./vocab.json";
 
 export interface StoredValue {
@@ -61,11 +62,14 @@ export function detectCandidates(values: StoredValue[]): Candidate[] {
   // build split is read beside it, not instead of it. One method version only.
   const series = new Map<string, Map<string, { n: number; d: number }>>();
   for (const v of values) {
+    // Only the current method: a retired definition's series is not a current candidate.
+    if (v.method_version !== METHOD_VERSION) continue;
     const k = `${v.method_version}|${v.repo}|${v.metric_id}|${v.lane}`;
     const days = series.get(k) ?? new Map();
     const cur = days.get(v.run_date) ?? { n: 0, d: 0 };
     cur.n += Number(v.numerator);
-    cur.d += Number(v.denominator);
+    // UNKNOWN provenance is neither filed nor unfiled (the metric contract).
+    cur.d += Number(v.denominator) - Number(v.unknown_count ?? 0);
     days.set(v.run_date, cur);
     series.set(k, days);
   }

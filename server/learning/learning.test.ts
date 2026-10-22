@@ -62,7 +62,7 @@ describe("a definition change is a new method version", () => {
     const h = createHash("sha256").update(definitionsText()).digest("hex").slice(0, 16);
     // If this fails you changed a definition: bump METHOD_VERSION and pin the new hash beside it.
     expect(h).toBe(DEFINITIONS_HASH);
-    expect(METHOD_VERSION).toBe("learning-v1");
+    expect(METHOD_VERSION).toBe("learning-v2");
   });
 
   it("every statement and every definition is inside the hashed text", () => {
@@ -203,7 +203,8 @@ describe("the fleet filed rate", () => {
 
 // 5Star: c1 booked by NextGen id, c2 booked by person+slot, c3 submitted but the
 // mirror says no, c4 NPX firm, c5 NPX fuzzy, c6 cancelled locally, c7 no ids,
-// c8 substantive not asked, c9 not substantive.
+// c8 substantive, not asked and NOT submitted yet holding a firm NPX booking
+// (a submission write-back that failed), c9 not substantive.
 const fsCalls = [
   { id: "c1", build: "b1", substantive: true, submitted: true, asked: true },
   { id: "c2", build: "b1", substantive: true, submitted: true, asked: true },
@@ -238,6 +239,7 @@ const fsBookings = [
   booking("c5", { source: "npx", npx_link_method: "fuzzy_needs_review", partner_outcome_status: "in_partner_schedule" }),
   booking("c6", { status: "cancelled", person_id: "66666666-6666-6666-6666-666666666666" }),
   booking("c7", {}),
+  booking("c8", { source: "npx", npx_link_method: "external_ref", partner_outcome_status: "awaiting_outcome" }),
 ];
 
 function fsSources(consoleBooked: string[] | null = ["c1|bk-c1", "c2|bk-c2", "c2|bk-c2-second"]) {
@@ -255,8 +257,9 @@ describe("the 5Star booked rates", () => {
     expect(get("5star.submitted_rate_a", "b2")).toMatchObject({ numerator: 4, denominator: 5 });
     // b1: c1 and c2 booked (c2 once, though two bookings), c3 not.
     expect(get("5star.booked_rate_a", "b1")).toMatchObject({ numerator: 2, denominator: 3 });
-    // b2: only c4 (NPX firm). c5 fuzzy, c6 cancelled, c7 uncheckable, c8 not submitted.
-    expect(get("5star.booked_rate_a", "b2")).toMatchObject({ numerator: 1, denominator: 5 });
+    // b2: c4 and c8 (NPX firm; c8 counts though its notes lost the submission).
+    // c5 fuzzy, c6 cancelled, c7 uncheckable. c8 is not asked, so B stays 1/4.
+    expect(get("5star.booked_rate_a", "b2")).toMatchObject({ numerator: 2, denominator: 5 });
     expect(get("5star.booked_rate_b", "b2")).toMatchObject({ numerator: 1, denominator: 4 });
   });
 
@@ -269,11 +272,11 @@ describe("the 5Star booked rates", () => {
     expect(consoleQ).toBeDefined();
   });
 
-  it("only submitted substantive calls are looked up", async () => {
+  it("every substantive call is looked up, submitted or not (Codex, #365)", async () => {
     const { fivestar, src } = fsSources();
     await computeFivestar("2026-10-20", src);
     const asked = fivestar.calls.find((c) => c.text === FIVESTAR_BOOKINGS_SQL)?.params?.[0];
-    expect(asked).toEqual(["c1", "c2", "c3", "c4", "c5", "c6", "c7"]);
+    expect(asked).toEqual(["c1", "c2", "c3", "c4", "c5", "c6", "c7", "c8"]);
   });
 
   it("the NPX rule is isFirmPartnerLink plus the booked statuses", () => {
@@ -339,7 +342,7 @@ describe("the run", () => {
     expect(out.status).toBe("partial"); // no Support Center, no 5Star in this fixture
     expect(tx.calls.map((c) => c.text)).toEqual(["BEGIN", DAY_LOCK_SQL, UPSERT_RUN_SQL, DELETE_VALUES_SQL, INSERT_VALUES_SQL, "COMMIT"]);
     const [day, status, version, notes] = tx.calls[2].params as string[];
-    expect([day, status, version]).toEqual(["2026-10-20", "partial", "learning-v1"]);
+    expect([day, status, version]).toEqual(["2026-10-20", "partial", "learning-v2"]);
     const n = JSON.parse(notes);
     expect(n.readAt).toBe("2026-10-21T11:00:00.000Z");
     expect(n.unavailable["remix.filed_rate_independent"]).toBeTruthy();
@@ -455,12 +458,12 @@ function mockRes() {
 }
 
 const storedValues: StoredValue[] = [
-  { run_date: "2026-10-20", method_version: "learning-v1", metric_id: "remix.filed_rate", repo: "Remix", lane: "tech", runtime_marker: "voice-runtime-v111-x", numerator: 137, denominator: 150, unknown_count: 0 },
+  { run_date: "2026-10-20", method_version: "learning-v2", metric_id: "remix.filed_rate", repo: "Remix", lane: "tech", runtime_marker: "voice-runtime-v111-x", numerator: 137, denominator: 150, unknown_count: 0 },
 ];
 
 describe("the export", () => {
   const hub = fakeQuery((text) => {
-    if (text === EXPORT_RUNS_SQL) return [{ id: 1, run_date: "2026-10-20", status: "partial", method_version: "learning-v1", notes: JSON.stringify({ readAt: "2026-10-21T11:00:00Z", unavailable: { "remix.filed_rate_independent": "A1" } }) }];
+    if (text === EXPORT_RUNS_SQL) return [{ id: 1, run_date: "2026-10-20", status: "partial", method_version: "learning-v2", notes: JSON.stringify({ readAt: "2026-10-21T11:00:00Z", unavailable: { "remix.filed_rate_independent": "A1" } }) }];
     if (text === EXPORT_VALUES_SQL) return storedValues;
     return [];
   });
@@ -525,6 +528,25 @@ describe("candidates", () => {
     // A thin newest day is not read, even against a sound baseline.
     const thinLast = series([0.9, 0.91, 0.89, 0.9, 0.9, 0.91, 0.9, 0.89]).concat({ ...storedValues[0], run_date: day(9), numerator: 2, denominator: 10 });
     expect(detectCandidates(thinLast)).toEqual([]);
+  });
+
+  it("an UNKNOWN-provenance call is neither filed nor unfiled (Codex, #365)", () => {
+    // 90% of the KNOWN calls filed every day; the last day has 40 UNKNOWN on top.
+    // Counted as unfiled they would read 0.54 and raise a false drop.
+    const vals = series([0.9, 0.91, 0.89, 0.9, 0.9, 0.91, 0.9, 0.89, 0.9]).map((v) => ({ ...v, metric_id: "remix.filed_rate_independent" }));
+    vals[8] = { ...vals[8], denominator: 140, unknown_count: 40 };
+    expect(detectCandidates(vals)).toEqual([]);
+  });
+
+  it("a retired method version is not a current candidate (Codex, #365)", () => {
+    const old = series([0.9, 0.91, 0.89, 0.9, 0.9, 0.91, 0.9, 0.89, 0.6]).map((v) => ({ ...v, method_version: "learning-v0" }));
+    expect(detectCandidates(old)).toEqual([]);
+  });
+
+  it("the mirror's NextGen id outranks a person + slot match (Codex, #365)", () => {
+    const order = CONSOLE_BOOKED_SQL.slice(CONSOLE_BOOKED_SQL.indexOf("ORDER BY"));
+    expect(order.indexOf("f.appointment_id = b.appointment_id::uuid")).toBeGreaterThan(-1);
+    expect(order.indexOf("f.appointment_id = b.appointment_id::uuid")).toBeLessThan(order.indexOf("f.is_cancelled ASC"));
   });
 
   it("every shape named is in the closed vocabulary", () => {

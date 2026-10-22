@@ -21,9 +21,9 @@
  */
 
 /** Bump with DEFINITIONS_HASH whenever any text below changes. */
-export const METHOD_VERSION = "learning-v1";
+export const METHOD_VERSION = "learning-v2";
 /** sha256 of definitionsText(), first 16 hex. definitions.test.ts pins it. */
-export const DEFINITIONS_HASH = "39ae0af751d85493";
+export const DEFINITIONS_HASH = "5729209fd50f7d08";
 
 export const PACIFIC = "America/Los_Angeles";
 
@@ -209,7 +209,11 @@ hit AS (
     WHERE (b.appointment_id ~* '^[0-9a-f-]{36}$' AND f.appointment_id = b.appointment_id::uuid)
        OR (b.person_id ~* '^[0-9a-f-]{36}$' AND f.person_id = b.person_id::uuid
            AND f.appointment_date = b.slot_date AND f.begin_time = b.slot_time)
-    ORDER BY f.is_cancelled ASC
+    -- The NextGen id wins: person + slot is a fallback for a booking whose id
+    -- the mirror does not hold, never a second chance for a cancelled id.
+    -- coalesce: DESC puts NULL first, and a NULL id must not outrank a match.
+    ORDER BY coalesce(b.appointment_id ~* '^[0-9a-f-]{36}$' AND f.appointment_id = b.appointment_id::uuid, false) DESC,
+             f.is_cancelled ASC
     LIMIT 1
   ) f ON true
 )
