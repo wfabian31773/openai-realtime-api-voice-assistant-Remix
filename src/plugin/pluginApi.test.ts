@@ -28,6 +28,7 @@ import type { SmsSender } from "./sms";
 
 const PHONE = "+15555550111";
 const TICKET = "VA-61001";
+const CALL_DOB = "March 17, 1950";
 
 function agents() {
   return {
@@ -172,7 +173,7 @@ describe("the approval gate", () => {
     const res = await fetch(`${base}/api/plugin/v1/prepare_call`, {
       method: "POST",
       headers: { Authorization: `Bearer ${minted.plaintext}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ phone: PHONE, ticketNumber: TICKET, firstName: "Testa" }),
+      body: JSON.stringify({ phone: PHONE, ticketNumber: TICKET, firstName: "Testa", dateOfBirth: CALL_DOB }),
     });
     expect(res.status).toBe(201);
     const body = (await res.json()) as {
@@ -215,7 +216,7 @@ describe("the approval gate", () => {
     const prep = await fetch(`${base}/api/plugin/v1/prepare_call`, {
       method: "POST",
       headers: { Authorization: `Bearer ${bot.plaintext}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ phone: PHONE, ticketNumber: TICKET, firstName: "Testa" }),
+      body: JSON.stringify({ phone: PHONE, ticketNumber: TICKET, firstName: "Testa", dateOfBirth: CALL_DOB }),
     });
     const pending = (await prep.json()) as { approval: { id: string } };
     const approved = await staffApprove(base, staff, store, pending.approval.id);
@@ -272,6 +273,82 @@ describe("the approval gate", () => {
     expect(JSON.stringify(audit)).not.toContain("Patient");
   });
 
+  it("prepare_call returns 400 when the date of birth is missing or unparseable", async () => {
+    const { base, store } = await boot({ PLUGIN_WRITES_ENABLED: "true" });
+    const bot = store.mint(["contacts:prepare"]);
+    const missing = await fetch(`${base}/api/plugin/v1/prepare_call`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${bot.plaintext}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ phone: PHONE, ticketNumber: TICKET, firstName: "Testa" }),
+    });
+    expect(missing.status).toBe(400);
+    const missingBody = (await missing.json()) as { error: string };
+    expect(missingBody.error).toMatch(/date of birth is required/i);
+
+    const unparseable = await fetch(`${base}/api/plugin/v1/prepare_call`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${bot.plaintext}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        phone: PHONE,
+        ticketNumber: TICKET,
+        dateOfBirth: "1960-03-05T00:00:00.000Z",
+      }),
+    });
+    expect(unparseable.status).toBe(400);
+    const unparseableBody = (await unparseable.json()) as { error: string };
+    expect(unparseableBody.error).toMatch(/unparseable/i);
+  });
+
+  it("prepare_call returns 400 when dateOfBirth and date_of_birth disagree", async () => {
+    const { base, store } = await boot({ PLUGIN_WRITES_ENABLED: "true" });
+    const minted = store.mint(["contacts:prepare"]);
+    const res = await fetch(`${base}/api/plugin/v1/prepare_call`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${minted.plaintext}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        phone: PHONE,
+        ticketNumber: TICKET,
+        dateOfBirth: "March 17, 1950",
+        date_of_birth: "1951-03-17",
+      }),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toMatch(/dateOfBirth and date_of_birth disagree/i);
+  });
+
+  it("prepare_call accepts ticketing birthMonth, birthDay and birthYear", async () => {
+    const now = () => new Date("2026-10-22T18:00:00Z");
+    const { base, store, outbound } = await boot({ PLUGIN_WRITES_ENABLED: "true" }, { now });
+    const bot = store.mint(["contacts:prepare", "contacts:commit"]);
+    const staff = store.mint(["contacts:approve"]);
+    const prep = await fetch(`${base}/api/plugin/v1/prepare_call`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${bot.plaintext}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        phone: PHONE,
+        ticketNumber: TICKET,
+        firstName: "Testa",
+        lastName: "Patient",
+        birthMonth: 3,
+        birthDay: 17,
+        birthYear: 1950,
+      }),
+    });
+    expect(prep.status).toBe(201);
+    const pending = (await prep.json()) as { approval: { id: string } };
+    const approved = await staffApprove(base, staff, store, pending.approval.id);
+    const token = (await approved.json()) as { confirmToken: string };
+    const committed = await fetch(`${base}/api/plugin/v1/commit_contact`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${bot.plaintext}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ confirmToken: token.confirmToken }),
+    });
+    expect(committed.status).toBe(200);
+    const contact = [...outbound.contacts.values()][0];
+    expect(contact.customData.date_of_birth).toBe("1950-03-17");
+  });
+
   it("a used confirm token cannot be reused", async () => {
     const now = () => new Date("2026-10-22T18:00:00Z");
     const { base, store } = await boot({ PLUGIN_WRITES_ENABLED: "true" }, { now });
@@ -312,7 +389,7 @@ describe("token expiry", () => {
     const prep = await fetch(`${base}/api/plugin/v1/prepare_call`, {
       method: "POST",
       headers: { Authorization: `Bearer ${bot.plaintext}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ phone: PHONE, ticketNumber: TICKET, firstName: "Testa" }),
+      body: JSON.stringify({ phone: PHONE, ticketNumber: TICKET, firstName: "Testa", dateOfBirth: CALL_DOB }),
     });
     const pending = (await prep.json()) as {
       confirmToken?: string;
@@ -407,7 +484,7 @@ describe("the calling window and DNC list", () => {
     const prep = await fetch(`${base}/api/plugin/v1/prepare_call`, {
       method: "POST",
       headers: { Authorization: `Bearer ${bot.plaintext}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ phone: PHONE, ticketNumber: TICKET }),
+      body: JSON.stringify({ phone: PHONE, ticketNumber: TICKET, dateOfBirth: CALL_DOB }),
     });
     const pending = (await prep.json()) as { approval: { id: string } };
     const approved = await staffApprove(base, staff, store, pending.approval.id);
@@ -930,7 +1007,7 @@ describe("review findings", () => {
     const prep = await fetch(`${base}/api/plugin/v1/prepare_call`, {
       method: "POST",
       headers: { Authorization: `Bearer ${bot.plaintext}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ phone: PHONE, ticketNumber: TICKET }),
+      body: JSON.stringify({ phone: PHONE, ticketNumber: TICKET, dateOfBirth: CALL_DOB }),
     });
     const pending = (await prep.json()) as { approval: { id: string } };
     const approved = await staffApprove(base, staff, store, pending.approval.id);
@@ -951,7 +1028,7 @@ describe("review findings", () => {
     const prep2 = await fetch(`${missing.base}/api/plugin/v1/prepare_call`, {
       method: "POST",
       headers: { Authorization: `Bearer ${bot2.plaintext}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ phone: PHONE, ticketNumber: TICKET }),
+      body: JSON.stringify({ phone: PHONE, ticketNumber: TICKET, dateOfBirth: CALL_DOB }),
     });
     const pending2 = (await prep2.json()) as { approval: { id: string } };
     const approved2 = await staffApprove(missing.base, staff2, missing.store, pending2.approval.id);

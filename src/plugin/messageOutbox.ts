@@ -123,30 +123,33 @@ async function noteDead(store: PluginStore, row: MessageOutboxRow): Promise<void
   }
 }
 
-type AttachmentFollowUp = {
+type TicketStamp = {
   ticketId?: string | null;
   ticketNumber?: string | null;
   approvalId?: string | null;
-  idempotencyKey?: string | null;
 };
 
-const attachmentFollowUps = new Map<string, AttachmentFollowUp>();
-
-export function resetAttachmentFollowUpsForTests(): void {
-  attachmentFollowUps.clear();
+function ticketStamp(row: TicketStamp): { ticketId: string | null; ticketNumber: string | null; approvalId: string | null } {
+  return {
+    ticketId: row.ticketId ?? null,
+    ticketNumber: row.ticketNumber ?? null,
+    approvalId: row.approvalId ?? null,
+  };
 }
 
-function queueAttachmentFollowUp(row: MessageOutboxRow): void {
-  attachmentFollowUps.set(row.id, {
-    ticketId: row.ticketId,
-    ticketNumber: row.ticketNumber,
-    approvalId: row.approvalId,
-    idempotencyKey: row.idempotencyKey,
-  });
+function hasTicketStamp(row: TicketStamp): boolean {
+  const s = ticketStamp(row);
+  return Boolean(s.ticketId || s.ticketNumber || s.approvalId);
+}
+
+function ticketStampsDiffer(a: TicketStamp, b: TicketStamp): boolean {
+  const left = ticketStamp(a);
+  const right = ticketStamp(b);
+  return left.ticketId !== right.ticketId || left.ticketNumber !== right.ticketNumber || left.approvalId !== right.approvalId;
 }
 
 async function reportAttachmentUpdate(
-  row: { id: string } & AttachmentFollowUp,
+  row: { id: string; idempotencyKey?: string | null } & TicketStamp,
   reporter: CallbackReporter,
 ): Promise<void> {
   await reporter.report({
@@ -170,16 +173,20 @@ async function settleDelivery(
   reporter: CallbackReporter | null = null,
 ): Promise<void> {
   if (delivered.ok) {
-    await store.markOutbox(
+    const marked = await store.markOutbox(
       row.id,
       { status: "delivered", lastError: null, message: "", updatedAt: now },
       "sending",
     );
-    const follow = attachmentFollowUps.get(row.id);
-    attachmentFollowUps.delete(row.id);
-    if (follow && (follow.ticketId || follow.ticketNumber || follow.approvalId) && reporter) {
+    const current = marked ?? row;
+    // Ticket keys live on the outbox row (persisted by attachOutboxTickets).
+    // If they changed after the send snapshot, this is an attachmentUpdate.
+    if (reporter && hasTicketStamp(current) && ticketStampsDiffer(row, current)) {
       try {
-        await reportAttachmentUpdate({ id: row.id, ...follow }, reporter);
+        await reportAttachmentUpdate(
+          { id: row.id, idempotencyKey: current.idempotencyKey ?? row.idempotencyKey, ...ticketStamp(current) },
+          reporter,
+        );
       } catch {
         console.error("[si-assistant] outbox attachment follow-up failed");
       }
@@ -198,7 +205,6 @@ async function settleDelivery(
     "sending",
   );
   if (dead) {
-    attachmentFollowUps.delete(row.id);
     await noteDead(store, row);
   }
   console.error(`[si-assistant] outbox ${row.id} ${delivered.error}${dead ? " dead" : ""}`);
@@ -274,9 +280,8 @@ export async function reattachTakenMessages(
       continue;
     }
     if (row.status === "sending") {
-      // In-flight flush already captured the unmatched snapshot. Queue a
-      // follow-up so settleDelivery attaches the ticket keys after it lands.
-      queueAttachmentFollowUp(row);
+      // Keys are already on the row. settleDelivery compares markOutbox's
+      // current keys to the send snapshot and reports attachmentUpdate.
       continue;
     }
     if (row.status === "delivered" && reporter) {

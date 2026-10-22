@@ -574,4 +574,45 @@ describe("take_si_assistant_message", () => {
       dobMatched: false,
     });
   });
+
+  it("treats a failed contact load as an error, not as no date of birth", async () => {
+    bindOutbox();
+    const store = new FakeOutboundStore();
+    await evaluateAndEnqueueCall(
+      store,
+      {
+        approvalId: "appr-1",
+        phone: "+15555550111",
+        firstName: "Testa",
+        lastName: "Patient",
+        dateOfBirth: "1950-03-17",
+        ticketNumber: "VA-61001",
+      },
+      new Date("2026-10-22T18:00:00Z"),
+    );
+    const contact = [...store.contacts.values()][0];
+    const attemptId = await store.startAttempt(contact.id, store.campaignId, 1);
+    store.loadCallContact = async () => {
+      throw new Error("db down");
+    };
+    setSiAssistantToolStoreForTests(store);
+    const err = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const result = await getTool(CONFIRM_IDENTITY_TOOL_NAME)!.handler({
+      speaking_with_named_patient: true,
+      date_of_birth: "March 17 1950",
+      outbound_contact_id: contact.id,
+      outbound_attempt_id: attemptId,
+      outbound_call_sid: "CA" + "e".repeat(32),
+    });
+    err.mockRestore();
+    expect(result).toMatchObject({
+      success: false,
+      error: "contact_load_failed",
+    });
+    const fix = String((result as { fix: string }).fix);
+    expect(fix).toMatch(/right now/i);
+    expect(fix).toMatch(/take a message/i);
+    expect(fix).toMatch(/do not say there is no date of birth on file/i);
+    expect(fix).not.toMatch(/there is no date of birth on file, so you cannot verify/i);
+  });
 });

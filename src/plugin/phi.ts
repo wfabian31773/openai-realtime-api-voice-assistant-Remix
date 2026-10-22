@@ -23,6 +23,9 @@ export const PHI_FIELD_NAMES = [
   "email",
   "dateOfBirth",
   "date_of_birth",
+  "birthMonth",
+  "birthDay",
+  "birthYear",
   "resolutionNotes",
 ] as const;
 

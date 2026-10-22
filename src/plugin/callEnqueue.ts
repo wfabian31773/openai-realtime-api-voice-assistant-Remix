@@ -39,10 +39,76 @@ export interface EnqueueCallInput {
  * Unparseable input is omitted — missing is not a mismatch.
  */
 export function storedDobFromInput(raw: unknown): string | null {
+  if (raw == null) return null;
+  if (typeof raw === "number" && Number.isFinite(raw)) {
+    return storedDobFromInput(String(raw));
+  }
   if (typeof raw !== "string" || !raw.trim()) return null;
   const parts = readDobQuietly(raw);
   if (!parts) return null;
   return `${parts.year}-${parts.month}-${parts.day}`;
+}
+
+function sourcePresent(value: unknown): boolean {
+  return value !== undefined && value !== null;
+}
+
+function birthPartsRaw(payload: Record<string, unknown>): { present: boolean; raw: string | null } {
+  const present =
+    sourcePresent(payload.birthMonth) || sourcePresent(payload.birthDay) || sourcePresent(payload.birthYear);
+  if (!present) return { present: false, raw: null };
+  const month = payload.birthMonth;
+  const day = payload.birthDay;
+  const year = payload.birthYear;
+  if (!sourcePresent(month) || !sourcePresent(day) || !sourcePresent(year)) {
+    return { present: true, raw: null };
+  }
+  return { present: true, raw: `${String(month).trim()}/${String(day).trim()}/${String(year).trim()}` };
+}
+
+export type PrepareDobResult = { ok: true; dateOfBirth: string } | { ok: false; error: string };
+
+/**
+ * Resolve the ticket patient's date of birth from prepare_call.
+ * Accepts dateOfBirth, date_of_birth, or ticketing's birthMonth/Day/Year.
+ * Missing or unparseable is a 400. Two present sources that parse differently
+ * are a 400.
+ */
+export function prepareDobFromPayload(payload: Record<string, unknown>): PrepareDobResult {
+  const sources: Array<{ name: string; parsed: string | null }> = [];
+  if (sourcePresent(payload.dateOfBirth)) {
+    sources.push({ name: "dateOfBirth", parsed: storedDobFromInput(payload.dateOfBirth) });
+  }
+  if (sourcePresent(payload.date_of_birth)) {
+    sources.push({ name: "date_of_birth", parsed: storedDobFromInput(payload.date_of_birth) });
+  }
+  const parts = birthPartsRaw(payload);
+  if (parts.present) {
+    sources.push({ name: "birth parts", parsed: storedDobFromInput(parts.raw) });
+  }
+  if (sources.length === 0) {
+    return {
+      ok: false,
+      error: "A parseable date of birth is required (dateOfBirth, or birthMonth, birthDay and birthYear)",
+    };
+  }
+  for (const source of sources) {
+    if (!source.parsed) {
+      return { ok: false, error: "date of birth is unparseable" };
+    }
+  }
+  const first = sources[0].parsed!;
+  for (const source of sources.slice(1)) {
+    if (source.parsed !== first) {
+      const bothAliases =
+        sources.some((s) => s.name === "dateOfBirth") && sources.some((s) => s.name === "date_of_birth");
+      return {
+        ok: false,
+        error: bothAliases ? "dateOfBirth and date_of_birth disagree" : "dates of birth disagree",
+      };
+    }
+  }
+  return { ok: true, dateOfBirth: first };
 }
 
 /** Name + DOB from the locked prepare_call payload (ticket patient). */
@@ -53,8 +119,8 @@ export function identityFromPreparePayload(payload: Record<string, unknown>): {
 } {
   const firstName = typeof payload.firstName === "string" ? payload.firstName.trim() || null : null;
   const lastName = typeof payload.lastName === "string" ? payload.lastName.trim() || null : null;
-  const dateOfBirth = storedDobFromInput(payload.dateOfBirth ?? payload.date_of_birth);
-  return { firstName, lastName, dateOfBirth };
+  const dob = prepareDobFromPayload(payload);
+  return { firstName, lastName, dateOfBirth: dob.ok ? dob.dateOfBirth : null };
 }
 
 export type EnqueueCallResult =

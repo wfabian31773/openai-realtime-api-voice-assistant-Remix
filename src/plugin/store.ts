@@ -96,6 +96,9 @@ export interface CallPayload {
   lastName?: string | null;
   dateOfBirth?: string | null;
   date_of_birth?: string | null;
+  birthMonth?: string | number | null;
+  birthDay?: string | number | null;
+  birthYear?: string | number | null;
   ticketId?: string | null;
   ticketNumber?: string | null;
   purpose?: string | null;

@@ -237,6 +237,14 @@ registerTool({
         onFile = contact ? dobOnFile({ data: contact.data ?? {} }) : null;
       } catch {
         console.error('[si-assistant] confirm-identity contact load failed');
+        return {
+          success: false,
+          missingFields: [],
+          error: 'contact_load_failed',
+          message: 'I cannot verify who you are right now.',
+          fix:
+            'The patient record could not be loaded. Do not say there is no date of birth on file. Do not say the date of birth does not match. Say you cannot verify who they are right now and offer to take a message.',
+        };
       }
     }
     const session = callbackSessionFor(sid);

@@ -50,8 +50,11 @@ prepare, approve, reject, cancel and commit.
 Approved calls enqueue **one** contact into the existing campaign dialer
 (`src/runtime/outbound/`). They go out from `SI_ASSISTANT_NUMBER`
 (+1 909-255-3213). `prepare_call` must send the ticket patient's
-`firstName`, `lastName` and `dateOfBirth` (from the ticket). Enqueue
-copies those into the contact row and `custom_data.date_of_birth` —
+`firstName`, `lastName` and a parseable `dateOfBirth` (or `date_of_birth`,
+or ticketing's `birthMonth` / `birthDay` / `birthYear`). A missing or
+unparseable date is HTTP 400. If `dateOfBirth` and `date_of_birth` both
+arrive and parse to different days, the request is refused. Enqueue
+copies the resolved date into the contact row and `custom_data.date_of_birth` —
 memory and contact data only, never logs or `plugin_audit_log`. Returned
 callers read the same field on the campaign candidates. The dialer already enforces:
 
@@ -81,15 +84,20 @@ to "Am I speaking with <name>?" plus a matching date of birth
 (`confirm_si_assistant_identity`). If the call records `wrong_person`,
 nothing attaches. A phone match never attaches. A message taken before
 identification is re-attached to the same keys once they are identified.
-If the outbox row is mid-send (`sending`) when that happens, the in-flight
-delivery may still go out unmatched; a follow-up webhook then carries
-`attachmentUpdate: true` with the same `outboxId` and `idempotencyKey`
-and the ticket keys. **Ticketing contract:** that payload is an UPDATE
-to the existing My Messages item (attach the ticket keys), not a
-duplicate to drop and not a second message. A later identification
-with no date of birth on file cannot verify — the agent says so and
-takes a message; it must not say the date "does not match".
-`wrong_person` is sticky for the rest of the call.
+If the outbox row is mid-send (`sending`) when that happens, the ticket
+keys are stamped on the outbox row (persisted). The in-flight delivery
+may still go out unmatched; when `markOutbox` marks it delivered it
+compares those current keys to the send snapshot, and if they differ a
+follow-up webhook carries `attachmentUpdate: true` with the same
+`outboxId` and `idempotencyKey` and the ticket keys. **Ticketing
+contract:** that payload is an UPDATE to the existing My Messages item
+(attach the ticket keys), not a duplicate to drop and not a second
+message. A later identification with no date of birth on file cannot
+verify — the agent says so and takes a message; it must not say the
+date "does not match". A contact-load failure is a separate error: the
+agent says it cannot verify right now and takes a message; it must not
+say there is no date of birth on file. `wrong_person` is sticky for the
+rest of the call.
 Unidentified callbacks go to SI Assistant My Messages with up to three
 suggested tickets (ticket number and approval id only, no extra PHI)
 drawn from the union of placed dials (actually reached the network, not

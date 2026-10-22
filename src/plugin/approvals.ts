@@ -5,6 +5,7 @@
  */
 
 import { dncKey } from "../runtime/outbound/store";
+import { prepareDobFromPayload } from "./callEnqueue";
 import { hashPayload, hashSecret, isConfirmExpired } from "./tokens";
 import {
   issueConfirmOnApprove,
@@ -23,7 +24,19 @@ import {
 export const PREPARE_PAYLOAD_MAX_BYTES = 8192;
 
 const PREPARE_KEYS: Record<ContactChannel, readonly string[]> = {
-  call: ["phone", "firstName", "lastName", "dateOfBirth", "date_of_birth", "ticketId", "ticketNumber", "purpose"],
+  call: [
+    "phone",
+    "firstName",
+    "lastName",
+    "dateOfBirth",
+    "date_of_birth",
+    "birthMonth",
+    "birthDay",
+    "birthYear",
+    "ticketId",
+    "ticketNumber",
+    "purpose",
+  ],
   sms: ["phone", "body", "ticketId", "ticketNumber"],
   email: ["to", "subject", "body", "ticketId", "ticketNumber"],
 };
@@ -72,6 +85,8 @@ function requireEmail(value: unknown): string | null {
 export function validatePrepare(input: PrepareInput): { ok: true } | { ok: false; error: string } {
   if (input.channel === "call") {
     if (!requirePhone(input.payload.phone)) return { ok: false, error: "A valid US phone number is required" };
+    const dob = prepareDobFromPayload(input.payload as unknown as Record<string, unknown>);
+    if (!dob.ok) return { ok: false, error: dob.error };
     return { ok: true };
   }
   if (input.channel === "sms") {

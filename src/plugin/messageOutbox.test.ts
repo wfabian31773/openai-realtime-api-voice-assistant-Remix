@@ -2,7 +2,7 @@
  * Durable outbox: reclaim, dead audit, retention, idempotency.
  * Synthetic ids and messages only.
  */
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   flushDueOutbox,
   flushOutboxRow,
@@ -10,16 +10,11 @@ import {
   purgeOutboxRetention,
   reattachTakenMessages,
   reclaimStaleOutboxSending,
-  resetAttachmentFollowUpsForTests,
   settleOutboxDelivery,
 } from "./messageOutbox";
 import { MemoryPluginStore, OUTBOX_MAX_ATTEMPTS, OUTBOX_RETENTION_MS, STALE_SENDING_MS } from "./store";
 import { createSqlPluginStore } from "./sqlStore";
 import type { CallbackReporter } from "./callbackReport";
-
-afterEach(() => {
-  resetAttachmentFollowUpsForTests();
-});
 
 describe("message outbox", () => {
   it("reclaims a stale sending row so the sweep can retry", async () => {
@@ -220,6 +215,8 @@ describe("message outbox", () => {
     );
     expect(persisted).toBeTruthy();
     await store.markOutbox(persisted!.id, { status: "sending", attempts: 1, updatedAt: now }, "pending");
+    const sendSnapshot = { ...store.outbox.get(persisted!.id)! };
+    expect(sendSnapshot.ticketNumber).toBeNull();
 
     const posted: Array<Record<string, unknown>> = [];
     const reporter: CallbackReporter = {
@@ -241,13 +238,7 @@ describe("message outbox", () => {
     expect(store.outbox.get(persisted!.id)?.ticketNumber).toBe("VA-61001");
     expect(posted).toEqual([]);
 
-    await settleOutboxDelivery(
-      store,
-      { ...store.outbox.get(persisted!.id)! },
-      { ok: true, error: "" },
-      now,
-      reporter,
-    );
+    await settleOutboxDelivery(store, sendSnapshot, { ok: true, error: "" }, now, reporter);
     expect(posted).toHaveLength(1);
     expect(posted[0]).toMatchObject({
       event: "message",
