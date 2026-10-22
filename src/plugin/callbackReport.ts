@@ -25,6 +25,8 @@ export interface CallbackReport {
   smsCommand?: string;
   /** Taken-message text. Delivered only to the ticketing webhook. Never logged. */
   message?: string;
+  /** No unique ticket+patient match — SI Assistant My Messages should route it. */
+  unmatched?: boolean;
 }
 
 export type TicketExtras = {
@@ -114,6 +116,7 @@ export async function reportSiAssistantCall(
       ticketNumber: extras.ticketNumber ?? null,
       approvalId: extras.approvalId ?? null,
       ticketId: extras.ticketId ?? null,
+      unmatched: !(extras.ticketNumber || extras.approvalId || extras.ticketId) || undefined,
     });
     if (!result.ok) {
       console.error(`[si-assistant] callback webhook returned ${result.status ?? "unknown"}`);

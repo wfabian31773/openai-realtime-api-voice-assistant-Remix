@@ -38,16 +38,22 @@ export const APPROVAL_STATUSES = [
   "cancelled",
   "committed",
   "failed",
+  "unknown",
 ] as const;
 export type ApprovalStatus = (typeof APPROVAL_STATUSES)[number];
 
 export const OUTBOX_STATUSES = ["pending", "sending", "delivered", "dead"] as const;
 export type OutboxStatus = (typeof OUTBOX_STATUSES)[number];
 
-/** How long a claim may sit in `sending` before the sweep marks it failed. Never resends. */
+/**
+ * How long a claim may sit in `sending` before the sweep labels it
+ * `unknown`. Never resends. Graph and Twilio are bounded well under this.
+ */
 export const STALE_SENDING_MS = 10 * 60 * 1000;
 export const OUTBOX_MAX_ATTEMPTS = 8;
 export const RETURNED_CALL_LOOKBACK_MS = 72 * 60 * 60 * 1000;
+/** Undelivered outbox rows older than this are deleted. Delivered bodies are purged on settle. */
+export const OUTBOX_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 
 export interface ApiTokenRow {
   jti: string;
@@ -130,12 +136,15 @@ export interface PluginStore {
   /** Cancel only while the request is still open and the confirm token is unused. */
   cancelIfOpen(id: string, now: Date): Promise<ContactApprovalRow | null>;
   /**
-   * Mark `sending` rows whose claim is older than `staleBefore` as failed.
+   * Mark `sending` rows whose claim is older than `staleBefore` as unknown.
    * Never resends. Audit separately, ids only.
    */
   reapStaleSending(now: Date, staleBefore: Date): Promise<ContactApprovalRow[]>;
-  /** Most recent approved/sending/committed contact to this last-10, since `since`. */
-  findRecentApprovedContactByPhone(phoneKey: string, since: Date): Promise<ContactApprovalRow | null>;
+  /**
+   * Contacts that were actually sent to this last-10 (`committed` with a
+   * `committedAt` on or after `since`). Unsent approvals do not count.
+   */
+  listCommittedContactsByPhone(phoneKey: string, since: Date): Promise<ContactApprovalRow[]>;
 
   insertOutbox(row: MessageOutboxRow): Promise<MessageOutboxRow>;
   claimDueOutbox(now: Date, limit: number): Promise<MessageOutboxRow[]>;
@@ -144,6 +153,12 @@ export interface PluginStore {
     patch: Partial<MessageOutboxRow>,
     onlyIfStatus?: OutboxStatus,
   ): Promise<MessageOutboxRow | null>;
+  /** Reset stale `sending` outbox rows to `pending` so the sweep can retry. */
+  reclaimStaleOutboxSending(now: Date, staleBefore: Date): Promise<MessageOutboxRow[]>;
+  /** Empty delivered bodies (PHI). */
+  purgeDeliveredOutboxBodies(now: Date): Promise<number>;
+  /** Delete undelivered rows older than `olderThan`. */
+  purgeExpiredOutbox(now: Date, olderThan: Date): Promise<number>;
 
   isSmsOptedOut(phoneKey: string): Promise<boolean>;
   setSmsOptOut(phoneKey: string, optedOut: boolean): Promise<void>;
@@ -164,6 +179,8 @@ export interface MessageOutboxRow {
   attempts: number;
   nextAttemptAt: Date;
   lastError: string | null;
+  /** sha256(callSid + "\\n" + message). Retries with the same words reuse the row. */
+  idempotencyKey?: string | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -300,7 +317,7 @@ export class MemoryPluginStore implements PluginStore {
     for (const row of this.approvals.values()) {
       if (row.status !== "sending") continue;
       if (row.updatedAt.getTime() >= staleBefore.getTime()) continue;
-      row.status = "failed";
+      row.status = "unknown";
       row.result = { reason: "stale_send" };
       row.updatedAt = now;
       marked.push({ ...row, payload: { ...row.payload } });
@@ -308,24 +325,26 @@ export class MemoryPluginStore implements PluginStore {
     return marked;
   }
 
-  async findRecentApprovedContactByPhone(phoneKey: string, since: Date): Promise<ContactApprovalRow | null> {
-    if (!phoneKey) return null;
-    const eligible = ["approved", "sending", "committed"] as const;
-    const matches = [...this.approvals.values()]
+  async listCommittedContactsByPhone(phoneKey: string, since: Date): Promise<ContactApprovalRow[]> {
+    if (!phoneKey) return [];
+    return [...this.approvals.values()]
       .filter((row) => {
-        if (!eligible.includes(row.status as (typeof eligible)[number])) return false;
-        const at = (row.approvedAt ?? row.createdAt).getTime();
-        if (at < since.getTime()) return false;
+        if (row.status !== "committed") return false;
+        if (!row.committedAt || row.committedAt.getTime() < since.getTime()) return false;
         const key = row.phoneKey ?? phoneKeyOfPayload(row.payload);
         return key === phoneKey;
       })
-      .sort((a, b) => (b.approvedAt ?? b.createdAt).getTime() - (a.approvedAt ?? a.createdAt).getTime());
-    const row = matches[0];
-    return row ? { ...row, payload: { ...row.payload } } : null;
+      .sort((a, b) => (b.committedAt ?? b.createdAt).getTime() - (a.committedAt ?? a.createdAt).getTime())
+      .map((r) => ({ ...r, payload: { ...r.payload } }));
   }
 
   async insertOutbox(row: MessageOutboxRow): Promise<MessageOutboxRow> {
     if (this.outboxBroken) throw new Error("outbox unavailable");
+    if (row.idempotencyKey) {
+      for (const existing of this.outbox.values()) {
+        if (existing.idempotencyKey === row.idempotencyKey) return { ...existing };
+      }
+    }
     const stored = { ...row };
     this.outbox.set(row.id, stored);
     return { ...stored };
@@ -356,6 +375,41 @@ export class MemoryPluginStore implements PluginStore {
     if (onlyIfStatus && row.status !== onlyIfStatus) return null;
     Object.assign(row, patch, { updatedAt: patch.updatedAt ?? new Date() });
     return { ...row };
+  }
+
+  async reclaimStaleOutboxSending(now: Date, staleBefore: Date): Promise<MessageOutboxRow[]> {
+    const reclaimed: MessageOutboxRow[] = [];
+    for (const row of this.outbox.values()) {
+      if (row.status !== "sending") continue;
+      if (row.updatedAt.getTime() >= staleBefore.getTime()) continue;
+      row.status = "pending";
+      row.lastError = "stale_sending";
+      row.updatedAt = now;
+      reclaimed.push({ ...row });
+    }
+    return reclaimed;
+  }
+
+  async purgeDeliveredOutboxBodies(now: Date): Promise<number> {
+    let n = 0;
+    for (const row of this.outbox.values()) {
+      if (row.status !== "delivered" || row.message === "") continue;
+      row.message = "";
+      row.updatedAt = now;
+      n += 1;
+    }
+    return n;
+  }
+
+  async purgeExpiredOutbox(_now: Date, olderThan: Date): Promise<number> {
+    let n = 0;
+    for (const [id, row] of this.outbox) {
+      if (row.status === "delivered") continue;
+      if (row.createdAt.getTime() >= olderThan.getTime()) continue;
+      this.outbox.delete(id);
+      n += 1;
+    }
+    return n;
   }
 
   async isSmsOptedOut(phoneKey: string): Promise<boolean> {

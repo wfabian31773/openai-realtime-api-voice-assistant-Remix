@@ -83,6 +83,28 @@ export async function handleInboundSms(
   return { command, replied: false };
 }
 
+export const SMS_TIMEOUT_MS = 15_000;
+
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      const err = new Error("sms_timeout");
+      err.name = "AbortError";
+      reject(err);
+    }, ms);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (err) => {
+        clearTimeout(timer);
+        reject(err);
+      },
+    );
+  });
+}
+
 export function createTwilioSmsSender(env: Record<string, string | undefined> = process.env): SmsSender | null {
   const sid = env.TWILIO_ACCOUNT_SID;
   const token = env.TWILIO_AUTH_TOKEN;
@@ -91,7 +113,10 @@ export function createTwilioSmsSender(env: Record<string, string | undefined> = 
     async send(opts) {
       const twilio = await import("twilio");
       const client = twilio.default(sid, token);
-      const msg = await client.messages.create({ to: opts.to, from: opts.from, body: opts.body });
+      const msg = await withTimeout(
+        client.messages.create({ to: opts.to, from: opts.from, body: opts.body }),
+        SMS_TIMEOUT_MS,
+      );
       return { sid: msg.sid };
     },
   };

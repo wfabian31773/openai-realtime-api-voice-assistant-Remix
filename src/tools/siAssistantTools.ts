@@ -18,7 +18,13 @@ import {
   type CallbackReporter,
 } from '../plugin/callbackReport';
 import type { PluginStore } from '../plugin/store';
-import { extrasForReturnedCaller, extrasFromRecentContacts, hasTicketKeys } from '../plugin/returnedCaller';
+import {
+  extrasForIdentifiedContact,
+  extrasForReturnedCaller,
+  extrasOfMatch,
+  hasTicketKeys,
+  matchPlacedContacts,
+} from '../plugin/returnedCaller';
 import { flushOutboxRow, persistTakenMessage } from '../plugin/messageOutbox';
 import { siAssistantNumber } from '../plugin/siAssistantConstants';
 import { formatPhoneForSpeech } from '../utils/timeAware';
@@ -77,14 +83,20 @@ async function extrasFor(input: Record<string, unknown>): Promise<{
   const sid = typeof input.outbound_callback_sid === 'string' ? input.outbound_callback_sid : '';
   if (sid) {
     const session = callbackSessionFor(sid);
-    if (session?.chosen && session.attemptId) {
-      const contact = await session.store.loadCallContact(session.chosen.contactId, session.attemptId);
-      const extras = extrasFromContactData(contact?.data);
-      if (hasTicketKeys(extras)) return extras;
+    if (session?.chosen) {
+      if (session.attemptId) {
+        const contact = await session.store.loadCallContact(session.chosen.contactId, session.attemptId);
+        const extras = extrasFromContactData(contact?.data);
+        if (hasTicketKeys(extras)) return extras;
+      }
+      const fromChosen = extrasForIdentifiedContact(session.chosen, session.candidates);
+      if (hasTicketKeys(fromChosen)) return fromChosen;
+      // Identified, but their record has no ticket keys. Do not pick among others.
+      return {};
     }
     if (session?.candidates?.length) {
-      const fromSession = extrasFromRecentContacts(session.candidates);
-      if (hasTicketKeys(fromSession)) return fromSession;
+      const fromSession = matchPlacedContacts(session.candidates);
+      if (fromSession.kind !== 'none') return extrasOfMatch(fromSession);
     }
     const phone = callerPhoneOf(input, session?.callerPhone);
     if (phone) return extrasForReturnedCaller(phone, new Date(), session?.store ?? (await outboundStore()), boundPluginStore());
@@ -152,11 +164,9 @@ registerTool({
       message,
     });
     if (!persisted) return persistFailedResult();
-    try {
-      await flushOutboxRow(persisted, boundPluginStore(), reporter());
-    } catch {
+    void flushOutboxRow(persisted, boundPluginStore(), reporter()).catch(() => {
       console.error('[si-assistant] outbox flush failed');
-    }
+    });
     return takenResult();
   },
 });

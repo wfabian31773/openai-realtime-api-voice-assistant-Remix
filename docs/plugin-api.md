@@ -35,7 +35,9 @@ Write scopes are never implied. An empty scope list becomes `fleet:read` only.
    the stored payload against the lock, then sends exactly that payload. A
    thrown send moves the row to `failed` and writes a PHI-free audit row.
    A crash between claim and send leaves the row `sending`; a timeout sweep
-   marks it `failed` (PHI-free audit) and **never resends**.
+   labels it `unknown` (PHI-free audit) and **never resends**. Graph and
+   Twilio sends are bounded at 15 seconds. A successful send is recorded
+   `committed` immediately so the sweep cannot overwrite it.
 5. `cancel_contact` cancels a pending or approved request only while the
    confirm token is unused. Cancel and get are tied to the token that
    created the row (or to `contacts:approve`).
@@ -67,9 +69,19 @@ outbox. If persist itself fails, the agent says so and gives the SI
 Assistant number.
 
 An inbound returned call has no outbound session contact. Teardown and
-`take_si_assistant_message` look up the most recent approved outbound
-contact to that caller in the last 72 hours and attach its ticket id,
-ticket number and approval id.
+`take_si_assistant_message` prefer the person the caller was identified
+as. Otherwise they attach a ticket only when exactly one ticket and one
+patient match among contacts that were actually placed or sent in the
+last 72 hours (a committed approval, or a campaign dial that reached
+the network). Zero or several matches attach no ticket keys and the
+message is sent unmatched to SI Assistant My Messages for a human to
+route. A phone number is never used to pick between people.
+
+`plugin_message_outbox` retries webhook delivery. Stale `sending` rows
+are reclaimed to `pending`. Dead rows write a PHI-free audit (`outbox_dead`).
+An unset webhook URL leaves rows pending (they do not expire toward dead).
+Retries with the same call SID and message reuse one idempotency key.
+Delivered bodies are purged; undelivered rows older than 30 days are deleted.
 
 `/api/test-call` and surgery-line routing are untouched.
 

@@ -4,7 +4,7 @@
 --
 -- Tables:
 --   api_tokens              bearer tokens: jti + sha256(secret) + scopes
---   contact_approvals       pending/approved/sending/rejected/committed/failed
+--   contact_approvals       pending/approved/sending/rejected/cancelled/committed/failed/unknown
 --   plugin_audit_log        append-only, NO phone numbers, bodies or transcripts
 --   plugin_message_outbox   taken-message bodies (PHI). Never copy into audit.
 --
@@ -48,7 +48,7 @@ CREATE TABLE IF NOT EXISTS contact_approvals (
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   CONSTRAINT contact_approvals_channel_check CHECK (channel IN ('call', 'sms', 'email')),
-  CONSTRAINT contact_approvals_status_check CHECK (status IN ('pending', 'approved', 'sending', 'rejected', 'cancelled', 'committed', 'failed'))
+  CONSTRAINT contact_approvals_status_check CHECK (status IN ('pending', 'approved', 'sending', 'rejected', 'cancelled', 'committed', 'failed', 'unknown'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_contact_approvals_status ON contact_approvals (status, created_at);
@@ -86,12 +86,26 @@ CREATE TABLE IF NOT EXISTS plugin_message_outbox (
   attempts INTEGER NOT NULL DEFAULT 0,
   next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   last_error VARCHAR(64),
+  idempotency_key VARCHAR(64),
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   CONSTRAINT plugin_message_outbox_status_check CHECK (status IN ('pending', 'sending', 'delivered', 'dead'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_plugin_outbox_due ON plugin_message_outbox (status, next_attempt_at);
+
+-- Upgrade an earlier apply: columns and statuses inside CREATE TABLE IF NOT
+-- EXISTS are skipped when the table already exists. These statements are
+-- safe to re-run.
+ALTER TABLE contact_approvals ADD COLUMN IF NOT EXISTS phone_key VARCHAR(10);
+CREATE INDEX IF NOT EXISTS idx_contact_approvals_phone_key ON contact_approvals (phone_key);
+ALTER TABLE contact_approvals DROP CONSTRAINT IF EXISTS contact_approvals_status_check;
+ALTER TABLE contact_approvals ADD CONSTRAINT contact_approvals_status_check
+  CHECK (status IN ('pending', 'approved', 'sending', 'rejected', 'cancelled', 'committed', 'failed', 'unknown'));
+
+ALTER TABLE plugin_message_outbox ADD COLUMN IF NOT EXISTS idempotency_key VARCHAR(64);
+CREATE UNIQUE INDEX IF NOT EXISTS plugin_message_outbox_idempotency_key
+  ON plugin_message_outbox (idempotency_key);
 
 -- Reversal:
 --   DROP TABLE plugin_message_outbox;

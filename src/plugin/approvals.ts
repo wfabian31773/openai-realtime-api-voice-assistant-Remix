@@ -290,8 +290,9 @@ export async function markFailed(
 
 /**
  * A claim that never reached markCommitted/markFailed stays `sending`
- * forever unless we sweep it. Marks those stale rows failed. Never
- * resends — a new prepare is the only way out.
+ * forever unless we sweep it. Labels those stale rows `unknown` — the
+ * send may have succeeded after the process died — and never resends.
+ * A new prepare is the only way out.
  */
 export async function reapStaleSending(
   store: PluginStore,
@@ -309,7 +310,7 @@ export async function reapStaleSending(
         method: "SWEEP",
         approvalId: row.id,
         ticketId: row.ticketId,
-        outcome: "failed",
+        outcome: "unknown",
         httpStatus: 408,
       });
     } catch {

@@ -65,6 +65,23 @@ export function createMemoryGraphMail(): GraphMail & { sent: Array<{ to: string;
   };
 }
 
+export const GRAPH_TIMEOUT_MS = 15_000;
+
+async function timedFetch(
+  fetchImpl: typeof fetch,
+  url: string,
+  init: RequestInit = {},
+  timeoutMs = GRAPH_TIMEOUT_MS,
+): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetchImpl(url, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export function createGraphMail(
   env: Record<string, string | undefined> = process.env,
   fetchImpl: typeof fetch = fetch,
@@ -85,7 +102,7 @@ export function createGraphMail(
       grant_type: "client_credentials",
       scope: "https://graph.microsoft.com/.default",
     });
-    const res = await fetchImpl(`https://login.microsoftonline.com/${tenant}/oauth2/v2.0/token`, {
+    const res = await timedFetch(fetchImpl, `https://login.microsoftonline.com/${tenant}/oauth2/v2.0/token`, {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body,
@@ -100,7 +117,8 @@ export function createGraphMail(
   return {
     async sendMail(input) {
       const access = await token();
-      const res = await fetchImpl(
+      const res = await timedFetch(
+        fetchImpl,
         `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(mailbox)}/sendMail`,
         {
           method: "POST",
@@ -125,7 +143,8 @@ export function createGraphMail(
     async listReplies(input) {
       const access = await token();
       const top = input?.top ?? 20;
-      const res = await fetchImpl(
+      const res = await timedFetch(
+        fetchImpl,
         `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(mailbox)}/messages?$top=${top}&$select=id,receivedDateTime,conversationId,from,subject,isDraft&$orderby=receivedDateTime desc`,
         { headers: { Authorization: `Bearer ${access}` } },
       );

@@ -76,6 +76,7 @@ function outboxFrom(r: Record<string, unknown>): MessageOutboxRow {
     attempts: Number(r.attempts ?? 0),
     nextAttemptAt: new Date(String(r.next_attempt_at)),
     lastError: (r.last_error as string | null) ?? null,
+    idempotencyKey: (r.idempotency_key as string | null) ?? null,
     createdAt: new Date(String(r.created_at)),
     updatedAt: new Date(String(r.updated_at)),
   };
@@ -212,7 +213,7 @@ export function createSqlPluginStore(exec: SqlExec): PluginStore {
     async reapStaleSending(now, staleBefore) {
       const rows = await exec(
         `UPDATE contact_approvals
-            SET status = 'failed',
+            SET status = 'unknown',
                 result = jsonb_build_object('reason', 'stale_send'),
                 updated_at = $1
           WHERE status = 'sending'
@@ -222,25 +223,28 @@ export function createSqlPluginStore(exec: SqlExec): PluginStore {
       );
       return rows.map(approvalFrom);
     },
-    async findRecentApprovedContactByPhone(phoneKey, since) {
-      if (!phoneKey) return null;
+    async listCommittedContactsByPhone(phoneKey, since) {
+      if (!phoneKey) return [];
       const rows = await exec(
         `SELECT * FROM contact_approvals
           WHERE phone_key = $1
-            AND status IN ('approved', 'sending', 'committed')
-            AND COALESCE(approved_at, created_at) >= $2
-          ORDER BY COALESCE(approved_at, created_at) DESC
-          LIMIT 1`,
+            AND status = 'committed'
+            AND committed_at IS NOT NULL
+            AND committed_at >= $2
+          ORDER BY committed_at DESC`,
         [phoneKey, since.toISOString()],
       );
-      return rows[0] ? approvalFrom(rows[0]) : null;
+      return rows.map(approvalFrom);
     },
     async insertOutbox(row) {
       const rows = await exec(
         `INSERT INTO plugin_message_outbox (
             id, call_sid, ticket_id, ticket_number, approval_id, message,
-            status, attempts, next_attempt_at, last_error, created_at, updated_at
-          ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *`,
+            status, attempts, next_attempt_at, last_error, idempotency_key,
+            created_at, updated_at
+          ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+          ON CONFLICT (idempotency_key) DO NOTHING
+          RETURNING *`,
         [
           row.id,
           row.callSid,
@@ -252,11 +256,20 @@ export function createSqlPluginStore(exec: SqlExec): PluginStore {
           row.attempts,
           row.nextAttemptAt.toISOString(),
           row.lastError,
+          row.idempotencyKey ?? null,
           row.createdAt.toISOString(),
           row.updatedAt.toISOString(),
         ],
       );
-      return rows[0] ? outboxFrom(rows[0]) : row;
+      if (rows[0]) return outboxFrom(rows[0]);
+      if (row.idempotencyKey) {
+        const existing = await exec(
+          "SELECT * FROM plugin_message_outbox WHERE idempotency_key = $1 LIMIT 1",
+          [row.idempotencyKey],
+        );
+        if (existing[0]) return outboxFrom(existing[0]);
+      }
+      return row;
     },
     async claimDueOutbox(now, limit) {
       const rows = await exec(
@@ -283,7 +296,9 @@ export function createSqlPluginStore(exec: SqlExec): PluginStore {
             status = COALESCE($2, status),
             next_attempt_at = COALESCE($3, next_attempt_at),
             last_error = $4,
-            updated_at = $5
+            updated_at = $5,
+            attempts = COALESCE($7, attempts),
+            message = COALESCE($8, message)
           WHERE id = $1 AND ($6::text IS NULL OR status = $6)
           RETURNING *`,
         [
@@ -293,9 +308,44 @@ export function createSqlPluginStore(exec: SqlExec): PluginStore {
           patch.lastError ?? null,
           (patch.updatedAt ?? new Date()).toISOString(),
           onlyIfStatus ?? null,
+          patch.attempts ?? null,
+          patch.message ?? null,
         ],
       );
       return rows[0] ? outboxFrom(rows[0]) : null;
+    },
+    async reclaimStaleOutboxSending(now, staleBefore) {
+      const rows = await exec(
+        `UPDATE plugin_message_outbox
+            SET status = 'pending',
+                last_error = 'stale_sending',
+                updated_at = $1
+          WHERE status = 'sending'
+            AND updated_at < $2
+          RETURNING *`,
+        [now.toISOString(), staleBefore.toISOString()],
+      );
+      return rows.map(outboxFrom);
+    },
+    async purgeDeliveredOutboxBodies(now) {
+      const rows = await exec(
+        `UPDATE plugin_message_outbox
+            SET message = '', updated_at = $1
+          WHERE status = 'delivered' AND message <> ''
+          RETURNING id`,
+        [now.toISOString()],
+      );
+      return rows.length;
+    },
+    async purgeExpiredOutbox(_now, olderThan) {
+      const rows = await exec(
+        `DELETE FROM plugin_message_outbox
+          WHERE status IN ('pending', 'sending', 'dead')
+            AND created_at < $1
+          RETURNING id`,
+        [olderThan.toISOString()],
+      );
+      return rows.length;
     },
     async isSmsOptedOut(phoneKey) {
       // Any DNC row blocks SMS — a call opt-out is also a text opt-out.

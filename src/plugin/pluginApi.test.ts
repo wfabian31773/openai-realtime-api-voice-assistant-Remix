@@ -462,7 +462,9 @@ describe("SMS and email", () => {
 
   it("sends Graph mail from SI_ASSISTANT_EMAIL with SI_MAIL_* client credentials", async () => {
     const calls: Array<{ url: string; body: string }> = [];
+    const signals: Array<AbortSignal | undefined> = [];
     const fetchImpl = (async (url: string | URL, init?: RequestInit) => {
+      signals.push(init?.signal ?? undefined);
       calls.push({ url: String(url), body: String(init?.body ?? "") });
       if (String(url).includes("/oauth2/")) {
         return new Response(JSON.stringify({ access_token: "tok", expires_in: 3600 }), { status: 200 });
@@ -487,6 +489,10 @@ describe("SMS and email", () => {
     expect(calls[1].url).toBe(
       `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(SI_ASSISTANT_EMAIL_DEFAULT)}/sendMail`,
     );
+    expect(signals[0]).toBeDefined();
+    expect(signals[1]).toBeDefined();
+    expect(signals[0]?.aborted).toBe(false);
+    expect(signals[1]?.aborted).toBe(false);
   });
 
   it("never hardcodes the Entra app id or a mail secret", () => {
@@ -959,6 +965,8 @@ describe("review findings", () => {
     expect(migration).toContain("contact_approvals_status_check");
     expect(migration).toContain("'sending'");
     expect(schema).toContain("'sending'");
+    expect(migration).toContain("'unknown'");
+    expect(schema).toContain("'unknown'");
     expect(migration).toContain("plugin_message_outbox");
     expect(schema).toContain('pgTable("plugin_message_outbox"');
   });
@@ -1001,20 +1009,20 @@ describe("review findings", () => {
     const sms: Array<{ to: string; body: string }> = [];
     const swept = await reapStaleSending(store, new Date(now.getTime() + STALE_SENDING_MS + 1));
     expect(swept).toHaveLength(1);
-    expect(swept[0].status).toBe("failed");
+    expect(swept[0].status).toBe("unknown");
     expect(swept[0].result).toEqual({ reason: "stale_send" });
-    expect((await store.getApproval("appr-stale"))?.status).toBe("failed");
+    expect((await store.getApproval("appr-stale"))?.status).toBe("unknown");
     expect(sms).toEqual([]);
     expect(await markCommitted(store, "appr-stale", { queued: true }, now)).toBeNull();
     expect(await markFailed(store, "appr-stale", { reason: "send_failed" }, now)).toBeNull();
     const audit = await store.listAudit();
     const row = audit.find((e) => e.tool === "reap_stale_sending");
-    expect(row).toMatchObject({ approvalId: "appr-stale", ticketId: "tid-stale", outcome: "failed" });
+    expect(row).toMatchObject({ approvalId: "appr-stale", ticketId: "tid-stale", outcome: "unknown" });
     expect(JSON.stringify(row)).not.toContain("5555550111");
     expect(JSON.stringify(row)).not.toContain("Hi");
   });
 
-  it("the SQL stale sweep only marks failed", async () => {
+  it("the SQL stale sweep only marks unknown", async () => {
     const seen: string[] = [];
     const store = createSqlPluginStore(async (text) => {
       seen.push(text);
@@ -1022,9 +1030,33 @@ describe("review findings", () => {
     });
     await store.reapStaleSending(new Date("2026-10-22T18:10:00Z"), new Date("2026-10-22T18:00:00Z"));
     expect(seen).toHaveLength(1);
-    expect(seen[0]).toMatch(/status = 'failed'/);
+    expect(seen[0]).toMatch(/status = 'unknown'/);
     expect(seen[0]).toMatch(/stale_send/);
     expect(seen[0]).toMatch(/status = 'sending'/);
     expect(seen[0]).not.toMatch(/executeApproved|sendApproved|enqueue|sendMail/);
+  });
+
+  it("the SQL markOutbox persists the attempt count", async () => {
+    const seen: Array<{ text: string; params: unknown[] }> = [];
+    const store = createSqlPluginStore(async (text, params) => {
+      seen.push({ text, params: params ?? [] });
+      return [];
+    });
+    await store.markOutbox(
+      "obx-1",
+      { status: "sending", attempts: 1, updatedAt: new Date("2026-10-22T18:00:00Z") },
+      "pending",
+    );
+    expect(seen[0].text).toMatch(/attempts = COALESCE\(\$7, attempts\)/);
+    expect(seen[0].params[6]).toBe(1);
+  });
+
+  it("the migration upgrades existing tables with ALTER TABLE ADD COLUMN IF NOT EXISTS", () => {
+    const migration = readFileSync(join(__dirname, "../../migrations/add_plugin_api.sql"), "utf8");
+    expect(migration).toMatch(/ALTER TABLE contact_approvals ADD COLUMN IF NOT EXISTS phone_key/);
+    expect(migration).toMatch(/ALTER TABLE plugin_message_outbox ADD COLUMN IF NOT EXISTS idempotency_key/);
+    expect(migration).toMatch(/DROP CONSTRAINT IF EXISTS contact_approvals_status_check/);
+    expect(migration).toMatch(/'unknown'/);
+    expect(migration).toContain("plugin_message_outbox_idempotency_key");
   });
 });

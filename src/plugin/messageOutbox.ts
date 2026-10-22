@@ -5,7 +5,15 @@
  * message. The body is PHI: never log it, never write it to
  * plugin_audit_log.
  */
-import { newId, OUTBOX_MAX_ATTEMPTS, type MessageOutboxRow, type PluginStore } from "./store";
+import { createHash } from "node:crypto";
+import {
+  newId,
+  OUTBOX_MAX_ATTEMPTS,
+  OUTBOX_RETENTION_MS,
+  STALE_SENDING_MS,
+  type MessageOutboxRow,
+  type PluginStore,
+} from "./store";
 import { boundPluginStore } from "./bindings";
 import { createCallbackReporter, type CallbackReporter } from "./callbackReport";
 import { SI_ASSISTANT_SLUG } from "./siAssistantConstants";
@@ -16,6 +24,11 @@ const BACKOFF_CAP_MS = 30 * 60 * 1000;
 export function outboxBackoffMs(attempts: number): number {
   const exp = Math.max(0, attempts - 1);
   return Math.min(BACKOFF_MS * 2 ** exp, BACKOFF_CAP_MS);
+}
+
+export function outboxIdempotencyKey(callSid: string | null | undefined, message: string): string | null {
+  if (!callSid) return null;
+  return createHash("sha256").update(`${callSid}\n${message}`, "utf8").digest("hex");
 }
 
 export function phiFreeOutboxError(status?: number, failed?: "timeout" | "no_webhook" | "send_failed"): string {
@@ -50,6 +63,7 @@ export async function persistTakenMessage(
       attempts: 0,
       nextAttemptAt: now,
       lastError: null,
+      idempotencyKey: outboxIdempotencyKey(input.callSid, input.message),
       createdAt: now,
       updatedAt: now,
     });
@@ -65,6 +79,7 @@ async function deliverRow(
 ): Promise<{ ok: boolean; error: string }> {
   if (!reporter) return { ok: false, error: phiFreeOutboxError(undefined, "no_webhook") };
   try {
+    const unmatched = !row.ticketNumber && !row.approvalId && !row.ticketId;
     const result = await reporter.report({
       event: "message",
       slug: SI_ASSISTANT_SLUG,
@@ -72,6 +87,7 @@ async function deliverRow(
       approvalId: row.approvalId,
       ticketId: row.ticketId,
       message: row.message,
+      unmatched: unmatched || undefined,
     });
     if (result.ok) return { ok: true, error: "" };
     return { ok: false, error: phiFreeOutboxError(result.status) };
@@ -84,6 +100,23 @@ async function deliverRow(
   }
 }
 
+async function noteDead(store: PluginStore, row: MessageOutboxRow): Promise<void> {
+  try {
+    await store.writeAudit({
+      tokenJti: "system",
+      tool: "outbox_dead",
+      route: "/api/plugin/v1/message_outbox",
+      method: "SWEEP",
+      approvalId: row.approvalId,
+      ticketId: row.ticketId,
+      outcome: "failed",
+      httpStatus: 408,
+    });
+  } catch {
+    console.error("[si-assistant] outbox dead audit failed");
+  }
+}
+
 async function settleDelivery(
   store: PluginStore,
   row: MessageOutboxRow,
@@ -91,7 +124,11 @@ async function settleDelivery(
   now: Date,
 ): Promise<void> {
   if (delivered.ok) {
-    await store.markOutbox(row.id, { status: "delivered", lastError: null, updatedAt: now }, "sending");
+    await store.markOutbox(
+      row.id,
+      { status: "delivered", lastError: null, message: "", updatedAt: now },
+      "sending",
+    );
     return;
   }
   const dead = row.attempts >= OUTBOX_MAX_ATTEMPTS;
@@ -105,7 +142,27 @@ async function settleDelivery(
     },
     "sending",
   );
+  if (dead) await noteDead(store, row);
   console.error(`[si-assistant] outbox ${row.id} ${delivered.error}${dead ? " dead" : ""}`);
+}
+
+export async function reclaimStaleOutboxSending(
+  store: PluginStore | null = boundPluginStore(),
+  now = new Date(),
+  staleMs = STALE_SENDING_MS,
+): Promise<MessageOutboxRow[]> {
+  if (!store) return [];
+  return store.reclaimStaleOutboxSending(now, new Date(now.getTime() - staleMs));
+}
+
+export async function purgeOutboxRetention(
+  store: PluginStore | null = boundPluginStore(),
+  now = new Date(),
+): Promise<{ bodies: number; expired: number }> {
+  if (!store) return { bodies: 0, expired: 0 };
+  const bodies = await store.purgeDeliveredOutboxBodies(now);
+  const expired = await store.purgeExpiredOutbox(now, new Date(now.getTime() - OUTBOX_RETENTION_MS));
+  return { bodies, expired };
 }
 
 /** One delivery attempt of a just-persisted pending row. Sweep uses flushDueOutbox. */
@@ -116,6 +173,8 @@ export async function flushOutboxRow(
   now = new Date(),
 ): Promise<void> {
   if (!store) return;
+  // No webhook URL: leave the row pending. Do not count toward dead.
+  if (!reporter) return;
   const claimed = await store.markOutbox(
     row.id,
     { status: "sending", attempts: row.attempts + 1, updatedAt: now },
@@ -132,6 +191,14 @@ export async function flushDueOutbox(
   limit = 20,
 ): Promise<number> {
   if (!store) return 0;
+  try {
+    await reclaimStaleOutboxSending(store, now);
+    await purgeOutboxRetention(store, now);
+  } catch {
+    console.error("[si-assistant] outbox reclaim/purge failed");
+  }
+  // Unset webhook: keep rows pending. Do not expire them toward dead.
+  if (!reporter) return 0;
   const due = await store.claimDueOutbox(now, limit);
   for (const row of due) {
     await settleDelivery(store, row, await deliverRow(row, reporter), now);

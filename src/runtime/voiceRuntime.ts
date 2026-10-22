@@ -312,7 +312,7 @@ import {
   type CallbackCandidate,
   type CallbackContext,
 } from "./outbound/callback";
-import { closeCallbackSession, openCallbackSession } from "../tools/outboundTools";
+import { callbackSessionFor, closeCallbackSession, openCallbackSession } from "../tools/outboundTools";
 import { closeOutreachSession } from "../tools/npxOutreachTools";
 import type { OutboundStore } from "./outbound/store";
 import { createDbOutboundStore } from "./outbound/store";
@@ -1647,6 +1647,11 @@ export function mountVoiceRuntime(
            * socket open for a ticket POST.
            */
           persistCallRecord: async (record) => {
+            // Snapshot before closeCallbackSession deletes the map entry —
+            // teardown must still prefer the identified caller (N-5).
+            const returnedSession = callbackSessionFor(record.callSid);
+            const identified = returnedSession?.chosen ?? null;
+            const identifiedCandidates = returnedSession?.candidates ?? [];
             // A returned call's inbound attempt ends, and an identified caller
             // with no recorded outcome is marked answered. Never awaited and
             // never throws: it is the campaign's ledger, not the call's record.
@@ -1788,10 +1793,14 @@ export function mountVoiceRuntime(
             void Promise.all([
               import("../plugin/callbackReport"),
               import("../plugin/returnedCaller"),
-            ]).then(async ([{ reportSiAssistantCall, extrasFromContactData }, { extrasForReturnedCaller, hasTicketKeys }]) => {
+            ]).then(async ([{ reportSiAssistantCall, extrasFromContactData }, { extrasForIdentifiedContact, extrasForReturnedCaller, hasTicketKeys }]) => {
               let extras = extrasFromContactData(outboundContact?.data);
-              if (!hasTicketKeys(extras) && record.slug === "si-assistant" && entry.callerPhone) {
-                extras = await extrasForReturnedCaller(entry.callerPhone);
+              if (!hasTicketKeys(extras) && record.slug === "si-assistant") {
+                if (identified) {
+                  extras = extrasForIdentifiedContact(identified, identifiedCandidates);
+                } else if (entry.callerPhone) {
+                  extras = await extrasForReturnedCaller(entry.callerPhone);
+                }
               }
               return reportSiAssistantCall(
                 {

@@ -1547,7 +1547,7 @@ export const contactApprovals = pgTable("contact_approvals", {
   index("idx_contact_approvals_confirm").on(table.confirmTokenHash),
   index("idx_contact_approvals_phone_key").on(table.phoneKey),
   check("contact_approvals_channel_check", sql`channel IN ('call', 'sms', 'email')`),
-  check("contact_approvals_status_check", sql`status IN ('pending', 'approved', 'sending', 'rejected', 'cancelled', 'committed', 'failed')`),
+  check("contact_approvals_status_check", sql`status IN ('pending', 'approved', 'sending', 'rejected', 'cancelled', 'committed', 'failed', 'unknown')`),
 ]);
 
 export const pluginMessageOutbox = pgTable("plugin_message_outbox", {
@@ -1561,10 +1561,12 @@ export const pluginMessageOutbox = pgTable("plugin_message_outbox", {
   attempts: integer("attempts").notNull().default(0),
   nextAttemptAt: timestamp("next_attempt_at", { withTimezone: true }).notNull().defaultNow(),
   lastError: varchar("last_error", { length: 64 }),
+  idempotencyKey: varchar("idempotency_key", { length: 64 }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => [
   index("idx_plugin_outbox_due").on(table.status, table.nextAttemptAt),
+  unique("plugin_message_outbox_idempotency_key").on(table.idempotencyKey),
   check("plugin_message_outbox_status_check", sql`status IN ('pending', 'sending', 'delivered', 'dead')`),
 ]);
 

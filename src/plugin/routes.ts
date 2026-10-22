@@ -360,18 +360,9 @@ export function mountPluginApi(app: Express, deps: PluginApiDeps): void {
       });
       return;
     }
-    const committed = await markCommitted(deps.store, consumed.approval.id, executed.result, now);
-    if (!committed) {
-      jsonError(res, 409, "Contact request is no longer sending");
-      await audit(deps, req.pluginAuth, req, "commit_contact", "error", 409, {
-        approvalId: consumed.approval.id,
-        ticketId: consumed.approval.ticketId,
-      });
-      return;
-    }
     res.json({
       status: "committed",
-      approval: publicApproval(committed ?? consumed.approval),
+      approval: publicApproval(executed.approval),
       result: executed.result,
     });
     await audit(deps, req.pluginAuth, req, "commit_contact", "committed", 200, {
@@ -414,10 +405,15 @@ async function executeApproved(
   approval: Awaited<ReturnType<PluginStore["getApproval"]> & object>,
   now: Date,
 ): Promise<
-  | { ok: true; result: Record<string, unknown> }
+  | { ok: true; result: Record<string, unknown>; approval: NonNullable<typeof approval> }
   | { ok: false; status: number; error: string; reason: string }
 > {
   if (!approval) return { ok: false, status: 404, error: "Contact request not found", reason: "missing" };
+
+  const heartbeat = await deps.store.updateApproval(approval.id, { updatedAt: now }, "sending");
+  if (!heartbeat) {
+    return { ok: false, status: 409, error: "Contact request is no longer sending", reason: "not_sending" };
+  }
 
   if (approval.channel === "call") {
     if (!deps.outboundStore) {
@@ -440,7 +436,7 @@ async function executeApproved(
       const status = enqueueHttpStatus(queued.reason);
       return { ok: false, status, error: `Call was not placed: ${queued.reason}`, reason: queued.reason };
     }
-    return { ok: true, result: { queued: true, campaignId: queued.campaignId } };
+    return commitSend(deps, approval, { queued: true, campaignId: queued.campaignId }, now);
   }
 
   if (approval.channel === "sms") {
@@ -453,7 +449,7 @@ async function executeApproved(
       envOf(deps),
     );
     if (!sent.ok) return { ok: false, status: 409, error: `SMS was not sent: ${sent.reason}`, reason: sent.reason };
-    return { ok: true, result: { messageSid: sent.sid } };
+    return commitSend(deps, approval, { messageSid: sent.sid }, now);
   }
 
   const mail = deps.graphMail === undefined ? createGraphMail(envOf(deps)) : deps.graphMail;
@@ -464,5 +460,21 @@ async function executeApproved(
     body: String(approval.payload.body ?? ""),
   });
   if (!sent.ok) return { ok: false, status: 409, error: `Email was not sent: ${sent.reason}`, reason: sent.reason };
-  return { ok: true, result: { messageId: sent.id } };
+  return commitSend(deps, approval, { messageId: sent.id }, now);
+}
+
+async function commitSend(
+  deps: PluginApiDeps,
+  approval: NonNullable<Awaited<ReturnType<PluginStore["getApproval"]>>>,
+  result: Record<string, unknown>,
+  now: Date,
+): Promise<
+  | { ok: true; result: Record<string, unknown>; approval: NonNullable<Awaited<ReturnType<PluginStore["getApproval"]>>> }
+  | { ok: false; status: number; error: string; reason: string }
+> {
+  const committed = await markCommitted(deps.store, approval.id, result, now);
+  if (!committed) {
+    return { ok: false, status: 409, error: "Contact request outcome is unknown", reason: "unknown" };
+  }
+  return { ok: true, result, approval: committed };
 }

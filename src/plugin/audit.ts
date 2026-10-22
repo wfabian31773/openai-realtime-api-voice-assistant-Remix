@@ -9,7 +9,8 @@ export type PluginAuditOutcome =
   | "rejected"
   | "cancelled"
   | "committed"
-  | "failed";
+  | "failed"
+  | "unknown";
 
 export interface PluginAuditEntry {
   tokenJti: string;
