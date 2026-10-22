@@ -7,7 +7,7 @@
  */
 import { dbReady, pool } from "../server/db";
 import { generateTokenParts, hashSecret } from "../src/plugin/tokens";
-import { parseScopes } from "../src/plugin/scopes";
+import { mintScopesCompatible, parseScopes } from "../src/plugin/scopes";
 
 function arg(name: string, fallback: string): string {
   const i = process.argv.indexOf(`--${name}`);
@@ -18,6 +18,11 @@ function arg(name: string, fallback: string): string {
 async function main(): Promise<void> {
   const label = arg("label", "plugin");
   const scopes = parseScopes(arg("scopes", "fleet:read").split(",").map((s) => s.trim()));
+  const allowed = mintScopesCompatible(scopes);
+  if (!allowed.ok) {
+    console.error(`[plugin-token] ${allowed.error}`);
+    process.exit(1);
+  }
   if (scopes.includes("contacts:approve")) {
     console.warn("[plugin-token] contacts:approve is for the Support Center page, not the bot.");
   }

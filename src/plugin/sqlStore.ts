@@ -157,6 +157,37 @@ export function createSqlPluginStore(exec: SqlExec): PluginStore {
       const rows = await exec("SELECT * FROM contact_approvals WHERE confirm_token_hash = $1 LIMIT 1", [hash]);
       return rows[0] ? approvalFrom(rows[0]) : null;
     },
+    async claimConfirmToken(hash, now) {
+      const at = now.toISOString();
+      const rows = await exec(
+        `UPDATE contact_approvals
+            SET confirm_used_at = $2, updated_at = $2
+          WHERE confirm_token_hash = $1
+            AND status = 'approved'
+            AND confirm_used_at IS NULL
+            AND confirm_expires_at > $2
+          RETURNING *`,
+        [hash, at],
+      );
+      return rows[0] ? approvalFrom(rows[0]) : null;
+    },
+    async cancelIfOpen(id, now) {
+      const at = now.toISOString();
+      const rows = await exec(
+        `UPDATE contact_approvals
+            SET status = 'cancelled',
+                cancelled_at = $2,
+                confirm_token_hash = NULL,
+                confirm_expires_at = NULL,
+                updated_at = $2
+          WHERE id = $1
+            AND status IN ('pending', 'approved')
+            AND confirm_used_at IS NULL
+          RETURNING *`,
+        [id, at],
+      );
+      return rows[0] ? approvalFrom(rows[0]) : null;
+    },
     async isSmsOptedOut(phoneKey) {
       // Any DNC row blocks SMS — a call opt-out is also a text opt-out.
       const rows = await exec(

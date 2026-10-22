@@ -25,11 +25,18 @@ Write scopes are never implied. An empty scope list becomes `fleet:read` only.
 ## Approval gate
 
 1. `prepare_*` creates a `contact_approvals` row in `pending`. Nothing is sent.
-2. A staffer approves (or rejects) on Pending bot actions.
-3. Approve mints a confirm token that expires in **5 minutes** and is
-   single-use.
-4. `commit_contact` consumes that token, then sends.
-5. `cancel_contact` cancels a pending or approved request.
+2. `GET /approvals` returns the full payload and its `payloadHash` to
+   `contacts:approve` only, so the staffer sees who will be contacted and
+   what will be said.
+3. Approve submits that `payloadHash`. A mismatch, or a token approving
+   its own request, is refused. Approve mints a confirm token that expires
+   in **5 minutes** and is single-use. Consume is one atomic `UPDATE`.
+4. `commit_contact` claims the token, re-hashes the stored payload against
+   the lock, then sends exactly that payload. A thrown send moves the row
+   to `failed` and writes a PHI-free audit row.
+5. `cancel_contact` cancels a pending or approved request only while the
+   confirm token is unused. Cancel and get are tied to the token that
+   created the row (or to `contacts:approve`).
 
 `PLUGIN_WRITES_ENABLED` defaults **off**. Only `true` / `1` / `yes` enables
 prepare, approve, reject, cancel and commit.
@@ -50,7 +57,8 @@ human. Each finished SI Assistant call is reported to the ticketing app
 (`SI_ASSISTANT_CALLBACK_WEBHOOK_URL` + HMAC
 `SI_ASSISTANT_CALLBACK_WEBHOOK_SECRET`, header `X-SI-Assistant-Signature`).
 The payload is PHI-bounded: callSid, outcome, duration, ticket number,
-approval id. No phones, bodies or transcripts.
+ticket id, approval id. No phones, bodies or transcripts. A taken
+message is a separate `message` event on the same webhook.
 
 `/api/test-call` and surgery-line routing are untouched.
 
@@ -68,8 +76,10 @@ Sent **from this fleet**, from `SI_ASSISTANT_NUMBER`, through Twilio.
 Not delegated to the ticketing app: that sender uses a different number
 (+1 909-310-8277). Every body is prefixed
 `Azul Vision SI Assistant (AI):`. STOP / HELP / START are honoured on the
-inbound webhook. STOP writes `do_not_contact` source `sms_stop` without
-overwriting a call opt-out. START clears only `sms_stop`.
+inbound webhook after `X-Twilio-Signature` is checked the same way as
+the voice webhooks (invalid → 403; no auth token → 200 empty TwiML and
+no opt-out change). STOP writes `do_not_contact` source `sms_stop`
+without overwriting a call opt-out. START clears only `sms_stop`.
 
 ## Email
 
@@ -77,7 +87,8 @@ Sent from `SI_ASSISTANT_EMAIL` (default `Support-Assistant@azulvision.com`)
 via Microsoft Graph `sendMail`, app-only client credentials. The Entra app is
 **SI Assistant Mail**. It is scoped through Exchange **RBAC for Applications**
 to that one mailbox. Replies are read from the same mailbox
-(`GET /email_replies`).
+(`GET /email_replies`). Sender and subject are returned only to a
+`contacts:approve` token; `fleet:read` sees ids and timestamps.
 
 Use exactly these names:
 
@@ -103,7 +114,9 @@ npx tsx scripts/plugin-token.ts --label "si-assistant-bot" --scopes fleet:read,c
 ```
 
 The plaintext `si.<jti>.<secret>` is printed once. Only the hash is stored.
-Grant `contacts:approve` only to the Support Center page token.
+Grant `contacts:approve` only to the Support Center page token. The
+mint script refuses `contacts:approve` alongside `contacts:prepare` or
+`contacts:commit`.
 
 The mint script does not apply the migration. If the tables are missing it
 fails closed.

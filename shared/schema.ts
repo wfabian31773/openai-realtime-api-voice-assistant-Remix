@@ -21,6 +21,8 @@ import {
   uuid,
   time,
   real,
+  unique,
+  check,
 } from "drizzle-orm/pg-core";
 
 // Session storage table (for Express sessions)
@@ -1504,7 +1506,7 @@ export type InsertCallTurn = typeof callTurns.$inferInsert;
  */
 export const apiTokens = pgTable("api_tokens", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
-  jti: varchar("jti", { length: 32 }).notNull().unique(),
+  jti: varchar("jti", { length: 32 }).notNull(),
   hashedSecret: varchar("hashed_secret", { length: 64 }).notNull(),
   label: varchar("label", { length: 128 }),
   scopes: text("scopes").array().notNull().default(sql`ARRAY['fleet:read']::text[]`),
@@ -1513,7 +1515,7 @@ export const apiTokens = pgTable("api_tokens", {
   lastUsedAt: timestamp("last_used_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => [
-  index("idx_api_tokens_jti").on(table.jti),
+  unique("api_tokens_jti_key").on(table.jti),
 ]);
 
 export const contactApprovals = pgTable("contact_approvals", {
@@ -1541,6 +1543,8 @@ export const contactApprovals = pgTable("contact_approvals", {
   index("idx_contact_approvals_status").on(table.status, table.createdAt),
   index("idx_contact_approvals_ticket").on(table.ticketNumber),
   index("idx_contact_approvals_confirm").on(table.confirmTokenHash),
+  check("contact_approvals_channel_check", sql`channel IN ('call', 'sms', 'email')`),
+  check("contact_approvals_status_check", sql`status IN ('pending', 'approved', 'rejected', 'cancelled', 'committed', 'failed')`),
 ]);
 
 export const pluginAuditLog = pgTable("plugin_audit_log", {

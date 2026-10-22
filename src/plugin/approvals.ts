@@ -10,7 +10,6 @@ import {
   issueConfirmOnApprove,
   newId,
   publicApproval,
-  type ApprovalStatus,
   type CallPayload,
   type ContactApprovalRow,
   type ContactChannel,
@@ -18,6 +17,34 @@ import {
   type PluginStore,
   type SmsPayload,
 } from "./store";
+
+export const PREPARE_PAYLOAD_MAX_BYTES = 8192;
+
+const PREPARE_KEYS: Record<ContactChannel, readonly string[]> = {
+  call: ["phone", "firstName", "lastName", "ticketId", "ticketNumber", "purpose"],
+  sms: ["phone", "body", "ticketId", "ticketNumber"],
+  email: ["to", "subject", "body", "ticketId", "ticketNumber"],
+};
+
+export function pickPreparePayload(
+  channel: ContactChannel,
+  raw: Record<string, unknown>,
+): { ok: true; payload: Record<string, unknown> } | { ok: false; error: string } {
+  let encoded: string;
+  try {
+    encoded = JSON.stringify(raw);
+  } catch {
+    return { ok: false, error: "Payload is not valid JSON" };
+  }
+  if (encoded.length > PREPARE_PAYLOAD_MAX_BYTES) {
+    return { ok: false, error: "Payload is too large" };
+  }
+  const payload: Record<string, unknown> = {};
+  for (const key of PREPARE_KEYS[channel]) {
+    if (raw[key] !== undefined) payload[key] = raw[key];
+  }
+  return { ok: true, payload };
+}
 
 export type PrepareInput =
   | { channel: "call"; payload: CallPayload }
@@ -68,13 +95,16 @@ export async function prepareContact(
   input: PrepareInput,
   now = new Date(),
 ): Promise<GateResult> {
-  const valid = validatePrepare(input);
+  const picked = pickPreparePayload(input.channel, input.payload as unknown as Record<string, unknown>);
+  if (!picked.ok) return { ok: false, status: 400, error: picked.error };
+  const narrowed = { channel: input.channel, payload: picked.payload } as unknown as PrepareInput;
+  const valid = validatePrepare(narrowed);
   if (!valid.ok) return { ok: false, status: 400, error: valid.error };
 
   const ticketId =
-    (typeof input.payload.ticketId === "string" && input.payload.ticketId) || null;
+    (typeof picked.payload.ticketId === "string" && picked.payload.ticketId) || null;
   const ticketNumber =
-    (typeof input.payload.ticketNumber === "string" && input.payload.ticketNumber) || null;
+    (typeof picked.payload.ticketNumber === "string" && picked.payload.ticketNumber) || null;
 
   const row: ContactApprovalRow = {
     id: newId(),
@@ -83,8 +113,8 @@ export async function prepareContact(
     tokenJti,
     ticketId,
     ticketNumber,
-    payload: { ...input.payload } as Record<string, unknown>,
-    payloadHash: hashPayload(input.payload),
+    payload: picked.payload,
+    payloadHash: hashPayload(picked.payload),
     confirmTokenHash: null,
     confirmExpiresAt: null,
     confirmUsedAt: null,
@@ -107,11 +137,21 @@ export async function approveContact(
   id: string,
   approvedBy: string,
   now = new Date(),
+  expectedPayloadHash?: string,
 ): Promise<GateResult> {
   const current = await store.getApproval(id);
   if (!current) return { ok: false, status: 404, error: "Contact request not found" };
   if (current.status !== "pending") {
     return { ok: false, status: 409, error: `Contact request is ${current.status}, not pending` };
+  }
+  if (approvedBy === current.tokenJti) {
+    return { ok: false, status: 403, error: "A token cannot approve its own request" };
+  }
+  if (typeof expectedPayloadHash !== "string" || !/^[a-f0-9]{64}$/.test(expectedPayloadHash)) {
+    return { ok: false, status: 400, error: "payloadHash is required" };
+  }
+  if (expectedPayloadHash !== current.payloadHash) {
+    return { ok: false, status: 409, error: "payloadHash does not match the request on file" };
   }
   const confirm = issueConfirmOnApprove(now);
   const approval = await store.updateApproval(
@@ -162,17 +202,13 @@ export async function cancelContact(
     return { ok: false, status: 409, error: "Contact request has already been sent" };
   }
   if (current.status === "cancelled") return { ok: true, approval: current };
-  const cancellable: ApprovalStatus[] = ["pending", "approved"];
-  if (!cancellable.includes(current.status)) {
+  if (current.status !== "pending" && current.status !== "approved") {
     return { ok: false, status: 409, error: `Contact request is ${current.status}` };
   }
-  const approval = await store.updateApproval(id, {
-    status: "cancelled",
-    cancelledAt: now,
-    confirmTokenHash: null,
-    confirmExpiresAt: null,
-    updatedAt: now,
-  });
+  if (current.confirmUsedAt) {
+    return { ok: false, status: 409, error: "Contact request is already being sent" };
+  }
+  const approval = await store.cancelIfOpen(id, now);
   if (!approval) return { ok: false, status: 409, error: "Contact request could not be cancelled" };
   return { ok: true, approval };
 }
@@ -194,6 +230,9 @@ export async function consumeConfirmToken(
     return { ok: false, status: 400, error: "confirmToken is required" };
   }
   const hash = hashSecret(confirmToken);
+  const claimed = await store.claimConfirmToken(hash, now);
+  if (claimed) return { ok: true, approval: claimed };
+
   const row = await store.findApprovalByConfirmHash(hash);
   if (!row) return { ok: false, status: 404, error: "Confirmation token not found" };
   if (row.status !== "approved") {
@@ -205,15 +244,7 @@ export async function consumeConfirmToken(
   if (!row.confirmExpiresAt || isConfirmExpired(row.confirmExpiresAt, now)) {
     return { ok: false, status: 410, error: "Confirmation token has expired" };
   }
-  const consumed = await store.updateApproval(
-    row.id,
-    { confirmUsedAt: now, updatedAt: now },
-    "approved",
-  );
-  if (!consumed || !consumed.confirmUsedAt) {
-    return { ok: false, status: 409, error: "Confirmation token has already been used" };
-  }
-  return { ok: true, approval: consumed };
+  return { ok: false, status: 409, error: "Confirmation token has already been used" };
 }
 
 export async function markCommitted(
@@ -222,12 +253,16 @@ export async function markCommitted(
   result: Record<string, unknown>,
   now = new Date(),
 ): Promise<ContactApprovalRow | null> {
-  return store.updateApproval(id, {
-    status: "committed",
-    committedAt: now,
-    result,
-    updatedAt: now,
-  });
+  return store.updateApproval(
+    id,
+    {
+      status: "committed",
+      committedAt: now,
+      result,
+      updatedAt: now,
+    },
+    "approved",
+  );
 }
 
 export async function markFailed(
@@ -236,11 +271,15 @@ export async function markFailed(
   result: Record<string, unknown>,
   now = new Date(),
 ): Promise<ContactApprovalRow | null> {
-  return store.updateApproval(id, {
-    status: "failed",
-    result,
-    updatedAt: now,
-  });
+  return store.updateApproval(
+    id,
+    {
+      status: "failed",
+      result,
+      updatedAt: now,
+    },
+    "approved",
+  );
 }
 
 export function channelOf(value: string): ContactChannel | null {

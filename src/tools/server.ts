@@ -36,6 +36,7 @@ import './generalServiceTools';
 import './languageTools';
 import './outboundTools';
 import './npxOutreachTools';
+import './siAssistantTools';
 
 function authorised(req: Request): boolean {
   const expected = process.env.VOICE_TOOL_API_KEY;

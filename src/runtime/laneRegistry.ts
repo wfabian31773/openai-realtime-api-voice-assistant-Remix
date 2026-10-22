@@ -78,6 +78,7 @@ import {
 } from "../tools/outboundTools";
 // The NPX outreach lane's own tools (v110): static for the same reason.
 import "../tools/npxOutreachTools";
+import "../tools/siAssistantTools";
 import type { OutboundContact, OutboundLanePolicy } from "./outbound/campaign";
 import type { CallbackContext } from "./outbound/callback";
 

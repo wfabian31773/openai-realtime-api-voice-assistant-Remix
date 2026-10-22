@@ -10,8 +10,10 @@
 import { createHmac } from "node:crypto";
 import { SI_ASSISTANT_SLUG } from "./siAssistantConstants";
 
+export const CALLBACK_REPORT_TIMEOUT_MS = 5_000;
+
 export interface CallbackReport {
-  event: "callback" | "inbound_sms";
+  event: "callback" | "inbound_sms" | "message";
   callSid?: string;
   slug: string;
   direction?: "inbound" | "outbound";
@@ -19,7 +21,21 @@ export interface CallbackReport {
   durationSeconds?: number;
   ticketNumber?: string | null;
   approvalId?: string | null;
+  ticketId?: string | null;
   smsCommand?: string;
+  /** Taken-message text. Delivered only to the ticketing webhook. Never logged. */
+  message?: string;
+}
+
+export function extrasFromContactData(
+  data: Record<string, unknown> | null | undefined,
+): { ticketNumber?: string | null; approvalId?: string | null; ticketId?: string | null } {
+  if (!data) return {};
+  return {
+    ticketNumber: typeof data.ticket_number === "string" ? data.ticket_number : null,
+    approvalId: typeof data.approval_id === "string" ? data.approval_id : null,
+    ticketId: typeof data.ticket_id === "string" ? data.ticket_id : null,
+  };
 }
 
 export interface CallbackReporter {
@@ -41,15 +57,22 @@ export function createCallbackReporter(
     async report(payload) {
       const body = JSON.stringify({ ...payload, slug: payload.slug || SI_ASSISTANT_SLUG });
       const signature = signCallbackPayload(body, secret);
-      const res = await fetchImpl(url, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-SI-Assistant-Signature": signature,
-        },
-        body,
-      });
-      return { ok: res.ok, status: res.status };
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), CALLBACK_REPORT_TIMEOUT_MS);
+      try {
+        const res = await fetchImpl(url, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-SI-Assistant-Signature": signature,
+          },
+          body,
+          signal: controller.signal,
+        });
+        return { ok: res.ok, status: res.status };
+      } finally {
+        clearTimeout(timer);
+      }
     },
   };
 }
@@ -67,7 +90,7 @@ export async function reportSiAssistantCall(
     startedAtMs: number;
     endedAtMs: number;
   },
-  extras: { ticketNumber?: string | null; approvalId?: string | null } = {},
+  extras: { ticketNumber?: string | null; approvalId?: string | null; ticketId?: string | null } = {},
   reporter: CallbackReporter | null = null,
   env: Record<string, string | undefined> = process.env,
 ): Promise<void> {
@@ -84,6 +107,7 @@ export async function reportSiAssistantCall(
       durationSeconds: Math.max(0, Math.round((record.endedAtMs - record.startedAtMs) / 1000)),
       ticketNumber: extras.ticketNumber ?? null,
       approvalId: extras.approvalId ?? null,
+      ticketId: extras.ticketId ?? null,
     });
     if (!result.ok) {
       console.error(`[si-assistant] callback webhook returned ${result.status ?? "unknown"}`);

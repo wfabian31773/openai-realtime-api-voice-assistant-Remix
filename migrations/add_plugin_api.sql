@@ -11,17 +11,16 @@
 
 CREATE TABLE IF NOT EXISTS api_tokens (
   id VARCHAR PRIMARY KEY DEFAULT gen_random_uuid(),
-  jti VARCHAR(32) NOT NULL UNIQUE,
+  jti VARCHAR(32) NOT NULL,
   hashed_secret VARCHAR(64) NOT NULL,
   label VARCHAR(128),
   scopes TEXT[] NOT NULL DEFAULT ARRAY['fleet:read']::text[],
   revoked_at TIMESTAMPTZ,
   expires_at TIMESTAMPTZ,
   last_used_at TIMESTAMPTZ,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT api_tokens_jti_key UNIQUE (jti)
 );
-
-CREATE INDEX IF NOT EXISTS idx_api_tokens_jti ON api_tokens (jti);
 
 CREATE TABLE IF NOT EXISTS contact_approvals (
   id VARCHAR PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -45,7 +44,9 @@ CREATE TABLE IF NOT EXISTS contact_approvals (
   -- Non-PHI result only: provider ids, status codes. No phones or bodies.
   result JSONB,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT contact_approvals_channel_check CHECK (channel IN ('call', 'sms', 'email')),
+  CONSTRAINT contact_approvals_status_check CHECK (status IN ('pending', 'approved', 'rejected', 'cancelled', 'committed', 'failed'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_contact_approvals_status ON contact_approvals (status, created_at);

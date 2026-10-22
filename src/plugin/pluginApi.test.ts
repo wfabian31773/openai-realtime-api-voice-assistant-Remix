@@ -8,16 +8,21 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { AddressInfo } from "node:net";
 import express from "express";
+import twilio from "twilio";
 import { MemoryPluginStore } from "./store";
 import { mountPluginApi } from "./routes";
-import { createGraphMail, createMemoryGraphMail } from "./email";
+import { createGraphMail, createMemoryGraphMail, type GraphMail } from "./email";
 import { evaluateAndEnqueueCall, siAssistantMayDial } from "./callEnqueue";
 import { FakeOutboundStore } from "../runtime/outbound/store.testkit";
 import { auditContainsPhi, ticketResolvedLogFields } from "./phi";
 import { ticketResolvedAuthorized } from "./ticketResolved";
-import { CONFIRM_TTL_MS } from "./tokens";
+import { CONFIRM_TTL_MS, generateConfirmToken, hashPayload } from "./tokens";
 import { classifyInboundSms, handleInboundSms, sendApprovedSms } from "./sms";
 import { SI_ASSISTANT_EMAIL_DEFAULT } from "./siAssistantConstants";
+import { mintScopesCompatible } from "./scopes";
+import { createSqlPluginStore } from "./sqlStore";
+import { extrasFromContactData, reportSiAssistantCall } from "./callbackReport";
+import type { SmsSender } from "./sms";
 
 const PHONE = "+15555550111";
 const TICKET = "VA-61001";
@@ -43,6 +48,7 @@ async function listen(
     outbound?: FakeOutboundStore;
     sms?: Array<{ to: string; from: string; body: string }>;
     mail?: ReturnType<typeof createMemoryGraphMail>;
+    smsSender?: SmsSender | null;
     now?: () => Date;
   } = {},
 ): Promise<{
@@ -66,12 +72,15 @@ async function listen(
     env,
     now: extras.now,
     outboundStore: outbound,
-    smsSender: {
-      async send(opts) {
-        sms.push(opts);
-        return { sid: `SM${sms.length}` };
-      },
-    },
+    smsSender:
+      extras.smsSender !== undefined
+        ? extras.smsSender
+        : {
+            async send(opts) {
+              sms.push(opts);
+              return { sid: `SM${sms.length}` };
+            },
+          },
     graphMail: mail,
   });
   const server = createServer(app);
@@ -96,6 +105,20 @@ async function boot(env: Record<string, string | undefined>, extras?: Parameters
   const ctx = await listen(env, extras);
   servers.push(ctx.server);
   return ctx;
+}
+
+async function staffApprove(
+  base: string,
+  staff: { plaintext: string },
+  store: MemoryPluginStore,
+  id: string,
+): Promise<Response> {
+  const row = await store.getApproval(id);
+  return fetch(`${base}/api/plugin/v1/approvals/${id}/approve`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${staff.plaintext}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ payloadHash: row!.payloadHash }),
+  });
 }
 
 describe("plugin auth", () => {
@@ -193,10 +216,7 @@ describe("the approval gate", () => {
       body: JSON.stringify({ phone: PHONE, ticketNumber: TICKET, firstName: "Testa" }),
     });
     const pending = (await prep.json()) as { approval: { id: string } };
-    const approved = await fetch(`${base}/api/plugin/v1/approvals/${pending.approval.id}/approve`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${staff.plaintext}`, "Content-Type": "application/json" },
-    });
+    const approved = await staffApprove(base, staff, store, pending.approval.id);
     expect(approved.status).toBe(200);
     const token = (await approved.json()) as { confirmToken: string };
     const committed = await fetch(`${base}/api/plugin/v1/commit_contact`, {
@@ -222,10 +242,7 @@ describe("the approval gate", () => {
       body: JSON.stringify({ phone: PHONE, body: "Hello", ticketNumber: TICKET }),
     });
     const pending = (await prep.json()) as { approval: { id: string } };
-    const approved = await fetch(`${base}/api/plugin/v1/approvals/${pending.approval.id}/approve`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${staff.plaintext}` },
-    });
+    const approved = await staffApprove(base, staff, store, pending.approval.id);
     const token = (await approved.json()) as { confirmToken: string };
     const first = await fetch(`${base}/api/plugin/v1/commit_contact`, {
       method: "POST",
@@ -264,10 +281,7 @@ describe("token expiry", () => {
     expect(pending.approval.confirmExpiresAt ?? null).toBeNull();
 
     nowMs += CONFIRM_TTL_MS + 60_000;
-    const approved = await fetch(`${base}/api/plugin/v1/approvals/${pending.approval.id}/approve`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${staff.plaintext}` },
-    });
+    const approved = await staffApprove(base, staff, store, pending.approval.id);
     expect(approved.status).toBe(200);
     const token = (await approved.json()) as { confirmToken: string; expiresAt: string };
     expect(token.confirmToken).toMatch(/^[a-f0-9]{64}$/);
@@ -298,10 +312,7 @@ describe("token expiry", () => {
       }),
     });
     const pending = (await prep.json()) as { approval: { id: string } };
-    const approved = await fetch(`${base}/api/plugin/v1/approvals/${pending.approval.id}/approve`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${staff.plaintext}` },
-    });
+    const approved = await staffApprove(base, staff, store, pending.approval.id);
     const token = (await approved.json()) as { confirmToken: string };
     nowMs += CONFIRM_TTL_MS + 1;
     const committed = await fetch(`${base}/api/plugin/v1/commit_contact`, {
@@ -358,10 +369,7 @@ describe("the calling window and DNC list", () => {
       body: JSON.stringify({ phone: PHONE, ticketNumber: TICKET }),
     });
     const pending = (await prep.json()) as { approval: { id: string } };
-    const approved = await fetch(`${base}/api/plugin/v1/approvals/${pending.approval.id}/approve`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${staff.plaintext}` },
-    });
+    const approved = await staffApprove(base, staff, store, pending.approval.id);
     const token = (await approved.json()) as { confirmToken: string };
     const committed = await fetch(`${base}/api/plugin/v1/commit_contact`, {
       method: "POST",
@@ -504,5 +512,447 @@ describe("SMS and email", () => {
     expect(files[3]).toMatch(/^SI_MAIL_CLIENT_SECRET=$/m);
     expect(files[3]).toMatch(/^SI_MAIL_TENANT_ID=$/m);
     expect(files[3]).toMatch(/^SI_MAIL_CLIENT_ID=$/m);
+  });
+});
+
+const TWILIO_AUTH = "test-auth-token";
+
+function signedSms(path: string, body: Record<string, string>, host = "127.0.0.1") {
+  const url = `http://${host}${path}`;
+  const sig = (
+    twilio as unknown as {
+      getExpectedTwilioSignature: (t: string, u: string, p: Record<string, string>) => string;
+    }
+  ).getExpectedTwilioSignature(TWILIO_AUTH, url, body);
+  return { signature: sig, body };
+}
+
+describe("review findings", () => {
+  it("refuses an unsigned SMS STOP and does not write DNC", async () => {
+    const { base, store } = await boot({ PLUGIN_WRITES_ENABLED: "true", TWILIO_AUTH_TOKEN: TWILIO_AUTH });
+    const res = await fetch(`${base}/api/plugin/v1/webhooks/twilio-sms`, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ From: PHONE, Body: "STOP" }).toString(),
+    });
+    expect(res.status).toBe(403);
+    expect(await store.isSmsOptedOut("5555550111")).toBe(false);
+  });
+
+  it("fails closed on SMS STOP when TWILIO_AUTH_TOKEN is missing", async () => {
+    const { base, store } = await boot({ PLUGIN_WRITES_ENABLED: "true" });
+    const res = await fetch(`${base}/api/plugin/v1/webhooks/twilio-sms`, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ From: PHONE, Body: "STOP" }).toString(),
+    });
+    expect(res.status).toBe(200);
+    expect(await store.isSmsOptedOut("5555550111")).toBe(false);
+  });
+
+  it("honours a signed SMS STOP", async () => {
+    const { base, store, server } = await boot({
+      PLUGIN_WRITES_ENABLED: "true",
+      TWILIO_AUTH_TOKEN: TWILIO_AUTH,
+    });
+    const port = (server.address() as { port: number }).port;
+    const path = "/api/plugin/v1/webhooks/twilio-sms";
+    const body = { From: PHONE, Body: "STOP" };
+    const signed = signedSms(path, body, `127.0.0.1:${port}`);
+    const res = await fetch(`${base}${path}`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "X-Twilio-Signature": signed.signature,
+      },
+      body: new URLSearchParams(body).toString(),
+    });
+    expect(res.status).toBe(200);
+    expect(await store.isSmsOptedOut("5555550111")).toBe(true);
+  });
+
+  it("claims a confirm token only once under overlapping commits", async () => {
+    const store = new MemoryPluginStore();
+    const token = generateConfirmToken();
+    const now = new Date("2026-10-22T18:00:00Z");
+    await store.insertApproval({
+      id: "appr-race",
+      channel: "sms",
+      status: "approved",
+      tokenJti: "preparer",
+      ticketId: null,
+      ticketNumber: TICKET,
+      payload: { phone: PHONE, body: "Hi" },
+      payloadHash: hashPayload({ phone: PHONE, body: "Hi" }),
+      confirmTokenHash: token.hash,
+      confirmExpiresAt: new Date(now.getTime() + 60_000),
+      confirmUsedAt: null,
+      approvedBy: "staff",
+      approvedAt: now,
+      rejectedBy: null,
+      rejectedAt: null,
+      cancelledAt: null,
+      committedAt: null,
+      result: null,
+      createdAt: now,
+      updatedAt: now,
+    });
+    const [a, b] = await Promise.all([
+      store.claimConfirmToken(token.hash, now),
+      store.claimConfirmToken(token.hash, now),
+    ]);
+    expect([a, b].filter(Boolean)).toHaveLength(1);
+  });
+
+  it("the SQL claim is one conditional UPDATE", async () => {
+    const seen: Array<{ text: string; params: unknown[] }> = [];
+    const store = createSqlPluginStore(async (text, params) => {
+      seen.push({ text, params: params ?? [] });
+      return [];
+    });
+    await store.claimConfirmToken("abc", new Date("2026-10-22T18:00:00Z"));
+    expect(seen).toHaveLength(1);
+    expect(seen[0].text).toMatch(/confirm_used_at IS NULL/);
+    expect(seen[0].text).toMatch(/status = 'approved'/);
+    expect(seen[0].text).toMatch(/confirm_expires_at > \$2/);
+    expect(seen[0].text).toMatch(/RETURNING \*/);
+  });
+
+  it("shows the payload and hash to the approver and refuses a mismatched hash", async () => {
+    const now = () => new Date("2026-10-22T18:00:00Z");
+    const { base, store } = await boot({ PLUGIN_WRITES_ENABLED: "true" }, { now });
+    const bot = store.mint(["contacts:prepare"]);
+    const staff = store.mint(["contacts:approve"]);
+    const prep = await fetch(`${base}/api/plugin/v1/prepare_sms`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${bot.plaintext}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ phone: PHONE, body: "Please call us", ticketNumber: TICKET }),
+    });
+    const pending = (await prep.json()) as { approval: { id: string } };
+    const listed = await fetch(`${base}/api/plugin/v1/approvals`, {
+      headers: { Authorization: `Bearer ${staff.plaintext}` },
+    });
+    const body = (await listed.json()) as {
+      approvals: Array<{ id: string; payload: { body: string; phone: string }; payloadHash: string }>;
+    };
+    const shown = body.approvals.find((r) => r.id === pending.approval.id);
+    expect(shown?.payload.body).toBe("Please call us");
+    expect(shown?.payload.phone).toBe(PHONE);
+    expect(shown?.payloadHash).toMatch(/^[a-f0-9]{64}$/);
+
+    const wrong = await fetch(`${base}/api/plugin/v1/approvals/${pending.approval.id}/approve`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${staff.plaintext}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ payloadHash: "0".repeat(64) }),
+    });
+    expect(wrong.status).toBe(409);
+
+    const ok = await fetch(`${base}/api/plugin/v1/approvals/${pending.approval.id}/approve`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${staff.plaintext}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ payloadHash: shown!.payloadHash }),
+    });
+    expect(ok.status).toBe(200);
+  });
+
+  it("refuses a token approving its own request", async () => {
+    const { base, store } = await boot({ PLUGIN_WRITES_ENABLED: "true" });
+    const both = store.mint(["contacts:prepare", "contacts:approve"]);
+    const prep = await fetch(`${base}/api/plugin/v1/prepare_sms`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${both.plaintext}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ phone: PHONE, body: "Hi", ticketNumber: TICKET }),
+    });
+    const pending = (await prep.json()) as { approval: { id: string } };
+    const approved = await staffApprove(base, both, store, pending.approval.id);
+    expect(approved.status).toBe(403);
+    expect(mintScopesCompatible(["contacts:prepare", "contacts:approve"]).ok).toBe(false);
+    expect(mintScopesCompatible(["fleet:read", "contacts:approve"]).ok).toBe(true);
+  });
+
+  it("moves a thrown send to failed and audits without PHI", async () => {
+    const now = () => new Date("2026-10-22T18:00:00Z");
+    const { base, store } = await boot(
+      { PLUGIN_WRITES_ENABLED: "true" },
+      {
+        now,
+        smsSender: {
+          async send() {
+            throw new Error(`twilio refused ${PHONE} Patient secret text`);
+          },
+        },
+      },
+    );
+    const bot = store.mint(["contacts:prepare", "contacts:commit"]);
+    const staff = store.mint(["contacts:approve"]);
+    const prep = await fetch(`${base}/api/plugin/v1/prepare_sms`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${bot.plaintext}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ phone: PHONE, body: "Patient secret text", ticketNumber: TICKET }),
+    });
+    const pending = (await prep.json()) as { approval: { id: string } };
+    const approved = await staffApprove(base, staff, store, pending.approval.id);
+    const token = (await approved.json()) as { confirmToken: string };
+    const committed = await fetch(`${base}/api/plugin/v1/commit_contact`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${bot.plaintext}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ confirmToken: token.confirmToken }),
+    });
+    expect(committed.status).toBe(502);
+    const row = await store.getApproval(pending.approval.id);
+    expect(row?.status).toBe("failed");
+    expect(row?.result).toEqual({ reason: "send_failed" });
+    const audit = await store.listAudit();
+    const failed = audit.find((e) => e.outcome === "failed");
+    expect(failed).toBeTruthy();
+    expect(JSON.stringify(failed)).not.toContain("5555550111");
+    expect(JSON.stringify(failed)).not.toContain("Patient secret");
+    expect(auditContainsPhi(failed as unknown as Record<string, unknown>)).toBe(false);
+  });
+
+  it("will not send a cancelled request and will not overwrite cancelled", async () => {
+    const now = () => new Date("2026-10-22T18:00:00Z");
+    const { base, store, sms } = await boot({ PLUGIN_WRITES_ENABLED: "true" }, { now });
+    const bot = store.mint(["contacts:prepare", "contacts:commit"]);
+    const staff = store.mint(["contacts:approve"]);
+    const prep = await fetch(`${base}/api/plugin/v1/prepare_sms`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${bot.plaintext}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ phone: PHONE, body: "Hello", ticketNumber: TICKET }),
+    });
+    const pending = (await prep.json()) as { approval: { id: string } };
+    const approved = await staffApprove(base, staff, store, pending.approval.id);
+    const token = (await approved.json()) as { confirmToken: string };
+    const cancelled = await fetch(`${base}/api/plugin/v1/cancel_contact`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${bot.plaintext}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ id: pending.approval.id }),
+    });
+    expect(cancelled.status).toBe(200);
+    const committed = await fetch(`${base}/api/plugin/v1/commit_contact`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${bot.plaintext}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ confirmToken: token.confirmToken }),
+    });
+    expect([404, 409]).toContain(committed.status);
+    expect(sms).toEqual([]);
+    const row = await store.getApproval(pending.approval.id);
+    expect(row?.status).toBe("cancelled");
+  });
+
+  it("refuses cancel after the confirm token is consumed", async () => {
+    const store = new MemoryPluginStore();
+    const now = new Date("2026-10-22T18:00:00Z");
+    const token = generateConfirmToken();
+    await store.insertApproval({
+      id: "appr-used",
+      channel: "sms",
+      status: "approved",
+      tokenJti: "preparer",
+      ticketId: null,
+      ticketNumber: TICKET,
+      payload: { phone: PHONE, body: "Hi" },
+      payloadHash: hashPayload({ phone: PHONE, body: "Hi" }),
+      confirmTokenHash: token.hash,
+      confirmExpiresAt: new Date(now.getTime() + 60_000),
+      confirmUsedAt: now,
+      approvedBy: "staff",
+      approvedAt: now,
+      rejectedBy: null,
+      rejectedAt: null,
+      cancelledAt: null,
+      committedAt: null,
+      result: null,
+      createdAt: now,
+      updatedAt: now,
+    });
+    expect(await store.cancelIfOpen("appr-used", now)).toBeNull();
+    const committed = await store.updateApproval(
+      "appr-used",
+      { status: "committed", committedAt: now, result: { queued: true }, updatedAt: now },
+      "approved",
+    );
+    expect(committed?.status).toBe("committed");
+  });
+
+  it("does not let another approval's attempts cap a first call", async () => {
+    const outbound = new FakeOutboundStore();
+    const campaignId = await outbound.ensureCampaign();
+    await outbound.upsertSourceContacts(campaignId!, [
+      {
+        externalRef: "plugin:other-approval",
+        phone: PHONE,
+        firstName: "Other",
+        lastName: null,
+        data: {},
+      },
+    ]);
+    const other = (await outbound.sourceRows(campaignId!))[0];
+    const attemptId = await outbound.startAttempt(other.id, campaignId!, 1);
+    await outbound.finishAttempt(attemptId, { status: "no_answer" });
+    const result = await evaluateAndEnqueueCall(
+      outbound,
+      { approvalId: "new-approval", phone: PHONE, ticketNumber: TICKET },
+      new Date("2026-10-22T18:00:00Z"),
+    );
+    expect(result).toMatchObject({ ok: true, queued: true });
+  });
+
+  it("returns 422 outside hours and 503 when the campaign is missing", async () => {
+    const now = () => new Date("2026-10-22T15:30:00Z"); // 8:30 AM PDT
+    const { base, store } = await boot({ PLUGIN_WRITES_ENABLED: "true" }, { now });
+    const bot = store.mint(["contacts:prepare", "contacts:commit"]);
+    const staff = store.mint(["contacts:approve"]);
+    const prep = await fetch(`${base}/api/plugin/v1/prepare_call`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${bot.plaintext}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ phone: PHONE, ticketNumber: TICKET }),
+    });
+    const pending = (await prep.json()) as { approval: { id: string } };
+    const approved = await staffApprove(base, staff, store, pending.approval.id);
+    const token = (await approved.json()) as { confirmToken: string };
+    const committed = await fetch(`${base}/api/plugin/v1/commit_contact`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${bot.plaintext}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ confirmToken: token.confirmToken }),
+    });
+    expect(committed.status).toBe(422);
+
+    const outbound = new FakeOutboundStore();
+    outbound.agentRowMissing = true;
+    const noon = () => new Date("2026-10-22T18:00:00Z");
+    const missing = await boot({ PLUGIN_WRITES_ENABLED: "true" }, { outbound, now: noon });
+    const bot2 = missing.store.mint(["contacts:prepare", "contacts:commit"]);
+    const staff2 = missing.store.mint(["contacts:approve"]);
+    const prep2 = await fetch(`${missing.base}/api/plugin/v1/prepare_call`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${bot2.plaintext}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ phone: PHONE, ticketNumber: TICKET }),
+    });
+    const pending2 = (await prep2.json()) as { approval: { id: string } };
+    const approved2 = await staffApprove(missing.base, staff2, missing.store, pending2.approval.id);
+    const token2 = (await approved2.json()) as { confirmToken: string };
+    const committed2 = await fetch(`${missing.base}/api/plugin/v1/commit_contact`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${bot2.plaintext}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ confirmToken: token2.confirmToken }),
+    });
+    expect(committed2.status).toBe(503);
+  });
+
+  it("hides another token's request and drops unknown prepare keys", async () => {
+    const { base, store } = await boot({ PLUGIN_WRITES_ENABLED: "true" });
+    const bot = store.mint(["contacts:prepare", "fleet:read"]);
+    const other = store.mint(["contacts:prepare", "fleet:read"]);
+    const prep = await fetch(`${base}/api/plugin/v1/prepare_sms`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${bot.plaintext}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        phone: PHONE,
+        body: "Hello",
+        ticketNumber: TICKET,
+        ssn: "000-00-0000",
+        extra: "drop me",
+      }),
+    });
+    const pending = (await prep.json()) as { approval: { id: string } };
+    const row = await store.getApproval(pending.approval.id);
+    expect(row?.payload).not.toHaveProperty("ssn");
+    expect(row?.payload).not.toHaveProperty("extra");
+    expect(row?.tokenJti).toBe(bot.jti);
+
+    const peek = await fetch(`${base}/api/plugin/v1/get_contact_request?id=${pending.approval.id}`, {
+      headers: { Authorization: `Bearer ${other.plaintext}` },
+    });
+    expect(peek.status).toBe(404);
+    const cancel = await fetch(`${base}/api/plugin/v1/cancel_contact`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${other.plaintext}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ id: pending.approval.id }),
+    });
+    expect(cancel.status).toBe(404);
+  });
+
+  it("redacts reply senders from fleet:read and catches Graph failures", async () => {
+    const mail = createMemoryGraphMail();
+    mail.listReplies = async () => [
+      {
+        id: "r1",
+        receivedAt: "2026-10-22T18:00:00Z",
+        conversationId: "c1",
+        from: "patient@example.com",
+        subject: "About my eyes",
+      },
+    ];
+    const { base, store } = await boot({ PLUGIN_WRITES_ENABLED: "true" }, { mail });
+    const reader = store.mint(["fleet:read"]);
+    const staff = store.mint(["contacts:approve", "fleet:read"]);
+    const hidden = await fetch(`${base}/api/plugin/v1/email_replies`, {
+      headers: { Authorization: `Bearer ${reader.plaintext}` },
+    });
+    const hiddenBody = (await hidden.json()) as { replies: Array<Record<string, unknown>> };
+    expect(hiddenBody.replies[0]).not.toHaveProperty("from");
+    expect(hiddenBody.replies[0]).not.toHaveProperty("subject");
+    const shown = await fetch(`${base}/api/plugin/v1/email_replies`, {
+      headers: { Authorization: `Bearer ${staff.plaintext}` },
+    });
+    const shownBody = (await shown.json()) as { replies: Array<{ from?: string; subject?: string }> };
+    expect(shownBody.replies[0].from).toBe("patient@example.com");
+    expect(shownBody.replies[0].subject).toBe("About my eyes");
+
+    const broken: GraphMail = {
+      async sendMail() {
+        return { id: "x" };
+      },
+      async listReplies() {
+        throw new Error("graph down");
+      },
+    };
+    const fail = await boot({ PLUGIN_WRITES_ENABLED: "true" }, { mail: broken as ReturnType<typeof createMemoryGraphMail> });
+    const res = await fetch(`${fail.base}/api/plugin/v1/email_replies`, {
+      headers: { Authorization: `Bearer ${fail.store.mint(["fleet:read"]).plaintext}` },
+    });
+    expect(res.status).toBe(502);
+  });
+
+  it("carries ticket id through the callback extras", async () => {
+    const extras = extrasFromContactData({
+      approval_id: "appr-1",
+      ticket_number: TICKET,
+      ticket_id: "tid-9",
+    });
+    expect(extras).toEqual({ approvalId: "appr-1", ticketNumber: TICKET, ticketId: "tid-9" });
+    const posted: Array<{ body: string }> = [];
+    await reportSiAssistantCall(
+      {
+        slug: "si-assistant",
+        callSid: "CA" + "a".repeat(32),
+        outcome: "agent_ended",
+        startedAtMs: 0,
+        endedAtMs: 12_000,
+      },
+      extras,
+      {
+        async report(payload) {
+          posted.push({ body: JSON.stringify(payload) });
+          return { ok: true, status: 200 };
+        },
+      },
+    );
+    expect(posted[0].body).toContain("tid-9");
+    expect(posted[0].body).toContain(TICKET);
+    expect(posted[0].body).toContain("appr-1");
+  });
+
+  it("aligns the drizzle jti constraint name with the migration", () => {
+    const schema = readFileSync(join(__dirname, "../../shared/schema.ts"), "utf8");
+    const migration = readFileSync(join(__dirname, "../../migrations/add_plugin_api.sql"), "utf8");
+    expect(schema).toContain('unique("api_tokens_jti_key")');
+    expect(schema).not.toMatch(/jti: varchar\("jti".*\)\.notNull\(\)\.unique\(\)/);
+    expect(schema).not.toContain("idx_api_tokens_jti");
+    expect(migration).toContain("CONSTRAINT api_tokens_jti_key UNIQUE (jti)");
+    expect(migration).not.toContain("idx_api_tokens_jti");
+    expect(migration).toContain("contact_approvals_channel_check");
+    expect(migration).toContain("contact_approvals_status_check");
   });
 });

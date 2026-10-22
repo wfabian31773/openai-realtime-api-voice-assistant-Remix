@@ -48,6 +48,24 @@ export function hasScope(granted: readonly string[] | null | undefined, needed: 
   return (granted ?? []).includes(needed);
 }
 
+/**
+ * A token that can both prepare and approve can skip the human. The mint
+ * script refuses that combination; the approve gate also refuses a jti
+ * approving its own request.
+ */
+export function mintScopesCompatible(scopes: readonly PluginScope[]): { ok: true } | { ok: false; error: string } {
+  if (
+    scopes.includes("contacts:approve") &&
+    (scopes.includes("contacts:prepare") || scopes.includes("contacts:commit"))
+  ) {
+    return {
+      ok: false,
+      error: "contacts:approve cannot be minted with contacts:prepare or contacts:commit",
+    };
+  }
+  return { ok: true };
+}
+
 export const SCOPE_FOR_TOOL: Record<string, PluginScope> = {
   list_agents: "fleet:read",
   agent_health: "fleet:read",

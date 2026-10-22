@@ -63,9 +63,7 @@ export async function evaluateAndEnqueueCall(
   if (!campaignId) return { ok: false, reason: "no_campaign" };
 
   const externalRef = `plugin:${input.approvalId}`;
-  const existing = (await store.sourceRows(campaignId)).find(
-    (r) => r.externalRef === externalRef || dncKey(r.phone) === key,
-  );
+  const existing = (await store.sourceRows(campaignId)).find((r) => r.externalRef === externalRef);
   const prior = existing ? await store.priorAttempts(existing.id) : [];
   const decision = mayDialNow(now, prior, SI_ASSISTANT_WINDOW, SI_ASSISTANT_CAPS);
   if (!decision.ok) return { ok: false, reason: decision.reason };

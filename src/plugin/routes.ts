@@ -10,7 +10,7 @@ import type { Express, NextFunction, Request, Response } from "express";
 import { hasScope, type PluginScope } from "./scopes";
 import { pluginWritesEnabled } from "./writesEnabled";
 import { parseBearerToken, type VerifiedPluginToken } from "./tokens";
-import { verifyStoredToken, publicApproval, type PluginStore } from "./store";
+import { verifyStoredToken, publicApproval, approvalForApprover, type ContactApprovalRow, type PluginStore } from "./store";
 import {
   approveContact,
   cancelContact,
@@ -20,6 +20,8 @@ import {
   prepareContact,
   rejectContact,
 } from "./approvals";
+import { hashPayload } from "./tokens";
+import { checkTwilioSignature, type WebhookRequest } from "../runtime/voiceWebhook";
 import { agentHealth, emptyFleetReader, listAgents, outboundStatus, type AgentSource, type FleetReader } from "./reads";
 import { evaluateAndEnqueueCall } from "./callEnqueue";
 import { createTwilioSmsSender, handleInboundSms, sendApprovedSms, type SmsSender } from "./sms";
@@ -74,6 +76,26 @@ async function audit(
 
 function jsonError(res: Response, status: number, error: string): void {
   res.status(status).json({ error });
+}
+
+function canAccessApproval(auth: VerifiedPluginToken | undefined, row: ContactApprovalRow): boolean {
+  if (!auth) return false;
+  if (row.tokenJti === auth.jti) return true;
+  return hasScope(auth.scopes, "contacts:approve");
+}
+
+function asWebhookRequest(req: Request): WebhookRequest {
+  return {
+    headers: req.headers as WebhookRequest["headers"],
+    body: (req.body ?? {}) as Record<string, string>,
+    originalUrl: req.originalUrl,
+  };
+}
+
+function enqueueHttpStatus(reason: string): number {
+  if (reason === "do_not_contact" || reason === "invalid_phone") return 409;
+  if (reason === "no_campaign") return 503;
+  return 422;
 }
 
 export function mountPluginApi(app: Express, deps: PluginApiDeps): void {
@@ -151,12 +173,15 @@ export function mountPluginApi(app: Express, deps: PluginApiDeps): void {
   app.get(`${v1}/get_contact_request`, requireAuth, requireScope("fleet:read"), async (req: AuthedRequest, res) => {
     const id = typeof req.query.id === "string" ? req.query.id : "";
     const row = id ? await deps.store.getApproval(id) : null;
-    if (!row) {
+    if (!row || !canAccessApproval(req.pluginAuth, row)) {
       jsonError(res, 404, "Contact request not found");
       await audit(deps, req.pluginAuth, req, "get_contact_request", "error", 404);
       return;
     }
-    res.json(publicApproval(row));
+    const view = hasScope(req.pluginAuth?.scopes, "contacts:approve")
+      ? approvalForApprover(row)
+      : publicApproval(row);
+    res.json(view);
     await audit(deps, req.pluginAuth, req, "get_contact_request", "ok", 200, {
       approvalId: row.id,
       ticketId: row.ticketId,
@@ -170,17 +195,22 @@ export function mountPluginApi(app: Express, deps: PluginApiDeps): void {
       await audit(deps, req.pluginAuth, req, "email_replies", "error", 503);
       return;
     }
-    const replies = await mail.listReplies({ top: 20 });
-    res.json({
-      replies: replies.map((r) => ({
-        id: r.id,
-        receivedAt: r.receivedAt,
-        conversationId: r.conversationId,
-        from: r.from,
-        subject: r.subject,
-      })),
-    });
-    await audit(deps, req.pluginAuth, req, "email_replies", "ok", 200);
+    try {
+      const replies = await mail.listReplies({ top: 20 });
+      const reveal = hasScope(req.pluginAuth?.scopes, "contacts:approve");
+      res.json({
+        replies: replies.map((r) => ({
+          id: r.id,
+          receivedAt: r.receivedAt,
+          conversationId: r.conversationId,
+          ...(reveal ? { from: r.from, subject: r.subject } : {}),
+        })),
+      });
+      await audit(deps, req.pluginAuth, req, "email_replies", "ok", 200);
+    } catch {
+      jsonError(res, 502, "Could not list email replies");
+      await audit(deps, req.pluginAuth, req, "email_replies", "error", 502);
+    }
   });
 
   const prepare = (channel: "call" | "sms" | "email") => async (req: AuthedRequest, res: Response) => {
@@ -212,6 +242,12 @@ export function mountPluginApi(app: Express, deps: PluginApiDeps): void {
 
   app.post(`${v1}/cancel_contact`, requireAuth, requireScope("contacts:prepare"), requireWrites, async (req: AuthedRequest, res) => {
     const id = String((req.body as { id?: string })?.id ?? "");
+    const existing = id ? await deps.store.getApproval(id) : null;
+    if (!existing || !canAccessApproval(req.pluginAuth, existing)) {
+      jsonError(res, 404, "Contact request not found");
+      await audit(deps, req.pluginAuth, req, "cancel_contact", "error", 404, { approvalId: id });
+      return;
+    }
     const result = await cancelContact(deps.store, id, (deps.now ?? (() => new Date()))());
     if (!result.ok) {
       jsonError(res, result.status, result.error);
@@ -228,16 +264,18 @@ export function mountPluginApi(app: Express, deps: PluginApiDeps): void {
   app.get(`${v1}/approvals`, requireAuth, requireScope("contacts:approve"), async (req: AuthedRequest, res) => {
     const status = typeof req.query.status === "string" ? req.query.status : "pending";
     const rows = await deps.store.listApprovals(status as never);
-    res.json({ approvals: rows.map(publicApproval) });
+    res.json({ approvals: rows.map(approvalForApprover) });
     await audit(deps, req.pluginAuth, req, "list_approvals", "ok", 200);
   });
 
   app.post(`${v1}/approvals/:id/approve`, requireAuth, requireScope("contacts:approve"), requireWrites, async (req: AuthedRequest, res) => {
+    const payloadHash = String((req.body as { payloadHash?: string } | undefined)?.payloadHash ?? "");
     const result = await approveContact(
       deps.store,
       req.params.id,
       req.pluginAuth!.jti,
       (deps.now ?? (() => new Date()))(),
+      payloadHash,
     );
     if (!result.ok) {
       jsonError(res, result.status, result.error);
@@ -248,7 +286,7 @@ export function mountPluginApi(app: Express, deps: PluginApiDeps): void {
       status: "approved",
       confirmToken: result.confirmToken,
       expiresAt: result.approval.confirmExpiresAt?.toISOString() ?? null,
-      approval: publicApproval(result.approval),
+      approval: approvalForApprover(result.approval),
     });
     await audit(deps, req.pluginAuth, req, "approve_contact", "approved", 200, {
       approvalId: result.approval.id,
@@ -285,17 +323,46 @@ export function mountPluginApi(app: Express, deps: PluginApiDeps): void {
       return;
     }
 
-    const executed = await executeApproved(deps, consumed.approval, now);
+    if (hashPayload(consumed.approval.payload) !== consumed.approval.payloadHash) {
+      await markFailed(deps.store, consumed.approval.id, { reason: "payload_hash_mismatch" }, now);
+      jsonError(res, 409, "Approved payload no longer matches the locked hash");
+      await audit(deps, req.pluginAuth, req, "commit_contact", "error", 409, {
+        approvalId: consumed.approval.id,
+        ticketId: consumed.approval.ticketId,
+      });
+      return;
+    }
+
+    let executed: Awaited<ReturnType<typeof executeApproved>>;
+    try {
+      executed = await executeApproved(deps, consumed.approval, now);
+    } catch {
+      await markFailed(deps.store, consumed.approval.id, { reason: "send_failed" }, now);
+      jsonError(res, 502, "The send failed");
+      await audit(deps, req.pluginAuth, req, "commit_contact", "failed", 502, {
+        approvalId: consumed.approval.id,
+        ticketId: consumed.approval.ticketId,
+      });
+      return;
+    }
     if (!executed.ok) {
       await markFailed(deps.store, consumed.approval.id, { reason: executed.reason }, now);
       jsonError(res, executed.status, executed.error);
-      await audit(deps, req.pluginAuth, req, "commit_contact", "error", executed.status, {
+      await audit(deps, req.pluginAuth, req, "commit_contact", "failed", executed.status, {
         approvalId: consumed.approval.id,
         ticketId: consumed.approval.ticketId,
       });
       return;
     }
     const committed = await markCommitted(deps.store, consumed.approval.id, executed.result, now);
+    if (!committed) {
+      jsonError(res, 409, "Contact request is no longer approved");
+      await audit(deps, req.pluginAuth, req, "commit_contact", "error", 409, {
+        approvalId: consumed.approval.id,
+        ticketId: consumed.approval.ticketId,
+      });
+      return;
+    }
     res.json({
       status: "committed",
       approval: publicApproval(committed ?? consumed.approval),
@@ -308,6 +375,17 @@ export function mountPluginApi(app: Express, deps: PluginApiDeps): void {
   });
 
   app.post(`${v1}/webhooks/twilio-sms`, async (req, res) => {
+    const sig = checkTwilioSignature(asWebhookRequest(req), envOf(deps));
+    if (sig === "no_auth_token") {
+      // Fail closed: do not honour STOP/START. 200 empty TwiML so Twilio
+      // does not treat this as a 5xx and retry.
+      res.type("text/xml").status(200).send("<Response></Response>");
+      return;
+    }
+    if (sig === "invalid") {
+      res.status(403).type("text/plain").send("invalid signature");
+      return;
+    }
     const body = (req.body ?? {}) as { From?: string; Body?: string };
     const from = String(body.From ?? "");
     const text = String(body.Body ?? "");
@@ -353,7 +431,7 @@ async function executeApproved(
       now,
     );
     if (!queued.ok) {
-      const status = queued.reason === "do_not_contact" || queued.reason === "invalid_phone" ? 409 : 409;
+      const status = enqueueHttpStatus(queued.reason);
       return { ok: false, status, error: `Call was not placed: ${queued.reason}`, reason: queued.reason };
     }
     return { ok: true, result: { queued: true, campaignId: queued.campaignId } };

@@ -108,6 +108,13 @@ export interface PluginStore {
   listApprovals(status?: ApprovalStatus): Promise<ContactApprovalRow[]>;
   updateApproval(id: string, patch: Partial<ContactApprovalRow>, onlyIfStatus?: ApprovalStatus): Promise<ContactApprovalRow | null>;
   findApprovalByConfirmHash(hash: string): Promise<ContactApprovalRow | null>;
+  /**
+   * Single-use claim of an approved, unused, unexpired confirm token.
+   * Must be one atomic check-and-set so two commits cannot both send.
+   */
+  claimConfirmToken(hash: string, now: Date): Promise<ContactApprovalRow | null>;
+  /** Cancel only while the request is still open and the confirm token is unused. */
+  cancelIfOpen(id: string, now: Date): Promise<ContactApprovalRow | null>;
 
   isSmsOptedOut(phoneKey: string): Promise<boolean>;
   setSmsOptOut(phoneKey: string, optedOut: boolean): Promise<void>;
@@ -208,6 +215,36 @@ export class MemoryPluginStore implements PluginStore {
     }
     return null;
   }
+  async claimConfirmToken(hash: string, now: Date): Promise<ContactApprovalRow | null> {
+    // No await between the check and the write — JS is single-threaded,
+    // so two overlapping calls still serialise here.
+    for (const row of this.approvals.values()) {
+      if (
+        row.confirmTokenHash === hash &&
+        row.status === "approved" &&
+        !row.confirmUsedAt &&
+        row.confirmExpiresAt &&
+        row.confirmExpiresAt.getTime() > now.getTime()
+      ) {
+        row.confirmUsedAt = now;
+        row.updatedAt = now;
+        return { ...row, payload: { ...row.payload } };
+      }
+    }
+    return null;
+  }
+  async cancelIfOpen(id: string, now: Date): Promise<ContactApprovalRow | null> {
+    const row = this.approvals.get(id);
+    if (!row) return null;
+    if (row.confirmUsedAt) return null;
+    if (row.status !== "pending" && row.status !== "approved") return null;
+    row.status = "cancelled";
+    row.cancelledAt = now;
+    row.confirmTokenHash = null;
+    row.confirmExpiresAt = null;
+    row.updatedAt = now;
+    return { ...row, payload: { ...row.payload } };
+  }
 
   async isSmsOptedOut(phoneKey: string): Promise<boolean> {
     return this.smsOptOuts.has(phoneKey);
@@ -225,7 +262,7 @@ export class MemoryPluginStore implements PluginStore {
   }
 }
 
-/** Redacted view the Support Center page and get_contact_request may see. */
+/** Redacted view the bot and get_contact_request may see. No payload. */
 export function publicApproval(row: ContactApprovalRow): Record<string, unknown> {
   return {
     id: row.id,
@@ -242,6 +279,18 @@ export function publicApproval(row: ContactApprovalRow): Record<string, unknown>
     confirmExpiresAt: row.confirmExpiresAt?.toISOString() ?? null,
     confirmUsed: Boolean(row.confirmUsedAt),
     result: row.result,
+  };
+}
+
+/**
+ * What the Pending bot actions page shows. Includes the payload the
+ * fleet will send and the hash the approve/commit steps lock to.
+ */
+export function approvalForApprover(row: ContactApprovalRow): Record<string, unknown> {
+  return {
+    ...publicApproval(row),
+    payload: { ...row.payload },
+    payloadHash: row.payloadHash,
   };
 }
 

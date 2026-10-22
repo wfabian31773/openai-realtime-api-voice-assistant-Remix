@@ -19,6 +19,9 @@ import {
   SI_ASSISTANT_ENABLE_ENV,
   SI_ASSISTANT_SLUG,
 } from '../plugin/siAssistantConstants';
+import { TAKE_MESSAGE_TOOL_NAME } from '../tools/siAssistantTools';
+
+export const SI_ASSISTANT_TOOLS = [TAKE_MESSAGE_TOOL_NAME] as const;
 
 export const siAssistantAgentConfig = {
   slug: SI_ASSISTANT_SLUG,
@@ -54,6 +57,7 @@ export const siAssistantPolicy: OutboundLanePolicy = {
   greeting: siAssistantGreeting,
   voicemail: () => SI_ASSISTANT_VOICEMAIL,
   callbackPurpose: SI_ASSISTANT_CALLBACK_PURPOSE,
+  tools: SI_ASSISTANT_TOOLS,
 };
 
 function buildPrompt(contact: OutboundContact | undefined, returnedCall: boolean): string {
@@ -84,7 +88,7 @@ ${opening}
 Thank them, call record_call_outcome with done, say goodbye, and call end_call.
 
 ## Guardrails & Escalation
-You cannot transfer this call or schedule an appointment. If they ask for a person, say you will take a message for the support team. If they ask not to be called, call opt_out_of_calls at once and say only what it tells you to say, then call end_call. Do not invent clinical advice.
+You cannot transfer this call or schedule an appointment. If they ask for a person, or have a message for the support team, ask what they would like the team to know, then call take_si_assistant_message with their words. Say only what that tool tells you to say. You cannot transfer. If they ask not to be called, call opt_out_of_calls at once and say only what it tells you to say, then call end_call. Do not invent clinical advice.
 
 ## Voice & Communication Style
 Short sentences. One question at a time, then stop and listen. Always identify as an AI assistant if there is any doubt.`;
