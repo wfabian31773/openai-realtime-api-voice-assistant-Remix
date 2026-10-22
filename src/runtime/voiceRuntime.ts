@@ -268,6 +268,8 @@ function matchedRecord(
 import type { TransferTwilioOps } from "./warmTransfer";
 import { resolveAppDomain } from "../config/environment";
 import { callEnvironment } from "./callRecord";
+import { loadGrokRuntimeVoiceConfig } from "./config";
+import { runtimeBuildIdentity, stampBuildIdentity, deployedBuildSha, type BuildIdentity } from "./buildIdentity";
 import { openRuntimeCall, persistRuntimeCall, type CallLogInsert, type RuntimeCallIdentity } from "./callRecord";
 import { identityForRow } from "./runtimeIdentity";
 import { identityStoreProbe, rememberVerifiedIdentity } from "../tools/verifiedIdentity";
@@ -433,6 +435,14 @@ export interface VoiceRuntimeOptions {
   /** The identity the process established for the caller rides with the
    * record (runtimeIdentity.ts) — a CERTAIN match only, never a candidate. */
   persistCall?: (record: VoiceCallRecord, identity?: RuntimeCallIdentity) => Promise<boolean>;
+  /**
+   * Stamps which software handled the call (marker, build SHA, voice model)
+   * onto its row — buildIdentity.ts. Fired, never awaited, after the row is
+   * opened and again after the teardown write lands; the statement only fills
+   * NULLs, so the second write repairs a row the first never reached and
+   * changes nothing on one it did. Injected for tests.
+   */
+  stampBuild?: (callSid: string, identity: BuildIdentity) => Promise<boolean>;
   /**
    * The teardown request sweep. Injected for tests, and settable to a no-op
    * to turn it off without a deploy.
@@ -606,7 +616,24 @@ export function mountVoiceRuntime(
   // Resolved lazily and cached: importing src/config/agents pulls in every
   // agent (and their database and API clients), which must not happen at
   // boot or in a health check.
-  const persistCall = options.persistCall ?? persistRuntimeCall;
+  const stampBuild = options.stampBuild ?? stampBuildIdentity;
+  // The model a lane's session opens with is a pure function of the
+  // environment and the slug — the same call `resolveLane` makes — so the
+  // teardown stamp can name it without holding the lane.
+  const buildFor = (slug: string): BuildIdentity =>
+    runtimeBuildIdentity(loadGrokRuntimeVoiceConfig(env, slug).model);
+  const stampCall = (callSid: string, slug: string): void => {
+    void stampBuild(callSid, buildFor(slug)).catch(() => false);
+  };
+  const persistCallRow = options.persistCall ?? persistRuntimeCall;
+  const persistCall = async (
+    record: VoiceCallRecord,
+    identity?: RuntimeCallIdentity,
+  ): Promise<boolean> => {
+    const written = await persistCallRow(record, identity);
+    if (written) stampCall(record.callSid, record.slug);
+    return written;
+  };
   const sweepCall = options.sweepCall ?? runRequestSweep;
   const persistTurns = options.persistTurns ?? persistRuntimeTurns;
   const startRecording = options.startRecording ?? makeRecordingStarter(env);
@@ -745,6 +772,10 @@ export function mountVoiceRuntime(
     const lanes = await rosterFor().catch(() => null);
     res.json({
       marker: VOICE_RUNTIME_DEPLOY_MARKER,
+      // The commit this bundle was built from, read from build-info.json
+      // (written by the deployment build). null = unknown, never a guess.
+      // Compare with call_logs.build_sha on calls after a publish.
+      buildSha: deployedBuildSha(),
       // The cached prefix every lane shares. Reported so a change in the
       // fleet's cache-hit rate can be attributed to a prefix change rather
       // than guessed at — which is the whole reason the constant exists,
@@ -1422,6 +1453,7 @@ export function mountVoiceRuntime(
         // being logged as unidentified (Codex review, PR #227).
         void openRow.then((id) => {
           if (id) callLogId = id;
+          stampCall(entry.callSid, entry.slug);
         });
         callLogId =
           (await withinOrNull(openRow, options.callRowDeadlineMs ?? CALL_ROW_DEADLINE_MS)) ??

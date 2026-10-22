@@ -241,7 +241,7 @@ export class AgentRegistry {
       outbound: npxOutreachPolicy,
     });
 
-    // SI Assistant (v111): approved single-contact calls, texts and emails
+    // SI Assistant (v112): approved single-contact calls, texts and emails
     // from the Support Center bot. Runtime outbound only — not on the old
     // core. Dials nothing unless RUNTIME_OUTBOUND_DIALING=1,
     // OUTBOUND_CAMPAIGN_SI_ASSISTANT=1 and SI_ASSISTANT_NUMBER are set and

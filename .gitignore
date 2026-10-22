@@ -145,3 +145,7 @@ twilio-inventory.json
 replay-corpus/
 replay-out/
 *.jsonl
+
+# Written at build time by scripts/write-build-info.cjs; never committed (a
+# committed copy reported 3f4ec74 as the deployed SHA for two months).
+build-info.json
