@@ -5,7 +5,7 @@
  * message. The body is PHI: never log it, never write it to
  * plugin_audit_log.
  */
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   ATTACHMENT_UPDATE_MAX_ATTEMPTS,
   newId,
@@ -60,12 +60,20 @@ export async function persistTakenMessage(
     fromPhone?: string | null;
     /** Twilio MessageSid of an inbound SMS. Keys the row's idempotency. */
     messageSid?: string | null;
+    /** True for an inbound SMS. With no usable MessageSid it gets a unique key. */
+    inboundSms?: boolean;
   },
   now = new Date(),
   store: PluginStore | null = boundPluginStore(),
 ): Promise<MessageOutboxRow | null> {
   if (!store) return null;
   const smsKey = smsIdempotencyKey(input.messageSid);
+  // An inbound SMS without a MessageSid has nothing to dedupe on. A key built
+  // from the (absent) callSid and the text would merge two senders who wrote
+  // the same words, so it gets a random key: never deduped, never merged.
+  const idempotencyKey =
+    smsKey ??
+    (input.inboundSms ? `sms-nosid:${randomUUID()}` : outboxIdempotencyKey(input.callSid, input.message));
   try {
     return await store.insertOutbox({
       id: newId(),
@@ -78,7 +86,7 @@ export async function persistTakenMessage(
       attempts: 0,
       nextAttemptAt: now,
       lastError: null,
-      idempotencyKey: smsKey ?? outboxIdempotencyKey(input.callSid, input.message),
+      idempotencyKey,
       suggestions: input.suggestions ?? [],
       fromPhone: input.fromPhone ?? null,
       messageSid: smsKey ? (input.messageSid ?? "").trim() : null,

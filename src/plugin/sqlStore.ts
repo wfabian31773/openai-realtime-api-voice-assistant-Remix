@@ -396,8 +396,9 @@ export function createSqlPluginStore(exec: SqlExec): PluginStore {
     async purgeDeliveredOutboxBodies(now) {
       const rows = await exec(
         `UPDATE plugin_message_outbox
-            SET message = '', updated_at = $1
-          WHERE status = 'delivered' AND message <> ''
+            SET message = '', from_phone = NULL, message_sid = NULL, updated_at = $1
+          WHERE status = 'delivered'
+            AND (message <> '' OR from_phone IS NOT NULL OR message_sid IS NOT NULL)
           RETURNING id`,
         [now.toISOString()],
       );

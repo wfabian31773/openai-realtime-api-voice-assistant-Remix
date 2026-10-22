@@ -6,8 +6,9 @@
  * STOP / HELP / START are honoured on the inbound webhook. STOP writes
  * an SMS opt-out row (source `sms_stop`). Any do_not_contact row, of any
  * source, blocks both texts and calls. HELP replies with the AI
- * identification. START deletes only the `sms_stop` row and never a voice
- * "don't call me" — so a number with a voice row stays blocked for both.
+ * identification unless the number is blocked. START deletes only the
+ * `sms_stop` row and never a voice "don't call me" — so a number with a
+ * voice row stays blocked for both, and START then sends no reply.
  */
 
 import { dncKey } from "../runtime/outbound/store";
@@ -89,6 +90,9 @@ export async function handleInboundSms(
     return { command, replied: Boolean(sender) };
   }
   if (command === "help") {
+    // A number blocked by any do_not_contact row (an SMS STOP or a voice
+    // "don't call me") gets no text at all, not even the HELP reply.
+    if (await store.isSmsOptedOut(key)) return { command, replied: false };
     if (sender) {
       await sender.send({ to: `+1${key}`, from: siAssistantNumber(env), body: HELP_REPLY });
     }
@@ -96,6 +100,10 @@ export async function handleInboundSms(
   }
   if (command === "start") {
     await store.setSmsOptOut(key, false);
+    // START clears only sms_stop. If another row (a voice opt-out) still
+    // blocks the number, texting "you are opted back in" would be false and
+    // would itself be a text to a blocked number: send nothing.
+    if (await store.isSmsOptedOut(key)) return { command, replied: false };
     if (sender) {
       await sender.send({ to: `+1${key}`, from: siAssistantNumber(env), body: START_REPLY });
     }

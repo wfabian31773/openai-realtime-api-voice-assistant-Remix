@@ -122,7 +122,19 @@ CREATE INDEX IF NOT EXISTS idx_plugin_outbox_attachment_due
 CREATE UNIQUE INDEX IF NOT EXISTS plugin_message_outbox_idempotency_key
   ON plugin_message_outbox (idempotency_key);
 
+-- Row level security, no policies, not FORCEd. The tables are reached only
+-- by the fleet process over its Hub connection (the owner, which RLS without
+-- FORCE does not restrict); anon / authenticated through PostgREST see
+-- nothing. Re-running ENABLE is a no-op. do_not_contact is not created by
+-- this migration (the outbound store's ensureSchema creates it) and is left
+-- alone here.
+ALTER TABLE api_tokens ENABLE ROW LEVEL SECURITY;
+ALTER TABLE contact_approvals ENABLE ROW LEVEL SECURITY;
+ALTER TABLE plugin_audit_log ENABLE ROW LEVEL SECURITY;
+ALTER TABLE plugin_message_outbox ENABLE ROW LEVEL SECURITY;
+
 -- Reversal:
+--   ALTER TABLE <each of the four> DISABLE ROW LEVEL SECURITY;
 --   DROP TABLE plugin_message_outbox;
 --   DROP TABLE plugin_audit_log;
 --   DROP TABLE contact_approvals;

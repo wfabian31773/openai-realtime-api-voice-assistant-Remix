@@ -408,7 +408,12 @@ export function mountPluginApi(app: Express, deps: PluginApiDeps): void {
         // Sender and MessageSid ride on the row and the webhook payload, never
         // in a log. Keyed on the MessageSid so a Twilio retry is one row.
         const row = await persistTakenMessage(
-          { message: preview, fromPhone: from || null, messageSid: String(body.MessageSid ?? "") || null },
+          {
+            message: preview,
+            fromPhone: from || null,
+            messageSid: String(body.MessageSid ?? "") || null,
+            inboundSms: true,
+          },
           now,
           deps.store,
         );

@@ -172,7 +172,7 @@ export interface PluginStore {
    * Leases each row until `leaseUntil` so two sweeps do not send it twice.
    */
   claimDueAttachmentUpdates(now: Date, leaseUntil: Date, limit: number): Promise<MessageOutboxRow[]>;
-  /** Empty delivered bodies (PHI). */
+  /** Empty delivered bodies (PHI), and null the sender phone and MessageSid with them. */
   purgeDeliveredOutboxBodies(now: Date): Promise<number>;
   /** Delete undelivered rows older than `olderThan`. Returns the deleted ids. */
   purgeExpiredOutbox(now: Date, olderThan: Date): Promise<string[]>;
@@ -459,8 +459,12 @@ export class MemoryPluginStore implements PluginStore {
   async purgeDeliveredOutboxBodies(now: Date): Promise<number> {
     let n = 0;
     for (const row of this.outbox.values()) {
-      if (row.status !== "delivered" || row.message === "") continue;
+      if (row.status !== "delivered") continue;
+      if (row.message === "" && !row.fromPhone && !row.messageSid) continue;
+      // The sender's number and the MessageSid go with the body.
       row.message = "";
+      row.fromPhone = null;
+      row.messageSid = null;
       row.updatedAt = now;
       n += 1;
     }

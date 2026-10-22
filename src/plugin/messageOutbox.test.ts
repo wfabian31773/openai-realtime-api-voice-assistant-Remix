@@ -117,6 +117,59 @@ describe("message outbox", () => {
     expect(JSON.stringify(expired)).not.toContain("gone");
   });
 
+  it("the retention purge clears the sender and MessageSid with the body", async () => {
+    const store = new MemoryPluginStore();
+    const now = new Date("2026-10-22T18:00:00Z");
+    const messageSid = "SM" + "4".repeat(32);
+    const row = await persistTakenMessage(
+      { message: "Please call me", fromPhone: "+15555550199", messageSid, inboundSms: true },
+      now,
+      store,
+    );
+    await store.markOutbox(row!.id, { status: "delivered", updatedAt: now });
+    const purged = await purgeOutboxRetention(store, now);
+    expect(purged.bodies).toBe(1);
+    const after = store.outbox.get(row!.id)!;
+    expect(after.message).toBe("");
+    expect(after.fromPhone).toBeNull();
+    expect(after.messageSid).toBeNull();
+    // A second pass finds nothing left to purge.
+    expect((await purgeOutboxRetention(store, now)).bodies).toBe(0);
+  });
+
+  it("the SQL purge nulls from_phone and message_sid as well as the body", async () => {
+    const seen: string[] = [];
+    const sqlStore = createSqlPluginStore(async (text) => {
+      seen.push(text);
+      return [];
+    });
+    await sqlStore.purgeDeliveredOutboxBodies(new Date("2026-10-22T18:00:00Z"));
+    expect(seen[0]).toMatch(/SET message = '', from_phone = NULL, message_sid = NULL/);
+    expect(seen[0]).toMatch(/from_phone IS NOT NULL OR message_sid IS NOT NULL/);
+  });
+
+  it("two senders with the same text and no MessageSid get two rows", async () => {
+    const store = new MemoryPluginStore();
+    const now = new Date("2026-10-22T18:00:00Z");
+    const a = await persistTakenMessage(
+      { message: "Is my order ready?", fromPhone: "+15555550101", messageSid: null, inboundSms: true },
+      now,
+      store,
+    );
+    const b = await persistTakenMessage(
+      { message: "Is my order ready?", fromPhone: "+15555550102", messageSid: "", inboundSms: true },
+      now,
+      store,
+    );
+    expect(a!.id).not.toBe(b!.id);
+    expect(store.outbox.size).toBe(2);
+    expect(a!.idempotencyKey).toMatch(/^sms-nosid:/);
+    expect(b!.idempotencyKey).toMatch(/^sms-nosid:/);
+    expect(a!.idempotencyKey).not.toBe(b!.idempotencyKey);
+    expect(a!.idempotencyKey!.length).toBeLessThanOrEqual(64);
+    expect(store.outbox.get(b!.id)?.fromPhone).toBe("+15555550102");
+  });
+
   it("writes the expiry audit before deleting, and keeps the row if the audit throws", async () => {
     const store = new MemoryPluginStore();
     const now = new Date("2026-10-22T18:00:00Z");

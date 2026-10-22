@@ -146,7 +146,9 @@ as its own row — unique is `(phone_key, source)`, not the phone
 alone — so a later voice "don't call me" is a second row. START
 deletes only `sms_stop`. Voice dials ignore `sms_stop`; SMS send
 ignores a voice row. Either order (voice then START, or STOP then
-voice then START) leaves the call blocked. An inbound text that is
+voice then START) leaves the call blocked. A number still blocked by
+any `do_not_contact` row gets no reply at all: START that leaves a
+voice row behind is silent, and so is HELP. An inbound text that is
 not STOP / HELP / START is a taken message: a body preview goes
 through `plugin_message_outbox`. Empty bodies are skipped — they
 must not become an empty Support Center item.

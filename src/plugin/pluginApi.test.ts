@@ -18,7 +18,7 @@ import { ChannelDoNotContact } from "../runtime/outbound/channelDnc";
 import { auditContainsPhi, ticketResolvedLogFields } from "./phi";
 import { ticketResolvedAuthorized } from "./ticketResolved";
 import { CONFIRM_TTL_MS, generateConfirmToken, hashPayload } from "./tokens";
-import { classifyInboundSms, handleInboundSms, inboundSmsPreview, sendApprovedSms } from "./sms";
+import { HELP_REPLY, START_REPLY, classifyInboundSms, handleInboundSms, inboundSmsPreview, sendApprovedSms } from "./sms";
 import { SI_ASSISTANT_EMAIL_DEFAULT } from "./siAssistantConstants";
 import { mintScopesCompatible } from "./scopes";
 import { createSqlPluginStore } from "./sqlStore";
@@ -520,6 +520,64 @@ describe("the calling window and DNC list", () => {
     );
     expect(result).toEqual({ ok: false, reason: "do_not_contact" });
     expect(outbound.upserts).toEqual([]);
+  });
+
+  it("START to a number a voice row still blocks sends no reply and texts stay blocked", async () => {
+    const channels = new ChannelDoNotContact();
+    const outbound = new FakeOutboundStore();
+    outbound.channelDnc = channels;
+    const store = new MemoryPluginStore();
+    store.channelDnc = channels;
+    const sent: string[] = [];
+    const sender = { async send(o: { body: string }) { sent.push(o.body); return { sid: "SM-x" }; } };
+    await outbound.stampDoNotContact(PHONE, "opt_out_of_calls");
+    const out = await handleInboundSms(store, sender, { from: PHONE, body: "START" }, {});
+    expect(out).toEqual({ command: "start", replied: false });
+    expect(sent).toEqual([]);
+    expect(await store.isSmsOptedOut("5555550111")).toBe(true);
+    const sms = await sendApprovedSms(store, sender, { phone: PHONE, body: "hello" }, {});
+    expect(sms).toMatchObject({ ok: false, reason: "sms_opted_out" });
+    expect(sent).toEqual([]);
+  });
+
+  it("START with only an sms_stop row still replies START_REPLY", async () => {
+    const store = new MemoryPluginStore();
+    const sent: string[] = [];
+    const sender = { async send(o: { body: string }) { sent.push(o.body); return { sid: "SM-y" }; } };
+    await handleInboundSms(store, sender, { from: PHONE, body: "STOP" }, {});
+    sent.length = 0;
+    const out = await handleInboundSms(store, sender, { from: PHONE, body: "START" }, {});
+    expect(out).toEqual({ command: "start", replied: true });
+    expect(sent).toEqual([START_REPLY]);
+  });
+
+  it("HELP to a number blocked by any do_not_contact row sends no reply", async () => {
+    const channels = new ChannelDoNotContact();
+    const outbound = new FakeOutboundStore();
+    outbound.channelDnc = channels;
+    const store = new MemoryPluginStore();
+    store.channelDnc = channels;
+    const sent: string[] = [];
+    const sender = { async send(o: { body: string }) { sent.push(o.body); return { sid: "SM-h" }; } };
+    await outbound.stampDoNotContact(PHONE, "opt_out_of_calls");
+    expect(await handleInboundSms(store, sender, { from: PHONE, body: "HELP" }, {})).toEqual({
+      command: "help",
+      replied: false,
+    });
+    const smsOnly = new MemoryPluginStore();
+    await smsOnly.setSmsOptOut("5555550111", true);
+    expect(await handleInboundSms(smsOnly, sender, { from: PHONE, body: "HELP" }, {})).toEqual({
+      command: "help",
+      replied: false,
+    });
+    expect(sent).toEqual([]);
+    // An unblocked number still gets the HELP identification.
+    const open = new MemoryPluginStore();
+    expect(await handleInboundSms(open, sender, { from: PHONE, body: "HELP" }, {})).toEqual({
+      command: "help",
+      replied: true,
+    });
+    expect(sent).toEqual([HELP_REPLY]);
   });
 
   it("a voice opt-out blocks an approved SMS", async () => {
@@ -1504,6 +1562,21 @@ describe("review findings", () => {
     expect(migration).toMatch(/DROP CONSTRAINT IF EXISTS contact_approvals_status_check/);
     expect(migration).toMatch(/'unknown'/);
     expect(migration).toContain("plugin_message_outbox_idempotency_key");
+  });
+
+  it("the migration enables RLS on every plugin table, without FORCE and without policies", () => {
+    const migration = readFileSync(join(__dirname, "../../migrations/add_plugin_api.sql"), "utf8");
+    for (const t of ["api_tokens", "contact_approvals", "plugin_audit_log", "plugin_message_outbox"]) {
+      expect(migration).toMatch(new RegExp(`^ALTER TABLE ${t} ENABLE ROW LEVEL SECURITY;`, "m"));
+    }
+    const live = migration
+      .split("\n")
+      .filter((l) => !l.trim().startsWith("--"))
+      .join("\n");
+    expect(live).not.toMatch(/FORCE ROW LEVEL SECURITY/i);
+    expect(live).not.toMatch(/CREATE POLICY/i);
+    // do_not_contact belongs to the outbound store's ensureSchema, not here.
+    expect(live).not.toMatch(/do_not_contact/);
   });
 
   it("the per-channel DNC migration drops the phone-only primary key", () => {
