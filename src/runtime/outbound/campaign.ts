@@ -121,7 +121,7 @@ export interface OutboundLanePolicy {
   tools?: readonly string[];
   /**
    * Whether the campaign is calling test data or real people right now, for
-   * /voice/health (v112): the one fact an operator must be able to confirm
+   * /voice/health (v113): the one fact an operator must be able to confirm
    * after a republish without placing a call. Read from the environment it is
    * given. Optional: a campaign with one mode leaves it out.
    */

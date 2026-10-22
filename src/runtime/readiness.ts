@@ -833,16 +833,22 @@ import { callEnvironment } from "./callRecord";
  * caller ID and NPX key are set. On top of v109 (#360), which it contains.
  * `src/agents/npxOutreachAgent.ts`,
  * `src/tools/npxOutreachTools.ts`.
+ *
+ * v111 — THE CALL ROW NAMES ITS BUILD (2026-10-22), Stage C step 1. Every
+ * call row carries runtime_marker, build_sha and voice_model, written by one
+ * fill-only statement once the A6 migration's columns exist; the deployment
+ * build writes build-info.json from git instead of serving a committed copy
+ * frozen at 3f4ec74. `src/runtime/buildIdentity.ts`. On top of v110 (#361).
  */
 /**
- * v111 — THE MEDICATION NAME IS ASKED ONCE (2026-10-22). The after-hours
+ * v112 — THE MEDICATION NAME IS ASKED ONCE (2026-10-22). The after-hours
  * line's refill gate refused `create_ticket` on every attempt for the life of
  * the call; it now refuses once, files on the next attempt, never asks about
- * a contact lens, and the refusal reaches `tool_timeline`.
- * `src/services/toolDirection.ts`.
+ * a contact lens, and the refusal reaches `tool_timeline`. On top of v111
+ * (#364), which it contains. `src/services/toolDirection.ts`.
  */
 /**
- * v112 — THE NPX DEMO LINE (2026-10-22). Operator: "No way we are going to do
+ * v113 — THE NPX DEMO LINE (2026-10-22). Operator: "No way we are going to do
  * this without testing the line first", then "switching over to production
  * should be a env switch". ONE lane, `npx-outreach`, and NPX_OUTREACH_MODE:
  * unset (or anything but `live`) calls the synthetic patients on
@@ -850,12 +856,12 @@ import { callEnvironment } from "./callRecord";
  * the staff ticket simulated; `live` calls the Console's movable list and
  * books for real. Same caller ID, Voice URL, agent, prompt, tools and voice
  * (`eve`) in both. `/voice/health` names each lane's voice and the NPX lane's
- * mode. On top of v111, which it contains.
+ * mode. On top of v112, which it contains.
  * `src/agents/npxOutreachAgent.ts`, `src/agents/npxOutreachDemo.ts`,
  * `src/tools/npxOutreachTools.ts`.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v112-the-npx-demo-line-20261022";
+  "voice-runtime-v113-the-npx-demo-line-20261022";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

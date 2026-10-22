@@ -29,7 +29,7 @@ export function releaseDirectionState(callId: string | undefined): void {
 }
 
 /**
- * THE MEDICATION ASK IS BOUNDED AT ONE PER CALL (v111).
+ * THE MEDICATION ASK IS BOUNDED AT ONE PER CALL (v112).
  *
  * The refill gate below refused `create_ticket` whenever the arguments said
  * "refill" or "medication" and no drug name in its list matched — with no
@@ -153,7 +153,7 @@ export function withToolDirection<A extends unknown[]>(
      * Called when the medication gate refuses, with the arguments and the
      * outcome to record. The refusal returns before `execute`, so the
      * recorder the agent wrapped around `execute` never sees it — without
-     * this, a refused filing is invisible in `tool_timeline` (v111).
+     * this, a refused filing is invisible in `tool_timeline` (v112).
      */
     recordRefusal?: (args: unknown, outcome: Record<string, unknown>) => void;
   } = {},
@@ -268,7 +268,7 @@ async function gateDecision(
   const argText = JSON.stringify(toolArgs ?? '').toLowerCase();
   // Request-type requirements (live retest 2026-08-07): a refill ticket
   // without the medication name is a message worth less — ask for it, ONCE
-  // (v111, medicationGate above).
+  // (v112, medicationGate above).
   if (toolName === 'create_ticket') {
     const text = medicationGate(callId, argText);
     if (text) {

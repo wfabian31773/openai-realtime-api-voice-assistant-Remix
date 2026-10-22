@@ -78,7 +78,7 @@ describe('gateBeforeExecution — no abrupt endings (PCP)', () => {
   });
 });
 
-describe('the medication gate asks once (v111)', () => {
+describe('the medication gate asks once (v112)', () => {
   const refill = { request_category: 'medication_refill', request_summary: 'Refill of Betoptic drops.' };
 
   it('refuses once per call, then lets the filing through', async () => {

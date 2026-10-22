@@ -42,7 +42,7 @@
  * Every refusal speaks through `fix`, the model's channel (v43); `say` is the
  * one sentence for the caller where there is one.
  *
- * DEMO OR LIVE IS ONE ENVIRONMENT VARIABLE (v112), NPX_OUTREACH_MODE: `live`
+ * DEMO OR LIVE IS ONE ENVIRONMENT VARIABLE (v113), NPX_OUTREACH_MODE: `live`
  * calls the Console's movable list and books for real; anything else, unset
  * included, is the demo (operator, 2026-10-22: "switching over to production
  * should be a env switch"). A demo call runs these same tools with three of

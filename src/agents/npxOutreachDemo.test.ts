@@ -1,5 +1,5 @@
 /**
- * NPX outreach in DEMO mode (v112): one lane, `npx-outreach`, and one
+ * NPX outreach in DEMO mode (v113): one lane, `npx-outreach`, and one
  * environment variable, NPX_OUTREACH_MODE, between the demo and production
  * (operator, 2026-10-22: "switching over to production should be a env
  * switch"). In demo: synthetic patients on the operator's test numbers, the

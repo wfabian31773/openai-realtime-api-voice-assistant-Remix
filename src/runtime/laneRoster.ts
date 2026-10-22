@@ -94,7 +94,7 @@ export interface LaneReadiness {
    */
   voiceName: string | null;
   /**
-   * For an outbound campaign with two modes (v112, NPX outreach): `demo`
+   * For an outbound campaign with two modes (v113, NPX outreach): `demo`
    * while it calls test data, `live` once it calls real people — read from
    * the same environment the campaign reads, so after a republish this says
    * which one is dialling without anybody placing a call. Null for every

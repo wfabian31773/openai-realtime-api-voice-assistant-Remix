@@ -1,5 +1,5 @@
 /**
- * The NPX outreach DEMO SEED (v112): who the `npx-outreach` lane calls while
+ * The NPX outreach DEMO SEED (v113): who the `npx-outreach` lane calls while
  * NPX_OUTREACH_MODE is not `live`.
  *
  * Operator, 2026-10-22: "No way we are going to do this without testing the

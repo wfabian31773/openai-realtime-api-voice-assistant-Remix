@@ -1217,7 +1217,7 @@ export async function createNoIvrAgent(
         ...def,
         // CP-3: the approved next line rides inside the tool result (script-listing §6).
         execute: withToolDirection('no-ivr', callId, def.name, recordingExecute(timelineCtx, def.name, def.execute), {
-          // v111: a gate refusal returns before the recorder runs, so it is
+          // v112: a gate refusal returns before the recorder runs, so it is
           // recorded here — the same timeline key and ids recordingExecute uses.
           recordRefusal: (args, outcome) => {
             const key = timelineCtx.callId ?? timelineCtx.callSid ?? '';

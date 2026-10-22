@@ -54,6 +54,7 @@ import {
 import { db } from "./db";
 import { eq, asc, desc, and, or, count, gte, lte, lt, inArray, isNull, isNotNull, ilike, sql } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
+import { stampBuildIdentity, oldCoreBuildIdentity } from "../src/runtime/buildIdentity";
 
 export interface IStorage {
   // User operations (required for Replit Auth)
@@ -432,6 +433,10 @@ export class DatabaseStorage implements IStorage {
   async createCallLog(callLogData: InsertCallLog): Promise<CallLog> {
     return await withRetry(async () => {
       const [callLog] = await db.insert(callLogs).values(callLogData).returning();
+      // Which software handled the call (Stage C, A6): every row this path
+      // opens is the old SIP core's. Fired, never awaited; fills NULLs only,
+      // and writes nothing until the migration's columns exist.
+      if (callLog?.callSid) void stampBuildIdentity(callLog.callSid, oldCoreBuildIdentity());
       return callLog;
     }, `createCallLog(${callLogData.callSid?.slice(-8) || 'new'})`);
   }

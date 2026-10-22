@@ -37,6 +37,8 @@ import { answerUrl } from "./outbound/dialer";
 import type { OutboundLanePolicy } from "./outbound/campaign";
 import { DEFAULT_ATTEMPT_CAPS, DEFAULT_CALLING_WINDOW } from "./outbound/callingWindow";
 import { CallSessionRegistry } from "./sessionRegistry";
+import { deployedBuildSha } from "./buildIdentity";
+import { VOICE_RUNTIME_DEPLOY_MARKER } from "./readiness";
 import { transferDestinationStatus, transferUnavailableReason } from "./runtimeTransfer";
 import type { GrokServerEvent } from "./wireTypes";
 import type { LaneConfig, LaneSource } from "./laneRegistry";
@@ -205,6 +207,8 @@ function laneSource(over: Partial<LaneConfig> = {}): LaneSource {
 
 interface Harness {
   openedRows: Array<Record<string, unknown>>;
+  /** Every build-identity stamp the runtime fired, in order (v111). */
+  stamped: Array<{ callSid: string; identity: Record<string, unknown> }>;
   persisted: Array<Record<string, unknown>>;
   /** The identity handed to persistCall beside each record (v51). */
   persistedIdentity: Array<unknown>;
@@ -264,6 +268,7 @@ async function harness(
     startRecording?: (callSid: string, host: string | undefined) => Promise<unknown>;
     persistBeforeSweepMs?: number;
     openCallRow?: (row: unknown) => Promise<string | undefined>;
+    stampBuild?: (callSid: string, identity: unknown) => Promise<boolean>;
     callRowDeadlineMs?: number;
     env?: Record<string, string | undefined>;
     /** The outbound layer's store (src/runtime/outbound/). */
@@ -276,6 +281,7 @@ async function harness(
   const registry = new CallSessionRegistry();
   const transports: FakeGrokTransport[] = [];
   const openedRows: Array<Record<string, unknown>> = [];
+  const stamped: Array<{ callSid: string; identity: Record<string, unknown> }> = [];
   const persisted: Array<Record<string, unknown>> = [];
   const persistedIdentity: Array<unknown> = [];
   const audioRows: Array<{ callSid: string; outcome: string; counts: unknown }> = [];
@@ -318,6 +324,13 @@ async function harness(
         return undefined;
       }),
     persistBeforeSweepMs: over.persistBeforeSweepMs,
+    // The real stamp would reach for the database; record it instead.
+    stampBuild:
+      (over.stampBuild as never) ??
+      (async (callSid: string, identity: Record<string, unknown>) => {
+        stamped.push({ callSid, identity });
+        return true;
+      }),
     // Telemetry hooks default to no-ops here: the real ones import twilio
     // and write call_turns, neither of which a harness call should touch.
     persistTurns: over.persistTurns ?? (async () => 0),
@@ -368,6 +381,7 @@ async function harness(
   const port = (server.address() as { port: number }).port;
   const h: Harness = {
     openedRows,
+    stamped,
     persisted,
     persistedIdentity,
     audioRows,
@@ -566,6 +580,47 @@ describe("one whole call, end to end, offline", () => {
 
     ws.close();
     await settle();
+  });
+
+  it("stamps which software handled the call when the row opens and again after the teardown write (v111)", async () => {
+    const h = await harness({
+      env: { ...ENV, XAI_VOICE_MODEL_OPTICAL: "grok-voice-test-model" },
+    });
+    const answered = await post(h, "/voice/optical", { CallSid: "CAb111", From: "+15551234567", To: "+15559876543" });
+    const { ws } = await openStream(h, "CAb111", tokenFrom(answered.text));
+    await waitFor(() => h.transports.length === 1, "the transport to register");
+    await waitFor(() => h.stamped.length === 1, "the open stamp");
+    expect(h.stamped[0]).toEqual({
+      callSid: "CAb111",
+      identity: {
+        runtimeMarker: VOICE_RUNTIME_DEPLOY_MARKER,
+        buildSha: deployedBuildSha(),
+        voiceModel: "grok-voice-test-model",
+      },
+    });
+    ws.close();
+    await waitFor(() => h.persisted.length === 1, "the teardown write");
+    await waitFor(() => h.stamped.length === 2, "the teardown stamp");
+    expect(h.stamped[1]).toEqual(h.stamped[0]);
+  });
+
+  it("does not stamp after a teardown write that did not land (v111)", async () => {
+    const h = await harness({ persistCall: async () => false });
+    const answered = await post(h, "/voice/optical", { CallSid: "CAb112", From: "+1", To: "+2" });
+    const { ws } = await openStream(h, "CAb112", tokenFrom(answered.text));
+    await waitFor(() => h.stamped.length === 1, "the open stamp");
+    ws.close();
+    await settle(8);
+    expect(h.stamped).toHaveLength(1);
+  });
+
+  it("/voice/health names the build SHA beside the marker (v111)", async () => {
+    const h = await harness();
+    const res = await fetch(`${h.base}/voice/health`);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.marker).toBe(VOICE_RUNTIME_DEPLOY_MARKER);
+    expect("buildSha" in body).toBe(true);
+    expect(body.buildSha).toBe(deployedBuildSha());
   });
 
   it("plays the agent's audio to the caller and records what was actually heard", async () => {

@@ -135,7 +135,7 @@ describe("what this deployment can serve", () => {
 describe("the boot lines", () => {
   it("lead with the count, so a deployment serving nothing is obvious", () => {
     const lines = formatLaneRoster(laneRoster(ALL, {}, { transferAvailable: false }));
-    // 5 of the 8 inbound lanes, plus the NPX outreach lane (v112): this fake
+    // 5 of the 8 inbound lanes, plus the NPX outreach lane (v113): this fake
     // registers every slug as an inbound lane, so it counts as served.
     expect(lines[0]).toContain("lanes this deployment can serve (6/9)");
     expect(lines[0]).toContain("optical");
@@ -202,7 +202,7 @@ describe("the voice model each lane would use", () => {
 });
 
 /**
- * Which xAI voice each lane would speak in (v112). Operator, 2026-10-22: "I
+ * Which xAI voice each lane would speak in (v113). Operator, 2026-10-22: "I
  * have never heard this agent, make sure it has a good voice, the main one
  * from xai that they use." The runtime's default is `eve`, the voice in every
  * one of xAI's own Voice Agent examples; `/voice/health` now says so per lane.
@@ -229,7 +229,7 @@ describe("the voice each lane would speak in", () => {
 });
 
 /**
- * Demo or live (v112): the one fact that decides whether NPX outreach rings a
+ * Demo or live (v113): the one fact that decides whether NPX outreach rings a
  * patient, confirmed from `/voice/health` and the boot lines after a
  * republish, through the REAL registry so the policy's own switch is what is
  * read.
