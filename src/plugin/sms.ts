@@ -1,0 +1,98 @@
+/**
+ * SI Assistant SMS. Sent from SI_ASSISTANT_NUMBER through Twilio on this
+ * fleet — not delegated to the ticketing app — because the dedicated
+ * number (+1 909-255-3213) lives here and the dialer already uses it.
+ *
+ * STOP / HELP / START are honoured on the inbound webhook. STOP writes
+ * an SMS opt-out (and does not send further SMS). HELP replies with the
+ * AI identification. START clears the SMS opt-out.
+ */
+
+import { dncKey } from "../runtime/outbound/store";
+import { siAssistantNumber, smsIdentifiedBody } from "./siAssistantConstants";
+import type { PluginStore } from "./store";
+
+export interface SmsSender {
+  send(opts: { to: string; from: string; body: string }): Promise<{ sid: string }>;
+}
+
+export const HELP_REPLY =
+  "Azul Vision SI Assistant (AI). Reply STOP to opt out of texts. Reply START to opt back in. This is an automated assistant, not a person. Msg&data rates may apply.";
+
+export const STOP_REPLY =
+  "Azul Vision SI Assistant (AI): you are opted out of texts from this number. Reply START to opt back in.";
+
+export const START_REPLY =
+  "Azul Vision SI Assistant (AI): you are opted back in to texts from this number. Reply STOP to opt out.";
+
+export type InboundSmsCommand = "stop" | "help" | "start" | "other";
+
+export function classifyInboundSms(body: string): InboundSmsCommand {
+  const normalized = body.trim().toLowerCase().replace(/[!.]/g, "");
+  if (["stop", "stopall", "unsubscribe", "cancel", "end", "quit"].includes(normalized)) return "stop";
+  if (["help", "info"].includes(normalized)) return "help";
+  if (["start", "unstop", "yes"].includes(normalized)) return "start";
+  return "other";
+}
+
+export async function sendApprovedSms(
+  store: PluginStore,
+  sender: SmsSender,
+  input: { phone: string; body: string },
+  env: Record<string, string | undefined> = process.env,
+): Promise<{ ok: true; sid: string } | { ok: false; reason: string }> {
+  const key = dncKey(input.phone);
+  if (!key) return { ok: false, reason: "invalid_phone" };
+  if (await store.isSmsOptedOut(key)) return { ok: false, reason: "sms_opted_out" };
+  const from = siAssistantNumber(env);
+  const body = smsIdentifiedBody(input.body);
+  const sent = await sender.send({ to: `+1${key}`, from, body });
+  return { ok: true, sid: sent.sid };
+}
+
+export async function handleInboundSms(
+  store: PluginStore,
+  sender: SmsSender | null,
+  input: { from: string; body: string },
+  env: Record<string, string | undefined> = process.env,
+): Promise<{ command: InboundSmsCommand; replied: boolean }> {
+  const key = dncKey(input.from);
+  const command = classifyInboundSms(input.body);
+  if (!key) return { command, replied: false };
+
+  if (command === "stop") {
+    await store.setSmsOptOut(key, true);
+    if (sender) {
+      await sender.send({ to: `+1${key}`, from: siAssistantNumber(env), body: STOP_REPLY });
+    }
+    return { command, replied: Boolean(sender) };
+  }
+  if (command === "help") {
+    if (sender) {
+      await sender.send({ to: `+1${key}`, from: siAssistantNumber(env), body: HELP_REPLY });
+    }
+    return { command, replied: Boolean(sender) };
+  }
+  if (command === "start") {
+    await store.setSmsOptOut(key, false);
+    if (sender) {
+      await sender.send({ to: `+1${key}`, from: siAssistantNumber(env), body: START_REPLY });
+    }
+    return { command, replied: Boolean(sender) };
+  }
+  return { command, replied: false };
+}
+
+export function createTwilioSmsSender(env: Record<string, string | undefined> = process.env): SmsSender | null {
+  const sid = env.TWILIO_ACCOUNT_SID;
+  const token = env.TWILIO_AUTH_TOKEN;
+  if (!sid || !token) return null;
+  return {
+    async send(opts) {
+      const twilio = await import("twilio");
+      const client = twilio.default(sid, token);
+      const msg = await client.messages.create({ to: opts.to, from: opts.from, body: opts.body });
+      return { sid: msg.sid };
+    },
+  };
+}

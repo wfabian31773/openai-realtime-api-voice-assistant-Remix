@@ -1,6 +1,7 @@
 import type { OutboundLanePolicy } from '../runtime/outbound/campaign';
 import { createOutboundProofAgent, outboundProofAgentConfig, outboundProofPolicy } from '../agents/outboundProofAgent';
 import { createNpxOutreachAgent, npxOutreachAgentConfig, npxOutreachPolicy } from '../agents/npxOutreachAgent';
+import { createSiAssistantAgent, siAssistantAgentConfig, siAssistantPolicy } from '../agents/siAssistantAgent';
 import { RealtimeAgent } from '@openai/agents/realtime';
 import { createAfterHoursAgent } from '../agents/afterHoursAgent';
 import { createDRSSchedulerAgent } from '../agents/drsSchedulerAgent';
@@ -238,6 +239,24 @@ export class AgentRegistry {
       language: npxOutreachAgentConfig.language,
       spokenLanguages: ['en', 'es'],
       outbound: npxOutreachPolicy,
+    });
+
+    // SI Assistant (v111): approved single-contact calls, texts and emails
+    // from the Support Center bot. Runtime outbound only — not on the old
+    // core. Dials nothing unless RUNTIME_OUTBOUND_DIALING=1,
+    // OUTBOUND_CAMPAIGN_SI_ASSISTANT=1 and SI_ASSISTANT_NUMBER are set and
+    // that number's Voice URL points at /voice/si-assistant.
+    this.register({
+      id: siAssistantAgentConfig.slug,
+      factory: createSiAssistantAgent as AgentFactory,
+      enabled: true,
+      description: siAssistantAgentConfig.description,
+      twilioNumbers: [],
+      agentType: 'outbound',
+      version: siAssistantAgentConfig.version,
+      voice: siAssistantAgentConfig.voice,
+      language: siAssistantAgentConfig.language,
+      outbound: siAssistantPolicy,
     });
 
     // Azul Vision NextGen scheduling line (San Diego pilot).

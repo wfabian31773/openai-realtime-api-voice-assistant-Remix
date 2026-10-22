@@ -1494,3 +1494,71 @@ export const callTurns = pgTable("call_turns", {
 
 export type CallTurn = typeof callTurns.$inferSelect;
 export type InsertCallTurn = typeof callTurns.$inferInsert;
+
+/**
+ * Plugin API tables (SI Assistant). Migration is migrations/add_plugin_api.sql
+ * — do not apply from this change. These declarations keep drizzle aligned
+ * with the Hub objects once Wayne applies that file.
+ *
+ * plugin_audit_log holds no phone numbers, message bodies or transcripts.
+ */
+export const apiTokens = pgTable("api_tokens", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  jti: varchar("jti", { length: 32 }).notNull().unique(),
+  hashedSecret: varchar("hashed_secret", { length: 64 }).notNull(),
+  label: varchar("label", { length: 128 }),
+  scopes: text("scopes").array().notNull().default(sql`ARRAY['fleet:read']::text[]`),
+  revokedAt: timestamp("revoked_at", { withTimezone: true }),
+  expiresAt: timestamp("expires_at", { withTimezone: true }),
+  lastUsedAt: timestamp("last_used_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => [
+  index("idx_api_tokens_jti").on(table.jti),
+]);
+
+export const contactApprovals = pgTable("contact_approvals", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  channel: varchar("channel", { length: 16 }).notNull(),
+  status: varchar("status", { length: 24 }).notNull().default("pending"),
+  tokenJti: varchar("token_jti", { length: 32 }).notNull(),
+  ticketId: varchar("ticket_id", { length: 64 }),
+  ticketNumber: varchar("ticket_number", { length: 64 }),
+  payload: jsonb("payload").notNull(),
+  payloadHash: varchar("payload_hash", { length: 64 }).notNull(),
+  confirmTokenHash: varchar("confirm_token_hash", { length: 64 }),
+  confirmExpiresAt: timestamp("confirm_expires_at", { withTimezone: true }),
+  confirmUsedAt: timestamp("confirm_used_at", { withTimezone: true }),
+  approvedBy: varchar("approved_by", { length: 64 }),
+  approvedAt: timestamp("approved_at", { withTimezone: true }),
+  rejectedBy: varchar("rejected_by", { length: 64 }),
+  rejectedAt: timestamp("rejected_at", { withTimezone: true }),
+  cancelledAt: timestamp("cancelled_at", { withTimezone: true }),
+  committedAt: timestamp("committed_at", { withTimezone: true }),
+  result: jsonb("result"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => [
+  index("idx_contact_approvals_status").on(table.status, table.createdAt),
+  index("idx_contact_approvals_ticket").on(table.ticketNumber),
+  index("idx_contact_approvals_confirm").on(table.confirmTokenHash),
+]);
+
+export const pluginAuditLog = pgTable("plugin_audit_log", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  tokenJti: varchar("token_jti", { length: 32 }).notNull(),
+  tool: varchar("tool", { length: 64 }).notNull(),
+  route: varchar("route", { length: 256 }).notNull(),
+  method: varchar("method", { length: 8 }).notNull(),
+  approvalId: varchar("approval_id", { length: 64 }),
+  ticketId: varchar("ticket_id", { length: 64 }),
+  outcome: varchar("outcome", { length: 32 }).notNull(),
+  httpStatus: integer("http_status").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => [
+  index("idx_plugin_audit_created").on(table.createdAt),
+  index("idx_plugin_audit_jti").on(table.tokenJti),
+]);
+
+export type ApiToken = typeof apiTokens.$inferSelect;
+export type ContactApproval = typeof contactApprovals.$inferSelect;
+export type PluginAuditLogRow = typeof pluginAuditLog.$inferSelect;
