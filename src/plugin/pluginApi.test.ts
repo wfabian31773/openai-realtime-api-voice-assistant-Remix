@@ -150,9 +150,15 @@ describe("the approval gate", () => {
       body: JSON.stringify({ phone: PHONE, ticketNumber: TICKET, firstName: "Testa" }),
     });
     expect(res.status).toBe(201);
-    const body = (await res.json()) as { status: string; approval: { id: string; status: string } };
+    const body = (await res.json()) as {
+      status: string;
+      confirmToken?: string;
+      approval: { id: string; status: string; confirmExpiresAt?: string | null };
+    };
     expect(body.status).toBe("pending_approval");
     expect(body.approval.status).toBe("pending");
+    expect(body.confirmToken).toBeUndefined();
+    expect(body.approval.confirmExpiresAt ?? null).toBeNull();
     expect(outbound.upserts).toEqual([]);
     expect(body.approval).not.toHaveProperty("phone");
   });
@@ -237,6 +243,45 @@ describe("the approval gate", () => {
 });
 
 describe("token expiry", () => {
+  it("mints the confirm token at approve, so a request that sat pending longer than five minutes still commits", async () => {
+    let nowMs = Date.parse("2026-10-22T18:00:00Z");
+    const { base, store, outbound } = await boot(
+      { PLUGIN_WRITES_ENABLED: "true" },
+      { now: () => new Date(nowMs) },
+    );
+    const bot = store.mint(["contacts:prepare", "contacts:commit"]);
+    const staff = store.mint(["contacts:approve"]);
+    const prep = await fetch(`${base}/api/plugin/v1/prepare_call`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${bot.plaintext}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ phone: PHONE, ticketNumber: TICKET, firstName: "Testa" }),
+    });
+    const pending = (await prep.json()) as {
+      confirmToken?: string;
+      approval: { id: string; confirmExpiresAt?: string | null };
+    };
+    expect(pending.confirmToken).toBeUndefined();
+    expect(pending.approval.confirmExpiresAt ?? null).toBeNull();
+
+    nowMs += CONFIRM_TTL_MS + 60_000;
+    const approved = await fetch(`${base}/api/plugin/v1/approvals/${pending.approval.id}/approve`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${staff.plaintext}` },
+    });
+    expect(approved.status).toBe(200);
+    const token = (await approved.json()) as { confirmToken: string; expiresAt: string };
+    expect(token.confirmToken).toMatch(/^[a-f0-9]{64}$/);
+    expect(Date.parse(token.expiresAt)).toBe(nowMs + CONFIRM_TTL_MS);
+
+    const committed = await fetch(`${base}/api/plugin/v1/commit_contact`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${bot.plaintext}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ confirmToken: token.confirmToken }),
+    });
+    expect(committed.status).toBe(200);
+    expect(outbound.upserts).toEqual([1]);
+  });
+
   it("refuses a confirm token after five minutes", async () => {
     let nowMs = Date.parse("2026-10-22T18:00:00Z");
     const { base, store } = await boot({ PLUGIN_WRITES_ENABLED: "true" }, { now: () => new Date(nowMs) });
