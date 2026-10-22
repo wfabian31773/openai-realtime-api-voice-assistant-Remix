@@ -10,9 +10,15 @@ import {
   mayDialNow,
   type DialDecision,
 } from "../runtime/outbound/callingWindow";
+import { outboundDialingEnabled, PLACE_BY_KEY } from "../runtime/outbound/campaign";
 import { dncKey, type OutboundStore } from "../runtime/outbound/store";
 import { readDobQuietly } from "../tools/dobParts";
-import { SI_ASSISTANT_CAMPAIGN_KEY, SI_ASSISTANT_SLUG } from "./siAssistantConstants";
+import {
+  SI_ASSISTANT_CALLER_ID_ENV,
+  SI_ASSISTANT_CAMPAIGN_KEY,
+  SI_ASSISTANT_ENABLE_ENV,
+  SI_ASSISTANT_SLUG,
+} from "./siAssistantConstants";
 
 export const SI_ASSISTANT_CAPS = {
   ...DEFAULT_ATTEMPT_CAPS,
@@ -21,6 +27,31 @@ export const SI_ASSISTANT_CAPS = {
 } as const;
 
 export const SI_ASSISTANT_WINDOW = DEFAULT_CALLING_WINDOW;
+
+/**
+ * How long an approved call may wait in the queue before its FIRST dial
+ * (v115). A commit is refused outside the calling window, so a healthy
+ * dialler rings within a tick or two; this bounds the case where it cannot
+ * (routing being fixed, a deploy) so a staffer's approval is never acted on
+ * hours or days later. Retries after a first dial follow the caps instead.
+ */
+export const SI_ASSISTANT_PLACE_BY_MS = 2 * 60 * 60 * 1000;
+
+export type SiAssistantDialingProblem = "outbound_dialing_off" | "campaign_off" | "no_caller_id";
+
+/**
+ * Why the dialler would not place an SI Assistant call right now, read from
+ * the same switches it reads (`campaignEnabled`, the caller-ID env), or null.
+ * A commit must not report a call as queued when nothing will dial it (v115).
+ */
+export function siAssistantDialingProblem(
+  env: Record<string, string | undefined>,
+): SiAssistantDialingProblem | null {
+  if (!outboundDialingEnabled(env)) return "outbound_dialing_off";
+  if (env[SI_ASSISTANT_ENABLE_ENV] !== "1") return "campaign_off";
+  if (!(env[SI_ASSISTANT_CALLER_ID_ENV] ?? "").trim()) return "no_caller_id";
+  return null;
+}
 
 export interface EnqueueCallInput {
   approvalId: string;
@@ -176,6 +207,7 @@ export async function evaluateAndEnqueueCall(
         ticket_id: input.ticketId ?? null,
         purpose: input.purpose ?? null,
         ...(dateOfBirth ? { date_of_birth: dateOfBirth } : {}),
+        [PLACE_BY_KEY]: new Date(now.getTime() + SI_ASSISTANT_PLACE_BY_MS).toISOString(),
       },
     },
   ]);

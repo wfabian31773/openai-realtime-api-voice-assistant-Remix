@@ -1066,3 +1066,49 @@ describe("a campaign fed live from a source", () => {
     });
   });
 });
+
+describe("a place-by deadline (v115)", () => {
+  const PAST = new Date(NOW.getTime() - 60_000).toISOString();
+  const FUTURE = new Date(NOW.getTime() + 60_000).toISOString();
+
+  it("settles a contact never rung whose deadline has passed, and rings nobody", async () => {
+    const { store, createCall, deps } = setup();
+    store.addContact({ id: "c1", phone: "+15555550111", customData: { place_by: PAST } });
+    const r = await runCampaignTick("test-lane", policy, deps);
+    expect(r.dialled).toBe(0);
+    expect(r.held).toEqual({ place_by_passed: 1 });
+    expect(createCall).not.toHaveBeenCalled();
+    expect(store.attempts).toHaveLength(0);
+    expect(store.contacts.get("c1")!.status).toBe("rescheduled");
+    expect(store.contacts.get("c1")!.notes).toMatch(/place-by/);
+  });
+
+  it("rings a contact whose deadline is still ahead", async () => {
+    const { store, createCall, deps } = setup();
+    store.addContact({ id: "c1", phone: "+15555550111", customData: { place_by: FUTURE } });
+    expect((await runCampaignTick("test-lane", policy, deps)).dialled).toBe(1);
+    expect(createCall).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not stop a retry after a first dial: the caps govern retries", async () => {
+    const { store, createCall, deps } = setup();
+    store.addContact({ id: "c1", phone: "+15555550111", status: "no_answer", customData: { place_by: PAST } });
+    store.attempts.push({
+      id: "a0",
+      contactId: "c1",
+      campaignId: "campaign-1",
+      attemptNumber: 1,
+      at: new Date(NOW.getTime() - 3 * 24 * 60 * 60 * 1000),
+    });
+    expect((await runCampaignTick("test-lane", policy, deps)).dialled).toBe(1);
+    expect(createCall).toHaveBeenCalledTimes(1);
+  });
+
+  it("reads a missing or unreadable deadline as no deadline", async () => {
+    const { store, createCall, deps } = setup();
+    store.addContact({ id: "c1", phone: "+15555550111", customData: { place_by: "not a date" } });
+    store.addContact({ id: "c2", phone: "+15555550112", customData: {} });
+    expect((await runCampaignTick("test-lane", policy, deps)).dialled).toBe(2);
+    expect(createCall).toHaveBeenCalledTimes(2);
+  });
+});

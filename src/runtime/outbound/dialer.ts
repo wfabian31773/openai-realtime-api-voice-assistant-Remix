@@ -58,6 +58,7 @@ import type { ContactSource, OutboundLanePolicy, SourceContact } from "./campaig
 import {
   REFUSAL_STREAK_WINDOW_MS,
   campaignEnabled,
+  placeByPassed,
   resolvedInfraRetryMinutes,
   resolvedMaxConsecutiveInfraRetries,
 } from "./campaign";
@@ -441,6 +442,15 @@ async function dialOne(
   // import can carry one person on two rows, and the caps are per person.
   // A dial Twilio refused is not among them — nobody was rung.
   const prior = await deps.store.priorAttempts(contact.id);
+  // A contact that had to be FIRST rung by a deadline it has missed (v115):
+  // settled, never rung late. An approval acted on hours after it was given
+  // is a call nobody asked for any more.
+  if (prior.length === 0 && placeByPassed(contact.customData, now)) {
+    await deps.store.settleContact(contact.id, "rescheduled", {
+      notes: "not placed before its place-by deadline; never rung",
+    });
+    return "place_by_passed";
+  }
   if (prior.length >= policy.caps.total) {
     await deps.store.settleContact(contact.id, "max_attempts");
     return "total_cap";

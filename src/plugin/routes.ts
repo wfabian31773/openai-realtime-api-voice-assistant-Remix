@@ -25,8 +25,8 @@ import {
 import { hashPayload } from "./tokens";
 import { checkTwilioSignature, type WebhookRequest } from "../runtime/voiceWebhook";
 import { agentHealth, emptyFleetReader, listAgents, outboundStatus, type AgentSource, type FleetReader } from "./reads";
-import { evaluateAndEnqueueCall, identityFromPreparePayload } from "./callEnqueue";
-import { createTwilioSmsSender, handleInboundSms, inboundSmsPreview, sendApprovedSms, type SmsSender } from "./sms";
+import { evaluateAndEnqueueCall, identityFromPreparePayload, siAssistantDialingProblem } from "./callEnqueue";
+import { classifyInboundSms, createTwilioSmsSender, handleInboundSms, inboundSmsPreview, sendApprovedSms, type SmsSender } from "./sms";
 import { createGraphMail, sendApprovedEmail, type GraphMail } from "./email";
 import { createCallbackReporter, type CallbackReporter } from "./callbackReport";
 import { flushOutboxRow, persistTakenMessage } from "./messageOutbox";
@@ -399,7 +399,17 @@ export function mountPluginApi(app: Express, deps: PluginApiDeps): void {
     const from = String(body.From ?? "");
     const text = String(body.Body ?? "");
     const sender = deps.smsSender === undefined ? createTwilioSmsSender(envOf(deps)) : deps.smsSender;
-    const handled = await handleInboundSms(deps.store, sender, { from, body: text }, envOf(deps));
+    let handled: Awaited<ReturnType<typeof handleInboundSms>>;
+    try {
+      handled = await handleInboundSms(deps.store, sender, { from, body: text }, envOf(deps));
+    } catch {
+      // Twilio does not retry a messaging webhook, so a 500 would lose this
+      // text as surely as a 200. Say so loudly, without the phone or body,
+      // and answer 200 (v115).
+      console.error(`[si-assistant] inbound sms (${classifyInboundSms(text)}) could not be handled; it may not have been recorded`);
+      res.type("text/xml").status(200).send("<Response></Response>");
+      return;
+    }
     const reporter = deps.callbackReporter ?? createCallbackReporter(envOf(deps));
     if (handled.command === "other") {
       const preview = inboundSmsPreview(text);
@@ -451,6 +461,12 @@ async function executeApproved(
   if (approval.channel === "call") {
     if (!deps.outboundStore) {
       return { ok: false, status: 503, error: "Outbound store is not configured", reason: "no_outbound_store" };
+    }
+    // Nothing would dial it: refuse, so the approval fails visibly instead of
+    // reading as a queued call that never rings (v115).
+    const dialing = siAssistantDialingProblem(envOf(deps));
+    if (dialing) {
+      return { ok: false, status: 503, error: `Calls are not being placed: ${dialing}`, reason: dialing };
     }
     const identity = identityFromPreparePayload(approval.payload);
     const queued = await evaluateAndEnqueueCall(

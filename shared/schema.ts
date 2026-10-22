@@ -293,20 +293,18 @@ export const campaignContacts = pgTable("campaign_contacts", {
 /**
  * Opt-outs, phone-wide and across every runtime outbound campaign
  * (src/runtime/outbound/). Keyed on the last ten digits so every spelling
- * of a number is one request. One row per (phone, source): voice and
- * `sms_stop` are separate, so an SMS START cannot erase a voice
- * "don't call me". Every outbound dial checks the voice rows first; the
- * voice tool `opt_out_of_calls` writes a voice row. Created on first use
+ * of a number is one request. One row per phone, keyed on phone_key: an
+ * SMS STOP writes `sms_stop`, and a voice opt-out takes that row over (so an
+ * SMS START, which deletes only `sms_stop`, cannot erase a voice
+ * "don't call me"). Any row blocks both calls and texts. Created on first use
  * by the outbound store as well, so a missing `db:push` cannot turn the
  * check into a pass.
  */
 export const doNotContact = pgTable("do_not_contact", {
-  phoneKey: varchar("phone_key", { length: 10 }).notNull(),
+  phoneKey: varchar("phone_key", { length: 10 }).primaryKey(),
   source: varchar("source", { length: 64 }).notNull(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-}, (table) => [
-  uniqueIndex("do_not_contact_phone_source_uidx").on(table.phoneKey, table.source),
-]);
+});
 
 export type CampaignContact = typeof campaignContacts.$inferSelect;
 export type InsertCampaignContact = typeof campaignContacts.$inferInsert;
@@ -1567,6 +1565,13 @@ export const pluginMessageOutbox = pgTable("plugin_message_outbox", {
   lastError: varchar("last_error", { length: 64 }),
   idempotencyKey: varchar("idempotency_key", { length: 64 }),
   suggestions: jsonb("suggestions"),
+  // Declared so `db:push` cannot drop them (v115); the store reads them by raw SQL.
+  fromPhone: varchar("from_phone", { length: 32 }),
+  messageSid: varchar("message_sid", { length: 64 }),
+  deliveredAt: timestamp("delivered_at", { withTimezone: true }),
+  attachmentPending: boolean("attachment_pending").notNull().default(false),
+  attachmentAttempts: integer("attachment_attempts").notNull().default(0),
+  attachmentNextAttemptAt: timestamp("attachment_next_attempt_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => [

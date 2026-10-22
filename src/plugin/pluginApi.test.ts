@@ -4,7 +4,7 @@
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createServer, type Server } from "node:http";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { AddressInfo } from "node:net";
 import express from "express";
@@ -18,7 +18,7 @@ import { ChannelDoNotContact } from "../runtime/outbound/channelDnc";
 import { auditContainsPhi, ticketResolvedLogFields } from "./phi";
 import { ticketResolvedAuthorized } from "./ticketResolved";
 import { CONFIRM_TTL_MS, generateConfirmToken, hashPayload } from "./tokens";
-import { HELP_REPLY, START_REPLY, classifyInboundSms, handleInboundSms, inboundSmsPreview, sendApprovedSms } from "./sms";
+import { HELP_REPLY, START_REPLY, STOP_REPLY, classifyInboundSms, handleInboundSms, inboundSmsPreview, sendApprovedSms } from "./sms";
 import { SI_ASSISTANT_EMAIL_DEFAULT } from "./siAssistantConstants";
 import { mintScopesCompatible } from "./scopes";
 import { createSqlPluginStore } from "./sqlStore";
@@ -107,8 +107,16 @@ afterEach(async () => {
   }
 });
 
+/** The switches the dialler reads. A call commit is refused without them
+ * (v115), so every test boots with dialing on unless it says otherwise. */
+const DIALING_ON = {
+  RUNTIME_OUTBOUND_DIALING: "1",
+  OUTBOUND_CAMPAIGN_SI_ASSISTANT: "1",
+  SI_ASSISTANT_NUMBER: "+19092553213",
+} as const;
+
 async function boot(env: Record<string, string | undefined>, extras?: Parameters<typeof listen>[1]) {
-  const ctx = await listen(env, extras);
+  const ctx = await listen({ ...DIALING_ON, ...env }, extras);
   servers.push(ctx.server);
   return ctx;
 }
@@ -1529,7 +1537,7 @@ describe("review findings", () => {
     expect(seen[0]).not.toMatch(/executeApproved|sendApproved|enqueue|sendMail/);
   });
 
-  it("the SQL SMS opt-out writes per channel but reads any row, so START cannot erase a voice row", async () => {
+  it("the SQL SMS opt-out keeps one row per phone and reads any row, so START cannot erase a voice row", async () => {
     const seen: Array<{ text: string; params: unknown[] }> = [];
     const store = createSqlPluginStore(async (text, params) => {
       seen.push({ text, params: params ?? [] });
@@ -1542,12 +1550,14 @@ describe("review findings", () => {
     expect(seen[0].text).toMatch(/FROM do_not_contact WHERE phone_key = \$1/);
     expect(seen[0].text).not.toMatch(/source/);
     expect(seen[0].params).toEqual(["5555550111"]);
-    expect(seen[1].text).toMatch(/ON CONFLICT \(phone_key, source\) DO NOTHING/);
+    // The conflict target is the Hub's primary key. A target the live table
+    // has no unique index for is a 42P10 on every STOP (v115).
+    expect(seen[1].text).toMatch(/ON CONFLICT \(phone_key\) DO NOTHING/);
+    expect(seen[1].text).not.toMatch(/ON CONFLICT \(phone_key, source\)/);
     expect(seen[1].params[1]).toBe("sms_stop");
     expect(seen[2].text).toMatch(/DELETE FROM do_not_contact/);
     expect(seen[2].text).toMatch(/source = \$2/);
     expect(seen[2].params[1]).toBe("sms_stop");
-    expect(seen.map((s) => s.text).join("\n")).not.toMatch(/ON CONFLICT \(phone_key\) DO NOTHING/);
   });
 
   it("the SQL markOutbox persists the attempt count", async () => {
@@ -1590,10 +1600,151 @@ describe("review findings", () => {
     expect(live).not.toMatch(/do_not_contact/);
   });
 
-  it("the per-channel DNC migration drops the phone-only primary key", () => {
-    const migration = readFileSync(join(__dirname, "../../migrations/add_do_not_contact_per_channel.sql"), "utf8");
-    expect(migration).toMatch(/DROP CONSTRAINT IF EXISTS do_not_contact_pkey/);
-    expect(migration).toContain("do_not_contact_phone_source_uidx");
-    expect(migration).toMatch(/phone_key, source/);
+  it("nothing in the repo drops the do_not_contact primary key (v115)", () => {
+    // v114 shipped a migration and a first-use ALTER that dropped it. Older
+    // builds write `ON CONFLICT (phone_key)`, so dropping it turns every
+    // older build's opt-out into an error the moment a deploy rolls back.
+    expect(existsSync(join(__dirname, "../../migrations/add_do_not_contact_per_channel.sql"))).toBe(false);
+    const store = readFileSync(join(__dirname, "../runtime/outbound/store.ts"), "utf8");
+    expect(store).not.toMatch(/DROP CONSTRAINT[^;]*do_not_contact_pkey/);
+    expect(store).not.toMatch(/do_not_contact_phone_source_uidx/);
+    const schema = readFileSync(join(__dirname, "../../shared/schema.ts"), "utf8");
+    expect(schema).toMatch(/pgTable\("do_not_contact", \{\s*phoneKey: varchar\("phone_key", \{ length: 10 \}\)\.primaryKey\(\)/);
+    expect(schema).not.toMatch(/do_not_contact_phone_source_uidx/);
+  });
+});
+
+describe("a call commit needs a dialler that will place it (v115)", () => {
+  const noon = () => new Date("2026-10-22T18:00:00Z");
+
+  async function approveCall(env: Record<string, string | undefined>) {
+    const ctx = await boot({ PLUGIN_WRITES_ENABLED: "true", ...env }, { now: noon });
+    const bot = ctx.store.mint(["contacts:prepare", "contacts:commit"]);
+    const staff = ctx.store.mint(["contacts:approve"]);
+    const prep = await fetch(`${ctx.base}/api/plugin/v1/prepare_call`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${bot.plaintext}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ phone: PHONE, ticketNumber: TICKET, firstName: "Testa", dateOfBirth: CALL_DOB }),
+    });
+    const pending = (await prep.json()) as { approval: { id: string } };
+    const approved = await staffApprove(ctx.base, staff, ctx.store, pending.approval.id);
+    const token = (await approved.json()) as { confirmToken: string };
+    const committed = await fetch(`${ctx.base}/api/plugin/v1/commit_contact`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${bot.plaintext}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ confirmToken: token.confirmToken }),
+    });
+    return { ...ctx, committed, approvalId: pending.approval.id };
+  }
+
+  for (const [label, env, reason] of [
+    ["the fleet switch is off", { RUNTIME_OUTBOUND_DIALING: "0" }, "outbound_dialing_off"],
+    ["the campaign switch is off", { OUTBOUND_CAMPAIGN_SI_ASSISTANT: undefined }, "campaign_off"],
+    ["no caller ID is set", { SI_ASSISTANT_NUMBER: " " }, "no_caller_id"],
+  ] as const) {
+    it(`refuses with 503, queues nothing and fails the approval when ${label}`, async () => {
+      const { committed, outbound, store, approvalId } = await approveCall(env);
+      expect(committed.status).toBe(503);
+      expect(((await committed.json()) as { error: string }).error).toContain(reason);
+      expect(outbound.contacts.size).toBe(0);
+      expect(outbound.upserts).toEqual([]);
+      expect((await store.getApproval(approvalId))?.status).toBe("failed");
+    });
+  }
+
+  it("stamps the queued contact with a place-by deadline two hours out", async () => {
+    const { committed, outbound } = await approveCall({});
+    expect(committed.status).toBe(200);
+    const contact = [...outbound.contacts.values()][0];
+    expect(contact.customData.place_by).toBe(new Date(noon().getTime() + 2 * 60 * 60 * 1000).toISOString());
+  });
+});
+
+describe("inbound SMS keywords and replies (v115)", () => {
+  it("a plain Yes from a number that never opted out is a reply for My Messages, not START", async () => {
+    const store = new MemoryPluginStore();
+    const sent: string[] = [];
+    const sender = { async send(o: { body: string }) { sent.push(o.body); return { sid: "SM-yes" }; } };
+    const out = await handleInboundSms(store, sender, { from: PHONE, body: "Yes" }, {});
+    expect(out).toEqual({ command: "other", replied: false });
+    expect(sent).toEqual([]);
+    expect(await store.isSmsOptedOut("5555550111")).toBe(false);
+  });
+
+  it("a plain Yes from a number that sent STOP opts it back in", async () => {
+    const store = new MemoryPluginStore();
+    const sent: string[] = [];
+    const sender = { async send(o: { body: string }) { sent.push(o.body); return { sid: "SM-yes2" }; } };
+    await handleInboundSms(store, sender, { from: PHONE, body: "STOP" }, {});
+    sent.length = 0;
+    const out = await handleInboundSms(store, sender, { from: PHONE, body: "yes." }, {});
+    expect(out).toEqual({ command: "start", replied: true });
+    expect(sent).toEqual([START_REPLY]);
+    expect(await store.isSmsOptedOut("5555550111")).toBe(false);
+  });
+
+  it("a Yes whose opt-out state cannot be read is kept as a reply, never an opt-in", async () => {
+    const store = new MemoryPluginStore();
+    const real = store.isSmsOptedOut.bind(store);
+    store.isSmsOptedOut = async () => { throw new Error("db down"); };
+    const out = await handleInboundSms(store, null, { from: PHONE, body: "Yes" }, {});
+    expect(out).toEqual({ command: "other", replied: false });
+    store.isSmsOptedOut = real;
+  });
+
+  it.each(["STOP", "HELP"])(
+    "a %s reply Twilio refuses (21610) does not undo or fail the keyword",
+    async (keyword) => {
+      const store = new MemoryPluginStore();
+      const logged: string[] = [];
+      const err = vi.spyOn(console, "error").mockImplementation((...a: unknown[]) => { logged.push(a.map(String).join(" ")); });
+      const sender = {
+        async send(): Promise<{ sid: string }> {
+          const e = new Error("Attempt to send to unsubscribed recipient") as Error & { status: number; code: number };
+          e.status = 400;
+          e.code = 21610;
+          throw e;
+        },
+      };
+      const out = await handleInboundSms(store, sender, { from: PHONE, body: keyword }, {});
+      err.mockRestore();
+      expect(out).toEqual({ command: keyword.toLowerCase(), replied: false });
+      if (keyword === "STOP") expect(await store.isSmsOptedOut("5555550111")).toBe(true);
+      expect(logged.join(" ")).not.toContain("5555550111");
+    },
+  );
+
+  it("STOP still confirms with STOP_REPLY when the reply goes through", async () => {
+    const store = new MemoryPluginStore();
+    const sent: string[] = [];
+    const sender = { async send(o: { body: string }) { sent.push(o.body); return { sid: "SM-stop" }; } };
+    expect(await handleInboundSms(store, sender, { from: PHONE, body: "STOP" }, {})).toEqual({ command: "stop", replied: true });
+    expect(sent).toEqual([STOP_REPLY]);
+  });
+
+  it("the webhook answers 200 empty TwiML when the opt-out write fails, and logs no phone or body", async () => {
+    const store = new MemoryPluginStore();
+    store.setSmsOptOut = async () => { throw new Error("db down"); };
+    const logged: string[] = [];
+    const err = vi.spyOn(console, "error").mockImplementation((...a: unknown[]) => { logged.push(a.map(String).join(" ")); });
+    const { base, server } = await boot(
+      { PLUGIN_WRITES_ENABLED: "true", TWILIO_AUTH_TOKEN: TWILIO_AUTH },
+      { store, smsSender: { async send() { return { sid: "SM-z" }; } } },
+    );
+    const port = (server.address() as { port: number }).port;
+    const path = "/api/plugin/v1/webhooks/twilio-sms";
+    const body = { From: PHONE, Body: "STOP" };
+    const signed = signedSms(path, body, `127.0.0.1:${port}`);
+    const res = await fetch(`${base}${path}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded", "X-Twilio-Signature": signed.signature },
+      body: new URLSearchParams(body).toString(),
+    });
+    err.mockRestore();
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("<Response></Response>");
+    const all = logged.join(" ");
+    expect(all).toContain("could not be handled");
+    expect(all).not.toContain("5555550111");
   });
 });

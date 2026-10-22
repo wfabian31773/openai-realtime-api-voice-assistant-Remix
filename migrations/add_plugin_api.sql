@@ -110,9 +110,9 @@ ALTER TABLE plugin_message_outbox ADD COLUMN IF NOT EXISTS suggestions JSONB;
 -- inbound SMS keys its idempotency on 'sms:' || MessageSid.
 ALTER TABLE plugin_message_outbox ADD COLUMN IF NOT EXISTS from_phone VARCHAR(32);
 ALTER TABLE plugin_message_outbox ADD COLUMN IF NOT EXISTS message_sid VARCHAR(64);
--- Set when the webhook first answered 2xx. Only then is a later send an
--- attachmentUpdate. A follow-up that fails stays delivered and is retried
--- on its own budget; it never makes the message dead.
+-- Set when the webhook first answered 2xx. A follow-up that fails stays
+-- delivered and is retried on its own budget; it never makes the message
+-- dead. Any send carrying ticket keys is an attachmentUpdate (v115).
 ALTER TABLE plugin_message_outbox ADD COLUMN IF NOT EXISTS delivered_at TIMESTAMPTZ;
 ALTER TABLE plugin_message_outbox ADD COLUMN IF NOT EXISTS attachment_pending BOOLEAN NOT NULL DEFAULT FALSE;
 ALTER TABLE plugin_message_outbox ADD COLUMN IF NOT EXISTS attachment_attempts INTEGER NOT NULL DEFAULT 0;

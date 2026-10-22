@@ -316,6 +316,10 @@ import {
 } from "./outbound/callback";
 import { callbackSessionFor, closeCallbackSession, openCallbackSession } from "../tools/outboundTools";
 import { closeOutreachSession } from "../tools/npxOutreachTools";
+import { reportSiAssistantCall, shouldReportSiAssistantCall } from "../plugin/callbackReport";
+import { attachmentForSiAssistant } from "../plugin/returnedCaller";
+import { reattachTakenMessages } from "../plugin/messageOutbox";
+import { closeSiAssistantIdentity, siAssistantIdentityFor } from "../plugin/siAssistantIdentity";
 import type { OutboundStore } from "./outbound/store";
 import { createDbOutboundStore } from "./outbound/store";
 import { OUTBOUND_PATH_PREFIX, type OutboundTwilio } from "./outbound/dialer";
@@ -1827,17 +1831,13 @@ export function mountVoiceRuntime(
             // SI Assistant callbacks (and the outbound leg) are reported to
             // the ticketing app so they land on the ticket and in My Messages.
             // Payload is PHI-bounded: no phone, body or transcript.
-            void Promise.all([
-              import("../plugin/callbackReport"),
-              import("../plugin/returnedCaller"),
-              import("../plugin/messageOutbox"),
-              import("../plugin/siAssistantIdentity"),
-            ]).then(async ([
-              { reportSiAssistantCall, shouldReportSiAssistantCall },
-              { attachmentForSiAssistant },
-              { reattachTakenMessages },
-              { siAssistantIdentityFor, closeSiAssistantIdentity },
-            ]) => {
+            //
+            // STATIC imports, never `import()` (v115): the identity store the
+            // tools wrote during the call is a module-level Map, and on Node
+            // 20 — what Replit runs — a dynamic import of a module the lane
+            // registry already loaded statically evaluates it a SECOND time,
+            // so this read would see an empty store (the v78/v90 class).
+            void (async () => {
               if (!shouldReportSiAssistantCall(record.slug)) return;
               const identity = siAssistantIdentityFor(record.callSid);
               const attachment = await attachmentForSiAssistant({
@@ -1870,7 +1870,7 @@ export function mountVoiceRuntime(
                   identityConfirmed: attachment.identityConfirmed,
                 },
               );
-            }).catch(() => undefined);
+            })().catch(() => undefined);
           },
         });
         // The session is constructed above, so its onMessage is bound.

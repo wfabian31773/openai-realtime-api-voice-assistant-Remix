@@ -143,9 +143,21 @@ describe("the do-not-contact list", () => {
     expect(check).not.toContain("source <> 'sms_stop'");
     expect(check).not.toMatch(/AND source/);
     expect(check).toContain("WHERE phone_key = ${key}::varchar");
-    expect(method("stampDoNotContact")).toContain("ON CONFLICT (phone_key, source) DO NOTHING");
-    expect(SRC).toContain("do_not_contact_phone_source_uidx");
-    expect(SRC).toContain("DROP CONSTRAINT IF EXISTS do_not_contact_pkey");
+  });
+
+  it("keeps one row per phone: the voice write takes over only an sms_stop row (v115)", () => {
+    const stamp = method("stampDoNotContact");
+    // The Hub's primary key is the conflict target; a target with no unique
+    // index behind it is a 42P10 on every opt-out.
+    expect(stamp).toContain("ON CONFLICT (phone_key) DO UPDATE SET source = EXCLUDED.source");
+    expect(stamp).toContain("WHERE do_not_contact.source = 'sms_stop'");
+    expect(stamp).not.toContain("ON CONFLICT (phone_key, source)");
+  });
+
+  it("only ever creates do_not_contact, with its primary key, and never alters it (v115)", () => {
+    expect(SRC).toMatch(/CREATE TABLE IF NOT EXISTS do_not_contact \(\s*phone_key VARCHAR\(10\) PRIMARY KEY,/);
+    expect(SRC).not.toMatch(/ALTER TABLE do_not_contact/);
+    expect(SRC).not.toContain("do_not_contact_phone_source_uidx");
   });
 
   it("keys every spelling of a US number on its ten digits", () => {

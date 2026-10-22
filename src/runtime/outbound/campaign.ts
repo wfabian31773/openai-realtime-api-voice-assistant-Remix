@@ -218,6 +218,23 @@ export function outboundDialingEnabled(env: Record<string, string | undefined>):
   return env.RUNTIME_OUTBOUND_DIALING === "1";
 }
 
+/**
+ * A contact's place-by deadline (v115): the key in `custom_data` holding an
+ * ISO instant by which its FIRST dial must happen. Past it with nobody rung,
+ * the dialler settles the row instead of ringing it. Retries after a first
+ * dial are governed by the caps, not by this.
+ */
+export const PLACE_BY_KEY = "place_by";
+
+/** True when the contact carries a place-by deadline that has passed. A
+ * missing or unreadable value is no deadline — never a reason to settle. */
+export function placeByPassed(customData: Record<string, unknown>, now: Date): boolean {
+  const raw = customData[PLACE_BY_KEY];
+  if (typeof raw !== "string") return false;
+  const at = Date.parse(raw);
+  return Number.isFinite(at) && at <= now.getTime();
+}
+
 export function campaignEnabled(
   policy: OutboundLanePolicy,
   env: Record<string, string | undefined>,

@@ -4,12 +4,14 @@
  * number (+1 909-255-3213) lives here and the dialer already uses it.
  *
  * STOP / HELP / START are honoured on the inbound webhook. STOP writes
- * an SMS opt-out row (source `sms_stop`). Any do_not_contact row, of any
+ * an SMS opt-out row (source `sms_stop`) unless the phone already has a
+ * row. do_not_contact holds one row per phone, and any row, of any
  * source, blocks both texts and calls. HELP always replies (CTIA): the
  * program name, a contact number and how to opt out, even to a number
- * that any do_not_contact row blocks. START deletes only the
- * `sms_stop` row and never a voice "don't call me" — so a number with a
- * voice row stays blocked for both, and START then sends no reply.
+ * that any do_not_contact row blocks. START deletes only an
+ * `sms_stop` row and never a voice "don't call me" (a voice opt-out takes
+ * an sms_stop row over) — so a number with a voice row stays blocked for
+ * both, and START then sends no reply.
  */
 
 import { dncKey } from "../runtime/outbound/store";
@@ -73,6 +75,34 @@ export async function sendApprovedSms(
   }
 }
 
+/** "Yes" is an opt-in keyword only for a number that has opted out. */
+function isBareYes(body: string): boolean {
+  return body.trim().toLowerCase().replace(/[!.]/g, "") === "yes";
+}
+
+/**
+ * Send a keyword reply without letting a failed reply undo the keyword. The
+ * opt-out write has already happened by the time any reply is sent; a reply
+ * Twilio refuses (21610 when its own opt-out handling is on, an outage) must
+ * not turn the webhook into a 500 (v115). Logged without the phone.
+ */
+async function replyQuietly(
+  sender: SmsSender,
+  command: InboundSmsCommand,
+  to: string,
+  from: string,
+  body: string,
+): Promise<boolean> {
+  try {
+    await sender.send({ to, from, body });
+    return true;
+  } catch (err) {
+    const reason = err instanceof SendOutcomeError ? err.message : "send_failed";
+    console.error(`[si-assistant] ${command} reply was not sent (${reason}); the keyword itself was honoured`);
+    return false;
+  }
+}
+
 export async function handleInboundSms(
   store: PluginStore,
   sender: SmsSender | null,
@@ -80,24 +110,39 @@ export async function handleInboundSms(
   env: Record<string, string | undefined> = process.env,
 ): Promise<{ command: InboundSmsCommand; replied: boolean }> {
   const key = dncKey(input.from);
-  const command = classifyInboundSms(input.body);
+  let command = classifyInboundSms(input.body);
   if (!key) return { command, replied: false };
 
-  if (command === "stop") {
-    await store.setSmsOptOut(key, true);
-    if (sender) {
-      await sender.send({ to: `+1${key}`, from: siAssistantNumber(env), body: STOP_REPLY });
+  // A patient answering one of our texts with "Yes" is answering it, not
+  // opting in: "yes" is a START keyword only when this number has opted out.
+  // Otherwise it is an ordinary reply for My Messages.
+  if (command === "start" && isBareYes(input.body)) {
+    let optedOut = false;
+    try {
+      optedOut = await store.isSmsOptedOut(key);
+    } catch {
+      // Unread opt-out state: keep the "Yes" as an ordinary reply so it
+      // reaches My Messages, rather than opting anyone in on a guess.
+      optedOut = false;
     }
-    return { command, replied: Boolean(sender) };
+    if (!optedOut) command = "other";
+  }
+
+  const to = `+1${key}`;
+  const from = siAssistantNumber(env);
+  if (command === "stop") {
+    // The write first, and a failed write throws: an opt-out we did not
+    // record must not be confirmed to the sender.
+    await store.setSmsOptOut(key, true);
+    const replied = sender ? await replyQuietly(sender, command, to, from, STOP_REPLY) : false;
+    return { command, replied };
   }
   if (command === "help") {
     // HELP always replies, even to a number an SMS STOP or a voice
     // "don't call me" blocks: carriers and CTIA expect a HELP response
     // whatever the opt-out state.
-    if (sender) {
-      await sender.send({ to: `+1${key}`, from: siAssistantNumber(env), body: HELP_REPLY });
-    }
-    return { command, replied: Boolean(sender) };
+    const replied = sender ? await replyQuietly(sender, command, to, from, HELP_REPLY) : false;
+    return { command, replied };
   }
   if (command === "start") {
     await store.setSmsOptOut(key, false);
@@ -105,10 +150,8 @@ export async function handleInboundSms(
     // blocks the number, texting "you are opted back in" would be false and
     // would itself be a text to a blocked number: send nothing.
     if (await store.isSmsOptedOut(key)) return { command, replied: false };
-    if (sender) {
-      await sender.send({ to: `+1${key}`, from: siAssistantNumber(env), body: START_REPLY });
-    }
-    return { command, replied: Boolean(sender) };
+    const replied = sender ? await replyQuietly(sender, command, to, from, START_REPLY) : false;
+    return { command, replied };
   }
   return { command, replied: false };
 }
