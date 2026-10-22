@@ -2,6 +2,9 @@
  * SMS and voice opt-outs share `do_not_contact` but not a row.
  * One row per (phone_key, source). START deletes only `sms_stop`.
  * A later voice "don't call me" is its own row; START cannot erase it.
+ *
+ * READS ARE STRICT: any row for the phone, whatever its source, blocks both
+ * calls and texts. A STOP blocks calls; a voice opt-out blocks texts.
  */
 export const SMS_DNC_SOURCE = "sms_stop";
 
@@ -11,13 +14,17 @@ export class ChannelDoNotContact {
   /** SMS STOP numbers. Keyed on last-10. */
   readonly sms = new Set<string>();
 
+  private anyRow(phoneKey: string): boolean {
+    return this.voice.has(phoneKey) || this.sms.has(phoneKey);
+  }
+
   isVoiceBlocked(phoneKey: string | null): boolean {
     if (!phoneKey) return true;
-    return this.voice.has(phoneKey);
+    return this.anyRow(phoneKey);
   }
 
   isSmsBlocked(phoneKey: string): boolean {
-    return this.sms.has(phoneKey);
+    return this.anyRow(phoneKey);
   }
 
   stamp(phoneKey: string | null, source: string): void {

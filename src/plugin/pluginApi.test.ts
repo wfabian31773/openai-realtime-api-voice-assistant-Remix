@@ -510,7 +510,8 @@ describe("the calling window and DNC list", () => {
     const sender = { async send() { return { sid: "SM-start" }; } };
     await outbound.stampDoNotContact(PHONE, "opt_out_of_calls");
     await handleInboundSms(store, sender, { from: PHONE, body: "START" }, {});
-    expect(await store.isSmsOptedOut("5555550111")).toBe(false);
+    // The voice row survives START and blocks texts as well as calls.
+    expect(await store.isSmsOptedOut("5555550111")).toBe(true);
     expect(await outbound.isDoNotContact(PHONE)).toBe(true);
     const result = await evaluateAndEnqueueCall(
       outbound,
@@ -521,7 +522,43 @@ describe("the calling window and DNC list", () => {
     expect(outbound.upserts).toEqual([]);
   });
 
-  it("SMS STOP then voice opt-out then SMS START keeps the call blocked", async () => {
+  it("a voice opt-out blocks an approved SMS", async () => {
+    const channels = new ChannelDoNotContact();
+    const outbound = new FakeOutboundStore();
+    outbound.channelDnc = channels;
+    const store = new MemoryPluginStore();
+    store.channelDnc = channels;
+    const sent: string[] = [];
+    const sender = { async send(o: { body: string }) { sent.push(o.body); return { sid: "SM-v" }; } };
+    await outbound.stampDoNotContact(PHONE, "opt_out_of_calls");
+    const out = await sendApprovedSms(store, sender, { phone: PHONE, body: "Your request is in." }, {});
+    expect(out).toMatchObject({ ok: false, reason: "sms_opted_out", mayHaveSent: false });
+    expect(sent).toEqual([]);
+  });
+
+  it("an SMS STOP blocks calls", async () => {
+    const channels = new ChannelDoNotContact();
+    const outbound = new FakeOutboundStore();
+    outbound.channelDnc = channels;
+    const store = new MemoryPluginStore();
+    store.channelDnc = channels;
+    const sender = { async send() { return { sid: "SM-stop" }; } };
+    await handleInboundSms(store, sender, { from: PHONE, body: "STOP" }, {});
+    expect(await outbound.isDoNotContact(PHONE)).toBe(true);
+    const result = await evaluateAndEnqueueCall(
+      outbound,
+      { approvalId: "appr-1", phone: PHONE, ticketNumber: TICKET },
+      new Date("2026-10-22T18:00:00Z"),
+    );
+    expect(result).toEqual({ ok: false, reason: "do_not_contact" });
+    expect(outbound.upserts).toEqual([]);
+    // START with no voice row unblocks both channels.
+    await handleInboundSms(store, sender, { from: PHONE, body: "START" }, {});
+    expect(await store.isSmsOptedOut("5555550111")).toBe(false);
+    expect(await outbound.isDoNotContact(PHONE)).toBe(false);
+  });
+
+  it("SMS STOP then voice opt-out then SMS START keeps both channels blocked", async () => {
     const channels = new ChannelDoNotContact();
     const outbound = new FakeOutboundStore();
     outbound.channelDnc = channels;
@@ -530,12 +567,17 @@ describe("the calling window and DNC list", () => {
     const sender = { async send() { return { sid: "SM-rev" }; } };
     await handleInboundSms(store, sender, { from: PHONE, body: "STOP" }, {});
     expect(await store.isSmsOptedOut("5555550111")).toBe(true);
-    expect(await outbound.isDoNotContact(PHONE)).toBe(false);
+    expect(await outbound.isDoNotContact(PHONE)).toBe(true);
     await outbound.stampDoNotContact(PHONE, "opt_out_of_calls");
     expect(await outbound.isDoNotContact(PHONE)).toBe(true);
     await handleInboundSms(store, sender, { from: PHONE, body: "START" }, {});
-    expect(await store.isSmsOptedOut("5555550111")).toBe(false);
+    // START deleted only the sms_stop row; the voice row still blocks both.
+    expect(channels.sms.has("5555550111")).toBe(false);
+    expect(channels.voice.has("5555550111")).toBe(true);
+    expect(await store.isSmsOptedOut("5555550111")).toBe(true);
     expect(await outbound.isDoNotContact(PHONE)).toBe(true);
+    const sms = await sendApprovedSms(store, sender, { phone: PHONE, body: "hello" }, {});
+    expect(sms).toMatchObject({ ok: false, reason: "sms_opted_out" });
     const result = await evaluateAndEnqueueCall(
       outbound,
       { approvalId: "appr-1", phone: PHONE, ticketNumber: TICKET },
@@ -1418,7 +1460,7 @@ describe("review findings", () => {
     expect(seen[0]).not.toMatch(/executeApproved|sendApproved|enqueue|sendMail/);
   });
 
-  it("the SQL SMS opt-out is per channel so START cannot erase a voice row", async () => {
+  it("the SQL SMS opt-out writes per channel but reads any row, so START cannot erase a voice row", async () => {
     const seen: Array<{ text: string; params: unknown[] }> = [];
     const store = createSqlPluginStore(async (text, params) => {
       seen.push({ text, params: params ?? [] });
@@ -1427,8 +1469,10 @@ describe("review findings", () => {
     await store.isSmsOptedOut("5555550111");
     await store.setSmsOptOut("5555550111", true);
     await store.setSmsOptOut("5555550111", false);
-    expect(seen[0].text).toMatch(/source = \$2/);
-    expect(seen[0].params[1]).toBe("sms_stop");
+    // The read has no source filter: a voice row blocks texts too.
+    expect(seen[0].text).toMatch(/FROM do_not_contact WHERE phone_key = \$1/);
+    expect(seen[0].text).not.toMatch(/source/);
+    expect(seen[0].params).toEqual(["5555550111"]);
     expect(seen[1].text).toMatch(/ON CONFLICT \(phone_key, source\) DO NOTHING/);
     expect(seen[1].params[1]).toBe("sms_stop");
     expect(seen[2].text).toMatch(/DELETE FROM do_not_contact/);

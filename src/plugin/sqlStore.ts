@@ -453,11 +453,8 @@ export function createSqlPluginStore(exec: SqlExec): PluginStore {
       return rows.map(outboxFrom);
     },
     async isSmsOptedOut(phoneKey) {
-      // SMS only. A voice opt-out is a different row and does not block texts.
-      const rows = await exec(
-        "SELECT phone_key FROM do_not_contact WHERE phone_key = $1 AND source = $2 LIMIT 1",
-        [phoneKey, "sms_stop"],
-      );
+      // Any row blocks, whatever its source: a voice opt-out blocks texts too.
+      const rows = await exec("SELECT phone_key FROM do_not_contact WHERE phone_key = $1 LIMIT 1", [phoneKey]);
       return rows.length > 0;
     },
     async setSmsOptOut(phoneKey, optedOut) {

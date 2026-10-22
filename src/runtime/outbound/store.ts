@@ -626,11 +626,12 @@ export async function createDbOutboundStore(): Promise<OutboundStore> {
       // cannot be made does not pass.
       if (!key) return true;
       await ensureSchema();
+      // Any row blocks, whatever its source: an SMS STOP blocks calls too.
       const found = rows(
         await db.execute(sql`
           SELECT 1 FROM do_not_contact
            WHERE phone_key = ${key}::varchar
-             AND source <> 'sms_stop'`),
+           LIMIT 1`),
       );
       return found.length > 0;
     },

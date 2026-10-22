@@ -138,9 +138,11 @@ describe("the do-not-contact list", () => {
     expect(check).toMatch(/if \(!key\) return true;/);
   });
 
-  it("voice checks ignore sms_stop so START cannot unblock a call", () => {
+  it("the call check reads any do_not_contact row, so an SMS STOP blocks calls", () => {
     const check = method("isDoNotContact");
-    expect(check).toContain("AND source <> 'sms_stop'");
+    expect(check).not.toContain("source <> 'sms_stop'");
+    expect(check).not.toMatch(/AND source/);
+    expect(check).toContain("WHERE phone_key = ${key}::varchar");
     expect(method("stampDoNotContact")).toContain("ON CONFLICT (phone_key, source) DO NOTHING");
     expect(SRC).toContain("do_not_contact_phone_source_uidx");
     expect(SRC).toContain("DROP CONSTRAINT IF EXISTS do_not_contact_pkey");

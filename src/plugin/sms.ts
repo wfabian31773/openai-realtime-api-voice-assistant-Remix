@@ -4,9 +4,10 @@
  * number (+1 909-255-3213) lives here and the dialer already uses it.
  *
  * STOP / HELP / START are honoured on the inbound webhook. STOP writes
- * an SMS opt-out (source `sms_stop` only — it does not block voice).
- * HELP replies with the AI identification. START clears the SMS opt-out
- * and never a voice "don't call me".
+ * an SMS opt-out row (source `sms_stop`). Any do_not_contact row, of any
+ * source, blocks both texts and calls. HELP replies with the AI
+ * identification. START deletes only the `sms_stop` row and never a voice
+ * "don't call me" — so a number with a voice row stays blocked for both.
  */
 
 import { dncKey } from "../runtime/outbound/store";
