@@ -201,6 +201,20 @@ describe("the build SHA is written at build time, never committed", () => {
     }
   });
 
+  it("a status that cannot be read is not 'clean': no SHA", () => {
+    const dir = tmp();
+    const git = (...a: string[]) => execFileSync("git", a, { cwd: dir, stdio: "pipe" }).toString().trim();
+    git("init", "-q");
+    git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "x");
+    // A corrupt index: rev-parse HEAD still answers, git status does not.
+    fs.writeFileSync(path.join(dir, ".git", "index"), "not an index");
+    expect(() => git("status", "--porcelain")).toThrow();
+    execFileSync("node", [script], { cwd: dir, stdio: "pipe" });
+    const info = getBuildInfo(path.join(dir, "build-info.json"));
+    expect(info.gitShaFull).toBeNull();
+    expect(info.dirty).toBe(true);
+  });
+
   it("an ignored file alone leaves the tree clean and the SHA stands", () => {
     const dir = tmp();
     const git = (...a: string[]) => execFileSync("git", a, { cwd: dir, stdio: "pipe" }).toString().trim();
