@@ -821,8 +821,21 @@ import { callEnvironment } from "./callRecord";
  * parse. On top of v108 (#359), which it contains.
  * `src/services/toolFieldDescriptions.ts`.
  */
+/**
+ * v110 — THE NPX OUTREACH CALL (2026-10-22), DARK. Operator, 2026-10-20: call
+ * patients whose routine exam is weeks away and offer a sooner one at an NPX
+ * partner that takes their medical group; on a yes, book it in NPX and cancel
+ * the Azul appointment. The first real campaign on the outbound layer: the
+ * movable list as its source, the person confirmed by date of birth before
+ * anything about an appointment is said, NPX's offer and booking (EPC #281),
+ * the Azul cancel only if the appointment is still this person's on the date
+ * offered, and the result reported to NPX. Dials nobody until its own switch,
+ * caller ID and NPX key are set. On top of v109 (#360), which it contains.
+ * `src/agents/npxOutreachAgent.ts`,
+ * `src/tools/npxOutreachTools.ts`.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v109-the-field-descriptions-reach-the-model-20261021";
+  "voice-runtime-v110-the-npx-outreach-call-20261022";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

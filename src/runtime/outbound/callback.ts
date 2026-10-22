@@ -17,15 +17,18 @@
  *
  *   matchCallback       who on this campaign's list the calling number belongs
  *                       to — ONE person, SEVERAL (never picked), or NONE
- *   callbackGreeting    the first words, which confirm and never assume
+ *   callbackGreeting    the first words: a single match by first name,
+ *                       anybody else asked who is calling
  *   callbackSteps       what the agent does next, inserted into the lane's
  *                       own Conversation Flow as `### Returned call`
  *
  * RULE ZERO, step 2: a phone number is a candidate to CONFIRM, never an
- * identity. A callback from a matched number is greeted with the person's
- * first name AS A QUESTION, and nothing about why we called is said until the
- * caller is identified through `identify_callback_caller` (src/tools/
- * outboundTools.ts). Several people on one number are never picked between —
+ * identity. A callback from a matched number is greeted by the person's first
+ * name (operator, 2026-10-21), their reply is their answer — a caller who says
+ * it is not them is asked who is calling — and nothing about why we called is
+ * said until the caller is identified through `identify_callback_caller`
+ * (src/tools/outboundTools.ts). A lane that discloses more than why it called
+ * holds that behind its own check (the NPX outreach lane: a date of birth). Several people on one number are never picked between —
  * the agent asks who is calling. A number not on the list may be the person
  * calling from another phone, so the agent asks their name and, where the
  * campaign holds one, their date of birth.
@@ -118,15 +121,21 @@ function firstNameOf(match: CallbackMatch): string | null {
 }
 
 /**
- * The first words a caller hears. Says it is automated and recorded before
- * anything else, like every outbound greeting (OUTBOUND_RECORDING_CLAUSE), and
- * never says why we called: that waits for identity. A single match is
- * confirmed by first name, as the dialled greeting does; anything else asks.
+ * The first words a caller hears. A single match is greeted by first name —
+ * operator, 2026-10-21: "we are recognizing the phone number … and we are
+ * greeting by name. Hello, Wayne. Thank you for calling." — and the caller's
+ * reply is their answer: anything but "that's not me" carries on, the way a
+ * yes to "May I speak with …?" does on a dialled call. Anything else asks who
+ * is calling. Either way it says it is automated and recorded before anything
+ * is asked (OUTBOUND_RECORDING_CLAUSE), never says the last name, and never
+ * says why we called: that waits for identification.
  */
 export function callbackGreeting(match: CallbackMatch): string {
   const first = firstNameOf(match);
-  const ask = first ? `Am I speaking with ${first}?` : "May I have your first and last name?";
-  return `Thank you for calling Azul Vision. This is an automated assistant. ${OUTBOUND_RECORDING_CLAUSE}. ${ask}`;
+  if (first) {
+    return `Hello, ${first}. Thank you for calling Azul Vision. This is an automated assistant. ${OUTBOUND_RECORDING_CLAUSE}.`;
+  }
+  return `Thank you for calling Azul Vision. This is an automated assistant. ${OUTBOUND_RECORDING_CLAUSE}. May I have your first and last name?`;
 }
 
 /** "Tuesday, October 20" in Pacific time — the practice's day, not the server's. */
@@ -174,9 +183,9 @@ export function callbackSteps(ctx: CallbackContext): string {
   const first = firstNameOf(ctx.match);
   if (ctx.match.kind === "one" && first) {
     lines.push(
-      `Their number matches someone we called: ${first}. ${describeLastAttempt(ctx.match.contact)}`,
-      `If they say yes, they are ${first}: call ${IDENTIFY_TOOL} with first_name "${first}" before you say anything else.`,
-      `If they say no, or that ${first} is not there: do not say why we called. Ask for their first and last name and call ${IDENTIFY_TOOL} with what they say.`,
+      `Their number matches someone we called: ${first}, and your opening greeted them by that name. ${describeLastAttempt(ctx.match.contact)}`,
+      `Unless their reply says they are not ${first}, or that ${first} is not there, they are ${first}: call ${IDENTIFY_TOOL} with first_name "${first}" before you say anything else.`,
+      `If they say they are not ${first}, or that ${first} is not there: do not say why we called. Ask for their first and last name and call ${IDENTIFY_TOOL} with what they say.`,
     );
   } else if (ctx.match.kind === "several") {
     lines.push(

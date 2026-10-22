@@ -109,6 +109,16 @@ export interface OutboundLanePolicy {
    * configured in this process, and the campaign does not dial.
    */
   source?: () => Promise<ContactSource | null>;
+  /**
+   * The lane's OWN registry tools (v110), bound by the runtime on a call the
+   * lane dialled and on a call made back to it — never on an inbound lane.
+   * Each receives who the call is about as injected context (the contact,
+   * attempt and CallSid on a dialled call; the CallSid on a returned one),
+   * never as a schema field. Registry tools, not hand-built `tool()`s: the
+   * agent SDK drops every field description from a hand-built tool with an
+   * optional field, and a registry tool's JSON schema reaches the model whole.
+   */
+  tools?: readonly string[];
 }
 
 /** One person a live source says the campaign may call. */
