@@ -529,7 +529,9 @@ function outboundRuntimeTools(
   if (metadata.callback) {
     return realtimeToolsFor(
       [...RUNTIME_CALLBACK_TOOLS, ...laneTools],
-      { outbound_callback_sid: metadata.callSid },
+      // The campaign too, as on a dialled call: a lane's tools may answer
+      // differently per campaign (the NPX demo lane's do, v112).
+      { outbound_callback_sid: metadata.callSid, outbound_campaign: config.outbound.campaignKey },
       telemetry,
     ) as unknown as LiveTool[];
   }

@@ -834,8 +834,24 @@ import { callEnvironment } from "./callRecord";
  * `src/agents/npxOutreachAgent.ts`,
  * `src/tools/npxOutreachTools.ts`.
  */
+/**
+ * v111 — THE MEDICATION NAME IS ASKED ONCE (2026-10-22). The after-hours
+ * line's refill gate refused `create_ticket` on every attempt for the life of
+ * the call; it now refuses once, files on the next attempt, never asks about
+ * a contact lens, and the refusal reaches `tool_timeline`.
+ * `src/services/toolDirection.ts`.
+ */
+/**
+ * v112 — THE NPX DEMO LINE (2026-10-22). Operator: "No way we are going to do
+ * this without testing the line first." The `npx-outreach-demo` lane: the
+ * live NPX agent, prompt, tools and voice (`eve`), calling synthetic patients
+ * on the numbers in NPX_OUTREACH_DEMO_PHONES and booking in the demo NPX; the
+ * Azul cancel and the staff ticket are simulated. `/voice/health` names each
+ * lane's voice. On top of v111, which it contains.
+ * `src/agents/npxOutreachDemo.ts`, `src/tools/npxOutreachTools.ts`.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v111-the-medication-name-is-asked-once-20261022";
+  "voice-runtime-v112-the-npx-demo-line-20261022";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

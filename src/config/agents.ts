@@ -1,6 +1,7 @@
 import type { OutboundLanePolicy } from '../runtime/outbound/campaign';
 import { createOutboundProofAgent, outboundProofAgentConfig, outboundProofPolicy } from '../agents/outboundProofAgent';
 import { createNpxOutreachAgent, npxOutreachAgentConfig, npxOutreachPolicy } from '../agents/npxOutreachAgent';
+import { npxOutreachDemoAgentConfig, npxOutreachDemoPolicy } from '../agents/npxOutreachDemo';
 import { RealtimeAgent } from '@openai/agents/realtime';
 import { createAfterHoursAgent } from '../agents/afterHoursAgent';
 import { createDRSSchedulerAgent } from '../agents/drsSchedulerAgent';
@@ -238,6 +239,26 @@ export class AgentRegistry {
       language: npxOutreachAgentConfig.language,
       spokenLanguages: ['en', 'es'],
       outbound: npxOutreachPolicy,
+    });
+
+    // The NPX outreach DEMO (v112): the same agent and factory, calling the
+    // synthetic patients on NPX_OUTREACH_DEMO_PHONES and booking in the demo
+    // NPX; the Azul cancel and the staff ticket are simulated. Dials nothing
+    // unless RUNTIME_OUTBOUND_DIALING=1, OUTBOUND_CAMPAIGN_NPX_OUTREACH_DEMO=1,
+    // NPX_OUTREACH_DEMO_CALLER_ID, NPX_OUTREACH_DEMO_PHONES and
+    // NPX_OUTREACH_DEMO_API_KEY are set and that number's Voice URL points here.
+    this.register({
+      id: npxOutreachDemoAgentConfig.slug,
+      factory: createNpxOutreachAgent as AgentFactory,
+      enabled: true,
+      description: npxOutreachDemoAgentConfig.description,
+      twilioNumbers: [],
+      agentType: 'outbound',
+      version: npxOutreachDemoAgentConfig.version,
+      voice: npxOutreachDemoAgentConfig.voice,
+      language: npxOutreachDemoAgentConfig.language,
+      spokenLanguages: ['en', 'es'],
+      outbound: npxOutreachDemoPolicy,
     });
 
     // Azul Vision NextGen scheduling line (San Diego pilot).

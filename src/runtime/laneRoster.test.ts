@@ -135,7 +135,9 @@ describe("what this deployment can serve", () => {
 describe("the boot lines", () => {
   it("lead with the count, so a deployment serving nothing is obvious", () => {
     const lines = formatLaneRoster(laneRoster(ALL, {}, { transferAvailable: false }));
-    expect(lines[0]).toContain("lanes this deployment can serve (5/8)");
+    // 5 of the 8 inbound lanes, plus the two NPX outreach lanes (v112): this
+    // fake registers every slug as an inbound lane, so they count as served.
+    expect(lines[0]).toContain("lanes this deployment can serve (7/10)");
     expect(lines[0]).toContain("optical");
   });
 
@@ -196,5 +198,34 @@ describe("the voice model each lane would use", () => {
     const r = bySlug(laneRoster(source(["optical"]), {}, { transferAvailable: false }));
     expect(r.optical.voiceModel).toBe("grok-voice-3.0");
     expect(r.pcp.voiceModel).toBeNull();
+  });
+});
+
+/**
+ * Which xAI voice each lane would speak in (v112). Operator, 2026-10-22: "I
+ * have never heard this agent, make sure it has a good voice, the main one
+ * from xai that they use." The runtime's default is `eve`, the voice in every
+ * one of xAI's own Voice Agent examples; `/voice/health` now says so per lane.
+ */
+describe("the voice each lane would speak in", () => {
+  it("reports eve on every registered lane, the NPX outreach lanes included, when nothing overrides it", () => {
+    const r = bySlug(laneRoster(ALL, {}, { transferAvailable: false }));
+    for (const row of Object.values(r)) expect(row.voiceName, row.slug).toBe("eve");
+    expect(r["npx-outreach"]).toBeDefined();
+    expect(r["npx-outreach-demo"]).toBeDefined();
+  });
+
+  it("follows XAI_VOICE_NAME, with a per-lane setting winning, exactly as a call does", () => {
+    const r = bySlug(
+      laneRoster(ALL, { XAI_VOICE_NAME: "ara", XAI_VOICE_NAME_NPX_OUTREACH_DEMO: "eve" }, { transferAvailable: false }),
+    );
+    expect(r.tech.voiceName).toBe("ara");
+    expect(r["npx-outreach"].voiceName).toBe("ara");
+    expect(r["npx-outreach-demo"].voiceName).toBe("eve");
+  });
+
+  it("reports no voice for a lane this build does not register", () => {
+    const r = bySlug(laneRoster(source(["optical"]), {}, { transferAvailable: false }));
+    expect(r["npx-outreach-demo"].voiceName).toBeNull();
   });
 });

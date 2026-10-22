@@ -41,6 +41,14 @@
  *
  * Every refusal speaks through `fix`, the model's channel (v43); `say` is the
  * one sentence for the caller where there is one.
+ *
+ * THE DEMO LANE (v112, `npx-outreach-demo`) RUNS THESE SAME TOOLS, with three
+ * of their dependencies swapped and nothing else: NPX is the demo deployment,
+ * and the Azul cancel and the staff ticket are SIMULATED — logged, never sent
+ * to NextGen or the ticketing app. A call is a demo call when its injected
+ * campaign is the demo lane's OR its contact came from the demo seed; either
+ * one is enough, so a demo call never reaches a live system because one of
+ * the two was missing.
  */
 import { registerTool, type ToolFailure, type ToolResult } from './registry';
 import { readDobQuietly } from './dobParts';
@@ -49,7 +57,13 @@ import { callbackSessionFor } from './outboundTools';
 import { dobOnFile } from '../runtime/outbound/callback';
 import type { OutboundContact } from '../runtime/outbound/campaign';
 import type { OutboundStore } from '../runtime/outbound/store';
-import { createNpxOutreachClient, NPX_TIMEOUT_MS, type NpxOutreachClient, type NpxSlot } from '../services/npxOutreachClient';
+import {
+  createNpxOutreachClient,
+  createNpxOutreachDemoClient,
+  NPX_TIMEOUT_MS,
+  type NpxOutreachClient,
+  type NpxSlot,
+} from '../services/npxOutreachClient';
 import { cancelAzulAppointment, type AzulCancelRequest, type AzulCancelResult } from '../services/outreachAzulCancel';
 import { fold, SCHEDULING } from './queueRouting';
 import { sanitizeForSms } from '../services/gsm7';
@@ -67,6 +81,11 @@ export const NPX_OUTREACH_TOOLS = [
   BOOK_SOONER_TOOL_NAME,
   STAFF_CALLBACK_TOOL_NAME,
 ] as const;
+
+/** The demo lane's campaign, and the `custom_data.source` of its seeded
+ * contacts (src/agents/npxOutreachDemo.ts). */
+export const NPX_OUTREACH_DEMO_CAMPAIGN_KEY = 'npx-outreach-demo';
+export const NPX_OUTREACH_DEMO_SOURCE = 'npx_outreach_demo';
 
 /** The HVA Hub, where every schedule-related request goes (standing
  * instruction 10), and its scheduling request type. */
@@ -87,6 +106,8 @@ export const MIN_DAYS_SOONER = 21;
 
 interface Deps {
   npx: NpxOutreachClient;
+  /** The demo lane's NPX: the demo deployment and its own key. */
+  npxDemo: NpxOutreachClient;
   cancel: (req: AzulCancelRequest) => Promise<AzulCancelResult>;
   store: () => Promise<OutboundStore>;
   fileTicket: (params: CreateTicketParams) => Promise<CreateTicketResponse>;
@@ -95,6 +116,7 @@ interface Deps {
 let storePromise: Promise<OutboundStore> | null = null;
 const defaultDeps = (): Deps => ({
   npx: createNpxOutreachClient(),
+  npxDemo: createNpxOutreachDemoClient(),
   cancel: (req) => cancelAzulAppointment(req),
   store: () => (storePromise ??= import('../runtime/outbound/store').then((m) => m.createDbOutboundStore())),
   // Imported when used, as every registry tool does: the client reads its
@@ -110,10 +132,44 @@ export function setNpxOutreachDepsForTests(next: Partial<Deps> | null): void {
   deps = next ? { ...defaultDeps(), ...next } : null;
 }
 
+/** A demo call's Azul cancel: nothing is sent to NextGen. It answers
+ * cancelled so the demo hears the whole booking script; the log line says
+ * plainly that nothing happened. */
+export async function simulatedDemoCancel(req: AzulCancelRequest): Promise<AzulCancelResult> {
+  console.info(
+    `[NPX OUTREACH DEMO] Azul cancel SIMULATED for demo appointment ${req.appointmentId} — nothing was sent to NextGen`,
+  );
+  return { cancelled: true, alreadyCancelled: false };
+}
+
+/** A demo call's staff ticket: nothing is filed. The text a scheduler would
+ * have read is logged, because seeing it is part of the test. */
+export async function simulatedDemoTicket(params: CreateTicketParams): Promise<CreateTicketResponse> {
+  console.info(
+    `[NPX OUTREACH DEMO] staff callback ticket SIMULATED — nothing was filed. It would have gone to department ` +
+      `${params.departmentId}, request type ${params.requestTypeId}, reason ${params.requestReasonId}:\n${params.description}`,
+  );
+  return { success: true, ticketNumber: 'DEMO-STAFF' };
+}
+
+/** What a session's call may reach: the demo NPX and the simulations on a
+ * demo call, the live dependencies on any other. */
+function npxFor(s: OutreachSession): NpxOutreachClient {
+  return s.demo ? live().npxDemo : live().npx;
+}
+function cancelFor(s: OutreachSession): Deps['cancel'] {
+  return s.demo ? simulatedDemoCancel : live().cancel;
+}
+function ticketFor(s: OutreachSession): Deps['fileTicket'] {
+  return s.demo ? simulatedDemoTicket : live().fileTicket;
+}
+
 // ── The per-call session ────────────────────────────────────────────────────
 
 interface OutreachSession {
   contact: OutboundContact;
+  /** The demo lane's call: demo NPX, simulated cancel and ticket. */
+  demo: boolean;
   /** describe_upcoming_appointment has told them the visit and its date. */
   described: boolean;
   verified: boolean;
@@ -202,12 +258,15 @@ async function sessionFor(input: Record<string, unknown>): Promise<{ sid: string
   if (!contactId || !attemptId) return NOT_THIS_CALL;
   const contact = await (await live().store()).loadCallContact(contactId, attemptId);
   if (!contact) return NOT_THIS_CALL;
+  const demo =
+    input.outbound_campaign === NPX_OUTREACH_DEMO_CAMPAIGN_KEY || contact.data.source === NPX_OUTREACH_DEMO_SOURCE;
   return {
     sid,
     s: keep(
       sid,
       {
         contact,
+        demo,
         described: false,
         verified: false,
         dobTries: 0,
@@ -477,7 +536,7 @@ registerTool({
       };
       return r;
     }
-    const offer = await live().npx.offer({
+    const offer = await npxFor(s).offer({
       medicalGroupName: medicalGroup,
       partnerNames: partners,
       replacedAppointmentDate: replaced,
@@ -613,7 +672,7 @@ async function bookChosen(
     };
     return r;
   }
-  const book = await live().npx.book({
+  const book = await npxFor(s).book({
     slotId: slot.slotId,
     medicalGroupName: field(s.contact, 'medical_group'),
     minDaysSooner: MIN_DAYS_SOONER,
@@ -651,14 +710,14 @@ async function bookChosen(
   // Booked. Now the Azul appointment, then tell NPX how that went. A cancel
   // that does not land is still safe: NPX lists the booking for CEC after
   // 15 minutes with no `cancelled` report.
-  const cancel = await live().cancel({
+  const cancel = await cancelFor(s)({
     appointmentId,
     personId,
     appointmentDate: field(s.contact, 'appointment_date'),
     comment: `Moved to an NPX partner practice by the Azul outreach call (NPX booking ${book.bookingId}).`,
     deadlineAt: deadline - NPX_TIMEOUT_MS.report - SETTLE_BUDGET_MS,
   });
-  const report = await live().npx.reportCancel(
+  const report = await npxFor(s).reportCancel(
     book.bookingId,
     cancel.cancelled ? 'cancelled' : { failed: cancel.reason },
   );
@@ -764,7 +823,7 @@ registerTool({
         .join('\n'),
     ).value;
 
-    const result = await live().fileTicket({
+    const result = await ticketFor(s)({
       departmentId: HVA_HUB_DEPARTMENT_ID,
       requestTypeId: HVA_HUB_SCHEDULING_REQUEST_TYPE_ID,
       requestReasonId: staffReasonFor(request),
