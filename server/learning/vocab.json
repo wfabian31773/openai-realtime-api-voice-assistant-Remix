@@ -1,0 +1,72 @@
+{
+  "_comment": "Closed failure-shape vocabulary (VB-17d §17d.3). A new shape is added by PR review only. Each maps to its VB-16 failure mode.",
+  "shapes": {
+    "refusal-then-silence": "FM-01",
+    "barely-heard": "FM-02",
+    "barge-in-on-noise": "FM-03",
+    "greeting-replay": "FM-04",
+    "wrong-language": "FM-05",
+    "dob-refusal-none": "FM-06",
+    "identity-burned": "FM-06",
+    "false-state-claim": "FM-07",
+    "outcome-missing": "FM-08",
+    "capability-stopped": "FM-09",
+    "transfer-not-attempted": "FM-09",
+    "not-deployed": "FM-10",
+    "copy-drift": "FM-11",
+    "meta-layer-harm": "FM-12",
+    "stream-protocol": "FM-13",
+    "test-blind-spot": "FM-14",
+    "date-error": "FM-15",
+    "lost-request-no-ticket": "FM-16",
+    "lost-request-no-callback-row": "FM-16",
+    "success-loop": "FM-17",
+    "session-never-starts": "FM-18",
+    "reads-too-much": "FM-19",
+    "amd-human-voicemailed": "FM-20",
+    "booking-destroyed": "FM-21",
+    "wrong-department": "FM-22",
+    "downstream-contract-refusal": "FM-23",
+    "unsatisfiable-gate": "FM-24",
+    "process-wide-fault": "FM-25",
+    "handoff-record-wrong": "FM-26",
+    "tickets-collapsed": "FM-27",
+    "cost-misreported": "FM-28",
+    "report-tool-rejected": "FM-29",
+    "forbidden-booking-offered": "FM-30",
+    "stale-appointment-read": "FM-06",
+    "unvoiced-answer-hangup": "FM-01",
+    "excess-data-access": "FM-33 (proposed)",
+    "silent-zero-report": "FM-09"
+  },
+  "lane_groups": {
+    "Remix": {
+      "queue": [
+        "optical",
+        "surgery",
+        "tech",
+        "records"
+      ],
+      "pcp": [
+        "pcp"
+      ],
+      "after-hours": [
+        "no-ivr"
+      ],
+      "old-core": [
+        "answering-service"
+      ],
+      "outbound": [
+        "outbound-proof"
+      ]
+    },
+    "5Star": {
+      "inbound": [
+        "drs-8484"
+      ],
+      "outbound": [
+        "drs-campaign"
+      ]
+    }
+  }
+}

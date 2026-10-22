@@ -463,6 +463,11 @@ async function startServer() {
     // returned server since we're already listening on earlyServer)
     await registerRoutes(app);
 
+    // Stage C measurement engine: the export route always exists (503 without
+    // its token); the nightly runner starts only with LEARNING_RUNNER_ENABLED=1.
+    const { registerLearningExport, startLearningRunner } = await import('./learning/scheduler');
+    registerLearningExport(app);
+
     // Catch-all: serve index.html for client-side routing (must be after API routes)
     app.use((req, res) => {
       res.sendFile('index.html', { root: 'client/dist' });
@@ -487,6 +492,8 @@ async function startServer() {
 
     // Schedule nightly reconciliation at configured UTC hour
     scheduleNightlyReconciliation();
+
+    startLearningRunner();
   } catch (error) {
     healthState.initFailed = true;
     console.error("════════════════════════════════════════════════════════");
