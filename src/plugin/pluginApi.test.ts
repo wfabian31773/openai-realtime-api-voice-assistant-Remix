@@ -551,7 +551,13 @@ describe("the calling window and DNC list", () => {
     expect(sent).toEqual([START_REPLY]);
   });
 
-  it("HELP to a number blocked by any do_not_contact row sends no reply", async () => {
+  it("the HELP reply names the program, a contact number and how to opt out", () => {
+    expect(HELP_REPLY).toContain("Azul Vision SI Assistant");
+    expect(HELP_REPLY).toMatch(/call \(909\) 255-3213/);
+    expect(HELP_REPLY).toContain("Reply STOP to opt out");
+  });
+
+  it("HELP from a number blocked by a voice do_not_contact row still gets the HELP reply (CTIA)", async () => {
     const channels = new ChannelDoNotContact();
     const outbound = new FakeOutboundStore();
     outbound.channelDnc = channels;
@@ -560,24 +566,29 @@ describe("the calling window and DNC list", () => {
     const sent: string[] = [];
     const sender = { async send(o: { body: string }) { sent.push(o.body); return { sid: "SM-h" }; } };
     await outbound.stampDoNotContact(PHONE, "opt_out_of_calls");
+    expect(await store.isSmsOptedOut("5555550111")).toBe(true);
     expect(await handleInboundSms(store, sender, { from: PHONE, body: "HELP" }, {})).toEqual({
-      command: "help",
-      replied: false,
-    });
-    const smsOnly = new MemoryPluginStore();
-    await smsOnly.setSmsOptOut("5555550111", true);
-    expect(await handleInboundSms(smsOnly, sender, { from: PHONE, body: "HELP" }, {})).toEqual({
-      command: "help",
-      replied: false,
-    });
-    expect(sent).toEqual([]);
-    // An unblocked number still gets the HELP identification.
-    const open = new MemoryPluginStore();
-    expect(await handleInboundSms(open, sender, { from: PHONE, body: "HELP" }, {})).toEqual({
       command: "help",
       replied: true,
     });
     expect(sent).toEqual([HELP_REPLY]);
+    // HELP changes no opt-out state.
+    expect(await store.isSmsOptedOut("5555550111")).toBe(true);
+  });
+
+  it("HELP from a number blocked by an SMS STOP still gets the HELP reply (CTIA)", async () => {
+    const store = new MemoryPluginStore();
+    const sent: string[] = [];
+    const sender = { async send(o: { body: string }) { sent.push(o.body); return { sid: "SM-h" }; } };
+    await handleInboundSms(store, sender, { from: PHONE, body: "STOP" }, {});
+    sent.length = 0;
+    expect(await store.isSmsOptedOut("5555550111")).toBe(true);
+    expect(await handleInboundSms(store, sender, { from: PHONE, body: "HELP" }, {})).toEqual({
+      command: "help",
+      replied: true,
+    });
+    expect(sent).toEqual([HELP_REPLY]);
+    expect(await store.isSmsOptedOut("5555550111")).toBe(true);
   });
 
   it("a voice opt-out blocks an approved SMS", async () => {

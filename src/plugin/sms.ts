@@ -5,8 +5,9 @@
  *
  * STOP / HELP / START are honoured on the inbound webhook. STOP writes
  * an SMS opt-out row (source `sms_stop`). Any do_not_contact row, of any
- * source, blocks both texts and calls. HELP replies with the AI
- * identification unless the number is blocked. START deletes only the
+ * source, blocks both texts and calls. HELP always replies (CTIA): the
+ * program name, a contact number and how to opt out, even to a number
+ * that any do_not_contact row blocks. START deletes only the
  * `sms_stop` row and never a voice "don't call me" — so a number with a
  * voice row stays blocked for both, and START then sends no reply.
  */
@@ -21,7 +22,7 @@ export interface SmsSender {
 }
 
 export const HELP_REPLY =
-  "Azul Vision SI Assistant (AI). Reply STOP to opt out of texts. Reply START to opt back in. This is an automated assistant, not a person. Msg&data rates may apply.";
+  "Azul Vision SI Assistant (AI). This is an automated assistant, not a person. For help, call (909) 255-3213. Reply STOP to opt out of texts. Reply START to opt back in. Msg&data rates may apply.";
 
 export const STOP_REPLY =
   "Azul Vision SI Assistant (AI): you are opted out of texts from this number. Reply START to opt back in.";
@@ -90,9 +91,9 @@ export async function handleInboundSms(
     return { command, replied: Boolean(sender) };
   }
   if (command === "help") {
-    // A number blocked by any do_not_contact row (an SMS STOP or a voice
-    // "don't call me") gets no text at all, not even the HELP reply.
-    if (await store.isSmsOptedOut(key)) return { command, replied: false };
+    // HELP always replies, even to a number an SMS STOP or a voice
+    // "don't call me" blocks: carriers and CTIA expect a HELP response
+    // whatever the opt-out state.
     if (sender) {
       await sender.send({ to: `+1${key}`, from: siAssistantNumber(env), body: HELP_REPLY });
     }
