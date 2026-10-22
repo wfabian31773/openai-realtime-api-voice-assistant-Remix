@@ -14,7 +14,7 @@ import { URGENT_SYMPTOMS, getCurrentDateTimeContext } from "../config/knowledgeB
 // The three presentations the symptom list above cannot express, because two
 // of its entries are conditionals written as prose. See afterHoursTriage.ts.
 import { renderTriagePrompt } from "../tools/afterHoursTriage";
-import { recordingExecute } from "../services/toolTimeline";
+import { recordingExecute, recordToolEvent, flushAzulTimeline } from "../services/toolTimeline";
 import { keepFieldDescriptions } from "../services/toolFieldDescriptions";
 // The queue lanes' "ask once, then file anyway" ruling (operator, 2026-09-04),
 // which this lane never reached because it builds create_ticket by hand.
@@ -1216,7 +1216,19 @@ export async function createNoIvrAgent(
       tool({
         ...def,
         // CP-3: the approved next line rides inside the tool result (script-listing §6).
-        execute: withToolDirection('no-ivr', callId, def.name, recordingExecute(timelineCtx, def.name, def.execute)),
+        execute: withToolDirection('no-ivr', callId, def.name, recordingExecute(timelineCtx, def.name, def.execute), {
+          // v111: a gate refusal returns before the recorder runs, so it is
+          // recorded here — the same timeline key and ids recordingExecute uses.
+          recordRefusal: (args, outcome) => {
+            const key = timelineCtx.callId ?? timelineCtx.callSid ?? '';
+            recordToolEvent(key, def.name, (args ?? {}) as Record<string, unknown>, JSON.stringify(outcome), 0, {
+              callSid: metadata.callSid,
+              callLogId: metadata.callLogId,
+              agentSlug: 'no-ivr',
+            });
+            void flushAzulTimeline(key).catch(() => { /* telemetry must never touch the call */ });
+          },
+        }),
       }),
       def.parameters,
     )) as typeof tool;
