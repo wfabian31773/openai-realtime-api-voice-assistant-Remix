@@ -182,6 +182,24 @@ describe("the build SHA is written at build time, never committed", () => {
     expect(getBuildInfo(path.join(dir, "build-info.json")).gitSha).toBeNull();
   });
 
+  it("a write that FAILS still leaves no stale file behind — the old one is removed first", () => {
+    const dir = tmp();
+    const out = path.join(dir, "build-info.json");
+    fs.writeFileSync(out, JSON.stringify({ builtAt: "2026-08-12", gitSha: "3f4ec74" }));
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const writer = require(script) as { main: (out: string) => void };
+    const spy = vi.spyOn(fs, "writeFileSync").mockImplementation(() => {
+      throw new Error("disk full");
+    });
+    try {
+      writer.main(out);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(fs.existsSync(out)).toBe(false);
+    expect(getBuildInfo(out).gitSha).toBeNull();
+  });
+
   it("a missing file reads as null on every field", () => {
     expect(getBuildInfo(path.join(tmp(), "build-info.json"))).toEqual({
       builtAt: null, gitSha: null, gitShaFull: null, traceable: null,
