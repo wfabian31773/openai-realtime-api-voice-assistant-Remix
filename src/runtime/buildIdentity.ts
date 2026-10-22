@@ -64,13 +64,22 @@ export function oldCoreBuildIdentity(): BuildIdentity {
   return { runtimeMarker: OLD_CORE_MARKER, buildSha: deployedBuildSha(), voiceModel: null };
 }
 
-/** The one statement. Exported so a test pins the never-overwrite rule. */
+/**
+ * The one statement. Exported so a test pins the never-overwrite rule.
+ *
+ * ONE ATOMIC FIRST-WRITER STAMP (Codex, #364). The three columns are written
+ * together, once, by whichever writer reaches the row first; every later stamp
+ * matches nothing. A column-by-column COALESCE would let a later deployment
+ * fill a SHA the first one deliberately left unknown (a dirty build), pairing
+ * that deployment's SHA with the first one's marker. runtime_marker is never
+ * NULL in a stamp, so "still NULL" means "never stamped".
+ */
 export const STAMP_SQL =
   "UPDATE call_logs SET " +
-  "runtime_marker = COALESCE(runtime_marker, $2::text), " +
-  "build_sha = COALESCE(build_sha, $3::text), " +
-  "voice_model = COALESCE(voice_model, $4::text) " +
-  "WHERE call_sid = $1::text";
+  "runtime_marker = $2::text, " +
+  "build_sha = $3::text, " +
+  "voice_model = $4::text " +
+  "WHERE call_sid = $1::text AND runtime_marker IS NULL";
 
 export const COLUMNS_SQL =
   "SELECT count(*)::int AS n FROM information_schema.columns " +

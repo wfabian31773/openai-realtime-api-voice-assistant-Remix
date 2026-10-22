@@ -48,11 +48,27 @@ beforeEach(() => {
 afterEach(() => vi.restoreAllMocks());
 
 describe("the stamp never overwrites and never guesses", () => {
-  it("fills each column only where it is NULL", () => {
-    expect(STAMP_SQL).toContain("runtime_marker = COALESCE(runtime_marker, $2::text)");
-    expect(STAMP_SQL).toContain("build_sha = COALESCE(build_sha, $3::text)");
-    expect(STAMP_SQL).toContain("voice_model = COALESCE(voice_model, $4::text)");
-    expect(STAMP_SQL).toMatch(/WHERE call_sid = \$1::text$/);
+  it("stamps all three columns once, atomically, and only a row never stamped (Codex, #364)", () => {
+    expect(STAMP_SQL).toContain("runtime_marker = $2::text");
+    expect(STAMP_SQL).toContain("build_sha = $3::text");
+    expect(STAMP_SQL).toContain("voice_model = $4::text");
+    // No per-column fill: a deliberate NULL SHA must stay NULL for good.
+    expect(STAMP_SQL).not.toMatch(/COALESCE/i);
+    expect(STAMP_SQL).toMatch(/WHERE call_sid = \$1::text AND runtime_marker IS NULL$/);
+  });
+
+  it("an intentional unknown SHA is never filled in by a later writer", () => {
+    // The statement's own semantics, played on one row.
+    const row: Record<string, string | null> = { runtime_marker: null, build_sha: null, voice_model: null };
+    const apply = (marker: string, sha: string | null, model: string | null) => {
+      const where = STAMP_SQL.slice(STAMP_SQL.indexOf("WHERE"));
+      if (!/runtime_marker IS NULL/.test(where) || row.runtime_marker === null) {
+        Object.assign(row, { runtime_marker: marker, build_sha: sha, voice_model: model });
+      }
+    };
+    apply("v111-dirty-build", null, "grok-voice-3.0"); // first writer: dirty, SHA unknown
+    apply("v112-later", "abc1234", "grok-voice-3.0"); // a later deployment, same CallSid
+    expect(row).toEqual({ runtime_marker: "v111-dirty-build", build_sha: null, voice_model: "grok-voice-3.0" });
   });
 
   it("a runtime call carries the deploy marker, the build SHA and the lane's model", () => {
@@ -252,6 +268,47 @@ describe("the build SHA is written at build time, never committed", () => {
     }
     expect(fs.existsSync(out)).toBe(false);
     expect(getBuildInfo(out).gitSha).toBeNull();
+  });
+
+  it("a stale file that can be neither removed nor replaced fails the build (Codex, #364)", () => {
+    const dir = tmp();
+    const out = path.join(dir, "build-info.json");
+    fs.writeFileSync(out, JSON.stringify({ builtAt: "2026-08-12", gitSha: "3f4ec74" }));
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const writer = require(script) as { main: (out: string) => boolean };
+    const rm = vi.spyOn(fs, "rmSync").mockImplementation(() => {
+      throw new Error("read-only");
+    });
+    const wr = vi.spyOn(fs, "writeFileSync").mockImplementation(() => {
+      throw new Error("read-only");
+    });
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    let ok: boolean;
+    try {
+      ok = writer.main(out);
+    } finally {
+      rm.mockRestore();
+      wr.mockRestore();
+    }
+    expect(ok).toBe(false);
+    // And the CLI turns that into a failing exit status.
+    expect(read("scripts/write-build-info.cjs")).toContain("if (require.main === module && !main()) process.exitCode = 1;");
+  });
+
+  it("a write that fails with nothing stale left behind does not fail the build", () => {
+    const dir = tmp();
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const writer = require(script) as { main: (out: string) => boolean };
+    const wr = vi.spyOn(fs, "writeFileSync").mockImplementation(() => {
+      throw new Error("disk full");
+    });
+    let ok: boolean;
+    try {
+      ok = writer.main(path.join(dir, "build-info.json"));
+    } finally {
+      wr.mockRestore();
+    }
+    expect(ok).toBe(true);
   });
 
   it("a missing file reads as null on every field", () => {

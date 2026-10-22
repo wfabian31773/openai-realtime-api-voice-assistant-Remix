@@ -13,8 +13,11 @@
  *     survive in the workspace from the previous build; if anything below
  *     fails, there is no file and the runtime reports null ("unknown").
  *  2. Every field is null when it cannot be read. Nothing is guessed.
- *  3. It never fails the build. A deploy that cannot say its SHA is still a
- *     deploy; it just says "unknown".
+ *  3. It fails the build in exactly one case: an old file it could neither
+ *     remove nor replace is still there, because that build would advertise
+ *     the previous deployment's SHA (Codex, #364). Otherwise it never fails
+ *     the build: a deploy that cannot say its SHA is still a deploy; it just
+ *     says "unknown".
  *
  * `traceable` answers whether this commit is on GitHub's main: true or false
  * from LOCAL git only (`merge-base --is-ancestor HEAD origin/main`), null when
@@ -80,11 +83,12 @@ function buildInfo() {
   };
 }
 
+/** true when the build may proceed; false only when a stale file survives. */
 function main(out = path.join(process.cwd(), "build-info.json")) {
   try {
     fs.rmSync(out, { force: true });
   } catch {
-    /* nothing to remove */
+    /* tried below: the write replaces it, or the stale check catches it */
   }
   try {
     const info = buildInfo();
@@ -94,11 +98,19 @@ function main(out = path.join(process.cwd(), "build-info.json")) {
         ? `[build-info] workspace has uncommitted changes on ${info.baseShaFull.slice(0, 7)}; build SHA reported as unknown`
         : `[build-info] ${info.gitSha ?? "unknown sha"} traceable=${info.traceable}`,
     );
+    return true;
   } catch (error) {
     console.warn(`[build-info] not written: ${error && error.message}`);
   }
+  if (fs.existsSync(out)) {
+    console.error(
+      "[build-info] an old build-info.json could not be removed or replaced; failing the build so it cannot report the previous deployment's SHA",
+    );
+    return false;
+  }
+  return true;
 }
 
-if (require.main === module) main();
+if (require.main === module && !main()) process.exitCode = 1;
 
 module.exports = { buildInfo, main };
