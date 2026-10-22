@@ -3,8 +3,12 @@
 -- phone_key alone: STOP wrote the only row, the voice insert no-op'd,
 -- and START deleted that row.
 --
--- Write-only here. The outbound store also applies this on first use
--- (ensureSchema). Do not apply this file from the voice deploy.
+-- APPLIED to the Hub (pslzngjciiifowemrzza) 2026-10-22 22:10 UTC, Wayne's
+-- approval, by GitHub Assistant. Kept as the record of that change.
+--
+-- Since v115 the outbound store's ensureSchema only creates the table and
+-- the unique index when absent; it never drops the old primary key. A
+-- database that still has that key needs this file, not a deploy.
 
 ALTER TABLE do_not_contact DROP CONSTRAINT IF EXISTS do_not_contact_pkey;
 CREATE UNIQUE INDEX IF NOT EXISTS do_not_contact_phone_source_uidx

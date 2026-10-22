@@ -295,8 +295,7 @@ export const campaignContacts = pgTable("campaign_contacts", {
  * (src/runtime/outbound/). Keyed on the last ten digits so every spelling
  * of a number is one request. One row per (phone, source): voice and
  * `sms_stop` are separate, so an SMS START cannot erase a voice
- * "don't call me". Every outbound dial checks the voice rows first; the
- * voice tool `opt_out_of_calls` writes a voice row. Created on first use
+ * "don't call me". Any row blocks both calls and texts. Created on first use
  * by the outbound store as well, so a missing `db:push` cannot turn the
  * check into a pass.
  */
@@ -1567,6 +1566,13 @@ export const pluginMessageOutbox = pgTable("plugin_message_outbox", {
   lastError: varchar("last_error", { length: 64 }),
   idempotencyKey: varchar("idempotency_key", { length: 64 }),
   suggestions: jsonb("suggestions"),
+  // Declared so `db:push` cannot drop them (v115); the store reads them by raw SQL.
+  fromPhone: varchar("from_phone", { length: 32 }),
+  messageSid: varchar("message_sid", { length: 64 }),
+  deliveredAt: timestamp("delivered_at", { withTimezone: true }),
+  attachmentPending: boolean("attachment_pending").notNull().default(false),
+  attachmentAttempts: integer("attachment_attempts").notNull().default(0),
+  attachmentNextAttemptAt: timestamp("attachment_next_attempt_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => [

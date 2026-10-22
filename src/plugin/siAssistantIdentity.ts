@@ -7,7 +7,12 @@ export type SiAssistantIdentity = {
   greetingAffirmed: boolean;
   dobMatched: boolean;
   wrongPerson: boolean;
+  /** Dates of birth given that did not match the record (v115). */
+  dobTries: number;
 };
+
+/** Two tries at the date of birth: once to ask, once in case it was misheard. */
+export const MAX_SI_DOB_TRIES = 2;
 
 const sessions = new Map<string, SiAssistantIdentity>();
 const MAX = 500;
@@ -33,7 +38,7 @@ function row(callSid: string): SiAssistantIdentity {
   prune();
   let current = sessions.get(callSid);
   if (!current) {
-    current = { greetingAffirmed: false, dobMatched: false, wrongPerson: false };
+    current = { greetingAffirmed: false, dobMatched: false, wrongPerson: false, dobTries: 0 };
     sessions.set(callSid, current);
     opened.set(callSid, Date.now());
   }

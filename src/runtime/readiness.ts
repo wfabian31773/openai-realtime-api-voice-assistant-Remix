@@ -871,7 +871,7 @@ import { callEnvironment } from "./callRecord";
  * (#363), which it contains. `src/plugin/`, `src/agents/siAssistantAgent.ts`.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v114-the-si-assistant-plugin-api-20261022";
+  "voice-runtime-v115-the-si-assistant-review-fixes-20261022";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

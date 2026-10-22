@@ -12,13 +12,15 @@ import twilio from "twilio";
 import { MemoryPluginStore } from "./store";
 import { mountPluginApi } from "./routes";
 import { createGraphMail, createMemoryGraphMail, type GraphMail } from "./email";
-import { evaluateAndEnqueueCall, siAssistantMayDial } from "./callEnqueue";
+import { evaluateAndEnqueueCall, reportCallNotPlaced, siAssistantMayDial } from "./callEnqueue";
+import { bindPluginStore } from "./bindings";
+import { siAssistantPolicy } from "../agents/siAssistantAgent";
 import { FakeOutboundStore } from "../runtime/outbound/store.testkit";
 import { ChannelDoNotContact } from "../runtime/outbound/channelDnc";
 import { auditContainsPhi, ticketResolvedLogFields } from "./phi";
 import { ticketResolvedAuthorized } from "./ticketResolved";
 import { CONFIRM_TTL_MS, generateConfirmToken, hashPayload } from "./tokens";
-import { HELP_REPLY, START_REPLY, classifyInboundSms, handleInboundSms, inboundSmsPreview, sendApprovedSms } from "./sms";
+import { HELP_REPLY, START_REPLY, STOP_REPLY, classifyInboundSms, handleInboundSms, inboundSmsPreview, sendApprovedSms } from "./sms";
 import { SI_ASSISTANT_EMAIL_DEFAULT } from "./siAssistantConstants";
 import { mintScopesCompatible } from "./scopes";
 import { createSqlPluginStore } from "./sqlStore";
@@ -107,8 +109,16 @@ afterEach(async () => {
   }
 });
 
+/** The switches the dialler reads. A call commit is refused without them
+ * (v115), so every test boots with dialing on unless it says otherwise. */
+const DIALING_ON = {
+  RUNTIME_OUTBOUND_DIALING: "1",
+  OUTBOUND_CAMPAIGN_SI_ASSISTANT: "1",
+  SI_ASSISTANT_NUMBER: "+19092553213",
+} as const;
+
 async function boot(env: Record<string, string | undefined>, extras?: Parameters<typeof listen>[1]) {
-  const ctx = await listen(env, extras);
+  const ctx = await listen({ ...DIALING_ON, ...env }, extras);
   servers.push(ctx.server);
   return ctx;
 }
@@ -1199,6 +1209,7 @@ describe("review findings", () => {
       body: JSON.stringify({ confirmToken: token.confirmToken }),
     });
     expect(committed.status).toBe(502);
+    expect(await committed.json()).toMatchObject({ outcome: "unknown" });
     const row = await store.getApproval(pending.approval.id);
     expect(row?.status).toBe("unknown");
     expect(row?.result).toEqual({ reason: "unknown" });
@@ -1275,24 +1286,125 @@ describe("review findings", () => {
     expect(committed?.status).toBe("committed");
   });
 
-  it("does not let another approval's attempts cap a first call", async () => {
-    const outbound = new FakeOutboundStore();
+  it("caps a second approval on a number another approval rang today, as the dialler would (v115)", async () => {
+    // The dialler's caps are per PHONE (priorAttempts reads every attempt in
+    // the campaign on the number). A commit that read only its own row would
+    // answer "queued" for a call the dialler then holds until its place-by
+    // deadline lapses.
+    let clock = new Date("2026-10-22T16:30:00Z"); // 9:30 Pacific
+    const outbound = new FakeOutboundStore(() => clock);
     const campaignId = await outbound.ensureCampaign();
     await outbound.upsertSourceContacts(campaignId!, [
-      {
-        externalRef: "plugin:other-approval",
-        phone: PHONE,
-        firstName: "Other",
-        lastName: null,
-        data: {},
-      },
+      { externalRef: "plugin:other-approval", phone: PHONE, firstName: "Other", lastName: null, data: {} },
     ]);
     const other = (await outbound.sourceRows(campaignId!))[0];
     const attemptId = await outbound.startAttempt(other.id, campaignId!, 1);
-    await outbound.finishAttempt(attemptId, { status: "no_answer" });
+    await outbound.finishAttempt(attemptId, { status: "completed" });
+    await outbound.settleContact(other.id, "answered");
+    clock = new Date("2026-10-22T18:00:00Z");
+    const result = await evaluateAndEnqueueCall(outbound, { approvalId: "new-approval", phone: PHONE, ticketNumber: TICKET }, clock);
+    expect(result).toEqual({ ok: false, reason: "daily_cap" });
+    expect(outbound.upserts).toEqual([1]);
+  });
+
+  it("lets a second approval through once the earlier dial is days old: per-phone caps, not a ban", async () => {
+    let clock = new Date("2026-10-19T17:00:00Z");
+    const outbound = new FakeOutboundStore(() => clock);
+    const campaignId = await outbound.ensureCampaign();
+    await outbound.upsertSourceContacts(campaignId!, [
+      { externalRef: "plugin:other-approval", phone: PHONE, firstName: "Other", lastName: null, data: {} },
+    ]);
+    const other = (await outbound.sourceRows(campaignId!))[0];
+    const attemptId = await outbound.startAttempt(other.id, campaignId!, 1);
+    await outbound.finishAttempt(attemptId, { status: "completed" });
+    await outbound.settleContact(other.id, "answered");
+    clock = new Date("2026-10-22T18:00:00Z");
+    const result = await evaluateAndEnqueueCall(outbound, { approvalId: "new-approval", phone: PHONE, ticketNumber: TICKET }, clock);
+    expect(result).toMatchObject({ ok: true, queued: true });
+  });
+
+  it("stops at the total cap across every approval on the number", async () => {
+    let clock = new Date("2026-09-01T17:00:00Z");
+    const outbound = new FakeOutboundStore(() => clock);
+    const campaignId = await outbound.ensureCampaign();
+    for (const [i, day] of ["2026-09-01", "2026-09-10", "2026-09-20"].entries()) {
+      clock = new Date(`${day}T17:00:00Z`);
+      await outbound.upsertSourceContacts(campaignId!, [
+        { externalRef: `plugin:old-${i}`, phone: PHONE, firstName: "Other", lastName: null, data: {} },
+      ]);
+      const row = (await outbound.sourceRows(campaignId!)).find((r) => r.externalRef === `plugin:old-${i}`)!;
+      const attemptId = await outbound.startAttempt(row.id, campaignId!, 1);
+      await outbound.finishAttempt(attemptId, { status: "completed" });
+      await outbound.settleContact(row.id, "answered");
+    }
+    clock = new Date("2026-10-22T18:00:00Z");
+    const result = await evaluateAndEnqueueCall(outbound, { approvalId: "new-approval", phone: PHONE, ticketNumber: TICKET }, clock);
+    expect(result).toEqual({ ok: false, reason: "total_cap" });
+  });
+
+  it("does not count a dial Twilio refused on another approval's settled row", async () => {
+    let clock = new Date("2026-10-22T16:30:00Z");
+    const outbound = new FakeOutboundStore(() => clock);
+    const campaignId = await outbound.ensureCampaign();
+    await outbound.upsertSourceContacts(campaignId!, [
+      { externalRef: "plugin:other-approval", phone: PHONE, firstName: "Other", lastName: null, data: {} },
+    ]);
+    const other = (await outbound.sourceRows(campaignId!))[0];
+    const refused = await outbound.startAttempt(other.id, campaignId!, 1);
+    await outbound.finishAttempt(refused, { status: "not_placed" });
+    await outbound.settleContact(other.id, "rescheduled");
+    clock = new Date("2026-10-22T18:00:00Z");
+    const result = await evaluateAndEnqueueCall(outbound, { approvalId: "new-approval", phone: PHONE, ticketNumber: TICKET }, clock);
+    expect(result).toMatchObject({ ok: true, queued: true });
+  });
+
+  it.each(["pending", "no_answer", "voicemail", "callback_scheduled", "calling"] as const)(
+    "refuses a second approval while another approval's call to the number is still %s",
+    async (status) => {
+      const outbound = new FakeOutboundStore(() => new Date("2026-10-22T17:58:00Z"));
+      const campaignId = await outbound.ensureCampaign();
+      await outbound.upsertSourceContacts(campaignId!, [
+        { externalRef: "plugin:first-approval", phone: PHONE, firstName: "Testa", lastName: null, data: {} },
+      ]);
+      const first = (await outbound.sourceRows(campaignId!))[0];
+      if (status !== "pending") await outbound.settleContact(first.id, status);
+      const result = await evaluateAndEnqueueCall(
+        outbound,
+        { approvalId: "second-approval", phone: PHONE, ticketNumber: TICKET },
+        new Date("2026-10-22T18:00:00Z"),
+      );
+      expect(result).toEqual({ ok: false, reason: "call_already_queued" });
+      expect(outbound.upserts).toEqual([1]);
+    },
+  );
+
+  it.each(["answered", "rescheduled", "do_not_call", "max_attempts"] as const)(
+    "lets a second approval through once the other row is settled %s (the caps still apply)",
+    async (status) => {
+      const outbound = new FakeOutboundStore(() => new Date("2026-10-22T17:58:00Z"));
+      const campaignId = await outbound.ensureCampaign();
+      await outbound.upsertSourceContacts(campaignId!, [
+        { externalRef: "plugin:first-approval", phone: PHONE, firstName: "Testa", lastName: null, data: {} },
+      ]);
+      await outbound.settleContact((await outbound.sourceRows(campaignId!))[0].id, status);
+      const result = await evaluateAndEnqueueCall(
+        outbound,
+        { approvalId: "second-approval", phone: PHONE, ticketNumber: TICKET },
+        new Date("2026-10-22T18:00:00Z"),
+      );
+      expect(result).toMatchObject({ ok: true, queued: true });
+    },
+  );
+
+  it("does not let a queued call on ANOTHER number block this one", async () => {
+    const outbound = new FakeOutboundStore(() => new Date("2026-10-22T17:58:00Z"));
+    const campaignId = await outbound.ensureCampaign();
+    await outbound.upsertSourceContacts(campaignId!, [
+      { externalRef: "plugin:first-approval", phone: "+15555550199", firstName: "Other", lastName: null, data: {} },
+    ]);
     const result = await evaluateAndEnqueueCall(
       outbound,
-      { approvalId: "new-approval", phone: PHONE, ticketNumber: TICKET },
+      { approvalId: "second-approval", phone: PHONE, ticketNumber: TICKET },
       new Date("2026-10-22T18:00:00Z"),
     );
     expect(result).toMatchObject({ ok: true, queued: true });
@@ -1542,12 +1654,14 @@ describe("review findings", () => {
     expect(seen[0].text).toMatch(/FROM do_not_contact WHERE phone_key = \$1/);
     expect(seen[0].text).not.toMatch(/source/);
     expect(seen[0].params).toEqual(["5555550111"]);
+    // The conflict target is the Hub's unique index (phone_key, source). A
+    // target the live table has no unique index for is a 42P10 on every STOP.
     expect(seen[1].text).toMatch(/ON CONFLICT \(phone_key, source\) DO NOTHING/);
+    expect(seen[1].text).not.toMatch(/ON CONFLICT \(phone_key\)/);
     expect(seen[1].params[1]).toBe("sms_stop");
     expect(seen[2].text).toMatch(/DELETE FROM do_not_contact/);
     expect(seen[2].text).toMatch(/source = \$2/);
     expect(seen[2].params[1]).toBe("sms_stop");
-    expect(seen.map((s) => s.text).join("\n")).not.toMatch(/ON CONFLICT \(phone_key\) DO NOTHING/);
   });
 
   it("the SQL markOutbox persists the attempt count", async () => {
@@ -1590,10 +1704,382 @@ describe("review findings", () => {
     expect(live).not.toMatch(/do_not_contact/);
   });
 
-  it("the per-channel DNC migration drops the phone-only primary key", () => {
+  it("the per-channel key is a migration's job, and the runtime never alters the table (v115)", () => {
+    // The Hub took (phone_key, source) from this migration on 2026-10-22.
+    // v114 also dropped the old primary key on first use in ensureSchema, a
+    // schema change on a live table; the runtime now only creates.
     const migration = readFileSync(join(__dirname, "../../migrations/add_do_not_contact_per_channel.sql"), "utf8");
     expect(migration).toMatch(/DROP CONSTRAINT IF EXISTS do_not_contact_pkey/);
     expect(migration).toContain("do_not_contact_phone_source_uidx");
-    expect(migration).toMatch(/phone_key, source/);
+    const store = readFileSync(join(__dirname, "../runtime/outbound/store.ts"), "utf8");
+    expect(store).not.toMatch(/DROP CONSTRAINT[^;`]*do_not_contact_pkey/);
+    expect(store).toContain("do_not_contact_phone_source_uidx");
+    const schema = readFileSync(join(__dirname, "../../shared/schema.ts"), "utf8");
+    expect(schema).toMatch(/uniqueIndex\("do_not_contact_phone_source_uidx"\)\.on\(table\.phoneKey, table\.source\)/);
+    expect(schema).not.toMatch(/pgTable\("do_not_contact", \{\s*phoneKey: varchar\("phone_key", \{ length: 10 \}\)\.primaryKey\(\)/);
+  });
+});
+
+describe("a call commit needs a dialler that will place it (v115)", () => {
+  const noon = () => new Date("2026-10-22T18:00:00Z");
+
+  async function approveCall(env: Record<string, string | undefined>) {
+    const ctx = await boot({ PLUGIN_WRITES_ENABLED: "true", ...env }, { now: noon });
+    const bot = ctx.store.mint(["contacts:prepare", "contacts:commit"]);
+    const staff = ctx.store.mint(["contacts:approve"]);
+    const prep = await fetch(`${ctx.base}/api/plugin/v1/prepare_call`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${bot.plaintext}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ phone: PHONE, ticketNumber: TICKET, firstName: "Testa", dateOfBirth: CALL_DOB }),
+    });
+    const pending = (await prep.json()) as { approval: { id: string } };
+    const approved = await staffApprove(ctx.base, staff, ctx.store, pending.approval.id);
+    const token = (await approved.json()) as { confirmToken: string };
+    const committed = await fetch(`${ctx.base}/api/plugin/v1/commit_contact`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${bot.plaintext}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ confirmToken: token.confirmToken }),
+    });
+    return { ...ctx, committed, approvalId: pending.approval.id };
+  }
+
+  for (const [label, env, reason] of [
+    ["the fleet switch is off", { RUNTIME_OUTBOUND_DIALING: "0" }, "outbound_dialing_off"],
+    ["the campaign switch is off", { OUTBOUND_CAMPAIGN_SI_ASSISTANT: undefined }, "campaign_off"],
+    ["no caller ID is set", { SI_ASSISTANT_NUMBER: " " }, "no_caller_id"],
+  ] as const) {
+    it(`refuses with 503, queues nothing and fails the approval when ${label}`, async () => {
+      const { committed, outbound, store, approvalId } = await approveCall(env);
+      expect(committed.status).toBe(503);
+      expect(((await committed.json()) as { error: string }).error).toContain(reason);
+      expect(outbound.contacts.size).toBe(0);
+      expect(outbound.upserts).toEqual([]);
+      expect((await store.getApproval(approvalId))?.status).toBe("failed");
+    });
+  }
+
+  it("stamps the queued contact with a place-by deadline two hours out", async () => {
+    const { committed, outbound } = await approveCall({});
+    expect(committed.status).toBe(200);
+    const contact = [...outbound.contacts.values()][0];
+    expect(contact.customData.place_by).toBe(new Date(noon().getTime() + 2 * 60 * 60 * 1000).toISOString());
+  });
+
+  it("says the call was not sent when dialing is off (outcome not_sent)", async () => {
+    const { committed } = await approveCall({ RUNTIME_OUTBOUND_DIALING: "0" });
+    expect(committed.status).toBe(503);
+    expect(await committed.json()).toMatchObject({ outcome: "not_sent" });
+  });
+
+  it("says the call was not sent when a cap refuses it (outcome not_sent)", async () => {
+    const outbound = new FakeOutboundStore(() => new Date("2026-10-22T16:30:00Z"));
+    const campaignId = await outbound.ensureCampaign();
+    await outbound.upsertSourceContacts(campaignId!, [
+      { externalRef: "plugin:earlier", phone: PHONE, firstName: "Testa", lastName: null, data: {} },
+    ]);
+    const earlier = (await outbound.sourceRows(campaignId!))[0];
+    await outbound.finishAttempt(await outbound.startAttempt(earlier.id, campaignId!, 1), { status: "completed" });
+    await outbound.settleContact(earlier.id, "answered");
+    const ctx = await boot({ PLUGIN_WRITES_ENABLED: "true" }, { now: noon, outbound });
+    const bot = ctx.store.mint(["contacts:prepare", "contacts:commit"]);
+    const staff = ctx.store.mint(["contacts:approve"]);
+    const prep = await fetch(`${ctx.base}/api/plugin/v1/prepare_call`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${bot.plaintext}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ phone: PHONE, ticketNumber: TICKET, firstName: "Testa", dateOfBirth: CALL_DOB }),
+    });
+    const pending = (await prep.json()) as { approval: { id: string } };
+    const approved = await staffApprove(ctx.base, staff, ctx.store, pending.approval.id);
+    const token = (await approved.json()) as { confirmToken: string };
+    const committed = await fetch(`${ctx.base}/api/plugin/v1/commit_contact`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${bot.plaintext}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ confirmToken: token.confirmToken }),
+    });
+    expect(committed.status).toBe(422);
+    expect(await committed.json()).toEqual({ error: "Call was not placed: daily_cap", outcome: "not_sent" });
+    expect((await ctx.store.getApproval(pending.approval.id))?.status).toBe("failed");
+    expect(outbound.upserts).toEqual([1]);
+  });
+
+  it("says the outcome is unknown when queueing throws after the claim (outcome unknown)", async () => {
+    const outbound = new FakeOutboundStore(() => noon());
+    outbound.upsertSourceContacts = async () => { throw new Error("hub timeout"); };
+    const ctx = await boot({ PLUGIN_WRITES_ENABLED: "true" }, { now: noon, outbound });
+    const bot = ctx.store.mint(["contacts:prepare", "contacts:commit"]);
+    const staff = ctx.store.mint(["contacts:approve"]);
+    const prep = await fetch(`${ctx.base}/api/plugin/v1/prepare_call`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${bot.plaintext}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ phone: PHONE, ticketNumber: TICKET, firstName: "Testa", dateOfBirth: CALL_DOB }),
+    });
+    const pending = (await prep.json()) as { approval: { id: string } };
+    const approved = await staffApprove(ctx.base, staff, ctx.store, pending.approval.id);
+    const token = (await approved.json()) as { confirmToken: string };
+    const committed = await fetch(`${ctx.base}/api/plugin/v1/commit_contact`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${bot.plaintext}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ confirmToken: token.confirmToken }),
+    });
+    expect(committed.status).toBe(502);
+    expect(await committed.json()).toEqual({ error: "The send outcome is unknown", outcome: "unknown" });
+    expect((await ctx.store.getApproval(pending.approval.id))?.status).toBe("unknown");
+  });
+
+  it("says nothing was sent when the approved payload no longer matches its lock (outcome not_sent)", async () => {
+    const ctx = await boot({ PLUGIN_WRITES_ENABLED: "true" }, { now: noon });
+    const bot = ctx.store.mint(["contacts:prepare", "contacts:commit"]);
+    const staff = ctx.store.mint(["contacts:approve"]);
+    const prep = await fetch(`${ctx.base}/api/plugin/v1/prepare_call`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${bot.plaintext}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ phone: PHONE, ticketNumber: TICKET, firstName: "Testa", dateOfBirth: CALL_DOB }),
+    });
+    const pending = (await prep.json()) as { approval: { id: string } };
+    const approved = await staffApprove(ctx.base, staff, ctx.store, pending.approval.id);
+    const token = (await approved.json()) as { confirmToken: string };
+    const row = await ctx.store.getApproval(pending.approval.id);
+    await ctx.store.updateApproval(pending.approval.id, { payload: { ...row!.payload, purpose: "changed after approval" } });
+    const committed = await fetch(`${ctx.base}/api/plugin/v1/commit_contact`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${bot.plaintext}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ confirmToken: token.confirmToken }),
+    });
+    expect(committed.status).toBe(409);
+    expect(await committed.json()).toEqual({ error: "Approved payload no longer matches the locked hash", outcome: "not_sent" });
+    expect(ctx.outbound.upserts).toEqual([]);
+  });
+
+  it("refuses the second of two approvals committed back to back for one number (409, not_sent)", async () => {
+    const ctx = await boot({ PLUGIN_WRITES_ENABLED: "true" }, { now: noon });
+    const bot = ctx.store.mint(["contacts:prepare", "contacts:commit"]);
+    const staff = ctx.store.mint(["contacts:approve"]);
+    const commitOne = async (ticketNumber: string) => {
+      const prep = await fetch(`${ctx.base}/api/plugin/v1/prepare_call`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${bot.plaintext}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ phone: PHONE, ticketNumber, firstName: "Testa", dateOfBirth: CALL_DOB }),
+      });
+      const pending = (await prep.json()) as { approval: { id: string } };
+      const approved = await staffApprove(ctx.base, staff, ctx.store, pending.approval.id);
+      const token = (await approved.json()) as { confirmToken: string };
+      const res = await fetch(`${ctx.base}/api/plugin/v1/commit_contact`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${bot.plaintext}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ confirmToken: token.confirmToken }),
+      });
+      return { res, id: pending.approval.id };
+    };
+    const first = await commitOne(TICKET);
+    expect(first.res.status).toBe(200);
+    const second = await commitOne("VA-61002");
+    expect(second.res.status).toBe(409);
+    expect(await second.res.json()).toEqual({ error: "Call was not placed: call_already_queued", outcome: "not_sent" });
+    expect((await ctx.store.getApproval(second.id))?.status).toBe("failed");
+    expect(ctx.outbound.contacts.size).toBe(1);
+  });
+
+  it("carries no outcome on a refusal before the confirm token is consumed", async () => {
+    const ctx = await boot({ PLUGIN_WRITES_ENABLED: "true" }, { now: noon });
+    const bot = ctx.store.mint(["contacts:commit"]);
+    const committed = await fetch(`${ctx.base}/api/plugin/v1/commit_contact`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${bot.plaintext}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ confirmToken: "a".repeat(64) }),
+    });
+    expect(committed.status).toBe(404);
+    expect(await committed.json()).not.toHaveProperty("outcome");
+  });
+});
+
+describe("a call that missed its place-by deadline fails its approval (v115)", () => {
+  const now = new Date("2026-10-22T21:00:00Z");
+
+  async function committedApproval(store: MemoryPluginStore, id: string, status: "committed" | "failed" | "unknown" = "committed") {
+    const token = generateConfirmToken();
+    await store.insertApproval({
+      id,
+      channel: "call",
+      status,
+      tokenJti: "jti-bot",
+      ticketId: "tid-7",
+      ticketNumber: TICKET,
+      payload: { phone: PHONE },
+      payloadHash: hashPayload({ phone: PHONE }),
+      confirmTokenHash: token.hash,
+      confirmExpiresAt: now,
+      confirmUsedAt: now,
+      approvedBy: "staff",
+      approvedAt: now,
+      rejectedBy: null,
+      rejectedAt: null,
+      cancelledAt: null,
+      committedAt: now,
+      result: { queued: true, campaignId: "campaign-1" },
+      createdAt: now,
+      updatedAt: now,
+    });
+  }
+
+  it("moves a committed approval to failed, keeps its result, and audits without PHI", async () => {
+    const store = new MemoryPluginStore();
+    await committedApproval(store, "appr-late");
+    await reportCallNotPlaced({ id: "c1", customData: { approval_id: "appr-late", place_by: now.toISOString() } }, "place_by_passed", store, now);
+    const row = await store.getApproval("appr-late");
+    expect(row?.status).toBe("failed");
+    expect(row?.result).toEqual({ queued: false, campaignId: "campaign-1", placed: false, reason: "place_by_passed" });
+    const audit = (await store.listAudit()).filter((e) => e.tool === "call_not_placed");
+    expect(audit).toHaveLength(1);
+    expect(audit[0]).toMatchObject({ approvalId: "appr-late", ticketId: "tid-7", outcome: "failed", httpStatus: 410, method: "SWEEP" });
+    expect(JSON.stringify(audit)).not.toContain("5555550111");
+  });
+
+  it("reports once: a second report changes nothing and writes no second audit row", async () => {
+    const store = new MemoryPluginStore();
+    await committedApproval(store, "appr-late");
+    await reportCallNotPlaced({ id: "c1", customData: { approval_id: "appr-late" } }, "place_by_passed", store, now);
+    await reportCallNotPlaced({ id: "c1", customData: { approval_id: "appr-late" } }, "place_by_passed", store, now);
+    expect((await store.listAudit()).filter((e) => e.tool === "call_not_placed")).toHaveLength(1);
+  });
+
+  it.each(["failed", "unknown"] as const)("leaves a %s approval alone", async (status) => {
+    const store = new MemoryPluginStore();
+    await committedApproval(store, "appr-x", status);
+    await reportCallNotPlaced({ id: "c1", customData: { approval_id: "appr-x" } }, "place_by_passed", store, now);
+    expect((await store.getApproval("appr-x"))?.status).toBe(status);
+    expect((await store.listAudit()).filter((e) => e.tool === "call_not_placed")).toHaveLength(0);
+  });
+
+  it("moves nothing when the approval left committed after it was read (the update is conditional)", async () => {
+    const store = new MemoryPluginStore();
+    await committedApproval(store, "appr-race", "unknown");
+    const real = store.getApproval.bind(store);
+    store.getApproval = async (id) => {
+      const row = await real(id);
+      return row ? { ...row, status: "committed" } : row;
+    };
+    await reportCallNotPlaced({ id: "c1", customData: { approval_id: "appr-race" } }, "place_by_passed", store, now);
+    expect((await real("appr-race"))?.status).toBe("unknown");
+    expect((await store.listAudit()).filter((e) => e.tool === "call_not_placed")).toHaveLength(0);
+  });
+
+  it("does nothing without an approval id or a store", async () => {
+    const store = new MemoryPluginStore();
+    await committedApproval(store, "appr-late");
+    await reportCallNotPlaced({ id: "c1", customData: {} }, "place_by_passed", store, now);
+    await reportCallNotPlaced({ id: "c1", customData: { approval_id: "appr-late" } }, "place_by_passed", null, now);
+    expect((await store.getApproval("appr-late"))?.status).toBe("committed");
+  });
+
+  it("keeps the approval failed when its audit row cannot be written", async () => {
+    const store = new MemoryPluginStore();
+    await committedApproval(store, "appr-late");
+    store.writeAudit = async () => { throw new Error("audit down"); };
+    await expect(reportCallNotPlaced({ id: "c1", customData: { approval_id: "appr-late" } }, "place_by_passed", store, now)).resolves.toBeUndefined();
+    expect((await store.getApproval("appr-late"))?.status).toBe("failed");
+  });
+
+  it("is the SI Assistant lane's not-placed hook, carrying the reason and reading the bound store", async () => {
+    const store = new MemoryPluginStore();
+    await committedApproval(store, "appr-lane");
+    bindPluginStore(store);
+    try {
+      expect(siAssistantPolicy.onNotPlaced).toBeTypeOf("function");
+      await siAssistantPolicy.onNotPlaced!({ id: "c1", customData: { approval_id: "appr-lane" } }, "do_not_contact");
+      const row = await store.getApproval("appr-lane");
+      expect(row?.status).toBe("failed");
+      expect(row?.result).toMatchObject({ placed: false, reason: "do_not_contact" });
+    } finally {
+      bindPluginStore(null);
+    }
+  });
+});
+
+describe("inbound SMS keywords and replies (v115)", () => {
+  it("a plain Yes from a number that never opted out is a reply for My Messages, not START", async () => {
+    const store = new MemoryPluginStore();
+    const sent: string[] = [];
+    const sender = { async send(o: { body: string }) { sent.push(o.body); return { sid: "SM-yes" }; } };
+    const out = await handleInboundSms(store, sender, { from: PHONE, body: "Yes" }, {});
+    expect(out).toEqual({ command: "other", replied: false });
+    expect(sent).toEqual([]);
+    expect(await store.isSmsOptedOut("5555550111")).toBe(false);
+  });
+
+  it("a plain Yes from a number that sent STOP opts it back in", async () => {
+    const store = new MemoryPluginStore();
+    const sent: string[] = [];
+    const sender = { async send(o: { body: string }) { sent.push(o.body); return { sid: "SM-yes2" }; } };
+    await handleInboundSms(store, sender, { from: PHONE, body: "STOP" }, {});
+    sent.length = 0;
+    const out = await handleInboundSms(store, sender, { from: PHONE, body: "yes." }, {});
+    expect(out).toEqual({ command: "start", replied: true });
+    expect(sent).toEqual([START_REPLY]);
+    expect(await store.isSmsOptedOut("5555550111")).toBe(false);
+  });
+
+  it("a Yes whose opt-out state cannot be read is kept as a reply, never an opt-in", async () => {
+    const store = new MemoryPluginStore();
+    const real = store.isSmsOptedOut.bind(store);
+    store.isSmsOptedOut = async () => { throw new Error("db down"); };
+    const out = await handleInboundSms(store, null, { from: PHONE, body: "Yes" }, {});
+    expect(out).toEqual({ command: "other", replied: false });
+    store.isSmsOptedOut = real;
+  });
+
+  it.each(["STOP", "HELP"])(
+    "a %s reply Twilio refuses (21610) does not undo or fail the keyword",
+    async (keyword) => {
+      const store = new MemoryPluginStore();
+      const logged: string[] = [];
+      const err = vi.spyOn(console, "error").mockImplementation((...a: unknown[]) => { logged.push(a.map(String).join(" ")); });
+      const sender = {
+        async send(): Promise<{ sid: string }> {
+          const e = new Error("Attempt to send to unsubscribed recipient") as Error & { status: number; code: number };
+          e.status = 400;
+          e.code = 21610;
+          throw e;
+        },
+      };
+      const out = await handleInboundSms(store, sender, { from: PHONE, body: keyword }, {});
+      err.mockRestore();
+      expect(out).toEqual({ command: keyword.toLowerCase(), replied: false });
+      if (keyword === "STOP") expect(await store.isSmsOptedOut("5555550111")).toBe(true);
+      expect(logged.join(" ")).not.toContain("5555550111");
+    },
+  );
+
+  it("STOP still confirms with STOP_REPLY when the reply goes through", async () => {
+    const store = new MemoryPluginStore();
+    const sent: string[] = [];
+    const sender = { async send(o: { body: string }) { sent.push(o.body); return { sid: "SM-stop" }; } };
+    expect(await handleInboundSms(store, sender, { from: PHONE, body: "STOP" }, {})).toEqual({ command: "stop", replied: true });
+    expect(sent).toEqual([STOP_REPLY]);
+  });
+
+  it("the webhook answers 200 empty TwiML when the opt-out write fails, and logs no phone or body", async () => {
+    const store = new MemoryPluginStore();
+    store.setSmsOptOut = async () => { throw new Error("db down"); };
+    const logged: string[] = [];
+    const err = vi.spyOn(console, "error").mockImplementation((...a: unknown[]) => { logged.push(a.map(String).join(" ")); });
+    const { base, server } = await boot(
+      { PLUGIN_WRITES_ENABLED: "true", TWILIO_AUTH_TOKEN: TWILIO_AUTH },
+      { store, smsSender: { async send() { return { sid: "SM-z" }; } } },
+    );
+    const port = (server.address() as { port: number }).port;
+    const path = "/api/plugin/v1/webhooks/twilio-sms";
+    const body = { From: PHONE, Body: "STOP" };
+    const signed = signedSms(path, body, `127.0.0.1:${port}`);
+    const res = await fetch(`${base}${path}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded", "X-Twilio-Signature": signed.signature },
+      body: new URLSearchParams(body).toString(),
+    });
+    err.mockRestore();
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("<Response></Response>");
+    const all = logged.join(" ");
+    expect(all).toContain("could not be handled");
+    expect(all).not.toContain("5555550111");
   });
 });

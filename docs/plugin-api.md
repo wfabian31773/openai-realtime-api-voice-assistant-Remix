@@ -38,6 +38,15 @@ Write scopes are never implied. An empty scope list becomes `fleet:read` only.
    labels it `unknown` (PHI-free audit) and **never resends**. Graph and
    Twilio sends are bounded at 15 seconds. A successful send is recorded
    `committed` immediately so the sweep cannot overwrite it.
+   **A commit error after the token is consumed carries `outcome`** (v115),
+   because only the fleet knows what happened to the contact:
+   `"not_sent"` — the request is `failed` and nothing went out (a payload
+   that no longer matches its lock, dialing switched off, a calling-window
+   or cap refusal, a send the provider refused); `"unknown"` — the send may
+   have gone out (a timeout or throw after the send started). Classify on
+   this field, never on the HTTP status: a 503 sent nothing, a 502 may have.
+   A refusal before the token is consumed (bad, used or expired token)
+   carries no `outcome`; nothing was claimed.
 5. `cancel_contact` cancels a pending or approved request only while the
    confirm token is unused. Cancel and get are tied to the token that
    created the row (or to `contacts:approve`).
@@ -60,7 +69,27 @@ callers read the same field on the campaign candidates. The dialer already enfor
 
 - `do_not_contact`
 - 9:00 AM – 8:00 PM Pacific (federal holidays and practice closures skipped)
-- 1 call per day, 3 per week
+- 1 call per day, 3 per week, 3 in total — **per phone number**, across
+  every approval for that number
+
+The commit applies the same per-number caps before it queues, so a second
+approval for a number already rung today is refused (`daily_cap`,
+`outcome: "not_sent"`) instead of reading as queued. A second approval for
+a number whose earlier approved call is still queued, retrying or on the
+line is refused too (`call_already_queued`, HTTP 409): the dialler would
+place only one of them.
+
+A queued call must be FIRST rung within two hours (`custom_data.place_by`).
+If it is not, the dialler settles the contact `rescheduled` and never rings
+it. When the dialler settles a call that was never dialled — the deadline
+passed, the number went on the do-not-contact list, or the number reached
+its total cap — the approval moves from `committed` to `failed` with
+`result.placed: false`, `result.reason` (`place_by_passed`,
+`do_not_contact` or `total_cap`) and a `call_not_placed` audit row. "Never
+dialled" means this approval's own row has no attempt Twilio accepted or
+might have: a call that may have rung is never reported as not placed, and
+an earlier approval's call to the same number does not turn this one into a
+retry.
 
 The same number answers inbound callbacks on the `si-assistant` runtime lane.
 That lane identifies itself as an **AI assistant** and never pretends to be

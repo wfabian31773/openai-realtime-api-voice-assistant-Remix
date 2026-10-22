@@ -39,7 +39,7 @@ describe("message outbox", () => {
     expect(reclaimed[0].lastError).toBe("stale_sending");
   });
 
-  it("audits a dead row with ids only and keeps the body out of the audit", async () => {
+  it("a refused payload (400) is dead at once, audited with ids only and the body kept out", async () => {
     const store = new MemoryPluginStore();
     const now = new Date("2026-10-22T18:00:00Z");
     const persisted = await persistTakenMessage(
@@ -48,25 +48,21 @@ describe("message outbox", () => {
       store,
     );
     expect(persisted).toBeTruthy();
-    await store.markOutbox(
-      persisted!.id,
-      { attempts: OUTBOX_MAX_ATTEMPTS, updatedAt: now },
-      "pending",
-    );
+    await store.markOutbox(persisted!.id, { attempts: 1, updatedAt: now }, "pending");
     const err = vi.spyOn(console, "error").mockImplementation(() => undefined);
     await flushOutboxRow(
-      { ...persisted!, attempts: OUTBOX_MAX_ATTEMPTS },
+      { ...persisted!, attempts: 1 },
       store,
       {
         async report() {
-          return { ok: false, status: 500 };
+          return { ok: false, status: 400 };
         },
       },
       now,
     );
     const row = [...store.outbox.values()][0];
     expect(row.status).toBe("dead");
-    expect(row.lastError).toBe("webhook_500");
+    expect(row.lastError).toBe("webhook_400");
     const audit = await store.listAudit();
     const dead = audit.find((e) => e.tool === "outbox_dead");
     expect(dead).toMatchObject({
@@ -77,6 +73,86 @@ describe("message outbox", () => {
     expect(JSON.stringify(dead)).not.toContain("secret body");
     expect(err.mock.calls.flat().join(" ")).not.toContain("secret body");
     err.mockRestore();
+  });
+
+  it("a 422 is a refused payload too and is dead at once", async () => {
+    const store = new MemoryPluginStore();
+    const now = new Date("2026-10-22T18:00:00Z");
+    const persisted = await persistTakenMessage({ callSid: "CA" + "7".repeat(32), message: "m" }, now, store);
+    const err = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    await flushOutboxRow({ ...persisted!, attempts: 1 }, store, { async report() { return { ok: false, status: 422 }; } }, now);
+    err.mockRestore();
+    expect(store.outbox.get(persisted!.id)?.status).toBe("dead");
+  });
+
+  it.each([401, 403, 404, 500, 503])(
+    "a receiver that is not ready (%i) keeps retrying past the old limit instead of going dead (v115)",
+    async (status) => {
+      const store = new MemoryPluginStore();
+      const now = new Date("2026-10-22T18:00:00Z");
+      const persisted = await persistTakenMessage(
+        { callSid: "CA" + "3".repeat(32), ticketId: "tid-1", approvalId: "appr-1", message: "secret body" },
+        now,
+        store,
+      );
+      const err = vi.spyOn(console, "error").mockImplementation(() => undefined);
+      // flushOutboxRow claims the row and counts the attempt, so these are
+      // the attempt numbers just before, at and past the old limit.
+      for (const attempts of [OUTBOX_MAX_ATTEMPTS - 1, OUTBOX_MAX_ATTEMPTS, OUTBOX_MAX_ATTEMPTS + 5]) {
+        await store.markOutbox(persisted!.id, { status: "pending", attempts: attempts - 1, updatedAt: now });
+        await flushOutboxRow(
+          { ...persisted!, attempts: attempts - 1 },
+          store,
+          { async report() { return { ok: false, status }; } },
+          now,
+        );
+        const row = store.outbox.get(persisted!.id)!;
+        expect(row.status).toBe("pending");
+        expect(row.lastError).toBe(`webhook_${status}`);
+        expect(row.nextAttemptAt.getTime() - now.getTime()).toBeLessThanOrEqual(30 * 60 * 1000);
+      }
+      err.mockRestore();
+      const audit = await store.listAudit();
+      expect(audit.filter((e) => e.tool === "outbox_dead")).toHaveLength(0);
+      const overdue = audit.filter((e) => e.tool === "outbox_overdue");
+      expect(overdue).toHaveLength(1);
+      expect(overdue[0]).toMatchObject({ approvalId: "appr-1", ticketId: "tid-1" });
+      expect(JSON.stringify(overdue)).not.toContain("secret body");
+    },
+  );
+
+  it.each([["timeout", "AbortError"], ["send_failed", "Error"]])(
+    "a %s keeps retrying instead of going dead",
+    async (expected, name) => {
+      const store = new MemoryPluginStore();
+      const now = new Date("2026-10-22T18:00:00Z");
+      const persisted = await persistTakenMessage({ callSid: "CA" + "4".repeat(32), message: "m" }, now, store);
+      const err = vi.spyOn(console, "error").mockImplementation(() => undefined);
+      await flushOutboxRow(
+        { ...persisted!, attempts: OUTBOX_MAX_ATTEMPTS + 1 },
+        store,
+        { async report() { const e = new Error("x"); e.name = name; throw e; } },
+        now,
+      );
+      err.mockRestore();
+      const row = store.outbox.get(persisted!.id)!;
+      expect(row.status).toBe("pending");
+      expect(row.lastError).toBe(expected);
+    },
+  );
+
+  it("a row that never delivers is expired by retention, with its own audit", async () => {
+    const store = new MemoryPluginStore();
+    const now = new Date("2026-10-22T18:00:00Z");
+    const persisted = await persistTakenMessage({ callSid: "CA" + "5".repeat(32), message: "m" }, now, store);
+    const err = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    await flushOutboxRow({ ...persisted!, attempts: OUTBOX_MAX_ATTEMPTS + 3 }, store, { async report() { return { ok: false, status: 404 }; } }, now);
+    err.mockRestore();
+    expect(store.outbox.get(persisted!.id)?.status).toBe("pending");
+    const result = await purgeOutboxRetention(store, new Date(now.getTime() + OUTBOX_RETENTION_MS + 1000));
+    expect(result.expired).toBe(1);
+    expect(store.outbox.has(persisted!.id)).toBe(false);
+    expect((await store.listAudit()).some((e) => e.tool === "outbox_expired")).toBe(true);
   });
 
   it("does not expire pending rows when the webhook URL is unset", async () => {
@@ -427,7 +503,7 @@ describe("message outbox", () => {
     expect((await store.listAudit()).some((e) => e.tool === "outbox_dead")).toBe(false);
   });
 
-  it("a stale reclaim with no confirmed 2xx is a first delivery, not an attachmentUpdate", async () => {
+  it("a stale reclaim carrying ticket keys is sent as an attachmentUpdate, so a send that committed is not dropped", async () => {
     const store = new MemoryPluginStore();
     const now = new Date("2026-10-22T18:00:00Z");
     const sid = "CA" + "a".repeat(32);
@@ -474,7 +550,10 @@ describe("message outbox", () => {
       identityConfirmed: true,
       message: "Taken then the process died",
     });
-    expect(posted[0].attachmentUpdate).toBeUndefined();
+    // v115: the first send may have committed on the receiver before the
+    // process died. A plain resend would be answered `duplicate` by outboxId
+    // and the keys dropped; the flag makes it an attachment either way.
+    expect(posted[0].attachmentUpdate).toBe(true);
     expect(store.outbox.get(persisted!.id)?.status).toBe("delivered");
   });
 

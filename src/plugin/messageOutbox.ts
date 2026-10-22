@@ -40,6 +40,20 @@ export function smsIdempotencyKey(messageSid: string | null | undefined): string
   return TWILIO_MESSAGE_SID.test(sid) ? `sms:${sid}` : null;
 }
 
+/**
+ * Receiver answers that mean the payload itself was refused: re-sending the
+ * same bytes cannot succeed, so the row is dead-lettered at once (v115).
+ * Everything else — no webhook configured, 401/403 (secret mismatch), 404
+ * (receiver not deployed), 5xx, a timeout — is the receiver not ready, and
+ * the row keeps retrying at the capped interval until the retention sweep
+ * expires it with its own `outbox_expired` audit.
+ */
+const TERMINAL_OUTBOX_ERRORS: ReadonlySet<string> = new Set(["webhook_400", "webhook_422"]);
+
+export function outboxErrorIsTerminal(error: string): boolean {
+  return TERMINAL_OUTBOX_ERRORS.has(error);
+}
+
 export function phiFreeOutboxError(status?: number, failed?: "timeout" | "no_webhook" | "send_failed"): string {
   if (failed === "timeout") return "timeout";
   if (failed === "no_webhook") return "no_webhook";
@@ -110,10 +124,12 @@ async function deliverRow(
   if (!reporter) return { ok: false, error: phiFreeOutboxError(undefined, "no_webhook") };
   try {
     const unmatched = !row.ticketNumber && !row.approvalId && !row.ticketId;
-    // Only a row the receiver already accepted (a persisted 2xx) can be an
-    // attachmentUpdate. A stale_sending reclaim with no confirmed 2xx is a
-    // first delivery as far as anyone can prove.
-    const attachmentUpdate = !unmatched && Boolean(row.deliveredAt);
+    // Any delivery carrying ticket keys is sent as an attachmentUpdate (v115).
+    // A first delivery that committed on the receiver but timed out here comes
+    // back to pending; if keys were stamped meanwhile, a plain resend would be
+    // answered `duplicate` by outboxId and the keys dropped. With no existing
+    // row the receiver simply creates one, so the flag is safe on a first send.
+    const attachmentUpdate = !unmatched;
     const result = await reporter.report({
       event: "message",
       slug: SI_ASSISTANT_SLUG,
@@ -155,6 +171,23 @@ async function noteDead(store: PluginStore, row: MessageOutboxRow): Promise<void
     });
   } catch {
     console.error("[si-assistant] outbox dead audit failed");
+  }
+}
+
+async function noteOverdue(store: PluginStore, row: MessageOutboxRow): Promise<void> {
+  try {
+    await store.writeAudit({
+      tokenJti: "system",
+      tool: "outbox_overdue",
+      route: "/api/plugin/v1/message_outbox",
+      method: "SWEEP",
+      approvalId: row.approvalId,
+      ticketId: row.ticketId,
+      outcome: "failed",
+      httpStatus: 503,
+    });
+  } catch {
+    console.error("[si-assistant] outbox overdue audit failed");
   }
 }
 
@@ -220,7 +253,9 @@ async function retryLater(
 ): Promise<void> {
   // Only an undelivered row comes here. A delivered row owes at most an
   // attachmentUpdate, which has its own budget (scheduleAttachmentRetry).
-  const dead = row.attempts >= OUTBOX_MAX_ATTEMPTS;
+  // A caller was told their message was taken, so only a refused payload is
+  // dead; a receiver that is not ready yet is retried until retention (v115).
+  const dead = outboxErrorIsTerminal(error);
   await store.markOutbox(
     row.id,
     {
@@ -233,6 +268,10 @@ async function retryLater(
   );
   if (dead) {
     await noteDead(store, row);
+  } else if (row.attempts === OUTBOX_MAX_ATTEMPTS) {
+    // Once, when the row has been failing about an hour: visible in the
+    // audit log while it keeps retrying.
+    await noteOverdue(store, row);
   }
   console.error(`[si-assistant] outbox ${row.id} ${error}${dead ? " dead" : ""}`);
 }

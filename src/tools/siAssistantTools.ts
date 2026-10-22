@@ -17,7 +17,7 @@ import type { PluginStore } from '../plugin/store';
 import { attachmentForSiAssistant, type TicketAttachment } from '../plugin/returnedCaller';
 import { flushOutboxRow, persistTakenMessage, reattachTakenMessages } from '../plugin/messageOutbox';
 import { siAssistantNumber } from '../plugin/siAssistantConstants';
-import { noteSiAssistantIdentity, siAssistantIdentityFor } from '../plugin/siAssistantIdentity';
+import { MAX_SI_DOB_TRIES, noteSiAssistantIdentity, siAssistantIdentityFor } from '../plugin/siAssistantIdentity';
 import { formatPhoneForSpeech } from '../utils/timeAware';
 import { dobOnFile } from '../runtime/outbound/callback';
 import { readDobQuietly } from './dobParts';
@@ -218,6 +218,20 @@ registerTool({
           'They are not the patient. Call record_call_outcome with wrong_person, apologise, say goodbye and call end_call. Do not attach a ticket.',
       };
     }
+    // Spent tries stay spent (v115): a third guess must not unlock what two
+    // wrong dates of birth have already refused, whatever it says. Only a
+    // wrong date counts, and a wrong date clears dobMatched, so the count
+    // alone decides.
+    const prior = siAssistantIdentityFor(sid);
+    if (prior && prior.dobTries >= MAX_SI_DOB_TRIES) {
+      return {
+        success: true,
+        confirmed: false,
+        locked: true,
+        fix:
+          'Two dates of birth did not match the patient on file. Do not ask for it again and do not treat them as identified. Take a message if they have one.',
+      };
+    }
     const spoken = typeof input.date_of_birth === 'string' ? readDobQuietly(input.date_of_birth) : null;
     if (!spoken) {
       return {
@@ -263,7 +277,8 @@ registerTool({
       };
     }
     const matched = spoken.year === onFile.year && spoken.month === onFile.month && spoken.day === onFile.day;
-    noteSiAssistantIdentity(sid, { greetingAffirmed: true, dobMatched: matched });
+    const tries = prior?.dobTries ?? 0;
+    noteSiAssistantIdentity(sid, { greetingAffirmed: true, dobMatched: matched, dobTries: matched ? tries : tries + 1 });
     if (!matched) {
       return {
         success: true,

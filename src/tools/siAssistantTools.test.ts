@@ -616,3 +616,45 @@ describe("take_si_assistant_message", () => {
     expect(fix).not.toMatch(/there is no date of birth on file, so you cannot verify/i);
   });
 });
+
+describe("confirm_si_assistant_identity — the date of birth is tried twice (v115)", () => {
+  async function dialled(): Promise<{ attemptId: string; sid: string }> {
+    const store = new FakeOutboundStore();
+    store.addContact({
+      id: "c-dob",
+      phone: "+15555550177",
+      customData: { approval_id: "appr-dob", ticket_number: "VA-61077", date_of_birth: "1950-03-17" },
+    });
+    const attemptId = await store.startAttempt("c-dob", store.campaignId, 1);
+    setSiAssistantToolStoreForTests(store);
+    setSiAssistantReporterForTests({ async report() { return { ok: true, status: 200 }; } });
+    bindOutbox();
+    return { attemptId, sid: "CA" + "d".repeat(32) };
+  }
+
+  function confirmWith(dob: string, attemptId: string, sid: string) {
+    return getTool(CONFIRM_IDENTITY_TOOL_NAME)!.handler({
+      speaking_with_named_patient: true,
+      date_of_birth: dob,
+      outbound_contact_id: "c-dob",
+      outbound_attempt_id: attemptId,
+      outbound_call_sid: sid,
+    });
+  }
+
+  it("a correct date on the second try still confirms", async () => {
+    const { attemptId, sid } = await dialled();
+    expect(await confirmWith("April 2 1961", attemptId, sid)).toMatchObject({ confirmed: false });
+    expect(await confirmWith("March 17 1950", attemptId, sid)).toMatchObject({ confirmed: true });
+    expect(siAssistantIdentityFor(sid)).toMatchObject({ dobMatched: true });
+  });
+
+  it("after two wrong dates a third, correct one is refused and nothing is identified", async () => {
+    const { attemptId, sid } = await dialled();
+    expect(await confirmWith("April 2 1961", attemptId, sid)).toMatchObject({ confirmed: false });
+    expect(await confirmWith("May 9 1972", attemptId, sid)).toMatchObject({ confirmed: false });
+    const third = await confirmWith("March 17 1950", attemptId, sid);
+    expect(third).toMatchObject({ success: true, confirmed: false, locked: true });
+    expect(siAssistantIdentityFor(sid)).toMatchObject({ dobMatched: false, dobTries: 2 });
+  });
+});

@@ -157,3 +157,37 @@ describe('an agent module is reached only through the registry', () => {
     expect(lane).toContain('config/agents');
   });
 });
+
+/**
+ * v115. The SI Assistant plugin keeps per-call state in module-level maps
+ * (`siAssistantIdentity`'s identity store, `bindings`' bound stores), and the
+ * lane registry reaches every one of them statically through
+ * `tools/siAssistantTools`. The v114 teardown read that state through
+ * `import("../plugin/…")`, which on Node 20 evaluates a second copy with an
+ * empty map — so a caller whose identity the tools had confirmed was reported
+ * to the ticketing app as unconfirmed. Reproduced under Node 20 before the fix.
+ * The two `import()`s in server/routes.ts (mount, ticketResolved) reach modules
+ * nothing else loads, so they cannot split; this rule covers the code that
+ * shares state with the tools.
+ */
+describe('a plugin module is imported one way', () => {
+  const pluginDir = join(SRC, 'plugin');
+
+  it('no runtime, agent, tool or plugin source dynamic-imports anything under src/plugin', () => {
+    const offenders: string[] = [];
+    for (const dir of ['runtime', 'agents', 'tools', 'plugin']) {
+      for (const file of productionSources(join(SRC, dir))) {
+        for (const target of dynamicImportTargets(file)) {
+          if (target.startsWith(pluginDir + '/')) offenders.push(`${file.slice(SRC.length + 1)} -> ${basename(target)}`);
+        }
+      }
+    }
+    expect(offenders).toEqual([]);
+  });
+
+  it('the runtime reads the identity store through a static import', () => {
+    const runtime = withoutComments(readFileSync(join(SRC, 'runtime/voiceRuntime.ts'), 'utf8'));
+    expect(runtime).toMatch(/^import \{[^}]*\bsiAssistantIdentityFor\b[^}]*\} from "\.\.\/plugin\/siAssistantIdentity";/m);
+    expect(runtime).toMatch(/^import \{[^}]*\breportSiAssistantCall\b[^}]*\} from "\.\.\/plugin\/callbackReport";/m);
+  });
+});

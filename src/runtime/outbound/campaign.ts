@@ -126,7 +126,22 @@ export interface OutboundLanePolicy {
    * given. Optional: a campaign with one mode leaves it out.
    */
   mode?: (env?: Record<string, string | undefined>) => "demo" | "live";
+  /**
+   * Called once, after the dialler settles a row that was never dialled
+   * (v115): its place-by deadline (PLACE_BY_KEY) passed, the number went on
+   * the do-not-contact list, or the phone reached its total cap through other
+   * rows. Whoever asked for the call learns it never rang. Never called for a
+   * row that has been dialled, since that call may have rung. Optional. A
+   * throw is logged and the settle stands.
+   */
+  onNotPlaced?: (
+    contact: { id: string; customData: Record<string, unknown> },
+    reason: NotPlacedReason,
+  ) => Promise<void>;
 }
+
+/** Why the dialler settled a row without ever dialling it (v115). */
+export type NotPlacedReason = "place_by_passed" | "do_not_contact" | "total_cap";
 
 /** One person a live source says the campaign may call. */
 export interface SourceContact {
@@ -216,6 +231,23 @@ export function resolvedMaxConsecutiveInfraRetries(
  * exactly "1"; a typo is off, never on. */
 export function outboundDialingEnabled(env: Record<string, string | undefined>): boolean {
   return env.RUNTIME_OUTBOUND_DIALING === "1";
+}
+
+/**
+ * A contact's place-by deadline (v115): the key in `custom_data` holding an
+ * ISO instant by which its FIRST dial must happen. Past it with nobody rung,
+ * the dialler settles the row instead of ringing it. Retries after a first
+ * dial are governed by the caps, not by this.
+ */
+export const PLACE_BY_KEY = "place_by";
+
+/** True when the contact carries a place-by deadline that has passed. A
+ * missing or unreadable value is no deadline — never a reason to settle. */
+export function placeByPassed(customData: Record<string, unknown>, now: Date): boolean {
+  const raw = customData[PLACE_BY_KEY];
+  if (typeof raw !== "string") return false;
+  const at = Date.parse(raw);
+  return Number.isFinite(at) && at <= now.getTime();
 }
 
 export function campaignEnabled(

@@ -466,7 +466,7 @@ export function createSqlPluginStore(exec: SqlExec): PluginStore {
           [phoneKey, "sms_stop"],
         );
       } else {
-        // START clears SMS only. A voice "don't call me" stays.
+        // START clears SMS only. A voice "don't call me" is its own row.
         await exec("DELETE FROM do_not_contact WHERE phone_key = $1 AND source = $2", [phoneKey, "sms_stop"]);
       }
     },

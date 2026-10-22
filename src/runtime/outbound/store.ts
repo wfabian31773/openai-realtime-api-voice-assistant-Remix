@@ -100,6 +100,10 @@ export interface AttemptFinish {
 
 export interface PriorAttempt {
   at: Date;
+  /** The contact row the attempt was made for. One phone can carry several
+   * rows (an import, or one SI Assistant approval each), and the caps read
+   * them all; the place-by gate asks whether THIS row has been dialled. */
+  contactId: string;
 }
 
 /**
@@ -307,13 +311,18 @@ export async function createDbOutboundStore(): Promise<OutboundStore> {
       await db.execute(sql`
         CREATE UNIQUE INDEX IF NOT EXISTS campaign_contacts_campaign_external_ref_uidx
           ON campaign_contacts (campaign_id, external_ref) WHERE external_ref IS NOT NULL`);
+      // One row per (phone, source): the shape migrations/
+      // add_do_not_contact_per_channel.sql gave the Hub on 2026-10-22. This
+      // only CREATES — the table when absent, and the unique index the
+      // writes conflict on. It never drops or alters what is there: v114
+      // dropped the old primary key here on first use, a schema change on a
+      // live table that belongs in a migration (v115).
       await db.execute(sql`
         CREATE TABLE IF NOT EXISTS do_not_contact (
           phone_key VARCHAR(10) NOT NULL,
           source VARCHAR(64) NOT NULL,
           created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )`);
-      await db.execute(sql`ALTER TABLE do_not_contact DROP CONSTRAINT IF EXISTS do_not_contact_pkey`);
       await db.execute(sql`
         CREATE UNIQUE INDEX IF NOT EXISTS do_not_contact_phone_source_uidx
           ON do_not_contact (phone_key, source)`);
@@ -439,7 +448,7 @@ export async function createDbOutboundStore(): Promise<OutboundStore> {
           -- dncKey on every number that can carry an attempt, because an
           -- unreadable number is refused before it is ever dialled.
           -- A dial Twilio refused rang nobody, so it spends no cap.
-          SELECT (a.attempted_at AT TIME ZONE 'UTC') AS attempted_at
+          SELECT (a.attempted_at AT TIME ZONE 'UTC') AS attempted_at, a.contact_id
             FROM campaign_contacts me
             JOIN campaign_contacts c
               ON c.campaign_id = me.campaign_id
@@ -448,7 +457,7 @@ export async function createDbOutboundStore(): Promise<OutboundStore> {
             JOIN campaign_contact_attempts a ON a.contact_id = c.id AND a.direction = 'outbound'
            WHERE me.id = ${contactId}::varchar
              AND a.status IS DISTINCT FROM ${NOT_PLACED}::varchar`),
-      ).map((r) => ({ at: new Date(r.attempted_at as string) }));
+      ).map((r) => ({ at: new Date(r.attempted_at as string), contactId: String(r.contact_id) }));
     },
 
     async consecutiveRefusedAttempts(contactId, since) {
@@ -765,6 +774,8 @@ export async function createDbOutboundStore(): Promise<OutboundStore> {
       const key = dncKey(phone);
       if (!key) return;
       await ensureSchema();
+      // Its own row per channel: a later SMS START deletes only `sms_stop`,
+      // so it cannot erase this one.
       await db.execute(sql`
         INSERT INTO do_not_contact (phone_key, source) VALUES (${key}::varchar, ${source}::varchar)
         ON CONFLICT (phone_key, source) DO NOTHING`);

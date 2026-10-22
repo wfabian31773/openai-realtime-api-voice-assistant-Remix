@@ -25,8 +25,8 @@ import {
 import { hashPayload } from "./tokens";
 import { checkTwilioSignature, type WebhookRequest } from "../runtime/voiceWebhook";
 import { agentHealth, emptyFleetReader, listAgents, outboundStatus, type AgentSource, type FleetReader } from "./reads";
-import { evaluateAndEnqueueCall, identityFromPreparePayload } from "./callEnqueue";
-import { createTwilioSmsSender, handleInboundSms, inboundSmsPreview, sendApprovedSms, type SmsSender } from "./sms";
+import { evaluateAndEnqueueCall, identityFromPreparePayload, siAssistantDialingProblem } from "./callEnqueue";
+import { classifyInboundSms, createTwilioSmsSender, handleInboundSms, inboundSmsPreview, sendApprovedSms, type SmsSender } from "./sms";
 import { createGraphMail, sendApprovedEmail, type GraphMail } from "./email";
 import { createCallbackReporter, type CallbackReporter } from "./callbackReport";
 import { flushOutboxRow, persistTakenMessage } from "./messageOutbox";
@@ -77,8 +77,17 @@ async function audit(
   }
 }
 
-function jsonError(res: Response, status: number, error: string): void {
-  res.status(status).json({ error });
+/**
+ * What a commit error means for the contact (v115). Set only once the
+ * confirm token has been consumed, where the fleet knows: `not_sent` when it
+ * marked the request failed and nothing went out, `unknown` when the send may
+ * have gone out. A caller classifies on this, never on the HTTP status alone:
+ * a 503 "Calls are not being placed" sent nothing, a 502 may have.
+ */
+type CommitOutcome = "not_sent" | "unknown";
+
+function jsonError(res: Response, status: number, error: string, outcome?: CommitOutcome): void {
+  res.status(status).json(outcome ? { error, outcome } : { error });
 }
 
 function canAccessApproval(auth: VerifiedPluginToken | undefined, row: ContactApprovalRow): boolean {
@@ -96,7 +105,7 @@ function asWebhookRequest(req: Request): WebhookRequest {
 }
 
 function enqueueHttpStatus(reason: string): number {
-  if (reason === "do_not_contact" || reason === "invalid_phone") return 409;
+  if (reason === "do_not_contact" || reason === "invalid_phone" || reason === "call_already_queued") return 409;
   if (reason === "no_campaign") return 503;
   return 422;
 }
@@ -333,7 +342,7 @@ export function mountPluginApi(app: Express, deps: PluginApiDeps): void {
 
     if (hashPayload(consumed.approval.payload) !== consumed.approval.payloadHash) {
       await markFailed(deps.store, consumed.approval.id, { reason: "payload_hash_mismatch" }, now);
-      jsonError(res, 409, "Approved payload no longer matches the locked hash");
+      jsonError(res, 409, "Approved payload no longer matches the locked hash", "not_sent");
       await audit(deps, req.pluginAuth, req, "commit_contact", "error", 409, {
         approvalId: consumed.approval.id,
         ticketId: consumed.approval.ticketId,
@@ -347,7 +356,7 @@ export function mountPluginApi(app: Express, deps: PluginApiDeps): void {
     } catch {
       // Timeout / throw after the send may already have gone out.
       await markUnknown(deps.store, consumed.approval.id, { reason: "send_unknown" }, now);
-      jsonError(res, 502, "The send outcome is unknown");
+      jsonError(res, 502, "The send outcome is unknown", "unknown");
       await audit(deps, req.pluginAuth, req, "commit_contact", "unknown", 502, {
         approvalId: consumed.approval.id,
         ticketId: consumed.approval.ticketId,
@@ -357,7 +366,7 @@ export function mountPluginApi(app: Express, deps: PluginApiDeps): void {
     if (!executed.ok) {
       if (executed.reason === "unknown") {
         await markUnknown(deps.store, consumed.approval.id, { reason: "unknown" }, now);
-        jsonError(res, executed.status, executed.error);
+        jsonError(res, executed.status, executed.error, "unknown");
         await audit(deps, req.pluginAuth, req, "commit_contact", "unknown", executed.status, {
           approvalId: consumed.approval.id,
           ticketId: consumed.approval.ticketId,
@@ -365,7 +374,7 @@ export function mountPluginApi(app: Express, deps: PluginApiDeps): void {
         return;
       }
       await markFailed(deps.store, consumed.approval.id, { reason: executed.reason }, now);
-      jsonError(res, executed.status, executed.error);
+      jsonError(res, executed.status, executed.error, "not_sent");
       await audit(deps, req.pluginAuth, req, "commit_contact", "failed", executed.status, {
         approvalId: consumed.approval.id,
         ticketId: consumed.approval.ticketId,
@@ -399,7 +408,17 @@ export function mountPluginApi(app: Express, deps: PluginApiDeps): void {
     const from = String(body.From ?? "");
     const text = String(body.Body ?? "");
     const sender = deps.smsSender === undefined ? createTwilioSmsSender(envOf(deps)) : deps.smsSender;
-    const handled = await handleInboundSms(deps.store, sender, { from, body: text }, envOf(deps));
+    let handled: Awaited<ReturnType<typeof handleInboundSms>>;
+    try {
+      handled = await handleInboundSms(deps.store, sender, { from, body: text }, envOf(deps));
+    } catch {
+      // Twilio does not retry a messaging webhook, so a 500 would lose this
+      // text as surely as a 200. Say so loudly, without the phone or body,
+      // and answer 200 (v115).
+      console.error(`[si-assistant] inbound sms (${classifyInboundSms(text)}) could not be handled; it may not have been recorded`);
+      res.type("text/xml").status(200).send("<Response></Response>");
+      return;
+    }
     const reporter = deps.callbackReporter ?? createCallbackReporter(envOf(deps));
     if (handled.command === "other") {
       const preview = inboundSmsPreview(text);
@@ -451,6 +470,12 @@ async function executeApproved(
   if (approval.channel === "call") {
     if (!deps.outboundStore) {
       return { ok: false, status: 503, error: "Outbound store is not configured", reason: "no_outbound_store" };
+    }
+    // Nothing would dial it: refuse, so the approval fails visibly instead of
+    // reading as a queued call that never rings (v115).
+    const dialing = siAssistantDialingProblem(envOf(deps));
+    if (dialing) {
+      return { ok: false, status: 503, error: `Calls are not being placed: ${dialing}`, reason: dialing };
     }
     const identity = identityFromPreparePayload(approval.payload);
     const queued = await evaluateAndEnqueueCall(

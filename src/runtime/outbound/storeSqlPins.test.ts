@@ -91,6 +91,12 @@ describe("the attempt row keeps the answer webhook's verdict", () => {
     expect(prior).not.toMatch(/a\.contact_id = \$\{contactId\}/);
   });
 
+  it("names each attempt's own row, so the place-by gate can ask whether THIS row was dialled (v115)", () => {
+    const prior = method("priorAttempts");
+    expect(prior).toContain("AS attempted_at, a.contact_id");
+    expect(prior).toContain("contactId: String(r.contact_id)");
+  });
+
   it("spends no cap on a dial Twilio refused (Codex round 4, #357)", () => {
     expect(method("priorAttempts")).toContain("AND a.status IS DISTINCT FROM ${NOT_PLACED}::varchar");
   });
@@ -143,9 +149,21 @@ describe("the do-not-contact list", () => {
     expect(check).not.toContain("source <> 'sms_stop'");
     expect(check).not.toMatch(/AND source/);
     expect(check).toContain("WHERE phone_key = ${key}::varchar");
-    expect(method("stampDoNotContact")).toContain("ON CONFLICT (phone_key, source) DO NOTHING");
-    expect(SRC).toContain("do_not_contact_phone_source_uidx");
-    expect(SRC).toContain("DROP CONSTRAINT IF EXISTS do_not_contact_pkey");
+  });
+
+  it("writes one row per channel, on the unique index the Hub carries since 2026-10-22", () => {
+    const stamp = method("stampDoNotContact");
+    // The conflict target must be a unique index the live table has; one it
+    // lacks is a 42P10 on every opt-out. The Hub's is (phone_key, source).
+    expect(stamp).toContain("ON CONFLICT (phone_key, source) DO NOTHING");
+    expect(stamp).not.toMatch(/ON CONFLICT \(phone_key\)/);
+  });
+
+  it("only ever creates do_not_contact and its index, and never alters the table (v115)", () => {
+    expect(SRC).toMatch(/CREATE TABLE IF NOT EXISTS do_not_contact \(\s*phone_key VARCHAR\(10\) NOT NULL,/);
+    expect(SRC).toMatch(/CREATE UNIQUE INDEX IF NOT EXISTS do_not_contact_phone_source_uidx\s+ON do_not_contact \(phone_key, source\)/);
+    expect(SRC).not.toMatch(/ALTER TABLE do_not_contact/);
+    expect(SRC).not.toMatch(/DROP CONSTRAINT[^;`]*do_not_contact_pkey/);
   });
 
   it("keys every spelling of a US number on its ten digits", () => {
