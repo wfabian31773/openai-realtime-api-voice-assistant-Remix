@@ -107,10 +107,14 @@ export async function learningTick(deps: RunnerDeps, now: Date = new Date()): Pr
           console.warn(`[learning] ${day}: nothing written — ${out.reason}`);
           break;
         }
-        console.info(
-          `[learning] ${day}: ${out.status}` +
-            (out.status === "locked" ? " (another run holds the day)" : ` run ${out.runId}, ${out.values.length} values, hash ${out.hash}`),
-        );
+        if (out.status === "locked") {
+          // Nothing was written by THIS run, so the night is not finished: the
+          // next tick tries the day again (Codex, #365).
+          failed = true;
+          console.info(`[learning] ${day}: another run holds the day; tried again next tick`);
+          continue;
+        }
+        console.info(`[learning] ${day}: ${out.status} run ${out.runId}, ${out.values.length} values, hash ${out.hash}`);
         done.push(day);
       } catch (e) {
         failed = true;

@@ -83,38 +83,6 @@ export async function runLearningDay(day: string, deps: RunnerDeps): Promise<Run
     return { status: "skipped", reason: "learning tables absent (the A6 migration has not been applied)" };
   }
 
-  const src: Sources = {
-    hub: deps.hub,
-    supportCenter: deps.supportCenter,
-    fivestar: deps.fivestar,
-    console: deps.console,
-    hubHasRuntimeMarker: await columnExists(deps.hub, "runtime_marker"),
-    fivestarHasBuildId: await columnExists(deps.fivestar, "build_id"),
-  };
-
-  const parts: DayResult[] = [];
-  try {
-    parts.push(await computeRemix(day, src));
-  } catch (e) {
-    parts.push({ values: [], unavailable: allUnavailable("Remix", `fleet read failed: ${(e as Error).message}`) });
-  }
-  try {
-    parts.push(await computeFivestar(day, src));
-  } catch (e) {
-    parts.push({ values: [], unavailable: allUnavailable("5Star", `5Star read failed: ${(e as Error).message}`) });
-  }
-  const values = sortValues(parts.flatMap((p) => p.values));
-  const unavailable = Object.assign({}, ...parts.map((p) => p.unavailable)) as Record<string, string>;
-  const hash = outputHash(values);
-  const status = Object.keys(unavailable).length ? "partial" : "ok";
-  const notes = JSON.stringify({
-    readAt: (deps.now?.() ?? new Date()).toISOString(),
-    outputHash: hash,
-    definitionsHash: DEFINITIONS_HASH,
-    buildSplit: { remix: src.hubHasRuntimeMarker, fivestar: src.fivestarHasBuildId },
-    unavailable,
-  });
-
   const client = await deps.connectHub();
   try {
     await client.query("BEGIN");
@@ -123,6 +91,40 @@ export async function runLearningDay(day: string, deps: RunnerDeps): Promise<Run
       await client.query("ROLLBACK");
       return { status: "locked" };
     }
+    // The day is held BEFORE anything is read, so an older read can never
+    // replace a newer one (Codex, #365): whoever holds the lock reads and writes.
+    const src: Sources = {
+      hub: deps.hub,
+      supportCenter: deps.supportCenter,
+      fivestar: deps.fivestar,
+      console: deps.console,
+      hubHasRuntimeMarker: await columnExists(deps.hub, "runtime_marker"),
+      fivestarHasBuildId: await columnExists(deps.fivestar, "build_id"),
+    };
+
+    const parts: DayResult[] = [];
+    try {
+      parts.push(await computeRemix(day, src));
+    } catch (e) {
+      parts.push({ values: [], unavailable: allUnavailable("Remix", `fleet read failed: ${(e as Error).message}`) });
+    }
+    try {
+      parts.push(await computeFivestar(day, src));
+    } catch (e) {
+      parts.push({ values: [], unavailable: allUnavailable("5Star", `5Star read failed: ${(e as Error).message}`) });
+    }
+    const values = sortValues(parts.flatMap((p) => p.values));
+    const unavailable = Object.assign({}, ...parts.map((p) => p.unavailable)) as Record<string, string>;
+    const hash = outputHash(values);
+    const status = Object.keys(unavailable).length ? "partial" : "ok";
+    const notes = JSON.stringify({
+      readAt: (deps.now?.() ?? new Date()).toISOString(),
+      outputHash: hash,
+      definitionsHash: DEFINITIONS_HASH,
+      buildSplit: { remix: src.hubHasRuntimeMarker, fivestar: src.fivestarHasBuildId },
+      unavailable,
+    });
+
     const runId = Number((await client.query(UPSERT_RUN_SQL, [day, status, METHOD_VERSION, notes])).rows[0].id);
     await client.query(DELETE_VALUES_SQL, [runId]);
     if (values.length) {

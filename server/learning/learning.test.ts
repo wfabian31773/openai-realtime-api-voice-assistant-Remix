@@ -357,6 +357,25 @@ describe("the run", () => {
     expect(tx.calls.map((c) => c.text)).toEqual(["BEGIN", DAY_LOCK_SQL, "ROLLBACK"]);
   });
 
+  it("the day is locked before any source is read (Codex, #365)", async () => {
+    const held = runnerDeps({ locked: false });
+    await runLearningDay("2026-10-20", held.deps);
+    expect(held.hub.calls.some((c) => c.text.includes("FROM call_logs"))).toBe(false);
+    // And a run that holds the lock reads only after taking it.
+    const order: string[] = [];
+    const { deps } = runnerDeps();
+    const tx = deps.connectHub;
+    deps.connectHub = async () => {
+      const c = await tx();
+      return { ...c, query: async (t: string, p?: unknown[]) => (order.push(t === DAY_LOCK_SQL ? "lock" : "tx"), c.query(t, p)) };
+    };
+    const hub = deps.hub;
+    deps.hub = async (t: string, p?: unknown[]) => (t.includes("FROM call_logs") && order.push("read"), hub(t, p));
+    await runLearningDay("2026-10-20", deps);
+    expect(order.indexOf("lock")).toBeGreaterThan(-1);
+    expect(order.indexOf("lock")).toBeLessThan(order.indexOf("read"));
+  });
+
   it("a failed write rolls back and releases the connection", async () => {
     const { deps, released } = runnerDeps();
     const failing = fakeQuery((text) => {
@@ -419,6 +438,13 @@ describe("OFF by default", () => {
     const ok = runnerDeps();
     expect(await learningTick(ok.deps, new Date("2026-10-21T11:15:00Z"))).toHaveLength(3);
     expect(await learningTick(ok.deps, new Date("2026-10-21T11:45:00Z"))).toEqual([]);
+  });
+
+  it("a night held by another run is tried again on the next tick (Codex, #365)", async () => {
+    const held = runnerDeps({ locked: false });
+    expect(await learningTick(held.deps, new Date("2026-10-21T10:45:00Z"))).toEqual([]);
+    const ok = runnerDeps();
+    expect(await learningTick(ok.deps, new Date("2026-10-21T11:15:00Z"))).toHaveLength(3);
   });
 
   it("the server wires the export always and the runner behind its switch", () => {
