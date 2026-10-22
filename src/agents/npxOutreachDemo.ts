@@ -1,53 +1,44 @@
 /**
- * The NPX outreach DEMO lane (v112): the same agent and the same voice as
- * `npx-outreach`, calling synthetic patients and booking in the demo NPX.
+ * The NPX outreach DEMO SEED (v112): who the `npx-outreach` lane calls while
+ * NPX_OUTREACH_MODE is not `live`.
  *
  * Operator, 2026-10-22: "No way we are going to do this without testing the
  * line first, I have never heard this agent, make sure it has a good voice,
  * the main one from xai that they use, we should connect it to the demo db
  * first and run our tests there, add some seed data with <two test numbers>
- * so that we can test this first before we have it make live calls."
+ * so that we can test this first before we have it make live calls." And
+ * then: "switching over to production should be a env switch."
  *
- * What differs from the live lane, and nothing else does:
- *  - WHO IS CALLED: the synthetic patients below, on the numbers in
+ * So there is ONE lane, `npx-outreach`, with one caller ID and one Twilio
+ * Voice URL, and the mode decides (src/agents/npxOutreachAgent.ts):
+ *  - WHO IS CALLED: in demo, the synthetic patients below on the numbers in
  *    NPX_OUTREACH_DEMO_PHONES (comma-separated, first number to the first
- *    patient). Never the Console. The numbers live in the environment, not in
- *    git. Unset, the lane rings nobody.
- *  - WHERE IT BOOKS: the demo NPX (cec-npx-demo.vercel.app, its own database)
- *    with its own key, NPX_OUTREACH_DEMO_API_KEY. Unset, the lane rings nobody.
+ *    patient), never the Console. The numbers live in the environment, not in
+ *    git. Unset, the demo rings nobody.
+ *  - WHERE IT BOOKS: the demo NPX (cec-npx-demo.vercel.app, its own
+ *    database) with its own key, NPX_OUTREACH_DEMO_API_KEY. Unset, the demo
+ *    rings nobody.
  *  - THE AZUL CANCEL AND THE STAFF TICKET ARE SIMULATED (npxOutreachTools.ts):
  *    logged, never sent to NextGen or the ticketing app.
- *  - Test-sized caps, its own switch (OUTBOUND_CAMPAIGN_NPX_OUTREACH_DEMO) and
- *    its own caller ID (NPX_OUTREACH_DEMO_CALLER_ID), whose Twilio Voice URL
- *    must be /voice/npx-outreach-demo on the published host before the
- *    dialler rings anybody.
+ *  - Test-sized caps, and its own campaign row (`npx-outreach-demo`), so test
+ *    calls never mix with the live campaign's records or counts.
  *
- * The agent, the prompt, the greeting, the tools and the voice are the live
- * lane's: standing instruction 2, the thing being tested is the thing that
- * will run. The voice is the runtime's default, `eve` — the voice in every one
- * of xAI's own Voice Agent examples — unless XAI_VOICE_NAME is set; /voice/health
- * names it per lane.
+ * The agent, the prompt, the greeting, the tools and the voice are the same
+ * in both modes: standing instruction 2, the thing being tested is the thing
+ * that will run. The voice is the runtime's default, `eve` — the voice in
+ * every one of xAI's own Voice Agent examples — unless XAI_VOICE_NAME is set;
+ * /voice/health names it, and the mode, per lane.
  */
-import type { ContactSource, OutboundLanePolicy, SourceContact } from '../runtime/outbound/campaign';
-import { DEFAULT_CALLING_WINDOW } from '../runtime/outbound/callingWindow';
+import type { AttemptCaps } from '../runtime/outbound/callingWindow';
+import type { ContactSource, SourceContact } from '../runtime/outbound/campaign';
 import { e164, pacificToday } from '../runtime/outbound/consoleMovable';
 import { createNpxOutreachDemoClient } from '../services/npxOutreachClient';
-import { NPX_OUTREACH_DEMO_CAMPAIGN_KEY, NPX_OUTREACH_DEMO_SOURCE, NPX_OUTREACH_TOOLS } from '../tools/npxOutreachTools';
-import { NPX_OUTREACH_CALLBACK_PURPOSE, NPX_OUTREACH_VOICEMAIL, npxOutreachGreeting } from './npxOutreachAgent';
-
-export const npxOutreachDemoAgentConfig = {
-  slug: NPX_OUTREACH_DEMO_CAMPAIGN_KEY,
-  name: 'NPX Outreach Agent (demo)',
-  description:
-    'Outbound DEMO: the NPX outreach call on synthetic patients, booking in the demo NPX; ' +
-    'the Azul cancel and the staff ticket are simulated.',
-  version: '1.0.0',
-  voice: 'sage',
-  language: 'en',
-} as const;
+import { NPX_OUTREACH_DEMO_SOURCE } from '../tools/npxOutreachTools';
 
 /** The demo practice in reach of every demo patient (cec-npx-demo's one
- * active partner). */
+ * active partner). Seeded in cec-npx-demo's database on 2026-10-22, not here:
+ * a demo reset (POST /api/demo/reset) puts the demo's own seed back and
+ * removes the provider credentials and exam codes an offer needs. */
 export const DEMO_PARTNER = 'Premier Vision Associates';
 
 interface DemoPatient {
@@ -152,9 +143,9 @@ export function demoContacts(now: Date, env: Record<string, string | undefined> 
 let warned = false;
 
 /**
- * The demo lane's people, or null — and null means the dialler rings nobody:
+ * The demo's people, or null — and null means the dialler rings nobody:
  * without test numbers there is nobody to ring, and without the demo key no
- * slot could be offered (the live lane's rule, v110 Codex P1).
+ * slot could be offered (the live mode's rule, v110 Codex P1).
  */
 export async function npxOutreachDemoSource(
   env: Record<string, string | undefined> = process.env,
@@ -184,18 +175,6 @@ export async function npxOutreachDemoSource(
   };
 }
 
-export const npxOutreachDemoPolicy: OutboundLanePolicy = {
-  campaignKey: NPX_OUTREACH_DEMO_CAMPAIGN_KEY,
-  enableEnv: 'OUTBOUND_CAMPAIGN_NPX_OUTREACH_DEMO',
-  callerIdEnv: 'NPX_OUTREACH_DEMO_CALLER_ID',
-  window: DEFAULT_CALLING_WINDOW,
-  // Sized for testing: a missed call rings again after half an hour, at most
-  // four times a day. A finished call is not rung again until it is reset.
-  caps: { perDay: 4, perWeek: 20, total: 60, minHoursBetween: 0.5 },
-  concurrency: 1,
-  greeting: npxOutreachGreeting,
-  voicemail: () => NPX_OUTREACH_VOICEMAIL,
-  callbackPurpose: NPX_OUTREACH_CALLBACK_PURPOSE,
-  source: () => npxOutreachDemoSource(),
-  tools: NPX_OUTREACH_TOOLS,
-};
+/** Sized for testing: a missed call rings again after half an hour, at most
+ * four times a day. A finished call is not rung again until it is reset. */
+export const NPX_OUTREACH_DEMO_CAPS: AttemptCaps = { perDay: 4, perWeek: 20, total: 60, minHoursBetween: 0.5 };

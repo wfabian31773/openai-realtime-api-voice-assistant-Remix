@@ -1,18 +1,28 @@
 /**
- * The NPX outreach DEMO lane (v112): the same agent and voice as the live
- * lane, synthetic patients on the operator's test numbers, the demo NPX, and
- * a simulated Azul cancel and staff ticket. Through the REAL lane and agent
- * registries where the wiring is the claim (failure mode 10). Synthetic
- * patients and placeholder numbers only — the real test numbers live in the
- * environment, never here.
+ * NPX outreach in DEMO mode (v112): one lane, `npx-outreach`, and one
+ * environment variable, NPX_OUTREACH_MODE, between the demo and production
+ * (operator, 2026-10-22: "switching over to production should be a env
+ * switch"). In demo: synthetic patients on the operator's test numbers, the
+ * demo NPX, and a simulated Azul cancel and staff ticket. Through the REAL lane
+ * and agent registries where the wiring is the claim (failure mode 10).
+ * Synthetic patients and placeholder numbers only — the real test numbers live
+ * in the environment, never here.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 vi.hoisted(() => {
   process.env.DATABASE_URL ||= 'postgres://stub:stub@ci-stub.invalid:5432/stub';
 });
+const movable = vi.hoisted(() => ({ source: null as unknown, reads: 0 }));
+vi.mock('../runtime/outbound/consoleMovable', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../runtime/outbound/consoleMovable')>()),
+  consoleMovableContactSource: vi.fn(async () => {
+    movable.reads += 1;
+    return movable.source;
+  }),
+}));
 
 import { resolveLane, RUNTIME_CALLBACK_TOOLS, RUNTIME_OUTBOUND_TOOLS, type LaneConfig } from '../runtime/laneRegistry';
-import type { OutboundContact } from '../runtime/outbound/campaign';
+import type { ContactSource, OutboundContact } from '../runtime/outbound/campaign';
 import type { CallbackContext } from '../runtime/outbound/callback';
 import { FakeOutboundStore } from '../runtime/outbound/store.testkit';
 import { pacificToday } from '../runtime/outbound/consoleMovable';
@@ -23,6 +33,7 @@ import {
   FIND_SOONER_TOOL_NAME,
   NPX_OUTREACH_DEMO_CAMPAIGN_KEY,
   NPX_OUTREACH_DEMO_SOURCE,
+  NPX_OUTREACH_LIVE_CAMPAIGN_KEY,
   NPX_OUTREACH_TOOLS,
   STAFF_CALLBACK_TOOL_NAME,
   resetOutreachSessionsForTests,
@@ -42,7 +53,6 @@ import {
   demoContacts,
   demoId,
   demoPhones,
-  npxOutreachDemoPolicy,
   npxOutreachDemoSource,
 } from './npxOutreachDemo';
 import { createNpxOutreachAgent, npxOutreachPolicy } from './npxOutreachAgent';
@@ -180,6 +190,9 @@ beforeEach(async () => {
 afterEach(() => {
   setNpxOutreachDepsForTests(null);
   resetOutreachSessionsForTests();
+  vi.unstubAllEnvs();
+  movable.source = null;
+  movable.reads = 0;
 });
 
 const dialled = (campaign: string) => ({
@@ -229,27 +242,42 @@ describe('a demo call books in the demo NPX and touches nothing live', () => {
     info.mockRestore();
   });
 
-  it('a demo contact is a demo call even if the campaign key were missing — either one is enough', async () => {
-    await bookThrough('');
+  // Any ONE of the three makes it a demo call, so a demo call never reaches a
+  // live system because one of the three was missing. Each row turns on
+  // exactly one.
+  it.each([
+    ['demo mode alone', undefined, NPX_OUTREACH_LIVE_CAMPAIGN_KEY, 'console_movable'],
+    ['the demo campaign alone', 'live', NPX_OUTREACH_DEMO_CAMPAIGN_KEY, 'console_movable'],
+    ['a demo-seeded contact alone', 'live', NPX_OUTREACH_LIVE_CAMPAIGN_KEY, NPX_OUTREACH_DEMO_SOURCE],
+  ])('%s makes it a demo call', async (_label, mode, campaign, source) => {
+    if (mode) vi.stubEnv('NPX_OUTREACH_MODE', mode);
+    seed(source);
+    attemptId = await store.startAttempt('c1', store.campaignId, 1);
+    vi.spyOn(console, 'info').mockImplementation(() => {});
+    await bookThrough(campaign);
     expect(demo.book).toHaveBeenCalledTimes(1);
+    expect(live.offer).not.toHaveBeenCalled();
     expect(live.book).not.toHaveBeenCalled();
     expect(cancel).not.toHaveBeenCalled();
+    await run(campaign, STAFF_CALLBACK_TOOL_NAME, { request: 'a person please' });
+    expect(fileTicket).not.toHaveBeenCalled();
   });
 
-  it('a live call never reaches the demo NPX or the simulations', async () => {
+  it('live mode, the live campaign and a Console contact: production NPX, the real cancel and ticket, never the demo', async () => {
+    vi.stubEnv('NPX_OUTREACH_MODE', 'live');
     seed('console_movable');
     attemptId = await store.startAttempt('c1', store.campaignId, 1);
-    await bookThrough(npxOutreachPolicy.campaignKey);
+    await bookThrough(NPX_OUTREACH_LIVE_CAMPAIGN_KEY);
     expect(live.book).toHaveBeenCalledTimes(1);
     expect(cancel).toHaveBeenCalledTimes(1);
     expect(demo.offer).not.toHaveBeenCalled();
     expect(demo.book).not.toHaveBeenCalled();
-    await run(npxOutreachPolicy.campaignKey, STAFF_CALLBACK_TOOL_NAME, { request: 'a person please' });
+    await run(NPX_OUTREACH_LIVE_CAMPAIGN_KEY, STAFF_CALLBACK_TOOL_NAME, { request: 'a person please' });
     expect(fileTicket).toHaveBeenCalledTimes(1);
   });
 });
 
-// ── The lane as the runtime resolves it ─────────────────────────────────────
+// ── One lane, one switch ────────────────────────────────────────────────────
 
 const CONTACT: OutboundContact = {
   contactId: 'c1',
@@ -266,46 +294,99 @@ const META = {
   callerPhone: '+15555550101',
   dialedNumber: '+15555550100',
 };
+const CONSOLE: ContactSource = {
+  name: 'console_movable',
+  refreshEveryMs: 1,
+  parkMs: 1,
+  list: async () => [{ externalRef: 'appt-1', phone: '+15555550199', firstName: 'Real', lastName: 'Patient', data: {} }],
+  recheck: async () => ({ state: 'off_list' }),
+};
 
-describe('the demo lane is the live agent, in the same voice', () => {
-  it('is registered as an outbound lane with the demo policy and the live lane\'s own factory', async () => {
+describe('one lane in both modes: going live is the environment variable and nothing else', () => {
+  it('registers one NPX lane — no separate demo lane, caller ID or Voice URL to move at the switch', async () => {
     const r = await registry();
-    const config = r.getAgentConfig(NPX_OUTREACH_DEMO_CAMPAIGN_KEY) as LaneConfig & { factory: unknown };
-    const liveConfig = r.getAgentConfig(npxOutreachPolicy.campaignKey) as LaneConfig & { factory: unknown };
+    const config = r.getAgentConfig('npx-outreach') as LaneConfig & { factory: unknown };
     expect(config).toMatchObject({ agentType: 'outbound', enabled: true });
-    expect(config.outbound).toBe(npxOutreachDemoPolicy);
+    expect(config.outbound).toBe(npxOutreachPolicy);
     expect(config.factory).toBe(createNpxOutreachAgent);
-    expect(liveConfig.factory).toBe(createNpxOutreachAgent);
-    expect(config.outbound!.tools).toEqual(NPX_OUTREACH_TOOLS);
-    expect(config.outbound!.greeting(CONTACT)).toBe(npxOutreachPolicy.greeting(CONTACT));
-    expect(config.outbound!.voicemail()).toBe(npxOutreachPolicy.voicemail());
+    expect(r.getAgentConfig('npx-outreach-demo')).toBeUndefined();
+    for (const mode of ['demo', 'live']) {
+      vi.stubEnv('NPX_OUTREACH_MODE', mode);
+      expect(config.outbound!.callerIdEnv).toBe('NPX_OUTREACH_CALLER_ID');
+      expect(config.outbound!.enableEnv).toBe('OUTBOUND_CAMPAIGN_NPX_OUTREACH');
+      expect(config.outbound!.tools).toEqual(NPX_OUTREACH_TOOLS);
+    }
   });
 
-  it('speaks in eve on grok-voice-3.0, exactly as the live lane does, with the same prompt and tools', async () => {
+  it('demo (the default): the dialler is handed the test numbers and the Console is never read', async () => {
+    movable.source = CONSOLE;
+    vi.stubEnv('NPX_OUTREACH_DEMO_PHONES', PHONES);
+    vi.stubEnv('NPX_OUTREACH_DEMO_API_KEY', 'demo-key');
+    vi.stubEnv('NPX_OUTREACH_API_KEY', 'live-key');
+    const src = (await npxOutreachPolicy.source!())!;
+    expect(src.name).toBe(NPX_OUTREACH_DEMO_SOURCE);
+    expect((await src.list(NOW)).map((c) => c.phone)).toEqual(['+15555550101', '+15555550102']);
+    expect(movable.reads).toBe(0);
+  });
+
+  it('demo without its own key rings nobody, even with the live key set', async () => {
+    movable.source = CONSOLE;
+    vi.stubEnv('NPX_OUTREACH_DEMO_PHONES', PHONES);
+    vi.stubEnv('NPX_OUTREACH_API_KEY', 'live-key');
+    expect(await npxOutreachPolicy.source!()).toBeNull();
+    expect(movable.reads).toBe(0);
+  });
+
+  it('live: the Console\'s list, never the test numbers', async () => {
+    movable.source = CONSOLE;
+    vi.stubEnv('NPX_OUTREACH_MODE', 'live');
+    vi.stubEnv('NPX_OUTREACH_DEMO_PHONES', PHONES);
+    vi.stubEnv('NPX_OUTREACH_DEMO_API_KEY', 'demo-key');
+    vi.stubEnv('NPX_OUTREACH_API_KEY', 'live-key');
+    const src = (await npxOutreachPolicy.source!())!;
+    expect(movable.reads).toBe(1);
+    expect((await src.list(NOW)).map((c) => c.phone)).toEqual(['+15555550199']);
+  });
+
+  it('live without the live key rings nobody, even with the demo key set', async () => {
+    movable.source = CONSOLE;
+    vi.stubEnv('NPX_OUTREACH_MODE', 'live');
+    vi.stubEnv('NPX_OUTREACH_DEMO_PHONES', PHONES);
+    vi.stubEnv('NPX_OUTREACH_DEMO_API_KEY', 'demo-key');
+    expect(await npxOutreachPolicy.source!()).toBeNull();
+  });
+
+  it('speaks in eve on grok-voice-3.0 in both modes, with the same prompt and tools', async () => {
     const source = await registry();
-    const demoLane = await resolveLane(NPX_OUTREACH_DEMO_CAMPAIGN_KEY, { ...META, outbound: { ...CONTACT, campaignKey: NPX_OUTREACH_DEMO_CAMPAIGN_KEY } }, { source, env: {} });
-    const liveLane = await resolveLane(npxOutreachPolicy.campaignKey, { ...META, outbound: { ...CONTACT, campaignKey: npxOutreachPolicy.campaignKey } }, { source, env: {} });
-    expect(demoLane!.voice.voiceName).toBe('eve');
-    expect(demoLane!.voice.model).toBe('grok-voice-3.0');
-    expect(liveLane!.voice.voiceName).toBe('eve');
-    expect(String(demoLane!.agent.instructions)).toBe(String(liveLane!.agent.instructions));
-    const bound = names(demoLane!.agent.tools);
-    for (const t of [...RUNTIME_OUTBOUND_TOOLS, ...NPX_OUTREACH_TOOLS]) expect(bound).toContain(t);
+    const prompts: string[] = [];
+    for (const mode of ['demo', 'live']) {
+      vi.stubEnv('NPX_OUTREACH_MODE', mode);
+      const lane = await resolveLane('npx-outreach', { ...META, outbound: { ...CONTACT, campaignKey: npxOutreachPolicy.campaignKey } }, { source, env: {} });
+      expect(lane!.voice.voiceName).toBe('eve');
+      expect(lane!.voice.model).toBe('grok-voice-3.0');
+      prompts.push(String(lane!.agent.instructions));
+      const bound = names(lane!.agent.tools);
+      for (const t of [...RUNTIME_OUTBOUND_TOOLS, ...NPX_OUTREACH_TOOLS]) expect(bound).toContain(t);
+    }
+    expect(prompts[0]).toBe(prompts[1]);
   });
 
-  it('a returned call reaches the demo NPX too: the runtime injects the campaign on a returned call', async () => {
+  it('a returned call carries the campaign it was resolved under, so a demo callback still reaches the demo NPX', async () => {
     const callback: CallbackContext = {
-      campaignKey: NPX_OUTREACH_DEMO_CAMPAIGN_KEY,
+      campaignKey: npxOutreachPolicy.campaignKey,
       campaignId: store.campaignId,
       callerPhone: '+15555550101',
       match: { kind: 'none' },
-      purpose: npxOutreachDemoPolicy.callbackPurpose!,
+      purpose: npxOutreachPolicy.callbackPurpose!,
     };
-    // A plain contact (no demo source) so only the injected campaign can make it a demo call.
-    seed('console_movable');
-    const lane = await resolveLane(NPX_OUTREACH_DEMO_CAMPAIGN_KEY, { ...META, callback }, { source: await registry(), env: {} });
+    // Resolved in demo mode, so the runtime injects the demo campaign...
+    const lane = await resolveLane('npx-outreach', { ...META, callback }, { source: await registry(), env: {} });
     const bound = names(lane!.agent.tools);
     for (const t of [...RUNTIME_CALLBACK_TOOLS, ...NPX_OUTREACH_TOOLS]) expect(bound).toContain(t);
+    // ...and with the process now live and a Console contact, only that
+    // injected campaign can make it a demo call.
+    vi.stubEnv('NPX_OUTREACH_MODE', 'live');
+    seed('console_movable');
     openCallbackSession({
       callSid: SID,
       campaignKey: NPX_OUTREACH_DEMO_CAMPAIGN_KEY,

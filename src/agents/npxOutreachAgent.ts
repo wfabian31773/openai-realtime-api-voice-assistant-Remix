@@ -15,14 +15,28 @@
  * reaches this same lane (v106).
  *
  * DARK UNTIL THE OPERATOR SAYS: nothing dials unless RUNTIME_OUTBOUND_DIALING=1,
- * OUTBOUND_CAMPAIGN_NPX_OUTREACH=1 and NPX_OUTREACH_CALLER_ID are set, the
- * caller-ID number's Voice URL points back at /voice/npx-outreach, and
- * NPX_OUTREACH_API_KEY is set (without it no slot can be offered).
+ * OUTBOUND_CAMPAIGN_NPX_OUTREACH=1 and NPX_OUTREACH_CALLER_ID are set and the
+ * caller-ID number's Voice URL points back at /voice/npx-outreach.
+ *
+ * DEMO UNTIL SOMEBODY WRITES `live` (v112). NPX_OUTREACH_MODE decides who is
+ * called and where they are booked; nothing else changes at the switch — the
+ * lane, the caller ID, the Voice URL, the agent and the voice are the same
+ * (operator, 2026-10-22: "switching over to production should be a env
+ * switch"):
+ *  - unset or anything but `live`: the synthetic patients in
+ *    src/agents/npxOutreachDemo.ts on NPX_OUTREACH_DEMO_PHONES, the demo NPX
+ *    with NPX_OUTREACH_DEMO_API_KEY, the Azul cancel and the staff ticket
+ *    simulated, test caps, the `npx-outreach-demo` campaign row;
+ *  - `live`: the Console's movable list, production NPX with
+ *    NPX_OUTREACH_API_KEY, the real Azul cancel and staff ticket, patient
+ *    caps, the `npx-outreach` campaign row.
+ * Each mode rings nobody without its own key, so a half-configured switch
+ * fails closed. Read when used, so a republish is what moves it.
  */
 import { RealtimeAgent } from '@openai/agents/realtime';
 import type { ContactSource, OutboundContact, OutboundLanePolicy, SourceContact } from '../runtime/outbound/campaign';
 import { OUTBOUND_RECORDING_CLAUSE } from '../runtime/outbound/campaign';
-import { DEFAULT_ATTEMPT_CAPS, DEFAULT_CALLING_WINDOW } from '../runtime/outbound/callingWindow';
+import { DEFAULT_ATTEMPT_CAPS, DEFAULT_CALLING_WINDOW, type AttemptCaps } from '../runtime/outbound/callingWindow';
 import { consoleMovableContactSource } from '../runtime/outbound/consoleMovable';
 import { createNpxOutreachClient } from '../services/npxOutreachClient';
 import {
@@ -30,9 +44,13 @@ import {
   CONFIRM_DOB_TOOL_NAME,
   DESCRIBE_TOOL_NAME,
   FIND_SOONER_TOOL_NAME,
+  NPX_OUTREACH_DEMO_CAMPAIGN_KEY,
+  NPX_OUTREACH_LIVE_CAMPAIGN_KEY,
   NPX_OUTREACH_TOOLS,
   STAFF_CALLBACK_TOOL_NAME,
+  npxOutreachMode,
 } from '../tools/npxOutreachTools';
+import { NPX_OUTREACH_DEMO_CAPS, npxOutreachDemoSource } from './npxOutreachDemo';
 
 export const npxOutreachAgentConfig = {
   slug: 'npx-outreach',
@@ -120,20 +138,36 @@ export async function npxOutreachSource(
   return live ? pilotSource(live, env) : null;
 }
 
+/**
+ * One policy for both modes. The fields the mode moves are getters, read by
+ * the dialler, the answer webhook and the runtime at the moment they act, so
+ * every reader in one process sees one mode. The campaign ROW differs by mode
+ * on purpose: test calls never land among the live campaign's contacts,
+ * attempts or counts, and a test number is never a candidate when a patient
+ * rings back in live mode.
+ */
 export const npxOutreachPolicy: OutboundLanePolicy = {
-  campaignKey: 'npx-outreach',
+  get campaignKey(): string {
+    return npxOutreachMode() === 'live' ? NPX_OUTREACH_LIVE_CAMPAIGN_KEY : NPX_OUTREACH_DEMO_CAMPAIGN_KEY;
+  },
   enableEnv: 'OUTBOUND_CAMPAIGN_NPX_OUTREACH',
   // Its own number, not the proving lane's: the number patients see is the
-  // number they ring back, and its Voice URL can point at one lane only.
+  // number they ring back, and its Voice URL can point at one lane only. The
+  // same number in both modes, so going live needs no Twilio change.
   callerIdEnv: 'NPX_OUTREACH_CALLER_ID',
   window: DEFAULT_CALLING_WINDOW,
-  caps: DEFAULT_ATTEMPT_CAPS,
-  concurrency: 2,
+  get caps(): AttemptCaps {
+    return npxOutreachMode() === 'live' ? DEFAULT_ATTEMPT_CAPS : NPX_OUTREACH_DEMO_CAPS;
+  },
+  get concurrency(): number {
+    return npxOutreachMode() === 'live' ? 2 : 1;
+  },
   greeting: npxOutreachGreeting,
   voicemail: () => NPX_OUTREACH_VOICEMAIL,
   callbackPurpose: NPX_OUTREACH_CALLBACK_PURPOSE,
-  source: () => npxOutreachSource(),
+  source: () => (npxOutreachMode() === 'live' ? npxOutreachSource() : npxOutreachDemoSource()),
   tools: NPX_OUTREACH_TOOLS,
+  mode: (env) => npxOutreachMode(env),
 };
 
 /**

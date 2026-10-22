@@ -42,13 +42,16 @@
  * Every refusal speaks through `fix`, the model's channel (v43); `say` is the
  * one sentence for the caller where there is one.
  *
- * THE DEMO LANE (v112, `npx-outreach-demo`) RUNS THESE SAME TOOLS, with three
- * of their dependencies swapped and nothing else: NPX is the demo deployment,
- * and the Azul cancel and the staff ticket are SIMULATED — logged, never sent
- * to NextGen or the ticketing app. A call is a demo call when its injected
- * campaign is the demo lane's OR its contact came from the demo seed; either
- * one is enough, so a demo call never reaches a live system because one of
- * the two was missing.
+ * DEMO OR LIVE IS ONE ENVIRONMENT VARIABLE (v112), NPX_OUTREACH_MODE: `live`
+ * calls the Console's movable list and books for real; anything else, unset
+ * included, is the demo (operator, 2026-10-22: "switching over to production
+ * should be a env switch"). A demo call runs these same tools with three of
+ * their dependencies swapped and nothing else: NPX is the demo deployment, and
+ * the Azul cancel and the staff ticket are SIMULATED — logged, never sent to
+ * NextGen or the ticketing app. A call is a demo call when the process is in
+ * demo mode, OR its injected campaign is the demo campaign, OR its contact came
+ * from the demo seed; any one is enough, so a demo call never reaches a live
+ * system because one of the three was missing.
  */
 import { registerTool, type ToolFailure, type ToolResult } from './registry';
 import { readDobQuietly } from './dobParts';
@@ -82,10 +85,26 @@ export const NPX_OUTREACH_TOOLS = [
   STAFF_CALLBACK_TOOL_NAME,
 ] as const;
 
-/** The demo lane's campaign, and the `custom_data.source` of its seeded
- * contacts (src/agents/npxOutreachDemo.ts). */
+/** The campaign row the lane dials from in demo mode, and the
+ * `custom_data.source` of its seeded contacts (src/agents/npxOutreachDemo.ts).
+ * A campaign name, not a lane: there is one lane, `npx-outreach`, in both
+ * modes, so its caller ID and Twilio Voice URL never change at the switch. */
 export const NPX_OUTREACH_DEMO_CAMPAIGN_KEY = 'npx-outreach-demo';
 export const NPX_OUTREACH_DEMO_SOURCE = 'npx_outreach_demo';
+/** The campaign row the lane dials from in live mode. */
+export const NPX_OUTREACH_LIVE_CAMPAIGN_KEY = 'npx-outreach';
+
+export type NpxOutreachMode = 'demo' | 'live';
+
+/**
+ * THE SWITCH. `live` (any case) is production: real patients from the
+ * Console's movable list, production NPX, the real Azul cancel and the real
+ * staff ticket. Anything else — unset, `demo`, a typo — is the demo, so a
+ * deployment can only reach a patient by somebody writing `live` on purpose.
+ */
+export function npxOutreachMode(env: Record<string, string | undefined> = process.env): NpxOutreachMode {
+  return (env.NPX_OUTREACH_MODE ?? '').trim().toLowerCase() === 'live' ? 'live' : 'demo';
+}
 
 /** The HVA Hub, where every schedule-related request goes (standing
  * instruction 10), and its scheduling request type. */
@@ -106,7 +125,7 @@ export const MIN_DAYS_SOONER = 21;
 
 interface Deps {
   npx: NpxOutreachClient;
-  /** The demo lane's NPX: the demo deployment and its own key. */
+  /** The demo's NPX: the demo deployment and its own key. */
   npxDemo: NpxOutreachClient;
   cancel: (req: AzulCancelRequest) => Promise<AzulCancelResult>;
   store: () => Promise<OutboundStore>;
@@ -168,7 +187,7 @@ function ticketFor(s: OutreachSession): Deps['fileTicket'] {
 
 interface OutreachSession {
   contact: OutboundContact;
-  /** The demo lane's call: demo NPX, simulated cancel and ticket. */
+  /** A demo call: demo NPX, simulated cancel and ticket. */
   demo: boolean;
   /** describe_upcoming_appointment has told them the visit and its date. */
   described: boolean;
@@ -259,7 +278,9 @@ async function sessionFor(input: Record<string, unknown>): Promise<{ sid: string
   const contact = await (await live().store()).loadCallContact(contactId, attemptId);
   if (!contact) return NOT_THIS_CALL;
   const demo =
-    input.outbound_campaign === NPX_OUTREACH_DEMO_CAMPAIGN_KEY || contact.data.source === NPX_OUTREACH_DEMO_SOURCE;
+    npxOutreachMode() === 'demo' ||
+    input.outbound_campaign === NPX_OUTREACH_DEMO_CAMPAIGN_KEY ||
+    contact.data.source === NPX_OUTREACH_DEMO_SOURCE;
   return {
     sid,
     s: keep(

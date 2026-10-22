@@ -843,12 +843,16 @@ import { callEnvironment } from "./callRecord";
  */
 /**
  * v112 — THE NPX DEMO LINE (2026-10-22). Operator: "No way we are going to do
- * this without testing the line first." The `npx-outreach-demo` lane: the
- * live NPX agent, prompt, tools and voice (`eve`), calling synthetic patients
- * on the numbers in NPX_OUTREACH_DEMO_PHONES and booking in the demo NPX; the
- * Azul cancel and the staff ticket are simulated. `/voice/health` names each
- * lane's voice. On top of v111, which it contains.
- * `src/agents/npxOutreachDemo.ts`, `src/tools/npxOutreachTools.ts`.
+ * this without testing the line first", then "switching over to production
+ * should be a env switch". ONE lane, `npx-outreach`, and NPX_OUTREACH_MODE:
+ * unset (or anything but `live`) calls the synthetic patients on
+ * NPX_OUTREACH_DEMO_PHONES and books in the demo NPX, with the Azul cancel and
+ * the staff ticket simulated; `live` calls the Console's movable list and
+ * books for real. Same caller ID, Voice URL, agent, prompt, tools and voice
+ * (`eve`) in both. `/voice/health` names each lane's voice and the NPX lane's
+ * mode. On top of v111, which it contains.
+ * `src/agents/npxOutreachAgent.ts`, `src/agents/npxOutreachDemo.ts`,
+ * `src/tools/npxOutreachTools.ts`.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
   "voice-runtime-v112-the-npx-demo-line-20261022";
