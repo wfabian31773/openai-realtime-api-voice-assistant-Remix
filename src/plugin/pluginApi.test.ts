@@ -679,7 +679,7 @@ describe("review findings", () => {
     expect(mintScopesCompatible(["fleet:read", "contacts:approve"]).ok).toBe(true);
   });
 
-  it("moves a thrown send to failed and audits without PHI", async () => {
+  it("moves a thrown send to unknown and audits without PHI", async () => {
     const now = () => new Date("2026-10-22T18:00:00Z");
     const { base, store } = await boot(
       { PLUGIN_WRITES_ENABLED: "true" },
@@ -709,14 +709,14 @@ describe("review findings", () => {
     });
     expect(committed.status).toBe(502);
     const row = await store.getApproval(pending.approval.id);
-    expect(row?.status).toBe("failed");
-    expect(row?.result).toEqual({ reason: "send_failed" });
+    expect(row?.status).toBe("unknown");
+    expect(row?.result).toEqual({ reason: "send_unknown" });
     const audit = await store.listAudit();
-    const failed = audit.find((e) => e.outcome === "failed");
-    expect(failed).toBeTruthy();
-    expect(JSON.stringify(failed)).not.toContain("5555550111");
-    expect(JSON.stringify(failed)).not.toContain("Patient secret");
-    expect(auditContainsPhi(failed as unknown as Record<string, unknown>)).toBe(false);
+    const unknown = audit.find((e) => e.outcome === "unknown" && e.tool === "commit_contact");
+    expect(unknown).toBeTruthy();
+    expect(JSON.stringify(unknown)).not.toContain("5555550111");
+    expect(JSON.stringify(unknown)).not.toContain("Patient secret");
+    expect(auditContainsPhi(unknown as unknown as Record<string, unknown>)).toBe(false);
   });
 
   it("will not send a cancelled request and will not overwrite cancelled", async () => {
@@ -969,6 +969,8 @@ describe("review findings", () => {
     expect(schema).toContain("'unknown'");
     expect(migration).toContain("plugin_message_outbox");
     expect(schema).toContain('pgTable("plugin_message_outbox"');
+    expect(schema).toContain('uniqueIndex("plugin_message_outbox_idempotency_key")');
+    expect(schema).not.toContain('unique("plugin_message_outbox_idempotency_key")');
   });
 
   it("claims a confirm token into sending and will not resend a stale claim", async () => {
@@ -1055,6 +1057,7 @@ describe("review findings", () => {
     const migration = readFileSync(join(__dirname, "../../migrations/add_plugin_api.sql"), "utf8");
     expect(migration).toMatch(/ALTER TABLE contact_approvals ADD COLUMN IF NOT EXISTS phone_key/);
     expect(migration).toMatch(/ALTER TABLE plugin_message_outbox ADD COLUMN IF NOT EXISTS idempotency_key/);
+    expect(migration).toMatch(/ALTER TABLE plugin_message_outbox ADD COLUMN IF NOT EXISTS suggestions/);
     expect(migration).toMatch(/DROP CONSTRAINT IF EXISTS contact_approvals_status_check/);
     expect(migration).toMatch(/'unknown'/);
     expect(migration).toContain("plugin_message_outbox_idempotency_key");

@@ -1647,11 +1647,13 @@ export function mountVoiceRuntime(
            * socket open for a ticket POST.
            */
           persistCallRecord: async (record) => {
-            // Snapshot before closeCallbackSession deletes the map entry —
-            // teardown must still prefer the identified caller (N-5).
+            // Snapshot before closeCallbackSession deletes the map entry.
+            // Message and call report use this same identity (P2-4).
             const returnedSession = callbackSessionFor(record.callSid);
             const identified = returnedSession?.chosen ?? null;
             const identifiedCandidates = returnedSession?.candidates ?? [];
+            const identifiedAttemptId = returnedSession?.attemptId ?? null;
+            const identifiedStore = returnedSession?.store ?? null;
             // A returned call's inbound attempt ends, and an identified caller
             // with no recorded outcome is marked answered. Never awaited and
             // never throws: it is the campaign's ledger, not the call's record.
@@ -1793,15 +1795,15 @@ export function mountVoiceRuntime(
             void Promise.all([
               import("../plugin/callbackReport"),
               import("../plugin/returnedCaller"),
-            ]).then(async ([{ reportSiAssistantCall, extrasFromContactData }, { extrasForIdentifiedContact, extrasForReturnedCaller, hasTicketKeys }]) => {
-              let extras = extrasFromContactData(outboundContact?.data);
-              if (!hasTicketKeys(extras) && record.slug === "si-assistant") {
-                if (identified) {
-                  extras = extrasForIdentifiedContact(identified, identifiedCandidates);
-                } else if (entry.callerPhone) {
-                  extras = await extrasForReturnedCaller(entry.callerPhone);
-                }
-              }
+            ]).then(async ([{ reportSiAssistantCall }, { attachmentForSiAssistant }]) => {
+              const attachment = await attachmentForSiAssistant({
+                outboundContactData: outboundContact?.data,
+                chosen: identified,
+                candidates: identifiedCandidates,
+                store: identifiedStore,
+                attemptId: identifiedAttemptId,
+                phone: entry.callerPhone,
+              });
               return reportSiAssistantCall(
                 {
                   slug: record.slug,
@@ -1811,7 +1813,11 @@ export function mountVoiceRuntime(
                   startedAtMs: record.startedAtMs,
                   endedAtMs: record.endedAtMs,
                 },
-                extras,
+                {
+                  ...attachment.extras,
+                  suggestions: attachment.identityConfirmed ? [] : attachment.suggestions,
+                  identityConfirmed: attachment.identityConfirmed,
+                },
               );
             }).catch(() => undefined);
           },

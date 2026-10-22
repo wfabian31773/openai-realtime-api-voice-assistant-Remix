@@ -1,13 +1,13 @@
 /**
  * Ticket keys for a person ringing the SI Assistant number back.
  *
- * A phone match is a candidate to confirm, never an identity — we never
- * pick between people who share a number (RULE ZERO step 2 / standing
- * instruction 6). Prefer the person the caller was identified as. Otherwise
- * attach a ticket only when exactly one ticket and one patient match among
- * contacts that were actually placed or sent in the last 72 hours. Zero or
- * several → no keys; the message goes to SI Assistant My Messages unmatched
- * for a human to route.
+ * A phone match is a candidate to confirm, never an identity (RULE ZERO
+ * step 2 / standing instruction 6). Ticket keys attach ONLY when the
+ * caller was identified on the call — the person we dialled, or the
+ * person identify_callback_caller settled after name and date of birth.
+ * A phone match never attaches. Unidentified callbacks go to SI Assistant
+ * My Messages with up to three suggested tickets (number + approval id,
+ * no extra PHI) drawn from placed dials and sent texts/emails in 72 hours.
  */
 import { extrasFromContactData } from "./callbackReport";
 import { boundOutboundStore, boundPluginStore } from "./bindings";
@@ -16,27 +16,36 @@ import { SI_ASSISTANT_CAMPAIGN_KEY } from "./siAssistantConstants";
 import { dncKey, type OutboundStore } from "../runtime/outbound/store";
 import type { PluginStore } from "./store";
 
+export const SUGGESTION_LIMIT = 3;
+
 export type TicketExtras = {
   ticketNumber?: string | null;
   approvalId?: string | null;
   ticketId?: string | null;
 };
 
-export type TicketMatch =
-  | { kind: "one"; extras: TicketExtras }
-  | { kind: "several" }
-  | { kind: "none" };
+export type TicketSuggestion = {
+  ticketNumber: string | null;
+  approvalId: string | null;
+};
+
+export type TicketAttachment = {
+  extras: TicketExtras;
+  suggestions: TicketSuggestion[];
+  identityConfirmed: boolean;
+};
 
 export function hasTicketKeys(extras: TicketExtras): boolean {
   return Boolean(extras.ticketNumber || extras.approvalId || extras.ticketId);
 }
 
-export function ticketKeyOf(extras: TicketExtras): string | null {
-  return extras.ticketNumber || extras.ticketId || extras.approvalId || null;
+export function ticketKeyOf(extras: Pick<TicketExtras, "ticketNumber" | "approvalId" | "ticketId">): string | null {
+  return extras.ticketNumber || extras.approvalId || extras.ticketId || null;
 }
 
-export function extrasOfMatch(match: TicketMatch): TicketExtras {
-  return match.kind === "one" ? match.extras : {};
+export function suggestionOf(extras: TicketExtras): TicketSuggestion | null {
+  if (!extras.ticketNumber && !extras.approvalId) return null;
+  return { ticketNumber: extras.ticketNumber ?? null, approvalId: extras.approvalId ?? null };
 }
 
 /** The identified caller's own contact — never another person on the number. */
@@ -46,43 +55,6 @@ export function extrasForIdentifiedContact(
 ): TicketExtras {
   const match = candidates.find((c) => c.contactId === chosen.contactId);
   return extrasFromContactData(match?.data);
-}
-
-export function uniqueTicketAndPatient(
-  rows: Array<{ extras: TicketExtras; patientKey: string }>,
-): TicketMatch {
-  const withKeys = rows.filter((r) => hasTicketKeys(r.extras) && r.patientKey);
-  if (withKeys.length === 0) return { kind: "none" };
-  if (withKeys.length === 1) return { kind: "one", extras: withKeys[0].extras };
-  const tickets = new Set(withKeys.map((r) => ticketKeyOf(r.extras)).filter((k): k is string => Boolean(k)));
-  const patients = new Set(withKeys.map((r) => r.patientKey));
-  if (tickets.size === 1 && patients.size === 1) return { kind: "one", extras: withKeys[0].extras };
-  return { kind: "several" };
-}
-
-/**
- * Campaign contacts that actually reached the network inside 72 hours.
- * A missing or zero lastAttemptAt is not a placed dial.
- */
-export function matchPlacedContacts(
-  candidates: Array<{
-    contactId?: string;
-    lastAttemptAt: Date | null;
-    data?: Record<string, unknown> | null;
-  }>,
-  now = new Date(),
-): TicketMatch {
-  const since = now.getTime() - RETURNED_CALL_LOOKBACK_MS;
-  return uniqueTicketAndPatient(
-    candidates
-      .map((c) => ({
-        extras: extrasFromContactData(c.data),
-        patientKey: c.contactId ?? "",
-        at: c.lastAttemptAt?.getTime() ?? 0,
-      }))
-      .filter((c) => c.at > 0 && c.at >= since)
-      .map(({ extras, patientKey }) => ({ extras, patientKey })),
-  );
 }
 
 export function extrasFromApproval(row: {
@@ -97,20 +69,99 @@ export function extrasFromApproval(row: {
   };
 }
 
-export async function extrasForReturnedCaller(
+type RankedSuggestion = { suggestion: TicketSuggestion; at: number; key: string };
+
+export function mergeSuggestions(ranked: RankedSuggestion[], limit = SUGGESTION_LIMIT): TicketSuggestion[] {
+  const ordered = [...ranked].sort((a, b) => b.at - a.at);
+  const seen = new Set<string>();
+  const out: TicketSuggestion[] = [];
+  for (const row of ordered) {
+    if (!row.key || seen.has(row.key)) continue;
+    seen.add(row.key);
+    out.push(row.suggestion);
+    if (out.length >= limit) break;
+  }
+  return out;
+}
+
+/** Campaign contacts that actually reached the network inside 72 hours. */
+export function suggestionsFromPlacedContacts(
+  candidates: Array<{
+    lastAttemptAt: Date | null;
+    data?: Record<string, unknown> | null;
+  }>,
+  now = new Date(),
+): RankedSuggestion[] {
+  const since = now.getTime() - RETURNED_CALL_LOOKBACK_MS;
+  const ranked: RankedSuggestion[] = [];
+  for (const c of candidates) {
+    const at = c.lastAttemptAt?.getTime() ?? 0;
+    if (at <= 0 || at < since) continue;
+    const extras = extrasFromContactData(c.data);
+    const suggestion = suggestionOf(extras);
+    const key = ticketKeyOf(extras);
+    if (!suggestion || !key) continue;
+    ranked.push({ suggestion, at, key });
+  }
+  return ranked;
+}
+
+export function emptyAttachment(suggestions: TicketSuggestion[] = []): TicketAttachment {
+  return { extras: {}, suggestions, identityConfirmed: false };
+}
+
+export function identifiedAttachment(extras: TicketExtras): TicketAttachment {
+  return { extras, suggestions: [], identityConfirmed: true };
+}
+
+/**
+ * One attachment for the message and the call report. Confirmed identity
+ * (the dialled contact, or the caller identify_callback_caller settled)
+ * is the only path that may carry ticket keys. Otherwise suggestions only.
+ */
+export async function attachmentForSiAssistant(
+  input: {
+    outboundContactData?: Record<string, unknown> | null;
+    chosen?: { contactId: string } | null;
+    candidates?: Array<{ contactId: string; data?: Record<string, unknown> | null; lastAttemptAt?: Date | null }>;
+    store?: OutboundStore | null;
+    attemptId?: string | null;
+    phone?: string;
+  },
+  now = new Date(),
+  outbound: OutboundStore | null = boundOutboundStore(),
+  plugin: PluginStore | null = boundPluginStore(),
+): Promise<TicketAttachment> {
+  if (input.outboundContactData) {
+    return identifiedAttachment(extrasFromContactData(input.outboundContactData));
+  }
+  if (input.chosen) {
+    if (input.store && input.attemptId) {
+      try {
+        const contact = await input.store.loadCallContact(input.chosen.contactId, input.attemptId);
+        const extras = extrasFromContactData(contact?.data);
+        if (hasTicketKeys(extras)) return identifiedAttachment(extras);
+      } catch {
+        console.error("[si-assistant] identified-contact load failed");
+      }
+    }
+    return identifiedAttachment(extrasForIdentifiedContact(input.chosen, input.candidates ?? []));
+  }
+  if (!input.phone) return emptyAttachment();
+  return emptyAttachment(await suggestionsForReturnedCaller(input.phone, now, outbound ?? input.store ?? null, plugin));
+}
+
+export async function suggestionsForReturnedCaller(
   phone: string,
   now = new Date(),
   outbound: OutboundStore | null = boundOutboundStore(),
   plugin: PluginStore | null = boundPluginStore(),
-): Promise<TicketExtras> {
+): Promise<TicketSuggestion[]> {
+  const ranked: RankedSuggestion[] = [];
   if (outbound) {
     try {
       const { candidates } = await outbound.callbackCandidates(SI_ASSISTANT_CAMPAIGN_KEY, phone);
-      const fromCampaign = matchPlacedContacts(candidates, now);
-      if (fromCampaign.kind === "one") return fromCampaign.extras;
-      // Several people or several tickets on this number: never pick, and
-      // do not consult approvals for a different winner.
-      if (fromCampaign.kind === "several") return {};
+      ranked.push(...suggestionsFromPlacedContacts(candidates, now));
     } catch {
       console.error("[si-assistant] returned-caller campaign lookup failed");
     }
@@ -122,12 +173,20 @@ export async function extrasForReturnedCaller(
         key,
         new Date(now.getTime() - RETURNED_CALL_LOOKBACK_MS),
       );
-      return extrasOfMatch(
-        uniqueTicketAndPatient(rows.map((row) => ({ extras: extrasFromApproval(row), patientKey: row.id }))),
-      );
+      for (const row of rows) {
+        // A committed call is only "enqueued". Count texts and emails that
+        // were actually sent. Placed dials come from the campaign list.
+        if (row.channel === "call") continue;
+        if (!row.committedAt || row.committedAt.getTime() <= 0) continue;
+        const extras = extrasFromApproval(row);
+        const suggestion = suggestionOf(extras);
+        const ticketKey = ticketKeyOf(extras);
+        if (!suggestion || !ticketKey) continue;
+        ranked.push({ suggestion, at: row.committedAt.getTime(), key: ticketKey });
+      }
     } catch {
       console.error("[si-assistant] returned-caller approval lookup failed");
     }
   }
-  return {};
+  return mergeSuggestions(ranked);
 }

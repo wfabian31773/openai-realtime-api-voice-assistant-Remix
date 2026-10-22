@@ -157,8 +157,8 @@ export interface PluginStore {
   reclaimStaleOutboxSending(now: Date, staleBefore: Date): Promise<MessageOutboxRow[]>;
   /** Empty delivered bodies (PHI). */
   purgeDeliveredOutboxBodies(now: Date): Promise<number>;
-  /** Delete undelivered rows older than `olderThan`. */
-  purgeExpiredOutbox(now: Date, olderThan: Date): Promise<number>;
+  /** Delete undelivered rows older than `olderThan`. Returns the deleted ids. */
+  purgeExpiredOutbox(now: Date, olderThan: Date): Promise<string[]>;
 
   isSmsOptedOut(phoneKey: string): Promise<boolean>;
   setSmsOptOut(phoneKey: string, optedOut: boolean): Promise<void>;
@@ -181,6 +181,8 @@ export interface MessageOutboxRow {
   lastError: string | null;
   /** sha256(callSid + "\\n" + message). Retries with the same words reuse the row. */
   idempotencyKey?: string | null;
+  /** Ticket number + approval id only. Unmatched My Messages routing hints. */
+  suggestions?: Array<{ ticketNumber: string | null; approvalId: string | null }> | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -401,15 +403,15 @@ export class MemoryPluginStore implements PluginStore {
     return n;
   }
 
-  async purgeExpiredOutbox(_now: Date, olderThan: Date): Promise<number> {
-    let n = 0;
+  async purgeExpiredOutbox(_now: Date, olderThan: Date): Promise<string[]> {
+    const ids: string[] = [];
     for (const [id, row] of this.outbox) {
       if (row.status === "delivered") continue;
       if (row.createdAt.getTime() >= olderThan.getTime()) continue;
       this.outbox.delete(id);
-      n += 1;
+      ids.push(id);
     }
-    return n;
+    return ids;
   }
 
   async isSmsOptedOut(phoneKey: string): Promise<boolean> {

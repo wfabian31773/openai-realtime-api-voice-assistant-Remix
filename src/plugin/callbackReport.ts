@@ -25,14 +25,24 @@ export interface CallbackReport {
   smsCommand?: string;
   /** Taken-message text. Delivered only to the ticketing webhook. Never logged. */
   message?: string;
-  /** No unique ticket+patient match — SI Assistant My Messages should route it. */
+  /** No confirmed identity — SI Assistant My Messages should route it. */
   unmatched?: boolean;
+  /** Ticket number + approval id only. Unmatched My Messages routing hints. */
+  suggestions?: Array<{ ticketNumber: string | null; approvalId: string | null }>;
+  /** The person we dialled, or name+DOB verified on the call. */
+  identityConfirmed?: boolean;
+  /** Outbox row id. Receiver dedupes redelivery on this. */
+  outboxId?: string;
+  /** sha256(callSid + "\\n" + message). Receiver dedupes redelivery on this. */
+  idempotencyKey?: string;
 }
 
 export type TicketExtras = {
   ticketNumber?: string | null;
   approvalId?: string | null;
   ticketId?: string | null;
+  suggestions?: Array<{ ticketNumber: string | null; approvalId: string | null }>;
+  identityConfirmed?: boolean;
 };
 
 export function extrasFromContactData(
@@ -98,7 +108,7 @@ export async function reportSiAssistantCall(
     startedAtMs: number;
     endedAtMs: number;
   },
-  extras: { ticketNumber?: string | null; approvalId?: string | null; ticketId?: string | null } = {},
+  extras: TicketExtras = {},
   reporter: CallbackReporter | null = null,
   env: Record<string, string | undefined> = process.env,
 ): Promise<void> {
@@ -117,6 +127,8 @@ export async function reportSiAssistantCall(
       approvalId: extras.approvalId ?? null,
       ticketId: extras.ticketId ?? null,
       unmatched: !(extras.ticketNumber || extras.approvalId || extras.ticketId) || undefined,
+      suggestions: extras.suggestions?.length ? extras.suggestions : undefined,
+      identityConfirmed: extras.identityConfirmed || undefined,
     });
     if (!result.ok) {
       console.error(`[si-assistant] callback webhook returned ${result.status ?? "unknown"}`);

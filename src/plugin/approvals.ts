@@ -289,9 +289,30 @@ export async function markFailed(
 }
 
 /**
- * A claim that never reached markCommitted/markFailed stays `sending`
- * forever unless we sweep it. Labels those stale rows `unknown` — the
- * send may have succeeded after the process died — and never resends.
+ * The send may already have gone out (timeout, abort after accept,
+ * markCommitted throw). Do not resend. A new prepare is the only way out.
+ */
+export async function markUnknown(
+  store: PluginStore,
+  id: string,
+  result: Record<string, unknown>,
+  now = new Date(),
+): Promise<ContactApprovalRow | null> {
+  return store.updateApproval(
+    id,
+    {
+      status: "unknown",
+      result,
+      updatedAt: now,
+    },
+    "sending",
+  );
+}
+
+/**
+ * A claim that never reached markCommitted/markFailed/markUnknown stays
+ * `sending` forever unless we sweep it. Labels those stale rows `unknown`
+ * — the send may have succeeded after the process died — and never resends.
  * A new prepare is the only way out.
  */
 export async function reapStaleSending(

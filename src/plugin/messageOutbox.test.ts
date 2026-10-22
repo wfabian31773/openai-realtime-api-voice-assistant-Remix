@@ -97,6 +97,47 @@ describe("message outbox", () => {
     expect(purged.expired).toBe(1);
     expect(store.outbox.get(delivered!.id)?.message).toBe("");
     expect(store.outbox.has(stale!.id)).toBe(false);
+    const expired = (await store.listAudit()).find((e) => e.tool === "outbox_expired");
+    expect(expired).toMatchObject({
+      tool: "outbox_expired",
+      route: `/api/plugin/v1/message_outbox/${stale!.id}`,
+      outcome: "expired",
+      httpStatus: 410,
+    });
+    expect(JSON.stringify(expired)).not.toContain("old");
+    expect(JSON.stringify(expired)).not.toContain("gone");
+  });
+
+  it("sends the outbox id and idempotency key so a redelivery can be deduped", async () => {
+    const store = new MemoryPluginStore();
+    const now = new Date("2026-10-22T18:00:00Z");
+    const posted: Array<Record<string, unknown>> = [];
+    const persisted = await persistTakenMessage(
+      {
+        callSid: "CA" + "6".repeat(32),
+        message: "callback please",
+        suggestions: [{ ticketNumber: "VA-1", approvalId: "appr-1" }],
+      },
+      now,
+      store,
+    );
+    expect(persisted).toBeTruthy();
+    await flushOutboxRow(
+      persisted!,
+      store,
+      {
+        async report(payload) {
+          posted.push(payload as unknown as Record<string, unknown>);
+          return { ok: true, status: 200 };
+        },
+      },
+      now,
+    );
+    expect(posted).toHaveLength(1);
+    expect(posted[0].outboxId).toBe(persisted!.id);
+    expect(posted[0].idempotencyKey).toBe(persisted!.idempotencyKey);
+    expect(posted[0].unmatched).toBe(true);
+    expect(posted[0].suggestions).toEqual([{ ticketNumber: "VA-1", approvalId: "appr-1" }]);
   });
 
   it("the SQL insert conflicts on the idempotency key and markOutbox writes attempts", async () => {

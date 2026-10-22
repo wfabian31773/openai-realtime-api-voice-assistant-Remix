@@ -65,9 +65,13 @@ describe("take_si_assistant_message", () => {
     expect(posted[0].ticketNumber).toBe("VA-61001");
     expect(posted[0].ticketId).toBe("tid-9");
     expect(posted[0].message).toBe("Please call me about my glasses");
+    expect(posted[0].identityConfirmed).toBe(true);
+    expect(posted[0].outboxId).toBeTruthy();
+    expect(posted[0].idempotencyKey).toBeFalsy();
     const rows = [...plugin.outbox.values()];
     expect(rows).toHaveLength(1);
     expect(rows[0].message).toBe("");
+    expect(posted[0].outboxId).toBe(rows[0].id);
   });
 
   it("refuses an empty message and does not persist", async () => {
@@ -146,7 +150,7 @@ describe("take_si_assistant_message", () => {
     err.mockRestore();
   });
 
-  it("looks up ticket keys from the recent outbound contact when the attempt id is missing", async () => {
+  it("does not attach on a phone match when the attempt id is missing; suggests the placed ticket", async () => {
     bindOutbox();
     const store = new FakeOutboundStore();
     store.addContact({
@@ -165,12 +169,13 @@ describe("take_si_assistant_message", () => {
       },
     });
     const sid = "CA" + "b".repeat(32);
+    const { candidates } = await store.callbackCandidates("si-assistant", "+15555550111");
     openCallbackSession({
       callSid: sid,
       campaignKey: "si-assistant",
       campaignId: store.campaignId,
       callerPhone: "+15555550111",
-      candidates: [],
+      candidates,
       candidatesLoaded: true,
       purpose: "test",
       store,
@@ -182,9 +187,14 @@ describe("take_si_assistant_message", () => {
     });
     expect(result).toMatchObject({ success: true });
     await vi.waitFor(() => expect(posted).toHaveLength(1));
-    expect(posted[0].approvalId).toBe("appr-back");
-    expect(posted[0].ticketNumber).toBe("VA-61099");
-    expect(posted[0].ticketId).toBe("tid-back");
+    expect(posted[0].approvalId ?? null).toBeNull();
+    expect(posted[0].ticketNumber ?? null).toBeNull();
+    expect(posted[0].ticketId ?? null).toBeNull();
+    expect(posted[0].unmatched).toBe(true);
+    expect(posted[0].identityConfirmed).toBeUndefined();
+    expect(posted[0].suggestions).toEqual([{ ticketNumber: "VA-61099", approvalId: "appr-back" }]);
+    expect(posted[0].outboxId).toBeTruthy();
+    expect(posted[0].idempotencyKey).toBe(outboxIdempotencyKey(sid, "Calling back about my ticket"));
   });
 
   it("prefers the identified caller and does not pick the other person on the number", async () => {
@@ -283,6 +293,13 @@ describe("take_si_assistant_message", () => {
     expect(posted[0].approvalId ?? null).toBeNull();
     expect(posted[0].ticketNumber ?? null).toBeNull();
     expect(posted[0].unmatched).toBe(true);
+    expect(posted[0].suggestions).toEqual(
+      expect.arrayContaining([
+        { ticketNumber: "VA-A", approvalId: "a" },
+        { ticketNumber: "VA-B", approvalId: "b" },
+      ]),
+    );
+    expect((posted[0].suggestions as unknown[]).length).toBe(2);
   });
 
   it("reuses one outbox row for the same call SID and message", async () => {
@@ -295,6 +312,19 @@ describe("take_si_assistant_message", () => {
     expect(plugin.outbox.size).toBe(1);
     const row = [...plugin.outbox.values()][0];
     expect(row.idempotencyKey).toBe(outboxIdempotencyKey(sid, "Same words"));
+  });
+
+  it("uses outbound_call_sid as the idempotency key on a dialled call", async () => {
+    const plugin = bindOutbox();
+    setSiAssistantReporterForTests(null);
+    const sid = "CA" + "f".repeat(32);
+    const tool = getTool(TAKE_MESSAGE_TOOL_NAME);
+    await tool!.handler({ message: "Outbound words", outbound_call_sid: sid });
+    await tool!.handler({ message: "Outbound words", outbound_call_sid: sid });
+    expect(plugin.outbox.size).toBe(1);
+    const row = [...plugin.outbox.values()][0];
+    expect(row.callSid).toBe(sid);
+    expect(row.idempotencyKey).toBe(outboxIdempotencyKey(sid, "Outbound words"));
   });
 
   it("defines SI_ASSISTANT_TOOLS once", () => {

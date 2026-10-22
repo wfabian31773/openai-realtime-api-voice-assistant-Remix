@@ -87,6 +87,7 @@ CREATE TABLE IF NOT EXISTS plugin_message_outbox (
   next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   last_error VARCHAR(64),
   idempotency_key VARCHAR(64),
+  suggestions JSONB,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   CONSTRAINT plugin_message_outbox_status_check CHECK (status IN ('pending', 'sending', 'delivered', 'dead'))
@@ -104,6 +105,7 @@ ALTER TABLE contact_approvals ADD CONSTRAINT contact_approvals_status_check
   CHECK (status IN ('pending', 'approved', 'sending', 'rejected', 'cancelled', 'committed', 'failed', 'unknown'));
 
 ALTER TABLE plugin_message_outbox ADD COLUMN IF NOT EXISTS idempotency_key VARCHAR(64);
+ALTER TABLE plugin_message_outbox ADD COLUMN IF NOT EXISTS suggestions JSONB;
 CREATE UNIQUE INDEX IF NOT EXISTS plugin_message_outbox_idempotency_key
   ON plugin_message_outbox (idempotency_key);
 

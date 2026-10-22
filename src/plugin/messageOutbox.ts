@@ -46,6 +46,7 @@ export async function persistTakenMessage(
     ticketNumber?: string | null;
     approvalId?: string | null;
     message: string;
+    suggestions?: Array<{ ticketNumber: string | null; approvalId: string | null }>;
   },
   now = new Date(),
   store: PluginStore | null = boundPluginStore(),
@@ -64,6 +65,7 @@ export async function persistTakenMessage(
       nextAttemptAt: now,
       lastError: null,
       idempotencyKey: outboxIdempotencyKey(input.callSid, input.message),
+      suggestions: input.suggestions ?? [],
       createdAt: now,
       updatedAt: now,
     });
@@ -88,6 +90,10 @@ async function deliverRow(
       ticketId: row.ticketId,
       message: row.message,
       unmatched: unmatched || undefined,
+      suggestions: unmatched && row.suggestions?.length ? row.suggestions : undefined,
+      identityConfirmed: !unmatched || undefined,
+      outboxId: row.id,
+      idempotencyKey: row.idempotencyKey ?? undefined,
     });
     if (result.ok) return { ok: true, error: "" };
     return { ok: false, error: phiFreeOutboxError(result.status) };
@@ -155,14 +161,32 @@ export async function reclaimStaleOutboxSending(
   return store.reclaimStaleOutboxSending(now, new Date(now.getTime() - staleMs));
 }
 
+async function noteExpired(store: PluginStore, ids: string[]): Promise<void> {
+  for (const id of ids) {
+    try {
+      await store.writeAudit({
+        tokenJti: "system",
+        tool: "outbox_expired",
+        route: `/api/plugin/v1/message_outbox/${id}`,
+        method: "SWEEP",
+        outcome: "expired",
+        httpStatus: 410,
+      });
+    } catch {
+      console.error("[si-assistant] outbox expired audit failed");
+    }
+  }
+}
+
 export async function purgeOutboxRetention(
   store: PluginStore | null = boundPluginStore(),
   now = new Date(),
 ): Promise<{ bodies: number; expired: number }> {
   if (!store) return { bodies: 0, expired: 0 };
   const bodies = await store.purgeDeliveredOutboxBodies(now);
-  const expired = await store.purgeExpiredOutbox(now, new Date(now.getTime() - OUTBOX_RETENTION_MS));
-  return { bodies, expired };
+  const expiredIds = await store.purgeExpiredOutbox(now, new Date(now.getTime() - OUTBOX_RETENTION_MS));
+  await noteExpired(store, expiredIds);
+  return { bodies, expired: expiredIds.length };
 }
 
 /** One delivery attempt of a just-persisted pending row. Sweep uses flushDueOutbox. */

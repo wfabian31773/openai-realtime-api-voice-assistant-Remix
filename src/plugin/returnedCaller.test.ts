@@ -1,16 +1,19 @@
 /**
- * Returned-caller ticket lookup. Synthetic phones and ticket numbers only.
- * Never picks between people on one number.
+ * Returned-caller ticket attach. Synthetic phones and ticket numbers only.
+ * A phone match never attaches. Identified callers do. Everyone else
+ * gets up to three suggestions.
  */
 import { afterEach, describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
+  SUGGESTION_LIMIT,
+  attachmentForSiAssistant,
   extrasForIdentifiedContact,
-  extrasForReturnedCaller,
-  extrasOfMatch,
   hasTicketKeys,
-  matchPlacedContacts,
+  mergeSuggestions,
+  suggestionsForReturnedCaller,
+  suggestionsFromPlacedContacts,
 } from "./returnedCaller";
 import { FakeOutboundStore } from "../runtime/outbound/store.testkit";
 import { MemoryPluginStore, RETURNED_CALL_LOOKBACK_MS } from "./store";
@@ -29,7 +32,7 @@ const PHONE = "+15555550111";
 function approval(partial: Partial<ContactApprovalRow> & { id: string }): ContactApprovalRow {
   const now = partial.createdAt ?? NOW;
   return {
-    channel: "call",
+    channel: "sms",
     status: "committed",
     tokenJti: "preparer",
     ticketId: "tid-1",
@@ -53,105 +56,54 @@ function approval(partial: Partial<ContactApprovalRow> & { id: string }): Contac
   };
 }
 
-describe("matchPlacedContacts", () => {
-  it("attaches when exactly one ticket and one patient were placed in-window", () => {
-    const match = matchPlacedContacts(
+describe("suggestionsFromPlacedContacts", () => {
+  it("keeps a placed dial and skips queued or never-placed contacts", () => {
+    const ranked = suggestionsFromPlacedContacts(
       [
+        { lastAttemptAt: null, data: { approval_id: "queued", ticket_number: "VA-q" } },
         {
-          contactId: "c1",
-          lastAttemptAt: new Date("2026-10-22T16:00:00Z"),
-          data: { approval_id: "appr", ticket_number: "VA-1", ticket_id: "t1" },
-        },
-        {
-          contactId: "c1",
-          lastAttemptAt: new Date("2026-10-22T10:00:00Z"),
-          data: { approval_id: "appr", ticket_number: "VA-1", ticket_id: "t1" },
-        },
-      ],
-      NOW,
-    );
-    expect(match).toEqual({
-      kind: "one",
-      extras: { approvalId: "appr", ticketNumber: "VA-1", ticketId: "t1" },
-    });
-  });
-
-  it("refuses when two tickets match on one number", () => {
-    const match = matchPlacedContacts(
-      [
-        {
-          contactId: "c-old",
-          lastAttemptAt: new Date("2026-10-22T10:00:00Z"),
-          data: { approval_id: "old", ticket_number: "VA-1", ticket_id: "t1" },
-        },
-        {
-          contactId: "c-new",
-          lastAttemptAt: new Date("2026-10-22T16:00:00Z"),
-          data: { approval_id: "new", ticket_number: "VA-2", ticket_id: "t2" },
-        },
-      ],
-      NOW,
-    );
-    expect(match.kind).toBe("several");
-    expect(extrasOfMatch(match)).toEqual({});
-  });
-
-  it("refuses when one ticket matches two patients", () => {
-    const match = matchPlacedContacts(
-      [
-        {
-          contactId: "alice",
-          lastAttemptAt: new Date("2026-10-22T10:00:00Z"),
-          data: { approval_id: "a", ticket_number: "VA-1", ticket_id: "t1" },
-        },
-        {
-          contactId: "bob",
-          lastAttemptAt: new Date("2026-10-22T16:00:00Z"),
-          data: { approval_id: "b", ticket_number: "VA-1", ticket_id: "t1" },
-        },
-      ],
-      NOW,
-    );
-    expect(match.kind).toBe("several");
-  });
-
-  it("excludes a missing lastAttemptAt and a never-placed (at === 0) contact", () => {
-    const match = matchPlacedContacts(
-      [
-        { contactId: "undated", lastAttemptAt: null, data: { approval_id: "undated", ticket_number: "VA-u" } },
-        {
-          contactId: "zero",
           lastAttemptAt: new Date(0),
           data: { approval_id: "zero", ticket_number: "VA-z" },
         },
         {
-          contactId: "dated",
           lastAttemptAt: new Date("2026-10-22T12:00:00Z"),
           data: { approval_id: "dated", ticket_number: "VA-d" },
         },
       ],
       NOW,
     );
-    expect(match).toEqual({
-      kind: "one",
-      extras: { approvalId: "dated", ticketNumber: "VA-d", ticketId: null },
-    });
+    expect(ranked.map((r) => r.suggestion)).toEqual([{ ticketNumber: "VA-d", approvalId: "dated" }]);
   });
 
   it("excludes a placed dial older than 72 hours", () => {
     const stale = new Date("2026-10-18T16:00:00Z");
     expect(NOW.getTime() - stale.getTime()).toBeGreaterThan(RETURNED_CALL_LOOKBACK_MS);
-    const match = matchPlacedContacts(
+    expect(
+      suggestionsFromPlacedContacts(
+        [{ lastAttemptAt: stale, data: { approval_id: "stale", ticket_number: "VA-0" } }],
+        NOW,
+      ),
+    ).toEqual([]);
+  });
+});
+
+describe("mergeSuggestions", () => {
+  it("caps at three, newest first, and dedupes by ticket key", () => {
+    const merged = mergeSuggestions(
       [
-        {
-          contactId: "stale",
-          lastAttemptAt: stale,
-          data: { approval_id: "stale", ticket_number: "VA-0", ticket_id: "t0" },
-        },
+        { suggestion: { ticketNumber: "VA-1", approvalId: "a" }, at: 1, key: "VA-1" },
+        { suggestion: { ticketNumber: "VA-1", approvalId: "a-again" }, at: 2, key: "VA-1" },
+        { suggestion: { ticketNumber: "VA-2", approvalId: "b" }, at: 3, key: "VA-2" },
+        { suggestion: { ticketNumber: "VA-3", approvalId: "c" }, at: 4, key: "VA-3" },
+        { suggestion: { ticketNumber: "VA-4", approvalId: "d" }, at: 5, key: "VA-4" },
       ],
-      NOW,
+      SUGGESTION_LIMIT,
     );
-    expect(match.kind).toBe("none");
+    expect(merged).toEqual([
+      { ticketNumber: "VA-4", approvalId: "d" },
+      { ticketNumber: "VA-3", approvalId: "c" },
+      { ticketNumber: "VA-2", approvalId: "b" },
+    ]);
   });
 });
 
@@ -168,9 +120,9 @@ describe("extrasForIdentifiedContact", () => {
   });
 });
 
-describe("extrasForReturnedCaller", () => {
-  it("reads ticket keys from the campaign contact within 72 hours", async () => {
-    const outbound = new FakeOutboundStore();
+describe("suggestionsForReturnedCaller", () => {
+  it("suggests a placed campaign dial and does not attach", async () => {
+    const outbound = new FakeOutboundStore(() => new Date("2026-10-22T16:00:00Z"));
     outbound.addContact({
       id: "c1",
       phone: PHONE,
@@ -178,37 +130,51 @@ describe("extrasForReturnedCaller", () => {
     });
     const attemptId = await outbound.startAttempt("c1", outbound.campaignId, 1);
     await outbound.finishAttempt(attemptId, { status: "no_answer" });
-    const extras = await extrasForReturnedCaller(PHONE, NOW, outbound, null);
-    expect(extras).toEqual({ approvalId: "appr-1", ticketNumber: "VA-61001", ticketId: "tid-9" });
-    expect(hasTicketKeys(extras)).toBe(true);
+    const suggestions = await suggestionsForReturnedCaller(PHONE, NOW, outbound, null);
+    expect(suggestions).toEqual([{ ticketNumber: "VA-61001", approvalId: "appr-1" }]);
+    const attachment = await attachmentForSiAssistant({ phone: PHONE }, NOW, outbound, null);
+    expect(attachment.identityConfirmed).toBe(false);
+    expect(hasTicketKeys(attachment.extras)).toBe(false);
+    expect(attachment.suggestions).toEqual(suggestions);
   });
 
-  it("attaches a unique committed approval and refuses two tickets on one number", async () => {
+  it("unions a placed dial with a sent text and skips a committed call", async () => {
+    const outbound = new FakeOutboundStore(() => new Date("2026-10-22T14:00:00Z"));
+    outbound.addContact({
+      id: "c-a",
+      phone: PHONE,
+      customData: { approval_id: "appr-a", ticket_number: "VA-A", ticket_id: "ta" },
+    });
+    const placed = await outbound.startAttempt("c-a", outbound.campaignId, 1);
+    await outbound.finishAttempt(placed, { status: "no_answer" });
+
     const plugin = new MemoryPluginStore();
     await plugin.insertApproval(
       approval({
-        id: "appr-only",
-        ticketNumber: "VA-9",
-        ticketId: "tid-9",
-        committedAt: new Date("2026-10-22T15:00:00Z"),
-      }),
-    );
-    const one = await extrasForReturnedCaller(PHONE, NOW, new FakeOutboundStore(), plugin);
-    expect(one).toEqual({ approvalId: "appr-only", ticketNumber: "VA-9", ticketId: "tid-9" });
-
-    await plugin.insertApproval(
-      approval({
-        id: "appr-other",
-        ticketNumber: "VA-2",
-        ticketId: "tid-2",
+        id: "appr-sms",
+        channel: "sms",
+        ticketNumber: "VA-B",
+        ticketId: "tb",
         committedAt: new Date("2026-10-22T16:00:00Z"),
       }),
     );
-    const two = await extrasForReturnedCaller(PHONE, NOW, new FakeOutboundStore(), plugin);
-    expect(two).toEqual({});
+    await plugin.insertApproval(
+      approval({
+        id: "appr-call",
+        channel: "call",
+        ticketNumber: "VA-C",
+        ticketId: "tc",
+        committedAt: new Date("2026-10-22T17:00:00Z"),
+      }),
+    );
+    const suggestions = await suggestionsForReturnedCaller(PHONE, NOW, outbound, plugin);
+    expect(suggestions).toEqual([
+      { ticketNumber: "VA-B", approvalId: "appr-sms" },
+      { ticketNumber: "VA-A", approvalId: "appr-a" },
+    ]);
   });
 
-  it("does not count unsent approvals (approved / sending) or a committedAt of zero", async () => {
+  it("does not count unsent approvals or a committedAt of zero", async () => {
     const plugin = new MemoryPluginStore();
     await plugin.insertApproval(
       approval({
@@ -236,45 +202,98 @@ describe("extrasForReturnedCaller", () => {
         ticketNumber: "VA-zero",
       }),
     );
-    const extras = await extrasForReturnedCaller(PHONE, NOW, new FakeOutboundStore(), plugin);
-    expect(extras).toEqual({});
+    expect(await suggestionsForReturnedCaller(PHONE, NOW, new FakeOutboundStore(), plugin)).toEqual([]);
   });
 
-  it("does not consult approvals when the campaign already has several matches", async () => {
-    const outbound = new FakeOutboundStore();
-    outbound.addContact({
-      id: "c-a",
-      phone: PHONE,
-      customData: { approval_id: "a", ticket_number: "VA-A", ticket_id: "ta" },
-    });
-    outbound.addContact({
-      id: "c-b",
-      phone: PHONE,
-      customData: { approval_id: "b", ticket_number: "VA-B", ticket_id: "tb" },
-    });
-    const a = await outbound.startAttempt("c-a", outbound.campaignId, 1);
-    const b = await outbound.startAttempt("c-b", outbound.campaignId, 1);
-    await outbound.finishAttempt(a, { status: "no_answer" });
-    await outbound.finishAttempt(b, { status: "no_answer" });
+  it("caps the union at three newest tickets", async () => {
     const plugin = new MemoryPluginStore();
-    await plugin.insertApproval(
-      approval({
-        id: "appr-unique",
-        ticketNumber: "VA-only",
-        committedAt: new Date("2026-10-22T15:00:00Z"),
-      }),
+    for (const hour of [10, 12, 14, 16]) {
+      await plugin.insertApproval(
+        approval({
+          id: `appr-${hour}`,
+          ticketNumber: `VA-${hour}`,
+          ticketId: `t-${hour}`,
+          committedAt: new Date(`2026-10-22T${hour}:00:00Z`),
+        }),
+      );
+    }
+    expect(await suggestionsForReturnedCaller(PHONE, NOW, new FakeOutboundStore(), plugin)).toEqual([
+      { ticketNumber: "VA-16", approvalId: "appr-16" },
+      { ticketNumber: "VA-14", approvalId: "appr-14" },
+      { ticketNumber: "VA-12", approvalId: "appr-12" },
+    ]);
+  });
+});
+
+describe("attachmentForSiAssistant", () => {
+  it("attaches the identified outbound contact and ignores phone suggestions", async () => {
+    const attachment = await attachmentForSiAssistant(
+      {
+        outboundContactData: { approval_id: "appr-out", ticket_number: "VA-out", ticket_id: "tid-out" },
+        phone: PHONE,
+      },
+      NOW,
+      new FakeOutboundStore(),
+      null,
     );
-    const extras = await extrasForReturnedCaller(PHONE, NOW, outbound, plugin);
-    expect(extras).toEqual({});
+    expect(attachment).toEqual({
+      identityConfirmed: true,
+      extras: { approvalId: "appr-out", ticketNumber: "VA-out", ticketId: "tid-out" },
+      suggestions: [],
+    });
   });
 
-  it("the runtime teardown prefers the identified caller and never picks on phone", () => {
+  it("attaches the identified callback caller, not the other person on the number", async () => {
+    const attachment = await attachmentForSiAssistant(
+      {
+        chosen: { contactId: "alice" },
+        candidates: [
+          {
+            contactId: "bob",
+            lastAttemptAt: new Date("2026-10-22T16:00:00Z"),
+            data: { approval_id: "bob", ticket_number: "VA-bob" },
+          },
+          {
+            contactId: "alice",
+            lastAttemptAt: new Date("2026-10-22T10:00:00Z"),
+            data: { approval_id: "alice", ticket_number: "VA-alice", ticket_id: "ta" },
+          },
+        ],
+        phone: PHONE,
+      },
+      NOW,
+    );
+    expect(attachment.identityConfirmed).toBe(true);
+    expect(attachment.extras).toEqual({ approvalId: "alice", ticketNumber: "VA-alice", ticketId: "ta" });
+    expect(attachment.suggestions).toEqual([]);
+  });
+
+  it("never attaches on a phone match alone", async () => {
+    const outbound = new FakeOutboundStore(() => new Date("2026-10-22T16:00:00Z"));
+    outbound.addContact({
+      id: "only",
+      phone: PHONE,
+      customData: { approval_id: "only", ticket_number: "VA-only" },
+    });
+    const attemptId = await outbound.startAttempt("only", outbound.campaignId, 1);
+    await outbound.finishAttempt(attemptId, { status: "no_answer" });
+    const attachment = await attachmentForSiAssistant({ phone: PHONE }, NOW, outbound, null);
+    expect(attachment.identityConfirmed).toBe(false);
+    expect(attachment.extras).toEqual({});
+    expect(attachment.suggestions).toEqual([{ ticketNumber: "VA-only", approvalId: "only" }]);
+  });
+});
+
+describe("runtime teardown identity", () => {
+  it("uses the same attachment helper for the message and the call report", () => {
     const src = readFileSync(join(__dirname, "../runtime/voiceRuntime.ts"), "utf8");
     expect(src).toMatch(/callbackSessionFor/);
-    expect(src).toMatch(/extrasForIdentifiedContact/);
-    expect(src).toMatch(/extrasForReturnedCaller/);
-    expect(src).toMatch(/hasTicketKeys/);
-    expect(src).toMatch(/si-assistant/);
+    expect(src).toMatch(/attachmentForSiAssistant/);
+    expect(src).toMatch(/identifiedAttemptId/);
+    expect(src).toMatch(/identifiedStore/);
+    expect(src).not.toMatch(/extrasForReturnedCaller/);
+    expect(src).not.toMatch(/matchPlacedContacts/);
     expect(src.indexOf("identified = returnedSession")).toBeLessThan(src.indexOf("closeCallbackSession(record.callSid"));
+    expect(src.indexOf("identifiedAttemptId")).toBeLessThan(src.indexOf("closeCallbackSession(record.callSid"));
   });
 });

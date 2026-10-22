@@ -77,9 +77,35 @@ function outboxFrom(r: Record<string, unknown>): MessageOutboxRow {
     nextAttemptAt: new Date(String(r.next_attempt_at)),
     lastError: (r.last_error as string | null) ?? null,
     idempotencyKey: (r.idempotency_key as string | null) ?? null,
+    suggestions: suggestionsFrom(r.suggestions),
     createdAt: new Date(String(r.created_at)),
     updatedAt: new Date(String(r.updated_at)),
   };
+}
+
+function suggestionsFrom(
+  value: unknown,
+): Array<{ ticketNumber: string | null; approvalId: string | null }> | null {
+  if (!value) return null;
+  let raw: unknown = value;
+  if (typeof value === "string") {
+    try {
+      raw = JSON.parse(value);
+    } catch {
+      return null;
+    }
+  }
+  if (!Array.isArray(raw)) return null;
+  const out: Array<{ ticketNumber: string | null; approvalId: string | null }> = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object") continue;
+    const row = item as { ticketNumber?: unknown; approvalId?: unknown };
+    const ticketNumber = typeof row.ticketNumber === "string" ? row.ticketNumber : null;
+    const approvalId = typeof row.approvalId === "string" ? row.approvalId : null;
+    if (!ticketNumber && !approvalId) continue;
+    out.push({ ticketNumber, approvalId });
+  }
+  return out;
 }
 
 export function createSqlPluginStore(exec: SqlExec): PluginStore {
@@ -241,8 +267,8 @@ export function createSqlPluginStore(exec: SqlExec): PluginStore {
         `INSERT INTO plugin_message_outbox (
             id, call_sid, ticket_id, ticket_number, approval_id, message,
             status, attempts, next_attempt_at, last_error, idempotency_key,
-            created_at, updated_at
-          ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+            suggestions, created_at, updated_at
+          ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb,$13,$14)
           ON CONFLICT (idempotency_key) DO NOTHING
           RETURNING *`,
         [
@@ -257,6 +283,7 @@ export function createSqlPluginStore(exec: SqlExec): PluginStore {
           row.nextAttemptAt.toISOString(),
           row.lastError,
           row.idempotencyKey ?? null,
+          JSON.stringify(row.suggestions ?? []),
           row.createdAt.toISOString(),
           row.updatedAt.toISOString(),
         ],
@@ -345,7 +372,7 @@ export function createSqlPluginStore(exec: SqlExec): PluginStore {
           RETURNING id`,
         [olderThan.toISOString()],
       );
-      return rows.length;
+      return rows.map((r) => String(r.id));
     },
     async isSmsOptedOut(phoneKey) {
       // Any DNC row blocks SMS — a call opt-out is also a text opt-out.

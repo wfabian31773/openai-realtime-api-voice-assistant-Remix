@@ -17,6 +17,7 @@ import {
   consumeConfirmToken,
   markCommitted,
   markFailed,
+  markUnknown,
   prepareContact,
   reapStaleSending,
   rejectContact,
@@ -343,15 +344,25 @@ export function mountPluginApi(app: Express, deps: PluginApiDeps): void {
     try {
       executed = await executeApproved(deps, consumed.approval, now);
     } catch {
-      await markFailed(deps.store, consumed.approval.id, { reason: "send_failed" }, now);
-      jsonError(res, 502, "The send failed");
-      await audit(deps, req.pluginAuth, req, "commit_contact", "failed", 502, {
+      // Timeout / throw after the send may already have gone out.
+      await markUnknown(deps.store, consumed.approval.id, { reason: "send_unknown" }, now);
+      jsonError(res, 502, "The send outcome is unknown");
+      await audit(deps, req.pluginAuth, req, "commit_contact", "unknown", 502, {
         approvalId: consumed.approval.id,
         ticketId: consumed.approval.ticketId,
       });
       return;
     }
     if (!executed.ok) {
+      if (executed.reason === "unknown") {
+        await markUnknown(deps.store, consumed.approval.id, { reason: "unknown" }, now);
+        jsonError(res, executed.status, executed.error);
+        await audit(deps, req.pluginAuth, req, "commit_contact", "unknown", executed.status, {
+          approvalId: consumed.approval.id,
+          ticketId: consumed.approval.ticketId,
+        });
+        return;
+      }
       await markFailed(deps.store, consumed.approval.id, { reason: executed.reason }, now);
       jsonError(res, executed.status, executed.error);
       await audit(deps, req.pluginAuth, req, "commit_contact", "failed", executed.status, {

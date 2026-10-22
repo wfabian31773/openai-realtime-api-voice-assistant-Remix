@@ -12,19 +12,9 @@ import { registerTool, type ToolResult } from './registry';
 import { callbackSessionFor } from './outboundTools';
 import type { OutboundStore } from '../runtime/outbound/store';
 import { bindOutboundStore, bindPluginStore, boundOutboundStore, boundPluginStore } from '../plugin/bindings';
-import {
-  createCallbackReporter,
-  extrasFromContactData,
-  type CallbackReporter,
-} from '../plugin/callbackReport';
+import { createCallbackReporter, type CallbackReporter } from '../plugin/callbackReport';
 import type { PluginStore } from '../plugin/store';
-import {
-  extrasForIdentifiedContact,
-  extrasForReturnedCaller,
-  extrasOfMatch,
-  hasTicketKeys,
-  matchPlacedContacts,
-} from '../plugin/returnedCaller';
+import { attachmentForSiAssistant, type TicketAttachment } from '../plugin/returnedCaller';
 import { flushOutboxRow, persistTakenMessage } from '../plugin/messageOutbox';
 import { siAssistantNumber } from '../plugin/siAssistantConstants';
 import { formatPhoneForSpeech } from '../utils/timeAware';
@@ -67,43 +57,40 @@ function callerPhoneOf(input: Record<string, unknown>, sessionPhone?: string): s
   return sessionPhone ?? '';
 }
 
-async function extrasFor(input: Record<string, unknown>): Promise<{
-  ticketNumber?: string | null;
-  approvalId?: string | null;
-  ticketId?: string | null;
-}> {
+/** Callback injects outbound_callback_sid; a dialled call injects outbound_call_sid. */
+function callSidOf(input: Record<string, unknown>): string {
+  if (typeof input.outbound_callback_sid === 'string' && input.outbound_callback_sid) {
+    return input.outbound_callback_sid;
+  }
+  if (typeof input.outbound_call_sid === 'string' && input.outbound_call_sid) {
+    return input.outbound_call_sid;
+  }
+  return '';
+}
+
+async function attachmentFor(input: Record<string, unknown>): Promise<TicketAttachment> {
   const contactId = typeof input.outbound_contact_id === 'string' ? input.outbound_contact_id : '';
   const attemptId = typeof input.outbound_attempt_id === 'string' ? input.outbound_attempt_id : '';
+  const sid = callSidOf(input);
+  const session = sid ? callbackSessionFor(sid) : null;
+  let outboundContactData: Record<string, unknown> | null | undefined;
   if (contactId && attemptId) {
-    const store = await outboundStore();
-    const contact = await store.loadCallContact(contactId, attemptId);
-    const extras = extrasFromContactData(contact?.data);
-    if (hasTicketKeys(extras)) return extras;
-  }
-  const sid = typeof input.outbound_callback_sid === 'string' ? input.outbound_callback_sid : '';
-  if (sid) {
-    const session = callbackSessionFor(sid);
-    if (session?.chosen) {
-      if (session.attemptId) {
-        const contact = await session.store.loadCallContact(session.chosen.contactId, session.attemptId);
-        const extras = extrasFromContactData(contact?.data);
-        if (hasTicketKeys(extras)) return extras;
-      }
-      const fromChosen = extrasForIdentifiedContact(session.chosen, session.candidates);
-      if (hasTicketKeys(fromChosen)) return fromChosen;
-      // Identified, but their record has no ticket keys. Do not pick among others.
-      return {};
+    try {
+      const store = session?.store ?? (await outboundStore());
+      const contact = await store.loadCallContact(contactId, attemptId);
+      outboundContactData = contact?.data;
+    } catch {
+      console.error('[si-assistant] identified-contact load failed');
     }
-    if (session?.candidates?.length) {
-      const fromSession = matchPlacedContacts(session.candidates);
-      if (fromSession.kind !== 'none') return extrasOfMatch(fromSession);
-    }
-    const phone = callerPhoneOf(input, session?.callerPhone);
-    if (phone) return extrasForReturnedCaller(phone, new Date(), session?.store ?? (await outboundStore()), boundPluginStore());
   }
-  const phone = callerPhoneOf(input);
-  if (phone) return extrasForReturnedCaller(phone, new Date(), await outboundStore(), boundPluginStore());
-  return {};
+  return attachmentForSiAssistant({
+    outboundContactData,
+    chosen: session?.chosen,
+    candidates: session?.candidates,
+    store: session?.store,
+    attemptId: session?.attemptId ?? (attemptId || null),
+    phone: callerPhoneOf(input, session?.callerPhone),
+  });
 }
 
 function takenResult(): ToolResult {
@@ -154,14 +141,14 @@ registerTool({
         fix: 'Ask what they would like the support team to know, then call this again with their words.',
       };
     }
-    const extras = await extrasFor(input);
-    const callSid = typeof input.outbound_callback_sid === 'string' ? input.outbound_callback_sid : null;
+    const attachment = await attachmentFor(input);
     const persisted = await persistTakenMessage({
-      callSid,
-      ticketId: extras.ticketId ?? null,
-      ticketNumber: extras.ticketNumber ?? null,
-      approvalId: extras.approvalId ?? null,
+      callSid: callSidOf(input) || null,
+      ticketId: attachment.extras.ticketId ?? null,
+      ticketNumber: attachment.extras.ticketNumber ?? null,
+      approvalId: attachment.extras.approvalId ?? null,
       message,
+      suggestions: attachment.identityConfirmed ? [] : attachment.suggestions,
     });
     if (!persisted) return persistFailedResult();
     void flushOutboxRow(persisted, boundPluginStore(), reporter()).catch(() => {

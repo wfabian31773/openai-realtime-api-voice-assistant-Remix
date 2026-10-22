@@ -69,19 +69,27 @@ outbox. If persist itself fails, the agent says so and gives the SI
 Assistant number.
 
 An inbound returned call has no outbound session contact. Teardown and
-`take_si_assistant_message` prefer the person the caller was identified
-as. Otherwise they attach a ticket only when exactly one ticket and one
-patient match among contacts that were actually placed or sent in the
-last 72 hours (a committed approval, or a campaign dial that reached
-the network). Zero or several matches attach no ticket keys and the
-message is sent unmatched to SI Assistant My Messages for a human to
-route. A phone number is never used to pick between people.
+`take_si_assistant_message` use the same identity. Ticket keys attach
+ONLY when the caller was identified on the call — the person we dialled,
+or name plus date of birth verified by `identify_callback_caller`. A
+phone match never attaches. Unidentified callbacks go to SI Assistant
+My Messages with up to three suggested tickets (ticket number and
+approval id only, no extra PHI) drawn from the union of placed dials
+(actually reached the network, not merely enqueued) and sent texts or
+emails in the last 72 hours.
 
 `plugin_message_outbox` retries webhook delivery. Stale `sending` rows
 are reclaimed to `pending`. Dead rows write a PHI-free audit (`outbox_dead`).
 An unset webhook URL leaves rows pending (they do not expire toward dead).
-Retries with the same call SID and message reuse one idempotency key.
-Delivered bodies are purged; undelivered rows older than 30 days are deleted.
+Retries with the same call SID and message reuse one idempotency key
+(`outbound_callback_sid` or `outbound_call_sid`). The webhook payload
+carries the outbox row id and that key so a redelivery can be deduped.
+Delivered bodies are purged; undelivered rows older than 30 days are
+deleted and audited (`outbox_expired`, ids only).
+
+A send that times out or throws after it may already have gone out is
+labelled `unknown`, never `failed`. Do not resend. A new prepare is
+the only way out.
 
 `/api/test-call` and surgery-line routing are untouched.
 
