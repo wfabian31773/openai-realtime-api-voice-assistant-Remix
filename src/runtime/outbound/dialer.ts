@@ -54,7 +54,7 @@
  * ─────────────────────────────────────────────────────────────────────────────
  */
 
-import type { ContactSource, OutboundLanePolicy, SourceContact } from "./campaign";
+import type { ContactSource, NotPlacedReason, OutboundLanePolicy, SourceContact } from "./campaign";
 import {
   REFUSAL_STREAK_WINDOW_MS,
   campaignEnabled,
@@ -433,37 +433,49 @@ async function dialOne(
     }
   }
 
-  if (await deps.store.isDoNotContact(contact.phone)) {
-    await deps.store.settleContact(contact.id, "do_not_call");
-    return "do_not_contact";
-  }
-
   // Every attempt on this phone in this campaign, not only this row's: an
   // import can carry one person on two rows, and the caps are per person.
   // A dial Twilio refused is not among them — nobody was rung.
   const prior = await deps.store.priorAttempts(contact.id);
+  // Whether THIS row may have rung anybody (v115): any of its own attempts
+  // that Twilio did not refuse, an open one included. An ambiguous createCall
+  // throw or a lost markContactDialled leaves `contact.attempts` at 0 while
+  // the phone may have rung, so the counter cannot answer this.
+  const dialledThisRow = prior.some((a) => a.contactId === contact.id);
+  // A row settled before it was ever dialled tells the lane, so whoever asked
+  // for the call learns it never rang. A row that was dialled is not
+  // reported: that call may have rung.
+  const notPlaced = async (reason: NotPlacedReason): Promise<void> => {
+    if (dialledThisRow || !policy.onNotPlaced) return;
+    try {
+      await policy.onNotPlaced({ id: contact.id, customData: contact.customData }, reason);
+    } catch {
+      (deps.log ?? console.log)(`[outbound] ${policy.campaignKey}: could not report a call that was never placed (${reason})`);
+    }
+  };
+
+  if (await deps.store.isDoNotContact(contact.phone)) {
+    await deps.store.settleContact(contact.id, "do_not_call");
+    await notPlaced("do_not_contact");
+    return "do_not_contact";
+  }
+
   // A contact that had to be FIRST rung by a deadline it has missed (v115):
   // settled, never rung late. An approval acted on hours after it was given
   // is a call nobody asked for any more. THIS ROW's own dials decide it, not
   // the phone's: `prior` is every attempt on the number, so a second approval
   // for a patient already called once would read as a retry and be rung the
-  // next morning. `attempts` counts only dials Twilio accepted
-  // (markContactDialled), so a refused dial still leaves the row unrung.
-  if (contact.attempts === 0 && placeByPassed(contact.customData, now)) {
+  // next morning.
+  if (!dialledThisRow && placeByPassed(contact.customData, now)) {
     await deps.store.settleContact(contact.id, "rescheduled", {
       notes: "not placed before its place-by deadline; never rung",
     });
-    if (policy.onPlaceByPassed) {
-      try {
-        await policy.onPlaceByPassed({ id: contact.id, customData: contact.customData });
-      } catch {
-        (deps.log ?? console.log)(`[outbound] ${policy.campaignKey}: could not report a place-by expiry`);
-      }
-    }
+    await notPlaced("place_by_passed");
     return "place_by_passed";
   }
   if (prior.length >= policy.caps.total) {
     await deps.store.settleContact(contact.id, "max_attempts");
+    await notPlaced("total_cap");
     return "total_cap";
   }
   // A call to this phone still on the line, from this campaign or any other:

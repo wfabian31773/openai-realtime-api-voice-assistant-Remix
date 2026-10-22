@@ -121,7 +121,7 @@ export class FakeOutboundStore implements OutboundStore {
     const siblings = this.samePhone(contactId, false);
     return this.attempts
       .filter((a) => siblings.has(a.contactId) && (a.direction ?? "outbound") === "outbound" && a.finish?.status !== NOT_PLACED)
-      .map((a) => ({ at: a.at }));
+      .map((a) => ({ at: a.at, contactId: a.contactId }));
   }
 
   async consecutiveRefusedAttempts(contactId: string, since: Date): Promise<number> {

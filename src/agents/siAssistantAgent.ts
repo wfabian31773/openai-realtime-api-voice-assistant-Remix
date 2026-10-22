@@ -59,8 +59,8 @@ export const siAssistantPolicy: OutboundLanePolicy = {
   voicemail: () => SI_ASSISTANT_VOICEMAIL,
   callbackPurpose: SI_ASSISTANT_CALLBACK_PURPOSE,
   tools: SI_ASSISTANT_TOOLS,
-  // A call that missed its place-by deadline marks its approval failed (v115).
-  onPlaceByPassed: (contact) => reportCallNotPlaced(contact),
+  // A call settled before it was ever dialled marks its approval failed (v115).
+  onNotPlaced: (contact, reason) => reportCallNotPlaced(contact, reason),
 };
 
 function buildPrompt(contact: OutboundContact | undefined, returnedCall: boolean): string {

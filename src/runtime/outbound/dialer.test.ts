@@ -1125,21 +1125,87 @@ describe("a place-by deadline (v115)", () => {
     expect(store.contacts.get("c1")!.status).toBe("rescheduled");
   });
 
-  it("reports the expiry to the lane once, with the contact", async () => {
+  type Reported = Array<{ contact: { id: string; customData: Record<string, unknown> }; reason: string }>;
+  const reporting = (reported: Reported) => ({
+    ...policy,
+    onNotPlaced: async (contact: { id: string; customData: Record<string, unknown> }, reason: string) =>
+      void reported.push({ contact, reason }),
+  });
+
+  it("reports the expiry to the lane once, with the contact and the reason", async () => {
     const { store, deps } = setup();
-    const reported: Array<{ id: string; customData: Record<string, unknown> }> = [];
+    const reported: Reported = [];
     store.addContact({ id: "c1", phone: "+15555550111", customData: { place_by: PAST, approval_id: "appr-1" } });
-    const p = { ...policy, onPlaceByPassed: async (c: { id: string; customData: Record<string, unknown> }) => void reported.push(c) };
-    await runCampaignTick("test-lane", p, deps);
-    expect(reported).toEqual([{ id: "c1", customData: { place_by: PAST, approval_id: "appr-1" } }]);
-    await runCampaignTick("test-lane", p, deps);
+    await runCampaignTick("test-lane", reporting(reported), deps);
+    expect(reported).toEqual([
+      { contact: { id: "c1", customData: { place_by: PAST, approval_id: "appr-1" } }, reason: "place_by_passed" },
+    ]);
+    await runCampaignTick("test-lane", reporting(reported), deps);
     expect(reported).toHaveLength(1);
+  });
+
+  it("reports a never-dialled row settled for do-not-contact", async () => {
+    const { store, createCall, deps } = setup();
+    const reported: Reported = [];
+    store.addContact({ id: "c1", phone: "+15555550111", customData: { place_by: FUTURE } });
+    await store.stampDoNotContact("+15555550111", "opt_out_of_calls");
+    expect((await runCampaignTick("test-lane", reporting(reported), deps)).held).toEqual({ do_not_contact: 1 });
+    expect(createCall).not.toHaveBeenCalled();
+    expect(reported.map((r) => r.reason)).toEqual(["do_not_contact"]);
+  });
+
+  it("does not report a do-not-contact settle on a row that was already dialled (that call may have rung)", async () => {
+    const { store, deps } = setup();
+    const reported: Reported = [];
+    store.addContact({ id: "c1", phone: "+15555550111", status: "no_answer", attempts: 1 });
+    store.attempts.push({ id: "a0", contactId: "c1", campaignId: "campaign-1", attemptNumber: 1, at: new Date(NOW.getTime() - 3 * 24 * 60 * 60 * 1000) });
+    await store.stampDoNotContact("+15555550111", "opt_out_of_calls");
+    await runCampaignTick("test-lane", reporting(reported), deps);
+    expect(store.contacts.get("c1")!.status).toBe("do_not_call");
+    expect(reported).toEqual([]);
+  });
+
+  it("reports a never-dialled row settled at the phone's total cap through other rows", async () => {
+    const { store, createCall, deps } = setup();
+    const reported: Reported = [];
+    store.addContact({ id: "c0", phone: "+15555550111", status: "answered", attempts: 3 });
+    for (const [i, days] of [30, 20, 10].entries()) {
+      store.attempts.push({ id: `a${i}`, contactId: "c0", campaignId: "campaign-1", attemptNumber: i + 1, at: new Date(NOW.getTime() - days * 24 * 60 * 60 * 1000) });
+    }
+    store.addContact({ id: "c1", phone: "+15555550111", customData: { place_by: FUTURE } });
+    expect((await runCampaignTick("test-lane", reporting(reported), deps)).held).toEqual({ total_cap: 1 });
+    expect(createCall).not.toHaveBeenCalled();
+    expect(reported).toEqual([{ contact: { id: "c1", customData: { place_by: FUTURE } }, reason: "total_cap" }]);
+  });
+
+  it("does not settle a row whose own dial may have rung, even with its counter at 0", async () => {
+    // An ambiguous createCall throw, or a lost markContactDialled, leaves
+    // `attempts` at 0 while an attempt row exists: the phone may have rung.
+    const { store, createCall, deps } = setup();
+    const reported: Reported = [];
+    store.addContact({ id: "c1", phone: "+15555550111", status: "no_answer", attempts: 0, customData: { place_by: PAST } });
+    store.attempts.push({ id: "a0", contactId: "c1", campaignId: "campaign-1", attemptNumber: 1, at: new Date(NOW.getTime() - 3 * 24 * 60 * 60 * 1000) });
+    const r = await runCampaignTick("test-lane", reporting(reported), deps);
+    expect(r.held).not.toHaveProperty("place_by_passed");
+    expect(store.contacts.get("c1")!.status).not.toBe("rescheduled");
+    expect(reported).toEqual([]);
+    expect(createCall).toHaveBeenCalledTimes(1);
+  });
+
+  it("still settles a row whose only dial Twilio refused (nobody was rung)", async () => {
+    const { store, createCall, deps } = setup();
+    const reported: Reported = [];
+    store.addContact({ id: "c1", phone: "+15555550111", customData: { place_by: PAST } });
+    store.attempts.push({ id: "a0", contactId: "c1", campaignId: "campaign-1", attemptNumber: 1, at: new Date(NOW.getTime() - 60 * 60 * 1000), finish: { status: "not_placed" } });
+    expect((await runCampaignTick("test-lane", reporting(reported), deps)).held).toEqual({ place_by_passed: 1 });
+    expect(createCall).not.toHaveBeenCalled();
+    expect(reported.map((r) => r.reason)).toEqual(["place_by_passed"]);
   });
 
   it("keeps the settle when the lane's report throws", async () => {
     const { store, createCall, deps } = setup();
     store.addContact({ id: "c1", phone: "+15555550111", customData: { place_by: PAST } });
-    const p = { ...policy, onPlaceByPassed: async () => { throw new Error("hub down"); } };
+    const p = { ...policy, onNotPlaced: async () => { throw new Error("hub down"); } };
     const r = await runCampaignTick("test-lane", p, deps);
     expect(r.held).toEqual({ place_by_passed: 1 });
     expect(createCall).not.toHaveBeenCalled();

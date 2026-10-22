@@ -100,6 +100,10 @@ export interface AttemptFinish {
 
 export interface PriorAttempt {
   at: Date;
+  /** The contact row the attempt was made for. One phone can carry several
+   * rows (an import, or one SI Assistant approval each), and the caps read
+   * them all; the place-by gate asks whether THIS row has been dialled. */
+  contactId: string;
 }
 
 /**
@@ -444,7 +448,7 @@ export async function createDbOutboundStore(): Promise<OutboundStore> {
           -- dncKey on every number that can carry an attempt, because an
           -- unreadable number is refused before it is ever dialled.
           -- A dial Twilio refused rang nobody, so it spends no cap.
-          SELECT (a.attempted_at AT TIME ZONE 'UTC') AS attempted_at
+          SELECT (a.attempted_at AT TIME ZONE 'UTC') AS attempted_at, a.contact_id
             FROM campaign_contacts me
             JOIN campaign_contacts c
               ON c.campaign_id = me.campaign_id
@@ -453,7 +457,7 @@ export async function createDbOutboundStore(): Promise<OutboundStore> {
             JOIN campaign_contact_attempts a ON a.contact_id = c.id AND a.direction = 'outbound'
            WHERE me.id = ${contactId}::varchar
              AND a.status IS DISTINCT FROM ${NOT_PLACED}::varchar`),
-      ).map((r) => ({ at: new Date(r.attempted_at as string) }));
+      ).map((r) => ({ at: new Date(r.attempted_at as string), contactId: String(r.contact_id) }));
     },
 
     async consecutiveRefusedAttempts(contactId, since) {

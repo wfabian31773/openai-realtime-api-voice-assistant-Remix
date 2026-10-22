@@ -10,8 +10,8 @@ import {
   mayDialNow,
   type DialDecision,
 } from "../runtime/outbound/callingWindow";
-import { outboundDialingEnabled, PLACE_BY_KEY } from "../runtime/outbound/campaign";
-import { dncKey, type OutboundStore } from "../runtime/outbound/store";
+import { outboundDialingEnabled, PLACE_BY_KEY, type NotPlacedReason } from "../runtime/outbound/campaign";
+import { DIALABLE_STATUSES, dncKey, type OutboundStore } from "../runtime/outbound/store";
 import { readDobQuietly } from "../tools/dobParts";
 import { boundPluginStore } from "./bindings";
 import type { PluginStore } from "./store";
@@ -170,7 +170,8 @@ export type EnqueueCallResult =
         | "daily_cap"
         | "weekly_cap"
         | "total_cap"
-        | "too_soon";
+        | "too_soon"
+        | "call_already_queued";
     };
 
 export async function evaluateAndEnqueueCall(
@@ -193,6 +194,18 @@ export async function evaluateAndEnqueueCall(
   // Each approval is its own row, so reading only this approval's row would
   // find none and let a second approval through the daily cap (v115).
   const rows = await store.sourceRows(campaignId);
+  // Another approval's call to this number that the dialler will still place
+  // (queued, a retry, or on the line now): it rings first or this one does,
+  // and the per-phone caps hold the other until its place-by deadline lapses.
+  // Refused here so the commit never answers "queued" for a call that would
+  // not ring.
+  const stillDialling = rows.some(
+    (r) =>
+      r.externalRef !== externalRef &&
+      dncKey(r.phone) === key &&
+      (r.status === "calling" || (DIALABLE_STATUSES as readonly string[]).includes(r.status)),
+  );
+  if (stillDialling) return { ok: false, reason: "call_already_queued" };
   const onPhone = rows.find((r) => r.externalRef === externalRef) ?? rows.find((r) => dncKey(r.phone) === key);
   const prior = onPhone ? await store.priorAttempts(onPhone.id) : [];
   const decision = mayDialNow(now, prior, SI_ASSISTANT_WINDOW, SI_ASSISTANT_CAPS);
@@ -230,14 +243,17 @@ export function siAssistantMayDial(
 }
 
 /**
- * The dialler settled an SI Assistant call that missed its place-by deadline
- * before its first dial (v115). The approval read `committed` with
- * `queued: true`; it now reads `failed`, so nobody takes a call that never
- * rang as made. Only a committed approval moves, and only once. A missing
- * store or approval is a no-op: the contact row already says what happened.
+ * The dialler settled an SI Assistant call before its first dial (v115): its
+ * place-by deadline passed, the number went on the do-not-contact list, or
+ * the phone reached its total cap. The approval read `committed` with
+ * `queued: true`; it now reads `failed` with the reason, so nobody takes a
+ * call that never rang as made. Only a committed approval moves, and only
+ * once. A missing store or approval is a no-op: the contact row already says
+ * what happened.
  */
 export async function reportCallNotPlaced(
   contact: { id: string; customData: Record<string, unknown> },
+  reason: NotPlacedReason = "place_by_passed",
   store: PluginStore | null = boundPluginStore(),
   now = new Date(),
 ): Promise<void> {
@@ -250,7 +266,7 @@ export async function reportCallNotPlaced(
     approvalId,
     {
       status: "failed",
-      result: { ...(current.result ?? {}), queued: false, placed: false, reason: "place_by_passed" },
+      result: { ...(current.result ?? {}), queued: false, placed: false, reason },
       updatedAt: now,
     },
     "committed",

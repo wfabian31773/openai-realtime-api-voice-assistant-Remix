@@ -91,6 +91,12 @@ describe("the attempt row keeps the answer webhook's verdict", () => {
     expect(prior).not.toMatch(/a\.contact_id = \$\{contactId\}/);
   });
 
+  it("names each attempt's own row, so the place-by gate can ask whether THIS row was dialled (v115)", () => {
+    const prior = method("priorAttempts");
+    expect(prior).toContain("AS attempted_at, a.contact_id");
+    expect(prior).toContain("contactId: String(r.contact_id)");
+  });
+
   it("spends no cap on a dial Twilio refused (Codex round 4, #357)", () => {
     expect(method("priorAttempts")).toContain("AND a.status IS DISTINCT FROM ${NOT_PLACED}::varchar");
   });

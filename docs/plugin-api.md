@@ -74,14 +74,22 @@ callers read the same field on the campaign candidates. The dialer already enfor
 
 The commit applies the same per-number caps before it queues, so a second
 approval for a number already rung today is refused (`daily_cap`,
-`outcome: "not_sent"`) instead of reading as queued.
+`outcome: "not_sent"`) instead of reading as queued. A second approval for
+a number whose earlier approved call is still queued, retrying or on the
+line is refused too (`call_already_queued`, HTTP 409): the dialler would
+place only one of them.
 
 A queued call must be FIRST rung within two hours (`custom_data.place_by`).
-If it is not, the dialler settles the contact `rescheduled`, never rings it,
-and moves the approval from `committed` to `failed` with
-`result.reason: "place_by_passed"` and a `call_not_placed` audit row. The
-deadline is the contact row's own: an earlier approval's call to the same
-number does not turn this one into a retry.
+If it is not, the dialler settles the contact `rescheduled` and never rings
+it. When the dialler settles a call that was never dialled — the deadline
+passed, the number went on the do-not-contact list, or the number reached
+its total cap — the approval moves from `committed` to `failed` with
+`result.placed: false`, `result.reason` (`place_by_passed`,
+`do_not_contact` or `total_cap`) and a `call_not_placed` audit row. "Never
+dialled" means this approval's own row has no attempt Twilio accepted or
+might have: a call that may have rung is never reported as not placed, and
+an earlier approval's call to the same number does not turn this one into a
+retry.
 
 The same number answers inbound callbacks on the `si-assistant` runtime lane.
 That lane identifies itself as an **AI assistant** and never pretends to be

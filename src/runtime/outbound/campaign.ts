@@ -127,13 +127,21 @@ export interface OutboundLanePolicy {
    */
   mode?: (env?: Record<string, string | undefined>) => "demo" | "live";
   /**
-   * Called once, after the dialler settles a row whose place-by deadline
-   * (PLACE_BY_KEY) passed before its first dial (v115), so whoever asked for
-   * the call can learn it never rang. Optional: a campaign that sets no
-   * deadline never reaches it. A throw is logged and the settle stands.
+   * Called once, after the dialler settles a row that was never dialled
+   * (v115): its place-by deadline (PLACE_BY_KEY) passed, the number went on
+   * the do-not-contact list, or the phone reached its total cap through other
+   * rows. Whoever asked for the call learns it never rang. Never called for a
+   * row that has been dialled, since that call may have rung. Optional. A
+   * throw is logged and the settle stands.
    */
-  onPlaceByPassed?: (contact: { id: string; customData: Record<string, unknown> }) => Promise<void>;
+  onNotPlaced?: (
+    contact: { id: string; customData: Record<string, unknown> },
+    reason: NotPlacedReason,
+  ) => Promise<void>;
 }
+
+/** Why the dialler settled a row without ever dialling it (v115). */
+export type NotPlacedReason = "place_by_passed" | "do_not_contact" | "total_cap";
 
 /** One person a live source says the campaign may call. */
 export interface SourceContact {

@@ -1299,7 +1299,8 @@ describe("review findings", () => {
     ]);
     const other = (await outbound.sourceRows(campaignId!))[0];
     const attemptId = await outbound.startAttempt(other.id, campaignId!, 1);
-    await outbound.finishAttempt(attemptId, { status: "no_answer" });
+    await outbound.finishAttempt(attemptId, { status: "completed" });
+    await outbound.settleContact(other.id, "answered");
     clock = new Date("2026-10-22T18:00:00Z");
     const result = await evaluateAndEnqueueCall(outbound, { approvalId: "new-approval", phone: PHONE, ticketNumber: TICKET }, clock);
     expect(result).toEqual({ ok: false, reason: "daily_cap" });
@@ -1315,7 +1316,8 @@ describe("review findings", () => {
     ]);
     const other = (await outbound.sourceRows(campaignId!))[0];
     const attemptId = await outbound.startAttempt(other.id, campaignId!, 1);
-    await outbound.finishAttempt(attemptId, { status: "no_answer" });
+    await outbound.finishAttempt(attemptId, { status: "completed" });
+    await outbound.settleContact(other.id, "answered");
     clock = new Date("2026-10-22T18:00:00Z");
     const result = await evaluateAndEnqueueCall(outbound, { approvalId: "new-approval", phone: PHONE, ticketNumber: TICKET }, clock);
     expect(result).toMatchObject({ ok: true, queued: true });
@@ -1332,14 +1334,15 @@ describe("review findings", () => {
       ]);
       const row = (await outbound.sourceRows(campaignId!)).find((r) => r.externalRef === `plugin:old-${i}`)!;
       const attemptId = await outbound.startAttempt(row.id, campaignId!, 1);
-      await outbound.finishAttempt(attemptId, { status: "no_answer" });
+      await outbound.finishAttempt(attemptId, { status: "completed" });
+      await outbound.settleContact(row.id, "answered");
     }
     clock = new Date("2026-10-22T18:00:00Z");
     const result = await evaluateAndEnqueueCall(outbound, { approvalId: "new-approval", phone: PHONE, ticketNumber: TICKET }, clock);
     expect(result).toEqual({ ok: false, reason: "total_cap" });
   });
 
-  it("does not count a dial Twilio refused on another approval's row", async () => {
+  it("does not count a dial Twilio refused on another approval's settled row", async () => {
     let clock = new Date("2026-10-22T16:30:00Z");
     const outbound = new FakeOutboundStore(() => clock);
     const campaignId = await outbound.ensureCampaign();
@@ -1349,8 +1352,61 @@ describe("review findings", () => {
     const other = (await outbound.sourceRows(campaignId!))[0];
     const refused = await outbound.startAttempt(other.id, campaignId!, 1);
     await outbound.finishAttempt(refused, { status: "not_placed" });
+    await outbound.settleContact(other.id, "rescheduled");
     clock = new Date("2026-10-22T18:00:00Z");
     const result = await evaluateAndEnqueueCall(outbound, { approvalId: "new-approval", phone: PHONE, ticketNumber: TICKET }, clock);
+    expect(result).toMatchObject({ ok: true, queued: true });
+  });
+
+  it.each(["pending", "no_answer", "voicemail", "callback_scheduled", "calling"] as const)(
+    "refuses a second approval while another approval's call to the number is still %s",
+    async (status) => {
+      const outbound = new FakeOutboundStore(() => new Date("2026-10-22T17:58:00Z"));
+      const campaignId = await outbound.ensureCampaign();
+      await outbound.upsertSourceContacts(campaignId!, [
+        { externalRef: "plugin:first-approval", phone: PHONE, firstName: "Testa", lastName: null, data: {} },
+      ]);
+      const first = (await outbound.sourceRows(campaignId!))[0];
+      if (status !== "pending") await outbound.settleContact(first.id, status);
+      const result = await evaluateAndEnqueueCall(
+        outbound,
+        { approvalId: "second-approval", phone: PHONE, ticketNumber: TICKET },
+        new Date("2026-10-22T18:00:00Z"),
+      );
+      expect(result).toEqual({ ok: false, reason: "call_already_queued" });
+      expect(outbound.upserts).toEqual([1]);
+    },
+  );
+
+  it.each(["answered", "rescheduled", "do_not_call", "max_attempts"] as const)(
+    "lets a second approval through once the other row is settled %s (the caps still apply)",
+    async (status) => {
+      const outbound = new FakeOutboundStore(() => new Date("2026-10-22T17:58:00Z"));
+      const campaignId = await outbound.ensureCampaign();
+      await outbound.upsertSourceContacts(campaignId!, [
+        { externalRef: "plugin:first-approval", phone: PHONE, firstName: "Testa", lastName: null, data: {} },
+      ]);
+      await outbound.settleContact((await outbound.sourceRows(campaignId!))[0].id, status);
+      const result = await evaluateAndEnqueueCall(
+        outbound,
+        { approvalId: "second-approval", phone: PHONE, ticketNumber: TICKET },
+        new Date("2026-10-22T18:00:00Z"),
+      );
+      expect(result).toMatchObject({ ok: true, queued: true });
+    },
+  );
+
+  it("does not let a queued call on ANOTHER number block this one", async () => {
+    const outbound = new FakeOutboundStore(() => new Date("2026-10-22T17:58:00Z"));
+    const campaignId = await outbound.ensureCampaign();
+    await outbound.upsertSourceContacts(campaignId!, [
+      { externalRef: "plugin:first-approval", phone: "+15555550199", firstName: "Other", lastName: null, data: {} },
+    ]);
+    const result = await evaluateAndEnqueueCall(
+      outbound,
+      { approvalId: "second-approval", phone: PHONE, ticketNumber: TICKET },
+      new Date("2026-10-22T18:00:00Z"),
+    );
     expect(result).toMatchObject({ ok: true, queued: true });
   });
 
@@ -1722,7 +1778,8 @@ describe("a call commit needs a dialler that will place it (v115)", () => {
       { externalRef: "plugin:earlier", phone: PHONE, firstName: "Testa", lastName: null, data: {} },
     ]);
     const earlier = (await outbound.sourceRows(campaignId!))[0];
-    await outbound.finishAttempt(await outbound.startAttempt(earlier.id, campaignId!, 1), { status: "no_answer" });
+    await outbound.finishAttempt(await outbound.startAttempt(earlier.id, campaignId!, 1), { status: "completed" });
+    await outbound.settleContact(earlier.id, "answered");
     const ctx = await boot({ PLUGIN_WRITES_ENABLED: "true" }, { now: noon, outbound });
     const bot = ctx.store.mint(["contacts:prepare", "contacts:commit"]);
     const staff = ctx.store.mint(["contacts:approve"]);
@@ -1793,6 +1850,35 @@ describe("a call commit needs a dialler that will place it (v115)", () => {
     expect(ctx.outbound.upserts).toEqual([]);
   });
 
+  it("refuses the second of two approvals committed back to back for one number (409, not_sent)", async () => {
+    const ctx = await boot({ PLUGIN_WRITES_ENABLED: "true" }, { now: noon });
+    const bot = ctx.store.mint(["contacts:prepare", "contacts:commit"]);
+    const staff = ctx.store.mint(["contacts:approve"]);
+    const commitOne = async (ticketNumber: string) => {
+      const prep = await fetch(`${ctx.base}/api/plugin/v1/prepare_call`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${bot.plaintext}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ phone: PHONE, ticketNumber, firstName: "Testa", dateOfBirth: CALL_DOB }),
+      });
+      const pending = (await prep.json()) as { approval: { id: string } };
+      const approved = await staffApprove(ctx.base, staff, ctx.store, pending.approval.id);
+      const token = (await approved.json()) as { confirmToken: string };
+      const res = await fetch(`${ctx.base}/api/plugin/v1/commit_contact`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${bot.plaintext}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ confirmToken: token.confirmToken }),
+      });
+      return { res, id: pending.approval.id };
+    };
+    const first = await commitOne(TICKET);
+    expect(first.res.status).toBe(200);
+    const second = await commitOne("VA-61002");
+    expect(second.res.status).toBe(409);
+    expect(await second.res.json()).toEqual({ error: "Call was not placed: call_already_queued", outcome: "not_sent" });
+    expect((await ctx.store.getApproval(second.id))?.status).toBe("failed");
+    expect(ctx.outbound.contacts.size).toBe(1);
+  });
+
   it("carries no outcome on a refusal before the confirm token is consumed", async () => {
     const ctx = await boot({ PLUGIN_WRITES_ENABLED: "true" }, { now: noon });
     const bot = ctx.store.mint(["contacts:commit"]);
@@ -1838,7 +1924,7 @@ describe("a call that missed its place-by deadline fails its approval (v115)", (
   it("moves a committed approval to failed, keeps its result, and audits without PHI", async () => {
     const store = new MemoryPluginStore();
     await committedApproval(store, "appr-late");
-    await reportCallNotPlaced({ id: "c1", customData: { approval_id: "appr-late", place_by: now.toISOString() } }, store, now);
+    await reportCallNotPlaced({ id: "c1", customData: { approval_id: "appr-late", place_by: now.toISOString() } }, "place_by_passed", store, now);
     const row = await store.getApproval("appr-late");
     expect(row?.status).toBe("failed");
     expect(row?.result).toEqual({ queued: false, campaignId: "campaign-1", placed: false, reason: "place_by_passed" });
@@ -1851,15 +1937,15 @@ describe("a call that missed its place-by deadline fails its approval (v115)", (
   it("reports once: a second report changes nothing and writes no second audit row", async () => {
     const store = new MemoryPluginStore();
     await committedApproval(store, "appr-late");
-    await reportCallNotPlaced({ id: "c1", customData: { approval_id: "appr-late" } }, store, now);
-    await reportCallNotPlaced({ id: "c1", customData: { approval_id: "appr-late" } }, store, now);
+    await reportCallNotPlaced({ id: "c1", customData: { approval_id: "appr-late" } }, "place_by_passed", store, now);
+    await reportCallNotPlaced({ id: "c1", customData: { approval_id: "appr-late" } }, "place_by_passed", store, now);
     expect((await store.listAudit()).filter((e) => e.tool === "call_not_placed")).toHaveLength(1);
   });
 
   it.each(["failed", "unknown"] as const)("leaves a %s approval alone", async (status) => {
     const store = new MemoryPluginStore();
     await committedApproval(store, "appr-x", status);
-    await reportCallNotPlaced({ id: "c1", customData: { approval_id: "appr-x" } }, store, now);
+    await reportCallNotPlaced({ id: "c1", customData: { approval_id: "appr-x" } }, "place_by_passed", store, now);
     expect((await store.getApproval("appr-x"))?.status).toBe(status);
     expect((await store.listAudit()).filter((e) => e.tool === "call_not_placed")).toHaveLength(0);
   });
@@ -1872,7 +1958,7 @@ describe("a call that missed its place-by deadline fails its approval (v115)", (
       const row = await real(id);
       return row ? { ...row, status: "committed" } : row;
     };
-    await reportCallNotPlaced({ id: "c1", customData: { approval_id: "appr-race" } }, store, now);
+    await reportCallNotPlaced({ id: "c1", customData: { approval_id: "appr-race" } }, "place_by_passed", store, now);
     expect((await real("appr-race"))?.status).toBe("unknown");
     expect((await store.listAudit()).filter((e) => e.tool === "call_not_placed")).toHaveLength(0);
   });
@@ -1880,8 +1966,8 @@ describe("a call that missed its place-by deadline fails its approval (v115)", (
   it("does nothing without an approval id or a store", async () => {
     const store = new MemoryPluginStore();
     await committedApproval(store, "appr-late");
-    await reportCallNotPlaced({ id: "c1", customData: {} }, store, now);
-    await reportCallNotPlaced({ id: "c1", customData: { approval_id: "appr-late" } }, null, now);
+    await reportCallNotPlaced({ id: "c1", customData: {} }, "place_by_passed", store, now);
+    await reportCallNotPlaced({ id: "c1", customData: { approval_id: "appr-late" } }, "place_by_passed", null, now);
     expect((await store.getApproval("appr-late"))?.status).toBe("committed");
   });
 
@@ -1889,18 +1975,20 @@ describe("a call that missed its place-by deadline fails its approval (v115)", (
     const store = new MemoryPluginStore();
     await committedApproval(store, "appr-late");
     store.writeAudit = async () => { throw new Error("audit down"); };
-    await expect(reportCallNotPlaced({ id: "c1", customData: { approval_id: "appr-late" } }, store, now)).resolves.toBeUndefined();
+    await expect(reportCallNotPlaced({ id: "c1", customData: { approval_id: "appr-late" } }, "place_by_passed", store, now)).resolves.toBeUndefined();
     expect((await store.getApproval("appr-late"))?.status).toBe("failed");
   });
 
-  it("is the SI Assistant lane's place-by hook, reading the bound store", async () => {
+  it("is the SI Assistant lane's not-placed hook, carrying the reason and reading the bound store", async () => {
     const store = new MemoryPluginStore();
     await committedApproval(store, "appr-lane");
     bindPluginStore(store);
     try {
-      expect(siAssistantPolicy.onPlaceByPassed).toBeTypeOf("function");
-      await siAssistantPolicy.onPlaceByPassed!({ id: "c1", customData: { approval_id: "appr-lane" } });
-      expect((await store.getApproval("appr-lane"))?.status).toBe("failed");
+      expect(siAssistantPolicy.onNotPlaced).toBeTypeOf("function");
+      await siAssistantPolicy.onNotPlaced!({ id: "c1", customData: { approval_id: "appr-lane" } }, "do_not_contact");
+      const row = await store.getApproval("appr-lane");
+      expect(row?.status).toBe("failed");
+      expect(row?.result).toMatchObject({ placed: false, reason: "do_not_contact" });
     } finally {
       bindPluginStore(null);
     }
