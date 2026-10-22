@@ -2,7 +2,7 @@
  * Plugin API: approval gate, calling window, DNC, token expiry, no PHI
  * in audit or ticket-resolved logs. In-memory store only.
  */
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createServer, type Server } from "node:http";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -789,7 +789,65 @@ describe("review findings", () => {
     expect([...store.outbox.values()]).toHaveLength(1);
     expect(posted.some((p) => p.event === "inbound_sms")).toBe(false);
     expect(posted.some((p) => p.event === "message" && p.message === "Can someone call me back about my glasses?")).toBe(true);
-    expect(JSON.stringify(posted)).not.toContain("5555550111");
+    // The sender rides on the webhook payload so staff can reply to it.
+    expect(posted.find((p) => p.event === "message")?.from).toBe(PHONE);
+  });
+
+  it("dedupes a Twilio retry of one inbound text by MessageSid, and never logs the sender or body", async () => {
+    const posted: Array<Record<string, unknown>> = [];
+    const logged: string[] = [];
+    const spies = (["log", "info", "warn", "error"] as const).map((m) =>
+      vi.spyOn(console, m).mockImplementation((...args: unknown[]) => {
+        logged.push(args.map(String).join(" "));
+      }),
+    );
+    try {
+      const { base, store, server } = await boot(
+        { PLUGIN_WRITES_ENABLED: "true", TWILIO_AUTH_TOKEN: TWILIO_AUTH },
+        {
+          callbackReporter: {
+            async report(payload) {
+              posted.push(payload as unknown as Record<string, unknown>);
+              return { ok: true, status: 200 };
+            },
+          },
+        },
+      );
+      const port = (server.address() as { port: number }).port;
+      const path = "/api/plugin/v1/webhooks/twilio-sms";
+      const messageSid = "SM" + "3".repeat(32);
+      const body = { From: PHONE, Body: "Is my order ready?", MessageSid: messageSid };
+      const signed = signedSms(path, body, `127.0.0.1:${port}`);
+      for (let i = 0; i < 2; i += 1) {
+        const res = await fetch(`${base}${path}`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/x-www-form-urlencoded",
+            "X-Twilio-Signature": signed.signature,
+          },
+          body: new URLSearchParams(body).toString(),
+        });
+        expect(res.status).toBe(200);
+      }
+      const until = Date.now() + 500;
+      while (!posted.some((p) => p.event === "message") && Date.now() < until) {
+        await new Promise((r) => setTimeout(r, 10));
+      }
+      await new Promise((r) => setTimeout(r, 30));
+      const rows = [...store.outbox.values()];
+      expect(rows).toHaveLength(1);
+      expect(rows[0].idempotencyKey).toBe(`sms:${messageSid}`);
+      expect(rows[0].messageSid).toBe(messageSid);
+      expect(rows[0].fromPhone).toBe(PHONE);
+      const messages = posted.filter((p) => p.event === "message");
+      expect(messages).toHaveLength(1);
+      expect(messages[0]).toMatchObject({ from: PHONE, messageSid, idempotencyKey: `sms:${messageSid}` });
+      const all = logged.join("\n");
+      expect(all).not.toContain("5555550111");
+      expect(all).not.toContain("Is my order ready?");
+    } finally {
+      for (const s of spies) s.mockRestore();
+    }
   });
 
   it("skips an empty inbound text so Support Center does not get a blank item", async () => {

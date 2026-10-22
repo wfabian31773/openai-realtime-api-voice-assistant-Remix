@@ -106,6 +106,19 @@ ALTER TABLE contact_approvals ADD CONSTRAINT contact_approvals_status_check
 
 ALTER TABLE plugin_message_outbox ADD COLUMN IF NOT EXISTS idempotency_key VARCHAR(64);
 ALTER TABLE plugin_message_outbox ADD COLUMN IF NOT EXISTS suggestions JSONB;
+-- Inbound SMS sender and MessageSid (PHI: forwarded, never logged). An
+-- inbound SMS keys its idempotency on 'sms:' || MessageSid.
+ALTER TABLE plugin_message_outbox ADD COLUMN IF NOT EXISTS from_phone VARCHAR(32);
+ALTER TABLE plugin_message_outbox ADD COLUMN IF NOT EXISTS message_sid VARCHAR(64);
+-- Set when the webhook first answered 2xx. Only then is a later send an
+-- attachmentUpdate. A follow-up that fails stays delivered and is retried
+-- on its own budget; it never makes the message dead.
+ALTER TABLE plugin_message_outbox ADD COLUMN IF NOT EXISTS delivered_at TIMESTAMPTZ;
+ALTER TABLE plugin_message_outbox ADD COLUMN IF NOT EXISTS attachment_pending BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE plugin_message_outbox ADD COLUMN IF NOT EXISTS attachment_attempts INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE plugin_message_outbox ADD COLUMN IF NOT EXISTS attachment_next_attempt_at TIMESTAMPTZ;
+CREATE INDEX IF NOT EXISTS idx_plugin_outbox_attachment_due
+  ON plugin_message_outbox (attachment_next_attempt_at) WHERE attachment_pending;
 CREATE UNIQUE INDEX IF NOT EXISTS plugin_message_outbox_idempotency_key
   ON plugin_message_outbox (idempotency_key);
 

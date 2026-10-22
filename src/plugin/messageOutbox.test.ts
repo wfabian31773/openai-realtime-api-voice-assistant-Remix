@@ -12,7 +12,13 @@ import {
   reclaimStaleOutboxSending,
   settleOutboxDelivery,
 } from "./messageOutbox";
-import { MemoryPluginStore, OUTBOX_MAX_ATTEMPTS, OUTBOX_RETENTION_MS, STALE_SENDING_MS } from "./store";
+import {
+  ATTACHMENT_UPDATE_MAX_ATTEMPTS,
+  MemoryPluginStore,
+  OUTBOX_MAX_ATTEMPTS,
+  OUTBOX_RETENTION_MS,
+  STALE_SENDING_MS,
+} from "./store";
 import { createSqlPluginStore } from "./sqlStore";
 import type { CallbackReporter } from "./callbackReport";
 
@@ -288,18 +294,87 @@ describe("message outbox", () => {
     };
 
     await settleOutboxDelivery(store, sendSnapshot, { ok: true, error: "" }, now, reporter);
-    expect(store.outbox.get(persisted!.id)?.status).toBe("pending");
-    expect(store.outbox.get(persisted!.id)?.lastError).toBe("attachment_update");
-    expect(store.outbox.get(persisted!.id)?.message).toBe("Taken before identify");
+    // The message itself was delivered; only the follow-up is owed.
+    const owed = store.outbox.get(persisted!.id)!;
+    expect(owed.status).toBe("delivered");
+    expect(owed.deliveredAt).toEqual(now);
+    expect(owed.attachmentPending).toBe(true);
+    expect(owed.attachmentAttempts).toBe(1);
+    expect(owed.lastError).toBe("attachment_update");
+    expect(owed.attachmentNextAttemptAt!.getTime()).toBeGreaterThan(now.getTime());
 
     const later = new Date(now.getTime() + 30_000);
     await flushDueOutbox(store, reporter, later);
     expect(updates).toBe(2);
     expect(posted.filter((p) => p.attachmentUpdate === true)).toHaveLength(2);
+    // The redelivery is the follow-up alone, never the message again.
+    expect(posted.filter((p) => p.message !== undefined)).toHaveLength(0);
     expect(store.outbox.get(persisted!.id)?.status).toBe("delivered");
+    expect(store.outbox.get(persisted!.id)?.attachmentPending).toBe(false);
   });
 
-  it("a restart after an unmatched send redelivers with persisted attachmentUpdate", async () => {
+  it("a failed follow-up never makes a delivered message dead and never notes it dead", async () => {
+    const store = new MemoryPluginStore();
+    const now = new Date("2026-10-22T18:00:00Z");
+    const sid = "CA" + "e".repeat(32);
+    const persisted = await persistTakenMessage({ callSid: sid, message: "Delivered then keyed" }, now, store);
+    await store.markOutbox(persisted!.id, { status: "sending", attempts: OUTBOX_MAX_ATTEMPTS, updatedAt: now }, "pending");
+    const sendSnapshot = { ...store.outbox.get(persisted!.id)! };
+    await reattachTakenMessages(sid, { ticketId: "tid-x", ticketNumber: "VA-61009", approvalId: null }, store, null, now);
+
+    let updates = 0;
+    const reporter: CallbackReporter = {
+      async report(payload) {
+        if (payload.attachmentUpdate) {
+          updates += 1;
+          return { ok: false, status: 503 };
+        }
+        return { ok: true, status: 200 };
+      },
+    };
+    // The send attempt is at the outbox cap; under the old rule a failed
+    // follow-up here would have dead-lettered a delivered message.
+    await settleOutboxDelivery(store, sendSnapshot, { ok: true, error: "" }, now, reporter);
+    expect(store.outbox.get(persisted!.id)?.status).toBe("delivered");
+    expect(store.outbox.get(persisted!.id)?.attachmentPending).toBe(true);
+
+    let t = now.getTime();
+    for (let i = 0; i < ATTACHMENT_UPDATE_MAX_ATTEMPTS + 2; i += 1) {
+      t += 31 * 60 * 1000;
+      await flushDueOutbox(store, reporter, new Date(t));
+    }
+    const row = store.outbox.get(persisted!.id)!;
+    expect(updates).toBe(ATTACHMENT_UPDATE_MAX_ATTEMPTS);
+    expect(row.status).toBe("delivered");
+    expect(row.attachmentPending).toBe(false);
+    expect(row.lastError).toBe("attachment_update_exhausted");
+    const audit = await store.listAudit();
+    expect(audit.some((e) => e.tool === "outbox_dead")).toBe(false);
+    expect(audit.filter((e) => e.tool === "outbox_attachment_update_exhausted")).toHaveLength(1);
+  });
+
+  it("a delivered row re-keyed later owes the follow-up when the webhook fails, staying delivered", async () => {
+    const store = new MemoryPluginStore();
+    const now = new Date("2026-10-22T18:00:00Z");
+    const sid = "CA" + "f".repeat(32);
+    const persisted = await persistTakenMessage({ callSid: sid, message: "Delivered unmatched" }, now, store);
+    await flushOutboxRow(persisted!, store, { async report() { return { ok: true, status: 200 }; } }, now);
+    expect(store.outbox.get(persisted!.id)?.status).toBe("delivered");
+
+    await reattachTakenMessages(
+      sid,
+      { ticketId: "tid-d", ticketNumber: "VA-61010", approvalId: null },
+      store,
+      { async report() { return { ok: false, status: 502 }; } },
+      now,
+    );
+    const row = store.outbox.get(persisted!.id)!;
+    expect(row.status).toBe("delivered");
+    expect(row.attachmentPending).toBe(true);
+    expect((await store.listAudit()).some((e) => e.tool === "outbox_dead")).toBe(false);
+  });
+
+  it("a stale reclaim with no confirmed 2xx is a first delivery, not an attachmentUpdate", async () => {
     const store = new MemoryPluginStore();
     const now = new Date("2026-10-22T18:00:00Z");
     const sid = "CA" + "a".repeat(32);
@@ -338,15 +413,118 @@ describe("message outbox", () => {
     expect(posted).toHaveLength(1);
     expect(posted[0]).toMatchObject({
       event: "message",
-      attachmentUpdate: true,
       outboxId: persisted!.id,
       idempotencyKey: persisted!.idempotencyKey,
       ticketNumber: "VA-61002",
       approvalId: "appr-r",
       ticketId: "tid-r",
       identityConfirmed: true,
+      message: "Taken then the process died",
     });
+    expect(posted[0].attachmentUpdate).toBeUndefined();
     expect(store.outbox.get(persisted!.id)?.status).toBe("delivered");
+  });
+
+  it("a redelivery of a row with a confirmed 2xx is an attachmentUpdate", async () => {
+    const store = new MemoryPluginStore();
+    const now = new Date("2026-10-22T18:00:00Z");
+    const persisted = await persistTakenMessage({ callSid: "CA" + "c".repeat(32), message: "Confirmed once" }, now, store);
+    // A row the receiver already accepted that is back in the queue keyed.
+    await store.markOutbox(persisted!.id, {
+      deliveredAt: now,
+      ticketNumber: "VA-61011",
+      lastError: "stale_sending",
+      updatedAt: now,
+    });
+    const posted: Array<Record<string, unknown>> = [];
+    await flushDueOutbox(
+      store,
+      {
+        async report(payload) {
+          posted.push(payload as unknown as Record<string, unknown>);
+          return { ok: true, status: 200 };
+        },
+      },
+      now,
+    );
+    expect(posted).toHaveLength(1);
+    expect(posted[0].attachmentUpdate).toBe(true);
+  });
+
+  it("an inbound SMS keys on its MessageSid and carries the sender to the webhook", async () => {
+    const store = new MemoryPluginStore();
+    const now = new Date("2026-10-22T18:00:00Z");
+    const messageSid = "SM" + "1".repeat(32);
+    const first = await persistTakenMessage(
+      { message: "Please call me", fromPhone: "+15555550199", messageSid },
+      now,
+      store,
+    );
+    const retry = await persistTakenMessage(
+      { message: "Please call me", fromPhone: "+15555550199", messageSid },
+      now,
+      store,
+    );
+    expect(first!.idempotencyKey).toBe(`sms:${messageSid}`);
+    expect(retry!.id).toBe(first!.id);
+    expect(store.outbox.size).toBe(1);
+
+    const posted: Array<Record<string, unknown>> = [];
+    const reporter: CallbackReporter = {
+      async report(payload) {
+        posted.push(payload as unknown as Record<string, unknown>);
+        return { ok: true, status: 200 };
+      },
+    };
+    await flushOutboxRow(first!, store, reporter, now);
+    await flushOutboxRow(retry!, store, reporter, now);
+    expect(posted).toHaveLength(1);
+    expect(posted[0]).toMatchObject({
+      event: "message",
+      from: "+15555550199",
+      messageSid,
+      idempotencyKey: `sms:${messageSid}`,
+      unmatched: true,
+    });
+  });
+
+  it("the SQL store persists the sender, MessageSid and the delivery markers", async () => {
+    const seen: Array<{ text: string; params: unknown[] }> = [];
+    const store = createSqlPluginStore(async (text, params) => {
+      seen.push({ text, params: params ?? [] });
+      return [];
+    });
+    await store.insertOutbox({
+      id: "obx",
+      callSid: null,
+      ticketId: null,
+      ticketNumber: null,
+      approvalId: null,
+      message: "hi",
+      status: "pending",
+      attempts: 0,
+      nextAttemptAt: new Date(),
+      lastError: null,
+      idempotencyKey: "sms:SM" + "2".repeat(32),
+      fromPhone: "+15555550199",
+      messageSid: "SM" + "2".repeat(32),
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    expect(seen[0].text).toMatch(/from_phone, message_sid/);
+    expect(seen[0].params).toContain("+15555550199");
+    seen.length = 0;
+    const at = new Date("2026-10-22T18:00:00Z");
+    await store.markOutbox("obx", { deliveredAt: at, attachmentPending: true, attachmentAttempts: 1 }, "delivered");
+    expect(seen[0].text).toMatch(/delivered_at = COALESCE/);
+    expect(seen[0].text).toMatch(/attachment_pending = COALESCE/);
+    expect(seen[0].params).toContain(at.toISOString());
+    expect(seen[0].params).toContain(true);
+    seen.length = 0;
+    await store.claimDueAttachmentUpdates(at, new Date(at.getTime() + 1000), 5);
+    expect(seen[0].text).toMatch(/status = 'delivered'/);
+    expect(seen[0].text).toMatch(/AND attachment_pending/);
+    expect(seen[0].text).toMatch(/FOR UPDATE SKIP LOCKED/);
   });
 
   it("does not delete a delivered row when expiry ids are re-checked", async () => {

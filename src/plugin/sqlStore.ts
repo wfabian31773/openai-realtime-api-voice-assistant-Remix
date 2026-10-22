@@ -78,6 +78,12 @@ function outboxFrom(r: Record<string, unknown>): MessageOutboxRow {
     lastError: (r.last_error as string | null) ?? null,
     idempotencyKey: (r.idempotency_key as string | null) ?? null,
     suggestions: suggestionsFrom(r.suggestions),
+    fromPhone: (r.from_phone as string | null) ?? null,
+    messageSid: (r.message_sid as string | null) ?? null,
+    deliveredAt: r.delivered_at ? new Date(String(r.delivered_at)) : null,
+    attachmentPending: r.attachment_pending === true,
+    attachmentAttempts: Number(r.attachment_attempts ?? 0),
+    attachmentNextAttemptAt: r.attachment_next_attempt_at ? new Date(String(r.attachment_next_attempt_at)) : null,
     createdAt: new Date(String(r.created_at)),
     updatedAt: new Date(String(r.updated_at)),
   };
@@ -267,8 +273,8 @@ export function createSqlPluginStore(exec: SqlExec): PluginStore {
         `INSERT INTO plugin_message_outbox (
             id, call_sid, ticket_id, ticket_number, approval_id, message,
             status, attempts, next_attempt_at, last_error, idempotency_key,
-            suggestions, created_at, updated_at
-          ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb,$13,$14)
+            suggestions, created_at, updated_at, from_phone, message_sid
+          ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb,$13,$14,$15,$16)
           ON CONFLICT (idempotency_key) DO NOTHING
           RETURNING *`,
         [
@@ -286,6 +292,8 @@ export function createSqlPluginStore(exec: SqlExec): PluginStore {
           JSON.stringify(row.suggestions ?? []),
           row.createdAt.toISOString(),
           row.updatedAt.toISOString(),
+          row.fromPhone ?? null,
+          row.messageSid ?? null,
         ],
       );
       if (rows[0]) return outboxFrom(rows[0]);
@@ -329,7 +337,11 @@ export function createSqlPluginStore(exec: SqlExec): PluginStore {
             last_error = $4,
             updated_at = $5,
             attempts = COALESCE($7, attempts),
-            message = COALESCE($8, message)
+            message = COALESCE($8, message),
+            delivered_at = COALESCE($9::timestamptz, delivered_at),
+            attachment_pending = COALESCE($10::boolean, attachment_pending),
+            attachment_attempts = COALESCE($11::integer, attachment_attempts),
+            attachment_next_attempt_at = COALESCE($12::timestamptz, attachment_next_attempt_at)
           WHERE id = $1 AND ($6::text IS NULL OR status = $6)
           RETURNING *`,
         [
@@ -341,6 +353,10 @@ export function createSqlPluginStore(exec: SqlExec): PluginStore {
           onlyIfStatus ?? null,
           patch.attempts ?? null,
           patch.message ?? null,
+          patch.deliveredAt?.toISOString() ?? null,
+          patch.attachmentPending ?? null,
+          patch.attachmentAttempts ?? null,
+          patch.attachmentNextAttemptAt?.toISOString() ?? null,
         ],
       );
       return rows[0] ? outboxFrom(rows[0]) : null;
@@ -355,6 +371,25 @@ export function createSqlPluginStore(exec: SqlExec): PluginStore {
             AND updated_at < $2
           RETURNING *`,
         [now.toISOString(), staleBefore.toISOString()],
+      );
+      return rows.map(outboxFrom);
+    },
+    async claimDueAttachmentUpdates(now, leaseUntil, limit) {
+      const rows = await exec(
+        `UPDATE plugin_message_outbox
+            SET attachment_next_attempt_at = $2,
+                updated_at = $1
+          WHERE id IN (
+            SELECT id FROM plugin_message_outbox
+             WHERE status = 'delivered'
+               AND attachment_pending
+               AND coalesce(attachment_next_attempt_at, $1) <= $1
+             ORDER BY attachment_next_attempt_at
+             LIMIT $3
+             FOR UPDATE SKIP LOCKED
+          )
+          RETURNING *`,
+        [now.toISOString(), leaseUntil.toISOString(), limit],
       );
       return rows.map(outboxFrom);
     },

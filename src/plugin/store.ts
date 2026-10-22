@@ -52,6 +52,11 @@ export type OutboxStatus = (typeof OUTBOX_STATUSES)[number];
  */
 export const STALE_SENDING_MS = 10 * 60 * 1000;
 export const OUTBOX_MAX_ATTEMPTS = 8;
+/**
+ * A follow-up attachmentUpdate on an already delivered row has its own
+ * budget. Running out never makes the message dead — it was delivered.
+ */
+export const ATTACHMENT_UPDATE_MAX_ATTEMPTS = 8;
 export const RETURNED_CALL_LOOKBACK_MS = 72 * 60 * 60 * 1000;
 /** Undelivered outbox rows older than this are deleted. Delivered bodies are purged on settle. */
 export const OUTBOX_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
@@ -162,6 +167,11 @@ export interface PluginStore {
   ): Promise<MessageOutboxRow | null>;
   /** Reset stale `sending` outbox rows to `pending` so the sweep can retry. */
   reclaimStaleOutboxSending(now: Date, staleBefore: Date): Promise<MessageOutboxRow[]>;
+  /**
+   * Delivered rows whose attachmentUpdate follow-up is still owed and due.
+   * Leases each row until `leaseUntil` so two sweeps do not send it twice.
+   */
+  claimDueAttachmentUpdates(now: Date, leaseUntil: Date, limit: number): Promise<MessageOutboxRow[]>;
   /** Empty delivered bodies (PHI). */
   purgeDeliveredOutboxBodies(now: Date): Promise<number>;
   /** Delete undelivered rows older than `olderThan`. Returns the deleted ids. */
@@ -203,6 +213,16 @@ export interface MessageOutboxRow {
   idempotencyKey?: string | null;
   /** Ticket number + approval id only. Unmatched My Messages routing hints. */
   suggestions?: Array<{ ticketNumber: string | null; approvalId: string | null }> | null;
+  /** Inbound SMS sender (E.164). PHI. Forwarded to the webhook, never logged. */
+  fromPhone?: string | null;
+  /** Twilio MessageSid of an inbound SMS. */
+  messageSid?: string | null;
+  /** When the webhook first answered 2xx for this row. Null until then. */
+  deliveredAt?: Date | null;
+  /** A delivered row still owes an attachmentUpdate follow-up. */
+  attachmentPending?: boolean;
+  attachmentAttempts?: number;
+  attachmentNextAttemptAt?: Date | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -418,6 +438,22 @@ export class MemoryPluginStore implements PluginStore {
       reclaimed.push({ ...row });
     }
     return reclaimed;
+  }
+
+  async claimDueAttachmentUpdates(now: Date, leaseUntil: Date, limit: number): Promise<MessageOutboxRow[]> {
+    const due = [...this.outbox.values()]
+      .filter(
+        (r) =>
+          r.status === "delivered" &&
+          r.attachmentPending === true &&
+          (r.attachmentNextAttemptAt?.getTime() ?? 0) <= now.getTime(),
+      )
+      .slice(0, Math.max(0, limit));
+    for (const row of due) {
+      row.attachmentNextAttemptAt = leaseUntil;
+      row.updatedAt = now;
+    }
+    return due.map((r) => ({ ...r }));
   }
 
   async purgeDeliveredOutboxBodies(now: Date): Promise<number> {

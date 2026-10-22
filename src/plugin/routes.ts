@@ -395,7 +395,7 @@ export function mountPluginApi(app: Express, deps: PluginApiDeps): void {
       res.status(403).type("text/plain").send("invalid signature");
       return;
     }
-    const body = (req.body ?? {}) as { From?: string; Body?: string };
+    const body = (req.body ?? {}) as { From?: string; Body?: string; MessageSid?: string };
     const from = String(body.From ?? "");
     const text = String(body.Body ?? "");
     const sender = deps.smsSender === undefined ? createTwilioSmsSender(envOf(deps)) : deps.smsSender;
@@ -405,7 +405,13 @@ export function mountPluginApi(app: Express, deps: PluginApiDeps): void {
       const preview = inboundSmsPreview(text);
       if (preview) {
         const now = deps.now?.() ?? new Date();
-        const row = await persistTakenMessage({ message: preview }, now, deps.store);
+        // Sender and MessageSid ride on the row and the webhook payload, never
+        // in a log. Keyed on the MessageSid so a Twilio retry is one row.
+        const row = await persistTakenMessage(
+          { message: preview, fromPhone: from || null, messageSid: String(body.MessageSid ?? "") || null },
+          now,
+          deps.store,
+        );
         if (row) {
           void flushOutboxRow(row, deps.store, reporter, now).catch(() => {
             console.error("[si-assistant] inbound sms outbox flush failed");

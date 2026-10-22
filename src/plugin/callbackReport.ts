@@ -27,6 +27,10 @@ export interface CallbackReport {
   smsCommand?: string;
   /** Taken-message text. Delivered only to the ticketing webhook. Never logged. */
   message?: string;
+  /** Inbound SMS sender (E.164). PHI. Delivered only to the webhook. Never logged. */
+  from?: string;
+  /** Twilio MessageSid of an inbound SMS. Receiver may dedupe on it. */
+  messageSid?: string;
   /** No confirmed identity — SI Assistant My Messages should route it. */
   unmatched?: boolean;
   /** Ticket number + approval id only. Unmatched My Messages routing hints. */

@@ -7,6 +7,7 @@
  */
 import { createHash } from "node:crypto";
 import {
+  ATTACHMENT_UPDATE_MAX_ATTEMPTS,
   newId,
   OUTBOX_MAX_ATTEMPTS,
   OUTBOX_RETENTION_MS,
@@ -31,6 +32,14 @@ export function outboxIdempotencyKey(callSid: string | null | undefined, message
   return createHash("sha256").update(`${callSid}\n${message}`, "utf8").digest("hex");
 }
 
+const TWILIO_MESSAGE_SID = /^(SM|MM)[0-9a-f]{32}$/i;
+
+/** Inbound SMS idempotency: one row per Twilio MessageSid, so a webhook retry dedupes. */
+export function smsIdempotencyKey(messageSid: string | null | undefined): string | null {
+  const sid = (messageSid ?? "").trim();
+  return TWILIO_MESSAGE_SID.test(sid) ? `sms:${sid}` : null;
+}
+
 export function phiFreeOutboxError(status?: number, failed?: "timeout" | "no_webhook" | "send_failed"): string {
   if (failed === "timeout") return "timeout";
   if (failed === "no_webhook") return "no_webhook";
@@ -47,11 +56,16 @@ export async function persistTakenMessage(
     approvalId?: string | null;
     message: string;
     suggestions?: Array<{ ticketNumber: string | null; approvalId: string | null }>;
+    /** Inbound SMS sender. PHI: persisted and forwarded, never logged. */
+    fromPhone?: string | null;
+    /** Twilio MessageSid of an inbound SMS. Keys the row's idempotency. */
+    messageSid?: string | null;
   },
   now = new Date(),
   store: PluginStore | null = boundPluginStore(),
 ): Promise<MessageOutboxRow | null> {
   if (!store) return null;
+  const smsKey = smsIdempotencyKey(input.messageSid);
   try {
     return await store.insertOutbox({
       id: newId(),
@@ -64,8 +78,14 @@ export async function persistTakenMessage(
       attempts: 0,
       nextAttemptAt: now,
       lastError: null,
-      idempotencyKey: outboxIdempotencyKey(input.callSid, input.message),
+      idempotencyKey: smsKey ?? outboxIdempotencyKey(input.callSid, input.message),
       suggestions: input.suggestions ?? [],
+      fromPhone: input.fromPhone ?? null,
+      messageSid: smsKey ? (input.messageSid ?? "").trim() : null,
+      deliveredAt: null,
+      attachmentPending: false,
+      attachmentAttempts: 0,
+      attachmentNextAttemptAt: null,
       createdAt: now,
       updatedAt: now,
     });
@@ -82,11 +102,10 @@ async function deliverRow(
   if (!reporter) return { ok: false, error: phiFreeOutboxError(undefined, "no_webhook") };
   try {
     const unmatched = !row.ticketNumber && !row.approvalId && !row.ticketId;
-    // last_error = stale_sending is persisted by reclaim. A restart that
-    // redelivers a row which now has ticket keys is an attachmentUpdate —
-    // the in-memory flag does not survive the process.
-    const attachmentUpdate =
-      !unmatched && (row.lastError === "stale_sending" || row.lastError === ATTACHMENT_UPDATE_ERROR);
+    // Only a row the receiver already accepted (a persisted 2xx) can be an
+    // attachmentUpdate. A stale_sending reclaim with no confirmed 2xx is a
+    // first delivery as far as anyone can prove.
+    const attachmentUpdate = !unmatched && Boolean(row.deliveredAt);
     const result = await reporter.report({
       event: "message",
       slug: SI_ASSISTANT_SLUG,
@@ -94,6 +113,8 @@ async function deliverRow(
       approvalId: row.approvalId,
       ticketId: row.ticketId,
       message: row.message,
+      from: row.fromPhone || undefined,
+      messageSid: row.messageSid || undefined,
       unmatched: unmatched || undefined,
       suggestions: unmatched && row.suggestions?.length ? row.suggestions : undefined,
       identityConfirmed: !unmatched || undefined,
@@ -189,6 +210,8 @@ async function retryLater(
   error: string,
   now: Date,
 ): Promise<void> {
+  // Only an undelivered row comes here. A delivered row owes at most an
+  // attachmentUpdate, which has its own budget (scheduleAttachmentRetry).
   const dead = row.attempts >= OUTBOX_MAX_ATTEMPTS;
   await store.markOutbox(
     row.id,
@@ -198,12 +221,77 @@ async function retryLater(
       nextAttemptAt: new Date(now.getTime() + outboxBackoffMs(row.attempts)),
       updatedAt: now,
     },
-    row.status === "delivered" ? "delivered" : "sending",
+    "sending",
   );
   if (dead) {
     await noteDead(store, row);
   }
   console.error(`[si-assistant] outbox ${row.id} ${error}${dead ? " dead" : ""}`);
+}
+
+const ATTACHMENT_UPDATE_EXHAUSTED = "attachment_update_exhausted";
+
+async function noteAttachmentUpdateExhausted(store: PluginStore, row: MessageOutboxRow): Promise<void> {
+  try {
+    await store.writeAudit({
+      tokenJti: "system",
+      tool: "outbox_attachment_update_exhausted",
+      route: "/api/plugin/v1/message_outbox",
+      method: "SWEEP",
+      approvalId: row.approvalId,
+      ticketId: row.ticketId,
+      outcome: "failed",
+      httpStatus: 408,
+    });
+  } catch {
+    console.error("[si-assistant] outbox attachment audit failed");
+  }
+}
+
+/**
+ * The message is delivered; only the ticket-key follow-up failed. Keep the
+ * row delivered and owe the follow-up, retried by the sweep on its own
+ * backoff. Running out of attempts stops retrying — it never makes the
+ * message dead.
+ */
+async function scheduleAttachmentRetry(
+  store: PluginStore,
+  row: MessageOutboxRow,
+  error: string,
+  now: Date,
+): Promise<void> {
+  const attempts = (row.attachmentAttempts ?? 0) + 1;
+  const exhausted = attempts >= ATTACHMENT_UPDATE_MAX_ATTEMPTS;
+  await store.markOutbox(
+    row.id,
+    {
+      attachmentPending: !exhausted,
+      attachmentAttempts: attempts,
+      attachmentNextAttemptAt: new Date(now.getTime() + outboxBackoffMs(attempts)),
+      lastError: exhausted ? ATTACHMENT_UPDATE_EXHAUSTED : error,
+      updatedAt: now,
+    },
+    "delivered",
+  );
+  if (exhausted) await noteAttachmentUpdateExhausted(store, row);
+  console.error(`[si-assistant] outbox ${row.id} ${exhausted ? ATTACHMENT_UPDATE_EXHAUSTED : error}`);
+}
+
+async function sendAttachmentUpdate(
+  store: PluginStore,
+  row: MessageOutboxRow,
+  reporter: CallbackReporter,
+  now: Date,
+): Promise<boolean> {
+  const follow = await reportAttachmentUpdate(row, reporter);
+  if (follow.ok) {
+    if (row.attachmentPending) {
+      await store.markOutbox(row.id, { attachmentPending: false, lastError: null, updatedAt: now }, "delivered");
+    }
+    return true;
+  }
+  await scheduleAttachmentRetry(store, row, follow.error, now);
+  return false;
 }
 
 async function settleDelivery(
@@ -214,24 +302,19 @@ async function settleDelivery(
   reporter: CallbackReporter | null = null,
 ): Promise<void> {
   if (delivered.ok) {
-    const current = (await store.getOutbox(row.id)) ?? row;
+    // Persist the confirmed 2xx first. Whatever the follow-up does, this
+    // message is delivered and must never become dead.
+    const confirmed = { status: "delivered" as const, deliveredAt: now, lastError: null, message: "", updatedAt: now };
+    const current =
+      (await store.markOutbox(row.id, confirmed, "sending")) ??
+      // A stale reclaim may have put it back to pending mid-send.
+      (await store.markOutbox(row.id, confirmed, "pending"));
+    if (!current) return;
     // Ticket keys live on the outbox row (persisted by attachOutboxTickets).
-    // Compare before marking delivered so a 5xx on the follow-up can retry.
+    // Keys stamped during the send are owed to the receiver as an update.
     if (reporter && hasTicketStamp(current) && ticketStampsDiffer(row, current)) {
-      const follow = await reportAttachmentUpdate(
-        { id: row.id, idempotencyKey: current.idempotencyKey ?? row.idempotencyKey, ...ticketStamp(current) },
-        reporter,
-      );
-      if (!follow.ok) {
-        await retryLater(store, row, follow.error, now);
-        return;
-      }
+      await sendAttachmentUpdate(store, current, reporter, now);
     }
-    await store.markOutbox(
-      row.id,
-      { status: "delivered", lastError: null, message: "", updatedAt: now },
-      "sending",
-    );
     return;
   }
   await retryLater(store, row, delivered.error, now);
@@ -311,10 +394,16 @@ export async function reattachTakenMessages(
       // current keys to the send snapshot and reports attachmentUpdate.
       continue;
     }
-    if (row.status === "delivered" && reporter) {
-      const follow = await reportAttachmentUpdate(row, reporter);
-      if (!follow.ok) {
-        await retryLater(store, row, follow.error, now);
+    if (row.status === "delivered") {
+      if (reporter) {
+        await sendAttachmentUpdate(store, row, reporter, now);
+      } else {
+        // No webhook right now: owe the update; the sweep sends it later.
+        await store.markOutbox(
+          row.id,
+          { attachmentPending: true, attachmentNextAttemptAt: now, lastError: row.lastError, updatedAt: now },
+          "delivered",
+        );
       }
     }
   }
@@ -359,5 +448,9 @@ export async function flushDueOutbox(
   for (const row of due) {
     await settleDelivery(store, row, await deliverRow(row, reporter), now, reporter);
   }
-  return due.length;
+  const owed = await store.claimDueAttachmentUpdates(now, new Date(now.getTime() + STALE_SENDING_MS), limit);
+  for (const row of owed) {
+    await sendAttachmentUpdate(store, row, reporter, now);
+  }
+  return due.length + owed.length;
 }
