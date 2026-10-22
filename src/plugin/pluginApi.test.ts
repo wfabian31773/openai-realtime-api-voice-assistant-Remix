@@ -14,14 +14,15 @@ import { mountPluginApi } from "./routes";
 import { createGraphMail, createMemoryGraphMail, type GraphMail } from "./email";
 import { evaluateAndEnqueueCall, siAssistantMayDial } from "./callEnqueue";
 import { FakeOutboundStore } from "../runtime/outbound/store.testkit";
+import { ChannelDoNotContact } from "../runtime/outbound/channelDnc";
 import { auditContainsPhi, ticketResolvedLogFields } from "./phi";
 import { ticketResolvedAuthorized } from "./ticketResolved";
 import { CONFIRM_TTL_MS, generateConfirmToken, hashPayload } from "./tokens";
-import { classifyInboundSms, handleInboundSms, sendApprovedSms } from "./sms";
+import { classifyInboundSms, handleInboundSms, inboundSmsPreview, sendApprovedSms } from "./sms";
 import { SI_ASSISTANT_EMAIL_DEFAULT } from "./siAssistantConstants";
 import { mintScopesCompatible } from "./scopes";
 import { createSqlPluginStore } from "./sqlStore";
-import { extrasFromContactData, reportSiAssistantCall } from "./callbackReport";
+import { extrasFromContactData, reportSiAssistantCall, type CallbackReporter } from "./callbackReport";
 import { markCommitted, markFailed, reapStaleSending } from "./approvals";
 import { STALE_SENDING_MS } from "./store";
 import type { SmsSender } from "./sms";
@@ -53,6 +54,7 @@ async function listen(
     mail?: ReturnType<typeof createMemoryGraphMail>;
     smsSender?: SmsSender | null;
     now?: () => Date;
+    callbackReporter?: CallbackReporter | null;
   } = {},
 ): Promise<{
   base: string;
@@ -85,6 +87,7 @@ async function listen(
             },
           },
     graphMail: mail,
+    callbackReporter: extras.callbackReporter,
   });
   const server = createServer(app);
   await new Promise<void>((resolve) => server.listen(0, resolve));
@@ -497,6 +500,50 @@ describe("the calling window and DNC list", () => {
     expect(committed.status).toBe(409);
     expect(outbound.upserts).toEqual([]);
   });
+
+  it("voice opt-out then SMS START keeps the call blocked", async () => {
+    const channels = new ChannelDoNotContact();
+    const outbound = new FakeOutboundStore();
+    outbound.channelDnc = channels;
+    const store = new MemoryPluginStore();
+    store.channelDnc = channels;
+    const sender = { async send() { return { sid: "SM-start" }; } };
+    await outbound.stampDoNotContact(PHONE, "opt_out_of_calls");
+    await handleInboundSms(store, sender, { from: PHONE, body: "START" }, {});
+    expect(await store.isSmsOptedOut("5555550111")).toBe(false);
+    expect(await outbound.isDoNotContact(PHONE)).toBe(true);
+    const result = await evaluateAndEnqueueCall(
+      outbound,
+      { approvalId: "appr-1", phone: PHONE, ticketNumber: TICKET },
+      new Date("2026-10-22T18:00:00Z"),
+    );
+    expect(result).toEqual({ ok: false, reason: "do_not_contact" });
+    expect(outbound.upserts).toEqual([]);
+  });
+
+  it("SMS STOP then voice opt-out then SMS START keeps the call blocked", async () => {
+    const channels = new ChannelDoNotContact();
+    const outbound = new FakeOutboundStore();
+    outbound.channelDnc = channels;
+    const store = new MemoryPluginStore();
+    store.channelDnc = channels;
+    const sender = { async send() { return { sid: "SM-rev" }; } };
+    await handleInboundSms(store, sender, { from: PHONE, body: "STOP" }, {});
+    expect(await store.isSmsOptedOut("5555550111")).toBe(true);
+    expect(await outbound.isDoNotContact(PHONE)).toBe(false);
+    await outbound.stampDoNotContact(PHONE, "opt_out_of_calls");
+    expect(await outbound.isDoNotContact(PHONE)).toBe(true);
+    await handleInboundSms(store, sender, { from: PHONE, body: "START" }, {});
+    expect(await store.isSmsOptedOut("5555550111")).toBe(false);
+    expect(await outbound.isDoNotContact(PHONE)).toBe(true);
+    const result = await evaluateAndEnqueueCall(
+      outbound,
+      { approvalId: "appr-1", phone: PHONE, ticketNumber: TICKET },
+      new Date("2026-10-22T18:00:00Z"),
+    );
+    expect(result).toEqual({ ok: false, reason: "do_not_contact" });
+    expect(outbound.upserts).toEqual([]);
+  });
 });
 
 describe("audit and ticket-resolved logs hold no PHI", () => {
@@ -585,6 +632,9 @@ describe("SMS and email", () => {
       if (String(url).includes("/oauth2/")) {
         return new Response(JSON.stringify({ access_token: "tok", expires_in: 3600 }), { status: 200 });
       }
+      if (String(url).includes("/mailFolders/inbox/messages")) {
+        return new Response(JSON.stringify({ value: [] }), { status: 200 });
+      }
       return new Response("", { status: 202, headers: { "request-id": "rid-1" } });
     }) as typeof fetch;
     const mail = createGraphMail(
@@ -609,6 +659,13 @@ describe("SMS and email", () => {
     expect(signals[1]).toBeDefined();
     expect(signals[0]?.aborted).toBe(false);
     expect(signals[1]?.aborted).toBe(false);
+
+    const listed = await mail!.listReplies({ top: 5 });
+    expect(listed).toEqual([]);
+    expect(calls[2].url).toBe(
+      `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(SI_ASSISTANT_EMAIL_DEFAULT)}/mailFolders/inbox/messages?$top=5&$select=id,receivedDateTime,conversationId,from,subject,isDraft&$orderby=receivedDateTime desc`,
+    );
+    expect(calls[2].url).not.toMatch(/\/users\/[^/]+\/messages\?/);
   });
 
   it("never hardcodes the Entra app id or a mail secret", () => {
@@ -693,6 +750,79 @@ describe("review findings", () => {
     });
     expect(res.status).toBe(200);
     expect(await store.isSmsOptedOut("5555550111")).toBe(true);
+  });
+
+  it("posts an unmatched inbound text through the outbox, not as an empty item", async () => {
+    const posted: Array<Record<string, unknown>> = [];
+    const { base, store, server } = await boot(
+      { PLUGIN_WRITES_ENABLED: "true", TWILIO_AUTH_TOKEN: TWILIO_AUTH },
+      {
+        callbackReporter: {
+          async report(payload) {
+            posted.push(payload as unknown as Record<string, unknown>);
+            return { ok: true, status: 200 };
+          },
+        },
+      },
+    );
+    const port = (server.address() as { port: number }).port;
+    const path = "/api/plugin/v1/webhooks/twilio-sms";
+    const body = { From: PHONE, Body: "Can someone call me back about my glasses?" };
+    const signed = signedSms(path, body, `127.0.0.1:${port}`);
+    const res = await fetch(`${base}${path}`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "X-Twilio-Signature": signed.signature,
+      },
+      body: new URLSearchParams(body).toString(),
+    });
+    expect(res.status).toBe(200);
+    const deadline = Date.now() + 500;
+    while (store.outbox.size === 0 && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    const postedUntil = Date.now() + 500;
+    while (!posted.some((p) => p.event === "message") && Date.now() < postedUntil) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    expect([...store.outbox.values()]).toHaveLength(1);
+    expect(posted.some((p) => p.event === "inbound_sms")).toBe(false);
+    expect(posted.some((p) => p.event === "message" && p.message === "Can someone call me back about my glasses?")).toBe(true);
+    expect(JSON.stringify(posted)).not.toContain("5555550111");
+  });
+
+  it("skips an empty inbound text so Support Center does not get a blank item", async () => {
+    const posted: Array<Record<string, unknown>> = [];
+    const { base, store, server } = await boot(
+      { PLUGIN_WRITES_ENABLED: "true", TWILIO_AUTH_TOKEN: TWILIO_AUTH },
+      {
+        callbackReporter: {
+          async report(payload) {
+            posted.push(payload as unknown as Record<string, unknown>);
+            return { ok: true, status: 200 };
+          },
+        },
+      },
+    );
+    const port = (server.address() as { port: number }).port;
+    const path = "/api/plugin/v1/webhooks/twilio-sms";
+    const body = { From: PHONE, Body: "   " };
+    const signed = signedSms(path, body, `127.0.0.1:${port}`);
+    const res = await fetch(`${base}${path}`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "X-Twilio-Signature": signed.signature,
+      },
+      body: new URLSearchParams(body).toString(),
+    });
+    expect(res.status).toBe(200);
+    await new Promise((r) => setTimeout(r, 20));
+    expect(store.outbox.size).toBe(0);
+    expect(posted).toEqual([]);
+    expect(inboundSmsPreview("")).toBeNull();
+    expect(inboundSmsPreview("   \n")).toBeNull();
   });
 
   it("claims a confirm token only once under overlapping commits", async () => {
@@ -1230,6 +1360,25 @@ describe("review findings", () => {
     expect(seen[0]).not.toMatch(/executeApproved|sendApproved|enqueue|sendMail/);
   });
 
+  it("the SQL SMS opt-out is per channel so START cannot erase a voice row", async () => {
+    const seen: Array<{ text: string; params: unknown[] }> = [];
+    const store = createSqlPluginStore(async (text, params) => {
+      seen.push({ text, params: params ?? [] });
+      return [];
+    });
+    await store.isSmsOptedOut("5555550111");
+    await store.setSmsOptOut("5555550111", true);
+    await store.setSmsOptOut("5555550111", false);
+    expect(seen[0].text).toMatch(/source = \$2/);
+    expect(seen[0].params[1]).toBe("sms_stop");
+    expect(seen[1].text).toMatch(/ON CONFLICT \(phone_key, source\) DO NOTHING/);
+    expect(seen[1].params[1]).toBe("sms_stop");
+    expect(seen[2].text).toMatch(/DELETE FROM do_not_contact/);
+    expect(seen[2].text).toMatch(/source = \$2/);
+    expect(seen[2].params[1]).toBe("sms_stop");
+    expect(seen.map((s) => s.text).join("\n")).not.toMatch(/ON CONFLICT \(phone_key\) DO NOTHING/);
+  });
+
   it("the SQL markOutbox persists the attempt count", async () => {
     const seen: Array<{ text: string; params: unknown[] }> = [];
     const store = createSqlPluginStore(async (text, params) => {
@@ -1253,5 +1402,12 @@ describe("review findings", () => {
     expect(migration).toMatch(/DROP CONSTRAINT IF EXISTS contact_approvals_status_check/);
     expect(migration).toMatch(/'unknown'/);
     expect(migration).toContain("plugin_message_outbox_idempotency_key");
+  });
+
+  it("the per-channel DNC migration drops the phone-only primary key", () => {
+    const migration = readFileSync(join(__dirname, "../../migrations/add_do_not_contact_per_channel.sql"), "utf8");
+    expect(migration).toMatch(/DROP CONSTRAINT IF EXISTS do_not_contact_pkey/);
+    expect(migration).toContain("do_not_contact_phone_source_uidx");
+    expect(migration).toMatch(/phone_key, source/);
   });
 });

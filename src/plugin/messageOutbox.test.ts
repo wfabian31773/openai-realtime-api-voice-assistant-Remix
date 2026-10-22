@@ -254,6 +254,101 @@ describe("message outbox", () => {
     expect(store.outbox.get(persisted!.id)?.status).toBe("delivered");
   });
 
+  it("retries an attachmentUpdate when the receiver returns 5xx", async () => {
+    const store = new MemoryPluginStore();
+    const now = new Date("2026-10-22T18:00:00Z");
+    const sid = "CA" + "b".repeat(32);
+    const persisted = await persistTakenMessage(
+      { callSid: sid, message: "Taken before identify" },
+      now,
+      store,
+    );
+    expect(persisted).toBeTruthy();
+    await store.markOutbox(persisted!.id, { status: "sending", attempts: 1, updatedAt: now }, "pending");
+    const sendSnapshot = { ...store.outbox.get(persisted!.id)! };
+    await reattachTakenMessages(
+      sid,
+      { ticketId: "tid-5xx", ticketNumber: "VA-61003", approvalId: "appr-5xx" },
+      store,
+      { async report() { return { ok: true, status: 200 }; } },
+      now,
+    );
+
+    let updates = 0;
+    const posted: Array<Record<string, unknown>> = [];
+    const reporter: CallbackReporter = {
+      async report(payload) {
+        posted.push(payload as unknown as Record<string, unknown>);
+        if (payload.attachmentUpdate) {
+          updates += 1;
+          if (updates === 1) return { ok: false, status: 503 };
+        }
+        return { ok: true, status: 200 };
+      },
+    };
+
+    await settleOutboxDelivery(store, sendSnapshot, { ok: true, error: "" }, now, reporter);
+    expect(store.outbox.get(persisted!.id)?.status).toBe("pending");
+    expect(store.outbox.get(persisted!.id)?.lastError).toBe("attachment_update");
+    expect(store.outbox.get(persisted!.id)?.message).toBe("Taken before identify");
+
+    const later = new Date(now.getTime() + 30_000);
+    await flushDueOutbox(store, reporter, later);
+    expect(updates).toBe(2);
+    expect(posted.filter((p) => p.attachmentUpdate === true)).toHaveLength(2);
+    expect(store.outbox.get(persisted!.id)?.status).toBe("delivered");
+  });
+
+  it("a restart after an unmatched send redelivers with persisted attachmentUpdate", async () => {
+    const store = new MemoryPluginStore();
+    const now = new Date("2026-10-22T18:00:00Z");
+    const sid = "CA" + "a".repeat(32);
+    const persisted = await persistTakenMessage(
+      { callSid: sid, message: "Taken then the process died" },
+      now,
+      store,
+    );
+    expect(persisted).toBeTruthy();
+    await store.markOutbox(persisted!.id, { status: "sending", attempts: 1, updatedAt: now }, "pending");
+    const n = await reattachTakenMessages(
+      sid,
+      { ticketId: "tid-r", ticketNumber: "VA-61002", approvalId: "appr-r" },
+      store,
+      { async report() { return { ok: true, status: 200 }; } },
+      now,
+    );
+    expect(n).toBe(1);
+    expect(store.outbox.get(persisted!.id)?.status).toBe("sending");
+    expect(store.outbox.get(persisted!.id)?.ticketNumber).toBe("VA-61002");
+
+    // Process dies before settleDelivery. Reclaim persists stale_sending.
+    const later = new Date(now.getTime() + STALE_SENDING_MS + 1);
+    const reclaimed = await reclaimStaleOutboxSending(store, later);
+    expect(reclaimed[0]?.lastError).toBe("stale_sending");
+    expect(reclaimed[0]?.ticketNumber).toBe("VA-61002");
+
+    const posted: Array<Record<string, unknown>> = [];
+    const reporter: CallbackReporter = {
+      async report(payload) {
+        posted.push(payload as unknown as Record<string, unknown>);
+        return { ok: true, status: 200 };
+      },
+    };
+    await flushDueOutbox(store, reporter, later);
+    expect(posted).toHaveLength(1);
+    expect(posted[0]).toMatchObject({
+      event: "message",
+      attachmentUpdate: true,
+      outboxId: persisted!.id,
+      idempotencyKey: persisted!.idempotencyKey,
+      ticketNumber: "VA-61002",
+      approvalId: "appr-r",
+      ticketId: "tid-r",
+      identityConfirmed: true,
+    });
+    expect(store.outbox.get(persisted!.id)?.status).toBe("delivered");
+  });
+
   it("does not delete a delivered row when expiry ids are re-checked", async () => {
     const store = new MemoryPluginStore();
     const now = new Date("2026-10-22T18:00:00Z");

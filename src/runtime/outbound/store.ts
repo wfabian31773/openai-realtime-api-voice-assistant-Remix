@@ -11,8 +11,9 @@
  *   campaign_contacts          one row per person to call; `external_ref`
  *                              (added here) makes an import idempotent
  *   campaign_contact_attempts  one row per dial
- *   do_not_contact             NEW: one row per phone number that asked not
- *                              to be called, phone-wide, every campaign
+ *   do_not_contact             NEW: one row per phone per channel (voice
+ *                              vs sms_stop) that asked not to be contacted,
+ *                              phone-wide, every campaign
  *
  * The first three predate this layer (the old core's campaign executor).
  * `external_ref` and `do_not_contact` are created on first use with
@@ -308,10 +309,14 @@ export async function createDbOutboundStore(): Promise<OutboundStore> {
           ON campaign_contacts (campaign_id, external_ref) WHERE external_ref IS NOT NULL`);
       await db.execute(sql`
         CREATE TABLE IF NOT EXISTS do_not_contact (
-          phone_key VARCHAR(10) PRIMARY KEY,
+          phone_key VARCHAR(10) NOT NULL,
           source VARCHAR(64) NOT NULL,
           created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )`);
+      await db.execute(sql`ALTER TABLE do_not_contact DROP CONSTRAINT IF EXISTS do_not_contact_pkey`);
+      await db.execute(sql`
+        CREATE UNIQUE INDEX IF NOT EXISTS do_not_contact_phone_source_uidx
+          ON do_not_contact (phone_key, source)`);
     })().catch((error) => {
       ensured = null; // try again next time rather than caching a failure
       throw error;
@@ -622,7 +627,10 @@ export async function createDbOutboundStore(): Promise<OutboundStore> {
       if (!key) return true;
       await ensureSchema();
       const found = rows(
-        await db.execute(sql`SELECT 1 FROM do_not_contact WHERE phone_key = ${key}::varchar`),
+        await db.execute(sql`
+          SELECT 1 FROM do_not_contact
+           WHERE phone_key = ${key}::varchar
+             AND source <> 'sms_stop'`),
       );
       return found.length > 0;
     },
@@ -758,7 +766,7 @@ export async function createDbOutboundStore(): Promise<OutboundStore> {
       await ensureSchema();
       await db.execute(sql`
         INSERT INTO do_not_contact (phone_key, source) VALUES (${key}::varchar, ${source}::varchar)
-        ON CONFLICT (phone_key) DO NOTHING`);
+        ON CONFLICT (phone_key, source) DO NOTHING`);
     },
   };
 }

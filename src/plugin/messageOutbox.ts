@@ -82,6 +82,11 @@ async function deliverRow(
   if (!reporter) return { ok: false, error: phiFreeOutboxError(undefined, "no_webhook") };
   try {
     const unmatched = !row.ticketNumber && !row.approvalId && !row.ticketId;
+    // last_error = stale_sending is persisted by reclaim. A restart that
+    // redelivers a row which now has ticket keys is an attachmentUpdate —
+    // the in-memory flag does not survive the process.
+    const attachmentUpdate =
+      !unmatched && (row.lastError === "stale_sending" || row.lastError === ATTACHMENT_UPDATE_ERROR);
     const result = await reporter.report({
       event: "message",
       slug: SI_ASSISTANT_SLUG,
@@ -92,6 +97,7 @@ async function deliverRow(
       unmatched: unmatched || undefined,
       suggestions: unmatched && row.suggestions?.length ? row.suggestions : undefined,
       identityConfirmed: !unmatched || undefined,
+      attachmentUpdate: attachmentUpdate || undefined,
       outboxId: row.id,
       idempotencyKey: row.idempotencyKey ?? undefined,
     });
@@ -148,21 +154,56 @@ function ticketStampsDiffer(a: TicketStamp, b: TicketStamp): boolean {
   return left.ticketId !== right.ticketId || left.ticketNumber !== right.ticketNumber || left.approvalId !== right.approvalId;
 }
 
+const ATTACHMENT_UPDATE_ERROR = "attachment_update";
+
 async function reportAttachmentUpdate(
   row: { id: string; idempotencyKey?: string | null } & TicketStamp,
   reporter: CallbackReporter,
+): Promise<{ ok: boolean; error: string }> {
+  try {
+    const result = await reporter.report({
+      event: "message",
+      slug: SI_ASSISTANT_SLUG,
+      ticketNumber: row.ticketNumber,
+      approvalId: row.approvalId,
+      ticketId: row.ticketId,
+      identityConfirmed: true,
+      outboxId: row.id,
+      idempotencyKey: row.idempotencyKey ?? undefined,
+      attachmentUpdate: true,
+    });
+    if (result.ok) return { ok: true, error: "" };
+    return { ok: false, error: ATTACHMENT_UPDATE_ERROR };
+  } catch (err) {
+    const name = err instanceof Error ? err.name : "";
+    return {
+      ok: false,
+      error: name === "AbortError" ? "timeout" : ATTACHMENT_UPDATE_ERROR,
+    };
+  }
+}
+
+async function retryLater(
+  store: PluginStore,
+  row: MessageOutboxRow,
+  error: string,
+  now: Date,
 ): Promise<void> {
-  await reporter.report({
-    event: "message",
-    slug: SI_ASSISTANT_SLUG,
-    ticketNumber: row.ticketNumber,
-    approvalId: row.approvalId,
-    ticketId: row.ticketId,
-    identityConfirmed: true,
-    outboxId: row.id,
-    idempotencyKey: row.idempotencyKey ?? undefined,
-    attachmentUpdate: true,
-  });
+  const dead = row.attempts >= OUTBOX_MAX_ATTEMPTS;
+  await store.markOutbox(
+    row.id,
+    {
+      status: dead ? "dead" : "pending",
+      lastError: error,
+      nextAttemptAt: new Date(now.getTime() + outboxBackoffMs(row.attempts)),
+      updatedAt: now,
+    },
+    row.status === "delivered" ? "delivered" : "sending",
+  );
+  if (dead) {
+    await noteDead(store, row);
+  }
+  console.error(`[si-assistant] outbox ${row.id} ${error}${dead ? " dead" : ""}`);
 }
 
 async function settleDelivery(
@@ -173,41 +214,27 @@ async function settleDelivery(
   reporter: CallbackReporter | null = null,
 ): Promise<void> {
   if (delivered.ok) {
-    const marked = await store.markOutbox(
+    const current = (await store.getOutbox(row.id)) ?? row;
+    // Ticket keys live on the outbox row (persisted by attachOutboxTickets).
+    // Compare before marking delivered so a 5xx on the follow-up can retry.
+    if (reporter && hasTicketStamp(current) && ticketStampsDiffer(row, current)) {
+      const follow = await reportAttachmentUpdate(
+        { id: row.id, idempotencyKey: current.idempotencyKey ?? row.idempotencyKey, ...ticketStamp(current) },
+        reporter,
+      );
+      if (!follow.ok) {
+        await retryLater(store, row, follow.error, now);
+        return;
+      }
+    }
+    await store.markOutbox(
       row.id,
       { status: "delivered", lastError: null, message: "", updatedAt: now },
       "sending",
     );
-    const current = marked ?? row;
-    // Ticket keys live on the outbox row (persisted by attachOutboxTickets).
-    // If they changed after the send snapshot, this is an attachmentUpdate.
-    if (reporter && hasTicketStamp(current) && ticketStampsDiffer(row, current)) {
-      try {
-        await reportAttachmentUpdate(
-          { id: row.id, idempotencyKey: current.idempotencyKey ?? row.idempotencyKey, ...ticketStamp(current) },
-          reporter,
-        );
-      } catch {
-        console.error("[si-assistant] outbox attachment follow-up failed");
-      }
-    }
     return;
   }
-  const dead = row.attempts >= OUTBOX_MAX_ATTEMPTS;
-  await store.markOutbox(
-    row.id,
-    {
-      status: dead ? "dead" : "pending",
-      lastError: delivered.error,
-      nextAttemptAt: new Date(now.getTime() + outboxBackoffMs(row.attempts)),
-      updatedAt: now,
-    },
-    "sending",
-  );
-  if (dead) {
-    await noteDead(store, row);
-  }
-  console.error(`[si-assistant] outbox ${row.id} ${delivered.error}${dead ? " dead" : ""}`);
+  await retryLater(store, row, delivered.error, now);
 }
 
 /** Test hook: finish an in-flight send the way flushOutboxRow does. */
@@ -285,10 +312,9 @@ export async function reattachTakenMessages(
       continue;
     }
     if (row.status === "delivered" && reporter) {
-      try {
-        await reportAttachmentUpdate(row, reporter);
-      } catch {
-        console.error("[si-assistant] outbox reattach report failed");
+      const follow = await reportAttachmentUpdate(row, reporter);
+      if (!follow.ok) {
+        await retryLater(store, row, follow.error, now);
       }
     }
   }

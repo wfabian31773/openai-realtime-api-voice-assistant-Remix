@@ -26,6 +26,7 @@ import {
 } from "./tokens";
 import { sanitizeAuditEntry, type PluginAuditEntry } from "./audit";
 import { CONFIRM_TTL_MS } from "./tokens";
+import { ChannelDoNotContact } from "../runtime/outbound/channelDnc";
 
 export const CONTACT_CHANNELS = ["call", "sms", "email"] as const;
 export type ContactChannel = (typeof CONTACT_CHANNELS)[number];
@@ -152,6 +153,7 @@ export interface PluginStore {
   listCommittedContactsByPhone(phoneKey: string, since: Date): Promise<ContactApprovalRow[]>;
 
   insertOutbox(row: MessageOutboxRow): Promise<MessageOutboxRow>;
+  getOutbox(id: string): Promise<MessageOutboxRow | null>;
   claimDueOutbox(now: Date, limit: number): Promise<MessageOutboxRow[]>;
   markOutbox(
     id: string,
@@ -231,7 +233,10 @@ export class MemoryPluginStore implements PluginStore {
   tokens = new Map<string, ApiTokenRow>();
   approvals = new Map<string, ContactApprovalRow>();
   outbox = new Map<string, MessageOutboxRow>();
-  smsOptOuts = new Set<string>();
+  channelDnc = new ChannelDoNotContact();
+  get smsOptOuts(): Set<string> {
+    return this.channelDnc.sms;
+  }
   audit: PluginAuditEntry[] = [];
   /** Tests only: persist-first path must be able to fail closed. */
   outboxBroken = false;
@@ -370,6 +375,11 @@ export class MemoryPluginStore implements PluginStore {
     return { ...stored };
   }
 
+  async getOutbox(id: string): Promise<MessageOutboxRow | null> {
+    const row = this.outbox.get(id);
+    return row ? { ...row } : null;
+  }
+
   async claimDueOutbox(now: Date, limit: number): Promise<MessageOutboxRow[]> {
     const due = [...this.outbox.values()]
       .filter((r) => r.status === "pending" && r.nextAttemptAt.getTime() <= now.getTime())
@@ -468,11 +478,10 @@ export class MemoryPluginStore implements PluginStore {
   }
 
   async isSmsOptedOut(phoneKey: string): Promise<boolean> {
-    return this.smsOptOuts.has(phoneKey);
+    return this.channelDnc.isSmsBlocked(phoneKey);
   }
   async setSmsOptOut(phoneKey: string, optedOut: boolean): Promise<void> {
-    if (optedOut) this.smsOptOuts.add(phoneKey);
-    else this.smsOptOuts.delete(phoneKey);
+    this.channelDnc.setSms(phoneKey, optedOut);
   }
 
   async writeAudit(entry: PluginAuditEntry): Promise<void> {

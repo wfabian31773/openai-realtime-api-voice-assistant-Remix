@@ -298,6 +298,10 @@ export function createSqlPluginStore(exec: SqlExec): PluginStore {
       }
       return row;
     },
+    async getOutbox(id) {
+      const rows = await exec("SELECT * FROM plugin_message_outbox WHERE id = $1 LIMIT 1", [id]);
+      return rows[0] ? outboxFrom(rows[0]) : null;
+    },
     async claimDueOutbox(now, limit) {
       const rows = await exec(
         `UPDATE plugin_message_outbox
@@ -414,23 +418,22 @@ export function createSqlPluginStore(exec: SqlExec): PluginStore {
       return rows.map(outboxFrom);
     },
     async isSmsOptedOut(phoneKey) {
-      // Any DNC row blocks SMS — a call opt-out is also a text opt-out.
+      // SMS only. A voice opt-out is a different row and does not block texts.
       const rows = await exec(
-        "SELECT phone_key FROM do_not_contact WHERE phone_key = $1 LIMIT 1",
-        [phoneKey],
+        "SELECT phone_key FROM do_not_contact WHERE phone_key = $1 AND source = $2 LIMIT 1",
+        [phoneKey, "sms_stop"],
       );
       return rows.length > 0;
     },
     async setSmsOptOut(phoneKey, optedOut) {
       if (optedOut) {
-        // Do not overwrite a call opt-out with sms_stop; START must not
-        // clear a number that asked not to be called.
         await exec(
           `INSERT INTO do_not_contact (phone_key, source) VALUES ($1, $2)
-           ON CONFLICT (phone_key) DO NOTHING`,
+           ON CONFLICT (phone_key, source) DO NOTHING`,
           [phoneKey, "sms_stop"],
         );
       } else {
+        // START clears SMS only. A voice "don't call me" stays.
         await exec("DELETE FROM do_not_contact WHERE phone_key = $1 AND source = $2", [phoneKey, "sms_stop"]);
       }
     },

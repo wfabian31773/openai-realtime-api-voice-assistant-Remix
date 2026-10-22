@@ -7,10 +7,12 @@
  * by status only — never by the body we sent or received.
  */
 
-import { createHmac } from "node:crypto";
+import { createHmac, timingSafeEqual } from "node:crypto";
 import { SI_ASSISTANT_SLUG } from "./siAssistantConstants";
 
 export const CALLBACK_REPORT_TIMEOUT_MS = 5_000;
+/** Receiver rejects a timestamp older (or newer) than this. */
+export const CALLBACK_SIGNATURE_MAX_AGE_SEC = 5 * 60;
 
 export interface CallbackReport {
   event: "callback" | "inbound_sms" | "message";
@@ -65,8 +67,35 @@ export interface CallbackReporter {
   report(payload: CallbackReport): Promise<{ ok: boolean; status?: number }>;
 }
 
-export function signCallbackPayload(body: string, secret: string): string {
-  return createHmac("sha256", secret).update(body, "utf8").digest("hex");
+/** HMAC-SHA256 over `${unixSeconds}.${rawBody}`. */
+export function signCallbackPayload(body: string, secret: string, timestamp: number | string): string {
+  return createHmac("sha256", secret).update(`${timestamp}.${body}`, "utf8").digest("hex");
+}
+
+export function verifyCallbackSignature(
+  input: {
+    body: string;
+    secret: string;
+    signature: string;
+    timestamp: number | string;
+    nowSec?: number;
+    maxAgeSec?: number;
+  },
+): boolean {
+  const ts = Number(input.timestamp);
+  if (!Number.isFinite(ts)) return false;
+  const now = input.nowSec ?? Math.floor(Date.now() / 1000);
+  const maxAge = input.maxAgeSec ?? CALLBACK_SIGNATURE_MAX_AGE_SEC;
+  if (Math.abs(now - ts) > maxAge) return false;
+  const expected = signCallbackPayload(input.body, input.secret, ts);
+  try {
+    const left = Buffer.from(expected, "hex");
+    const right = Buffer.from(input.signature, "hex");
+    if (left.length === 0 || left.length !== right.length) return false;
+    return timingSafeEqual(left, right);
+  } catch {
+    return false;
+  }
 }
 
 export function createCallbackReporter(
@@ -79,7 +108,8 @@ export function createCallbackReporter(
   return {
     async report(payload) {
       const body = JSON.stringify({ ...payload, slug: payload.slug || SI_ASSISTANT_SLUG });
-      const signature = signCallbackPayload(body, secret);
+      const timestamp = Math.floor(Date.now() / 1000);
+      const signature = signCallbackPayload(body, secret, timestamp);
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), CALLBACK_REPORT_TIMEOUT_MS);
       try {
@@ -87,6 +117,7 @@ export function createCallbackReporter(
           method: "POST",
           headers: {
             "Content-Type": "application/json",
+            "X-SI-Assistant-Timestamp": String(timestamp),
             "X-SI-Assistant-Signature": signature,
           },
           body,

@@ -26,9 +26,10 @@ import { hashPayload } from "./tokens";
 import { checkTwilioSignature, type WebhookRequest } from "../runtime/voiceWebhook";
 import { agentHealth, emptyFleetReader, listAgents, outboundStatus, type AgentSource, type FleetReader } from "./reads";
 import { evaluateAndEnqueueCall, identityFromPreparePayload } from "./callEnqueue";
-import { createTwilioSmsSender, handleInboundSms, sendApprovedSms, type SmsSender } from "./sms";
+import { createTwilioSmsSender, handleInboundSms, inboundSmsPreview, sendApprovedSms, type SmsSender } from "./sms";
 import { createGraphMail, sendApprovedEmail, type GraphMail } from "./email";
 import { createCallbackReporter, type CallbackReporter } from "./callbackReport";
+import { flushOutboxRow, persistTakenMessage } from "./messageOutbox";
 import type { OutboundStore } from "../runtime/outbound/store";
 import type { PluginAuditOutcome } from "./audit";
 
@@ -400,12 +401,17 @@ export function mountPluginApi(app: Express, deps: PluginApiDeps): void {
     const sender = deps.smsSender === undefined ? createTwilioSmsSender(envOf(deps)) : deps.smsSender;
     const handled = await handleInboundSms(deps.store, sender, { from, body: text }, envOf(deps));
     const reporter = deps.callbackReporter ?? createCallbackReporter(envOf(deps));
-    if (handled.command === "other" && reporter) {
-      void reporter.report({
-        event: "inbound_sms",
-        slug: "si-assistant",
-        smsCommand: handled.command,
-      });
+    if (handled.command === "other") {
+      const preview = inboundSmsPreview(text);
+      if (preview) {
+        const now = deps.now?.() ?? new Date();
+        const row = await persistTakenMessage({ message: preview }, now, deps.store);
+        if (row) {
+          void flushOutboxRow(row, deps.store, reporter, now).catch(() => {
+            console.error("[si-assistant] inbound sms outbox flush failed");
+          });
+        }
+      }
     }
     res.type("text/xml").send("<Response></Response>");
   });

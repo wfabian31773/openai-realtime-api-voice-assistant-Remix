@@ -65,8 +65,10 @@ callers read the same field on the campaign candidates. The dialer already enfor
 The same number answers inbound callbacks on the `si-assistant` runtime lane.
 That lane identifies itself as an **AI assistant** and never pretends to be
 human. Each finished SI Assistant call is reported to the ticketing app
-(`SI_ASSISTANT_CALLBACK_WEBHOOK_URL` + HMAC
-`SI_ASSISTANT_CALLBACK_WEBHOOK_SECRET`, header `X-SI-Assistant-Signature`).
+(`SI_ASSISTANT_CALLBACK_WEBHOOK_URL` + HMAC-SHA256 of
+`${unixSeconds}.${rawBody}`, headers `X-SI-Assistant-Timestamp` and
+`X-SI-Assistant-Signature`). The receiver rejects a timestamp older
+than five minutes.
 The payload is PHI-bounded: callSid, outcome, duration, ticket number,
 ticket id, approval id. No phones, bodies or transcripts. A taken
 message is a separate `message` event on the same webhook. The agent
@@ -140,16 +142,25 @@ Not delegated to the ticketing app: that sender uses a different number
 inbound webhook after `X-Twilio-Signature` is checked the same way as
 the voice webhooks (invalid → 403; no auth token → 200 empty TwiML and
 no opt-out change). STOP writes `do_not_contact` source `sms_stop`
-without overwriting a call opt-out. START clears only `sms_stop`.
+as its own row — unique is `(phone_key, source)`, not the phone
+alone — so a later voice "don't call me" is a second row. START
+deletes only `sms_stop`. Voice dials ignore `sms_stop`; SMS send
+ignores a voice row. Either order (voice then START, or STOP then
+voice then START) leaves the call blocked. An inbound text that is
+not STOP / HELP / START is a taken message: a body preview goes
+through `plugin_message_outbox`. Empty bodies are skipped — they
+must not become an empty Support Center item.
 
 ## Email
 
 Sent from `SI_ASSISTANT_EMAIL` (default `Support-Assistant@azulvision.com`)
 via Microsoft Graph `sendMail`, app-only client credentials. The Entra app is
 **SI Assistant Mail**. It is scoped through Exchange **RBAC for Applications**
-to that one mailbox. Replies are read from the same mailbox
-(`GET /email_replies`). Sender and subject are returned only to a
-`contacts:approve` token; `fleet:read` sees ids and timestamps.
+to that one mailbox. Replies are read from that mailbox's Inbox
+only (`GET /users/{mailbox}/mailFolders/inbox/messages` behind
+`GET /email_replies`), not the whole mailbox. Sender and subject
+are returned only to a `contacts:approve` token; `fleet:read` sees
+ids and timestamps.
 
 Use exactly these names:
 

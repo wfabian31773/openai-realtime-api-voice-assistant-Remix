@@ -4,8 +4,9 @@
  * number (+1 909-255-3213) lives here and the dialer already uses it.
  *
  * STOP / HELP / START are honoured on the inbound webhook. STOP writes
- * an SMS opt-out (and does not send further SMS). HELP replies with the
- * AI identification. START clears the SMS opt-out.
+ * an SMS opt-out (source `sms_stop` only — it does not block voice).
+ * HELP replies with the AI identification. START clears the SMS opt-out
+ * and never a voice "don't call me".
  */
 
 import { dncKey } from "../runtime/outbound/store";
@@ -27,6 +28,16 @@ export const START_REPLY =
   "Azul Vision SI Assistant (AI): you are opted back in to texts from this number. Reply STOP to opt out.";
 
 export type InboundSmsCommand = "stop" | "help" | "start" | "other";
+
+/** Body preview for an unmatched inbound text. Empty after trim is skipped. */
+export const INBOUND_SMS_PREVIEW_MAX = 280;
+
+export function inboundSmsPreview(body: string): string | null {
+  const trimmed = body.replace(/\s+/g, " ").trim();
+  if (!trimmed) return null;
+  if (trimmed.length <= INBOUND_SMS_PREVIEW_MAX) return trimmed;
+  return `${trimmed.slice(0, INBOUND_SMS_PREVIEW_MAX - 1).trimEnd()}…`;
+}
 
 export function classifyInboundSms(body: string): InboundSmsCommand {
   const normalized = body.trim().toLowerCase().replace(/[!.]/g, "");

@@ -150,7 +150,7 @@ export function createGraphMail(
       const top = input?.top ?? 20;
       const res = await timedFetch(
         fetchImpl,
-        `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(mailbox)}/messages?$top=${top}&$select=id,receivedDateTime,conversationId,from,subject,isDraft&$orderby=receivedDateTime desc`,
+        `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(mailbox)}/mailFolders/inbox/messages?$top=${top}&$select=id,receivedDateTime,conversationId,from,subject,isDraft&$orderby=receivedDateTime desc`,
         { headers: { Authorization: `Bearer ${access}` } },
       );
       if (!res.ok) throw new Error("graph_list_failed");
