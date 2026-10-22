@@ -4,7 +4,7 @@
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createServer, type Server } from "node:http";
-import { existsSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { AddressInfo } from "node:net";
 import express from "express";
@@ -1537,7 +1537,7 @@ describe("review findings", () => {
     expect(seen[0]).not.toMatch(/executeApproved|sendApproved|enqueue|sendMail/);
   });
 
-  it("the SQL SMS opt-out keeps one row per phone and reads any row, so START cannot erase a voice row", async () => {
+  it("the SQL SMS opt-out writes per channel but reads any row, so START cannot erase a voice row", async () => {
     const seen: Array<{ text: string; params: unknown[] }> = [];
     const store = createSqlPluginStore(async (text, params) => {
       seen.push({ text, params: params ?? [] });
@@ -1550,10 +1550,10 @@ describe("review findings", () => {
     expect(seen[0].text).toMatch(/FROM do_not_contact WHERE phone_key = \$1/);
     expect(seen[0].text).not.toMatch(/source/);
     expect(seen[0].params).toEqual(["5555550111"]);
-    // The conflict target is the Hub's primary key. A target the live table
-    // has no unique index for is a 42P10 on every STOP (v115).
-    expect(seen[1].text).toMatch(/ON CONFLICT \(phone_key\) DO NOTHING/);
-    expect(seen[1].text).not.toMatch(/ON CONFLICT \(phone_key, source\)/);
+    // The conflict target is the Hub's unique index (phone_key, source). A
+    // target the live table has no unique index for is a 42P10 on every STOP.
+    expect(seen[1].text).toMatch(/ON CONFLICT \(phone_key, source\) DO NOTHING/);
+    expect(seen[1].text).not.toMatch(/ON CONFLICT \(phone_key\)/);
     expect(seen[1].params[1]).toBe("sms_stop");
     expect(seen[2].text).toMatch(/DELETE FROM do_not_contact/);
     expect(seen[2].text).toMatch(/source = \$2/);
@@ -1600,17 +1600,19 @@ describe("review findings", () => {
     expect(live).not.toMatch(/do_not_contact/);
   });
 
-  it("nothing in the repo drops the do_not_contact primary key (v115)", () => {
-    // v114 shipped a migration and a first-use ALTER that dropped it. Older
-    // builds write `ON CONFLICT (phone_key)`, so dropping it turns every
-    // older build's opt-out into an error the moment a deploy rolls back.
-    expect(existsSync(join(__dirname, "../../migrations/add_do_not_contact_per_channel.sql"))).toBe(false);
+  it("the per-channel key is a migration's job, and the runtime never alters the table (v115)", () => {
+    // The Hub took (phone_key, source) from this migration on 2026-10-22.
+    // v114 also dropped the old primary key on first use in ensureSchema, a
+    // schema change on a live table; the runtime now only creates.
+    const migration = readFileSync(join(__dirname, "../../migrations/add_do_not_contact_per_channel.sql"), "utf8");
+    expect(migration).toMatch(/DROP CONSTRAINT IF EXISTS do_not_contact_pkey/);
+    expect(migration).toContain("do_not_contact_phone_source_uidx");
     const store = readFileSync(join(__dirname, "../runtime/outbound/store.ts"), "utf8");
-    expect(store).not.toMatch(/DROP CONSTRAINT[^;]*do_not_contact_pkey/);
-    expect(store).not.toMatch(/do_not_contact_phone_source_uidx/);
+    expect(store).not.toMatch(/DROP CONSTRAINT[^;`]*do_not_contact_pkey/);
+    expect(store).toContain("do_not_contact_phone_source_uidx");
     const schema = readFileSync(join(__dirname, "../../shared/schema.ts"), "utf8");
-    expect(schema).toMatch(/pgTable\("do_not_contact", \{\s*phoneKey: varchar\("phone_key", \{ length: 10 \}\)\.primaryKey\(\)/);
-    expect(schema).not.toMatch(/do_not_contact_phone_source_uidx/);
+    expect(schema).toMatch(/uniqueIndex\("do_not_contact_phone_source_uidx"\)\.on\(table\.phoneKey, table\.source\)/);
+    expect(schema).not.toMatch(/pgTable\("do_not_contact", \{\s*phoneKey: varchar\("phone_key", \{ length: 10 \}\)\.primaryKey\(\)/);
   });
 });
 

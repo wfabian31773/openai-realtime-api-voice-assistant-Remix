@@ -11,10 +11,9 @@
  *   campaign_contacts          one row per person to call; `external_ref`
  *                              (added here) makes an import idempotent
  *   campaign_contact_attempts  one row per dial
- *   do_not_contact             NEW: one row per phone that asked not to be
- *                              contacted, phone-wide, every campaign; `source`
- *                              says which channel asked (a voice opt-out wins
- *                              over an SMS `sms_stop` row)
+ *   do_not_contact             NEW: one row per phone per channel (voice
+ *                              vs sms_stop) that asked not to be contacted,
+ *                              phone-wide, every campaign
  *
  * The first three predate this layer (the old core's campaign executor).
  * `external_ref` and `do_not_contact` are created on first use with
@@ -308,17 +307,21 @@ export async function createDbOutboundStore(): Promise<OutboundStore> {
       await db.execute(sql`
         CREATE UNIQUE INDEX IF NOT EXISTS campaign_contacts_campaign_external_ref_uidx
           ON campaign_contacts (campaign_id, external_ref) WHERE external_ref IS NOT NULL`);
-      // One row per phone, keyed on phone_key — the shape the Hub has carried
-      // since v105. This only ever CREATES the table; it never alters one.
-      // v114 dropped the primary key here on first use, which is a schema
-      // change on a live table that no migration covered, and it broke the
-      // `ON CONFLICT (phone_key)` write every older build makes (v115).
+      // One row per (phone, source): the shape migrations/
+      // add_do_not_contact_per_channel.sql gave the Hub on 2026-10-22. This
+      // only CREATES — the table when absent, and the unique index the
+      // writes conflict on. It never drops or alters what is there: v114
+      // dropped the old primary key here on first use, a schema change on a
+      // live table that belongs in a migration (v115).
       await db.execute(sql`
         CREATE TABLE IF NOT EXISTS do_not_contact (
-          phone_key VARCHAR(10) PRIMARY KEY,
+          phone_key VARCHAR(10) NOT NULL,
           source VARCHAR(64) NOT NULL,
           created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )`);
+      await db.execute(sql`
+        CREATE UNIQUE INDEX IF NOT EXISTS do_not_contact_phone_source_uidx
+          ON do_not_contact (phone_key, source)`);
     })().catch((error) => {
       ensured = null; // try again next time rather than caching a failure
       throw error;
@@ -767,13 +770,11 @@ export async function createDbOutboundStore(): Promise<OutboundStore> {
       const key = dncKey(phone);
       if (!key) return;
       await ensureSchema();
-      // One row per phone. A voice opt-out on a phone that only has an SMS
-      // STOP takes the row over, so a later START (which deletes only
-      // `sms_stop`) cannot erase it; any other existing row stays as it is.
+      // Its own row per channel: a later SMS START deletes only `sms_stop`,
+      // so it cannot erase this one.
       await db.execute(sql`
         INSERT INTO do_not_contact (phone_key, source) VALUES (${key}::varchar, ${source}::varchar)
-        ON CONFLICT (phone_key) DO UPDATE SET source = EXCLUDED.source
-          WHERE do_not_contact.source = 'sms_stop'`);
+        ON CONFLICT (phone_key, source) DO NOTHING`);
     },
   };
 }

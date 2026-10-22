@@ -462,12 +462,11 @@ export function createSqlPluginStore(exec: SqlExec): PluginStore {
       if (optedOut) {
         await exec(
           `INSERT INTO do_not_contact (phone_key, source) VALUES ($1, $2)
-           ON CONFLICT (phone_key) DO NOTHING`,
+           ON CONFLICT (phone_key, source) DO NOTHING`,
           [phoneKey, "sms_stop"],
         );
       } else {
-        // START clears SMS only. A voice "don't call me" owns the row
-        // (the voice write takes over an sms_stop row), so it stays.
+        // START clears SMS only. A voice "don't call me" is its own row.
         await exec("DELETE FROM do_not_contact WHERE phone_key = $1 AND source = $2", [phoneKey, "sms_stop"]);
       }
     },

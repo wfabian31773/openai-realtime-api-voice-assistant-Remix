@@ -145,19 +145,19 @@ describe("the do-not-contact list", () => {
     expect(check).toContain("WHERE phone_key = ${key}::varchar");
   });
 
-  it("keeps one row per phone: the voice write takes over only an sms_stop row (v115)", () => {
+  it("writes one row per channel, on the unique index the Hub carries since 2026-10-22", () => {
     const stamp = method("stampDoNotContact");
-    // The Hub's primary key is the conflict target; a target with no unique
-    // index behind it is a 42P10 on every opt-out.
-    expect(stamp).toContain("ON CONFLICT (phone_key) DO UPDATE SET source = EXCLUDED.source");
-    expect(stamp).toContain("WHERE do_not_contact.source = 'sms_stop'");
-    expect(stamp).not.toContain("ON CONFLICT (phone_key, source)");
+    // The conflict target must be a unique index the live table has; one it
+    // lacks is a 42P10 on every opt-out. The Hub's is (phone_key, source).
+    expect(stamp).toContain("ON CONFLICT (phone_key, source) DO NOTHING");
+    expect(stamp).not.toMatch(/ON CONFLICT \(phone_key\)/);
   });
 
-  it("only ever creates do_not_contact, with its primary key, and never alters it (v115)", () => {
-    expect(SRC).toMatch(/CREATE TABLE IF NOT EXISTS do_not_contact \(\s*phone_key VARCHAR\(10\) PRIMARY KEY,/);
+  it("only ever creates do_not_contact and its index, and never alters the table (v115)", () => {
+    expect(SRC).toMatch(/CREATE TABLE IF NOT EXISTS do_not_contact \(\s*phone_key VARCHAR\(10\) NOT NULL,/);
+    expect(SRC).toMatch(/CREATE UNIQUE INDEX IF NOT EXISTS do_not_contact_phone_source_uidx\s+ON do_not_contact \(phone_key, source\)/);
     expect(SRC).not.toMatch(/ALTER TABLE do_not_contact/);
-    expect(SRC).not.toContain("do_not_contact_phone_source_uidx");
+    expect(SRC).not.toMatch(/DROP CONSTRAINT[^;`]*do_not_contact_pkey/);
   });
 
   it("keys every spelling of a US number on its ten digits", () => {

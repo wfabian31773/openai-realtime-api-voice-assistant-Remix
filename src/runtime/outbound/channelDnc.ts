@@ -1,12 +1,7 @@
 /**
- * SMS and voice opt-outs share `do_not_contact`, one row per phone (the
- * primary key the Hub has carried since v105). STOP writes `sms_stop` when
- * the phone has no row; a voice "don't call me" takes an `sms_stop` row over.
- * START deletes only `sms_stop`, so it cannot erase a voice opt-out.
- *
- * This in-memory model keeps the two channels in two sets. That is the same
- * behaviour as the one-row table: a phone with a voice entry stays blocked
- * after START either way.
+ * SMS and voice opt-outs share `do_not_contact` but not a row.
+ * One row per (phone_key, source). START deletes only `sms_stop`.
+ * A later voice "don't call me" is its own row; START cannot erase it.
  *
  * READS ARE STRICT: any row for the phone, whatever its source, blocks both
  * calls and texts. A STOP blocks calls; a voice opt-out blocks texts.
