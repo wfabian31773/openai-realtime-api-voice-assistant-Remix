@@ -73,13 +73,19 @@ export function outputHash(values: MetricValue[]): string {
   return createHash("sha256").update(JSON.stringify(sortValues(values))).digest("hex").slice(0, 16);
 }
 
-async function columnExists(q: Query | undefined, column: string): Promise<boolean> {
+/**
+ * true/false when the source answered; "failed" when the probe itself could
+ * not be read. A failed probe is NOT "the column is absent": it would store
+ * every call under the empty build marker and close the night on an unsplit
+ * result (Codex, #365), so it counts as a read failure and the night retries.
+ */
+async function columnExists(q: Query | undefined, column: string): Promise<boolean | "failed"> {
   if (!q) return false;
   try {
     const { rows } = await q(COLUMN_SQL, [column]);
     return Number(rows[0]?.n) > 0;
   } catch {
-    return false;
+    return "failed";
   }
 }
 
@@ -111,9 +117,17 @@ export async function runLearningDay(day: string, deps: RunnerDeps): Promise<Run
       supportCenter: deps.supportCenter,
       fivestar: deps.fivestar,
       console: deps.console,
-      hubHasRuntimeMarker: await columnExists(deps.hub, "runtime_marker"),
-      fivestarHasBuildId: await columnExists(deps.fivestar, "build_id"),
+      hubHasRuntimeMarker: false,
+      fivestarHasBuildId: false,
     };
+    const hubProbe = await columnExists(deps.hub, "runtime_marker");
+    const fivestarProbe = await columnExists(deps.fivestar, "build_id");
+    src.hubHasRuntimeMarker = hubProbe === true;
+    src.fivestarHasBuildId = fivestarProbe === true;
+    const buildSplitFailed = [
+      ...(hubProbe === "failed" ? ["Remix"] : []),
+      ...(fivestarProbe === "failed" ? ["5Star"] : []),
+    ];
 
     const parts: DayResult[] = [];
     try {
@@ -129,12 +143,13 @@ export async function runLearningDay(day: string, deps: RunnerDeps): Promise<Run
     const values = sortValues(parts.flatMap((p) => p.values));
     const unavailable = Object.assign({}, ...parts.map((p) => p.unavailable)) as Record<string, string>;
     const hash = outputHash(values);
-    const status = Object.keys(unavailable).length ? "partial" : "ok";
+    const status = Object.keys(unavailable).length || buildSplitFailed.length ? "partial" : "ok";
     const notes = JSON.stringify({
       readAt: (deps.now?.() ?? new Date()).toISOString(),
       outputHash: hash,
       definitionsHash: DEFINITIONS_HASH,
       buildSplit: { remix: src.hubHasRuntimeMarker, fivestar: src.fivestarHasBuildId },
+      ...(buildSplitFailed.length ? { buildSplitReadFailed: buildSplitFailed } : {}),
       unavailable,
     });
 
@@ -157,7 +172,7 @@ export async function runLearningDay(day: string, deps: RunnerDeps): Promise<Run
       ]);
     }
     await client.query("COMMIT");
-    return { status, runId, hash, values, unavailable, readFailed: Object.values(unavailable).some(isReadFailure) };
+    return { status, runId, hash, values, unavailable, readFailed: Object.values(unavailable).some(isReadFailure) || buildSplitFailed.length > 0 };
   } catch (e) {
     await client.query("ROLLBACK").catch(() => {});
     throw e;

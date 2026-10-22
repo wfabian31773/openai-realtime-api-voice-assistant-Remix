@@ -448,6 +448,30 @@ describe("OFF by default", () => {
     expect(await learningTick(ok.deps, new Date("2026-10-21T11:15:00Z"))).toHaveLength(3);
   });
 
+  it("a build-column probe that failed is a read failure, not an absent column (Codex, #365)", async () => {
+    const { deps, tx } = runnerDeps();
+    const hub = deps.hub;
+    deps.hub = async (t: string, p?: unknown[]) => {
+      if (t.includes("information_schema.columns")) throw new Error("statement timeout");
+      return hub(t, p);
+    };
+    const out = await runLearningDay("2026-10-20", deps);
+    if (out.status === "skipped" || out.status === "locked") throw new Error(out.status);
+    expect(out.readFailed).toBe(true);
+    expect(out.status).toBe("partial");
+    // The run says why it is unsplit.
+    const notes = JSON.parse(tx.calls.find((c) => c.text === UPSERT_RUN_SQL)!.params![3] as string);
+    expect(notes.buildSplit.remix).toBe(false);
+    expect(notes.buildSplitReadFailed).toEqual(["Remix"]);
+    // A column that is simply absent is a fact: not a read failure.
+    const absent = runnerDeps();
+    const h2 = absent.deps.hub;
+    absent.deps.hub = async (t: string, p?: unknown[]) => (t.includes("information_schema.columns") ? { rows: [{ n: 0 }] } : h2(t, p));
+    const ok = await runLearningDay("2026-10-20", absent.deps);
+    if (ok.status === "skipped" || ok.status === "locked") throw new Error(ok.status);
+    expect(ok.readFailed).toBe(false);
+  });
+
   it("a configured source that failed keeps the night open; an unconfigured one does not (Codex, #365)", async () => {
     const failing = runnerDeps();
     failing.deps.supportCenter = async () => {
