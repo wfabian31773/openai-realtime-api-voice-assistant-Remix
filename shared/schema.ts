@@ -21,6 +21,8 @@ import {
   uuid,
   time,
   real,
+  unique,
+  check,
 } from "drizzle-orm/pg-core";
 
 // Session storage table (for Express sessions)
@@ -289,18 +291,22 @@ export const campaignContacts = pgTable("campaign_contacts", {
 ]);
 
 /**
- * Phone numbers that asked not to be called, phone-wide and across every
- * runtime outbound campaign (src/runtime/outbound/). Keyed on the last ten
- * digits so every spelling of a number is one request. Every outbound dial
- * checks it first; the voice tool `opt_out_of_calls` writes it. Created on
- * first use by the outbound store as well, so a missing `db:push` cannot turn
- * the check into a pass.
+ * Opt-outs, phone-wide and across every runtime outbound campaign
+ * (src/runtime/outbound/). Keyed on the last ten digits so every spelling
+ * of a number is one request. One row per (phone, source): voice and
+ * `sms_stop` are separate, so an SMS START cannot erase a voice
+ * "don't call me". Every outbound dial checks the voice rows first; the
+ * voice tool `opt_out_of_calls` writes a voice row. Created on first use
+ * by the outbound store as well, so a missing `db:push` cannot turn the
+ * check into a pass.
  */
 export const doNotContact = pgTable("do_not_contact", {
-  phoneKey: varchar("phone_key", { length: 10 }).primaryKey(),
+  phoneKey: varchar("phone_key", { length: 10 }).notNull(),
   source: varchar("source", { length: 64 }).notNull(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-});
+}, (table) => [
+  uniqueIndex("do_not_contact_phone_source_uidx").on(table.phoneKey, table.source),
+]);
 
 export type CampaignContact = typeof campaignContacts.$inferSelect;
 export type InsertCampaignContact = typeof campaignContacts.$inferInsert;
@@ -1494,3 +1500,98 @@ export const callTurns = pgTable("call_turns", {
 
 export type CallTurn = typeof callTurns.$inferSelect;
 export type InsertCallTurn = typeof callTurns.$inferInsert;
+
+/**
+ * Plugin API tables (SI Assistant). Migration is migrations/add_plugin_api.sql
+ * — do not apply from this change. These declarations keep drizzle aligned
+ * with the Hub objects once Wayne applies that file.
+ *
+ * plugin_audit_log holds no phone numbers, message bodies or transcripts.
+ * plugin_message_outbox is the one table that may hold a taken-message body.
+ */
+export const apiTokens = pgTable("api_tokens", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  jti: varchar("jti", { length: 32 }).notNull(),
+  hashedSecret: varchar("hashed_secret", { length: 64 }).notNull(),
+  label: varchar("label", { length: 128 }),
+  scopes: text("scopes").array().notNull().default(sql`ARRAY['fleet:read']::text[]`),
+  revokedAt: timestamp("revoked_at", { withTimezone: true }),
+  expiresAt: timestamp("expires_at", { withTimezone: true }),
+  lastUsedAt: timestamp("last_used_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => [
+  unique("api_tokens_jti_key").on(table.jti),
+]);
+
+export const contactApprovals = pgTable("contact_approvals", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  channel: varchar("channel", { length: 16 }).notNull(),
+  status: varchar("status", { length: 24 }).notNull().default("pending"),
+  tokenJti: varchar("token_jti", { length: 32 }).notNull(),
+  ticketId: varchar("ticket_id", { length: 64 }),
+  ticketNumber: varchar("ticket_number", { length: 64 }),
+  phoneKey: varchar("phone_key", { length: 10 }),
+  payload: jsonb("payload").notNull(),
+  payloadHash: varchar("payload_hash", { length: 64 }).notNull(),
+  confirmTokenHash: varchar("confirm_token_hash", { length: 64 }),
+  confirmExpiresAt: timestamp("confirm_expires_at", { withTimezone: true }),
+  confirmUsedAt: timestamp("confirm_used_at", { withTimezone: true }),
+  approvedBy: varchar("approved_by", { length: 64 }),
+  approvedAt: timestamp("approved_at", { withTimezone: true }),
+  rejectedBy: varchar("rejected_by", { length: 64 }),
+  rejectedAt: timestamp("rejected_at", { withTimezone: true }),
+  cancelledAt: timestamp("cancelled_at", { withTimezone: true }),
+  committedAt: timestamp("committed_at", { withTimezone: true }),
+  result: jsonb("result"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => [
+  index("idx_contact_approvals_status").on(table.status, table.createdAt),
+  index("idx_contact_approvals_ticket").on(table.ticketNumber),
+  index("idx_contact_approvals_confirm").on(table.confirmTokenHash),
+  index("idx_contact_approvals_phone_key").on(table.phoneKey),
+  check("contact_approvals_channel_check", sql`channel IN ('call', 'sms', 'email')`),
+  check("contact_approvals_status_check", sql`status IN ('pending', 'approved', 'sending', 'rejected', 'cancelled', 'committed', 'failed', 'unknown')`),
+]);
+
+export const pluginMessageOutbox = pgTable("plugin_message_outbox", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  callSid: varchar("call_sid", { length: 64 }),
+  ticketId: varchar("ticket_id", { length: 64 }),
+  ticketNumber: varchar("ticket_number", { length: 64 }),
+  approvalId: varchar("approval_id", { length: 64 }),
+  message: text("message").notNull(),
+  status: varchar("status", { length: 16 }).notNull().default("pending"),
+  attempts: integer("attempts").notNull().default(0),
+  nextAttemptAt: timestamp("next_attempt_at", { withTimezone: true }).notNull().defaultNow(),
+  lastError: varchar("last_error", { length: 64 }),
+  idempotencyKey: varchar("idempotency_key", { length: 64 }),
+  suggestions: jsonb("suggestions"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => [
+  index("idx_plugin_outbox_due").on(table.status, table.nextAttemptAt),
+  uniqueIndex("plugin_message_outbox_idempotency_key").on(table.idempotencyKey),
+  check("plugin_message_outbox_status_check", sql`status IN ('pending', 'sending', 'delivered', 'dead')`),
+]);
+
+export const pluginAuditLog = pgTable("plugin_audit_log", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  tokenJti: varchar("token_jti", { length: 32 }).notNull(),
+  tool: varchar("tool", { length: 64 }).notNull(),
+  route: varchar("route", { length: 256 }).notNull(),
+  method: varchar("method", { length: 8 }).notNull(),
+  approvalId: varchar("approval_id", { length: 64 }),
+  ticketId: varchar("ticket_id", { length: 64 }),
+  outcome: varchar("outcome", { length: 32 }).notNull(),
+  httpStatus: integer("http_status").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => [
+  index("idx_plugin_audit_created").on(table.createdAt),
+  index("idx_plugin_audit_jti").on(table.tokenJti),
+]);
+
+export type ApiToken = typeof apiTokens.$inferSelect;
+export type ContactApproval = typeof contactApprovals.$inferSelect;
+export type PluginAuditLogRow = typeof pluginAuditLog.$inferSelect;
+export type PluginMessageOutboxRow = typeof pluginMessageOutbox.$inferSelect;

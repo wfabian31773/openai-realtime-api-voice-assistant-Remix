@@ -4375,7 +4375,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Called by external system when ticket is resolved with phone contact method
   app.post('/api/campaigns/ticket-resolved', async (req, res) => {
     try {
-      // Authenticate using API key
+      // Authenticate using API key — constant-time compare. A length
+      // mismatch is a miss, never a throw (src/plugin/timingSafe.ts).
+      const { ticketResolvedAuthorized, ticketResolvedLogPayload } = await import('../src/plugin/ticketResolved');
       const providedApiKey = req.headers['x-api-key'];
       const expectedApiKey = process.env.VOICE_AGENT_WEBHOOK_SECRET;
 
@@ -4387,7 +4389,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         });
       }
 
-      if (!providedApiKey || providedApiKey !== expectedApiKey) {
+      if (!ticketResolvedAuthorized(providedApiKey, expectedApiKey)) {
         console.warn('[TICKET WEBHOOK] Unauthorized access attempt');
         return res.status(401).json({
           success: false,
@@ -4408,13 +4410,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
         departmentId,
       } = req.body;
 
-      console.info('[TICKET WEBHOOK] Received ticket resolution:', {
+      console.info('[TICKET WEBHOOK] Received ticket resolution:', ticketResolvedLogPayload({
         ticketId,
         ticketNumber,
-        patient: `${patientFirstName} ${patientLastName}`,
-        phone: patientPhone,
-        contactMethod: preferredContactMethod,
-      });
+        preferredContactMethod,
+      }));
 
       // Validate required fields
       if (!ticketId || !ticketNumber || !patientPhone || !resolutionNotes) {
@@ -4872,6 +4872,16 @@ export async function registerRoutes(app: Express): Promise<Server> {
       res.status(500).json({ error: 'Failed to update setting' });
     }
   });
+
+  try {
+    const { mountProductionPluginApi } = await import('../src/plugin/mount');
+    await mountProductionPluginApi(app);
+  } catch (error) {
+    console.error(
+      '[plugin] failed to mount /api/plugin/v1 — fleet plugin is unavailable:',
+      error instanceof Error ? error.message : error,
+    );
+  }
 
   const httpServer = createServer(app);
   return httpServer;

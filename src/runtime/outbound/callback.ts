@@ -130,9 +130,10 @@ function firstNameOf(match: CallbackMatch): string | null {
  * is asked (OUTBOUND_RECORDING_CLAUSE), never says the last name, and never
  * says why we called: that waits for identification.
  */
-export function callbackGreeting(match: CallbackMatch): string {
+export function callbackGreeting(match: CallbackMatch, opts: { sayName?: boolean } = {}): string {
   const first = firstNameOf(match);
-  if (first) {
+  // SI Assistant must not name the patient before they are verified (P2-A).
+  if (first && opts.sayName !== false) {
     return `Hello, ${first}. Thank you for calling Azul Vision. This is an automated assistant. ${OUTBOUND_RECORDING_CLAUSE}.`;
   }
   return `Thank you for calling Azul Vision. This is an automated assistant. ${OUTBOUND_RECORDING_CLAUSE}. May I have your first and last name?`;
@@ -174,14 +175,19 @@ export const IDENTIFY_TOOL = "identify_callback_caller";
  * withCallbackSteps). The lane's prompt says what the campaign is FOR; this
  * says how to find out who is calling first, the same way on every campaign.
  */
-export function callbackSteps(ctx: CallbackContext): string {
+export function callbackSteps(ctx: CallbackContext, opts: { nameBeforeVerify?: boolean } = {}): string {
   const lines: string[] = [
     "### Returned call",
     "This person rang the number this line calls from: they are calling us. Your opening has already been spoken. " +
       "Never tell them why we called, or anything about anyone, until they are identified.",
   ];
   const first = firstNameOf(ctx.match);
-  if (ctx.match.kind === "one" && first) {
+  if (opts.nameBeforeVerify === false) {
+    lines.push(
+      "Ask for their first and last name, then their date of birth starting with the month, then the day, then the year. " +
+        `Call ${IDENTIFY_TOOL} with all three. Do not guess who they are from the number.`,
+    );
+  } else if (ctx.match.kind === "one" && first) {
     lines.push(
       `Their number matches someone we called: ${first}, and your opening greeted them by that name. ${describeLastAttempt(ctx.match.contact)}`,
       `Unless their reply says they are not ${first}, or that ${first} is not there, they are ${first}: call ${IDENTIFY_TOOL} with first_name "${first}" before you say anything else.`,

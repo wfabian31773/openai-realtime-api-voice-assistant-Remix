@@ -12,6 +12,7 @@
     "db:push": "drizzle-kit push",
     "db:studio": "drizzle-kit studio",
     "seed:pcp-agent": "tsx scripts/seed-pcp-agent.ts",
+    "plugin:token": "tsx scripts/plugin-token.ts",
     "sim": "node scripts/sim-personas.mjs",
     "sim:conv": "tsx scripts/sim-conversations.mjs"
   },

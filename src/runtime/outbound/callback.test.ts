@@ -85,6 +85,12 @@ describe("the greeting on a returned call", () => {
     expect(g).not.toContain("?");
   });
 
+  it("does not say the patient's name before they are verified when sayName is false", () => {
+    const g = callbackGreeting({ kind: "one", contact: candidate({ contactId: "a" }) }, { sayName: false });
+    expect(g).not.toContain("Testa");
+    expect(g).toMatch(/May I have your first and last name\?$/);
+  });
+
   it("asks who is calling when there is no single person to confirm", () => {
     for (const match of [
       { kind: "none" } as const,
@@ -144,6 +150,16 @@ describe("the steps on a returned call", () => {
     const steps = callbackSteps(ctx({ kind: "none" }));
     expect(steps).toContain("This number is not one we called");
     expect(steps).toContain("starting with the month, then the day, then the year");
+  });
+
+  it("does not name the patient or identify by first name when nameBeforeVerify is false", () => {
+    const steps = callbackSteps(ctx({ kind: "one", contact: candidate({ contactId: "a" }) }), {
+      nameBeforeVerify: false,
+    });
+    expect(steps).not.toContain("Testa");
+    expect(steps).toContain("first and last name");
+    expect(steps).toContain("date of birth");
+    expect(steps).not.toContain('first_name "Testa"');
   });
 });
 

@@ -314,7 +314,7 @@ import {
   type CallbackCandidate,
   type CallbackContext,
 } from "./outbound/callback";
-import { closeCallbackSession, openCallbackSession } from "../tools/outboundTools";
+import { callbackSessionFor, closeCallbackSession, openCallbackSession } from "../tools/outboundTools";
 import { closeOutreachSession } from "../tools/npxOutreachTools";
 import type { OutboundStore } from "./outbound/store";
 import { createDbOutboundStore } from "./outbound/store";
@@ -1523,7 +1523,7 @@ export function mountVoiceRuntime(
             : // A call made TO an outbound lane: confirm, never assume, and
               // say nothing about why we called (outbound/callback.ts).
               callback
-              ? callbackGreeting(callback.match)
+              ? callbackGreeting(callback.match, { sayName: entry.slug !== "si-assistant" })
               : personaliseGreeting(
                 chooseGreeting(entry.slug, configuredGreeting, lane.greeting),
                 recognisedFirstName(precontext),
@@ -1621,7 +1621,10 @@ export function mountVoiceRuntime(
                     // A returned call: how to find out who rang, inside the
                     // lane's own Conversation Flow (outbound/callback.ts).
                     callback
-                      ? withCallbackSteps(lane.agent.instructions, callbackSteps(callback))
+                      ? withCallbackSteps(
+                          lane.agent.instructions,
+                          callbackSteps(callback, { nameBeforeVerify: entry.slug !== "si-assistant" }),
+                        )
                       : lane.agent.instructions,
                     spokenGreeting,
                   ),
@@ -1679,6 +1682,13 @@ export function mountVoiceRuntime(
            * socket open for a ticket POST.
            */
           persistCallRecord: async (record) => {
+            // Snapshot before closeCallbackSession deletes the map entry.
+            // Message and call report use this same identity (P2-4).
+            const returnedSession = callbackSessionFor(record.callSid);
+            const identified = returnedSession?.chosen ?? null;
+            const identifiedCandidates = returnedSession?.candidates ?? [];
+            const identifiedAttemptId = returnedSession?.attemptId ?? null;
+            const identifiedStore = returnedSession?.store ?? null;
             // A returned call's inbound attempt ends, and an identified caller
             // with no recorded outcome is marked answered. Never awaited and
             // never throws: it is the campaign's ledger, not the call's record.
@@ -1814,6 +1824,53 @@ export function mountVoiceRuntime(
              */
             void logAudio(record, callerAudio.counts(), { callLogId }, { after: identityWritten })
               .catch(() => undefined);
+            // SI Assistant callbacks (and the outbound leg) are reported to
+            // the ticketing app so they land on the ticket and in My Messages.
+            // Payload is PHI-bounded: no phone, body or transcript.
+            void Promise.all([
+              import("../plugin/callbackReport"),
+              import("../plugin/returnedCaller"),
+              import("../plugin/messageOutbox"),
+              import("../plugin/siAssistantIdentity"),
+            ]).then(async ([
+              { reportSiAssistantCall, shouldReportSiAssistantCall },
+              { attachmentForSiAssistant },
+              { reattachTakenMessages },
+              { siAssistantIdentityFor, closeSiAssistantIdentity },
+            ]) => {
+              if (!shouldReportSiAssistantCall(record.slug)) return;
+              const identity = siAssistantIdentityFor(record.callSid);
+              const attachment = await attachmentForSiAssistant({
+                outboundContactData: outboundContact?.data,
+                chosen: identified,
+                candidates: identifiedCandidates,
+                store: identifiedStore,
+                attemptId: identifiedAttemptId,
+                phone: entry.callerPhone,
+                greetingAffirmed: identity?.greetingAffirmed,
+                dobMatched: identity?.dobMatched,
+                wrongPerson: identity?.wrongPerson,
+              });
+              if (attachment.identityConfirmed) {
+                await reattachTakenMessages(record.callSid, attachment.extras);
+              }
+              closeSiAssistantIdentity(record.callSid);
+              return reportSiAssistantCall(
+                {
+                  slug: record.slug,
+                  callSid: record.callSid,
+                  direction: record.direction,
+                  outcome: record.outcome,
+                  startedAtMs: record.startedAtMs,
+                  endedAtMs: record.endedAtMs,
+                },
+                {
+                  ...attachment.extras,
+                  suggestions: attachment.identityConfirmed ? [] : attachment.suggestions,
+                  identityConfirmed: attachment.identityConfirmed,
+                },
+              );
+            }).catch(() => undefined);
           },
         });
         // The session is constructed above, so its onMessage is bound.

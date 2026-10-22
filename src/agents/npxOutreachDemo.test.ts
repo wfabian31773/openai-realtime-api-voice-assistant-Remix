@@ -398,7 +398,7 @@ describe('one lane in both modes: going live is the environment variable and not
       store,
     });
     const cb = callbackSessionFor(SID)!;
-    cb.chosen = { contactId: 'c1', phone: '+15555550101', firstName: 'Alex' };
+    cb.chosen = { contactId: 'c1', phone: '+15555550101', firstName: 'Alex', verifiedBy: 'first_name' };
     cb.attemptId = await store.openCallbackAttempt('c1', store.campaignId, SID);
     // The runtime's own dispatch path: the model sends only what it heard.
     const dispatch = (n: string, a: object) =>

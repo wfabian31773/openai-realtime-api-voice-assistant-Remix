@@ -20,6 +20,7 @@ import {
   type SourceRow,
 } from "./store";
 import type { SourceContact } from "./campaign";
+import { ChannelDoNotContact, SMS_DNC_SOURCE } from "./channelDnc";
 
 export interface FakeAttempt {
   id: string;
@@ -37,7 +38,12 @@ export interface FakeAttempt {
 export class FakeOutboundStore implements OutboundStore {
   contacts = new Map<string, ContactRow & { updatedAt: Date; notes?: string }>();
   attempts: FakeAttempt[] = [];
-  dnc = new Map<string, string>();
+  /** Shared with MemoryPluginStore in channel-separation tests. */
+  channelDnc = new ChannelDoNotContact();
+  /** Voice opt-outs only. Existing tests seed this map; SMS STOP is `channelDnc.sms`. */
+  get dnc(): Map<string, string> {
+    return this.channelDnc.voice;
+  }
   campaignId = "campaign-1";
   /** The campaign key ensureCampaign/callbackCandidates answer for; any key
    * when null (the dialer's tests never name one). */
@@ -221,12 +227,12 @@ export class FakeOutboundStore implements OutboundStore {
 
   async isDoNotContact(phone: string): Promise<boolean> {
     const key = dncKey(phone);
-    return !key || this.dnc.has(key);
+    return this.channelDnc.isVoiceBlocked(key);
   }
 
   async stampDoNotContact(phone: string, source: string): Promise<void> {
     const key = dncKey(phone);
-    if (key && !this.dnc.has(key)) this.dnc.set(key, source);
+    this.channelDnc.stamp(key, source === SMS_DNC_SOURCE ? SMS_DNC_SOURCE : source);
   }
 
   /** Same rules as the SQL: this campaign's rows on the caller's ten digits,

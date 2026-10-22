@@ -494,7 +494,7 @@ describe('a patient who rings the number back', () => {
     openReturnedCall();
     const inbound = await store.openCallbackAttempt('c1', store.campaignId, SID);
     const cb = callbackSessionFor(SID)!;
-    cb.chosen = { contactId: 'c1', phone: '+15555550111', firstName: 'Testa' };
+    cb.chosen = { contactId: 'c1', phone: '+15555550111', firstName: 'Testa', verifiedBy: 'first_name' };
     cb.attemptId = inbound;
     expect(await getTool(FIND_SOONER_TOOL_NAME)!.handler({ ...RETURNED })).toMatchObject({ error: 'not_confirmed_yet' });
     expect(await getTool(CONFIRM_DOB_TOOL_NAME)!.handler({ ...RETURNED, date_of_birth: '01/02/1950' })).toMatchObject({ verified: true });
