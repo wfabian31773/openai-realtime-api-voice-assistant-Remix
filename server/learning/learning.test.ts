@@ -37,6 +37,7 @@ import {
   EXPORT_VALUES_SQL,
   _resetLearningSchedulerForTests,
   daysDue,
+  isCalendarDay,
   learningExportHandler,
   learningTick,
   pacificClock,
@@ -580,11 +581,17 @@ describe("the export", () => {
   });
 
   it("clamps an old or malformed since", async () => {
-    for (const since of ["2020-01-01", "yesterday"]) {
+    for (const since of ["2020-01-01", "yesterday", "2026-99-99", "2026-02-30"]) {
       const res = mockRes();
       await learningExportHandler(hub, { LEARNING_EXPORT_TOKEN: "secret" }, now)({ headers: { authorization: "Bearer secret" }, query: { since } } as any, res);
       expect(res.body.since >= "2026-06-24").toBe(true);
     }
+  });
+
+  it("an impossible date is malformed, not passed to the database (Codex, #365)", () => {
+    expect(isCalendarDay("2026-10-20")).toBe(true);
+    expect(isCalendarDay("2028-02-29")).toBe(true);
+    for (const bad of ["2026-99-99", "2026-02-30", "2026-13-01", "2026-10-2", "x", undefined]) expect(isCalendarDay(bad)).toBe(false);
   });
 
   it("no statement the export runs selects a SID, a name or a phone", () => {

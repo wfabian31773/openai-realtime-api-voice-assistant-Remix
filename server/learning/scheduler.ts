@@ -174,6 +174,13 @@ function tokenMatches(given: string, expected: string): boolean {
   return a.length === b.length && timingSafeEqual(a, b);
 }
 
+/** A real calendar day in YYYY-MM-DD, not merely that shape (Codex, #365: 2026-99-99). */
+export function isCalendarDay(s: unknown): s is string {
+  if (typeof s !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(s)) return false;
+  const d = new Date(`${s}T00:00:00Z`);
+  return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === s;
+}
+
 export function learningExportHandler(hub: Query, env: NodeJS.ProcessEnv = process.env, now: () => Date = () => new Date()) {
   return async (req: Request, res: Response) => {
     const expected = env.LEARNING_EXPORT_TOKEN;
@@ -184,7 +191,7 @@ export function learningExportHandler(hub: Query, env: NodeJS.ProcessEnv = proce
 
     const today = pacificClock(now()).day;
     const floor = shiftDay(today, -MAX_EXPORT_DAYS);
-    const asked = typeof req.query.since === "string" && /^\d{4}-\d{2}-\d{2}$/.test(req.query.since) ? req.query.since : shiftDay(today, -14);
+    const asked = isCalendarDay(req.query.since) ? req.query.since : shiftDay(today, -14);
     const since = asked < floor ? floor : asked;
     try {
       const runs = (await hub(EXPORT_RUNS_SQL, [since])).rows;
