@@ -114,6 +114,13 @@ export async function learningTick(deps: RunnerDeps, now: Date = new Date()): Pr
           console.info(`[learning] ${day}: another run holds the day; tried again next tick`);
           continue;
         }
+        if (out.status === "kept") {
+          // A source failed and the day already holds a run: the earlier
+          // values stand, and the next tick reads the day again (Codex, #365).
+          failed = true;
+          console.warn(`[learning] ${day}: a source failed, earlier values kept; tried again next tick — ${out.reason}`);
+          continue;
+        }
         console.info(`[learning] ${day}: ${out.status} run ${out.runId}, ${out.values.length} values, hash ${out.hash}`);
         done.push(day);
         // A source that is set up but failed to answer is a blip, not a fact:

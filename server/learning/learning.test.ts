@@ -24,6 +24,7 @@ import { computeFivestar, computeRemix, npxBooked, type Query, type Sources } fr
 import {
   DAY_LOCK_SQL,
   DELETE_VALUES_SQL,
+  PRIOR_RUN_SQL,
   INSERT_VALUES_SQL,
   TABLES_SQL,
   UPSERT_RUN_SQL,
@@ -309,9 +310,10 @@ describe("the 5Star booked rates", () => {
   });
 });
 
-function runnerDeps(over: Partial<RunnerDeps> & { tables?: boolean; locked?: boolean } = {}) {
+function runnerDeps(over: Partial<RunnerDeps> & { tables?: boolean; locked?: boolean; prior?: boolean } = {}) {
   const tx = fakeQuery((text) => {
     if (text === DAY_LOCK_SQL) return [{ locked: over.locked ?? true }];
+    if (text === PRIOR_RUN_SQL) return over.prior ? [{ id: 7 }] : [];
     if (text === UPSERT_RUN_SQL) return [{ id: 7 }];
     return [];
   });
@@ -401,7 +403,7 @@ describe("the run", () => {
       return [];
     });
     const b = await runLearningDay("2026-10-20", shuffled.deps);
-    expect(a.status !== "skipped" && a.status !== "locked" && a.hash).toBe(b.status !== "skipped" && b.status !== "locked" && b.hash);
+    expect("hash" in a && a.hash).toBe("hash" in b && b.hash);
     expect(outputHash([])).toMatch(/^[0-9a-f]{16}$/);
     // The hash sorts for itself, whoever calls it.
     const vals = (a as any).values;
@@ -449,6 +451,46 @@ describe("OFF by default", () => {
     expect(await learningTick(ok.deps, new Date("2026-10-21T11:15:00Z"))).toHaveLength(3);
   });
 
+  it("a failed read never replaces a day already measured (Codex, #365)", async () => {
+    const { deps, tx } = runnerDeps({ prior: true });
+    deps.supportCenter = async () => {
+      throw new Error("connection reset");
+    };
+    const out = await runLearningDay("2026-10-20", deps);
+    expect(out).toEqual({ status: "kept", reason: expect.stringMatching(/connection reset/), readFailed: true });
+    expect(tx.calls.map((c) => c.text)).toEqual(["BEGIN", DAY_LOCK_SQL, PRIOR_RUN_SQL, "ROLLBACK"]);
+    expect(tx.calls[2].params).toEqual(["2026-10-20", "learning-v4"]);
+    // A failed build-column probe is a read failure too, and keeps the day the same way.
+    const probe = runnerDeps({ prior: true });
+    const ph = probe.deps.hub;
+    probe.deps.hub = async (t: string, p?: unknown[]) => {
+      if (t.includes("information_schema.columns")) throw new Error("statement timeout");
+      return ph(t, p);
+    };
+    expect((await runLearningDay("2026-10-20", probe.deps)).status).toBe("kept");
+    expect(probe.tx.calls.map((c) => c.text)).not.toContain(DELETE_VALUES_SQL);
+    // With no earlier run the day is still written, partial, rather than left empty.
+    const first = runnerDeps({ prior: false });
+    first.deps.supportCenter = deps.supportCenter;
+    const f = await runLearningDay("2026-10-20", first.deps);
+    expect(f.status).toBe("partial");
+    expect(first.tx.calls.map((c) => c.text)).toContain(INSERT_VALUES_SQL);
+    // A read that did not fail replaces the earlier run as before, and never asks.
+    const clean = runnerDeps({ prior: true });
+    expect((await runLearningDay("2026-10-20", clean.deps)).status).toBe("partial");
+    expect(clean.tx.calls.map((c) => c.text)).toEqual(["BEGIN", DAY_LOCK_SQL, UPSERT_RUN_SQL, DELETE_VALUES_SQL, INSERT_VALUES_SQL, "COMMIT"]);
+  });
+
+  it("a kept day keeps the night open (Codex, #365)", async () => {
+    const kept = runnerDeps({ prior: true });
+    kept.deps.supportCenter = async () => {
+      throw new Error("connection reset");
+    };
+    expect(await learningTick(kept.deps, new Date("2026-10-21T10:45:00Z"))).toEqual([]);
+    const ok = runnerDeps();
+    expect(await learningTick(ok.deps, new Date("2026-10-21T11:15:00Z"))).toHaveLength(3);
+  });
+
   it("a build-column probe that failed is a read failure, not an absent column (Codex, #365)", async () => {
     const { deps, tx } = runnerDeps();
     const hub = deps.hub;
@@ -457,7 +499,7 @@ describe("OFF by default", () => {
       return hub(t, p);
     };
     const out = await runLearningDay("2026-10-20", deps);
-    if (out.status === "skipped" || out.status === "locked") throw new Error(out.status);
+    if (out.status === "skipped" || out.status === "locked" || out.status === "kept") throw new Error(out.status);
     expect(out.readFailed).toBe(true);
     expect(out.status).toBe("partial");
     // The run says why it is unsplit.
@@ -475,7 +517,7 @@ describe("OFF by default", () => {
     full.deps.fivestar = async () => ({ rows: [] });
     full.deps.console = async () => ({ rows: [] });
     const f = await runLearningDay("2026-10-20", full.deps);
-    if (f.status === "skipped" || f.status === "locked") throw new Error(f.status);
+    if (f.status === "skipped" || f.status === "locked" || f.status === "kept") throw new Error(f.status);
     expect(f.unavailable).toEqual({});
     expect(f.status).toBe("partial");
     // A column that is simply absent is a fact: not a read failure.
@@ -483,7 +525,7 @@ describe("OFF by default", () => {
     const h2 = absent.deps.hub;
     absent.deps.hub = async (t: string, p?: unknown[]) => (t.includes("information_schema.columns") ? { rows: [{ n: 0 }] } : h2(t, p));
     const ok = await runLearningDay("2026-10-20", absent.deps);
-    if (ok.status === "skipped" || ok.status === "locked") throw new Error(ok.status);
+    if (ok.status === "skipped" || ok.status === "locked" || ok.status === "kept") throw new Error(ok.status);
     expect(ok.readFailed).toBe(false);
   });
 

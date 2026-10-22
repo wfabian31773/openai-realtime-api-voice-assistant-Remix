@@ -34,6 +34,8 @@ export interface RunnerDeps {
 export type RunOutcome =
   | { status: "skipped"; reason: string }
   | { status: "locked" }
+  /** A configured source failed and this day already holds a run: the earlier values are kept untouched and the night retries. */
+  | { status: "kept"; reason: string; readFailed: true }
   | {
       status: "ok" | "partial";
       runId: number;
@@ -58,6 +60,8 @@ VALUES ($1::date, $2::text, $3::text, $4::text, now(), now())
 ON CONFLICT (run_date, method_version)
 DO UPDATE SET status = EXCLUDED.status, notes = EXCLUDED.notes, started_at = EXCLUDED.started_at, finished_at = EXCLUDED.finished_at
 RETURNING id`;
+
+export const PRIOR_RUN_SQL = `SELECT id FROM learning_runs WHERE run_date = $1::date AND method_version = $2::text`;
 
 export const DELETE_VALUES_SQL = `DELETE FROM learning_metric_values WHERE run_id = $1::bigint`;
 
@@ -153,6 +157,17 @@ export async function runLearningDay(day: string, deps: RunnerDeps): Promise<Run
       unavailable,
     });
 
+    const readFailed = Object.values(unavailable).some(isReadFailure) || buildSplitFailed.length > 0;
+    // A read that failed must not replace a day already measured: the delete
+    // below would drop that source's earlier values, and if the source stays
+    // down until the day leaves the settling window they never come back
+    // (Codex, #365). The day is kept as it was and the night retries it. A day
+    // with no run yet is still written, partial, so it is not left empty.
+    if (readFailed && (await client.query(PRIOR_RUN_SQL, [day, METHOD_VERSION])).rows.length) {
+      await client.query("ROLLBACK");
+      return { status: "kept", reason: Object.values(unavailable).filter(isReadFailure).concat(buildSplitFailed.map((r) => `${r} build-column probe failed`)).join("; "), readFailed: true };
+    }
+
     const runId = Number((await client.query(UPSERT_RUN_SQL, [day, status, METHOD_VERSION, notes])).rows[0].id);
     await client.query(DELETE_VALUES_SQL, [runId]);
     if (values.length) {
@@ -172,7 +187,7 @@ export async function runLearningDay(day: string, deps: RunnerDeps): Promise<Run
       ]);
     }
     await client.query("COMMIT");
-    return { status, runId, hash, values, unavailable, readFailed: Object.values(unavailable).some(isReadFailure) || buildSplitFailed.length > 0 };
+    return { status, runId, hash, values, unavailable, readFailed };
   } catch (e) {
     await client.query("ROLLBACK").catch(() => {});
     throw e;
