@@ -379,6 +379,10 @@ describe("the run", () => {
     const b = await runLearningDay("2026-10-20", shuffled.deps);
     expect(a.status !== "skipped" && a.status !== "locked" && a.hash).toBe(b.status !== "skipped" && b.status !== "locked" && b.hash);
     expect(outputHash([])).toMatch(/^[0-9a-f]{16}$/);
+    // The hash sorts for itself, whoever calls it.
+    const vals = (a as any).values;
+    expect(vals.length).toBeGreaterThan(1);
+    expect(outputHash([...vals].reverse())).toBe(outputHash(vals));
   });
 
   it("one fixed insert statement whatever the row count", () => {
@@ -518,6 +522,9 @@ describe("candidates", () => {
     expect(detectCandidates(series([0.9, 0.91, 0.89, 0.9, 0.9, 0.91, 0.9, 0.89, 0.87]))).toEqual([]);
     expect(detectCandidates(series([0.9, 0.91, 0.89, 0.9, 0.9, 0.91, 0.9, 0.89, 0.2], 10))).toEqual([]);
     expect(detectCandidates(series([0.9, 0.9, 0.1]))).toEqual([]);
+    // A thin newest day is not read, even against a sound baseline.
+    const thinLast = series([0.9, 0.91, 0.89, 0.9, 0.9, 0.91, 0.9, 0.89]).concat({ ...storedValues[0], run_date: day(9), numerator: 2, denominator: 10 });
+    expect(detectCandidates(thinLast)).toEqual([]);
   });
 
   it("every shape named is in the closed vocabulary", () => {
