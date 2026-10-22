@@ -219,9 +219,11 @@ registerTool({
       };
     }
     // Spent tries stay spent (v115): a third guess must not unlock what two
-    // wrong dates of birth have already refused, whatever it says.
+    // wrong dates of birth have already refused, whatever it says. Only a
+    // wrong date counts, and a wrong date clears dobMatched, so the count
+    // alone decides.
     const prior = siAssistantIdentityFor(sid);
-    if (prior && !prior.dobMatched && prior.dobTries >= MAX_SI_DOB_TRIES) {
+    if (prior && prior.dobTries >= MAX_SI_DOB_TRIES) {
       return {
         success: true,
         confirmed: false,
