@@ -62,7 +62,7 @@ describe("a definition change is a new method version", () => {
     const h = createHash("sha256").update(definitionsText()).digest("hex").slice(0, 16);
     // If this fails you changed a definition: bump METHOD_VERSION and pin the new hash beside it.
     expect(h).toBe(DEFINITIONS_HASH);
-    expect(METHOD_VERSION).toBe("learning-v2");
+    expect(METHOD_VERSION).toBe("learning-v3");
   });
 
   it("every statement and every definition is inside the hashed text", () => {
@@ -342,7 +342,7 @@ describe("the run", () => {
     expect(out.status).toBe("partial"); // no Support Center, no 5Star in this fixture
     expect(tx.calls.map((c) => c.text)).toEqual(["BEGIN", DAY_LOCK_SQL, UPSERT_RUN_SQL, DELETE_VALUES_SQL, INSERT_VALUES_SQL, "COMMIT"]);
     const [day, status, version, notes] = tx.calls[2].params as string[];
-    expect([day, status, version]).toEqual(["2026-10-20", "partial", "learning-v2"]);
+    expect([day, status, version]).toEqual(["2026-10-20", "partial", "learning-v3"]);
     const n = JSON.parse(notes);
     expect(n.readAt).toBe("2026-10-21T11:00:00.000Z");
     expect(n.unavailable["remix.filed_rate_independent"]).toBeTruthy();
@@ -458,12 +458,12 @@ function mockRes() {
 }
 
 const storedValues: StoredValue[] = [
-  { run_date: "2026-10-20", method_version: "learning-v2", metric_id: "remix.filed_rate", repo: "Remix", lane: "tech", runtime_marker: "voice-runtime-v111-x", numerator: 137, denominator: 150, unknown_count: 0 },
+  { run_date: "2026-10-20", method_version: "learning-v3", metric_id: "remix.filed_rate", repo: "Remix", lane: "tech", runtime_marker: "voice-runtime-v111-x", numerator: 137, denominator: 150, unknown_count: 0 },
 ];
 
 describe("the export", () => {
   const hub = fakeQuery((text) => {
-    if (text === EXPORT_RUNS_SQL) return [{ id: 1, run_date: "2026-10-20", status: "partial", method_version: "learning-v2", notes: JSON.stringify({ readAt: "2026-10-21T11:00:00Z", unavailable: { "remix.filed_rate_independent": "A1" } }) }];
+    if (text === EXPORT_RUNS_SQL) return [{ id: 1, run_date: "2026-10-20", status: "partial", method_version: "learning-v3", notes: JSON.stringify({ readAt: "2026-10-21T11:00:00Z", unavailable: { "remix.filed_rate_independent": "A1" } }) }];
     if (text === EXPORT_VALUES_SQL) return storedValues;
     return [];
   });
@@ -547,6 +547,14 @@ describe("candidates", () => {
     const order = CONSOLE_BOOKED_SQL.slice(CONSOLE_BOOKED_SQL.indexOf("ORDER BY"));
     expect(order.indexOf("f.appointment_id = b.appointment_id::uuid")).toBeGreaterThan(-1);
     expect(order.indexOf("f.appointment_id = b.appointment_id::uuid")).toBeLessThan(order.indexOf("f.is_cancelled ASC"));
+  });
+
+  it("a moved, unkept appointment needs a live replacement (Codex, #365)", () => {
+    const where = CONSOLE_BOOKED_SQL.slice(CONSOLE_BOOKED_SQL.lastIndexOf("WHERE (NOT"));
+    // Direct branch: not cancelled AND (not moved OR kept).
+    expect(where).toMatch(/NOT coalesce\(h\.is_cancelled, false\)\s+AND \(NOT coalesce\(h\.is_rescheduled, false\) OR coalesce\(h\.is_kept, false\)\)/);
+    // Replacement: the same rule on the replacement row.
+    expect(where).toMatch(/AND \(NOT coalesce\(g\.is_rescheduled, false\) OR coalesce\(g\.is_kept, false\)\)/);
   });
 
   it("every shape named is in the closed vocabulary", () => {

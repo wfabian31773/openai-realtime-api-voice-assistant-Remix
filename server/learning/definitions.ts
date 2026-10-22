@@ -21,9 +21,9 @@
  */
 
 /** Bump with DEFINITIONS_HASH whenever any text below changes. */
-export const METHOD_VERSION = "learning-v2";
+export const METHOD_VERSION = "learning-v3";
 /** sha256 of definitionsText(), first 16 hex. definitions.test.ts pins it. */
-export const DEFINITIONS_HASH = "5729209fd50f7d08";
+export const DEFINITIONS_HASH = "73a1d2faf531f871";
 
 export const PACIFIC = "America/Los_Angeles";
 
@@ -82,8 +82,9 @@ export const METRICS: readonly MetricDefinition[] = [
     definition:
       "Substantive calls with a booking that the Patient Console's NextGen mirror shows at the run's read time, over substantive. A booking is the " +
       "call's internal_bookings row (voice_agent_booking_attempts outcome booked/booked_drift, or notes 'Call ID: <call_logs.id>'). Booked: a " +
-      "non-NPX row not cancelled locally whose mirror appointment (by NextGen id, else person + slot date + begin time) is not cancelled, or was " +
-      "moved and the person still holds an uncancelled appointment on or after the call's day (operator 2026-10-11); an NPX row needs a firm " +
+      "non-NPX row not cancelled locally whose mirror appointment (by NextGen id, else person + slot date + begin time) is neither cancelled nor " +
+      "moved-and-not-kept, or was moved and the person still holds such a live appointment on or after the call's day (operator 2026-10-11; " +
+      "the NextGen Bible row rule); an NPX row needs a firm " +
       "partner link (isFirmPartnerLink), a partner status in in_partner_schedule/awaiting_outcome/partner_reported_showed/partner_report_received, " +
       "and not cancelled locally. The mirror lags staff entry, so a day is re-read on later nights until it settles.",
   },
@@ -201,10 +202,10 @@ WITH b AS (
   FROM jsonb_array_elements($1::jsonb) x
 ),
 hit AS (
-  SELECT b.k, b.person_id, b.since, f.is_cancelled, f.is_rescheduled
+  SELECT b.k, b.person_id, b.since, f.is_cancelled, f.is_rescheduled, f.is_kept
   FROM b
   JOIN LATERAL (
-    SELECT f.is_cancelled, f.is_rescheduled
+    SELECT f.is_cancelled, f.is_rescheduled, f.is_kept
     FROM si_appointment_facts f
     WHERE (b.appointment_id ~* '^[0-9a-f-]{36}$' AND f.appointment_id = b.appointment_id::uuid)
        OR (b.person_id ~* '^[0-9a-f-]{36}$' AND f.person_id = b.person_id::uuid
@@ -219,11 +220,16 @@ hit AS (
 )
 SELECT h.k
 FROM hit h
-WHERE NOT coalesce(h.is_cancelled, false)
+-- The NextGen Bible's row rule (statusOf, v104): kept wins; moved and not kept
+-- is not an appointment; cancelled is not. A moved booking counts only through
+-- a replacement that is itself a live appointment.
+WHERE (NOT coalesce(h.is_cancelled, false)
+       AND (NOT coalesce(h.is_rescheduled, false) OR coalesce(h.is_kept, false)))
    OR (coalesce(h.is_rescheduled, false) AND h.person_id ~* '^[0-9a-f-]{36}$' AND EXISTS (
         SELECT 1 FROM si_appointment_facts g
         WHERE g.person_id = h.person_id::uuid
           AND NOT coalesce(g.is_cancelled, false)
+          AND (NOT coalesce(g.is_rescheduled, false) OR coalesce(g.is_kept, false))
           AND g.appointment_date >= h.since))`;
 
 /** isFirmPartnerLink (5Star shared/partner-booking.ts), mirrored. */
