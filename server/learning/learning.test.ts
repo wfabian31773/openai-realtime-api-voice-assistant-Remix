@@ -463,6 +463,20 @@ describe("OFF by default", () => {
     const notes = JSON.parse(tx.calls.find((c) => c.text === UPSERT_RUN_SQL)!.params![3] as string);
     expect(notes.buildSplit.remix).toBe(false);
     expect(notes.buildSplitReadFailed).toEqual(["Remix"]);
+    // With every source configured and answering, the failed probe alone makes the run partial.
+    const full = runnerDeps();
+    const fh = full.deps.hub;
+    full.deps.hub = async (t: string, p?: unknown[]) => {
+      if (t.includes("information_schema.columns")) throw new Error("statement timeout");
+      return fh(t, p);
+    };
+    full.deps.supportCenter = async () => ({ rows: [] });
+    full.deps.fivestar = async () => ({ rows: [] });
+    full.deps.console = async () => ({ rows: [] });
+    const f = await runLearningDay("2026-10-20", full.deps);
+    if (f.status === "skipped" || f.status === "locked") throw new Error(f.status);
+    expect(f.unavailable).toEqual({});
+    expect(f.status).toBe("partial");
     // A column that is simply absent is a fact: not a read failure.
     const absent = runnerDeps();
     const h2 = absent.deps.hub;
