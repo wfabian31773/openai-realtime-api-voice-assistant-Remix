@@ -27,6 +27,7 @@ import {
   INSERT_VALUES_SQL,
   TABLES_SQL,
   UPSERT_RUN_SQL,
+  isReadFailure,
   outputHash,
   runLearningDay,
   type RunnerDeps,
@@ -445,6 +446,22 @@ describe("OFF by default", () => {
     expect(await learningTick(held.deps, new Date("2026-10-21T10:45:00Z"))).toEqual([]);
     const ok = runnerDeps();
     expect(await learningTick(ok.deps, new Date("2026-10-21T11:15:00Z"))).toHaveLength(3);
+  });
+
+  it("a configured source that failed keeps the night open; an unconfigured one does not (Codex, #365)", async () => {
+    const failing = runnerDeps();
+    failing.deps.supportCenter = async () => {
+      throw new Error("connection reset");
+    };
+    const t1 = new Date("2026-10-21T10:45:00Z");
+    expect(await learningTick(failing.deps, t1)).toHaveLength(3); // written, as partial
+    // The same night: read again, because the failure was a blip, not a fact.
+    const ok = runnerDeps();
+    expect(await learningTick(ok.deps, new Date("2026-10-21T11:15:00Z"))).toHaveLength(3);
+    // ok had no Support Center at all — unconfigured is a fact; the night closes.
+    expect(await learningTick(ok.deps, new Date("2026-10-21T11:45:00Z"))).toEqual([]);
+    expect(isReadFailure("Support Center read failed: x")).toBe(true);
+    expect(isReadFailure("Support Center read-only role (A1) not configured")).toBe(false);
   });
 
   it("the server wires the export always and the runner behind its switch", () => {

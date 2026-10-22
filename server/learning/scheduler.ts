@@ -116,6 +116,10 @@ export async function learningTick(deps: RunnerDeps, now: Date = new Date()): Pr
         }
         console.info(`[learning] ${day}: ${out.status} run ${out.runId}, ${out.values.length} values, hash ${out.hash}`);
         done.push(day);
+        // A source that is set up but failed to answer is a blip, not a fact:
+        // keep the night open so the day is read again (Codex, #365). An
+        // unconfigured source stays partial and does not hold the night.
+        if (out.readFailed) failed = true;
       } catch (e) {
         failed = true;
         console.error(`[learning] ${day}: run failed — ${(e as Error).message}`);

@@ -34,7 +34,20 @@ export interface RunnerDeps {
 export type RunOutcome =
   | { status: "skipped"; reason: string }
   | { status: "locked" }
-  | { status: "ok" | "partial"; runId: number; hash: string; values: MetricValue[]; unavailable: Record<string, string> };
+  | {
+      status: "ok" | "partial";
+      runId: number;
+      hash: string;
+      values: MetricValue[];
+      unavailable: Record<string, string>;
+      /** A configured source failed to answer (not merely unconfigured): the night retries the day. */
+      readFailed: boolean;
+    };
+
+/** A reason written by a source that is configured but failed, as against one that is not set up. */
+export function isReadFailure(reason: string): boolean {
+  return /read failed/.test(reason);
+}
 
 export const TABLES_SQL = `SELECT to_regclass('public.learning_runs') IS NOT NULL AS runs, to_regclass('public.learning_metric_values') IS NOT NULL AS vals`;
 export const COLUMN_SQL = `SELECT count(*)::int AS n FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'call_logs' AND column_name = $1::text`;
@@ -144,7 +157,7 @@ export async function runLearningDay(day: string, deps: RunnerDeps): Promise<Run
       ]);
     }
     await client.query("COMMIT");
-    return { status, runId, hash, values, unavailable };
+    return { status, runId, hash, values, unavailable, readFailed: Object.values(unavailable).some(isReadFailure) };
   } catch (e) {
     await client.query("ROLLBACK").catch(() => {});
     throw e;
