@@ -222,7 +222,7 @@ export class AgentRegistry {
       outbound: outboundProofPolicy,
     });
 
-    // The NPX outreach campaign (v109): a sooner routine exam at an NPX
+    // The NPX outreach campaign (v110): a sooner routine exam at an NPX
     // partner for patients on the Console's movable list. Dials nothing
     // unless RUNTIME_OUTBOUND_DIALING=1, OUTBOUND_CAMPAIGN_NPX_OUTREACH=1 and
     // NPX_OUTREACH_CALLER_ID are set and that number's Voice URL points here.

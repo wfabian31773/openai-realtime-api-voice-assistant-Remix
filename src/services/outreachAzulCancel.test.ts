@@ -1,5 +1,5 @@
 /**
- * The outreach cancel (v109): the Azul appointment is cancelled only when it
+ * The outreach cancel (v110): the Azul appointment is cancelled only when it
  * still belongs to the person the call was about, on the date offered, and a
  * reason is configured; every refusal is a short code NPX accepts. Synthetic
  * ids only; no network.

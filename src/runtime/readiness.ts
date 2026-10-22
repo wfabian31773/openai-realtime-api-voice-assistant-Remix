@@ -811,7 +811,18 @@ import { callEnvironment } from "./callRecord";
  * patient's own care). `src/services/symptomCorroboration.ts`.
  */
 /**
- * v109 — THE NPX OUTREACH CALL (2026-10-21), DARK. Operator, 2026-10-20: call
+ * v109 — THE FIELD DESCRIPTIONS REACH THE MODEL (2026-10-21). The SDK's
+ * `tool()` drops every zod `.describe()` from a schema with an optional
+ * field, so on no-ivr and pcp — the two live lanes that build tools by hand —
+ * 1 of 31 and 1 of 2 field descriptions reached Grok. Among the lost:
+ * `escalate_to_human.caller_type`'s "ONLY when the caller has said so in
+ * their own words" (v99). They are now copied back onto the SDK's own schema;
+ * no type, enum or required list moves, and validation is still the zod
+ * parse. On top of v108 (#359), which it contains.
+ * `src/services/toolFieldDescriptions.ts`.
+ */
+/**
+ * v110 — THE NPX OUTREACH CALL (2026-10-22), DARK. Operator, 2026-10-20: call
  * patients whose routine exam is weeks away and offer a sooner one at an NPX
  * partner that takes their medical group; on a yes, book it in NPX and cancel
  * the Azul appointment. The first real campaign on the outbound layer: the
@@ -819,11 +830,12 @@ import { callEnvironment } from "./callRecord";
  * anything about an appointment is said, NPX's offer and booking (EPC #281),
  * the Azul cancel only if the appointment is still this person's on the date
  * offered, and the result reported to NPX. Dials nobody until its own switch,
- * caller ID and NPX key are set. `src/agents/npxOutreachAgent.ts`,
+ * caller ID and NPX key are set. On top of v109 (#360), which it contains.
+ * `src/agents/npxOutreachAgent.ts`,
  * `src/tools/npxOutreachTools.ts`.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v109-the-npx-outreach-call-20261021";
+  "voice-runtime-v110-the-npx-outreach-call-20261022";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

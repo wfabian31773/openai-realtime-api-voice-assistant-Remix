@@ -110,7 +110,7 @@ export interface OutboundLanePolicy {
    */
   source?: () => Promise<ContactSource | null>;
   /**
-   * The lane's OWN registry tools (v109), bound by the runtime on a call the
+   * The lane's OWN registry tools (v110), bound by the runtime on a call the
    * lane dialled and on a call made back to it — never on an inbound lane.
    * Each receives who the call is about as injected context (the contact,
    * attempt and CallSid on a dialled call; the CallSid on a returned one),

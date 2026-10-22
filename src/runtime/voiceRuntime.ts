@@ -1624,7 +1624,7 @@ export function mountVoiceRuntime(
             // The caller's words the escalation gate reads die with the call
             // too (v99: the bridge now feeds them on this pipeline).
             releaseCallerSpeech(entry.callSid);
-            // And an outreach call's session (v109): it holds the patient's
+            // And an outreach call's session (v110): it holds the patient's
             // record and their offered slots, and must not outlive the call.
             closeOutreachSession(entry.callSid);
             // The call is over, whatever ended it: any office leg still

@@ -76,7 +76,7 @@ import {
   OPT_OUT_TOOL_NAME,
   RECORD_OUTCOME_TOOL_NAME,
 } from "../tools/outboundTools";
-// The NPX outreach lane's own tools (v109): static for the same reason.
+// The NPX outreach lane's own tools (v110): static for the same reason.
 import "../tools/npxOutreachTools";
 import type { OutboundContact, OutboundLanePolicy } from "./outbound/campaign";
 import type { CallbackContext } from "./outbound/callback";
