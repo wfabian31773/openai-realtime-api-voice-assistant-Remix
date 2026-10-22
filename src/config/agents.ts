@@ -226,6 +226,7 @@ export class AgentRegistry {
     // partner for patients on the Console's movable list. Dials nothing
     // unless RUNTIME_OUTBOUND_DIALING=1, OUTBOUND_CAMPAIGN_NPX_OUTREACH=1 and
     // NPX_OUTREACH_CALLER_ID are set and that number's Voice URL points here.
+    // Calls the demo seed and the demo NPX until NPX_OUTREACH_MODE=live (v113).
     this.register({
       id: npxOutreachAgentConfig.slug,
       factory: createNpxOutreachAgent as AgentFactory,

@@ -18,6 +18,10 @@
 
 export const NPX_OUTREACH_DEFAULT_BASE_URL = 'https://cec-npx.vercel.app';
 
+/** The demo NPX (Vercel project cec-npx-demo, database cec-npx-demo): the
+ * demo lane books here and nowhere else (src/agents/npxOutreachDemo.ts). */
+export const NPX_OUTREACH_DEMO_DEFAULT_BASE_URL = 'https://cec-npx-demo.vercel.app';
+
 /** Per-call budgets. The booking runs a transaction under a lock on NPX's
  * side, so it gets the longest; all three sit well inside the bridge's
  * tool-dispatch watchdog. */
@@ -236,4 +240,23 @@ export function createNpxOutreachClient(
       return { ok: false, error: failure(reply, 'cancel report') };
     },
   };
+}
+
+/**
+ * The demo lane's NPX client: the demo deployment, with its own key
+ * (NPX_OUTREACH_DEMO_API_KEY, whose SHA-256 is cec-npx-demo's
+ * AZUL_OUTREACH_API_KEY_SHA256). It never reads the live key or the live
+ * base URL, so a demo call cannot book in production NPX by a missing setting.
+ */
+export function createNpxOutreachDemoClient(
+  env: Record<string, string | undefined> = process.env,
+  fetchImpl: Fetch = fetch,
+): NpxOutreachClient {
+  return createNpxOutreachClient(
+    {
+      NPX_OUTREACH_API_KEY: env.NPX_OUTREACH_DEMO_API_KEY,
+      NPX_OUTREACH_BASE_URL: env.NPX_OUTREACH_DEMO_BASE_URL?.trim() || NPX_OUTREACH_DEMO_DEFAULT_BASE_URL,
+    },
+    fetchImpl,
+  );
 }

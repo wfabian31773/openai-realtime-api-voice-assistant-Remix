@@ -16,7 +16,7 @@ vi.hoisted(() => {
   process.env.XAI_API_KEY ||= 'test-unused';
 });
 import { laneRoster, formatLaneRoster, REPORTED_LANES } from "./laneRoster";
-import type { LaneSource } from "./laneRegistry";
+import { defaultLaneSource, type LaneSource } from "./laneRegistry";
 
 /** Enough of an agent config for laneSupportStatus to judge it. */
 const inbound = (id: string, enabled = true) => ({ id, agentType: "inbound" as const, enabled });
@@ -135,7 +135,9 @@ describe("what this deployment can serve", () => {
 describe("the boot lines", () => {
   it("lead with the count, so a deployment serving nothing is obvious", () => {
     const lines = formatLaneRoster(laneRoster(ALL, {}, { transferAvailable: false }));
-    expect(lines[0]).toContain("lanes this deployment can serve (5/8)");
+    // 5 of the 8 inbound lanes, plus the NPX outreach lane (v113): this fake
+    // registers every slug as an inbound lane, so it counts as served.
+    expect(lines[0]).toContain("lanes this deployment can serve (6/9)");
     expect(lines[0]).toContain("optical");
   });
 
@@ -196,5 +198,63 @@ describe("the voice model each lane would use", () => {
     const r = bySlug(laneRoster(source(["optical"]), {}, { transferAvailable: false }));
     expect(r.optical.voiceModel).toBe("grok-voice-3.0");
     expect(r.pcp.voiceModel).toBeNull();
+  });
+});
+
+/**
+ * Which xAI voice each lane would speak in (v113). Operator, 2026-10-22: "I
+ * have never heard this agent, make sure it has a good voice, the main one
+ * from xai that they use." The runtime's default is `eve`, the voice in every
+ * one of xAI's own Voice Agent examples; `/voice/health` now says so per lane.
+ */
+describe("the voice each lane would speak in", () => {
+  it("reports eve on every registered lane, the NPX outreach lane included, when nothing overrides it", () => {
+    const r = bySlug(laneRoster(ALL, {}, { transferAvailable: false }));
+    for (const row of Object.values(r)) expect(row.voiceName, row.slug).toBe("eve");
+    expect(r["npx-outreach"]).toBeDefined();
+  });
+
+  it("follows XAI_VOICE_NAME, with a per-lane setting winning, exactly as a call does", () => {
+    const r = bySlug(
+      laneRoster(ALL, { XAI_VOICE_NAME: "ara", XAI_VOICE_NAME_NPX_OUTREACH: "eve" }, { transferAvailable: false }),
+    );
+    expect(r.tech.voiceName).toBe("ara");
+    expect(r["npx-outreach"].voiceName).toBe("eve");
+  });
+
+  it("reports no voice for a lane this build does not register", () => {
+    const r = bySlug(laneRoster(source(["optical"]), {}, { transferAvailable: false }));
+    expect(r["npx-outreach"].voiceName).toBeNull();
+  });
+});
+
+/**
+ * Demo or live (v113): the one fact that decides whether NPX outreach rings a
+ * patient, confirmed from `/voice/health` and the boot lines after a
+ * republish, through the REAL registry so the policy's own switch is what is
+ * read.
+ */
+describe("the mode an outbound campaign is dialling in", () => {
+  it("reports demo for NPX outreach until NPX_OUTREACH_MODE is live, and null for every other lane", async () => {
+    const real = await defaultLaneSource();
+    const demo = bySlug(laneRoster(real, {}, { transferAvailable: true }));
+    expect(demo["npx-outreach"].outboundMode).toBe("demo");
+    for (const slug of ["optical", "pcp", "no-ivr"]) expect(demo[slug].outboundMode, slug).toBeNull();
+    const live = bySlug(laneRoster(real, { NPX_OUTREACH_MODE: "live" }, { transferAvailable: true }));
+    expect(live["npx-outreach"].outboundMode).toBe("live");
+  });
+
+  it("says it in the boot lines, so the deploy log answers it too", async () => {
+    const real = await defaultLaneSource();
+    expect(formatLaneRoster(laneRoster(real, {}, { transferAvailable: true }))).toContain(
+      "[voice-runtime]   npx-outreach: demo — calls the test numbers only",
+    );
+    expect(formatLaneRoster(laneRoster(real, { NPX_OUTREACH_MODE: "live" }, { transferAvailable: true }))).toContain(
+      "[voice-runtime]   npx-outreach: LIVE — calls real patients",
+    );
+  });
+
+  it("reports no mode for a lane this build does not register", () => {
+    expect(bySlug(laneRoster(source(["optical"]), {}, { transferAvailable: false }))["npx-outreach"].outboundMode).toBeNull();
   });
 });

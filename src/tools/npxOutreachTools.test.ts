@@ -59,6 +59,10 @@ let cancel: ReturnType<typeof vi.fn>;
 let fileTicket: ReturnType<typeof vi.fn>;
 
 beforeEach(async () => {
+  // These are the LIVE mode's tests: production NPX, the real Azul cancel and
+  // the real staff ticket (all faked here). Unset, the mode is the demo, which
+  // swaps all three (npxOutreachDemo.test.ts).
+  vi.stubEnv('NPX_OUTREACH_MODE', 'live');
   resetOutreachSessionsForTests();
   store = new FakeOutboundStore();
   store.addContact({ id: 'c1', phone: '+15555550111', status: 'calling', firstName: 'Testa', lastName: 'Synthetic', customData: { ...DATA } });
@@ -78,7 +82,10 @@ beforeEach(async () => {
   });
 });
 
-afterEach(() => setNpxOutreachDepsForTests(null));
+afterEach(() => {
+  setNpxOutreachDepsForTests(null);
+  vi.unstubAllEnvs();
+});
 
 const DIALLED = () => ({
   outbound_contact_id: 'c1',

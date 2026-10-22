@@ -25,6 +25,81 @@ const errorAttempts = new Map<string, number>();
 export function releaseDirectionState(callId: string | undefined): void {
   if (!callId) return;
   for (const key of errorAttempts.keys()) if (key.startsWith(`${callId}:`)) errorAttempts.delete(key);
+  medicationAsks.delete(callId);
+}
+
+/**
+ * THE MEDICATION ASK IS BOUNDED AT ONE PER CALL (v112).
+ *
+ * The refill gate below refused `create_ticket` whenever the arguments said
+ * "refill" or "medication" and no drug name in its list matched — with no
+ * count, so it refused the same request on every attempt for the life of the
+ * call. And its list is a dozen names and five suffixes, so a caller who NAMED
+ * their drug was refused anyway. Measured 2026-10-22 over the 30 days before,
+ * after-hours line: 14 calls asked for the medication name and ended with no
+ * ticket of any provenance, 9 of them told the team would call back. In 11 of
+ * the 14 the caller had said the name — Betoptic, Lumigan, Alphagan, Cosopt,
+ * cyclosporine, fluorometholone, prednisone, doxycycline, sodium chloride
+ * drops — and the worst call was asked 19 times. In the other 3 the caller did
+ * not know the name, one of them about contact lenses.
+ *
+ * So the gate asks ONCE and the next attempt files, whatever it carries — the
+ * operator's 2026-09-04 ruling on the date of birth ("ask once, then file")
+ * applied to the one gate that never got it. A name the list does not know is
+ * not a missing name; a list of names is not how a name is recognised
+ * (standing instruction 3), and growing this one would only move the loop to
+ * the next drug.
+ *
+ * Keyed on the call. A call with no id cannot be counted, so it is never
+ * refused: a request must not be lost to a gate that cannot bound itself.
+ * Capped, oldest first, because nothing on the runtime releases this module's
+ * state at hangup and a map that only grows is a leak.
+ */
+const medicationAsks = new Map<string, number>();
+export const MEDICATION_ASK_LIMIT = 1;
+const MEDICATION_ASKS_CAP = 1000;
+
+/** What the model reads when the gate refuses. Model-facing, never spoken. */
+export const MEDICATION_GATE_REFUSAL =
+  'ONE DETAIL NEEDED BEFORE FILING (this is NOT a system error — do not apologize, do not mention technical issues, do not end the call). ' +
+  'If the caller has ALREADY said the name of the medication, do not ask again: put that name in the request and call create_ticket again now. ' +
+  'Otherwise ask once: "Which medication do you need refilled?" — then call create_ticket again with the name, or, if they do not know it, ' +
+  'call create_ticket again anyway; it will file without it. Never ask for the medication name a second time.';
+
+/** What the call's tool timeline records when the gate refuses — countable, no PHI. */
+export const MEDICATION_GATE_OUTCOME = {
+  success: false,
+  refused: 'medication_name',
+  missingFields: ['medication'],
+} as const;
+
+/** A contact lens is not a medication, and asking which drug it is answers nothing. */
+const CONTACT_LENSES = /contact ?lens|lentes de contacto|\bcontacts\b/;
+
+function medicationGate(callId: string | undefined, argText: string): string | null {
+  if (!/refill|medication/.test(argText)) return null;
+  // A post-op prescription problem is exempt (operator ruling 2026-10-02, v89):
+  // it files URGENT to After Hours, and the corpus caller did not know the
+  // drug's name ("we don't know the name", CAa2e451aba415a1deb97a72374e3e1784)
+  // — blocking that ticket for a name is the request lost.
+  if (/"post_op_prescription":true/.test(argText)) return null;
+  if (CONTACT_LENSES.test(argText)) return null;
+  const namedMed = /\b(latanoprost|timolol|brimonidine|dorzolamide|prednisolone|atropine|restasis|xiidra|[a-z]{6,}(ol|ide|pine|mycin|floxacin|prost|zolamide))\b/.test(argText);
+  if (namedMed) return null;
+  if (!callId) return null;
+  const asked = medicationAsks.get(callId) ?? 0;
+  if (asked >= MEDICATION_ASK_LIMIT) {
+    console.warn(`[TOOL-GATE] create_ticket medication ask already spent on call ${callId} — filing without a recognised name`);
+    return null;
+  }
+  medicationAsks.delete(callId);
+  medicationAsks.set(callId, asked + 1);
+  while (medicationAsks.size > MEDICATION_ASKS_CAP) {
+    const oldest = medicationAsks.keys().next().value;
+    if (oldest === undefined) break;
+    medicationAsks.delete(oldest);
+  }
+  return MEDICATION_GATE_REFUSAL;
 }
 
 const FILED_LINE: Record<string, string> = {
@@ -73,6 +148,15 @@ export function withToolDirection<A extends unknown[]>(
   callId: string | undefined,
   toolName: string,
   execute: (...args: A) => Promise<unknown> | unknown,
+  opts: {
+    /**
+     * Called when the medication gate refuses, with the arguments and the
+     * outcome to record. The refusal returns before `execute`, so the
+     * recorder the agent wrapped around `execute` never sees it — without
+     * this, a refused filing is invisible in `tool_timeline` (v112).
+     */
+    recordRefusal?: (args: unknown, outcome: Record<string, unknown>) => void;
+  } = {},
 ): (...args: A) => Promise<unknown> {
   return async (...args: A) => {
     // Ledger auto-fill (2026-08-07 afternoon watch: callback_fields was
@@ -105,8 +189,15 @@ export function withToolDirection<A extends unknown[]>(
         }
       }
     } catch { /* auto-fill must never affect the call */ }
-    const blocked = await gateBeforeExecution(agentSlug, callId, toolName, args[0]);
-    if (blocked) return blocked;
+    const refusal = await gateDecision(agentSlug, callId, toolName, args[0]);
+    if (refusal) {
+      if (refusal.code === 'medication_name') {
+        try {
+          opts.recordRefusal?.(args[0], { ...MEDICATION_GATE_OUTCOME });
+        } catch { /* telemetry must never change what the caller hears */ }
+      }
+      return refusal.text;
+    }
     const raw = await execute(...args);
     try {
       const directive = directionFor(agentSlug, toolName, raw, callId);
@@ -163,22 +254,26 @@ export async function gateBeforeExecution(
   toolName: string,
   toolArgs?: unknown,
 ): Promise<string | null> {
+  return (await gateDecision(agentSlug, callId, toolName, toolArgs))?.text ?? null;
+}
+
+type GateRefusal = { text: string; code: 'medication_name' | 'call_not_finished' };
+
+async function gateDecision(
+  agentSlug: string,
+  callId: string | undefined,
+  toolName: string,
+  toolArgs?: unknown,
+): Promise<GateRefusal | null> {
   const argText = JSON.stringify(toolArgs ?? '').toLowerCase();
   // Request-type requirements (live retest 2026-08-07): a refill ticket
-  // without the medication name is a message worth nothing — block filing.
-  // A post-op prescription problem is exempt (operator ruling 2026-10-02, v89):
-  // it files URGENT to After Hours, and the corpus caller did not know the
-  // drug's name ("we don't know the name", CAa2e451aba415a1deb97a72374e3e1784)
-  // — blocking that ticket for a name is the request lost.
-  if (
-    toolName === 'create_ticket' &&
-    /refill|medication/.test(argText) &&
-    !/"post_op_prescription":true/.test(argText)
-  ) {
-    const namedMed = /\b(latanoprost|timolol|brimonidine|dorzolamide|prednisolone|atropine|restasis|xiidra|[a-z]{6,}(ol|ide|pine|mycin|floxacin|prost|zolamide))\b/.test(argText);
-    if (!namedMed) {
-      console.warn(`[TOOL-GATE] create_ticket BLOCKED on ${agentSlug} — refill request without a medication name`);
-      return 'ONE DETAIL NEEDED BEFORE FILING (this is NOT a system error — do not apologize, do not mention technical issues, do not end the call): ask the caller "Which medication do you need refilled?" and then call create_ticket again with the medication included.';
+  // without the medication name is a message worth less — ask for it, ONCE
+  // (v112, medicationGate above).
+  if (toolName === 'create_ticket') {
+    const text = medicationGate(callId, argText);
+    if (text) {
+      console.warn(`[TOOL-GATE] create_ticket BLOCKED on ${agentSlug} — refill request without a recognised medication name (asked once)`);
+      return { text, code: 'medication_name' };
     }
   }
   if (!callId || !/^(terminate_call|end_call|handle_patient_medical_records_request)$/.test(toolName)) return null;
@@ -200,7 +295,10 @@ export async function gateBeforeExecution(
     }
     if (missing.length) {
       console.warn(`[TOOL-GATE] terminate_call BLOCKED on ${agentSlug} call ${callId} — missing: ${missing.join('; ')}`);
-      return `NOT DONE YET (this is NOT a system error — do not apologize or mention technical issues): you still need to collect ${missing.join('; ')}. Ask for it now, then wrap up with "Anything else I can help with?" before ending.`;
+      return {
+        text: `NOT DONE YET (this is NOT a system error — do not apologize or mention technical issues): you still need to collect ${missing.join('; ')}. Ask for it now, then wrap up with "Anything else I can help with?" before ending.`,
+        code: 'call_not_finished',
+      };
     }
   } catch {
     /* gate must never break a call */

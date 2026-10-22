@@ -840,8 +840,28 @@ import { callEnvironment } from "./callRecord";
  * build writes build-info.json from git instead of serving a committed copy
  * frozen at 3f4ec74. `src/runtime/buildIdentity.ts`. On top of v110 (#361).
  */
+/**
+ * v112 — THE MEDICATION NAME IS ASKED ONCE (2026-10-22). The after-hours
+ * line's refill gate refused `create_ticket` on every attempt for the life of
+ * the call; it now refuses once, files on the next attempt, never asks about
+ * a contact lens, and the refusal reaches `tool_timeline`. On top of v111
+ * (#364), which it contains. `src/services/toolDirection.ts`.
+ */
+/**
+ * v113 — THE NPX DEMO LINE (2026-10-22). Operator: "No way we are going to do
+ * this without testing the line first", then "switching over to production
+ * should be a env switch". ONE lane, `npx-outreach`, and NPX_OUTREACH_MODE:
+ * unset (or anything but `live`) calls the synthetic patients on
+ * NPX_OUTREACH_DEMO_PHONES and books in the demo NPX, with the Azul cancel and
+ * the staff ticket simulated; `live` calls the Console's movable list and
+ * books for real. Same caller ID, Voice URL, agent, prompt, tools and voice
+ * (`eve`) in both. `/voice/health` names each lane's voice and the NPX lane's
+ * mode. On top of v112, which it contains.
+ * `src/agents/npxOutreachAgent.ts`, `src/agents/npxOutreachDemo.ts`,
+ * `src/tools/npxOutreachTools.ts`.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v111-the-call-row-names-its-build-20261022";
+  "voice-runtime-v113-the-npx-demo-line-20261022";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

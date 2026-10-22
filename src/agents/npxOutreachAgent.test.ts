@@ -27,6 +27,7 @@ import {
   resetOutreachSessionsForTests,
 } from '../tools/npxOutreachTools';
 import { npxOutreachGreeting, npxOutreachPolicy, npxOutreachSource, pilotSource } from './npxOutreachAgent';
+import { NPX_OUTREACH_DEMO_CAPS } from './npxOutreachDemo';
 import { outboundProofPolicy } from './outboundProofAgent';
 
 const DATA = {
@@ -156,11 +157,45 @@ describe('the lane as the runtime resolves it', () => {
 });
 
 describe('the policy', () => {
-  it('dials only behind its own switch and its own caller ID, never the proving lane\'s', () => {
-    expect(npxOutreachPolicy.enableEnv).toBe('OUTBOUND_CAMPAIGN_NPX_OUTREACH');
-    expect(npxOutreachPolicy.callerIdEnv).not.toBe(outboundProofPolicy.callerIdEnv);
-    expect(npxOutreachPolicy.tools).toEqual(NPX_OUTREACH_TOOLS);
+  it('dials only behind its own switch and its own caller ID, never the proving lane\'s, in either mode', () => {
+    for (const mode of ['live', 'demo']) {
+      vi.stubEnv('NPX_OUTREACH_MODE', mode);
+      expect(npxOutreachPolicy.enableEnv).toBe('OUTBOUND_CAMPAIGN_NPX_OUTREACH');
+      expect(npxOutreachPolicy.callerIdEnv).toBe('NPX_OUTREACH_CALLER_ID');
+      expect(npxOutreachPolicy.callerIdEnv).not.toBe(outboundProofPolicy.callerIdEnv);
+      expect(npxOutreachPolicy.tools).toEqual(NPX_OUTREACH_TOOLS);
+    }
+    vi.unstubAllEnvs();
+  });
+
+  it('live: the patient caps and the live campaign row', () => {
+    vi.stubEnv('NPX_OUTREACH_MODE', 'live');
+    expect(npxOutreachPolicy.mode!()).toBe('live');
+    expect(npxOutreachPolicy.campaignKey).toBe('npx-outreach');
     expect(npxOutreachPolicy.caps).toMatchObject({ perDay: 1, perWeek: 3, total: 3 });
+    expect(npxOutreachPolicy.concurrency).toBe(2);
+    vi.unstubAllEnvs();
+  });
+
+  it('demo, the default: test caps, one call at a time, and its own campaign row', () => {
+    for (const unset of [undefined, '', 'demo', 'production', 'liv']) {
+      if (unset === undefined) vi.unstubAllEnvs();
+      else vi.stubEnv('NPX_OUTREACH_MODE', unset);
+      expect(npxOutreachPolicy.mode!()).toBe('demo');
+      expect(npxOutreachPolicy.campaignKey).toBe('npx-outreach-demo');
+      expect(npxOutreachPolicy.caps).toEqual(NPX_OUTREACH_DEMO_CAPS);
+      expect(npxOutreachPolicy.concurrency).toBe(1);
+    }
+    vi.stubEnv('NPX_OUTREACH_MODE', ' LIVE ');
+    expect(npxOutreachPolicy.mode!()).toBe('live');
+    vi.unstubAllEnvs();
+  });
+
+  it('the mode the health check reports is read from the environment it is handed', () => {
+    vi.stubEnv('NPX_OUTREACH_MODE', 'live');
+    expect(npxOutreachPolicy.mode!({})).toBe('demo');
+    vi.unstubAllEnvs();
+    expect(npxOutreachPolicy.mode!({ NPX_OUTREACH_MODE: 'live' })).toBe('live');
   });
 
   it('its voicemail says nothing about an appointment — whoever plays the machine back hears it', () => {
@@ -200,8 +235,9 @@ describe('dark without the NPX key (Codex P1, #361)', () => {
     expect(await src!.list(new Date())).toEqual([]);
   });
 
-  it('the policy the dialler reads is that gate', async () => {
+  it('the policy the dialler reads is that gate, in live mode', async () => {
     movable.source = base;
+    vi.stubEnv('NPX_OUTREACH_MODE', 'live');
     vi.stubEnv('NPX_OUTREACH_API_KEY', '');
     expect(await npxOutreachPolicy.source!()).toBeNull();
     vi.stubEnv('NPX_OUTREACH_API_KEY', 'k');
