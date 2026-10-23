@@ -613,4 +613,87 @@ describe('the record office name is sent when our lookup does not resolve it', (
     expect(said()).toContain('Error 400');
     expect(said()).not.toContain(ON_RECORD);
   });
+
+  /**
+   * A RETRYABLE failure takes the outbox branch, which printed `res.error`
+   * raw (Codex thread PRRT_kwDORVukLs6vzf35 on #371): a 5xx body, or an
+   * HTTP 200 answering `success:false`, can carry the record's office.
+   */
+  function realFetch(api: Awaited<ReturnType<typeof client>>, reply: () => unknown) {
+    const internals = realPost(api);
+    internals.baseUrl = 'https://ticketing.invalid';
+    internals.apiKey = 'test-key';
+    return vi.spyOn(globalThis, 'fetch').mockImplementation(async () => reply() as Response);
+  }
+
+  it('never logs the office name from a retryable 5xx body', async () => {
+    const api = await client();
+    const fetchSpy = realFetch(api, () => ({
+      ok: false, status: 503, statusText: 'Service Unavailable',
+      json: async () => ({ success: false, error: `Location "${ON_RECORD}" lookup timed out` }),
+    }));
+    const said = consoleSaid();
+    record();
+
+    await runTool('file_optical_ticket', NO_OFFICE);
+    await runTool('file_optical_ticket', NO_OFFICE);
+
+    expect(fetchSpy).toHaveBeenCalled();
+    expect(said()).toContain('[TICKET OUTBOX]');
+    expect(said()).toContain('HTTP 503');
+    expect(said()).not.toContain(ON_RECORD);
+  });
+
+  it('never logs the office name from an HTTP 200 answering success:false', async () => {
+    const api = await client();
+    realFetch(api, () => ({
+      ok: true, status: 200, statusText: 'OK',
+      json: async () => ({ success: false, error: `Location "${ON_RECORD}" not found in system` }),
+    }));
+    const said = consoleSaid();
+    record();
+
+    await runTool('file_optical_ticket', NO_OFFICE);
+    await runTool('file_optical_ticket', NO_OFFICE);
+
+    expect(said()).toContain('[TICKET OUTBOX]');
+    expect(said()).not.toContain(ON_RECORD);
+  });
+
+  /**
+   * A non-JSON body: `response.json()` throws a SyntaxError that quotes an
+   * excerpt of the body, and `makeRequest` printed it raw (Codex thread
+   * PRRT_kwDORVukLs6vzf39 on #371).
+   */
+  it('never logs the office name from a body that is not JSON', async () => {
+    const api = await client();
+    realFetch(api, () => ({
+      ok: false, status: 502, statusText: 'Bad Gateway',
+      json: async () => {
+        throw new SyntaxError(`Unexpected token 'L', "Location "${ON_RECORD}" not found" is not valid JSON`);
+      },
+    }));
+    const said = consoleSaid();
+    record();
+
+    await runTool('file_optical_ticket', NO_OFFICE);
+    await runTool('file_optical_ticket', NO_OFFICE);
+
+    expect(said()).toContain('Failed to parse JSON response (HTTP 502): SyntaxError');
+    expect(said()).not.toContain(ON_RECORD);
+  });
+});
+
+describe('loggableTicketingError', () => {
+  it('passes the client\'s own messages through and withholds the far side\'s', async () => {
+    const { loggableTicketingError } = await import('../services/loggableTicketingError');
+    expect(loggableTicketingError('Ticketing API timeout after 15000ms - please try again'))
+      .toBe('Ticketing API timeout after 15000ms - please try again');
+    expect(loggableTicketingError('Invalid JSON response from ticketing API: 502', 502))
+      .toBe('Invalid JSON response from ticketing API: 502');
+    const withheld = loggableTicketingError(`Location "${ON_RECORD}" not found`, 503);
+    expect(withheld).toContain('HTTP 503');
+    expect(withheld).not.toContain(ON_RECORD);
+    expect(loggableTicketingError(`Location "${ON_RECORD}" not found`)).not.toContain(ON_RECORD);
+  });
 });

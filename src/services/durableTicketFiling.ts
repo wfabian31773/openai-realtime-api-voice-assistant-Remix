@@ -31,6 +31,7 @@
  *    exists a long outage is still found by a human noticing.
  */
 import { ticketingApiClient } from '../../server/services/ticketingApiClient';
+import { loggableTicketingError } from './loggableTicketingError';
 // One-way edge: the registry does not import this module, the tools import both.
 import { getTool } from '../tools/registry';
 import type { CreateTicketParams, CreateTicketResponse } from '../../server/services/ticketingApiClient';
@@ -177,7 +178,7 @@ export async function createTicketDurable(params: CreateTicketParams): Promise<D
   console.error(
     `[TICKET OUTBOX] ✗ create-ticket FAILED for ${agent} ` +
       `(dept ${params.departmentId}/${params.requestTypeId ?? 'none'}/${params.requestReasonId ?? 'none'}) — ` +
-      `capturing the request. Cause: ${res.error ?? 'no ticket number returned'}`,
+      `capturing the request. Cause: ${loggableTicketingError(res.error, res.statusCode)}`,
   );
 
   try {

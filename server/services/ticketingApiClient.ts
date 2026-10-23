@@ -643,7 +643,13 @@ export class TicketingApiClient {
         // no status downstream, so it is captured and retried like any other
         // request that never got an answer — not read as a refusal.
         if (parseError instanceof Error && parseError.name === 'AbortError') throw parseError;
-        console.error(`[TICKETING API] ✗ Failed to parse JSON response:`, parseError);
+        // Status and error TYPE only: a JSON SyntaxError quotes an excerpt of
+        // the body, and a non-JSON body can be `Location "<office>" not
+        // found` (v116 — Codex thread PRRT_kwDORVukLs6vzf39 on #371).
+        console.error(
+          `[TICKETING API] ✗ Failed to parse JSON response (HTTP ${response.status}): ` +
+            `${parseError instanceof Error ? parseError.name : typeof parseError} (body text withheld)`,
+        );
         /**
          * THE STATUS SURVIVES A BODY WE COULD NOT READ.
          *
