@@ -541,4 +541,76 @@ describe('the record office name is sent when our lookup does not resolve it', (
     expect(said).toContain('Creating ticket');
     expect(said).not.toContain(ON_RECORD);
   });
+
+  /**
+   * The app's own words name the office too (Codex thread
+   * PRRT_kwDORVukLs6vzaiN on #371): a lookup warning on a filed ticket, and
+   * the error body of a refusal, both read like `Location "<office>" not
+   * found`. The refusal is driven through the REAL `makeRequest` with only
+   * `fetch` faked, so the non-2xx body dump and the catch are both exercised.
+   */
+  function realPost(api: Awaited<ReturnType<typeof client>>) {
+    type Internals = {
+      ensureInitialized: () => void;
+      warmUpIfStale: (...args: unknown[]) => Promise<boolean>;
+      makeRequest: (...args: unknown[]) => Promise<unknown>;
+      baseUrl: string | null;
+      apiKey: string | null;
+    };
+    const internals = api as unknown as Internals;
+    vi.spyOn(internals, 'ensureInitialized').mockImplementation(() => {});
+    vi.spyOn(internals, 'warmUpIfStale').mockResolvedValue(true);
+    vi.spyOn(api, 'lookupProviderAndLocation').mockResolvedValue(
+      { success: true, outcome: 'no_match', locationId: undefined } as never,
+    );
+    return internals;
+  }
+  function consoleSaid() {
+    const spies = (['log', 'info', 'warn', 'error'] as const)
+      .map((k) => vi.spyOn(console, k).mockImplementation(() => {}));
+    return () => spies
+      .flatMap((s) => s.mock.calls)
+      .map((c) => c.map((v) => (typeof v === 'string' ? v : v instanceof Error ? `${v.message}` : JSON.stringify(v))).join(' '))
+      .join(' | ');
+  }
+
+  it('never logs the office name from a lookup warning on a filed ticket', async () => {
+    const api = await client();
+    const internals = realPost(api);
+    vi.spyOn(internals, 'makeRequest').mockImplementation(async (path) =>
+      path === '/api/voice-agent/create-ticket'
+        ? { success: true, ticketNumber: 'VA-99015', lookupWarnings: [`Location "${ON_RECORD}" not found in system`] }
+        : { success: true },
+    );
+    const said = consoleSaid();
+    record();
+
+    await runTool('file_optical_ticket', NO_OFFICE);
+    await runTool('file_optical_ticket', NO_OFFICE);
+
+    expect(said()).toContain('1 lookup warning(s) for VA-99015');
+    expect(said()).not.toContain(ON_RECORD);
+  });
+
+  it('never logs the office name from a refusal body', async () => {
+    const api = await client();
+    const internals = realPost(api);
+    internals.baseUrl = 'https://ticketing.invalid';
+    internals.apiKey = 'test-key';
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => ({
+      ok: false,
+      status: 400,
+      statusText: 'Bad Request',
+      json: async () => ({ success: false, error: `Location "${ON_RECORD}" not found in system` }),
+    }) as unknown as Response);
+    const said = consoleSaid();
+    record();
+
+    await runTool('file_optical_ticket', NO_OFFICE);
+    await runTool('file_optical_ticket', NO_OFFICE);
+
+    expect(fetchSpy).toHaveBeenCalled();
+    expect(said()).toContain('Error 400');
+    expect(said()).not.toContain(ON_RECORD);
+  });
 });

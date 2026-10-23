@@ -141,9 +141,16 @@ export async function createTicketDurable(params: CreateTicketParams): Promise<D
 
   if (isTerminalRefusal(res.statusCode)) {
     const missingField = missingFieldFromError(res.error);
+    // The app's refusal text is NOT printed: it can name the office on the
+    // patient's record (`Location "<office>" not found`, v116 — Codex thread
+    // PRRT_kwDORVukLs6vzaiN on #371). A missing FIELD name is safe and is the
+    // part the console line is read for.
+    const reason = missingField
+      ? `missing ${missingField}`
+      : res.error ? 'reason withheld (the app\'s text can name the patient\'s office)' : 'no reason given';
     console.warn(
       `[TICKET FILING] ${agent}: create-ticket REFUSED the payload (HTTP ${res.statusCode}) — ` +
-        `${res.error ?? 'no reason given'}. Not queued: retrying cannot change a refusal.`,
+        `${reason}. Not queued: retrying cannot change a refusal.`,
     );
     return { ...res, queued: false, terminal: true, missingField };
   }

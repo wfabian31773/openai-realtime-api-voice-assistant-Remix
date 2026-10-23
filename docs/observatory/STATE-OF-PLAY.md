@@ -1400,7 +1400,12 @@ Codex then found the same leak one call later (thread PRRT_kwDORVukLs6vtp3I):
 the call SID, and its "Lookup results" line echoed the app's `locationSearched`;
 `submitTicket`'s `lastLocation` had the same shape. All three print presence
 only now, and a third test runs the REAL `createTicket` (request and warm-up
-faked).
+faked). Codex thread PRRT_kwDORVukLs6vzaiN then found the APP's own text
+carrying it: a lookup warning or refusal body like `Location "<office>" not
+found`, printed verbatim by `createTicket`, `makeRequest`'s non-2xx dump, both
+catch blocks and `durableTicketFiling`'s REFUSED line. All are counted or
+summarised now (keys, missing-field names, status), with two tests through the
+real `makeRequest` and only `fetch` faked.
 
 ### Open, and Wayne's to settle — the first-call ask on a no-match
 

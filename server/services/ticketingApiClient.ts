@@ -341,6 +341,30 @@ function maskName(...parts: Array<string | undefined>): string {
   return initials ? `${initials}***` : '(none)';
 }
 
+/**
+ * THE APP'S OWN WORDS CAN NAME THE PATIENT'S OFFICE (v116, Codex thread
+ * PRRT_kwDORVukLs6vzaiN on #371). A lookup warning or a refusal body reads
+ * like `Location "<office>" not found in system`, and since v116 that office
+ * is the one on the PATIENT'S RECORD. So response-derived text is never
+ * printed: a warning is counted, and a refusal is summarised by its keys and
+ * the field NAMES it says are missing.
+ */
+function describeRefusalBody(data: unknown): Record<string, unknown> {
+  if (!data || typeof data !== 'object') return { body: data === null ? 'null' : typeof data };
+  const body = data as Record<string, unknown>;
+  return {
+    keys: Object.keys(body),
+    hasError: typeof body.error === 'string' && body.error.length > 0,
+    missingFields: Array.isArray(body.missingFields) ? body.missingFields : undefined,
+  };
+}
+function describeFailure(error: unknown): unknown {
+  const statusCode = (error as { statusCode?: number } | null)?.statusCode;
+  // An error carrying a status holds the far side's text; one without is ours
+  // (a timeout, an unreachable host) and is printed as it is.
+  return statusCode !== undefined ? { statusCode, message: '(response text withheld)' } : error;
+}
+
 export class TicketingApiClient {
   private baseUrl: string | null = null;
   // Direct-to-app base for post-call enrichment; falls back to baseUrl (n8n) when unset.
@@ -650,7 +674,7 @@ export class TicketingApiClient {
         if (response.status === 404 && isNoTicketError(String(data?.error ?? ''))) {
           console.info(`[TICKETING API] 404 no-ticket for ${endpoint} (expected for info-only calls)`);
         } else {
-          console.error(`[TICKETING API] Error ${response.status}:`, data);
+          console.error(`[TICKETING API] Error ${response.status}:`, describeRefusalBody(data));
         }
         shadowTap.emit('n8n_workflow_failed', shadowSession, shadowAgent,
           { endpoint, method, viaGateway: shadowViaGateway, status: response.status, body: body ?? {}, response: data ?? {} },
@@ -824,7 +848,7 @@ export class TicketingApiClient {
       
       // Log any lookup warnings for staff awareness
       if (response.lookupWarnings && response.lookupWarnings.length > 0) {
-        console.warn(`[TICKETING API] ⚠️  Lookup warnings for ${response.ticketNumber}:`, response.lookupWarnings);
+        console.warn(`[TICKETING API] ⚠️  ${response.lookupWarnings.length} lookup warning(s) for ${response.ticketNumber} (text withheld — it can name the patient's office)`);
       }
       
       if (response.usedFallbackReason) {
@@ -833,7 +857,7 @@ export class TicketingApiClient {
 
       return response;
     } catch (error) {
-      console.error("[TICKETING API] ✗ Failed to create ticket:", error);
+      console.error("[TICKETING API] ✗ Failed to create ticket:", describeFailure(error));
       return {
         success: false,
         error: error instanceof Error ? error.message : String(error),
@@ -994,7 +1018,7 @@ export class TicketingApiClient {
         
         // Log any lookup warnings for staff awareness
         if (response.lookupWarnings && response.lookupWarnings.length > 0) {
-          console.warn(`[TICKETING API] ⚠️  Lookup warnings for ${response.ticketNumber}:`, response.lookupWarnings);
+          console.warn(`[TICKETING API] ⚠️  ${response.lookupWarnings.length} lookup warning(s) for ${response.ticketNumber} (text withheld — it can name the patient's office)`);
         }
         
         if (response.usedFallbackReason) {
@@ -1003,14 +1027,14 @@ export class TicketingApiClient {
       } else {
         console.error(`[TICKETING API] ✗ Ticket submission failed:`, {
           errorCode: response.errorCode,
-          error: response.error,
+          hasError: Boolean(response.error),
           missingFields: response.missingFields,
         });
       }
 
       return response;
     } catch (error) {
-      console.error("[TICKETING API] ✗ Failed to submit ticket:", error);
+      console.error("[TICKETING API] ✗ Failed to submit ticket:", describeFailure(error));
       return {
         success: false,
         errorCode: 'request_failed',
