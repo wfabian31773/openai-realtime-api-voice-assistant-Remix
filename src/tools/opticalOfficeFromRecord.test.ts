@@ -105,6 +105,14 @@ describe('the office on the record is used when the caller named none', () => {
     // The payload the app routes on — not our own log line, and not the
     // tool's return value.
     expect(create.mock.calls[0][0]).toMatchObject({ locationId: RECORD_LOCATION_ID });
+    // v116 (stand-in review of #371, P2): when the record's office RESOLVES,
+    // its name now travels beside the id. Before v116 a routed ticket carried
+    // the id and no name. Pinned so a disagreement between ticketing-app
+    // #381's name resolver and our id is visible on the payload, and so the
+    // name cannot silently drop off the resolved path again.
+    const payload = create.mock.calls[0][0] as unknown as Record<string, unknown>;
+    expect(payload.locationOfLastVisit).toBe(ON_RECORD);
+    expect(payload.routingAskExhausted).toBeUndefined();
   });
 });
 

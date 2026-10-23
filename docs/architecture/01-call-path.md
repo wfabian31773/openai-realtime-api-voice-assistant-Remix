@@ -765,7 +765,11 @@ locationOfLastVisit cleanLocation (always — the caller's words survive); when
                     the caller named none, the office on the patient's record
                     (`usualOfficeFor`), sent even when our /lookup did not
                     resolve it — the app resolves names itself (ticketing-app
-                    #381, unique-match). Withheld on a DOB conflict. Also
+                    #381, unique-match) — and sent beside locationId when it
+                    DID resolve, so a routed ticket carries both. Withheld on
+                    a DOB conflict. On a no-match the FIRST call still asks
+                    for the office (kept pending the operator's ruling,
+                    STATE-OF-PLAY §15). Also
                     sent on a cross-queue redirect, where routingAskExhausted
                     is never sent. 2026-10-23, marker v116
 providerId          ONLY when resolved
