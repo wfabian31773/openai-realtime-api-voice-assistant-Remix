@@ -175,9 +175,40 @@ describe('what the agent is told to say', () => {
   });
 
   it('still refuses when nothing captured the request', async () => {
-    const out = postFailureToolResult({ success: false, queued: false, error: 'ECONNREFUSED' });
+    // The client's own message passes through; the far side's text does not
+    // (see the record-office tests below).
+    const own = 'Ticketing system unreachable: ECONNREFUSED';
+    const out = postFailureToolResult({ success: false, queued: false, error: own });
     expect(out.success).toBe(false);
-    expect((out as { error?: string }).error).toBe('ECONNREFUSED');
+    expect((out as { error?: string }).error).toBe(own);
+    expect((out as { retryable?: boolean }).retryable).toBe(true);
+  });
+
+  /**
+   * THE TOOL RESULT IS A LOG TOO (v116 — Codex thread PRRT_kwDORVukLs6vzltO
+   * on #371). The adapter prints `[TOOLS] ← … error:` and `tool_timeline`
+   * persists `error`, so an app message echoing `locationOfLastVisit` — the
+   * office on the patient's RECORD since v116 — must not reach it.
+   */
+  describe('the app\'s text never becomes the tool result\'s error', () => {
+    const OFFICE = 'Glendora';
+    const echo = `Location "${OFFICE}" not found in system`;
+
+    it('on a terminal refusal that names no field', async () => {
+      createTicket.mockResolvedValue({ success: false, statusCode: 422, error: echo });
+      const res = await createTicketDurable(OPTICAL_OTHER);
+      const out = postFailureToolResult(res, 'file_optical_ticket') as { error?: string; retryable?: boolean };
+      expect(out.retryable).toBe(false);
+      expect(out.error).toContain('HTTP 422');
+      expect(JSON.stringify(out)).not.toContain(OFFICE);
+    });
+
+    it('on a failure nothing captured', () => {
+      const out = postFailureToolResult({ success: false, queued: false, statusCode: 503, error: echo });
+      expect(out.success).toBe(false);
+      expect((out as { error?: string }).error).toContain('HTTP 503');
+      expect(JSON.stringify(out)).not.toContain(OFFICE);
+    });
   });
 });
 
@@ -316,7 +347,10 @@ describe('a payload the server read and refused', () => {
     expect(writeToOutbox).not.toHaveBeenCalled();
     expect(out.success).toBe(false);
     expect(out.retryable).toBe(false);
-    expect(out.error).toMatch(/patientPhone/);
+    // The app's own text is withheld from the tool result (v116, thread
+    // PRRT_kwDORVukLs6vzltO): only the status reaches the adapter and timeline.
+    expect(out.error).toMatch(/HTTP 400/);
+    expect(out.error).not.toMatch(/Too big/);
   });
 
   it('is terminal even when the refusal body was not JSON', async () => {

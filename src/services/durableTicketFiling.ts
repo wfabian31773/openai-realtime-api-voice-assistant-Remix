@@ -258,7 +258,13 @@ export function postFailureToolResult(res: DurableCreateResult, toolName?: strin
     }
     return {
       success: false as const,
-      error: res.error ?? 'the ticketing system refused this request',
+      // Never the app's own text: a tool result's `error` is printed by the
+      // adapter (`[TOOLS] ← … error:`) and persisted by `tool_timeline`, and
+      // the app's text can name the office on the patient's record
+      // (v116 — Codex thread PRRT_kwDORVukLs6vzltO on #371).
+      error: res.error
+        ? loggableTicketingError(res.error, res.statusCode)
+        : 'the ticketing system refused this request',
       // Deliberately NOT retryable: the server read it and said no.
       retryable: false,
     };
@@ -276,7 +282,9 @@ export function postFailureToolResult(res: DurableCreateResult, toolName?: strin
   }
   return {
     success: false as const,
-    error: res.error ?? 'ticket creation failed',
+    // Same rule as the refusal above: the far side's text never becomes a
+    // tool result.
+    error: res.error ? loggableTicketingError(res.error, res.statusCode) : 'ticket creation failed',
     retryable: true,
   };
 }
