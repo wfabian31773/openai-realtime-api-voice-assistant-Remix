@@ -65,7 +65,7 @@ describe("a definition change is a new method version", () => {
     const h = createHash("sha256").update(definitionsText()).digest("hex").slice(0, 16);
     // If this fails you changed a definition: bump METHOD_VERSION and pin the new hash beside it.
     expect(h).toBe(DEFINITIONS_HASH);
-    expect(METHOD_VERSION).toBe("learning-v4");
+    expect(METHOD_VERSION).toBe("learning-v5");
   });
 
   it("every statement and every definition is inside the hashed text", () => {
@@ -101,18 +101,29 @@ describe("the reads follow the written rules (CLAUDE.md and the Daybook)", () =>
     expect(SUPPORT_PROVENANCE_SQL).not.toMatch(/ticket_number|VA-|PCP-/);
   });
 
-  it("5Star calls: the DRS line, not simulated, the UTC-to-Pacific day (82, not the naive 108)", () => {
-    expect(FIVESTAR_CALLS_SQL).toContain("to_phone = '+16266998484'");
-    expect(FIVESTAR_CALLS_SQL).toContain("coalesce(simulated, false) = false");
-    expect(FIVESTAR_CALLS_SQL).toContain("notes LIKE 'DRS voice call%'");
-    expect(FIVESTAR_CALLS_SQL).toContain("((created_at AT TIME ZONE 'UTC') AT TIME ZONE 'America/Los_Angeles')::date");
-    expect(FIVESTAR_CALLS_SQL).toContain("coalesce(transcript, '') ~ 'CALLER:'");
-    // response_excerpt can hold caller words: only the step fields leave the statement.
-    expect(FIVESTAR_CALLS_SQL).not.toMatch(/SELECT[^;]*response_excerpt\s*(,|AS|FROM)/);
+  it("5Star is read only through the two SECURITY DEFINER functions, never a PHI table", () => {
+    expect(FIVESTAR_CALLS_SQL).toBe(
+      "SELECT call_id AS id, build, substantive, submitted, asked FROM public.learning_fivestar_calls($1::date)",
+    );
+    expect(FIVESTAR_BOOKINGS_SQL).toBe(
+      "SELECT call_log_id, booking_id, status, source, nextgen_appointment_id, person_id, slot_date, slot_time, " +
+        "npx_link_method, partner_link_needs_review, partner_outcome_status FROM public.learning_fivestar_bookings($1::text[])",
+    );
+    const forbidden = /call_logs|sage_tool_calls|internal_bookings|\bpatients\b|voice_agent_booking_attempts|transcript|notes|to_phone|response_excerpt/i;
+    for (const s of [FIVESTAR_CALLS_SQL, FIVESTAR_BOOKINGS_SQL]) {
+      expect(s).not.toMatch(forbidden);
+      // The only relations named are the two functions.
+      const from = [...s.matchAll(/\bFROM\s+([\w.]+)/gi)].map((m) => m[1]);
+      expect(from.every((r) => /^public\.learning_fivestar_(calls|bookings)$/.test(r))).toBe(true);
+      expect(from).toHaveLength(1);
+    }
+    expect(FIVESTAR_CALLS_SQL).toContain("public.learning_fivestar_calls($1::date)");
+    expect(FIVESTAR_BOOKINGS_SQL).toContain("public.learning_fivestar_bookings($1::text[])");
+    expect(FIVESTAR_CALLS_SQL).not.toContain("%BUILD%");
   });
 
   it("the booking slot time is HHMM like the mirror's begin_time", () => {
-    expect(FIVESTAR_BOOKINGS_SQL).toContain("replace(left(coalesce(b.slot_begintime, ''), 5), ':', '') AS slot_time");
+    expect(FIVESTAR_BOOKINGS_SQL).toContain("slot_time");
     expect(CONSOLE_BOOKED_SQL).toContain("f.begin_time = b.slot_time");
   });
 
@@ -144,7 +155,6 @@ function sources(over: Partial<Sources> = {}): Sources {
   return {
     hub: fakeQuery(() => remixRows),
     hubHasRuntimeMarker: true,
-    fivestarHasBuildId: true,
     ...over,
   };
 }
@@ -156,6 +166,15 @@ describe("the fleet filed rate", () => {
     expect(v).toContainEqual(expect.objectContaining({ lane: "tech", runtimeMarker: "v111", numerator: 1, denominator: 2 }));
     expect(v).toContainEqual(expect.objectContaining({ lane: "tech", runtimeMarker: "", numerator: 1, denominator: 1 }));
     expect(v).toContainEqual(expect.objectContaining({ lane: "pcp", runtimeMarker: "v111", numerator: 1, denominator: 2 }));
+  });
+
+  it("the filed rate from the fixtures is exactly what it was before the 5Star change", async () => {
+    const r = await computeRemix("2026-10-20", sources());
+    expect(r.values).toEqual([
+      { metricId: "remix.filed_rate", repo: "Remix", lane: "tech", runtimeMarker: "v111", numerator: 1, denominator: 2, unknownCount: 0 },
+      { metricId: "remix.filed_rate", repo: "Remix", lane: "tech", runtimeMarker: "", numerator: 1, denominator: 1, unknownCount: 0 },
+      { metricId: "remix.filed_rate", repo: "Remix", lane: "pcp", runtimeMarker: "v111", numerator: 1, denominator: 2, unknownCount: 0 },
+    ]);
   });
 
   it("reads NULL for the build when the column does not exist yet", async () => {
@@ -303,10 +322,25 @@ describe("the 5Star booked rates", () => {
     expect(Object.keys(r.unavailable).sort()).toEqual(["5star.booked_rate_a", "5star.booked_rate_b", "5star.submitted_rate_a"]);
   });
 
-  it("reads NULL for the build when 5Star has no build_id column yet", async () => {
-    const fivestar = fakeQuery(() => []);
-    await computeFivestar("2026-10-20", sources({ fivestar, fivestarHasBuildId: false }));
-    expect(fivestar.calls[0].text).toContain("btrim(NULL::text)");
+  it("sends the function statements as written, with only the day and the call ids", async () => {
+    const { fivestar, src } = fsSources();
+    await computeFivestar("2026-10-20", src);
+    expect(fivestar.calls.map((c) => c.text)).toEqual([FIVESTAR_CALLS_SQL, FIVESTAR_BOOKINGS_SQL]);
+    expect(fivestar.calls[0].params).toEqual(["2026-10-20"]);
+  });
+
+  it("the function rows give exactly the values the table reads gave", async () => {
+    const { src } = fsSources();
+    const r = await computeFivestar("2026-10-20", src);
+    const pick = (id: string) =>
+      r.values
+        .filter((v) => v.metricId === id)
+        .map((v) => [v.runtimeMarker, v.numerator, v.denominator])
+        .sort();
+    expect(pick("5star.submitted_rate_a")).toEqual([["b1", 3, 3], ["b2", 4, 5]]);
+    expect(pick("5star.booked_rate_a")).toEqual([["b1", 2, 3], ["b2", 2, 5]]);
+    expect(pick("5star.booked_rate_b")).toEqual([["b1", 2, 3], ["b2", 1, 4]]);
+    expect(r.unavailable).toEqual({});
   });
 });
 
@@ -346,13 +380,28 @@ describe("the run", () => {
     expect(out.status).toBe("partial"); // no Support Center, no 5Star in this fixture
     expect(tx.calls.map((c) => c.text)).toEqual(["BEGIN", DAY_LOCK_SQL, UPSERT_RUN_SQL, DELETE_VALUES_SQL, INSERT_VALUES_SQL, "COMMIT"]);
     const [day, status, version, notes] = tx.calls[2].params as string[];
-    expect([day, status, version]).toEqual(["2026-10-20", "partial", "learning-v4"]);
+    expect([day, status, version]).toEqual(["2026-10-20", "partial", "learning-v5"]);
     const n = JSON.parse(notes);
     expect(n.readAt).toBe("2026-10-21T11:00:00.000Z");
     expect(n.unavailable["remix.filed_rate_independent"]).toBeTruthy();
     const rows = JSON.parse(tx.calls[4].params?.[1] as string);
     expect(rows).toContainEqual({ metric_id: "remix.filed_rate", repo: "Remix", lane: "pcp", runtime_marker: "v111", numerator: 1, denominator: 2, unknown_count: 0 });
     expect(released).toHaveBeenCalledOnce();
+  });
+
+  it("5Star's build split comes from the function, with no column probe on 5Star", async () => {
+    const without = runnerDeps();
+    await runLearningDay("2026-10-20", without.deps);
+    const n0 = JSON.parse(without.tx.calls.find((c) => c.text === UPSERT_RUN_SQL)!.params![3] as string);
+    expect(n0.buildSplit).toEqual({ remix: true, fivestar: false });
+
+    const fivestar = fakeQuery(() => []);
+    const { deps, tx } = runnerDeps({ fivestar });
+    await runLearningDay("2026-10-20", deps);
+    const n = JSON.parse(tx.calls.find((c) => c.text === UPSERT_RUN_SQL)!.params![3] as string);
+    expect(n.buildSplit).toEqual({ remix: true, fivestar: true });
+    expect(fivestar.calls.map((c) => c.text)).toEqual([FIVESTAR_CALLS_SQL]);
+    expect(fivestar.calls.some((c) => c.text.includes("information_schema"))).toBe(false);
   });
 
   it("another run holding the day writes nothing", async () => {
@@ -459,7 +508,7 @@ describe("OFF by default", () => {
     const out = await runLearningDay("2026-10-20", deps);
     expect(out).toEqual({ status: "kept", reason: expect.stringMatching(/connection reset/), readFailed: true });
     expect(tx.calls.map((c) => c.text)).toEqual(["BEGIN", DAY_LOCK_SQL, PRIOR_RUN_SQL, "ROLLBACK"]);
-    expect(tx.calls[2].params).toEqual(["2026-10-20", "learning-v4"]);
+    expect(tx.calls[2].params).toEqual(["2026-10-20", "learning-v5"]);
     // A failed build-column probe is a read failure too, and keeps the day the same way.
     const probe = runnerDeps({ prior: true });
     const ph = probe.deps.hub;
@@ -582,12 +631,12 @@ function mockRes() {
 }
 
 const storedValues: StoredValue[] = [
-  { run_date: "2026-10-20", method_version: "learning-v4", metric_id: "remix.filed_rate", repo: "Remix", lane: "tech", runtime_marker: "voice-runtime-v111-x", numerator: 137, denominator: 150, unknown_count: 0 },
+  { run_date: "2026-10-20", method_version: "learning-v5", metric_id: "remix.filed_rate", repo: "Remix", lane: "tech", runtime_marker: "voice-runtime-v111-x", numerator: 137, denominator: 150, unknown_count: 0 },
 ];
 
 describe("the export", () => {
   const hub = fakeQuery((text) => {
-    if (text === EXPORT_RUNS_SQL) return [{ id: 1, run_date: "2026-10-20", status: "partial", method_version: "learning-v4", notes: JSON.stringify({ readAt: "2026-10-21T11:00:00Z", unavailable: { "remix.filed_rate_independent": "A1" } }) }];
+    if (text === EXPORT_RUNS_SQL) return [{ id: 1, run_date: "2026-10-20", status: "partial", method_version: "learning-v5", notes: JSON.stringify({ readAt: "2026-10-21T11:00:00Z", unavailable: { "remix.filed_rate_independent": "A1" } }) }];
     if (text === EXPORT_VALUES_SQL) return storedValues;
     return [];
   });

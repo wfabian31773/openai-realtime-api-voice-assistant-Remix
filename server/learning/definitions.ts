@@ -16,14 +16,23 @@
  *
  * PHI: every statement returns counts, lane slugs, build markers and call SIDs
  * (the SIDs only to join across databases, never exported). No name, phone,
- * date of birth or transcript text leaves a statement — the transcript is
- * READ for one fact (did the caller speak) and only that boolean returns.
+ * date of birth or transcript text leaves a statement — the Hub transcript is
+ * never selected here.
+ *
+ * 5Star is read ONLY through two SECURITY DEFINER functions owned in 5Star,
+ * public.learning_fivestar_calls(date) and public.learning_fivestar_bookings(text[]).
+ * The engine's role may EXECUTE them and touches no 5Star table directly: the
+ * functions read transcript, notes, to_phone, response_excerpt and the
+ * booking notes inside 5Star and return only derived booleans, status enums,
+ * build markers, opaque row ids and the NextGen mirror join keys. Their SQL
+ * mirrors the rules written in the 5Star metric definitions below; a change
+ * to either side must be made on both.
  */
 
 /** Bump with DEFINITIONS_HASH whenever any text below changes. */
-export const METHOD_VERSION = "learning-v4";
+export const METHOD_VERSION = "learning-v5";
 /** sha256 of definitionsText(), first 16 hex. definitions.test.ts pins it. */
-export const DEFINITIONS_HASH = "6326ab29f0fadd35";
+export const DEFINITIONS_HASH = "3177be1567675ae8";
 
 export const PACIFIC = "America/Los_Angeles";
 
@@ -124,67 +133,22 @@ FROM tickets
 WHERE call_sid ~* '^CA[0-9a-f]{32}$' AND call_sid = ANY($1::text[])
 GROUP BY call_sid`;
 
-const ASKED_STEPS = "ASK_PREFERENCE|CONFIRM_LOCATION|OFFER_SLOTS|CONFIRM_SLOT|CONFIRM_REQUEST_SUBMITTED";
-const TERMINAL_CORE =
-  "REQUEST_SUBMITTED|NO_ACCEPTABLE_LOCATION|NO_AVAILABLE_SLOTS|LOCATION_RANKING_UNAVAILABLE|AMBIGUOUS_SELECTION|CANCEL_REQUESTED";
+/**
+ * 5Star: the DRS inbound calls of one Pacific day, with the funnel flags,
+ * through the SECURITY DEFINER function public.learning_fivestar_calls
+ * (5Star). The function holds the line filter, the UTC-to-Pacific day (the
+ * naive cast read 108 calls on 2026-10-20 where the Daybook read 81/82), the
+ * substantive / submitted / asked rules and the build (call_logs.build_id),
+ * so no 5Star table is read from here. $1 = day (date).
+ */
+export const FIVESTAR_CALLS_SQL = `SELECT call_id AS id, build, substantive, submitted, asked FROM public.learning_fivestar_calls($1::date)`;
 
 /**
- * 5Star: the DRS inbound calls of one Pacific day, with the funnel flags.
- * created_at is a timestamp WITHOUT time zone holding UTC — the naive cast
- * read 108 calls on 2026-10-20 where the Daybook (and this) read 81/82.
- * $1 = day (date). %BUILD% is build_id or a NULL literal when the column is absent.
+ * 5Star: the bookings tied to a list of call_logs ids, through the SECURITY
+ * DEFINER function public.learning_fivestar_bookings (5Star), which honours
+ * only DRS inbound call ids. $1 = text[].
  */
-export const FIVESTAR_CALLS_SQL = `
-WITH c AS (
-  SELECT id, provider_call_id AS sid, notes,
-         coalesce(nullif(btrim(%BUILD%), ''), '') AS build,
-         (coalesce(duration, 0) >= 30 AND coalesce(transcript, '') ~ 'CALLER:') AS substantive
-  FROM call_logs
-  WHERE direction = 'inbound'
-    AND coalesce(simulated, false) = false
-    AND to_phone = '${FIVESTAR_INBOUND_NUMBER}'
-    AND notes LIKE 'DRS voice call%'
-    AND ((created_at AT TIME ZONE 'UTC') AT TIME ZONE '${PACIFIC}')::date = $1::date
-),
-t AS (
-  SELECT call_sid, tool_name, outcome,
-         substring(response_excerpt from '"from":"([A-Z_]+)"') AS fr,
-         substring(response_excerpt from '"to":"([A-Z_]+)"')   AS tt
-  FROM sage_tool_calls
-  WHERE call_sid IN (SELECT sid FROM c WHERE sid IS NOT NULL)
-)
-SELECT c.id, c.build, c.substantive,
-       (c.notes ~ 'core: REQUEST_SUBMITTED') AS submitted,
-       (EXISTS (SELECT 1 FROM t WHERE t.call_sid = c.sid AND (
-             (t.tool_name = 'report_consent' AND t.outcome = 'success')
-          OR t.tool_name = 'report_cancel_request'
-          OR t.fr ~ '^(${ASKED_STEPS})$' OR t.tt ~ '^(${ASKED_STEPS})$'))
-        OR c.notes ~ 'core: (${TERMINAL_CORE})'
-        OR c.notes ~ 'step: (${ASKED_STEPS})') AS asked
-FROM c`;
-
-/** 5Star: the bookings tied to a list of call_logs ids. $1 = text[]. */
-export const FIVESTAR_BOOKINGS_SQL = `
-WITH linked AS (
-  SELECT DISTINCT a.call_log_id, a.internal_booking_id AS booking_id
-  FROM voice_agent_booking_attempts a
-  WHERE a.call_log_id = ANY($1::text[]) AND a.outcome IN ('booked', 'booked_drift')
-    AND a.internal_booking_id IS NOT NULL
-  UNION
-  SELECT DISTINCT substring(b.notes from 'Call ID: ([A-Za-z0-9-]+)'), b.id
-  FROM internal_bookings b
-  WHERE substring(b.notes from 'Call ID: ([A-Za-z0-9-]+)') = ANY($1::text[])
-)
-SELECT l.call_log_id, b.id AS booking_id, b.status::text AS status,
-       coalesce(b.appointment_source, '') AS source,
-       b.nextgen_appointment_id,
-       upper(p.person_id) AS person_id,
-       to_char(b.slot_date, 'YYYY-MM-DD') AS slot_date,
-       replace(left(coalesce(b.slot_begintime, ''), 5), ':', '') AS slot_time,
-       b.npx_link_method, b.partner_link_needs_review, b.partner_outcome_status
-FROM linked l
-JOIN internal_bookings b ON b.id = l.booking_id
-LEFT JOIN patients p ON p.id = b.patient_id`;
+export const FIVESTAR_BOOKINGS_SQL = `SELECT call_log_id, booking_id, status, source, nextgen_appointment_id, person_id, slot_date, slot_time, npx_link_method, partner_link_needs_review, partner_outcome_status FROM public.learning_fivestar_bookings($1::text[])`;
 
 /**
  * Console: the mirror's view of a list of bookings. $1 = jsonb array of
