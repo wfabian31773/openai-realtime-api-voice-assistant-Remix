@@ -38,6 +38,19 @@ interface MessagesClient {
   messages: { create(input: { body: string; from: string; to: string }): Promise<unknown> };
 }
 
+/**
+ * Whether the on-call text can be sent at all: a number to text and a number
+ * to send from. ONE rule, read by the sender below and by `/voice/health`, so
+ * the page can never say ready while the sender skips. Names only, never the
+ * numbers. Before this, a missing URGENT_NOTIFICATION_NUMBER showed nowhere
+ * but one console line per escalation: the text just stopped (the 2026-10-02
+ * shape, where the operator waited for a text that never came).
+ */
+export function urgentAlertStatus(env: Record<string, string | undefined>): { ready: boolean; missing: string[] } {
+  const missing = ["URGENT_NOTIFICATION_NUMBER", "TWILIO_PHONE_NUMBER"].filter((k) => !env[k]?.trim());
+  return { ready: missing.length === 0, missing };
+}
+
 export function defaultUrgentTransferAlerts(
   env: Record<string, string | undefined>,
   log: (line: string) => void,
@@ -98,9 +111,7 @@ export function defaultUrgentTransferAlerts(
 
   return {
     smsBeforeDial(input) {
-      const to = env.URGENT_NOTIFICATION_NUMBER?.trim();
-      const from = env.TWILIO_PHONE_NUMBER?.trim();
-      if (!to || !from) {
+      if (!urgentAlertStatus(env).ready) {
         log(
           "[runtime-xfer] urgent SMS skipped - URGENT_NOTIFICATION_NUMBER or TWILIO_PHONE_NUMBER not configured",
         );
@@ -112,7 +123,11 @@ export function defaultUrgentTransferAlerts(
             { callerNumber: input.callerNumber, escalationDetails: input.escalationDetails },
             urgentAlertTime(now()),
           );
-          await (await smsClient()).messages.create({ body, from, to });
+          await (await smsClient()).messages.create({
+            body,
+            from: env.TWILIO_PHONE_NUMBER!.trim(),
+            to: env.URGENT_NOTIFICATION_NUMBER!.trim(),
+          });
           log("[runtime-xfer] ✓ urgent SMS sent before the dial");
         } catch (err) {
           log(`[runtime-xfer] ⚠️ urgent SMS failed: ${String(err)}`);

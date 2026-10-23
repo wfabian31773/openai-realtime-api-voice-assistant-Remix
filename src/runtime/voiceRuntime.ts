@@ -43,6 +43,7 @@ import {
   type CallOutcome,
   type VoiceCallRecord,
 } from "./mediaStreamBridge";
+import { urgentAlertStatus } from "./urgentTransferAlerts";
 import { CallSessionRegistry, type CallEntry } from "./sessionRegistry";
 import {
   GrokVoiceSession,
@@ -813,6 +814,12 @@ export function mountVoiceRuntime(
       // Per LANE, because the two use different numbers and one can work
       // while the other does not. Booleans, never the numbers themselves.
       transferDestinations: { clinical: destinations.clinical, pcp: destinations.pcp },
+      // The text that tells the on-call phone who is calling and why, sent
+      // before an urgent after-hours transfer rings. A transfer still dials
+      // without it, so it is NOT part of transferReady — it is reported on
+      // its own so a missing number shows here instead of failing silently.
+      // Names only, never the numbers.
+      urgentAlert: urgentAlertStatus(env),
       // Per lane: can this deployment answer a call on it, and if not, the
       // sentence why. `transferWarning` is the second gate — a lane that IS
       // served but whose transfer has nowhere to dial, which reads as
