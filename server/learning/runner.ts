@@ -122,16 +122,13 @@ export async function runLearningDay(day: string, deps: RunnerDeps): Promise<Run
       fivestar: deps.fivestar,
       console: deps.console,
       hubHasRuntimeMarker: false,
-      fivestarHasBuildId: false,
     };
     const hubProbe = await columnExists(deps.hub, "runtime_marker");
-    const fivestarProbe = await columnExists(deps.fivestar, "build_id");
     src.hubHasRuntimeMarker = hubProbe === true;
-    src.fivestarHasBuildId = fivestarProbe === true;
-    const buildSplitFailed = [
-      ...(hubProbe === "failed" ? ["Remix"] : []),
-      ...(fivestarProbe === "failed" ? ["5Star"] : []),
-    ];
+    // 5Star needs no probe: learning_fivestar_calls always returns the build
+    // (from call_logs.build_id), so the split holds whenever 5Star is read.
+    const fivestarBuildSplit = !!deps.fivestar;
+    const buildSplitFailed = hubProbe === "failed" ? ["Remix"] : [];
 
     const parts: DayResult[] = [];
     try {
@@ -152,7 +149,7 @@ export async function runLearningDay(day: string, deps: RunnerDeps): Promise<Run
       readAt: (deps.now?.() ?? new Date()).toISOString(),
       outputHash: hash,
       definitionsHash: DEFINITIONS_HASH,
-      buildSplit: { remix: src.hubHasRuntimeMarker, fivestar: src.fivestarHasBuildId },
+      buildSplit: { remix: src.hubHasRuntimeMarker, fivestar: fivestarBuildSplit },
       ...(buildSplitFailed.length ? { buildSplitReadFailed: buildSplitFailed } : {}),
       unavailable,
     });

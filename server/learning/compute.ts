@@ -24,7 +24,7 @@ export interface MetricValue {
   metricId: MetricId;
   repo: "Remix" | "5Star";
   lane: string;
-  /** Remix: call_logs.runtime_marker. 5Star: call_logs.build_id. '' = unknown. */
+  /** Remix: call_logs.runtime_marker. 5Star: the function's build (call_logs.build_id). '' = unknown. */
   runtimeMarker: string;
   numerator: number;
   denominator: number;
@@ -43,9 +43,8 @@ export interface Sources {
   supportCenter?: Query;
   fivestar?: Query;
   console?: Query;
-  /** Which optional build columns exist (read once by the runner). */
+  /** Whether the Hub's optional runtime_marker column exists (read once by the runner). */
   hubHasRuntimeMarker: boolean;
-  fivestarHasBuildId: boolean;
 }
 
 function key(lane: string, marker: string): string {
@@ -136,8 +135,7 @@ export async function computeFivestar(day: string, src: Sources): Promise<DayRes
     for (const id of ids) unavailable[id] = "5Star read-only connection not configured";
     return { values: [], unavailable };
   }
-  const sql = FIVESTAR_CALLS_SQL.replace("%BUILD%", src.fivestarHasBuildId ? "build_id" : "NULL::text");
-  const { rows: calls } = await src.fivestar(sql, [day]);
+  const { rows: calls } = await src.fivestar(FIVESTAR_CALLS_SQL, [day]);
 
   const base = (metricId: MetricId, build: string) => ({ metricId, repo: "5Star" as const, lane: FIVESTAR_INBOUND_LANE, runtimeMarker: build });
   const submitted = new Map<string, MetricValue>();
