@@ -870,8 +870,18 @@ import { callEnvironment } from "./callRecord";
  * defaults off. The migration is written, not applied. On top of v113
  * (#363), which it contains. `src/plugin/`, `src/agents/siAssistantAgent.ts`.
  */
+/**
+ * v116 — THE RECORD'S OFFICE NAME TRAVELS (2026-10-23). When an optical caller
+ * names no office, `file_optical_ticket` sends the office on the patient's
+ * record as `locationOfLastVisit` even when our `/lookup` did not resolve it
+ * to a `locationId` (no-match or outage); ticketing-app #381 resolves names
+ * itself under a unique-match rule. Withheld on a date-of-birth conflict,
+ * never logged. A payload change on the ticket path of the queue that routes
+ * BY office, so it gets its own marker. On top of v115 (#367), which it
+ * contains. `src/tools/opticalTools.ts`, `opticalOfficeFromRecord.test.ts`.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v115-the-si-assistant-review-fixes-20261022";
+  "voice-runtime-v116-the-record-office-name-travels-20261023";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

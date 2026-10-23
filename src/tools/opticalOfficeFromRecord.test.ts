@@ -366,6 +366,47 @@ describe('the record office name is sent when our lookup does not resolve it', (
     const payload = create.mock.calls[0][0] as unknown as Record<string, unknown>;
     expect(payload.locationOfLastVisit).toBe(ON_RECORD);
     expect(payload.locationId).toBeUndefined();
+    // THE COMBINATION ticketing-app #381 reads, pinned as one payload: on this
+    // path the record's name and the unassigned exit travel together for the
+    // first time. Still optical's, still surfaced at high priority, and the
+    // exit is sanctioned because the office ask was spent on the first call.
+    expect(payload.departmentId).toBe(1);
+    expect(payload.priority).toBe('high');
+    expect(payload.routingAskExhausted).toBe(true);
+  });
+
+  /**
+   * A REDIRECTED REQUEST STILL CARRIES THE RECORD'S NAME, AND NEVER THE EXIT.
+   *
+   * `detectCrossQueue` sends a scheduling request to the HVA Hub (dept 9).
+   * The office name rides along exactly as a caller-named office always has on
+   * a redirect — the Hub schedules AT an office, and the app's name resolution
+   * is the same either way. What must NOT ride along is `routingAskExhausted`:
+   * that flag sanctions an unassigned OPTICAL ticket and is guarded on the
+   * ticket still being optical's. Nor the raised priority, which is about the
+   * optical queue view.
+   */
+  it('sends the name on a cross-queue redirect, without the unassigned exit', async () => {
+    const api = await client();
+    vi.spyOn(api, 'lookupProviderAndLocation').mockResolvedValue(
+      { success: true, outcome: 'no_match', locationId: undefined } as never,
+    );
+    const create = vi.spyOn(api, 'createTicket')
+      .mockResolvedValue({ success: true, ticketNumber: 'VA-99012' } as never);
+    vi.spyOn(console, 'info').mockImplementation(() => {});
+    record();
+
+    const scheduling = { ...NO_OFFICE, request_description: 'I need to reschedule my appointment' };
+    await runTool('file_optical_ticket', scheduling);
+    await runTool('file_optical_ticket', scheduling);
+
+    expect(create).toHaveBeenCalledTimes(1);
+    const payload = create.mock.calls[0][0] as unknown as Record<string, unknown>;
+    expect(payload.departmentId).toBe(9);
+    expect(payload.locationOfLastVisit).toBe(ON_RECORD);
+    expect(payload.locationId).toBeUndefined();
+    expect(payload.routingAskExhausted).toBeUndefined();
+    expect(payload.priority).toBe('medium');
   });
 
   it('sends it during a directory outage too', async () => {
@@ -382,6 +423,12 @@ describe('the record office name is sent when our lookup does not resolve it', (
 
     const payload = create.mock.calls[0][0] as unknown as Record<string, unknown>;
     expect(payload.locationOfLastVisit).toBe(ON_RECORD);
+    expect(payload.locationId).toBeUndefined();
+    // One call: an outage waives the ask (`officeAskWaived`), so the exit
+    // travels with the name on the first POST.
+    expect(payload.departmentId).toBe(1);
+    expect(payload.priority).toBe('high');
+    expect(payload.routingAskExhausted).toBe(true);
   });
 
   it('never logs the office name', async () => {
