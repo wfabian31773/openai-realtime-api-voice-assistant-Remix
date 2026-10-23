@@ -80,7 +80,7 @@ describe("the Support Center plugin adapter", () => {
 
   it("through compute: a plugin failure is a read failure (the night retries), unconfigured is not", async () => {
     const hub = async () => ({ rows: [{ call_sid: SID_A, lane: "tech", runtime_marker: "", filed: true }] });
-    const base: Sources = { hub, hubHasRuntimeMarker: false, fivestarHasBuildId: false };
+    const base: Sources = { hub, hubHasRuntimeMarker: false };
     const failing = vi.fn(async () => new Response("", { status: 503 })) as unknown as typeof fetch;
     const r1 = await computeRemix("2026-10-20", { ...base, supportCenter: supportCenterPluginQuery(ENV, failing) });
     expect(isReadFailure(r1.unavailable["remix.filed_rate_independent"])).toBe(true);
