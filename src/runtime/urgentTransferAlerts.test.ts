@@ -13,7 +13,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createRuntimeTransfer } from "./runtimeTransfer";
-import { defaultUrgentTransferAlerts, type UrgentTransferAlerts } from "./urgentTransferAlerts";
+import { defaultUrgentTransferAlerts, urgentAlertStatus, type UrgentTransferAlerts } from "./urgentTransferAlerts";
 import { ACCEPT_WINDOW_MS, type TransferTwilioOps } from "./warmTransfer";
 import { escalationDetailsMap } from "../services/escalationStore";
 import {
@@ -428,5 +428,24 @@ describe("one copy of the words, read by both pipelines", () => {
     expect(src).toMatch(/urgentAlerts\.smsBeforeDial\(/);
     expect(src).not.toMatch(/await\s+urgentAlerts\./);
     expect(ACCEPT_WINDOW_MS).toBeGreaterThan(0);
+  });
+});
+
+describe("urgentAlertStatus — the one rule the sender and /voice/health share", () => {
+  it("names what is missing, treats blank as missing, and is ready only with both", () => {
+    expect(urgentAlertStatus({})).toEqual({ ready: false, missing: ["URGENT_NOTIFICATION_NUMBER", "TWILIO_PHONE_NUMBER"] });
+    expect(urgentAlertStatus({ URGENT_NOTIFICATION_NUMBER: "  ", TWILIO_PHONE_NUMBER: "+15550000000" })).toEqual({
+      ready: false,
+      missing: ["URGENT_NOTIFICATION_NUMBER"],
+    });
+    expect(urgentAlertStatus({ URGENT_NOTIFICATION_NUMBER: "+15550000001", TWILIO_PHONE_NUMBER: "+15550000000" })).toEqual({
+      ready: true,
+      missing: [],
+    });
+  });
+
+  it("the sender reads the same rule, so the page cannot say ready while the text is skipped", () => {
+    const src = readFileSync(join(__dirname, "urgentTransferAlerts.ts"), "utf8");
+    expect(src).toContain("if (!urgentAlertStatus(env).ready)");
   });
 });

@@ -1599,6 +1599,34 @@ describe("one whole call, end to end, offline", () => {
     expect(JSON.stringify(body)).not.toContain("8185551234");
   });
 
+  it("reports whether the on-call text can be sent, by name only", async () => {
+    // Missing: a clinical transfer still dials, so transferReady stays true,
+    // and the missing text is named on its own instead of failing silently.
+    const without = await harness({
+      env: { ...ENV, TWILIO_ACCOUNT_SID: "ACxxx", TWILIO_PHONE_NUMBER: "+15550000000", DOMAIN: "runtime.example.test", HUMAN_AGENT_NUMBER: "+18185551234" },
+    });
+    const a = (await (await fetch(`${without.base}/voice/health`)).json()) as {
+      transferReady: boolean;
+      urgentAlert: { ready: boolean; missing: string[] };
+    };
+    expect(a.transferReady).toBe(true);
+    expect(a.urgentAlert).toEqual({ ready: false, missing: ["URGENT_NOTIFICATION_NUMBER"] });
+    // Present: ready, and never the number itself.
+    const withIt = await harness({
+      env: {
+        ...ENV,
+        TWILIO_ACCOUNT_SID: "ACxxx",
+        TWILIO_PHONE_NUMBER: "+15550000000",
+        DOMAIN: "runtime.example.test",
+        HUMAN_AGENT_NUMBER: "+18185551234",
+        URGENT_NOTIFICATION_NUMBER: "+18185559876",
+      },
+    });
+    const b = (await (await fetch(`${withIt.base}/voice/health`)).json()) as { urgentAlert: { ready: boolean; missing: string[] } };
+    expect(b.urgentAlert).toEqual({ ready: true, missing: [] });
+    expect(JSON.stringify(b)).not.toContain("8185559876");
+  });
+
   it("an armed transport with nowhere to dial is NOT transfer-ready", () => {
     // The transport can be fully configured while no destination number
     // is set, and then every transfer still fails at
