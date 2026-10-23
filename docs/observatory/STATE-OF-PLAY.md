@@ -1395,6 +1395,12 @@ but it made v116's "never logged" claim false). That line now prints
 faked) and asserts the name appears in no console line. The older test
 stubbed the lookup, and stringified objects with `String()` — which prints
 `[object Object]` — so it could not have seen the leak either way.
+Codex then found the same leak one call later (thread PRRT_kwDORVukLs6vtp3I):
+`createTicket`'s "Creating ticket" line printed `locationOfLastVisit` raw beside
+the call SID, and its "Lookup results" line echoed the app's `locationSearched`;
+`submitTicket`'s `lastLocation` had the same shape. All three print presence
+only now, and a third test runs the REAL `createTicket` (request and warm-up
+faked).
 
 ### Open, and Wayne's to settle — the first-call ask on a no-match
 

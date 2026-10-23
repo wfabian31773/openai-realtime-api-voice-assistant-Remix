@@ -747,7 +747,10 @@ export class TicketingApiClient {
       priority: params.priority || "medium",
       preferredContactMethod: params.preferredContactMethod,
       lastProviderSeen: params.lastProviderSeen,
-      locationOfLastVisit: params.locationOfLastVisit,
+      // Never the office itself: on optical it can come from the patient's
+      // own record (v116), and beside the call SID it is that patient's
+      // office. Presence only (#371, Codex thread PRRT_kwDORVukLs6vtp3I).
+      locationOfLastVisit: params.locationOfLastVisit ? '(set)' : '(none)',
       hasCallData: !!params.callData,
       callSid: params.callData?.callSid,
       hasRecording: !!params.callData?.recordingUrl,
@@ -813,7 +816,8 @@ export class TicketingApiClient {
         console.info(`[TICKETING API] Lookup results:`, {
           providerSearched: response.providerSearched,
           providerMatched: response.providerMatched,
-          locationSearched: response.locationSearched,
+          // The app echoes the office name it searched for; presence only (v116).
+          locationSearched: response.locationSearched ? '(set)' : '(none)',
           locationMatched: response.locationMatched,
         });
       }
@@ -952,7 +956,7 @@ export class TicketingApiClient {
       hasEmail: !!params.patientEmail,
       preferredContact: params.preferredContactMethod,
       lastProvider: params.lastProviderSeen,
-      lastLocation: params.locationOfLastVisit,
+      lastLocation: params.locationOfLastVisit ? '(set)' : '(none)',
       hasCallData: !!params.callData,
       callSid: params.callData?.callSid,
       idempotencyKey: params.idempotencyKey,

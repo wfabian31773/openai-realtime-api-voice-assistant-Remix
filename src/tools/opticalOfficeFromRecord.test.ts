@@ -498,4 +498,47 @@ describe('the record office name is sent when our lookup does not resolve it', (
     expect(said).toContain('(set)');
     expect(said).not.toContain(ON_RECORD);
   });
+
+  /**
+   * And the REAL `createTicket` (Codex thread PRRT_kwDORVukLs6vtp3I on #371):
+   * its "Creating ticket" line printed `locationOfLastVisit` raw beside the
+   * call SID, and its lookup-results line echoed the app's `locationSearched`.
+   * Only the HTTP request and the warm-up are faked here.
+   */
+  it('never logs the office name through the real ticket POST either', async () => {
+    const api = await client();
+    type Internals = {
+      ensureInitialized: () => void;
+      warmUpIfStale: (...args: unknown[]) => Promise<boolean>;
+      makeRequest: (...args: unknown[]) => Promise<unknown>;
+    };
+    const internals = api as unknown as Internals;
+    vi.spyOn(internals, 'ensureInitialized').mockImplementation(() => {});
+    vi.spyOn(internals, 'warmUpIfStale').mockResolvedValue(true);
+    vi.spyOn(api, 'lookupProviderAndLocation').mockResolvedValue(
+      { success: true, outcome: 'no_match', locationId: undefined } as never,
+    );
+    const request = vi.spyOn(internals, 'makeRequest').mockImplementation(async (path) =>
+      path === '/api/voice-agent/create-ticket'
+        ? { success: true, ticketNumber: 'VA-99014', locationSearched: ON_RECORD, locationMatched: false }
+        : { success: true },
+    );
+    const spies = (['log', 'info', 'warn', 'error'] as const)
+      .map((k) => vi.spyOn(console, k).mockImplementation(() => {}));
+    record();
+
+    await runTool('file_optical_ticket', NO_OFFICE);
+    await runTool('file_optical_ticket', NO_OFFICE);
+
+    // The real POST carried the record's office…
+    const posted = request.mock.calls.find((c) => c[0] === '/api/voice-agent/create-ticket');
+    expect(posted?.[2]).toMatchObject({ locationOfLastVisit: ON_RECORD });
+    // …and no console line printed it.
+    const said = spies
+      .flatMap((s) => s.mock.calls)
+      .map((c) => c.map((v) => (typeof v === 'string' ? v : JSON.stringify(v))).join(' '))
+      .join(' | ');
+    expect(said).toContain('Creating ticket');
+    expect(said).not.toContain(ON_RECORD);
+  });
 });
