@@ -327,7 +327,8 @@ registerTool({
      * a certain match only, the ticket's name must be the verified person's,
      * and an explicit date-of-birth conflict withholds the office (Codex P1,
      * #291). An office the caller names still wins — this block never runs
-     * when `cleanLocation` is set. Never logged: the name stays on the payload.
+     * when `cleanLocation` is set. Never logged: the name stays on the payload,
+     * and the client's lookup line prints only whether a location was asked.
      */
     let officeFromRecord: string | undefined;
     if (!cleanLocation) {

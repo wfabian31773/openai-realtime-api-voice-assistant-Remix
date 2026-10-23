@@ -1192,9 +1192,12 @@ export class TicketingApiClient {
       return { success: true, outcome: 'no_match' };
     }
 
+    // The office name is not logged, only whether one was asked: optical sends
+    // the office on the PATIENT'S RECORD here (v116), and a line naming it,
+    // printed beside the call's own lines, says where that patient is seen.
     console.info("[TICKETING API] Looking up provider/location:", {
       providerName: params.providerName || '(none)',
-      locationName: params.locationName || '(none)',
+      locationName: params.locationName ? '(set)' : '(none)',
     });
 
     try {

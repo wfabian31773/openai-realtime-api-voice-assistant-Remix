@@ -1386,6 +1386,16 @@ appear on the residue; filing rate per lane must not fall.
 stand-in review of #371) also beside `locationId` when the lookup DID
 resolve it. ticketing-app #381 resolves the name under a unique-match rule.
 
+**The name is never logged — on the whole path, not just the tool's lines.**
+The stand-in review of #371 found that `ticketingApiClient.lookupProviderAndLocation`
+printed `locationName` to `console.info` before every lookup, so the record's
+office reached the logs beside the call's own lines (pre-existing since v12,
+but it made v116's "never logged" claim false). That line now prints
+`'(set)'` / `'(none)'`, and a test drives the REAL lookup (only `makeRequest`
+faked) and asserts the name appears in no console line. The older test
+stubbed the lookup, and stringified objects with `String()` — which prints
+`[object Object]` — so it could not have seen the leak either way.
+
 ### Open, and Wayne's to settle — the first-call ask on a no-match
 
 When the record holds an office our `/lookup` cannot resolve, the first

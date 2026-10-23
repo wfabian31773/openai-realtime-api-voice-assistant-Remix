@@ -876,7 +876,8 @@ import { callEnvironment } from "./callRecord";
  * record as `locationOfLastVisit` even when our `/lookup` did not resolve it
  * to a `locationId` (no-match or outage); ticketing-app #381 resolves names
  * itself under a unique-match rule. Withheld on a date-of-birth conflict,
- * never logged. A payload change on the ticket path of the queue that routes
+ * never logged (the ticketing client's lookup line no longer prints the
+ * location name either). A payload change on the ticket path of the queue that routes
  * BY office, so it gets its own marker. On top of v115 (#367), which it
  * contains. `src/tools/opticalTools.ts`, `opticalOfficeFromRecord.test.ts`.
  */

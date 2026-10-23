@@ -453,10 +453,49 @@ describe('the record office name is sent when our lookup does not resolve it', (
     await runTool('file_optical_ticket', NO_OFFICE);
     await runTool('file_optical_ticket', NO_OFFICE);
 
+    // JSON, not String(): String() prints an object argument as
+    // "[object Object]", which could never contain the name it is checking.
     const said = spies
       .flatMap((s) => s.mock.calls)
-      .map((c) => c.map(String).join(' '))
+      .map((c) => c.map((v) => (typeof v === 'string' ? v : JSON.stringify(v))).join(' '))
       .join(' | ');
+    expect(said).not.toContain(ON_RECORD);
+  });
+
+  /**
+   * The test above stubs `lookupProviderAndLocation`, so the client's own log
+   * line never runs — and that line is on the path every record-office call
+   * takes (stand-in review of #371, P2). Here the REAL method runs, with only
+   * the HTTP request faked, and the office name must still appear nowhere.
+   */
+  it('never logs the office name through the real directory lookup either', async () => {
+    const api = await client();
+    type Internals = {
+      ensureInitialized: () => void;
+      makeRequest: (...args: unknown[]) => Promise<unknown>;
+    };
+    const internals = api as unknown as Internals;
+    vi.spyOn(internals, 'ensureInitialized').mockImplementation(() => {});
+    // `{ success: true }` with no id is the directory's no-match answer.
+    const request = vi.spyOn(internals, 'makeRequest').mockResolvedValue({ success: true });
+    vi.spyOn(api, 'createTicket')
+      .mockResolvedValue({ success: true, ticketNumber: 'VA-99013' } as never);
+    const spies = (['log', 'info', 'warn', 'error'] as const)
+      .map((k) => vi.spyOn(console, k).mockImplementation(() => {}));
+    record();
+
+    await runTool('file_optical_ticket', NO_OFFICE);
+    await runTool('file_optical_ticket', NO_OFFICE);
+
+    // The real lookup ran and was asked about the record's office…
+    const asked = request.mock.calls.find((c) => c[0] === '/api/voice-agent/lookup');
+    expect(asked?.[2]).toMatchObject({ locationName: ON_RECORD });
+    // …and nothing it, or the tool, printed carries the name.
+    const said = spies
+      .flatMap((s) => s.mock.calls)
+      .map((c) => c.map((v) => (typeof v === 'string' ? v : JSON.stringify(v))).join(' '))
+      .join(' | ');
+    expect(said).toContain('(set)');
     expect(said).not.toContain(ON_RECORD);
   });
 });
