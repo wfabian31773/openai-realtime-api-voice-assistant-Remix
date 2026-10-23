@@ -39,7 +39,7 @@ export interface DayResult {
 
 export interface Sources {
   hub: Query;
-  /** The Support Center through a read-only role (A1). Absent today. */
+  /** The Support Center through its plugin API (metrics:read token). Absent until the token is set. */
   supportCenter?: Query;
   fivestar?: Query;
   console?: Query;
@@ -76,7 +76,7 @@ export async function computeRemix(day: string, src: Sources): Promise<DayResult
   const values = [...filed.values()];
 
   if (!src.supportCenter) {
-    unavailable["remix.filed_rate_independent"] = "Support Center read-only role (A1) not configured";
+    unavailable["remix.filed_rate_independent"] = "Support Center plugin token (LEARNING_SUPPORT_CENTER_TOKEN) not configured";
   } else {
     try {
       const prov = new Map<string, { agent: boolean; unknown: boolean }>();

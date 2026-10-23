@@ -11,7 +11,6 @@
  * serves nothing. It never serves a call SID, a name or a phone.
  */
 import { timingSafeEqual } from "node:crypto";
-import pg from "pg";
 import type { Express, Request, Response } from "express";
 import { pool as hubPool } from "../db";
 import { consoleQuery, isConsoleConfigured } from "../observatory/consoleDb";
@@ -20,6 +19,7 @@ import { DEFINITIONS_HASH, METHOD_VERSION, METRICS, PACIFIC } from "./definition
 import { runLearningDay, type RunnerDeps } from "./runner";
 import type { Query } from "./compute";
 import { detectCandidates, type StoredValue } from "./candidates";
+import { supportCenterPluginQuery } from "./supportCenterPlugin";
 
 export const RUN_AFTER_PACIFIC_MINUTES = 3 * 60 + 30;
 export const SETTLING_DAYS = 3;
@@ -57,24 +57,6 @@ export function daysDue(now: Date, lastRunFor: string | null): string[] {
   return Array.from({ length: SETTLING_DAYS }, (_, i) => shiftDay(day, -(i + 1)));
 }
 
-let supportPool: pg.Pool | null = null;
-function supportCenterQuery(env: NodeJS.ProcessEnv): Query | undefined {
-  const url = env.LEARNING_SUPPORT_CENTER_DATABASE_URL;
-  if (!url) return undefined;
-  if (!supportPool) {
-    supportPool = new pg.Pool({
-      connectionString: url,
-      max: 2,
-      connectionTimeoutMillis: 10_000,
-      ssl: { rejectUnauthorized: false },
-      options: "-c default_transaction_read_only=on -c statement_timeout=15000",
-    });
-    supportPool.on("error", (err) => console.error("[learning] Support Center pool error:", err.message));
-  }
-  const p = supportPool;
-  return (text, params) => p.query(text, params);
-}
-
 export function productionDeps(env: NodeJS.ProcessEnv = process.env): RunnerDeps {
   return {
     hub: (text, params) => hubPool.query(text, params),
@@ -82,7 +64,7 @@ export function productionDeps(env: NodeJS.ProcessEnv = process.env): RunnerDeps
       const c = await hubPool.connect();
       return { query: (text, params) => c.query(text, params), release: () => c.release() };
     },
-    supportCenter: supportCenterQuery(env),
+    supportCenter: supportCenterPluginQuery(env),
     fivestar: isFivestarConfigured() ? (text, params) => fivestarQuery(text, params ?? []) : undefined,
     console: isConsoleConfigured() ? (text, params) => consoleQuery(text, params ?? []) : undefined,
   };

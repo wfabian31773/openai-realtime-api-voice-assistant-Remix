@@ -21,9 +21,9 @@
  */
 
 /** Bump with DEFINITIONS_HASH whenever any text below changes. */
-export const METHOD_VERSION = "learning-v4";
+export const METHOD_VERSION = "learning-v5";
 /** sha256 of definitionsText(), first 16 hex. definitions.test.ts pins it. */
-export const DEFINITIONS_HASH = "6326ab29f0fadd35";
+export const DEFINITIONS_HASH = "71e1f9283df3e6fa";
 
 export const PACIFIC = "America/Los_Angeles";
 
@@ -65,7 +65,7 @@ export const METRICS: readonly MetricDefinition[] = [
     definition:
       "The same denominator as remix.filed_rate; the numerator is the calls the Support Center shows an AGENT filing for, folded per call " +
       "agent > UNKNOWN > staff (CLAUDE.md, the filing test). UNKNOWN calls are reported in unknown_count and never counted as filed or unfiled. " +
-      "Unavailable until the read-only Support Center role exists (A1); the run notes say so.",
+      "Read through the Support Center plugin API (scope metrics:read); unavailable until its token is set, and the run notes say so.",
   },
   {
     id: "5star.submitted_rate_a",
