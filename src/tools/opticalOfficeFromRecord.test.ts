@@ -275,6 +275,9 @@ describe('a date of birth that contradicts the verified record', () => {
     const create = await fileWith('03/04/1972');
     const payload = create.mock.calls[0][0] as unknown as Record<string, unknown>;
     expect(payload.locationId).toBeUndefined();
+    // Withheld means withheld: the father's office NAME must not travel either,
+    // or the ticketing app's own name resolution would route it there.
+    expect(payload.locationOfLastVisit).toBeUndefined();
     // Still TAKEN, not lost: the unassigned exit is what catches it.
     expect(payload.routingAskExhausted).toBe(true);
   });
@@ -325,5 +328,80 @@ describe('the office comparison is silent', () => {
 
     const said = [...warn.mock.calls, ...info.mock.calls].map((c) => String(c[0])).join(' | ');
     expect(said).not.toContain('[DOB]');
+  });
+});
+
+/**
+ * OPERATOR RULING, 2026-10-23 — the record's office NAME travels even when our
+ * directory cannot turn it into an id.
+ *
+ * The ticketing app (ticketing-app #381) now resolves `locationOfLastVisit`
+ * itself under a unique-match rule. Before this, an office on the record that
+ * our `/lookup` did not resolve was dropped entirely and the ticket filed
+ * unassigned with nothing for staff to read, though we held the office.
+ */
+describe('the record office name is sent when our lookup does not resolve it', () => {
+  function record() {
+    rememberVerifiedIdentity(SID, {
+      firstName: 'Testcaller', lastName: 'Optical',
+      dateOfBirth: '01/01/1950', usualOffice: ON_RECORD, certain: true,
+    });
+  }
+
+  it('sends it as locationOfLastVisit on a no-match, with no locationId', async () => {
+    const api = await client();
+    vi.spyOn(api, 'lookupProviderAndLocation').mockResolvedValue(
+      { success: true, outcome: 'no_match', locationId: undefined } as never,
+    );
+    const create = vi.spyOn(api, 'createTicket')
+      .mockResolvedValue({ success: true, ticketNumber: 'VA-99009' } as never);
+    record();
+
+    // The local ask is unchanged — the first call still asks — so the filing
+    // is the second call, where the caller again named none.
+    await runTool('file_optical_ticket', NO_OFFICE);
+    await runTool('file_optical_ticket', NO_OFFICE);
+
+    expect(create).toHaveBeenCalledTimes(1);
+    const payload = create.mock.calls[0][0] as unknown as Record<string, unknown>;
+    expect(payload.locationOfLastVisit).toBe(ON_RECORD);
+    expect(payload.locationId).toBeUndefined();
+  });
+
+  it('sends it during a directory outage too', async () => {
+    const api = await client();
+    vi.spyOn(api, 'lookupProviderAndLocation').mockResolvedValue(
+      { success: false, outcome: 'unavailable', locationId: undefined } as never,
+    );
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const create = vi.spyOn(api, 'createTicket')
+      .mockResolvedValue({ success: true, ticketNumber: 'VA-99010' } as never);
+    record();
+
+    await runTool('file_optical_ticket', NO_OFFICE);
+
+    const payload = create.mock.calls[0][0] as unknown as Record<string, unknown>;
+    expect(payload.locationOfLastVisit).toBe(ON_RECORD);
+  });
+
+  it('never logs the office name', async () => {
+    const api = await client();
+    vi.spyOn(api, 'lookupProviderAndLocation').mockResolvedValue(
+      { success: true, outcome: 'no_match', locationId: undefined } as never,
+    );
+    vi.spyOn(api, 'createTicket')
+      .mockResolvedValue({ success: true, ticketNumber: 'VA-99011' } as never);
+    const spies = (['log', 'info', 'warn', 'error'] as const)
+      .map((k) => vi.spyOn(console, k).mockImplementation(() => {}));
+    record();
+
+    await runTool('file_optical_ticket', NO_OFFICE);
+    await runTool('file_optical_ticket', NO_OFFICE);
+
+    const said = spies
+      .flatMap((s) => s.mock.calls)
+      .map((c) => c.map(String).join(' '))
+      .join(' | ');
+    expect(said).not.toContain(ON_RECORD);
   });
 });

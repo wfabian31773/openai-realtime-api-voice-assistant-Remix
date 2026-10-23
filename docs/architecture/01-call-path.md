@@ -761,7 +761,11 @@ patientEmail        optional
 preferredContactMethod 'phone'
 patientBirthMonth/Day/Year   from normalizeDobParts
 locationId          ONLY when the lookup resolved one
-locationOfLastVisit cleanLocation (always — the caller's words survive)
+locationOfLastVisit cleanLocation (always — the caller's words survive); when
+                    the caller named none, the office on the patient's record
+                    (`usualOfficeFor`), sent even when our /lookup did not
+                    resolve it — the app resolves names itself (ticketing-app
+                    #381, unique-match). Withheld on a DOB conflict. 2026-10-23
 providerId          ONLY when resolved
 lastProviderSeen    cleanProvider || undefined
 description         redirect note + GSM-7-sanitised description
