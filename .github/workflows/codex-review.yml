@@ -24,15 +24,10 @@ jobs:
         with:
           ref: refs/pull/${{ github.event.pull_request.number }}/merge
           persist-credentials: false
+          # Full history of the merge commit includes both base and head SHAs
+          # (private repos cannot re-fetch without persisted credentials).
+          fetch-depth: 0
 
-      - name: Pre-fetch base and head refs for the PR
-        env:
-          PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-        run: |
-          git fetch --no-tags origin \
-            "$PR_BASE_REF" \
-            "+refs/pull/$PR_NUMBER/head"
 
       - name: Run Codex
         id: run_codex
