@@ -111,8 +111,8 @@ interface BookingRow {
   booking_id: string;
   status: string;
   source: string;
-  nextgen_appointment_id: string | null;
-  person_id: string | null;
+  appointment_tag: string | null;
+  person_tag: string | null;
   slot_date: string | null;
   slot_time: string;
   npx_link_method: string | null;
@@ -163,11 +163,11 @@ export async function computeFivestar(day: string, src: Sources): Promise<DayRes
         continue;
       }
       if (b.status === "cancelled" || !b.slot_date) continue;
-      if (!b.nextgen_appointment_id && !b.person_id) continue; // cannot be checked: not booked
+      if (!b.appointment_tag && !b.person_tag) continue; // cannot be checked: not booked
       toMirror.push({
         k: `${b.call_log_id}|${b.booking_id}`,
-        appointment_id: b.nextgen_appointment_id,
-        person_id: b.person_id,
+        appointment_tag: b.appointment_tag,
+        person_tag: b.person_tag,
         slot_date: b.slot_date,
         slot_time: b.slot_time,
         since: day,

@@ -65,7 +65,7 @@ describe("a definition change is a new method version", () => {
     const h = createHash("sha256").update(definitionsText()).digest("hex").slice(0, 16);
     // If this fails you changed a definition: bump METHOD_VERSION and pin the new hash beside it.
     expect(h).toBe(DEFINITIONS_HASH);
-    expect(METHOD_VERSION).toBe("learning-v6");
+    expect(METHOD_VERSION).toBe("learning-v7");
   });
 
   it("every statement and every definition is inside the hashed text", () => {
@@ -106,10 +106,10 @@ describe("the reads follow the written rules (CLAUDE.md and the Daybook)", () =>
       "SELECT call_id AS id, build, substantive, submitted, asked FROM public.learning_fivestar_calls($1::date)",
     );
     expect(FIVESTAR_BOOKINGS_SQL).toBe(
-      "SELECT call_log_id, booking_id, status, source, nextgen_appointment_id, person_id, slot_date, slot_time, " +
+      "SELECT call_log_id, booking_id, status, source, appointment_tag, person_tag, slot_date, slot_time, " +
         "npx_link_method, partner_link_needs_review, partner_outcome_status FROM public.learning_fivestar_bookings($1::text[])",
     );
-    const forbidden = /call_logs|sage_tool_calls|internal_bookings|\bpatients\b|voice_agent_booking_attempts|transcript|notes|to_phone|response_excerpt/i;
+    const forbidden = /call_logs|sage_tool_calls|internal_bookings|\bpatients\b|voice_agent_booking_attempts|transcript|notes|to_phone|response_excerpt|person_id|nextgen_appointment_id/i;
     for (const s of [FIVESTAR_CALLS_SQL, FIVESTAR_BOOKINGS_SQL]) {
       expect(s).not.toMatch(forbidden);
       // The only relations named are the two functions.
@@ -124,12 +124,26 @@ describe("the reads follow the written rules (CLAUDE.md and the Daybook)", () =>
 
   it("the booking slot time is HHMM like the mirror's begin_time", () => {
     expect(FIVESTAR_BOOKINGS_SQL).toContain("slot_time");
-    expect(CONSOLE_BOOKED_SQL).toContain("f.begin_time = b.slot_time");
+    expect(CONSOLE_BOOKED_SQL).toContain("p.begin_time = b.slot_time");
   });
 
   it("a moved appointment still counts only while the person holds an uncancelled one", () => {
     expect(CONSOLE_BOOKED_SQL).toContain("coalesce(h.is_rescheduled, false)");
     expect(CONSOLE_BOOKED_SQL).toContain("g.appointment_date >= h.since");
+  });
+
+  it("the Console matches tags against md5 of its own ids, never a raw id from 5Star (learning-v7)", () => {
+    expect(CONSOLE_BOOKED_SQL).toContain("md5(f.appointment_id::text) AS atag");
+    expect(CONSOLE_BOOKED_SQL).toContain("md5(f.person_id::text) AS ptag");
+    // No input field carries a raw id any more.
+    expect(CONSOLE_BOOKED_SQL).not.toMatch(/x->>'(appointment_id|person_id)'/);
+    expect(CONSOLE_BOOKED_SQL).not.toMatch(/::uuid/);
+    // A tag that is not 32 hex characters is treated as absent.
+    expect(CONSOLE_BOOKED_SQL).toContain("x->>'appointment_tag' ~ '^[0-9a-f]{32}$'");
+    expect(CONSOLE_BOOKED_SQL).toContain("x->>'person_tag' ~ '^[0-9a-f]{32}$'");
+    // One bounded scan (an unbounded or per-booking hash timed out on the Console).
+    expect(CONSOLE_BOOKED_SQL.match(/FROM si_appointment_facts/g)).toHaveLength(1);
+    expect(CONSOLE_BOOKED_SQL).toContain("f.appointment_date >= (SELECT min(least(slot_date, since)) - 60 FROM b)");
   });
 });
 
@@ -243,8 +257,8 @@ const booking = (call: string, over: Record<string, unknown>) => ({
   booking_id: `bk-${call}`,
   status: "manual_import_needed",
   source: "manual",
-  nextgen_appointment_id: null,
-  person_id: null,
+  appointment_tag: null,
+  person_tag: null,
   slot_date: "2026-11-04",
   slot_time: "1500",
   npx_link_method: null,
@@ -253,13 +267,13 @@ const booking = (call: string, over: Record<string, unknown>) => ({
   ...over,
 });
 const fsBookings = [
-  booking("c1", { nextgen_appointment_id: "11111111-1111-1111-1111-111111111111" }),
-  booking("c2", { person_id: "22222222-2222-2222-2222-222222222222" }),
-  booking("c2", { booking_id: "bk-c2-second", person_id: "22222222-2222-2222-2222-222222222222" }),
-  booking("c3", { person_id: "33333333-3333-3333-3333-333333333333" }),
+  booking("c1", { appointment_tag: "11111111111111111111111111111111" }),
+  booking("c2", { person_tag: "22222222222222222222222222222222" }),
+  booking("c2", { booking_id: "bk-c2-second", person_tag: "22222222222222222222222222222222" }),
+  booking("c3", { person_tag: "33333333333333333333333333333333" }),
   booking("c4", { source: "npx", npx_link_method: "coordinator", partner_outcome_status: "in_partner_schedule" }),
   booking("c5", { source: "npx", npx_link_method: "fuzzy_needs_review", partner_outcome_status: "in_partner_schedule" }),
-  booking("c6", { status: "cancelled", person_id: "66666666-6666-6666-6666-666666666666" }),
+  booking("c6", { status: "cancelled", person_tag: "66666666666666666666666666666666" }),
   booking("c7", {}),
   booking("c8", { source: "npx", npx_link_method: "external_ref", partner_outcome_status: "awaiting_outcome" }),
 ];
@@ -724,8 +738,10 @@ describe("candidates", () => {
 
   it("the mirror's NextGen id outranks a person + slot match (Codex, #365)", () => {
     const order = CONSOLE_BOOKED_SQL.slice(CONSOLE_BOOKED_SQL.indexOf("ORDER BY"));
-    expect(order.indexOf("f.appointment_id = b.appointment_id::uuid")).toBeGreaterThan(-1);
-    expect(order.indexOf("f.appointment_id = b.appointment_id::uuid")).toBeLessThan(order.indexOf("f.is_cancelled ASC"));
+    expect(order.indexOf("u.by_id DESC")).toBeGreaterThan(-1);
+    expect(order.indexOf("u.by_id DESC")).toBeLessThan(order.indexOf("u.is_cancelled ASC"));
+    // The id branch is the one marked true.
+    expect(CONSOLE_BOOKED_SQL).toMatch(/true AS by_id\s+FROM by_id i WHERE i\.tag = b\.appointment_tag/);
   });
 
   it("a moved, unkept appointment needs a live replacement (Codex, #365)", () => {

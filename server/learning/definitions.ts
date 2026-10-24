@@ -30,9 +30,9 @@
  */
 
 /** Bump with DEFINITIONS_HASH whenever any text below changes. */
-export const METHOD_VERSION = "learning-v6";
+export const METHOD_VERSION = "learning-v7";
 /** sha256 of definitionsText(), first 16 hex. definitions.test.ts pins it. */
-export const DEFINITIONS_HASH = "ff5e0c24fc20f03d";
+export const DEFINITIONS_HASH = "438cf23ca06ef815";
 
 export const PACIFIC = "America/Los_Angeles";
 
@@ -146,39 +146,67 @@ export const FIVESTAR_CALLS_SQL = `SELECT call_id AS id, build, substantive, sub
 /**
  * 5Star: the bookings tied to a list of call_logs ids, through the SECURITY
  * DEFINER function public.learning_fivestar_bookings (5Star), which honours
- * only DRS inbound call ids. $1 = text[].
+ * only DRS inbound call ids. $1 = text[]. Since learning-v7 (5Star #409) the
+ * NextGen ids leave 5Star only as md5 tags: appointment_tag =
+ * md5(lower(appointment id)), person_tag = md5(lower(person id)), each only
+ * when the id is UUID-shaped. No person or appointment id is read.
  */
-export const FIVESTAR_BOOKINGS_SQL = `SELECT call_log_id, booking_id, status, source, nextgen_appointment_id, person_id, slot_date, slot_time, npx_link_method, partner_link_needs_review, partner_outcome_status FROM public.learning_fivestar_bookings($1::text[])`;
+export const FIVESTAR_BOOKINGS_SQL = `SELECT call_log_id, booking_id, status, source, appointment_tag, person_tag, slot_date, slot_time, npx_link_method, partner_link_needs_review, partner_outcome_status FROM public.learning_fivestar_bookings($1::text[])`;
 
 /**
  * Console: the mirror's view of a list of bookings. $1 = jsonb array of
- * {k, appointment_id, person_id, slot_date, slot_time, since}. Returns one row
- * per k that is booked at the read time.
+ * {k, appointment_tag, person_tag, slot_date, slot_time, since}. The tags are
+ * matched against md5(id::text) of the mirror's own columns (a uuid's text is
+ * lower case, which is what 5Star hashes). Returns one row per k that is booked
+ * at the read time. The rule is the learning-v6 rule, unchanged: only the
+ * comparison moved from the id to its tag.
  */
 export const CONSOLE_BOOKED_SQL = `
 WITH b AS (
   SELECT x->>'k' AS k,
-         nullif(x->>'appointment_id', '') AS appointment_id,
-         nullif(x->>'person_id', '')      AS person_id,
+         CASE WHEN x->>'appointment_tag' ~ '^[0-9a-f]{32}$' THEN x->>'appointment_tag' END AS appointment_tag,
+         CASE WHEN x->>'person_tag' ~ '^[0-9a-f]{32}$' THEN x->>'person_tag' END           AS person_tag,
          (x->>'slot_date')::date          AS slot_date,
          x->>'slot_time'                  AS slot_time,
          (x->>'since')::date              AS since
   FROM jsonb_array_elements($1::jsonb) x
 ),
+facts AS (
+  -- ONE bounded scan of the mirror, hashing both ids. The lower bound is the
+  -- earliest date any rule can need (the booked slot, or the call day a
+  -- replacement must fall on or after) less 60 days of slack for a NextGen id
+  -- whose mirror date drifted earlier than the booked slot. Unbounded, or
+  -- hashed per booking, this timed out; bounded it reads in about 4 s.
+  SELECT md5(f.appointment_id::text) AS atag, md5(f.person_id::text) AS ptag,
+         f.appointment_date, f.begin_time, f.is_cancelled, f.is_rescheduled, f.is_kept
+  FROM si_appointment_facts f
+  WHERE f.appointment_date >= (SELECT min(least(slot_date, since)) - 60 FROM b)
+),
+by_id AS (
+  SELECT atag AS tag, is_cancelled, is_rescheduled, is_kept
+  FROM facts WHERE atag IN (SELECT appointment_tag FROM b WHERE appointment_tag IS NOT NULL)
+),
+by_person AS (
+  SELECT ptag AS tag, appointment_date, begin_time, is_cancelled, is_rescheduled, is_kept
+  FROM facts WHERE ptag IN (SELECT person_tag FROM b WHERE person_tag IS NOT NULL)
+),
 hit AS (
-  SELECT b.k, b.person_id, b.since, f.is_cancelled, f.is_rescheduled, f.is_kept
+  SELECT b.k, b.person_tag, b.since, f.is_cancelled, f.is_rescheduled, f.is_kept
   FROM b
   JOIN LATERAL (
-    SELECT f.is_cancelled, f.is_rescheduled, f.is_kept
-    FROM si_appointment_facts f
-    WHERE (b.appointment_id ~* '^[0-9a-f-]{36}$' AND f.appointment_id = b.appointment_id::uuid)
-       OR (b.person_id ~* '^[0-9a-f-]{36}$' AND f.person_id = b.person_id::uuid
-           AND f.appointment_date = b.slot_date AND f.begin_time = b.slot_time)
+    SELECT u.is_cancelled, u.is_rescheduled, u.is_kept
+    FROM (
+      SELECT i.is_cancelled, i.is_rescheduled, i.is_kept, true AS by_id
+      FROM by_id i WHERE i.tag = b.appointment_tag
+      UNION ALL
+      SELECT p.is_cancelled, p.is_rescheduled, p.is_kept, false AS by_id
+      FROM by_person p
+      WHERE p.tag = b.person_tag
+        AND p.appointment_date = b.slot_date AND p.begin_time = b.slot_time
+    ) u
     -- The NextGen id wins: person + slot is a fallback for a booking whose id
     -- the mirror does not hold, never a second chance for a cancelled id.
-    -- coalesce: DESC puts NULL first, and a NULL id must not outrank a match.
-    ORDER BY coalesce(b.appointment_id ~* '^[0-9a-f-]{36}$' AND f.appointment_id = b.appointment_id::uuid, false) DESC,
-             f.is_cancelled ASC
+    ORDER BY u.by_id DESC, u.is_cancelled ASC
     LIMIT 1
   ) f ON true
 )
@@ -189,12 +217,12 @@ FROM hit h
 -- a replacement that is itself a live appointment.
 WHERE (coalesce(h.is_kept, false)
        OR (NOT coalesce(h.is_cancelled, false) AND NOT coalesce(h.is_rescheduled, false)))
-   OR (coalesce(h.is_rescheduled, false) AND h.person_id ~* '^[0-9a-f-]{36}$' AND EXISTS (
-        SELECT 1 FROM si_appointment_facts g
-        WHERE g.person_id = h.person_id::uuid
+   OR (coalesce(h.is_rescheduled, false) AND h.person_tag IS NOT NULL AND EXISTS (
+        SELECT 1 FROM by_person g
+        WHERE g.tag = h.person_tag
+          AND g.appointment_date >= h.since
           AND (coalesce(g.is_kept, false)
-               OR (NOT coalesce(g.is_cancelled, false) AND NOT coalesce(g.is_rescheduled, false)))
-          AND g.appointment_date >= h.since))`;
+               OR (NOT coalesce(g.is_cancelled, false) AND NOT coalesce(g.is_rescheduled, false)))))`;
 
 /** isFirmPartnerLink (5Star shared/partner-booking.ts), mirrored. */
 export const FIRM_PARTNER_LINK_METHODS = ["external_ref", "npx_booking_id", "coordinator", "api_create", "auto_match"] as const;
