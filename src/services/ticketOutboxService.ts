@@ -2,7 +2,7 @@ import { db } from '../../server/db';
 import { ticketOutbox } from '../../shared/schema';
 import { eq, and, lte, or, isNull, sql, inArray } from 'drizzle-orm';
 import { ticketingApiClient } from '../../server/services/ticketingApiClient';
-import { loggableTicketingError } from './loggableTicketingError';
+import { loggableTicketingError, loggableLookupError } from './loggableTicketingError';
 import type { CreateTicketParams, CreateTicketResponse } from '../../server/services/ticketingApiClient';
 import { getValidatedTicketIds } from '../config/answeringServiceTicketing';
 import type { SyncAgentTicketParams } from './syncAgentService';
@@ -460,7 +460,7 @@ export class TicketOutboxService {
         if (lookupWasUnavailable(lookupResult)) {
           console.error(
             `[TICKET OUTBOX] ✗ PROVIDER/LOCATION LOOKUP UNAVAILABLE for ${outboxId} — ` +
-              `filing unrouted. Cause: ${lookupResult.error ?? 'unknown'}`,
+              `filing unrouted. Cause: ${loggableLookupError(lookupResult)}`,
           );
         } else {
           resolvedProviderId = lookupResult.providerId ?? undefined;

@@ -29,3 +29,17 @@ export function loggableTicketingError(error: string | undefined, statusCode?: n
   return `${statusCode !== undefined ? `HTTP ${statusCode}` : 'no HTTP status'} ` +
     `(response text withheld — it can name the patient's office)`;
 }
+
+/**
+ * A `/lookup` result's failure, safe to print (stand-in review of #371,
+ * P2-1). On a directory outage the result's `error` is the app's text, or the
+ * message of a thrown HTTP error, and either can echo the office on the
+ * patient's record. The result keeps the raw text for any logic that needs
+ * it; a `Cause:` line prints this.
+ */
+export function loggableLookupError(result: { error?: string; statusCode?: number }): string {
+  if (!result.error) {
+    return result.statusCode !== undefined ? `HTTP ${result.statusCode}, no reason given` : 'no reason given';
+  }
+  return loggableTicketingError(result.error, result.statusCode);
+}

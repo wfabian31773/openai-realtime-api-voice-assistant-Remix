@@ -322,7 +322,14 @@ interface LookupResponse {
     city: string;
   } | null;
   locationMatches?: Array<{ id: number; name: string; city: string }>;
+  /**
+   * Raw, for logic only. It can be the far side's words (`Location "<office>"
+   * not found`), so a log line prints `loggableTicketingError(error,
+   * statusCode)`, never this (v116 stand-in review of #371, P2-1).
+   */
   error?: string;
+  /** Set when the lookup failed with an HTTP status. */
+  statusCode?: number;
 }
 
 // PHI-safe log helpers — never emit full patient identifiers to stdout. These
@@ -1266,15 +1273,19 @@ export class TicketingApiClient {
 
       return { ...response, outcome };
     } catch (error) {
-      console.warn("[TICKETING API] ⚠️ Lookup failed, will create ticket without IDs:", error);
+      // describeFailure, not the Error: a non-2xx body is the app's text and
+      // can name the office on the patient's record (v116).
+      console.warn("[TICKETING API] ⚠️ Lookup failed, will create ticket without IDs:", describeFailure(error));
       // Don't fail ticket creation if lookup fails — but SAY SO, in a way the
       // caller cannot mistake for a name that matched nobody. Proceeding
       // without ids is right; telling the patient their office does not exist
       // is what cost 43 calls on 2026-08-31.
+      const statusCode = (error as { statusCode?: number } | null)?.statusCode;
       return {
         success: false,
         outcome: 'unavailable',
         error: error instanceof Error ? error.message : String(error),
+        ...(statusCode !== undefined ? { statusCode } : {}),
       };
     }
   }

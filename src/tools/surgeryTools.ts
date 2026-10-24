@@ -29,6 +29,7 @@
 import { registerTool, missing, refuseDob, dobRefusalCopy, type ToolResult } from './registry';
 import { str, isTwilioCallSid, normalizePhone } from './sharedPatientTools';
 import { createTicketDurable, postFailureToolResult } from '../services/durableTicketFiling';
+import { loggableLookupError } from '../services/loggableTicketingError';
 import { gateRefusalsSoFar, noteGateRefusal } from './gateAttempts';
 import { decideDobEscape, dobStatusNote, dobEscapeMarker, type DobStatus } from './dobEscape';
 import { verifiedDobFor } from './verifiedIdentity';
@@ -659,7 +660,7 @@ registerTool({
             // afterwards, and it must not collide with the line below.
             `[surgery] ✗ SURGEON LOOKUP UNAVAILABLE — filing '${surgeonName}' UNROUTED. ` +
               `Dept 2 routes by surgeon, so this ticket needs manual assignment. ` +
-              `Cause: ${lookup.error ?? 'unknown'}`
+              `Cause: ${loggableLookupError(lookup)}`
           : `[surgery] ✗ SURGEON DID NOT RESOLVE — ticket will file unrouted (dept 2 routes by surgeon)`,
       );
     }

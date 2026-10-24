@@ -30,6 +30,7 @@ import { registerTool, missing, refuseDob, dobRefusalCopy, type ToolResult } fro
 import { str, isTwilioCallSid, normalizePhone } from './sharedPatientTools';
 import { decideDobEscape, dobStatusNote, dobEscapeMarker, type DobStatus } from './dobEscape';
 import { createTicketDurable, postFailureToolResult } from '../services/durableTicketFiling';
+import { loggableLookupError } from '../services/loggableTicketingError';
 import { verifiedDobFor } from './verifiedIdentity';
 
 // ---------------------------------------------------------------- what kind
@@ -361,7 +362,7 @@ registerTool({
       console.error(
         `[tech] ✗ PROVIDER LOOKUP UNAVAILABLE — filing ` +
           `'${cleanProvider || cleanLocation}' with no id. This ticket needs manual ` +
-          `assignment. Cause: ${lookup.error ?? 'unknown'}`,
+          `assignment. Cause: ${loggableLookupError(lookup)}`,
       );
     }
 

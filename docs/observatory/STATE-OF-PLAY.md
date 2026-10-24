@@ -1405,7 +1405,20 @@ carrying it: a lookup warning or refusal body like `Location "<office>" not
 found`, printed verbatim by `createTicket`, `makeRequest`'s non-2xx dump, both
 catch blocks and `durableTicketFiling`'s REFUSED line. All are counted or
 summarised now (keys, missing-field names, status), with two tests through the
-real `makeRequest` and only `fetch` faked.
+real `makeRequest` and only `fetch` faked. The stand-in review's P2-1 then
+found the outage path itself: when `/lookup` for the record's office fails,
+the client's catch printed the whole Error, a 200 `{success:false, error}` was
+spread into the result, and every lane's `Cause: ${lookup.error}` line printed
+the app's text. The catch logs `describeFailure(error)` now, the result keeps
+the raw `error` (for logic) plus `statusCode`, and all six `Cause:` lines print
+`loggableLookupError(result)`. Three tests drive the real lookup with only
+`fetch` faked (a 503 and a 200 `success:false`, each echoing the office).
+
+**Ship order (P3-1, softened):** either order ships, but "harmless before
+#381" is not established — the deployed app already searches the location name
+it is sent, so what a record name our `/lookup` missed does there before #381
+has not been read or measured. This build is only certain to add the office
+name to tickets that carry none today.
 
 ### Open, and Wayne's to settle — the first-call ask on a no-match
 

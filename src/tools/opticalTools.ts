@@ -18,6 +18,7 @@ import { registerTool, missing, refuseDob, dobRefusalCopy, type ToolResult } fro
 // queue — the same three definitions Surgery uses, not copies of them.
 import { str, isTwilioCallSid, normalizePhone } from './sharedPatientTools';
 import { createTicketDurable, postFailureToolResult } from '../services/durableTicketFiling';
+import { loggableLookupError } from '../services/loggableTicketingError';
 import { gateRefusalsSoFar, noteGateRefusal } from './gateAttempts';
 import { decideDobEscape, dobStatusNote, dobEscapeMarker, type DobStatus } from './dobEscape';
 import { usualOfficeFor, verifiedDobFor } from './verifiedIdentity';
@@ -598,7 +599,8 @@ registerTool({
       console.error(
         `[Optical] ✗ LOCATION LOOKUP UNAVAILABLE — filing '${cleanLocation}' UNASSIGNED. ` +
           `Dept 1 assigns by location, so this ticket needs manual assignment. ` +
-          `Cause: ${lookup.error ?? 'unknown'}`,
+          // Never the raw text: a lookup failure can echo the record's office.
+          `Cause: ${loggableLookupError(lookup)}`,
       );
     }
 

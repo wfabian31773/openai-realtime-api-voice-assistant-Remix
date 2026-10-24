@@ -682,6 +682,84 @@ describe('the record office name is sent when our lookup does not resolve it', (
     expect(said()).toContain('Failed to parse JSON response (HTTP 502): SyntaxError');
     expect(said()).not.toContain(ON_RECORD);
   });
+
+  /**
+   * THE DIRECTORY OUTAGE ITSELF (stand-in review of #371, P2-1). The /lookup
+   * call for the record's office fails, and its failure text can echo that
+   * office: the client's catch printed the whole Error, and every `Cause:`
+   * line printed `lookup.error` raw. Driven through the REAL lookup and the
+   * REAL `makeRequest` — nothing on the lookup path is stubbed — with a
+   * create-ticket that succeeds, so the outage is the only failure on the call.
+   */
+  function failingLookup(api: Awaited<ReturnType<typeof client>>, lookupReply: () => unknown) {
+    type Internals = {
+      ensureInitialized: () => void;
+      warmUpIfStale: (...args: unknown[]) => Promise<boolean>;
+      baseUrl: string | null;
+      apiKey: string | null;
+    };
+    const internals = api as unknown as Internals;
+    vi.spyOn(internals, 'ensureInitialized').mockImplementation(() => {});
+    vi.spyOn(internals, 'warmUpIfStale').mockResolvedValue(true);
+    internals.baseUrl = 'https://ticketing.invalid';
+    internals.apiKey = 'test-key';
+    return vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) =>
+      (String(input).endsWith('/api/voice-agent/lookup')
+        ? lookupReply()
+        : {
+            ok: true, status: 200, statusText: 'OK',
+            json: async () => ({ success: true, ticketNumber: 'VA-99016' }),
+          }) as Response,
+    );
+  }
+
+  it('never logs the office name from a lookup that answers non-2xx', async () => {
+    const api = await client();
+    const fetchSpy = failingLookup(api, () => ({
+      ok: false, status: 503, statusText: 'Service Unavailable',
+      json: async () => ({ success: false, error: `Location "${ON_RECORD}" directory unavailable` }),
+    }));
+    const said = consoleSaid();
+    record();
+
+    await runTool('file_optical_ticket', NO_OFFICE);
+
+    expect(fetchSpy.mock.calls.some((c) => String(c[0]).endsWith('/api/voice-agent/lookup'))).toBe(true);
+    expect(said()).toContain('Lookup failed, will create ticket without IDs');
+    expect(said()).toContain('LOCATION LOOKUP UNAVAILABLE');
+    expect(said()).toContain('HTTP 503');
+    expect(said()).not.toContain(ON_RECORD);
+  });
+
+  it('never logs the office name from a lookup that answers 200 success:false', async () => {
+    const api = await client();
+    const fetchSpy = failingLookup(api, () => ({
+      ok: true, status: 200, statusText: 'OK',
+      json: async () => ({ success: false, error: `Location "${ON_RECORD}" not found in system` }),
+    }));
+    const said = consoleSaid();
+    record();
+
+    await runTool('file_optical_ticket', NO_OFFICE);
+
+    expect(fetchSpy.mock.calls.some((c) => String(c[0]).endsWith('/api/voice-agent/lookup'))).toBe(true);
+    expect(said()).toContain('LOCATION LOOKUP UNAVAILABLE');
+    expect(said()).not.toContain(ON_RECORD);
+  });
+
+  it('keeps the raw lookup error internally for logic, and redacts it for logs', async () => {
+    const api = await client();
+    failingLookup(api, () => ({
+      ok: false, status: 503, statusText: 'Service Unavailable',
+      json: async () => ({ success: false, error: `Location "${ON_RECORD}" directory unavailable` }),
+    }));
+    consoleSaid();
+    const result = await api.lookupProviderAndLocation({ locationName: ON_RECORD });
+    expect(result.outcome).toBe('unavailable');
+    expect(result.statusCode).toBe(503);
+    const { loggableTicketingError } = await import('../services/loggableTicketingError');
+    expect(loggableTicketingError(result.error, result.statusCode)).not.toContain(ON_RECORD);
+  });
 });
 
 describe('loggableTicketingError', () => {

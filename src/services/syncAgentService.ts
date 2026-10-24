@@ -1,5 +1,6 @@
 import { ticketingApiClient } from '../../server/services/ticketingApiClient';
 import { missingFieldsFromRefusal, spokenMissingFields } from './missingFieldsRefusal';
+import { loggableLookupError } from './loggableTicketingError';
 import { storage } from '../../server/storage';
 import { 
   AFTER_HOURS_DEPARTMENT_ID, 
@@ -291,7 +292,7 @@ export class SyncAgentService {
         if (lookupWasUnavailable(lookupResult)) {
           console.error(
             `[SYNC-AGENT] ✗ PROVIDER/LOCATION LOOKUP UNAVAILABLE — filing unrouted. ` +
-              `Cause: ${lookupResult.error ?? 'unknown'}`,
+              `Cause: ${loggableLookupError(lookupResult)}`,
           );
         } else {
           if (lookupResult.providerId) resolvedProviderId = lookupResult.providerId;
