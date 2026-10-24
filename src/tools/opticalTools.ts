@@ -18,6 +18,7 @@ import { registerTool, missing, refuseDob, dobRefusalCopy, type ToolResult } fro
 // queue — the same three definitions Surgery uses, not copies of them.
 import { str, isTwilioCallSid, normalizePhone } from './sharedPatientTools';
 import { createTicketDurable, postFailureToolResult } from '../services/durableTicketFiling';
+import { loggableLookupError } from '../services/loggableTicketingError';
 import { gateRefusalsSoFar, noteGateRefusal } from './gateAttempts';
 import { decideDobEscape, dobStatusNote, dobEscapeMarker, type DobStatus } from './dobEscape';
 import { usualOfficeFor, verifiedDobFor } from './verifiedIdentity';
@@ -313,6 +314,23 @@ registerTool({
     let recordLookup:
       | Awaited<ReturnType<typeof ticketingApiClient.lookupProviderAndLocation>>
       | undefined;
+    /**
+     * THE RECORD'S OFFICE NAME TRAVELS EVEN WHEN OUR DIRECTORY CANNOT RESOLVE
+     * IT. Operator ruling, 2026-10-23: when the caller names no office and the
+     * patient's record holds one, send that name to create-ticket as
+     * `locationOfLastVisit` whether or not `lookupProviderAndLocation` turned
+     * it into a `locationId`. The ticketing app (ticketing-app #381) now
+     * resolves a name itself under a unique-match rule, so a name our lookup
+     * missed can still route there, and when it cannot, the staffer reads the
+     * office off the ticket instead of phoning the patient to ask.
+     *
+     * Set only from `usualOfficeFor`, so every guard it applies still holds:
+     * a certain match only, the ticket's name must be the verified person's,
+     * and an explicit date-of-birth conflict withholds the office (Codex P1,
+     * #291). An office the caller names still wins — this block never runs
+     * when `cleanLocation` is set. Never logged: the name stays on the payload,
+     * and the client's lookup line prints only whether a location was asked.
+     */
     let officeFromRecord: string | undefined;
     if (!cleanLocation) {
       // `dob` is what the ticket is being filed under. Passed so an explicit,
@@ -320,13 +338,13 @@ registerTool({
       // rather than routing a same-named relative's ticket (Codex P1, #291).
       const onRecord = usualOfficeFor(callSid, first, last, dob);
       if (onRecord) {
+        officeFromRecord = onRecord;
         const byRecord = await ticketingApiClient.lookupProviderAndLocation({
           locationName: onRecord,
           ...(cleanProvider ? { providerName: cleanProvider } : {}),
         });
         if (byRecord.locationId) {
           recordLookup = byRecord;
-          officeFromRecord = onRecord;
           // Names no office and no patient: the office is not PHI on its own,
           // but pairing it with a call identifier is a step toward one, and
           // the count is what this line is for.
@@ -581,7 +599,8 @@ registerTool({
       console.error(
         `[Optical] ✗ LOCATION LOOKUP UNAVAILABLE — filing '${cleanLocation}' UNASSIGNED. ` +
           `Dept 1 assigns by location, so this ticket needs manual assignment. ` +
-          `Cause: ${lookup.error ?? 'unknown'}`,
+          // Never the raw text: a lookup failure can echo the record's office.
+          `Cause: ${loggableLookupError(lookup)}`,
       );
     }
 
@@ -776,7 +795,11 @@ registerTool({
       // Omitted rather than sent null when the lookup could not run — the name
       // still travels, and the raised priority surfaces it for assignment.
       ...(lookup.locationId ? { locationId: lookup.locationId } : {}),
-      ...(cleanLocation ? { locationOfLastVisit: cleanLocation } : {}),
+      // The caller's words win; otherwise the office on their record, resolved
+      // or not — see `officeFromRecord` above.
+      ...(cleanLocation || officeFromRecord
+        ? { locationOfLastVisit: cleanLocation || officeFromRecord }
+        : {}),
       ...(lookup.providerId ? { providerId: lookup.providerId } : {}),
       lastProviderSeen: cleanProvider || undefined,
       description: routedDescriptionWithDobStatus,

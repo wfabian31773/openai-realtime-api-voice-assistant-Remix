@@ -333,7 +333,10 @@ describe('what it refuses, and what it does not', () => {
     })) as Record<string, unknown>;
 
     expect(out.success).toBe(false);
-    expect(String(out.error)).toMatch(/Validation failed/);
+    // A failure is reported, never the app's own text (v116, thread
+    // PRRT_kwDORVukLs6vzltO on #371: that text can name the record's office).
+    expect(String(out.error)).toMatch(/withheld/);
+    expect(String(out.error)).not.toMatch(/Validation failed/);
     expect(out.retryable).toBe(true);
   });
 });

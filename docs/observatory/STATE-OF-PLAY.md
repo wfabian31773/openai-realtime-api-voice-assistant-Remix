@@ -1375,3 +1375,112 @@ retries are too few. No new secret.
 The after-arm starts with the republish: `provider_failure` with zero
 agent turns and no ticket should go to 0; setup-failure tickets should
 appear on the residue; filing rate per lane must not fall.
+
+---
+
+## 15. The record's office name on an optical ticket — v116 (#371), 2026-10-23
+
+**What shipped.** When the caller names no office and the patient's record
+(`usualOfficeFor`) holds one, `file_optical_ticket` sends that name as
+`locationOfLastVisit` — on a lookup no-match, on an outage, and (since the
+stand-in review of #371) also beside `locationId` when the lookup DID
+resolve it. ticketing-app #381 resolves the name under a unique-match rule.
+
+**The name is never logged — on the whole path, not just the tool's lines.**
+The stand-in review of #371 found that `ticketingApiClient.lookupProviderAndLocation`
+printed `locationName` to `console.info` before every lookup, so the record's
+office reached the logs beside the call's own lines (pre-existing since v12,
+but it made v116's "never logged" claim false). That line now prints
+`'(set)'` / `'(none)'`, and a test drives the REAL lookup (only `makeRequest`
+faked) and asserts the name appears in no console line. The older test
+stubbed the lookup, and stringified objects with `String()` — which prints
+`[object Object]` — so it could not have seen the leak either way.
+Codex then found the same leak one call later (thread PRRT_kwDORVukLs6vtp3I):
+`createTicket`'s "Creating ticket" line printed `locationOfLastVisit` raw beside
+the call SID, and its "Lookup results" line echoed the app's `locationSearched`;
+`submitTicket`'s `lastLocation` had the same shape. All three print presence
+only now, and a third test runs the REAL `createTicket` (request and warm-up
+faked). Codex thread PRRT_kwDORVukLs6vzaiN then found the APP's own text
+carrying it: a lookup warning or refusal body like `Location "<office>" not
+found`, printed verbatim by `createTicket`, `makeRequest`'s non-2xx dump, both
+catch blocks and `durableTicketFiling`'s REFUSED line. All are counted or
+summarised now (keys, missing-field names, status), with two tests through the
+real `makeRequest` and only `fetch` faked. The stand-in review's P2-1 then
+found the outage path itself: when `/lookup` for the record's office fails,
+the client's catch printed the whole Error, a 200 `{success:false, error}` was
+spread into the result, and every lane's `Cause: ${lookup.error}` line printed
+the app's text. The catch logs `describeFailure(error)` now, the result keeps
+the raw `error` (for logic) plus `statusCode`, and all six `Cause:` lines print
+`loggableLookupError(result)`. Three tests drive the real lookup with only
+`fetch` faked (a 503 and a 200 `success:false`, each echoing the office).
+
+**Ship order (P3-1, softened):** either order ships, but "harmless before
+#381" is not established — the deployed app already searches the location name
+it is sent, so what a record name our `/lookup` missed does there before #381
+has not been read or measured. This build is only certain to add the office
+name to tickets that carry none today.
+
+### Open, and Wayne's to settle — the first-call ask on a no-match
+
+When the record holds an office our `/lookup` cannot resolve, the first
+`file_optical_ticket` still refuses and asks *"Which of our offices do you
+usually visit?"*. The record's name only reaches a ticket on the second
+call, and in 42 of 75 date-of-birth refusals the refusal is the call's last
+tool event — so a caller who hangs up on that ask leaves no ticket with
+their office on it. RULE ZERO says a gate refusing on a field the record
+holds is a bug in the gate.
+
+The fix would be one line: treat *"record office held, lookup did not
+resolve it"* as waiving the ask (`officeAskWaived`), so the first call
+files unassigned, with the name and `routingAskExhausted: true`. That
+changes when `routingAskExhausted` is sent on the queue that routes BY
+office, so it is a ruling, not an engineering call. **Recommendation:**
+take it once #381 is live — the name then usually routes anyway, and the
+ask buys little. **Until he rules, v116 keeps the first-call ask.**
+
+### To measure before merge (read-only; nothing has been run)
+
+Tests (the session that wrote this could not run vitest):
+
+```
+npx vitest run src/tools/opticalOfficeFromRecord.test.ts \
+  src/tools/opticalTools.production.test.ts \
+  src/tools/opticalUnassignedExit.test.ts src/runtime/readiness.test.ts \
+  src/runtime/markerTableIsIntact.test.ts src/runtime/markerCarriesClaim.test.ts
+npx tsc --noEmit
+```
+
+Before-number, two steps because `call_logs` (Hub, `pslzngjciiifowemrzza`)
+and `tickets` (Support Center, `vsmcxhxeirkoobmjcrbn`) cannot be joined in
+one statement.
+
+Step 1, Hub — optical calls in the 14 days before deploy whose lookup made a
+certain match:
+
+```sql
+SELECT DISTINCT c.call_sid
+FROM call_logs c,
+     LATERAL jsonb_array_elements(coalesce(c.tool_timeline->'events','[]'::jsonb)) e
+WHERE c.agent_used = 'optical'
+  AND c.call_sid ~* '^CA[0-9a-f]{32}$'
+  AND c.created_at >= now() - interval '14 days'
+  AND e->>'tool' = 'lookup_patient'
+  AND (e->'outcome'->>'identity_is_certain')::boolean IS TRUE;
+```
+
+Step 2, Support Center — of those SIDs, agent-filed optical tickets that
+carried neither an office id nor an office name:
+
+```sql
+SELECT count(DISTINCT call_sid) AS record_held_ticket_empty
+FROM tickets
+WHERE call_sid = ANY(:sids_from_step_1)
+  AND department_id = 1
+  AND created_by_id IS NULL AND agent_used IS NOT NULL
+  AND location_id IS NULL
+  AND coalesce(location_of_last_visit, '') = '';
+```
+
+After the deploy, the same population should read 0 on the second query,
+and optical tickets with no `location_id` must not rise (before-arm
+2026-10-01: 15 of 391).

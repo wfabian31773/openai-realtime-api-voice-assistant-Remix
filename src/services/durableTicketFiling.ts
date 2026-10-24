@@ -31,6 +31,7 @@
  *    exists a long outage is still found by a human noticing.
  */
 import { ticketingApiClient } from '../../server/services/ticketingApiClient';
+import { loggableTicketingError } from './loggableTicketingError';
 // One-way edge: the registry does not import this module, the tools import both.
 import { getTool } from '../tools/registry';
 import type { CreateTicketParams, CreateTicketResponse } from '../../server/services/ticketingApiClient';
@@ -141,9 +142,16 @@ export async function createTicketDurable(params: CreateTicketParams): Promise<D
 
   if (isTerminalRefusal(res.statusCode)) {
     const missingField = missingFieldFromError(res.error);
+    // The app's refusal text is NOT printed: it can name the office on the
+    // patient's record (`Location "<office>" not found`, v116 — Codex thread
+    // PRRT_kwDORVukLs6vzaiN on #371). A missing FIELD name is safe and is the
+    // part the console line is read for.
+    const reason = missingField
+      ? `missing ${missingField}`
+      : res.error ? 'reason withheld (the app\'s text can name the patient\'s office)' : 'no reason given';
     console.warn(
       `[TICKET FILING] ${agent}: create-ticket REFUSED the payload (HTTP ${res.statusCode}) — ` +
-        `${res.error ?? 'no reason given'}. Not queued: retrying cannot change a refusal.`,
+        `${reason}. Not queued: retrying cannot change a refusal.`,
     );
     return { ...res, queued: false, terminal: true, missingField };
   }
@@ -170,7 +178,7 @@ export async function createTicketDurable(params: CreateTicketParams): Promise<D
   console.error(
     `[TICKET OUTBOX] ✗ create-ticket FAILED for ${agent} ` +
       `(dept ${params.departmentId}/${params.requestTypeId ?? 'none'}/${params.requestReasonId ?? 'none'}) — ` +
-      `capturing the request. Cause: ${res.error ?? 'no ticket number returned'}`,
+      `capturing the request. Cause: ${loggableTicketingError(res.error, res.statusCode)}`,
   );
 
   try {
@@ -250,7 +258,13 @@ export function postFailureToolResult(res: DurableCreateResult, toolName?: strin
     }
     return {
       success: false as const,
-      error: res.error ?? 'the ticketing system refused this request',
+      // Never the app's own text: a tool result's `error` is printed by the
+      // adapter (`[TOOLS] ← … error:`) and persisted by `tool_timeline`, and
+      // the app's text can name the office on the patient's record
+      // (v116 — Codex thread PRRT_kwDORVukLs6vzltO on #371).
+      error: res.error
+        ? loggableTicketingError(res.error, res.statusCode)
+        : 'the ticketing system refused this request',
       // Deliberately NOT retryable: the server read it and said no.
       retryable: false,
     };
@@ -268,7 +282,9 @@ export function postFailureToolResult(res: DurableCreateResult, toolName?: strin
   }
   return {
     success: false as const,
-    error: res.error ?? 'ticket creation failed',
+    // Same rule as the refusal above: the far side's text never becomes a
+    // tool result.
+    error: res.error ? loggableTicketingError(res.error, res.statusCode) : 'ticket creation failed',
     retryable: true,
   };
 }

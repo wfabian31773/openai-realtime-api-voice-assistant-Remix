@@ -2,6 +2,7 @@ import { db } from '../../server/db';
 import { ticketOutbox } from '../../shared/schema';
 import { eq, and, lte, or, isNull, sql, inArray } from 'drizzle-orm';
 import { ticketingApiClient } from '../../server/services/ticketingApiClient';
+import { loggableTicketingError, loggableLookupError } from './loggableTicketingError';
 import type { CreateTicketParams, CreateTicketResponse } from '../../server/services/ticketingApiClient';
 import { getValidatedTicketIds } from '../config/answeringServiceTicketing';
 import type { SyncAgentTicketParams } from './syncAgentService';
@@ -387,7 +388,7 @@ export class TicketOutboxService {
       if (isTerminalRefusal(response.statusCode)) {
         console.error(
           `[TICKET OUTBOX] ☠ REFUSED (HTTP ${response.statusCode}) — dead-lettering ${outboxId} ` +
-            `without retrying: ${error}`,
+            `without retrying: ${loggableTicketingError(error, response.statusCode)}`,
         );
         const refused = await TicketOutboxService.markFailed(
           outboxId,
@@ -401,7 +402,7 @@ export class TicketOutboxService {
       return await TicketOutboxService.markFailed(outboxId, entry.retryCount, error);
     } catch (err) {
       const error = err instanceof Error ? err.message : String(err);
-      console.error(`[TICKET OUTBOX] ✗ Send failed for ${outboxId}:`, error);
+      console.error(`[TICKET OUTBOX] ✗ Send failed for ${outboxId}:`, loggableTicketingError(error));
       return await TicketOutboxService.markFailed(outboxId, entry.retryCount, error);
     }
   }
@@ -459,7 +460,7 @@ export class TicketOutboxService {
         if (lookupWasUnavailable(lookupResult)) {
           console.error(
             `[TICKET OUTBOX] ✗ PROVIDER/LOCATION LOOKUP UNAVAILABLE for ${outboxId} — ` +
-              `filing unrouted. Cause: ${lookupResult.error ?? 'unknown'}`,
+              `filing unrouted. Cause: ${loggableLookupError(lookupResult)}`,
           );
         } else {
           resolvedProviderId = lookupResult.providerId ?? undefined;
@@ -542,7 +543,7 @@ export class TicketOutboxService {
       .where(eq(ticketOutbox.id, outboxId));
 
     if (isDeadLetter && !terminal) {
-      console.error(`[TICKET OUTBOX] ☠ Dead letter after ${MAX_RETRIES} retries: ${outboxId} - ${error}`);
+      console.error(`[TICKET OUTBOX] ☠ Dead letter after ${MAX_RETRIES} retries: ${outboxId} - ${loggableTicketingError(error)}`);
     } else if (isDeadLetter) {
       // The refusal was already logged with its status at the call site.
     } else {

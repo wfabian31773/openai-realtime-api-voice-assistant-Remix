@@ -322,7 +322,14 @@ interface LookupResponse {
     city: string;
   } | null;
   locationMatches?: Array<{ id: number; name: string; city: string }>;
+  /**
+   * Raw, for logic only. It can be the far side's words (`Location "<office>"
+   * not found`), so a log line prints `loggableTicketingError(error,
+   * statusCode)`, never this (v116 stand-in review of #371, P2-1).
+   */
   error?: string;
+  /** Set when the lookup failed with an HTTP status. */
+  statusCode?: number;
 }
 
 // PHI-safe log helpers — never emit full patient identifiers to stdout. These
@@ -339,6 +346,30 @@ function maskName(...parts: Array<string | undefined>): string {
     .map((p) => p[0]?.toUpperCase() ?? '')
     .join('');
   return initials ? `${initials}***` : '(none)';
+}
+
+/**
+ * THE APP'S OWN WORDS CAN NAME THE PATIENT'S OFFICE (v116, Codex thread
+ * PRRT_kwDORVukLs6vzaiN on #371). A lookup warning or a refusal body reads
+ * like `Location "<office>" not found in system`, and since v116 that office
+ * is the one on the PATIENT'S RECORD. So response-derived text is never
+ * printed: a warning is counted, and a refusal is summarised by its keys and
+ * the field NAMES it says are missing.
+ */
+function describeRefusalBody(data: unknown): Record<string, unknown> {
+  if (!data || typeof data !== 'object') return { body: data === null ? 'null' : typeof data };
+  const body = data as Record<string, unknown>;
+  return {
+    keys: Object.keys(body),
+    hasError: typeof body.error === 'string' && body.error.length > 0,
+    missingFields: Array.isArray(body.missingFields) ? body.missingFields : undefined,
+  };
+}
+function describeFailure(error: unknown): unknown {
+  const statusCode = (error as { statusCode?: number } | null)?.statusCode;
+  // An error carrying a status holds the far side's text; one without is ours
+  // (a timeout, an unreachable host) and is printed as it is.
+  return statusCode !== undefined ? { statusCode, message: '(response text withheld)' } : error;
 }
 
 export class TicketingApiClient {
@@ -619,7 +650,13 @@ export class TicketingApiClient {
         // no status downstream, so it is captured and retried like any other
         // request that never got an answer — not read as a refusal.
         if (parseError instanceof Error && parseError.name === 'AbortError') throw parseError;
-        console.error(`[TICKETING API] ✗ Failed to parse JSON response:`, parseError);
+        // Status and error TYPE only: a JSON SyntaxError quotes an excerpt of
+        // the body, and a non-JSON body can be `Location "<office>" not
+        // found` (v116 — Codex thread PRRT_kwDORVukLs6vzf39 on #371).
+        console.error(
+          `[TICKETING API] ✗ Failed to parse JSON response (HTTP ${response.status}): ` +
+            `${parseError instanceof Error ? parseError.name : typeof parseError} (body text withheld)`,
+        );
         /**
          * THE STATUS SURVIVES A BODY WE COULD NOT READ.
          *
@@ -650,7 +687,7 @@ export class TicketingApiClient {
         if (response.status === 404 && isNoTicketError(String(data?.error ?? ''))) {
           console.info(`[TICKETING API] 404 no-ticket for ${endpoint} (expected for info-only calls)`);
         } else {
-          console.error(`[TICKETING API] Error ${response.status}:`, data);
+          console.error(`[TICKETING API] Error ${response.status}:`, describeRefusalBody(data));
         }
         shadowTap.emit('n8n_workflow_failed', shadowSession, shadowAgent,
           { endpoint, method, viaGateway: shadowViaGateway, status: response.status, body: body ?? {}, response: data ?? {} },
@@ -747,7 +784,10 @@ export class TicketingApiClient {
       priority: params.priority || "medium",
       preferredContactMethod: params.preferredContactMethod,
       lastProviderSeen: params.lastProviderSeen,
-      locationOfLastVisit: params.locationOfLastVisit,
+      // Never the office itself: on optical it can come from the patient's
+      // own record (v116), and beside the call SID it is that patient's
+      // office. Presence only (#371, Codex thread PRRT_kwDORVukLs6vtp3I).
+      locationOfLastVisit: params.locationOfLastVisit ? '(set)' : '(none)',
       hasCallData: !!params.callData,
       callSid: params.callData?.callSid,
       hasRecording: !!params.callData?.recordingUrl,
@@ -813,14 +853,15 @@ export class TicketingApiClient {
         console.info(`[TICKETING API] Lookup results:`, {
           providerSearched: response.providerSearched,
           providerMatched: response.providerMatched,
-          locationSearched: response.locationSearched,
+          // The app echoes the office name it searched for; presence only (v116).
+          locationSearched: response.locationSearched ? '(set)' : '(none)',
           locationMatched: response.locationMatched,
         });
       }
       
       // Log any lookup warnings for staff awareness
       if (response.lookupWarnings && response.lookupWarnings.length > 0) {
-        console.warn(`[TICKETING API] ⚠️  Lookup warnings for ${response.ticketNumber}:`, response.lookupWarnings);
+        console.warn(`[TICKETING API] ⚠️  ${response.lookupWarnings.length} lookup warning(s) for ${response.ticketNumber} (text withheld — it can name the patient's office)`);
       }
       
       if (response.usedFallbackReason) {
@@ -829,7 +870,7 @@ export class TicketingApiClient {
 
       return response;
     } catch (error) {
-      console.error("[TICKETING API] ✗ Failed to create ticket:", error);
+      console.error("[TICKETING API] ✗ Failed to create ticket:", describeFailure(error));
       return {
         success: false,
         error: error instanceof Error ? error.message : String(error),
@@ -952,7 +993,7 @@ export class TicketingApiClient {
       hasEmail: !!params.patientEmail,
       preferredContact: params.preferredContactMethod,
       lastProvider: params.lastProviderSeen,
-      lastLocation: params.locationOfLastVisit,
+      lastLocation: params.locationOfLastVisit ? '(set)' : '(none)',
       hasCallData: !!params.callData,
       callSid: params.callData?.callSid,
       idempotencyKey: params.idempotencyKey,
@@ -990,7 +1031,7 @@ export class TicketingApiClient {
         
         // Log any lookup warnings for staff awareness
         if (response.lookupWarnings && response.lookupWarnings.length > 0) {
-          console.warn(`[TICKETING API] ⚠️  Lookup warnings for ${response.ticketNumber}:`, response.lookupWarnings);
+          console.warn(`[TICKETING API] ⚠️  ${response.lookupWarnings.length} lookup warning(s) for ${response.ticketNumber} (text withheld — it can name the patient's office)`);
         }
         
         if (response.usedFallbackReason) {
@@ -999,14 +1040,14 @@ export class TicketingApiClient {
       } else {
         console.error(`[TICKETING API] ✗ Ticket submission failed:`, {
           errorCode: response.errorCode,
-          error: response.error,
+          hasError: Boolean(response.error),
           missingFields: response.missingFields,
         });
       }
 
       return response;
     } catch (error) {
-      console.error("[TICKETING API] ✗ Failed to submit ticket:", error);
+      console.error("[TICKETING API] ✗ Failed to submit ticket:", describeFailure(error));
       return {
         success: false,
         errorCode: 'request_failed',
@@ -1192,9 +1233,12 @@ export class TicketingApiClient {
       return { success: true, outcome: 'no_match' };
     }
 
+    // The office name is not logged, only whether one was asked: optical sends
+    // the office on the PATIENT'S RECORD here (v116), and a line naming it,
+    // printed beside the call's own lines, says where that patient is seen.
     console.info("[TICKETING API] Looking up provider/location:", {
       providerName: params.providerName || '(none)',
-      locationName: params.locationName || '(none)',
+      locationName: params.locationName ? '(set)' : '(none)',
     });
 
     try {
@@ -1229,15 +1273,19 @@ export class TicketingApiClient {
 
       return { ...response, outcome };
     } catch (error) {
-      console.warn("[TICKETING API] ⚠️ Lookup failed, will create ticket without IDs:", error);
+      // describeFailure, not the Error: a non-2xx body is the app's text and
+      // can name the office on the patient's record (v116).
+      console.warn("[TICKETING API] ⚠️ Lookup failed, will create ticket without IDs:", describeFailure(error));
       // Don't fail ticket creation if lookup fails — but SAY SO, in a way the
       // caller cannot mistake for a name that matched nobody. Proceeding
       // without ids is right; telling the patient their office does not exist
       // is what cost 43 calls on 2026-08-31.
+      const statusCode = (error as { statusCode?: number } | null)?.statusCode;
       return {
         success: false,
         outcome: 'unavailable',
         error: error instanceof Error ? error.message : String(error),
+        ...(statusCode !== undefined ? { statusCode } : {}),
       };
     }
   }

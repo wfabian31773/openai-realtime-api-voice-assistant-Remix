@@ -34,6 +34,7 @@ import { registerTool, missing, refuseDob, dobRefusalCopy, type ToolResult } fro
 import { str, isTwilioCallSid, normalizePhone } from './sharedPatientTools';
 import { decideDobEscape, dobStatusNote, dobEscapeMarker, type DobStatus } from './dobEscape';
 import { createTicketDurable, postFailureToolResult } from '../services/durableTicketFiling';
+import { loggableLookupError } from '../services/loggableTicketingError';
 import { verifiedDobFor, verifiedIdentityFor } from './verifiedIdentity';
 import { gateRefusalsSoFar, gateRefusalAgeMs, noteGateRefusal, noteCallFact, callFactNoted } from './gateAttempts';
 
@@ -892,7 +893,7 @@ registerTool({
     if (lostToOutage) {
       console.error(
         `[records] ✗ LOOKUP UNAVAILABLE — filing ` +
-          `'${cleanLocation || cleanProvider}' with no id. Cause: ${lookup.error ?? 'unknown'}`,
+          `'${cleanLocation || cleanProvider}' with no id. Cause: ${loggableLookupError(lookup)}`,
       );
     }
 
