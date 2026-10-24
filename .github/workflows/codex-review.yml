@@ -12,7 +12,11 @@ permissions:
 
 jobs:
   codex:
-    if: github.event.pull_request.draft == false
+    # Skip drafts, and fork/Dependabot PRs (no access to OPENAI_API_KEY there).
+    if: >-
+      github.event.pull_request.draft == false &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.actor != 'dependabot[bot]'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -71,10 +75,14 @@ jobs:
         with:
           github-token: ${{ github.token }}
           script: |
-            let body = process.env.CODEX_FINAL_MESSAGE.trim();
+            const NL = String.fromCharCode(10);
             const sha = process.env.HEAD_SHA;
-            if (!body.includes(sha)) body = `Codex review of head ${sha}\n\n` + body;
-            if (!/VERDICT: (CLEAN|CHANGES)\s*$/.test(body)) body += `\n\nVERDICT: CHANGES`;
+            let body = process.env.CODEX_FINAL_MESSAGE.trim();
+            if (!body.includes(sha)) body = `Codex review of head ${sha}` + NL + NL + body;
+            const last = body.split(NL).pop().trim();
+            if (last !== 'VERDICT: CLEAN' && last !== 'VERDICT: CHANGES') {
+              body += NL + NL + 'VERDICT: CHANGES';
+            }
             await github.rest.pulls.createReview({
               owner: context.repo.owner,
               repo: context.repo.repo,
