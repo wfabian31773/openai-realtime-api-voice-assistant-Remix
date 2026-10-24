@@ -1,15 +1,24 @@
 /**
  * Export a runtime replay corpus from production `call_logs`.
  *
- *   Usage:
- *     tsx scripts/build-replay-corpus.ts --agents optical,surgery,tech,records \
- *       --from 2026-09-02 --to 2026-09-02 --out replay-corpus/2026-09-02 \
+ *   Usage — ONE CORPUS PER LANE:
+ *     tsx scripts/build-replay-corpus.ts --agents optical \
+ *       --from 2026-09-02 --to 2026-09-02 --out replay-corpus/2026-09-02-optical \
  *       [--worst-first] [--limit N] [--chunk-size N] [--min-caller-words N]
  *
  *   Then:
  *     XAI_API_KEY=... XAI_REGRESSION_MODEL=<chat model id> \
  *       tsx scripts/run-runtime-regression.ts --slug optical \
- *       --corpus replay-corpus/2026-09-02 --out replay-out/optical
+ *       --corpus replay-corpus/2026-09-02-optical --out replay-out/optical \
+ *       --limit 54
+ *
+ * Build a separate corpus for each lane you replay. A corpus row does not carry
+ * `agent_used` (the key set is deliberately narrow — see corpusBuilder.ts), and
+ * the runner replays EVERY row in the directory through whatever --slug it is
+ * given, so a four-lane corpus replayed under --slug optical pushes surgery,
+ * tech and records calls through the optical agent and the numbers mean
+ * nothing. Also: the runner defaults --limit to 25, so pass the manifest's
+ * `calls` count explicitly or a lane replays only its first 25 conversations.
  *
  * `run-runtime-regression.ts` has always read `chunk-*.jsonl` from a directory
  * that **nothing in this repo produced** — the builder lived only on an
