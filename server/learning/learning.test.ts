@@ -65,7 +65,7 @@ describe("a definition change is a new method version", () => {
     const h = createHash("sha256").update(definitionsText()).digest("hex").slice(0, 16);
     // If this fails you changed a definition: bump METHOD_VERSION and pin the new hash beside it.
     expect(h).toBe(DEFINITIONS_HASH);
-    expect(METHOD_VERSION).toBe("learning-v5");
+    expect(METHOD_VERSION).toBe("learning-v6");
   });
 
   it("every statement and every definition is inside the hashed text", () => {
@@ -184,10 +184,10 @@ describe("the fleet filed rate", () => {
     expect(hub.calls[0].text).not.toContain("btrim(runtime_marker)");
   });
 
-  it("without the Support Center role the independent rate is unavailable, never zero", async () => {
+  it("without the Support Center token the independent rate is unavailable, never zero", async () => {
     const r = await computeRemix("2026-10-20", sources());
     expect(r.values.some((x) => x.metricId === "remix.filed_rate_independent")).toBe(false);
-    expect(r.unavailable["remix.filed_rate_independent"]).toMatch(/A1/);
+    expect(r.unavailable["remix.filed_rate_independent"]).toMatch(/LEARNING_SUPPORT_CENTER_TOKEN/);
   });
 
   it("folds each call agent > UNKNOWN > staff, and UNKNOWN is reported, not counted either way", async () => {
@@ -380,7 +380,7 @@ describe("the run", () => {
     expect(out.status).toBe("partial"); // no Support Center, no 5Star in this fixture
     expect(tx.calls.map((c) => c.text)).toEqual(["BEGIN", DAY_LOCK_SQL, UPSERT_RUN_SQL, DELETE_VALUES_SQL, INSERT_VALUES_SQL, "COMMIT"]);
     const [day, status, version, notes] = tx.calls[2].params as string[];
-    expect([day, status, version]).toEqual(["2026-10-20", "partial", "learning-v5"]);
+    expect([day, status, version]).toEqual(["2026-10-20", "partial", METHOD_VERSION]);
     const n = JSON.parse(notes);
     expect(n.readAt).toBe("2026-10-21T11:00:00.000Z");
     expect(n.unavailable["remix.filed_rate_independent"]).toBeTruthy();
@@ -508,7 +508,7 @@ describe("OFF by default", () => {
     const out = await runLearningDay("2026-10-20", deps);
     expect(out).toEqual({ status: "kept", reason: expect.stringMatching(/connection reset/), readFailed: true });
     expect(tx.calls.map((c) => c.text)).toEqual(["BEGIN", DAY_LOCK_SQL, PRIOR_RUN_SQL, "ROLLBACK"]);
-    expect(tx.calls[2].params).toEqual(["2026-10-20", "learning-v5"]);
+    expect(tx.calls[2].params).toEqual(["2026-10-20", METHOD_VERSION]);
     // A failed build-column probe is a read failure too, and keeps the day the same way.
     const probe = runnerDeps({ prior: true });
     const ph = probe.deps.hub;
@@ -591,7 +591,7 @@ describe("OFF by default", () => {
     // ok had no Support Center at all — unconfigured is a fact; the night closes.
     expect(await learningTick(ok.deps, new Date("2026-10-21T11:45:00Z"))).toEqual([]);
     expect(isReadFailure("Support Center read failed: x")).toBe(true);
-    expect(isReadFailure("Support Center read-only role (A1) not configured")).toBe(false);
+    expect(isReadFailure("Support Center plugin token (LEARNING_SUPPORT_CENTER_TOKEN) not configured")).toBe(false);
   });
 
   it("the server wires the export always and the runner behind its switch", () => {
@@ -631,12 +631,12 @@ function mockRes() {
 }
 
 const storedValues: StoredValue[] = [
-  { run_date: "2026-10-20", method_version: "learning-v5", metric_id: "remix.filed_rate", repo: "Remix", lane: "tech", runtime_marker: "voice-runtime-v111-x", numerator: 137, denominator: 150, unknown_count: 0 },
+  { run_date: "2026-10-20", method_version: METHOD_VERSION, metric_id: "remix.filed_rate", repo: "Remix", lane: "tech", runtime_marker: "voice-runtime-v111-x", numerator: 137, denominator: 150, unknown_count: 0 },
 ];
 
 describe("the export", () => {
   const hub = fakeQuery((text) => {
-    if (text === EXPORT_RUNS_SQL) return [{ id: 1, run_date: "2026-10-20", status: "partial", method_version: "learning-v5", notes: JSON.stringify({ readAt: "2026-10-21T11:00:00Z", unavailable: { "remix.filed_rate_independent": "A1" } }) }];
+    if (text === EXPORT_RUNS_SQL) return [{ id: 1, run_date: "2026-10-20", status: "partial", method_version: METHOD_VERSION, notes: JSON.stringify({ readAt: "2026-10-21T11:00:00Z", unavailable: { "remix.filed_rate_independent": "token not configured" } }) }];
     if (text === EXPORT_VALUES_SQL) return storedValues;
     return [];
   });
