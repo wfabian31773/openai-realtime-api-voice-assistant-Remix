@@ -58,12 +58,23 @@ export function supportCenterPluginQuery(
     if (!res.ok) throw new Error(`plugin answered HTTP ${res.status}`);
     const body = (await res.json()) as { calls?: unknown };
     if (!Array.isArray(body?.calls)) throw new Error("plugin answer had no calls list");
-    return {
-      rows: body.calls.map((c: any) => ({
-        call_sid: String(c?.callSid ?? ""),
-        any_agent: c?.anyAgent === true,
-        any_unknown: c?.anyUnknown === true,
-      })),
-    };
+    // Every entry must be a call we asked about, with both flags real booleans.
+    // A malformed entry is a read failure, never a quiet "not filed": mapping it
+    // to an empty SID and false flags would score every call as unfiled and
+    // store a valid-looking rate (Codex P1, #369). The message names the
+    // problem only, never the entry.
+    const asked = new Set(callSids);
+    const rows = body.calls.map((c: unknown, i: number) => {
+      const e = c as { callSid?: unknown; anyAgent?: unknown; anyUnknown?: unknown } | null;
+      if (!e || typeof e !== "object") throw new Error(`plugin answer entry ${i} is not an object`);
+      if (typeof e.callSid !== "string" || !asked.has(e.callSid)) {
+        throw new Error(`plugin answer entry ${i} names a call that was not asked for`);
+      }
+      if (typeof e.anyAgent !== "boolean" || typeof e.anyUnknown !== "boolean") {
+        throw new Error(`plugin answer entry ${i} has no boolean anyAgent/anyUnknown`);
+      }
+      return { call_sid: e.callSid, any_agent: e.anyAgent, any_unknown: e.anyUnknown };
+    });
+    return { rows };
   };
 }

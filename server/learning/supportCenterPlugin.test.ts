@@ -37,7 +37,7 @@ describe("the Support Center plugin adapter", () => {
   it("POSTs the SIDs with the bearer token to the filing route and maps the answer to the SQL row shape", async () => {
     const f = okFetch([
       { callSid: SID_A, anyAgent: true, anyUnknown: false },
-      { callSid: SID_B, anyAgent: "true", anyUnknown: 1 },
+      { callSid: SID_B, anyAgent: false, anyUnknown: true },
     ]);
     const q = supportCenterPluginQuery(ENV, f)!;
     const res = await q(SUPPORT_PROVENANCE_SQL, [[SID_A, SID_B]]);
@@ -46,11 +46,34 @@ describe("the Support Center plugin adapter", () => {
     expect(init.method).toBe("POST");
     expect(init.headers.authorization).toBe("Bearer tok-123");
     expect(JSON.parse(init.body)).toEqual({ callSids: [SID_A, SID_B] });
-    // Only a real `true` counts; a truthy string or number is not an agent filing.
     expect(res.rows).toEqual([
       { call_sid: SID_A, any_agent: true, any_unknown: false },
-      { call_sid: SID_B, any_agent: false, any_unknown: false },
+      { call_sid: SID_B, any_agent: false, any_unknown: true },
     ]);
+  });
+
+  // Codex P1 on #369: a 200 with a changed or malformed entry must be a read
+  // failure, never a call quietly scored as unfiled.
+  it.each([
+    ["an empty entry", [{}]],
+    ["null", [null]],
+    ["snake_case fields", [{ call_sid: SID_A, any_agent: true, any_unknown: false }]],
+    ["a truthy string flag", [{ callSid: SID_A, anyAgent: "true", anyUnknown: false }]],
+    ["a numeric flag", [{ callSid: SID_A, anyAgent: true, anyUnknown: 1 }]],
+    ["a missing flag", [{ callSid: SID_A, anyAgent: true }]],
+    ["a call that was not asked for", [{ callSid: SID_B, anyAgent: true, anyUnknown: false }]],
+    ["a numeric callSid", [{ callSid: 7, anyAgent: true, anyUnknown: false }]],
+  ])("throws on %s", async (_label, calls) => {
+    const q = supportCenterPluginQuery(ENV, okFetch(calls))!;
+    await expect(q(SUPPORT_PROVENANCE_SQL, [[SID_A]])).rejects.toThrow(/plugin answer entry 0/);
+  });
+
+  it("a malformed entry through compute is a read failure, not a zero rate", async () => {
+    const hub = async () => ({ rows: [{ call_sid: SID_A, lane: "tech", runtime_marker: "", filed: true }] });
+    const base: Sources = { hub, hubHasRuntimeMarker: false };
+    const r = await computeRemix("2026-10-20", { ...base, supportCenter: supportCenterPluginQuery(ENV, okFetch([{}])) });
+    expect(isReadFailure(r.unavailable["remix.filed_rate_independent"])).toBe(true);
+    expect(r.values.some((v) => v.metricId === "remix.filed_rate_independent")).toBe(false);
   });
 
   it("does not call the route for an empty list (it refuses one)", async () => {
