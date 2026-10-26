@@ -224,6 +224,19 @@ describe('what is not a refusal the caller cannot fix is answered as before', ()
     expect(r).not.toHaveProperty('recovered_after_refusal');
   });
 
+  it('a filing the outbox holds forgets its name halves, as a filed one does', async () => {
+    writeToOutbox.mockResolvedValue({ outboxId: 'ob-rec-3', alreadyExists: false });
+    const { posts } = await app(OUTAGE, FILED('VA-NEXT-2'));
+    await runTool('file_records_ticket', THIRD_PARTY);
+    // The next patient on the call, with only a first name so far.
+    const { last_name: _l, ...firstOnly } = THIRD_PARTY;
+    const next = (await runTool('file_records_ticket', { ...firstOnly, first_name: 'Otherpatient' })) as Out;
+    expect(next.missingFields, 'the surname is asked for, not filled in').toContain('last_name');
+    for (const p of posts().slice(1)) {
+      expect(p.patientLastName, 'never the queued patient\'s surname').not.toBe('Example');
+    }
+  });
+
   it('an outage the outbox holds files no recovery: it is already persisted', async () => {
     writeToOutbox.mockResolvedValue({ outboxId: 'ob-rec-2', alreadyExists: false });
     const { posts } = await app(OUTAGE);

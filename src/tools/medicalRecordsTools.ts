@@ -1284,8 +1284,14 @@ registerTool({
     if (!res.success || !res.ticketNumber) {
       const failed = postFailureToolResult(res, 'file_records_ticket');
       // A field the tool can ask for is a question, and an outage the outbox
-      // is holding is already persisted: both are answered as before.
-      if (!res.terminal || 'missingFields' in failed) return failed;
+      // is holding is already persisted: both are answered as before. A
+      // queued filing is filed as far as this call is concerned, so its
+      // carried name halves are forgotten like a filed one's — or the next
+      // patient on the call inherits this one's surname (Codex P2 on #376).
+      if (!res.terminal || 'missingFields' in failed) {
+        if (res.queued) forgetNameHalves(callSid, scope);
+        return failed;
+      }
 
       // A refusal the caller cannot fix. Log the request BEFORE anybody is
       // told it is logged — see RECOVERED_AFTER_REFUSAL_FIX.
