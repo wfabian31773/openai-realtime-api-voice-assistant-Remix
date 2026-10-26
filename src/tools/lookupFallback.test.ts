@@ -141,10 +141,11 @@ describe('a mis-transcribed date of birth does not lose a known patient', () => 
       dateOfBirth: '01/04/1958',
       certain: true,
     });
+    const chartHit = { ...FOUND, matchedBy: 'name_and_dob', identity: { unique: true, candidateCount: 1, candidates: [] } };
     lookupSpy
       .mockResolvedValueOnce(MISS as never) // spoken last name
       .mockResolvedValueOnce(MISS as never) // phone retry
-      .mockResolvedValueOnce(FOUND as never); // chart name
+      .mockResolvedValueOnce(chartHit as never); // chart name + spoken DOB
 
     const out = (await runTool('lookup_patient', {
       first_name: 'Dana',
@@ -159,5 +160,35 @@ describe('a mis-transcribed date of birth does not lose a known patient', () => 
     const chartCall = lookupSpy.mock.calls[2][0] as Record<string, unknown>;
     expect(chartCall.firstName).toBe('Dana');
     expect(chartCall.lastName).toBe('Example');
+    expect(chartCall.dateOfBirth).toBe('01/04/1958');
+  });
+
+  it('a chart-name retry keeps the spoken date of birth and refuses a name-only fallthrough', async () => {
+    const { rememberVerifiedIdentity, resetVerifiedIdentities } = await import('./verifiedIdentity');
+    resetVerifiedIdentities();
+    const sid = 'CA0000000000000000000000000000c622';
+    rememberVerifiedIdentity(sid, {
+      firstName: 'Dana',
+      lastName: 'Example',
+      dateOfBirth: '01/04/1958',
+      certain: true,
+    });
+    lookupSpy
+      .mockResolvedValueOnce(MISS as never)
+      .mockResolvedValueOnce(MISS as never)
+      .mockResolvedValueOnce({ ...FOUND, matchedBy: 'name' } as never);
+
+    const out = (await runTool('lookup_patient', {
+      first_name: 'Dana',
+      last_name: 'Exampel',
+      date_of_birth: '03/17/1973',
+      caller_phone: '+15550001111',
+      call_sid: sid,
+    })) as Record<string, unknown>;
+
+    const chartCall = lookupSpy.mock.calls[2][0] as Record<string, unknown>;
+    expect(chartCall.dateOfBirth).toBe('03/17/1973');
+    expect(chartCall.dateOfBirth).not.toBe('01/04/1958');
+    expect(out.found, 'a name-only hit is the previous person, not this caller').toBe(false);
   });
 });

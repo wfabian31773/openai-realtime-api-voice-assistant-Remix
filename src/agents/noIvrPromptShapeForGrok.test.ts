@@ -208,6 +208,7 @@ const RULINGS: Array<[string, RegExp]> = [
   ['office hours are answered with the times, never hedged', /including the office's own opening and closing time, exactly as written\s*\n?\s*there/],
   ['one identity ask before an on-call transfer', /one quick ask for name and date of birth|collect the caller's name and DOB in at most one/i],
   ['911-level skips the identity ask', /911-level emergency/],
+  ['need_identity is not a refused transfer', /need_identity/],
   ['never tell them they are not found when a schedule match exists', /never tell them they are not found/i],
   ['no "is that correct?"', /DO NOT ask "Is that correct\?"|Do not ask "Is that correct\?"/],
   ['the ticket number is not read out', /(DO NOT|Do not) read (out )?the ticket number/],

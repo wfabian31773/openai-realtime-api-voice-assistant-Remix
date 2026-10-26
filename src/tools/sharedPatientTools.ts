@@ -400,10 +400,17 @@ registerTool({
         const corrected = await scheduleLookupService.lookupPatient({
           firstName: held.firstName,
           lastName: held.lastName,
-          dateOfBirth: held.dateOfBirth || dob,
+          dateOfBirth: dob,
           deadlineAt,
         });
-        if (corrected.patientFound) {
+        // Spoken DOB only, and only a name+DOB hit. The book's name rung
+        // would otherwise re-resolve the previous person after a different
+        // birthday missed the trio (Codex P1 on #375).
+        if (
+          corrected.patientFound &&
+          corrected.matchedBy === 'name_and_dob' &&
+          corrected.identity?.unique !== false
+        ) {
           console.info('[TOOLS] lookup_patient: spoken name missed, matched on the chart name instead');
           resolved = corrected;
         }
