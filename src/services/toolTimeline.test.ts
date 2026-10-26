@@ -256,6 +256,31 @@ describe('PHI discipline — the allow-list is the safety mechanism', () => {
     expect(getAzulTimeline(lookup)![0].args).not.toHaveProperty('dobShape');
   });
 
+  /**
+   * v117. CA63467308b45e3e7f9118cde1b67be7bf: the caller gave both halves of
+   * the name and the POST carried neither, and this table could not say
+   * whether the model ever passed them. Two booleans answer it; no name.
+   */
+  it('says whether each half of the name reached a filing tool, and never the name', () => {
+    const half = freshCall();
+    recordToolEvent(
+      half, 'file_records_ticket', { ...TICKET_ARGS, first_name: '  ' }, '{}', 1, { agentSlug: 'records' },
+    );
+    const [ev] = getAzulTimeline(half)!;
+    expect(ev.args.hasFirstName).toBe(false);
+    expect(ev.args.hasLastName).toBe(true);
+    expect(JSON.stringify(ev)).not.toContain('Kolterman');
+
+    const none = freshCall();
+    recordToolEvent(none, 'file_optical_ticket', { request_reason_id: 3 }, '{}', 1, { agentSlug: 'optical' });
+    expect(getAzulTimeline(none)![0].args).toMatchObject({ hasFirstName: false, hasLastName: false });
+
+    // create_ticket keeps its own combined flag and does not grow these.
+    const fleet = freshCall();
+    recordToolEvent(fleet, 'create_ticket', TICKET_ARGS, '{}', 1, { agentSlug: 'answering-service' });
+    expect(getAzulTimeline(fleet)![0].args).not.toHaveProperty('hasFirstName');
+  });
+
   it('records missing FIELD NAMES on a validation failure, not their values', () => {
     const callId = freshCall();
     recordToolEvent(

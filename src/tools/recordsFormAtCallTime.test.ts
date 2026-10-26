@@ -360,7 +360,7 @@ describe('v79 — the tool asks the channel when the model did not', () => {
 
   it('the source: the redirect is decided BEFORE the channel ask, on the same words', () => {
     const src = readFileSync(join(__dirname, 'medicalRecordsTools.ts'), 'utf8');
-    const redirectAt = src.indexOf("const redirect = detectCrossQueue(description, MEDICAL_RECORDS_DEPARTMENT_ID)");
+    const redirectAt = src.indexOf("detectCrossQueue(description, MEDICAL_RECORDS_DEPARTMENT_ID)");
     const askAt = src.indexOf("formAskOutcome(callSid, FORM_CHANNEL_ASK)");
     expect(redirectAt).toBeGreaterThan(0);
     expect(askAt).toBeGreaterThan(redirectAt);

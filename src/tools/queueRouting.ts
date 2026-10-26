@@ -230,6 +230,17 @@ function hit(text: string, cues: string[]): boolean {
 }
 
 /**
+ * Does this request name a document — a record, a chart, a note, a report?
+ *
+ * The records-line hold below, exported so `file_records_ticket` reads the SAME
+ * list when it keeps a third party's request home (v117) rather than a second
+ * copy that drifts. The list itself is unchanged; see RECORDS_CUES.
+ */
+export function namesARecord(text: string): boolean {
+  return hit(fold(text), RECORDS_CUES);
+}
+
+/**
  * `hit`, but the cue has to stand as a WHOLE WORD — Codex P2 round 2, PR #298.
  *
  * `hit` is a substring test, which is right for `detectCrossQueue`: several of
@@ -307,7 +318,7 @@ export function detectCrossQueue(text: string, homeDepartmentId: number): QueueR
    * ruling is that schedule-related requests go to the Hub from every queue,
    * and a records line is one of them.
    */
-  const holdsOnRecordsLine = homeDepartmentId === MEDICAL_RECORDS && hit(t, RECORDS_CUES);
+  const holdsOnRecordsLine = homeDepartmentId === MEDICAL_RECORDS && namesARecord(t);
 
   // 1. Appointments -> HVA Hub, from anywhere, unless it is a surgery date.
   //

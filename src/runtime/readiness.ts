@@ -881,8 +881,22 @@ import { callEnvironment } from "./callRecord";
  * BY office, so it gets its own marker. On top of v115 (#367), which it
  * contains. `src/tools/opticalTools.ts`, `opticalOfficeFromRecord.test.ts`.
  */
+/**
+ * v117 — THE THIRD PARTY'S REPORT STAYS IN RECORDS (2026-10-26). On the
+ * records line, a provider's, plan's or other third party's request whose
+ * words name a document is no longer sent to the HVA Hub on a scheduling cue
+ * ("the most recent eye exam REPORT" read as "schedule an eye exam"); a
+ * request still redirected with no patient name files in Medical Records
+ * instead of drawing the app's 400; a refusal the caller cannot fix tells the
+ * model, in `fix`, that nothing is lost and never to say "call back"; and a
+ * name given in two halves across invocations reaches the payload. Seven
+ * records-lane calls, 2026-10-12..10-26. A payload change on the ticket path
+ * of the department under the CAP, so it gets its own marker. On top of v116
+ * (#371), which it contains. `src/tools/medicalRecordsTools.ts`,
+ * `thirdPartyRecordsStayInRecords.test.ts`.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v116-the-record-office-name-travels-20261023";
+  "voice-runtime-v117-the-third-party-report-stays-in-records-20261026";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

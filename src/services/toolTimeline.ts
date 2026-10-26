@@ -196,6 +196,21 @@ function derivedFlags(tool: string, args: Record<string, unknown>): Record<strin
   if (tool === 'create_ticket' || /^file_[a-z_]+_ticket$/.test(tool)) {
     out.dobShape = dobShape(args?.date_of_birth);
   }
+  /**
+   * WHETHER EACH HALF OF THE NAME WAS PASSED — two booleans, never the name.
+   *
+   * v117. On CA63467308b45e3e7f9118cde1b67be7bf (2026-10-26) the caller spelled
+   * the patient's last name and gave the first name later, and the
+   * create-ticket POST carried neither. "Did the model drop them, or the
+   * tool?" had no answer in this table: a filing tool's row recorded the
+   * date's SHAPE and nothing about the name, and the tool blanks a half name
+   * once its one ask is spent. With these two, the next one is a query.
+   * `create_ticket` keeps its own combined `hasPatientName` above.
+   */
+  if (/^file_[a-z_]+_ticket$/.test(tool)) {
+    out.hasFirstName = typeof args?.first_name === 'string' && args.first_name.trim() !== '';
+    out.hasLastName = typeof args?.last_name === 'string' && args.last_name.trim() !== '';
+  }
   if (tool === 'record_pcp_intake') {
     const keys = Object.keys(args ?? {}).filter((k) => args?.[k] != null && args[k] !== '');
     out.recorded = keys;
