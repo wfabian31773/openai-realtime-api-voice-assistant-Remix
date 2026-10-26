@@ -1497,9 +1497,10 @@ the callback ticket was `Unknown Caller` with no name and no date of birth.
 `urgentFallbackTicketParams` filed `Unknown` + `Caller`; `escalate_to_human`
 did not keep the ANI unless the model passed a callback. Now: one identity
 ask before the dial (911-level and a clinician skip; a decline still
-transfers); the calling number is always the callback; a failed transfer's
-ticket uses the stand-in, never Unknown Caller, and carries whatever was
-captured.
+transfers); the calling number is always the callback and wins over a
+model-supplied number; a `need_identity` result is not a transfer; a failed
+transfer's ticket uses the stand-in, never Unknown Caller, and carries
+whatever was captured.
 
 **VA-76221, root cause.** `lookup_schedule` called `lookupByNameAndDOB` only.
 That is a string match on the spoken name. The same call already held a

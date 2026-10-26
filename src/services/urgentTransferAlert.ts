@@ -139,10 +139,10 @@ export function urgentFallbackTicketParams(input: {
   if (standIn) {
     descParts.push(STAND_IN_NAME_NOTE);
   }
-  if (d?.patientDob && !normalizeDobParts(d.patientDob)) {
+  const dob = d?.patientDob ? normalizeDobParts(d.patientDob) : null;
+  if (d?.patientDob && !dob) {
     descParts.push(`DOB as collected: ${d.patientDob}`);
   }
-  const dob = d?.patientDob ? normalizeDobParts(d.patientDob) : null;
 
   return {
     departmentId: AFTER_HOURS_DEPARTMENT_ID,

@@ -248,6 +248,14 @@ describe('every ruling survives in both bodies', () => {
     expect(await prompt({ pipeline: 'runtime' })).not.toContain('Caller-ID pre-context');
   });
 
+  it('the Grok CRITICAL line treats need_identity as a follow-up, not a second transfer', async () => {
+    const p = await prompt({ pipeline: 'runtime' });
+    const critical = p.slice(p.indexOf('## CRITICAL INSTRUCTIONS'));
+    expect(critical).toMatch(/ONCE after a sanctioned transfer/);
+    expect(critical).toMatch(/need_identity result is not a transfer/);
+    expect(critical).not.toMatch(/ONCE per call/);
+  });
+
   it('the withheld phone-match section rides into the Grok body unchanged', () => {
     const p = buildNoIvrSystemPrompt(
       { ...base, pipeline: 'runtime' } as any,

@@ -243,6 +243,27 @@ describe("a caller who declines details is still transferred", () => {
     expect(handoff).not.toHaveBeenCalled();
   });
 
+  it("a successful transfer's record ticket keeps the ANI even if the model sent another number", async () => {
+    const callSid = freshSid();
+    const handoff = vi.fn(async () => {});
+    const agent = await createNoIvrAgent(handoff, {
+      callId: `call-${callSid}`,
+      callSid,
+      callerPhone: ANI,
+    } as any);
+
+    const r = await call(agent, "escalate_to_human", {
+      ...FLASHES,
+      patient_first_name: "Dana",
+      patient_last_name: "Example",
+      patient_dob: "January 4, 1958",
+      callback_number: "+15559990000",
+    });
+    expect(r.success).toBe(true);
+    expect(handoff).toHaveBeenCalledTimes(1);
+    expect(escalationDetailsMap.get(`call-${callSid}`)?.callbackNumber).toBe(ANI);
+  });
+
   it("a 911-level emergency never waits on the ask", async () => {
     const callSid = freshSid();
     const handoff = vi.fn(async () => {});

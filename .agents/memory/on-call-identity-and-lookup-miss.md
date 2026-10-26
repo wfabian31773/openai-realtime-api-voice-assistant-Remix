@@ -21,9 +21,10 @@ trauma, sudden vision loss, bleeding) or a clinician goes straight through.
 If the caller cannot or will not give details, transfer anyway. Both first
 and last name are required before skipping the ask. A batched sibling of
 the ask (same 2s window as records) repeats the ask and does not dial. The
-calling number (ANI) is always the callback. A failed transfer's ticket uses
-`nameOrStandIn` (never Unknown Caller) and carries whatever identity was
-captured.
+calling number (ANI) is always the callback — a model-supplied number never
+overrides it. A failed transfer's ticket uses `nameOrStandIn` (never Unknown
+Caller) and carries whatever identity was captured. A `need_identity` result
+is not a transfer; the model asks once and calls the tool again.
 
 ## VA-76221 — "not found in system" while visit history matched
 

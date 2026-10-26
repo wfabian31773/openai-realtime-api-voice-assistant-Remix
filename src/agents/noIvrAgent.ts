@@ -2388,7 +2388,9 @@ For healthcare provider calls — escalate immediately with whatever info you ha
           try {
             const { SyncAgentService } = await import("../services/syncAgentService");
             const { fullName: name, standIn } = nameOrStandIn(params.patient_first_name, params.patient_last_name);
-            const phone = normalizePhoneNumber(params.callback_number || metadata.callerPhone || '');
+            const phone = normalizePhoneNumber(
+              onCallCallbackNumber(params.callback_number, metadata.callerPhone) || '',
+            );
             // A refusal earlier on this call may already have filed a ticket under
             // the call's key; the record must not be swallowed by it (Codex P1,
             // #339). See transferRecordCrossReference.
