@@ -38,6 +38,7 @@ jobs:
         uses: openai/codex-action@v1.13
         with:
           openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          allow-bot-users: "cursor"
           permission-profile: ":workspace"
           prompt: |
             This is PR #${{ github.event.pull_request.number }} for ${{ github.repository }}.
