@@ -44,9 +44,10 @@ patient — not found in system".
 the chart, re-run with the chart name and the spoken date of birth — never
 the previously held one. Only a unique `name_and_dob` hit is accepted on
 both `lookup_schedule` and `lookup_patient`; a name-only or ambiguous
-fallthrough is another person, not this caller. If a
-visit-history match still cannot be confirmed, the spoken line is "Let me
-make sure the team has your details." Never tell the caller they are not
-found when a schedule match exists.
+fallthrough is another person, not this caller. An ambiguous chart-name
+retry (`identity.unique: false`) is refused and uses the unsure wording —
+never treated as found. If a visit-history match still cannot be confirmed,
+the spoken line is "Let me make sure the team has your details." Never tell
+the caller they are not found when a schedule match exists.
 
 Synthetic fixtures only. `src/agents/noIvrOnCallIdentityAndLookup.test.ts`.
