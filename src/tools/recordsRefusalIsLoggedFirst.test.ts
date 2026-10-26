@@ -173,6 +173,7 @@ describe('a refusal the caller cannot fix is logged before anyone is told it is'
     const r = (await runTool('file_records_ticket', THIRD_PARTY)) as Out;
     expect(r.success).toBe(false);
     expect(r.fix).toBe(REFUSAL_NOT_LOGGED_FIX);
+    expect(String(r.fix)).toMatch(/NOT logged/);
   });
 
   it('a recovery ticket is never offered a signing form', async () => {
@@ -183,6 +184,15 @@ describe('a refusal the caller cannot fix is logged before anyone is told it is'
     const r = (await runTool('send_records_form', { channel: 'sms', call_sid: SID })) as Out;
     expect(resend).not.toHaveBeenCalled();
     expect(String(r.message)).toMatch(/no form to sign/i);
+  });
+
+  it('a recovered request has done its job: its name does not carry into the next request on the call', async () => {
+    const { posts } = await app(UNASKABLE_400, FILED('VA-RECOVERED-5'), FILED('VA-NEXT-1'));
+    await runTool('file_records_ticket', THIRD_PARTY);
+    const { first_name: _f, last_name: _l, ...nameless } = THIRD_PARTY;
+    const next = (await runTool('file_records_ticket', nameless)) as Out;
+    expect(next.missingFields, 'asked, not filled from the recovered request').toEqual(['first_name', 'last_name']);
+    expect(posts()).toHaveLength(2);
   });
 
   it('PCP\'s second patient keeps its own key on the recovery', async () => {
