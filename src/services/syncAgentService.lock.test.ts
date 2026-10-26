@@ -48,7 +48,7 @@ vi.mock('./ticketFieldSanitizers', () => ({
   sanitizeTicketLookupFields: vi.fn((x: unknown) => x),
 }));
 
-import { SyncAgentService } from './syncAgentService';
+import { SyncAgentService, CONTENTION_WAIT_MS } from './syncAgentService';
 
 const CALL_SID = 'CA-overnight-0001';
 
@@ -218,16 +218,24 @@ describe('it does not hand away a lock it never held', () => {
   it('stays silent when another process holds the lock', async () => {
     // claimed:false with a call log present is the genuine race. Releasing here
     // would clear the OTHER process's lock and produce the duplicate ticket the
-    // lock exists to prevent.
-    h.claimTicketCreation.mockResolvedValue({ claimed: false });
-    h.getCallLogBySid.mockResolvedValue({ callSid: CALL_SID }); // exists, no ticket
+    // lock exists to prevent. The wait for the other attempt's write-back is
+    // CONTENTION_WAIT_MS of real time, so the clock is faked here.
+    vi.useFakeTimers();
+    try {
+      h.claimTicketCreation.mockResolvedValue({ claimed: false });
+      h.getCallLogBySid.mockResolvedValue({ callSid: CALL_SID }); // exists, no ticket
 
-    const r = await SyncAgentService.submitSimplifiedTicket(params);
+      const pending = SyncAgentService.submitSimplifiedTicket(params);
+      await vi.advanceTimersByTimeAsync(CONTENTION_WAIT_MS + 1_000);
+      const r = await pending;
 
-    expect(r.success).toBe(false);
-    expect(r.error).toMatch(/concurrent/i);
-    expect(h.releaseTicketCreationLock).not.toHaveBeenCalled();
-  }, 10_000);
+      expect(r.success).toBe(false);
+      expect(r.error).toMatch(/concurrent/i);
+      expect(h.releaseTicketCreationLock).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 
   it('stays silent when the claim itself errored', async () => {
     // The claim threw, so we do not know who holds it. The method proceeds

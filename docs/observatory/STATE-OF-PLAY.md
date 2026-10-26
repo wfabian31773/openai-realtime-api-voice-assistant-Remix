@@ -1,8 +1,19 @@
+> **RULE ZERO (Wayne, 2026-09-12) is binding and supersedes everything in this
+> document.** (1) A validated `patients_master` match, JOINED to `Schedule` on
+> `PersonID`, IS the record — carried forward into every tool and onto the
+> ticket; nothing may ask for or gate on a field it already holds. (2) When we
+> cannot find them, FUNNEL the caller: new-or-existing first, then one field per
+> question with the format named inside the question. Full text: `CLAUDE.md`
+> (top) and `.agents/memory/the-record-and-the-funnel.md`.
+
 # State of Play — Azul Vision voice agents
 
 **Companion to `/CLAUDE.md`. Read both at the start of every session.**
 
-Last updated: **2026-08-11 01:15 UTC** (Wayne: *"go through this entire
+Last updated: **2026-10-06** (section 14 — the session stall reconnects).
+Earlier: **2026-09-25** (section 13 — terminal 4xx is follow-up, not a
+stall), **2026-09-17 11:10 UTC** (section 12), **2026-09-09 17:40 UTC**
+(section 11), **2026-08-11 01:15 UTC** (Wayne: *"go through this entire
 conversation… and log and create an MD file… and force every time that you read
 that"*).
 
@@ -336,3 +347,1140 @@ Details: **`.agents/memory/ticket-creation-lock.md`**.
   code**. Needs one.
 - `config/answeringServiceTicketing.ts` fallbacks are stale, and
   `validDepartments = [1,2,3,11,12]` is wrong — it omits the HVA Hub (9).
+
+---
+
+## 9. The 2026-08-24 logging blackout — zeros that were not zeros (written 08-27)
+
+Wayne, 08-26: four "Live now" calls at 52 hours, and every Hub agent card at
+0 calls / — quality while SAGE showed 339. Both symptoms were ONE event.
+
+**Measured chain (do not re-derive):**
+
+- Supabase Operations Hub Postgres **restarted 2026-08-24 20:19:49 UTC**
+  (pg_cron / pg_net / postgres_exporter backends all date from that second).
+- Last `call_logs` row ever written: **20:17:17** (last `call_turns` 20:18:23).
+  Zero rows on Aug 25–26 across every line — while OpenAI's Costs API billed a
+  **normal $174.26 realtime day on Aug 25** (weekdays run $150–190). Calls were
+  answered and billed; nothing was recorded. Quality monitoring was blind.
+- The four stale rows are the calls in flight at the restart (tech CA4227…,
+  optical CA25ce… + CA2ca6…, surgery CA813e…, 20:12–20:17). Their terminal
+  updates died with the voice process's DB layer, and every repair mechanism
+  (60s DB reconciler, lifecycle coordinator, dead-air bookkeeping) lives in
+  that same process. The dashboard process recovered (its 06:00 UTC cost cron
+  kept writing) but only swept stale rows at boot, and it had not rebooted.
+- **No merge caused this.** Last code on main was Aug 21 (#223); it ran fine
+  Aug 22–24. Nothing from the Aug-26 session was ever merged (#225 closed
+  unmerged).
+
+**Fixes (branch claude/dr-screening-discovery-3qo5r1):** keep-alive now
+escalates to a pool rebuild after 3 consecutive failed pings (`recyclePool` in
+`server/db.ts`, decision in `server/services/dbSelfHeal.logic.ts`); a
+stale-call sweeper runs in the DASHBOARD process at boot + every 5 min closing
+rows past a measured 30-min ceiling from Twilio truth, marking
+`call_disposition='stale_reaped'`, never inventing durations, never touching a
+call Twilio says is live (`server/services/staleCallSweeper.ts` + tested logic
+file); Live panels stop rendering rows older than 30 min; the command center
+shows an amber "logging is DOWN" banner when the newest call_logs row is >2h
+old, so all-zero cards can never again pass as quiet lines.
+
+**Deploy markers** (grep after republish):
+`[DB KEEP-ALIVE] self-heal armed (build 2026-08-27)` and
+`[StaleCallSweeper] armed (build 2026-08-27)`.
+
+---
+
+## 10. The 2026-08-31 filing outage and the week's work order (written 09-01)
+
+### What happened
+
+The n8n Cloud account hit its **monthly execution cap at 20:16 UTC on
+2026-08-31**. The gateway refused every create-ticket **at the webhook, before
+any node ran**, and answered HTTP 200 with a body that is not JSON. Every queue
+line saw `Invalid JSON response from ticketing API: 200`; optical failed a step
+earlier, at `/lookup`, and so presented as a different defect.
+
+**Measured, not inferred:** 286 filing attempts rejected. 185 consecutive queue
+calls filed nothing, from 20:15:45 to 23:54:54. 43 optical callers were told
+their real office does not exist — Mission Hills, Downey, Glendale, Santa Ana,
+the whole map — because nothing was being looked up. One call ran 19 tool calls
+over 8 minutes with a patient on the line.
+
+It was found hours later because **staff told Wayne**. Nothing watched the
+ticket path: R1–R12 in `02-diagnosis-rules.md` do not cover it, which is the
+queue lines' entire job.
+
+**Recovery:** `TICKETING_SYSTEM_URL` flipped to the app directly
+(`https://ticketing-app--fabianwayne1.replit.app`), verified by traffic rather
+than by reading the secret. 107 distinct requests reconstructed from
+transcripts; 82 filed, 67 new tickets; 24 optical reconstructions still
+unfiled; 25 correctly refused, 24 of those for a missing surgeon.
+
+**A cost I caused during recovery:** 77 patients received a welcome SMS,
+because I fired 82 POSTs without checking the blast radius first.
+
+### The work order
+
+Wayne, 2026-09-01: *"let's kill standalone and core, two pipelines only … fix
+compliance, request lost, silence, and the other live now bugs and then stop
+there."*
+
+All of it is on `claude/determined-brown-o5qsft` / PR #244, which carries the
+full detail per commit. In short:
+
+- **Two pipelines.** `src/core/` and `src/standalone/` deleted. Casualty:
+  `replayRealCalls.test.ts`, the instrument standing instruction 8 names. No
+  replacement yet — outstanding.
+- **Compliance.** The database may word the no-IVR greeting; it may no longer
+  drop the recording disclosure or the 911 line. Lunch closure (12–1) added.
+  7am is after-hours by routing and was already right.
+- **Silence.** Overflow legs now carry a status callback and register with the
+  SIP conference lifecycle. 34 of 3,203 overflow calls had sat in >600s of
+  terminal silence against 0 of 927 on no-IVR.
+- **Request lost.** The four queue tools now persist a refused payload verbatim
+  to the existing outbox before returning; the outbox re-sends queue payloads
+  without re-validating them; retry window 15 min → ~3.5 h.
+- **The alarm.** `ticketFilingHealth.ts`, wired to systemAlertService every 5
+  minutes and to a red banner on the command center. Would have caught 08-31 at
+  **20:23:06**.
+
+### What the measuring turned up that nobody had asked about
+
+- **The model was overwriting the CallSid.** 130 surgery POSTs carried the
+  literal string `"unknown"`, while every one of the 2,926 queue calls had a
+  real CA-prefixed SID on its `call_logs` row. The adapter merged the model's
+  arguments over the injected context. No SID means no idempotency key: no
+  duplicate protection, no post-call enrichment, no outbox key.
+- **20% of queue POSTs are refused with HTTP 400** — 664 in 14 days, 602 of
+  them *"Missing required information: surgeon"* across 181 surgery calls, at
+  3.3 identical doomed attempts per call. That is what `retryable: true` on
+  every failure buys. It would also have poisoned the new outbox.
+- **`getValidatedTicketIds` rewrote ten live departments to the medication
+  queue.** Not firing at volume — only two callers reach it — but it is why the
+  queue tools could not be routed through the outbox.
+- **`lookup_patient` times out on 13–17% of queue calls** (6s budget, 475
+  events). First tool every queue call runs. Unfixed.
+- **Ticket write-back is NOT broken.** It was on the list as if it were;
+  97–98% on every clean day. The apparent gap was the 08-25/08-26 blackout and
+  my own recovery run showing up on the wrong side of midnight.
+
+### Open, and Wayne's to settle
+
+1. **Optical with no resolved office** — unassigned at high priority (what
+   surgery does with a missing surgeon), or routed to a default office? 62 of
+   the 107 requests lost to a gate in 14 days are exactly this.
+2. **May a request be filed with a name and a phone but no date of birth?**
+   23 more turn on it.
+3. **records went live on 2026-08-31** (4 calls, then 27) and nothing in the
+   repo says who pointed the number.
+4. **answering-service took zero calls on 09-01** through 13:22 PT, after 38
+   the day before and a steady 18–58 every weekday. Weekends are zero for it;
+   this was not a weekend.
+
+---
+
+# 2026-09-03 — the runtime cutover, and the first day of real evidence
+
+Three queue lanes moved off the OpenAI SIP core onto the Grok Media Streams
+runtime: optical 15:24:58, surgery 19:43:57, tech 19:51:10 UTC. Records stayed
+on the old core and is therefore a same-day control, which is the only reason
+any of the numbers below can be trusted.
+
+## The headline: it is a wash, and that is the right result
+
+| lane | old core | Grok runtime |
+|---|---|---|
+| tech | 49/73 = 67.1% | 46/66 = **69.7%** |
+| surgery | 22/44 = 50.0% | 18/32 = **56.3%** |
+| optical | (no arm — cut over at 15:24) | 28/56 = **50.0%** |
+| records | 14/29 = 48.3% | *did not move* |
+
+Neither difference is significant at these n. **A pipeline swap that changes
+nothing about outcomes is a successful pipeline swap** — the ear, brain and
+mouth were replaced end to end and the patients could not tell. What the
+runtime buys is not a better number today; it is that everything below is now
+fixable by us rather than by a vendor.
+
+Two real differences, on the same calls: turn detection is better (tech callers
+say 353 characters against 333, in fewer transcript lines, at identical
+duration), and the agent talks in about twice as many short lines.
+
+## The finding that mattered
+
+**A refusal the model cannot diagnose is a refusal it repeats.**
+
+| gate hit | calls | still filed |
+|---|---|---|
+| `date_of_birth` | 23 | **0** |
+| optical `location` | 11 | 9 |
+
+Two refusals in one codebase. One survivable, one terminal, and the difference
+is not severity — it is whether anything the caller says can clear the gate. It
+could not: the model was omitting `date_of_birth` from the tool call entirely,
+heard "I did not catch that date of birth", said that to the caller, the caller
+repeated the date, and the model resent the same argument-less payload. An
+unwinnable loop, dressed as a caller problem.
+
+Most of the day was spent fixing the parser — separators, whole sentences,
+two-digit centuries, Spanish months. Every one of those was a real bug. **None
+of them was this one.** What settled it was `dobShape`: a PHI-free shape of what
+actually arrived (digits → `#`, letters → `a`), which read `"(none)"` on five
+refusals out of five within twenty minutes of going live.
+
+## Where the day's requests went
+
+53 substantive queue calls produced no ticket; 2 correctly so. The other 51:
+23 the date-of-birth gate, 12 asked for a human and hung up, 7 where no tool
+ever ran, 9 other. The date-of-birth calls average 2m49 — the longest in the
+set. Those callers gave everything asked of them and were failed at the end.
+
+## Identity is the root cause under most of it
+
+Caller-ID pre-context produced a usable name on **zero of 143** substantive
+queue calls, so nobody heard "Am I speaking with…?" all day. Of 132 distinct
+callers, **2** are in `si_persons` — the 3,774-row table pre-context reads — and
+**100** are in `patients_master`, which has 915,843. `lookup_patient` separately
+reads the Operations Hub appointment book rather than the mirror.
+
+That single fact explains the shape of the losses: a certain identity match is
+what lets the filing handler fall back to a verified date of birth, so calls
+with one mostly filed and calls without one mostly did not.
+
+## Shipped, and needing a pull before any of it counts
+
+- `MissingFields.fix` — a channel that tells the model what IT got wrong,
+  separate from `message`, which is what the agent says.
+- The teardown request sweep, wired into `voiceRuntime` after the call_logs
+  write. **It recovers only 6 of the 53 losses**; 47 skip on "no name, no
+  ticket", because the calls that get lost are exactly the calls where
+  identification failed.
+- "Lead the ask" — the operator's ruling, in the tool schemas so all four lanes
+  move together: last name, then "your date of birth, starting with the month,
+  then the day, then the year".
+- Greeting-already-played, appended by the runtime rather than the prompts.
+- Records trimmed 1,907 → 1,679 tokens, with ceilings added for optical and
+  records, which had never had one.
+
+## Open, and Wayne's to settle
+
+1. **"No name, no ticket" costs 47 of 53 recoveries.** The ruling was about what
+   identity goes on a swept ticket. The calls it blocks are the ones where we
+   never identified anyone — which is the whole population the sweep exists for.
+2. **Point pre-context at `patients_master` instead of `si_persons`** (2 → 100
+   of 132 callers), and `lookup_patient` at the mirror before the schedule. Both
+   are ticket-path changes and need a before/after number. Caveat that must
+   travel with them: 75 of those 100 numbers resolve to more than one person, so
+   this buys a name to CONFIRM, never an identity.
+3. **Records is still on the old core** and visibly missing the rulings shipped
+   to the runtime lanes — it used the "someone will become available" wording
+   #265 forbids, at 23:54.
+4. **Turkish months** — one evidenced call, and the table's own rule is evidence
+   first. Add now on one call, or wait?
+5. **#53 medical-safety wording** for optical and records. Needs clinical
+   language from Wayne; not to be invented.
+
+---
+
+# 2026-09-04 — the instruments, after Wayne said the Observatory was wrong
+
+He was right, and it was one missing column.
+
+## The Observatory had stopped counting three of the four queue lanes
+
+Measured over every call since 09-01:
+
+| pipeline | calls | rows carrying `agent_id` |
+|---|---|---|
+| old core (SIP) | 1,315 | 1,315 (100%) |
+| grok runtime | 239 | **0** |
+
+The runtime opened its `call_logs` row with the lane slug and nothing else.
+Five reports join `agents` on the uuid — the Observatory scorecard, the
+Observatory today view, the cost analytics (`routes.ts:2281`), the quality
+and sentiment analytics (`routes.ts:2463`), and `storage.ts:523`. So at
+15:24:58 on 09-03, the moment optical cut over, it stopped existing in all
+five. **Not wrong, ABSENT** — and an absent lane is indistinguishable from a
+quiet one, which is why nothing looked broken.
+
+`shared/schema.ts:549` had anticipated exactly this in a comment — *"even if
+agentId is null"* — but nothing implemented the fallback.
+
+Fixed at the source rather than by teaching five call sites a second join:
+`src/runtime/agentIdentity.ts`, one cached lookup per lane per process. A
+miss is deliberately **not** cached, so a lane whose agents row is added
+later is picked up without a redeploy and its marker keeps printing until it
+is. **259 existing rows were backfilled** from the slug they already carried
+(every slug matched exactly one agent; reversal snapshot in
+`call_logs_agent_id_backfill_20260904`), so the cutover day is visible again.
+
+The Observatory also had **no concept of `voice_provider` anywhere** — server
+or client — so the biggest thing that has ever happened to these agents was
+invisible on the one screen built to watch them. Each card now names its
+pipeline and warns *"mixed pipelines — do not read these as one population"*
+on a lane that cut over mid-day.
+
+Left alone, deliberately: 98 rows with a NULL `agent_used` (Nov–Jan), 14
+`greeter`, 5 `claude-as`. No current lane among them.
+
+## The Grok cost was never a measurement
+
+All 241 Grok rows carry `cost_is_estimated = true` and `cost_reconciled_at`
+NULL. Both columns have existed since the schema was written and had never
+been used on any row, either pipeline. The price is
+`Math.ceil(duration * 8/60)` from a constant nobody had checked against a
+bill.
+
+| | |
+|---|---|
+| summed seconds | 25,259 (421 min) |
+| exact at the published $0.08/min | $33.68 |
+| stored | $34.86 |
+| overstatement from `Math.ceil` alone | **$1.18 = 3.5%** |
+
+Zero rows deviated from the formula, so the bias is the rounding, applied in
+the same direction 241 times.
+
+Wayne's method is the right one and it is now built: xAI run a **management
+API** (`management-api.x.ai`, a separate credential from `XAI_API_KEY`) with
+`POST /v1/billing/teams/{team}/usage` for spend per day and
+`GET .../postpaid/invoice/preview` for `unitPrice` and `numUnits`. A flat
+per-minute rate means a day's authoritative total can be split across that
+day's calls by seconds — an allocation that **sums to what xAI actually
+charged**, and that absorbs anything we are not counting. xAI bill
+`$0.004 / text input` separately from the audio minute and we never have.
+
+`invoice/preview` is the sharper instrument of the two, because `numUnits` is
+how many units **they** counted, which is the only way to find out whether
+they bill the duration Twilio reports.
+
+**It is dormant until `XAI_MANAGEMENT_KEY` and `XAI_TEAM_ID` exist.** It says
+so once at boot and does not schedule.
+
+## Also shipped today
+
+- **The date-of-birth gate stops being terminal** (`src/tools/dobEscape.ts`).
+  Ask once with the coaching wording, then file anyway marked `unavailable`
+  (never given) or `unmatched` (given, unreadable). This is the same ruling
+  Wayne gave for optical's office on 09-01, and the cutover day measured both
+  side by side: the location gate **had** that escape and recovered 9 of 11;
+  the date-of-birth gate did not and recovered **0 of 23**.
+  The status goes at the top of the description, not in the birth columns —
+  those are `varchar(2)/(2)/(4)` in the ticketing app and the word does not
+  fit. A dedicated ticket field is the proper fix and is proposed, not built.
+
+## Open, and Wayne's to settle
+
+1. **The two xAI credentials.** `XAI_MANAGEMENT_KEY` (Console → Settings →
+   Management Keys — NOT the inference key) and `XAI_TEAM_ID`
+   (console.x.ai/team/default/settings/team). One reconciliation run then
+   answers whether $0.08/min is the real rate and whether the text-input
+   charge is material.
+2. Everything still open from 09-03 below, unchanged: "no name, no ticket";
+   pre-context → `patients_master`; records on the old core; Turkish months;
+   #53 medical-safety wording.
+3. **Records stays untouched** — HHS corrective action plan work.
+
+---
+
+## PCP and records on the runtime — what is actually left (2026-09-04)
+
+Measured through `realLanes.test.ts`, the one harness that touches the real
+agent tree, with a transfer injected so pcp could be examined in the
+condition it would actually run in — which nobody had ever done, because pcp
+has spent its whole life on the refused side of that gate.
+
+**Both lanes bind cleanly today.** No skipped tools, no `strict` on any
+schema, no stringified prompt closure, a Grok voice rather than the
+registry's `sage`, and the knowledge pack correctly prefixed.
+
+| | pcp | records |
+|---|---|---|
+| tools resolved | 8, none skipped | 6, none skipped |
+| output guardrails carried | **3** | **0** |
+| prompt, total chars | 18,360 | 16,035 |
+| the lane's own share | **~2,260 tokens** | ~1,680 tokens |
+| what refuses it today | no transfer injected | nothing — it is served |
+
+### records
+
+**It is already servable and always was.** The only reason it is on the old
+core is that nothing has pointed it at the runtime. Nothing needs building.
+
+The thing to correct in this document's own earlier note: records is not
+"missing every ruling shipped to the runtime lanes". Its #265 wording landed
+in `recordsAgent.ts` at 21:04 UTC on 09-03 and the violation was observed at
+23:54 — **nearly three hours later, because the commit is on
+`claude/determined-brown-o5qsft` and has never been deployed.** `agent_prompts`
+is not read by the call path, so the prompt is the file, and the file is
+right. The split that actually matters:
+
+- **Prompt- and tool-level rulings** — the #265 wording, lead-the-ask, the
+  date-of-birth escape, `resolve_location` — records gets all of these on
+  merge and pull, **on the old core, with no cutover.**
+- **Runtime-level** — greeting-already-played, the VAD threshold, the tool
+  ceiling, the teardown sweep, `agent_id`, Grok cost — records gets **none**
+  of these until it moves.
+
+**Its one real gap is that it carries zero output guardrails**, on either
+pipeline (#53). So does optical, surgery and tech. See below.
+
+### pcp
+
+Everything is built. Two things are not settled, and neither is code:
+
+1. **The warm transfer has never been proven on a live call** (#30, six test
+   calls with Wayne, never run). Transfer is the entire point of this lane.
+   It is unit-tested through a fake Twilio and mounted on the runtime, and
+   that is not the same claim.
+2. **`PCP_HUMAN_AGENT_NUMBER` must be set** or the lane answers, sounds
+   healthy, and fails every transfer at `resolveHandoffDestination`. This is
+   now reported per lane at boot and on `/voice/health` rather than
+   discovered on a call.
+
+And one measurement worth acting on before it takes traffic: at **~2,260
+tokens** its prompt is a third larger than the trimmed queue lanes, and it
+has never been trimmed for Grok. The standing note is *"Grok requires minimal
+prompting, we should not be near our ceilings."*
+
+#### The pcp prompt, measured section by section (2026-09-04)
+
+Built the net before touching anything: `src/agents/pcpPromptRulings.test.ts`,
+the pcp equivalent of `queuePromptRulings.test.ts`, which pcp never had —
+because pcp spent its whole life refused by the runtime, so nobody measured
+it. **23 rulings, matched on meaning rather than phrasing**, each traced to a
+standing instruction or to a dated incident already recorded in `pcpAgent.ts`.
+It is green against the prompt as it stands today, which is the only way to
+tell a trim from a regression later.
+
+Then the coverage runs the other way — delete each section and see which
+rulings stop holding:
+
+| section | ~tokens | unique rulings lost if deleted |
+|---|---|---|
+| `## FIRST, ALWAYS: WHAT IS THIS CALL ABOUT?` | 391 | 4 |
+| `# TWO THINGS ABOUT THE LAST THIRTY SECONDS` | 287 | 2 |
+| `# IF A PATIENT REACHES YOU, TAKE THEIR REQUEST` | 261 | 2 |
+| `# WHEN A TOOL SAYS NO` | 249 | 2 |
+| `# ONE QUESTION. THEN STOP TALKING.` | 226 | 2 |
+| `# CONNECTING SOMEONE TO A PERSON` | 167 | 3 |
+| `# HOW YOU SPEAK` | 130 | 2 |
+| `## HOW YOU KNOW WHAT TO ASK` | 121 | **0** |
+| `# SAFETY` | 94 | 2 |
+| `# THE DIRECTOR DECIDES, NOT YOU` | 71 | **0** |
+| `# MEDICAL RECORDS` | 68 | 1 |
+| `# WHAT YOU DO` | 49 | **0** |
+
+**THE FINDING: the pcp prompt is dense, not fat.** Twenty-three rulings in
+2,260 tokens. Only three sections carry no unique ruling and together they are
+241 tokens — and two of those three are the SAME instruction stated twice
+(*"ask only the next question `record_pcp_intake` gives you"*), which is the
+one honest redundancy in the file. Even they are not pure duplicates:
+`# THE DIRECTOR DECIDES` alone says the director also decides whether a
+transfer is available, and `## HOW YOU KNOW` alone carries the four-step loop
+and *"you do not have the list"* — the #201 lesson, where showing the model
+the intake order stopped it inventing a sequence and started it reciting one.
+
+So a trim that gets pcp near the queue lanes' 1,500–1,800 means **dropping
+rulings, not prose**, and which ones is Wayne's call, not mine. The three
+zero-ruling sections are named in the test file with the reason each is kept,
+and a NEW section carrying no ruling now fails rather than joining them
+quietly.
+
+The ceiling is pinned at **2,300 — where the prompt already is.** It asserts
+one thing today: that pcp does not grow while nobody is looking. Lowering it
+is the point of the trim.
+
+### The guardrail gap, with a number on it at last
+
+The four queue lanes carry **no output guardrails on either pipeline**. Before
+proposing the existing `medicalSafetyGuardrails` for them, they were dry-run
+over **400 real queue calls / 2,704 agent lines**:
+
+- **One** trip in the whole corpus, and it was **wrong** — the agent reading
+  the caller's own words back ("you mentioned you have questions about your
+  recovery from cataract surgery"). In enforce mode that line is cut
+  mid-sentence.
+- With the exclusion added for it: **zero** trips.
+
+So the cost of switching them on is now measured at nothing, and the same
+pattern was misfiring on no-ivr, after-hours and azul-scheduling the whole
+time. **Turning them on for the queue lanes is still Wayne's call** — #53
+says the clinical language is his, and the generic pair may not be what he
+wants for records in particular.
+
+---
+
+## 11. Why queue calls do not file — the 2026-09-08 taxonomy (written 09-09)
+
+Wayne, 2026-09-09, after reading the overnight report: *"How can eight people
+not get a ticket? … Why are these tickets not being filed, man? I need to
+know why."* And then, on the answer: *"There was a patient on the phone that
+gave their date of birth digit by digit four times, and we fucked that up."*
+
+**Everything in this section is a count with its denominator and window.
+Where a cause is not established, it says so.** The full tables live in
+`/CLAUDE.md` under "WHY QUEUE CALLS DO NOT FILE"; this is the narrative and
+the decisions.
+
+### The shape of the loss
+
+One full business day (2026-09-08), queue lanes, `duration >= 30`:
+**446 substantive calls, 255 filed, 191 produced no ticket.**
+
+The two dominant causes are a filing gate refusing (62) and the caller never
+being properly transcribed (77 with 0 or 1 caller lines). Below those: 26
+calls where tools ran and a filing tool was never called at all, 14 with no
+tool events, and 12 where the filing tool returned a ticket number that no
+ticket carries — **that last group is not established as lost**, it may be the
+known call-attribution defect.
+
+### The date-of-birth gate, root-caused
+
+**75 calls hit it, 53 filed nothing.** The chain, each link measured:
+
+1. **The model sent no `date_of_birth` argument on 75 of 75.** `dobShape` is
+   `(none)` on every refusal event. The parser was never asked a question.
+2. **51 of the 75 callers had already given a date** — a 19xx year or a month
+   name in their own transcribed lines. A lower bound; it counts two signals.
+3. **42 of the 75 end with that refusal as the last tool event.** The model
+   does not try again.
+4. So the "ask once then file anyway" escape (`dobEscape.ts`, built 09-04 to
+   Wayne's ruling) **cannot fire on those 42** — it needs a second attempt
+   that never comes. It was built for a retry loop; this failure is the
+   opposite shape.
+
+**Why the model omits the field is NOT established.** Checked and ruled out:
+the `fix` channel does reach the model (`agentBinding.dispatch` stringifies
+the whole result), and the schema is passed through unchanged with
+`strict: false`. `date_of_birth` is deliberately not in `required`.
+
+### The runtime made this gate worse, and there is a same-day control
+
+Share of substantive calls refused for `date_of_birth`, optical+surgery+tech:
+old core ran **3.2%–8.7%** over 08-28..09-02 and **1.6%** on 09-03 before the
+cutover; the runtime read **12.4%** the same day after it, then **14.8%**
+(09-04) and **18.3%** (09-08). Same lanes, same callers, same tools.
+**This is the before-number for the `docs/BACKEND_HANDOFF.md` rule.**
+
+### A second, independent defect on the same call
+
+`normalizeDobParts` refused `"0 1 0 4 58"` — five numeric groups is neither
+three nor four, so the rule that correctly refuses a phone number refused a
+birthday. That is what the caller on `CA4475d6f1b265c4c6824ff0f241d159f9`
+said, twice, in a 329-second call that filed nothing. A Spanish caller on
+`CAdc9f9667694dd95382985ad5f86f57b4` was lost the same day to
+`"Cero tres veintidos del cincuenta"`.
+
+**Fixed** by `readDigitStringDate`, which runs only after the existing reader
+refuses and therefore cannot change any answer it already gives. Phone numbers
+and digits inside a sentence are still refused. **Spelled-out digits in either
+language are still refused and are not fixed.**
+
+**Both defects were live on that one call.** Even if the model had sent the
+field, the parser would have refused it.
+
+### The runaway-loop check went blind the moment the ceiling shipped
+
+`toolCeiling.ts` refuses at `dispatches >= 40`, so a call can reach 40 and
+never exceed it. The check published as its proof looked for `> 40`. Measured
+09-09 over all grok rows: `> 40` = **1** (the pre-ceiling 118-dispatch optical
+call), `= 40` = **5**, between 25 and 39 = **0**. The zero in the middle is
+what makes it unambiguous — 40 is the ceiling being hit, not a value calls
+drift to. Two of the five were on 09-08. Corrected to `>= 40` in `/CLAUDE.md`
+and `docs/PULL-CHECK.md`. **What each of those five loops actually was has not
+been established.**
+
+### A measurement trap worth keeping
+
+Surgery's hourly barely-heard rate on 2026-09-08 ran from **0% to 42.9%**
+across nine business hours. Any single hour above the 25% watch threshold is
+inside that spread. Do not report an hour of it as a spike.
+
+### Open, and NOT decided here
+
+- The transcript fallback — reading the date from what the caller actually
+  said instead of waiting for the model to relay it — **is not built.** It is
+  where the 53 actually go. `transcriptLog.ts` holds the caller lines in
+  memory and only `mediaStreamBridge.ts` can see them.
+- **Wayne's question, unanswered:** when a ticket files without a date of
+  birth, does it carry `DATE OF BIRTH UNMATCHED` at the top of the description
+  (already built), or route to a named person to verify first?
+- Whether the 77 barely-heard calls are dead air or lost callers.
+- Whether the 12 ticket-number-without-a-ticket calls exist under another SID.
+
+---
+
+# 2026-09-09 — the date-of-birth gate, and the half of it nobody had built
+
+## The measurement this rests on
+
+2026-09-08, one full business day, queue lanes (optical/surgery/tech/records/
+pcp), calls >= 30s: **446 substantive, 255 filed, 191 produced no ticket.** The
+single biggest cause is the date-of-birth gate: **75 calls hit it, 53 filed
+nothing.**
+
+The chain, all measured:
+
+1. In **51 of the 75** the caller's own transcribed words contain a birth year
+   or a month name. They answered.
+2. **The model called the filing tool with no `date_of_birth` argument. 75 of
+   75.** `dobShape` reads `(none)` on every refusal, across surgery, tech and
+   optical.
+3. Nothing to parse, no verified record to fall back on, so `decideDobEscape`
+   returns `askAgain: true` on the FIRST refusal.
+4. **In 42 of the 75 that refusal is the last tool call of the call.** The model
+   never retries, so the "ask once then file anyway" escape (`dobEscape.ts`,
+   the 2026-09-04 ruling) never gets its second attempt. **It is unreachable in
+   the majority of cases.**
+
+Share of substantive queue calls refused for `date_of_birth`, optical + surgery
++ tech — the baseline any "after" number has to beat:
+
+```
+old core 08-28..09-02   3.2% - 8.7%
+old core 09-03          1.6%   (same day, pre-cutover)
+grok     09-03         12.4%   (same day, post-cutover)
+grok     09-04         14.8%
+grok     09-08         18.3%   75 calls, 53 filed nothing
+```
+
+## What shipped
+
+**Two independent defects, and only the second one can move that number.**
+
+### 1. The parser could not read a birthday said one digit at a time
+
+Probed against the real calls:
+
+```
+"0 1 0 4 58"                        REFUSED   CA4475d6f1b265c4c6824ff0f241d159f9, said 4x
+"Cero tres veintidos del cincuenta" REFUSED   CAdc9f9667694dd95382985ad5f86f57b4, Spanish
+"01 04 58" / "January 4th, 1958"    parse fine
+```
+
+`readDateFromAnything` assembles a date out of three numeric groups or four. A
+caller spelling their birthday out produces **five**, which is neither, so it
+fell through to the branch whose job is refusing phone numbers.
+`readDigitStringDate` re-reads the digits as one continuous string, and runs
+only after the existing reader has already refused — so by construction it
+changes no answer the parser gives today.
+
+Mutation-checked rather than asserted: the every-token-is-digits guard is
+load-bearing (removing it fails three tests, two of them pre-existing — a
+sentence's digits joined together fabricate a real, in-range, wrong birthday);
+the 6-or-8 length check **earns nothing today** and the comment says so.
+
+### 2. Nothing carried the caller's answer to the filing tools — this is the half that matters
+
+`src/runtime/transcriptLog.ts` held the caller's lines in memory the whole
+time. Only the bridge could see them. Every fix before this one depended on the
+model relaying what the caller said, and on 75 of 75 refusals the model did not.
+
+`src/tools/spokenDob.ts` bridges that gap: the bridge posts the record as it
+grows (`mediaStreamBridge.ts`, on caller transcript), and the four filing tools
+read the answer back by CallSid as a THIRD source in the `if (!parts)` chain —
+after the model's argument and after `verifiedDobFor`, never replacing either.
+
+**The guard is adjacency, and it is the whole design.** Filing a wrong birthday
+is worse than filing none, and callers on these lines say surgery dates and
+appointment dates constantly — `valid()` cannot tell those from a birthday. So
+a date counts only when the caller said it while ANSWERING a request for one:
+inside the turn following an agent line that *opens a window*, ending at the
+next thing the agent says. Same TTL, ceiling, recency eviction and sentinel
+rule as `gateAttempts.ts` and `verifiedIdentity.ts`.
+
+**Which agent lines open a window is the discriminator** (Codex P1b on #275,
+fixed in #280 rather than by first-vs-last date inside a window). A line
+opens one only when it REQUESTS the date or REQUESTS confirmation of it — a
+born-when phrase, a request/confirm cue (`may I have`, `is that`, `starting
+with the month`, `need your date of birth`, `except your date of birth`), a
+question mark whose question itself is about the date of birth, or a re-ask
+follow-through (`mis-heard` / `once more`) on the same agent line even when
+that cue sits in the next sentence. "I have your date of birth, thank you.
+Anything else?" mentions the subject and then changes topic; it does not
+open a window, so a later surgery date in the reply cannot become the
+birthday. "I have January 4th 1958 — is that your date of birth?" still
+opens one, so a real correction is captured.
+
+**#280 over-narrowed the ask.** After republish, 3 of 13 live re-asks
+stopped opening a window: "I just need your date of birth to get this
+logged." (CAe3de7ada), "I have everything except your date of birth."
+(CA74811ee4), and "the date of birth may have been mis-heard. Could you
+give it to me once more?" (CAa6a32e9c). Those are asks. The P1b
+acknowledgement is not. The extra cues are the ones that separate them.
+
+**Same-turn "sorry I meant" replaces the first date** (P1c). First-date-
+within still blocks "and my surgery is September 12th". It does not block
+"January 4th 1958" / "Sorry, I meant January 5th 1958" — that later date
+is the one the caller is standing on.
+
+**A later empty window does not clear the date; a refused attempt does**
+(Codex P1a). "Yes that is correct" yields no date and leaves the earlier
+value standing. "No, zero three twenty two of fifty" is an attempted date
+the parser refuses (`dobShape` / month word / two-plus spoken number words,
+and `readDobQuietly` returned nothing). That clears the answer, and
+`noteSpokenDob` deletes the cache entry — `if (!iso) return` used to leave
+the rejected value for the four filing tools to write.
+
+Every guard was mutation-checked against a scratch copy: dropping adjacency
+fails 3, letting the window run past the next agent line fails 1, taking the
+first answer instead of the last fails 1, using the announcing parser instead
+of the quiet one fails 1, severing the bridge post fails 2, and severing the
+third source fails one test in each of the four lanes.
+
+`readDobQuietly` exists because the speculative reader must not touch the
+instruments: `[DOB] refused a date of birth in the shape …` is the documented
+live counter this whole finding rests on, and Grok re-emits a caller turn up to
+five times, so an announcing parser would bury the real refusal count under
+guesses no tool ever made.
+
+## What this does NOT close
+
+- **Spelled-out digits still refuse**, in both languages: `zero one zero four
+  five eight`, `cero tres veintidos del cincuenta`. That cost a Spanish caller
+  their request on 09-08 and it is unchanged.
+- **The DOB question is recognised in English and Spanish only.** The runtime's
+  own language table also carries Tagalog, Korean, Armenian, Farsi,
+  Vietnamese, Russian and Arabic. A caller asked in any of those gets no window
+  opened at all — the same known gap as the month table, needing the same
+  evidence first: which phrasings actually arrive, in real transcripts.
+- **The other no-ticket buckets are untouched**: 77 calls where the caller was
+  transcribed 0 or 1 times (barely-heard is still ~2x the old core after the
+  VAD drop to 0.6, and optical went the wrong way, 8.5% -> 21.5%), and 26 calls
+  where tools ran and a filing tool was never attempted at all.
+- **No production number yet.** BACKEND_HANDOFF §0 is explicit that green tests
+  have never prevented one of these regressions. The control is
+  `[DOB] refused … (none)` falling; the two new markers only prove the paths
+  are live. Nothing here has been measured against a real call.
+
+## Open, and Wayne's to settle
+
+- **Unanswered from 09-08, and still blocking nothing but worth an answer:**
+  when we file without a date of birth, does the ticket say
+  `DATE OF BIRTH UNMATCHED` at the top of the description (already built), or
+  route to a named person to verify first?
+- **A test-fixture question.** The regression tests for both halves carry
+  literal spoken dates, because that is what pins the parser. The standing PHI
+  rule says dates of birth never go into git. The existing suite has done this
+  since it was written (and one commit on the merged branch scrubbed a name and
+  a number from a fixture while leaving dates), so the precedent is dates stay
+  and identifiers go — but it is his rule and it should be his call, not one
+  inherited from a file.
+
+---
+
+## 12. The night of 2026-09-16/17 — one worksheet, nineteen ships, twenty-one Codex rounds (written 09-17)
+
+**The mandate** (Wayne, 2026-09-17): *"keep working through the worksheet,
+don't wait on me … knock out as many relevant tasks as possible and have
+everything lined up for me at 5 am."* 5am Pacific is 12:00 UTC. The rulings in
+force all night: "no name, no ticket" STANDS; a mistake is a tool that should
+have been called and was not, a ticket not generated, or a question asked
+several times; *"stop chasing … these less than one percent codex findings"*
+— a Codex finding is measured before it is taken, and a declined one carries
+its number on the thread.
+
+**The method, every time:** the 2026-09-16 corpus (667 substantive calls, every
+one read) → the failure named per call, not per category → a test that goes
+RED without the fix → a mutation check against a scratch copy of the FIXED
+files → a marker row in `CLAUDE.md` with the number it moves and the guard
+beside it → a query in `docs/observatory/AFTER-MEASUREMENTS-20260917.md` that
+was executed against the live databases. Nothing merges without a Codex
+greenlight; the operator merges.
+
+**Where it is:** `docs/WORKSHEET-20260917.md` is the driving document and its
+*FOR 5AM* block is the hand-off. **PR #321** carries v39–v56 — eighteen ships,
+each with its row in the marker table — plus the round-by-round record of
+**twenty-one Codex reviews absorbed** (every finding taken or declined on a
+measurement, every thread answered and resolved). **v57, the surgeon ask, was
+built and then WITHDRAWN on the operator's ruling** — *"if it's only 9 callers,
+I would remove if we are unsure"* — after six consecutive rounds of concurrency
+findings on the machinery, the last of which no constant could close. Its
+measurement stands and is kept; the number v57 is retired rather than reused.
+Suite 258 files / 4,714 tests, root and client typecheck clean.
+Live Replit was still on v24 when this was written; the deploy marker to look
+for is `voice-runtime-v56-an-unvoiced-answer-cannot-end-the-call-20260917`.
+
+## What shipped, by the number it moves
+
+- **v39** the four queue lanes disclose the recording (0 of 401 calls did on
+  09-16); **v40** no invented callback number (*"ending in ."*, *"ending in
+  mous"*); **v41** the after-hours line asks for a date of birth once, then
+  files (11 calls asked 3+ times, one 15); **v42** a filed ticket is never
+  spoken as a failure; **v43** a tool stops reading its own rule aloud.
+- **v44/v45 — the operator's explicit ask, the Observatory and the cost:**
+  every runtime call gets a dual-channel recording and timed turns
+  (`recording_url` NULL and `call_turns` empty on all 4,564 runtime calls
+  since the cutover), and `daily_grok_costs` puts xAI's reported voice spend
+  beside what the rows were booked at, one row per day, refusals included.
+  The 2026-09-12 row that allocated $37.43 onto ONE 104-second call was
+  corrected on the Hub.
+- **v46** a success loop is a loop (17 calls since 09-10 looped one tool
+  11–35 times, 16 with no ticket); **v47** a phone match is a candidate — the
+  after-hours line stops reading a phone-matched patient's appointment to
+  whoever is calling (44 of 365 calls in nine days); **v48** the ambiguous
+  lookup is countable; **v49** the runtime grades its own calls at teardown
+  (p90 hangup-to-grade lag was 502–720 minutes at peak) and a real
+  conversation ending in dead air is `completed`, so it is graded and synced.
+- **v50** the second identity miss ends the ask (`LOOKUP_MISS_LIMIT = 2`, a
+  dial); **v51/v53** a CERTAIN identity reaches the call row on the runtime
+  and on no-ivr (`patient_found` was NULL on every substantive call on every
+  lane for seven days); **v54** the affirmed name picks the person among
+  several on a phone (26 DOB refusals on recognised callers on 09-16, all
+  `no_entry`).
+- **Round 12 of the review found a second large gap the same way v52 was
+  found — by measuring instead of assuming:** three quarters of agent-filed
+  tickets (291 of 383 on 09-14, 280 of 368, 296 of 387) carried NO quality
+  score or outcome while every call row had one, because the five-minute
+  sync could snapshot the row before the grade landed and nothing ever
+  re-opened it. The grade's write now re-opens the sync and the sync's
+  mark-done refuses a row whose grade landed mid-flight.
+- **Round 13 closed the last door on the v56 wait:** `terminate_call`
+  emitted FIRST in a multi-tool response found no sibling to wait for. An
+  end-call now waits for its batch boundary — the response's done, or the
+  late-batch window, which is armed at the late event's arrival so a waiting
+  end-call can ever see it — as well as the siblings it has seen.
+- **Round 14 hardened the v45 day table twice:** the preservation decision
+  is now one transaction under a per-day advisory lock (two replicas could
+  otherwise interleave and a failed run overwrite a reconciled row), and a
+  refusal that could not read the day writes UNKNOWN rather than 0 calls /
+  $0.00 — a dash on the dashboard, never a measured empty day.
+- **v52 — the headline finding of the night, read from the Hub's own postgres
+  log:** the per-call cost UPDATE had been refused at PARSE 3,749 times a day
+  since 2026-09-04 (`operator is not unique: unknown + unknown`), so
+  `twilio_cost_cents` was written on 5–25% of calls instead of 100% and 4,295
+  rows carry a provider-only total. Fixed with the column's type on the bound
+  value; the backfill is an admin recalculation and the operator's call.
+- **v55** the follow-up after a fast tool refusal no longer waits for a
+  `response.done` that already passed — the largest lost-request class on the
+  runtime that nothing had a name for (26 · 25 · 42 · 9 · 15 dead-air calls a
+  day since 09-10), with a PHI-free `follow_up_summary` row per call so
+  tomorrow's data says whether the hypothesis was right; **v56** an unvoiced
+  tool answer cannot end the call (38 PCP calls on 09-16 hung up on the
+  agent's own question, nine with a found appointment never spoken).
+- **Round 15 (09:44) made the sync's failure writes atomic:** a snapshotted
+  `retries + 1` could clobber the grade or recording writer's reset to 0 and
+  strand a row at 3; both writes now add one in the database. Measured first
+  (0 rows at 3, 4 at 2 in 14 days) and taken as one expression.
+- **v57 — BUILT AND WITHDRAWN 2026-09-17; the measurement below stands and the
+  code does not ship (task #75's after-number, never taken since 09-02):** 96 surgery calls took the surgeon refusal over
+  09-08..09-16, 46 left no ticket anywhere, the exit fired on 57 calls and on
+  none of the 46. On every lost call that reached a third POST the attempts
+  landed 1–100 ms apart — one model response — so a counter noted after each
+  refusal read 0 on all three. `claimGateAttempt` / `settleGateAttempt`: claimed
+  before the POST (refusals + in-flight), counted only when the app refused for
+  the surgeon. Also read on the way, and CORRECTED at 10:45: the exit files
+  into department 2 and moves nothing — all 55 of its tickets were created
+  there and 37 were then moved BY A PERSON (`department_transferred`, an actor
+  on every one): 19 to Technicians Support, 13 to the HVA Hub, 5 elsewhere.
+  That, not the app, is why dept-2 provider fill held at 100%. Whether the
+  triage is the exit working or the ask being spent on the wrong queue's
+  caller is Wayne's; the first reading ("the app re-routes") was wrong.
+  **Withdrawn because the claim serialises POSTs that used to go out in
+  parallel, and rounds 16 through 21 each found a new interleaving in the
+  machinery holding it up — round 21 being uncloseable by any constant, since
+  three serialised 15 s client timeouts is exactly the 45 s tool watchdog.
+  9 callers over seven business days did not justify it. The next attempt
+  flags on the SECOND refusal, where no batch of three exists and nothing is
+  serialised.** Rounds 17 through 21 below describe machinery that is no longer
+  in the PR; they are kept because the reasoning is what the next attempt has
+  to avoid repeating.
+- **Round 16 (10:11) caught both of the above one step further:** the sync's
+  failure write still stamped *GAVE UP* from the snapshot (now a CASE in the
+  same statement, read back with RETURNING, PREPAREd on the Hub), and v57's
+  in-flight count could flag the third of a batch whose first two were 503s —
+  a claim now waits for the attempts ahead of it and reads confirmed refusals
+  only. Exposure 0 in the window on both; taken because both doors were new.
+- **Round 17 (10:26) caught the wait one step further:** one 20 s deadline
+  for the whole queue, where each predecessor's POST may take 15 s — the
+  third of a slow batch was released at 20 s reading one refusal of two. Now
+  one bounded wait per predecessor, re-armed on each settle (`34d3ecc`; 3
+  mutations, 3 caught). Exposure 0 in the window; taken because the wait is
+  this PR's.
+- **Round 18 (10:38) caught the wait one step further again:** every waiter
+  started its own bound on arrival, so one predecessor past the bound — and
+  the create path can legitimately take ~21.5 s with its warm-up — released
+  all of them together. Claims are now queued and released one at a time,
+  and the floor is 25 s, above the longest legitimate attempt (`8a11864`; 3
+  mutations, 3 caught).
+- **Round 19 (10:47) caught the queue against the bridge:** with a stuck
+  first attempt the third claim waited two bounds — 50 s — and the runtime's
+  45 s tool watchdog tears the call down first. A bound that passes now lets
+  go of the stuck attempt, so a claim's total wait is one bound plus the real
+  duration of what answers (`1b6eb33`). Base rate: 0 of 2,532 surgery POSTs
+  in 30 days over 20 s, max 14.1 s.
+- **Round 20 (10:58) found the real hole under all of that:** the ticketing
+  client cleared its 15 s timer at the HEADERS and read the body unbounded,
+  so a late refusal was possible after all. Fixed at the root (`3f66bc9`):
+  the timer covers the body, an abort mid-body is a timeout and not a
+  bad-body 4xx, and the floor is 23 s so the queue fits under the 45 s
+  watchdog. Real-client test; 3 mutations, 3 caught. **The client half of this
+  STAYS in the PR** — it is a real fleet-wide defect (a hung body read hung a
+  ticket POST forever, on every lane) that the surgeon work merely uncovered.
+  The floor went out with the rest of the claim.
+- **Round 21 (11:09) was declined on the base rate, and then the ship it was
+  about was withdrawn entirely.** A stuck first attempt plus a full-length
+  second leaves the third claiming at ~44.5 s against the 45 s watchdog. That
+  needs a settle that is LOST rather than slow, which round 20 had already
+  turned into an escaped exception; on measured data the worst batch of three
+  lands at 42.3 s. No constant closes it, which is what made the operator's
+  remove-it ruling the right call rather than a seventh round.
+
+**Live database objects, in no branch:** four partial indexes on `call_logs`
+(05:45 UTC, DDL and reversal in the pack) because the four 5-minute sweeps
+each seq-scanned the table; and the corrected 09-12 cost row.
+
+## What this does NOT close
+
+- **None of it is measured in production.** Every row says so and
+  `docs/BACKEND_HANDOFF.md` applies; the after-arm starts with the republish.
+- **The recognised-caller prompt is past three of four token ceilings**
+  (v29 row) — trimming it deletes capability and is the operator's call.
+- **#51's "after the refusal, take the request"** is bounded by "no name, no
+  ticket", which stands; **#138** (`unclassified_call` as the model's default,
+  57 of 104 PCP tickets on 09-16) needs a ruling on the enum.
+- **The Hub's own health** — a platform restart 05:27–05:30 UTC and an
+  exporter timing out ~80 times an hour since 09-10 — is not fixable from
+  this repo.
+
+## Open, and Wayne's to settle
+
+The worksheet's *FOR 5AM* block is the list; the ones that are decisions
+rather than work: the xAI management key pasted into an earlier session's
+transcript **must be rotated**; `LOOKUP_MISS_LIMIT` (2), `HANGUP_HOLD_LIMIT`
+(3) and `RESOLVE_ASK_LIMIT` (2) are judgements, not measurements; the
+4,295-row Twilio price backfill and when to run it; the emergency lexicon
+(*detached retina* firing on a scheduling call); and whether the recognised
+arm is trimmed to the stated ceilings or the ceilings restated for the arm
+that serves most callers.
+
+---
+
+## 13. The filing alarm treated a 400 as an outage — 2026-09-25
+
+Measured that evening, read-only: three `ticket_outbox` rows were
+dead-lettered by `markFailed(..., terminal=true)` after the ticketing app
+recovered.
+
+| call_sid | lane | refusal |
+|---|---|---|
+| `CAf1c375ee5dc57dd6d705939a7f15cee7` | optical | 400, missing office |
+| `CA4707e391198147df5032f2e72884e998` | surgery | 400, missing surgeon |
+| `CAb751a4f668f9f33e4c15dc9c34e8fcfa` | surgery | 400, missing surgeon |
+
+Filing itself was healthy — tickets landed 1–4 minutes before every alert.
+`readTicketFilingSnapshot` counted every `dead_letter` forever with no
+age-out (that part is still right — a dead letter must not look healthy
+because it is old). `assessTicketFiling` stalled whenever
+`outboxDeadLetter > 0`. `checkTicketFilingAlert` emailed
+`ticket_filing_stalled` every five minutes (cooldown 5 min, cap 10/hour).
+The same false-alarm shape happened on 2026-09-02.
+
+**What changed.** `refusal_status_code` is persisted on a 400/422 dead
+letter only (`isTerminalRefusal`, enumerated, never inferred from
+`last_error`). The snapshot splits those into `terminal_dead_letter`.
+`assessTicketFiling` stalls on a *transport* dead letter, on
+`outboxHeld >= 3` of pending/failed/transport-dead-letter, and on the
+unfiled-run plane. A terminal 4xx does not stall.
+
+Each terminal row gets one `ticket_needs_followup` email through
+`emailService.sendEmail` (not `sendAlert` — that cooldown would throttle
+a row). `followup_notified_at` is the once-only lock; a failed send
+unclaims. Resolved rows (`resolved_at` / `resolved_by` /
+`resolution_note`) drop out of both the alarm and the notice.
+Admin-only: `GET /api/ticket-outbox/unresolved`,
+`POST /api/ticket-outbox/:id/resolve`. Observatory amber banner with a
+Resolve button.
+
+**The three rows above wait for Wayne.** They were written before the
+column existed, so `refusal_status_code` is NULL and they still count as
+transport until he resolves them after deploy. The migration does not
+backfill or auto-resolve. After the pull: Observatory → amber follow-up
+list → Resolve on each of the three. Do not replay them from here.
+
+Migration (do not apply from this session):
+`migrations/add_ticket_outbox_refusal_and_resolution.sql`.
+
+---
+
+## 14. The session stall reconnects — 2026-10-06
+
+xAI accepts the realtime WebSocket (HTTP 101, typically ~0.2 s) and
+sometimes never sends `session.created`. The runtime used to wait the
+15-second setup deadline, then tear the call down. The caller heard
+nothing and no ticket filed. Production on 2026-10-05/06: about **1 in
+18** connections (worst about **1 in 7**). Ninety off-production probes
+of the same model and session setup hung 5 of 90 for 20 seconds with no
+error and no close — the stall is on their side.
+
+**What the runtime does now.**
+
+`connectWithFirstEventRetry` (`src/runtime/providerConnect.ts`) opens
+the socket, waits for the **first** inbound event, and if none arrives
+it **detaches** that socket (so a later close cannot end the call) and
+opens a new one.
+
+| | default | env | clamp |
+|---|---|---|---|
+| first-event wait | **2500 ms** | `RUNTIME_FIRST_EVENT_TIMEOUT_MS` | 1000–10000 |
+| retries after the first attempt | **2** (three attempts) | `RUNTIME_CONNECT_RETRIES` | 0–4 |
+| handshake that never upgrades | **5000 ms** | `RUNTIME_WS_HANDSHAKE_TIMEOUT_MS` | 2000–15000 |
+
+Inbound frames buffer until `commitBuffered` after the session binds
+`onMessage`. A first event that arrives before that bind is not dropped.
+
+**What gets logged — PHI-free, names and numbers never.**
+
+- `[PROVIDER CONNECT] attempt n/N connecting at <iso>`
+- the HTTP 101 upgrade headers, when present:
+  `x-trace-id=…` and `cf-ray=…` (Cloudflare `CF-RAY`). A miss prints
+  `no-upgrade-headers`.
+- `[PROVIDER CONNECT] first-event stall` on a discarded socket, with
+  the same headers so a hang can be matched to xAI's side.
+- `[SESSION] created session=<id> conversation=<id>` once a session
+  actually starts.
+
+A sliding window of 30 connect outcomes texts Wayne if stalls reach 4,
+with a 15-minute cooldown. That uses the existing urgent-notification
+path; it is not a new secret.
+
+**When every retry stalls.**
+
+`runSetupFailureFloor` (`src/runtime/setupFailureFloor.ts`) files one
+ticket in the lane's department and the TwiML speaks the existing
+technical-trouble apology. It files only when:
+
+- the outcome is `provider_failure`, AND
+- the agent never spoke (`agentTurns === 0`), AND
+- the lane has a department, AND
+- there is a callback number.
+
+Stand-in name `Unnamed` / `Caller` (the app refuses a blank name
+everywhere except Medical Records). Optical uses Other 66/536.
+Idempotency is `call-<sid>-setup-failure`, so a later real filing on
+the same SID cannot collide. Description is the sweep's callback-only
+sentence. Priority high. Staff note says the name is a stand-in and
+caller ID is the number to ring.
+
+The ticket files even if the call-row write rejects or never settles
+(Codex P1 on #347). Persist is bounded the same way as bridge teardown
+(`withinOrNull` + `PERSIST_BEFORE_SWEEP_MS`); the floor always runs
+after that bound. Same key.
+
+**Wayne does not have to set anything.** The defaults work. The three
+env knobs above are optional dials if 2500 ms is too short or two
+retries are too few. No new secret.
+
+**Not measured in production.** `docs/BACKEND_HANDOFF.md` applies.
+The after-arm starts with the republish: `provider_failure` with zero
+agent turns and no ticket should go to 0; setup-failure tickets should
+appear on the residue; filing rate per lane must not fall.
+
+---
+
+## 15. The record's office name on an optical ticket — v116 (#371), 2026-10-23
+
+**What shipped.** When the caller names no office and the patient's record
+(`usualOfficeFor`) holds one, `file_optical_ticket` sends that name as
+`locationOfLastVisit` — on a lookup no-match, on an outage, and (since the
+stand-in review of #371) also beside `locationId` when the lookup DID
+resolve it. ticketing-app #381 resolves the name under a unique-match rule.
+
+**The name is never logged — on the whole path, not just the tool's lines.**
+The stand-in review of #371 found that `ticketingApiClient.lookupProviderAndLocation`
+printed `locationName` to `console.info` before every lookup, so the record's
+office reached the logs beside the call's own lines (pre-existing since v12,
+but it made v116's "never logged" claim false). That line now prints
+`'(set)'` / `'(none)'`, and a test drives the REAL lookup (only `makeRequest`
+faked) and asserts the name appears in no console line. The older test
+stubbed the lookup, and stringified objects with `String()` — which prints
+`[object Object]` — so it could not have seen the leak either way.
+Codex then found the same leak one call later (thread PRRT_kwDORVukLs6vtp3I):
+`createTicket`'s "Creating ticket" line printed `locationOfLastVisit` raw beside
+the call SID, and its "Lookup results" line echoed the app's `locationSearched`;
+`submitTicket`'s `lastLocation` had the same shape. All three print presence
+only now, and a third test runs the REAL `createTicket` (request and warm-up
+faked). Codex thread PRRT_kwDORVukLs6vzaiN then found the APP's own text
+carrying it: a lookup warning or refusal body like `Location "<office>" not
+found`, printed verbatim by `createTicket`, `makeRequest`'s non-2xx dump, both
+catch blocks and `durableTicketFiling`'s REFUSED line. All are counted or
+summarised now (keys, missing-field names, status), with two tests through the
+real `makeRequest` and only `fetch` faked. The stand-in review's P2-1 then
+found the outage path itself: when `/lookup` for the record's office fails,
+the client's catch printed the whole Error, a 200 `{success:false, error}` was
+spread into the result, and every lane's `Cause: ${lookup.error}` line printed
+the app's text. The catch logs `describeFailure(error)` now, the result keeps
+the raw `error` (for logic) plus `statusCode`, and all six `Cause:` lines print
+`loggableLookupError(result)`. Three tests drive the real lookup with only
+`fetch` faked (a 503 and a 200 `success:false`, each echoing the office).
+
+**Ship order (P3-1, softened):** either order ships, but "harmless before
+#381" is not established — the deployed app already searches the location name
+it is sent, so what a record name our `/lookup` missed does there before #381
+has not been read or measured. This build is only certain to add the office
+name to tickets that carry none today.
+
+### Open, and Wayne's to settle — the first-call ask on a no-match
+
+When the record holds an office our `/lookup` cannot resolve, the first
+`file_optical_ticket` still refuses and asks *"Which of our offices do you
+usually visit?"*. The record's name only reaches a ticket on the second
+call, and in 42 of 75 date-of-birth refusals the refusal is the call's last
+tool event — so a caller who hangs up on that ask leaves no ticket with
+their office on it. RULE ZERO says a gate refusing on a field the record
+holds is a bug in the gate.
+
+The fix would be one line: treat *"record office held, lookup did not
+resolve it"* as waiving the ask (`officeAskWaived`), so the first call
+files unassigned, with the name and `routingAskExhausted: true`. That
+changes when `routingAskExhausted` is sent on the queue that routes BY
+office, so it is a ruling, not an engineering call. **Recommendation:**
+take it once #381 is live — the name then usually routes anyway, and the
+ask buys little. **Until he rules, v116 keeps the first-call ask.**
+
+### To measure before merge (read-only; nothing has been run)
+
+Tests (the session that wrote this could not run vitest):
+
+```
+npx vitest run src/tools/opticalOfficeFromRecord.test.ts \
+  src/tools/opticalTools.production.test.ts \
+  src/tools/opticalUnassignedExit.test.ts src/runtime/readiness.test.ts \
+  src/runtime/markerTableIsIntact.test.ts src/runtime/markerCarriesClaim.test.ts
+npx tsc --noEmit
+```
+
+Before-number, two steps because `call_logs` (Hub, `pslzngjciiifowemrzza`)
+and `tickets` (Support Center, `vsmcxhxeirkoobmjcrbn`) cannot be joined in
+one statement.
+
+Step 1, Hub — optical calls in the 14 days before deploy whose lookup made a
+certain match:
+
+```sql
+SELECT DISTINCT c.call_sid
+FROM call_logs c,
+     LATERAL jsonb_array_elements(coalesce(c.tool_timeline->'events','[]'::jsonb)) e
+WHERE c.agent_used = 'optical'
+  AND c.call_sid ~* '^CA[0-9a-f]{32}$'
+  AND c.created_at >= now() - interval '14 days'
+  AND e->>'tool' = 'lookup_patient'
+  AND (e->'outcome'->>'identity_is_certain')::boolean IS TRUE;
+```
+
+Step 2, Support Center — of those SIDs, agent-filed optical tickets that
+carried neither an office id nor an office name:
+
+```sql
+SELECT count(DISTINCT call_sid) AS record_held_ticket_empty
+FROM tickets
+WHERE call_sid = ANY(:sids_from_step_1)
+  AND department_id = 1
+  AND created_by_id IS NULL AND agent_used IS NOT NULL
+  AND location_id IS NULL
+  AND coalesce(location_of_last_visit, '') = '';
+```
+
+After the deploy, the same population should read 0 on the second query,
+and optical tickets with no `location_id` must not rise (before-arm
+2026-10-01: 15 of 391).

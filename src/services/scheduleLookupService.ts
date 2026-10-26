@@ -3,6 +3,10 @@ import { schedule } from '../../shared/schema';
 import { eq, or, desc, gte, and, sql } from 'drizzle-orm';
 import type { AnyPgColumn } from 'drizzle-orm/pg-core';
 import { normalizePhone } from '../utils/phone';
+// The ONE PersonID comparison in the repo, cast to uuid. See its own comment:
+// a bare `uuid = text` fails at runtime, inside a catch, on a live call, and
+// reads as "this patient has no history" rather than as a bug.
+import { byPerson } from './appointmentAnswers';
 
 /**
  * Who this lookup could have meant.
@@ -35,6 +39,23 @@ export interface PatientScheduleContext {
   patientFound: boolean;
   patientName?: string;
   matchedBy?: 'phone' | 'name' | 'dob' | 'name_and_dob';
+  /**
+   * UNIQUE IS NOT CONFIRMED, AND THE DIFFERENCE IS THE WHOLE OF INSTRUCTION 6.
+   *
+   * Set when the PERSON BASE matched on caller ID alone. Exactly one person
+   * carries that number, so `identity.unique` is true and it is not a guess
+   * between candidates — but nobody has established that the CALLER is that
+   * person. A family member on the household phone, a reassigned number and a
+   * spoofed caller ID all produce this shape, and with the PersonID join the
+   * reward for guessing wrong is somebody else's visit history, office and
+   * provider read down the line.
+   *
+   * Rule Zero, `.agents/memory/the-record-and-the-funnel.md`: MATCH, then
+   * VALIDATE. A phone match is a candidate to CONFIRM, never an identity.
+   * This flag is what carries "not yet validated" out of the service, so the
+   * tool can keep the record and still refuse to call it certain.
+   */
+  identityUnconfirmed?: boolean;
   upcomingAppointments: AppointmentSummary[];
   pastAppointments: AppointmentSummary[];
   lastProviderSeen?: string;
@@ -69,6 +90,13 @@ export interface PatientData {
   firstName?: string;
   lastName?: string;
   dateOfBirth?: string;
+  /**
+   * The person base's primary key, when this context came from a source that
+   * knows it. The ONLY thing that can prove two lookups on one call are about
+   * the same human: a father and son share a name and a phone, so neither
+   * settles it (Codex P1 on PR #292, `bfa28ae`).
+   */
+  personId?: string;
   email?: string;
   cellPhone?: string;
   homePhone?: string;
@@ -228,7 +256,14 @@ const MONTH_MAP: Record<string, string> = {
   'dec': '12', 'december': '12',
 };
 
-function normalizeDOB(dob: string): string {
+/**
+ * Exported for testing. The mirror's equivalent
+ * (patientVerification.normalizeDob) is exported for the same reason: a date
+ * parser that only runs behind a database call is a parser nobody can prove
+ * anything about, and this one silently returned '' for the commonest spoken
+ * form in production for as long as it has existed.
+ */
+export function normalizeDOB(dob: string): string {
   if (!dob) return '';
   
   const cleaned = dob.trim();
@@ -272,8 +307,20 @@ function normalizeDOB(dob: string): string {
     }
   }
   
-  // Natural language: "March 12, 1975" or "March 12 1975" or "Mar 12, 1975"
-  const naturalLang = cleaned.match(/^([a-zA-Z]+)\s+(\d{1,2}),?\s+(\d{4})$/i);
+  // Natural language: "March 12, 1975", "Mar 12 1975", "March 17th, 1973".
+  //
+  // The ordinal suffix is not a nicety — it is how people SAY a date, so it
+  // is what the transcriber writes down. Without `(?:st|nd|rd|th)?` this
+  // matched "17" and then demanded a comma or a space and found the "t" of
+  // "17th", so every spoken date fell through to the warn and verification
+  // silently degraded to the caller-ID match. Observed on both live optical
+  // calls, 2026-08-31: "[normalizeDOB] Unable to parse date: March 17th, 1973".
+  //
+  // The mirror's own normalizer (patientVerification.normalizeDob) has always
+  // had this. This is the appointment-book copy catching up — and the fact
+  // that there are two of these is the argument for standing instruction 14,
+  // not an argument for keeping them in step by hand.
+  const naturalLang = cleaned.match(/^([a-zA-Z]+)\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})$/i);
   if (naturalLang) {
     const [, monthName, day, year] = naturalLang;
     const month = MONTH_MAP[monthName.toLowerCase()];
@@ -283,7 +330,7 @@ function normalizeDOB(dob: string): string {
   }
   
   // Natural language: "12 March 1975" or "12 Mar 1975"
-  const naturalLangReverse = cleaned.match(/^(\d{1,2})\s+([a-zA-Z]+),?\s+(\d{4})$/i);
+  const naturalLangReverse = cleaned.match(/^(\d{1,2})(?:st|nd|rd|th)?\s+([a-zA-Z]+),?\s+(\d{4})$/i);
   if (naturalLangReverse) {
     const [, day, monthName, year] = naturalLangReverse;
     const month = MONTH_MAP[monthName.toLowerCase()];
@@ -293,7 +340,7 @@ function normalizeDOB(dob: string): string {
   }
   
   // Natural language with 2-digit year: "March 12, 75" or "Mar 12 75"
-  const naturalLang2Digit = cleaned.match(/^([a-zA-Z]+)\s+(\d{1,2}),?\s+(\d{2})$/i);
+  const naturalLang2Digit = cleaned.match(/^([a-zA-Z]+)\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{2})$/i);
   if (naturalLang2Digit) {
     const [, monthName, day, shortYear] = naturalLang2Digit;
     const month = MONTH_MAP[monthName.toLowerCase()];
@@ -349,6 +396,38 @@ function isValidDate(year: number, month: number, day: number): boolean {
  * lookup is an index scan rather than a sequential scan, costs nothing.
  */
 const LOOKUP_ROW_LIMIT = 60;
+
+/**
+ * How long the PersonID join may take before we keep the identity and drop the
+ * history. Must stay COMFORTABLY UNDER `lookup_patient`'s 6s tool budget — the
+ * point is to answer before that race does, so the fallback still runs.
+ */
+/**
+ * How much of the join budget is kept back for the Hub fallback when the
+ * Console attempt is bounded. The Hub read on `PersonID` is an index scan
+ * measured at 15-79 ms; 300 ms is four times the slowest of those.
+ */
+const HUB_FALLBACK_RESERVE_MS = 300;
+
+/** Reject after `ms`, and never leave the timer running past the work. */
+async function withDeadline<T>(work: Promise<T>, ms: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      work,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(label)), ms);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+function joinDeadlineMs(): number {
+  const n = Number(process.env.PERSON_JOIN_TIMEOUT_MS);
+  return Number.isFinite(n) && n > 0 ? n : 1_500;
+}
 
 /**
  * A case-insensitive prefix match that Postgres can actually answer from an
@@ -426,6 +505,46 @@ function splitByPerson(rows: any[]): { primary: any[]; identity: PatientIdentity
   };
 }
 
+/**
+ * Rows that came back on the PERSON KEY are one person by construction.
+ *
+ * `splitByPerson` exists because a phone number and a surname are not
+ * identities, so it groups on `first|last|dob` and keeps the newest group.
+ * PersonID is a different kind of answer: it is the primary key of the person
+ * base, and every row carrying it belongs to that person whatever the row
+ * SPELLS their name as.
+ *
+ * MEASURED 2026-09-12 over 1,500 person_ids seen in the last 21 days (1,372 of
+ * them carrying more than one row): **33 — 2.4% — disagree with themselves**
+ * across their own rows. 15 vary by last name, 13 by first name, 8 by date of
+ * birth: married and maiden names, a nickname against a legal name, a
+ * corrected birthday. Every one is the same human being under one key.
+ *
+ * Put those rows through `splitByPerson` and the 2.4% are reported
+ * `unique: false` — AMBIGUOUS, on a primary-key join — and the smaller group's
+ * visits are dropped from their own history. So the grouping is bypassed here,
+ * and ONLY here: it still guards every lookup that matched on a name or a
+ * number, which is every lookup that can genuinely have meant two people.
+ */
+function onePerson(rows: any[]): { primary: any[]; identity: PatientIdentity } {
+  const newest = rows[0] ?? {};
+  return {
+    primary: rows,
+    identity: {
+      unique: true,
+      candidateCount: 1,
+      candidates: [
+        {
+          firstName: newest.patientFirstName || undefined,
+          lastName: newest.patientLastName || undefined,
+          dateOfBirth: newest.patientDateOfBirth || undefined,
+          appointmentCount: rows.length,
+        },
+      ],
+    },
+  };
+}
+
 export class ScheduleLookupService {
 
   async lookupByPhone(phone: string): Promise<PatientScheduleContext> {
@@ -461,7 +580,11 @@ export class ScheduleLookupService {
     }
   }
 
-  async lookupByName(firstName: string, lastName: string): Promise<PatientScheduleContext> {
+  async lookupByName(
+    firstName: string,
+    lastName: string,
+    options: { logIdentifiers?: boolean } = {},
+  ): Promise<PatientScheduleContext> {
     try {
       const normalizedFirst = firstName.trim().toLowerCase();
       const normalizedLast = lastName.trim().toLowerCase();
@@ -481,7 +604,11 @@ export class ScheduleLookupService {
         return this.emptyContext();
       }
 
-      console.log(`[ScheduleLookup] Found ${appointments.length} appointments for ${firstName} ${lastName}`);
+      console.log(
+        options.logIdentifiers === false
+          ? `[ScheduleLookup] Found ${appointments.length} appointments for verified professional lookup`
+          : `[ScheduleLookup] Found ${appointments.length} appointments for ${firstName} ${lastName}`,
+      );
       return this.buildContext(appointments, 'name');
       
     } catch (error) {
@@ -535,16 +662,233 @@ export class ScheduleLookupService {
     }
   }
 
+  /**
+   * THE WHOLE RECORD, ON THE KEY THAT CANNOT BE MISSPELLED.
+   *
+   * Operator, 2026-09-12: *"When you find the patient in the patient master,
+   * you automatically join the UID or UUID, whatever, to the schedule to pull
+   * up the entire record. Right? Simple. Basic."*
+   *
+   * Every other rung in this class searches the appointment book by STRING —
+   * a phone number as it was typed into the chart, a surname, a date of birth.
+   * That is why they miss: the strings drift, and the book is not the person
+   * base. `patients_master` answers WHO on its own key, and `Schedule` carries
+   * that same key in `PersonID`, so once the mirror has identified somebody
+   * their appointments come back with no matching of any kind.
+   *
+   * MEASURED 2026-09-12 on the 64 callers the book had just told us it had no
+   * record of: **52 (81%) have schedule history on this join** — 51 with
+   * Active visits, 49 with past visits, 19 with an UPCOMING appointment, 51
+   * with an office on file across 27 distinct offices, averaging 4.8 rows.
+   * The book did not lack their appointments. It could not find them by name.
+   *
+   * IT NEEDED AN INDEX AND HAD NONE. `Schedule` is 1,024,785 rows / 1,494 MB
+   * and carried sixteen indexes, not one of them on `PersonID`, so this query
+   * was a sequential scan and timed out at 60s — for a SINGLE person.
+   * `idx_schedule_personid_apptdate` makes it an **Index Scan, 15–79 ms**
+   * (five different people, 2026-09-12, 3–21 rows each).
+   *
+   * NOT an index-only scan, and the difference is this method's own doing:
+   * `db.select()` is `SELECT *`, `buildContext` reads a dozen columns, so
+   * every matched row is fetched from the heap. A 1.305 ms figure was measured
+   * on a NARROW covering query and does not describe this one — quoting it
+   * here would be the instrument error this repo keeps making. It is well
+   * inside `lookup_patient`'s 6s budget either way, and a covering index over
+   * a dozen wide columns is not worth its size.
+   *
+   * That index is a live database object created by migration, not a file in
+   * this repo; if this method ever goes slow again, check that it still
+   * exists before changing any code here.
+   */
+  async lookupByPersonId(
+    personId: string,
+    matchedBy: 'phone' | 'name' | 'dob' | 'name_and_dob',
+    deadlineAt?: number,
+  ): Promise<PatientScheduleContext> {
+    if (!personId) return this.emptyContext();
+
+    /**
+     * BUDGET AGAINST WHAT IS LEFT, NOT AGAINST A FIXED 1.5 SECONDS.
+     *
+     * Codex P1 round 2 on PR #292, and the first fix was only half of it. A
+     * RELATIVE deadline starts when the join starts — after three schedule
+     * rungs and the mirror have already run serially, none of them locally
+     * bounded, against a pool that permits a 15s connection wait. Spend 4.6s
+     * up there and a 1.5s join deadline expires at 6.1s, AFTER `runTool`'s
+     * absolute 6s race has already answered "timed out" — so the preserved
+     * identity never reaches the model and the fix does nothing in exactly the
+     * case it was written for.
+     *
+     * So the deadline is the SMALLER of our own limit and the time actually
+     * remaining, and when nothing is left the join is SKIPPED outright: the
+     * identity in hand is worth more than a history we cannot deliver in time.
+     *
+     * SCOPE, stated honestly: this stops the join being the CAUSE of a lost
+     * identity. It cannot rescue a call whose earlier rungs already spent the
+     * whole budget — that is task #68 (`lookup_patient` exceeds 6s on 13-17%
+     * of queue calls) and it needs those rungs bounded too.
+     */
+    const remaining = deadlineAt === undefined ? Infinity : deadlineAt - Date.now();
+    const allowed = Math.min(joinDeadlineMs(), remaining);
+    if (allowed <= 0) {
+      console.warn(
+        '[ScheduleLookup] PersonID join SKIPPED — no tool budget left; keeping the identity ' +
+          'without history rather than racing a deadline we would lose',
+      );
+      return this.emptyContext();
+    }
+
+    try {
+      /**
+       * A DEADLINE, BECAUSE A HANG IS NOT A THROW.
+       *
+       * Codex P1 on PR #292. `lookup_patient` is raced against a 6s budget in
+       * `runTool` (`src/tools/registry.ts`), and that race RESOLVES rather than
+       * cancelling anything: if this query stalls — waiting on the pool, not on
+       * Postgres — the outer race answers `timed out, retryable` while this
+       * await is still pending. The catch below never runs, the
+       * identity-without-history fallback never runs, and a caller the mirror
+       * had ALREADY identified comes back unidentified. That is Rule Zero's
+       * carry-forward lost to a stall, which is the one thing this method must
+       * not do.
+       *
+       * The catch only ever protected failures that reject promptly. This
+       * bounds the ones that do not.
+       *
+       * NOT a hypothetical population: `lookup_patient` already exceeds its 6s
+       * budget on 13-17% of queue calls (475 events / 314 calls, task #68).
+       * The deadline is ~20x the measured p95 of this query (15-79 ms over five
+       * people) and leaves the rest of the tool budget to the rungs above.
+       */
+      // The timer is cleared in the `finally` below for the same reason the
+      // office refinement clears its own (Codex P2 on ec45286): a dangling
+      // deadline outlives the work it was bounding. This one rejects rather
+      // than logs, so it corrupts no counter — but it still holds its closure
+      // for up to `allowed` ms after a query that already came back.
+      let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+      /**
+       * THE SOURCE IS THE CONSOLE (standing instruction 14). `si_appointment_facts`
+       * is the schedule mirror; the Hub's `Schedule` copy was fed by an EDW job the
+       * operator retired on 2026-10-01 and is read here only as the fallback when
+       * the Console pool is not configured or does not answer. The rows come back
+       * already in the Hub's shape (`consoleScheduleFacts.toScheduleRow`), so the
+       * same `buildContext` runs on either and nothing downstream changes.
+       */
+      const { isConsoleScheduleConfigured, fetchFactsForPerson } = await import('./consoleScheduleFacts');
+      const source: 'console' | 'hub' = isConsoleScheduleConfigured() ? 'console' : 'hub';
+      const hubRows = () =>
+        db
+          .select()
+          .from(schedule)
+          .where(byPerson(personId))
+          .orderBy(desc(schedule.appointmentDate))
+          .limit(LOOKUP_ROW_LIMIT);
+      /**
+       * THE CONSOLE GETS ITS OWN, SHORTER DEADLINE (Codex P2 on #342). The Console
+       * pool allows 2.5 s statements and 5 s connection waits, both longer than
+       * this join's whole budget, so a Console query that STALLS rather than
+       * rejecting would eat the budget before the catch below could run, the
+       * outer deadline would win, and the advertised Hub fallback would never be
+       * attempted — identity without history, on a day the Console is merely
+       * slow. The Console attempt is therefore bounded at the budget minus a
+       * reserve for the Hub read (measured 15-79 ms on five people), floored at
+       * half the budget so a small budget still gives the Console a real try.
+       */
+      const consoleAllowed = Math.max(allowed - HUB_FALLBACK_RESERVE_MS, Math.floor(allowed / 2));
+      const consoleThenHub = async (): Promise<any[]> => {
+        try {
+          return await withDeadline(fetchFactsForPerson(personId, LOOKUP_ROW_LIMIT), consoleAllowed, 'Console join deadline');
+        } catch (error) {
+          // Loud, because a silent fallback hides a Console outage behind a working
+          // answer. Counted by this line; the Hub copy answers until it is dropped.
+          console.warn(
+            '[ScheduleLookup] PersonID join: the CONSOLE did not answer, falling back to the Hub copy:',
+            error instanceof Error ? error.message : 'unknown',
+          );
+          return hubRows();
+        }
+      };
+      const appointments = await Promise.race([
+        source === 'console' ? consoleThenHub() : hubRows(),
+        new Promise<never>((_, reject) => {
+          deadlineTimer = setTimeout(() => reject(new Error('PersonID join deadline')), allowed);
+        }),
+      ]).finally(() => {
+        if (deadlineTimer) clearTimeout(deadlineTimer);
+      });
+
+      if (appointments.length === 0) {
+        // Not a failure. This is the caller who really is on file and really
+        // has never had an appointment — we still know exactly who they are.
+        console.log(`[ScheduleLookup] PersonID join (${source}): identified, and genuinely no appointments on file`);
+        return this.emptyContext();
+      }
+
+      console.log(`[ScheduleLookup] PersonID join (${source}) returned ${appointments.length} row(s) — no name matching`);
+      return this.buildContext(appointments, matchedBy, { keyedByPerson: true });
+    } catch (error) {
+      // A failed join is NOT an empty history, and the caller above must not
+      // let it erase the identity the mirror just established.
+      // Reached by a rejection OR by the deadline above. Either way the
+      // identity survives: the caller returns identity-without-history.
+      console.error(
+        '[ScheduleLookup] PersonID join FAILED — this is not the same as having no appointments:',
+        error instanceof Error ? error.message : 'unknown',
+      );
+      return this.emptyContext();
+    }
+  }
+
   async lookupPatient(params: {
     phone?: string;
     firstName?: string;
     lastName?: string;
     dateOfBirth?: string;
+    /**
+     * Epoch ms by which this must have ANSWERED — the moment `runTool`'s race
+     * fires, less a margin. Optional: callers without a tool budget omit it and
+     * the join falls back to its own relative deadline.
+     */
+    deadlineAt?: number;
+    /**
+     * Keep the caller's name and date of birth OUT of the console.
+     *
+     * The book rungs below log `<first> <last> (DOB: <dob>)` by default, which
+     * is right on a patient line where the log is the only trace of who was
+     * asked about — and wrong on the PCP line, whose own tool has passed
+     * `logIdentifiers: false` since it was written because the subject of the
+     * lookup is a THIRD PARTY the caller named. Undefined keeps today's
+     * behaviour for every existing caller; only a caller that asks gets the
+     * quieter line.
+     */
+    logIdentifiers?: boolean;
   }): Promise<PatientScheduleContext> {
-    const { phone, firstName, lastName, dateOfBirth } = params;
+    const { phone, firstName, lastName, dateOfBirth, deadlineAt, logIdentifiers } = params;
+    const logging = { logIdentifiers };
+
+    /**
+     * THE PERSON BASE ANSWERS FIRST (v85). RULE ZERO: MATCH on `patients_master`,
+     * VALIDATE, JOIN on `PersonID`. Until v84 the person base was the LAST rung,
+     * consulted only after three string searches of the appointment book had
+     * missed — so a caller's identity was whatever the book's phone or surname
+     * strings said, and `patients_master` only ever ADDED a match. With the join
+     * reading the Console (v84), the person base is the source of truth for WHO
+     * and the Console mirror for WHAT, and the book's string rungs are the
+     * fallback: they run only when the person base finds nobody (or is not
+     * configured, which keeps every old-core agent exactly where it was).
+     * Ambiguity from the person base is an ANSWER (several people on the number,
+     * none picked) and is returned, never discarded for a string match.
+     */
+    const { isConsoleScheduleConfigured } = await import('./consoleScheduleFacts');
+    const personBaseFirst = isConsoleScheduleConfigured();
+    if (personBaseFirst) {
+      const first = await this.lookupInPersonBase({ phone, firstName, lastName, dateOfBirth, deadlineAt });
+      if (first.patientFound || first.identity) return first;
+      console.info('[ScheduleLookup] the PERSON BASE found nobody for this lookup; trying the appointment book');
+    }
 
     if (firstName && lastName && dateOfBirth) {
-      const result = await this.lookupByNameAndDOB(firstName, lastName, dateOfBirth);
+      const result = await this.lookupByNameAndDOB(firstName, lastName, dateOfBirth, logging);
       if (result.patientFound) return result;
     }
 
@@ -554,14 +898,204 @@ export class ScheduleLookupService {
     }
 
     if (firstName && lastName) {
-      const result = await this.lookupByName(firstName, lastName);
+      const result = await this.lookupByName(firstName, lastName, logging);
       if (result.patientFound) return result;
     }
+
+    /**
+     * THE APPOINTMENT BOOK HAS SAID NOBODY. ASK THE PERSON BASE BEFORE GIVING UP.
+     *
+     * Every rung above reads `schedule` — the Operations Hub's appointment
+     * book — so a real patient with no appointment inside its window cannot be
+     * found, and from outside that failure looks random. Standing instruction
+     * 14: identity belongs to the Eye Care Patient Console.
+     *
+     * MEASURED 2026-09-12, ten days of queue calls, duration >= 30:
+     *   627 of 2,511 substantive calls (25.0%) ran this and found NOBODY
+     *     tech 277/1173 · surgery 158/638 · optical 122/501 · records 70/199
+     *   235 of those 627 ended with no ticket at all
+     *   of 330 distinct caller numbers behind them, 208 (63%) ARE in
+     *     patients_master — optical 76/100, tech 132/230
+     *
+     * DELIBERATELY LAST, AND THAT IS THE SAFETY PROPERTY. It runs only where
+     * this method already returned `emptyContext()`, so it can ADD a match and
+     * can never change one the schedule already made. Nothing above it moves,
+     * and the 1,214 calls that currently reach a certain match take exactly
+     * the path they take today.
+     *
+     * IT BRINGS THE HISTORY TOO, ON THE PERSON KEY. An earlier version of this
+     * comment said it brought none, and called that correct on the reasoning
+     * that these people must have no appointments — which is why the book
+     * missed them. THAT WAS WRONG, and measuring it is what settled it: of 64
+     * such callers, **52 (81%) have schedule history** reachable on
+     * `PersonID`, 19 of them with an appointment still upcoming. The book was
+     * not missing their appointments, it was missing THEM — it searches by
+     * name and phone STRINGS, and those drift. So identity comes from the
+     * mirror and then `lookupByPersonId` pulls the record on the key.
+     *
+     * The risk here runs OPPOSITE to most of this file: the danger is
+     * verification becoming permissive, not strict. `findByPhone` and
+     * `verifyPatient` both refuse to choose between two people and report a
+     * candidate count instead — instruction 6, unchanged.
+     */
+    // Already asked first when the Console is configured; asking again would spend
+    // a second lookup on an answer that cannot have changed.
+    if (personBaseFirst) return this.emptyContext();
+    const fromMirror = await this.lookupInPersonBase({ phone, firstName, lastName, dateOfBirth, deadlineAt });
+    // `identity` alone is a real answer: it is the AMBIGUOUS case, where the
+    // person base holds several people for this lookup. Returning only on
+    // `patientFound` discarded it and reported a plain "not found", which is
+    // the opposite of what the comment below it promises — caught by
+    // `lookupPersonBaseRung.test.ts` rather than by reading.
+    if (fromMirror.patientFound || fromMirror.identity) return fromMirror;
 
     return this.emptyContext();
   }
 
-  private buildContext(rows: any[], matchedBy: 'phone' | 'name' | 'dob' | 'name_and_dob'): PatientScheduleContext {
+  /**
+   * Identity from `patients_master`, shaped as a context with no history.
+   *
+   * Ambiguity is reported, never resolved: `identity.unique` is false and
+   * `candidateCount` carries the number, so `lookup_patient` reports
+   * `identity_is_certain: false` exactly as it does for an ambiguous schedule
+   * hit, and no caller of this gets to treat a shared number as a person.
+   */
+  private async lookupInPersonBase(params: {
+    phone?: string;
+    firstName?: string;
+    lastName?: string;
+    dateOfBirth?: string;
+    deadlineAt?: number;
+  }): Promise<PatientScheduleContext> {
+    const { phone, firstName, lastName, dateOfBirth, deadlineAt } = params;
+    const { verifyPatient, findByPhone } = await import('./patientVerification');
+
+    // Name + date of birth first: it is the stronger claim, and it is the one
+    // the caller actually made out loud.
+    let matchedBy: 'phone' | 'name_and_dob' = 'name_and_dob';
+    let result =
+      firstName && lastName && dateOfBirth
+        ? await verifyPatient({ firstName, lastName, dob: dateOfBirth, callerPhone: phone })
+        : null;
+
+    if (!result || (!result.verified && result.reason !== 'ambiguous')) {
+      if (phone) {
+        // The affirmed first name narrows a shared number inside the person base
+        // (RULE ZERO step 2); without one, several people stay several people.
+        const byPhone = await findByPhone(phone, firstName);
+        if (byPhone.verified || byPhone.reason === 'ambiguous') {
+          result = byPhone;
+          matchedBy = 'phone';
+        }
+      }
+    }
+
+    if (!result) return this.emptyContext();
+
+    if (!result.verified) {
+      if (result.reason !== 'ambiguous') return this.emptyContext();
+      // Somebody is here, but which one is not established. Say so; do not pick.
+      console.info(
+        `[ScheduleLookup] the person base holds ${result.candidates} people for this lookup — ` +
+          'reporting ambiguity rather than choosing',
+      );
+      return {
+        ...this.emptyContext(),
+        identity: { unique: false, candidateCount: result.candidates, candidates: [] },
+      };
+    }
+
+    const p = result.patient!;
+
+    /**
+     * ONE PERSON IS CERTAIN, SEVERAL IS AMBIGUOUS — v86, and v85 got this
+     * wrong for forty minutes of live traffic.
+     *
+     * v10 marked every person-base phone match `identityUnconfirmed` (Codex
+     * P1 on #292: a caller-ID hit "establishes only who OWNS the number"),
+     * and that was harmless while the person base was the LAST rung, reached
+     * only after the Schedule's own phone rung had missed. v85 made it the
+     * FIRST rung, so from the moment it deployed (17:21:57 UTC, 2026-10-01)
+     * every phone match on every runtime lane read `identity_is_certain:
+     * false` — 3 of the first 3 — and the queue prompts did what that flag
+     * tells them to: ask the recognised caller for their name and date of
+     * birth (CA4f3e821538bbe16aaa83bc19b92cb51b, surgery, asked both and
+     * only then matched by name_and_dob). RULE ZERO's own named loss, back
+     * through a rung reorder, on every lane at once.
+     *
+     * The rule is now the Schedule rung's, which production ran for months:
+     * `findByPhone` answers `verified` ONLY when the number resolves to
+     * exactly ONE person — unique across all 915,843, or narrowed to one by
+     * the caller's affirmed first name (RULE ZERO step 2, the validation) —
+     * and several people stays `ambiguous` above and never reaches here. A
+     * unique hit picks nobody, which is what standing instruction 6 forbids.
+     * `verifiedDobFor`'s name guard still refuses a stored date for a caller
+     * who gives a different name, so a household member saying "no, that's
+     * my father" is not filed under the father's chart.
+     *
+     * IDENTIFIED — SO PULL THE RECORD. This is the join, and it is the point
+     * of verifying against the person base at all: the mirror answers WHO on
+     * its own key, and `Schedule.PersonID` is that same key.
+     */
+    const joined = await this.lookupByPersonId(p.personId, matchedBy, deadlineAt);
+
+    if (joined.patientFound) {
+      console.info(
+        `[ScheduleLookup] the appointment book had nobody by name or number; the PERSON BASE ` +
+          `identified this caller by ${matchedBy}, and the PersonID join returned ` +
+          `${joined.totalAppointmentsFound} row(s)`,
+      );
+      return {
+        ...joined,
+        identityUnconfirmed: false,
+        /**
+         * The mirror wins on WHO, the schedule supplies everything else.
+         *
+         * Standing instruction 14 puts identity in the Console, and this is
+         * exactly where the two disagree: 2.4% of person_ids are spelled more
+         * than one way across their own appointment rows (maiden names,
+         * nicknames, a corrected birthday). The name we just verified against
+         * `patients_master` is the one staff will see on the chart, so it is
+         * the one to carry. Office, provider, history and contact details have
+         * no counterpart in the mirror and come from the rows untouched.
+         */
+        patientName: `${p.firstName} ${p.lastName}`.trim() || joined.patientName,
+        patientData: {
+          ...joined.patientData,
+          firstName: p.firstName || joined.patientData?.firstName,
+          lastName: p.lastName || joined.patientData?.lastName,
+          dateOfBirth: p.dob || joined.patientData?.dateOfBirth,
+          personId: p.personId,
+        },
+      };
+    }
+
+    // Identified, but the join brought nothing back — either they genuinely
+    // have no appointments, or it failed (the two log differently, one line
+    // up). WHO still stands: an unavailable schedule must never unidentify a
+    // caller the person base already vouched for.
+    console.info(
+      `[ScheduleLookup] the appointment book had nobody; the PERSON BASE identified this caller ` +
+        `by ${matchedBy}, and the PersonID join returned no rows`,
+    );
+    return {
+      patientFound: true,
+      patientName: `${p.firstName} ${p.lastName}`.trim(),
+      matchedBy,
+      identityUnconfirmed: false,
+      upcomingAppointments: [],
+      pastAppointments: [],
+      totalAppointmentsFound: 0,
+      identity: { unique: true, candidateCount: 1, candidates: [] },
+      patientData: { firstName: p.firstName, lastName: p.lastName, dateOfBirth: p.dob, personId: p.personId },
+    };
+  }
+
+  private buildContext(
+    rows: any[],
+    matchedBy: 'phone' | 'name' | 'dob' | 'name_and_dob',
+    options: { keyedByPerson?: boolean } = {},
+  ): PatientScheduleContext {
     const todayStr = getPacificDateString();
 
     // ONE PERSON PER CONTEXT.
@@ -577,7 +1111,10 @@ export class ScheduleLookupService {
     // reported rather than discarded, because a caller that intends to say a
     // name out loud needs to know whether it is the only one this lookup could
     // have meant.
-    const { primary, identity } = splitByPerson(rows);
+    // ...unless the rows came back on the person key, which cannot mean two
+    // people. See `onePerson`: grouping them by spelling would report 2.4% of
+    // real patients as ambiguous and discard part of their own history.
+    const { primary, identity } = options.keyedByPerson ? onePerson(rows) : splitByPerson(rows);
     const appointments = primary;
 
     const upcoming: AppointmentSummary[] = [];
@@ -612,14 +1149,24 @@ export class ScheduleLookupService {
       // caller on 2026-08-10 that their last appointment was four months in
       // the future, in the same breath as "you have no upcoming
       // appointments". Both sentences came from that one row.
+      // NextGen's kept flag, when the row carries one (Console rows do, Hub
+      // rows do not). The NextGen Bible's §2 rule: today is Upcoming UNTIL it
+      // is marked kept, and a past date never kept is a no-show.
+      const kept: boolean | null | undefined = apt.appointmentKept;
+
       if (aptDateStr >= todayStr) {
-        if (status === 'Active') upcoming.push(summary);
+        if (status !== 'Active') continue;
+        // Seen this morning: a visit, not an appointment still to come.
+        if (kept === true && aptDateStr === todayStr) past.push(summary);
+        else upcoming.push(summary);
         continue;
       }
 
       // Only a visit the patient actually had is reported as one. Cancelled
-      // (Removed) and NoShow rows are history, not appointments they attended.
-      if (status === 'Active') past.push(summary);
+      // (Removed) and NoShow rows are history, not appointments they attended,
+      // and neither is a past row NextGen says was never kept. Unknown (null,
+      // or a Hub row with no flag) is counted as before: never a no-show.
+      if (status === 'Active' && kept !== false) past.push(summary);
     }
 
     upcoming.sort((a, b) => a.isoDate.localeCompare(b.isoDate));
@@ -698,6 +1245,7 @@ export class ScheduleLookupService {
       homePhone: firstApt.patientHomePhone || undefined,
       preferredLocation: lastLocationSeen || firstApt.officeLocation || undefined,
       preferredProvider: lastProviderSeen || firstApt.renderingPhysician || undefined,
+      personId: firstApt.personId || undefined,
     };
 
     return {

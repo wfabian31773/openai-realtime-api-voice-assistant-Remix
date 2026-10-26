@@ -27,6 +27,7 @@ import { eq } from 'drizzle-orm';
 import { shadowTap } from '../shadow/tap'; // observation-only tap; no-op unless SHADOW_MODE_ENABLED
 import { callMetadataForDB } from './callMetadataStore';
 import type { DirectorAction } from '../director/director';
+import { dobShape } from '../tools/dobParts';
 
 export interface AzulToolEvent {
   at: string;               // ISO timestamp
@@ -71,6 +72,19 @@ const timelines = new Map<string, {
   directorActions?: DirectorTimelineAction[];
   /** Flush idempotence for the director block, mirroring flushedCount. */
   flushedDirectorCount?: number;
+  /**
+   * The tail of this entry's flush chain, so two flushes for one call can
+   * never be in flight at once (Codex P1, #320).
+   *
+   * `mediaStreamBridge.handleToolCall` dispatches every tool call in one model
+   * response CONCURRENTLY, and the per-tool flush turned that into overlapping
+   * UPDATEs on one row. The older write could land last, overwrite the newer
+   * timeline, and then mark the LARGER event count durable — so the reaper saw
+   * a complete entry over a truncated row and never repaired it. That is the
+   * 2026-07-28 race (17 of 51 timelines gutted) with a much shorter fuse,
+   * because this fires per TOOL rather than per call.
+   */
+  flushChain?: Promise<void>;
   /** When this entry was opened. The reaper used to date an entry by its first
    *  TOOL event, which leaks any entry that only ever held director actions. */
   startedAt: number;
@@ -161,6 +175,27 @@ function derivedFlags(tool: string, args: Record<string, unknown>): Record<strin
    * same discipline `missingFields` already uses in summarizeResult: a field
    * name is not a patient.
    */
+  /**
+   * WHY A DATE OF BIRTH WAS REFUSED — as a shape, never a value.
+   *
+   * The filing tools refuse with `missingFields: ["date_of_birth"]`, which is
+   * two different failures wearing one name: the model sent nothing, or the
+   * model sent something the parser would not take. They need opposite fixes,
+   * and until now the timeline could not tell them apart, because
+   * `date_of_birth` is correctly excluded from SAFE_ARG_KEYS and the row read
+   * `"args": {}`.
+   *
+   * On 2026-09-03 that cost the answer to a live one: surgery refused a caller
+   * four times for a date she had just confirmed back to the agent, and every
+   * form the transcript makes plausible parses on the deployed build.
+   *
+   * dobShape() replaces digits with `#` and letters with `a`, so this records
+   * "# # ##" or "(none)" — the same discipline as `recorded` above. A shape is
+   * not a birthday.
+   */
+  if (tool === 'create_ticket' || /^file_[a-z_]+_ticket$/.test(tool)) {
+    out.dobShape = dobShape(args?.date_of_birth);
+  }
   if (tool === 'record_pcp_intake') {
     const keys = Object.keys(args ?? {}).filter((k) => args?.[k] != null && args[k] !== '');
     out.recorded = keys;
@@ -204,7 +239,107 @@ function summarizeResult(tool: string, resultJson: string): Record<string, unkno
     // is the field D11 turns on: it is the difference between "the agent
     // promised a callback and filed it" and "promised and filed nothing".
     'success', 'ticket_number', 'ticketNumber', 'validationError',
+    // A request the POST could not file and the outbox is now holding.
+    // Without this key a captured request is indistinguishable in the
+    // timeline from a filed one — success is true for both, and only this
+    // says there is no ticket number because there is not one yet.
+    'filed_pending',
     'department', 'requestType', 'escalated', 'patientFound',
+    /**
+     * HOW the patient was matched, and whether that counts as an identity.
+     *
+     * Neither is PHI — one is an enum from a fixed set
+     * ('phone' | 'name' | 'dob' | 'name_and_dob'), the other a boolean — and
+     * without them the timeline cannot answer the question that matters about
+     * lookup_patient: 2,819 calls to it in the fourteen days to 2026-09-03
+     * and not one of them says how the match was made.
+     *
+     * That blindness is why the name-only carry-forward hazard in
+     * sharedPatientTools.ts could not be fixed on 2026-09-03: BACKEND_HANDOFF
+     * forbids changing the ticket path on a number nobody can measure, so the
+     * measurement had to come first.
+     */
+    'matched_by', 'identity_is_certain',
+    /**
+     * WHETHER THE LOOKUP FOUND ANYBODY, AND HOW MANY — the two fields that
+     * separate the branches `identity_is_certain: false` collapses (CLAUDE.md,
+     * the v28 row). `lookup_patient` answers false in three shapes: found
+     * nobody, found one person nobody has confirmed, and found SEVERAL — and
+     * only the last carries `candidate_count`. With neither key here, the
+     * 2026-09-16 worksheet could not say how many of the 33 date-of-birth
+     * refusals behind a matched lookup were the ambiguous branch (which
+     * deliberately forgets the record) and how many were the no-entry gap,
+     * so a safety-relevant fix was written and reverted for want of a number.
+     * A boolean and a count: no PHI.
+     */
+    'found', 'candidate_count',
+    /**
+     * How many times this call's lookup missed on a name or date of birth the
+     * caller had already given (sharedPatientTools.ts, LOOKUP_MISS_LIMIT). A
+     * count, no PHI: it is what makes "the second miss ended the ask" a
+     * number rather than a console line.
+     */
+    'lookup_misses',
+    /**
+     * WHY THE LOOKUP DID NOT RUN — RULE ZERO 2a's gate (operator ruling,
+     * 2026-09-19). One string from a closed set, no PHI. It is here from the
+     * start deliberately: v48 exists because `found` and `candidate_count`
+     * were NOT on this list, so "how often is `identity_is_certain: false`
+     * actually ambiguous?" answered 0 on every lane and that zero was the
+     * instrument rather than the fleet. A gate nobody can count is a gate
+     * nobody can tune, and this one has a dial the operator will want.
+     */
+    'suppressed',
+    // The form at call time (2026-09-27): which channel the patient chose and
+    // whether the ticketing app confirmed the link went out. Both PHI-free.
+    'form_channel',
+    'form_sent',
+    // v103: a records filing ROUTED OUT of Medical Records answers
+    // `form_applies: false`, so "how often is a routed-away caller offered a
+    // link" is a count, not a transcript scan. A boolean, no PHI.
+    'form_applies',
+    /**
+     * WHY escalate_to_human was refused (one of the gate's three codes) and
+     * whether the refusal FILED the ticket (2026-09-29). Both PHI-free. Until
+     * now a refused escalation and a sanctioned one were byte-identical in
+     * the timeline but for `success`, so "how many refusals left no ticket"
+     * was a transcript read; with these two it is a count.
+     */
+    'refused',
+    'ticket_filed',
+    /**
+     * ONE CALL, ONE TICKET (2026-10-01): a PCP filing tool called again on a
+     * call whose request is already filed through create-ticket answers with
+     * the existing number and POSTs nothing. A boolean, no PHI — it is what
+     * makes "the double ticket stopped" a count rather than a console line.
+     */
+    'alreadyFiled',
+    /**
+     * WHAT THE IDENTITY CARRY-FORWARD WRITE DID: `stored` | `merged` |
+     * `refused_sid` | `refused_name`, absent when the branch was not reached.
+     *
+     * A fixed word from a closed set, never caller data — the same class of
+     * value as `matched_by` above it. It is here because the v58 store probe
+     * cannot distinguish a refused write from one that never happened: all
+     * three of `rememberVerifiedIdentity`'s early returns leave the map empty,
+     * so `storeSize: 0` was the only thing 623 consecutive calls could say
+     * (docs/observatory/SPEC-20260923.md). Without this key the question
+     * stays unanswerable from SQL, which is the v28/v48 mistake.
+     */
+    'identity_write',
+    /**
+     * WHICH LANGUAGE `set_spoken_language` switched the call TO — the tag
+     * `normalizeSpokenLanguage` produced ('es', 'tl', 'ko'), never the
+     * caller's word for it (that is the ARGUMENT, and it stays dropped).
+     *
+     * Measured 2026-09-14..27, runtime queue lanes: 574 switch events, and
+     * 76 of them on calls whose caller lines carry no Spanish cue — the
+     * lane's WORST filing arm at 45.5% — and not one of the 574 says what it
+     * switched to, because this key was not here. Without it the question
+     * "what are the non-Spanish switches?" cannot be asked from SQL, which
+     * is the v28/v48 mistake again.
+     */
+    'language',
     'say', // directive text — kept so the Phase 7 rubric can grade say-verbatim compliance
     /**
      * What a refused PCP gate told the model to do instead (src/pcp/refusals.ts).
@@ -245,6 +380,22 @@ function summarizeResult(tool: string, resultJson: string): Record<string, unkno
     out.missingFields = parsed.missingFields.map(String);
   }
   /**
+   * WHY inherit did not fill date_of_birth — a closed enum, never a value.
+   *
+   * `dobShape` on args already answers "did the model send it?". This
+   * answers the next question: if it did not, and the gate still fired,
+   * was there an entry, did it hold a date, and did the name guard reject
+   * it? The five arms are the diagnosis in PR #307. A string that is not
+   * one of those five is dropped rather than stored — the allow-list is
+   * the safety mechanism, same as every other outcome key.
+   */
+  if (
+    typeof parsed?.carry === 'string'
+    && ['fired', 'no_entry', 'entry_without_dob', 'name_mismatch', 'bad_call_sid'].includes(parsed.carry)
+  ) {
+    out.carry = parsed.carry;
+  }
+  /**
    * THE DIRECTOR'S VERDICT — the other half of the PCP blind spot.
    *
    * record_pcp_intake returns a PcpDirectorDecision, and none of its keys were
@@ -263,7 +414,11 @@ function summarizeResult(tool: string, resultJson: string): Record<string, unkno
   if (parsed?.nextQuestion || parsed?.mayTerminate !== undefined || parsed?.handoffEligible !== undefined) {
     if (parsed?.nextQuestion?.field) out.nextField = String(parsed.nextQuestion.field);
     else if (parsed?.mayTerminate !== undefined) out.nextField = null; // intake complete
-    for (const k of ['disposition', 'handoffEligible', 'mayTerminate', 'phiDisclosureAllowed', 'authoritativeToolAllowed', 'mustCreateFallbackTicket']) {
+    // `askBudgetSpent` is an array of FIELD NAMES — no caller data — and it is
+    // the signal that answers "did the line get stuck on a question?" from
+    // SQL. The tool ceiling's own stops never reach this table and cannot be
+    // counted at all; this one deliberately does not repeat that.
+    for (const k of ['disposition', 'handoffEligible', 'mayTerminate', 'phiDisclosureAllowed', 'authoritativeToolAllowed', 'mustCreateFallbackTicket', 'askBudgetSpent']) {
       if (parsed?.[k] !== undefined) out[k] = parsed[k];
     }
   }
@@ -330,6 +485,14 @@ export function recordingExecute<A, R>(
           { callSid: ctx.callSid, callLogId: ctx.callLogId, agentSlug: ctx.agentSlug },
         );
       } catch { /* telemetry must never mask the real error */ }
+      /**
+       * A TOOL THAT THREW IS STILL A TOOL THAT RAN, and its event is the one a
+       * reader most wants (Codex P2, #320). This path records the failure and
+       * rethrows, so without a flush here the error event depended on teardown
+       * or the 2h reaper — exactly the durability gap this change closes,
+       * surviving on the branch that matters most.
+       */
+      void flushAfterRecording(ctx.callId ?? ctx.callSid ?? '');
       throw err;
     }
     try {
@@ -344,8 +507,41 @@ export function recordingExecute<A, R>(
     } catch (e) {
       console.error(`[TOOL-TIMELINE] record failed for ${tool}:`, e);
     }
+    /**
+     * PERSIST HERE, so that RECORDING AND PERSISTING ARE ONE ACT.
+     *
+     * They were two, and the split was invisible: `realtimeAdapter` flushed
+     * after every tool, so the four queue lanes were durable within seconds,
+     * while pcp, no-ivr and answering-service wire `recordingExecute`
+     * THEMSELVES and never flushed at all. Their only route to the database
+     * was the 2h reaper — and `timelines` is an in-memory Map, so every deploy
+     * or restart inside that window destroyed the record outright.
+     *
+     * Measured 2026-09-16: `tool_call_count` NULL on 90.9% of substantive PCP
+     * calls against 16-26% on the adapter-built lanes, and PCP itself read
+     * 36.8% / 31.7% on the two preceding days — the swing is how many times
+     * the process restarted, which is not a property anybody should be
+     * measuring the fleet through.
+     *
+     * Putting it here rather than at each call site is the point: an agent
+     * cannot wire recording and forget persistence, because there is no longer
+     * a way to have one without the other. Fire-and-forget and swallowing,
+     * exactly as the adapter's copy is — telemetry must never delay or break a
+     * patient's call.
+     */
+    void flushAfterRecording(ctx.callId ?? ctx.callSid ?? '');
     return result;
   };
+}
+
+/** The flush `recordingExecute` fires. Never throws into the tool. */
+async function flushAfterRecording(key: string): Promise<void> {
+  if (!key) return;
+  try {
+    await flushAzulTimeline(key);
+  } catch (e) {
+    console.warn('[TOOL-TIMELINE] flush after record failed (call unaffected):', e);
+  }
 }
 
 /**
@@ -487,6 +683,31 @@ function classifyForAgent(agentSlug: string | undefined, events: AzulToolEvent[]
 /** Persist the finished timeline on the call log and free the memory.
  *  Accepts the OpenAI callId, the Twilio callSid, or the callLogId. */
 export async function flushAzulTimeline(callIdOrSid: string): Promise<void> {
+  /**
+   * SERIALIZED PER ENTRY. See `flushChain`. Queueing behind the entry's own
+   * tail is what makes "last write wins" true again; the snapshot discipline
+   * inside `writeTimeline` is the belt to this braces, and both are needed —
+   * serializing alone still lets a write mark a count it did not persist if a
+   * later tool lands mid-await.
+   */
+  const entryForChain = findEntry(callIdOrSid);
+  if (!entryForChain) return;
+  const run = () => writeTimeline(callIdOrSid);
+  entryForChain.flushChain = (entryForChain.flushChain ?? Promise.resolve()).then(run, run);
+  return entryForChain.flushChain;
+}
+
+/** Resolve an entry by call id, call sid or call log id. */
+function findEntry(callIdOrSid: string) {
+  const direct = timelines.get(callIdOrSid);
+  if (direct) return direct;
+  for (const v of timelines.values()) {
+    if (v.callSid === callIdOrSid || v.callLogId === callIdOrSid) return v;
+  }
+  return undefined;
+}
+
+async function writeTimeline(callIdOrSid: string): Promise<void> {
   let key = callIdOrSid;
   let entry = timelines.get(key);
   if (!entry) {
@@ -522,8 +743,18 @@ export async function flushAzulTimeline(callIdOrSid: string): Promise<void> {
   if (entry.flushedCount === entry.events.length && (entry.flushedDirectorCount ?? 0) === directorCount) {
     return; // nothing new since last write
   }
+  /**
+   * THE COUNT THAT GETS MARKED IS THE ONE THAT WAS WRITTEN.
+   *
+   * `entry.events` is live and the write below is awaited, so reading its
+   * length AFTERWARDS marks a count this write did not persist — and the
+   * entry then reads as durable at a size the row does not hold (Codex P1,
+   * #320). Snapshot here, mark this.
+   */
+  const eventsSnapshot = entry.events.slice();
+  const eventsWritten = eventsSnapshot.length;
   try {
-    const { purpose, result } = classifyForAgent(entry.agentSlug, entry.events);
+    const { purpose, result } = classifyForAgent(entry.agentSlug, eventsSnapshot);
     // A/B carriage arm (Phase 7): stamped on call metadata at session
     // creation; persisted here so per-arm grade comparison reads one field.
     let abArm: string | undefined;
@@ -548,25 +779,57 @@ export async function flushAzulTimeline(callIdOrSid: string): Promise<void> {
         }
       : null;
     const payload = {
-      events: entry.events,
+      // THE SNAPSHOT, not the live array. `entry.events` keeps growing while
+      // this write is awaited, so a reference here writes a set of events the
+      // marked count does not describe.
+      events: eventsSnapshot,
       purpose,
       result,
-      toolCallCount: entry.events.length,
+      toolCallCount: eventsWritten,
       ...(entry.agentSlug ? { agentSlug: entry.agentSlug } : {}),
       ...(abArm ? { abArm } : {}),
       ...(director ? { director } : {}),
     };
+    /**
+     * A WRITE THAT TOUCHED NO ROW IS NOT A FLUSH, and marking it one is how
+     * this timeline goes missing permanently.
+     *
+     * `callRecord.ts` has described the defect since PR #227 without it ever
+     * being fixed: the UPDATE runs `WHERE call_sid = ?`, and if the call's row
+     * has not been opened yet it matches NOTHING — but `flushedCount` was set
+     * regardless, so the entry read as durable, the 2h reaper skipped it, and
+     * the events died in memory. The earlier the flush, the likelier the row is
+     * not there yet, which is precisely the direction this module is moving in.
+     *
+     * `.returning()` is what makes the difference observable; leaving
+     * `flushedCount` alone on a zero-row write leaves the entry DIRTY, so the
+     * next tool call — or the reaper — writes it again once the row exists.
+     */
+    let rowsTouched = 0;
     if (entry.callLogId) {
-      await db.update(callLogs)
-        .set({ toolTimeline: payload, toolCallCount: entry.events.length })
-        .where(eq(callLogs.id, entry.callLogId));
+      const touched = await db.update(callLogs)
+        .set({ toolTimeline: payload, toolCallCount: eventsWritten })
+        .where(eq(callLogs.id, entry.callLogId))
+        .returning({ id: callLogs.id });
+      rowsTouched = touched.length;
     } else if (entry.callSid) {
-      await db.update(callLogs)
-        .set({ toolTimeline: payload, toolCallCount: entry.events.length })
-        .where(eq(callLogs.callSid, entry.callSid));
+      const touched = await db.update(callLogs)
+        .set({ toolTimeline: payload, toolCallCount: eventsWritten })
+        .where(eq(callLogs.callSid, entry.callSid))
+        .returning({ id: callLogs.id });
+      rowsTouched = touched.length;
     }
-    entry.flushedCount = entry.events.length;
-    entry.flushedDirectorCount = directorCount;
+    if (rowsTouched === 0) {
+      console.warn(
+        `[TOOL-TIMELINE] ${entry.agentSlug ?? 'azul-scheduling'}: write touched NO row yet ` +
+          `(${entry.events.length} event(s) still held) — the call row is not open. ` +
+          `Left dirty so a later flush retries.`,
+      );
+      return;
+    }
+    // Never `entry.events.length` — see eventsWritten above.
+    entry.flushedCount = Math.max(entry.flushedCount ?? 0, eventsWritten);
+    entry.flushedDirectorCount = Math.max(entry.flushedDirectorCount ?? 0, directorCount);
     console.info(
       `[TOOL-TIMELINE] ${entry.agentSlug ?? 'azul-scheduling'}: flushed ${entry.events.length} tool event(s) (${purpose} → ${result})` +
         (director ? ` + ${director.count} director action(s), max ${director.maxEnforcement}` : ''),

@@ -1,0 +1,642 @@
+/**
+ * WHAT WE ALREADY KNOW ABOUT THE PERSON ON THIS CALL.
+ *
+ * Operator, 2026-09-01: *"it is very rare that a new patient will call that
+ * line so verification should succeed, if we do our job and validate and pass
+ * the patient records along, you will not have this issue."*
+ *
+ * He is right on both halves, and the second half is the bug.
+ *
+ * **Verification succeeds.** Over the 14 days to 2026-09-01, `lookup_patient`
+ * found the caller on 95% of the queue calls where it ran — 997 of 1,048 on
+ * tech, 651 of 698 on surgery, 421 of 442 on optical, 18 of 18 on records.
+ *
+ * **And then we asked them for it again.** 45 calls in that same window were
+ * refused for a date of birth and ended with no ticket — and on **23 of them
+ * `lookup_patient` had already identified the patient**. The service returns
+ * `patientData.dateOfBirth` and always has; nothing carried it the twenty
+ * lines from the lookup to the filing tool, so the agent asked a question the
+ * process could already answer, and when the caller could not answer it the
+ * request was lost.
+ *
+ * This is that carry. It is deliberately narrow:
+ *
+ *  - Only a CERTAIN match is remembered. A phone number can carry a family and
+ *    a surname carries several — Wayne's own number resolves to eight records
+ *    in the mirror. `identity.unique === false` is never stored, so an
+ *    uncertain match still has to be confirmed out loud.
+ *  - It is only ever read back for the SAME NAME. A caller ringing about
+ *    somebody else gets no borrowed date of birth; the name on the ticket must
+ *    be the name we verified.
+ *  - It never replaces something the caller actually said. It fills a gap.
+ *
+ * In memory, for the length of one call, like `gateAttempts.ts` beside it —
+ * this is patient data and it has no business being written anywhere durable
+ * for the sake of a twenty-line hand-off.
+ */
+
+import { isTwilioCallSid } from './callSid';
+import { readDobQuietly } from './dobParts';
+
+export interface VerifiedIdentity {
+  firstName: string;
+  lastName: string;
+  /**
+   * As the record holds it. Parsed by the caller, never displayed.
+   *
+   * OPTIONAL, because a verified NAME and a carried-forward date of birth are
+   * two different things. A certain unique phone match whose schedule row has
+   * no date of birth used to store nothing at all — so the sweep reported
+   * "no-name" and dropped a recoverable request from a caller we had
+   * positively identified (Codex, PR #268 round 7). `verifiedDobFor` still
+   * refuses to answer without one; only `verifiedIdentityFor` is satisfied by
+   * a name.
+   */
+  dateOfBirth?: string;
+  /**
+   * The office this patient actually attends, as `lookup_patient` already
+   * picked it for this queue — the value it returns as `usual_office` and
+   * the comment beside it calls "the field this queue routes on".
+   *
+   * It was computed, handed to the model, and then dropped on the floor,
+   * exactly as the date of birth above it was. `file_optical_ticket` never
+   * saw it and had only the caller's own words to work from, so an office it
+   * could not match became an UNASSIGNED ticket on the one queue whose
+   * assignment IS the location.
+   *
+   * OPTIONAL, and read back under a stricter guard than the date of birth:
+   * see `usualOfficeFor`. A name can be checked against the ticket; an office
+   * string cannot, so the certainty flag has to carry that weight instead.
+   */
+  usualOffice?: string;
+  /**
+   * The match was UNAMBIGUOUS — not a unique hit on a name or a date of
+   * birth alone.
+   *
+   * `lookup_patient` computes this (`sharedPatientTools.ts`: unique AND
+   * matchedBy is neither 'name' nor 'dob') and reports it to the model as
+   * `identity_is_certain: false`, precisely so the agent does not treat a
+   * name-only hit as the person. It then stored the candidate here anyway,
+   * with the certainty dropped on the floor — so anything reading this map
+   * saw a name-only guess as a verified identity (Codex, PR #268 round 3).
+   *
+   * That matters most for the teardown sweep, which files a request under
+   * this name with nobody watching. Wayne's standing instruction 6 is that
+   * verification "refuses to guess between two people"; a name is exactly
+   * the field that collides, and these lines get fathers and sons
+   * constantly.
+   */
+  certain: boolean;
+  /**
+   * The person base's primary key, when the lookup that wrote this knew it.
+   * The only thing that can prove a later lookup on the same call is about the
+   * same human — see the downgrade guard, and the father-and-son case that
+   * makes a name insufficient.
+   */
+  personId?: string;
+}
+
+interface Entry extends VerifiedIdentity {
+  at: number;
+}
+
+const verified = new Map<string, Entry>();
+
+/** Longer than any call, short enough that the map cannot become a leak. */
+const TTL_MS = 30 * 60_000;
+const MAX_ENTRIES = 5_000;
+
+/**
+ * The name guard. Trim + case-fold is not enough: a hyphenated surname
+ * (`Garcia-Lopez` vs `Garcia Lopez`) and an accent (`José` vs `Jose`) are
+ * the same person on these lines, and the exact `norm` used to refuse the
+ * carry for them — the surviving hypothesis for Bug B in PR #307.
+ *
+ * WHAT THIS IS NOT. A nickname list (Bill/William), a maiden-name table, or
+ * a first-name-only match. Those would put a relative's birthday on the
+ * ticket, which is worse than refusing. Residual after this: nicknames,
+ * married-vs-maiden surnames, and fully different transcriptions. `carry:
+ * name_mismatch` still measures that residue.
+ */
+export function nameKey(s: string | undefined): string {
+  return (s ?? '')
+    .normalize('NFD')
+    .replace(/\p{M}/gu, '')
+    .replace(/[-.\u2010-\u2015\u2018\u2019'`]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+}
+
+function namesAgree(
+  firstA: string | undefined,
+  lastA: string | undefined,
+  firstB: string | undefined,
+  lastB: string | undefined,
+): boolean {
+  const first = nameKey(firstA);
+  const last = nameKey(lastA);
+  return first !== '' && last !== '' && first === nameKey(firstB) && last === nameKey(lastB);
+}
+
+function sweep(now: number): void {
+  for (const [k, v] of verified) {
+    if (now - v.at > TTL_MS) verified.delete(k);
+  }
+  if (verified.size > MAX_ENTRIES) {
+    let excess = verified.size - MAX_ENTRIES;
+    for (const k of verified.keys()) {
+      verified.delete(k);
+      if (--excess <= 0) break;
+    }
+  }
+}
+
+/**
+ * Remember a match the lookup was CERTAIN about.
+ *
+ * Silently does nothing without a REAL CallSid, without a date of birth, or
+ * without both names — an entry that cannot be matched back to a person is
+ * worse than no entry, because the whole guard on reading it is the name.
+ *
+ * THE KEY MUST BE A REAL CALLSID, not merely a non-empty string — found by
+ * Codex on PR #244, and it is the most dangerous thing on this branch.
+ * `call_sid` is a declared property on the filing tools, so when the injected
+ * value is missing the model supplies a sentinel: "unknown", "latest", "none".
+ * A truthiness check accepts those, and every call that emits the same
+ * sentinel then shares one map entry. Two callers named the same thing — a
+ * father and son, which these lines get constantly — would be one key, and
+ * `verifiedDobFor` would hand the second caller the FIRST caller's date of
+ * birth for a ticket filed in their name. The name guard cannot catch it,
+ * because the names match; that is precisely when it fires.
+ *
+ * A call with no usable SID keeps the old behaviour: nothing is remembered,
+ * and the agent asks for the date of birth out loud.
+ */
+/**
+ * WHAT A WRITE DID, because until now it did all four of these in silence.
+ *
+ * `rememberVerifiedIdentity` returns early on three conditions — a SID that is
+ * not a real Twilio Call SID, an absent first name, an absent last name — and
+ * every one of them leaves the map EMPTY. So `identityStoreProbe` reporting
+ * `storeSize: 0` / `no_entry` cannot tell a refused write from a write that
+ * never happened, and on 2026-09-22 all 623 probed calls read exactly that
+ * while 210 of them ran a `lookup_patient` reporting `identity_is_certain:
+ * true` (docs/observatory/SPEC-20260923.md).
+ *
+ * THIS ALSO CORRECTS THIS MODULE'S OWN DESIGN NOTE. The probe's docstring says
+ * a write/read SID disagreement shows up as `storeSize > 0` with `hasEntry`
+ * false — the `key_mismatch` arm. That is false for the case that matters: a
+ * non-canonical write SID is refused HERE, nothing is stored, and the map stays
+ * empty. `key_mismatch` can only fire when the write SID is canonical AND
+ * different, so the arm cannot see the shape it was built for.
+ *
+ * The verdict is RETURNED rather than accumulated in a second store, because
+ * both call sites already sit somewhere countable: the lookup tool puts it on
+ * its own recorded outcome (`identity_write`, allow-listed in toolTimeline) and
+ * the runtime puts it on the `identity_summary` row. No new map, no second TTL.
+ */
+export type RememberOutcome = 'stored' | 'merged' | 'refused_sid' | 'refused_name';
+
+export function rememberVerifiedIdentity(
+  callSid: string | undefined,
+  identity: Partial<VerifiedIdentity>,
+): RememberOutcome {
+  // Absent means NOT certain. A caller that forgets to say so must not get
+  // the benefit of the doubt on a field this one is about.
+  const certain = identity.certain === true;
+  /**
+   * STORED AS THE RECORD SPELLS IT, MATCHED CASE-INSENSITIVELY.
+   *
+   * These used to be stored lower-cased, because the only reader compared them
+   * and never showed them. The request sweep now puts this name on a ticket a
+   * human reads, and "testpatient example" on a patient record is wrong in a
+   * way nobody would have caught from a passing test. Matching is unchanged
+   * in that sense — `nameKey` is applied at the comparison instead of at
+   * the write.
+   */
+  const firstName = (identity.firstName ?? '').trim();
+  const lastName = (identity.lastName ?? '').trim();
+  const dateOfBirth = (identity.dateOfBirth ?? '').trim();
+  const usualOffice = (identity.usualOffice ?? '').trim();
+  // A NAME IS ENOUGH TO REMEMBER. The date of birth is a bonus that the
+  // filing tools carry forward; its absence is not a reason to forget who
+  // the caller is.
+  /**
+   * THE SAME TWO RULES, SAID OUT LOUD. The conditions are unchanged — this
+   * splits one silent `return` into two that name themselves. A CallSid is not
+   * a patient, so the offending value is printed; a name never is, so the name
+   * branch reports only which half was missing.
+   */
+  if (!isTwilioCallSid(callSid)) {
+    console.info(
+      `[IDENTITY] remember REFUSED: not a Twilio CallSid — "${String(callSid).slice(0, 40)}"`,
+    );
+    return 'refused_sid';
+  }
+  if (!firstName || !lastName) {
+    console.info(
+      '[IDENTITY] remember REFUSED: the record gave no ' +
+        (!firstName && !lastName ? 'first or last name' : !firstName ? 'first name' : 'last name'),
+    );
+    return 'refused_name';
+  }
+  const now = Date.now();
+  sweep(now);
+
+  /**
+   * MERGE, DO NOT REPLACE, WHEN IT IS THE SAME PERSON.
+   *
+   * v11 writes the pre-context chart date into this map (`certain: false`,
+   * no `personId`). The person-base rung of `lookup_patient` then writes
+   * again with `identityUnconfirmed: true` and, until v26, no date. The
+   * old guard required `existing.certain === true` AND the same `personId`
+   * — neither is true of that write — so it deleted the date (Bug A, 24
+   * calls on 2026-09-14). Empty must not overwrite full.
+   *
+   * SAME PERSON if both sides have a `personId` and they agree, OR we
+   * cannot prove by id and the names agree (`nameKey`). DIFFERENT
+   * `personId` replaces the whole row — a father then a son (Invariant C).
+   * Names that do not match, and ids that do not prove same, also replace.
+   *
+   * Incoming date wins when present (the record). Incoming empty keeps the
+   * date already stored. Certainty never downgrades. Names come from the
+   * incoming write so the store tracks the record's spelling.
+   */
+  const incomingPersonId = (identity.personId ?? '').trim() || undefined;
+  const existing = verified.get(callSid);
+  const existingFresh = existing && now - existing.at <= TTL_MS ? existing : undefined;
+
+  if (existingFresh) {
+    const bothIds = !!existingFresh.personId && !!incomingPersonId;
+    const differentPerson = bothIds && existingFresh.personId !== incomingPersonId;
+    const sameById = bothIds && existingFresh.personId === incomingPersonId;
+    const sameByName = namesAgree(
+      existingFresh.firstName,
+      existingFresh.lastName,
+      firstName,
+      lastName,
+    );
+    const samePerson = sameById || (!bothIds && sameByName);
+
+    if (!differentPerson && samePerson) {
+      const keptDate = dateOfBirth || existingFresh.dateOfBirth || '';
+      const keptOffice = usualOffice || existingFresh.usualOffice || '';
+      const keptPersonId = incomingPersonId || existingFresh.personId;
+      verified.set(callSid, {
+        firstName,
+        lastName,
+        ...(keptDate ? { dateOfBirth: keptDate } : {}),
+        ...(keptOffice ? { usualOffice: keptOffice } : {}),
+        ...(keptPersonId ? { personId: keptPersonId } : {}),
+        certain: existingFresh.certain || certain,
+        at: now,
+      });
+      return 'merged';
+    }
+  }
+
+  verified.delete(callSid);
+  verified.set(callSid, {
+    firstName,
+    lastName,
+    ...(dateOfBirth ? { dateOfBirth } : {}),
+    ...(usualOffice ? { usualOffice } : {}),
+    ...(incomingPersonId ? { personId: incomingPersonId } : {}),
+    certain,
+    at: now,
+  });
+  return 'stored';
+}
+
+/**
+ * The date of birth we verified for this call, IF the ticket is for that same
+ * person. Returns undefined otherwise — including for a caller filing on
+ * somebody else's behalf, which is the case this must never guess at, and
+ * now also for a caller we identified from a record that simply has no date
+ * of birth on it. That entry still exists so the sweep knows who called; it
+ * just has no date to carry forward, and answering undefined is exactly
+ * right (Codex, PR #268 round 7).
+ */
+export function verifiedDobFor(
+  callSid: string | undefined,
+  firstName: string,
+  lastName: string,
+): string | undefined {
+  // Validated on the READ as well as the write, not because a sentinel could
+  // be in the map (the write refuses it) but so the guard survives someone
+  // later relaxing the write. Both ends state the same rule.
+  if (!isTwilioCallSid(callSid)) return undefined;
+  const entry = verified.get(callSid);
+  if (!entry) return undefined;
+  if (Date.now() - entry.at > TTL_MS) return undefined;
+  if (!namesAgree(firstName, lastName, entry.firstName, entry.lastName)) {
+    return undefined;
+  }
+  return entry.dateOfBirth;
+}
+
+/**
+ * WHY inherit did not fill `date_of_birth` on this refusal.
+ *
+ * `verifiedDobFor` returns a date or `undefined`. Those five `undefined`s
+ * are one bucket in every log we have, which is why Bug B in PR #307
+ * (32 certain matches that still refused) cannot be proven from what is
+ * persisted. This is the same walk, with a named exit at each guard.
+ *
+ * PHI-free: the value is a closed enum. It never carries a name or a date.
+ * `fired` means a date WAS in the map under this name — inherit would have
+ * returned it. A refusal that still happens then is an unparseable stored
+ * date, not a miss. See `the-dob-carry.md` on #307.
+ *
+ * Expired entries read as `no_entry`: they are gone for every other reader.
+ */
+export type DobCarry =
+  | 'fired'
+  | 'no_entry'
+  | 'entry_without_dob'
+  | 'name_mismatch'
+  | 'bad_call_sid';
+
+export function dobCarry(
+  callSid: string | undefined,
+  firstName: string,
+  lastName: string,
+): DobCarry {
+  if (!isTwilioCallSid(callSid)) return 'bad_call_sid';
+  const entry = verified.get(callSid);
+  if (!entry || Date.now() - entry.at > TTL_MS) return 'no_entry';
+  if (!namesAgree(firstName, lastName, entry.firstName, entry.lastName)) {
+    return 'name_mismatch';
+  }
+  if (!entry.dateOfBirth) return 'entry_without_dob';
+  return 'fired';
+}
+
+/**
+ * The office this patient attends, IF the ticket is for that same person AND
+ * the match was unambiguous.
+ *
+ * TWO GUARDS, WHERE THE DATE OF BIRTH HAS ONE, AND THE ASYMMETRY IS THE POINT.
+ * `verifiedDobFor` can be satisfied by the name alone because a wrong date
+ * under the RIGHT name is caught by the name comparison — the ticket says who
+ * it is about. An office is a bare string with nothing to compare it against,
+ * so a family sharing a phone would hand one member's office to another's
+ * ticket and nothing downstream would notice. `certain` is what stands in for
+ * the missing comparison, and it is required here.
+ *
+ * Same TTL and same call-sid validation as the other two readers.
+ */
+export function usualOfficeFor(
+  callSid: string | undefined,
+  firstName: string,
+  lastName: string,
+  /**
+   * The date of birth the TICKET is being filed under, when the caller gave
+   * one. Codex P1 on PR #291: the name guard alone cannot separate a parent
+   * and child who share a name, and on that call the filing input already
+   * held a date that says outright they are different people. Ignoring it
+   * routed the child's ticket to the parent's office silently.
+   *
+   * OPTIONAL, and its absence changes nothing — the vast majority of calls
+   * reach here with no date at all, and refusing them would delete the
+   * feature to fix 0.42% of numbers (measured 2026-09-12: 4,633 of 1,095,736
+   * numbers in `patients_master` are shared AND carry a name collision).
+   */
+  dateOfBirth?: string,
+): string | undefined {
+  if (!isTwilioCallSid(callSid)) return undefined;
+  const entry = verified.get(callSid);
+  if (!entry) return undefined;
+  if (Date.now() - entry.at > TTL_MS) return undefined;
+  if (!entry.certain) return undefined;
+  if (!namesAgree(firstName, lastName, entry.firstName, entry.lastName)) {
+    return undefined;
+  }
+  /**
+   * ONLY AN EXPLICIT, PARSEABLE CONFLICT REFUSES. This asymmetry is the whole
+   * safety of the check.
+   *
+   * A naive string compare would be worse than no check: the stored date
+   * comes off a record ("1950-01-02") and the ticket's comes from the model
+   * out of speech ("01/02/1950"), so the two disagree textually on calls that
+   * are the SAME person. That would silently switch the feature off for
+   * everyone to fix a case in 0.42% of numbers.
+   *
+   * So both sides are parsed, and the office is withheld only when both
+   * parsed AND they name different days. Anything unparseable or absent
+   * leaves the previous behaviour exactly as it was.
+   */
+  if (dateOfBirth && entry.dateOfBirth) {
+    /**
+     * THE QUIET PARSER, NOT THE ANNOUNCING ONE. Codex P2 on PR #291.
+     *
+     * `normalizeDobParts` emits the `[DOB]` refusal line and the parser-shape
+     * telemetry, and both are LIVE COUNTERS — `dobShape` in `tool_timeline` is
+     * what settled the "did the model send it, or did the parser refuse it?"
+     * question. `file_optical_ticket` parses the same value again a few lines
+     * later, so announcing here double-counts one tool attempt; worse, when
+     * the office gate returns first it emits a DOB refusal for an attempt
+     * whose recorded outcome is missing only the LOCATION.
+     *
+     * This reader is a comparison, not a filing decision. It has no business
+     * moving an instrument.
+     */
+    const asked = readDobQuietly(dateOfBirth);
+    const held = readDobQuietly(entry.dateOfBirth);
+    if (asked && held) {
+      const differs =
+        asked.year !== held.year || asked.month !== held.month || asked.day !== held.day;
+      if (differs) return undefined;
+    }
+  }
+  return entry.usualOffice;
+}
+
+/**
+ * The whole identity verified for this call, or undefined.
+ *
+ * Added 2026-09-03 for the request sweep. Operator ruling that afternoon:
+ * *"no name no ticket."* The sweep files a caller's request from the
+ * transcript when the agent did not, and it must never invent a person to
+ * hang it on — so it asks here, and stays its hand when the answer is
+ * undefined.
+ *
+ * Same TTL and same call-sid validation as the date-of-birth read. It does
+ * NOT take a name to match against, because it is not answering "is this
+ * ticket for that person?" — it is answering "who did we establish this
+ * caller to be?", which is the question the sweep has.
+ */
+export function verifiedIdentityFor(callSid: string | undefined): VerifiedIdentity | undefined {
+  if (!isTwilioCallSid(callSid)) return undefined;
+  const entry = verified.get(callSid);
+  if (!entry) return undefined;
+  if (Date.now() - entry.at > TTL_MS) return undefined;
+  /**
+   * AN UNCERTAIN MATCH IS NOT AN IDENTITY, and this reader is the one that
+   * must not accept one. Its only caller is the teardown sweep, which puts
+   * this name on a ticket a human then acts on, with nobody watching the
+   * call. A unique hit on a NAME alone is exactly the case Wayne's
+   * instruction 6 refuses — and filing one patient's request under another
+   * patient's name is worse than not filing it, which is saying something,
+   * because "no name, no ticket" already costs 47 recoveries a day.
+   *
+   * `verifiedDobFor` deliberately keeps its existing behaviour: it answers a
+   * different question ("is this ticket for that same person?") and applies
+   * its own name guard, and narrowing it is a ticket-path change that
+   * BACKEND_HANDOFF says needs a before/after number. Raised, not done here.
+   */
+  if (!entry.certain) return undefined;
+  return {
+    firstName: entry.firstName,
+    lastName: entry.lastName,
+    ...(entry.dateOfBirth ? { dateOfBirth: entry.dateOfBirth } : {}),
+    certain: true,
+  };
+}
+
+/**
+ * WHAT THE STORE LOOKED LIKE WHEN A READER ASKED — PHI-FREE, task #148.
+ *
+ * `verifiedIdentityFor` answers with a name or with `undefined`, and that
+ * single `undefined` is four different facts: nothing was ever written, the
+ * entry expired, the entry is here but not certain, or the entry is under a
+ * DIFFERENT KEY than the one being read. v51 reads it at teardown and wrote
+ * identity onto `patient_found` for 0 of 633 calls on 2026-09-17 while 209 of
+ * those calls ran a `lookup_patient` reporting `identity_is_certain: true` —
+ * and seven candidate causes were ruled out from outside without reaching the
+ * eighth, because that `undefined` is indistinguishable in every log we have.
+ *
+ * `size` and `certainEntries` are what make the decisive split readable:
+ *
+ *   size 0                     nothing is in the store at teardown at all
+ *   size > 0 && !hasEntry      entries exist under OTHER keys — the write and
+ *                              the read disagree about this call's SID
+ *   hasEntry && !entryCertain  the entry survives and its certainty does not
+ *
+ * **AND THE SECOND ARM CANNOT SEE THE CASE IT WAS BUILT FOR — corrected
+ * 2026-09-23, v61.** A write whose SID is not canonical is refused by
+ * `rememberVerifiedIdentity` and stores NOTHING, so the map stays empty and the
+ * probe reports the FIRST arm. `size > 0 && !hasEntry` therefore only ever
+ * means the write SID was canonical AND different, which the recording control
+ * rules out (`startRecording(entry.callSid, …)` produced a Twilio recording on
+ * 681 of 682 calls on 2026-09-22, and Twilio refuses a SID that is not a real
+ * call). So arm 1 covers three distinct facts, not one, and that is why the
+ * verdict now comes from the WRITE instead: `rememberVerifiedIdentity` returns
+ * `stored` | `merged` | `refused_sid` | `refused_name`, the lookup tool puts it
+ * on `tool_timeline.identity_write` and the runtime on the `identity_summary`
+ * row as `precontextWrite`. See docs/observatory/SPEC-20260923.md.
+ *
+ * COUNTS AND BOOLEANS ONLY. No name, no date of birth, no office, no phone,
+ * and never a key — a CallSid is not a patient, but the point of this is that
+ * it goes in a table, and a map key here is one call's identifier beside
+ * another's. The columns answer "which of the four happened", nothing more.
+ *
+ * A PURE READ. It does NOT call `sweep()`, because a diagnostic that evicts
+ * entries changes the thing it is measuring; expired entries are skipped in
+ * the count instead, so `size` is live entries as a reader would find them.
+ */
+export interface IdentityStoreProbe {
+  /** Live (unexpired) entries in the whole store at this instant. */
+  size: number;
+  /** Live entries whose match was CERTAIN — the only ones `verifiedIdentityFor` answers for. */
+  certainEntries: number;
+  /** Did the key pass `isTwilioCallSid`? A sentinel is refused on the write, so it can never have one. */
+  sidCanonical: boolean;
+  /** Was there a live entry under THIS key? */
+  hasEntry: boolean;
+  /** Was that entry certain? */
+  entryCertain: boolean;
+  /** Did it carry a date of birth? Separates v51's silence from v26's. */
+  entryHasDob: boolean;
+  /**
+   * WHEN the store was read, epoch ms — because everything above is a fact
+   * about one instant and the questions asked of it are not.
+   *
+   * A `lookup_patient` still in flight at hangup settles AFTER this read and
+   * writes its certain result to `tool_timeline` anyway, so a call can
+   * honestly read `no_entry` here and carry a certain lookup there. Without
+   * this field the mismatch JOIN in `identityTelemetry.ts` counts that call as
+   * the write and the read disagreeing about the SID, which is the one
+   * hypothesis the join exists to test (Codex P2, #322 round 5). A number
+   * rather than a string so the PHI guard's "counts and booleans only" holds
+   * unchanged.
+   */
+  at: number;
+}
+
+export function identityStoreProbe(callSid: string | undefined): IdentityStoreProbe {
+  const now = Date.now();
+  const live = (e: Entry) => now - e.at <= TTL_MS;
+  let size = 0;
+  let certainEntries = 0;
+  for (const e of verified.values()) {
+    if (!live(e)) continue;
+    size += 1;
+    if (e.certain) certainEntries += 1;
+  }
+  const sidCanonical = isTwilioCallSid(callSid);
+  // Read under the same guard the readers use: a non-canonical key is never
+  // looked up, so reporting an entry for one would invent a lookup nobody does.
+  const entry = sidCanonical ? verified.get(callSid as string) : undefined;
+  const found = entry && live(entry) ? entry : undefined;
+  return {
+    size,
+    certainEntries,
+    sidCanonical,
+    hasEntry: Boolean(found),
+    entryCertain: Boolean(found?.certain),
+    entryHasDob: Boolean(found?.dateOfBirth),
+    // The same `now` the liveness test used: one instant, reported once.
+    at: now,
+  };
+}
+
+/** Tests only. */
+export function resetVerifiedIdentities(): void {
+  verified.clear();
+}
+
+/**
+ * FORGET WHAT THIS CALL ESTABLISHED, when a later lookup comes back AMBIGUOUS
+ * about the same name.
+ *
+ * Codex P1 on PR #291. `rememberVerifiedIdentity` is only ever called under
+ * `if (uniqueMatch)`, and there was no `else` — so a call that identified
+ * somebody early and then hit an ambiguous lookup kept the FIRST entry, with
+ * its `certain: true` intact. Every reader here then answered from a result
+ * the tool itself had just stopped believing.
+ *
+ * The office is what made that reachable: a name can be checked against the
+ * ticket, an office string cannot, so `usualOfficeFor` leans on `certain` —
+ * and `certain` was stale. A parent and child sharing a name and a chart
+ * would trade offices on the one queue that assigns BY office.
+ *
+ * DELIBERATELY NARROW, and the narrowness is the point. Clearing on ANY
+ * ambiguous lookup would throw away a good identification whenever the model
+ * ran a second, vaguer search — and that entry is what closed the
+ * date-of-birth gate that cost 53 of 75 calls. So it clears only when the
+ * ambiguity is about the SAME NAME we are holding, which is exactly the
+ * collision the readers' name guard cannot see. An ambiguous lookup about
+ * somebody else leaves the entry alone; the name guard already covers that.
+ *
+ * No name to compare means no collision can be established, so nothing is
+ * cleared — the same "do not guess" posture as everything else in this file.
+ *
+ * Returns whether an entry was actually dropped, so a caller can count it.
+ */
+export function forgetIfSameName(
+  callSid: string | undefined,
+  firstName: string | undefined,
+  lastName: string | undefined,
+): boolean {
+  if (!isTwilioCallSid(callSid)) return false;
+  if (!nameKey(firstName) || !nameKey(lastName)) return false;
+  const entry = verified.get(callSid);
+  if (!entry) return false;
+  if (!namesAgree(firstName, lastName, entry.firstName, entry.lastName)) {
+    return false;
+  }
+  verified.delete(callSid);
+  return true;
+}

@@ -1,0 +1,2694 @@
+/**
+ * One whole call, end to end, with no phone and no xAI account.
+ *
+ * This is the test the standing rule asks for: "a failing call goes into a
+ * replay test BEFORE any code changes — show red then green offline; do not
+ * ask him to dial to find out whether a guess was right." Everything below
+ * the Twilio socket and above the Grok socket is real code — the webhook,
+ * the token gate, the lane resolution, the agent binding, the session's
+ * wire handling, the bridge's barge-in and teardown, the outcome the
+ * post-stream TwiML reads. Only the two sockets are fakes.
+ */
+import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
+// HOISTED above every import (vi.hoisted runs before the hoisted import
+// graph loads): since v78 `laneRegistry` imports the tool library STATICALLY,
+// and its telemetry module validates DATABASE_URL at import. The plain
+// assignments below this file's imports ran too late once the lazy import
+// was gone — the v77 outage fix would have failed this file to load.
+vi.hoisted(() => {
+  process.env.DATABASE_URL ||= 'postgresql://unused:unused@127.0.0.1:5432/unused';
+  process.env.OPENAI_API_KEY ||= 'test-unused';
+  process.env.XAI_API_KEY ||= 'test-unused';
+});
+import express from "express";
+import http from "node:http";
+import { z } from "zod";
+import twilio from "twilio";
+import WebSocket from "ws";
+import {
+  mountVoiceRuntime,
+  publicTransferDomain,
+  chooseGreeting,
+  type RuntimeTransport,
+} from "./voiceRuntime";
+import type { OutboundStore } from "./outbound/store";
+import { FakeOutboundStore } from "./outbound/store.testkit";
+import { answerUrl } from "./outbound/dialer";
+import type { OutboundLanePolicy } from "./outbound/campaign";
+import { DEFAULT_ATTEMPT_CAPS, DEFAULT_CALLING_WINDOW } from "./outbound/callingWindow";
+import { CallSessionRegistry } from "./sessionRegistry";
+import { deployedBuildSha } from "./buildIdentity";
+import { VOICE_RUNTIME_DEPLOY_MARKER } from "./readiness";
+import { transferDestinationStatus, transferUnavailableReason } from "./runtimeTransfer";
+import type { GrokServerEvent } from "./wireTypes";
+import type { LaneConfig, LaneSource } from "./laneRegistry";
+import { registerCallHandoff, registeredHandoffCount } from "../tools/handoffBroker";
+import { runSetupFailureFloor, type SetupFailureContext } from "./setupFailureFloor";
+import type { VoiceCallRecord } from "./mediaStreamBridge";
+
+// v77: resolveLane binds the PIPELINE's own tools (set_spoken_language) through
+// the tool library, whose telemetry module validates the environment at import.
+// A dummy connection string satisfies that validation; nothing here queries it.
+process.env.DATABASE_URL ||= 'postgresql://unused:unused@127.0.0.1:5432/unused';
+process.env.OPENAI_API_KEY ||= 'test-unused';
+process.env.XAI_API_KEY ||= 'test-unused';
+
+const AUTH_TOKEN = "test-auth-token";
+const ENV = {
+  TWILIO_AUTH_TOKEN: AUTH_TOKEN,
+  XAI_API_KEY: "xai-key",
+  DATABASE_URL: "postgres://x",
+};
+
+/** A fake Grok socket: records what the runtime sends and lets the test
+ * play server events back in wire order. Buffers inbound events until
+ * commitBuffered, the same way WebSocketGrokTransport does — otherwise
+ * a connect-time session.created is lost before GrokVoiceSession binds
+ * onMessage. */
+class FakeGrokTransport implements RuntimeTransport {
+  public sent: Array<Record<string, unknown>> = [];
+  public closed = false;
+  public detached = false;
+  private onMsg: ((data: string) => void) | null = null;
+  private onErr: ((err: Error) => void) | null = null;
+  private onCls: (() => void) | null = null;
+  private buffer: string[] = [];
+  private committed = false;
+  private firstEventArrived = false;
+  private firstEventWaiters: Array<(arrived: boolean) => void> = [];
+
+  /** True when connect() ran AFTER close(). A `closed` flag alone cannot
+   * see this: teardown closes the transport, then a connect behind it
+   * opens a provider socket with every timer already cleared and nobody
+   * owning it. The order is the defect, so the fake records the order. */
+  public connectedAfterClose = false;
+
+  /** Connect resolves and session.created is emitted, but session.updated
+   * never arrives — the failure the 15 s setup deadline exists for.
+   * MUST still emit session.created: if it does not, waitForFirstEvent
+   * times out and the first-event retry fires instead of the deadline. */
+  public stallHandshake = false;
+
+  /** Connect resolves and NO first event is emitted — the xAI 101-then-
+   * silence stall. Independent of stallHandshake. */
+  public stallFirstEvent = false;
+
+  public headers = { xTraceId: "trace-test", cfRay: "ray-test" };
+
+  async connect(): Promise<void> {
+    if (this.closed) this.connectedAfterClose = true;
+    if (this.stallFirstEvent) return;
+    // Synchronous so waitForFirstEvent (called after connect returns)
+    // already sees firstEventArrived. A microtask race here is what
+    // the real buffer exists to close.
+    this.emit({ type: "session.created" } as GrokServerEvent);
+  }
+  send(data: string): void {
+    this.sent.push(JSON.parse(data));
+  }
+  close(): void {
+    this.closed = true;
+  }
+  onMessage(cb: (data: string) => void): void {
+    this.onMsg = cb;
+  }
+  onError(cb: (err: Error) => void): void {
+    this.onErr = cb;
+  }
+  onClose(cb: () => void): void {
+    this.onCls = cb;
+  }
+  emit(event: GrokServerEvent): void {
+    this.handleInbound(JSON.stringify(event));
+  }
+  private handleInbound(data: string): void {
+    if (!this.firstEventArrived) {
+      this.firstEventArrived = true;
+      this.wakeFirstEventWaiters(true);
+    }
+    if (!this.committed) {
+      this.buffer.push(data);
+      return;
+    }
+    this.onMsg?.(data);
+  }
+  private wakeFirstEventWaiters(arrived: boolean) {
+    const waiters = this.firstEventWaiters.splice(0);
+    for (const w of waiters) w(arrived);
+  }
+  async waitForFirstEvent(ms: number): Promise<boolean> {
+    if (this.firstEventArrived) return true;
+    if (this.closed || this.detached) return false;
+    return new Promise((resolve) => {
+      const t = setTimeout(() => {
+        this.firstEventWaiters = this.firstEventWaiters.filter((w) => w !== onArrive);
+        resolve(this.firstEventArrived);
+      }, ms);
+      const onArrive = (arrived: boolean) => {
+        clearTimeout(t);
+        resolve(arrived);
+      };
+      this.firstEventWaiters.push(onArrive);
+    });
+  }
+  commitBuffered(): void {
+    this.committed = true;
+    const pending = this.buffer.splice(0);
+    for (const data of pending) this.onMsg?.(data);
+  }
+  detachAndClose(): void {
+    this.detached = true;
+    this.closed = true;
+    this.onMsg = null;
+    this.onErr = null;
+    this.onCls = null;
+    this.wakeFirstEventWaiters(false);
+  }
+  upgradeHeaders(): { xTraceId?: string; cfRay?: string } {
+    return { ...this.headers };
+  }
+  emitError(err: Error): void {
+    this.onErr?.(err);
+  }
+  emitClose(): void {
+    this.onCls?.();
+  }
+  ofType(type: string): Array<Record<string, unknown>> {
+    return this.sent.filter((e) => e.type === type);
+  }
+}
+
+const filedTickets: Array<Record<string, unknown>> = [];
+
+function laneSource(over: Partial<LaneConfig> = {}): LaneSource {
+  const config: LaneConfig = {
+    id: "optical",
+    enabled: true,
+    voice: "sage",
+    version: "v1.4.0",
+    factory: (async () => ({
+      instructions: "You are the optical queue agent. Take the request and file it.",
+      tools: [
+        {
+          name: "create_ticket",
+          description: "File a callback request.",
+          parameters: z.object({ reason: z.string(), callback_number: z.string() }),
+          invoke: async (_ctx: unknown, input: string) => {
+            filedTickets.push(JSON.parse(input));
+            return { ticket_number: "VA-51121" };
+          },
+        },
+      ],
+    })) as unknown as LaneConfig["factory"],
+    ...over,
+  };
+  return { getAgentConfig: (id) => (id === config.id ? config : undefined) };
+}
+
+interface Harness {
+  openedRows: Array<Record<string, unknown>>;
+  /** Every build-identity stamp the runtime fired, in order (v111). */
+  stamped: Array<{ callSid: string; identity: Record<string, unknown> }>;
+  persisted: Array<Record<string, unknown>>;
+  /** The identity handed to persistCall beside each record (v51). */
+  persistedIdentity: Array<unknown>;
+  /** Every caller-audio row the runtime wrote, in order (v64). */
+  audioRows: Array<{ callSid: string; outcome: string; counts: unknown }>;
+  /**
+   * Calls the teardown request sweep saw, in order.
+   *
+   * Stubbed rather than left to the real one on purpose: `runRequestSweep`
+   * lazily imports the durable filing path, so an unstubbed sweep would put a
+   * ticket POST behind every call in this suite the first time a fixture
+   * happened to look sweepable.
+   */
+  swept: Array<Record<string, unknown>>;
+  pcpSwept: Array<Record<string, unknown>>;
+  base: string;
+  wsUrl: string;
+  registry: CallSessionRegistry;
+  transports: FakeGrokTransport[];
+  /**
+   * Setup-failure tickets the stubbed floor accepted. The real floor
+   * POSTs; incidental provider_failure fixtures must not.
+   */
+  setupFailures: Array<Record<string, unknown>>;
+  close: () => Promise<void>;
+}
+
+const open: Harness[] = [];
+/** Every client socket a test opened. An upgraded WebSocket is detached
+ * from the HTTP server, so closeAllConnections() cannot reach it and
+ * server.close() would wait on it forever. */
+const clients: WebSocket[] = [];
+
+async function harness(
+  over: {
+    laneSource?: LaneSource;
+    stallHandshake?: boolean;
+    /** Every transport stalls after 101 — no first event. */
+    stallFirstEvent?: boolean;
+    /** Stall the first N transports; later ones emit session.created. */
+    firstEventStalls?: number;
+    firstEventTimeoutMs?: number;
+    connectRetries?: number;
+    fileSetupFailure?: (record: VoiceCallRecord, ctx?: SetupFailureContext) => Promise<unknown>;
+    providerSetupDeadlineMs?: number;
+    fetchPrecontext?: (phone: string) => Promise<unknown>;
+    resolveGreeting?: (slug: string) => Promise<string | null>;
+    sweepCall?: (record: unknown) => Promise<unknown>;
+    sweepPcpFloor?: (record: unknown) => Promise<unknown>;
+    /** Leave the runtime's OWN floor default in place (v90). */
+    realPcpFloor?: boolean;
+    persistCall?: (record: unknown) => Promise<boolean>;
+    persistTurns?: (record: unknown, ids: unknown) => Promise<unknown>;
+    gradeCall?: (record: unknown, ids: unknown) => Promise<unknown>;
+    logFollowUps?: (record: unknown, ids: unknown) => Promise<unknown>;
+    logCallerAudio?: (call: unknown, counts: unknown, ids: unknown) => Promise<unknown>;
+    startRecording?: (callSid: string, host: string | undefined) => Promise<unknown>;
+    persistBeforeSweepMs?: number;
+    openCallRow?: (row: unknown) => Promise<string | undefined>;
+    stampBuild?: (callSid: string, identity: unknown) => Promise<boolean>;
+    callRowDeadlineMs?: number;
+    env?: Record<string, string | undefined>;
+    /** The outbound layer's store (src/runtime/outbound/). */
+    outboundStore?: OutboundStore;
+  } = {},
+): Promise<Harness> {
+  const app = express();
+  app.use(express.urlencoded({ extended: true }));
+  const server = http.createServer(app);
+  const registry = new CallSessionRegistry();
+  const transports: FakeGrokTransport[] = [];
+  const openedRows: Array<Record<string, unknown>> = [];
+  const stamped: Array<{ callSid: string; identity: Record<string, unknown> }> = [];
+  const persisted: Array<Record<string, unknown>> = [];
+  const persistedIdentity: Array<unknown> = [];
+  const audioRows: Array<{ callSid: string; outcome: string; counts: unknown }> = [];
+  const swept: Array<Record<string, unknown>> = [];
+  const pcpSwept: Array<Record<string, unknown>> = [];
+  const setupFailures: Array<Record<string, unknown>> = [];
+  mountVoiceRuntime(app, server, {
+    env: over.env ?? ENV,
+    // Short so the deadline test does not wait on a production-length one.
+    streamClaimDeadlineMs: 300,
+    registry,
+    laneSource: over.laneSource ?? laneSource(),
+    createTransport: () => {
+      const t = new FakeGrokTransport();
+      t.stallHandshake = over.stallHandshake ?? false;
+      // Flags BEFORE push: firstEventStalls: 1 stalls while length is still 0.
+      if (over.stallFirstEvent) t.stallFirstEvent = true;
+      else if ((over.firstEventStalls ?? 0) > transports.length) t.stallFirstEvent = true;
+      transports.push(t);
+      return t;
+    },
+    firstEventTimeoutMs: over.firstEventTimeoutMs,
+    connectRetries: over.connectRetries,
+    fileSetupFailure:
+      over.fileSetupFailure ??
+      (async (record, ctx) =>
+        runSetupFailureFloor(record, ctx, async (ticket) => {
+          setupFailures.push(ticket);
+          return { success: true, ticketNumber: "VA-SETUP-1" };
+        })),
+    providerSetupDeadlineMs: over.providerSetupDeadlineMs,
+    callRowDeadlineMs: over.callRowDeadlineMs,
+    fetchPrecontext: over.fetchPrecontext,
+    resolveGreeting: over.resolveGreeting,
+    outboundStore: over.outboundStore,
+    openCallRow:
+      over.openCallRow ??
+      (async (row) => {
+        openedRows.push(row as unknown as Record<string, unknown>);
+        return undefined;
+      }),
+    persistBeforeSweepMs: over.persistBeforeSweepMs,
+    // The real stamp would reach for the database; record it instead.
+    stampBuild:
+      (over.stampBuild as never) ??
+      (async (callSid: string, identity: Record<string, unknown>) => {
+        stamped.push({ callSid, identity });
+        return true;
+      }),
+    // Telemetry hooks default to no-ops here: the real ones import twilio
+    // and write call_turns, neither of which a harness call should touch.
+    persistTurns: over.persistTurns ?? (async () => 0),
+    startRecording: over.startRecording ?? (async () => "skipped"),
+    gradeCall: over.gradeCall ?? (async () => "skipped"),
+    logFollowUps: over.logFollowUps ?? (async () => false),
+    logCallerAudio:
+      (over.logCallerAudio as never) ??
+      (async (call, counts) => {
+        audioRows.push({
+          callSid: (call as { callSid: string }).callSid,
+          outcome: (call as { outcome: string }).outcome,
+          counts,
+        });
+        return true;
+      }),
+    persistCall:
+      over.persistCall ??
+      (async (record, identity) => {
+        persisted.push(record as unknown as Record<string, unknown>);
+        persistedIdentity.push(identity);
+        return true;
+      }),
+    sweepPcpFloor: over.realPcpFloor
+      ? undefined
+      : over.sweepPcpFloor ??
+      (async (record) => {
+        // The floor files a request, so like sweepCall it must run AFTER the
+        // durable record — asserted, not assumed.
+        pcpSwept.push({
+          ...(record as unknown as Record<string, unknown>),
+          persistedFirst: persisted.length,
+        });
+        return undefined;
+      }),
+    sweepCall:
+      over.sweepCall ??
+      (async (record) => {
+        // Order matters and is asserted: the durable record lands first.
+        swept.push({
+          ...(record as unknown as Record<string, unknown>),
+          persistedFirst: persisted.length,
+        });
+        return { filed: false, reason: "caller-said-nothing" };
+      }),
+  });
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const port = (server.address() as { port: number }).port;
+  const h: Harness = {
+    openedRows,
+    stamped,
+    persisted,
+    persistedIdentity,
+    audioRows,
+    swept,
+    pcpSwept,
+    base: `http://127.0.0.1:${port}`,
+    wsUrl: `ws://127.0.0.1:${port}/voice/stream`,
+    registry,
+    transports,
+    setupFailures,
+    close: () =>
+      new Promise<void>((resolve) => {
+        // A media stream left open would hold server.close() forever —
+        // which is exactly what a real hung call does, and not what this
+        // hook is for.
+        server.closeAllConnections();
+        server.close(() => resolve());
+      }),
+  };
+  open.push(h);
+  return h;
+}
+
+afterEach(async () => {
+  while (clients.length) clients.pop()!.terminate();
+  while (open.length) await open.pop()!.close();
+  filedTickets.length = 0;
+});
+
+/** POST a genuinely signed Twilio webhook. */
+async function post(
+  h: Harness,
+  path: string,
+  body: Record<string, string>,
+): Promise<{ status: number; text: string }> {
+  const url = `${h.base}${path}`;
+  const sig = (
+    twilio as unknown as {
+      getExpectedTwilioSignature: (t: string, u: string, p: Record<string, string>) => string;
+    }
+  ).getExpectedTwilioSignature(AUTH_TOKEN, url, body);
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      "content-type": "application/x-www-form-urlencoded",
+      "x-twilio-signature": sig,
+      "x-forwarded-proto": "http",
+    },
+    body: new URLSearchParams(body).toString(),
+  });
+  return { status: res.status, text: await res.text() };
+}
+
+function tokenFrom(twiml: string): string {
+  return twiml.match(/name="token" value="([^"]+)"/)![1];
+}
+
+/** Open the media stream and send the start frame Twilio would send. */
+async function openStream(
+  h: Harness,
+  callSid: string,
+  token: string,
+  host?: string,
+): Promise<{ ws: WebSocket; frames: Array<Record<string, unknown>> }> {
+  const ws = new WebSocket(h.wsUrl);
+  clients.push(ws);
+  const frames: Array<Record<string, unknown>> = [];
+  ws.on("message", (raw) => frames.push(JSON.parse(raw.toString())));
+  await new Promise<void>((resolve, reject) => {
+    ws.once("open", () => resolve());
+    ws.once("error", reject);
+  });
+  ws.send(
+    JSON.stringify({
+      event: "start",
+      streamSid: "MZ1",
+      start: {
+        streamSid: "MZ1",
+        callSid,
+        customParameters: { callSid, token, ...(host ? { host } : {}) },
+      },
+    }),
+  );
+  return { ws, frames };
+}
+
+/** Let the event loop drain — the runtime builds the agent asynchronously. */
+async function settle(times = 8): Promise<void> {
+  for (let i = 0; i < times; i += 1) await new Promise((r) => setTimeout(r, 5));
+}
+
+/**
+ * A condition-wait for the one thing `settle` cannot promise: that a stream
+ * the test just opened has REGISTERED its transport. `settle()` is 40ms of
+ * fixed sleep, and `expect(h.transports).toHaveLength(1)` after it has gone
+ * red in CI three times (task #112, last on 2026-09-15 at dd51297) with no
+ * runtime change between the failing and passing runs — the upgrade simply
+ * took longer than 40ms on a loaded runner. Polls at settle's cadence and
+ * gives up loudly rather than sleeping longer for everyone.
+ */
+async function waitFor(cond: () => boolean, what: string, timeoutMs = 2000): Promise<void> {
+  const until = Date.now() + timeoutMs;
+  while (!cond()) {
+    if (Date.now() > until) throw new Error(`timed out after ${timeoutMs}ms waiting for ${what}`);
+    await new Promise((r) => setTimeout(r, 5));
+  }
+}
+
+describe("one whole call, end to end, offline", () => {
+  it("answers, configures the session with the agent's own prompt and tools, and files a ticket", async () => {
+    const h = await harness();
+
+    // 1. Twilio's Voice webhook.
+    const answered = await post(h, "/voice/optical", {
+      CallSid: "CA1",
+      From: "+15551234567",
+      To: "+15559876543",
+    });
+    expect(answered.status).toBe(200);
+    expect(answered.text).toContain("<Connect><Stream");
+
+    // 2. The media stream, with the token the webhook minted.
+    const { ws } = await openStream(h, "CA1", tokenFrom(answered.text));
+    await waitFor(() => h.transports.length === 1, "the transport to register");
+    expect(h.transports).toHaveLength(1);
+    const grok = h.transports[0];
+
+    // 2b. The call's row exists BEFORE any tool can fire — the agents' own
+    //     telemetry updates it by call_sid and a flush landing on no row
+    //     marks itself done anyway, losing the timeline for good.
+    expect(h.openedRows).toHaveLength(1);
+    expect(h.openedRows[0]).toMatchObject({
+      callSid: "CA1",
+      status: "in_progress",
+      agentUsed: "optical",
+      direction: "inbound",
+    });
+
+    // 3. The session handshake: config BEFORE any audio (the rule that
+    //    cost a whole line when it was the other way round).
+    grok.emit({ type: "session.created" } as GrokServerEvent);
+    await settle();
+    const update = grok.ofType("session.update")[0] as {
+      session: { instructions: string; voice: string; tools: Array<{ name: string }> };
+    };
+    // The lane registers `voice: 'sage'` — an OpenAI voice. Grok must be
+    // configured with a Grok voice, or session setup fails on every lane.
+    expect(update.session.voice).not.toBe("sage");
+    expect(update.session.voice).toBe("eve");
+    // The agent's own words, and the practice knowledge in front of them.
+    expect(update.session.instructions).toContain("You are the optical queue agent");
+    expect(update.session.instructions).toContain("YOU WORK FOR AZUL VISION");
+    // The agent's own tool, with its own schema and no strict mode — then the
+    // pipeline's own (v77): the runtime binds set_spoken_language to every lane.
+    expect(update.session.tools.map((t) => t.name)).toEqual(["create_ticket", "set_spoken_language"]);
+    expect(JSON.stringify(update.session.tools)).not.toContain('"strict"');
+
+    // 4. Caller audio reaches Grok untouched.
+    ws.send(
+      JSON.stringify({ event: "media", streamSid: "MZ1", media: { payload: "QUJDRA==" } }),
+    );
+    await settle();
+    grok.emit({ type: "session.updated" } as GrokServerEvent);
+    await settle();
+    expect(grok.ofType("input_audio_buffer.append").map((e) => e.audio)).toContain("QUJDRA==");
+
+    // The opening turn is asked for with NO per-response instructions, so
+    // the caller's first sentence is generated from the session's
+    // instructions — the agent's prompt with the knowledge pack in front.
+    // `response.instructions` overrides those, so a single word here would
+    // silently switch both off for exactly that sentence.
+    const opening = grok.ofType("response.create") as Array<{ response: Record<string, unknown> }>;
+    expect(opening).toHaveLength(1);
+    expect(opening[0].response).toEqual({});
+
+    // 5. The model calls the agent's tool, and the agent's own code runs.
+    grok.emit({ type: "response.created" } as GrokServerEvent);
+    grok.emit({
+      type: "response.function_call_arguments.done",
+      call_id: "fc1",
+      name: "create_ticket",
+      arguments: JSON.stringify({ reason: "lens remake", callback_number: "+15551234567" }),
+    } as GrokServerEvent);
+    await settle();
+    expect(filedTickets).toEqual([
+      { reason: "lens remake", callback_number: "+15551234567" },
+    ]);
+    // Every tool call is answered, or the turn stalls forever.
+    const answer = grok.ofType("conversation.item.create").pop() as {
+      item: { type: string; call_id: string; output: string };
+    };
+    expect(answer.item.type).toBe("function_call_output");
+    expect(answer.item.call_id).toBe("fc1");
+    // `ok` is the wire layer's own flag; the tool's answer rides beside it.
+    expect(JSON.parse(answer.item.output)).toEqual({ ok: true, ticket_number: "VA-51121" });
+
+    ws.close();
+    await settle();
+  });
+
+  it("stamps which software handled the call when the row opens and again after the teardown write (v111)", async () => {
+    const h = await harness({
+      env: { ...ENV, XAI_VOICE_MODEL_OPTICAL: "grok-voice-test-model" },
+    });
+    const answered = await post(h, "/voice/optical", { CallSid: "CAb111", From: "+15551234567", To: "+15559876543" });
+    const { ws } = await openStream(h, "CAb111", tokenFrom(answered.text));
+    await waitFor(() => h.transports.length === 1, "the transport to register");
+    await waitFor(() => h.stamped.length === 1, "the open stamp");
+    expect(h.stamped[0]).toEqual({
+      callSid: "CAb111",
+      identity: {
+        runtimeMarker: VOICE_RUNTIME_DEPLOY_MARKER,
+        buildSha: deployedBuildSha(),
+        voiceModel: "grok-voice-test-model",
+      },
+    });
+    ws.close();
+    await waitFor(() => h.persisted.length === 1, "the teardown write");
+    await waitFor(() => h.stamped.length === 2, "the teardown stamp");
+    expect(h.stamped[1]).toEqual(h.stamped[0]);
+  });
+
+  it("does not stamp after a teardown write that did not land (v111)", async () => {
+    const h = await harness({ persistCall: async () => false });
+    const answered = await post(h, "/voice/optical", { CallSid: "CAb112", From: "+1", To: "+2" });
+    const { ws } = await openStream(h, "CAb112", tokenFrom(answered.text));
+    await waitFor(() => h.stamped.length === 1, "the open stamp");
+    ws.close();
+    await settle(8);
+    expect(h.stamped).toHaveLength(1);
+  });
+
+  it("/voice/health names the build SHA beside the marker (v111)", async () => {
+    const h = await harness();
+    const res = await fetch(`${h.base}/voice/health`);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.marker).toBe(VOICE_RUNTIME_DEPLOY_MARKER);
+    expect("buildSha" in body).toBe(true);
+    expect(body.buildSha).toBe(deployedBuildSha());
+  });
+
+  it("plays the agent's audio to the caller and records what was actually heard", async () => {
+    const h = await harness();
+    const answered = await post(h, "/voice/optical", {
+      CallSid: "CA2",
+      From: "+15551234567",
+      To: "+15559876543",
+    });
+    const { ws, frames } = await openStream(h, "CA2", tokenFrom(answered.text));
+    await settle();
+    const grok = h.transports[0];
+    grok.emit({ type: "session.created" } as GrokServerEvent);
+    grok.emit({ type: "session.updated" } as GrokServerEvent);
+    grok.emit({ type: "response.created" } as GrokServerEvent);
+    grok.emit({
+      type: "response.output_audio_transcript.delta",
+      delta: "Thanks for calling Azul Vision optical.",
+    } as GrokServerEvent);
+    grok.emit({
+      type: "response.output_audio.delta",
+      delta: Buffer.alloc(800, 0x7f).toString("base64"),
+    } as GrokServerEvent);
+    await settle();
+
+    const media = frames.filter((f) => f.event === "media");
+    expect(media).toHaveLength(1);
+    expect((media[0] as { media: { payload: string } }).media.payload).toBe(
+      Buffer.alloc(800, 0x7f).toString("base64"),
+    );
+
+    grok.emit({
+      type: "response.output_audio_transcript.done",
+      transcript: "Thanks for calling Azul Vision optical.",
+    } as GrokServerEvent);
+    await settle();
+    const mark = frames.find((f) => f.event === "mark") as { mark: { name: string } };
+    expect(mark).toBeTruthy();
+
+    // Twilio confirms the audio played. Only now is the line committed.
+    ws.send(JSON.stringify({ event: "mark", streamSid: "MZ1", mark: { name: mark.mark.name } }));
+    await settle();
+    ws.send(JSON.stringify({ event: "stop", streamSid: "MZ1" }));
+    await settle();
+    expect(h.registry.consumeOutcome("CA2")).toBe("caller_hangup");
+  });
+
+  it("barges in with BOTH signals when the caller talks over the agent", async () => {
+    const h = await harness();
+    const answered = await post(h, "/voice/optical", {
+      CallSid: "CA3",
+      From: "+1",
+      To: "+2",
+    });
+    const { ws, frames } = await openStream(h, "CA3", tokenFrom(answered.text));
+    await settle();
+    const grok = h.transports[0];
+    grok.emit({ type: "session.created" } as GrokServerEvent);
+    grok.emit({ type: "session.updated" } as GrokServerEvent);
+    grok.emit({ type: "response.created" } as GrokServerEvent);
+    grok.emit({
+      type: "response.output_audio.delta",
+      delta: Buffer.alloc(400, 0x7f).toString("base64"),
+    } as GrokServerEvent);
+    await settle();
+    grok.emit({ type: "input_audio_buffer.speech_started" } as GrokServerEvent);
+    await settle();
+
+    expect(grok.ofType("response.cancel")).toHaveLength(1);
+    expect(frames.filter((f) => f.event === "clear")).toHaveLength(1);
+    ws.close();
+    await settle();
+  });
+
+  it("survives Grok rejecting the cancel — the failure that used to hang up on a healthy caller", async () => {
+    const h = await harness();
+    const answered = await post(h, "/voice/optical", { CallSid: "CA4", From: "+1", To: "+2" });
+    const { ws } = await openStream(h, "CA4", tokenFrom(answered.text));
+    await settle();
+    const grok = h.transports[0];
+    grok.emit({ type: "session.created" } as GrokServerEvent);
+    grok.emit({ type: "session.updated" } as GrokServerEvent);
+    grok.emit({ type: "response.created" } as GrokServerEvent);
+    grok.emit({
+      type: "response.output_audio.delta",
+      delta: Buffer.alloc(400, 0x7f).toString("base64"),
+    } as GrokServerEvent);
+    await settle();
+    grok.emit({ type: "input_audio_buffer.speech_started" } as GrokServerEvent);
+    await settle();
+    // Grok finished the response first, so it rejects the cancel. That is
+    // the missing response.done, not a fault.
+    grok.emit({
+      type: "error",
+      error: {
+        type: "invalid_request_error",
+        message: "cancellation failed: no active response found",
+      },
+    } as GrokServerEvent);
+    await settle();
+    // The call is still up: no outcome recorded, socket not closed.
+    expect(h.registry.get("CA4")!.outcome).toBeNull();
+    ws.close();
+    await settle();
+  });
+
+  it("abandons setup when the caller hangs up while the agent is still being built", async () => {
+    // Building an agent takes real time. If Twilio disconnects during it,
+    // the continuation must not go on to open a Grok session against a
+    // socket that is already gone — that is a provider connection nobody
+    // owns and nobody closes (Codex review, PR #227).
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const slow: LaneSource = {
+      getAgentConfig: () => ({
+        id: "optical",
+        enabled: true,
+        factory: (async () => {
+          await blocked;
+          return {
+            instructions: "You are the optical queue agent.",
+            tools: [],
+          };
+        }) as unknown as LaneConfig["factory"],
+      }),
+    };
+    const h = await harness({ laneSource: slow });
+    const answered = await post(h, "/voice/optical", { CallSid: "CA8", From: "+1", To: "+2" });
+    const { ws } = await openStream(h, "CA8", tokenFrom(answered.text));
+    await settle(2);
+    // The caller hangs up mid-setup.
+    ws.close();
+    await settle(4);
+    release();
+    await settle(6);
+    expect(h.transports).toHaveLength(0);
+    expect(h.registry.get("CA8")?.outcome ?? h.registry.consumeOutcome("CA8")).toBe(
+      "caller_hangup",
+    );
+  });
+
+  it("a stop frame queued during setup closes the provider socket instead of orphaning it", async () => {
+    // Twilio can send `stop` while the agent is still being built. That
+    // frame is held, and replaying it tears the bridge down — so it must be
+    // replayed only AFTER the provider socket exists, or teardown closes a
+    // transport that is then opened behind it and left live with every
+    // timer already cleared (Codex review, PR #227).
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const slow: LaneSource = {
+      getAgentConfig: () => ({
+        id: "optical",
+        enabled: true,
+        agentType: "inbound",
+        factory: (async () => {
+          await blocked;
+          return { instructions: "You are the optical queue agent.", tools: [] };
+        }) as unknown as LaneConfig["factory"],
+      }),
+    };
+    const h = await harness({ laneSource: slow });
+    const answered = await post(h, "/voice/optical", { CallSid: "CA9", From: "+1", To: "+2" });
+    const { ws } = await openStream(h, "CA9", tokenFrom(answered.text));
+    await settle(2);
+    ws.send(JSON.stringify({ event: "stop", streamSid: "MZ1" }));
+    await settle(2);
+    release();
+    await settle(8);
+    expect(h.transports).toHaveLength(1);
+    // Opened, then closed by teardown — and crucially NOT opened behind a
+    // teardown that had already closed it.
+    expect(h.transports[0].connectedAfterClose).toBe(false);
+    expect(h.transports[0].closed).toBe(true);
+    expect(h.registry.consumeOutcome("CA9")).toBe("caller_hangup");
+  });
+
+  it("a claimed call whose lane resolves to NOTHING still leaves a durable failed record", async () => {
+    // The webhook deliberately admits every syntactically valid slug, so an
+    // unknown or disabled lane is discovered only here — and this early
+    // return sits BEFORE the catch that persists other setup failures
+    // (Codex, PR #227 round 18).
+    const noLane: LaneSource = {
+      getAgentConfig: () => undefined,
+    };
+    const h = await harness({ laneSource: noLane });
+    const answered = await post(h, "/voice/optical", { CallSid: "CA-nolane", From: "+1", To: "+2" });
+    await openStream(h, "CA-nolane", tokenFrom(answered.text));
+    await settle(8);
+
+    const record = h.persisted.find((r) => r.callSid === "CA-nolane");
+    expect(record).toBeDefined();
+    expect(record?.outcome).toBe("provider_failure");
+    await h.close();
+  });
+
+  it("a setup failure BEFORE the bridge exists still leaves a durable failed record", async () => {
+    // The registry copy is consumed by the post-stream redirect — without
+    // this row, lane-resolution and agent-binding failures (exactly the
+    // setup problems operators need to diagnose) would vanish entirely
+    // (Codex review, PR #227 round 17).
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const failing: LaneSource = {
+        getAgentConfig: () => ({
+          id: "optical",
+          enabled: true,
+          agentType: "inbound",
+          factory: (async () => {
+            throw new Error("agent tree exploded");
+          }) as unknown as LaneConfig["factory"],
+        }),
+      };
+      const h = await harness({ laneSource: failing });
+      const answered = await post(h, "/voice/optical", { CallSid: "CA-fail", From: "+1", To: "+2" });
+      await openStream(h, "CA-fail", tokenFrom(answered.text));
+      await settle(8);
+
+      const record = h.persisted.find((r) => r.callSid === "CA-fail");
+      expect(record).toBeDefined();
+      expect(record?.outcome).toBe("provider_failure");
+      expect(record?.slug).toBe("optical");
+      await h.close();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("refuses a lane whose factory contract the runtime does not model", async () => {
+    // createAfterHoursAgent(handoff, recordPatientInfoCallback, metadata) —
+    // calling it with the uniform two-argument shape puts the metadata in
+    // the callback slot, so the agent loses caller context and later tries
+    // to CALL that object (Codex review, PR #227).
+    const afterHours: LaneSource = {
+      getAgentConfig: () => ({
+        id: "after-hours",
+        enabled: true,
+        agentType: "inbound",
+        // A perfectly good agent: the ONLY reason this lane is refused is
+        // its factory's argument layout. A stub returning undefined would
+        // fail binding anyway and prove nothing about the contract check.
+        factory: (async () => ({
+          instructions: "You are the after-hours agent.",
+          tools: [],
+        })) as unknown as LaneConfig["factory"],
+      }),
+    };
+    const h = await harness({ laneSource: afterHours });
+    const answered = await post(h, "/voice/after-hours", {
+      CallSid: "CA10",
+      From: "+1",
+      To: "+2",
+    });
+    await openStream(h, "CA10", tokenFrom(answered.text));
+    await settle();
+    expect(h.transports).toHaveLength(0);
+    const after = await post(h, "/voice/after-hours/after", { CallSid: "CA10" });
+    expect(after.text).toContain("technical trouble");
+  });
+
+  it("closes a socket that never claims a stream, so an anonymous client cannot accumulate them", async () => {
+    // /voice/stream accepts an upgrade before any token is seen — the gate
+    // runs on the start frame. Without a deadline a remote client can open
+    // sockets and send nothing, holding descriptors indefinitely (Codex
+    // review, PR #227).
+    const h = await harness();
+    const ws = new WebSocket(h.wsUrl);
+    clients.push(ws);
+    await new Promise<void>((resolve, reject) => {
+      ws.once("open", () => resolve());
+      ws.once("error", reject);
+    });
+    const closed = new Promise<void>((resolve) => ws.once("close", () => resolve()));
+    await Promise.race([closed, new Promise((r) => setTimeout(r, 2500))]);
+    expect(ws.readyState === ws.CLOSING || ws.readyState === ws.CLOSED).toBe(true);
+  });
+
+  it("gives up on a provider that connects but never completes its handshake", async () => {
+    // The dead-air watchdog is armed by onConfigured, so nothing covered
+    // the window before it: the caller sat in billed silence to the
+    // ten-minute ceiling and it was recorded as a clean max_duration rather
+    // than the provider failure it was (Codex review, PR #227).
+    const h = await harness({ stallHandshake: true, providerSetupDeadlineMs: 200 });
+    const answered = await post(h, "/voice/optical", { CallSid: "CA11", From: "+1", To: "+2" });
+    await openStream(h, "CA11", tokenFrom(answered.text));
+    await waitFor(() => h.transports.length === 1, "the transport to register");
+    expect(h.transports).toHaveLength(1);
+    expect(h.registry.get("CA11")?.outcome ?? null).toBeNull();
+    await new Promise((r) => setTimeout(r, 350));
+    expect(h.registry.consumeOutcome("CA11")).toBe("provider_failure");
+  });
+
+  it("retries a first-event stall and opens the session on the next attempt", async () => {
+    const h = await harness({ firstEventStalls: 1, firstEventTimeoutMs: 80, connectRetries: 2 });
+    const answered = await post(h, "/voice/optical", { CallSid: "CA91A", From: "+15551234567", To: "+2" });
+    await openStream(h, "CA91A", tokenFrom(answered.text));
+    await waitFor(() => h.transports.length === 2, "the retry transport to register");
+    expect(h.transports[0].detached).toBe(true);
+    expect(h.transports[1].detached).toBe(false);
+    h.transports[1].emit({ type: "session.updated" } as GrokServerEvent);
+    await settle(4);
+    expect(h.registry.get("CA91A")?.outcome ?? null).toBeNull();
+    expect(h.setupFailures).toHaveLength(0);
+  });
+
+  it("files a setup-failure ticket and speaks the apology when every retry stalls", async () => {
+    const h = await harness({ stallFirstEvent: true, firstEventTimeoutMs: 80, connectRetries: 2 });
+    const answered = await post(h, "/voice/optical", { CallSid: "CA91B", From: "+15551234567", To: "+2" });
+    await openStream(h, "CA91B", tokenFrom(answered.text));
+    await waitFor(
+      () => h.transports.length === 3 && h.persisted.length >= 1 && h.setupFailures.length >= 1,
+      "every retry to stall and the floor to file",
+      3000,
+    );
+    expect(h.transports.every((t) => t.detached)).toBe(true);
+    expect(h.persisted[0].outcome).toBe("provider_failure");
+    expect(h.setupFailures[0]).toMatchObject({
+      departmentId: 1,
+      requestTypeId: 66,
+      requestReasonId: 536,
+      patientFirstName: "Unnamed",
+      patientLastName: "Caller",
+      idempotencyKey: "call-CA91B-setup-failure",
+    });
+    const after = await post(h, "/voice/optical/after", { CallSid: "CA91B" });
+    expect(after.text).toContain("technical trouble");
+  });
+
+  it("files the setup-failure ticket when persistCall rejects", async () => {
+    // Codex P1 on #347: persist-then-file meant a rejected write skipped
+    // the ticket — the outage the floor exists to cover.
+    const h = await harness({
+      stallFirstEvent: true,
+      firstEventTimeoutMs: 80,
+      connectRetries: 2,
+      persistCall: async () => {
+        throw new Error("db down");
+      },
+    });
+    const answered = await post(h, "/voice/optical", { CallSid: "CA91C", From: "+15551234567", To: "+2" });
+    await openStream(h, "CA91C", tokenFrom(answered.text));
+    await waitFor(
+      () => h.transports.length === 3 && h.setupFailures.length >= 1,
+      "every retry to stall and the floor to file despite persist rejecting",
+      3000,
+    );
+    expect(h.persisted).toHaveLength(0);
+    expect(h.setupFailures).toHaveLength(1);
+    expect(h.setupFailures[0]).toMatchObject({
+      departmentId: 1,
+      requestTypeId: 66,
+      requestReasonId: 536,
+      patientFirstName: "Unnamed",
+      patientLastName: "Caller",
+      idempotencyKey: "call-CA91C-setup-failure",
+    });
+    const after = await post(h, "/voice/optical/after", { CallSid: "CA91C" });
+    expect(after.text).toContain("technical trouble");
+  });
+
+  it("files the setup-failure ticket when persistCall never settles", async () => {
+    // Same P1, the hang arm: an unbounded persist waited forever for the
+    // ticket. Bound the write the way teardown already does.
+    const h = await harness({
+      stallFirstEvent: true,
+      firstEventTimeoutMs: 80,
+      connectRetries: 2,
+      persistCall: () => new Promise<boolean>(() => {}),
+      persistBeforeSweepMs: 40,
+    });
+    const answered = await post(h, "/voice/optical", { CallSid: "CA91D", From: "+15551234567", To: "+2" });
+    await openStream(h, "CA91D", tokenFrom(answered.text));
+    await waitFor(
+      () => h.transports.length === 3 && h.setupFailures.length >= 1,
+      "every retry to stall and the floor to file despite persist hanging",
+      3000,
+    );
+    expect(h.persisted).toHaveLength(0);
+    expect(h.setupFailures).toHaveLength(1);
+    expect(h.setupFailures[0]).toMatchObject({
+      departmentId: 1,
+      requestTypeId: 66,
+      requestReasonId: 536,
+      patientFirstName: "Unnamed",
+      patientLastName: "Caller",
+      idempotencyKey: "call-CA91D-setup-failure",
+    });
+    const after = await post(h, "/voice/optical/after", { CallSid: "CA91D" });
+    expect(after.text).toContain("technical trouble");
+  });
+
+  /**
+   * v92 — A CALLER WHO HUNG UP INSIDE THE FIRST-EVENT WAIT LEFT; THEY WERE
+   * NOT FAILED. 3 of the floor's first 4 tickets were 1–2 s after-hours
+   * hangups. The hangup is only NOTICED at the end of the wait (the retry
+   * checks for an abort between attempts), so the record's own end time
+   * reads as a caller who waited — the runtime has to hand over the moment
+   * the socket closed, and these two tests are what prove it does.
+   */
+  it("files nothing when the caller hangs up inside the first-event wait", async () => {
+    const h = await harness({ stallFirstEvent: true, firstEventTimeoutMs: 400, connectRetries: 2 });
+    const answered = await post(h, "/voice/optical", { CallSid: "CA92A", From: "+15551234567", To: "+2" });
+    const { ws } = await openStream(h, "CA92A", tokenFrom(answered.text));
+    await new Promise((r) => setTimeout(r, 40));
+    ws.close();
+    await waitFor(
+      () => h.persisted.some((r) => r.callSid === "CA92A"),
+      "the abandoned setup to persist",
+      3000,
+    );
+    // The floor runs after the bounded persist; give it the same room.
+    await new Promise((r) => setTimeout(r, 120));
+    expect(h.persisted.find((r) => r.callSid === "CA92A")?.outcome).toBe("provider_failure");
+    expect(h.setupFailures).toHaveLength(0);
+  });
+
+  it("still files for a caller who hung up only AFTER the wait had expired", async () => {
+    const h = await harness({ stallFirstEvent: true, firstEventTimeoutMs: 80, connectRetries: 2 });
+    const answered = await post(h, "/voice/optical", { CallSid: "CA92B", From: "+15551234567", To: "+2" });
+    const { ws } = await openStream(h, "CA92B", tokenFrom(answered.text));
+    await waitFor(() => h.transports.length >= 2, "a second attempt after the first stalled", 3000);
+    ws.close();
+    await waitFor(
+      () => h.setupFailures.length >= 1,
+      "the floor to file for a caller who waited",
+      3000,
+    );
+    expect(h.setupFailures[0]).toMatchObject({
+      departmentId: 1,
+      idempotencyKey: "call-CA92B-setup-failure",
+      routingAskExhausted: true,
+    });
+  });
+
+  it("does NOT fire the setup deadline on a healthy handshake", async () => {
+    const h = await harness({ providerSetupDeadlineMs: 200 });
+    const answered = await post(h, "/voice/optical", { CallSid: "CA12", From: "+1", To: "+2" });
+    await openStream(h, "CA12", tokenFrom(answered.text));
+    await settle(2);
+    h.transports[0].emit({ type: "session.created" } as GrokServerEvent);
+    h.transports[0].emit({ type: "session.updated" } as GrokServerEvent);
+    await new Promise((r) => setTimeout(r, 350));
+    expect(h.registry.get("CA12")?.outcome ?? null).toBeNull();
+  });
+
+  it("hands the agent the caller-ID pre-context, bounded so it cannot hold the call open", async () => {
+    // The queue agents choose their opening from metadata.precontext: with
+    // a unique match they confirm rather than ask cold, which is what the
+    // SIP path already gives all four lanes.
+    const seen: Array<Record<string, unknown>> = [];
+    const laneSourceCapturing: LaneSource = {
+      getAgentConfig: () => ({
+        id: "optical",
+        enabled: true,
+        agentType: "inbound",
+        factory: ((_h: unknown, metadata: Record<string, unknown>) => {
+          seen.push(metadata);
+          return Promise.resolve({ instructions: "optical agent", tools: [] });
+        }) as unknown as LaneConfig["factory"],
+      }),
+    };
+    const h = await harness({
+      laneSource: laneSourceCapturing,
+      fetchPrecontext: async () => ({ matched: true, firstName: "Wayne" }),
+    });
+    const answered = await post(h, "/voice/optical", {
+      CallSid: "CA13",
+      From: "+15551234567",
+      To: "+2",
+    });
+    await openStream(h, "CA13", tokenFrom(answered.text));
+    await settle();
+    expect(seen).toHaveLength(1);
+    expect(seen[0].precontext).toEqual({ matched: true, firstName: "Wayne" });
+  });
+
+  it("proceeds without pre-context rather than waiting on a slow lookup", async () => {
+    const seen: Array<Record<string, unknown>> = [];
+    const laneSourceCapturing: LaneSource = {
+      getAgentConfig: () => ({
+        id: "optical",
+        enabled: true,
+        agentType: "inbound",
+        factory: ((_h: unknown, metadata: Record<string, unknown>) => {
+          seen.push(metadata);
+          return Promise.resolve({ instructions: "optical agent", tools: [] });
+        }) as unknown as LaneConfig["factory"],
+      }),
+    };
+    const h = await harness({
+      laneSource: laneSourceCapturing,
+      // Never settles: a caller must not listen to silence for it.
+      fetchPrecontext: () => new Promise(() => {}),
+    });
+    const answered = await post(h, "/voice/optical", { CallSid: "CA14", From: "+1", To: "+2" });
+    await openStream(h, "CA14", tokenFrom(answered.text));
+    await new Promise((r) => setTimeout(r, 1800));
+    expect(seen).toHaveLength(1);
+    expect(seen[0].precontext).toBeUndefined();
+  });
+
+  it("does not let a wedged database hold the caller in silence", async () => {
+    // openRuntimeCall is documented as never blocking the call, but an
+    // awaited insert that never settles blocks setup before the bridge
+    // exists and before the provider deadline is armed — try/catch only
+    // covers rejection (Codex review, PR #227).
+    const h = await harness({ openCallRow: () => new Promise<string | undefined>(() => {}) });
+    const answered = await post(h, "/voice/optical", { CallSid: "CA15", From: "+1", To: "+2" });
+    await openStream(h, "CA15", tokenFrom(answered.text));
+    await new Promise((r) => setTimeout(r, 2500));
+    // Setup went on without the row rather than waiting on it.
+    expect(h.transports).toHaveLength(1);
+  });
+
+  it("finalizes a row it opened when the caller hangs up during setup", async () => {
+    // The row is opened before the socketGone check, so an early hangup
+    // used to leave it `in_progress` until the 30-minute stale sweep
+    // classified it stale_reaped instead of caller_hangup.
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const slow: LaneSource = {
+      getAgentConfig: () => ({
+        id: "optical",
+        enabled: true,
+        agentType: "inbound",
+        factory: (async () => {
+          await blocked;
+          return { instructions: "You are the optical queue agent.", tools: [] };
+        }) as unknown as LaneConfig["factory"],
+      }),
+    };
+    const h = await harness({ laneSource: slow });
+    const answered = await post(h, "/voice/optical", { CallSid: "CA16", From: "+1", To: "+2" });
+    const { ws } = await openStream(h, "CA16", tokenFrom(answered.text));
+    await settle(2);
+    ws.close();
+    await settle(4);
+    release();
+    await settle(8);
+    expect(h.openedRows).toHaveLength(1);
+    expect(h.persisted).toHaveLength(1);
+    expect(h.persisted[0]).toMatchObject({ callSid: "CA16", outcome: "caller_hangup" });
+  });
+
+  /**
+   * THE SWEEP RUNS ON EVERY FINISHED CALL, AFTER THE RECORD.
+   *
+   * Built and merged on 2026-09-03 and wired to nothing for the rest of that
+   * afternoon, while ten calls ended with a request in the transcript and no
+   * ticket. A decision layer nobody calls recovers no requests, so what this
+   * pins is the call itself — not what it decides, which requestSweep.test.ts
+   * owns.
+   */
+  it("sweeps every finished call, and only after the call_logs row is written", async () => {
+    const h = await harness();
+    const answered = await post(h, "/voice/optical", { CallSid: "CA-sweep", From: "+1", To: "+2" });
+    const { ws } = await openStream(h, "CA-sweep", tokenFrom(answered.text));
+    await settle(2);
+    ws.close();
+    await settle(8);
+    expect(h.persisted).toHaveLength(1);
+    expect(h.swept).toHaveLength(1);
+    expect(h.swept[0]).toMatchObject({ callSid: "CA-sweep" });
+    // The record was already in before the sweep saw the call.
+    expect(h.swept[0]!.persistedFirst).toBe(1);
+  });
+
+  /**
+   * AND THE PCP FLOOR RUNS TOO, AFTER THE RECORD.
+   *
+   * This is the wiring, and the wiring is the whole defect: the floor itself
+   * has been built and tested since v18/v30/v31 and had never once run,
+   * because its only caller was the OLD CORE's SIP teardown and PCP moved to
+   * this runtime on 2026-09-04. A filer nobody calls files nothing — 38 calls
+   * on 2026-09-22 ran the intake, filed nothing and carry no ticket of any
+   * provenance. What pcpFloor.test.ts owns is what the floor DOES; what this
+   * owns is that teardown calls it at all, which is what was missing.
+   */
+  it("runs the PCP floor on a finished call, after the call_logs row", async () => {
+    const h = await harness();
+    const answered = await post(h, "/voice/optical", { CallSid: "CA-floor", From: "+1", To: "+2" });
+    const { ws } = await openStream(h, "CA-floor", tokenFrom(answered.text));
+    await settle(2);
+    ws.close();
+    await settle(8);
+    expect(h.pcpSwept).toHaveLength(1);
+    expect(h.pcpSwept[0]).toMatchObject({ callSid: "CA-floor", slug: "optical" });
+    // The durable record landed before the floor saw the call, exactly as for
+    // the generic sweep: the row is the evidence every measurement rests on.
+    expect(h.pcpSwept[0]!.persistedFirst).toBe(1);
+  });
+
+  /**
+   * v90 — AND THE DEFAULT HANDS THE LANE'S OWN SWEEP THE CALL. Every test above
+   * replaces the floor with a stub, so none of them could see what production
+   * actually ran: a floor that imported pcpAgent separately and, on Node 20,
+   * read a second copy with no call metadata (0 floor POSTs since v69). The
+   * floor now takes `teardownSweep` off the lane's registration, through the
+   * SAME source the call's agent was resolved from — asserted here with the
+   * runtime's real default left in place.
+   */
+  it("hands the pcp lane's own teardownSweep the CallSid, through the runtime's default", async () => {
+    const teardownSweep = vi.fn(async () => undefined);
+    const h = await harness({ realPcpFloor: true, laneSource: laneSource({ id: "pcp", teardownSweep }), env: { ...ENV, PCP_HUMAN_AGENT_NUMBER: "+18185551234", TWILIO_ACCOUNT_SID: "AC00000000000000000000000000000000", TWILIO_PHONE_NUMBER: "+18185550000", DOMAIN: "voice.example.test" } });
+    const answered = await post(h, "/voice/pcp", { CallSid: "CA-floor-real", From: "+1", To: "+2" });
+    const { ws } = await openStream(h, "CA-floor-real", tokenFrom(answered.text));
+    await settle(2);
+    ws.close();
+    await settle(8);
+    expect(h.persisted).toHaveLength(1);
+    expect(teardownSweep).toHaveBeenCalledTimes(1);
+    // The caller closed the socket, so the record says caller_hangup — and the
+    // sweep must be told, or it files behind a caller who left (2026-10-19).
+    expect(teardownSweep).toHaveBeenCalledWith("CA-floor-real", { outcome: "caller_hangup", transcript: expect.any(String) });
+  });
+
+  it("finishes teardown even when the PCP floor rejects", async () => {
+    // Same property as the sweep beside it: the floor files a ticket over the
+    // network, and a ticketing outage must not cost the call its record.
+    const h = await harness({ sweepPcpFloor: async () => { throw new Error("floor boom"); } });
+    const answered = await post(h, "/voice/optical", { CallSid: "CA-floor-boom", From: "+1", To: "+2" });
+    const { ws } = await openStream(h, "CA-floor-boom", tokenFrom(answered.text));
+    await settle(2);
+    ws.close();
+    await settle(8);
+    expect(h.persisted).toHaveLength(1);
+    expect(h.persisted[0]).toMatchObject({ callSid: "CA-floor-boom" });
+  });
+
+  it("finishes teardown even when the sweep rejects", async () => {
+    // Rule 1 of sweepRunner, enforced from the outside as well as the inside:
+    // a sweep that blows up must not cost the call its record.
+    const h = await harness({ sweepCall: async () => { throw new Error("boom"); } });
+    const answered = await post(h, "/voice/optical", { CallSid: "CA-sweep-boom", From: "+1", To: "+2" });
+    const { ws } = await openStream(h, "CA-sweep-boom", tokenFrom(answered.text));
+    await settle(2);
+    ws.close();
+    await settle(8);
+    expect(h.persisted).toHaveLength(1);
+    expect(h.persisted[0]).toMatchObject({ callSid: "CA-sweep-boom" });
+  });
+
+  /**
+   * A WEDGED POOL MUST NOT EAT THE REQUEST.
+   *
+   * `persistCall` is a database upsert; if it never settles, an unbounded
+   * await here means the sweep never runs, teardown completes, and a
+   * substantive request is lost even though the ticketing API was healthy
+   * the whole time. The bridge fires teardown without awaiting it, so
+   * nothing upstream would ever notice (Codex, PR #268 round 7).
+   */
+  it("sweeps anyway when the call-record write never settles", async () => {
+    const h = await harness({
+      persistCall: () => new Promise<boolean>(() => {}),
+      persistBeforeSweepMs: 40,
+    });
+    const answered = await post(h, "/voice/optical", { CallSid: "CA-wedged", From: "+1", To: "+2" });
+    const { ws } = await openStream(h, "CA-wedged", tokenFrom(answered.text));
+    await settle(2);
+    ws.close();
+    await new Promise((r) => setTimeout(r, 120));
+    await settle(8);
+    expect(h.persisted).toHaveLength(0);
+    expect(h.swept).toHaveLength(1);
+    expect(h.swept[0]).toMatchObject({ callSid: "CA-wedged" });
+  });
+
+  it("releases the brokered transfer when the caller hangs up before the bridge exists", async () => {
+    // The proving lane registers its per-call transfer inside the factory
+    // (createRuntimeProofAgent), and the ONLY release is the bridge's
+    // onOutcome. An early hangup returns before the bridge is built, so the
+    // closure — over a Twilio leg for a call that is already over — used to
+    // sit in the broker until the 200-entry cap evicted it, and every
+    // pre-bridge setup failure leaked the same way (Codex review, PR #237).
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const brokering: LaneSource = {
+      getAgentConfig: () => ({
+        id: "optical",
+        enabled: true,
+        agentType: "inbound",
+        // Registers first, then builds — the proving agent's own order.
+        // Registration is not undone by the build stalling or the caller
+        // leaving while it does.
+        factory: ((_handoff: unknown, metadata: { callId?: string }) => {
+          registerCallHandoff(String(metadata.callId), async () => undefined);
+          return blocked.then(() => ({
+            instructions: "You are the proving agent.",
+            tools: [],
+          }));
+        }) as unknown as LaneConfig["factory"],
+      }),
+    };
+    const before = registeredHandoffCount();
+    const h = await harness({ laneSource: brokering });
+    const answered = await post(h, "/voice/optical", { CallSid: "CA31", From: "+1", To: "+2" });
+    const { ws } = await openStream(h, "CA31", tokenFrom(answered.text));
+    await settle(4);
+    // The leak the fix is about only exists once the factory has registered.
+    expect(registeredHandoffCount()).toBe(before + 1);
+    ws.close();
+    await settle(4);
+    release();
+    await settle(8);
+    expect(registeredHandoffCount()).toBe(before);
+  });
+
+  it("keeps the brokered transfer for the whole call, releasing it only at teardown", async () => {
+    // The other direction, and the reason the release is guarded rather
+    // than unconditional: request_human_handoff finds this entry by
+    // call_sid mid-call. Releasing it once the bridge exists would make
+    // every real transfer refuse with transfer_unavailable.
+    const brokering: LaneSource = {
+      getAgentConfig: () => ({
+        id: "optical",
+        enabled: true,
+        agentType: "inbound",
+        factory: ((_handoff: unknown, metadata: { callId?: string }) => {
+          registerCallHandoff(String(metadata.callId), async () => undefined);
+          return Promise.resolve({ instructions: "You are the proving agent.", tools: [] });
+        }) as unknown as LaneConfig["factory"],
+      }),
+    };
+    const before = registeredHandoffCount();
+    const h = await harness({ laneSource: brokering });
+    const answered = await post(h, "/voice/optical", { CallSid: "CA32", From: "+1", To: "+2" });
+    const { ws } = await openStream(h, "CA32", tokenFrom(answered.text));
+    await settle(8);
+    // Mid-call: the tool must still be able to find it.
+    expect(registeredHandoffCount()).toBe(before + 1);
+    ws.close();
+    await settle(8);
+    expect(registeredHandoffCount()).toBe(before);
+  });
+
+  it("finalizes the row even when the open timed out and landed late", async () => {
+    // withinOrNull gives up waiting; it does not cancel the insert. So the
+    // row can still commit `in_progress` a moment later, and gating the
+    // final upsert on the open having reported success leaves exactly that
+    // row for the stale sweep to misclassify (Codex review, PR #227).
+    // The upsert is safe in either order: the open does nothing on
+    // conflict, the finalize updates on conflict.
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const laneSrc: LaneSource = {
+      getAgentConfig: () => ({
+        id: "optical",
+        enabled: true,
+        agentType: "inbound",
+        factory: (async () => ({
+          instructions: "You are the optical queue agent.",
+          tools: [],
+        })) as unknown as LaneConfig["factory"],
+      }),
+    };
+    const opened: unknown[] = [];
+    const h = await harness({
+      laneSource: laneSrc,
+      callRowDeadlineMs: 40,
+      // Exceeds the deadline, then succeeds anyway.
+      openCallRow: async (row) => {
+        await blocked;
+        opened.push(row);
+        return "late-row";
+      },
+    });
+    const answered = await post(h, "/voice/optical", { CallSid: "CA17", From: "+1", To: "+2" });
+    const { ws } = await openStream(h, "CA17", tokenFrom(answered.text));
+    await settle(4);
+    ws.close();
+    await settle(6);
+    release();
+    await settle(6);
+    expect(opened).toHaveLength(1); // the insert did land, late
+    expect(h.persisted).toHaveLength(1);
+    expect(h.persisted[0]).toMatchObject({ callSid: "CA17", outcome: "caller_hangup" });
+  });
+
+  it("gives the agent the call-log id it polls for, after the row exists", async () => {
+    // answeringServiceAgent polls metadata.callLogId for 5s before writing
+    // patientFound / patientName / lastLocationSeen. Without it the poll
+    // times out and every recognized caller is logged as unidentified —
+    // the exact phone-ID metric the migration baseline is measured on
+    // (Codex review, PR #227). The agent is built BEFORE the row exists,
+    // so it has to be a getter, which is why the SIP transport uses one.
+    let captured: { callLogId?: string } | null = null;
+    const capturing: LaneSource = {
+      getAgentConfig: () => ({
+        id: "answering-service",
+        enabled: true,
+        agentType: "inbound",
+        factory: ((_h: unknown, metadata: { callLogId?: string }) => {
+          captured = metadata;
+          return Promise.resolve({ instructions: "answering service", tools: [] });
+        }) as unknown as LaneConfig["factory"],
+      }),
+    };
+    const h = await harness({
+      laneSource: capturing,
+      openCallRow: async () => "call-log-row-1",
+    });
+    const answered = await post(h, "/voice/answering-service", {
+      CallSid: "CA18",
+      From: "+15551234567",
+      To: "+2",
+    });
+    await openStream(h, "CA18", tokenFrom(answered.text));
+    await settle();
+    expect(captured).not.toBeNull();
+    expect(captured!.callLogId).toBe("call-log-row-1");
+  });
+
+  it("leaves the call-log id undefined rather than inventing one when the row never opened", async () => {
+    let captured: { callLogId?: string } | null = null;
+    const capturing: LaneSource = {
+      getAgentConfig: () => ({
+        id: "answering-service",
+        enabled: true,
+        agentType: "inbound",
+        factory: ((_h: unknown, metadata: { callLogId?: string }) => {
+          captured = metadata;
+          return Promise.resolve({ instructions: "answering service", tools: [] });
+        }) as unknown as LaneConfig["factory"],
+      }),
+    };
+    const h = await harness({
+      laneSource: capturing,
+      openCallRow: async () => {
+        throw new Error("db down");
+      },
+    });
+    const answered = await post(h, "/voice/answering-service", {
+      CallSid: "CA19",
+      From: "+1",
+      To: "+2",
+    });
+    await openStream(h, "CA19", tokenFrom(answered.text));
+    await settle();
+    expect(captured).not.toBeNull();
+    expect(captured!.callLogId).toBeUndefined();
+  });
+
+  it("refuses a stream whose token was not minted by the webhook", async () => {
+    const h = await harness();
+    await post(h, "/voice/optical", { CallSid: "CA5", From: "+1", To: "+2" });
+    const { ws } = await openStream(h, "CA5", "not-the-token");
+    await settle();
+    // No session was ever opened for it.
+    expect(h.transports).toHaveLength(0);
+    expect(ws.readyState === ws.CLOSING || ws.readyState === ws.CLOSED).toBe(true);
+  });
+
+  it("refuses a SECOND stream for a call that already has one", async () => {
+    const h = await harness();
+    const answered = await post(h, "/voice/optical", { CallSid: "CA6", From: "+1", To: "+2" });
+    const token = tokenFrom(answered.text);
+    await openStream(h, "CA6", token);
+    await waitFor(() => h.transports.length === 1, "the first transport to register");
+    expect(h.transports).toHaveLength(1);
+    await openStream(h, "CA6", token);
+    // A second stream must NOT add one — absence has nothing to wait for, so
+    // this stays a settle: the assertion is that nothing happened.
+    await settle();
+    expect(h.transports).toHaveLength(1);
+  });
+
+  it("ends a call whose lane turns out to be disabled, and explains it to the caller", async () => {
+    const h = await harness({ laneSource: laneSource({ enabled: false }) });
+    const answered = await post(h, "/voice/optical", { CallSid: "CA7", From: "+1", To: "+2" });
+    // The webhook accepted an unseen slug rather than awaiting the agent
+    // tree on Twilio's clock; the stream is where it is resolved.
+    expect(answered.text).toContain("<Stream");
+    await openStream(h, "CA7", tokenFrom(answered.text));
+    await settle();
+    expect(h.transports).toHaveLength(0);
+    const after = await post(h, "/voice/optical/after", { CallSid: "CA7" });
+    expect(after.text).toContain("technical trouble");
+  });
+
+  it("serves the deploy marker, which is how a stale build is caught", async () => {
+    const h = await harness();
+    const res = await fetch(`${h.base}/voice/health`);
+    const body = (await res.json()) as {
+      marker: string;
+      knowledgePack: string;
+      liveReady: boolean;
+      missing: string[];
+      transferReady: boolean;
+      transferBlockedBy: string | null;
+    };
+    expect(body.marker).toMatch(/^voice-runtime-/);
+    expect(body.liveReady).toBe(true);
+    expect(body.missing).toEqual([]);
+    // The shared cache prefix's version, so a cache-rate change can be
+    // attributed to a prefix change instead of guessed at.
+    expect(body.knowledgePack).toMatch(/^v\d+$/);
+  });
+
+  it("reports transfer readiness separately, and names what blocks it", async () => {
+    // liveReady covers answering a call, NOT transferring one — a
+    // deployment with no transfer config is genuinely ready for every
+    // non-transfer lane. But `liveReady: true` reads as "everything
+    // works", and the difference used to appear only in the boot log, so
+    // checking whether a warm transfer could succeed at all needed shell
+    // access to the running deployment.
+    const h = await harness();
+    const res = await fetch(`${h.base}/voice/health`);
+    const body = (await res.json()) as {
+      liveReady: boolean;
+      transferReady: boolean;
+      transferBlockedBy: string | null;
+    };
+    // The harness configures no Twilio number or domain, so transfers are
+    // unavailable even though the runtime is otherwise live-ready.
+    expect(body.liveReady).toBe(true);
+    expect(body.transferReady).toBe(false);
+    // NAMES, never values — the same rule `missing` follows.
+    expect(body.transferBlockedBy).toContain("missing");
+    expect(body.transferBlockedBy).not.toMatch(/AC[0-9a-f]{6,}|\+1\d{10}/);
+  });
+
+  it("an armed transport with nowhere to dial reports NOT ready, through the endpoint", async () => {
+    // The scenario end to end, not just the pure helpers: transport fully
+    // configured, no destination number anywhere. The boot log says
+    // "warm transfer armed" in this state, so health is the only place
+    // that can tell you every transfer will still fail (Codex, PR #236).
+    const h = await harness({
+      env: {
+        ...ENV,
+        TWILIO_ACCOUNT_SID: "ACxxx",
+        TWILIO_PHONE_NUMBER: "+15550000000",
+        DOMAIN: "runtime.example.test",
+      },
+    });
+    const body = (await (await fetch(`${h.base}/voice/health`)).json()) as {
+      transferReady: boolean;
+      transferBlockedBy: string | null;
+      transferDestinations: { clinical: boolean; pcp: boolean };
+    };
+    expect(body.transferReady).toBe(false);
+    expect(body.transferBlockedBy).toContain("no destination configured");
+    expect(body.transferBlockedBy).toContain("HUMAN_AGENT_NUMBER");
+    expect(body.transferDestinations).toEqual({ clinical: false, pcp: false });
+  });
+
+  it("an armed transport WITH a destination is transfer-ready", async () => {
+    const h = await harness({
+      env: {
+        ...ENV,
+        TWILIO_ACCOUNT_SID: "ACxxx",
+        TWILIO_PHONE_NUMBER: "+15550000000",
+        DOMAIN: "runtime.example.test",
+        HUMAN_AGENT_NUMBER: "+18185551234",
+      },
+    });
+    const body = (await (await fetch(`${h.base}/voice/health`)).json()) as {
+      transferReady: boolean;
+      transferBlockedBy: string | null;
+      transferDestinations: { clinical: boolean; pcp: boolean };
+    };
+    expect(body.transferReady).toBe(true);
+    expect(body.transferBlockedBy).toBeNull();
+    // Per lane: clinical can dial, pcp still cannot — and that is a
+    // working deployment for the no-IVR family, not a broken one.
+    expect(body.transferDestinations).toEqual({ clinical: true, pcp: false });
+    // Still names only, never the numbers.
+    expect(JSON.stringify(body)).not.toContain("8185551234");
+  });
+
+  it("reports whether the on-call text can be sent, by name only", async () => {
+    // Missing: a clinical transfer still dials, so transferReady stays true,
+    // and the missing text is named on its own instead of failing silently.
+    const without = await harness({
+      env: { ...ENV, TWILIO_ACCOUNT_SID: "ACxxx", TWILIO_PHONE_NUMBER: "+15550000000", DOMAIN: "runtime.example.test", HUMAN_AGENT_NUMBER: "+18185551234" },
+    });
+    const a = (await (await fetch(`${without.base}/voice/health`)).json()) as {
+      transferReady: boolean;
+      urgentAlert: { ready: boolean; missing: string[] };
+    };
+    expect(a.transferReady).toBe(true);
+    expect(a.urgentAlert).toEqual({ ready: false, missing: ["URGENT_NOTIFICATION_NUMBER"] });
+    // Present: ready, and never the number itself.
+    const withIt = await harness({
+      env: {
+        ...ENV,
+        TWILIO_ACCOUNT_SID: "ACxxx",
+        TWILIO_PHONE_NUMBER: "+15550000000",
+        DOMAIN: "runtime.example.test",
+        HUMAN_AGENT_NUMBER: "+18185551234",
+        URGENT_NOTIFICATION_NUMBER: "+18185559876",
+      },
+    });
+    const b = (await (await fetch(`${withIt.base}/voice/health`)).json()) as { urgentAlert: { ready: boolean; missing: string[] } };
+    expect(b.urgentAlert).toEqual({ ready: true, missing: [] });
+    expect(JSON.stringify(b)).not.toContain("8185559876");
+  });
+
+  it("an armed transport with nowhere to dial is NOT transfer-ready", () => {
+    // The transport can be fully configured while no destination number
+    // is set, and then every transfer still fails at
+    // resolveHandoffDestination. Reporting that as ready defeats the
+    // whole point of the field — it is exactly the partial deployment it
+    // exists to catch (Codex, PR #236).
+    const armed = { TWILIO_ACCOUNT_SID: "ACx", TWILIO_AUTH_TOKEN: "t", TWILIO_PHONE_NUMBER: "+15550000000" };
+    expect(transferUnavailableReason(armed, { hasInjectedOps: false, domain: "host.test" })).toBeNull();
+
+    const none = transferDestinationStatus(armed);
+    expect(none).toMatchObject({ clinical: false, pcp: false });
+    expect(none.missing).toEqual(["HUMAN_AGENT_NUMBER", "PCP_HUMAN_AGENT_NUMBER"]);
+  });
+
+  it("reports destinations per LANE, because one can work while the other cannot", () => {
+    // The no-IVR family dials HUMAN_AGENT_NUMBER and pcp dials
+    // PCP_HUMAN_AGENT_NUMBER. Folding these into the mount-time gate
+    // would take a WORKING lane down because the other lane's number is
+    // absent, so this is reporting only.
+    const clinicalOnly = transferDestinationStatus({ HUMAN_AGENT_NUMBER: "+18185551234" });
+    expect(clinicalOnly).toMatchObject({ clinical: true, pcp: false });
+    expect(clinicalOnly.missing).toEqual(["PCP_HUMAN_AGENT_NUMBER"]);
+
+    const pcpOnly = transferDestinationStatus({ PCP_HUMAN_AGENT_NUMBER: "+17149564300" });
+    expect(pcpOnly).toMatchObject({ clinical: false, pcp: true });
+
+    // Whitespace is not a number.
+    expect(transferDestinationStatus({ HUMAN_AGENT_NUMBER: "   " }).clinical).toBe(false);
+  });
+});
+
+describe("the transfer's public domain", () => {
+  it("a fallback domain is NO domain — localhost can never answer an accept webhook", () => {
+    // resolveAppDomain always answers, falling back to localhost:8000. A
+    // deployment with Twilio credentials but no domain was therefore marked
+    // transfer-ready and dialled office legs whose accept URL Twilio could
+    // never reach — every transfer timed out instead of the lane being
+    // refused (Codex, PR #230).
+    expect(publicTransferDomain({})).toBeUndefined();
+  });
+
+  it("a configured or Replit domain arms it — dev domains are publicly reachable too", () => {
+    expect(publicTransferDomain({ REPLIT_DOMAINS: "azul.replit.app" })).toBe("azul.replit.app");
+    expect(publicTransferDomain({ REPLIT_DEV_DOMAIN: "azul.spock.replit.dev" })).toBe(
+      "azul.spock.replit.dev",
+    );
+  });
+});
+
+describe("a recognised caller hears the confirm in the greeting itself", () => {
+  /**
+   * The queue lines APPEND: they keep their own opening — which pre-empts
+   * the ask for a human on a line that cannot transfer — and swap its
+   * trailing question for "Am I speaking with <name>?". The tech and records
+   * prompts then instruct the model to take that answer and move on, which
+   * it cannot do if the caller was only ever asked "How can I help you
+   * today?" (Codex review, PR #240).
+   *
+   * Asserted through the real runtime rather than the bridge's fake session,
+   * because what is being checked is that voiceRuntime hands the bridge a
+   * PERSONALISED string — a bridge test would pass whatever it was given.
+   */
+  const GREETING =
+    "Thank you for calling Azul Vision optical. How can I help you today?";
+
+  const laneWithGreeting = (): LaneSource => ({
+    getAgentConfig: () => ({
+      id: "optical",
+      enabled: true,
+      agentType: "inbound",
+      greeting: GREETING,
+      factory: (async () => ({
+        instructions: "You are the optical queue agent.",
+        tools: [],
+      })) as unknown as LaneConfig["factory"],
+    }),
+  });
+
+  /** What the runtime actually put in Grok's mouth. */
+  const spokenText = (h: Harness): string[] =>
+    h.transports[0].sent
+      .filter((m) => m.type === "conversation.item.create")
+      .map((m) => {
+        const item = m.item as { content?: Array<{ text?: string }> };
+        return item?.content?.[0]?.text ?? "";
+      });
+
+  it("swaps the greeting's own question for the confirm", async () => {
+    const h = await harness({
+      laneSource: laneWithGreeting(),
+      fetchPrecontext: async () => ({ matched: true, firstName: "Wayne" }),
+    });
+    const answered = await post(h, "/voice/optical", { CallSid: "CA40", From: "+1", To: "+2" });
+    const { ws } = await openStream(h, "CA40", tokenFrom(answered.text));
+    await settle(6);
+    // The handshake the real wire performs: only once the session is
+    // configured does a queued say reach the mouth.
+    h.transports[0].emit({ type: "session.updated" } as GrokServerEvent);
+    await settle(4);
+
+    expect(spokenText(h)).toEqual([
+      "Thank you for calling Azul Vision optical. Am I speaking with Wayne?",
+    ]);
+    ws.close();
+  });
+
+  it("never speaks a name the lookup did not stand behind", async () => {
+    // The firstName is PRESENT here and `matched` is false — a number that
+    // resolved to a candidate the service will not vouch for. That is the
+    // case worth guarding: the optical prompt's own recognition block exists
+    // only when the match is unique, "because saying that when it is false
+    // would name the wrong patient out loud". An unmatched caller hears the
+    // line exactly as configured, question and all.
+    const h = await harness({
+      laneSource: laneWithGreeting(),
+      fetchPrecontext: async () => ({ matched: false, firstName: "Wayne" }),
+    });
+    const answered = await post(h, "/voice/optical", { CallSid: "CA41", From: "+1", To: "+2" });
+    const { ws } = await openStream(h, "CA41", tokenFrom(answered.text));
+    await settle(6);
+    h.transports[0].emit({ type: "session.updated" } as GrokServerEvent);
+    await settle(4);
+
+    expect(spokenText(h)).toEqual([GREETING]);
+    ws.close();
+  });
+
+  /**
+   * THE MATCH HAS TO LEAVE THE PROMPT.
+   *
+   * Measured 2026-09-11, one business day, the three queue lanes: 61 calls
+   * were refused for a missing date of birth, and on 44 of them the greeting
+   * had already addressed the caller by name. The record was in hand and the
+   * filing tool asked for a field it contained, because pre-context reached
+   * the greeting and the prompt and nothing else.
+   *
+   * These assert against the reader the FILING TOOLS call, never against the
+   * store's writer. A test that checked the write would have passed for the
+   * whole six months the wire was missing, which is the entire lesson here.
+   *
+   * Names and dates below are invented. No production caller is in this file.
+   */
+  const LOCKED_SID = "CA" + "b".repeat(31) + "7";
+
+  it("carries a caller-ID match to the filing tools, not just the greeting", async () => {
+    const { verifiedDobFor, verifiedIdentityFor, resetVerifiedIdentities } =
+      await import("../tools/verifiedIdentity");
+    void verifiedIdentityFor;
+    resetVerifiedIdentities();
+    const h = await harness({
+      laneSource: laneWithGreeting(),
+      fetchPrecontext: async () => ({ matched: true, firstName: "Testcaller", lastNameOnFile: "Optical", dobOnFile: "01/01/1950" }),
+    });
+    const answered = await post(h, "/voice/optical", {
+      CallSid: LOCKED_SID, From: "+1", To: "+2",
+    });
+    const { ws } = await openStream(h, LOCKED_SID, tokenFrom(answered.text));
+    await settle(6);
+
+    // The question file_optical_ticket asks, in the words it asks it.
+    expect(verifiedDobFor(LOCKED_SID, "Testcaller", "Optical")).toBe("01/01/1950");
+    ws.close();
+  });
+
+  it("refuses the record to a ticket filed under a different name", async () => {
+    // The confirmation rule enforced by the name rather than by a flag: a
+    // caller who answers "no, that is my father" is not filed under the
+    // matched name, so nothing carries. This guard is what lets a phone
+    // match be used at all.
+    const { verifiedDobFor, verifiedIdentityFor, resetVerifiedIdentities } =
+      await import("../tools/verifiedIdentity");
+    void verifiedIdentityFor;
+    resetVerifiedIdentities();
+    const h = await harness({
+      laneSource: laneWithGreeting(),
+      fetchPrecontext: async () => ({ matched: true, firstName: "Testcaller", lastNameOnFile: "Optical", dobOnFile: "01/01/1950" }),
+    });
+    const answered = await post(h, "/voice/optical", {
+      CallSid: LOCKED_SID, From: "+1", To: "+2",
+    });
+    const { ws } = await openStream(h, LOCKED_SID, tokenFrom(answered.text));
+    await settle(6);
+
+    expect(verifiedDobFor(LOCKED_SID, "Someone", "Else")).toBeUndefined();
+    ws.close();
+  });
+
+  it("never lets the teardown sweep file under a caller-ID match alone", async () => {
+    // Standing instruction 6: a phone match is a candidate to confirm, never
+    // an identity. The sweep files under this name with nobody watching, so
+    // it reads verifiedIdentityFor, which refuses anything not marked
+    // certain. lookup_patient earns certain; caller ID does not.
+    const { verifiedDobFor, verifiedIdentityFor, resetVerifiedIdentities } =
+      await import("../tools/verifiedIdentity");
+    void verifiedIdentityFor;
+    resetVerifiedIdentities();
+    const h = await harness({
+      laneSource: laneWithGreeting(),
+      fetchPrecontext: async () => ({ matched: true, firstName: "Testcaller", lastNameOnFile: "Optical", dobOnFile: "01/01/1950" }),
+    });
+    const answered = await post(h, "/voice/optical", {
+      CallSid: LOCKED_SID, From: "+1", To: "+2",
+    });
+    const { ws } = await openStream(h, LOCKED_SID, tokenFrom(answered.text));
+    await settle(6);
+
+    expect(verifiedIdentityFor(LOCKED_SID)).toBeUndefined();
+    ws.close();
+  });
+
+  it("stores nothing when the service will not vouch for the number", async () => {
+    const { verifiedDobFor, verifiedIdentityFor, resetVerifiedIdentities } =
+      await import("../tools/verifiedIdentity");
+    void verifiedIdentityFor;
+    resetVerifiedIdentities();
+    const h = await harness({
+      laneSource: laneWithGreeting(),
+      fetchPrecontext: async () => ({ matched: false, firstName: "Testcaller", lastNameOnFile: "Optical", dobOnFile: "01/01/1950" }),
+    });
+    const answered = await post(h, "/voice/optical", {
+      CallSid: LOCKED_SID, From: "+1", To: "+2",
+    });
+    const { ws } = await openStream(h, LOCKED_SID, tokenFrom(answered.text));
+    await settle(6);
+
+    expect(verifiedDobFor(LOCKED_SID, "Testcaller", "Optical")).toBeUndefined();
+    ws.close();
+  });
+
+  it("stores nothing from a half-named match, because the name is the read guard", async () => {
+    const { verifiedDobFor, verifiedIdentityFor, resetVerifiedIdentities } =
+      await import("../tools/verifiedIdentity");
+    void verifiedIdentityFor;
+    resetVerifiedIdentities();
+    const h = await harness({
+      laneSource: laneWithGreeting(),
+      fetchPrecontext: async () => ({ matched: true, firstName: "Testcaller", dobOnFile: "01/01/1950" }),
+    });
+    const answered = await post(h, "/voice/optical", {
+      CallSid: LOCKED_SID, From: "+1", To: "+2",
+    });
+    const { ws } = await openStream(h, LOCKED_SID, tokenFrom(answered.text));
+    await settle(6);
+
+    expect(verifiedDobFor(LOCKED_SID, "Testcaller", "")).toBeUndefined();
+    ws.close();
+  });
+
+  it("says which pre-context outcome happened, so a cold open can be diagnosed", async () => {
+    // Every failure reaches the runtime as the same `null`, and an ordinary
+    // "no match" is indistinguishable from it in the return value. The
+    // runbook tells an operator to establish which before concluding
+    // anything, and without this line that step cannot be carried out —
+    // `si_persons` shows what data exists, not what this request returned
+    // (Codex, PR #239).
+    const cases: Array<[unknown, string]> = [
+      [{ matched: true, firstName: "Wayne" }, "recognised"],
+      [{ matched: false }, "no_match"],
+      [null, "unavailable"],
+      // A unique match with no usable first name. The greeting correctly
+      // does nothing with it — there is nothing to say — but logging it as
+      // `no_match` describes the opposite of what happened and would send
+      // someone hunting a lookup failure that never occurred. Codex, #240.
+      [{ matched: true }, "matched, no usable first name"],
+    ];
+    let n = 50;
+    for (const [pc, expected] of cases) {
+      const logged: string[] = [];
+      const spy = vi.spyOn(console, "info").mockImplementation((m) => {
+        logged.push(String(m));
+      });
+      try {
+        const sid = `CA${n++}`;
+        const h = await harness({
+          laneSource: laneWithGreeting(),
+          fetchPrecontext: async () => pc,
+        });
+        const answered = await post(h, "/voice/optical", { CallSid: sid, From: "+1", To: "+2" });
+        const { ws } = await openStream(h, sid, tokenFrom(answered.text));
+        await settle(6);
+        const line = logged.find((l) => l.includes("pre-context"));
+        expect(line, `no pre-context line for ${expected}`).toBeDefined();
+        expect(line).toContain(expected);
+        expect(line).toContain(sid);
+        ws.close();
+      } finally {
+        spy.mockRestore();
+      }
+    }
+  });
+
+  it("never puts the recognised caller's name in that line", async () => {
+    // The operator's test is whether the AGENT said the name, not whether a
+    // log did. Nothing here needs it, so it does not go in.
+    const logged: string[] = [];
+    const spy = vi.spyOn(console, "info").mockImplementation((m) => {
+      logged.push(String(m));
+    });
+    try {
+      const h = await harness({
+        laneSource: laneWithGreeting(),
+        fetchPrecontext: async () => ({ matched: true, firstName: "Wayne" }),
+      });
+      const answered = await post(h, "/voice/optical", { CallSid: "CA60", From: "+1", To: "+2" });
+      const { ws } = await openStream(h, "CA60", tokenFrom(answered.text));
+      await settle(6);
+      const line = logged.find((l) => l.includes("pre-context"));
+      expect(line).toBeDefined();
+      expect(line).not.toContain("Wayne");
+      ws.close();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("plays the greeting an administrator configured, not the shipped one", async () => {
+    // `agents.welcome_greeting` is the source of truth — it is what the admin
+    // UI and the Observatory display, and what the SIP path resolves. Playing
+    // the registry string means an operator edits the greeting, sees it
+    // change everywhere, and hears the old one on the line (Codex, PR #240).
+    const h = await harness({
+      laneSource: laneWithGreeting(),
+      fetchPrecontext: async () => ({ matched: true, firstName: "Wayne" }),
+      resolveGreeting: async () =>
+        "Good afternoon, Azul Vision optical here. What can I do for you?",
+    });
+    const answered = await post(h, "/voice/optical", { CallSid: "CA43", From: "+1", To: "+2" });
+    const { ws } = await openStream(h, "CA43", tokenFrom(answered.text));
+    await settle(6);
+    h.transports[0].emit({ type: "session.updated" } as GrokServerEvent);
+    await settle(4);
+
+    // The configured copy, and personalised — both, not one or the other.
+    expect(spokenText(h)).toEqual([
+      "Good afternoon, Azul Vision optical here. Am I speaking with Wayne?",
+    ]);
+    ws.close();
+  });
+
+  it("falls back to the registry greeting when nothing is configured", async () => {
+    // The resolver returns null both when the column is empty and when the
+    // database cannot be reached. Neither may cost the caller their opening.
+    const h = await harness({
+      laneSource: laneWithGreeting(),
+      fetchPrecontext: async () => ({ matched: true, firstName: "Wayne" }),
+      resolveGreeting: async () => null,
+    });
+    const answered = await post(h, "/voice/optical", { CallSid: "CA44", From: "+1", To: "+2" });
+    const { ws } = await openStream(h, "CA44", tokenFrom(answered.text));
+    await settle(6);
+    h.transports[0].emit({ type: "session.updated" } as GrokServerEvent);
+    await settle(4);
+
+    expect(spokenText(h)).toEqual([
+      "Thank you for calling Azul Vision optical. Am I speaking with Wayne?",
+    ]);
+    ws.close();
+  });
+
+  it("personalises the answering service, whose prompt is certain it did", async () => {
+    // answeringServiceAgent's matched-caller block: "YOUR GREETING HAS
+    // ALREADY PLAYED. Do NOT greet again... Go straight to the confirmation."
+    // Left out of the style map, that prompt would be certain of something
+    // untrue — the exact defect the module exists to remove (Codex, PR #240).
+    const AS_GREETING =
+      "Hello, thank you for calling Azul Vision, all of our operators are " +
+      "currently on the phone assisting other patients, how may I help you today?";
+    const h = await harness({
+      laneSource: {
+        getAgentConfig: () => ({
+          id: "answering-service",
+          enabled: true,
+          agentType: "inbound",
+          greeting: AS_GREETING,
+          factory: (async () => ({
+            instructions: "You are the answering service agent.",
+            tools: [],
+          })) as unknown as LaneConfig["factory"],
+        }),
+      },
+      fetchPrecontext: async () => ({ matched: true, firstName: "Wayne" }),
+    });
+    const answered = await post(h, "/voice/answering-service", {
+      CallSid: "CA45",
+      From: "+1",
+      To: "+2",
+    });
+    const { ws } = await openStream(h, "CA45", tokenFrom(answered.text));
+    await settle(6);
+    h.transports[0].emit({ type: "session.updated" } as GrokServerEvent);
+    await settle(4);
+
+    // The busy-operators line survives — it pre-empts the ask for a human,
+    // same as the queue lines — and only the closing question is swapped.
+    expect(spokenText(h)).toEqual([
+      "Hello, thank you for calling Azul Vision, all of our operators are " +
+        "currently on the phone assisting other patients. Am I speaking with Wayne?",
+    ]);
+    ws.close();
+  });
+
+  it("leaves it alone when the match carries no first name to use", async () => {
+    // Personalising on an empty name would strip the greeting's question and
+    // put nothing in its place — a line that ends mid-thought.
+    const h = await harness({
+      laneSource: laneWithGreeting(),
+      fetchPrecontext: async () => ({ matched: true }),
+    });
+    const answered = await post(h, "/voice/optical", { CallSid: "CA42", From: "+1", To: "+2" });
+    const { ws } = await openStream(h, "CA42", tokenFrom(answered.text));
+    await settle(6);
+    h.transports[0].emit({ type: "session.updated" } as GrokServerEvent);
+    await settle(4);
+
+    expect(spokenText(h)).toEqual([GREETING]);
+    ws.close();
+  });
+});
+
+describe("the database outranks the code, but not on the copy a lane must say", () => {
+  // `greetingResolver` makes agents.welcome_greeting the source of truth, and
+  // that is right — a boot that overwrote operator edits was a real incident.
+  // But an edit chooses WORDING; it does not license dropping the 911
+  // direction or the recording disclosure from the after-hours line.
+  //
+  // Live evidence, 2026-08-31: the no-ivr row carried 911 and the
+  // closed-office notice and NO recording disclosure, while the built-in
+  // greeting had all three. Codex, #240.
+  const LIVE_ROW =
+    "Thank you for calling Azul Vision. Our offices are currently closed. If this is a " +
+    "medical emergency, please hang up and dial 911. Otherwise, I'm happy to help — how " +
+    "may I assist you?";
+  const BUILT_IN =
+    "Thank you for calling Azul Vision, all of our offices are currently closed, you have " +
+    "reached the after hours call service. If this is a medical emergency, please dial 911. " +
+    "All calls are being recorded for quality assurance purposes, how can I help you?";
+
+  it("prefers the configured greeting whenever it is complete", () => {
+    // "Configured optical line." was the fixture until 2026-09-17. It kept
+    // PASSING after optical gained a recording-disclosure requirement, and
+    // that is the trap: with BOTH strings deficient `chooseGreeting` falls
+    // into its "neither has it" branch, which also returns `configured` — so
+    // the assertion held while testing a different branch entirely. The
+    // fixture now actually satisfies optical's copy, so this tests what its
+    // name says.
+    const COMPLETE_OPTICAL =
+      "Configured optical line. All calls are being recorded for quality assurance purposes.";
+    expect(chooseGreeting("optical", COMPLETE_OPTICAL, "Registry.")).toBe(COMPLETE_OPTICAL);
+    expect(chooseGreeting("no-ivr", BUILT_IN, "something else")).toBe(BUILT_IN);
+  });
+
+  it("falls back to the built-in greeting when the row has lost mandated copy", () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      expect(chooseGreeting("no-ivr", LIVE_ROW, BUILT_IN)).toBe(BUILT_IN);
+      // The row still needs a person to fix it, so the gap is loud.
+      expect(spy.mock.calls.flat().join(" ")).toContain("recording disclosure");
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("keeps the configured one when neither carries it, and says so", () => {
+    // Swapping one deficient greeting for another helps nobody; the log is
+    // the only thing that can help here.
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      expect(chooseGreeting("no-ivr", LIVE_ROW, "Thanks for calling.")).toBe(LIVE_ROW);
+      expect(spy.mock.calls.flat().join(" ")).toContain("both missing");
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("uses the registry string when nothing is configured", () => {
+    expect(chooseGreeting("optical", null, "Registry.")).toBe("Registry.");
+    expect(chooseGreeting("optical", null, null)).toBe("");
+  });
+});
+
+describe("Rule Zero 2a reaches the session, and stands down when Rule 1 answered", () => {
+  /**
+   * THE WIRING, not the function.
+   *
+   * `newOrExistingAsk.test.ts` proves `withNewOrExistingAsk` behaves. It would
+   * pass in full with the runtime never calling it — which is precisely how
+   * #291's office carry was found dead behind five green tests, and CLAUDE.md
+   * failure mode 10. These read the instructions the SESSION actually
+   * received, so deleting the call site fails them.
+   */
+  async function sessionInstructions(
+    over: Parameters<typeof harness>[0],
+    sid: string,
+  ): Promise<string> {
+    const h = await harness(over);
+    const answered = await post(h, "/voice/optical", { CallSid: sid, From: "+1", To: "+2" });
+    const { ws } = await openStream(h, sid, tokenFrom(answered.text));
+    await settle(6);
+    h.transports[0].emit({ type: "session.created" } as GrokServerEvent);
+    await settle(4);
+    const update = h.transports[0].ofType("session.update")[0] as {
+      session: { instructions: string };
+    };
+    ws.close();
+    return update.session.instructions;
+  }
+
+  it("asks an UNRECOGNISED caller — the branch that is essentially every call today", async () => {
+    // Pre-context vouched for nobody on 0 of 143 substantive queue calls on
+    // 2026-09-03, so this is the live population, not the edge case.
+    const instructions = await sessionInstructions(
+      { fetchPrecontext: async () => ({ matched: false }) },
+      "CA2A1",
+    );
+    expect(instructions).toContain("new patient or an existing patient");
+    expect(instructions).toContain("STOP LOOKING");
+  });
+
+  it("asks when pre-context could not be reached at all", async () => {
+    // An unreachable lookup is not a recognition. Rule 1 did not answer, so
+    // Rule 2 has to.
+    const instructions = await sessionInstructions({}, "CA2A2");
+    expect(instructions).toContain("new patient or an existing patient");
+  });
+
+  it("does NOT ask a caller the person base recognised", async () => {
+    const instructions = await sessionInstructions(
+      { fetchPrecontext: async () => ({ matched: true, firstName: "Marisol" }) },
+      "CA2A3",
+    );
+    expect(instructions).not.toContain("new patient or an existing patient");
+  });
+
+  it("does NOT ask a recognised caller we have no NAME for", async () => {
+    // `AzulPrecontext` permits `{ matched: true }` with no usable name, and
+    // that person is still an existing patient Rule 1 answered for. Suppress
+    // on the MATCH, not on the name — keying this on `recognisedFirstName`
+    // would interrogate a recognised patient because we happened to have
+    // nothing to call them.
+    const instructions = await sessionInstructions(
+      { fetchPrecontext: async () => ({ matched: true }) },
+      "CA2A4",
+    );
+    expect(instructions).not.toContain("new patient or an existing patient");
+  });
+
+  it("composes with the greeting notice rather than replacing it", async () => {
+    // The two appends are independent and neither may swallow the other.
+    //
+    // This needs a lane that HAS a greeting: `withGreetingAlreadyPlayed`
+    // returns the prompt untouched when there is none, and the module-level
+    // `laneSource()` sets no greeting. The first version of this test used it
+    // anyway and failed on an absent notice that was correctly absent —
+    // asserting against a fixture rather than against the behaviour.
+    const withGreeting = laneSource({
+      greeting: "Thank you for calling Azul Vision. How may I help you?",
+    });
+
+    const unrecognised = await sessionInstructions(
+      { laneSource: withGreeting, fetchPrecontext: async () => ({ matched: false }) },
+      "CA2A5",
+    );
+    expect(unrecognised).toContain("ALREADY been spoken");
+    expect(unrecognised).toContain("new patient or an existing patient");
+
+    const recognised = await sessionInstructions(
+      {
+        laneSource: withGreeting,
+        fetchPrecontext: async () => ({ matched: true, firstName: "Marisol" }),
+      },
+      "CA2A6",
+    );
+    expect(recognised).toContain("ALREADY been spoken");
+    expect(recognised).not.toContain("new patient or an existing patient");
+  });
+});
+
+/**
+ * THE RUNTIME'S TURNS AND RECORDING REACH THE OBSERVATORY.
+ *
+ * Measured 2026-09-17: recording_url NULL and call_turns empty on all 4,564
+ * runtime calls since the cutover, on lanes that open with "all calls are
+ * being recorded". The page fell back to the flat transcript and called it an
+ * instrumentation gap. Both hooks are pinned HERE, at the runtime, because a
+ * unit test on each helper proves the helper works and not that anything
+ * calls it — failure mode 10.
+ */
+describe("the runtime's turns and recording reach the Observatory", () => {
+  /**
+   * THE GRADE, AT TEARDOWN. The old core grades a call when it ends; the
+   * runtime never did, so every runtime call waited on the five-per-cycle
+   * backfill — 161–203 minutes behind at peak on 2026-09-16, which is what
+   * the hourly fleet watch alarmed on (task #139). Pinned here, at the
+   * runtime, after the sweep: the threshold lives in runtimeGrading.ts and
+   * has its own test.
+   */
+  it("hands the call to the grader once, after the sweep, with its row id", async () => {
+    const graded: Array<{ callSid: string; callLogId: unknown; sweptFirst: number }> = [];
+    let sweeps = 0;
+    const h = await harness({
+      sweepCall: async () => {
+        sweeps += 1;
+        return { filed: false, reason: "caller-said-nothing" };
+      },
+      gradeCall: async (record, ids) => {
+        const r = record as { callSid: string };
+        graded.push({ callSid: r.callSid, callLogId: (ids as { callLogId?: string }).callLogId, sweptFirst: sweeps });
+        return "graded";
+      },
+    });
+    const answered = await post(h, "/voice/optical", { CallSid: "CA43", From: "+1", To: "+2" });
+    const { ws } = await openStream(h, "CA43", tokenFrom(answered.text));
+    await waitFor(() => h.transports.length === 1, "the transport to register");
+    ws.close();
+    await settle(8);
+    expect(graded).toHaveLength(1);
+    expect(graded[0]).toMatchObject({ callSid: "CA43", sweptFirst: 1 });
+    // The row id travels with it — whatever the harness's row opener returned.
+    expect("callLogId" in graded[0]).toBe(true);
+  });
+
+  /**
+   * THE RECORD REACHES THE CALL ROW (v51). Measured over seven days:
+   * patient_found / patient_name / patient_dob NULL on 2,471 of 2,471 runtime
+   * calls, because nothing supplied persistRuntimeCall's identity argument.
+   * Pinned at the runtime, with a canonical SID (the store refuses any other)
+   * and a CERTAIN entry — an uncertain one must produce nothing.
+   */
+  it("hands persistCall the CERTAIN identity the tools established for the call, and nothing for an uncertain one", async () => {
+    const { rememberVerifiedIdentity, resetVerifiedIdentities } = await import("../tools/verifiedIdentity");
+    resetVerifiedIdentities();
+    const CERTAIN = "CA0000000000000000000000000000005a";
+    const CANDIDATE = "CA0000000000000000000000000000005b";
+    rememberVerifiedIdentity(CERTAIN, { firstName: "Zelda", lastName: "Quixote", dateOfBirth: "1958-01-04", certain: true });
+    rememberVerifiedIdentity(CANDIDATE, { firstName: "Zed", lastName: "Quixote", dateOfBirth: "1958-01-04", certain: false });
+    const h = await harness();
+    for (const sid of [CERTAIN, CANDIDATE]) {
+      const expectedCalls = h.transports.length + 1;
+      const answered = await post(h, "/voice/optical", { CallSid: sid, From: "+1", To: "+2" });
+      const { ws } = await openStream(h, sid, tokenFrom(answered.text));
+      // Wait for THIS call: the first call's transport remains in the array.
+      // Closing during setup exercises the no-bridge path, not identity teardown.
+      await waitFor(() => h.transports.length === expectedCalls, "this call's transport to register");
+      ws.close();
+      await waitFor(() => h.persisted.length === expectedCalls, "this call to persist");
+    }
+    expect(h.persistedIdentity).toHaveLength(2);
+    expect(h.persistedIdentity[0]).toEqual({ patientFound: true, patientName: "Zelda Quixote", patientDob: "1958-01-04" });
+    expect(h.persistedIdentity[1]).toEqual({});
+    resetVerifiedIdentities();
+  });
+
+  it("starts a Twilio recording once per call, on the host the webhook was reached on", async () => {
+    const started: Array<[string, string | undefined]> = [];
+    const h = await harness({
+      startRecording: async (sid, host) => {
+        started.push([sid, host]);
+      },
+    });
+    const answered = await post(h, "/voice/optical", { CallSid: "CA40", From: "+1", To: "+2" });
+    const { ws } = await openStream(h, "CA40", tokenFrom(answered.text), "runtime.test");
+    await settle(4);
+    expect(started).toEqual([["CA40", "runtime.test"]]);
+    ws.close();
+    await settle(6);
+    expect(started, "a second start on the same call").toHaveLength(1);
+  });
+
+  it("the TwiML carries the host the stream started from", async () => {
+    const h = await harness();
+    const answered = await post(h, "/voice/optical", { CallSid: "CA42", From: "+1", To: "+2" });
+    expect(answered.text).toMatch(/<Parameter name="host" value="127\.0\.0\.1:\d+"\/>/);
+  });
+
+  it("the persisted record carries timed turns, handed to the turn writer AFTER the sweep", async () => {
+    const handed: Array<{ callSid: string; turns: unknown; sweptFirst: number }> = [];
+    let sweeps = 0;
+    const h = await harness({
+      sweepCall: async () => {
+        sweeps += 1;
+        return { filed: false, reason: "caller-said-nothing" };
+      },
+      persistTurns: async (record) => {
+        const r = record as { callSid: string; turns?: unknown };
+        handed.push({ callSid: r.callSid, turns: r.turns, sweptFirst: sweeps });
+        return 0;
+      },
+    });
+    const answered = await post(h, "/voice/optical", { CallSid: "CA41", From: "+1", To: "+2" });
+    const { ws } = await openStream(h, "CA41", tokenFrom(answered.text));
+    await settle(4);
+    ws.close();
+    await settle(8);
+    expect(h.persisted[0]).toMatchObject({ callSid: "CA41" });
+    const turns = (h.persisted[0] as { turns?: unknown }).turns;
+    expect(Array.isArray(turns), "the record has no turns array").toBe(true);
+    for (const t of turns as Array<Record<string, unknown>>) {
+      expect(typeof t.atMs).toBe("number");
+      expect(["caller", "agent"]).toContain(t.role);
+    }
+    expect(handed).toEqual([{ callSid: "CA41", turns, sweptFirst: 1 }]);
+  });
+});
+
+/**
+ * WHETHER THE CALLER'S AUDIO EVER REACHED US, on every exit that writes a row.
+ *
+ * `callerAudioEnergy.ts` carries the measurement (optical's 13.6% zero-caller-
+ * line rate against surgery's 7.7% and tech's 8.3%) and the μ-law arithmetic
+ * has its own unit tests. What is driven HERE is the wiring, at the real
+ * runtime, because two Codex P2s on #327 were both about wiring and neither
+ * would have been caught by a helper test: the counting sat in the bridge,
+ * which never sees the frames the pre-bridge hold discards, and three exits
+ * that persist a `call_logs` row without ever building a bridge wrote no row
+ * at all — while being part of the no-audio population the instrument exists
+ * to size.
+ */
+describe("the caller-audio summary, on every exit", () => {
+  /** 160 μ-law bytes at the loudest sample there is: exponent 7, voiced. */
+  const LOUD = Buffer.from(new Uint8Array(160).fill(0x00)).toString("base64");
+  /** μ-law digital silence. Exponent 0 by construction, never voiced. */
+  const QUIET = Buffer.from(new Uint8Array(160).fill(0xff)).toString("base64");
+  const media = (payload: string) =>
+    JSON.stringify({ event: "media", media: { payload } });
+
+  it("counts audio that arrived BEFORE the bridge existed, including the frames the hold discarded", async () => {
+    // THE EXACT DEFECT (Codex P2, #327). `PRE_BRIDGE_FRAME_CAP` is 500 and
+    // drops its OLDEST frame, so the loud one below never reaches the bridge:
+    // a bridge-side meter would report `silent_line` — a caller who spoke,
+    // recorded as a line nobody spoke into, by the one measure built to tell
+    // those apart. The socket counts all 501.
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const slow: LaneSource = {
+      getAgentConfig: () => ({
+        id: "optical",
+        enabled: true,
+        agentType: "inbound",
+        factory: (async () => {
+          await blocked;
+          return { instructions: "You are the optical queue agent.", tools: [] };
+        }) as unknown as LaneConfig["factory"],
+      }),
+    };
+    const h = await harness({ laneSource: slow });
+    const answered = await post(h, "/voice/optical", { CallSid: "CA-audio1", From: "+1", To: "+2" });
+    const { ws } = await openStream(h, "CA-audio1", tokenFrom(answered.text));
+    await settle(2);
+    ws.send(media(LOUD));
+    for (let i = 0; i < 500; i += 1) ws.send(media(QUIET));
+    await settle(6);
+    release();
+    await waitFor(() => h.transports.length === 1, "the transport to register");
+    ws.close();
+    await settle(8);
+
+    const row = h.audioRows.find((r) => r.callSid === "CA-audio1");
+    expect(row).toBeDefined();
+    expect(row?.counts).toEqual({ frames: 501, voiced: 1 });
+    await h.close();
+  });
+
+  it("writes a row when the lane resolves to NOTHING — no bridge is ever built", async () => {
+    const noLane: LaneSource = { getAgentConfig: () => undefined };
+    const h = await harness({ laneSource: noLane });
+    const answered = await post(h, "/voice/optical", { CallSid: "CA-audio2", From: "+1", To: "+2" });
+    await openStream(h, "CA-audio2", tokenFrom(answered.text));
+    await settle(8);
+
+    // The `call_logs` row is written on this path and always has been; before
+    // #327 the caller-audio row was not, so the population with the LEAST
+    // audio was the one population with no measurement of it.
+    expect(h.persisted.find((r) => r.callSid === "CA-audio2")?.outcome).toBe("provider_failure");
+    expect(h.audioRows.find((r) => r.callSid === "CA-audio2")).toMatchObject({
+      outcome: "provider_failure",
+    });
+    await h.close();
+  });
+
+  it("writes a row for a caller who hung up while the agent was being built, carrying what they said", async () => {
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const h = await harness({
+      callRowDeadlineMs: 40,
+      openCallRow: async () => {
+        await blocked;
+        return "late-row";
+      },
+    });
+    const answered = await post(h, "/voice/optical", { CallSid: "CA-audio3", From: "+1", To: "+2" });
+    const { ws } = await openStream(h, "CA-audio3", tokenFrom(answered.text));
+    await settle(2);
+    // Spoken while the row was being opened — before any bridge exists.
+    ws.send(media(LOUD));
+    ws.send(media(LOUD));
+    await settle(4);
+    ws.close();
+    await settle(6);
+    release();
+    await settle(8);
+
+    expect(h.persisted.find((r) => r.callSid === "CA-audio3")?.outcome).toBe("caller_hangup");
+    const row = h.audioRows.find((r) => r.callSid === "CA-audio3");
+    expect(row?.outcome).toBe("caller_hangup");
+    // Not merely present: this caller WAS speaking, and the row says so.
+    expect(row?.counts).toEqual({ frames: 2, voiced: 2 });
+    await h.close();
+  });
+
+  it("writes a row when setup fails before the bridge exists", async () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const failing: LaneSource = {
+        getAgentConfig: () => ({
+          id: "optical",
+          enabled: true,
+          agentType: "inbound",
+          factory: (async () => {
+            throw new Error("agent tree exploded");
+          }) as unknown as LaneConfig["factory"],
+        }),
+      };
+      const h = await harness({ laneSource: failing });
+      const answered = await post(h, "/voice/optical", { CallSid: "CA-audio4", From: "+1", To: "+2" });
+      await openStream(h, "CA-audio4", tokenFrom(answered.text));
+      await settle(8);
+
+      expect(h.persisted.find((r) => r.callSid === "CA-audio4")?.outcome).toBe("provider_failure");
+      expect(h.audioRows.find((r) => r.callSid === "CA-audio4")).toMatchObject({
+        outcome: "provider_failure",
+      });
+      await h.close();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("writes exactly ONE row per call on the ordinary teardown path", async () => {
+    const h = await harness();
+    const answered = await post(h, "/voice/optical", { CallSid: "CA-audio5", From: "+1", To: "+2" });
+    const { ws } = await openStream(h, "CA-audio5", tokenFrom(answered.text));
+    await waitFor(() => h.transports.length === 1, "the transport to register");
+    ws.send(media(QUIET));
+    await settle(4);
+    ws.close();
+    await settle(8);
+
+    const rows = h.audioRows.filter((r) => r.callSid === "CA-audio5");
+    expect(rows).toHaveLength(1);
+    expect(rows[0].counts).toEqual({ frames: 1, voiced: 0 });
+    await h.close();
+  });
+});
+
+
+describe("a call the runtime dialled (src/runtime/outbound/)", () => {
+  const PATIENT = "+15555550111";
+  const OURS = "+15555550100";
+  const policy: OutboundLanePolicy = {
+    campaignKey: "test-campaign",
+    enableEnv: "OUTBOUND_CAMPAIGN_TEST",
+    callerIdEnv: "OUTBOUND_TEST_FROM",
+    window: DEFAULT_CALLING_WINDOW,
+    caps: DEFAULT_ATTEMPT_CAPS,
+    concurrency: 1,
+    greeting: (c) =>
+      `Hello, this is an automated assistant calling for Azul Vision. This call is recorded. Am I speaking with ${c.firstName}?`,
+    voicemail: () => "Hello, this is Azul Vision.",
+  };
+  const seenMetadata: Array<Record<string, unknown>> = [];
+  const outboundLane = (over: Partial<LaneConfig> = {}): LaneSource => {
+    const config: LaneConfig = {
+      id: "test-lane",
+      enabled: true,
+      agentType: "outbound",
+      outbound: policy,
+      factory: (async (_h: unknown, md: Record<string, unknown>) => {
+        seenMetadata.push(md);
+        return { instructions: "You are the test outbound agent.", tools: [] };
+      }) as unknown as LaneConfig["factory"],
+      ...over,
+    };
+    return { getAgentConfig: (id) => (id === config.id ? config : undefined) };
+  };
+  const spokenText = (h: Harness): string[] =>
+    h.transports[0].sent
+      .filter((m) => m.type === "conversation.item.create")
+      .map((m) => (m.item as { content?: Array<{ text?: string }> })?.content?.[0]?.text ?? "");
+
+  async function dialled(store: FakeOutboundStore) {
+    store.addContact({ id: "c1", phone: PATIENT, firstName: "Testa" });
+    await store.claimContact("c1", new Date());
+    return store.startAttempt("c1", "campaign-1", 1);
+  }
+
+  /** The answer webhook as Twilio would post it: the signed URL the dialler made. */
+  async function answer(h: Harness, slug: string, attemptId: string, callSid: string) {
+    const path = new URL(answerUrl("x.invalid", slug, "c1", attemptId)).pathname +
+      new URL(answerUrl("x.invalid", slug, "c1", attemptId)).search;
+    return post(h, path, { CallSid: callSid, From: OURS, To: PATIENT, AnsweredBy: "human" });
+  }
+
+  beforeEach(() => {
+    seenMetadata.length = 0;
+  });
+
+  it("opens with the campaign's greeting for the person it rang, and hands the agent who that is", async () => {
+    const store = new FakeOutboundStore();
+    const attemptId = await dialled(store);
+    const fetchPrecontext = vi.fn(async () => ({ matched: true, firstName: "Somebody Else" }));
+    const opened: Record<string, unknown>[] = [];
+    const h = await harness({
+      laneSource: outboundLane(),
+      outboundStore: store,
+      fetchPrecontext,
+      openCallRow: async (row) => {
+        opened.push(row as Record<string, unknown>);
+        return "row-1";
+      },
+    });
+    const answered = await answer(h, "test-lane", attemptId, "CA90");
+    const { ws } = await openStream(h, "CA90", tokenFrom(answered.text));
+    await waitFor(() => h.transports.length === 1, "the provider transport");
+    await settle(4);
+    h.transports[0].emit({ type: "session.updated" } as GrokServerEvent);
+    await settle(4);
+
+    expect(spokenText(h)).toEqual([
+      "Hello, this is an automated assistant calling for Azul Vision. This call is recorded. Am I speaking with Testa?",
+    ]);
+    expect(seenMetadata[0].outbound).toMatchObject({ contactId: "c1", attemptId, campaignKey: "test-campaign", phone: PATIENT });
+    // The contact row says who was rung; no caller-ID lookup is made.
+    expect(fetchPrecontext).not.toHaveBeenCalled();
+    ws.close();
+    await waitFor(() => h.persisted.length === 1, "the call record");
+    expect(h.persisted[0]).toMatchObject({ direction: "outbound", callerPhone: PATIENT, dialedNumber: OURS });
+    // The row OPENED at setup is outbound too, with Twilio's ends the right
+    // way round: the teardown upsert never rewrites direction, from or to,
+    // so a row opened as inbound would stay inbound (Codex P1 on #357).
+    expect(opened[0]).toMatchObject({ direction: "outbound", from: OURS, to: PATIENT, dialedNumber: PATIENT });
+  });
+
+  /**
+   * A RETURNED CALL IS ANSWERED BY THE SAME LANE (v106). v105 refused this
+   * call and the person heard "unavailable"; the operator's rule is that the
+   * agent handles it and knows who is on the line and why (outbound/callback.ts).
+   */
+  async function returnedCall(store: FakeOutboundStore, callSid: string, from = PATIENT) {
+    const h = await harness({ laneSource: outboundLane(), outboundStore: store });
+    const answered = await post(h, "/voice/test-lane", { CallSid: callSid, From: from, To: OURS });
+    const { ws } = await openStream(h, callSid, tokenFrom(answered.text));
+    await waitFor(() => h.transports.length === 1, "the provider transport");
+    await settle(4);
+    h.transports[0].emit({ type: "session.created" } as GrokServerEvent);
+    await settle(4);
+    h.transports[0].emit({ type: "session.updated" } as GrokServerEvent);
+    await settle(4);
+    const update = h.transports[0].sent.find((m) => m.type === "session.update") as
+      | { session: { instructions: string; tools: Array<{ name: string }> } }
+      | undefined;
+    return { h, ws, update };
+  }
+
+  it("answers an INBOUND call on an outbound lane as the person ringing back, and greets them by first name", async () => {
+    const store = new FakeOutboundStore();
+    await dialled(store);
+    const { h, ws, update } = await returnedCall(store, "CA91");
+    expect(spokenText(h)).toEqual([
+      "Hello, Testa. Thank you for calling Azul Vision. This is an automated assistant. This call is recorded.",
+    ]);
+    // The agent knows who the number belongs to and why we called — as a
+    // candidate, with nothing said until they are identified.
+    expect(seenMetadata[0].callback).toMatchObject({
+      campaignKey: "test-campaign",
+      campaignId: "campaign-1",
+      callerPhone: PATIENT,
+      match: { kind: "one", contact: { contactId: "c1", firstName: "Testa" } },
+    });
+    expect(seenMetadata[0].outbound).toBeUndefined();
+    expect(update?.session.instructions).toContain("### Returned call");
+    expect(update?.session.instructions).toContain('call identify_callback_caller with first_name "Testa"');
+    expect(update?.session.tools.map((t) => t.name)).toEqual(
+      expect.arrayContaining(["identify_callback_caller", "opt_out_of_calls", "record_call_outcome", "end_call"]),
+    );
+    ws.close();
+    await waitFor(() => h.persisted.some((r) => r.callSid === "CA91"), "the call record");
+    // An ordinary inbound call record: from them, to us.
+    expect(h.persisted.find((r) => r.callSid === "CA91")).toMatchObject({ callerPhone: PATIENT, dialedNumber: OURS });
+    expect(h.persisted.find((r) => r.callSid === "CA91")?.outcome).not.toBe("provider_failure");
+  });
+
+  it("asks who is calling when the number belongs to more than one person, and never names them", async () => {
+    const store = new FakeOutboundStore();
+    store.addContact({ id: "c1", phone: PATIENT, firstName: "Testa", lastName: "One" });
+    store.addContact({ id: "c2", phone: PATIENT, firstName: "Other", lastName: "Two" });
+    const { h, ws, update } = await returnedCall(store, "CA94");
+    expect(spokenText(h)).toEqual([
+      "Thank you for calling Azul Vision. This is an automated assistant. This call is recorded. May I have your first and last name?",
+    ]);
+    expect(update?.session.instructions).toContain("more than one person we called");
+    expect(update?.session.instructions).not.toContain("Testa");
+    expect(update?.session.instructions).not.toContain("Other");
+    ws.close();
+  });
+
+  it("asks who is calling when the number is not on the list — they may be ringing from another phone", async () => {
+    const store = new FakeOutboundStore();
+    await dialled(store);
+    const { h, ws, update } = await returnedCall(store, "CA95", "+15555550199");
+    expect(spokenText(h)[0]).toMatch(/May I have your first and last name\?$/);
+    expect(update?.session.instructions).toContain("This number is not one we called");
+    ws.close();
+  });
+
+  it("writes the identified caller's returned call into the campaign's history, and ends it at hangup", async () => {
+    const store = new FakeOutboundStore();
+    await dialled(store);
+    await store.finishAttempt(store.attempts[0].id, { status: "voicemail" });
+    await store.settleContact("c1", "voicemail");
+    const { h, ws } = await returnedCall(store, "CA96");
+    const { getTool } = await import("../tools/registry");
+    const r = await getTool("identify_callback_caller")!.handler({
+      outbound_callback_sid: "CA96",
+      first_name: "Testa",
+    });
+    expect(r).toMatchObject({ success: true, identified: true });
+    const inbound = store.attempts.find((a) => a.direction === "inbound");
+    expect(inbound).toMatchObject({ contactId: "c1", callSid: "CA96" });
+    expect(inbound?.endedAt).toBeUndefined();
+    ws.close();
+    await waitFor(() => store.attempts.find((a) => a.direction === "inbound")?.endedAt !== undefined, "the returned call ended");
+    // Identified, no outcome recorded: answered, so the dialler does not ring
+    // somebody who has just spoken with us.
+    expect(store.contacts.get("c1")!.status).toBe("answered");
+    void h;
+  });
+
+  it("refuses a dialled call that reaches an inbound lane", async () => {
+    const store = new FakeOutboundStore();
+    const attemptId = await dialled(store);
+    // An inbound lane registered under the slug the answer URL names.
+    const inbound = laneSource({ id: "test-lane", agentType: "inbound" });
+    const h = await harness({ laneSource: inbound, outboundStore: store });
+    const answered = await answer(h, "test-lane", attemptId, "CA92");
+    // The outbound webhook itself refuses a slug with no outbound policy.
+    expect(answered.text).toContain("<Hangup/>");
+    expect(answered.text).not.toContain("<Stream");
+  });
+
+  it("refuses a dialled call whose contact cannot be loaded, rather than guess who it rang", async () => {
+    const store = new FakeOutboundStore();
+    const attemptId = await dialled(store);
+    const h = await harness({ laneSource: outboundLane(), outboundStore: store });
+    const answered = await answer(h, "test-lane", attemptId, "CA93");
+    store.contacts.delete("c1");
+    await openStream(h, "CA93", tokenFrom(answered.text));
+    await settle(8);
+    expect(h.transports).toHaveLength(0);
+    expect(seenMetadata).toHaveLength(0);
+  });
+});

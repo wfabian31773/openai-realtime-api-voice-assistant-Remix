@@ -1,9 +1,10 @@
 import { getEnvironmentConfig } from '../../src/config/environment';
 import { shadowTap } from '../../src/shadow/tap'; // observation-only tap; no-op unless SHADOW_MODE_ENABLED
 import { isNoTicketError } from './ticketingSyncPolicy';
-import type { PcpTicketPayload, PcpTicketResponse } from '../../src/pcp/pcpTicketing';
+import type { PcpTicketPayload, PcpTicketResponse, PcpWithdrawRequest, PcpWithdrawResponse } from '../../src/pcp/pcpTicketing';
+import { noteTicketFiled } from './ticketFilingPulse';
 
-interface CallData {
+export interface CallData {
   callSid?: string;
   recordingUrl?: string;
   transcript?: string;
@@ -19,7 +20,7 @@ interface CallData {
   agentOutcome?: string;
 }
 
-interface CreateTicketParams {
+export interface CreateTicketParams {
   /**
    * MEDICAL RECORDS / CAP ONLY.
    *
@@ -39,9 +40,20 @@ interface CreateTicketParams {
    * payload, which is what makes sending them safe today.
    */
   requestorType?: 'patient' | 'personal_representative' | 'provider' | 'health_plan' | 'legal' | 'other';
-  requestPathway?: 'roa_patient' | 'third_party_treatment' | 'third_party_plan' | 'third_party_legal' | 'third_party_other';
+  requestPathway?:
+    | 'roa_patient' | 'third_party_treatment' | 'third_party_plan' | 'third_party_legal' | 'third_party_other'
+    /** Logged, clock not started: the agent sent the signing link and the signature starts the clock (owner, 2026-09-27). */
+    | 'pending_authorization';
   capClockApplies?: boolean;
   requestorName?: string;
+  /**
+   * THE FORM AT CALL TIME (owner, 2026-09-27). Medical Records only: the app
+   * sends the patient the signing link — by text to `patientPhone` or by email
+   * to `patientEmail` — in the same request that files the ticket. The
+   * response's `form` says what happened. A send that fails never fails the
+   * ticket. The app must be deployed with #320 before this field is sent.
+   */
+  formChannel?: 'sms' | 'email';
   departmentId: number;
   /**
    * Omit both when the request genuinely does not fit the department's
@@ -52,8 +64,14 @@ interface CreateTicketParams {
    */
   requestTypeId?: number;
   requestReasonId?: number;
-  patientFirstName: string;
-  patientLastName: string;
+  /**
+   * OPTIONAL since 2026-09-27, for the records lane only: a request nobody
+   * identified files without a name rather than not at all. Every other
+   * filing tool still refuses before it gets here. The ticketing app's
+   * create-ticket accepts the omission (its own change, shipped first).
+   */
+  patientFirstName?: string;
+  patientLastName?: string;
   patientPhone: string;
   patientEmail?: string;
   preferredContactMethod?: "phone" | "text" | "email";
@@ -64,17 +82,56 @@ interface CreateTicketParams {
   patientBirthYear?: string;
   locationId?: number;
   providerId?: number;
+  /**
+   * "This call has already been asked for its routing field and still cannot
+   * supply one." The ticketing app's routing gate then takes the ticket
+   * UNASSIGNED into its department, with an advisory on the audit trail,
+   * instead of refusing it a second time — operator ruling 2026-09-02,
+   * currently honoured for department 2 only.
+   *
+   * The gate's refusal is a QUESTION: `postFailureToolResult` turns it into a
+   * sentence the agent puts to the caller. Asked twice it is not a question,
+   * it is a call that ends with no ticket at all. Two of the six surgery
+   * requests lost on 2026-09-02 died exactly there.
+   *
+   * Set from the sending tool's own per-call refusal counter (`gateAttempts`,
+   * keyed on a real CallSid) and NEVER from a model argument. Sent on every
+   * submission it would switch the app's gate off, and department 2's provider
+   * fill has already been driven from ~98% to 49% once by a change that looked
+   * smaller than this one.
+   */
+  routingAskExhausted?: boolean;
   description: string;
   priority?: "low" | "normal" | "medium" | "high" | "urgent";
   callData?: CallData;
   idempotencyKey?: string; // Undeclared here let a typo compile clean and send nothing — see PR #220.
 }
 
-interface CreateTicketResponse {
+export interface CreateTicketResponse {
   success: boolean;
   ticketId?: number;
   ticketNumber?: string;
   error?: string;
+  /** What create-ticket did with `formChannel`; absent when none was sent. */
+  form?: {
+    requested: boolean;
+    sent: boolean;
+    channel?: 'sms' | 'email';
+    statusMove?: string | null;
+    error?: string;
+  };
+  /**
+   * The HTTP status, when the request reached the server and it said no.
+   *
+   * Absent for a timeout, a DNS failure or a socket reset — which is exactly
+   * the distinction that matters: a 400 will fail identically forever, a
+   * timeout may work on the next try. Without this the two are one string and
+   * the only available behaviour is to retry both. Measured over 14 days,
+   * that cost 602 POSTs across 181 surgery calls, all rejected with the same
+   * "Missing required information: surgeon", roughly three per call while a
+   * patient waited.
+   */
+  statusCode?: number;
   // New fields from enhanced API (2026-01-13)
   providerSearched?: string;
   providerMatched?: boolean;
@@ -128,6 +185,14 @@ export interface SubmitTicketParams {
   additionalDetails?: string;
   /** Ticket priority — the app defaults urgent for Urgent/Emergency Transfer tickets and medium otherwise. */
   priority?: 'low' | 'normal' | 'medium' | 'high' | 'urgent';
+  /**
+   * A DEPARTMENT THE OPERATOR HAS RULED ON, never a guess. Absent on nearly
+   * every call, which leaves the derivation above where it is. Sent only for
+   * the two kinds of after-hours call the operator routed himself on
+   * 2026-10-02 — see `afterHoursRouting.ts`. The endpoint validates it and
+   * lets it win over its own derivation (`resolveSuppliedDepartment`).
+   */
+  departmentId?: number;
   callData?: {
     callSid?: string;
     callerPhone?: string;
@@ -200,8 +265,48 @@ interface LookupParams {
   locationName?: string;
 }
 
+/**
+ * WHY THIS CARRIES AN `outcome` AND NOT JUST A BOOLEAN.
+ *
+ * `lookupProviderAndLocation` catches its own transport error and answers
+ * `{success:false}` — historically byte-identical to what it answers when a
+ * name legitimately matched nobody. Every caller read only `providerId` /
+ * `locationId`, so the two states collapsed into one branch, and the branch
+ * said the caller's office or surgeon does not exist.
+ *
+ * On 2026-08-31 that collapse took optical to zero. `/api/voice-agent/lookup`
+ * rode the n8n gateway; n8n hit its plan's execution cap at 20:16 UTC and
+ * refused every execution at the webhook, answering 200 with a body that is
+ * not JSON. Forty-three callers were told "I'm not finding an office by that
+ * name" about Mission Hills, Downey, Glendale, Santa Ana and the rest of the
+ * map. The sentence was false, so the caller repeated the office, so the tool
+ * asked again: one call ran 19 tool calls over 8 minutes.
+ *
+ * Fixing that at the four call sites would have been four patches on one trap.
+ * The trap is removed here instead, by making the two states impossible to
+ * conflate: read `outcome`, or better, `lookupWasUnavailable()` below.
+ *
+ *   'unavailable'  the request never completed. NOT the caller's fault, and
+ *                  they must never be told a name was not found.
+ *   'no_match'     the request completed and returned no id. The name really
+ *                  is one we do not hold.
+ *   'matched'      at least one id came back.
+ *
+ * `outcome` describes the SERVICE, not a single field: a request for both a
+ * provider and a location that resolves only one is still 'matched'. Which
+ * fields resolved is still read from `providerId` / `locationId`, exactly as
+ * before — the shape is unchanged and only widened.
+ */
+export type LookupOutcome = 'matched' | 'no_match' | 'unavailable';
+
 interface LookupResponse {
   success: boolean;
+  /**
+   * Optional only because responses constructed elsewhere (test fixtures,
+   * recorded payloads) predate the field. Anything this client returns sets
+   * it. Use `lookupWasUnavailable()` rather than reading it raw.
+   */
+  outcome?: LookupOutcome;
   providerId?: number | null;
   provider?: {
     id: number;
@@ -217,7 +322,14 @@ interface LookupResponse {
     city: string;
   } | null;
   locationMatches?: Array<{ id: number; name: string; city: string }>;
+  /**
+   * Raw, for logic only. It can be the far side's words (`Location "<office>"
+   * not found`), so a log line prints `loggableTicketingError(error,
+   * statusCode)`, never this (v116 stand-in review of #371, P2-1).
+   */
   error?: string;
+  /** Set when the lookup failed with an HTTP status. */
+  statusCode?: number;
 }
 
 // PHI-safe log helpers — never emit full patient identifiers to stdout. These
@@ -234,6 +346,30 @@ function maskName(...parts: Array<string | undefined>): string {
     .map((p) => p[0]?.toUpperCase() ?? '')
     .join('');
   return initials ? `${initials}***` : '(none)';
+}
+
+/**
+ * THE APP'S OWN WORDS CAN NAME THE PATIENT'S OFFICE (v116, Codex thread
+ * PRRT_kwDORVukLs6vzaiN on #371). A lookup warning or a refusal body reads
+ * like `Location "<office>" not found in system`, and since v116 that office
+ * is the one on the PATIENT'S RECORD. So response-derived text is never
+ * printed: a warning is counted, and a refusal is summarised by its keys and
+ * the field NAMES it says are missing.
+ */
+function describeRefusalBody(data: unknown): Record<string, unknown> {
+  if (!data || typeof data !== 'object') return { body: data === null ? 'null' : typeof data };
+  const body = data as Record<string, unknown>;
+  return {
+    keys: Object.keys(body),
+    hasError: typeof body.error === 'string' && body.error.length > 0,
+    missingFields: Array.isArray(body.missingFields) ? body.missingFields : undefined,
+  };
+}
+function describeFailure(error: unknown): unknown {
+  const statusCode = (error as { statusCode?: number } | null)?.statusCode;
+  // An error carrying a status holds the far side's text; one without is ours
+  // (a timeout, an unreachable host) and is printed as it is.
+  return statusCode !== undefined ? { statusCode, message: '(response text withheld)' } : error;
 }
 
 export class TicketingApiClient {
@@ -495,18 +631,54 @@ export class TicketingApiClient {
         body: body ? JSON.stringify(body) : undefined,
         signal: controller.signal,
       });
-      
-      clearTimeout(timeoutId);
 
+      // The timer stays armed until the BODY has been read. It used to be
+      // cleared here, the moment the headers arrived, and `response.json()`
+      // below then waited without any bound — so a server that sent its
+      // status promptly and its body slowly could hold a filing tool open
+      // past every budget built on the 15 s: the gate-attempt claim's floor
+      // (`gateAttempts.ts`) rests on a refusal arriving inside this timeout
+      // or not at all, and the runtime's 45 s tool watchdog rests on the tool
+      // returning at all (Codex, #321 round 20).
       console.info(`[TICKETING API] Response status: ${response.status} ${response.statusText}`);
 
       let data: any;
       try {
         data = await response.json();
       } catch (parseError) {
-        console.error(`[TICKETING API] ✗ Failed to parse JSON response:`, parseError);
-        throw new Error(`Invalid JSON response from ticketing API: ${response.status}`);
+        // A body the timer cut off is a TIMEOUT, not a bad body: it carries
+        // no status downstream, so it is captured and retried like any other
+        // request that never got an answer — not read as a refusal.
+        if (parseError instanceof Error && parseError.name === 'AbortError') throw parseError;
+        // Status and error TYPE only: a JSON SyntaxError quotes an excerpt of
+        // the body, and a non-JSON body can be `Location "<office>" not
+        // found` (v116 — Codex thread PRRT_kwDORVukLs6vzf39 on #371).
+        console.error(
+          `[TICKETING API] ✗ Failed to parse JSON response (HTTP ${response.status}): ` +
+            `${parseError instanceof Error ? parseError.name : typeof parseError} (body text withheld)`,
+        );
+        /**
+         * THE STATUS SURVIVES A BODY WE COULD NOT READ.
+         *
+         * Found by Codex on PR #244. This threw a plain Error, so a 4xx with an
+         * empty or non-JSON body arrived at `createTicketDurable` with no
+         * `statusCode` — read as a transport failure and written to the outbox,
+         * which is the one thing the 4xx split exists to prevent. An empty 400
+         * is ordinary, and a 401/403 after a key rotation would have filled the
+         * outbox with requests that can never send and held the filing alarm
+         * open indefinitely.
+         *
+         * The 2026-08-31 outage is the case that must NOT change: n8n answered
+         * HTTP 200 with a body that is not JSON. That now carries statusCode
+         * 200, which is not a refusal, so it is still captured and retried.
+         */
+        const parseFailure = new Error(
+          `Invalid JSON response from ticketing API: ${response.status}`,
+        ) as Error & { statusCode?: number };
+        parseFailure.statusCode = response.status;
+        throw parseFailure;
       }
+      clearTimeout(timeoutId);
 
       if (!response.ok) {
         // A 404 "no ticket found" is deterministic and expected for calls
@@ -515,13 +687,26 @@ export class TicketingApiClient {
         if (response.status === 404 && isNoTicketError(String(data?.error ?? ''))) {
           console.info(`[TICKETING API] 404 no-ticket for ${endpoint} (expected for info-only calls)`);
         } else {
-          console.error(`[TICKETING API] Error ${response.status}:`, data);
+          console.error(`[TICKETING API] Error ${response.status}:`, describeRefusalBody(data));
         }
         shadowTap.emit('n8n_workflow_failed', shadowSession, shadowAgent,
           { endpoint, method, viaGateway: shadowViaGateway, status: response.status, body: body ?? {}, response: data ?? {} },
           { sensitive: true, component: 'ticketingApiClient' });
         shadowReported = true;
-        throw new Error(data.error || `HTTP ${response.status} error`);
+        // Carry the status out with the message. Callers that need to tell a
+        // refusal from an outage read it; everything else still sees an Error
+        // with the same text it always had.
+        // `data?.error`, not `data.error` — found by Codex on PR #244. A 4xx whose
+        // body is the valid JSON literal `null` parses fine and then throws a
+        // TypeError HERE, before the status is attached. That throw lands in the
+        // network catch below, gets rewrapped as an outage, and the refusal is
+        // queued to the outbox and reported to the caller as recorded. The
+        // optional form is already used two lines above, in the 404 check.
+        const httpError = new Error(data?.error || `HTTP ${response.status} error`) as Error & {
+          statusCode?: number;
+        };
+        httpError.statusCode = response.status;
+        throw httpError;
       }
 
       shadowTap.emit('n8n_workflow_completed', shadowSession, shadowAgent,
@@ -539,6 +724,22 @@ export class TicketingApiClient {
           { sensitive: true, component: 'ticketingApiClient' });
       }
       
+      /**
+       * A response-derived error passes through untouched.
+       *
+       * This catch wraps the whole try — the fetch AND the response handling —
+       * so the two throws above land here too. The rewraps below are for
+       * errors that never received a response, and either of them would strip
+       * the `statusCode` that `createTicketDurable` uses to tell a refusal
+       * from an outage. The `.includes('fetch')` test is the live hazard: the
+       * message can be the far side's own error text, and a refusal whose text
+       * happened to contain that word would be rewrapped as "unreachable" and
+       * queued as a transport failure.
+       */
+      if ((networkError as { statusCode?: number } | null)?.statusCode !== undefined) {
+        throw networkError;
+      }
+
       if (networkError instanceof Error && networkError.name === 'AbortError') {
         console.error(`[TICKETING API] ✗ Request aborted (timeout): ${endpoint}`);
         throw new Error(`Ticketing API timeout after ${timeoutMs}ms - please try again`);
@@ -583,7 +784,10 @@ export class TicketingApiClient {
       priority: params.priority || "medium",
       preferredContactMethod: params.preferredContactMethod,
       lastProviderSeen: params.lastProviderSeen,
-      locationOfLastVisit: params.locationOfLastVisit,
+      // Never the office itself: on optical it can come from the patient's
+      // own record (v116), and beside the call SID it is that patient's
+      // office. Presence only (#371, Codex thread PRRT_kwDORVukLs6vtp3I).
+      locationOfLastVisit: params.locationOfLastVisit ? '(set)' : '(none)',
       hasCallData: !!params.callData,
       callSid: params.callData?.callSid,
       hasRecording: !!params.callData?.recordingUrl,
@@ -613,6 +817,11 @@ export class TicketingApiClient {
       console.info(
         `[TICKETING API] ✓ Ticket created: ${response.ticketNumber} (ID: ${response.ticketId})`
       );
+
+      // The filing alarm's positive signal, recorded HERE rather than waiting
+      // on the fire-and-forget call_logs write-back below — see
+      // ticketFilingPulse.ts for the 2026-09-03 false alarm this closes.
+      noteTicketFiled();
 
       /**
        * WRITE THE TICKET NUMBER BACK TO THE CALL LOG — found 2026-08-13, and
@@ -644,14 +853,15 @@ export class TicketingApiClient {
         console.info(`[TICKETING API] Lookup results:`, {
           providerSearched: response.providerSearched,
           providerMatched: response.providerMatched,
-          locationSearched: response.locationSearched,
+          // The app echoes the office name it searched for; presence only (v116).
+          locationSearched: response.locationSearched ? '(set)' : '(none)',
           locationMatched: response.locationMatched,
         });
       }
       
       // Log any lookup warnings for staff awareness
       if (response.lookupWarnings && response.lookupWarnings.length > 0) {
-        console.warn(`[TICKETING API] ⚠️  Lookup warnings for ${response.ticketNumber}:`, response.lookupWarnings);
+        console.warn(`[TICKETING API] ⚠️  ${response.lookupWarnings.length} lookup warning(s) for ${response.ticketNumber} (text withheld — it can name the patient's office)`);
       }
       
       if (response.usedFallbackReason) {
@@ -660,10 +870,11 @@ export class TicketingApiClient {
 
       return response;
     } catch (error) {
-      console.error("[TICKETING API] ✗ Failed to create ticket:", error);
+      console.error("[TICKETING API] ✗ Failed to create ticket:", describeFailure(error));
       return {
         success: false,
         error: error instanceof Error ? error.message : String(error),
+        statusCode: (error as { statusCode?: number } | null)?.statusCode,
       };
     }
   }
@@ -766,6 +977,7 @@ export class TicketingApiClient {
     console.log(
       `[TICKETING API] location-queue ticket ${r.ok ? `created${refiled ? ' (re-filed)' : ''}` : `FAILED ${r.status}`}: ${text.slice(0, 200)}`,
     );
+    if (r.ok) noteTicketFiled();
     return { ok: r.ok, status: r.status, text, ticketNumber, refiled };
   }
 
@@ -781,7 +993,7 @@ export class TicketingApiClient {
       hasEmail: !!params.patientEmail,
       preferredContact: params.preferredContactMethod,
       lastProvider: params.lastProviderSeen,
-      lastLocation: params.locationOfLastVisit,
+      lastLocation: params.locationOfLastVisit ? '(set)' : '(none)',
       hasCallData: !!params.callData,
       callSid: params.callData?.callSid,
       idempotencyKey: params.idempotencyKey,
@@ -809,6 +1021,7 @@ export class TicketingApiClient {
         console.info(
           `[TICKETING API] ✓ Ticket submitted: ${response.ticketNumber} (ID: ${response.ticketId})`
         );
+        noteTicketFiled();
 
         // Log lookup results for visibility
         console.info(`[TICKETING API] Lookup results:`, {
@@ -818,7 +1031,7 @@ export class TicketingApiClient {
         
         // Log any lookup warnings for staff awareness
         if (response.lookupWarnings && response.lookupWarnings.length > 0) {
-          console.warn(`[TICKETING API] ⚠️  Lookup warnings for ${response.ticketNumber}:`, response.lookupWarnings);
+          console.warn(`[TICKETING API] ⚠️  ${response.lookupWarnings.length} lookup warning(s) for ${response.ticketNumber} (text withheld — it can name the patient's office)`);
         }
         
         if (response.usedFallbackReason) {
@@ -827,14 +1040,14 @@ export class TicketingApiClient {
       } else {
         console.error(`[TICKETING API] ✗ Ticket submission failed:`, {
           errorCode: response.errorCode,
-          error: response.error,
+          hasError: Boolean(response.error),
           missingFields: response.missingFields,
         });
       }
 
       return response;
     } catch (error) {
-      console.error("[TICKETING API] ✗ Failed to submit ticket:", error);
+      console.error("[TICKETING API] ✗ Failed to submit ticket:", describeFailure(error));
       return {
         success: false,
         errorCode: 'request_failed',
@@ -918,6 +1131,32 @@ export class TicketingApiClient {
   }
 
   /** PCP uses a caller-first contract and always bypasses the n8n/patient path. */
+  /**
+   * RE-SEND THE SIGNING LINK for the records request this call already filed —
+   * the caller says the text did not arrive, or wants it by email instead.
+   * The first send rides inside `createTicket` (`formChannel`); this is the
+   * second chance. The app re-mints (the earlier link stops working) and never
+   * returns the URL. Never throws: a failed re-send is a sentence to the
+   * caller, not a fault.
+   */
+  async sendRecordsIntakeLink(params: {
+    callSid?: string;
+    ticketNumber?: string;
+    channel: 'sms' | 'email';
+    email?: string;
+  }): Promise<{ success: boolean; error?: string; statusCode?: number; channel?: string; expiresAt?: string; ticketNumber?: string }> {
+    try {
+      const response = await this.makeRequest<{
+        success: boolean; error?: string; channel?: string; expiresAt?: string; ticketNumber?: string;
+      }>('/api/voice-agent/records-intake-link', 'POST', params, 15_000);
+      return response;
+    } catch (err) {
+      const e = err as Error & { statusCode?: number };
+      console.warn(`[TICKETING API] records intake link re-send failed: ${e.message}`);
+      return { success: false, error: e.message, ...(e.statusCode ? { statusCode: e.statusCode } : {}) };
+    }
+  }
+
   async createPcpTicket(params: PcpTicketPayload): Promise<PcpTicketResponse> {
     try {
       const response = await this.makeRequest<PcpTicketResponse>(
@@ -948,6 +1187,8 @@ export class TicketingApiClient {
        * first number rather than flapping, and wrapped so a telemetry failure
        * can never fail a ticket that was actually filed.
        */
+      if (response?.success && response.ticketNumber) noteTicketFiled();
+
       if (response?.success && response.ticketNumber && params.callSid) {
         try {
           const { storage } = await import('../storage');
@@ -967,18 +1208,37 @@ export class TicketingApiClient {
   }
 
   /**
+   * Ask the ticketing app to withdraw this call's PCP tickets that name no
+   * patient — the caller hung up, or the PCP queue answered (operator,
+   * 2026-10-19). The app decides which tickets go from its own rows; this only
+   * says the call ended that way. Never throws.
+   */
+  async withdrawPcpTickets(params: PcpWithdrawRequest): Promise<PcpWithdrawResponse> {
+    try {
+      return await this.makeRequest<PcpWithdrawResponse>('/api/voice-agent/pcp-ticket/withdraw', 'POST', params, 10_000, true);
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'pcp_withdraw_request_failed' };
+    }
+  }
+
+  /**
    * Look up provider and location IDs by name from the external ticketing system.
    * This ensures we use IDs that exist in the external database, preventing FK violations.
    */
   async lookupProviderAndLocation(params: LookupParams): Promise<LookupResponse> {
-    // Skip lookup if neither provider nor location specified
+    // Skip lookup if neither provider nor location specified. Nothing was
+    // asked, so nothing was found — but the service was never in question,
+    // which is what 'no_match' says and 'unavailable' would not.
     if (!params.providerName && !params.locationName) {
-      return { success: true };
+      return { success: true, outcome: 'no_match' };
     }
 
+    // The office name is not logged, only whether one was asked: optical sends
+    // the office on the PATIENT'S RECORD here (v116), and a line naming it,
+    // printed beside the call's own lines, says where that patient is seen.
     console.info("[TICKETING API] Looking up provider/location:", {
       providerName: params.providerName || '(none)',
-      locationName: params.locationName || '(none)',
+      locationName: params.locationName ? '(set)' : '(none)',
     });
 
     try {
@@ -997,16 +1257,58 @@ export class TicketingApiClient {
         locationMatches: response.locationMatches?.length || 0,
       });
 
-      return response;
+      /**
+       * A body that says `success:false` is the far side declining to answer,
+       * not a considered "no such name" — so it is 'unavailable' too. That
+       * keeps the equivalence `outcome === 'unavailable'` <-> `success ===
+       * false` exact, which is what lets `lookupWasUnavailable()` fall back
+       * safely on a response that predates this field.
+       */
+      const outcome: LookupOutcome =
+        response.success === false
+          ? 'unavailable'
+          : response.providerId || response.locationId
+            ? 'matched'
+            : 'no_match';
+
+      return { ...response, outcome };
     } catch (error) {
-      console.warn("[TICKETING API] ⚠️ Lookup failed, will create ticket without IDs:", error);
-      // Don't fail ticket creation if lookup fails - just proceed without IDs
+      // describeFailure, not the Error: a non-2xx body is the app's text and
+      // can name the office on the patient's record (v116).
+      console.warn("[TICKETING API] ⚠️ Lookup failed, will create ticket without IDs:", describeFailure(error));
+      // Don't fail ticket creation if lookup fails — but SAY SO, in a way the
+      // caller cannot mistake for a name that matched nobody. Proceeding
+      // without ids is right; telling the patient their office does not exist
+      // is what cost 43 calls on 2026-08-31.
+      const statusCode = (error as { statusCode?: number } | null)?.statusCode;
       return {
         success: false,
+        outcome: 'unavailable',
         error: error instanceof Error ? error.message : String(error),
+        ...(statusCode !== undefined ? { statusCode } : {}),
       };
     }
   }
+}
+
+/**
+ * THE ONE QUESTION EVERY CALLER OF THE LOOKUP HAS TO ASK.
+ *
+ * "Did the lookup actually run?" — because the answer decides whether the
+ * caller's own words may be questioned back at them. Use this rather than
+ * reading `outcome` or `success` directly, so the decision is made the same
+ * way in all four queues.
+ *
+ * The `success === false` fallback covers responses built before `outcome`
+ * existed (fixtures, recorded payloads, anything not minted by
+ * `lookupProviderAndLocation`). The two are equivalent by construction above.
+ */
+export function lookupWasUnavailable(
+  result: { outcome?: LookupOutcome; success?: boolean } | null | undefined,
+): boolean {
+  if (!result) return true;
+  if (result.outcome) return result.outcome === 'unavailable';
+  return result.success === false;
 }
 
 export const ticketingApiClient = new TicketingApiClient();

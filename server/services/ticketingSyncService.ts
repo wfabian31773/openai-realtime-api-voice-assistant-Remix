@@ -78,6 +78,7 @@ export class TicketingSyncService {
           from: callLogs.from,
           to: callLogs.to,
           agentId: callLogs.agentId,
+          agentUsed: callLogs.agentUsed,
           direction: callLogs.direction,
           status: callLogs.status,
           startTime: callLogs.startTime,
@@ -175,7 +176,26 @@ export class TicketingSyncService {
         transcript: call.transcript || undefined,
         callerPhone: call.from,
         dialedNumber: sanitizedDialedNumber,
-        agentUsed: call.agentId || "unknown",
+        /**
+         * THE LANE SLUG, NEVER THE AGENTS-TABLE UUID — AND NEVER "unknown".
+         *
+         * This read `call.agentId || "unknown"` and the ticketing app writes
+         * whatever arrives here straight onto `tickets.agent_used`
+         * (update-call-data, `if (payload.agentUsed) updateData.agentUsed`).
+         * So every ticket the sync touched was re-stamped with the uuid the
+         * runtime resolves for `call_logs.agent_id`, or with the literal
+         * "unknown" where a row had none. Measured 2026-09-27: 126 of 307
+         * agent-filed Medical Records tickets in 09-08..09-25 carry a uuid
+         * (pcp 99, records 10, tech 10, surgery 6, optical 1), and CLAUDE.md
+         * already records 91 rows reading "unknown" on 2026-09-03 — the same
+         * line, the other branch. The ticket is CREATED with the slug by every
+         * filing tool; this was the only writer turning it into something no
+         * report can group by.
+         *
+         * Omitted rather than defaulted: the app skips a falsy value and keeps
+         * what the filing wrote, which is always better than a sentinel.
+         */
+        agentUsed: call.agentUsed || undefined,
         callStartTime: call.startTime?.toISOString(),
         callEndTime: call.endTime?.toISOString(),
         callDurationSeconds: call.duration || 0,
@@ -188,7 +208,32 @@ export class TicketingSyncService {
       const response = await ticketingApiClient.updateTicketCallData(payload);
 
       if (response.success) {
-        await db
+        /**
+         * MARKED DONE ONLY IF THE ROW STILL HOLDS THE RECORDING THIS PAYLOAD
+         * CARRIED (Codex P2, #321 round 11). A recording can land on the row
+         * between this batch being selected and this write — the callback
+         * saves the URL, pushes it directly, and if THAT push fails it reads
+         * a pre-push snapshot that still says the sync is coming. It was:
+         * with a payload snapshotted before the URL existed. Marking the row
+         * done here would have sent the URL from neither side, for good.
+         * So the mark is conditional on the row's `recording_url` being what
+         * was sent (both null, or the same string); a URL that landed
+         * mid-flight makes this match zero rows, the row stays pending with
+         * its retry count untouched, and the next pass carries it. Typed
+         * explicitly — the v52 lesson: a bare parameter beside NULL has no
+         * type for Postgres to infer, and the statement was PREPAREd against
+         * the live Hub with these casts before it shipped.
+         *
+         * AND THE GRADE, THE SAME WAY (Codex P2, round 12): qualityScore,
+         * sentiment and agentOutcome land on the row from the teardown
+         * grader seconds to minutes after the call, and a sweep that
+         * snapshotted the row first sent nulls. Three quarters of
+         * agent-filed tickets carried no grade while their rows did
+         * (291 of 383 on 2026-09-14). A grade that landed mid-flight makes
+         * this match zero rows too; the grade's own write re-opens the sync
+         * for the row a sweep had already finished.
+         */
+        const marked = await db
           .update(callLogs)
           .set({
             ticketingSynced: true,
@@ -199,7 +244,26 @@ export class TicketingSyncService {
             ticketNumber: response.ticketNumber || call.ticketNumber,
             ticketingSyncRetries: currentRetries + 1,
           })
-          .where(eq(callLogs.id, call.id));
+          .where(
+            and(
+              eq(callLogs.id, call.id),
+              sql`${callLogs.recordingUrl} IS NOT DISTINCT FROM ${call.recordingUrl ?? null}::text`,
+              sql`${callLogs.qualityScore} IS NOT DISTINCT FROM ${call.qualityScore ?? null}::integer`,
+              sql`${callLogs.agentOutcome}::text IS NOT DISTINCT FROM ${call.agentOutcome ?? null}::text`,
+              sql`${callLogs.sentiment}::text IS NOT DISTINCT FROM ${call.sentiment ?? null}::text`,
+            ),
+          )
+          .returning({ id: callLogs.id });
+
+        if (marked.length === 0) {
+          console.warn(`[TICKETING SYNC] ○ a recording or a grade landed on call ${identifier} while this pass was in flight — the payload did not carry it, so the call is left pending for the next pass`);
+          return {
+            callId: call.id,
+            callSid: call.callSid,
+            ticketNumber: response.ticketNumber || call.ticketNumber,
+            success: true,
+          };
+        }
 
         console.log(`[TICKETING SYNC] ✓ Successfully synced call ${identifier}`);
         
@@ -257,18 +321,29 @@ export class TicketingSyncService {
           };
         }
 
-        const newRetryCount = currentRetries + 1;
-        const retriesExhausted = newRetryCount >= MAX_RETRIES;
-
-        await db
+        const gaveUp = `GAVE UP after ${MAX_RETRIES} attempts: ${errorMsg}`;
+        const [written] = await db
           .update(callLogs)
           .set({
-            ticketingSyncError: retriesExhausted
-              ? `GAVE UP after ${MAX_RETRIES} attempts: ${errorMsg}`
-              : errorMsg,
-            ticketingSyncRetries: newRetryCount,
+            // The error text follows the count ACTUALLY WRITTEN (Codex P2, round
+            // 16 on #321): decided in the same statement, against the same
+            // pre-update value — Postgres evaluates every SET against the old
+            // row — so a reset that lands mid-pass cannot leave a row at 1
+            // wearing "GAVE UP". PREPAREd on the live Hub before it shipped.
+            ticketingSyncError: sql`CASE WHEN COALESCE(${callLogs.ticketingSyncRetries}, 0) + 1 >= ${MAX_RETRIES}::integer THEN ${gaveUp} ELSE ${errorMsg} END`,
+            // ATOMIC, not the snapshot (Codex P2, round 15 on #321): the grade
+            // and recording writers reset this column to 0 to re-open the sync,
+            // and a stale `currentRetries + 1` written after that reset put a
+            // row at 3 — ineligible — with the new data never sent. Incremented
+            // in the database, a reset that lands mid-pass leaves the row at 1.
+            ticketingSyncRetries: sql`COALESCE(${callLogs.ticketingSyncRetries}, 0) + 1`,
           })
-          .where(eq(callLogs.id, call.id));
+          .where(eq(callLogs.id, call.id))
+          .returning({ retries: callLogs.ticketingSyncRetries });
+        // Exhaustion is a fact about the row, read back from the write — never
+        // from the snapshot this pass started with (round 16).
+        const newRetryCount = written?.retries ?? currentRetries + 1;
+        const retriesExhausted = newRetryCount >= MAX_RETRIES;
 
         if (retriesExhausted) {
           console.warn(`[TICKETING SYNC] ✗ Gave up on call ${identifier} after ${MAX_RETRIES} attempts: ${errorMsg}`);
@@ -287,18 +362,19 @@ export class TicketingSyncService {
       }
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error);
-      const newRetryCount = currentRetries + 1;
-      const retriesExhausted = newRetryCount >= MAX_RETRIES;
-      
-      await db
+      const gaveUp = `GAVE UP after ${MAX_RETRIES} attempts: ${errorMsg}`;
+      const [written] = await db
         .update(callLogs)
         .set({
-          ticketingSyncError: retriesExhausted 
-            ? `GAVE UP after ${MAX_RETRIES} attempts: ${errorMsg}`
-            : errorMsg,
-          ticketingSyncRetries: newRetryCount,
+          // Text and count decided together, as in the failure branch above.
+          ticketingSyncError: sql`CASE WHEN COALESCE(${callLogs.ticketingSyncRetries}, 0) + 1 >= ${MAX_RETRIES}::integer THEN ${gaveUp} ELSE ${errorMsg} END`,
+          // Atomic for the same reason as the failure branch above.
+          ticketingSyncRetries: sql`COALESCE(${callLogs.ticketingSyncRetries}, 0) + 1`,
         })
-        .where(eq(callLogs.id, call.id));
+        .where(eq(callLogs.id, call.id))
+        .returning({ retries: callLogs.ticketingSyncRetries });
+      const newRetryCount = written?.retries ?? currentRetries + 1;
+      const retriesExhausted = newRetryCount >= MAX_RETRIES;
 
       if (retriesExhausted) {
         console.warn(`[TICKETING SYNC] ✗ Gave up on call ${identifier} after ${MAX_RETRIES} attempts: ${errorMsg}`);

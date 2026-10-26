@@ -2,6 +2,7 @@
 // Reference: blueprint:javascript_database and blueprint:javascript_log_in_with_replit
 
 import { withRetry } from './services/dbResilience';
+import { buildPreservedCostSet } from './preservedCostSet';
 import {
   users,
   agents,
@@ -52,6 +53,8 @@ import {
 } from "../shared/schema";
 import { db } from "./db";
 import { eq, asc, desc, and, or, count, gte, lte, lt, inArray, isNull, isNotNull, ilike, sql } from "drizzle-orm";
+import { randomUUID } from "node:crypto";
+import { stampBuildIdentity, oldCoreBuildIdentity } from "../src/runtime/buildIdentity";
 
 export interface IStorage {
   // User operations (required for Replit Auth)
@@ -82,6 +85,11 @@ export interface IStorage {
   // Call logs
   createCallLog(callLog: InsertCallLog): Promise<CallLog>;
   updateCallLog(id: string, updates: Partial<InsertCallLog>): Promise<CallLog>;
+  /** Same, but a reconciled provider cost is never overwritten — see the impl. */
+  updateCallLogPreservingReconciledCost(
+    id: string,
+    updates: Partial<InsertCallLog>,
+  ): Promise<CallLog>;
   getCallLogs(options?: {
     page?: number;
     limit?: number;
@@ -124,6 +132,46 @@ export interface IStorage {
     recentCalls: CallLog[];
     recentCallbacks: CallbackQueueItem[];
   }>;
+}
+
+/**
+ * A grading claim that has not turned into a grade within this long is
+ * abandoned — the process died between the claim and the persisted grade —
+ * and may be taken again (Codex P2, #321 round 8). The grade itself takes
+ * seconds; ten minutes cannot double-grade a live one.
+ */
+export const GRADING_CLAIM_LEASE_MS = 10 * 60 * 1000;
+/**
+ * What a claim writes into quality_analysis; overwritten by a real grade.
+ * THE TOKEN IS THE CLAIM'S OWNER (Codex P2, #321 round 9): the lease says
+ * when a claim may be taken over, and nothing about the lease can stop the
+ * worker that lost it from finishing — so a completion and a release must
+ * both carry the token that took the claim, and a worker whose lease expired
+ * can neither write its grade over its successor's nor release its
+ * successor's claim. See ownsGradingClaim.
+ */
+export function gradingClaimMarker(token: string) {
+  return { grading: 'claimed', token } as const;
+}
+
+/**
+ * Ungraded, OR claimed before `staleBefore` and never graded. The second arm
+ * reads the claim marker, not the timestamp alone: a dead-letter stamp and a
+ * short-transcript skip also set graded_at with no grade, and reclaiming
+ * those would re-spend on them every lease.
+ */
+export function gradingClaimable(staleBefore: Date) {
+  return or(
+    isNull(callLogs.gradedAt),
+    and(lt(callLogs.gradedAt, staleBefore), sql`${callLogs.qualityAnalysis}->>'grading' = 'claimed'`),
+  );
+}
+
+/** The row still carries THIS claim — the fence every completion and every
+ * release of a claimed grade goes through. A completed grade overwrites the
+ * marker (token included), so a stale owner's token matches nothing. */
+function ownsGradingClaim(id: string, token: string) {
+  return and(eq(callLogs.id, id), sql`${callLogs.qualityAnalysis}->>'token' = ${token}`);
 }
 
 export class DatabaseStorage implements IStorage {
@@ -385,6 +433,10 @@ export class DatabaseStorage implements IStorage {
   async createCallLog(callLogData: InsertCallLog): Promise<CallLog> {
     return await withRetry(async () => {
       const [callLog] = await db.insert(callLogs).values(callLogData).returning();
+      // Which software handled the call (Stage C, A6): every row this path
+      // opens is the old SIP core's. Fired, never awaited; fills NULLs only,
+      // and writes nothing until the migration's columns exist.
+      if (callLog?.callSid) void stampBuildIdentity(callLog.callSid, oldCoreBuildIdentity());
       return callLog;
     }, `createCallLog(${callLogData.callSid?.slice(-8) || 'new'})`);
   }
@@ -398,6 +450,52 @@ export class DatabaseStorage implements IStorage {
         .returning();
       return callLog;
     }, `updateCallLog(${id.slice(-8)})`);
+  }
+
+  /**
+   * Update a call log WITHOUT ever overwriting a reconciled provider cost.
+   *
+   * The in-memory `costReconciledAt` guard in `priceVoiceCall` is a snapshot
+   * taken at read time, and the Twilio fetch that sits between the read and
+   * the write is slow enough to make the race real: reconciliation can commit
+   * in that window, and the caller then writes a duration ESTIMATE over
+   * xAI's own number while `cost_reconciled_at` stays populated — a wrong
+   * figure wearing the badge of an authoritative one (Codex, PR #268 round 8;
+   * round 2 fixed the guard, this fixes the window around it).
+   *
+   * So the decision is made by the database, at write time, in the same
+   * statement. A row reconciled a millisecond ago keeps its cost, its total
+   * is still rebuilt from that cost plus whatever Twilio price is being
+   * written, and `cost_is_estimated` stays false because it is not an
+   * estimate.
+   *
+   * Every other column is written normally — this only defends the three
+   * cost fields, and only when they are actually part of the update.
+   */
+  async updateCallLogPreservingReconciledCost(
+    id: string,
+    updates: Partial<InsertCallLog>,
+  ): Promise<CallLog> {
+    /**
+     * The clause itself lives in server/preservedCostSet.ts, where drizzle can
+     * render it offline and a test can assert the SQL that actually goes to
+     * the database rather than the shape of the code that builds it.
+     */
+    const built = buildPreservedCostSet(updates as Record<string, unknown>);
+    if (!built.touchesCost) return this.updateCallLog(id, updates);
+    if (built.rejectedTwilio) {
+      console.warn(
+        `[COST] refused an invalid twilioCostCents on ${id.slice(-8)} — the stored price stands`,
+      );
+    }
+    return await withRetry(async () => {
+      const [callLog] = await db
+        .update(callLogs)
+        .set(built.set as Partial<InsertCallLog>)
+        .where(eq(callLogs.id, id))
+        .returning();
+      return callLog;
+    }, `updateCallLogPreservingReconciledCost(${id.slice(-8)})`);
   }
 
   async getCallLogBySid(callSid: string): Promise<CallLog | undefined> {
@@ -621,13 +719,17 @@ export class DatabaseStorage implements IStorage {
     }, `getCallLogByCallSid(${callSid.slice(-8)})`);
   }
 
-  async getCallLogsWithoutGrades(limit: number = 10): Promise<CallLog[]> {
+  async getCallLogsWithoutGrades(limit: number = 10, leaseMs: number = GRADING_CLAIM_LEASE_MS): Promise<CallLog[]> {
     return await db
       .select()
       .from(callLogs)
       .where(
         and(
-          isNull(callLogs.gradedAt),
+          // Ungraded — or claimed for grading longer ago than the lease and
+          // never graded (Codex P2, #321 round 8): a process that died
+          // between the claim and the persisted grade must not leave the
+          // row claimed forever. See gradingClaimable.
+          gradingClaimable(new Date(Date.now() - leaseMs)),
           isNotNull(callLogs.transcript),
           eq(callLogs.status, 'completed')
         )
@@ -643,6 +745,57 @@ export class DatabaseStorage implements IStorage {
    *  that had no loop dimension. This selects graded rows whose
    *  graderVersion predates the current one so the 5-minute sweep can
    *  re-run the (cheap, deterministic) graders against them. */
+  /**
+   * ATOMICALLY CLAIM A CALL FOR GRADING (Codex P2, #321 round 7). `gradedAt`
+   * was stamped only AFTER the LLM answered, so for the seconds between a
+   * completed row landing and its grade landing, the teardown grader and the
+   * five-minute backfill could both select it and both pay for a grade. The
+   * claim is the stamp itself, taken before the LLM is asked, and only where
+   * nobody has taken it: one row back means this caller grades, none means
+   * somebody else already is (or did). Released by the grader on failure.
+   */
+  async claimCallLogForGrading(id: string, leaseMs: number = GRADING_CLAIM_LEASE_MS): Promise<string | null> {
+    const token = randomUUID();
+    const rows = await db
+      .update(callLogs)
+      // THE CLAIM CARRIES A MARKER (round 8): `gradedAt` alone cannot tell a
+      // claim from a completed grade or a dead-letter stamp. A completed
+      // grade overwrites quality_analysis with the analysis; a release nulls
+      // it; the dead-letter and short-transcript stamps never write it. So
+      // only a row that still reads `claimed` past the lease is reclaimable.
+      // AND AN OWNER (round 9): the token the caller must present to finish
+      // or release what it claimed.
+      .set({ gradedAt: new Date(), qualityAnalysis: gradingClaimMarker(token) })
+      .where(and(eq(callLogs.id, id), gradingClaimable(new Date(Date.now() - leaseMs))))
+      .returning({ id: callLogs.id });
+    return rows.length === 1 ? token : null;
+  }
+
+  /** Write the grade ONLY if the row still carries this claim. False means
+   * another worker took the claim over (the lease expired while this one
+   * waited on the API) and this grade must be discarded, not written over
+   * the successor's. */
+  async completeGradingClaim(id: string, token: string, updates: Partial<InsertCallLog>): Promise<boolean> {
+    const rows = await db
+      .update(callLogs)
+      .set(updates)
+      .where(ownsGradingClaim(id, token))
+      .returning({ id: callLogs.id });
+    return rows.length === 1;
+  }
+
+  /** Give a claim back to the queue — but only THIS claim: a stale owner's
+   * late failure must not null out the claim, or the grade, of whoever took
+   * the row over. */
+  async releaseGradingClaim(id: string, token: string): Promise<boolean> {
+    const rows = await db
+      .update(callLogs)
+      .set({ gradedAt: null, qualityAnalysis: null })
+      .where(ownsGradingClaim(id, token))
+      .returning({ id: callLogs.id });
+    return rows.length === 1;
+  }
+
   async getCallLogsWithStaleGraderVersion(currentVersion: number, limit: number = 25): Promise<CallLog[]> {
     return await db
       .select()
@@ -1062,6 +1215,33 @@ export class DatabaseStorage implements IStorage {
         lte(callLogs.createdAt, endOfDay)
       ));
     
+    return Number(result[0]?.totalCents) || 0;
+  }
+
+  /**
+   * The day's per-call cost total for calls OpenAI actually billed.
+   *
+   * `getEstimatedOpenaiCostForDate` above sums every call's voice-AI cost —
+   * the right number for a budget guard or a spend dashboard, where a Grok
+   * call's charge is still money spent. This one exists for the OTHER
+   * meaning: anywhere the sum is compared against OpenAI's own Usage API or
+   * billing CSV, a Grok-served call's xAI charge must not be counted, or the
+   * comparison reports a phantom discrepancy against OpenAI on exactly the
+   * days the migration is being judged (Codex, PR #227 round 11).
+   */
+  async getOpenaiBilledEstimateForDate(date: string): Promise<number> {
+    const startOfDay = new Date(date + 'T00:00:00Z');
+    const endOfDay = new Date(date + 'T23:59:59.999Z');
+
+    const result = await db
+      .select({ totalCents: sql`COALESCE(SUM(openai_cost_cents), 0)` })
+      .from(callLogs)
+      .where(and(
+        gte(callLogs.createdAt, startOfDay),
+        lte(callLogs.createdAt, endOfDay),
+        sql`(voice_provider IS DISTINCT FROM 'grok')`
+      ));
+
     return Number(result[0]?.totalCents) || 0;
   }
 

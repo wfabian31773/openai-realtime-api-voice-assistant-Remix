@@ -26,8 +26,16 @@
  * resolve_location, check_open_tickets — come from `sharedPatientTools`, one
  * definition each, made queue-aware rather than forked.
  */
-import { registerTool, missing, type ToolResult } from './registry';
+import { registerTool, missing, refuseDob, dobRefusalCopy, type ToolResult } from './registry';
 import { str, isTwilioCallSid, normalizePhone } from './sharedPatientTools';
+import { createTicketDurable, postFailureToolResult } from '../services/durableTicketFiling';
+import { loggableLookupError } from '../services/loggableTicketingError';
+import { gateRefusalsSoFar, noteGateRefusal } from './gateAttempts';
+import { decideDobEscape, dobStatusNote, dobEscapeMarker, type DobStatus } from './dobEscape';
+import { verifiedDobFor } from './verifiedIdentity';
+
+/** This tool's own name, for the per-call gate counter. */
+const SURGERY_FILE_TOOL = 'file_surgery_ticket';
 
 // ---------------------------------------------------------------- what kind
 
@@ -72,9 +80,14 @@ registerTool({
       request_reason: classification.requestReason,
       request_reason_id: classification.requestReasonId,
       ...(isLogistics ? { logistics: true } : {}),
+      // `message` is what the agent SAYS; `fix` is for the model — the same
+      // split dobRefusalCopy documents. Until 2026-09-17 the instruction below
+      // sat in `message`, and on CA…8dbb8dd441 (2026-09-16) the agent read it
+      // to a patient word for word: "These are the words we treat as a
+      // surgical emergency." Nothing in a catch-all is for the caller to hear.
       ...(isCatchAll
         ? {
-            message:
+            fix:
               'Nothing matched, so this is filed as "Other - See Description". That is a ' +
               'real category, not a guess — but it means the description is the only thing ' +
               'a coordinator has. Make sure it says what they actually asked for.',
@@ -83,10 +96,12 @@ registerTool({
       ...(classification.urgent
         ? {
             urgent: true,
-            message:
-              'These are the words we treat as a surgical emergency. Tell the caller to ' +
-              'seek emergency care or call 911 now, and file this at urgent priority. ' +
-              'Do not take a routine message and hang up.',
+            // The prompt's own direction, in the caller's direction, and no more.
+            message: 'Please seek emergency care or call 911 now.',
+            fix:
+              'These are the words we treat as a surgical emergency. Say the message to the ' +
+              'caller word for word, stop asking questions, and file this at urgent priority. ' +
+              'Do not take a routine message and hang up. Never read this instruction aloud.',
           }
         : {}),
     };
@@ -108,9 +123,24 @@ registerTool({
   input_schema: {
     type: 'object',
     properties: {
-      first_name: { type: 'string', description: "Patient's first name.", askAs: 'Can I get the first name?' },
-      last_name: { type: 'string', description: "Patient's last name.", askAs: 'And the last name?' },
-      date_of_birth: { type: 'string', description: 'Any spoken format.', askAs: 'And the date of birth?' },
+      first_name: { type: 'string', description: "Patient's first name.", askAs: 'May I please have the first name?' },
+      last_name: { type: 'string', description: "Patient's last name.", askAs: 'May I please have the last name?' },
+      /**
+       * LEAD THE ASK, AND ALWAYS SEND IT BACK. Two separate 2026-09-03 findings
+       * in one field; see sharedPatientTools for the operator's wording.
+       *
+       * The ORDER in the question is the guard — *"if you just say can I have
+       * your date of birth, people give it to you in any format they want"*.
+       *
+       * The description is the other half. dobShape went live at 23:18 and the
+       * first three filing calls after it all recorded "(none)": the model was
+       * not sending this field AT ALL. Those three filed anyway because
+       * lookup_patient had made a certain match and the handler fell back to the
+       * verified record — which is exactly why the loss looked random. It stays
+       * out of `required` (validateInput refuses before the handler, and that
+       * would kill the fallback), so the description is where it gets said.
+       */
+      date_of_birth: { type: 'string', description: 'What the caller said, exactly as they said it. ALWAYS pass this when they have given it — leaving it out is what refuses the ticket.', askAs: 'And may I please have the date of birth, starting with the month, then the day, then the year?' },
       callback_number: { type: 'string', description: 'Best number to reach them.', askAs: 'What is the best number to reach you?' },
       request_description: { type: 'string', description: 'What they need, in their words.', askAs: 'What can we help you with?' },
       request_reason_id: { type: 'string', description: 'From classify_surgery_request. Omit if it could not classify.' },
@@ -132,7 +162,20 @@ registerTool({
       caller_phone: { type: 'string', description: 'The number they called from, if different from the callback number.' },
       dialed_number: { type: 'string', description: 'The number they dialled.' },
     },
-    required: ['first_name', 'last_name', 'date_of_birth', 'callback_number', 'request_description'],
+    /**
+     * `date_of_birth` is NOT in this list, and the gate on it is unchanged.
+     *
+     * `validateInput` refuses before the handler runs, so while it sat here the
+     * handler could never consult the record `lookup_patient` had already
+     * matched — and the caller was asked for a date of birth the process was
+     * holding. 45 calls in the fourteen days to 2026-09-01 were refused for one
+     * and ended with no ticket; on 23 of them the patient had already been
+     * identified.
+     *
+     * The handler still refuses when it has neither the caller's answer nor a
+     * verified record for that same name, in the same words as before.
+     */
+    required: ['first_name', 'last_name', 'callback_number', 'request_description'],
   },
   handler: async (input): Promise<ToolResult> => {
     const first = str(input.first_name);
@@ -209,11 +252,92 @@ registerTool({
     const cleanLocation = sanitizeLocationName(str(input.location)).value;
     const cleanSurgeon = sanitizeProviderName(str(input.surgeon)).value;
 
-    const { ticketingApiClient } = await import('../../server/services/ticketingApiClient');
+    const { ticketingApiClient, lookupWasUnavailable } = await import(
+      '../../server/services/ticketingApiClient'
+    );
     const { normalizeDobParts } = await import('./dobParts');
-    const parts = normalizeDobParts(dob);
+    let parts = normalizeDobParts(dob);
     if (!parts) {
-      return missing(['date_of_birth'], 'I did not catch that date of birth — month, day and year?');
+      /**
+       * ASK ONCE, NOT TWICE. Operator instruction, 2026-09-01: *"if we do our
+       * job and validate and pass the patient records along, you will not have
+       * this issue."*
+       *
+       * `lookup_patient` found this caller — it does on 95% of queue calls —
+       * and the service returned their date of birth with the match. Nothing
+       * carried it here, so the agent asked for something the process already
+       * held, and 45 calls in fourteen days ended with no ticket because the
+       * caller could not answer. On 23 of those we already knew who they were.
+       *
+       * Only ever for the SAME NAME as the verified match, and only from a
+       * match the lookup was certain about. See verifiedIdentity.ts.
+       */
+      const known = verifiedDobFor(callSid, first, last);
+      parts = known ? normalizeDobParts(known) : null;
+      if (parts) {
+        // No name in the log line: this is the one place a masked identifier
+        // would still be the patient.
+        console.info('[surgery] date of birth taken from the verified record for this call');
+      }
+    }
+    if (!parts) {
+      /**
+       * THE CALLER ALREADY ANSWERED — STOP DEPENDING ON THE MODEL TO RELAY IT.
+       *
+       * 2026-09-08, the queue lanes, one full business day: 75 substantive
+       * calls hit this gate and 53 of them filed nothing. It is the single
+       * biggest cause of a call producing no ticket, and the measurement says
+       * the gate is not where it fails:
+       *
+       *  - On 75 of 75, the model called this tool with NO `date_of_birth`
+       *    argument at all. `dobShape` reads "(none)" on every refusal, across
+       *    surgery, tech and optical.
+       *  - In 51 of the 75, the caller's own transcribed words contain a birth
+       *    year or a month name. They answered the question that was asked.
+       *  - In 42 of the 75 the refusal is the LAST TOOL CALL OF THE CALL, so
+       *    the ask-once-then-file escape below never gets its second attempt.
+       *    It is unreachable in the majority of cases.
+       *
+       * The two sources above both go through the model or the record. This
+       * one does not: it is what the caller said on this call, taken from the
+       * transcript the bridge was already keeping and nothing else could see.
+       *
+       * ONLY FROM THE TURN THAT ANSWERED THE QUESTION. A caller says surgery
+       * dates and appointment dates too, and filing a wrong birthday is worse
+       * than filing none — see spokenDob.ts for the adjacency rule and what it
+       * still cannot catch.
+       */
+      const { spokenDobFor } = await import('./spokenDob');
+      const heard = spokenDobFor(callSid);
+      parts = heard ? normalizeDobParts(heard) : null;
+      if (parts) {
+        // The line names neither the value nor the patient, for the same
+        // reason as the one above it.
+        console.info('[surgery] date of birth taken from what the caller said on this call');
+      }
+    }
+    /**
+     * ASK ONCE, THEN FILE IT ANYWAY. Operator ruling 2026-09-04, and the same
+     * ruling he gave for optical's office on 2026-09-01. The measurement that
+     * settles it: the location gate has this escape and recovered 9 of 11; this
+     * gate did not and recovered 0 of 23. See dobEscape.ts.
+     */
+    let dobStatus: DobStatus | null = null;
+    if (!parts) {
+      const escape = decideDobEscape(callSid, SURGERY_FILE_TOOL, dob);
+      if (escape.askAgain) {
+        /**
+         * The first refusal only, and it carries BOTH channels: `message` is
+         * the coaching line the agent says, `fix` is what the model itself got
+         * wrong. The two branches of `fix` need OPPOSITE corrections — telling
+         * the model "ask the caller again" when it simply omitted the argument
+         * is what built the loop.
+         */
+        const copy = dobRefusalCopy(dob);
+        return refuseDob(callSid, first, last, copy.message, copy.fix);
+      }
+      dobStatus = escape.status;
+      console.info(dobEscapeMarker(SURGERY_FILE_TOOL, dobStatus, callSid));
     }
 
     // Resolve office and surgeon to the ticketing app's numeric ids when we
@@ -256,11 +380,109 @@ registerTool({
     const filedDepartmentId = redirect?.departmentId ?? SURGERY_DEPARTMENT_ID;
     /** Only THIS queue routes by surgeon; a redirect changes what may be filed. */
     const filedOnSurgeryQueue = filedDepartmentId === SURGERY_DEPARTMENT_ID;
+
+    /**
+     * HAS THIS CALL ALREADY BEEN ASKED FOR THE SURGEON?
+     *
+     * Unlike optical, this tool has never had a surgeon gate of its own — it
+     * always files, and the refusal comes from the ticketing app, which
+     * answers 400 "Missing required information: surgeon" and rejects the
+     * whole ticket. `postFailureToolResult` turns that into a question the
+     * agent asks the caller, so the ticketing app's refusal IS this queue's
+     * ask. The counter is therefore written where that refusal is handled,
+     * below, rather than at a local gate that does not exist.
+     *
+     * Read BEFORE this attempt can record anything, so the first pass through
+     * always reads 0.
+     *
+     * ONE PRIOR REFUSAL SINCE 2026-09-30 — and the threshold is the whole design.
+     *
+     * A refusal is not proof the caller was asked. Traced on
+     * CA101be0fe842e77fd83a6024ae06df244 (2026-09-02), whose tool_timeline
+     * shows `file_surgery_ticket` refused at 15:25:24.064 and called AGAIN at
+     * 15:25:25.270 — 1.2 seconds later, with an identical payload. The
+     * question "And which surgeon are you seeing?" is not in that gap; it
+     * comes afterwards. The model spent a retry before it asked anything.
+     *
+     * Timing cannot tell the two apart: over the 14 days to 2026-09-02 the
+     * gap from a refusal to the next attempt has p10 15.2s / median 32.4s
+     * when the caller HAD answered (the surgeon changed), and p10 14.0s /
+     * median 35.3s when nothing changed. The distributions sit on top of
+     * each other, so there is no floor to put a clock at.
+     *
+     * THE THRESHOLD WAS TWO FROM 2026-09-02 TO 2026-09-30, on this measurement
+     * (14 days to 2026-09-02, 196 surgery calls took a surgeon refusal):
+     *
+     *   139 ended with no ticket at all      <- what this exit is for
+     *    38 were rescued ON ATTEMPT 2        <- the ask worked; do not pre-empt it
+     *    19 were rescued on attempt 3+
+     *
+     * Firing at >= 1 would have taken all 139 but fired where those 38
+     * rescues happened; >= 2 took 111 of the 139 and risked 19 rather than 38.
+     *
+     * WHAT >= 2 ACTUALLY DID, measured 2026-09-29 (one business day, surgery,
+     * every call that took a surgeon refusal): 7 calls died holding TWO
+     * refusals — one attempt short of the exit — and the calls that filed
+     * were the ones that made that next attempt. The model asks once, the
+     * caller answers, the second attempt is refused (a name the roster cannot
+     * match, or no name), and the caller is gone before a third. Read by the
+     * event timestamps: 4 of the 7 were SPACED pairs (the second attempt
+     * started 10–23 s after the first refusal, so it read a count of 1) and a
+     * threshold of one files all four on their last attempt; 3 were
+     * CONCURRENT pairs — two identical filing calls in one model response,
+     * the second STARTING before the first refusal returned, both reading 0 —
+     * which no threshold reaches (the v57 shape; CLAUDE.md, THE SURGEON
+     * CLAIM). Of the calls that filed after two spaced refusals, 3 were routed
+     * to a surgeon the roster matched on a third or fourth attempt; at >= 1
+     * those file UNASSIGNED with the caller's spoken surgeon in the
+     * description and a coordinator assigns by hand — which is what happens to
+     * 37 of 55 exit tickets already (ticket_events, 2026-09-17). Four requests
+     * saved against three tickets routed by a person instead of the roster.
+     *
+     * OPERATOR RULING, 2026-09-30: "lower the surgeon exit to the second
+     * refusal." So: ONE prior surgeon refusal on this call, and the next
+     * attempt says the ask is spent. The first refusal is still the ask — the
+     * exit never fires on a call that has not been refused for the surgeon at
+     * all — and a refusal for any OTHER field, an outage, or a sentinel
+     * CallSid still spends nothing (`surgeryUnassignedExit.test.ts`).
+     * Department 2's provider fill is the guard, as it was at >= 2
+     * (docs/BACKEND_HANDOFF.md): tickets carrying `routingAskExhausted`
+     * should rise by about 3 a day, and surgery calls lost on a surgeon
+     * refusal should fall from 7 a day toward the 3 the concurrent pairs
+     * still cost.
+     */
+    const surgeonAskExhausted = gateRefusalsSoFar(callSid, SURGERY_FILE_TOOL, 'surgeon') >= 1;
     const filedTypeId = redirect?.requestTypeId ?? cls.requestTypeId;
     const filedReasonId = redirect?.requestReasonId ?? cls.requestReasonId;
     const filedDescription = redirect
       ? `${redirect.note}\n\n${cleanDescription.value}`
       : cleanDescription.value;
+    /**
+     * THE STATUS GOES FIRST, ABOVE THE CALLER'S OWN WORDS.
+     *
+     * Operator, 2026-09-04: *"where date of birth would be, you just put
+     * unavailable or unmatched, so this way we know what was happening."*
+     * It cannot go in the birth columns — they are varchar(2)/(2)/(4) — so it
+     * goes where staff actually look, and first, because the point is that
+     * nobody matches this to a chart without checking the recording.
+     */
+    /**
+     * THE STATUS DOES NOT GO IN THE DESCRIPTION.
+     *
+     * That field becomes the body of a patient-facing SMS — `opticalTools`
+     * sanitizes it to GSM-7 for exactly that reason, and BACKEND_HANDOFF
+     * section 6 lists "annotating unrouted tickets in description" among the
+     * changes caught in review. Prepending "Confirm identity from the call
+     * recording before matching this to a chart" would have texted the
+     * caller an instruction meant for staff (Codex, PR #268 round 5).
+     *
+     * The operator's ruling — *"where date of birth would be, you just put
+     * unavailable or unmatched, so this way we know what was happening"* —
+     * is about STAFF knowing. `callData` carries it to the ticket's own
+     * call-metadata columns, which no message to the patient reads.
+     */
+    const filedDescriptionWithDobStatus = filedDescription;
+    const dobStaffNote = dobStatus ? dobStatusNote(dobStatus) : undefined;
     if (redirect) {
       console.info(
         `[surgery] routed to ${redirect.departmentName} (dept ${redirect.departmentId}) — ` +
@@ -312,7 +534,17 @@ registerTool({
             ...(cleanLocation ? { locationName: cleanLocation } : {}),
             ...(providerName ? { providerName } : {}),
           })
-        : { locationId: undefined, providerId: undefined, locationMatches: [] };
+        : // Nothing to look up. That is a ran-and-matched-nothing, not an
+          // outage — say so explicitly so `lookupWasUnavailable` cannot read
+          // a bare object as a failure.
+          {
+            success: true,
+            outcome: 'no_match' as const,
+            locationId: undefined,
+            providerId: undefined,
+            locationMatches: [],
+            error: undefined,
+          };
 
     /**
      * THE LADDER RUNS ON A BUDGET, BECAUSE FILING BEATS ROUTING.
@@ -340,7 +572,16 @@ registerTool({
     // Walk the patient's own record only while the ticket is still unrouted,
     // and never on a request being redirected to a queue that does not route
     // by surgeon.
-    if (!lookup.providerId && !redirect && budgetLeft()) {
+    //
+    // AND NEVER WITHOUT A DATE OF BIRTH. The ladder's whole safety argument
+    // below is that it matches on name AND date of birth rather than falling
+    // back to the phone, because the phone matches a spouse, an adult child or
+    // the previous owner of a reassigned mobile — and we would attach THAT
+    // person's surgeon. When the date-of-birth escape has fired there is no
+    // date to match on, so the ladder cannot run safely and does not run at
+    // all. The ticket files unassigned, which is a real exit this queue
+    // already takes 1.5% of the time, not a lost request.
+    if (parts && !lookup.providerId && !redirect && budgetLeft()) {
       try {
         const { scheduleLookupService } = await import('../services/scheduleLookupService');
         /**
@@ -397,12 +638,40 @@ registerTool({
      * `{success:false}` — "don't fail ticket creation if lookup fails". That is
      * the right call for the caller and the wrong one for us: it is why 66
      * unrouted tickets left no trace anywhere except the null column itself.
+     *
+     * AND A LOOKUP THAT NEVER RAN IS NOT A SURGEON WHO DOES NOT EXIST.
+     *
+     * Until 2026-09-01 both states printed this one line, so an n8n outage and
+     * a surgeon we do not hold were indistinguishable in the logs as well as in
+     * the return value — see `LookupOutcome` in ticketingApiClient for what the
+     * 08-31 collapse cost optical. They are two different problems: one is
+     * ours and transient, the other is a fact about the call.
+     *
+     * `lookup` is whatever the ladder finished holding. A rung that resolves a
+     * provider replaces it, so 'unavailable' here means no rung got an answer —
+     * the conservative reading, and the one that errs towards surfacing.
      */
-    if (surgeonName && !lookup.providerId) {
+    const surgeonUnresolved = Boolean(surgeonName) && !lookup.providerId;
+    const lookupUnavailable = lookupWasUnavailable(lookup);
+    if (surgeonUnresolved) {
       console.error(
-        `[surgery] ✗ SURGEON DID NOT RESOLVE — ticket will file unrouted (dept 2 routes by surgeon)`,
+        lookupUnavailable
+          ? // Distinctive on purpose: this string is how an outage is found
+            // afterwards, and it must not collide with the line below.
+            `[surgery] ✗ SURGEON LOOKUP UNAVAILABLE — filing '${surgeonName}' UNROUTED. ` +
+              `Dept 2 routes by surgeon, so this ticket needs manual assignment. ` +
+              `Cause: ${loggableLookupError(lookup)}`
+          : `[surgery] ✗ SURGEON DID NOT RESOLVE — ticket will file unrouted (dept 2 routes by surgeon)`,
       );
     }
+    /**
+     * The outage cost us the routing field on the queue that routes by it —
+     * and only on that queue. A request `detectCrossQueue` sent to Optical or
+     * the HVA Hub deliberately carries no surgeon (see the payload below), so
+     * raising its priority over a surgeon it was never going to have would be
+     * noise in someone else's queue view.
+     */
+    const unroutedByOutage = filedOnSurgeryQueue && surgeonUnresolved && lookupUnavailable;
 
     const urgent = str(input.urgent).toLowerCase() === 'true' || cls?.urgent === true;
 
@@ -422,7 +691,22 @@ registerTool({
      * because the model is the thing that called it routine.
      */
     const postOpSymptom = !urgent && isSurgeryPostOpSymptom(description);
-    const priority = urgent ? 'urgent' : postOpSymptom ? 'high' : 'medium';
+    /**
+     * AND THE THIRD REASON TO RAISE IT: the outage, not the request.
+     *
+     * When the resolve never ran, the caller named their surgeon correctly and
+     * we lost it — so the ticket lands on the queue that routes by surgeon with
+     * nothing to route on, indistinguishable in a queue view from one whose
+     * patient genuinely has no physician on file. Optical raises priority for
+     * exactly this reason and it is the only signal available: there is no
+     * staff-notes field on `CreateTicketParams`, and the description is a
+     * patient-facing SMS body (docs/BACKEND_HANDOFF.md lists annotating it
+     * under changes that made things worse).
+     *
+     * Never above `urgent`, and never for a name the lookup ran and rejected —
+     * a raise that fires on every unresolved surgeon would mean nothing.
+     */
+    const priority = urgent ? 'urgent' : postOpSymptom || unroutedByOutage ? 'high' : 'medium';
 
     /**
      * THE UNROUTED TICKET SAYS NOTHING TO THE PATIENT.
@@ -445,7 +729,22 @@ registerTool({
      *
      * A staff-notes field is the second ask in the ticketing change request.
      */
-    const res = await ticketingApiClient.createTicket({
+    /**
+     * DEPLOY MARKER, and a live counter. Prints only when this call has
+     * already been asked for the surgeon and still has none — the exact
+     * population that used to end with no ticket. Absent from the logs, the
+     * exit is not deployed and any conclusion drawn from a call is worthless
+     * (CLAUDE.md, "How to tell whether a deploy actually took").
+     */
+    if (filedOnSurgeryQueue && surgeonAskExhausted && !lookup.providerId) {
+      console.warn(
+        '[surgery] SURGEON ASK ALREADY SPENT — filing UNASSIGNED rather than ' +
+          'refusing a second time (operator ruling 2026-09-02). ' +
+          `Caller said: ${surgeonName ? `"${surgeonName}"` : '(no surgeon given)'}`,
+      );
+    }
+
+    const res = await createTicketDurable({
       departmentId: filedDepartmentId,
       requestTypeId: filedTypeId,
       requestReasonId: filedReasonId,
@@ -462,9 +761,17 @@ registerTool({
       patientPhone: normalizePhone(phone),
       patientEmail: str(input.email) || undefined,
       preferredContactMethod: 'phone',
-      patientBirthMonth: parts.month,
-      patientBirthDay: parts.day,
-      patientBirthYear: parts.year,
+      // Omitted entirely when the escape was taken. create-ticket takes these
+      // as optional (traced 2026-09-03), and the columns are varchar(2)/(2)/(4)
+      // so a word like "unavailable" could not be stored there even if we tried
+      // — the status rides in the description instead, which is what staff read.
+      ...(parts
+        ? {
+            patientBirthMonth: parts.month,
+            patientBirthDay: parts.day,
+            patientBirthYear: parts.year,
+          }
+        : {}),
       ...(lookup.locationId ? { locationId: lookup.locationId } : {}),
       ...(cleanLocation ? { locationOfLastVisit: cleanLocation } : {}),
       /**
@@ -478,20 +785,65 @@ registerTool({
        */
       ...(filedOnSurgeryQueue && lookup.providerId ? { providerId: lookup.providerId } : {}),
       ...(filedOnSurgeryQueue && surgeonName ? { lastProviderSeen: surgeonName } : {}),
-      description: filedDescription,
+      /**
+       * TAKE THE REQUEST RATHER THAN LOSE IT — operator ruling, 2026-09-02,
+       * extending to surgery the exit optical already had for its own bounded
+       * ask ("if you gate the location, the agent will ask and if no answer,
+       * unassigned", 2026-09-01).
+       *
+       * The ticketing app refuses a department-2 ticket with no resolvable
+       * surgeon. That refusal is a question the first time — the agent asks
+       * the caller who their surgeon is and refiles. The SECOND time there is
+       * nothing left to ask: the call ends and the request is gone. On
+       * 2026-09-02 two of the six lost surgery requests died exactly there —
+       * one caller had no provider anywhere on their record, the other named
+       * a surgeon absent from the providers table entirely.
+       *
+       * So on a re-attempt this tells the app the ask has been spent, and it
+       * files the ticket UNASSIGNED into department 2 with an advisory on the
+       * audit trail instead of refusing again.
+       *
+       * THREE GUARDS, all load-bearing:
+       *  - `surgeonAskExhausted` comes from the per-call refusal counter,
+       *    which is keyed on a REAL CallSid — never from a model argument.
+       *    Sent unconditionally this would switch the app's gate off, and
+       *    department 2's provider fill has already been driven from ~98% to
+       *    49% once by changes that looked smaller than this one.
+       *  - `!lookup.providerId`, so a ticket that DID resolve a surgeon never
+       *    claims to need manual routing.
+       *  - `filedOnSurgeryQueue`, because a request `detectCrossQueue` sent to
+       *    Optical or the HVA Hub is not gated on a surgeon at all.
+       */
+      ...(filedOnSurgeryQueue && surgeonAskExhausted && !lookup.providerId
+        ? { routingAskExhausted: true }
+        : {}),
+      description: filedDescriptionWithDobStatus,
       priority,
-      callData: { agentUsed: 'surgery', ...(callSid ? { callSid } : {}) },
+      callData: {
+        agentUsed: 'surgery',
+        ...(callSid ? { callSid } : {}),
+        // Staff-only. Never the description — that is an SMS body.
+        ...(dobStaffNote ? { transcript: dobStaffNote } : {}),
+      },
       // Guarded: callSid can be a sentinel ("unknown", "latest", ...), never
       // a real Twilio SID, when the retry lands on someone else's key.
       ...(isTwilioCallSid(callSid) ? { idempotencyKey: `call-${callSid}` } : {}),
     });
 
     if (!res.success || !res.ticketNumber) {
-      return {
-        success: false,
-        error: res.error ?? 'ticket creation failed',
-        retryable: true,
-      };
+      // The POST failed. createTicketDurable has already put the payload in the
+      // outbox if it could; this only decides what the agent says about it.
+      //
+      // A terminal refusal naming the surgeon is this queue's ASK: the line
+      // below turns it into a question the agent puts to the caller. Count it,
+      // so a second trip through here carries routingAskExhausted and the app
+      // takes the request unassigned instead of refusing it again. Counted
+      // only for the surgeon — a refusal for any other field has not asked
+      // this question and must not spend it.
+      if (res.terminal && res.missingField === 'surgeon') {
+        noteGateRefusal(callSid, SURGERY_FILE_TOOL, 'surgeon');
+      }
+      return postFailureToolResult(res, 'file_surgery_ticket');
     }
 
     return {

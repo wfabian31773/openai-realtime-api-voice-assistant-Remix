@@ -20,6 +20,7 @@ import {
   nextRequiredAsk,
   annotationFor,
   MAX_BLOCKS,
+  FILING_MAY_BE_HELD,
   type RequiredField,
 } from './ticketRequirements';
 import type { PcpConversationState } from './director';
@@ -46,19 +47,44 @@ describe('the three questions, and only those three', () => {
     expect(r.blocking).toEqual([]);
   });
 
-  it('blocks on who is calling', () => {
+  /**
+   * THESE THREE ASSERTED `blocking` UNTIL 2026-09-16, and the history matters
+   * because the LIST did not change — only what we do about it.
+   *
+   * Operator: "it's like a voicemail... we shouldn't have any gates here about
+   * who's calling, why they're calling." So the same three fields are still
+   * the ones a staffer needs, still the ones the intake asks for, and still
+   * the ones named on the ticket when they are missing. What they can no
+   * longer do is hold the filing.
+   */
+  it('never blocks on who is calling — it says so on the ticket instead', () => {
     const r = ticketReadiness(base({ ...complete, callerName: undefined }));
-    expect(r.blocking).toContain('callerName');
+    expect(r.blocking).toEqual([]);
+    expect(r.annotate).toContain('callerName');
+    expect(r.ready).toBe(true);
   });
 
-  it('blocks on who the call is about', () => {
+  it('never blocks on who the call is about', () => {
     const r = ticketReadiness(base({ ...complete, patientFirstName: undefined, patientLastName: undefined }));
-    expect(r.blocking).toContain('patientName');
+    expect(r.blocking).toEqual([]);
+    expect(r.annotate).toContain('patientName');
+    expect(r.ready).toBe(true);
   });
 
-  it('blocks on how to reach them', () => {
+  it('never blocks on how to reach them', () => {
     const r = ticketReadiness(base({ ...complete, callbackNumber: undefined }));
-    expect(r.blocking).toContain('callbackNumber');
+    expect(r.blocking).toEqual([]);
+    expect(r.annotate).toContain('callbackNumber');
+    expect(r.ready).toBe(true);
+  });
+
+  it('files on the FIRST attempt, with nothing at all', () => {
+    // The whole point, and the shape of every call this line has lost: an
+    // unidentified caller, zero strikes used, ticket goes through.
+    const r = ticketReadiness(base({ callPurpose: 'peer_to_peer' }), 0);
+    expect(r.ready).toBe(true);
+    expect(r.blocking).toEqual([]);
+    expect([...r.annotate].sort()).toEqual(['callbackNumber', 'callerName', 'patientName']);
   });
 
   it('does NOT block on role, organisation, facility type or date of birth', () => {
@@ -90,26 +116,48 @@ describe('a patient calling about themselves is not interrogated', () => {
     expect(r.ready).toBe(true);
   });
 
-  it('but a professional still has to say who the patient is', () => {
+  /**
+   * The patient is still the field a staffer cannot work without, and the
+   * ticket still SAYS when it is missing — it just no longer refuses to file
+   * for it. `patientContextNeeded` is what decides that this purpose has a
+   * patient at all, and that is untouched: see the drug-rep case below.
+   */
+  it('but a professional not naming the patient is still flagged on the ticket', () => {
     const r = ticketReadiness(base({
       callPurpose: 'peer_to_peer',
       callerName: 'Dr Chen office',
       callbackNumber: '+18455317471',
     }));
-    expect(r.blocking).toContain('patientName');
+    expect(r.annotate).toContain('patientName');
+    expect(r.blocking).toEqual([]);
+    expect(r.ready).toBe(true);
   });
 });
 
 describe('THE FLOOR — a stubborn caller cannot lose their request', () => {
-  it('holds the ticket up to MAX_BLOCKS times, then files', () => {
+  /**
+   * THE REVERT LEVER, EXERCISED. `FILING_MAY_BE_HELD` is false, so the budget
+   * below is dormant — and a dormant branch that nobody runs is one that
+   * quietly stops working. Passing `mayHold` explicitly keeps the old
+   * behaviour reachable, so flipping the constant back is a change we know
+   * works rather than one we hope does.
+   */
+  it('still holds up to MAX_BLOCKS times when filing MAY be held', () => {
     const state = base({ ...complete, callerName: undefined });
-    expect(ticketReadiness(state, 0).blocking).toContain('callerName');
-    expect(ticketReadiness(state, MAX_BLOCKS - 1).blocking).toContain('callerName');
-    // Budget spent: annotated, not blocked.
-    const done = ticketReadiness(state, MAX_BLOCKS);
+    expect(ticketReadiness(state, 0, true).blocking).toContain('callerName');
+    expect(ticketReadiness(state, MAX_BLOCKS - 1, true).blocking).toContain('callerName');
+    const done = ticketReadiness(state, MAX_BLOCKS, true);
     expect(done.blocking).toEqual([]);
     expect(done.annotate).toContain('callerName');
     expect(done.ready).toBe(true);
+  });
+
+  it('and holds nothing at all under the live setting', () => {
+    expect(FILING_MAY_BE_HELD).toBe(false);
+    const state = base({ ...complete, callerName: undefined });
+    for (const used of [0, 1, 2, 3, 99]) {
+      expect(ticketReadiness(state, used).blocking, `held at ${used} strikes`).toEqual([]);
+    }
   });
 
   it('a caller who answers NOTHING still gets a ticket', () => {
@@ -132,9 +180,22 @@ describe('THE FLOOR — a stubborn caller cannot lose their request', () => {
    */
   it('the budget counts the whole call, not each field', () => {
     const nothing = base({ callPurpose: 'peer_to_peer' });
-    // Three fields missing, but the third block ends it for ALL of them.
-    expect(ticketReadiness(nothing, MAX_BLOCKS - 1).ready).toBe(false);
-    expect(ticketReadiness(nothing, MAX_BLOCKS).ready).toBe(true);
+    // Under the revert, the third block ends it for ALL three fields at once.
+    expect(ticketReadiness(nothing, MAX_BLOCKS - 1, true).ready).toBe(false);
+    expect(ticketReadiness(nothing, MAX_BLOCKS, true).ready).toBe(true);
+  });
+
+  /**
+   * MAX_BLOCKS IS STILL 3 AND IT IS STILL LOAD-BEARING — do not "clean it up"
+   * to 0 to match the filing gate. `pcpAgent.ts` shares this counter with the
+   * records-delivery ask (`ticketBlocksUsed < MAX_BLOCKS`), so zeroing it
+   * would stop that ask firing and open an mr_cases row with nowhere to send
+   * the records: the 2026-08-13 hard gate failing through a side door, and
+   * the one thing the operator explicitly kept gated ("the only thing that we
+   * are gating is if it's medical records").
+   */
+  it('is still three, because the records-delivery ask spends the same budget', () => {
+    expect(MAX_BLOCKS).toBe(3);
   });
 
   it('is three — enough to ask, not enough to interrogate', () => {
@@ -143,11 +204,22 @@ describe('THE FLOOR — a stubborn caller cannot lose their request', () => {
 });
 
 describe('one question at a time', () => {
-  it('asks for the first missing field only', () => {
-    const r = ticketReadiness(base({ callPurpose: 'peer_to_peer' }));
+  it('asks for the first missing field only — under the revert', () => {
+    const r = ticketReadiness(base({ callPurpose: 'peer_to_peer' }), 0, true);
     const ask = nextRequiredAsk(r);
     expect(ask?.field).toBe('callerName');
     expect(r.blocking.length).toBeGreaterThan(1); // more missing, but one ask
+  });
+
+  /**
+   * Live, the FILING never asks anything. That is not the same as the caller
+   * never being asked: the director's own intake still puts these questions,
+   * one at a time — see PROFESSIONAL_FIELDS. What is gone is the filing tool's
+   * power to refuse and re-ask on top of it, which is how one call reached ten
+   * refusals in August.
+   */
+  it('asks nothing at all live, because nothing is being held', () => {
+    expect(nextRequiredAsk(ticketReadiness(base({ callPurpose: 'peer_to_peer' })))).toBeNull();
   });
 
   it('returns nothing to ask when ready', () => {
@@ -171,8 +243,22 @@ describe('a gap on a filed ticket says it is a gap', () => {
     expect(note).toMatch(/callback number/);
   });
 
-  it('says the caller was asked, so a blank is not read as an answer', () => {
-    expect(annotationFor(['patientName'])).toMatch(/was asked and did not provide/);
+  /**
+   * THIS ASSERTED THE OPPOSITE UNTIL 2026-09-16, and the reversal is the point.
+   *
+   * "The caller was asked and did not provide it" was true while a filing
+   * could be HELD — the only route to that annotation was to have asked and
+   * been refused. Now the ticket files on the first attempt, so the sentence
+   * would be a false statement about a caller on a durable record. This
+   * module's own history records the same objection raised in review on
+   * 2026-08-17 about a drug rep annotated as withholding a patient name
+   * nobody asked them for.
+   */
+  it('does not claim we asked, because now we often have not', () => {
+    const note = annotationFor(['patientName']);
+    expect(note).toMatch(/NOT CAPTURED/);
+    expect(note, 'a false statement about the caller on a durable record')
+      .not.toMatch(/was asked|did not provide|refused|declined/i);
   });
 
   it('is absent when nothing is missing', () => {

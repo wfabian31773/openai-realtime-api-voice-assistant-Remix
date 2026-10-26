@@ -75,9 +75,21 @@ describe('nothing else about the overnight path moved', () => {
     // night call in this file. That is the change this hint exists to avoid.
     const call = submitCall();
     expect(AGENT).toMatch(/SyncAgentService\.submitSimplifiedTicket/);
-    expect(call).not.toMatch(/departmentId/);
     expect(call).not.toMatch(/requestTypeId:/);
     expect(call).not.toMatch(/requestReasonId:/);
+  });
+
+  it('names a department ONLY for the two kinds of call the operator routed himself (v89)', () => {
+    // Until 2026-10-02 this asserted no department at all. The operator then
+    // ruled on two kinds of call — a post-op medication problem and a same-day
+    // request both go to After Hours — and only those may carry one. Every
+    // other night call still sends none and the app derives it, which is what
+    // this guard was written to keep: the department comes from the route, the
+    // route answers 'default' for everything else, and nothing here classifies.
+    const call = submitCall();
+    const departments = call.match(/departmentId:/g) ?? [];
+    expect(departments).toHaveLength(1);
+    expect(call).toMatch(/route\.kind === 'default' \? \{\} : \{ departmentId: route\.departmentId \}/);
   });
 
   it('still sends no transcript at filing', () => {

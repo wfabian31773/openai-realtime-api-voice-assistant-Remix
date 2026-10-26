@@ -1,0 +1,560 @@
+/**
+ * src/runtime/laneRegistry.ts
+ * ─────────────────────────────────────────────────────────────────────────────
+ * Resolves a lane slug to an agent bound onto the voice runtime.
+ *
+ * It deliberately builds NO registry of its own. `src/config/agents.ts`
+ * already holds every lane — id, factory, enabled, voice, language,
+ * version — and the OpenAI SIP core routes through it today. A second
+ * registry would be a second place for a lane to be enabled, and the first
+ * time the two disagreed the answer to "is surgery live?" would depend on
+ * which file you read. This module reads that one.
+ *
+ * So the chain, end to end, is:
+ *
+ *   slug -> agentRegistry.getAgentConfig(slug)   (the registry that exists)
+ *        -> factory(handoff, metadata)           (the agent's own factory)
+ *        -> bindAgent(agent, knowledge pack)     (instructions + tools, verbatim)
+ *        -> GrokVoiceSession                     (the wire)
+ *
+ * and adding a lane is a registry entry plus a prompt — which is the claim
+ * ADR-001 makes and this file is what makes it literally true.
+ *
+ * TWO THINGS THIS MODULE REFUSES TO DO.
+ *
+ * NO HANDOFF IS INVENTED. Every factory takes a handoff callback first
+ * because the registry's shared shape passes one. Operator ruling,
+ * 2026-08-12: only PCP and Scheduling SD transfer; every other agent has NO
+ * transfer tool at all, not a disabled one, because "a tool the agent
+ * cannot see is a promise it cannot make." The callback passed here
+ * therefore rejects rather than pretending: if a lane's own factory wires
+ * it to a tool, that lane's tool fails loudly instead of silently dropping
+ * a caller who was told they were being transferred. The runtime does not
+ * decide which lanes transfer — the agents do, in their own files.
+ *
+ * NO ENABLED FLAG IS SECOND-GUESSED. A disabled lane resolves to null and
+ * the webhook answers with its controlled unavailable line. Whether a line
+ * takes calls is Wayne's decision, recorded in the registry and in
+ * CLAUDE.md's line-status table — never inferred here.
+ * ─────────────────────────────────────────────────────────────────────────────
+ */
+
+import { bindAgent, type BorrowableAgent, type BoundAgent } from "./agentBinding";
+import { buildKnowledgePack } from "./knowledgePack";
+import {
+  loadGrokRuntimeVoiceConfig,
+  pickLaneEnv,
+  type GrokRuntimeVoiceConfig,
+} from "./config";
+import type { LiveTool } from "./agentBinding";
+import { normalizeSpokenLanguage } from "./language";
+/**
+ * STATIC, ON PURPOSE — THIS LINE IS THE v78 FIX.
+ *
+ * v77 imported these two lazily inside `runtimeOwnedTools` (`await import(…)`)
+ * "so a health check does not pull the tool library into the process". On
+ * Node 20 — the version Replit runs — that dynamic import evaluated
+ * `languageTools.ts` a SECOND time in a process that had already loaded it
+ * through `src/tools/server.ts`'s static import, and the module's top-level
+ * `registerTool` threw `[TOOLS] duplicate tool name: set_spoken_language`
+ * inside `resolveLane`. Every runtime lane failed at call setup from the
+ * 14:17 UTC republish of 2026-09-28 until the rollback. It does not reproduce
+ * on Node 22, which is why every test and every local probe passed.
+ *
+ * A static import goes through the same loader and the same cache as the
+ * boot-time one, so the module is evaluated once. `toolModulesAreImportedOneWay`
+ * (its test) keeps any dynamic import of a tool-registering module out of the
+ * runtime and the agents from now on.
+ */
+import { SET_SPOKEN_LANGUAGE_TOOL_NAME, spokenLanguageToolDescription } from "../tools/languageTools";
+import { realtimeToolsFor } from "../tools/realtimeAdapter";
+// Static, like languageTools above: a module that registers tools at load
+// must reach the process through one loader (the v78 outage).
+import {
+  END_CALL_TOOL_NAME,
+  IDENTIFY_CALLBACK_TOOL_NAME,
+  OPT_OUT_TOOL_NAME,
+  RECORD_OUTCOME_TOOL_NAME,
+} from "../tools/outboundTools";
+// The NPX outreach lane's own tools (v110): static for the same reason.
+import "../tools/npxOutreachTools";
+import "../tools/siAssistantTools";
+import type { OutboundContact, OutboundLanePolicy } from "./outbound/campaign";
+import type { CallbackContext } from "./outbound/callback";
+
+/** What the runtime needs from a lane's registry entry. Structurally a
+ * subset of AgentConfig in src/config/agents.ts. */
+export interface LaneConfig {
+  id: string;
+  enabled: boolean;
+  factory: (...args: never[]) => unknown;
+  voice?: string;
+  language?: string;
+  /**
+   * The languages this line SPEAKS, as codes ('en', 'es'). Absent means the
+   * lane follows the caller into any language. Rendered by the runtime into
+   * the one language block every lane carries (languageMechanism.ts); the
+   * mechanism is the pipeline's, the list is the lane's policy.
+   */
+  spokenLanguages?: readonly string[];
+  version?: string;
+  agentType?: "inbound" | "outbound";
+  /**
+   * Present on a lane the runtime DIALS (src/runtime/outbound/): its calling
+   * window, caps, caller ID, greeting and voicemail. An outbound lane with no
+   * policy is refused, as every outbound agent was before the outbound layer.
+   */
+  outbound?: OutboundLanePolicy;
+  /** The line the practice answers with. Present on every registered
+   * inbound agent; the SIP path plays it and the prompts assume it. */
+  greeting?: string;
+  /** The lane's teardown filer (PCP's floor), from the same module as
+   * `factory`. See src/runtime/pcpFloor.ts. */
+  teardownSweep?: (callId: string, ctx?: { outcome?: string }) => Promise<void>;
+}
+
+/**
+ * Agent factories whose argument layout is NOT `(handoff, metadata)`.
+ *
+ * Most lanes share that shape, but not all, and calling one of these with
+ * it silently mis-slots every argument (Codex review, PR #227). The
+ * after-hours case is the worst: `metadata` lands in the
+ * `recordPatientInfoCallback` slot, so the agent loses caller context AND
+ * later tries to invoke that plain object — reporting `system_error` after
+ * a ticket was already filed, which can draw a duplicate retry.
+ *
+ * The existing SIP transport handles this with an explicit per-slug switch
+ * (voiceAgentRoutes.ts). This runtime does not reproduce those adapters —
+ * `recordPatientInfoCallback` is a closure over request state and roughly
+ * fifty lines of database logic, and a second implementation of it would be
+ * a second behaviour to keep in step. So these lanes are REFUSED here, by
+ * name, until an adapter is written deliberately. Refusing is the honest
+ * failure: a caller hears the controlled unavailable line instead of
+ * reaching an agent that has been built wrong.
+ */
+const NON_UNIFORM_FACTORY_LANES: Record<string, string> = {
+  "after-hours": "createAfterHoursAgent(handoff, recordPatientInfoCallback, metadata)",
+  "drs-scheduler":
+    "createDRSSchedulerAgent(lookupPatient, markCompleted, computer, handoff, metadata)",
+  "appointment-confirmation":
+    "createAppointmentConfirmationAgent(getAppointment, confirm, reschedule, cancel, markConfirmed, handoff, metadata)",
+  "fantasy-football": "createFantasyFootballAgent(metadata)",
+};
+
+/**
+ * Lanes whose agents actually invoke the handoff callback.
+ *
+ * Counted in the source rather than assumed: `noIvrAgent` calls it in three
+ * places (a sanctioned emergency transfer among them), `azulSchedulingAgent`
+ * and `pcpAgent` once each. Optical, surgery, tech, records and
+ * answering-service never call it at all — which is precisely the
+ * operator's 2026-08-12 ruling that only PCP and Scheduling SD transfer and
+ * every other agent has no transfer tool to call.
+ *
+ * That ruling is why a callback that refuses is right for most lanes and
+ * wrong for these: for a lane that never calls it, throwing is a tripwire;
+ * for one that does, it turns a sanctioned emergency transfer into a
+ * guaranteed failure report (Codex review, PR #227).
+ *
+ * A real transfer on this transport means redirecting the caller's Twilio
+ * leg into a conference — a feature, not a detail, and one whose destinations
+ * are the operator's to set. That feature now exists (`warmTransfer.ts`), so
+ * these lanes are refused only when no handoff is INJECTED. A deployment that
+ * supplies one serves them; one that does not still refuses, rather than
+ * offering a transfer that cannot work.
+ */
+const TRANSFER_CAPABLE_LANES = new Set([
+  "no-ivr",
+  "no-ivr-v2",
+  "dev-no-ivr",
+  "azul-scheduling",
+  "pcp",
+  // The proving lane holds request_human_handoff, so serving it without a
+  // configured transfer would hand the operator a tool that cannot work.
+  "runtime-proof",
+]);
+
+/**
+ * The transfer-capable lanes whose factory-handoff contract the injected
+ * transfer actually satisfies: the no-ivr family awaits a void callback
+ * that throws on failure, and pcp receives a structured outcome adapter
+ * (runtimeTransfer.ts). azul-scheduling is transfer-capable but its
+ * ORDINARY cold_transfer flow never invokes the factory handoff at all —
+ * `transfer_to_office` reads `officeTransferCallbacks`, a per-call side
+ * channel registered only by voiceAgentRoutes — so treating it as
+ * transfer-ready through the factory callback alone made every ordinary
+ * scheduling transfer return transfer_unavailable and file a callback
+ * ticket instead of dialing the office (Codex, PR #230). It stays
+ * refused until that side channel is wired on this runtime.
+ */
+const RUNTIME_TRANSFER_READY_LANES = new Set([
+  "no-ivr",
+  "no-ivr-v2",
+  "dev-no-ivr",
+  "pcp",
+  // The proving lane transfers through the handoff BROKER, which this
+  // runtime does wire: createRuntimeProofAgent registers the per-call
+  // callback under its callId and voiceRuntime releases it at teardown.
+  // It was left out when this set was introduced to refuse
+  // azul-scheduling (PR #230 round 1) and only added to the registry
+  // afterwards (PR #232), so the one lane built for live-testing the
+  // runtime end to end was the one lane the runtime refused — and with
+  // the azul side-channel reason, which was never true of it.
+  "runtime-proof",
+]);
+
+/**
+ * Why this runtime cannot serve a lane, or null when it can. Pure, so the
+ * reason can be asserted and logged rather than discovered on a live call.
+ */
+export function laneSupportStatus(
+  config: LaneConfig,
+  opts: { transferAvailable?: boolean } = {},
+): string | null {
+  if (config.agentType === "outbound" && config.outbound) {
+    // A registered campaign: answered only through /voice/outbound/:slug,
+    // which the voice runtime checks against the call's own registry entry.
+  } else if (config.agentType && config.agentType !== "inbound") {
+    return `lane '${config.id}' is an ${config.agentType} agent; this runtime answers inbound calls`;
+  }
+  if (TRANSFER_CAPABLE_LANES.has(config.id) && !opts.transferAvailable) {
+    return (
+      `lane '${config.id}' performs a call transfer and no handoff is configured for this ` +
+      "deployment; serving it would turn a sanctioned transfer into a guaranteed failure"
+    );
+  }
+  if (TRANSFER_CAPABLE_LANES.has(config.id) && !RUNTIME_TRANSFER_READY_LANES.has(config.id)) {
+    return (
+      `lane '${config.id}' transfers through its own per-call side channel ` +
+      "(registerAzulOfficeTransferCallback), which this runtime does not wire yet; " +
+      "serving it through the factory handoff alone turns every ordinary transfer into " +
+      "transfer_unavailable and a callback ticket (Codex, PR #230)"
+    );
+  }
+  const shape = NON_UNIFORM_FACTORY_LANES[config.id];
+  if (shape) {
+    return (
+      `lane '${config.id}' uses a different factory argument layout — ${shape} — ` +
+      "which this runtime does not model; it needs a per-lane adapter before it can be served"
+    );
+  }
+  return null;
+}
+
+/** The registry surface this module reads. `agentRegistry` satisfies it;
+ * tests substitute a fake so the whole agent tree is not imported. */
+export interface LaneSource {
+  getAgentConfig(id: string): LaneConfig | undefined;
+}
+
+/** Context the runtime hands the agent's factory. These are the same
+ * metadata fields the SIP transport passes today, so an agent borrowed
+ * here receives exactly what it receives there. */
+export interface LaneCallMetadata {
+  callSid: string;
+  callId: string;
+  callerPhone: string;
+  dialedNumber: string;
+  /**
+   * The call_logs row id.
+   *
+   * A PROPERTY, and on the live path a getter over a value filled in later:
+   * the agent is built before the row exists, and `answeringServiceAgent`
+   * polls `metadata.callLogId` for five seconds before writing
+   * `patientFound`, `patientName` and the last location/provider it
+   * recognised. Read it, never destructure it — destructuring evaluates a
+   * getter once and freezes `undefined` for the whole call, which is the
+   * bug recorded in that agent's own comments.
+   */
+  readonly callLogId?: string;
+  /**
+   * Which pipeline built this call. The runtime says `'runtime'`; the SIP
+   * core never sets it. An agent whose prompt exists in two shapes — the
+   * after-hours lane, whose Grok-shaped body is written for THIS pipeline
+   * (src/agents/noIvrPromptForGrok.ts) — reads it to pick, so a build can
+   * be deployed before a repoint without changing the live line.
+   */
+  readonly pipeline?: 'runtime';
+  /**
+   * On a call the runtime dialled: who it is calling, loaded from
+   * `campaign_contacts` by the contact and attempt the answer webhook was
+   * given. Absent on every inbound call.
+   */
+  readonly outbound?: OutboundContact & { campaignKey: string };
+  /**
+   * On an outbound lane, a call somebody made TO it — the person ringing
+   * back the number we call from (./outbound/callback.ts): who on the
+   * campaign's list the calling number belongs to, and why we called. Absent
+   * on a dialled call and on every inbound lane.
+   */
+  readonly callback?: CallbackContext;
+}
+
+export interface ResolvedLane {
+  slug: string;
+  agent: BoundAgent;
+  voice: GrokRuntimeVoiceConfig;
+  /** The agent's own version string, for the call record and health. */
+  version: string | null;
+  /**
+   * The line the practice answers with, from the agent's own config.
+   *
+   * The SIP path plays this before the agent takes over, and every queue
+   * prompt is written on that assumption — optical's says, in as many words,
+   * "Your greeting has already played. Do NOT greet again." This runtime
+   * never read it, so the agent obeyed an instruction whose premise was
+   * false and opened cold with "Am I speaking with …?" (operator, three
+   * calls, 2026-08-31).
+   *
+   * Carried here rather than written into the runtime so there is still one
+   * source of truth for what the practice says when it picks up the phone,
+   * and so a lane that has no greeting simply has none.
+   */
+  greeting: string | null;
+  /** The lane's outbound policy, or null on an inbound lane. */
+  outbound: OutboundLanePolicy | null;
+}
+
+/** The handoff callback every factory's first parameter expects. It is a
+ * rejection, not a no-op: see NO HANDOFF IS INVENTED above. */
+async function refuseHandoff(): Promise<void> {
+  throw new Error(
+    "voice runtime: this transport performs no call transfer. A lane that " +
+      "needs one must not offer the tool (operator ruling 2026-08-12).",
+  );
+}
+
+/**
+ * Resolve one lane. Returns null when the slug is unknown or the lane is
+ * disabled — the caller answers with its controlled unavailable line
+ * rather than guessing at a default agent. (The SIP core falls back to
+ * no-ivr for an unmapped NUMBER; a slug that is not registered is a
+ * misconfiguration, and answering it with someone else's agent is how a
+ * surgery caller ends up talking to the optical prompt.)
+ */
+export async function resolveLane(
+  slug: string,
+  metadata: LaneCallMetadata,
+  deps: {
+    source: LaneSource;
+    env?: Record<string, string | undefined>;
+    /**
+     * The real transfer, when this deployment has one wired.
+     *
+     * Injected rather than imported so `resolveLane` stays testable without a
+     * Twilio client, and so a deployment with no transfer configured keeps
+     * refusing the lanes that need one instead of serving a broken promise.
+     * The promise's resolved value is per-lane — void for the no-ivr family,
+     * PCP's structured HandoffOutcome for pcp (Codex, PR #230) — so the
+     * type is the union every factory accepts.
+     */
+    handoff?: (metadata: LaneCallMetadata) => () => Promise<unknown>;
+  },
+): Promise<ResolvedLane | null> {
+  const config = deps.source.getAgentConfig(slug);
+  if (!config || !config.enabled) return null;
+
+  const unsupported = laneSupportStatus(config, {
+    transferAvailable: Boolean(deps.handoff),
+  });
+  if (unsupported) {
+    // Refused BEFORE the factory is called: an agent constructed with
+    // mis-slotted arguments is worse than one that never answered, because
+    // it answers and then fails halfway through a patient's request.
+    console.warn(`[voice-runtime] ${unsupported}`);
+    return null;
+  }
+
+  // The factory's own shape, called exactly as the SIP transport calls it.
+  const factory = config.factory as (
+    handoff: () => Promise<unknown>,
+    metadata: LaneCallMetadata,
+  ) => unknown;
+  // A lane that transfers gets the real callback; every other lane keeps the
+  // refusing one, which stays a tripwire it should never trip (optical,
+  // surgery, tech, records and answering-service invoked it 0 times across
+  // the corpus — operator ruling 2026-08-12, standing instruction 9). Only
+  // the lanes whose handoff CONTRACT the runtime satisfies get the real one
+  // — laneSupportStatus already refused the rest above.
+  const handoff = deps.handoff && RUNTIME_TRANSFER_READY_LANES.has(config.id)
+    ? deps.handoff(metadata)
+    : refuseHandoff;
+  const created = await factory(handoff, metadata);
+  const agent = created as BorrowableAgent;
+
+  const bound = await bindAgent(agent, {
+    // The knowledge pack, placed by the binding as `## Business Facts` after
+    // a five-section prompt's Role & Persona (the docs' order), or in front
+    // of any other prompt (ADR-001's original arrangement).
+    instructionsPrefix: buildKnowledgePack(),
+    // The pipeline's own tools, on every lane, recorded to the timeline the
+    // way the lane's own are.
+    runtimeTools: [
+      ...(await runtimeOwnedTools(slug, metadata, config.spokenLanguages)),
+      ...outboundRuntimeTools(slug, metadata, config),
+    ],
+    spokenLanguages: config.spokenLanguages,
+  });
+
+  const env = deps.env ?? process.env;
+  const voice = loadGrokRuntimeVoiceConfig(env, slug);
+  const envLanguage = pickLaneEnv(env, "XAI_VOICE_LANGUAGE", slug);
+  return {
+    slug,
+    agent: bound,
+    voice: {
+      ...voice,
+      // The registry's `voice` is deliberately NOT consulted. It holds an
+      // OpenAI voice name — every supported inbound agent registers
+      // 'sage' — and Grok has no such voice, so passing it through fails
+      // session setup on every one of them (Codex review, PR #227). Voice
+      // is provider-specific; a lane that wants its own Grok voice sets
+      // XAI_VOICE_NAME_<SLUG>. No mapping is invented between the two
+      // rosters: guessing which Grok voice 'sage' means is exactly the
+      // kind of gap-filling that produces a line nobody chose.
+      voiceName: pickLaneEnv(env, "XAI_VOICE_NAME", slug) ?? voice.voiceName,
+      // Language IS provider-neutral ('en', 'es'), so the lane's own
+      // registered value still counts.
+      language: normalizeSpokenLanguage(envLanguage ?? config.language ?? voice.language),
+      // But only an ENV value is a choice. Every registered lane carries
+      // `language: 'en'` from the old core, where the prompt did the
+      // detecting; on this runtime that value would seed an English
+      // transcription bias against every caller who opens in Spanish. The
+      // handshake seeds a hint only for an explicit setting or a non-English
+      // lane — see `seedsLanguageHint` (grokSession.ts) and the docs it cites.
+      languageExplicit: envLanguage !== undefined,
+    },
+    version: config.version ?? null,
+    greeting: config.greeting?.trim() || null,
+    outbound: config.outbound ?? null,
+  };
+}
+
+/**
+ * TOOLS THE PIPELINE OWNS, bound to every lane it serves.
+ *
+ * `set_spoken_language` is how the model asks the bridge to retarget the
+ * provider's transcription mid-call (mediaStreamBridge.ts does the transport
+ * step by this NAME for any lane). Until v77 each lane listed it — four queue
+ * lanes did, the after-hours lane got a hand-built copy on v75, pcp never
+ * had it — which is the same decision written five times. The runtime binds
+ * it here, once, so a lane that forgets is not a lane that cannot follow a
+ * Spanish caller. The tool library is imported STATICALLY at the top of this
+ * file — see the note there: the lazy import this used to carry is what took
+ * every runtime lane down on 2026-09-28.
+ */
+export const RUNTIME_OWNED_TOOLS = ["set_spoken_language"] as const;
+
+async function runtimeOwnedTools(
+  slug: string,
+  metadata: LaneCallMetadata,
+  /** The lane's language POLICY, from its registration. Undeclared means the
+   * lane follows the caller into any language. */
+  spokenLanguages?: readonly string[],
+): Promise<LiveTool[]> {
+  const tools = realtimeToolsFor(
+    [...RUNTIME_OWNED_TOOLS],
+    {
+      /**
+       * THE POLICY REACHES THE TOOL AS INJECTED CONTEXT (Codex P2 on #336).
+       *
+       * Merged UNDER the model's arguments by the adapter, like `lane` on
+       * `lookup_patient`: not a schema field, so the model can neither set it
+       * nor be asked for it. The tool refuses a language outside the list at
+       * dispatch and returns no `language` key, so the bridge's transport
+       * step (`languageToSwitchTo`) has nothing to act on — the after-hours
+       * line's English-and-Spanish rule holds against a model that calls the
+       * tool for Tagalog anyway. Undefined is filtered out by the adapter, so
+       * a lane with no policy hands the tool nothing and it follows any caller.
+       */
+      spoken_languages: spokenLanguages ? [...spokenLanguages] : undefined,
+    },
+    {
+      callId: metadata.callId,
+      callSid: metadata.callSid,
+      // A getter, for the same reason the factories read it as one: the row
+      // does not exist when the agent is built.
+      get callLogId() {
+        return metadata.callLogId;
+      },
+      agentSlug: slug,
+    },
+  ) as unknown as LiveTool[];
+  // And the tool's WORDS agree with the policy: a lane that speaks English
+  // and Spanish is not told "call this the moment the caller speaks another
+  // language". One description per policy, composed in languageTools.ts.
+  return tools.map((t) =>
+    t.name === SET_SPOKEN_LANGUAGE_TOOL_NAME
+      ? { ...t, description: spokenLanguageToolDescription(spokenLanguages) }
+      : t,
+  );
+}
+
+/**
+ * TOOLS EVERY DIALLED CALL CARRIES: opt out, record how the call ended, hang up.
+ * Bound only when the lane is an outbound campaign AND this call was dialled
+ * (the metadata carries its contact), so an inbound lane never sees them.
+ * Who the call is about is injected context, merged UNDER the model's
+ * arguments — see src/tools/outboundTools.ts.
+ */
+export const RUNTIME_OUTBOUND_TOOLS = [OPT_OUT_TOOL_NAME, RECORD_OUTCOME_TOOL_NAME, END_CALL_TOOL_NAME] as const;
+
+/**
+ * AND EVERY RETURNED CALL: the same three, plus finding out who rang. Who the
+ * call is with is not known when the tools are bound, so the injected value
+ * is the call's own CallSid and the contact lives in the per-call session the
+ * runtime opened (src/tools/outboundTools.ts, openCallbackSession).
+ */
+export const RUNTIME_CALLBACK_TOOLS = [
+  IDENTIFY_CALLBACK_TOOL_NAME,
+  OPT_OUT_TOOL_NAME,
+  RECORD_OUTCOME_TOOL_NAME,
+  END_CALL_TOOL_NAME,
+] as const;
+
+function outboundRuntimeTools(
+  slug: string,
+  metadata: LaneCallMetadata,
+  config: LaneConfig,
+): LiveTool[] {
+  if (!config.outbound) return [];
+  const telemetry = {
+    callId: metadata.callId,
+    callSid: metadata.callSid,
+    get callLogId() {
+      return metadata.callLogId;
+    },
+    agentSlug: slug,
+  };
+  const laneTools = [...(config.outbound.tools ?? [])];
+  if (metadata.callback) {
+    return realtimeToolsFor(
+      [...RUNTIME_CALLBACK_TOOLS, ...laneTools],
+      // The campaign too, as on a dialled call: a lane's tools may answer
+      // differently per campaign (NPX outreach's do: its demo campaign books
+      // in the demo NPX, v113).
+      { outbound_callback_sid: metadata.callSid, outbound_campaign: config.outbound.campaignKey },
+      telemetry,
+    ) as unknown as LiveTool[];
+  }
+  if (!metadata.outbound) return [];
+  return realtimeToolsFor(
+    [...RUNTIME_OUTBOUND_TOOLS, ...laneTools],
+    {
+      outbound_contact_id: metadata.outbound.contactId,
+      outbound_phone: metadata.outbound.phone,
+      outbound_campaign: metadata.outbound.campaignKey,
+      outbound_attempt_id: metadata.outbound.attemptId,
+      outbound_call_sid: metadata.callSid,
+    },
+    telemetry,
+  ) as unknown as LiveTool[];
+}
+
+/** The real registry, imported lazily so a health check or a unit test
+ * never pulls the entire agent tree (and its database and OpenAI clients)
+ * into the process. */
+export async function defaultLaneSource(): Promise<LaneSource> {
+  const { agentRegistry } = await import("../config/agents");
+  return agentRegistry as unknown as LaneSource;
+}

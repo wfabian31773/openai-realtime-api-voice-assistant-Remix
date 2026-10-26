@@ -1,0 +1,326 @@
+/**
+ * CAdc07bca1b6e2c7daf43c9f3a8f5ee4fa — 2026-09-08 12:21 UTC, the operator's
+ * own test call. Filed PCP-57918 and got three things wrong at once.
+ *
+ *   AGENT: Which organization are you calling from?
+ *   AGENT: What type of healthcare organization is that?
+ *   AGENT: What is your professional relationship to this patient?
+ *   AGENT: What is the patient's first name?
+ *   AGENT: What is the patient's last name?
+ *   AGENT: What is the patient's date of birth?
+ *   AGENT: Let me get this logged for you — one moment.
+ *   [call ends]
+ *
+ * A records request was taken without ever asking WHERE THE RECORDS GO, and
+ * then the line went dead mid-breath — no ticket number, no "here is what
+ * happens next", no goodbye.
+ *
+ * Operator, same day: "if you want medical records, how would you like to
+ * receive them by fax? What's the fax number? By email. What's your email?
+ * ... gathering the information as we go, sort of filling out a form, asking
+ * a question by question. That's what I think that everything should be like."
+ *
+ * So this is an EXTENSION of the director's existing one-question-at-a-time
+ * machine, not a redesign of it — he was explicit that the guided shape is
+ * what works and should not be tinkered with.
+ *
+ * The callback number is deliberately NOT part of this. It is seeded from
+ * caller ID (pcpAgent.ts), and asking for it anyway was the single biggest
+ * cause of discarded requests on 2026-08-06. The gap is that the number a
+ * clinic happened to dial from is not somewhere you send records.
+ */
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+
+process.env.DATABASE_URL ||= 'postgresql://unused:unused@127.0.0.1:5432/unused';
+process.env.OPENAI_API_KEY ||= 'test-unused';
+
+vi.mock('../../server/db', () => ({ db: {} }));
+
+const ticketing = vi.hoisted(() => ({
+  createPcpTicket: vi.fn(async () => ({ success: true, ticketNumber: 'PCP-57918' })),
+  /**
+   * THE RECORDS LIBRARY FILES THROUGH `createTicket`, NOT `createPcpTicket`.
+   *
+   * Added 2026-09-13 with the routing change. Before it, this mock carried
+   * only `createPcpTicket` because `handle_patient_medical_records_request`
+   * never reached Medical Records — it filed a plain PCP ticket, which is the
+   * defect. With the route live the tool calls `file_records_ticket`, which
+   * calls `createTicket`; an absent mock made the tool THROW and the SDK
+   * returned a plain-text error the harness could not parse. A fixture gap,
+   * not a source defect — but it is the reason two tests below now read a
+   * different sink.
+   */
+  createTicket: vi.fn(async () => ({ success: true, ticketNumber: 'VA-58001' })),
+}));
+vi.mock('../../server/services/ticketingApiClient', () => ({
+  ticketingApiClient: ticketing,
+  /**
+   * `medicalRecordsTools` destructures this alongside the client. Absent from
+   * the mock it throws inside the tool, and the SDK hands back a plain-text
+   * error the harness cannot parse — which reads as a source defect and is not
+   * one. Only reachable here since the records route went live.
+   */
+  lookupWasUnavailable: () => false,
+}));
+
+const { createPcpAgent } = await import('../agents/pcpAgent');
+const { pcpDirector } = await import('./director');
+
+async function call(agent: any, name: string, args: Record<string, unknown> = {}) {
+  const t = agent.tools.find((x: any) => x.name === name);
+  expect(t, `${name} is not on the agent`).toBeTruthy();
+  const raw = await t.invoke({}, JSON.stringify(args));
+  return typeof raw === 'string' ? JSON.parse(raw) : raw;
+}
+
+let n = 0;
+function freshCall() {
+  const callId = `CArecords${++n}`;
+  const agent = createPcpAgent(async () => ({ ok: false, status: 'NO_ANSWER' as const }) as never, {
+    callId,
+    callerPhone: '+19095550123',
+  } as never);
+  return { agent, callId };
+}
+
+/** Everything the 12:21 call had gathered by the time it filed. */
+const INTAKE_AS_ON_THE_CALL = {
+  callPurpose: 'patient_medical_records_request',
+  callerName: 'Dr Joseph Perez',
+  callerRole: 'primary care provider',
+  callerOrganization: 'De La Pena Family Medicine',
+  callerFacilityType: 'pcp_office',
+  statedRelationship: 'primary care provider',
+  patientFirstName: 'A',
+  patientLastName: 'B',
+  patientDob: '1973-03-17',
+};
+
+beforeEach(() => {
+  ticketing.createPcpTicket.mockClear();
+  ticketing.createPcpTicket.mockResolvedValue({ success: true, ticketNumber: 'PCP-57918' });
+  ticketing.createTicket.mockClear();
+  ticketing.createTicket.mockResolvedValue({ success: true, ticketNumber: 'VA-58001' });
+});
+
+describe('a records request asks where the records go', () => {
+  it('asks the delivery method before it files', async () => {
+    const { agent, callId } = freshCall();
+    await call(agent, 'record_pcp_intake', INTAKE_AS_ON_THE_CALL);
+
+    const next = pcpDirector.next(callId).nextQuestion;
+    expect(next?.field, 'the form is not finished until we know where records go').toBe(
+      'recordsDeliveryMethod',
+    );
+    expect(next?.prompt).toMatch(/fax|email/i);
+  });
+
+  it('then asks for the destination, in the words of the method chosen', async () => {
+    const { agent, callId } = freshCall();
+    await call(agent, 'record_pcp_intake', INTAKE_AS_ON_THE_CALL);
+    await call(agent, 'record_pcp_intake', { recordsDeliveryMethod: 'fax' });
+
+    const next = pcpDirector.next(callId).nextQuestion;
+    expect(next?.field).toBe('recordsDeliveryDestination');
+    expect(next?.prompt, 'a fax destination is a fax number, not "an address"').toMatch(/fax number/i);
+
+    // The same field, asked differently when the answer was email — the point
+    // of asking question by question rather than reading one generic line.
+    const second = freshCall();
+    await call(second.agent, 'record_pcp_intake', INTAKE_AS_ON_THE_CALL);
+    await call(second.agent, 'record_pcp_intake', { recordsDeliveryMethod: 'email' });
+    expect(pcpDirector.next(second.callId).nextQuestion?.prompt).toMatch(/email/i);
+  });
+
+  it('stops asking once it has both', async () => {
+    const { agent, callId } = freshCall();
+    await call(agent, 'record_pcp_intake', INTAKE_AS_ON_THE_CALL);
+    await call(agent, 'record_pcp_intake', {
+      recordsDeliveryMethod: 'fax',
+      recordsDeliveryDestination: '9095550199',
+    });
+    expect(pcpDirector.next(callId).nextQuestion).toBeUndefined();
+  });
+});
+
+describe('the caller is told what happened before the line goes quiet', () => {
+  it('the records tool tells the agent to read the ticket number back', async () => {
+    const { agent } = freshCall();
+    await call(agent, 'record_pcp_intake', {
+      ...INTAKE_AS_ON_THE_CALL,
+      recordsDeliveryMethod: 'fax',
+      recordsDeliveryDestination: '9095550199',
+    });
+
+    const filed = await call(agent, 'handle_patient_medical_records_request', {
+      narrative: 'Records request for a mutual patient, to be faxed.',
+    });
+
+    expect(filed.success).toBe(true);
+    /**
+     * A MEDICAL RECORDS NUMBER NOW, NOT A PCP ONE — operator, 2026-09-13:
+     * "a medical records request should file a ticket with medical records,
+     * not pcp." This assertion previously read PCP-57918 and that was the
+     * defect, not the contract: 54 of these landed in department 18 where the
+     * records team never saw them.
+     */
+    expect(filed.ticketNumber).toBe('VA-58001');
+    expect(filed.routed_to).toBe('Medical Records');
+    expect(ticketing.createPcpTicket, 'it must not also file a PCP ticket').not.toHaveBeenCalled();
+    // The 12:21 defect: the tool returned bare success, so nothing told the
+    // agent to speak and it ended the call mid-breath.
+    expect(filed.message, 'the tool must tell the agent what to say').toBeTruthy();
+    expect(filed.message).toContain('VA-58001');
+  });
+
+  it('carries the delivery instruction onto the ticket', async () => {
+    const { agent } = freshCall();
+    await call(agent, 'record_pcp_intake', {
+      ...INTAKE_AS_ON_THE_CALL,
+      recordsDeliveryMethod: 'fax',
+      recordsDeliveryDestination: '9095550199',
+    });
+    await call(agent, 'handle_patient_medical_records_request', { narrative: 'Records request.' });
+
+    // Reads `createTicket` because the case now files to Medical Records. The
+    // assertion is unchanged in substance: whichever queue holds it, a staffer
+    // cannot send records without knowing where they go.
+    const payload = (ticketing.createTicket.mock.calls as any[])[0][0];
+    const blob = JSON.stringify(payload);
+    expect(blob, 'a staffer cannot send records without knowing where').toMatch(/fax/i);
+    expect(blob).toContain('9095550199');
+  });
+
+  /**
+   * THE OPERATOR'S CHOICE B, 2026-09-13, and the reason it is not a relaxation.
+   *
+   * PCP has never collected a date range, and the library hard-gates one on an
+   * on-clock request. Rather than add a question to this lane, the request
+   * files with the gap written on the ticket — the shape of optical's
+   * unassigned exit (#288): a row a clerk can chase beats a row in the wrong
+   * queue. What must NOT happen is the gap going out silently, because an
+   * absent line reads as "not applicable" and nobody chases it.
+   *
+   * AND THE CALLER HERE IS THE PATIENT, not the clinic of the 12:21 call —
+   * changed 2026-09-14 with Codex's P1 on #296. The gate this exits only
+   * applies ON the clock, and a provider request is not on it; the clinic
+   * fixture reached this branch solely because every professional caller was
+   * being filed as the patient's personal representative, which is the defect
+   * that P1 removed. Proving an on-clock exit with an off-clock caller is
+   * testing the bug, so the fixture moves to a caller the clock really
+   * covers.
+   */
+  it('files without a date range and says so on the ticket', async () => {
+    const { agent } = freshCall();
+    await call(agent, 'record_pcp_intake', {
+      callPurpose: 'patient_medical_records_request',
+      callerName: 'A B',
+      callerIsThePatient: true,
+      patientFirstName: 'A',
+      patientLastName: 'B',
+      patientDob: '1973-03-17',
+      recordsDeliveryMethod: 'fax',
+      recordsDeliveryDestination: '9095550199',
+    });
+
+    const filed = await call(agent, 'handle_patient_medical_records_request', {
+      narrative: 'I need a copy of my records, to be faxed.',
+    });
+
+    expect(filed.success, 'the request must land, not be refused for a field this lane cannot ask').toBe(true);
+    const blob = JSON.stringify((ticketing.createTicket.mock.calls as any[])[0][0]);
+    expect(blob, 'the clerk has to see that the range is missing').toMatch(/Dates needed: NOT CAPTURED/i);
+  });
+});
+
+/**
+ * CODEX ROUND 4 ON PR #273 — four findings, all real, all reproduced here.
+ * The first two are holes in my own change; the third contradicted a claim I
+ * made in the commit message.
+ */
+describe('the delivery gate cannot be walked around', () => {
+  it('holds a PATIENT records request too, though the purpose never says records', async () => {
+    // A patient or family member is stored as `patient_caller`, so the
+    // director's records branch never fires — and the tool sets the records
+    // purpose ITSELF and used to file on the spot. The gate has to live here.
+    const { agent } = freshCall();
+    await call(agent, 'record_pcp_intake', {
+      callPurpose: 'patient_caller',
+      callerName: 'A Patient',
+      callerIsThePatient: true,
+    });
+
+    const r = await call(agent, 'handle_patient_medical_records_request', {
+      narrative: 'Patient requesting their own records.',
+    });
+
+    expect(r.success).toBe(false);
+    expect(r.error).toMatch(/recordsDeliveryMethod/);
+    expect(ticketing.createPcpTicket, 'nothing may file without a destination').not.toHaveBeenCalled();
+  });
+
+  it('lets a caller who will not answer still get their request filed', async () => {
+    // The unbounded loop: nothing incremented MAX_BLOCKS for these fields, so
+    // the director named the same one forever. 'unspecified' is a recordable
+    // answer, which is what ends it.
+    const { agent, callId } = freshCall();
+    await call(agent, 'record_pcp_intake', INTAKE_AS_ON_THE_CALL);
+    await call(agent, 'record_pcp_intake', { recordsDeliveryMethod: 'unspecified' });
+
+    expect(pcpDirector.next(callId).nextQuestion, 'a recorded refusal ends the question').toBeUndefined();
+
+    const filed = await call(agent, 'handle_patient_medical_records_request', { narrative: 'Records.' });
+    expect(filed.success).toBe(true);
+    const blob = JSON.stringify((ticketing.createPcpTicket.mock.calls as any[])[0][0]);
+    /**
+     * "NOT CHOSEN", not "not captured" — and the distinction is the staffer's,
+     * not ours. `ticketDeliveryNote` writes three different sentences because
+     * three different things happen: nobody was asked, they were asked and
+     * declined, or a route was named without a destination. A clerk reading
+     * "not captured" cannot tell whether to ring the requester back or whether
+     * they already refused. This assertion originally pinned the literal
+     * "NOT captured", which was the wording for a case this test is not.
+     */
+    expect(blob, 'the ticket must say the requester declined to choose').toMatch(/NOT chosen/i);
+    expect(blob, 'and that they were asked, so nobody re-asks blindly').toMatch(/did not specify/i);
+  });
+
+  it('never asks for a destination once the method is unspecified', async () => {
+    const { agent, callId } = freshCall();
+    await call(agent, 'record_pcp_intake', INTAKE_AS_ON_THE_CALL);
+    await call(agent, 'record_pcp_intake', { recordsDeliveryMethod: 'unspecified' });
+    expect(pcpDirector.next(callId).nextQuestion?.field).not.toBe('recordsDeliveryDestination');
+  });
+});
+
+describe('a changed delivery method does not keep the old destination', () => {
+  it('forgets the fax number when the caller switches to email', async () => {
+    // "Deliver by EMAIL to <fax number>" — records sent somewhere the caller
+    // never named. `update` merges, so the stale value survived.
+    const { agent, callId } = freshCall();
+    await call(agent, 'record_pcp_intake', INTAKE_AS_ON_THE_CALL);
+    await call(agent, 'record_pcp_intake', {
+      recordsDeliveryMethod: 'fax',
+      recordsDeliveryDestination: '9095550199',
+    });
+    await call(agent, 'record_pcp_intake', { recordsDeliveryMethod: 'email' });
+
+    expect(pcpDirector.get(callId).recordsDeliveryDestination).toBeUndefined();
+    expect(pcpDirector.next(callId).nextQuestion?.field).toBe('recordsDeliveryDestination');
+    expect(pcpDirector.next(callId).nextQuestion?.prompt).toMatch(/email/i);
+  });
+
+  it('keeps a replacement supplied in the same breath', async () => {
+    const { agent, callId } = freshCall();
+    await call(agent, 'record_pcp_intake', INTAKE_AS_ON_THE_CALL);
+    await call(agent, 'record_pcp_intake', {
+      recordsDeliveryMethod: 'fax',
+      recordsDeliveryDestination: '9095550199',
+    });
+    await call(agent, 'record_pcp_intake', {
+      recordsDeliveryMethod: 'email',
+      recordsDeliveryDestination: 'records@delapena.example',
+    });
+    expect(pcpDirector.get(callId).recordsDeliveryDestination).toBe('records@delapena.example');
+  });
+});

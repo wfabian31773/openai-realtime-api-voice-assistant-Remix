@@ -57,6 +57,129 @@ describe('PHI discipline — the allow-list is the safety mechanism', () => {
     }
   });
 
+  /**
+   * THE THREE SHAPES OF `identity_is_certain: false` ARE SEPARABLE (CLAUDE.md,
+   * the v28 row): found nobody, found one unconfirmed person, found SEVERAL.
+   * Only the last carries `candidate_count`, and `found` splits the first
+   * from the other two. Without both the 2026-09-16 worksheet could not say
+   * how many of 33 date-of-birth refusals behind a matched lookup came from
+   * the ambiguous branch, and a fix was reverted for want of the number.
+   */
+  it('keeps found and candidate_count on a lookup outcome, and still nothing about who', () => {
+    const callId = freshCall();
+    recordToolEvent(
+      callId,
+      'lookup_patient',
+      { first_name: 'Paula', last_name: 'Kolterman' },
+      JSON.stringify({
+        success: true,
+        found: false,
+        identity_is_certain: false,
+        candidate_count: 3,
+        message: 'Ask for their full name and date of birth',
+        candidates: [{ first_name: 'Paula', last_name: 'Kolterman', date_of_birth: '1952-08-29' }],
+      }),
+      40,
+      { agentSlug: 'optical' },
+    );
+    const [ev] = getAzulTimeline(callId)!;
+    expect(ev.outcome).toMatchObject({ found: false, identity_is_certain: false, candidate_count: 3 });
+    expect(ev.outcome).not.toHaveProperty('candidates');
+    expect(ev.outcome).not.toHaveProperty('message');
+    expect(JSON.stringify(ev)).not.toContain('1952-08-29');
+  });
+
+  /**
+   * AND WHAT THE CARRY-FORWARD WRITE DID (W1, docs/observatory/SPEC-20260923.md).
+   *
+   * All three of `rememberVerifiedIdentity`'s early returns leave the store
+   * EMPTY, so `identityStoreProbe` reporting `storeSize: 0` cannot tell a
+   * refused write from one that never ran — 623 consecutive calls on 09-22 read
+   * exactly that. Without this key the question stays unanswerable from SQL,
+   * which is the v28/v48 mistake one more time.
+   */
+  it('keeps identity_write on a lookup outcome, and still nothing about who', () => {
+    const callId = freshCall();
+    recordToolEvent(
+      callId,
+      'lookup_patient',
+      { first_name: 'Paula', last_name: 'Kolterman' },
+      JSON.stringify({
+        success: true,
+        found: true,
+        identity_is_certain: true,
+        identity_write: 'refused_sid',
+        patient_name: 'Paula Kolterman',
+      }),
+      40,
+      { agentSlug: 'optical' },
+    );
+    const [ev] = getAzulTimeline(callId)!;
+    expect(ev.outcome).toMatchObject({ identity_write: 'refused_sid' });
+    expect(JSON.stringify(ev)).not.toContain('Kolterman');
+  });
+
+  /**
+   * v87: the one-call-one-ticket guard is countable. A second filing on a call
+   * already filed through create-ticket answers `alreadyFiled: true` and posts
+   * nothing — without this key that is a console line no query can find.
+   */
+  it('keeps alreadyFiled on a filing outcome, and still nothing about who', () => {
+    const callId = freshCall();
+    recordToolEvent(
+      callId,
+      'create_pcp_task',
+      { narrative: 'Patient Paula Kolterman asking about a refill.' },
+      JSON.stringify({ success: true, alreadyFiled: true, ticketNumber: 'VA-1', guidance: 'already filed' }),
+      5,
+      { agentSlug: 'pcp' },
+    );
+    const [ev] = getAzulTimeline(callId)!;
+    expect(ev.outcome).toMatchObject({ alreadyFiled: true });
+    expect(JSON.stringify(ev)).not.toContain('Kolterman');
+  });
+
+  /**
+   * v103: a records filing routed out of Medical Records is countable. Without
+   * the key the only trace is a transcript line naming another team.
+   */
+  it('keeps form_applies on a records filing, and still nothing about who', () => {
+    const callId = freshCall();
+    recordToolEvent(
+      callId,
+      'file_records_ticket',
+      { description: 'Paula Kolterman wants to confirm tomorrow.' },
+      JSON.stringify({ success: true, ticket_number: 'VA-1', routed_to: 'HVA Hub', form_applies: false }),
+      5,
+      { agentSlug: 'records' },
+    );
+    const [ev] = getAzulTimeline(callId)!;
+    expect(ev.outcome).toMatchObject({ form_applies: false });
+    expect(JSON.stringify(ev)).not.toContain('Kolterman');
+  });
+
+  /**
+   * v75: WHICH language a switch went TO is countable. 574 switch events in
+   * the fourteen days to 2026-09-27 and not one said; 76 of them were on
+   * calls with no Spanish cue — the worst filing arm — and nothing could say
+   * what they were. The tag is the normaliser's output, never the caller's
+   * word for it (which is the argument, and stays dropped).
+   */
+  it('keeps the language a set_spoken_language switch went to, not the word the caller used', () => {
+    const callId = freshCall();
+    recordToolEvent(
+      callId,
+      'set_spoken_language',
+      { language: 'Spanish, please, my mother does not speak English' },
+      JSON.stringify({ success: true, language: 'es', message: 'Now speaking es. Continue in that language.' }),
+      1,
+      { agentSlug: 'no-ivr' },
+    );
+    const [ev] = getAzulTimeline(callId)!;
+    expect(ev.outcome).toMatchObject({ language: 'es' });
+    expect(JSON.stringify(ev)).not.toContain('my mother');
+  });
+
   it('keeps the diagnostic signal as booleans instead of the caller\'s words', () => {
     const callId = freshCall();
     recordToolEvent(callId, 'create_ticket', TICKET_ARGS, '{}', 1, { agentSlug: 'answering-service' });
@@ -82,6 +205,57 @@ describe('PHI discipline — the allow-list is the safety mechanism', () => {
     expect(getAzulTimeline(callId)![0].outcome).toMatchObject({ success: true, ticket_number: 'T-9001' });
   });
 
+  /**
+   * WHICH refusal it was, without the birthday.
+   *
+   * `missingFields: ["date_of_birth"]` names two opposite failures: the model
+   * sent no date, or it sent one the parser would not take. On 2026-09-03 that
+   * ambiguity cost the diagnosis of a live surgery call refused four times for
+   * a date the caller had confirmed back to the agent — the timeline recorded
+   * `"args": {}` because date_of_birth is (correctly) not on the allow-list.
+   */
+  it('records the SHAPE of a refused date of birth, and never the date', () => {
+    const callId = freshCall();
+    recordToolEvent(
+      callId, 'file_surgery_ticket', { ...TICKET_ARGS, date_of_birth: '5 8 39' },
+      JSON.stringify({ success: false, missingFields: ['date_of_birth'] }), 5,
+      { agentSlug: 'surgery' },
+    );
+    const [ev] = getAzulTimeline(callId)!;
+    expect(ev.args.dobShape).toBe('# # ##');
+    expect(JSON.stringify(ev)).not.toContain('5 8 39');
+  });
+
+  it('tells "the model sent nothing" apart from "the parser refused it"', () => {
+    const noDate = freshCall();
+    recordToolEvent(noDate, 'file_tech_ticket', { ...TICKET_ARGS, date_of_birth: '' }, '{}', 1, {
+      agentSlug: 'tech',
+    });
+    expect(getAzulTimeline(noDate)![0].args.dobShape).toBe('(none)');
+
+    const structured = freshCall();
+    recordToolEvent(
+      structured, 'file_optical_ticket', { ...TICKET_ARGS, date_of_birth: { month: 5, day: 8, year: 1939 } },
+      '{}', 1, { agentSlug: 'optical' },
+    );
+    expect(getAzulTimeline(structured)![0].args.dobShape).toBe('(not a string)');
+  });
+
+  it('shapes the date on every filing tool, and on none of the others', () => {
+    for (const tool of ['create_ticket', 'file_surgery_ticket', 'file_optical_ticket',
+                        'file_tech_ticket', 'file_medical_records_ticket']) {
+      const callId = freshCall();
+      recordToolEvent(callId, tool, TICKET_ARGS, '{}', 1, { agentSlug: 'surgery' });
+      expect(getAzulTimeline(callId)![0].args.dobShape, tool).toBe('####-##-##');
+    }
+    // lookup_patient takes a date of birth too, but it is not where filing is
+    // refused, and every extra place a shape is written is another place to
+    // check for a leak.
+    const lookup = freshCall();
+    recordToolEvent(lookup, 'lookup_patient', TICKET_ARGS, '{}', 1, { agentSlug: 'surgery' });
+    expect(getAzulTimeline(lookup)![0].args).not.toHaveProperty('dobShape');
+  });
+
   it('records missing FIELD NAMES on a validation failure, not their values', () => {
     const callId = freshCall();
     recordToolEvent(
@@ -90,6 +264,45 @@ describe('PHI discipline — the allow-list is the safety mechanism', () => {
       { agentSlug: 'answering-service' },
     );
     expect(getAzulTimeline(callId)![0].outcome.missingFields).toEqual(['surgeon name']);
+  });
+
+  /**
+   * WHY inherit failed, without the birthday. The five arms are the
+   * diagnosis in PR #307. A string that is not one of them is dropped —
+   * the allow-list is the safety mechanism, same as every other outcome key.
+   */
+  it('records carry on a date-of-birth refusal, and never a date', () => {
+    const callId = freshCall();
+    recordToolEvent(
+      callId, 'file_surgery_ticket', TICKET_ARGS,
+      JSON.stringify({
+        success: false,
+        missingFields: ['date_of_birth'],
+        carry: 'name_mismatch',
+        dateOfBirth: '03/17/1973',
+        firstName: 'Wayne',
+      }),
+      5,
+      { agentSlug: 'surgery' },
+    );
+    const [ev] = getAzulTimeline(callId)!;
+    expect(ev.outcome.carry).toBe('name_mismatch');
+    expect(ev.outcome.missingFields).toEqual(['date_of_birth']);
+    const blob = JSON.stringify(ev);
+    expect(blob).not.toContain('03/17/1973');
+    expect(blob).not.toContain('Wayne');
+  });
+
+  it('drops a carry value that is not one of the five arms', () => {
+    const callId = freshCall();
+    recordToolEvent(
+      callId, 'file_tech_ticket', TICKET_ARGS,
+      JSON.stringify({ success: false, missingFields: ['date_of_birth'], carry: 'Wayne Fabian 03/17/1973' }),
+      1,
+      { agentSlug: 'tech' },
+    );
+    expect(getAzulTimeline(callId)![0].outcome).not.toHaveProperty('carry');
+    expect(JSON.stringify(getAzulTimeline(callId))).not.toContain('Wayne');
   });
 });
 

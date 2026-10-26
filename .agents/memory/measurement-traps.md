@@ -275,3 +275,263 @@ one in another, and alerts on the second.
 I reported that as the cause of the 43% gap and **it was not**:
 `other_cost_cents` is $0.00 every day — essentially all spend here is voice.
 Real bug, immaterial effect. Check the magnitude before naming a cause.
+
+## The instrument that drops a third of what it counts (2026-09-03)
+
+I reported filing rates to Wayne all afternoon from `call_logs.tool_timeline`
+and every one was understated by about a third. The fleet was fine. The
+instrument was not.
+
+`tool_timeline` recorded 65 successful filings on a day when 100 substantive
+queue calls read a real `VA-` number to the caller. Three consecutive calls
+(VA-57425, VA-57428, VA-57429) had a real ticket in the Support Center with the
+right patient and the right department, and **no filing event in the timeline at
+all**. That is #77, and it is live on the runtime rather than historical.
+
+**The authority is the Support Center, joined on `call_sid`:**
+
+```sql
+-- 196 of 196 VA- tickets on 2026-09-03 carry a real CA-prefixed sid.
+-- Re-run this control before trusting the join on any other day.
+SELECT count(*), count(call_sid) FROM tickets
+WHERE created_at::date = '<day>' AND ticket_number LIKE 'VA-%';
+```
+
+`tool_timeline` remains **reliable for refusals** — `outcome.missingFields` is
+written faithfully. It is successes that go missing. So the shape of an honest
+query is: refusals from the timeline, successes from the ticket table.
+
+### The proxy that looks safe and over-counts
+
+`transcript ~ 'VA-[0-9]{5}'` seems like a clean read of "the agent told the
+caller a ticket number". It caught 9 extra calls, and every one was
+`check_open_tickets` correctly reading back an EXISTING ticket to a caller
+chasing one — three separate calls from a single number all quote VA-57151.
+The tool working is not the tool filing.
+
+### And the attribution moves after the fact
+
+5 of 196 tickets (2.6%) carry a `call_sid` belonging to a call that started an
+average of 49 minutes LATER, sometimes from a different phone entirely. Too
+small to move a rate; large enough to ruin a single-call forensic, because the
+ticket will point at the wrong call. Related to #71.
+
+### `total_turns` is not turns
+
+It fell 16.1 → 9.7 across the tech cutover, which reads as "the agent stopped
+listening". The callers actually said MORE: 353 characters against 333, in
+fewer transcript lines, at the same call duration. Count `CALLER:` lines in the
+transcript. Do not quote `total_turns` for anything.
+
+## A refusal the model cannot diagnose is a refusal it repeats (2026-09-03)
+
+Not a measurement trap so much as the thing measurement finally caught, and it
+belongs here because the *shape* of the query is what found it.
+
+| gate hit | calls | still filed |
+|---|---|---|
+| `date_of_birth` | 23 | **0** |
+| optical `location` | 11 | 9 |
+
+Two refusals in the same codebase, one terminal and one survivable. Comparing
+them is what located the bug — the same control discipline as
+`realtime-tool-schemas.md`, where Optical filing and Surgery not filing was the
+diff that found the strict-mode kill.
+
+The difference is not severity. It is whether the CALLER's answer can satisfy
+the gate. A location refusal is fixable by the caller. A date-of-birth refusal
+was not, because the model was omitting the argument entirely, so no answer the
+caller gave could ever change the outcome. `dobShape` — a PHI-free shape of
+what arrived, digits to `#` and letters to `a` — recorded `"(none)"` on every
+observed refusal, which is what settled it after hours of arguing about the
+parser.
+
+**Generalise this: when a gate refuses, ask whether anything the caller can say
+would clear it. If not, the refusal is a loop and the model needs to be told
+what IT did wrong, not what to say.** That is what `MissingFields.fix` is for.
+
+**Replicated on two full days, 2026-09-08 and 2026-09-09** — `dobShape` reads
+`(none)` on **75 of 75** refusals and then on **60 of 60**, across surgery,
+tech and optical. 135 of 135. The reason it is recorded here rather than only
+in the day's write-up: a finding taken from one day is a candidate, and the
+cheapest way to promote it is to run the identical query on the next day the
+lane ran. It cost one query and it turned "the model omitted the argument on
+the calls I looked at" into "the model does not send this argument."
+
+And the corollary that survives the replication: **the gate is not the whole
+loss, but it is the biggest measurable slice of it** — 53 of the day's
+unfiled calls on 09-08, 37 on 09-09.
+
+---
+
+## A cost that is a constant times a duration is not a measurement
+
+**2026-09-04.** Every Grok row on disk — 241 of them — carries
+`cost_is_estimated = true` and `cost_reconciled_at` NULL, and its
+`openai_cost_cents` is `Math.ceil(duration * 8/60)` from
+`GROK_COST_CENTS_PER_SECOND` in `src/services/voiceCostRates.ts`. That
+constant came from xAI's published `$0.08 / min` and has never been checked
+against a bill.
+
+Two traps in one number.
+
+**1. The per-call ceil biases in ONE direction, every time.**
+
+| | |
+|---|---|
+| summed seconds | 25,259 (421 min) |
+| exact at $0.08/min | $33.68 |
+| stored | $34.86 |
+| overstatement | **$1.18 = 3.5%** |
+
+Zero rows deviated from the formula, so it is not a bug in the application —
+it is the rounding, and rounding up 241 times is not noise, it is a trend.
+**Round at the aggregate, never per row**, whenever a rate is applied to many
+small quantities.
+
+**2. It sits beside a number built a completely different way.** On the old
+core, `openai_cost_cents` is derived from reported tokens (172 of 184 rows).
+On grok it is duration times a guess. On 2026-09-03 the two read $17.01 and
+$15.86 per call, which looks exactly like "the runtime is 7% cheaper" and is
+not a comparison at all. **Before comparing two cost columns, ask what each
+one is made of.**
+
+The fix is not a better constant. It is `grokCostReconciler.ts`, which takes
+xAI's own daily total from their management API and splits it across the
+day's calls by seconds — an allocation that sums to the actual charge, and
+that absorbs components we do not know about (xAI bill `$0.004 / text input`
+separately from the audio minute, and we have never counted it).
+
+---
+
+## An absent row and a quiet lane look identical
+
+**2026-09-04.** 239 of 239 runtime calls had `call_logs.agent_id` NULL while
+100% of old-core rows carried it, because the runtime opened its row with the
+lane slug only. Five per-agent reports join `agents` on the uuid, so from
+each lane's cutover moment it simply **stopped appearing** in all five — the
+Observatory scorecard read as though optical, surgery and tech had gone
+quiet.
+
+This is the same shape as `tool_timeline` dropping a third of successful
+filings: **the instrument omitted rows rather than mis-valuing them**, and an
+omission has no error bar. Nothing looked wrong.
+
+The control that would have caught it in one query, and which is worth
+running against any per-agent number before quoting it:
+
+```sql
+SELECT voice_provider, count(*) AS calls, count(agent_id) AS with_agent_id
+  FROM call_logs WHERE created_at >= '<day>' GROUP BY 1;
+```
+
+If `with_agent_id` is not `calls`, every per-agent report is under-counting
+by the difference and none of them will say so.
+
+
+---
+
+## A threshold that the thing it watches can never cross (2026-09-10)
+
+The runaway-loop check read
+
+```sql
+WHERE voice_provider = 'grok' AND tool_call_count > 40
+```
+
+against a ceiling that refuses at `dispatches >= perCallDispatches`. So a
+loop the ceiling STOPS lands on exactly 40 and can never exceed it. The check
+could see only calls from BEFORE the ceiling shipped: it proved the fix had
+landed, and in the same moment became permanently blind to the fix doing its
+job.
+
+Measured 2026-09-10 on the same table: `> 40` returns **1** row, `>= 40`
+returns **9**. The old form missed eight of the nine, including all three that
+happened the previous day.
+
+**Two things generalise.**
+
+1. **A boundary check has to be read against the code that enforces the
+   boundary, not against the number in the code.** `40` matched. `>` did not.
+   The number is the part people diff; the comparator is the part that
+   silently decides whether the query has any reachable population at all.
+2. **An empty result from a check that CANNOT return rows looks exactly like a
+   healthy system**, and it looks healthier the longer it runs. This is the
+   `agent_id` failure again (an absent row and a quiet lane look identical)
+   with the absence manufactured by the query rather than by the writer.
+
+The control is one line and it should be run whenever a check is written
+against a cap: **ask the query for the distribution, not the exceedances.**
+
+```sql
+SELECT count(*) FILTER (WHERE tool_call_count > 40)             AS above,
+       count(*) FILTER (WHERE tool_call_count = 40)             AS at_the_cap,
+       count(*) FILTER (WHERE tool_call_count BETWEEN 25 AND 39) AS just_below,
+       max(tool_call_count) FILTER (WHERE tool_call_count < 40)  AS highest_clean
+FROM call_logs WHERE voice_provider = 'grok';
+```
+
+On 2026-09-10 that returns `above 1 · at_the_cap 8 · just_below 0 ·
+highest_clean 23`. The **empty band between 23 and 40** is what proves 40 is a
+strike and never drift — and it is visible only because the query asked for
+the shape instead of asking whether a threshold was crossed.
+
+**RE-MEASURED 2026-09-14, and the drift is the point of re-measuring:**
+`above 1 · at_the_cap 15 · just_below 0 · highest_clean 23`, over 2,423 grok
+calls. So the population went 8 → 15 at the cap in four days while the shape
+held exactly: the band between 23 and 40 is still empty, and **none of the 16
+filed a ticket.** Roughly two lost requests a day, unchanged. This note was
+written with 8 and would have been quoted as 8 indefinitely — the lesson it
+teaches about comparators does not expire, but every number beside it does.
+`tool_call_count` is also NULL on 834 of the 2,423, so the floor here is
+unknown rather than zero.
+
+`ceilingDocCheck.test.ts` keeps the documented 40 in step with
+`DEFAULT_CEILING_LIMITS.perCallDispatches`. It cannot check the comparator,
+which is the half that was actually wrong.
+
+---
+
+## Offline test boundaries
+
+Adapter tests should stub the service dispatch boundary rather than merely spy
+on it, while retaining assertions on the tool name and arguments.
+
+**Why:** A spy still executes its implementation. An adapter test's apparent
+import timeout turned out to include real database/service work, making its
+result depend on the environment rather than the adapter's behavior.
+
+**How to apply:** For timeout investigations, distinguish module loading from
+handler execution before increasing a timeout or changing production behavior.
+
+## "The agent did something impossible" — check the caller first
+
+2026-09-15. I reported that the PCP agent had read one ticket number to five
+different people, and named it the day's most important finding. It had not.
+Every one of those pairs was **the same phone number ringing back**, and the
+ticketing app had consolidated the callback onto the caller's own open ticket
+and handed the agent that ticket's number to read out. The agent said what the
+API told it.
+
+**The control that killed it was one column: is it the same caller?** I had run
+the SQL three different ways and it agreed with itself every time, because
+every query I wrote took the finding for granted and asked only how big it was.
+The tickets were real, the SIDs were real, the numbers were spoken on two calls
+— all true, and the conclusion still wrong.
+
+This is the fourth time the transcript `VA-#####` proxy has caught a caller
+chasing an existing request and been read as a filing (CLAUDE.md records the
+first three, on 2026-09-03). **It is written down and I still walked into it.**
+
+The general form, and the reason this is in this file rather than in a ticket:
+
+- A finding of the shape *"the system did something it could not have done"* is
+  far more often a missing control than a real defect. Before reporting it,
+  name the boring explanation and go disprove that instead.
+- If the boring explanation is "it is the same person / the same record / the
+  same call", the column that settles it is usually one join away.
+- Re-running the same query with a bigger denominator is not a control. It
+  measures the size of a thing you have not yet established exists.
+
+Root cause and the ruling that governs it: CLAUDE.md, "THE SAME TICKET NUMBER
+READ TO TWO CALLERS", and `.agents/memory/ticketing-api-contract.md`.

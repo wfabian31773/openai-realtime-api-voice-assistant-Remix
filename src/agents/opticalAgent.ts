@@ -39,6 +39,11 @@ import { getPacificTimeContext, formatPhoneForSpeech, formatPhoneLast4 } from '.
 import { realtimeToolsFor } from '../tools/realtimeAdapter';
 // Registration is an import side effect, exactly as the HTTP server does it.
 import '../tools/opticalTools';
+import {
+  identityAskScript,
+  identityCertainMeaning,
+  recognisedCallerBlock,
+} from '../runtime/recognisedCallerBlock';
 
 export interface OpticalAgentMetadata {
   callId?: string;
@@ -74,12 +79,25 @@ export const opticalAgentConfig = {
   greeting:
     'Thank you for calling Azul Vision optical. All of our opticians are currently ' +
     'assisting other patients, but I can take a message and they will follow up with you. ' +
+    'All calls are being recorded for quality assurance purposes. ' +
     'How can I help you today?',
   voice: 'sage',
   language: 'en',
 };
 
 /** The five tools this queue needs, and deliberately nothing else. */
+/**
+ * `set_spoken_language` follows the caller's language mid-call (operator
+ * instruction, 2026-09-03). The tool normalises; the runtime performs the
+ * `session.update` — see the TRANSPORT NOTE — SET_SPOKEN_LANGUAGE in
+ * mediaStreamBridge.ts. No prompt line is added for it: the tool's own
+ * description carries the instruction, which is the point of giving Grok
+ * tools instead of paragraphs.
+ *
+ * The comment lives ABOVE this array, not inside it: serverRegistration.test
+ * parses these names straight out of the source, and an apostrophe in a
+ * comment between the brackets was read as a tool name.
+ */
 export const OPTICAL_TOOLS = [
   'lookup_patient',
   'resolve_location',
@@ -96,25 +114,9 @@ export function buildOpticalPrompt(metadata: OpticalAgentMetadata): string {
   // block asserts "this number matches one person on file", and saying that
   // when it is false would name the wrong patient out loud.
   const pc = metadata.precontext;
-  const recognitionSection =
-    pc?.matched && pc.firstName
-      ? `
-# YOU ALREADY KNOW WHO THIS PROBABLY IS
-This number matches one person on file: first name "${pc.firstName}".
-
-- Your greeting has already played. Do NOT greet again. Go straight to
-  confirming: "Am I speaking with ${pc.firstName}?"
-- NEVER open with "can I get your name and date of birth" when you have a
-  match. Asking a patient to identify themselves to a system that already holds
-  their chart tells them it does not.
-- A first name is not verification. Ask for the last name in their own words,
-  and still collect the date of birth. If either disagrees with what you were
-  told to expect, this number matched the WRONG person — use what THEY said and
-  ignore this block from then on.
-- Do not say we recognised their number, and do not speak a last name first.
-- Disclose nothing from anyone's record on the strength of this match.
-`
-      : '';
+  const recognitionSection = recognisedCallerBlock(pc);
+  const askScript = identityAskScript(pc);
+  const certainMeaning = identityCertainMeaning(pc);
 
   /**
    * TIMING LIVES IN ONE PLACE, and it is the last-thirty-seconds block below.
@@ -157,47 +159,28 @@ This number matches one person on file: first name "${pc.firstName}".
       `Use it as the callback number without asking. Confirm it once, BEFORE you file — never after.`
     : `You do not have their number. Ask for a full ten-digit callback number BEFORE you file, never after.`;
 
-  return `You answer the optical line at Azul Vision. ${time}
+  return `## Role & Persona
+You answer the optical line at Azul Vision. ${time}
 
 Every call that reaches you is an optical matter — glasses, lenses, contacts, a
 pickup, a repair. You do not need to work out which department it belongs to,
 and you must never ask the caller which department they want.
-${recognitionSection}
-# WHAT YOU DO
+
+## Objective
 Take the request and file it for the optician at their office. That is the job.
 
-# IF IT BELONGS TO ANOTHER TEAM, YOU STILL TAKE IT
-People press the wrong menu option. If someone reaches you about medication, a surgery, or an appointment,
-take the request exactly as you would any other. Never say "wrong number",
-"wrong extension", "wrong department", or "you'll need to call" — they rang us,
-and that is enough.
-
-The filing tool routes it to the right team and tells you which in routed_to.
-Use THAT name when you say what happens next, never one you guessed at.
-
-# YOU CANNOT TRANSFER ANYONE
-There is no one to transfer to on this line and you have no way to do it. If
-they ask for a person, say so plainly and offer what you can actually deliver:
-"I'm not able to transfer you, but I can take this down and have the optical
-team at your office call you back." Then take the request. Never say you will
-put them through, never say you are transferring, never leave them expecting a
-person to pick up. Promising a transfer you cannot make is worse than saying no.
-
-# APPOINTMENTS
+## Conversation Flow
+${recognitionSection}### Appointments
 If they want to book, change or cancel an appointment, take the request in their
 own words and file it — the tool routes it to our scheduling hub. Do not attempt
 to schedule anything yourself, and do not tell them to call another number.
 
-# HOW A CALL RUNS
+${askScript}
+
+### How a call runs
 1. Find them. Call lookup_patient as soon as you have their phone number, or
-   their name and date of birth. If it says identity_is_certain is false, the
-   number matches more than one person — collect their last name and date of
-   birth, then CALL lookup_patient AGAIN with first name, last name and date of
-   birth together. That almost always resolves it to one person, and it is the
-   whole point of asking.
-   Never tell the caller how many records matched. That is our problem, not
-   theirs. Do not read their history back to them until you are certain who
-   they are.
+   their name and date of birth. ${certainMeaning}
+   Do not read their history back to them until you are certain who they are.
 2. Find their office. This is the one thing a ticket cannot be filed without:
    there is one optician per office, and the request is assigned by location.
    lookup_patient returns usual_clinic — confirm it rather than assuming
@@ -213,23 +196,39 @@ to schedule anything yourself, and do not tell them to call another number.
    description.
 6. File it with file_optical_ticket, then read the ticket number back.
 
-# TWO THINGS ABOUT THE LAST THIRTY SECONDS
-
+### Two things about the last thirty seconds
 THE NUMBER COMES BEFORE THE TICKET. Confirming a callback number after you have
 filed is not confirming it — the ticket is already a record somebody will act
 on. Ask, hear the answer, THEN file. If you have already filed, do not ask; say
 the number you used and stop.
 
 NEVER GO SILENT WHILE FILING. The caller cannot tell silence from a dropped
-line. Say "Let me get this logged for you — one moment." FIRST, then file
-quietly. Do not narrate, do not apologise for the wait, do not ask anything new
-while it runs.
+line. Say "Let me get this logged for you — one moment." FIRST, then call the
+filing tool straight away. Say nothing else until it answers. Do not narrate, do
+not apologise for the wait, do not ask anything new while it runs.
 
 SAY IT ONLY WHEN YOU ARE ACTUALLY ABOUT TO FILE — it is the last thing they
 hear before the pause, not something you say and then carry on asking. Still
 need something? Ask for that first.
 
-# HOW YOU SPEAK
+## Guardrails & Escalation
+People press the wrong menu option. If someone reaches you about medication, a surgery, or an appointment,
+take the request exactly as you would any other. Never say "wrong number",
+"wrong extension", "wrong department", or "you'll need to call" — they rang us,
+and that is enough.
+
+The filing tool routes it to the right team and tells you which in routed_to.
+Use THAT name when you say what happens next, never one you guessed at.
+
+No one to transfer to, and no way to do it. When they ask for a person —
+representative, agent, someone in the department — say what you cannot do and
+what you can, then do it: "I'm not able to transfer calls. What I can do is
+take a message and put in a request for the optical team at your office to
+follow up with you." Never say you will put them through, and never imply
+someone is about to come free: no "they're currently busy", no "as soon as
+someone's available".
+
+## Voice & Communication Style
 ${callbackLine}
 Short sentences. One question at a time. Do not read lists aloud. Do not spell
 anything unless they ask. Never use markdown, asterisks or bullet characters —
@@ -262,8 +261,22 @@ export async function createOpticalAgent(
     // VA-50813 filed with call_sid null because the prompt was the only thing
     // carrying it.
     tools: realtimeToolsFor(OPTICAL_TOOLS, {
-      call_sid: metadata.callSid ?? metadata.callId,
+      /**
+      * THE TWILIO SID OR NOTHING — never the OpenAI call id in its place.
+      *
+      * This read `metadata.callSid ?? metadata.callId`. The fallback is a
+      * uuid, so it fails isTwilioCallSid, produces no idempotency key, and
+      * matches no ticket in the post-call enrichment endpoint — the same
+      * dead end as sending nothing, but it looks like an identifier in the
+      * logs. Absent is the honest value, and it makes "we never had a SID"
+      * countable. Telemetry keeps its own callId; this field is the one that
+      * travels on the ticket.
+      */
+      call_sid: metadata.callSid,
       caller_phone: metadata.callerPhone,
+      /** Which lane is asking. Only a lane in `LANES_THAT_ASK` may have the
+       * caller's new-or-existing answer read back to it — Codex round 7. */
+      lane: 'optical',
       dialed_number: metadata.dialedNumber,
       // The three shared patient tools serve both queues now. This is what
       // tells them a surgery centre is the WRONG kind of place for this call —

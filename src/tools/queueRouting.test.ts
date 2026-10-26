@@ -11,7 +11,7 @@
  * word. Half of these tests are about staying silent.
  */
 import { describe, it, expect } from 'vitest';
-import { detectCrossQueue } from './queueRouting';
+import { detectCrossQueue, OPERATION_CUES, SURGERY_CUES } from './queueRouting';
 
 const OPTICAL = 1;
 const SURGERY = 2;
@@ -328,5 +328,34 @@ describe('patients say medicine, charts say medication', () => {
     // 'medicine' is a strong cue, so it must still lose to the home queue's
     // own subject when both appear.
     expect(detectCrossQueue('my glasses broke and I also take medicine', OPTICAL)).toBeNull();
+  });
+});
+
+/**
+ * OPERATION_CUES vs SURGERY_CUES — the claim `schedulingRedirectForStatedIntent`
+ * makes about its own guard, asserted rather than trusted (Codex P2, PR #298).
+ *
+ * The two lists must differ by exactly the facility words. If a future cue is
+ * added to SURGERY_CUES that names a PLACE rather than a procedure, this is
+ * where the subtraction has to grow — and until it does, a caller whose
+ * employer carries that word loses their scheduling redirect the way a surgery
+ * centre's coordinator did.
+ */
+describe('the operation cues are the surgery cues minus the places', () => {
+  it('excludes the facility name that caused the false positive', () => {
+    expect(OPERATION_CUES).not.toContain('surgery center');
+  });
+
+  it('keeps every cue that names a procedure', () => {
+    for (const cue of ['surgery date', 'my surgery', 'cataract surgery', 'lasik', 'pre-op', 'post-op', 'operation']) {
+      expect(OPERATION_CUES, `${cue} is evidence of an operation`).toContain(cue);
+    }
+  });
+
+  it('is a strict subset — it may never invent a cue of its own', () => {
+    // A cue here that SURGERY_CUES does not have would mean this list had
+    // started drifting into a second, hand-maintained taxonomy.
+    const surgery = new Set<string>(SURGERY_CUES);
+    for (const cue of OPERATION_CUES) expect(surgery.has(cue), cue).toBe(true);
   });
 });

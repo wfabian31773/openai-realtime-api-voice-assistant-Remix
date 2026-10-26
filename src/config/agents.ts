@@ -1,3 +1,7 @@
+import type { OutboundLanePolicy } from '../runtime/outbound/campaign';
+import { createOutboundProofAgent, outboundProofAgentConfig, outboundProofPolicy } from '../agents/outboundProofAgent';
+import { createNpxOutreachAgent, npxOutreachAgentConfig, npxOutreachPolicy } from '../agents/npxOutreachAgent';
+import { createSiAssistantAgent, siAssistantAgentConfig, siAssistantPolicy } from '../agents/siAssistantAgent';
 import { RealtimeAgent } from '@openai/agents/realtime';
 import { createAfterHoursAgent } from '../agents/afterHoursAgent';
 import { createDRSSchedulerAgent } from '../agents/drsSchedulerAgent';
@@ -7,11 +11,12 @@ import { createFantasyFootballAgent } from '../agents/fantasyFootballAgent';
 import { createNoIvrAgent, noIvrAgentConfig, type NoIvrAgentMetadata } from '../agents/noIvrAgent';
 import { createNoIvrAgentV2, noIvrAgentV2Config } from '../agents/noIvrAgentV2';
 import { createAzulSchedulingAgent, azulSchedulingAgentConfig } from '../agents/azulSchedulingAgent';
-import { createPcpAgent, pcpAgentConfig } from '../agents/pcpAgent';
+import { createPcpAgent, pcpAgentConfig, sweepPcpUnfiledCall } from '../agents/pcpAgent';
 import { createOpticalAgent, opticalAgentConfig } from '../agents/opticalAgent';
 import { createSurgeryAgent, surgeryAgentConfig } from '../agents/surgeryAgent';
 import { createTechAgent, techAgentConfig } from '../agents/techAgent';
 import { createRecordsAgent, recordsAgentConfig } from '../agents/recordsAgent';
+import { createRuntimeProofAgent, runtimeProofAgentConfig } from '../agents/runtimeProofAgent';
 
 export type AgentFactory = (...args: any[]) => RealtimeAgent | Promise<RealtimeAgent>;
 
@@ -25,7 +30,23 @@ export interface AgentConfig {
   version?: string;
   voice?: string;      // Voice to use for this agent (e.g., 'sage', 'coral')
   language?: string;   // Language code for transcription (e.g., 'en', 'es')
+  /** The languages this line SPEAKS ('en', 'es'); absent = follow the caller
+   *  into any language. Read by the voice runtime's language block. */
+  spokenLanguages?: readonly string[];
   greeting?: string;   // Agent greeting message
+  /**
+   * The lane's teardown filer, when it has one (PCP's lost-request floor).
+   * Carried HERE, beside `factory`, so the runtime gets it from the same
+   * import statement the factory came from — one module evaluation, so the
+   * per-call state the factory wrote is the state the sweep reads. See
+   * src/runtime/pcpFloor.ts for the Node 20 double evaluation this prevents.
+   */
+  teardownSweep?: (callId: string, ctx?: { outcome?: string }) => Promise<void>;
+  /**
+   * On an `agentType: 'outbound'` lane the voice runtime DIALS: its calling
+   * window, caps, caller ID, greeting and voicemail (src/runtime/outbound/).
+   */
+  outbound?: OutboundLanePolicy;
 }
 
 export class AgentRegistry {
@@ -43,6 +64,7 @@ export class AgentRegistry {
       version: noIvrAgentConfig.version, // v1.13.0: after-hours routing mandate — Request Type pinning, transcript at filing, urgent-transfer record ticket
       voice: noIvrAgentConfig.voice,
       language: noIvrAgentConfig.language,
+      spokenLanguages: noIvrAgentConfig.spokenLanguages,
       greeting: noIvrAgentConfig.greeting,
     });
 
@@ -52,6 +74,7 @@ export class AgentRegistry {
       factory: createNoIvrAgentV2 as AgentFactory,
       enabled: true,
       description: 'DEV: ' + noIvrAgentV2Config.description,
+      greeting: noIvrAgentV2Config.greeting,
       twilioNumbers: [],
       agentType: 'inbound',
       version: '2.0.0-workflow', // v2.0.0: Workflow engine with structured intent classification and guarded escalation
@@ -63,6 +86,7 @@ export class AgentRegistry {
       factory: createNoIvrAgentV2 as AgentFactory,
       enabled: true,
       description: noIvrAgentV2Config.description,
+      greeting: noIvrAgentV2Config.greeting,
       twilioNumbers: [],
       agentType: 'inbound',
       version: noIvrAgentV2Config.version,
@@ -73,6 +97,9 @@ export class AgentRegistry {
       id: 'after-hours',
       factory: createAfterHoursAgent,
       enabled: true,
+      // No greeting: this lane is refused by the voice runtime (its factory
+      // takes a different argument layout), so one here would be unreachable.
+      // The SIP path uses afterHoursAgent's own WELCOME_GREETING.
       description: 'After-hours medical triage for Azul Vision',
       twilioNumbers: [],
       agentType: 'inbound',
@@ -162,6 +189,77 @@ export class AgentRegistry {
       greeting: recordsAgentConfig.greeting,
     });
 
+    // The operator's proving lane: every registry capability on one agent,
+    // for live-testing the voice runtime end to end. Reachable only by
+    // pointing a number at /voice/runtime-proof, and refused by the runtime
+    // unless a transfer is configured (it holds the handoff tool).
+    this.register({
+      id: runtimeProofAgentConfig.slug,
+      factory: createRuntimeProofAgent as AgentFactory,
+      enabled: true,
+      description: runtimeProofAgentConfig.description,
+      twilioNumbers: [],
+      agentType: 'inbound',
+      version: runtimeProofAgentConfig.version,
+      voice: runtimeProofAgentConfig.voice,
+      language: runtimeProofAgentConfig.language,
+      greeting: runtimeProofAgentConfig.greeting,
+    });
+
+    // The operator's OUTBOUND proving lane: the runtime outbound layer
+    // (src/runtime/outbound/) end to end, on a campaign only his own numbers
+    // are queued in. Dials nothing unless RUNTIME_OUTBOUND_DIALING=1,
+    // OUTBOUND_CAMPAIGN_OUTBOUND_PROOF=1 and OUTBOUND_CALLER_ID are set.
+    this.register({
+      id: outboundProofAgentConfig.slug,
+      factory: createOutboundProofAgent as AgentFactory,
+      enabled: true,
+      description: outboundProofAgentConfig.description,
+      twilioNumbers: [],
+      agentType: 'outbound',
+      version: outboundProofAgentConfig.version,
+      voice: outboundProofAgentConfig.voice,
+      language: outboundProofAgentConfig.language,
+      outbound: outboundProofPolicy,
+    });
+
+    // The NPX outreach campaign (v110): a sooner routine exam at an NPX
+    // partner for patients on the Console's movable list. Dials nothing
+    // unless RUNTIME_OUTBOUND_DIALING=1, OUTBOUND_CAMPAIGN_NPX_OUTREACH=1 and
+    // NPX_OUTREACH_CALLER_ID are set and that number's Voice URL points here.
+    // Calls the demo seed and the demo NPX until NPX_OUTREACH_MODE=live (v113).
+    this.register({
+      id: npxOutreachAgentConfig.slug,
+      factory: createNpxOutreachAgent as AgentFactory,
+      enabled: true,
+      description: npxOutreachAgentConfig.description,
+      twilioNumbers: [],
+      agentType: 'outbound',
+      version: npxOutreachAgentConfig.version,
+      voice: npxOutreachAgentConfig.voice,
+      language: npxOutreachAgentConfig.language,
+      spokenLanguages: ['en', 'es'],
+      outbound: npxOutreachPolicy,
+    });
+
+    // SI Assistant (v114): approved single-contact calls, texts and emails
+    // from the Support Center bot. Runtime outbound only — not on the old
+    // core. Dials nothing unless RUNTIME_OUTBOUND_DIALING=1,
+    // OUTBOUND_CAMPAIGN_SI_ASSISTANT=1 and SI_ASSISTANT_NUMBER are set and
+    // that number's Voice URL points at /voice/si-assistant.
+    this.register({
+      id: siAssistantAgentConfig.slug,
+      factory: createSiAssistantAgent as AgentFactory,
+      enabled: true,
+      description: siAssistantAgentConfig.description,
+      twilioNumbers: [],
+      agentType: 'outbound',
+      version: siAssistantAgentConfig.version,
+      voice: siAssistantAgentConfig.voice,
+      language: siAssistantAgentConfig.language,
+      outbound: siAssistantPolicy,
+    });
+
     // Azul Vision NextGen scheduling line (San Diego pilot).
     // All scheduling decisions run through the Eye Care service's rules
     // engine (sage_* tools) — the master switch + per-location approvals
@@ -191,6 +289,7 @@ export class AgentRegistry {
       voice: pcpAgentConfig.voice,
       language: pcpAgentConfig.language,
       greeting: pcpAgentConfig.greeting,
+      teardownSweep: sweepPcpUnfiledCall,
     });
 
     // Outbound agents

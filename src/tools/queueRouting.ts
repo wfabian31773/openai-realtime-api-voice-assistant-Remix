@@ -164,8 +164,14 @@ const OPTICAL_CUES = [
   'sunglasses', 'my glasses are', 'pick up my glasses', 'lentes', 'gafas', 'armazon', 'armazón',
 ];
 
-/** Surgery, when the words are unmistakably about an operation. */
-const SURGERY_CUES = [
+/**
+ * Surgery, when the words are unmistakably about an operation.
+ *
+ * Exported for the same reason `SCHEDULING` and `SPECIALIST_CUES` are: so the
+ * invariant `OPERATION_CUES` claims about it — a strict subset, differing by
+ * exactly the facility words — can be asserted rather than trusted.
+ */
+export const SURGERY_CUES = [
   'my surgery', 'the surgery', 'cataract surgery', 'lasik', 'surgery date',
   'surgery center', 'pre-op', 'post-op', 'operation', 'cirugía', 'cirugia',
 ];
@@ -221,6 +227,36 @@ function specialistReferral(foldedText: string): boolean {
 /** `text` is already folded by the caller; cues are folded here. */
 function hit(text: string, cues: string[]): boolean {
   return cues.some((c) => text.includes(fold(c)));
+}
+
+/**
+ * `hit`, but the cue has to stand as a WHOLE WORD — Codex P2 round 2, PR #298.
+ *
+ * `hit` is a substring test, which is right for `detectCrossQueue`: several of
+ * its cues are deliberate STEMS (`reprogram` catches reprogramar,
+ * reprogramación and reprogramacion; `oculoplastic` catches oculoplastics), and
+ * a boundary would silently disarm them.
+ *
+ * It is wrong for WITHHOLDING a redirect on a professional narrative. The bare
+ * cue `operation` is contained in `operations`, so an "operations coordinator"
+ * or "operations manager" ringing to book an ordinary eye exam matched the
+ * surgery exception and stayed in department 18 — their ROLE NAME withheld the
+ * route. That is the 'surgery center' finding one level down, and it survived
+ * removing 'surgery center'.
+ *
+ * Safe here and only here because `OPERATION_CUES` contains no stems — every
+ * entry is a complete word or phrase — and `schedulingReachesTheHub.test.ts`
+ * fires each cue on its own to prove none was disarmed by the boundary.
+ *
+ * The text is already folded (lowercased, diacritics stripped), so a boundary
+ * is "not a letter or a digit". Hyphens count as boundaries, which is what
+ * `pre-op` and `post-op` need.
+ */
+function hitWord(text: string, cues: string[]): boolean {
+  return cues.some((c) => {
+    const cue = fold(c).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return new RegExp(`(^|[^a-z0-9])${cue}([^a-z0-9]|$)`).test(text);
+  });
 }
 
 /**
@@ -362,4 +398,168 @@ export function detectCrossQueue(text: string, homeDepartmentId: number): QueueR
   }
 
   return null;
+}
+
+/**
+ * The three scheduling intents a caller can STATE rather than imply.
+ *
+ * WHY THIS EXISTS BESIDE `detectCrossQueue` RATHER THAN INSIDE IT.
+ *
+ * `detectCrossQueue` reads prose, which is the only evidence a queue lane has:
+ * a patient says what they want and the words are all we get. The PCP line is
+ * different — its intake asks the caller what the call is about and stores the
+ * answer as a closed enum, so on that lane the intent is a STATED FACT and the
+ * description is a summary written around it.
+ *
+ * Reading the stated value is worth a third of the population. Measured over
+ * all 217 PCP tickets, 2026-09-14: **75 carry one of these three slugs, and 25
+ * of them contain no scheduling cue at all** — a narrative like "caller would
+ * like to be seen before their referral expires" states the purpose in the
+ * enum and never uses a word this file cues on. Prose alone leaves those 25 in
+ * department 18.
+ *
+ * It is also the safer read on a professional line, and that is not a
+ * side-benefit. `detectCrossQueue`'s subject cues fire on a caller's EMPLOYER
+ * — `'surgery center'` in SURGERY_CUES routed a Loma Linda Surgery Center
+ * caller's ticket to department 2 on 2026-09-08 (CAbf717457), which is still
+ * open. An enum filled from a closed list has nothing in it to drift.
+ *
+ * THE SURGERY EXCEPTION STILL WINS, and it is enforced HERE rather than at the
+ * call site so it cannot be forgotten by the next caller of this function.
+ * Operator, 2026-08-13: "surgery is an exception to that hva hub rule." A
+ * stated `reschedule` whose narrative names an operation is coordinator work,
+ * so this declines and the request stays with the line that took it. 4 of the
+ * 75 are that shape.
+ *
+ * BUT IT READS `OPERATION_CUES`, NOT `SURGERY_CUES` — Codex P2, PR #298, and
+ * it caught this route doing the exact thing the paragraph above boasts it
+ * cannot. `SURGERY_CUES` contains the literal `'surgery center'`, so a
+ * referral coordinator AT a surgery centre, ringing to book an ordinary eye
+ * exam, hit the exception on their EMPLOYER's name and stayed in department
+ * 18. That is #99 arriving through the one line here that reads prose.
+ *
+ * The operator's own wording settles which list is right: "The exception is
+ * the OPERATION, not the word 'reschedule'." A place that performs surgery is
+ * not a surgery being performed.
+ */
+export type StatedSchedulingIntent = 'new' | 'reschedule' | 'cancel';
+
+/**
+ * Surgery cues that name a PLACE rather than a procedure.
+ *
+ * Derived by subtraction rather than written out, so this list stays visibly
+ * a statement about `SURGERY_CUES` — if a future facility word is added there
+ * and not here, the subtraction is where to add it. `queueRouting.test.ts`
+ * asserts the two lists still differ by exactly this.
+ *
+ * NOT removed from `SURGERY_CUES` itself. That list is read by
+ * `detectCrossQueue`, which routes on subject matter across every lane, and
+ * changing it is the open #99 work that `docs/BACKEND_HANDOFF.md` requires a
+ * before-and-after department-2 misroute measurement for. This narrower list
+ * is used ONLY to decide whether to WITHHOLD a scheduling redirect, where a
+ * false positive costs a routed ticket and can never misroute one.
+ */
+const SURGERY_CUES_NAMING_A_PLACE = ['surgery center'];
+
+export const OPERATION_CUES = SURGERY_CUES.filter(
+  (cue) => !SURGERY_CUES_NAMING_A_PLACE.includes(cue),
+);
+
+/**
+ * Reason ids for a STATED intent, read back out of SCHEDULING so this cannot
+ * drift from the cue table — the same argument that keeps `hubTaxonomy` on the
+ * shared list rather than a copy of it.
+ */
+const STATED_SCHEDULING_REASON_ID: Record<StatedSchedulingIntent, number> = {
+  new: 146,
+  reschedule: 147,
+  cancel: 148,
+};
+
+export function schedulingRedirectForStatedIntent(
+  intent: StatedSchedulingIntent,
+  text: string,
+  homeDepartmentId: number,
+  /**
+   * THE CALLER'S OWN METADATA, REMOVED BEFORE THE GUARD READS THE TEXT —
+   * Codex P2 round 3, PR #298, and the point where this stopped being a cue
+   * list problem.
+   *
+   * The same finding arrived three times in three shapes: `surgery center`,
+   * then `operation` inside `operations coordinator`, then `lasik` inside
+   * "Coordinator at Example LASIK Clinic". No edit to the cue list closes it,
+   * because in the last case the employer token and the procedure token are
+   * the SAME TOKEN — a word boundary cannot separate them and neither can a
+   * narrower list.
+   *
+   * What separates them is provenance, not spelling. Codex's own framing was
+   * "request-scoped evidence rather than matching the whole narrative", and
+   * this makes that literal: whatever the intake recorded as the caller's
+   * organisation and role is removed from the text, and the guard reads what
+   * is left. On the PCP line that metadata is a large share of the narrative
+   * by construction, which is why every one of these findings landed here.
+   *
+   * IT CANNOT LOOSEN THE EXCEPTION BEYOND ITS OWN STRING. Only exact
+   * occurrences of the supplied text are removed, so "Coordinator at Example
+   * LASIK Clinic — needs to move the surgery date" still withholds, and
+   * "Booking her LASIK" still withholds because "example lasik clinic" does
+   * not occur in it. Omitted entirely, the behaviour is exactly as before.
+   *
+   * MEASURED, all 217 PCP tickets: 7 organisations contain an operation cue,
+   * and 2 of the 75 scheduling tickets are this shape. Small — and the reason
+   * to fix it at the source anyway is that it closes all three rounds at one
+   * point rather than waiting for the fourth token.
+   */
+  callerMetadata: readonly string[] = [],
+): QueueRedirect | null {
+  if (homeDepartmentId === HVA_HUB) return null;
+  let t = fold(text);
+  for (const raw of callerMetadata) {
+    const m = fold(raw).trim();
+    // A one- or two-character fragment would blank half the narrative; a
+    // missing organisation arrives as '' and must not match everywhere.
+    if (m.length < 3) continue;
+    t = t.split(m).join(' ');
+  }
+  // The exception, before anything else. An operation is not front-desk
+  // scheduling whatever the intake enum says — but a surgery CENTRE is an
+  // employer, not an operation. See OPERATION_CUES.
+  if (hitWord(t, OPERATION_CUES)) return null;
+
+  const reasonId = STATED_SCHEDULING_REASON_ID[intent];
+  const row = SCHEDULING.find((s) => s.reasonId === reasonId);
+  // Unreachable while the ids above are in SCHEDULING, and `queueRouting.test.ts`
+  // asserts they are. Handled rather than asserted so a future edit to the cue
+  // table degrades to "keep it here" instead of throwing inside a filing tool.
+  if (!row) return null;
+
+  /**
+   * NO SPECIALIST REFINEMENT ON THIS PATH — Codex P2 round 2, PR #298.
+   *
+   * `specialistReferral` read `SPECIALIST_CUES` over the whole narrative, and
+   * on this path the narrative is dominated by the caller's own organisation
+   * and role BY CONSTRUCTION — that is what the PCP intake collects. So
+   * "coordinator at Example Retina Specialist", booking a routine exam, graded
+   * as reason 152.
+   *
+   * There is no lexical way to separate that employer from a patient who
+   * genuinely needs a retina specialist: the two sentences contain the same
+   * string. So this stops guessing rather than guessing better — the same
+   * ruling as `detectCrossQueue` not being called here at all.
+   *
+   * The cost is small and was checked rather than assumed: reason 152 has been
+   * used ONCE in 90 days (see the note on `specialistReferral`). A refinement
+   * that fires once a quarter is not worth a class of mislabelled tickets.
+   *
+   * `detectCrossQueue` keeps its own specialist read. That is the PATIENT path,
+   * where the narrative is the caller's own words about their own care.
+   */
+  return {
+    departmentId: HVA_HUB,
+    departmentName: 'HVA Hub',
+    requestTypeId: 32,
+    requestReasonId: row.reasonId,
+    requestReason: row.reason,
+    note: 'Scheduling request — taken on another line and routed here.',
+  };
 }

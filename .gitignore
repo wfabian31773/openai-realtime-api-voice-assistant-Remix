@@ -137,3 +137,15 @@ twilio-inventory.json
 
 # Shadow observer spool (session records; never committed)
 .shadow-spool/
+
+# Replay corpora and regression output carry FULL call transcripts (names,
+# dates of birth, phone numbers). The corpus builder and the regression
+# runner both refuse to write anywhere git does not ignore — these rules are
+# the guard, not documentation of one. PHI never in git.
+replay-corpus/
+replay-out/
+*.jsonl
+
+# Written at build time by scripts/write-build-info.cjs; never committed (a
+# committed copy reported 3f4ec74 as the deployed SHA for two months).
+build-info.json

@@ -1,0 +1,249 @@
+/**
+ * Stage C, step 3 — the measurement engine's metric DEFINITIONS.
+ *
+ * Every number the engine publishes is computed from the SQL in this file and
+ * nothing else. The engine, not Claude, is authoritative for these numbers
+ * (operator, 2026-10-22), so the definitions are code, and a change to any of
+ * them is a new METHOD_VERSION: `definitions.test.ts` hashes the text below and
+ * fails until both METHOD_VERSION and DEFINITIONS_HASH are bumped together.
+ * The learning register's VERIFY gate refuses a value whose method_version does
+ * not match the one a target was set against, so a silent change to a
+ * definition cannot pass for a moved number.
+ *
+ * WHAT IS DELIBERATELY NOT HERE: any fleet-and-5Star combined rate. The two
+ * systems measure different things (a ticket filed, an appointment booked) and
+ * are published side by side, never summed.
+ *
+ * PHI: every statement returns counts, lane slugs, build markers and call SIDs
+ * (the SIDs only to join across databases, never exported). No name, phone,
+ * date of birth or transcript text leaves a statement — the Hub transcript is
+ * never selected here.
+ *
+ * 5Star is read ONLY through two SECURITY DEFINER functions owned in 5Star,
+ * public.learning_fivestar_calls(date) and public.learning_fivestar_bookings(text[]).
+ * The engine's role may EXECUTE them and touches no 5Star table directly: the
+ * functions read transcript, notes, to_phone, response_excerpt and the
+ * booking notes inside 5Star and return only derived booleans, status enums,
+ * build markers, opaque row ids and the NextGen mirror join keys. Their SQL
+ * mirrors the rules written in the 5Star metric definitions below; a change
+ * to either side must be made on both.
+ */
+
+/** Bump with DEFINITIONS_HASH whenever any text below changes. */
+export const METHOD_VERSION = "learning-v7";
+/** sha256 of definitionsText(), first 16 hex. definitions.test.ts pins it. */
+export const DEFINITIONS_HASH = "438cf23ca06ef815";
+
+export const PACIFIC = "America/Los_Angeles";
+
+/** The 5Star inbound line the Daybook measures. */
+export const FIVESTAR_INBOUND_NUMBER = "+16266998484";
+/** Lane names, from ai-bridge learning/vocab.json lane_groups. */
+export const FIVESTAR_INBOUND_LANE = "drs-8484";
+
+export type MetricId =
+  | "remix.filed_rate"
+  | "remix.filed_rate_independent"
+  | "5star.submitted_rate_a"
+  | "5star.booked_rate_a"
+  | "5star.booked_rate_b";
+
+export interface MetricDefinition {
+  id: MetricId;
+  repo: "Remix" | "5Star";
+  /** True only when the numerator is read from a system the agent does not write. */
+  independent: boolean;
+  definition: string;
+}
+
+export const METRICS: readonly MetricDefinition[] = [
+  {
+    id: "remix.filed_rate",
+    repo: "Remix",
+    independent: false,
+    definition:
+      "Substantive calls (canonical CallSid, not outbound, duration >= 30, the call's own Pacific day from call_logs.created_at) " +
+      "whose own call_logs row carries a non-blank ticket_number, over all substantive calls. Per lane (call_logs.agent_used) and build " +
+      "(call_logs.runtime_marker; '' when absent). The write-back is the agent's own record, so this is NOT independent; " +
+      "remix.filed_rate_independent is the Support Center reading of the same calls.",
+  },
+  {
+    id: "remix.filed_rate_independent",
+    repo: "Remix",
+    independent: true,
+    definition:
+      "The same denominator as remix.filed_rate; the numerator is the calls the Support Center shows an AGENT filing for, folded per call " +
+      "agent > UNKNOWN > staff (CLAUDE.md, the filing test). UNKNOWN calls are reported in unknown_count and never counted as filed or unfiled. " +
+      "Read through the Support Center plugin API (scope metrics:read); unavailable until its token is set, and the run notes say so.",
+  },
+  {
+    id: "5star.submitted_rate_a",
+    repo: "5Star",
+    independent: false,
+    definition:
+      "5Star inbound calls on the DRS line (not simulated, the Pacific day of call_logs.created_at, notes 'DRS voice call%') that are substantive " +
+      "(duration >= 30 and a CALLER: line) and whose notes carry core status REQUEST_SUBMITTED, over substantive. Per build (call_logs.build_id).",
+  },
+  {
+    id: "5star.booked_rate_a",
+    repo: "5Star",
+    independent: true,
+    definition:
+      "Substantive calls with a booking that the Patient Console's NextGen mirror shows at the run's read time, over substantive. A booking is the " +
+      "call's internal_bookings row (voice_agent_booking_attempts outcome booked/booked_drift, or notes 'Call ID: <call_logs.id>'). Booked: a " +
+      "non-NPX row not cancelled locally whose mirror appointment (by NextGen id, else person + slot date + begin time) is neither cancelled nor " +
+      "moved-and-not-kept, or was moved and the person still holds such a live appointment on or after the call's day (operator 2026-10-11; " +
+      "the NextGen Bible row rule); an NPX row needs a firm " +
+      "partner link (isFirmPartnerLink), a partner status in in_partner_schedule/awaiting_outcome/partner_reported_showed/partner_report_received, " +
+      "and not cancelled locally. The mirror lags staff entry, so a day is re-read on later nights until it settles.",
+  },
+  {
+    id: "5star.booked_rate_b",
+    repo: "5Star",
+    independent: true,
+    definition:
+      "The booked count of 5star.booked_rate_a over ASKED calls: substantive calls that passed consent (report_consent success), asked to cancel " +
+      "(report_cancel_request), reached ASK_PREFERENCE/CONFIRM_LOCATION/OFFER_SLOTS/CONFIRM_SLOT/CONFIRM_REQUEST_SUBMITTED (sage_tool_calls step " +
+      "fields only), or whose notes carry one of the terminal core statuses or those steps (the Daybook proxy).",
+  },
+] as const;
+
+// ---------------------------------------------------------------------------
+// SQL. Parameters are typed in the text (the v52 lesson: two bare parameters
+// cannot be typed by the server).
+
+/** Hub: substantive fleet calls of one Pacific day. $1 = day (date). */
+export const REMIX_CALLS_SQL = `
+SELECT call_sid,
+       coalesce(nullif(btrim(agent_used), ''), 'unknown') AS lane,
+       coalesce(nullif(btrim(%MARKER%), ''), '')           AS runtime_marker,
+       (nullif(btrim(ticket_number), '') IS NOT NULL)      AS filed
+FROM call_logs
+WHERE call_sid ~* '^CA[0-9a-f]{32}$'
+  AND coalesce(direction, 'inbound') <> 'outbound'
+  AND duration >= 30
+  AND ((created_at AT TIME ZONE 'UTC') AT TIME ZONE '${PACIFIC}')::date = $1::date`;
+
+/** Support Center: provenance per call for a list of SIDs. $1 = text[]. */
+export const SUPPORT_PROVENANCE_SQL = `
+SELECT call_sid,
+       bool_or(created_by_id IS NULL AND agent_used IS NOT NULL) AS any_agent,
+       bool_or(created_by_id IS NULL AND agent_used IS NULL)     AS any_unknown
+FROM tickets
+WHERE call_sid ~* '^CA[0-9a-f]{32}$' AND call_sid = ANY($1::text[])
+GROUP BY call_sid`;
+
+/**
+ * 5Star: the DRS inbound calls of one Pacific day, with the funnel flags,
+ * through the SECURITY DEFINER function public.learning_fivestar_calls
+ * (5Star). The function holds the line filter, the UTC-to-Pacific day (the
+ * naive cast read 108 calls on 2026-10-20 where the Daybook read 81/82), the
+ * substantive / submitted / asked rules and the build (call_logs.build_id),
+ * so no 5Star table is read from here. $1 = day (date).
+ */
+export const FIVESTAR_CALLS_SQL = `SELECT call_id AS id, build, substantive, submitted, asked FROM public.learning_fivestar_calls($1::date)`;
+
+/**
+ * 5Star: the bookings tied to a list of call_logs ids, through the SECURITY
+ * DEFINER function public.learning_fivestar_bookings (5Star), which honours
+ * only DRS inbound call ids. $1 = text[]. Since learning-v7 (5Star #409) the
+ * NextGen ids leave 5Star only as md5 tags: appointment_tag =
+ * md5(lower(appointment id)), person_tag = md5(lower(person id)), each only
+ * when the id is UUID-shaped. No person or appointment id is read.
+ */
+export const FIVESTAR_BOOKINGS_SQL = `SELECT call_log_id, booking_id, status, source, appointment_tag, person_tag, slot_date, slot_time, npx_link_method, partner_link_needs_review, partner_outcome_status FROM public.learning_fivestar_bookings($1::text[])`;
+
+/**
+ * Console: the mirror's view of a list of bookings. $1 = jsonb array of
+ * {k, appointment_tag, person_tag, slot_date, slot_time, since}. The tags are
+ * matched against md5(id::text) of the mirror's own columns (a uuid's text is
+ * lower case, which is what 5Star hashes). Returns one row per k that is booked
+ * at the read time. The rule is the learning-v6 rule, unchanged: only the
+ * comparison moved from the id to its tag.
+ */
+export const CONSOLE_BOOKED_SQL = `
+WITH b AS (
+  SELECT x->>'k' AS k,
+         CASE WHEN x->>'appointment_tag' ~ '^[0-9a-f]{32}$' THEN x->>'appointment_tag' END AS appointment_tag,
+         CASE WHEN x->>'person_tag' ~ '^[0-9a-f]{32}$' THEN x->>'person_tag' END           AS person_tag,
+         (x->>'slot_date')::date          AS slot_date,
+         x->>'slot_time'                  AS slot_time,
+         (x->>'since')::date              AS since
+  FROM jsonb_array_elements($1::jsonb) x
+),
+facts AS (
+  -- ONE bounded scan of the mirror, hashing both ids. The lower bound is the
+  -- earliest date any rule can need (the booked slot, or the call day a
+  -- replacement must fall on or after) less 60 days of slack for a NextGen id
+  -- whose mirror date drifted earlier than the booked slot. Unbounded, or
+  -- hashed per booking, this timed out; bounded it reads in about 4 s.
+  SELECT md5(f.appointment_id::text) AS atag, md5(f.person_id::text) AS ptag,
+         f.appointment_date, f.begin_time, f.is_cancelled, f.is_rescheduled, f.is_kept
+  FROM si_appointment_facts f
+  WHERE f.appointment_date >= (SELECT min(least(slot_date, since)) - 60 FROM b)
+),
+by_id AS (
+  SELECT atag AS tag, is_cancelled, is_rescheduled, is_kept
+  FROM facts WHERE atag IN (SELECT appointment_tag FROM b WHERE appointment_tag IS NOT NULL)
+),
+by_person AS (
+  SELECT ptag AS tag, appointment_date, begin_time, is_cancelled, is_rescheduled, is_kept
+  FROM facts WHERE ptag IN (SELECT person_tag FROM b WHERE person_tag IS NOT NULL)
+),
+hit AS (
+  SELECT b.k, b.person_tag, b.since, f.is_cancelled, f.is_rescheduled, f.is_kept
+  FROM b
+  JOIN LATERAL (
+    SELECT u.is_cancelled, u.is_rescheduled, u.is_kept
+    FROM (
+      SELECT i.is_cancelled, i.is_rescheduled, i.is_kept, true AS by_id
+      FROM by_id i WHERE i.tag = b.appointment_tag
+      UNION ALL
+      SELECT p.is_cancelled, p.is_rescheduled, p.is_kept, false AS by_id
+      FROM by_person p
+      WHERE p.tag = b.person_tag
+        AND p.appointment_date = b.slot_date AND p.begin_time = b.slot_time
+    ) u
+    -- The NextGen id wins: person + slot is a fallback for a booking whose id
+    -- the mirror does not hold, never a second chance for a cancelled id.
+    ORDER BY u.by_id DESC, u.is_cancelled ASC
+    LIMIT 1
+  ) f ON true
+)
+SELECT h.k
+FROM hit h
+-- The NextGen Bible's row rule, exactly statusOf (v104): kept wins over every
+-- flag; otherwise moved is not an appointment and cancelled is not. A moved booking counts only through
+-- a replacement that is itself a live appointment.
+WHERE (coalesce(h.is_kept, false)
+       OR (NOT coalesce(h.is_cancelled, false) AND NOT coalesce(h.is_rescheduled, false)))
+   OR (coalesce(h.is_rescheduled, false) AND h.person_tag IS NOT NULL AND EXISTS (
+        SELECT 1 FROM by_person g
+        WHERE g.tag = h.person_tag
+          AND g.appointment_date >= h.since
+          AND (coalesce(g.is_kept, false)
+               OR (NOT coalesce(g.is_cancelled, false) AND NOT coalesce(g.is_rescheduled, false)))))`;
+
+/** isFirmPartnerLink (5Star shared/partner-booking.ts), mirrored. */
+export const FIRM_PARTNER_LINK_METHODS = ["external_ref", "npx_booking_id", "coordinator", "api_create", "auto_match"] as const;
+export const NPX_BOOKED_STATUSES = [
+  "in_partner_schedule",
+  "awaiting_outcome",
+  "partner_reported_showed",
+  "partner_report_received",
+] as const;
+
+/** The text the definitions hash covers: every definition and every statement. */
+export function definitionsText(): string {
+  return [
+    METHOD_VERSION,
+    ...METRICS.map((m) => `${m.id}|${m.repo}|${m.independent}|${m.definition}`),
+    REMIX_CALLS_SQL,
+    SUPPORT_PROVENANCE_SQL,
+    FIVESTAR_CALLS_SQL,
+    FIVESTAR_BOOKINGS_SQL,
+    CONSOLE_BOOKED_SQL,
+    FIRM_PARTNER_LINK_METHODS.join(","),
+    NPX_BOOKED_STATUSES.join(","),
+  ].join("\n--\n");
+}

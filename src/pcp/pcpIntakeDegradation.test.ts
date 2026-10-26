@@ -51,7 +51,20 @@ vi.mock('../../server/services/ticketingApiClient', () => ({
       filed.push(payload);
       return { success: true, ticketId: filed.length, ticketNumber: `PCP-${1000 + filed.length}` };
     },
+    /**
+     * THE RECORDS LIBRARY FILES THROUGH HERE, and since 2026-09-13 the records
+     * tool reaches it. Both entries push to the same `filed` array on purpose:
+     * every assertion below is about what a staffer can read on the ticket, and
+     * that question does not change with the department. Without the second
+     * entry the tool THROWS and the SDK returns a plain-text error, which reads
+     * as a broken floor rather than a missing fixture.
+     */
+    createTicket: async (payload: any) => {
+      filed.push(payload);
+      return { success: true, ticketId: filed.length, ticketNumber: `VA-${2000 + filed.length}` };
+    },
   },
+  lookupWasUnavailable: () => false,
 }));
 
 const { createPcpAgent } = await import('../agents/pcpAgent');
@@ -161,13 +174,30 @@ describe('a records request survives an incomplete intake', () => {
     expect(filed[0].callPurpose).toBe('patient_medical_records_request');
   });
 
-  it('never lets a placeholder read as something the caller said', async () => {
+  /**
+   * THIS ASSERTED THE PLACEHOLDERS UNTIL 2026-09-16, and the property it was
+   * protecting is unchanged — it just has a better implementation now.
+   *
+   * The concern is that a reader must never mistake a blank for something the
+   * caller said. The old answer was to write "Not provided" into the column,
+   * which only works while the schema REQUIRES that column: it was a
+   * workaround for a gate, wearing the clothes of a safety feature. Since
+   * ticketing-app #275 the field can simply be absent, and "Not provided" in
+   * `pcp_caller_role` is a string a staffer reads, a report groups by, and the
+   * buildable role list would offer back as a role.
+   *
+   * So the field goes out EMPTY and the narrative says so in words — which is
+   * where a human was going to read it anyway.
+   */
+  it('sends nothing rather than a placeholder that reads like an answer', async () => {
     const callId = freshCall();
     await fileAfterAsking(build(callId), "handle_patient_medical_records_request", { narrative: "Records request." });
+    expect(filed[0].callerRole, 'a placeholder in a column a staffer reads').toBeUndefined();
+    expect(filed[0].callerOrganization).toBeUndefined();
+    expect(filed[0].callerCallbackNumber).toBeUndefined();
+    // callerName keeps its placeholder: the app still requires that one.
     expect(filed[0].callerName).toBe('Not provided by caller');
-    expect(filed[0].callerRole).toBe('Not provided');
-    // Caller ID withheld — say so rather than inventing a number.
-    expect(filed[0].callerCallbackNumber).toBe('NOT PROVIDED');
+    // The gap is STATED, which is the property the placeholders existed for.
     expect(filed[0].narrative).toContain('Caller ID was withheld');
   });
 });
@@ -192,7 +222,9 @@ describe('the callback number comes from the call itself', () => {
   it('does not treat a withheld caller ID as a phone number', async () => {
     const callId = freshCall();
     await fileAfterAsking(build(callId, "Anonymous"), "handle_patient_medical_records_request", { narrative: "x" });
-    expect(filed[0].callerCallbackNumber).toBe('NOT PROVIDED');
+    // The point was never the string "NOT PROVIDED" — it is that "Anonymous"
+    // must not end up in a column a staffer would dial.
+    expect(filed[0].callerCallbackNumber).toBeUndefined();
   });
 });
 

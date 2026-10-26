@@ -7,7 +7,7 @@ vi.hoisted(() => {
   process.env.DATABASE_URL ??= 'postgres://test:test@127.0.0.1:5432/test';
 });
 
-import { ScheduleLookupService } from './scheduleLookupService';
+import { ScheduleLookupService, normalizeDOB } from './scheduleLookupService';
 
 /**
  * Real call, 2026-08-10 23:52. The caller asked when their last appointment
@@ -285,5 +285,50 @@ describe('a retina surgeon counts as the physician', () => {
     expect(ctx.lastPhysicianSeen).toBeUndefined();
     // The OD is still the honest answer to "who did you last see".
     expect(ctx.lastProviderSeen).toBe('Eriq Plechot, OD');
+  });
+});
+
+describe('a date of birth as a person actually says it', () => {
+  /**
+   * Both live optical calls on 2026-08-31 logged:
+   *
+   *   [normalizeDOB] Unable to parse date: March 17th, 1973
+   *
+   * The caller said their date of birth clearly and the model transcribed it
+   * correctly. The parser matched "17", then demanded a comma or a space and
+   * found the "t" of "17th", so it gave up — and because a failed parse
+   * returns '' rather than throwing, verification degraded to the caller-ID
+   * match with nothing said out loud. It looked like recognition working.
+   */
+  it('parses the form that was failing in production', () => {
+    expect(normalizeDOB('March 17th, 1973')).toBe('1973-03-17');
+  });
+
+  it('handles every ordinal, not just th', () => {
+    expect(normalizeDOB('August 1st, 1980')).toBe('1980-08-01');
+    expect(normalizeDOB('July 2nd, 1991')).toBe('1991-07-02');
+    expect(normalizeDOB('May 3rd, 1965')).toBe('1965-05-03');
+    expect(normalizeDOB('June 22nd, 1972')).toBe('1972-06-22');
+  });
+
+  it('handles the day-first order and the short year', () => {
+    expect(normalizeDOB('17th March 1973')).toBe('1973-03-17');
+    expect(normalizeDOB('Mar 17th, 73')).toBe('1973-03-17');
+  });
+
+  it('still parses the written forms it always did', () => {
+    // The regression guard. Widening a parser is where you break the inputs
+    // that already worked.
+    expect(normalizeDOB('1973-03-17')).toBe('1973-03-17');
+    expect(normalizeDOB('03/17/1973')).toBe('1973-03-17');
+    expect(normalizeDOB('3/17/73')).toBe('1973-03-17');
+    expect(normalizeDOB('03-17-1973')).toBe('1973-03-17');
+    expect(normalizeDOB('March 17, 1973')).toBe('1973-03-17');
+  });
+
+  it('still refuses what it cannot place, rather than guessing', () => {
+    expect(normalizeDOB('')).toBe('');
+    expect(normalizeDOB('sometime in the seventies')).toBe('');
+    expect(normalizeDOB('February 30th, 1973')).toBe('');
   });
 });

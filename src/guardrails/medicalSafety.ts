@@ -14,7 +14,22 @@ export const medicalSafetyGuardrails: RealtimeOutputGuardrail[] = [
         // Match "you have [condition]" but NOT administrative phrases like:
         // "you have a pending request...cataract surgery" or "you have an open ticket...glaucoma"
         // Uses negative lookahead to exclude specific admin phrases (NOT single words like "open" which appears in "open-angle glaucoma")
-        /\byou have\b(?!.{0,20}\b(pending request|open ticket|previous request|earlier request|existing ticket|previous ticket)\b).*\b(retinal|glaucoma|cataract|macular|infection|disease|condition)/i,
+        //
+        // "questions about" / "concerns about" were added 2026-09-04 from
+        // evidence, not from imagination. Dry-run over 400 real queue calls
+        // and 2,704 agent lines: this pattern fired ONCE, on
+        //
+        //   "you mentioned you have questions about your recovery from
+        //    cataract surgery that took place on Monday"
+        //
+        // — the agent reading the caller's own stated reason back to them.
+        // In enforce mode that line is cut mid-sentence. It was the only
+        // trip in the whole corpus, so the guardrail's entire observed
+        // behaviour on this traffic was a false positive, and the same
+        // pattern is live today on no-ivr, after-hours and azul-scheduling.
+        // A guardrail whose only firings are wrong teaches people to ignore
+        // it, which costs more than the rule earns.
+        /\byou have\b(?!.{0,20}\b(pending request|open ticket|previous request|earlier request|existing ticket|previous ticket|questions? about|concerns? about)\b).*\b(retinal|glaucoma|cataract|macular|infection|disease|condition)/i,
         /\bthis is (definitely|likely|probably)\b.*\b(retinal|glaucoma|infection|disease)/i,
         /\b(diagnosed|diagnosis) (with|of)\b/i,
         /\byour (condition|disease|problem) is\b/i,

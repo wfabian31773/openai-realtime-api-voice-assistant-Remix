@@ -40,7 +40,7 @@ process.env.DATABASE_URL ||= 'postgresql://unused:unused@127.0.0.1:5432/unused';
 process.env.OPENAI_API_KEY ||= 'test-unused';
 
 const { buildPcpPrompt } = await import('../agents/pcpAgent');
-const { PROFESSIONAL_FIELDS, PATIENT_INTAKE_ORDER, PROMPTS, PcpDirector } = await import('./director');
+const { PROFESSIONAL_FIELDS, PROFESSIONAL_ENRICHMENT, ENRICHMENT_AFTER_FILING, PATIENT_INTAKE_ORDER, PROMPTS, PcpDirector } = await import('./director');
 
 const prompt = buildPcpPrompt({ callerPhone: '+18455317471' } as never);
 
@@ -51,7 +51,7 @@ describe('the model cannot read ahead, because it is not given the list', () => 
      * prompt is a question the model can ask before the caller has answered
      * the last one.
      */
-    for (const f of PROFESSIONAL_FIELDS) {
+    for (const f of [...PROFESSIONAL_FIELDS, ...PROFESSIONAL_ENRICHMENT]) {
       const q = PROMPTS[f];
       if (!q) continue;
       expect(prompt, `prompt still contains "${q}" — the model can read ahead`).not.toContain(q);
@@ -81,7 +81,12 @@ describe('the model cannot read ahead, because it is not given the list', () => 
   it('the patient intake is still shorter, and still excludes the professional fields', () => {
     // The director owns this now; the prompt only says a patient gets a
     // shorter one and must never be asked a professional question.
-    expect(PATIENT_INTAKE_ORDER.length).toBeLessThan(PROFESSIONAL_FIELDS.length);
+    // Compared against the WHOLE professional interview, which is now split
+    // across two lists so the patient can sit between them — see
+    // PROFESSIONAL_ENRICHMENT. Comparing against PROFESSIONAL_FIELDS alone
+    // would silently stop measuring anything once the split happened.
+    expect(PATIENT_INTAKE_ORDER.length)
+      .toBeLessThan(PROFESSIONAL_FIELDS.length + PROFESSIONAL_ENRICHMENT.length);
     expect(PATIENT_INTAKE_ORDER).not.toContain('callerRole');
     expect(PATIENT_INTAKE_ORDER).not.toContain('callerOrganization');
     expect(PATIENT_INTAKE_ORDER).not.toContain('callerFacilityType');
@@ -133,7 +138,21 @@ describe('the model cannot read ahead, because it is not given the list', () => 
    */
   it('asks a professional for the whole list, in the rendered order', () => {
     const d = new PcpDirector({ lunchClosure: () => false });
-    for (const field of PROFESSIONAL_FIELDS) {
+    // `plan_participation` has no patient behind it, so the two professional
+    // blocks run back to back and the order is the whole interview.
+    d.update('pro1', { callPurpose: 'plan_participation' });
+    // `ENRICHMENT_AFTER_FILING` holds the title and the email back until a
+    // disposition is on the record, so the walk is in two halves. The ORDER
+    // within the whole list is unchanged — only where the filing sits in it.
+    const before = [...PROFESSIONAL_FIELDS, ...PROFESSIONAL_ENRICHMENT]
+      .filter((f) => f !== 'callPurpose' && !ENRICHMENT_AFTER_FILING.includes(f));
+    for (const field of before) {
+      expect(d.next('pro1').nextQuestion?.field, `expected ${field} next`).toBe(field);
+      d.update('pro1', answerFor(String(field)));
+    }
+    expect(d.next('pro1').nextQuestion, 'the request files before the credentials').toBeUndefined();
+    d.recordDisposition('pro1', 'CREATE_TASK');
+    for (const field of ENRICHMENT_AFTER_FILING) {
       expect(d.next('pro1').nextQuestion?.field, `expected ${field} next`).toBe(field);
       d.update('pro1', answerFor(String(field)));
     }
@@ -206,7 +225,7 @@ describe('the order lives in exactly one place', () => {
    * can ask still HAS wording, because the director speaks it via nextQuestion.
    */
   it('every director field has a prompt sentence to ask it with', () => {
-    for (const f of PROFESSIONAL_FIELDS) {
+    for (const f of [...PROFESSIONAL_FIELDS, ...PROFESSIONAL_ENRICHMENT]) {
       expect(PROMPTS[f], `PROMPTS has no wording for ${String(f)}`).toBeTruthy();
     }
     for (const f of PATIENT_INTAKE_ORDER) {
@@ -216,7 +235,7 @@ describe('the order lives in exactly one place', () => {
 
   it('and none of that wording leaks into the prompt', () => {
     // The inverse of the old assertion, and the whole point of this change.
-    const leaked = [...PROFESSIONAL_FIELDS, ...PATIENT_INTAKE_ORDER]
+    const leaked = [...PROFESSIONAL_FIELDS, ...PROFESSIONAL_ENRICHMENT, ...PATIENT_INTAKE_ORDER]
       .map((f) => PROMPTS[f])
       .filter((q): q is string => Boolean(q))
       .filter((q) => prompt.includes(q));

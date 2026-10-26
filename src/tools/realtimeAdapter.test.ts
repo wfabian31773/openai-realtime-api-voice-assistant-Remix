@@ -9,6 +9,8 @@
  * with the call, every time, and cost most of a day.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
 
 // vi.mock is hoisted above every const in this file, so the spy has to be
 // hoisted with it or the factory closes over a value in its temporal dead zone.
@@ -54,35 +56,73 @@ beforeEach(() => {
   flushSpy.mockClear();
 });
 
+/**
+ * Source with comments stripped.
+ *
+ * The first version of the assertion below banned the STRING
+ * `flushTimelineSafely` and went red on the COMMENT that explains why the
+ * call site was removed — documentation reading as a second copy. That is the
+ * device `recognisedCallerBlock.test.ts` already settled: compare CODE, not
+ * prose, or the file cannot explain its own history.
+ */
+function codeOnly(src: string): string {
+  return src
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .split('\n')
+    .filter((l) => !l.trim().startsWith('//'))
+    .join('\n');
+}
+
 describe('a tool call is persisted when it finishes, not when the call does', () => {
-  it('flushes the timeline after the tool returns', async () => {
-    const tool = await buildTool({ callId: 'rtc_test_1', agentSlug: 'surgery' });
-    const out = await callTool(tool as never, {
-      request_description: 'my surgery is Monday and the eye drops never came',
-    });
-
-    expect(JSON.parse(out).success).toBe(true);
+  /**
+   * THE PERSISTENCE MOVED, THE PROPERTY DID NOT.
+   *
+   * The two assertions that used to live here spied on a
+   * `flushTimelineSafely(telemetry)` call in this file. That call site was
+   * removed because it was in the wrong place twice over:
+   *
+   *  - It was ONE TOOL BEHIND. It sat inside the function `recordingExecute`
+   *    wraps, and the event is recorded only after that function returns — so
+   *    it persisted the PREVIOUS tools and never the one that just finished.
+   *    The last tool of every call reached the database through the 2h reaper
+   *    or not at all, which is the exact shape this file's header describes.
+   *  - It was UNREACHABLE for three agents. `pcp`, `no-ivr` and
+   *    `answering-service` build their tools by hand and never come through
+   *    this file, so they had no per-tool flush at all — `tool_call_count`
+   *    was NULL on 90.9% of substantive PCP calls on 2026-09-16.
+   *
+   * Persistence now lives in `recordingExecute`, so recording and persisting
+   * cannot come apart. The BEHAVIOUR is tested in
+   * `src/services/recordingPersistsTheTimeline.test.ts`, against the real
+   * recorder — this file mocks `recordingExecute` to a pass-through, so it
+   * structurally cannot see it. What belongs here is the WIRING: that the
+   * adapter still routes through the recorder, and that no second flush site
+   * has grown back.
+   */
+  it('routes every tool through the recorder, which is what persists it', () => {
+    const src = codeOnly(readFileSync(path.resolve(__dirname, './realtimeAdapter.ts'), 'utf8'));
+    expect(src).toContain('recordingExecute<unknown, string>(');
     expect(
-      flushSpy,
-      'the tool completed but nothing was written — this is the state that hid the failure',
-    ).toHaveBeenCalledWith('rtc_test_1');
+      src.includes('flushTimelineSafely'),
+      'a second flush site grew back — one tool behind, and the drift shape this repo has paid for',
+    ).toBe(false);
   });
 
-  it('falls back to the call sid when there is no call id', async () => {
-    const tool = await buildTool({ callSid: 'CAtest', agentSlug: 'surgery' });
-    await callTool(tool as never, { request_description: 'anything' });
-    expect(flushSpy).toHaveBeenCalledWith('CAtest');
-  });
+  it('does not record when there is no call to record against', async () => {
+    // The HTTP surface has no call, so wrapWithTelemetry passes execute
+    // through untouched and nothing is keyed on nothing.
+    const src = readFileSync(path.resolve(__dirname, './realtimeAdapter.ts'), 'utf8');
+    expect(src).toContain('if (!telemetry) return execute;');
+    expect(src).toContain('if (!telemetry.callId && !telemetry.callSid) return execute;');
 
-  it('does not try to flush when there is no call to flush against', async () => {
-    // The HTTP surface has no call. Flushing there would key on nothing.
     const tool = await buildTool(undefined);
-    await callTool(tool as never, { request_description: 'anything' });
-    expect(flushSpy).not.toHaveBeenCalled();
+    const out = await callTool(tool as never, { request_description: 'anything' });
+    expect(JSON.parse(out).success).toBe(true);
   });
 
   it('never lets a telemetry failure reach the call', async () => {
-    // A patient's call must not break because a write failed.
+    // A patient's call must not break because a write failed. Still true, and
+    // now guaranteed by flushAfterRecording swallowing into a log line.
     flushSpy.mockRejectedValueOnce(new Error('db is down'));
     const tool = await buildTool({ callId: 'rtc_test_2', agentSlug: 'surgery' });
 
@@ -161,5 +201,125 @@ describe('a model may omit what it does not have', () => {
       tool.strict,
       'strict forces every property into required — the exact cause of the outage',
     ).toBe(false);
+  });
+
+  it('never sends house metadata to the model — Codex round 7', async () => {
+    /**
+     * `askAs` is the sentence `validateInput` speaks when a REQUIRED field is
+     * absent: a contract between the tool and the agent's mouth, not part of the
+     * JSON Schema. `parameters` used to spread `input_schema` whole, so every
+     * `askAs` in the library travelled to the model as documentation on the field.
+     *
+     * The case that found it: `lookup_patient.patient_status` carries "Are you a
+     * new patient or an existing patient?", and that reached the RECORDS model,
+     * which round 5 deliberately stopped asking it because its caller is a proxy
+     * on 42% of calls.
+     *
+     * ASSERTED ON THE BUILT TOOL, not on `stripInternalKeys`. The first version of
+     * this called the helper directly and a mutation that reverted the adapter's
+     * call site survived it — failure mode 10 in the test written to cite failure
+     * mode 10.
+     */
+    await import('./sharedPatientTools');
+    const { realtimeToolsFor } = await import('./realtimeAdapter');
+    const built = realtimeToolsFor(['lookup_patient'], {})[0] as unknown as {
+      parameters: { properties: Record<string, Record<string, unknown>> };
+    };
+
+    for (const [field, def] of Object.entries(built.parameters.properties)) {
+      expect(def.askAs, `${field} still carries askAs to the model`).toBeUndefined();
+    }
+
+    // The library keeps it — the leak was the transport's, and every field in
+    // sharedPatientTools has one by house convention.
+    const { getTool } = await import('./registry');
+    const source = getTool('lookup_patient')!.input_schema.properties.patient_status as
+      Record<string, unknown>;
+    expect(source.askAs).toBe('Are you a new patient or an existing patient?');
+
+    // And nothing else about the field is lost on the way out.
+    const sent = built.parameters.properties.patient_status;
+    expect(sent.enum).toEqual(['existing']);
+    expect(String(sent.description)).toMatch(/never send this to report that somebody is new/i);
+  });
+});
+
+
+/**
+ * THE CALL KNOWS ITS OWN SID. THE MODEL DOES NOT GET A VOTE.
+ *
+ * Measured 2026-09-01 in the ticketing app's voice_agent_api_logs: 130
+ * create-ticket POSTs from the surgery queue between 08-24 and today carried
+ * `callData.callSid = "unknown"` — the literal string. Seven more from optical,
+ * plus "none", "undefined", "N/A", "latest", "automated_xxx_placeholder".
+ *
+ * Every one of those calls has a real CA-prefixed CallSid on its call_logs row.
+ * All 2,926 queue calls in the window do. The SID was never missing; it was
+ * OVERWRITTEN — `call_sid` is a declared property on the filing tools ("The
+ * call id, so a retry cannot double-file"), so the model emits it, and the
+ * merge below put the model's arguments on top of the injected context.
+ *
+ * The cost is not cosmetic. The idempotency key is `call-${callSid}` guarded by
+ * isTwilioCallSid, so a payload carrying "unknown" goes out with NO key: no
+ * duplicate protection on a retry, no way for the post-call enrichment endpoint
+ * to attach the recording and transcript, and — since 2026-09-01 — no key for
+ * the outbox either. With a real SID, duplicate filing is 3 calls in 2,086
+ * (0.14%). Without one it is unbounded.
+ */
+describe('injected call context outranks the model', () => {
+  it('keeps the real CallSid when the model passes "unknown"', async () => {
+    const { registerTool } = await import('./registry');
+    const { realtimeToolsFor } = await import('./realtimeAdapter');
+    registerTool({
+      name: 'echo_context_test',
+      description: 'test only',
+      layer: 'agent',
+      timeoutMs: 1000,
+      input_schema: {
+        type: 'object',
+        properties: {
+          call_sid: { type: 'string', description: 'the call id' },
+          caller_phone: { type: 'string', description: 'the caller' },
+          note: { type: 'string', description: 'anything' },
+        },
+        required: [],
+      },
+      handler: async (input: Record<string, unknown>) => ({ success: true, saw: input }),
+    } as never);
+
+    const tool = realtimeToolsFor(
+      ['echo_context_test'],
+      { call_sid: 'CA11111111111111111111111111111111', caller_phone: '+17605551234' },
+    )[0] as never;
+
+    const out = JSON.parse(
+      await callTool(tool, {
+        // What the model actually emits on the surgery line, 130 times in nine days.
+        call_sid: 'unknown',
+        caller_phone: 'N/A',
+        note: 'the model may still say what it likes about its own fields',
+      }),
+    );
+
+    expect(out.saw.call_sid).toBe('CA11111111111111111111111111111111');
+    expect(out.saw.caller_phone).toBe('+17605551234');
+    // The model's OWN arguments are untouched — this is not "the process wins
+    // everything", it is "the process wins the fields it supplied".
+    expect(out.saw.note).toMatch(/model may still say/);
+  });
+
+  it('does not blank a model argument the context has no value for', async () => {
+    const { realtimeToolsFor } = await import('./realtimeAdapter');
+    // caller_phone absent from the context — a call whose caller ID never
+    // arrived. Overwriting the model's answer with undefined here would be the
+    // same bug pointing the other way.
+    const tool = realtimeToolsFor(
+      ['echo_context_test'],
+      { call_sid: 'CA22222222222222222222222222222222', caller_phone: undefined },
+    )[0] as never;
+
+    const out = JSON.parse(await callTool(tool, { caller_phone: '7605559999' }));
+    expect(out.saw.caller_phone).toBe('7605559999');
+    expect(out.saw.call_sid).toBe('CA22222222222222222222222222222222');
   });
 });

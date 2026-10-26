@@ -167,3 +167,102 @@ smart punctuation in the description. Found from one curly apostrophe in
 
 Neither is load-bearing for the queue agents, which carry their own IDs. Both
 will bite whoever trusts them next.
+
+---
+
+## Ticket number prefixes — three sources, and all three are real
+
+Established 2026-09-03 from the operator, after a filing-alarm investigation
+turned up `T-` and `SR-` numbers sitting on `call_logs` rows and I did not know
+what either was.
+
+| prefix | who creates it |
+|---|---|
+| `VA-` | the voice agents |
+| `T-`  | **staff**, by hand in the ticketing app |
+| `SR-` | the **online form for surgery coordinators** |
+
+**A non-`VA-` number on a call row does NOT mean something else filed for us.**
+It means `check_open_tickets` found the caller's already-open ticket and the
+agent attached the call to it instead of opening a duplicate. The evidence is
+unambiguous: over the fourteen days to 2026-09-03, all ten non-`VA-` numbers on
+queue call rows belong to tickets that were created **before** the call that
+carries them — by fourteen seconds in one case and two days in another — and
+every one of those tickets has a `call_sid`, while the staff tickets nobody
+called about have `call_sid` null.
+
+So attaching is the request being handled, not lost:
+
+- `call_logs.ticket_number IS NOT NULL` is the right test for "this call's
+  request was taken", whatever the prefix. The filing alarm
+  (`ticketFilingHealth.ts`) deliberately does NOT restrict itself to `VA-`.
+  Excluding the others would make it blind to requests that were properly
+  handled, and would let a few hand-filed tickets during an outage look like
+  the agents were still working.
+- Volume is small either way — 9 `T-` and 2 `SR-` against 1,560 `VA-` in
+  fourteen days — so this is about the predicate meaning what it claims, not
+  about the numbers moving.
+
+**Attaching overwrites the ticket's call fields, and that is DECIDED — leave it
+alone.** The attach stamps the newest call's `call_sid`, `caller_phone` and
+`call_duration_seconds` onto the ticket, so the originating call's linkage is
+replaced rather than kept alongside. `SR-54155` carries two calls five minutes
+apart on 2026-08-24 and only the later one's details survive on it.
+
+I raised this as a possible defect. Wayne, 2026-09-03: *"overwrite is fine,
+that's the most recent request anyway."* The ticket is a live request, not an
+audit log — staff working it need the number that just called, not the first
+one. Do not "fix" this, and do not re-raise it as data loss: the earlier call
+still has its own `call_logs` row carrying the same ticket number, so the
+association is recoverable from that side.
+
+This is also the answer to a question that was open for most of 2026-09-03:
+when a later caller lands on an earlier caller's ticket and the ticket's call
+fields change, that is **this** path and not the `update-call-data` retry sweep
+in #71/#77. Do not re-investigate it as a write-back bug.
+
+**THE MECHANISM WAS NAMED WRONG HERE UNTIL 2026-09-15, and the name is the part
+somebody will grep for.** This paragraph used to call it *"the
+`check_open_tickets` dedupe"*. It is not. `check_open_tickets`
+(`sharedPatientTools.ts:714`) calls `SyncAgentService.checkOpenTickets` and
+returns the numbers to the model — **it writes nothing, and it does not have to
+run at all** for a ticket's call fields to change. Traced end to end on
+2026-09-15:
+
+1. **`consolidateIfDuplicate`** (`lib/services/ticket-consolidation.ts`, called
+   from `create-ticket`) matches the new contact against an open ticket in the
+   same department — **phone on the last 7 digits within 48h, OR first+last
+   name within 24h** — appends a `ticket_contact_entries` row, and answers
+   `{ consolidated: true, ticketNumber: <the existing ticket> }`. That is where
+   the agent gets the number it reads back, and it is why the same number
+   reaching two calls is usually one caller ringing twice rather than a defect.
+2. **`update-call-data`** (`app/api/voice-agent/update-call-data/route.ts:217`)
+   looks the ticket up **by `ticketNumber` first**, then assigns `callSid`,
+   `callStartTime`, `callEndTime`, `callDurationSeconds`, `transcript`,
+   `recordingUrl`, `qualityScore`, `patientSentiment` and `agentOutcome` onto
+   the ticket row. `ticketingSyncService.syncCall`
+   (`server/services/ticketingSyncService.ts:170`) sends the call's
+   `ticketNumber` whenever its row has one — which the write-back has already
+   set on a consolidated callback — and on those calls the lookup goes by
+   NUMBER and the row is re-stamped.
+
+   **THE `ticket_contact_entries` FALLBACK IS STILL REACHABLE, and an earlier
+   version of this entry said it was "never reached"** (Codex P2, #315).
+   `runSync` selects on `or(isNotNull(ticketNumber), isNotNull(callSid))`
+   (`:112-115`) and `syncCall` serialises a missing number as
+   `ticketNumber: undefined` (`:171-174`), so a call carrying only a SID
+   reaches the endpoint with no number, matches by `callSid`, and lands on its
+   contact entry — which is the correct target. Saying otherwise would
+   misdirect anyone investigating exactly those unsynced calls. The accurate
+   statement is narrower: **a call whose row already holds a ticket number
+   bypasses the fallback**, and that is the consolidation case.
+
+The ruling above still stands over all of it. What is NOT covered by the ruling
+is the **name-only** arm of rule 1: two different patients with the same common
+name, same department, inside 24 hours, merge onto one ticket with no phone
+check. Unmeasured as of 2026-09-15. Count it before raising it, and the call is
+Wayne's.
+
+Full write-up, including the day it was mistaken for the model repeating a
+ticket number to five strangers: CLAUDE.md, "THE SAME TICKET NUMBER READ TO TWO
+CALLERS".

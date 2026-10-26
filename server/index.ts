@@ -204,71 +204,6 @@ app.use(express.urlencoded({ extended: true }));
 // Serve static frontend files
 app.use(express.static("client/dist"));
 
-async function cleanupStaleCallsOnStartup() {
-  try {
-    const { storage } = await import('./storage');
-    const { getTwilioClient } = await import('../src/lib/twilioClient');
-    
-    const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000);
-    const staleCalls = await storage.getCallLogs({
-      status: 'in_progress,ringing,initiated',
-      endDate: fiveMinutesAgo,
-      limit: 100,
-    });
-    
-    if (staleCalls.data.length === 0) {
-      console.log("[STARTUP] No stale calls to cleanup");
-      return;
-    }
-    
-    console.log(`[STARTUP] Found ${staleCalls.data.length} stale calls, cleaning up...`);
-    
-    let cleanedCount = 0;
-    const twilioClient = await getTwilioClient();
-    
-    for (const call of staleCalls.data) {
-      const callTime = call.startTime || call.createdAt;
-      if (callTime && new Date(callTime) < fiveMinutesAgo) {
-        let finalStatus: 'completed' | 'busy' | 'no_answer' | 'failed' = 'completed';
-        let actualDuration: number | null = null;
-        
-        if (call.callSid) {
-          try {
-            const twilioCall = await twilioClient.calls(call.callSid).fetch();
-            const twilioStatus = twilioCall.status;
-            actualDuration = twilioCall.duration ? parseInt(twilioCall.duration) : null;
-            
-            if (twilioStatus === 'in-progress' || twilioStatus === 'ringing' || twilioStatus === 'queued') {
-              continue;
-            } else if (twilioStatus === 'busy') {
-              finalStatus = 'busy';
-            } else if (twilioStatus === 'no-answer') {
-              finalStatus = 'no_answer';
-            } else if (twilioStatus === 'failed' || twilioStatus === 'canceled') {
-              finalStatus = 'failed';
-            }
-          } catch (e) {
-            // Call not found in Twilio
-          }
-        }
-        
-        const duration = actualDuration ?? Math.max(0, Math.floor((fiveMinutesAgo.getTime() - new Date(callTime).getTime()) / 1000));
-        
-        await storage.updateCallLog(call.id, {
-          status: finalStatus,
-          endTime: call.endTime || fiveMinutesAgo,
-          duration: duration,
-        });
-        cleanedCount++;
-      }
-    }
-    
-    console.log(`[STARTUP] Cleaned up ${cleanedCount} stale calls`);
-  } catch (error) {
-    console.error("[STARTUP] Error cleaning up stale calls:", error);
-  }
-}
-
 async function backfillMissingReconciliations(): Promise<void> {
   const { backfillMissingReconciliations: doBackfill } = await import('../src/services/reconciliationBackfill');
   return doBackfill();
@@ -439,22 +374,45 @@ async function startServer() {
   // server is already accepting connections.
   const earlyServer = http.createServer(app);
 
-  // The standalone demo line lives HERE, on the public server, not on the
-  // voice server behind the /api/voice proxy — that proxy speaks HTTP only
-  // and cannot forward the WebSocket upgrade a media stream needs. Mounted
-  // before listen so the upgrade handler is attached when the first call
-  // lands, and before registerRoutes so nothing can shadow /demo/*.
-  // A failure here must never stop the API server.
+  // The Grok voice runtime (src/runtime/). It lives HERE, on the public
+  // server, not on the voice server behind the /api/voice proxy, for one hard
+  // reason: it serves Twilio Media Streams, and that proxy speaks HTTP only —
+  // a WebSocket upgrade cannot reach it there. Mounted before listen so the
+  // upgrade handler is attached when the first call lands.
+  //
+  // Mounting is unconditional and safe: an unconfigured process still
+  // starts, still serves GET /voice/health with its deploy marker and the
+  // NAMES of whatever is missing, and its webhook fails closed with a
+  // controlled spoken line rather than a half-configured call. No number
+  // points at /voice/:slug until Wayne points one, so mounting it changes
+  // nothing for any live line.
   try {
-    const { mountDemoLine } = await import('../src/standalone/demoLine');
-    mountDemoLine(app, earlyServer);
+    const [{ mountVoiceRuntime }, { fetchAzulPrecontext }, { resolveConfiguredGreeting }] =
+      await Promise.all([
+        import('../src/runtime/voiceRuntime'),
+        import('../src/agents/azulSchedulingAgent'),
+        import('../src/services/greetingResolver'),
+      ]);
+    mountVoiceRuntime(app, earlyServer, {
+      // The queue agents pick their opening from metadata.precontext: with a
+      // unique caller-ID match they confirm ("Am I speaking with…?") rather
+      // than ask cold, which is what the SIP path already gives them. The
+      // runtime bounds this lookup itself and drops it if late.
+      fetchPrecontext: (phone: string) => fetchAzulPrecontext(phone),
+      // `agents.welcome_greeting` is the source of truth for how an agent
+      // opens — the value the admin UI and the Observatory show. The SIP path
+      // already resolves it; without this the runtime would play the registry
+      // string and an operator's edit would be visible everywhere except on
+      // the line (Codex review, PR #240).
+      resolveGreeting: (slug: string) => resolveConfiguredGreeting(slug),
+    });
   } catch (err) {
-    console.error('[STARTUP] Demo line failed to mount (rest of the server unaffected):', err);
+    console.error('[STARTUP] Voice runtime failed to mount (rest of the server unaffected):', err);
   }
 
   // The tool library's HTTP surface. Mounted here, before registerRoutes, for
-  // the same reason as the demo line: nothing should be able to shadow
-  // /api/tools/*, and a failure here must never stop the API server.
+  // the same reason as the voice runtime above: nothing should be able to
+  // shadow /api/tools/*, and a failure here must never stop the API server.
   try {
     const { mountToolServer } = await import('../src/tools/server');
     mountToolServer(app);
@@ -505,6 +463,11 @@ async function startServer() {
     // returned server since we're already listening on earlyServer)
     await registerRoutes(app);
 
+    // Stage C measurement engine: the export route always exists (503 without
+    // its token); the nightly runner starts only with LEARNING_RUNNER_ENABLED=1.
+    const { registerLearningExport, startLearningRunner } = await import('./learning/scheduler');
+    registerLearningExport(app);
+
     // Catch-all: serve index.html for client-side routing (must be after API routes)
     app.use((req, res) => {
       res.sendFile('index.html', { root: 'client/dist' });
@@ -513,8 +476,14 @@ async function startServer() {
     healthState.isReady = true;
     console.log("[STARTUP] Server fully initialized");
 
-    // Cleanup stale calls from previous sessions
-    await cleanupStaleCallsOnStartup();
+    // Stale-call sweeper: boot + every 5 min, closes call rows stuck in a
+    // live status past the measured 30-min ceiling using Twilio's real
+    // status. Replaces the old boot-only cleanupStaleCallsOnStartup — on
+    // 2026-08-24 a Supabase restart wedged the voice process's DB layer and
+    // four rows sat "Live now" for 52 hours because this process had not
+    // rebooted. See server/services/staleCallSweep.logic.ts.
+    const { startStaleCallSweeper } = await import('./services/staleCallSweeper');
+    startStaleCallSweeper();
 
     // Backfill any missing reconciliation days (non-blocking)
     backfillMissingReconciliations().catch(err => {
@@ -523,6 +492,8 @@ async function startServer() {
 
     // Schedule nightly reconciliation at configured UTC hour
     scheduleNightlyReconciliation();
+
+    startLearningRunner();
   } catch (error) {
     healthState.initFailed = true;
     console.error("════════════════════════════════════════════════════════");

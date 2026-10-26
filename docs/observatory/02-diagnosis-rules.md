@@ -22,6 +22,7 @@ quiet on healthy ranges.
 | R10 | Outcome-integrity mismatch | calls with answered handoff but outcome ∉ (scheduled, transferred); voicemail-shaped transcripts labeled `call_back_later` | Answered transfers logged `call_back_later`; 3 of 5 "callbacks" were machines (Aug 5 audit) | Classifier/feedback fix status; recount affected funnel cells |
 | R11 | Prod-vs-repo divergence | FIVESTAR `release_history.git_short_sha` not on origin/main | Workspace deploys missing #170/#171 (twice in one week) | Merge main into workspace before deploy; list missing merges |
 | R12 | Grader critical-failure spike (Ops Hub) | agent's critical-fail rate > 1.5× its 30-day baseline for 2+ days | SD pilot 56% critical era | Top failing check + 5 worst transcripts linked |
+| R13 | Ticketing-app freeze / memory (Ops Hub) | `app_heartbeat` for `ticketing-next` stale ≥3 min; heap or RSS ≥80% of limit; 15-min steady rise; event-loop p99 >1s for 3 min | 2026-09-25 20:09–20:32 UTC hang (last beat 20:09 → fire by 20:13) | Check Replit Deployments logs; do not trust `/api/health` or `/_health/live`; republish only after confirming Next is the dead child |
 
 ## Card anatomy (law 2)
 

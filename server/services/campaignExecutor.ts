@@ -39,6 +39,17 @@ export class CampaignExecutor {
         throw new Error(`Campaign not found: ${campaignId}`);
       }
 
+      // A runtime outbound campaign (src/runtime/outbound/) is dialled by the
+      // voice runtime under its own window, caps and do-not-contact list.
+      // This executor dials through the old pipeline with none of those, so
+      // it never starts one — a press of "start" in the old admin screen
+      // must not ring a runtime campaign's contacts.
+      if (campaign.campaignType === 'runtime_outbound') {
+        throw new Error(
+          `Campaign ${campaignId} is a runtime outbound campaign; the voice runtime dials it, not this executor`,
+        );
+      }
+
       // Validate campaign can be executed
       if (campaign.status !== 'scheduled' && campaign.status !== 'running') {
         throw new Error(`Campaign cannot be executed. Current status: ${campaign.status}`);

@@ -1,3 +1,4 @@
+import { PCP_HANDOFF_NOT_ATTEMPTED_REASONS } from './handoffNotAttempted';
 import { z } from 'zod';
 import { PCP_CALL_PURPOSE_SLUGS, PCP_DISPOSITIONS, assertPcpDisposition } from './policy';
 import { PCP_FACILITY_TYPES } from './director';
@@ -5,15 +6,56 @@ import { spokenDates } from '../services/identityArgGuard';
 
 const optionalText = (max: number) => z.string().trim().min(1).max(max).optional();
 
+/**
+ * The payload schema's own ceiling on `narrative`, EXPORTED so a caller that
+ * builds a long one can trim to fit instead of discovering the limit as a
+ * local safeParse failure.
+ *
+ * That failure mode is not hypothetical and it is the worst shape this path
+ * has: `submitPcpTicket` safeParses BEFORE the wire, so an over-long
+ * narrative files NOWHERE — no POST, no 400 in `voice_agent_api_logs`, just a
+ * console line. The teardown sweep pastes the caller's own words into the
+ * narrative precisely so a human can route a call nobody classified, which
+ * makes the longest calls the ones most likely to be silently dropped by it.
+ *
+ * Exported rather than duplicated because a second hand-written 12000 is the
+ * `explicitAsk.ts` noun-list shape: two copies that drift and nothing says so.
+ */
+export const NARRATIVE_MAX_CHARS = 12000;
+
 export const PcpTicketPayloadSchema = z.object({
   callSid: z.string().trim().min(3).max(120),
   agentSlug: z.literal('pcp'),
   agentVersion: z.string().trim().min(1).max(50),
   callerName: z.string().trim().min(1).max(200),
-  callerRole: z.string().trim().min(1).max(160),
-  callerOrganization: z.string().trim().min(1).max(255),
-  callerFacilityType: z.enum(PCP_FACILITY_TYPES),
-  callerCallbackNumber: z.string().trim().min(7).max(40),
+  /**
+   * OPTIONAL SINCE 2026-09-16, AND THIS SIDE MUST NOT BE STRICTER THAN THE
+   * APP'S. Operator: "I think we need to address the ticketing application as
+   * well to allow for this lightly gated department."
+   *
+   * Until now these four were required here AND in the app, and `buildPayload`
+   * satisfied both by sending the literal string "Not provided" for fields the
+   * caller had never been asked about. That string then sat in a column a
+   * staffer reads. The fix is in both schemas at once, because this one
+   * safeParses BEFORE the wire: a field the app would accept and this rejects
+   * files NOWHERE, with no POST and no 400 in `voice_agent_api_logs`.
+   *
+   * SHIP ORDER IS LOAD-BEARING, and it runs the other way round. ticketing-app
+   * #275 must deploy FIRST. Omitting a field the deployed app still requires
+   * is an HTTP 400, which is exactly how 17 requests became nothing on
+   * 2026-09-14.
+   */
+  callerRole: optionalText(160),
+  callerOrganization: optionalText(255),
+  callerFacilityType: z.enum(PCP_FACILITY_TYPES).optional(),
+  callerCallbackNumber: optionalText(40),
+  /**
+   * How the caller wants the answer back — the operator's fifth field.
+   * Deliberately NOT `.email()`; see the app-side schema for why a strict
+   * validator here would lose the whole request rather than one field.
+   */
+  callerEmail: optionalText(320),
+  deliveryPreference: optionalText(200),
   statedRelationship: optionalText(500),
   callPurpose: z.enum(PCP_CALL_PURPOSE_SLUGS),
   disposition: z.enum(PCP_DISPOSITIONS),
@@ -48,7 +90,7 @@ export const PcpTicketPayloadSchema = z.object({
   patientPhone: optionalText(40),
   providerRequested: optionalText(255),
   officeLocation: optionalText(255),
-  narrative: z.string().trim().min(1).max(12000),
+  narrative: z.string().trim().min(1).max(NARRATIVE_MAX_CHARS),
   transcript: optionalText(50000),
   handoff: z.object({
     requested: z.boolean(),
@@ -62,6 +104,16 @@ export const PcpTicketPayloadSchema = z.object({
     failureReason: optionalText(1000),
     fallbackTicketStatus: optionalText(80),
   }).optional(),
+  /**
+   * WHY NO DIAL WENT OUT. Declared here and set from `buildPayload`; the model
+   * never supplies it. `src/pcp/handoffNotAttempted.ts` is the whole rule, and
+   * the reason it exists.
+   *
+   * THIS SIDE MUST NOT BE STRICTER THAN THE APP'S, and the enum is REFERENCED
+   * rather than retyped so it cannot drift from the one
+   * `pcpPolicyTablesAgree.test.ts` reconciles against.
+   */
+  handoffNotAttemptedReason: z.enum(PCP_HANDOFF_NOT_ATTEMPTED_REASONS).optional(),
   failureInformation: optionalText(2000),
 }).strict();
 
@@ -69,6 +121,68 @@ export type PcpTicketPayload = z.infer<typeof PcpTicketPayloadSchema>;
 export type PcpTicketResponse = { success: boolean; ticketId?: number; ticketNumber?: string; cached?: boolean; error?: string };
 
 type Client = { createPcpTicket(payload: PcpTicketPayload): Promise<PcpTicketResponse> };
+
+/**
+ * HOW A PCP CALL ENDED, WHEN THAT ENDING TAKES ITS EMPTY TICKETS WITH IT.
+ *
+ * Operator, 2026-10-19: "any caller that hangs up will not get their ticket
+ * submitted, plain and simple" — and, from 2026-10-01, a caller who goes to
+ * the queue gets no ticket either. The ticketing app's
+ * `/api/voice-agent/pcp-ticket/withdraw` closes and archives this call's PCP
+ * Support tickets that name no patient and nobody has touched; it decides from
+ * its own rows (`lib/pcp/withdraw-on-leave.ts` in that repo), so a ticket that
+ * names a patient is kept whatever the agent sends here.
+ */
+export type PcpWithdrawReason = 'caller_hung_up' | 'sent_to_queue';
+
+/**
+ * Names the agent writes when it has none. The ticketing app's
+ * `withdraw-on-leave.ts` carries the same list and is the authority; this copy
+ * only decides what the caller is TOLD on the way to the queue, so a drift
+ * here can cost a clause of the warning, never a ticket.
+ */
+const PLACEHOLDER_NAME =
+  /^(unknown|patient|caller|none|n\/?a|unnamed|unnamed caller|unknown patient|unknown caller|not provided|not provided by caller|unclassified_caller|-)$/i;
+
+/** Did the call name a patient — a real first or last name, or a date of birth? */
+export function namesAPatient(state: { patientFirstName?: string; patientLastName?: string; patientDob?: string }): boolean {
+  const real = (v?: string) => Boolean(v && v.trim() && !PLACEHOLDER_NAME.test(v.trim()));
+  // The date of birth takes the same placeholder test: "unknown" or "not
+  // provided" in that slot names nobody, and the app judges it the same way.
+  return real(state.patientFirstName) || real(state.patientLastName) || real(state.patientDob);
+}
+export type PcpWithdrawRequest = { callSid: string; reason: PcpWithdrawReason };
+export type PcpWithdrawResponse = {
+  success: boolean;
+  withdrawn?: string[];
+  kept?: Array<{ ticketNumber: string; why: string }>;
+  error?: string;
+};
+type WithdrawClient = { withdrawPcpTickets(params: PcpWithdrawRequest): Promise<PcpWithdrawResponse> };
+
+/**
+ * Never throws: it runs after the call is over, and a failed withdrawal leaves
+ * the ticket where a staffer can close it, which is where it was before.
+ */
+export async function submitPcpWithdrawal(
+  callSid: string,
+  reason: PcpWithdrawReason,
+  client?: WithdrawClient,
+): Promise<PcpWithdrawResponse> {
+  try {
+    const effectiveClient = client ?? (await import('../../server/services/ticketingApiClient')).ticketingApiClient;
+    const res = await effectiveClient.withdrawPcpTickets({ callSid, reason });
+    if (res.success && res.withdrawn?.length) {
+      console.info(`[PCP-TICKET] ${reason}: withdrew ${res.withdrawn.join(', ')} — named no patient (${callSid})`);
+    } else if (!res.success) {
+      console.warn(`[PCP-TICKET] ${reason}: withdrawal not applied (${res.error ?? 'unknown'}) — any ticket stays (${callSid})`);
+    }
+    return res;
+  } catch (e) {
+    console.warn(`[PCP-TICKET] ${reason}: withdrawal failed — any ticket stays (${callSid}):`, e);
+    return { success: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
 
 /**
  * Make a payload filable without losing the request.

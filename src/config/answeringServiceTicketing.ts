@@ -458,7 +458,37 @@ export function getDepartmentName(department: AnsweringServiceDepartment): strin
  * If any ID is invalid or mismatched, we coerce to safe defaults atomically.
  */
 export function getValidatedTicketIds(departmentId: number, requestTypeId: number, requestReasonId: number): { departmentId: number; requestTypeId: number; requestReasonId: number } {
-  const validDepartments = [1, 2, 3, 11, 12];
+  /**
+   * EVERY DEPARTMENT THAT EXISTS, not the five this file happened to know.
+   *
+   * This list was `[1, 2, 3, 11, 12]`. Two of those (11 Research, 12 CEC
+   * Networking) are INACTIVE in the Support Center's own `departments` table,
+   * and it omitted ten live ones. Anything not in the list is replaced at
+   * Step 1 below with `DEFAULT_TICKET.departmentId`, which is **3 —
+   * Technicians Support, the medication queue** — and because Steps 2 and 3
+   * derive the type and reason from the validated department, one wrong
+   * department silently rewrites the whole ticket to type 8 / reason 212.
+   *
+   * Voice tickets since 2026-06-01 on departments the old list rejected:
+   * 9 HVA Hub 1,741 · 8 After Hours 874 · 15 OCS Hub 631 · 16 Medical
+   * Records 631 · 18 PCP Support 198 · 17 Locations 125 · 4 Billing 66.
+   * Standing instruction 10 routes schedule-related requests to the HVA Hub
+   * from every queue, so department 9 is not an edge case.
+   *
+   * It has not been firing at volume — the exact default signature
+   * (3 / 8 / 212) is on 15 tickets since June, the newest 2026-08-22 —
+   * because the queue tools call `createTicket` directly and never come
+   * through here. Only `syncAgentService` and `ticketOutboxService` do. It is
+   * a trap waiting for the next caller, and it is the reason the queue tools
+   * cannot simply be routed through the existing outbox: their department,
+   * type and reason are already validated by their own taxonomy module.
+   *
+   * Read from the Support Center `departments` table on 2026-09-01. Inactive
+   * ones are kept here deliberately: passing a department through to an
+   * endpoint that will reject it loudly beats silently turning it into a
+   * medication ticket.
+   */
+  const validDepartments = [1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12, 13, 15, 16, 17, 18];
   
   // Department → Type → Reason mapping for consistency
   const departmentToDefaultType: Record<number, number> = {
@@ -490,8 +520,51 @@ export function getValidatedTicketIds(departmentId: number, requestTypeId: numbe
     50: 412, // Network Operations → Referral Coordination CEC
   };
   
-  // Step 1: Validate department
-  let validatedDeptId = validDepartments.includes(departmentId) ? departmentId : DEFAULT_TICKET.departmentId;
+  /**
+   * THIS MODULE VALIDATES ONLY THE TAXONOMY IT OWNS.
+   *
+   * `REQUEST_TYPE_INFO` carries types for five departments — optical, surgery,
+   * tech, research, cec_networking. It has none for After Hours, the HVA Hub,
+   * OCS, Medical Records, Locations, PCP Support or Billing, all of which
+   * carry live voice tickets. Steps 2 and 3 derive the type from the validated
+   * department and the reason from the validated type, so running an unowned
+   * department through them produces `8 / 212` — a Technicians type and reason
+   * — whatever department is on the ticket.
+   *
+   * Which is why widening the allowlist is NOT the fix, and I nearly shipped
+   * it as one. It keeps the department and still rewrites the rest, so a HVA
+   * Hub ticket leaves as 9/8/212 — and `create-ticket` takes the whole triple
+   * or nothing, so that is refused rather than merely misrouted. A quiet
+   * misroute would have become a lost request. Worse, not better.
+   *
+   * So: a department this module owns is validated exactly as before. A real
+   * department it does not own passes through UNTOUCHED, because the taxonomy
+   * module that does own it already validated the triple — the same guard that
+   * keeps optical off reason 153. Only a department that exists nowhere falls
+   * back, and it now says so instead of doing it silently.
+   */
+  const OWNED_DEPARTMENTS = [1, 2, 3, 11, 12];
+  if (!OWNED_DEPARTMENTS.includes(departmentId)) {
+    if (validDepartments.includes(departmentId)) {
+      console.info(
+        `[TICKET VALIDATION] Department ${departmentId} is outside this module's taxonomy — ` +
+          `passing ${departmentId}/${requestTypeId}/${requestReasonId} through unvalidated; ` +
+          `its own queue validated it.`,
+      );
+      return { departmentId, requestTypeId, requestReasonId };
+    }
+    console.error(
+      `[TICKET VALIDATION] ✗ UNKNOWN DEPARTMENT ${departmentId} — falling back to ` +
+        `${DEFAULT_TICKET.departmentId}, which also rewrites the type and reason. ` +
+        `The list was read from the Support Center departments table on 2026-09-01; ` +
+        `if this department is real, add it there and here.`,
+    );
+    return { ...DEFAULT_TICKET };
+  }
+
+  // Step 1: the department is one this module owns, so Steps 2 and 3 below
+  // have the type and reason knowledge they need to check it against.
+  let validatedDeptId = departmentId;
   
   // Step 2: Validate type - must exist AND belong to the validated department
   const typeInfo = REQUEST_TYPE_INFO[requestTypeId];

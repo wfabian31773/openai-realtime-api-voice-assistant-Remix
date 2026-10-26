@@ -19,17 +19,19 @@ import {
 } from '@openai/agents/realtime';
 import { getTwilioClient, getTwilioFromPhoneNumber } from './lib/twilioClient';
 import { medicalSafetyGuardrails, WELCOME_GREETING, getUrgentTriageGreeting } from './agents/afterHoursAgent';
+import { compliantFallbackGreeting } from './services/compliantFallbackGreeting';
 import { azulSchedulingAgentConfig, registerAzulHoldingCallback, unregisterAzulHoldingCallback, registerAzulOfficeTransferCallback, unregisterAzulOfficeTransferCallback, registerAzulTranscriptProvider, unregisterAzulTranscriptProvider } from './agents/azulSchedulingAgent';
 import { flushAzulTimeline, getAzulTimeline, recordDirectorAction } from './services/toolTimeline';
 import { callLifecycleCoordinator, getMaxDurationMs } from './services/callLifecycleCoordinator';
 import { callMetadataForDB } from './services/callMetadataStore';
+import { recordingStatusTarget } from './services/recordingStatusTarget';
+import { landRecording } from './runtime/parkedRecordings';
 import { callSessionService } from './services/callSessionService';
 import { withRetry, withResiliency, TICKETING_RETRY_CONFIG, TWILIO_RETRY_CONFIG, getCircuitBreaker } from './services/resilienceUtils';
 import { getGreeterOpeningGreeting } from './utils/timeAware';
 import { resolveConfiguredGreeting, scheduleGreetingCacheWarm } from './services/greetingResolver';
 import { seedLedger, renderKnownFacts, releaseLedger, harvestCallerLine } from './services/callFactsLedger';
 import { startRamp, onCallerUtterance, rampActive, releaseRamp } from './services/rampEngine';
-import { newCoreFor, newCoreEnabled, releaseNewCoreCall } from './core/router';
 import { getLedger as getCallFacts } from './services/callFactsLedger';
 import { storage } from '../server/storage';
 import { registerTicketingSyncRoutes } from './voiceAgent';
@@ -39,8 +41,14 @@ import { resolveAbAssignment } from './services/abCarriage';
 import { director, directorEnabledFor, type DirectorAction } from './director/director';
 import { getEnvironmentConfig, resolveAppDomain } from './config/environment';
 import { CallDiagnostics } from './services/callDiagnostics';
-import { resolveHandoffDestination, resolvePcpDialSequence } from './services/handoffPolicy';
-import { pcpAgentConfig } from './agents/pcpAgent';
+import {
+  resolveClinicalTransferNumber,
+  resolveHandoffDestination,
+  resolvePcpDialSequence,
+  urgentTransferFailureLine,
+} from './services/handoffPolicy';
+import { buildPcpTransferBriefing, buildWarmTransferScript } from './services/warmTransferBriefing';
+import { pcpAgentConfig, markPcpCallEnded, pcpCallIsLive } from './agents/pcpAgent';
 import { SipConferenceLifecycle } from './services/sipConferenceLifecycle';
 import { deadAirWatchdog, isActivityEvent, deadAirTimeoutMs } from './services/deadAirWatchdog';
 import { buildTranscriptionConfig, transcriptionModel } from './config/transcription';
@@ -89,6 +97,7 @@ try {
       authToken: process.env.TWILIO_AUTH_TOKEN || '',
       phoneNumber: process.env.TWILIO_PHONE_NUMBER,
       humanAgentNumber: process.env.HUMAN_AGENT_NUMBER,
+      noIvrHumanAgentNumber: process.env.NO_IVR_HUMAN_AGENT_NUMBER,
       pcpHumanAgentNumber: process.env.PCP_HUMAN_AGENT_NUMBER,
       pcpAgentDids: (process.env.PCP_AGENT_DIDS || '').split(',').map((number) => number.trim()).filter(Boolean),
       pcpRoutingMode: process.env.PCP_ROUTING_MODE === 'sequential' ? 'sequential' : 'queue',
@@ -228,15 +237,6 @@ const pendingGreetings = new Map<string, PendingGreeting>();
 
 /** CP-4: lines running the deterministic ramp (env override RAMP_AGENTS). */
 const RAMP_AGENTS = new Set((process.env.RAMP_AGENTS ?? 'answering-service,pcp,azul-scheduling').split(',').map((x) => x.trim()).filter(Boolean));
-
-/**
- * Calls owned by a new-core line module (reconstruction-plan.md §4), keyed by
- * call id -> the slug the module was REGISTERED under. Looking a module up by
- * any other name returns nothing and the caller hears dead air, which is
- * exactly what happened when a 'no-ivr' call was re-labelled 'after-hours'
- * mid-session (live 2026-08-09).
- */
-const newCoreCalls = new Map<string, string>();
 
 /**
  * Wrap-up hangups, pending. A caller can speak AFTER the closing line — most
@@ -855,7 +855,28 @@ async function flushLoopTelemetry(key: string, callLogId: string): Promise<LoopG
 
 /** What we dialed for a warm transfer, keyed by the OFFICE leg's CallSid, so
  *  the accept/status webhooks can attribute an outcome to it. */
-const officeLegDials = new Map<string, { openAiCallId: string; dialedNumber: string; queueLabel: string; dialedAt: number; callerCallSid?: string }>();
+const officeLegDials = new Map<string, {
+  openAiCallId: string;
+  dialedNumber: string;
+  queueLabel: string;
+  dialedAt: number;
+  callerCallSid?: string;
+  /**
+   * WHAT THE OFFICE WAS NOT TOLD, SNAPSHOT AT DIAL TIME. Codex P2, PR #273.
+   *
+   * The runtime records these from the escalation side channel; this path did
+   * not, so a legacy PCP call that DID run the one-round intake was
+   * indistinguishable from a lane that never checked the briefing — the exact
+   * "absent reads as a negative finding" failure that made every runtime
+   * transfer look like no transfer at all.
+   *
+   * Snapshotted HERE rather than read at outcome time because a successful
+   * handoff deletes `escalationDetailsMap` before the outcome is recorded, so
+   * reading it later would report every connected transfer as fully briefed.
+   */
+  briefingGaps?: string[];
+  askedBeforeDial?: boolean;
+}>();
 
 /** Persist the office leg's result onto the call log. This is the record that
  *  answers "did the office actually pick up, and which office was it?" — a
@@ -890,6 +911,10 @@ async function recordTransferOutcome(
     amdVerdict: extra.amdVerdict ?? null,
     ...(extra.detail ? { detail: extra.detail } : {}),
     ringSeconds: Math.round((Date.now() - dial.dialedAt) / 1000),
+    // Absent, never empty, on a lane that does not run the round — an empty
+    // list would claim a complete briefing this path never checked.
+    ...(dial.briefingGaps ? { briefingGaps: dial.briefingGaps } : {}),
+    ...(dial.askedBeforeDial !== undefined ? { askedBeforeDial: dial.askedBeforeDial } : {}),
     at: new Date().toISOString(),
   };
   try {
@@ -1126,10 +1151,16 @@ const aircallDTMFSent = new Set<string>();
 
 // Import escalation details from shared store (avoids circular dependency with noIvrAgent.ts)
 import { escalationDetailsMap, type EscalationDetails } from './services/escalationStore';
+import {
+  buildUrgentTransferSms,
+  urgentAlertTime,
+  urgentFallbackTicketParams,
+  type UrgentTransferSmsOptions,
+} from './services/urgentTransferAlert';
 import { markCallConcluded, getCallConclusion, linkConferenceToCall, callIdForConference } from './services/callConclusion';
 import { filesTickets } from './config/agentCapabilities';
 import { recordCallerSpeech, releaseCallerSpeech } from './services/symptomCorroboration';
-import { OPENAI_COST_CENTS_PER_SECOND } from './services/callCostService';
+import { applyTwilioStatusCallback } from './services/twilioStatusCallback';
 
 
 
@@ -1197,46 +1228,27 @@ function logHistoryItem(item: RealtimeItem, callId?: string): void {
  */
 async function fileUrgentHandoffFallbackTicket(
   openAiCallId: string,
-  escalationDetails: { reason?: string; symptomsSummary?: string; patientFirstName?: string; patientLastName?: string } | undefined,
+  escalationDetails: { reason?: string; symptomsSummary?: string; patientFirstName?: string; patientLastName?: string; callbackNumber?: string } | undefined,
   callerID: string | null | undefined,
   ctx: { why: string; dialTarget?: string },
 ): Promise<void> {
   console.warn(`[HANDOFF] Creating urgent fallback ticket — ${ctx.why}`);
   try {
     const { SyncAgentService } = await import('./services/syncAgentService');
-    const { AFTER_HOURS_DEPARTMENT_ID, TRIAGE_OUTCOME_MAPPINGS } = await import('./config/afterHoursTicketing');
-
-    const urgentMapping = TRIAGE_OUTCOME_MAPPINGS['sudden_vision_loss']; // generic urgent
-    const patientFirst = escalationDetails?.patientFirstName || 'Unknown';
-    const patientLast = escalationDetails?.patientLastName || 'Caller';
-    const rawPhone = callerID || '';
-    const digits = rawPhone.replace(/\D/g, '');
-    const formattedPhone = digits.length === 10
-      ? `+1${digits}`
-      : rawPhone.startsWith('+') ? rawPhone : `+${digits}`;
-
-    const descParts: string[] = [ctx.why, 'Please call the patient back immediately.'];
-    if (ctx.dialTarget) descParts.push(`Attempted transfer to: ${ctx.dialTarget}`);
-    if (escalationDetails?.reason) descParts.push(`Reason: ${escalationDetails.reason}`);
-    if (escalationDetails?.symptomsSummary) descParts.push(`Symptoms: ${escalationDetails.symptomsSummary}`);
-
     const conferenceName = getConferenceName(openAiCallId);
-    const ticketResult = await SyncAgentService.createTicket({
-      departmentId: AFTER_HOURS_DEPARTMENT_ID,
-      requestTypeId: urgentMapping.requestTypeId,
-      requestReasonId: urgentMapping.requestReasonId,
-      patientFirstName: patientFirst,
-      patientLastName: patientLast,
-      patientPhone: formattedPhone,
-      description: descParts.join('\n'),
-      priority: 'urgent',
-      callData: {
+    // The payload lives in one module both pipelines read
+    // (src/services/urgentTransferAlert.ts) — the runtime files the same ticket.
+    const ticketResult = await SyncAgentService.createTicket(
+      urgentFallbackTicketParams({
+        why: ctx.why,
+        dialTarget: ctx.dialTarget,
+        escalationDetails,
+        callerId: callerID,
         callSid: conferenceName ? getTwilioCallSid(conferenceName) : undefined,
-        callerPhone: callerID || undefined,
         // Label with the agent actually on the call, not a hardcoded slug.
         agentUsed: callMetadataForDB.get(openAiCallId)?.agentSlug || 'after-hours',
-      },
-    });
+      }),
+    );
 
     if (ticketResult.success) {
       console.log('[HANDOFF] ✓ Urgent fallback ticket created:', ticketResult.ticketNumber);
@@ -1263,12 +1275,7 @@ async function fileUrgentHandoffFallbackTicket(
  * Callers pass whatever context they have; escalation details are included
  * when the call got far enough to record them.
  */
-function sendUrgentTransferSms(opts: {
-  callerNumber?: string;
-  escalationDetails?: EscalationDetails;
-  /** Extra context line for fallback paths, e.g. why this is a direct dial. */
-  note?: string;
-}): void {
+function sendUrgentTransferSms(opts: UrgentTransferSmsOptions): void {
   const to = envConfig.twilio.urgentNotificationNumber;
   const from = envConfig.twilio.phoneNumber;
   if (!to || !from) {
@@ -1278,27 +1285,9 @@ function sendUrgentTransferSms(opts: {
   (async () => {
     try {
       const client = twilioClient ?? (twilioClient = await getTwilioClient());
-      const callTime = new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true, timeZone: 'America/Los_Angeles' });
-      const d = opts.escalationDetails;
-
-      let smsBody = `📞 INCOMING TRANSFER - ${callTime}\n`;
-      smsBody += `From: ${opts.callerNumber || 'Unknown'}\n`;
-      if (opts.note) {
-        smsBody += `\n⚠️ ${opts.note}\n`;
-      }
-      if (d) {
-        if (d.callerType === 'healthcare_provider' && d.providerInfo) {
-          smsBody += `\n👨‍⚕️ PROVIDER CALL\nProvider: ${d.providerInfo}\n`;
-        } else if (d.callerType === 'patient_urgent') {
-          smsBody += `\n🚨 URGENT PATIENT\n`;
-        }
-        if (d.patientFirstName) smsBody += `Patient: ${d.patientFirstName} ${d.patientLastName || ''}\n`;
-        if (d.patientDob) smsBody += `DOB: ${d.patientDob}\n`;
-        if (d.callbackNumber) smsBody += `Callback: ${d.callbackNumber}\n`;
-        if (d.reason) smsBody += `\nReason: ${d.reason}\n`;
-        if (d.symptomsSummary) smsBody += `Symptoms: ${d.symptomsSummary}\n`;
-      }
-      smsBody += `\n📱 Connecting patient to you now...`;
+      // The text itself lives in one module both pipelines read
+      // (src/services/urgentTransferAlert.ts) — the runtime sends the same words.
+      const smsBody = buildUrgentTransferSms(opts, urgentAlertTime());
 
       await client.messages.create({ body: smsBody, from, to });
       console.log('[HANDOFF] ✓ SMS notification sent to', to);
@@ -1329,13 +1318,20 @@ async function addHumanAgent(openAiCallId: string): Promise<HandoffOutcome> {
 
   // Get escalation details for this call
   const escalationDetails = escalationDetailsMap.get(openAiCallId);
+  const handoffAgentSlug =
+    escalationDetails?.agentSlug ?? callMetadataForDB.get(openAiCallId)?.agentSlug;
+  const clinicalDestination = resolveClinicalTransferNumber({
+    agentSlug: handoffAgentSlug,
+    clinicalNumber: HUMAN_AGENT_NUMBER,
+    noIvrNumber: envConfig.twilio.noIvrHumanAgentNumber,
+  });
   
   const callerType = escalationDetails?.callerType;
   const policy = resolveHandoffDestination({
-    agentSlug: escalationDetails?.agentSlug,
+    agentSlug: handoffAgentSlug,
     callerType,
     callerRequestedHuman: escalationDetails?.callerRequestedHuman,
-    clinicalNumber: HUMAN_AGENT_NUMBER,
+    clinicalNumber: clinicalDestination,
     pcpNumber: envConfig.twilio.pcpHumanAgentNumber,
   });
 
@@ -1387,6 +1383,12 @@ async function addHumanAgent(openAiCallId: string): Promise<HandoffOutcome> {
   // routing one into an office front desk would be wrong. So the office queue
   // only ever replaces the CLINICAL destination.
   let dialSource = 'policy';
+  // Hoisted out of the block below so the heads-up SMS can tell the on-call
+  // phone which of two different things is happening. Without it, an office
+  // routed call sent the same "connecting patient to you now" as a call that
+  // really was ringing that phone (Codex review, PR #238).
+  let urgentSource: string | null = null;
+  let urgentQueueLabel: string | undefined;
   if (policy.policy !== 'pcp') {
     const { resolveUrgentTransferTarget } = await import('./services/urgentTransfer');
     const target = await resolveUrgentTransferTarget({
@@ -1395,11 +1397,13 @@ async function addHumanAgent(openAiCallId: string): Promise<HandoffOutcome> {
       onCallNumber: handoffDestination,
       // Only an authorized agent may be handed the on-call phone. Without
       // this, an office-less result fell back to it from ANY agent.
-      agentSlug: escalationDetails?.agentSlug,
+      agentSlug: handoffAgentSlug,
     });
     if (target?.number) {
       handoffDestination = target.number;
       dialSource = target.source + (target.queueLabel ? ` — ${target.queueLabel}` : '');
+      urgentSource = target.source;
+      urgentQueueLabel = target.queueLabel;
     }
   }
   console.log(`[HANDOFF] Dialing ${handoffDestination} (${dialSource})`);
@@ -1428,21 +1432,65 @@ async function addHumanAgent(openAiCallId: string): Promise<HandoffOutcome> {
       : [];
     
     // STEP 1: Send SMS notification immediately (fire and forget)
-    // Provider gets heads-up while we're dialing them
+    // Provider gets heads-up while we're dialing them — but only the recipient
+    // whose phone is ACTUALLY about to ring is told to pick up. In business
+    // hours a no-IVR escalation goes to the office queue the rules engine
+    // chose, and this alert still lands on the on-call mobile; sending the
+    // "connecting patient to you now" wording there left it waiting on a call
+    // ringing in another building (Codex review, PR #238).
     if (policy.policy !== 'pcp') {
-      sendUrgentTransferSms({ callerNumber: callerID, escalationDetails });
+      const routedToOffice = urgentSource === 'office_queue';
+      sendUrgentTransferSms({
+        callerNumber: callerID,
+        escalationDetails,
+        ...(routedToOffice ? { kind: 'routed' as const, routedTo: urgentQueueLabel } : {}),
+      });
     }
     
     let sequentialPcpAnswered = false;
     if (policy.policy === 'pcp' && envConfig.twilio.pcpRoutingMode === 'sequential') {
+      /**
+       * THE CALLER CAN LEAVE WHILE THIS FUNCTION IS SETTING UP. Codex P1, PR #273.
+       *
+       * `addHumanAgent` awaits `getTwilioClient()` above — on the first transfer
+       * of a process that is a real await, and pcpAgent's own liveness gate has
+       * already run and passed by then. If the transport closes during it,
+       * teardown adds the abort marker and marks the call ended... and then the
+       * very next line here DELETES that marker, wiping the evidence a moment
+       * before the loop would have checked it. The PCP team is dialled for a
+       * caller who is gone, and a staffer picks up to silence.
+       *
+       * The delete itself is not the bug and stays: a stale marker from an
+       * earlier aborted attempt must not refuse a legitimate retry. What was
+       * missing is that it cannot tell a stale marker from a fresh one.
+       *
+       * `pcpCallIsLive` can, because it is teardown-synchronous and — unlike
+       * `abortedPcpHandoffs` — this path neither owns nor clears it. Asking the
+       * marker you are about to erase is not a check.
+       *
+       * Third round of this same race, each window narrower than the last:
+       * the sweep, then the teardown await, now the client init. Recorded so
+       * the next one is looked for at an await rather than found on a call.
+       */
+      if (!pcpCallIsLive(openAiCallId)) {
+        console.warn(`[HANDOFF] the caller left during setup — NOT dialling (${openAiCallId})`);
+        return { ok: false, status: 'FAILED', reason: 'caller_disconnected', destination: handoffDestination };
+      }
       abortedPcpHandoffs.delete(openAiCallId);
       if (pcpDialSequence.length === 0) return { ok: false, status: 'HANDOFF_UNAVAILABLE', reason: 'pcp_agent_dids_not_configured' };
-      const briefing = [
-        'This is the Azul Vision PCP support assistant with a live professional caller transfer.',
-        escalationDetails?.providerInfo ? `Caller organization and role: ${escalationDetails.providerInfo}.` : null,
-        escalationDetails?.reason ? `Reason: ${escalationDetails.reason}.` : null,
-        'Press any key to accept, or remain on the line to connect.',
-      ].filter(Boolean).join(' ');
+      // How to accept is the TwiML's PRESS_PROMPT, spoken before and after this
+      // text. The briefing used to repeat it as "press any key to accept, or
+      // remain on the line to connect" — and the accept handler hangs up on
+      // anything that is not a digit, so the second half was an instruction we
+      // would not honour, given to referring providers.
+      const briefing = buildPcpTransferBriefing({
+        // Both pipelines brief the office from the same builder, so both have
+        // to pass the same fields. Adding the name on the runtime only would
+        // have left the old core silently worse (2026-09-08).
+        callerName: escalationDetails?.callerName,
+        providerInfo: escalationDetails?.providerInfo,
+        reason: escalationDetails?.reason,
+      });
       for (let index = 0; index < pcpDialSequence.length; index += 1) {
         if (abortedPcpHandoffs.has(openAiCallId)) return { ok: false, status: 'FAILED', reason: 'caller_disconnected', destination: handoffDestination };
         const destination = pcpDialSequence[index];
@@ -1644,6 +1692,7 @@ async function addHumanAgent(openAiCallId: string): Promise<HandoffOutcome> {
     const callMeta = callMetadataForDB.get(openAiCallId);
     if (callMeta) {
       callMeta.transferredToHuman = true;
+      callMeta.transferTargetNumber = handoffDestination;
       
       // CRITICAL: Also mark in callLifecycleCoordinator to prevent it from overwriting
       // the transferredToHuman flag when it finalizes the call
@@ -1687,7 +1736,10 @@ async function addHumanAgent(openAiCallId: string): Promise<HandoffOutcome> {
           
           // CRITICAL: DO NOT save duration - TWILIO IS THE SOURCE OF TRUTH
           // Let Twilio status callback set the authoritative duration
-          await storage.updateCallLog(callMeta.dbCallLogId, {
+          // Preserving, because this sets cost_is_estimated. A reconciled
+          // row must not be relabelled an estimate — the badge and the
+          // number have to agree in both directions.
+          await storage.updateCallLogPreservingReconciledCost(callMeta.dbCallLogId, {
             status: 'transferred',
             endTime,
             // DO NOT SET DURATION - Twilio status callback will set it
@@ -1861,17 +1913,79 @@ async function recoverCallerAfterSipTermination(conferenceName: string, status: 
       return;
     }
 
-    const fallbackNumber = HUMAN_AGENT_NUMBER || '+18186021567';
-    const callerIdAttribute = envConfig.twilio.phoneNumber
-      ? ` callerId="${escapeXml(envConfig.twilio.phoneNumber)}"`
-      : '';
-    // Heads-up SMS BEFORE the operator's phone rings. This path fires only for
-    // a mid-call drop on an already-escalated (urgent) call.
+    const fallbackNumber = resolveClinicalTransferNumber({
+      agentSlug:
+        escalation.agentSlug ??
+        (recoveredCallId ? callMetadataForDB.get(recoveredCallId)?.agentSlug : undefined),
+      clinicalNumber: HUMAN_AGENT_NUMBER,
+      noIvrNumber: envConfig.twilio.noIvrHumanAgentNumber,
+    });
+    // Heads-up SMS BEFORE the operator's phone rings, and before the
+    // no-destination branch below. This path fires only for a mid-call drop on
+    // an already-escalated (urgent) call, so the operator has to hear about it
+    // whether or not we can dial — the caller we CANNOT transfer is the one
+    // who most needs somebody told. Sending it after the branch meant that
+    // caller was the only one nobody was paged about.
     sendUrgentTransferSms({
       callerNumber: getCallerNumber(conferenceName) || callerCall.from,
       escalationDetails: escalation,
-      note: 'TECH FALLBACK — assistant disconnected during an URGENT call; caller transferred directly',
+      kind: fallbackNumber ? 'transfer' : 'callback',
+      note: fallbackNumber
+        ? 'TECH FALLBACK — assistant disconnected during an URGENT call; caller transferred directly'
+        : 'TECH FALLBACK — assistant disconnected during an URGENT call and NO transfer destination is configured. Nobody was dialled.',
     });
+    if (!fallbackNumber) {
+      console.error(
+        `[SIP-RECOVERY] ${conferenceName}: urgent transfer destination is not configured — ending caller leg without dialing`,
+      );
+      // Filed, not awaited. Operator ruling 2026-08-30: this caller is NOT
+      // promised a callback, so nothing spoken below depends on the ticket
+      // having landed — and awaiting it would hold an already-distressed
+      // caller in silence through a database lock, an outbox write, an
+      // external send and, on a contended claim, a deliberate three-second
+      // wait (Codex review, PR #238). The record still gets written; its
+      // latency just stops being the caller's problem.
+      void fileUrgentHandoffFallbackTicket(
+        // Non-null holds by construction: `escalation` is only ever read as
+        // `recoveredCallId ? escalationDetailsMap.get(recoveredCallId) : undefined`,
+        // and the guard above returns when it is falsy. The helper keys the
+        // conference and agent slug off this id, so substituting the
+        // conference name would file a ticket with neither.
+        recoveredCallId!,
+        escalation,
+        getCallerNumber(conferenceName) || callerCall.from,
+        {
+          why:
+            'URGENT call lost its assistant leg and NO transfer destination is configured — ' +
+            'nobody was dialled. Call this patient back.',
+        },
+      );
+      await client.calls(callerCallSid).update({
+        twiml: `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Say voice="Polly.Joanna">${escapeXml(urgentTransferFailureLine())}</Say>
+  <Hangup/>
+</Response>`,
+      });
+      return;
+    }
+    const callerIdAttribute = envConfig.twilio.phoneNumber
+      ? ` callerId="${escapeXml(envConfig.twilio.phoneNumber)}"`
+      : '';
+    // No ticket is filed here, deliberately. It would have to be written
+    // BEFORE the dial — the outcome is not known on this side until Twilio
+    // reports it — and this helper's description always carries "Please call
+    // the patient back immediately." So a caller the on-call phone answers
+    // would generate an urgent callback task for a patient who is at that
+    // moment talking to the person named on it, on the after-hours queue the
+    // operator works himself (Codex review, PR #238).
+    //
+    // Nothing is lost by leaving it out: the escalation that led here already
+    // files its own record through the agent, and addHumanAgent files the
+    // urgent fallback ticket on the paths where a transfer actually failed.
+    // This function's job is to get the caller to a person, not to duplicate
+    // that bookkeeping with a worse copy of it.
+    const unansweredSay = urgentTransferFailureLine();
     await client.calls(callerCallSid).update({
       twiml: `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
@@ -1879,7 +1993,7 @@ async function recoverCallerAfterSipTermination(conferenceName: string, status: 
   <Dial${callerIdAttribute}>
     <Number>${escapeXml(fallbackNumber)}</Number>
   </Dial>
-  <Say voice="Polly.Joanna">We were unable to complete your call. Please try again later or call back during regular business hours. Goodbye.</Say>
+  <Say voice="Polly.Joanna">${escapeXml(unansweredSay)}</Say>
   <Hangup/>
 </Response>`,
     });
@@ -1965,18 +2079,13 @@ async function transferConferenceToNumber(
     const acceptUrl = `https://${envConfig.domain}/api/voice/warm-transfer-accept`;
     const statusUrl = `https://${envConfig.domain}/api/voice/warm-transfer-status`;
     const amdUrl = `https://${envConfig.domain}/api/voice/warm-transfer-amd`;
-    const say = escapeXml(briefing.slice(0, 800));
-    // The second Gather uses actionOnEmptyResult so that staff who simply
-    // listen to the briefing and say nothing are STILL connected. Previously
-    // both Gathers fell through to a "No confirmation received. Goodbye."
-    // hangup, so an office that answered but never pressed a key was recorded
-    // as an unanswered transfer and the caller — who was holding in silence —
-    // was dropped to a callback ticket. A keypress still connects instantly;
-    // staying on the line now connects too. Answering machines are filtered
-    // by the async AMD verdict in the accept handler rather than by relying
-    // on a human to press a digit.
-    // A KEYPRESS IS THE ONLY WAY TO ACCEPT, and the briefing says so before and
-    // after the details, so silence is never ambiguous.
+    // RAW, not pre-escaped: buildWarmTransferScript escapes it, and escaping
+    // twice turns "Smith & Jones" into the spoken words "Smith amp; Jones"
+    // (Codex, round 1 of this PR — the pre-escape here survived the
+    // extraction and doubled with the builder's).
+    const say = briefing.slice(0, 800);
+    // A KEYPRESS IS THE ONLY WAY TO ACCEPT, and the press prompt bookends the
+    // details, so silence is never ambiguous.
     //
     // Staying on the line used to connect too, gated on the async AMD verdict. On a
     // staffed queue that inverted: staffers answered, listened, pressed nothing, and
@@ -1985,19 +2094,7 @@ async function transferConferenceToNumber(
     // transfers to +17149564300 came back `machine` this way. A keypress is positive
     // proof of a person and bypasses AMD entirely, so requiring one removes the
     // guesswork instead of tuning it.
-    const PRESS_PROMPT = 'Press any key to take this caller.';
-    const twiml =
-      `<?xml version="1.0" encoding="UTF-8"?><Response>` +
-      `<Gather input="dtmf" numDigits="1" timeout="8" action="${acceptUrl}" method="POST">` +
-      `<Say voice="Polly.Joanna">${PRESS_PROMPT}</Say>` +
-      `<Say voice="Polly.Joanna">${say}</Say>` +
-      `<Say voice="Polly.Joanna">${PRESS_PROMPT}</Say>` +
-      `</Gather>` +
-      `<Gather input="dtmf" numDigits="1" timeout="10" actionOnEmptyResult="true" action="${acceptUrl}" method="POST">` +
-      `<Say voice="Polly.Joanna">Repeating: ${say}</Say>` +
-      `<Say voice="Polly.Joanna">${PRESS_PROMPT}</Say>` +
-      `</Gather>` +
-      `</Response>`;
+    const twiml = buildWarmTransferScript({ say, acceptUrl });
     const dialResult = await withResiliency(
       async () => twilioClient.calls.create({
         from: twilioPhoneNumber,
@@ -2057,8 +2154,15 @@ async function transferConferenceToNumber(
     // Office-leg telemetry (2026-07-30): remember what we dialed so the
     // accept/status webhooks can record the OUTCOME against it. Without
     // this pair, nothing in the database says whether the office picked up.
+    const briefedAtDial = escalationDetailsMap.get(openAiCallId);
     officeLegDials.set(dialedSid, {
       openAiCallId, dialedNumber: toNumber, queueLabel: label, dialedAt: Date.now(),
+      // Taken now: a successful handoff clears the side channel before the
+      // outcome is recorded (Codex P2, PR #273).
+      ...(briefedAtDial?.briefingGaps ? { briefingGaps: briefedAtDial.briefingGaps } : {}),
+      ...(briefedAtDial?.askedBeforeDial !== undefined
+        ? { askedBeforeDial: briefedAtDial.askedBeforeDial }
+        : {}),
       // The CALLER's leg, so a late outcome can still find the call_logs row
       // when dbCallLogId has not been written yet. Taken from the conference
       // rather than CallMetadata, whose twilioCallSid is never populated.
@@ -3210,7 +3314,7 @@ async function observeCall(
        * ANY response delta means the model has started producing output.
        *
        * This was pinned to `response.output_audio.delta` /
-       * `response.audio.delta` — the names `standalone/demoLine.ts` uses on a
+       * `response.audio.delta` — the names the OpenAI Realtime API uses on a
        * raw websocket. The Agents SDK transport does not surface those under
        * those names, so the mark never fired once: on the first live night
        * `modelFirstAudioMs` and `callerWaitMs` were blank on all 51 agent
@@ -3335,76 +3439,10 @@ async function observeCall(
               `[CONTEXT] ${effectiveSlug} ${callId.slice(-6)} | name=${src(cf.firstName, cf.matchedFirstName)} ${src(cf.lastName, cf.matchedLastName)}` +
                 ` | dob=${src(cf.dateOfBirth, cf.matchedDob)} | verified=${cf.identityVerified ? 'YES' : 'no'}` +
                 ` | callback=${last4} | reason=${reason}` +
-                ` | lang=${cf.language ?? 'en'}${cf.contactMethod && cf.contactMethod !== 'callback' ? ` | via=${cf.contactMethod}` : ''}` +
-                ` | core=${newCoreCalls.has(callId) ? 'NEW' : 'old'}`,
+                ` | lang=${cf.language ?? 'en'}${cf.contactMethod && cf.contactMethod !== 'callback' ? ` | via=${cf.contactMethod}` : ''}`,
             );
           }
         } catch { /* logging must never affect a call */ }
-
-        // Reconstruction cutover: the new-core line module owns EVERY turn of
-        // this call. It returns the exact next line (and executes its own
-        // tools in code); the model's improvised reply is cancelled and the
-        // scripted line rides the same delivery guarantee as greetings.
-        if (newCoreCalls.has(callId)) {
-          // The caller spoke again: whatever we had queued to end the call is
-          // off until the module says so again.
-          cancelPendingHangup(callId);
-          void (async () => {
-            try {
-              const mod = newCoreFor(newCoreCalls.get(callId) ?? effectiveSlug);
-              if (!mod) {
-                console.error(`[NEW-CORE] no module for ${callId} (registered=${newCoreCalls.get(callId)}, effective=${effectiveSlug}) — the caller would hear nothing`);
-                return;
-              }
-              let action: import('./core/types').CoreAction | null = await mod.onUtterance(callId, transcript);
-              while (action) {
-                if (action.say) {
-                  if (responseInFlight.has(callId)) {
-                    try { (session.transport as any).sendEvent({ type: 'response.cancel' }); } catch { /* fine */ }
-                  }
-                  armGreetingGuarantee(
-                    callId,
-                    action.say,
-                    `Say this to the caller word-for-word, without adding, removing, or rephrasing anything: "${action.say}" - Then stop and wait for their response.`,
-                    session.transport as any,
-                  );
-                  console.info(`[NEW-CORE] ${mod.stateOf(callId)} line forced (guaranteed) for ${callId}`);
-                }
-                if (action.alert) console.error(`[NEW-CORE][ALERT] ${action.alert}`);
-                if (action.endCall) {
-                  // Hang up the CALL (not just our transport) after the wrap
-                  // line has had time to play — same REST call as terminate_call.
-                  // Held in pendingHangups so a caller who speaks again (an
-                  // emergency, a second request) cancels it.
-                  cancelPendingHangup(callId);
-                  pendingHangups.set(callId, setTimeout(() => {
-                    pendingHangups.delete(callId);
-                    void (async () => {
-                      try {
-                        const apiKey = process.env.OPENAI_API_KEY;
-                        if (apiKey) {
-                          const res = await fetch(
-                            `https://api.openai.com/v1/realtime/calls/${encodeURIComponent(callId)}/hangup`,
-                            { method: 'POST', headers: { Authorization: `Bearer ${apiKey}` } },
-                          );
-                          console.info(`[NEW-CORE] wrap hangup for ${callId} → ${res.status}`);
-                          // Deliberate, successful wrap hangup — SIP recovery
-                          // must hang up the lingering caller, not transfer.
-                          if (res.ok) markCallConcluded(callId, 'new_core_wrap');
-                        }
-                      } catch (e) {
-                        console.warn(`[NEW-CORE] hangup failed for ${callId}:`, e);
-                      }
-                    })();
-                  }, 7000));
-                }
-                action = action.followUp ? await action.followUp() : null;
-              }
-            } catch (newCoreErr) {
-              console.warn(`[NEW-CORE] error for ${callId}:`, newCoreErr);
-            }
-          })();
-        }
 
         // CP-4: the ramp state machine owns the opening — parse the answer,
         // force the operator's next line, preempting any improvised reply
@@ -3474,12 +3512,9 @@ async function observeCall(
         recordCallerSpeech(callId, transcript);
 
         // Loop guard: a repeated "representative / customer service" demand
-        // trips the escalation directive. (New-core calls handle the busy
-        // script inside the line module — a second directive would double-talk.)
-        if (!newCoreCalls.has(callId)) {
-          const lgCallerDirective = conversationLoopGuard.onCallerLine(callId, effectiveSlug, transcript);
-          if (lgCallerDirective) sendLoopGuardDirective(session, callId, lgCallerDirective);
-        }
+        // trips the escalation directive.
+        const lgCallerDirective = conversationLoopGuard.onCallerLine(callId, effectiveSlug, transcript);
+        if (lgCallerDirective) sendLoopGuardDirective(session, callId, lgCallerDirective);
 
         // Director: bank what the caller just told us, so re-asking it is
         // detectable on the FIRST repeat rather than the third.
@@ -4291,10 +4326,102 @@ async function observeCall(
     const listenFirst = metadata?.agentGreeting !== undefined && metadata.agentGreeting.trim() === '';
     const configuredGreeting = listenFirst ? null : await resolveConfiguredGreeting(agentSlug);
     if (configuredGreeting) {
-      if (!agentGreeting || agentGreeting.trim() === '') {
-        console.info(`[GREETING] In-memory metadata missing for ${callId} — configured greeting rescued from DB (agent: ${agentSlug})`);
+      /**
+       * THE DATABASE MAY WORD THE GREETING. IT MAY NOT DROP THE DISCLOSURES.
+       *
+       * This override was unconditional, and on 2026-08-31 the live `no-ivr`
+       * row had lost the recording disclosure while the route records from
+       * start (`record="record-from-start"`, ~:5918). So calls were recorded
+       * and callers were no longer told — on the busiest overnight line, in a
+       * medical practice. Nobody edited code to cause it; the row simply
+       * outranked the registry string that carries the sentence.
+       *
+       * `missingMandatoryCopy` already existed for exactly this and was wired
+       * into the voice runtime only. Its own comment predicted this: "making
+       * the configured greeting outrank the registry string, as the SIP path
+       * does, would have taken that disclosure off the runtime too."
+       *
+       * Narrow on purpose: only the lane with legally-shaped copy, and only
+       * the closed-office notice, the 911 direction and the recording
+       * disclosure. Everything else is the operator's wording to choose.
+       */
+      const { missingMandatoryCopy } = await import('./services/greetingPersonalisation');
+      const missing = missingMandatoryCopy(agentSlug, configuredGreeting);
+      if (missing.length) {
+        console.error(
+          `[GREETING] ✗ configured greeting for ${agentSlug} is missing ${missing.join(', ')} — ` +
+            `falling back to the code greeting. Fix the agents.welcome_greeting row.`,
+        );
+        /**
+         * DECLINING THE DATABASE IS NOT THE SAME AS HAVING A GREETING.
+         *
+         * Found by Codex on PR #244. This branch only logged, and "keeping the
+         * code greeting" was a claim rather than an assignment — there is a
+         * live path where there is no code greeting to keep. `agentGreeting`
+         * starts as `metadata?.agentGreeting`, and that metadata is lost
+         * whenever the webhook lands on a different instance than the one that
+         * stored it. That is not hypothetical: it is the diagnosed root cause
+         * of agents improvising their openings, four live SD calls on
+         * 2026-08-06, and it is the reason the database rescue above exists.
+         *
+         * So: metadata lost AND the database row non-compliant — which is
+         * exactly the state the live `no-ivr` row was in — left `agentGreeting`
+         * undefined, and the check further down falls through to a bare
+         * `response.create`. The model then improvises an opening, which is
+         * how the recording disclosure and the 911 direction went missing in
+         * the first place. This change would have narrowed that window and
+         * called it fixed.
+         *
+         * WELCOME_GREETING is the registry string this line has always used
+         * and it carries all three mandatory phrases — asserted in
+         * greetingPersonalisation.test.ts, so it cannot quietly stop being a
+         * safe fallback.
+         */
+        if (!agentGreeting || agentGreeting.trim() === '') {
+          // A TABLE, because this line used to be a single-lane ternary under a
+          // comment asserting no other lane had mandatory copy — and #304 gave
+          // `pcp` some, which made the `null` arm below reachable for the first
+          // time. `compliantFallbackGreeting.test.ts` walks MANDATED_COPY_LANES
+          // and goes red if a third lane repeats it.
+          const fallback = compliantFallbackGreeting(agentSlug);
+          if (fallback) {
+            agentGreeting = fallback;
+            console.warn(
+              `[GREETING] in-memory metadata was also missing for ${callId} — ` +
+                `using the compliant code greeting for ${agentSlug} rather than letting the model open`,
+            );
+          } else {
+            // Reached only when a lane has mandatory copy, a bad database row
+            // and no entry in COMPLIANT_FALLBACK_GREETINGS. The table's own
+            // test makes that combination fail in CI rather than at 1am on a
+            // live call, so this is the belt behind the braces.
+            console.error(
+              `[GREETING] ✗✗ ${agentSlug} has mandatory copy, a bad database row and no code ` +
+                `greeting to fall back on — the model will open this call unscripted`,
+            );
+          }
+        }
+      } else {
+        if (!agentGreeting || agentGreeting.trim() === '') {
+          console.info(`[GREETING] In-memory metadata missing for ${callId} — configured greeting rescued from DB (agent: ${agentSlug})`);
+        }
+        agentGreeting = configuredGreeting;
       }
-      agentGreeting = configuredGreeting;
+    }
+
+    /**
+     * Lunch is not after hours. Operator, 2026-09-01: "if it is during lunch,
+     * our offices are closed between 12-1, so that should be said." Last, so
+     * it wins over both the registry string and the database row — the reason
+     * to say it is the clock, not the configuration.
+     */
+    {
+      const { lunchGreetingFor } = await import('./services/greetingPersonalisation');
+      const lunchGreeting = lunchGreetingFor(agentSlug);
+      if (lunchGreeting && !listenFirst) {
+        console.info(`[GREETING] lunch closure (12–1 PT) — ${agentSlug} using the lunch greeting`);
+        agentGreeting = lunchGreeting;
+      }
     }
     const recognisedFirstName = azulMetadataRef?.precontext?.matched
       ? String(azulMetadataRef.precontext.firstName ?? '').trim()
@@ -4323,102 +4450,6 @@ async function observeCall(
       console.info(`[GREETING] Personalised for recognised caller (${recognisedFirstName}) on ${agentSlug}`);
     }
 
-    // Reconstruction cutover: when NEW_CORE_LINES names this line, its
-    // module owns the WHOLE call and the ramp stays out. The greeting is
-    // NOT personalized to the confirm-question here — the module captures
-    // intent first and asks the identity question itself.
-    if (agentSlug && newCoreEnabled(agentSlug) && newCoreFor(agentSlug)) {
-      if (agentSlug === 'pcp' || agentSlug === 'azul-scheduling') {
-        const { registerPcpBindings } = await import('./core/router');
-        registerPcpBindings(callId, {
-          callSid: callId,
-          handoff: async () => {
-            try {
-              const outcome = await addHumanAgent(callId);
-              return { ok: Boolean((outcome as { ok?: boolean })?.ok ?? true) };
-            } catch (e) {
-              return { ok: false, reason: String(e) };
-            }
-          },
-        });
-      }
-      newCoreFor(agentSlug)!.start(callId);
-      newCoreCalls.set(callId, agentSlug);
-
-      // MOUTHPIECE. The state machine owns the call, so the model must own
-      // nothing: no agent prompt with its own agenda, no tools it can decide
-      // to call. Live 2026-08-09 proved why — with the old prompt still
-      // active, TWO agents talked on the same call, the module asking its
-      // scripted questions while the model invented its own ("which
-      // pharmacy...", "let me check your open tickets"). That is the piling,
-      // inside a single call.
-      try {
-        (session.transport as any).sendEvent({
-          type: 'session.update',
-          session: {
-            instructions:
-              'You are the VOICE of a scripted system, not a decision maker.\n' +
-              '- Say exactly the words you are given, and nothing else.\n' +
-              '- Never ask a question you were not given. Never add a follow-up.\n' +
-              '- Never offer to check, look up, transfer, schedule, or confirm anything.\n' +
-              '- If you were given nothing to say, stay silent and wait.\n' +
-              'Speak naturally and warmly, but the words are not yours to choose.',
-            tools: [],
-            tool_choice: 'none',
-            // THE PART THAT ACTUALLY SILENCES THE MODEL. Stripping the tools
-            // and the prompt is not enough: with create_response true the
-            // model is still handed every caller turn, and instructions are
-            // advice, not a gate. The live 13:43 after-hours call proved it —
-            //   "I can help with that. Could you"          (model, cut off)
-            //   "May I have the patient's first and last name?"  (module)
-            //   "Actually, let me quickly check if you have any open tickets"
-            // Two agents, one call, on a line already cut over.
-            //
-            // Why this block is shaped the way it is. There are two rules in
-            // this file that look contradictory: line ~720 says a
-            // session.update omitting the audio format clobbers it to PCM16,
-            // while the accept payload says SIP must NEVER send a format
-            // because the codec comes from SDP. Both are true of DIFFERENT
-            // things. The clobber warning is about the SDK's update path:
-            // _getMergedSessionConfig merges against
-            // DEFAULT_OPENAI_REALTIME_SESSION_CONFIG — the DEFAULTS, not the
-            // live session — so anything it is not told is sent as PCM16.
-            // This is a raw partial sendEvent, which carries only the keys
-            // named here, and the accept payload deliberately set no input
-            // format at all. So there is no format to preserve, and none is
-            // sent.
-            //
-            // What IS preserved: transcription and noise reduction are
-            // repeated verbatim, and the output voice with them, so that this
-            // update is safe whether the server merges `audio.input`
-            // field-by-field or replaces it wholesale. Under replace, this is
-            // exactly the accept payload's audio minus the format it never
-            // had. Losing transcription here would make the module deaf —
-            // strictly worse than the bug being fixed.
-            audio: {
-              input: {
-                noise_reduction: { type: 'far_field' },
-                transcription: buildTranscriptionConfig({
-                  establishedLanguage: establishedLanguageCode,
-                  callerSurname: resolvedPrecontextSurname,
-                }),
-                turn_detection: {
-                  type: 'semantic_vad',
-                  eagerness: vadEagernessFor(agentSlug),
-                  create_response: false,
-                  interrupt_response: true,
-                },
-              },
-              output: { voice: voiceForCall },
-            },
-          },
-        });
-        console.info(`[NEW-CORE] ${agentSlug} session stripped to mouthpiece for ${callId}`);
-      } catch (e) {
-        console.warn(`[NEW-CORE] could not strip session for ${callId}:`, e);
-      }
-      console.info(`[NEW-CORE] ${agentSlug} line module owns ${callId}`);
-    } else
     // CP-4 (spine S1): on ramp lines, a caller-ID match personalizes the
     // greeting for ANY agent, and the deterministic ramp takes the opening.
     if (agentSlug && RAMP_AGENTS.has(agentSlug)) {
@@ -4547,6 +4578,12 @@ async function observeCall(
     throw error;
   } finally {
     abortedPcpHandoffs.add(callId);
+    // SYNCHRONOUS, and it must stay above the await below. handoff_to_pcp
+    // refuses to dial once this is set; the sweep that drops the call's
+    // metadata does not run until much later in this same block, and a
+    // handoff write failing in between would otherwise still read the call as
+    // live and ring the PCP team for someone who has hung up (Codex, PR #273).
+    markPcpCallEnded(callId);
     await cancelActiveOfficeLegs(callId);
     setTimeout(() => abortedPcpHandoffs.delete(callId), 10 * 60_000);
     // Azul scheduling: stop the holding heartbeat, drop the transfer hook +
@@ -4687,7 +4724,8 @@ async function observeCall(
         // finalized 4 of 5, and this block never ran for them.
         void flushLoopTelemetry(callId, callMeta.dbCallLogId);
 
-        await storage.updateCallLog(callMeta.dbCallLogId, {
+        // Preserving, for the same reason as the handoff teardown above.
+        await storage.updateCallLogPreservingReconciledCost(callMeta.dbCallLogId, {
           status: 'completed',
           endTime,
           // DO NOT SET DURATION HERE - Twilio status callback will set it
@@ -4872,29 +4910,13 @@ async function observeCall(
     responseInFlight.delete(callId);
     pendingGreetings.delete(callId);
     lastFactsRender.delete(callId);
-    // HANG-UP SAFETY NET, BEFORE ANYTHING IS CLEARED. A caller who gave us
-    // enough to act on and then dropped must still leave a ticket behind —
-    // and finalize needs both the ledger and the module state to do it, so
-    // it runs first and everything else waits for it (review 2026-08-09).
-    void (async () => {
-      try {
-        const mod = newCoreCalls.has(callId) ? newCoreFor(newCoreCalls.get(callId) ?? effectiveSlug) : null;
-        if (mod?.finalize) {
-          const r = await mod.finalize(callId);
-          if (r.filed) console.info(`[NEW-CORE] hang-up ticket filed for ${callId}`);
-          if (r.alert) console.error(`[NEW-CORE][ALERT] ${r.alert}`);
-        }
-      } catch (e) {
-        console.warn(`[NEW-CORE] finalize failed for ${callId}:`, e);
-      } finally {
-        releaseLedger(callId);
-        void import('./services/toolDirection').then(({ releaseDirectionState }) => releaseDirectionState(callId));
-        releaseRamp(callId);
-        releaseNewCoreCall(callId);
-        cancelPendingHangup(callId);
-        newCoreCalls.delete(callId);
-      }
-    })();
+    // Per-call state, released before anything else is cleared. These four
+    // are the only owners of their maps, so a missed release leaks for the
+    // life of the process — they run unconditionally.
+    releaseLedger(callId);
+    void import('./services/toolDirection').then(({ releaseDirectionState }) => releaseDirectionState(callId));
+    releaseRamp(callId);
+    cancelPendingHangup(callId);
     callMetadataForDB.delete(callId);
     callTranscripts.delete(callId);
     deadAirWatchdog.release(callId);
@@ -6105,6 +6127,41 @@ export function setupVoiceAgentRoutes(app: Express): void {
         console.warn('[${opts.tag}] ⚠️ No webhook CallToken found — passing empty string');
       }
       const effectiveToken = webhookToken || '';
+      /**
+       * THE CALLER MUST NOT BE LEFT ALONE IN THE CONFERENCE.
+       *
+       * This block used to ask Twilio for `conferenceStatusCallbackEvent:
+       * ['join']` and nothing else. No `statusCallback`, so
+       * `/api/voice/sip-status` never fired for an overflow line, so
+       * `recoverCallerAfterSipTermination` never ran. When the agent leg died
+       * mid-call the caller stayed in a conference whose `waitUrl` is ""
+       * — silence — because `endConferenceOnExit` is on the CUSTOMER
+       * participant, so the conference outlives the agent. The only backstop
+       * left was the lifecycle coordinator's 15-minute cap.
+       *
+       * Measured 2026-08-18 → 09-01, calls ending with more than ten minutes
+       * of terminal silence (`post_transcript_tail_ms`):
+       *
+       *   tech 12/1325 · surgery 7/943 · optical 9/637 · answering-service 6/293
+       *   no-ivr, which already had this callback:   0 of 927
+       *
+       * 34 of 3,203 against 0 of 927 — about 1 in 20,000 by chance. 65 calls
+       * sat through more than five minutes of it, 642 billed minutes. Of the
+       * eight worst, four heard only the greeting, two died while the agent
+       * was looking their record up after they had given name and date of
+       * birth, and one had a ticket filed and read back before being left on
+       * the line for fourteen minutes.
+       *
+       * `/api/voice/no-ivr` has had these three lines all along. This is that,
+       * copied — not a second recovery mechanism.
+       *
+       * Safe on a normal hangup, which also fires `completed`:
+       * `recoverCallerAfterSipTermination` returns early unless the caller's
+       * leg is still `in-progress`, and when the session ended deliberately it
+       * says goodbye and hangs that leg up rather than transferring anyone.
+       * Only a genuine prior escalation reaches a human — the 2026-08-10
+       * ruling, already encoded there.
+       */
       const participant = await twilioClient.conferences(conferenceName)
         .participants
         .create({
@@ -6113,12 +6170,22 @@ export function setupVoiceAgentRoutes(app: Express): void {
           to: `sip:${process.env.OPENAI_PROJECT_ID}@sip.api.openai.com;transport=tls?X-conferenceName=${conferenceName}&X-CallerPhone=${encodeURIComponent(callerIDNumber)}&X-agentSlug=${opts.slug}`,
           earlyMedia: true,
           callToken: effectiveToken,
+          statusCallback: `https://${domain}/api/voice/sip-status`,
+          statusCallbackEvent: ['initiated', 'ringing', 'answered', 'completed'],
+          statusCallbackMethod: 'POST',
           conferenceStatusCallback: `https://${domain}/api/voice/conference-events`,
           conferenceStatusCallbackEvent: ['join']
         });
+      // Belt and braces: `resolveConferenceName` can recover the conference by
+      // parsing X-conferenceName out of the SIP To URI, which these lines set,
+      // so this is a robustness nicety rather than a prerequisite.
+      sipConferenceLifecycle.registerSipLeg(conferenceName, participant.callSid);
       console.info(`[${opts.tag}] ✓ ${opts.slug} agent successfully added to conference: ${conferenceName}`);
     } catch (error) {
       console.error(`[${opts.tag}] ✗ Failed to add agent to conference:`, error);
+      // The caller is already in the conference — TwiML was returned before
+      // this ran. Without this they hear silence until the 15-minute cap.
+      void recoverCallerAfterSipTermination(conferenceName, 'creation_failed');
     }
   });
   }
@@ -6140,6 +6207,7 @@ export function setupVoiceAgentRoutes(app: Express): void {
     greeting:
       'Thank you for calling Azul Vision optical. All of our opticians are currently ' +
       'assisting other customers, but I can take a message and they will follow up with you. ' +
+      'All calls are being recorded for quality assurance purposes. ' +
       'How can I help you today?',
   });
 
@@ -6152,7 +6220,8 @@ export function setupVoiceAgentRoutes(app: Express): void {
     greeting:
       'Thank you for calling Azul Vision surgery coordination. All of our coordinators are ' +
       'currently assisting other patients, but I can take a message and they will follow up ' +
-      'with you. How can I help you today?',
+      'with you. All calls are being recorded for quality assurance purposes. ' +
+      'How can I help you today?',
   });
 
   // Point the Clinical Tech Support number's Twilio voice webhook here.
@@ -6163,7 +6232,8 @@ export function setupVoiceAgentRoutes(app: Express): void {
     greeting:
       'Thank you for calling Azul Vision clinical support. All of our technicians are ' +
       'currently assisting other patients, but I can take a message and they will follow ' +
-      'up with you. How can I help you today?',
+      'up with you. All calls are being recorded for quality assurance purposes. ' +
+      'How can I help you today?',
   });
 
   // Point the Medical Records number's Twilio voice webhook here. Until that
@@ -6175,7 +6245,8 @@ export function setupVoiceAgentRoutes(app: Express): void {
     greeting:
       'Thank you for calling Azul Vision medical records. Our records team is currently ' +
       'assisting other patients, but I can take the details and they will follow up with ' +
-      'you. How can I help you today?',
+      'you. All calls are being recorded for quality assurance purposes. ' +
+      'How can I help you today?',
   });
 
   // THE DEMO LINE (+1 626-548-2660). Its own webhook so it can never inherit
@@ -7524,6 +7595,99 @@ export function setupVoiceAgentRoutes(app: Express): void {
       const recordingSid = parsedBody.RecordingSid;
       const conferenceSid = parsedBody.ConferenceSid;
       const recordingStatus = parsedBody.RecordingStatus;
+      const target = recordingStatusTarget(parsedBody);
+
+      /**
+       * Push the recording URL to the ticketing system immediately. The
+       * ticketing sync runs every 5 min and marks calls as synced before the
+       * recording is ready — so once synced, the recording URL is never
+       * re-sent. Shared by the conference branch (old core) and the CallSid
+       * branch (runtime) below.
+       */
+      const pushRecordingToTicketing = async (callLogId: string, recordingUrl: string): Promise<void> => {
+        const { storage } = await import('../server/storage');
+        try {
+          const callLog = await storage.getCallLog(callLogId);
+          if (!callLog) {
+            console.warn(`[RECORDING] ⚠️ Could not fetch call log ${callLogId} for ticketing push`);
+            return;
+          }
+          // Only push if there is something to identify the ticket on the other end
+          if (!callLog.ticketNumber && !callLog.callSid) {
+            console.info(`[RECORDING] No ticketNumber/callSid on call log ${callLogId} — skipping ticketing push`);
+            return;
+          }
+          /**
+           * A PARTIAL PUSH, AND IT NEVER MARKS THE CALL DELIVERED.
+           *
+           * Codex P1 (#321 round 1) and P2 (round 3) — the same fact, twice.
+           * `ticketingSyncService` selects rows with callDataSynced = false and
+           * carries the FULL payload: transcript, duration, outcome, grading,
+           * and recordingUrl off the row. This helper used to push the URL and
+           * then stamp that flag, which told the sync the call was done and
+           * left every runtime ticket with a recording and nothing else. The
+           * round-1 fix let the sync carry the URL and pushed from here only on
+           * a call the sync had already finished — and that opened the round-3
+           * race: a call the sync had already SNAPSHOTTED into its batch when
+           * the callback saved the URL was pushed from neither side, and the
+           * sync's stale payload then marked it done for good.
+           *
+           * So: push the URL here, every time, and never touch the flag. The
+           * sync still runs (the flag is still false), carries the URL again
+           * off the row (the same value — an idempotent update on the app),
+           * and sets the flag itself. Every ordering delivers it.
+           * `ticketingSyncService.test.ts` exempts this ONE site from its
+           * every-push-records-delivery rule for exactly this reason: this is
+           * the partial push that must not.
+           */
+          const { ticketingApiClient } = await import('../server/services/ticketingApiClient');
+          let delivered = false;
+          try {
+            const result = await ticketingApiClient.updateTicketCallData({
+              callSid: callLog.callSid || undefined,
+              ticketNumber: callLog.ticketNumber || undefined,
+              recordingUrl: recordingUrl,
+            });
+            delivered = result.success;
+            if (delivered) {
+              console.info(`[RECORDING] ✓ Recording URL pushed to ticketing system for ${callLog.ticketNumber || callLog.callSid}${callLog.callDataSynced ? ' (call already synced)' : ' (the post-call sync carries the rest)'}`);
+            } else {
+              console.warn(`[RECORDING] ⚠️ Ticketing push failed for ${callLog.ticketNumber || callLog.callSid}: ${result.error}`);
+            }
+          } catch (pushErr) {
+            console.error('[RECORDING] ✗ Exception pushing recording URL to ticketing system:', pushErr);
+          }
+          /**
+           * A FAILED PUSH ON A ROW THE SYNC HAS ALREADY FINISHED HAS NO OTHER
+           * DELIVERY (Codex P2, #321 round 10). The sync selects
+           * callDataSynced = false, so once it has finished a call this push
+           * is the only path the URL has, and a transient failure lost it for
+           * good. Re-open the sync: the flag goes back to false (the ONE flag
+           * write on this path, and it only ever clears), the next pass
+           * carries the full payload with the URL now on the row, and marks
+           * the call itself. A row the sync has not finished needs nothing —
+           * and that is safe against a sweep already in flight with a stale
+           * payload only because the sync's mark-done is conditional on the
+           * row still holding the recording the payload carried
+           * (`ticketingSyncService.syncCall`, Codex P2 round 11).
+           *
+           * THE RETRY COUNT IS RESET WITH IT (Codex P2, round 11): the sync
+           * selects `ticketingSyncRetries < 3` and its success write stores
+           * the attempt number, so a call that synced on its third attempt
+           * would be re-opened and never selected. 0 of 5,904 synced rows in
+           * the 14 days to 2026-09-17 carried a count of 3 — taken because it
+           * is one field in the write this branch already makes.
+           */
+          const { afterRecordingPush } = await import('./runtime/recordingPushOutcome');
+          if (afterRecordingPush(delivered, callLog.callDataSynced === true) === 'reopen_sync') {
+            await storage.updateCallLog(callLogId, { callDataSynced: false, ticketingSyncRetries: 0 });
+            console.warn(`[RECORDING] the push failed on a call the post-call sync had already finished — re-opened the sync for ${callLogId} (retries reset) so its next pass carries the recording URL`);
+          }
+        } catch (pushErr) {
+          console.error('[RECORDING] ✗ the recording push could not complete:', pushErr);
+        }
+      };
+
       
       console.info(`[RECORDING] Conference ${conferenceSid} recording ${recordingStatus}: ${recordingUrl}`);
       
@@ -7570,44 +7734,57 @@ export function setupVoiceAgentRoutes(app: Express): void {
           // The ticketing sync runs every 5 min and marks calls as synced before the
           // recording is ready — so once synced, the recording URL is never re-sent.
           // Fix: push it directly here as soon as Twilio delivers the recording.
-          (async () => {
-            try {
-              const callLog = await storage.getCallLog(callLogId);
-              if (!callLog) {
-                console.warn(`[RECORDING] ⚠️ Could not fetch call log ${callLogId} for ticketing push`);
-                return;
-              }
-              // Only push if there is something to identify the ticket on the other end
-              if (!callLog.ticketNumber && !callLog.callSid) {
-                console.info(`[RECORDING] No ticketNumber/callSid on call log ${callLogId} — skipping ticketing push`);
-                return;
-              }
-              const { ticketingApiClient } = await import('../server/services/ticketingApiClient');
-              const result = await ticketingApiClient.updateTicketCallData({
-                callSid: callLog.callSid || undefined,
-                ticketNumber: callLog.ticketNumber || undefined,
-                recordingUrl: recordingUrl,
-              });
-              if (result.success) {
-                console.info(`[RECORDING] ✓ Recording URL pushed to ticketing system for ${callLog.ticketNumber || callLog.callSid}`);
-                // Record the delivery, or the sweeper re-pushes this call five
-                // minutes from now. With a hard .limit(20) per cycle, normal
-                // traffic would saturate the sweeper re-sending calls that
-                // already landed and crowd out the failures it exists to
-                // recover.
-                await storage.updateCallLog(callLog.id, { callDataSynced: true });
-              } else {
-                console.warn(`[RECORDING] ⚠️ Ticketing push failed for ${callLog.ticketNumber || callLog.callSid}: ${result.error}`);
-              }
-            } catch (pushErr) {
-              console.error('[RECORDING] ✗ Exception pushing recording URL to ticketing system:', pushErr);
-            }
-          })();
+          void pushRecordingToTicketing(callLogId, recordingUrl);
           
           // Clean up mapping
           delete conferenceSidToCallLogId[conferenceSid];
         } else {
           console.warn(`[RECORDING] ⚠️ No call log ID found for conference SID ${conferenceSid}`);
+        }
+      } else if (target?.by === 'call') {
+        /**
+         * A RUNTIME CALL. `<Connect><Stream>` has no conference; the runtime
+         * starts its recording over REST (`src/runtime/callRecording.ts`) and
+         * Twilio posts back with a CallSid. Until 2026-09-17 this handler read
+         * ConferenceSid only, so the runtime lanes — which say "all calls are
+         * being recorded" — had recording_url NULL on 4,564 of 4,564 calls.
+         *
+         * SIGNED, OR NOTHING IS WRITTEN (Codex P1, #321). This route sits
+         * behind the rate limiter only, and a CallSid is not a secret — it is
+         * on every ticket and in every log line — so an unsigned POST with a
+         * valid CallSid and an arbitrary RecordingUrl would overwrite the
+         * call's recording and push the forged URL to the ticket. The check is
+         * the runtime's own `checkTwilioSignature` (HMAC over the URL Twilio
+         * was given plus the form params), fail-closed: no auth token, no
+         * header, or a bad signature all refuse. The conference branch above
+         * is not gated here — that is the old core's pre-existing surface,
+         * keyed on a ConferenceSid, and widening a security check onto a live
+         * path it has never run on is its own change with its own after-number.
+         */
+        const { checkTwilioSignature } = await import('./runtime/voiceWebhook');
+        const signature = checkTwilioSignature(
+          { headers: req.headers as Record<string, string | string[] | undefined>, body: parsedBody, originalUrl: req.originalUrl },
+          process.env,
+        );
+        if (signature !== 'valid') {
+          console.warn(`[RECORDING] ✗ refused an unsigned CallSid recording callback (${signature}) — nothing written`);
+          return res.status(403).send('invalid signature');
+        }
+        const { storage } = await import('../server/storage');
+        // The recording can beat the row (Codex P2, #321): the runtime records
+        // from the stream's first frame, before the row opens. And the lookup
+        // can pass the teardown's own peeks (Codex P2, round 7) — so the URL
+        // is PARKED BEFORE the row is looked up, and released only once a
+        // write has carried it. The ordering is the fix; see landRecording.
+        const landed = await landRecording(target.callSid, recordingUrl, {
+          findRow: (sid) => storage.getCallLogBySid(sid),
+          writeUrl: (id, url) => storage.updateCallLog(id, { recordingUrl: url }),
+          push: (id, url) => void pushRecordingToTicketing(id, url),
+        });
+        if (landed === 'written') {
+          console.info(`[RECORDING] ✓ Saved recording URL to the call log by CallSid`);
+        } else {
+          console.warn(`[RECORDING] ⚠️ No call log yet for CallSid ${target.callSid} — recording URL parked until the row lands`);
         }
       }
       
@@ -7632,229 +7809,61 @@ export function setupVoiceAgentRoutes(app: Express): void {
     res.send(twimlResponse);
   });
 
-  // Twilio StatusCallback endpoint - comprehensive call outcome tracking
-  // Called by Twilio when call status changes (completed, busy, no-answer, failed, etc.)
-  // Support both /status and /status-callback for Twilio compatibility
+  // Twilio StatusCallback — parent-call hangup bookkeeping.
+  // `/api/voice/status` and `/status-callback` live on the OLD CORE process
+  // (port 8000). The Grok runtime writes local_duration at stream teardown;
+  // this webhook is what was supposed to put Twilio's CallDuration on the
+  // row. On 2026-09-15 it answered HTTP 500 (Twilio 15003) on every completed
+  // PCP inbound. Decision + write: src/services/twilioStatusCallback.ts.
+  // A processing error is HTTP 200 — a 500 is 15003 and hides the exception.
   const statusCallbackHandler = async (req: any, res: any) => {
     try {
-      // Handle both Buffer (raw parser) and object (urlencoded parser) cases
-      let parsedBody: Record<string, string>;
-      
-      if (Buffer.isBuffer(req.body)) {
-        // Raw body-parser middleware - parse manually
-        const rawBody = req.body.toString("utf8");
-        parsedBody = Object.fromEntries(new URLSearchParams(rawBody));
-      } else if (typeof req.body === 'object') {
-        // Already parsed by urlencoded middleware
-        parsedBody = req.body;
-      } else {
-        // Unexpected format
-        console.error('[STATUS CALLBACK] Unexpected body format:', typeof req.body);
-        return res.status(400).json({ success: false, error: 'Invalid request format' });
-      }
-      
-      const {
-        CallSid,
-        CallStatus,
-        CallDuration,
-        AnsweredBy,
-        MachineDetectionDuration,
-        ErrorCode,
-        ErrorMessage,
-        Timestamp,
-      } = parsedBody;
-
-      // Validate required fields
-      if (!CallSid || !CallStatus) {
-        console.error('[STATUS CALLBACK] Missing required fields: CallSid or CallStatus');
-        return res.status(400).json({ success: false, error: 'Missing required fields' });
+      const parsedEarly = Buffer.isBuffer(req.body)
+        ? Object.fromEntries(new URLSearchParams(req.body.toString("utf8")))
+        : req.body && typeof req.body === "object"
+          ? req.body
+          : {};
+      const earlySid = typeof parsedEarly.CallSid === "string" ? parsedEarly.CallSid : "";
+      const earlyStatus = typeof parsedEarly.CallStatus === "string" ? parsedEarly.CallStatus : "";
+      if (earlySid && earlyStatus) {
+        callLifecycleCoordinator.handleTwilioStatusCallback(earlySid, earlyStatus);
       }
 
-      console.info(`[STATUS CALLBACK] CallSid: ${CallSid}, Status: ${CallStatus}, AnsweredBy: ${AnsweredBy || 'N/A'}`);
-
-      // Notify lifecycle coordinator of Twilio status callback (most authoritative signal)
-      callLifecycleCoordinator.handleTwilioStatusCallback(CallSid, CallStatus);
-
-      // Use singleton storage instance for consistency
-      const { storage } = await import('../server/storage');
-
-      // Find the call log by CallSid using direct query (not pagination scan)
-      const callLog = await storage.getCallLogBySid(CallSid);
-
-      if (!callLog) {
-        console.warn(`[STATUS CALLBACK] No call log found for CallSid: ${CallSid}`);
-        return res.json({ success: false, message: 'Call log not found' });
-      }
-
-      // Determine call disposition based on comprehensive Twilio data
-      let callDisposition = CallStatus;
-      let isVoicemail = false;
-
-      // Machine detection results
-      if (AnsweredBy === 'machine_start' || AnsweredBy === 'machine_end_beep' || AnsweredBy === 'machine_end_silence') {
-        callDisposition = 'voicemail';
-        isVoicemail = true;
-      } else if (AnsweredBy === 'fax') {
-        callDisposition = 'fax_machine';
-      }
-
-      // Map Twilio status to our internal status
-      let internalStatus: 'initiated' | 'ringing' | 'in_progress' | 'completed' | 'failed' | 'no_answer' | 'busy' | 'transferred' = 'completed';
-      
-      if (CallStatus === 'busy') {
-        internalStatus = 'busy';
-        callDisposition = 'busy';
-      } else if (CallStatus === 'no-answer') {
-        internalStatus = 'no_answer';
-        callDisposition = 'no_answer';
-      } else if (CallStatus === 'failed' || CallStatus === 'canceled') {
-        internalStatus = 'failed';
-        
-        // Parse error codes for detailed disposition
-        if (ErrorCode === '21217') callDisposition = 'line_disconnected';
-        else if (ErrorCode === '21214') callDisposition = 'wrong_number';
-        else if (ErrorCode === '21211') callDisposition = 'out_of_service';
-        else callDisposition = 'failed';
-      } else if (CallStatus === 'completed') {
-        internalStatus = 'completed';
-      }
-
-      // Use Twilio's timestamp if provided, otherwise current time
-      const endTime = Timestamp ? new Date(Timestamp) : new Date();
-      
-      // Fetch actual Twilio cost for terminal states
-      let actualTwilioCostCents: number | null = null;
-      const terminalStates = ['completed', 'busy', 'no-answer', 'failed', 'canceled'];
-      
-      if (terminalStates.includes(CallStatus)) {
-        try {
+      const { storage } = await import("../server/storage");
+      const result = await applyTwilioStatusCallback(req.body, {
+        storage: {
+          getCallLogBySid: (callSid) => storage.getCallLogBySid(callSid),
+          updateCallLogPreservingReconciledCost: (id, updates) =>
+            storage.updateCallLogPreservingReconciledCost(id, updates),
+          updateCallLogHangup: (id, updates) => storage.updateCallLog(id, updates),
+          updateCampaignContact: (contactId, updates) =>
+            storage.updateCampaignContact(contactId, updates),
+        },
+        fetchTwilioCostCents: async (callSid) => {
           const twilioClient = await getTwilioClient();
-          if (twilioClient) {
-            const twilioCallDetails = await twilioClient.calls(CallSid).fetch();
-            if (twilioCallDetails.price) {
-              // Twilio returns price as negative string like "-0.009"
-              const price = parseFloat(twilioCallDetails.price);
-              actualTwilioCostCents = Math.round(Math.abs(price) * 100);
-              console.info(`[STATUS CALLBACK] Fetched actual Twilio cost: $${Math.abs(price).toFixed(4)} (${actualTwilioCostCents}¢)`);
-            }
-          }
-        } catch (err) {
-          console.warn('[STATUS CALLBACK] Could not fetch Twilio cost:', err);
-        }
-      }
-      
-      // CRITICAL: Only use Twilio's CallDuration if provided, otherwise leave duration unchanged
-      // This prevents overwriting with 0 when Twilio doesn't provide duration
-      const hasTwilioDuration = CallDuration && CallDuration !== '0' && CallDuration !== '';
-      const twilioProvidedDuration = hasTwilioDuration ? parseInt(CallDuration) : null;
-      
-      // Calculate costs only if we have authoritative Twilio duration
-      const duration = twilioProvidedDuration ?? callLog.duration ?? 0;
-
-      /**
-       * ONE RATE, AND NEVER OVER A MEASUREMENT.
-       *
-       * This line was `Math.round(duration / 60 * 19)` — 19c/min, which is
-       * 1.67x the 11.4c/min the rest of the codebase intends. The comment on
-       * OPENAI_COST_CENTS_PER_SECOND has called 19c/min a units slip since the
-       * day it was written; the correction landed in server/routes.ts and never
-       * here, in the Twilio status-callback handler — a live path on every
-       * inbound call, and now on five more numbers since the callbacks were
-       * wired up on 2026-08-15.
-       *
-       * It also had no token guard and set costIsEstimated:false below,
-       * stamping a blended-rate guess as authoritative.
-       *
-       * Now: the shared constant, and only when there is nothing better. A row
-       * carrying real token counts keeps the cost derived from them.
-       */
-      const twilioCostCents = actualTwilioCostCents ?? callLog.twilioCostCents ?? 0;
-      const hasTokenDerivedCost = callLog.inputAudioTokens != null;
-      const openaiCostCents = hasTokenDerivedCost
-        ? (callLog.openaiCostCents ?? 0)
-        : Math.ceil(duration * OPENAI_COST_CENTS_PER_SECOND);
-      const totalCostCents = twilioCostCents + openaiCostCents;
-
-      // Update call log with comprehensive tracking data
-      // ONLY mark as authoritative (costIsEstimated: false) if Twilio provided CallDuration
-      // CRITICAL: Preserve transferredToHuman flag - it was set during handoff and must NOT be overwritten
-      const updateData: Record<string, any> = {
-        status: internalStatus,
-        twilioStatus: CallStatus,
-        answeredBy: AnsweredBy || null,
-        machineDetectionDuration: MachineDetectionDuration ? parseInt(MachineDetectionDuration) : null,
-        callDisposition,
-        isVoicemail,
-        twilioErrorCode: ErrorCode || null,
-        endTime,
-        twilioCostCents,
-        openaiCostCents,
-        totalCostCents,
-        // PRESERVE EXISTING transferredToHuman FLAG - never overwrite with null/false
-        transferredToHuman: callLog.transferredToHuman || false,
-      };
-      
-      // Only update duration and mark as authoritative if Twilio actually provided it
-      if (hasTwilioDuration) {
-        updateData.duration = twilioProvidedDuration;
-        /**
-         * "AUTHORITATIVE" IS ABOUT THE DURATION, NOT THE COST.
-         *
-         * Twilio giving us a CallDuration makes the DURATION authoritative. It
-         * says nothing about how the OpenAI cost was derived — and this branch
-         * set costIsEstimated:false unconditionally, stamping a blended-rate
-         * duration guess as a measurement. The flag then meant nothing, which
-         * is why it could not be used to find the rows this whole
-         * investigation was about.
-         *
-         * It now tracks what it names: false only when the cost came from
-         * token counts.
-         */
-        updateData.costIsEstimated = !hasTokenDerivedCost;
-        console.info(
-          `[STATUS CALLBACK] ✓ TWILIO AUTHORITATIVE: Duration=${twilioProvidedDuration}s` +
-            (hasTokenDerivedCost ? ' (cost from tokens, preserved)' : ' (cost estimated from duration)'),
-        );
-      } else {
-        // Twilio didn't provide duration - keep costIsEstimated true for reconciliation
-        console.warn(`[STATUS CALLBACK] ⚠️ Twilio did not provide CallDuration, keeping costIsEstimated=true for reconciliation`);
-      }
-      
-      await storage.updateCallLog(callLog.id, updateData);
-
-      // Update campaign contact if this was a campaign call
-      if (callLog.campaignId && callLog.contactId) {
-        const successful = internalStatus === 'completed' && !isVoicemail;
-        
-        await storage.updateCampaignContact(callLog.contactId, {
-          contacted: true,
-          successful,
-          lastAttemptAt: endTime,
-        });
-
-        console.info(`[STATUS CALLBACK] ✓ Updated campaign contact: ${callLog.contactId}, Successful: ${successful}`);
-      }
-
-      console.info(`[STATUS CALLBACK] ✓ Call log updated: ${callLog.id}, Disposition: ${callDisposition}, Voicemail: ${isVoicemail}, Cost: ${totalCostCents}¢`);
-      
-      // Notify campaign executor that call has completed (ONLY for terminal states)
-      if (callLog.campaignId && callLog.direction === 'outbound' && terminalStates.includes(CallStatus)) {
-        try {
-          const { campaignExecutor } = await import('../server/services/campaignExecutor');
-          campaignExecutor.notifyCallComplete(CallSid);
-          console.info(`[STATUS CALLBACK] ✓ Notified campaign executor (terminal state: ${CallStatus}): ${CallSid}`);
-        } catch (err) {
-          console.error('[STATUS CALLBACK] Error notifying campaign executor:', err);
-          // Don't fail the webhook if notification fails
-        }
-      } else if (callLog.campaignId && callLog.direction === 'outbound') {
-        console.info(`[STATUS CALLBACK] Skipping notification - non-terminal state: ${CallStatus}`);
-      }
-      
-      res.json({ success: true });
+          if (!twilioClient) return null;
+          const twilioCallDetails = await twilioClient.calls(callSid).fetch();
+          if (!twilioCallDetails.price) return null;
+          const price = parseFloat(twilioCallDetails.price);
+          const cents = Math.round(Math.abs(price) * 100);
+          console.info(`[STATUS CALLBACK] Fetched actual Twilio cost: $${Math.abs(price).toFixed(4)} (${cents}¢)`);
+          return cents;
+        },
+        notifyCampaignComplete: (callSid) => {
+          void import("../server/services/campaignExecutor")
+            .then(({ campaignExecutor }) => {
+              campaignExecutor.notifyCallComplete(callSid);
+              console.info(`[STATUS CALLBACK] ✓ Notified campaign executor: ${callSid}`);
+            })
+            .catch((err) => {
+              console.error("[STATUS CALLBACK] Error notifying campaign executor:", err);
+            });
+        },
+      });
+      res.status(result.status).json(result.body);
     } catch (error) {
-      console.error('[STATUS CALLBACK] Error processing webhook:', error);
-      res.status(500).json({ success: false, error: 'Internal server error' });
+      console.error("[STATUS CALLBACK] exception Error:", error);
+      res.status(200).json({ success: false, error: "status_callback_failed" });
     }
   };
   

@@ -263,7 +263,7 @@ export class OrgBillingLedgerService {
         await this.storeOrgUsage(dateStr, orgUsage);
       }
 
-      const perCallSumCents = await storage.getEstimatedOpenaiCostForDate(dateStr);
+      const perCallSumCents = await storage.getOpenaiBilledEstimateForDate(dateStr);
 
       /**
        * COMPARE LIKE WITH LIKE.

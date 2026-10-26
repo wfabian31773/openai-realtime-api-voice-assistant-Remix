@@ -257,7 +257,14 @@ export function SdPilotPage() {
   const { data: liveCalls } = useQuery({
     queryKey: ['sd-pilot-live'],
     queryFn: async () =>
-      (await apiClient.get(`/call-logs?agentUsed=${AGENT_SLUG}&status=in_progress,ringing,initiated&limit=20`)).data as CallLogsResponse,
+      (
+        await apiClient.get(
+          // 30-min ceiling — stale rows are swept server-side; never show them as live
+          `/call-logs?agentUsed=${AGENT_SLUG}&status=in_progress,ringing,initiated&limit=20&startDate=${new Date(
+            Date.now() - 30 * 60 * 1000,
+          ).toISOString()}`,
+        )
+      ).data as CallLogsResponse,
     refetchInterval: 3000,
   })
 

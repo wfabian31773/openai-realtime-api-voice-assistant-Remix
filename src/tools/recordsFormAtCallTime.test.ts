@@ -1,0 +1,593 @@
+/**
+ * THE FORM AT CALL TIME — the voice half.
+ *
+ * Owner, 2026-09-27: *"we need the voice agent to send SMS or emails with the
+ * link whenever a patient is requesting records … log the records in the
+ * medical records as Pending Auth so we can track it but it shouldn't start
+ * the clock and when he does sign the auth it should attach right to that
+ * original request."*
+ *
+ * Driven through `runTool`, the entry point the model calls, on an invented
+ * caller, with the ticketing client mocked at its two methods. What is pinned:
+ * the payload the app receives (`formChannel`, the `pending_authorization`
+ * pathway, the clock OFF), the on-clock gate standing down for a link, the
+ * email asked once, the third party untouched, what the agent is handed to
+ * say, the verbal directions, and the re-send's latch.
+ */
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { runTool } from './registry';
+import './sharedPatientTools';
+import './medicalRecordsTools';
+import { ASK_BATCH_WINDOW_MS, WEBSITE_DIRECTIONS } from './medicalRecordsTools';
+import { gateRefusalsSoFar, resetGateAttempts } from './gateAttempts';
+import { resetVerifiedIdentities } from './verifiedIdentity';
+
+let sidCounter = 0x900;
+const freshSid = () => `CA${(++sidCounter).toString(16).padStart(32, '0')}`;
+
+// A patient, on the clock, WITHOUT destination or dates: the form collects those.
+const PATIENT = {
+  requester: 'I am the patient',
+  first_name: 'Testpatient',
+  last_name: 'Example',
+  date_of_birth: '01/02/1950',
+  callback_number: '845-531-7471',
+  request_description: 'I need a copy of my medical records',
+};
+
+async function client() {
+  return (await import('../../server/services/ticketingApiClient')).ticketingApiClient;
+}
+type Out = Record<string, unknown>;
+const filed = (n: string, form?: Record<string, unknown>) =>
+  ({ success: true, ticketNumber: n, ...(form ? { form } : {}) }) as never;
+
+/**
+ * THE CLOCK IS THE TURN. gateAttempts stamps every ask with Date.now(), and the
+ * tool reads a refusal noted inside ASK_BATCH_WINDOW_MS as a batched SIBLING's
+ * (the same question again, nothing spent), not as a turn the caller has had.
+ * Two back-to-back invocations at one instant are therefore a batch; a genuine
+ * later turn has to move the clock. `laterTurn()` is that move; `sibling()` is
+ * the tens of milliseconds the runtime puts between two dispatches of one
+ * response.
+ */
+let clock = 1_790_000_000_000;
+const laterTurn = () => {
+  clock += 5_000;
+};
+const sibling = (ms = 40) => {
+  clock += ms;
+};
+
+beforeEach(() => {
+  vi.restoreAllMocks();
+  resetGateAttempts();
+  resetVerifiedIdentities();
+  vi.spyOn(Date, 'now').mockImplementation(() => clock);
+});
+
+describe('a patient who takes the link', () => {
+  it('files as pending authorization, off the clock, with the channel — and the gate does not ask where or when', async () => {
+    const api = await client();
+    const create = vi.spyOn(api, 'createTicket').mockResolvedValueOnce(
+      filed('VA-FORM-1', { requested: true, sent: true, channel: 'sms' }),
+    );
+    const r = (await runTool('file_records_ticket', { ...PATIENT, form_channel: 'sms', call_sid: freshSid() })) as Out;
+
+    expect(r.success).toBe(true);
+    const p = create.mock.calls[0][0] as unknown as Record<string, unknown>;
+    expect(p.formChannel).toBe('sms');
+    expect(p.requestPathway).toBe('pending_authorization');
+    expect(p.capClockApplies).toBe(false);
+    expect(p.requestorType).toBe('patient');
+    expect(String(p.description)).toContain('Send to: on the signed form');
+    expect(String(p.description)).toContain('Dates needed: on the signed form');
+    expect(String(p.description)).not.toContain('NOT CAPTURED');
+    // What the agent is handed to say.
+    expect(r.form_sent).toBe(true);
+    expect(r.form_channel).toBe('sms');
+    expect(String(r.message)).toContain('VA-FORM-1');
+    expect(String(r.message)).toMatch(/link by text/i);
+    expect(String(r.message)).toMatch(/sign at the end/i);
+  });
+
+  it('asks for the email ONCE when they chose email, then falls back to a text', async () => {
+    const api = await client();
+    const create = vi.spyOn(api, 'createTicket').mockResolvedValueOnce(
+      filed('VA-FORM-2', { requested: true, sent: true, channel: 'sms' }),
+    );
+    const sid = freshSid();
+    const first = (await runTool('file_records_ticket', { ...PATIENT, form_channel: 'email', call_sid: sid })) as Out;
+    expect(first.success).toBe(false);
+    expect(first.missingFields).toEqual(['email']);
+    expect(String(first.message)).toMatch(/spell it out/i);
+    expect(create).not.toHaveBeenCalled();
+
+    laterTurn(); // the caller has had the turn; this is the model coming back with no address
+    const second = (await runTool('file_records_ticket', { ...PATIENT, form_channel: 'email', call_sid: sid })) as Out;
+    expect(second.success).toBe(true);
+    expect((create.mock.calls[0][0] as unknown as Record<string, unknown>).formChannel).toBe('sms');
+  });
+
+  it('sends by email when they gave an address', async () => {
+    const api = await client();
+    const create = vi.spyOn(api, 'createTicket').mockResolvedValueOnce(
+      filed('VA-FORM-3', { requested: true, sent: true, channel: 'email' }),
+    );
+    const r = (await runTool('file_records_ticket', {
+      ...PATIENT, form_channel: 'email', email: 'patient@example.test', call_sid: freshSid(),
+    })) as Out;
+    expect(r.success).toBe(true);
+    const p = create.mock.calls[0][0] as unknown as Record<string, unknown>;
+    expect(p.formChannel).toBe('email');
+    expect(p.patientEmail).toBe('patient@example.test');
+    expect(String(r.message)).toMatch(/email to that address/i);
+  });
+
+  it('says the team will send the form when the app could not, and offers the other channel to the model only', async () => {
+    const api = await client();
+    vi.spyOn(api, 'createTicket').mockResolvedValueOnce(
+      filed('VA-FORM-4', { requested: true, sent: false, channel: 'sms', error: 'No mobile number on the case.' }),
+    );
+    const r = (await runTool('file_records_ticket', { ...PATIENT, form_channel: 'sms', call_sid: freshSid() })) as Out;
+    expect(r.success).toBe(true);
+    expect(r.form_sent).toBe(false);
+    expect(String(r.message)).toMatch(/records team will send/i);
+    expect(String(r.message)).not.toMatch(/I've just sent/i);
+    expect(String(r.fix)).toContain('send_records_form');
+  });
+
+  it('a filing the app confirmed with no `form` at all (an older app) is a filing, not a sent link', async () => {
+    const api = await client();
+    vi.spyOn(api, 'createTicket').mockResolvedValueOnce(filed('VA-FORM-5'));
+    const r = (await runTool('file_records_ticket', { ...PATIENT, form_channel: 'sms', call_sid: freshSid() })) as Out;
+    expect(r.success).toBe(true);
+    expect(r.form_sent).toBe(false);
+    expect(String(r.message)).not.toMatch(/I've just sent/i);
+  });
+});
+
+describe('the caller with no mobile and no email hears where the form is', () => {
+  it('verbal: still asks where and when (once), files ON the clock as today, and hands over the directions', async () => {
+    const api = await client();
+    const create = vi.spyOn(api, 'createTicket').mockResolvedValueOnce(filed('VA-FORM-6'));
+    const sid = freshSid();
+    const first = (await runTool('file_records_ticket', { ...PATIENT, form_channel: 'verbal', call_sid: sid })) as Out;
+    expect(first.success).toBe(false);
+    expect(first.missingFields).toEqual(['deliver_to', 'date_range']);
+
+    const r = (await runTool('file_records_ticket', {
+      ...PATIENT, form_channel: 'verbal', deliver_to: 'to me', date_range: 'everything', call_sid: sid,
+    })) as Out;
+    expect(r.success).toBe(true);
+    const p = create.mock.calls[0][0] as unknown as Record<string, unknown>;
+    expect(p).not.toHaveProperty('formChannel');
+    expect(p.requestPathway).toBe('roa_patient');
+    expect(p.capClockApplies).toBe(true);
+    expect(r.form_channel).toBe('verbal');
+    expect(String(r.message)).toContain(WEBSITE_DIRECTIONS);
+  });
+});
+
+describe('a third party never gets a form', () => {
+  it('ignores form_channel from an attorney: no channel sent, pathway and clock as before', async () => {
+    const api = await client();
+    const create = vi.spyOn(api, 'createTicket').mockResolvedValueOnce(filed('VA-FORM-7'));
+    const r = (await runTool('file_records_ticket', {
+      ...PATIENT, requester: 'I am an attorney at Lexitas', form_channel: 'sms', call_sid: freshSid(),
+    })) as Out;
+    expect(r.success).toBe(true);
+    const p = create.mock.calls[0][0] as unknown as Record<string, unknown>;
+    expect(p).not.toHaveProperty('formChannel');
+    expect(p.requestPathway).not.toBe('pending_authorization');
+    expect(p.capClockApplies).toBe(false);
+    expect(r).not.toHaveProperty('form_sent');
+  });
+});
+
+describe('the re-send is latched on a filing having succeeded on THIS call', () => {
+  it('refuses, with guidance for the model and nothing for the caller, before any filing', async () => {
+    const api = await client();
+    const resend = vi.spyOn(api, 'sendRecordsIntakeLink');
+    const r = (await runTool('send_records_form', { channel: 'sms', call_sid: freshSid() })) as Out;
+    expect(r.success).toBe(false);
+    expect(String(r.fix)).toMatch(/file_records_ticket/);
+    expect(r).not.toHaveProperty('message');
+    expect(resend).not.toHaveBeenCalled();
+  });
+
+  it('re-sends for the call that filed, by the channel asked, and carries an email the caller spelled out', async () => {
+    const api = await client();
+    vi.spyOn(api, 'createTicket').mockResolvedValueOnce(filed('VA-FORM-8', { requested: true, sent: true, channel: 'sms' }));
+    const resend = vi.spyOn(api, 'sendRecordsIntakeLink').mockResolvedValueOnce({ success: true, channel: 'email' });
+    const sid = freshSid();
+    await runTool('file_records_ticket', { ...PATIENT, form_channel: 'sms', call_sid: sid });
+
+    const r = (await runTool('send_records_form', { channel: 'email', email: 'patient@example.test', call_sid: sid })) as Out;
+    expect(r.success).toBe(true);
+    expect(resend).toHaveBeenCalledWith({ callSid: sid, channel: 'email', email: 'patient@example.test' });
+    expect(r.form_sent).toBe(true);
+    expect(String(r.message)).toMatch(/on its way/i);
+  });
+
+  it('asks for the email before re-sending by email', async () => {
+    const api = await client();
+    vi.spyOn(api, 'createTicket').mockResolvedValueOnce(filed('VA-FORM-9', { requested: true, sent: true, channel: 'sms' }));
+    const resend = vi.spyOn(api, 'sendRecordsIntakeLink');
+    const sid = freshSid();
+    await runTool('file_records_ticket', { ...PATIENT, form_channel: 'sms', call_sid: sid });
+    const r = (await runTool('send_records_form', { channel: 'email', call_sid: sid })) as Out;
+    expect(r.success).toBe(false);
+    expect(r.missingFields).toEqual(['email']);
+    expect(resend).not.toHaveBeenCalled();
+  });
+
+  it('a failed re-send is a sentence to the caller and a stop to the model', async () => {
+    const api = await client();
+    vi.spyOn(api, 'createTicket').mockResolvedValueOnce(filed('VA-FORM-10', { requested: true, sent: true, channel: 'sms' }));
+    vi.spyOn(api, 'sendRecordsIntakeLink').mockResolvedValueOnce({ success: false, error: 'upstream 503' });
+    const sid = freshSid();
+    await runTool('file_records_ticket', { ...PATIENT, form_channel: 'sms', call_sid: sid });
+    const r = (await runTool('send_records_form', { channel: 'sms', call_sid: sid })) as Out;
+    expect(r.success).toBe(false);
+    expect(String(r.message)).toMatch(/records team will send/i);
+    expect(String(r.fix)).toMatch(/do not try again/i);
+  });
+});
+
+describe('the plumbing', () => {
+  it('the timeline can count the channel and the send, and nothing else about the form', () => {
+    const src = readFileSync(join(__dirname, '..', 'services', 'toolTimeline.ts'), 'utf8');
+    expect(src).toContain("'form_channel',");
+    expect(src).toContain("'form_sent',");
+  });
+
+  it('the tool never sends a form on a ticket that left Medical Records', () => {
+    const src = readFileSync(join(__dirname, 'medicalRecordsTools.ts'), 'utf8');
+    expect(src).toMatch(/formChannel && !redirect \? 'pending_authorization' : cap\.pathway/);
+    expect(src).toMatch(/\.\.\.\(formChannel && !redirect \? \{ formChannel \} : \{\}\)/);
+  });
+});
+
+describe('v79 — the tool asks the channel when the model did not', () => {
+  // The records lane's first business day on the runtime, 2026-09-28: four
+  // real patient calls in the first hour, every create-ticket POST answering
+  // `form: {requested:false}`, every patient case opened ON the clock with no
+  // link, and not one funnel line in the transcripts. The model filed with no
+  // channel, took the on-clock refusal for destination and dates, and walked
+  // the old path. So the FIRST refusal on a patient request with no channel is
+  // now the channel question itself.
+  it('refuses a patient request with no channel by asking the channel question — nothing is filed', async () => {
+    const api = await client();
+    const create = vi.spyOn(api, 'createTicket');
+    const r = (await runTool('file_records_ticket', { ...PATIENT, call_sid: freshSid() })) as Out;
+
+    expect(r.success).toBe(false);
+    expect(r.missingFields).toEqual(['form_channel']);
+    expect(String(r.message)).toMatch(/mobile number that receives texts/i);
+    expect(String(r.message)).toMatch(/by email/i);
+    expect(String(r.fix)).toMatch(/verbal/);
+    expect(String(r.fix)).toMatch(/do not ask where/i);
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it('asks ONCE: a second invocation still carrying no channel files with a text to the callback number, off the clock', async () => {
+    const api = await client();
+    const create = vi.spyOn(api, 'createTicket').mockResolvedValueOnce(
+      filed('VA-FORM-V79', { requested: true, sent: true, channel: 'sms' }),
+    );
+    const sid = freshSid();
+    const first = (await runTool('file_records_ticket', { ...PATIENT, call_sid: sid })) as Out;
+    expect(first.missingFields).toEqual(['form_channel']);
+
+    laterTurn(); // the caller has had the turn; this is the model coming back with no channel
+    const r = (await runTool('file_records_ticket', { ...PATIENT, call_sid: sid })) as Out;
+    expect(r.success).toBe(true);
+    const p = create.mock.calls[0][0] as unknown as Record<string, unknown>;
+    expect(p.formChannel).toBe('sms');
+    expect(p.requestPathway).toBe('pending_authorization');
+    expect(p.capClockApplies).toBe(false);
+    expect(String(p.description)).toContain('Send to: on the signed form');
+    expect(r.form_channel).toBe('sms');
+    expect(r.form_sent).toBe(true);
+  });
+
+  it('the ask is keyed on the call: another call is asked afresh', async () => {
+    const a = (await runTool('file_records_ticket', { ...PATIENT, call_sid: freshSid() })) as Out;
+    const b = (await runTool('file_records_ticket', { ...PATIENT, call_sid: freshSid() })) as Out;
+    expect(a.missingFields).toEqual(['form_channel']);
+    expect(b.missingFields).toEqual(['form_channel']);
+  });
+
+  it('a sentinel CallSid is asked every time — a shared counter would spend one caller’s ask on another', async () => {
+    const a = (await runTool('file_records_ticket', { ...PATIENT, call_sid: 'unknown' })) as Out;
+    const b = (await runTool('file_records_ticket', { ...PATIENT, call_sid: 'unknown' })) as Out;
+    expect(a.missingFields).toEqual(['form_channel']);
+    expect(b.missingFields).toEqual(['form_channel']);
+  });
+
+  it('"declined" is an answer: not asked again, the destination-and-dates gate takes over as before', async () => {
+    const r = (await runTool('file_records_ticket', { ...PATIENT, form_channel: 'declined', call_sid: freshSid() })) as Out;
+    expect(r.success).toBe(false);
+    expect(r.missingFields).toEqual(['deliver_to', 'date_range']);
+  });
+
+  it('a lane that declares it cannot ask (on_clock_ask_exhausted — PCP) is not asked: files as today, gap noted', async () => {
+    const api = await client();
+    const create = vi.spyOn(api, 'createTicket').mockResolvedValueOnce(filed('VA-PCP-V79'));
+    const r = (await runTool('file_records_ticket', { ...PATIENT, on_clock_ask_exhausted: true, call_sid: freshSid() })) as Out;
+    expect(r.success, JSON.stringify(r)).toBe(true);
+    const p = create.mock.calls[0][0] as unknown as Record<string, unknown>;
+    expect(p.formChannel).toBeUndefined();
+    expect(p.requestPathway).toBe('roa_patient');
+    expect(String(p.description)).toContain('Dates needed: NOT CAPTURED');
+  });
+
+  it('a third party is never asked: files with no channel and no question', async () => {
+    const api = await client();
+    const create = vi.spyOn(api, 'createTicket').mockResolvedValueOnce(filed('VA-3P-V79'));
+    const r = (await runTool('file_records_ticket', {
+      ...PATIENT,
+      requester: 'I am an attorney at Lexitas',
+      requester_type: 'legal',
+      call_sid: freshSid(),
+    })) as Out;
+    expect(r.success).toBe(true);
+    const p = create.mock.calls[0][0] as unknown as Record<string, unknown>;
+    expect(p.formChannel).toBeUndefined();
+  });
+
+  it('a caller who pressed the wrong option is not offered a form: an appointment request is redirected, not asked', async () => {
+    const api = await client();
+    const create = vi.spyOn(api, 'createTicket').mockResolvedValueOnce(filed('VA-HUB-V79'));
+    const r = (await runTool('file_records_ticket', {
+      ...PATIENT,
+      request_description: 'I need to make an appointment for an eye exam',
+      // Supplied so this test stays about the CHANNEL question. Since v103 the
+      // destination-and-dates gate stands down on a redirected request anyway
+      // — see the routed-away suite below, which files without them.
+      deliver_to: 'to me',
+      date_range: 'everything',
+      call_sid: freshSid(),
+    })) as Out;
+    expect(r.success, JSON.stringify(r)).toBe(true);
+    const p = create.mock.calls[0][0] as unknown as Record<string, unknown>;
+    expect(p.formChannel).toBeUndefined();
+    expect(p.departmentId).not.toBe(16);
+  });
+
+  it('the source: the redirect is decided BEFORE the channel ask, on the same words', () => {
+    const src = readFileSync(join(__dirname, 'medicalRecordsTools.ts'), 'utf8');
+    const redirectAt = src.indexOf("const redirect = detectCrossQueue(description, MEDICAL_RECORDS_DEPARTMENT_ID)");
+    const askAt = src.indexOf("formAskOutcome(callSid, FORM_CHANNEL_ASK)");
+    expect(redirectAt).toBeGreaterThan(0);
+    expect(askAt).toBeGreaterThan(redirectAt);
+    // and it is decided exactly once
+    expect(src.split('detectCrossQueue(description').length - 1).toBe(1);
+  });
+});
+
+/**
+ * v103 — A REQUEST ROUTED OUT OF MEDICAL RECORDS CARRIES NO FORM, AND THE TOOLS
+ * SAY SO.
+ *
+ * Corpus, 2026-10-19 (shapes only; the transcripts stay on disk):
+ *   CAcd3cb871e27852961800131082473100  routed to Optical. The model had offered
+ *     the link on the prompt's say-so, then said "I've sent the link by text",
+ *     then send_records_form came back refused by the app and the agent said
+ *     "The records team will send the form to you instead". Both false.
+ *   CA84db2ea14706c3594cd31b1293f53c58  an appointment confirmation, routed to
+ *     the HVA Hub, first asked "where should these be sent, and which dates?",
+ *     then offered a link, then heard the same false promise.
+ * Measured 2026-09-28..10-19: 24 of 462 records calls routed away, 16 of those
+ * asked the destination-and-dates question, 8 offered a link, 3 promised a form.
+ */
+describe('v103 — a request routed out of Medical Records', () => {
+  const APPOINTMENT = { ...PATIENT, request_description: 'I need to confirm my appointment for tomorrow' };
+
+  it('files on the FIRST invocation — no records question about a request that is not one', async () => {
+    const api = await client();
+    const create = vi.spyOn(api, 'createTicket').mockResolvedValueOnce(filed('VA-HUB-V103'));
+    const r = (await runTool('file_records_ticket', { ...APPOINTMENT, call_sid: freshSid() })) as Out;
+
+    expect(r.success, JSON.stringify(r)).toBe(true);
+    expect(r).not.toHaveProperty('missingFields');
+    expect(create).toHaveBeenCalledTimes(1);
+    const p = create.mock.calls[0][0] as unknown as Record<string, unknown>;
+    expect(p.departmentId).not.toBe(16);
+    expect(p.formChannel).toBeUndefined();
+  });
+
+  it('a records request the patient declined the link on still gets the destination-and-dates ask (the control)', async () => {
+    const api = await client();
+    const create = vi.spyOn(api, 'createTicket');
+    const r = (await runTool('file_records_ticket', { ...PATIENT, form_channel: 'declined', call_sid: freshSid() })) as Out;
+    expect(r.success).toBe(false);
+    expect(r.missingFields).toEqual(['deliver_to', 'date_range']);
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it('tells the MODEL no form applies — in fix, never in the line it speaks — and makes it countable', async () => {
+    const api = await client();
+    vi.spyOn(api, 'createTicket').mockResolvedValueOnce(filed('VA-HUB-V103B'));
+    const r = (await runTool('file_records_ticket', { ...APPOINTMENT, form_channel: 'sms', call_sid: freshSid() })) as Out;
+
+    expect(r.success, JSON.stringify(r)).toBe(true);
+    expect(r.form_applies).toBe(false);
+    expect(r).not.toHaveProperty('form_sent');
+    expect(String(r.fix)).toMatch(/no\s+signing form applies/i);
+    expect(String(r.fix)).toMatch(/do not call send_records_form/i);
+    expect(String(r.fix)).toMatch(/already offered a link/i);
+    expect(String(r.message)).toMatch(/team will follow up/i);
+    expect(String(r.message)).not.toMatch(/link|form/i);
+  });
+
+  it('the re-send refuses on its own, with a TRUE line, and never asks the app or promises a form', async () => {
+    const api = await client();
+    vi.spyOn(api, 'createTicket').mockResolvedValueOnce(filed('VA-HUB-V103C'));
+    const resend = vi.spyOn(api, 'sendRecordsIntakeLink');
+    const sid = freshSid();
+    await runTool('file_records_ticket', { ...APPOINTMENT, call_sid: sid });
+
+    const r = (await runTool('send_records_form', { channel: 'sms', call_sid: sid })) as Out;
+    expect(r.success).toBe(false);
+    expect(resend).not.toHaveBeenCalled();
+    expect(String(r.message)).toMatch(/another team/i);
+    expect(String(r.message)).toMatch(/no form/i);
+    expect(String(r.message)).not.toMatch(/records team will send/i);
+    expect(String(r.fix)).toMatch(/do not call send_records_form again/i);
+  });
+
+  it('a call that ALSO filed a real records request can still re-send — the records filing wins', async () => {
+    const api = await client();
+    vi.spyOn(api, 'createTicket')
+      .mockResolvedValueOnce(filed('VA-HUB-V103D'))
+      .mockResolvedValueOnce(filed('VA-FORM-V103D', { requested: true, sent: true, channel: 'sms' }));
+    const resend = vi.spyOn(api, 'sendRecordsIntakeLink').mockResolvedValueOnce({ success: true, channel: 'sms' });
+    const sid = freshSid();
+    await runTool('file_records_ticket', { ...APPOINTMENT, call_sid: sid });
+    laterTurn();
+    await runTool('file_records_ticket', { ...PATIENT, form_channel: 'sms', call_sid: sid });
+
+    const r = (await runTool('send_records_form', { channel: 'sms', call_sid: sid })) as Out;
+    expect(r.success, JSON.stringify(r)).toBe(true);
+    expect(resend).toHaveBeenCalledTimes(1);
+  });
+
+  // Codex P2 x2 on #356: the email gate and the destination note both ran
+  // ahead of, or beside, the redirect.
+  it('a redirected request carrying form_channel "email" and no address still files first time', async () => {
+    const api = await client();
+    const create = vi.spyOn(api, 'createTicket').mockResolvedValueOnce(filed('VA-HUB-V103E'));
+    const r = (await runTool('file_records_ticket', { ...APPOINTMENT, form_channel: 'email', call_sid: freshSid() })) as Out;
+
+    expect(r.success, JSON.stringify(r)).toBe(true);
+    expect(r).not.toHaveProperty('missingFields');
+    expect(create).toHaveBeenCalledTimes(1);
+    expect((create.mock.calls[0][0] as unknown as Record<string, unknown>).formChannel).toBeUndefined();
+  });
+
+  it('a redirected ticket carries no records-destination note and no spoken form directions', async () => {
+    const api = await client();
+    vi.spyOn(api, 'createTicket')
+      .mockResolvedValueOnce(filed('VA-HUB-V103F'))
+      .mockResolvedValueOnce(filed('VA-HUB-V103G'));
+    const plain = (await runTool('file_records_ticket', { ...APPOINTMENT, call_sid: freshSid() })) as Out;
+    expect(plain).not.toHaveProperty('note_destination');
+    const verbal = (await runTool('file_records_ticket', { ...APPOINTMENT, form_channel: 'verbal', call_sid: freshSid() })) as Out;
+    expect(verbal).not.toHaveProperty('form_channel');
+    expect(String(verbal.message)).not.toMatch(/authorization|website/i);
+  });
+
+  it('a records request with no destination still gets the note (the control)', async () => {
+    const api = await client();
+    vi.spyOn(api, 'createTicket').mockResolvedValueOnce(filed('VA-FORM-V103H', { requested: true, sent: true, channel: 'sms' }));
+    const r = (await runTool('file_records_ticket', { ...PATIENT, form_channel: 'sms', call_sid: freshSid() })) as Out;
+    expect(r.success, JSON.stringify(r)).toBe(true);
+    expect(String(r.note_destination)).toMatch(/ask where these should be sent/);
+  });
+
+  it('the timeline carries form_applies', () => {
+    const src = readFileSync(join(__dirname, '..', 'services', 'toolTimeline.ts'), 'utf8');
+    expect(src).toContain("'form_applies',");
+  });
+});
+
+describe('#338 Codex P1 — a batched sibling is not a second turn', () => {
+  // The surgeon-claim shape (v57) on a new ask. When the model emits two
+  // file_records_ticket calls in ONE response, the runtime dispatches them
+  // side by side: the first notes the channel ask, the sibling reads it as
+  // spent milliseconds later — before the refusal is returned, let alone
+  // spoken — and under 7635f60 defaulted to a text and filed before the
+  // caller had answered. Measured 2026-09-27/28 on the records lane: fourteen
+  // sibling gaps of 3–1,178 ms, then nothing until 4,807 ms. The window sits
+  // in the gap; a sibling inside it gets the SAME question and spends nothing.
+  //
+  // SCOPE PIN, in another file: recordsFilesWithoutAName.test.ts invokes the
+  // NAME ask twice at one instant and expects the second to FILE — the window
+  // is the two form asks' and not the gate's, and that test goes red if it
+  // widens.
+  it('a sibling inside the window gets the channel question again, and nothing is filed', async () => {
+    const api = await client();
+    const create = vi.spyOn(api, 'createTicket');
+    const sid = freshSid();
+    const first = (await runTool('file_records_ticket', { ...PATIENT, call_sid: sid })) as Out;
+    sibling();
+    const second = (await runTool('file_records_ticket', { ...PATIENT, call_sid: sid })) as Out;
+    expect(first.missingFields).toEqual(['form_channel']);
+    expect(second.success).toBe(false);
+    expect(second.missingFields).toEqual(['form_channel']);
+    expect(String(second.message)).toMatch(/mobile number that receives texts/i);
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it('a batch of five (one real call had five inside 221 ms) all get the question, and the ask is still spent ONCE', async () => {
+    const api = await client();
+    const create = vi.spyOn(api, 'createTicket').mockResolvedValueOnce(
+      filed('VA-FORM-BATCH', { requested: true, sent: true, channel: 'sms' }),
+    );
+    const sid = freshSid();
+    for (let i = 0; i < 5; i++) {
+      const r = (await runTool('file_records_ticket', { ...PATIENT, call_sid: sid })) as Out;
+      expect(r.missingFields).toEqual(['form_channel']);
+      sibling(50);
+    }
+    expect(create).not.toHaveBeenCalled();
+    // Four siblings, and the ask is spent exactly once — a sibling that re-noted
+    // would restart the clock and could carry a batch past the window.
+    expect(gateRefusalsSoFar(sid, 'file_records_ticket', 'form_channel')).toBe(1);
+    // The caller has had the turn and the model STILL sent no channel: the
+    // fallback v79 built, and the four siblings spent nothing extra to reach it.
+    laterTurn();
+    const r = (await runTool('file_records_ticket', { ...PATIENT, call_sid: sid })) as Out;
+    expect(r.success).toBe(true);
+    expect((create.mock.calls[0][0] as unknown as Record<string, unknown>).formChannel).toBe('sms');
+  });
+
+  it('the window is a bound, not a grace: at exactly ASK_BATCH_WINDOW_MS the ask is spent', async () => {
+    const api = await client();
+    const create = vi.spyOn(api, 'createTicket').mockResolvedValueOnce(
+      filed('VA-FORM-EDGE', { requested: true, sent: true, channel: 'sms' }),
+    );
+    const sid = freshSid();
+    await runTool('file_records_ticket', { ...PATIENT, call_sid: sid });
+    sibling(ASK_BATCH_WINDOW_MS);
+    const r = (await runTool('file_records_ticket', { ...PATIENT, call_sid: sid })) as Out;
+    expect(r.success).toBe(true);
+    expect((create.mock.calls[0][0] as unknown as Record<string, unknown>).formChannel).toBe('sms');
+  });
+
+  it('the email ask has the same shape and the same fix: a sibling gets the address question, not a text', async () => {
+    const api = await client();
+    const create = vi.spyOn(api, 'createTicket');
+    const sid = freshSid();
+    const first = (await runTool('file_records_ticket', { ...PATIENT, form_channel: 'email', call_sid: sid })) as Out;
+    sibling();
+    const second = (await runTool('file_records_ticket', { ...PATIENT, form_channel: 'email', call_sid: sid })) as Out;
+    expect(first.missingFields).toEqual(['email']);
+    expect(second.success).toBe(false);
+    expect(second.missingFields).toEqual(['email']);
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it('the window is measured, not chosen: it sits between the slowest sibling and the fastest genuine turn', () => {
+    // 2026-09-27 19:00 → 09-28 22:00 UTC, records lane, consecutive
+    // file_records_ticket events on one call — end-to-end gaps, so an upper
+    // bound on how far apart two siblings START.
+    const slowestSibling = 1_178;
+    const fastestGenuineTurn = 4_807;
+    expect(ASK_BATCH_WINDOW_MS).toBeGreaterThan(slowestSibling);
+    expect(ASK_BATCH_WINDOW_MS).toBeLessThan(fastestGenuineTurn);
+  });
+
+  it('the source: this is not the serialisation v57 tried — the ask decision awaits nothing', () => {
+    const src = readFileSync(join(__dirname, 'medicalRecordsTools.ts'), 'utf8');
+    const start = src.indexOf('function formAskOutcome(');
+    expect(start).toBeGreaterThan(0);
+    const body = src.slice(start, src.indexOf('\n}\n', start));
+    expect(body).not.toMatch(/\bawait\b/);
+    expect(body).toContain('gateRefusalAgeMs(callSid, RECORDS_TOOL, field)');
+  });
+});

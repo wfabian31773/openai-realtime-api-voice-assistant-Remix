@@ -29,8 +29,15 @@ import { schedule } from '../../shared/schema';
  * "operator does not exist", and the failure lands inside the catch below —
  * meaning a caller would verify perfectly and then be told they have no
  * appointments at all. Cast, and it returns their 43.
+ *
+ * EXPORTED so there is exactly ONE of these in the repo. `scheduleLookupService`
+ * joins on the same key for the same reason, and a second hand-written
+ * comparison is a second chance to drop the cast — which fails at RUNTIME, in
+ * a catch block, on a call, and looks like a patient with no history rather
+ * than like a bug. `drizzle` types the column as text, so nothing above
+ * Postgres will object.
  */
-const byPerson = (personId: string) => sql`${schedule.personId} = ${personId}::uuid`;
+export const byPerson = (personId: string) => sql`${schedule.personId} = ${personId}::uuid`;
 
 // server/db is imported LAZILY, inside the lookup. At module scope it runs
 // environment validation on import, which would make every file that merely
@@ -103,6 +110,32 @@ function toFact(r: Record<string, any>): AppointmentFact {
 export async function appointmentsForPerson(personId: string): Promise<AppointmentAnswer | null> {
   const today = new Date().toISOString().slice(0, 10);
   try {
+    /**
+     * THE SOURCE IS THE CONSOLE (standing instruction 14) — the same mirror and
+     * the same Hub-shaped rows the PersonID join reads, so "your last visit"
+     * and "your next appointment" come from the table everyone else uses. The
+     * Hub copy answers only when the Console pool is not configured.
+     */
+    const { isConsoleScheduleConfigured, fetchFactsForPerson } = await import('./consoleScheduleFacts');
+    if (isConsoleScheduleConfigured()) {
+      const rows = await fetchFactsForPerson(personId, 60);
+      // A moved appointment arrives here already 'Removed' (NextGen hides it;
+      // `statusOf`). One already marked kept today is a visit, not the next
+      // appointment (NextGen Bible §2: today is Upcoming until it is kept).
+      const live = rows.filter((r) => r.appointmentStatus !== REMOVED);
+      const keptToday = (r: { appointmentDate: string; appointmentKept: boolean | null }) =>
+        r.appointmentDate === today && r.appointmentKept === true;
+      const past = live
+        .filter((r) => r.appointmentDate < today || keptToday(r))
+        .sort((a, b) => b.appointmentDate.localeCompare(a.appointmentDate));
+      const upcoming = live
+        .filter((r) => r.appointmentDate >= today && !keptToday(r))
+        .sort((a, b) => a.appointmentDate.localeCompare(b.appointmentDate));
+      return {
+        last: past[0] ? toFact(past[0] as unknown as Record<string, any>) : null,
+        next: upcoming[0] ? toFact(upcoming[0] as unknown as Record<string, any>) : null,
+      };
+    }
     const { db } = await import('../../server/db');
     const [past, upcoming] = await Promise.all([
       db

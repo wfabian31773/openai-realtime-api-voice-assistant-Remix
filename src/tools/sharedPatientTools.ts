@@ -28,7 +28,9 @@
  * acceptable and the wording names no speciality. That is the right default for
  * the HTTP surface, where the caller is not a queue.
  */
-import { registerTool, missing, type ToolResult } from './registry';
+import { registerTool, missing, type MissingFields, type ToolResult } from './registry';
+import { gateRefusalsSoFar, noteGateRefusal, noteCallFact, callFactNoted } from './gateAttempts';
+import { forgetIfSameName, nameKey, rememberVerifiedIdentity, verifiedIdentityFor } from './verifiedIdentity';
 
 /** Which queue is asking. Injected as call context, never a model argument. */
 export type ToolQueue = 'optical' | 'surgery';
@@ -61,10 +63,63 @@ function askWhichOffice(queue: ToolQueue | undefined): string {
 
 // ---------------------------------------------------------------- who
 
+/**
+ * `lookup_patient`'s whole budget, and the ONE place it is written.
+ *
+ * `runTool` races the handler against this and the race RESOLVES rather than
+ * cancelling, so anything inside that wants to answer first has to know the
+ * ABSOLUTE moment the race fires — not its own relative timeout. Declared here
+ * so the deadline handed to the service cannot drift from the budget the
+ * registry enforces; `lookupBudgetDrift.test.ts` fails if the two separate.
+ */
+export const LOOKUP_PATIENT_BUDGET_MS = 6000;
+
+/**
+ * Answer this far before the race does. Enough to build the result object and
+ * return it, and nothing more.
+ */
+const LOOKUP_BUDGET_MARGIN_MS = 250;
+
+/**
+ * THE SECOND MISS ENDS THE IDENTITY ASK — v50, 2026-09-17.
+ *
+ * Measured over the runtime lanes on 2026-09-16: the agent asked for a date
+ * of birth two or more times on 35 substantive calls (surgery 16, tech 16,
+ * optical 3), three or more on 13, and on tech 15 of the 16 were COLD
+ * callers — nobody pre-context recognised, so v25–v28 (the recognised-caller
+ * fixes) never touch them. The shape is not a filing-tool loop: those calls
+ * hit `file_*_ticket`'s date-of-birth refusal at most once (`dobShape`
+ * always `(none)`, the escape working) but called THIS tool 2.5–6.5 times
+ * each. The model asks, the caller answers, the lookup misses, and this
+ * tool's own miss message told it to ask again — every time, with no count.
+ *
+ * So the count lives here, keyed on the call like every other per-call
+ * budget (gateAttempts). A miss counts only when the lookup CARRIED a name
+ * or a date of birth — the phone-first pass on a cold caller is not an ask
+ * the caller answered. The first identity miss coaches the ONE re-ask RULE
+ * ZERO 2b would shape anyway (spell the surname; month, then day, then
+ * year); the second says stop and file. That is the operator's 2026-09-04
+ * ruling on the filing tool ("ask once, then file anyway") applied one layer
+ * earlier, and v33's `MAX_ASKS_PER_FIELD = 2` on the PCP intake — once to
+ * ask, once in case the first answer was mis-heard.
+ *
+ * THE TRADE, measured before choosing the limit (09-15 / 09-16, ~310 calls
+ * with a lookup per day): ~250 found on the first lookup, 9 / 16 on the
+ * second, 10 / 7 only on the third or later — those are matches a bound can
+ * cost, and a ticket still files for them, unmatched, for staff to match.
+ * Against that, 16 / 13 calls missed three or more times and never found,
+ * and 10 / 7 of THOSE left no ticket at all. A lost request outweighs a
+ * lost match. The limit is the dial; it is a judgement, and it is exported
+ * so the test pins the number the prose quotes.
+ */
+export const LOOKUP_MISS_LIMIT = 2;
+const LOOKUP_TOOL = 'lookup_patient';
+const IDENTITY_MISS = 'identity_miss';
+
 registerTool({
   name: 'lookup_patient',
   layer: 'agent',
-  timeoutMs: 6000,
+  timeoutMs: LOOKUP_PATIENT_BUDGET_MS,
   description:
     'Find a patient and their recent visit history. Call this as soon as you have ' +
     'either their phone number, or their first name, last name and date of birth. ' +
@@ -73,13 +128,87 @@ registerTool({
   input_schema: {
     type: 'object',
     properties: {
+      /**
+       * LEAD THE ASK. Operator ruling, 2026-09-03:
+       *
+       *   *"We should be proactively structuring the conversation. On any
+       *   validation we should lead... May I please have your last name? May I
+       *   please have your date of birth? And when you ask for date of birth
+       *   it should say starting with the month, the day, and then the year.
+       *   This way you get it in the way you want it. It's kind of a guard.
+       *   If you just say can I have your date of birth, people give it to you
+       *   in any format they want."*
+       *
+       * These strings are the words the agent actually says: `validateInput`
+       * builds its refusal from `askAs`, and the model reads them in the
+       * schema. Changing them here changes all four queue lanes at once, which
+       * is why the wording lives with the field and not in four prompts.
+       *
+       * The date-of-birth guard is worth its characters twice over. Every
+       * parser fix on 2026-09-03 — separators, sentences, two-digit centuries
+       * — was widening what we accept AFTER the fact. Naming the order in the
+       * question narrows what arrives, which is the cheaper half and the one
+       * that was there before and got lost.
+       */
       phone: { type: 'string', description: 'Any format. The number they are calling from is usually best.', askAs: 'What is the best phone number for you?' },
-      first_name: { type: 'string', description: "Patient's first name as they said it.", askAs: 'Can I get your first name?' },
-      last_name: { type: 'string', description: "Patient's last name as they said it.", askAs: 'And your last name?' },
-      date_of_birth: { type: 'string', description: 'Any spoken format — "March 17th 1973", "03/17/1973".', askAs: 'And your date of birth?' },
+      first_name: { type: 'string', description: "Patient's first name as they said it.", askAs: 'And may I please have your first name?' },
+      last_name: { type: 'string', description: "Patient's last name as they said it.", askAs: 'May I please have your last name?' },
+      date_of_birth: { type: 'string', description: 'Any spoken format — "March 17th 1973", "03/17/1973".', askAs: 'And may I please have your date of birth, starting with the month, then the day, then the year?' },
+      /**
+       * RULE ZERO 2a, and this field is the OVERRIDE rather than the primary.
+       *
+       * The primary is the transcript (`spokenPatientStatus.ts`), because the
+       * model does not send arguments it is not forced to send — `dobShape`
+       * read `(none)` on 75 of 75 date-of-birth refusals on 2026-09-08. A gate
+       * that depended on this field arriving would fire on almost nothing.
+       *
+       * What it is FOR: the way back. A caller who answers "new" and then says
+       * "actually, I was in last spring" needs their record looked for, and the
+       * suppression's own `fix` tells the model to send `existing` here to get
+       * it. Send it when the CALLER has said which they are — not as a guess.
+       */
+      /**
+       * `existing` IS THE ONLY VALUE — Codex round 6, P1-A and P1-D.
+       *
+       * This field is the WAY BACK and nothing else. It used to accept `new`
+       * too, which gave the model a way to suppress a lookup on its own word:
+       * on records — where 42% of callers are a proxy for the patient — a `new`
+       * describing the CALLER suppressed the lookup for the PATIENT whose chart
+       * they rang about, and once stored it beat every later transcript read for
+       * the rest of the call. Sending `new` never bought anything the transcript
+       * did not already say. `noteStatusOverride` has the full argument.
+       */
+      patient_status: {
+        type: 'string',
+        enum: ['existing'],
+        description:
+          'Send "existing" ONLY when the caller has told you they have been seen here before. ' +
+          'It lifts a suppression an earlier "new" put in place. There is no other value: ' +
+          'never send this to report that somebody is new.',
+        /**
+         * The `askAs` stays and the LEAK was the adapter's — Codex round 7.
+         * Codex was right that this question reached every lane's model,
+         * records included, where round 5 deliberately removed it: the adapter
+         * spread the whole `input_schema` into `parameters`. But `askAs` is a
+         * house convention every field in this file keeps (`sharedPatientTools.test.ts`
+         * — "a tool asking for something hands the agent the sentence to say"),
+         * so deleting it here would have traded one leak for a hole in that
+         * contract. `stripInternalKeys` in `realtimeAdapter.ts` is the fix, and it
+         * closes the same leak for every tool and every field at once.
+         */
+        askAs: 'Are you a new patient or an existing patient?',
+      },
     },
   },
   handler: async (input): Promise<ToolResult> => {
+    /**
+     * WHEN THE RACE FIRES, in absolute terms. Codex P1 (round 2) on PR #292:
+     * a RELATIVE deadline inside the join is worthless if the rungs above it
+     * have already spent the budget, because `runTool`'s race is absolute from
+     * the moment the handler was entered. Captured here, at that moment, and
+     * threaded down so the join can bound itself by what is actually LEFT.
+     */
+    const deadlineAt = Date.now() + LOOKUP_PATIENT_BUDGET_MS - LOOKUP_BUDGET_MARGIN_MS;
     const queue = input.queue as ToolQueue | undefined;
     // The number the call ARRIVED on, when the model did not pass one.
     //
@@ -100,6 +229,97 @@ registerTool({
     const last = str(input.last_name);
     const dob = str(input.date_of_birth);
 
+    /**
+     * RULE ZERO 2a — A CALLER WHO SAID THEY ARE NEW IS NOT LOOKED UP.
+     *
+     * Operator ruling, 2026-09-19: "new should hard suppress lookup patient."
+     * RULE ZERO 2a has said the same since it was written — "NEW means STOP
+     * LOOKING: no lookup, no appointment search, and never tell them we have
+     * no record of them" — and until this build only the prompt obeyed it.
+     * #293 appended the question and gated nothing, and said so.
+     *
+     * WHY IT SITS HERE, above every rung and above the argument check: the
+     * point is not to look and miss quietly, it is not to look. A suppression
+     * below the rungs would still spend the 6s budget, would still walk the
+     * appointment book for somebody who has never been here, and — the part
+     * that actually costs a caller — would still reach the miss messages,
+     * which send the model back to ask for a name and a date of birth again.
+     *
+     * RULE 1 OUTRANKS IT, and this is the guard on Wayne's own stated failure
+     * mode: an existing patient who answers "new". If the process has already
+     * established WHO IS CALLING, a spoken "new" cannot unknow them.
+     * `verifiedIdentityFor` is the right reader for that because it refuses an
+     * UNCERTAIN match by design — so a phone candidate does not count, which is
+     * standing instruction 6, while a confirmed identity does. In the ordinary
+     * sequence this fires: the model looks up the injected caller phone before
+     * the question is ever asked, so a caller the person base vouches for is
+     * already locked in by the time they could answer "new".
+     *
+     * IT SUPPRESSES THIS TOOL AND NOTHING ELSE. `file_*_ticket` still files,
+     * `resolve_location` still routes optical by office, `check_open_tickets`
+     * still answers. A new patient's ticket carries no match, which is correct
+     * and expected rather than a gap.
+     */
+    const { patientStatusFor, noteStatusOverride } = await import('./spokenPatientStatus');
+    const { LANES_THAT_ASK } = await import('../runtime/newOrExistingAsk');
+    // Only the way back is honoured. A model that sends `new` against the
+    // schema's single value changes nothing — the store cannot hold it and this
+    // branch does not fire. See `noteStatusOverride`.
+    if (str(input.patient_status) === 'existing') {
+      noteStatusOverride(str(input.call_sid), 'existing');
+    }
+    /**
+     * ONLY A LANE THAT ASKS MAY READ THE ANSWER — Codex round 7, P1-B, and it is
+     * the hinge I told round 6 was unavailable. It was: `ToolQueue` is
+     * `optical | surgery` and tech injects none. So this takes its own injected
+     * `lane`, the same shape as `queue` — not a schema field, merged UNDER the
+     * model's arguments, so the model can neither set it nor be asked for it.
+     *
+     * WHY IT IS NEEDED AFTER ROUND 5 AND 6. Round 5 took the QUESTION off
+     * records, whose caller is a proxy on 42% of calls, and round 6 took `new`
+     * off the override — but the transcript READER still read every lane, so a
+     * records agent improvising the question (or nudged into it by the `askAs`
+     * this round also removed) opened a window in which a proxy's "New." —
+     * describing THEMSELVES — suppressed the lookup for the PATIENT whose chart
+     * they rang about. A category error, and wrong even once.
+     *
+     * AN ABSENT LANE DOES NOT SUPPRESS, deliberately: the HTTP surface, pcp,
+     * no-ivr and answering-service all reach this tool and none of them asks.
+     * That default fails in the CHEAP direction — the lookup runs, and a miss on
+     * a genuinely new patient is expected (RULE ZERO 2a) — but it does mean a
+     * lane that forgets to inject its own name has an inert gate, so
+     * `newMeansStopLooking.test.ts` reads each asking agent's source and goes
+     * red if one drops it (failure mode 10: a helper test proves the helper).
+     */
+    const lane = str(input.lane);
+    const laneMayRead = LANES_THAT_ASK.has(lane);
+    const status = laneMayRead ? patientStatusFor(str(input.call_sid)) : undefined;
+    if (status === 'new' && !verifiedIdentityFor(str(input.call_sid))) {
+      // PHI-free: a SID and the branch. The marker line for the after-number.
+      console.info(
+        `[TOOLS] lookup_patient: not dispatched on ${str(input.call_sid)} — the caller said they are a NEW patient (RULE ZERO 2a)`,
+      );
+      return {
+        success: true,
+        found: false,
+        /**
+         * NO `message`. There is nothing here for the caller to hear, and v43
+         * is what happens when a tool's instruction to the model sits in the
+         * channel the model speaks: the surgery agent read its own emergency
+         * rule out loud — "These are the words we treat as a surgical
+         * emergency." A catch-all has nothing to say.
+         */
+        suppressed: 'caller_said_new',
+        fix:
+          'This caller told you they are a NEW patient, so there is no record to find and none ' +
+          'will be. Do NOT look them up, do not ask for a date of birth in order to find them, ' +
+          'and never tell them we have no record of them — a miss here is expected, not a ' +
+          'failure. Collect what the request itself needs and file it. If the caller tells you ' +
+          'they HAVE been seen here before, call this tool again with patient_status "existing" ' +
+          'and it will look them up.',
+      };
+    }
+
     // Either a phone, or the full name+DOB trio. Half a trio is not a lookup.
     if (!phone && !(first && last && dob)) {
       return missing(
@@ -116,6 +336,7 @@ registerTool({
       firstName: first || undefined,
       lastName: last || undefined,
       dateOfBirth: dob || undefined,
+      deadlineAt,
     });
 
     // A name+DOB miss is very often ONE mis-transcribed field, not a stranger.
@@ -127,21 +348,161 @@ registerTool({
     // version did `Object.assign(ctx, byPhone)` and a test caught it corrupting
     // a shared fixture — which is the same hazard in miniature.
     let resolved = ctx;
-    if (!ctx.patientFound && phone && (first || last || dob)) {
-      const byPhone = await scheduleLookupService.lookupPatient({ phone });
+
+    /**
+     * AN EXPLICIT AMBIGUITY IS TERMINAL. THE PHONE RETRY MAY NOT OVERWRITE IT.
+     *
+     * Codex P1 on PR #292. A name+DOB that resolves to SEVERAL people is not a
+     * miss — it is a specific, stronger claim that came back unsettled. The
+     * retry below then looked the CALLER'S NUMBER up on its own, and a unique
+     * hit there replaced the ambiguous result wholesale. Nothing checks that
+     * the phone's owner is one of the people the name matched, so the tool
+     * could answer `found: true, identity_is_certain: true` with an unrelated
+     * person's PersonID-joined record — a daughter's chart read back to a
+     * caller who spoke her mother's name and birthday. Standing instruction 6
+     * forbids exactly that, and the join makes it worse by attaching a full
+     * history, office and provider to the wrong person.
+     *
+     * SMALL, AND FIXED ANYWAY. Measured 2026-09-12 on 400 sampled persons:
+     * last name + date of birth collides for 8 (2.0%), and the full
+     * first+last+DOB triple for 0 (<0.75% at 95%). The scenario needs that
+     * collision AND a unique phone hit on someone else AND the schedule's own
+     * phone rung to miss first — far below the 1% bar where a finding is worth
+     * chasing. It is fixed because reading the wrong patient's record aloud is
+     * a different class of harm from a lost request, and because the fix is
+     * one condition in the direction instruction 6 already mandates.
+     */
+    const explicitlyAmbiguous = Boolean(ctx.identity && !ctx.identity.unique);
+
+    if (!ctx.patientFound && !explicitlyAmbiguous && phone && (first || last || dob)) {
+      const byPhone = await scheduleLookupService.lookupPatient({ phone, deadlineAt });
       if (byPhone.patientFound) {
         console.info('[TOOLS] lookup_patient: name+DOB missed, matched on the caller phone instead');
         resolved = byPhone;
       }
     }
 
+    /**
+     * THE AFFIRMED FIRST NAME PICKS ONE PERSON AMONG SEVERAL ON A PHONE — v54.
+     *
+     * Measured 2026-09-16: every one of the 26 recognised-caller date-of-birth
+     * refusals on the runtime lanes read `carry = no_entry`, their lookups had
+     * matched by PHONE with `identity_is_certain: false`, and nothing later
+     * wiped an entry (0 of 26 had a match followed by a miss). That is this
+     * shape: the Schedule phone rung finds SEVERAL people on the number,
+     * returns the most recently seen one with `identity.unique: false`, and
+     * the remember below is skipped because the match is not unique — so the
+     * filing tool finds nothing to inherit and asks for a date of birth the
+     * greeting's own question had already settled. The greeting asked "Am I
+     * speaking with <name>?", the caller said yes, and that affirmed name
+     * never reached this tool.
+     *
+     * RULE ZERO step 2: MATCH by phone, VALIDATE — and the validation is the
+     * name the caller affirmed (v26: 228 affirmed, 13 denied). When the
+     * caller's first name matches exactly ONE of the people on the number,
+     * that person is re-resolved on their own name and date of birth and
+     * carried as CERTAIN. Two people sharing the first name (a father and a
+     * son), or a name matching nobody, leave the match the guess it was.
+     */
+    if (resolved.patientFound && resolved.identity && !resolved.identity.unique && first) {
+      const affirmed = nameKey(first);
+      const hits = resolved.identity.candidates.filter((c) => nameKey(c.firstName) === affirmed);
+      const one = hits.length === 1 ? hits[0] : undefined;
+      if (one?.firstName && one.lastName && one.dateOfBirth) {
+        const picked = await scheduleLookupService.lookupPatient({
+          firstName: one.firstName,
+          lastName: one.lastName,
+          dateOfBirth: one.dateOfBirth,
+          deadlineAt,
+        });
+        // Codex P1 on #321 (sixth pass): `lookupPatient` FALLS THROUGH when
+        // the trio misses — to the phone rung (no phone is passed here) and
+        // then to the NAME rung, whose first-name predicate is a three-
+        // character prefix. A stored date that no longer resolves would hand
+        // back a similarly named STRANGER as `matchedBy: 'name'`, and the
+        // line below would have relabelled that person phone-confirmed and
+        // remembered their date for the ticket. Only the trio itself promotes.
+        if (
+          picked.patientFound &&
+          picked.matchedBy === 'name_and_dob' &&
+          picked.identity?.unique !== false
+        ) {
+          // PHI-free: a count of people and the fact that one was picked.
+          console.info(
+            `[TOOLS] lookup_patient: the caller's first name picked one of the ${resolved.identity.candidateCount} people on this number`,
+          );
+          // Matched by phone, confirmed by the caller — not a guess any more.
+          resolved = { ...picked, matchedBy: 'phone', identityUnconfirmed: false };
+        }
+      }
+    }
+
     if (!resolved.patientFound) {
+      /**
+       * "SEVERAL PEOPLE" IS NOT "NOBODY", and the agent needs the difference.
+       *
+       * Codex P2 on PR #292. The person-base rung reports an ambiguous hit by
+       * returning `identity` on an otherwise empty context — several people
+       * share this number, and instruction 6 forbids picking one. This branch
+       * read only `patientFound` and told the agent "no record found", which
+       * is false and points it the wrong way: it would treat a known family as
+       * a new patient instead of asking the one question that separates them.
+       *
+       * The finding also caught that the service-level test could not see
+       * this, because the tool's own not-found branch is where the signal died.
+       */
+      const several = resolved.identity && !resolved.identity.unique;
+      if (several) {
+        return {
+          success: true,
+          found: false,
+          identity_is_certain: false,
+          candidate_count: resolved.identity!.candidateCount,
+          message:
+            `This number is on file for ${resolved.identity!.candidateCount} different people, so ` +
+            'I cannot tell which one is calling. Ask for their full name and date of birth — do ' +
+            'not read any history back until they have given both.',
+        };
+      }
+      // Only an answered ask can miss. The phone-first pass on a cold caller
+      // carries no name and no date, so it neither counts nor coaches.
+      const askedAndMissed = Boolean(first || last || dob);
+      const misses = askedAndMissed
+        ? noteGateRefusal(str(input.call_sid), LOOKUP_TOOL, IDENTITY_MISS)
+        : gateRefusalsSoFar(str(input.call_sid), LOOKUP_TOOL, IDENTITY_MISS);
+      if (misses >= LOOKUP_MISS_LIMIT) {
+        // PHI-free: a count and a SID. The marker line for the after-number.
+        console.info(`[TOOLS] lookup_patient: identity miss #${misses} on ${str(input.call_sid)} — the identity ask is spent, telling the model to file with what it has`);
+        return {
+          success: true,
+          found: false,
+          lookup_misses: misses,
+          message:
+            'No record found under those details. That is fine — I will take the request ' +
+            'as given and the team will match it to the chart.',
+          fix:
+            `This is identity miss number ${misses} on this call. Do NOT ask the caller for ` +
+            'their name or date of birth again, and do not look them up again with different ' +
+            'spellings. Take the request and file it now with the details they gave — the ' +
+            'filing tool does not require a match.',
+        };
+      }
       return {
         success: true,
         found: false,
+        lookup_misses: misses,
         message:
           'No record found. They may be new, or calling from a different number. ' +
           'Ask for their name and date of birth if you have not already.',
+        ...(askedAndMissed
+          ? {
+              fix:
+                'That name and date of birth matched nobody on file. You may ask ONCE more — ' +
+                'have them spell the last name, and give the date of birth as month, then day, ' +
+                'then year — then look them up again. If that also misses, do not ask a third ' +
+                'time: take the request and file it with what they gave.',
+            }
+          : {}),
       };
     }
 
@@ -162,14 +523,187 @@ registerTool({
     //
     // So the office is resolved against what the QUEUE accepts, and the raw
     // most-recent stays available but is clearly labelled.
-    const usualOffice = await mostRecentAcceptable(seen, queue);
+    const usualOffice = await mostRecentAcceptable(seen, queue, deadlineAt);
 
     // A phone number can carry more than one person, and a surname carries
     // whole families. The service reports which case this was, and the agent
     // needs it because it changes what may be SAID: an uncertain match is one
     // real person's record, but it is a guess among several, so the name must
     // be confirmed and the history must not be read back.
-    const certain = resolved.identity?.unique !== false;
+    const uniqueMatch = resolved.identity?.unique !== false;
+
+    /**
+     * A NAME-ONLY HIT IS NOT AN IDENTITY, AND THE TOOL SAYS SO NOW.
+     *
+     * `identity_is_certain` used to mean only "the match was unique". But
+     * `lookupPatient` falls back from name+DOB to the PHONE NUMBER and then to
+     * the NAME ALONE, and a lone Smith on file is unique — so a name-only hit
+     * on a common surname came back `found: true, identity_is_certain: true`,
+     * and it is somebody else's chart.
+     *
+     * Nothing stopped that except six lines of prompt telling the model to
+     * distrust this very field:
+     *
+     *   "THEN CHECK matched_by BEFORE YOU BELIEVE IT ... If matched_by is not
+     *    name_and_dob, treat it as NOT FOUND: say nothing about their
+     *    appointments, read no history back"
+     *
+     * A safety rule that holds only while the model obeys an instruction is
+     * not a safety rule. The check belongs here, where it cannot be talked
+     * out of, and the prompt lines it replaces are deleted (task #25 — the
+     * queue prompts carry workarounds written for a model that needed them).
+     *
+     * `phone` from the SCHEDULE stays certain: it is the one field nobody
+     * mis-transcribed, and that rung only matches a number written on this
+     * person's own appointment record.
+     *
+     * `phone` FROM THE PERSON BASE DOES NOT, and that distinction is new.
+     * Codex P1 on PR #292. This PR made `matchedBy: 'phone'` mean two
+     * different claims: the schedule rung above, and a caller-ID hit in a
+     * 915,843-row person base. The second one establishes only who OWNS the
+     * number — a family member on the household phone, a reassigned number
+     * and a spoofed caller ID all look identical to it — and the PersonID
+     * join now hands that answer a full visit history, office and provider.
+     * The queue prompts ask for name and date of birth only when this flag is
+     * false, so leaving it true is a PHI disclosure gated on nothing.
+     *
+     * It also contradicts Rule Zero, written the same day: MATCH, then
+     * VALIDATE — "a phone number is a candidate to CONFIRM, never an
+     * identity". The service says which kind it is via `identityUnconfirmed`.
+     *
+     * THE LESSON, since it is one CLAUDE.md already names: a change that
+     * widens what a value MEANS invalidates the sentence that justified how
+     * it was treated. I widened `matchedBy: 'phone'` and left the comment
+     * above it standing.
+     *
+     * THE DATE STILL GOES INTO THE MAP. v11 already wrote the chart date
+     * from pre-context; stripping it here was Bug A (24 calls on 2026-09-14)
+     * — an empty person-base write overwrote a full one. The name guard on
+     * `verifiedDobFor` IS the confirmation (a caller who says "no, that's my
+     * father" is not filed under that name). We do not invent a date, and we
+     * do not promote `certain: false` to `true`.
+     */
+    const certain =
+      uniqueMatch &&
+      resolved.matchedBy !== 'name' &&
+      resolved.matchedBy !== 'dob' &&
+      !resolved.identityUnconfirmed;
+
+    /**
+     * PASS THE RECORD ALONG — operator instruction, 2026-09-01.
+     *
+     * The service has already returned this patient's date of birth in
+     * `patientData`, and nothing carried it the twenty lines to the filing
+     * tool. So the agent asked for a date of birth the process was holding,
+     * and when the caller could not give it the request was lost: 45 calls
+     * refused for a date of birth in fourteen days, 23 of them for a patient
+     * this tool had already identified.
+     *
+     * A unique match is remembered, including an unconfirmed caller-ID hit.
+     * It is only ever read back for the same name — see verifiedIdentity.ts.
+     * `certain` stays false until something else confirms; the name guard
+     * is what lets a filing tool inherit the chart date.
+     */
+    /**
+     * DELIBERATELY `uniqueMatch`, NOT `certain` — do not "tidy" this to the
+     * stricter flag above.
+     *
+     * This carry-forward is the operator's 2026-09-01 fix: it recovered 45
+     * calls in a fortnight that were refused for a date of birth the process
+     * was already holding, 23 of them for a patient this tool had identified.
+     * Narrowing it to `certain` would drop every phone-matched caller back
+     * into that gate and undo the fix.
+     *
+     * It stays safe on its own terms: `verifiedDobFor` only ever reads a
+     * remembered date back for the SAME NAME, so a unique phone match carries
+     * that person's date of birth and nobody else's.
+     *
+     * The remaining hazard is a unique NAME-ONLY match banking a date of birth
+     * for a caller who is not on file. It is pre-existing, it is invisible in
+     * the data today — `matched_by` was never recorded on the timeline, so
+     * 2,819 lookups in fourteen days say nothing about how often this happens
+     * — and BACKEND_HANDOFF forbids changing the ticket path on a number
+     * nobody can measure. That is why `matched_by` joins the recorded outcome
+     * below rather than being fixed blind here.
+     */
+    /**
+     * WHAT THE WRITE DID, carried onto this tool's own recorded outcome.
+     *
+     * Undefined when the branch was not taken at all, which is itself the
+     * answer to one of the two questions the v58 probe could not separate: a
+     * `storeSize: 0` row beside `identity_write: undefined` says the write was
+     * never reached, and beside `refused_sid` / `refused_name` it says which
+     * guard turned it away. See docs/observatory/SPEC-20260923.md.
+     */
+    let identityWrite: string | undefined;
+    if (uniqueMatch) {
+      identityWrite = rememberVerifiedIdentity(str(input.call_sid), {
+        firstName: resolved.patientData?.firstName,
+        lastName: resolved.patientData?.lastName,
+        // What makes the downgrade guard provable rather than name-based.
+        personId: resolved.patientData?.personId,
+        /**
+         * THE CHART DATE, WHEN THE UNIQUE HIT HAD ONE. Until v26 this
+         * stripped `dateOfBirth` on `identityUnconfirmed` (the person-base
+         * phone rung). That write then replaced the v11 pre-context entry
+         * and erased a date the process already held — Bug A.
+         *
+         * The name guard on `verifiedDobFor` is the confirmation. Storing a
+         * date the unique hit actually returned is not inventing one. We
+         * still do not set `certain: true` here. A non-unique match never
+         * reaches this branch.
+         */
+        ...(resolved.patientData?.dateOfBirth
+          ? { dateOfBirth: resolved.patientData.dateOfBirth }
+          : {}),
+        /**
+         * The office this queue routes on, carried rather than only spoken.
+         *
+         * It is computed twenty lines up and returned below as `usual_office`,
+         * and until now that return value was the ONLY copy — so the filing
+         * tool depended on the model relaying it back, which is the same
+         * dependency that made `date_of_birth` arrive as "(none)" on 61 of 61
+         * refusals. `null` when the history holds no office this queue can
+         * use, which the store drops rather than writes.
+         */
+        ...(usualOffice ? { usualOffice } : {}),
+        // The same `certain` reported to the model as `identity_is_certain`.
+        // It was computed twenty lines up and then dropped here, so a
+        // name-only hit was stored as though it were a verified identity
+        // (Codex, PR #268 round 3).
+        certain,
+      });
+    } else {
+      /**
+       * AN AMBIGUOUS ANSWER MUST NOT LEAVE A CONFIDENT ONE STANDING.
+       *
+       * Codex P1 on PR #291. There was no `else` here at all, so a call that
+       * matched uniquely early and then came back ambiguous kept the FIRST
+       * entry with its `certain: true` intact — and every reader answered
+       * from a result this tool had just stopped believing. The office made
+       * it reachable: `usualOfficeFor` leans on `certain` precisely because
+       * an office string cannot be checked against the ticket, and `certain`
+       * was stale.
+       *
+       * Scoped to the SAME NAME on purpose — see `forgetIfSameName`. Clearing
+       * on every ambiguous lookup would discard a good identification the
+       * moment the model ran a vaguer second search, and that entry is what
+       * carries the date of birth past the gate that cost 53 of 75 calls.
+       */
+      const dropped = forgetIfSameName(
+        str(input.call_sid),
+        resolved.patientData?.firstName,
+        resolved.patientData?.lastName,
+      );
+      if (dropped) {
+        // No name and no office: the fact that a call went ambiguous is not
+        // PHI, and the count is what this line is for.
+        console.info(
+          '[TOOLS] lookup_patient: this call went ambiguous on a name we had ' +
+            'already verified — forgetting the earlier match',
+        );
+      }
+    }
 
     return {
       success: true,
@@ -177,15 +711,24 @@ registerTool({
       patient_name: resolved.patientName,
       matched_by: resolved.matchedBy,
       identity_is_certain: certain,
+      // The verdict of the carry-forward write, allow-listed in toolTimeline so
+      // it is SQL rather than a console line. A fixed word from a closed set,
+      // never caller data.
+      ...(identityWrite ? { identity_write: identityWrite } : {}),
       ...(certain
         ? {}
         : {
-            identity_warning:
-              `This ${phone && !first ? 'phone number' : 'name'} matches ` +
-              `${resolved.identity?.candidateCount} different people on file, and what follows ` +
-              `is only the most recently seen of them. Ask for their full name and date of ` +
-              `birth before using any of it, and do not read their history back until they ` +
-              `confirm who they are.`,
+            identity_warning: resolved.identityUnconfirmed
+              ? 'This is the person our records show for the number they are calling from, but ' +
+                'nobody has confirmed the CALLER is that person — a family member, a reassigned ' +
+                'number or a withheld caller ID all look like this. Ask for their full name and ' +
+                'date of birth before using any of it, and do not read their history back until ' +
+                'they confirm who they are.'
+              : `This ${phone && !first ? 'phone number' : 'name'} matches ` +
+                `${resolved.identity?.candidateCount} different people on file, and what follows ` +
+                `is only the most recently seen of them. Ask for their full name and date of ` +
+                `birth before using any of it, and do not read their history back until they ` +
+                `confirm who they are.`,
           }),
       // The field this queue routes on.
       usual_clinic: usualOffice,
@@ -208,15 +751,95 @@ registerTool({
 
 // ---------------------------------------------------------------- where
 
+const RESOLVE_TOOL = 'resolve_location';
+
+/**
+ * HOW MANY TIMES ONE CALL MAY BE ASKED WHICH OFFICE, BEFORE THE ASK IS A LOOP.
+ *
+ * Two, matching optical's filing gate: the first refusal is a question, the
+ * second is the caller having another go, and a third has stopped being either.
+ *
+ * Measured on the grok runtime, 2026-09-03 to 2026-09-10: `resolve_location`
+ * refused `spoken_location` 144 times across 66 calls, and ten calls reached
+ * the 40-dispatch tool ceiling with this tool running 30-35 times. On the
+ * eleven optical calls carrying two or more `location` refusals it averaged
+ * 19-25 SUCCESSES and filed nothing at all — 0 of 11 — while the 61 calls that
+ * took the filing gate's escape after a single refusal filed 53.
+ *
+ * The exit is deliberately NOT a refusal and NOT a guess. It hands the
+ * caller's own words back with `resolved: false, verified: false`, which is
+ * the same shape this tool already returns when the Console directory is not
+ * configured. `file_*_ticket` then applies its OWN escape (`gateAttempts`,
+ * the 2026-09-01 operator ruling) and takes the request unassigned at high
+ * priority rather than losing it.
+ */
+const RESOLVE_ASK_LIMIT = 2;
+
+/** Per-call fact: this call has already printed the exhausted marker. */
+const RESOLVE_ASK_SPENT = 'resolve_location:ask_spent';
+
+/** The caller has been asked as often as this call is allowed to ask. */
+function officeAskSpent(callSid: string | undefined): boolean {
+  return gateRefusalsSoFar(callSid, RESOLVE_TOOL, 'spoken_location') >= RESOLVE_ASK_LIMIT;
+}
+
+/**
+ * The caller's words, carried on unverified. Never invented, never a guess —
+ * `resolved: false` is the tool saying plainly that it could not place this.
+ */
+function unresolvedPassthrough(callSid: string | undefined, spoken: string): ToolResult {
+  /**
+   * A LIVE COUNTER OF CALLS, AND IT HAS TO BE ONE PER CALL TO BE THAT.
+   *
+   * This is the after-control for the whole change, so it is worth saying why
+   * it is guarded. Printed unconditionally, it fired on every invocation
+   * rather than every call — and the model may keep calling this tool after
+   * the limit, which is the very loop being fixed. One 30-call loop printed
+   * about 28 lines, so `grep -c` would have reported ~28 exhausted CALLS and
+   * the after-number would have been inflated by the failure it exists to
+   * detect. Found by Codex on PR #282; the tests hold it at one.
+   *
+   * `unresolvedPassthrough` is only reachable once `officeAskSpent` is true,
+   * and that needs a real Twilio SID — `gateRefusalsSoFar` returns 0 for a
+   * sentinel — so there is always a key to dedupe on.
+   *
+   * The CallSid is on the line deliberately: it makes the count distinct and
+   * a single call traceable. No caller words are logged — a spoken office
+   * name is the caller's own speech and this line is not the place for it.
+   */
+  if (!callFactNoted(callSid, RESOLVE_ASK_SPENT)) {
+    noteCallFact(callSid, RESOLVE_ASK_SPENT);
+    console.info(
+      `[RESOLVE LOCATION] the office ask is spent on ${callSid} — passing the ` +
+        "caller's words through unverified so the filing tool can take the request",
+    );
+  }
+  return { success: true, resolved: false, location: spoken, verified: false, ask_exhausted: true };
+}
+
 registerTool({
   name: 'resolve_location',
   layer: 'agent',
   timeoutMs: 4000,
+  /**
+   * "BEFORE YOU FILE A TICKET" WAS READ AS "ALWAYS", AND IT COST 14 CALLS.
+   *
+   * 2026-09-03: this tool was called with NO ARGUMENT 34 times across 16 calls.
+   * `spoken_location` is in `required`, so validateInput refused every one
+   * before the handler ran — and only 5 of those 16 calls went on to file, the
+   * worst recovery rate of any gate that day.
+   *
+   * The old wording named a MOMENT ("before you file") and never named a
+   * PRECONDITION, so a model with nothing to resolve called it anyway, on
+   * schedule, and burnt a turn asking a question standing instruction 10
+   * forbids — "never ask a patient where our offices are".
+   */
   description:
-    'Turn what the caller said about an office into the real office name. Call it ' +
-    'with their words — "the Encinitas one", "Azul Vision Redlands" — before you ' +
-    'file a ticket. A ticket without a location is harder to route, so if this ' +
-    'cannot resolve it, ask the caller which office they visit.',
+    'Turn what the caller said about an office into the real office name — ' +
+    '"the Encinitas one", "Azul Vision Redlands". ONLY call this when the caller ' +
+    'has actually named a place; there is nothing to resolve otherwise, and ' +
+    'calling it empty just wastes a turn. If they have not named one, use the ' +
+    'office already on their record instead.',
   input_schema: {
     type: 'object',
     properties: {
@@ -227,6 +850,7 @@ registerTool({
   handler: async (input): Promise<ToolResult> => {
     const queue = input.queue as ToolQueue | undefined;
     const spoken = str(input.spoken_location);
+    const callSid = str(input.call_sid);
     const { sanitizeLocationName } = await import('../services/ticketFieldSanitizers');
     const cleaned = sanitizeLocationName(spoken);
     if (!cleaned.value) {
@@ -269,13 +893,56 @@ registerTool({
        * and the queue prompts already tell it that a tool asking for something
        * is not a fault.
        */
+      // BOUNDED. Refusing forever is what turned this into a 35-call well.
+      if (officeAskSpent(callSid)) return unresolvedPassthrough(callSid, cleaned.value);
+      noteGateRefusal(callSid, RESOLVE_TOOL, 'spoken_location');
       return missing(
         ['spoken_location'],
-        `I'm not finding an office by that name — which city is the office in?`,
+        // See opticalTools' matching refusal: every queue prompt that uses
+        // resolve_location forbids asking which city an office is in.
+        `I'm not finding an office by that name — which of our offices do you usually visit?`,
       );
     }
 
     const usable = acceptsFacility(queue, hit.facilityKind);
+
+    /**
+     * THE WRONG KIND OF PLACE IS A REFUSAL, NOT A SUCCESS.
+     *
+     * The `!hit` branch above already learned this and says so at length: an
+     * advisory `message` inside a `success: true` envelope tells the model the
+     * call WORKED, so it has no reason to change anything and every reason to
+     * try again. That fix stopped at the branch above. This one — an office
+     * found, but a surgery centre named on the optical line — kept returning
+     * success with a message, and it is the branch the 2026-09-10 ceiling
+     * calls ran through: `resolve_location` x35, every one reporting success,
+     * while `file_optical_ticket` refused for `location` beside it.
+     *
+     * Bounded like its sibling, so the refusal cannot become the same well.
+     */
+    if (!usable) {
+      const wrongKind =
+        `${hit.canonical} is a ${hit.facilityKind?.replace('_', ' ')}, not an ` +
+        `${facilityWord(queue)}. ` + askWhichOffice(queue);
+      if (officeAskSpent(callSid)) return unresolvedPassthrough(callSid, cleaned.value);
+      noteGateRefusal(callSid, RESOLVE_TOOL, 'spoken_location');
+      // The ENVELOPE changes; the diagnostic fields do not. Callers read
+      // `usable_for_this_queue` to explain the refusal, and dropping it here
+      // would trade one loop for a silent one.
+      // Typed as the refusal PLUS diagnostics: `MissingFields` is closed, and
+      // widening it would stop catching a misspelt `missingFields` everywhere
+      // else. The intersection keeps that check where it matters and admits
+      // the extra fields only here.
+      const refusal: MissingFields & Record<string, unknown> = {
+        ...missing(['spoken_location'], wrongKind),
+        resolved: false,
+        canonical_name: hit.canonical,
+        facility_kind: hit.facilityKind,
+        usable_for_this_queue: false,
+        is_optical_office: false,
+      };
+      return refusal;
+    }
 
     // `location` is the form the RECEIVER stores, not the form the mirror does.
     //
@@ -304,16 +971,11 @@ registerTool({
       location: fileable,
       canonical_name: hit.canonical,
       facility_kind: hit.facilityKind,
-      usable_for_this_queue: usable,
+      // Always true by the time we reach here: an unusable facility refused
+      // above. Kept in the payload because callers read it.
+      usable_for_this_queue: true,
       // Kept for existing Optical callers, which read this name.
       is_optical_office: hit.facilityKind === 'clinic' || hit.facilityKind == null,
-      ...(usable
-        ? {}
-        : {
-            message:
-              `${hit.canonical} is a ${hit.facilityKind?.replace('_', ' ')}, not an ` +
-              `${facilityWord(queue)}. ` + askWhichOffice(queue),
-          }),
     };
   },
 });
@@ -363,9 +1025,11 @@ export function str(v: unknown): string {
  * those sentinels would key on the literal string instead of the call, so a
  * second caller's retry could read back a stranger's ticket number.
  */
-export function isTwilioCallSid(v: string | undefined | null): v is string {
-  return typeof v === 'string' && /^CA[0-9a-f]{32}$/i.test(v);
-}
+// The definition moved to `./callSid` so `gateAttempts` and `verifiedIdentity`
+// can validate their map keys without importing this module (which pulls in
+// the registry and every queue tool). Re-exported here so the four filing
+// tools keep their single import line and there is still ONE definition.
+export { isTwilioCallSid } from './callSid';
 
 // Re-exported so the four queue tools only need one import line from here,
 // not a second import path into `utils/phone.ts`. See that file for what it
@@ -383,24 +1047,88 @@ export { normalizePhone } from '../utils/phone';
  * guess beats blocking the call, and `resolve_location` will catch it before a
  * ticket is filed.
  */
-async function mostRecentAcceptable(
+export async function mostRecentAcceptable(
   locations: string[],
   queue: ToolQueue | undefined,
+  deadlineAt?: number,
 ): Promise<string | null> {
   if (locations.length === 0) return null;
-  const { lookupLocation, isDirectoryConfigured } = await import('../services/consoleDirectory');
-  if (!isDirectoryConfigured()) return locations[0];
 
-  for (const name of locations) {
-    try {
-      const hit = await lookupLocation(name);
-      // An unknown location is more likely an office we have not mirrored than
-      // a wrong one, so it is not disqualified here — resolve_location is the
-      // gate that matters.
-      if (!hit || acceptsFacility(queue, hit.facilityKind)) return name;
-    } catch {
-      return locations[0];
+  /**
+   * THE LAST UNBOUNDED AWAIT BEFORE THE TOOL ANSWERS.
+   *
+   * Codex P1 round 3 on PR #292. `lookupLocation` reads a cached snapshot, but
+   * a COLD OR STALE one triggers a refresh with a 5s connection timeout — and
+   * this is a LOOP, one lookup per past location. The 250ms margin covers
+   * building the result, not a database round trip, so `runTool`'s race can
+   * still fire here and discard an identity the join went to some trouble to
+   * preserve.
+   *
+   * MY CHANGE MADE THIS REACHABLE, which is why it belongs in this PR rather
+   * than in #68. Before the PersonID join a mirror-identified caller had NO
+   * past locations, so this returned `null` immediately; now they have several
+   * and the loop runs. The join created the population that pays this cost.
+   *
+   * Out of time falls back to `locations[0]` — the raw most-recent office —
+   * which is exactly what this function already does when the directory is
+   * unconfigured or a lookup throws. A known fallback, not a new behaviour:
+   * the office is unrefined, `resolve_location` is still the gate that
+   * matters, and the caller keeps their identity.
+   */
+  const remaining = deadlineAt === undefined ? Infinity : deadlineAt - Date.now();
+  if (remaining <= 0) return locations[0];
+
+  const refine = async (): Promise<string | null> => {
+    const { lookupLocation, isDirectoryConfigured } = await import('../services/consoleDirectory');
+    if (!isDirectoryConfigured()) return locations[0];
+
+    for (const name of locations) {
+      try {
+        const hit = await lookupLocation(name);
+        // An unknown location is more likely an office we have not mirrored
+        // than a wrong one, so it is not disqualified here — resolve_location
+        // is the gate that matters.
+        if (!hit || acceptsFacility(queue, hit.facilityKind)) return name;
+      } catch {
+        return locations[0];
+      }
     }
+    return null;
+  };
+
+  if (remaining === Infinity) return refine();
+
+  /**
+   * CAPPED, not merely pre-checked. Checking the clock BEFORE each lookup
+   * bounds nothing: the stall happens INSIDE one call, so the check that
+   * matters has to be able to interrupt it. Same shape as the PersonID join —
+   * a race, because the catch below only ever covered rejections.
+   */
+  /**
+   * THE LOSING TIMER MUST BE CLEARED. Codex P2 on `ec45286`, and it is the kind
+   * of bug this repo has been burned by twice: an instrument that fires when
+   * nothing is wrong. Left dangling, the timer runs seconds AFTER the tool has
+   * already answered — on every ordinary call, including the cached-directory
+   * and unconfigured-directory paths — and logs "ran out of tool budget" for a
+   * lookup that did not. That line is meant to be a live counter of a real
+   * failure; firing it on success makes it count nothing. It also holds the
+   * closure alive until the deadline.
+   */
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      refine(),
+      new Promise<string | null>((resolve) => {
+        timer = setTimeout(() => {
+          console.warn(
+            '[TOOLS] lookup_patient: the office refinement ran out of tool budget — ' +
+              'using the most recent office unrefined',
+          );
+          resolve(locations[0]);
+        }, remaining);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
   }
-  return null;
 }

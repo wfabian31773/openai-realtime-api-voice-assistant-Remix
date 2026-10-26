@@ -12,7 +12,13 @@
  * `lunchClosure.test.ts`, which pins it in both directions.
  */
 import { describe, expect, it } from 'vitest';
-import { resolveHandoffDestination, resolvePcpDialSequence } from './handoffPolicy';
+import {
+  resolveClinicalTransferNumber,
+  resolveHandoffDestination,
+  preferredCallbackNumber,
+  resolvePcpDialSequence,
+  urgentTransferFailureLine,
+} from './handoffPolicy';
 import { PCP_CALL_PURPOSES } from '../pcp/policy';
 
 const QUEUE = '+17149564300';
@@ -62,6 +68,31 @@ describe('slug-aware handoff policy', () => {
  * reaches Twilio verbatim and fails the dial mid-call, so normalize at the boundary.
  */
 describe('destination normalization', () => {
+  it('always selects the dedicated no-IVR destination for the production no-IVR agent', () => {
+    expect(resolveClinicalTransferNumber({
+      agentSlug: 'no-ivr',
+      clinicalNumber: '+15550000001',
+      noIvrNumber: '845-531-7471',
+    })).toBe('+18455317471');
+  });
+
+  it('does not apply the no-IVR destination to another agent or the dev test line', () => {
+    for (const agentSlug of ['after-hours', 'azul-scheduling', 'dev-no-ivr']) {
+      expect(resolveClinicalTransferNumber({
+        agentSlug,
+        clinicalNumber: '+15550000001',
+        noIvrNumber: '+18455317471',
+      })).toBe('+15550000001');
+    }
+  });
+
+  it('fails closed when the dedicated no-IVR destination is missing', () => {
+    expect(resolveClinicalTransferNumber({
+      agentSlug: 'no-ivr',
+      clinicalNumber: '+15550000001',
+    })).toBeUndefined();
+  });
+
   it('accepts the PCP queue however it was written', () => {
     for (const written of ['714-956-4300', '(714) 956-4300', '7149564300', '1-714-956-4300', ' +17149564300 ']) {
       expect(resolvePcpDialSequence({ mode: 'queue', queueNumber: written, agentDids: [] }))
@@ -124,5 +155,54 @@ describe('PCP transfer eligibility tracks the purpose table', () => {
   it('still fails closed on an unknown caller type', () => {
     expect(resolveHandoffDestination({ agentSlug: 'pcp', lunchClosure: false, callerType: 'not_a_purpose', pcpNumber: QUEUE }))
       .toEqual({ allowed: false, reason: 'pcp_reason_not_allowed' });
+  });
+});
+
+describe('what an urgent caller is told when the transfer fails outright', () => {
+  it('never promises a callback — operator ruling 2026-08-30', () => {
+    // Backing a promise means filing a ticket and awaiting it before speaking,
+    // which leaves an urgent caller in silence while it completes. The ruling
+    // was to drop the promise, not to buy it with dead air.
+    const line = urgentTransferFailureLine();
+    expect(line).not.toMatch(/call you back/i);
+    expect(line).not.toMatch(/on-call team has your request/i);
+    expect(line).not.toMatch(/will (call|contact|reach)/i);
+  });
+
+  it('never tells the caller to call us — standing instruction 10', () => {
+    const line = urgentTransferFailureLine();
+    expect(line).not.toMatch(/call (us )?back/i);
+    expect(line).not.toMatch(/try again later/i);
+    expect(line).not.toMatch(/business hours/i);
+  });
+
+  it('still gives the caller the one route that always works', () => {
+    expect(urgentTransferFailureLine()).toMatch(/nine one one/);
+  });
+});
+
+describe('which number a promised callback is filed against', () => {
+  const CALLER_ID = '+16265551212';
+
+  it('prefers the number the patient asked to be reached on', () => {
+    expect(preferredCallbackNumber({ collected: '714-956-4300', callerId: CALLER_ID }))
+      .toBe('+17149564300');
+  });
+
+  it('keeps caller ID when the collected number is a fragment', () => {
+    // "555-1234" is seven digits: toE164 cannot place it, so it comes back
+    // without a '+'. Filing it would replace a dialable number with one that
+    // is not, on a path that just promised to call this person back.
+    expect(preferredCallbackNumber({ collected: '555-1234', callerId: CALLER_ID }))
+      .toBe(CALLER_ID);
+  });
+
+  it('keeps caller ID when nothing was collected', () => {
+    expect(preferredCallbackNumber({ collected: undefined, callerId: CALLER_ID })).toBe(CALLER_ID);
+    expect(preferredCallbackNumber({ collected: '   ', callerId: CALLER_ID })).toBe(CALLER_ID);
+  });
+
+  it('returns nothing when neither is usable, rather than a fragment', () => {
+    expect(preferredCallbackNumber({ collected: '1234', callerId: null })).toBeUndefined();
   });
 });

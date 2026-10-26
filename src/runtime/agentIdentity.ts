@@ -1,0 +1,209 @@
+/**
+ * WHY A CALL_LOGS ROW NEEDS agent_id AND NOT JUST agent_used.
+ *
+ * Measured 2026-09-04 on the Operations Hub, over every call since 09-01:
+ *
+ *   pipeline            calls   rows carrying agent_id
+ *   old core (SIP)        1315   1315  (100%)
+ *   grok runtime           239      0  (NONE)
+ *
+ * The runtime opens its row with the lane slug and nothing else, and the
+ * slug is not what anything reads. Every per-agent report in this app joins
+ * the agents table on the uuid:
+ *
+ *   server/observatory/queries.ts  opsHubAgentScorecards, todayOverview
+ *   server/routes.ts:2281          cost analytics, grouped by agent
+ *   server/routes.ts:2463          quality and sentiment analytics
+ *   server/routes.ts:257           the agents overview
+ *   server/storage.ts:523          "show me this agent's calls"
+ *
+ * So at 15:24:58 UTC on 2026-09-03, the moment optical cut over, it stopped
+ * existing in all five. Not wrong — ABSENT, which is worse, because an
+ * absent lane looks like a quiet lane. That is what the operator meant by
+ * *"the observatory isn't tracking these agents properly"*: the Observatory
+ * is fine, the join key is missing.
+ *
+ * The schema anticipated exactly this and said so at shared/schema.ts:549 —
+ * *"Actual agent slug used ... even if agentId is null"* — but a fallback
+ * nothing implements is not a fallback. Rather than teach five call sites a
+ * second join, the fix is here, at the one place the row is created.
+ *
+ * NOT a lookup per call: the agents table is 13 static rows, so a slug is
+ * resolved once per process and remembered.
+ */
+
+/** Reads the agents table. Injectable so this module is testable without a database. */
+export type AgentIdLookup = (slug: string) => Promise<string | undefined>;
+
+/**
+ * Resolutions so far, as promises rather than values — two calls arriving on
+ * the same lane in the same second must not both query.
+ */
+const cache = new Map<string, Promise<string | undefined>>();
+
+/** Slugs whose marker has already printed. One line per lane, not per call. */
+const announced = new Set<string>();
+
+/** Tests only. Production resolves each slug once for the life of the process. */
+export function resetAgentIdCache(): void {
+  cache.clear();
+  announced.clear();
+}
+
+/**
+ * DEPLOY MARKER, and the line that names the damage if a lane is missing.
+ *
+ * The success line prints once per lane on its first call after a deploy, so
+ * seeing four of them is proof the build is live — the discipline in
+ * CLAUDE.md, "how to tell whether a deploy actually took". Neither line
+ * carries anything but a slug and a uuid; no PHI passes through here.
+ */
+export function agentIdMarker(slug: string, agentId: string | undefined): string {
+  return agentId
+    ? `[AGENT ID] ${slug} -> ${agentId}; call_logs.agent_id will be set on this lane `
+      + `(it was NULL on every runtime call before this build)`
+    : `[AGENT ID] no agents row for slug "${slug}" — call_logs.agent_id stays NULL, so this lane `
+      + `is INVISIBLE in the Observatory scorecard and in every cost and quality report`;
+}
+
+async function defaultLookup(slug: string): Promise<string | undefined> {
+  const [{ db }, { agents }, { eq }] = await Promise.all([
+    import("../../server/db"),
+    import("../../shared/schema"),
+    import("drizzle-orm"),
+  ]);
+  const rows = await db
+    .select({ id: agents.id })
+    .from(agents)
+    .where(eq(agents.slug, slug))
+    .limit(1);
+  return rows[0]?.id;
+}
+
+/**
+ * How long a lookup may take before the call gives up on it.
+ *
+ * A BOUND, NOT A PREFERENCE. Codex found the failure on PR #268: a lookup
+ * that never settles — a wedged connection pool is the ordinary way — was
+ * cached as a pending promise for the life of the process. voiceRuntime's own
+ * deadline stops WAITING for the call row; it does not cancel this, so every
+ * later call on that lane awaited the same dead promise and never reached the
+ * insert at all. The calls still connect, but their row is absent while their
+ * tools run, and an absent row is not a cosmetic loss: flushAzulTimeline
+ * marks its events flushed whether or not a row was there to update, so the
+ * timeline is gone permanently.
+ *
+ * SMALL ON PURPOSE, and the arithmetic is the reason. `voiceRuntime` puts a
+ * 2,000ms deadline on the WHOLE of `openRuntimeCall`, and this lookup runs
+ * before the insert inside it — so every millisecond spent here is a
+ * millisecond the insert does not have. At 1,500ms a slow-but-successful
+ * lookup left 500ms for the insert, and an insert that then missed would
+ * start the agent with no row at all: identity and timeline writes landing on
+ * nothing, permanently, because flushAzulTimeline marks its events flushed
+ * either way (Codex, PR #268 round 6).
+ *
+ * 300ms leaves 1,700ms — more than the insert had before this lookup existed
+ * at all. It is a single indexed select against a thirteen-row table, and it
+ * is cached after the first call on each lane, so the budget is generous for
+ * what it buys. Losing the join key costs a report; losing the row costs the
+ * call's whole timeline, and the row wins every time.
+ */
+export const AGENT_ID_LOOKUP_TIMEOUT_MS = 300;
+
+/**
+ * The agents-table uuid for a lane slug, or undefined when there is no row.
+ *
+ * Never throws and never blocks a call: a caller who cannot be attributed is
+ * still a caller to be answered, and the row is written either way — just
+ * without the join key, exactly as it is today.
+ *
+ * A MISS IS NOT CACHED, and neither is a TIMEOUT. If the slug is absent
+ * because someone has yet to add the agents row, or because the database was
+ * briefly unreachable, the next call must find it once that changes, without
+ * a redeploy — and the marker keeps printing until then, which makes it a
+ * live counter of the gap rather than a single line lost in the boot log.
+ */
+const TIMED_OUT = Symbol("agent-id-lookup-timeout");
+
+/**
+ * Wait for a lookup, but never longer than the bound.
+ *
+ * EVERY caller gets this, not just the one that started the lookup. A second
+ * call arriving on the same lane while the first is still in flight used to
+ * return the cached promise raw — so it inherited the hang the bound exists
+ * to prevent, and the first caller's eviction did nothing for it: it was
+ * already attached (Codex, PR #268 round 2). Its call row then never got
+ * inserted either, which is the failure that loses a whole call's timeline.
+ */
+async function awaitBounded(
+  slug: string,
+  pending: Promise<string | undefined>,
+  timeoutMs: number,
+): Promise<string | undefined | typeof TIMED_OUT> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const raced = await Promise.race([
+    pending,
+    new Promise<typeof TIMED_OUT>((resolve) => {
+      timer = setTimeout(() => resolve(TIMED_OUT), timeoutMs);
+      if (typeof timer.unref === "function") timer.unref();
+    }),
+  ]);
+  if (timer) clearTimeout(timer);
+  return raced;
+}
+
+/** Drop a lookup that blew its deadline, and make sure nobody is left holding it. */
+function abandon(slug: string, pending: Promise<string | undefined>, timeoutMs: number): void {
+  // Only if it is still THE entry — a later caller may already have replaced it.
+  if (cache.get(slug) === pending) cache.delete(slug);
+  // Swallow a later rejection on the orphan: nothing awaits it now, and an
+  // unhandled rejection would take the process down.
+  void pending.catch(() => undefined);
+  console.info(
+    `[AGENT ID] lookup for "${slug}" exceeded ${timeoutMs}ms — this call's row is written ` +
+      `without agent_id and the next call retries; the lane is missing from the Observatory ` +
+      `and every cost and quality report until it succeeds`,
+  );
+}
+
+export async function resolveAgentId(
+  slug: string,
+  lookup: AgentIdLookup = defaultLookup,
+  timeoutMs: number = AGENT_ID_LOOKUP_TIMEOUT_MS,
+): Promise<string | undefined> {
+  const cached = cache.get(slug);
+  if (cached) {
+    // Bounded too. Returning it raw is what let a wedged lookup hang every
+    // later call on the lane even after the first caller gave up.
+    const shared = await awaitBounded(slug, cached, timeoutMs);
+    if (shared === TIMED_OUT) {
+      abandon(slug, cached, timeoutMs);
+      return undefined;
+    }
+    return shared;
+  }
+
+  const pending = (async () => {
+    try {
+      return await lookup(slug);
+    } catch (error) {
+      console.error(`[AGENT ID] could not resolve slug "${slug}":`, error);
+      return undefined;
+    }
+  })();
+  cache.set(slug, pending);
+
+  const raced = await awaitBounded(slug, pending, timeoutMs);
+  if (raced === TIMED_OUT) {
+    abandon(slug, pending, timeoutMs);
+    return undefined;
+  }
+
+  const resolved = raced;
+  if (resolved === undefined) cache.delete(slug);
+  if (resolved === undefined || !announced.has(slug)) {
+    if (resolved !== undefined) announced.add(slug);
+    console.info(agentIdMarker(slug, resolved));
+  }
+  return resolved;
+}

@@ -282,6 +282,19 @@ async function load(): Promise<Snapshot | null> {
 }
 
 /** Current snapshot, refreshing if stale. Never throws; returns null if unavailable. */
+/**
+ * The snapshot ALREADY in memory, or null — never a fetch.
+ *
+ * The voice runtime builds its keyterm list inside a synchronous
+ * `createSession` callback on the call path, where an await would add latency
+ * to every answer for data that is refreshed on a timer anyway. A cold process
+ * answers its first call or two without keyterms and warms up behind them;
+ * that is the right trade against making a caller wait.
+ */
+export function loadedDirectory(): Snapshot | null {
+  return snapshot;
+}
+
 export async function getDirectory(): Promise<Snapshot | null> {
   if (snapshot && Date.now() - snapshot.loadedAt < REFRESH_MS) return snapshot;
   if (inFlight) return inFlight;
@@ -317,10 +330,188 @@ export async function lookupProvider(raw: string): Promise<DirectoryProvider | n
   return dir.providers.get(directoryKey(raw)) ?? null;
 }
 
+/**
+ * THE OFFICE NAMED INSIDE A SENTENCE, when the whole sentence is not a key.
+ *
+ * Measured 2026-09-11 against the real mirror: every BARE office name
+ * resolves — "Riverside", "Long Beach", "Pasadena", "Mission Viejo" — and
+ * every one with a word around it misses, because the lookup above is a map
+ * get on the whole utterance.
+ *
+ *   "Riverside"                        -> Azul Vision Riverside Latham
+ *   "downtown Riverside"               -> nothing
+ *   "Mission Viejo"                    -> Azul Vision Mission Viejo
+ *   "Mission Viejo, by the Crown Valley" -> nothing
+ *
+ * The second of those is a real 2026-09-09 call (CAa28557a1…): the agent asked
+ * which office five times, twice said "I'm not finding an office by that
+ * name", and the caller had said "downtown Riverside" — a string containing
+ * the exact key that resolves on its own.
+ *
+ * THIS IS NOT A FUZZY MATCHER, and the file header's objection to one still
+ * stands. Nothing new becomes matchable: a candidate must already BE a key,
+ * exact, on whole-token boundaries. All this removes is the requirement that
+ * the caller say the key and NOTHING ELSE.
+ *
+ * One rule keeps it from routing anyone wrong, and it is SUBSUMPTION, not
+ * length. The first draft used longest-by-characters and its own test caught
+ * it sending "the willow office in long beach" to the Long Beach CLINIC,
+ * because "long beach" (10 chars) is longer than "willow" (6) — and the
+ * SHORTER key was the specific one. Length is not specificity.
+ *
+ *   A MATCH SUBSUMED BY ANOTHER DROPS OUT. "long beach willow" contains
+ *   "long beach", so the city match is a fragment of the office match and
+ *   only Willow survives. Same for "long beach memorial", a hospital that is
+ *   also a key: a caller naming it is not sent to our clinic.
+ *
+ *   TWO SURVIVORS REFUSE. Disjoint matches — "the willow office in long
+ *   beach", or "is it Upland or Covina" — mean the phrase names more than
+ *   one office and nothing here can tell which they want. Returning null
+ *   costs the caller one more question; the wrong office costs them their
+ *   request, because optical and surgery both self-assign by it.
+ *
+ * It runs ONLY after the exact lookup has already missed, so by construction
+ * it cannot change any answer the directory gives today — the same shape as
+ * `readDigitStringDate` in dobParts.ts, and for the same reason.
+ *
+ * THERE IS NO MINIMUM KEY LENGTH, deliberately. The first draft carried one
+ * and mutation testing showed it earns nothing: removing it failed no test,
+ * because the whole-token boundaries below already do the work it was
+ * imagined to do — a short key can only match a whole word, and a real office
+ * with a short name SHOULD match it. Same finding, same reasoning, as the
+ * 6-or-8 length check recorded in `readDigitStringDate`.
+ *
+ * STREET NAMES ARE NOT COVERED and deliberately so. "the office down on
+ * Redondo" is Azul Vision Willow, and "Redondo" appears only in
+ * `address_line1`, which `load()` does not read. Adding it is a separate
+ * change with a real hazard: Foothill Blvd is MONROVIA, so a caller saying
+ * "Pasadena over on Foothill" names two offices and a street match scored
+ * outside its city would route them to the wrong one.
+ */
+/**
+ * Keys that may be matched EXACTLY but never INSIDE a longer phrase.
+ *
+ * "downtown" is an alias for DTLA, and it is a word people attach to other
+ * cities. The real call this whole change exists for said "downtown
+ * Riverside" — which contains BOTH the DTLA alias and the Riverside key, so
+ * containment saw two offices and refused, turning the one caller we know
+ * the right answer for into a refusal. Said alone, "downtown" still resolves
+ * to DTLA through the exact lookup above; it simply stops voting when it is
+ * one word inside a sentence.
+ *
+ * Keep this list to words that are GENERIC LOCATIONAL ENGLISH. A distinctive
+ * name that happens to be short — "willow", "latham", "magan" — belongs in
+ * containment: those collide with nothing.
+ */
+const NEVER_MATCH_INSIDE = new Set(['downtown']);
+
+/**
+ * Places that CONTAIN one of our office names and are not that office.
+ *
+ * Codex P1 on PR #286, landing after it had merged. Containment matches on
+ * whole-token boundaries, which stops `Uplander` and `Pasadenas` and does
+ * nothing whatever about a separate word in front: "the office in West
+ * Covina" matched `covina` and routed the caller to our Covina office. West
+ * Covina is a different city of ~106,000 people, next door to ours.
+ *
+ * THIS IS A REGRESSION #286 INTRODUCED. Before it the exact lookup missed and
+ * the caller was asked again; after it they were sent somewhere wrong.
+ * Optical self-assigns by location, so the cost is the request, not a
+ * question. The old header comment even named the hazard — "covina sits
+ * inside west covina, which is a different city" — and then tested only
+ * plural suffixes, so it read as coverage while covering nothing.
+ *
+ * THE FIRST FIX FOR THIS WAS WRONG AND THE MEASUREMENT IS WHY IT IS NOT HERE.
+ * The obvious rule is "a cardinal direction in front voids the match". Over
+ * 30 days / 10,715 transcripts to 2026-09-11, every direction-plus-office
+ * phrase callers actually said:
+ *
+ *   west covina      13   A DIFFERENT CITY          voiding helps
+ *   south pasadena    4   A DIFFERENT CITY          voiding helps
+ *   south anaheim     5   part of Anaheim           voiding LOSES the office
+ *   west redlands     4   part of Redlands          voiding LOSES the office
+ *   east willow       2   our own office's street   voiding LOSES the office
+ *   south riverside   2   part of Riverside         voiding LOSES the office
+ *   north glendale / north long beach / north indio / south glendora
+ *                     4   all parts of those cities voiding LOSES the office
+ *
+ * Seventeen misroutes prevented, seventeen fresh refusals created, and the
+ * refusals fall on callers who named a real office correctly. That is a wash
+ * paid for by the wrong people, so the generic rule is refused and the two
+ * real cities are named. Small and explicit, like the alias table above it —
+ * a caller does not say "West Covina" because they are being vague.
+ *
+ * Suffixes are not here for the same reason: "san gabriel valley" and
+ * "anaheim hills" appear on ZERO calls in that window. Add an entry when a
+ * transcript produces one, not when a map suggests one.
+ */
+const NOT_OUR_CITY = ['west covina', 'south pasadena'];
+
+/**
+ * Blank out any foreign city before the office keys get a vote, so the office
+ * name buried inside it is never seen.
+ *
+ * Masking rather than rejecting, because a caller who says both — "not West
+ * Covina, Covina" — has named our office cleanly once and must still be
+ * understood. Only the qualified mention disappears; a bare one beside it
+ * still resolves.
+ */
+function maskForeignCities(hay: string): string {
+  let out = hay;
+  for (const city of NOT_OUR_CITY) {
+    const needle = ` ${city} `;
+    // A loop, not a single replace: two mentions share the space between
+    // them, so one pass leaves the second standing.
+    while (out.includes(needle)) out = out.replace(needle, ' \u0000 ');
+  }
+  return out;
+}
+
+function locationNamedInside(
+  dir: Snapshot,
+  spoken: string,
+): DirectoryLocation | null {
+  const hay = maskForeignCities(
+    ` ${directoryKey(spoken).replace(/[^a-z0-9]+/g, ' ').replace(/\s+/g, ' ').trim()} `,
+  );
+  if (hay.length <= 2) return null;
+
+  const matches: Array<{ needle: string; entry: DirectoryLocation }> = [];
+  for (const [key, entry] of dir.locations) {
+    if (NEVER_MATCH_INSIDE.has(key)) continue;
+    const needle = ` ${key.replace(/[^a-z0-9]+/g, ' ').replace(/\s+/g, ' ').trim()} `;
+    if (needle.length <= 2 || !hay.includes(needle)) continue;
+    matches.push({ needle, entry });
+  }
+  if (matches.length === 0) return null;
+
+  // Drop every match that is a fragment of a longer one. Two keys can point
+  // at the SAME office (a bare name and an alias), so compare entries, not
+  // just strings, before calling anything ambiguous.
+  const survivors = matches.filter(
+    (m) => !matches.some(
+      (o) => o !== m
+        && o.needle.length > m.needle.length
+        && o.needle.includes(m.needle.trim()),
+    ),
+  );
+
+  const distinct = new Set(survivors.map((s) => s.entry));
+  if (distinct.size === 1) return survivors[0].entry;
+
+  console.info(
+    `[DIRECTORY] ${distinct.size} different offices are named in that phrase — ` +
+      'refusing rather than guessing; the caller gets asked once more',
+  );
+  return null;
+}
+
 export async function lookupLocation(raw: string): Promise<DirectoryLocation | null> {
   const dir = await getDirectory();
   if (!dir) return null;
-  return dir.locations.get(directoryKey(raw)) ?? null;
+  const exact = dir.locations.get(directoryKey(raw));
+  if (exact) return exact;
+  return locationNamedInside(dir, raw);
 }
 
 /** Test seam. Also lets a deploy force a refresh without a restart. */

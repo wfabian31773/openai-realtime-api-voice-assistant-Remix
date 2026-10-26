@@ -26,6 +26,9 @@
  * missing a location to 1.9%. Prompt instructions alone never achieved that.
  */
 
+import type { DobCarry } from './verifiedIdentity';
+import { dobCarry } from './verifiedIdentity';
+
 /** A tool refused to run because the caller has not supplied enough. */
 export interface MissingFields {
   success: false;
@@ -33,6 +36,33 @@ export interface MissingFields {
   missingFields: string[];
   /** One sentence the agent can say more or less verbatim. */
   message: string;
+  /**
+   * WHAT THE MODEL MUST DO DIFFERENTLY. Never spoken to the caller.
+   *
+   * `message` answers "what do I say?". This answers "what did I get wrong?",
+   * and the two are not the same question — which is what made the
+   * date-of-birth gate TERMINAL on 2026-09-03: 23 calls hit it and ZERO
+   * recovered, while the optical location gate was hit 11 times and 9 of them
+   * went on to file.
+   *
+   * The difference is that a location refusal is fixable by the caller and a
+   * date-of-birth refusal was not. The model was omitting the `date_of_birth`
+   * argument entirely (dobShape recorded "(none)" on every observed refusal),
+   * heard "I did not catch that date of birth", said that to the caller, the
+   * caller repeated the date, and the model sent the same argument-less
+   * payload again. No answer the caller could give would ever satisfy it.
+   *
+   * So a refusal now carries the model's own mistake back to it. Populate this
+   * only where the tool can tell WHY — an absent argument and an unreadable one
+   * need opposite corrections, and saying "ask again" for the first is the
+   * loop.
+   */
+  fix?: string;
+  /**
+   * WHY inherit did not fill `date_of_birth`. PHI-free closed enum.
+   * Only set when this refusal withholds that field. See `dobCarry`.
+   */
+  carry?: DobCarry;
 }
 
 export interface ToolFailure {
@@ -124,9 +154,101 @@ export function manifest(includePrimitives = false): Array<{
     }));
 }
 
-/** Shorthand for the refusal every tool uses. */
-export function missing(fields: string[], message: string): MissingFields {
-  return { success: false, missingFields: fields, message };
+/**
+ * Shorthand for the refusal every tool uses.
+ *
+ * `message` is spoken. `fix` is read by the model and never said out loud —
+ * see MissingFields. A tool that can tell WHY it refused should always pass
+ * it: the refusal the model cannot diagnose is the refusal it repeats.
+ */
+export function missing(fields: string[], message: string, fix?: string): MissingFields {
+  return { success: false, missingFields: fields, message, ...(fix ? { fix } : {}) };
+}
+
+/**
+ * The date-of-birth refusal, with the carry enum attached.
+ *
+ * Same spoken `message` / model `fix` as `missing(['date_of_birth'], …)`.
+ * The extra field is the instrument: it says why `verifiedDobFor` did not
+ * fill the gate, without writing a name or a date.
+ */
+export function refuseDob(
+  callSid: string | undefined,
+  firstName: string,
+  lastName: string,
+  message: string,
+  fix?: string,
+): MissingFields {
+  const carry = dobCarry(callSid, firstName, lastName);
+  console.info(`[DOB] carry ${carry}`);
+  return { ...missing(['date_of_birth'], message, fix), carry };
+}
+
+/**
+ * THE DATE-OF-BIRTH REFUSAL'S COPY, IN ONE PLACE, SPLIT THE WAY `fix` ALREADY IS.
+ *
+ * Two branches, and until 2026-09-16 they shared a spoken line that was true of
+ * only one of them. `fix` — the channel the MODEL reads — has always been
+ * correctly split, and its own wording says why:
+ *
+ *   "You did not send the date_of_birth argument at all — that, not the caller,
+ *    is why this was refused. ... Only say the message if they have not given
+ *    it yet."
+ *
+ * The spoken `message` was the SAME string on both: *"I did not catch that —
+ * may I please have the date of birth..."*. On the branch where the model
+ * simply omitted the argument, nobody mis-heard anything and on most calls the
+ * caller had never been asked at all — so we opened by blaming them for a turn
+ * that never happened. That is the v18 shape exactly: the branch defined by one
+ * thing happening spoke the sentence belonging to the other.
+ *
+ * AND THE OMITTED BRANCH IS THE COMMON ONE. CLAUDE.md records `dobShape` as
+ * `(none)` on 93 of 93 refusals on 2026-09-14 — the model omits the field
+ * essentially always — so the wrong line was very nearly the only one callers
+ * ever heard.
+ *
+ * MEASURED BEFORE CHANGING IT, across every lane that files a ticket:
+ * 2026-09-15 carried it on 25 substantive calls (surgery 11, pcp 8, optical 4,
+ * tech 2) and 10 of those ended with NO ticket of any provenance. A worked
+ * example is `CA48a7238f2381ae130d73c9f9221181bb` (pcp, 2026-09-16): a records
+ * request with purpose, caller, organisation, patient, delivery method, fax
+ * number and title all captured — then this line, then the caller hung up, and
+ * nothing filed.
+ *
+ * WHAT IS DELIBERATELY UNCHANGED: the unreadable branch. When the model DID
+ * send something and the parser refused it, "I did not catch that" is a fair
+ * description of what happened and it stays word for word. Only the branch
+ * that never had an answer to mis-hear is reworded, and it keeps the format in
+ * the question (RULE ZERO 2b) by saying the same sentence minus the false
+ * preamble — the smallest edit that stops it lying.
+ *
+ * ONE COPY, NOT FOUR. `opticalTools`, `surgeryTools`, `techTools` and
+ * `medicalRecordsTools` each held a byte-identical literal and an identical
+ * `fix` ternary. That is the shape this repo has already paid for twice — the
+ * `explicitAsk.ts` noun lists that drifted apart and cost the operator his own
+ * transfer, and the recognition block that was written four times and
+ * contradicted itself. Four copies of a sentence is four chances to fix three
+ * of them.
+ */
+export function dobRefusalCopy(dob: string | undefined): { message: string; fix: string } {
+  return dob
+    ? {
+        message:
+          'I did not catch that — may I please have the date of birth, starting with the month, '
+          + 'then the day, then the year?',
+        fix:
+          'The date_of_birth you sent could not be read as a date. Say the message to the caller, '
+          + 'then call this tool again with exactly what they say next.',
+      }
+    : {
+        message:
+          'May I please have the date of birth, starting with the month, then the day, then the year?',
+        fix:
+          'You did not send the date_of_birth argument at all — that, not the caller, is why this '
+          + 'was refused. If they have ALREADY given you a date of birth, call this tool again '
+          + 'right now with date_of_birth set to what they said, and do NOT ask them again. Only '
+          + 'say the message if they have not given it yet.',
+      };
 }
 
 /**

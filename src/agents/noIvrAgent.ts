@@ -14,16 +14,87 @@ import { URGENT_SYMPTOMS, getCurrentDateTimeContext } from "../config/knowledgeB
 // The three presentations the symptom list above cannot express, because two
 // of its entries are conditionals written as prose. See afterHoursTriage.ts.
 import { renderTriagePrompt } from "../tools/afterHoursTriage";
-import { recordingExecute } from "../services/toolTimeline";
-import { buildCompactLocationReference } from "../config/azulVisionKnowledge";
+import { recordingExecute, recordToolEvent, flushAzulTimeline } from "../services/toolTimeline";
+import { keepFieldDescriptions } from "../services/toolFieldDescriptions";
+// The queue lanes' "ask once, then file anyway" ruling (operator, 2026-09-04),
+// which this lane never reached because it builds create_ticket by hand.
+import { decideDobEscape, dobStatusNote, dobEscapeMarker, type DobStatus } from "../tools/dobEscape";
+// One retry per call on a ticket-API timeout; keyed on the call SID like every
+// other bounded ask in this repo.
+import { gateRefusalsSoFar, noteGateRefusal } from "../tools/gateAttempts";
+import { missingFieldsFromRefusal, spokenMissingFields } from "../services/missingFieldsRefusal";
+import { AZUL_VISION_KNOWLEDGE, buildCompactLocationReference } from "../config/azulVisionKnowledge";
+import { buildNoIvrGrokBody, noIvrPromptShape } from "./noIvrPromptForGrok";
 import { getNextBusinessDayContext } from "../utils/timeAware";
 import { type TriageOutcome } from "../config/afterHoursTicketing";
 import { storage } from "../../server/storage";
 import { escalationDetailsMap } from "../services/escalationStore";
 import { judgeEscalation } from "../services/afterHoursEscalationGate";
+import {
+  afterHoursRouteNote,
+  POST_PROCEDURE_REQUEST,
+  routeAfterHoursTicket,
+} from "../services/afterHoursRouting";
+import { AFTER_HOURS_DEPARTMENT_ID as AFTER_HOURS_ROUTE_DEPARTMENT_ID } from "../tools/afterHoursTaxonomy";
+import { nameOrStandIn, STAND_IN_NAME_NOTE } from "../services/standInName";
 import { corroborate } from "../services/symptomCorroboration";
 import { markCallConcluded } from "../services/callConclusion";
 import { callMetadataForDB } from "../services/callMetadataStore";
+
+/**
+ * AN EMAIL PREFERENCE WITHOUT AN ADDRESS IS A QUESTION, NOT A FAILURE.
+ *
+ * `CA42f5b35d3924b8a1e5e66c00ee927742`, no-ivr, 2026-09-27 20:48 UTC, 217 s,
+ * 14 caller lines. A reschedule request; the caller asked to be reached by
+ * email and spelled the address out on the call. The model called
+ * `create_ticket` with `preferred_contact: "email"` and no `email` argument.
+ * The ticketing app requires `patientEmail` when the contact method is email
+ * (its `voice-agent-ticket-service.ts`), refused the POST with HTTP 400, and
+ * the refusal reached this handler in the app's own spelling — "Missing
+ * required fields" — which nothing here matched. So it fell to the generic
+ * branch and the agent said *"I'm experiencing a technical issue on my end
+ * right now. I have your information and our team will call you back."* No
+ * ticket of any provenance exists for that call.
+ *
+ * 14-day control, `voice_agent_api_logs`: of the no-ivr POSTs carrying an
+ * email preference, 8 were accepted (every one with an address) and 2 were
+ * refused for `patientEmail`. Small, and each one is a request lost after a
+ * caller has spent three minutes on the phone.
+ *
+ * THE ASK IS BOUNDED THE WAY THE DATE-OF-BIRTH ASK IS: once per call, keyed on
+ * the CallSid through `gateAttempts`, and on the next attempt the request
+ * FILES — for a phone callback at the number already on it, with a note for
+ * the staffer. A missing email must never hold a request; the callback number
+ * is required on every call and the app accepts a phone preference with it.
+ * The caller's words never reach the note; the recording has them.
+ *
+ * THE NOTE SAYS WHAT THE CODE KNOWS AND NO MORE (Codex P2, #335): on the
+ * corpus call the caller DID spell the address out, and the model sent no
+ * `email` argument anyway. This handler cannot tell "the caller never gave
+ * one" from "the model dropped it", so the note says no address reached the
+ * TICKET and points the staffer at the recording, rather than claiming the
+ * address was absent from the call — a claim that was false on the very call
+ * this was written for, and that would have sent a staffer past an address
+ * sitting in the recording.
+ */
+export const EMAIL_ASK_ONCE =
+  "Missing required information: email address. The caller asked to be reached by EMAIL " +
+  "and no address was sent, so the request cannot be filed that way yet. Ask ONCE, in " +
+  "these words: \"What email address should we use? Please spell it out for me, letter " +
+  "by letter.\" Then call create_ticket again with the address in the email field. If " +
+  "they would rather not, or cannot, call create_ticket again with preferred_contact set " +
+  "to \"phone\" — the callback number is already on the request. Nothing has failed: do " +
+  "not apologise and do not say there was a problem.";
+
+export const EMAIL_ESCAPE_NOTE =
+  "CONTACT PREFERENCE: the caller asked to be reached by EMAIL, but no address reached " +
+  "this ticket — filed for a PHONE callback at the number on this ticket. The caller may " +
+  "well have given the address on the call; the recording has what they said.";
+
+export function emailEscapeMarker(callSid: string): string {
+  return `[EMAIL ESCAPE] create_ticket: asked once and still no email address reached the tool — `
+    + `filing for a phone callback instead (${callSid})`;
+}
 
 const CONTEXT_LOOKUP_TIMEOUT_MS = 2000;
 
@@ -63,6 +134,9 @@ export interface NoIvrAgentMetadata {
   precontext?: import('./azulSchedulingAgent').AzulPrecontext;
   /** Live transcript up to the moment of filing — lets the ticketing app generate its staff-facing summary at creation instead of waiting for post-call enrichment. */
   getTranscript?: () => string;
+  /** Set by the Grok runtime (voiceRuntime.ts) and by nothing else. Picks the
+   *  prompt body written for that pipeline — see noIvrPromptForGrok.ts. */
+  pipeline?: 'runtime';
 }
 
 // Operator mandate 2026-07-25: department-by-call-content, urgents-only in
@@ -72,6 +146,235 @@ export interface NoIvrAgentMetadata {
 // the triage category it collects, leaving routing to keyword guessing. A
 // "Request Type:" header pins the unambiguous cases so the app's PRIORITY-1
 // database lookup wins. Labels must match the afterHoursAgent map exactly.
+/**
+ * A REFUSED ESCALATION FILES THE TICKET.
+ *
+ * Operator, 2026-09-29: "fix the no-ivr refused escalation so it files a
+ * ticket." The corpus is CA05daa62fd6c7156a322ea4810d590923 (00:09 UTC that
+ * morning, 417 seconds, 26 caller lines): escalate_to_human was refused twice
+ * by the gate in under 3 ms, the agent then said TWICE that it would connect
+ * the caller with the on-call team, create_ticket never ran, and the call
+ * ended on terminate_call with no ticket of any provenance. Over the fourteen
+ * days before it, 9 after-hours calls had an escalation refused and 3 of them
+ * left no ticket — every one of the 3 spoke a promise to connect and never
+ * called create_ticket. The refusal's directive already SAID "call
+ * create_ticket now"; a directive is a sentence the model may obey. So the
+ * refusal now files the ticket itself, from the escalation's own arguments
+ * plus caller ID, and its result tells the model what has ALREADY happened
+ * and what to say — never a transfer it cannot make.
+ *
+ * WHAT IT FILES: the reason the model gave (with symptoms and provider lines
+ * where it gave them), the name and date of birth if collected, the callback
+ * number or the caller ID, and a note in additionalDetails saying the
+ * escalation was asked for and not sanctioned. Never at the head of
+ * reasonForCalling: the `Request Type:` header rule (operator, 2026-07-25).
+ * On `symptoms_not_stated_by_caller` the reason is NOT the model's — that
+ * arm exists because the model wrote symptoms the caller never said, and
+ * the on-call provider acts on what is written — so the ticket says the
+ * claims were uncorroborated and points a staffer at the recording.
+ *
+ * WHAT IT DOES NOT DO: it does not make the escalation succeed (the three
+ * cases are the operator's, unchanged), it does not page anybody, and it
+ * does not open a second ticket beside one the model already filed —
+ * submitSimplifiedTicket sends `idempotencyKey: call-<sid>`, so a call that
+ * already holds a ticket gets that ticket's number back. A later
+ * create_ticket on the same call returns the same cached ticket; the
+ * post-call sync then carries the whole transcript onto it, so nothing the
+ * caller says afterwards is lost to the team.
+ *
+ * WHAT IT SAYS: the spoken line carries no promise of a connection and names
+ * where the callback goes — the number they gave, this number, or a question
+ * for one when neither is known (a withheld caller ID arrives as a WORD, the
+ * v40 lesson, so "known" means ten digits and not a truthy string).
+ */
+export type RefusedEscalationCode =
+  | 'communication_failure'
+  | 'administrative_request'
+  | 'symptoms_not_stated_by_caller'
+  | 'post_op_medication'
+  | 'provider_not_stated_by_caller';
+
+export const REFUSED_ESCALATION_WHY: Record<RefusedEscalationCode, string> = {
+  communication_failure:
+    'not being able to collect a detail is not an emergency, and this line does not transfer for it',
+  administrative_request:
+    'this is a routine request however urgently the caller phrased it, and this line transfers only for ' +
+    'an eye emergency or a clinician calling about a patient',
+  symptoms_not_stated_by_caller:
+    'the caller did not describe the symptoms you wrote, and the on-call provider acts on what you write',
+  post_op_medication:
+    'a post-operative medication or prescription problem with no new symptom is filed URGENT for the After ' +
+    'Hours team rather than transferred (operator ruling 2026-10-02)',
+  provider_not_stated_by_caller:
+    'the caller has not said they are a doctor, a nurse, or calling from a doctor\'s office, hospital, ER, ' +
+    'lab or clinic, and this line transfers a provider call only when the caller says so (operator rulings ' +
+    '2026-10-19 and 2026-10-21)',
+};
+
+export const REFUSED_ESCALATION_LINE = {
+  gave:
+    "I'm not able to put you through to the on-call team for this, but I've logged your message and " +
+    'our team will call you back at the number you gave me.',
+  callerId:
+    "I'm not able to put you through to the on-call team for this, but I've logged your message and " +
+    'our team will call you back at this number.',
+  none:
+    "I'm not able to put you through to the on-call team for this, but I've logged your message. " +
+    'What is the best number to reach you on?',
+} as const;
+
+export function refusedEscalationNote(code: RefusedEscalationCode): string {
+  return (
+    `ESCALATION REQUESTED, NOT SANCTIONED (${code}): the caller asked for the on-call team. ` +
+    'This line transfers only for an eye emergency or a clinician calling about a patient. ' +
+    'Filed automatically at the refusal so the request is not lost.'
+  );
+}
+
+/** Ten digits or nothing — "anonymous" is a word, not a number (v40). */
+export function knownNumber(value: string | undefined): boolean {
+  return (value ?? '').replace(/\D/g, '').length >= 10;
+}
+
+export type RefusedEscalationFiling =
+  | { ok: true; ticketNumber?: string }
+  | { ok: false; error?: string };
+
+/**
+ * The tool result for a refused escalation. `message` is this agent's
+ * model-facing channel (its quoted sentences are what gets spoken — see
+ * noIvrFalseFailure.test.ts's control), so it carries the instruction, the
+ * line to say, and never a promise of a connection.
+ */
+export function refusedEscalationResult(args: {
+  code: RefusedEscalationCode;
+  filed: RefusedEscalationFiling;
+  number: 'gave' | 'callerId' | 'none';
+}): {
+  success: false;
+  refused: RefusedEscalationCode;
+  ticket_filed: boolean;
+  ticketNumber?: string;
+  message: string;
+} {
+  const { code, filed, number } = args;
+  const why = REFUSED_ESCALATION_WHY[code];
+  const noPromise =
+    'Do NOT say you will connect, transfer or put anyone through — no transfer is happening.';
+  const onceMore =
+    code === 'symptoms_not_stated_by_caller'
+      ? ' Ask ONE question at a time and wait for a real answer; if the caller then describes an ' +
+        'emergency in their own words — vision loss, severe pain, an injury, chemical exposure — ' +
+        'you may call escalate_to_human once more.'
+      : code === 'post_op_medication'
+        ? ' If the caller then describes a NEW SYMPTOM in their own words — pain, a change in vision, ' +
+          'redness, swelling, discharge — that is post-surgical trouble and you may call ' +
+          'escalate_to_human once more with the symptom as they said it.'
+        : code === 'provider_not_stated_by_caller'
+          ? ' BEFORE you say that line, ask ONE question: "Are you calling from a doctor\'s office, a ' +
+            'hospital, a clinic or a laboratory, and which one?" If they name one — a laboratory reporting ' +
+            'results counts — do not say the line: call ' +
+            'escalate_to_human once more with what they told you. Asking for a doctor by name, or for an ' +
+            'operator, does not make someone a provider.'
+          : '';
+  if (filed.ok) {
+    const ticket = filed.ticketNumber ? ` (${filed.ticketNumber})` : '';
+    const afterLine =
+      number === 'none'
+        ? ' When they give a number, read it back one digit at a time; it reaches the team with ' +
+          "this call's transcript."
+        : '';
+    return {
+      success: false,
+      refused: code,
+      ticket_filed: true,
+      ...(filed.ticketNumber ? { ticketNumber: filed.ticketNumber } : {}),
+      message:
+        `Escalation is not available: ${why}. A ticket has ALREADY been filed for this caller with ` +
+        `what you gave me${ticket}. Do NOT call create_ticket for this request. ${noPromise} ` +
+        `Say: "${REFUSED_ESCALATION_LINE[number]}"${afterLine} Then ask if there is anything else.` +
+        onceMore,
+    };
+  }
+  const error = filed.error ? ` (${filed.error})` : '';
+  return {
+    success: false,
+    refused: code,
+    ticket_filed: false,
+    message:
+      `Escalation is not available: ${why}. The ticket could NOT be filed automatically${error}, so ` +
+      `nothing is on record yet. ${noPromise} Call create_ticket now with whatever you have, and ` +
+      'only after it returns success=true tell the caller their message is going to the team and ' +
+      'someone will call them back.' +
+      onceMore,
+  };
+}
+
+/**
+ * THE URGENT TRANSFER RECORD BESIDE A REFUSED-ESCALATION TICKET (Codex P1 on
+ * #339, 2026-09-29).
+ *
+ * A refusal files under the call's own key, and that key is what makes a later
+ * `create_ticket` return the same ticket. It would ALSO have made the
+ * sanctioned path's urgent record return it: `submitSimplifiedTicket`'s
+ * per-call claim hands back the existing number without posting. So a caller
+ * refused first (a symptom the agent invented, a detail it could not collect)
+ * who then described the emergency in their own words and WAS connected would
+ * have ended the call with ONE ticket — the refusal's, reading NOT SANCTIONED
+ * at normal priority, with no word that a transfer happened. Measured
+ * 2026-09-29 over thirty days of no-ivr: 26 calls had an escalation refused,
+ * and 3 of them went on to a sanctioned transfer on the same call.
+ *
+ * So the record files BESIDE the earlier ticket, under its own key, and says
+ * what the earlier one still is: on the uncorroborated-symptoms arm the
+ * model's own sentence, now superseded; on the other two arms the caller's
+ * request, which still stands. Keyed on the call id like the escalation map;
+ * ticket numbers and codes only, never a caller's words.
+ */
+export interface RefusedEscalationRecord {
+  ticketNumber: string;
+  code: RefusedEscalationCode;
+}
+
+const refusedEscalationTicketByCall = new Map<string, RefusedEscalationRecord>();
+const REFUSED_ESCALATION_TICKETS_CAP = 500;
+
+export function rememberRefusedEscalationTicket(callId: string, record: RefusedEscalationRecord): void {
+  if (refusedEscalationTicketByCall.size >= REFUSED_ESCALATION_TICKETS_CAP) {
+    const oldest = refusedEscalationTicketByCall.keys().next().value;
+    if (oldest !== undefined) refusedEscalationTicketByCall.delete(oldest);
+  }
+  refusedEscalationTicketByCall.set(callId, record);
+}
+
+export function refusedEscalationTicketFor(callId: string): RefusedEscalationRecord | undefined {
+  return refusedEscalationTicketByCall.get(callId);
+}
+
+/** What the urgent record says about the ticket the refusal already filed. */
+export function transferRecordCrossReference(earlier: RefusedEscalationRecord): string {
+  const t = earlier.ticketNumber;
+  if (earlier.code === 'symptoms_not_stated_by_caller') {
+    return (
+      `SUPERSEDES ${t}: that ticket was filed automatically when a first escalation attempt was refused ` +
+      'because the symptoms the agent wrote were not corroborated. The caller then described the emergency ' +
+      `in their own words and WAS connected to the on-call provider. No callback is needed on ${t}.`
+    );
+  }
+  if (earlier.code === 'provider_not_stated_by_caller') {
+    return (
+      `SUPERSEDES ${t}: that ticket was filed automatically when a first escalation attempt was refused ` +
+      'because the caller had not yet said they were calling from a provider\'s office or facility. They ' +
+      `then said so and WERE connected to the on-call provider. No callback is needed on ${t}.`
+    );
+  }
+  return (
+    `SEE ALSO ${t}: the caller's own request on this call, filed automatically when a first escalation ` +
+    `attempt was refused (${earlier.code}). That request still stands and should be read with this one; ` +
+    'this ticket records only that the caller was later connected to the on-call provider.'
+  );
+}
+
 const CATEGORY_TO_REQUEST_TYPE: Partial<Record<string, string>> = {
   // Appointment family → Appointment Request (routes per the app's taxonomy).
   new_appointment: 'Appointment Request',
@@ -180,7 +483,17 @@ function toIsoDob(dobString: string): string | undefined {
   return parsed.iso;
 }
 
-function buildNoIvrSystemPrompt(
+/**
+ * A schedule context that was matched on the calling number alone. The
+ * pre-call lookup is always by phone (`lookupByPhone`), and the person-base
+ * rung marks the same thing as `identityUnconfirmed`; either means nobody
+ * has confirmed the caller is the patient on file.
+ */
+export function phoneMatchIsUnconfirmed(context: PatientScheduleContext): boolean {
+  return context.matchedBy === 'phone' || context.identityUnconfirmed === true;
+}
+
+export function buildNoIvrSystemPrompt(
   metadata: NoIvrAgentMetadata,
   scheduleContext?: PatientScheduleContext,
   variant: NoIvrAgentVariant = 'production',
@@ -200,14 +513,14 @@ function buildNoIvrSystemPrompt(
 ===== CALLER-ID PRE-CONTEXT (a hint, NOT verification) =====
 This phone number matches ONE person on file: first name "${pc.firstName}".
 
-- YOUR GREETING IS NOT OPTIONAL AND MUST NOT BE SHORTENED. Deliver it IN FULL,
-  to the end, before you say anything else. It carries the two things this
-  line exists to say: that offices are closed, and that a medical emergency
-  means calling 911 — plus the recording disclosure. On 2026-08-01 12:21 UTC
-  this block caused the greeting to be cut off after the words "Thank you for
-  calling", so a caller was never told to dial 911 in an emergency and was
-  never told the call was recorded. That must never happen again. DO NOT open
-  with a name confirmation. DO NOT speak before the greeting finishes.
+- DO NOT OPEN WITH A NAME CONFIRMATION, AND DO NOT SPEAK OVER THE GREETING.
+  It carries the two things this line exists to say: that offices are closed,
+  and that a medical emergency means calling 911 — plus the recording
+  disclosure. On 2026-08-01 12:21 UTC this block caused the greeting to be cut
+  off after the words "Thank you for calling", so a caller was never told to
+  dial 911 in an emergency and was never told the call was recorded. That must
+  never happen again. Never shorten it, never paraphrase it, and never say it
+  a second time.
 - This is an AFTER-HOURS MESSAGE-TAKING line, not a check-in desk. Do not
   open with an identity interview. Let the caller say why they are calling
   first, and handle urgency first if there is any.
@@ -230,7 +543,47 @@ This phone number matches ONE person on file: first name "${pc.firstName}".
   }
 
   let scheduleContextSection = "";
-  if (scheduleContext?.patientFound) {
+  if (scheduleContext?.patientFound && phoneMatchIsUnconfirmed(scheduleContext)) {
+    /**
+     * A PHONE MATCH IS A CANDIDATE, NOT AN IDENTITY — so the appointment
+     * stays OUT of the prompt.
+     *
+     * Measured 2026-09-17 over nine days of substantive no-ivr calls (365):
+     * the agent read an appointment on 81, and on 44 of those it did so
+     * BEFORE any identity question at all — "I just wanna know my
+     * appointment" answered with the date, time, office and doctor of
+     * whoever the schedule matched to the calling number. The section this
+     * replaces put those details in the prompt with "AFTER IDENTITY
+     * CONFIRMED (in Phase 4): You MAY answer" underneath, and three of three
+     * hand-read calls show the model reading the details first and asking
+     * (or never asking) afterwards. A sequencing instruction was not a
+     * gate. Withholding the text is.
+     *
+     * RULE ZERO step 2 and standing instruction 6: several people share a
+     * phone, and an unvalidated candidate is not a match. The identity
+     * standard is Phase 4's own — confirm the name from the schedule, then
+     * the date of birth — and the details come back through lookup_schedule
+     * once that is done, from the tool result rather than from memory.
+     */
+    const firstName = (scheduleContext.patientName ?? '').trim().split(/\s+/)[0] || 'the patient on file';
+    console.log('[No-IVR Agent] PHONE MATCH IS A CANDIDATE — appointment details withheld from the prompt until the name and date of birth are confirmed');
+    scheduleContextSection = `
+===== PATIENT CONTEXT (PHONE MATCH — UNCONFIRMED, a candidate only) =====
+This caller's number matched a patient record for a patient whose first name is ${firstName}.
+That is a CANDIDATE, not an identity: several people share a phone, and nobody has
+confirmed that the CALLER is that person. The appointment details are deliberately
+NOT loaded here.
+
+TO ANSWER ANY QUESTION ABOUT AN APPOINTMENT, A VISIT, A DOCTOR OR AN OFFICE:
+1. Confirm identity first — "I was able to pull up a record. Is this for ${firstName}?",
+   then their FULL name in their own words, then their date of birth (month, then
+   day, then year) and read it back.
+2. THEN call lookup_schedule(first_name, last_name, date_of_birth).
+3. Read the appointment from the TOOL RESULT, never from memory.
+If they say no, or are asking about someone else, collect THAT person's full name
+and date of birth and look them up the same way. Never state a date, a time, an
+office or a doctor's name before step 2 has returned.`;
+  } else if (scheduleContext?.patientFound) {
     const formattedSchedule = scheduleLookupService.formatContextForAgent(scheduleContext);
     scheduleContextSection = `
 ===== PATIENT CONTEXT (LOADED - use as reference only) =====
@@ -262,13 +615,14 @@ This is the caller's phone number from caller ID.
 - DO NOT ask "is that correct?" for the callback number during info gathering
 - Only confirm the callback number ONCE - in Phase 5 as part of the final summary
 - Always pass the full 10-digit number: "${callerPhone}"`
-    : "Caller ID not available. You must ask for their full 10-digit callback number.";
+    : "CALLER PHONE: not available from caller ID. You must ask for their full 10-digit callback number.";
 
   // Patient lookup fallback for both production and dev
   const nameDobFallbackSection = `
 ===== MANDATORY SCHEDULE LOOKUP =====
 ⚠️ CRITICAL: You MUST call lookup_schedule when:
-1. No patient record was loaded at call start (PATIENT CONTEXT section is missing), AND
+1. No CONFIRMED patient record was loaded at call start (the PATIENT CONTEXT section is
+   missing, or says the phone match is UNCONFIRMED), AND
 2. You have collected the patient's NAME and DATE OF BIRTH
 
 TRIGGER PHRASES that require lookup_schedule:
@@ -281,8 +635,9 @@ IMMEDIATELY after collecting name+DOB, if caller mentions past visits:
 → WAIT for the result before responding about their history
 → Use the returned last_provider_seen and last_location_seen in your response
 
-Example: Caller says "Wayne Fabian, March 17 1973" and "I want to see the last doctor I saw"
-→ Call lookup_schedule(first_name: "Wayne", last_name: "Fabian", date_of_birth: "03/17/1973")
+Example: caller gives a first name, a last name and a date of birth, then says
+"I want to see the last doctor I saw"
+→ Call lookup_schedule(first_name, last_name, date_of_birth) with what they said
 → If found: "I can see your last visit was with Dr. [provider] at [location]. I'll request that for you."
 → If not found: Follow the PATIENT NOT FOUND RECOVERY steps below.
 
@@ -302,8 +657,9 @@ When name+DOB lookup fails, DO NOT immediately say "I can't find you." Instead:
    - Do NOT attempt another lookup — proceed to collect their request details
    - Create the ticket normally; new patients do not need to be found in the system
 
-⚠️ DOB CLARIFICATION: Always ask for DOB in parts: "starting with the month, then the day, then the year" — this prevents the phone's voice recognition from merging digits together.
-⚠️ PHONE FALLBACK: Always try lookup_schedule(phone: callerPhone) as a fallback when name+DOB fails — the phone number alone can match most existing patients.
+⚠️ ALWAYS ask for the date of birth in parts — "starting with the month, then
+the day, then the year". Said whole, the phone's speech recognition merges the
+digits.
 
 DO NOT say "the team can find it" or "based on your history" - USE THE TOOL to find it yourself!
 `;
@@ -329,12 +685,20 @@ Use check_open_tickets tool before creating new tickets to avoid duplicates.
 If caller has pending tickets, acknowledge them first.
 
 🗣️ LANGUAGE:
-⚠️ ALWAYS greet in ENGLISH first - even if patient name appears Asian, Hispanic, or foreign.
-NEVER assume language from patient name - wait to HEAR the caller speak.
-Detect language from caller's FIRST substantive spoken words (not just "hello" or "hi").
-ONLY switch to Spanish if the caller clearly and unambiguously speaks Spanish. STAY in English for the ENTIRE call for any other language, including French, Chinese, Vietnamese, or any language other than English or Spanish. Any unrecognized, ambiguous, or non-English/non-Spanish utterance MUST default to English — NEVER switch to French, Chinese, Vietnamese, or any other language.
-Once confirmed (Spanish or English), STAY in that language for the ENTIRE call.
-If asked "Do you speak Spanish?" in English → Ask: "Would you like to continue in Spanish?"
+- You speak English and Spanish. Start in English. Never assume a language
+  from a name — read it from the caller's first substantive words (not
+  "hello" or "hi").
+- When the caller speaks Spanish, or asks for Spanish, continue in Spanish for
+  the rest of the call — every question, confirmation and the wait line before
+  create_ticket.
+- Switch only if the caller switches. An English tool result, a medication
+  name, a number or a word you did not catch is not a switch.
+- Keep every tool ARGUMENT in English (names, dates, yes/no) whatever language
+  you are speaking.
+- Any other language — French, Chinese, Vietnamese, unrecognised, ambiguous —
+  say in English that this line can help in English or Spanish, and continue
+  in English.
+- If asked "Do you speak Spanish?" in English → Ask: "Would you like to continue in Spanish?"
 
 🚫 GHOST CALL & ROBOT/SPAM DETECTION — END THESE CALLS, NEVER ESCALATE:
 
@@ -346,11 +710,8 @@ ROBOT/SPAM CALL INDICATORS (any 1 of these = end immediately):
 - Caller produces completely random disconnected words with no coherent meaning across 3+ turns (e.g. "The ceiling" / "Seagulls" / "virus" / "in Michigan" — no sentence structure, no request, no coherence — not just an accent or ESL caller)
 - Audio switches rapidly between 3+ languages with zero coherent message or request
 
-ROBOT/SPAM CALL PROTOCOL:
-1. Say: "We were unable to connect. Goodbye."
-2. Call the terminate_call tool immediately with reason "robot_call"
-3. Do NOT create a ticket
-4. Do NOT escalate to human — EVER
+ROBOT/SPAM PROTOCOL: say "We were unable to connect. Goodbye." then call
+terminate_call with reason "robot_call".
 
 GHOST CALL INDICATORS (any 2+ of these = ghost call):
 - Only heard single syllables: "mm", "uh", "ok", "hi", background noise
@@ -358,15 +719,14 @@ GHOST CALL INDICATORS (any 2+ of these = ghost call):
 - Caller doesn't respond to direct questions
 - Total conversation is just greetings with no substance after 3 prompts
 
-GHOST CALL PROTOCOL:
+GHOST CALL PROTOCOL — three turns, then out:
 1. After first unclear response: "What can I help you with today?"
 2. After second unclear response: "I'm having trouble hearing you. If you need assistance, please call back."
-3. After third unclear response: Say "Take care, goodbye." then call terminate_call tool with reason "ghost_call"
-4. Do NOT create a ticket for ghost calls
-5. Do NOT escalate ghost calls to human — the human agent cannot help someone who isn't communicating
+3. After third unclear response: say "Take care, goodbye." then call terminate_call with reason "ghost_call"
 
-⚠️ NEVER run a ghost call or robot call for more than 2-3 turns — exit and end the call.
-⚠️ Switching between 3+ languages with zero coherent message = robot call → end it.
+FOR BOTH: never create a ticket, and NEVER escalate to a human — not once, not
+ever. A human cannot help someone who is not communicating, and a robocall must
+never wake anyone. Never run either kind of call past 2-3 turns.
 
 `;
 
@@ -379,6 +739,25 @@ If they're calling about the same issue, acknowledge you see their previous requ
 Avoid creating duplicate tickets for the same issue.
 ` : '';
 
+  // THE GROK PIPELINE GETS THE PROMPT WRITTEN FOR IT (v76). Same rulings, the
+  // shape xAI's Prompting Guide prescribes, under half the size; the body
+  // below stays for the OpenAI SIP core until that pipeline is retired.
+  // noIvrPromptShapeForGrok.test.ts holds both bodies to one list of rulings.
+  if (noIvrPromptShape(metadata) === 'grok') {
+    return buildNoIvrGrokBody({
+      versionString,
+      timeContext,
+      nextBusinessDayPhrase: nextBizDay.contextPhrase,
+      phoneContext,
+      callerHistorySection,
+      openTicketsContext,
+      scheduleContextSection,
+      precontextFirstName: pc?.matched && pc.firstName ? pc.firstName : null,
+      urgentSymptomsList: URGENT_SYMPTOMS.symptoms.map((s) => `• ${s}`).join("\n"),
+      triageBlock: renderTriagePrompt(),
+    });
+  }
+
   // PROMPT CACHING: Static content FIRST (cacheable prefix), dynamic context LAST
   return `You are the AFTER-HOURS AGENT for Azul Vision. VERSION: ${versionString}
 
@@ -386,247 +765,237 @@ Avoid creating duplicate tickets for the same issue.
 
 You have an internal checklist to track. Execute these phases IN ORDER. Track your progress silently.
 
-╔══════════════════════════════════════════════════════════════╗
-║  PHASE 1: UNDERSTAND THE REQUEST                              ║
-╠══════════════════════════════════════════════════════════════╣
-║  GOAL: Find out WHY they're calling                           ║
-║  ────────────────────────────────────────────────────────────  ║
-║  IF caller states need: Acknowledge and proceed to Phase 2    ║
-║  IF caller just says "hi": Ask "What can I help you with?"    ║
-║                                                                ║
-║  🟢 SIMPLE QUESTION? (hours, location, fax) →                 ║
-║     Answer directly, ask "Anything else?", END CALL           ║
-║     (Skip all remaining phases - no info collection needed)   ║
-║                                                                ║
-║  🎤 IF CALLER ASKS FOR "VOICEMAIL":                           ║
-║     Many callers expect old-fashioned voicemail systems.      ║
-║     REASSURE THEM: "I'm here to help! This call is being      ║
-║     recorded, and I'll make sure your message gets to the     ║
-║     right person. What would you like us to know?"            ║
-║     Then continue with the workflow to gather their info.     ║
-║                                                                ║
-║  ✓ EXIT when you know the reason OR simple question answered  ║
-╚══════════════════════════════════════════════════════════════╝
+PHASE 1: UNDERSTAND THE REQUEST
+GOAL: Find out WHY they're calling
+IF caller states need: Acknowledge and proceed to Phase 2
+IF caller just says "hi": Ask "What can I help you with?"
 
-╔══════════════════════════════════════════════════════════════╗
-║  PHASE 2: DETECT CALLER TYPE & THIRD-PARTY CALLS             ║
-╠══════════════════════════════════════════════════════════════╣
-║  LISTEN for these phrases (don't ask upfront):                ║
-║                                                                ║
-║  🔴 THIRD-PARTY TRIGGER PHRASES:                              ║
-║     "my mother", "my father", "my husband", "my wife"         ║
-║     "my daughter", "my son", "my child", "my parent"          ║
-║     "calling for [someone's name]", "calling about my..."     ║
-║                                                                ║
-║  IF DETECTED → Confirm: "Are you calling on behalf of         ║
-║                someone else? What is the patient's name?"     ║
-║  → Collect BOTH: Caller's name + Patient's name/DOB           ║
-║                                                                ║
-║  🔴 PROVIDER CALL — IMMEDIATE ESCALATION REQUIRED:            ║
-║  Detect ANY of these signals immediately:                      ║
-║     • Caller says "Dr.", "doctor", "nurse", "NP", "PA"        ║
-║     • "calling from a hospital / clinic / ER / office"        ║
-║     • "I need to page Dr. [name]" / "paging"                  ║
-║     • "peer-to-peer" / "peer to peer"                         ║
-║     • "I'm calling from [medical facility name]"               ║
-║     • Any caller identifying as a healthcare professional      ║
-║                                                                ║
-║  ⚡ DO NOT wait until you have collected all patient info.    ║
-║     The moment you detect a provider call:                     ║
-║     1. Say: "I'll connect you with our on-call team now."     ║
-║     2. Call escalate_to_human(caller_type: "healthcare_       ║
-║        provider") immediately — pass whatever info you have.   ║
-║     Provider calls are time-sensitive — every second matters. ║
-║                                                                ║
-║  🟡 B2B / BUSINESS CALLER (optical lab, referring office,     ║
-║     outside vendor, other clinic or pharmacy):                 ║
-║     "I'm calling from [lab/optical/office]", "this is [name]  ║
-║     at [business]", "we are a lab", "Bartley Optical",        ║
-║     "we need an invoice", "tint density", "lens order"        ║
-║                                                                ║
-║  B2B PROTOCOL — DOB IS OPTIONAL FOR BUSINESS CALLERS:        ║
-║  - Collect: caller name, business name, patient name,         ║
-║    specific request/question, callback number                  ║
-║  - If they don't have patient DOB: that's okay — note it      ║
-║    in the ticket as "DOB not available — B2B inquiry from      ║
-║    [business name]"                                            ║
-║  - DO NOT refuse to help or escalate just because DOB is      ║
-║    missing for B2B callers                                     ║
-║  - DO NOT keep asking for DOB after caller says they don't    ║
-║    have it — accept that and proceed to create the ticket     ║
-║                                                                ║
-║  ✓ EXIT when you know WHO the call is about                   ║
-╚══════════════════════════════════════════════════════════════╝
+🟢 SIMPLE QUESTION? (hours, location, fax) →
+Answer directly, ask "Anything else?", END CALL
+(Skip all remaining phases - no info collection needed)
 
-╔══════════════════════════════════════════════════════════════╗
-║  PHASE 3: ASSESS URGENCY (HANDLE MOST CALLS YOURSELF)         ║
-╠══════════════════════════════════════════════════════════════╣
-║                                                                ║
-║  🚨 ESCALATE — type: healthcare_provider — NO EXCEPTIONS      ║
-║     ANY call from a healthcare provider gets an IMMEDIATE     ║
-║     handoff. Full stop. Do not create a ticket instead.       ║
-║     Doctor • Nurse • NP • PA • Hospital • ER • Clinic •      ║
-║     Medical office • Insurance clinical reviewer •            ║
-║     Pharmacy calling about a patient • Any provider           ║
-║     "paging Dr. X" • "peer-to-peer" • "I need to reach Dr."  ║
-║     → Say: "I'll connect you with our on-call team now."     ║
-║     → Call escalate_to_human immediately with whatever        ║
-║       info you have. Do NOT delay to collect more info.       ║
-║                                                                ║
-║  🚨 ESCALATE — type: patient_urgent_medical                   ║
-║     TRUE MEDICAL EMERGENCIES ONLY:                            ║
-║     "can't see", "blind", "sudden vision loss"                ║
-║     "severe eye pain", "eye injury", "trauma"                 ║
-║     "chemical in eye", "bleeding from eye"                    ║
-║     "flashes + floaters" (together, sudden onset)             ║
-║                                                                ║
-║  ✅ HANDLE YOURSELF (create ticket — do NOT escalate):        ║
-║     • Appointments (confirm, schedule, reschedule, cancel)    ║
-║     • Medication refills, prescription questions              ║
-║     • Billing, insurance, payment questions                   ║
-║     • General questions, office info, directions              ║
-║     • Leave a message FOR a doctor                            ║
-║     • Patient frustration ("I want to talk to someone")       ║
-║     • Follow-up appointments, post-op questions               ║
-║     • "I want to speak to the on-call doctor/person"          ║
-║       → This is a patient preference, NOT an emergency.       ║
-║       → Create a ticket noting they want a callback from      ║
-║         the on-call doctor. Do NOT escalate.                  ║
-║     • Any patient wanting a human without emergency symptoms  ║
-║                                                                ║
-║  ⚠️  PATIENT ASKING FOR ON-CALL / HUMAN = NOT AN EMERGENCY   ║
-║     Respond: "I understand. I can make sure the on-call       ║
-║     doctor receives your message and can call you back.       ║
-║     Let me take down your information."                       ║
-║     Then collect info and create a ticket. Do NOT escalate.  ║
-║                                                                ║
-║  ✓ Log with emit_decision tool (urgent/non-urgent)            ║
-╚══════════════════════════════════════════════════════════════╝
+🎤 IF CALLER ASKS FOR "VOICEMAIL":
+Many callers expect old-fashioned voicemail systems.
+REASSURE THEM: "I'm here to help! This call is being
+recorded, and I'll make sure your message gets to the
+right person. What would you like us to know?"
+Then continue with the workflow to gather their info.
 
-╔══════════════════════════════════════════════════════════════╗
-║  PHASE 4: GATHER & CONFIRM PATIENT INFO                       ║
-╠══════════════════════════════════════════════════════════════╣
-║  REQUIRED FIELDS for any action:                              ║
-║  □ Patient FULL NAME (first AND last in ONE question)         ║
-║  □ Date of birth (REQUIRED for patients; OPTIONAL for B2B)   ║
-║  □ Callback number                                            ║
-║  □ Reason for call                                            ║
-║  □ Preferred contact method (phone, text, or email)           ║
-║  □ Request-specific details (ONLY if caller mentioned them)   ║
-║                                                                ║
-║  ⚠️ B2B CALLERS: If they say they don't have the patient DOB, ║
-║     DO NOT keep asking — proceed with ticket using available  ║
-║     info and note "DOB unavailable — B2B call"               ║
-║                                                                ║
-║  🟢 NAME COLLECTION - EFFICIENT APPROACH:                     ║
-║     Ask: "What is your full name?" (NOT first, then last)     ║
-║     IF schedule data exists: "I was able to pull up a record. ║
-║        Is this for [Name from schedule]?" then get DOB        ║
-║     IF name wrong: "What is your full name?"                  ║
-║                                                                ║
-║  📞 PREFERRED CONTACT METHOD:                                 ║
-║     Ask: "Would you prefer we call, text, or email you back?" ║
-║     Use caller's answer in create_ticket contact_method field ║
-║     IF caller history shows preference, confirm: "Last time   ║
-║        we reached you by [method]. Is that still best?"       ║
-║                                                                ║
-║  🔵 IF THIRD-PARTY CALL:                                      ║
-║     Collect: Caller's name AND Patient's full name/DOB        ║
-║     "And what is YOUR name so we know who to ask for?"        ║
-║                                                                ║
-║  ⚠️  DO NOT assume or add details caller didn't mention!      ║
-║     If they said "appointment" - don't ask about pharmacy     ║
-║     If they said "refill" - then ask about medication/pharmacy║
-║                                                                ║
-║  ✓ EXIT when all required fields are gathered                 ║
-╚══════════════════════════════════════════════════════════════╝
+✓ EXIT when you know the reason OR simple question answered
 
-╔══════════════════════════════════════════════════════════════╗
-║  PHASE 5: FINAL SUMMARY & VALIDATION                          ║
-╠══════════════════════════════════════════════════════════════╣
-║  BEFORE calling create_ticket or escalate_to_human:           ║
-║                                                                ║
-║  STEP 1 - CHECK (silently):                                   ║
-║  ✓ Name? (first and last)                                     ║
-║  ✓ DOB? (month, day, year)                                    ║
-║  ✓ Callback? (full 10-digit number)                           ║
-║  ✓ Reason? (what they need)                                   ║
-║  ✓ Contact preference? (phone, text, or email)                ║
-║  ✓ Details? (medication name, appointment type, etc.)         ║
-║                                                                ║
-║  IF ANY MISSING → Ask naturally: "I just need..."             ║
-║                                                                ║
-║  STEP 2 - ONE FINAL SUMMARY (the ONLY confirmation):          ║
-║  "Alright, I have [Name], date of birth [DOB], callback       ║
-║   [phone], you prefer [contact method], and you need          ║
-║   [reason]. I'll pass this along."                            ║
-║                                                                ║
-║  ⚠️  DO NOT ask "Is that correct?" or "Does that sound right?"║
-║  ⚠️  Just state the summary and proceed to Phase 6            ║
-║  The caller will interrupt if something is wrong              ║
-║                                                                ║
-║  DO NOT PROCEED until all fields are complete!                ║
-╚══════════════════════════════════════════════════════════════╝
+PHASE 2: DETECT CALLER TYPE & THIRD-PARTY CALLS
+LISTEN for these phrases (don't ask upfront):
 
-╔══════════════════════════════════════════════════════════════╗
-║  PHASE 6: TAKE ACTION (CREATE TICKET FOR 99% OF CALLS)         ║
-╠══════════════════════════════════════════════════════════════╣
-║  DEFAULT ACTION → create_ticket (handles all routine calls)    ║
-║  RARE EXCEPTION → escalate_to_human (TRUE emergencies only)    ║
-║                                                                ║
-║  ═══ BEFORE TICKET ═══════════════════════════════════════════ ║
-║  1. Call check_open_tickets to avoid duplicates                ║
-║  2. Then call create_ticket with collected info                ║
-║  3. WAIT for the tool response - it returns success/failure    ║
-║                                                                ║
-║  ═══ AFTER create_ticket TOOL RESPONSE ═══════════════════════ ║
-║  ⚠️ You MUST check the tool response before confirming:        ║
-║                                                                ║
-║  IF tool returns success=true:                                 ║
-║  → Say: "Your request has been submitted. Our [team] will      ║
-║         call you back at [phone]. Anything else?"              ║
-║  → DO NOT read out the ticket number (it's too long)           ║
-║                                                                ║
-║  IF tool returns success=false or error:                       ║
-║  → Say: "I'm sorry, I'm having trouble saving your message.    ║
-║         Let me connect you with our on-call team."             ║
-║  → Then call escalate_to_human immediately                     ║
-║                                                                ║
-║  ❌ NEVER say "request submitted" or "passed your message"     ║
-║     UNLESS the tool returned success=true                      ║
-║                                                                ║
-║  ═══ ESCALATION — EXACTLY THREE CASES, NOTHING ELSE ══════════ ║
-║  1. A provider's office calling about a patient                ║
-║  2. A hospital, ER or urgent care calling about a patient      ║
-║  3. A TRUE eye emergency happening now: vision loss, severe    ║
-║     pain, injury, chemical exposure, flashes or floaters,      ║
-║     post-surgical trouble                                      ║
-║                                                                ║
-║  NOT a transfer, however the caller phrases it:                ║
-║  ❌ "urgent" appointment, refill, glasses, authorization, fax  ║
-║  ❌ billing, insurance, records, office hours                  ║
-║  ❌ you could not hear them, could not get a date of birth,    ║
-║     could not understand the language, they would not answer   ║
-║     → ALL of these are create_ticket with whatever you have.   ║
-║     Filing a partial ticket IS the job. Waking the on-call     ║
-║     provider because you missed a detail is not.               ║
-║                                                                ║
-║  Say: "Based on what you're describing, I want to connect you  ║
-║        with our on-call team right away."                      ║
-║  Then call escalate_to_human — ONCE. Never twice on one call.  ║
-║                                                                ║
-║  ═══ CLOSING (CRITICAL: SAY THIS ONLY ONCE) ════════════════   ║
-║  After SUCCESSFUL ticket: "Your message will be sent to        ║
-║   [staff]. The doctor will receive a full recording.           ║
-║   Anything else?"                                              ║
-║                                                                ║
-║  If caller says no/goodbye/thanks/ok:                         ║
-║   → Give ONE short goodbye: "Great, have a good day!"         ║
-║   → STOP - do NOT repeat ticket details or callback number    ║
-║                                                                ║
-║  ⚠️ ANTI-REPETITION: Once confirmed, NEVER repeat:            ║
-║   - Ticket details  - Callback number  - "We'll contact you"  ║
-╚══════════════════════════════════════════════════════════════╝
+🔴 THIRD-PARTY TRIGGER PHRASES:
+"my mother", "my father", "my husband", "my wife"
+"my daughter", "my son", "my child", "my parent"
+"calling for [someone's name]", "calling about my..."
+
+IF DETECTED → Confirm: "Are you calling on behalf of
+someone else? What is the patient's name?"
+→ Collect BOTH: Caller's name + Patient's name/DOB
+
+🔴 PROVIDER CALL — IMMEDIATE ESCALATION REQUIRED:
+Detect ANY of these signals immediately:
+• Caller says "Dr.", "doctor", "nurse", "NP", "PA"
+• "calling from a hospital / clinic / ER / office"
+• A medical laboratory calling in a patient's results
+("stat labs", "critical result") — not an optical lab
+• "I need to page Dr. [name]" / "paging"
+• "peer-to-peer" / "peer to peer"
+• "I'm calling from [medical facility name]"
+• Any caller identifying as a healthcare professional
+
+⚡ DO NOT wait until you have collected all patient info.
+The moment you detect a provider call:
+1. Say: "I'll connect you with our on-call team now."
+2. Call escalate_to_human(caller_type: "healthcare_
+provider") immediately — pass whatever info you have.
+Provider calls are time-sensitive — every second matters.
+
+🟡 B2B / BUSINESS CALLER (optical lab, referring office,
+outside vendor, other clinic or pharmacy):
+"I'm calling from [optical lab/office]", "this is [name]
+at [business]", "we are an optical lab", "Bartley Optical",
+"we need an invoice", "tint density", "lens order"
+
+B2B PROTOCOL — DOB IS OPTIONAL FOR BUSINESS CALLERS:
+- Collect: caller name, business name, patient name,
+specific request/question, callback number
+- If they don't have patient DOB: that's okay — note it
+in the ticket as "DOB not available — B2B inquiry from
+[business name]"
+- DO NOT refuse to help or escalate just because DOB is
+missing for B2B callers
+- DO NOT keep asking for DOB after caller says they don't
+have it — accept that and proceed to create the ticket
+
+✓ EXIT when you know WHO the call is about
+
+PHASE 3: ASSESS URGENCY (HANDLE MOST CALLS YOURSELF)
+
+🚨 ESCALATE — type: healthcare_provider — NO EXCEPTIONS
+Any healthcare provider — the Phase 2 signals — gets an IMMEDIATE handoff.
+Full stop. Do not create a ticket instead.
+→ Say: "I'll connect you with our on-call team now."
+→ Call escalate_to_human immediately with whatever info you have.
+  Do NOT delay to collect more info.
+
+🚨 ESCALATE — type: patient_urgent_medical
+TRUE MEDICAL EMERGENCIES ONLY — the URGENT SYMPTOMS list below is the list.
+
+✅ HANDLE YOURSELF (create ticket — do NOT escalate):
+• Appointments (confirm, schedule, reschedule, cancel)
+• Medication refills, prescription questions
+• Billing, insurance, payment questions
+• General questions, office info, directions
+• Leave a message FOR a doctor
+• Follow-up appointments, post-op questions
+
+⚠️  A PATIENT ASKING FOR A HUMAN OR FOR THE ON-CALL DOCTOR IS NOT AN
+EMERGENCY — however they phrase it, however frustrated they sound.
+Respond: "I understand. I can make sure the on-call doctor receives your
+message and can call you back. Let me take down your information."
+Then collect info and create a ticket. Do NOT escalate.
+
+✓ Log with emit_decision tool (urgent/non-urgent)
+
+PHASE 4: GATHER & CONFIRM PATIENT INFO
+REQUIRED FIELDS for any action:
+□ Patient FULL NAME (first AND last in ONE question)
+□ Date of birth (REQUIRED for patients; OPTIONAL for B2B)
+□ Callback number
+□ Reason for call
+□ Preferred contact method (phone, text, or email)
+□ Request-specific details (ONLY if caller mentioned them)
+
+⚠️ B2B CALLERS: If they say they don't have the patient DOB,
+DO NOT keep asking — proceed with ticket using available
+info and note "DOB unavailable — B2B call"
+
+🟢 NAME COLLECTION - EFFICIENT APPROACH:
+Ask: "What is your full name?" (NOT first, then last)
+IF schedule data exists: "I was able to pull up a record.
+Is this for [Name from schedule]?" then get DOB
+IF name wrong: "What is your full name?"
+
+📞 PREFERRED CONTACT METHOD:
+Ask: "Would you prefer we call, text, or email you back?"
+Use caller's answer in create_ticket contact_method field
+IF EMAIL: "What email address should we use? Please spell
+it out for me, letter by letter." → create_ticket email field.
+No address = it cannot go by email: ask once, then offer a
+phone callback instead. Never say anything failed.
+IF caller history shows preference, confirm: "Last time
+we reached you by [method]. Is that still best?"
+
+🔵 IF THIRD-PARTY CALL:
+Collect: Caller's name AND Patient's full name/DOB
+"And what is YOUR name so we know who to ask for?"
+
+⚠️  DO NOT assume or add details caller didn't mention!
+If they said "appointment" - don't ask about pharmacy
+If they said "refill" - then ask about medication/pharmacy
+
+✓ EXIT when all required fields are gathered
+
+PHASE 5: FINAL SUMMARY & VALIDATION
+BEFORE calling create_ticket or escalate_to_human:
+
+STEP 1 - CHECK (silently):
+✓ Name? (first and last)
+✓ DOB? (month, day, year)
+✓ Callback? (full 10-digit number)
+✓ Reason? (what they need)
+✓ Contact preference? (phone, text, or email)
+✓ Details? (medication name, appointment type, etc.)
+
+IF ANY MISSING → Ask naturally: "I just need..."
+
+STEP 2 - ONE FINAL SUMMARY (the ONLY confirmation):
+"Alright, I have [Name], date of birth [DOB], callback
+[phone], you prefer [contact method], and you need
+[reason]. I'll pass this along."
+
+⚠️  DO NOT ask "Is that correct?" or "Does that sound right?"
+⚠️  Just state the summary and proceed to Phase 6
+The caller will interrupt if something is wrong
+
+DO NOT PROCEED until all fields are complete!
+
+PHASE 6: TAKE ACTION (CREATE TICKET FOR 99% OF CALLS)
+DEFAULT ACTION → create_ticket (handles all routine calls)
+RARE EXCEPTION → escalate_to_human (TRUE emergencies only)
+
+BEFORE TICKET
+1. Call check_open_tickets to avoid duplicates
+2. Then call create_ticket with collected info
+3. WAIT for the tool response - it returns success/failure
+
+AFTER create_ticket TOOL RESPONSE
+⚠️ You MUST check the tool response before confirming:
+
+IF tool returns success=true:
+→ Say: "Your request has been submitted. Our [team] will
+call you back at [phone]. Anything else?"
+→ DO NOT read out the ticket number (it's too long)
+
+IF tool returns success=false or error:
+→ A failed tool is NOT an escalation case. See TICKET CONFIRMATION RULES
+  below: missing fields means ask once and retry; a technical error means
+  apologise, promise the callback, and end; a result that says another
+  attempt is already in progress, or asks you to call it ONCE more, means
+  do exactly that and say nothing about a failure. Never wake the on-call
+  team because a tool failed.
+
+❌ NEVER say "request submitted" or "passed your message"
+UNLESS the tool returned success=true
+
+ESCALATION — EXACTLY THREE CASES, NOTHING ELSE
+1. A provider's office calling about a patient
+2. A hospital, ER or urgent care calling about a patient
+3. A TRUE eye emergency happening now: vision loss, severe
+pain, injury, chemical exposure, flashes or floaters,
+post-surgical trouble (a NEW symptom after surgery, never a
+medication or prescription problem on its own)
+
+NOT a transfer, however the caller phrases it:
+❌ "urgent" appointment, refill, glasses, authorization, fax
+❌ billing, insurance, records, office hours
+❌ you could not hear them, could not get a date of birth,
+could not understand the language, they would not answer
+❌ a patient who ALREADY had surgery or a procedure and whose only
+problem is a medication or prescription — post-op drops not at the
+pharmacy, a prescription that never arrived, run out — with no new
+symptom: create_ticket with post_op_prescription true. It files URGENT
+for the After Hours team.
+→ ALL of these are create_ticket with whatever you have.
+
+SAME-DAY: if the request is about an appointment TODAY — confirming,
+cancelling or moving it, running late, at the office now, or needing
+to be seen today — set appointment_today true on create_ticket.
+Same-day tickets go to the After Hours team, who work them.
+Filing a partial ticket IS the job. Waking the on-call
+provider because you missed a detail is not.
+
+Call escalate_to_human FIRST — ONCE, never twice on one call — and
+say nothing about connecting anyone until it answers. If it returns
+success=true, say: "Based on what you're describing, I'm connecting you
+with our on-call team right now." If it is refused, it has ALREADY filed
+a ticket for the caller: say exactly what its message tells you to say,
+and never say you will connect, transfer or put anyone through.
+
+CLOSING (CRITICAL: SAY THIS ONLY ONCE)
+After a SUCCESSFUL ticket, give the success line above — once. Promise only
+that the right team will follow up. Never promise a recording, and never
+promise what any individual will do.
+
+If caller says no/goodbye/thanks/ok:
+→ Give ONE short goodbye: "Great, have a good day!"
+→ STOP - do NOT repeat ticket details or callback number
+
+⚠️ ANTI-REPETITION: Once confirmed, NEVER repeat:
+- Ticket details  - Callback number  - "We'll contact you"
 
 ===== URGENT SYMPTOMS (see Phase 3 for handling) =====
 ${URGENT_SYMPTOMS.symptoms.map((s) => `• ${s}`).join("\n")}
@@ -657,38 +1026,36 @@ MESSAGE FOR PROVIDER:
 - NEVER explain internal processes, handoffs, or system actions
 - NEVER invent commitments — do not promise recordings, that "the doctor will receive" anything, or any specific staff action. The ONLY promise you make is that the right team will follow up / call back.
 
-╔══════════════════════════════════════════════════════════════╗
-║  ⚠️ CRITICAL - TICKET CREATION IS MANDATORY ⚠️                ║
-╠══════════════════════════════════════════════════════════════╣
-║  You MUST call create_ticket tool before ending non-urgent   ║
-║  calls. The tool call is what actually saves the request.    ║
-║  Saying "submitted" without calling the tool = PATIENT       ║
-║  REQUEST LOST FOREVER. This is a medical liability.          ║
-║                                                              ║
-║  ═══ FORBIDDEN PHRASES (NEVER say without tool call) ═══════ ║
-║  ❌ "Your request has been submitted"                        ║
-║  ❌ "I'll pass this along"                                   ║
-║  ❌ "The staff will contact you"                             ║
-║  ❌ "Your message will be sent"                              ║
-║  ❌ "I've noted your request"                                ║
-║  ❌ "We'll get back to you"                                  ║
-║                                                              ║
-║  ═══ CORRECT SEQUENCE (MUST FOLLOW) ═══════════════════════  ║
-║  1. Collect all required info (name, DOB, callback, reason)  ║
-║  2. Call check_open_tickets tool                             ║
-║  3. Call create_ticket tool ← THIS IS NOT OPTIONAL           ║
-║  4. WAIT for tool response                                   ║
-║  5. IF success=true THEN say "Your request has been..."      ║
-║     IF error THEN call escalate_to_human                     ║
-║                                                              ║
-║  ⚠️ YOU CANNOT SKIP STEP 3. The patient's request will be    ║
-║     lost if you don't call create_ticket before saying       ║
-║     anything about submission or staff contact.              ║
-╚══════════════════════════════════════════════════════════════╝
+⚠️ CRITICAL - TICKET CREATION IS MANDATORY ⚠️
+You MUST call create_ticket tool before ending non-urgent
+calls. The tool call is what actually saves the request.
+Saying "submitted" without calling the tool = PATIENT
+REQUEST LOST FOREVER. This is a medical liability.
+
+FORBIDDEN PHRASES (NEVER say without tool call)
+❌ "Your request has been submitted"
+❌ "I'll pass this along"
+❌ "The staff will contact you"
+❌ "Your message will be sent"
+❌ "I've noted your request"
+❌ "We'll get back to you"
+
+CORRECT SEQUENCE (MUST FOLLOW)
+1. Collect all required info (name, DOB, callback, reason)
+2. Call check_open_tickets tool
+3. Call create_ticket tool ← THIS IS NOT OPTIONAL
+4. WAIT for tool response
+5. IF success=true THEN say "Your request has been..."
+IF error THEN follow TICKET CONFIRMATION RULES below — do NOT escalate
+
+⚠️ YOU CANNOT SKIP STEP 3. The patient's request will be
+lost if you don't call create_ticket before saying
+anything about submission or staff contact.
 
 TICKET CONFIRMATION RULES:
 - ONLY say "your request has been submitted" AFTER create_ticket returns success=true
 - NEVER claim success before calling the tool or if the tool returns an error
+- If the create_ticket result says another attempt for this call is ALREADY IN PROGRESS, or asks you to call it ONCE more: that is NOT a failure. Do exactly what the result says, say nothing about a problem, and never speak the technical-issue line on that result.
 - If create_ticket fails due to a TECHNICAL ERROR (system_error, api_timeout, validation error):
   → DO NOT escalate to human. This is a technical issue, not a medical emergency.
   → Say: "I'm sorry, I'm having a technical issue on my end right now. I have your information and our team will call you back at [callback number] as soon as possible."
@@ -720,7 +1087,9 @@ Keep a mental checklist: □ Name □ DOB □ Callback □ Reason □ Contact pr
 ===== CONFUSION & TIMEOUT GUARDRAILS =====
 If caller seems confused, cannot answer basic questions, or is incoherent:
 
-MINIMUM FOR TICKET: name + DOB + callback number + reason (all 4 required)
+ASK FOR ALL FOUR: name + DOB + callback number + reason. They are what makes a
+ticket useful — but a missing one is never a reason to lose the request. If you
+cannot get one, file with what you have (see Phase 6).
 MINIMUM FOR ESCALATION: caller must be a real human with a genuine need
 
 - After 2 failed attempts to get the same information (2 asks TOTAL — the
@@ -729,7 +1098,8 @@ MINIMUM FOR ESCALATION: caller must be a real human with a genuine need
   IF you have all 4 required fields (name, DOB, callback, reason):
     → "Let me note what you've shared." → call create_ticket → close
   ELSE IF caller has shown ANY coherent intent (mentioned a doctor, appointment, surgery, eye issue):
-    → "Let me connect you with someone who can help." → call escalate_to_human
+    → call escalate_to_human, and say nothing about connecting anyone until it
+      answers: if it is refused it has ALREADY filed a ticket and tells you what to say
   ELSE (no coherent intent, just noise/gibberish/random words):
     → "We were unable to connect. Goodbye." → END THE CALL (do NOT escalate)
 
@@ -756,7 +1126,7 @@ MINIMUM FOR ESCALATION: caller must be a real human with a genuine need
 
 ⚠️ NEVER abandon a real human caller who has a coherent medical or scheduling need
 ⚠️ DO end calls for robot callers, ghost calls, and spam — do NOT wake up humans for these
-⚠️ DON'T force create_ticket if you're missing required fields — escalate if human, end if not
+⚠️ A missing field is NOT a reason to escalate and NOT a reason to file nothing — file the partial ticket
 
 ===== HARD RULES =====
 1. Follow 6-phase workflow (exit early only for simple questions)
@@ -777,11 +1147,10 @@ MINIMUM FOR ESCALATION: caller must be a real human with a genuine need
 ❌ "I'm looking up your information"
 ❌ "Let me check that for you"
 
-✅ INSTEAD: Just DO it silently, then state the RESULT:
-- After lookup: "I can see your last visit was with Dr. Smith at Anaheim."
-- After ticket: "Your message will be sent to staff. Anything else?"
-
-The caller doesn't need to know HOW you're doing things - just the outcome.
+✅ INSTEAD: do it silently, then state the RESULT — e.g. after a lookup,
+"I can see your last visit was with Dr. [provider] at [location]."
+The caller does not need to know HOW you are doing things, only the outcome.
+(The ONE exception is the create_ticket wait line above, which you always say.)
 
 ===== STYLE =====
 - Calm, warm, professional
@@ -795,13 +1164,14 @@ When asked about office locations, addresses, or phone numbers, use ONLY the fol
 
 ${buildCompactLocationReference()}
 
+Hours, every office: ${AZUL_VISION_KNOWLEDGE.businessHours.standard}. When a caller asks when an office opens or closes, answer from the practice facts, including the office's own opening and closing time, exactly as written there. No ticket for an hours question. Every office is closed right now.
+
 ===== CURRENT CALL CONTEXT =====
 ${callerHistorySection}
 ${nameDobFallbackSection}
 ${productionEnhancementsSection}
 ${openTicketsContext}
 
-CALLER PHONE:
 ${phoneContext}
 
 TIME CONTEXT:
@@ -838,12 +1208,30 @@ export async function createNoIvrAgent(
     callLogId: metadata.callLogId,
     agentSlug: 'no-ivr',
   };
+  // v109: the SDK drops every field `.describe()` from a schema with an
+  // optional field, so they are copied back from the zod — see
+  // toolFieldDescriptions.ts. Validation stays the SDK's zod parse.
   const recordedTool: typeof tool = ((def: any) =>
-    tool({
-      ...def,
-      // CP-3: the approved next line rides inside the tool result (script-listing §6).
-      execute: withToolDirection('no-ivr', callId, def.name, recordingExecute(timelineCtx, def.name, def.execute)),
-    })) as typeof tool;
+    keepFieldDescriptions(
+      tool({
+        ...def,
+        // CP-3: the approved next line rides inside the tool result (script-listing §6).
+        execute: withToolDirection('no-ivr', callId, def.name, recordingExecute(timelineCtx, def.name, def.execute), {
+          // v112: a gate refusal returns before the recorder runs, so it is
+          // recorded here — the same timeline key and ids recordingExecute uses.
+          recordRefusal: (args, outcome) => {
+            const key = timelineCtx.callId ?? timelineCtx.callSid ?? '';
+            recordToolEvent(key, def.name, (args ?? {}) as Record<string, unknown>, JSON.stringify(outcome), 0, {
+              callSid: metadata.callSid,
+              callLogId: metadata.callLogId,
+              agentSlug: 'no-ivr',
+            });
+            void flushAzulTimeline(key).catch(() => { /* telemetry must never touch the call */ });
+          },
+        }),
+      }),
+      def.parameters,
+    )) as typeof tool;
 
   let scheduleContext: PatientScheduleContext | undefined;
   let callerMemory: CallerMemory | null = null;
@@ -882,14 +1270,15 @@ export async function createNoIvrAgent(
         hasProvider: !!scheduleContext.lastProviderSeen,
       });
       
-      if (metadata.callLogId) {
-        storage.updateCallLog(metadata.callLogId, {
-          patientFound: true,
-          patientName: scheduleContext.patientName || undefined,
-          lastProviderSeen: scheduleContext.lastProviderSeen || undefined,
-          lastLocationSeen: scheduleContext.lastLocationSeen || undefined,
-        }).catch(err => console.error(`[No-IVR Agent] Failed to update call log:`, err));
-      }
+      // Until v53 the phone match was written to the call row HERE as
+      // patientFound + patientName — a CANDIDATE recorded as an identity
+      // (RULE ZERO step 2; v47 withholds the same match from the prompt) —
+      // and it never once landed anyway: `metadata.callLogId` is a getter the
+      // transport backfills after session.connect(), so at factory time it
+      // read undefined on every call (0 of 297 substantive no-ivr calls with
+      // patient_found in the seven days to 2026-09-17). The row is written
+      // from create_ticket, once a name and a date of birth have confirmed
+      // who this is — see "THE RECORD REACHES THE AFTER-HOURS CALL ROW".
     } else {
       console.log(`[No-IVR Agent] No schedule context for ${phoneRef} (timeout or not found)`);
     }
@@ -936,14 +1325,16 @@ export async function createNoIvrAgent(
 
   const lookupScheduleTool = recordedTool({
     name: "lookup_schedule",
-    description: `Look up patient appointment context using phone, name, or date of birth.
+    description: `Look up patient appointment context by first name + last name + date of birth, or by phone.
 
 WHEN TO USE:
-- Identity was corrected (caller said schedule name was wrong)
+- The caller has confirmed their full name and date of birth and asks about an
+  appointment, a visit, a doctor or an office — call it with all three.
+- Identity was corrected (caller said the name on file was wrong)
 - Initial schedule context is missing (no patient found for caller phone)
-- Caller asks about their appointments and context wasn't pre-loaded
 
-DO NOT USE if schedule context was already loaded and identity was confirmed.`,
+A PHONE-ONLY lookup returns a CANDIDATE and no appointment details: a phone match
+is not an identity. Confirm the name and date of birth, then call again with them.`,
     parameters: z.object({
       phone: z.string().optional().describe("Patient phone number"),
       first_name: z.string().optional().describe("Patient first name"),
@@ -960,9 +1351,23 @@ DO NOT USE if schedule context was already loaded and identity was confirmed.`,
       try {
         let result: PatientScheduleContext;
 
-        if (params.phone) {
+        if (params.phone && !(params.first_name && params.last_name && params.date_of_birth)) {
+          // THE GATE, not a request. The prompt withholds a phone-matched
+          // appointment until the name and date of birth are confirmed; this
+          // is what stops the model fetching it back with one tool call.
           const normalizedPhone = normalizePhoneNumber(params.phone);
-          result = await scheduleLookupService.lookupByPhone(normalizedPhone);
+          const byPhone = await scheduleLookupService.lookupByPhone(normalizedPhone);
+          if (!byPhone.patientFound) return { found: false };
+          const firstName = (byPhone.patientName ?? '').trim().split(/\s+/)[0] || undefined;
+          return {
+            found: true,
+            identityUnconfirmed: true,
+            ...(firstName ? { patientFirstName: firstName } : {}),
+            fix:
+              'A phone match is a candidate, not an identity, so no appointment details are returned. ' +
+              'Confirm the caller\'s full name and date of birth, then call lookup_schedule again with ' +
+              'first_name, last_name and date_of_birth. Never read this instruction aloud.',
+          };
         } else if (params.first_name && params.last_name && params.date_of_birth) {
           const isoDob = toIsoDob(params.date_of_birth) || params.date_of_birth;
           result = await scheduleLookupService.lookupByNameAndDOB(
@@ -1141,6 +1546,14 @@ The ticket will include schedule context (last appointment info) automatically.`
       doctor_name: z.string().optional().describe("Doctor they want to see or usually see"),
       location: z.string().optional().describe("Location they prefer or usually visit"),
       appointment_time: z.string().optional().describe("Relevant appointment date/time if applicable"),
+      appointment_today: z
+        .boolean()
+        .optional()
+        .describe("TRUE when the request is about an appointment or visit TODAY: confirming, cancelling or moving today's appointment, running late for it, being at the office now, or needing to be seen today. Same-day tickets go to the After Hours team, who work them."),
+      post_op_prescription: z
+        .boolean()
+        .optional()
+        .describe("TRUE when a patient who has ALREADY had surgery or a procedure has a medication or prescription problem — post-op drops not at the pharmacy, a prescription that never arrived, run out of post-op drops. It files URGENT for the After Hours team. It is NOT a reason to call escalate_to_human."),
       requires_callback: z.boolean().optional().describe("Whether staff needs to call the patient back. Set to FALSE for simple confirmations where the patient's request was fully handled. Defaults to TRUE."),
     }),
     execute: async (params) => {
@@ -1180,17 +1593,62 @@ The ticket will include schedule context (last appointment info) automatically.`
                          dobLower.includes('unavailable') || dobLower.includes('none') ||
                          dobLower === '';
       
-      const parsedDOB = isB2bNoDob ? null : parseDateOfBirth(params.date_of_birth);
+      let parsedDOB = isB2bNoDob ? null : parseDateOfBirth(params.date_of_birth);
+      // ASK ONCE, THEN FILE ANYWAY. Until 2026-09-17 this refusal had no
+      // counter, no key and no escape, so it could be returned on every
+      // invocation for the life of the call — measured on 2026-09-16 as the
+      // fifteen-ask loop, on the lane that takes all overnight volume. The
+      // queue lanes have bounded the same gate at one ask per call since
+      // 2026-09-04 (`decideDobEscape`, keyed on the call SID); this is that
+      // ruling reaching the after-hours line. The value the placeholder
+      // sends ('Unknown') is the one the B2B path below has always sent and
+      // the ticket API has accepted on every POST.
+      let dobEscapeStatus: DobStatus | null = null;
       if (!isB2bNoDob && (!parsedDOB?.month || !parsedDOB?.day || !parsedDOB?.year)) {
-        return {
-          success: false,
-          validation_errors: ["complete date of birth (month, day, and year)"],
-          message: "Missing required information: complete date of birth (month, day, and year)",
-        };
+        const escape = decideDobEscape(
+          metadata.callSid ?? '',
+          'create_ticket',
+          (params.date_of_birth ?? '').trim(),
+        );
+        if (escape.askAgain) {
+          return {
+            success: false,
+            validation_errors: ["complete date of birth (month, day, and year)"],
+            message: "Missing required information: complete date of birth (month, day, and year)",
+          };
+        }
+        dobEscapeStatus = escape.status;
+        console.info(dobEscapeMarker('create_ticket', dobEscapeStatus, metadata.callSid ?? ''));
+        // A partial parse must not feed the name+DOB lookup below — the
+        // secondary lookup is guarded on parsedDOB being usable.
+        parsedDOB = null;
       }
       
       if (isB2bNoDob) {
         console.log("[No-IVR Agent] B2B caller — skipping DOB validation, proceeding without DOB");
+      }
+
+      // ASK FOR THE EMAIL ONCE, THEN FILE FOR A PHONE CALLBACK. The app
+      // refuses an email preference with no address; until 2026-09-27 that
+      // refusal arrived here in a spelling nothing matched and was spoken as
+      // a technical failure (CA42f5b35d3924b8a1e5e66c00ee927742). Checked
+      // BEFORE the schedule lookup so the question comes back in
+      // milliseconds and no lookup is spent on a payload that cannot file.
+      // See EMAIL_ASK_ONCE above for the measurement.
+      const wantsEmail = params.preferred_contact === 'email';
+      const emailGiven = (params.email ?? '').trim();
+      let emailEscaped = false;
+      if (wantsEmail && !emailGiven) {
+        if (gateRefusalsSoFar(metadata.callSid, 'create_ticket', 'email') < 1) {
+          noteGateRefusal(metadata.callSid, 'create_ticket', 'email');
+          return {
+            success: false,
+            validation_errors: ["email address"],
+            message: EMAIL_ASK_ONCE,
+          };
+        }
+        emailEscaped = true;
+        console.info(emailEscapeMarker(metadata.callSid ?? ''));
       }
 
       // SECONDARY LOOKUP: Enrich schedule context using name+DOB
@@ -1213,6 +1671,44 @@ The ticket will include schedule context (last appointment info) automatically.`
           }
         } catch (lookupError) {
           console.error("[No-IVR Agent] Secondary lookup error:", lookupError);
+        }
+      }
+
+      // THE RECORD REACHES THE AFTER-HOURS CALL ROW — only once it is CERTAIN
+      // (v53). A phone match is a candidate (`phoneMatchIsUnconfirmed`, v47);
+      // a name + date-of-birth match is the identity this lane's Phase 4
+      // collects for every ticket anyway. `metadata.callLogId` is read HERE,
+      // minutes into the call, because it is a getter the transport backfills
+      // after session.connect(); the factory-time read that used to sit beside
+      // the phone lookup saw undefined on every call. Not awaited — the
+      // caller is waiting on the ticket, not on telemetry.
+      // Codex P2 on #321 (sixth pass): a name + date-of-birth query that
+      // matches SEVERAL people still comes back `patientFound: true`, with
+      // `identity.unique: false` and the newest person's rows as the primary
+      // context — writing that would record an arbitrary patient's name as
+      // this caller's identity. One person, or nothing.
+      if (
+        enrichedContext?.patientFound &&
+        !phoneMatchIsUnconfirmed(enrichedContext) &&
+        enrichedContext.identity?.unique !== false
+      ) {
+        const liveCallLogId = metadata.callLogId;
+        const confirmedDob = parsedDOB
+          ? parsedDOB.iso || `${parsedDOB.year}-${parsedDOB.month}-${parsedDOB.day}`
+          : undefined;
+        if (liveCallLogId) {
+          void storage.updateCallLog(liveCallLogId, {
+            patientFound: true,
+            patientName: enrichedContext.patientName || undefined,
+            patientDob: confirmedDob,
+            lastProviderSeen: enrichedContext.lastProviderSeen || undefined,
+            lastLocationSeen: enrichedContext.lastLocationSeen || undefined,
+          }).then(
+            () => console.log(`[No-IVR Agent] confirmed identity written to call row ${liveCallLogId}`),
+            (err) => console.error(`[No-IVR Agent] Failed to write the confirmed identity to the call row:`, err),
+          );
+        } else {
+          console.warn(`[No-IVR Agent] identity confirmed but the call row has no id yet — not recorded for ${metadata.callId}`);
         }
       }
 
@@ -1259,29 +1755,76 @@ The ticket will include schedule context (last appointment info) automatically.`
       const { classifyAfterHoursRequest } = await import('../tools/afterHoursTaxonomy');
       const ahHint = classifyAfterHoursRequest(finalSummary);
 
+      // THE TWO KINDS OF CALL THE OPERATOR ROUTED HIMSELF (2026-10-02), and
+      // nothing else: a post-op medication problem files URGENT to After
+      // Hours, and a same-day request files to After Hours, who work them.
+      // Every other call sends no department and the app decides as before.
+      // See afterHoursRouting.ts. Only a CONFIRMED record's appointments count
+      // — a phone candidate's appointments are somebody's, not the caller's.
+      const recordConfirmed =
+        !!enrichedContext?.patientFound &&
+        !phoneMatchIsUnconfirmed(enrichedContext) &&
+        enrichedContext.identity?.unique !== false;
+      const route = routeAfterHoursTicket({
+        postOpMedication: params.post_op_prescription,
+        appointmentToday: params.appointment_today,
+        text: [params.request_summary, params.appointment_time].filter(Boolean).join(' '),
+        confirmedUpcoming: recordConfirmed ? enrichedContext?.upcomingAppointments : undefined,
+        appointmentIntent: CATEGORY_TO_REQUEST_TYPE[params.request_category] === 'Appointment Request',
+      });
+      if (route.kind !== 'default') {
+        console.info(`[AFTER-HOURS ROUTE] ${route.kind} -> department ${route.departmentId} on ${metadata.callSid}`);
+      }
+      const routeNote = afterHoursRouteNote(route.kind);
+
       // Use NEW SIMPLIFIED ENDPOINT - more reliable, all mapping done server-side
       const result = await SyncAgentService.submitSimplifiedTicket({
         patientFullName,
-        patientDOB: isB2bNoDob ? 'Unknown' : params.date_of_birth, // B2B callers may not have DOB
+        patientDOB: (isB2bNoDob || dobEscapeStatus) ? 'Unknown' : params.date_of_birth, // B2B callers may not have DOB; the escape never sends unreadable words in a date field
         reasonForCalling: finalSummary,
-        preferredContactMethod: preferredContactSimplified,
+        // An email preference the caller could not complete files for a PHONE
+        // callback — the number is on every request — never as an email
+        // ticket with no address, which the app refuses.
+        preferredContactMethod: emailEscaped ? 'phone' : preferredContactSimplified,
         patientPhone: callbackNormalized,
-        patientEmail: params.email,
+        // Never an empty string: the app reads `.trim()` and refuses a blank,
+        // while an absent key is simply no email.
+        patientEmail: emailGiven || undefined,
         lastProviderSeen: params.doctor_name || enrichedContext?.lastProviderSeen,
         locationOfLastVisit: params.location || enrichedContext?.lastLocationSeen,
-        additionalDetails: params.appointment_time ? `Appointment: ${params.appointment_time}` : undefined,
+        // The status note goes HERE and not at the head of reasonForCalling:
+        // the `Request Type:` header must stay the first line of that field
+        // (operator, 2026-07-25). The note never carries the caller's words.
+        additionalDetails: [
+          routeNote,
+          dobEscapeStatus ? dobStatusNote(dobEscapeStatus) : null,
+          emailEscaped ? EMAIL_ESCAPE_NOTE : null,
+          params.appointment_time ? `Appointment: ${params.appointment_time}` : null,
+        ].filter(Boolean).join('\n') || undefined,
         callSid: metadata.callSid,
         callerPhone: metadata.callerPhone,
         dialedNumber: metadata.dialedNumber,
         agentUsed: 'no-ivr',
-        ...(ahHint.isCatchAll
-          ? {}
-          : {
-              suggestedRequestTypeId: ahHint.classification.requestTypeId,
-              suggestedRequestReasonId: ahHint.classification.requestReasonId,
-              suggestedRequestReason: ahHint.classification.requestReason,
-              suggestedUrgent: Boolean(ahHint.classification.urgent),
-            }),
+        ...(route.kind === 'default' ? {} : { departmentId: route.departmentId }),
+        ...(route.kind === 'post_op_medication'
+          ? {
+              priority: route.priority,
+              // The department-8 pair for it, so the hint and the department
+              // agree in one payload (the app logs AGENT CONTRACT CONFLICT
+              // when they do not).
+              suggestedRequestTypeId: POST_PROCEDURE_REQUEST.requestTypeId,
+              suggestedRequestReasonId: POST_PROCEDURE_REQUEST.requestReasonId,
+              suggestedRequestReason: POST_PROCEDURE_REQUEST.requestReason,
+              suggestedUrgent: true,
+            }
+          : ahHint.isCatchAll
+            ? {}
+            : {
+                suggestedRequestTypeId: ahHint.classification.requestTypeId,
+                suggestedRequestReasonId: ahHint.classification.requestReasonId,
+                suggestedRequestReason: ahHint.classification.requestReason,
+                suggestedUrgent: Boolean(ahHint.classification.urgent),
+              }),
         callStartTime: new Date().toISOString(),
         // Transcript deliberately NOT sent at filing.
         //
@@ -1298,13 +1841,75 @@ The ticket will include schedule context (last appointment info) automatically.`
         // still ended up with a summary — 100%. Nothing is lost by waiting.
       });
 
-      if (result.error?.includes('Missing required information')) {
+      // A FIELD REFUSAL IS A QUESTION, in whichever spelling it arrived. The
+      // sink normalises the app's wording now, and this reads the field list
+      // again so the model is told WHAT to ask for in words rather than in the
+      // app's column names — and is told plainly that nothing failed, because
+      // the branch below this one speaks the technical-issue apology, and on
+      // CA42f5b35d3924b8a1e5e66c00ee927742 that is what a refusal became.
+      const missingFromApi = missingFieldsFromRefusal(result.error);
+      if (missingFromApi) {
         console.log("[No-IVR Agent] VALIDATION FAILED:", result.error);
         return {
           success: false,
-          validation_errors: [result.error],
-          message: result.message || 'Please collect missing information and try again.',
+          validation_errors: missingFromApi,
+          message:
+            `Missing required information: ${spokenMissingFields(missingFromApi)}. Ask the caller ` +
+            "for it — one field per question, with the format in the question — then call " +
+            "create_ticket again with it. Nothing has failed: do not apologise and do not say " +
+            "there was a technical issue.",
         };
+      }
+
+      // TWO REFUSALS BELOW ARE NOT FAILURES, AND UNTIL 2026-09-17 BOTH FELL
+      // INTO THE "technical system error… end the call" BRANCH AT THE BOTTOM.
+      //
+      // CA…11e362485f (2026-09-16 14:54): the model fired create_ticket twice,
+      // overlapping. The first attempt filed VA-60434; the second lost the
+      // per-call lock, waited 3s, found no ticket number written back yet, and
+      // came back "Concurrent ticket creation in progress" 0.4s BEFORE the
+      // first returned success. The caller — twenty minutes late for an 8:00
+      // appointment — was told we had a technical issue while her ticket sat
+      // in the queue. A duplicate attempt losing the lock means the OTHER
+      // attempt is in flight; its result is the one to speak.
+      if (result.error === 'Concurrent ticket creation in progress') {
+        console.warn(`[TICKET CREATE] duplicate attempt on ${metadata.callSid} lost the lock — the other attempt's result stands`);
+        return {
+          success: false,
+          error: result.error,
+          message:
+            "Another create_ticket call for this same request is already in progress on this " +
+            "call, and its result is on its way to you. Nothing has failed. Do NOT apologise and " +
+            "do NOT tell the caller there was a problem. Say nothing about it — wait for that " +
+            "other result and read the caller the ticket number it carries. Do not call " +
+            "create_ticket again.",
+        };
+      }
+
+      // CA…7074e29c0c (2026-09-16 03:13): create_ticket hit the 15,000ms
+      // client timeout while the ticketing app finished the insert at the
+      // same instant — VA-60429 exists. A timeout is not a proven failure.
+      // submitSimplifiedTicket sends `idempotencyKey: call-<sid>` and the app
+      // answers a key it has seen with the cached result, so ONE retry cannot
+      // open a second ticket and usually returns the number. Bounded to one
+      // per call; a SECOND timeout is a real outage and falls through to the
+      // apology below.
+      if (/timeout/i.test(result.error ?? '')) {
+        const retriedAlready = gateRefusalsSoFar(metadata.callSid, 'create_ticket', 'api_timeout') > 0;
+        if (!retriedAlready) {
+          noteGateRefusal(metadata.callSid, 'create_ticket', 'api_timeout');
+          console.warn(`[TICKET CREATE] ticket API timed out on ${metadata.callSid} — asking for ONE retry (the app dedupes on this call)`);
+          return {
+            success: false,
+            error: result.error,
+            message:
+              "The ticketing system did not answer in time, but it may still have filed the " +
+              "request. Call create_ticket ONCE more right now with exactly the same details — " +
+              "the system recognises this call and will not open a second ticket. Do not tell " +
+              "the caller anything failed.",
+          };
+        }
+        console.error(`[TICKET CREATE] ticket API timed out TWICE on ${metadata.callSid} — reporting the failure`);
       }
 
       if (result.success && result.ticketNumber) {
@@ -1419,6 +2024,113 @@ Always say a brief goodbye phrase BEFORE calling this tool.`,
     },
   });
 
+  /**
+   * File the ticket a refused escalation stands for. Same endpoint and shape
+   * as the sanctioned path's record ticket below, same idempotency key as
+   * create_ticket (call-<sid>), so it can never open a second ticket beside
+   * one this call already holds. Returns what happened; never throws. The
+   * ticket it files is remembered per call so a LATER sanctioned transfer's
+   * record files BESIDE it instead of being swallowed by it — see
+   * transferRecordCrossReference.
+   */
+  async function fileRefusedEscalationTicket(
+    params: {
+      reason: string;
+      patient_first_name?: string;
+      patient_last_name?: string;
+      patient_dob?: string;
+      callback_number?: string;
+      symptoms_summary?: string;
+      provider_info?: string;
+    },
+    code: RefusedEscalationCode,
+    uncorroborated: string[],
+  ): Promise<RefusedEscalationFiling> {
+    try {
+      const { SyncAgentService } = await import("../services/syncAgentService");
+      const { classifyAfterHoursRequest } = await import('../tools/afterHoursTaxonomy');
+      // "Unknown Caller" was refused by /submit-ticket — both words are on its
+      // placeholder list — so a refusal with no name filed nothing (v93).
+      const { fullName: name, standIn } = nameOrStandIn(params.patient_first_name, params.patient_last_name);
+      const phone = normalizePhoneNumber(params.callback_number || metadata.callerPhone || '');
+      const reasonForCalling =
+        code === 'symptoms_not_stated_by_caller'
+          ? 'Caller asked to reach the on-call team. The symptoms the agent wrote ' +
+            `(${uncorroborated.join(', ') || 'unspecified'}) were NOT stated by the caller — ` +
+            'read the recording for what they actually said.'
+          : code === 'provider_not_stated_by_caller'
+            ? [
+                'Caller asked to reach the on-call team. The agent described them as a provider, but the ' +
+                  'caller never said they were one; read the recording for what they actually said.',
+                `Agent's summary (unverified): ${params.reason}`,
+                params.symptoms_summary ? `Symptoms: ${params.symptoms_summary}` : null,
+              ]
+                .filter(Boolean)
+                .join('\n')
+          : [
+              params.reason,
+              params.symptoms_summary ? `Symptoms: ${params.symptoms_summary}` : null,
+              params.provider_info ? `Provider: ${params.provider_info}` : null,
+            ]
+              .filter(Boolean)
+              .join('\n');
+      const ahHint = classifyAfterHoursRequest(reasonForCalling);
+      // A post-op medication refusal files URGENT to After Hours (operator,
+      // 2026-10-02) — the same route create_ticket takes for it, so the
+      // ticket lands in the same place whichever tool the model reached for.
+      const postOp = code === 'post_op_medication';
+      const routeNote = postOp ? afterHoursRouteNote('post_op_medication') : null;
+      const result = await SyncAgentService.submitSimplifiedTicket({
+        patientFullName: name,
+        patientDOB: params.patient_dob || 'Unknown',
+        reasonForCalling,
+        preferredContactMethod: 'phone',
+        patientPhone: phone || undefined,
+        // The note goes HERE and not at the head of reasonForCalling — the
+        // `Request Type:` header rule (operator, 2026-07-25).
+        additionalDetails: [routeNote, refusedEscalationNote(code), standIn ? STAND_IN_NAME_NOTE : null]
+          .filter(Boolean)
+          .join('\n'),
+        callSid: metadata.callSid,
+        callerPhone: metadata.callerPhone,
+        dialedNumber: metadata.dialedNumber,
+        agentUsed: 'no-ivr',
+        ...(postOp
+          ? {
+              departmentId: AFTER_HOURS_ROUTE_DEPARTMENT_ID,
+              priority: 'urgent' as const,
+              suggestedRequestTypeId: POST_PROCEDURE_REQUEST.requestTypeId,
+              suggestedRequestReasonId: POST_PROCEDURE_REQUEST.requestReasonId,
+              suggestedRequestReason: POST_PROCEDURE_REQUEST.requestReason,
+              suggestedUrgent: true,
+            }
+          : ahHint.isCatchAll
+            ? {}
+            : {
+                suggestedRequestTypeId: ahHint.classification.requestTypeId,
+                suggestedRequestReasonId: ahHint.classification.requestReasonId,
+                suggestedRequestReason: ahHint.classification.requestReason,
+                suggestedUrgent: Boolean(ahHint.classification.urgent),
+              }),
+        callStartTime: new Date().toISOString(),
+      });
+      if (result.success) {
+        console.info(
+          `[HANDOFF] refused escalation (${code}) filed as ${result.ticketNumber ?? 'a ticket'} on ${metadata.callSid}`,
+        );
+        if (result.ticketNumber) rememberRefusedEscalationTicket(callId, { ticketNumber: result.ticketNumber, code });
+        return { ok: true, ...(result.ticketNumber ? { ticketNumber: result.ticketNumber } : {}) };
+      }
+      console.error(
+        `[HANDOFF] refused escalation (${code}) could NOT be filed on ${metadata.callSid}: ${result.error}`,
+      );
+      return { ok: false, ...(result.error ? { error: result.error } : {}) };
+    } catch (err) {
+      console.error(`[HANDOFF] refused escalation (${code}) filing threw on ${metadata.callSid}:`, err);
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  }
+
   const escalateToHumanTool = recordedTool({
     name: "escalate_to_human",
     description: `Transfer the call to a human on-call provider. 
@@ -1431,6 +2143,8 @@ Always say a brief goodbye phrase BEFORE calling this tool.`,
 ❌ NEVER ESCALATE FOR:
 - Appointment confirmations, scheduling, rescheduling, cancellations
 - Medication refills or prescription questions  
+- A post-op medication or prescription problem (drops not at the pharmacy) with no new symptom
+  → create_ticket with post_op_prescription true. It files URGENT for the After Hours team.
 - Billing or insurance questions
 - General questions about office hours, locations, fax numbers
 - Patient frustration or impatience (be patient, handle it yourself)
@@ -1441,7 +2155,7 @@ Always say a brief goodbye phrase BEFORE calling this tool.`,
 PATIENT REQUESTING ON-CALL DOCTOR = TAKE A MESSAGE, NOT A TRANSFER.
 Only escalate if the patient has actual emergency symptoms (vision loss, severe pain, injury, etc.)
 
-## OFFICE HOURS — ANSWER THE COMMON QUESTION, WITHHOLD ONLY THE EXACT TIMES
+## OFFICE HOURS — ANSWER THE COMMON QUESTION, TIMES INCLUDED
 
 "Are you open today?" is the single most common question on this line and it
 must NOT become a ticket. On 2026-08-01 13:35 UTC a caller asked exactly
@@ -1452,18 +2166,14 @@ ANSWER DIRECTLY, no tool needed, no ticket:
 - "Are you open right now / today?" → Every office is closed right now — that
   is why they reached the after-hours service. Say so plainly.
 - Weekends and holidays → Our offices are closed on weekends and holidays.
-- General weekday shape → Our offices are open weekdays during business hours.
-
-DO NOT STATE EXACT PER-OFFICE TIMES. Do not say a named office opens at 8:00
-or closes at 5:00. The location table in this prompt is hardcoded and uniform
-("Mon-Fri 8am-5pm" for every office) and it disagrees with the practice's own
-live data, which has Encinitas closing at 4:30. So the day is safe to state;
-the clock time is not.
-
-If — and only if — the caller needs a specific office's exact opening or
-closing time, say: "I don't want to give you the wrong time for that office —
-I can have someone confirm it when they're back in." Offer the callback; file
-a ticket only if they want one.
+- "When does <office> open / close?" → answer from the practice facts,
+  including the office's own opening and closing time, exactly as written
+  there. Never hedge an hours question: the hours in the practice facts are
+  the practice's own, and every other line states them. (An earlier version
+  of this section withheld the exact times because the table was thought to
+  disagree with live data; on 2026-10-01 the operator rang this line, asked
+  when an office opens, was told "I don't want to give you the wrong time for
+  that office", and confirmed every office keeps the same hours.)
 
 NEVER file a ticket whose only content is "caller asked about office hours".
 A ticket is for something a human must DO.
@@ -1492,7 +2202,7 @@ For healthcare provider calls — escalate immediately with whatever info you ha
        */
       caller_type: z
         .enum(["patient_urgent_medical", "healthcare_provider"])
-        .describe("patient_urgent_medical=a true eye emergency happening now, healthcare_provider=a doctor, nurse, hospital, ER or clinic calling about a patient. There is no third option: if you could not understand the caller or could not collect a detail, that is create_ticket, never this tool."),
+        .describe("patient_urgent_medical=a true eye emergency happening now, healthcare_provider=a doctor, nurse, hospital, ER, clinic or medical laboratory (never an optical lab) calling about a patient, and ONLY when the caller has said so in their own words (asking for a doctor by name, or for an operator, does not make someone a provider: ask which office or facility they are calling from first). There is no third option: if you could not understand the caller or could not collect a detail, that is create_ticket, never this tool."),
       patient_first_name: z.string().optional().describe("Patient first name if collected"),
       patient_last_name: z.string().optional().describe("Patient last name if collected"),
       patient_dob: z.string().optional().describe("Patient date of birth if collected"),
@@ -1541,24 +2251,38 @@ For healthcare provider calls — escalate immediately with whatever info you ha
        * needless transfer costs a phone call and a wrongly refused one could
        * cost somebody their sight.
        */
+      // What the caller actually said, so a symptom the AGENT supplied
+      // cannot page the on-call provider. See symptomCorroboration.
+      const corroboration = corroborate(
+        callId,
+        [params.reason, params.symptoms_summary].filter(Boolean).join(' '),
+      );
       const verdict = judgeEscalation({
         callerType: params.caller_type,
         reason: params.reason,
         symptomsSummary: params.symptoms_summary,
         providerInfo: params.provider_info,
-        // What the caller actually said, so a symptom the AGENT supplied
-        // cannot page the on-call provider. See symptomCorroboration.
-        corroboration: corroborate(callId, [params.reason, params.symptoms_summary].filter(Boolean).join(' ')),
+        corroboration,
       });
       if (!verdict.allowed) {
         console.warn(
           `[HANDOFF] escalation refused for ${callId} — ${verdict.code}: ${params.reason?.substring(0, 120)}`,
         );
-        return { success: false, refused: verdict.code, message: verdict.directive };
+        // A REFUSED ESCALATION FILES THE TICKET — see the rules above
+        // CATEGORY_TO_REQUEST_TYPE. The directive alone was a sentence the
+        // model could ignore, and on 3 of 9 refusals in fourteen days it did.
+        const filed = await fileRefusedEscalationTicket(params, verdict.code, corroboration.unsupported);
+        const number: 'gave' | 'callerId' | 'none' = knownNumber(params.callback_number)
+          ? 'gave'
+          : knownNumber(metadata.callerPhone)
+            ? 'callerId'
+            : 'none';
+        return refusedEscalationResult({ code: verdict.code, filed, number });
       }
       console.info(`[HANDOFF] escalation sanctioned for ${callId} — basis: ${verdict.basis}`);
 
       const escalationDetails = {
+        agentSlug: 'no-ivr',
         reason: params.reason,
         callerType: params.caller_type,
         patientFirstName: params.patient_first_name,
@@ -1583,9 +2307,15 @@ For healthcare provider calls — escalate immediately with whatever info you ha
         void (async () => {
           try {
             const { SyncAgentService } = await import("../services/syncAgentService");
-            const name = [params.patient_first_name, params.patient_last_name]
-              .filter(Boolean).join(' ').trim() || 'Unknown Caller';
+            const { fullName: name, standIn } = nameOrStandIn(params.patient_first_name, params.patient_last_name);
             const phone = normalizePhoneNumber(params.callback_number || metadata.callerPhone || '');
+            // A refusal earlier on this call may already have filed a ticket under
+            // the call's key; the record must not be swallowed by it (Codex P1,
+            // #339). See transferRecordCrossReference.
+            const earlier = refusedEscalationTicketFor(callId);
+            const notes = [earlier ? transferRecordCrossReference(earlier) : null, standIn ? STAND_IN_NAME_NOTE : null]
+              .filter(Boolean)
+              .join('\n');
             const result = await SyncAgentService.submitSimplifiedTicket({
               patientFullName: name,
               patientDOB: params.patient_dob || 'Unknown',
@@ -1602,6 +2332,19 @@ For healthcare provider calls — escalate immediately with whatever info you ha
               // provider calling about a patient. The 'medium' branch existed
               // solely for patient_unresponsive, which no longer exists.
               priority: 'urgent',
+              // PINNED TO AFTER HOURS, which is what the mandate above says and
+              // what this payload never did: with no department named the app
+              // classified the description, and of the 54 record tickets traced
+              // 2026-08-11..10-09 only 32 landed in After Hours — 22 went to
+              // Technicians, the HVA Hub, Surgery and elsewhere, and 9 more
+              // classified as Surgery were REFUSED for a surgeon. A supplied
+              // department wins over the derivation (resolveSuppliedDepartment)
+              // and the surgeon gate is department 2's alone. No reason hint:
+              // the app refuses 159 as a hint by design (a disposition, not a
+              // request reason), so the description still picks the reason.
+              departmentId: AFTER_HOURS_ROUTE_DEPARTMENT_ID,
+              ...(notes ? { additionalDetails: notes } : {}),
+              ...(earlier ? { secondTicketOnThisCall: { keySuffix: 'urgent-transfer' } } : {}),
               callSid: metadata.callSid,
               callerPhone: metadata.callerPhone,
               dialedNumber: metadata.dialedNumber,
@@ -1611,7 +2354,9 @@ For healthcare provider calls — escalate immediately with whatever info you ha
               // path above. The post-call update carries the complete one.
             });
             if (result.success) {
-              console.info(`[HANDOFF] ✓ Urgent transfer record ticket: ${result.ticketNumber}`);
+              console.info(
+                `[HANDOFF] ✓ Urgent transfer record ticket: ${result.ticketNumber}${earlier ? ` (beside ${earlier.ticketNumber})` : ''}`,
+              );
             } else {
               console.error(`[HANDOFF] ✗ Urgent transfer record ticket failed: ${result.error}`);
             }
@@ -1658,9 +2403,11 @@ For healthcare provider calls — escalate immediately with whatever info you ha
 
   console.log(`[${agentTag}] ✓ Agent created with tools:`, [
     "lookup_schedule",
+    "check_open_tickets",
     "emit_decision",
     "create_ticket",
     "escalate_to_human",
+    "terminate_call",
   ]);
   console.log(`[${agentTag}] ✓ Version: ${versionString}`);
 
@@ -1680,4 +2427,10 @@ export const noIvrAgentConfig = {
   greeting: "Thank you for calling Azul Vision, all of our offices are currently closed, you have reached the after hours call service. If this is a medical emergency, please dial 911. All calls are being recorded for quality assurance purposes, how can I help you?",
   voice: "sage",
   language: "en", // Default to English - prompt handles language detection/switching
+  /** The languages this line SPEAKS. An old-core-era rule the operator has
+   *  not revisited: English and Spanish only, any other language answered in
+   *  English. On the runtime this renders into the pipeline's own language
+   *  block (src/runtime/languageMechanism.ts); the queue lanes declare no
+   *  list and follow the caller into any language. */
+  spokenLanguages: ["en", "es"] as const,
 };

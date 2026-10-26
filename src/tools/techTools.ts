@@ -26,8 +26,12 @@
  *
  * NO HANDOFF. Operator ruling 2026-08-12: only PCP and Scheduling transfer.
  */
-import { registerTool, missing, type ToolResult } from './registry';
+import { registerTool, missing, refuseDob, dobRefusalCopy, type ToolResult } from './registry';
 import { str, isTwilioCallSid, normalizePhone } from './sharedPatientTools';
+import { decideDobEscape, dobStatusNote, dobEscapeMarker, type DobStatus } from './dobEscape';
+import { createTicketDurable, postFailureToolResult } from '../services/durableTicketFiling';
+import { loggableLookupError } from '../services/loggableTicketingError';
+import { verifiedDobFor } from './verifiedIdentity';
 
 // ---------------------------------------------------------------- what kind
 
@@ -69,7 +73,8 @@ registerTool({
       request_reason_id: classification.requestReasonId,
       ...(isCatchAll
         ? {
-            message:
+            // For the model, not the caller — `message` is what gets spoken.
+            fix:
               'Nothing matched, so this is filed as "Other - See Description". That is a ' +
               'real category, not a guess — but it means the description is the only thing ' +
               'the team has. Make sure it says what they actually asked for.',
@@ -94,9 +99,24 @@ registerTool({
   input_schema: {
     type: 'object',
     properties: {
-      first_name: { type: 'string', description: "Patient's first name.", askAs: 'Can I get the first name?' },
-      last_name: { type: 'string', description: "Patient's last name.", askAs: 'And the last name?' },
-      date_of_birth: { type: 'string', description: 'Any spoken format.', askAs: 'And the date of birth?' },
+      first_name: { type: 'string', description: "Patient's first name.", askAs: 'May I please have the first name?' },
+      last_name: { type: 'string', description: "Patient's last name.", askAs: 'May I please have the last name?' },
+      /**
+       * LEAD THE ASK, AND ALWAYS SEND IT BACK. Two separate 2026-09-03 findings
+       * in one field; see sharedPatientTools for the operator's wording.
+       *
+       * The ORDER in the question is the guard — *"if you just say can I have
+       * your date of birth, people give it to you in any format they want"*.
+       *
+       * The description is the other half. dobShape went live at 23:18 and the
+       * first three filing calls after it all recorded "(none)": the model was
+       * not sending this field AT ALL. Those three filed anyway because
+       * lookup_patient had made a certain match and the handler fell back to the
+       * verified record — which is exactly why the loss looked random. It stays
+       * out of `required` (validateInput refuses before the handler, and that
+       * would kill the fallback), so the description is where it gets said.
+       */
+      date_of_birth: { type: 'string', description: 'What the caller said, exactly as they said it. ALWAYS pass this when they have given it — leaving it out is what refuses the ticket.', askAs: 'And may I please have the date of birth, starting with the month, then the day, then the year?' },
       callback_number: { type: 'string', description: 'Best number to reach them.', askAs: 'What is the best number to reach you?' },
       request_description: { type: 'string', description: 'What they need, in their words.', askAs: 'What can we help you with?' },
       request_reason_id: { type: 'string', description: 'From classify_tech_request.' },
@@ -109,7 +129,20 @@ registerTool({
       caller_phone: { type: 'string', description: 'The number they called from.' },
       dialed_number: { type: 'string', description: 'The number they dialled.' },
     },
-    required: ['first_name', 'last_name', 'date_of_birth', 'callback_number', 'request_description'],
+    /**
+     * `date_of_birth` is NOT in this list, and the gate on it is unchanged.
+     *
+     * `validateInput` refuses before the handler runs, so while it sat here the
+     * handler could never consult the record `lookup_patient` had already
+     * matched — and the caller was asked for a date of birth the process was
+     * holding. 45 calls in the fourteen days to 2026-09-01 were refused for one
+     * and ended with no ticket; on 23 of them the patient had already been
+     * identified.
+     *
+     * The handler still refuses when it has neither the caller's answer nor a
+     * verified record for that same name, in the same words as before.
+     */
+    required: ['first_name', 'last_name', 'callback_number', 'request_description'],
   },
   handler: async (input): Promise<ToolResult> => {
     const first = str(input.first_name);
@@ -186,11 +219,92 @@ registerTool({
     const cleanProvider = sanitizeProviderName(str(input.provider)).value;
     const cleanLocation = sanitizeLocationName(str(input.location)).value;
 
-    const { ticketingApiClient } = await import('../../server/services/ticketingApiClient');
+    const { ticketingApiClient, lookupWasUnavailable } = await import(
+      '../../server/services/ticketingApiClient'
+    );
     const { normalizeDobParts } = await import('./dobParts');
-    const parts = normalizeDobParts(dob);
+    let parts = normalizeDobParts(dob);
     if (!parts) {
-      return missing(['date_of_birth'], 'I did not catch that date of birth — month, day and year?');
+      /**
+       * ASK ONCE, NOT TWICE. Operator instruction, 2026-09-01: *"if we do our
+       * job and validate and pass the patient records along, you will not have
+       * this issue."*
+       *
+       * `lookup_patient` found this caller — it does on 95% of queue calls —
+       * and the service returned their date of birth with the match. Nothing
+       * carried it here, so the agent asked for something the process already
+       * held, and 45 calls in fourteen days ended with no ticket because the
+       * caller could not answer. On 23 of those we already knew who they were.
+       *
+       * Only ever for the SAME NAME as the verified match, and only from a
+       * match the lookup was certain about. See verifiedIdentity.ts.
+       */
+      const known = verifiedDobFor(callSid, first, last);
+      parts = known ? normalizeDobParts(known) : null;
+      if (parts) {
+        // No name in the log line: this is the one place a masked identifier
+        // would still be the patient.
+        console.info('[tech] date of birth taken from the verified record for this call');
+      }
+    }
+    if (!parts) {
+      /**
+       * THE CALLER ALREADY ANSWERED — STOP DEPENDING ON THE MODEL TO RELAY IT.
+       *
+       * 2026-09-08, the queue lanes, one full business day: 75 substantive
+       * calls hit this gate and 53 of them filed nothing. It is the single
+       * biggest cause of a call producing no ticket, and the measurement says
+       * the gate is not where it fails:
+       *
+       *  - On 75 of 75, the model called this tool with NO `date_of_birth`
+       *    argument at all. `dobShape` reads "(none)" on every refusal, across
+       *    surgery, tech and optical.
+       *  - In 51 of the 75, the caller's own transcribed words contain a birth
+       *    year or a month name. They answered the question that was asked.
+       *  - In 42 of the 75 the refusal is the LAST TOOL CALL OF THE CALL, so
+       *    the ask-once-then-file escape below never gets its second attempt.
+       *    It is unreachable in the majority of cases.
+       *
+       * The two sources above both go through the model or the record. This
+       * one does not: it is what the caller said on this call, taken from the
+       * transcript the bridge was already keeping and nothing else could see.
+       *
+       * ONLY FROM THE TURN THAT ANSWERED THE QUESTION. A caller says surgery
+       * dates and appointment dates too, and filing a wrong birthday is worse
+       * than filing none — see spokenDob.ts for the adjacency rule and what it
+       * still cannot catch.
+       */
+      const { spokenDobFor } = await import('./spokenDob');
+      const heard = spokenDobFor(callSid);
+      parts = heard ? normalizeDobParts(heard) : null;
+      if (parts) {
+        // The line names neither the value nor the patient, for the same
+        // reason as the one above it.
+        console.info('[tech] date of birth taken from what the caller said on this call');
+      }
+    }
+    /**
+     * ASK ONCE, THEN FILE IT ANYWAY. Operator ruling 2026-09-04, and the same
+     * ruling he gave for optical's office on 2026-09-01. The measurement that
+     * settles it: the location gate has this escape and recovered 9 of 11; this
+     * gate did not and recovered 0 of 23. See dobEscape.ts.
+     */
+    let dobStatus: DobStatus | null = null;
+    if (!parts) {
+      const escape = decideDobEscape(callSid, 'file_tech_ticket', dob);
+      if (escape.askAgain) {
+        /**
+         * The first refusal only, and it carries BOTH channels: `message` is
+         * the coaching line the agent says, `fix` is what the model itself got
+         * wrong. The two branches of `fix` need OPPOSITE corrections — telling
+         * the model "ask the caller again" when it simply omitted the argument
+         * is what built the loop.
+         */
+        const copy = dobRefusalCopy(dob);
+        return refuseDob(callSid, first, last, copy.message, copy.fix);
+      }
+      dobStatus = escape.status;
+      console.info(dobEscapeMarker('file_tech_ticket', dobStatus, callSid));
     }
 
     // Resolve the prescriber and office to ids when we have names. Not a gate:
@@ -203,12 +317,62 @@ registerTool({
             ...(cleanProvider ? { providerName: cleanProvider } : {}),
             ...(cleanLocation ? { locationName: cleanLocation } : {}),
           })
-        : { providerId: undefined, locationId: undefined, locationMatches: [] };
+        : // Nothing to look up. That is a ran-and-matched-nothing, not an
+          // outage — say so explicitly so `lookupWasUnavailable` cannot read
+          // a bare object as a failure.
+          {
+            success: true,
+            outcome: 'no_match' as const,
+            providerId: undefined,
+            locationId: undefined,
+            locationMatches: [],
+            error: undefined,
+          };
+
+    /**
+     * A LOOKUP THAT NEVER RAN IS NOT A PRESCRIBER WHO DOES NOT EXIST.
+     *
+     * `lookupProviderAndLocation` used to catch its own error and answer
+     * `{success:false}` — the same shape as a name that matched nobody. Optical
+     * read only `locationId`, collapsed the two, and on 2026-08-31 told 43
+     * callers their real office did not exist; see `LookupOutcome` in
+     * ticketingApiClient. This queue never told anyone anything, which is its
+     * own failure: a prescriber the caller named correctly went in the bin with
+     * no trace, on the queue that files 103 tickets a day and cannot work a
+     * refill without somebody to sign it.
+     *
+     * Nothing here refuses. The module header is explicit that the prescriber
+     * is not a gate, and a caller sent away because they cannot name their
+     * doctor is not recoverable. So the request is taken exactly as before, and
+     * what changes is that the loss is visible: the caller's words still travel
+     * in `lastProviderSeen` / `locationOfLastVisit`, the ids are omitted rather
+     * than sent null, this logs loudly, and the priority is raised so a
+     * technician sees a ticket that needs a name resolved.
+     *
+     * NOT in the description — that becomes the body of a patient-facing SMS,
+     * and `docs/BACKEND_HANDOFF.md` lists annotating it under changes that made
+     * things worse. There is no staff-notes field on `CreateTicketParams`.
+     */
+    const lookupUnavailable = lookupWasUnavailable(lookup);
+    const lostToOutage =
+      lookupUnavailable &&
+      ((Boolean(cleanProvider) && !lookup.providerId) ||
+        (Boolean(cleanLocation) && !lookup.locationId));
+    if (lostToOutage) {
+      console.error(
+        `[tech] ✗ PROVIDER LOOKUP UNAVAILABLE — filing ` +
+          `'${cleanProvider || cleanLocation}' with no id. This ticket needs manual ` +
+          `assignment. Cause: ${loggableLookupError(lookup)}`,
+      );
+    }
 
     // Sight-preserving medication. A patient out of glaucoma drops is not a
     // routine refill: pressure rises within days and the damage does not come
     // back. The practice gave it its own reason; this gives it its own urgency.
-    const priority = cls.requestReasonId === 155 ? 'high' : 'medium';
+    //
+    // An outage raises it too, for the reason above — never for a name the
+    // lookup ran and rejected, which is an ordinary fact about the call.
+    const priority = cls.requestReasonId === 155 || lostToOutage ? 'high' : 'medium';
 
     // ONE ENDPOINT, ALWAYS. create-ticket, with the department stated.
     // Never submit-ticket: it re-derives the DEPARTMENT server-side and
@@ -232,6 +396,32 @@ registerTool({
     const filedDescription = redirect
       ? `${redirect.note}\n\n${cleanDescription.value}`
       : cleanDescription.value;
+    /**
+     * THE STATUS GOES FIRST, ABOVE THE CALLER'S OWN WORDS.
+     *
+     * Operator, 2026-09-04: *"where date of birth would be, you just put
+     * unavailable or unmatched, so this way we know what was happening."*
+     * It cannot go in the birth columns — they are varchar(2)/(2)/(4) — so it
+     * goes where staff actually look, and first, because the point is that
+     * nobody matches this to a chart without checking the recording.
+     */
+    /**
+     * THE STATUS DOES NOT GO IN THE DESCRIPTION.
+     *
+     * That field becomes the body of a patient-facing SMS — `opticalTools`
+     * sanitizes it to GSM-7 for exactly that reason, and BACKEND_HANDOFF
+     * section 6 lists "annotating unrouted tickets in description" among the
+     * changes caught in review. Prepending "Confirm identity from the call
+     * recording before matching this to a chart" would have texted the
+     * caller an instruction meant for staff (Codex, PR #268 round 5).
+     *
+     * The operator's ruling — *"where date of birth would be, you just put
+     * unavailable or unmatched, so this way we know what was happening"* —
+     * is about STAFF knowing. `callData` carries it to the ticket's own
+     * call-metadata columns, which no message to the patient reads.
+     */
+    const filedDescriptionWithDobStatus = filedDescription;
+    const dobStaffNote = dobStatus ? dobStatusNote(dobStatus) : undefined;
     if (redirect) {
       console.info(
         `[tech] routed to ${redirect.departmentName} (dept ${redirect.departmentId}) — ` +
@@ -239,7 +429,7 @@ registerTool({
       );
     }
 
-    const res = await ticketingApiClient.createTicket({
+    const res = await createTicketDurable({
       departmentId: filedDepartmentId,
       requestTypeId: filedTypeId,
       requestReasonId: filedReasonId,
@@ -256,23 +446,36 @@ registerTool({
       patientPhone: normalizePhone(phone),
       patientEmail: str(input.email) || undefined,
       preferredContactMethod: 'phone',
-      patientBirthMonth: parts.month,
-      patientBirthDay: parts.day,
-      patientBirthYear: parts.year,
+      // Omitted entirely when the escape was taken. create-ticket takes these
+      // as optional (traced 2026-09-03), and the columns are varchar(2)/(2)/(4)
+      // so a word like "unavailable" could not be stored there even if we tried
+      // — the status rides in the description instead, which is what staff read.
+      ...(parts
+        ? {
+            patientBirthMonth: parts.month,
+            patientBirthDay: parts.day,
+            patientBirthYear: parts.year,
+          }
+        : {}),
       ...(lookup.providerId ? { providerId: lookup.providerId } : {}),
       ...(lookup.locationId ? { locationId: lookup.locationId } : {}),
       ...(cleanLocation ? { locationOfLastVisit: cleanLocation } : {}),
       lastProviderSeen: cleanProvider || undefined,
-      description: filedDescription,
+      description: filedDescriptionWithDobStatus,
       priority,
-      callData: { agentUsed: 'tech', ...(callSid ? { callSid } : {}) },
+      callData: {
+        agentUsed: 'tech',
+        ...(callSid ? { callSid } : {}),
+        // Staff-only. Never the description — that is an SMS body.
+        ...(dobStaffNote ? { transcript: dobStaffNote } : {}),
+      },
       // Guarded: callSid can be a sentinel ("unknown", "latest", ...), never
       // a real Twilio SID, when the retry lands on someone else's key.
       ...(isTwilioCallSid(callSid) ? { idempotencyKey: `call-${callSid}` } : {}),
     });
 
     if (!res.success || !res.ticketNumber) {
-      return { success: false, error: res.error ?? 'ticket creation failed', retryable: true };
+      return postFailureToolResult(res, 'file_tech_ticket');
     }
 
     return {

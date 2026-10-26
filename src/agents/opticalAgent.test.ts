@@ -1,11 +1,17 @@
 /**
  * The Optical agent: what it can do, and what it must never claim it can do.
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 vi.hoisted(() => {
   process.env.DATABASE_URL ??= 'postgres://test:test@127.0.0.1:5432/test';
 });
+
+// Adapter assertions exercise context injection, not timeline persistence.
+// Even a stubbed dispatch otherwise triggers a real database write at teardown.
+vi.mock('../services/toolTimeline', () => ({
+  recordingExecute: (_ctx: unknown, _name: string, fn: (input: unknown) => Promise<string>) => fn,
+}));
 
 import {
   buildOpticalPrompt,
@@ -13,10 +19,16 @@ import {
   opticalAgentConfig,
   OPTICAL_TOOLS,
 } from './opticalAgent';
-import { manifest } from '../tools/registry';
+import * as registry from '../tools/registry';
+
+const { manifest } = registry;
 
 beforeEach(() => {
   vi.spyOn(console, 'info').mockImplementation(() => {});
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
 });
 
 describe('it cannot transfer, and must not imply that it can', () => {
@@ -32,13 +44,38 @@ describe('it cannot transfer, and must not imply that it can', () => {
     for (const name of OPTICAL_TOOLS) {
       expect(name).not.toMatch(/transfer|handoff|escalat|human|operator/i);
     }
+    /**
+     * FIVE SINCE v77. The count is pinned so a tool cannot join this lane
+     * unnoticed — which is what it caught on 2026-09-03, when the sixth was
+     * `set_spoken_language`. That tool is the PIPELINE's now: the runtime
+     * binds it to every lane (laneRegistry RUNTIME_OWNED_TOOLS, asserted in
+     * src/runtime/promptShapeIsTheDocs.test.ts), so this list stops naming
+     * it. It retargets the provider's speech recognition and nothing else —
+     * it cannot move the call, cannot reach a person, and cannot promise one,
+     * so it never weakened standing instruction 9. The pattern above is the
+     * guard that matters; this is the tripwire.
+     */
     expect(OPTICAL_TOOLS).toHaveLength(5);
+    expect(OPTICAL_TOOLS).not.toContain('set_spoken_language');
   });
 
   it('is told to say so plainly and offer the callback instead', () => {
-    expect(prompt).toMatch(/not able to transfer you/i);
-    expect(prompt).toMatch(/call you back/i);
-    expect(prompt).toMatch(/never say you will\s*\n?\s*put them through/i);
+    /**
+     * Matched on MEANING, not on one sentence. These were three literal regexes
+     * until 2026-09-03, when the operator ruled the reply must say it cannot
+     * transfer AND that a request is raised for staff to follow up. Rewording to
+     * carry that ruling broke two of the three, which is a guard failing on the
+     * phrasing rather than on the promise — the mistake queuePromptRulings.ts
+     * was written to avoid. So: the promise, however it is worded.
+     */
+    expect(prompt).toMatch(/not\s+able\s+to\s+transfer\s+(you|calls)|cannot\s+transfer/i);
+    // What it offers INSTEAD — a callback, or a request raised for staff.
+    expect(prompt).toMatch(/call\s+you\s+back|follow\s+up\s+with\s+you/i);
+    // Standing instruction 9: a transfer it cannot make must never be promised.
+    expect(prompt).toMatch(/never\s+say\s+you\s+will\s+put\s+them\s+through/i);
+    // The 2026-09-03 ruling's second half, absent before it.
+    expect(prompt).toMatch(/take\s+a\s+message/i);
+    expect(prompt).toMatch(/put\s+in\s+a\s+request/i);
   });
 
   it('is built without a handoff callback wired to anything', async () => {
@@ -156,6 +193,8 @@ describe('what it tells the caller about themselves', () => {
     const p = buildOpticalPrompt({});
     expect(p).toMatch(/identity_is_certain is false/);
     expect(p).toMatch(/do not read their history\s*\n?\s*back/i);
+    expect(p).toContain('ask as above');
+    expect(p).toContain('CALL lookup_patient AGAIN');
   });
 
   it('is told never to emit markdown, because it is spoken aloud', () => {
@@ -196,10 +235,73 @@ describe('caller recognition — credibility, not cosmetics', () => {
     expect(matched).toMatch(/NEVER open with "can I get your name and date of birth"/i);
   });
 
-  it('still treats the match as a hint, not as verification', () => {
-    expect(matched).toMatch(/A first name is not verification/i);
-    expect(matched).toMatch(/still collect the date of birth/i);
-    expect(matched).toMatch(/matched the WRONG person/i);
+  /**
+   * THIS ASSERTION WAS REVERSED ON 2026-09-15, ON THE OPERATOR'S APPROVAL, AND
+   * THE OLD FORM IS KEPT HERE SO THE REVERSAL IS READABLE.
+   *
+   * It used to demand "A first name is not verification ... still collect the
+   * date of birth". The INTENT was RULE ZERO step 2 — validate a phone match
+   * before trusting it — and the implementation inverted the outcome: the
+   * caller's spoken surname went to `verifiedDobFor`'s name guard, which reads
+   * ANY textual difference as the wrong person. A confirmation mechanism
+   * became a rejection mechanism, and the patient lost a date of birth the
+   * process was already holding.
+   *
+   * Measured on the 30 certain-phone date-of-birth refusals of 2026-09-14
+   * (`src/tools/dobNameMismatch.test.ts`, the corpus): 24 were greeted by
+   * name, 19 of those were asked for their last name anyway, and 27 of 30
+   * were asked for both a name and a date of birth.
+   *
+   * THE VALIDATION DID NOT GO AWAY — it moved to the answer the greeting's own
+   * question already collects. Over the same period 228 callers affirmed it
+   * and 13 denied it, so it discriminates. A denial still discards the match
+   * entirely, which is the half that was always right and is asserted below.
+   */
+  it('takes the greeting\u2019s own answer as the validation, and drops the match on a denial', () => {
+    expect(matched).toMatch(/If they said YES, the identity step is DONE/i);
+    expect(matched).toMatch(/Do not ask for their last name/i);
+    expect(matched).toMatch(/matched the WRONG\s+person/i);
+    expect(matched).toMatch(/ignore this block from then on/i);
+  });
+
+  /**
+   * CURSOR SECOND-PASS ON #310. The block and the ask script agreed; How a
+   * call runs still said identity_is_certain false means collect last name
+   * and date of birth. After #292 that flag is also a unique phone hit.
+   */
+  it('does not tell a recognised caller that a false flag means re-collect last name and DOB', () => {
+    expect(matched).toMatch(/Do not collect their last name/);
+    // Whitespace-tolerant across the wrap only; the phrase is unchanged.
+    expect(matched).toMatch(/do not\s+collect their date\s+of\s+birth/);
+    expect(matched).not.toContain('Collect their last name and date of birth');
+    // Denial still has the words — the ask script keeps them.
+    expect(matched).toContain('May I please have your last name?');
+  });
+
+  /**
+   * CODEX P1 ON #311, ROUND 2, ASSERTED ON THE BUILT PROMPT.
+   *
+   * This block used to assert the prompt says false is "NOT more than one
+   * person". That claim is FALSE unconditionally: on the found:true path with
+   * identityUnconfirmed false, false means exactly more than one person, the
+   * warning says so, and the record returned is "only the most recently seen
+   * of them". Asserting the withdrawn claim would pin the bug.
+   *
+   * The conditional property is what belongs here, and on the BUILT prompt
+   * rather than only on the helper — a helper-only test stayed green while
+   * `How a call runs` carried the contradiction, which is how #310 shipped
+   * with it.
+   */
+  it('routes an ambiguous lookup to the ask and only the unconfirmed one to the record', () => {
+    expect(matched).toMatch(/Several or different people on file/);
+    expect(matched).toMatch(/means ASK/);
+    expect(matched).toMatch(/ONLY "nobody has confirmed the caller\s+is that person"/);
+    expect(matched).not.toMatch(/that is NOT\s+more than one person/);
+    expect(matched).not.toMatch(/false does NOT mean more than one person/);
+    const several = matched.search(/Several or different people on file/);
+    const ban = matched.search(/Do not collect their last name/);
+    expect(several).toBeGreaterThan(-1);
+    expect(several).toBeLessThan(ban);
   });
 
   it('says nothing about recognition when the number matches nobody', () => {
@@ -252,8 +354,9 @@ describe('the call id must not depend on the model remembering it', () => {
   // to the call, so the recording, transcript and summary are not late, they
   // are unattachable forever.
   it('injects call_sid, caller_phone and dialed_number into every tool', async () => {
-    const { runTool } = await import('../tools/registry');
-    const spy = vi.spyOn(await import('../tools/registry'), 'runTool');
+    // This is an adapter/context test, not an integration test of the ticketing
+    // service. A bare spy still executes the real handler (and its network I/O).
+    const spy = vi.spyOn(registry, 'runTool').mockResolvedValue({ success: true });
 
     const agent = await createOpticalAgent(undefined, {
       callId: 'call-1',
@@ -280,18 +383,39 @@ describe('the call id must not depend on the model remembering it', () => {
     expect(passed.call_sid, 'a null from the model must not blank the injected id').toBe('CAreal123');
     expect(passed.caller_phone).toBe('8455317471');
     expect(passed.dialed_number).toBe('8186193692');
-    void runTool;
+    expect(spy).toHaveBeenCalledWith('file_optical_ticket', expect.any(Object));
   });
 
-  it('falls back to callId when there is no callSid', async () => {
-    const spy = vi.spyOn(await import('../tools/registry'), 'runTool');
+  /**
+   * REVERSED 2026-09-01, and the old assertion is quoted here so the change is
+   * not mistaken for a regression: this used to require `call_sid` to fall back
+   * to the OpenAI call id when no Twilio SID was known.
+   *
+   * The fallback value is a uuid. It fails isTwilioCallSid, so the ticket goes
+   * out with no idempotency key; it matches no ticket in the post-call
+   * enrichment endpoint; and since 2026-09-01 it gives the outbox no key
+   * either. It is exactly as useless as sending nothing, and it looks like an
+   * identifier in the logs, which is worse — it made "we never had a SID"
+   * uncountable.
+   *
+   * The concern the old test encoded is real and is still covered by the test
+   * above: a null from the model must not blank the injected id. That is a
+   * different thing from inventing one.
+   */
+  it('sends no call_sid at all rather than an id that is not a Twilio SID', async () => {
+    const spy = vi.spyOn(registry, 'runTool').mockResolvedValue({ success: true });
     const agent = await createOpticalAgent(undefined, { callId: 'call-only' });
     const t = ((agent as { tools?: Array<{ name: string; invoke?: Function }> }).tools ?? []).find(
       (x) => x.name === 'check_open_tickets',
     );
     await t!.invoke?.({} as never, JSON.stringify({ phone: '845-531-7471' }));
     const calls = spy.mock.calls;
-    expect((calls[calls.length - 1][1] as Record<string, unknown>).call_sid).toBe('call-only');
+    const passed = calls[calls.length - 1][1] as Record<string, unknown>;
+    expect(spy).toHaveBeenCalledWith('check_open_tickets', expect.any(Object));
+    expect(passed.call_sid).toBeUndefined();
+    // The call is still identified where identification actually works — the
+    // telemetry carries callId, and the timeline row is keyed on callLogId.
+    expect(passed.phone).toBe('845-531-7471');
   });
 });
 
@@ -316,7 +440,11 @@ describe('what the operator heard on a live call', () => {
   it('gives it a line to say before the silence, not after', () => {
     expect(live).toMatch(/NEVER GO SILENT WHILE FILING/);
     expect(live).toMatch(/Let me get this logged for you/);
-    expect(live).toMatch(/FIRST, then file/);
+    // The ORDER is the ruling: the line first, then the filing. The wording
+    // after FIRST changed in v97 — "then file quietly" was read aloud by
+    // grok-voice-3.0 as "Quietly filing." on 15 of 62 offline calls.
+    expect(live).toMatch(/FIRST, then call the\s+filing tool/);
+    expect(live).not.toMatch(/file\s+quietly/i);
   });
 
   it('does not call patients "customers"', () => {

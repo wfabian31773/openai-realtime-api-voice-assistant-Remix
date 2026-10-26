@@ -210,3 +210,51 @@ describe('rampEngine — PCP full rails (professional end-to-end)', () => {
     expect(s.line).toContain("I'll make sure that gets to the right team");
   });
 });
+
+/**
+ * A CALLBACK NUMBER THAT CANNOT BE SPOKEN IS COLLECTED, NOT CONFIRMED —
+ * Codex P2 on #321 round 3. v40 stopped the ramp SAYING "ending in \"mous\""
+ * by asking for a number instead, but both branches had already set
+ * CONFIRM_CALLBACK, so the ten digits the caller then gave were parsed as a
+ * yes/no, rejected, and after a second try the ramp disengaged with nothing
+ * stored. The state has to move with the line.
+ */
+describe('rampEngine — an unspeakable caller ID is collected, not confirmed', () => {
+  beforeEach(() => { clearAllLedgers(); releaseRamp('u'); releaseRamp('v'); });
+
+  it('patient path (TAKE_MESSAGE): asks for a number in COLLECT_CALLBACK, and the digits land', async () => {
+    seedLedger('u', { matchedFirstName: 'Ana', matchedLastName: 'Diaz', callerPhone: 'anonymous', callbackNumber: 'anonymous' });
+    startRamp('u', 'full_rails');
+    await onCallerUtterance('u', 'calling about my glasses order', verifyYes);
+    await onCallerUtterance('u', 'yes', verifyYes);
+    await onCallerUtterance('u', '5/10/1983', verifyYes);
+    let s = await onCallerUtterance('u', 'my glasses order status please', verifyYes);
+    expect(s.line).toBe(RAMP_LINES.collectCallback);
+    expect(s.status.state).toBe('COLLECT_CALLBACK');
+    s = await onCallerUtterance('u', '760-555-9999', verifyYes);
+    expect(getLedger('u')!.callbackNumber).toContain('7605559999');
+    expect(s.line).toContain('create_ticket');
+    expect(rampActive('u')).toBe(false);
+  });
+
+  it('professional path (COLLECT_CALLER): the same', async () => {
+    seedLedger('v', { callerPhone: 'anonymous', callbackNumber: 'anonymous' });
+    startRamp('v', 'professional');
+    await onCallerUtterance('v', 'I need a status on a referral', verifyYes);
+    let s = await onCallerUtterance('v', 'This is Dana from Example Medical Group', verifyYes);
+    expect(s.line).toBe(RAMP_LINES.collectCallback);
+    expect(s.status.state).toBe('COLLECT_CALLBACK');
+    s = await onCallerUtterance('v', '760 555 9999', verifyYes);
+    expect(getLedger('v')!.callbackNumber).toContain('7605559999');
+    expect(rampActive('v')).toBe(false);
+  });
+
+  it('a speakable number is still CONFIRMED, not re-collected — the control', async () => {
+    seedLedger('v', { callerPhone: '+17605552000', callbackNumber: '+17605552000' });
+    startRamp('v', 'professional');
+    await onCallerUtterance('v', 'I need a status on a referral', verifyYes);
+    const s = await onCallerUtterance('v', 'This is Dana from Example Medical Group', verifyYes);
+    expect(s.status.state).toBe('CONFIRM_CALLBACK');
+    expect(s.line).toBe(RAMP_LINES.confirmCallback('2000'));
+  });
+});

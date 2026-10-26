@@ -256,6 +256,38 @@ export function getGreeterOpeningGreeting(language: 'english' | 'spanish' = 'eng
 /**
  * Format phone number for display (last 4 digits)
  */
+/**
+ * THE LAST FOUR DIGITS, OR NOTHING — and "nothing" is the point.
+ *
+ * `formatPhoneLast4` returns `''` when there is nothing usable, which reads as
+ * a value at a template call site and gets SPOKEN. Two live examples from
+ * 2026-09-16:
+ *
+ *   "The number ending in ."                    (pcp, said three times in one call)
+ *   "Is this number ending in \"mous\" the best one to reach you?"   (no-ivr)
+ *
+ * The second one is `"anonymous".slice(-4)`. A withheld or blocked caller ID
+ * does not arrive as an empty string — it arrives as a WORD, so a truthiness
+ * check on `callerPhone` passes and the raw slice produces four letters. The
+ * first is the same shape with the digits stripped to nothing.
+ *
+ * Returning `null` is what forces the call site to have the other branch, which
+ * is always "ask them for the number" — the fork `knowledgeBase.ts:283` and the
+ * v18 `handoff_not_eligible_no_callback` copy already write correctly
+ * elsewhere. A caller confirming a number nobody holds produces a request that
+ * cannot be called back, which is the one outcome that branch exists to stop
+ * (standing instruction 12).
+ *
+ * TEN DIGITS, not four. Four was enough to make `formatPhoneLast4` safe against
+ * an empty string and is not enough to make it safe against a short code, an
+ * extension or a partial ANI — none of which can be rung back. Eleven-digit
+ * E.164 with a leading 1 is the normal case here and passes.
+ */
+export function speakableLast4(phone: string | null | undefined): string | null {
+  const digits = String(phone ?? '').replace(/\D/g, '');
+  return digits.length >= 10 ? digits.slice(-4) : null;
+}
+
 export function formatPhoneLast4(phone: string): string {
   if (!phone) return '';
   const digits = phone.replace(/\D/g, '');

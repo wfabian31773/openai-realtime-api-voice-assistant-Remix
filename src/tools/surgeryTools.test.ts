@@ -333,7 +333,10 @@ describe('what it refuses, and what it does not', () => {
     })) as Record<string, unknown>;
 
     expect(out.success).toBe(false);
-    expect(String(out.error)).toMatch(/Validation failed/);
+    // A failure is reported, never the app's own text (v116, thread
+    // PRRT_kwDORVukLs6vzltO on #371: that text can name the record's office).
+    expect(String(out.error)).toMatch(/withheld/);
+    expect(String(out.error)).not.toMatch(/Validation failed/);
     expect(out.retryable).toBe(true);
   });
 });
@@ -653,4 +656,245 @@ describe('the ladder cannot outrun the tool it lives in', () => {
     // And the ticket still files.
     expect(create).toHaveBeenCalledOnce();
   }, 30000);
+});
+
+/**
+ * THE 2026-08-31 OUTAGE, ON DEPARTMENT 2.
+ *
+ * `lookupProviderAndLocation` used to catch its own error and return
+ * `{success:false}` — byte-identical to what it returns for a name that
+ * matched nobody. Optical read only `locationId`, collapsed the two, and told
+ * 43 callers their real office did not exist; one call ran 19 tool calls over
+ * 8 minutes. Optical was fixed on 2026-09-01. Surgery had the same conflation
+ * in a quieter place: the `SURGEON DID NOT RESOLVE` log fires for both states,
+ * so an outage and an unknown surgeon leave the same trace and the same
+ * medium-priority unrouted ticket.
+ *
+ * Dept 2 routes BY SURGEON. A ticket the outage left unrouted is a manual
+ * NextGen lookup nobody volunteers for (operator, 2026-08-18), so it has to
+ * be visible as such — and the two signals are the ones optical already uses:
+ * the caller's own words kept in `lastProviderSeen`, and a raised priority.
+ * Never the description: `docs/BACKEND_HANDOFF.md` lists annotating an
+ * unrouted ticket's description under changes that made things worse, because
+ * that field becomes the body of a patient-facing SMS.
+ */
+describe('a lookup that never ran is not a surgeon who does not exist', () => {
+  it('takes the request and surfaces it when the lookup service is down', async () => {
+    const api = await client();
+    // The verbatim shape of a lookup that threw and was swallowed. Every rung
+    // of the ladder gets the same answer, because the service is down.
+    vi.spyOn(api, 'lookupProviderAndLocation').mockResolvedValue({
+      success: false,
+      outcome: 'unavailable',
+      error: 'Invalid JSON response from ticketing API: 200',
+    } as never);
+    const create = vi
+      .spyOn(api, 'createTicket')
+      .mockResolvedValueOnce({ success: true, ticketNumber: 'VA-SURG-OUTAGE' } as never);
+    const errors: string[] = [];
+    vi.spyOn(console, 'error').mockImplementation((...a: unknown[]) => {
+      errors.push(a.map(String).join(' '));
+    });
+
+    const out = (await runTool('file_surgery_ticket', {
+      ...BASE,
+      surgeon: 'Dwayne Logan, MD',
+      location: 'Eastvale',
+      request_description: 'what time should I arrive on Thursday',
+    })) as Record<string, unknown>;
+
+    // The caller named their surgeon correctly. Nothing they said is in doubt,
+    // so nothing they said may be questioned back at them.
+    expect(out.success).toBe(true);
+    expect((out.missingFields as string[] | undefined) ?? []).not.toContain('surgeon');
+    expect(JSON.stringify(out)).not.toMatch(/not find|no such|not finding|do not have a/i);
+
+    // The request is TAKEN. Losing it is the worse outcome — a call ends in a
+    // ticket, never in nothing.
+    expect(create).toHaveBeenCalledTimes(1);
+    const filed = create.mock.calls[0][0] as unknown as Record<string, unknown>;
+
+    // The caller's own words survive in the text field this queue already
+    // reads, so the manual step is "resolve this name", not "ring them back".
+    expect(filed.lastProviderSeen).toBe('Dwayne Logan'); // sanitizeProviderName drops the credential suffix
+    expect(filed.locationOfLastVisit).toBe('Eastvale');
+    // OMITTED, never sent null — null is what files a ticket unassigned.
+    expect(filed).not.toHaveProperty('providerId');
+    expect(filed).not.toHaveProperty('locationId');
+    // Raised, so an unrouted dept-2 ticket is not sitting at the bottom of a
+    // queue view sorted by priority. Asserted on the payload, because a
+    // comment in optical once claimed a raise the payload never sent.
+    expect(filed.priority).toBe('high');
+    // The instruction to staff does not go in patient-readable free text.
+    expect(String(filed.description)).not.toMatch(/unavailable|unrouted|assign|lookup/i);
+
+    // Greppable, and distinct from the unknown-surgeon log below — an outage
+    // that leaves the same trace as a bad name is an outage nobody finds.
+    expect(errors.join('\n')).toMatch(/SURGEON LOOKUP UNAVAILABLE/);
+  }, 30000);
+
+  /**
+   * THE CONTROL, and the behaviour that must NOT regress.
+   *
+   * Here the lookup RAN and matched nobody. That is not a transient error and
+   * it is not the caller's problem to solve either: surgery does not gate on a
+   * surgeon (see 'files WITHOUT a location' above and the module header — only
+   * optical refuses, because dept 1 assigns BY location), so this files
+   * unrouted at its normal priority with the existing loud log. Turning this
+   * into a refusal would relinquish a caller, which the operator's rulings in
+   * docs/BACKEND_HANDOFF.md forbid outright.
+   */
+  it('files a surgeon the lookup ran and matched to nothing exactly as before', async () => {
+    const api = await client();
+    vi.spyOn(api, 'lookupProviderAndLocation').mockResolvedValue({
+      success: true,
+      outcome: 'no_match',
+      providerId: undefined,
+      locationMatches: [],
+    } as never);
+    const create = vi
+      .spyOn(api, 'createTicket')
+      .mockResolvedValueOnce({ success: true, ticketNumber: 'VA-SURG-NOMATCH' } as never);
+    const errors: string[] = [];
+    vi.spyOn(console, 'error').mockImplementation((...a: unknown[]) => {
+      errors.push(a.map(String).join(' '));
+    });
+
+    const out = (await runTool('file_surgery_ticket', {
+      ...BASE,
+      surgeon: 'Doctor Nobody',
+      request_description: 'what time should I arrive on Thursday',
+    })) as Record<string, unknown>;
+
+    expect(out.success).toBe(true);
+    expect(create).toHaveBeenCalledTimes(1);
+    const filed = create.mock.calls[0][0] as unknown as Record<string, unknown>;
+    expect(filed).not.toHaveProperty('providerId');
+    // NOT raised. A name that matches nobody is an ordinary fact about the
+    // call; raising every one of them would make the raise mean nothing.
+    expect(filed.priority).toBe('medium');
+    // The existing signal, unchanged.
+    expect(errors.join('\n')).toMatch(/SURGEON DID NOT RESOLVE/);
+    // And emphatically NOT the outage marker — that is the whole point of
+    // having two.
+    expect(errors.join('\n')).not.toMatch(/SURGEON LOOKUP UNAVAILABLE/);
+  }, 30000);
+});
+
+/**
+ * THE CALLER'S OWN ANSWER, WHEN THE MODEL DID NOT RELAY IT.
+ *
+ * 2026-09-08: 75 substantive queue calls hit the date-of-birth gate and 53
+ * filed nothing. On 75 of 75 the model called the filing tool with NO
+ * `date_of_birth` argument — `dobShape` reads "(none)" on every refusal — while
+ * in 51 of them the caller's transcribed words contain the answer.
+ *
+ * These prove the THIRD source is actually reached and actually used, rather
+ * than that the store can hold a string. The store has its own suite in
+ * spokenDob.test.ts; what is under test here is the chain.
+ */
+describe('the date of birth the caller said, when the model sent none', () => {
+  const SID = 'CA0000000000000000000000000000dead';
+  const ASKED_AND_ANSWERED = [
+    'AGENT: May I have your date of birth?',
+    'CALLER: March 17th, 1973.',
+  ];
+
+  beforeEach(async () => {
+    (await import('./spokenDob')).resetSpokenDobs();
+    /**
+     * The escape counts refusals per CallSid, so without this a test that
+     * refuses hands the NEXT test its second refusal — and the second refusal
+     * files anyway. That is the escape working as designed, but it makes these
+     * tests depend on the order they run in, which is how a mutation gets to
+     * hide behind a green suite.
+     */
+    (await import('./dobEscape')).resetDobHistory();
+  });
+
+  it('files, instead of refusing, when the transcript holds the answer', async () => {
+    const { noteSpokenDob } = await import('./spokenDob');
+    noteSpokenDob(SID, ASKED_AND_ANSWERED);
+
+    const api = await client();
+    const create = vi
+      .spyOn(api, 'createTicket')
+      .mockResolvedValueOnce({ success: true, ticketNumber: 'VA-TEST-DOB' } as never);
+
+    const { date_of_birth: _omitted, ...noDob } = BASE;
+    const out = (await runTool('file_surgery_ticket', {
+      ...noDob,
+      call_sid: SID,
+      request_description: 'I need to move my cataract surgery',
+    })) as Record<string, unknown>;
+
+    expect(out.success).toBe(true);
+    const sent = create.mock.calls[0][0];
+    expect(sent.patientBirthYear).toBe('1973');
+    expect(sent.patientBirthMonth).toBe('03');
+    expect(sent.patientBirthDay).toBe('17');
+  });
+
+  it('still refuses when the caller never answered — this is not a way to skip the gate', async () => {
+    const { noteSpokenDob } = await import('./spokenDob');
+    // The caller talked about a date, but not in answer to being asked for one.
+    noteSpokenDob(SID, [
+      'AGENT: What can I help you with?',
+      'CALLER: My surgery was on March 17th, 1973.',
+    ]);
+
+    const api = await client();
+    const create = vi.spyOn(api, 'createTicket');
+
+    const { date_of_birth: _omitted, ...noDob } = BASE;
+    const out = (await runTool('file_surgery_ticket', {
+      ...noDob,
+      call_sid: SID,
+      request_description: 'I need to move my cataract surgery',
+    })) as Record<string, unknown>;
+
+    expect(out.success).toBe(false);
+    expect(out.missingFields).toContain('date_of_birth');
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it('never reads one call\'s answer on another call', async () => {
+    const { noteSpokenDob } = await import('./spokenDob');
+    noteSpokenDob(SID, ASKED_AND_ANSWERED);
+
+    const api = await client();
+    const create = vi.spyOn(api, 'createTicket');
+
+    const { date_of_birth: _omitted, ...noDob } = BASE;
+    const out = (await runTool('file_surgery_ticket', {
+      ...noDob,
+      call_sid: 'CA0000000000000000000000000000beef',
+      request_description: 'I need to move my cataract surgery',
+    })) as Record<string, unknown>;
+
+    expect(out.success).toBe(false);
+    expect(out.missingFields).toContain('date_of_birth');
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it('the date the model DID send still wins — this only fills a gap', async () => {
+    const { noteSpokenDob } = await import('./spokenDob');
+    // A stale or misheard line in the record must never overwrite the
+    // argument the model actually sent.
+    noteSpokenDob(SID, ['AGENT: May I have your date of birth?', 'CALLER: May 8th, 1939.']);
+
+    const api = await client();
+    const create = vi
+      .spyOn(api, 'createTicket')
+      .mockResolvedValueOnce({ success: true, ticketNumber: 'VA-TEST-DOB2' } as never);
+
+    const out = (await runTool('file_surgery_ticket', {
+      ...BASE,
+      call_sid: SID,
+      request_description: 'I need to move my cataract surgery',
+    })) as Record<string, unknown>;
+
+    expect(out.success).toBe(true);
+    expect(create.mock.calls[0][0].patientBirthYear).toBe('1973');
+  });
 });

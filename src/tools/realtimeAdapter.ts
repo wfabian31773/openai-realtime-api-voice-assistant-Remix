@@ -12,8 +12,8 @@
  * platform calls over HTTP are the same code path.
  */
 import { tool } from '@openai/agents/realtime';
-import { getTool, runTool } from './registry';
-import { recordingExecute, flushAzulTimeline } from '../services/toolTimeline';
+import { getTool, runTool, type ToolDefinition } from './registry';
+import { recordingExecute } from '../services/toolTimeline';
 
 /**
  * Who is calling, for the tool timeline.
@@ -30,6 +30,44 @@ export interface ToolTelemetry {
   readonly callLogId?: string;
   /** The queue, so a call's tools can be attributed to the line that took it. */
   agentSlug: string;
+}
+
+/**
+ * House metadata that must never reach the model — Codex round 7, P1-B's other
+ * half.
+ *
+ * `askAs` is the sentence `validateInput` speaks when a REQUIRED field is
+ * absent; it is a contract between the tool and the agent's mouth, not part of
+ * the JSON Schema. `parameters` used to spread `input_schema` whole, so every
+ * `askAs` in the library travelled to the model as an extra property on the
+ * field — documentation it can read and act on.
+ *
+ * THE CASE THAT FOUND IT: `lookup_patient.patient_status` carries
+ * *"Are you a new patient or an existing patient?"*, and that question reached
+ * the RECORDS model, which round 5 deliberately stopped asking it because its
+ * caller is a proxy on 42% of calls. A records agent nudged into asking it opens
+ * a status window in which a proxy's "New." — describing themselves — suppresses
+ * the lookup for the PATIENT whose chart they rang about.
+ *
+ * Stripped HERE rather than at that one field, because the house convention is
+ * that every field HAS an `askAs` (`sharedPatientTools.test.ts`) — so the field
+ * was right and the transport was wrong, and fixing the transport closes the
+ * leak for every tool at once. Only the properties are rewritten; nothing else
+ * about the schema moves.
+ */
+const INTERNAL_PROPERTY_KEYS = ['askAs'] as const;
+
+export function stripInternalKeys(
+  schema: ToolDefinition['input_schema'],
+): ToolDefinition['input_schema'] {
+  const properties = Object.fromEntries(
+    Object.entries(schema.properties ?? {}).map(([field, def]) => {
+      const kept = { ...(def as Record<string, unknown>) };
+      for (const k of INTERNAL_PROPERTY_KEYS) delete kept[k];
+      return [field, kept];
+    }),
+  );
+  return { ...schema, properties } as ToolDefinition['input_schema'];
 }
 
 /**
@@ -115,7 +153,7 @@ export function realtimeToolsFor(
       // instead of hearing that the system is broken. That refusal contract is
       // the whole point of the library and it was unreachable.
       parameters: {
-        ...def.input_schema,
+        ...stripInternalKeys(def.input_schema),
         // Strict-adjacent hygiene, independent of the strict flag: never let a
         // model invent a field the handler will silently ignore.
         additionalProperties: false,
@@ -149,7 +187,58 @@ export function realtimeToolsFor(
         const started = Date.now();
         console.info(`[TOOLS] → ${def.name} (${telemetry?.agentSlug ?? 'no-slug'})`);
         try {
-          const result = await runTool(def.name, { ...context, ...supplied });
+          /**
+           * THE PROCESS WINS THE FIELDS IT SUPPLIED.
+           *
+           * This used to be `{ ...context, ...supplied }` — the model's
+           * arguments on top — and the comment above explained why: an unset
+           * argument arrives as null under strict mode and would blank what we
+           * injected. Filtering nulls out of `supplied` fixed that case and
+           * left the one that mattered.
+           *
+           * `call_sid` is a declared property on all four filing tools ("The
+           * call id, so a retry cannot double-file"), so the model emits it —
+           * and it emits a guess. Measured in the ticketing app's
+           * voice_agent_api_logs: 130 surgery create-ticket POSTs between
+           * 2026-08-24 and 2026-09-01 carried callData.callSid = "unknown",
+           * plus optical's seven, and "none", "undefined", "N/A", "latest",
+           * "automated_xxx_placeholder". Every one of those calls has a real
+           * CA-prefixed SID on its call_logs row; all 2,926 queue calls in the
+           * window do. Nothing was missing, it was overwritten.
+           *
+           * A payload carrying "unknown" fails isTwilioCallSid, so it goes out
+           * with no idempotency key: no duplicate protection, nothing for the
+           * post-call enrichment endpoint to match, and no outbox key. With a
+           * real SID duplicate filing is 3 calls in 2,086; without one there is
+           * no defence at all.
+           *
+           * Only DEFINED context values win, so a context that does not know
+           * the caller's phone does not blank the one the model was told.
+           */
+          const injected = Object.fromEntries(
+            Object.entries(context).filter(([, v]) => v !== null && v !== undefined),
+          );
+          /**
+           * DEPLOY MARKER, and a live counter for the same defect.
+           *
+           * This line only appears when the model actually tried to overwrite a
+           * value the process holds — so its presence proves the new build is
+           * running, and its rate is the measurement of how often the old merge
+           * was corrupting a payload. Expect it on the surgery line first: 130
+           * POSTs in nine days carried callSid "unknown".
+           *
+           * Key names only, plus the offending value for `call_sid` alone —
+           * a CallSid is not a patient, a phone number is.
+           */
+          for (const [k, v] of Object.entries(injected)) {
+            if (k in supplied && supplied[k] !== v) {
+              console.info(
+                `[TOOLS] ${def.name}: kept the call's ${k}` +
+                  (k === 'call_sid' ? ` over the model's "${String(supplied[k]).slice(0, 40)}"` : ''),
+              );
+            }
+          }
+          const result = await runTool(def.name, { ...supplied, ...injected });
           const outcome =
             result.success === true
               ? 'ok'
@@ -158,21 +247,22 @@ export function realtimeToolsFor(
                 : `error:${(result as { error: string }).error}`;
           console.info(`[TOOLS] ← ${def.name} ${Date.now() - started}ms ${outcome}`);
 
-          // PERSIST NOW, not at hangup.
+          // PERSIST NOW, not at hangup — and that happens in `recordingExecute`,
+          // which WRAPS this function, so there is nothing to do here.
           //
-          // The timeline reaches the database only when the call ends and
-          // flushes. A tool still running at that moment leaves no record at
-          // all — and `file_surgery_ticket` has a 30s budget while a caller who
-          // has just been told there is a problem hangs up in about that long.
-          // Four consecutive live calls produced three tool events and nothing
-          // for the fourth, which reads identically to "never called" and cost
-          // most of a day.
+          // There used to be a `void flushTimelineSafely(telemetry)` on this
+          // line, and it was one tool behind for its whole life: this body runs
+          // INSIDE `recordingExecute`, which records the event only AFTER the
+          // body returns, so a flush fired here persisted the PREVIOUS tools'
+          // events and never this one. The last tool of every call reached the
+          // database through the 2h reaper or not at all — the shape that cost
+          // most of a day when four consecutive live calls produced three tool
+          // events and nothing for the fourth.
           //
-          // Flushing per tool makes the record independent of how long the call
-          // survives. It is safe to call repeatedly: the flush writes a
-          // superset and is idempotent by event count, and it never throws into
-          // the caller — a telemetry failure must not break a patient's call.
-          void flushTimelineSafely(telemetry);
+          // Moving it into the recorder fixes that ordering and, more
+          // importantly, gives the same durability to pcp, no-ivr and
+          // answering-service, which build their tools by hand and never
+          // reached this file at all.
 
           return JSON.stringify(result);
         } catch (err) {
@@ -217,20 +307,4 @@ function wrapWithTelemetry(
     name,
     execute,
   );
-}
-
-/**
- * Write the timeline out now, and never let that failure reach the call.
- *
- * Keyed on whichever id the recorder registered the entry under; the flush
- * falls back to scanning by callSid or callLogId, so either works.
- */
-async function flushTimelineSafely(telemetry: ToolTelemetry | undefined): Promise<void> {
-  const key = telemetry?.callId ?? telemetry?.callSid;
-  if (!key) return;
-  try {
-    await flushAzulTimeline(key);
-  } catch (e) {
-    console.warn('[TOOLS] timeline flush failed (call unaffected):', e);
-  }
 }

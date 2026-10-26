@@ -1,0 +1,189 @@
+/**
+ * AN ALARM THAT ONLY WRITES TO THE CONSOLE HAS NOT ALERTED ANYONE.
+ *
+ * Codex, PR #244 round seven. The note at the top of `systemAlertService`
+ * says alerts "still record to logs and alertHistory, they just don't go to a
+ * phone". That was true of the three callers that push the event themselves,
+ * and false of the generic `sendAlert` path — which is the one the
+ * ticket-filing alarm uses.
+ *
+ * So the outcome for a critical filing outage was: SMS suppressed (off since
+ * 2026-07-27, by operator decision, after it sent one every 15 minutes for
+ * hours), email still a TODO, and nothing in `alertHistory` for any interface
+ * to read back. Two console lines.
+ *
+ * This pins the recording half. WHERE a filing-stopped alert should actually
+ * be delivered is an operator decision and is not made here — enabling SMS
+ * would silently reverse the 07-27 ruling.
+ *
+ * Read as source text: this module imports the database at load, so it cannot
+ * be imported in a unit test without a live DATABASE_URL (that is the same
+ * reason `p0Hardening.test.ts` is the suite's known baseline failure).
+ */
+import { describe, it, expect } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { shouldEmailAlert } from './alertEmail';
+
+const source = readFileSync(new URL('./systemAlertService.ts', import.meta.url), 'utf8');
+// Anchored at the method signature, not at a comment inside it: round eight
+// moved the recording ABOVE the cooldown check, and a slice that started at
+// "// Check hourly limit" no longer contained the line it was asserting on.
+const sendAlert = source.slice(
+  source.indexOf('private async sendAlert'),
+  source.indexOf('private async sendSmsAlert'),
+);
+
+describe('sendAlert records what it was asked to send', () => {
+  it('pushes the event to alertHistory', () => {
+    // The Observatory renders alertHistory. Without this the alarm is
+    // invisible to every surface except a log tail.
+    expect(sendAlert).toMatch(/this\.alertHistory\.push\(event\)/);
+  });
+
+  it('records ABOVE the cooldown and hourly-limit returns', () => {
+    // Round eight moved this up. Suppression is a decision about DELIVERY; an
+    // alert dropped for being the fourth this hour is exactly the one an
+    // operator later needs to find. Below the returns it was lost entirely.
+    const pushAt = sendAlert.indexOf('this.alertHistory.push(event)');
+    const cooldownAt = sendAlert.indexOf('Skipping alert (cooldown)');
+    const hourlyAt = sendAlert.indexOf('Skipping alert (hourly limit)');
+    const smsAt = sendAlert.indexOf('await this.sendSmsAlert(event)');
+    const emailAt = sendAlert.indexOf('await this.sendEmailAlert(event)');
+    for (const [name, at] of [['cooldown', cooldownAt], ['hourly', hourlyAt], ['sms', smsAt], ['email', emailAt]] as const) {
+      expect(at, name).toBeGreaterThan(-1);
+      expect(pushAt, name).toBeLessThan(at);
+    }
+  });
+
+  it('records each alert exactly once', () => {
+    // Round seven added the push here while three callers were already pushing
+    // their own, so every delivered alert landed twice — inflating
+    // getAlertStats() and eating the ten-event recent window. The two callers
+    // that always reach sendAlert now leave the recording to it.
+    const always = source.slice(source.indexOf('async recordCallLogFailure'), source.indexOf('private async sendAlert'));
+    expect(always).not.toMatch(/alertHistory\.push/);
+    expect(always.match(/await this\.sendAlert\(event\)/g) ?? []).toHaveLength(2);
+  });
+
+  it('still records a sub-threshold database failure, which never alerts at all', () => {
+    // recordDatabaseFailure is the one caller that can record WITHOUT calling
+    // sendAlert — below FAILURE_THRESHOLD it deliberately does not wake anyone,
+    // and dropping its push to de-duplicate would have lost that history.
+    const dbFailure = source.slice(
+      source.indexOf('async recordDatabaseFailure'),
+      source.indexOf('recordDatabaseSuccess'),
+    );
+    expect(dbFailure).toMatch(/consecutiveFailures >= FAILURE_THRESHOLD/);
+    expect(dbFailure).toMatch(/\} else \{[\s\S]*alertHistory\.push\(event\)/);
+    // And exactly one push — in the else branch, not before the if.
+    expect(dbFailure.match(/alertHistory\.push/g) ?? []).toHaveLength(1);
+  });
+
+  it('leaves the SMS default alone — that ruling is the operator\'s', () => {
+    // 2026-07-27: engineering telemetry to a personal phone buried the one
+    // message that mattered. Re-enabling it here would reverse that silently.
+    expect(source).toMatch(/SYSTEM_ALERT_SMS_ENABLED = process\.env\.SYSTEM_ALERT_SMS_ENABLED === 'true'/);
+  });
+});
+
+/**
+ * AND THE EMAIL SITS BELOW THE GATES — operator, 2026-09-02: *"for the alert,
+ * email me at wfabian@azulvision.com, use the same route we use for invites
+ * and such."*
+ *
+ * WHAT the email says and WHO it goes to are pure functions in `alertEmail.ts`
+ * and are tested by being run (`alertEmail.test.ts`). The only thing that can
+ * be checked here is placement, because this module cannot be imported without
+ * a live DATABASE_URL — so it is checked against the cooldown and hourly
+ * returns by position, which is a structural fact rather than a phrase.
+ */
+describe('a critical alert reaches an inbox', () => {
+  it('sends the email from inside sendAlert', () => {
+    expect(sendAlert).toMatch(/await this\.sendEmailAlert\(event\)/);
+  });
+
+  it('sends it AFTER the cooldown and hourly-limit returns, not before', () => {
+    // The 2026-07-27 ruling was about volume: one text every fifteen minutes
+    // for hours, burying the message that mattered. Above these returns, email
+    // would reproduce exactly that in an inbox.
+    const emailAt = sendAlert.indexOf('await this.sendEmailAlert(event)');
+    const cooldownAt = sendAlert.indexOf('Skipping alert (cooldown)');
+    const hourlyAt = sendAlert.indexOf('Skipping alert (hourly limit)');
+    expect(emailAt).toBeGreaterThan(-1);
+    expect(emailAt).toBeGreaterThan(cooldownAt);
+    expect(emailAt).toBeGreaterThan(hourlyAt);
+  });
+
+  it('no longer says email is a later problem', () => {
+    // The TODO Codex quoted. It described the state that left a filing outage
+    // reaching nobody.
+    expect(source).not.toMatch(/email integration can be added later/);
+  });
+});
+
+/**
+ * A TERMINAL 4xx IS FOLLOW-UP, NOT A STALL — 2026-09-25.
+ *
+ * checkTicketFilingAlert used to send ticket_filing_stalled for any
+ * dead_letter. The notice must run on every tick, including a healthy one,
+ * and it must not go through sendAlert or a row is lost to the cooldown.
+ */
+describe('terminal refusals are notified beside the filing alarm, not through it', () => {
+  const check = source.slice(
+    source.indexOf('async checkTicketFilingAlert'),
+    source.indexOf('startTicketFilingSchedule'),
+  );
+
+  it('always calls notifyTerminalRefusals, including when the verdict is not stalled', () => {
+    expect(check).toMatch(/notifyTerminalRefusals/);
+    const notifyAt = check.indexOf('await notifyTerminalRefusals()');
+    const snapshotMissAt = check.indexOf('if (!snapshot)');
+    const stallAt = check.indexOf('if (!verdict.stalled)');
+    const sendAt = check.indexOf('await this.sendAlert');
+    expect(notifyAt).toBeGreaterThan(-1);
+    // A call_logs blip must not skip a notice that only needs ticket_outbox.
+    expect(snapshotMissAt).toBeGreaterThan(notifyAt);
+    expect(stallAt).toBeGreaterThan(notifyAt);
+    expect(sendAt).toBeGreaterThan(stallAt);
+  });
+
+  it('does not send the follow-up through sendAlert', () => {
+    expect(check).not.toMatch(/ticket_needs_followup/);
+    expect(check).not.toMatch(/sendAlert\(\{[\s\S]*ticket_needs_followup/);
+  });
+
+  it('the boot line names the split so a failed pull is visible', () => {
+    expect(source).toMatch(
+      /Starting ticket-filing alarm \(every 5 minutes; a terminal 4xx is follow-up, not a stall\)/,
+    );
+  });
+});
+
+describe('the ticketing-app liveness watcher is removed', () => {
+  it('does not schedule the watcher at startup, while still scheduling ticket filing', () => {
+    const startup = readFileSync(new URL('../../src/server.ts', import.meta.url), 'utf8');
+    expect(startup).not.toMatch(/startTicketingAppLivenessSchedule|checkTicketingAppLiveness/);
+    expect(startup).toMatch(/systemAlertService\.startTicketFilingSchedule\(\)/);
+  });
+
+  it('has no watcher methods, state, imports, or alert types in the alert service', () => {
+    expect(source).not.toMatch(/ticketingAppLiveness|ticketingLiveness|livenessCheckInFlight/);
+    expect(source).not.toMatch(/ticketing_app_liveness|TICKETING_APP_DATABASE_URL/);
+    expect(source).toMatch(/startTicketFilingSchedule/);
+    expect(source).toMatch(/type: 'ticket_filing_stalled'/);
+  });
+
+  it('forbids both former liveness emails while leaving the filing alarm email enabled', () => {
+    for (const type of ['ticketing_app_liveness', 'ticketing_app_liveness_recovered']) {
+      for (const severity of ['critical', 'warning', 'info']) {
+        expect(shouldEmailAlert(type, severity)).toBe(false);
+      }
+    }
+    expect(shouldEmailAlert('ticket_filing_stalled', 'critical')).toBe(true);
+  });
+
+  it('still treats failed SMTP delivery as undelivered', () => {
+    expect(sendAlert).toMatch(/const emailed = await this\.sendEmailAlert/);
+    expect(sendAlert).toMatch(/if \(!emailed\) return false/);
+  });
+});

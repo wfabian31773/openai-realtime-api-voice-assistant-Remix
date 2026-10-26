@@ -1,7 +1,10 @@
-import { useQuery } from '@tanstack/react-query'
-import { useEffect, useRef, useState } from 'react'
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useEffect, useState } from 'react'
 import apiClient from '@/lib/apiClient'
+import { describePipeline } from '@/lib/pipelineSplit'
+import { briefCorrectionNotice, briefNeighbours } from '@/lib/briefDayPicker'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { Button } from '@/components/ui/button'
 import {
   Telescope,
   Database,
@@ -135,6 +138,10 @@ interface OpsHubTodayAgent {
   activeNow: number
   criticalsToday: number
   qualityToday: number | null
+  /** voice_provider = 'grok' — the Media Streams runtime. */
+  runtimeCallsToday: number
+  /** voice_provider NULL — the OpenAI SIP core. */
+  legacyCallsToday: number
   outcomesToday: Record<string, number>
 }
 interface SageActiveCall {
@@ -157,6 +164,31 @@ interface SageToday {
 interface TodayOverview {
   opsHub: OpsHubTodayAgent[]
   sage: SageToday
+  /** Epoch ms of the newest call_logs row — null if none. Lets the page say
+   * "logging is down" instead of showing silent zeros on every card. */
+  lastCallLogAtMs?: number | null
+  /** The same guard for the ticket path, which had none until 2026-09-01.
+   * Thresholds and their derivation: server/services/ticketFilingHealth.ts. */
+  ticketFiling?: {
+    stalled: boolean
+    reason: string | null
+    unfiledRun: number
+    lastFiledAtMs: number | null
+    minutesSinceLastFiled: number | null
+    outboxHeld: number
+    outboxTerminalDeadLetter?: number
+  } | null
+}
+
+interface UnresolvedOutboxRow {
+  id: string
+  callSid: string | null
+  createdAt: string
+  lastError: string | null
+  refusalStatusCode: number | null
+  kind: 'terminal' | 'transport'
+  departmentId: string
+  agentUsed: string
 }
 interface BriefAgentMetric {
   agentId: string
@@ -194,6 +226,8 @@ interface DailyBriefPayload {
       }
     | { error: string }
   syncReds: Array<{ name: string; ageHours: number | null; detail: string | null }>
+  /** Set only by a backfill that corrected the stored day; loose on purpose. */
+  correction?: { label?: string; reason?: string; correctedAt?: string; [key: string]: unknown }
 }
 interface BriefBundle {
   today: DailyBriefPayload
@@ -202,6 +236,8 @@ interface BriefBundle {
   baselineDate: string | null
   daysTracked: number
   history: Array<{ briefDate: string; totalCriticalCalls: number; totalCalls: number }>
+  availableDates: string[]
+  selectedDate: string
 }
 interface LiveOpsCall {
   id: string
@@ -214,6 +250,15 @@ interface LiveOpsCall {
   createdAt: string
   agentUsed: string | null
   transcript: string | null
+}
+
+interface CarrierActiveCall {
+  conferenceSid: string
+  conferenceName: string
+  callSid: string | null
+  status: string
+  dateCreated: string
+  participantCount: number
 }
 
 interface GraderCheckStat {
@@ -380,6 +425,36 @@ function adherenceTone(a: number | null, sampled: number): Tone {
   if (a >= 0.9) return 'green'
   if (a >= 0.6) return 'amber'
   return 'red'
+}
+
+/**
+ * WHICH PIPELINE SERVED THESE CALLS.
+ *
+ * The Observatory had no idea `voice_provider` existed. Three lanes moved to
+ * the Media Streams runtime on 2026-09-03 at three separate moments, records
+ * deliberately stayed on the OpenAI SIP core as the same-day control, and
+ * none of that was visible on the one screen built to watch these agents — a
+ * card reading "tech: 100 calls" cannot tell you which stack you are looking
+ * at, and during a cutover that is the only question worth asking.
+ *
+ * Renders nothing when a lane is entirely on one pipeline and idle, and says
+ * "mixed" plainly when a lane cut over mid-day, because that is precisely the
+ * day whose numbers must not be read as one population.
+ */
+function PipelineLine({ runtime, legacy }: { runtime: number; legacy: number }) {
+  const { kind, label } = describePipeline({ runtime, legacy })
+  if (kind === 'idle') return null
+  return (
+    <p
+      className={
+        kind === 'mixed'
+          ? 'text-xs font-medium text-amber-700 dark:text-amber-400'
+          : 'text-xs text-muted-foreground'
+      }
+    >
+      {label}
+    </p>
+  )
 }
 
 function StatusDot({ tone }: { tone: Tone }) {
@@ -1589,8 +1664,23 @@ function CommandCenterTab({
 }) {
   const live = useQuery<{ data: LiveOpsCall[] }>({
     queryKey: ['obs-live-ops'],
+    // startDate ceiling: a row still "live" after 30 min is stale bookkeeping,
+    // not a call — p99.9 call duration is ~26 min and the coordinator
+    // force-terminates at 25. Keeps zombie rows (e.g. the 52-hour ones from
+    // the 2026-08-24 DB restart) off the board even before the sweeper runs.
     queryFn: async () =>
-      (await apiClient.get('/call-logs?status=in_progress,ringing,initiated&limit=50')).data,
+      (
+        await apiClient.get(
+          `/call-logs?status=in_progress,ringing,initiated&limit=50&startDate=${new Date(
+            Date.now() - 30 * 60 * 1000,
+          ).toISOString()}`,
+        )
+      ).data,
+    refetchInterval: 3000,
+  })
+  const carrierLive = useQuery<{ success: boolean; calls: CarrierActiveCall[] }>({
+    queryKey: ['obs-carrier-live'],
+    queryFn: async () => (await apiClient.get('/monitoring/active-calls')).data,
     refetchInterval: 3000,
   })
   const today = useQuery<TodayOverview>({
@@ -1598,10 +1688,37 @@ function CommandCenterTab({
     queryFn: async () => (await apiClient.get('/observatory/today')).data,
     refetchInterval: 15_000,
   })
+  const queryClient = useQueryClient()
+  const unresolvedOutbox = useQuery<{ rows: UnresolvedOutboxRow[] }>({
+    queryKey: ['obs-outbox-unresolved'],
+    queryFn: async () => (await apiClient.get('/ticket-outbox/unresolved')).data,
+    refetchInterval: 15_000,
+    retry: false,
+  })
+  const resolveOutbox = useMutation({
+    mutationFn: async (id: string) =>
+      (await apiClient.post(`/ticket-outbox/${id}/resolve`, { note: 'Resolved from Observatory' })).data,
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['obs-outbox-unresolved'] })
+      void queryClient.invalidateQueries({ queryKey: ['obs-today'] })
+    },
+  })
 
-  const activeOps = (live.data?.data ?? []).filter((c) =>
-    ['in_progress', 'ringing', 'initiated'].includes(c.status),
+  // "Live" must be confirmed by the carrier. A database row can miss its
+  // completion callback and remain in_progress indefinitely; that produced
+  // false 90-minute calls in Observatory on 2026-08-24.
+  const carrierLiveSids = new Set(
+    (carrierLive.data?.calls ?? [])
+      .filter((call) => call.participantCount > 0 && call.callSid)
+      .map((call) => call.callSid),
   )
+  const activeOps = carrierLive.data
+    ? (live.data?.data ?? []).filter(
+        (c) =>
+          ['in_progress', 'ringing', 'initiated'].includes(c.status) &&
+          Boolean(c.callSid && carrierLiveSids.has(c.callSid)),
+      )
+    : []
   const sage = today.data?.sage
   const sageOk = sage && !sage.error
   const totalLive = activeOps.length + (sageOk ? sage.activeNow : 0)
@@ -1614,9 +1731,12 @@ function CommandCenterTab({
           <span className={`h-3 w-3 rounded-full ${totalLive ? 'animate-pulse bg-red-500' : 'bg-gray-400'}`} />
           Live now — {totalLive} call{totalLive === 1 ? '' : 's'}
         </h2>
-        {live.isError && (
+        {(live.isError || carrierLive.isError) && (
           <p className="text-sm text-red-600">
-            Live feed failed: {(live.error as any)?.response?.data?.error ?? String(live.error)}
+            Live feed failed:{' '}
+            {(carrierLive.error as any)?.response?.data?.error ??
+              (live.error as any)?.response?.data?.error ??
+              String(carrierLive.error ?? live.error)}
           </p>
         )}
         <div className="space-y-2">
@@ -1651,7 +1771,7 @@ function CommandCenterTab({
                 </div>
               </div>
             ))}
-          {!totalLive && !live.isLoading && (
+          {!totalLive && !live.isLoading && !carrierLive.isLoading && (
             <p className="rounded-lg border border-dashed p-4 text-sm text-muted-foreground">
               No calls in progress. This section lights up the moment any line rings — every agent, with live
               transcript and a listen-in button.
@@ -1665,6 +1785,92 @@ function CommandCenterTab({
       {/* Today per agent */}
       <div>
         <h2 className="mb-2 text-lg font-semibold">Today — every agent at a glance</h2>
+        {(() => {
+          // Call-logging staleness guard (2026-08-24 incident: every card read
+          // zero for two days because the voice process stopped writing rows
+          // after a Supabase restart, and nothing on this page said so).
+          const lastMs = today.data?.lastCallLogAtMs
+          const STALE_LOGGING_MS = 2 * 60 * 60 * 1000
+          if (lastMs != null && Date.now() - lastMs > STALE_LOGGING_MS) {
+            const hours = Math.round((Date.now() - lastMs) / 3600000)
+            return (
+              <div className="mb-3 rounded-lg border border-amber-500/60 bg-amber-500/10 p-3 text-sm">
+                <p className="font-semibold text-amber-700 dark:text-amber-400">
+                  ⚠ No call has been logged in ~{hours} hour{hours === 1 ? '' : 's'} (last row:{' '}
+                  {new Date(lastMs).toLocaleString()})
+                </p>
+                <p className="mt-1 text-muted-foreground">
+                  The zeros below mean call logging is DOWN, not that the lines are quiet. Calls may
+                  still be answered while nothing is recorded. Check the deployment logs for{' '}
+                  <code>[DB KEEP-ALIVE]</code> and republish if needed.
+                </p>
+              </div>
+            )
+          }
+          return null
+        })()}
+        {(() => {
+          // The ticket path, which had no guard at all until 2026-09-01. On
+          // 08-31 filing stopped at 20:16 UTC and ran dead for three and a half
+          // hours; this page showed nothing, because a queue call that files no
+          // ticket looks exactly like one that had nothing to file. Staff told
+          // the operator in the end.
+          const tf = today.data?.ticketFiling
+          if (!tf?.stalled) return null
+          return (
+            <div className="mb-3 rounded-lg border border-red-500/60 bg-red-500/10 p-3 text-sm">
+              <p className="font-semibold text-red-700 dark:text-red-400">
+                ⚠ TICKET FILING HAS STOPPED — {tf.reason}
+              </p>
+              <p className="mt-1 text-muted-foreground">
+                {tf.lastFiledAtMs
+                  ? `Last ticket filed ${new Date(tf.lastFiledAtMs).toLocaleString()}. `
+                  : 'No ticket on record in the recent window. '}
+                {tf.outboxHeld > 0
+                  ? `${tf.outboxHeld} request(s) are held in the outbox and being retried — the payloads are intact. `
+                  : ''}
+                Callers are still being answered. Check{' '}
+                <code>[TICKETING API]</code> and <code>[TICKET OUTBOX]</code> in the deployment logs.
+              </p>
+            </div>
+          )
+        })()}
+        {(() => {
+          const rows = unresolvedOutbox.data?.rows ?? []
+          if (rows.length === 0) return null
+          return (
+            <div className="mb-3 rounded-lg border border-amber-500/60 bg-amber-500/10 p-3 text-sm">
+              <p className="font-semibold text-amber-800 dark:text-amber-300">
+                Ticket requests need follow-up — {rows.length} unresolved dead letter
+                {rows.length === 1 ? '' : 's'}. Filing itself may still be healthy.
+              </p>
+              <ul className="mt-2 space-y-2">
+                {rows.map((row) => (
+                  <li key={row.id} className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="text-muted-foreground">
+                      <code>{row.callSid ?? row.id}</code>
+                      {' · '}
+                      {row.agentUsed} / dept {row.departmentId}
+                      {' · '}
+                      {row.kind === 'terminal'
+                        ? `HTTP ${row.refusalStatusCode ?? '?'}`
+                        : 'transport (no refusal status)'}
+                      {row.lastError ? ` — ${row.lastError}` : ''}
+                    </span>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      disabled={resolveOutbox.isPending}
+                      onClick={() => resolveOutbox.mutate(row.id)}
+                    >
+                      Resolve
+                    </Button>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )
+        })()}
         {today.isError && (
           <p className="text-sm text-red-600">
             Today stats failed: {(today.error as any)?.response?.data?.error ?? String(today.error)}
@@ -1706,6 +1912,7 @@ function CommandCenterTab({
                       <p className="text-xs text-muted-foreground">quality</p>
                     </div>
                   </div>
+                  <PipelineLine runtime={a.runtimeCallsToday} legacy={a.legacyCallsToday} />
                   {Object.keys(a.outcomesToday).length > 0 && (
                     <p className="text-xs text-muted-foreground">
                       {Object.entries(a.outcomesToday)
@@ -1808,35 +2015,84 @@ function delta(now: number | null | undefined, base: number | null | undefined):
 }
 
 function DailyBriefTab() {
+  // null = the latest brief (the server may generate it); a date = that stored day, read only.
+  const [selected, setSelected] = useState<string | null>(null)
   const brief = useQuery<BriefBundle>({
-    queryKey: ['obs-daily-brief'],
-    queryFn: async () => (await apiClient.get('/observatory/daily-brief')).data,
+    queryKey: ['obs-daily-brief', selected ?? 'latest'],
+    queryFn: async () =>
+      (await apiClient.get('/observatory/daily-brief', { params: selected ? { date: selected } : undefined })).data,
     staleTime: 5 * 60 * 1000,
+    placeholderData: keepPreviousData,
   })
   if (brief.isLoading)
     return <p className="text-sm text-muted-foreground">Generating the brief (first view of the day computes it)…</p>
   if (brief.isError)
     return (
-      <p className="text-sm text-red-600">
-        Daily brief failed: {(brief.error as any)?.response?.data?.error ?? String(brief.error)}
-      </p>
+      <div className="space-y-2">
+        <p className="text-sm text-red-600">
+          Daily brief{selected ? ` for ${selected}` : ''} failed:{' '}
+          {(brief.error as any)?.response?.data?.error ?? String(brief.error)}
+        </p>
+        {selected && (
+          <Button size="sm" variant="outline" onClick={() => setSelected(null)}>
+            Back to the latest brief
+          </Button>
+        )}
+      </div>
     )
   const b = brief.data!
   const t = b.today
   const base = b.baseline && b.baseline.briefDate !== t.briefDate ? b.baseline : null
   const yest = b.yesterday
   const catFrom = (p: DailyBriefPayload | null, key: string) => p?.categories.find((c) => c.key === key)
+  const availableDates = b.availableDates ?? []
+  const shownDate = b.selectedDate ?? t.briefDate
+  const { prev, next } = briefNeighbours(availableDates, shownDate)
+  const dayIndex = availableDates.indexOf(shownDate) + 1
+  const correction = briefCorrectionNotice(t.correction)
 
   return (
     <section className="space-y-6">
-      <div>
+      <div className="space-y-2">
+        <div className="flex flex-wrap items-center gap-2 text-sm">
+          <Button size="sm" variant="outline" disabled={!prev} onClick={() => prev && setSelected(prev)} aria-label="Previous day">
+            ‹ Prev
+          </Button>
+          <select
+            className="rounded-md border bg-background px-2 py-1 font-mono text-sm"
+            value={availableDates.includes(shownDate) ? shownDate : ''}
+            onChange={(e) => setSelected(e.target.value || null)}
+            aria-label="Brief day"
+          >
+            {!availableDates.includes(shownDate) && <option value="">{shownDate}</option>}
+            {[...availableDates].reverse().map((d) => (
+              <option key={d} value={d}>
+                {d}
+                {d === availableDates[availableDates.length - 1] ? ' (latest)' : ''}
+              </option>
+            ))}
+          </select>
+          <Button size="sm" variant="outline" disabled={!next} onClick={() => next && setSelected(next)} aria-label="Next day">
+            Next ›
+          </Button>
+          {brief.isFetching && <span className="text-xs text-muted-foreground">loading…</span>}
+        </div>
         <h2 className="text-lg font-semibold">
           Morning brief — {t.briefDate}
           <span className="ml-2 text-sm font-normal text-muted-foreground">
-            day {b.daysTracked} of tracking{b.baselineDate ? ` · baseline ${b.baselineDate}` : ''} · inch by inch to
-            stability
+            day {dayIndex > 0 ? dayIndex : b.daysTracked} of {b.daysTracked} tracked
+            {b.baselineDate ? ` · baseline ${b.baselineDate}` : ''} · inch by inch to stability
           </span>
         </h2>
+        {correction && (
+          <div className="rounded-lg border border-amber-500/60 bg-amber-500/10 p-3 text-sm text-amber-900 dark:text-amber-200">
+            <span className="font-medium">Backfilled/corrected: </span>
+            {correction.label}
+            {correction.correctedAt && (
+              <span className="ml-1 text-xs opacity-80">(corrected {correction.correctedAt})</span>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Stability scoreboard */}
@@ -1985,10 +2241,18 @@ function DailyBriefTab() {
           <h3 className="mb-1.5 text-sm font-medium">Track record</h3>
           <div className="flex flex-wrap gap-2 text-xs">
             {b.history.slice(-14).map((h) => (
-              <span key={h.briefDate} className="rounded-md border px-2 py-1">
+              <button
+                type="button"
+                key={h.briefDate}
+                onClick={() => setSelected(h.briefDate)}
+                title={`Show the brief for ${h.briefDate}`}
+                className={`rounded-md border px-2 py-1 hover:bg-muted ${
+                  h.briefDate === shownDate ? 'border-primary bg-primary/10' : ''
+                }`}
+              >
                 <span className="font-mono">{h.briefDate.slice(5)}</span> · {h.totalCriticalCalls}/{h.totalCalls}{' '}
                 critical
-              </span>
+              </button>
             ))}
           </div>
         </div>
@@ -2034,41 +2298,28 @@ interface ReplaySummaryRow {
   replayedAt: string | null
 }
 
-interface ReplayTape {
-  callLogId: string
-  agent: string
-  verdict: string | null
-  oldTranscript: string | null
-  newTranscript: string | null
-  oldCriticalCount: number
-  newCriticalCount: number
-  approximations: string[] | null
-}
 
 /** Share of calls, as a percentage of a count (distinct from the ratio-based `pct`). */
 function share(n: number, d: number) {
   return d ? `${((100 * n) / d).toFixed(1)}%` : '—'
 }
 
-function TranscriptPane({ title, text, tone }: { title: string; text: string | null; tone: 'old' | 'new' }) {
-  return (
-    <div className="flex-1 min-w-0">
-      <h4 className={`mb-1 text-xs font-semibold uppercase tracking-wide ${tone === 'old' ? 'text-muted-foreground' : 'text-emerald-700'}`}>
-        {title}
-      </h4>
-      <pre className="max-h-[28rem] overflow-auto whitespace-pre-wrap rounded border bg-muted/30 p-3 text-xs leading-relaxed">
-        {text ?? '(not stored)'}
-      </pre>
-    </div>
-  )
-}
-
 function ReplaysTab() {
   const [agent, setAgent] = useState('pcp')
   const [verdict, setVerdict] = useState('worse')
-  const [openCall, setOpenCall] = useState<string | null>(null)
-  const tapeRef = useRef<HTMLDivElement | null>(null)
-
+  /**
+   * LIVE TAPE RENDERING IS GONE — Codex, PR #244 round thirteen.
+   *
+   * Rendering a tape re-ran the call through the new core, and that pipeline
+   * was deleted with `src/core/`, so `replayTape()` returns null and the route
+   * turns every request into a 404. The rows here were still clickable, and
+   * the error they produced blamed "the stored call has no transcript" — a
+   * wrong explanation for a deterministic failure, on every row.
+   *
+   * The stored verdicts are unaffected: `new_core_replay_index` still holds
+   * them and `replayTapeList` still serves them, which is what the counts
+   * below are. So the counts stay and the promise of a readable tape goes.
+   */
   const summary = useQuery<{ summary: ReplaySummaryRow[] }>({
     queryKey: ['obs-replays'],
     queryFn: async () => (await apiClient.get('/observatory/replays')).data,
@@ -2077,19 +2328,8 @@ function ReplaysTab() {
     queryKey: ['obs-replay-list', agent, verdict],
     queryFn: async () => (await apiClient.get(`/observatory/replays/${agent}/list?verdict=${verdict}`)).data,
   })
-  const tape = useQuery<ReplayTape>({
-    queryKey: ['obs-replay-tape', openCall],
-    queryFn: async () => (await apiClient.get(`/observatory/replay/${openCall}`)).data,
-    enabled: Boolean(openCall),
-  })
 
   const rows = summary.data?.summary ?? []
-
-  useEffect(() => {
-    if (openCall && tape.data && tapeRef.current) {
-      tapeRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' })
-    }
-  }, [openCall, tape.data])
 
   return (
     <section className="space-y-6">
@@ -2097,7 +2337,8 @@ function ReplaysTab() {
         <h3 className="text-lg font-semibold">New core vs old core, on real calls</h3>
         <p className="text-sm text-muted-foreground">
           Every call below actually happened. The new core was fed the same caller turns and scored by the same
-          graders. Nothing cuts over on these numbers alone — read the tapes.
+          graders. These are the verdicts recorded at the time; the new core has since been deleted, so the
+          tapes can no longer be re-rendered and these counts are the whole of what remains.
         </p>
       </div>
 
@@ -2141,7 +2382,7 @@ function ReplaysTab() {
         {rows.map((r) => (
           <button
             key={r.agent}
-            onClick={() => { setAgent(r.agent); setOpenCall(null) }}
+            onClick={() => setAgent(r.agent)}
             className={`rounded border px-3 py-1 text-sm ${agent === r.agent ? 'bg-foreground text-background' : ''}`}
           >
             {r.agent}
@@ -2151,7 +2392,7 @@ function ReplaysTab() {
         {['worse', 'better', 'same'].map((v) => (
           <button
             key={v}
-            onClick={() => { setVerdict(v); setOpenCall(null) }}
+            onClick={() => setVerdict(v)}
             className={`rounded border px-3 py-1 text-sm ${verdict === v ? 'bg-foreground text-background' : ''}`}
           >
             {v}
@@ -2161,64 +2402,29 @@ function ReplaysTab() {
 
       <div className="grid gap-2">
         {(list.data?.tapes ?? []).map((t) => (
-          <button
+          <div
             key={t.callLogId}
-            onClick={() => setOpenCall(t.callLogId === openCall ? null : t.callLogId)}
-            className="flex items-center justify-between rounded border px-3 py-2 text-left text-sm hover:bg-muted/40"
+            className="flex items-center justify-between rounded border px-3 py-2 text-left text-sm"
           >
             <span className="font-mono text-xs">{t.callLogId.slice(0, 8)}</span>
             <span className="text-xs text-muted-foreground">
               old {t.oldCriticalCount} critical → new {t.newCriticalCount}
             </span>
-          </button>
+          </div>
         ))}
         {list.data && list.data.tapes.length === 0 && (
           <p className="text-sm text-muted-foreground">No {verdict} tapes for {agent}.</p>
         )}
       </div>
 
-      {openCall && tape.isLoading && (
-        <p className="rounded border p-4 text-sm text-muted-foreground">
-          Replaying call {openCall.slice(0, 8)} through the new core…
+      {(list.data?.tapes ?? []).length > 0 && (
+        <p className="rounded border border-dashed p-3 text-xs text-muted-foreground">
+          Side-by-side tapes are no longer available. Rendering one re-ran the call through the new core, and
+          that pipeline was deleted on 2026-09-01; the verdicts above were computed before it was removed and
+          are still stored in <code>new_core_replay_index</code>.
         </p>
       )}
-      {openCall && tape.isError && (
-        <div className="rounded border border-red-300 p-4 text-sm">
-          <p className="font-medium text-red-600">Could not render this tape.</p>
-          <p className="mt-1 text-muted-foreground">
-            {(tape.error as any)?.response?.data?.message ??
-              (tape.error as any)?.response?.data?.error ??
-              String(tape.error)}
-          </p>
-          <p className="mt-2 text-xs text-muted-foreground">
-            Call {openCall} — most often this means the stored call has no transcript to replay.
-          </p>
-        </div>
-      )}
-      {openCall && tape.data && (
-        <div ref={tapeRef} className="space-y-2 rounded border p-4">
-          <div className="flex flex-wrap items-baseline justify-between gap-2">
-            <h4 className="font-semibold">Call {tape.data.callLogId.slice(0, 8)} — {tape.data.verdict}</h4>
-            <span className="text-xs text-muted-foreground">
-              old {tape.data.oldCriticalCount} critical → new {tape.data.newCriticalCount}
-            </span>
-          </div>
-          <div className="flex flex-col gap-4 md:flex-row">
-            <TranscriptPane title="Old core (what actually happened)" text={tape.data.oldTranscript} tone="old" />
-            <TranscriptPane title="New core (what it would have said)" text={tape.data.newTranscript} tone="new" />
-          </div>
-          {tape.data.approximations && tape.data.approximations.length > 0 && (
-            <details className="text-xs text-muted-foreground">
-              <summary className="cursor-pointer">Replay caveats ({tape.data.approximations.length})</summary>
-              <ul className="ml-4 list-disc">
-                {tape.data.approximations.map((a, i) => (
-                  <li key={i}>{a}</li>
-                ))}
-              </ul>
-            </details>
-          )}
-        </div>
-      )}
+
     </section>
   )
 }

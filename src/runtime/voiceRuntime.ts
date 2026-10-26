@@ -1,0 +1,1979 @@
+/**
+ * src/runtime/voiceRuntime.ts
+ * ─────────────────────────────────────────────────────────────────────────────
+ * The server glue: Express routes, the media-stream WebSocket, and the
+ * health endpoint. Everything it does is assembled from the pieces that
+ * already have their own tests — this file wires, it does not decide.
+ *
+ *   POST /voice/:slug        the number's Voice webhook (voiceWebhook.ts)
+ *   POST /voice/:slug/after  post-stream continuation (voiceWebhook.ts)
+ *   WS   /voice/stream       Twilio Media Streams (mediaStreamBridge.ts)
+ *   GET  /voice/health       deploy marker, readiness, missing env NAMES
+ *
+ * ONE PATH, EVERY LANE. The slug in the URL picks the agent, through the
+ * registry that already exists (laneRegistry.ts -> src/config/agents.ts).
+ * Adding a lane is a registry entry and a prompt; no code here changes.
+ *
+ * WHAT HAPPENS ON A CALL:
+ *   1. Twilio POSTs /voice/optical. Signature checked, readiness checked,
+ *      lane checked. The call is registered with a single-use token and
+ *      answered with <Connect><Stream>.
+ *   2. Twilio opens the stream and sends `start`, carrying the callSid and
+ *      token as customParameters. They are claimed exactly once; anything
+ *      unrecognised is closed without ever constructing a bridge.
+ *   3. The lane's agent is built from its own factory, bound (instructions
+ *      and tools verbatim, knowledge pack first), and a Grok session is
+ *      opened. The bridge owns the call from there.
+ *   4. Teardown records one outcome, writes call_logs, and closes the
+ *      socket. Twilio runs the <Redirect>, which reads that outcome.
+ *
+ * THE AGENT IS BUILT AFTER THE START FRAME, NOT AT THE WEBHOOK. The factory
+ * needs the callSid and caller phone, and the webhook's response has to be
+ * fast — Twilio times it. Building at start-frame time also means a caller
+ * who hangs up during setup costs one factory call, not a live session.
+ * ─────────────────────────────────────────────────────────────────────────────
+ */
+
+import type { Express, Request, Response } from "express";
+import type { Server as HttpServer } from "node:http";
+import { WebSocketServer, type WebSocket } from "ws";
+
+import {
+  VoiceCallBridge,
+  type CallOutcome,
+  type VoiceCallRecord,
+} from "./mediaStreamBridge";
+import { urgentAlertStatus } from "./urgentTransferAlerts";
+import { CallSessionRegistry, type CallEntry } from "./sessionRegistry";
+import {
+  GrokVoiceSession,
+  WebSocketGrokTransport,
+  buildSessionConfig,
+  vadBootMarker,
+  type GrokTransport,
+} from "./grokSession";
+import {
+  connectWithFirstEventRetry,
+  connectRetries,
+  firstEventTimeoutMs,
+  trackConnect,
+  ProviderConnectAbortedError,
+} from "./providerConnect";
+import { runSetupFailureFloor, type SetupFailureContext } from "./setupFailureFloor";
+import { resolveLane, defaultLaneSource, type LaneSource } from "./laneRegistry";
+import { laneRoster, formatLaneRoster, type LaneReadiness } from "./laneRoster";
+import {
+  createRuntimeTransfer,
+  transferDestinationStatus,
+  TRANSFER_ACCEPT_PATH,
+  TRANSFER_DIAL_RESULT_PATH,
+  TRANSFER_STATUS_PATH,
+} from "./runtimeTransfer";
+import { releaseCallHandoff } from "../tools/handoffBroker";
+import { releaseCallerSpeech } from "../services/symptomCorroboration";
+import {
+  greetingStyleFor,
+  missingMandatoryCopy,
+  personaliseGreeting,
+} from "../services/greetingPersonalisation";
+
+import { loadedDirectory } from "../services/consoleDirectory";
+import { selectKeyterms } from "./keyterms";
+import { TECH_KEYTERMS } from "../config/techKeyterms";
+
+/**
+ * This lane's transcription vocabulary — surgeon names, office names and drug
+ * names — biasing Grok's ASR toward words it would otherwise mangle.
+ *
+ * Reads the directory snapshot ALREADY in memory and never fetches: this runs
+ * inside the synchronous createSession callback on the answer path, where an
+ * await would add latency to every call for data refreshed on a timer anyway.
+ * A cold process answers its first call or two with no keyterms and warms up
+ * behind them, which beats making a caller wait for reference data.
+ *
+ * Medication vocabulary is the practice's own (config/techKeyterms.ts, lifted
+ * from the Medication Requests classifier) rather than invented here, and it
+ * leads on tech because that is the medication queue.
+ *
+ * Never throws. Vocabulary is an optimisation; a call must not fail for want
+ * of it.
+ */
+function laneKeyterms(slug: string): string[] | undefined {
+  try {
+    const snap = loadedDirectory();
+    return selectKeyterms(
+      {
+        providers: snap ? [...snap.providers.values()] : [],
+        locations: snap ? [...snap.locations.values()] : [],
+        medications: TECH_KEYTERMS,
+      },
+      slug,
+    );
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The first name a caller-ID match resolved to, or "" when there is none.
+ *
+ * `precontext` reaches this untyped — it is whatever `fetchPrecontext`
+ * returned, injected so the runtime needs no network in tests — so the shape
+ * is checked rather than asserted. A match without a first name is not a
+ * match for this purpose: personalising on an empty string would strip the
+ * greeting's own question and leave nothing in its place.
+ */
+/**
+ * Whether the lookup vouched for exactly one person, regardless of whether a
+ * usable first name came with it.
+ *
+ * Separate from `recognisedFirstName` on purpose. `AzulPrecontext` permits
+ * `{ matched: true }` with no name, and the greeting correctly does nothing
+ * with that — there is nothing to say. But logging it as `no_match` describes
+ * the opposite of what happened and would send someone looking for a lookup
+ * failure that did not occur. Classification is the flag's job; the name
+ * helper's job is the greeting (Codex review, PR #240).
+ */
+/**
+ * The configured greeting, unless it is missing copy the lane must say.
+ *
+ * The database outranks the registry — that is `greetingResolver`'s whole
+ * purpose and an operator's edit has to be what the caller hears. But an
+ * edit is a choice of WORDING, not permission to drop the 911 direction or
+ * the recording disclosure from the after-hours line. When the configured
+ * text has lost one, the registry string is used and the gap is logged
+ * loudly, because the row still needs fixing and only a person can do that.
+ *
+ * The alternative — play it anyway, warn, and let a caller miss a
+ * disclosure — is worse in the only direction that matters. Codex, #240.
+ */
+export function chooseGreeting(
+  slug: string,
+  configured: string | null,
+  registry: string | null,
+): string {
+  if (!configured) return registry ?? "";
+  const missing = missingMandatoryCopy(slug, configured);
+  if (missing.length === 0) return configured;
+  if (missingMandatoryCopy(slug, registry).length > 0) {
+    // Neither has it. Say the configured one and make the gap impossible to
+    // miss: falling back would swap one deficient greeting for another.
+    console.error(
+      `[runtime] ${slug}: configured AND registry greetings are both missing ` +
+        `${missing.join(", ")} — FIX agents.welcome_greeting`,
+    );
+    return configured;
+  }
+  console.error(
+    `[runtime] ${slug}: configured greeting is missing ${missing.join(", ")} — ` +
+      `using the built-in greeting instead. FIX agents.welcome_greeting`,
+  );
+  return registry ?? configured;
+}
+
+function precontextMatched(precontext: unknown): boolean {
+  if (!precontext || typeof precontext !== "object") return false;
+  return (precontext as { matched?: unknown }).matched === true;
+}
+
+function recognisedFirstName(precontext: unknown): string {
+  if (!precontext || typeof precontext !== "object") return "";
+  const pc = precontext as { matched?: unknown; firstName?: unknown };
+  if (pc.matched !== true) return "";
+  return typeof pc.firstName === "string" ? pc.firstName.trim() : "";
+}
+
+/**
+ * THE RECORD A CALLER-ID MATCH RESOLVED TO — name and date of birth.
+ *
+ * `AzulPrecontext` has carried `dobOnFile` since the eyecare service added it,
+ * and until now the only thing that read it was the PROMPT. That is the whole
+ * defect this helper exists to close, and it cost more than any other single
+ * thing in this codebase:
+ *
+ *  - 2026-09-11, one business day, the three queue lanes: **61 calls were
+ *    refused for a missing date of birth, and on 44 of them the greeting had
+ *    already addressed the caller by name** — so the match had landed, the
+ *    record was in hand, and the filing tool asked for a field the process was
+ *    holding.
+ *  - `dobShape` reads "(none)" on 61 of 61: the model never relayed it. It
+ *    never will reliably, and it should not have to. The prompt is not a
+ *    transport.
+ *  - Of the 93 distinct numbers behind that day's ticketless calls, 46 resolve
+ *    to exactly one person in `patients_master`, and 43 of those have visit
+ *    history naming their office AND their provider — the other two fields the
+ *    gates refuse for.
+ *
+ * The fix is not new machinery. `verifiedIdentity` already exists, already has
+ * the right guards, and is already read by all four filing tools; it simply
+ * had one writer (`lookup_patient`) when it should have had two. This is the
+ * second writer.
+ *
+ * Shape checked rather than asserted, for the same reason as the two helpers
+ * above: `precontext` arrives untyped from an injected fetcher.
+ */
+function matchedRecord(
+  precontext: unknown,
+): { firstName: string; lastName: string; dateOfBirth: string } | null {
+  if (!precontext || typeof precontext !== "object") return null;
+  const pc = precontext as {
+    matched?: unknown;
+    firstName?: unknown;
+    lastNameOnFile?: unknown;
+    dobOnFile?: unknown;
+  };
+  /**
+   * `matched` is the service's flag, and WHAT IT PROMISES IS NOT ESTABLISHED.
+   *
+   * An earlier version of this comment said it is a unique-hit flag, so this
+   * "never sees a family of three". That was written from the service's own
+   * docstring and the measurement contradicts it: of the 38 caller numbers on
+   * 2026-09-11 whose greeting DID name someone, **17 resolve to two or three
+   * people** in `patients_master`. So either `sage_precontext` reads a table
+   * where those numbers are unique, or it picks a winner among several —
+   * which table it reads is the UNSETTLED question CLAUDE.md already flags,
+   * and this cannot settle it from inside the runtime.
+   *
+   * WHY THAT IS TOLERABLE HERE, stated so nobody has to re-derive it:
+   *
+   *  - **The greeting already asserts this identity out loud.** Storing it
+   *    adds a consequence to a claim the caller is already hearing; it does
+   *    not create the exposure. A wrong name is wrong on the call first.
+   *  - **`verifiedDobFor`'s name guard is the real protection**, and it is
+   *    load-bearing rather than theoretical: 3 of 61 callers that day said
+   *    "no, that's not me", and on those the stored record cannot be read
+   *    back, because the ticket is not filed under the stored name.
+   *  - **`certain: false`** keeps it away from the teardown sweep, which is
+   *    the one reader that acts with nobody listening.
+   *
+   * What would settle it: the service confirming its uniqueness rule, or our
+   * own count against the mirror before trusting the flag. Neither is done.
+   */
+  if (pc.matched !== true) return null;
+  const firstName = typeof pc.firstName === "string" ? pc.firstName.trim() : "";
+  const lastName = typeof pc.lastNameOnFile === "string" ? pc.lastNameOnFile.trim() : "";
+  const dateOfBirth = typeof pc.dobOnFile === "string" ? pc.dobOnFile.trim() : "";
+  /**
+   * NO SECOND COPY OF THE NAME RULE. `rememberVerifiedIdentity` already
+   * refuses an entry without both names, because the read guard IS the name
+   * comparison and a half-named entry can never be read back safely.
+   *
+   * A duplicate check here was written first and then deleted: mutation
+   * testing showed removing it failed nothing, because the store caught the
+   * case either way. That is failure mode 9 in CLAUDE.md — adding a rule
+   * without grepping for the rule — and an untestable guard is worse than no
+   * guard, because it reads as protection while proving nothing.
+   */
+  return { firstName, lastName, dateOfBirth };
+}
+import type { TransferTwilioOps } from "./warmTransfer";
+import { resolveAppDomain } from "../config/environment";
+import { callEnvironment } from "./callRecord";
+import { loadGrokRuntimeVoiceConfig } from "./config";
+import { runtimeBuildIdentity, stampBuildIdentity, deployedBuildSha, type BuildIdentity } from "./buildIdentity";
+import { openRuntimeCall, persistRuntimeCall, type CallLogInsert, type RuntimeCallIdentity } from "./callRecord";
+import { identityForRow } from "./runtimeIdentity";
+import { identityStoreProbe, rememberVerifiedIdentity } from "../tools/verifiedIdentity";
+import { logRuntimeIdentity } from "./identityTelemetry";
+import { runRequestSweep } from "./sweepRunner";
+import { runPcpFloor } from "./pcpFloor";
+import { persistRuntimeTurns } from "./runtimeTurns";
+import { makeRecordingStarter } from "./callRecording";
+import { gradeRuntimeCall } from "./runtimeGrading";
+import { logRuntimeFollowUps } from "./followUpTelemetry";
+import { logCallerAudio } from "./callerAudioTelemetry";
+import { CallerAudioMeter, type CallerAudioCounts } from "./callerAudioEnergy";
+import { withGreetingAlreadyPlayed } from "./greetingAlreadyPlayed";
+import { withNewOrExistingAsk } from "./newOrExistingAsk";
+import {
+  buildUnavailableTwiml,
+  handleAfterRedirect,
+  handleVoiceWebhook,
+  isValidSlug,
+  VOICE_STREAM_PATH,
+  type WebhookRequest,
+  type WebhookResponse,
+} from "./voiceWebhook";
+import {
+  computeRuntimeReadiness,
+  formatReadinessLines,
+  VOICE_RUNTIME_DEPLOY_MARKER,
+} from "./readiness";
+import {
+  parseTwilioInboundFrame,
+  type TwilioInboundFrame,
+  type TwilioOutboundFrame,
+} from "./twilioFrames";
+import { KNOWLEDGE_PACK_VERSION } from "./knowledgePack";
+import type { OutboundContact } from "./outbound/campaign";
+import {
+  callbackGreeting,
+  callbackPurpose,
+  callbackSteps,
+  matchCallback,
+  withCallbackSteps,
+  type CallbackCandidate,
+  type CallbackContext,
+} from "./outbound/callback";
+import { callbackSessionFor, closeCallbackSession, openCallbackSession } from "../tools/outboundTools";
+import { closeOutreachSession } from "../tools/npxOutreachTools";
+import { reportSiAssistantCall, shouldReportSiAssistantCall } from "../plugin/callbackReport";
+import { attachmentForSiAssistant } from "../plugin/returnedCaller";
+import { reattachTakenMessages } from "../plugin/messageOutbox";
+import { closeSiAssistantIdentity, siAssistantIdentityFor } from "../plugin/siAssistantIdentity";
+import type { OutboundStore } from "./outbound/store";
+import { createDbOutboundStore } from "./outbound/store";
+import { OUTBOUND_PATH_PREFIX, type OutboundTwilio } from "./outbound/dialer";
+import {
+  OUTBOUND_UNAVAILABLE_LINE,
+  handleOutboundAnswer,
+  handleOutboundStatus,
+  type OutboundWebhookDeps,
+} from "./outbound/outboundWebhook";
+import { startOutboundScheduler, type DialerLock } from "./outbound/scheduler";
+import { defaultDialerLock } from "./outbound/defaultLock";
+
+/**
+ * Twilio media frames held while the agent is being built — 10 seconds of
+ * 20ms frames. Sized against the WORST case of the bounded setup steps
+ * run in sequence, not the typical build: the precontext lookup (1.5s),
+ * the lane factory's own context lookups (the answering-service factory
+ * waits up to ~2s), and the call-row insert (2s) can all legitimately run
+ * to their deadlines back to back, and a 4-second cap was dropping the
+ * start of what the caller said during that window even though every
+ * dependency finished inside its allowance (Codex review, PR #227
+ * round 17). 500 frames of ~1KB JSON is at most ~0.5 MB per call.
+ */
+const PRE_BRIDGE_FRAME_CAP = 500;
+
+/**
+ * How long a socket may hold the media-stream endpoint without claiming a
+ * call. The upgrade itself carries no token — Twilio delivers the callSid
+ * and token in the `start` frame, so the gate cannot run any earlier — and
+ * without a deadline any remote client can open sockets, send nothing, and
+ * hold descriptors and memory indefinitely (Codex review, PR #227).
+ * Twilio sends `connected` and `start` immediately, so ten seconds is far
+ * more slack than a real call needs.
+ */
+const STREAM_CLAIM_DEADLINE_MS = 10_000;
+
+/**
+ * How long the provider has to connect and complete its handshake.
+ *
+ * The dead-air watchdog is armed by `onConfigured`, so nothing covers the
+ * window before it: a WebSocket that never settles, or one that opens and
+ * never emits `session.created`/`session.updated`, left the caller in
+ * billed silence until the ten-minute ceiling — and then recorded a clean
+ * `max_duration` rather than the provider failure it was (Codex review,
+ * PR #227). A real handshake is sub-second.
+ */
+const PROVIDER_SETUP_DEADLINE_MS = 15_000;
+
+/**
+ * Bound on the caller-ID lookup. The pre-context is what lets an agent say
+ * "Am I speaking with…?" instead of asking cold, but it is worth nothing if
+ * the caller is listening to silence while we fetch it: an unbounded
+ * lookup was a review finding on 5Star #200. Whatever has not arrived by
+ * the time the stream is ready is dropped.
+ */
+const PRECONTEXT_DEADLINE_MS = 1_500;
+
+/**
+ * Bound on opening the call's row. Generous against a healthy database and
+ * short against a wedged one: the row matters, but not more than the caller
+ * hearing something.
+ */
+const CALL_ROW_DEADLINE_MS = 2_000;
+
+/**
+ * How long teardown waits for the call_logs write before sweeping anyway.
+ *
+ * Generous — this is teardown, the caller is gone and nothing is holding a
+ * socket for it — but finite, because the sweep is what saves the request
+ * and it must not be hostage to a database that has stopped answering.
+ */
+const PERSIST_BEFORE_SWEEP_MS = 5_000;
+
+/** Resolve within a bound, or null. Never throws. */
+async function withinOrNull<T>(work: Promise<T>, ms: number): Promise<T | null> {
+  return Promise.race([
+    work.catch(() => null),
+    new Promise<null>((resolve) => {
+      const t = setTimeout(() => resolve(null), ms);
+      (t as unknown as { unref?: () => void }).unref?.();
+    }),
+  ]);
+}
+
+export interface VoiceRuntimeOptions {
+  env?: Record<string, string | undefined>;
+  /** Overridable so tests never import the agent tree. */
+  laneSource?: LaneSource;
+  /** Overridable so the wedged-pool test does not wait five seconds. */
+  persistBeforeSweepMs?: number;
+  registry?: CallSessionRegistry;
+  /** How long a media-stream socket may stay open without claiming a call.
+   * Defaults to STREAM_CLAIM_DEADLINE_MS. */
+  streamClaimDeadlineMs?: number;
+  /** How long the provider has to connect AND finish its handshake.
+   * Defaults to PROVIDER_SETUP_DEADLINE_MS. */
+  providerSetupDeadlineMs?: number;
+  /** Caller-ID pre-context lookup. Injected so tests need no network, and
+   * so a lane that should not do one simply is not given it. */
+  fetchPrecontext?: (phone: string) => Promise<unknown>;
+  /**
+   * The admin-configured `agents.welcome_greeting`, or null when there is
+   * none. Injected for the same reason as `fetchPrecontext`: the resolver
+   * reaches the database, and the runtime's tests must not.
+   *
+   * The DB value is the source of truth for how every agent opens — that is
+   * what `greetingResolver` exists to enforce, and what the admin UI and the
+   * Observatory display. Playing the registry string instead means an
+   * operator edits the greeting, sees it change everywhere, and hears the old
+   * one on the line (Codex review, PR #240). The registry string stays as the
+   * fallback, which is also the SIP path's arrangement.
+   */
+  resolveGreeting?: (slug: string) => Promise<string | null>;
+  /** Opens the call_logs row. Injected for tests. */
+  openCallRow?: CallLogInsert;
+  /** Persists the finished call. Injected for tests. */
+  /** The identity the process established for the caller rides with the
+   * record (runtimeIdentity.ts) — a CERTAIN match only, never a candidate. */
+  persistCall?: (record: VoiceCallRecord, identity?: RuntimeCallIdentity) => Promise<boolean>;
+  /**
+   * Stamps which software handled the call (marker, build SHA, voice model)
+   * onto its row — buildIdentity.ts. Fired, never awaited, after the row is
+   * opened and again after the teardown write lands; the statement only fills
+   * NULLs, so the second write repairs a row the first never reached and
+   * changes nothing on one it did. Injected for tests.
+   */
+  stampBuild?: (callSid: string, identity: BuildIdentity) => Promise<boolean>;
+  /**
+   * The teardown request sweep. Injected for tests, and settable to a no-op
+   * to turn it off without a deploy.
+   *
+   * Runs AFTER the call_logs write on every finished call: if the caller made
+   * a request and no ticket was filed, it files what they said. See
+   * requestSweep.ts for why, and sweepRunner.ts for the rules it holds to.
+   */
+  sweepCall?: (record: VoiceCallRecord) => Promise<unknown>;
+  /**
+   * The PCP lost-request floor — see pcpFloor.ts. A no-op on every other lane.
+   *
+   * Separate from `sweepCall` because the two file through different endpoints
+   * with different payloads, and the generic sweep declines `pcp` by design
+   * (`DEPARTMENT_BY_SLUG`), so they cannot double-file. Injected for tests, and
+   * settable to a no-op to turn the floor off without a deploy.
+   */
+  sweepPcpFloor?: (record: VoiceCallRecord) => Promise<unknown>;
+  /**
+   * The outbound layer's database (src/runtime/outbound/store.ts). Injected
+   * for tests; production builds the Hub store on first use, so an inbound-
+   * only deployment never opens it.
+   */
+  outboundStore?: OutboundStore;
+  /** Places outbound calls. Injected for tests; production wraps the Twilio
+   * client, and only when RUNTIME_OUTBOUND_DIALING=1 starts the scheduler. */
+  outboundTwilio?: () => Promise<OutboundTwilio>;
+  /** The fleet-wide dialler lock. Injected for tests. */
+  outboundLock?: DialerLock;
+  /**
+   * Writes the call's timed turns to `call_turns` — telemetry, after the row
+   * and after the sweep, never awaited by teardown. Injected for tests.
+   */
+  persistTurns?: (record: VoiceCallRecord, ids: { callLogId?: string }) => Promise<unknown>;
+  /**
+   * Starts a Twilio recording on the answered call — see callRecording.ts.
+   * Fire-and-forget from `startCall`. Injected for tests.
+   */
+  startRecording?: (callSid: string, host: string | undefined) => Promise<unknown>;
+  /**
+   * Grades the call at teardown — the LLM pass the old core has always run
+   * when a call ends and the runtime never did (runtimeGrading.ts). After
+   * the row and after the sweep, never awaited. Injected for tests.
+   */
+  gradeCall?: (record: VoiceCallRecord, ids: { callLogId?: string }) => Promise<unknown>;
+  /**
+   * Writes the call's tool follow-up summary to `call_events` (v55,
+   * followUpTelemetry.ts) — after the row and after the sweep, never
+   * awaited. Injected for tests.
+   */
+  logFollowUps?: (record: VoiceCallRecord, ids: { callLogId?: string }) => Promise<unknown>;
+  /**
+   * Why the record did or did not reach the call row (task #148,
+   * identityTelemetry.ts) — one PHI-free row per call, beside the follow-up
+   * summary and under the same rules. Injected for tests.
+   */
+  logIdentity?: (
+    record: VoiceCallRecord,
+    identity: RuntimeCallIdentity,
+    probe: ReturnType<typeof identityStoreProbe>,
+    persisted: boolean | null,
+    ids: { callLogId?: string },
+    opts?: { after?: Promise<unknown>; precontextWrite?: string },
+  ) => Promise<unknown>;
+  /**
+   * Whether the caller's audio ever reached us (v64, callerAudioTelemetry.ts)
+   * — one PHI-free row per call, on EVERY exit that writes a `call_logs` row
+   * and not only the bridge's teardown. Injected for tests.
+   */
+  logCallerAudio?: (
+    call: { callSid: string; outcome: string },
+    counts: CallerAudioCounts | undefined,
+    ids: { callLogId?: string },
+    opts?: { after?: Promise<unknown> },
+  ) => Promise<unknown>;
+  /** Bound on opening the call row. Defaults to CALL_ROW_DEADLINE_MS. */
+  callRowDeadlineMs?: number;
+  /**
+   * How to open the Grok connection. Injectable for one reason, and it is
+   * the standing rule rather than a convenience: a failing call goes into
+   * an offline test BEFORE any code changes, red then green, instead of
+   * asking Wayne to dial and find out. With a fake transport the whole
+   * path — webhook, token claim, lane resolve, binding, session, bridge,
+   * teardown, outcome, after-redirect — runs in milliseconds with no phone
+   * and no xAI account.
+   */
+  createTransport?: (config: { apiKey: string; model: string }) => RuntimeTransport;
+  /**
+   * How long to wait for the FIRST inbound event after the WebSocket
+   * upgrades. Defaults to RUNTIME_FIRST_EVENT_TIMEOUT_MS (2.5 s). The
+   * 15 s PROVIDER_SETUP_DEADLINE_MS still covers session.updated after
+   * that first event.
+   */
+  firstEventTimeoutMs?: number;
+  /**
+   * Retries AFTER the first connect attempt. Defaults to
+   * RUNTIME_CONNECT_RETRIES (2) — three attempts in total.
+   */
+  connectRetries?: number;
+  /**
+   * Files a stand-in ticket when setup never reached a configured
+   * session. Injected for tests. Default is runSetupFailureFloor.
+   */
+  fileSetupFailure?: (record: VoiceCallRecord, ctx?: SetupFailureContext) => Promise<unknown>;
+  /**
+   * Twilio operations for the warm transfer. Injected for tests; when
+   * omitted, a client is built lazily from TWILIO_ACCOUNT_SID/AUTH_TOKEN.
+   * Whether transfers are OFFERED at all is decided by
+   * `transferUnavailableReason` — a deployment missing credentials, a
+   * from-number or a public domain keeps refusing the transfer-capable
+   * lanes exactly as before, with the reason logged once at mount.
+   */
+  transferOps?: TransferTwilioOps;
+}
+
+/** A transport the runtime can open. WebSocketGrokTransport satisfies it. */
+export interface RuntimeTransport extends GrokTransport {
+  connect(): Promise<void>;
+}
+
+function toWebhookRequest(req: Request): WebhookRequest {
+  return {
+    headers: req.headers as WebhookRequest["headers"],
+    body: (req.body ?? {}) as Record<string, string>,
+    originalUrl: req.originalUrl,
+  };
+}
+
+function send(res: Response, out: WebhookResponse): void {
+  res.status(out.status).type(out.contentType).send(out.body);
+}
+
+/**
+ * Mount the runtime on an existing Express app and HTTP server. Returns the
+ * registry so a caller can inspect live calls; mounting never throws and
+ * never blocks startup on configuration — an unconfigured process still
+ * starts, still serves health, and still fails closed at the webhook.
+ */
+/**
+ * The public domain transfers may build their accept URL on, or undefined
+ * when this deployment has none.
+ *
+ * `resolveAppDomain` ALWAYS answers, falling back to `localhost:8000` —
+ * which is not a public domain: Twilio can never reach an accept URL on
+ * it, so treating the fallback as proof of a domain marked a deployment
+ * with credentials but no domain transfer-ready, and every transfer
+ * dialled an office leg that timed out instead of the lane being refused
+ * as intended (Codex, PR #230). Production preference uses the same
+ * signal set as the rest of the runtime (callEnvironment), not NODE_ENV
+ * alone (Codex, PR #227 round 21).
+ */
+export function publicTransferDomain(
+  env: Record<string, string | undefined>,
+): string | undefined {
+  const resolved = resolveAppDomain({
+    domain: env.DOMAIN,
+    replitDomains: env.REPLIT_DOMAINS,
+    replitDevDomain: env.REPLIT_DEV_DOMAIN,
+    isProduction: callEnvironment(env) === "production",
+  });
+  return resolved.source === "fallback" ? undefined : resolved.domain;
+}
+
+export function mountVoiceRuntime(
+  app: Express,
+  server: HttpServer,
+  options: VoiceRuntimeOptions = {},
+): CallSessionRegistry {
+  const env = options.env ?? process.env;
+  const registry = options.registry ?? new CallSessionRegistry();
+  // Resolved lazily and cached: importing src/config/agents pulls in every
+  // agent (and their database and API clients), which must not happen at
+  // boot or in a health check.
+  const stampBuild = options.stampBuild ?? stampBuildIdentity;
+  // The model a lane's session opens with is a pure function of the
+  // environment and the slug — the same call `resolveLane` makes — so the
+  // teardown stamp can name it without holding the lane.
+  const buildFor = (slug: string): BuildIdentity =>
+    runtimeBuildIdentity(loadGrokRuntimeVoiceConfig(env, slug).model);
+  const stampCall = (callSid: string, slug: string): void => {
+    void stampBuild(callSid, buildFor(slug)).catch(() => false);
+  };
+  const persistCallRow = options.persistCall ?? persistRuntimeCall;
+  const persistCall = async (
+    record: VoiceCallRecord,
+    identity?: RuntimeCallIdentity,
+  ): Promise<boolean> => {
+    const written = await persistCallRow(record, identity);
+    if (written) stampCall(record.callSid, record.slug);
+    return written;
+  };
+  const sweepCall = options.sweepCall ?? runRequestSweep;
+  const persistTurns = options.persistTurns ?? persistRuntimeTurns;
+  const startRecording = options.startRecording ?? makeRecordingStarter(env);
+  const gradeCall = options.gradeCall ?? gradeRuntimeCall;
+  const logFollowUps = options.logFollowUps ?? logRuntimeFollowUps;
+  const logIdentity = options.logIdentity ?? logRuntimeIdentity;
+  const logAudio = options.logCallerAudio ?? logCallerAudio;
+  let laneSourcePromise: Promise<LaneSource> | null = null;
+  const laneSource = () => {
+    if (options.laneSource) return Promise.resolve(options.laneSource);
+    laneSourcePromise ??= defaultLaneSource();
+    return laneSourcePromise;
+  };
+  // The PCP floor reads its sweep off the SAME source the call's agent was
+  // resolved from, so the sweep and the factory are one module (v90 —
+  // pcpFloor.ts says why a separate import of pcpAgent never filed on Node 20).
+  const sweepPcpFloor =
+    options.sweepPcpFloor ?? ((record: VoiceCallRecord) => runPcpFloor(record, { source: laneSource }));
+  // Passed as is: `(record, ctx)` IS runSetupFailureFloor's signature, so
+  // there is no wrapper here to lose the context (setupFailureFloor.ts).
+  const fileSetupFailure = options.fileSetupFailure ?? runSetupFailureFloor;
+  /**
+   * Bound persist, then ALWAYS file the setup-failure ticket.
+   *
+   * Codex P1 on #347: the no-bridge path used to chain
+   * `persistCall(...).then(() => fileSetupFailure(...))`. A rejected write
+   * skipped the ticket (empty catch). A hung write waited forever. Both are
+   * the outage this floor exists to cover. Same bound as bridge teardown
+   * (`withinOrNull` + persistBeforeSweepMs). The floor is idempotent on
+   * `call-<sid>-setup-failure`.
+   */
+  const persistBoundThenFileSetup = async (
+    record: VoiceCallRecord,
+    ctx: SetupFailureContext,
+  ): Promise<void> => {
+    await withinOrNull(
+      persistCall(record),
+      options.persistBeforeSweepMs ?? PERSIST_BEFORE_SWEEP_MS,
+    );
+    await fileSetupFailure(record, ctx).catch(() => undefined);
+  };
+  /** Lanes proven available at least once, so the webhook's own check does
+   * not have to await the agent tree on Twilio's clock. A slug is only
+   * added here after a successful resolve. */
+  const knownLanes = new Set<string>();
+
+  /** The outbound layer's store, built on first use (an inbound-only
+   * deployment never opens it). A failed build is not cached. */
+  let outboundStorePromise: Promise<OutboundStore> | null = null;
+  const outboundStore = (): Promise<OutboundStore> => {
+    if (options.outboundStore) return Promise.resolve(options.outboundStore);
+    outboundStorePromise ??= createDbOutboundStore().catch((error) => {
+      outboundStorePromise = null;
+      throw error;
+    });
+    return outboundStorePromise;
+  };
+  /** The policy of a registered, enabled outbound lane — null for any other
+   * slug, so an inbound lane can never be reached through the outbound path. */
+  const outboundPolicyFor = async (slug: string) => {
+    const config = (await laneSource()).getAgentConfig(slug);
+    return config?.enabled && config.agentType === "outbound" && config.outbound
+      ? config.outbound
+      : null;
+  };
+
+  for (const line of formatReadinessLines(computeRuntimeReadiness(env))) {
+    console.log(line);
+  }
+
+  // Which VAD threshold this build is actually running. 2026-09-04's
+  // re-measurement came back flat and could not be attributed, because a
+  // threshold that never deployed and one that did nothing are identical
+  // from SQL. Absent this line, the build is not live and a call proves
+  // nothing (CLAUDE.md, "How to tell whether a deploy took").
+  console.log(vadBootMarker());
+
+  // The warm transfer. Its availability is decided once, here, and logged —
+  // so "why is no-ivr still refused?" is answered by the boot log, not a
+  // live call. resolveAppDomain is the same resolution the SIP path uses
+  // for its callback URLs, called with raw env so this module never pulls
+  // in the full config (which requires DATABASE_URL at import).
+  const transferDomain = publicTransferDomain(env);
+  const transfer = createRuntimeTransfer({
+    env,
+    ops: options.transferOps,
+    domain: transferDomain,
+  });
+  console.log(
+    transfer.unavailableReason
+      ? `[voice-runtime] ${transfer.unavailableReason} — transfer-capable lanes stay refused`
+      : `[voice-runtime] warm transfer armed (accept: https://${transferDomain}${TRANSFER_ACCEPT_PATH})`,
+  );
+
+  /**
+   * Say at boot which lanes this deployment can serve. `laneSupportStatus`
+   * has always been pure and always returned a reason; nothing ever printed
+   * it, so the only way to find out a lane was refused was to point a number
+   * at it and listen. Resolved lazily and never awaited on the boot path —
+   * the lane source imports the whole agent tree, and a health report must
+   * not be the thing that delays the first call.
+   */
+  const rosterFor = async (): Promise<LaneReadiness[]> =>
+    laneRoster(await laneSource(), env, {
+      transferAvailable: transfer.unavailableReason === null,
+    });
+  void rosterFor()
+    .then((roster) => {
+      for (const line of formatLaneRoster(roster)) console.log(line);
+    })
+    .catch((error) => {
+      console.error("[voice-runtime] could not report the lane roster:", error);
+    });
+
+  app.post(TRANSFER_ACCEPT_PATH, (req: Request, res: Response) => {
+    send(res, transfer.handleAccept(toWebhookRequest(req)));
+  });
+
+  app.post(TRANSFER_STATUS_PATH, (req: Request, res: Response) => {
+    send(res, transfer.handleStatus(toWebhookRequest(req)));
+  });
+
+  // A blind transfer's `<Dial>` finished. This is the ONLY signal that says
+  // whether the PCP queue answered — there is no keypress on that path — and
+  // its response is the only voice left to a caller whose dial never
+  // connected, because the redirect killed the agent's stream.
+  app.post(TRANSFER_DIAL_RESULT_PATH, (req: Request, res: Response) => {
+    send(res, transfer.handleDialResult(toWebhookRequest(req)));
+  });
+
+  app.get("/voice/health", async (_req: Request, res: Response) => {
+    const readiness = computeRuntimeReadiness(env);
+    const destinations = transferDestinationStatus(env);
+    // Never let a roster failure take the health endpoint down with it: the
+    // endpoint's first job is to answer at all.
+    const lanes = await rosterFor().catch(() => null);
+    res.json({
+      marker: VOICE_RUNTIME_DEPLOY_MARKER,
+      // The commit this bundle was built from, read from build-info.json
+      // (written by the deployment build). null = unknown, never a guess.
+      // Compare with call_logs.build_sha on calls after a publish.
+      buildSha: deployedBuildSha(),
+      // The cached prefix every lane shares. Reported so a change in the
+      // fleet's cache-hit rate can be attributed to a prefix change rather
+      // than guessed at — which is the whole reason the constant exists,
+      // and it was doing none of it while nothing read it.
+      knowledgePack: KNOWLEDGE_PACK_VERSION,
+      liveReady: readiness.liveReady,
+      // NAMES only. A readiness endpoint that echoes a value is a
+      // credential leak with a health check's URL.
+      missing: readiness.missing,
+      requiredDbEnvVar: readiness.requiredDbEnvVar,
+      // Transfer readiness is SEPARATE from liveReady on purpose: a
+      // deployment with no transfer configuration still serves every
+      // non-transfer lane correctly, so it is ready — it just refuses the
+      // transfer-capable ones. But `liveReady: true` was being read as
+      // "everything works", and the only place the difference showed was
+      // one line in the boot log, which meant checking whether a warm
+      // transfer could possibly succeed required shell access to the
+      // running deployment. Names only here too.
+      //
+      // TRANSPORT is not the whole answer: the transport can be armed
+      // while no destination number is configured, in which case every
+      // transfer still fails at resolveHandoffDestination. Ready means a
+      // transfer can actually complete — transport AND somewhere to dial
+      // (Codex, PR #236).
+      transferReady: transfer.unavailableReason === null && destinations.missing.length < 2,
+      transferBlockedBy:
+        transfer.unavailableReason ??
+        (destinations.missing.length === 2
+          ? `transfer unavailable: no destination configured (${destinations.missing.join(", ")})`
+          : null),
+      // Per LANE, because the two use different numbers and one can work
+      // while the other does not. Booleans, never the numbers themselves.
+      transferDestinations: { clinical: destinations.clinical, pcp: destinations.pcp },
+      // The text that tells the on-call phone who is calling and why, sent
+      // before an urgent after-hours transfer rings. A transfer still dials
+      // without it, so it is NOT part of transferReady — it is reported on
+      // its own so a missing number shows here instead of failing silently.
+      // Names only, never the numbers.
+      urgentAlert: urgentAlertStatus(env),
+      // Per lane: can this deployment answer a call on it, and if not, the
+      // sentence why. `transferWarning` is the second gate — a lane that IS
+      // served but whose transfer has nowhere to dial, which reads as
+      // healthy everywhere else (Codex, PR #236, per-lane this time).
+      lanes,
+      activeCalls: registry.activeCount(),
+    });
+  });
+
+  /**
+   * THE OUTBOUND LAYER'S WEBHOOKS (src/runtime/outbound/). Mounted before
+   * `/voice/:slug` so a three-segment outbound path is never read as a lane.
+   * Async because the answer has to read the contact; a failure answers with
+   * the controlled line or an empty 204, never a 5xx Twilio would retry into
+   * dead air.
+   */
+  const outboundDeps = async (): Promise<OutboundWebhookDeps> => ({
+    env,
+    registry,
+    store: await outboundStore(),
+    policyFor: outboundPolicyFor,
+  });
+  app.post(`${OUTBOUND_PATH_PREFIX}/:slug/status`, async (req: Request, res: Response) => {
+    try {
+      send(res, await handleOutboundStatus(String(req.params.slug ?? ""), toWebhookRequest(req), await outboundDeps()));
+    } catch (error) {
+      console.error("[outbound] status webhook failed:", error instanceof Error ? error.message : error);
+      res.status(204).end();
+    }
+  });
+  app.post(`${OUTBOUND_PATH_PREFIX}/:slug`, async (req: Request, res: Response) => {
+    try {
+      send(res, await handleOutboundAnswer(String(req.params.slug ?? ""), toWebhookRequest(req), await outboundDeps()));
+    } catch (error) {
+      console.error("[outbound] answer webhook failed:", error instanceof Error ? error.message : error);
+      send(res, buildUnavailableTwiml(200, OUTBOUND_UNAVAILABLE_LINE));
+    }
+  });
+
+  /**
+   * THE DIALLER. Started only when RUNTIME_OUTBOUND_DIALING=1; with the switch
+   * off there is no timer, no lock and no query. Each campaign also needs its
+   * own enable variable and caller ID before it rings anybody (dialer.ts).
+   */
+  startOutboundScheduler({
+    env,
+    host: transferDomain ?? "",
+    laneSource,
+    slugs: async () => {
+      const source = (await laneSource()) as LaneSource & {
+        getOutboundAgents?: () => Array<{ id: string }>;
+      };
+      return (source.getOutboundAgents?.() ?? []).map((a) => a.id);
+    },
+    store: outboundStore,
+    twilio:
+      options.outboundTwilio ??
+      (async () => {
+        const { getTwilioClient } = await import("../lib/twilioClient");
+        const client = await getTwilioClient();
+        return {
+          createCall: (opts) => client.calls.create(opts),
+          // Where a call back to the caller ID goes (dialer.callbackRouting).
+          voiceUrlFor: async (phoneNumber) => {
+            const [number] = await client.incomingPhoneNumbers.list({ phoneNumber, limit: 1 });
+            return number?.voiceUrl ?? null;
+          },
+        };
+      }),
+    lock: options.outboundLock ?? defaultDialerLock,
+  });
+
+  app.post("/voice/:slug/after", (req: Request, res: Response) => {
+    send(
+      res,
+      handleAfterRedirect(toWebhookRequest(req), {
+        env,
+        registry,
+        laneIsAvailable: () => true,
+      }),
+    );
+  });
+
+  app.post("/voice/:slug", (req: Request, res: Response) => {
+    const slug = String(req.params.slug ?? "");
+    send(
+      res,
+      handleVoiceWebhook(slug, toWebhookRequest(req), {
+        env,
+        registry,
+        // A lane the runtime has already served is known available. An
+        // unseen slug is accepted here and resolved at start-frame time:
+        // the alternative is awaiting the agent tree inside Twilio's
+        // webhook timeout, and a slug that turns out to be unknown then
+        // gets the same controlled unavailable line, one verb later.
+        laneIsAvailable: (candidate) => knownLanes.has(candidate) || isValidSlug(candidate),
+      }),
+    );
+  });
+
+  // maxPayload: /voice/stream is PUBLIC until a start frame's token is
+  // claimed, and ws's default cap is 100 MiB — an unauthenticated client
+  // could make the message handler materialize and parse huge strings
+  // before any check runs (Codex review, PR #227 round 17). Real Twilio
+  // frames are tiny: a 20ms μ-law media frame is ~216 base64 chars in
+  // under 1 KB of JSON, and start frames with customParameters are smaller
+  // still. 64 KiB is orders of magnitude of headroom; anything larger is
+  // not Twilio and the socket is closed by ws itself (1009).
+  const wss = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 });
+
+  server.on("upgrade", (req, socket, head) => {
+    let path = "";
+    try {
+      path = new URL(req.url ?? "", "http://localhost").pathname;
+    } catch {
+      return; // malformed URL — not ours
+    }
+    if (path !== VOICE_STREAM_PATH) return; // another handler owns it, or nobody does
+    wss.handleUpgrade(req, socket as never, head, (ws) => wss.emit("connection", ws));
+  });
+
+  wss.on("connection", (ws: WebSocket) => {
+    // Armed from the moment of upgrade and cleared the instant a call is
+    // claimed: an unauthenticated socket gets a bounded window, a real
+    // call is never touched by it.
+    let claimDeadline: ReturnType<typeof setTimeout> | null = setTimeout(() => {
+      claimDeadline = null;
+      console.warn("[voice-runtime] closing a stream socket that never claimed a call");
+      try {
+        ws.close();
+      } catch {
+        /* already gone */
+      }
+    }, options.streamClaimDeadlineMs ?? STREAM_CLAIM_DEADLINE_MS);
+    const clearClaimDeadline = () => {
+      if (claimDeadline !== null) {
+        clearTimeout(claimDeadline);
+        claimDeadline = null;
+      }
+    };
+    let bridge: VoiceCallBridge | null = null;
+    let starting = false;
+    /**
+     * A valid `start` frame CLAIMED this socket: the callSid and token checked
+     * out. Distinct from `starting`, which is set before the claim is tested
+     * and stays true on a refused one — so it cannot gate work that must never
+     * run for an unauthenticated client.
+     */
+    let claimed = false;
+    /**
+     * Twilio is gone. Set by the close and error handlers, which cannot
+     * report to a bridge that does not exist yet: building the agent is
+     * asynchronous, and a caller who hangs up during it would otherwise be
+     * forgotten while the continuation went on to open a Grok session
+     * against a dead socket — a provider connection nobody owns and nobody
+     * closes (Codex review, PR #227).
+     */
+    let socketGone = false;
+    /**
+     * WHEN the caller's socket closed. `socketGone` says whether; the
+     * setup-failure floor needs when, because a hangup during the
+     * first-event wait is only NOTICED at the end of the wait — so the
+     * record's own end time reads as a caller who waited when they did not.
+     */
+    let socketGoneAtMs: number | undefined;
+    /**
+     * Caller audio that arrives between the `start` frame and the bridge
+     * existing. Building the agent and opening the Grok socket takes real
+     * time, and a caller who begins talking during it would otherwise be
+     * talking into a dropped stream. The session has its own hold for the
+     * NEXT gap (its handshake); this one covers the gap before it exists.
+     * Bounded for the same reason as that one: on a live call, stale audio
+     * is worth less than fresh, and oldest goes first.
+     */
+    const pendingFrames: TwilioInboundFrame[] = [];
+    /**
+     * WHAT TWILIO DELIVERED FROM THE CALLER, counted at the socket.
+     *
+     * At the SOCKET and not in the bridge, for two reasons that are the whole
+     * point of the instrument (Codex P2, #327). The queue above drops its
+     * OLDEST frame past the cap, so a caller who spoke during a slow start
+     * and went quiet afterwards would be counted as a line nobody spoke into
+     * — audio that reached this server, reported as its opposite, by the
+     * measure built to separate those two. And three exits below write a
+     * `call_logs` row without ever building a bridge; they are part of the
+     * no-audio population, and from here they have counts to write.
+     *
+     * One stream per socket (the `start` handler refuses a second), so this
+     * is per call.
+     */
+    const callerAudio = new CallerAudioMeter();
+
+    const twilioSocket = {
+      sendFrame: (frame: TwilioOutboundFrame) => {
+        if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(frame));
+      },
+      close: () => {
+        try {
+          ws.close();
+        } catch {
+          /* already closed */
+        }
+      },
+    };
+
+    ws.on("message", (raw) => {
+      const frame = parseTwilioInboundFrame(raw.toString());
+      if (!frame) return;
+
+      if (frame.event === "start") {
+        if (starting || bridge) return; // one stream per socket
+        starting = true;
+        const params = frame.start.customParameters ?? {};
+        const entry = registry.claimStream(params.callSid ?? "", params.token ?? "");
+        if (!entry) {
+          // Unknown callSid, wrong token, or a second stream for a call
+          // that already has one. Closed before any bridge exists.
+          console.warn("[voice-runtime] refused a stream with no valid claim");
+          twilioSocket.close();
+          return;
+        }
+        claimed = true;
+        clearClaimDeadline();
+        // The public host the webhook was reached on rides in as a stream
+        // parameter, so the recording callback can be named without a second
+        // way of learning it. Absent on older TwiML; the starter falls back
+        // to env.DOMAIN.
+        void startCall(entry, frame.streamSid, params.host);
+        return;
+      }
+
+      // COUNTED HERE: after the claim, before every branch below that can drop
+      // a frame — the hold that discards its oldest, and the bridge that may
+      // not exist yet. Two integers and one pass over 160 bytes, and the audio
+      // is handed on unchanged further down, so nothing here can delay it.
+      //
+      // BEHIND `claimed` FOR TWO REASONS (Codex P2, #327 round 2). Until a
+      // valid `start` arrives this socket is unauthenticated for up to the
+      // claim deadline, and the parser accepts a payload up to the 64 KiB
+      // message limit with no rate limit behind it — so metering ahead of the
+      // claim let an anonymous client spend the shared event loop on scans.
+      // And those frames are not this call's anyway: the call's identity
+      // arrives IN the `start` frame, and a socket that never claims writes no
+      // row at all, so counting them could only ever inflate `frames` with
+      // audio that belongs to no measurement.
+      if (frame.event === "media" && claimed) callerAudio.note(frame.media.payload);
+
+      if (!bridge) {
+        if (starting) {
+          pendingFrames.push(frame);
+          if (pendingFrames.length > PRE_BRIDGE_FRAME_CAP) pendingFrames.shift();
+        }
+        return;
+      }
+      bridge.handleTwilioFrame(frame);
+    });
+
+    ws.on("close", () => {
+      clearClaimDeadline();
+      clearSetupDeadline();
+      socketGone = true;
+      socketGoneAtMs ??= Date.now();
+      bridge?.handleSocketClosed();
+    });
+    ws.on("error", () => {
+      clearClaimDeadline();
+      clearSetupDeadline();
+      socketGone = true;
+      socketGoneAtMs ??= Date.now();
+      bridge?.handleSocketClosed();
+    });
+
+    /** Armed once the provider socket is being opened, cleared by the
+     * handshake. Declared out here because the bridge's session is
+     * constructed before the timer is armed. */
+    let setupDeadline: ReturnType<typeof setTimeout> | null = null;
+    const clearSetupDeadline = () => {
+      if (setupDeadline !== null) {
+        clearTimeout(setupDeadline);
+        setupDeadline = null;
+      }
+    };
+
+    async function startCall(
+      entry: CallEntry,
+      streamSid: string,
+      recordingHost?: string,
+    ): Promise<void> {
+      const startedAtMs = Date.now();
+      // The call is answered once its stream has started, so Twilio will take
+      // a REST recording from here. Never awaited, never on the call's path:
+      // a failure is one console line and the call proceeds unrecorded, as
+      // every runtime call did before 2026-09-17.
+      void startRecording(entry.callSid, recordingHost).catch(() => undefined);
+      /** Filled in when the call_logs row lands; read through the metadata
+       * getter above for the rest of the call. */
+      let callLogId: string | undefined;
+      /**
+       * WHAT THE PRE-CONTEXT CARRY-FORWARD WRITE DID, or undefined when
+       * pre-context vouched for nobody and there was nothing to write.
+       *
+       * Declared here, beside `callLogId`, because the teardown reads it and
+       * the write happens sixty lines below. Every early return leaves it
+       * undefined, which is the honest value: nothing was attempted.
+       */
+      let precontextWrite: string | undefined;
+      const context = {
+        callSid: entry.callSid,
+        streamSid,
+        slug: entry.slug,
+        callerPhone: entry.callerPhone,
+        dialedNumber: entry.dialedNumber,
+        // A call this runtime DIALLED says so, and the call record writes
+        // Twilio's from/to the right way round (callRecord.callEnds).
+        ...(entry.outbound ? { direction: "outbound" as const } : {}),
+      };
+      try {
+        // Started BEFORE the agent is built so the two overlap, and bounded
+        // so it can never hold the call open on its own.
+        // Both together: the greeting resolver is a warm Map read after
+        // boot, but on a cold miss it can wait on the database, and that
+        // must overlap the pre-context lookup rather than follow it.
+        const [precontext, configuredGreeting, outboundContact, callbackLookup] = await Promise.all([
+          // A DIALLED call already knows who it rang: the contact row names
+          // them, so there is no caller-ID lookup to make — and a household
+          // phone's other members are exactly what that lookup would surface.
+          options.fetchPrecontext && !entry.outbound
+            ? withinOrNull(
+                options.fetchPrecontext(entry.callerPhone) as Promise<unknown>,
+                PRECONTEXT_DEADLINE_MS,
+              )
+            : Promise.resolve(null),
+          options.resolveGreeting
+            ? withinOrNull(
+                options.resolveGreeting(entry.slug),
+                PRECONTEXT_DEADLINE_MS,
+              )
+            : Promise.resolve(null),
+          entry.outbound
+            ? withinOrNull(
+                outboundStore().then((store) =>
+                  store.loadCallContact(entry.outbound!.contactId, entry.outbound!.attemptId),
+                ),
+                PRECONTEXT_DEADLINE_MS,
+              ).catch(() => null)
+            : Promise.resolve(null as OutboundContact | null),
+          // A call somebody made TO an outbound lane is the person ringing
+          // back the number we call from (outbound/callback.ts): who on the
+          // campaign's list that number belongs to. Bounded like the rest;
+          // a miss here is retried by identify_callback_caller itself.
+          entry.outbound
+            ? Promise.resolve(null)
+            : laneSource()
+                .then((source) => {
+                  const cfg = source.getAgentConfig(entry.slug);
+                  if (!cfg?.enabled || cfg.agentType !== "outbound" || !cfg.outbound) return null;
+                  const campaignKey = cfg.outbound.campaignKey;
+                  return withinOrNull(
+                    outboundStore().then(async (store) => ({
+                      store,
+                      ...(await store.callbackCandidates(campaignKey, entry.callerPhone)),
+                    })),
+                    PRECONTEXT_DEADLINE_MS,
+                  );
+                })
+                .catch(() => null),
+        ]);
+        // WHICH of the three pre-context outcomes happened. Without this the
+        // runbook's own diagnosis step is not performable: every failure —
+        // an ordinary "no match", a service error, a lookup that beat no
+        // deadline — arrives here as the same `null`, and the runbook told
+        // an operator to establish which one before concluding anything.
+        // `si_persons` shows what data exists, not what this request
+        // returned. So the distinction has to be logged where it is known,
+        // and this is the only place that knows (Codex review, PR #239).
+        //
+        // No name, no number: `recognised` is the fact the operator needs,
+        // and the caller's own line already carries the identity.
+        // `unavailable` is null — the lookup failed or missed the 1.5s
+        // deadline, and callEyecareTool's own [AZUL-SCHED] lines separate
+        // those two. `no_match` is a lookup that ran and vouched for nobody,
+        // which is ORDINARY and the commonest reason an opening is cold.
+        console.info(
+          `[runtime] pre-context ${entry.slug} ${entry.callSid}: ` +
+            (precontext === null
+              ? "unavailable (failed or past the 1.5s deadline — see [AZUL-SCHED])"
+              : precontextMatched(precontext)
+                ? recognisedFirstName(precontext)
+                  ? "recognised"
+                  : "matched, no usable first name — the greeting stays generic"
+                : "no_match (ran, vouched for nobody — a cold open is correct)"),
+        );
+
+        /**
+         * CARRY THE MATCH INTO THE ONE PLACE THE TOOLS CAN READ IT.
+         *
+         * Wayne, repeatedly and for months: *"once you validate that, lock
+         * that, that's it — that carries you everywhere you go."* Until this
+         * line the match went into the greeting and the prompt and nowhere
+         * else, so every tool that needed it depended on the model relaying
+         * it back, and the model does not. See `matchedRecord` above for what
+         * that cost on a single measured day.
+         *
+         * `certain: false` IS THE VALIDATION RULE, not a hedge. A phone match
+         * is a candidate to confirm — his instruction 6, and the reason the
+         * greeting asks "Am I speaking with…?" rather than asserting. The flag
+         * gates `verifiedIdentityFor`, which the teardown sweep uses to file a
+         * ticket under a name with nobody watching, and a caller-ID hit has
+         * not earned that. It deliberately does NOT gate `verifiedDobFor`,
+         * whose own guard is stricter in the way that matters here: it answers
+         * only when the ticket is being filed under the SAME name the record
+         * gave. A caller who says "no, that's my father" is not filed under
+         * that name, so the date of birth never carries — the confirmation
+         * enforces itself through the name rather than through a flag we would
+         * have to guess at.
+         *
+         * Everything else the store already guarantees and this does not
+         * restate: a real Twilio CallSid or nothing is written, both names or
+         * nothing, one entry per call, thirty-minute TTL, in memory only.
+         */
+        const record = matchedRecord(precontext);
+        if (record) {
+          precontextWrite = rememberVerifiedIdentity(entry.callSid, {
+            ...record,
+            certain: false,
+          });
+        }
+        /**
+         * A DIALLED CALL REACHES ONLY ITS CAMPAIGN'S LANE, and an inbound call
+         * never reaches an outbound lane. Decided from the registration BEFORE
+         * the agent is built, like every other refusal (laneRegistry): an
+         * outbound agent answering an inbound caller would open with a greeting
+         * about somebody else's appointment, and an inbound agent on a dialled
+         * call would not know why it rang. A dialled call whose contact could
+         * not be loaded is refused the same way — the agent must never be
+         * guessing who it called.
+         */
+        const registered = (await laneSource()).getAgentConfig(entry.slug);
+        const isOutboundLane = registered?.agentType === "outbound" && Boolean(registered.outbound);
+        const directionMismatch =
+          registered !== undefined &&
+          ((Boolean(entry.outbound) && !isOutboundLane) ||
+            (entry.outbound !== undefined && !outboundContact));
+        if (directionMismatch) {
+          console.warn(
+            `[voice-runtime] ${entry.slug}: refused — ` +
+              (isOutboundLane
+                ? "the dialled contact could not be loaded"
+                : "a dialled call reached an inbound lane"),
+          );
+        }
+        /**
+         * A RETURNED CALL IS ANSWERED, NOT REFUSED (v106).
+         *
+         * Operator, 2026-10-21: "There is no redirect. If a patient calls back,
+         * like we expect them to, the voice agent has to handle that call as
+         * well and know exactly who is on the line and why they are calling."
+         * v105 refused every inbound call on an outbound lane, so a patient
+         * ringing back the number on their caller ID heard "unavailable". The
+         * same lane, the same agent, answers it now: the calling number makes
+         * the people on it candidates, the greeting confirms rather than
+         * assumes, and nothing about why we called is said until the caller is
+         * identified (outbound/callback.ts, identify_callback_caller).
+         */
+        const callback: CallbackContext | null =
+          isOutboundLane && !entry.outbound && registered?.outbound
+            ? {
+                campaignKey: registered.outbound.campaignKey,
+                campaignId: callbackLookup?.campaignId ?? null,
+                callerPhone: entry.callerPhone,
+                match: matchCallback(callbackLookup?.candidates ?? []),
+                purpose: callbackPurpose(registered.outbound),
+              }
+            : null;
+        if (callback) {
+          // Counts and a verdict only: never a name, never the number.
+          console.info(
+            `[outbound] returned call ${entry.slug} ${entry.callSid}: ` +
+              (callbackLookup === null
+                ? "the campaign list could not be read in time — identify_callback_caller will try again"
+                : callback.match.kind === "one"
+                  ? "one person on this number — the greeting confirms them by first name"
+                  : callback.match.kind === "several"
+                    ? `${callback.match.people} people on this number — the greeting asks who is calling`
+                    : "this number is not on the campaign's list — the greeting asks who is calling"),
+          );
+        }
+        const lane = directionMismatch ? null : await resolveLane(
+          entry.slug,
+          {
+            callSid: entry.callSid,
+            callId: entry.callSid,
+            callerPhone: entry.callerPhone,
+            dialedNumber: entry.dialedNumber,
+            // A GETTER, because the agent is built before the row exists.
+            // answeringServiceAgent polls this for five seconds before
+            // writing what it recognised about the caller; a plain value
+            // captured here would be undefined forever and every
+            // recognised caller would be logged as unidentified — the very
+            // phone-ID metric the migration is measured on (Codex review,
+            // PR #227).
+            get callLogId(): string | undefined {
+              return callLogId;
+            },
+            // This pipeline names itself, so an agent with a prompt written
+            // for Grok (the after-hours lane, v76) can pick it here and keep
+            // the old core's prompt on the old core.
+            pipeline: "runtime" as const,
+            // The queue agents choose their opening from this: with a
+            // unique match they confirm ("Am I speaking with…?") instead of
+            // asking cold, which is the behaviour the SIP path already
+            // gives every one of these lanes. A match is a candidate to
+            // confirm, never an identity — the agent's own prompt decides
+            // what to do with it (Codex review, PR #227).
+            ...(precontext ? { precontext } : {}),
+            // Who a dialled call is for, from the contact row (outbound/).
+            ...(entry.outbound && outboundContact
+              ? { outbound: { ...outboundContact, campaignKey: entry.outbound.campaignKey } }
+              : {}),
+            // And who may be ringing back, on a call made TO an outbound lane.
+            ...(callback ? { callback } : {}),
+          },
+          {
+            source: await laneSource(),
+            env,
+            // Only when this deployment can actually transfer. Otherwise the
+            // transfer-capable lanes keep their refusal, reason logged at
+            // mount — never a handoff that dials nothing.
+            ...(transfer.unavailableReason
+              ? {}
+              : {
+                  handoff: (md) =>
+                    transfer.handoffFor(entry.slug, md, {
+                      // Late-bound on purpose: the handoff is built before
+                      // the bridge exists, and invoked mid-call when it
+                      // does. The mark is what records a successful
+                      // transfer as `transferred` rather than the
+                      // caller_hangup the stream's death looks like
+                      // (Codex, PR #230 round 2).
+                      onCallerRedirectStarting: (method) => bridge?.noteTransferStarting(method),
+                      onCallerRedirectFailed: () => bridge?.noteTransferFailed(),
+                      // The watchdog must span the accept window while the
+                      // office is being dialed and briefed, or the caller
+                      // is torn down as dead_air at the tool budget and
+                      // the office leg abandoned mid-briefing (Codex,
+                      // PR #230 round 3).
+                      onAttemptStarting: (waitMs) => bridge?.noteTransferWaitStarting(waitMs),
+                      onAttemptSettled: () => bridge?.noteTransferWaitSettled(),
+                    }),
+                }),
+          },
+        );
+        if (!lane) {
+          // The webhook let this through unseen and it turned out to be
+          // unknown or disabled. Closing the socket runs the <Redirect>,
+          // whose handler speaks the controlled line.
+          console.warn(`[voice-runtime] no available lane for slug ${entry.slug}`);
+          registry.recordOutcome(entry.callSid, "provider_failure");
+          // Same durable record the catch below writes: this early return
+          // sits BEFORE that catch, and the registry copy is consumed by
+          // the redirect — a claimed call for an unknown or disabled lane
+          // would otherwise vanish (Codex review, PR #227 round 18).
+          const unknownLaneRecord: VoiceCallRecord = {
+            callSid: entry.callSid,
+            streamSid,
+            slug: entry.slug,
+            callerPhone: entry.callerPhone,
+            dialedNumber: entry.dialedNumber,
+            outcome: "provider_failure",
+            transcript: "",
+            toolEvents: [],
+            agentTurns: 0,
+            interruptions: 0,
+            startedAtMs,
+            endedAtMs: Date.now(),
+          };
+          // No context: the floor skips an unknown lane before it reads one.
+          void persistBoundThenFileSetup(unknownLaneRecord, {});
+          // And what the caller's audio did, on an exit that never built a
+          // bridge (Codex P2, #327). Part of the no-audio population, so the
+          // row goes here too or the instrument's claim of one per call is
+          // false on exactly the calls it was built to size.
+          void logAudio(
+            { callSid: entry.callSid, outcome: "provider_failure" },
+            callerAudio.counts(),
+            { callLogId },
+          ).catch(() => undefined);
+          twilioSocket.close();
+          return;
+        }
+        knownLanes.add(entry.slug);
+        const callbackStore = callback
+          ? (callbackLookup?.store ?? (await outboundStore().catch(() => null)))
+          : null;
+        if (callback && callbackStore) {
+          // The tools find who this call is with here, by its CallSid. Opened
+          // only once the lane exists; closed at teardown, or below if the
+          // caller has already gone. With no store at all the agent can still
+          // take the call — it just cannot look anybody up.
+          openCallbackSession({
+            callSid: entry.callSid,
+            campaignKey: callback.campaignKey,
+            campaignId: callback.campaignId,
+            callerPhone: entry.callerPhone,
+            candidates: (callbackLookup?.candidates ?? []) as CallbackCandidate[],
+            candidatesLoaded: callbackLookup !== null,
+            purpose: callback.purpose,
+            store: callbackStore,
+          });
+        }
+        // Open the call's row BEFORE the agent can run a tool. The agents'
+        // own telemetry, identity stamping and ticket number all UPDATE
+        // this row by call_sid, and a flush that lands on no row still
+        // marks itself done — so a row created only at teardown loses the
+        // tool timeline permanently (Codex review, PR #227).
+        //
+        // BOUNDED, not merely try/caught. A rejection was handled; an
+        // insert that never settles — a lock, a wedged pool — is not a
+        // rejection, and awaiting it here blocks before the bridge exists
+        // and before the provider deadline is armed, leaving the caller in
+        // billed silence. Logging must never do that, so the call proceeds
+        // without the row if it does not land in time; teardown's upsert
+        // inserts it then instead.
+        const openRow = openRuntimeCall(
+          {
+            callSid: entry.callSid,
+            slug: entry.slug,
+            callerPhone: entry.callerPhone,
+            dialedNumber: entry.dialedNumber,
+            ...(entry.outbound ? { direction: "outbound" as const } : {}),
+            agentVersion: lane.version,
+            startedAtMs,
+          },
+          options.openCallRow,
+          env,
+        );
+        // Stopping the WAIT is not cancelling the insert. A row that lands
+        // a moment late still carries the id the answering-service agent is
+        // polling for — it polls for five seconds — so attach it whenever it
+        // arrives rather than discarding it along with the wait. Without
+        // this, transient database slowness puts a recognised caller back to
+        // being logged as unidentified (Codex review, PR #227).
+        void openRow.then((id) => {
+          if (id) callLogId = id;
+          stampCall(entry.callSid, entry.slug);
+        });
+        callLogId =
+          (await withinOrNull(openRow, options.callRowDeadlineMs ?? CALL_ROW_DEADLINE_MS)) ??
+          undefined;
+        if (socketGone) {
+          // The caller hung up while the agent was being built. No session
+          // exists, so there is nothing to tear down — but a row opened a
+          // moment ago is now sitting `in_progress`, and left alone it is
+          // swept as a stale call rather than the hangup it was. Finalize
+          // it here, on the one path that never reaches the bridge.
+          registry.recordOutcome(entry.callSid, "caller_hangup");
+          void closeCallbackSession(entry.callSid);
+          // Finalized unconditionally. Both writes are safe in either
+          // order: the open does nothing on conflict, this updates on
+          // conflict. So whether the row landed before the deadline, after
+          // it, or never, the call is recorded as the hangup it was rather
+          // than swept as stale.
+          void persistCall({
+            callSid: entry.callSid,
+            streamSid,
+            slug: entry.slug,
+            callerPhone: entry.callerPhone,
+            dialedNumber: entry.dialedNumber,
+            outcome: "caller_hangup",
+            transcript: "",
+            toolEvents: [],
+            agentTurns: 0,
+            interruptions: 0,
+            startedAtMs,
+            endedAtMs: Date.now(),
+          }).catch(() => {
+            // Losing the record must never break the hangup path.
+          });
+          // And what the caller's audio did, on an exit that never built a
+          // bridge (Codex P2, #327). Part of the no-audio population, so the
+          // row goes here too or the instrument's claim of one per call is
+          // false on exactly the calls it was built to size.
+          void logAudio(
+            { callSid: entry.callSid, outcome: "caller_hangup" },
+            callerAudio.counts(),
+            { callLogId },
+          ).catch(() => undefined);
+          return;
+        }
+        if (lane.agent.skipped.length > 0) {
+          // Reported, never silent: a tool that vanished is
+          // indistinguishable from a model that would not call it.
+          console.warn(
+            `[voice-runtime] ${entry.slug}: tools not offered — ` +
+              lane.agent.skipped.map((s) => `${s.name} (${s.reason})`).join(", "),
+          );
+        }
+
+        /**
+         * ONE GREETING, KNOWN TO BOTH SIDES.
+         *
+         * Hoisted out of the bridge options because the SESSION now needs it
+         * too — see withGreetingAlreadyPlayed. The bridge speaks it; the model
+         * has to be told it was spoken.
+         */
+        const spokenGreeting =
+          // A dialled call opens with its campaign's own greeting, built for
+          // the person it rang: who is calling, that it is automated, and
+          // that the call is recorded, before anything else (outbound/).
+          lane.outbound && outboundContact
+            ? lane.outbound.greeting(outboundContact) || null
+            : // A call made TO an outbound lane: confirm, never assume, and
+              // say nothing about why we called (outbound/callback.ts).
+              callback
+              ? callbackGreeting(callback.match, { sayName: entry.slug !== "si-assistant" })
+              : personaliseGreeting(
+                chooseGreeting(entry.slug, configuredGreeting, lane.greeting),
+                recognisedFirstName(precontext),
+                greetingStyleFor(entry.slug),
+              ) || null;
+        /**
+         * FIRST-EVENT RETRY, BEFORE THE BRIDGE (v91).
+         *
+         * xAI accepts the WebSocket (~0.2 s, 101) and sometimes never
+         * sends `session.created`. Waiting the 15 s handshake deadline
+         * then dropping the call left the caller in silence with no
+         * ticket. Open, wait ~2.5 s for the first inbound event, detach
+         * a stalled socket so its close cannot end the call, try again.
+         * The winning transport is the one the session is built on.
+         *
+         * createSession binds onMessage in the constructor, so
+         * commitBuffered MUST run after the session exists — otherwise
+         * the buffered session.created lands on a null handler.
+         */
+        // Holder, not a `let`, so the assignment inside `open` is visible
+        // to the type checker after the await. A `let live = null` assigned
+        // only in a closure stays `null` forever to tsc, and the null-check
+        // then narrows the transport to `never`.
+        const opened: { transport?: RuntimeTransport } = {};
+        await connectWithFirstEventRetry({
+          open: async () => {
+            if (socketGone) throw new ProviderConnectAbortedError();
+            const t = options.createTransport
+              ? options.createTransport({ apiKey: lane.voice.apiKey, model: lane.voice.model })
+              : new WebSocketGrokTransport(lane.voice.apiKey, lane.voice.model);
+            opened.transport = t;
+            await t.connect();
+            return {
+              headers: t.upgradeHeaders?.() ?? {},
+              waitForFirstEvent: (ms) =>
+                t.waitForFirstEvent?.(ms) ?? Promise.resolve(true),
+              detachAndClose: () => {
+                if (t.detachAndClose) t.detachAndClose();
+                else t.close();
+              },
+            };
+          },
+          shouldAbort: () => socketGone,
+          firstEventTimeoutMs: options.firstEventTimeoutMs ?? firstEventTimeoutMs(env),
+          maxRetries: options.connectRetries ?? connectRetries(env),
+          // One call id for every attempt and the outcome, so the
+          // connect-failure alert counts calls dropped, not just attempts.
+          ...trackConnect(),
+        });
+        const transport = opened.transport;
+        if (!transport) throw new Error("provider connect returned no transport");
+        bridge = new VoiceCallBridge({
+          context,
+          startedAtMs,
+          agent: lane.agent,
+          // The practice's own line, spoken before the agent's first turn,
+          // personalised for a recognised caller exactly as the SIP path
+          // personalises it — same two helpers, same per-agent style.
+          //
+          // Passing the raw registry greeting was not a smaller version of
+          // this, it was a different opening: the queue lines APPEND, so a
+          // recognised caller should hear their own greeting with its
+          // trailing question swapped for "Am I speaking with <name>?".
+          // Tech and records prompts then tell the model to take that
+          // answer and move on — which it cannot do if the caller was only
+          // ever asked "How can I help you today?" (Codex review, PR #240).
+          //
+          // No name, or no match, returns the greeting untouched: whether
+          // recognition happened is not a decision this makes.
+          // The configured greeting outranks the registry string, exactly as
+          // it does on the SIP path — an admin edit must be what the caller
+          // hears, not what the code was shipped with. UNLESS it has dropped
+          // copy the lane is required to say; see `chooseGreeting`.
+          greeting: spokenGreeting,
+          twilio: twilioSocket,
+          createSession: (handlers) =>
+            new GrokVoiceSession(
+              transport,
+              buildSessionConfig(
+                lane.voice,
+                /**
+                 * RULE ZERO, both halves, composed at the one seam that knows
+                 * whether Rule 1 fired.
+                 *
+                 * Order is deliberate but not load-bearing — both append, and
+                 * neither reads the other's text. What IS load-bearing is that
+                 * the new-or-existing ask sees `precontextMatched`, so it
+                 * stands down for a caller the person base has already vouched
+                 * for. Rule 2a: asking a recognised patient to classify
+                 * themselves tells them we do not know who they are while we
+                 * are looking at their chart.
+                 */
+                withNewOrExistingAsk(
+                  withGreetingAlreadyPlayed(
+                    // A returned call: how to find out who rang, inside the
+                    // lane's own Conversation Flow (outbound/callback.ts).
+                    callback
+                      ? withCallbackSteps(
+                          lane.agent.instructions,
+                          callbackSteps(callback, { nameBeforeVerify: entry.slug !== "si-assistant" }),
+                        )
+                      : lane.agent.instructions,
+                    spokenGreeting,
+                  ),
+                  entry.slug,
+                  precontextMatched(precontext),
+                ),
+                lane.agent.tools,
+                laneKeyterms(entry.slug),
+              ),
+              {
+                ...handlers,
+                // The handshake landing is what stands the setup deadline
+                // down — the same event that arms the bridge's own dead-air
+                // watchdog, so the two windows meet with no gap between
+                // them and nothing to poll.
+                onConfigured: () => {
+                  clearSetupDeadline();
+                  handlers.onConfigured();
+                },
+              },
+            ),
+          // Enforce by default — the SDK interrupts on the SIP path, and a
+          // lane must not lose its safety rules by moving transports. "log"
+          // exists to measure a rule's false-positive rate first.
+          guardrailMode: env.RUNTIME_GUARDRAIL_MODE === "log" ? "log" : "enforce",
+          onOutcome: (outcome: CallOutcome) => {
+            registry.recordOutcome(entry.callSid, outcome);
+            // The per-call transfer the proving agent may have brokered dies
+            // with the call — an entry outliving its call would let a later
+            // call's tool dial a dead leg.
+            releaseCallHandoff(entry.callSid);
+            // The caller's words the escalation gate reads die with the call
+            // too (v99: the bridge now feeds them on this pipeline).
+            releaseCallerSpeech(entry.callSid);
+            // And an outreach call's session (v110): it holds the patient's
+            // record and their offered slots, and must not outlive the call.
+            closeOutreachSession(entry.callSid);
+            // The call is over, whatever ended it: any office leg still
+            // ringing for this caller is abandoned NOW, not after the
+            // accept window — the staffer must not keep ringing toward,
+            // or accept into, a completed leg (Codex, PR #230 round 2).
+            // A successful transfer has no pending legs left; no-op then.
+            transfer.abandonFor(entry.callSid);
+          },
+          /**
+           * THE RECORD FIRST, THEN THE SWEEP.
+           *
+           * Ordered, not raced. The call_logs row is the evidence every
+           * measurement is built on and it must land whatever the sweep does;
+           * the sweep in turn reads nothing from the row, so a failed write
+           * does not stop a request being recovered. `runRequestSweep` never
+           * throws — the catch here is the second lock, not the first.
+           *
+           * The bridge fires this and does not wait: teardown must not hold a
+           * socket open for a ticket POST.
+           */
+          persistCallRecord: async (record) => {
+            // Snapshot before closeCallbackSession deletes the map entry.
+            // Message and call report use this same identity (P2-4).
+            const returnedSession = callbackSessionFor(record.callSid);
+            const identified = returnedSession?.chosen ?? null;
+            const identifiedCandidates = returnedSession?.candidates ?? [];
+            const identifiedAttemptId = returnedSession?.attemptId ?? null;
+            const identifiedStore = returnedSession?.store ?? null;
+            // A returned call's inbound attempt ends, and an identified caller
+            // with no recorded outcome is marked answered. Never awaited and
+            // never throws: it is the campaign's ledger, not the call's record.
+            void closeCallbackSession(record.callSid, {
+              durationSeconds: Math.max(0, Math.round((record.endedAtMs - record.startedAtMs) / 1000)),
+            });
+            /**
+             * BOUNDED, because an unbounded await here throws the request
+             * away. `persistCall` is a database upsert, and a wedged pool
+             * makes it never settle — at which point the sweep never runs,
+             * teardown completes, and a substantive request is lost even
+             * though the ticketing API was healthy the whole time. The
+             * bridge fires this without awaiting, so nothing upstream would
+             * ever notice (Codex, PR #268 round 7).
+             *
+             * The order still matters and is unchanged: the row first,
+             * because it is the evidence every measurement is built on. But
+             * the sweep reads nothing from it, so a slow or failed write is
+             * no reason to abandon the caller's request.
+             */
+            // Who the process established the caller to be (v51): a certain
+            // match only, read from the same store the teardown sweep reads, so
+            // a row carries a name only when the lookup matched one person and
+            // nobody denied it.
+            //
+            // AND WHAT THE STORE LOOKED LIKE AT THAT INSTANT (task #148). Taken
+            // here, next to the read and BEFORE the write, because the probe's
+            // whole job is to describe what this read saw — taken later it
+            // would describe a different moment and answer a question nobody
+            // asked. v51 wrote identity on 0 of 633 calls on 2026-09-17 while
+            // 209 of them had a certain lookup, and `{}` is four different
+            // facts with no way to tell them apart.
+            const identity = identityForRow(record.callSid);
+            const identityProbe = identityStoreProbe(record.callSid);
+            /**
+             * THE UPSERT'S OWN ANSWER IS KEPT (Codex P1, #322). `persistCall`
+             * reports whether the row landed and `withinOrNull` answers null
+             * when the deadline wins — and this discarded both, so the
+             * identity telemetry called a failed write `reached_row` while
+             * `call_logs.patient_found` stayed unset. Three distinct facts:
+             * true landed, false failed after its retries, null still running.
+             */
+            const persisted = await withinOrNull(
+              persistCall(record, identity),
+              options.persistBeforeSweepMs ?? PERSIST_BEFORE_SWEEP_MS,
+            );
+            await sweepCall(record).catch(() => undefined);
+            /**
+             * AND THE PCP FLOOR, which the sweep above declines by design.
+             *
+             * `decideSweep` returns `not-a-queue-lane` for pcp at its first
+             * line, so before this the lane had no teardown filer on this
+             * runtime at all: `sweepPcpUnfiledCall` was wired only into the old
+             * core's SIP teardown and PCP moved here on 2026-09-04. 38 calls on
+             * 2026-09-22 ran the intake, filed nothing, and carry no ticket of
+             * any provenance; 24-53/day over six business days. See pcpFloor.ts
+             * and docs/observatory/W2-CORPUS-20260922.md.
+             *
+             * AWAITED, like the sweep above and unlike the telemetry below,
+             * because it files a caller's request rather than describing it —
+             * and bounded inside `runPcpFloor` so a wedged ticketing app cannot
+             * hold teardown. It also frees the lane's per-call state: the
+             * sweep's `finally` is the only caller of `pcpDirector.clear` that
+             * this runtime ever reaches, since `terminate_call`'s success branch
+             * needs an `ok` from OpenAI's SIP hangup endpoint and got 400 on 94
+             * of 94 PCP calls on 2026-09-22.
+             */
+            await sweepPcpFloor(record).catch(() => undefined);
+            /**
+             * AND THE SETUP-FAILURE FLOOR (v91). A call that never reached
+             * a configured session used to persist provider_failure and
+             * file nothing. The retry absorbs most stalls; this is what
+             * runs when they do not. Gated inside the helper — a call
+             * that already spoke or hung up during the factory is a no-op.
+             */
+            await fileSetupFailure(record).catch(() => undefined);
+            // Telemetry last: the per-turn record lights up the Observatory's
+            // call page but must never delay a caller's request.
+            void persistTurns(record, { callLogId }).catch(() => undefined);
+            // And the grade, which every Observatory surface reads — at
+            // teardown, as the old core does, instead of hours later from the
+            // five-per-cycle backfill (task #139).
+            void gradeCall(record, { callLogId }).catch(() => undefined);
+            // And the follow-up summary (v55, task #146): the one record of
+            // whether the turn a tool result is owed was ever requested and
+            // ever answered, which nothing else persists.
+            /**
+             * THE TWO `call_events` WRITERS RUN ONE AFTER THE OTHER, NOT AT
+             * ONCE (Codex P2, #322).
+             *
+             * Both flush and release the SAME per-SID buffer, and
+             * `flushCallEvents` returns TRUE when it finds no buffer (there is
+             * nothing left to write). So concurrently: one writer's flush
+             * lands and `releaseCallEvents` deletes the whole buffer; the
+             * other's flush failed and is in backoff; its retry then finds
+             * nothing, reports durable, and its row is gone for good — on
+             * exactly the calls a database blip had made worth measuring.
+             *
+             * Before task #148 there was ONE teardown event writer, so the
+             * race did not exist; adding the second is what opened it. Chained
+             * rather than awaited: teardown still holds for neither of them,
+             * and telemetry must never delay a caller's request.
+             *
+             * THE ROOT FIX IS IN `releaseCallEvents` (Codex P1, #322 round 4),
+             * which no longer deletes events nobody has written — a
+             * predecessor that SUCCEEDS used to take the identity row with it,
+             * which the chaining alone did not prevent. The order below is now
+             * an INSERT saved, not the safety property.
+             */
+            const followUpsWritten = logFollowUps(record, { callLogId }).catch(() => undefined);
+            /**
+             * AND WHY IDENTITY DID OR DID NOT LAND (task #148): an instrument,
+             * never a gate — it changes nothing a caller hears.
+             *
+             * Started IMMEDIATELY rather than chained off the line above
+             * (Codex P1, #322 round 3). It emits its row first and waits for
+             * `followUpsWritten` only before FLUSHING, so the two never release
+             * the same per-SID buffer at once — while a wedged pool, which
+             * leaves the unbounded flush above pending for ever, can no longer
+             * stop the identity row being buffered. The 2h reaper recovers what
+             * is emitted; it cannot recover what was never emitted at all.
+             */
+            const identityWritten = logIdentity(record, identity, identityProbe, persisted, { callLogId }, {
+              after: followUpsWritten,
+              precontextWrite,
+            }).catch(() => undefined);
+            /**
+             * AND WHETHER THE CALLER'S AUDIO EVER REACHED US — the optical
+             * barely-heard instrument. Same discipline as the two above: emits
+             * its row immediately, waits on its predecessor only before
+             * flushing, never awaited by teardown, and changes nothing a caller
+             * hears. `callerAudioEnergy.ts` carries the measurement.
+             */
+            void logAudio(record, callerAudio.counts(), { callLogId }, { after: identityWritten })
+              .catch(() => undefined);
+            // SI Assistant callbacks (and the outbound leg) are reported to
+            // the ticketing app so they land on the ticket and in My Messages.
+            // Payload is PHI-bounded: no phone, body or transcript.
+            //
+            // STATIC imports, never `import()` (v115): the identity store the
+            // tools wrote during the call is a module-level Map, and on Node
+            // 20 — what Replit runs — a dynamic import of a module the lane
+            // registry already loaded statically evaluates it a SECOND time,
+            // so this read would see an empty store (the v78/v90 class).
+            void (async () => {
+              if (!shouldReportSiAssistantCall(record.slug)) return;
+              const identity = siAssistantIdentityFor(record.callSid);
+              const attachment = await attachmentForSiAssistant({
+                outboundContactData: outboundContact?.data,
+                chosen: identified,
+                candidates: identifiedCandidates,
+                store: identifiedStore,
+                attemptId: identifiedAttemptId,
+                phone: entry.callerPhone,
+                greetingAffirmed: identity?.greetingAffirmed,
+                dobMatched: identity?.dobMatched,
+                wrongPerson: identity?.wrongPerson,
+              });
+              if (attachment.identityConfirmed) {
+                await reattachTakenMessages(record.callSid, attachment.extras);
+              }
+              closeSiAssistantIdentity(record.callSid);
+              return reportSiAssistantCall(
+                {
+                  slug: record.slug,
+                  callSid: record.callSid,
+                  direction: record.direction,
+                  outcome: record.outcome,
+                  startedAtMs: record.startedAtMs,
+                  endedAtMs: record.endedAtMs,
+                },
+                {
+                  ...attachment.extras,
+                  suggestions: attachment.identityConfirmed ? [] : attachment.suggestions,
+                  identityConfirmed: attachment.identityConfirmed,
+                },
+              );
+            })().catch(() => undefined);
+          },
+        });
+        // The session is constructed above, so its onMessage is bound.
+        // Flush the first-event buffer now — session.created included —
+        // or the handshake never starts.
+        transport.commitBuffered?.();
+        // The 15 s deadline now covers session.updated AFTER the first
+        // event, not the wait for session.created. A stall is already
+        // absorbed (or thrown) by the retry above.
+        setupDeadline = setTimeout(() => {
+          setupDeadline = null;
+          console.error(`[voice-runtime] provider setup timed out for ${entry.callSid}`);
+          bridge?.failSession(new Error("provider setup timed out"));
+        }, options.providerSetupDeadlineMs ?? PROVIDER_SETUP_DEADLINE_MS);
+        (setupDeadline as unknown as { unref?: () => void }).unref?.();
+        (bridge.getSession() as GrokVoiceSession).markConnecting();
+        bridge.noteProviderConnecting();
+        // First event already arrived. Ready BEFORE pending-frame replay
+        // so a queued Twilio `stop` stays caller_hangup (the caller left
+        // after we had a live session), not provider_failure.
+        bridge.noteProviderReady();
+        if (socketGone) {
+          // Twilio went away while the provider socket was opening. Route it
+          // through the bridge's own teardown so the transport is closed and
+          // exactly one outcome is recorded. Ready is already set, so this
+          // is caller_hangup — they hung up after we had a session.
+          bridge.handleSocketClosed();
+          return;
+        }
+        // Only now replay what the caller said while the agent was being
+        // built — in order, and after the connect, so a queued `stop` frame
+        // tears the call down against a live transport instead of closing
+        // one that is about to be opened. The session holds this audio
+        // through its own handshake and releases it once the config lands,
+        // which is the ordering its module doc requires.
+        for (const held of pendingFrames.splice(0)) bridge.handleTwilioFrame(held);
+      } catch (error) {
+        const err = error instanceof Error ? error : new Error(String(error));
+        console.error(`[voice-runtime] call setup failed for ${entry.callSid}:`, err.message);
+        if (bridge) {
+          bridge.failSession(err);
+        } else {
+          registry.recordOutcome(entry.callSid, "provider_failure");
+          // The registry copy is consumed by the post-stream redirect, so
+          // without a durable row the setup failures operators most need
+          // to diagnose — lane resolution or agent binding rejecting —
+          // would vanish entirely (Codex review, PR #227 round 17).
+          // Minimal record, fire-and-forget: failing to log a failure
+          // must not block closing the caller's socket.
+          const setupFailRecord: VoiceCallRecord = {
+            callSid: entry.callSid,
+            streamSid,
+            slug: entry.slug,
+            callerPhone: entry.callerPhone,
+            dialedNumber: entry.dialedNumber,
+            outcome: "provider_failure",
+            transcript: "",
+            toolEvents: [],
+            agentTurns: 0,
+            interruptions: 0,
+            startedAtMs,
+            endedAtMs: Date.now(),
+          };
+          void persistBoundThenFileSetup(setupFailRecord, {
+            // A caller who hung up inside the first-event wait left; one who
+            // stayed past it, or whose call WE failed (no hangup), is filed.
+            ...(socketGone && socketGoneAtMs !== undefined
+              ? { callerLeftAfterMs: socketGoneAtMs - startedAtMs }
+              : {}),
+            firstEventWaitMs: options.firstEventTimeoutMs ?? firstEventTimeoutMs(env),
+          });
+          // And what the caller's audio did, on an exit that never built a
+          // bridge (Codex P2, #327). Part of the no-audio population, so the
+          // row goes here too or the instrument's claim of one per call is
+          // false on exactly the calls it was built to size.
+          void logAudio(
+            { callSid: entry.callSid, outcome: "provider_failure" },
+            callerAudio.counts(),
+            { callLogId },
+          ).catch(() => undefined);
+          twilioSocket.close();
+        }
+      } finally {
+        // No bridge means no `onOutcome`, and `onOutcome` holds the only
+        // release of this call's brokered transfer. The proving lane
+        // registers that entry inside `resolveLane` — the factory runs
+        // before this function has a bridge — so every exit above between
+        // the factory and the bridge (the caller hanging up during the
+        // call-row wait, a transport or binding failure) would strand a
+        // closure over a dead leg until the broker's 200-entry cap evicted
+        // it (Codex review, PR #237). Keyed by callSid and idempotent, so
+        // it is a no-op for the lanes that never registered one.
+        if (!bridge) releaseCallHandoff(entry.callSid);
+      }
+    }
+  });
+
+  return registry;
+}

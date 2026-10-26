@@ -10,6 +10,11 @@
  */
 import { pool } from '../db';
 import { fivestarQuery } from './fivestarDb';
+import {
+  assessTicketFiling,
+  readTicketFilingSnapshot,
+  type TicketFilingVerdict,
+} from '../services/ticketFilingHealth';
 
 // ────────────────────────────────────────────────────────────────────────
 // Ops Hub agents — six-pillar scorecards
@@ -28,6 +33,10 @@ export interface OpsHubScorecard {
   telephonyErrors: number;
   outcomes: Record<string, number>;
   avgDurationSec: number | null;
+  /** Calls served by the Media Streams runtime (voice_provider = 'grok'). */
+  runtimeCalls: number;
+  /** Calls served by the OpenAI SIP core (voice_provider NULL). */
+  legacyCalls: number;
 }
 
 export async function opsHubAgentScorecards(days = 30): Promise<OpsHubScorecard[]> {
@@ -44,7 +53,9 @@ export async function opsHubAgentScorecards(days = 30): Promise<OpsHubScorecard[
            COUNT(cl.id) FILTER (WHERE cl.total_turns > 45)::int AS long_calls,
            ROUND(AVG(cl.interruption_count)::numeric, 2) AS avg_interruptions,
            COUNT(cl.id) FILTER (WHERE cl.twilio_error_code IS NOT NULL)::int AS telephony_errors,
-           ROUND(AVG(cl.duration)::numeric, 0) AS avg_duration_sec
+           ROUND(AVG(cl.duration)::numeric, 0) AS avg_duration_sec,
+           COUNT(cl.id) FILTER (WHERE cl.voice_provider = 'grok')::int AS runtime_calls,
+           COUNT(cl.id) FILTER (WHERE cl.voice_provider IS DISTINCT FROM 'grok')::int AS legacy_calls
     FROM agents a
     LEFT JOIN call_logs cl
       ON cl.agent_id = a.id AND cl.created_at >= NOW() - make_interval(days => $1::int)
@@ -80,6 +91,8 @@ export async function opsHubAgentScorecards(days = 30): Promise<OpsHubScorecard[
     telephonyErrors: r.telephony_errors,
     outcomes: outcomeMap.get(r.agent_id) ?? {},
     avgDurationSec: r.avg_duration_sec === null ? null : Number(r.avg_duration_sec),
+    runtimeCalls: Number(r.runtime_calls) || 0,
+    legacyCalls: Number(r.legacy_calls) || 0,
   }));
 }
 
@@ -926,6 +939,19 @@ export interface OpsHubTodayAgent {
   criticalsToday: number;
   qualityToday: number | null;
   outcomesToday: Record<string, number>;
+  /**
+   * Which stack served today's calls. `voice_provider = 'grok'` is the Media
+   * Streams runtime; NULL is the OpenAI SIP core.
+   *
+   * The Observatory had no idea this column existed, which meant the biggest
+   * thing that has ever happened to these agents — three lanes moving to a
+   * different pipeline on 2026-09-03, one lane deliberately left behind as
+   * the control — was invisible on the one screen built to watch them. A
+   * card reading "tech: 100 calls" with no pipeline on it cannot tell you
+   * whether you are looking at the new stack or the old.
+   */
+  runtimeCallsToday: number;
+  legacyCallsToday: number;
 }
 
 export interface SageActiveCall {
@@ -949,6 +975,15 @@ export interface SageToday {
 export interface TodayOverview {
   opsHub: OpsHubTodayAgent[];
   sage: SageToday | { error: string };
+  /** Epoch ms (UTC) of the newest call_logs row, null if the table is empty.
+   * The command center uses this to say "logging is DOWN" instead of showing
+   * silent zeros — on 2026-08-24 a Supabase restart wedged the voice
+   * process's DB writes and every agent card read 0 for two days with no
+   * explanation anywhere on the page. A zero must be distinguishable from
+   * "nothing recorded" (measurement-traps.md). */
+  lastCallLogAtMs: number | null;
+  /** Ticket-path health, or null when it could not be read. See ticketFilingHealth.ts. */
+  ticketFiling: TicketFilingVerdict | null;
 }
 
 export async function todayOverview(): Promise<TodayOverview> {
@@ -959,7 +994,13 @@ export async function todayOverview(): Promise<TodayOverview> {
            COUNT(cl.id)::int AS calls_today,
            COUNT(cl.id) FILTER (WHERE cl.status IN ('in_progress','ringing','initiated'))::int AS active_now,
            COUNT(cl.id) FILTER (WHERE COALESCE(((cl.grader_results::jsonb)->'summary'->>'criticalFailures')::int, 0) > 0)::int AS criticals_today,
-           ROUND(AVG(cl.quality_score)::numeric, 2) AS quality_today
+           ROUND(AVG(cl.quality_score)::numeric, 2) AS quality_today,
+           -- The legacy bucket is IS DISTINCT FROM, not <>: voice_provider is
+           -- NULL on every old-core row, so <> 'grok' evaluates to NULL for
+           -- them, which FILTER treats as false — the two buckets would then
+           -- silently fail to add up to calls_today.
+           COUNT(cl.id) FILTER (WHERE cl.voice_provider = 'grok')::int AS runtime_calls_today,
+           COUNT(cl.id) FILTER (WHERE cl.voice_provider IS DISTINCT FROM 'grok')::int AS legacy_calls_today
     FROM agents a
     LEFT JOIN call_logs cl
       ON cl.agent_id = a.id
@@ -984,6 +1025,39 @@ export async function todayOverview(): Promise<TodayOverview> {
     const m = outcomeMap.get(r.agent_id) ?? {};
     m[r.outcome] = r.n;
     outcomeMap.set(r.agent_id, m);
+  }
+
+  // created_at is a timestamp-without-tz holding UTC wall time; EXTRACT(EPOCH)
+  // reads it as UTC, so this is directly comparable to Date.now().
+  const lastLog = await pool.query(
+    `SELECT (EXTRACT(EPOCH FROM MAX(created_at)) * 1000)::bigint AS last_ms FROM call_logs`,
+  );
+  const lastCallLogAtMs =
+    lastLog.rows[0]?.last_ms != null ? Number(lastLog.rows[0].last_ms) : null;
+
+  /**
+   * The same guard for the ticket path, which had none at all.
+   *
+   * Call logging got its staleness banner on 2026-08-24. A week later filing
+   * stopped for three and a half hours and this page showed nothing, because
+   * a queue call that files no ticket looks exactly like a queue call that had
+   * nothing to file. The rule and the thresholds live in
+   * server/services/ticketFilingHealth.ts, next to the run-length distribution
+   * they were measured from — this reads both planes and asks it.
+   */
+  let ticketFiling: TicketFilingVerdict | null = null;
+  try {
+    // ONE snapshot, not a second copy of the SQL. Two predicates drifted
+    // apart on PR #244 (the banner went green overnight while requests sat
+    // unfiled) and would have drifted again the moment terminal refusals
+    // stopped counting as a stall. The alarm and this banner now share
+    // readTicketFilingSnapshot.
+    const snapshot = await readTicketFilingSnapshot();
+    ticketFiling = snapshot ? assessTicketFiling(snapshot) : null;
+  } catch (err) {
+    // A widget that cannot read is not a system that is healthy — say nothing
+    // rather than green.
+    console.error('[observatory] ticket filing health unavailable:', err);
   }
 
   let sage: TodayOverview['sage'];
@@ -1062,8 +1136,12 @@ export async function todayOverview(): Promise<TodayOverview> {
       criticalsToday: r.criticals_today,
       qualityToday: r.quality_today === null ? null : Number(r.quality_today),
       outcomesToday: outcomeMap.get(r.agent_id) ?? {},
+      runtimeCallsToday: Number(r.runtime_calls_today) || 0,
+      legacyCallsToday: Number(r.legacy_calls_today) || 0,
     })),
     sage,
+    lastCallLogAtMs,
+    ticketFiling,
   };
 }
 
@@ -1122,60 +1200,16 @@ export async function replayTapeList(agent: string, verdict = 'worse', limit = 4
   }));
 }
 
-/** Render one tape live: both transcripts, both grader verdicts. */
-export async function replayTape(callLogId: string): Promise<{
-  callLogId: string;
-  agent: string;
-  verdict: string | null;
-  oldTranscript: string | null;
-  newTranscript: string | null;
-  newGraders: unknown;
-  oldCriticalCount: number;
-  newCriticalCount: number;
-  approximations: string[] | null;
-} | null> {
-  const { rows } = await pool.query(
-    `SELECT id, agent_used, "from", caller_name, patient_name, patient_dob, patient_found,
-            ticket_number, transferred_to_human, total_turns, duration, transcript
-     FROM call_logs WHERE id = $1 LIMIT 1`,
-    [callLogId],
-  );
-  if (!rows.length || !rows[0].transcript) return null;
-  const row = rows[0] as any;
-  const agent = String(row.agent_used ?? 'answering-service');
-  const { replayStoredCall } = await import('../../src/core/replay/replayCall');
-  const tape = await replayStoredCall(
-    {
-      id: row.id,
-      from: row.from,
-      caller_name: row.caller_name,
-      patient_name: row.patient_name,
-      patient_dob: row.patient_dob,
-      patient_found: row.patient_found,
-      ticket_number: row.ticket_number,
-      transferred_to_human: row.transferred_to_human,
-      total_turns: row.total_turns,
-      duration: row.duration,
-      transcript: row.transcript,
-    },
-    (agent === 'pcp'
-      ? 'pcp'
-      : agent === 'azul-scheduling'
-        ? 'azul-scheduling'
-        : agent === 'no-ivr' || agent === 'after-hours'
-          ? 'no-ivr'
-          : 'answering-service'),
-  );
-  if (!tape) return null;
-  return {
-    callLogId,
-    agent,
-    verdict: tape.verdict,
-    oldTranscript: row.transcript,
-    newTranscript: tape.new_transcript,
-    newGraders: tape.new_grader_results,
-    oldCriticalCount: tape.old_critical.length,
-    newCriticalCount: tape.new_critical.length,
-    approximations: tape.approximations,
-  };
-}
+/**
+ * Live tape rendering is GONE, deliberately, and `replayTape()` with it.
+ *
+ * It re-ran the call through the new core (`src/core/replay/replayCall.ts`),
+ * and that pipeline was deleted on 2026-09-01, so the function could only
+ * return null and its route could only answer 404 — while the Observatory
+ * still offered every row as a clickable tape and blamed the resulting error
+ * on a missing transcript (Codex, PR #244 round thirteen). The control and the
+ * route are removed rather than left to fail.
+ *
+ * Verdicts computed before the deletion are unaffected: they are stored in
+ * `new_core_replay_index` and still served by `replayTapeList` above.
+ */

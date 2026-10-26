@@ -6,10 +6,11 @@ import { createServer, type Server } from "http";
 import { storage } from "./storage";
 import { setupAuth, isAuthenticated as isReplitAuthenticated } from "./replitAuth";
 import { authRouter, requireRole, requireManager } from "./auth";
+import { agentPromptWriteRefusal, AGENT_PROMPT_WRITE_STATUS } from "./agentPromptSurface";
 import multer from "multer";
 import { parse } from "csv-parse/sync";
 import { getTwilioClient, getTwilioFromPhoneNumber } from "../src/lib/twilioClient";
-import { OPENAI_COST_CENTS_PER_SECOND } from '../src/services/callCostService';
+import { priceVoiceCall } from '../src/services/callCostService';
 
 // Hybrid authentication middleware - supports both Replit Auth and custom auth
 const isAuthenticated = (req: Request, res: Response, next: NextFunction) => {
@@ -215,28 +216,25 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  app.get('/api/observatory/replay/:callLogId', isAuthenticated, async (req, res) => {
-    try {
-      const { replayTape } = await import('./observatory/queries');
-      const tape = await replayTape(req.params.callLogId);
-      if (!tape) return res.status(404).json({ message: 'No replay for this call' });
-      res.json(tape);
-    } catch (error) {
-      console.error('[observatory] replay tape failed:', error);
-      res.status(500).json({ message: 'Replay tape failed', error: error instanceof Error ? error.message : String(error) });
-    }
-  });
+  // GET /api/observatory/replay/:callLogId is gone with the pipeline behind it.
+  // Rendering a tape re-ran the call through the new core; `src/core/` was
+  // deleted on 2026-09-01, so the endpoint could only ever answer 404. The
+  // Observatory no longer offers the control, and the stored verdicts are
+  // still served by /api/observatory/replays/:agent/list above.
 
   // Daily Brief — baseline-tracked morning review: categorized critical
   // fails with proposals, vs yesterday and vs the day-one baseline
   // ("inch by inch we will get to stability", Wayne 2026-08-07).
   // The cron arms at boot so the brief exists by ~06:15 ET without a visit.
   void import('./observatory/dailyBrief').then((m) => m.scheduleDailyBriefCron()).catch(() => {});
-  app.get('/api/observatory/daily-brief', isAuthenticated, async (_req, res) => {
+  // ?date=YYYY-MM-DD reads one stored day, read only (400 malformed, 404 absent);
+  // no date keeps the latest-brief behaviour, generate-if-missing included.
+  app.get('/api/observatory/daily-brief', isAuthenticated, async (req, res) => {
     try {
-      const { getBriefBundle, scheduleDailyBriefCron } = await import('./observatory/dailyBrief');
+      const { dailyBriefResponse, scheduleDailyBriefCron } = await import('./observatory/dailyBrief');
       scheduleDailyBriefCron();
-      res.json(await getBriefBundle());
+      const { status, body } = await dailyBriefResponse(req.query.date);
+      res.status(status).json(body);
     } catch (error) {
       console.error('[observatory] daily-brief failed:', error);
       res.status(500).json({
@@ -280,6 +278,40 @@ export async function registerRoutes(app: Express): Promise<Server> {
         message: 'Observatory today failed',
         error: error instanceof Error ? error.message : String(error),
       });
+    }
+  });
+
+  // Unresolved outbox dead letters — both terminal 4xx and transport — so
+  // Wayne can see the 2026-09-25 rows (NULL refusal_status_code) and mark
+  // them handled. Does not replay or mutate payload.
+  app.get('/api/ticket-outbox/unresolved', isAuthenticated, requireRole('admin'), async (_req, res) => {
+    try {
+      const { listUnresolvedDeadLetters } = await import('../src/services/ticketOutboxResolve');
+      res.json({ rows: await listUnresolvedDeadLetters() });
+    } catch (error) {
+      console.error('[ticket-outbox] list unresolved failed:', error);
+      res.status(500).json({ error: 'Failed to list unresolved outbox rows' });
+    }
+  });
+
+  app.post('/api/ticket-outbox/:id/resolve', isAuthenticated, requireRole('admin'), async (req, res) => {
+    try {
+      const { actorFromRequest, resolveOutboxRow } = await import('../src/services/ticketOutboxResolve');
+      const actor = actorFromRequest(req);
+      if (!actor) {
+        return res.status(401).json({ error: 'Authentication required' });
+      }
+      const note = typeof req.body?.note === 'string' ? req.body.note : undefined;
+      const result = await resolveOutboxRow({ id: req.params.id, resolvedBy: actor, note });
+      if (!result.ok) {
+        const status =
+          result.reason === 'not_found' ? 404 : result.reason === 'already_resolved' ? 409 : 400;
+        return res.status(status).json({ error: result.reason });
+      }
+      res.json(result);
+    } catch (error) {
+      console.error('[ticket-outbox] resolve failed:', error);
+      res.status(500).json({ error: 'Failed to resolve outbox row' });
     }
   });
 
@@ -700,44 +732,22 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  // Create or update agent prompt
+  /**
+   * Create or update agent prompt — REFUSED, see server/agentPromptSurface.ts.
+   *
+   * This wrote to `agent_prompts` and returned 200. Nothing on the call path
+   * reads that table, so the operator got a success and the live agent was
+   * unchanged. The table is empty and no client page calls this, so refusing
+   * breaks no workflow that exists; it just stops the first person who tries
+   * from believing they changed a live agent.
+   */
   app.put('/api/agent-prompts/:slug', requireManager, async (req: any, res) => {
-    try {
-      const { slug } = req.params;
-      const { greeting, personality, customInstructions, closingScript, changeNotes } = req.body;
-      
-      // Get current prompt for versioning
-      const existingPrompt = await storage.getAgentPrompt(slug);
-      
-      // Upsert the prompt
-      const prompt = await storage.upsertAgentPrompt({
-        agentSlug: slug,
-        greeting,
-        personality,
-        customInstructions,
-        closingScript,
-        publishedBy: req.session?.userId || null,
-        publishedAt: new Date(),
-      });
-      
-      // Create version history
-      await storage.createAgentPromptVersion({
-        agentSlug: slug,
-        version: prompt.version || 1,
-        greeting,
-        personality,
-        customInstructions,
-        closingScript,
-        createdBy: req.session?.userId || null,
-        changeNotes: changeNotes || 'Updated prompt',
-      });
-      
-      console.log(`[PROMPTS] Updated prompt for agent: ${slug}, version: ${prompt.version}`);
-      res.json(prompt);
-    } catch (error) {
-      console.error("Error updating agent prompt:", error);
-      res.status(500).json({ message: "Failed to update agent prompt" });
-    }
+    const { slug } = req.params;
+    console.warn(
+      `[PROMPTS] ✗ REFUSED a write to agent_prompts for "${slug}" — that table is not read ` +
+        'by the call path. Live greeting: agents.welcome_greeting. Everything else: src/agents/.',
+    );
+    return res.status(AGENT_PROMPT_WRITE_STATUS).json(agentPromptWriteRefusal(slug));
   });
 
   // Get prompt version history
@@ -1463,6 +1473,15 @@ export async function registerRoutes(app: Express): Promise<Server> {
       if (!campaign) {
         return res.status(404).json({ success: false, message: 'Campaign not found' });
       }
+      // A runtime outbound campaign is dialled by the voice runtime, never by
+      // this scheduler (src/services/outboundCampaignScheduler.ts refuses it
+      // too). Refused here, before a scheduler is created and remembered.
+      if (campaign.campaignType === 'runtime_outbound') {
+        return res.status(409).json({
+          success: false,
+          message: 'This is a runtime outbound campaign; the voice runtime dials it. It cannot be started here.',
+        });
+      }
       
       const { createScheduler } = await import('../src/services/outboundCampaignScheduler');
       
@@ -2013,20 +2032,27 @@ export async function registerRoutes(app: Express): Promise<Server> {
             else if (twilioStatus === 'failed' || twilioStatus === 'canceled') finalStatus = 'failed';
             
             const finalDuration = actualDuration ?? call.duration ?? 0;
-            // The shared constant, not a copy of its value.
-            // The old formula here (19 c/min) was a 12x units slip vs the
-            // live pipeline's rate — and token-derived costs must be kept.
-            const openaiCostCents = call.inputAudioTokens != null
-              ? (call.openaiCostCents ?? 0)
-              : Math.ceil(finalDuration * OPENAI_COST_CENTS_PER_SECOND);
             const finalTwilioCostCents = actualTwilioCostCents ?? call.twilioCostCents ?? 0;
-            
-            await storage.updateCallLog(call.id, {
+            // The shared DECISION, not a copy of the rate: token-derived
+            // costs are kept, and a Grok-served row is priced at xAI's
+            // rate — its token columns are null exactly like an
+            // un-reconciled OpenAI row's (Codex, PR #227 round 14).
+            const pricing = priceVoiceCall({
+              voiceProvider: (call as { voiceProvider?: string | null }).voiceProvider,
+              inputAudioTokens: call.inputAudioTokens,
+              existingOpenaiCostCents: call.openaiCostCents,
+              costReconciledAt: (call as { costReconciledAt?: Date | null }).costReconciledAt,
+              durationSeconds: finalDuration,
+              twilioCostCents: finalTwilioCostCents,
+            });
+            const openaiCostCents = pricing.providerCostCents ?? call.openaiCostCents ?? 0;
+
+            await storage.updateCallLogPreservingReconciledCost(call.id, {
               duration: finalDuration,
               status: finalStatus,
               twilioCostCents: finalTwilioCostCents,
               openaiCostCents,
-              totalCostCents: finalTwilioCostCents + openaiCostCents,
+              totalCostCents: pricing.totalCostCents,
             });
             
             results.push({ 
@@ -2553,7 +2579,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
         typeof d.date === 'string' ? d.date : new Date(d.date).toISOString().split('T')[0]
       ));
       if (!reconciledDates.has(today) && today >= startDate && today <= endDate) {
-        const todayEstimateCents = await storage.getEstimatedOpenaiCostForDate(today);
+        // OpenAI-only: today's cell stands in for a RECONCILED OpenAI figure
+        // in this series, so it must mean the same thing the other cells mean.
+        const todayEstimateCents = await storage.getOpenaiBilledEstimateForDate(today);
         opsHubCostByDate[today] = todayEstimateCents / 100;
         totalReconciledCents += todayEstimateCents;
       }
@@ -2580,6 +2608,62 @@ export async function registerRoutes(app: Express): Promise<Server> {
     } catch (error) {
       console.error("Error fetching OpenAI usage:", error);
       res.status(500).json({ message: "Failed to fetch OpenAI usage" });
+    }
+  });
+
+  /**
+   * The Grok runtime's day table — xAI's reported voice spend beside what
+   * the call rows were booked at, one row per day, refusals included. Written
+   * by grokCostReconciler on every nightly outcome (daily_grok_costs). Empty
+   * until the first run after this ships; a missing table reads as "no rows",
+   * not a 500, the same way call_events does.
+   */
+  app.get('/api/analytics/grok-usage', isAuthenticated, async (req, res) => {
+    try {
+      const startDate = (req.query.startDate as string) ||
+        new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+      const endDate = (req.query.endDate as string) || new Date().toISOString().split('T')[0];
+      const { db } = await import('./db');
+      const { sql } = await import('drizzle-orm');
+      let rows: any[] = [];
+      let tableExists = true;
+      try {
+        const r = await db.execute(sql`
+          SELECT day::text AS day, reconciled, refused_reason, xai_voice_cents, xai_ignored_lines,
+                 booked_cents, estimated_cents, runtime_calls, runtime_seconds, derived_cents_per_minute,
+                 updated_at
+          FROM daily_grok_costs
+          WHERE day >= ${startDate}::date AND day <= ${endDate}::date
+          ORDER BY day ASC
+        `);
+        rows = ((r as any).rows ?? r) as any[];
+      } catch {
+        tableExists = false;
+      }
+      res.json({
+        tableExists,
+        // The published rate the estimate uses, so the page can say how far a
+        // day's derived rate sits from it without a second copy of the number.
+        publishedCentsPerMinute: 8,
+        days: rows.map((d) => ({
+          day: d.day,
+          reconciled: Boolean(d.reconciled),
+          refusedReason: d.refused_reason ?? null,
+          xaiVoiceDollars: d.xai_voice_cents == null ? null : Number(d.xai_voice_cents) / 100,
+          // NULL is "the day could not be read" (round 14) — and Number(null)
+          // is 0, which would present that as a measured empty day.
+          bookedDollars: d.booked_cents == null ? null : Number(d.booked_cents) / 100,
+          estimatedDollars: d.estimated_cents == null ? null : Number(d.estimated_cents) / 100,
+          runtimeCalls: d.runtime_calls == null ? null : Number(d.runtime_calls),
+          runtimeMinutes: d.runtime_seconds == null ? null : Math.round(Number(d.runtime_seconds) / 60),
+          derivedCentsPerMinute: d.derived_cents_per_minute == null ? null : Number(d.derived_cents_per_minute),
+          ignoredLines: Array.isArray(d.xai_ignored_lines) ? d.xai_ignored_lines : [],
+          updatedAt: d.updated_at,
+        })),
+      });
+    } catch (error) {
+      console.error('Error fetching Grok usage:', error);
+      res.status(500).json({ message: 'Failed to fetch Grok usage' });
     }
   });
   
@@ -3150,7 +3234,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
       
       const { callGradingService } = await import('../src/services/callGradingService');
       
-      const grading = await callGradingService.gradeCall(callLog.id, callLog.transcript);
+      // A manual regrade means to grade a row that may already be graded, so
+      // it bypasses the once-only claim the automatic paths take.
+      const grading = await callGradingService.gradeCall(callLog.id, callLog.transcript, undefined, { claim: false });
       
       res.json({ 
         success: true, 
@@ -3265,6 +3351,16 @@ export async function registerRoutes(app: Express): Promise<Server> {
           duration: callLogs.duration,
           twilioCostCents: callLogs.twilioCostCents,
           openaiCostCents: callLogs.openaiCostCents,
+          // Both feed priceVoiceCall: without them every backfilled row
+          // reads as an un-reconciled OpenAI call (Codex, PR #227 round 14).
+          inputAudioTokens: callLogs.inputAudioTokens,
+          voiceProvider: callLogs.voiceProvider,
+          // And so does this. A guard whose input is never selected is not a
+          // guard: the cast below read `undefined` on every row, so this
+          // backfill would still have overwritten a reconciled Grok cost with
+          // the duration estimate — while leaving cost_reconciled_at set
+          // (Codex, PR #268 round 2).
+          costReconciledAt: callLogs.costReconciledAt,
         })
         .from(callLogs)
         .where(and(
@@ -3293,17 +3389,35 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
           if (needsUpdate) {
             const finalDuration = twilioDuration ?? call.duration ?? 0;
-            // ONE RATE. This was 15c/min — a third value for the same quantity,
-            // alongside 19c/min in the status callback and 11.4c/min everywhere
-            // else. See OPENAI_COST_CENTS_PER_SECOND.
-            const openaiCostCents = Math.ceil(finalDuration * OPENAI_COST_CENTS_PER_SECOND);
+            // ONE RATE, through the one DECISION. This was 15c/min — a third
+            // value for the same quantity, alongside 19c/min in the status
+            // callback and 11.4c/min everywhere else. priceVoiceCall also
+            // keeps a token-derived cost and prices a Grok-served row at
+            // xAI's rate instead of inventing OpenAI spend
+            // (Codex, PR #227 round 14).
+            const pricing = priceVoiceCall({
+              voiceProvider: call.voiceProvider,
+              inputAudioTokens: call.inputAudioTokens,
+              existingOpenaiCostCents: call.openaiCostCents,
+              costReconciledAt: (call as { costReconciledAt?: Date | null }).costReconciledAt,
+              durationSeconds: finalDuration,
+              twilioCostCents: twilioCostCents ?? call.twilioCostCents ?? 0,
+            });
 
             if (!dryRun) {
-              await storage.updateCallLog(call.id, {
+              await storage.updateCallLogPreservingReconciledCost(call.id, {
                 duration: finalDuration,
                 twilioCostCents: twilioCostCents ?? call.twilioCostCents,
-                openaiCostCents,
-                costIsEstimated: true,
+                // The total is rebuilt whether or not the PROVIDER cost moved.
+                // On a reconciled row priceVoiceCall deliberately leaves the
+                // provider cost alone and returns a total that folds in the new
+                // Twilio price — and this update used to discard it, leaving a
+                // total that no longer equalled its own two components
+                // (Codex, PR #268 round 4).
+                totalCostCents: pricing.totalCostCents,
+                ...(pricing.providerCostCents !== undefined
+                  ? { openaiCostCents: pricing.providerCostCents, costIsEstimated: true }
+                  : {}),
               });
             }
             results.twilioUpdated++;
@@ -3330,7 +3444,18 @@ export async function registerRoutes(app: Express): Promise<Server> {
       // STEP 3: Add missing OpenAI costs
       console.log('[BACKFILL] Step 3: Adding missing OpenAI costs...');
       const callsMissingCost = await db
-        .select({ id: callLogs.id, duration: callLogs.duration })
+        .select({
+          id: callLogs.id,
+          duration: callLogs.duration,
+          voiceProvider: callLogs.voiceProvider,
+          // Belt and braces: the WHERE below already excludes every
+          // reconciled row, because reconciliation always writes a cost and
+          // this only takes rows that have none. Selected anyway so the guard
+          // in priceVoiceCall is REAL here rather than a cast that silently
+          // reads undefined — a guard that cannot fire is worse than no
+          // guard, because the next reader believes it.
+          costReconciledAt: callLogs.costReconciledAt,
+        })
         .from(callLogs)
         .where(and(
           isNull(callLogs.openaiCostCents),
@@ -3340,15 +3465,32 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
       for (const call of callsMissingCost) {
         if (!call.duration) continue;
-        // Same consolidation as above. This path only ever runs on rows with no
-        // cost at all, so there is no measurement here to protect — but it must
-        // still agree with every other duration estimate in the codebase.
-        const openaiCostCents = Math.ceil(call.duration * OPENAI_COST_CENTS_PER_SECOND);
+        // Same consolidation as above. This path only ever runs on rows with
+        // no cost at all, so there is no measurement to protect — but WHOSE
+        // duration rate applies is still the provider's to decide: a Grok
+        // row here priced as OpenAI invents spend that never happened
+        // (Codex, PR #227 round 14).
+        const pricing = priceVoiceCall({
+          voiceProvider: call.voiceProvider,
+          inputAudioTokens: null,
+          existingOpenaiCostCents: null,
+          costReconciledAt: (call as { costReconciledAt?: Date | null }).costReconciledAt,
+          durationSeconds: call.duration,
+          twilioCostCents: 0,
+        });
         if (!dryRun) {
-          await db.update(callLogs).set({ 
-            openaiCostCents,
+          /**
+           * Direct, and safe to be: the WHERE above takes only rows with NO
+           * cost at all (`isNull(openaiCostCents)`), and reconciliation
+           * always writes one — so a reconciled row cannot reach this
+           * statement. Every OTHER writer that prices a call goes through
+           * updateCallLogPreservingReconciledCost, which makes the decision
+           * in SQL (Codex, PR #268 round 8).
+           */
+          await db.update(callLogs).set({
+            openaiCostCents: pricing.providerCostCents ?? 0,
             costIsEstimated: true,
-          }).where(eq(callLogs.id, call.id));
+          }).where(and(eq(callLogs.id, call.id), isNull(callLogs.costReconciledAt)));
         }
         results.openaiCostsAdded++;
       }
@@ -4027,13 +4169,38 @@ export async function registerRoutes(app: Express): Promise<Server> {
         limit: 50
       });
       
-      const activeCalls = conferences.map(conf => ({
-        conferenceSid: conf.sid,
-        conferenceName: conf.friendlyName,
-        status: conf.status,
-        dateCreated: conf.dateCreated,
-        participantCount: 0 // Will be populated by participant query if needed
-      }));
+      /**
+       * The database status is not proof that a call is still live.
+       *
+       * On 2026-08-24 four completed calls missed their database completion
+       * update during a connection-pool outage. Observatory kept counting up
+       * from their start times and showed them as "Live now" for 90+ minutes.
+       * Twilio had ended every call. Return the actual participant count and
+       * caller CallSid so the live UI can require carrier confirmation.
+       *
+       * Empty conferences are excluded: Twilio can retain an old conference
+       * resource with status "in-progress" even though it has no participants.
+       */
+      const activeCalls = (
+        await Promise.all(
+          conferences.map(async (conf) => {
+            const participants = await twilioClient.conferences(conf.sid).participants.list({ limit: 20 });
+            const conferenceCallSid = conf.friendlyName?.replace(/^(outbound_|test_)?conf_/, '');
+            const callSid = conferenceCallSid?.startsWith('CA')
+              ? conferenceCallSid
+              : participants.find((participant) => participant.callSid?.startsWith('CA'))?.callSid ?? null;
+
+            return {
+              conferenceSid: conf.sid,
+              conferenceName: conf.friendlyName,
+              callSid,
+              status: conf.status,
+              dateCreated: conf.dateCreated,
+              participantCount: participants.length,
+            };
+          }),
+        )
+      ).filter((call) => call.participantCount > 0);
       
       res.json({ success: true, calls: activeCalls });
     } catch (error) {
@@ -4208,7 +4375,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Called by external system when ticket is resolved with phone contact method
   app.post('/api/campaigns/ticket-resolved', async (req, res) => {
     try {
-      // Authenticate using API key
+      // Authenticate using API key — constant-time compare. A length
+      // mismatch is a miss, never a throw (src/plugin/timingSafe.ts).
+      const { ticketResolvedAuthorized, ticketResolvedLogPayload } = await import('../src/plugin/ticketResolved');
       const providedApiKey = req.headers['x-api-key'];
       const expectedApiKey = process.env.VOICE_AGENT_WEBHOOK_SECRET;
 
@@ -4220,7 +4389,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         });
       }
 
-      if (!providedApiKey || providedApiKey !== expectedApiKey) {
+      if (!ticketResolvedAuthorized(providedApiKey, expectedApiKey)) {
         console.warn('[TICKET WEBHOOK] Unauthorized access attempt');
         return res.status(401).json({
           success: false,
@@ -4241,13 +4410,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
         departmentId,
       } = req.body;
 
-      console.info('[TICKET WEBHOOK] Received ticket resolution:', {
+      console.info('[TICKET WEBHOOK] Received ticket resolution:', ticketResolvedLogPayload({
         ticketId,
         ticketNumber,
-        patient: `${patientFirstName} ${patientLastName}`,
-        phone: patientPhone,
-        contactMethod: preferredContactMethod,
-      });
+        preferredContactMethod,
+      }));
 
       // Validate required fields
       if (!ticketId || !ticketNumber || !patientPhone || !resolutionNotes) {
@@ -4504,7 +4671,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
           });
 
           if (applyChanges) {
-            await storage.updateCallLog(dbCall.id, {
+            // Preserving. This rebuilds total_cost_cents, and a reconciled
+            // row's total must be rebuilt from the invoiced provider cost in
+            // SQL at write time — not from a value this loop read minutes
+            // earlier, and not at all if the estimate has since changed.
+            await storage.updateCallLogPreservingReconciledCost(dbCall.id, {
               twilioCostCents: newCostCents,
               totalCostCents: newCostCents + (dbCall.openaiCostCents || 0),
             });
@@ -4701,6 +4872,16 @@ export async function registerRoutes(app: Express): Promise<Server> {
       res.status(500).json({ error: 'Failed to update setting' });
     }
   });
+
+  try {
+    const { mountProductionPluginApi } = await import('../src/plugin/mount');
+    await mountProductionPluginApi(app);
+  } catch (error) {
+    console.error(
+      '[plugin] failed to mount /api/plugin/v1 — fleet plugin is unavailable:',
+      error instanceof Error ? error.message : error,
+    );
+  }
 
   const httpServer = createServer(app);
   return httpServer;

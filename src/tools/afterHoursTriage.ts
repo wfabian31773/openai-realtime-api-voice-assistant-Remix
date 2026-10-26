@@ -372,7 +372,7 @@ ring this line.
 `
     : '';
 
-  return `# TRIAGE — ASK ONE QUESTION, THEN DECIDE
+  return `### Triage — ask one question, then decide
 
 Some things a caller says do not tell you how serious they are. For these, ask
 ONE short question, WAIT for the answer, and let the answer decide. Ask ONE.

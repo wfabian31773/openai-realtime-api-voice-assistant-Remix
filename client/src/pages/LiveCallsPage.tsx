@@ -29,10 +29,14 @@ export function LiveCallsPage() {
   const { data: activeCalls = [], isLoading, isError, error } = useQuery({
     queryKey: ['active-calls'],
     queryFn: async () => {
+      // 30-min ceiling: nothing legitimate is still live past 30 min
+      // (p99.9 duration ~26 min; coordinator force-terminates at 25).
+      // Stale rows beyond it are the sweeper's problem, not this board's.
+      const startDate = new Date(Date.now() - 30 * 60 * 1000).toISOString()
       const { data } = await apiClient.get<{
         data: CallLog[]
-      }>('/call-logs?status=in_progress,ringing,initiated&limit=100')
-      
+      }>(`/call-logs?status=in_progress,ringing,initiated&limit=100&startDate=${startDate}`)
+
       return data.data || []
     },
     refetchInterval: 3000,

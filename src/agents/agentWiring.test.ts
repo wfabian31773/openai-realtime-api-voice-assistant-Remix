@@ -372,3 +372,112 @@ describe('the personalised greeting is not reimplemented inline', () => {
     ).not.toMatch(/agentGreeting\.replace\(/);
   });
 });
+
+/**
+ * THE CALLER-RECOVERY WIRING, WHICH ONE TRANSPORT HAD AND THE OTHER DID NOT.
+ *
+ * Same shape of gap as the Optical one this file was written for: the agent
+ * was fine, the recovery path was fine, and the two were not connected.
+ *
+ * `/api/voice/no-ivr` asks Twilio for `statusCallback: /api/voice/sip-status`,
+ * so when the agent leg dies `recoverCallerAfterSipTermination` runs and the
+ * caller is released. `registerOverflowLine` — which serves answering-service,
+ * optical, surgery, tech and records — asked only for the conference `join`
+ * event, so that handler never fired for those lines. The caller stayed in a
+ * conference whose `waitUrl` is "" until the 15-minute cap.
+ *
+ * Measured 2026-08-18 → 09-01, calls ending in >10 minutes of silence:
+ * 34 of 3,203 overflow calls, against 0 of 927 on no-ivr. About 1 in 20,000
+ * by chance.
+ *
+ * No unit test could have caught it — the participant params are built inside
+ * a route handler that never runs under test. So this reads the transport as
+ * text, like everything else in this file, and checks that the two call sites
+ * agree.
+ */
+describe('overflow lines can learn that the agent leg died', () => {
+  /** The body of `registerOverflowLine`, where the SIP participant is created. */
+  const OVERFLOW_FACTORY = (() => {
+    const start = ROUTES.indexOf('function registerOverflowLine(');
+    expect(start, 'registerOverflowLine has moved or been renamed').toBeGreaterThan(-1);
+    const end = ROUTES.indexOf('registerOverflowLine({', start);
+    expect(end, 'the first registerOverflowLine() call has moved').toBeGreaterThan(start);
+    return ROUTES.slice(start, end);
+  })();
+
+  it('asks Twilio for SIP leg status, not only the conference join', () => {
+    expect(
+      OVERFLOW_FACTORY,
+      'the overflow lines are not subscribed to /api/voice/sip-status, so nothing ' +
+        'notices when the agent leg dies and the caller waits out the 15-minute cap',
+    ).toMatch(/statusCallback:\s*`https:\/\/\$\{domain\}\/api\/voice\/sip-status`/);
+    expect(OVERFLOW_FACTORY).toMatch(/statusCallbackEvent:\s*\[[^\]]*'completed'/);
+  });
+
+  it('releases the caller when the participant cannot even be created', () => {
+    // The TwiML was already returned by this point — the caller is in the
+    // conference. Without this they hear silence, and no call_logs row is ever
+    // written, so the failure cannot even be counted afterwards.
+    expect(
+      OVERFLOW_FACTORY,
+      'the catch around participants.create does not recover the caller',
+    ).toMatch(/recoverCallerAfterSipTermination\(conferenceName, 'creation_failed'\)/);
+  });
+
+  it('registers the SIP leg so the conference can be resolved back', () => {
+    expect(OVERFLOW_FACTORY).toMatch(/registerSipLeg\(conferenceName, participant\.callSid\)/);
+  });
+
+  it('still matches what the no-ivr route does — one mechanism, not two', () => {
+    const NO_IVR = (() => {
+      const start = ROUTES.indexOf('app.post("/api/voice/no-ivr"');
+      expect(start, 'the no-ivr route has moved').toBeGreaterThan(-1);
+      return ROUTES.slice(start, start + 12000);
+    })();
+    for (const wiring of [/\/api\/voice\/sip-status/, /statusCallbackEvent/, /registerSipLeg/]) {
+      expect(NO_IVR, 'no-ivr lost wiring the overflow lines are asserted to have').toMatch(wiring);
+      expect(OVERFLOW_FACTORY, 'the overflow lines drifted from no-ivr').toMatch(wiring);
+    }
+  });
+});
+
+
+/**
+ * DECLINING THE DATABASE GREETING MUST LEAVE ONE BEHIND — Codex, PR #244.
+ *
+ * `voiceAgentRoutes` rejects an `agents.welcome_greeting` row that is missing
+ * a mandatory phrase. That branch used to only log. `agentGreeting` starts as
+ * `metadata?.agentGreeting`, which is lost whenever the webhook lands on a
+ * different instance — the diagnosed cause of agents improvising their
+ * openings — so metadata lost plus a bad row left nothing to say, and the
+ * greeting check further down falls through to a bare `response.create` where
+ * the model opens the call itself.
+ *
+ * Read as text, like the rest of this file: the transport cannot be stood up
+ * in a unit test, and what is being checked is that one branch assigns.
+ */
+describe('a rejected database greeting still leaves a compliant one', () => {
+  const ROUTES_SRC = readFileSync(join(__dirname, '..', 'voiceAgentRoutes.ts'), 'utf8');
+
+  it('assigns the code greeting rather than only logging', () => {
+    const branch = ROUTES_SRC.slice(
+      ROUTES_SRC.indexOf('is missing ${missing.join'),
+      ROUTES_SRC.indexOf('Lunch is not after hours'),
+    );
+    expect(branch, 'the rejection branch must exist').toBeTruthy();
+    // The assignment, not just the console.error.
+    expect(branch).toMatch(/agentGreeting = fallback/);
+    expect(branch).toMatch(/WELCOME_GREETING/);
+  });
+
+  it('only when there is nothing already in hand', () => {
+    // A greeting the process already holds is the caller's own lane copy and
+    // outranks the fallback; overwriting it would undo the listen-first and
+    // per-route greetings.
+    const branch = ROUTES_SRC.slice(
+      ROUTES_SRC.indexOf('is missing ${missing.join'),
+      ROUTES_SRC.indexOf('Lunch is not after hours'),
+    );
+    expect(branch).toMatch(/if \(!agentGreeting \|\| agentGreeting\.trim\(\) === ''\)/);
+  });
+});

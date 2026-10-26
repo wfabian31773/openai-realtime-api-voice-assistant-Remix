@@ -1,0 +1,764 @@
+/**
+ * Stage C, step 3 — the measurement engine. Synthetic fixtures only: call
+ * SIDs are invented, no names, no phones. Each describe pins one property the
+ * approved plan asks for: the definitions are versioned, the reads follow the
+ * written rules, the run is deterministic and transactional, the engine is
+ * OFF by default, and the export carries no PHI.
+ */
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { createHash } from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
+import {
+  CONSOLE_BOOKED_SQL,
+  DEFINITIONS_HASH,
+  FIVESTAR_BOOKINGS_SQL,
+  FIVESTAR_CALLS_SQL,
+  METHOD_VERSION,
+  METRICS,
+  REMIX_CALLS_SQL,
+  SUPPORT_PROVENANCE_SQL,
+  definitionsText,
+} from "./definitions";
+import { computeFivestar, computeRemix, npxBooked, type Query, type Sources } from "./compute";
+import {
+  DAY_LOCK_SQL,
+  DELETE_VALUES_SQL,
+  PRIOR_RUN_SQL,
+  INSERT_VALUES_SQL,
+  TABLES_SQL,
+  UPSERT_RUN_SQL,
+  isReadFailure,
+  outputHash,
+  runLearningDay,
+  type RunnerDeps,
+} from "./runner";
+import {
+  EXPORT_RUNS_SQL,
+  EXPORT_VALUES_SQL,
+  _resetLearningSchedulerForTests,
+  daysDue,
+  isCalendarDay,
+  learningExportHandler,
+  learningTick,
+  pacificClock,
+  startLearningRunner,
+} from "./scheduler";
+import { METRIC_SHAPES, detectCandidates, knownShapes, type StoredValue } from "./candidates";
+
+// The Hub pool validates the environment at import; the engine's own tests
+// inject every query, so the real pool is never needed here.
+vi.mock("../db", () => ({ pool: { query: vi.fn(), connect: vi.fn() } }));
+
+const sid = (n: number) => `CA${n.toString(16).padStart(32, "0")}`;
+
+beforeEach(() => {
+  vi.spyOn(console, "info").mockImplementation(() => {});
+  vi.spyOn(console, "warn").mockImplementation(() => {});
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  _resetLearningSchedulerForTests();
+});
+afterEach(() => vi.restoreAllMocks());
+
+describe("a definition change is a new method version", () => {
+  it("the pinned hash is the hash of the definitions as written", () => {
+    const h = createHash("sha256").update(definitionsText()).digest("hex").slice(0, 16);
+    // If this fails you changed a definition: bump METHOD_VERSION and pin the new hash beside it.
+    expect(h).toBe(DEFINITIONS_HASH);
+    expect(METHOD_VERSION).toBe("learning-v7");
+  });
+
+  it("every statement and every definition is inside the hashed text", () => {
+    const text = definitionsText();
+    for (const s of [REMIX_CALLS_SQL, SUPPORT_PROVENANCE_SQL, FIVESTAR_CALLS_SQL, FIVESTAR_BOOKINGS_SQL, CONSOLE_BOOKED_SQL]) {
+      expect(text).toContain(s);
+    }
+    for (const m of METRICS) expect(text).toContain(m.definition);
+  });
+
+  it("only the Support Center and mirror readings are marked independent", () => {
+    const ind = METRICS.filter((m) => m.independent).map((m) => m.id).sort();
+    expect(ind).toEqual(["5star.booked_rate_a", "5star.booked_rate_b", "remix.filed_rate_independent"]);
+  });
+
+  it("no metric combines the fleet and 5Star", () => {
+    for (const m of METRICS) expect(m.id.startsWith(m.repo === "Remix" ? "remix." : "5star.")).toBe(true);
+  });
+});
+
+describe("the reads follow the written rules (CLAUDE.md and the Daybook)", () => {
+  it("fleet calls: canonical SID, not outbound, duration >= 30, the call's own Pacific day from a UTC timestamp", () => {
+    expect(REMIX_CALLS_SQL).toContain("call_sid ~* '^CA[0-9a-f]{32}$'");
+    expect(REMIX_CALLS_SQL).not.toMatch(/LIKE 'CA%'/);
+    expect(REMIX_CALLS_SQL).toContain("coalesce(direction, 'inbound') <> 'outbound'");
+    expect(REMIX_CALLS_SQL).toContain("duration >= 30");
+    expect(REMIX_CALLS_SQL).toContain("((created_at AT TIME ZONE 'UTC') AT TIME ZONE 'America/Los_Angeles')::date = $1::date");
+  });
+
+  it("provenance reads the creator and agent fields, never a ticket prefix", () => {
+    expect(SUPPORT_PROVENANCE_SQL).toContain("bool_or(created_by_id IS NULL AND agent_used IS NOT NULL) AS any_agent");
+    expect(SUPPORT_PROVENANCE_SQL).toContain("bool_or(created_by_id IS NULL AND agent_used IS NULL)     AS any_unknown");
+    expect(SUPPORT_PROVENANCE_SQL).not.toMatch(/ticket_number|VA-|PCP-/);
+  });
+
+  it("5Star is read only through the two SECURITY DEFINER functions, never a PHI table", () => {
+    expect(FIVESTAR_CALLS_SQL).toBe(
+      "SELECT call_id AS id, build, substantive, submitted, asked FROM public.learning_fivestar_calls($1::date)",
+    );
+    expect(FIVESTAR_BOOKINGS_SQL).toBe(
+      "SELECT call_log_id, booking_id, status, source, appointment_tag, person_tag, slot_date, slot_time, " +
+        "npx_link_method, partner_link_needs_review, partner_outcome_status FROM public.learning_fivestar_bookings($1::text[])",
+    );
+    const forbidden = /call_logs|sage_tool_calls|internal_bookings|\bpatients\b|voice_agent_booking_attempts|transcript|notes|to_phone|response_excerpt|person_id|nextgen_appointment_id/i;
+    for (const s of [FIVESTAR_CALLS_SQL, FIVESTAR_BOOKINGS_SQL]) {
+      expect(s).not.toMatch(forbidden);
+      // The only relations named are the two functions.
+      const from = [...s.matchAll(/\bFROM\s+([\w.]+)/gi)].map((m) => m[1]);
+      expect(from.every((r) => /^public\.learning_fivestar_(calls|bookings)$/.test(r))).toBe(true);
+      expect(from).toHaveLength(1);
+    }
+    expect(FIVESTAR_CALLS_SQL).toContain("public.learning_fivestar_calls($1::date)");
+    expect(FIVESTAR_BOOKINGS_SQL).toContain("public.learning_fivestar_bookings($1::text[])");
+    expect(FIVESTAR_CALLS_SQL).not.toContain("%BUILD%");
+  });
+
+  it("the booking slot time is HHMM like the mirror's begin_time", () => {
+    expect(FIVESTAR_BOOKINGS_SQL).toContain("slot_time");
+    expect(CONSOLE_BOOKED_SQL).toContain("p.begin_time = b.slot_time");
+  });
+
+  it("a moved appointment still counts only while the person holds an uncancelled one", () => {
+    expect(CONSOLE_BOOKED_SQL).toContain("coalesce(h.is_rescheduled, false)");
+    expect(CONSOLE_BOOKED_SQL).toContain("g.appointment_date >= h.since");
+  });
+
+  it("the Console matches tags against md5 of its own ids, never a raw id from 5Star (learning-v7)", () => {
+    expect(CONSOLE_BOOKED_SQL).toContain("md5(f.appointment_id::text) AS atag");
+    expect(CONSOLE_BOOKED_SQL).toContain("md5(f.person_id::text) AS ptag");
+    // No input field carries a raw id any more.
+    expect(CONSOLE_BOOKED_SQL).not.toMatch(/x->>'(appointment_id|person_id)'/);
+    expect(CONSOLE_BOOKED_SQL).not.toMatch(/::uuid/);
+    // A tag that is not 32 hex characters is treated as absent.
+    expect(CONSOLE_BOOKED_SQL).toContain("x->>'appointment_tag' ~ '^[0-9a-f]{32}$'");
+    expect(CONSOLE_BOOKED_SQL).toContain("x->>'person_tag' ~ '^[0-9a-f]{32}$'");
+    // One bounded scan (an unbounded or per-booking hash timed out on the Console).
+    expect(CONSOLE_BOOKED_SQL.match(/FROM si_appointment_facts/g)).toHaveLength(1);
+    expect(CONSOLE_BOOKED_SQL).toContain("f.appointment_date >= (SELECT min(least(slot_date, since)) - 60 FROM b)");
+  });
+});
+
+function fakeQuery(handler: (text: string, params?: unknown[]) => any[] | Promise<any[]>): Query & { calls: Array<{ text: string; params?: unknown[] }> } {
+  const calls: Array<{ text: string; params?: unknown[] }> = [];
+  const q = (async (text: string, params?: unknown[]) => {
+    calls.push({ text, params });
+    return { rows: await handler(text, params) };
+  }) as Query & { calls: typeof calls };
+  q.calls = calls;
+  return q;
+}
+
+const remixRows = [
+  { call_sid: sid(1), lane: "tech", runtime_marker: "v111", filed: true },
+  { call_sid: sid(2), lane: "tech", runtime_marker: "v111", filed: false },
+  { call_sid: sid(3), lane: "tech", runtime_marker: "", filed: true },
+  { call_sid: sid(4), lane: "pcp", runtime_marker: "v111", filed: true },
+  { call_sid: sid(5), lane: "pcp", runtime_marker: "v111", filed: false },
+];
+
+function sources(over: Partial<Sources> = {}): Sources {
+  return {
+    hub: fakeQuery(() => remixRows),
+    hubHasRuntimeMarker: true,
+    ...over,
+  };
+}
+
+describe("the fleet filed rate", () => {
+  it("counts per lane and per build, with an unknown build kept apart", async () => {
+    const r = await computeRemix("2026-10-20", sources());
+    const v = r.values.filter((x) => x.metricId === "remix.filed_rate");
+    expect(v).toContainEqual(expect.objectContaining({ lane: "tech", runtimeMarker: "v111", numerator: 1, denominator: 2 }));
+    expect(v).toContainEqual(expect.objectContaining({ lane: "tech", runtimeMarker: "", numerator: 1, denominator: 1 }));
+    expect(v).toContainEqual(expect.objectContaining({ lane: "pcp", runtimeMarker: "v111", numerator: 1, denominator: 2 }));
+  });
+
+  it("the filed rate from the fixtures is exactly what it was before the 5Star change", async () => {
+    const r = await computeRemix("2026-10-20", sources());
+    expect(r.values).toEqual([
+      { metricId: "remix.filed_rate", repo: "Remix", lane: "tech", runtimeMarker: "v111", numerator: 1, denominator: 2, unknownCount: 0 },
+      { metricId: "remix.filed_rate", repo: "Remix", lane: "tech", runtimeMarker: "", numerator: 1, denominator: 1, unknownCount: 0 },
+      { metricId: "remix.filed_rate", repo: "Remix", lane: "pcp", runtimeMarker: "v111", numerator: 1, denominator: 2, unknownCount: 0 },
+    ]);
+  });
+
+  it("reads NULL for the build when the column does not exist yet", async () => {
+    const hub = fakeQuery(() => []);
+    await computeRemix("2026-10-20", sources({ hub, hubHasRuntimeMarker: false }));
+    expect(hub.calls[0].text).toContain("nullif(btrim(NULL::text), '')");
+    expect(hub.calls[0].text).not.toContain("btrim(runtime_marker)");
+  });
+
+  it("without the Support Center token the independent rate is unavailable, never zero", async () => {
+    const r = await computeRemix("2026-10-20", sources());
+    expect(r.values.some((x) => x.metricId === "remix.filed_rate_independent")).toBe(false);
+    expect(r.unavailable["remix.filed_rate_independent"]).toMatch(/LEARNING_SUPPORT_CENTER_TOKEN/);
+  });
+
+  it("folds each call agent > UNKNOWN > staff, and UNKNOWN is reported, not counted either way", async () => {
+    const supportCenter = fakeQuery(() => [
+      { call_sid: sid(1), any_agent: true, any_unknown: true }, // agent wins
+      { call_sid: sid(2), any_agent: false, any_unknown: true }, // UNKNOWN
+      { call_sid: sid(3), any_agent: false, any_unknown: false }, // staff only
+      { call_sid: sid(4), any_agent: true, any_unknown: false },
+      // sid(5): no ticket
+    ]);
+    const r = await computeRemix("2026-10-20", sources({ supportCenter }));
+    const v = r.values.filter((x) => x.metricId === "remix.filed_rate_independent");
+    expect(v).toContainEqual(expect.objectContaining({ lane: "tech", runtimeMarker: "v111", numerator: 1, denominator: 2, unknownCount: 1 }));
+    expect(v).toContainEqual(expect.objectContaining({ lane: "tech", runtimeMarker: "", numerator: 0, denominator: 1, unknownCount: 0 }));
+    expect(v).toContainEqual(expect.objectContaining({ lane: "pcp", runtimeMarker: "v111", numerator: 1, denominator: 2, unknownCount: 0 }));
+    expect(supportCenter.calls[0].params?.[0]).toEqual(remixRows.map((r) => r.call_sid));
+  });
+
+  it("asks the Support Center in chunks", async () => {
+    const many = Array.from({ length: 1201 }, (_, i) => ({ call_sid: sid(i + 10), lane: "tech", runtime_marker: "", filed: false }));
+    const supportCenter = fakeQuery(() => []);
+    await computeRemix("2026-10-20", sources({ hub: fakeQuery(() => many), supportCenter }));
+    expect(supportCenter.calls.map((c) => (c.params?.[0] as string[]).length)).toEqual([500, 500, 201]);
+  });
+
+  it("a failing Support Center read makes the independent rate unavailable and keeps the write-back rate", async () => {
+    const supportCenter = fakeQuery(() => {
+      throw new Error("permission denied");
+    });
+    const r = await computeRemix("2026-10-20", sources({ supportCenter }));
+    expect(r.unavailable["remix.filed_rate_independent"]).toMatch(/permission denied/);
+    expect(r.values.some((x) => x.metricId === "remix.filed_rate")).toBe(true);
+  });
+});
+
+// 5Star: c1 booked by NextGen id, c2 booked by person+slot, c3 submitted but the
+// mirror says no, c4 NPX firm, c5 NPX fuzzy, c6 cancelled locally, c7 no ids,
+// c8 substantive, not asked and NOT submitted yet holding a firm NPX booking
+// (a submission write-back that failed), c9 not substantive.
+const fsCalls = [
+  { id: "c1", build: "b1", substantive: true, submitted: true, asked: true },
+  { id: "c2", build: "b1", substantive: true, submitted: true, asked: true },
+  { id: "c3", build: "b1", substantive: true, submitted: true, asked: true },
+  { id: "c4", build: "b2", substantive: true, submitted: true, asked: true },
+  { id: "c5", build: "b2", substantive: true, submitted: true, asked: true },
+  { id: "c6", build: "b2", substantive: true, submitted: true, asked: true },
+  { id: "c7", build: "b2", substantive: true, submitted: true, asked: true },
+  { id: "c8", build: "b2", substantive: true, submitted: false, asked: false },
+  { id: "c9", build: "b2", substantive: false, submitted: false, asked: false },
+];
+const booking = (call: string, over: Record<string, unknown>) => ({
+  call_log_id: call,
+  booking_id: `bk-${call}`,
+  status: "manual_import_needed",
+  source: "manual",
+  appointment_tag: null,
+  person_tag: null,
+  slot_date: "2026-11-04",
+  slot_time: "1500",
+  npx_link_method: null,
+  partner_link_needs_review: false,
+  partner_outcome_status: null,
+  ...over,
+});
+const fsBookings = [
+  booking("c1", { appointment_tag: "11111111111111111111111111111111" }),
+  booking("c2", { person_tag: "22222222222222222222222222222222" }),
+  booking("c2", { booking_id: "bk-c2-second", person_tag: "22222222222222222222222222222222" }),
+  booking("c3", { person_tag: "33333333333333333333333333333333" }),
+  booking("c4", { source: "npx", npx_link_method: "coordinator", partner_outcome_status: "in_partner_schedule" }),
+  booking("c5", { source: "npx", npx_link_method: "fuzzy_needs_review", partner_outcome_status: "in_partner_schedule" }),
+  booking("c6", { status: "cancelled", person_tag: "66666666666666666666666666666666" }),
+  booking("c7", {}),
+  booking("c8", { source: "npx", npx_link_method: "external_ref", partner_outcome_status: "awaiting_outcome" }),
+];
+
+function fsSources(consoleBooked: string[] | null = ["c1|bk-c1", "c2|bk-c2", "c2|bk-c2-second"]) {
+  const fivestar = fakeQuery((text) => (text === FIVESTAR_BOOKINGS_SQL ? fsBookings : fsCalls));
+  const consoleQ = consoleBooked ? fakeQuery(() => consoleBooked.map((k) => ({ k }))) : undefined;
+  return { fivestar, console: consoleQ, src: sources({ fivestar, console: consoleQ }) };
+}
+
+describe("the 5Star booked rates", () => {
+  it("submitted A, booked A over substantive and booked B over asked, per build", async () => {
+    const { src } = fsSources();
+    const r = await computeFivestar("2026-10-20", src);
+    const get = (id: string, b: string) => r.values.find((v) => v.metricId === id && v.runtimeMarker === b);
+    expect(get("5star.submitted_rate_a", "b1")).toMatchObject({ numerator: 3, denominator: 3, lane: "drs-8484" });
+    expect(get("5star.submitted_rate_a", "b2")).toMatchObject({ numerator: 4, denominator: 5 });
+    // b1: c1 and c2 booked (c2 once, though two bookings), c3 not.
+    expect(get("5star.booked_rate_a", "b1")).toMatchObject({ numerator: 2, denominator: 3 });
+    // b2: c4 and c8 (NPX firm; c8 counts though its notes lost the submission).
+    // c5 fuzzy, c6 cancelled, c7 uncheckable. c8 is not asked, so B stays 1/4.
+    expect(get("5star.booked_rate_a", "b2")).toMatchObject({ numerator: 2, denominator: 5 });
+    expect(get("5star.booked_rate_b", "b2")).toMatchObject({ numerator: 1, denominator: 4 });
+  });
+
+  it("sends the mirror only checkable, uncancelled, non-NPX bookings", async () => {
+    const { console: consoleQ } = fsSources();
+    const { src } = fsSources();
+    await computeFivestar("2026-10-20", src);
+    const sent = JSON.parse((src.console as any).calls[0].params[0] as string).map((x: any) => x.k).sort();
+    expect(sent).toEqual(["c1|bk-c1", "c2|bk-c2", "c2|bk-c2-second", "c3|bk-c3"]);
+    expect(consoleQ).toBeDefined();
+  });
+
+  it("every substantive call is looked up, submitted or not (Codex, #365)", async () => {
+    const { fivestar, src } = fsSources();
+    await computeFivestar("2026-10-20", src);
+    const asked = fivestar.calls.find((c) => c.text === FIVESTAR_BOOKINGS_SQL)?.params?.[0];
+    expect(asked).toEqual(["c1", "c2", "c3", "c4", "c5", "c6", "c7", "c8"]);
+  });
+
+  it("the NPX rule is isFirmPartnerLink plus the booked statuses", () => {
+    const b = booking("x", { source: "npx", npx_link_method: "auto_match", partner_outcome_status: "awaiting_outcome" });
+    expect(npxBooked(b as any)).toBe(true);
+    expect(npxBooked({ ...b, partner_link_needs_review: true } as any)).toBe(false);
+    expect(npxBooked({ ...b, partner_outcome_status: "partner_reported_cancelled" } as any)).toBe(false);
+    expect(npxBooked({ ...b, status: "cancelled" } as any)).toBe(false);
+  });
+
+  it("without the Console the booked rates are unavailable and submitted still reports", async () => {
+    const { src } = fsSources(null);
+    const r = await computeFivestar("2026-10-20", src);
+    expect(r.unavailable["5star.booked_rate_a"]).toMatch(/Console/);
+    expect(r.values.some((v) => v.metricId === "5star.booked_rate_a")).toBe(false);
+    expect(r.values.some((v) => v.metricId === "5star.submitted_rate_a")).toBe(true);
+  });
+
+  it("without 5Star every 5Star metric is unavailable", async () => {
+    const r = await computeFivestar("2026-10-20", sources());
+    expect(Object.keys(r.unavailable).sort()).toEqual(["5star.booked_rate_a", "5star.booked_rate_b", "5star.submitted_rate_a"]);
+  });
+
+  it("sends the function statements as written, with only the day and the call ids", async () => {
+    const { fivestar, src } = fsSources();
+    await computeFivestar("2026-10-20", src);
+    expect(fivestar.calls.map((c) => c.text)).toEqual([FIVESTAR_CALLS_SQL, FIVESTAR_BOOKINGS_SQL]);
+    expect(fivestar.calls[0].params).toEqual(["2026-10-20"]);
+  });
+
+  it("the function rows give exactly the values the table reads gave", async () => {
+    const { src } = fsSources();
+    const r = await computeFivestar("2026-10-20", src);
+    const pick = (id: string) =>
+      r.values
+        .filter((v) => v.metricId === id)
+        .map((v) => [v.runtimeMarker, v.numerator, v.denominator])
+        .sort();
+    expect(pick("5star.submitted_rate_a")).toEqual([["b1", 3, 3], ["b2", 4, 5]]);
+    expect(pick("5star.booked_rate_a")).toEqual([["b1", 2, 3], ["b2", 2, 5]]);
+    expect(pick("5star.booked_rate_b")).toEqual([["b1", 2, 3], ["b2", 1, 4]]);
+    expect(r.unavailable).toEqual({});
+  });
+});
+
+function runnerDeps(over: Partial<RunnerDeps> & { tables?: boolean; locked?: boolean; prior?: boolean } = {}) {
+  const tx = fakeQuery((text) => {
+    if (text === DAY_LOCK_SQL) return [{ locked: over.locked ?? true }];
+    if (text === PRIOR_RUN_SQL) return over.prior ? [{ id: 7 }] : [];
+    if (text === UPSERT_RUN_SQL) return [{ id: 7 }];
+    return [];
+  });
+  const released = vi.fn();
+  const hub = fakeQuery((text) => {
+    if (text === TABLES_SQL) return [{ runs: over.tables ?? true, vals: over.tables ?? true }];
+    if (text.includes("information_schema.columns")) return [{ n: 1 }];
+    if (text.includes("FROM call_logs")) return remixRows;
+    return [];
+  });
+  const deps: RunnerDeps = {
+    hub,
+    connectHub: vi.fn(async () => ({ query: tx, release: released })),
+    now: () => new Date("2026-10-21T11:00:00Z"),
+    ...over,
+  };
+  return { deps, tx, hub, released };
+}
+
+describe("the run", () => {
+  it("with the tables absent it writes nothing and never opens a transaction", async () => {
+    const { deps } = runnerDeps({ tables: false });
+    expect(await runLearningDay("2026-10-20", deps)).toEqual({ status: "skipped", reason: expect.stringMatching(/A6/) });
+    expect(deps.connectHub).not.toHaveBeenCalled();
+  });
+
+  it("writes the run and its values in one transaction under the day's lock", async () => {
+    const { deps, tx, released } = runnerDeps();
+    const out = await runLearningDay("2026-10-20", deps);
+    expect(out.status).toBe("partial"); // no Support Center, no 5Star in this fixture
+    expect(tx.calls.map((c) => c.text)).toEqual(["BEGIN", DAY_LOCK_SQL, UPSERT_RUN_SQL, DELETE_VALUES_SQL, INSERT_VALUES_SQL, "COMMIT"]);
+    const [day, status, version, notes] = tx.calls[2].params as string[];
+    expect([day, status, version]).toEqual(["2026-10-20", "partial", METHOD_VERSION]);
+    const n = JSON.parse(notes);
+    expect(n.readAt).toBe("2026-10-21T11:00:00.000Z");
+    expect(n.unavailable["remix.filed_rate_independent"]).toBeTruthy();
+    const rows = JSON.parse(tx.calls[4].params?.[1] as string);
+    expect(rows).toContainEqual({ metric_id: "remix.filed_rate", repo: "Remix", lane: "pcp", runtime_marker: "v111", numerator: 1, denominator: 2, unknown_count: 0 });
+    expect(released).toHaveBeenCalledOnce();
+  });
+
+  it("5Star's build split comes from the function, with no column probe on 5Star", async () => {
+    const without = runnerDeps();
+    await runLearningDay("2026-10-20", without.deps);
+    const n0 = JSON.parse(without.tx.calls.find((c) => c.text === UPSERT_RUN_SQL)!.params![3] as string);
+    expect(n0.buildSplit).toEqual({ remix: true, fivestar: false });
+
+    const fivestar = fakeQuery(() => []);
+    const { deps, tx } = runnerDeps({ fivestar });
+    await runLearningDay("2026-10-20", deps);
+    const n = JSON.parse(tx.calls.find((c) => c.text === UPSERT_RUN_SQL)!.params![3] as string);
+    expect(n.buildSplit).toEqual({ remix: true, fivestar: true });
+    expect(fivestar.calls.map((c) => c.text)).toEqual([FIVESTAR_CALLS_SQL]);
+    expect(fivestar.calls.some((c) => c.text.includes("information_schema"))).toBe(false);
+  });
+
+  it("another run holding the day writes nothing", async () => {
+    const { deps, tx } = runnerDeps({ locked: false });
+    expect(await runLearningDay("2026-10-20", deps)).toEqual({ status: "locked" });
+    expect(tx.calls.map((c) => c.text)).toEqual(["BEGIN", DAY_LOCK_SQL, "ROLLBACK"]);
+  });
+
+  it("the day is locked before any source is read (Codex, #365)", async () => {
+    const held = runnerDeps({ locked: false });
+    await runLearningDay("2026-10-20", held.deps);
+    expect(held.hub.calls.some((c) => c.text.includes("FROM call_logs"))).toBe(false);
+    // And a run that holds the lock reads only after taking it.
+    const order: string[] = [];
+    const { deps } = runnerDeps();
+    const tx = deps.connectHub;
+    deps.connectHub = async () => {
+      const c = await tx();
+      return { ...c, query: async (t: string, p?: unknown[]) => (order.push(t === DAY_LOCK_SQL ? "lock" : "tx"), c.query(t, p)) };
+    };
+    const hub = deps.hub;
+    deps.hub = async (t: string, p?: unknown[]) => (t.includes("FROM call_logs") && order.push("read"), hub(t, p));
+    await runLearningDay("2026-10-20", deps);
+    expect(order.indexOf("lock")).toBeGreaterThan(-1);
+    expect(order.indexOf("lock")).toBeLessThan(order.indexOf("read"));
+  });
+
+  it("a failed write rolls back and releases the connection", async () => {
+    const { deps, released } = runnerDeps();
+    const failing = fakeQuery((text) => {
+      if (text === DAY_LOCK_SQL) return [{ locked: true }];
+      if (text === UPSERT_RUN_SQL) throw new Error("boom");
+      return [];
+    });
+    deps.connectHub = async () => ({ query: failing, release: released });
+    await expect(runLearningDay("2026-10-20", deps)).rejects.toThrow("boom");
+    expect(failing.calls.map((c) => c.text)).toContain("ROLLBACK");
+    expect(released).toHaveBeenCalledOnce();
+  });
+
+  it("is deterministic: the same inputs in any order give the same hash", async () => {
+    const a = await runLearningDay("2026-10-20", runnerDeps().deps);
+    const shuffled = runnerDeps();
+    shuffled.deps.hub = fakeQuery((text) => {
+      if (text === TABLES_SQL) return [{ runs: true, vals: true }];
+      if (text.includes("information_schema.columns")) return [{ n: 1 }];
+      if (text.includes("FROM call_logs")) return [...remixRows].reverse();
+      return [];
+    });
+    const b = await runLearningDay("2026-10-20", shuffled.deps);
+    expect("hash" in a && a.hash).toBe("hash" in b && b.hash);
+    expect(outputHash([])).toMatch(/^[0-9a-f]{16}$/);
+    // The hash sorts for itself, whoever calls it.
+    const vals = (a as any).values;
+    expect(vals.length).toBeGreaterThan(1);
+    expect(outputHash([...vals].reverse())).toBe(outputHash(vals));
+  });
+
+  it("one fixed insert statement whatever the row count", () => {
+    expect(INSERT_VALUES_SQL).toContain("jsonb_to_recordset($2::jsonb)");
+  });
+
+  it("refuses a malformed day", async () => {
+    await expect(runLearningDay("2026-10-20; drop", runnerDeps().deps)).rejects.toThrow(/not a day/);
+  });
+});
+
+describe("OFF by default", () => {
+  it("does not start without LEARNING_RUNNER_ENABLED=1", () => {
+    expect(startLearningRunner({})).toBe(false);
+    expect(startLearningRunner({ LEARNING_RUNNER_ENABLED: "true" })).toBe(false);
+  });
+
+  it("runs after 03:30 Pacific for the three days before, once a night", () => {
+    expect(daysDue(new Date("2026-10-21T10:00:00Z"), null)).toEqual([]); // 03:00 PDT
+    expect(daysDue(new Date("2026-10-21T10:45:00Z"), null)).toEqual(["2026-10-20", "2026-10-19", "2026-10-18"]);
+    expect(daysDue(new Date("2026-10-21T10:45:00Z"), "2026-10-21")).toEqual([]);
+    expect(pacificClock(new Date("2026-11-03T11:40:00Z"))).toEqual({ day: "2026-11-03", minutes: 3 * 60 + 40 }); // PST
+  });
+
+  it("a night whose run failed is tried again on the next tick", async () => {
+    const { deps } = runnerDeps();
+    deps.connectHub = async () => {
+      throw new Error("pool exhausted");
+    };
+    expect(await learningTick(deps, new Date("2026-10-21T10:45:00Z"))).toEqual([]);
+    const ok = runnerDeps();
+    expect(await learningTick(ok.deps, new Date("2026-10-21T11:15:00Z"))).toHaveLength(3);
+    expect(await learningTick(ok.deps, new Date("2026-10-21T11:45:00Z"))).toEqual([]);
+  });
+
+  it("a night held by another run is tried again on the next tick (Codex, #365)", async () => {
+    const held = runnerDeps({ locked: false });
+    expect(await learningTick(held.deps, new Date("2026-10-21T10:45:00Z"))).toEqual([]);
+    const ok = runnerDeps();
+    expect(await learningTick(ok.deps, new Date("2026-10-21T11:15:00Z"))).toHaveLength(3);
+  });
+
+  it("a failed read never replaces a day already measured (Codex, #365)", async () => {
+    const { deps, tx } = runnerDeps({ prior: true });
+    deps.supportCenter = async () => {
+      throw new Error("connection reset");
+    };
+    const out = await runLearningDay("2026-10-20", deps);
+    expect(out).toEqual({ status: "kept", reason: expect.stringMatching(/connection reset/), readFailed: true });
+    expect(tx.calls.map((c) => c.text)).toEqual(["BEGIN", DAY_LOCK_SQL, PRIOR_RUN_SQL, "ROLLBACK"]);
+    expect(tx.calls[2].params).toEqual(["2026-10-20", METHOD_VERSION]);
+    // A failed build-column probe is a read failure too, and keeps the day the same way.
+    const probe = runnerDeps({ prior: true });
+    const ph = probe.deps.hub;
+    probe.deps.hub = async (t: string, p?: unknown[]) => {
+      if (t.includes("information_schema.columns")) throw new Error("statement timeout");
+      return ph(t, p);
+    };
+    expect((await runLearningDay("2026-10-20", probe.deps)).status).toBe("kept");
+    expect(probe.tx.calls.map((c) => c.text)).not.toContain(DELETE_VALUES_SQL);
+    // With no earlier run the day is still written, partial, rather than left empty.
+    const first = runnerDeps({ prior: false });
+    first.deps.supportCenter = deps.supportCenter;
+    const f = await runLearningDay("2026-10-20", first.deps);
+    expect(f.status).toBe("partial");
+    expect(first.tx.calls.map((c) => c.text)).toContain(INSERT_VALUES_SQL);
+    // A read that did not fail replaces the earlier run as before, and never asks.
+    const clean = runnerDeps({ prior: true });
+    expect((await runLearningDay("2026-10-20", clean.deps)).status).toBe("partial");
+    expect(clean.tx.calls.map((c) => c.text)).toEqual(["BEGIN", DAY_LOCK_SQL, UPSERT_RUN_SQL, DELETE_VALUES_SQL, INSERT_VALUES_SQL, "COMMIT"]);
+  });
+
+  it("a kept day keeps the night open (Codex, #365)", async () => {
+    const kept = runnerDeps({ prior: true });
+    kept.deps.supportCenter = async () => {
+      throw new Error("connection reset");
+    };
+    expect(await learningTick(kept.deps, new Date("2026-10-21T10:45:00Z"))).toEqual([]);
+    const ok = runnerDeps();
+    expect(await learningTick(ok.deps, new Date("2026-10-21T11:15:00Z"))).toHaveLength(3);
+  });
+
+  it("a build-column probe that failed is a read failure, not an absent column (Codex, #365)", async () => {
+    const { deps, tx } = runnerDeps();
+    const hub = deps.hub;
+    deps.hub = async (t: string, p?: unknown[]) => {
+      if (t.includes("information_schema.columns")) throw new Error("statement timeout");
+      return hub(t, p);
+    };
+    const out = await runLearningDay("2026-10-20", deps);
+    if (out.status === "skipped" || out.status === "locked" || out.status === "kept") throw new Error(out.status);
+    expect(out.readFailed).toBe(true);
+    expect(out.status).toBe("partial");
+    // The run says why it is unsplit.
+    const notes = JSON.parse(tx.calls.find((c) => c.text === UPSERT_RUN_SQL)!.params![3] as string);
+    expect(notes.buildSplit.remix).toBe(false);
+    expect(notes.buildSplitReadFailed).toEqual(["Remix"]);
+    // With every source configured and answering, the failed probe alone makes the run partial.
+    const full = runnerDeps();
+    const fh = full.deps.hub;
+    full.deps.hub = async (t: string, p?: unknown[]) => {
+      if (t.includes("information_schema.columns")) throw new Error("statement timeout");
+      return fh(t, p);
+    };
+    full.deps.supportCenter = async () => ({ rows: [] });
+    full.deps.fivestar = async () => ({ rows: [] });
+    full.deps.console = async () => ({ rows: [] });
+    const f = await runLearningDay("2026-10-20", full.deps);
+    if (f.status === "skipped" || f.status === "locked" || f.status === "kept") throw new Error(f.status);
+    expect(f.unavailable).toEqual({});
+    expect(f.status).toBe("partial");
+    // A column that is simply absent is a fact: not a read failure.
+    const absent = runnerDeps();
+    const h2 = absent.deps.hub;
+    absent.deps.hub = async (t: string, p?: unknown[]) => (t.includes("information_schema.columns") ? { rows: [{ n: 0 }] } : h2(t, p));
+    const ok = await runLearningDay("2026-10-20", absent.deps);
+    if (ok.status === "skipped" || ok.status === "locked" || ok.status === "kept") throw new Error(ok.status);
+    expect(ok.readFailed).toBe(false);
+  });
+
+  it("a configured source that failed keeps the night open; an unconfigured one does not (Codex, #365)", async () => {
+    const failing = runnerDeps();
+    failing.deps.supportCenter = async () => {
+      throw new Error("connection reset");
+    };
+    const t1 = new Date("2026-10-21T10:45:00Z");
+    expect(await learningTick(failing.deps, t1)).toHaveLength(3); // written, as partial
+    // The same night: read again, because the failure was a blip, not a fact.
+    const ok = runnerDeps();
+    expect(await learningTick(ok.deps, new Date("2026-10-21T11:15:00Z"))).toHaveLength(3);
+    // ok had no Support Center at all — unconfigured is a fact; the night closes.
+    expect(await learningTick(ok.deps, new Date("2026-10-21T11:45:00Z"))).toEqual([]);
+    expect(isReadFailure("Support Center read failed: x")).toBe(true);
+    expect(isReadFailure("Support Center plugin token (LEARNING_SUPPORT_CENTER_TOKEN) not configured")).toBe(false);
+  });
+
+  it("the server wires the export always and the runner behind its switch", () => {
+    const idx = fs.readFileSync(path.join(__dirname, "../index.ts"), "utf8");
+    expect(idx).toContain("registerLearningExport(app);");
+    expect(idx).toContain("startLearningRunner();");
+    expect(idx.indexOf("registerLearningExport(app);")).toBeLessThan(idx.indexOf("res.sendFile('index.html'"));
+  });
+});
+
+// ai-bridge learning/schema.py, the PHI guard the register applies.
+const FORBIDDEN_KEYS = ["patient_name", "first_name", "last_name", "dob", "date_of_birth", "phone", "phone_number", "transcript", "caller_name", "email"];
+const PHONE = /(?<![\w])(\+?1[ -.]?)?\(?\d{3}\)?[ -.]\d{3}[ -.]\d{4}(?!\d)/;
+const EMAIL = /[\w.+-]+@[\w-]+\.[\w.]+/;
+const DOB = /\b(0?[1-9]|1[0-2])\/(0?[1-9]|[12]\d|3[01])\/(19\d\d|200\d)\b/;
+
+function phiProblems(x: unknown, at = "$"): string[] {
+  const out: string[] = [];
+  if (Array.isArray(x)) x.forEach((v, i) => out.push(...phiProblems(v, `${at}[${i}]`)));
+  else if (x && typeof x === "object") {
+    for (const [k, v] of Object.entries(x)) {
+      if (FORBIDDEN_KEYS.includes(k.toLowerCase())) out.push(`${at}.${k}`);
+      out.push(...phiProblems(v, `${at}.${k}`));
+    }
+  } else if (typeof x === "string") {
+    if (PHONE.test(x) || EMAIL.test(x) || DOB.test(x)) out.push(at);
+    if (/^CA[0-9a-f]{32}$/i.test(x)) out.push(`${at}: a call SID`);
+  }
+  return out;
+}
+
+function mockRes() {
+  const res: any = { statusCode: 200, body: undefined };
+  res.status = (c: number) => ((res.statusCode = c), res);
+  res.json = (b: unknown) => ((res.body = b), res);
+  return res;
+}
+
+const storedValues: StoredValue[] = [
+  { run_date: "2026-10-20", method_version: METHOD_VERSION, metric_id: "remix.filed_rate", repo: "Remix", lane: "tech", runtime_marker: "voice-runtime-v111-x", numerator: 137, denominator: 150, unknown_count: 0 },
+];
+
+describe("the export", () => {
+  const hub = fakeQuery((text) => {
+    if (text === EXPORT_RUNS_SQL) return [{ id: 1, run_date: "2026-10-20", status: "partial", method_version: METHOD_VERSION, notes: JSON.stringify({ readAt: "2026-10-21T11:00:00Z", unavailable: { "remix.filed_rate_independent": "token not configured" } }) }];
+    if (text === EXPORT_VALUES_SQL) return storedValues;
+    return [];
+  });
+  const now = () => new Date("2026-10-22T18:00:00Z");
+
+  it("answers 503 and serves nothing without a token configured", async () => {
+    const res = mockRes();
+    await learningExportHandler(hub, {}, now)({ headers: {}, query: {} } as any, res);
+    expect(res.statusCode).toBe(503);
+  });
+
+  it("refuses a wrong or missing bearer token", async () => {
+    for (const authorization of [undefined, "Bearer nope", "secret"]) {
+      const res = mockRes();
+      await learningExportHandler(hub, { LEARNING_EXPORT_TOKEN: "secret" }, now)({ headers: { authorization }, query: {} } as any, res);
+      expect(res.statusCode).toBe(401);
+    }
+  });
+
+  it("serves runs, values, definitions and candidates, and nothing the PHI guard refuses", async () => {
+    const res = mockRes();
+    await learningExportHandler(hub, { LEARNING_EXPORT_TOKEN: "secret" }, now)({ headers: { authorization: "Bearer secret" }, query: { since: "2026-10-01" } } as any, res);
+    expect(res.statusCode).toBe(200);
+    expect(res.body.values).toHaveLength(1);
+    expect(res.body.metrics.length).toBe(METRICS.length);
+    expect(phiProblems(res.body)).toEqual([]);
+  });
+
+  it("the PHI guard itself catches what it must", () => {
+    expect(phiProblems({ phone: "x" })).not.toEqual([]);
+    expect(phiProblems({ a: "call me at 626-699-8484" })).not.toEqual([]);
+    expect(phiProblems({ a: sid(1) })).not.toEqual([]);
+  });
+
+  it("clamps an old or malformed since", async () => {
+    for (const since of ["2020-01-01", "yesterday", "2026-99-99", "2026-02-30"]) {
+      const res = mockRes();
+      await learningExportHandler(hub, { LEARNING_EXPORT_TOKEN: "secret" }, now)({ headers: { authorization: "Bearer secret" }, query: { since } } as any, res);
+      expect(res.body.since >= "2026-06-24").toBe(true);
+    }
+  });
+
+  it("an impossible date is malformed, not passed to the database (Codex, #365)", () => {
+    expect(isCalendarDay("2026-10-20")).toBe(true);
+    expect(isCalendarDay("2028-02-29")).toBe(true);
+    for (const bad of ["2026-99-99", "2026-02-30", "2026-13-01", "2026-10-2", "x", undefined]) expect(isCalendarDay(bad)).toBe(false);
+  });
+
+  it("no statement the export runs selects a SID, a name or a phone", () => {
+    for (const s of [EXPORT_RUNS_SQL, EXPORT_VALUES_SQL]) expect(s).not.toMatch(/call_sid|name|phone|transcript/);
+  });
+});
+
+describe("candidates", () => {
+  const day = (i: number) => `2026-10-${String(i).padStart(2, "0")}`;
+  const series = (rates: number[], d = 100): StoredValue[] =>
+    rates.map((r, i) => ({ ...storedValues[0], run_date: day(i + 1), numerator: Math.round(r * d), denominator: d }));
+
+  it("a drop outside its own band is a candidate with the shape the metric plainly reads as", () => {
+    const c = detectCandidates(series([0.9, 0.91, 0.89, 0.9, 0.9, 0.91, 0.9, 0.89, 0.6]));
+    expect(c).toEqual([expect.objectContaining({ fingerprint: "remix.filed_rate:tech:down", day: "2026-10-09", shape: "lost-request-no-ticket", baselineDays: 8 })]);
+  });
+
+  it("nothing inside the band, nothing on thin days, nothing without a baseline", () => {
+    expect(detectCandidates(series([0.9, 0.91, 0.89, 0.9, 0.9, 0.91, 0.9, 0.89, 0.87]))).toEqual([]);
+    expect(detectCandidates(series([0.9, 0.91, 0.89, 0.9, 0.9, 0.91, 0.9, 0.89, 0.2], 10))).toEqual([]);
+    expect(detectCandidates(series([0.9, 0.9, 0.1]))).toEqual([]);
+    // A thin newest day is not read, even against a sound baseline.
+    const thinLast = series([0.9, 0.91, 0.89, 0.9, 0.9, 0.91, 0.9, 0.89]).concat({ ...storedValues[0], run_date: day(9), numerator: 2, denominator: 10 });
+    expect(detectCandidates(thinLast)).toEqual([]);
+  });
+
+  it("an UNKNOWN-provenance call is neither filed nor unfiled (Codex, #365)", () => {
+    // 90% of the KNOWN calls filed every day; the last day has 40 UNKNOWN on top.
+    // Counted as unfiled they would read 0.54 and raise a false drop.
+    const vals = series([0.9, 0.91, 0.89, 0.9, 0.9, 0.91, 0.9, 0.89, 0.9]).map((v) => ({ ...v, metric_id: "remix.filed_rate_independent" }));
+    vals[8] = { ...vals[8], denominator: 140, unknown_count: 40 };
+    expect(detectCandidates(vals)).toEqual([]);
+  });
+
+  it("a retired method version is not a current candidate (Codex, #365)", () => {
+    const old = series([0.9, 0.91, 0.89, 0.9, 0.9, 0.91, 0.9, 0.89, 0.6]).map((v) => ({ ...v, method_version: "learning-v0" }));
+    expect(detectCandidates(old)).toEqual([]);
+  });
+
+  it("the mirror's NextGen id outranks a person + slot match (Codex, #365)", () => {
+    const order = CONSOLE_BOOKED_SQL.slice(CONSOLE_BOOKED_SQL.indexOf("ORDER BY"));
+    expect(order.indexOf("u.by_id DESC")).toBeGreaterThan(-1);
+    expect(order.indexOf("u.by_id DESC")).toBeLessThan(order.indexOf("u.is_cancelled ASC"));
+    // The id branch is the one marked true.
+    expect(CONSOLE_BOOKED_SQL).toMatch(/true AS by_id\s+FROM by_id i WHERE i\.tag = b\.appointment_tag/);
+  });
+
+  it("a moved, unkept appointment needs a live replacement (Codex, #365)", () => {
+    const where = CONSOLE_BOOKED_SQL.slice(CONSOLE_BOOKED_SQL.indexOf("FROM hit h"));
+    // statusOf, exactly: kept wins; else neither cancelled nor moved. Same rule
+    // on the replacement row (Codex, #365: kept outranks a cancellation flag).
+    expect(where).toMatch(/WHERE \(coalesce\(h\.is_kept, false\)\s+OR \(NOT coalesce\(h\.is_cancelled, false\) AND NOT coalesce\(h\.is_rescheduled, false\)\)\)/);
+    expect(where).toMatch(/AND \(coalesce\(g\.is_kept, false\)\s+OR \(NOT coalesce\(g\.is_cancelled, false\) AND NOT coalesce\(g\.is_rescheduled, false\)\)\)/);
+  });
+
+  it("every shape named is in the closed vocabulary", () => {
+    for (const s of Object.values(METRIC_SHAPES)) expect(knownShapes()).toContain(s);
+  });
+
+  it("the vocabulary mirror names the lanes this engine reports", () => {
+    const v = JSON.parse(fs.readFileSync(path.join(__dirname, "vocab.json"), "utf8"));
+    expect(v.lane_groups["5Star"].inbound).toContain("drs-8484");
+    expect(Object.values(v.lane_groups.Remix).flat()).toEqual(expect.arrayContaining(["optical", "surgery", "tech", "records", "pcp", "no-ivr"]));
+  });
+});

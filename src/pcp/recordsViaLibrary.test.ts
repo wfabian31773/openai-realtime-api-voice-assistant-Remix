@@ -31,6 +31,12 @@ vi.mock('../../server/services/ticketingApiClient', () => ({
     createTicket: (...a: unknown[]) => createTicket(...a),
     lookupProviderAndLocation: (...a: unknown[]) => lookupProviderAndLocation(...a),
   },
+  // Mirrors the real predicate: 'unavailable' means the lookup never ran, and
+  // it is exactly equivalent to success === false. Kept in step with the
+  // source rather than stubbed to a constant, or this mock would hide the
+  // very distinction the predicate exists to make.
+  lookupWasUnavailable: (r: { outcome?: string; success?: boolean } | null | undefined) =>
+    r?.outcome === 'unavailable' || r?.success === false,
 }));
 
 const { getTool } = await import('../tools/registry');
@@ -40,6 +46,9 @@ const fileRecords = getTool('file_records_ticket')!;
 
 /** Exactly what pcpAgent now passes, minus whatever a case is testing. */
 const PCP_CALL = {
+  // v79: the library asks a patient the form-channel question first; these
+  // tests are about the destination-and-dates gate, so the fixture answers it.
+  form_channel: 'declined',
   first_name: 'Wayne',
   last_name: 'Fabian',
   date_of_birth: '03/17/1973',
@@ -57,6 +66,29 @@ beforeEach(() => {
 
 const run = (extra: Record<string, unknown> = {}) =>
   fileRecords.handler({ ...PCP_CALL, ...extra }) as Promise<any>;
+
+describe('a records case always says where it is going, or that nobody said', () => {
+  /**
+   * OFF THE CLOCK THERE IS NO GATE, so the note is the only thing standing
+   * between a clerk and a chart with no address. Added 2026-09-14, when
+   * professional records requests began arriving here from PCP: those are
+   * off-clock by definition and PCP can run out of asks. The line used to be
+   * written only when the clock applied, on the reasoning that only then does
+   * somebody have to act on the absence — true while every off-clock case came
+   * from the records lane, which asks, and false the moment this route opened.
+   */
+  it('writes NOT CAPTURED for a missing destination even off the clock', async () => {
+    const r = await run({
+      requester: 'Dr Perez — De La Pena Family Medicine',
+      requester_type: 'provider',
+      date_range: 'the last year',
+    });
+    expect(r.success, `must file: ${JSON.stringify(r)}`).toBe(true);
+    expect(r.cap_clock_applies, 'a provider request is not on the patient clock').toBe(false);
+    const body = String((createTicket.mock.calls as any[])[0][0].description);
+    expect(body, 'nobody can send a chart to an address nobody captured').toMatch(/Send to: NOT CAPTURED/);
+  });
+});
 
 describe('the hard gate PCP was bypassing', () => {
   it('refuses to file a patient request without a destination and a date range', async () => {

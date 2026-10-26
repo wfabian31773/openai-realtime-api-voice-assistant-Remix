@@ -57,8 +57,22 @@ export interface CallFacts {
   /** PCP line (docs/ramp/playbook.md): who is calling and how to respond. */
   callerRole?: string;
   medicalGroup?: string;
-  /** Contact method MUST match the request: fax->faxNumber, email->email. */
-  contactMethod?: 'callback' | 'fax' | 'email';
+  /**
+   * Contact method MUST match the request: fax->faxNumber, email->email.
+   *
+   * `mail` and `unspecified` were added 2026-09-08 so this ledger can hold
+   * what the PCP records intake actually captures. Before that its only
+   * delivery vocabulary was fax/email/callback, and `gateBeforeExecution`
+   * DEFAULTS a records request to fax — so a caller asking for records by
+   * post was asked for a fax number, refused, and asked again, with no value
+   * in this union able to say otherwise (Codex P1, PR #273).
+   *
+   * Every reader tests `=== 'fax'` or `=== 'email'`, so the two new values
+   * are inert everywhere by construction: they simply stop the fax and email
+   * requirements from engaging. Written only by `syncDeliveryToLedger`
+   * (src/pcp/recordsDelivery.ts), which carries the reasoning.
+   */
+  contactMethod?: 'callback' | 'fax' | 'email' | 'mail' | 'unspecified';
   faxNumber?: string;
   email?: string;
   patientReferenced?: string;
