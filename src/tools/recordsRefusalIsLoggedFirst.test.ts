@@ -176,14 +176,23 @@ describe('a refusal the caller cannot fix is logged before anyone is told it is'
     expect(String(r.fix)).toMatch(/NOT logged/);
   });
 
-  it('a recovery ticket is never offered a signing form', async () => {
+  it('no link goes out from a recovery, and the caller is not told there is no form', async () => {
     await app(UNASKABLE_400, FILED('VA-RECOVERED-3'));
-    await runTool('file_records_ticket', THIRD_PARTY);
+    // A patient's own request: the records team still sends the form later.
+    await runTool('file_records_ticket', {
+      ...THIRD_PARTY,
+      requester: 'I am the patient',
+      form_channel: 'sms',
+      request_description: 'copy of my records',
+    });
     const api = await client();
     const resend = vi.spyOn(api, 'sendRecordsIntakeLink');
     const r = (await runTool('send_records_form', { channel: 'sms', call_sid: SID })) as Out;
     expect(resend).not.toHaveBeenCalled();
-    expect(String(r.message)).toMatch(/no form to sign/i);
+    expect(r.success).toBe(false);
+    expect(String(r.message)).toMatch(/team will follow up/i);
+    expect(String(r.message)).not.toMatch(/no form/i);
+    expect(String(r.fix)).toMatch(/do not call send_records_form again/i);
   });
 
   it('a recovered request has done its job: its name does not carry into the next request on the call', async () => {

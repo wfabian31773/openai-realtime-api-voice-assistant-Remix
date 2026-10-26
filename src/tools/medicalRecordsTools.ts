@@ -169,6 +169,16 @@ const RECORDS_ROUTED_AWAY_FACT = 'records_ticket_routed_away';
 const RECORDS_HELD_NO_FORM_FACT = 'records_ticket_held_no_form';
 
 /**
+ * Per-call latch: the filing on this call was REFUSED by the ticketing app and
+ * logged instead as a general Medical Records recovery ticket (v117, Codex P2
+ * on #376). No link can go out from this call — the app never opened the case
+ * the form belongs to — but a person classifies the ticket and a patient's
+ * request still gets its form from the records team, so "no form to sign"
+ * would be false here.
+ */
+const RECORDS_RECOVERED_FACT = 'records_ticket_recovered_after_refusal';
+
+/**
  * THE HALVES OF THE NAME THIS CALL HAS ALREADY HANDED THE TOOL — v117.
  *
  * CA63467308b45e3e7f9118cde1b67be7bf, 2026-10-26: the caller spelled the
@@ -241,10 +251,11 @@ export const RECOVERED_AFTER_REFUSAL_FIX =
   'The ticketing system turned the first filing down, so this request was logged as a general ' +
   'ticket for the Medical Records team instead, who will route it. Nothing the caller can say ' +
   'would change the refusal, so do not ask them to repeat anything, do not call ' +
-  'file_records_ticket again, and do not tell them the system is not accepting it. No signing ' +
-  'form applies to it: do not offer a link, do not ask text or email, and do not call ' +
-  'send_records_form. Tell the caller their request has been taken and the team will follow up ' +
-  'with them. Never tell them to call back.';
+  'file_records_ticket again, and do not tell them the system is not accepting it. No link goes ' +
+  'out from this call: do not offer one, do not ask text or email, and do not call ' +
+  'send_records_form; if you already offered a link, tell the caller the team will follow up ' +
+  'about it. Tell the caller their request has been taken and the team will follow up with them. ' +
+  'Never tell them to call back.';
 
 export const REFUSAL_NOT_LOGGED_FIX =
   'The ticketing system turned this filing down, and the backup filing was not taken either, so ' +
@@ -1313,8 +1324,8 @@ registerTool({
           `${recovery.ticketNumber ?? 'a queued ticket'} in Medical Records (${callSid || 'no call reference'})`,
       );
       forgetNameHalves(callSid, scope);
-      // A general ticket for a person to route, never offered a form.
-      noteCallFact(callSid, RECORDS_HELD_NO_FORM_FACT);
+      // A general ticket for a person to route; no link goes out from here.
+      noteCallFact(callSid, RECORDS_RECOVERED_FACT);
       return {
         success: true,
         ...(recovery.ticketNumber
@@ -1473,6 +1484,19 @@ registerTool({
     const channel = str(input.channel).toLowerCase();
     if (channel !== 'sms' && channel !== 'email') {
       return refuse('channel must be "sms" or "email"', { fix: 'Call again with channel "sms" or "email".' });
+    }
+    if (!callFactNoted(callSid, RECORDS_FILED_FACT) && callFactNoted(callSid, RECORDS_RECOVERED_FACT)) {
+      // The app refused the filing and a recovery ticket holds it (v117). It
+      // opened no case for a link to belong to, and a person routes it — so
+      // the caller is told the team will follow up, never that there is no
+      // form, which is false for a patient's own request.
+      return refuse('the request on this call was logged as a recovery ticket', {
+        message: 'The team will follow up with you about that.',
+        fix:
+          'The filing on this call was refused and logged as a recovery ticket (recovered_after_refusal on the ' +
+          'filing), so no link can be sent from this call. Do not offer one again and do not call ' +
+          'send_records_form again.',
+      });
     }
     if (!callFactNoted(callSid, RECORDS_FILED_FACT) && callFactNoted(callSid, RECORDS_HELD_NO_FORM_FACT)) {
       // Kept in Medical Records for want of a name, but it reads as another
