@@ -661,7 +661,7 @@ registerTool({
     // offered a records form either. Decided HERE, before the channel ask,
     // on the same words the redirect below reads, so the one question this
     // tool adds is never put to somebody who rang about an appointment.
-    const { detectCrossQueue, namesARecord } = await import('./queueRouting');
+    const { detectCrossQueue, namesADocument } = await import('./queueRouting');
     const crossQueue = detectCrossQueue(description, MEDICAL_RECORDS_DEPARTMENT_ID);
     /**
      * A THIRD PARTY ASKING FOR A PATIENT'S RECORDS OR REPORT IS NOT BOOKING
@@ -688,9 +688,16 @@ registerTool({
      * office booking a mutual patient's exam still reaches the Hub.
      * `detectCrossQueue`'s cue lists are untouched fleet-wide; changing them
      * is open item #99 and needs its own department-2 measurement.
+     *
+     * THE DOCUMENT WORD IS THE NARROW ONE, `namesADocument`, NOT THE
+     * RECORDS-LINE HOLD'S (Codex P1 on #376). That hold is substring matching
+     * over `note`, `report` and `record`, safe only while scheduling is read
+     * first; read here, ahead of scheduling, it kept "please note the patient
+     * needs to reschedule", "calling to report that the patient needs an eye
+     * exam" and "calling on a recorded line" out of the Hub.
      */
     const thirdPartyRecordsHold =
-      crossQueue !== null && cap.pathway !== 'roa_patient' && namesARecord(description);
+      crossQueue !== null && cap.pathway !== 'roa_patient' && namesADocument(description);
     if (thirdPartyRecordsHold) {
       console.info(
         `[records] a third party's records request held in Medical Records against the ` +

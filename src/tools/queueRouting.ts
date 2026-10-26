@@ -232,12 +232,66 @@ function hit(text: string, cues: string[]): boolean {
 /**
  * Does this request name a document — a record, a chart, a note, a report?
  *
- * The records-line hold below, exported so `file_records_ticket` reads the SAME
- * list when it keeps a third party's request home (v117) rather than a second
- * copy that drifts. The list itself is unchanged; see RECORDS_CUES.
+ * The records-line hold below. Broad on purpose — see RECORDS_CUES — and NOT
+ * what `file_records_ticket` reads to keep a third party's request home: that
+ * turns the order round, so it reads the narrow `namesADocument`.
  */
 export function namesARecord(text: string): boolean {
   return hit(fold(text), RECORDS_CUES);
+}
+
+/**
+ * Does this request ASK FOR a document — the narrow reading, for the one place
+ * a document word OUTRANKS a scheduling cue (v117, Codex P1 on #376).
+ *
+ * `namesARecord` is the records-line hold, and it is deliberately broad: it is
+ * substring matching over `record`, `note` and `report`, and it was safe only
+ * because `detectCrossQueue` reads scheduling BEFORE it, so a scheduling cue
+ * always won. `file_records_ticket` reads a document word to WITHHOLD the
+ * scheduling redirect for a third party, which turns that order round, and the
+ * broad list then reads ordinary speech as a document: *"please NOTE the
+ * patient needs to reschedule"*, *"calling to REPORT that the patient needs an
+ * eye exam"*, and — on most professional calls — *"calling on a RECORDED
+ * line"*. Each would have kept a third party's appointment request in Medical
+ * Records instead of the HVA Hub, the guard this change promised not to move.
+ *
+ * So this asks for the NOUN, as a whole word, and the ambiguous ones only in a
+ * document phrase: `records`, `chart(s)`, `documentation`, `copy of`, `release
+ * of information`; `record`, `notes` and `report(s)` after a determiner or a
+ * clinical word ("the most recent eye exam REPORT", "chart NOTES", "her
+ * medical RECORD"), and singular `note` only after a clinical word, because
+ * "leave a note for the doctor" is a message, not a chart. A verb never
+ * matches: "to report", "please note", "the patient reports". "For the
+ * record" is not a request for one.
+ *
+ * Its own list rather than a narrowed `RECORDS_CUES`: the records-line hold is
+ * live on every records-lane call and keeps its reading; only the new order
+ * needs the narrow one.
+ */
+const DOCUMENT_CLINICAL =
+  "(?:chart|office|visit|progress|clinic|clinical|consult|consultation|op|operative|surgical|surgery|" +
+  "exam|examination|medical|pathology|lab|labs|imaging|oct|field|test|testing|radiology|discharge|" +
+  "treatment|encounter|doctor|doctors|doctor's|physician|physicians|physician's|provider|providers|provider's)";
+const DOCUMENT_DETERMINER =
+  "(?:the|this|that|these|those|his|her|their|its|any|all|latest|recent|last|final|full|written)";
+const DOCUMENT_PATTERNS: readonly RegExp[] = [
+  /\brecords\b/,
+  new RegExp(`\\b(?:${DOCUMENT_CLINICAL}|${DOCUMENT_DETERMINER}|patient's|patients')\\s+record\\b`),
+  /\bcharts?\b/,
+  new RegExp(`\\b${DOCUMENT_CLINICAL}\\s+notes?\\b`),
+  new RegExp(`\\b${DOCUMENT_DETERMINER}\\s+notes\\b`),
+  /\bnotes\s+(?:from|for)\b/,
+  new RegExp(`\\b(?:${DOCUMENT_CLINICAL}|${DOCUMENT_DETERMINER}|a|an)\\s+reports?\\b`),
+  /\breports?\s+from\b/,
+  /\bdocumentation\b/,
+  /\bcop(?:y|ies)\s+of\b/,
+  /\brelease\s+of\s+information\b/,
+  /\b(?:expediente|historial|copias?|informes?)\b/,
+];
+
+export function namesADocument(text: string): boolean {
+  const t = fold(text).replace(/\bfor\s+the\s+record\b/g, ' ');
+  return DOCUMENT_PATTERNS.some((re) => re.test(t));
 }
 
 /**

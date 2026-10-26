@@ -40,6 +40,7 @@ import { runTool } from './registry';
 import './sharedPatientTools';
 import './medicalRecordsTools';
 import { NAME_NOT_CAPTURED_NOTE } from './medicalRecordsTools';
+import { namesADocument } from './queueRouting';
 import { resetGateAttempts } from './gateAttempts';
 import { resetVerifiedIdentities } from './verifiedIdentity';
 
@@ -196,6 +197,50 @@ describe('the corpus: a third party asking for "the most recent eye exam report"
       expect(r.success, words).toBe(true);
       expect(app.lastParams().departmentId, words).toBe(MEDICAL_RECORDS);
       vi.restoreAllMocks();
+    }
+  });
+});
+
+describe('a third party\'s ordinary "note", "report" or "recorded line" is not a document (Codex P1 on #376)', () => {
+  /**
+   * The records-line hold matches `note`, `report` and `record` as
+   * substrings. Read AHEAD of scheduling, it would keep these appointment
+   * requests out of the Hub; the hold reads `namesADocument` instead.
+   */
+  for (const words of [
+    'please note the patient needs to reschedule the eye exam',
+    "I'm calling to report that the patient needs an eye exam",
+    'calling on a recorded line to schedule an eye exam for our mutual patient',
+    'the patient reports blurry vision and needs to schedule an eye exam',
+    'leave a note for the doctor that the patient needs to reschedule',
+    'for the record, the patient needs to reschedule the eye exam',
+  ]) {
+    it(`"${words}" still reaches the HVA Hub`, async () => {
+      const app = await fakeApp();
+      const r = (await runTool('file_records_ticket', {
+        ...NAMELESS_THIRD_PARTY,
+        first_name: 'Testpatient',
+        last_name: 'Example',
+        requester: THIRD_PARTIES[0].requester,
+        request_description: words,
+      })) as Out;
+      expect(r.success, JSON.stringify(r)).toBe(true);
+      expect(app.lastParams().departmentId, words).toBe(HVA_HUB);
+    });
+  }
+
+  it('asks for the noun, and reads it as a document in a document phrase', () => {
+    for (const doc of [
+      EXAM_REPORT,
+      'need the records from her last eye exam',
+      'please fax the chart notes from the annual exam',
+      'a copy of the dilated exam',
+      'can you send the report from the retina consult',
+      "her medical record from the last visit",
+      'we need the office notes and the visit report',
+      'necesitamos el expediente del paciente',
+    ]) {
+      expect(namesADocument(doc), doc).toBe(true);
     }
   });
 });
