@@ -10,7 +10,8 @@
 
 **Companion to `/CLAUDE.md`. Read both at the start of every session.**
 
-Last updated: **2026-10-06** (section 14 — the session stall reconnects).
+Last updated: **2026-10-26** (VA-76222 / VA-76221 — on-call identity before transfer, and a lookup miss that is not "not found").
+Earlier: **2026-10-06** (section 14 — the session stall reconnects).
 Earlier: **2026-09-25** (section 13 — terminal 4xx is follow-up, not a
 stall), **2026-09-17 11:10 UTC** (section 12), **2026-09-09 17:40 UTC**
 (section 11), **2026-08-11 01:15 UTC** (Wayne: *"go through this entire
@@ -1484,3 +1485,26 @@ WHERE call_sid = ANY(:sids_from_step_1)
 After the deploy, the same population should read 0 on the second query,
 and optical tickets with no `location_id` must not rise (before-arm
 2026-10-01: 15 of 391).
+
+---
+
+## 16. VA-76222 / VA-76221 — on-call identity, and a lookup miss that is not "not found" (2026-10-26)
+
+Ticket ids only. Full note: `.agents/memory/on-call-identity-and-lookup-miss.md`.
+
+**VA-76222.** An urgent-symptom call reached on-call, the transfer failed, and
+the callback ticket was `Unknown Caller` with no name and no date of birth.
+`urgentFallbackTicketParams` filed `Unknown` + `Caller`; `escalate_to_human`
+did not keep the ANI unless the model passed a callback. Now: one identity
+ask before the dial (911-level and a clinician skip; a decline still
+transfers); the calling number is always the callback; a failed transfer's
+ticket uses the stand-in, never Unknown Caller, and carries whatever was
+captured.
+
+**VA-76221, root cause.** `lookup_schedule` called `lookupByNameAndDOB` only.
+That is a string match on the spoken name. The same call already held a
+phone-loaded schedule with the chart name and the visits. The tool answered
+`{ found: false }`; the prompt told the model to say "not found in system".
+Fix: re-run with the chart name when the spoken first name agrees; if still
+unsure, say "Let me make sure the team has your details." Never tell the
+caller they are not found when visit history exists.

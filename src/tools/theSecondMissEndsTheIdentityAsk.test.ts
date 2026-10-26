@@ -24,6 +24,7 @@ vi.mock('../services/consoleDirectory', () => ({
 
 const { runTool } = await import('./registry');
 const { LOOKUP_MISS_LIMIT } = await import('./sharedPatientTools');
+const { LOOKUP_UNSURE_SAY } = await import('./lookupUnsure');
 const { resetGateAttempts } = await import('./gateAttempts');
 
 const SID = 'CA000000000000000000000000000000a5';
@@ -63,7 +64,7 @@ describe('what counts as a miss', () => {
   it('the first identity miss coaches ONE re-ask in the format the funnel needs', async () => {
     const out = await lookup({ ...identity, call_sid: SID });
     expect(out.lookup_misses).toBe(1);
-    expect(String(out.message)).toMatch(/No record found/);
+    expect(String(out.message)).toBe(LOOKUP_UNSURE_SAY);
     expect(String(out.fix)).toMatch(/ONCE more/);
     expect(String(out.fix)).toMatch(/spell the last name/i);
     expect(String(out.fix)).toMatch(/month, then day, then year/i);
@@ -78,9 +79,9 @@ describe('what counts as a miss', () => {
     expect(String(out.fix)).toMatch(/Do NOT ask the caller for their name or date of birth again/);
     expect(String(out.fix)).toMatch(/file it now/i);
     // The spoken line no longer sends the model back for another round.
-    expect(String(out.message)).toMatch(/^No record found/);
+    expect(String(out.message)).toBe(LOOKUP_UNSURE_SAY);
     expect(String(out.message)).not.toMatch(/Ask for their name/);
-    expect(String(out.message)).toMatch(/take the request/i);
+    expect(String(out.fix)).toMatch(/file it now/i);
   });
 
   it('the ambiguous branch is an identity question, not a miss', async () => {
@@ -120,7 +121,8 @@ describe('the count is the CALL\'s', () => {
       const out = await lookup({ ...identity, call_sid: 'unknown' });
       expect(out.lookup_misses).toBe(0);
       expect(String(out.fix ?? '')).not.toMatch(/Do NOT ask the caller/);
-      expect(String(out.message)).toMatch(/Ask for their name and date of birth/);
+      expect(String(out.message)).toBe(LOOKUP_UNSURE_SAY);
+      expect(String(out.fix ?? '')).toMatch(/ONCE more/);
     }
   });
 });

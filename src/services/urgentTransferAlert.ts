@@ -26,7 +26,8 @@ import type { EscalationDetails } from './escalationStore';
 import type { SyncAgentService, SyncAgentTicketParams } from './syncAgentService';
 import { AFTER_HOURS_DEPARTMENT_ID } from '../tools/afterHoursTaxonomy';
 import { preferredCallbackNumber } from './handoffPolicy';
-import { nameOrStandIn, STAND_IN_NAME_NOTE } from './standInName';
+import { nameOrStandIn, STAND_IN_FIRST_NAME, STAND_IN_LAST_NAME, STAND_IN_NAME_NOTE } from './standInName';
+import { normalizeDobParts } from '../tools/dobParts';
 
 export interface UrgentTransferSmsOptions {
   callerNumber?: string;
@@ -125,7 +126,7 @@ export function urgentFallbackTicketParams(input: {
   dialTarget?: string;
   escalationDetails?: Pick<
     EscalationDetails,
-    'reason' | 'symptomsSummary' | 'patientFirstName' | 'patientLastName' | 'callbackNumber'
+    'reason' | 'symptomsSummary' | 'patientFirstName' | 'patientLastName' | 'patientDob' | 'callbackNumber'
   >;
   callerId?: string | null;
   callSid?: string;
@@ -133,22 +134,56 @@ export function urgentFallbackTicketParams(input: {
 }): SyncAgentTicketParams {
   const d = input.escalationDetails;
   const formattedPhone = fallbackCallbackPhone(d?.callbackNumber, input.callerId);
+  const { first, last, standIn } = fallbackTicketName(d?.patientFirstName, d?.patientLastName);
   const descParts = fallbackDescriptionLines(input);
+  if (standIn) {
+    descParts.push(STAND_IN_NAME_NOTE);
+  }
+  if (d?.patientDob && !normalizeDobParts(d.patientDob)) {
+    descParts.push(`DOB as collected: ${d.patientDob}`);
+  }
+  const dob = d?.patientDob ? normalizeDobParts(d.patientDob) : null;
 
   return {
     departmentId: AFTER_HOURS_DEPARTMENT_ID,
     requestTypeId: ON_CALL_TRANSFER_REQUEST.requestTypeId,
     requestReasonId: ON_CALL_TRANSFER_REQUEST.requestReasonId,
-    patientFirstName: d?.patientFirstName || 'Unknown',
-    patientLastName: d?.patientLastName || 'Caller',
+    patientFirstName: first,
+    patientLastName: last,
     patientPhone: formattedPhone,
     description: descParts.join('\n'),
     priority: 'urgent',
+    ...(dob
+      ? {
+          patientBirthMonth: dob.month,
+          patientBirthDay: dob.day,
+          patientBirthYear: dob.year,
+        }
+      : {}),
     callData: {
       callSid: input.callSid,
       callerPhone: input.callerId || undefined,
       agentUsed: input.agentUsed,
     },
+  };
+}
+
+/**
+ * VA-76222: "Unknown" + "Caller" is the pair `/submit-ticket` refuses and the
+ * pair `/create-ticket` used to SAVE. A failed on-call transfer must never
+ * file that pair — especially when we already hold the ANI. The stand-in is
+ * the same one the connected-transfer record uses.
+ */
+function fallbackTicketName(
+  first: string | undefined,
+  last: string | undefined,
+): { first: string; last: string; standIn: boolean } {
+  const { fullName, standIn } = nameOrStandIn(first, last);
+  const parts = fullName.split(/\s+/).filter(Boolean);
+  return {
+    first: parts[0] || STAND_IN_FIRST_NAME,
+    last: parts.slice(1).join(' ') || STAND_IN_LAST_NAME,
+    standIn,
   };
 }
 

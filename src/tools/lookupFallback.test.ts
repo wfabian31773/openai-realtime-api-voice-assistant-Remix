@@ -127,6 +127,37 @@ describe('a mis-transcribed date of birth does not lose a known patient', () => 
     })) as Record<string, unknown>;
 
     expect(out.found).toBe(false);
-    expect(String(out.message)).toMatch(/No record found/i);
+    expect(String(out.message)).toMatch(/make sure the team has your details/i);
+  });
+
+  it('a chart-name correction never produces "not found"', async () => {
+    const { rememberVerifiedIdentity, resetVerifiedIdentities } = await import('./verifiedIdentity');
+    const { payloadSaysNotFound } = await import('./lookupUnsure');
+    resetVerifiedIdentities();
+    const sid = 'CA0000000000000000000000000000c621';
+    rememberVerifiedIdentity(sid, {
+      firstName: 'Dana',
+      lastName: 'Example',
+      dateOfBirth: '01/04/1958',
+      certain: true,
+    });
+    lookupSpy
+      .mockResolvedValueOnce(MISS as never) // spoken last name
+      .mockResolvedValueOnce(MISS as never) // phone retry
+      .mockResolvedValueOnce(FOUND as never); // chart name
+
+    const out = (await runTool('lookup_patient', {
+      first_name: 'Dana',
+      last_name: 'Exampel',
+      date_of_birth: '01/04/1958',
+      caller_phone: '+15550001111',
+      call_sid: sid,
+    })) as Record<string, unknown>;
+
+    expect(out.found).toBe(true);
+    expect(payloadSaysNotFound(out)).toBe(false);
+    const chartCall = lookupSpy.mock.calls[2][0] as Record<string, unknown>;
+    expect(chartCall.firstName).toBe('Dana');
+    expect(chartCall.lastName).toBe('Example');
   });
 });

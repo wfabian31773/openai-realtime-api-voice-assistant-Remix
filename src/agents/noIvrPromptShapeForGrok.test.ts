@@ -206,6 +206,9 @@ const RULINGS: Array<[string, RegExp]> = [
   // was told "I don't want to give you the wrong time for that office". The
   // hours are the practice's own and every other lane states them.
   ['office hours are answered with the times, never hedged', /including the office's own opening and closing time, exactly as written\s*\n?\s*there/],
+  ['one identity ask before an on-call transfer', /one quick ask for name and date of birth|collect the caller's name and DOB in at most one/i],
+  ['911-level skips the identity ask', /911-level emergency/],
+  ['never tell them they are not found when a schedule match exists', /never tell them they are not found/i],
   ['no "is that correct?"', /DO NOT ask "Is that correct\?"|Do not ask "Is that correct\?"/],
   ['the ticket number is not read out', /(DO NOT|Do not) read (out )?the ticket number/],
   ['the technical-issue line is a fixed sentence', /I'm sorry, I'm having a technical issue on my end right now\. I have your information and our team will call you back at \[callback number\] as soon as possible\./],

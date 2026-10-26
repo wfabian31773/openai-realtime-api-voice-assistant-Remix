@@ -11,6 +11,7 @@ import { buildPracticeKnowledgePrompt } from '../config/azulVisionKnowledge';
 import { getNextBusinessDayContext } from '../utils/timeAware';
 import { escalationDetailsMap } from '../services/escalationStore';
 import { markCallConcluded } from '../services/callConclusion';
+import { nameOrStandIn, STAND_IN_NAME_NOTE } from '../services/standInName';
 
 // ── Content-based routing (operator mandate 2026-07-25) ─────────────────
 // Tickets go to the APPROPRIATE department for what the call was about;
@@ -284,8 +285,12 @@ export async function createAfterHoursAgent(
             ? `+1${autoPhone.replace(/\D/g, '')}`
             : autoPhone.startsWith('+') ? autoPhone : `+${autoPhone.replace(/\D/g, '')}`;
 
+          const { fullName, standIn } = nameOrStandIn(
+            lastPatientInfo?.patient_name?.trim().split(/\s+/)[0],
+            lastPatientInfo?.patient_name?.trim().split(/\s+/).slice(1).join(' ') || undefined,
+          );
           await SyncAgentService.submitSimplifiedTicket({
-            patientFullName: lastPatientInfo?.patient_name || 'Unknown Caller',
+            patientFullName: fullName,
             patientDOB: 'Unknown',
             reasonForCalling: [
               'Request Type: Urgent/Emergency Transfer',
@@ -295,6 +300,7 @@ export async function createAfterHoursAgent(
             ].join('\n'),
             preferredContactMethod: 'phone',
             patientPhone: formattedAutoPhone,
+            ...(standIn ? { additionalDetails: STAND_IN_NAME_NOTE } : {}),
             priority: 'urgent',
             callSid: metadata?.callSid,
             callerPhone,
