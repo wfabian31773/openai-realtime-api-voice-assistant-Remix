@@ -344,36 +344,9 @@ describe('belt and braces: a request still routed away with NO name files to Med
   });
 });
 
-describe('a refusal the caller cannot fix says nothing is lost, and never "call back"', () => {
-  it('a 400 from the app carries a `fix` for the model and no instruction in `message`', async () => {
-    const api = await client();
-    vi.spyOn(api, 'createTicket').mockResolvedValue({
-      success: false,
-      statusCode: 400,
-      error: 'Missing required information: somethingElse',
-    } as never);
-    const r = (await runTool('file_records_ticket', {
-      first_name: 'Testpatient',
-      last_name: 'Example',
-      date_of_birth: '01/02/1950',
-      callback_number: '845-555-0142',
-      requester: THIRD_PARTIES[0].requester,
-      request_description: EXAM_REPORT,
-    })) as Out;
-
-    expect(r.success).toBe(false);
-    expect(r.retryable).toBe(false);
-    const fix = String(r.fix ?? '');
-    expect(fix).toMatch(/nothing is lost/i);
-    expect(fix).toMatch(/logged/i);
-    expect(fix).toMatch(/never tell (them|the caller) to call back/i);
-    expect(fix).toMatch(/not accepting|isn't accepting|system/i);
-    // v43: an instruction to the model never sits in the spoken channel.
-    expect(r.message).toBeUndefined();
-    // and the app's own text still never reaches a tool result
-    expect(JSON.stringify(r)).not.toContain('somethingElse');
-  });
-
+describe('a refusal the caller cannot fix, and a transport failure', () => {
+  // The refusal itself — the recovery ticket filed before the assurance — is
+  // driven in recordsRefusalIsLoggedFirst.test.ts, which controls the outbox.
   it('a transport failure (not a refusal) is unchanged: retryable, and the outbox is the safety net', async () => {
     const api = await client();
     vi.spyOn(api, 'createTicket').mockResolvedValueOnce({ success: false, error: 'upstream 503' } as never);

@@ -34,6 +34,8 @@ import { registerTool, missing, refuseDob, dobRefusalCopy, type ToolResult } fro
 import { str, isTwilioCallSid, normalizePhone } from './sharedPatientTools';
 import { decideDobEscape, dobStatusNote, dobEscapeMarker, type DobStatus } from './dobEscape';
 import { createTicketDurable, postFailureToolResult } from '../services/durableTicketFiling';
+import { SWEPT_TICKET_DESCRIPTION } from '../runtime/requestSweep';
+import { otherReasonFor } from './otherReason';
 import { loggableLookupError } from '../services/loggableTicketingError';
 import { verifiedDobFor, verifiedIdentityFor } from './verifiedIdentity';
 import {
@@ -210,26 +212,81 @@ function forgetNameHalves(callSid: string, scope: string): void {
 }
 
 /**
- * WHAT THE MODEL IS TOLD WHEN THE TICKETING APP REFUSES THE FILING — v117.
+ * WHAT HAPPENS WHEN THE TICKETING APP REFUSES THE FILING — v117.
  *
  * The refusal used to come back as `HTTP 400 (response text withheld …)` and
  * nothing else, so the model improvised a line for the caller — on the seven
  * records-lane calls of 2026-10-12..10-26, that the system was not accepting
  * the entry, and on CA63467308b45e3e7f9118cde1b67be7bf *"I'd recommend calling
  * back shortly so we can get it filed"*: standing instruction 10, *nobody is
- * told to call back*, broken by a sentence the code never wrote. The teardown
- * sweep, which files any records-lane call that said something and left no
- * ticket, then filed those requests as nameless department-16 stubs: the
- * request survived, and the caller had been told it had not.
+ * told to call back*, broken by a sentence the code never wrote.
  *
- * In `fix`, never in `message` (v43): it is an instruction to the model.
+ * THE REQUEST IS LOGGED BEFORE THE CALLER IS TOLD IT IS (Codex P2 on #376).
+ * The first version of this answer told the model "nothing is lost … will be
+ * logged" and persisted nothing: a terminal refusal bypasses the outbox, and
+ * the teardown sweep is no guarantee — it skips a call where
+ * `check_open_tickets` found an existing ticket, a call whose caller said
+ * only their name, and every lane but records. So a refusal now files a
+ * RECOVERY ticket in Medical Records first, in the shape the teardown sweep
+ * has filed nameless records requests in since 2026-09-27 (department 16, its
+ * own "Other - See Description", no name, the sweep's SMS-safe description,
+ * everything from the call on the staff side), on the same idempotency key, so
+ * the sweep and this collapse to one ticket. Only a recovery the app took —
+ * or the outbox holds — earns the assurance. If the recovery is refused too,
+ * the model is told the truth: nothing was logged.
+ *
+ * Both in `fix`, never in `message` (v43): they are instructions to the model.
  */
-export const REFUSED_FILING_FIX =
-  'The ticketing system turned this filing down, and nothing the caller can say will change ' +
-  'that, so do not ask them to repeat anything, do not call file_records_ticket again, and do ' +
-  'not tell them the system is not accepting it. Nothing is lost: what they asked for is kept ' +
-  'from this call and will be logged for the team, who will follow up. Tell the caller their ' +
-  'request has been taken and the team will follow up with them. Never tell them to call back.';
+export const RECOVERED_AFTER_REFUSAL_FIX =
+  'The ticketing system turned the first filing down, so this request was logged as a general ' +
+  'ticket for the Medical Records team instead, who will route it. Nothing the caller can say ' +
+  'would change the refusal, so do not ask them to repeat anything, do not call ' +
+  'file_records_ticket again, and do not tell them the system is not accepting it. No signing ' +
+  'form applies to it: do not offer a link, do not ask text or email, and do not call ' +
+  'send_records_form. Tell the caller their request has been taken and the team will follow up ' +
+  'with them. Never tell them to call back.';
+
+export const REFUSAL_NOT_LOGGED_FIX =
+  'The ticketing system turned this filing down, and the backup filing was not taken either, so ' +
+  'this request is NOT logged. Do not tell the caller it was taken or that the team will follow ' +
+  'up, do not call file_records_ticket again, and do not tell them the system is not accepting ' +
+  'it. Tell them plainly that you were not able to log the request on your end, and apologise. ' +
+  'Never tell them to call back.';
+
+/**
+ * The staff side of a recovery ticket. `callData.transcript`, never the
+ * description (an SMS body) — so the caller's name and what they asked for
+ * may sit here, where only staff read it, exactly as the teardown sweep's
+ * note carries the caller's words.
+ */
+export function recoveryAfterRefusalNote(r: {
+  statusCode?: number;
+  redirect?: { departmentName: string; requestReason: string } | null;
+  name?: string;
+  dob?: string;
+  requester?: string;
+  request: string;
+  phone: string;
+  callSid: string;
+  staffLines: ReadonlyArray<string | undefined>;
+}): string {
+  return [
+    `RECOVERED AFTER A REFUSAL — the ticketing app refused this records filing` +
+      `${r.statusCode ? ` (HTTP ${r.statusCode})` : ''}, so the request is held here and is not lost. ` +
+      'Route it to the right team if it is not a Medical Records request.',
+    r.redirect
+      ? `The request read as one for ${r.redirect.departmentName} (${r.redirect.requestReason}).`
+      : undefined,
+    ...r.staffLines,
+    r.name ? `Patient name given on the call: ${r.name}.` : undefined,
+    r.dob ? `Date of birth given on the call: ${r.dob}.` : undefined,
+    r.requester ? `Requester: ${r.requester}.` : undefined,
+    `What was asked, as the agent described it: ${r.request}`,
+    `Call back on ${r.phone}. Call reference ${r.callSid || 'not captured'}.`,
+  ]
+    .filter(Boolean)
+    .join('\n');
+}
 
 /**
  * The staff line on a request KEPT in Medical Records for want of a name.
@@ -1208,12 +1265,75 @@ registerTool({
 
     if (!res.success || !res.ticketNumber) {
       const failed = postFailureToolResult(res, 'file_records_ticket');
-      // A refusal the caller cannot fix — not a field the tool can ask for,
-      // and not an outage the outbox is holding — gets the model's
-      // instruction. See REFUSED_FILING_FIX.
-      return res.terminal && !('missingFields' in failed)
-        ? ({ ...failed, fix: REFUSED_FILING_FIX } as ToolResult)
-        : failed;
+      // A field the tool can ask for is a question, and an outage the outbox
+      // is holding is already persisted: both are answered as before.
+      if (!res.terminal || 'missingFields' in failed) return failed;
+
+      // A refusal the caller cannot fix. Log the request BEFORE anybody is
+      // told it is logged — see RECOVERED_AFTER_REFUSAL_FIX.
+      const other = otherReasonFor(MEDICAL_RECORDS_DEPARTMENT_ID)!;
+      const recovery = await createTicketDurable({
+        departmentId: MEDICAL_RECORDS_DEPARTMENT_ID,
+        requestTypeId: other.requestTypeId,
+        requestReasonId: other.requestReasonId,
+        patientPhone: normalizePhone(phone),
+        preferredContactMethod: 'phone',
+        description: SWEPT_TICKET_DESCRIPTION,
+        priority: 'high',
+        callData: {
+          agentUsed: 'records',
+          ...(callSid ? { callSid } : {}),
+          transcript: recoveryAfterRefusalNote({
+            statusCode: res.statusCode,
+            redirect,
+            name: `${first} ${last}`.trim() || undefined,
+            dob: parts ? `${parts.month}/${parts.day}/${parts.year}` : undefined,
+            requester: requesterRaw || cap.requesterType,
+            request: cleanDescription.value,
+            phone: normalizePhone(phone),
+            callSid,
+            staffLines: [keptNote, nameNote, dobStaffNote],
+          }),
+        },
+        // The same key as the refused POST and as the teardown sweep: the app
+        // stores a key only once a ticket exists, so the refusal left none,
+        // and the sweep collapses onto this ticket instead of opening another.
+        ...(isTwilioCallSid(callSid) ? { idempotencyKey: `call-${callSid}${scope}` } : {}),
+      });
+      const queued = (recovery as { queued?: boolean }).queued === true;
+      if (!(recovery.success && recovery.ticketNumber) && !queued) {
+        console.error(
+          `[records] ✗✗ the filing AND its recovery were both turned down — this request is NOT logged ` +
+            `(${callSid || 'no call reference'})`,
+        );
+        return { ...failed, fix: REFUSAL_NOT_LOGGED_FIX } as ToolResult;
+      }
+      console.warn(
+        `[records] filing refused (HTTP ${res.statusCode ?? '?'}) — recovered as ` +
+          `${recovery.ticketNumber ?? 'a queued ticket'} in Medical Records (${callSid || 'no call reference'})`,
+      );
+      forgetNameHalves(callSid, scope);
+      // A general ticket for a person to route, never offered a form.
+      noteCallFact(callSid, RECORDS_HELD_NO_FORM_FACT);
+      return {
+        success: true,
+        ...(recovery.ticketNumber
+          ? {
+              ticket_number: recovery.ticketNumber,
+              message:
+                `Filed as ${recovery.ticketNumber}. Read the ticket number back to the caller and say the ` +
+                'team will follow up. Do not promise a date.',
+            }
+          : {
+              filed_pending: true,
+              message:
+                'Their request has been recorded and our team will follow up. Say that. There is no ticket ' +
+                'number yet — do not read one back, do not invent one, and do not ask them to call back.',
+            }),
+        recovered_after_refusal: true,
+        form_applies: false,
+        fix: RECOVERED_AFTER_REFUSAL_FIX,
+      } as ToolResult;
     }
 
     // The request filed, so the halves it carried have done their job.

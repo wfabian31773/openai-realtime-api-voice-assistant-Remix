@@ -313,6 +313,11 @@ function summarizeResult(tool: string, resultJson: string): Record<string, unkno
     // `form_applies: false`, so "how often is a routed-away caller offered a
     // link" is a count, not a transcript scan. A boolean, no PHI.
     'form_applies',
+    // v117: a records filing the ticketing app refused, logged instead as a
+    // general Medical Records ticket BEFORE the caller was told it was taken
+    // (Codex P2 on #376). A boolean, no PHI — "how often does the app refuse
+    // a records filing outright" is a count, not a log search.
+    'recovered_after_refusal',
     /**
      * WHY escalate_to_human was refused (one of the gate's three codes) and
      * whether the refusal FILED the ticket (2026-09-29). Both PHI-free. Until
