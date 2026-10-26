@@ -252,6 +252,10 @@ describe('a third party who names a document AND asks to schedule is scheduling 
     ['we got the chart notes and need to schedule an appointment for the patient', 146],
     ['the visit report came through, please confirm my appointment for the patient', 149],
     ['we have the eye exam report, we need to cancel the appointment', 148],
+    // An ask in words SCHEDULING does not list: only the exam name fires, and
+    // it is not bound to the document, so the request is not held (head 48dde27).
+    ['we have the chart notes and need to book an eye exam', 146],
+    ['we have the chart notes and want to arrange a dilated exam', 146],
   ] as const) {
     it(`"${words}" reaches the HVA Hub (reason ${reason})`, async () => {
       const app = await fakeApp();
@@ -279,6 +283,22 @@ describe('a third party who names a document AND asks to schedule is scheduling 
     expect(scheduledOnlyByAnExamName('the eye exam report, and we need to reschedule')).toBe(false);
     expect(scheduledOnlyByAnExamName('please schedule an eye exam')).toBe(false);
     expect(scheduledOnlyByAnExamName('a copy of the chart')).toBe(false);
+  });
+
+  it('an exam name holds only when it is the document\'s subject', () => {
+    for (const bound of [
+      'need the records from her last eye exam',
+      'please fax the chart notes from the annual exam',
+      'a copy of the dilated exam',
+      'the eye exam notes from last month please',
+      'need the results of the most recent eye exam',
+    ]) expect(scheduledOnlyByAnExamName(bound), bound).toBe(true);
+    for (const loose of [
+      'we have the chart notes and need to book an eye exam',
+      'the report came in; the patient is due for an eye exam',
+      // bound once, loose once: the loose one is an ask
+      'we have the eye exam report and the patient wants an eye exam',
+    ]) expect(scheduledOnlyByAnExamName(loose), loose).toBe(false);
   });
 });
 

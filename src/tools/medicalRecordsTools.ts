@@ -280,6 +280,12 @@ export function recoveryAfterRefusalNote(r: {
   phone: string;
   callSid: string;
   staffLines: ReadonlyArray<string | undefined>;
+  /** What the caller already gave that the recovery payload does not carry. */
+  office?: string;
+  provider?: string;
+  email?: string;
+  deliverTo?: string;
+  dateRange?: string;
 }): string {
   return [
     `RECOVERED AFTER A REFUSAL — the ticketing app refused this records filing` +
@@ -293,6 +299,14 @@ export function recoveryAfterRefusalNote(r: {
     r.dob ? `Date of birth given on the call: ${r.dob}.` : undefined,
     r.requester ? `Requester: ${r.requester}.` : undefined,
     `What was asked, as the agent described it: ${r.request}`,
+    // Collected on the call and NOT on the recovery payload, which carries
+    // the sweep's shape only — so they ride here or nobody sees them (Codex
+    // P2 on #376, head 48dde27).
+    r.office ? `Office given on the call: ${r.office}.` : undefined,
+    r.provider ? `Provider given on the call: ${r.provider}.` : undefined,
+    r.email ? `Email given on the call: ${r.email}.` : undefined,
+    r.deliverTo ? `Send to: ${r.deliverTo}.` : undefined,
+    r.dateRange ? `Dates needed: ${r.dateRange}.` : undefined,
     `Call back on ${r.phone}. Call reference ${r.callSid || 'not captured'}.`,
   ]
     .filter(Boolean)
@@ -1326,6 +1340,11 @@ registerTool({
             phone: normalizePhone(phone),
             callSid,
             staffLines: [keptNote, nameNote, dobStaffNote],
+            office: cleanLocation || undefined,
+            provider: cleanProvider || undefined,
+            email: str(input.email) || undefined,
+            deliverTo: deliverTo || undefined,
+            dateRange: dateRange || undefined,
           }),
         },
         // The same key as the refused POST and as the teardown sweep: the app

@@ -319,7 +319,39 @@ export function scheduledOnlyByAnExamName(text: string): boolean {
   const t = fold(text);
   const names = new Set(EXAM_NAME_CUES.map(fold));
   const fired = SCHEDULING.flatMap((s) => s.cues).map(fold).filter((c) => t.includes(c));
-  return fired.length > 0 && fired.every((c) => names.has(c));
+  return fired.length > 0 && fired.every((c) => names.has(c)) && everyExamNameIsTheDocuments(t);
+}
+
+/**
+ * EVERY EXAM NAMED IS THE SUBJECT OF A DOCUMENT — Codex P2 on #376, head
+ * `48dde27`.
+ *
+ * An ask in words `SCHEDULING` does not list ("we have the chart notes and need
+ * to BOOK an eye exam") fired only an exam name, so the rule above read it as
+ * document-only. Adding the missing verbs would be one more list that can
+ * always be one verb short — the shape of every round so far on this hold. So
+ * the evidence is turned round: the hold needs each exam name to be BOUND to a
+ * document — "eye exam REPORT", "the records FROM her last eye exam", "a copy
+ * OF the dilated exam" — and anything phrased otherwise, an unknown verb
+ * included, falls back to the Hub, which is what this line did before v117.
+ * A miss here costs the corpus fix on an odd phrasing; it can no longer keep an
+ * appointment request out of the Hub.
+ */
+const BOUND_AFTER = /^\s+(?:reports?|notes?|records?|results?|summary|findings|documentation|informe|informes|notas|resultados)\b/;
+const BOUND_BEFORE =
+  /\b(?:reports?|notes?|records?|results?|charts?|summary|findings|documentation|copy|copies|informe|informes|notas|resultados|expediente|historial|copia|copias)\s+(?:from|of|for|on|de|del)\s+(?:(?:the|her|his|their|its|this|that|a|an|la|el|su|last|latest|recent|most|prior|previous|ultimo|ultima)\s+){0,3}$/;
+
+function everyExamNameIsTheDocuments(folded: string): boolean {
+  for (const name of EXAM_NAME_CUES.map(fold)) {
+    let at = folded.indexOf(name);
+    while (at !== -1) {
+      const before = folded.slice(0, at);
+      const after = folded.slice(at + name.length);
+      if (!BOUND_AFTER.test(after) && !BOUND_BEFORE.test(before)) return false;
+      at = folded.indexOf(name, at + name.length);
+    }
+  }
+  return true;
 }
 
 /**

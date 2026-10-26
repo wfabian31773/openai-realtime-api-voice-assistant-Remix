@@ -126,6 +126,27 @@ describe('a refusal the caller cannot fix is logged before anyone is told it is'
     expect(String(r.message)).not.toMatch(/general ticket|refus/i);
   });
 
+  it('what the caller gave beyond the request reaches the staff side of the recovery', async () => {
+    const { posts } = await app(UNASKABLE_400, FILED('VA-RECOVERED-6'));
+    await runTool('file_records_ticket', {
+      ...THIRD_PARTY,
+      location: 'Example Valley',
+      provider: 'Dr. Testdoctor',
+      email: 'records@example.com',
+      deliver_to: 'fax 845-555-0199',
+      date_range: 'the last two years',
+    });
+    const [, recovery] = posts();
+    const note = String((recovery.callData as Params).transcript);
+    expect(note).toContain('Example Valley');
+    expect(note).toContain('Testdoctor');
+    expect(note).toContain('records@example.com');
+    expect(note).toContain('fax 845-555-0199');
+    expect(note).toContain('the last two years');
+    // and still none of it in the SMS body
+    expect(String(recovery.description)).not.toMatch(/Example Valley|Testdoctor|example\.com/);
+  });
+
   it('a routed request the app refuses says on the staff line where it read as belonging', async () => {
     const { posts } = await app(UNASKABLE_400, FILED('VA-RECOVERED-2'));
     const r = (await runTool('file_records_ticket', {
