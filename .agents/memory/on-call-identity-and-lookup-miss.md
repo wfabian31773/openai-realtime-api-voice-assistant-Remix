@@ -42,8 +42,9 @@ patient — not found in system".
 
 **Fix.** When the spoken trio misses and the spoken first name agrees with
 the chart, re-run with the chart name and the spoken date of birth — never
-the previously held one. Only a unique `name_and_dob` hit is accepted; a
-name-only fallthrough is the previous person, not this caller. If a
+the previously held one. Only a unique `name_and_dob` hit is accepted on
+both `lookup_schedule` and `lookup_patient`; a name-only or ambiguous
+fallthrough is another person, not this caller. If a
 visit-history match still cannot be confirmed, the spoken line is "Let me
 make sure the team has your details." Never tell the caller they are not
 found when a schedule match exists.

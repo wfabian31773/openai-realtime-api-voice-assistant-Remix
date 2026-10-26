@@ -1411,7 +1411,11 @@ is not an identity. Confirm the name and date of birth, then call again with the
                 chart.last,
                 isoDob,
               );
-              if (corrected.patientFound) {
+              if (
+                corrected.patientFound &&
+                corrected.matchedBy === "name_and_dob" &&
+                corrected.identity?.unique !== false
+              ) {
                 result = corrected;
               }
             }

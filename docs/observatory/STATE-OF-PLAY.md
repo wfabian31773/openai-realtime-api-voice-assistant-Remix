@@ -1506,6 +1506,7 @@ whatever was captured.
 That is a string match on the spoken name. The same call already held a
 phone-loaded schedule with the chart name and the visits. The tool answered
 `{ found: false }`; the prompt told the model to say "not found in system".
-Fix: re-run with the chart name when the spoken first name agrees; if still
-unsure, say "Let me make sure the team has your details." Never tell the
-caller they are not found when visit history exists.
+Fix: re-run with the chart name when the spoken first name agrees; accept
+only a unique `name_and_dob` hit. If still unsure, say "Let me make sure
+the team has your details." Never tell the caller they are not found when
+visit history exists.

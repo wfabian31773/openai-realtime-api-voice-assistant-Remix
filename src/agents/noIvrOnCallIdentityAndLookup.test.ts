@@ -289,7 +289,11 @@ describe("a corrected schedule match never produces not-found", () => {
         pastAppointments: [],
         totalAppointmentsFound: 0,
       } as any)
-      .mockResolvedValueOnce(CHART as any);
+      .mockResolvedValueOnce({
+        ...CHART,
+        matchedBy: "name_and_dob",
+        identity: { unique: true, candidateCount: 1, candidates: [] },
+      } as any);
 
     const agent = await createNoIvrAgent(async () => {}, {
       callId: "call-lookup",
@@ -311,6 +315,39 @@ describe("a corrected schedule match never produces not-found", () => {
     expect(r.lastProviderSeen).toBe("Dr. Example");
     expect(payloadSaysNotFound(r)).toBe(false);
     expect(JSON.stringify(r)).not.toMatch(/not found/i);
+  });
+
+  it("an ambiguous chart-name retry is not treated as found", async () => {
+    h.lookupByPhone.mockResolvedValue(CHART as any);
+    h.lookupByNameAndDOB
+      .mockResolvedValueOnce({
+        patientFound: false,
+        upcomingAppointments: [],
+        pastAppointments: [],
+        totalAppointmentsFound: 0,
+      } as any)
+      .mockResolvedValueOnce({
+        ...CHART,
+        matchedBy: "name_and_dob",
+        identity: { unique: false, candidateCount: 2, candidates: [] },
+      } as any);
+
+    const agent = await createNoIvrAgent(async () => {}, {
+      callId: "call-ambiguous",
+      callSid: freshSid(),
+      callerPhone: ANI,
+    } as any);
+
+    const r = await call(agent, "lookup_schedule", {
+      first_name: "Dana",
+      last_name: "Exampel",
+      date_of_birth: "01/04/1958",
+    });
+
+    expect(r.found).toBe(false);
+    expect(r.visit_history_on_file).toBe(true);
+    expect(r.message).toBe(LOOKUP_UNSURE_SAY);
+    expect(payloadSaysNotFound(r)).toBe(false);
   });
 
   it("when the chart still cannot confirm, the spoken line is the unsure wording", async () => {
