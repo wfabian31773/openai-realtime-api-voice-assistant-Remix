@@ -18,9 +18,12 @@ it. The ANI was not stamped on `callbackNumber` unless the model passed one.
 **Fix.** Before an on-call transfer, collect name and DOB in at most one
 quick prompt (`decideOnCallIdentityAsk`). A 911-level emergency (chemical,
 trauma, sudden vision loss, bleeding) or a clinician goes straight through.
-If the caller cannot or will not give details, transfer anyway. The calling
-number is always the callback. A failed transfer's ticket uses `nameOrStandIn`
-(never Unknown Caller) and carries whatever identity was captured.
+If the caller cannot or will not give details, transfer anyway. Both first
+and last name are required before skipping the ask. A batched sibling of
+the ask (same 2s window as records) repeats the ask and does not dial. The
+calling number (ANI) is always the callback. A failed transfer's ticket uses
+`nameOrStandIn` (never Unknown Caller) and carries whatever identity was
+captured.
 
 ## VA-76221 — "not found in system" while visit history matched
 

@@ -26,7 +26,7 @@
  * like a duplicate.
  */
 
-import { gateRefusalsSoFar, noteGateRefusal } from "../tools/gateAttempts";
+import { gateRefusalAgeMs, gateRefusalsSoFar, noteGateRefusal } from "../tools/gateAttempts";
 import { nameOrStandIn } from "./standInName";
 
 export const ON_CALL_IDENTITY_FIELD = "on_call_identity";
@@ -72,9 +72,15 @@ export function hasUsableOnCallName(
   first: string | undefined,
   last: string | undefined,
 ): boolean {
+  const f = (first ?? "").trim();
+  const l = (last ?? "").trim();
+  if (!f || !l) return false;
   const { standIn } = nameOrStandIn(first, last);
-  return !standIn && Boolean((first ?? "").trim());
+  return !standIn;
 }
+
+/** Same window records uses: two tool calls in one response, not a later turn. */
+const ASK_BATCH_WINDOW_MS = 2_000;
 
 export function hasUsableOnCallDob(dob: string | undefined): boolean {
   const t = (dob ?? "").trim();
@@ -110,6 +116,15 @@ export function decideOnCallIdentityAsk(input: {
     return { transferNow: true, skipReason: "have_identity" };
   }
   if (gateRefusalsSoFar(input.callSid, "escalate_to_human", ON_CALL_IDENTITY_FIELD) >= 1) {
+    /**
+     * A refusal noted this recently is a batched sibling in the same model
+     * turn, not a later turn the caller has answered (Codex P1, same shape
+     * as `ASK_BATCH_WINDOW_MS` on records). Repeat the ask; do not dial.
+     */
+    const age = gateRefusalAgeMs(input.callSid, "escalate_to_human", ON_CALL_IDENTITY_FIELD);
+    if (age !== undefined && age < ASK_BATCH_WINDOW_MS) {
+      return { transferNow: false, ask: ON_CALL_IDENTITY_ASK };
+    }
     return { transferNow: true, skipReason: "already_asked" };
   }
   noteGateRefusal(input.callSid, "escalate_to_human", ON_CALL_IDENTITY_FIELD);
@@ -117,15 +132,15 @@ export function decideOnCallIdentityAsk(input: {
 }
 
 /**
- * The callback that rides on the transfer: what they gave, else the ANI.
- * A failed transfer's ticket must never lose the number they are calling from.
+ * The callback that rides on the transfer: the ANI, always, when we have it.
+ * A model-supplied number is only used when there is no calling number.
  */
 export function onCallCallbackNumber(
   collected: string | undefined,
   ani: string | undefined,
 ): string | undefined {
-  const given = (collected ?? "").trim();
-  if (given) return given;
   const from = (ani ?? "").trim();
-  return from || undefined;
+  if (from) return from;
+  const given = (collected ?? "").trim();
+  return given || undefined;
 }

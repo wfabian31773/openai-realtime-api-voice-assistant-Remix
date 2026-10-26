@@ -209,15 +209,38 @@ describe("a caller who declines details is still transferred", () => {
       callerPhone: ANI,
     } as any);
 
-    const ask = await call(agent, "escalate_to_human", FLASHES);
-    expect(ask.success).toBe(false);
-    expect(ask.need_identity).toBe(true);
-    expect(String(ask.message)).toMatch(/Ask ONCE/);
-    expect(handoff).not.toHaveBeenCalled();
+    vi.useFakeTimers();
+    try {
+      const ask = await call(agent, "escalate_to_human", FLASHES);
+      expect(ask.success).toBe(false);
+      expect(ask.need_identity).toBe(true);
+      expect(String(ask.message)).toMatch(/Ask ONCE/);
+      expect(handoff).not.toHaveBeenCalled();
 
-    const again = await call(agent, "escalate_to_human", FLASHES);
-    expect(again.success).toBe(true);
-    expect(handoff).toHaveBeenCalledTimes(1);
+      vi.advanceTimersByTime(2_000);
+
+      const again = await call(agent, "escalate_to_human", FLASHES);
+      expect(again.success).toBe(true);
+      expect(handoff).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a batched sibling of the identity ask does not dial", async () => {
+    const callSid = freshSid();
+    const handoff = vi.fn(async () => {});
+    const agent = await createNoIvrAgent(handoff, {
+      callId: `call-${callSid}`,
+      callSid,
+      callerPhone: ANI,
+    } as any);
+
+    const first = await call(agent, "escalate_to_human", FLASHES);
+    const sibling = await call(agent, "escalate_to_human", FLASHES);
+    expect(first.need_identity).toBe(true);
+    expect(sibling.need_identity).toBe(true);
+    expect(handoff).not.toHaveBeenCalled();
   });
 
   it("a 911-level emergency never waits on the ask", async () => {

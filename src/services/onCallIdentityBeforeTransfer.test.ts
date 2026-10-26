@@ -8,7 +8,7 @@
  *
  * Synthetic callers only.
  */
-import { describe, expect, it, beforeEach } from "vitest";
+import { describe, expect, it, beforeEach, vi } from "vitest";
 import { resetGateAttempts } from "../tools/gateAttempts";
 import {
   decideOnCallIdentityAsk,
@@ -79,20 +79,34 @@ describe("decideOnCallIdentityAsk", () => {
     expect(d).toEqual({ transferNow: true, skipReason: "have_identity" });
   });
 
-  it("otherwise asks once, then transfers on the next call", () => {
-    const first = decideOnCallIdentityAsk(flashes);
-    expect(first).toEqual({ transferNow: false, ask: ON_CALL_IDENTITY_ASK });
-    const second = decideOnCallIdentityAsk(flashes);
-    expect(second).toEqual({ transferNow: true, skipReason: "already_asked" });
+  it("otherwise asks once, then transfers on a later turn — not a batched sibling", () => {
+    vi.useFakeTimers();
+    try {
+      const first = decideOnCallIdentityAsk(flashes);
+      expect(first).toEqual({ transferNow: false, ask: ON_CALL_IDENTITY_ASK });
+      const sibling = decideOnCallIdentityAsk(flashes);
+      expect(sibling).toEqual({ transferNow: false, ask: ON_CALL_IDENTITY_ASK });
+      vi.advanceTimersByTime(2_000);
+      const later = decideOnCallIdentityAsk(flashes);
+      expect(later).toEqual({ transferNow: true, skipReason: "already_asked" });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a first name alone is not identity — still asks", () => {
+    const d = decideOnCallIdentityAsk({ ...flashes, firstName: "Dana", dob: "01/04/1958" });
+    expect(d).toEqual({ transferNow: false, ask: ON_CALL_IDENTITY_ASK });
   });
 });
 
-describe("the ANI is the callback when they gave none", () => {
-  it("keeps what they gave", () => {
-    expect(onCallCallbackNumber("+15551112222", "+15551234567")).toBe("+15551112222");
+describe("the ANI is the authoritative callback", () => {
+  it("keeps the calling number even when the model supplied another", () => {
+    expect(onCallCallbackNumber("+15551112222", "+15551234567")).toBe("+15551234567");
   });
 
-  it("falls back to the calling number", () => {
+  it("uses what they gave only when there is no ANI", () => {
+    expect(onCallCallbackNumber("+15551112222", undefined)).toBe("+15551112222");
     expect(onCallCallbackNumber(undefined, "+15551234567")).toBe("+15551234567");
     expect(onCallCallbackNumber("  ", "+15551234567")).toBe("+15551234567");
   });
@@ -102,6 +116,7 @@ describe("usable identity", () => {
   it("rejects the placeholder pair the app used to save", () => {
     expect(hasUsableOnCallName("Unknown", "Caller")).toBe(false);
     expect(hasUsableOnCallName("Dana", "Example")).toBe(true);
+    expect(hasUsableOnCallName("Dana", undefined)).toBe(false);
     expect(hasUsableOnCallDob("Unknown")).toBe(false);
     expect(hasUsableOnCallDob("01/04/1958")).toBe(true);
   });
