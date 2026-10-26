@@ -239,6 +239,7 @@ describe('a third party\'s ordinary "note", "report" or "recorded line" is not a
       "her medical record from the last visit",
       'we need the office notes and the visit report',
       'necesitamos el expediente del paciente',
+      'please send notes from her last visit',
     ]) {
       expect(namesADocument(doc), doc).toBe(true);
     }
@@ -288,8 +289,11 @@ describe('the guard: a genuine scheduling request on the records line still reac
       date_of_birth: '01/02/1950',
       callback_number: '845-555-0142',
       requester: 'I am the patient',
-      request_description: 'I got the note you sent and I need to reschedule my appointment',
+      // A phrase `namesADocument` DOES read as a document, so only the
+      // third-party condition can be what sends this to the Hub.
+      request_description: 'I got the visit notes you sent and I need to reschedule my appointment',
     })) as Out;
+    expect(namesADocument('I got the visit notes you sent and I need to reschedule my appointment')).toBe(true);
     expect(r.success, JSON.stringify(r)).toBe(true);
     expect(app.lastParams().departmentId).toBe(HVA_HUB);
   });
