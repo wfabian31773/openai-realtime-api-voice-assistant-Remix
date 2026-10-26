@@ -295,6 +295,34 @@ export function namesADocument(text: string): boolean {
 }
 
 /**
+ * The `SCHEDULING` cues that are an exam's NAME, not an ask to book one — v117,
+ * Codex P2 on #376 (head `8e11d5e`).
+ *
+ * The defect `file_records_ticket` holds against is exactly one of these firing
+ * on a document's own name: "the most recent EYE EXAM report" matched reason
+ * 146 on `'eye exam'` with nothing in it asking for an appointment. A caller
+ * who ALSO asks to book, move, cancel or confirm ("we received the eye exam
+ * report and need to reschedule the patient") is making a scheduling request,
+ * and every other `SCHEDULING` cue is that kind of ask. So the hold fires only
+ * when an exam name was the whole of the scheduling signal.
+ *
+ * A subset of reason 146's cues, asserted by a test so it cannot drift from
+ * the list `detectCrossQueue` reads; the list itself is unchanged.
+ */
+export const EXAM_NAME_CUES: readonly string[] = [
+  'eye exam', 'new patient exam', 'check-up', 'checkup', 'annual exam', 'yearly exam',
+  'routine exam', 'vision exam', 'dilated exam',
+  'examen de la vista', 'examen de ojos', 'revision general', 'revisión general',
+];
+
+export function scheduledOnlyByAnExamName(text: string): boolean {
+  const t = fold(text);
+  const names = new Set(EXAM_NAME_CUES.map(fold));
+  const fired = SCHEDULING.flatMap((s) => s.cues).map(fold).filter((c) => t.includes(c));
+  return fired.length > 0 && fired.every((c) => names.has(c));
+}
+
+/**
  * `hit`, but the cue has to stand as a WHOLE WORD — Codex P2 round 2, PR #298.
  *
  * `hit` is a substring test, which is right for `detectCrossQueue`: several of

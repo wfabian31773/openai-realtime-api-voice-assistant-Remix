@@ -661,7 +661,7 @@ registerTool({
     // offered a records form either. Decided HERE, before the channel ask,
     // on the same words the redirect below reads, so the one question this
     // tool adds is never put to somebody who rang about an appointment.
-    const { detectCrossQueue, namesADocument } = await import('./queueRouting');
+    const { detectCrossQueue, namesADocument, scheduledOnlyByAnExamName } = await import('./queueRouting');
     const crossQueue = detectCrossQueue(description, MEDICAL_RECORDS_DEPARTMENT_ID);
     /**
      * A THIRD PARTY ASKING FOR A PATIENT'S RECORDS OR REPORT IS NOT BOOKING
@@ -695,9 +695,18 @@ registerTool({
      * first; read here, ahead of scheduling, it kept "please note the patient
      * needs to reschedule", "calling to report that the patient needs an eye
      * exam" and "calling on a recorded line" out of the Hub.
+     *
+     * AND ONLY WHEN THE EXAM'S NAME WAS THE WHOLE SCHEDULING SIGNAL (Codex P2
+     * on #376, head `8e11d5e`). A third party who mentions a document and
+     * also asks to book, move, cancel or confirm — "we received the eye exam
+     * report and need to reschedule the patient" — is scheduling, and goes to
+     * the Hub as it always has. See `EXAM_NAME_CUES`.
      */
     const thirdPartyRecordsHold =
-      crossQueue !== null && cap.pathway !== 'roa_patient' && namesADocument(description);
+      crossQueue !== null &&
+      cap.pathway !== 'roa_patient' &&
+      namesADocument(description) &&
+      scheduledOnlyByAnExamName(description);
     if (thirdPartyRecordsHold) {
       console.info(
         `[records] a third party's records request held in Medical Records against the ` +

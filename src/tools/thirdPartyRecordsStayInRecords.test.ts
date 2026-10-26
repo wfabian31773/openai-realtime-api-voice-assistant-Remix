@@ -40,7 +40,7 @@ import { runTool } from './registry';
 import './sharedPatientTools';
 import './medicalRecordsTools';
 import { NAME_NOT_CAPTURED_NOTE } from './medicalRecordsTools';
-import { namesADocument } from './queueRouting';
+import { namesADocument, scheduledOnlyByAnExamName, EXAM_NAME_CUES, SCHEDULING } from './queueRouting';
 import { resetGateAttempts } from './gateAttempts';
 import { resetVerifiedIdentities } from './verifiedIdentity';
 
@@ -243,6 +243,42 @@ describe('a third party\'s ordinary "note", "report" or "recorded line" is not a
     ]) {
       expect(namesADocument(doc), doc).toBe(true);
     }
+  });
+});
+
+describe('a third party who names a document AND asks to schedule is scheduling (Codex P2 on #376)', () => {
+  for (const [words, reason] of [
+    ["we received the eye exam report and need to reschedule the patient's appointment", 147],
+    ['we got the chart notes and need to schedule an appointment for the patient', 146],
+    ['the visit report came through, please confirm my appointment for the patient', 149],
+    ['we have the eye exam report, we need to cancel the appointment', 148],
+  ] as const) {
+    it(`"${words}" reaches the HVA Hub (reason ${reason})`, async () => {
+      const app = await fakeApp();
+      const r = (await runTool('file_records_ticket', {
+        ...NAMELESS_THIRD_PARTY,
+        first_name: 'Testpatient',
+        last_name: 'Example',
+        requester: THIRD_PARTIES[0].requester,
+        request_description: words,
+      })) as Out;
+      expect(r.success, JSON.stringify(r)).toBe(true);
+      expect(app.lastParams().departmentId, words).toBe(HVA_HUB);
+      expect(app.lastParams().requestReasonId, words).toBe(reason);
+    });
+  }
+
+  it('the exam names are reason 146 cues, so the two lists cannot drift apart', () => {
+    const newAppointment = SCHEDULING.find((s) => s.reasonId === 146)!;
+    for (const name of EXAM_NAME_CUES) expect(newAppointment.cues, name).toContain(name);
+  });
+
+  it('an exam name alone is not an ask; an ask beside it is', () => {
+    expect(scheduledOnlyByAnExamName(EXAM_REPORT)).toBe(true);
+    expect(scheduledOnlyByAnExamName('necesitamos el informe del examen de la vista')).toBe(true);
+    expect(scheduledOnlyByAnExamName('the eye exam report, and we need to reschedule')).toBe(false);
+    expect(scheduledOnlyByAnExamName('please schedule an eye exam')).toBe(false);
+    expect(scheduledOnlyByAnExamName('a copy of the chart')).toBe(false);
   });
 });
 
