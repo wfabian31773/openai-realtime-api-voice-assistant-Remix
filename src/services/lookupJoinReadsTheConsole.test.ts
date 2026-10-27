@@ -66,6 +66,32 @@ beforeEach(() => {
 afterEach(() => vi.restoreAllMocks());
 
 describe('lookupByPersonId', () => {
+  it.each([
+    ['North Valley Eye', 'Mission Hills'],
+    ['Magan', 'Covina'],
+  ])('canonicalizes Hub fallback %s in history and patient context', async (retired, current) => {
+    fetchFactsForPerson.mockRejectedValue(new Error('console unavailable'));
+    hubLimit.mockResolvedValue([
+      consoleRow({ officeLocation: retired }),
+      consoleRow({ appointmentDate: '2001-01-01', officeLocation: retired }),
+    ]);
+    const { scheduleLookupService } = await import('./scheduleLookupService');
+    const ctx = await scheduleLookupService.lookupByPersonId(PERSON, 'phone');
+    expect(hubLimit).toHaveBeenCalled();
+    expect(ctx.upcomingAppointments[0]?.location).toBe(current);
+    expect(ctx.pastAppointments[0]?.location).toBe(current);
+    expect(ctx.lastLocationSeen).toBe(current);
+    expect(ctx.patientData?.preferredLocation).toBe(current);
+  });
+
+  it('canonicalizes the preferred office even with no attended visits in the Hub', async () => {
+    configured = false;
+    hubLimit.mockResolvedValue([consoleRow({ officeLocation: 'North Valley Eye' })]);
+    const { scheduleLookupService } = await import('./scheduleLookupService');
+    const ctx = await scheduleLookupService.lookupByPersonId(PERSON, 'phone');
+    expect(ctx.patientData?.preferredLocation).toBe('Mission Hills');
+  });
+
   it('reads the Console when the pool is configured, and the Hub copy is never asked', async () => {
     fetchFactsForPerson.mockResolvedValue([
       consoleRow(),
@@ -135,6 +161,16 @@ describe('lookupByPersonId', () => {
 });
 
 describe('appointmentsForPerson', () => {
+  it('canonicalizes Hub appointment answers too', async () => {
+    configured = false;
+    hubLimit.mockResolvedValueOnce([consoleRow({ officeLocation: 'North Valley Eye' })])
+      .mockResolvedValueOnce([consoleRow({ officeLocation: 'Magan' })]);
+    const { appointmentsForPerson } = await import('./appointmentAnswers');
+    const answer = await appointmentsForPerson(PERSON);
+    expect(answer?.last?.office).toBe('Mission Hills');
+    expect(answer?.next?.office).toBe('Covina');
+  });
+
   it('answers last and next from the Console rows, excluding Removed, when configured', async () => {
     const today = new Date().toISOString().slice(0, 10);
     fetchFactsForPerson.mockResolvedValue([
