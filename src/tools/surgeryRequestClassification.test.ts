@@ -210,6 +210,15 @@ it('an unexplained callback cannot acquire a surgery date from a stale logistics
   expect(create.mock.calls[0][0].description).not.toContain('Surgery date');
 });
 
+it('still routes an explicit exam appointment when a symptom is named', async () => {
+  const request_description = 'I need to schedule an eye exam because my vision is blurry';
+  expect(detectCrossQueue(request_description, 2)).toMatchObject({
+    departmentId: 9, requestTypeId: 32, requestReasonId: 146,
+  });
+  const result = await runTool('classify_surgery_request', { request_description });
+  expect(result).toMatchObject({ department_id: 9, request_type_id: 32, request_reason_id: 146 });
+});
+
 it.each([
   'I have severe eye pain when I wear my glasses.',
   'My eye is red after taking out my contacts.',

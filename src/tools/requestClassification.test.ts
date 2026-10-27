@@ -70,10 +70,17 @@ describe('review regressions: preserve clinical and procedure context', () => {
       .toEqual({ departmentId: 9, requestTypeId: 32, requestReasonId: 147 });
     expect(classifyNonSurgicalRequest('Will insurance cover my eye exam?'))
       .toEqual({ departmentId: 9, requestTypeId: 37, requestReasonId: 178 });
+    expect(classifyNonSurgicalRequest('My insurance changed. Will it cover my eye exam?'))
+      .toEqual({ departmentId: 9, requestTypeId: 37, requestReasonId: 178 });
   });
 
   it('does not let results override booking an exam', () => {
     expect(classifyNonSurgicalRequest('I need to schedule an eye exam to discuss my test results'))
+      .toEqual({ departmentId: 9, requestTypeId: 32, requestReasonId: 146 });
+  });
+
+  it('still routes an explicit exam appointment when a symptom is named', () => {
+    expect(classifyNonSurgicalRequest('I need to schedule an eye exam because my vision is blurry'))
       .toEqual({ departmentId: 9, requestTypeId: 32, requestReasonId: 146 });
   });
 

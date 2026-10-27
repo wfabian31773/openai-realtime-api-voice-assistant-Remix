@@ -56,7 +56,9 @@ function hubSchedulingReason(t: string): number | null {
   }
   const cancel = /\b(?:cancel\w*|cannot make|can't make)\b/.test(t);
   const cancelNegated = /\b(?:not|no|do not|don't)\s+(?:to\s+)?(?:cancel\w*)\b/.test(t);
-  const reschedule = /\b(?:reschedul\w*|reprogram\w*|cambiar|mover|move|chang\w*|different day for my appointment)\b/.test(t);
+  // "change" only when it refers to the appointment, not "insurance changed".
+  const reschedule = /\b(?:reschedul\w*|reprogram\w*|cambiar|mover|move|different day for my appointment)\b/.test(t)
+    || /\bchang\w*\s+(?:my |the )?(?:appointment|cita|exam|date|time)\b/.test(t);
   if (cancel && !cancelNegated) return 148;
   if (reschedule) return 147;
   if (/\b(?:confirm\w*|what time|is my appointment)\b/.test(t)) return 149;
@@ -78,7 +80,7 @@ export function classifyNonSurgicalRequest(text: string): RequestClassification 
   const t = requestContent(text);
   // Deliberately leave records handling to its existing owner (#8).
   if (/\b(?:medical records?|records? request|copy of|copies of)\b/.test(t)) return null;
-  if (isSurgeryRequest(text) || /\bsurgeon\b/.test(t) || hasClinicalComplaint(text)) return null;
+  if (isSurgeryRequest(text) || /\bsurgeon\b/.test(t)) return null;
   const result = (departmentId: number, requestTypeId: number, requestReasonId: number) =>
     ({ departmentId, requestTypeId, requestReasonId });
   const contacts = /\b(?:contacts|contact[- ]lens(?:es)?|cl|cls|lentes de contacto)\b/.test(t);
@@ -86,8 +88,10 @@ export function classifyNonSurgicalRequest(text: string): RequestClassification 
   // Medication authorizations stay with the existing medication logic.
   const medication = /\b(?:medication|medicine|drops?|pharmacy|medicamento|gotas|farmacia)\b/.test(t);
   const scheduled = hubSchedulingReason(t);
-  // An incidental insurance mention does not beat an explicit appointment change.
+  // An incidental insurance mention or a named symptom does not beat an
+  // explicit appointment change. Eyewear still stays off a clinical complaint.
   if (exam && scheduled && !medication) return result(9, 32, scheduled);
+  if (hasClinicalComplaint(text)) return null;
   if (!medication && /\b(?:insurance|coverage|eligibility|benefits|deductible|copay|seguro|cobertura|aseguranza)\b/.test(t)) {
     const reason = /\b(?:prior auth|authorization|autorizacion)\b/.test(t) ? 180
       : /\b(?:benefits|deductible|copay)\b/.test(t) ? 179
