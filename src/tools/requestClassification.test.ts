@@ -28,9 +28,21 @@ describe('review regressions: preserve clinical and procedure context', () => {
     'Will insurance cover my cataract procedure?',
     'Will insurance cover my cataract removal?',
     'Will insurance cover my procedure?',
+    'Will insurance cover my vitrectomy?',
+    'Will insurance cover my blepharoplasty?',
   ])('preserves surgical insurance context: %s', (text) => {
     expect(isSurgeryRequest(text)).toBe(true);
     expect(classifyNonSurgicalRequest(text)).toBeNull();
+  });
+
+  it('treats every taxonomy-named operation as surgical', async () => {
+    const { SURGERY_CLASSIFICATIONS } = await import('./surgeryTaxonomy');
+    const named = ['vitrectomy', 'blepharoplasty', 'chalazion', 'ectropion', 'ptosis', 'macular hole'];
+    for (const name of named) {
+      expect(SURGERY_CLASSIFICATIONS.some((c) => c.cues.includes(name)), name).toBe(true);
+      expect(isSurgeryRequest(`Will insurance cover my ${name}?`)).toBe(true);
+      expect(classifyNonSurgicalRequest(`Please call about my ${name}`)).toBeNull();
+    }
   });
 
   it.each([

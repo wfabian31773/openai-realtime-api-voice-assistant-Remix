@@ -5,6 +5,8 @@
  * Ambiguous surgery requests retain the existing surgery workflow. No records
  * requests or records-line decisions are classified here.
  */
+import { classifySurgery } from './surgeryTaxonomy';
+
 export interface RequestClassification {
   departmentId: number;
   requestTypeId: number;
@@ -28,7 +30,16 @@ function requestContent(text: string): string {
 }
 
 export function isSurgeryRequest(text: string): boolean {
-  return /\b(?:surgery|surgical|lasik|prk|operation|cataracts?|procedures?|sx|pre[- ]?op|post[- ]?op|cirugia|operacion)\b/.test(requestContent(text));
+  const t = requestContent(text);
+  // Generic operation words stay, so "cataract procedure" / "sx" still count
+  // when the taxonomy box needs a longer scheduling phrase.
+  if (/\b(?:surgery|surgical|lasik|prk|operation|cataracts?|procedures?|sx|pre[- ]?op|post[- ]?op|cirugia|operacion)\b/.test(t)) {
+    return true;
+  }
+  // Named operations come from the procedure boxes, not a second list. A new
+  // row in SURGERY_CLASSIFICATIONS (vitrectomy, blepharoplasty, …) counts
+  // here. Logistics and the catch-all do not — those are not operations.
+  return classifySurgery(t) !== null;
 }
 
 function isResultsRequest(t: string): boolean {
