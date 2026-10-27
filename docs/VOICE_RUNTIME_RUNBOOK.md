@@ -528,8 +528,16 @@ synthetic fixtures in the cited tests when checking this branch.
   `requires_callback: false`, it returns `ticketCreated: false` without
   entering intake gates; the tool direction must preserve that result and
   must not say the request was submitted or promise a callback. A false or
-  omitted callback flag alone still files the request. In particular, the
-  existing category default for confirmations must not discard a confirmation
+  omitted callback flag alone still files the request. The normal answered-only
+  path calls `record_answered_question` after asking if
+  anything else is needed, once no staff work remains. The timeline records
+  only boolean outcome flags. The missing-ticket warning and both ticket
+  graders recognize this disposition on no-IVR calls; any failed filing or
+  escalation, or later tool activity, leaves the call eligible for the warning
+  and normal grading.
+  This marker relies on the agent, and cannot prove that an unrecorded later
+  request did not occur. The existing category default for confirmations must
+  not discard a confirmation
   staff still need to answer. Filed requests without a phone callback keep
   their `[NO CALLBACK NEEDED]` tag and do not promise a phone call.
 - **Clinic hours (#10):** `AZUL_VISION_LOCATIONS[].hours` is the source for

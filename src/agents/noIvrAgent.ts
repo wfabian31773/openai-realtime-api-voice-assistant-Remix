@@ -782,7 +782,9 @@ IF caller just says "hi": Ask "What can I help you with?"
 Answer directly, ask "Anything else?", END CALL
 (Skip all remaining phases - no info collection needed)
 If any question is fully answered and the caller did not ask for a callback,
-do not create a ticket.
+do not create a ticket. After asking "Anything else?", if the caller has no
+other needs and no staff work remains, call record_answered_question before ending.
+Never use it for a request that still needs staff action.
 
 🎤 IF CALLER ASKS FOR "VOICEMAIL":
 Many callers expect old-fashioned voicemail systems.
@@ -1510,6 +1512,13 @@ This does NOT affect the call - it's purely for internal tracking.`,
     },
   });
 
+  const recordAnsweredQuestionTool = recordedTool({
+    name: "record_answered_question",
+    description: "Record that every caller request was fully answered and no staff action or follow-up remains. Call only after asking if anything else is needed. Never use for unresolved requests or failed ticket filings.",
+    parameters: z.object({}),
+    execute: async () => ({ success: true, ticketCreated: false, callbackRequired: false }),
+  });
+
   const createTicketTool = recordedTool({
     name: "create_ticket",
     description: `Create a ticket in the EXTERNAL TICKETING SYSTEM for non-urgent after-hours requests. 
@@ -2183,23 +2192,13 @@ Only escalate if the patient has actual emergency symptoms (vision loss, severe 
 
 ## OFFICE HOURS — ANSWER THE COMMON QUESTION, TIMES INCLUDED
 
-"Are you open today?" is the single most common question on this line and it
-must NOT become a ticket. On 2026-08-01 13:35 UTC a caller asked exactly
-that, got a hedge, and had a callback ticket filed for it. That is worse
-service than answering, and it puts junk in the staff queue.
-
-ANSWER DIRECTLY, no tool needed, no ticket:
+Answer office-hours questions directly without filing a ticket:
 - "Are you open right now / today?" → Every office is closed right now — that
   is why they reached the after-hours service. Say so plainly.
 - Weekends and holidays → Our offices are closed on weekends and holidays.
 - "When does <office> open / close?" → answer from the practice facts,
   including the office's own opening and closing time, exactly as written
-  there. Never hedge an hours question: the hours in the practice facts are
-  the practice's own, and every other line states them. (An earlier version
-  of this section withheld the exact times because the table was thought to
-  disagree with live data; on 2026-10-01 the operator rang this line, asked
-  when an office opens, was told "I don't want to give you the wrong time for
-  that office", and confirmed every office keeps the same hours.)
+  there. Never hedge: the hours are the practice's own.
 
 NEVER file a ticket whose only content is "caller asked about office hours".
 A ticket is for something a human must DO.
@@ -2418,6 +2417,7 @@ For healthcare provider calls — escalate immediately with whatever info you ha
       lookupScheduleTool,
       checkOpenTicketsTool,
       emitDecisionTool,
+      recordAnsweredQuestionTool,
       createTicketTool,
       escalateToHumanTool,
       terminateCallTool,
@@ -2431,6 +2431,7 @@ For healthcare provider calls — escalate immediately with whatever info you ha
     "lookup_schedule",
     "check_open_tickets",
     "emit_decision",
+    "record_answered_question",
     "create_ticket",
     "escalate_to_human",
     "terminate_call",

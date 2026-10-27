@@ -1,4 +1,5 @@
 import OpenAI from 'openai';
+import { answeredWithoutTicket } from './answeredCallDisposition';
 import { storage } from '../../server/storage';
 import { redactGraderResults } from './phiSanitizer';
 import { classifyAsk, isHumanRequest, humanRequestCapFor } from './conversationLoopGuard';
@@ -53,6 +54,7 @@ export interface DeterministicGraderInput {
   transferredToHuman: boolean;
   ticketNumber: string | null;
   agentSlug: string | null;
+  toolTimeline?: unknown;
   totalTurns: number | null;
   interruptionCount: number | null;
   truncationCount: number | null;
@@ -649,6 +651,9 @@ function gradeLanguageConfigFault(input: DeterministicGraderInput): GraderResult
 }
 
 function gradeTicketRequiredVsCreated(input: DeterministicGraderInput): GraderResult {
+  if (input.agentSlug === 'no-ivr' && !input.ticketNumber && answeredWithoutTicket(input.toolTimeline)) {
+    return { grader: 'ticket_required_vs_created', pass: true, score: 1, reason: 'Question fully answered; no ticket or callback needed', metadata: { answeredWithoutTicket: true } };
+  }
   const transcriptLower = input.transcript.toLowerCase();
   const lines = input.transcript.split('\n');
   const callerLines = lines.filter(l => /^(caller|patient|user):/i.test(l.trim())).join(' ').toLowerCase();
@@ -1243,6 +1248,9 @@ function gradeProviderMustEscalate(input: DeterministicGraderInput): GraderResul
 }
 
 function gradeActionableRequestNeedsTicket(input: DeterministicGraderInput): GraderResult {
+  if (input.agentSlug === 'no-ivr' && !input.ticketNumber && answeredWithoutTicket(input.toolTimeline)) {
+    return { grader: 'actionable_request_needs_ticket', pass: true, score: 1, reason: 'Question fully answered; no ticket or callback needed', metadata: { answeredWithoutTicket: true } };
+  }
   const transcriptLower = input.transcript.toLowerCase();
   const lines = input.transcript.split('\n');
   const callerLines = lines.filter(l => /^(caller|patient|user):/i.test(l.trim())).join(' ').toLowerCase();
@@ -1884,7 +1892,7 @@ Respond with a JSON object only, no other text:
   // transcript, which also repairs the rows graded against a partial one
   // (9 of 9 "missing reason" verdicts on 09-09 contradict the transcript now
   // stored).
-  static readonly CURRENT_GRADER_VERSION = 10;
+  static readonly CURRENT_GRADER_VERSION = 11;
 
   /** Re-run the deterministic graders on calls graded under an older
    *  grader version. Deterministic-only — the LLM analysis is not re-run,
@@ -1931,6 +1939,7 @@ Respond with a JSON object only, no other text:
         transferredToHuman: callLog.transferredToHuman || false,
         ticketNumber: callLog.ticketNumber || null,
         agentSlug: callLog.agentUsed || null,
+        toolTimeline: callLog.toolTimeline,
         totalTurns: callLog.totalTurns ?? null,
         interruptionCount: callLog.interruptionCount ?? null,
         truncationCount: callLog.truncationCount ?? null,

@@ -86,7 +86,7 @@ const EVERY_TOOL_THIS_FLEET_HAS = [
   'classify_optical_request', 'send_records_form', 'handoff_to_pcp', 'record_pcp_intake',
   'create_pcp_task', 'record_automated_resolution', 'handle_patient_medical_records_request',
   'lookup_patient_appointments', 'check_patient_scheduled', 'transfer_call', 'end_call', 'web_search',
-  'lookup_schedule', 'check_open_tickets', 'emit_decision', 'create_ticket', 'escalate_to_human',
+  'lookup_schedule', 'check_open_tickets', 'emit_decision', 'record_answered_question', 'create_ticket', 'escalate_to_human',
   'terminate_call', 'set_spoken_language',
 ];
 

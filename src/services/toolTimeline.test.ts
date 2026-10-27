@@ -310,6 +310,21 @@ describe('classifyFleetCall — "promised and filed" vs "promised and did not"',
   const ev = (tool: string, outcome: Record<string, unknown> = {}, args: Record<string, unknown> = {}) =>
     ({ at: '', tool, args, outcome, ms: 1 });
 
+  it('records and classifies the explicit answered-without-ticket result', async () => {
+    const callId = freshCall();
+    const wrapped = recordingExecute({ callId, agentSlug: 'no-ivr' }, 'create_ticket', async () => ({
+      success: true, ticketCreated: false, callbackRequired: false,
+      message: 'Synthetic private text',
+    }));
+    await wrapped({});
+    const events = getAzulTimeline(callId)!;
+    expect(events[0].outcome).toMatchObject({ success: true, ticketCreated: false, callbackRequired: false });
+    expect(JSON.stringify(events)).not.toContain('Synthetic private text');
+    expect(classifyFleetCall(events)).toEqual({ purpose: 'Answered question', result: 'Answered, no ticket needed' });
+    expect(classifyFleetCall([...events, ev('create_ticket', { success: true, ticket_number: 'T-2' })]).result).toBe('Ticket filed (T-2)');
+    expect(classifyFleetCall([...events, ev('create_ticket', { success: false, validationError: true })]).result).toContain('FAILED');
+  });
+
   it('reports a filed ticket with its number', () => {
     expect(classifyFleetCall([ev('classify_request'), ev('create_ticket', { success: true, ticket_number: 'T-1' })]))
       .toEqual({ purpose: 'Patient request', result: 'Ticket filed (T-1)' });

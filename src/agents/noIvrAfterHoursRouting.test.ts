@@ -300,6 +300,17 @@ describe('every other call is the app\'s to route, exactly as before', () => {
 });
 
 describe('caller-requested callback handling — VA-76095 / 74600 / VA-71404', () => {
+  it('records an answered-only call without collecting identifying details or filing', async () => {
+    const { agent, callSid } = await agentFor();
+    const result = await call(agent, 'record_answered_question', {});
+    expect(result).toMatchObject({ success: true, ticketCreated: false, callbackRequired: false });
+    expect(h.submitSimplifiedTicket).not.toHaveBeenCalled();
+    const { getAzulTimeline, classifyFleetCall } = await import('../services/toolTimeline');
+    const events = getAzulTimeline(`call-${callSid}`)!;
+    expect(events[events.length - 1]?.outcome).toMatchObject({ success: true, ticketCreated: false, callbackRequired: false });
+    expect(classifyFleetCall(events).result).toBe('Answered, no ticket needed');
+  });
+
   it('does not create a callback ticket when the question was answered and no callback is needed', async () => {
     const { agent } = await agentFor();
     const result = await call(agent, 'create_ticket', {

@@ -156,7 +156,7 @@ describe("the Grok body is the shape xAI's Prompting Guide prescribes", () => {
       'file_tech_ticket', 'file_records_ticket', 'classify_surgery_request', 'classify_tech_request',
       'classify_optical_request', 'send_records_form', 'handoff_to_pcp', 'record_pcp_intake',
       'create_pcp_task', 'record_automated_resolution', 'transfer_call', 'end_call', 'web_search',
-      'lookup_schedule', 'check_open_tickets', 'emit_decision', 'create_ticket', 'escalate_to_human',
+      'lookup_schedule', 'check_open_tickets', 'emit_decision', 'record_answered_question', 'create_ticket', 'escalate_to_human',
       'terminate_call', 'set_spoken_language',
     ];
     for (const meta of [{ pipeline: 'runtime' }, {}]) {
@@ -202,6 +202,7 @@ const RULINGS: Array<[string, RegExp]> = [
   // legacy body still states this line's POLICY in its own words for the old
   // core; the Grok body gets the policy from `spokenLanguages` at binding.
   ['anything else before ending', /Anything else\?/],
+  ['record only when all caller needs are resolved', /record_answered_question before ending/i],
   // 2026-10-01: the operator rang the line, asked when an office opens and
   // was told "I don't want to give you the wrong time for that office". The
   // hours are the practice's own and every other lane states them.
