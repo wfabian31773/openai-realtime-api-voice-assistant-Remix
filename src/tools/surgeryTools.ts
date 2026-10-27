@@ -32,7 +32,8 @@ import { createTicketDurable, postFailureToolResult } from '../services/durableT
 import { loggableLookupError } from '../services/loggableTicketingError';
 import { gateRefusalsSoFar, noteGateRefusal } from './gateAttempts';
 import { decideDobEscape, dobStatusNote, dobEscapeMarker, type DobStatus } from './dobEscape';
-import { verifiedDobFor } from './verifiedIdentity';
+import { correctSurgeryIntake, isSurgeryRequest, withoutSurgeryFields } from './requestClassification';
+import { usualOfficeFor, verifiedDobFor } from './verifiedIdentity';
 
 /** This tool's own name, for the per-call gate counter. */
 const SURGERY_FILE_TOOL = 'file_surgery_ticket';
@@ -65,6 +66,15 @@ registerTool({
   },
   handler: async (input): Promise<ToolResult> => {
     const { classifySurgeryRequest, SURGERY_DEPARTMENT_ID } = await import('./surgeryTaxonomy');
+    const corrected = correctSurgeryIntake(str(input.request_description), SURGERY_DEPARTMENT_ID);
+    if (corrected) {
+      return { success: true, classified: true,
+        department_id: corrected.departmentId,
+        request_type_id: corrected.requestTypeId,
+        request_reason_id: corrected.requestReasonId,
+        fix: 'File this request with file_surgery_ticket. Do not ask for a surgery date or surgeon for this request.' };
+    }
+
     const { classification, isCatchAll, isLogistics } = classifySurgeryRequest(
       str(input.request_description),
     );
@@ -155,7 +165,7 @@ registerTool({
           + "physician-only lookup this tool already runs against the patient's record.",
         askAs: 'And which surgeon are you seeing?',
       },
-      surgery_date: { type: 'string', description: 'The date of their surgery, if they gave one. Put it in the description too.' },
+      surgery_date: { type: 'string', description: 'Only for an actual surgery request: the surgery date from the validated record or caller. Never use an exam, testing or callback date.' },
       urgent: { type: 'string', description: 'Pass "true" only when classify_surgery_request said urgent.' },
       email: { type: 'string', description: 'Optional — looked up if omitted.' },
       call_sid: { type: 'string', description: 'The call id, so a retry cannot double-file.' },
@@ -228,9 +238,14 @@ registerTool({
 
     // Lead with the bucket when there is no reason id to carry the meaning.
     // A coordinator scanning a queue reads the first three words.
-    const surgeryDate = str(input.surgery_date);
+    const { detectCrossQueue } = await import('./queueRouting');
+    const redirect = detectCrossQueue(description, SURGERY_DEPARTMENT_ID);
+    const filedDepartmentId = redirect?.departmentId ?? SURGERY_DEPARTMENT_ID;
+    const filedOnSurgeryQueue = filedDepartmentId === SURGERY_DEPARTMENT_ID;
+    const surgeryDate = filedOnSurgeryQueue && isSurgeryRequest(description)
+      ? str(input.surgery_date) : '';
     const body = [
-      description,
+      filedOnSurgeryQueue ? description : withoutSurgeryFields(description),
       surgeryDate ? `\n\nSurgery date given by caller: ${surgeryDate}` : '',
     ].join('');
 
@@ -249,8 +264,9 @@ registerTool({
     const { sanitizeProviderName, sanitizeLocationName } = await import(
       '../services/ticketFieldSanitizers'
     );
-    const cleanLocation = sanitizeLocationName(str(input.location)).value;
-    const cleanSurgeon = sanitizeProviderName(str(input.surgeon)).value;
+    const recordOffice = filedDepartmentId === 1 ? usualOfficeFor(callSid, first, last, dob) : undefined;
+    const cleanLocation = sanitizeLocationName(recordOffice || str(input.location)).value;
+    const cleanSurgeon = filedOnSurgeryQueue ? sanitizeProviderName(str(input.surgeon)).value : '';
 
     const { ticketingApiClient, lookupWasUnavailable } = await import(
       '../../server/services/ticketingApiClient'
@@ -375,11 +391,6 @@ registerTool({
     // The detector stays silent unless the misroute is obvious — the line that
     // rang is better evidence than a keyword, and a redirect on a guess would
     // be worse than none.
-    const { detectCrossQueue } = await import('./queueRouting');
-    const redirect = detectCrossQueue(description, SURGERY_DEPARTMENT_ID);
-    const filedDepartmentId = redirect?.departmentId ?? SURGERY_DEPARTMENT_ID;
-    /** Only THIS queue routes by surgeon; a redirect changes what may be filed. */
-    const filedOnSurgeryQueue = filedDepartmentId === SURGERY_DEPARTMENT_ID;
 
     /**
      * HAS THIS CALL ALREADY BEEN ASKED FOR THE SURGEON?

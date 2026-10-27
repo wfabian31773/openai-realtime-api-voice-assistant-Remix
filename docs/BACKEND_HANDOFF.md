@@ -417,3 +417,37 @@ Recorded so they are not repeated.
 `VOICE_TOOL_API_KEY` is **unrotated**. It was deferred until agent testing finished.
 It is also the credential needed for any authenticated end-to-end test against the
 ticketing API, which is why no such test has been run from this side.
+
+
+## 2026-10-27 — #6/#7 and HVA request classification
+
+Scope: VA-75838, 75208, 74205, 71404; 67428, 67429, 67486, 67506,
+VA-76202; VA-76697 and VA-76341. Tests use synthetic failure shapes identified
+only by these ticket IDs. No production records were read or changed.
+
+`requestClassification.ts` corrects clear non-surgery requests on Surgery/HVA
+intake. Contact orders/status go to Optical, eye-exam/glaucoma-test appointments
+and non-surgical insurance to HVA, contact-prescription renewal and clinical
+results to Technicians. It does not classify records requests or the records line.
+Ambiguous requests and explicit operations retain their existing workflow.
+`classify_surgery_request` exposes the correction before filing;
+`file_surgery_ticket` repeats it before reading surgery-only arguments.
+A surgery date requires an actual surgery request. A redirected ticket carries
+no surgeon/date from the surgery tool. For an Optical redirect, the validated
+record office wins over the model's office, through `usualOfficeFor` and its
+existing identity/DOB guard; verified DOB inheritance is unchanged.
+
+The companion Ticketing change enforces the same narrow correction on both
+creation endpoints before routing/enrichment. Its final stored taxonomy drives
+a deterministic acknowledgement, including LASIK versus neutral surgery,
+Optical/contact-lens, appointment, insurance and technician-support wording.
+This supersedes the historical statement above that create-ticket stores every
+incoming triple verbatim, for Surgery/HVA intake only.
+
+Offline regression: `npx vitest run src/tools/surgeryRequestClassification.test.ts`.
+The 11 issue cases failed before the fix; explicit-surgery and records-line
+controls passed. Added classification-tool, unexplained-date and joined-record
+carry checks also failed before their fixes. Production before/after rates are
+unmeasured: the task prohibits production DB access. No merge/deploy is claimed.
+No migrations. Rollback: revert this change and its companion Ticketing commit;
+that restores the old misclassification and generative acknowledgement behavior.
