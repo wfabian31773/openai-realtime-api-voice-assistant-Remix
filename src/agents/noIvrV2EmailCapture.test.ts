@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { LiveTool } from '../runtime/agentBinding';
 
 vi.hoisted(() => {
@@ -15,6 +15,8 @@ vi.mock('../services/scheduleLookupService', () => ({
 }));
 
 const { createNoIvrAgentV2 } = await import('./noIvrAgentV2');
+const { EMAIL_ASK_ONCE, EMAIL_ESCAPE_NOTE } = await import('./noIvrAgent');
+const { resetGateAttempts } = await import('../tools/gateAttempts');
 const { SyncAgentService } = await import('../services/syncAgentService');
 
 const request = {
@@ -28,7 +30,13 @@ const request = {
   email: 'Synthetic.Caller@example.invalid',
 };
 
+beforeEach(() => resetGateAttempts());
 afterEach(() => vi.restoreAllMocks());
+
+const missingEmail = (() => {
+  const { email: _email, ...rest } = request;
+  return rest;
+})();
 
 describe('no-ivr-v2 ticket email capture', () => {
   it('carries the complete email from the actual tool to the ticket payload', async () => {
@@ -77,5 +85,35 @@ describe('no-ivr-v2 ticket email capture', () => {
     const result = await ticketTool.invoke!({}, JSON.stringify({ ...request, email: 123 }));
     expect(result).toContain('Invalid JSON input for tool');
     expect(createTicket).not.toHaveBeenCalled();
+  });
+
+  it('asks once for a missing email, then files the request as a phone callback', async () => {
+    const createTicket = vi.spyOn(SyncAgentService, 'createTicket').mockResolvedValue({
+      success: true, ticketNumber: 'VA-SYNTHETIC', message: 'VA-SYNTHETIC',
+    });
+    const callSid = `CA${'e'.repeat(32)}`;
+    const agent = await createNoIvrAgentV2(async () => {}, {
+      callId: 'synthetic-v2-email-escape',
+      callSid,
+    });
+    const ticketTool = (agent.tools as LiveTool[]).find((tool) => tool.name === 'create_ticket')!;
+
+    const first = await ticketTool.invoke!({}, JSON.stringify(missingEmail));
+    const firstResponse = typeof first === 'string' ? JSON.parse(first) : first;
+    expect(firstResponse).toMatchObject({
+      success: false,
+      validation_errors: ['email address'],
+    });
+    expect(firstResponse.message).toBe(EMAIL_ASK_ONCE);
+    expect(createTicket).not.toHaveBeenCalled();
+
+    const second = await ticketTool.invoke!({}, JSON.stringify(missingEmail));
+    const secondResponse = typeof second === 'string' ? JSON.parse(second) : second;
+    expect(secondResponse).toMatchObject({ success: true, ticket_number: 'VA-SYNTHETIC' });
+    expect(createTicket).toHaveBeenCalledWith(expect.objectContaining({
+      preferredContactMethod: 'phone',
+      patientEmail: undefined,
+      description: expect.stringContaining(EMAIL_ESCAPE_NOTE),
+    }));
   });
 });

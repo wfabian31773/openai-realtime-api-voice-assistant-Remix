@@ -23,6 +23,8 @@ import {
 import { buildWorkflowDrivenPrompt, getWorkflowDirectiveForContext } from "../workflows/workflowPromptBuilder";
 import { EMAIL_FIELD_DESCRIPTION, LAST_NAME_FIELD_DESCRIPTION } from "../tools/contactCaptureGuidance";
 import { keepFieldDescriptions } from "../services/toolFieldDescriptions";
+import { EMAIL_ASK_ONCE, EMAIL_ESCAPE_NOTE, emailEscapeMarker } from "./noIvrAgent";
+import { gateRefusalsSoFar, noteGateRefusal } from "../tools/gateAttempts";
 
 const describedTool: typeof tool = ((def: any) =>
   keepFieldDescriptions(tool(def), def.parameters)) as typeof tool;
@@ -453,6 +455,24 @@ Call this ONLY when you have collected ALL required information.`,
         };
       }
 
+      // Same ask-once-then-file-as-phone rule as the main no-IVR lane: an
+      // email preference with no address must not lose the request.
+      const wantsEmail = params.preferred_contact === "email";
+      const emailGiven = (params.email ?? "").trim();
+      let emailEscaped = false;
+      if (wantsEmail && !emailGiven) {
+        if (gateRefusalsSoFar(metadata.callSid, "create_ticket", "email") < 1) {
+          noteGateRefusal(metadata.callSid, "create_ticket", "email");
+          return {
+            success: false,
+            validation_errors: ["email address"],
+            message: EMAIL_ASK_ONCE,
+          };
+        }
+        emailEscaped = true;
+        console.info(emailEscapeMarker(metadata.callSid ?? ""));
+      }
+
       let enrichedContext = scheduleContext;
       if (!scheduleContext?.patientFound || scheduleContext.matchedBy === "phone") {
         try {
@@ -471,9 +491,10 @@ Call this ONLY when you have collected ALL required information.`,
         }
       }
 
-      const finalSummary = requiresCallback
+      const taggedSummary = requiresCallback
         ? params.request_summary
         : `[NO CALLBACK NEEDED] ${params.request_summary}`;
+      const finalSummary = emailEscaped ? `${taggedSummary}\n${EMAIL_ESCAPE_NOTE}` : taggedSummary;
 
       const result = await SyncAgentService.createTicketFromAgentInput({
         firstName: params.first_name,
@@ -484,8 +505,8 @@ Call this ONLY when you have collected ALL required information.`,
         callbackNumber: params.callback_number,
         requestCategory: params.request_category as TriageOutcome,
         requestSummary: finalSummary,
-        preferredContact: params.preferred_contact || undefined,
-        email: params.email,
+        preferredContact: emailEscaped ? "phone" : params.preferred_contact || undefined,
+        email: emailGiven || undefined,
         doctorName: params.doctor_name || enrichedContext?.lastProviderSeen || undefined,
         location: params.location || enrichedContext?.lastLocationSeen || undefined,
         callData: {
