@@ -1,4 +1,4 @@
-import { correctSurgeryIntake } from './requestClassification';
+import { correctSurgeryIntake, hasClinicalComplaint } from './requestClassification';
 
 /**
  * A caller who pressed the wrong option is not the caller's problem.
@@ -298,6 +298,10 @@ export function detectCrossQueue(text: string, homeDepartmentId: number): QueueR
     return { ...corrected, departmentName, requestReason: 'Request classified from caller intent',
       note: 'Request taken on another line and routed by its subject.' };
   }
+
+  // The legacy eyewear matcher must respect the correction's clinical veto.
+  // Leave triage/taxonomy with the current Surgery/HVA workflow.
+  if ((homeDepartmentId === SURGERY || homeDepartmentId === HVA_HUB) && hasClinicalComplaint(text)) return null;
 
   const mentionsSurgery = hit(t, SURGERY_CUES);
   const mentionsOptical = hit(t, OPTICAL_CUES);

@@ -1,0 +1,50 @@
+import { describe, expect, it } from 'vitest';
+import { classifyNonSurgicalRequest, correctSurgeryIntake, isSurgeryRequest } from './requestClassification';
+
+describe('review regressions: preserve clinical and procedure context', () => {
+  it.each([
+    'I have severe eye pain when I wear my glasses.',
+    'My eye is red after taking out my contacts.',
+    'I see flashes and floaters with my glasses on.',
+    'My eye is swollen and I also need to order contacts.',
+    'Tengo dolor en el ojo cuando uso lentes de contacto.',
+  ])('declines a routine correction for %s', (text) => {
+    expect(correctSurgeryIntake(text, 2)).toBeNull();
+    expect(correctSurgeryIntake(text, 9)).toBeNull();
+  });
+
+  it.each([
+    "This isn't about surgery; I need glasses.",
+    'This isn’t about surgery; I need glasses.',
+    'I do not need surgery; I need glasses.',
+    "I don't want cataract surgery; I need glasses.",
+    'I am not planning to have surgery; I need glasses.',
+  ])('recognizes an explicit surgery denial: %s', (text) => {
+    expect(isSurgeryRequest(text)).toBe(false);
+    expect(classifyNonSurgicalRequest(text)).toEqual({ departmentId: 1, requestTypeId: 66, requestReasonId: 536 });
+  });
+
+  it.each([
+    'Will insurance cover my cataract procedure?',
+    'Will insurance cover my cataract removal?',
+    'Will insurance cover my procedure?',
+  ])('preserves surgical insurance context: %s', (text) => {
+    expect(isSurgeryRequest(text)).toBe(true);
+    expect(classifyNonSurgicalRequest(text)).toBeNull();
+  });
+
+  it.each([
+    'I do not want to cancel my surgery; I need glasses afterwards.',
+    'I am not sure whether I need surgery or glasses.',
+    'This is not about surgery; I need insurance for my LASIK operation.',
+    'Not cataract surgery, but I need to reschedule my LASIK.',
+  ])('preserves positive or uncertain surgery intent: %s', (text) => {
+    expect(isSurgeryRequest(text)).toBe(true);
+    expect(classifyNonSurgicalRequest(text)).toBeNull();
+  });
+
+  it('keeps ordinary optical requests, including red frames', () => {
+    expect(classifyNonSurgicalRequest('I want to order red frames for my glasses.'))
+      .toEqual({ departmentId: 1, requestTypeId: 66, requestReasonId: 536 });
+  });
+});

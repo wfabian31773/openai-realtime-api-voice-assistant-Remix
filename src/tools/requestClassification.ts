@@ -19,20 +19,28 @@ export function withoutSurgeryFields(text: string): string {
 
 function requestContent(text: string): string {
   return withoutSurgeryFields(text).normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase()
+    .replace(/\b(is|are|was|were|do|does|did|has|have|had|would|should|could)n['’]t\b/g, '$1 not')
     // A line name and an explicit denial are not a request for an operation.
     .replace(/\b(?:the )?surgery (?:line|department|queue)\b/g, '')
-    .replace(/\b(?:not|no)\s+(?:(?:about|for|a|my|any|cataract)\s+)*(?:surgery|lasik)\b/g, '');
+    // Stay within explicit denials; "not sure" and "not cancel" still carry
+    // surgical intent. Never consume a later affirmative clause.
+    .replace(/\b(?:not|no)\s+(?:(?:about|for|a|an|the|my|any|need|want|planning|to|have|having|undergo|cataract|eye)\s+)*(?:surgery|lasik|prk|operation|procedure)\b/g, '');
 }
 
 export function isSurgeryRequest(text: string): boolean {
-  return /\b(?:surgery|surgical|lasik|prk|operation|pre[- ]?op|post[- ]?op|cirugia|operacion)\b/.test(requestContent(text));
+  return /\b(?:surgery|surgical|lasik|prk|operation|cataracts?|procedures?|pre[- ]?op|post[- ]?op|cirugia|operacion)\b/.test(requestContent(text));
+}
+
+/** A conservative veto, not a triage decision: preserve the existing workflow. */
+export function hasClinicalComplaint(text: string): boolean {
+  return /\b(?:pain|painful|hurts?|hurting|burning|swollen|swelling|redness|(?:red|bloodshot) eyes?|eyes?(?: is| are)? (?:very |really )?(?:red|bloodshot)|bleeding|discharge|blurry|blurred|flashes|floaters|vision loss|loss of vision|(?:cannot|can't) see|light sensitivity|dolor|duele|hinchado|sangrado|borroso|ojo rojo|no puedo ver)\b/.test(requestContent(text));
 }
 
 export function classifyNonSurgicalRequest(text: string): RequestClassification | null {
   const t = requestContent(text);
   // Deliberately leave records handling to its existing owner (#8).
   if (/\b(?:medical records?|records? request|copy of|copies of)\b/.test(t)) return null;
-  if (isSurgeryRequest(text) || /\bsurgeon\b/.test(t)) return null;
+  if (isSurgeryRequest(text) || /\bsurgeon\b/.test(t) || hasClinicalComplaint(text)) return null;
   const result = (departmentId: number, requestTypeId: number, requestReasonId: number) =>
     ({ departmentId, requestTypeId, requestReasonId });
   const contacts = /\b(?:contacts|contact[- ]lens(?:es)?|cl|cls|lentes de contacto)\b/.test(t);

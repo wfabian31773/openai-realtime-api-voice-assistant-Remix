@@ -165,7 +165,7 @@ registerTool({
           + "physician-only lookup this tool already runs against the patient's record.",
         askAs: 'And which surgeon are you seeing?',
       },
-      surgery_date: { type: 'string', description: 'Only for an actual surgery request: the surgery date from the validated record or caller. Never use an exam, testing or callback date.' },
+      surgery_date: { type: 'string', description: 'For an operation or recognized surgery logistics (such as clearance or arrival): the surgery date from the validated record or caller. Never use an exam, testing or unexplained callback date.' },
       urgent: { type: 'string', description: 'Pass "true" only when classify_surgery_request said urgent.' },
       email: { type: 'string', description: 'Optional — looked up if omitted.' },
       call_sid: { type: 'string', description: 'The call id, so a retry cannot double-file.' },
@@ -224,7 +224,7 @@ registerTool({
       );
     }
 
-    const { SURGERY_DEPARTMENT_ID, surgeryReasonById, classifySurgeryRequest, isSurgeryPostOpSymptom } =
+    const { SURGERY_DEPARTMENT_ID, surgeryReasonById, classifySurgeryRequest, classifySurgeryLogistics, isSurgeryPostOpSymptom } =
       await import('./surgeryTaxonomy');
 
     // The reason must be one of SURGERY's own, whatever we were handed. This is
@@ -242,7 +242,11 @@ registerTool({
     const redirect = detectCrossQueue(description, SURGERY_DEPARTMENT_ID);
     const filedDepartmentId = redirect?.departmentId ?? SURGERY_DEPARTMENT_ID;
     const filedOnSurgeryQueue = filedDepartmentId === SURGERY_DEPARTMENT_ID;
-    const surgeryDate = filedOnSurgeryQueue && isSurgeryRequest(description)
+    // Logistics already recognized by this queue carry their surgery date.
+    // A generic callback/status chase or a supplied reason id alone cannot
+    // establish that an otherwise unexplained date belongs to an operation.
+    const logistics = classifySurgeryLogistics(description);
+    const surgeryDate = filedOnSurgeryQueue && (isSurgeryRequest(description) || (logistics && logistics.key !== 'status'))
       ? str(input.surgery_date) : '';
     const body = [
       filedOnSurgeryQueue ? description : withoutSurgeryFields(description),

@@ -16,6 +16,8 @@ import './surgeryTools';
 import { rememberVerifiedIdentity, resetVerifiedIdentities } from './verifiedIdentity';
 import { resetGateAttempts } from './gateAttempts';
 const cases = [
+  ['surgery denial contraction', "This isn't about surgery; I need glasses.", 1, 66, 536, 'optical'],
+  ['surgery denial need', 'I do not need surgery; I need contacts.', 1, 66, 536, 'optical'],
   [
     "#6 VA-75838",
     "I reached the surgery line but need to order contact lenses.",
@@ -158,6 +160,66 @@ it('HVA VA-76697: an unexplained date is not evidence of a surgery request', asy
     surgery_date: '2026-12-01', surgeon: 'Synthetic Surgeon',
   });
   expect(create.mock.calls[0][0].description).not.toContain('Surgery date');
+});
+
+it.each([
+  'Will insurance cover my cataract procedure?',
+  'Will insurance cover my cataract removal?',
+  'Will insurance cover my procedure?',
+])('retains Surgery, surgeon and date for operation insurance: %s', async (request_description) => {
+  expect(detectCrossQueue(request_description, 2)).toBeNull();
+  expect(await runTool('classify_surgery_request', { request_description })).toMatchObject({ department_id: 2 });
+  expect(await runTool('file_surgery_ticket', {
+    first_name: 'Avery', last_name: 'Example', date_of_birth: '01/02/1980',
+    callback_number: '2025550142', request_description,
+    surgery_date: '2026-12-01', surgeon: 'Synthetic Surgeon',
+  })).toMatchObject({ success: true });
+  expect(create.mock.calls[0][0]).toMatchObject({ departmentId: 2, providerId: 88 });
+  expect(create.mock.calls[0][0].description).toContain('Surgery date given by caller: 2026-12-01');
+});
+
+it.each([
+  ['I never got my clearance form.', 530],
+  ['What time should I arrive?', 532],
+  ['My pre-op drops did not arrive.', 529],
+  ['I have a question about the deposit.', 533],
+  ['I need to postpone.', 531],
+] as const)('carries a validated surgery date for recognized logistics: %s', async (request_description, requestReasonId) => {
+  expect(await runTool('classify_surgery_request', { request_description })).toMatchObject({
+    department_id: 2, request_reason_id: requestReasonId, logistics: true,
+  });
+  expect(await runTool('file_surgery_ticket', {
+    first_name: 'Avery', last_name: 'Example', date_of_birth: '01/02/1980',
+    callback_number: '2025550142', request_description,
+    surgery_date: '2026-12-01', surgeon: 'Synthetic Surgeon',
+  })).toMatchObject({ success: true });
+  expect(create.mock.calls[0][0]).toMatchObject({ departmentId: 2, requestReasonId });
+  expect(create.mock.calls[0][0].description).toContain('Surgery date given by caller: 2026-12-01');
+});
+
+it('an unexplained callback cannot acquire a surgery date from a stale logistics reason', async () => {
+  await runTool('file_surgery_ticket', {
+    first_name: 'Avery', last_name: 'Example', date_of_birth: '01/02/1980',
+    callback_number: '2025550142', request_description: 'Please call me back.',
+    request_reason_id: '530', surgery_date: '2026-12-01', surgeon: 'Synthetic Surgeon',
+  });
+  expect(create.mock.calls[0][0].description).not.toContain('Surgery date');
+});
+
+it.each([
+  'I have severe eye pain when I wear my glasses.',
+  'My eye is red after taking out my contacts.',
+  'I see sudden flashes and floaters while wearing glasses.',
+])('does not redirect a clinical complaint as routine eyewear: %s', async (request_description) => {
+  expect(detectCrossQueue(request_description, 2)).toBeNull();
+  expect(detectCrossQueue(request_description, 9)).toBeNull();
+  const result = await runTool('classify_surgery_request', { request_description });
+  expect(result).toMatchObject({ department_id: 2 });
+  await runTool('file_surgery_ticket', {
+    first_name: 'Avery', last_name: 'Example', date_of_birth: '01/02/1980',
+    callback_number: '2025550142', request_description, urgent: 'true', surgeon: 'Synthetic Surgeon',
+  });
+  expect(create.mock.calls[0][0]).toMatchObject({ departmentId: 2, priority: 'urgent' });
 });
 
 it('#6 VA-75838: a redirected request carries the validated record office and DOB', async () => {

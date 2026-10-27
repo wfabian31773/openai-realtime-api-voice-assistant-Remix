@@ -432,7 +432,10 @@ results to Technicians. It does not classify records requests or the records lin
 Ambiguous requests and explicit operations retain their existing workflow.
 `classify_surgery_request` exposes the correction before filing;
 `file_surgery_ticket` repeats it before reading surgery-only arguments.
-A surgery date requires an actual surgery request. A redirected ticket carries
+A surgery date requires an operation or a recognized surgery-logistics request
+(drops, clearance, arrival/transport, rescheduling or financial questions).
+An unexplained callback/status chase, including one carrying a stale logistics
+reason ID, does not establish surgery-date context. A redirected ticket carries
 no surgeon/date from the surgery tool. For an Optical redirect, the validated
 record office wins over the model's office, through `usualOfficeFor` and its
 existing identity/DOB guard; verified DOB inheritance is unchanged.
@@ -485,3 +488,30 @@ caught by assertions: voice classification (8 failures), voice office retry (2),
 Ticketing classification (9), legacy intake/provider handling (5), create-ticket
 provider handling (20), and unknown-taxonomy acknowledgements (3). Each reversion
 was restored; no mutation is part of the change.
+
+### Codex review fixes, 2026-10-27
+
+Both repositories' request matchers now decline routine corrections for clinical
+symptoms that merely mention eyewear, including when the caller also mentions
+an order. The legacy cross-queue fallback respects the same veto on Surgery/HVA
+intake, preserving the existing clinical/urgent workflow. Explicit surgery
+denials normalize contractions and need/want/planning phrases; a separate
+affirmative or uncertain operation request still keeps its surgery context.
+Cataract/procedure insurance questions stay with Surgery and keep their surgeon
+and surgery date. Existing `surgeryTaxonomy` logistics cues retain dates except
+for generic status/callback requests; a supplied reason alone cannot qualify.
+
+Synthetic regression files: `src/tools/requestClassification.test.ts` and
+`src/tools/surgeryRequestClassification.test.ts`. Each finding was reproduced
+before its fix. No production access, migrations, pushes, merges or deployments.
+
+Validation: 309 targeted tests pass across request classification, surgery
+filing/taxonomy, queue routing, unassigned exits, DOB carry and the synthetic PCP
+replay. Repository `tsc -p . --noEmit` and recommended ESLint/TypeScript rules on
+all five changed TypeScript files pass (ESLint supplied by the sibling Ticketing
+installation; this repo has no lint configuration). Five temporary reversions
+were caught: clinical veto (5 failures), denial handling (5), procedure cues (3),
+logistics dates (4), and the legacy routing veto (2). All were restored.
+The full suite could not complete in this sandbox: local listeners and
+`spawnSync` in `buildIdentity.test.ts` are denied with `EPERM`. GitHub check logs
+were unreachable, so the separately reported CI test could not be identified.

@@ -8,10 +8,19 @@
 
 # State of Play — Azul Vision voice agents
 
+2026-10-27 review follow-up (offline, synthetic data): the paired request
+classifiers now preserve clinical complaints mentioning eyewear, normalize
+explicit surgery denials, and retain cataract/procedure insurance on Surgery.
+The legacy routing fallback respects the clinical veto. Surgery dates survive
+recognized logistics requests while generic callbacks/status chases still omit
+unexplained dates. Regression evidence and scope: `docs/BACKEND_HANDOFF.md`,
+"Codex review fixes, 2026-10-27". No production measurement or deployment claimed.
+
 **Companion to `/CLAUDE.md`. Read both at the start of every session.**
 
-Last updated: **2026-10-06** (section 14 — the session stall reconnects).
-Earlier: **2026-09-25** (section 13 — terminal 4xx is follow-up, not a
+Last updated: **2026-10-27** (request-classification review follow-up above).
+Earlier: **2026-10-06** (section 14 — the session stall reconnects),
+**2026-09-25** (section 13 — terminal 4xx is follow-up, not a
 stall), **2026-09-17 11:10 UTC** (section 12), **2026-09-09 17:40 UTC**
 (section 11), **2026-08-11 01:15 UTC** (Wayne: *"go through this entire
 conversation… and log and create an MD file… and force every time that you read
