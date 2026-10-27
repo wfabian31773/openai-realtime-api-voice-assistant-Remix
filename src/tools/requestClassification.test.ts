@@ -71,6 +71,15 @@ describe('review regressions: preserve clinical and procedure context', () => {
   it('keeps explicit contact-lens appointment changes on the Hub', () => {
     expect(classifyNonSurgicalRequest('I need to reschedule my appointment for contact lenses'))
       .toEqual({ departmentId: 9, requestTypeId: 32, requestReasonId: 147 });
+    expect(classifyNonSurgicalRequest('I need to reschedule my appointment to order contact lenses'))
+      .toEqual({ departmentId: 9, requestTypeId: 32, requestReasonId: 147 });
+  });
+
+  it('keeps a contact-lens order cancel on Optical when no appointment is named', () => {
+    expect(classifyNonSurgicalRequest('I need to cancel my contact lens order'))
+      .toEqual({ departmentId: 1, requestTypeId: 3, requestReasonId: 11 });
+    expect(classifyNonSurgicalRequest('I need to cancel my contact lens appointment'))
+      .toEqual({ departmentId: 9, requestTypeId: 32, requestReasonId: 148 });
   });
 
   it('treats sx as surgical context', () => {
