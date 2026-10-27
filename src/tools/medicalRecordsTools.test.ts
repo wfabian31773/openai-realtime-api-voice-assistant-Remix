@@ -23,10 +23,10 @@ const BASE = {
   form_channel: 'declined',
   deliver_to: 'to me',
   date_range: 'everything',
-  first_name: 'Wayne',
-  last_name: 'Fabian',
-  date_of_birth: '03/17/1973',
-  callback_number: '845-531-7471',
+  first_name: 'Taylor',
+  last_name: 'Example',
+  date_of_birth: '01/02/1980',
+  callback_number: '202-555-0142',
 };
 
 async function client() {
@@ -55,7 +55,7 @@ describe('patientPhone is the digits, not the raw string', () => {
       request_description: 'I need a copy of my medical records',
     });
 
-    expect(create.mock.calls[0][0].patientPhone).toBe('8455317471');
+    expect(create.mock.calls[0][0].patientPhone).toBe('2025550142');
   });
 
   it('drops a leading 1, not the area code', async () => {
@@ -64,11 +64,11 @@ describe('patientPhone is the digits, not the raw string', () => {
 
     await runTool('file_records_ticket', {
       ...BASE,
-      callback_number: '1-845-531-7471',
+      callback_number: '1-202-555-0142',
       request_description: 'I need a copy of my medical records',
     });
 
-    expect(create.mock.calls[0][0].patientPhone).toBe('8455317471');
+    expect(create.mock.calls[0][0].patientPhone).toBe('2025550142');
   });
 
   it('refuses 11 digits that do not start with 1, rather than dropping the first one', async () => {
@@ -77,7 +77,7 @@ describe('patientPhone is the digits, not the raw string', () => {
 
     const out = (await runTool('file_records_ticket', {
       ...BASE,
-      callback_number: '2-845-531-7471',
+      callback_number: '2-202-555-0142',
       request_description: 'I need a copy of my medical records',
     })) as Record<string, unknown>;
 
@@ -92,7 +92,7 @@ describe('patientPhone is the digits, not the raw string', () => {
 
     const out = (await runTool('file_records_ticket', {
       ...BASE,
-      callback_number: '845-531-7471 ext 202',
+      callback_number: '202-555-0142 ext 202',
       request_description: 'I need a copy of my medical records',
     })) as Record<string, unknown>;
 
@@ -129,9 +129,11 @@ describe('the department is never guessed', () => {
       "I need a doctor's note",
       'I want to review my chart',
     ]) {
-      await runTool('file_records_ticket', { ...BASE, request_description: text });
+      const result = await runTool('file_records_ticket', { ...BASE, request_description: text });
+      expect(result.success).toBe(true);
     }
 
+    expect(create).toHaveBeenCalledTimes(5);
     for (const call of create.mock.calls) {
       expect([500, 501, 502, 503, 504, 547]).toContain(call[0].requestReasonId);
     }
@@ -166,7 +168,8 @@ describe('the reason is the one the words earned', () => {
       const api = await client();
       const create = vi.spyOn(api, 'createTicket').mockResolvedValueOnce(ok('VA-R4'));
 
-      await runTool('file_records_ticket', { ...BASE, request_description: text });
+      const result = await runTool('file_records_ticket', { ...BASE, request_description: text });
+      expect(result.success).toBe(true);
 
       expect(create.mock.calls[0][0].requestReasonId).toBe(reasonId);
     });
@@ -263,7 +266,7 @@ describe('the things that make a clerk ring the patient back', () => {
   it('refuses a partial callback number with a speakable line', async () => {
     const r = (await runTool('file_records_ticket', {
       ...BASE,
-      callback_number: '845-531',
+      callback_number: '202-555',
       request_description: 'copy of my records',
     })) as Record<string, unknown>;
 
@@ -668,7 +671,7 @@ describe('the date of birth the caller said, when the model sent none', () => {
     const { noteSpokenDob } = await import('./spokenDob');
     noteSpokenDob(SID, [
       'AGENT: May I have your date of birth?',
-      'CALLER: March 17th, 1973.',
+      'CALLER: January 2nd, 1980.',
     ]);
 
     const api = await client();
@@ -684,14 +687,14 @@ describe('the date of birth the caller said, when the model sent none', () => {
     })) as Record<string, unknown>;
 
     expect(out.success).toBe(true);
-    expect(create.mock.calls[0][0].patientBirthYear).toBe('1973');
+    expect(create.mock.calls[0][0].patientBirthYear).toBe('1980');
   });
 
   it('still refuses when the caller never answered', async () => {
     const { noteSpokenDob } = await import('./spokenDob');
     noteSpokenDob(SID, [
       'AGENT: What can I help you with?',
-      'CALLER: The records I need are from March 17th, 1973.',
+      'CALLER: The records I need are from January 2nd, 1980.',
     ]);
 
     const api = await client();

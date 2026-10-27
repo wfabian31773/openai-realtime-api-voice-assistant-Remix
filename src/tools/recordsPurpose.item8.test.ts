@@ -4,7 +4,7 @@ import { runTool } from './registry';
 import './sharedPatientTools';
 import './medicalRecordsTools';
 import { resetGateAttempts } from './gateAttempts';
-import { recordCallerSpeech, releaseCallerSpeech } from '../services/symptomCorroboration';
+import { recordCallerSpeech, releaseCallerSpeech, noteCallerTranscript } from '../services/symptomCorroboration';
 const api = vi.hoisted(() => ({ createTicket: vi.fn(), lookupProviderAndLocation: vi.fn() }));
 vi.mock('../../server/services/ticketingApiClient', () => ({ ticketingApiClient: api, lookupWasUnavailable: () => false }));
 const BASE = { first_name: 'Taylor', last_name: 'Example', date_of_birth: '01/02/1980', callback_number: '2025550142', requester: 'I am the patient' };
@@ -64,4 +64,44 @@ describe('item #8: a non-records call never becomes records work', () => {
     expect(result.success).toBe(true);
     expect(api.createTicket.mock.calls[0]?.[0]).toMatchObject({ departmentId: 16, capClockApplies: false });
   });
+});
+
+
+describe('self-review: request-scoped caller evidence', () => {
+  it('does not read caller identity or employer as a contradictory request', async () => {
+    const sid = 'CA' + '9'.repeat(32);
+    noteCallerTranscript(sid, ["CALLER: I am Taylor from Example Surgery Center"]);
+    try {
+      const result = await runTool('file_records_ticket', { ...BASE, requester: 'provider', call_sid: sid,
+        request_description: 'Please fax my chart to the new doctor' });
+      expect(result.success).toBe(true);
+      expect(api.createTicket.mock.calls[0]?.[0]).toMatchObject({ departmentId: 16 });
+    } finally { releaseCallerSpeech(sid); }
+  });
+
+  it('uses the same captured request in classification and filing, excluding identity turns', async () => {
+    const sid = 'CA' + 'a'.repeat(32);
+    noteCallerTranscript(sid, [
+      'CALLER: Please move my appointment to Friday',
+      'CALLER: My name is Taylor Example',
+      'CALLER: January second nineteen eighty',
+    ]);
+    try {
+      const input = { ...BASE, call_sid: sid, request_description: 'Patient requests medical records', form_channel: 'sms' };
+      expect(await runTool('classify_records_request', input)).toMatchObject({ is_records_request: false, department_id: 9 });
+      expect((await runTool('file_records_ticket', input)).success).toBe(true);
+      const payload = api.createTicket.mock.calls[0]?.[0];
+      expect(payload).toMatchObject({ departmentId: 9, requestTypeId: 32, requestReasonId: 147 });
+      expect(payload.description).toContain('please move my appointment to friday');
+      expect(payload.description).not.toMatch(/name is|nineteen eighty|records clock/);
+    } finally { releaseCallerSpeech(sid); }
+  });
+
+  it.each(['Please fax my OCT images to my doctor', 'ROI request', 'I want to inspect my file', 'Please complete my DMV form'])(
+    'files supported records work without redirecting it: %s', async request_description => {
+      expect(await runTool('classify_records_request', { request_description })).toMatchObject({ is_records_request: true, department_id: 16 });
+      expect((await runTool('file_records_ticket', { ...BASE, request_description, form_channel: 'sms' })).success).toBe(true);
+      expect(api.createTicket.mock.calls[0]?.[0]).toMatchObject({ departmentId: 16, requestPathway: 'pending_authorization', capClockApplies: false, formChannel: 'sms' });
+    },
+  );
 });

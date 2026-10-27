@@ -1,5 +1,5 @@
 import { recordsLinePurpose, recordsRequestText, recordsLineRedirect } from '../../shared/records-request-intent';
-import { callerSaid } from '../services/symptomCorroboration';
+import { callerUtterances } from '../services/symptomCorroboration';
 /**
  * The tools a Medical Records agent needs, and nothing else.
  *
@@ -46,6 +46,25 @@ import { gateRefusalsSoFar, gateRefusalAgeMs, noteGateRefusal, noteCallFact, cal
  */
 export function patientScope(value: unknown): string {
   return typeof value === 'string' && /^-p\d{1,3}$/.test(value) ? value : '';
+}
+
+/**
+ * Correct a model's invented records summary only from an actual caller request.
+ * An employer or a surname containing a queue word is not contrary evidence.
+ * Keep turn boundaries: identity answers must not become the request/SMS body.
+ * A PCP patient scope owns its own narrative, independent of the other patients.
+ */
+function requestDescription(input: Record<string, unknown>): string {
+  const supplied = recordsRequestText(str(input.request_description));
+  if (patientScope(input.patient_scope) || recordsLinePurpose(supplied) !== 'records') return supplied;
+  const turns = callerUtterances(str(input.call_sid));
+  if (recordsLinePurpose(turns.join('\n')) === 'records') return supplied;
+  const requests = turns.filter(turn => {
+    const purpose = recordsLinePurpose(turn);
+    return purpose !== 'unknown' && purpose !== 'records'
+      && /\b(?:need|want|would like|please|question|what time|when|how|can you|has my|reschedul\w*|schedul\w*|cancel\w*|confirm\w*|reprogram\w*|necesit\w*|quiero|cambiar)\b/i.test(turn);
+  });
+  return requests.length ? recordsRequestText(requests.join('\n')) : supplied;
 }
 
 // ---------------------------------------------------------------- what kind
@@ -219,7 +238,7 @@ registerTool({
     const { classifyRecordsRequest, MEDICAL_RECORDS_DEPARTMENT_ID } = await import(
       './medicalRecordsTaxonomy'
     );
-    const description = str(input.request_description);
+    const description = requestDescription(input);
     const redirect = recordsLineRedirect(description);
     if (redirect) return {
       success: true, classified: true, is_records_request: false,
@@ -398,14 +417,7 @@ registerTool({
     const dob = str(input.date_of_birth);
     const phone = str(input.callback_number);
     const callSid = str(input.call_sid);
-    const spoken = callerSaid(callSid);
-    // Known caller intent wins over a model-generated records template. An
-    // identity-only turn is not request evidence; use the supplied request then.
-    const supplied = str(input.request_description);
-    const spokenPurpose = recordsLinePurpose(spoken);
-    const description = recordsRequestText(spoken && spokenPurpose !== 'unknown'
-      && spokenPurpose !== 'records' && recordsLinePurpose(supplied) === 'records'
-      && !patientScope(input.patient_scope) ? spoken : supplied);
+    const description = requestDescription(input);
     const redirect = recordsLineRedirect(description);
 
     /**

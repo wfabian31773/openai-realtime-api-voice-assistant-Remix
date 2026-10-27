@@ -570,3 +570,22 @@ before the fix; removing its create-ticket normalization makes 14 API tests
 fail. Both variants were restored and retested. The requested root typechecks
 pass. The dashboard production build is blocked by unavailable client React,
 React Router and React Query dependencies/types; the server build passes.
+
+
+Self-review (2026-10-27) extends the request evidence to the existing ROI,
+imaging/OCT/visual-field, inspection and letter/form workflows. It excludes
+refused delivery and clinical interpretation, and keeps the established
+scheduling reasons (including same-day/availability and Spanish scheduling).
+Classification and filing now read the same captured request turns. A caller's
+employer or identity-only answer cannot override a genuine records summary,
+and those answers are not copied into a redirected request's SMS body. PCP's
+per-patient scopes still keep their own narrative. Tests exercise the runtime's
+transcript-feed function and both real tool entry points; the redirect-before-form
+check now asserts behavior instead of source-code order.
+
+Resume validation: all 150 tests in the four touched test files pass, and a
+TypeScript project covering the branch's changed files and their imports passes.
+Restoring the initial intent policy fails 23 policy checks. Bypassing captured
+request evidence in classification fails the classification/filing regression.
+Both mutations were restored before the final run. The shared policy and its
+tests are identical in both repositories. No migration is included in this branch.

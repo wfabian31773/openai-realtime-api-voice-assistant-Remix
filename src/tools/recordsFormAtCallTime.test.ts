@@ -33,7 +33,7 @@ const PATIENT = {
   first_name: 'Testpatient',
   last_name: 'Example',
   date_of_birth: '01/02/1950',
-  callback_number: '845-531-7471',
+  callback_number: '202-555-0142',
   request_description: 'I need a copy of my medical records',
 };
 
@@ -358,14 +358,16 @@ describe('v79 — the tool asks the channel when the model did not', () => {
     expect(p.departmentId).not.toBe(16);
   });
 
-  it('the source: the redirect is decided BEFORE the channel ask, on the same words', () => {
-    const src = readFileSync(join(__dirname, 'medicalRecordsTools.ts'), 'utf8');
-    const redirectAt = src.indexOf("const redirect = recordsLineRedirect(description)");
-    const askAt = src.indexOf("formAskOutcome(callSid, FORM_CHANNEL_ASK)");
-    expect(redirectAt).toBeGreaterThan(0);
-    expect(askAt).toBeGreaterThan(redirectAt);
-    // and it is decided exactly once
-    expect(src.slice(src.indexOf("name: 'file_records_ticket'")).split('recordsLineRedirect(description').length - 1).toBe(1);
+  it('files a scheduling request before asking any records-only question', async () => {
+    const api = await client();
+    const create = vi.spyOn(api, 'createTicket').mockResolvedValueOnce(filed('VA-SYNTHETIC-REDIRECT'));
+    const result = await runTool('file_records_ticket', {
+      ...PATIENT, requester: undefined, request_description: 'Please reschedule my appointment', call_sid: freshSid(),
+    });
+    expect(result.success).toBe(true);
+    expect(create).toHaveBeenCalledOnce();
+    expect(create.mock.calls[0][0]).toMatchObject({ departmentId: 9, requestTypeId: 32, requestReasonId: 147 });
+    expect(create.mock.calls[0][0]).not.toHaveProperty('formChannel');
   });
 });
 
