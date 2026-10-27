@@ -186,7 +186,7 @@ const RULINGS: Array<[string, RegExp]> = [
   ['ghost calls terminate', /terminate_call with reason "ghost_call"/],
   ['date of birth is asked in parts', /starting with the month, then\s*\n?\s*the day, then the year/],
   ['the create_ticket wait line', /Give me one moment while I get this submitted for you/],
-  ['B2B callers are not blocked on a date of birth', /DOB IS OPTIONAL FOR BUSINESS CALLERS/],
+  ['held DOB and clinic are used before asking for missing facts', /use the validated record's DOB and clinic if held/i],
   ['new-or-existing on a lookup miss', /are you a new patient with us, or have you been seen/],
   ['filing a partial ticket is the job', /Filing a partial ticket IS the job/],
   ['a failed tool is never an escalation', /A failed tool is NOT an escalation case/],

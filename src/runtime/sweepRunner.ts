@@ -39,6 +39,7 @@ import {
   type SweepSkipReason,
 } from "./requestSweep";
 import type { VoiceCallRecord } from "./mediaStreamBridge";
+import type { CreateTicketParams } from '../../server/services/ticketingApiClient';
 import { verifiedIdentityFor } from "../tools/verifiedIdentity";
 
 export interface SweepOutcome {
@@ -49,7 +50,9 @@ export interface SweepOutcome {
 }
 
 /** The POST, injected so a test proves the payload without a network. */
-export type SweepFiler = (ticket: ReturnType<typeof buildSweptTicket>) => Promise<{
+type SweepTicket = ReturnType<typeof buildSweptTicket> & Pick<CreateTicketParams,
+  'validatedPatient' | 'patientBirthYear' | 'patientBirthMonth' | 'patientBirthDay' | 'locationOfLastVisit'>;
+export type SweepFiler = (ticket: SweepTicket) => Promise<{
   success: boolean;
   ticketNumber?: string;
   /** Durably queued in the outbox; a number will follow from the retry worker. */
@@ -71,6 +74,9 @@ export type SweepFiler = (ticket: ReturnType<typeof buildSweptTicket>) => Promis
 const defaultFiler: SweepFiler = async (ticket) => {
   const { createTicketDurable } = await import("../services/durableTicketFiling");
   const res = await createTicketDurable({
+    ...(ticket.validatedPatient ? { validatedPatient: ticket.validatedPatient } : {}),
+    ...(ticket.patientBirthYear ? { patientBirthYear: ticket.patientBirthYear, patientBirthMonth: ticket.patientBirthMonth, patientBirthDay: ticket.patientBirthDay } : {}),
+    ...(ticket.locationOfLastVisit ? { locationOfLastVisit: ticket.locationOfLastVisit } : {}),
     departmentId: ticket.departmentId,
     requestTypeId: ticket.requestTypeId,
     requestReasonId: ticket.requestReasonId,
@@ -119,12 +125,13 @@ const defaultFiler: SweepFiler = async (ticket) => {
 };
 
 /**
- * NO DATE OF BIRTH IS SENT, AND THAT IS NOT AN OVERSIGHT.
+ * NO DATE OF BIRTH IS REQUIRED.
  *
  * Traced 2026-09-03: `/api/voice-agent/create-ticket` validates
  * `patientBirthMonth/Day/Year` as OPTIONAL. Every `missingFields:
- * ["date_of_birth"]` refusal in that day's logs came from OUR OWN tools. A
- * swept ticket therefore files cleanly without one, and the request survives
+ * ["date_of_birth"]` refusal in that day's logs came from OUR OWN tools.
+ * A captured validated DOB is carried when held. A swept ticket still files
+ * without one, and the request survives
  * a gate that was never the server's — which is the single largest reason
  * these requests were lost.
  */
@@ -185,7 +192,7 @@ export async function runRequestSweep(
     }
 
     console.info(sweepMarker(record.slug, record.callSid));
-    const ticket = buildSweptTicket(input, decision);
+    const ticket: SweepTicket = buildSweptTicket(input, decision);
     if (identity) {
       const dob = readDobQuietly(identity.dateOfBirth ?? '');
       Object.assign(ticket, ticketIdentityFields(record.callSid, identity.firstName, identity.lastName),

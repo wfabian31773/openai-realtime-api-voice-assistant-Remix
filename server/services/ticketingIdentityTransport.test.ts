@@ -14,3 +14,12 @@ it('67395 / VA-75419: the shared HTTP client carries a captured match for recove
   expect(send.mock.calls[0][2]).toMatchObject({ patientFullName: 'Alex Synthetic', patientDOB: '1970-01-02', patientPhone: '5555550100',
     validatedPatient: { callSid: sid, status: 'validated', personId: '00000000-0000-4000-8000-000000000001' } });
 });
+it('create-ticket transport does not reattach a held record after a DOB correction', async () => {
+  rememberVerifiedIdentity(sid, { firstName: 'Alex', lastName: 'Synthetic', dateOfBirth: '1970-01-02', certain: true });
+  const api = new TicketingApiClient();
+  vi.spyOn(api as any, 'warmUpIfStale').mockResolvedValue(true);
+  const send = vi.spyOn(api as any, 'makeRequest').mockResolvedValue({ success: false, error: 'controlled failure' });
+  await api.createTicket({ departmentId: 3, requestTypeId: 1, requestReasonId: 1, patientFirstName: 'Alex', patientLastName: 'Synthetic',
+    patientPhone: '5555550100', patientBirthYear: '1980', patientBirthMonth: '02', patientBirthDay: '03', description: 'Synthetic request', callData: { callSid: sid } });
+  expect(send.mock.calls[0][2]).toMatchObject({ patientBirthYear: '1980', validatedPatient: undefined });
+});

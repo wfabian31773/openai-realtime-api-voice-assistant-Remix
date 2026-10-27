@@ -11,12 +11,14 @@ export interface ValidatedPatient {
 }
 const value = (v: unknown) => typeof v === 'string' ? v.trim() : '';
 const isoDOB = (v?: string) => { const d = v ? readDobQuietly(v) : null; return d ? `${d.year}-${d.month}-${d.day}` : undefined; };
-export function joinedAppointments(context: PatientScheduleContext): Pick<VerifiedIdentity, 'nextAppointment' | 'lastVisit' | 'usualOffice'> {
+export function joinedAppointments(context: PatientScheduleContext): Pick<VerifiedIdentity, 'nextAppointment' | 'lastVisit' | 'usualOffice' | 'lastPhysicianSeen' | 'lastProviderSeen'> {
   const convert = (a?: AppointmentSummary): IdentityAppointment | undefined => a?.isoDate && a.location && a.location !== 'Unknown'
     ? { date: a.isoDate.slice(0, 10), location: a.location, ...(a.provider && a.provider !== 'Unknown' ? { provider: a.provider } : {}) } : undefined;
   const nextAppointment = convert(context.upcomingAppointments?.[0]);
   const lastVisit = convert(context.pastAppointments?.[0]);
   return { ...(nextAppointment ? { nextAppointment } : {}), ...(lastVisit ? { lastVisit } : {}),
+    ...(context.lastPhysicianSeen ? { lastPhysicianSeen: context.lastPhysicianSeen } : {}),
+    ...(context.lastProviderSeen ? { lastProviderSeen: context.lastProviderSeen } : {}),
     ...((nextAppointment?.location || lastVisit?.location || context.lastLocationSeen) ? { usualOffice: nextAppointment?.location || lastVisit?.location || context.lastLocationSeen } : {}) };
 }
 export function validatedPatientFor(callSid?: string, first?: string, last?: string, dob?: string): ValidatedPatient | undefined {
@@ -31,8 +33,8 @@ export function validatedPatientFor(callSid?: string, first?: string, last?: str
     ...(held.nextAppointment ? { nextAppointment: held.nextAppointment } : {}),
     ...(held.lastVisit ? { lastVisit: held.lastVisit } : {}) };
 }
-export function ticketIdentityFields(callSid: string, first: string, last: string) {
-  const validatedPatient = validatedPatientFor(callSid, first, last);
+export function ticketIdentityFields(callSid: string, first: string, last: string, dob?: string) {
+  const validatedPatient = validatedPatientFor(callSid, first, last, dob);
   return validatedPatient ? { validatedPatient } : {};
 }
 /** Shared live filing gate: ask one missing field, never ask for held facts. */

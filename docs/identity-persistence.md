@@ -68,6 +68,40 @@ override a different caller-stated surname. An explicit
 `identity_corrected` lookup clears it before searching again. Caller-stated
 name spelling and valid DOB input remain intact at transport.
 
+## Local self-review (2026-10-27)
+
+Fixed P2 gaps in the paired path:
+
+- Every queue filing tool and the HTTP client's fallback compare the supplied
+  DOB before attaching held identity, so a corrected DOB cannot travel with the
+  old validated record and cause a permanent receiver refusal.
+- The production teardown filer carries DOB, clinic and `validatedPatient` into
+  the durable payload. Testing only the injected filer had missed this loss;
+  outbox retries now retain those facts after the in-memory identity expires.
+- Surgery retains the joined record's physician and last clinician and uses
+  them without repeating a name/DOB search. Candidate or conflicting identities
+  still supply neither routing facts nor validated context.
+- Caller-named clinics survive directory-unavailable and exhausted-resolution
+  pass-throughs. They remain unverified; the ticketing API resolves the name.
+- The Grok after-hours prompt and both prompt contract suites now match the
+  branch's held-DOB/clinic policy, which had only reached the legacy prompt.
+
+New behavioral regressions failed before their fixes. The production sweep test
+reaches the durable filer and exercises a queued outcome. Auth/signature checks
+and database safeguards are unchanged. No migration or production access is used.
+
+Final verification: **425 tests pass in 23 files**, including touched non-socket
+files, the real sweep filer, durable filing, request recovery and identity import
+boundaries. `npx tsc --noEmit -p .` passes. Five targeted mutations (DOB guard
+removed, sweep identity dropped, joined physician dropped, caller clinic dropped,
+runtime identity prompt removed) each fail the corresponding regression.
+The complete `voiceRuntime.test.ts` was attempted: all **79 tests** fail because
+the sandbox rejects server `listen` with `EPERM`, then each harness times out.
+No socket test or security check was disabled to obtain the passing results.
+The isolated production build compiles the backend, then fails in the unchanged
+client dashboard on unavailable React/router dependencies/types. Full build
+success is not claimed.
+
 ## Files in this paired change
 
 - `docs/identity-persistence.md`

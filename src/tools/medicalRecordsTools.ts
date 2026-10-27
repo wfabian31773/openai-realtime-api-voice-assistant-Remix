@@ -949,7 +949,7 @@ registerTool({
     // Never submit-ticket: it re-derives the DEPARTMENT server-side and
     // defaults to 8.
     const res = await createTicketDurable({
-      ...ticketIdentityFields(callSid, first, last),
+      ...ticketIdentityFields(callSid, first, last, str(input.date_of_birth)),
       departmentId: filedDepartmentId,
       requestTypeId: filedTypeId,
       requestReasonId: filedReasonId,

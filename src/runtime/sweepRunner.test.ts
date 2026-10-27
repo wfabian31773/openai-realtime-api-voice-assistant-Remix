@@ -8,6 +8,9 @@ import { runRequestSweep, type SweepFiler } from "./sweepRunner";
 import type { VoiceCallRecord, ToolEvent } from "./mediaStreamBridge";
 import { rememberVerifiedIdentity, resetVerifiedIdentities } from "../tools/verifiedIdentity";
 
+const { durableFile } = vi.hoisted(() => ({ durableFile: vi.fn() }));
+vi.mock('../services/durableTicketFiling', () => ({ createTicketDurable: durableFile }));
+
 const SID = "CA00000000000000000000000000000042";
 
 function record(over: Partial<VoiceCallRecord> = {}): VoiceCallRecord {
@@ -49,6 +52,7 @@ function filer(): SweepFiler & { calls: unknown[] } {
 }
 
 beforeEach(() => {
+  durableFile.mockReset();
   resetVerifiedIdentities();
   rememberVerifiedIdentity(SID, {
     firstName: "Testpatient",
@@ -69,6 +73,16 @@ afterEach(() => {
 });
 
 describe("recovering a request the agent did not file", () => {
+  it('the production filer carries identity into the durable payload, not only the injected test filer', async () => {
+    rememberVerifiedIdentity(SID, { firstName: 'Testpatient', lastName: 'Example', dateOfBirth: '1950-01-02',
+      certain: true, personId: '00000000-0000-4000-8000-000000000001', usualOffice: 'Synthetic Clinic' });
+    durableFile.mockResolvedValue({ success: false, queued: true });
+    expect(await runRequestSweep(record())).toEqual({ filed: true });
+    expect(durableFile).toHaveBeenCalledWith(expect.objectContaining({
+      patientBirthYear: '1950', patientBirthMonth: '01', patientBirthDay: '02', locationOfLastVisit: 'Synthetic Clinic',
+      validatedPatient: expect.objectContaining({ status: 'validated', callSid: SID, personId: '00000000-0000-4000-8000-000000000001' }),
+    }));
+  });
   it("files it, on the queue the call arrived on", async () => {
     const file = filer();
     const out = await runRequestSweep(record(), file);

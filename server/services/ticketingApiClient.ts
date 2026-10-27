@@ -782,8 +782,10 @@ export class TicketingApiClient {
 
   async createTicket(params: CreateTicketParams): Promise<CreateTicketResponse> {
     const unnamed = /^unknown caller$/i.test(`${params.patientFirstName ?? ''} ${params.patientLastName ?? ''}`.trim());
+    const suppliedDob = params.patientBirthYear && params.patientBirthMonth && params.patientBirthDay
+      ? `${params.patientBirthYear}-${params.patientBirthMonth.padStart(2, '0')}-${params.patientBirthDay.padStart(2, '0')}` : undefined;
     params = { ...params, validatedPatient: params.validatedPatient ?? validatedPatientFor(params.callData?.callSid,
-      unnamed ? undefined : params.patientFirstName, unnamed ? undefined : params.patientLastName) };
+      unnamed ? undefined : params.patientFirstName, unnamed ? undefined : params.patientLastName, suppliedDob) };
     console.info("[TICKETING API] Creating ticket:", {
       patient: maskName(params.patientFirstName, params.patientLastName),
       phone: maskPhone(params.patientPhone),

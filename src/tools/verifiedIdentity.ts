@@ -98,6 +98,8 @@ export interface VerifiedIdentity {
   personId?: string;
   nextAppointment?: IdentityAppointment;
   lastVisit?: IdentityAppointment;
+  lastPhysicianSeen?: string;
+  lastProviderSeen?: string;
 }
 
 interface Entry extends VerifiedIdentity {
@@ -303,6 +305,8 @@ export function rememberVerifiedIdentity(
         ...(keptPersonId ? { personId: keptPersonId } : {}),
         nextAppointment: existingFresh.certain && !certain ? existingFresh.nextAppointment : identity.nextAppointment ?? existingFresh.nextAppointment,
         lastVisit: existingFresh.certain && !certain ? existingFresh.lastVisit : identity.lastVisit ?? existingFresh.lastVisit,
+        lastPhysicianSeen: existingFresh.certain && !certain ? existingFresh.lastPhysicianSeen : identity.lastPhysicianSeen ?? existingFresh.lastPhysicianSeen,
+        lastProviderSeen: existingFresh.certain && !certain ? existingFresh.lastProviderSeen : identity.lastProviderSeen ?? existingFresh.lastProviderSeen,
         certain: existingFresh.certain || certain,
         at: now,
       });
@@ -320,6 +324,8 @@ export function rememberVerifiedIdentity(
     ...(incomingPersonId ? { personId: incomingPersonId } : {}),
     nextAppointment: identity.nextAppointment,
     lastVisit: identity.lastVisit,
+    lastPhysicianSeen: identity.lastPhysicianSeen,
+    lastProviderSeen: identity.lastProviderSeen,
     certain,
     at: now,
   });
@@ -511,6 +517,8 @@ export function verifiedIdentityFor(callSid: string | undefined): VerifiedIdenti
     ...(entry.usualOffice ? { usualOffice: entry.usualOffice } : {}),
     ...(entry.nextAppointment ? { nextAppointment: entry.nextAppointment } : {}),
     ...(entry.lastVisit ? { lastVisit: entry.lastVisit } : {}),
+    ...(entry.lastPhysicianSeen ? { lastPhysicianSeen: entry.lastPhysicianSeen } : {}),
+    ...(entry.lastProviderSeen ? { lastProviderSeen: entry.lastProviderSeen } : {}),
   };
 }
 

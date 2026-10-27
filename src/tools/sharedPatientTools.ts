@@ -718,6 +718,9 @@ function officeAskSpent(callSid: string | undefined): boolean {
  * `resolved: false` is the tool saying plainly that it could not place this.
  */
 function unresolvedPassthrough(callSid: string | undefined, spoken: string): ToolResult {
+  // Keep the caller's answer even when it could not be mapped. This does not
+  // validate the office; filing still resolves it through the ticketing API.
+  rememberConfirmedClinic(callSid, spoken);
   /**
    * A LIVE COUNTER OF CALLS, AND IT HAS TO BE ONE PER CALL TO BE THAT.
    *
@@ -790,6 +793,7 @@ registerTool({
     const { lookupLocation, isDirectoryConfigured } = await import('../services/consoleDirectory');
     if (!isDirectoryConfigured()) {
       // No mirror: pass the cleaned string through rather than block a call.
+      rememberConfirmedClinic(callSid, cleaned.value);
       return { success: true, resolved: false, location: cleaned.value, verified: false };
     }
 

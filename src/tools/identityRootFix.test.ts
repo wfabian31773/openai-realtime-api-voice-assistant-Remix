@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { runTool } from './registry';
 import './sharedPatientTools';
 import './techTools';
+import './surgeryTools';
 import { resetVerifiedIdentities, verifiedIdentityFor, verifiedDobFor } from './verifiedIdentity';
 
 const { lookup, file, directory } = vi.hoisted(() => ({ lookup: vi.fn(), file: vi.fn(), directory: { configured: false } }));
@@ -10,7 +11,8 @@ vi.mock('../services/consoleDirectory', () => ({ isDirectoryConfigured: () => di
   lookupLocation: async () => ({ canonical: 'Testville', fileAs: 'Testville', facilityKind: 'clinic' }) }));
 vi.mock('../services/durableTicketFiling', () => ({ createTicketDurable: file, postFailureToolResult: () => ({ success: false }) }));
 vi.mock('../../server/services/ticketingApiClient', () => ({
-  ticketingApiClient: { lookupProviderAndLocation: async () => ({ success: true, locationId: 31 }) },
+  ticketingApiClient: { lookupProviderAndLocation: async (input: { providerName?: string }) => ({ success: true, locationId: 31,
+    ...(input.providerName === 'Synthetic Surgeon' ? { providerId: 77 } : {}) }) },
   lookupWasUnavailable: () => false,
 }));
 const sid = 'CA' + 'a'.repeat(32);
@@ -26,6 +28,24 @@ async function identify() {
   return runTool('lookup_patient', { call_sid: sid, first_name: 'Alex', last_name: 'Synthetic', date_of_birth: '01/01/1970' });
 }
 describe('Support Desk #1-4/#12 validated record carry', () => {
+  it('surgery uses the validated joined physician without searching by name again', async () => {
+    lookup.mockResolvedValue({ ...context, lastPhysicianSeen: 'Synthetic Surgeon', lastProviderSeen: 'Synthetic Optometrist' });
+    await identify();
+    const out = await runTool('file_surgery_ticket', { call_sid: sid,
+      callback_number: '5555550100', request_description: 'Question about my surgery date' });
+    expect(out.success).toBe(true);
+    expect(file.mock.calls[0][0]).toMatchObject({ providerId: 77, lastProviderSeen: 'Synthetic Surgeon' });
+    expect(lookup).toHaveBeenCalledTimes(1);
+  });
+  it('a caller-supplied conflicting DOB never travels with the previous validated identity', async () => {
+    await identify();
+    const out = await runTool('file_tech_ticket', { call_sid: sid, first_name: 'Alex', last_name: 'Synthetic',
+      date_of_birth: '1980-02-03', location: 'Caller Clinic', callback_number: '5555550100', request_description: 'Callback requested' });
+    expect(out.success).toBe(true);
+    expect(file.mock.calls[0][0]).toMatchObject({ patientBirthYear: '1980', patientBirthMonth: '02', patientBirthDay: '03' });
+    expect(file.mock.calls[0][0].validatedPatient).toBeUndefined();
+  });
+
   it('VA-76095: the clinic confirmed earlier in this call survives an omitted filing argument', async () => {
     directory.configured = true;
     expect(await runTool('resolve_location', { call_sid: sid, spoken_location: 'Testville', queue: 'tech' })).toMatchObject({ success: true, verified: true });
@@ -33,6 +53,16 @@ describe('Support Desk #1-4/#12 validated record carry', () => {
     expect((await runTool('file_tech_ticket', args)).success).toBe(true);
     expect(file.mock.calls[0][0]).toMatchObject({ locationOfLastVisit: 'Testville' });
     expect(await runTool('file_tech_ticket', { ...args, call_sid: 'CA' + 'b'.repeat(32) })).toMatchObject({ success: false, missingFields: ['location'] });
+  });
+
+  it('a caller-named clinic is still carried when the directory is unavailable', async () => {
+    expect(await runTool('resolve_location', { call_sid: sid, spoken_location: 'Caller Clinic', queue: 'tech' }))
+      .toMatchObject({ success: true, resolved: false, verified: false });
+    const out = await runTool('file_tech_ticket', { call_sid: sid, first_name: 'Alex', last_name: 'Synthetic',
+      date_of_birth: '1970-01-01', callback_number: '5555550100', request_description: 'Callback requested' });
+    expect(out.success).toBe(true);
+    expect(file.mock.calls[0][0]).toMatchObject({ locationOfLastVisit: 'Caller Clinic' });
+    expect(file.mock.calls[0][0].validatedPatient).toBeUndefined();
   });
 
   it('VA-75419: an established match is reused without another lookup', async () => {

@@ -1,4 +1,4 @@
-import { ticketIdentityFields } from './ticketIdentity';
+import { ticketIdentityFields, validatedPatientFor } from './ticketIdentity';
 /**
  * The tools a Surgery-Coordination agent needs, and nothing else.
  *
@@ -33,7 +33,7 @@ import { createTicketDurable, postFailureToolResult } from '../services/durableT
 import { loggableLookupError } from '../services/loggableTicketingError';
 import { gateRefusalsSoFar, noteGateRefusal } from './gateAttempts';
 import { decideDobEscape, dobStatusNote, dobEscapeMarker, type DobStatus } from './dobEscape';
-import { verifiedDobFor } from './verifiedIdentity';
+import { verifiedDobFor, verifiedIdentityFor } from './verifiedIdentity';
 
 /** This tool's own name, for the per-call gate counter. */
 const SURGERY_FILE_TOOL = 'file_surgery_ticket';
@@ -597,12 +597,15 @@ registerTool({
          * still be true, because it only describes the phone result. We would
          * attach that person's clinician. Found in review, 2026-08-18.
          */
-        const ctx = await scheduleLookupService.lookupByNameAndDOB(
-          first,
-          last,
-          `${parts.year}-${parts.month}-${parts.day}`,
-          { logIdentifiers: false },
-        );
+        const locked = validatedPatientFor(callSid, first, last, dob) ? verifiedIdentityFor(callSid) : undefined;
+        const ctx = locked
+          ? { patientFound: true, identity: { unique: true }, lastPhysicianSeen: locked.lastPhysicianSeen, lastProviderSeen: locked.lastProviderSeen }
+          : await scheduleLookupService.lookupByNameAndDOB(
+              first,
+              last,
+              `${parts.year}-${parts.month}-${parts.day}`,
+              { logIdentifiers: false },
+            );
         if (ctx.patientFound && ctx.identity?.unique !== false) {
           const rungs: Array<['patient_record' | 'last_clinician', string | undefined]> = [
             ['patient_record', ctx.lastPhysicianSeen],
@@ -746,7 +749,7 @@ registerTool({
     }
 
     const res = await createTicketDurable({
-      ...ticketIdentityFields(callSid, first, last),
+      ...ticketIdentityFields(callSid, first, last, str(input.date_of_birth)),
       departmentId: filedDepartmentId,
       requestTypeId: filedTypeId,
       requestReasonId: filedReasonId,
