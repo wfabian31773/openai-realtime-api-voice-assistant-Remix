@@ -1533,6 +1533,8 @@ export const contactApprovals = pgTable("contact_approvals", {
   payload: jsonb("payload").notNull(),
   payloadHash: varchar("payload_hash", { length: 64 }).notNull(),
   confirmTokenHash: varchar("confirm_token_hash", { length: 64 }),
+  // Short-lived hand-off secret, never exposed in approval views or audit.
+  confirmTokenPlaintext: varchar("confirm_token_plaintext", { length: 64 }),
   confirmExpiresAt: timestamp("confirm_expires_at", { withTimezone: true }),
   confirmUsedAt: timestamp("confirm_used_at", { withTimezone: true }),
   approvedBy: varchar("approved_by", { length: 64 }),

@@ -4,6 +4,11 @@ The runtime (`src/runtime/`) answers a Twilio call on `POST /voice/:slug` and
 runs an existing agent on the Grok wire. This is what to do to put a lane on
 it, and how to tell what happened.
 
+For Support Desk item #15 (VA-74600, 76186, 67478, VA-75007), see
+[read-only appointment access](appointment-access.md): the joined schedule
+returned to the voice tools, provider/office checks, existing-booking review,
+and the distinction between an empty, partial and unavailable schedule.
+
 **Read this first: no live Grok call has ever been made on this runtime.**
 Every claim below is proven offline against fake sockets, plus one real
 resolution of the agents through their own registry. The wire itself is a
