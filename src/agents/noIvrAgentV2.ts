@@ -21,7 +21,7 @@ import {
   type ConversationSlots,
 } from "../workflows";
 import { buildWorkflowDrivenPrompt, getWorkflowDirectiveForContext } from "../workflows/workflowPromptBuilder";
-import { LAST_NAME_FIELD_DESCRIPTION } from "../tools/contactCaptureGuidance";
+import { EMAIL_FIELD_DESCRIPTION, LAST_NAME_FIELD_DESCRIPTION } from "../tools/contactCaptureGuidance";
 import { keepFieldDescriptions } from "../services/toolFieldDescriptions";
 
 const describedTool: typeof tool = ((def: any) =>
@@ -425,6 +425,7 @@ Call this ONLY when you have collected ALL required information.`,
       ]).describe("Category of request"),
       request_summary: z.string().describe("Summary of what the patient needs"),
       preferred_contact: z.enum(["phone", "text", "email"]).optional(),
+      email: z.string().optional().describe(`${EMAIL_FIELD_DESCRIPTION} Required when preferred_contact is email.`),
       doctor_name: z.string().optional(),
       location: z.string().optional(),
       requires_callback: z.boolean().optional().describe("Set to FALSE for simple confirmations"),
@@ -484,6 +485,7 @@ Call this ONLY when you have collected ALL required information.`,
         requestCategory: params.request_category as TriageOutcome,
         requestSummary: finalSummary,
         preferredContact: params.preferred_contact || undefined,
+        email: params.email,
         doctorName: params.doctor_name || enrichedContext?.lastProviderSeen || undefined,
         location: params.location || enrichedContext?.lastLocationSeen || undefined,
         callData: {

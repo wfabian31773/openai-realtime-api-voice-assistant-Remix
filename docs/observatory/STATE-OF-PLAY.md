@@ -1539,3 +1539,13 @@ marker guards and `RUNTIME_LANE_SMOKE=1` real-lane construction. Final focused
 rerun: **8 files / 117 tests passed**. Full-project
 `tsc --noEmit --pretty false` passed with no diagnostics; `git diff --check`
 passed. Production before/after measurement is still outstanding as above.
+
+### PR review — no-IVR v2 email capture (2026-10-27)
+
+The v2 `create_ticket` tool now exposes the shared email spelling, read-back
+and confirmation guidance and forwards the complete address to the ticket
+payload. The field is optional for phone and text requests; an email preference
+still requires an address at the ticketing service. Synthetic tests exercise
+the model-facing schema and the agent-to-ticket mapping. Production impact
+has not been measured; the before/after ticket-path measurement above remains
+required before merge or deploy.

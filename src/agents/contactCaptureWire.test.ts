@@ -35,6 +35,7 @@ describe('contact guidance on the schema sent to the model', () => {
     ['after-hours', 'create_after_hours_ticket', 'patient_email', /complete address back.*confirm/],
     ['no-ivr-v2', 'lookup_schedule', 'last_name', /spell.*letter by letter/],
     ['no-ivr-v2', 'create_ticket', 'last_name', /spell.*letter by letter/],
+    ['no-ivr-v2', 'create_ticket', 'email', /complete address back.*confirm/],
     ['shared-create-ticket', 'create_ticket', 'patientLastName', /spell.*letter by letter/],
     ['shared-create-ticket', 'create_ticket', 'patientEmail', /complete address back.*confirm/],
   ] as const)('%s/%s.%s keeps its capture instruction', (agent, name, field, wording) => {
