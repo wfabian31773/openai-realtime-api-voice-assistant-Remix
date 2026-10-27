@@ -516,3 +516,57 @@ the code they add.
 4. Put the failing utterance into an offline test before changing code.
    `src/runtime/voiceRuntime.test.ts` drives a whole call with fake sockets
    on both sides; a real failure should be reproducible there first.
+
+
+## Records-line purpose gate — item #8 (2026-10-27)
+
+References: VA-73593, 73510, 73485, 73880, 75992, 67520, 67482, 67461, 67473, 67533; HVA VA-76695, 76349.
+
+`classify_records_request` returns `is_records_request: false` and the ordinary
+callback destination when the request is not for records. `file_records_ticket`
+rechecks deterministically before the form/channel/delivery asks. It uses the
+caller's captured request when that contradicts a model-generated MR request;
+identity-only speech does not override the request, and a scoped multi-patient
+request keeps its own narrative. Verified patient identity carry is unchanged.
+
+Non-records tickets have no CAP statement, records requester/pathway/clock fields,
+form channel, or delivery/date-range instructions. Scheduling goes to HVA Hub,
+surgery to Surgery Coordination, referral authorization and payer/vendor inquiries
+to PCP Support; unclear non-records work goes to HVA Hub / Other. Nobody is told
+to call another line. Existing identity and routing gates still apply.
+
+An actual records request stays in Medical Records even when it names an
+appointment, operation, referral, vendor or payer. Third-party requester handling
+and the patient pending-authorization/signature flow are unchanged. The nearby
+PR #376 behavior is protected without edits to PCP routing or queueRouting.ts.
+Ticketing's Support Desk bot classification still takes effect immediately.
+
+The pure policy in `shared/records-request-intent.ts` is mirrored in Ticketing,
+which owns the final decision on both voice creation endpoints and the case
+sweep. Keep the two copies and their shared policy tests aligned. Ship Ticketing
+first to protect older voice payloads; then voice stops offering the wrong form.
+No database/schema change or historical cleanup is included.
+
+Offline regression commands (external services mocked):
+
+```sh
+npx vitest run shared/records-request-intent.test.ts src/tools/recordsPurpose.item8.test.ts src/tools/medicalRecordsTools.test.ts src/tools/recordsFormAtCallTime.test.ts src/tools/recordsFilesWithoutAName.test.ts src/pcp/professionalRecordsReachMedicalRecords.test.ts
+npx tsc --noEmit -p .
+```
+
+All issue references use synthetic stand-ins, not retrieved transcripts. No
+production DB access or writes were permitted for this work. Population counts,
+production before/after effects and live call behavior are unmeasured; this is
+local proof only. Following deployment, the metric is non-records calls producing
+an MR case (target zero); the guard is genuine records requests, especially
+third-party requests, still reaching Medical Records. Do not bulk reclassify
+existing cases to improve that metric.
+
+Regression evidence for this change: the initial voice suite failed 14 of 17
+checks before the fix; a later result-envelope check failed all 12 non-records
+rows until `cap_clock_applies` was also corrected. The selected voice suites
+pass 236 tests. Ticketing's inline/sweep regression failed all 12 issue rows
+before the fix; removing its create-ticket normalization makes 14 API tests
+fail. Both variants were restored and retested. The requested root typechecks
+pass. The dashboard production build is blocked by unavailable client React,
+React Router and React Query dependencies/types; the server build passes.

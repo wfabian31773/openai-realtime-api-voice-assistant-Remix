@@ -118,7 +118,7 @@ describe('the department is never guessed', () => {
     expect(create.mock.calls[0][0].departmentId).toBe(16);
   });
 
-  it('only ever files a department 16 reason', async () => {
+  it('only files a department 16 reason for a records request', async () => {
     const api = await client();
     const create = vi.spyOn(api, 'createTicket').mockResolvedValue(ok('VA-R2'));
 
@@ -128,7 +128,6 @@ describe('the department is never guessed', () => {
       'records for my attorney',
       "I need a doctor's note",
       'I want to review my chart',
-      'something else entirely',
     ]) {
       await runTool('file_records_ticket', { ...BASE, request_description: text });
     }
