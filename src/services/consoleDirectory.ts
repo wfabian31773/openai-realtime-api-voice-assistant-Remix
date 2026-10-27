@@ -190,6 +190,75 @@ export function directoryKey(raw: string): string {
     .toLowerCase();
 }
 
+function providerMatchKey(raw: string): string {
+  return directoryKey(raw)
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim()
+    .replace(/\s+/g, ' ');
+}
+
+function editDistance(a: string, b: string): number {
+  const previous = Array.from({ length: b.length + 1 }, (_, i) => i);
+  for (let i = 1; i <= a.length; i += 1) {
+    let diagonal = previous[0];
+    previous[0] = i;
+    for (let j = 1; j <= b.length; j += 1) {
+      const above = previous[j];
+      previous[j] = Math.min(
+        previous[j] + 1,
+        previous[j - 1] + 1,
+        diagonal + (a[i - 1] === b[j - 1] ? 0 : 1),
+      );
+      diagonal = above;
+    }
+  }
+  return previous[b.length];
+}
+
+/**
+ * Match an exact or clearly unique small transcription error against the
+ * Console provider roster. Fuzzy hits must be at least 88% similar and the
+ * nearest candidate must beat the runner-up by at least five points; otherwise
+ * the caller keeps the original spelling for staff to resolve.
+ */
+export function matchProviderFromRoster(
+  raw: string,
+  roster: readonly DirectoryProvider[],
+): DirectoryProvider | null {
+  const key = providerMatchKey(raw);
+  if (!key) return null;
+
+  // Preserve the original exact spelling before folding accents/punctuation.
+  // Those folds can make two distinct roster names identical.
+  const originalKey = directoryKey(raw);
+  const exact = roster.filter((provider) => directoryKey(provider.key || provider.canonical) === originalKey);
+  if (exact.length) return exact.length === 1 ? exact[0] : null;
+
+  const normalized = roster.filter((provider) => providerMatchKey(provider.key || provider.canonical) === key);
+  if (normalized.length) return normalized.length === 1 ? normalized[0] : null;
+
+  // Short names are too easy to collapse into a different person with one
+  // character changed. Keep the established exact-only behavior for them.
+  if (key.length < 8) return null;
+
+  const ranked = roster
+    .map((provider) => {
+      const candidate = providerMatchKey(provider.key || provider.canonical);
+      const distance = editDistance(key, candidate);
+      const similarity = 1 - distance / Math.max(key.length, candidate.length);
+      return { provider, similarity };
+    })
+    .sort((a, b) => b.similarity - a.similarity);
+
+  // Rank the entire roster: a runner-up below 88% can still be too close to
+  // distinguish safely from a best candidate just above that threshold.
+  if (!ranked.length || ranked[0].similarity < 0.88) return null;
+  if (ranked[1] && ranked[0].similarity - ranked[1].similarity < 0.05) return null;
+  return ranked[0].provider;
+}
+
 async function load(): Promise<Snapshot | null> {
   const client = getPool();
   const [prov, loc] = await Promise.all([
@@ -325,7 +394,7 @@ export async function getDirectory(): Promise<Snapshot | null> {
 export async function lookupProvider(raw: string): Promise<DirectoryProvider | null> {
   const dir = await getDirectory();
   if (!dir) return null;
-  return dir.providers.get(directoryKey(raw)) ?? null;
+  return matchProviderFromRoster(raw, [...dir.providers.values()]);
 }
 
 /**

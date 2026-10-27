@@ -8,6 +8,7 @@ import { escalationDetailsMap } from '../services/escalationStore';
 import { markCallConcluded } from '../services/callConclusion';
 import { recordingExecute } from '../services/toolTimeline';
 import { keepFieldDescriptions } from '../services/toolFieldDescriptions';
+import { EMAIL_CONFIRMATION_DESCRIPTION, LAST_NAME_FIELD_DESCRIPTION } from '../tools/contactCaptureGuidance';
 import { withToolDirection } from '../services/toolDirection';
 import { scheduleLookupService } from '../services/scheduleLookupService';
 import {
@@ -740,7 +741,7 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
        * speech recognition, and a `.email()` here would refuse the whole
        * intake call rather than one field.
        */
-      callerEmail: z.string().min(3).optional(),
+      callerEmail: z.string().min(3).optional().describe(EMAIL_CONFIRMATION_DESCRIPTION),
       deliveryPreference: z.string().min(1).optional(),
       /**
        * WHERE A RECORDS REQUEST GOES. Operator, 2026-09-08 — his own test
@@ -772,7 +773,7 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
         + 'ask "who is the call about".',
       ),
       patientFirstName: z.string().min(1).optional(),
-      patientLastName: z.string().min(1).optional(),
+      patientLastName: z.string().min(1).optional().describe(LAST_NAME_FIELD_DESCRIPTION),
       patientDob: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
       patientMrn: z.string().min(1).optional(),
     }).strict(),

@@ -787,7 +787,7 @@ high-volume patient's history.
 
 ---
 
-## 12. `src/services/consoleDirectory.ts` (330 lines)
+## 12. `src/services/consoleDirectory.ts`
 
 **Responsible for** the in-memory provider/location snapshot read from CONSOLE —
 `getDirectory` (:285), `lookupProvider` (:314), `lookupLocation` (:320),
@@ -814,14 +814,14 @@ and `phreesiaSchedulingTool.test.ts`. All added patient fixtures are synthetic.
 
 | group | site |
 |---|---|
-| live call path | `src/tools/sharedPatientTools.ts:236` (`resolve_location`) and `:393` (`mostRecentAcceptable`) — so all four queues; `src/services/ticketFieldSanitizers.ts:206` (`resolveTicketLookupFields`) → `src/services/syncAgentService.ts:9` → the answering-service / no-ivr / after-hours filing path |
-| tests | `consoleDirectory.test.ts:7`, `locationAliases.test.ts:14` |
-| dead | `lookupProvider` has exactly one production caller (`ticketFieldSanitizers.ts:208`); nothing else uses the providers map |
+| live call path | `src/tools/sharedPatientTools.ts` (`resolve_location`, `mostRecentAcceptable`) — all four queues; `src/services/ticketFieldSanitizers.ts` (`resolveTicketLookupFields`) → `src/services/syncAgentService.ts` — answering-service / no-ivr / after-hours; `server/services/ticketingApiClient.ts` → `normalizeProviderNameForTicket` → `lookupProvider` — canonicalizes ticket provider names on the create path |
+| tests | `consoleDirectory.test.ts`, `locationAliases.test.ts`, `server/services/ticketingApiClientContactCapture.test.ts` |
+| provider roster | `lookupProvider` now uses exact matching first, then a unique fuzzy match against this same Console snapshot; ambiguous matches return null |
 
 **Queues affected: 4 (optical, surgery, tech, records) plus every line that
-files through `syncAgentService`.** `resolve_location` is in all four queue tool
-sets, and `usual_clinic`/`usual_office` on `lookup_patient` is resolved through
-this same snapshot.
+files through `syncAgentService` or `ticketingApiClient.createTicket`.**
+`resolve_location` is in all four queue tool sets, and provider names on every
+create-ticket call can be canonicalized against this same snapshot.
 
 **What it reads that it does not own** — `process.env.OBS_CONSOLE_DATABASE_URL`
 (:26 TTL override `CONSOLE_DIRECTORY_TTL_MS`, :64, :69); CONSOLE tables
@@ -862,30 +862,37 @@ alias entry writes `fileAs` onto every key pointing at it; concurrent
 
 ---
 
-## 13. `src/services/ticketFieldSanitizers.ts` (244 lines)
+## 13. `src/services/ticketFieldSanitizers.ts`
 
-**Responsible for** cleaning the two fields the ticketing app resolves by name —
-`sanitizeProviderName` (:104), `sanitizeLocationName` (:138), the combined
-`sanitizeTicketLookupFields` (:159) and the directory-checked
-`resolveTicketLookupFields` (:198).
+**Responsible for** cleaning and resolving provider/location names sent to the
+ticketing app — `sanitizeProviderName`, `sanitizeLocationName`, the combined
+`sanitizeTicketLookupFields`, directory-checked `resolveTicketLookupFields`,
+and `normalizeProviderNameForTicket` (exact or uniquely fuzzy Console roster
+match; original name retained on ambiguity or directory failure).
+`resolveTicketLookupFields` sends a matched provider's canonical spelling on
+the simplified submission path too. Fuzzy matching compares the best candidate
+to the entire roster; normalization collisions stay unresolved unless the
+original spelling matches exactly.
 
 **Who imports it**
 
 | group | site |
 |---|---|
 | live call path — the four queues | `src/tools/opticalTools.ts:163`, `src/tools/surgeryTools.ts:206`, `src/tools/techTools.ts:183`, `src/tools/medicalRecordsTools.ts:264`, `src/tools/sharedPatientTools.ts:230` (`resolve_location`) — all dynamic |
-| live call path — answering service | `src/services/syncAgentService.ts:9` (both `sanitizeTicketLookupFields` and `resolveTicketLookupFields`) |
+| live call path — answering service | `src/services/syncAgentService.ts` (both `sanitizeTicketLookupFields` and `resolveTicketLookupFields`) |
+| live call path — all create-ticket callers | `server/services/ticketingApiClient.ts` calls `normalizeProviderNameForTicket` before serializing the request body |
 | tests | `ticketFieldSanitizers.test.ts`, `consoleDirectory.test.ts:8`, `providerCorpus.test.ts:9` |
 | dead | none |
 
-**Queues affected: 4 (optical, surgery, tech, records) plus every line filing
-through `syncAgentService`.** The queue tools use only the **pure** functions;
-`resolveTicketLookupFields` — the one that consults CONSOLE — is used **only by
-`syncAgentService`**, never by a queue tool.
+**Queues affected: 4 (optical, surgery, tech, records) plus every line using
+`ticketingApiClient.createTicket`.** Provider canonicalization is centralized
+at the create-ticket boundary, so queue filing tools and other callers use the
+same roster rule.
 
-**What it reads that it does not own** — nothing in the pure path (:44-156 are
-constants and regexes). `resolveTicketLookupFields` dynamically imports
-`./consoleDirectory` (:206) and therefore reads CONSOLE.
+**What it reads that it does not own** — the string cleaners use constants and
+regexes only. `resolveTicketLookupFields` and `normalizeProviderNameForTicket`
+dynamically import `./consoleDirectory` and therefore read its read-only
+Console snapshot.
 
 **What silently swallows its errors**
 

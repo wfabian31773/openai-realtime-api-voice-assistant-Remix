@@ -496,6 +496,42 @@ type. `surgery`, `tech` and `records` already resolve clean (§4). `no-ivr` and
 `pcp` need §6b first, because they do transfer and those six calls are exactly
 the code they add.
 
+## 6d. Name, email and provider capture
+
+Item #14 (`VA-76200`, `VA-76188`, `VA-76215`) is covered in the agent-visible
+tool descriptions and the common ticket client. Verify deployment using
+`voice-runtime-v117-contact-capture-20261027` from `/voice/health`:
+
+- A validated joined record supplies identity and contact fields it already
+  holds. Do not ask for or overwrite those fields again.
+- When the surname is missing or uncertain, ask for it separately, have the
+  caller spell it letter by letter, and repeat the spelling back when
+  transcription may have changed it into a place name.
+- For a newly supplied or changed email address, ask the caller to spell it,
+  read back the complete address, and wait for confirmation before filing.
+  Pass the entire confirmed address unchanged. Validation rejects an address
+  longer than 254 characters; it does not truncate one. The local
+  `patient_email` columns are unbounded `varchar` fields.
+- Both create-ticket and simplified submission canonicalize an exact or
+  uniquely close provider name using the read-only Patient Console roster. A
+  fuzzy hit must score at least 88% similarity and beat the next candidate in
+  the entire roster by five percentage points, including candidates below 88%.
+  Accent/punctuation normalization that matches multiple roster entries is
+  ambiguous; an original exact spelling wins before normalization. The common
+  create-ticket client keeps the original wording on ambiguity or directory
+  failure; simplified submission retains its existing unknown-provider policy.
+- Answering-service and no-ivr-v2 preserve the new field descriptions through
+  the SDK's schema conversion. Types, required fields and validation stay as
+  declared in their original schemas.
+
+Offline coverage uses synthetic names and addresses:
+`src/tools/contactCapture.test.ts`,
+`src/services/consoleDirectory.test.ts`,
+`src/utils/contactValidation.test.ts`, and
+`server/services/ticketingApiClientContactCapture.test.ts`. Agent-visible SDK
+schemas are exercised in `src/agents/contactCaptureWire.test.ts` and
+`src/runtime/toolFieldDescriptionsReachTheWire.test.ts`.
+
 ## 7. What is not covered
 
 - **`azul-scheduling` still cannot transfer** — see §3. Scheduling for San

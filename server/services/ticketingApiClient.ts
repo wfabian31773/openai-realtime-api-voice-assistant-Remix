@@ -3,6 +3,7 @@ import { shadowTap } from '../../src/shadow/tap'; // observation-only tap; no-op
 import { isNoTicketError } from './ticketingSyncPolicy';
 import type { PcpTicketPayload, PcpTicketResponse, PcpWithdrawRequest, PcpWithdrawResponse } from '../../src/pcp/pcpTicketing';
 import { noteTicketFiled } from './ticketFilingPulse';
+import { normalizeProviderNameForTicket } from '../../src/services/ticketFieldSanitizers';
 
 export interface CallData {
   callSid?: string;
@@ -808,10 +809,13 @@ export class TicketingApiClient {
     }
 
     try {
+      const requestParams = params.lastProviderSeen
+        ? { ...params, lastProviderSeen: await normalizeProviderNameForTicket(params.lastProviderSeen) }
+        : params;
       const response = await this.makeRequest<CreateTicketResponse>(
         "/api/voice-agent/create-ticket",
         "POST",
-        params
+        requestParams
       );
 
       console.info(

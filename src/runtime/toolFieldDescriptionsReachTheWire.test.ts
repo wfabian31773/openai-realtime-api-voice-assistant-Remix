@@ -260,8 +260,11 @@ describe('what the descriptions cost on the wire', () => {
    * unaffected; this is the first ceiling on the tools themselves.
    */
   it.each([
-    ['no-ivr', 12_500],
-    ['pcp', 6_400],
+    // Item #14 + main's appointment-access fields. Measured on the bound tools
+    // after that merge: no-ivr 13,113 chars; pcp 6,879 chars. The ceiling
+    // stays a ratchet, not a target — do not grow the descriptions to fill it.
+    ['no-ivr', 13_200],
+    ['pcp', 7_000],
   ] as const)('%s stays under %i characters', (slug, ceiling) => {
     expect(JSON.stringify(built.get(slug)!.lane.agent.tools).length).toBeLessThan(ceiling);
   });

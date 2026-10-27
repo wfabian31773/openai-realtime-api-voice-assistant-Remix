@@ -1485,7 +1485,72 @@ After the deploy, the same population should read 0 on the second query,
 and optical tickets with no `location_id` must not rise (before-arm
 2026-10-01: 15 of 391).
 
-## 16. No-IVR answer and record integrity — 2026-10-27 (#9, #10, #11, #20)
+---
+
+## 16. Item #14 — name, email and provider capture (2026-10-27)
+
+Offline changes for `VA-76200`, `VA-76188` and `VA-76215`:
+
+- Missing or uncertain surnames are asked separately and spelled letter by
+  letter. The guidance does not ask for a surname already held by a validated
+  joined record.
+- New or changed email addresses are spelled, read back in full and confirmed
+  before filing. The voice client sends the complete value unchanged; address
+  validation rejects lengths over 254 instead of clipping them.
+- `ticketingApiClient.createTicket` canonicalizes exact or uniquely fuzzy
+  provider matches against the read-only Patient Console roster. Ambiguous
+  matches and directory outages retain the supplied name.
+
+Synthetic offline coverage:
+
+```
+npx vitest run src/services/consoleDirectory.test.ts \
+  src/utils/contactValidation.test.ts src/tools/contactCapture.test.ts \
+  server/services/ticketingApiClientContactCapture.test.ts
+```
+
+No production database was accessed, and no before/after production number was
+taken. Per `docs/BACKEND_HANDOFF.md`, the ticket-path result still needs that
+read-only measurement before merge/deploy. No migration was added.
+
+### Self-review of item #14 (2026-10-27)
+
+Last touched by: Codex. Reviewed `main...HEAD`; fixes stay within contact
+capture and provider matching. All findings below are fixed:
+
+| Priority | Finding | Fix and evidence |
+|---|---|---|
+| P2 | `consoleDirectory.ts`: the fuzzy runner-up was filtered out below 88%, admitting ambiguous matches | Rank the entire roster before checking the five-point margin. A synthetic 88.24%/86.67% pair failed before the fix and passes now. |
+| P2 | `consoleDirectory.ts`: normalized exact matches picked the first of two names differing in accent/punctuation | Original exact spelling wins first; a normalized match must be unique. Regression covers both roster orders. |
+| P2 | `ticketFieldSanitizers.ts`: simplified submission accepted a fuzzy match but sent the misspelling | Send the matched canonical name. Tests exercise both the resolver and the real simplified submission through the HTTP payload, with a synthetic cached roster. |
+| P2 | `answeringServiceAgent.ts` / `noIvrAgentV2.ts`: SDK conversion discarded the new contact descriptions | Preserve descriptions using the existing helper. Five wire assertions failed before the fix; tests also verify invalid types remain refused and surname required status stays unchanged. |
+| P2 | `toolFieldDescriptionsReachTheWire.test.ts`: both existing size guards failed on the added contact instructions | Record measured sizes (12,917 and 6,627 characters) and set bounded ceilings of 13,000 and 6,700. |
+| P3 | `readiness.ts`: contact changes reused v116's deployment marker | Bump to `voice-runtime-v117-contact-capture-20261027` and update the runbook and marker ledger. |
+
+The ticket-client integration test now uses the real directory matcher rather
+than a canned provider hit. It also checks ambiguous/unmatched providers, an
+unconfigured directory, a configured directory failure, unchanged full email,
+and both submission endpoints. New fixtures are synthetic. No authentication
+or signature checks changed; no migration exists in the branch diff.
+
+Validation: **39 test files / 772 tests passed**, including all branch-touched
+test files, queue filing tools, after-hours regressions, wire/prompt checks,
+marker guards and `RUNTIME_LANE_SMOKE=1` real-lane construction. Final focused
+rerun: **8 files / 117 tests passed**. Full-project
+`tsc --noEmit --pretty false` passed with no diagnostics; `git diff --check`
+passed. Production before/after measurement is still outstanding as above.
+
+### PR review — no-IVR v2 email capture (2026-10-27)
+
+The v2 `create_ticket` tool now exposes the shared email spelling, read-back
+and confirmation guidance and forwards the complete address to the ticket
+payload. The field is optional for phone and text requests; an email preference
+still requires an address at the ticketing service. Synthetic tests exercise
+the model-facing schema and the agent-to-ticket mapping. Production impact
+has not been measured; the before/after ticket-path measurement above remains
+required before merge or deploy.
+
+## 17. No-IVR answer and record integrity — 2026-10-27 (#9, #10, #11, #20)
 
 The voice-remix branch addresses the four Support Desk items with synthetic
 regression tests. No production database or live call was used, and no
