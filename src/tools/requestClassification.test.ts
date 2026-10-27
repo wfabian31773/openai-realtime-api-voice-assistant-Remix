@@ -82,6 +82,15 @@ describe('review regressions: preserve clinical and procedure context', () => {
       .toEqual({ departmentId: 9, requestTypeId: 32, requestReasonId: 148 });
   });
 
+  it('keeps contact-lens order change, confirm, and pickup time on Optical', () => {
+    expect(classifyNonSurgicalRequest('change my contact lens order'))
+      .toEqual({ departmentId: 1, requestTypeId: 3, requestReasonId: 11 });
+    expect(classifyNonSurgicalRequest('confirm my contact lens order'))
+      .toEqual({ departmentId: 1, requestTypeId: 3, requestReasonId: 11 });
+    expect(classifyNonSurgicalRequest('What time can I pick up my contacts?'))
+      .toEqual({ departmentId: 1, requestTypeId: 5, requestReasonId: 21 });
+  });
+
   it('treats sx as surgical context', () => {
     expect(isSurgeryRequest('Please schedule my cataract sx')).toBe(true);
     expect(classifyNonSurgicalRequest('Please schedule my cataract sx')).toBeNull();

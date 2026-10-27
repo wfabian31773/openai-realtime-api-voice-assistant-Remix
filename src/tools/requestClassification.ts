@@ -87,11 +87,11 @@ export function classifyNonSurgicalRequest(text: string): RequestClassification 
   }
   if (contacts) {
     if (/\b(?:renew|renewal|renovar)\b/.test(t) && /\b(?:prescription|rx|receta)\b/.test(t)) return result(3, 33, 157);
-    // Appointment language wins over order/status. A bare "cancel my contact
-    // lens order" has no appointment in it and stays Optical.
+    // Appointment language wins over order/status. Change/confirm/what-time
+    // on an order, and a pickup time, stay Optical.
     const scheduled = hubSchedulingReason(t);
-    const appointmentish = /\b(?:appointment|cita|exam|examen)\b/.test(t);
-    if (scheduled && (scheduled !== 148 || appointmentish)) return result(9, 32, scheduled);
+    const appointmentish = /\b(?:appointment|cita|exam|examen|fitting|reschedul\w*|schedul\w*|book\w*|make an appointment|set[- ]?up|need an appointment|get an appointment|agendar|sacar una cita|pedir una cita|hacer una cita|nueva cita|cita para)\b/.test(t);
+    if (scheduled && appointmentish) return result(9, 32, scheduled);
     if (/\b(?:status|ready|pickup|pick up|arriv\w*|estado|listos)\b/.test(t)) return result(1, 5, 21);
     if (/\b(?:order\w*|reorder\w*|buy|purchase|more (?:contacts|contact[- ]lenses)|box|ordenar)\b/.test(t)) return result(1, 3, 11);
     return result(1, 66, 536);
