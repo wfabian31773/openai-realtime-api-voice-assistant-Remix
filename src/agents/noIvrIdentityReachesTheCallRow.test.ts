@@ -26,7 +26,8 @@ const PHONE_CANDIDATE = {
   lastLocationSeen: 'Quixotic Vision Testville',
   lastProviderSeen: 'Dr. Xavier Zebrastripe',
 };
-const CONFIRMED = { ...PHONE_CANDIDATE, matchedBy: 'name_and_dob' as const };
+const CONFIRMED = { ...PHONE_CANDIDATE, matchedBy: 'name_and_dob' as const,
+  identity: { unique: true, candidateCount: 1, candidates: [] } };
 
 const h = vi.hoisted(() => ({
   lookupByPhone: vi.fn(async () => ({ patientFound: false, upcomingAppointments: [], pastAppointments: [], totalAppointmentsFound: 0 })),
@@ -55,7 +56,7 @@ vi.mock('../services/callerMemoryService', () => ({
   callerMemoryService: { getCallerMemory: async () => null, buildContextForPrompt: () => '' },
 }));
 
-const { resetVerifiedIdentities } = await import('../tools/verifiedIdentity');
+const { resetVerifiedIdentities, verifiedIdentityFor } = await import('../tools/verifiedIdentity');
 const { createNoIvrAgent } = await import('./noIvrAgent');
 
 async function call(agent: any, name: string, args: Record<string, unknown>) {
@@ -130,12 +131,33 @@ describe('a candidate is not an identity', () => {
     expect(h.updateCallLog).not.toHaveBeenCalled();
   });
 
-  it('a reachable caller with no date of birth is asked before filing; phone context cannot fill it', async () => {
+  it('a reachable caller with an unreadable date of birth is asked before filing; phone context cannot fill it', async () => {
     const agent = await createNoIvrAgent(async () => {}, META);
     h.liveCallLogId = 'log-row-c153';
-    const res = await call(agent, 'create_ticket', { ...TICKET, date_of_birth: 'DOB not available' });
+    const res = await call(agent, 'create_ticket', { ...TICKET, date_of_birth: 'not a readable date' });
     expect(res.success).toBe(false);
     expect(h.lookupByNameAndDOB).not.toHaveBeenCalled();
+    expect(h.updateCallLog).not.toHaveBeenCalled();
+  });
+
+  it('the B2B no-DOB path files without a clinic and never promotes the phone candidate', async () => {
+    const agent = await createNoIvrAgent(async () => {}, META);
+    h.liveCallLogId = 'log-row-c153';
+    const { location, ...request } = TICKET;
+    const res = await call(agent, 'create_ticket', { ...request, date_of_birth: 'DOB not available' });
+    expect(res.success).toBe(true);
+    expect(h.lookupByNameAndDOB).not.toHaveBeenCalled();
+    expect(h.updateCallLog).not.toHaveBeenCalled();
+  });
+
+  it('a unique name-only fallback cannot become the validated filing identity', async () => {
+    h.lookupByNameAndDOB.mockResolvedValue({ ...CONFIRMED, matchedBy: 'name',
+      patientData: { firstName: 'Zelda', lastName: 'Quixote', dateOfBirth: '1958-01-04' } } as any);
+    const agent = await createNoIvrAgent(async () => {}, META);
+    h.liveCallLogId = 'log-row-c153';
+    const res = await call(agent, 'create_ticket', TICKET);
+    expect(res.success).toBe(true);
+    expect(verifiedIdentityFor(SID)).toBeUndefined();
     expect(h.updateCallLog).not.toHaveBeenCalled();
   });
 

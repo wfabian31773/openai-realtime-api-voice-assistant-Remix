@@ -291,8 +291,16 @@ export async function runTool(
 
   if (['file_optical_ticket', 'file_surgery_ticket', 'file_tech_ticket', 'file_records_ticket'].includes(name)) {
     const prepared = prepareTicketIdentity(input);
+    // Optical owns its bounded office ask and the record-office outage exit.
+    // Keep that provenance instead of turning a held office into caller input.
+    if (name === 'file_optical_ticket') prepared.input.location = input.location;
     input = prepared.input;
-    if (prepared.missing) return missing([prepared.missing], prepared.message!);
+    // DOB refusal belongs to the handler: it carries the diagnostic/fix and
+    // decideDobEscape's per-call ask-once budget. This enrichment must not
+    // introduce a second, unbounded refusal in front of it.
+    if (prepared.missing && prepared.missing !== 'date_of_birth' && name !== 'file_optical_ticket') {
+      return missing([prepared.missing], prepared.message!);
+    }
   }
 
   const bad = validateInput(def, input);

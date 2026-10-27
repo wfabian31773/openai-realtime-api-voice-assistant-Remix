@@ -33,9 +33,13 @@ export function validatedPatientFor(callSid?: string, first?: string, last?: str
     ...(held.nextAppointment ? { nextAppointment: held.nextAppointment } : {}),
     ...(held.lastVisit ? { lastVisit: held.lastVisit } : {}) };
 }
-export function ticketIdentityFields(callSid: string, first: string, last: string, dob?: string) {
+export function ticketIdentityFields(callSid: string, first: string, last: string, dob?: string, clinic?: string) {
   const validatedPatient = validatedPatientFor(callSid, first, last, dob);
-  return validatedPatient ? { validatedPatient } : {};
+  if (!validatedPatient) return {};
+  // Optical's caller-named fallback must agree with the carried context at
+  // the receiver. Joined appointment history still outranks this fallback.
+  if (clinic && !validatedPatient.nextAppointment && !validatedPatient.lastVisit) validatedPatient.confirmedClinic = clinic;
+  return { validatedPatient };
 }
 /** Shared live filing gate: ask one missing field, never ask for held facts. */
 export function prepareTicketIdentity(input: Record<string, unknown>): { input: Record<string, unknown>; missing?: string; message?: string } {

@@ -27,7 +27,7 @@ await import('./techTools');
 await import('./medicalRecordsTools');
 
 const CALL = 'CA00000000000000000000000000000001';
-const WAYNE = { firstName: 'Wayne', lastName: 'Fabian', dateOfBirth: '03/17/1973' };
+const WAYNE = { firstName: 'Wayne', lastName: 'Fabian', dateOfBirth: '03/17/1973', certain: true };
 
 beforeEach(async () => {
   resetVerifiedIdentities();
@@ -80,6 +80,7 @@ describe('dobCarry names the same exits verifiedDobFor collapses', () => {
       firstName: 'Ana',
       lastName: 'Garcia-Lopez',
       dateOfBirth: '03/17/1973',
+      certain: true,
     });
     expect(dobCarry(CALL, 'Ana', 'Garcia Lopez')).toBe('fired');
     expect(verifiedDobFor(CALL, 'Ana', 'Garcia Lopez')).toBe('03/17/1973');

@@ -1567,7 +1567,7 @@ The ticket will include schedule context (last appointment info) automatically.`
     }),
     execute: async (params) => {
       const prepared = prepareTicketIdentity({ ...params, call_sid: metadata.callSid });
-      if (prepared.missing && prepared.missing !== 'location') return { success: false, missingFields: [prepared.missing], message: prepared.message };
+      // Hydrate held facts here; the bounded DOB/B2B rules below own refusals.
       params = { ...params, first_name: String(prepared.input.first_name ?? ''), last_name: String(prepared.input.last_name ?? ''),
         date_of_birth: String(prepared.input.date_of_birth ?? ''), location: String(prepared.input.location ?? '') };
       // Lazy import to avoid module initialization during agent bootstrap
@@ -1703,8 +1703,9 @@ The ticket will include schedule context (last appointment info) automatically.`
       // this caller's identity. One person, or nothing.
       if (
         enrichedContext?.patientFound &&
+        enrichedContext.matchedBy === 'name_and_dob' &&
         !phoneMatchIsUnconfirmed(enrichedContext) &&
-        enrichedContext.identity?.unique !== false
+        enrichedContext.identity?.unique === true
       ) {
         const liveCallLogId = metadata.callLogId;
         const confirmedDob = parsedDOB
@@ -1777,13 +1778,14 @@ The ticket will include schedule context (last appointment info) automatically.`
       // — a phone candidate's appointments are somebody's, not the caller's.
       const recordConfirmed =
         !!enrichedContext?.patientFound &&
+        enrichedContext.matchedBy === 'name_and_dob' &&
         !phoneMatchIsUnconfirmed(enrichedContext) &&
-        enrichedContext.identity?.unique !== false;
+        enrichedContext.identity?.unique === true;
       if (recordConfirmed && enrichedContext) rememberVerifiedIdentity(metadata.callSid,
         { firstName: params.first_name, lastName: params.last_name, dateOfBirth: params.date_of_birth,
           ...enrichedContext.patientData, ...joinedAppointments(enrichedContext), certain: true });
       const completedIdentity = prepareTicketIdentity({ ...params, call_sid: metadata.callSid });
-      if (completedIdentity.missing) return { success: false, missingFields: [completedIdentity.missing], message: completedIdentity.message };
+      if (completedIdentity.missing && !dobEscapeStatus && !isB2bNoDob) return { success: false, missingFields: [completedIdentity.missing], message: completedIdentity.message };
       params.location = String(completedIdentity.input.location || '');
       const route = routeAfterHoursTicket({
         postOpMedication: params.post_op_prescription,

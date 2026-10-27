@@ -3,9 +3,14 @@
 2026-10-27. The live queue filing tools and normal after-hours create tool use
 `prepareTicketIdentity` before their individual handlers: read the validated
 per-call record, fill held name/DOB/clinic, then ask only one missing question.
-DOB and a clinic are required while the caller can answer. A valid record never
-causes a repeat demographic question. Recovery/sweep filing preserves captured
-facts without running that live interview gate.
+The individual handlers retain the operator's bounded DOB refusal: ask once,
+then capture the request unmatched with the staff-only DOB status note. The
+no-IVR B2B path still accepts an unavailable DOB on its first attempt. Neither
+exception treats a phone candidate as validated or borrows a mismatched
+identity. A valid held record never causes a repeat demographic question.
+Optical retains its bounded office ask and directory-outage exit; other live
+intakes ask for a missing clinic when a usable DOB exists. Recovery/sweep filing
+preserves captured facts without running that live interview gate.
 
 `lookup_patient` carries canonical person ID, chart DOB, next appointment and
 last visit into `verifiedIdentity`, keyed only by the canonical CallSid. The next
@@ -137,3 +142,39 @@ success is not claimed.
 - `src/tools/ticketIdentity.ts`
 - `src/tools/verifiedIdentity.test.ts`
 - `src/tools/verifiedIdentity.ts`
+
+## PR #384 CI repair (2026-10-27)
+
+The shared pre-handler gate had bypassed the handlers' DOB refusal metadata,
+per-call ask-once budget and B2B exception. It now hydrates validated facts
+before the handler without replacing those bounded decisions. Optical keeps
+record-office provenance through its own routing gate, including the outage
+exit; joined next/last appointments retain priority over caller hints. With no
+joined history, an optical caller's clinic travels consistently in both the
+ordinary location field and the validated context. Name-only fallback results
+cannot be promoted by after-hours filing into a validated identity.
+
+Intake fixtures now supply clinics where required, and successful identity
+mocks explicitly represent name+DOB validation. Older assertions that exposed
+phone candidates as verified, or required repeat lookups or unbounded asks,
+now follow the identity policy and the operator's bounded-ask rulings. The
+comments and assertions in `noIvrDobEscape.test.ts` are intact (only its clinic
+fixture changed), and `dobEscapePayload.test.ts` is unchanged. No test is removed
+or disabled.
+
+The repaired and adjacent run passes **454 tests in 25 files**. Backend
+`npx tsc -p . --noEmit` passes; CI defines no separate lint command. Client
+typechecking cannot complete because client dependencies are absent: the offline
+npm cache is incomplete and a normal `npm ci --no-audit --no-fund` fails registry
+DNS resolution (`EAI_AGAIN`). Local socket binding independently fails `EPERM`;
+the full-suite socket tests and child-process Git tests encounter the same
+sandbox restrictions. The requested commit also fails because the worktree's
+Git metadata is read-only (`index.lock`). No production access or push was used.
+
+The final full CI test command completed: **6,744 passed, 127 failed, 16
+skipped** across **346 passing, 4 failing and 1 skipped files** (6,887 tests).
+The failing files are `voiceRuntime.test.ts`, `pluginApi.test.ts`,
+`buildIdentity.test.ts` and `server/health.test.ts`: local server binding and
+child-process Git execution are denied with `EPERM`, producing timeouts and
+hook failures. All repaired intake suites pass in this full run. Full-suite
+green, client-typecheck green and a local commit are not claimed.

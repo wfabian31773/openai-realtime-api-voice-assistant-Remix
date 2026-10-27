@@ -3,7 +3,8 @@ import { runTool } from './registry';
 import './sharedPatientTools';
 import './techTools';
 import './surgeryTools';
-import { resetVerifiedIdentities, verifiedIdentityFor, verifiedDobFor } from './verifiedIdentity';
+import './opticalTools';
+import { rememberVerifiedIdentity, resetVerifiedIdentities, verifiedIdentityFor, verifiedDobFor } from './verifiedIdentity';
 
 const { lookup, file, directory } = vi.hoisted(() => ({ lookup: vi.fn(), file: vi.fn(), directory: { configured: false } }));
 vi.mock('../services/scheduleLookupService', () => ({ scheduleLookupService: { lookupPatient: lookup } }));
@@ -80,9 +81,13 @@ describe('Support Desk #1-4/#12 validated record carry', () => {
       validatedPatient: { callSid: sid, status: 'validated', personId: context.patientData.personId, nextAppointment: { location: 'Testville' }, lastVisit: { location: 'Sampleville' } } });
   });
   it('VA-75719 / 76116 / 76265 / 76697: reachable caller is asked for missing DOB before filing', async () => {
-    const args = { call_sid: sid, first_name: 'Alex', last_name: 'Synthetic', callback_number: '5555550100', request_description: 'Appointment question', location: 'Testville' };
-    for (let i=0; i<3; i++) expect(await runTool('file_tech_ticket', args)).toMatchObject({ success: false, missingFields: ['date_of_birth'] });
+    const args = { call_sid: sid, first_name: 'Alex', last_name: 'Synthetic', callback_number: '5555550100', request_description: 'Appointment question' };
+    expect(await runTool('file_tech_ticket', args)).toMatchObject({ success: false, missingFields: ['date_of_birth'], carry: 'no_entry' });
     expect(file).not.toHaveBeenCalled();
+    // The identity carry must coexist with the operator's ask-once escape.
+    expect(await runTool('file_tech_ticket', args)).toMatchObject({ success: true });
+    expect(file.mock.calls[0][0]).toMatchObject({ callData: { transcript: expect.stringContaining('DATE OF BIRTH UNAVAILABLE') } });
+    expect(file.mock.calls[0][0].validatedPatient).toBeUndefined();
   });
   it('VA-76095 / 75989 / 75953 / 75899 / 75838: reachable caller must confirm an office when no history exists', async () => {
     const out = await runTool('file_tech_ticket', { call_sid: sid, first_name: 'Alex', last_name: 'Synthetic', date_of_birth: '01/01/1970', callback_number: '5555550100', request_description: 'Appointment question' });
@@ -92,6 +97,24 @@ describe('Support Desk #1-4/#12 validated record carry', () => {
   it('VA-76198 vs VA-76197: another call on the same phone cannot inherit', async () => {
     await identify();
     expect(verifiedIdentityFor('CA' + 'b'.repeat(32))).toBeUndefined();
+  });
+  it('optical preserves joined-history priority without treating the record office as caller input', async () => {
+    await identify();
+    const out = await runTool('file_optical_ticket', { call_sid: sid,
+      location: 'Caller Clinic', callback_number: '5555550100', request_description: 'Please order new glasses' });
+    expect(out.success).toBe(true);
+    expect(file.mock.calls[0][0]).toMatchObject({ locationOfLastVisit: 'Testville', locationId: 31,
+      validatedPatient: { nextAppointment: { location: 'Testville' } } });
+    expect(lookup).toHaveBeenCalledTimes(1);
+  });
+  it('optical carries a caller-named clinic consistently when there is no joined appointment history', async () => {
+    rememberVerifiedIdentity(sid, { ...context.patientData, certain: true, usualOffice: 'Historical Clinic' });
+    const out = await runTool('file_optical_ticket', { call_sid: sid,
+      location: 'Caller Clinic', callback_number: '5555550100', request_description: 'Please order new glasses' });
+    expect(out.success).toBe(true);
+    expect(file.mock.calls[0][0]).toMatchObject({ locationOfLastVisit: 'Caller Clinic',
+      validatedPatient: { confirmedClinic: 'Caller Clinic' } });
+    expect(verifiedIdentityFor(sid)?.usualOffice).toBe('Historical Clinic');
   });
   it('VA-76205 / 76217: phone-only candidate is never a validated identity or DOB', async () => {
     lookup.mockResolvedValue({ ...context, matchedBy: 'phone', identityUnconfirmed: false });

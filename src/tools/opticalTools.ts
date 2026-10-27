@@ -1,4 +1,4 @@
-import { ticketIdentityFields } from './ticketIdentity';
+import { ticketIdentityFields, validatedPatientFor } from './ticketIdentity';
 /**
  * The tools an Optical-queue agent needs, and nothing else.
  *
@@ -244,7 +244,11 @@ registerTool({
     const { sanitizeProviderName, sanitizeLocationName } = await import(
       '../services/ticketFieldSanitizers'
     );
-    const cleanLocation = sanitizeLocationName(location).value;
+    const validated = validatedPatientFor(callSid, first, last, dob);
+    const historyOffice = validated?.nextAppointment?.location || validated?.lastVisit?.location;
+    // Joined history wins under the Oct 25 identity policy. Keep it on the
+    // record rung so a directory outage still waives the bounded office ask.
+    const cleanLocation = sanitizeLocationName(historyOffice ? undefined : location).value;
     const cleanProvider = sanitizeProviderName(str(input.provider)).value;
 
     /**
@@ -337,7 +341,7 @@ registerTool({
       // `dob` is what the ticket is being filed under. Passed so an explicit,
       // parseable conflict with the verified record withholds the office
       // rather than routing a same-named relative's ticket (Codex P1, #291).
-      const onRecord = usualOfficeFor(callSid, first, last, dob);
+      const onRecord = historyOffice || usualOfficeFor(callSid, first, last, dob);
       if (onRecord) {
         officeFromRecord = onRecord;
         const byRecord = await ticketingApiClient.lookupProviderAndLocation({
@@ -718,7 +722,7 @@ registerTool({
     }
 
     const res = await createTicketDurable({
-      ...ticketIdentityFields(callSid, first, last, str(input.date_of_birth)),
+      ...ticketIdentityFields(callSid, first, last, str(input.date_of_birth), cleanLocation || officeFromRecord),
       departmentId: filedDepartmentId,
       requestTypeId: filedTypeId,
       requestReasonId: filedReasonId,

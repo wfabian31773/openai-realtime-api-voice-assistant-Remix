@@ -688,7 +688,7 @@ describe('optical: ask once for the office, then file it unassigned', () => {
     expect(String(filed.description)).not.toMatch(/NEEDS OFFICE|unassigned|lookup/i);
   });
 
-  it('keeps asking for a missing clinic while the caller is reachable', async () => {
+  it('asks once for a missing clinic, then files unassigned with the routing ask exhausted', async () => {
     const api = await client();
     const lookup = vi.spyOn(api, 'lookupProviderAndLocation');
     const create = vi.spyOn(api, 'createTicket').mockResolvedValue({
@@ -700,8 +700,9 @@ describe('optical: ask once for the office, then file it unassigned', () => {
     expect((first as { missingFields: string[] }).missingFields).toContain('location');
 
     const second = await runTool('file_optical_ticket', { ...BASE, location: '', call_sid: CALL });
-    expect(second.success).toBe(false);
-    expect(create).not.toHaveBeenCalled();
+    expect(second.success).toBe(true);
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(create.mock.calls[0][0]).toMatchObject({ routingAskExhausted: true, priority: 'high' });
     expect(lookup).not.toHaveBeenCalled();
   });
 
