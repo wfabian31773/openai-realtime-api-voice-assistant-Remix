@@ -68,6 +68,13 @@ export const AZUL_VISION_LOCATIONS: Location[] = [
   { name: "West Hills", address: "7301 Medical Center Drive, Suite 301", city: "West Hills", state: "CA", zip: "91307", phone: "(818) 583-9115", fax: "(818) 583-9116", hours: "Mon-Fri 8am-5pm, closed 12pm-1pm" },
 ];
 
+function standardHoursFromClinicRows(): string {
+  const schedules = [...new Set(AZUL_VISION_LOCATIONS.map((location) => location.hours.trim()).filter(Boolean))];
+  if (schedules.length === 1) return schedules[0];
+  if (schedules.length > 1) return "Hours vary by location; use the hours listed on that clinic's row.";
+  return "Use the hours listed on each clinic's row.";
+}
+
 export const AZUL_VISION_SERVICES = {
   surgical: {
     cataracts: {
@@ -190,7 +197,7 @@ export const AZUL_VISION_KNOWLEDGE = {
   },
   
   businessHours: {
-    standard: "Monday-Friday, 8am-5pm (closed 12pm-1pm for lunch)",
+    standard: standardHoursFromClinicRows(),
     afterHours: "After-hours calls handled by answering service with next-business-day callback",
     holidays: "Closed on major holidays",
   },
@@ -431,9 +438,9 @@ When asking about locations, doctors, appointments, or medications:
 `;
 }
 
-export function buildCompactLocationReference(): string {
+export function buildCompactLocationReference(options: { includeHours?: boolean } = {}): string {
   return AZUL_VISION_LOCATIONS.map(loc => 
-    `${loc.name}: ${loc.address}, ${loc.city} ${loc.zip} | ${loc.phone}`
+    `${loc.name}: ${loc.address}, ${loc.city} ${loc.zip} | ${loc.phone}${options.includeHours ? ` | hours: ${loc.hours}` : ''}`
   ).join('\n');
 }
 

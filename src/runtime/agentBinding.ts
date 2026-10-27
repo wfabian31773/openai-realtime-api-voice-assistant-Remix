@@ -79,6 +79,8 @@ export interface ToolDispatchResult {
  */
 export interface OutputGuardrail {
   name: string;
+  /** Guardrails that protect caller-facing speech cannot be downgraded by log mode. */
+  alwaysEnforce?: boolean;
   /** Guidance for the corrective turn when this trips. Never spoken verbatim. */
   policyHint?: string;
   execute(input: {

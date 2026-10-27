@@ -1484,3 +1484,69 @@ WHERE call_sid = ANY(:sids_from_step_1)
 After the deploy, the same population should read 0 on the second query,
 and optical tickets with no `location_id` must not rise (before-arm
 2026-10-01: 15 of 391).
+
+## 16. No-IVR answer and record integrity — 2026-10-27 (#9, #10, #11, #20)
+
+The voice-remix branch addresses the four Support Desk items with synthetic
+regression tests. No production database or live call was used, and no
+ticketing-app repository is present in this workspace.
+
+- **#9 — VA-76095, 74600:** an explicit `question_fully_answered: true` with
+  `requires_callback: false` returns `ticketCreated: false` before intake
+  gates, ticket lookup or submission. A false or omitted callback flag alone
+  still files the request; confirmation categories default to no phone
+  callback, not to having been answered. Filed requests without a phone
+  callback keep their `[NO CALLBACK NEEDED]` tag and make no phone promise. The
+  response direction also avoids the normal filed-ticket script, so staff do
+  not receive an unnecessary callback ticket.
+- **#10:** `AZUL_VISION_LOCATIONS[].hours` supplies each clinic row in the
+  runtime knowledge pack and legacy prompt. `businessHours.standard` is
+  derived from those rows; the agent is directed to use the named clinic's
+  recorded times regardless of the current hour. Tests cover representative
+  clinics in morning, lunch and after-close contexts.
+- **#11:** the grading model is instructed not to infer facts. Before
+  persistence, its generated summary is replaced by all caller turns and the
+  last two agent turns, quoted exactly without silent clipping. This preserves
+  requests after an opening hello, later corrections and multiline turns, as
+  well as the agent response before a goodbye. These digests can be longer
+  than a generated summary; they add no unsupported details.
+- **#20 — VA-71404:** the no-IVR output guardrail catches tool directives,
+  prompt phases and bracketed notes and remains enforcing in log mode, even
+  if another rule logged a violation on the same or an earlier delta. The
+  identifier list includes the lane's `emit_decision` tool too. Streaming
+  audio may precede its transcript, so the guard interrupts a detected leak;
+  it cannot prove no offending audio was heard. The
+  callback supplied by the caller is preserved separately from caller ID;
+  differing numbers are included in ticket details as an explicit staff flag
+  on ordinary tickets, refused escalations and connected-transfer records.
+
+The joined record remains intact: caller ID is kept in `callerPhone`, the
+confirmed callback is kept in `patientPhone`, and the mismatch note travels
+with the ticket. These changes add no ticket-schema dependency and no
+migration file. Offline coverage is in
+`src/agents/noIvrAfterHoursRouting.test.ts`,
+`src/agents/noIvrTransferRecordFiles.test.ts`,
+`src/agents/noIvrAnswersOfficeHours.test.ts`,
+`src/agents/noIvrPromptShapeForGrok.test.ts`,
+`src/guardrails/medicalSafety.test.ts`,
+`src/runtime/mediaStreamBridge.test.ts`,
+`src/services/gradingIsClaimedOnce.test.ts` and
+`src/services/toolDirection.test.ts`.
+
+Self-review, **2026-10-27 — Codex**: fixed the silent loss of no-phone-callback
+staff requests (including category-default confirmations), the resolved-question
+path entering the medication gate, log-mode rules suppressing privacy enforcement,
+the uncovered `emit_decision` identifier, missing escalation mismatch notes, and
+summaries losing mid-call requests or corrections. Replaced the blanket-true
+callback default in the routing fixture with production's confirmation default;
+the regressions failed before the fixes. Trimmed repeated prompt and schema
+wording to pass the existing size limits without raising them. Validation:
+**439 tests passed in 15 files**, including all branch-touched test files,
+the medication-gate corpus with synthetic stand-ins, prompt invariants, runtime
+binding and field-description wire checks. `tsc -p . --noEmit` passed across
+`src`, `server` and `shared`; `git diff --check` passed. No new PHI or secrets,
+no signature/auth changes, and no migration. Local review only: nothing pushed,
+no PR opened, no merge or deploy, and no production before/after claim. Next:
+owner opens the PR and follows the measurement rule in `docs/BACKEND_HANDOFF.md`
+before merging ticket-path changes. Shared bridge files are outside this
+session's writable workspace; this entry is the local handoff.
