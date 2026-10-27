@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { workflowManager, type PatientData } from '../../server/services/schedulingWorkflowManager';
 import { PhreesiaComputerUseAgent } from '../../server/services/computerUseAgent';
 import { PHREESIA_CONFIG } from '../config/phreesiaConfig';
+import { currentClinicName } from '../config/azulVisionKnowledge';
 
 export interface PhreesiaSchedulingContext {
   callLogId: string;
@@ -40,10 +41,11 @@ export function createPhreesiaSchedulingTool(context: PhreesiaSchedulingContext)
       }).describe('Patient information collected from the voice call'),
     }),
     execute: async ({ patient_type, preferred_location, patient_data }) => {
+      const currentPreferredLocation = currentClinicName(preferred_location) ?? undefined;
       console.info('[PHREESIA TOOL] Starting form automation', {
         patient: `${patient_data.firstName} ${patient_data.lastName}`,
         patientType: patient_type,
-        preferredLocation: preferred_location,
+        preferredLocation: currentPreferredLocation,
         callLogId: context.callLogId,
       });
 
@@ -60,7 +62,7 @@ export function createPhreesiaSchedulingTool(context: PhreesiaSchedulingContext)
 
         activeWorkflowsByCall.set(context.callLogId, workflow.id);
 
-        const computerAgent = new PhreesiaComputerUseAgent(workflow.id, patient_type, preferred_location ?? undefined);
+        const computerAgent = new PhreesiaComputerUseAgent(workflow.id, patient_type, currentPreferredLocation);
         await computerAgent.init();
 
         try {
@@ -77,7 +79,8 @@ export function createPhreesiaSchedulingTool(context: PhreesiaSchedulingContext)
             );
 
             const details = result.appointmentDetails;
-            return `✓ Appointment scheduled successfully!\n\nConfirmation: ${result.confirmationNumber || 'Pending'}\nDate: ${details?.date}\nTime: ${details?.time}\nLocation: ${details?.location}\n\nThe patient will receive a confirmation text message.`;
+            const location = currentClinicName(details?.location) ?? details?.location;
+            return `✓ Appointment scheduled successfully!\n\nConfirmation: ${result.confirmationNumber || 'Pending'}\nDate: ${details?.date}\nTime: ${details?.time}\nLocation: ${location}\n\nThe patient will receive a confirmation text message.`;
           } else {
             await workflowManager.completeWorkflow(workflow.id, false);
 

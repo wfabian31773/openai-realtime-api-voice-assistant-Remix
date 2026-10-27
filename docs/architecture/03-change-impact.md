@@ -791,8 +791,11 @@ high-volume patient's history.
 
 **Responsible for** the in-memory provider/location snapshot read from CONSOLE —
 `getDirectory` (:285), `lookupProvider` (:314), `lookupLocation` (:320),
-`directoryKey` (:204), the `LOCATION_ALIASES` exception table (:151) and the
-`__resetDirectory` test seam (:327).
+`directoryKey` (:204), the `LOCATION_ALIASES` exception table (:151), the
+retired-name map `RETIRED_CLINIC_NAMES` in `src/config/azulVisionKnowledge.ts`,
+and the `__resetDirectory` test seam (:327). The caller-name matcher resolves
+the retired spelling to the current live entry; schedule facts and Phreesia
+results use the same map when they display office names.
 
 **Who imports it**
 
@@ -1383,10 +1386,12 @@ Module-level state written by more than one caller.
   pointing at nothing; the only symptom is `usedFallbackReason` warned at
   `ticketingApiClient.ts:657-659`, or a rejected create.
 
-### `LOCATION_ALIASES` — `src/services/consoleDirectory.ts:151`
+### Clinic name aliases — `src/services/consoleDirectory.ts:151` and `src/config/azulVisionKnowledge.ts`
 - Exported as a mutable array and read by `load()` (:252) on every refresh;
   `load()` writes `entry.fileAs` back onto the snapshot objects (:263).
 - **Failure mode:** an alias whose `mirror` key no longer exists is skipped with
   a `console.warn` (:257-260) and simply stops resolving — the 2026-08-21
-  retired-name case (`north valley eye`, `magan`) is the reason
-  `locationAliases.test.ts:108-121` asserts the table's shape.
+  retired clinic labels are stored once in `RETIRED_CLINIC_NAMES` and resolved
+  to their active directory rows. `consoleScheduleFacts` returns current
+  labels for historical schedule rows; `locationAliases.test.ts` covers
+  matching a retired name, including inside a longer caller phrase.

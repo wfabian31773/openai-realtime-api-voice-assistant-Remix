@@ -21,7 +21,7 @@ export const PHREESIA_CONFIG = {
     'Mission Viejo',
     'Monrovia',
     'Montebello',
-    'North Valley Eye',
+    'Mission Hills',
     'Northridge',
     'Palm Desert',
     'Pasadena',

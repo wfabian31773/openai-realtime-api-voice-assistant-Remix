@@ -12,6 +12,7 @@
  */
 import { describe, it, expect, beforeEach } from 'vitest';
 import { LOCATION_ALIASES, directoryKey, lookupLocation, __resetDirectory } from './consoleDirectory';
+import { RETIRED_CLINIC_NAMES } from '../config/azulVisionKnowledge';
 
 /** The real mirror rows these aliases point at, with their real volumes. */
 const MIRROR = [
@@ -19,6 +20,7 @@ const MIRROR = [
   { nextgen_name: 'Azul Vision Riverside Latham', facility_kind: 'clinic', volume_90d: 11399 },
   { nextgen_name: 'Azul Vision Mission Hlls', facility_kind: 'clinic', volume_90d: 7259 },
   { nextgen_name: 'Azul Vision Willow', facility_kind: 'clinic', volume_90d: 3373 },
+  { nextgen_name: 'Azul Vision Covina', facility_kind: 'clinic', volume_90d: 100 },
   // The one that must NOT be stolen by an alias.
   { nextgen_name: 'Atlantis Eyecare Long Beach', facility_kind: 'clinic', volume_90d: 9241 },
   { nextgen_name: 'Azul Vision Encinitas', facility_kind: 'clinic', volume_90d: 2346 },
@@ -45,6 +47,10 @@ function buildSnapshot() {
       locations.set(k, entry);
     }
   }
+  for (const [retired, current] of Object.entries(RETIRED_CLINIC_NAMES)) {
+    const entry = locations.get(directoryKey(current));
+    if (entry) locations.set(directoryKey(retired), entry);
+  }
   return { providers: new Map(), locations, loadedAt: Date.now() };
 }
 
@@ -61,6 +67,8 @@ describe('the words callers actually use', () => {
     ['DTLA', 'Azul Vision DTLA', 'Los Angeles'],
     ['Riverside', 'Azul Vision Riverside Latham', 'Riverside'],
     ['Mission Hills', 'Azul Vision Mission Hlls', 'Mission Hills'],
+    ['North Valley Eye', 'Azul Vision Mission Hlls', 'Mission Hills'],
+    ['Magan', 'Azul Vision Covina', 'Covina'],
     ['Willow', 'Azul Vision Willow', 'Long Beach Willow'],
   ];
 
@@ -78,6 +86,13 @@ describe('the words callers actually use', () => {
     // should not be punished for that.
     expect((await lookupLocation('mission hlls'))?.canonical).toBe('Azul Vision Mission Hlls');
     expect((await lookupLocation('mission hills'))?.canonical).toBe('Azul Vision Mission Hlls');
+  });
+
+  it('resolves the retired name inside a longer caller phrase to the current clinic', async () => {
+    const hit = await lookupLocation('I usually go to the North Valley Eye office');
+    expect(RETIRED_CLINIC_NAMES['north valley eye']).toBe('Mission Hills');
+    expect(hit?.canonical).toBe('Azul Vision Mission Hlls');
+    expect(hit?.fileAs).toBe('Mission Hills');
   });
 });
 
