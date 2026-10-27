@@ -1252,6 +1252,9 @@ export class VoiceCallBridge {
   /** Utterance sequences already checked-and-tripped, so one violation is
    * one interruption, not one per remaining delta. */
   private trippedUtterances = new Set<number>();
+  /** A logged verdict deduplicates that rule only. Other rules, including
+   * enforcing privacy rules, must still inspect this utterance's later text. */
+  private loggedGuardrailTrips = new Map<number, Set<string>>();
 
   /**
    * Run the agent's own output guardrails over the text spoken so far.
@@ -1271,13 +1274,21 @@ export class VoiceCallBridge {
     if (guardrails.length === 0 || this.trippedUtterances.has(current.seq)) return;
     const { seq, epoch, text } = current;
     for (const guardrail of guardrails) {
+      if (this.loggedGuardrailTrips.get(seq)?.has(guardrail.name)) continue;
       void guardrail
         .execute({ agentOutput: text })
         .then((verdict) => {
           if (!verdict.tripwireTriggered || this.ended) return;
           if (this.trippedUtterances.has(seq)) return;
           if (this.current?.seq !== seq || this.current.epoch !== epoch) return;
-          this.trippedUtterances.add(seq);
+          if (this.deps.guardrailMode === 'log' && !guardrail.alwaysEnforce) {
+            const logged = this.loggedGuardrailTrips.get(seq) ?? new Set<string>();
+            if (logged.has(guardrail.name)) return;
+            logged.add(guardrail.name);
+            this.loggedGuardrailTrips.set(seq, logged);
+          } else {
+            this.trippedUtterances.add(seq);
+          }
           this.handleGuardrailTrip(guardrail);
         })
         .catch((err) => {
@@ -1300,8 +1311,8 @@ export class VoiceCallBridge {
    * clear Twilio's buffer, mark what was partially heard — because it IS an
    * interruption; the only difference is who interrupted.
    */
-  private handleGuardrailTrip(guardrail: { name: string; policyHint?: string }): void {
-    if (this.deps.guardrailMode === "log") {
+  private handleGuardrailTrip(guardrail: { name: string; policyHint?: string; alwaysEnforce?: boolean }): void {
+    if (this.deps.guardrailMode === "log" && !guardrail.alwaysEnforce) {
       console.error(`[bridge] GUARDRAIL TRIPPED (log mode, audio not cut): ${guardrail.name}`);
       return;
     }

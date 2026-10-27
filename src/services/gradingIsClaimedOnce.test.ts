@@ -152,6 +152,62 @@ describe("a call is graded once", () => {
       expect(src, `${f} bypasses the claim`).not.toMatch(/claim:\s*false/);
     }
   });
+
+  it("VA-74600: the stored call summary cannot add details absent from the transcript", async () => {
+    const transcript =
+      "CALLER: What time does Example Clinic open?\n" +
+      "AGENT: Example Clinic opens at 8 AM and closes at 5 PM.";
+    const { svc, create } = service(async () => ({
+      choices: [{ message: { content: JSON.stringify({
+        ...ANSWER,
+        summary: "The caller asked to reschedule an appointment for Friday, and staff confirmed it.",
+      }) } }],
+      usage: undefined,
+    }));
+
+    const graded = await svc.gradeCall("c1", transcript, undefined, { claim: false });
+
+    expect(graded?.summary).toBe(
+      "Caller said: “What time does Example Clinic open?” Agent said: “Example Clinic opens at 8 AM and closes at 5 PM.”",
+    );
+    expect(graded?.summary).not.toContain("Friday");
+    const request = (create.mock.calls[0] as unknown as [Record<string, unknown>] | undefined)?.[0];
+    if (!request) throw new Error('grading request was not captured');
+    const messages = request.messages as Array<{ role: string; content: string }>;
+    expect(messages[0].content).toMatch(/SUMMARY GROUNDING.*facts explicitly present in the transcript/is);
+  });
+
+  it('keeps the request and later corrections when the call starts with hello and ends with goodbye', async () => {
+    const transcript = [
+      'AGENT: Thank you for calling Example Clinic.',
+      'CALLER: Hello.',
+      'AGENT: How can I help?',
+      'CALLER: I need to reschedule my visit.',
+      'AGENT: Which day works for you?',
+      'CALLER: Friday.',
+      'CALLER: Sorry, Monday instead.\nPlease text me the options.',
+      'AGENT: I have submitted your request to the team.',
+      'CALLER: Thank you.',
+      'AGENT: Goodbye.',
+    ].join('\n');
+    const { svc } = service(answers);
+    const graded = await svc.gradeCall('c1', transcript, undefined, { claim: false });
+    const stored = (q.rows.get('c1')!.qualityAnalysis as { summary: string }).summary;
+    expect(stored).toBe(graded?.summary);
+    expect(stored).toContain('I need to reschedule my visit.');
+    expect(stored).toContain('Sorry, Monday instead.\nPlease text me the options.');
+    expect(stored).toContain('Agent said: “I have submitted your request to the team.”');
+    expect(stored).not.toContain('rescheduled for Monday');
+  });
+
+  it('never cuts off a long statement before its final correction', async () => {
+    const statement = 'I thought I needed to move my visit. ' + 'I was checking my calendar. '.repeat(15) +
+      'Actually, please keep my appointment as it is.';
+    const { svc } = service(answers);
+    const graded = await svc.gradeCall('c1', `  PATIENT: ${statement}\r\n\tAGENT: I will leave it as it is.`, undefined, { claim: false });
+    expect(graded?.summary).toContain(`Caller said: “${statement}”`);
+    expect(graded?.summary).toContain('Agent said: “I will leave it as it is.”');
+  });
 });
 
 describe("an abandoned claim is recoverable — Codex P2 on #321, round 8", () => {

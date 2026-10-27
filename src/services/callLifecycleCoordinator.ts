@@ -6,6 +6,7 @@ import { createLogger } from './structuredLogger';
 import { getTwilioClient } from '../lib/twilioClient';
 import { callSessionService } from './callSessionService';
 import { twilioInsightsService } from './twilioInsightsService';
+import { answeredWithoutTicket } from './answeredCallDisposition';
 
 export type CallState = 'initiated' | 'ringing' | 'in_progress' | 'ending' | 'completed' | 'failed';
 
@@ -907,7 +908,7 @@ class CallLifecycleCoordinator extends EventEmitter {
         setTimeout(async () => {
           try {
             const [callRecord] = await db
-              .select({ ticketNumber: callLogs.ticketNumber, agentUsed: callLogs.agentUsed, duration: callLogs.duration })
+              .select({ ticketNumber: callLogs.ticketNumber, agentUsed: callLogs.agentUsed, duration: callLogs.duration, toolTimeline: callLogs.toolTimeline })
               .from(callLogs)
               .where(eq(callLogs.id, callId))
               .limit(1);
@@ -915,7 +916,7 @@ class CallLifecycleCoordinator extends EventEmitter {
             const finalizedDuration = Number(callRecord?.duration || 0);
             
             // Only warn for no-ivr agent calls (the main inbound agent)
-            if (callRecord && callRecord.agentUsed === 'no-ivr' && !callRecord.ticketNumber && finalizedDuration >= 45) {
+            if (callRecord && callRecord.agentUsed === 'no-ivr' && !callRecord.ticketNumber && finalizedDuration >= 45 && !answeredWithoutTicket(callRecord.toolTimeline)) {
               logger.warn(`[MISSING TICKET] Call completed without ticket creation - patient request may be lost`, {
                 callId,
                 duration: finalizedDuration,

@@ -222,6 +222,13 @@ describe('the rulings the finding named are among them', () => {
 describe('validation is the SDK zod parse, as it was', () => {
   const REFUSED = 'Invalid JSON input for tool';
 
+  it('no-ivr: the runtime dispatches the answered-only disposition', async () => {
+    const lane = built.get('no-ivr')!.lane;
+    const result = await lane.agent.dispatch('record_answered_question', {});
+    expect(result.ok).toBe(true);
+    expect(JSON.parse(result.output)).toMatchObject({ success: true, ticketCreated: false, callbackRequired: false });
+  });
+
   it('no-ivr: emit_decision still refuses a decision_type outside its enum', async () => {
     const lane = built.get('no-ivr')!.lane;
     const refused = await lane.agent.dispatch('emit_decision', { decision_type: 'not_a_type', value: 'x' });

@@ -557,3 +557,56 @@ schemas are exercised in `src/agents/contactCaptureWire.test.ts` and
 4. Put the failing utterance into an offline test before changing code.
    `src/runtime/voiceRuntime.test.ts` drives a whole call with fake sockets
    on both sides; a real failure should be reproducible there first.
+
+## 9. No-IVR speech, callback, and summary safeguards
+
+The no-IVR voice changes for #9, #10, #11 and #20 are pinned offline; use the
+synthetic fixtures in the cited tests when checking this branch.
+
+- **Answered question, no callback (#9; VA-76095, 74600):** the agent must not
+  file when it fully answered the caller and no follow-up was requested. If
+  `create_ticket` is reached with `question_fully_answered: true` AND
+  `requires_callback: false`, it returns `ticketCreated: false` without
+  entering intake gates; the tool direction must preserve that result and
+  must not say the request was submitted or promise a callback. A false or
+  omitted callback flag alone still files the request. The normal answered-only
+  path calls `record_answered_question` after asking if
+  anything else is needed, once no staff work remains. The timeline records
+  only boolean outcome flags. The missing-ticket warning and both ticket
+  graders recognize this disposition on no-IVR calls. Hangup and bookkeeping
+  (`terminate_call`, `end_call`, `emit_decision`, `set_spoken_language`) after
+  the marker do not revoke it. Any failed filing or escalation, or later
+  request-tool activity, leaves the call eligible for the warning and normal
+  grading.
+  This marker relies on the agent, and cannot prove that an unrecorded later
+  request did not occur. The existing category default for confirmations must
+  not discard a confirmation
+  staff still need to answer. Filed requests without a phone callback keep
+  their `[NO CALLBACK NEEDED]` tag and do not promise a phone call.
+- **Clinic hours (#10):** `AZUL_VISION_LOCATIONS[].hours` is the source for
+  each clinic's hours. The runtime knowledge pack renders each clinic's row,
+  and the shared standard-hours fact is derived from those rows. Answer from
+  the named clinic's row even during lunch or after closing; do not infer a
+  schedule from the clock. The synthetic morning, lunch and after-close cases
+  are in `src/agents/noIvrAnswersOfficeHours.test.ts`.
+- **Call grading summary (#11):** model-generated analysis is still used for
+  grading, but the stored summary is replaced with exact transcript excerpts
+  labeled by speaker: all caller turns and the last two agent turns. Keeping
+  the caller turns preserves mid-call requests, corrections and multiline
+  speech; keeping two agent turns prevents a goodbye from displacing the
+  preceding response. Quotes are never silently clipped. These digests can be
+  longer than the old generated summary; they do not infer an appointment,
+  request or outcome from those words.
+- **Internal text and callback number (#20; VA-71404):** the output guardrail
+  interrupts detected tool names, prompt phases and bracketed notes, even
+  when runtime guardrails are configured in log mode. A logged rule only
+  deduplicates itself; privacy rules still check that utterance and later
+  deltas. Streaming audio may precede the transcript, so this is an
+  interruption safeguard, not proof that no offending audio was heard. A
+  caller-provided callback number stays in the ticket's patient phone field; caller ID remains
+  in the caller phone field, and a mismatch is written into ticket details for
+  staff on ordinary tickets, refused-escalation tickets and connected-transfer
+  records.
+
+These are voice-remix behaviors. They do not change the Support Center's
+ticket schema or apply a database migration.

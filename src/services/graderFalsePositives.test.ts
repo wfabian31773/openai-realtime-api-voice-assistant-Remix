@@ -17,7 +17,7 @@
  *
  * A grader whose reds do not mean anything teaches people to ignore red.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 
 // callGradingService imports systemAlertService, which opens the database at
 // import — the same shape that made the scheduling prompt and the 159
@@ -143,6 +143,56 @@ describe('ticket_required_vs_created — the conversation floor', () => {
     ].join('\n');
     const r = check(run({ transcript: real, ticketNumber: 'VA-51001' }), 'ticket_required_vs_created');
     expect(r.pass).toBe(true);
+  });
+});
+
+describe('no-IVR fully answered disposition', () => {
+  const transcript = [
+    'AGENT: How can I help?',
+    'CALLER: I have a question about my appointment and the office hours.',
+    'AGENT: The office opens at eight.',
+    'CALLER: Thank you, that answers my question.',
+  ].join('\n');
+  const answered = { events: [{ tool: 'create_ticket', outcome: { success: true, ticketCreated: false, callbackRequired: false } }] };
+  const grades = (timeline: unknown, agentSlug = 'no-ivr') => callGradingService.runDeterministicGraders({
+    ...base, transcript, agentSlug, toolTimeline: timeline,
+  } as AnyInput);
+  it('reads the persisted timeline when grading a call', async () => {
+    const { storage } = await import('../../server/storage');
+    const read = vi.spyOn(storage, 'getCallLog').mockResolvedValue({
+      id: 'synthetic', agentUsed: 'no-ivr', transcript, ticketNumber: null, toolTimeline: answered,
+    } as any);
+    const write = vi.spyOn(storage, 'updateCallLog').mockResolvedValue(undefined as any);
+    try {
+      const results = await callGradingService.runAndPersistDeterministicGraders('synthetic', true);
+      expect(check(results, 'ticket_required_vs_created').pass).toBe(true);
+      expect(check(results, 'actionable_request_needs_ticket').pass).toBe(true);
+      expect(write).toHaveBeenCalledOnce();
+    } finally {
+      read.mockRestore();
+      write.mockRestore();
+    }
+  });
+
+  it('passes both missing-ticket graders only with an explicit answered disposition', () => {
+    for (const name of ['ticket_required_vs_created', 'actionable_request_needs_ticket']) {
+      expect(check(grades(answered), name).pass).toBe(true);
+      expect(check(grades({ events: [{ tool: 'record_answered_question', outcome: answered.events[0].outcome }] }), name).pass).toBe(true);
+      expect(check(grades(undefined), name).pass).toBe(false);
+      expect(check(grades(answered, 'tech'), name).pass).toBe(false);
+      expect(check(grades({ events: [{ tool: 'create_ticket', outcome: { success: true, ticketCreated: false } }] }), name).pass).toBe(false);
+      expect(check(grades({ events: [...answered.events, { tool: 'create_ticket', outcome: { success: false } }] }), name).pass).toBe(false);
+      expect(check(grades({ events: [{ tool: 'create_ticket', outcome: { success: false } }, ...answered.events] }), name).pass).toBe(false);
+      expect(check(grades({ events: [...answered.events, { tool: 'escalate_to_human', outcome: {} }] }), name).pass).toBe(false);
+      expect(check(grades({ events: [...answered.events, { tool: 'lookup_schedule', outcome: {} }] }), name).pass).toBe(false);
+      expect(check(grades({
+        events: [
+          ...answered.events,
+          { tool: 'emit_decision', outcome: {} },
+          { tool: 'terminate_call', outcome: { success: true } },
+        ],
+      }), name).pass).toBe(true);
+    }
   });
 });
 
