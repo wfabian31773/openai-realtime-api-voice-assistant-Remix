@@ -40,6 +40,7 @@ import { nameOrStandIn, STAND_IN_NAME_NOTE } from "../services/standInName";
 import { corroborate } from "../services/symptomCorroboration";
 import { markCallConcluded } from "../services/callConclusion";
 import { callMetadataForDB } from "../services/callMetadataStore";
+import { EMAIL_FIELD_DESCRIPTION, LAST_NAME_FIELD_DESCRIPTION } from "../tools/contactCaptureGuidance";
 
 /**
  * AN EMAIL PREFERENCE WITHOUT AN ADDRESS IS A QUESTION, NOT A FAILURE.
@@ -81,7 +82,8 @@ export const EMAIL_ASK_ONCE =
   "Missing required information: email address. The caller asked to be reached by EMAIL " +
   "and no address was sent, so the request cannot be filed that way yet. Ask ONCE, in " +
   "these words: \"What email address should we use? Please spell it out for me, letter " +
-  "by letter.\" Then call create_ticket again with the address in the email field. If " +
+  "by letter.\" Read the complete address back and wait for confirmation. Pass the full " +
+  "address unchanged, then call create_ticket again with it in the email field. If " +
   "they would rather not, or cannot, call create_ticket again with preferred_contact set " +
   "to \"phone\" — the callback number is already on the request. Nothing has failed: do " +
   "not apologise and do not say there was a problem.";
@@ -874,16 +876,15 @@ DO NOT keep asking — proceed with ticket using available
 info and note "DOB unavailable — B2B call"
 
 🟢 NAME COLLECTION - EFFICIENT APPROACH:
-Ask: "What is your full name?" (NOT first, then last)
+Ask for the first name and surname in separate turns. For the surname say: "May I have your last name? Please spell it letter by letter."
 IF schedule data exists: "I was able to pull up a record.
 Is this for [Name from schedule]?" then get DOB
-IF name wrong: "What is your full name?"
+IF name wrong: ask for the surname separately and have the caller spell it letter by letter.
 
 📞 PREFERRED CONTACT METHOD:
 Ask: "Would you prefer we call, text, or email you back?"
 Use caller's answer in create_ticket contact_method field
-IF EMAIL: "What email address should we use? Please spell
-it out for me, letter by letter." → create_ticket email field.
+IF EMAIL: "What email address should we use? Please spell it out for me, letter by letter." Read the complete address back and ask them to confirm it before filing. Pass the full address unchanged.
 No address = it cannot go by email: ask once, then offer a
 phone callback instead. Never say anything failed.
 IF caller history shows preference, confirm: "Last time
@@ -1338,7 +1339,7 @@ is not an identity. Confirm the name and date of birth, then call again with the
     parameters: z.object({
       phone: z.string().optional().describe("Patient phone number"),
       first_name: z.string().optional().describe("Patient first name"),
-      last_name: z.string().optional().describe("Patient last name"),
+      last_name: z.string().optional().describe(LAST_NAME_FIELD_DESCRIPTION),
       date_of_birth: z.string().optional().describe("Patient date of birth"),
     }),
     execute: async (params) => {
@@ -1515,7 +1516,7 @@ Call this ONLY when you have collected ALL required fields:
 The ticket will include schedule context (last appointment info) automatically.`,
     parameters: z.object({
       first_name: z.string().describe("Patient first name (required)"),
-      last_name: z.string().describe("Patient last name (required)"),
+      last_name: z.string().describe(LAST_NAME_FIELD_DESCRIPTION),
       date_of_birth: z
         .string()
         .describe('Full date of birth as spoken (e.g., "January 15, 1980" or "01/15/1980"). For B2B/business callers who don\'t have the patient DOB, pass "DOB not available" — the ticket will still be created.'),
@@ -1542,7 +1543,7 @@ The ticket will include schedule context (last appointment info) automatically.`
         .enum(["phone", "text", "email"])
         .optional()
         .describe("How they prefer to be contacted"),
-      email: z.string().optional().describe("Email address if provided"),
+      email: z.string().optional().describe(EMAIL_FIELD_DESCRIPTION),
       doctor_name: z.string().optional().describe("Doctor they want to see or usually see"),
       location: z.string().optional().describe("Location they prefer or usually visit"),
       appointment_time: z.string().optional().describe("Relevant appointment date/time if applicable"),

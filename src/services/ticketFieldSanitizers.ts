@@ -25,8 +25,9 @@
  *   487  real providers whose credential suffix broke the match
  *   667  genuinely absent from the providers table — nothing to do here
  *
- * Everything in this file is a pure function so it can be proven without a
- * phone call.
+ * The string cleaners are pure and independently testable. The ticket-path
+ * roster normalizer lazily reads the Console's read-only provider snapshot and
+ * keeps the original input when the roster is unavailable or inconclusive.
  */
 
 /**
@@ -120,6 +121,28 @@ export function sanitizeProviderName(raw: string | null | undefined): SanitizedF
   if (!cleaned) return { dropped: true, reason: `empty-after-cleaning:${trimmed}` };
   if (cleaned === trimmed) return { value: cleaned, dropped: false };
   return { value: cleaned, dropped: false, reason: `cleaned:${trimmed}->${cleaned}` };
+}
+
+/**
+ * Canonicalize a ticket's provider against the read-only Patient Console
+ * roster. A fuzzy hit is used only when it is unique; on a miss or directory
+ * outage, keep the caller's full spelling for the existing ticketing lookup.
+ */
+export async function normalizeProviderNameForTicket(
+  raw: string | null | undefined,
+): Promise<string | undefined> {
+  const value = raw?.trim();
+  if (!value) return undefined;
+
+  try {
+    const { isDirectoryConfigured, lookupProvider } = await import('./consoleDirectory');
+    if (!isDirectoryConfigured()) return value;
+    const match = await lookupProvider(value);
+    if (!match) return value;
+    return sanitizeProviderName(match.canonical).value ?? value;
+  } catch {
+    return value;
+  }
 }
 
 /**

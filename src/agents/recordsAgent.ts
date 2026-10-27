@@ -169,7 +169,7 @@ Once classify_records_request confirms a records request and the requester is
 the patient or their personal representative, offer the link, format in the
 question: "I can send you a short link to finish and sign this request — is this
 a mobile number that receives texts, or would you rather have it by email?"
-Email: "What's the email address? Please spell it out for me." Read it back.
+Email: "What's the email address? Please spell it out for me, letter by letter." Read the complete address back and ask, "Did I get that right?" Wait for confirmation before filing. Pass the full address unchanged.
 File with form_channel set; the tool sends the link and hands you what to say.
 Where they go and which dates come from the form — do not ask on the phone.
 

@@ -27,6 +27,7 @@
  * definition each, made queue-aware rather than forked.
  */
 import { registerTool, missing, refuseDob, dobRefusalCopy, type ToolResult } from './registry';
+import { EMAIL_FIELD_DESCRIPTION, LAST_NAME_ASK, LAST_NAME_FIELD_DESCRIPTION } from './contactCaptureGuidance';
 import { str, isTwilioCallSid, normalizePhone } from './sharedPatientTools';
 import { createTicketDurable, postFailureToolResult } from '../services/durableTicketFiling';
 import { loggableLookupError } from '../services/loggableTicketingError';
@@ -124,7 +125,7 @@ registerTool({
     type: 'object',
     properties: {
       first_name: { type: 'string', description: "Patient's first name.", askAs: 'May I please have the first name?' },
-      last_name: { type: 'string', description: "Patient's last name.", askAs: 'May I please have the last name?' },
+      last_name: { type: 'string', description: LAST_NAME_FIELD_DESCRIPTION, askAs: LAST_NAME_ASK },
       /**
        * LEAD THE ASK, AND ALWAYS SEND IT BACK. Two separate 2026-09-03 findings
        * in one field; see sharedPatientTools for the operator's wording.
@@ -157,7 +158,7 @@ registerTool({
       },
       surgery_date: { type: 'string', description: 'The date of their surgery, if they gave one. Put it in the description too.' },
       urgent: { type: 'string', description: 'Pass "true" only when classify_surgery_request said urgent.' },
-      email: { type: 'string', description: 'Optional — looked up if omitted.' },
+      email: { type: 'string', description: EMAIL_FIELD_DESCRIPTION },
       call_sid: { type: 'string', description: 'The call id, so a retry cannot double-file.' },
       caller_phone: { type: 'string', description: 'The number they called from, if different from the callback number.' },
       dialed_number: { type: 'string', description: 'The number they dialled.' },

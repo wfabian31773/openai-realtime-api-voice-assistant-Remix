@@ -491,6 +491,32 @@ type. `surgery`, `tech` and `records` already resolve clean (§4). `no-ivr` and
 `pcp` need §6b first, because they do transfer and those six calls are exactly
 the code they add.
 
+## 6d. Name, email and provider capture
+
+Item #14 (`VA-76200`, `VA-76188`, `VA-76215`) is covered in the agent-visible
+tool descriptions and the common ticket client:
+
+- A validated joined record supplies identity and contact fields it already
+  holds. Do not ask for or overwrite those fields again.
+- When the surname is missing or uncertain, ask for it separately, have the
+  caller spell it letter by letter, and repeat the spelling back when
+  transcription may have changed it into a place name.
+- For a newly supplied or changed email address, ask the caller to spell it,
+  read back the complete address, and wait for confirmation before filing.
+  Pass the entire confirmed address unchanged. Validation rejects an address
+  longer than 254 characters; it does not truncate one. The local
+  `patient_email` columns are unbounded `varchar` fields.
+- Ticket creation canonicalizes an exact or uniquely close provider name using
+  the read-only Patient Console roster. A fuzzy hit must score at least 88%
+  similarity and beat the next candidate by five percentage points. Ambiguous
+  names and directory outages keep the caller's original wording.
+
+Offline coverage uses synthetic names and addresses:
+`src/tools/contactCapture.test.ts`,
+`src/services/consoleDirectory.test.ts`,
+`src/utils/contactValidation.test.ts`, and
+`server/services/ticketingApiClientContactCapture.test.ts`.
+
 ## 7. What is not covered
 
 - **`azul-scheduling` still cannot transfer** — see §3. Scheduling for San

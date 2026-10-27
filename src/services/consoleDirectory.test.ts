@@ -1,10 +1,16 @@
 /**
  * The directory key has one job: make two spellings of the same person compare
- * equal. Every string here is a real `nextgen_name` from `si_providers` /
- * `si_locations` in the Patient Console, read 2026-08-11.
+ * equal. The directoryKey examples below are roster forms; provider fuzzy-match
+ * coverage uses synthetic names so no case data enters the test.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { directoryKey, isDirectoryConfigured, LOCATION_ALIASES } from './consoleDirectory';
+import {
+  directoryKey,
+  isDirectoryConfigured,
+  LOCATION_ALIASES,
+  matchProviderFromRoster,
+  type DirectoryProvider,
+} from './consoleDirectory';
 import { resolveTicketLookupFields } from './ticketFieldSanitizers';
 
 describe('directoryKey normalises what NextGen actually stores', () => {
@@ -47,6 +53,30 @@ describe('directoryKey normalises what NextGen actually stores', () => {
     // No comma, no trailing-credential shape — must survive whole.
     expect(directoryKey('Dana Le')).toBe('dana le');
     expect(directoryKey('Vi Nguyen')).toBe('vi nguyen');
+  });
+});
+
+describe('provider roster matching', () => {
+  const roster: DirectoryProvider[] = [
+    { canonical: 'Mira Example, O.D.', key: 'mira example', volume90d: 0 },
+    { canonical: 'Jonas Sample, M.D.', key: 'jonas sample', volume90d: 0 },
+  ];
+
+  it('corrects a unique, small transcription error to the roster spelling', () => {
+    expect(matchProviderFromRoster('Dr. Mira Exampl', roster)?.canonical)
+      .toBe('Mira Example, O.D.');
+  });
+
+  it('leaves equally close provider names unresolved', () => {
+    const ambiguous: DirectoryProvider[] = [
+      { canonical: 'Mira Examplex, O.D.', key: 'mira examplex', volume90d: 0 },
+      { canonical: 'Mira Exampleq, O.D.', key: 'mira exampleq', volume90d: 0 },
+    ];
+    expect(matchProviderFromRoster('Mira Example', ambiguous)).toBeNull();
+  });
+
+  it('does not turn an unrelated name into a roster hit', () => {
+    expect(matchProviderFromRoster('Rina Fictional', roster)).toBeNull();
   });
 });
 

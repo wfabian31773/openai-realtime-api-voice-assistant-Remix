@@ -194,7 +194,7 @@ const RULINGS: Array<[string, RegExp]> = [
   // must not script a promise to connect before the tool has answered.
   ['a refused escalation has already filed the ticket', /it has ALREADY filed\s*\n?\s*a ticket/],
   ['never promise a recording', /Never promise a recording/],
-  ['the full name in one question', /"What is your full name\?"/],
+  ['surname asked separately and spelled', /first name and surname in separate turns[\s\S]*spell it letter by letter/],
   ['the email funnel, once, then a phone callback', /spell\s*\n?\s*it out for me, letter by letter/],
   // The language MECHANISM (call set_spoken_language, switch only if the caller
   // switches, arguments in English) is the RUNTIME's since v77 and is asserted

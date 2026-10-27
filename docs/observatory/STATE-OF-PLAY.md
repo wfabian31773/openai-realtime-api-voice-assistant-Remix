@@ -1484,3 +1484,31 @@ WHERE call_sid = ANY(:sids_from_step_1)
 After the deploy, the same population should read 0 on the second query,
 and optical tickets with no `location_id` must not rise (before-arm
 2026-10-01: 15 of 391).
+
+---
+
+## 16. Item #14 — name, email and provider capture (2026-10-27)
+
+Offline changes for `VA-76200`, `VA-76188` and `VA-76215`:
+
+- Missing or uncertain surnames are asked separately and spelled letter by
+  letter. The guidance does not ask for a surname already held by a validated
+  joined record.
+- New or changed email addresses are spelled, read back in full and confirmed
+  before filing. The voice client sends the complete value unchanged; address
+  validation rejects lengths over 254 instead of clipping them.
+- `ticketingApiClient.createTicket` canonicalizes exact or uniquely fuzzy
+  provider matches against the read-only Patient Console roster. Ambiguous
+  matches and directory outages retain the supplied name.
+
+Synthetic offline coverage:
+
+```
+npx vitest run src/services/consoleDirectory.test.ts \
+  src/utils/contactValidation.test.ts src/tools/contactCapture.test.ts \
+  server/services/ticketingApiClientContactCapture.test.ts
+```
+
+No production database was accessed, and no before/after production number was
+taken. Per `docs/BACKEND_HANDOFF.md`, the ticket-path result still needs that
+read-only measurement before merge/deploy. No migration was added.

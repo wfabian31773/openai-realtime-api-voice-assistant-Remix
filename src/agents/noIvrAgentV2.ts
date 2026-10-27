@@ -21,6 +21,7 @@ import {
   type ConversationSlots,
 } from "../workflows";
 import { buildWorkflowDrivenPrompt, getWorkflowDirectiveForContext } from "../workflows/workflowPromptBuilder";
+import { LAST_NAME_FIELD_DESCRIPTION } from "../tools/contactCaptureGuidance";
 
 export interface NoIvrAgentV2Metadata {
   callId: string;
@@ -263,7 +264,7 @@ WHEN TO USE:
     parameters: z.object({
       phone: z.string().optional().describe("Patient phone number"),
       first_name: z.string().optional().describe("Patient first name"),
-      last_name: z.string().optional().describe("Patient last name"),
+      last_name: z.string().optional().describe(LAST_NAME_FIELD_DESCRIPTION),
       date_of_birth: z.string().optional().describe("Patient date of birth"),
     }),
     execute: async (params) => {
@@ -400,7 +401,7 @@ Call this when you make key decisions about caller type, urgency, or escalation.
 Call this ONLY when you have collected ALL required information.`,
     parameters: z.object({
       first_name: z.string().describe("Patient first name"),
-      last_name: z.string().describe("Patient last name"),
+      last_name: z.string().describe(LAST_NAME_FIELD_DESCRIPTION),
       date_of_birth: z.string().describe("Full date of birth"),
       callback_number: z.string().describe("Callback phone number (10+ digits)"),
       request_category: z.enum([

@@ -1,6 +1,7 @@
 import { tool } from '@openai/agents/realtime';
 import { z } from 'zod';
 import { detectCrossQueue } from '../../tools/queueRouting';
+import { EMAIL_FIELD_DESCRIPTION, LAST_NAME_FIELD_DESCRIPTION } from '../../tools/contactCaptureGuidance';
 
 const DEPARTMENTS = {
   OPTICAL: 1,
@@ -149,9 +150,9 @@ const createTicketSchema = z.object({
   requestTypeId: z.number().describe('Type of request being made'),
   requestReasonId: z.number().describe('Specific reason for the request'),
   patientFirstName: z.string().describe('Patient first name'),
-  patientLastName: z.string().describe('Patient last name'),
+  patientLastName: z.string().describe(LAST_NAME_FIELD_DESCRIPTION),
   patientPhone: z.string().describe('Patient phone number in E.164 format (e.g., +15551234567)'),
-  patientEmail: z.string().nullable().optional().describe('Patient email address'),
+  patientEmail: z.string().nullable().optional().describe(EMAIL_FIELD_DESCRIPTION),
   preferredContactMethod: z.enum(['phone', 'text', 'email']).nullable().optional().describe('How the patient prefers to be contacted'),
   lastProviderSeen: z.string().nullable().optional().describe('Name of the last provider/doctor the patient saw (e.g., "Dr. Smith"). REQUIRED for surgery tickets.'),
   locationOfLastVisit: z.string().nullable().optional().describe('Location/office where patient had their last visit (e.g., "Pasadena Office"). REQUIRED for optical tickets if locationId not provided.'),
