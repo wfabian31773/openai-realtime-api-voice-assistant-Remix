@@ -77,7 +77,7 @@ async function listen(
     store,
     agents: agents(),
     env,
-    now: extras.now,
+    now: extras.now ?? (() => new Date("2026-10-22T18:00:00Z")),
     outboundStore: outbound,
     smsSender:
       extras.smsSender !== undefined
@@ -610,7 +610,7 @@ describe("the calling window and DNC list", () => {
     const sent: string[] = [];
     const sender = { async send(o: { body: string }) { sent.push(o.body); return { sid: "SM-v" }; } };
     await outbound.stampDoNotContact(PHONE, "opt_out_of_calls");
-    const out = await sendApprovedSms(store, sender, { phone: PHONE, body: "Your request is in." }, {});
+    const out = await sendApprovedSms(store, sender, { phone: PHONE, body: "Your request is in." }, {}, new Date("2026-10-22T18:00:00Z"));
     expect(out).toMatchObject({ ok: false, reason: "sms_opted_out", mayHaveSent: false });
     expect(sent).toEqual([]);
   });
@@ -724,7 +724,7 @@ describe("SMS and email", () => {
         return { sid: "SM1" };
       },
     };
-    const out = await sendApprovedSms(store, sender, { phone: PHONE, body: "Your request is in." }, {});
+    const out = await sendApprovedSms(store, sender, { phone: PHONE, body: "Your request is in." }, {}, new Date("2026-10-22T18:00:00Z"));
     expect(out).toMatchObject({ ok: true });
     expect(sent[0].body.startsWith("Azul Vision SI Assistant (AI):")).toBe(true);
     expect(classifyInboundSms("STOP")).toBe("stop");

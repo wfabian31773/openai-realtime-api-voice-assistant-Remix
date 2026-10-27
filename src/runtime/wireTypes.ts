@@ -120,6 +120,9 @@ export type GrokClientEvent =
   | { type: "input_audio_buffer.append"; audio: string }
   | GrokForceMessage
   | GrokFunctionCallOutput
+  | { type: "conversation.item.create"; item: {
+      type: "message"; role: "user"; content: Array<{ type: "input_text"; text: string }>;
+    } }
   | GrokResponseCreate
   /** Barge-in: cancel the model's in-flight response. ONLY valid while a
    * response is actually open at the wire — cancelling one the provider

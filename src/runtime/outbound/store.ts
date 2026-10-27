@@ -413,6 +413,8 @@ export async function createDbOutboundStore(): Promise<OutboundStore> {
            WHERE campaign_id = ${campaignId}::varchar
              AND outreach_status::text IN ('pending', 'no_answer', 'voicemail', 'callback_scheduled')
              AND (next_attempt_at IS NULL OR next_attempt_at <= ${utc(now)})
+             -- Live approvals are single attempts, never scheduler retries.
+             AND COALESCE(custom_data->>'plugin_live', 'false') <> 'true'
            ORDER BY next_attempt_at NULLS FIRST, created_at
            LIMIT ${limit}::int`),
       ).map(rowToContact);

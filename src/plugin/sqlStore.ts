@@ -50,6 +50,7 @@ function approvalFrom(r: Record<string, unknown>): ContactApprovalRow {
     payload,
     payloadHash: String(r.payload_hash),
     confirmTokenHash: (r.confirm_token_hash as string | null) ?? null,
+    confirmTokenPlaintext: (r.confirm_token_plaintext as string | null) ?? null,
     confirmExpiresAt: r.confirm_expires_at ? new Date(String(r.confirm_expires_at)) : null,
     confirmUsedAt: r.confirm_used_at ? new Date(String(r.confirm_used_at)) : null,
     approvedBy: (r.approved_by as string | null) ?? null,
@@ -185,7 +186,9 @@ export function createSqlPluginStore(exec: SqlExec): PluginStore {
             cancelled_at = $9,
             committed_at = $10,
             result = $11::jsonb,
-            updated_at = $12
+            updated_at = $12,
+            -- Never restore a secret read before a concurrent fetch/consume.
+            confirm_token_plaintext = CASE WHEN $16::boolean THEN $15::text ELSE confirm_token_plaintext END
           WHERE id = $13 AND ($14::text IS NULL OR status = $14)
           RETURNING *`,
         [
@@ -203,6 +206,8 @@ export function createSqlPluginStore(exec: SqlExec): PluginStore {
           next.updatedAt.toISOString(),
           id,
           onlyIfStatus ?? null,
+          patch.confirmTokenPlaintext ?? null,
+          Object.prototype.hasOwnProperty.call(patch, "confirmTokenPlaintext"),
         ],
       );
       return rows[0] ? approvalFrom(rows[0]) : null;
@@ -215,7 +220,7 @@ export function createSqlPluginStore(exec: SqlExec): PluginStore {
       const at = now.toISOString();
       const rows = await exec(
         `UPDATE contact_approvals
-            SET confirm_used_at = $2, status = 'sending', updated_at = $2
+            SET confirm_used_at = $2, confirm_token_plaintext = NULL, status = 'sending', updated_at = $2
           WHERE confirm_token_hash = $1
             AND status = 'approved'
             AND confirm_used_at IS NULL
@@ -225,6 +230,31 @@ export function createSqlPluginStore(exec: SqlExec): PluginStore {
       );
       return rows[0] ? approvalFrom(rows[0]) : null;
     },
+    async takeConfirmToken(id, tokenJti, now) {
+      await this.purgeExpiredConfirmTokens(now);
+      const rows = await exec(
+        `WITH taken AS (
+           UPDATE contact_approvals SET confirm_token_plaintext = NULL
+            WHERE id = $1 AND token_jti = $2 AND status = 'approved'
+              AND confirm_used_at IS NULL AND confirm_expires_at > $3
+              AND confirm_token_plaintext IS NOT NULL
+            RETURNING id
+         )
+         SELECT a.confirm_token_plaintext, a.confirm_expires_at
+           FROM contact_approvals a JOIN taken ON taken.id = a.id`,
+        [id, tokenJti, now.toISOString()],
+      );
+      // The SELECT uses the statement's pre-update snapshot; the UPDATE's
+      // row lock rechecks eligibility after a concurrent fetch or consume.
+      const row = rows[0];
+      return row?.confirm_token_plaintext
+        ? { confirmToken: String(row.confirm_token_plaintext), expiresAt: new Date(String(row.confirm_expires_at)) }
+        : null;
+    },
+    async purgeExpiredConfirmTokens(now) {
+      await exec(`UPDATE contact_approvals SET confirm_token_plaintext = NULL
+        WHERE confirm_token_plaintext IS NOT NULL AND confirm_expires_at <= $1`, [now.toISOString()]);
+    },
     async cancelIfOpen(id, now) {
       const at = now.toISOString();
       const rows = await exec(
@@ -232,6 +262,7 @@ export function createSqlPluginStore(exec: SqlExec): PluginStore {
             SET status = 'cancelled',
                 cancelled_at = $2,
                 confirm_token_hash = NULL,
+                confirm_token_plaintext = NULL,
                 confirm_expires_at = NULL,
                 updated_at = $2
           WHERE id = $1
