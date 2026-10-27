@@ -779,10 +779,8 @@ IF caller states need: Acknowledge and proceed to Phase 2
 IF caller just says "hi": Ask "What can I help you with?"
 
 🟢 SIMPLE QUESTION? (hours, location, fax) →
-Answer directly. If a question is fully answered and the caller did not ask for a callback,
-do not create a ticket. Ask "Anything else?" If no needs or staff work remain,
-call record_answered_question before ending; skip remaining phases and info collection.
-Never use it for unresolved requests or failed filings.
+Answer directly. Fully answered, no callback: do not file. Ask "Anything else?"
+If nothing else remains, call record_answered_question before ending; skip remaining phases.
 
 🎤 IF CALLER ASKS FOR "VOICEMAIL":
 Many callers expect old-fashioned voicemail systems.
