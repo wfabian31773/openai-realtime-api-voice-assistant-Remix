@@ -31,6 +31,8 @@
 import { registerTool, missing, type MissingFields, type ToolResult } from './registry';
 import { gateRefusalsSoFar, noteGateRefusal, noteCallFact, callFactNoted } from './gateAttempts';
 import { forgetIfSameName, nameKey, rememberVerifiedIdentity, verifiedIdentityFor } from './verifiedIdentity';
+import { appointmentAccess } from '../services/appointmentAccess';
+import './patientAppointments';
 
 /** Which queue is asking. Injected as call context, never a model argument. */
 export type ToolQueue = 'optical' | 'surgery';
@@ -121,7 +123,7 @@ registerTool({
   layer: 'agent',
   timeoutMs: LOOKUP_PATIENT_BUDGET_MS,
   description:
-    'Find a patient and their recent visit history. Call this as soon as you have ' +
+    'Find a patient, their recent visit history and upcoming appointments. Call this as soon as you have ' +
     'either their phone number, or their first name, last name and date of birth. ' +
     'It returns the offices and providers they have actually been seen at, which is ' +
     'how you confirm which office they mean.',
@@ -711,6 +713,7 @@ registerTool({
       patient_name: resolved.patientName,
       matched_by: resolved.matchedBy,
       identity_is_certain: certain,
+      ...appointmentAccess(resolved, certain),
       // The verdict of the carry-forward write, allow-listed in toolTimeline so
       // it is SQL rather than a console line. A fixed word from a closed set,
       // never caller data.

@@ -98,6 +98,9 @@ CREATE INDEX IF NOT EXISTS idx_plugin_outbox_due ON plugin_message_outbox (statu
 -- Upgrade an earlier apply: columns and statuses inside CREATE TABLE IF NOT
 -- EXISTS are skipped when the table already exists. These statements are
 -- safe to re-run.
+-- Short-lived confirm-token hand-off: cleared on first fetch, consume,
+-- cancel, or the expiry sweep. Never include in views, logs, or audit.
+ALTER TABLE contact_approvals ADD COLUMN IF NOT EXISTS confirm_token_plaintext VARCHAR(64);
 ALTER TABLE contact_approvals ADD COLUMN IF NOT EXISTS phone_key VARCHAR(10);
 CREATE INDEX IF NOT EXISTS idx_contact_approvals_phone_key ON contact_approvals (phone_key);
 ALTER TABLE contact_approvals DROP CONSTRAINT IF EXISTS contact_approvals_status_check;

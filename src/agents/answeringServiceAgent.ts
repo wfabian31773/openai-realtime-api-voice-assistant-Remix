@@ -1,3 +1,6 @@
+import { appointmentReadPolicy } from '../services/appointmentReadPolicy';
+import { appointmentAccess, unavailableAppointmentAccess } from '../services/appointmentAccess';
+import { nameKey } from '../tools/verifiedIdentity';
 import { RealtimeAgent, tool } from '@openai/agents/realtime';
 import { z } from 'zod';
 import { getPacificTimeContext, formatPhoneLast4, formatPhoneForSpeech } from '../utils/timeAware';
@@ -232,7 +235,14 @@ This phone number matches ONE person on file: first name "${pc.firstName}".
   }
 
   let scheduleContextSection = '';
-  if (scheduleContext?.patientFound) {
+  if (scheduleContext?.patientFound && (scheduleContext.matchedBy !== 'name_and_dob' ||
+      scheduleContext.identity?.unique === false || scheduleContext.identityUnconfirmed)) {
+    // The reader now returns every upcoming booking. Keep candidate records
+    // out of the prompt, too; a disclosure instruction cannot gate visible data.
+    scheduleContextSection = '\nA patient candidate was found, but appointment details are withheld until identity is confirmed. ' +
+      'Collect the patient name and date of birth, then call lookup_schedule with first_name, last_name and date_of_birth. ' +
+      'Do not confirm or deny a booking before that tool returns a confirmed record.';
+  } else if (scheduleContext?.patientFound) {
     const parts: string[] = ['\n===== PATIENT CONTEXT (AUTO-RETRIEVED) ====='];
     parts.push(`Patient found in our system.`);
     
@@ -592,6 +602,7 @@ ${timeContext}
 
 CALLBACK NUMBER:
 ${callbackPhoneSection}
+${appointmentReadPolicy('lookup_schedule')}
 ${precontextSection}${scheduleContextSection}
 ${callerMemorySection}`;
 }
@@ -752,6 +763,8 @@ Use this data to answer appointment questions AND for ticket creation.`,
       first_name: z.string().optional().describe('Patient first name'),
       last_name: z.string().optional().describe('Patient last name'),
       date_of_birth: z.string().optional().describe('Date of birth in any format'),
+      provider: z.string().optional().describe('Provider the caller named for the appointment, if any.'),
+      office: z.string().optional().describe('Office the caller named for the appointment, if any.'),
     }),
     execute: async (params) => {
       console.log(`[${agentTag}] lookup_schedule called:`, {
@@ -763,6 +776,7 @@ Use this data to answer appointment questions AND for ticket creation.`,
       const TOOL_TIMEOUT_MS = 5000; // 5 second timeout for tool calls
       const emptyResult: PatientScheduleContext = {
         patientFound: false,
+        scheduleReadStatus: 'unavailable',
         upcomingAppointments: [],
         pastAppointments: [],
         totalAppointmentsFound: 0,
@@ -777,7 +791,10 @@ Use this data to answer appointment questions AND for ticket creation.`,
         // directly. No name search to garble, regardless of who is driving.
         if (callId && params.date_of_birth) {
           const { dobMatchesContext, updateLedger: ul, getLedger: gl } = await import('../services/callFactsLedger');
-          if (dobMatchesContext(callId, params.date_of_birth) === true && scheduleContext?.patientFound) {
+          if (dobMatchesContext(callId, params.date_of_birth) === true && scheduleContext?.patientFound &&
+              scheduleContext.identity?.unique !== false && !scheduleContext.identityUnconfirmed &&
+              (!params.first_name || nameKey(params.first_name) === nameKey(scheduleContext.patientData?.firstName)) &&
+              (!params.last_name || nameKey(params.last_name) === nameKey(scheduleContext.patientData?.lastName))) {
             const lf = gl(callId);
             ul(callId, {
               firstName: lf?.matchedFirstName,
@@ -787,13 +804,14 @@ Use this data to answer appointment questions AND for ticket creation.`,
             console.log(`[${agentTag}] ✓ VERIFIED via context DOB match — returning pre-loaded record for ${callId}`);
             return {
               ...scheduleContext,
+              ...appointmentAccess(scheduleContext, true, params),
               verified: true,
               note: 'Caller VERIFIED: recognized phone number + date of birth matches the record on file. Greet them by first name and proceed — do NOT ask any further identity questions.',
             };
           }
         }
 
-        if (params.phone) {
+        if (params.phone && !(params.first_name && params.last_name && params.date_of_birth)) {
           const normalizedPhone = normalizePhoneNumber(params.phone);
           result = await withTimeout(
             scheduleLookupService.lookupByPhone(normalizedPhone),
@@ -819,6 +837,11 @@ Use this data to answer appointment questions AND for ticket creation.`,
         }
         
         if (result.patientFound) {
+          const confirmed = result.matchedBy === 'name_and_dob' && result.identity?.unique !== false && !result.identityUnconfirmed;
+          if (!confirmed) return {
+            found: true, identityUnconfirmed: true,
+            ...appointmentAccess(result, false),
+          };
           const pd = result.patientData;
           return {
             found: true,
@@ -832,6 +855,7 @@ Use this data to answer appointment questions AND for ticket creation.`,
               preferredLocation: pd?.preferredLocation || null,
               preferredProvider: pd?.preferredProvider || null,
             },
+            ...appointmentAccess(result, confirmed, params),
             upcomingAppointments: result.upcomingAppointments,
             pastAppointments: result.pastAppointments.slice(0, 5),
             lastProviderSeen: result.lastProviderSeen || null,
@@ -841,14 +865,16 @@ Use this data to answer appointment questions AND for ticket creation.`,
             message: `Patient found with ${result.totalAppointmentsFound} appointment(s) in system`,
           };
         }
+        if (result.scheduleReadStatus === 'unavailable') return { found: false, ...unavailableAppointmentAccess() };
         return {
           found: false,
           message: 'No patient found matching the provided information. This may be a new patient.',
         };
       } catch (error) {
-        console.error(`[${agentTag}] lookup_schedule error:`, error);
+        console.error(`[${agentTag}] lookup_schedule error:`, error instanceof Error ? error.name : 'unknown');
         return {
           found: false,
+          ...unavailableAppointmentAccess(),
           error: 'Unable to look up schedule at this time.',
         };
       }

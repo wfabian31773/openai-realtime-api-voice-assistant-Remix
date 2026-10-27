@@ -1,6 +1,7 @@
 import { chromium, Browser, Page } from 'playwright';
 import { workflowManager, type PatientData } from './schedulingWorkflowManager';
 import { PHREESIA_CONFIG, type PatientType } from '../../src/config/phreesiaConfig';
+import { currentClinicName } from '../../src/config/azulVisionKnowledge';
 
 const CUA_KEY_TO_PLAYWRIGHT_KEY: Record<string, string> = {
   '/': 'Divide',
@@ -250,10 +251,11 @@ export class PhreesiaComputerUseAgent {
       let selectedOption: { value: string; text: string } | undefined;
       
       if (preferredLocation) {
-        selectedOption = options.find(opt => 
-          opt.text.toLowerCase().includes(preferredLocation.toLowerCase()) ||
-          preferredLocation.toLowerCase().includes(opt.text.toLowerCase())
-        );
+        const preferred = (currentClinicName(preferredLocation) ?? preferredLocation).toLowerCase();
+        selectedOption = options.find(opt => {
+          const label = currentClinicName(opt.text)?.toLowerCase();
+          return label && (label.includes(preferred) || preferred.includes(label));
+        });
         if (selectedOption) {
           console.info(`[COMPUTER USE] Found preferred location: ${selectedOption.text}`);
         }
@@ -276,10 +278,16 @@ export class PhreesiaComputerUseAgent {
         await this._page.waitForTimeout(500);
         
         if (preferredLocation) {
-          const option = await this._page.$(`text="${preferredLocation}"`);
-          if (option) {
+          const preferred = (currentClinicName(preferredLocation) ?? preferredLocation).toLowerCase();
+          // The external form can retain the retired label after our caller
+          // vocabulary changes. Match its actual options through the same map.
+          const options = await this._page.$$('[role="option"]:not([aria-disabled="true"])');
+          for (const option of options) {
+            const label = currentClinicName(await option.textContent())?.toLowerCase();
+            if (label !== preferred) continue;
             await option.click();
             console.info(`[COMPUTER USE] Selected location via combobox: ${preferredLocation}`);
+            break;
           }
         } else {
           const firstOption = await this._page.$('[role="option"]:not([aria-disabled="true"])');

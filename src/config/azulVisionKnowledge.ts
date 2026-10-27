@@ -9,6 +9,31 @@ export interface Location {
   hours: string;
 }
 
+/** Retired clinic labels mapped to the name callers and staff use now. */
+export const RETIRED_CLINIC_NAMES: Readonly<Record<string, string>> = Object.freeze({
+  'north valley eye': 'Mission Hills',
+  magan: 'Covina',
+});
+
+/** Current clinic display name for a retired label; unknown names pass through. */
+export function currentClinicName(value: string | null | undefined): string | null {
+  if (typeof value !== 'string' || !value.trim()) return null;
+  const trimmed = value.trim();
+  const key = trimmed
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+  const core = key
+    .replace(/^(the|our|your)\s+/, '')
+    .replace(/^(azul vision|atlantis eyecare)\s+/, '')
+    .replace(/\s+(office|location|clinic)$/, '')
+    .trim();
+  const current = RETIRED_CLINIC_NAMES[key] ?? RETIRED_CLINIC_NAMES[core];
+  return typeof current === 'string' ? current : trimmed;
+}
+
 export const AZUL_VISION_LOCATIONS: Location[] = [
   { name: "Anaheim", address: "947 S. Anaheim Boulevard, Suite #120", city: "Anaheim", state: "CA", zip: "92805", phone: "(714) 991-4100", fax: "(714) 533-6800", hours: "Mon-Fri 8am-5pm, closed 12pm-1pm" },
   { name: "Covina", address: "420 W. Rowland Street", city: "Covina", state: "CA", zip: "91723", phone: "(626) 224-9980", fax: "(626) 470-4550", hours: "Mon-Fri 8am-5pm, closed 12pm-1pm" },
@@ -150,7 +175,7 @@ export const AZUL_VISION_KNOWLEDGE = {
   },
   
   partnerPractices: [
-    "North Valley Eye",
+    "Mission Hills",
     "Riverside Eye Partners", 
     "Atlantis Eyecare",
     "California Eye Specialists",

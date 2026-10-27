@@ -22,6 +22,7 @@
  */
 import { and, desc, asc, gte, lt, ne, sql } from 'drizzle-orm';
 import { schedule } from '../../shared/schema';
+import { currentClinicName } from '../config/azulVisionKnowledge';
 
 /**
  * PersonID is a uuid COLUMN and the id we hold is a string, so the comparison
@@ -94,7 +95,7 @@ function toFact(r: Record<string, any>): AppointmentFact {
     date: String(r.appointmentDate),
     time: speakTime(r.appointmentStart),
     provider: (r.renderingPhysician ?? r.providerFromAppt ?? null) || null,
-    office: (r.officeLocation ?? null) || null,
+    office: currentClinicName(r.officeLocation),
   };
 }
 
