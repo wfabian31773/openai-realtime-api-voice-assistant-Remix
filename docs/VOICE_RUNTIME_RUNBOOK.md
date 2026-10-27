@@ -537,9 +537,11 @@ synthetic fixtures in the cited tests when checking this branch.
   path calls `record_answered_question` after asking if
   anything else is needed, once no staff work remains. The timeline records
   only boolean outcome flags. The missing-ticket warning and both ticket
-  graders recognize this disposition on no-IVR calls; any failed filing or
-  escalation, or later tool activity, leaves the call eligible for the warning
-  and normal grading.
+  graders recognize this disposition on no-IVR calls. Hangup and bookkeeping
+  (`terminate_call`, `end_call`, `emit_decision`, `set_spoken_language`) after
+  the marker do not revoke it. Any failed filing or escalation, or later
+  request-tool activity, leaves the call eligible for the warning and normal
+  grading.
   This marker relies on the agent, and cannot prove that an unrecorded later
   request did not occur. The existing category default for confirmations must
   not discard a confirmation

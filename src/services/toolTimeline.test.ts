@@ -321,6 +321,8 @@ describe('classifyFleetCall — "promised and filed" vs "promised and did not"',
     expect(events[0].outcome).toMatchObject({ success: true, ticketCreated: false, callbackRequired: false });
     expect(JSON.stringify(events)).not.toContain('Synthetic private text');
     expect(classifyFleetCall(events)).toEqual({ purpose: 'Answered question', result: 'Answered, no ticket needed' });
+    expect(classifyFleetCall([...events, ev('terminate_call', { success: true }, { reason: 'completed' })]))
+      .toEqual({ purpose: 'Answered question', result: 'Answered, no ticket needed' });
     expect(classifyFleetCall([...events, ev('create_ticket', { success: true, ticket_number: 'T-2' })]).result).toBe('Ticket filed (T-2)');
     expect(classifyFleetCall([...events, ev('create_ticket', { success: false, validationError: true })]).result).toContain('FAILED');
   });

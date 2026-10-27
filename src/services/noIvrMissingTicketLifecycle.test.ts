@@ -31,6 +31,7 @@ describe('missing-ticket warning at finalization', () => {
     for (const [id, timeline, expectedWarnings] of [
       ['answered', { events: [{ tool: 'create_ticket', outcome }] }, 0],
       ['normal-answered', { events: [{ tool: 'record_answered_question', outcome }] }, 0],
+      ['answered-then-hangup', { events: [{ tool: 'record_answered_question', outcome }, { tool: 'terminate_call', outcome: { success: true } }] }, 0],
       ['answered-and-failed', { events: [{ tool: 'create_ticket', outcome }, { tool: 'create_ticket', outcome: { success: false } }] }, 1],
       ['no-disposition', { events: [] }, 1],
       ['unfiled', { events: [{ tool: 'create_ticket', outcome: { success: false } }] }, 1],

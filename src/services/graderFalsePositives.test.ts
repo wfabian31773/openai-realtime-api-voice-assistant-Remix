@@ -185,6 +185,13 @@ describe('no-IVR fully answered disposition', () => {
       expect(check(grades({ events: [{ tool: 'create_ticket', outcome: { success: false } }, ...answered.events] }), name).pass).toBe(false);
       expect(check(grades({ events: [...answered.events, { tool: 'escalate_to_human', outcome: {} }] }), name).pass).toBe(false);
       expect(check(grades({ events: [...answered.events, { tool: 'lookup_schedule', outcome: {} }] }), name).pass).toBe(false);
+      expect(check(grades({
+        events: [
+          ...answered.events,
+          { tool: 'emit_decision', outcome: {} },
+          { tool: 'terminate_call', outcome: { success: true } },
+        ],
+      }), name).pass).toBe(true);
     }
   });
 });
