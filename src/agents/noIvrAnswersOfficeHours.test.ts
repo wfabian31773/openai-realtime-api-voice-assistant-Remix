@@ -106,7 +106,7 @@ describe('the after-hours line states the office hours', () => {
 
   it('the Grok body still says no ticket for an hours question, and every office is closed right now', async () => {
     const grok = await prompt({ pipeline: 'runtime' });
-    expect(grok).toMatch(/Hours, an address or fax:.*?If a question is fully answered and no callback is requested, do not file\./s);
+    expect(grok).toMatch(/Hours, an address or fax:.*?Fully answered, no callback: do not file/s);
     expect(grok).toMatch(/Every office is closed/);
   });
 
