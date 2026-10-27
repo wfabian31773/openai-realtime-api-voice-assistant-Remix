@@ -535,6 +535,16 @@ surgery to Surgery Coordination, referral authorization and payer/vendor inquiri
 to PCP Support; unclear non-records work goes to HVA Hub / Other. Nobody is told
 to call another line. Existing identity and routing gates still apply.
 
+The intent policy checks clinical interpretation before delivery words: "explain
+the test results that were sent to me" stays clinical. A refusal covers all
+supported document terms, including notes, reports, results, imaging and
+documentation. Corrections such as "I don't need my whole chart, just send the
+operative report" retain the affirmative request; documentation from a past
+visit is supported records work. Unknown requests still file to HVA Hub / Other,
+with `classified: false`, no spoken `message`, and model instructions in `fix`.
+The deployment marker for these review fixes is
+`voice-runtime-v117-records-intent-review-fixes-20261027`.
+
 An actual records request stays in Medical Records even when it names an
 appointment, operation, referral, vendor or payer. Third-party requester handling
 and the patient pending-authorization/signature flow are unchanged. The nearby
@@ -589,3 +599,30 @@ Restoring the initial intent policy fails 23 policy checks. Bypassing captured
 request evidence in classification fails the classification/filing regression.
 Both mutations were restored before the final run. The shared policy and its
 tests are identical in both repositories. No migration is included in this branch.
+
+
+Review-fix proof (2026-10-27): the policy/tool/CI regressions failed 42 tests
+before the fixes. The selected policy, classification/filing, records form/name,
+professional-request, readiness and marker suites now pass all 242 tests (9 files),
+including `src/tools/theToolDoesNotNarrateItsRule.test.ts`. Root `tsc -p .
+--noEmit` passes. This repo has no ESLint dependency/config; touched TypeScript
+files were linted with the paired Ticketing repo's ESLint and TypeScript parser,
+using its unused-symbol rule, without changing dependencies or disabling checks.
+
+Independent temporary-copy mutations of the mirrored policy each fail: restoring
+narrow document negation (29), delivery before interpretation (4), dropping inline
+correction splitting (2), and dropping documentation (3). Restored policy passes
+all 85 checks. Both repos retain identical policy sources and policy tests.
+The optional dashboard typecheck is blocked by absent client dependencies; an
+`npm ci` attempt failed with npm registry DNS `EAI_AGAIN`. No live services,
+patient data or migrations were used.
+
+
+Full-suite attempt: 344 files / 6,832 tests passed; one file / 16 tests skipped.
+Four files could not pass under this sandbox (127 failed tests):
+`server/health.test.ts`, `src/plugin/pluginApi.test.ts` and
+`src/runtime/voiceRuntime.test.ts` require local listening sockets, refused with
+`listen EPERM` and followed by harness timeouts; `src/runtime/buildIdentity.test.ts`
+requires a child Git process, refused with `spawnSync git EPERM`. Those checks
+and the authentication/signature rules remain intact. The targeted nine-file
+run passes independently of these environment restrictions.

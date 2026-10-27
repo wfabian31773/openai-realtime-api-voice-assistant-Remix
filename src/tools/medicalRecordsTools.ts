@@ -241,10 +241,10 @@ registerTool({
     const description = requestDescription(input);
     const redirect = recordsLineRedirect(description);
     if (redirect) return {
-      success: true, classified: true, is_records_request: false,
+      success: true, classified: recordsLinePurpose(description) !== 'unknown', is_records_request: false,
       department_id: redirect.departmentId, request_type_id: redirect.requestTypeId,
       request_reason_id: redirect.requestReasonId, request_reason: redirect.requestReason,
-      fix: 'This is not a records request. Take the callback request with file_records_ticket; do not offer a records form or ask for delivery details.',
+      fix: 'This is not a records request. Take the callback request with file_records_ticket; do not offer a records form or ask for delivery details. Preserve the caller request in the description.',
     };
     const { classification, isCatchAll } = classifyRecordsRequest(description);
 

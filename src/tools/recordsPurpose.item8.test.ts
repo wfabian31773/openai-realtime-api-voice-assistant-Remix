@@ -41,6 +41,10 @@ describe('item #8: a non-records call never becomes records work', () => {
     expect(api.createTicket.mock.calls[0]?.[0].departmentId).toBe(9);
   });
   it('uses the ordinary callback queue when no records request is stated', async () => {
+    const classified = await runTool('classify_records_request', { request_description: 'Something else entirely' });
+    expect(classified).toMatchObject({ success: true, classified: false, is_records_request: false, department_id: 9 });
+    expect(classified).not.toHaveProperty('message');
+    expect(classified).toHaveProperty('fix', expect.stringMatching(/description/i));
     await runTool('file_records_ticket', { ...BASE, request_description: 'Something else entirely' });
     expect(api.createTicket.mock.calls[0]?.[0]).toMatchObject({ departmentId: 9, requestTypeId: 69, requestReasonId: 539 });
   });
@@ -104,4 +108,27 @@ describe('self-review: request-scoped caller evidence', () => {
       expect(api.createTicket.mock.calls[0]?.[0]).toMatchObject({ departmentId: 16, requestPathway: 'pending_authorization', capClockApplies: false, formChannel: 'sms' });
     },
   );
+});
+
+
+describe('review: classification and filing agree on records intent', () => {
+  it.each([
+    ['Can someone explain the test results that were sent to me?', 3],
+    ["Don't send my test results; please reschedule my appointment", 9],
+  ])('avoids records authorization for %s', async (request_description, departmentId) => {
+    expect(await runTool('classify_records_request', { request_description })).toMatchObject({ is_records_request: false, department_id: departmentId });
+    expect((await runTool('file_records_ticket', { ...BASE, requester: undefined, request_description })).success).toBe(true);
+    const payload = api.createTicket.mock.calls[0]?.[0];
+    expect(payload.departmentId).toBe(departmentId);
+    for (const field of ['requestorType', 'requestPathway', 'capClockApplies', 'formChannel']) expect(payload).not.toHaveProperty(field);
+  });
+
+  it.each([
+    "I don't need my whole chart, just send the operative report",
+    'I need documentation from my last visit',
+  ])('retains the records workflow for %s', async request_description => {
+    expect(await runTool('classify_records_request', { request_description })).toMatchObject({ is_records_request: true, department_id: 16 });
+    expect((await runTool('file_records_ticket', { ...BASE, request_description, form_channel: 'sms' })).success).toBe(true);
+    expect(api.createTicket.mock.calls[0]?.[0]).toMatchObject({ departmentId: 16, requestPathway: 'pending_authorization', capClockApplies: false, formChannel: 'sms' });
+  });
 });

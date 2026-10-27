@@ -80,3 +80,42 @@ describe('self-review: preserve the supported records workflows', () => {
     expect(recordsLineRedirect(text)).toMatchObject({ departmentId: 9, requestTypeId: 32, requestReasonId: reason });
   });
 });
+
+
+describe('review regressions: records evidence follows the caller request', () => {
+  it.each([
+    'test results', 'lab results', 'exam results', 'diagnostic results',
+    'progress notes', 'consultation notes', 'visit notes', 'office notes',
+    'surgery notes', 'surgical notes', 'operative notes', 'notes',
+    'operative report', 'surgical report', 'optometry report', 'consultation report', 'op report', 'reports',
+    'imaging', 'OCT images', 'visual field', 'VF', 'DRS', 'fundus images', 'topography',
+    'documentation', 'historial', 'informes', 'results',
+  ])('honors a refusal to send %s', document => {
+    const text = `Don't send my ${document}; please reschedule my appointment`;
+    expect(recordsLinePurpose(text)).toBe('scheduling');
+    expect(recordsLineRedirect(text)).toMatchObject({ departmentId: 9, requestTypeId: 32, requestReasonId: 147 });
+  });
+
+  it.each([
+    'Can someone explain the test results that were sent to me?',
+    'Please interpret the lab results that were emailed to me',
+    'I have a question about my exam results that were faxed',
+    'I need to review the results that were mailed with my doctor',
+  ])('keeps delivered results interpretation in clinical: %s', text => {
+    expect(recordsLinePurpose(text)).toBe('clinical');
+    expect(recordsLineRedirect(text)).toMatchObject({ departmentId: 3 });
+  });
+
+  it.each([
+    "I don't need my whole chart, just send the operative report",
+    "I don't need my chart, only fax the consultation notes",
+    "I don't need my chart, but please send my test results",
+    "I don't need my chart; please send my imaging",
+    'I need documentation from my last visit',
+    'Please send documentation from my last visit',
+    'Documentation from my last visit',
+  ])('preserves the affirmative document request: %s', text => {
+    expect(recordsLinePurpose(text)).toBe('records');
+    expect(recordsLineRedirect(text)).toBeNull();
+  });
+});

@@ -881,8 +881,10 @@ import { callEnvironment } from "./callRecord";
  * BY office, so it gets its own marker. On top of v115 (#367), which it
  * contains. `src/tools/opticalTools.ts`, `opticalOfficeFromRecord.test.ts`.
  */
+// v117: records-intent review fixes — clinical interpretation before delivery,
+// document-wide refusals, inline corrections, documentation and unknown results.
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v116-the-record-office-name-travels-20261023";
+  "voice-runtime-v117-records-intent-review-fixes-20261027";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

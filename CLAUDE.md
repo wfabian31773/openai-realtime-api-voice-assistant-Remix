@@ -2347,6 +2347,7 @@ voice-runtime-v113-the-npx-demo-line-20261022
 voice-runtime-v114-the-si-assistant-plugin-api-20261022
 voice-runtime-v115-the-si-assistant-review-fixes-20261022
 voice-runtime-v116-the-record-office-name-travels-20261023
+voice-runtime-v117-records-intent-review-fixes-20261027
 ```
 
 Also printed at boot as `[voice-runtime] <marker>`. Anything ending in an
@@ -2554,8 +2555,8 @@ v10 (the person base and the join), v11 (the locked record, #290) and v12
 (optical's office ladder) are a CHAIN on `main`: each merged after the one
 before and brought it in, so v12 contains both.
 
-**AND THE SEQUENCE HAS TWO HOLES IN IT ON PURPOSE: v13 AND v57. v116 IS THE
-NEWEST — the record's office name travels on an optical ticket — on its branch
+**AND THE SEQUENCE HAS TWO HOLES IN IT ON PURPOSE: v13 AND v57. v117 IS THE
+NEWEST — the records-intent review fixes, on top of v116 — on its branch
 ABOVE `main`'s v115, which it contains — AND v115 IS WHAT `main` CARRIES, SINCE
 #367 MERGED 2026-10-22 (`df4b6bc`): the five #366 review fixes; on top of v114,
 from #366 MERGED 2026-10-22 (`086062b`): the SI Assistant plugin API, dark; on top of v113, from #363 MERGED
@@ -2687,7 +2688,7 @@ re-bumps only when it falls BELOW `main`, where it would read as a failed pull.
 **NEWEST IS NOT THE SAME AS CONTAINED:** v70 contains v69 because `main` was
 merged into it, not because 70 > 69. **A build must never read v13, v57, v59,
 v60, v63, v65 or v66** — v13 and v57 were withdrawn, and the other five were
-branch numbers given up the moment a merge put them below `main`. The next ship takes **v117**. v19-v24 were siblings off v18 on 2026-09-15 — v19 the PCP lost-requestfloor (#300), v20 the blind transfer telemetry (#302), v21 the ask detection
+branch numbers given up the moment a merge put them below `main`. The next ship takes **v118**. v19-v24 were siblings off v18 on 2026-09-15 — v19 the PCP lost-requestfloor (#300), v20 the blind transfer telemetry (#302), v21 the ask detection
 (#301), v22 the question format (#303), v23 the recording disclosure (#304),
 v24 the answerable queue choice (#306). Distinct numbers were assigned UP FRONT
 precisely so six open branches could never make six different builds read alike
