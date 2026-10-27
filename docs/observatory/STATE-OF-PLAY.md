@@ -1484,3 +1484,39 @@ WHERE call_sid = ANY(:sids_from_step_1)
 After the deploy, the same population should read 0 on the second query,
 and optical tickets with no `location_id` must not rise (before-arm
 2026-10-01: 15 of 391).
+
+## 16. No-IVR answer and record integrity — 2026-10-27 (#9, #10, #11, #20)
+
+The voice-remix branch addresses the four Support Desk items with synthetic
+regression tests. No production database or live call was used, and no
+ticketing-app repository is present in this workspace.
+
+- **#9 — VA-76095, 74600:** a fully answered question with no callback request
+  returns `ticketCreated: false` before ticket lookup or submission. The
+  response direction also avoids the normal filed-ticket script, so staff do
+  not receive an unnecessary callback ticket.
+- **#10:** `AZUL_VISION_LOCATIONS[].hours` supplies each clinic row in the
+  runtime knowledge pack and legacy prompt. `businessHours.standard` is
+  derived from those rows; the agent is directed to use the named clinic's
+  recorded times regardless of the current hour. Tests cover representative
+  clinics in morning, lunch and after-close contexts.
+- **#11:** the grading model is instructed not to infer facts. Before
+  persistence, its generated summary is replaced by exact caller and final
+  agent transcript excerpts, which prevents unsupported details from being
+  stored as a summary.
+- **#20 — VA-71404:** the no-IVR output guardrail catches tool directives,
+  prompt phases and bracketed notes and remains enforcing in log mode. The
+  callback supplied by the caller is preserved separately from caller ID;
+  differing numbers are included in ticket details as an explicit staff flag.
+
+The joined record remains intact: caller ID is kept in `callerPhone`, the
+confirmed callback is kept in `patientPhone`, and the mismatch note travels
+with the ticket. These changes add no ticket-schema dependency and no
+migration file. Offline coverage is in
+`src/agents/noIvrAfterHoursRouting.test.ts`,
+`src/agents/noIvrAnswersOfficeHours.test.ts`,
+`src/agents/noIvrPromptShapeForGrok.test.ts`,
+`src/guardrails/medicalSafety.test.ts`,
+`src/runtime/mediaStreamBridge.test.ts`,
+`src/services/gradingIsClaimedOnce.test.ts` and
+`src/services/toolDirection.test.ts`.

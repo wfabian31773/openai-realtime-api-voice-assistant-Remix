@@ -17,6 +17,27 @@ export interface QualityAnalysis {
   patientConcerns: string[];
 }
 
+/**
+ * Keep the stored call summary extractive. A generated summary can turn a
+ * question into an appointment, upgrade a tentative detail into a fact, or
+ * invent an outcome. These excerpts preserve exactly what the speakers said;
+ * the model still grades the other quality fields.
+ */
+export function transcriptGroundedSummary(transcript: string): string {
+  const turns = transcript
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => /^(?:CALLER|PATIENT|USER|AGENT)\s*:/i.test(line));
+  const caller = turns.find((line) => /^(?:CALLER|PATIENT|USER)\s*:/i.test(line));
+  const finalAgent = [...turns].reverse().find((line) => /^AGENT\s*:/i.test(line));
+  const excerpt = (line: string) => line.replace(/^[^:]+:\s*/, '').slice(0, 300).trim();
+  const parts = [
+    caller ? `Caller said: “${excerpt(caller)}”` : null,
+    finalAgent ? `Agent said: “${excerpt(finalAgent)}”` : null,
+  ].filter((part): part is string => Boolean(part));
+  return parts.length ? parts.join(' ') : 'No caller or agent statement was captured in the transcript.';
+}
+
 export interface GraderResult {
   grader: string;
   pass: boolean;
@@ -1619,8 +1640,10 @@ export class CallGradingService {
           return null;
         }
       }
-      const systemPrompt = `You are an expert call quality analyst for a healthcare ophthalmology practice. 
-Analyze the following call transcript between a patient and an AI voice agent.
+      const systemPrompt = `You are an expert call quality analyst for a healthcare ophthalmology practice.
+Analyze the following call transcript between a caller and an AI voice agent.
+
+SUMMARY GROUNDING: Only use facts explicitly present in the transcript. Do not infer a request, appointment, date, identity, diagnosis, action, or outcome. Treat agent statements as statements made by the agent, not as independently verified facts. If a detail is unclear or missing, omit it. The stored summary is guarded to transcript excerpts after your analysis.
 
 Evaluate based on:
 1. PATIENT SENTIMENT - How did the patient feel during and at the end of the call?
@@ -1674,6 +1697,7 @@ Respond with a JSON object only, no other text:
       }
 
       const analysis: QualityAnalysis = JSON.parse(content);
+      analysis.summary = transcriptGroundedSummary(transcript);
       
       if (!['satisfied', 'neutral', 'frustrated', 'irate'].includes(analysis.sentiment)) {
         analysis.sentiment = 'neutral';

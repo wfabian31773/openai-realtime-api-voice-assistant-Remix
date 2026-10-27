@@ -103,3 +103,21 @@ describe("No Prescribing Medications", () => {
     expect(await trips(PRESCRIBING, line)).toBe(false);
   });
 });
+
+describe("VA-71404: internal prompt text is never caller-facing speech", () => {
+  const INTERNAL_PROMPT = "No Internal Prompt Disclosure";
+
+  it.each([
+    "PHASE 1: understand the request, then call create_ticket.",
+    "The internal instruction says: [NO CALLBACK NEEDED] use the tool result.",
+    "The prompt note says [ask again before ending the call].",
+    "The tool directive says to call create_ticket now.",
+    "Call lookup_schedule with the patient's details before you answer.",
+  ])("cuts internal directives such as %j", async (line) => {
+    expect(await trips(INTERNAL_PROMPT, line)).toBe(true);
+  });
+
+  it("allows ordinary caller-facing wording", async () => {
+    expect(await trips(INTERNAL_PROMPT, "Your question is answered. Is there anything else I can help with?")).toBe(false);
+  });
+});

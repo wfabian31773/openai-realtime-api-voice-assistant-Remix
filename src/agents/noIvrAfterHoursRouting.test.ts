@@ -296,3 +296,54 @@ describe('every other call is the app\'s to route, exactly as before', () => {
     expect(p.additionalDetails ?? '').not.toMatch(/SAME-DAY|POST-OP/);
   });
 });
+
+describe('caller-requested callback handling — VA-76095 / 74600 / VA-71404', () => {
+  it('does not create a callback ticket when the question was answered and no callback is needed', async () => {
+    const { agent } = await agentFor();
+    const result = await call(agent, 'create_ticket', {
+      ...TICKET,
+      request_category: 'general_question',
+      request_summary: 'Asked for the West Hills office hours; the agent answered from clinic facts.',
+      requires_callback: false,
+    });
+
+    expect(result).toMatchObject({ success: true, ticketCreated: false, callbackRequired: false });
+    expect(String(result.message)).toContain('No ticket was created');
+    expect(h.submitSimplifiedTicket).not.toHaveBeenCalled();
+  });
+
+  it('keeps caller ID and a different callback number on the ticket, with a staff flag', async () => {
+    const { agent } = await agentFor();
+    await call(agent, 'create_ticket', {
+      ...TICKET,
+      callback_number: '555-765-4321',
+      request_category: 'general_question',
+      request_summary: 'Asked a question that needs a staff follow-up.',
+      requires_callback: true,
+    });
+
+    expect(lastSubmit()).toMatchObject({
+      patientPhone: '5557654321',
+      callerPhone: '5551234567',
+    });
+    expect(String(lastSubmit().additionalDetails)).toContain('CALLBACK NUMBER MISMATCH');
+    expect(String(lastSubmit().additionalDetails)).toContain('+15557654321');
+    expect(String(lastSubmit().additionalDetails)).toContain('+15551234567');
+  });
+
+  it('keeps internal instructions private in both the SIP and runtime prompts', async () => {
+    const legacyAgent = await createNoIvrAgent(async () => {}, { callId: 'synthetic-legacy' } as any);
+    const runtimeAgent = await createNoIvrAgent(async () => {}, {
+      callId: 'synthetic-runtime',
+      pipeline: 'runtime',
+    } as any);
+    for (const agent of [legacyAgent, runtimeAgent]) {
+      expect(String((agent as any).instructions)).toMatch(
+        /Never (?:speak|say|quote)\b.{0,45}(?:system|developer) instructions?.{0,100}(?:bracketed notes|tool directives)/i,
+      );
+      expect((agent as any).outputGuardrails).toEqual(
+        expect.arrayContaining([expect.objectContaining({ name: 'No Internal Prompt Disclosure', alwaysEnforce: true })]),
+      );
+    }
+  });
+});

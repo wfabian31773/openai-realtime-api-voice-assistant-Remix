@@ -19,6 +19,20 @@ function classify(raw: unknown): Outcome {
   return /^\s*error\b|"error"|ERROR:/i.test(s) ? 'error' : 'success';
 }
 
+function ticketWasNotCreated(raw: unknown): boolean {
+  try {
+    const result = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    return Boolean(
+      result &&
+      typeof result === 'object' &&
+      (result as Record<string, unknown>).success === true &&
+      (result as Record<string, unknown>).ticketCreated === false,
+    );
+  } catch {
+    return false;
+  }
+}
+
 /** `${callId}:${tool}` → error attempts this call (drives retry-once). */
 const errorAttempts = new Map<string, number>();
 
@@ -120,6 +134,10 @@ export function directionFor(
 ): string | null {
   const outcome = classify(raw);
   if (toolName === 'create_ticket') {
+    if (ticketWasNotCreated(raw)) {
+      errorAttempts.delete(`${callId}:${toolName}`);
+      return 'No ticket was created because the caller’s question was fully answered and no callback was requested. Do not say the request was submitted or promise a callback; ask whether the caller needs anything else.';
+    }
     if (outcome === 'success') {
       errorAttempts.delete(`${callId}:${toolName}`);
       const line = FILED_LINE[agentSlug];

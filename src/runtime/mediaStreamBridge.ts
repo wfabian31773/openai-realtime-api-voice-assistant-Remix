@@ -1295,8 +1295,8 @@ export class VoiceCallBridge {
    * clear Twilio's buffer, mark what was partially heard — because it IS an
    * interruption; the only difference is who interrupted.
    */
-  private handleGuardrailTrip(guardrail: { name: string; policyHint?: string }): void {
-    if (this.deps.guardrailMode === "log") {
+  private handleGuardrailTrip(guardrail: { name: string; policyHint?: string; alwaysEnforce?: boolean }): void {
+    if (this.deps.guardrailMode === "log" && !guardrail.alwaysEnforce) {
       console.error(`[bridge] GUARDRAIL TRIPPED (log mode, audio not cut): ${guardrail.name}`);
       return;
     }

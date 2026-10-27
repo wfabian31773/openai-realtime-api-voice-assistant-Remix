@@ -516,3 +516,33 @@ the code they add.
 4. Put the failing utterance into an offline test before changing code.
    `src/runtime/voiceRuntime.test.ts` drives a whole call with fake sockets
    on both sides; a real failure should be reproducible there first.
+
+## 9. No-IVR speech, callback, and summary safeguards
+
+The no-IVR voice changes for #9, #10, #11 and #20 are pinned offline; use the
+synthetic fixtures in the cited tests when checking this branch.
+
+- **Answered question, no callback (#9; VA-76095, 74600):** the agent must not
+  file when it fully answered the caller and no follow-up was requested. If
+  `create_ticket` is reached with `requires_callback: false`, it returns
+  `ticketCreated: false`; the tool direction must preserve that result and
+  must not say the request was submitted or promise a callback.
+- **Clinic hours (#10):** `AZUL_VISION_LOCATIONS[].hours` is the source for
+  each clinic's hours. The runtime knowledge pack renders each clinic's row,
+  and the shared standard-hours fact is derived from those rows. Answer from
+  the named clinic's row even during lunch or after closing; do not infer a
+  schedule from the clock. The synthetic morning, lunch and after-close cases
+  are in `src/agents/noIvrAnswersOfficeHours.test.ts`.
+- **Call grading summary (#11):** model-generated analysis is still used for
+  grading, but the stored summary is replaced with short, exact transcript
+  excerpts labeled by speaker. It does not infer an appointment, request or
+  outcome from those words.
+- **Internal text and callback number (#20; VA-71404):** the output guardrail
+  stops tool names, prompt phases and bracketed notes from being spoken, even
+  when runtime guardrails are configured in log mode. A caller-provided
+  callback number stays in the ticket's patient phone field; caller ID remains
+  in the caller phone field, and a mismatch is written into ticket details for
+  staff.
+
+These are voice-remix behaviors. They do not change the Support Center's
+ticket schema or apply a database migration.

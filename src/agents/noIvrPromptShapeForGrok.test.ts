@@ -205,7 +205,8 @@ const RULINGS: Array<[string, RegExp]> = [
   // 2026-10-01: the operator rang the line, asked when an office opens and
   // was told "I don't want to give you the wrong time for that office". The
   // hours are the practice's own and every other lane states them.
-  ['office hours are answered with the times, never hedged', /including the office's own opening and closing time, exactly as written\s*\n?\s*there/],
+  ['office hours are answered from clinic facts, never hedged', /(?:named clinic's Business Facts row.*?opening, closing and lunch hours exactly|hours printed on each office's row are the authoritative clinic hours)/s],
+  ['a fully answered question without a callback creates no ticket', /fully answered.{0,80}(?:no callback|did not ask for a callback).{0,30}(?:do not file|do not create a ticket)/is],
   ['no "is that correct?"', /DO NOT ask "Is that correct\?"|Do not ask "Is that correct\?"/],
   ['the ticket number is not read out', /(DO NOT|Do not) read (out )?the ticket number/],
   ['the technical-issue line is a fixed sentence', /I'm sorry, I'm having a technical issue on my end right now\. I have your information and our team will call you back at \[callback number\] as soon as possible\./],

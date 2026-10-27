@@ -152,6 +152,30 @@ describe("a call is graded once", () => {
       expect(src, `${f} bypasses the claim`).not.toMatch(/claim:\s*false/);
     }
   });
+
+  it("VA-74600: the stored call summary cannot add details absent from the transcript", async () => {
+    const transcript =
+      "CALLER: What time does Example Clinic open?\n" +
+      "AGENT: Example Clinic opens at 8 AM and closes at 5 PM.";
+    const { svc, create } = service(async () => ({
+      choices: [{ message: { content: JSON.stringify({
+        ...ANSWER,
+        summary: "The caller asked to reschedule an appointment for Friday, and staff confirmed it.",
+      }) } }],
+      usage: undefined,
+    }));
+
+    const graded = await svc.gradeCall("c1", transcript, undefined, { claim: false });
+
+    expect(graded?.summary).toBe(
+      "Caller said: “What time does Example Clinic open?” Agent said: “Example Clinic opens at 8 AM and closes at 5 PM.”",
+    );
+    expect(graded?.summary).not.toContain("Friday");
+    const request = (create.mock.calls[0] as unknown as [Record<string, unknown>] | undefined)?.[0];
+    if (!request) throw new Error('grading request was not captured');
+    const messages = request.messages as Array<{ role: string; content: string }>;
+    expect(messages[0].content).toMatch(/SUMMARY GROUNDING.*facts explicitly present in the transcript/is);
+  });
 });
 
 describe("an abandoned claim is recoverable — Codex P2 on #321, round 8", () => {
