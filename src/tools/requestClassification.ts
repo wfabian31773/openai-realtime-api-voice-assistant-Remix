@@ -28,7 +28,34 @@ function requestContent(text: string): string {
 }
 
 export function isSurgeryRequest(text: string): boolean {
-  return /\b(?:surgery|surgical|lasik|prk|operation|cataracts?|procedures?|pre[- ]?op|post[- ]?op|cirugia|operacion)\b/.test(requestContent(text));
+  return /\b(?:surgery|surgical|lasik|prk|operation|cataracts?|procedures?|sx|pre[- ]?op|post[- ]?op|cirugia|operacion)\b/.test(requestContent(text));
+}
+
+function isResultsRequest(t: string): boolean {
+  return /\b(?:results?|resultados?)\b/.test(t);
+}
+
+/** Affirmative Hub scheduling only. A negated cancel does not win over a move. */
+function hubSchedulingReason(t: string): number | null {
+  if (/\b(?:cornea specialist|retina specialist|glaucoma specialist|oculoplastics?|neuro[- ]ophthalm\w*|pediatric (?:optometrist|ophthalm\w*)|peds|see a specialist|specialist (?:consult|appointment)|referral appointment|referred to|was referred|referral from my|cataract (?:consult|evaluation)|consult for my cataract|low vision|uveitis|especialista|consulta con especialista)\b/.test(t)) {
+    return 152;
+  }
+  if (/\b(?:same[- ]day|today if|get in today|seen today|squeeze me in|sooner appointment|earlier appointment|move my appointment up|cita para hoy|hoy mismo)\b/.test(t)) {
+    return 151;
+  }
+  const cancel = /\b(?:cancel\w*|cannot make|can't make)\b/.test(t);
+  const cancelNegated = /\b(?:not|no|do not|don't)\s+(?:to\s+)?(?:cancel\w*)\b/.test(t);
+  const reschedule = /\b(?:reschedul\w*|reprogram\w*|cambiar|mover|move|chang\w*|different day for my appointment)\b/.test(t);
+  if (cancel && !cancelNegated) return 148;
+  if (reschedule) return 147;
+  if (/\b(?:confirm\w*|what time|is my appointment)\b/.test(t)) return 149;
+  if (/\b(?:openings|what times do you have|next available|availability|disponibilidad|que horarios (?:tienen|hay))\b/.test(t)) {
+    return 150;
+  }
+  if (/\b(?:schedul\w*|book\w*|make an appointment|set[- ]?up|need an appointment|get an appointment|agendar|sacar una cita|pedir una cita|hacer una cita|solicitud de cita|nueva cita|cita para)\b/.test(t)) {
+    return 146;
+  }
+  return null;
 }
 
 /** A conservative veto, not a triage decision: preserve the existing workflow. */
@@ -54,21 +81,16 @@ export function classifyNonSurgicalRequest(text: string): RequestClassification 
     return result(9, 37, reason);
   }
   if (exam && !medication) {
-    if (/\b(?:results?|resultados?)\b/.test(t)) return result(3, 72, 542);
-    // Preserve the existing Hub scheduling distinctions (queueRouting's
-    // SCHEDULING / SPECIALIST_CUES), including Spanish nominal forms.
-    const reason = /\b(?:cornea specialist|retina specialist|glaucoma specialist|oculoplastics?|neuro[- ]ophthalm\w*|pediatric (?:optometrist|ophthalm\w*)|peds|see a specialist|specialist (?:consult|appointment)|referral appointment|referred to|was referred|referral from my|cataract (?:consult|evaluation)|consult for my cataract|low vision|uveitis|especialista|consulta con especialista)\b/.test(t) ? 152
-      : /\b(?:same[- ]day|today if|get in today|seen today|squeeze me in|sooner appointment|earlier appointment|move my appointment up|cita para hoy|hoy mismo)\b/.test(t) ? 151
-      : /\b(?:cancel\w*|cannot make|can't make)\b/.test(t) ? 148
-      : /\b(?:reschedul\w*|reprogram\w*|cambiar|mover|move|chang\w*|different day for my appointment)\b/.test(t) ? 147
-      : /\b(?:confirm\w*|what time|is my appointment)\b/.test(t) ? 149
-      : /\b(?:openings|what times do you have|next available|availability|disponibilidad|que horarios (?:tienen|hay))\b/.test(t) ? 150 : 146;
-    return result(9, 32, reason);
+    // Results only when the caller is asking for them, not booking around them.
+    if (isResultsRequest(t) && !hubSchedulingReason(t)) return result(3, 72, 542);
+    return result(9, 32, hubSchedulingReason(t) ?? 146);
   }
   if (contacts) {
     if (/\b(?:renew|renewal|renovar)\b/.test(t) && /\b(?:prescription|rx|receta)\b/.test(t)) return result(3, 33, 157);
     if (/\b(?:status|ready|pickup|pick up|arriv\w*|estado|listos)\b/.test(t)) return result(1, 5, 21);
     if (/\b(?:order\w*|reorder\w*|buy|purchase|more (?:contacts|contact[- ]lenses)|box|ordenar)\b/.test(t)) return result(1, 3, 11);
+    const scheduled = hubSchedulingReason(t);
+    if (scheduled) return result(9, 32, scheduled);
     return result(1, 66, 536);
   }
   if (!medication && /\b(?:optical|glasses|eyeglasses|spectacles|frames?|gafas|armazon|lentes)\b/.test(t)) return result(1, 66, 536);

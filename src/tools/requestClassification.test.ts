@@ -47,4 +47,34 @@ describe('review regressions: preserve clinical and procedure context', () => {
     expect(classifyNonSurgicalRequest('I want to order red frames for my glasses.'))
       .toEqual({ departmentId: 1, requestTypeId: 66, requestReasonId: 536 });
   });
+
+  it('keeps a request for exam results on Clinical Tech Support', () => {
+    expect(classifyNonSurgicalRequest('I need my eye exam results.'))
+      .toEqual({ departmentId: 3, requestTypeId: 72, requestReasonId: 542 });
+  });
+
+  it('does not let results override booking an exam', () => {
+    expect(classifyNonSurgicalRequest('I need to schedule an eye exam to discuss my test results'))
+      .toEqual({ departmentId: 9, requestTypeId: 32, requestReasonId: 146 });
+  });
+
+  it('prefers rescheduling when cancellation is negated', () => {
+    expect(classifyNonSurgicalRequest('I need to move my eye exam to next week, not cancel it'))
+      .toEqual({ departmentId: 9, requestTypeId: 32, requestReasonId: 147 });
+  });
+
+  it('still files an affirmative exam cancellation', () => {
+    expect(classifyNonSurgicalRequest('I need to cancel my eye exam'))
+      .toEqual({ departmentId: 9, requestTypeId: 32, requestReasonId: 148 });
+  });
+
+  it('keeps explicit contact-lens appointment changes on the Hub', () => {
+    expect(classifyNonSurgicalRequest('I need to reschedule my appointment for contact lenses'))
+      .toEqual({ departmentId: 9, requestTypeId: 32, requestReasonId: 147 });
+  });
+
+  it('treats sx as surgical context', () => {
+    expect(isSurgeryRequest('Please schedule my cataract sx')).toBe(true);
+    expect(classifyNonSurgicalRequest('Please schedule my cataract sx')).toBeNull();
+  });
 });

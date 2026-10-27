@@ -166,7 +166,8 @@ it.each([
   'Will insurance cover my cataract procedure?',
   'Will insurance cover my cataract removal?',
   'Will insurance cover my procedure?',
-])('retains Surgery, surgeon and date for operation insurance: %s', async (request_description) => {
+  'Please schedule my cataract sx',
+])('retains Surgery, surgeon and date for a recognized operation: %s', async (request_description) => {
   expect(detectCrossQueue(request_description, 2)).toBeNull();
   expect(await runTool('classify_surgery_request', { request_description })).toMatchObject({ department_id: 2 });
   expect(await runTool('file_surgery_ticket', {
