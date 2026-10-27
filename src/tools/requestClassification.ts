@@ -11,6 +11,8 @@ export interface RequestClassification {
   requestReasonId: number;
 }
 
+export const SURGERY_REQUEST_TYPE_IDS: ReadonlySet<number> = new Set([10, 11, 12, 13, 14, 65]);
+
 export function withoutSurgeryFields(text: string): string {
   return text.replace(/^\s*(?:request type|department|agent|line|surgeon|surgery (?:date(?: given by caller)?|type|center|centre))\s*:[^\n]*(?:\n|$)/gim, '').trim();
 }
@@ -45,15 +47,20 @@ export function classifyNonSurgicalRequest(text: string): RequestClassification 
   }
   if (exam && !medication) {
     if (/\b(?:results?|resultados?)\b/.test(t)) return result(3, 72, 542);
-    const reason = /\b(?:cancel|cancelar)\b/.test(t) ? 148
-      : /\b(?:reschedule|reprogram\w*|cambiar|move|change)\b/.test(t) ? 147
-      : /\b(?:confirm|confirmar|what time)\b/.test(t) ? 149 : 146;
+    // Preserve the existing Hub scheduling distinctions (queueRouting's
+    // SCHEDULING / SPECIALIST_CUES), including Spanish nominal forms.
+    const reason = /\b(?:cornea specialist|retina specialist|glaucoma specialist|oculoplastics?|neuro[- ]ophthalm\w*|pediatric (?:optometrist|ophthalm\w*)|peds|see a specialist|specialist (?:consult|appointment)|referral appointment|referred to|was referred|referral from my|cataract (?:consult|evaluation)|consult for my cataract|low vision|uveitis|especialista|consulta con especialista)\b/.test(t) ? 152
+      : /\b(?:same[- ]day|today if|get in today|seen today|squeeze me in|sooner appointment|earlier appointment|move my appointment up|cita para hoy|hoy mismo)\b/.test(t) ? 151
+      : /\b(?:cancel\w*|cannot make|can't make)\b/.test(t) ? 148
+      : /\b(?:reschedul\w*|reprogram\w*|cambiar|mover|move|chang\w*|different day for my appointment)\b/.test(t) ? 147
+      : /\b(?:confirm\w*|what time|is my appointment)\b/.test(t) ? 149
+      : /\b(?:openings|what times do you have|next available|availability|disponibilidad|que horarios (?:tienen|hay))\b/.test(t) ? 150 : 146;
     return result(9, 32, reason);
   }
   if (contacts) {
     if (/\b(?:renew|renewal|renovar)\b/.test(t) && /\b(?:prescription|rx|receta)\b/.test(t)) return result(3, 33, 157);
     if (/\b(?:status|ready|pickup|pick up|arriv\w*|estado|listos)\b/.test(t)) return result(1, 5, 21);
-    if (/\b(?:order\w*|reorder\w*|buy|purchase|more|box|ordenar)\b/.test(t)) return result(1, 3, 11);
+    if (/\b(?:order\w*|reorder\w*|buy|purchase|more (?:contacts|contact[- ]lenses)|box|ordenar)\b/.test(t)) return result(1, 3, 11);
     return result(1, 66, 536);
   }
   if (!medication && /\b(?:optical|glasses|eyeglasses|spectacles|frames?|gafas|armazon|lentes)\b/.test(t)) return result(1, 66, 536);

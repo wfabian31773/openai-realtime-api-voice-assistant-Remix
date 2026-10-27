@@ -451,3 +451,37 @@ carry checks also failed before their fixes. Production before/after rates are
 unmeasured: the task prohibits production DB access. No merge/deploy is claimed.
 No migrations. Rollback: revert this change and its companion Ticketing commit;
 that restores the old misclassification and generative acknowledgement behavior.
+
+### Self-review, 2026-10-27
+
+The correction preserves the Hub's existing cancellation/confirmation (including
+Spanish noun forms), availability, same-day and specialist appointment reasons.
+Synthetic regressions drive classification and filing, not just the pure matcher.
+An information request about contacts keeps the Optical catch-all rather than
+asserting an order merely because the caller said "more information".
+
+An Optical redirect also observes the destination's bounded office ask: a terminal
+`office`/`location` refusal from Ticketing spends this call's office ask, and its
+next attempt carries `routingAskExhausted`. The surgeon and office counters are
+separate. An outage, a different call or a sentinel SID cannot spend the ask.
+The API may reject an office id `/lookup` returned (for example, no assignable
+staff), so a previous office refusal is respected even when lookup returns an id.
+The new tests condition acceptance on the outgoing flag; without it they fail.
+Uncertain identity, another patient's name and a conflicting DOB never carry the
+record-only office onto a redirected ticket.
+
+The companion Ticketing self-review also clears the losing surgery provider
+before corrected assignment, covers legacy hints/headers without department or
+agent fields, and sends neutral acknowledgement wording for unknown type IDs.
+All measurements here are offline synthetic cases; production rates are still
+unmeasured. No schema change, migration or historical backfill is needed.
+
+Resumed validation: all 32 tests in `surgeryRequestClassification.test.ts` and
+all 64 tests in the four companion Ticketing classification/acknowledgement
+files pass. `tsc --noEmit` with each repository's existing compiler options and
+the branch's touched TypeScript files as roots passes (5 voice files, 9 Ticketing
+files, including imports). Six temporary reversions to the pre-review code were
+caught by assertions: voice classification (8 failures), voice office retry (2),
+Ticketing classification (9), legacy intake/provider handling (5), create-ticket
+provider handling (20), and unknown-taxonomy acknowledgements (3). Each reversion
+was restored; no mutation is part of the change.

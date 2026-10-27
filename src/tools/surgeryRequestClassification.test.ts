@@ -1,18 +1,20 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { detectCrossQueue } from './queueRouting';
 const create = vi.fn();
+const lookup = vi.fn();
 vi.mock('../services/durableTicketFiling', () => ({
   createTicketDurable: (...args: unknown[]) => create(...args),
   postFailureToolResult: (r: unknown) => r,
 }));
 vi.mock('../../server/services/ticketingApiClient', () => ({
-  ticketingApiClient: { lookupProviderAndLocation: async () => ({ success: true, providerId: 88, locationId: 21 }) },
+  ticketingApiClient: { lookupProviderAndLocation: (...args: unknown[]) => lookup(...args) },
   lookupWasUnavailable: () => false,
 }));
 vi.mock('../services/scheduleLookupService', () => ({ scheduleLookupService: {} }));
 import { runTool } from './registry';
 import './surgeryTools';
 import { rememberVerifiedIdentity, resetVerifiedIdentities } from './verifiedIdentity';
+import { resetGateAttempts } from './gateAttempts';
 const cases = [
   [
     "#6 VA-75838",
@@ -101,9 +103,22 @@ const cases = [
     72,
     542,
     "technician support"
-  ]
+  ],
+
+  ['different day exam', 'I need a different day for my appointment for an eye exam.', 9, 32, 147, 'appointment'],
+  ['contact information', 'I need more information about contact lenses.', 1, 66, 536, 'optical'],
+  ['cancelled exam', 'Cancelación de cita para examen de la vista.', 9, 32, 148, 'appointment'],
+  ['confirmed exam', 'Confirmación de cita para examen de la vista.', 9, 32, 149, 'appointment'],
+  ['confirming exam', 'I am confirming my eye exam appointment.', 9, 32, 149, 'appointment'],
+  ['same-day exam', 'Can I get in today for an eye exam?', 9, 32, 151, 'appointment'],
+  ['available exam', 'What is the next available eye exam appointment?', 9, 32, 150, 'appointment'],
+  ['specialist exam', 'I was referred to a glaucoma specialist for an eye exam.', 9, 32, 152, 'appointment'],
 ] as const;
-beforeEach(() => { resetVerifiedIdentities(); vi.clearAllMocks(); create.mockResolvedValue({ success: true, ticketNumber: 'VA-SYNTHETIC' }); });
+beforeEach(() => {
+  resetVerifiedIdentities(); resetGateAttempts(); vi.clearAllMocks();
+  lookup.mockResolvedValue({ success: true, providerId: 88, locationId: 21 });
+  create.mockResolvedValue({ success: true, ticketNumber: 'VA-SYNTHETIC' });
+});
 describe('#6/#7 and HVA: actual request wins on the surgery line', () => {
   it.each(cases)('%s routes and files without surgery fields', async (_id, description, departmentId, requestTypeId, requestReasonId) => {
     expect(detectCrossQueue(description, 2)).toMatchObject({ departmentId, requestTypeId, requestReasonId });
@@ -157,6 +172,56 @@ it('#6 VA-75838: a redirected request carries the validated record office and DO
   expect(create.mock.calls[0][0]).toMatchObject({ departmentId: 1, locationOfLastVisit: 'Testville',
     patientBirthYear: '1980', patientBirthMonth: '01', patientBirthDay: '02' });
 });
+it.each([
+  ['uncertain identity', false, 'Example', '01/02/1980'],
+  ['different patient', true, 'Different', '01/02/1980'],
+  ['conflicting DOB', true, 'Example', '02/03/1981'],
+] as const)('does not carry the record office for %s', async (_reason, certain, last_name, date_of_birth) => {
+  const callSid = 'CA' + 'd'.repeat(32);
+  rememberVerifiedIdentity(callSid, { firstName: 'Avery', lastName: 'Example',
+    dateOfBirth: '1980-01-02', usualOffice: 'Record-only office', certain });
+  await runTool('file_surgery_ticket', {
+    first_name: 'Avery', last_name, date_of_birth, callback_number: '2025550142',
+    request_description: 'Order contact lenses.', call_sid: callSid, location: 'Caller office',
+  });
+  expect(create).toHaveBeenCalledOnce();
+  expect(create.mock.calls[0][0].locationOfLastVisit).toBe('Caller office');
+  expect(lookup).toHaveBeenCalledWith({ locationName: 'Caller office' });
+});
 it('does not treat the verb contact as eyewear', () => {
   expect(detectCrossQueue('Please contact me about my question.', 2)).toBeNull();
+});
+
+describe('Optical redirects keep the bounded office ask', () => {
+  const input = { first_name: 'Avery', last_name: 'Example', date_of_birth: '01/02/1980',
+    callback_number: '2025550142', request_description: 'I need to order contact lenses.',
+    call_sid: 'CA' + 'b'.repeat(32) };
+
+  it.each(['office', 'location'])('a terminal %s refusal enables only this call’s second attempt', async (missingField) => {
+    // Make acceptance depend on the actual payload; an unconditional success
+    // mock cannot prove the exit is wired.
+    create.mockImplementation(async (payload) => payload.routingAskExhausted
+      ? { success: true, ticketNumber: 'VA-SYNTHETIC' }
+      : { success: false, terminal: true, missingField });
+    await runTool('file_surgery_ticket', input);
+    expect(create.mock.calls[0][0].routingAskExhausted).toBeUndefined();
+    expect(await runTool('file_surgery_ticket', input)).toMatchObject({ success: true });
+    expect(create.mock.calls[1][0].routingAskExhausted).toBe(true);
+    await runTool('file_surgery_ticket', { ...input, call_sid: 'CA' + 'c'.repeat(32) });
+    expect(create.mock.calls[2][0].routingAskExhausted).toBeUndefined();
+  });
+
+  it.each(['unknown', ''])('a sentinel SID %s cannot pool office refusals', async (call_sid) => {
+    create.mockResolvedValue({ success: false, terminal: true, missingField: 'office' });
+    await runTool('file_surgery_ticket', { ...input, call_sid });
+    await runTool('file_surgery_ticket', { ...input, call_sid });
+    expect(create.mock.calls.every(([p]) => !p.routingAskExhausted)).toBe(true);
+  });
+
+  it('an outage does not spend the office ask', async () => {
+    create.mockResolvedValueOnce({ success: false, statusCode: 503 });
+    await runTool('file_surgery_ticket', input);
+    await runTool('file_surgery_ticket', input);
+    expect(create.mock.calls[1][0].routingAskExhausted).toBeUndefined();
+  });
 });

@@ -463,6 +463,8 @@ registerTool({
      * still cost.
      */
     const surgeonAskExhausted = gateRefusalsSoFar(callSid, SURGERY_FILE_TOOL, 'surgeon') >= 1;
+    const officeAskExhausted = filedDepartmentId === 1
+      && gateRefusalsSoFar(callSid, SURGERY_FILE_TOOL, 'location') >= 1;
     const filedTypeId = redirect?.requestTypeId ?? cls.requestTypeId;
     const filedReasonId = redirect?.requestReasonId ?? cls.requestReasonId;
     const filedDescription = redirect
@@ -828,6 +830,10 @@ registerTool({
       ...(filedOnSurgeryQueue && surgeonAskExhausted && !lookup.providerId
         ? { routingAskExhausted: true }
         : {}),
+      // The destination's office gate is independent of the surgeon ask.
+      // Send this even if /lookup returned an id: the API already refused
+      // that office (e.g. it cannot receive assignment), and re-asks must end.
+      ...(officeAskExhausted ? { routingAskExhausted: true } : {}),
       description: filedDescriptionWithDobStatus,
       priority,
       callData: {
@@ -849,10 +855,14 @@ registerTool({
       // below turns it into a question the agent puts to the caller. Count it,
       // so a second trip through here carries routingAskExhausted and the app
       // takes the request unassigned instead of refusing it again. Counted
-      // only for the surgeon — a refusal for any other field has not asked
-      // this question and must not spend it.
+      // separately for each destination's required field: a surgeon refusal
+      // cannot spend the office ask, and an office refusal cannot spend the surgeon ask.
       if (res.terminal && res.missingField === 'surgeon') {
         noteGateRefusal(callSid, SURGERY_FILE_TOOL, 'surgeon');
+      }
+      if (filedDepartmentId === 1 && res.terminal
+        && (res.missingField === 'office' || res.missingField === 'location')) {
+        noteGateRefusal(callSid, SURGERY_FILE_TOOL, 'location');
       }
       return postFailureToolResult(res, 'file_surgery_ticket');
     }
