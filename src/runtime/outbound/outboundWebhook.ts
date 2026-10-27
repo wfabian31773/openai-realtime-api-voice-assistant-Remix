@@ -172,8 +172,9 @@ export async function handleOutboundStatus(
   if (gated) return gated;
   const ok: WebhookResponse = { status: 204, contentType: "text/plain", body: "" };
 
+  // A lost live session (e.g. restart) only skips the in-memory update; the
+  // signed, URL-bound callback still settles the durable attempt below.
   const live = liveSessionFor(slug, req, deps);
-  if (live === false) return ok;
   const status = req.body.CallStatus ?? "";
   if (live) {
     const mapped: Record<string, LiveCallStatus> = {

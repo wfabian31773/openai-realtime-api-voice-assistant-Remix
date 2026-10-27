@@ -67,6 +67,18 @@ describe("signed live call webhooks and memory retention", () => {
     } finally { h.liveCalls.clear(); }
   });
 
+  it("still settles the campaign attempt when the live session was lost (restart)", async () => {
+    const h = await setup();
+    try {
+      const path = `/voice/outbound/si-assistant/status?${h.query}`;
+      h.liveCalls.clear();
+      const res = await handleOutboundStatus("si-assistant", h.request(path, { CallSid: "CA-lost", CallStatus: "completed", CallDuration: "12" }), h.deps);
+      expect(res.status).toBe(204);
+      expect(h.store.attempts[0].endedAt).toBeDefined();
+      expect(await h.store.dialableContacts(h.store.campaignId, new Date(Date.now() + 86_400_000), 10)).toEqual([]);
+    } finally { h.liveCalls.clear(); }
+  });
+
   it("drops retained transcript buffers by timer even when nobody polls", () => {
     vi.useFakeTimers();
     try {
