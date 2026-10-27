@@ -491,6 +491,7 @@ export function verifiedIdentityFor(callSid: string | undefined): VerifiedIdenti
     firstName: entry.firstName,
     lastName: entry.lastName,
     ...(entry.dateOfBirth ? { dateOfBirth: entry.dateOfBirth } : {}),
+    ...(entry.personId ? { personId: entry.personId } : {}),
     certain: true,
   };
 }

@@ -28,6 +28,7 @@ import { manifest, runTool, getTool, allTools } from './registry';
 // test suite is the guard: it walks the agent registry and fails if any agent
 // names a tool this file does not register.
 import './sharedPatientTools';
+import './patientAppointments';
 import './opticalTools';
 import './surgeryTools';
 import './techTools';

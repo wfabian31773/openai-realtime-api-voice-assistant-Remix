@@ -36,6 +36,10 @@ export interface PatientIdentity {
 }
 
 export interface PatientScheduleContext {
+  /** An empty successful read is different from an unavailable schedule. */
+  scheduleReadStatus?: 'available' | 'unavailable';
+  /** Row limit reached: never infer absence from this partial schedule. */
+  scheduleTruncated?: boolean;
   patientFound: boolean;
   patientName?: string;
   matchedBy?: 'phone' | 'name' | 'dob' | 'name_and_dob';
@@ -705,7 +709,7 @@ export class ScheduleLookupService {
     matchedBy: 'phone' | 'name' | 'dob' | 'name_and_dob',
     deadlineAt?: number,
   ): Promise<PatientScheduleContext> {
-    if (!personId) return this.emptyContext();
+    if (!personId) return { ...this.emptyContext(), scheduleReadStatus: 'unavailable' };
 
     /**
      * BUDGET AGAINST WHAT IS LEFT, NOT AGAINST A FIXED 1.5 SECONDS.
@@ -735,7 +739,7 @@ export class ScheduleLookupService {
         '[ScheduleLookup] PersonID join SKIPPED — no tool budget left; keeping the identity ' +
           'without history rather than racing a deadline we would lose',
       );
-      return this.emptyContext();
+      return { ...this.emptyContext(), scheduleReadStatus: 'unavailable' };
     }
 
     try {
@@ -803,7 +807,7 @@ export class ScheduleLookupService {
           // answer. Counted by this line; the Hub copy answers until it is dropped.
           console.warn(
             '[ScheduleLookup] PersonID join: the CONSOLE did not answer, falling back to the Hub copy:',
-            error instanceof Error ? error.message : 'unknown',
+            error instanceof Error && error.message === 'Console join deadline' ? 'Console join deadline' : error instanceof Error ? error.name : 'unknown',
           );
           return hubRows();
         }
@@ -821,7 +825,7 @@ export class ScheduleLookupService {
         // Not a failure. This is the caller who really is on file and really
         // has never had an appointment — we still know exactly who they are.
         console.log(`[ScheduleLookup] PersonID join (${source}): identified, and genuinely no appointments on file`);
-        return this.emptyContext();
+        return { ...this.emptyContext(), scheduleReadStatus: 'available' };
       }
 
       console.log(`[ScheduleLookup] PersonID join (${source}) returned ${appointments.length} row(s) — no name matching`);
@@ -833,9 +837,9 @@ export class ScheduleLookupService {
       // identity survives: the caller returns identity-without-history.
       console.error(
         '[ScheduleLookup] PersonID join FAILED — this is not the same as having no appointments:',
-        error instanceof Error ? error.message : 'unknown',
+        error instanceof Error ? error.name : 'unknown',
       );
-      return this.emptyContext();
+      return { ...this.emptyContext(), scheduleReadStatus: 'unavailable' };
     }
   }
 
@@ -1081,6 +1085,8 @@ export class ScheduleLookupService {
     return {
       patientFound: true,
       patientName: `${p.firstName} ${p.lastName}`.trim(),
+      scheduleReadStatus: joined.scheduleReadStatus,
+      scheduleTruncated: joined.scheduleTruncated,
       matchedBy,
       identityUnconfirmed: false,
       upcomingAppointments: [],
@@ -1252,7 +1258,9 @@ export class ScheduleLookupService {
       patientFound: true,
       patientName: patientName || undefined,
       matchedBy,
-      upcomingAppointments: upcoming.slice(0, 5),
+      scheduleReadStatus: 'available',
+      scheduleTruncated: rows.length >= LOOKUP_ROW_LIMIT,
+      upcomingAppointments: upcoming,
       pastAppointments: past.slice(0, 5),
       lastProviderSeen,
       lastPhysicianSeen,

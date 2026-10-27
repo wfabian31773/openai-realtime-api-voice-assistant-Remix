@@ -1,3 +1,5 @@
+import { appointmentReadPolicy, appointmentReadReminder } from '../services/appointmentReadPolicy';
+import { appointmentAccess } from '../services/appointmentAccess';
 import { RealtimeAgent, tool } from '@openai/agents/realtime';
 import { z } from 'zod';
 import { buildPcpPublicKnowledgePrompt } from '../config/azulVisionKnowledge';
@@ -290,6 +292,7 @@ either answer from an approved lookup, file a request, or connect them to the
 PCP team. Nothing else.
 
 ## Conversation Flow
+${appointmentReadReminder('lookup_patient_appointments')}
 ### The director decides, not you
 Ask only the single next question record_pcp_intake gives you, and never re-ask
 something already stored. It decides which fields are missing, whether a
@@ -866,7 +869,7 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
 
   const appointmentLookup = recordedTool({
     name: 'lookup_patient_appointments',
-    description: 'Look up schedule/attendance for a patient-specific request after the required caller and patient context is collected.',
+    description: 'Look up schedule/attendance for a patient-specific request after the required caller and patient context is collected. ' + appointmentReadPolicy('lookup_patient_appointments'),
     parameters: z.object({
       patientFirstName: z.string().min(1),
       patientLastName: z.string().min(1),
@@ -968,6 +971,7 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
         return {
           success: true,
           patientFound: context.patientFound,
+          ...appointmentAccess(context, confirmed),
           upcomingAppointments: context.upcomingAppointments,
           pastAppointments: context.pastAppointments,
         };

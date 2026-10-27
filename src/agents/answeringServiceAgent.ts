@@ -1,3 +1,5 @@
+import { appointmentReadPolicy } from '../services/appointmentReadPolicy';
+import { appointmentAccess } from '../services/appointmentAccess';
 import { RealtimeAgent, tool } from '@openai/agents/realtime';
 import { z } from 'zod';
 import { getPacificTimeContext, formatPhoneLast4, formatPhoneForSpeech } from '../utils/timeAware';
@@ -592,6 +594,7 @@ ${timeContext}
 
 CALLBACK NUMBER:
 ${callbackPhoneSection}
+${appointmentReadPolicy('lookup_schedule')}
 ${precontextSection}${scheduleContextSection}
 ${callerMemorySection}`;
 }
@@ -752,6 +755,8 @@ Use this data to answer appointment questions AND for ticket creation.`,
       first_name: z.string().optional().describe('Patient first name'),
       last_name: z.string().optional().describe('Patient last name'),
       date_of_birth: z.string().optional().describe('Date of birth in any format'),
+      provider: z.string().optional().describe('Provider the caller named for the appointment, if any.'),
+      office: z.string().optional().describe('Office the caller named for the appointment, if any.'),
     }),
     execute: async (params) => {
       console.log(`[${agentTag}] lookup_schedule called:`, {
@@ -787,6 +792,7 @@ Use this data to answer appointment questions AND for ticket creation.`,
             console.log(`[${agentTag}] ✓ VERIFIED via context DOB match — returning pre-loaded record for ${callId}`);
             return {
               ...scheduleContext,
+              ...appointmentAccess(scheduleContext, true, params),
               verified: true,
               note: 'Caller VERIFIED: recognized phone number + date of birth matches the record on file. Greet them by first name and proceed — do NOT ask any further identity questions.',
             };
@@ -832,6 +838,7 @@ Use this data to answer appointment questions AND for ticket creation.`,
               preferredLocation: pd?.preferredLocation || null,
               preferredProvider: pd?.preferredProvider || null,
             },
+            ...appointmentAccess(result, result.matchedBy === 'name_and_dob' && result.identity?.unique !== false && !result.identityUnconfirmed, params),
             upcomingAppointments: result.upcomingAppointments,
             pastAppointments: result.pastAppointments.slice(0, 5),
             lastProviderSeen: result.lastProviderSeen || null,

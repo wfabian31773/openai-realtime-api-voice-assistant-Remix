@@ -1,3 +1,5 @@
+import { appointmentReadPolicy } from '../services/appointmentReadPolicy';
+import { appointmentAccess } from '../services/appointmentAccess';
 import { RealtimeAgent, tool } from "@openai/agents/realtime";
 import { z } from "zod";
 import { withToolDirection } from '../services/toolDirection';
@@ -1177,6 +1179,7 @@ ${phoneContext}
 TIME CONTEXT:
 ${timeContext}
 Non-urgent callbacks will be made ${nextBizDay.contextPhrase}.
+${appointmentReadPolicy('lookup_schedule')}
 ${precontextSection}${scheduleContextSection}`;
 }
 
@@ -1340,6 +1343,8 @@ is not an identity. Confirm the name and date of birth, then call again with the
       first_name: z.string().optional().describe("Patient first name"),
       last_name: z.string().optional().describe("Patient last name"),
       date_of_birth: z.string().optional().describe("Patient date of birth"),
+      provider: z.string().optional().describe('Provider the caller named for the appointment, if any.'),
+      office: z.string().optional().describe('Office the caller named for the appointment, if any.'),
     }),
     execute: async (params) => {
       console.log("[No-IVR Agent] lookup_schedule called:", {
@@ -1385,6 +1390,7 @@ is not an identity. Confirm the name and date of birth, then call again with the
         if (result.patientFound) {
           return {
             found: true,
+            ...appointmentAccess(result, result.matchedBy === 'name_and_dob' && result.identity?.unique !== false && !result.identityUnconfirmed, params),
             upcomingAppointments: result.upcomingAppointments,
             pastAppointments: result.pastAppointments.slice(0, 3),
             lastLocationSeen: result.lastLocationSeen,
