@@ -1028,6 +1028,11 @@ export class VoiceCallBridge {
     return this.transcriptLog.render();
   }
 
+  /** Timed turns for in-memory live-call polling. */
+  getTranscriptTurns(): TranscriptTurn[] {
+    return this.transcriptLog.turns();
+  }
+
   // ── Twilio -> bridge ─────────────────────────────────────────────────
 
   handleTwilioFrame(frame: TwilioInboundFrame): void {

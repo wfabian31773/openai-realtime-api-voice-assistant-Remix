@@ -11,18 +11,32 @@ import { OUTBOUND_LOCK_NAME } from "./scheduler";
 const LOCK_TTL_SECONDS = 50;
 const HOLDER = "outbound-dialer";
 
+let acquiringOrHeld = false;
+
 export const defaultDialerLock: DialerLock = {
   async acquire() {
-    const { distributedLockService } = await import("../../services/distributedLock");
-    const result = await distributedLockService.acquireLock({
-      lockName: OUTBOUND_LOCK_NAME,
-      holderId: HOLDER,
-      ttlSeconds: LOCK_TTL_SECONDS,
-    });
-    return result.acquired;
+    if (acquiringOrHeld) return false;
+    acquiringOrHeld = true;
+    try {
+      const { distributedLockService } = await import("../../services/distributedLock");
+      const result = await distributedLockService.acquireLock({
+        lockName: OUTBOUND_LOCK_NAME,
+        holderId: HOLDER,
+        ttlSeconds: LOCK_TTL_SECONDS,
+      });
+      acquiringOrHeld = result.acquired;
+      return result.acquired;
+    } catch (error) {
+      acquiringOrHeld = false;
+      throw error;
+    }
   },
   async release() {
     const { distributedLockService } = await import("../../services/distributedLock");
-    await distributedLockService.releaseLock(OUTBOUND_LOCK_NAME, HOLDER);
+    try {
+      await distributedLockService.releaseLock(OUTBOUND_LOCK_NAME, HOLDER);
+    } finally {
+      acquiringOrHeld = false;
+    }
   },
 };

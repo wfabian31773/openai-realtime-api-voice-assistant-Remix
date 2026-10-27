@@ -791,8 +791,24 @@ high-volume patient's history.
 
 **Responsible for** the in-memory provider/location snapshot read from CONSOLE —
 `getDirectory` (:285), `lookupProvider` (:314), `lookupLocation` (:320),
-`directoryKey` (:204), the `LOCATION_ALIASES` exception table (:151) and the
-`__resetDirectory` test seam (:327).
+`directoryKey` (:204), the `LOCATION_ALIASES` exception table (:151), the
+retired-name map `RETIRED_CLINIC_NAMES` in `src/config/azulVisionKnowledge.ts`,
+and the `__resetDirectory` test seam (:327). The caller-name matcher resolves
+the retired spelling to the current live entry, while an existing directory
+key still wins over an alias collision. Schedule facts, Hub fallback visit
+context (`scheduleLookupService`), appointment answers (`appointmentAnswers`)
+and Phreesia results use the same map when they display office names:
+North Valley Eye → Mission Hills, Magan → Covina. Phreesia option matching
+normalizes both the preference and the external form's label, so a retired
+option cannot make a current-name preference select an unrelated first office.
+Successful Phreesia workflow details store the same current location name the
+voice result reports, so the scheduling monitor displays it too.
+
+`locationAliases.test.ts` exercises the real snapshot loader with only `pg`
+mocked; it no longer builds a second implementation of the snapshot. Hub
+fallback coverage lives in `lookupJoinReadsTheConsole.test.ts`; Phreesia
+selection and tool-result coverage live in `computerUseAgent.location.test.ts`
+and `phreesiaSchedulingTool.test.ts`. All added patient fixtures are synthetic.
 
 **Who imports it**
 
@@ -1390,10 +1406,12 @@ Module-level state written by more than one caller.
   pointing at nothing; the only symptom is `usedFallbackReason` warned at
   `ticketingApiClient.ts:657-659`, or a rejected create.
 
-### `LOCATION_ALIASES` — `src/services/consoleDirectory.ts:151`
+### Clinic name aliases — `src/services/consoleDirectory.ts:151` and `src/config/azulVisionKnowledge.ts`
 - Exported as a mutable array and read by `load()` (:252) on every refresh;
   `load()` writes `entry.fileAs` back onto the snapshot objects (:263).
 - **Failure mode:** an alias whose `mirror` key no longer exists is skipped with
   a `console.warn` (:257-260) and simply stops resolving — the 2026-08-21
-  retired-name case (`north valley eye`, `magan`) is the reason
-  `locationAliases.test.ts:108-121` asserts the table's shape.
+  retired clinic labels are stored once in `RETIRED_CLINIC_NAMES` and resolved
+  to their active directory rows. `consoleScheduleFacts` returns current
+  labels for historical schedule rows; `locationAliases.test.ts` covers
+  matching a retired name, including inside a longer caller phrase.

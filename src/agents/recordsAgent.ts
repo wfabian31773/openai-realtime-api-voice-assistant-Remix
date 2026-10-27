@@ -29,6 +29,7 @@
  * one pass instead of three.
  */
 import { RealtimeAgent } from '@openai/agents/realtime';
+import { appointmentReadReminder } from '../services/appointmentReadPolicy';
 import { getPacificTimeContext, formatPhoneForSpeech, formatPhoneLast4 } from '../utils/timeAware';
 import { realtimeToolsFor } from '../tools/realtimeAdapter';
 // Registration is an import side effect, exactly as the HTTP server does it.
@@ -84,6 +85,7 @@ export const recordsAgentConfig = {
  */
 export const RECORDS_TOOLS = [
   'lookup_patient',
+  'check_patient_appointments',
   'resolve_location',
   'check_open_tickets',
   'classify_records_request',
@@ -183,6 +185,8 @@ Text not arrived, or they want the other channel: send_records_form. Somebody
 else asking — another office, a plan, an attorney — gets no link and no form.
 
 ${askScript}
+
+${appointmentReadReminder('check_patient_appointments')}
 
 ### How a call runs
 1. Find the patient. Call lookup_patient as soon as you have a phone number, or

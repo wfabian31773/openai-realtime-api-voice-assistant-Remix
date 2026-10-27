@@ -47,6 +47,7 @@
  * every call under a reason the caller's own words earned.
  */
 import { RealtimeAgent } from '@openai/agents/realtime';
+import { appointmentReadReminder } from '../services/appointmentReadPolicy';
 import { getPacificTimeContext, formatPhoneForSpeech, formatPhoneLast4 } from '../utils/timeAware';
 import { realtimeToolsFor } from '../tools/realtimeAdapter';
 // Registration is an import side effect, exactly as the HTTP server does it.
@@ -114,6 +115,7 @@ export const surgeryAgentConfig = {
  */
 export const SURGERY_TOOLS = [
   'lookup_patient',
+  'check_patient_appointments',
   'resolve_location',
   'check_open_tickets',
   'classify_surgery_request',
@@ -187,6 +189,8 @@ have a date and something around it has gone wrong. All of it is yours.
 ${recognitionSection}
 ${askScript}
 
+${appointmentReadReminder('check_patient_appointments')}
+
 ### How a call runs
 1. lookup_patient with whatever you have. ${certainMeaning}
    If it finds nobody, ask once whether they are new or have been seen before.
@@ -194,8 +198,7 @@ ${askScript}
    birth was probably mis-heard — ask for it again and look up ONCE more
    before you file.
 
-2. Take the request in their own words. Ask for the surgery date and pass it as
-   surgery_date.
+2. Take the request in their own words. Use the booked surgery date from the record when available; otherwise ask. Pass it as surgery_date.
 
 3. check_open_tickets before you file — many of these callers are chasing
    something they already asked for.

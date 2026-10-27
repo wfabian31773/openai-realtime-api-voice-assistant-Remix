@@ -15,9 +15,9 @@ constant-time compare, 5-minute single-use confirm token minted **on approve**.
 
 | scope | tools | who gets it |
 |---|---|---|
-| `fleet:read` | `list_agents`, `agent_health`, `fleet_today`, `recent_outcomes`, `outbound_status`, `get_contact_request`, `email_replies` | SI Assistant bot (default at mint) |
+| `fleet:read` | `list_agents`, `agent_health`, `fleet_today`, `recent_outcomes`, `outbound_status`, `get_contact_request`, `email_replies`, `capabilities` | SI Assistant bot (default at mint) |
 | `contacts:prepare` | `prepare_call`, `prepare_sms`, `prepare_email`, `cancel_contact` | SI Assistant bot |
-| `contacts:commit` | `commit_contact` | SI Assistant bot |
+| `contacts:commit` | `commit_contact`, `commit_call_live`, `confirm_token` hand-off, live call controls | SI Assistant bot |
 | `contacts:approve` | `GET /approvals`, `POST /approvals/:id/approve`, `POST /approvals/:id/reject` | Support Center **Pending bot actions** page only. **Do not grant this to the bot.** |
 
 Write scopes are never implied. An empty scope list becomes `fleet:read` only.
@@ -31,7 +31,18 @@ Write scopes are never implied. An empty scope list becomes `fleet:read` only.
 3. Approve submits that `payloadHash`. A mismatch, or a token approving
    its own request, is refused. Approve mints a confirm token that expires
    in **5 minutes** and is single-use. Consume is one atomic `UPDATE`.
-4. `commit_contact` claims the token (the row moves to `sending`), re-hashes
+4. The preparing bot retrieves the token with
+   `GET /contact_requests/:id/confirm_token` using `contacts:commit`.
+   The response is `{ confirmToken, expiresAt }` with `Cache-Control: no-store`.
+   Only the row's preparing token jti can fetch it: another jti gets 404;
+   pending, cancelled, consumed, expired, or already fetched gets 409.
+   Fetch is atomic and succeeds at most once. The plaintext is retained only
+   until first fetch, consumption, cancellation, or the expiry sweep (at most
+   one minute after expiry). Approval views and audit never contain it.
+   Staff approval still requires `contacts:approve`; that scope alone cannot
+   fetch the hand-off token or commit a contact. The approve response retains
+   its existing confirm token for compatibility.
+5. `commit_contact` claims the token (the row moves to `sending`), re-hashes
    the stored payload against the lock, then sends exactly that payload. A
    thrown send moves the row to `failed` and writes a PHI-free audit row.
    A crash between claim and send leaves the row `sending`; a timeout sweep
@@ -47,16 +58,16 @@ Write scopes are never implied. An empty scope list becomes `fleet:read` only.
    this field, never on the HTTP status: a 503 sent nothing, a 502 may have.
    A refusal before the token is consumed (bad, used or expired token)
    carries no `outcome`; nothing was claimed.
-5. `cancel_contact` cancels a pending or approved request only while the
+6. `cancel_contact` cancels a pending or approved request only while the
    confirm token is unused. Cancel and get are tied to the token that
    created the row (or to `contacts:approve`).
 
 `PLUGIN_WRITES_ENABLED` defaults **off**. Only `true` / `1` / `yes` enables
-prepare, approve, reject, cancel and commit.
+prepare, approve, reject, cancel, commit and all live call controls.
 
 ## Calls
 
-Approved calls enqueue **one** contact into the existing campaign dialer
+`commit_contact` for approved calls enqueues **one** contact into the existing campaign dialer
 (`src/runtime/outbound/`). They go out from `SI_ASSISTANT_NUMBER`
 (+1 909-255-3213). `prepare_call` must send the ticket patient's
 `firstName`, `lastName` and a parseable `dateOfBirth` (or `date_of_birth`,
@@ -162,6 +173,56 @@ not resend an `unknown`. A new prepare is the only way out.
 Until those point here, outbound dials fail the returned-call check and
 inbound SMS STOP/HELP/START is not received.
 
+## Live calls driven by the bot
+
+`GET /capabilities` requires `fleet:read` and returns:
+
+```json
+{ "liveCalls": true, "confirmTokenHandoff": true, "smsHoursEnforced": true }
+```
+
+All paths below are under `/api/plugin/v1`. Each requires bearer auth,
+`contacts:commit`, and enabled plugin writes. An approve-only token cannot
+use them. Sessions belong to the same token jti that prepared and committed
+that approval; another jti receives 404 on the session endpoints.
+
+`POST /commit_call_live` with `{ "confirmToken": "..." }` consumes an approved
+**call** request and dials immediately from `SI_ASSISTANT_NUMBER` into
+`/voice/si-assistant`. Other channels get 400 without consuming the token.
+The preparing bot must commit its own request. The locked payload, any-source
+do-not-contact list (including SMS STOP), Pacific calling window, holidays,
+practice closures, per-number campaign caps, dialing switches, callback
+routing and an already queued/in-progress call are checked before dialing.
+The dial and cap checks share the scheduler's lock; a busy dialer refuses
+this commit. Refusals after consumption fail the approval and return
+`outcome: "not_sent"`. An ambiguous Twilio error returns `outcome: "unknown"`.
+A live approval gets **one attempt**, never an automatic retry, including
+no-answer or unknown results. Its campaign attempt counts toward caps and
+returned-call matching just like a scheduled dial.
+
+Success is `{ status: "live", approval, callSid, sessionId }`. Controls:
+
+- `GET /live_calls/:sessionId` returns `status`, `callSid`, `startedAt`,
+  `endedAt`, `transcript: [{ role: "agent" | "caller", text, at }]` and
+  `nextAfter`. Status is `dialing`, `ringing`, `in_progress`, `completed`,
+  `failed`, or `no_answer`. `?after=<index>` returns turns strictly after
+  that zero-based index; omit it (or use -1) for all turns. Use `nextAfter`
+  for the next poll. An open caller turn can be refined in place; refetch
+  the full transcript when current-turn corrections matter.
+- `POST /live_calls/:sessionId/instruct` with `{ "text": "..." }` adds up to
+  2000 characters of guidance to the running realtime session. Guidance is
+  context only: it cannot replace AI disclosure, identity verification,
+  privacy rules or tool permissions, and never counts as caller speech or
+  verification. Returns `{ status: "instructed" }`, or 409 if not running.
+- `POST /live_calls/:sessionId/end` with `{}` completes the Twilio call and
+  closes the attached runtime session. Repeating it for a retained ended
+  session returns its terminal status.
+
+Live state and transcripts are in-process memory only. Transcripts are not
+written to call logs, timed-turn storage, or plugin audit. They
+are dropped two minutes after the call ends. Sessions do not survive a
+process restart; clients need affinity to the process serving the call.
+
 ## SMS
 
 Sent **from this fleet**, from `SI_ASSISTANT_NUMBER`, through Twilio.
@@ -173,9 +234,10 @@ the voice webhooks (invalid → 403; no auth token → 200 empty TwiML and
 no opt-out change). STOP writes `do_not_contact` source `sms_stop`
 as its own row — unique is `(phone_key, source)`, not the phone
 alone — so a later voice "don't call me" is a second row. START
-deletes only `sms_stop`. Voice dials ignore `sms_stop`; SMS send
-ignores a voice row. Either order (voice then START, or STOP then
-voice then START) leaves the call blocked. START that leaves a voice
+deletes only `sms_stop`. **Any `do_not_contact` row, from any source, blocks
+both calls and texts**, including an SMS STOP blocking voice dials and a
+voice opt-out blocking SMS. Either order (voice then START, or STOP then
+voice then START) leaves both channels blocked by the voice row. START that leaves a voice
 row behind sends no reply. HELP always replies, per CTIA, even to a
 number blocked by an SMS STOP or a voice row: the program name
 (Azul Vision SI Assistant), a contact number and how to opt out. An
@@ -183,6 +245,14 @@ inbound text that is
 not STOP / HELP / START is a taken message: a body preview goes
 through `plugin_message_outbox`. Empty bodies are skipped — they
 must not become an empty Support Center item.
+
+Approved outbound SMS is sent only **09:00 through 19:59 Pacific**
+(`America/Los_Angeles`, including daylight-saving changes). It skips the
+same federal holidays and practice closures as the dialer. Outside the
+window or on a closed date, commit fails with `outside_hours`, `closed_day`
+or `holiday` and `outcome: "not_sent"`; no provider send is attempted.
+Inbound STOP / HELP / START keyword replies remain available at any hour,
+including holidays, and follow the opt-out rules above.
 
 ## Email
 

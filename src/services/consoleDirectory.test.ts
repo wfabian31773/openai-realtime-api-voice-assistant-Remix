@@ -12,6 +12,7 @@ import {
   __resetDirectory,
   type DirectoryProvider,
 } from './consoleDirectory';
+import { currentClinicName, RETIRED_CLINIC_NAMES } from '../config/azulVisionKnowledge';
 import { resolveTicketLookupFields } from './ticketFieldSanitizers';
 
 describe('directoryKey normalises what NextGen actually stores', () => {
@@ -117,28 +118,24 @@ describe('provider roster matching', () => {
   });
 });
 
-describe('LOCATION_ALIASES carries the two 2026-08-21 renames', () => {
-  // Traced from a real call: lookup_patient said "I have you at our North
-  // Valley Eye office," the caller confirmed it, and resolve_location still
-  // asked "which city is your office in?" — 7 of 19 optical location
-  // refusals that day. Confirmed by Wayne, not inferred: North Valley Eye
-  // was renamed to Mission Hills, Magan to Covina, both a couple of months
-  // before this fix.
+describe('retired clinic names resolve through the current location directory', () => {
+  // Historical schedule labels and caller wording both resolve through the
+  // current-name map while the directory continues to use active mirror rows.
   it('points the retired "North Valley Eye" name at the live Mission Hills entry', () => {
     const missionHills = LOCATION_ALIASES.find((a) => a.fileAs === 'Mission Hills');
     expect(missionHills?.mirror).toBe('azul vision mission hlls');
-    expect(missionHills?.spoken).toContain('north valley eye');
-    // The mirror itself must be a name that exists in the live directory —
-    // only `spoken` entries are free to be retired names with nothing behind
-    // them. See the file header: a `mirror` with no live entry just warns
-    // and does nothing.
+    expect(RETIRED_CLINIC_NAMES['north valley eye']).toBe('Mission Hills');
+    expect(currentClinicName('Our North Valley Eye office')).toBe('Mission Hills');
+    // The mirror itself must be a name that exists in the live directory;
+    // retired spellings stay in the separate map, never in `mirror`.
     expect(directoryKey('Azul Vision Mission Hlls')).toBe(missionHills?.mirror);
   });
 
   it('points the retired "Magan" name at the live Covina entry', () => {
     const covina = LOCATION_ALIASES.find((a) => a.fileAs === 'Covina');
     expect(covina?.mirror).toBe('azul vision covina');
-    expect(covina?.spoken).toContain('magan');
+    expect(RETIRED_CLINIC_NAMES.magan).toBe('Covina');
+    expect(currentClinicName('Magan')).toBe('Covina');
     expect(directoryKey('Azul Vision Covina')).toBe(covina?.mirror);
   });
 

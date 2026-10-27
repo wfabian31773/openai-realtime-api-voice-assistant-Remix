@@ -397,6 +397,8 @@ async function dialOne(
   deps: DialerDeps,
   source: ContactSource | null = null,
 ): Promise<string | null> {
+  // Defense against a stale queue read: live approvals never retry.
+  if (candidate.customData.plugin_live === true) return "live_call";
   const contact = await deps.store.claimContact(candidate.id, now);
   if (!contact) return "claimed_elsewhere";
 
