@@ -61,4 +61,17 @@ describe('item #15 real joined schedule reader', () => {
       scheduleReadStatus: 'available', scheduleTruncated: true, upcomingAppointments: [],
     });
   });
+
+  it('keeps failed legacy name and phone reads distinct from successful misses', async () => {
+    for (const read of [
+      () => scheduleLookupService.lookupByPhone('+15555550115'),
+      () => scheduleLookupService.lookupByName('Synthetic', 'Example'),
+      () => scheduleLookupService.lookupByNameAndDOB('Synthetic', 'Example', '1980-01-02'),
+    ]) {
+      hubLimit.mockRejectedValue(new Error('synthetic outage'));
+      expect(await read()).toMatchObject({ patientFound: false, scheduleReadStatus: 'unavailable' });
+      hubLimit.mockResolvedValue([]);
+      expect(await read()).toMatchObject({ patientFound: false, scheduleReadStatus: 'available' });
+    }
+  });
 });

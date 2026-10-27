@@ -869,7 +869,7 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
 
   const appointmentLookup = recordedTool({
     name: 'lookup_patient_appointments',
-    description: 'Look up schedule/attendance for a patient-specific request after the required caller and patient context is collected. ' + appointmentReadPolicy('lookup_patient_appointments'),
+    description: 'Read schedule/attendance after required intake. ' + appointmentReadPolicy('lookup_patient_appointments'),
     parameters: z.object({
       patientFirstName: z.string().min(1),
       patientLastName: z.string().min(1),

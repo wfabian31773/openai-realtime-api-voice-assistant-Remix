@@ -572,15 +572,15 @@ export class ScheduleLookupService {
 
       if (appointments.length === 0) {
         console.log(`[ScheduleLookup] No appointments found for phone: ${normalizedPhone.slice(-4)}`);
-        return this.emptyContext();
+        return { ...this.emptyContext(), scheduleReadStatus: 'available' };
       }
 
       console.log(`[ScheduleLookup] Found ${appointments.length} appointments for phone ending in ${normalizedPhone.slice(-4)}`);
       return this.buildContext(appointments, 'phone');
       
     } catch (error) {
-      console.error('[ScheduleLookup] Error looking up by phone:', error);
-      return this.emptyContext();
+      console.error('[ScheduleLookup] Error looking up by phone:', error instanceof Error ? error.name : 'unknown');
+      return { ...this.emptyContext(), scheduleReadStatus: 'unavailable' };
     }
   }
 
@@ -605,7 +605,7 @@ export class ScheduleLookupService {
         .limit(LOOKUP_ROW_LIMIT);
 
       if (appointments.length === 0) {
-        return this.emptyContext();
+        return { ...this.emptyContext(), scheduleReadStatus: 'available' };
       }
 
       console.log(
@@ -616,8 +616,8 @@ export class ScheduleLookupService {
       return this.buildContext(appointments, 'name');
       
     } catch (error) {
-      console.error('[ScheduleLookup] Error looking up by name:', error);
-      return this.emptyContext();
+      console.error('[ScheduleLookup] Error looking up by name:', error instanceof Error ? error.name : 'unknown');
+      return { ...this.emptyContext(), scheduleReadStatus: 'unavailable' };
     }
   }
 
@@ -650,7 +650,7 @@ export class ScheduleLookupService {
         .limit(LOOKUP_ROW_LIMIT);
       
       if (appointments.length === 0) {
-        return this.emptyContext();
+        return { ...this.emptyContext(), scheduleReadStatus: 'available' };
       }
 
       if (options.logIdentifiers === false) {
@@ -661,8 +661,8 @@ export class ScheduleLookupService {
       return this.buildContext(appointments, 'name_and_dob');
       
     } catch (error) {
-      console.error('[ScheduleLookup] Error looking up by name and DOB:', error instanceof Error ? error.message : 'unknown');
-      return this.emptyContext();
+      console.error('[ScheduleLookup] Error looking up by name and DOB:', error instanceof Error ? error.name : 'unknown');
+      return { ...this.emptyContext(), scheduleReadStatus: 'unavailable' };
     }
   }
 

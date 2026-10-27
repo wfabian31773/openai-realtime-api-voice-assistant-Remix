@@ -1,5 +1,5 @@
 import { appointmentReadPolicy } from '../services/appointmentReadPolicy';
-import { appointmentAccess } from '../services/appointmentAccess';
+import { appointmentAccess, unavailableAppointmentAccess } from '../services/appointmentAccess';
 import { RealtimeAgent, tool } from "@openai/agents/realtime";
 import { z } from "zod";
 import { withToolDirection } from '../services/toolDirection';
@@ -678,8 +678,8 @@ When schedule data is loaded, you CAN answer appointment questions directly:
 
 ⚠️ CRITICAL: Once you've stated appointment details, DO NOT REPEAT THEM.
 - If caller asks again: "That's the same appointment I mentioned - [brief date only]."
-- If caller corrects you: TRUST THE CALLER over your data. Say: "Thanks for clarifying."
-- If data conflicts (you say Jan 12, they say April 22): Accept caller's info as correct.
+- If the caller disagrees, clarify the difference against the record. Acknowledge their account and keep both versions for staff to review.
+- If data conflicts (you say Jan 12, they say April 22), include that unresolved difference in the request; never overwrite the booking with a guess.
 - NEVER re-read the full appointment details more than once per call.
 
 📋 OPEN TICKETS:
@@ -1362,7 +1362,10 @@ is not an identity. Confirm the name and date of birth, then call again with the
           // is what stops the model fetching it back with one tool call.
           const normalizedPhone = normalizePhoneNumber(params.phone);
           const byPhone = await scheduleLookupService.lookupByPhone(normalizedPhone);
-          if (!byPhone.patientFound) return { found: false };
+          if (!byPhone.patientFound) return {
+            found: false,
+            ...(byPhone.scheduleReadStatus === 'unavailable' ? unavailableAppointmentAccess() : {}),
+          };
           const firstName = (byPhone.patientName ?? '').trim().split(/\s+/)[0] || undefined;
           return {
             found: true,
@@ -1388,9 +1391,14 @@ is not an identity. Confirm the name and date of birth, then call again with the
         }
 
         if (result.patientFound) {
+          const confirmed = result.matchedBy === 'name_and_dob' && result.identity?.unique !== false && !result.identityUnconfirmed;
+          if (!confirmed) return {
+            found: true, identityUnconfirmed: true,
+            ...appointmentAccess(result, false),
+          };
           return {
             found: true,
-            ...appointmentAccess(result, result.matchedBy === 'name_and_dob' && result.identity?.unique !== false && !result.identityUnconfirmed, params),
+            ...appointmentAccess(result, confirmed, params),
             upcomingAppointments: result.upcomingAppointments,
             pastAppointments: result.pastAppointments.slice(0, 3),
             lastLocationSeen: result.lastLocationSeen,
@@ -1399,10 +1407,13 @@ is not an identity. Confirm the name and date of birth, then call again with the
           };
         }
 
-        return { found: false };
+        return {
+          found: false,
+          ...(result.scheduleReadStatus === 'unavailable' ? unavailableAppointmentAccess() : {}),
+        };
       } catch (error) {
-        console.error("[No-IVR Agent] Schedule lookup error:", error);
-        return { found: false, error: "lookup_failed" };
+        console.error("[No-IVR Agent] Schedule lookup error:", error instanceof Error ? error.name : 'unknown');
+        return { found: false, error: "lookup_failed", ...unavailableAppointmentAccess() };
       }
     },
   });

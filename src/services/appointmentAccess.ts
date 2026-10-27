@@ -5,6 +5,16 @@ export interface AppointmentClaim {
   office?: string;
 }
 
+/** Shared failure contract, including failures before an identity was found. */
+export function unavailableAppointmentAccess() {
+  return {
+    appointment_access: 'unavailable', read_only: true,
+    has_upcoming_appointments: null,
+    scheduling_action: 'request_schedule_review',
+    appointment_instruction: 'The schedule could not be read now. This does not mean there are no bookings. Take a request to check the schedule; do not promise a new booking.',
+  };
+}
+
 function label(value: string | undefined, kind: keyof AppointmentClaim): string {
   let text = (value ?? '').normalize('NFD').replace(/\p{M}/gu, '').toLowerCase();
   text = text.replace(/[.,]/g, '');
@@ -26,12 +36,7 @@ export function appointmentAccess(
     appointment_instruction: 'Confirm the patient before reading appointment details. Do not guess between records.',
   };
   if (context.scheduleReadStatus === 'unavailable' ||
-      (!context.scheduleReadStatus && !context.patientFound)) return {
-    appointment_access: 'unavailable', read_only: true,
-    has_upcoming_appointments: null,
-    scheduling_action: 'request_schedule_review',
-    appointment_instruction: 'The schedule could not be read now. This does not mean there are no bookings. Take a request to check the schedule; do not promise a new booking.',
-  };
+      (!context.scheduleReadStatus && !context.patientFound)) return unavailableAppointmentAccess();
   const appointments = (context.upcomingAppointments ?? []).map((a) => ({
     date: a.isoDate, time: a.startTime || a.timeOfDay || null,
     time_zone: 'America/Los_Angeles', provider: a.provider, office: a.location,

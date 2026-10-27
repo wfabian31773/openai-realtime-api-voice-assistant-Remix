@@ -10,6 +10,9 @@ appointments, but previously returned only visit-history fields to the model.
 It now carries `appointment_access`, `upcoming_appointments` (provider, office,
 ISO date, local time and `America/Los_Angeles`) and booking-review instructions.
 These new fields disclose appointments only when that lookup is certain.
+The legacy camelCase appointment fields are also withheld on uncertain or
+ambiguous results; an `identity_required` assessment must never accompany
+another field containing the candidate's bookings.
 
 Optical, Surgery, Tech and Records also expose `check_patient_appointments`.
 The call's stored, certain identity supplies `personId`; the model cannot
@@ -28,7 +31,8 @@ tool under its existing authentication.
 
 This reads appointments, never free slots. There are no booking, rescheduling
 or cancellation writes. Support Center still owns ticket creation, taxonomy
-and assignment; neither ticket submission nor identity-gate rules change.
+and assignment. Ticket submission is unchanged; appointment disclosure is
+gated in both the original and the new result formats.
 
 ## What the caller can be told
 
@@ -51,7 +55,14 @@ exist elsewhere in the practice.
 
 The after-hours and answering-service `lookup_schedule` tools accept the
 same optional claims and return the same assessment alongside their existing
-results. Both after-hours prompt variants carry the read-only rule. PCP's
+results. Answering-service phone candidates carry no appointment details in
+the initial prompt or phone-only tool response. Its cached-DOB shortcut
+requires an unambiguous record and rejects a supplied name that differs from
+that record; a supplied name and DOB take precedence over a phone-only search.
+Legacy reader errors, tool exceptions and the answering-service timeout
+return `unavailable`, never a claim that the patient has no bookings.
+Both after-hours prompt variants preserve record/caller discrepancies for
+staff to review and carry the read-only rule. PCP's
 existing `lookup_patient_appointments` returns schedule availability and
 booking-review instructions under its existing patient-specific access gate.
 
@@ -88,7 +99,7 @@ npx vitest run src/tools/patientAppointments.test.ts src/services/appointmentAcc
 npx tsc --noEmit -p .
 ```
 
-Validation in this workspace: 27 new tests across those four files; the full
+Initial branch validation: 27 new tests across those four files; the full
 relevant run passed 397 tests in 19 files, including existing prompt limits,
 tool registration, identity, schedule-join and teardown-sweep regressions.
 `npx tsc --noEmit -p .` passed. Four deliberate reversions were caught:
@@ -106,3 +117,46 @@ this change. No production database was accessed and no migration was
 created or applied. The private ai-bridge checkout is absent from this
 workspace; these local notes record the handoff under the instruction not
 to push.
+
+## Self-review — 2026-10-27
+
+Fixed findings, with synthetic regressions through the built agents and the
+real schedule-reader methods:
+
+- **P1:** Legacy camelCase results bypassed `identity_required`. Both legacy
+  tools now withhold appointment and visit details unless the match is
+  confirmed. The older phone-candidate test's name/DOB mock now reports the
+  real reader's `name_and_dob` method instead of incorrectly returning a
+  phone match.
+- **P1:** Answering-service candidate bookings reached the initial prompt,
+  and its cached-DOB shortcut trusted ambiguous records and conflicting
+  supplied names. Candidate data is withheld and those shortcuts fall back
+  to the name/DOB lookup. A matching unique cached record still works.
+- **P2:** Legacy errors and timeouts looked like patient misses. The readers
+  preserve failure status, and the tools return the shared unavailable/read
+  review contract. Successful misses stay distinct from failures.
+- **P2:** The long after-hours prompt still instructed the model to trust the
+  caller over the booking. It now preserves the discrepancy against the record,
+  matching the runtime prompt. The test checks both instruction variants.
+- **P2:** PCP's added tool policy exceeded the existing 6,400-character wire
+  limit (6,511). The policy and description were shortened without removing
+  the appointment, identity, duplicate, discrepancy or read-only rules. The
+  original ceiling is retained.
+
+The new regressions failed before their fixes. The first broad parallel run
+also produced test timeouts and subsequent shared-mock failures; reducing
+worker concurrency removed those failures without changing their tests.
+Previous-pass validation: **504 tests passed across 30 files**, including the opt-in
+real-lane smoke tests (`RUNTIME_LANE_SMOKE=1`, `--maxWorkers=2`), all touched
+test files, legacy privacy, schedule joins, provider/office checks, PCP access
+gates and existing prompt/tool size limits. `npx tsc --noEmit -p .` passed.
+
+Resume validation: **95 tests passed across seven targeted files**: all six
+test files changed by this branch or its self-review, plus
+`src/runtime/toolFieldDescriptionsReachTheWire.test.ts` to verify the existing
+tool-size ceiling. The run used `--maxWorkers=2`. `npx tsc --noEmit -p .` and
+`git diff --check` passed again. The full suite was not rerun.
+
+No migration is present in this branch diff. No production measurement or
+deployment was performed. No push or ai-bridge PR was made, following the
+session's explicit instruction not to push.
