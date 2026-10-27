@@ -83,6 +83,8 @@ export interface ContactApprovalRow {
   payload: Record<string, unknown>;
   payloadHash: string;
   confirmTokenHash: string | null;
+  /** Short-lived hand-off secret. Never exposed in approval views or audit. */
+  confirmTokenPlaintext?: string | null;
   confirmExpiresAt: Date | null;
   confirmUsedAt: Date | null;
   approvedBy: string | null;
@@ -144,6 +146,9 @@ export interface PluginStore {
    * Moves the row to `sending`.
    */
   claimConfirmToken(hash: string, now: Date): Promise<ContactApprovalRow | null>;
+  /** Atomic owner-only read-and-clear. A token can be fetched at most once. */
+  takeConfirmToken(id: string, tokenJti: string, now: Date): Promise<{ confirmToken: string; expiresAt: Date } | null>;
+  purgeExpiredConfirmTokens(now: Date): Promise<void>;
   /** Cancel only while the request is still open and the confirm token is unused. */
   cancelIfOpen(id: string, now: Date): Promise<ContactApprovalRow | null>;
   /**
@@ -336,6 +341,7 @@ export class MemoryPluginStore implements PluginStore {
         row.confirmExpiresAt &&
         row.confirmExpiresAt.getTime() > now.getTime()
       ) {
+        row.confirmTokenPlaintext = null;
         row.confirmUsedAt = now;
         row.status = "sending";
         row.updatedAt = now;
@@ -344,6 +350,20 @@ export class MemoryPluginStore implements PluginStore {
     }
     return null;
   }
+  async takeConfirmToken(id: string, tokenJti: string, now: Date): Promise<{ confirmToken: string; expiresAt: Date } | null> {
+    await this.purgeExpiredConfirmTokens(now);
+    const row = this.approvals.get(id);
+    if (!row || row.tokenJti !== tokenJti || row.status !== "approved" || row.confirmUsedAt ||
+        !row.confirmTokenPlaintext || !row.confirmExpiresAt || row.confirmExpiresAt <= now) return null;
+    const confirmToken = row.confirmTokenPlaintext;
+    row.confirmTokenPlaintext = null;
+    return { confirmToken, expiresAt: row.confirmExpiresAt };
+  }
+  async purgeExpiredConfirmTokens(now: Date): Promise<void> {
+    for (const row of this.approvals.values()) {
+      if (row.confirmExpiresAt && row.confirmExpiresAt <= now) row.confirmTokenPlaintext = null;
+    }
+  }
   async cancelIfOpen(id: string, now: Date): Promise<ContactApprovalRow | null> {
     const row = this.approvals.get(id);
     if (!row) return null;
@@ -351,6 +371,7 @@ export class MemoryPluginStore implements PluginStore {
     if (row.status !== "pending" && row.status !== "approved") return null;
     row.status = "cancelled";
     row.cancelledAt = now;
+    row.confirmTokenPlaintext = null;
     row.confirmTokenHash = null;
     row.confirmExpiresAt = null;
     row.updatedAt = now;

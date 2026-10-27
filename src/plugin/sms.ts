@@ -12,6 +12,8 @@
  * voice row stays blocked for both, and START then sends no reply.
  */
 
+import { mayDialNow } from "../runtime/outbound/callingWindow";
+import { SI_ASSISTANT_WINDOW } from "./callEnqueue";
 import { dncKey } from "../runtime/outbound/store";
 import { siAssistantNumber, smsIdentifiedBody } from "./siAssistantConstants";
 import type { PluginStore } from "./store";
@@ -55,6 +57,7 @@ export async function sendApprovedSms(
   sender: SmsSender,
   input: { phone: string; body: string },
   env: Record<string, string | undefined> = process.env,
+  now = new Date(),
 ): Promise<{ ok: true; sid: string } | SendFailure> {
   const key = dncKey(input.phone);
   if (!key) return { ok: false, reason: "invalid_phone", mayHaveSent: false };
@@ -63,6 +66,8 @@ export async function sendApprovedSms(
   } catch (err) {
     return { ...failureFromUnknown(err), reason: "sms_opt_out_read_failed", mayHaveSent: false };
   }
+  const window = mayDialNow(now, [], SI_ASSISTANT_WINDOW);
+  if (!window.ok) return { ok: false, reason: window.reason, mayHaveSent: false };
   const from = siAssistantNumber(env);
   const body = smsIdentifiedBody(input.body);
   try {

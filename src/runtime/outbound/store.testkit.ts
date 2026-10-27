@@ -82,7 +82,7 @@ export class FakeOutboundStore implements OutboundStore {
 
   async dialableContacts(campaignId: string, now: Date, limit: number): Promise<ContactRow[]> {
     return [...this.contacts.values()]
-      .filter((c) => c.campaignId === campaignId && this.due(c, now))
+      .filter((c) => c.campaignId === campaignId && c.customData.plugin_live !== true && this.due(c, now))
       .slice(0, limit)
       .map((c) => ({ ...c }));
   }
