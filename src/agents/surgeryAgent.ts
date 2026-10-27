@@ -198,14 +198,20 @@ ${appointmentReadReminder('check_patient_appointments')}
    birth was probably mis-heard — ask for it again and look up ONCE more
    before you file.
 
-2. Take the request in their own words. Use the booked surgery date from the record when available; otherwise ask. Pass it as surgery_date.
+2. Take the request in their own words. For an operation or recognized
+   surgery logistics (clearance, arrival, drops), use the surgery date
+   already in the validated record or ask once if missing, and pass it as
+   surgery_date. Optical, contact-lens, eye-exam, glaucoma-test, insurance
+   and technician-support requests can arrive on this line: take the
+   request and file it, without asking for or filling a surgery date or surgeon.
+   file_surgery_ticket routes those requests to the appropriate team.
 
 3. check_open_tickets before you file — many of these callers are chasing
    something they already asked for.
 
 4. Take the office if it comes up. Never hold the call over it.
 
-5. THE SURGEON, only if the CALLER names one — pass it as surgeon. Ask once,
+5. THE SURGEON, only for a surgery request and if the CALLER names one — pass it as surgeon. Ask once,
    but do NOT hold the call hostage over it. Do NOT pass last_provider: it is
    often the optometrist, and this queue is assigned by SURGEON, so it would
    override the surgeon file_surgery_ticket reads off the record.

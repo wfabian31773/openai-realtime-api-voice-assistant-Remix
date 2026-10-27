@@ -33,7 +33,8 @@ import { createTicketDurable, postFailureToolResult } from '../services/durableT
 import { loggableLookupError } from '../services/loggableTicketingError';
 import { gateRefusalsSoFar, noteGateRefusal } from './gateAttempts';
 import { decideDobEscape, dobStatusNote, dobEscapeMarker, type DobStatus } from './dobEscape';
-import { verifiedDobFor } from './verifiedIdentity';
+import { correctSurgeryIntake, isSurgeryRequest, withoutSurgeryFields } from './requestClassification';
+import { usualOfficeFor, verifiedDobFor } from './verifiedIdentity';
 
 /** This tool's own name, for the per-call gate counter. */
 const SURGERY_FILE_TOOL = 'file_surgery_ticket';
@@ -66,6 +67,15 @@ registerTool({
   },
   handler: async (input): Promise<ToolResult> => {
     const { classifySurgeryRequest, SURGERY_DEPARTMENT_ID } = await import('./surgeryTaxonomy');
+    const corrected = correctSurgeryIntake(str(input.request_description), SURGERY_DEPARTMENT_ID);
+    if (corrected) {
+      return { success: true, classified: true,
+        department_id: corrected.departmentId,
+        request_type_id: corrected.requestTypeId,
+        request_reason_id: corrected.requestReasonId,
+        fix: 'File this request with file_surgery_ticket. Do not ask for a surgery date or surgeon for this request.' };
+    }
+
     const { classification, isCatchAll, isLogistics } = classifySurgeryRequest(
       str(input.request_description),
     );
@@ -156,7 +166,7 @@ registerTool({
           + "physician-only lookup this tool already runs against the patient's record.",
         askAs: 'And which surgeon are you seeing?',
       },
-      surgery_date: { type: 'string', description: 'The date of their surgery, if they gave one. Put it in the description too.' },
+      surgery_date: { type: 'string', description: 'For an operation or recognized surgery logistics (such as clearance or arrival): the surgery date from the validated record or caller. Never use an exam, testing or unexplained callback date.' },
       urgent: { type: 'string', description: 'Pass "true" only when classify_surgery_request said urgent.' },
       email: { type: 'string', description: EMAIL_FIELD_DESCRIPTION },
       call_sid: { type: 'string', description: 'The call id, so a retry cannot double-file.' },
@@ -215,7 +225,7 @@ registerTool({
       );
     }
 
-    const { SURGERY_DEPARTMENT_ID, surgeryReasonById, classifySurgeryRequest, isSurgeryPostOpSymptom } =
+    const { SURGERY_DEPARTMENT_ID, surgeryReasonById, classifySurgeryRequest, classifySurgeryLogistics, isSurgeryPostOpSymptom } =
       await import('./surgeryTaxonomy');
 
     // The reason must be one of SURGERY's own, whatever we were handed. This is
@@ -229,9 +239,18 @@ registerTool({
 
     // Lead with the bucket when there is no reason id to carry the meaning.
     // A coordinator scanning a queue reads the first three words.
-    const surgeryDate = str(input.surgery_date);
+    const { detectCrossQueue } = await import('./queueRouting');
+    const redirect = detectCrossQueue(description, SURGERY_DEPARTMENT_ID);
+    const filedDepartmentId = redirect?.departmentId ?? SURGERY_DEPARTMENT_ID;
+    const filedOnSurgeryQueue = filedDepartmentId === SURGERY_DEPARTMENT_ID;
+    // Logistics already recognized by this queue carry their surgery date.
+    // A generic callback/status chase or a supplied reason id alone cannot
+    // establish that an otherwise unexplained date belongs to an operation.
+    const logistics = classifySurgeryLogistics(description);
+    const surgeryDate = filedOnSurgeryQueue && (isSurgeryRequest(description) || (logistics && logistics.key !== 'status'))
+      ? str(input.surgery_date) : '';
     const body = [
-      description,
+      filedOnSurgeryQueue ? description : withoutSurgeryFields(description),
       surgeryDate ? `\n\nSurgery date given by caller: ${surgeryDate}` : '',
     ].join('');
 
@@ -250,8 +269,9 @@ registerTool({
     const { sanitizeProviderName, sanitizeLocationName } = await import(
       '../services/ticketFieldSanitizers'
     );
-    const cleanLocation = sanitizeLocationName(str(input.location)).value;
-    const cleanSurgeon = sanitizeProviderName(str(input.surgeon)).value;
+    const recordOffice = filedDepartmentId === 1 ? usualOfficeFor(callSid, first, last, dob) : undefined;
+    const cleanLocation = sanitizeLocationName(recordOffice || str(input.location)).value;
+    const cleanSurgeon = filedOnSurgeryQueue ? sanitizeProviderName(str(input.surgeon)).value : '';
 
     const { ticketingApiClient, lookupWasUnavailable } = await import(
       '../../server/services/ticketingApiClient'
@@ -376,11 +396,6 @@ registerTool({
     // The detector stays silent unless the misroute is obvious — the line that
     // rang is better evidence than a keyword, and a redirect on a guess would
     // be worse than none.
-    const { detectCrossQueue } = await import('./queueRouting');
-    const redirect = detectCrossQueue(description, SURGERY_DEPARTMENT_ID);
-    const filedDepartmentId = redirect?.departmentId ?? SURGERY_DEPARTMENT_ID;
-    /** Only THIS queue routes by surgeon; a redirect changes what may be filed. */
-    const filedOnSurgeryQueue = filedDepartmentId === SURGERY_DEPARTMENT_ID;
 
     /**
      * HAS THIS CALL ALREADY BEEN ASKED FOR THE SURGEON?
@@ -453,6 +468,8 @@ registerTool({
      * still cost.
      */
     const surgeonAskExhausted = gateRefusalsSoFar(callSid, SURGERY_FILE_TOOL, 'surgeon') >= 1;
+    const officeAskExhausted = filedDepartmentId === 1
+      && gateRefusalsSoFar(callSid, SURGERY_FILE_TOOL, 'location') >= 1;
     const filedTypeId = redirect?.requestTypeId ?? cls.requestTypeId;
     const filedReasonId = redirect?.requestReasonId ?? cls.requestReasonId;
     const filedDescription = redirect
@@ -818,6 +835,10 @@ registerTool({
       ...(filedOnSurgeryQueue && surgeonAskExhausted && !lookup.providerId
         ? { routingAskExhausted: true }
         : {}),
+      // The destination's office gate is independent of the surgeon ask.
+      // Send this even if /lookup returned an id: the API already refused
+      // that office (e.g. it cannot receive assignment), and re-asks must end.
+      ...(officeAskExhausted ? { routingAskExhausted: true } : {}),
       description: filedDescriptionWithDobStatus,
       priority,
       callData: {
@@ -839,10 +860,14 @@ registerTool({
       // below turns it into a question the agent puts to the caller. Count it,
       // so a second trip through here carries routingAskExhausted and the app
       // takes the request unassigned instead of refusing it again. Counted
-      // only for the surgeon — a refusal for any other field has not asked
-      // this question and must not spend it.
+      // separately for each destination's required field: a surgeon refusal
+      // cannot spend the office ask, and an office refusal cannot spend the surgeon ask.
       if (res.terminal && res.missingField === 'surgeon') {
         noteGateRefusal(callSid, SURGERY_FILE_TOOL, 'surgeon');
+      }
+      if (filedDepartmentId === 1 && res.terminal
+        && (res.missingField === 'office' || res.missingField === 'location')) {
+        noteGateRefusal(callSid, SURGERY_FILE_TOOL, 'location');
       }
       return postFailureToolResult(res, 'file_surgery_ticket');
     }
