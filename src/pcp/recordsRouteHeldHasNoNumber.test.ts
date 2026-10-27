@@ -35,6 +35,7 @@ vi.mock('../services/ticketOutboxService', async (importOriginal) => {
 
 const { createPcpAgent } = await import('../agents/pcpAgent');
 const { resetGateAttempts } = await import('../tools/gateAttempts');
+const { pcpDirector } = await import('./director');
 
 async function call(agent: any, name: string, args: Record<string, unknown> = {}) {
   const t = agent.tools.find((x: any) => x.name === name);
@@ -87,13 +88,15 @@ describe('a records request the outbox holds', () => {
   it('on a plain outage: says there is no number, never "undefined"', async () => {
     ticketing.createTicket.mockResolvedValueOnce(OUTAGE as never);
     writeToOutbox.mockResolvedValue({ outboxId: 'ob-pcp-1', alreadyExists: false });
-    const { agent } = freshCall();
+    const { agent, callId } = freshCall();
 
     const out = await clinicAsksForRecords(agent);
 
     expect(out.success).toBe(true);
     expect(out.filed_pending).toBe(true);
     expect(out.routed_to).toBe('Medical Records');
+    // Held is filed: the call may end, and the teardown floor has nothing left to file.
+    expect(pcpDirector.next(callId).mayTerminate).toBe(true);
     expect(out.ticketNumber).toBeUndefined();
     expect(JSON.stringify(out)).not.toMatch(/undefined/);
     expect(String(out.message)).toMatch(/no ticket number yet/i);
