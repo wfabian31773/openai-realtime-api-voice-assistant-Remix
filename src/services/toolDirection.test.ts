@@ -46,6 +46,16 @@ describe('toolDirection', () => {
     expect(d).not.toContain('passed that to the team');
     expect(d).not.toContain('will call you back');
   });
+
+  it('a filed ticket without a callback does not promise a phone call', () => {
+    const d = directionFor('no-ivr', 'create_ticket', JSON.stringify({
+      success: true,
+      ticketCreated: true,
+      callbackRequired: false,
+    }), 'no-phone-callback')!;
+    expect(d).toMatch(/submitted/i);
+    expect(d).not.toMatch(/call you back|first thing/i);
+  });
 });
 
 describe('acknowledgeDayMismatch — S6', () => {

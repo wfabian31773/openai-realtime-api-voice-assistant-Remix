@@ -113,6 +113,7 @@ describe("VA-71404: internal prompt text is never caller-facing speech", () => {
     "The prompt note says [ask again before ending the call].",
     "The tool directive says to call create_ticket now.",
     "Call lookup_schedule with the patient's details before you answer.",
+    "Call emit_decision with the urgency classification.",
   ])("cuts internal directives such as %j", async (line) => {
     expect(await trips(INTERNAL_PROMPT, line)).toBe(true);
   });

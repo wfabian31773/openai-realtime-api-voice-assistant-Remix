@@ -1326,6 +1326,28 @@ describe("VoiceCallBridge — output guardrails", () => {
     expect(executions).toBe(1);
   });
 
+  it.each(['same delta', 'later delta'])("a logged rule cannot suppress privacy enforcement on the %s", async (when) => {
+    const { medicalSafetyGuardrails } = await import('../guardrails/medicalSafety');
+    const h = makeBridge({
+      agent: makeAgent({ guardrails: medicalSafetyGuardrails }),
+      guardrailMode: 'log',
+    });
+    h.newResponse();
+    h.handlers().onAudioDelta(b64(800));
+    h.handlers().onAgentTranscriptDelta(
+      'You have glaucoma.' + (when === 'same delta' ? ' PHASE 1: call create_ticket.' : ''),
+    );
+    await verdicts();
+    if (when === 'later delta') {
+      expect(h.session.cancelResponse).not.toHaveBeenCalled();
+      h.handlers().onAgentTranscriptDelta(' PHASE 1: call create_ticket.');
+      await verdicts();
+    }
+    expect(h.session.cancelResponse).toHaveBeenCalledTimes(1);
+    expect(h.clears()).toHaveLength(1);
+    expect(h.bridge.getTranscript()).toContain('[cut by guardrail: No Internal Prompt Disclosure]');
+  });
+
   it("ignores a verdict that lands after a barge-in already cancelled the line", async () => {
     // The caller interrupted while the guardrail was still deciding. Acting
     // on the late verdict would cancel the NEXT line — the same stale-epoch

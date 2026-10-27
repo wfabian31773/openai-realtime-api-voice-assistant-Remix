@@ -524,9 +524,14 @@ synthetic fixtures in the cited tests when checking this branch.
 
 - **Answered question, no callback (#9; VA-76095, 74600):** the agent must not
   file when it fully answered the caller and no follow-up was requested. If
-  `create_ticket` is reached with `requires_callback: false`, it returns
-  `ticketCreated: false`; the tool direction must preserve that result and
-  must not say the request was submitted or promise a callback.
+  `create_ticket` is reached with `question_fully_answered: true` AND
+  `requires_callback: false`, it returns `ticketCreated: false` without
+  entering intake gates; the tool direction must preserve that result and
+  must not say the request was submitted or promise a callback. A false or
+  omitted callback flag alone still files the request. In particular, the
+  existing category default for confirmations must not discard a confirmation
+  staff still need to answer. Filed requests without a phone callback keep
+  their `[NO CALLBACK NEEDED]` tag and do not promise a phone call.
 - **Clinic hours (#10):** `AZUL_VISION_LOCATIONS[].hours` is the source for
   each clinic's hours. The runtime knowledge pack renders each clinic's row,
   and the shared standard-hours fact is derived from those rows. Answer from
@@ -534,15 +539,23 @@ synthetic fixtures in the cited tests when checking this branch.
   schedule from the clock. The synthetic morning, lunch and after-close cases
   are in `src/agents/noIvrAnswersOfficeHours.test.ts`.
 - **Call grading summary (#11):** model-generated analysis is still used for
-  grading, but the stored summary is replaced with short, exact transcript
-  excerpts labeled by speaker. It does not infer an appointment, request or
-  outcome from those words.
+  grading, but the stored summary is replaced with exact transcript excerpts
+  labeled by speaker: all caller turns and the last two agent turns. Keeping
+  the caller turns preserves mid-call requests, corrections and multiline
+  speech; keeping two agent turns prevents a goodbye from displacing the
+  preceding response. Quotes are never silently clipped. These digests can be
+  longer than the old generated summary; they do not infer an appointment,
+  request or outcome from those words.
 - **Internal text and callback number (#20; VA-71404):** the output guardrail
-  stops tool names, prompt phases and bracketed notes from being spoken, even
-  when runtime guardrails are configured in log mode. A caller-provided
-  callback number stays in the ticket's patient phone field; caller ID remains
+  interrupts detected tool names, prompt phases and bracketed notes, even
+  when runtime guardrails are configured in log mode. A logged rule only
+  deduplicates itself; privacy rules still check that utterance and later
+  deltas. Streaming audio may precede the transcript, so this is an
+  interruption safeguard, not proof that no offending audio was heard. A
+  caller-provided callback number stays in the ticket's patient phone field; caller ID remains
   in the caller phone field, and a mismatch is written into ticket details for
-  staff.
+  staff on ordinary tickets, refused-escalation tickets and connected-transfer
+  records.
 
 These are voice-remix behaviors. They do not change the Support Center's
 ticket schema or apply a database migration.

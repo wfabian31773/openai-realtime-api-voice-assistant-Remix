@@ -24,17 +24,17 @@ export interface QualityAnalysis {
  * the model still grades the other quality fields.
  */
 export function transcriptGroundedSummary(transcript: string): string {
-  const turns = transcript
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter((line) => /^(?:CALLER|PATIENT|USER|AGENT)\s*:/i.test(line));
-  const caller = turns.find((line) => /^(?:CALLER|PATIENT|USER)\s*:/i.test(line));
-  const finalAgent = [...turns].reverse().find((line) => /^AGENT\s*:/i.test(line));
-  const excerpt = (line: string) => line.replace(/^[^:]+:\s*/, '').slice(0, 300).trim();
-  const parts = [
-    caller ? `Caller said: “${excerpt(caller)}”` : null,
-    finalAgent ? `Agent said: “${excerpt(finalAgent)}”` : null,
-  ].filter((part): part is string => Boolean(part));
+  // Split on speaker boundaries, not newlines inside a spoken turn. Keep all
+  // caller turns: their request and corrections often come after "hello".
+  // Include the last two agent turns so a goodbye cannot displace the result.
+  // Never silently clip a quote: its tail may negate or correct its beginning.
+  const turns = [...transcript.matchAll(/^[ \t]*(CALLER|PATIENT|USER|AGENT)[ \t]*:[ \t]*([\s\S]*?)(?=^[ \t]*(?:CALLER|PATIENT|USER|AGENT)[ \t]*:|(?![\s\S]))/gim)]
+    .map((match) => ({ speaker: match[1].toUpperCase(), text: match[2].trim() }))
+    .filter((turn) => turn.text);
+  const finalAgents = turns.filter((turn) => turn.speaker === 'AGENT').slice(-2);
+  const parts = turns
+    .filter((turn) => turn.speaker !== 'AGENT' || finalAgents.includes(turn))
+    .map((turn) => `${turn.speaker === 'AGENT' ? 'Agent' : 'Caller'} said: “${turn.text}”`);
   return parts.length ? parts.join(' ') : 'No caller or agent statement was captured in the transcript.';
 }
 

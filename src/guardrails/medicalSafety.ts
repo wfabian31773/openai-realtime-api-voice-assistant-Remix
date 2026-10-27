@@ -13,7 +13,7 @@ const noInternalPromptDisclosure: RealtimeOutputGuardrail & { alwaysEnforce: tru
     const internalPatterns = [
       /\bPHASE\s+\d+\s*:/i,
       /\[[^\]\r\n]{1,120}\]/,
-      /\b(?:create_ticket|lookup_schedule|check_open_tickets|escalate_to_human|terminate_call|set_spoken_language)\b/i,
+      /\b(?:create_ticket|lookup_schedule|check_open_tickets|emit_decision|escalate_to_human|terminate_call|set_spoken_language)\b/i,
       /\b(?:tool|function)\s+(?:call|name|schema|directive|output|result)\b/i,
       /\b(?:system|developer|internal)\s+(?:prompt|instruction|directive|note|message)\b/i,
       /^\s*#{1,6}\s+/m,
