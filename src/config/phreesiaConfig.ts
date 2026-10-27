@@ -17,7 +17,7 @@ export const PHREESIA_CONFIG = {
     'Laguna Hills',
     'Long Beach',
     'Long Beach Willow',
-    'Magan',
+    'Covina',
     'Mission Viejo',
     'Monrovia',
     'Montebello',

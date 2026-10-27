@@ -30,7 +30,8 @@ export function currentClinicName(value: string | null | undefined): string | nu
     .replace(/^(azul vision|atlantis eyecare)\s+/, '')
     .replace(/\s+(office|location|clinic)$/, '')
     .trim();
-  return RETIRED_CLINIC_NAMES[key] ?? RETIRED_CLINIC_NAMES[core] ?? trimmed;
+  const current = RETIRED_CLINIC_NAMES[key] ?? RETIRED_CLINIC_NAMES[core];
+  return typeof current === 'string' ? current : trimmed;
 }
 
 export const AZUL_VISION_LOCATIONS: Location[] = [

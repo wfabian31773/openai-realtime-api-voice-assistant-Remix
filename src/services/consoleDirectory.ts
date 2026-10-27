@@ -22,7 +22,7 @@
  * rules in `ticketFieldSanitizers`, which are always safe.
  */
 import pg from 'pg';
-import { currentClinicName, RETIRED_CLINIC_NAMES } from '../config/azulVisionKnowledge';
+import { RETIRED_CLINIC_NAMES } from '../config/azulVisionKnowledge';
 
 const REFRESH_MS = Number(process.env.CONSOLE_DIRECTORY_TTL_MS ?? 15 * 60_000);
 const QUERY_TIMEOUT_MS = 2500;
@@ -507,10 +507,11 @@ function locationNamedInside(
 export async function lookupLocation(raw: string): Promise<DirectoryLocation | null> {
   const dir = await getDirectory();
   if (!dir) return null;
-  const currentName = currentClinicName(raw) ?? raw;
-  const exact = dir.locations.get(directoryKey(currentName));
+  // The snapshot indexes retired aliases with collision protection. Rewriting
+  // the input first would bypass that protection and steal a real office key.
+  const exact = dir.locations.get(directoryKey(raw));
   if (exact) return exact;
-  return locationNamedInside(dir, currentName);
+  return locationNamedInside(dir, raw);
 }
 
 /** Test seam. Also lets a deploy force a refresh without a restart. */

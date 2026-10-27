@@ -7,6 +7,7 @@ import { normalizePhone } from '../utils/phone';
 // a bare `uuid = text` fails at runtime, inside a catch, on a live call, and
 // reads as "this patient has no history" rather than as a bug.
 import { byPerson } from './appointmentAnswers';
+import { currentClinicName } from '../config/azulVisionKnowledge';
 
 /**
  * Who this lookup could have meant.
@@ -1131,7 +1132,7 @@ export class ScheduleLookupService {
         timeOfDay: formatTimeString(apt.appointmentStart) || apt.sessionPartOfDay || 'Unknown',
         startTime: formatTimeString(apt.appointmentStart),
         endTime: formatTimeString(apt.appointmentEnd),
-        location: apt.officeLocation || 'Unknown',
+        location: currentClinicName(apt.officeLocation) || 'Unknown',
         provider: apt.renderingPhysician || 'Unknown',
         status: apt.appointmentStatus || 'Unknown',
         appointmentType: apt.serviceCategory1 || undefined,
@@ -1243,7 +1244,7 @@ export class ScheduleLookupService {
       email: firstApt.patientEmailAddress || undefined,
       cellPhone: firstApt.patientCellPhone || undefined,
       homePhone: firstApt.patientHomePhone || undefined,
-      preferredLocation: lastLocationSeen || firstApt.officeLocation || undefined,
+      preferredLocation: lastLocationSeen || currentClinicName(firstApt.officeLocation) || undefined,
       preferredProvider: lastProviderSeen || firstApt.renderingPhysician || undefined,
       personId: firstApt.personId || undefined,
     };

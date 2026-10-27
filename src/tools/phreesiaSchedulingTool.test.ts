@@ -1,0 +1,55 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { RunContext } from '@openai/agents';
+
+const state = vi.hoisted(() => ({
+  constructors: vi.fn(),
+  createWorkflow: vi.fn(async () => ({ id: 'synthetic-workflow' })),
+  completeWorkflow: vi.fn(),
+  fill: vi.fn(),
+  dispose: vi.fn(),
+}));
+vi.mock('../../server/services/schedulingWorkflowManager', () => ({
+  workflowManager: { createWorkflow: state.createWorkflow, completeWorkflow: state.completeWorkflow },
+}));
+vi.mock('../../server/services/computerUseAgent', () => ({
+  PhreesiaComputerUseAgent: class {
+    constructor(...args: unknown[]) { state.constructors(...args); }
+    async init() {}
+    fillPhreesiaForm = state.fill;
+    dispose = state.dispose;
+  },
+}));
+
+import { createPhreesiaSchedulingTool } from './phreesiaSchedulingTool';
+
+const patient = {
+  firstName: 'Synthetic', lastName: 'Example', dateOfBirth: '01/01/1970', gender: 'female',
+  address: '1 Example Street', city: 'Example City', state: 'CA', zip: '00000',
+  homePhone: '555-010-0100', mobilePhone: '555-010-0101',
+};
+beforeEach(() => {
+  vi.clearAllMocks();
+  vi.spyOn(console, 'info').mockImplementation(() => {});
+});
+afterEach(() => vi.restoreAllMocks());
+
+describe('Phreesia tool current clinic names', () => {
+  it.each([
+    ['North Valley Eye', 'Mission Hills'],
+    ['Magan', 'Covina'],
+  ])('carries %s as %s into automation and the spoken result', async (retired, current) => {
+    state.fill.mockResolvedValue({
+      success: true, confirmationNumber: 'SYNTHETIC',
+      appointmentDetails: { date: '2099-01-01', time: '09:00', location: retired },
+    });
+    const tool = createPhreesiaSchedulingTool({ callLogId: 'synthetic-call', agentId: 'synthetic-agent' });
+    const reply = await tool.invoke(new RunContext(), JSON.stringify({
+      patient_type: 'returning', preferred_location: retired, patient_data: patient,
+    }));
+    expect(state.constructors).toHaveBeenCalledWith('synthetic-workflow', 'returning', current);
+    expect(reply).toContain(`Location: ${current}`);
+    expect(reply).not.toContain(retired);
+    expect(state.completeWorkflow).toHaveBeenCalledWith('synthetic-workflow', true, 'SYNTHETIC', expect.any(Object));
+    expect(state.dispose).toHaveBeenCalledOnce();
+  });
+});

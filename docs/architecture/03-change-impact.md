@@ -794,8 +794,19 @@ high-volume patient's history.
 `directoryKey` (:204), the `LOCATION_ALIASES` exception table (:151), the
 retired-name map `RETIRED_CLINIC_NAMES` in `src/config/azulVisionKnowledge.ts`,
 and the `__resetDirectory` test seam (:327). The caller-name matcher resolves
-the retired spelling to the current live entry; schedule facts and Phreesia
-results use the same map when they display office names.
+the retired spelling to the current live entry, while an existing directory
+key still wins over an alias collision. Schedule facts, Hub fallback visit
+context (`scheduleLookupService`), appointment answers (`appointmentAnswers`)
+and Phreesia results use the same map when they display office names:
+North Valley Eye → Mission Hills, Magan → Covina. Phreesia option matching
+normalizes both the preference and the external form's label, so a retired
+option cannot make a current-name preference select an unrelated first office.
+
+`locationAliases.test.ts` exercises the real snapshot loader with only `pg`
+mocked; it no longer builds a second implementation of the snapshot. Hub
+fallback coverage lives in `lookupJoinReadsTheConsole.test.ts`; Phreesia
+selection and tool-result coverage live in `computerUseAgent.location.test.ts`
+and `phreesiaSchedulingTool.test.ts`. All added patient fixtures are synthetic.
 
 **Who imports it**
 
