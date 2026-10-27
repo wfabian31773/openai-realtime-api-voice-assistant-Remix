@@ -71,16 +71,18 @@ export function createPhreesiaSchedulingTool(context: PhreesiaSchedulingContext)
           activeWorkflowsByCall.delete(context.callLogId);
 
           if (result.success) {
+            const details = result.appointmentDetails && {
+              ...result.appointmentDetails,
+              location: currentClinicName(result.appointmentDetails.location) ?? result.appointmentDetails.location,
+            };
             await workflowManager.completeWorkflow(
               workflow.id,
               true,
               result.confirmationNumber,
-              result.appointmentDetails
+              details
             );
 
-            const details = result.appointmentDetails;
-            const location = currentClinicName(details?.location) ?? details?.location;
-            return `✓ Appointment scheduled successfully!\n\nConfirmation: ${result.confirmationNumber || 'Pending'}\nDate: ${details?.date}\nTime: ${details?.time}\nLocation: ${location}\n\nThe patient will receive a confirmation text message.`;
+            return `✓ Appointment scheduled successfully!\n\nConfirmation: ${result.confirmationNumber || 'Pending'}\nDate: ${details?.date}\nTime: ${details?.time}\nLocation: ${details?.location}\n\nThe patient will receive a confirmation text message.`;
           } else {
             await workflowManager.completeWorkflow(workflow.id, false);
 

@@ -801,6 +801,8 @@ and Phreesia results use the same map when they display office names:
 North Valley Eye → Mission Hills, Magan → Covina. Phreesia option matching
 normalizes both the preference and the external form's label, so a retired
 option cannot make a current-name preference select an unrelated first office.
+Successful Phreesia workflow details store the same current location name the
+voice result reports, so the scheduling monitor displays it too.
 
 `locationAliases.test.ts` exercises the real snapshot loader with only `pg`
 mocked; it no longer builds a second implementation of the snapshot. Hub

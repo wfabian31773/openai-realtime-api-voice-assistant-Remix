@@ -37,19 +37,29 @@ describe('Phreesia tool current clinic names', () => {
   it.each([
     ['North Valley Eye', 'Mission Hills'],
     ['Magan', 'Covina'],
-  ])('carries %s as %s into automation and the spoken result', async (retired, current) => {
+    ['Example Clinic', 'Example Clinic'],
+  ])('carries %s as %s into automation, persistence, and the spoken result', async (original, current) => {
     state.fill.mockResolvedValue({
       success: true, confirmationNumber: 'SYNTHETIC',
-      appointmentDetails: { date: '2099-01-01', time: '09:00', location: retired },
+      appointmentDetails: { date: '2099-01-01', time: '09:00', location: original, visitType: 'Synthetic visit' },
     });
     const tool = createPhreesiaSchedulingTool({ callLogId: 'synthetic-call', agentId: 'synthetic-agent' });
     const reply = await tool.invoke(new RunContext(), JSON.stringify({
-      patient_type: 'returning', preferred_location: retired, patient_data: patient,
+      patient_type: 'returning', preferred_location: original, patient_data: patient,
     }));
     expect(state.constructors).toHaveBeenCalledWith('synthetic-workflow', 'returning', current);
     expect(reply).toContain(`Location: ${current}`);
-    expect(reply).not.toContain(retired);
-    expect(state.completeWorkflow).toHaveBeenCalledWith('synthetic-workflow', true, 'SYNTHETIC', expect.any(Object));
+    if (original !== current) expect(reply).not.toContain(original);
+    expect(state.completeWorkflow).toHaveBeenCalledWith('synthetic-workflow', true, 'SYNTHETIC', {
+      date: '2099-01-01', time: '09:00', location: current, visitType: 'Synthetic visit',
+    });
     expect(state.dispose).toHaveBeenCalledOnce();
+  });
+
+  it('preserves absent appointment details', async () => {
+    state.fill.mockResolvedValue({ success: true, confirmationNumber: 'SYNTHETIC' });
+    const tool = createPhreesiaSchedulingTool({ callLogId: 'synthetic-call', agentId: 'synthetic-agent' });
+    await tool.invoke(new RunContext(), JSON.stringify({ patient_type: 'returning', patient_data: patient }));
+    expect(state.completeWorkflow).toHaveBeenCalledWith('synthetic-workflow', true, 'SYNTHETIC', undefined);
   });
 });
