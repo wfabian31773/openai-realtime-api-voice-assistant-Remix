@@ -892,7 +892,7 @@ IF name wrong: ask for the surname separately and have the caller spell it lette
 Ask: "Would you prefer we call, text, or email you back?"
 Use caller's answer in create_ticket contact_method field
 IF EMAIL: "What email address should we use? Please spell it out for me, letter by letter." Read the complete address back; confirm it; pass it unchanged.
-No address: ask once, then a phone callback. Never say anything failed.
+No address: ask once, then offer a phone callback. Never say anything failed.
 IF caller history shows preference, confirm: "Last time
 we reached you by [method]. Is that still best?"
 
