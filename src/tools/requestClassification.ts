@@ -85,6 +85,9 @@ export function classifyNonSurgicalRequest(text: string): RequestClassification 
   const exam = /\b(?:eye[- ]exam|annual (?:eye )?exam|routine (?:eye )?exam|vision exam|glaucoma[- ](?:test|testing)|visual field|oct test|examen de (?:la vista|ojos)|prueba de glaucoma)\b/.test(t);
   // Medication authorizations stay with the existing medication logic.
   const medication = /\b(?:medication|medicine|drops?|pharmacy|medicamento|gotas|farmacia)\b/.test(t);
+  const scheduled = hubSchedulingReason(t);
+  // An incidental insurance mention does not beat an explicit appointment change.
+  if (exam && scheduled && !medication) return result(9, 32, scheduled);
   if (!medication && /\b(?:insurance|coverage|eligibility|benefits|deductible|copay|seguro|cobertura|aseguranza)\b/.test(t)) {
     const reason = /\b(?:prior auth|authorization|autorizacion)\b/.test(t) ? 180
       : /\b(?:benefits|deductible|copay)\b/.test(t) ? 179
@@ -93,14 +96,13 @@ export function classifyNonSurgicalRequest(text: string): RequestClassification 
   }
   if (exam && !medication) {
     // Results only when the caller is asking for them, not booking around them.
-    if (isResultsRequest(t) && !hubSchedulingReason(t)) return result(3, 72, 542);
-    return result(9, 32, hubSchedulingReason(t) ?? 146);
+    if (isResultsRequest(t) && !scheduled) return result(3, 72, 542);
+    return result(9, 32, scheduled ?? 146);
   }
   if (contacts) {
     if (/\b(?:renew|renewal|renovar)\b/.test(t) && /\b(?:prescription|rx|receta)\b/.test(t)) return result(3, 33, 157);
     // Appointment language wins over order/status. Change/confirm/what-time
     // on an order, and a pickup time, stay Optical.
-    const scheduled = hubSchedulingReason(t);
     const appointmentish = /\b(?:appointment|cita|exam|examen|fitting|reschedul\w*|schedul\w*|book\w*|make an appointment|set[- ]?up|need an appointment|get an appointment|agendar|sacar una cita|pedir una cita|hacer una cita|nueva cita|cita para)\b/.test(t);
     if (scheduled && appointmentish) return result(9, 32, scheduled);
     if (/\b(?:status|ready|pickup|pick up|arriv\w*|estado|listos)\b/.test(t)) return result(1, 5, 21);

@@ -65,6 +65,13 @@ describe('review regressions: preserve clinical and procedure context', () => {
       .toEqual({ departmentId: 3, requestTypeId: 72, requestReasonId: 542 });
   });
 
+  it('does not let an incidental insurance mention override rescheduling an exam', () => {
+    expect(classifyNonSurgicalRequest('I need to reschedule my eye exam because my insurance changed'))
+      .toEqual({ departmentId: 9, requestTypeId: 32, requestReasonId: 147 });
+    expect(classifyNonSurgicalRequest('Will insurance cover my eye exam?'))
+      .toEqual({ departmentId: 9, requestTypeId: 37, requestReasonId: 178 });
+  });
+
   it('does not let results override booking an exam', () => {
     expect(classifyNonSurgicalRequest('I need to schedule an eye exam to discuss my test results'))
       .toEqual({ departmentId: 9, requestTypeId: 32, requestReasonId: 146 });
