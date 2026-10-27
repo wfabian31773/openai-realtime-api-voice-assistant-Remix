@@ -1484,3 +1484,7 @@ WHERE call_sid = ANY(:sids_from_step_1)
 After the deploy, the same population should read 0 on the second query,
 and optical tickets with no `location_id` must not rise (before-arm
 2026-10-01: 15 of 391).
+
+## 2026-10-27 — paired identity persistence change
+
+Support Desk #1–4/#12/#13: [validated identity carry and filing gate](../identity-persistence.md). Local synthetic regression coverage; no production measurement or deployment. Ticket-side #16 stays separate from transfer sequencing in PR #375.

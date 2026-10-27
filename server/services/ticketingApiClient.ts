@@ -1,3 +1,5 @@
+import { validatedPatientFor, type ValidatedPatient } from '../../src/tools/ticketIdentity';
+import { readDobQuietly } from '../../src/tools/dobParts';
 import { getEnvironmentConfig } from '../../src/config/environment';
 import { shadowTap } from '../../src/shadow/tap'; // observation-only tap; no-op unless SHADOW_MODE_ENABLED
 import { isNoTicketError } from './ticketingSyncPolicy';
@@ -21,6 +23,7 @@ export interface CallData {
 }
 
 export interface CreateTicketParams {
+  validatedPatient?: ValidatedPatient;
   /**
    * MEDICAL RECORDS / CAP ONLY.
    *
@@ -143,6 +146,7 @@ export interface CreateTicketResponse {
 
 // NEW SIMPLIFIED ENDPOINT - accepts conversational data, handles all mapping server-side
 export interface SubmitTicketParams {
+  validatedPatient?: ValidatedPatient;
   /**
    * A CLASSIFICATION HINT, not an instruction.
    *
@@ -777,6 +781,9 @@ export class TicketingApiClient {
   }
 
   async createTicket(params: CreateTicketParams): Promise<CreateTicketResponse> {
+    const unnamed = /^unknown caller$/i.test(`${params.patientFirstName ?? ''} ${params.patientLastName ?? ''}`.trim());
+    params = { ...params, validatedPatient: params.validatedPatient ?? validatedPatientFor(params.callData?.callSid,
+      unnamed ? undefined : params.patientFirstName, unnamed ? undefined : params.patientLastName) };
     console.info("[TICKETING API] Creating ticket:", {
       patient: maskName(params.patientFirstName, params.patientLastName),
       phone: maskPhone(params.patientPhone),
@@ -987,6 +994,12 @@ export class TicketingApiClient {
    * This is the preferred method for voice agents - more reliable than the legacy createTicket
    */
   async submitTicket(params: SubmitTicketParams): Promise<SubmitTicketResponse> {
+    const unnamed = !params.patientFullName.trim() || /^unknown caller$/i.test(params.patientFullName.trim());
+    const words = unnamed ? [] : params.patientFullName.trim().split(/\s+/);
+    const match = params.validatedPatient ?? validatedPatientFor(params.callData?.callSid, words[0], words.slice(1).join(' '), params.patientDOB);
+    if (match) params = { ...params, validatedPatient: match, patientFullName: unnamed ? `${match.firstName} ${match.lastName}` : params.patientFullName,
+      patientDOB: readDobQuietly(params.patientDOB) ? params.patientDOB : match.dateOfBirth || params.patientDOB,
+      locationOfLastVisit: match.nextAppointment?.location || match.lastVisit?.location || match.confirmedClinic || params.locationOfLastVisit };
     console.info("[TICKETING API] Submitting ticket (simplified endpoint):", {
       patientName: maskName(params.patientFullName),
       hasPhone: !!params.patientPhone,

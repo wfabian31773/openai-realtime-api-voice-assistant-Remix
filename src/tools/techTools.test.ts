@@ -12,10 +12,11 @@ import './sharedPatientTools';
 import './techTools';
 
 const BASE = {
-  first_name: 'Wayne',
-  last_name: 'Fabian',
-  date_of_birth: '03/17/1973',
-  callback_number: '845-531-7471',
+  location: 'Testville',
+  first_name: 'Alex',
+  last_name: 'Synthetic',
+  date_of_birth: '01/02/1970',
+  callback_number: '555-555-0100',
 };
 
 async function client() {
@@ -26,8 +27,9 @@ function ok(n: string) {
   return { success: true, ticketNumber: n } as never;
 }
 
-beforeEach(() => {
+beforeEach(async () => {
   vi.restoreAllMocks();
+  vi.spyOn(await client(), 'lookupProviderAndLocation').mockResolvedValue({ success: true, locationId: 31 } as never);
 });
 
 describe('patientPhone is the digits, not the raw string', () => {
@@ -44,7 +46,7 @@ describe('patientPhone is the digits, not the raw string', () => {
       request_description: 'I need a refill of my Latanoprost',
     });
 
-    expect(create.mock.calls[0][0].patientPhone).toBe('8455317471');
+    expect(create.mock.calls[0][0].patientPhone).toBe('5555550100');
   });
 
   it('drops a leading 1, not the area code', async () => {
@@ -53,11 +55,11 @@ describe('patientPhone is the digits, not the raw string', () => {
 
     await runTool('file_tech_ticket', {
       ...BASE,
-      callback_number: '1-845-531-7471',
+      callback_number: '1-555-555-0100',
       request_description: 'I need a refill of my Latanoprost',
     });
 
-    expect(create.mock.calls[0][0].patientPhone).toBe('8455317471');
+    expect(create.mock.calls[0][0].patientPhone).toBe('5555550100');
   });
 
   it('refuses 11 digits that do not start with 1, rather than dropping the first one', async () => {
@@ -66,7 +68,7 @@ describe('patientPhone is the digits, not the raw string', () => {
 
     const out = (await runTool('file_tech_ticket', {
       ...BASE,
-      callback_number: '2-845-531-7471',
+      callback_number: '2-555-555-0100',
       request_description: 'I need a refill of my Latanoprost',
     })) as Record<string, unknown>;
 
@@ -81,7 +83,7 @@ describe('patientPhone is the digits, not the raw string', () => {
 
     const out = (await runTool('file_tech_ticket', {
       ...BASE,
-      callback_number: '845-531-7471 ext 202',
+      callback_number: '555-555-0100 ext 202',
       request_description: 'I need a refill of my Latanoprost',
     })) as Record<string, unknown>;
 
@@ -223,7 +225,7 @@ describe('what it refuses, and what it does not', () => {
   it('refuses a partial callback number', async () => {
     const out = (await runTool('file_tech_ticket', {
       ...BASE,
-      callback_number: '845-531',
+      callback_number: '555-555',
       request_description: 'refill',
     })) as Record<string, unknown>;
 
@@ -388,7 +390,7 @@ describe('the date of birth the caller said, when the model sent none', () => {
     const { noteSpokenDob } = await import('./spokenDob');
     noteSpokenDob(SID, [
       'AGENT: May I have your date of birth?',
-      'CALLER: March 17th, 1973.',
+      'CALLER: January 2nd, 1970.',
     ]);
 
     const api = await client();
@@ -402,16 +404,16 @@ describe('the date of birth the caller said, when the model sent none', () => {
     })) as Record<string, unknown>;
 
     expect(out.success).toBe(true);
-    expect(create.mock.calls[0][0].patientBirthYear).toBe('1973');
-    expect(create.mock.calls[0][0].patientBirthMonth).toBe('03');
-    expect(create.mock.calls[0][0].patientBirthDay).toBe('17');
+    expect(create.mock.calls[0][0].patientBirthYear).toBe('1970');
+    expect(create.mock.calls[0][0].patientBirthMonth).toBe('01');
+    expect(create.mock.calls[0][0].patientBirthDay).toBe('02');
   });
 
   it('still refuses when the caller never answered', async () => {
     const { noteSpokenDob } = await import('./spokenDob');
     noteSpokenDob(SID, [
       'AGENT: What can I help you with?',
-      'CALLER: My appointment was March 17th, 1973.',
+      'CALLER: My appointment was January 2nd, 1970.',
     ]);
 
     const api = await client();

@@ -1,3 +1,4 @@
+import { prepareTicketIdentity } from './ticketIdentity';
 /**
  * THE TOOL LIBRARY.
  *
@@ -287,6 +288,12 @@ export async function runTool(
 ): Promise<ToolResult> {
   const def = registry.get(name);
   if (!def) return { success: false, error: `no such tool: ${name}` };
+
+  if (['file_optical_ticket', 'file_surgery_ticket', 'file_tech_ticket', 'file_records_ticket'].includes(name)) {
+    const prepared = prepareTicketIdentity(input);
+    input = prepared.input;
+    if (prepared.missing) return missing([prepared.missing], prepared.message!);
+  }
 
   const bad = validateInput(def, input);
   if (bad) return bad;

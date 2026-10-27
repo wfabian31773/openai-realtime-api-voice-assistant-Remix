@@ -1,3 +1,4 @@
+import { joinedAppointments, validatedPatientFor } from './ticketIdentity';
 /**
  * The tools every queue needs: who is calling, which office, have they asked
  * already.
@@ -30,7 +31,7 @@
  */
 import { registerTool, missing, type MissingFields, type ToolResult } from './registry';
 import { gateRefusalsSoFar, noteGateRefusal, noteCallFact, callFactNoted } from './gateAttempts';
-import { forgetIfSameName, nameKey, rememberVerifiedIdentity, verifiedIdentityFor } from './verifiedIdentity';
+import { forgetIfSameName, nameKey, rememberConfirmedClinic, rememberVerifiedIdentity, verifiedIdentityFor } from './verifiedIdentity';
 
 /** Which queue is asking. Injected as call context, never a model argument. */
 export type ToolQueue = 'optical' | 'surgery';
@@ -150,6 +151,7 @@ registerTool({
        * question narrows what arrives, which is the cheaper half and the one
        * that was there before and got lost.
        */
+      identity_corrected: { type: 'boolean', askAs: 'Are you correcting whose request this is?', description: 'True only when the caller explicitly corrects the previously validated identity.' },
       phone: { type: 'string', description: 'Any format. The number they are calling from is usually best.', askAs: 'What is the best phone number for you?' },
       first_name: { type: 'string', description: "Patient's first name as they said it.", askAs: 'And may I please have your first name?' },
       last_name: { type: 'string', description: "Patient's last name as they said it.", askAs: 'May I please have your last name?' },
@@ -228,6 +230,19 @@ registerTool({
     const first = str(input.first_name);
     const last = str(input.last_name);
     const dob = str(input.date_of_birth);
+    const held = verifiedIdentityFor(str(input.call_sid));
+    if (input.identity_corrected === true && held) {
+      forgetIfSameName(str(input.call_sid), held.firstName, held.lastName);
+    } else {
+      const locked = validatedPatientFor(str(input.call_sid), first, last, dob);
+      if (locked) return {
+        success: true, found: true, identity_is_certain: true, matched_by: 'name_and_dob',
+        patient_name: `${locked.firstName} ${locked.lastName}`, usual_office: held?.usualOffice ?? null,
+        usual_clinic: held?.usualOffice ?? null, last_visit: locked.lastVisit?.date ?? null,
+        last_provider: locked.lastVisit?.provider ?? null, next_appointment: locked.nextAppointment ?? null,
+      };
+    }
+
 
     /**
      * RULE ZERO 2a — A CALLER WHO SAID THEY ARE NEW IS NOT LOOKED UP.
@@ -532,100 +547,14 @@ registerTool({
     // be confirmed and the history must not be read back.
     const uniqueMatch = resolved.identity?.unique !== false;
 
-    /**
-     * A NAME-ONLY HIT IS NOT AN IDENTITY, AND THE TOOL SAYS SO NOW.
-     *
-     * `identity_is_certain` used to mean only "the match was unique". But
-     * `lookupPatient` falls back from name+DOB to the PHONE NUMBER and then to
-     * the NAME ALONE, and a lone Smith on file is unique — so a name-only hit
-     * on a common surname came back `found: true, identity_is_certain: true`,
-     * and it is somebody else's chart.
-     *
-     * Nothing stopped that except six lines of prompt telling the model to
-     * distrust this very field:
-     *
-     *   "THEN CHECK matched_by BEFORE YOU BELIEVE IT ... If matched_by is not
-     *    name_and_dob, treat it as NOT FOUND: say nothing about their
-     *    appointments, read no history back"
-     *
-     * A safety rule that holds only while the model obeys an instruction is
-     * not a safety rule. The check belongs here, where it cannot be talked
-     * out of, and the prompt lines it replaces are deleted (task #25 — the
-     * queue prompts carry workarounds written for a model that needed them).
-     *
-     * `phone` from the SCHEDULE stays certain: it is the one field nobody
-     * mis-transcribed, and that rung only matches a number written on this
-     * person's own appointment record.
-     *
-     * `phone` FROM THE PERSON BASE DOES NOT, and that distinction is new.
-     * Codex P1 on PR #292. This PR made `matchedBy: 'phone'` mean two
-     * different claims: the schedule rung above, and a caller-ID hit in a
-     * 915,843-row person base. The second one establishes only who OWNS the
-     * number — a family member on the household phone, a reassigned number
-     * and a spoofed caller ID all look identical to it — and the PersonID
-     * join now hands that answer a full visit history, office and provider.
-     * The queue prompts ask for name and date of birth only when this flag is
-     * false, so leaving it true is a PHI disclosure gated on nothing.
-     *
-     * It also contradicts Rule Zero, written the same day: MATCH, then
-     * VALIDATE — "a phone number is a candidate to CONFIRM, never an
-     * identity". The service says which kind it is via `identityUnconfirmed`.
-     *
-     * THE LESSON, since it is one CLAUDE.md already names: a change that
-     * widens what a value MEANS invalidates the sentence that justified how
-     * it was treated. I widened `matchedBy: 'phone'` and left the comment
-     * above it standing.
-     *
-     * THE DATE STILL GOES INTO THE MAP. v11 already wrote the chart date
-     * from pre-context; stripping it here was Bug A (24 calls on 2026-09-14)
-     * — an empty person-base write overwrote a full one. The name guard on
-     * `verifiedDobFor` IS the confirmation (a caller who says "no, that's my
-     * father" is not filed under that name). We do not invent a date, and we
-     * do not promote `certain: false` to `true`.
-     */
-    const certain =
-      uniqueMatch &&
-      resolved.matchedBy !== 'name' &&
-      resolved.matchedBy !== 'dob' &&
-      !resolved.identityUnconfirmed;
+    // A phone hit, whether from appointments or the person base, is only a
+    // candidate. A unique name-and-DOB validation establishes the identity.
+    const certain = resolved.identity?.unique === true &&
+      resolved.matchedBy === 'name_and_dob' && !resolved.identityUnconfirmed;
 
-    /**
-     * PASS THE RECORD ALONG — operator instruction, 2026-09-01.
-     *
-     * The service has already returned this patient's date of birth in
-     * `patientData`, and nothing carried it the twenty lines to the filing
-     * tool. So the agent asked for a date of birth the process was holding,
-     * and when the caller could not give it the request was lost: 45 calls
-     * refused for a date of birth in fourteen days, 23 of them for a patient
-     * this tool had already identified.
-     *
-     * A unique match is remembered, including an unconfirmed caller-ID hit.
-     * It is only ever read back for the same name — see verifiedIdentity.ts.
-     * `certain` stays false until something else confirms; the name guard
-     * is what lets a filing tool inherit the chart date.
-     */
-    /**
-     * DELIBERATELY `uniqueMatch`, NOT `certain` — do not "tidy" this to the
-     * stricter flag above.
-     *
-     * This carry-forward is the operator's 2026-09-01 fix: it recovered 45
-     * calls in a fortnight that were refused for a date of birth the process
-     * was already holding, 23 of them for a patient this tool had identified.
-     * Narrowing it to `certain` would drop every phone-matched caller back
-     * into that gate and undo the fix.
-     *
-     * It stays safe on its own terms: `verifiedDobFor` only ever reads a
-     * remembered date back for the SAME NAME, so a unique phone match carries
-     * that person's date of birth and nobody else's.
-     *
-     * The remaining hazard is a unique NAME-ONLY match banking a date of birth
-     * for a caller who is not on file. It is pre-existing, it is invisible in
-     * the data today — `matched_by` was never recorded on the timeline, so
-     * 2,819 lookups in fourteen days say nothing about how often this happens
-     * — and BACKEND_HANDOFF forbids changing the ticket path on a number
-     * nobody can measure. That is why `matched_by` joins the recorded outcome
-     * below rather than being fixed blind here.
-     */
+    // Carry the joined record by CallSid. Candidate facts may be remembered,
+    // but neither DOB nor identity readers expose them until certainty is true.
+    // Matching a caller-stated name alone does not validate a phone candidate.
     /**
      * WHAT THE WRITE DID, carried onto this tool's own recorded outcome.
      *
@@ -648,7 +577,7 @@ registerTool({
          * phone rung). That write then replaced the v11 pre-context entry
          * and erased a date the process already held — Bug A.
          *
-         * The name guard on `verifiedDobFor` is the confirmation. Storing a
+         * The certainty AND name guards on `verifiedDobFor` protect filing. Storing a
          * date the unique hit actually returned is not inventing one. We
          * still do not set `certain: true` here. A non-unique match never
          * reaches this branch.
@@ -667,6 +596,7 @@ registerTool({
          * use, which the store drops rather than writes.
          */
         ...(usualOffice ? { usualOffice } : {}),
+        ...joinedAppointments(resolved),
         // The same `certain` reported to the model as `identity_is_certain`.
         // It was computed twenty lines up and then dropped here, so a
         // name-only hit was stored as though it were a verified identity
@@ -708,7 +638,7 @@ registerTool({
     return {
       success: true,
       found: true,
-      patient_name: resolved.patientName,
+      patient_name: certain ? resolved.patientName : undefined,
       matched_by: resolved.matchedBy,
       identity_is_certain: certain,
       // The verdict of the carry-forward write, allow-listed in toolTimeline so
@@ -731,14 +661,14 @@ registerTool({
                 `confirm who they are.`,
           }),
       // The field this queue routes on.
-      usual_clinic: usualOffice,
-      usual_office: usualOffice,
+      usual_clinic: certain ? usualOffice : null,
+      usual_office: certain ? usualOffice : null,
       // Where they were seen last, whatever kind of place that is.
-      last_location_any_kind: resolved.lastLocationSeen ?? null,
-      last_provider: resolved.lastProviderSeen ?? null,
-      last_visit: resolved.lastVisitDate ?? null,
-      recent_locations: seen.slice(0, 4),
-      total_appointments: resolved.totalAppointmentsFound,
+      last_location_any_kind: certain ? resolved.lastLocationSeen ?? null : null,
+      last_provider: certain ? resolved.lastProviderSeen ?? null : null,
+      last_visit: certain ? resolved.lastVisitDate ?? null : null,
+      recent_locations: certain ? seen.slice(0, 4) : [],
+      total_appointments: certain ? resolved.totalAppointmentsFound : 0,
       ...(usualOffice
         ? {}
         : {
@@ -963,6 +893,7 @@ registerTool({
     // and brand-stripping alone yields "DTLA" — a name the receiver has never
     // heard of, which is how a resolved office still failed to file.
     const fileable = hit.fileAs || sanitizeLocationName(hit.canonical).value || hit.canonical;
+    rememberConfirmedClinic(callSid, fileable);
 
     return {
       success: true,

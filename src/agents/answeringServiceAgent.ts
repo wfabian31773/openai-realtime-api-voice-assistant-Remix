@@ -1,3 +1,5 @@
+import { nameKey, rememberVerifiedIdentity } from '../tools/verifiedIdentity';
+import { joinedAppointments, prepareTicketIdentity, validatedPatientFor } from '../tools/ticketIdentity';
 import { RealtimeAgent, tool } from '@openai/agents/realtime';
 import { z } from 'zod';
 import { getPacificTimeContext, formatPhoneLast4, formatPhoneForSpeech } from '../utils/timeAware';
@@ -777,13 +779,17 @@ Use this data to answer appointment questions AND for ticket creation.`,
         // directly. No name search to garble, regardless of who is driving.
         if (callId && params.date_of_birth) {
           const { dobMatchesContext, updateLedger: ul, getLedger: gl } = await import('../services/callFactsLedger');
-          if (dobMatchesContext(callId, params.date_of_birth) === true && scheduleContext?.patientFound) {
+          if (dobMatchesContext(callId, params.date_of_birth) === true && scheduleContext?.patientFound &&
+              scheduleContext.identity?.unique === true &&
+              (!params.first_name || nameKey(params.first_name) === nameKey(scheduleContext.patientData?.firstName ?? '')) &&
+              (!params.last_name || nameKey(params.last_name) === nameKey(scheduleContext.patientData?.lastName ?? ''))) {
             const lf = gl(callId);
             ul(callId, {
               firstName: lf?.matchedFirstName,
               lastName: lf?.matchedLastName,
               identityVerified: true,
             });
+            rememberVerifiedIdentity(callSid, { ...scheduleContext.patientData, ...joinedAppointments(scheduleContext), certain: true });
             console.log(`[${agentTag}] ✓ VERIFIED via context DOB match — returning pre-loaded record for ${callId}`);
             return {
               ...scheduleContext,
@@ -793,7 +799,10 @@ Use this data to answer appointment questions AND for ticket creation.`,
           }
         }
 
-        if (params.phone) {
+        const held = validatedPatientFor(callSid, params.first_name, params.last_name, params.date_of_birth);
+        if (held && scheduleContext?.patientFound) {
+          result = scheduleContext;
+        } else if (params.phone && !(params.first_name && params.last_name && params.date_of_birth)) {
           const normalizedPhone = normalizePhoneNumber(params.phone);
           result = await withTimeout(
             scheduleLookupService.lookupByPhone(normalizedPhone),
@@ -818,7 +827,15 @@ Use this data to answer appointment questions AND for ticket creation.`,
           };
         }
         
+        if (result.patientFound && result.identity?.unique && result.matchedBy === 'name_and_dob') {
+          rememberVerifiedIdentity(callSid, { ...result.patientData, ...joinedAppointments(result), certain: true });
+          scheduleContext = result;
+        }
         if (result.patientFound) {
+          if (result.matchedBy === 'phone' || result.identityUnconfirmed || result.identity?.unique !== true) {
+            return { found: true, identityUnconfirmed: true,
+              fix: 'Confirm the caller full name and date of birth, then call lookup_schedule with those fields. A candidate is not a validated identity.' };
+          }
           const pd = result.patientData;
           return {
             found: true,
@@ -959,23 +976,27 @@ Use patient data from phone lookup when available - don't ask for info you alrea
       department_id: z.number().describe('Department ID: 1=Optical, 2=Surgery, 3=Tech'),
       request_type_id: z.number().describe('Request type ID from classify_request'),
       request_reason_id: z.number().describe('Request reason ID from classify_request'),
-      first_name: z.string().describe('Patient first name'),
+      first_name: z.string().default('').describe('Patient first name'),
       middle_initial: z.string().optional().describe('Patient middle initial (optional)'),
-      last_name: z.string().describe('Patient last name'),
-      date_of_birth: z.string().describe('Date of birth in any format'),
+      last_name: z.string().default('').describe('Patient last name'),
+      date_of_birth: z.string().default('').describe('Date of birth in any format'),
       callback_number: z.string().describe('Phone number for callback'),
       subject: z.string().describe('Brief summary of the request (1-2 sentences) for ticket subject line'),
       description: z.string().describe('Detailed description of what the patient needs - be thorough!'),
       priority: z.enum(['low', 'normal', 'medium', 'high', 'urgent']).default('medium').describe('Priority level'),
       location_id: z.number().optional().describe('Location ID if patient mentioned their clinic'),
       provider_id: z.number().optional().describe('Provider ID if patient mentioned their doctor'),
-      location_name: z.string().optional().describe('Office the CALLER explicitly states (e.g., "West Covina"). Do NOT use schedule/patient-history locations — those are context only, never the ticket location.'),
+      location_name: z.string().optional().describe('Confirmed clinic, or the next appointment office / last visit office from the validated patient record.'),
       provider_name: z.string().optional().describe('Doctor the CALLER explicitly names (e.g., "Dr. Logan"). Do NOT use schedule/patient-history providers — those are context only.'),
       email: z.string().optional().describe('Patient email for confirmation'),
       confirmation_type: z.enum(['text', 'email', 'phone', 'none']).optional().describe('How patient wants confirmation (text, email, phone, or none)'),
       unresolved_info: z.string().optional().describe('Set this ONLY after you have already asked and the caller genuinely cannot provide a REQUIRED field (a surgeon for Surgery, an office/location for Optical). Briefly state what is missing (e.g., "caller does not know their office"). The ticket is then still submitted with the gap flagged for a human, so the request is never lost. Do NOT set this on a first attempt — always ask the caller first.'),
     }),
     execute: async (params) => {
+      const prepared = prepareTicketIdentity({ ...params, call_sid: callSid, location: params.location_name || (params.location_id ? String(params.location_id) : '') });
+      if (prepared.missing) return { success: false, missingFields: [prepared.missing], message: prepared.message };
+      params = { ...params, first_name: String(prepared.input.first_name ?? ''), last_name: String(prepared.input.last_name ?? ''),
+        date_of_birth: String(prepared.input.date_of_birth ?? ''), location_name: String(prepared.input.location ?? '') };
       // Lazy import to avoid module initialization during agent bootstrap
       const { SyncAgentService } = await import('../services/syncAgentService');
       
@@ -1042,8 +1063,9 @@ Use patient data from phone lookup when available - don't ask for info you alrea
 
       // SECONDARY LOOKUP: Enrich schedule context using name+DOB
       // This catches cases where caller phone doesn't match patient record (family member calling)
-      let enrichedContext = scheduleContext;
-      if (!scheduleContext?.patientFound || scheduleContext.matchedBy === 'phone') {
+      const lockedIdentity = validatedPatientFor(callSid, params.first_name, params.last_name, params.date_of_birth);
+      let enrichedContext = lockedIdentity ? scheduleContext : undefined;
+      if (!lockedIdentity) {
         console.log(`[${agentTag}] Performing secondary schedule lookup for ticket enrichment...`);
         try {
           const dobForLookup = parsedDOB.iso || `${parsedDOB.year}-${parsedDOB.month}-${parsedDOB.day}`;

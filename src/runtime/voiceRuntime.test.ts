@@ -1087,7 +1087,7 @@ describe("one whole call, end to end, offline", () => {
     };
     const h = await harness({
       laneSource: laneSourceCapturing,
-      fetchPrecontext: async () => ({ matched: true, firstName: "Wayne" }),
+      fetchPrecontext: async () => ({ matched: true, firstName: "Alex", identityValidated: true }),
     });
     const answered = await post(h, "/voice/optical", {
       CallSid: "CA13",
@@ -1097,7 +1097,7 @@ describe("one whole call, end to end, offline", () => {
     await openStream(h, "CA13", tokenFrom(answered.text));
     await settle();
     expect(seen).toHaveLength(1);
-    expect(seen[0].precontext).toEqual({ matched: true, firstName: "Wayne" });
+    expect(seen[0].precontext).toEqual({ matched: true, firstName: "Alex", identityValidated: true });
   });
 
   it("proceeds without pre-context rather than waiting on a slow lookup", async () => {
@@ -1676,7 +1676,7 @@ describe("the transfer's public domain", () => {
   });
 });
 
-describe("a recognised caller hears the confirm in the greeting itself", () => {
+describe("a validated caller hears the confirm in the greeting itself", () => {
   /**
    * The queue lines APPEND: they keep their own opening — which pre-empts
    * the ask for a human on a line that cannot transfer — and swap its
@@ -1717,7 +1717,7 @@ describe("a recognised caller hears the confirm in the greeting itself", () => {
   it("swaps the greeting's own question for the confirm", async () => {
     const h = await harness({
       laneSource: laneWithGreeting(),
-      fetchPrecontext: async () => ({ matched: true, firstName: "Wayne" }),
+      fetchPrecontext: async () => ({ matched: true, firstName: "Alex", identityValidated: true }),
     });
     const answered = await post(h, "/voice/optical", { CallSid: "CA40", From: "+1", To: "+2" });
     const { ws } = await openStream(h, "CA40", tokenFrom(answered.text));
@@ -1728,7 +1728,7 @@ describe("a recognised caller hears the confirm in the greeting itself", () => {
     await settle(4);
 
     expect(spokenText(h)).toEqual([
-      "Thank you for calling Azul Vision optical. Am I speaking with Wayne?",
+      "Thank you for calling Azul Vision optical. Am I speaking with Alex?",
     ]);
     ws.close();
   });
@@ -1742,7 +1742,7 @@ describe("a recognised caller hears the confirm in the greeting itself", () => {
     // line exactly as configured, question and all.
     const h = await harness({
       laneSource: laneWithGreeting(),
-      fetchPrecontext: async () => ({ matched: false, firstName: "Wayne" }),
+      fetchPrecontext: async () => ({ matched: false, firstName: "Alex" }),
     });
     const answered = await post(h, "/voice/optical", { CallSid: "CA41", From: "+1", To: "+2" });
     const { ws } = await openStream(h, "CA41", tokenFrom(answered.text));
@@ -1771,7 +1771,7 @@ describe("a recognised caller hears the confirm in the greeting itself", () => {
    */
   const LOCKED_SID = "CA" + "b".repeat(31) + "7";
 
-  it("carries a caller-ID match to the filing tools, not just the greeting", async () => {
+  it("VA-76205: a caller-ID candidate supplies no filing DOB before validation", async () => {
     const { verifiedDobFor, verifiedIdentityFor, resetVerifiedIdentities } =
       await import("../tools/verifiedIdentity");
     void verifiedIdentityFor;
@@ -1787,7 +1787,7 @@ describe("a recognised caller hears the confirm in the greeting itself", () => {
     await settle(6);
 
     // The question file_optical_ticket asks, in the words it asks it.
-    expect(verifiedDobFor(LOCKED_SID, "Testcaller", "Optical")).toBe("01/01/1950");
+    expect(verifiedDobFor(LOCKED_SID, "Testcaller", "Optical")).toBeUndefined();
     ws.close();
   });
 
@@ -1883,7 +1883,7 @@ describe("a recognised caller hears the confirm in the greeting itself", () => {
     // `si_persons` shows what data exists, not what this request returned
     // (Codex, PR #239).
     const cases: Array<[unknown, string]> = [
-      [{ matched: true, firstName: "Wayne" }, "recognised"],
+      [{ matched: true, firstName: "Alex", identityValidated: true }, "recognised"],
       [{ matched: false }, "no_match"],
       [null, "unavailable"],
       // A unique match with no usable first name. The greeting correctly
@@ -1928,14 +1928,14 @@ describe("a recognised caller hears the confirm in the greeting itself", () => {
     try {
       const h = await harness({
         laneSource: laneWithGreeting(),
-        fetchPrecontext: async () => ({ matched: true, firstName: "Wayne" }),
+        fetchPrecontext: async () => ({ matched: true, firstName: "Alex", identityValidated: true }),
       });
       const answered = await post(h, "/voice/optical", { CallSid: "CA60", From: "+1", To: "+2" });
       const { ws } = await openStream(h, "CA60", tokenFrom(answered.text));
       await settle(6);
       const line = logged.find((l) => l.includes("pre-context"));
       expect(line).toBeDefined();
-      expect(line).not.toContain("Wayne");
+      expect(line).not.toContain("Alex");
       ws.close();
     } finally {
       spy.mockRestore();
@@ -1949,7 +1949,7 @@ describe("a recognised caller hears the confirm in the greeting itself", () => {
     // change everywhere, and hears the old one on the line (Codex, PR #240).
     const h = await harness({
       laneSource: laneWithGreeting(),
-      fetchPrecontext: async () => ({ matched: true, firstName: "Wayne" }),
+      fetchPrecontext: async () => ({ matched: true, firstName: "Alex", identityValidated: true }),
       resolveGreeting: async () =>
         "Good afternoon, Azul Vision optical here. What can I do for you?",
     });
@@ -1961,7 +1961,7 @@ describe("a recognised caller hears the confirm in the greeting itself", () => {
 
     // The configured copy, and personalised — both, not one or the other.
     expect(spokenText(h)).toEqual([
-      "Good afternoon, Azul Vision optical here. Am I speaking with Wayne?",
+      "Good afternoon, Azul Vision optical here. Am I speaking with Alex?",
     ]);
     ws.close();
   });
@@ -1971,7 +1971,7 @@ describe("a recognised caller hears the confirm in the greeting itself", () => {
     // database cannot be reached. Neither may cost the caller their opening.
     const h = await harness({
       laneSource: laneWithGreeting(),
-      fetchPrecontext: async () => ({ matched: true, firstName: "Wayne" }),
+      fetchPrecontext: async () => ({ matched: true, firstName: "Alex", identityValidated: true }),
       resolveGreeting: async () => null,
     });
     const answered = await post(h, "/voice/optical", { CallSid: "CA44", From: "+1", To: "+2" });
@@ -1981,7 +1981,7 @@ describe("a recognised caller hears the confirm in the greeting itself", () => {
     await settle(4);
 
     expect(spokenText(h)).toEqual([
-      "Thank you for calling Azul Vision optical. Am I speaking with Wayne?",
+      "Thank you for calling Azul Vision optical. Am I speaking with Alex?",
     ]);
     ws.close();
   });
@@ -2007,7 +2007,7 @@ describe("a recognised caller hears the confirm in the greeting itself", () => {
           })) as unknown as LaneConfig["factory"],
         }),
       },
-      fetchPrecontext: async () => ({ matched: true, firstName: "Wayne" }),
+      fetchPrecontext: async () => ({ matched: true, firstName: "Alex", identityValidated: true }),
     });
     const answered = await post(h, "/voice/answering-service", {
       CallSid: "CA45",
@@ -2023,7 +2023,7 @@ describe("a recognised caller hears the confirm in the greeting itself", () => {
     // same as the queue lines — and only the closing question is swapped.
     expect(spokenText(h)).toEqual([
       "Hello, thank you for calling Azul Vision, all of our operators are " +
-        "currently on the phone assisting other patients. Am I speaking with Wayne?",
+        "currently on the phone assisting other patients. Am I speaking with Alex?",
     ]);
     ws.close();
   });

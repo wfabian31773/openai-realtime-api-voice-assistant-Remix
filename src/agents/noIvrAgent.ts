@@ -1,3 +1,5 @@
+import { rememberVerifiedIdentity } from '../tools/verifiedIdentity';
+import { joinedAppointments, prepareTicketIdentity, validatedPatientFor } from '../tools/ticketIdentity';
 import { RealtimeAgent, tool } from "@openai/agents/realtime";
 import { z } from "zod";
 import { withToolDirection } from '../services/toolDirection';
@@ -819,16 +821,12 @@ outside vendor, other clinic or pharmacy):
 at [business]", "we are an optical lab", "Bartley Optical",
 "we need an invoice", "tint density", "lens order"
 
-B2B PROTOCOL — DOB IS OPTIONAL FOR BUSINESS CALLERS:
-- Collect: caller name, business name, patient name,
-specific request/question, callback number
-- If they don't have patient DOB: that's okay — note it
-in the ticket as "DOB not available — B2B inquiry from
-[business name]"
-- DO NOT refuse to help or escalate just because DOB is
-missing for B2B callers
-- DO NOT keep asking for DOB after caller says they don't
-have it — accept that and proceed to create the ticket
+B2B PROTOCOL:
+- Collect caller/business name, patient name, request and callback number.
+- For a patient ticket, use the validated record's DOB and clinic if held.
+- Otherwise ask for the patient's DOB and confirmed clinic before live filing.
+- If the caller cannot provide a fact, acknowledge it without guessing or
+repeating the question. Preserve captured facts for recovery when the call ends.
 
 ✓ EXIT when you know WHO the call is about
 
@@ -1351,7 +1349,10 @@ is not an identity. Confirm the name and date of birth, then call again with the
       try {
         let result: PatientScheduleContext;
 
-        if (params.phone && !(params.first_name && params.last_name && params.date_of_birth)) {
+        const held = validatedPatientFor(metadata.callSid, params.first_name, params.last_name, params.date_of_birth);
+        if (held && scheduleContext?.patientFound) {
+          result = scheduleContext;
+        } else if (params.phone && !(params.first_name && params.last_name && params.date_of_birth)) {
           // THE GATE, not a request. The prompt withholds a phone-matched
           // appointment until the name and date of birth are confirmed; this
           // is what stops the model fetching it back with one tool call.
@@ -1383,6 +1384,14 @@ is not an identity. Confirm the name and date of birth, then call again with the
         }
 
         if (result.patientFound) {
+          if (result.matchedBy !== 'name_and_dob' || result.identityUnconfirmed || result.identity?.unique !== true) {
+            return { found: true, identityUnconfirmed: true,
+              fix: 'Confirm the caller full name and date of birth. No visit history is available until the match is unique and validated.' };
+          }
+          if (result.identity?.unique && result.matchedBy === 'name_and_dob') {
+            rememberVerifiedIdentity(metadata.callSid, { ...result.patientData, ...joinedAppointments(result), certain: true });
+            scheduleContext = result;
+          }
           return {
             found: true,
             upcomingAppointments: result.upcomingAppointments,
@@ -1514,11 +1523,11 @@ Call this ONLY when you have collected ALL required fields:
 
 The ticket will include schedule context (last appointment info) automatically.`,
     parameters: z.object({
-      first_name: z.string().describe("Patient first name (required)"),
-      last_name: z.string().describe("Patient last name (required)"),
+      first_name: z.string().default('').describe("Patient first name (required)"),
+      last_name: z.string().default('').describe("Patient last name (required)"),
       date_of_birth: z
-        .string()
-        .describe('Full date of birth as spoken (e.g., "January 15, 1980" or "01/15/1980"). For B2B/business callers who don\'t have the patient DOB, pass "DOB not available" — the ticket will still be created.'),
+        .string().default('')
+        .describe('Full date of birth as spoken (e.g., "January 15, 1980" or "01/15/1980"). Use a held validated DOB without asking again; otherwise ask the caller before filing.'),
       callback_number: z.string().describe("Callback phone number (10+ digits)"),
       request_category: z
         .enum([
@@ -1557,6 +1566,10 @@ The ticket will include schedule context (last appointment info) automatically.`
       requires_callback: z.boolean().optional().describe("Whether staff needs to call the patient back. Set to FALSE for simple confirmations where the patient's request was fully handled. Defaults to TRUE."),
     }),
     execute: async (params) => {
+      const prepared = prepareTicketIdentity({ ...params, call_sid: metadata.callSid });
+      if (prepared.missing && prepared.missing !== 'location') return { success: false, missingFields: [prepared.missing], message: prepared.message };
+      params = { ...params, first_name: String(prepared.input.first_name ?? ''), last_name: String(prepared.input.last_name ?? ''),
+        date_of_birth: String(prepared.input.date_of_birth ?? ''), location: String(prepared.input.location ?? '') };
       // Lazy import to avoid module initialization during agent bootstrap
       const { SyncAgentService } = await import("../services/syncAgentService");
       
@@ -1653,8 +1666,9 @@ The ticket will include schedule context (last appointment info) automatically.`
 
       // SECONDARY LOOKUP: Enrich schedule context using name+DOB
       // This catches cases where caller phone doesn't match patient record (family member calling)
-      let enrichedContext = scheduleContext;
-      if (parsedDOB && (!scheduleContext?.patientFound || scheduleContext.matchedBy === 'phone')) {
+      const lockedIdentity = validatedPatientFor(metadata.callSid, params.first_name, params.last_name, params.date_of_birth);
+      let enrichedContext = lockedIdentity ? scheduleContext : undefined;
+      if (parsedDOB && !lockedIdentity) {
         console.log("[No-IVR Agent] Performing secondary schedule lookup...");
         try {
           const dobForLookup = parsedDOB.iso || `${parsedDOB.year}-${parsedDOB.month}-${parsedDOB.day}`;
@@ -1765,6 +1779,12 @@ The ticket will include schedule context (last appointment info) automatically.`
         !!enrichedContext?.patientFound &&
         !phoneMatchIsUnconfirmed(enrichedContext) &&
         enrichedContext.identity?.unique !== false;
+      if (recordConfirmed && enrichedContext) rememberVerifiedIdentity(metadata.callSid,
+        { firstName: params.first_name, lastName: params.last_name, dateOfBirth: params.date_of_birth,
+          ...enrichedContext.patientData, ...joinedAppointments(enrichedContext), certain: true });
+      const completedIdentity = prepareTicketIdentity({ ...params, call_sid: metadata.callSid });
+      if (completedIdentity.missing) return { success: false, missingFields: [completedIdentity.missing], message: completedIdentity.message };
+      params.location = String(completedIdentity.input.location || '');
       const route = routeAfterHoursTicket({
         postOpMedication: params.post_op_prescription,
         appointmentToday: params.appointment_today,

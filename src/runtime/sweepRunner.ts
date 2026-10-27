@@ -1,3 +1,5 @@
+import { ticketIdentityFields } from '../tools/ticketIdentity';
+import { readDobQuietly } from '../tools/dobParts';
 /**
  * RUNNING THE SWEEP AT TEARDOWN — the last thing that happens to a call.
  *
@@ -184,6 +186,12 @@ export async function runRequestSweep(
 
     console.info(sweepMarker(record.slug, record.callSid));
     const ticket = buildSweptTicket(input, decision);
+    if (identity) {
+      const dob = readDobQuietly(identity.dateOfBirth ?? '');
+      Object.assign(ticket, ticketIdentityFields(record.callSid, identity.firstName, identity.lastName),
+        { ...(dob ? { patientBirthYear: dob.year, patientBirthMonth: dob.month, patientBirthDay: dob.day } : {}),
+          ...(identity.usualOffice ? { locationOfLastVisit: identity.usualOffice } : {}) });
+    }
     const res = await file(ticket);
     if (!res.success) {
       console.error(

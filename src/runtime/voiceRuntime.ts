@@ -75,6 +75,7 @@ import {
   greetingStyleFor,
   missingMandatoryCopy,
   personaliseGreeting,
+  recognisedFirstName,
 } from "../services/greetingPersonalisation";
 
 import { loadedDirectory } from "../services/consoleDirectory";
@@ -174,13 +175,6 @@ export function chooseGreeting(
 function precontextMatched(precontext: unknown): boolean {
   if (!precontext || typeof precontext !== "object") return false;
   return (precontext as { matched?: unknown }).matched === true;
-}
-
-function recognisedFirstName(precontext: unknown): string {
-  if (!precontext || typeof precontext !== "object") return "";
-  const pc = precontext as { matched?: unknown; firstName?: unknown };
-  if (pc.matched !== true) return "";
-  return typeof pc.firstName === "string" ? pc.firstName.trim() : "";
 }
 
 /**

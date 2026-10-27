@@ -1047,7 +1047,7 @@ export class ScheduleLookupService {
       );
       return {
         ...joined,
-        identityUnconfirmed: false,
+        identityUnconfirmed: matchedBy === 'phone',
         /**
          * The mirror wins on WHO, the schedule supplies everything else.
          *
@@ -1082,7 +1082,7 @@ export class ScheduleLookupService {
       patientFound: true,
       patientName: `${p.firstName} ${p.lastName}`.trim(),
       matchedBy,
-      identityUnconfirmed: false,
+      identityUnconfirmed: matchedBy === 'phone',
       upcomingAppointments: [],
       pastAppointments: [],
       totalAppointmentsFound: 0,
@@ -1252,6 +1252,7 @@ export class ScheduleLookupService {
       patientFound: true,
       patientName: patientName || undefined,
       matchedBy,
+      identityUnconfirmed: matchedBy === 'phone',
       upcomingAppointments: upcoming.slice(0, 5),
       pastAppointments: past.slice(0, 5),
       lastProviderSeen,

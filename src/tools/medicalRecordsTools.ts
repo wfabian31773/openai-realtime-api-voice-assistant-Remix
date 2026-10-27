@@ -1,3 +1,4 @@
+import { ticketIdentityFields } from './ticketIdentity';
 /**
  * The tools a Medical Records agent needs, and nothing else.
  *
@@ -948,6 +949,7 @@ registerTool({
     // Never submit-ticket: it re-derives the DEPARTMENT server-side and
     // defaults to 8.
     const res = await createTicketDurable({
+      ...ticketIdentityFields(callSid, first, last),
       departmentId: filedDepartmentId,
       requestTypeId: filedTypeId,
       requestReasonId: filedReasonId,

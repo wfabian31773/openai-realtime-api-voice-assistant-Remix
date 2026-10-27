@@ -12,6 +12,7 @@ import './sharedPatientTools';
 import './medicalRecordsTools';
 
 const BASE = {
+  location: 'Testville',
   // A complete, on-the-clock patient request. deliver_to and date_range are
   // here because the CAP gate refuses a patient request without them — see the
   // gate tests at the bottom, which strip them deliberately.
@@ -23,10 +24,10 @@ const BASE = {
   form_channel: 'declined',
   deliver_to: 'to me',
   date_range: 'everything',
-  first_name: 'Wayne',
-  last_name: 'Fabian',
-  date_of_birth: '03/17/1973',
-  callback_number: '845-531-7471',
+  first_name: 'Alex',
+  last_name: 'Synthetic',
+  date_of_birth: '01/02/1970',
+  callback_number: '555-555-0100',
 };
 
 async function client() {
@@ -55,7 +56,7 @@ describe('patientPhone is the digits, not the raw string', () => {
       request_description: 'I need a copy of my medical records',
     });
 
-    expect(create.mock.calls[0][0].patientPhone).toBe('8455317471');
+    expect(create.mock.calls[0][0].patientPhone).toBe('5555550100');
   });
 
   it('drops a leading 1, not the area code', async () => {
@@ -64,11 +65,11 @@ describe('patientPhone is the digits, not the raw string', () => {
 
     await runTool('file_records_ticket', {
       ...BASE,
-      callback_number: '1-845-531-7471',
+      callback_number: '1-555-555-0100',
       request_description: 'I need a copy of my medical records',
     });
 
-    expect(create.mock.calls[0][0].patientPhone).toBe('8455317471');
+    expect(create.mock.calls[0][0].patientPhone).toBe('5555550100');
   });
 
   it('refuses 11 digits that do not start with 1, rather than dropping the first one', async () => {
@@ -77,7 +78,7 @@ describe('patientPhone is the digits, not the raw string', () => {
 
     const out = (await runTool('file_records_ticket', {
       ...BASE,
-      callback_number: '2-845-531-7471',
+      callback_number: '2-555-555-0100',
       request_description: 'I need a copy of my medical records',
     })) as Record<string, unknown>;
 
@@ -92,7 +93,7 @@ describe('patientPhone is the digits, not the raw string', () => {
 
     const out = (await runTool('file_records_ticket', {
       ...BASE,
-      callback_number: '845-531-7471 ext 202',
+      callback_number: '555-555-0100 ext 202',
       request_description: 'I need a copy of my medical records',
     })) as Record<string, unknown>;
 
@@ -264,7 +265,7 @@ describe('the things that make a clerk ring the patient back', () => {
   it('refuses a partial callback number with a speakable line', async () => {
     const r = (await runTool('file_records_ticket', {
       ...BASE,
-      callback_number: '845-531',
+      callback_number: '555-555',
       request_description: 'copy of my records',
     })) as Record<string, unknown>;
 
@@ -669,7 +670,7 @@ describe('the date of birth the caller said, when the model sent none', () => {
     const { noteSpokenDob } = await import('./spokenDob');
     noteSpokenDob(SID, [
       'AGENT: May I have your date of birth?',
-      'CALLER: March 17th, 1973.',
+      'CALLER: January 2nd, 1970.',
     ]);
 
     const api = await client();
@@ -685,14 +686,14 @@ describe('the date of birth the caller said, when the model sent none', () => {
     })) as Record<string, unknown>;
 
     expect(out.success).toBe(true);
-    expect(create.mock.calls[0][0].patientBirthYear).toBe('1973');
+    expect(create.mock.calls[0][0].patientBirthYear).toBe('1970');
   });
 
   it('still refuses when the caller never answered', async () => {
     const { noteSpokenDob } = await import('./spokenDob');
     noteSpokenDob(SID, [
       'AGENT: What can I help you with?',
-      'CALLER: The records I need are from March 17th, 1973.',
+      'CALLER: The records I need are from January 2nd, 1970.',
     ]);
 
     const api = await client();

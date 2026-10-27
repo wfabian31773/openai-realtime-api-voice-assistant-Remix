@@ -55,6 +55,7 @@ vi.mock('../services/callerMemoryService', () => ({
   callerMemoryService: { getCallerMemory: async () => null, buildContextForPrompt: () => '' },
 }));
 
+const { resetVerifiedIdentities } = await import('../tools/verifiedIdentity');
 const { createNoIvrAgent } = await import('./noIvrAgent');
 
 async function call(agent: any, name: string, args: Record<string, unknown>) {
@@ -79,9 +80,11 @@ const TICKET = {
   callback_number: '5551234567',
   request_category: 'general_question',
   request_summary: 'test request',
+  location: 'Synthetic Clinic',
 };
 
 beforeEach(() => {
+  resetVerifiedIdentities();
   h.lookupByPhone.mockReset().mockResolvedValue(PHONE_CANDIDATE as any);
   h.lookupByNameAndDOB.mockReset().mockResolvedValue(EMPTY as any);
   h.updateCallLog.mockReset().mockResolvedValue(undefined);
@@ -127,11 +130,11 @@ describe('a candidate is not an identity', () => {
     expect(h.updateCallLog).not.toHaveBeenCalled();
   });
 
-  it('a B2B caller with no date of birth writes nothing — the phone context is all there is', async () => {
+  it('a reachable caller with no date of birth is asked before filing; phone context cannot fill it', async () => {
     const agent = await createNoIvrAgent(async () => {}, META);
     h.liveCallLogId = 'log-row-c153';
     const res = await call(agent, 'create_ticket', { ...TICKET, date_of_birth: 'DOB not available' });
-    expect(res.success).toBe(true);
+    expect(res.success).toBe(false);
     expect(h.lookupByNameAndDOB).not.toHaveBeenCalled();
     expect(h.updateCallLog).not.toHaveBeenCalled();
   });
@@ -158,4 +161,38 @@ describe('several people on the name and date of birth write nothing — Codex P
     await new Promise((r) => setTimeout(r, 25));
     expect(h.updateCallLog).not.toHaveBeenCalled();
   });
+});
+
+it('VA-75419 / #12: a validated lookup supplies omitted demographics to create_ticket without another lookup', async () => {
+  h.lookupByNameAndDOB.mockResolvedValue({ ...CONFIRMED, identity: { unique: true },
+    patientData: { firstName: 'Zelda', lastName: 'Quixote', dateOfBirth: '1958-01-04', personId: '00000000-0000-4000-8000-000000000001' },
+    upcomingAppointments: [{ isoDate: '2099-01-01', location: 'Synthetic Clinic' }] } as any);
+  const agent = await createNoIvrAgent(async () => {}, META);
+  await call(agent, 'lookup_schedule', { first_name: 'Zelda', last_name: 'Quixote', date_of_birth: '1958-01-04' });
+  const { first_name, last_name, date_of_birth, location, ...rest } = TICKET;
+  const res = await call(agent, 'create_ticket', rest);
+  expect(res.success).toBe(true);
+  expect(h.lookupByNameAndDOB).toHaveBeenCalledTimes(1);
+});
+
+it('VA-75419: repeated appointment questions reuse the validated joined record', async () => {
+  h.lookupByNameAndDOB.mockResolvedValue({ ...CONFIRMED, identity: { unique: true },
+    patientData: { firstName: 'Zelda', lastName: 'Quixote', dateOfBirth: '1958-01-04' },
+    upcomingAppointments: [{ isoDate: '2099-01-01', location: 'Synthetic Clinic' }] } as any);
+  const agent = await createNoIvrAgent(async () => {}, META);
+  const args = { first_name: 'Zelda', last_name: 'Quixote', date_of_birth: '1958-01-04' };
+  await call(agent, 'lookup_schedule', args);
+  h.lookupByNameAndDOB.mockResolvedValue(EMPTY as any);
+  const result = await call(agent, 'lookup_schedule', args);
+  expect(result).toMatchObject({ found: true, upcomingAppointments: [{ location: 'Synthetic Clinic' }] });
+  expect(h.lookupByNameAndDOB).toHaveBeenCalledTimes(1);
+});
+
+it('VA-76198: an ambiguous lookup exposes no selected patient visit history', async () => {
+  h.lookupByNameAndDOB.mockResolvedValue({ ...CONFIRMED, identity: { unique: false, candidateCount: 2 },
+    upcomingAppointments: [{ isoDate: '2099-01-01', location: 'Synthetic Clinic' }] } as any);
+  const agent = await createNoIvrAgent(async () => {}, META);
+  const result = await call(agent, 'lookup_schedule', { first_name: 'Zelda', last_name: 'Quixote', date_of_birth: '1958-01-04' });
+  expect(result).toMatchObject({ found: true, identityUnconfirmed: true });
+  expect(result.upcomingAppointments).toBeUndefined();
 });

@@ -1,3 +1,4 @@
+import { ticketIdentityFields } from './ticketIdentity';
 /**
  * The tools a Surgery-Coordination agent needs, and nothing else.
  *
@@ -745,6 +746,7 @@ registerTool({
     }
 
     const res = await createTicketDurable({
+      ...ticketIdentityFields(callSid, first, last),
       departmentId: filedDepartmentId,
       requestTypeId: filedTypeId,
       requestReasonId: filedReasonId,

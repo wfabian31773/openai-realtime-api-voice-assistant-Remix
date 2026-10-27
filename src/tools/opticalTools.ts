@@ -1,3 +1,4 @@
+import { ticketIdentityFields } from './ticketIdentity';
 /**
  * The tools an Optical-queue agent needs, and nothing else.
  *
@@ -717,6 +718,7 @@ registerTool({
     }
 
     const res = await createTicketDurable({
+      ...ticketIdentityFields(callSid, first, last),
       departmentId: filedDepartmentId,
       requestTypeId: filedTypeId,
       requestReasonId: filedReasonId,
