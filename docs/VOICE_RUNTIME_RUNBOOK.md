@@ -494,7 +494,8 @@ the code they add.
 ## 6d. Name, email and provider capture
 
 Item #14 (`VA-76200`, `VA-76188`, `VA-76215`) is covered in the agent-visible
-tool descriptions and the common ticket client:
+tool descriptions and the common ticket client. Verify deployment using
+`voice-runtime-v117-contact-capture-20261027` from `/voice/health`:
 
 - A validated joined record supplies identity and contact fields it already
   holds. Do not ask for or overwrite those fields again.
@@ -506,16 +507,25 @@ tool descriptions and the common ticket client:
   Pass the entire confirmed address unchanged. Validation rejects an address
   longer than 254 characters; it does not truncate one. The local
   `patient_email` columns are unbounded `varchar` fields.
-- Ticket creation canonicalizes an exact or uniquely close provider name using
-  the read-only Patient Console roster. A fuzzy hit must score at least 88%
-  similarity and beat the next candidate by five percentage points. Ambiguous
-  names and directory outages keep the caller's original wording.
+- Both create-ticket and simplified submission canonicalize an exact or
+  uniquely close provider name using the read-only Patient Console roster. A
+  fuzzy hit must score at least 88% similarity and beat the next candidate in
+  the entire roster by five percentage points, including candidates below 88%.
+  Accent/punctuation normalization that matches multiple roster entries is
+  ambiguous; an original exact spelling wins before normalization. The common
+  create-ticket client keeps the original wording on ambiguity or directory
+  failure; simplified submission retains its existing unknown-provider policy.
+- Answering-service and no-ivr-v2 preserve the new field descriptions through
+  the SDK's schema conversion. Types, required fields and validation stay as
+  declared in their original schemas.
 
 Offline coverage uses synthetic names and addresses:
 `src/tools/contactCapture.test.ts`,
 `src/services/consoleDirectory.test.ts`,
 `src/utils/contactValidation.test.ts`, and
-`server/services/ticketingApiClientContactCapture.test.ts`.
+`server/services/ticketingApiClientContactCapture.test.ts`. Agent-visible SDK
+schemas are exercised in `src/agents/contactCaptureWire.test.ts` and
+`src/runtime/toolFieldDescriptionsReachTheWire.test.ts`.
 
 ## 7. What is not covered
 

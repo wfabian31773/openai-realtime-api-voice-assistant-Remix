@@ -9,6 +9,7 @@ import {
   isDirectoryConfigured,
   LOCATION_ALIASES,
   matchProviderFromRoster,
+  __resetDirectory,
   type DirectoryProvider,
 } from './consoleDirectory';
 import { resolveTicketLookupFields } from './ticketFieldSanitizers';
@@ -77,6 +78,42 @@ describe('provider roster matching', () => {
 
   it('does not turn an unrelated name into a roster hit', () => {
     expect(matchProviderFromRoster('Rina Fictional', roster)).toBeNull();
+  });
+
+  it('checks the margin against a runner-up below the minimum hit score', () => {
+    const close: DirectoryProvider[] = [
+      { canonical: 'Mira Exampletonxy', key: 'mira exampletonxy', volume90d: 0 },
+      { canonical: 'Mira Exompletonq', key: 'mira exompletonq', volume90d: 0 },
+    ];
+    // 88.24% and 86.67%: the best meets 88%, but is not five points ahead.
+    expect(matchProviderFromRoster('Mira Exampleton', close)).toBeNull();
+  });
+
+  it('refuses a normalized exact match shared by two roster spellings', () => {
+    const colliding: DirectoryProvider[] = [
+      roster[0],
+      { canonical: 'Míra Example, O.D.', key: 'míra example', volume90d: 0 },
+    ];
+    expect(matchProviderFromRoster('Mira-Example', colliding)).toBeNull();
+    expect(matchProviderFromRoster('Mira-Example', [...colliding].reverse())).toBeNull();
+    // An original exact spelling remains authoritative, in either order.
+    expect(matchProviderFromRoster('Mira Example', [...colliding].reverse())).toBe(roster[0]);
+  });
+
+  it('sends the roster spelling from the simplified ticket path too', async () => {
+    vi.stubEnv('OBS_CONSOLE_DATABASE_URL', 'postgresql://unused:unused@127.0.0.1:5432/unused');
+    __resetDirectory({
+      providers: new Map(roster.map((p) => [p.key, p])),
+      locations: new Map(),
+      loadedAt: Date.now(),
+    });
+    try {
+      const out = await resolveTicketLookupFields({ lastProviderSeen: 'Mira Exampl' });
+      expect(out.lastProviderSeen).toBe('Mira Example');
+    } finally {
+      __resetDirectory();
+      vi.unstubAllEnvs();
+    }
   });
 });
 

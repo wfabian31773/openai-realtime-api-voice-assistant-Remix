@@ -253,8 +253,10 @@ describe('what the descriptions cost on the wire', () => {
    * unaffected; this is the first ceiling on the tools themselves.
    */
   it.each([
-    ['no-ivr', 12_500],
-    ['pcp', 6_400],
+    // Item #14 adds surname spelling and complete email confirmation. Measured
+    // on the bound tools: no-ivr 12,917 chars; pcp 6,627 chars.
+    ['no-ivr', 13_000],
+    ['pcp', 6_700],
   ] as const)('%s stays under %i characters', (slug, ceiling) => {
     expect(JSON.stringify(built.get(slug)!.lane.agent.tools).length).toBeLessThan(ceiling);
   });

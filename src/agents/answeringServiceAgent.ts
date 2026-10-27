@@ -1,6 +1,7 @@
 import { RealtimeAgent, tool } from '@openai/agents/realtime';
 import { z } from 'zod';
 import { EMAIL_FIELD_DESCRIPTION, LAST_NAME_FIELD_DESCRIPTION } from '../tools/contactCaptureGuidance';
+import { keepFieldDescriptions } from '../services/toolFieldDescriptions';
 import { getPacificTimeContext, formatPhoneLast4, formatPhoneForSpeech } from '../utils/timeAware';
 import { scheduleLookupService, PatientScheduleContext } from '../services/scheduleLookupService';
 import { withToolDirection } from '../services/toolDirection';
@@ -634,11 +635,11 @@ export async function createAnsweringServiceAgent(
     agentSlug: 'answering-service',
   };
   const recordedTool: typeof tool = ((def: any) =>
-    tool({
+    keepFieldDescriptions(tool({
       ...def,
       // CP-3: the approved next line rides inside the tool result (script-listing §6).
       execute: withToolDirection('answering-service', callId, def.name, recordingExecute(timelineCtx, def.name, def.execute)),
-    })) as typeof tool;
+    }), def.parameters)) as typeof tool;
 
   console.log(`[${agentTag}] Creating agent for call:`, {
     callId,

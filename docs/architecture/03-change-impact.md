@@ -853,6 +853,10 @@ ticketing app — `sanitizeProviderName`, `sanitizeLocationName`, the combined
 `sanitizeTicketLookupFields`, directory-checked `resolveTicketLookupFields`,
 and `normalizeProviderNameForTicket` (exact or uniquely fuzzy Console roster
 match; original name retained on ambiguity or directory failure).
+`resolveTicketLookupFields` sends a matched provider's canonical spelling on
+the simplified submission path too. Fuzzy matching compares the best candidate
+to the entire roster; normalization collisions stay unresolved unless the
+original spelling matches exactly.
 
 **Who imports it**
 

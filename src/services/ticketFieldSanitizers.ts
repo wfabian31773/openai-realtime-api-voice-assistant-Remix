@@ -238,8 +238,9 @@ export async function resolveTicketLookupFields(
       if (!hit) {
         notes.push(`provider-unknown-to-nextgen:${base.lastProviderSeen}`);
         out.lastProviderSeen = undefined;
-      } else if (hit.volume90d === 0) {
-        notes.push(`provider-inactive-90d:${hit.canonical}`);
+      } else {
+        out.lastProviderSeen = sanitizeProviderName(hit.canonical).value ?? base.lastProviderSeen;
+        if (hit.volume90d === 0) notes.push(`provider-inactive-90d:${hit.canonical}`);
       }
     } catch {
       /* directory unavailable — keep the string-rule answer */

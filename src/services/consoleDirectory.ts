@@ -250,8 +250,14 @@ export function matchProviderFromRoster(
   const key = providerMatchKey(raw);
   if (!key) return null;
 
-  const exact = roster.find((provider) => providerMatchKey(provider.key || provider.canonical) === key);
-  if (exact) return exact;
+  // Preserve the original exact spelling before folding accents/punctuation.
+  // Those folds can make two distinct roster names identical.
+  const originalKey = directoryKey(raw);
+  const exact = roster.filter((provider) => directoryKey(provider.key || provider.canonical) === originalKey);
+  if (exact.length) return exact.length === 1 ? exact[0] : null;
+
+  const normalized = roster.filter((provider) => providerMatchKey(provider.key || provider.canonical) === key);
+  if (normalized.length) return normalized.length === 1 ? normalized[0] : null;
 
   // Short names are too easy to collapse into a different person with one
   // character changed. Keep the established exact-only behavior for them.
@@ -264,10 +270,11 @@ export function matchProviderFromRoster(
       const similarity = 1 - distance / Math.max(key.length, candidate.length);
       return { provider, similarity };
     })
-    .filter((entry) => entry.similarity >= 0.88)
     .sort((a, b) => b.similarity - a.similarity);
 
-  if (!ranked.length) return null;
+  // Rank the entire roster: a runner-up below 88% can still be too close to
+  // distinguish safely from a best candidate just above that threshold.
+  if (!ranked.length || ranked[0].similarity < 0.88) return null;
   if (ranked[1] && ranked[0].similarity - ranked[1].similarity < 0.05) return null;
   return ranked[0].provider;
 }

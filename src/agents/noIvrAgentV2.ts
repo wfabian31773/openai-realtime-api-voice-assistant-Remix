@@ -22,6 +22,10 @@ import {
 } from "../workflows";
 import { buildWorkflowDrivenPrompt, getWorkflowDirectiveForContext } from "../workflows/workflowPromptBuilder";
 import { LAST_NAME_FIELD_DESCRIPTION } from "../tools/contactCaptureGuidance";
+import { keepFieldDescriptions } from "../services/toolFieldDescriptions";
+
+const describedTool: typeof tool = ((def: any) =>
+  keepFieldDescriptions(tool(def), def.parameters)) as typeof tool;
 
 export interface NoIvrAgentV2Metadata {
   callId: string;
@@ -253,7 +257,7 @@ contact_preference, medication_name, pharmacy_name, doctor_name, location_prefer
     },
   });
 
-  const lookupScheduleTool = tool({
+  const lookupScheduleTool = describedTool({
     name: "lookup_schedule",
     description: `Look up patient appointment context using phone, name, or date of birth.
 
@@ -395,7 +399,7 @@ Call this when you make key decisions about caller type, urgency, or escalation.
     },
   });
 
-  const createTicketTool = tool({
+  const createTicketTool = describedTool({
     name: "create_ticket",
     description: `Create a ticket in the ticketing system for non-urgent after-hours requests.
 Call this ONLY when you have collected ALL required information.`,
