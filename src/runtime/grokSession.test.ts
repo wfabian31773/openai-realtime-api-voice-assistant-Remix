@@ -83,6 +83,7 @@ function buildHandlers(over: {
   onAudioDone?: NonNullable<GrokVoiceSessionHandlers["onAudioDone"]>;
   onAgentTranscriptDelta?: NonNullable<GrokVoiceSessionHandlers["onAgentTranscriptDelta"]>;
   onResponseDone?: NonNullable<GrokVoiceSessionHandlers["onResponseDone"]>;
+  onResponseStarted?: NonNullable<GrokVoiceSessionHandlers["onResponseStarted"]>;
   onConfigured?: NonNullable<GrokVoiceSessionHandlers["onConfigured"]>;
 }) {
   return {
@@ -95,10 +96,25 @@ function buildHandlers(over: {
     onAudioDone: over.onAudioDone ?? vi.fn(),
     onAgentTranscriptDelta: over.onAgentTranscriptDelta ?? vi.fn(),
     onResponseDone: over.onResponseDone ?? vi.fn(),
+    onResponseStarted: over.onResponseStarted ?? vi.fn(),
   } satisfies GrokVoiceSessionHandlers;
 }
 
 describe("GrokVoiceSession — what the bridge needs to attribute agent speech", () => {
+  it("reports response start immediately with the new epoch, before any audio", () => {
+    const epochs: number[] = [];
+    const { transport, session, onAudioDone } = makeSession({
+      onResponseStarted: () => epochs.push(session.getResponseEpoch()),
+    });
+    transport.emit({ type: "response.created" } as GrokServerEvent);
+    expect(epochs).toEqual([1]);
+    expect(session.isResponseActive()).toBe(true);
+    expect(onAudioDone).not.toHaveBeenCalled();
+    transport.emit({ type: "response.done" } as GrokServerEvent);
+    transport.emit({ type: "response.created" } as GrokServerEvent);
+    expect(epochs).toEqual([1, 2]);
+  });
+
   it("counts response cycles, so a cancelled response's late events are identifiable", () => {
     const { transport, session } = makeSession();
     expect(session.getResponseEpoch()).toBe(0);

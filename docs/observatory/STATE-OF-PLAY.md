@@ -1648,6 +1648,19 @@ before merging ticket-path changes. Shared bridge files are outside this
 session's writable workspace; this entry is the local handoff.
 
 
+## 19. Goodbye grace hangup (v134) — 2026-10-28
+
+v134 (`voice-runtime-v134-goodbye-grace-hangup-20261028`), on top of `main`'s v132 (#390, `76dd105f`; v133 is #391 on its open branch): when a heard caller
+says goodbye and the agent's sign-off finishes playing but the line stays open,
+the bridge waits 6s (`GOODBYE_GRACE_MS`) and ends the call deliberately
+(`goodbye_grace`) instead of idling to the 10-minute cap. Caller speech, a new
+response or a tool call cancels the window. Matcher is conservative
+English/Spanish. Silence ladder and ghost-call wording unchanged; no prompt or
+tool text added; logs carry call SID and reason only. No migration. Production
+impact unmeasured; owner: verify after deploy.
+
+---
+
 ## 18. Heard callers bypass silence and ghost-call termination — 2026-10-27
 
 v131 (`voice-runtime-v131-silence-ladder-heard-callers-20261028`), on top
