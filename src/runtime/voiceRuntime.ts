@@ -320,6 +320,8 @@ import { closeOutreachSession } from "../tools/npxOutreachTools";
 import { reportSiAssistantCall, shouldReportSiAssistantCall } from "../plugin/callbackReport";
 import { attachmentForSiAssistant } from "../plugin/returnedCaller";
 import { reattachTakenMessages } from "../plugin/messageOutbox";
+import { liveCallRegistry, type LiveCallRegistry } from "../plugin/liveSessions";
+import { SI_ASSISTANT_DIRECT_GREETING } from "../agents/siAssistantAgent";
 import { closeSiAssistantIdentity, siAssistantIdentityFor } from "../plugin/siAssistantIdentity";
 import type { OutboundStore } from "./outbound/store";
 import { createDbOutboundStore } from "./outbound/store";
@@ -472,6 +474,7 @@ export interface VoiceRuntimeOptions {
    * only deployment never opens it.
    */
   outboundStore?: OutboundStore;
+  liveCalls?: LiveCallRegistry;
   /** Places outbound calls. Injected for tests; production wraps the Twilio
    * client, and only when RUNTIME_OUTBOUND_DIALING=1 starts the scheduler. */
   outboundTwilio?: () => Promise<OutboundTwilio>;
@@ -618,6 +621,7 @@ export function mountVoiceRuntime(
 ): CallSessionRegistry {
   const env = options.env ?? process.env;
   const registry = options.registry ?? new CallSessionRegistry();
+  const liveCalls = options.liveCalls ?? liveCallRegistry;
   // Resolved lazily and cached: importing src/config/agents pulls in every
   // agent (and their database and API clients), which must not happen at
   // boot or in a health check.
@@ -841,6 +845,7 @@ export function mountVoiceRuntime(
     registry,
     store: await outboundStore(),
     policyFor: outboundPolicyFor,
+    liveCalls,
   });
   app.post(`${OUTBOUND_PATH_PREFIX}/:slug/status`, async (req: Request, res: Response) => {
     try {
@@ -903,8 +908,16 @@ export function mountVoiceRuntime(
     );
   });
 
-  app.post("/voice/:slug", (req: Request, res: Response) => {
+  app.post("/voice/:slug", async (req: Request, res: Response) => {
     const slug = String(req.params.slug ?? "");
+    if (slug === "si-assistant" && req.query.liveSession !== undefined) {
+      try {
+        send(res, await handleOutboundAnswer(slug, toWebhookRequest(req), await outboundDeps()));
+      } catch {
+        send(res, buildUnavailableTwiml(200, OUTBOUND_UNAVAILABLE_LINE));
+      }
+      return;
+    }
     send(
       res,
       handleVoiceWebhook(slug, toWebhookRequest(req), {
@@ -1109,6 +1122,8 @@ export function mountVoiceRuntime(
       recordingHost?: string,
     ): Promise<void> {
       const startedAtMs = Date.now();
+      const isLiveCall = entry.slug === "si-assistant" && Boolean(entry.liveSessionId);
+      const directCall = isLiveCall ? liveCalls.forCall(entry.callSid)?.directCall : undefined;
       // The call is answered once its stream has started, so Twilio will take
       // a REST recording from here. Never awaited, never on the call's path:
       // a failure is one console line and the call proceeds unrecorded, as
@@ -1262,7 +1277,8 @@ export function mountVoiceRuntime(
         const directionMismatch =
           registered !== undefined &&
           ((Boolean(entry.outbound) && !isOutboundLane) ||
-            (entry.outbound !== undefined && !outboundContact));
+            (entry.outbound !== undefined && !outboundContact) ||
+            (outboundContact?.data.plugin_direct === true && !directCall));
         if (directionMismatch) {
           console.warn(
             `[voice-runtime] ${entry.slug}: refused — ` +
@@ -1339,6 +1355,7 @@ export function mountVoiceRuntime(
             ...(entry.outbound && outboundContact
               ? { outbound: { ...outboundContact, campaignKey: entry.outbound.campaignKey } }
               : {}),
+            ...(directCall ? { directCall } : {}),
             // And who may be ringing back, on a call made TO an outbound lane.
             ...(callback ? { callback } : {}),
           },
@@ -1526,6 +1543,7 @@ export function mountVoiceRuntime(
          * has to be told it was spoken.
          */
         const spokenGreeting =
+          directCall ? SI_ASSISTANT_DIRECT_GREETING :
           // A dialled call opens with its campaign's own greeting, built for
           // the person it rang: who is calling, that it is automated, and
           // that the call is recorded, before anything else (outbound/).
@@ -1663,6 +1681,8 @@ export function mountVoiceRuntime(
           guardrailMode: env.RUNTIME_GUARDRAIL_MODE === "log" ? "log" : "enforce",
           onOutcome: (outcome: CallOutcome) => {
             registry.recordOutcome(entry.callSid, outcome);
+            const live = isLiveCall ? liveCalls.forCall(entry.callSid) : null;
+            if (live) liveCalls.setStatus(live.sessionId, outcome === "provider_failure" || outcome === "dead_air" ? "failed" : "completed");
             // The per-call transfer the proving agent may have brokered dies
             // with the call — an entry outliving its call would let a later
             // call's tool dial a dead leg.
@@ -1693,6 +1713,9 @@ export function mountVoiceRuntime(
            * socket open for a ticket POST.
            */
           persistCallRecord: async (record) => {
+            // Live transcripts belong only to the short-lived registry. Tool
+            // arguments can contain the same PHI, so they are cleared too.
+            if (isLiveCall) record = { ...record, transcript: "", turns: [], toolEvents: [] };
             // Snapshot before closeCallbackSession deletes the map entry.
             // Message and call report use this same identity (P2-4).
             const returnedSession = callbackSessionFor(record.callSid);
@@ -1880,6 +1903,14 @@ export function mountVoiceRuntime(
             })().catch(() => undefined);
           },
         });
+        if (isLiveCall) {
+          const activeBridge = bridge;
+          liveCalls.attach(entry.callSid, {
+            turns: () => activeBridge.getTranscriptTurns(),
+            instruct: (text) => (activeBridge.getSession() as GrokVoiceSession).addBotGuidance(text),
+            end: () => activeBridge.handleSocketClosed(),
+          });
+        }
         // The session is constructed above, so its onMessage is bound.
         // Flush the first-event buffer now — session.created included —
         // or the handshake never starts.
@@ -1970,7 +2001,11 @@ export function mountVoiceRuntime(
         // closure over a dead leg until the broker's 200-entry cap evicted
         // it (Codex review, PR #237). Keyed by callSid and idempotent, so
         // it is a no-op for the lanes that never registered one.
-        if (!bridge) releaseCallHandoff(entry.callSid);
+        if (!bridge) {
+          releaseCallHandoff(entry.callSid);
+          const live = isLiveCall ? liveCalls.forCall(entry.callSid) : null;
+          if (live) liveCalls.setStatus(live.sessionId, socketGone ? "completed" : "failed");
+        }
       }
     }
   });

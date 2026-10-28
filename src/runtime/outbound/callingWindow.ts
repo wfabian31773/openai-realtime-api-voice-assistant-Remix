@@ -188,6 +188,7 @@ export function mayDialNow(
 ): DialDecision {
   const p = pacificParts(now);
   if (!window.days.includes(p.weekday)) return { ok: false, reason: "closed_day" };
+  if (window.skipHolidays && PRACTICE_CLOSURES.includes(p.date)) return { ok: false, reason: "closed_day" };
   if (window.skipHolidays && isHoliday(p.date)) return { ok: false, reason: "holiday" };
   if (p.hour < window.startHour || p.hour >= window.endHour) {
     return { ok: false, reason: "outside_hours" };

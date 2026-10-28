@@ -1533,6 +1533,8 @@ export const contactApprovals = pgTable("contact_approvals", {
   payload: jsonb("payload").notNull(),
   payloadHash: varchar("payload_hash", { length: 64 }).notNull(),
   confirmTokenHash: varchar("confirm_token_hash", { length: 64 }),
+  // Short-lived hand-off secret, never exposed in approval views or audit.
+  confirmTokenPlaintext: varchar("confirm_token_plaintext", { length: 64 }),
   confirmExpiresAt: timestamp("confirm_expires_at", { withTimezone: true }),
   confirmUsedAt: timestamp("confirm_used_at", { withTimezone: true }),
   approvedBy: varchar("approved_by", { length: 64 }),
@@ -1591,6 +1593,7 @@ export const pluginAuditLog = pgTable("plugin_audit_log", {
   ticketId: varchar("ticket_id", { length: 64 }),
   outcome: varchar("outcome", { length: 32 }).notNull(),
   httpStatus: integer("http_status").notNull(),
+  details: jsonb("details").$type<{ maskedNumber: string; purpose: string; reason: string }>(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => [
   index("idx_plugin_audit_created").on(table.createdAt),

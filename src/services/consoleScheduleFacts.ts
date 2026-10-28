@@ -63,6 +63,7 @@
  * ONE IMPORT STYLE (v71): `patientVerification` is reached by dynamic import
  * everywhere in this repo, so it is reached that way here too.
  */
+import { currentClinicName } from '../config/azulVisionKnowledge';
 
 export const CONSOLE_SCHEDULE_ENV = 'OBS_CONSOLE_DATABASE_URL';
 
@@ -159,7 +160,7 @@ SELECT f.appointment_id::text                                   AS appointment_i
  */
 export const OFFICE_LABEL_OVERRIDES: Readonly<Record<string, string>> = Object.freeze({
   'Azul Vision DTLA': 'Downtown LA',
-  'Azul Vision Mission Hlls': 'North Valley Eye',
+  'Azul Vision Mission Hlls': 'Mission Hills',
   'Azul Vision Willow': 'Long Beach Willow',
   'Azul Vision Riverside Latham': 'Riverside',
   'Azul Vision Virtual Visit': 'Virtual Visits',
@@ -178,12 +179,12 @@ export function hubOfficeLabel(nextgenName: string | null | undefined): string |
   const t = nextgenName.trim();
   if (!t) return null;
   const override = OFFICE_LABEL_OVERRIDES[t];
-  if (override) return override;
+  if (override) return currentClinicName(override);
   if (/offsi[dt]e fundus scree/i.test(t)) return 'Mobile DRS';
   for (const prefix of OFFICE_PREFIXES) {
-    if (t.startsWith(prefix)) return t.slice(prefix.length).trim();
+    if (t.startsWith(prefix)) return currentClinicName(t.slice(prefix.length).trim());
   }
-  return t;
+  return currentClinicName(t);
 }
 
 /**

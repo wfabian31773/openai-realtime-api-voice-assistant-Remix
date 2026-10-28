@@ -882,7 +882,15 @@ import { callEnvironment } from "./callRecord";
  * contains. `src/tools/opticalTools.ts`, `opticalOfficeFromRecord.test.ts`.
  */
 /**
- * v117 — THE THIRD PARTY'S REPORT STAYS IN RECORDS (2026-10-26). On the
+ * v117 — CONTACT CAPTURE (#14, 2026-10-27). Surnames are spelled when needed;
+ * new email addresses are read back and confirmed in full. Provider names use
+ * an exact or uniquely fuzzy Console match on both ticket submission paths,
+ * with the five-point margin checked against the entire roster. Contact field
+ * descriptions survive the SDK conversion on answering-service and no-ivr-v2.
+ * On top of v116. No migration; production impact remains unmeasured.
+ */
+/**
+ * v118 — THE THIRD PARTY'S REPORT STAYS IN RECORDS (2026-10-26; renumbered from v117 on 2026-10-28 because main took v117 in #379). On the
  * records line, a provider's, plan's or other third party's request whose
  * words name a document is no longer sent to the HVA Hub on a scheduling cue
  * ("the most recent eye exam REPORT" read as "schedule an eye exam"); a
@@ -891,12 +899,12 @@ import { callEnvironment } from "./callRecord";
  * model, in `fix`, that nothing is lost and never to say "call back"; and a
  * name given in two halves across invocations reaches the payload. Seven
  * records-lane calls, 2026-10-12..10-26. A payload change on the ticket path
- * of the department under the CAP, so it gets its own marker. On top of v116
- * (#371), which it contains. `src/tools/medicalRecordsTools.ts`,
+ * of the department under the CAP, so it gets its own marker. On top of v117
+ * (#379), which it contains. `src/tools/medicalRecordsTools.ts`,
  * `thirdPartyRecordsStayInRecords.test.ts`.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v117-the-third-party-report-stays-in-records-20261026";
+  "voice-runtime-v118-the-third-party-report-stays-in-records-20261028";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

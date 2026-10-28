@@ -1,3 +1,5 @@
+import { correctSurgeryIntake, hasClinicalComplaint } from './requestClassification';
+
 /**
  * A caller who pressed the wrong option is not the caller's problem.
  *
@@ -413,6 +415,15 @@ export function detectCrossQueue(text: string, homeDepartmentId: number): QueueR
   const t = fold(text);
   if (!t.trim()) return null;
 
+  const corrected = correctSurgeryIntake(text, homeDepartmentId);
+  if (corrected) {
+    if (corrected.departmentId === homeDepartmentId) return null;
+    const departmentName = corrected.departmentId === 1 ? 'Optical Support'
+      : corrected.departmentId === 3 ? 'Clinical Tech Support' : 'HVA Hub';
+    return { ...corrected, departmentName, requestReason: 'Request classified from caller intent',
+      note: 'Request taken on another line and routed by its subject.' };
+  }
+
   const mentionsSurgery = hit(t, SURGERY_CUES);
   const mentionsOptical = hit(t, OPTICAL_CUES);
   const mentionsMedication = hit(t, TECH_CUES);
@@ -466,12 +477,15 @@ export function detectCrossQueue(text: string, homeDepartmentId: number): QueueR
   }
 
   // 2. Optical, when it is about eyewear and NOT about this queue's own subject.
+  // A clinical complaint is not a glasses request — leave it on Surgery/HVA —
+  // but an explicit appointment still goes to the Hub.
   if (
     homeDepartmentId !== OPTICAL &&
     mentionsOptical &&
     !holdsOnRecordsLine &&
     !(homeDepartmentId === TECH && mentionsMedicationClearly) &&
-    !(homeDepartmentId === SURGERY && mentionsSurgery)
+    !(homeDepartmentId === SURGERY && mentionsSurgery) &&
+    !((homeDepartmentId === SURGERY || homeDepartmentId === HVA_HUB) && hasClinicalComplaint(text))
   ) {
     return {
       departmentId: OPTICAL,

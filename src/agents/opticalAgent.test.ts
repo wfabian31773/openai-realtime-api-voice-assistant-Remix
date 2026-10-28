@@ -55,7 +55,9 @@ describe('it cannot transfer, and must not imply that it can', () => {
      * so it never weakened standing instruction 9. The pattern above is the
      * guard that matters; this is the tripwire.
      */
-    expect(OPTICAL_TOOLS).toHaveLength(5);
+    // Item #15 adds a read-only appointment check, with no booking or transfer.
+    expect(OPTICAL_TOOLS).toHaveLength(6);
+    expect(OPTICAL_TOOLS).toContain('check_patient_appointments');
     expect(OPTICAL_TOOLS).not.toContain('set_spoken_language');
   });
 

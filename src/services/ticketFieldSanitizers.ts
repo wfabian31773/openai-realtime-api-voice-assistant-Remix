@@ -25,8 +25,9 @@
  *   487  real providers whose credential suffix broke the match
  *   667  genuinely absent from the providers table — nothing to do here
  *
- * Everything in this file is a pure function so it can be proven without a
- * phone call.
+ * The string cleaners are pure and independently testable. The ticket-path
+ * roster normalizer lazily reads the Console's read-only provider snapshot and
+ * keeps the original input when the roster is unavailable or inconclusive.
  */
 
 /**
@@ -123,6 +124,28 @@ export function sanitizeProviderName(raw: string | null | undefined): SanitizedF
 }
 
 /**
+ * Canonicalize a ticket's provider against the read-only Patient Console
+ * roster. A fuzzy hit is used only when it is unique; on a miss or directory
+ * outage, keep the caller's full spelling for the existing ticketing lookup.
+ */
+export async function normalizeProviderNameForTicket(
+  raw: string | null | undefined,
+): Promise<string | undefined> {
+  const value = raw?.trim();
+  if (!value) return undefined;
+
+  try {
+    const { isDirectoryConfigured, lookupProvider } = await import('./consoleDirectory');
+    if (!isDirectoryConfigured()) return value;
+    const match = await lookupProvider(value);
+    if (!match) return value;
+    return sanitizeProviderName(match.canonical).value ?? value;
+  } catch {
+    return value;
+  }
+}
+
+/**
  * Clean a clinic name.
  *
  * NextGen brandifies its master data — "Atlantis Eyecare Encinitas" is surfaced
@@ -215,8 +238,9 @@ export async function resolveTicketLookupFields(
       if (!hit) {
         notes.push(`provider-unknown-to-nextgen:${base.lastProviderSeen}`);
         out.lastProviderSeen = undefined;
-      } else if (hit.volume90d === 0) {
-        notes.push(`provider-inactive-90d:${hit.canonical}`);
+      } else {
+        out.lastProviderSeen = sanitizeProviderName(hit.canonical).value ?? base.lastProviderSeen;
+        if (hit.volume90d === 0) notes.push(`provider-inactive-90d:${hit.canonical}`);
       }
     } catch {
       /* directory unavailable — keep the string-rule answer */

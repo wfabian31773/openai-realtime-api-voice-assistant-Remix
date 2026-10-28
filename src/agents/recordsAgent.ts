@@ -29,6 +29,7 @@
  * one pass instead of three.
  */
 import { RealtimeAgent } from '@openai/agents/realtime';
+import { appointmentReadReminder } from '../services/appointmentReadPolicy';
 import { getPacificTimeContext, formatPhoneForSpeech, formatPhoneLast4 } from '../utils/timeAware';
 import { realtimeToolsFor } from '../tools/realtimeAdapter';
 // Registration is an import side effect, exactly as the HTTP server does it.
@@ -84,6 +85,7 @@ export const recordsAgentConfig = {
  */
 export const RECORDS_TOOLS = [
   'lookup_patient',
+  'check_patient_appointments',
   'resolve_location',
   'check_open_tickets',
   'classify_records_request',
@@ -169,7 +171,7 @@ Once classify_records_request confirms a records request and the requester is
 the patient or their personal representative, offer the link, format in the
 question: "I can send you a short link to finish and sign this request — is this
 a mobile number that receives texts, or would you rather have it by email?"
-Email: "What's the email address? Please spell it out for me." Read it back.
+Email: "What's the email address? Please spell it out for me, letter by letter." Read the complete address back and ask, "Did I get that right?" Wait for confirmation before filing. Pass the full address unchanged.
 File with form_channel set; the tool sends the link and hands you what to say.
 Where they go and which dates come from the form — do not ask on the phone.
 
@@ -183,6 +185,8 @@ Text not arrived, or they want the other channel: send_records_form. Somebody
 else asking — another office, a plan, an attorney — gets no link and no form.
 
 ${askScript}
+
+${appointmentReadReminder('check_patient_appointments')}
 
 ### How a call runs
 1. Find the patient. Call lookup_patient as soon as you have a phone number, or

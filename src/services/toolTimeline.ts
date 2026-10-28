@@ -28,6 +28,7 @@ import { shadowTap } from '../shadow/tap'; // observation-only tap; no-op unless
 import { callMetadataForDB } from './callMetadataStore';
 import type { DirectorAction } from '../director/director';
 import { dobShape } from '../tools/dobParts';
+import { answeredWithoutTicket } from './answeredCallDisposition';
 
 export interface AzulToolEvent {
   at: string;               // ISO timestamp
@@ -376,6 +377,10 @@ function summarizeResult(tool: string, resultJson: string): Record<string, unkno
   ]) {
     if (parsed?.[k] !== undefined) out[k] = parsed[k];
   }
+  // These outcome flags are booleans only, never caller-supplied text.
+  for (const key of ['ticketCreated', 'callbackRequired']) {
+    if (typeof parsed?.[key] === 'boolean') out[key] = parsed[key];
+  }
   if (Array.isArray(parsed?.upcomingAppointments)) {
     out.upcomingCount = parsed.upcomingAppointments.length;
   }
@@ -663,14 +668,17 @@ export function classifyAzulCall(events: AzulToolEvent[]): { purpose: string; re
  *  different failure from "nothing to file", and the old azul classifier
  *  called both of them "Unclassified". */
 export function classifyFleetCall(events: AzulToolEvent[]): { purpose: string; result: string } {
-  const ticket = events.find((e) => e.tool === 'create_ticket');
+  const ticket = [...events].reverse().find((e) => e.tool === 'create_ticket');
   const filed = events.find(
-    (e) => e.tool === 'create_ticket' && (e.outcome.success === true || e.outcome.ticket_number || e.outcome.ticketNumber),
+    (e) => e.tool === 'create_ticket' && ((e.outcome.success === true && e.outcome.ticketCreated !== false) || e.outcome.ticket_number || e.outcome.ticketNumber),
   );
   const escalated = events.find((e) => e.tool === 'escalate_to_human' && !e.outcome.error);
   if (filed) {
     const num = filed.outcome.ticket_number ?? filed.outcome.ticketNumber;
     return { purpose: 'Patient request', result: `Ticket filed${num ? ` (${num})` : ''}` };
+  }
+  if (answeredWithoutTicket({ events })) {
+    return { purpose: 'Answered question', result: 'Answered, no ticket needed' };
   }
   if (ticket) {
     // Attempted and failed — the args/outcome say why (validationError,

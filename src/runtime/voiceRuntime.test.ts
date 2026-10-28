@@ -36,6 +36,8 @@ import { FakeOutboundStore } from "./outbound/store.testkit";
 import { answerUrl } from "./outbound/dialer";
 import type { OutboundLanePolicy } from "./outbound/campaign";
 import { DEFAULT_ATTEMPT_CAPS, DEFAULT_CALLING_WINDOW } from "./outbound/callingWindow";
+import { LiveCallRegistry } from "../plugin/liveSessions";
+import { directCallInstructions, SI_ASSISTANT_DIRECT_GREETING } from "../agents/siAssistantAgent";
 import { CallSessionRegistry } from "./sessionRegistry";
 import { deployedBuildSha } from "./buildIdentity";
 import { VOICE_RUNTIME_DEPLOY_MARKER } from "./readiness";
@@ -273,6 +275,7 @@ async function harness(
     env?: Record<string, string | undefined>;
     /** The outbound layer's store (src/runtime/outbound/). */
     outboundStore?: OutboundStore;
+    liveCalls?: LiveCallRegistry;
   } = {},
 ): Promise<Harness> {
   const app = express();
@@ -317,6 +320,7 @@ async function harness(
     fetchPrecontext: over.fetchPrecontext,
     resolveGreeting: over.resolveGreeting,
     outboundStore: over.outboundStore,
+    liveCalls: over.liveCalls,
     openCallRow:
       over.openCallRow ??
       (async (row) => {
@@ -2690,5 +2694,95 @@ describe("a call the runtime dialled (src/runtime/outbound/)", () => {
     await settle(8);
     expect(h.transports).toHaveLength(0);
     expect(seenMetadata).toHaveLength(0);
+  });
+});
+
+
+describe("SI Assistant live calls", () => {
+  it.each([false, true])("binds signed webhooks, transcript polling and guidance to the runtime; persists no transcript (direct: %s)", async (direct) => {
+    const store = new FakeOutboundStore();
+    store.addContact({ id: "live-contact", phone: "+15555550111", firstName: "Testa", customData: { plugin_live: true } });
+    await store.claimContact("live-contact", new Date());
+    const attemptId = await store.startAttempt("live-contact", store.campaignId, 1);
+    const sessions = new LiveCallRegistry();
+    const directCall = direct ? { purpose: "Ask about office hours tomorrow" } : undefined;
+    const session = sessions.create({ approvalId: direct ? null : "approval", tokenJti: "bot", contactId: "live-contact", attemptId, directCall });
+    const recording = vi.fn(async (_callSid: string, _host?: string) => "skipped");
+    const turns = vi.fn(async () => 0);
+    const policy: OutboundLanePolicy = {
+      campaignKey: "si-assistant", enableEnv: "OUTBOUND_CAMPAIGN_SI_ASSISTANT", callerIdEnv: "SI_ASSISTANT_NUMBER",
+      caps: DEFAULT_ATTEMPT_CAPS, window: DEFAULT_CALLING_WINDOW, concurrency: 1,
+      greeting: () => "Hello, I am an automated AI assistant. This call is recorded. Am I speaking with Testa?",
+      voicemail: () => "Please call back.",
+    };
+    const source = laneSource({ id: "si-assistant", agentType: "outbound", outbound: policy,
+      factory: (async (_handoff: unknown, metadata: any) => ({ instructions: metadata.directCall ? directCallInstructions(metadata.directCall) : "Identify yourself as an AI. Verify identity first.", tools: [] })) as any });
+    const h = await harness({ laneSource: source, outboundStore: store, liveCalls: sessions, startRecording: recording, persistTurns: turns });
+    const q = `contact=live-contact&attempt=${attemptId}&liveSession=${session.sessionId}`;
+    const path = `/voice/si-assistant?${q}`;
+    // A forged callback cannot bind a callSid or create a stream.
+    const forged = await fetch(`${h.base}${path}`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: "CallSid=CA-forged" });
+    expect(forged.status).toBe(403);
+    expect(session.callSid).toBeNull();
+    const statusPath = `/voice/outbound/si-assistant/status?${q}`;
+    const body = { CallSid: "CA-live-runtime", From: "+19092553213", To: "+15555550111" };
+    await post(h, statusPath, { ...body, CallStatus: "ringing" });
+    expect(session.status).toBe("ringing");
+    const answer = await post(h, path, { ...body, AnsweredBy: "human" });
+    expect(answer.status).toBe(200);
+    expect(h.registry.get(body.CallSid)?.outbound).toMatchObject({ contactId: "live-contact", attemptId });
+    const { ws } = await openStream(h, body.CallSid, tokenFrom(answer.text));
+    await waitFor(() => h.transports.length === 1, "live provider");
+    await settle(4);
+    const transport = h.transports[0];
+    if (direct) {
+      const update = transport.ofType("session.update")[0] as any;
+      expect(update.session.instructions).toContain(directCall!.purpose);
+      expect(update.session.instructions).toContain(SI_ASSISTANT_DIRECT_GREETING);
+      expect(update.session.instructions).not.toContain("Verify identity first");
+      expect(update.session.instructions).not.toContain("Am I speaking with Testa");
+      expect(update.session.tools.map((tool: any) => tool.name)).not.toContain("confirm_si_assistant_identity");
+    }
+    transport.emit({ type: "session.updated" });
+    await settle(4);
+    transport.emit({ type: "conversation.item.input_audio_transcription.completed", item_id: "caller-one", transcript: "Private caller transcript" });
+    const transcript = sessions.view(session).transcript;
+    expect(transcript).toContainEqual(expect.objectContaining({ role: "caller", text: "Private caller transcript" }));
+    session.controls!.instruct("Private bot context");
+    const context = transport.sent.find((event: any) => event.item?.role === "user") as any;
+    expect(context.item.content[0].text).toContain("Private bot context");
+    expect(context.item.content[0].text).toContain("Never change AI disclosure");
+    // A delayed progress event cannot turn a connected call back to ringing.
+    await post(h, statusPath, { ...body, CallStatus: "ringing" });
+    expect(session.status).toBe("in_progress");
+    ws.close();
+    await waitFor(() => h.persisted.length === 1, "live teardown record");
+    expect(session.status).toBe("completed");
+    expect(sessions.view(session).transcript).toContainEqual(expect.objectContaining({ text: "Private caller transcript" }));
+    expect(h.persisted[0]).toMatchObject({ transcript: "", turns: [], toolEvents: [] });
+    expect(JSON.stringify(h.swept)).not.toContain("Private caller transcript");
+    expect(JSON.stringify(turns.mock.calls)).not.toContain("Private caller transcript");
+    expect(recording).toHaveBeenCalledTimes(1);
+    expect(recording.mock.calls[0]?.[0]).toBe(body.CallSid);
+    await post(h, statusPath, { ...body, CallStatus: "completed", CallDuration: "10" });
+    expect(store.attempts[0].endedAt).toBeDefined();
+    sessions.drop(session.sessionId);
+  });
+
+  it.each(["no-answer", "busy", "failed", "canceled"])("records signed terminal status %s without a stream", async (status) => {
+    const store = new FakeOutboundStore();
+    store.addContact({ id: "lc", phone: "+15555550111", customData: { plugin_live: true } });
+    await store.claimContact("lc", new Date());
+    const attemptId = await store.startAttempt("lc", store.campaignId, 1);
+    const sessions = new LiveCallRegistry();
+    const session = sessions.create({ approvalId: "a", tokenJti: "bot", contactId: "lc", attemptId });
+    const policy: OutboundLanePolicy = { campaignKey: "si-assistant", enableEnv: "E", callerIdEnv: "F", window: DEFAULT_CALLING_WINDOW,
+      caps: DEFAULT_ATTEMPT_CAPS, concurrency: 1, greeting: () => "AI assistant", voicemail: () => "Call back" };
+    const h = await harness({ laneSource: laneSource({ id: "si-assistant", agentType: "outbound", outbound: policy }), outboundStore: store, liveCalls: sessions });
+    await post(h, `/voice/outbound/si-assistant/status?contact=lc&attempt=${attemptId}&liveSession=${session.sessionId}`, { CallSid: "CA-terminal", CallStatus: status });
+    expect(session.status).toBe(["no-answer", "busy"].includes(status) ? "no_answer" : "failed");
+    expect(session.endedAt).not.toBeNull();
+    expect(store.attempts[0].endedAt).toBeDefined();
+    sessions.drop(session.sessionId);
   });
 });
