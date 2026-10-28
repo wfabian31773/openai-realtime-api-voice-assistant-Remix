@@ -261,7 +261,9 @@ export function namesARecord(text: string): boolean {
  * document phrase: `records`, `chart(s)`, `documentation`, `copy of`, `release
  * of information`; `record`, `notes` and `report(s)` after a determiner or a
  * clinical word ("the most recent eye exam REPORT", "chart NOTES", "her
- * medical RECORD"), and singular `note` only after a clinical word, because
+ * medical RECORD"; `record` and `report(s)` also after `a`/`an`, and `record`
+ * after `patient` — "the patient RECORD from her last eye exam", Codex P2 on
+ * `9e5b8a6`), and singular `note` only after a clinical word, because
  * "leave a note for the doctor" is a message, not a chart. A verb never
  * matches: "to report", "please note", "the patient reports". "For the
  * record" is not a request for one.
@@ -278,7 +280,7 @@ const DOCUMENT_DETERMINER =
   "(?:the|this|that|these|those|his|her|their|its|any|all|latest|recent|last|final|full|written)";
 const DOCUMENT_PATTERNS: readonly RegExp[] = [
   /\brecords\b/,
-  new RegExp(`\\b(?:${DOCUMENT_CLINICAL}|${DOCUMENT_DETERMINER}|patient's|patients')\\s+record\\b`),
+  new RegExp(`\\b(?:${DOCUMENT_CLINICAL}|${DOCUMENT_DETERMINER}|patients?|patient's|patients'|a|an)\\s+record\\b`),
   /\bcharts?\b/,
   new RegExp(`\\b${DOCUMENT_CLINICAL}\\s+notes?\\b`),
   new RegExp(`\\b${DOCUMENT_DETERMINER}\\s+notes\\b`),

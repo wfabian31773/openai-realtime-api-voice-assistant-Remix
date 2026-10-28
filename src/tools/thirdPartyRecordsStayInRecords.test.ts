@@ -252,8 +252,34 @@ describe('a third party\'s ordinary "note", "report" or "recorded line" is not a
       'we need the office notes and the visit report',
       'necesitamos el expediente del paciente',
       'please send notes from her last visit',
+      // Singular "record" after "patient" or an indefinite article (Codex P2
+      // on 9e5b8a6): each was read as no document, so the hold never fired.
+      'requesting the patient record from her last eye exam',
+      'we need the patients record from the eye exam',
+      'we need a record from her last eye exam',
+      'please send an record of the eye exam',
     ]) {
       expect(namesADocument(doc), doc).toBe(true);
+    }
+  });
+
+  it('"the patient record from her last eye exam" stays in Medical Records (Codex P2 on 9e5b8a6)', async () => {
+    for (const words of [
+      'requesting the patient record from her last eye exam',
+      'we need a record from her last eye exam',
+    ]) {
+      resetGateAttempts();
+      const app = await fakeApp();
+      const r = (await runTool('file_records_ticket', {
+        ...NAMELESS_THIRD_PARTY,
+        first_name: 'Testpatient',
+        last_name: 'Example',
+        requester: THIRD_PARTIES[0].requester,
+        request_description: words,
+      })) as Out;
+      expect(r.success, words).toBe(true);
+      expect(app.lastParams().departmentId, words).toBe(MEDICAL_RECORDS);
+      vi.restoreAllMocks();
     }
   });
 });
