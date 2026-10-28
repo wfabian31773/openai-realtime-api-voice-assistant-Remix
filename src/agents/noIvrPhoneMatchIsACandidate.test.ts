@@ -226,7 +226,7 @@ const SPOKEN_IDENTITY = {
 describe.each([
   ['the live SIP factory', {}],
   ['the runtime factory', { pipeline: 'runtime' as const }],
-])('%s: DOB confirms a recognised caller before canonical-name lookup', (_label, pipeline) => {
+])('%s: name and DOB confirm a recognised caller before canonical-name lookup', (_label, pipeline) => {
   beforeEach(() => {
     h.lookupByNameAndDOB.mockImplementation(async (...args: unknown[]) => {
       if (args[0] === 'Zelda' && args[1] === 'Quixote' && args[2] === '1958-01-04') {
@@ -254,6 +254,72 @@ describe.each([
     const agent = await createNoIvrAgent(async () => {}, { ...RECOGNISED_META, ...pipeline });
     expect((await call(agent, 'lookup_schedule', SPOKEN_IDENTITY)).found).toBe(true);
     expect(h.lookupByNameAndDOB).toHaveBeenCalledExactlyOnceWith('Zelda', 'Quixote', '1958-01-04');
+  });
+
+  it.each([
+    ['Zelda', 'Different'],
+    ['Twin', 'Quixote'],
+    ['Different', 'Person'],
+    ['Zeeldaah', 'Quixote'],
+    ['Zelda', 'Quiixottee'],
+    ['Zoldo', 'Quixote'],
+    ['Zelda', 'Quxxota'],
+    [' ', 'Quixote'],
+    ['Zelda', ' '],
+  ])('keeps the supplied identity %s %s when only the DOB matches', async (first_name, last_name) => {
+    const agent = await createNoIvrAgent(async () => {}, { ...RECOGNISED_META, ...pipeline });
+    const result = await call(agent, 'lookup_schedule', {
+      first_name, last_name, date_of_birth: SPOKEN_IDENTITY.date_of_birth,
+    });
+
+    expect(h.lookupByNameAndDOB).toHaveBeenCalledExactlyOnceWith(first_name, last_name, '1958-01-04');
+    expect(result.found).toBe(false);
+    expect(result).not.toHaveProperty('upcomingAppointments');
+    expect(JSON.stringify(result)).not.toMatch(/Quixote|1958|Zebrastripe|Testville|2041-12-31|3:10 PM/);
+  });
+
+  it('returns the other household member when their supplied name and shared DOB match', async () => {
+    h.lookupByNameAndDOB.mockImplementation(async (...args: unknown[]) => {
+      if (args[0] === 'Twin' && args[1] === 'Quixote' && args[2] === '1958-01-04') {
+        return { ...PHONE_MATCH, patientName: 'Twin Quixote', matchedBy: 'name_and_dob', upcomingAppointments: [] } as any;
+      }
+      return { ...PHONE_MATCH, matchedBy: 'name_and_dob' } as any;
+    });
+    const agent = await createNoIvrAgent(async () => {}, { ...RECOGNISED_META, ...pipeline });
+    const result = await call(agent, 'lookup_schedule', {
+      first_name: 'Twin', last_name: 'Quixote', date_of_birth: SPOKEN_IDENTITY.date_of_birth,
+    });
+
+    expect(h.lookupByNameAndDOB).toHaveBeenCalledExactlyOnceWith('Twin', 'Quixote', '1958-01-04');
+    expect(result.found).toBe(true);
+    expect(result.upcomingAppointments).toEqual([]);
+  });
+
+  it.each([
+    ['  zElDa  ', ' qUiXoTe '],
+    ['Zeld', 'Quixot'],
+    ['Zeldo', 'Quixota'],
+  ])('allows case, whitespace or a single spelling edit in each name (%s %s)', async (first_name, last_name) => {
+    const agent = await createNoIvrAgent(async () => {}, { ...RECOGNISED_META, ...pipeline });
+    const result = await call(agent, 'lookup_schedule', {
+      first_name, last_name, date_of_birth: SPOKEN_IDENTITY.date_of_birth,
+    });
+
+    expect(h.lookupByNameAndDOB).toHaveBeenCalledExactlyOnceWith('Zelda', 'Quixote', '1958-01-04');
+    expect(result.upcomingAppointments).toEqual(PHONE_MATCH.upcomingAppointments);
+  });
+
+  it('requires short names to match exactly', async () => {
+    const agent = await createNoIvrAgent(async () => {}, {
+      ...RECOGNISED_META, ...pipeline,
+      precontext: { ...RECOGNISED_META.precontext, firstName: 'Jo' },
+    });
+    const result = await call(agent, 'lookup_schedule', {
+      first_name: 'Jon', last_name: 'Quixote', date_of_birth: SPOKEN_IDENTITY.date_of_birth,
+    });
+
+    expect(h.lookupByNameAndDOB).toHaveBeenCalledExactlyOnceWith('Jon', 'Quixote', '1958-01-04');
+    expect(result.found).toBe(false);
   });
 
   it.each(['01/05/1958', 'not a date', '02/30/1958'])(

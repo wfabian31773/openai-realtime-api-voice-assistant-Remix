@@ -124,6 +124,25 @@ function normalizePhoneNumber(phone: string): string {
   return digits.startsWith('1') && digits.length === 11 ? digits.slice(1) : digits;
 }
 
+/** Only a small spelling correction may select the phone candidate's name.
+ * Short names must agree exactly; neither a shared DOB nor one matching name
+ * establishes that a different household member is this candidate. */
+function nameConsistentWithCandidate(supplied: string, onFile: string): boolean {
+  const normalize = (name: string) => name.trim().replace(/\s+/g, ' ').toLowerCase();
+  const given = normalize(supplied);
+  const candidate = normalize(onFile);
+  if (!given || !candidate) return false;
+  if (given === candidate) return true;
+  if (Math.min(given.length, candidate.length) < 4 || Math.abs(given.length - candidate.length) > 1) return false;
+
+  // At most one insertion, deletion or substitution in this name component.
+  let i = 0;
+  while (i < Math.min(given.length, candidate.length) && given[i] === candidate[i]) i++;
+  if (given.length === candidate.length) return given.slice(i + 1) === candidate.slice(i + 1);
+  const [longer, shorter] = given.length > candidate.length ? [given, candidate] : [candidate, given];
+  return longer.slice(i + 1) === shorter.slice(i);
+}
+
 function callbackMismatchStaffNote(callbackNumber: string, callerId?: string): string | null {
   if (!callerId) return null;
   const callbackDigits = normalizePhoneNumber(callbackNumber);
@@ -144,8 +163,8 @@ export interface NoIvrAgentMetadata {
   callLogId?: string; // Database call log ID for patient context updates
   variant?: NoIvrAgentVariant; // Production or development variant
   /** Caller-ID pre-context from the full person base (sage_precontext): who
-   *  this number likely belongs to. A candidate until the caller supplies a
-   *  matching DOB; then lookup_schedule uses its canonical name. */
+   *  this number likely belongs to. A candidate until the caller supplies
+   *  consistent names and a matching DOB; then lookup_schedule uses its canonical name. */
   precontext?: import('./azulSchedulingAgent').AzulPrecontext;
   /** Live transcript up to the moment of filing — lets the ticketing app generate its staff-facing summary at creation instead of waiting for post-call enrichment. */
   getTranscript?: () => string;
@@ -1381,15 +1400,17 @@ is not an identity. Confirm the name and date of birth, then call again with the
               'first_name, last_name and date_of_birth. Never read this instruction aloud.',
           };
         } else if (params.first_name && params.last_name && params.date_of_birth) {
-          // A matching caller-supplied DOB validates the phone candidate even
-          // when the spoken name's spelling differs. Keep the on-file name and
-          // DOB out of the prompt and phone-only result until this gate passes.
+          // Both caller-supplied names must fit the candidate, allowing only
+          // small spelling corrections, before its matching DOB can select
+          // the canonical name. Otherwise search with the caller's own names.
           const candidate = metadata.precontext;
           const candidateDob = candidate?.matched && candidate.dobOnFile
             ? readDobQuietly(candidate.dobOnFile) : null;
           const givenDob = candidateDob ? readDobQuietly(params.date_of_birth) : null;
           const confirmedCandidate = candidate?.matched && candidate.firstName?.trim() &&
             candidate.lastNameOnFile?.trim() && candidateDob && givenDob &&
+            nameConsistentWithCandidate(params.first_name, candidate.firstName) &&
+            nameConsistentWithCandidate(params.last_name, candidate.lastNameOnFile) &&
             candidateDob.year === givenDob.year && candidateDob.month === givenDob.month &&
             candidateDob.day === givenDob.day
             ? {
