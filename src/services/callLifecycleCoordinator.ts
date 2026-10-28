@@ -7,6 +7,7 @@ import { getTwilioClient } from '../lib/twilioClient';
 import { callSessionService } from './callSessionService';
 import { twilioInsightsService } from './twilioInsightsService';
 import { answeredWithoutTicket } from './answeredCallDisposition';
+import { transcriptWithCallbackExtension } from './callbackExtensionNote';
 
 export type CallState = 'initiated' | 'ringing' | 'in_progress' | 'ending' | 'completed' | 'failed';
 
@@ -773,7 +774,7 @@ class CallLifecycleCoordinator extends EventEmitter {
     });
 
     try {
-      const transcript = record.transcriptLines.join('\n');
+      const transcript = transcriptWithCallbackExtension(record.transcriptLines.join('\n'), record.twilioCallSid);
       
       /**
        * ALWAYS WRITE OUR OWN MEASURED DURATION — corrected 2026-08-14.

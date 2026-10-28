@@ -23,6 +23,7 @@ import { compliantFallbackGreeting } from './services/compliantFallbackGreeting'
 import { azulSchedulingAgentConfig, registerAzulHoldingCallback, unregisterAzulHoldingCallback, registerAzulOfficeTransferCallback, unregisterAzulOfficeTransferCallback, registerAzulTranscriptProvider, unregisterAzulTranscriptProvider } from './agents/azulSchedulingAgent';
 import { flushAzulTimeline, getAzulTimeline, recordDirectorAction } from './services/toolTimeline';
 import { callLifecycleCoordinator, getMaxDurationMs } from './services/callLifecycleCoordinator';
+import { transcriptWithCallbackExtension } from './services/callbackExtensionNote';
 import { callMetadataForDB } from './services/callMetadataStore';
 import { recordingStatusTarget } from './services/recordingStatusTarget';
 import { landRecording } from './runtime/parkedRecordings';
@@ -1731,7 +1732,7 @@ async function addHumanAgent(openAiCallId: string): Promise<HandoffOutcome> {
           const { DatabaseStorage } = await import('../server/storage');
           const storage = new DatabaseStorage();
           
-          const transcript = callTranscripts.get(openAiCallId)?.join('\n') || '';
+          const transcript = transcriptWithCallbackExtension(callTranscripts.get(openAiCallId)?.join('\n') || '', callMeta.twilioCallSid);
           const endTime = new Date();
           
           // CRITICAL: DO NOT save duration - TWILIO IS THE SOURCE OF TRUTH
@@ -4697,7 +4698,7 @@ async function observeCall(
     const callMeta = callMetadataForDB.get(callId);
     if (callMeta?.dbCallLogId) {
       try {
-        const transcript = callTranscripts.get(callId)?.join('\n') || '';
+        const transcript = transcriptWithCallbackExtension(callTranscripts.get(callId)?.join('\n') || '', callMeta.twilioCallSid);
         const endTime = new Date();
         
         // CRITICAL: DO NOT save duration from OpenAI session - TWILIO IS THE SOURCE OF TRUTH
@@ -4828,7 +4829,7 @@ async function observeCall(
                   const result = await ticketingApiClient.updateTicketCallData({
                     callSid: twilioCallSid,
                     recordingUrl: updatedCallLog?.recordingUrl || undefined,
-                    transcript: finalTranscript || undefined,
+                    transcript: transcriptWithCallbackExtension(finalTranscript, twilioCallSid) || undefined,
                     callerPhone: callerPhone || undefined,
                     dialedNumber: dialedNumber || undefined,
                     agentUsed: agentSlug || undefined,
@@ -8031,7 +8032,7 @@ export function setupVoiceAgentRoutes(app: Express): void {
         try {
           const ticketUpdateResult = await ticketingApiClient.updateTicketCallData({
             callSid: effectiveTwilioCallSid,
-            transcript: transcript || undefined,
+            transcript: transcriptWithCallbackExtension(transcript || '', effectiveTwilioCallSid) || undefined,
             callerPhone: callLog?.from || undefined,
             dialedNumber: callLog?.to || undefined,
             agentUsed: agentSlug || undefined,

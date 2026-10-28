@@ -41,6 +41,9 @@ describe.each(lanes)('%s callback extension', (tool) => {
     ['202-555-0101x0204', '0204'],
     ['+1 (202) 555-0101 extension 204', '204'],
     ['202-555-0101 EXT. 204', '204'],
+    ['202-555-0101 ext. 204.', '204'],
+    ['202-555-0101 extension: 204', '204'],
+    ['202-555-0101 x: 0204!', '0204'],
   ])('files %s with the extension in staff notes', async (number, extension) => {
     const result = await file(tool, number);
     expect(result.success).toBe(true);
@@ -51,7 +54,7 @@ describe.each(lanes)('%s callback extension', (tool) => {
     expect(payload.description).not.toContain('Callback extension:');
   });
 
-  it.each(['202-555-0101 / 303-555-0102', '2-202-555-0101 ext 204', '202-555-01 ext 204', '202-555-0101 text204'])
+  it.each(['202-555-0101 / 303-555-0102', '2-202-555-0101 ext 204', '202-555-01 ext 204', '202-555-0101 text204', '202-555-0101 ext 204 / 303'])
     ('still refuses invalid base numbers: %s', async (number) => {
       const result = await file(tool, number);
       expect(result.success).toBe(false);

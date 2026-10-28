@@ -32,6 +32,7 @@
  */
 import { ticketingApiClient } from '../../server/services/ticketingApiClient';
 import { loggableTicketingError } from './loggableTicketingError';
+import { rememberCallbackExtension } from './callbackExtensionNote';
 // One-way edge: the registry does not import this module, the tools import both.
 import { getTool } from '../tools/registry';
 import type { CreateTicketParams, CreateTicketResponse } from '../../server/services/ticketingApiClient';
@@ -136,7 +137,10 @@ export function missingFieldFromError(error?: string): string | undefined {
  */
 export async function createTicketDurable(params: CreateTicketParams): Promise<DurableCreateResult> {
   const res = await ticketingApiClient.createTicket(params);
-  if (res.success && res.ticketNumber) return res;
+  if (res.success && res.ticketNumber) {
+    rememberCallbackExtension(params);
+    return res;
+  }
 
   const agent = params.callData?.agentUsed ?? 'unknown';
 
@@ -197,6 +201,8 @@ export async function createTicketDurable(params: CreateTicketParams): Promise<D
       );
       return { success: true, ticketNumber: write.ticketNumber };
     }
+
+    if (!write.alreadyExists) rememberCallbackExtension(params);
 
     console.info(
       `[TICKET OUTBOX] ✓ CAPTURED ${agent} request as ${write.outboxId}` +

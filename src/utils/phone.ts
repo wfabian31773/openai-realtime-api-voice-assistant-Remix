@@ -29,6 +29,6 @@ export function normalizePhone(phone: string): string {
 
 /** Separate an explicitly marked extension before validating a callback number. */
 export function splitCallbackExtension(phone: string): { base: string; extension?: string } {
-  const match = /^(.*?)(?<![a-z])(?:ext(?:ension)?\.?|x)\s*(\d+)\s*$/i.exec(phone);
+  const match = /^(.*?)(?<![a-z])(?:ext(?:ension)?\.?|x)\s*[:#-]?\s*(\d+)\s*[.!?,;]*\s*$/i.exec(phone);
   return match ? { base: match[1].trim(), extension: match[2] } : { base: phone };
 }
