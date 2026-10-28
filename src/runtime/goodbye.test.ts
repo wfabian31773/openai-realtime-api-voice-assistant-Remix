@@ -52,3 +52,14 @@ describe("conservative goodbye matcher", () => {
     "rejects agent questions and farewell mentions: %s", (text) => expect(isAgentSignOff(text)).toBe(false),
   );
 });
+
+describe("goodbye matcher cost (Codex P2, #396)", () => {
+  it("rejects long repeated farewells quickly instead of backtracking", () => {
+    const started = Date.now();
+    const text = "bye ".repeat(5_000) + "wait";
+    expect(callerConclusion(text, "")).toBeNull();
+    expect(isAgentSignOff(text)).toBe(false);
+    expect(callerConclusion("bye ".repeat(20) + "wait", "")).toBeNull();
+    expect(Date.now() - started).toBeLessThan(200);
+  });
+});
