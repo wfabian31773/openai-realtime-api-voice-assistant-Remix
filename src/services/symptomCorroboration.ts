@@ -656,6 +656,13 @@ const BARE_PATIENT_APPOSITIVE_BEFORE = new RegExp(String.raw`${PATIENT_INTRODUCT
 const PATIENT_INTRODUCTION_START = new RegExp(String.raw`${PATIENT_INTRODUCTION_BOUNDARY}$`);
 const PATIENT_APPOSITIVE_AFTER = new RegExp(String.raw`^\s*,\s+${PATIENT_NAME}(?=\s*(?:[,.?!]|$))`);
 const PATIENT_IDENTIFICATION_AFTER = /^(?:\s+is\s+|'s\s+)(?:me|myself)\b/;
+// In "the mutual patient's nurse" and "a mutual patient referral", the
+// patient phrase modifies the caller's role or call description. Check these
+// continuations before treating an introduction as the patient's identity.
+const PATIENT_PROVIDER_ROLE_AFTER = new RegExp(
+  String.raw`^'(?:s)?\s+(?:${PROVIDER_ROLE}|${OFFICE_STAFF})\b${NOT_POSSESSIVE}`,
+);
+const PATIENT_CALL_DESCRIPTION_AFTER = /^\s+(?:calls?|callbacks?|follow-?ups?|consult(?:ation)?s?|referrals?|requests?|questions?)\b/;
 
 /**
  * Pure, for tests: does this caller text identify the caller as a provider?
@@ -667,12 +674,14 @@ export function callerSaysTheyAreAProvider(spoken: string | readonly string[]): 
   const text = ` ${turns.join(' ').toLowerCase().replace(/[’‘]/g, "'").replace(/\s+/g, ' ')} `;
   return (
     PROVIDER_SELF_IDENTIFICATION.some((re) => affirmed(text, re)) ||
-    affirmed(text, MUTUAL_PATIENT, (before, after) =>
-      !PATIENT_IDENTIFICATION_BEFORE.test(before) &&
-      !PATIENT_APPOSITIVE_BEFORE.test(before) &&
-      !BARE_PATIENT_APPOSITIVE_BEFORE.test(before) &&
-      !(PATIENT_INTRODUCTION_START.test(before) && PATIENT_APPOSITIVE_AFTER.test(after)) &&
-      !PATIENT_IDENTIFICATION_AFTER.test(after)) ||
+    affirmed(text, MUTUAL_PATIENT, (before, after) => {
+      if (PATIENT_PROVIDER_ROLE_AFTER.test(after) || PATIENT_CALL_DESCRIPTION_AFTER.test(after)) return true;
+      return !PATIENT_IDENTIFICATION_BEFORE.test(before) &&
+        !PATIENT_APPOSITIVE_BEFORE.test(before) &&
+        !BARE_PATIENT_APPOSITIVE_BEFORE.test(before) &&
+        !(PATIENT_INTRODUCTION_START.test(before) && PATIENT_APPOSITIVE_AFTER.test(after)) &&
+        !PATIENT_IDENTIFICATION_AFTER.test(after);
+    }) ||
     turns.some(answersWithAFacility)
   );
 }

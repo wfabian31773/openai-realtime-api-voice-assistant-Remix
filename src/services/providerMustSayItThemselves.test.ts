@@ -312,6 +312,50 @@ describe('the gate', () => {
   );
 
   it.each([
+    "This is Sarah, the mutual patient's nurse.",
+    'This is Sarah, the mutual patient’s nurse.',
+    "This is Sarah, the mutual patients' nurse.",
+    'This is Sarah, the mutual patients’ nurse.',
+    "I am Sarah, the mutual patient's physician.",
+    "I'm Sarah, the mutual patient's nurse practitioner.",
+    "My name is Sarah, the mutual patient's coordinator.",
+    "Sarah, the mutual patient's nurse.",
+    "This is the mutual patient's nurse.",
+    "I'm the mutual patients' nurse.",
+  ])('recognizes a provider role after the patient phrase: %s', (spoken) => {
+    expect(callerSaysTheyAreAProvider(spoken)).toBe(true);
+    const corroboration = corr(spoken);
+    expect(corroboration.providerStated).toBe(true);
+    expect(corroboration.acuteStated).toBe(false);
+    expect(judgeEscalation({
+      callerType: 'healthcare_provider',
+      reason: 'Provider requesting the on-call physician',
+      corroboration,
+    })).toEqual({ allowed: true, basis: 'provider_or_facility' });
+  });
+
+  it.each([
+    'This is a mutual patient referral. Can I speak to the on-call physician?',
+    'This is actually a mutual patient referral.',
+    'This is our mutual patient consultation.',
+    'This is a mutual patient callback.',
+    'This is a mutual patient follow-up.',
+    'This is Sarah, a mutual patient referral.',
+    'This is Sarah, a mutual patient consultation.',
+    'Sarah, a mutual patient referral.',
+  ])('recognizes a call description after the patient phrase: %s', (spoken) => {
+    expect(callerSaysTheyAreAProvider(spoken)).toBe(true);
+    const corroboration = corr(spoken);
+    expect(corroboration.providerStated).toBe(true);
+    expect(corroboration.acuteStated).toBe(false);
+    expect(judgeEscalation({
+      callerType: 'healthcare_provider',
+      reason: 'Provider requesting the on-call physician',
+      corroboration,
+    })).toEqual({ allowed: true, basis: 'provider_or_facility' });
+  });
+
+  it.each([
     'Calling about the one mutual patient.',
     "I'm treating the one mutual patient.",
     'Calling about one of the mutual patients.',
@@ -374,6 +418,13 @@ describe('the gate', () => {
     'I am one of the mutual patients.', "I'm also one of the mutual patients you called.",
     'This is Jane, the mutual patient.', 'I am Jane, the mutual patient you called.', 'The mutual patient is me.',
     'Jane Smith, the mutual patient', 'The mutual patient, Jane Smith',
+    'This is a mutual patient. Can I speak to the on-call physician?',
+    'This is a mutual patient referred to you.',
+    'This is a mutual patient here for a referral.',
+    'This is Sarah, the mutual patient you called.',
+    "This is Sarah, the mutual patient's daughter.",
+    "This is Sarah, the mutual patients' mother.",
+    "This is Sarah, the mutual patient's nurse's mother.",
     ...['Jane', 'Jane Smith', 'Jane Anne Smith-Jones', "Mary-Jane O'Connor", 'jane smith', 'Jane King', 'Ming Lee']
       .flatMap((name) => [
         `${name}, the mutual patient.`,
