@@ -132,16 +132,25 @@ describe("the Grok body is the shape xAI's Prompting Guide prescribes", () => {
     expect(p).not.toMatch(/=====\s*(INTERNAL|HARD RULES|ANTI-NARRATION|INTERRUPTION|CONFUSION)/);
   });
 
-  it('is much shorter — the migration text in one number', async () => {
-    const grok = await prompt({ pipeline: 'runtime' });
-    const legacy = await prompt({});
-    expect(grok.length).toBeLessThan(legacy.length / 2);
-    // A RATCHET, not a measurement: the built prompt with no caller context
-    // read 14,082 characters on 2026-09-28 against 28,801 for the legacy body
-    // — 49%, of which 2,489 is the triage block and the urgent-symptom list
-    // both bodies share verbatim. Raise it with the reason beside it, never
-    // silently; lower it when a trim lands.
-    expect(grok.length).toBeLessThan(15_000);
+  it.each([
+    ['Tuesday 13:00 Los Angeles', '2026-10-27T20:00:00Z', 'on the next business day'],
+    ['Wednesday 01:00 Los Angeles', '2026-10-28T08:00:00Z', 'later this morning when the office opens'],
+  ])('is much shorter at %s — the migration text in one number', async (_label, time, callback) => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(new Date(time));
+      const grok = await prompt({ pipeline: 'runtime' });
+      const legacy = await prompt({});
+      expect(grok).toContain(`Non-urgent callbacks will be made ${callback}.`);
+      expect(grok.length).toBeLessThan(legacy.length / 2);
+      // RATCHET: measured 2026-10-28 with this fixture and pinned clocks, the
+      // built Grok body is 14,771 characters by day and 14,801 overnight
+      // (before the trim: 14,981 and 15,011). The triage block and urgent
+      // symptoms are shared verbatim with legacy. Never raise this silently.
+      expect(grok.length).toBeLessThan(15_000);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('carries no second office list — the runtime prefixes the knowledge pack, which has one', async () => {
