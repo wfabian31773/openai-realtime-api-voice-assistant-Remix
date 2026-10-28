@@ -101,7 +101,9 @@ export function spokenLanguageToolDescription(spokenLanguages?: readonly string[
   const names = policyNames(spokenLanguages);
   if (!names) return SET_SPOKEN_LANGUAGE_DESCRIPTION;
   return (
-    `${renderLanguagePolicy(spokenLanguages)} Call this the moment the caller ` +
+    // The policy's own any-other-language sentence is restated just below
+    // (the refusal), so the head carries only the list — same rule, once.
+    `This line speaks ${names}. Call this the moment the caller ` +
     `speaks ${names} other than the one you are using, or asks for it — then ` +
     'carry on in that language and take their request as normal. Do NOT call ' +
     'it for any other language: it will be refused, and you say in English ' +

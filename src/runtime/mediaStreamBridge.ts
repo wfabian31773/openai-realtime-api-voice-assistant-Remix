@@ -503,7 +503,7 @@ export interface VoiceCallRecord {
   silenceCut?: boolean;
   /**
    * True when the ladder stands down because the caller has been heard.
-   * v72 waited until its prompts were spent; v121 stands down before speaking.
+   * v72 waited until its prompts were spent; v131 stands down before speaking.
    */
   silenceStoodDown?: boolean;
 }
@@ -2287,7 +2287,7 @@ export class VoiceCallBridge {
    */
   private handleCallerSilence(): void {
     if (this.ended) return;
-    // v121: stand down BEFORE speaking. A caller we have already heard
+    // v131: stand down BEFORE speaking. A caller we have already heard
     // must never get the cannot-hear ladder, even after later quiet turns.
     if (this.callerEverHeard) {
       this.silenceStoodDown = true;

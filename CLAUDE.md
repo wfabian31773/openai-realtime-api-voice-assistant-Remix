@@ -658,13 +658,27 @@ is reading noise.
 
 ## Current branch — heard callers bypass the silence ladder (2026-10-28)
 
-This branch carries **`voice-runtime-v121-silence-ladder-heard-callers-20261028`**,
-on top of v117. Heard callers bypass the silence ladder before it speaks;
+This branch carries **`voice-runtime-v131-silence-ladder-heard-callers-20261028`**
+(renumbered from v121), on top of `main`'s v128 (#389, `558f288`); v127 is #376 on its open branch; v129 is #386 on its open branch; v130 is #387 on its open branch. Heard callers bypass the silence ladder before it speaks;
 SIP and runtime refuse ghost-call termination after any non-empty caller transcript.
 Both after-hours prompt bodies forbid the ghost line after a request.
-No new spoken wording. v118–v126 are claimed concurrently; recheck numbering
-before merge. The v117 contact-capture work remains included: surname spelling
+No new spoken wording. Numbering rechecked at v131 against
+main and open branches. The v117 contact-capture work remains included: surname spelling
 and full email confirmation reach the agent's
+
+The v128 base (#389, `558f288`) carries **`voice-runtime-v128-pcp-scheduling-hub-unassigned-exit-20261028`**
+(renumbered from v122), on top of `main`'s v126 (#394, `036c39e`); v127 is #376
+on its open branch. PCP patient scheduling honors captured scheduling purposes;
+shared appointment cues also recognize "schedule my appointment" and
+"appointment scheduling" before eyewear. A terminal Optical/Surgery refusal
+for office/location/surgeon retries once with `routingAskExhausted` inside
+`create_pcp_task`. No repeated routing-field ask or callback promise after a
+refused unassigned write. Synthetic live-tool regressions:
+`src/pcp/patientSchedulingUnassigned.test.ts`. No migration or production
+measurement. The contact-capture history below is retained.
+
+The v117 base carried **`voice-runtime-v117-contact-capture-20261027`**, on top
+of v116. Surname spelling and full email confirmation reach the agent's
 tool schemas, including answering-service and no-ivr-v2. Provider names use
 an exact or uniquely fuzzy Console match on both create-ticket and simplified
 submission paths. A fuzzy candidate must score at least 88% and beat every
@@ -672,6 +686,11 @@ other candidate by five percentage points, including candidates below 88%.
 Normalization collisions stay unresolved unless the original spelling matches
 exactly. No migration. Production before/after measurement remains outstanding;
 see `docs/observatory/STATE-OF-PLAY.md` §16.
+
+The v126 base (#394) carries **`voice-runtime-v126-noivr-prompt-trim-20261028`**, on top
+of v117; v122–v125 are on open branches. It removes repeated explanations
+from the no-IVR Grok prompt while retaining its rules. The length ratchet checks
+pinned daytime and overnight clocks. No migration.
 
 ---
 
@@ -2367,7 +2386,9 @@ voice-runtime-v114-the-si-assistant-plugin-api-20261022
 voice-runtime-v115-the-si-assistant-review-fixes-20261022
 voice-runtime-v116-the-record-office-name-travels-20261023
 voice-runtime-v117-contact-capture-20261027
-voice-runtime-v121-silence-ladder-heard-callers-20261028
+voice-runtime-v126-noivr-prompt-trim-20261028
+voice-runtime-v128-pcp-scheduling-hub-unassigned-exit-20261028
+voice-runtime-v131-silence-ladder-heard-callers-20261028
 ```
 
 Also printed at boot as `[voice-runtime] <marker>`. Anything ending in an
@@ -2491,7 +2512,10 @@ on it is evidence about current code.
 | **v115** or earlier — NOT the date (v13 and v57 were withdrawn; v59, v60, v63, v65 and v66 are retired; this ship is **v116**, on `grok/optical-send-record-office` (#371) ABOVE `main`'s v115 (#367, `df4b6bc`), which it contains) | the office on an optical patient's RECORD reaching the ticket when our directory cannot resolve it. **Operator ruling, 2026-10-23** (recorded in the v11 row): when the caller names no office and `usualOfficeFor` returns one, `file_optical_ticket` sends that name as `locationOfLastVisit` whether or not `lookupProviderAndLocation` turned it into a `locationId` — on a `no_match` and on an outage. Before, the name was dropped and the ticket filed unassigned with nothing for staff to read, though we held the office. **NOTHING ROUTES DIFFERENTLY ON OUR SIDE:** `officeFromRecord` is set before the lookup and read only at the payload; `recordLookup` is still the only thing the location gate, `officeAskWaived` and `lookup` read, so the gate, the first-call ask and `routingAskExhausted` behave as before. The name comes only from `usualOfficeFor`, so its guards hold — a certain match, the ticket's name the verified person's, and a date-of-birth conflict withholds the office, NAME INCLUDED (asserted). An office the caller names still wins. **The name is never logged, on the whole path** (asserted across `log`/`info`/`warn`/`error`) — **and that claim was false until the stand-in review's second round (P2):** `ticketingApiClient.lookupProviderAndLocation` printed `locationName` to `console.info` before every lookup (since v12), so every record-office call logged the patient's office beside its own lines. The line now prints `'(set)'`/`'(none)'`; a second test drives the REAL lookup with only `makeRequest` faked and asserts the name in no console line. The first test could not have caught it twice over: it stubbed the lookup, and it stringified arguments with `String()`, which prints an object as `[object Object]` — now JSON. **AND A SECOND LEAK ON THE SAME PATH (Codex thread PRRT_kwDORVukLs6vtp3I, P1):** `ticketingApiClient.createTicket`'s *"Creating ticket"* line printed `locationOfLastVisit` raw beside the call SID, its *"Lookup results"* line echoed the app's `locationSearched`, and `submitTicket`'s line printed `lastLocation` — every one a presence flag now, and a third test runs the REAL `createTicket` with only the request and warm-up faked (red with the raw field restored). **AND THE APP'S OWN WORDS (Codex thread PRRT_kwDORVukLs6vzaiN, P2):** a lookup warning or a refusal body reads like `Location "<office>" not found in system`, and `createTicket` printed `lookupWarnings` verbatim, `makeRequest` dumped every non-2xx body, both catch blocks printed the Error (whose message IS that text), and `durableTicketFiling`'s `[TICKET FILING] … REFUSED the payload` line printed `res.error`. Warnings are now counted, a refusal body is summarised by its keys and missing-field NAMES, an error with a status prints only the status, and the refusal line names the missing field or says the reason is withheld. Two more tests drive a warning and a 400 through the REAL `makeRequest` with only `fetch` faked; the 400 test went red first on the `[TICKET FILING]` line, which the review had not named. **AND THE RETRYABLE AND UNPARSEABLE PATHS (Codex threads PRRT_kwDORVukLs6vzf35 and PRRT_kwDORVukLs6vzf39, P2):** a 5xx or an HTTP 200 answering `success:false` takes the OUTBOX branch, whose `[TICKET OUTBOX] … FAILED … Cause:` line (and the outbox worker's three retry lines) printed `res.error` raw; and a non-JSON body made `response.json()` throw a SyntaxError quoting the body, which `makeRequest` printed. All now go through `src/services/loggableTicketingError.ts` — the client's own messages (timeout, unreachable, unreadable body, missing config) pass, anything else prints its status only — and the parse failure prints its status and error type. Three more tests in the same file drive a 503, a 200 `success:false` and a non-JSON 502 through the REAL `makeRequest`, each red with its line reverted. **AND THE TOOL RESULT ITSELF (Codex thread PRRT_kwDORVukLs6vzltO, P1):** `postFailureToolResult` handed `res.error` back as the tool result's `error` on a fieldless refusal and on an uncaptured failure, and the adapter prints that (`[TOOLS] ← … error:`) and `tool_timeline` persists it — so the same echo reached the console and the call row through the tool. Both branches now return `loggableTicketingError(res.error, res.statusCode)`; the model is told the status and that it failed, not the app's words. `durableTicketFiling.test.ts` +2 (a 422 and a 503 echoing an office, the office in neither result); three existing assertions that pinned the raw text (`patientPhone: Too big`, `Validation failed` on surgery and tech) were rewritten to the withheld form. Not touched: `noIvrAgent`'s own `Lookup warnings` line on the after-hours `/submit-ticket` path, which does not carry the record office. **AND THE DIRECTORY OUTAGE ITSELF (stand-in review of #371, P2-1):** when `/lookup` for the record's office failed, `lookupProviderAndLocation`'s catch printed the whole Error and returned its message as `error`, a 200 `{success:false, error}` was spread into the result as is, and the `Cause: ${lookup.error}` line in optical (and the same line in surgery, tech, records, `syncAgentService` and `ticketOutboxService`) printed it — so the app's `Location "<office>" …` text reached the console on exactly the outage path v116 adds. The catch now logs `describeFailure(error)`, the result carries `statusCode` beside the raw `error` (kept for logic; nothing reads it but logs), and every `Cause:` line prints `loggableLookupError(result)` (`src/services/loggableTicketingError.ts`). Three tests in `opticalOfficeFromRecord.test.ts` drive the REAL lookup and `makeRequest` with only `fetch` faked: a 503 and a 200 `success:false` on `/lookup`, each echoing the office, the console never naming it, and the raw error still on the result. **THE COMBINATION #381 READS IS PINNED AS ONE PAYLOAD** (stand-in review of #371, P2): on the no-match second call the record's name and `routingAskExhausted: true` travel together for the first time, with `departmentId: 1` and `priority: 'high'`; on an outage the same four arrive on the FIRST call (the ask is waived). **ON A CROSS-QUEUE REDIRECT** (a scheduling request to the HVA Hub) the record's name still travels — exactly as a caller-named office always has on a redirect, since the Hub schedules at an office — with `departmentId: 9`, `priority: 'medium'` and NO `routingAskExhausted`, which sanctions an unassigned OPTICAL ticket only. **ON THE RESOLVED PATH THE NAME NOW TRAVELS TOO** (stand-in review of #371, P2): before v116 a ticket routed to the record's office carried the `locationId` and no name; from v116 it also carries the record's office in `locationOfLastVisit`. The first-call routed test pins both (and no `routingAskExhausted`), so a disagreement between #381's name resolver and our id shows on the payload; it fails on the pre-v116 code. **THE FIRST-CALL ASK ON A NO-MATCH IS KEPT, PENDING THE OPERATOR'S RULING** (same review, P2, a RULE ZERO tension): when the record holds an office our `/lookup` cannot resolve, `recordLookup` stays undefined and the first `file_optical_ticket` still asks *"Which of our offices do you usually visit?"*, though the record's name travels anyway on the second call. A caller who hangs up on that ask takes the record's office with them (42 of 75 date-of-birth refusals are the call's last tool event). The alternative — extend `officeAskWaived` to *record office held, lookup did not resolve it*, so the first call files unassigned with the name and `routingAskExhausted` — changes when that flag is sent, which is the operator's call (standing instruction 1). Recorded as open in `docs/observatory/STATE-OF-PLAY.md` §15; nothing in this build changes the ask. **SHIP ORDER: either, but "harmless before #381" is NOT established** (stand-in review of #371, P3-1) — the deployed app already searches the location name it is sent (`locationSearched` / `locationMatched` come back on create-ticket), so whether a record name our `/lookup` missed is routed, or what it does, before #381 lands has not been read from the app's code or measured. What this build is certain to do is put the office name on tickets that today carry none. With #381 live, a name that matches exactly one office routes there. Tests: `src/tools/opticalOfficeFromRecord.test.ts` (no-match and outage payloads now assert `routingAskExhausted`, `departmentId` and `priority` beside the name; +1 redirect case). **NOT RUN HERE** — the session could not execute vitest; run the commands in the PR body. **NOT MEASURED IN PRODUCTION**, `docs/BACKEND_HANDOFF.md` applies — this changes what optical sends on the ticket path of the queue that routes BY office. **BEFORE-NUMBER, NOT YET TAKEN — TO MEASURE BEFORE MERGE; the read-only SQL and the test commands are in `docs/observatory/STATE-OF-PLAY.md` §15** (no production access in the session that wrote this): optical tickets (department 1, agent provenance) filed with no `location_id` AND no `location_of_last_visit` on calls whose `tool_timeline` carries a certain `lookup_patient` — i.e. a record the process held and the ticket did not — over the 14 days before this deploys; join Support Center tickets to `call_logs.tool_timeline` by canonical SID. The 2026-10-01 before-arm for the wider guard is 15 of 391 Optical Support tickets with no `location_id`. **THE NUMBERS:** that population's `location_of_last_visit` must go from empty to the record's office on every such ticket from this build; with #381 live, the share of them that gains a `location_id`. **THE GUARDS:** **optical tickets with no `location_id` must not rise** (this adds a name, never removes an id); **tickets #381 resolves from the name must land on the record's office** — spot-check `location_id` against `usualOfficeFor`'s office on the call; and optical tickets carrying an office on a call with a date-of-birth conflict must stay 0 |
 
 | **v116** or earlier — NOT the date; this branch is **v117**, above v116 | Item #14 contact capture: surname spelling and complete email confirmation on agent-visible tool schemas; exact or unique fuzzy provider canonicalization on both ticket submission paths. Runner-up margin uses the whole roster; normalized collisions refuse a match. See `docs/observatory/STATE-OF-PLAY.md` §16. No migration; production measurement outstanding. |
-| **v117** or earlier — NOT the date; this branch is **v121**, on top of v117 | Heard callers bypass the silence ladder before any cannot-hear prompt; never-heard callers retain the original ladder. Ghost-call prompts and termination tools forbid ghost treatment after any non-empty caller transcript, including a request. On top of v117; no migration or new spoken wording. Offline bridge and actual agent-tool tests use synthetic requests indexed by the three reported call SIDs. Production impact remains unmeasured. v118–v126 are claimed concurrently; marker numbering must be checked before merge. |
+| **v117** or earlier — NOT the date; this branch is **v126**, above v117 | No-IVR Grok prompt trim: repeated explanations removed without changing rules; the length ratchet checks pinned daytime and overnight clocks. v122–v125 are on open branches. No migration. |
+
+| **v126** or earlier — NOT the date; this branch is **v128** (renumbered from v122), ABOVE `main`'s v126 (#394, `036c39e`), which it contains; v127 is #376 on its open branch | PCP patient scheduling reaches the HVA Hub; terminal Optical/Surgery office or surgeon refusals retry once with the existing unassigned flag. `src/pcp/patientSchedulingUnassigned.test.ts` exercises the live filing tool with synthetic data. No migration; production measurement outstanding. |
+| **v128** or earlier — NOT the date; this branch is **v131** (renumbered from v121), ABOVE `main`'s v128 (#389, `558f288`), which it contains; v127 is #376 on its open branch; v129 is #386 on its open branch; v130 is #387 on its open branch | Heard callers bypass the silence ladder before any cannot-hear prompt; never-heard callers retain the original ladder. Ghost-call prompts and termination tools forbid ghost treatment after any non-empty caller transcript, including a request. No migration or new spoken wording. Offline bridge and actual agent-tool tests use synthetic requests indexed by the three reported call SIDs. Production impact remains unmeasured. |
 
 ### THE SURGEON CLAIM — BUILT, REVIEWED SIX TIMES, WITHDRAWN 2026-09-17
 
@@ -2578,11 +2602,13 @@ v10 (the person base and the join), v11 (the locked record, #290) and v12
 (optical's office ladder) are a CHAIN on `main`: each merged after the one
 before and brought it in, so v12 contains both.
 
-**AND THE SEQUENCE HAS TWO HOLES IN IT ON PURPOSE: v13 AND v57. v121 IS THE
-NEWEST — heard callers bypass the silence ladder, above v117, which it contains.
-v117 carries contact capture (#14), above v116, which it contains. v116 carries
+**AND THE SEQUENCE HAS TWO HOLES IN IT ON PURPOSE: v13 AND v57. v131 IS THE
+NEWEST — v131: once a caller is heard, the silence ladder and ghost-call exit stand down, on its branch ABOVE `main`'s v128, which it contains; v127 is #376 on its open branch; v129 is #386 on its open branch; v130 is #387 on its open branch —
+AND v128 IS WHAT `main` CARRIES, SINCE #389 MERGED 2026-10-28 (`558f288`): PCP scheduling and
+unassigned exit, above v126 (#394, `036c39e`), the no-IVR prompt trim, above
+v117; v122–v125 are on open branches. v117 is contact capture (#14), above v116. v116 carries
 the record's office name on an optical ticket — on its branch
-ABOVE `main`'s v115, which it contains — AND v115 IS WHAT `main` CARRIES, SINCE
+ABOVE v115, which it contains — and v115 came from
 #367 MERGED 2026-10-22 (`df4b6bc`): the five #366 review fixes; on top of v114,
 from #366 MERGED 2026-10-22 (`086062b`): the SI Assistant plugin API, dark; on top of v113, from #363 MERGED
 2026-10-22 (`5112fa1`): the NPX demo line, stacked on v112 (the medication name is asked
@@ -2848,7 +2874,7 @@ never read v57; **v58 was that next ship** — the identity probe, an instrument
 and no behaviour change (see the v56 row below for what it measures). It is no
 longer the current marker: see the paragraph beneath this one.
 
-**v115 (#367) IS WHAT `main` CARRIES (merged 2026-10-22, `df4b6bc`), AND v57,
+**v128 (#389) IS WHAT `main` CARRIES (merged 2026-10-28, `558f288`), AND v57,
 v59, v60, v63, v65 AND v66 ARE RETIRED RATHER THAN REUSED.** Each of the last
 five was a branch's own number while it sat below `main`, and each was given up
 the moment a merge put it there: two branches carrying one version make two

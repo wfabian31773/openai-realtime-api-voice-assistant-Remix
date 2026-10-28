@@ -890,14 +890,27 @@ import { callEnvironment } from "./callRecord";
  * On top of v116. No migration; production impact remains unmeasured.
  */
 /**
- * v121 — HEARD CALLERS BYPASS THE SILENCE LADDER (2026-10-28). Once any
+ * v126 — NO-IVR PROMPT TRIM (2026-10-28). Remove repeated explanations from
+ * the Grok prompt while keeping its rules; the length ratchet checks pinned
+ * daytime and overnight clocks. On top of v117; v122–v125 are on open
+ * branches. `src/agents/noIvrPromptForGrok.ts`.
+ */
+/**
+ * v128 — PCP SCHEDULING AND UNASSIGNED EXIT (2026-10-28; renumbered from v122). Patient scheduling
+ * reaches the HVA Hub, including a captured scheduling purpose alongside the
+ * patient latch. A terminal Optical/Surgery office or surgeon refusal retries
+ * once with routingAskExhausted instead of sending PCP back through re-asks.
+ * On top of v126 (#394); v127 is #376 on its open branch. No migration; production impact remains unmeasured.
+ */
+/**
+ * v131 — HEARD CALLERS BYPASS THE SILENCE LADDER (2026-10-28). Once any
  * non-empty caller transcript arrives, the ladder stands down before speaking
  * and cannot end the call. Ghost-call prompts forbid use after a request;
  * terminate_call refuses ghost_call after a caller transcript on SIP and runtime.
- * On top of v117. No migration; production impact remains unmeasured.
+ * On top of v128 (#389); renumbered from v121; v127 is #376 on its open branch; v129 is #386 on its open branch; v130 is #387 on its open branch. No migration; production impact remains unmeasured.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v121-silence-ladder-heard-callers-20261028";
+  "voice-runtime-v131-silence-ladder-heard-callers-20261028";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

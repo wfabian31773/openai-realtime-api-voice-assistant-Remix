@@ -562,7 +562,7 @@ describe("the window is a dial, and a typo cannot disarm the ladder", () => {
  * deliberately unchanged — the tests above are its guard, and one below
  * proves the new latch cannot disarm it.
  */
-describe("heard callers retire the ladder before it speaks (v121)", () => {
+describe("heard callers retire the ladder before it speaks (v131)", () => {
   it.each(["Hello.", "I need help with an appointment.", "Necesito ayuda."])(
     "never prompts or cuts after the first non-empty caller transcript: %s",
     async (text) => {
