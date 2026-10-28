@@ -7,6 +7,11 @@
  * prescription with no prescriber.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+
+vi.mock('../services/ticketOutboxService', async () => {
+  const { queueTicketOutboxMock } = await import('../testUtils/queueTicketOutbox');
+  return queueTicketOutboxMock();
+});
 import { runTool } from './registry';
 import './sharedPatientTools';
 import './techTools';
@@ -250,6 +255,7 @@ describe('what it refuses, and what it does not', () => {
     const api = await client();
     vi.spyOn(api, 'createTicket').mockResolvedValueOnce({
       success: false,
+      statusCode: 422,
       error: 'Validation failed',
     } as never);
 

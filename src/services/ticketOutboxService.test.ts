@@ -594,3 +594,43 @@ describe('a dead letter must not hold the key its own correction needs', () => {
     expect(res.terminal).toBe(true);
   });
 });
+
+describe('late patient-scoped filings', () => {
+  it('reopens completed call sync before publishing the sent filing', async () => {
+    const sid = 'CA0123456789abcdef0123456789abcdef';
+    const payload = wrapCreateTicketPayload({
+      ...OPTICAL_OTHER,
+      callData: { callSid: sid, transcript: 'Callback extension: 222' },
+      idempotencyKey: `call-${sid}-p2`,
+    });
+    updateResults.push(entry(payload, { callSid: `${sid}-p2` }), undefined, undefined);
+    createTicket.mockResolvedValueOnce({ success: true, ticketNumber: 'VA-TEST', consolidated: true });
+    const result = await TicketOutboxService.attemptSend('ob-1');
+    expect(result).toMatchObject({ success: true, ticketNumber: 'VA-TEST', consolidated: true });
+    const reset = setPayloads.findIndex(value => value.callDataSynced === false);
+    const sent = setPayloads.findIndex(value => value.status === 'sent');
+    expect(reset).toBeGreaterThan(0);
+    expect(reset).toBeLessThan(sent);
+    expect(setPayloads[reset]).toMatchObject({ ticketingSyncRetries: 0 });
+    expect(setPayloads[sent].payload).toMatchObject({ consolidated: true, params: payload.params });
+    expect(whereCols[reset]).toContain('call_sid');
+  });
+});
+
+it('marks a live refusal resolved so it does not trigger unattended follow-up', async () => {
+  updateResults.push(entry(wrapCreateTicketPayload(OPTICAL_OTHER)), undefined);
+  createTicket.mockResolvedValueOnce({ success: false, statusCode: 400, error: 'Missing required information: office' });
+  const result = await TicketOutboxService.attemptSend('ob-1', { liveCaller: true });
+  expect(result).toMatchObject({ success: false, terminal: true, statusCode: 400 });
+  expect(setPayloads.find(value => value.status === 'dead_letter')).toMatchObject({
+    refusalStatusCode: 400, resolvedAt: expect.any(Date),
+  });
+});
+
+it('returns the immediate filing response including the records form result', async () => {
+  updateResults.push(entry(wrapCreateTicketPayload(OPTICAL_OTHER)), undefined);
+  createTicket.mockResolvedValueOnce({ success: true, ticketNumber: 'VA-TEST', form: { requested: true, sent: true, channel: 'sms' } });
+  expect(await TicketOutboxService.attemptSend('ob-1', { liveCaller: true })).toMatchObject({
+    success: true, ticketNumber: 'VA-TEST', form: { requested: true, sent: true, channel: 'sms' },
+  });
+});

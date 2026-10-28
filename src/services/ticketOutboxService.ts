@@ -1,5 +1,5 @@
 import { db } from '../../server/db';
-import { ticketOutbox } from '../../shared/schema';
+import { callLogs, ticketOutbox } from '../../shared/schema';
 import { eq, and, lte, or, isNull, sql, inArray } from 'drizzle-orm';
 import { ticketingApiClient } from '../../server/services/ticketingApiClient';
 import { loggableTicketingError, loggableLookupError } from './loggableTicketingError';
@@ -83,10 +83,7 @@ interface OutboxWriteResult {
   reopened?: boolean;
 }
 
-interface OutboxSendResult {
-  success: boolean;
-  ticketNumber?: string;
-  error?: string;
+interface OutboxSendResult extends CreateTicketResponse {
   outboxId: string;
   /**
    * The far side READ the payload and refused it, so the row went straight to
@@ -242,7 +239,7 @@ export class TicketOutboxService {
     return { outboxId: entry.id, alreadyExists: false };
   }
 
-  static async attemptSend(outboxId: string): Promise<OutboxSendResult> {
+  static async attemptSend(outboxId: string, options: { liveCaller?: boolean } = {}): Promise<OutboxSendResult> {
     /**
      * THE BACKOFF HAS TO BE PART OF THE CLAIM — Codex, PR #244.
      *
@@ -321,12 +318,20 @@ export class TicketOutboxService {
 
       if (response.success && response.ticketNumber) {
         const now = new Date();
+        const canonicalSid = isCreateTicketPayload(stored) ? stored.params.callData?.callSid : undefined;
+        if (canonicalSid && /^CA[0-9a-f]{32}$/i.test(canonicalSid)) {
+          // A retry can file after teardown and after an earlier sync. Make the
+          // completed call eligible again before publishing the sent status.
+          await db.update(callLogs).set({ callDataSynced: false, ticketingSyncRetries: 0 })
+            .where(and(eq(callLogs.callSid, canonicalSid), eq(callLogs.status, 'completed')));
+        }
         await db
           .update(ticketOutbox)
           .set({
             status: 'sent',
             ticketNumber: response.ticketNumber,
             externalTicketId: response.ticketId ?? null,
+            ...(isCreateTicketPayload(stored) ? { payload: { ...stored, consolidated: response.consolidated === true } } : {}),
             sentAt: now,
             updatedAt: now,
           })
@@ -335,7 +340,7 @@ export class TicketOutboxService {
         console.info(`[TICKET OUTBOX] ✓ Sent: ${outboxId} → ${response.ticketNumber}`);
 
         // Update call log ticketing_synced flag
-        const callSidForSync = entry.callSid;
+        const callSidForSync = canonicalSid || entry.callSid;
         const callLogIdForSync = entry.callLogId;
         const ticketNumberForSync = response.ticketNumber;
         setImmediate(async () => {
@@ -376,7 +381,7 @@ export class TicketOutboxService {
           });
         }
 
-        return { success: true, ticketNumber: response.ticketNumber, outboxId };
+        return { ...response, outboxId };
       }
 
       const error = response.error || 'API returned success=false with no ticket number';
@@ -406,6 +411,7 @@ export class TicketOutboxService {
           error,
           true,
           response.statusCode,
+          options.liveCaller,
         );
         return { ...refused, statusCode: response.statusCode };
       }
@@ -528,6 +534,7 @@ export class TicketOutboxService {
     /** HTTP status behind a terminal refusal. Persisted so the alarm can
      *  tell a 400 from a transport dead letter without reading last_error. */
     statusCode?: number,
+    liveCaller = false,
   ): Promise<OutboxSendResult> {
     const newRetryCount = currentRetryCount + 1;
     const isDeadLetter = terminal || newRetryCount >= MAX_RETRIES;
@@ -547,6 +554,9 @@ export class TicketOutboxService {
         retryCount: newRetryCount,
         lastError: error,
         ...(persistedRefusal !== undefined ? { refusalStatusCode: persistedRefusal } : {}),
+        // A live tool returns the refusal to the caller for correction. Only a
+        // worker's unattended refusal needs a follow-up notice and alarm.
+        ...(terminal && liveCaller ? { resolvedAt: new Date() } : {}),
         nextRetryAt,
         updatedAt: new Date(),
       })

@@ -39,7 +39,6 @@ import type { VoiceCallRecord } from "./mediaStreamBridge";
 import { peekParkedRecording, releaseParkedRecording } from "./parkedRecordings";
 import { resolveAgentId, type AgentIdLookup } from "./agentIdentity";
 import { type RuntimeTransferOutcome } from "./transferOutcomeLog";
-import { transcriptWithCallbackExtension } from "../services/callbackExtensionNote";
 
 /**
  * Identity the runtime was TOLD, never identity it inferred. Supplied by
@@ -255,7 +254,7 @@ export function toCallLogRow(
     // duration-mismatch detector compares this against Twilio's own,
     // which is the point of keeping the column.
     localDurationSeconds: durationSeconds,
-    transcript: transcriptWithCallbackExtension(record.transcript, record.callSid),
+    transcript: record.transcript,
     // Not an OpenAI call. Cost reconciliation estimates OpenAI spend from
     // duration whenever the token columns are null, and they always are
     // here, so without this every Grok call is priced at the OpenAI rate

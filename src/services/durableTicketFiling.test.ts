@@ -23,13 +23,13 @@ vi.mock('../../server/services/ticketingApiClient', () => ({
 }));
 
 const writeToOutbox = vi.fn();
-const wasRefused = vi.fn();
+const attemptSend = vi.fn();
 vi.mock('./ticketOutboxService', async (importOriginal) => {
   // The envelope helpers stay REAL. Stubbing `wrapCreateTicketPayload` would
   // make this suite agree with itself about the discriminator while the outbox
   // read a different one, which is the only way this wiring can silently fail.
   const actual = await importOriginal<typeof import('./ticketOutboxService')>();
-  return { ...actual, TicketOutboxService: { writeToOutbox, wasRefused } };
+  return { ...actual, TicketOutboxService: { writeToOutbox, attemptSend } };
 });
 
 // Registration is an import side effect, and askAsFor reads the registry — so
@@ -43,7 +43,6 @@ await import('../tools/medicalRecordsTools');
 
 const { createTicketDurable, postFailureToolResult, missingFieldFromError } = await import('./durableTicketFiling');
 const { CREATE_TICKET_PAYLOAD_KIND } = await import('./ticketOutboxService');
-const { transcriptWithCallbackExtension } = await import('./callbackExtensionNote');
 
 /**
  * What optical files when the caller's words do not fit any of its eighteen
@@ -68,109 +67,23 @@ const OPTICAL_OTHER = {
 };
 
 beforeEach(() => {
-  vi.clearAllMocks();
+  vi.resetAllMocks();
   writeToOutbox.mockResolvedValue({ outboxId: 'ob-1', alreadyExists: false });
-  wasRefused.mockResolvedValue(false);
-});
-
-describe('callback extensions after a refused outbox payload', () => {
-  const params = (sid: string, extension?: string) => ({
-    departmentId: 1, patientPhone: '2025550101', description: 'Test request',
-    idempotencyKey: `call-${sid}`,
-    callData: { callSid: sid, transcript: extension ? `Callback extension: ${extension}` : undefined },
-  });
-  const transcript = (sid: string) => transcriptWithCallbackExtension('CALLER: Hello', sid);
-
-  it.each([
-    ['001', '101', '202', 'CALLER: Hello\nCallback extension: 202'],
-    ['002', undefined, '202', 'CALLER: Hello\nCallback extension: 202'],
-    ['003', '101', undefined, 'CALLER: Hello'],
-  ] as const)('replaces the note when a dead letter is reopened (%s)', async (suffix, oldExtension, newExtension, expected) => {
-    const sid = `CA${suffix.padStart(32, '0')}`;
-    createTicket.mockResolvedValue({ success: false, statusCode: 503 });
-    await createTicketDurable(params(sid, oldExtension));
-    writeToOutbox.mockResolvedValueOnce({ outboxId: 'ob-1', alreadyExists: true, status: 'pending', reopened: true });
-    await createTicketDurable(params(sid, newExtension));
-    expect(transcript(sid)).toBe(expected);
-  });
-
-  it.each([
-    ['011', '101', '202', 'CALLER: Hello\nCallback extension: 202'],
-    ['012', undefined, '202', 'CALLER: Hello\nCallback extension: 202'],
-    ['013', '101', undefined, 'CALLER: Hello'],
-  ] as const)('replaces a refused outbox note on a successful direct retry (%s)', async (suffix, oldExtension, newExtension, expected) => {
-    const sid = `CA${suffix.padStart(32, '0')}`;
-    createTicket.mockResolvedValueOnce({ success: false, statusCode: 503 });
-    await createTicketDurable(params(sid, oldExtension));
-    wasRefused.mockResolvedValueOnce(true);
-    createTicket.mockResolvedValueOnce({ success: true, ticketNumber: 'TEST-1' });
-    await createTicketDurable(params(sid, newExtension));
-    expect(wasRefused).toHaveBeenCalledWith('ob-1');
-    expect(transcript(sid)).toBe(expected);
-  });
-
-  it('keeps the first note when an existing outbox entry was not reopened', async () => {
-    const sid = `CA${'21'.padStart(32, '0')}`;
-    createTicket.mockResolvedValue({ success: false, statusCode: 503 });
-    await createTicketDurable(params(sid, '101'));
-    writeToOutbox.mockResolvedValueOnce({ outboxId: 'ob-1', alreadyExists: true, status: 'pending' });
-    await createTicketDurable(params(sid, '202'));
-    expect(transcript(sid)).toBe('CALLER: Hello\nCallback extension: 101');
-  });
-
-  it('keeps the first note on a direct idempotent retry when the outbox was not refused', async () => {
-    const sid = `CA${'22'.padStart(32, '0')}`;
-    createTicket.mockResolvedValueOnce({ success: false, statusCode: 503 });
-    await createTicketDurable(params(sid, '101'));
-    createTicket.mockResolvedValueOnce({ success: true, ticketNumber: 'TEST-1' });
-    await createTicketDurable(params(sid, '202'));
-    expect(wasRefused).toHaveBeenCalledWith('ob-1');
-    expect(transcript(sid)).toBe('CALLER: Hello\nCallback extension: 101');
-  });
-
-  it('preserves the filed note if the outbox status cannot be checked', async () => {
-    const sid = `CA${'23'.padStart(32, '0')}`;
-    createTicket.mockResolvedValueOnce({ success: false, statusCode: 503 });
-    await createTicketDurable(params(sid, '101'));
-    wasRefused.mockRejectedValueOnce(new Error('database unavailable'));
-    createTicket.mockResolvedValueOnce({ success: true, ticketNumber: 'TEST-1' });
-    expect(await createTicketDurable(params(sid, '202'))).toMatchObject({ success: true });
-    expect(transcript(sid)).toBe('CALLER: Hello\nCallback extension: 101');
-  });
-
-  it('does not overwrite a newer correction while checking the previous payload', async () => {
-    const sid = `CA${'24'.padStart(32, '0')}`;
-    createTicket.mockResolvedValueOnce({ success: false, statusCode: 503 });
-    await createTicketDurable(params(sid, '101'));
-
-    let finishCheck!: (refused: boolean) => void;
-    let checkStarted!: () => void;
-    const started = new Promise<void>((resolve) => { checkStarted = resolve; });
-    wasRefused.mockImplementationOnce(() => {
-      checkStarted();
-      return new Promise<boolean>((resolve) => { finishCheck = resolve; });
-    });
-    createTicket.mockResolvedValueOnce({ success: true, ticketNumber: 'TEST-1' });
-    const earlierRetry = createTicketDurable(params(sid, '202'));
-    await started;
-    createTicket.mockResolvedValueOnce({ success: false, statusCode: 503 });
-    writeToOutbox.mockResolvedValueOnce({ outboxId: 'ob-1', alreadyExists: true, status: 'pending', reopened: true });
-    await createTicketDurable(params(sid, '303'));
-    finishCheck(true);
-    await earlierRetry;
-    expect(transcript(sid)).toBe('CALLER: Hello\nCallback extension: 303');
+  attemptSend.mockImplementation(async (outboxId: string) => {
+    const result = await createTicket(writeToOutbox.mock.calls[writeToOutbox.mock.calls.length - 1][0].params);
+    return { ...result, outboxId, ...(!result.success && (result.statusCode === 400 || result.statusCode === 422) ? { terminal: true } : {}) };
   });
 });
 
-describe('the happy path is untouched', () => {
-  it('returns the ticket and never opens the outbox', async () => {
+describe('the happy path', () => {
+  it('persists before returning the ticket', async () => {
     createTicket.mockResolvedValue({ success: true, ticketNumber: 'VA-52001' });
 
     const res = await createTicketDurable(OPTICAL_OTHER);
 
     expect(res.ticketNumber).toBe('VA-52001');
     expect(res.queued).toBeUndefined();
-    expect(writeToOutbox).not.toHaveBeenCalled();
+    expect(writeToOutbox).toHaveBeenCalledOnce();
   });
 });
 
@@ -327,14 +240,14 @@ describe('a payload the server read and refused', () => {
     error: 'Missing required information: surgeon. Surgery tickets are assigned by surgeon.',
   };
 
-  it('is never queued — retrying cannot change a refusal', async () => {
+  it('does not promise a queued retry after a refusal', async () => {
     createTicket.mockResolvedValue(REFUSED);
 
     const res = await createTicketDurable(OPTICAL_OTHER);
 
     expect(res.terminal).toBe(true);
     expect(res.queued).toBe(false);
-    expect(writeToOutbox).not.toHaveBeenCalled();
+    expect(writeToOutbox).toHaveBeenCalledOnce();
   });
 
   it('becomes a question for the caller, in the tool\'s own words', async () => {
@@ -436,7 +349,7 @@ describe('a payload the server read and refused', () => {
       retryable?: boolean;
       error?: string;
     };
-    expect(writeToOutbox).not.toHaveBeenCalled();
+    expect(writeToOutbox).toHaveBeenCalledOnce();
     expect(out.success).toBe(false);
     expect(out.retryable).toBe(false);
     // The app's own text is withheld from the tool result (v116, thread
@@ -456,7 +369,7 @@ describe('a payload the server read and refused', () => {
     });
     const res = await createTicketDurable(OPTICAL_OTHER);
     expect(res.terminal).toBe(true);
-    expect(writeToOutbox).not.toHaveBeenCalled();
+    expect(writeToOutbox).toHaveBeenCalledOnce();
   });
 
   it('but the 2026-08-31 outage still gets captured', async () => {

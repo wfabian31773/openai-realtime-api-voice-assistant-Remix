@@ -18,6 +18,11 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
+vi.mock('../services/ticketOutboxService', async () => {
+  const { queueTicketOutboxMock } = await import('../testUtils/queueTicketOutbox');
+  return queueTicketOutboxMock();
+});
+
 vi.hoisted(() => {
   process.env.DATABASE_URL ??= 'postgres://test:test@127.0.0.1:5432/test';
 });

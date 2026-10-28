@@ -32,7 +32,6 @@
  */
 import { ticketingApiClient } from '../../server/services/ticketingApiClient';
 import { loggableTicketingError } from './loggableTicketingError';
-import { callbackExtensionOutboxEntry, rememberCallbackExtension } from './callbackExtensionNote';
 // One-way edge: the registry does not import this module, the tools import both.
 import { getTool } from '../tools/registry';
 import type { CreateTicketParams, CreateTicketResponse } from '../../server/services/ticketingApiClient';
@@ -129,29 +128,47 @@ export function missingFieldFromError(error?: string): string | undefined {
 }
 
 /**
- * POST the ticket; if that fails, persist it verbatim before returning.
+ * Persist keyed filings before posting so the staff-only note can be restored
+ * even if the process stops before call finalization. Unkeyed filings retain
+ * the existing POST-first path because they cannot safely be deduplicated.
  *
  * Never throws — a filing tool that throws is a call that ends badly, and the
  * whole point of this function is to be the thing that does not lose the
  * request.
  */
 export async function createTicketDurable(params: CreateTicketParams): Promise<DurableCreateResult> {
+  const sid = params.callData?.callSid;
+  const key = params.idempotencyKey;
+  const scoped = sid && key && new RegExp(`^call-${sid}-p\\d{1,3}$`).test(key);
+  if (sid && /^CA[0-9a-f]{32}$/i.test(sid) && key && (scoped || key === `call-${sid}`)) {
+    let outboxId: string | undefined;
+    try {
+      const { TicketOutboxService, wrapCreateTicketPayload } = await import('./ticketOutboxService');
+      const write = await TicketOutboxService.writeToOutbox(wrapCreateTicketPayload(params), key.slice(5));
+      outboxId = write.outboxId;
+      if (write.alreadyExists && write.status === 'sent' && write.ticketNumber) {
+        return { success: true, ticketNumber: write.ticketNumber };
+      }
+      const sent = await TicketOutboxService.attemptSend(write.outboxId, { liveCaller: true });
+      if (sent.success && sent.ticketNumber) return sent;
+      if (sent.terminal) return { ...sent, queued: false, missingField: missingFieldFromError(sent.error) };
+      console.error(
+        `[TICKET OUTBOX] Immediate filing failed: ${loggableTicketingError(sent.error, sent.statusCode)} — ` +
+          'the persisted filing will be retried',
+      );
+      return { ...sent, queued: true };
+    } catch {
+      if (outboxId) {
+        // The worker can reclaim a failed or interrupted send using this key.
+        console.error('[TICKET OUTBOX] Immediate send failed; the persisted filing will be retried');
+        return { success: false, queued: true, outboxId, error: 'ticket send unavailable' };
+      }
+      console.error('[TICKET OUTBOX] Could not persist the ticket before filing');
+      return { success: false, queued: false, error: 'ticket persistence unavailable' };
+    }
+  }
   const res = await ticketingApiClient.createTicket(params);
   if (res.success && res.ticketNumber) {
-    const previous = callbackExtensionOutboxEntry(params);
-    if (previous?.outboxId) {
-      try {
-        const { TicketOutboxService } = await import('./ticketOutboxService');
-        if (await TicketOutboxService.wasRefused(previous.outboxId)) {
-          rememberCallbackExtension(params, { replace: true, expected: previous });
-        }
-      } catch {
-        // An unavailable status cannot prove the first payload was refused.
-        // The ticket still succeeded; retain the existing note.
-        console.warn('[TICKET OUTBOX] Could not check the prior payload status for callback extension sync');
-      }
-    }
-    rememberCallbackExtension(params);
     return res;
   }
 
@@ -213,10 +230,6 @@ export async function createTicketDurable(params: CreateTicketParams): Promise<D
         `[TICKET OUTBOX] ✓ ${agent} request ${write.outboxId} was already sent as ${write.ticketNumber}`,
       );
       return { success: true, ticketNumber: write.ticketNumber };
-    }
-
-    if (!write.alreadyExists || write.reopened) {
-      rememberCallbackExtension(params, { outboxId: write.outboxId, replace: write.reopened });
     }
 
     console.info(

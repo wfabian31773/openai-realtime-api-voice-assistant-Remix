@@ -7,6 +7,11 @@
  * would matter to a records clerk holding the ticket.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+
+vi.mock('../services/ticketOutboxService', async () => {
+  const { queueTicketOutboxMock } = await import('../testUtils/queueTicketOutbox');
+  return queueTicketOutboxMock();
+});
 import { runTool } from './registry';
 import './sharedPatientTools';
 import './medicalRecordsTools';
@@ -284,7 +289,7 @@ describe('the things that make a clerk ring the patient back', () => {
     expect(r.missingFields).toContain('date_of_birth');
   });
 
-  it('reports a failed filing rather than claiming a ticket', async () => {
+  it('queues a failed filing without claiming a ticket number', async () => {
     const api = await client();
     vi.spyOn(api, 'createTicket').mockResolvedValueOnce({ success: false, error: 'upstream 503' } as never);
 
@@ -293,8 +298,9 @@ describe('the things that make a clerk ring the patient back', () => {
       request_description: 'copy of my records',
     })) as Record<string, unknown>;
 
-    expect(r.success).toBe(false);
-    expect(r.retryable).toBe(true);
+    expect(r.success).toBe(true);
+    expect(r.filed_pending).toBe(true);
+    expect(r.ticket_number).toBeUndefined();
   });
 });
 
