@@ -14,7 +14,7 @@ const FULL = {
 
 describe("runtime readiness", () => {
   it('identifies the PCP scheduling and unassigned-exit deployment', () => {
-    expect(VOICE_RUNTIME_DEPLOY_MARKER).toBe('voice-runtime-v122-pcp-scheduling-hub-unassigned-exit-20261028');
+    expect(VOICE_RUNTIME_DEPLOY_MARKER).toBe('voice-runtime-v128-pcp-scheduling-hub-unassigned-exit-20261028');
   });
 
   it("is live-ready with the voice, the webhook auth and a database", () => {

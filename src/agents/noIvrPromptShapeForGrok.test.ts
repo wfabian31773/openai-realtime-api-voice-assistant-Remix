@@ -215,6 +215,10 @@ const RULINGS: Array<[string, RegExp]> = [
   // 2026-10-01: the operator rang the line, asked when an office opens and
   // was told "I don't want to give you the wrong time for that office". The
   // hours are the practice's own and every other lane states them.
+  ['one identity ask before an on-call transfer', /one quick ask for name and date of birth|collect the caller's name and DOB in at most one/i],
+  ['911-level skips the identity ask', /911-level emergency/],
+  ['need_identity is not a refused transfer', /need_identity/],
+  ['never tell them they are not found when a schedule match exists', /never tell them they are not found/i],
   ['office hours are answered from clinic facts, never hedged', /(?:named clinic's Business Facts row.*?opening, closing and lunch hours exactly|hours printed on each office's row are the authoritative clinic hours)/s],
   ['a fully answered question without a callback creates no ticket', /fully answered.{0,80}(?:no callback|did not ask for a callback).{0,30}(?:do not file|do not create a ticket)/is],
   ['no "is that correct?"', /DO NOT ask "Is that correct\?"|Do not ask "Is that correct\?"/],
@@ -253,6 +257,14 @@ describe('every ruling survives in both bodies', () => {
     expect(grok).toMatch(/take the last name in their own words, then the date of birth in parts/);
     // Unrecognised: no block at all.
     expect(await prompt({ pipeline: 'runtime' })).not.toContain('Caller-ID pre-context');
+  });
+
+  it('the Grok CRITICAL line treats need_identity as a follow-up, not a second transfer', async () => {
+    const p = await prompt({ pipeline: 'runtime' });
+    const critical = p.slice(p.indexOf('## CRITICAL INSTRUCTIONS'));
+    expect(critical).toMatch(/ONCE after a sanctioned transfer/);
+    expect(critical).toMatch(/need_identity result is not a transfer/);
+    expect(critical).not.toMatch(/ONCE per call/);
   });
 
   it('the withheld phone-match section rides into the Grok body unchanged', () => {
