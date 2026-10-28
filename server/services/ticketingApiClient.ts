@@ -341,6 +341,15 @@ interface LookupResponse {
   statusCode?: number;
 }
 
+function fullNameMatchesPatient(fullName: string, patient: ValidatedPatient): boolean {
+  const full = nameKey(fullName);
+  const first = nameKey(patient.firstName);
+  const last = nameKey(patient.lastName);
+  if (full === `${first} ${last}`) return true;
+  return full.startsWith(`${first} `) && full.endsWith(` ${last}`) &&
+    /^\p{L}$/u.test(full.slice(first.length + 1, -(last.length + 1)));
+}
+
 // PHI-safe log helpers — never emit full patient identifiers to stdout. These
 // masked forms are unconditional (they don't depend on DISABLE_PHI_LOGGING) so a
 // misconfigured flag can't leak a patient name or full phone number. (R-6)
@@ -1005,11 +1014,11 @@ export class TicketingApiClient {
    */
   async submitTicket(params: SubmitTicketParams): Promise<SubmitTicketResponse> {
     const unnamed = !params.patientFullName.trim() || /^unknown caller$/i.test(params.patientFullName.trim());
-    // Full names have no recoverable first/last boundary. Compare the full
-    // spelling, then carry the validated record's original fields intact.
+    // Use the held first/last boundaries, allowing an optional middle initial,
+    // then carry the validated record's original fields intact.
     const held = validatedPatientFor(params.callData?.callSid, undefined, undefined, params.patientDOB);
     const match = params.validatedPatient ?? (held && (unnamed ||
-      nameKey(params.patientFullName) === nameKey(`${held.firstName} ${held.lastName}`)) ? held : undefined);
+      fullNameMatchesPatient(params.patientFullName, held)) ? held : undefined);
     if (match) params = { ...params, validatedPatient: match, patientFullName: unnamed ? `${match.firstName} ${match.lastName}` : params.patientFullName,
       patientDOB: readDobQuietly(params.patientDOB) ? params.patientDOB : match.dateOfBirth || params.patientDOB,
       locationOfLastVisit: params.locationOfLastVisit || match.nextAppointment?.location || match.lastVisit?.location || match.confirmedClinic };

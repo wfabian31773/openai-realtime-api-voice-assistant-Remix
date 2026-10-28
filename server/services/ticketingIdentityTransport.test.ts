@@ -53,6 +53,49 @@ it.each([
 });
 
 it.each([
+  ['Alex', 'Synthetic', 'Q'],
+  ['Alex', 'Synthetic', 'Q.'],
+  ['Mary Ann', 'Synthetic Example', 'Q.'],
+])('simplified transport keeps validated context with a middle initial: %s / %s / %s', async (firstName, lastName, initial) => {
+  const nextAppointment = { date: '2099-01-01', location: 'Synthetic Next Clinic' };
+  const lastVisit = { date: '2020-01-01', location: 'Synthetic Last Clinic' };
+  rememberVerifiedIdentity(sid, { firstName, lastName, dateOfBirth: '1970-01-02', certain: true,
+    personId: 'synthetic-person', nextAppointment, lastVisit });
+  const api = new TicketingApiClient();
+  vi.spyOn(api as any, 'warmUpIfStale').mockResolvedValue(true);
+  const send = vi.spyOn(api as any, 'makeRequest').mockResolvedValue({ success: false });
+
+  await api.submitTicket({ patientFullName: `  ${firstName}  ${initial}  ${lastName} `, patientDOB: '1970-01-02',
+    reasonForCalling: 'Synthetic callback', preferredContactMethod: 'phone', callData: { callSid: sid } });
+
+  expect(send.mock.calls[0][2]).toMatchObject({ locationOfLastVisit: nextAppointment.location,
+    validatedPatient: { status: 'validated', callSid: sid, firstName, lastName,
+      personId: 'synthetic-person', nextAppointment, lastVisit } });
+});
+
+it.each([
+  ['Other Q. Synthetic', '1970-01-02'],
+  ['Alex Q. Other', '1970-01-02'],
+  ['Alexandra Q. Synthetic', '1970-01-02'],
+  ['Alex Quinn Synthetic', '1970-01-02'],
+  ['Alex Q. R. Synthetic', '1970-01-02'],
+  ['Alex Q. Synthetic Other', '1970-01-02'],
+  ['Alex Q. Synthetic', '1980-02-03'],
+])('middle-initial tolerance still rejects conflicting identity: %s / %s', async (patientFullName, patientDOB) => {
+  rememberVerifiedIdentity(sid, { firstName: 'Alex', lastName: 'Synthetic', dateOfBirth: '1970-01-02', certain: true,
+    personId: 'synthetic-person', nextAppointment: { date: '2099-01-01', location: 'Synthetic Clinic' } });
+  const api = new TicketingApiClient();
+  vi.spyOn(api as any, 'warmUpIfStale').mockResolvedValue(true);
+  const send = vi.spyOn(api as any, 'makeRequest').mockResolvedValue({ success: false });
+
+  await api.submitTicket({ patientFullName, patientDOB, reasonForCalling: 'Synthetic callback',
+    preferredContactMethod: 'phone', callData: { callSid: sid } });
+
+  expect(send.mock.calls[0][2]).not.toHaveProperty('validatedPatient');
+  expect(send.mock.calls[0][2]).not.toHaveProperty('locationOfLastVisit');
+});
+
+it.each([
   { nextAppointment: { date: '2099-01-01', location: 'Synthetic Next Clinic' },
     lastVisit: { date: '2020-01-01', location: 'Synthetic Last Clinic' }, usualOffice: 'Synthetic Usual Clinic' },
   { lastVisit: { date: '2020-01-01', location: 'Synthetic Last Clinic' }, usualOffice: 'Synthetic Usual Clinic' },
