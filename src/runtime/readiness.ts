@@ -889,8 +889,17 @@ import { callEnvironment } from "./callRecord";
  * descriptions survive the SDK conversion on answering-service and no-ivr-v2.
  * On top of v116. No migration; production impact remains unmeasured.
  */
+/**
+ * v125 — AFTER-HOURS DOB CONFIRMS THE PHONE CANDIDATE (2026-10-28).
+ * lookup_schedule uses the recognised caller's canonical name when the caller
+ * supplies a DOB matching pre-context, so a corrected spoken spelling does not
+ * lose the record. A mismatching DOB keeps the spoken-name lookup; candidate
+ * details stay withheld before confirmation. `noIvrPhoneMatchIsACandidate.test.ts`
+ * drives the live factory's tool on both pipelines. On top of v117.
+ * No migration; production impact remains unmeasured.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v117-contact-capture-20261027";
+  "voice-runtime-v125-after-hours-dob-confirm-lookup-20261028";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

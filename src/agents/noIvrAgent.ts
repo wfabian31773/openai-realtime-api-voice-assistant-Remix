@@ -43,6 +43,7 @@ import { corroborate } from "../services/symptomCorroboration";
 import { markCallConcluded } from "../services/callConclusion";
 import { callMetadataForDB } from "../services/callMetadataStore";
 import { EMAIL_FIELD_DESCRIPTION, LAST_NAME_FIELD_DESCRIPTION } from "../tools/contactCaptureGuidance";
+import { readDobQuietly } from "../tools/dobParts";
 
 /**
  * AN EMAIL PREFERENCE WITHOUT AN ADDRESS IS A QUESTION, NOT A FAILURE.
@@ -143,8 +144,8 @@ export interface NoIvrAgentMetadata {
   callLogId?: string; // Database call log ID for patient context updates
   variant?: NoIvrAgentVariant; // Production or development variant
   /** Caller-ID pre-context from the full person base (sage_precontext): who
-   *  this number likely belongs to. A HINT for the opening turn — never
-   *  verification, and never a substitute for what the caller tells us. */
+   *  this number likely belongs to. A candidate until the caller supplies a
+   *  matching DOB; then lookup_schedule uses its canonical name. */
   precontext?: import('./azulSchedulingAgent').AzulPrecontext;
   /** Live transcript up to the moment of filing — lets the ticketing app generate its staff-facing summary at creation instead of waiting for post-call enrichment. */
   getTranscript?: () => string;
@@ -1380,10 +1381,25 @@ is not an identity. Confirm the name and date of birth, then call again with the
               'first_name, last_name and date_of_birth. Never read this instruction aloud.',
           };
         } else if (params.first_name && params.last_name && params.date_of_birth) {
-          const isoDob = toIsoDob(params.date_of_birth) || params.date_of_birth;
+          // A matching caller-supplied DOB validates the phone candidate even
+          // when the spoken name's spelling differs. Keep the on-file name and
+          // DOB out of the prompt and phone-only result until this gate passes.
+          const candidate = metadata.precontext;
+          const candidateDob = candidate?.matched && candidate.dobOnFile
+            ? readDobQuietly(candidate.dobOnFile) : null;
+          const givenDob = candidateDob ? readDobQuietly(params.date_of_birth) : null;
+          const confirmedCandidate = candidate?.matched && candidate.firstName?.trim() &&
+            candidate.lastNameOnFile?.trim() && candidateDob && givenDob &&
+            candidateDob.year === givenDob.year && candidateDob.month === givenDob.month &&
+            candidateDob.day === givenDob.day
+            ? {
+              firstName: candidate.firstName.trim(), lastName: candidate.lastNameOnFile.trim(),
+              isoDob: `${givenDob.year}-${givenDob.month}-${givenDob.day}`,
+            } : null;
+          const isoDob = confirmedCandidate?.isoDob || toIsoDob(params.date_of_birth) || params.date_of_birth;
           result = await scheduleLookupService.lookupByNameAndDOB(
-            params.first_name,
-            params.last_name,
+            confirmedCandidate?.firstName || params.first_name,
+            confirmedCandidate?.lastName || params.last_name,
             isoDob,
           );
         } else {

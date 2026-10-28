@@ -1624,3 +1624,19 @@ no PR opened, no merge or deploy, and no production before/after claim. Next:
 owner opens the PR and follows the measurement rule in `docs/BACKEND_HANDOFF.md`
 before merging ticket-path changes. Shared bridge files are outside this
 session's writable workspace; this entry is the local handoff.
+
+### 2026-10-27 — after-hours recognised-caller DOB lookup
+
+Last touched by: Codex. `createNoIvrAgent` now uses the phone pre-context's
+canonical name for `lookup_schedule` when the caller-supplied DOB matches.
+Pre-context provides no patient id, so this uses the existing canonical-name
+lookup. A mismatching, invalid or absent DOB keeps the current path; candidate
+surname, DOB and appointments remain outside the prompt and phone-only result.
+Synthetic tests invoke the live factory's tool on SIP and runtime metadata:
+eight regression cases failed before the fix; all 36 tests in the touched file
+passed afterwards. Marker: `voice-runtime-v125-after-hours-dob-confirm-lookup-20261028`,
+on top of v117; reconcile concurrent marker claims before merging. No migration,
+DB writes, commit, push, PR or deploy. Next: owner reviews and measures production
+impact; the reported 43 recognised callers among 118 misses was supplied by the
+owner and was not independently replayed in this session. Shared bridge notes
+are outside this worktree; this is the local handoff.
