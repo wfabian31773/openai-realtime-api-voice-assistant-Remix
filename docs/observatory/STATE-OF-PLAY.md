@@ -8,6 +8,19 @@
 
 # State of Play — Azul Vision voice agents
 
+2026-10-28 PCP scheduling/unassigned exit (offline, synthetic data):
+`CA9dfc0fa32af0d0548cbda1a764cd11c0` identifies the reported failure shape.
+The live PCP filing tool now honors captured patient scheduling intent and
+uses one unassigned retry for terminal Optical/Surgery routing-field refusals.
+Shared appointment cues cover "schedule my appointment" / "appointment scheduling".
+Marker: `voice-runtime-v128-pcp-scheduling-hub-unassigned-exit-20261028`
+(renumbered from v122), on top of `main`'s v126 (#394); v127 is #376. No production
+measurement, DB writes, migration, commit or deployment.
+Validation: 99 tests pass across the four touched Vitest files, run with
+`nice -n 10`, one worker. The new live-tool regression failed nine assertions
+before the fix. `tsc -p . --noEmit` and `git diff --check` pass. The full suite
+was not run.
+
 2026-10-27 review follow-up (offline, synthetic data): the paired request
 classifiers now preserve clinical complaints mentioning eyewear, normalize
 explicit surgery denials, and retain cataract/procedure insurance on Surgery.

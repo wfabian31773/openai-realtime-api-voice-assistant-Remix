@@ -26,6 +26,8 @@ describe('scheduling goes to the HVA Hub from every queue', () => {
     [TECH, 'cancel my appointment please'],
     [OPTICAL, 'do you have any openings sooner'],
     [TECH, 'quiero hacer una cita'],
+    [18, 'I need to schedule my appointment for new glasses'],
+    [16, 'Patient requests appointment scheduling for glasses'],
   ];
 
   for (const [home, text] of lines) {

@@ -656,9 +656,30 @@ is reading noise.
 
 ---
 
-## Current branch — no-IVR prompt trim (2026-10-28)
+## Current branch — PCP scheduling and unassigned exit (2026-10-28)
 
-This branch carries **`voice-runtime-v126-noivr-prompt-trim-20261028`**, on top
+This branch carries **`voice-runtime-v128-pcp-scheduling-hub-unassigned-exit-20261028`**
+(renumbered from v122), on top of `main`'s v126 (#394, `036c39e`); v127 is #376
+on its open branch. PCP patient scheduling honors captured scheduling purposes;
+shared appointment cues also recognize "schedule my appointment" and
+"appointment scheduling" before eyewear. A terminal Optical/Surgery refusal
+for office/location/surgeon retries once with `routingAskExhausted` inside
+`create_pcp_task`. No repeated routing-field ask or callback promise after a
+refused unassigned write. Synthetic live-tool regressions:
+`src/pcp/patientSchedulingUnassigned.test.ts`. No migration or production
+measurement. The contact-capture history below is retained.
+
+The v117 base carried **`voice-runtime-v117-contact-capture-20261027`**, on top
+of v116. Surname spelling and full email confirmation reach the agent's
+tool schemas, including answering-service and no-ivr-v2. Provider names use
+an exact or uniquely fuzzy Console match on both create-ticket and simplified
+submission paths. A fuzzy candidate must score at least 88% and beat every
+other candidate by five percentage points, including candidates below 88%.
+Normalization collisions stay unresolved unless the original spelling matches
+exactly. No migration. Production before/after measurement remains outstanding;
+see `docs/observatory/STATE-OF-PLAY.md` §16.
+
+The v126 base (#394) carries **`voice-runtime-v126-noivr-prompt-trim-20261028`**, on top
 of v117; v122–v125 are on open branches. It removes repeated explanations
 from the no-IVR Grok prompt while retaining its rules. The length ratchet checks
 pinned daytime and overnight clocks. No migration.
@@ -2358,6 +2379,7 @@ voice-runtime-v115-the-si-assistant-review-fixes-20261022
 voice-runtime-v116-the-record-office-name-travels-20261023
 voice-runtime-v117-contact-capture-20261027
 voice-runtime-v126-noivr-prompt-trim-20261028
+voice-runtime-v128-pcp-scheduling-hub-unassigned-exit-20261028
 ```
 
 Also printed at boot as `[voice-runtime] <marker>`. Anything ending in an
@@ -2483,6 +2505,8 @@ on it is evidence about current code.
 | **v116** or earlier — NOT the date; this branch is **v117**, above v116 | Item #14 contact capture: surname spelling and complete email confirmation on agent-visible tool schemas; exact or unique fuzzy provider canonicalization on both ticket submission paths. Runner-up margin uses the whole roster; normalized collisions refuse a match. See `docs/observatory/STATE-OF-PLAY.md` §16. No migration; production measurement outstanding. |
 | **v117** or earlier — NOT the date; this branch is **v126**, above v117 | No-IVR Grok prompt trim: repeated explanations removed without changing rules; the length ratchet checks pinned daytime and overnight clocks. v122–v125 are on open branches. No migration. |
 
+| **v126** or earlier — NOT the date; this branch is **v128** (renumbered from v122), ABOVE `main`'s v126 (#394, `036c39e`), which it contains; v127 is #376 on its open branch | PCP patient scheduling reaches the HVA Hub; terminal Optical/Surgery office or surgeon refusals retry once with the existing unassigned flag. `src/pcp/patientSchedulingUnassigned.test.ts` exercises the live filing tool with synthetic data. No migration; production measurement outstanding. |
+
 ### THE SURGEON CLAIM — BUILT, REVIEWED SIX TIMES, WITHDRAWN 2026-09-17
 
 **Operator ruling, 2026-09-17:** *"if it's only 9 callers, I would remove if we
@@ -2568,11 +2592,13 @@ v10 (the person base and the join), v11 (the locked record, #290) and v12
 (optical's office ladder) are a CHAIN on `main`: each merged after the one
 before and brought it in, so v12 contains both.
 
-**AND THE SEQUENCE HAS TWO HOLES IN IT ON PURPOSE: v13 AND v57. v126 IS THE
-NEWEST — the no-IVR prompt trim, above v117, which it contains; v122–v125 are
-on open branches. v117 is contact capture (#14), above v116. v116 carries
+**AND THE SEQUENCE HAS TWO HOLES IN IT ON PURPOSE: v13 AND v57. v128 IS THE
+NEWEST — PCP scheduling and unassigned exit, on its branch ABOVE `main`'s v126,
+which it contains; v127 is #376 on its open branch — AND v126 IS WHAT `main`
+CARRIES, SINCE #394 MERGED 2026-10-28 (`036c39e`): the no-IVR prompt trim, above
+v117; v122–v125 are on open branches. v117 is contact capture (#14), above v116. v116 carries
 the record's office name on an optical ticket — on its branch
-ABOVE `main`'s v115, which it contains — AND v115 IS WHAT `main` CARRIES, SINCE
+ABOVE v115, which it contains — and v115 came from
 #367 MERGED 2026-10-22 (`df4b6bc`): the five #366 review fixes; on top of v114,
 from #366 MERGED 2026-10-22 (`086062b`): the SI Assistant plugin API, dark; on top of v113, from #363 MERGED
 2026-10-22 (`5112fa1`): the NPX demo line, stacked on v112 (the medication name is asked
@@ -2838,7 +2864,7 @@ never read v57; **v58 was that next ship** — the identity probe, an instrument
 and no behaviour change (see the v56 row below for what it measures). It is no
 longer the current marker: see the paragraph beneath this one.
 
-**v115 (#367) IS WHAT `main` CARRIES (merged 2026-10-22, `df4b6bc`), AND v57,
+**v126 (#394) IS WHAT `main` CARRIES (merged 2026-10-28, `036c39e`), AND v57,
 v59, v60, v63, v65 AND v66 ARE RETIRED RATHER THAN REUSED.** Each of the last
 five was a branch's own number while it sat below `main`, and each was given up
 the moment a merge put it there: two branches carrying one version make two

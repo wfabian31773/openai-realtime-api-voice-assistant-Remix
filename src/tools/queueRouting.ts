@@ -128,7 +128,7 @@ export const SCHEDULING: SchedulingCue[] = [
     cues: ['do you have any openings', 'what times do you have', 'next available', 'availability',
            'tienen disponibilidad', 'hay disponibilidad', 'qué horarios tienen', 'que horarios hay'] },
   { reasonId: 146, reason: 'New Appointment Request',
-    cues: ['make an appointment', 'schedule an appointment', 'schedule an eye exam', 'book an appointment', 'set up an appointment', 'set-up a', 'need an appointment', 'get an appointment', 'new patient exam', 'new patient appointment', 'eye exam',
+    cues: ['make an appointment', 'schedule an appointment', 'schedule my appointment', 'appointment scheduling', 'schedule an eye exam', 'book an appointment', 'set up an appointment', 'set-up a', 'need an appointment', 'get an appointment', 'new patient exam', 'new patient appointment', 'eye exam',
            // Named exam types. "Request to schedule regular check-up" is a real
            // department 9 ticket that matched nothing here. Hyphenated and
            // joined forms only — a bare "check up" would take "check up on my
