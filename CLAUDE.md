@@ -656,11 +656,21 @@ is reading noise.
 
 ---
 
-## Current branch — item #14 contact capture (2026-10-27)
+## Current branch — queue withdrawal exemption (2026-10-28)
 
-This branch carries **`voice-runtime-v117-contact-capture-20261027`**, on top
-of v116. Use that marker when verifying this change; the v116 history below
-predates it. Surname spelling and full email confirmation reach the agent's
+This branch carries **`voice-runtime-v120-queue-withdrawal-exemption-20261028`**,
+on top of v117. Both queue-answer settlement paths keep a PCP ticket after
+the caller heard a filed ticket number or "I've taken this down". The verdict
+is captured before redirecting, using a runtime getter scoped to transfers;
+hang-up behavior is unchanged. No migration. Focused regressions live in
+`src/pcp/queueIsAChoice.test.ts` and `src/runtime/voiceRuntime.test.ts`.
+The owner must reconcile the marker number with concurrent v118..v126 work.
+Offline validation: 86 targeted PCP/readiness tests, TypeScript and diff checks
+pass. The runtime transcript wiring test is blocked by sandbox `listen EPERM`;
+rerun it outside the sandbox. No production measurement or deployment claimed.
+
+The v117 contact-capture change remains included. Surname spelling and full
+email confirmation reach the agent's
 tool schemas, including answering-service and no-ivr-v2. Provider names use
 an exact or uniquely fuzzy Console match on both create-ticket and simplified
 submission paths. A fuzzy candidate must score at least 88% and beat every
@@ -2363,6 +2373,7 @@ voice-runtime-v114-the-si-assistant-plugin-api-20261022
 voice-runtime-v115-the-si-assistant-review-fixes-20261022
 voice-runtime-v116-the-record-office-name-travels-20261023
 voice-runtime-v117-contact-capture-20261027
+voice-runtime-v120-queue-withdrawal-exemption-20261028
 ```
 
 Also printed at boot as `[voice-runtime] <marker>`. Anything ending in an
@@ -2572,8 +2583,8 @@ v10 (the person base and the join), v11 (the locked record, #290) and v12
 (optical's office ladder) are a CHAIN on `main`: each merged after the one
 before and brought it in, so v12 contains both.
 
-**AND THE SEQUENCE HAS TWO HOLES IN IT ON PURPOSE: v13 AND v57. v117 IS THE
-NEWEST — contact capture (#14), above v116, which it contains. v116 carries
+**AND THE SEQUENCE HAS TWO HOLES IN IT ON PURPOSE: v13 AND v57. v120 IS THE
+NEWEST — queue withdrawal exemption, above v117, which it contains. v116 carries
 the record's office name on an optical ticket — on its branch
 ABOVE `main`'s v115, which it contains — AND v115 IS WHAT `main` CARRIES, SINCE
 #367 MERGED 2026-10-22 (`df4b6bc`): the five #366 review fixes; on top of v114,

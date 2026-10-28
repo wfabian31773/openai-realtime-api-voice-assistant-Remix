@@ -119,6 +119,10 @@ describe("runtime readiness", () => {
     );
   });
 
+  it("identifies the queue-answer withdrawal exemption build", () => {
+    expect(VOICE_RUNTIME_DEPLOY_MARKER).toBe("voice-runtime-v120-queue-withdrawal-exemption-20261028");
+  });
+
   /**
    * WHY A TEST GUARDS A STRING'S SUFFIX.
    *

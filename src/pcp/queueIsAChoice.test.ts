@@ -92,9 +92,9 @@ async function call(agent: any, name: string, args: Record<string, unknown> = {}
 }
 
 let n = 0;
-function freshCall(handoff: () => Promise<unknown>) {
+function freshCall(handoff: () => Promise<unknown>, getTransferTranscript?: () => string) {
   const callId = `CAchoice${++n}`;
-  return { agent: createPcpAgent(handoff as never, { callId } as never), callId };
+  return { agent: createPcpAgent(handoff as never, { callId, getTransferTranscript } as never), callId };
 }
 
 /** A complete professional intake, so nothing else can be what blocks. */
@@ -109,6 +109,68 @@ const INTAKE = {
 };
 const ASKED = 'Caller asked to speak to a representative about a mutual patient.';
 const QUEUE_OK = async () => ({ ok: true, destination: '+17149564300', handedToQueue: true });
+
+describe.each([
+  ['explicit queue choice', true],
+  ['file before dial', undefined],
+] as const)('v120 — queue-answer withdrawal after %s', (_path, accepted) => {
+  const heardCases = [
+    ['literal read-back', 'AGENT: Your ticket number is PCP-58001.', true],
+    ['spoken read-back', 'AGENT: Your ticket number is P-C-P-five-eight-zero-zero-one.', true],
+    ['taken-down line', "AGENT: I've taken this down and the right team will follow up with you.", true],
+    ['neither', 'AGENT: One moment while I transfer you.', false],
+    ['caller-only read-back', 'CALLER: My ticket number is PCP-58001.', false],
+    ['another ticket number', 'AGENT: Your earlier ticket was PCP-58002.', false],
+  ] as const;
+
+  async function dialThenSettle(heard: string, answered = true) {
+    let captured: any;
+    let transcript = '';
+    let callId = '';
+    const dial = vi.fn(async () => {
+      captured = { ...escalationDetailsMap.get(callId) };
+      // The stream ends during a blind redirect, before the dial settles.
+      markPcpCallEnded(callId);
+      await sweepPcpUnfiledCall(callId, { outcome: 'transferred', transcript });
+      transcript = '';
+      return QUEUE_OK();
+    });
+    const made = freshCall(dial, () => transcript);
+    callId = made.callId;
+    await call(made.agent, 'record_pcp_intake', INTAKE);
+    expect((await call(made.agent, 'create_pcp_task', { narrative: ASKED })).success).toBe(true);
+    transcript = heard;
+    expect((await call(made.agent, 'handoff_to_pcp', { narrative: ASKED })).success).toBe(false);
+    const result = await call(made.agent, 'handoff_to_pcp', {
+      narrative: ASKED,
+      ...(accepted === undefined ? {} : { callerAcceptedQueue: accepted }),
+    });
+    expect(result.success).toBe(true);
+    expect(dial).toHaveBeenCalledTimes(1);
+    expect(ticketing.withdrawPcpTickets, 'transfer teardown leaves the decision to the dial result').not.toHaveBeenCalled();
+    ticketing.createPcpTicket.mockClear();
+    await captured.onBlindDialSettled(answered
+      ? { outcome: 'queue_answered', status: 'COMPLETED', connected: true, talkSeconds: 60, ringSeconds: 4 }
+      : { outcome: 'failed', status: 'CANCELED', connected: false, ringSeconds: 9 });
+    // The file-before-dial path still persists the settlement on a kept ticket.
+    expect(ticketing.createPcpTicket).toHaveBeenCalledTimes(accepted ? 0 : 1);
+    return callId;
+  }
+
+  it.each(heardCases)('queue answered after %s', async (_label, transcript, kept) => {
+    const callId = await dialThenSettle(transcript);
+    if (kept) {
+      expect(ticketing.withdrawPcpTickets).not.toHaveBeenCalled();
+    } else {
+      expect(ticketing.withdrawPcpTickets).toHaveBeenCalledExactlyOnceWith({ callSid: callId, reason: 'sent_to_queue' });
+    }
+  });
+
+  it('still withdraws after the caller cancels while the queue rings', async () => {
+    const callId = await dialThenSettle(heardCases[0][1], false);
+    expect(ticketing.withdrawPcpTickets).toHaveBeenCalledExactlyOnceWith({ callSid: callId, reason: 'sent_to_queue' });
+  });
+});
 
 /**
  * Walk to the point where the choice has been put and answered. Returns the

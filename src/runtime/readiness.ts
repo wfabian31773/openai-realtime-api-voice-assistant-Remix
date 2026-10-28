@@ -889,8 +889,16 @@ import { callEnvironment } from "./callRecord";
  * descriptions survive the SDK conversion on answering-service and no-ivr-v2.
  * On top of v116. No migration; production impact remains unmeasured.
  */
+/**
+ * v120 — A PCP CALLER TOLD THEIR REQUEST IS RECORDED KEEPS IT WHEN THE QUEUE
+ * ANSWERS (2026-10-28). Both blind-transfer settlement paths apply v102's
+ * read-back / "I've taken this down" exemption, captured before redirecting
+ * while the transcript is available. A caller who heard neither still has
+ * the ticket withdrawn; hang-up behavior is unchanged. On top of v117.
+ * No migration. `src/pcp/queueIsAChoice.test.ts`.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v117-contact-capture-20261027";
+  "voice-runtime-v120-queue-withdrawal-exemption-20261028";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

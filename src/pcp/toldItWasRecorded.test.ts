@@ -35,7 +35,8 @@
  * direction this exemption accepts.
  *
  * (Four more were withdrawn when the queue answered a transfer, e.g.
- * CA0fc953048ba93d2223ec20f9cf2aae8b. That is the other arm, and unchanged.)
+ * CA0fc953048ba93d2223ec20f9cf2aae8b. v120 extends the exemption to that arm;
+ * its live settlement callbacks are covered in queueIsAChoice.test.ts.)
  */
 import { describe, it, expect, vi, beforeEach, beforeAll, afterAll } from 'vitest';
 import { readFileSync } from 'node:fs';

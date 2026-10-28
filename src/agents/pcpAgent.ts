@@ -110,6 +110,8 @@ export interface PcpAgentMetadata {
   callerPhone?: string;
   dialedNumber?: string;
   getTranscript?: () => string;
+  /** Runtime transcript for the queue-withdrawal decision; leaves the hang-up floor unchanged. */
+  getTransferTranscript?: () => string;
   /** Audit status maintained by staff after intake; never solicited on the call. */
   professionalVerificationStatus?: PcpVerificationStatus;
 }
@@ -1765,6 +1767,16 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
       /** Something is already on file for this caller as the dial goes out. */
       const filedBeforeTheDial = requestIsOnRecord || Boolean(initial?.success);
 
+      /**
+       * v120 extends v102's exemption to an answered queue. Snapshot before
+       * redirecting: the stream and director are released before the dial
+       * result arrives. Keep only the verdict in the pending callback.
+       */
+      const callerWasToldItWasRecorded = toldTheCallerItWasRecorded(
+        (metadata.getTransferTranscript ?? metadata.getTranscript)?.() ?? '',
+        (state.ticketsFiled ?? []).map((f) => f.ticketNumber).filter((t): t is string => Boolean(t)),
+      );
+
       escalationDetailsMap.set(callId, {
         agentSlug: 'pcp',
         /**
@@ -1807,11 +1819,15 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
                  * no patient (operator, 2026-10-19). The queue has them, or they
                  * left while it rang; either way nobody is owed a callback on a
                  * ticket that cannot say who it is about. The app keeps one
-                 * that names a patient.
+                 * that names a patient. v120 also keeps it when the queue
+                 * answers after the caller was told it is recorded.
                  */
-                if (filedBeforeTheDial) await submitPcpWithdrawal(callId, 'sent_to_queue');
+                if (filedBeforeTheDial && !(settlement.outcome === 'queue_answered' && callerWasToldItWasRecorded)) {
+                  await submitPcpWithdrawal(callId, 'sent_to_queue');
+                }
                 console.info(
-                  `[PCP] queue dial on the caller's own choice settled ${settlement.outcome} — no ticket, by ruling (${callId})`,
+                  `[PCP] queue dial on the caller's own choice settled ${settlement.outcome}` +
+                    ` — ${callerWasToldItWasRecorded && settlement.outcome === 'queue_answered' ? 'recorded ticket kept' : 'no ticket, by ruling'} (${callId})`,
                 );
                 return;
               }
@@ -1855,9 +1871,12 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
                * pre-dial ticket goes if it names no patient (operator,
                * 2026-10-19). A dial that did not land keeps it: the caller was
                * just told "I have your request recorded", and it is re-opened
-               * as a task above.
+               * as a task above. v120 keeps an answered queue's ticket when
+               * the caller was already told it is recorded.
                */
-              if (!queueChoiceOwesATicket(settlement)) await submitPcpWithdrawal(callId, 'sent_to_queue');
+              if (!queueChoiceOwesATicket(settlement) && !(settlement.outcome === 'queue_answered' && callerWasToldItWasRecorded)) {
+                await submitPcpWithdrawal(callId, 'sent_to_queue');
+              }
               console.info(
                 `[PCP] queue dial settled ${settlement.outcome} after ${settlement.ringSeconds}s ringing` +
                   `${settlement.connected ? `, ${settlement.talkSeconds ?? 0}s bridged` : ''}` +
