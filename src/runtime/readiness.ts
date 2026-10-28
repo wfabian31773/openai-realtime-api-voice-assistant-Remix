@@ -932,9 +932,17 @@ import { callEnvironment } from "./callRecord";
  * `src/utils/phone.ts`, `src/tools/`.
  */
 /**
+ * v134 — GOODBYE GRACE HANGUP (2026-10-28). After a completed goodbye exchange
+ * (conservative English/Spanish matcher), the bridge waits GOODBYE_GRACE_MS
+ * (6s) after playback and then ends the call deliberately ("goodbye_grace").
+ * Caller speech, a new response or a tool call cancels it. Silence ladder and
+ * ghost-call wording unchanged; no prompt or tool text added.
+ * On top of v132 (#390, main); v127 is #376 and v133 is #391 on their open branches. No migration.
+ */
+/**
  * v136 (renumbered from v126) — PCP UNCLASSIFIED IS FLOOR ONLY (2026-10-28). The PCP agent cannot
  * choose unclassified_call in its intake tool; the after-hangup floor still
- * files unclassified calls for a person to route. On top of v132 (#390, main); v127 is #376, v133 is #391, v134 is #396 and v135 is #392 on their open branches. No migration; production impact remains unmeasured.
+ * files unclassified calls for a person to route. On top of v134 (#396, main); v127 is #376, v133 is #391 and v135 is #392 on their open branches. No migration; production impact remains unmeasured.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
   "voice-runtime-v136-pcp-unclassified-floor-only-20261028";
