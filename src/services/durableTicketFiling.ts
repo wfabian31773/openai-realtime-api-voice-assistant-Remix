@@ -32,7 +32,7 @@
  */
 import { ticketingApiClient } from '../../server/services/ticketingApiClient';
 import { loggableTicketingError } from './loggableTicketingError';
-import { rememberCallbackExtension } from './callbackExtensionNote';
+import { callbackExtensionOutboxEntry, rememberCallbackExtension } from './callbackExtensionNote';
 // One-way edge: the registry does not import this module, the tools import both.
 import { getTool } from '../tools/registry';
 import type { CreateTicketParams, CreateTicketResponse } from '../../server/services/ticketingApiClient';
@@ -138,6 +138,19 @@ export function missingFieldFromError(error?: string): string | undefined {
 export async function createTicketDurable(params: CreateTicketParams): Promise<DurableCreateResult> {
   const res = await ticketingApiClient.createTicket(params);
   if (res.success && res.ticketNumber) {
+    const previous = callbackExtensionOutboxEntry(params);
+    if (previous?.outboxId) {
+      try {
+        const { TicketOutboxService } = await import('./ticketOutboxService');
+        if (await TicketOutboxService.wasRefused(previous.outboxId)) {
+          rememberCallbackExtension(params, { replace: true, expected: previous });
+        }
+      } catch {
+        // An unavailable status cannot prove the first payload was refused.
+        // The ticket still succeeded; retain the existing note.
+        console.warn('[TICKET OUTBOX] Could not check the prior payload status for callback extension sync');
+      }
+    }
     rememberCallbackExtension(params);
     return res;
   }
@@ -202,7 +215,9 @@ export async function createTicketDurable(params: CreateTicketParams): Promise<D
       return { success: true, ticketNumber: write.ticketNumber };
     }
 
-    if (!write.alreadyExists) rememberCallbackExtension(params);
+    if (!write.alreadyExists || write.reopened) {
+      rememberCallbackExtension(params, { outboxId: write.outboxId, replace: write.reopened });
+    }
 
     console.info(
       `[TICKET OUTBOX] ✓ CAPTURED ${agent} request as ${write.outboxId}` +

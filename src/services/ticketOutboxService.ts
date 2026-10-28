@@ -107,6 +107,16 @@ interface OutboxSendResult {
 export class TicketOutboxService {
   private static workerTimer: ReturnType<typeof setInterval> | null = null;
 
+  /** A terminal refusal proves the held payload did not file a ticket. */
+  static async wasRefused(outboxId: string): Promise<boolean> {
+    const [entry] = await db
+      .select({ status: ticketOutbox.status, refusalStatusCode: ticketOutbox.refusalStatusCode })
+      .from(ticketOutbox)
+      .where(eq(ticketOutbox.id, outboxId))
+      .limit(1);
+    return entry?.status === 'dead_letter' && isTerminalRefusal(entry.refusalStatusCode ?? undefined);
+  }
+
   static async writeToOutbox(
     params: OutboxPayload,
     callSid?: string,

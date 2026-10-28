@@ -88,6 +88,26 @@ vi.mock('../../server/services/ticketingApiClient', () => ({
 
 const { TicketOutboxService, wrapCreateTicketPayload } = await import('./ticketOutboxService');
 
+describe('checking whether an outbox payload was refused', () => {
+  it.each([
+    ['dead_letter', 400, true],
+    ['dead_letter', 422, true],
+    ['dead_letter', null, false],
+    ['dead_letter', 503, false],
+    ['pending', 400, false],
+    ['sent', 400, false],
+  ])('only recognizes a terminal refusal: %s, %s', async (status, refusalStatusCode, expected) => {
+    selectResults.push([{ status, refusalStatusCode }]);
+    expect(await TicketOutboxService.wasRefused('ob-1')).toBe(expected);
+    expect(whereCols[0]).toContain('id');
+    expect(setPayloads).toHaveLength(0);
+  });
+
+  it('returns false when the outbox entry is absent', async () => {
+    expect(await TicketOutboxService.wasRefused('missing')).toBe(false);
+  });
+});
+
 /**
  * Optical's "Other - See Description": department 1, type 66, reason 536.
  *

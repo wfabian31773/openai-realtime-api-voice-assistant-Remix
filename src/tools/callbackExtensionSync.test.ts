@@ -7,6 +7,8 @@ vi.hoisted(() => {
 
 const createTicket = vi.fn(async (_payload: any): Promise<{ success: boolean; ticketNumber?: string; statusCode?: number }> => ({ success: true, ticketNumber: 'VA-TEST' }));
 const updateTicketCallData = vi.fn(async (_payload: any) => ({ success: true }));
+const writeToOutbox = vi.fn(async (): Promise<{ outboxId: string; alreadyExists: boolean; reopened?: boolean }> => ({ outboxId: 'test', alreadyExists: false }));
+const wasRefused = vi.fn(async () => false);
 vi.mock('../../server/db', () => ({
   db: { update: () => ({ set: () => ({ where: () => ({ returning: async () => [{ id: 'test' }] }) }) }) },
 }));
@@ -20,7 +22,7 @@ vi.mock('../../server/services/ticketingApiClient', () => ({
 }));
 vi.mock('../services/ticketOutboxService', () => ({
   wrapCreateTicketPayload: (params: unknown) => ({ params }),
-  TicketOutboxService: { writeToOutbox: async () => ({ outboxId: 'test', alreadyExists: false }) },
+  TicketOutboxService: { writeToOutbox, wasRefused },
 }));
 
 const { runTool } = await import('./registry');
@@ -88,4 +90,34 @@ it('carries the extension when filing is queued for retry', async () => {
   expect(result).toMatchObject({ success: true, filed_pending: true });
   const { transcriptWithCallbackExtension } = await import('../services/callbackExtensionNote');
   expect(transcriptWithCallbackExtension('CALLER: Hello', callSid)).toBe('CALLER: Hello\nCallback extension: 0204');
+});
+
+it.each(['reopened', 'direct'] as const)('syncs the corrected extension after a %s retry', async (retry) => {
+  const callSid = retry === 'reopened' ? 'CAaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' : 'CAbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+  const { createTicketDurable } = await import('../services/durableTicketFiling');
+  const params = (extension: string) => ({
+    departmentId: 1, patientPhone: '2025550101', description: 'Test request',
+    idempotencyKey: `call-${callSid}`,
+    callData: { callSid, transcript: `Callback extension: ${extension}` },
+  });
+  createTicket.mockResolvedValueOnce({ success: false, statusCode: 503 });
+  await createTicketDurable(params('101'));
+  if (retry === 'reopened') {
+    createTicket.mockResolvedValueOnce({ success: false, statusCode: 503 });
+    writeToOutbox.mockResolvedValueOnce({ outboxId: 'test', alreadyExists: true, reopened: true });
+  } else {
+    createTicket.mockResolvedValueOnce({ success: true, ticketNumber: 'VA-TEST' });
+    wasRefused.mockResolvedValueOnce(true);
+  }
+  await createTicketDurable(params('202'));
+
+  const record: VoiceCallRecord = {
+    callSid, streamSid: 'MZ-test', slug: 'optical', callerPhone: '2025550101',
+    dialedNumber: '2025550100', outcome: 'caller_hangup', transcript: 'CALLER: Hello',
+    toolEvents: [], agentTurns: 1, interruptions: 0, startedAtMs: 0, endedAtMs: 1000,
+  };
+  const row = toCallLogRow(record);
+  expect(row.transcript).toBe('CALLER: Hello\nCallback extension: 202');
+  await (new TicketingSyncService() as any).syncCall({ ...row, id: 'test', ticketNumber: 'VA-TEST' });
+  expect(updateTicketCallData.mock.lastCall![0].transcript).toBe(row.transcript);
 });
