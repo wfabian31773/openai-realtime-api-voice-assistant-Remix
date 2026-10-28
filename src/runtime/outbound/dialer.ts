@@ -82,8 +82,8 @@ export interface OutboundTwilio {
     url: string;
     method: "POST";
     timeout: number;
-    machineDetection: "DetectMessageEnd";
-    machineDetectionTimeout: number;
+    machineDetection?: "DetectMessageEnd";
+    machineDetectionTimeout?: number;
     statusCallback: string;
     statusCallbackMethod: "POST";
     statusCallbackEvent: string[];

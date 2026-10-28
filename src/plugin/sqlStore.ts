@@ -503,6 +503,15 @@ export function createSqlPluginStore(exec: SqlExec): PluginStore {
     },
     async writeAudit(entry) {
       const clean = sanitizeAuditEntry(entry);
+      if (clean.details) {
+        await exec(
+          `INSERT INTO plugin_audit_log (token_jti, tool, route, method, outcome, http_status, details, created_at)
+           VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8)`,
+          [clean.tokenJti, clean.tool, clean.route, clean.method, clean.outcome, clean.httpStatus,
+            JSON.stringify(clean.details), entry.createdAt ?? new Date()],
+        );
+        return;
+      }
       await exec(
         `INSERT INTO plugin_audit_log (token_jti, tool, route, method, approval_id, ticket_id, outcome, http_status)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
@@ -530,6 +539,7 @@ export function createSqlPluginStore(exec: SqlExec): PluginStore {
         outcome: r.outcome as PluginAuditEntry["outcome"],
         httpStatus: Number(r.http_status),
         createdAt: r.created_at ? new Date(String(r.created_at)) : undefined,
+        ...(r.details ? { details: r.details as PluginAuditEntry["details"] } : {}),
       }));
     },
   };

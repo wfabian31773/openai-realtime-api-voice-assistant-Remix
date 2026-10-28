@@ -1593,6 +1593,7 @@ export const pluginAuditLog = pgTable("plugin_audit_log", {
   ticketId: varchar("ticket_id", { length: 64 }),
   outcome: varchar("outcome", { length: 32 }).notNull(),
   httpStatus: integer("http_status").notNull(),
+  details: jsonb("details").$type<{ maskedNumber: string; purpose: string; reason: string }>(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => [
   index("idx_plugin_audit_created").on(table.createdAt),
