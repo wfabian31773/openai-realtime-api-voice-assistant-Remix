@@ -14,7 +14,7 @@ export function recordsRequestText(text: string): string {
 }
 
 const fold = (text: string) => recordsRequestText(text).toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[’‘]/g, "'");
-const DOC = /\b(?:documentation|records?|charts?|(?:progress|consult(?:ation)?|visit|office|surgery|surgical|operative) notes?|(?:medical|operative|surgical|optometry|consultation|op) reports?|(?:test|lab|exam|diagnostic) results?|imaging|oct|visual field|vf|drs|fundus|topography|expedientes?|registros?|historial|informes?)\b/;
+const DOC = /\b(?:documentation|records?|charts?|(?:progress|consult(?:ation)?|visit|office|surgery|surgical|operative) notes?|(?:medical|operative|surgical|optometry|consultation|op) reports?|(?:test|lab|exam|diagnostic) results?|imaging|oct|visual field|vf|drs|fundus|topography|expedientes?|registros?|historial|informes?|reportes? medicos?)\b/;
 const DELIVERY = /\b(?:copy|copies|get|fax(?:ed|ing)?|send|sent|email(?:ed)?|mail(?:ed)?|forward|release|obtain|retrieve|provide|inspect|inspection|copia|copias|envi\w*|mand\w*)\b/;
 // A delivery action asked of us is distinct from a past/future delivery
 // mentioned while asking someone to interpret results. Causative requests
@@ -45,7 +45,12 @@ const GENERIC_COPY_REQUEST = /(?:^\s*(?:(?:please|just|only)\s+)*|\b(?:necesit\w
 const GENERIC_COPY_ACCESS = /\bquestion about\s+(?:(?:the )?status of|getting|obtaining|requesting|receiving|accessing)\b[^.!?;]{0,100}\b(?:copy|copies) of\s+[a-z0-9]/;
 const WANT = /\b(?:need|want|request(?:ing|s|ed)?|would like|asking for|necesit\w*|solicit\w*|quiero)\b/;
 const SCHEDULE_ACTION = /\b(?:reschedul\w*|schedul\w*|cancel\w*|confirm\w*|book\w*|change|move|reprogram\w*|cambiar)\b[^.!?]{0,65}\b(?:appointments?|visits?|exam|date|cita)\b|\b(?:schedul\w*|book\w*)\b[^.!?;]{0,65}\b(?:oct|visual field|vf|drs|fundus|topography)\b|\b(?:appointment|cita)\b[^.!?]{0,40}\b(?:change|cancel\w*|confirm\w*|reschedul\w*)\b/;
-const DELIVERY_TO_DOCUMENT = new RegExp(String.raw`\b(?:send|fax|email|mail|forward|release|obtain|retrieve|provide|inspect|get)\b[^.!?;]{0,65}(?:${DOC.source}|\b(?:notes?|reports?|results?|copies|copy|copia|copias)\b)`);
+// Delivery must take a document as its object. Do not join an incidental
+// records-office mention to "get an appointment" or "get a ride".
+const DELIVERY_OBJECT = String.raw`(?:${DOC.source}|\b(?:notes?|reports?|results?|copies|copy|copia|copias|prescription|receta)\b)(?!\s+(?:line|department|office)\b)`;
+const DELIVERY_TO_DOCUMENT = new RegExp(String.raw`${DELIVERY.source}\s+(?:(?!(?:so|and|appointments?|ride)\b)[a-z0-9'-]+\s+){0,10}${DELIVERY_OBJECT}`);
+const DOCUMENT_TO_DELIVERY = new RegExp(String.raw`${DELIVERY_OBJECT}\s+(?:to be\s+)?(?:sent|faxed|emailed|mailed|forwarded|released|provided)\b`);
+const documentDelivery = (text: string) => DELIVERY_TO_DOCUMENT.test(text) || DOCUMENT_TO_DELIVERY.test(text);
 const PASSIVE_DELIVERY_REQUEST = new RegExp(String.raw`^(?:i|we) (?:need|want|would like)\s+[^.!?;,]{0,65}${DOC.source}\s+(?:sent|faxed|emailed|mailed|forwarded|released|provided)\b`);
 // A refusal to send/get documents is not an access request. Split contrasted
 // clauses below so a denied chart copy cannot suppress a separate report ask.
@@ -58,11 +63,20 @@ const RECORDS_WORKFLOW = /\b(?:roi|release of information|subpoena|authorization
 // Preserve the specialist cues used by the existing queue router as well as
 // the literal referral cue. This only refines an already-scheduling request.
 const SPECIALIST_APPOINTMENT = /\b(?:referral|cornea specialist|retina specialist|glaucoma specialist|oculoplastics?|neuro[- ]ophthalm\w*|pediatric (?:optometrist|ophthalm\w*)|peds|see a specialist|specialist (?:consult\w*|appointment)|referred to|was referred|cataract (?:consult\w*|evaluation)|consult for my cataract|low vision|uveitis|especialista|consulta con especialista)\b/;
+const REQUEST_CONJUNCTION = new RegExp(
+  String.raw`\b(?:and|but|because)\s+(?=(?:(?:i|we)\s+)?(?:${WANT.source}|${NEGATED_RECORDS.source})|(?:i|we) have (?:a|an) (?:[a-z'-]+ )?question\b|(?:just|only|please|(?:can|could|would|will) (?:you|someone)|reschedule|cancel|confirm|schedule|book|change|move|send|fax|email|mail|forward|release|obtain|retrieve|provide|inspect|get|refill|renew)\b)`,
+);
 
 function requestClauses(text: string): string[] {
   // A subject starting a new clause can correct a refusal even without an
   // imperative. Keep comma-separated document lists within the refusal.
-  return fold(text).split(/[.!?;\n]+|\bbut\b|,\s*(?=(?:(?:i|we|you|he|she|they)\b|(?:my|our|your|his|her|their|the)\s+(?:[a-z'-]+\s+){1,5}(?:is|are|was|were|has|have|needs?|broke)\b|(?:just|only|please|(?:can|could|would|will) (?:you|someone)|reschedule|cancel|confirm|schedule|book|send|fax|email|mail)\b))/)
+  return fold(text).split(/[.!?;\n]+|,\s*(?=(?:(?:i|we|you|he|she|they)\b|(?:my|our|your|his|her|their|the)\s+(?:[a-z'-]+\s+){1,5}(?:is|are|was|were|has|have|needs?|broke)\b|(?:just|only|please|(?:can|could|would|will) (?:you|someone)|reschedule|cancel|confirm|schedule|book|send|fax|email|mail)\b))/)
+    // Split independent instructions before discarding the refusal. Keep
+    // document lists together and preserve interpretation/delivery context
+    // in affirmative clauses ("explain my results and send me a copy").
+    .flatMap(c => NEGATED_RECORDS.test(c)
+      ? c.split(REQUEST_CONJUNCTION)
+      : c.split(/\bbut\b/))
     .filter(c => !NEGATED_RECORDS.test(c));
 }
 
@@ -118,8 +132,8 @@ export function recordsLinePurpose(text: string): RecordsLinePurpose {
     if (genericCopyRequest) return true;
     const schedulingStart = c.search(SCHEDULE_ACTION);
     const beforeScheduling = schedulingStart < 0 ? c : c.slice(0, schedulingStart);
-    if ((document || prescription || /\b(?:notes?|reports?|results?|imaging)\b/.test(c)) && DELIVERY.test(c)
-      && (schedulingStart < 0 || (DOC.test(beforeScheduling) && DELIVERY.test(beforeScheduling)) || DELIVERY_TO_DOCUMENT.test(c.slice(schedulingStart)))) return true;
+    if ((document || prescription || /\b(?:notes?|reports?|results?|imaging)\b/.test(c)) && documentDelivery(c)
+      && (schedulingStart < 0 || (DOC.test(beforeScheduling) && documentDelivery(beforeScheduling)) || documentDelivery(c.slice(schedulingStart)))) return true;
     if (RECORDS_WORKFLOW.test(c)) return true;
     const independentlyRequestedDocument = schedulingStart < 0 || ((DOC.test(beforeScheduling) || /\b(?:prescription|receta)\b/.test(beforeScheduling)) && WANT.test(beforeScheduling))
       || c.slice(schedulingStart).split(/\band\s+(?=(?:(?:i|we)\s+)?(?:need|want|request|would like)\b)/).slice(1).some(part => WANT.test(part) && DOC.test(part));

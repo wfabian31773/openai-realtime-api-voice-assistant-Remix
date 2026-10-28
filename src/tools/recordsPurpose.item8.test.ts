@@ -1,5 +1,9 @@
 // Item #8: synthetic failure shapes, indexed by the reported ticket ids; not transcripts.
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+vi.mock('../services/ticketOutboxService', async () => {
+  const { queueTicketOutboxMock } = await import('../testUtils/queueTicketOutbox');
+  return queueTicketOutboxMock();
+});
 import { runTool } from './registry';
 import './sharedPatientTools';
 import './medicalRecordsTools';
@@ -113,6 +117,21 @@ describe('self-review: request-scoped caller evidence', () => {
 
 describe('review: classification and filing agree on records intent', () => {
   it.each([
+    ['I called the medical records office to get an appointment', 146],
+    ['Do not send my records and please reschedule my appointment', 147],
+  ])('routes without a records form or delivery questions: %s', async (request_description, reason) => {
+    const classified = await runTool('classify_records_request', { request_description });
+    expect(classified).toMatchObject({
+      classified: true, is_records_request: false, department_id: 9,
+      request_type_id: 32, request_reason_id: reason,
+    });
+    expect((await runTool('file_records_ticket', { ...BASE, requester: undefined, request_description })).success).toBe(true);
+    const payload = api.createTicket.mock.calls[0]?.[0];
+    expect(payload).toMatchObject({ departmentId: 9, requestTypeId: 32, requestReasonId: reason });
+    for (const field of ['requestorType', 'requestPathway', 'capClockApplies', 'formChannel']) expect(payload).not.toHaveProperty(field);
+  });
+
+  it.each([
     ['Can someone explain the test results that were sent to me?', 3],
     ['What do my test results mean?', 3],
     ['I need to understand my test results', 3],
@@ -142,6 +161,8 @@ describe('review: classification and filing agree on records intent', () => {
     'Please write a letter',
     'I need documentation from my last visit',
     'I need a medical report',
+    'Necesito un reporte medico',
+    'Necesito un reporte médico',
     'Could you have my test results sent so I can discuss them with my doctor?',
     'Please send my test results so I can discuss them with my doctor',
     'Please fax my records to my surgeon to discuss surgery',

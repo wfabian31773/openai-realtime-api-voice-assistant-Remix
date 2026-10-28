@@ -1,6 +1,80 @@
 import { describe, expect, it } from 'vitest';
 import { recordsLinePurpose, recordsLineRedirect, recordsRequestText } from './records-request-intent';
 
+describe('review regressions: document delivery and independent instructions', () => {
+  it.each([
+    'I called the medical records office to get an appointment',
+    'I called the records department to get a new appointment',
+    'I called the medical records department to get an appointment',
+    'I need to schedule my OCT and get a ride from the records office',
+  ])('does not infer document delivery from an unrelated get: %s', text => {
+    expect(recordsLinePurpose(text)).toBe('scheduling');
+    expect(recordsLineRedirect(text)).toMatchObject({ departmentId: 9 });
+  });
+
+  it.each([
+    'Necesito un reporte medico',
+    'Necesito un reporte médico',
+    'Quiero mis reportes médicos',
+    'Necesito un informe medico',
+    'Necesito un informe médico',
+    'Necesito mi historial médico',
+    'Necesito mi expediente',
+    'Necesito mi record medico',
+    'Necesito una copia de mi historial médico',
+    'Solicito mis registros',
+    'Necesito mis registros médicos',
+    'Por favor enviar al doctor mi informe medico',
+    'Por favor enviar al doctor mi reporte médico',
+    'Do not send my chart and please send my medical report',
+    'Do not send my chart and send my medical report',
+    'Do not send my chart but send my medical report',
+    'Do not send my chart because I need my medical report',
+    'I called the records office to get my medical records',
+    'Please get a copy of my chart',
+    'Please send my records before I get an appointment',
+    'I need my records sent before my appointment',
+  ])('preserves affirmative document requests: %s', text => {
+    expect(recordsLinePurpose(text)).toBe('records');
+    expect(recordsLineRedirect(text)).toBeNull();
+  });
+
+  it.each([
+    'Do not send my records and please reschedule my appointment',
+    'Do not send my records but please reschedule my appointment',
+    'Do not send my records because please reschedule my appointment',
+    'Do not send my records because I need to reschedule my appointment',
+    "Don't fax my chart and I want to reschedule my appointment",
+    'I do not need records and can you reschedule my appointment?',
+    'Do not send my records and reschedule my appointment',
+    'Do not send my reporte medico and please reschedule my appointment',
+    'Do not send my records, my chart, and my imaging and please reschedule my appointment',
+  ])('preserves reason 147 after a conjunction-joined refusal: %s', text => {
+    expect(recordsLinePurpose(text)).toBe('scheduling');
+    expect(recordsLineRedirect(text)).toMatchObject({
+      departmentId: 9, requestTypeId: 32, requestReasonId: 147,
+    });
+  });
+
+  it.each([
+    'Do not send my records and my chart',
+    'Do not send my records, my chart, and my imaging',
+    'Do not send my reporte medico and my chart',
+    'Do not send my records but my chart',
+    'Do not send my records because I have an appointment',
+    'Do not send my records and I already have my chart',
+  ])('keeps refused document lists and explanations excluded: %s', text => {
+    expect(recordsLinePurpose(text)).toBe('unknown');
+  });
+
+  it.each(['and', 'but', 'because'])('preserves an affirmative request before an %s-joined refusal', conjunction => {
+    expect(recordsLinePurpose(`Please send my medical report ${conjunction} I do not need my chart`)).toBe('records');
+    expect(recordsLineRedirect(`Please reschedule my appointment ${conjunction} I do not need my chart`)).toMatchObject({
+      departmentId: 9, requestTypeId: 32, requestReasonId: 147,
+    });
+  });
+});
+
 describe('item #8 request evidence, independent of the model taxonomy', () => {
   it.each([
     'Please fax the notes before the appointment',
