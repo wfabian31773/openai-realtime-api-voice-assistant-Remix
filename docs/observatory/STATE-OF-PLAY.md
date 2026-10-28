@@ -13,8 +13,8 @@
 The live PCP filing tool now honors captured patient scheduling intent and
 uses one unassigned retry for terminal Optical/Surgery routing-field refusals.
 Shared appointment cues cover "schedule my appointment" / "appointment scheduling".
-Marker: `voice-runtime-v122-pcp-scheduling-hub-unassigned-exit-20261028`, on top
-of v117; concurrent marker numbers may require rebasing. No production
+Marker: `voice-runtime-v128-pcp-scheduling-hub-unassigned-exit-20261028`
+(renumbered from v122), on top of `main`'s v126 (#394); v127 is #376. No production
 measurement, DB writes, migration, commit or deployment.
 Validation: 99 tests pass across the four touched Vitest files, run with
 `nice -n 10`, one worker. The new live-tool regression failed nine assertions
