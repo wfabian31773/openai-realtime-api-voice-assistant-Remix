@@ -256,6 +256,8 @@ export interface LaneCallMetadata {
   callId: string;
   callerPhone: string;
   dialedNumber: string;
+  /** PCP's queue-withdrawal exemption reads the live transcript before redirecting. */
+  getTransferTranscript?: () => string;
   /**
    * The call_logs row id.
    *

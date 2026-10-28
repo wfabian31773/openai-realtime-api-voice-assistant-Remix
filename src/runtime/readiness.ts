@@ -910,8 +910,16 @@ import { callEnvironment } from "./callRecord";
  * are skipped. The normal per-call lock and idempotency key prevent duplicates.
  * On top of v128 (#389); renumbered from v119; v127 is #376 on its open branch. No migration; production impact remains unmeasured.
  */
+/**
+ * v130 — A PCP CALLER TOLD THEIR REQUEST IS RECORDED KEEPS IT WHEN THE QUEUE
+ * ANSWERS (2026-10-28). Both blind-transfer settlement paths apply v102's
+ * read-back / "I've taken this down" exemption, captured before redirecting
+ * while the transcript is available. A caller who heard neither still has
+ * the ticket withdrawn; hang-up behavior is unchanged. On top of v129 (#386); renumbered from v120; v127 is #376 on its open branch.
+ * No migration. `src/pcp/queueIsAChoice.test.ts`.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v129-after-hours-teardown-floor-20261028";
+  "voice-runtime-v130-queue-withdrawal-exemption-20261028";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

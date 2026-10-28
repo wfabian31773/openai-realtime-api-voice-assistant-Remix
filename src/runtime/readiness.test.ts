@@ -119,6 +119,10 @@ describe("runtime readiness", () => {
     );
   });
 
+  it("identifies the queue-answer withdrawal exemption build", () => {
+    expect(VOICE_RUNTIME_DEPLOY_MARKER).toBe("voice-runtime-v130-queue-withdrawal-exemption-20261028");
+  });
+
   /**
    * WHY A TEST GUARDS A STRING'S SUFFIX.
    *
@@ -137,10 +141,6 @@ describe("runtime readiness", () => {
   it("carries the date it was set, so a build's age is readable from the marker", () => {
     expect(VOICE_RUNTIME_DEPLOY_MARKER).toMatch(/-\d{8}$/);
     expect(markerSetOn()).not.toBeNull();
-  });
-
-  it('identifies the after-hours teardown floor deployment', () => {
-    expect(VOICE_RUNTIME_DEPLOY_MARKER).toBe('voice-runtime-v129-after-hours-teardown-floor-20261028');
   });
 
   it("markerSetOn reports null rather than guessing when the suffix is gone", () => {
