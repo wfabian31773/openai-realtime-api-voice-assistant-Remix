@@ -889,8 +889,16 @@ import { callEnvironment } from "./callRecord";
  * descriptions survive the SDK conversion on answering-service and no-ivr-v2.
  * On top of v116. No migration; production impact remains unmeasured.
  */
+/**
+ * v119 — AFTER-HOURS TEARDOWN FLOOR (2026-10-28). The no-ivr and no-ivr-v2
+ * agents reuse PCP's v90 registered sweep machinery on both voice pipelines.
+ * A transcribed request with no ticket files through the usual After Hours
+ * submission path; silent calls, identity-only calls and existing tickets
+ * are skipped. The normal per-call lock and idempotency key prevent duplicates.
+ * On top of v117. No migration; production impact remains unmeasured.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v117-contact-capture-20261027";
+  "voice-runtime-v119-after-hours-teardown-floor-20261028";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

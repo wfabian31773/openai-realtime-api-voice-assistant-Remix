@@ -43,6 +43,8 @@ import { corroborate } from "../services/symptomCorroboration";
 import { markCallConcluded } from "../services/callConclusion";
 import { callMetadataForDB } from "../services/callMetadataStore";
 import { EMAIL_FIELD_DESCRIPTION, LAST_NAME_FIELD_DESCRIPTION } from "../tools/contactCaptureGuidance";
+import { registerAfterHoursFloor, markAfterHoursTicketFiled } from '../services/afterHoursTeardownFloor';
+export { sweepAfterHoursUnfiledCall } from '../services/afterHoursTeardownFloor';
 
 /**
  * AN EMAIL PREFERENCE WITHOUT AN ADDRESS IS A QUESTION, NOT A FAILURE.
@@ -1190,6 +1192,7 @@ export async function createNoIvrAgent(
   handoffToHuman: () => Promise<void>,
   metadata: NoIvrAgentMetadata,
 ): Promise<RealtimeAgent> {
+  registerAfterHoursFloor(metadata, 'no-ivr');
   // Lazy import callerMemoryService to prevent module initialization errors in production
   // Wrapped in try/catch to ensure agent factory NEVER throws - agent must always be created
   let callerMemoryService: typeof import("../services/callerMemoryService")["callerMemoryService"] | null = null;
@@ -1952,6 +1955,7 @@ The ticket will include schedule context (last appointment info) automatically.`
       }
 
       if (result.success && result.ticketNumber) {
+        markAfterHoursTicketFiled(callId);
         console.log(`[TICKET CREATE] ✓ SUCCESS for call ${metadata.callSid}: ${result.ticketNumber}`);
         console.log(`[TICKET CREATE]   Patient: ${params.first_name} ${params.last_name}, Category: ${params.request_category}`);
         
@@ -2158,6 +2162,7 @@ Always say a brief goodbye phrase BEFORE calling this tool.`,
         callStartTime: new Date().toISOString(),
       });
       if (result.success) {
+        markAfterHoursTicketFiled(callId);
         console.info(
           `[HANDOFF] refused escalation (${code}) filed as ${result.ticketNumber ?? 'a ticket'} on ${metadata.callSid}`,
         );
@@ -2387,6 +2392,7 @@ For healthcare provider calls — escalate immediately with whatever info you ha
               // path above. The post-call update carries the complete one.
             });
             if (result.success) {
+              markAfterHoursTicketFiled(callId);
               console.info(
                 `[HANDOFF] ✓ Urgent transfer record ticket: ${result.ticketNumber}${earlier ? ` (beside ${earlier.ticketNumber})` : ''}`,
               );

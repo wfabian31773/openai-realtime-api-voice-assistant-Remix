@@ -8,6 +8,14 @@
 
 # State of Play — Azul Vision voice agents
 
+2026-10-28 after-hours teardown floor (offline, synthetic data):
+`voice-runtime-v119-after-hours-teardown-floor-20261028`, on top of v117.
+No-IVR and V2 reuse PCP's v90 registered, bounded teardown runner and its
+transcript request guard on both pipelines. Existing tickets, silent calls
+and explicitly answered questions are skipped; filings use the normal
+After Hours submission path and per-call idempotency. No migration or
+production measurement. Concurrent marker claims may require rebasing.
+
 2026-10-27 review follow-up (offline, synthetic data): the paired request
 classifiers now preserve clinical complaints mentioning eyewear, normalize
 explicit surgery denials, and retain cataract/procedure insurance on Surgery.

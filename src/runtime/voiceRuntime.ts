@@ -276,7 +276,7 @@ import { identityForRow } from "./runtimeIdentity";
 import { identityStoreProbe, rememberVerifiedIdentity } from "../tools/verifiedIdentity";
 import { logRuntimeIdentity } from "./identityTelemetry";
 import { runRequestSweep } from "./sweepRunner";
-import { runPcpFloor } from "./pcpFloor";
+import { runLaneTeardownFloor } from "./pcpFloor";
 import { persistRuntimeTurns } from "./runtimeTurns";
 import { makeRecordingStarter } from "./callRecording";
 import { gradeRuntimeCall } from "./runtimeGrading";
@@ -460,7 +460,7 @@ export interface VoiceRuntimeOptions {
    */
   sweepCall?: (record: VoiceCallRecord) => Promise<unknown>;
   /**
-   * The PCP lost-request floor — see pcpFloor.ts. A no-op on every other lane.
+   * Registered lost-request floors (PCP and after-hours) — see pcpFloor.ts.
    *
    * Separate from `sweepCall` because the two file through different endpoints
    * with different payloads, and the generic sweep declines `pcp` by design
@@ -660,7 +660,7 @@ export function mountVoiceRuntime(
   // resolved from, so the sweep and the factory are one module (v90 —
   // pcpFloor.ts says why a separate import of pcpAgent never filed on Node 20).
   const sweepPcpFloor =
-    options.sweepPcpFloor ?? ((record: VoiceCallRecord) => runPcpFloor(record, { source: laneSource }));
+    options.sweepPcpFloor ?? ((record: VoiceCallRecord) => runLaneTeardownFloor(record, { source: laneSource }));
   // Passed as is: `(record, ctx)` IS runSetupFailureFloor's signature, so
   // there is no wrapper here to lose the context (setupFailureFloor.ts).
   const fileSetupFailure = options.fileSetupFailure ?? runSetupFailureFloor;
@@ -1771,7 +1771,8 @@ export function mountVoiceRuntime(
             );
             await sweepCall(record).catch(() => undefined);
             /**
-             * AND THE PCP FLOOR, which the sweep above declines by design.
+             * AND THE REGISTERED FLOORS (PCP and after-hours), which the
+             * sweep above declines by design.
              *
              * `decideSweep` returns `not-a-queue-lane` for pcp at its first
              * line, so before this the lane had no teardown filer on this
@@ -1783,7 +1784,7 @@ export function mountVoiceRuntime(
              *
              * AWAITED, like the sweep above and unlike the telemetry below,
              * because it files a caller's request rather than describing it —
-             * and bounded inside `runPcpFloor` so a wedged ticketing app cannot
+             * and bounded inside `runLaneTeardownFloor` so a wedged ticketing app cannot
              * hold teardown. It also frees the lane's per-call state: the
              * sweep's `finally` is the only caller of `pcpDirector.clear` that
              * this runtime ever reaches, since `terminate_call`'s success branch
