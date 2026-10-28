@@ -929,6 +929,8 @@ export class VoiceCallBridge {
   private goodbyeTimer: unknown = null;
   private goodbyeGraceHangup = false;
   private callerClosing: CallerConclusion | null = null;
+  /** The provider item id of the last non-empty caller transcript. */
+  private lastCallerItemId: string | null = null;
   private goodbyeEpoch: number | null = null;
   private goodbyeOutputStarted = false;
   private goodbyeResponse: {
@@ -1007,7 +1009,13 @@ export class VoiceCallBridge {
         // concluding turn does not cancel the goodbye it already started.
         if (text.trim()) {
           const turn = this.lastCallerLineIndex();
-          const sameTurn = turn >= 0 && turn === turnBefore;
+          // Same turn by the provider's item identity when it has one (the
+          // log opens a new line once a playback mark commits the agent's
+          // reply), else by the log's own line.
+          const sameTurn = itemId
+            ? itemId === this.lastCallerItemId
+            : turn >= 0 && turn === turnBefore;
+          if (itemId) this.lastCallerItemId = itemId;
           const retained = turn >= 0 ? this.transcriptLog.lines[turn].slice(8) : text;
           this.callerClosing = this.callerClosingFromLog(text);
           const late = this.goodbyeResponse;

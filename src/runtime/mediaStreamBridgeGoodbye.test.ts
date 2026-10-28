@@ -76,6 +76,16 @@ describe("VoiceCallBridge — goodbye grace", () => {
     expect(h.outcomes).toEqual(["agent_ended"]);
   });
 
+  it("re-emitting the same concluding turn after playback keeps the grace timer (Codex P2, #396)", () => {
+    const h = harness();
+    h.handlers.onCallerTranscript("Bye.", "item_caller_4");
+    h.say("Goodbye.");
+    vi.advanceTimersByTime(1_000);
+    h.handlers.onCallerTranscript("Bye.", "item_caller_4");
+    vi.advanceTimersByTime(GOODBYE_GRACE_MS - 1_000);
+    expect(h.outcomes).toEqual(["agent_ended"]);
+  });
+
   it("hangs up exactly six seconds after the goodbye plays, through deliberate teardown", () => {
     expect(GOODBYE_GRACE_MS).toBe(6_000);
     const h = harness(); h.goodbye();
