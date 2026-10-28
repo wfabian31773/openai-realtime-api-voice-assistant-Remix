@@ -23,6 +23,7 @@ const registries: LiveCallRegistry[] = [];
 afterEach(async () => {
   for (const registry of registries.splice(0)) registry.clear();
   vi.restoreAllMocks();
+  vi.useRealTimers();
 });
 
 async function boot() {
@@ -53,7 +54,7 @@ async function boot() {
   ])) as unknown as Express;
   mountPluginApi(app, { store, outboundStore: outbound, agents: { getAllAgents: () => [] }, env,
     now: () => clock.at, liveCalls: sessions, liveCallSender: sender, smsSender: sms });
-  async function request(path: string, body?: unknown, token = bot) {
+  async function request(path: string, body?: unknown, token = bot, onResponse?: () => void) {
     const url = new URL(path, "https://fleet.example/api/plugin/v1/");
     const pathname = `/api/plugin/v1${url.pathname}`;
     const method = body === undefined ? "GET" : "POST";
@@ -68,7 +69,7 @@ async function boot() {
     const res = {
       setHeader(name: string, value: string) { result.headers.set(name, value); },
       status(status: number) { result.status = status; return res; },
-      json(value: unknown) { result.body = value; return res; },
+      json(value: unknown) { result.body = value; onResponse?.(); return res; },
     };
     async function run(index: number): Promise<void> {
       const handler = route!.handlers[index];
@@ -233,16 +234,53 @@ describe("direct open-line calls", () => {
     expect(JSON.stringify(await h.store.listAudit())).not.toContain("invalid-token");
   });
 
-  it("retains a masked attempt log when audit persistence is unavailable", async () => {
+  it.each(["Call Will about office hours", "Ask Price about pickup"])("retains a sanitized fallback for %j when audit persistence is unavailable", async (purpose) => {
     const h = await boot(); const bot = h.store.mint(["calls:direct"]);
     vi.spyOn(h.store, "writeAudit").mockRejectedValue(new Error("database unavailable"));
     const log = vi.spyOn(console, "error").mockImplementation(() => {});
-    expect((await h.request("/calls/direct", input, bot)).status).toBe(200);
+    expect((await h.request("/calls/direct", { ...input, purpose }, bot)).status).toBe(200);
     expect(log).toHaveBeenCalledWith(expect.stringContaining("database unavailable"), expect.objectContaining({
       tokenJti: bot.jti, at: h.clock.at.toISOString(), details: expect.objectContaining({ maskedNumber: "***0111", reason: "placed" }),
     }));
     expect(JSON.stringify(log.mock.calls)).not.toContain(PHONE);
     expect(JSON.stringify(log.mock.calls)).not.toContain(input.name);
+    expect(JSON.stringify(log.mock.calls).toLowerCase()).not.toMatch(/\b(?:will|price)\b/);
+  });
+
+  it("sends the successful response before starting an audit write that never resolves", async () => {
+    vi.useFakeTimers();
+    const h = await boot(); const bot = h.store.mint(["calls:direct"]);
+    const order: string[] = [];
+    vi.spyOn(h.store, "writeAudit").mockImplementation(() => {
+      order.push("audit");
+      return new Promise<void>(() => {});
+    });
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    const result = await h.request("/calls/direct", input, bot, () => order.push("response"));
+    expect(result).toMatchObject({ status: 200, body: { status: "live", sessionId: expect.any(String) } });
+    expect(h.sessions.owned(result.body.sessionId, bot.jti)).not.toBeNull();
+    expect(order).toEqual(["response", "audit"]);
+    expect(log).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(250);
+    expect(log).toHaveBeenCalledOnce();
+    expect(JSON.stringify(log.mock.calls)).not.toContain(PHONE);
+    expect(JSON.stringify(log.mock.calls)).not.toContain(input.name);
+  });
+
+  it.each([true, false])("bounds stalled audit writes on refusals (authentication: %s)", async (authentication) => {
+    vi.useFakeTimers();
+    const h = await boot();
+    const bot = authentication ? { ...h.bot, plaintext: "invalid-token" } : h.store.mint(["calls:direct"]);
+    const write = vi.spyOn(h.store, "writeAudit").mockImplementation(() => new Promise<void>(() => {}));
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    const response = h.request("/calls/direct", { ...input, phone: "invalid" }, bot);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(write).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(250);
+    expect(await response).toMatchObject({ status: authentication ? 401 : 400 });
+    expect(h.sender.createCall).not.toHaveBeenCalled();
+    expect(log).toHaveBeenCalledWith(expect.stringContaining("database unavailable"), expect.objectContaining({ outcome: "denied" }));
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it.each([true, false])("audits a provider failure without retrying (clear refusal: %s)", async (clear) => {

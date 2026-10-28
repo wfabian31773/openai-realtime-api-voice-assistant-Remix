@@ -53,6 +53,8 @@ export interface PluginApiDeps {
 
 type AuthedRequest = Request & { pluginAuth?: VerifiedPluginToken };
 
+const DIRECT_AUDIT_TIMEOUT_MS = 250;
+
 function envOf(deps: PluginApiDeps): Record<string, string | undefined> {
   return deps.env ?? process.env;
 }
@@ -82,8 +84,17 @@ async function audit(
       createdAt: (deps.now ?? (() => new Date()))(),
     } : {}),
   };
+  let timeout: ReturnType<typeof setTimeout> | undefined;
   try {
-    await deps.store.writeAudit(entry);
+    if (direct) {
+      // A stalled audit database must not hold a direct-call response open.
+      await Promise.race([
+        deps.store.writeAudit(entry),
+        new Promise<never>((_, reject) => {
+          timeout = setTimeout(() => reject(new Error("audit write timed out")), DIRECT_AUDIT_TIMEOUT_MS);
+        }),
+      ]);
+    } else await deps.store.writeAudit(entry);
   } catch {
     if (direct) {
       // Preserve a PHI-free attempt log even if the audit database is down.
@@ -91,6 +102,8 @@ async function audit(
         ...sanitizeAuditEntry(entry), at: entry.createdAt?.toISOString(),
       });
     } else console.error("[plugin-audit] failed to write audit row");
+  } finally {
+    if (timeout !== undefined) clearTimeout(timeout);
   }
 }
 
@@ -209,8 +222,8 @@ export function mountPluginApi(app: Express, deps: PluginApiDeps): void {
         res.status(502).json({ error: result.reason, reason: result.reason, outcome: "unknown", sessionId: result.sessionId });
         return;
       }
-      await audit(deps, req.pluginAuth, req, "direct_call", "committed", 200, { reason: "placed" });
       res.json({ status: "live", sessionId: result.sessionId, callSid: result.callSid });
+      void audit(deps, req.pluginAuth, req, "direct_call", "committed", 200, { reason: "placed" });
     } catch {
       await refuse(503, "direct_call_unavailable");
     }
