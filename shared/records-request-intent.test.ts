@@ -448,6 +448,61 @@ describe('review regressions: retain established records-line workflows', () => 
   });
 });
 
+describe('review regressions: prescription fulfillment versus document copies', () => {
+  it.each([
+    'Please send my prescription to Walgreens',
+    'Please send my prescription to CVS',
+    'Please send my prescription to Rite Aid',
+    'Please send my prescription to Costco',
+    'Please send my prescription to a pharmacy',
+    'Please send my medication to Walgreens',
+    'Please send my drops to CVS',
+    'Please call in my prescription to Rite Aid',
+    'Please call my prescription in to Costco',
+    'Please call in my medication to my pharmacy',
+    'Please call in my drops to Walgreens',
+    'Please transfer my prescription to CVS',
+    'Please transfer my medication to Rite Aid',
+    'Please transfer my drops to Costco',
+    'I need my prescription sent to Walgreens',
+    'My prescription needs to be called in to CVS',
+    'I need my prescription transferred to Rite-Aid',
+    'Walgreens needs my prescription',
+    'Please call in my prescription',
+    'Please call my prescription in',
+    'Please transfer my prescription',
+    'I need to call in my prescription',
+    'I need my prescription called in',
+    'I need to transfer my prescription',
+    'I need my prescription transferred',
+    'I need my prescriptions sent to CVS',
+    'I need my contact lens prescription transferred to Costco',
+    'I need my prescription refilled at Walgreens',
+    'Please refill my drops at CVS',
+  ])('routes fulfillment to Clinical Tech Support: %s', text => {
+    expect(recordsLinePurpose(text)).toBe('clinical');
+    expect(recordsLineRedirect(text)).toMatchObject({
+      departmentId: 3, departmentName: 'Clinical Tech Support', requestTypeId: 72, requestReasonId: 542,
+    });
+  });
+
+  it.each([
+    'Please send me a copy of my glasses prescription',
+    'I need a copy of my contact lens prescription',
+    'Please send me a copy of my medication prescription',
+    'Please send me a copy of my prescription for drops',
+    'Please send me a copy of my prescription from Walgreens',
+    'Please send a copy of my prescription to CVS',
+    'I need a copy of my prescription before transferring it to Costco',
+    'Please transfer my prescription to Walgreens and send me a copy of my records',
+    'Please send my prescription to CVS; I also need a copy of my contact lens prescription',
+    'Please send my medical records to Walgreens',
+  ])('keeps an explicit document request in Medical Records: %s', text => {
+    expect(recordsLinePurpose(text)).toBe('records');
+    expect(recordsLineRedirect(text)).toBeNull();
+  });
+});
+
 describe('review regressions: prescription actions, proof requests, and named exams', () => {
   it.each([
     'I need my prescription refilled',

@@ -117,6 +117,29 @@ describe('self-review: request-scoped caller evidence', () => {
 
 describe('review: classification and filing agree on records intent', () => {
   it.each([
+    'Please send my prescription to Walgreens',
+    'Please call in my prescription to CVS',
+    'Please transfer my prescription to Rite Aid',
+    'I need my contact lens prescription transferred to Costco',
+    'Please send my medication to Walgreens',
+    'Please call in my drops to CVS',
+    'I need my prescription refilled at Costco',
+  ])('files prescription fulfillment to Clinical without records intake: %s', async request_description => {
+    expect(await runTool('classify_records_request', { request_description })).toMatchObject({
+      classified: true, is_records_request: false, department_id: 3,
+      request_type_id: 72, request_reason_id: 542,
+    });
+    expect((await runTool('file_records_ticket', {
+      ...BASE, requester: undefined, request_description, form_channel: 'sms',
+    })).success).toBe(true);
+    expect(api.createTicket).toHaveBeenCalledOnce();
+    const payload = api.createTicket.mock.calls[0][0];
+    expect(payload).toMatchObject({ departmentId: 3, requestTypeId: 72, requestReasonId: 542 });
+    for (const field of ['requestorType', 'requestorName', 'requestPathway', 'capClockApplies', 'formChannel']) expect(payload).not.toHaveProperty(field);
+    expect(payload.description).not.toMatch(/CAP|records clock|Send to:|Dates needed:/i);
+  });
+
+  it.each([
     ['I called the medical records office to get an appointment', 146],
     ['Do not send my records and please reschedule my appointment', 147],
   ])('routes without a records form or delivery questions: %s', async (request_description, reason) => {
@@ -175,6 +198,10 @@ describe('review: classification and filing agree on records intent', () => {
     'Necesito una copia de mis resultados',
     'Please send me a copy of my last eye exam',
     'Please send me a copy of my file',
+    'Please send me a copy of my glasses prescription',
+    'I need a copy of my contact lens prescription',
+    'Please send me a copy of my medication prescription from Walgreens',
+    'Please send a copy of my prescription to CVS',
   ])('retains the records workflow for %s', async request_description => {
     expect(await runTool('classify_records_request', { request_description })).toMatchObject({ is_records_request: true, department_id: 16 });
     expect((await runTool('file_records_ticket', { ...BASE, request_description, form_channel: 'sms' })).success).toBe(true);

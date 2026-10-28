@@ -37,6 +37,12 @@ const INTERPRETATION = new RegExp([
 const BILLING = /\b(?:bills?|billing|copays?|payments?)\b/;
 const PRESCRIPTION_ACTION = /\b(?:refill(?:s|ed|ing)?|renew(?:s|ed|ing|als?)?)\b/;
 const MEDICATION = /\b(?:medication|medicine|drops?|pharmacy|medicina|medicamentos?|farmacia|gotas)\b/;
+const PHARMACY = /\b(?:pharmac(?:y|ies)|walgreens|cvs|rite[- ]aid|costco)\b/;
+const PRESCRIPTION_FULFILLMENT_ACTION = /\b(?:transfer(?:s|red|ring)?|call(?:s|ed|ing)?\b[^.!?;,]{0,65}\bin)\b/;
+// Sending a prescription to be filled is clinical work. Explicit document
+// copies still qualify through genericCopyRequest before this distinction.
+const prescriptionFulfillment = (text: string) => /\b(?:prescriptions?|recetas?)\b/.test(text)
+  && (PRESCRIPTION_ACTION.test(text) || PHARMACY.test(text) || PRESCRIPTION_FULFILLMENT_ACTION.test(text));
 // An explicit copy request can name a document outside our vocabulary (e.g.
 // an MRI or a file). Require an object and evidence that the copy is requested.
 // Exclude billing objects here; a billing purpose for a medical copy still counts.
@@ -127,7 +133,7 @@ export function recordsLinePurpose(text: string): RecordsLinePurpose {
     if (interpretation >= 0 && requestedDeliveryAfterInterpretation(clause, interpretation)) return true;
     if (interpretation >= 0 && !EXPLICIT_DELIVERY.test(c) && !accessQuestion && !genericCopyRequest) return false;
     const document = DOC.test(c) || /\b(?:doctor'?s? note|notes? from|report from)\b/.test(c);
-    const prescription = /\b(?:prescription|receta)\b/.test(c) && !MEDICATION.test(c) && !PRESCRIPTION_ACTION.test(c);
+    const prescription = /\b(?:prescription|receta)\b/.test(c) && !MEDICATION.test(c) && !prescriptionFulfillment(c);
     if (accessQuestion) return true;
     if (genericCopyRequest) return true;
     const schedulingStart = c.search(SCHEDULE_ACTION);
@@ -151,7 +157,7 @@ export function recordsLinePurpose(text: string): RecordsLinePurpose {
   if (schedulingCue(request) || SCHEDULE_ACTION.test(request) || /\b(?:appointment|cita|eye exam|visit tomorrow|seen today|get in today|openings|availability|disponibilidad)\b/.test(request)) return 'scheduling';
   if (/\b(?:referral|referido|autorizacion)\b/.test(request)) return 'referral';
   if (/\b(?:payer|payor|health plan|vendor|insurance|eligibility|claim)\b/.test(request)) return 'professional';
-  if (PRESCRIPTION_ACTION.test(request)) return 'clinical';
+  if (PRESCRIPTION_ACTION.test(request) || prescriptionFulfillment(request)) return 'clinical';
   if (/\b(?:glasses|frames?|contact lenses|eyeglasses|lentes|gafas)\b/.test(request)) return 'optical';
   if (MEDICATION.test(request) || /\b(?:prescription|receta|results?)\b/.test(request)) return 'clinical';
   if (BILLING.test(request)) return 'billing';
