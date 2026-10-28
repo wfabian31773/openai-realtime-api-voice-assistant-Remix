@@ -120,7 +120,7 @@ describe("runtime readiness", () => {
   });
 
   it("identifies the queue-answer withdrawal exemption build", () => {
-    expect(VOICE_RUNTIME_DEPLOY_MARKER).toBe("voice-runtime-v120-queue-withdrawal-exemption-20261028");
+    expect(VOICE_RUNTIME_DEPLOY_MARKER).toBe("voice-runtime-v130-queue-withdrawal-exemption-20261028");
   });
 
   /**

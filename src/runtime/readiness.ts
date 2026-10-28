@@ -890,15 +890,28 @@ import { callEnvironment } from "./callRecord";
  * On top of v116. No migration; production impact remains unmeasured.
  */
 /**
- * v120 — A PCP CALLER TOLD THEIR REQUEST IS RECORDED KEEPS IT WHEN THE QUEUE
+ * v126 — NO-IVR PROMPT TRIM (2026-10-28). Remove repeated explanations from
+ * the Grok prompt while keeping its rules; the length ratchet checks pinned
+ * daytime and overnight clocks. On top of v117; v122–v125 are on open
+ * branches. `src/agents/noIvrPromptForGrok.ts`.
+ */
+/**
+ * v128 — PCP SCHEDULING AND UNASSIGNED EXIT (2026-10-28; renumbered from v122). Patient scheduling
+ * reaches the HVA Hub, including a captured scheduling purpose alongside the
+ * patient latch. A terminal Optical/Surgery office or surgeon refusal retries
+ * once with routingAskExhausted instead of sending PCP back through re-asks.
+ * On top of v126 (#394); v127 is #376 on its open branch. No migration; production impact remains unmeasured.
+ */
+/**
+ * v130 — A PCP CALLER TOLD THEIR REQUEST IS RECORDED KEEPS IT WHEN THE QUEUE
  * ANSWERS (2026-10-28). Both blind-transfer settlement paths apply v102's
  * read-back / "I've taken this down" exemption, captured before redirecting
  * while the transcript is available. A caller who heard neither still has
- * the ticket withdrawn; hang-up behavior is unchanged. On top of v117.
+ * the ticket withdrawn; hang-up behavior is unchanged. On top of v128 (#389); renumbered from v120; v127 is #376 on its open branch; v129 is #386 on its open branch.
  * No migration. `src/pcp/queueIsAChoice.test.ts`.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v120-queue-withdrawal-exemption-20261028";
+  "voice-runtime-v130-queue-withdrawal-exemption-20261028";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

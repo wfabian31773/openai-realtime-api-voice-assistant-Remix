@@ -8,6 +8,19 @@
 
 # State of Play — Azul Vision voice agents
 
+2026-10-28 PCP scheduling/unassigned exit (offline, synthetic data):
+`CA9dfc0fa32af0d0548cbda1a764cd11c0` identifies the reported failure shape.
+The live PCP filing tool now honors captured patient scheduling intent and
+uses one unassigned retry for terminal Optical/Surgery routing-field refusals.
+Shared appointment cues cover "schedule my appointment" / "appointment scheduling".
+Marker: `voice-runtime-v128-pcp-scheduling-hub-unassigned-exit-20261028`
+(renumbered from v122), on top of `main`'s v126 (#394); v127 is #376. No production
+measurement, DB writes, migration, commit or deployment.
+Validation: 99 tests pass across the four touched Vitest files, run with
+`nice -n 10`, one worker. The new live-tool regression failed nine assertions
+before the fix. `tsc -p . --noEmit` and `git diff --check` pass. The full suite
+was not run.
+
 2026-10-27 review follow-up (offline, synthetic data): the paired request
 classifiers now preserve clinical complaints mentioning eyewear, normalize
 explicit surgery denials, and retain cataract/procedure insurance on Surgery.
@@ -19,6 +32,7 @@ unexplained dates. Regression evidence and scope: `docs/BACKEND_HANDOFF.md`,
 **Companion to `/CLAUDE.md`. Read both at the start of every session.**
 
 Last updated: **2026-10-27** (request-classification review follow-up above).
+Earlier: **2026-10-26** (VA-76222 / VA-76221 — on-call identity before transfer, and a lookup miss that is not "not found").
 Earlier: **2026-10-06** (section 14 — the session stall reconnects),
 **2026-09-25** (section 13 — terminal 4xx is follow-up, not a
 stall), **2026-09-17 11:10 UTC** (section 12), **2026-09-09 17:40 UTC**
@@ -1624,3 +1638,28 @@ no PR opened, no merge or deploy, and no production before/after claim. Next:
 owner opens the PR and follows the measurement rule in `docs/BACKEND_HANDOFF.md`
 before merging ticket-path changes. Shared bridge files are outside this
 session's writable workspace; this entry is the local handoff.
+
+---
+
+## 18. VA-76222 / VA-76221 — on-call identity, and a lookup miss that is not "not found" (2026-10-26)
+
+Ticket ids only. Full note: `.agents/memory/on-call-identity-and-lookup-miss.md`.
+
+**VA-76222.** An urgent-symptom call reached on-call, the transfer failed, and
+the callback ticket was `Unknown Caller` with no name and no date of birth.
+`urgentFallbackTicketParams` filed `Unknown` + `Caller`; `escalate_to_human`
+did not keep the ANI unless the model passed a callback. Now: one identity
+ask before the dial (911-level and a clinician skip; a decline still
+transfers); the calling number is always the callback and wins over a
+model-supplied number; a `need_identity` result is not a transfer; a failed
+transfer's ticket uses the stand-in, never Unknown Caller, and carries
+whatever was captured.
+
+**VA-76221, root cause.** `lookup_schedule` called `lookupByNameAndDOB` only.
+That is a string match on the spoken name. The same call already held a
+phone-loaded schedule with the chart name and the visits. The tool answered
+`{ found: false }`; the prompt told the model to say "not found in system".
+Fix: re-run with the chart name when the spoken first name agrees; accept
+only a unique `name_and_dob` hit. If still unsure, say "Let me make sure
+the team has your details." Never tell the caller they are not found when
+visit history exists.

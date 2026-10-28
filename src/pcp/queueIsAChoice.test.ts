@@ -113,7 +113,7 @@ const QUEUE_OK = async () => ({ ok: true, destination: '+17149564300', handedToQ
 describe.each([
   ['explicit queue choice', true],
   ['file before dial', undefined],
-] as const)('v120 — queue-answer withdrawal after %s', (_path, accepted) => {
+] as const)('v130 — queue-answer withdrawal after %s', (_path, accepted) => {
   const heardCases = [
     ['literal read-back', 'AGENT: Your ticket number is PCP-58001.', true],
     ['spoken read-back', 'AGENT: Your ticket number is P-C-P-five-eight-zero-zero-one.', true],
