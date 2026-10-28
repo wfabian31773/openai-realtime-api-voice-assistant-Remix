@@ -887,7 +887,7 @@ import { callEnvironment } from "./callRecord";
  * an exact or uniquely fuzzy Console match on both ticket submission paths,
  * with the five-point margin checked against the entire roster. Contact field
  * descriptions survive the SDK conversion on answering-service and no-ivr-v2.
- * On top of v116. No migration; production impact remains unmeasured.
+ * On top of v131 (main); renumbered from v127. No migration; production impact remains unmeasured.
  */
 /**
  * v126 — NO-IVR PROMPT TRIM (2026-10-28). Remove repeated explanations from
@@ -896,13 +896,43 @@ import { callEnvironment } from "./callRecord";
  * branches. `src/agents/noIvrPromptForGrok.ts`.
  */
 /**
- * v127 — MUTUAL PATIENT DETECTOR (2026-10-28). The provider detector also
+ * v128 — PCP SCHEDULING AND UNASSIGNED EXIT (2026-10-28; renumbered from v122). Patient scheduling
+ * reaches the HVA Hub, including a captured scheduling purpose alongside the
+ * patient latch. A terminal Optical/Surgery office or surgeon refusal retries
+ * once with routingAskExhausted instead of sending PCP back through re-asks.
+ * On top of v126 (#394); v127 is #376 on its open branch. No migration; production impact remains unmeasured.
+ */
+/**
+ * v129 — AFTER-HOURS TEARDOWN FLOOR (2026-10-28). The no-ivr and no-ivr-v2
+ * agents reuse PCP's v90 registered sweep machinery on both voice pipelines.
+ * A transcribed request with no ticket files through the usual After Hours
+ * submission path; silent calls, identity-only calls and existing tickets
+ * are skipped. The normal per-call lock and idempotency key prevent duplicates.
+ * On top of v128 (#389); renumbered from v119; v127 is #376 on its open branch. No migration; production impact remains unmeasured.
+ */
+/**
+ * v130 — A PCP CALLER TOLD THEIR REQUEST IS RECORDED KEEPS IT WHEN THE QUEUE
+ * ANSWERS (2026-10-28). Both blind-transfer settlement paths apply v102's
+ * read-back / "I've taken this down" exemption, captured before redirecting
+ * while the transcript is available. A caller who heard neither still has
+ * the ticket withdrawn; hang-up behavior is unchanged. On top of v129 (#386); renumbered from v120; v127 is #376 on its open branch.
+ * No migration. `src/pcp/queueIsAChoice.test.ts`.
+ */
+/**
+ * v131 — HEARD CALLERS BYPASS THE SILENCE LADDER (2026-10-28). Once any
+ * non-empty caller transcript arrives, the ladder stands down before speaking
+ * and cannot end the call. Ghost-call prompts forbid use after a request;
+ * terminate_call refuses ghost_call after a caller transcript on SIP and runtime.
+ * On top of v130 (#387); renumbered from v121; v127 is #376 on its open branch. No migration; production impact remains unmeasured.
+ */
+/**
+ * v133 — MUTUAL PATIENT DETECTOR (2026-10-28). The provider detector also
  * recognizes "one mutual patient" and "the mutual patient", including
  * plurals, so these callers can pass the after-hours provider gate.
  * On top of v126. No migration; production impact remains unmeasured.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v127-mutual-patient-detector-20261028";
+  "voice-runtime-v133-mutual-patient-detector-20261028";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

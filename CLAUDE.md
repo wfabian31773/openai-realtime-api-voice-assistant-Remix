@@ -656,9 +656,60 @@ is reading noise.
 
 ---
 
-## Current branch — no-IVR prompt trim (2026-10-28)
+## Current branch — heard callers bypass the silence ladder (2026-10-28)
 
-This branch carries **`voice-runtime-v126-noivr-prompt-trim-20261028`**, on top
+This branch carries **`voice-runtime-v131-silence-ladder-heard-callers-20261028`**
+(renumbered from v121), on top of `main`'s v130 (#387, `3e861ad`); v127 is #376 on its open branch. Heard callers bypass the silence ladder before it speaks;
+SIP and runtime refuse ghost-call termination after any non-empty caller transcript.
+Both after-hours prompt bodies forbid the ghost line after a request.
+No new spoken wording. Numbering rechecked at v131 against
+main and open branches. The v117 contact-capture work remains included: surname spelling
+and full email confirmation reach the agent's
+
+The v130 base (#387, `3e861ad`) carries **`voice-runtime-v130-queue-withdrawal-exemption-20261028`**
+(renumbered from v120), on top of `main`'s v129 (#386, `08734d7`); v127 is #376 on its open branch. Both queue-answer settlement paths keep a PCP ticket after
+the caller heard a filed ticket number or "I've taken this down". The verdict
+is captured before redirecting, using a runtime getter scoped to transfers;
+hang-up behavior is unchanged. No migration. Focused regressions live in
+`src/pcp/queueIsAChoice.test.ts` and `src/runtime/voiceRuntime.test.ts`.
+Offline validation: 86 targeted PCP/readiness tests, TypeScript and diff checks
+pass. The runtime transcript wiring test is blocked by sandbox `listen EPERM`;
+rerun it outside the sandbox. No production measurement or deployment claimed.
+
+The v117 contact-capture change remains included. Surname spelling and full
+email confirmation reach the agent's
+
+The v129 base (#386, `08734d7`) carries **`voice-runtime-v129-after-hours-teardown-floor-20261028`**
+(renumbered from v119), on top of `main`'s v128 (#389, `558f288`); v127 is #376 on its open branch. Both voice pipelines run the registered after-hours floor for
+no-ivr and no-ivr-v2, reusing PCP's v90 runner and transcript request guard.
+It files to After Hours only for a transcribed request with no ticket, using
+the normal per-call lock and idempotency key. No migration or production
+measurement.
+
+v117's surname spelling and full email confirmation reach the agent's
+
+The v128 base (#389, `558f288`) carries **`voice-runtime-v128-pcp-scheduling-hub-unassigned-exit-20261028`**
+(renumbered from v122), on top of `main`'s v126 (#394, `036c39e`); v127 is #376
+on its open branch. PCP patient scheduling honors captured scheduling purposes;
+shared appointment cues also recognize "schedule my appointment" and
+"appointment scheduling" before eyewear. A terminal Optical/Surgery refusal
+for office/location/surgeon retries once with `routingAskExhausted` inside
+`create_pcp_task`. No repeated routing-field ask or callback promise after a
+refused unassigned write. Synthetic live-tool regressions:
+`src/pcp/patientSchedulingUnassigned.test.ts`. No migration or production
+measurement. The contact-capture history below is retained.
+
+The v117 base carried **`voice-runtime-v117-contact-capture-20261027`**, on top
+of v116. Surname spelling and full email confirmation reach the agent's
+tool schemas, including answering-service and no-ivr-v2. Provider names use
+an exact or uniquely fuzzy Console match on both create-ticket and simplified
+submission paths. A fuzzy candidate must score at least 88% and beat every
+other candidate by five percentage points, including candidates below 88%.
+Normalization collisions stay unresolved unless the original spelling matches
+exactly. No migration. Production before/after measurement remains outstanding;
+see `docs/observatory/STATE-OF-PLAY.md` §16.
+
+The v126 base (#394) carries **`voice-runtime-v126-noivr-prompt-trim-20261028`**, on top
 of v117; v122–v125 are on open branches. It removes repeated explanations
 from the no-IVR Grok prompt while retaining its rules. The length ratchet checks
 pinned daytime and overnight clocks. No migration.
@@ -2358,7 +2409,11 @@ voice-runtime-v115-the-si-assistant-review-fixes-20261022
 voice-runtime-v116-the-record-office-name-travels-20261023
 voice-runtime-v117-contact-capture-20261027
 voice-runtime-v126-noivr-prompt-trim-20261028
-voice-runtime-v127-mutual-patient-detector-20261028
+voice-runtime-v128-pcp-scheduling-hub-unassigned-exit-20261028
+voice-runtime-v129-after-hours-teardown-floor-20261028
+voice-runtime-v130-queue-withdrawal-exemption-20261028
+voice-runtime-v131-silence-ladder-heard-callers-20261028
+voice-runtime-v133-mutual-patient-detector-20261028
 ```
 
 Also printed at boot as `[voice-runtime] <marker>`. Anything ending in an
@@ -2484,7 +2539,13 @@ on it is evidence about current code.
 | **v116** or earlier — NOT the date; this branch is **v117**, above v116 | Item #14 contact capture: surname spelling and complete email confirmation on agent-visible tool schemas; exact or unique fuzzy provider canonicalization on both ticket submission paths. Runner-up margin uses the whole roster; normalized collisions refuse a match. See `docs/observatory/STATE-OF-PLAY.md` §16. No migration; production measurement outstanding. |
 | **v117** or earlier — NOT the date; this branch is **v126**, above v117 | No-IVR Grok prompt trim: repeated explanations removed without changing rules; the length ratchet checks pinned daytime and overnight clocks. v122–v125 are on open branches. No migration. |
 
-| **v126** or earlier — NOT the date; this branch is **v127**, above v126 | The provider detector recognizes "one mutual patient" and "the mutual patient", including plurals, for the after-hours escalation gate. Call CA70722a91e13b9b657697ffff4257d36c was refused twice. Production impact remains unmeasured; marker number may need rebasing against concurrent work. |
+| **v126** or earlier — NOT the date; this branch is **v128** (renumbered from v122), ABOVE `main`'s v126 (#394, `036c39e`), which it contains; v127 is #376 on its open branch | PCP patient scheduling reaches the HVA Hub; terminal Optical/Surgery office or surgeon refusals retry once with the existing unassigned flag. `src/pcp/patientSchedulingUnassigned.test.ts` exercises the live filing tool with synthetic data. No migration; production measurement outstanding. |
+| **v128** or earlier — NOT the date; this branch is **v129** (renumbered from v119), ABOVE `main`'s v128 (#389, `558f288`), which it contains; v127 is #376 on its open branch | No-IVR and no-ivr-v2 run PCP's v90 registered teardown floor on both pipelines: a transcribed request with no ticket files to After Hours via the normal path, per-call lock and idempotency key; silent, identity-only and already-ticketed calls are skipped. No migration. |
+
+| **v129** or earlier — NOT the date; this branch is **v130** (renumbered from v120), ABOVE `main`'s v129 (#386, `08734d7`), which it contains; v127 is #376 on its open branch | queue-withdrawal exemption: an answered queue after a read-back keeps the PCP ticket |
+
+| **v130** or earlier — NOT the date; this branch is **v131** (renumbered from v121), ABOVE `main`'s v130 (#387, `3e861ad`), which it contains; v127 is #376 on its open branch | Heard callers bypass the silence ladder before any cannot-hear prompt; never-heard callers retain the original ladder. Ghost-call prompts and termination tools forbid ghost treatment after any non-empty caller transcript, including a request. No migration or new spoken wording. Offline bridge and actual agent-tool tests use synthetic requests indexed by the three reported call SIDs. Production impact remains unmeasured. |
+| **v131** or earlier — NOT the date; this branch is **v133** (renumbered from v127), ABOVE `main`'s v131, which it contains; v127 is #376 on its open branch | The provider detector recognizes mutual-patient phrasing for the after-hours escalation gate. No migration. |
 
 ### THE SURGEON CLAIM — BUILT, REVIEWED SIX TIMES, WITHDRAWN 2026-09-17
 
@@ -2571,11 +2632,13 @@ v10 (the person base and the join), v11 (the locked record, #290) and v12
 (optical's office ladder) are a CHAIN on `main`: each merged after the one
 before and brought it in, so v12 contains both.
 
-**AND THE SEQUENCE HAS TWO HOLES IN IT ON PURPOSE: v13 AND v57. v127 IS THE
-NEWEST — the mutual-patient detector, above v126, which it contains; v126 is
-the no-IVR prompt trim, above v117; v122–v125 are on open branches. v117 is contact capture (#14), above v116. v116 carries
+**AND THE SEQUENCE HAS TWO HOLES IN IT ON PURPOSE: v13 AND v57. v133 IS THE
+NEWEST — v133 (The provider detector recognizes mutual-patient phrasing for the after-hours escalation gate), above v131, which it contains; v131: once a caller is heard, the silence ladder and ghost-call exit stand down, on its branch ABOVE `main`'s v130, which it contains; v127 is #376 on its open branch —
+AND v130 IS WHAT `main` CARRIES, SINCE #387 MERGED 2026-10-28 (`3e861ad`): the PCP queue-withdrawal exemption, above v129 (#386, `08734d7`), the after-hours teardown floor, above v128 (#389, `558f288`), PCP scheduling and
+unassigned exit, above v126 (#394, `036c39e`), the no-IVR prompt trim, above
+v117; v122–v125 are on open branches. v117 is contact capture (#14), above v116. v116 carries
 the record's office name on an optical ticket — on its branch
-ABOVE `main`'s v115, which it contains — AND v115 IS WHAT `main` CARRIES, SINCE
+ABOVE v115, which it contains — and v115 came from
 #367 MERGED 2026-10-22 (`df4b6bc`): the five #366 review fixes; on top of v114,
 from #366 MERGED 2026-10-22 (`086062b`): the SI Assistant plugin API, dark; on top of v113, from #363 MERGED
 2026-10-22 (`5112fa1`): the NPX demo line, stacked on v112 (the medication name is asked
@@ -2841,7 +2904,7 @@ never read v57; **v58 was that next ship** — the identity probe, an instrument
 and no behaviour change (see the v56 row below for what it measures). It is no
 longer the current marker: see the paragraph beneath this one.
 
-**v115 (#367) IS WHAT `main` CARRIES (merged 2026-10-22, `df4b6bc`), AND v57,
+**v130 (#387) IS WHAT `main` CARRIES (merged 2026-10-28, `3e861ad`), AND v57,
 v59, v60, v63, v65 AND v66 ARE RETIRED RATHER THAN REUSED.** Each of the last
 five was a branch's own number while it sat below `main`, and each was given up
 the moment a merge put it there: two branches carrying one version make two
