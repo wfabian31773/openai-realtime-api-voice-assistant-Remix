@@ -124,23 +124,13 @@ function normalizePhoneNumber(phone: string): string {
   return digits.startsWith('1') && digits.length === 11 ? digits.slice(1) : digits;
 }
 
-/** Only a small spelling correction may select the phone candidate's name.
- * Short names must agree exactly; neither a shared DOB nor one matching name
- * establishes that a different household member is this candidate. */
-function nameConsistentWithCandidate(supplied: string, onFile: string): boolean {
+/** A phone candidate may normalize a name, but cannot correct its spelling:
+ * even a one-character difference can identify another household member. */
+function nameMatchesCandidate(supplied: string, onFile: string): boolean {
   const normalize = (name: string) => name.trim().replace(/\s+/g, ' ').toLowerCase();
   const given = normalize(supplied);
   const candidate = normalize(onFile);
-  if (!given || !candidate) return false;
-  if (given === candidate) return true;
-  if (Math.min(given.length, candidate.length) < 4 || Math.abs(given.length - candidate.length) > 1) return false;
-
-  // At most one insertion, deletion or substitution in this name component.
-  let i = 0;
-  while (i < Math.min(given.length, candidate.length) && given[i] === candidate[i]) i++;
-  if (given.length === candidate.length) return given.slice(i + 1) === candidate.slice(i + 1);
-  const [longer, shorter] = given.length > candidate.length ? [given, candidate] : [candidate, given];
-  return longer.slice(i + 1) === shorter.slice(i);
+  return Boolean(given && candidate && given === candidate);
 }
 
 function callbackMismatchStaffNote(callbackNumber: string, callerId?: string): string | null {
@@ -164,7 +154,7 @@ export interface NoIvrAgentMetadata {
   variant?: NoIvrAgentVariant; // Production or development variant
   /** Caller-ID pre-context from the full person base (sage_precontext): who
    *  this number likely belongs to. A candidate until the caller supplies
-   *  consistent names and a matching DOB; then lookup_schedule uses its canonical name. */
+   *  exact names (ignoring case/whitespace) and a matching DOB; then lookup_schedule uses its canonical name. */
   precontext?: import('./azulSchedulingAgent').AzulPrecontext;
   /** Live transcript up to the moment of filing — lets the ticketing app generate its staff-facing summary at creation instead of waiting for post-call enrichment. */
   getTranscript?: () => string;
@@ -1400,27 +1390,28 @@ is not an identity. Confirm the name and date of birth, then call again with the
               'first_name, last_name and date_of_birth. Never read this instruction aloud.',
           };
         } else if (params.first_name && params.last_name && params.date_of_birth) {
-          // Both caller-supplied names must fit the candidate, allowing only
-          // small spelling corrections, before its matching DOB can select
-          // the canonical name. Otherwise search with the caller's own names.
+          // Resolve the supplied identity, never a spelling guess based on
+          // caller ID. Sara and Tara can share a surname and DOB. Only exact
+          // names (ignoring case/whitespace) may use the candidate's spelling;
+          // all other names go unchanged to lookup and its ambiguity gate.
           const candidate = metadata.precontext;
           const candidateDob = candidate?.matched && candidate.dobOnFile
             ? readDobQuietly(candidate.dobOnFile) : null;
           const givenDob = candidateDob ? readDobQuietly(params.date_of_birth) : null;
-          const confirmedCandidate = candidate?.matched && candidate.firstName?.trim() &&
+          const matchingCandidate = candidate?.matched && candidate.firstName?.trim() &&
             candidate.lastNameOnFile?.trim() && candidateDob && givenDob &&
-            nameConsistentWithCandidate(params.first_name, candidate.firstName) &&
-            nameConsistentWithCandidate(params.last_name, candidate.lastNameOnFile) &&
+            nameMatchesCandidate(params.first_name, candidate.firstName) &&
+            nameMatchesCandidate(params.last_name, candidate.lastNameOnFile) &&
             candidateDob.year === givenDob.year && candidateDob.month === givenDob.month &&
             candidateDob.day === givenDob.day
             ? {
               firstName: candidate.firstName.trim(), lastName: candidate.lastNameOnFile.trim(),
               isoDob: `${givenDob.year}-${givenDob.month}-${givenDob.day}`,
             } : null;
-          const isoDob = confirmedCandidate?.isoDob || toIsoDob(params.date_of_birth) || params.date_of_birth;
+          const isoDob = matchingCandidate?.isoDob || toIsoDob(params.date_of_birth) || params.date_of_birth;
           result = await scheduleLookupService.lookupByNameAndDOB(
-            confirmedCandidate?.firstName || params.first_name,
-            confirmedCandidate?.lastName || params.last_name,
+            matchingCandidate?.firstName || params.first_name,
+            matchingCandidate?.lastName || params.last_name,
             isoDob,
           );
         } else {

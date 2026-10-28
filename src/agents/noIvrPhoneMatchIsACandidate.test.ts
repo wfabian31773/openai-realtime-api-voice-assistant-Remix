@@ -67,6 +67,17 @@ const h = vi.hoisted(() => ({
   lookupByNameAndDOB: vi.fn(async () => ({ patientFound: false, upcomingAppointments: [], pastAppointments: [], totalAppointmentsFound: 0 })),
 }));
 
+// Exercise the real tool handlers without constructing an SDK session.
+vi.mock('@openai/agents/realtime', () => ({
+  RealtimeAgent: class {
+    constructor(options: Record<string, unknown>) { Object.assign(this, options); }
+  },
+  tool: (definition: any) => ({
+    ...definition,
+    invoke: (_context: unknown, input: string) => definition.execute(definition.parameters.parse(JSON.parse(input))),
+  }),
+}));
+
 vi.mock('../../server/db', () => ({
   db: {
     update: () => ({ set: () => ({ where: () => ({ returning: async () => [{ id: 'test-call-row' }] }) }) }),
@@ -208,8 +219,8 @@ describe('lookup_schedule: the tool is the gate, not the prompt', () => {
   });
 });
 
-// Synthetic reproduction of the recognised-caller spelling miss: pre-context
-// knows the canonical name, while the caller supplies a corrected spelling.
+// Synthetic recognised caller: candidate names may normalize case/whitespace,
+// but a different spelling must be resolved as the supplied identity.
 const RECOGNISED_META = {
   ...META,
   precontext: {
@@ -221,6 +232,9 @@ const RECOGNISED_META = {
 };
 const SPOKEN_IDENTITY = {
   first_name: 'Zeldah', last_name: 'Quixotte', date_of_birth: '01/04/1958',
+};
+const NORMALIZED_IDENTITY = {
+  first_name: '  zElDa  ', last_name: ' qUiXoTe ', date_of_birth: '01/04/1958',
 };
 
 describe.each([
@@ -237,9 +251,9 @@ describe.each([
   });
 
   it.each(['01/04/1958', 'January 4, 1958', '1958-01-04'])(
-    'uses the canonical name for a matching DOB (%s), despite the corrected spelling', async (date_of_birth) => {
+    'uses the canonical name for exact normalized names and a matching DOB (%s)', async (date_of_birth) => {
       const agent = await createNoIvrAgent(async () => {}, { ...RECOGNISED_META, ...pipeline });
-      const result = await call(agent, 'lookup_schedule', { ...SPOKEN_IDENTITY, date_of_birth });
+      const result = await call(agent, 'lookup_schedule', { ...NORMALIZED_IDENTITY, date_of_birth });
 
       expect(h.lookupByNameAndDOB).toHaveBeenCalledExactlyOnceWith('Zelda', 'Quixote', '1958-01-04');
       expect(result.found).toBe(true);
@@ -252,7 +266,7 @@ describe.each([
   it('works when the initial phone schedule lookup found no appointments', async () => {
     h.lookupByPhone.mockResolvedValue({ patientFound: false, upcomingAppointments: [], pastAppointments: [], totalAppointmentsFound: 0 });
     const agent = await createNoIvrAgent(async () => {}, { ...RECOGNISED_META, ...pipeline });
-    expect((await call(agent, 'lookup_schedule', SPOKEN_IDENTITY)).found).toBe(true);
+    expect((await call(agent, 'lookup_schedule', NORMALIZED_IDENTITY)).found).toBe(true);
     expect(h.lookupByNameAndDOB).toHaveBeenCalledExactlyOnceWith('Zelda', 'Quixote', '1958-01-04');
   });
 
@@ -264,6 +278,11 @@ describe.each([
     ['Zelda', 'Quiixottee'],
     ['Zoldo', 'Quixote'],
     ['Zelda', 'Quxxota'],
+    ['Zeldah', 'Quixote'],
+    ['Zelda', 'Quixotte'],
+    ['Zeldah', 'Quixotte'],
+    ['Zeld', 'Quixot'],
+    ['Zeldo', 'Quixota'],
     [' ', 'Quixote'],
     ['Zelda', ' '],
   ])('keeps the supplied identity %s %s when only the DOB matches', async (first_name, last_name) => {
@@ -296,10 +315,57 @@ describe.each([
   });
 
   it.each([
+    ['Sara', 'Tara'],
+    ['Tara', 'Sara'],
+  ])('returns %s’s appointments when the phone candidate is their twin %s', async (first_name, candidateName) => {
+    const suppliedAppointments = [{ ...PHONE_MATCH.upcomingAppointments[0], startTime: '9:20 AM' }];
+    h.lookupByNameAndDOB.mockImplementation(async (...args: unknown[]) => ({
+      ...PHONE_MATCH,
+      patientName: `${args[0]} Quixote`,
+      matchedBy: 'name_and_dob',
+      identity: { unique: true, candidateCount: 1, candidates: [] },
+      upcomingAppointments: args[0] === first_name ? suppliedAppointments : PHONE_MATCH.upcomingAppointments,
+    } as any));
+    const agent = await createNoIvrAgent(async () => {}, {
+      ...RECOGNISED_META, ...pipeline,
+      precontext: { ...RECOGNISED_META.precontext, firstName: candidateName },
+    });
+    const result = await call(agent, 'lookup_schedule', {
+      first_name, last_name: 'Quixote', date_of_birth: SPOKEN_IDENTITY.date_of_birth,
+    });
+
+    expect(h.lookupByNameAndDOB).toHaveBeenCalledExactlyOnceWith(first_name, 'Quixote', '1958-01-04');
+    expect(result.appointment_access).toBe('available');
+    expect(result.upcomingAppointments).toEqual(suppliedAppointments);
+    expect(JSON.stringify(result)).not.toContain('3:10 PM');
+  });
+
+  it('withholds appointments when the supplied identity is ambiguous, even if the phone candidate is unique', async () => {
+    h.lookupByNameAndDOB.mockImplementation(async (...args: unknown[]) => ({
+      ...PHONE_MATCH,
+      matchedBy: 'name_and_dob',
+      identity: { unique: args[0] === 'Sara', candidateCount: args[0] === 'Sara' ? 1 : 2, candidates: [] },
+    } as any));
+    const agent = await createNoIvrAgent(async () => {}, {
+      ...RECOGNISED_META, ...pipeline,
+      precontext: { ...RECOGNISED_META.precontext, firstName: 'Sara' },
+    });
+    const result = await call(agent, 'lookup_schedule', {
+      first_name: 'Tara', last_name: 'Quixote', date_of_birth: SPOKEN_IDENTITY.date_of_birth,
+    });
+
+    expect(h.lookupByNameAndDOB).toHaveBeenCalledExactlyOnceWith('Tara', 'Quixote', '1958-01-04');
+    expect(result).toMatchObject({ found: true, identityUnconfirmed: true, appointment_access: 'identity_required' });
+    expect(result).not.toHaveProperty('upcomingAppointments');
+    expect(result).not.toHaveProperty('pastAppointments');
+    expect(JSON.stringify(result)).not.toMatch(/Quixote|1958|Zebrastripe|Testville|2041-12-31|3:10 PM/);
+  });
+
+  it.each([
     ['  zElDa  ', ' qUiXoTe '],
-    ['Zeld', 'Quixot'],
-    ['Zeldo', 'Quixota'],
-  ])('allows case, whitespace or a single spelling edit in each name (%s %s)', async (first_name, last_name) => {
+    ['ZELDA', 'QUIXOTE'],
+    ['Zelda', 'Quixote'],
+  ])('allows only case and whitespace normalization (%s %s)', async (first_name, last_name) => {
     const agent = await createNoIvrAgent(async () => {}, { ...RECOGNISED_META, ...pipeline });
     const result = await call(agent, 'lookup_schedule', {
       first_name, last_name, date_of_birth: SPOKEN_IDENTITY.date_of_birth,
