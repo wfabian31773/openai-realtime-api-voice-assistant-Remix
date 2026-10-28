@@ -296,10 +296,37 @@ describe('the gate', () => {
   );
 
   it.each(
-    ['concerning', 'regarding', 'about', 'calling about', 'following up on'].flatMap((description) =>
+    [
+      // Different clinical verbs exercise the -ing rule, rather than a list
+      // of individually excluded verbs. No other provider statement is needed.
+      'seeing', 'treating', 'evaluating', 'examining', 'assessing', 'managing',
+      'monitoring', 'referring', 'following', 'consulting on',
+      'calling about', 'calling regarding', 'calling concerning', 'calling for',
+      'following up on', 'checking on', 'with', 'from', 'about', 'regarding',
+      'concerning', 'in reference to', 'here about',
+      "Dr. Smith's office calling about", "Dr Smith's office calling about",
+      "Doctor Smith's office calling about",
+    ].flatMap((description) =>
       ['a mutual patient', 'our mutual patient', 'Jane Smith, the mutual patient', 'the mutual patient, Jane Smith']
-        .flatMap((patient) => [`This is ${description} ${patient}.`, `${description} ${patient}.`]),
-    ),
+        .flatMap((patient) => ["I'm ", 'I am ', 'I’m actually ', 'This is ', 'This is just ', '']
+          .map((introduction) => `${introduction}${description} ${patient}.`)),
+    ).concat([
+      // Articles, roles and office descriptions are not personal names,
+      // including roles that do not independently establish provider status.
+      "I'm a scheduler, our mutual patient needs a consultation.",
+      "I'm the coordinator, our mutual patient needs a consultation.",
+      "I'm Jane's scheduler, our mutual patient needs a consultation.",
+      "This is Smith's office, our mutual patient needs a consultation.",
+      "I'm the provider, our mutual patient needs a consultation.",
+      'This is the clinician, our mutual patient needs a consultation.',
+      'This is a consultation about our mutual patient.',
+      'This is regarding our mutual patient.',
+      'This is a callback regarding our mutual patient.',
+      'This is a referral concerning our mutual patient.',
+      "I'm the nurse for our mutual patient.",
+      "I'm an NP seeing our mutual patient.",
+      'This is concerning a mutual patient.',
+    ]),
   )('recognizes a call description and allows provider escalation: %s', (spoken) => {
     expect(callerSaysTheyAreAProvider(spoken)).toBe(true);
     const corroboration = corr(spoken);
@@ -314,6 +341,17 @@ describe('the gate', () => {
   it.each(["I'm the mutual patient.", 'I am the mutual patient you called.', 'This is the mutual patient.',
     'This is Jane, the mutual patient.', 'I am Jane, the mutual patient you called.', 'The mutual patient is me.',
     'Jane Smith, the mutual patient', 'The mutual patient, Jane Smith',
+    ...['Jane', 'Jane Smith', 'Jane Anne Smith-Jones', "Mary-Jane O'Connor", 'jane smith', 'Jane King', 'Ming Lee']
+      .flatMap((name) => [
+        `${name}, the mutual patient.`,
+        `The mutual patient, ${name}.`,
+        `I'm ${name}, the mutual patient.`,
+        `I am ${name} the mutual patient.`,
+        `This is ${name}, the mutual patient.`,
+        `I'm actually ${name}, the mutual patient.`,
+        `Hello. ${name}, the mutual patient.`,
+        `Hello. The mutual patient, ${name}.`,
+      ]),
   ])(
     'refuses an unstated provider escalation when the caller says %s', (spoken) => {
       const corroboration = corr(spoken);

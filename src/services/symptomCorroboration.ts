@@ -626,10 +626,23 @@ const PROVIDER_SELF_IDENTIFICATION: RegExp[] = [
 // evidence only; other provider statements can still stand.
 const MUTUAL_PATIENT = /\b(?:our|(?:a|one|the) mutual) (?:mutual )?patients?\b/;
 const PATIENT_IDENTIFICATION_BEFORE = /\b(?:i(?:'m| am)|this is)\s+(?:(?:actually|also|just|indeed)\s+)*$/;
-// A name can sit between the identification and its appositive. Do not let
-// words describing a call ("this is concerning a mutual patient") turn a
-// later patient reference into an appositive.
-const PATIENT_NAME_WORD = String.raw`(?!(?:calling|about|regarding|concerning|for|from|with|on|a|an|the|my|our)\b)[a-z][a-z'-]*`;
+// A name can sit between the identification and its appositive, but only
+// plausible name words count. Apply the same grammar to every token: -ing
+// actions ("seeing", "treating", "following"), function words, call
+// descriptions and provider/office roles must not turn a patient reference
+// into the caller's identity. Speech is already lowercased, so capitalization
+// cannot distinguish names from these other parts of speech.
+const PATIENT_NAME_FUNCTION_WORD =
+  String.raw`(?:a|an|the|my|our|your|his|her|their|its|this|that|these|those|` +
+  String.raw`i|we|you|he|she|it|they|am|is|are|was|were|be|been|and|or|but|` +
+  String.raw`about|above|across|after|against|along|among|around|as|at|before|behind|below|beneath|` +
+  String.raw`beside|between|beyond|by|during|for|from|in|into|of|off|on|onto|over|through|to|under|until|upon|with|within|without)`;
+const PATIENT_NAME_CALL_WORD = String.raw`(?:calls?|callbacks?|follow-?ups?|consult(?:ation)?|referrals?|up|re|regards?|reference|requests?|questions?|here|there)`;
+const PATIENT_NAME_WORD =
+  // A verb stem before -ing has at least two letters; names like King and
+  // Ming are still plausible names, including inside a longer introduction.
+  String.raw`(?![a-z][a-z'-]+ing\b)(?![a-z'-]*'s\b)` +
+  String.raw`(?!(?:${PATIENT_NAME_FUNCTION_WORD}|${PATIENT_NAME_CALL_WORD}|${PROVIDER_ROLE}|${OFFICE_STAFF}|provider|clinician)\b)[a-z][a-z'-]*`;
 const PATIENT_NAME = String.raw`(?:${PATIENT_NAME_WORD}\s+){0,2}${PATIENT_NAME_WORD}`;
 const PATIENT_APPOSITIVE_BEFORE = new RegExp(
   String.raw`\b(?:i(?:'m| am)|this is)\s+(?:(?:actually|also|just|indeed)\s+)*${PATIENT_NAME},?\s+$`,
