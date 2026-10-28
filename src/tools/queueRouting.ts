@@ -325,7 +325,8 @@ export function scheduledOnlyByAnExamName(text: string): boolean {
   const fired = SCHEDULING.flatMap((s) => s.cues).map(fold).filter((c) => t.includes(c));
   return (
     fired.length > 0 && fired.every((c) => names.has(c)) &&
-    everyExamNameIsTheDocuments(t) && !hasSeparateAppointmentAsk(t)
+    everyExamNameIsTheDocuments(t) && everyAppointmentIsTheDocuments(t) &&
+    !hasSeparateAppointmentAsk(t)
   );
 }
 
@@ -389,6 +390,36 @@ function hasSeparateAppointmentAsk(folded: string): boolean {
     if (!BOUND_AFTER.test(folded.slice(ask.index! + ask[0].length))) return true;
   }
   return false;
+}
+
+/**
+ * EVERY APPOINTMENT NAMED IS THE DOCUMENT'S TOO — Codex P2 on #376, head
+ * `abe568e`.
+ *
+ * `APPOINTMENT_ASK` reads an ask by its verb, and a verb list is one verb
+ * short: "we received the eye exam report and need to CANCEL her visit" (or
+ * confirm it, or move it, or cancel her appointment) fired only the exam name
+ * — `SCHEDULING`'s cues are first-person ("cancel my appointment") — so the
+ * hold kept an appointment request out of the Hub. So the appointment NOUN is
+ * read the way an exam name already is: it must be bound to a document
+ * ("the visit notes", "the records from her last visit", "the eye exam report
+ * for her appointment"), or the request falls back to the Hub, which is what
+ * this line did before v127. `follow-up` is not on this list on purpose:
+ * "calling to follow up on the eye exam report" is a records chase, and the
+ * noun form is `APPOINTMENT_ASK`'s.
+ */
+const APPOINTMENT_NOUN = /\b(?:appointments?|appts?|visits?|citas?|visitas?)\b/g;
+// The kinds of visit `APPOINTMENT_ASK` already reads, so "the eye exam report
+// from the FOLLOW-UP visit" is still bound to the report.
+const APPOINTMENT_KIND = /(?:\b(?:new|routine|follow[ -]?up|return|office|clinic)\s+)+$/;
+
+function everyAppointmentIsTheDocuments(folded: string): boolean {
+  for (const noun of folded.matchAll(APPOINTMENT_NOUN)) {
+    const before = folded.slice(0, noun.index!).replace(APPOINTMENT_KIND, '');
+    const after = folded.slice(noun.index! + noun[0].length);
+    if (!BOUND_AFTER.test(after) && !BOUND_BEFORE.test(before)) return false;
+  }
+  return true;
 }
 
 /**

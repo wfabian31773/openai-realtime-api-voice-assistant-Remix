@@ -309,6 +309,13 @@ describe('a third party who names a document AND asks to schedule is scheduling 
     ['we received the eye exam report and need to move her visit', 146],
     // github-actions Codex P2 on head 5195e3f: a modifier like "next".
     ['we received the eye exam report and need to schedule her next visit', 146],
+    ['we received the eye exam report and need to cancel her appointment', 146],
+    ['recibimos el informe del examen de la vista y necesitamos mover su cita', 146],
+    // A verb on no list: the appointment NOUN is not bound to the document.
+    ['we received the eye exam report and need to drop her visit', 146],
+    ['we received the eye exam report; please hold her appointment', 146],
+    ['we received the eye exam report and her visit needs to be moved', 146],
+    ['recibimos el informe del examen de la vista y hay que posponer su cita', 146],
   ] as const) {
     it(`"${words}" reaches the HVA Hub (reason ${reason})`, async () => {
       const app = await fakeApp();
@@ -347,6 +354,10 @@ describe('a third party who names a document AND asks to schedule is scheduling 
       'need the results of the most recent eye exam',
       'please send the eye exam report from the follow-up visit',
       'we need the follow-up visit report and the eye exam report',
+      // An appointment noun bound to the document is not an ask.
+      'we need the visit notes and the eye exam report',
+      'please send the records from her last office visit and the eye exam report',
+      'we need the eye exam report for her appointment next week',
     ]) expect(scheduledOnlyByAnExamName(bound), bound).toBe(true);
     for (const loose of [
       'we have the chart notes and need to book an eye exam',
@@ -368,6 +379,11 @@ describe('a third party who names a document AND asks to schedule is scheduling 
       'we received the eye exam report and want to change her appointment',
       'recibimos el informe del examen de la vista y necesitamos cancelar su cita',
       'recibimos el informe del examen de la vista, necesita una cita',
+      'we received the eye exam report, can you update her appointment',
+      // The accepted cost of reading the noun: an appointment mentioned as
+      // context, not bound to the document, falls back to the Hub — where it
+      // went before v127.
+      'we need the eye exam report before her appointment next week',
     ]) expect(scheduledOnlyByAnExamName(loose), loose).toBe(false);
   });
 });
