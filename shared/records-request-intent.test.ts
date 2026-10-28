@@ -297,3 +297,79 @@ describe('review regressions: copy requests and scheduled exams', () => {
     expect(recordsLineRedirect(text)?.departmentId).not.toBe(16);
   });
 });
+
+describe('review regressions: preserve Clinical and Billing requests', () => {
+  it.each([
+    'What do my test results mean?',
+    'I need to understand my test results',
+    'Why are my test results abnormal?',
+    'What does my lab result mean?',
+    'I want to understand the meaning of my lab results',
+    'Why are my lab results high?',
+  ])('keeps results interpretation in Clinical: %s', text => {
+    expect(recordsLinePurpose(text)).toBe('clinical');
+    expect(recordsLineRedirect(text)).toMatchObject({ departmentId: 3, requestTypeId: 72, requestReasonId: 542 });
+  });
+
+  it.each([
+    'I need a copy of my bill',
+    'Please send me copies of my bills',
+    'Copy of my payment receipt',
+    'I need a copy of my payments',
+    'I have a question about getting a copy of my billing statement',
+    'Please email me a copy of my medical bill',
+  ])('routes billing copies to Billing: %s', text => {
+    expect(recordsLinePurpose(text)).toBe('billing');
+    expect(recordsLineRedirect(text)).toMatchObject({ departmentId: 4, requestTypeId: 78, requestReasonId: 548 });
+  });
+
+  it.each([
+    'Please send my test results so I can understand them',
+    'I need a copy of my lab results to understand what they mean',
+    'I need to understand my test results and send me a copy',
+    'Why are my test results abnormal and can you fax them to my doctor?',
+    'Please send me a copy of my medical records for a billing dispute',
+    'I need a copy of my MRI for a bill dispute',
+    'I need a copy of my bill and a copy of my MRI',
+    'I need to understand how to get a copy of my test results',
+    'Why are my test results delayed?',
+  ])('preserves medical access requests: %s', text => {
+    expect(recordsLinePurpose(text)).toBe('records');
+    expect(recordsLineRedirect(text)).toBeNull();
+  });
+});
+
+describe('review regressions: retain established records-line workflows', () => {
+  it.each([
+    'I need a note for work',
+    'I need a note for school',
+    'Please write a letter',
+  ])('keeps note and letter requests in Medical Records: %s', text => {
+    expect(recordsLinePurpose(text)).toBe('records');
+    expect(recordsLineRedirect(text)).toBeNull();
+  });
+
+  it.each([
+    'retina specialist', 'cornea specialist', 'glaucoma specialist',
+    'oculoplastics', 'neuro-ophthalmologist', 'pediatric ophthalmologist',
+    'pediatric optometrist', 'peds', 'specialist consult',
+    'low vision', 'uveitis', 'especialista',
+  ])('preserves specialist reason 152 for an appointment with %s', specialty => {
+    const text = `Please schedule an appointment with a ${specialty}`;
+    expect(recordsLinePurpose(text)).toBe('scheduling');
+    expect(recordsLineRedirect(text)).toMatchObject({
+      departmentId: 9, requestTypeId: 32, requestReasonId: 152, requestReason: 'Specialist Referral Appointment',
+    });
+  });
+
+  it.each([
+    'Necesito medicina',
+    'Necesito medicamento',
+    'Necesito mis medicamentos',
+    'Tengo una pregunta sobre la farmacia',
+    'Necesito mi receta en la farmacia',
+  ])('routes Spanish medication requests to Clinical: %s', text => {
+    expect(recordsLinePurpose(text)).toBe('clinical');
+    expect(recordsLineRedirect(text)).toMatchObject({ departmentId: 3, requestTypeId: 72, requestReasonId: 542 });
+  });
+});

@@ -24,9 +24,20 @@ const EXPLICIT_DELIVERY = new RegExp(
 const ACCESS_QUESTION = new RegExp(
   String.raw`\bquestion about\s+(?:(?:the )?status of|getting|obtaining|requesting|receiving|accessing|(?:a )?(?:copy|copies) of)\b[^.!?;]{0,100}${DOC.source}`,
 );
+const INTERPRETATION = new RegExp([
+  String.raw`\b(?:discuss|explain|interpret)\b`,
+  String.raw`\b(?:understand|meaning of)\s+(?:(?:what|the|my|our|your|her|his|their|these|those|abnormal|normal|test|lab|exam|diagnostic)\s+)*results?\b`,
+  String.raw`\bwhat (?:do|does)\b[^.!?;]{0,65}\bresults?\b[^.!?;]{0,30}\bmean\b`,
+  String.raw`\bwhy (?:are|is|were|was)\b[^.!?;]{0,65}\bresults?\b[^.!?;]{0,30}\b(?:abnormal|normal|high|low)\b`,
+  String.raw`\breview\b[^.!?]{0,40}\bresults?\b[^.!?]{0,40}\bwith\b`,
+  String.raw`\bquestion about\s+(?:(?!(?:status|getting|get|obtaining|obtain|requesting|request|receiving|accessing|copy|copies|records?|charts?)\b)[a-z']+\s+){0,8}results?\b`,
+].join('|'));
+const BILLING = /\b(?:bills?|billing|copays?|payments?)\b/;
+const MEDICATION = /\b(?:refill|medication|medicine|drops?|pharmacy|medicina|medicamentos?|farmacia|gotas)\b/;
 // An explicit copy request can name a document outside our vocabulary (e.g.
 // an MRI or a file). Require an object and evidence that the copy is requested.
-const GENERIC_COPY = /\b(?:(?:copy|copies) of|(?:copia|copias) de)\s+[a-z0-9]/;
+// Exclude billing objects here; a billing purpose for a medical copy still counts.
+const GENERIC_COPY = new RegExp(String.raw`\b(?:(?:copy|copies) of|(?:copia|copias) de)\s+(?!(?:(?:a|an|the|my|our|your|his|her|their|this|that|last|latest|recent|medical|hospital)\s+)*${BILLING.source})[a-z0-9]`);
 const GENERIC_COPY_REQUEST = /(?:^\s*(?:(?:please|just|only)\s+)*|\b(?:necesit\w*|solicit\w*|quiero)\s+(?:(?:una|unas)\s+)?)(?:copy|copies|copia|copias)\s+(?:of|de)\s+[a-z0-9]/;
 const GENERIC_COPY_ACCESS = /\bquestion about\s+(?:(?:the )?status of|getting|obtaining|requesting|receiving|accessing)\b[^.!?;]{0,100}\b(?:copy|copies) of\s+[a-z0-9]/;
 const WANT = /\b(?:need|want|request(?:ing|s|ed)?|would like|asking for|necesit\w*|solicit\w*|quiero)\b/;
@@ -40,7 +51,10 @@ const PASSIVE_DELIVERY_REQUEST = new RegExp(String.raw`^(?:i|we) (?:need|want|wo
 const NEGATED_RECORDS = new RegExp(
   String.raw`\b(?:(?:don't|do not|doesn't|does not) (?:need|want|request|send|fax|mail|email|get)|not (?:requesting|asking for|about|a request for)|no (?:need to|necesito|quiero))\b[^.!?;]{0,50}(?:${DOC.source}|\b(?:notes?|reports?|results?|copy|copies|copia|copias)\b)|\bno records (?:needed|required|requested)\b`,
 );
-const RECORDS_WORKFLOW = /\b(?:roi|release of information|subpoena|authorization to release|medical release|disability (?:form|paperwork)|fmla|(?:inspect|inspection of)\b[^.!?]{0,30}\b(?:file|chart|records?)|(?:work|school|doctor'?s?) note|dmv (?:form|paperwork)|jury duty|verification of treatment|proof of treatment|(?:letter|carta) (?:for|from|stating|del)|fill out (?:a|this|my) form|paperwork to be filled|school form|constancia|comprobante|revisar mi expediente|ver mi expediente|send (?:me |us )?everything)\b/;
+const RECORDS_WORKFLOW = /\b(?:roi|release of information|subpoena|authorization to release|medical release|disability (?:form|paperwork)|fmla|(?:inspect|inspection of)\b[^.!?]{0,30}\b(?:file|chart|records?)|(?:work|school|doctor'?s?) note|note for (?:work|school)|write a letter|dmv (?:form|paperwork)|jury duty|verification of treatment|proof of treatment|(?:letter|carta) (?:for|from|stating|del)|fill out (?:a|this|my) form|paperwork to be filled|school form|constancia|comprobante|revisar mi expediente|ver mi expediente|send (?:me |us )?everything)\b/;
+// Preserve the specialist cues used by the existing queue router as well as
+// the literal referral cue. This only refines an already-scheduling request.
+const SPECIALIST_APPOINTMENT = /\b(?:referral|cornea specialist|retina specialist|glaucoma specialist|oculoplastics?|neuro[- ]ophthalm\w*|pediatric (?:optometrist|ophthalm\w*)|peds|see a specialist|specialist (?:consult\w*|appointment)|referred to|was referred|cataract (?:consult\w*|evaluation)|consult for my cataract|low vision|uveitis|especialista|consulta con especialista)\b/;
 
 function requestClauses(text: string): string[] {
   // A subject starting a new clause can correct a refusal even without an
@@ -83,14 +97,14 @@ export function recordsLinePurpose(text: string): RecordsLinePurpose {
   const clauses = requestClauses(text);
   if (clauses.some(clause => {
     // Keep interpretation clinical unless the caller also requests delivery.
-    const interpretation = clause.search(/\b(?:discuss|explain|interpret)\b|\breview\b[^.!?]{0,40}\bresults?\b[^.!?]{0,40}\bwith\b|\bquestion about\s+(?:(?!(?:status|getting|get|obtaining|obtain|requesting|request|receiving|accessing|copy|copies|records?|charts?)\b)[a-z']+\s+){0,8}results?\b/);
+    const interpretation = clause.search(INTERPRETATION);
     const c = interpretation < 0 ? clause : clause.slice(0, interpretation);
     const accessQuestion = ACCESS_QUESTION.test(c);
     const genericCopyRequest = GENERIC_COPY.test(c) && (EXPLICIT_DELIVERY.test(c) || GENERIC_COPY_REQUEST.test(c) || GENERIC_COPY_ACCESS.test(c));
     if (interpretation >= 0 && requestedDeliveryAfterInterpretation(clause, interpretation)) return true;
     if (interpretation >= 0 && !EXPLICIT_DELIVERY.test(c) && !accessQuestion && !genericCopyRequest) return false;
     const document = DOC.test(c) || /\b(?:doctor'?s? note|notes? from|report from)\b/.test(c);
-    const prescription = /\b(?:prescription|receta)\b/.test(c) && !/\b(?:refill|renew|pharmacy|medication|medicine|drops?)\b/.test(c);
+    const prescription = /\b(?:prescription|receta)\b/.test(c) && !MEDICATION.test(c) && !/\brenew\b/.test(c);
     if (accessQuestion) return true;
     if (genericCopyRequest) return true;
     const schedulingStart = c.search(SCHEDULE_ACTION);
@@ -115,8 +129,8 @@ export function recordsLinePurpose(text: string): RecordsLinePurpose {
   if (/\b(?:referral|referido|autorizacion)\b/.test(request)) return 'referral';
   if (/\b(?:payer|payor|health plan|vendor|insurance|eligibility|claim)\b/.test(request)) return 'professional';
   if (/\b(?:glasses|frames?|contact lenses|eyeglasses|lentes|gafas)\b/.test(request)) return 'optical';
-  if (/\b(?:refill|medication|medicine|drops?|pharmacy|prescription|receta|gotas|results?)\b/.test(request)) return 'clinical';
-  if (/\b(?:bill|billing|copay|payment)\b/.test(request)) return 'billing';
+  if (MEDICATION.test(request) || /\b(?:prescription|receta|results?)\b/.test(request)) return 'clinical';
+  if (BILLING.test(request)) return 'billing';
   if (/\b(?:surgery|surgical) cent(?:er|re)s?\b/.test(request)) return 'surgery';
   return 'unknown';
 }
@@ -141,7 +155,7 @@ export function recordsLineRedirect(text: string) {
   let requestReasonId: number = defaultRequestReasonId;
   let requestReason = 'Other - See Description';
   if (purpose === 'scheduling') {
-    const scheduling = /\breferral\b/.test(t) ? [152, 'Specialist Referral Appointment'] as const : schedulingReason(t);
+    const scheduling = SPECIALIST_APPOINTMENT.test(t) ? [152, 'Specialist Referral Appointment'] as const : schedulingReason(t);
     if (scheduling) { requestTypeId = 32; [requestReasonId, requestReason] = scheduling; }
   }
   return { departmentId, departmentName, requestTypeId, requestReasonId, requestReason,

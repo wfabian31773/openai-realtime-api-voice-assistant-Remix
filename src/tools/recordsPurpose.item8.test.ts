@@ -114,6 +114,14 @@ describe('self-review: request-scoped caller evidence', () => {
 describe('review: classification and filing agree on records intent', () => {
   it.each([
     ['Can someone explain the test results that were sent to me?', 3],
+    ['What do my test results mean?', 3],
+    ['I need to understand my test results', 3],
+    ['Why are my test results abnormal?', 3],
+    ['I need a copy of my bill', 4],
+    ['Please send me copies of my payments', 4],
+    ['Necesito medicina', 3],
+    ['Necesito medicamento', 3],
+    ['Tengo una pregunta sobre la farmacia', 3],
     ["Don't send my test results; please reschedule my appointment", 9],
     ["I don't need records, I have a billing question", 4],
     ["I don't need my chart, my glasses are broken", 1],
@@ -130,6 +138,8 @@ describe('review: classification and filing agree on records intent', () => {
 
   it.each([
     "I don't need my whole chart, just send the operative report",
+    'I need a note for work',
+    'Please write a letter',
     'I need documentation from my last visit',
     'I need a medical report',
     'Could you have my test results sent so I can discuss them with my doctor?',
@@ -160,5 +170,14 @@ describe('review: classification and filing agree on records intent', () => {
     const payload = api.createTicket.mock.calls[0]?.[0];
     expect(payload).toMatchObject({ departmentId: 9, requestTypeId: 32, requestReasonId: 147 });
     for (const field of ['requestorType', 'requestPathway', 'capClockApplies', 'formChannel']) expect(payload).not.toHaveProperty(field);
+  });
+
+  it('uses the specialist scheduling reason in classification and filing', async () => {
+    const request_description = 'Please schedule an appointment with a retina specialist';
+    expect(await runTool('classify_records_request', { request_description })).toMatchObject({
+      is_records_request: false, department_id: 9, request_type_id: 32, request_reason_id: 152,
+    });
+    expect((await runTool('file_records_ticket', { ...BASE, requester: undefined, request_description })).success).toBe(true);
+    expect(api.createTicket.mock.calls[0]?.[0]).toMatchObject({ departmentId: 9, requestTypeId: 32, requestReasonId: 152 });
   });
 });
