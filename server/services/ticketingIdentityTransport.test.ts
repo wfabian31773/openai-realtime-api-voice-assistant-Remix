@@ -49,5 +49,5 @@ it.each([
   vi.spyOn(api as any, 'warmUpIfStale').mockResolvedValue(true);
   const send = vi.spyOn(api as any, 'makeRequest').mockResolvedValue({ success: false });
   await api.submitTicket({ patientFullName, patientDOB, reasonForCalling: 'Synthetic callback', preferredContactMethod: 'phone', callData: { callSid: sid } });
-  expect(send.mock.calls[0][2].validatedPatient).toBeUndefined();
+  expect((send.mock.calls[0][2] as { validatedPatient?: unknown }).validatedPatient).toBeUndefined();
 });
