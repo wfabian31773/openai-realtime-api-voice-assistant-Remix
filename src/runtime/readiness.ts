@@ -945,11 +945,16 @@ import { callEnvironment } from "./callRecord";
  * supplies a DOB matching pre-context, so a corrected spoken spelling does not
  * lose the record. A mismatching DOB keeps the spoken-name lookup; candidate
  * details stay withheld before confirmation. `noIvrPhoneMatchIsACandidate.test.ts`
- * drives the live factory's tool on both pipelines. On top of v134 (#396, main); v127 is #376 and v133 is #391 on their open branches.
+ * drives the live factory's tool on both pipelines. On top of v134 (#396). Merged to main as #392 (6ae60e33).
  * No migration; production impact remains unmeasured.
  */
+/**
+ * v136 (renumbered from v126) — PCP UNCLASSIFIED IS FLOOR ONLY (2026-10-28). The PCP agent cannot
+ * choose unclassified_call in its intake tool; the after-hangup floor still
+ * files unclassified calls for a person to route. On top of v135 (#392, main, 6ae60e33); v127 is #376 and v133 is #391 on their open branches. No migration; production impact remains unmeasured.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v135-after-hours-dob-confirm-lookup-20261028";
+  "voice-runtime-v136-pcp-unclassified-floor-only-20261028";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can
