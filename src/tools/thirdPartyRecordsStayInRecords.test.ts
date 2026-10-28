@@ -301,6 +301,12 @@ describe('a third party who names a document AND asks to schedule is scheduling 
     ['we received the eye exam report and need to book a follow-up appointment', 146],
     ['we received the eye exam report; the patient needs a return visit', 146],
     ['we would like another visit for the patient. We received the eye exam report', 146],
+    // Codex P2 on head abe568e: a chained or non-booking verb on the visit.
+    // It reaches the Hub; the reason is the exam-name cue (146) because
+    // SCHEDULING's cancel/confirm/move cues name 'appointment', not 'visit'.
+    ['we received the eye exam report and need to cancel her visit', 146],
+    ['we received the eye exam report and need to confirm her visit', 146],
+    ['we received the eye exam report and need to move her visit', 146],
   ] as const) {
     it(`"${words}" reaches the HVA Hub (reason ${reason})`, async () => {
       const app = await fakeApp();
@@ -351,6 +357,12 @@ describe('a third party who names a document AND asks to schedule is scheduling 
       // appointment after it.
       'we received the eye exam report and the patient needs a follow-up',
       'we have the eye exam report and want to arrange a follow-up',
+      'we received the eye exam report and need to cancel her visit',
+      'we received the eye exam report and need to confirm her visit',
+      'we received the eye exam report and need to move her visit',
+      'we received the eye exam report and want to change her appointment',
+      'recibimos el informe del examen de la vista y necesitamos cancelar su cita',
+      'recibimos el informe del examen de la vista, necesita una cita',
     ]) expect(scheduledOnlyByAnExamName(loose), loose).toBe(false);
   });
 });

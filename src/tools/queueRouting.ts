@@ -369,7 +369,20 @@ function everyExamNameIsTheDocuments(folded: string): boolean {
  * a follow-up visit". These phrases need not match SCHEDULING themselves.
  * A request for a "follow-up visit report" is still a document request.
  */
-const APPOINTMENT_ASK = /\b(?:book(?:ing)?|schedul(?:e|ing)|arrang(?:e|ing)|set(?:ting)?[ -]+up|mak(?:e|ing)|request(?:s|ing)?|needs?|wants?|would\s+like)\s+(?:(?:an?|the|another|new|routine|follow[ -]?up|return|office|clinic|patient's|my|our|her|his|their)\s+){0,5}(?:appointments?|appts?|visits?|follow[ -]?ups?)\b/g;
+const ASK_VERB =
+  "(?:book(?:ing)?|schedul(?:e|ing)|reschedul(?:e|ing)|arrang(?:e|ing)|set(?:ting)?[ -]+up|mak(?:e|ing)|" +
+  "request(?:s|ing)?|needs?|wants?|would\\s+like|cancel(?:l?ing)?|confirm(?:ing)?|mov(?:e|ing)|chang(?:e|ing)|" +
+  "postpon(?:e|ing)|push(?:ing)?(?:\\s+back)?|check(?:ing)?\\s+on)";
+/**
+ * The verb may be chained ("need to CANCEL her visit"), and the ask may be in
+ * Spanish ("necesitamos cancelar su cita") — Codex P2 on #376, head `abe568e`:
+ * cancel/confirm/move a visit beside an exam report was held in Records.
+ */
+const APPOINTMENT_ASK = new RegExp(
+  `\\b${ASK_VERB}(?:\\s+to\\s+${ASK_VERB})?\\s+(?:(?:an?|the|another|new|routine|follow[ -]?up|return|office|clinic|patient's|my|our|her|his|their)\\s+){0,5}(?:appointments?|appts?|visits?|follow[ -]?ups?)\\b` +
+    `|\\b(?:agendar|programar|reprogramar|hacer|cancelar|confirmar|cambiar|mover|pedir|solicitar|necesita(?:mos|n)?|quiere(?:n)?)\\s+(?:(?:una|un|la|el|su|otra|nueva|de|del|seguimiento)\\s+){0,4}(?:citas?|consultas?|visitas?)\\b`,
+  'g',
+);
 
 function hasSeparateAppointmentAsk(folded: string): boolean {
   for (const ask of folded.matchAll(APPOINTMENT_ASK)) {
