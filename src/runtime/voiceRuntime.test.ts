@@ -1231,10 +1231,10 @@ describe("one whole call, end to end, offline", () => {
    * SAME source the call's agent was resolved from — asserted here with the
    * runtime's real default left in place.
    */
-  it("hands the pcp lane's own teardownSweep the CallSid, through the runtime's default", async () => {
+  it.each(['pcp', 'no-ivr', 'no-ivr-v2'])("hands %s its own teardownSweep through the runtime's default", async (slug) => {
     const teardownSweep = vi.fn(async () => undefined);
-    const h = await harness({ realPcpFloor: true, laneSource: laneSource({ id: "pcp", teardownSweep }), env: { ...ENV, PCP_HUMAN_AGENT_NUMBER: "+18185551234", TWILIO_ACCOUNT_SID: "AC00000000000000000000000000000000", TWILIO_PHONE_NUMBER: "+18185550000", DOMAIN: "voice.example.test" } });
-    const answered = await post(h, "/voice/pcp", { CallSid: "CA-floor-real", From: "+1", To: "+2" });
+    const h = await harness({ realPcpFloor: true, laneSource: laneSource({ id: slug, teardownSweep }), env: { ...ENV, PCP_HUMAN_AGENT_NUMBER: "+18185551234", TWILIO_ACCOUNT_SID: "AC00000000000000000000000000000000", TWILIO_PHONE_NUMBER: "+18185550000", DOMAIN: "voice.example.test" } });
+    const answered = await post(h, `/voice/${slug}`, { CallSid: "CA-floor-real", From: "+1", To: "+2" });
     const { ws } = await openStream(h, "CA-floor-real", tokenFrom(answered.text));
     await settle(2);
     ws.close();

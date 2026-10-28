@@ -35,6 +35,7 @@ export interface NoIvrAgentV2Metadata {
   callerPhone?: string;
   dialedNumber?: string;
   callLogId?: string;
+  getTranscript?: () => string;
 }
 
 function parseDateOfBirth(dobString: string): {

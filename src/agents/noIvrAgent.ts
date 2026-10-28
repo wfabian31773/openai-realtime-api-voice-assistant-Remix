@@ -56,6 +56,8 @@ import { GHOST_CALL_RESTRICTION, ghostCallRefusal, hasCallerTranscript } from ".
 import { requestSipHangup, type SipGhostHangupMetadata } from "../services/sipGhostHangup";
 import { callMetadataForDB } from "../services/callMetadataStore";
 import { EMAIL_FIELD_DESCRIPTION, LAST_NAME_FIELD_DESCRIPTION } from "../tools/contactCaptureGuidance";
+import { registerAfterHoursFloor, markAfterHoursTicketFiled, reserveAfterHoursTicketFiling } from '../services/afterHoursTeardownFloor';
+export { sweepAfterHoursUnfiledCall } from '../services/afterHoursTeardownFloor';
 
 /**
  * AN EMAIL PREFERENCE WITHOUT AN ADDRESS IS A QUESTION, NOT A FAILURE.
@@ -1206,6 +1208,7 @@ export async function createNoIvrAgent(
   handoffToHuman: () => Promise<void>,
   metadata: NoIvrAgentMetadata,
 ): Promise<RealtimeAgent> {
+  registerAfterHoursFloor(metadata, 'no-ivr');
   // Lazy import callerMemoryService to prevent module initialization errors in production
   // Wrapped in try/catch to ensure agent factory NEVER throws - agent must always be created
   let callerMemoryService: typeof import("../services/callerMemoryService")["callerMemoryService"] | null = null;
@@ -2001,6 +2004,7 @@ The ticket will include schedule context (last appointment info) automatically.`
       }
 
       if (result.success && result.ticketNumber) {
+        markAfterHoursTicketFiled(callId);
         console.log(`[TICKET CREATE] ✓ SUCCESS for call ${metadata.callSid}: ${result.ticketNumber}`);
         console.log(`[TICKET CREATE]   Patient: ${params.first_name} ${params.last_name}, Category: ${params.request_category}`);
         
@@ -2217,6 +2221,7 @@ Always say a brief goodbye phrase BEFORE calling this tool.`,
         callStartTime: new Date().toISOString(),
       });
       if (result.success) {
+        markAfterHoursTicketFiled(callId);
         console.info(
           `[HANDOFF] refused escalation (${code}) filed as ${result.ticketNumber ?? 'a ticket'} on ${metadata.callSid}`,
         );
@@ -2410,6 +2415,9 @@ PREREQUISITE: one quick ask for name and DOB; transfer even if unavailable. Clin
       };
       escalationDetailsMap.set(callId, escalationDetails);
 
+      // The handoff itself can end the call. Reserve the urgent record before
+      // it starts so teardown cannot claim its key for a generic floor ticket.
+      const finishRecordFiling = reserveAfterHoursTicketFiling(callId);
       try {
         await handoffToHuman();
         console.info("[HANDOFF] ✓ handoffToHuman() completed successfully");
@@ -2421,6 +2429,7 @@ PREREQUISITE: one quick ask for name and DOB; transfer even if unavailable. Clin
         // (Failed transfers are covered by addHumanAgent's fallback ticket;
         // the per-callSid claim lock dedupes if both paths ever race.)
         void (async () => {
+          let filed = false;
           try {
             const { SyncAgentService } = await import("../services/syncAgentService");
             const { fullName: name, standIn } = nameOrStandIn(params.patient_first_name, params.patient_last_name);
@@ -2471,6 +2480,7 @@ PREREQUISITE: one quick ask for name and DOB; transfer even if unavailable. Clin
               // path above. The post-call update carries the complete one.
             });
             if (result.success) {
+              filed = true;
               console.info(
                 `[HANDOFF] ✓ Urgent transfer record ticket: ${result.ticketNumber}${earlier ? ` (beside ${earlier.ticketNumber})` : ''}`,
               );
@@ -2479,11 +2489,14 @@ PREREQUISITE: one quick ask for name and DOB; transfer even if unavailable. Clin
             }
           } catch (recordErr) {
             console.error('[HANDOFF] ✗ Exception creating urgent transfer record ticket:', recordErr);
+          } finally {
+            finishRecordFiling(filed);
           }
         })();
 
         return { success: true, message: "Call transferred to on-call provider." };
       } catch (handoffError) {
+        finishRecordFiling(false);
         console.error("[HANDOFF] ✗ handoffToHuman() threw error:", handoffError);
         return { success: false, message: "Transfer failed - please take a message instead." };
       }

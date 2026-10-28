@@ -8,6 +8,14 @@
 
 # State of Play — Azul Vision voice agents
 
+2026-10-28 after-hours teardown floor (offline, synthetic data):
+`voice-runtime-v129-after-hours-teardown-floor-20261028` (renumbered from v119), on top of `main`'s v128 (#389, `558f288`); v127 is #376 on its open branch.
+No-IVR and V2 reuse PCP's v90 registered, bounded teardown runner and its
+transcript request guard on both pipelines. Existing tickets, silent calls
+and explicitly answered questions are skipped; filings use the normal
+After Hours submission path and per-call idempotency. No migration or
+production measurement.
+
 2026-10-28 PCP scheduling/unassigned exit (offline, synthetic data):
 `CA9dfc0fa32af0d0548cbda1a764cd11c0` identifies the reported failure shape.
 The live PCP filing tool now honors captured patient scheduling intent and
@@ -1643,7 +1651,7 @@ session's writable workspace; this entry is the local handoff.
 ## 18. Heard callers bypass silence and ghost-call termination — 2026-10-27
 
 v131 (`voice-runtime-v131-silence-ladder-heard-callers-20261028`), on top
-of v117: any non-empty caller transcript makes the runtime silence ladder
+of `main`'s v129 (#386, `08734d7`): any non-empty caller transcript makes the runtime silence ladder
 stand down before speaking. Never-heard callers retain the original ladder.
 The no-IVR, answering-service and legacy after-hours prompts forbid ghost
 wording after a request; their live SIP tools refuse ghost termination after
@@ -1654,7 +1662,7 @@ Regression tests exercise the real bridge and agent tools with synthetic
 requests indexed by the three reported call SIDs. Validation: 291 tests passed
 in the five touched/added test files, run with nice and one worker; TypeScript
 (`tsc -p . --noEmit`) and `git diff --check` passed. Production impact remains
-unmeasured. Numbering rechecked: v131 sits above main v128 and open v127, v129, v130;
+unmeasured. Numbering rechecked: v131 sits above main v129 and open v127, v130;
 owner: verify the published marker and call behavior after deploy.
 
 ---
