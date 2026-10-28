@@ -625,7 +625,7 @@ const PROVIDER_SELF_IDENTIFICATION: RegExp[] = [
 // A mutual patient can be the caller, so exclude first-person identification
 // for this evidence only; other provider statements can still stand.
 const MUTUAL_PATIENT = /\b(?:our|(?:a|one|the) mutual) (?:mutual )?patients?\b/;
-const PATIENT_IDENTIFICATION_BEFORE = /\bi(?:'m| am)\s+(?:(?:actually|also|just|indeed)\s+)*$/;
+const PATIENT_IDENTIFICATION_BEFORE = /\b(?:i(?:'m| am)|this is)\s+(?:(?:actually|also|just|indeed)\s+)*$/;
 
 /**
  * Pure, for tests: does this caller text identify the caller as a provider?

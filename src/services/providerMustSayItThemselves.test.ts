@@ -118,6 +118,8 @@ describe('mutual patient self-identification', () => {
     'I’m actually the mutual patient.',
     "I'm a mutual patient.",
     'I am also a mutual patient.',
+    'This is the mutual patient.',
+    'This is actually a mutual patient.',
   ])('does not mistake a patient identifying themselves for a provider: %s', (spoken) => {
     expect(callerSaysTheyAreAProvider(spoken)).toBe(false);
   });
@@ -126,6 +128,8 @@ describe('mutual patient self-identification', () => {
     expect(callerSaysTheyAreAProvider(["I'm the mutual patient.", 'This is Dr. Lee calling.'])).toBe(true);
     expect(callerSaysTheyAreAProvider("I'm the mutual patient. Calling about our mutual patient.")).toBe(true);
     expect(callerSaysTheyAreAProvider("I'm the mutual patient. Calling about the mutual patient.")).toBe(true);
+    expect(callerSaysTheyAreAProvider('This is the mutual patient. Calling about the mutual patient.')).toBe(true);
+    expect(callerSaysTheyAreAProvider(['This is the mutual patient.', 'This is Dr. Lee calling.'])).toBe(true);
   });
 });
 
@@ -258,7 +262,7 @@ describe('the gate', () => {
     },
   );
 
-  it.each(["I'm the mutual patient.", 'I am the mutual patient you called.'])(
+  it.each(["I'm the mutual patient.", 'I am the mutual patient you called.', 'This is the mutual patient.'])(
     'refuses an unstated provider escalation when the caller says %s', (spoken) => {
       const corroboration = corr(spoken);
       expect(corroboration.providerStated).toBe(false);
