@@ -52,8 +52,12 @@ import {
 } from "../tools/lookupUnsure";
 import { corroborate } from "../services/symptomCorroboration";
 import { markCallConcluded } from "../services/callConclusion";
+import { GHOST_CALL_RESTRICTION, ghostCallRefusal, hasCallerTranscript } from "../services/ghostCallProtection";
+import { requestSipHangup, type SipGhostHangupMetadata } from "../services/sipGhostHangup";
 import { callMetadataForDB } from "../services/callMetadataStore";
 import { EMAIL_FIELD_DESCRIPTION, LAST_NAME_FIELD_DESCRIPTION } from "../tools/contactCaptureGuidance";
+import { registerAfterHoursFloor, markAfterHoursTicketFiled, reserveAfterHoursTicketFiling } from '../services/afterHoursTeardownFloor';
+export { sweepAfterHoursUnfiledCall } from '../services/afterHoursTeardownFloor';
 
 /**
  * AN EMAIL PREFERENCE WITHOUT AN ADDRESS IS A QUESTION, NOT A FAILURE.
@@ -146,7 +150,7 @@ function callbackMismatchStaffNote(callbackNumber: string, callerId?: string): s
 
 export type NoIvrAgentVariant = 'production' | 'development';
 
-export interface NoIvrAgentMetadata {
+export interface NoIvrAgentMetadata extends SipGhostHangupMetadata {
   callId: string;
   callSid?: string;
   callerPhone?: string;
@@ -733,11 +737,13 @@ ROBOT/SPAM CALL INDICATORS (any 1 of these = end immediately):
 ROBOT/SPAM PROTOCOL: say "We were unable to connect. Goodbye." then call
 terminate_call with reason "robot_call".
 
-GHOST CALL INDICATORS (any 2+ of these = ghost call):
-- Only heard single syllables: "mm", "uh", "ok", "hi", background noise
+${GHOST_CALL_RESTRICTION}
+
+GHOST CALL INDICATORS (only before any non-empty caller transcript):
+- Only silence or background noise, with no caller words transcribed
 - Caller hasn't stated any actual request or question
 - Caller doesn't respond to direct questions
-- Total conversation is just greetings with no substance after 3 prompts
+- No caller words after 3 prompts
 
 GHOST CALL PROTOCOL — three turns, then out:
 1. After first unclear response: "What can I help you with today?"
@@ -1202,6 +1208,7 @@ export async function createNoIvrAgent(
   handoffToHuman: () => Promise<void>,
   metadata: NoIvrAgentMetadata,
 ): Promise<RealtimeAgent> {
+  registerAfterHoursFloor(metadata, 'no-ivr');
   // Lazy import callerMemoryService to prevent module initialization errors in production
   // Wrapped in try/catch to ensure agent factory NEVER throws - agent must always be created
   let callerMemoryService: typeof import("../services/callerMemoryService")["callerMemoryService"] | null = null;
@@ -1997,6 +2004,7 @@ The ticket will include schedule context (last appointment info) automatically.`
       }
 
       if (result.success && result.ticketNumber) {
+        markAfterHoursTicketFiled(callId);
         console.log(`[TICKET CREATE] ✓ SUCCESS for call ${metadata.callSid}: ${result.ticketNumber}`);
         console.log(`[TICKET CREATE]   Patient: ${params.first_name} ${params.last_name}, Category: ${params.request_category}`);
         
@@ -2040,7 +2048,7 @@ The ticket will include schedule context (last appointment info) automatically.`
     description: `Terminate the call server-side immediately. Use this to actually end the call — do NOT rely solely on verbal goodbye.
 
 USE FOR:
-- ghost_call: caller not responding after 3 prompts
+- ghost_call: caller never transcribed and not responding after 3 prompts. NEVER use ghost_call after any non-empty caller transcript, including a request or question
 - robot_call: IVR bleed-through or automated system detected
 - spam: spam/telemarketing detected
 - max_turns_exceeded: call has gone on too long with no resolution
@@ -2054,6 +2062,10 @@ Always say a brief goodbye phrase BEFORE calling this tool.`,
     execute: async (params) => {
       console.log(`[TOOL] terminate_call - reason: ${params.reason}, callId: ${callId}`);
 
+      // Read the live SIP-route transcript at invocation, never at construction.
+      const ghostRefusal = ghostCallRefusal(params.reason, hasCallerTranscript(metadata.getTranscript?.() ?? ''));
+      if (ghostRefusal) return ghostRefusal;
+
       // NEVER hang up on a call that is being handed to a human.
       //
       // 2026-08-04 03:55:09 the agent called escalate_to_human ("caller is
@@ -2066,17 +2078,20 @@ Always say a brief goodbye phrase BEFORE calling this tool.`,
       //
       // An escalation is a one-way door. Once it is open, ending the call is
       // the transfer's job (or the fallback ticket's), never the model's.
-      if (escalationDetailsMap.has(callId)) {
+      const checkEscalation = () => {
+        if (!escalationDetailsMap.has(callId)) return null;
         console.warn(
           `[TOOL] terminate_call REFUSED for ${callId} — escalate_to_human already fired ` +
             `(reason given: ${params.reason}). A handoff in flight outranks a hangup.`,
         );
         return {
-          success: false,
+          success: false as const,
           error: 'escalation_in_progress',
           say: 'Stay on the line — I am connecting you with someone now.',
         };
-      }
+      };
+      const escalationRefusal = checkEscalation();
+      if (escalationRefusal) return escalationRefusal;
 
       try {
         const apiKey = process.env.OPENAI_API_KEY;
@@ -2084,13 +2099,16 @@ Always say a brief goodbye phrase BEFORE calling this tool.`,
           console.error("[TOOL] terminate_call - missing OPENAI_API_KEY");
           return { success: false, error: "missing_api_key" };
         }
-        const response = await fetch(
+        const hangup = await requestSipHangup(params.reason, metadata, (signal) => fetch(
           `https://api.openai.com/v1/realtime/calls/${encodeURIComponent(callId)}/hangup`,
           {
             method: "POST",
             headers: { Authorization: `Bearer ${apiKey}` },
+            signal,
           },
-        );
+        ), checkEscalation);
+        if (hangup.refusal) return hangup.refusal;
+        const response = hangup.response;
         if (response.ok) {
           console.log(`[TOOL] terminate_call ✓ Call ${callId} terminated (${params.reason})`);
           // Deliberate, successful hangup — SIP recovery must hang up the
@@ -2203,6 +2221,7 @@ Always say a brief goodbye phrase BEFORE calling this tool.`,
         callStartTime: new Date().toISOString(),
       });
       if (result.success) {
+        markAfterHoursTicketFiled(callId);
         console.info(
           `[HANDOFF] refused escalation (${code}) filed as ${result.ticketNumber ?? 'a ticket'} on ${metadata.callSid}`,
         );
@@ -2396,6 +2415,9 @@ PREREQUISITE: one quick ask for name and DOB; transfer even if unavailable. Clin
       };
       escalationDetailsMap.set(callId, escalationDetails);
 
+      // The handoff itself can end the call. Reserve the urgent record before
+      // it starts so teardown cannot claim its key for a generic floor ticket.
+      const finishRecordFiling = reserveAfterHoursTicketFiling(callId);
       try {
         await handoffToHuman();
         console.info("[HANDOFF] ✓ handoffToHuman() completed successfully");
@@ -2407,6 +2429,7 @@ PREREQUISITE: one quick ask for name and DOB; transfer even if unavailable. Clin
         // (Failed transfers are covered by addHumanAgent's fallback ticket;
         // the per-callSid claim lock dedupes if both paths ever race.)
         void (async () => {
+          let filed = false;
           try {
             const { SyncAgentService } = await import("../services/syncAgentService");
             const { fullName: name, standIn } = nameOrStandIn(params.patient_first_name, params.patient_last_name);
@@ -2457,6 +2480,7 @@ PREREQUISITE: one quick ask for name and DOB; transfer even if unavailable. Clin
               // path above. The post-call update carries the complete one.
             });
             if (result.success) {
+              filed = true;
               console.info(
                 `[HANDOFF] ✓ Urgent transfer record ticket: ${result.ticketNumber}${earlier ? ` (beside ${earlier.ticketNumber})` : ''}`,
               );
@@ -2465,11 +2489,14 @@ PREREQUISITE: one quick ask for name and DOB; transfer even if unavailable. Clin
             }
           } catch (recordErr) {
             console.error('[HANDOFF] ✗ Exception creating urgent transfer record ticket:', recordErr);
+          } finally {
+            finishRecordFiling(filed);
           }
         })();
 
         return { success: true, message: "Call transferred to on-call provider." };
       } catch (handoffError) {
+        finishRecordFiling(false);
         console.error("[HANDOFF] ✗ handoffToHuman() threw error:", handoffError);
         return { success: false, message: "Transfer failed - please take a message instead." };
       }

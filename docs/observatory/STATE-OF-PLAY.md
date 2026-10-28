@@ -8,6 +8,27 @@
 
 # State of Play — Azul Vision voice agents
 
+2026-10-28 after-hours teardown floor (offline, synthetic data):
+`voice-runtime-v129-after-hours-teardown-floor-20261028` (renumbered from v119), on top of `main`'s v128 (#389, `558f288`); v127 is #376 on its open branch.
+No-IVR and V2 reuse PCP's v90 registered, bounded teardown runner and its
+transcript request guard on both pipelines. Existing tickets, silent calls
+and explicitly answered questions are skipped; filings use the normal
+After Hours submission path and per-call idempotency. No migration or
+production measurement.
+
+2026-10-28 PCP scheduling/unassigned exit (offline, synthetic data):
+`CA9dfc0fa32af0d0548cbda1a764cd11c0` identifies the reported failure shape.
+The live PCP filing tool now honors captured patient scheduling intent and
+uses one unassigned retry for terminal Optical/Surgery routing-field refusals.
+Shared appointment cues cover "schedule my appointment" / "appointment scheduling".
+Marker: `voice-runtime-v128-pcp-scheduling-hub-unassigned-exit-20261028`
+(renumbered from v122), on top of `main`'s v126 (#394); v127 is #376. No production
+measurement, DB writes, migration, commit or deployment.
+Validation: 99 tests pass across the four touched Vitest files, run with
+`nice -n 10`, one worker. The new live-tool regression failed nine assertions
+before the fix. `tsc -p . --noEmit` and `git diff --check` pass. The full suite
+was not run.
+
 2026-10-27 review follow-up (offline, synthetic data): the paired request
 classifiers now preserve clinical complaints mentioning eyewear, normalize
 explicit surgery denials, and retain cataract/procedure insurance on Surgery.
@@ -1625,6 +1646,24 @@ no PR opened, no merge or deploy, and no production before/after claim. Next:
 owner opens the PR and follows the measurement rule in `docs/BACKEND_HANDOFF.md`
 before merging ticket-path changes. Shared bridge files are outside this
 session's writable workspace; this entry is the local handoff.
+
+
+## 18. Heard callers bypass silence and ghost-call termination — 2026-10-27
+
+v131 (`voice-runtime-v131-silence-ladder-heard-callers-20261028`), on top
+of `main`'s v130 (#387, `3e861ad`): any non-empty caller transcript makes the runtime silence ladder
+stand down before speaking. Never-heard callers retain the original ladder.
+The no-IVR, answering-service and legacy after-hours prompts forbid ghost
+wording after a request; their live SIP tools refuse ghost termination after
+any caller words. The runtime also refuses it before dispatch, after an
+in-flight dispatch, and revokes pending ghost hangups before playback completes.
+No new spoken wording, migration, DB writes, commit, push or PR.
+Regression tests exercise the real bridge and agent tools with synthetic
+requests indexed by the three reported call SIDs. Validation: 291 tests passed
+in the five touched/added test files, run with nice and one worker; TypeScript
+(`tsc -p . --noEmit`) and `git diff --check` passed. Production impact remains
+unmeasured. Numbering rechecked: v131 sits above main v130 and open v127;
+owner: verify the published marker and call behavior after deploy.
 
 ---
 

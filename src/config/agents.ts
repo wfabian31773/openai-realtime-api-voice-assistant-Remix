@@ -10,7 +10,7 @@ import { createDRSSchedulerAgent } from '../agents/drsSchedulerAgent';
 import { createAppointmentConfirmationAgent } from '../agents/appointmentConfirmationAgent';
 import { createAnsweringServiceAgent, answeringServiceAgentConfig } from '../agents/answeringServiceAgent';
 import { createFantasyFootballAgent } from '../agents/fantasyFootballAgent';
-import { createNoIvrAgent, noIvrAgentConfig, type NoIvrAgentMetadata } from '../agents/noIvrAgent';
+import { createNoIvrAgent, noIvrAgentConfig, sweepAfterHoursUnfiledCall, type NoIvrAgentMetadata } from '../agents/noIvrAgent';
 import { createNoIvrAgentV2, noIvrAgentV2Config } from '../agents/noIvrAgentV2';
 import { createAzulSchedulingAgent, azulSchedulingAgentConfig } from '../agents/azulSchedulingAgent';
 import { createPcpAgent, pcpAgentConfig, sweepPcpUnfiledCall } from '../agents/pcpAgent';
@@ -37,13 +37,13 @@ export interface AgentConfig {
   spokenLanguages?: readonly string[];
   greeting?: string;   // Agent greeting message
   /**
-   * The lane's teardown filer, when it has one (PCP's lost-request floor).
+   * The lane's teardown filer, when it has one (PCP and after-hours floors).
    * Carried HERE, beside `factory`, so the runtime gets it from the same
    * import statement the factory came from — one module evaluation, so the
    * per-call state the factory wrote is the state the sweep reads. See
    * src/runtime/pcpFloor.ts for the Node 20 double evaluation this prevents.
    */
-  teardownSweep?: (callId: string, ctx?: { outcome?: string }) => Promise<void>;
+  teardownSweep?: (callId: string, ctx?: { outcome?: string; transcript?: string }) => Promise<void>;
   /**
    * On an `agentType: 'outbound'` lane the voice runtime DIALS: its calling
    * window, caps, caller ID, greeting and voicemail (src/runtime/outbound/).
@@ -64,6 +64,7 @@ export class AgentRegistry {
     this.register({
       id: 'no-ivr',
       factory: createNoIvrAgent as AgentFactory,
+      teardownSweep: sweepAfterHoursUnfiledCall,
       enabled: true,
       description: noIvrAgentConfig.description,
       twilioNumbers: [],
@@ -76,6 +77,7 @@ export class AgentRegistry {
     });
 
     // Development version - V2 Workflow-driven agent for testing
+    // Neither V2 lane has a teardown floor until it records no-followup dispositions.
     this.register({
       id: 'dev-no-ivr',
       factory: createNoIvrAgentV2 as AgentFactory,
