@@ -129,6 +129,41 @@ beforeEach(() => {
 });
 
 describe("a failed transfer creates an identifiable ticket", () => {
+  it("asks before dialing when emergencies are denied, then keeps the supplied identity on failure", async () => {
+    const callSid = freshSid();
+    const callId = `call-${callSid}`;
+    const handoff = vi.fn(async () => { throw new Error("synthetic transfer failure"); });
+    const agent = await createNoIvrAgent(handoff, { callId, callSid, callerPhone: ANI } as any);
+    const symptoms = {
+      ...FLASHES,
+      reason: "Flashes, but no vision loss or injury",
+      symptoms_summary: "Flashes without trauma or bleeding",
+    };
+
+    const ask = await call(agent, "escalate_to_human", symptoms);
+    expect(ask.need_identity).toBe(true);
+    expect(handoff).not.toHaveBeenCalled();
+    expect(escalationDetailsMap.has(callId)).toBe(false);
+
+    const result = await call(agent, "escalate_to_human", {
+      ...symptoms,
+      patient_first_name: "Dana",
+      patient_last_name: "Example",
+      patient_dob: "January 4, 1958",
+    });
+    expect(result.success).toBe(false);
+    expect(handoff).toHaveBeenCalledTimes(1);
+    const ticket = urgentFallbackTicketParams({
+      why: URGENT_TRANSFER_NOT_ANSWERED,
+      escalationDetails: escalationDetailsMap.get(callId),
+      callerId: ANI, callSid, agentUsed: "no-ivr",
+    });
+    expect(ticket).toMatchObject({
+      patientFirstName: "Dana", patientLastName: "Example", patientPhone: ANI,
+      patientBirthMonth: "01", patientBirthDay: "04", patientBirthYear: "1958",
+    });
+  });
+
   it("keeps the captured name, date of birth and ANI — never Unknown Caller", async () => {
     const callSid = freshSid();
     const callId = `call-${callSid}`;
@@ -280,6 +315,27 @@ describe("a caller who declines details is still transferred", () => {
 });
 
 describe("a corrected schedule match never produces not-found", () => {
+  it("keeps history-aware wording and main's unavailable appointment contract on a failed read", async () => {
+    h.lookupByPhone.mockResolvedValue(CHART as any);
+    h.lookupByNameAndDOB.mockResolvedValue({
+      patientFound: false, upcomingAppointments: [], pastAppointments: [],
+      totalAppointmentsFound: 0, scheduleReadStatus: "unavailable",
+    } as any);
+    const agent = await createNoIvrAgent(async () => {}, {
+      callId: "call-unavailable", callSid: freshSid(), callerPhone: ANI,
+    } as any);
+
+    const result = await call(agent, "lookup_schedule", {
+      first_name: "Dana", last_name: "Exampel", date_of_birth: "01/04/1958",
+    });
+    expect(result).toMatchObject({
+      found: false, visit_history_on_file: true, message: LOOKUP_UNSURE_SAY,
+      appointment_access: "unavailable", has_upcoming_appointments: null,
+      scheduling_action: "request_schedule_review",
+    });
+    expect(payloadSaysNotFound(result)).toBe(false);
+  });
+
   it("re-runs with the chart name when the spoken last name missed", async () => {
     h.lookupByPhone.mockResolvedValue(CHART as any);
     h.lookupByNameAndDOB

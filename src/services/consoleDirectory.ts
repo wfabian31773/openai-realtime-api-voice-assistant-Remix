@@ -22,6 +22,7 @@
  * rules in `ticketFieldSanitizers`, which are always safe.
  */
 import pg from 'pg';
+import { RETIRED_CLINIC_NAMES } from '../config/azulVisionKnowledge';
 
 const REFRESH_MS = Number(process.env.CONSOLE_DIRECTORY_TTL_MS ?? 15 * 60_000);
 const QUERY_TIMEOUT_MS = 2500;
@@ -124,24 +125,10 @@ function getPool(): pg.Pool {
  *      ticketing agent measured across 11,296 appointments, and I only ever
  *      checked providers.
  *
- * A THIRD BREAK, added 2026-08-21: a RETIRED name. Two offices were renamed
- * in NextGen a couple of months before this (Wayne, confirmed directly, not
- * inferred): "North Valley Eye" -> Mission Hills, "Magan" -> Covina. Every
- * appointment booked before the rename still carries the old name in
- * `Schedule.OfficeLocation` — which is where `lookup_patient`'s `usual_clinic`
- * reads from — so a longtime patient hears their own real office named back
- * to them correctly, confirms it, and `resolve_location` still can't place
- * it: the old name was never in `si_locations` to begin with (a rename, not
- * a typo), so there was no live entry for it to be an alternate spelling OF.
- * Traced from a real call, 2026-08-21: `lookup_patient` said "I have you at
- * our North Valley Eye office," the caller confirmed it, and filing asked
- * "which city is your optical office in?" as if nothing had been said —
- * measured at 7 of 19 optical location-refusals that day, the single largest
- * cause. `spoken` is exactly the right place for a retired name to live: it
- * does not need to exist in the mirror, only the office it now points at
- * does, and Covina needed a first entry here for it (it resolves natively by
- * brand-stripping, same as Mission Hills' bare "Mission Hlls" would if it
- * were not misspelled — the entry exists so "Magan" has somewhere to point).
+ * Retired names can remain in historical Schedule rows and caller phrasing
+ * after an office is renamed. Keep those labels in RETIRED_CLINIC_NAMES and
+ * index them against their active directory rows; do not put retired names
+ * in `mirror`, which must identify an active entry.
  *
  * This table is deliberately small and explicit. It is NOT a fuzzy matcher —
  * a fuzzy matcher would paper over exactly the drift we want to keep visible,
@@ -173,11 +160,9 @@ export const LOCATION_ALIASES: Array<{
     fileAs: 'Mission Hills',
     // The mirror's own spelling is missing an 'i'. Index the correct spelling
     // so a caller who says it properly is not punished for NextGen's typo.
-    // 'north valley eye' is the office's own RETIRED NextGen name (renamed a
-    // couple of months before 2026-08-21, per Wayne) — it never existed in
-    // si_locations under that name, so it can only ever be a spoken synonym,
-    // never a `mirror`. See the file header.
-    spoken: ['mission hills', 'mission hlls', 'north valley eye'],
+    // Correct spelling is indexed despite the mirror's omitted 'i'. Retired
+    // names are handled by RETIRED_CLINIC_NAMES below, not duplicated here.
+    spoken: ['mission hills', 'mission hlls'],
   },
   {
     mirror: 'azul vision willow',
@@ -189,15 +174,10 @@ export const LOCATION_ALIASES: Array<{
   },
   {
     mirror: 'azul vision covina',
-    // Already resolves natively by brand-stripping to "covina" — this entry
-    // exists only to carry the retired name below. fileAs is explicit (not
-    // relied on implicitly) because this entry is new, unlike Covina's own
-    // bare-strip match which predates it.
+    // Already resolves natively by brand-stripping to "covina". fileAs is
+    // explicit for the same reason as the other entries above.
     fileAs: 'Covina',
-    // 'magan' is Covina's own RETIRED NextGen name (renamed alongside North
-    // Valley Eye -> Mission Hills, per Wayne, 2026-08-21). Same shape as
-    // above: never a `mirror`, only ever a spoken synonym.
-    spoken: ['magan'],
+    spoken: ['covina'],
   },
 ];
 
@@ -208,6 +188,75 @@ export function directoryKey(raw: string): string {
     .replace(/\s{2,}/g, ' ')
     .trim()
     .toLowerCase();
+}
+
+function providerMatchKey(raw: string): string {
+  return directoryKey(raw)
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim()
+    .replace(/\s+/g, ' ');
+}
+
+function editDistance(a: string, b: string): number {
+  const previous = Array.from({ length: b.length + 1 }, (_, i) => i);
+  for (let i = 1; i <= a.length; i += 1) {
+    let diagonal = previous[0];
+    previous[0] = i;
+    for (let j = 1; j <= b.length; j += 1) {
+      const above = previous[j];
+      previous[j] = Math.min(
+        previous[j] + 1,
+        previous[j - 1] + 1,
+        diagonal + (a[i - 1] === b[j - 1] ? 0 : 1),
+      );
+      diagonal = above;
+    }
+  }
+  return previous[b.length];
+}
+
+/**
+ * Match an exact or clearly unique small transcription error against the
+ * Console provider roster. Fuzzy hits must be at least 88% similar and the
+ * nearest candidate must beat the runner-up by at least five points; otherwise
+ * the caller keeps the original spelling for staff to resolve.
+ */
+export function matchProviderFromRoster(
+  raw: string,
+  roster: readonly DirectoryProvider[],
+): DirectoryProvider | null {
+  const key = providerMatchKey(raw);
+  if (!key) return null;
+
+  // Preserve the original exact spelling before folding accents/punctuation.
+  // Those folds can make two distinct roster names identical.
+  const originalKey = directoryKey(raw);
+  const exact = roster.filter((provider) => directoryKey(provider.key || provider.canonical) === originalKey);
+  if (exact.length) return exact.length === 1 ? exact[0] : null;
+
+  const normalized = roster.filter((provider) => providerMatchKey(provider.key || provider.canonical) === key);
+  if (normalized.length) return normalized.length === 1 ? normalized[0] : null;
+
+  // Short names are too easy to collapse into a different person with one
+  // character changed. Keep the established exact-only behavior for them.
+  if (key.length < 8) return null;
+
+  const ranked = roster
+    .map((provider) => {
+      const candidate = providerMatchKey(provider.key || provider.canonical);
+      const distance = editDistance(key, candidate);
+      const similarity = 1 - distance / Math.max(key.length, candidate.length);
+      return { provider, similarity };
+    })
+    .sort((a, b) => b.similarity - a.similarity);
+
+  // Rank the entire roster: a runner-up below 88% can still be too close to
+  // distinguish safely from a best candidate just above that threshold.
+  if (!ranked.length || ranked[0].similarity < 0.88) return null;
+  if (ranked[1] && ranked[0].similarity - ranked[1].similarity < 0.05) return null;
+  return ranked[0].provider;
 }
 
 async function load(): Promise<Snapshot | null> {
@@ -278,6 +327,24 @@ async function load(): Promise<Snapshot | null> {
     }
   }
 
+  // A retired name can still occur inside a longer caller phrase. Index the
+  // retired spelling against its current entry so the contained-name matcher
+  // and exact lookup share the same single mapping.
+  for (const [retired, current] of Object.entries(RETIRED_CLINIC_NAMES)) {
+    const entry = locations.get(directoryKey(current));
+    if (!entry) {
+      console.warn(`[DIRECTORY] retired clinic target "${current}" is not in the mirror`);
+      continue;
+    }
+    const key = directoryKey(retired);
+    const existing = locations.get(key);
+    if (existing && existing !== entry) {
+      console.warn(`[DIRECTORY] retired clinic name "${retired}" already resolves to another office`);
+      continue;
+    }
+    locations.set(key, entry);
+  }
+
   return { providers, locations, loadedAt: Date.now() };
 }
 
@@ -327,7 +394,7 @@ export async function getDirectory(): Promise<Snapshot | null> {
 export async function lookupProvider(raw: string): Promise<DirectoryProvider | null> {
   const dir = await getDirectory();
   if (!dir) return null;
-  return dir.providers.get(directoryKey(raw)) ?? null;
+  return matchProviderFromRoster(raw, [...dir.providers.values()]);
 }
 
 /**
@@ -509,6 +576,8 @@ function locationNamedInside(
 export async function lookupLocation(raw: string): Promise<DirectoryLocation | null> {
   const dir = await getDirectory();
   if (!dir) return null;
+  // The snapshot indexes retired aliases with collision protection. Rewriting
+  // the input first would bypass that protection and steal a real office key.
   const exact = dir.locations.get(directoryKey(raw));
   if (exact) return exact;
   return locationNamedInside(dir, raw);

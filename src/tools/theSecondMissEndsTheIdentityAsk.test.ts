@@ -84,6 +84,21 @@ describe('what counts as a miss', () => {
     expect(String(out.fix)).toMatch(/file it now/i);
   });
 
+  it('never directs a chart-name retry at or beyond the miss limit', async () => {
+    const first = await lookup({ ...identity, call_sid: SID });
+    expect(String(first.fix)).toMatch(/call this tool again with that chart name/i);
+
+    for (let misses = LOOKUP_MISS_LIMIT; misses <= LOOKUP_MISS_LIMIT + 2; misses++) {
+      const out = await lookup({ ...identity, call_sid: SID });
+      expect(out.lookup_misses).toBe(misses);
+      expect(out.message).toBe(LOOKUP_UNSURE_SAY);
+      expect(String(out.fix)).toMatch(/file it now/i);
+      expect(String(out.fix)).toContain('Do NOT call lookup_patient again.');
+      expect(String(out.fix)).toMatch(/Do NOT ask the caller for their name or date of birth again/);
+      expect(String(out.fix)).not.toMatch(/call this tool again|look them up again|ONCE more/i);
+    }
+  });
+
   it('the ambiguous branch is an identity question, not a miss', async () => {
     lookupSpy.mockResolvedValueOnce({ ...EMPTY, identity: { unique: false, candidateCount: 3, candidates: [] } } as never);
     const several = await lookup({ ...identity, call_sid: SID });

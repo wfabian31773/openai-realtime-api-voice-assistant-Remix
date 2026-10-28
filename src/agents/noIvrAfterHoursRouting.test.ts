@@ -42,7 +42,9 @@ vi.mock('../services/syncAgentService', () => ({
   SyncAgentService: {
     submitSimplifiedTicket: (p: Record<string, unknown>) => h.submitSimplifiedTicket(p),
     checkOpenTickets: async () => [],
-    requiresCallback: () => true,
+    // The production default is false for confirmations. A blanket true
+    // hid requests being discarded before their same-day route could run.
+    requiresCallback: (category: string) => category !== 'confirm_appointment',
   },
 }));
 vi.mock('../services/scheduleLookupService', () => ({
@@ -294,5 +296,111 @@ describe('every other call is the app\'s to route, exactly as before', () => {
     expect(p.departmentId).toBeUndefined();
     expect(p.priority).toBeUndefined();
     expect(p.additionalDetails ?? '').not.toMatch(/SAME-DAY|POST-OP/);
+  });
+});
+
+describe('caller-requested callback handling — VA-76095 / 74600 / VA-71404', () => {
+  it('records an answered-only call without collecting identifying details or filing', async () => {
+    const { agent, callSid } = await agentFor();
+    const result = await call(agent, 'record_answered_question', {});
+    expect(result).toMatchObject({ success: true, ticketCreated: false, callbackRequired: false });
+    expect(h.submitSimplifiedTicket).not.toHaveBeenCalled();
+    const { getAzulTimeline, classifyFleetCall } = await import('../services/toolTimeline');
+    const events = getAzulTimeline(`call-${callSid}`)!;
+    expect(events[events.length - 1]?.outcome).toMatchObject({ success: true, ticketCreated: false, callbackRequired: false });
+    expect(classifyFleetCall(events).result).toBe('Answered, no ticket needed');
+  });
+
+  it('does not create a callback ticket when the question was answered and no callback is needed', async () => {
+    const { agent } = await agentFor();
+    const result = await call(agent, 'create_ticket', {
+      ...TICKET,
+      request_category: 'general_question',
+      request_summary: 'Asked for the West Hills office hours; the agent answered from clinic facts.',
+      requires_callback: false,
+      question_fully_answered: true,
+    });
+
+    expect(result).toMatchObject({ success: true, ticketCreated: false, callbackRequired: false });
+    expect(String(result.message)).toContain('No ticket was created');
+    expect(h.submitSimplifiedTicket).not.toHaveBeenCalled();
+  });
+
+  it('keeps a staff action even when no telephone callback was requested', async () => {
+    const { agent } = await agentFor();
+    const result = await call(agent, 'create_ticket', {
+      ...TICKET,
+      request_category: 'cancel_appointment',
+      request_summary: 'Please cancel my visit; send a text instead of calling.',
+      preferred_contact: 'text',
+      requires_callback: false,
+    });
+
+    expect(result).toMatchObject({ success: true, ticketCreated: true, callbackRequired: false });
+    expect(lastSubmit().reasonForCalling).toContain('[NO CALLBACK NEEDED]');
+    expect(lastSubmit().preferredContactMethod).toBe('sms');
+    expect(String(result.message)).not.toMatch(/receive a callback|call you back/i);
+  });
+
+  it('a fully answered medication question does not enter the refill intake gate', async () => {
+    const { agent } = await agentFor();
+    const result = await call(agent, 'create_ticket', {
+      ...TICKET,
+      request_category: 'general_question',
+      request_summary: 'Asked which fax number the pharmacy should use for medication requests; answered from clinic facts.',
+      requires_callback: false,
+      question_fully_answered: true,
+    });
+
+    expect(result).toMatchObject({ success: true, ticketCreated: false, callbackRequired: false });
+    expect(h.submitSimplifiedTicket).not.toHaveBeenCalled();
+  });
+
+  it('flags a different callback on the ticket filed by a refused escalation too', async () => {
+    const { agent } = await agentFor();
+    const result = await call(agent, 'escalate_to_human', {
+      reason: 'Post-op patient: the steroid drop prescription never reached the pharmacy',
+      caller_type: 'patient_urgent_medical',
+      callback_number: '555-765-4321',
+    });
+
+    expect(result.ticket_filed).toBe(true);
+    expect(lastSubmit()).toMatchObject({ patientPhone: '5557654321', callerPhone: '5551234567' });
+    expect(String(lastSubmit().additionalDetails)).toContain('CALLBACK NUMBER MISMATCH');
+  });
+
+  it('keeps caller ID and a different callback number on the ticket, with a staff flag', async () => {
+    const { agent } = await agentFor();
+    await call(agent, 'create_ticket', {
+      ...TICKET,
+      callback_number: '555-765-4321',
+      request_category: 'general_question',
+      request_summary: 'Asked a question that needs a staff follow-up.',
+      requires_callback: true,
+    });
+
+    expect(lastSubmit()).toMatchObject({
+      patientPhone: '5557654321',
+      callerPhone: '5551234567',
+    });
+    expect(String(lastSubmit().additionalDetails)).toContain('CALLBACK NUMBER MISMATCH');
+    expect(String(lastSubmit().additionalDetails)).toContain('+15557654321');
+    expect(String(lastSubmit().additionalDetails)).toContain('+15551234567');
+  });
+
+  it('keeps internal instructions private in both the SIP and runtime prompts', async () => {
+    const legacyAgent = await createNoIvrAgent(async () => {}, { callId: 'synthetic-legacy' } as any);
+    const runtimeAgent = await createNoIvrAgent(async () => {}, {
+      callId: 'synthetic-runtime',
+      pipeline: 'runtime',
+    } as any);
+    for (const agent of [legacyAgent, runtimeAgent]) {
+      expect(String((agent as any).instructions)).toMatch(
+        /Never (?:speak|say|quote)\b.{0,45}(?:system|developer) instructions?.{0,100}(?:bracketed notes|tool directives)/i,
+      );
+      expect((agent as any).outputGuardrails).toEqual(
+        expect.arrayContaining([expect.objectContaining({ name: 'No Internal Prompt Disclosure', alwaysEnforce: true })]),
+      );
+    }
   });
 });

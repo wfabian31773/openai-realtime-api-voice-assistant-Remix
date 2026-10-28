@@ -62,10 +62,26 @@ const NINE_ONE_ONE_TERMS = [
   "went blind",
 ];
 
+const EMERGENCY_MENTION = String.raw`\b(?:${NINE_ONE_ONE_TERMS.join("|")})\w*\b`;
+/**
+ * A denial can govern a list ("no vision loss or injury"), but cannot cross
+ * an affirmative clause ("no injury and now losing vision"). Only list
+ * connectors, symptom modifiers and other emergency mentions may intervene.
+ */
+const NEGATED_EMERGENCY_PREFIX = new RegExp(
+  String.raw`\b(?:no|not|without|denies|denied|negative for)\s+` +
+  String.raw`(?:(?:${EMERGENCY_MENTION}|\b(?:any|a|an|the|my|eye|ocular|left|right|either|both|current|new|recent|sudden|experiencing|having|experienced|sustained|signs|symptoms|evidence|exposure|of|in|to|from|and|or|nor)\b)[\s,]*)*$`,
+);
+
 export function isNineOneOneLevel(text: string | undefined): boolean {
   if (!text) return false;
-  const hay = ` ${text.toLowerCase()} `;
-  return NINE_ONE_ONE_TERMS.some((term) => hay.includes(term));
+  const hay = text.toLowerCase().replace(/[’‘]/g, "'")
+    .replace(/\b(is|are|was|were|has|have|had|does|do|did)n't\b/g, "$1 not");
+  return hay.split(/[.!?;\n]|\b(?:but|however|yet)\b/).some((clause) =>
+    [...clause.matchAll(new RegExp(EMERGENCY_MENTION, "g"))].some((hit) =>
+      !NEGATED_EMERGENCY_PREFIX.test(clause.slice(0, hit.index)),
+    ),
+  );
 }
 
 export function hasUsableOnCallName(
@@ -105,8 +121,7 @@ export function decideOnCallIdentityAsk(input: {
   if (input.callerType === "healthcare_provider") {
     return { transferNow: true, skipReason: "provider" };
   }
-  const blob = [input.reason, input.symptomsSummary].filter(Boolean).join(" ");
-  if (isNineOneOneLevel(blob)) {
+  if (isNineOneOneLevel(input.reason) || isNineOneOneLevel(input.symptomsSummary)) {
     return { transferNow: true, skipReason: "911" };
   }
   if (input.detailsDeclined) {

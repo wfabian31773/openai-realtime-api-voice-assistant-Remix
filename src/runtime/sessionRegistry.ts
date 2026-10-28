@@ -47,6 +47,8 @@ export interface CallEntry {
    * names a callSid and a token, and this is looked up from the callSid.
    */
   outbound?: { campaignKey: string; contactId: string; attemptId: string };
+  /** Marks live calls even after their ephemeral registry entry expires. */
+  liveSessionId?: string;
 }
 
 /** How long a webhook-issued entry may wait for its stream and its after-
@@ -84,6 +86,7 @@ export class CallSessionRegistry {
     callerPhone: string;
     dialedNumber: string;
     outbound?: CallEntry["outbound"];
+    liveSessionId?: string;
   }): CallEntry {
     this.sweep();
     const existing = this.entries.get(input.callSid);
@@ -98,6 +101,7 @@ export class CallSessionRegistry {
       streamStarted: false,
       outcome: null,
       ...(input.outbound ? { outbound: { ...input.outbound } } : {}),
+      ...(input.liveSessionId ? { liveSessionId: input.liveSessionId } : {}),
     };
     this.entries.set(input.callSid, entry);
     return entry;

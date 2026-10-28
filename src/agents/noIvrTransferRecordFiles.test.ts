@@ -127,6 +127,17 @@ describe('a connected transfer with no patient name still leaves its record', ()
 });
 
 describe('the record is pinned to After Hours', () => {
+  it('flags a confirmed callback that differs from caller ID on the transfer record', async () => {
+    const { agent, handoff } = await agentFor(freshSid());
+    await call(agent, 'escalate_to_human', { ...CLINICIAN, callback_number: '555-765-4321' });
+    expect(handoff).toHaveBeenCalledTimes(1);
+    const record = await recordAt(0);
+    expect(record).toMatchObject({ patientPhone: '5557654321', callerPhone: '5551234567' });
+    expect(record.additionalDetails).toContain('CALLBACK NUMBER MISMATCH');
+    expect(record.additionalDetails).toContain('+15557654321');
+    expect(record.additionalDetails).toContain('+15551234567');
+  });
+
   it('names department 8 on every connected transfer, so the app cannot classify it into Surgery', async () => {
     expect(AFTER_HOURS_DEPARTMENT_ID).toBe(8);
     const { agent } = await agentFor(freshSid());

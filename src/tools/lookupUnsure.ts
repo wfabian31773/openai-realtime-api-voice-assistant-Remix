@@ -24,12 +24,17 @@ import type { PatientScheduleContext } from "../services/scheduleLookupService";
 /** The only words the caller should hear when a lookup cannot settle. */
 export const LOOKUP_UNSURE_SAY = "Let me make sure the team has your details.";
 
-export const LOOKUP_UNSURE_FIX =
+/** Filing guidance is safe even when the lookup retry budget is exhausted. */
+export const LOOKUP_UNSURE_FILE_FIX =
   "Do NOT tell the caller they are not in the system, and do not say we have " +
   "no record of them. A schedule or visit-history match may exist under a " +
   "different spelling of their name. Say exactly: " +
   `"${LOOKUP_UNSURE_SAY}" ` +
-  "and file with the name they gave. If they confirmed the first name on " +
+  "and file with the name they gave.";
+
+/** Use only while another identity lookup is allowed. */
+export const LOOKUP_UNSURE_FIX =
+  LOOKUP_UNSURE_FILE_FIX + " If they confirmed the first name on " +
   "file, call this tool again with that chart name.";
 
 export function chartNameParts(context?: Pick<PatientScheduleContext, "patientName" | "patientData"> | null): {

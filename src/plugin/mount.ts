@@ -3,6 +3,7 @@
  * Tests never import this file — they call mountPluginApi with a MemoryPluginStore.
  */
 
+import { defaultDialerLock } from "../runtime/outbound/defaultLock";
 import type { Express } from "express";
 import { pool } from "../../server/db";
 import { agentRegistry } from "../config/agents";
@@ -69,5 +70,6 @@ export async function mountProductionPluginApi(app: Express): Promise<void> {
     agents: agentRegistry,
     fleet: createSqlFleetReader(exec),
     outboundStore,
+    liveCallLock: defaultDialerLock,
   });
 }

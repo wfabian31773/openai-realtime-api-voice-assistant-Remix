@@ -1,5 +1,10 @@
+import { appointmentReadPolicy } from '../services/appointmentReadPolicy';
+import { appointmentAccess, unavailableAppointmentAccess } from '../services/appointmentAccess';
+import { nameKey } from '../tools/verifiedIdentity';
 import { RealtimeAgent, tool } from '@openai/agents/realtime';
 import { z } from 'zod';
+import { EMAIL_FIELD_DESCRIPTION, LAST_NAME_FIELD_DESCRIPTION } from '../tools/contactCaptureGuidance';
+import { keepFieldDescriptions } from '../services/toolFieldDescriptions';
 import { getPacificTimeContext, formatPhoneLast4, formatPhoneForSpeech } from '../utils/timeAware';
 import { scheduleLookupService, PatientScheduleContext } from '../services/scheduleLookupService';
 import { withToolDirection } from '../services/toolDirection';
@@ -223,7 +228,7 @@ This phone number matches ONE person on file: first name "${pc.firstName}".
 
 - YOUR GREETING HAS ALREADY PLAYED. Do NOT greet again — no second "Hello". On the 12:20 test call the agent said the full greeting and then "Hello, am I speaking with Wayne?", which lands as two openings stacked. Go straight to the confirmation.
 - OPEN BY CONFIRMING, DO NOT ASK COLD. After your greeting, say "Am I speaking with ${pc.firstName}?" — never "Could you please tell me your first and last name?" when we already have a match. On 2026-08-01 a caller reached azul and answering-service from the same number 39 minutes apart: azul opened with his name, this line asked him to supply it from scratch and then asked for his date of birth. That is the interrogation this block exists to remove.
-- CONFIRMING A FIRST NAME DOES NOT CONFIRM A LAST NAME. Ask for the last name in their own words. If it differs from what you were told to expect, this number matched the WRONG person — use what THEY said and ignore this block from then on.
+- CONFIRMING A FIRST NAME DOES NOT CONFIRM A LAST NAME. Ask for the surname separately and have the caller spell it letter by letter. If it differs from what you were told to expect, this number matched the WRONG person — use what THEY said and ignore this block from then on.
 - STILL COLLECT THE DATE OF BIRTH, and read it back before you use it. A caller-ID match tells you nothing about a date of birth.
 - Do NOT say we recognized their number. Do NOT speak a last name first — let them say it.
 - If they say NO, or say they are calling for someone else, discard this block entirely and collect everything fresh for the ACTUAL patient.
@@ -232,7 +237,14 @@ This phone number matches ONE person on file: first name "${pc.firstName}".
   }
 
   let scheduleContextSection = '';
-  if (scheduleContext?.patientFound) {
+  if (scheduleContext?.patientFound && (scheduleContext.matchedBy !== 'name_and_dob' ||
+      scheduleContext.identity?.unique === false || scheduleContext.identityUnconfirmed)) {
+    // The reader now returns every upcoming booking. Keep candidate records
+    // out of the prompt, too; a disclosure instruction cannot gate visible data.
+    scheduleContextSection = '\nA patient candidate was found, but appointment details are withheld until identity is confirmed. ' +
+      'Collect the patient name and date of birth, then call lookup_schedule with first_name, last_name and date_of_birth. ' +
+      'Do not confirm or deny a booking before that tool returns a confirmed record.';
+  } else if (scheduleContext?.patientFound) {
     const parts: string[] = ['\n===== PATIENT CONTEXT (AUTO-RETRIEVED) ====='];
     parts.push(`Patient found in our system.`);
     
@@ -393,12 +405,12 @@ If yes, acknowledge: "I see you have a pending request from [date]. Are you call
 ⚠️ IDENTITY FIRST, RECORDS SECOND. Caller-ID is NOT identity: family members share phones and numbers get reused. NEVER speak a name, date of birth, appointment, or any record detail until the CALLER has stated their own name and date of birth on this call.
 
 IF you already have patient data from phone lookup:
-- Ask, without revealing anything: "Can I get your first and last name, please?" and then their date of birth
+- Ask one field at a time, without revealing anything: first name, surname ("May I have your last name? Please spell it letter by letter."), then date of birth
 - Silently compare their answers to the record. If they match, you already have: phone, location, provider, and possibly email — only ask for what's MISSING (usually nothing or just email)
 - If they do NOT match the record, treat this as a different person: do not use or mention the stored data; collect their details fresh
 
 IF patient NOT found in system:
-- Ask for full name (first and last)
+- Ask for first name, then ask for last name separately and have them spell it letter by letter
 - Ask for date of birth
 - Ask for callback number (if not already captured)
 - ⚠️ MANDATORY: After getting name + DOB, call lookup_schedule(first_name, last_name, date_of_birth) to find their records
@@ -592,6 +604,7 @@ ${timeContext}
 
 CALLBACK NUMBER:
 ${callbackPhoneSection}
+${appointmentReadPolicy('lookup_schedule')}
 ${precontextSection}${scheduleContextSection}
 ${callerMemorySection}`;
 }
@@ -633,11 +646,11 @@ export async function createAnsweringServiceAgent(
     agentSlug: 'answering-service',
   };
   const recordedTool: typeof tool = ((def: any) =>
-    tool({
+    keepFieldDescriptions(tool({
       ...def,
       // CP-3: the approved next line rides inside the tool result (script-listing §6).
       execute: withToolDirection('answering-service', callId, def.name, recordingExecute(timelineCtx, def.name, def.execute)),
-    })) as typeof tool;
+    }), def.parameters)) as typeof tool;
 
   console.log(`[${agentTag}] Creating agent for call:`, {
     callId,
@@ -750,8 +763,10 @@ Use this data to answer appointment questions AND for ticket creation.`,
     parameters: z.object({
       phone: z.string().optional().describe('Patient phone number (optional)'),
       first_name: z.string().optional().describe('Patient first name'),
-      last_name: z.string().optional().describe('Patient last name'),
+      last_name: z.string().optional().describe(LAST_NAME_FIELD_DESCRIPTION),
       date_of_birth: z.string().optional().describe('Date of birth in any format'),
+      provider: z.string().optional().describe('Provider the caller named for the appointment, if any.'),
+      office: z.string().optional().describe('Office the caller named for the appointment, if any.'),
     }),
     execute: async (params) => {
       console.log(`[${agentTag}] lookup_schedule called:`, {
@@ -763,6 +778,7 @@ Use this data to answer appointment questions AND for ticket creation.`,
       const TOOL_TIMEOUT_MS = 5000; // 5 second timeout for tool calls
       const emptyResult: PatientScheduleContext = {
         patientFound: false,
+        scheduleReadStatus: 'unavailable',
         upcomingAppointments: [],
         pastAppointments: [],
         totalAppointmentsFound: 0,
@@ -777,7 +793,10 @@ Use this data to answer appointment questions AND for ticket creation.`,
         // directly. No name search to garble, regardless of who is driving.
         if (callId && params.date_of_birth) {
           const { dobMatchesContext, updateLedger: ul, getLedger: gl } = await import('../services/callFactsLedger');
-          if (dobMatchesContext(callId, params.date_of_birth) === true && scheduleContext?.patientFound) {
+          if (dobMatchesContext(callId, params.date_of_birth) === true && scheduleContext?.patientFound &&
+              scheduleContext.identity?.unique !== false && !scheduleContext.identityUnconfirmed &&
+              (!params.first_name || nameKey(params.first_name) === nameKey(scheduleContext.patientData?.firstName)) &&
+              (!params.last_name || nameKey(params.last_name) === nameKey(scheduleContext.patientData?.lastName))) {
             const lf = gl(callId);
             ul(callId, {
               firstName: lf?.matchedFirstName,
@@ -787,13 +806,14 @@ Use this data to answer appointment questions AND for ticket creation.`,
             console.log(`[${agentTag}] ✓ VERIFIED via context DOB match — returning pre-loaded record for ${callId}`);
             return {
               ...scheduleContext,
+              ...appointmentAccess(scheduleContext, true, params),
               verified: true,
               note: 'Caller VERIFIED: recognized phone number + date of birth matches the record on file. Greet them by first name and proceed — do NOT ask any further identity questions.',
             };
           }
         }
 
-        if (params.phone) {
+        if (params.phone && !(params.first_name && params.last_name && params.date_of_birth)) {
           const normalizedPhone = normalizePhoneNumber(params.phone);
           result = await withTimeout(
             scheduleLookupService.lookupByPhone(normalizedPhone),
@@ -819,6 +839,11 @@ Use this data to answer appointment questions AND for ticket creation.`,
         }
         
         if (result.patientFound) {
+          const confirmed = result.matchedBy === 'name_and_dob' && result.identity?.unique !== false && !result.identityUnconfirmed;
+          if (!confirmed) return {
+            found: true, identityUnconfirmed: true,
+            ...appointmentAccess(result, false),
+          };
           const pd = result.patientData;
           return {
             found: true,
@@ -832,6 +857,7 @@ Use this data to answer appointment questions AND for ticket creation.`,
               preferredLocation: pd?.preferredLocation || null,
               preferredProvider: pd?.preferredProvider || null,
             },
+            ...appointmentAccess(result, confirmed, params),
             upcomingAppointments: result.upcomingAppointments,
             pastAppointments: result.pastAppointments.slice(0, 5),
             lastProviderSeen: result.lastProviderSeen || null,
@@ -841,14 +867,16 @@ Use this data to answer appointment questions AND for ticket creation.`,
             message: `Patient found with ${result.totalAppointmentsFound} appointment(s) in system`,
           };
         }
+        if (result.scheduleReadStatus === 'unavailable') return { found: false, ...unavailableAppointmentAccess() };
         return {
           found: false,
           message: 'No patient found matching the provided information. This may be a new patient.',
         };
       } catch (error) {
-        console.error(`[${agentTag}] lookup_schedule error:`, error);
+        console.error(`[${agentTag}] lookup_schedule error:`, error instanceof Error ? error.name : 'unknown');
         return {
           found: false,
+          ...unavailableAppointmentAccess(),
           error: 'Unable to look up schedule at this time.',
         };
       }
@@ -961,7 +989,7 @@ Use patient data from phone lookup when available - don't ask for info you alrea
       request_reason_id: z.number().describe('Request reason ID from classify_request'),
       first_name: z.string().describe('Patient first name'),
       middle_initial: z.string().optional().describe('Patient middle initial (optional)'),
-      last_name: z.string().describe('Patient last name'),
+      last_name: z.string().describe(LAST_NAME_FIELD_DESCRIPTION),
       date_of_birth: z.string().describe('Date of birth in any format'),
       callback_number: z.string().describe('Phone number for callback'),
       subject: z.string().describe('Brief summary of the request (1-2 sentences) for ticket subject line'),
@@ -971,7 +999,7 @@ Use patient data from phone lookup when available - don't ask for info you alrea
       provider_id: z.number().optional().describe('Provider ID if patient mentioned their doctor'),
       location_name: z.string().optional().describe('Office the CALLER explicitly states (e.g., "West Covina"). Do NOT use schedule/patient-history locations — those are context only, never the ticket location.'),
       provider_name: z.string().optional().describe('Doctor the CALLER explicitly names (e.g., "Dr. Logan"). Do NOT use schedule/patient-history providers — those are context only.'),
-      email: z.string().optional().describe('Patient email for confirmation'),
+      email: z.string().optional().describe(EMAIL_FIELD_DESCRIPTION),
       confirmation_type: z.enum(['text', 'email', 'phone', 'none']).optional().describe('How patient wants confirmation (text, email, phone, or none)'),
       unresolved_info: z.string().optional().describe('Set this ONLY after you have already asked and the caller genuinely cannot provide a REQUIRED field (a surgeon for Surgery, an office/location for Optical). Briefly state what is missing (e.g., "caller does not know their office"). The ticket is then still submitted with the gap flagged for a human, so the request is never lost. Do NOT set this on a first attempt — always ask the caller first.'),
     }),

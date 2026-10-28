@@ -21,6 +21,13 @@ import {
   type ConversationSlots,
 } from "../workflows";
 import { buildWorkflowDrivenPrompt, getWorkflowDirectiveForContext } from "../workflows/workflowPromptBuilder";
+import { EMAIL_FIELD_DESCRIPTION, LAST_NAME_FIELD_DESCRIPTION } from "../tools/contactCaptureGuidance";
+import { keepFieldDescriptions } from "../services/toolFieldDescriptions";
+import { EMAIL_ASK_ONCE, EMAIL_ESCAPE_NOTE, emailEscapeMarker } from "./noIvrAgent";
+import { gateRefusalsSoFar, noteGateRefusal } from "../tools/gateAttempts";
+
+const describedTool: typeof tool = ((def: any) =>
+  keepFieldDescriptions(tool(def), def.parameters)) as typeof tool;
 
 export interface NoIvrAgentV2Metadata {
   callId: string;
@@ -252,7 +259,7 @@ contact_preference, medication_name, pharmacy_name, doctor_name, location_prefer
     },
   });
 
-  const lookupScheduleTool = tool({
+  const lookupScheduleTool = describedTool({
     name: "lookup_schedule",
     description: `Look up patient appointment context using phone, name, or date of birth.
 
@@ -263,7 +270,7 @@ WHEN TO USE:
     parameters: z.object({
       phone: z.string().optional().describe("Patient phone number"),
       first_name: z.string().optional().describe("Patient first name"),
-      last_name: z.string().optional().describe("Patient last name"),
+      last_name: z.string().optional().describe(LAST_NAME_FIELD_DESCRIPTION),
       date_of_birth: z.string().optional().describe("Patient date of birth"),
     }),
     execute: async (params) => {
@@ -394,13 +401,13 @@ Call this when you make key decisions about caller type, urgency, or escalation.
     },
   });
 
-  const createTicketTool = tool({
+  const createTicketTool = describedTool({
     name: "create_ticket",
     description: `Create a ticket in the ticketing system for non-urgent after-hours requests.
 Call this ONLY when you have collected ALL required information.`,
     parameters: z.object({
       first_name: z.string().describe("Patient first name"),
-      last_name: z.string().describe("Patient last name"),
+      last_name: z.string().describe(LAST_NAME_FIELD_DESCRIPTION),
       date_of_birth: z.string().describe("Full date of birth"),
       callback_number: z.string().describe("Callback phone number (10+ digits)"),
       request_category: z.enum([
@@ -420,6 +427,7 @@ Call this ONLY when you have collected ALL required information.`,
       ]).describe("Category of request"),
       request_summary: z.string().describe("Summary of what the patient needs"),
       preferred_contact: z.enum(["phone", "text", "email"]).optional(),
+      email: z.string().optional().describe(`${EMAIL_FIELD_DESCRIPTION} Required when preferred_contact is email.`),
       doctor_name: z.string().optional(),
       location: z.string().optional(),
       requires_callback: z.boolean().optional().describe("Set to FALSE for simple confirmations"),
@@ -447,6 +455,24 @@ Call this ONLY when you have collected ALL required information.`,
         };
       }
 
+      // Same ask-once-then-file-as-phone rule as the main no-IVR lane: an
+      // email preference with no address must not lose the request.
+      const wantsEmail = params.preferred_contact === "email";
+      const emailGiven = (params.email ?? "").trim();
+      let emailEscaped = false;
+      if (wantsEmail && !emailGiven) {
+        if (gateRefusalsSoFar(metadata.callSid, "create_ticket", "email") < 1) {
+          noteGateRefusal(metadata.callSid, "create_ticket", "email");
+          return {
+            success: false,
+            validation_errors: ["email address"],
+            message: EMAIL_ASK_ONCE,
+          };
+        }
+        emailEscaped = true;
+        console.info(emailEscapeMarker(metadata.callSid ?? ""));
+      }
+
       let enrichedContext = scheduleContext;
       if (!scheduleContext?.patientFound || scheduleContext.matchedBy === "phone") {
         try {
@@ -465,9 +491,10 @@ Call this ONLY when you have collected ALL required information.`,
         }
       }
 
-      const finalSummary = requiresCallback
+      const taggedSummary = requiresCallback
         ? params.request_summary
         : `[NO CALLBACK NEEDED] ${params.request_summary}`;
+      const finalSummary = emailEscaped ? `${taggedSummary}\n${EMAIL_ESCAPE_NOTE}` : taggedSummary;
 
       const result = await SyncAgentService.createTicketFromAgentInput({
         firstName: params.first_name,
@@ -478,7 +505,8 @@ Call this ONLY when you have collected ALL required information.`,
         callbackNumber: params.callback_number,
         requestCategory: params.request_category as TriageOutcome,
         requestSummary: finalSummary,
-        preferredContact: params.preferred_contact || undefined,
+        preferredContact: emailEscaped ? "phone" : params.preferred_contact || undefined,
+        email: emailGiven || undefined,
         doctorName: params.doctor_name || enrichedContext?.lastProviderSeen || undefined,
         location: params.location || enrichedContext?.lastLocationSeen || undefined,
         callData: {

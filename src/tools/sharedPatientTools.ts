@@ -29,9 +29,12 @@
  * the HTTP surface, where the caller is not a queue.
  */
 import { registerTool, missing, type MissingFields, type ToolResult } from './registry';
+import { LAST_NAME_ASK, LAST_NAME_FIELD_DESCRIPTION } from './contactCaptureGuidance';
 import { gateRefusalsSoFar, noteGateRefusal, noteCallFact, callFactNoted } from './gateAttempts';
 import { forgetIfSameName, nameKey, rememberVerifiedIdentity, verifiedIdentityFor } from './verifiedIdentity';
-import { LOOKUP_UNSURE_FIX, LOOKUP_UNSURE_SAY, spokenFirstNameAgreesWithChart } from './lookupUnsure';
+import { LOOKUP_UNSURE_FILE_FIX, LOOKUP_UNSURE_FIX, LOOKUP_UNSURE_SAY, spokenFirstNameAgreesWithChart } from './lookupUnsure';
+import { appointmentAccess } from '../services/appointmentAccess';
+import './patientAppointments';
 
 /** Which queue is asking. Injected as call context, never a model argument. */
 export type ToolQueue = 'optical' | 'surgery';
@@ -122,7 +125,7 @@ registerTool({
   layer: 'agent',
   timeoutMs: LOOKUP_PATIENT_BUDGET_MS,
   description:
-    'Find a patient and their recent visit history. Call this as soon as you have ' +
+    'Find a patient, their recent visit history and upcoming appointments. Call this as soon as you have ' +
     'either their phone number, or their first name, last name and date of birth. ' +
     'It returns the offices and providers they have actually been seen at, which is ' +
     'how you confirm which office they mean.',
@@ -153,7 +156,7 @@ registerTool({
        */
       phone: { type: 'string', description: 'Any format. The number they are calling from is usually best.', askAs: 'What is the best phone number for you?' },
       first_name: { type: 'string', description: "Patient's first name as they said it.", askAs: 'And may I please have your first name?' },
-      last_name: { type: 'string', description: "Patient's last name as they said it.", askAs: 'May I please have your last name?' },
+      last_name: { type: 'string', description: LAST_NAME_FIELD_DESCRIPTION, askAs: LAST_NAME_ASK },
       date_of_birth: { type: 'string', description: 'Any spoken format — "March 17th 1973", "03/17/1973".', askAs: 'And may I please have your date of birth, starting with the month, then the day, then the year?' },
       /**
        * RULE ZERO 2a, and this field is the OVERRIDE rather than the primary.
@@ -515,8 +518,8 @@ registerTool({
           message: LOOKUP_UNSURE_SAY,
           fix:
             `This is identity miss number ${misses} on this call. ` +
-            LOOKUP_UNSURE_FIX +
-            ' Do NOT ask the caller for their name or date of birth again. Take the request and ' +
+            LOOKUP_UNSURE_FILE_FIX +
+            ' Do NOT call lookup_patient again. Do NOT ask the caller for their name or date of birth again. Take the request and ' +
             'file it now with the details they gave — the filing tool does not require a match.',
         };
       }
@@ -745,6 +748,7 @@ registerTool({
       patient_name: resolved.patientName,
       matched_by: resolved.matchedBy,
       identity_is_certain: certain,
+      ...appointmentAccess(resolved, certain),
       // The verdict of the carry-forward write, allow-listed in toolTimeline so
       // it is SQL rather than a console line. A fixed word from a closed set,
       // never caller data.

@@ -281,6 +281,8 @@ export interface LaneCallMetadata {
    * given. Absent on every inbound call.
    */
   readonly outbound?: OutboundContact & { campaignKey: string };
+  /** Only the owned SI Assistant direct live session supplies this. */
+  readonly directCall?: { purpose: string; name?: string };
   /**
    * On an outbound lane, a call somebody made TO it — the person ringing
    * back the number we call from (./outbound/callback.ts): who on the
@@ -386,7 +388,7 @@ export async function resolveLane(
     // The knowledge pack, placed by the binding as `## Business Facts` after
     // a five-section prompt's Role & Persona (the docs' order), or in front
     // of any other prompt (ADR-001's original arrangement).
-    instructionsPrefix: buildKnowledgePack(),
+    instructionsPrefix: metadata.directCall ? undefined : buildKnowledgePack(),
     // The pipeline's own tools, on every lane, recorded to the timeline the
     // way the lane's own are.
     runtimeTools: [
@@ -526,7 +528,7 @@ function outboundRuntimeTools(
     },
     agentSlug: slug,
   };
-  const laneTools = [...(config.outbound.tools ?? [])];
+  const laneTools = metadata.directCall ? [] : [...(config.outbound.tools ?? [])];
   if (metadata.callback) {
     return realtimeToolsFor(
       [...RUNTIME_CALLBACK_TOOLS, ...laneTools],

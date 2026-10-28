@@ -37,6 +37,37 @@ describe("isNineOneOneLevel", () => {
     expect(isNineOneOneLevel("flashes and floaters since this morning")).toBe(false);
     expect(isNineOneOneLevel("a curtain over the left eye")).toBe(false);
   });
+
+  it.each([
+    "flashes, but no vision loss or injury",
+    "floaters without bleeding, trauma or vision loss",
+    "denies any sudden vision loss, injury, or chemical exposure",
+    "no chemical splash or burns; flashes since this morning",
+    "no chemical exposure or eye injury; reports floaters",
+    "no eye injury and no bleeding",
+    "not experiencing any vision loss",
+    "hasn't lost vision and has floaters",
+    "isn’t bleeding; reports flashes",
+    "negative for trauma or injury",
+    "no signs of injury or blood in the eye",
+  ])("keeps explicitly denied emergencies on the one-ask path: %s", (text) => {
+    expect(isNineOneOneLevel(text)).toBe(false);
+  });
+
+  it.each([
+    "no injury, but sudden vision loss",
+    "denies trauma; bleeding from the eye",
+    "no vision loss. Chemical splash in the eye",
+    "no injury and now losing vision",
+    "no injury and the eye is bleeding",
+    "no vision loss but bleeding, without trauma",
+    "no vision loss or injury, but now vision loss",
+    "vision loss without injury",
+    "not sure whether this is vision loss",
+    "not only flashes but bleeding",
+  ])("still skips the ask for an affirmative emergency: %s", (text) => {
+    expect(isNineOneOneLevel(text)).toBe(true);
+  });
 });
 
 describe("decideOnCallIdentityAsk", () => {
@@ -62,6 +93,21 @@ describe("decideOnCallIdentityAsk", () => {
       reason: "Patient reports sudden vision loss after a chemical splash",
     });
     expect(d).toEqual({ transferNow: true, skipReason: "911" });
+  });
+
+  it("asks for identity when the emergency terms are denied", () => {
+    expect(decideOnCallIdentityAsk({
+      ...flashes,
+      symptomsSummary: "flashes, but no vision loss or injury",
+    })).toEqual({ transferNow: false, ask: ON_CALL_IDENTITY_ASK });
+  });
+
+  it("does not carry a denial from the reason into an affirmative symptom summary", () => {
+    expect(decideOnCallIdentityAsk({
+      ...flashes,
+      reason: "flashes, no injury",
+      symptomsSummary: "vision loss",
+    })).toEqual({ transferNow: true, skipReason: "911" });
   });
 
   it("a decline transfers anyway, without a second ask", () => {

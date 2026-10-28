@@ -156,7 +156,7 @@ describe("the Grok body is the shape xAI's Prompting Guide prescribes", () => {
       'file_tech_ticket', 'file_records_ticket', 'classify_surgery_request', 'classify_tech_request',
       'classify_optical_request', 'send_records_form', 'handoff_to_pcp', 'record_pcp_intake',
       'create_pcp_task', 'record_automated_resolution', 'transfer_call', 'end_call', 'web_search',
-      'lookup_schedule', 'check_open_tickets', 'emit_decision', 'create_ticket', 'escalate_to_human',
+      'lookup_schedule', 'check_open_tickets', 'emit_decision', 'record_answered_question', 'create_ticket', 'escalate_to_human',
       'terminate_call', 'set_spoken_language',
     ];
     for (const meta of [{ pipeline: 'runtime' }, {}]) {
@@ -194,7 +194,7 @@ const RULINGS: Array<[string, RegExp]> = [
   // must not script a promise to connect before the tool has answered.
   ['a refused escalation has already filed the ticket', /it has ALREADY filed\s*\n?\s*a ticket/],
   ['never promise a recording', /Never promise a recording/],
-  ['the full name in one question', /"What is your full name\?"/],
+  ['surname asked separately and spelled', /first name and surname in separate turns[\s\S]*spell it letter by letter/],
   ['the email funnel, once, then a phone callback', /spell\s*\n?\s*it out for me, letter by letter/],
   // The language MECHANISM (call set_spoken_language, switch only if the caller
   // switches, arguments in English) is the RUNTIME's since v77 and is asserted
@@ -202,14 +202,16 @@ const RULINGS: Array<[string, RegExp]> = [
   // legacy body still states this line's POLICY in its own words for the old
   // core; the Grok body gets the policy from `spokenLanguages` at binding.
   ['anything else before ending', /Anything else\?/],
+  ['record only when all caller needs are resolved', /record_answered_question before ending/i],
   // 2026-10-01: the operator rang the line, asked when an office opens and
   // was told "I don't want to give you the wrong time for that office". The
   // hours are the practice's own and every other lane states them.
-  ['office hours are answered with the times, never hedged', /including the office's own opening and closing time, exactly as written\s*\n?\s*there/],
   ['one identity ask before an on-call transfer', /one quick ask for name and date of birth|collect the caller's name and DOB in at most one/i],
   ['911-level skips the identity ask', /911-level emergency/],
   ['need_identity is not a refused transfer', /need_identity/],
   ['never tell them they are not found when a schedule match exists', /never tell them they are not found/i],
+  ['office hours are answered from clinic facts, never hedged', /(?:named clinic's Business Facts row.*?opening, closing and lunch hours exactly|hours printed on each office's row are the authoritative clinic hours)/s],
+  ['a fully answered question without a callback creates no ticket', /fully answered.{0,80}(?:no callback|did not ask for a callback).{0,30}(?:do not file|do not create a ticket)/is],
   ['no "is that correct?"', /DO NOT ask "Is that correct\?"|Do not ask "Is that correct\?"/],
   ['the ticket number is not read out', /(DO NOT|Do not) read (out )?the ticket number/],
   ['the technical-issue line is a fixed sentence', /I'm sorry, I'm having a technical issue on my end right now\. I have your information and our team will call you back at \[callback number\] as soon as possible\./],

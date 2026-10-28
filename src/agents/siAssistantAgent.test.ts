@@ -34,6 +34,23 @@ async function registry() {
 }
 
 describe("the SI Assistant lane", () => {
+  it("uses the direct purpose and minimal wrapper without patient-flow tools", async () => {
+    const purpose = "Ask the restaurant about a reservation tomorrow.";
+    const lane = await resolveLane("si-assistant", {
+      ...META, outbound: { ...CONTACT, campaignKey: "si-assistant" }, directCall: { purpose, name: "Test Recipient" },
+    }, { source: await registry(), env: {} });
+    expect(lane).not.toBeNull();
+    expect(lane!.agent.instructions).toContain(purpose);
+    expect(lane!.agent.instructions).toContain("on behalf of Wayne");
+    expect(lane!.agent.instructions).toContain("Be honest that you are an AI if asked");
+    expect(lane!.agent.instructions).not.toContain("Confirm who answered");
+    expect(lane!.agent.instructions).not.toContain("matching date of birth");
+    expect(lane!.agent.instructions).not.toContain("Business Facts");
+    expect(lane!.agent.toolNames).toEqual(["set_spoken_language", ...RUNTIME_OUTBOUND_TOOLS]);
+    expect(lane!.agent.toolNames).not.toContain(CONFIRM_IDENTITY_TOOL_NAME);
+    expect(lane!.agent.toolNames).not.toContain(TAKE_MESSAGE_TOOL_NAME);
+  });
+
   it("identifies as an AI assistant and never as a person", () => {
     const g = siAssistantGreeting(CONTACT);
     expect(g).toMatch(/SI Assistant/);
