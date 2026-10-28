@@ -612,9 +612,6 @@ const PROVIDER_SELF_IDENTIFICATION: RegExp[] = [
   /\bpatient (?:is |that'?s |who'?s |who is )?(?:on|in|at) (?:our|the) (?:e\.? ?r\b|emergency|unit|floor|icu|facility)/,
   /\b(?:on|in) our (?:e\.? ?r\b|emergency|unit|floor|icu)/,
   /\bour (?:physician|provider|surgeon|nurse)\b/,
-  // "This is Jane, our mutual patient needs a consultation" describes care
-  // for someone else, even though the caller introduced themselves by name.
-  /\bour mutual patients? (?:needs?|requires?)\b/,
   /\bpeer[- ]?to[- ]?peer\b/,
   // Spanish: "soy la doctora", "llamo del hospital", "nuestro paciente"
   /\bsoy (?:el |la |un |una )?(?:doctor|doctora|dr\.?|m[eé]dic[oa]|enfermer[oa])\b/,
@@ -669,6 +666,14 @@ const PATIENT_PROVIDER_ROLE_AFTER = new RegExp(
   String.raw`^'(?:s)?\s+(?:${PROVIDER_ROLE}|${OFFICE_STAFF})\b${NOT_POSSESSIVE}`,
 );
 const PATIENT_CALL_DESCRIPTION_AFTER = /^\s+(?:calls?|callbacks?|follow-?ups?|consult(?:ation)?s?|referrals?|requests?|questions?)\b/;
+// A name followed by "the mutual patient" identifies the caller only when
+// the noun phrase ends the introduction. Possessives and relative/prepositional
+// modifiers still belong to that phrase ("the mutual patient you called",
+// "the mutual patient's daughter"). Otherwise its continuation is a predicate
+// about someone else: "This is Sarah, our mutual patient has a question".
+// Check the phrase boundary rather than maintaining a list of predicate verbs.
+const PATIENT_APPOSITIVE_END_AFTER =
+  /^(?:\s*(?:[,.;:!?]|$)|'|\s+(?:i|we|you|he|she|it|they|who|whom|whose|that|which|here|there|of|from|at|in|on|for|with)\b)/;
 
 /**
  * Pure, for tests: does this caller text identify the caller as a provider?
@@ -685,9 +690,10 @@ export function callerSaysTheyAreAProvider(spoken: string | readonly string[]): 
       PROVIDER_SELF_IDENTIFICATION.some((re) => affirmed(text, re)) ||
       affirmed(text, MUTUAL_PATIENT, (before, after) => {
         if (PATIENT_PROVIDER_ROLE_AFTER.test(after) || PATIENT_CALL_DESCRIPTION_AFTER.test(after)) return true;
+        const identifiesPatientByName = PATIENT_APPOSITIVE_END_AFTER.test(after) &&
+          (PATIENT_APPOSITIVE_BEFORE.test(before) || BARE_PATIENT_APPOSITIVE_BEFORE.test(before));
         return !PATIENT_IDENTIFICATION_BEFORE.test(before) &&
-          !PATIENT_APPOSITIVE_BEFORE.test(before) &&
-          !BARE_PATIENT_APPOSITIVE_BEFORE.test(before) &&
+          !identifiesPatientByName &&
           !(PATIENT_INTRODUCTION_START.test(before) && PATIENT_APPOSITIVE_AFTER.test(after)) &&
           !PATIENT_IDENTIFICATION_AFTER.test(after);
       }) ||

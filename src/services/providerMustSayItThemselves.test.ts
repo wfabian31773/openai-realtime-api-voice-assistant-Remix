@@ -182,6 +182,81 @@ describe('mutual patient self-identification', () => {
   });
 });
 
+describe('mutual patient clauses after a provider introduction', () => {
+  it.each(
+    ['our mutual patient', 'our mutual patients', 'the mutual patient', 'a mutual patient']
+      .flatMap((patient) => [
+        'has a question about her medication',
+        'is waiting for a response',
+        'was seen yesterday',
+        'needs a consultation',
+        'requires a consultation',
+        'wants to speak to someone',
+        'called about a prescription',
+        'came in yesterday',
+        'had a question',
+        'will call tomorrow',
+        'can speak now',
+        'does need a response',
+        'did call yesterday',
+        'still has a question',
+        'has been waiting',
+        'asked about a medication',
+        'left a message',
+        'cannot come in today',
+        'never received a response',
+        "hasn't received a response",
+        "won't be coming in",
+        'usually calls in the morning',
+        'got a new prescription',
+      ].map((predicate) => `This is Sarah, ${patient} ${predicate}.`)),
+  )('preserves the separate patient clause in %s', (spoken) => {
+    expect(callerSaysTheyAreAProvider(spoken)).toBe(true);
+    for (const feed of ['core', 'runtime'] as const) {
+      releaseCallerSpeech(CALL);
+      if (feed === 'core') recordCallerSpeech(CALL, spoken);
+      else noteCallerTranscript(CALL, [`CALLER: ${spoken}`]);
+      const corroboration = corroborate(CALL, '');
+      expect(corroboration.providerStated, feed).toBe(true);
+      expect(judgeEscalation({
+        callerType: 'healthcare_provider',
+        reason: 'Provider requesting the on-call physician',
+        corroboration,
+      }), feed).toEqual({ allowed: true, basis: 'provider_or_facility' });
+    }
+  });
+
+  it.each([
+    'This is Sarah, our mutual patient has a question about her medication',
+    "I'm Sarah, our mutual patient has a question.",
+    'I am Sarah, the mutual patient was seen yesterday.',
+    'My name is Sarah Smith, a mutual patient called yesterday.',
+    'Hello, Sarah Smith, our mutual patients will call tomorrow.',
+    'Sarah, the mutual patient came in yesterday.',
+    'This is Sarah, our mutual patient has a question. This is Jane, the mutual patient.',
+    'This is Jane, the mutual patient. This is Sarah, our mutual patient has a question.',
+  ])('handles introduction and clause boundaries in %s', (spoken) => {
+    expect(callerSaysTheyAreAProvider(spoken)).toBe(true);
+  });
+
+  it.each([
+    'This is Sarah, our mutual patient.',
+    'This is Sarah, our mutual patients.',
+    'This is Sarah, the mutual patient',
+    'This is Sarah, a mutual patient.',
+    'This is Sarah, the mutual patient you called.',
+    'This is Sarah, the mutual patient who called yesterday.',
+    'This is Sarah, the mutual patient from yesterday.',
+    'This is Sarah, the mutual patient. She has a question about her medication.',
+    'This is Sarah, the mutual patient, she has a question about her medication.',
+    "It's me, the mutual patient.",
+    "I'm calling as the mutual patient.",
+    'This is Sarah, not the mutual patient has a question.',
+  ])('keeps self-identification and denied evidence excluded in %s', (spoken) => {
+    expect(callerSaysTheyAreAProvider(spoken)).toBe(false);
+  });
+});
+
 describe('patient introductions after greetings and across caller turns', () => {
   it.each([
     { turns: ["It's me, the mutual patient."] },
