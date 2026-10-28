@@ -891,8 +891,14 @@ import { callEnvironment } from "./callRecord";
  * descriptions survive the SDK conversion on answering-service and no-ivr-v2.
  * On top of v116. No migration; production impact remains unmeasured.
  */
+/**
+ * v126 — NO-IVR PROMPT TRIM (2026-10-28). Remove repeated explanations from
+ * the Grok prompt while keeping its rules; the length ratchet checks pinned
+ * daytime and overnight clocks. On top of v117; v122–v125 are on open
+ * branches. `src/agents/noIvrPromptForGrok.ts`.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v117-contact-capture-20261027";
+  "voice-runtime-v126-noivr-prompt-trim-20261028";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

@@ -83,4 +83,15 @@ describe("one stand-in across the fleet", () => {
       .join("\n");
     expect(src).not.toMatch(/'Unknown Caller'/);
   });
+
+  it("the urgent-triage auto-ticket and the failed-transfer payload do not either", () => {
+    for (const rel of ["../agents/afterHoursAgent.ts", "./urgentTransferAlert.ts"]) {
+      const src = readFileSync(join(__dirname, rel), "utf8")
+        .split("\n")
+        .filter((l) => !/^\s*(\/\/|\*)/.test(l))
+        .join("\n");
+      expect(src, rel).not.toMatch(/'Unknown Caller'/);
+      expect(src, rel).not.toMatch(/patientFirstName:\s*d\?\.patientFirstName \|\| 'Unknown'/);
+    }
+  });
 });
