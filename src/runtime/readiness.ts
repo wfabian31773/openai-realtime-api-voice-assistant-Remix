@@ -889,8 +889,14 @@ import { callEnvironment } from "./callRecord";
  * descriptions survive the SDK conversion on answering-service and no-ivr-v2.
  * On top of v116. No migration; production impact remains unmeasured.
  */
+/**
+ * v123 — CALLBACK EXTENSIONS (2026-10-28). Queue ticket tools validate and
+ * normalize the base callback number and preserve a marked extension in
+ * staff-only call notes. On top of v117. Production impact is unmeasured.
+ * `src/utils/phone.ts`, `src/tools/`.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v117-contact-capture-20261027";
+  "voice-runtime-v123-callback-extension-20261028";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

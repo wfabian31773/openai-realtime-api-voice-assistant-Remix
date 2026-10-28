@@ -86,13 +86,13 @@ describe('patientPhone is the digits, not the raw string', () => {
     expect((out as { missingFields?: string[] }).missingFields).toContain('callback_number');
   });
 
-  it('refuses a second number or an extension instead of filing a wrong one', async () => {
+  it('refuses a second number instead of filing a wrong one', async () => {
     const api = await client();
     const create = vi.spyOn(api, 'createTicket');
 
     const out = (await runTool('file_records_ticket', {
       ...BASE,
-      callback_number: '845-531-7471 ext 202',
+      callback_number: '202-555-0101 / 303-555-0102',
       request_description: 'I need a copy of my medical records',
     })) as Record<string, unknown>;
 

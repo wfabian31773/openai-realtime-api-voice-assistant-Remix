@@ -87,9 +87,9 @@ describe('patientPhone is the digits, not the raw string', () => {
     expect((out as { missingFields?: string[] }).missingFields).toContain('callback_number');
   });
 
-  it('refuses a second number or an extension instead of filing a wrong one', async () => {
+  it('refuses a second number instead of filing a wrong one', async () => {
     // The failure this ceiling exists to prevent: a raw digit count with no
-    // upper bound would have normalized a two-number or extension capture
+    // upper bound would have normalized a two-number capture
     // down to a plausible-looking (and wrong) 10 digits, filing a ticket
     // with a callback number nobody could reach. That is worse than the
     // loud 400 it replaces, and invisible in a ticket-count metric.
@@ -98,7 +98,7 @@ describe('patientPhone is the digits, not the raw string', () => {
 
     const out = (await runTool('file_surgery_ticket', {
       ...BASE,
-      callback_number: '845-531-7471 ext 202',
+      callback_number: '202-555-0101 / 303-555-0102',
       request_description: 'a question about my upcoming procedure',
     })) as Record<string, unknown>;
 

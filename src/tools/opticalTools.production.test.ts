@@ -352,9 +352,9 @@ describe('lookup_patient, on a real patient, resolved against the real roster', 
     expect((out as { missingFields?: string[] }).missingFields).toContain('callback_number');
   });
 
-  it('refuses a second number or an extension instead of filing a wrong one', async () => {
+  it('refuses a second number instead of filing a wrong one', async () => {
     // The failure this ceiling exists to prevent: a raw digit count with no
-    // upper bound would have normalized a two-number or extension capture
+    // upper bound would have normalized a two-number capture
     // down to a plausible-looking (and wrong) 10 digits, filing a ticket
     // with a callback number nobody could reach — worse than the loud 400
     // it replaces, and invisible in a ticket-count metric.
@@ -366,7 +366,7 @@ describe('lookup_patient, on a real patient, resolved against the real roster', 
       first_name: 'Wayne',
       last_name: 'Fabian',
       date_of_birth: '03/17/1973',
-      callback_number: '845-531-7471 ext 202',
+      callback_number: '202-555-0101 / 303-555-0102',
       location: 'Eastvale',
       request_description: 'my glasses broke at the hinge',
     })) as Record<string, unknown>;
