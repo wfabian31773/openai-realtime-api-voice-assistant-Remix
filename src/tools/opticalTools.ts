@@ -18,13 +18,14 @@ import { EMAIL_FIELD_DESCRIPTION, LAST_NAME_ASK, LAST_NAME_FIELD_DESCRIPTION } f
 // lookup_patient, resolve_location and check_open_tickets are registered by the
 // shared module. Importing it here is what puts them in the registry for this
 // queue — the same three definitions Surgery uses, not copies of them.
-import { str, isTwilioCallSid, normalizePhone, mostRecentAcceptable } from './sharedPatientTools';
+import { str, isTwilioCallSid, normalizePhone } from './sharedPatientTools';
 import { splitCallbackExtension } from '../utils/phone';
 import { createTicketDurable, postFailureToolResult } from '../services/durableTicketFiling';
 import { loggableLookupError } from '../services/loggableTicketingError';
 import { gateRefusalsSoFar, noteGateRefusal } from './gateAttempts';
 import { decideDobEscape, dobStatusNote, dobEscapeMarker, type DobStatus } from './dobEscape';
 import { usualOfficeFor, verifiedDobFor } from './verifiedIdentity';
+import { filterOpticalPatientLocations } from './acceptableLocation';
 
 /** This tool's own name, for the per-call gate counter. */
 const OPTICAL_FILE_TOOL = 'file_optical_ticket';
@@ -249,23 +250,10 @@ registerTool({
     );
     let validated = validatedPatientFor(callSid, first, last, dob);
     if (validated) {
-      const offices = new Map<string, Promise<string | null>>();
-      const acceptable = async (office?: string) => {
-        if (!office) return undefined;
-        if (!offices.has(office)) offices.set(office, mostRecentAcceptable([office], 'optical'));
-        return (await offices.get(office)) || undefined;
-      };
-      const [nextOffice, lastOffice, usualOffice] = await Promise.all([
-        acceptable(validated.nextAppointment?.location), acceptable(validated.lastVisit?.location),
-        acceptable(usualOfficeFor(callSid, first, last, dob)),
-      ]);
       // Apply the queue's facility rules to the payload as well as routing:
       // the receiver must not select a surgery center from carried history.
-      validated = { ...validated,
-        nextAppointment: nextOffice ? validated.nextAppointment : undefined,
-        lastVisit: lastOffice ? validated.lastVisit : undefined,
-        confirmedClinic: usualOffice,
-      };
+      validated = await filterOpticalPatientLocations({ ...validated,
+        confirmedClinic: usualOfficeFor(callSid, first, last, dob) });
     }
     const historyOffice = validated?.nextAppointment?.location || validated?.lastVisit?.location;
     const cleanLocation = sanitizeLocationName(location).value;

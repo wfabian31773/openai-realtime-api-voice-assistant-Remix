@@ -198,22 +198,12 @@ export async function runRequestSweep(
       const fields = ticketIdentityFields(record.callSid, identity.firstName, identity.lastName);
       let office = identity.usualOffice;
       if (record.slug === 'optical' && fields.validatedPatient) {
-        const { mostRecentAcceptable } = await import('../tools/acceptableLocation');
-        const patient = fields.validatedPatient;
-        const acceptable = async (location?: string) =>
-          location ? (await mostRecentAcceptable([location], 'optical')) || undefined : undefined;
-        const [nextOffice, lastOffice, usualOffice] = await Promise.all([
-          acceptable(patient.nextAppointment?.location), acceptable(patient.lastVisit?.location),
-          acceptable(patient.confirmedClinic),
-        ]);
+        const { filterOpticalPatientLocations } = await import('../tools/acceptableLocation');
         // Use the live Optical path's facility rules on carried history too:
         // the receiver prefers joined appointments over the fallback office.
-        fields.validatedPatient = { ...patient,
-          nextAppointment: nextOffice ? patient.nextAppointment : undefined,
-          lastVisit: lastOffice ? patient.lastVisit : undefined,
-          confirmedClinic: usualOffice,
-        };
-        office = nextOffice || lastOffice || usualOffice;
+        const patient = await filterOpticalPatientLocations(fields.validatedPatient);
+        fields.validatedPatient = patient;
+        office = patient.nextAppointment?.location || patient.lastVisit?.location || patient.confirmedClinic;
       }
       Object.assign(ticket, fields,
         { ...(dob ? { patientBirthYear: dob.year, patientBirthMonth: dob.month, patientBirthDay: dob.day } : {}),

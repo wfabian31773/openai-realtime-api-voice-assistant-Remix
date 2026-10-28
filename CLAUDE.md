@@ -656,12 +656,24 @@ is reading noise.
 
 ---
 
-## Current branch — PCP unclassified is floor only (2026-10-28)
+## Current branch — Identity gate (#384, 2026-10-28)
 
-This branch carries **`voice-runtime-v136-pcp-unclassified-floor-only-20261028`** (renumbered from v126), on top of `main`'s v135 (#392, `6ae60e33`); v127 is #376 and v133 is #391 on their open branches. The PCP model cannot select `unclassified_call`; the teardown
-floor still uses it when no classification was recorded. Production impact is
-unmeasured. Use this marker when verifying the branch; the v116 history below
-predates it. Surname spelling and full email confirmation reach the agent's
+This branch carries **`voice-runtime-v139-identity-gate-20261028`**, on top
+of v136 (#393, main, `9bfccda`); v137 is #391 and v138 is #376 on their
+open branches. Verified identity is carried through ticket filing and
+teardown/sweep recovery. Live Optical, answering-service Optical filing and
+Optical sweep recovery share the facility filter for carried appointments and
+offices, preventing known surgery centers from routing those Optical tickets.
+Answering-service filters secondary lookup history too and passes the filtered
+identity through simplified submission to the ticket client. Surgery still
+files without a clinic when none is known. No migration; production impact is
+unmeasured. Use v139 when verifying this branch.
+
+The v136 base (#393, main, `9bfccda`) carries
+**`voice-runtime-v136-pcp-unclassified-floor-only-20261028`** (renumbered
+from v126), on top of v135 (#392, `6ae60e33`). The PCP model cannot select
+`unclassified_call`; the teardown floor still uses it when no classification
+was recorded. The earlier branch notes below are retained as history.
 
 The v135 base (#392, `6ae60e33`) carries **`voice-runtime-v135-after-hours-dob-confirm-lookup-20261028`**, on top of `main`'s v134 (#396, `87766139`). After-hours confirms the phone-matched candidate on the date of
 birth, then uses that record for `lookup_schedule`.
@@ -2430,6 +2442,7 @@ voice-runtime-v132-callback-extension-20261028
 voice-runtime-v134-goodbye-grace-hangup-20261028
 voice-runtime-v135-after-hours-dob-confirm-lookup-20261028
 voice-runtime-v136-pcp-unclassified-floor-only-20261028
+voice-runtime-v139-identity-gate-20261028
 ```
 
 Also printed at boot as `[voice-runtime] <marker>`. Anything ending in an
@@ -2564,7 +2577,8 @@ on it is evidence about current code.
 | **v131** or earlier — NOT the date; this branch is **v132** (renumbered from v123), ABOVE `main`'s v131, which it contains; v127 is #376 on its open branch | Callback extensions are validated and kept in staff-only notes, per patient filing. No migration. |
 | **v132** or earlier — NOT the date; this branch is **v134**, ABOVE `main`'s v132 (#390, `76dd105f`), which it contains; v127 is #376 and v133 is #391 on their open branches | Goodbye grace hangup: after a completed caller/agent goodbye exchange, a 6s grace window after playback ends the call deliberately unless the caller speaks, a new response starts or a tool runs. No migration or new spoken wording. |
 | **v134** or earlier — NOT the date; v135 (renumbered from v125), now on `main` (#392, `6ae60e33`), is ABOVE `main`'s v134 (#396, `87766139`), which it contains; v127 is #376 and v133 is #391 on their open branches | After-hours confirms the phone-matched candidate on DOB, then looks up that record's schedule. No migration. |
-| **v135** or earlier — NOT the date; this branch is **v136** (renumbered from v126), ABOVE `main`'s v135 (#392, `6ae60e33`), which it contains; v127 is #376 and v133 is #391 on their open branches | The PCP model cannot choose unclassified_call; the teardown floor still files unclassified calls for a person to route. No migration. |
+| **v135** or earlier — NOT the date; v136 (renumbered from v126) is on `main` (#393, `9bfccda`), above v135 (#392, `6ae60e33`); this is #384's base | The PCP model cannot choose unclassified_call; the teardown floor still files unclassified calls for a person to route. No migration. |
+| **v136** or earlier — NOT the date; this branch is **v139** (#384), above v136 (#393, main, `9bfccda`); v137 is #391 and v138 is #376 on their open branches | Verified identity is carried through ticket filing and teardown/sweep recovery. Optical filters carried appointment and office locations using the shared facility rules; Surgery files without a clinic when none is known. No migration; production impact is unmeasured. |
 
 ### THE SURGEON CLAIM — BUILT, REVIEWED SIX TIMES, WITHDRAWN 2026-09-17
 
@@ -2651,9 +2665,16 @@ v10 (the person base and the join), v11 (the locked record, #290) and v12
 (optical's office ladder) are a CHAIN on `main`: each merged after the one
 before and brought it in, so v12 contains both.
 
-**AND THE SEQUENCE HAS TWO HOLES IN IT ON PURPOSE: v13 AND v57. v136 IS THE
-NEWEST — v136 (renumbered from v126): The PCP model cannot choose unclassified_call; the teardown floor still files unclassified calls for a person to route, on its branch ABOVE `main`'s v135, which it contains; v127 is #376 and v133 is #391 on their open branches —
-AND v135 IS WHAT `main` CARRIES, SINCE #392 MERGED 2026-10-28 (`6ae60e33`): after-hours confirms the phone-matched candidate on DOB, then looks up that record's schedule, above v134 —
+**AND THE SEQUENCE HAS TWO HOLES IN IT ON PURPOSE: v13 AND v57. v139 IS THE
+NEWEST ON #384 — verified identity carried through filing and teardown/sweep
+recovery, Optical facility filtering, and Surgery filing when its clinic is
+unknown; no migration; production impact is unmeasured. It contains v136;
+v137 is #391 and v138 is #376 on their open branches —
+AND v136 IS WHAT `main` CARRIES, SINCE #393 MERGED 2026-10-28 (`9bfccda`):
+the PCP model cannot choose unclassified_call; the teardown floor still files
+unclassified calls for a person to route, above v135 (#392, `6ae60e33`):
+after-hours confirms the phone-matched candidate on DOB, then looks up that
+record's schedule, above v134 —
 AND BEFORE THAT v134 (#396, MERGED 2026-10-28, `87766139`): the goodbye grace hangup, above v132 (#390, `76dd105f`), callback extensions validated and kept in staff-only notes, above v131 (#388, `47bc78c`), heard callers bypass the silence ladder, above v130 (#387, `3e861ad`), the PCP queue-withdrawal exemption, above v129 (#386, `08734d7`), the after-hours teardown floor, above v128 (#389, `558f288`), PCP scheduling and
 unassigned exit, above v126 (#394, `036c39e`), the no-IVR prompt trim, above
 v117; v122–v125 are on open branches. v117 is contact capture (#14), above v116. v116 carries
@@ -2924,7 +2945,9 @@ never read v57; **v58 was that next ship** — the identity probe, an instrument
 and no behaviour change (see the v56 row below for what it measures). It is no
 longer the current marker: see the paragraph beneath this one.
 
-**v135 (#392) IS WHAT `main` CARRIES (merged 2026-10-28, `6ae60e33`), AND v57,
+**v136 (#393) IS WHAT `main` CARRIES (merged 2026-10-28, `9bfccda`); #384
+carries v139 above it, while v137 is #391 and v138 is #376 on their open
+branches. AND v57,
 v59, v60, v63, v65 AND v66 ARE RETIRED RATHER THAN REUSED.** Each of the last
 five was a branch's own number while it sat below `main`, and each was given up
 the moment a merge put it there: two branches carrying one version make two

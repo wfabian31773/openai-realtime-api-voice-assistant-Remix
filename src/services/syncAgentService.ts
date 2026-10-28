@@ -1,4 +1,5 @@
 import { ticketingApiClient } from '../../server/services/ticketingApiClient';
+import type { ValidatedPatient } from '../tools/ticketIdentity';
 import { missingFieldsFromRefusal, spokenMissingFields } from './missingFieldsRefusal';
 import { loggableLookupError } from './loggableTicketingError';
 import { storage } from '../../server/storage';
@@ -605,6 +606,8 @@ export class SyncAgentService {
    * This is the preferred method for voice agents - more reliable than legacy createTicket
    */
   static async submitSimplifiedTicket(params: {
+    /** Queue-filtered identity snapshot; the shared client otherwise attaches the held record. */
+    validatedPatient?: ValidatedPatient;
     patientFullName: string;
     patientDOB: string;
     reasonForCalling: string;
@@ -796,6 +799,7 @@ export class SyncAgentService {
       const smsSafe = (t?: string) => (t ? sanitizeForSms(t).value : t);
 
       const response = await ticketingApiClient.submitTicket({
+        ...(params.validatedPatient ? { validatedPatient: params.validatedPatient } : {}),
         patientFullName: params.patientFullName,
         patientDOB: params.patientDOB,
         reasonForCalling: smsSafe(params.reasonForCalling)!,

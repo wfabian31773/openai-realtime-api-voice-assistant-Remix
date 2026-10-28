@@ -1,4 +1,4 @@
-import { mostRecentAcceptable } from '../tools/acceptableLocation';
+import { mostRecentAcceptable, filterOpticalPatientLocations } from '../tools/acceptableLocation';
 import { nameKey, rememberVerifiedIdentity } from '../tools/verifiedIdentity';
 import { joinedAppointments, prepareTicketIdentity, validatedPatientFor } from '../tools/ticketIdentity';
 import { appointmentReadPolicy } from '../services/appointmentReadPolicy';
@@ -1026,15 +1026,17 @@ Use patient data from phone lookup when available - don't ask for info you alrea
       if (prepared.missing) {
         return { success: false, missingFields: [prepared.missing], message: prepared.message };
       }
+      let validated = validatedPatientFor(callSid, String(prepared.input.first_name),
+        String(prepared.input.last_name), String(prepared.input.date_of_birth));
+      const heldOffice = validated?.nextAppointment?.location || validated?.lastVisit?.location || validated?.confirmedClinic;
+      if (params.department_id === 1 && validated) validated = await filterOpticalPatientLocations(validated);
       if (params.department_id === 1 && !locationName) {
-        const held = validatedPatientFor(callSid, String(prepared.input.first_name),
-          String(prepared.input.last_name), String(prepared.input.date_of_birth));
-        // The general identity gate can carry a surgery center. Apply Optical's
-        // facility rules before this inferred office reaches the routing field.
-        prepared.input.location = await mostRecentAcceptable([
-          held?.nextAppointment?.location, held?.lastVisit?.location,
-          held?.confirmedClinic || String(prepared.input.location || ''),
-        ].filter((office): office is string => Boolean(office)), 'optical') || '';
+        // The prepared fallback may be a caller-confirmed clinic. Preserve it
+        // only when it did not come from the held history we just filtered.
+        prepared.input.location = validated?.nextAppointment?.location || validated?.lastVisit?.location ||
+          validated?.confirmedClinic || (!heldOffice
+            ? await mostRecentAcceptable([String(prepared.input.location || '')].filter(Boolean), 'optical')
+            : '') || '';
       }
       params = { ...params, first_name: String(prepared.input.first_name ?? ''), last_name: String(prepared.input.last_name ?? ''),
         date_of_birth: String(prepared.input.date_of_birth ?? ''), location_name: String(prepared.input.location ?? '') };
@@ -1134,6 +1136,18 @@ Use patient data from phone lookup when available - don't ask for info you alrea
         }
       }
 
+      // A secondary lookup can establish identity during filing. Filter that
+      // snapshot too, and pass it explicitly so the client cannot reattach raw
+      // held history. Keep the held record intact for later Surgery requests.
+      if (!lockedIdentity) {
+        validated = validatedPatientFor(callSid, params.first_name, params.last_name, params.date_of_birth);
+        if (params.department_id === 1 && validated) {
+          validated = await filterOpticalPatientLocations(validated);
+          if (!params.location_name) params.location_name = validated.nextAppointment?.location ||
+            validated.lastVisit?.location || validated.confirmedClinic || '';
+        }
+      }
+
       const callbackNormalized = normalizePhoneNumber(params.callback_number);
       const departmentName = params.department_id === 1 ? 'Optical Support' :
                             params.department_id === 2 ? 'Surgery Coordination' :
@@ -1146,8 +1160,10 @@ Use patient data from phone lookup when available - don't ask for info you alrea
       if (!resolvedLocationId && params.location_name) {
         resolvedLocationId = findLocationByName(params.location_name);
       }
-      if (!resolvedLocationId && enrichedContext?.lastLocationSeen) {
-        resolvedLocationId = findLocationByName(enrichedContext.lastLocationSeen);
+      const lastLocationSeen = params.department_id === 1
+        ? validated?.lastVisit?.location : enrichedContext?.lastLocationSeen;
+      if (!resolvedLocationId && lastLocationSeen) {
+        resolvedLocationId = findLocationByName(lastLocationSeen);
       }
       
       let resolvedProviderId = params.provider_id;
@@ -1166,18 +1182,20 @@ Use patient data from phone lookup when available - don't ask for info you alrea
       // Build schedule context section for ticket if we have enriched data
       const scheduleSection: string[] = [];
       if (enrichedContext?.patientFound) {
+        const lastVisitDate = params.department_id === 1 ? validated?.lastVisit?.date : enrichedContext.lastVisitDate;
+        const lastProviderSeen = params.department_id === 1 ? validated?.lastVisit?.provider : enrichedContext.lastProviderSeen;
+        const nextAppt = params.department_id === 1 ? validated?.nextAppointment : enrichedContext.upcomingAppointments?.[0];
         scheduleSection.push('--- Patient History (from schedule) ---');
-        if (enrichedContext.lastVisitDate) {
-          scheduleSection.push(`Last Visit: ${enrichedContext.lastVisitDate}`);
+        if (lastVisitDate) {
+          scheduleSection.push(`Last Visit: ${lastVisitDate}`);
         }
-        if (enrichedContext.lastProviderSeen) {
-          scheduleSection.push(`Last Provider: ${enrichedContext.lastProviderSeen}`);
+        if (lastProviderSeen) {
+          scheduleSection.push(`Last Provider: ${lastProviderSeen}`);
         }
-        if (enrichedContext.lastLocationSeen) {
-          scheduleSection.push(`Last Location: ${enrichedContext.lastLocationSeen}`);
+        if (lastLocationSeen) {
+          scheduleSection.push(`Last Location: ${lastLocationSeen}`);
         }
-        if (enrichedContext.upcomingAppointments?.length > 0) {
-          const nextAppt = enrichedContext.upcomingAppointments[0];
+        if (nextAppt) {
           scheduleSection.push(`Next Appointment: ${nextAppt.date} at ${nextAppt.location} with ${nextAppt.provider}`);
         }
         if (enrichedContext.patientData?.email) {
@@ -1222,6 +1240,7 @@ Use patient data from phone lookup when available - don't ask for info you alrea
 
         // Use NEW SIMPLIFIED ENDPOINT - more reliable, all mapping done server-side
         const result = await SyncAgentService.submitSimplifiedTicket({
+          ...(validated ? { validatedPatient: validated } : {}),
           patientFullName,
           patientDOB: params.date_of_birth, // Any format - API handles parsing
           reasonForCalling: fullDescription, // Full description becomes the reason

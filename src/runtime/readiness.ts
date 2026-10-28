@@ -951,10 +951,20 @@ import { callEnvironment } from "./callRecord";
 /**
  * v136 (renumbered from v126) — PCP UNCLASSIFIED IS FLOOR ONLY (2026-10-28). The PCP agent cannot
  * choose unclassified_call in its intake tool; the after-hangup floor still
- * files unclassified calls for a person to route. On top of v135 (#392, main, 6ae60e33); v127 is #376 and v133 is #391 on their open branches. No migration; production impact remains unmeasured.
+ * files unclassified calls for a person to route. Merged to main as #393
+ * (9bfccda), on top of v135 (#392, 6ae60e33); this is #384's base.
+ * No migration; production impact remains unmeasured.
+ */
+/**
+ * v139 — IDENTITY GATE (#384, 2026-10-28). Verified identity is carried
+ * through ticket filing and teardown/sweep recovery. Optical filters carried
+ * appointment and office locations using the shared facility rules; Surgery
+ * files without a clinic when none is known. On top of v136 (#393, main,
+ * 9bfccda); v137 is #391 and v138 is #376 on their open branches.
+ * No migration; production impact is unmeasured.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v136-pcp-unclassified-floor-only-20261028";
+  "voice-runtime-v139-identity-gate-20261028";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

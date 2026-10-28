@@ -4,6 +4,8 @@
  * (see toolModulesAreImportedOneWay.test.ts).
  */
 
+import type { ValidatedPatient } from './ticketIdentity';
+
 /** Which queue is asking. Injected as call context, never a model argument. */
 export type ToolQueue = 'optical' | 'surgery';
 
@@ -19,6 +21,26 @@ export function acceptsFacility(queue: ToolQueue | undefined, kind: string | nul
   // clinics for consults, measurements and post-op. Both are correct.
   if (queue === 'surgery') return kind === 'clinic' || kind === 'surgery_center';
   return true;
+}
+
+/** Filter a ticket's carried history without changing the held identity for other queues. */
+export async function filterOpticalPatientLocations(patient: ValidatedPatient): Promise<ValidatedPatient> {
+  const offices = new Map<string, Promise<string | null>>();
+  const acceptable = async (office?: string) => {
+    if (!office) return undefined;
+    if (!offices.has(office)) offices.set(office, mostRecentAcceptable([office], 'optical'));
+    return (await offices.get(office)) || undefined;
+  };
+  const [nextOffice, lastOffice, usualOffice] = await Promise.all([
+    acceptable(patient.nextAppointment?.location), acceptable(patient.lastVisit?.location),
+    acceptable(patient.confirmedClinic),
+  ]);
+  // The receiver prefers joined appointments over the fallback office.
+  return { ...patient,
+    nextAppointment: nextOffice ? patient.nextAppointment : undefined,
+    lastVisit: lastOffice ? patient.lastVisit : undefined,
+    confirmedClinic: usualOffice,
+  };
 }
 
 /**

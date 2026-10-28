@@ -17,7 +17,11 @@ vi.mock('@openai/agents/realtime', () => ({
 
 const h = vi.hoisted(() => ({ lookup: vi.fn(), phone: vi.fn(), submit: vi.fn() }));
 vi.mock('../../server/db', () => ({ db: {} }));
-vi.mock('../../server/storage', () => ({ storage: { updateCallLog: async () => {} } }));
+vi.mock('../../server/storage', () => ({ storage: {
+  updateCallLog: async () => {},
+  claimTicketCreation: async () => ({ claimed: true }),
+  releaseTicketCreationLock: async () => {},
+} }));
 vi.mock('../services/toolTimeline', () => ({ recordingExecute: (_ctx: unknown, _name: string, execute: unknown) => execute }));
 vi.mock('../services/callerMemoryService', () => ({ CallerMemoryService: {
   getInstance: () => ({ getCallerMemory: async () => null }),
@@ -26,17 +30,11 @@ vi.mock('../services/scheduleLookupService', () => ({
   scheduleLookupService: { lookupByNameAndDOB: h.lookup, lookupByPhone: h.phone },
 }));
 vi.mock('../services/syncAgentService', () => ({ SyncAgentService: { submitSimplifiedTicket: h.submit } }));
-vi.mock('../services/consoleDirectory', () => ({
-  isDirectoryConfigured: () => true,
-  lookupLocation: async (name: string) => ({
-    canonical: name,
-    facilityKind: name === 'Synthetic Surgery Center' ? 'surgery_center'
-      : name === 'Synthetic Virtual Visits' ? 'virtual' : 'clinic',
-  }),
-}));
 import { createAnsweringServiceAgent } from './answeringServiceAgent';
-import { resetVerifiedIdentities } from '../tools/verifiedIdentity';
+import { rememberConfirmedClinic, rememberVerifiedIdentity, resetVerifiedIdentities } from '../tools/verifiedIdentity';
 import { validatedPatientFor } from '../tools/ticketIdentity';
+import { ticketingApiClient } from '../../server/services/ticketingApiClient';
+import * as directory from '../services/consoleDirectory';
 
 const sid = 'CA' + 'e'.repeat(32);
 const args = { first_name: 'Alex', last_name: 'Synthetic', date_of_birth: '1970-01-02' };
@@ -46,7 +44,15 @@ const record = { patientFound: true, matchedBy: 'name_and_dob', identity: { uniq
   pastAppointments: [], totalAppointmentsFound: 1 };
 
 beforeEach(() => {
+  vi.restoreAllMocks();
   vi.clearAllMocks();
+  vi.spyOn(directory, 'isDirectoryConfigured').mockReturnValue(true);
+  vi.spyOn(directory, 'lookupProvider').mockImplementation(async (name) => ({ canonical: name, key: name.toLowerCase(), volume90d: 1 }));
+  vi.spyOn(directory, 'lookupLocation').mockImplementation(async (name) => ({
+    canonical: name, key: name.toLowerCase(), volume90d: 1,
+    facilityKind: name === 'Synthetic Surgery Center' ? 'surgery_center'
+      : name === 'Synthetic Virtual Visits' ? 'virtual' : 'clinic',
+  }));
   resetVerifiedIdentities();
   h.lookup.mockResolvedValue(record);
   h.phone.mockResolvedValue({ ...record, matchedBy: 'phone', identityUnconfirmed: true });
@@ -55,6 +61,14 @@ beforeEach(() => {
 async function invoke(agent: any, name: string, input: Record<string, unknown>) {
   const raw = await agent.tools.find((t: any) => t.name === name).invoke({}, JSON.stringify(input));
   return typeof raw === 'string' ? JSON.parse(raw) : raw;
+}
+
+async function captureHttpSubmission() {
+  const { SyncAgentService } = await vi.importActual<typeof import('../services/syncAgentService')>('../services/syncAgentService');
+  h.submit.mockImplementation((params) => SyncAgentService.submitSimplifiedTicket(params));
+  vi.spyOn(ticketingApiClient as any, 'warmUpIfStale').mockResolvedValue(true);
+  return vi.spyOn(ticketingApiClient as any, 'makeRequest')
+    .mockResolvedValue({ success: true, ticketNumber: 'VA-SYNTHETIC' });
 }
 
 const opticalRequest = {
@@ -156,6 +170,19 @@ it('Optical preserves an explicit clinic name over the location ID and held hist
   expect(h.submit).toHaveBeenCalledWith(expect.objectContaining({ locationOfLastVisit: 'Synthetic Caller Clinic' }));
 });
 
+it('Optical preserves a caller-confirmed clinic when the held identity has no office history', async () => {
+  h.lookup.mockResolvedValue({ ...record, upcomingAppointments: [], totalAppointmentsFound: 0 });
+  const agent = await createAnsweringServiceAgent(async () => {}, { callSid: sid });
+  await invoke(agent, 'lookup_schedule', args);
+  rememberConfirmedClinic(sid, 'Synthetic Caller Clinic');
+  const send = await captureHttpSubmission();
+
+  expect(await invoke(agent, 'create_ticket', opticalRequest)).toMatchObject({ success: true });
+  expect(send).toHaveBeenCalledOnce();
+  expect(send.mock.calls[0][2]).toMatchObject({ locationOfLastVisit: 'Synthetic Caller Clinic',
+    validatedPatient: { status: 'validated', callSid: sid } });
+});
+
 it.each([false, true])('Optical files a missing-clinic request for human review after asking (held identity: %s)', async (held) => {
   h.lookup.mockResolvedValue({ ...record, upcomingAppointments: [], totalAppointmentsFound: 0 });
   const agent = await createAnsweringServiceAgent(async () => {}, { callSid: sid });
@@ -235,4 +262,99 @@ it.each([
   const agent = await createAnsweringServiceAgent(async () => {}, { callSid: sid });
   await invoke(agent, 'create_ticket', { ...opticalRequest, location_name: 'Synthetic Clinic' });
   expect(validatedPatientFor(sid)).toBeUndefined();
+});
+
+// Drive the real simplified service and HTTP client, intercepting only their
+// final request. A handler-only spy misses automatic held-identity attachment.
+it.each([
+  ['Synthetic Surgery Center', 'Synthetic Last Clinic', 'Synthetic Usual Clinic', undefined],
+  ['Synthetic Next Clinic', 'Synthetic Surgery Center', 'Synthetic Usual Clinic', undefined],
+  ['Synthetic Surgery Center', 'Synthetic Virtual Visits', 'Synthetic Usual Clinic', undefined],
+  ['Synthetic Surgery Center', 'Synthetic Surgery Center', 'Synthetic Virtual Visits', undefined],
+  [undefined, undefined, 'Synthetic Surgery Center', undefined],
+  [undefined, undefined, 'Synthetic Usual Clinic', undefined],
+  ['Synthetic Surgery Center', 'Synthetic Surgery Center', 'Synthetic Surgery Center', 'Synthetic Caller Clinic'],
+  ['Synthetic Surgery Center', 'Synthetic Last Clinic', 'Synthetic Surgery Center', 'id-only'],
+  ['Synthetic Next Clinic', 'Synthetic Last Clinic', 'Synthetic Usual Clinic', undefined],
+])('filters held Optical history through the HTTP boundary: %s / %s / %s / %s', async (nextOffice, lastOffice, usualOffice, explicit) => {
+  const nextAppointment = nextOffice ? { date: '2099-01-01', location: nextOffice } : undefined;
+  const lastVisit = lastOffice ? { date: '2020-01-01', location: lastOffice } : undefined;
+  h.lookup.mockResolvedValue({ ...record,
+    upcomingAppointments: nextOffice ? [{ isoDate: '2099-01-01', location: nextOffice }] : [],
+    pastAppointments: lastOffice ? [{ isoDate: '2020-01-01', location: lastOffice }] : [],
+    lastLocationSeen: usualOffice,
+  });
+  const agent = await createAnsweringServiceAgent(async () => {}, { callSid: sid });
+  await invoke(agent, 'lookup_schedule', args);
+  rememberVerifiedIdentity(sid, { ...record.patientData, certain: true, personId: 'synthetic-person',
+    nextAppointment, lastVisit, usualOffice });
+  const held = validatedPatientFor(sid);
+  const send = await captureHttpSubmission();
+
+  expect(await invoke(agent, 'create_ticket', { ...opticalRequest,
+    ...(explicit === 'id-only' ? { location_id: 5 } : { location_name: explicit }),
+    unresolved_info: 'Asked; caller cannot provide another clinic',
+  })).toMatchObject({ success: true });
+
+  expect(send).toHaveBeenCalledOnce();
+  const payload = send.mock.calls[0][2] as any;
+  const acceptable = (office?: string) => office && !['Synthetic Surgery Center', 'Synthetic Virtual Visits'].includes(office) ? office : undefined;
+  expect(payload.validatedPatient).toMatchObject({ status: 'validated', callSid: sid,
+    personId: 'synthetic-person', firstName: 'Alex', lastName: 'Synthetic', dateOfBirth: '1970-01-02' });
+  expect(payload.validatedPatient.nextAppointment).toEqual(acceptable(nextOffice) ? nextAppointment : undefined);
+  expect(payload.validatedPatient.lastVisit).toEqual(acceptable(lastOffice) ? lastVisit : undefined);
+  expect(payload.validatedPatient.confirmedClinic).toBe(acceptable(usualOffice));
+  expect(payload.locationOfLastVisit).toBe(explicit === 'id-only' ? 'Eastvale' : explicit ||
+    acceptable(nextOffice) || acceptable(lastOffice) || acceptable(usualOffice));
+  expect(JSON.stringify(payload)).not.toMatch(/Synthetic Surgery Center|Synthetic Virtual Visits/);
+  expect(validatedPatientFor(sid)).toEqual(held);
+  expect(h.lookup).toHaveBeenCalledTimes(1);
+});
+
+it.each([
+  [false, 'Synthetic Virtual Visits'],
+  [true, 'Synthetic Virtual Visits'],
+  [false, 'Synthetic Last Clinic'],
+  [true, 'Synthetic Last Clinic'],
+])('filters a newly verified secondary Optical identity through the HTTP boundary (clinic known: %s, last visit: %s)', async (clinicKnown, lastOffice) => {
+  h.lookup.mockResolvedValue({ ...record,
+    upcomingAppointments: [{ isoDate: '2099-01-01', location: 'Synthetic Surgery Center' }],
+    pastAppointments: [{ isoDate: '2020-01-01', location: lastOffice }],
+    lastLocationSeen: 'Synthetic Surgery Center',
+  });
+  const send = await captureHttpSubmission();
+  const agent = await createAnsweringServiceAgent(async () => {}, { callSid: sid });
+  expect(await invoke(agent, 'create_ticket', { ...opticalRequest,
+    ...(clinicKnown ? { location_name: 'Synthetic Caller Clinic' }
+      : { unresolved_info: 'Asked; caller cannot provide a clinic' }),
+  })).toMatchObject({ success: true });
+
+  expect(send).toHaveBeenCalledOnce();
+  const payload = send.mock.calls[0][2] as any;
+  expect(payload.validatedPatient).toMatchObject({ status: 'validated', callSid: sid,
+    firstName: 'Alex', lastName: 'Synthetic', dateOfBirth: '1970-01-02' });
+  expect(payload.validatedPatient.nextAppointment).toBeUndefined();
+  expect(payload.validatedPatient.lastVisit).toEqual(lastOffice === 'Synthetic Last Clinic'
+    ? { date: '2020-01-01', location: lastOffice } : undefined);
+  expect(payload.validatedPatient.confirmedClinic).toBeUndefined();
+  expect(payload.locationOfLastVisit).toBe(clinicKnown ? 'Synthetic Caller Clinic'
+    : lastOffice === 'Synthetic Last Clinic' ? lastOffice : undefined);
+  expect(JSON.stringify(payload)).not.toMatch(/Synthetic Surgery Center|Synthetic Virtual Visits/);
+  expect(h.lookup).toHaveBeenCalledTimes(1);
+});
+
+it.each([false, true])('Surgery files without asking for an unknown clinic through the HTTP boundary (held identity: %s)', async (held) => {
+  h.lookup.mockResolvedValue({ ...record, upcomingAppointments: [], totalAppointmentsFound: 0 });
+  const agent = await createAnsweringServiceAgent(async () => {}, { callSid: sid });
+  if (held) await invoke(agent, 'lookup_schedule', args);
+  const send = await captureHttpSubmission();
+
+  expect(await invoke(agent, 'create_ticket', { ...opticalRequest,
+    department_id: 2, provider_name: 'Synthetic Surgeon',
+  })).toMatchObject({ success: true });
+  expect(send).toHaveBeenCalledOnce();
+  const payload = send.mock.calls[0][2] as any;
+  expect(payload.locationOfLastVisit).toBeUndefined();
+  expect(payload.validatedPatient).toMatchObject({ status: 'validated', callSid: sid });
+  expect(h.lookup).toHaveBeenCalledTimes(1);
 });
