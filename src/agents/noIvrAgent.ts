@@ -148,6 +148,41 @@ function nameMatchesCandidate(supplied: string, onFile: string): boolean {
   return Boolean(given && candidate && given === candidate);
 }
 
+/** Optimal-string-alignment distance: insertions, deletions, substitutions
+ * and adjacent transpositions ("Exampel" -> "Example" is 1). */
+function nameEditDistance(a: string, b: string): number {
+  const d: number[][] = Array.from({ length: a.length + 1 }, (_, i) =>
+    Array.from({ length: b.length + 1 }, (_, j) => (i === 0 ? j : j === 0 ? i : 0)));
+  for (let i = 1; i <= a.length; i++) {
+    for (let j = 1; j <= b.length; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + cost);
+      if (i > 1 && j > 1 && a[i - 1] === b[j - 2] && a[i - 2] === b[j - 1]) {
+        d[i][j] = Math.min(d[i][j], d[i - 2][j - 2] + 1);
+      }
+    }
+  }
+  return d[a.length][b.length];
+}
+
+/**
+ * Wayne's decision on #392 (2026-10-28): the VA-76221 chart-name retry may
+ * correct a LIMITED misspelling of the last name (the first name must match
+ * exactly, as must the DOB). Conservative: same first
+ * letter, names of 5+ letters, distance <= 1 (<= 2 from 9 letters). Short or
+ * clearly different surnames never qualify.
+ */
+export function lastNameCloseToChart(spoken: string, onFile: string): boolean {
+  const norm = (n: string) => n.trim().toLowerCase().replace(/[^a-z]/g, '');
+  const a = norm(spoken);
+  const b = norm(onFile);
+  if (!a || !b) return false;
+  if (a === b) return true;
+  const shorter = Math.min(a.length, b.length);
+  if (shorter < 5 || a[0] !== b[0]) return false;
+  return nameEditDistance(a, b) <= (shorter >= 9 ? 2 : 1);
+}
+
 function callbackMismatchStaffNote(callbackNumber: string, callerId?: string): string | null {
   if (!callerId) return null;
   const callbackDigits = normalizePhoneNumber(callbackNumber);
@@ -1438,12 +1473,23 @@ is not an identity. Confirm the name and date of birth, then call again with the
            * The phone-loaded schedule already holds the name staff will see.
            * Re-run with that name when the spoken first name agrees; never
            * tell the caller they are not found when visit history is on file.
+           * Privacy (#392, Wayne's decision 2026-10-28): only when the
+           * phone-matched patient's DOB matches AND the spoken last name is a
+           * close misspelling of the chart's (`lastNameCloseToChart`); a
+           * clearly different name keeps the caller's supplied identity.
            */
-          if (!result.patientFound) {
+          if (!result.patientFound && candidateDob && givenDob &&
+            candidateDob.year === givenDob.year && candidateDob.month === givenDob.month &&
+            candidateDob.day === givenDob.day && candidate?.firstName?.trim() &&
+            nameMatchesCandidate(params.first_name, candidate.firstName) &&
+            candidate.lastNameOnFile?.trim() &&
+            lastNameCloseToChart(params.last_name, candidate.lastNameOnFile)) {
             const chart = chartNameParts(scheduleContext);
             if (
               chart.first &&
               chart.last &&
+              nameMatchesCandidate(params.first_name, chart.first) &&
+              lastNameCloseToChart(params.last_name, chart.last) &&
               spokenFirstNameAgreesWithChart(params.first_name, chart.first) &&
               (chart.last.toLowerCase() !== params.last_name.trim().toLowerCase() ||
                 chart.first.toLowerCase() !== params.first_name.trim().toLowerCase())

@@ -279,7 +279,6 @@ describe.each([
     ['Zoldo', 'Quixote'],
     ['Zelda', 'Quxxota'],
     ['Zeldah', 'Quixote'],
-    ['Zelda', 'Quixotte'],
     ['Zeldah', 'Quixotte'],
     ['Zeld', 'Quixot'],
     ['Zeldo', 'Quixota'],
@@ -295,6 +294,18 @@ describe.each([
     expect(result.found).toBe(false);
     expect(result).not.toHaveProperty('upcomingAppointments');
     expect(JSON.stringify(result)).not.toMatch(/Quixote|1958|Zebrastripe|Testville|2041-12-31|3:10 PM/);
+  });
+
+  // Wayne's decision on #392 (2026-10-28): a close misspelling of the last
+  // name, with the exact first name and a matching DOB, may use main's
+  // VA-76221 chart-name retry. Formerly in the keeps-identity list above.
+  it('a near-misspelled last name with the exact first name and DOB retries with the chart name', async () => {
+    const agent = await createNoIvrAgent(async () => {}, { ...RECOGNISED_META, ...pipeline });
+    await call(agent, 'lookup_schedule', {
+      first_name: 'Zelda', last_name: 'Quixotte', date_of_birth: SPOKEN_IDENTITY.date_of_birth,
+    });
+    expect(h.lookupByNameAndDOB).toHaveBeenNthCalledWith(1, 'Zelda', 'Quixotte', '1958-01-04');
+    expect(h.lookupByNameAndDOB).toHaveBeenNthCalledWith(2, 'Zelda', 'Quixote', '1958-01-04');
   });
 
   it('returns the other household member when their supplied name and shared DOB match', async () => {
