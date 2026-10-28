@@ -44,6 +44,17 @@ import { namesADocument, scheduledOnlyByAnExamName, EXAM_NAME_CUES, SCHEDULING }
 import { resetGateAttempts } from './gateAttempts';
 import { resetVerifiedIdentities } from './verifiedIdentity';
 
+vi.mock('../../server/db', () => ({ db: {} }));
+vi.mock('../services/ticketOutboxService', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../services/ticketOutboxService')>();
+  return {
+    ...actual,
+    TicketOutboxService: {
+      writeToOutbox: vi.fn(async () => { throw new Error('synthetic outbox outage'); }),
+    },
+  };
+});
+
 const MEDICAL_RECORDS = 16;
 const HVA_HUB = 9;
 
@@ -216,6 +227,7 @@ describe('a third party\'s ordinary "note", "report" or "recorded line" is not a
     'for the record, the patient needs to reschedule the eye exam',
   ]) {
     it(`"${words}" still reaches the HVA Hub`, async () => {
+      expect(namesADocument(words), 'ordinary speech must not count as a document').toBe(false);
       const app = await fakeApp();
       const r = (await runTool('file_records_ticket', {
         ...NAMELESS_THIRD_PARTY,
@@ -256,6 +268,13 @@ describe('a third party who names a document AND asks to schedule is scheduling 
     // it is not bound to the document, so the request is not held (head 48dde27).
     ['we have the chart notes and need to book an eye exam', 146],
     ['we have the chart notes and want to arrange a dilated exam', 146],
+    // The exam name belongs to the report; the appointment ask is separate
+    // and does not itself match a SCHEDULING cue.
+    ['we received the eye exam report and need to set up a follow-up visit', 146],
+    ['we received the eye exam report and want to arrange another office visit', 146],
+    ['we received the eye exam report and need to book a follow-up appointment', 146],
+    ['we received the eye exam report; the patient needs a return visit', 146],
+    ['we would like another visit for the patient. We received the eye exam report', 146],
   ] as const) {
     it(`"${words}" reaches the HVA Hub (reason ${reason})`, async () => {
       const app = await fakeApp();
@@ -292,12 +311,16 @@ describe('a third party who names a document AND asks to schedule is scheduling 
       'a copy of the dilated exam',
       'the eye exam notes from last month please',
       'need the results of the most recent eye exam',
+      'please send the eye exam report from the follow-up visit',
+      'we need the follow-up visit report and the eye exam report',
     ]) expect(scheduledOnlyByAnExamName(bound), bound).toBe(true);
     for (const loose of [
       'we have the chart notes and need to book an eye exam',
       'the report came in; the patient is due for an eye exam',
       // bound once, loose once: the loose one is an ask
       'we have the eye exam report and the patient wants an eye exam',
+      'we received the eye exam report and need to set up a follow-up visit',
+      'we received the eye exam report and want to arrange another office visit',
     ]) expect(scheduledOnlyByAnExamName(loose), loose).toBe(false);
   });
 });

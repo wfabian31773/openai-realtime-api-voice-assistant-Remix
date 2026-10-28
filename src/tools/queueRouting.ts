@@ -321,7 +321,10 @@ export function scheduledOnlyByAnExamName(text: string): boolean {
   const t = fold(text);
   const names = new Set(EXAM_NAME_CUES.map(fold));
   const fired = SCHEDULING.flatMap((s) => s.cues).map(fold).filter((c) => t.includes(c));
-  return fired.length > 0 && fired.every((c) => names.has(c)) && everyExamNameIsTheDocuments(t);
+  return (
+    fired.length > 0 && fired.every((c) => names.has(c)) &&
+    everyExamNameIsTheDocuments(t) && !hasSeparateAppointmentAsk(t)
+  );
 }
 
 /**
@@ -337,7 +340,9 @@ export function scheduledOnlyByAnExamName(text: string): boolean {
  * OF the dilated exam" — and anything phrased otherwise, an unknown verb
  * included, falls back to the Hub, which is what this line did before v118.
  * A miss here costs the corpus fix on an odd phrasing; it can no longer keep an
- * appointment request out of the Hub.
+ * appointment request out of the Hub. Binding alone does not establish that
+ * the whole request is document-only: a caller may also ask to arrange a visit
+ * without naming the exam again.
  */
 const BOUND_AFTER = /^\s+(?:reports?|notes?|records?|results?|summary|findings|documentation|informe|informes|notas|resultados)\b/;
 const BOUND_BEFORE =
@@ -354,6 +359,21 @@ function everyExamNameIsTheDocuments(folded: string): boolean {
     }
   }
   return true;
+}
+
+/**
+ * Preserve an existing redirect when an appointment ask is phrased separately
+ * from the exam report, e.g. "received the eye exam report and need to set up
+ * a follow-up visit". These phrases need not match SCHEDULING themselves.
+ * A request for a "follow-up visit report" is still a document request.
+ */
+const APPOINTMENT_ASK = /\b(?:book(?:ing)?|schedul(?:e|ing)|arrang(?:e|ing)|set(?:ting)?[ -]+up|mak(?:e|ing)|request(?:s|ing)?|needs?|wants?|would\s+like)\s+(?:(?:an?|the|another|new|routine|follow[ -]?up|return|office|clinic|patient's|my|our|her|his|their)\s+){0,5}(?:appointments?|appts?|visits?|follow[ -]?ups?)\b/g;
+
+function hasSeparateAppointmentAsk(folded: string): boolean {
+  for (const ask of folded.matchAll(APPOINTMENT_ASK)) {
+    if (!BOUND_AFTER.test(folded.slice(ask.index! + ask[0].length))) return true;
+  }
+  return false;
 }
 
 /**

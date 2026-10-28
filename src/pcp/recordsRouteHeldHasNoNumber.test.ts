@@ -111,16 +111,29 @@ describe('a records request the outbox holds', () => {
       .mockResolvedValueOnce(UNASKABLE_400 as never)
       .mockResolvedValueOnce(OUTAGE as never);
     writeToOutbox.mockResolvedValue({ outboxId: 'ob-pcp-2', alreadyExists: false });
-    const { agent } = freshCall();
+    const { agent, callId } = freshCall();
 
     const out = await clinicAsksForRecords(agent);
 
     expect(ticketing.createTicket).toHaveBeenCalledTimes(2);
+    expect(writeToOutbox).toHaveBeenCalledTimes(1);
     expect(out.success).toBe(true);
     expect(out.filed_pending).toBe(true);
     expect(out.recovered_after_refusal).toBe(true);
+    expect(out.routed_to).toBe('Medical Records');
+    expect(out).not.toHaveProperty('ticketNumber');
+    expect(pcpDirector.next(callId).mayTerminate).toBe(true);
     expect(JSON.stringify(out)).not.toMatch(/undefined/);
     expect(String(out.message)).toMatch(/no ticket number yet/i);
+
+    const again = await call(agent, 'handle_patient_medical_records_request', {
+      narrative: 'Records request for a mutual patient, to be faxed.',
+    });
+    expect(again.alreadyFiled).toBe(true);
+    expect(String(again.guidance)).toMatch(/no ticket number yet/i);
+    expect(String(again.guidance)).not.toMatch(/undefined|read it now/i);
+    expect(ticketing.createTicket).toHaveBeenCalledTimes(2);
+    expect(ticketing.createPcpTicket).not.toHaveBeenCalled();
   });
 
   it('a second ask on the call is answered as already filed — still with no number to read back', async () => {
