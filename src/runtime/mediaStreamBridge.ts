@@ -112,6 +112,7 @@ import { noteSpokenDob } from "../tools/spokenDob";
 import { notePatientStatus } from "../tools/spokenPatientStatus";
 import { noteCallerTranscript } from "../services/symptomCorroboration";
 import { ghostCallRefusal } from "../services/ghostCallProtection";
+import { callerConclusion, completesGoodbye, type CallerConclusion } from "./goodbye";
 import { CallUsage, usageSummaryMarker, type UsageTotals } from "./tokenUsage";
 import type { TwilioInboundFrame, TwilioOutboundFrame } from "./twilioFrames";
 import {
@@ -213,6 +214,9 @@ export const MULAW_BYTES_PER_MS = 8;
  * final-mark fallback — covers network + Twilio buffering jitter. The
  * variable part of the timeout is always derived from the audio length. */
 export const FINAL_MARK_GRACE_MS = 2_000;
+
+/** Time to resume speaking after a completed goodbye exchange. */
+export const GOODBYE_GRACE_MS = 6_000;
 
 /** Bounded ceiling on any single call — a connected session that stops
  * conversing must never run forever (sibling-repo zombie-call lesson:
@@ -506,6 +510,9 @@ export interface VoiceCallRecord {
    * v72 waited until its prompts were spent; v131 stands down before speaking.
    */
   silenceStoodDown?: boolean;
+  /** Deliberate completion after the goodbye grace window. */
+  goodbyeGraceHangup?: boolean;
+  teardownReason?: "goodbye_grace";
 }
 
 /**
@@ -627,6 +634,7 @@ export interface VoiceCallBridgeDeps {
    * the window's production value comes from `SILENCE_PROMPT_MS`. */
   silencePromptMs?: number;
   silenceStrikeLimit?: number;
+  goodbyeGraceMs?: number;
   /**
    * When the call actually began — the moment the stream was claimed.
    *
@@ -651,6 +659,8 @@ export interface VoiceCallBridgeDeps {
 /** Exactly the GrokVoiceSessionHandlers subset the bridge supplies. Kept
  * structural so the bridge does not import the session class. */
 export interface BridgeSessionHandlers {
+  /** A new response cancels a goodbye even before its first audio delta. */
+  onResponseStarted?: () => void;
   onToolCall: (callId: string, name: string, args: Record<string, unknown>) => void;
   onConfigured: () => void;
   onAudioDelta: (base64Audio: string) => void;
@@ -916,6 +926,19 @@ export class VoiceCallBridge {
   /** See VoiceCallRecord.silenceStoodDown. */
   private silenceStoodDown = false;
 
+  private goodbyeTimer: unknown = null;
+  private goodbyeGraceHangup = false;
+  private callerClosing: CallerConclusion | null = null;
+  private goodbyeEpoch: number | null = null;
+  private goodbyeOutputStarted = false;
+  private goodbyeResponse: {
+    epoch: number;
+    conclusion: CallerConclusion;
+    text: string;
+    mark: string | null;
+    done: boolean;
+  } | null = null;
+
   private readonly transcriptLog = new CallTranscriptLog();
   /** What the provider says this call cost. See tokenUsage.ts. */
   private readonly usage = new CallUsage();
@@ -938,6 +961,7 @@ export class VoiceCallBridge {
     this.ceiling = new ToolCallCeiling(deps.toolCeiling ?? {});
 
     this.session = deps.createSession({
+      onResponseStarted: () => this.handleResponseStarted(),
       onToolCall: (callId, name, args) => this.handleToolCall(callId, name, args),
       onConfigured: () => this.handleSessionConfigured(),
       onAudioDelta: (b64) => this.handleAudioDelta(b64),
@@ -952,6 +976,9 @@ export class VoiceCallBridge {
         // HEARD — for the rest of the call, whatever happens next. This is the
         // latch the operator's 2026-09-26 ruling turns on; see the field.
         if (text.trim()) {
+          this.cancelGoodbye();
+          const previous = this.transcriptLog.lines[this.transcriptLog.lines.length - 1] ?? "";
+          this.callerClosing = callerConclusion(text, previous.startsWith("AGENT: ") ? previous.slice(7) : "");
           this.callerEverHeard = true;
           // A request can arrive while a previously allowed ghost hangup is
           // waiting for playback. Revoke both its mark and fallback timer.
@@ -1110,6 +1137,8 @@ export class VoiceCallBridge {
       // one running: an agent debt (a pending tool, a response owed) is not
       // this timer's business and must not be extended by a playback echo.
       if (this.deadAirCause === "caller") this.armDeadAir("caller");
+      // A response may finish before OR after this playback confirmation.
+      if (this.goodbyeResponse?.mark === name && this.goodbyeResponse.done) this.armGoodbyeGrace();
     }
     // The greeting reached the caller in full. Barge-in works normally from
     // here — this protects the opening, not the conversation.
@@ -1210,6 +1239,19 @@ export class VoiceCallBridge {
   private openOrGetCurrent(): { seq: number; epoch: number; text: string; bytes: number } | null {
     const epoch = this.session.getResponseEpoch();
     if (this.cancelledEpoch !== null && epoch === this.cancelledEpoch) return null;
+    // Also supports sessions that report only audio/transcript events.
+    if (this.goodbyeEpoch !== epoch) this.handleResponseStarted();
+    if (!this.goodbyeOutputStarted) {
+      this.goodbyeOutputStarted = true;
+      // Capture the latest caller conclusion at the first output: its
+      // transcript may have arrived after response.created. Once output
+      // starts, later caller events revoke this response's eligibility.
+      if (this.callerClosing) {
+        this.goodbyeResponse = {
+          epoch, conclusion: this.callerClosing, text: "", mark: null, done: false,
+        };
+      }
+    }
     if (this.current && this.current.epoch !== epoch) {
       // The previous utterance never completed (it was superseded without
       // a completion event). Its audio is finished either way; drop it
@@ -1322,6 +1364,7 @@ export class VoiceCallBridge {
       return;
     }
     console.error(`[bridge] GUARDRAIL TRIPPED, cutting the line: ${guardrail.name}`);
+    this.cancelGoodbye();
     // Same invariant as the barge-in and teardown cuts: words the caller
     // heard, committed, move the clock. The cancelled response's own
     // completion cannot — it is discarded by the epoch check — and if the
@@ -1592,6 +1635,12 @@ export class VoiceCallBridge {
     // deltas: it is the authoritative text and it arrives whole.
     const text = (transcript ?? done.text).trim();
     const markName = `utt-${done.seq}`;
+    if (this.goodbyeResponse?.epoch === epoch) {
+      if (done.bytes > 0 && text) {
+        this.goodbyeResponse.text += ` ${text}`;
+        this.goodbyeResponse.mark = markName;
+      } else this.cancelGoodbye();
+    }
     // The greeting's own mark: its echo is what releases the lock.
     if (this.greetingLocked && this.greetingMarkName === null) {
       this.greetingMarkName = markName;
@@ -1654,6 +1703,7 @@ export class VoiceCallBridge {
    */
   private requestHangup(reason: unknown): void {
     if (this.ended || this.endRequested) return;
+    this.cancelGoodbye();
     this.endRequested = true;
     this.ghostHangupRequested = reason === "ghost_call";
     if (this.current !== null) return; // its completion will arm the mark
@@ -1752,6 +1802,8 @@ export class VoiceCallBridge {
 
   private handleCallerSpeechStarted(): void {
     if (this.ended) return;
+    this.cancelGoodbye();
+    this.callerClosing = null;
     // The caller is talking: not dead air, and any open caller line in the
     // record crossed a speech boundary (transcript correlation only). Applied
     // HERE, as it arrives. Buffering these alongside the caller lines they
@@ -1912,6 +1964,42 @@ export class VoiceCallBridge {
     // The boundary an end-call may be waiting on (round 13).
     this.wakeSiblingWaiters();
     this.maybeRequestFollowUp();
+    if (this.goodbyeResponse?.epoch === this.session.getResponseEpoch()) {
+      this.goodbyeResponse.done = true;
+      this.armGoodbyeGrace();
+    }
+  }
+
+  private cancelGoodbye(): void {
+    if (this.goodbyeTimer !== null) this.clearTimer(this.goodbyeTimer);
+    this.goodbyeTimer = null;
+    this.goodbyeResponse = null;
+  }
+
+  private handleResponseStarted(): void {
+    if (this.ended) return;
+    this.cancelGoodbye();
+    this.goodbyeEpoch = this.session.getResponseEpoch();
+    this.goodbyeOutputStarted = false;
+  }
+
+  private armGoodbyeGrace(): void {
+    const response = this.goodbyeResponse;
+    if (!response?.done || !response.mark || !completesGoodbye(response.text, response.conclusion)) return;
+    if (this.pendingToolCalls || this.followUpOwed || this.endRequested || this.transferInFlight) return;
+    if (this.goodbyeTimer !== null) this.clearTimer(this.goodbyeTimer);
+    // Generation can finish ahead of playback. The newest mark starts the
+    // exact grace window; if its echo is lost, bound the wait with all queued
+    // audio plus the existing playback jitter allowance.
+    const playbackMs = this.assistantAudioPlaying ? this.unplayedAudioMs() + FINAL_MARK_GRACE_MS : 0;
+    this.goodbyeTimer = this.setTimer(() => {
+      this.goodbyeTimer = null;
+      this.goodbyeGraceHangup = true;
+      console.info(`[bridge] ${this.deps.context.callSid} goodbye_grace`);
+      // Same deliberate outcome as the guarded end-call tools. Recovery
+      // must never mistake this completion for a dropped provider session.
+      this.teardown("agent_ended", "goodbye_grace");
+    }, playbackMs + (this.deps.goodbyeGraceMs ?? GOODBYE_GRACE_MS));
   }
 
   private maybeRequestFollowUp(): void {
@@ -1941,6 +2029,10 @@ export class VoiceCallBridge {
 
   private handleToolCall(callId: string, name: string, args: Record<string, unknown>): void {
     if (this.ended) return;
+    this.cancelGoodbye();
+    // Even a tool before the first audio makes this an unfinished exchange.
+    this.goodbyeEpoch = this.session.getResponseEpoch();
+    this.goodbyeOutputStarted = true;
     // The follow-up waits for the carrying response's `response.done` — but
     // ONLY if that response is still open at the wire. This used to assume
     // it always was ("function-call events precede their response's done"),
@@ -2366,6 +2458,7 @@ export class VoiceCallBridge {
    * genuine hangup is not mislabeled.
    */
   noteTransferStarting(method: "warm" | "blind" = "warm"): void {
+    this.cancelGoodbye();
     this.transferInFlight = true;
     this.transferMethod = method;
   }
@@ -2420,9 +2513,10 @@ export class VoiceCallBridge {
 
   private transferWaitExtraMs = 0;
 
-  private teardown(outcome: CallOutcome): void {
+  private teardown(outcome: CallOutcome, reason?: "goodbye_grace"): void {
     if (this.ended) return;
     this.ended = true;
+    this.cancelGoodbye();
     // Whatever close event won the race — Twilio's stop frame, the socket
     // closing, the provider session dying as the stream ends — the caller
     // was moved to a human on purpose. That is the outcome.
@@ -2500,6 +2594,8 @@ export class VoiceCallBridge {
         silencePrompts: this.silencePrompts,
         silenceCut: this.silenceCut,
         silenceStoodDown: this.silenceStoodDown,
+        goodbyeGraceHangup: this.goodbyeGraceHangup,
+        ...(reason ? { teardownReason: reason } : {}),
         followUps: {
           ...this.followUps,
           lastUnanswered:
