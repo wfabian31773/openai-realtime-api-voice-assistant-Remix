@@ -1,13 +1,14 @@
 /** Immediate, single-attempt SI Assistant calls, using the campaign ledger. */
 import twilio from "twilio";
+import { randomUUID } from "node:crypto";
 import { resolveAppDomain } from "../config/environment";
 import { callEnvironment } from "../runtime/callRecord";
 import { callbackRoutingProblem, isClearTwilioRefusal, RING_TIMEOUT_SECONDS, STALE_CLAIM_MS, statusUrl, type OutboundTwilio } from "../runtime/outbound/dialer";
 import type { DialerLock } from "../runtime/outbound/scheduler";
 import { NOT_PLACED, type OutboundStore } from "../runtime/outbound/store";
 import { evaluateAndEnqueueCall, identityFromPreparePayload, siAssistantDialingProblem, siAssistantMayDial } from "./callEnqueue";
-import { SI_ASSISTANT_SLUG } from "./siAssistantConstants";
-import type { ContactApprovalRow } from "./store";
+import { SI_ASSISTANT_SLUG, SI_ASSISTANT_CAMPAIGN_KEY, siAssistantNumber } from "./siAssistantConstants";
+import type { ContactApprovalRow, PluginStore } from "./store";
 import type { LiveCallRegistry } from "./liveSessions";
 
 export interface LiveCallSender extends OutboundTwilio {
@@ -37,7 +38,7 @@ export const localLiveCallLock: DialerLock = {
 
 type LiveResult =
   | { ok: true; callSid: string; sessionId: string }
-  | { ok: false; reason: string; mayHaveSent: boolean };
+  | { ok: false; reason: string; mayHaveSent: boolean; sessionId?: string };
 
 export async function placeLiveCall(
   deps: { store: OutboundStore; sender: LiveCallSender; sessions: LiveCallRegistry; env: Record<string, string | undefined>; lock?: DialerLock },
@@ -125,4 +126,78 @@ function boundedCall<T>(work: Promise<T>): Promise<T> {
     const timer = setTimeout(() => reject(new Error("call_timeout")), 15_000);
     work.then((value) => { clearTimeout(timer); resolve(value); }, (error) => { clearTimeout(timer); reject(error); });
   });
+}
+
+// OPT-OUT GUARD (removable): the same durable voice DNC / SMS STOP stores
+// used by callEnqueue. Keep all direct-call opt-out policy in this function.
+export async function directCallOptOutGuard(store: OutboundStore, plugin: PluginStore, phone: string): Promise<string | null> {
+  if (await store.isDoNotContact(phone) || await plugin.isSmsOptedOut(phone.slice(-10))) return "do_not_contact";
+  return null;
+}
+
+/** Open line: no approval, identity, calling window, caps or routing probe. */
+export async function placeDirectCall(
+  deps: { store: OutboundStore; plugin: PluginStore; sender: LiveCallSender; sessions: LiveCallRegistry; env: Record<string, string | undefined> },
+  input: { phone: string; purpose: string; name?: string; tokenJti: string },
+  now: Date,
+): Promise<LiveResult> {
+  const refused = (reason: string): LiveResult => ({ ok: false, reason, mayHaveSent: false });
+  const from = siAssistantNumber(deps.env);
+  const dialing = siAssistantDialingProblem({ ...deps.env, SI_ASSISTANT_NUMBER: from });
+  if (dialing) return refused(dialing);
+  const domain = resolveAppDomain({
+    domain: deps.env.DOMAIN, replitDomains: deps.env.REPLIT_DOMAINS, replitDevDomain: deps.env.REPLIT_DEV_DOMAIN,
+    isProduction: callEnvironment(deps.env) === "production",
+  });
+  if (domain.source === "fallback") return refused("no_public_host");
+
+  let sessionId: string | undefined;
+  let contactId: string | undefined;
+  let attemptId: string | undefined;
+  let sent = false;
+  try {
+    const blocked = await directCallOptOutGuard(deps.store, deps.plugin, input.phone);
+    if (blocked) return refused(blocked);
+    const campaignId = await deps.store.ensureCampaign(SI_ASSISTANT_CAMPAIGN_KEY, SI_ASSISTANT_SLUG);
+    if (!campaignId) return refused("no_campaign");
+    const externalRef = `plugin:direct:${randomUUID()}`;
+    // plugin_live excludes this single attempt from scheduler retries. Keep
+    // purpose/persona in the live registry, never in the campaign ledger.
+    await deps.store.upsertSourceContacts(campaignId, [{
+      externalRef, phone: input.phone, firstName: null, lastName: null,
+      data: { source: "si-assistant", plugin_live: true, plugin_direct: true },
+    }]);
+    const source = (await deps.store.sourceRows(campaignId)).find((row) => row.externalRef === externalRef);
+    if (!source) return refused("contact_missing");
+    contactId = source.id;
+    const contact = await deps.store.claimContact(contactId, now);
+    if (!contact) return refused("call_unavailable");
+    attemptId = await deps.store.startAttempt(contactId, campaignId, 1);
+    const session = deps.sessions.create({
+      approvalId: null, tokenJti: input.tokenJti, contactId, attemptId,
+      directCall: { purpose: input.purpose, ...(input.name ? { name: input.name } : {}) },
+    });
+    sessionId = session.sessionId;
+    const query = new URLSearchParams({ contact: contactId, attempt: attemptId, liveSession: sessionId });
+    sent = true;
+    const call = await boundedCall(deps.sender.createCall({
+      to: input.phone, from, url: `https://${domain.domain}/voice/si-assistant?${query}`,
+      method: "POST", timeout: RING_TIMEOUT_SECONDS,
+      statusCallback: `${statusUrl(domain.domain, SI_ASSISTANT_SLUG, contactId, attemptId)}&liveSession=${sessionId}`,
+      statusCallbackMethod: "POST", statusCallbackEvent: ["initiated", "ringing", "answered", "completed"],
+    }));
+    deps.sessions.bindCall(sessionId, call.sid);
+    await deps.store.markContactDialled(contactId);
+    await deps.store.setAttemptCallSid(attemptId, call.sid);
+    return { ok: true, callSid: call.sid, sessionId };
+  } catch (error) {
+    if (isClearTwilioRefusal(error)) sent = false;
+    if (!sent) {
+      if (sessionId) deps.sessions.setStatus(sessionId, "failed");
+      if (attemptId) await deps.store.finishAttempt(attemptId, { status: NOT_PLACED }).catch(() => undefined);
+      if (contactId) await deps.store.settleContact(contactId, "rescheduled", { onlyIfCalling: true }).catch(() => false);
+    }
+    // An ambiguous send is never retried. Signed callbacks can still bind it.
+    return { ok: false, reason: sent ? "send_unknown" : "direct_call_unavailable", mayHaveSent: sent, ...(sessionId ? { sessionId } : {}) };
+  }
 }

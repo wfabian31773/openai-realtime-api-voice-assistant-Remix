@@ -12,6 +12,10 @@ import { createSqlPluginStore } from "./sqlStore";
 import { handleInboundSms, sendApprovedSms } from "./sms";
 import { PRACTICE_CLOSURES } from "../runtime/outbound/callingWindow";
 import { CONFIRM_TTL_MS } from "./tokens";
+import { DEFAULT_PLUGIN_SCOPES, isWritePluginScope, mintScopesCompatible, parseScopes } from "./scopes";
+import twilio from "twilio";
+import { CallSessionRegistry } from "../runtime/sessionRegistry";
+import { handleOutboundAnswer, handleOutboundStatus } from "../runtime/outbound/outboundWebhook";
 
 const PHONE = "+15555550111";
 const OPEN = "2026-10-22T18:00:00Z";
@@ -19,6 +23,7 @@ const registries: LiveCallRegistry[] = [];
 afterEach(async () => {
   for (const registry of registries.splice(0)) registry.clear();
   vi.restoreAllMocks();
+  vi.useRealTimers();
 });
 
 async function boot() {
@@ -49,7 +54,7 @@ async function boot() {
   ])) as unknown as Express;
   mountPluginApi(app, { store, outboundStore: outbound, agents: { getAllAgents: () => [] }, env,
     now: () => clock.at, liveCalls: sessions, liveCallSender: sender, smsSender: sms });
-  async function request(path: string, body?: unknown, token = bot) {
+  async function request(path: string, body?: unknown, token = bot, onResponse?: () => void) {
     const url = new URL(path, "https://fleet.example/api/plugin/v1/");
     const pathname = `/api/plugin/v1${url.pathname}`;
     const method = body === undefined ? "GET" : "POST";
@@ -64,7 +69,7 @@ async function boot() {
     const res = {
       setHeader(name: string, value: string) { result.headers.set(name, value); },
       status(status: number) { result.status = status; return res; },
-      json(value: unknown) { result.body = value; return res; },
+      json(value: unknown) { result.body = value; onResponse?.(); return res; },
     };
     async function run(index: number): Promise<void> {
       const handler = route!.handlers[index];
@@ -87,6 +92,210 @@ async function boot() {
   }
   return { clock, store, outbound, sessions, env, sender, sms, bot, staff, other, request, approved };
 }
+
+describe("direct open-line calls", () => {
+  const input = { phone: PHONE, purpose: "Ask about office hours", name: "Private Recipient" };
+
+  it("requires an explicit write scope, excludes staff, and keeps mint defaults", async () => {
+    const h = await boot();
+    expect(DEFAULT_PLUGIN_SCOPES).toEqual(["fleet:read"]);
+    expect(parseScopes([])).toEqual(["fleet:read"]);
+    expect(isWritePluginScope("calls:direct")).toBe(true);
+    expect(mintScopesCompatible(["calls:direct", "contacts:approve"]).ok).toBe(false);
+    expect(mintScopesCompatible(["calls:direct"]).ok).toBe(true);
+    for (const token of [h.bot, h.staff, h.other, h.store.mint(), h.store.mint(["calls:direct", "contacts:approve"])]) {
+      expect((await h.request("/calls/direct", input, token)).status).toBe(403);
+    }
+    expect(h.sender.createCall).not.toHaveBeenCalled();
+    expect(await h.store.listAudit()).toHaveLength(5);
+  });
+
+  it.each(["voice", "sms_stop"])("refuses %s at the opt-out guard and audits the reason", async (source) => {
+    const h = await boot(); const bot = h.store.mint(["calls:direct"]);
+    if (source === "voice") await h.outbound.stampDoNotContact(PHONE, "voice");
+    else await h.store.setSmsOptOut(PHONE.slice(-10), true);
+    const result = await h.request("/calls/direct", input, bot);
+    expect(result).toMatchObject({ status: 409, body: { reason: "do_not_contact", outcome: "not_sent" } });
+    expect(h.sender.createCall).not.toHaveBeenCalled();
+    expect(h.outbound.attempts).toHaveLength(0);
+    expect(await h.store.listAudit()).toContainEqual(expect.objectContaining({ tokenJti: bot.jti, outcome: "denied",
+      createdAt: h.clock.at, details: { maskedNumber: "***0111", purpose: input.purpose.toLowerCase(), reason: "do_not_contact" } }));
+  });
+
+  it("places immediately from 909-255-3213, registers a live session, and exposes the existing controls", async () => {
+    const h = await boot(); const bot = h.store.mint(["calls:direct"]);
+    // Direct calls bypass windows/holidays, per-phone history and callback routing.
+    h.clock.at = new Date("2026-11-11T07:00:00Z");
+    h.outbound.addContact({ id: "prior-direct", phone: PHONE, status: "completed" });
+    for (let i = 0; i < 12; i++) h.outbound.attempts.push({ id: `old${i}`, contactId: "prior-direct", campaignId: h.outbound.campaignId,
+      attemptNumber: i + 1, at: h.clock.at, endedAt: h.clock.at });
+    h.sender.voiceUrlFor.mockResolvedValue("https://unrelated.example/");
+    delete h.env.SI_ASSISTANT_NUMBER; // Shared SI Assistant default, +19092553213.
+    const result = await h.request("/calls/direct", { ...input, phone: "5555550111" }, bot);
+    expect(result).toMatchObject({ status: 200, body: { status: "live", callSid: "CA-live", sessionId: expect.any(String) } });
+    const session = h.sessions.owned(result.body.sessionId, bot.jti)!;
+    expect(session).toMatchObject({ approvalId: null, callSid: "CA-live", directCall: { purpose: input.purpose, name: input.name } });
+    expect(h.store.approvals.size).toBe(0);
+    expect(h.sender.voiceUrlFor).not.toHaveBeenCalled();
+    expect(h.sender.createCall).toHaveBeenCalledWith(expect.objectContaining({ to: PHONE, from: "+19092553213",
+      url: expect.stringContaining(`liveSession=${session.sessionId}`), statusCallback: expect.stringContaining(`liveSession=${session.sessionId}`) }));
+    expect(h.sender.createCall.mock.calls[0][0]).not.toHaveProperty("machineDetection");
+    const directContact = h.outbound.contacts.get(session.contactId)!;
+    expect(directContact.customData).toMatchObject({ plugin_live: true, plugin_direct: true });
+    expect(JSON.stringify(directContact)).not.toContain(input.purpose);
+    expect((await h.request(`/live_calls/${session.sessionId}`, undefined, bot)).status).toBe(200);
+    const instruct = vi.fn(); const end = vi.fn();
+    h.sessions.attach("CA-live", { turns: () => [], instruct, end });
+    expect((await h.request(`/live_calls/${session.sessionId}/instruct`, { text: "Ask about availability" }, bot)).status).toBe(200);
+    expect(instruct).toHaveBeenCalledWith("Ask about availability");
+    const stranger = h.store.mint(["calls:direct"]);
+    expect((await h.request(`/live_calls/${session.sessionId}/end`, {}, stranger)).status).toBe(403);
+    expect((await h.request(`/live_calls/${session.sessionId}/end`, {}, bot)).status).toBe(200);
+    expect(h.sender.endCall).toHaveBeenCalledWith("CA-live");
+    expect(end).toHaveBeenCalledOnce();
+  });
+
+  it("uses signed live webhooks to bind an early answer, carry the session into the voice registry, and settle the attempt", async () => {
+    const h = await boot(); const bot = h.store.mint(["calls:direct"]);
+    const registry = new CallSessionRegistry();
+    const env = { ...h.env, TWILIO_AUTH_TOKEN: "test-auth", DATABASE_URL: "postgres://test", XAI_API_KEY: "test-unused" };
+    const deps = { env, registry, store: h.outbound, liveCalls: h.sessions, policyFor: () => siAssistantPolicy };
+    const body = { CallSid: "CA-early-direct", From: "+19092553213", To: PHONE, AnsweredBy: "human" };
+    function signed(url: string, fields: Record<string, string>) {
+      return { originalUrl: new URL(url).pathname + new URL(url).search, body: fields,
+        headers: { host: "fleet.example", "x-forwarded-proto": "https",
+          "x-twilio-signature": twilio.getExpectedTwilioSignature(env.TWILIO_AUTH_TOKEN, url, fields) } };
+    }
+    h.sender.createCall.mockImplementation(async (options) => {
+      const response = await handleOutboundAnswer("si-assistant", signed(options.url, body), deps);
+      expect(response.body).toContain("<Connect><Stream");
+      return { sid: body.CallSid };
+    });
+    const result = await h.request("/calls/direct", input, bot);
+    expect(result.status).toBe(200);
+    expect(registry.get(body.CallSid)).toMatchObject({ liveSessionId: result.body.sessionId, outbound: { campaignKey: "si-assistant" } });
+    const session = h.sessions.owned(result.body.sessionId, bot.jti)!;
+    expect(session).toMatchObject({ callSid: body.CallSid, status: "in_progress", directCall: { purpose: input.purpose } });
+    const callback = h.sender.createCall.mock.calls[0][0].statusCallback;
+    await handleOutboundStatus("si-assistant", signed(callback, { ...body, CallStatus: "completed" }), deps);
+    expect(session.status).toBe("completed");
+    expect(h.outbound.attempts[0].endedAt).toBeDefined();
+    expect(h.outbound.contacts.get(session.contactId)?.status).toBe("answered");
+  });
+
+  it("keeps approval sessions behind their existing commit scope", async () => {
+    const h = await boot(); const a = await h.approved();
+    const result = await h.request("/commit_call_live", { confirmToken: a.confirmToken });
+    // Even the owner needs contacts:commit for an approval-based session.
+    h.store.tokens.get(h.bot.jti)!.scopes = ["calls:direct"];
+    expect((await h.request(`/live_calls/${result.body.sessionId}`)).status).toBe(403);
+  });
+
+  it.each([
+    { phone: "+442012345678", purpose: "Call" }, { phone: PHONE }, { phone: PHONE, purpose: " " },
+    { phone: PHONE, purpose: "x".repeat(4001) }, { ...input, name: "x".repeat(101) },
+  ])("rejects invalid input and audits every refusal", async (body) => {
+    const h = await boot(); const bot = h.store.mint(["calls:direct"]);
+    expect((await h.request("/calls/direct", body, bot)).status).toBe(400);
+    expect(await h.store.listAudit()).toHaveLength(1);
+    expect(h.sender.createCall).not.toHaveBeenCalled();
+  });
+
+  it("masks phone numbers and redacts PHI before truncating the audit purpose", async () => {
+    const h = await boot(); const bot = h.store.mint(["calls:direct"]);
+    const purpose = `Call Private Recipient at ${PHONE}; DOB 1950-03-17; secret@example.com cataract. ${"Ask about office hours. ".repeat(30)}`;
+    expect((await h.request("/calls/direct", { ...input, purpose }, bot)).status).toBe(200);
+    const entries = await h.store.listAudit();
+    expect(entries[0]).toMatchObject({ tokenJti: bot.jti, createdAt: h.clock.at, tool: "direct_call", outcome: "committed",
+      details: { maskedNumber: "***0111", reason: "placed" } });
+    expect(entries[0].details!.purpose.length).toBeLessThanOrEqual(160);
+    for (const secret of [PHONE, "555555", "Private", "Recipient", "1950", "secret@example.com", "cataract"]) {
+      expect(JSON.stringify(entries)).not.toContain(secret);
+    }
+    const exec = vi.fn().mockResolvedValue([]);
+    await createSqlPluginStore(exec).writeAudit(entries[0]);
+    expect(exec.mock.calls[0][0]).toContain("details, created_at");
+    expect(JSON.stringify(exec.mock.calls)).not.toContain(PHONE);
+  });
+
+  it("honors the write switch and audits that refusal", async () => {
+    const h = await boot(); const bot = h.store.mint(["calls:direct"]);
+    h.env.PLUGIN_WRITES_ENABLED = "false";
+    expect((await h.request("/calls/direct", input, bot)).status).toBe(403);
+    expect(h.sender.createCall).not.toHaveBeenCalled();
+    expect(await h.store.listAudit()).toHaveLength(1);
+  });
+
+  it("audits rejected authentication without logging token secrets", async () => {
+    const h = await boot();
+    const result = await h.request("/calls/direct", input, { plaintext: "invalid-token" } as any);
+    expect(result.status).toBe(401);
+    expect(await h.store.listAudit()).toContainEqual(expect.objectContaining({ tokenJti: "unauthenticated", outcome: "denied", httpStatus: 401 }));
+    expect(JSON.stringify(await h.store.listAudit())).not.toContain("invalid-token");
+  });
+
+  it.each(["Call Will about office hours", "Ask Price about pickup"])("retains a sanitized fallback for %j when audit persistence is unavailable", async (purpose) => {
+    const h = await boot(); const bot = h.store.mint(["calls:direct"]);
+    vi.spyOn(h.store, "writeAudit").mockRejectedValue(new Error("database unavailable"));
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    expect((await h.request("/calls/direct", { ...input, purpose }, bot)).status).toBe(200);
+    expect(log).toHaveBeenCalledWith(expect.stringContaining("database unavailable"), expect.objectContaining({
+      tokenJti: bot.jti, at: h.clock.at.toISOString(), details: expect.objectContaining({ maskedNumber: "***0111", reason: "placed" }),
+    }));
+    expect(JSON.stringify(log.mock.calls)).not.toContain(PHONE);
+    expect(JSON.stringify(log.mock.calls)).not.toContain(input.name);
+    expect(JSON.stringify(log.mock.calls).toLowerCase()).not.toMatch(/\b(?:will|price)\b/);
+  });
+
+  it("sends the successful response before starting an audit write that never resolves", async () => {
+    vi.useFakeTimers();
+    const h = await boot(); const bot = h.store.mint(["calls:direct"]);
+    const order: string[] = [];
+    vi.spyOn(h.store, "writeAudit").mockImplementation(() => {
+      order.push("audit");
+      return new Promise<void>(() => {});
+    });
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    const result = await h.request("/calls/direct", input, bot, () => order.push("response"));
+    expect(result).toMatchObject({ status: 200, body: { status: "live", sessionId: expect.any(String) } });
+    expect(h.sessions.owned(result.body.sessionId, bot.jti)).not.toBeNull();
+    expect(order).toEqual(["response", "audit"]);
+    expect(log).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(250);
+    expect(log).toHaveBeenCalledOnce();
+    expect(JSON.stringify(log.mock.calls)).not.toContain(PHONE);
+    expect(JSON.stringify(log.mock.calls)).not.toContain(input.name);
+  });
+
+  it.each([true, false])("bounds stalled audit writes on refusals (authentication: %s)", async (authentication) => {
+    vi.useFakeTimers();
+    const h = await boot();
+    const bot = authentication ? { ...h.bot, plaintext: "invalid-token" } : h.store.mint(["calls:direct"]);
+    const write = vi.spyOn(h.store, "writeAudit").mockImplementation(() => new Promise<void>(() => {}));
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    const response = h.request("/calls/direct", { ...input, phone: "invalid" }, bot);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(write).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(250);
+    expect(await response).toMatchObject({ status: authentication ? 401 : 400 });
+    expect(h.sender.createCall).not.toHaveBeenCalled();
+    expect(log).toHaveBeenCalledWith(expect.stringContaining("database unavailable"), expect.objectContaining({ outcome: "denied" }));
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each([true, false])("audits a provider failure without retrying (clear refusal: %s)", async (clear) => {
+    const h = await boot(); const bot = h.store.mint(["calls:direct"]);
+    h.sender.createCall.mockRejectedValue(clear ? Object.assign(new Error("private provider detail"), { name: "RestException", status: 400 }) : new Error("private provider detail"));
+    const result = await h.request("/calls/direct", input, bot);
+    expect(result.body.outcome).toBe(clear ? "not_sent" : "unknown");
+    if (!clear) expect(h.sessions.owned(result.body.sessionId, bot.jti)).not.toBeNull();
+    expect(h.sender.createCall).toHaveBeenCalledOnce();
+    const entries = await h.store.listAudit();
+    expect(entries[0].outcome).toBe(clear ? "denied" : "unknown");
+    expect(JSON.stringify(entries)).not.toContain("private provider detail");
+    expect(await h.outbound.dialableContacts(h.outbound.campaignId, new Date(h.clock.at.getTime() + 86_400_000), 10)).toEqual([]);
+  });
+});
 
 describe("confirm token hand-off", () => {
   it("returns the preparing bot's token once, without leaking it through views or audit", async () => {

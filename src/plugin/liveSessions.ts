@@ -15,7 +15,7 @@ export interface LiveCallControls {
 
 export interface LiveCallSession {
   sessionId: string;
-  approvalId: string;
+  approvalId: string | null;
   tokenJti: string;
   contactId: string;
   attemptId: string;
@@ -24,6 +24,7 @@ export interface LiveCallSession {
   startedAt: Date;
   endedAt: Date | null;
   turns: TranscriptTurn[];
+  directCall?: { purpose: string; name?: string };
   controls?: LiveCallControls;
   timer?: ReturnType<typeof setTimeout>;
 }
@@ -32,7 +33,7 @@ export class LiveCallRegistry {
   private sessions = new Map<string, LiveCallSession>();
   constructor(private readonly now: () => Date = () => new Date()) {}
 
-  create(input: Pick<LiveCallSession, "approvalId" | "tokenJti" | "contactId" | "attemptId">): LiveCallSession {
+  create(input: Pick<LiveCallSession, "approvalId" | "tokenJti" | "contactId" | "attemptId" | "directCall">): LiveCallSession {
     const session: LiveCallSession = {
       ...input, sessionId: randomUUID(), callSid: null, status: "dialing",
       startedAt: this.now(), endedAt: null, turns: [],

@@ -321,6 +321,7 @@ import { reportSiAssistantCall, shouldReportSiAssistantCall } from "../plugin/ca
 import { attachmentForSiAssistant } from "../plugin/returnedCaller";
 import { reattachTakenMessages } from "../plugin/messageOutbox";
 import { liveCallRegistry, type LiveCallRegistry } from "../plugin/liveSessions";
+import { SI_ASSISTANT_DIRECT_GREETING } from "../agents/siAssistantAgent";
 import { closeSiAssistantIdentity, siAssistantIdentityFor } from "../plugin/siAssistantIdentity";
 import type { OutboundStore } from "./outbound/store";
 import { createDbOutboundStore } from "./outbound/store";
@@ -1122,6 +1123,7 @@ export function mountVoiceRuntime(
     ): Promise<void> {
       const startedAtMs = Date.now();
       const isLiveCall = entry.slug === "si-assistant" && Boolean(entry.liveSessionId);
+      const directCall = isLiveCall ? liveCalls.forCall(entry.callSid)?.directCall : undefined;
       // The call is answered once its stream has started, so Twilio will take
       // a REST recording from here. Never awaited, never on the call's path:
       // a failure is one console line and the call proceeds unrecorded, as
@@ -1275,7 +1277,8 @@ export function mountVoiceRuntime(
         const directionMismatch =
           registered !== undefined &&
           ((Boolean(entry.outbound) && !isOutboundLane) ||
-            (entry.outbound !== undefined && !outboundContact));
+            (entry.outbound !== undefined && !outboundContact) ||
+            (outboundContact?.data.plugin_direct === true && !directCall));
         if (directionMismatch) {
           console.warn(
             `[voice-runtime] ${entry.slug}: refused — ` +
@@ -1352,6 +1355,7 @@ export function mountVoiceRuntime(
             ...(entry.outbound && outboundContact
               ? { outbound: { ...outboundContact, campaignKey: entry.outbound.campaignKey } }
               : {}),
+            ...(directCall ? { directCall } : {}),
             // And who may be ringing back, on a call made TO an outbound lane.
             ...(callback ? { callback } : {}),
           },
@@ -1539,6 +1543,7 @@ export function mountVoiceRuntime(
          * has to be told it was spoken.
          */
         const spokenGreeting =
+          directCall ? SI_ASSISTANT_DIRECT_GREETING :
           // A dialled call opens with its campaign's own greeting, built for
           // the person it rang: who is calling, that it is automated, and
           // that the call is recorded, before anything else (outbound/).

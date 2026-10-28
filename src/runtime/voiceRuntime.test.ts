@@ -37,6 +37,7 @@ import { answerUrl } from "./outbound/dialer";
 import type { OutboundLanePolicy } from "./outbound/campaign";
 import { DEFAULT_ATTEMPT_CAPS, DEFAULT_CALLING_WINDOW } from "./outbound/callingWindow";
 import { LiveCallRegistry } from "../plugin/liveSessions";
+import { directCallInstructions, SI_ASSISTANT_DIRECT_GREETING } from "../agents/siAssistantAgent";
 import { CallSessionRegistry } from "./sessionRegistry";
 import { deployedBuildSha } from "./buildIdentity";
 import { VOICE_RUNTIME_DEPLOY_MARKER } from "./readiness";
@@ -2698,13 +2699,14 @@ describe("a call the runtime dialled (src/runtime/outbound/)", () => {
 
 
 describe("SI Assistant live calls", () => {
-  it("binds signed webhooks, transcript polling and guidance to the runtime; persists no transcript", async () => {
+  it.each([false, true])("binds signed webhooks, transcript polling and guidance to the runtime; persists no transcript (direct: %s)", async (direct) => {
     const store = new FakeOutboundStore();
     store.addContact({ id: "live-contact", phone: "+15555550111", firstName: "Testa", customData: { plugin_live: true } });
     await store.claimContact("live-contact", new Date());
     const attemptId = await store.startAttempt("live-contact", store.campaignId, 1);
     const sessions = new LiveCallRegistry();
-    const session = sessions.create({ approvalId: "approval", tokenJti: "bot", contactId: "live-contact", attemptId });
+    const directCall = direct ? { purpose: "Ask about office hours tomorrow" } : undefined;
+    const session = sessions.create({ approvalId: direct ? null : "approval", tokenJti: "bot", contactId: "live-contact", attemptId, directCall });
     const recording = vi.fn(async (_callSid: string, _host?: string) => "skipped");
     const turns = vi.fn(async () => 0);
     const policy: OutboundLanePolicy = {
@@ -2714,7 +2716,7 @@ describe("SI Assistant live calls", () => {
       voicemail: () => "Please call back.",
     };
     const source = laneSource({ id: "si-assistant", agentType: "outbound", outbound: policy,
-      factory: (async () => ({ instructions: "Identify yourself as an AI. Verify identity first.", tools: [] })) as any });
+      factory: (async (_handoff: unknown, metadata: any) => ({ instructions: metadata.directCall ? directCallInstructions(metadata.directCall) : "Identify yourself as an AI. Verify identity first.", tools: [] })) as any });
     const h = await harness({ laneSource: source, outboundStore: store, liveCalls: sessions, startRecording: recording, persistTurns: turns });
     const q = `contact=live-contact&attempt=${attemptId}&liveSession=${session.sessionId}`;
     const path = `/voice/si-assistant?${q}`;
@@ -2733,6 +2735,14 @@ describe("SI Assistant live calls", () => {
     await waitFor(() => h.transports.length === 1, "live provider");
     await settle(4);
     const transport = h.transports[0];
+    if (direct) {
+      const update = transport.ofType("session.update")[0] as any;
+      expect(update.session.instructions).toContain(directCall!.purpose);
+      expect(update.session.instructions).toContain(SI_ASSISTANT_DIRECT_GREETING);
+      expect(update.session.instructions).not.toContain("Verify identity first");
+      expect(update.session.instructions).not.toContain("Am I speaking with Testa");
+      expect(update.session.tools.map((tool: any) => tool.name)).not.toContain("confirm_si_assistant_identity");
+    }
     transport.emit({ type: "session.updated" });
     await settle(4);
     transport.emit({ type: "conversation.item.input_audio_transcription.completed", item_id: "caller-one", transcript: "Private caller transcript" });

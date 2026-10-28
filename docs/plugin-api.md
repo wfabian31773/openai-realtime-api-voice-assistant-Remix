@@ -1,8 +1,9 @@
 # Fleet plugin API (`/api/plugin/v1`)
 
 The Support Center SI Assistant (ticketing-app PR #366) places calls, texts
-and emails through this fleet. Nothing leaves until a human approves the
-request on **Pending bot actions**. Writes are dark until
+and emails through this fleet. Approved contact requests require a human on
+**Pending bot actions**; the bot-only direct-call path below dials immediately.
+Writes are dark until
 `PLUGIN_WRITES_ENABLED=true`.
 
 The Hub migration is `migrations/add_plugin_api.sql`. **Do not apply it from
@@ -19,8 +20,10 @@ constant-time compare, 5-minute single-use confirm token minted **on approve**.
 | `contacts:prepare` | `prepare_call`, `prepare_sms`, `prepare_email`, `cancel_contact` | SI Assistant bot |
 | `contacts:commit` | `commit_contact`, `commit_call_live`, `confirm_token` hand-off, live call controls | SI Assistant bot |
 | `contacts:approve` | `GET /approvals`, `POST /approvals/:id/approve`, `POST /approvals/:id/reject` | Support Center **Pending bot actions** page only. **Do not grant this to the bot.** |
+| `calls:direct` | `POST /calls/direct`, controls for the token's own direct live sessions | SI Assistant bot, explicit grant only |
 
 Write scopes are never implied. An empty scope list becomes `fleet:read` only.
+Minting `calls:direct` together with staff scope `contacts:approve` is refused.
 
 ## Approval gate
 
@@ -66,6 +69,42 @@ Write scopes are never implied. An empty scope list becomes `fleet:read` only.
 prepare, approve, reject, cancel, commit and all live call controls.
 
 ## Calls
+
+### Direct open-line calls
+
+`POST /api/plugin/v1/calls/direct` requires `calls:direct` and enabled plugin
+writes. Body: `{ "phone": "+19095550123", "purpose": "Ask about office hours", "name": "Optional recipient" }`.
+Phone accepts ten US digits or `+1` followed by ten digits; purpose is 1–4000
+characters, optional name 1–100. No DOB, approval, confirm token, per-phone
+caps, calling-hours window, holiday check, or callback-route probe applies.
+The existing outbound/campaign enable switches still apply.
+
+The call immediately uses `siAssistantNumber()` (`+19092553213`, with the
+existing `SI_ASSISTANT_NUMBER` override). Purpose supplies the persona and
+instructions, wrapped only with Wayne/practice-assistant identification,
+honest AI disclosure if asked, and no patient verification or DOB prompts.
+Only language, opt-out, outcome and hang-up tools are offered. A single
+`plugin_live` campaign attempt prevents scheduler retries, and the ordinary
+live registry owns the session by token jti. Success returns
+`{ "status": "live", "callSid": "CA...", "sessionId": "..." }`.
+Use the same `/live_calls/:sessionId` status/instruct/end endpoints below;
+`calls:direct` authorizes only owned direct sessions. Approval-based sessions
+retain their existing `contacts:commit` requirement.
+
+The marked `OPT-OUT GUARD (removable)` checks voice DNC and SMS STOP; blocked
+calls return HTTP 409 with `reason: "do_not_contact"` and place no call.
+Other placement refusals return 503; ambiguous provider errors return 502
+with `outcome: "unknown"` and are never retried automatically.
+
+Apply `migrations/add_plugin_direct_call_audit.sql` before deploying. It adds
+one nullable audit metadata column; scopes need no database migration.
+Every direct attempt, including refusals, writes its token jti (or
+`unauthenticated`), timestamp, outcome/reason, last four digits only, and a
+160-character purpose preview. Only generic task words survive that preview;
+other text is redacted to keep names and clinical details out of logs.
+The full purpose stays in process memory with the live session.
+
+### Approved calls
 
 `commit_contact` for approved calls enqueues **one** contact into the existing campaign dialer
 (`src/runtime/outbound/`). They go out from `SI_ASSISTANT_NUMBER`
