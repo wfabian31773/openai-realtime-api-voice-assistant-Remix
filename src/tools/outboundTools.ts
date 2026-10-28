@@ -32,6 +32,8 @@ import { DIALABLE_STATUSES, type ContactStatus, type OutboundStore } from '../ru
 import { IDENTIFY_TOOL, dobOnFile, personKey, type CallbackCandidate } from '../runtime/outbound/callback';
 import { SI_ASSISTANT_CAMPAIGN_KEY } from '../plugin/siAssistantConstants';
 import { noteSiAssistantIdentity } from '../plugin/siAssistantIdentity';
+import { OPERATOR_SLUG, US_E164 } from '../plugin/operatorLine';
+import { boundPluginStore } from '../plugin/bindings';
 
 let storeOverride: OutboundStore | null = null;
 let storePromise: Promise<OutboundStore> | null = null;
@@ -251,7 +253,11 @@ registerTool({
     const store = await outboundStore();
     // The do-not-contact row FIRST: it is the one every future dial reads,
     // so it must land even if settling this campaign's row then fails.
-    await store.stampDoNotContact(who.phone, `voice:${who.campaignKey}`);
+    if (who.campaignKey === OPERATOR_SLUG && !US_E164.test(who.phone)) {
+      const plugin = boundPluginStore();
+      if (!plugin) throw new Error('operator opt-out storage unavailable');
+      await plugin.setOperatorOptOut(who.phone);
+    } else await store.stampDoNotContact(who.phone, `voice:${who.campaignKey}`);
     await store.settleContact(who.contactId, 'do_not_call');
     return {
       success: true,

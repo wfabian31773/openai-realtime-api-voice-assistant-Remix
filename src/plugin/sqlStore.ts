@@ -15,6 +15,7 @@ import type {
   MessageOutboxRow,
   OutboxStatus,
   PluginStore,
+  OperatorCallRecord,
 } from "./store";
 
 export type SqlExec = (text: string, params?: unknown[]) => Promise<Record<string, unknown>[]>;
@@ -117,6 +118,32 @@ function suggestionsFrom(
 
 export function createSqlPluginStore(exec: SqlExec): PluginStore {
   return {
+    async isOperatorOptedOut(phone) {
+      return (await exec("SELECT 1 FROM plugin_operator_dnc WHERE phone = $1 LIMIT 1", [phone])).length > 0;
+    },
+    async setOperatorOptOut(phone) {
+      await exec("INSERT INTO plugin_operator_dnc (phone) VALUES ($1) ON CONFLICT DO NOTHING", [phone]);
+    },
+    async saveOperatorCall(record) {
+      await exec(`INSERT INTO plugin_operator_calls
+        (session_id, approval_id, token_jti, call_sid, status, started_at, ended_at, turns)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb)
+        ON CONFLICT (session_id) DO UPDATE SET
+          call_sid = COALESCE(EXCLUDED.call_sid, plugin_operator_calls.call_sid),
+          status = EXCLUDED.status, ended_at = EXCLUDED.ended_at, turns = EXCLUDED.turns`,
+      [record.sessionId, record.approvalId, record.tokenJti, record.callSid, record.status,
+        record.startedAt.toISOString(), record.endedAt?.toISOString() ?? null, JSON.stringify(record.turns)]);
+    },
+    async getOperatorCall(sessionId) {
+      const [row] = await exec("SELECT * FROM plugin_operator_calls WHERE session_id = $1 LIMIT 1", [sessionId]);
+      if (!row) return null;
+      return {
+        sessionId: String(row.session_id), approvalId: String(row.approval_id), tokenJti: String(row.token_jti),
+        callSid: row.call_sid ? String(row.call_sid) : null, status: String(row.status),
+        startedAt: new Date(String(row.started_at)), endedAt: row.ended_at ? new Date(String(row.ended_at)) : null,
+        turns: (typeof row.turns === "string" ? JSON.parse(row.turns) : row.turns) as OperatorCallRecord["turns"],
+      };
+    },
     async findToken(jti) {
       const rows = await exec("SELECT * FROM api_tokens WHERE jti = $1 LIMIT 1", [jti]);
       return rows[0] ? tokenFrom(rows[0]) : null;

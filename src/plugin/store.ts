@@ -6,6 +6,7 @@
  *
  * Tables (this app, Operations Hub — see migrations/add_plugin_api.sql):
  *   api_tokens, contact_approvals, plugin_audit_log, plugin_message_outbox
+ *   plugin_operator_calls, plugin_operator_dnc (migrations/add_operator_line.sql)
  *
  * plugin_audit_log holds no phone numbers, message bodies or transcripts.
  * plugin_message_outbox is the one table that may hold a taken-message
@@ -27,6 +28,18 @@ import {
 import { sanitizeAuditEntry, type PluginAuditEntry } from "./audit";
 import { CONFIRM_TTL_MS } from "./tokens";
 import { ChannelDoNotContact } from "../runtime/outbound/channelDnc";
+import type { TranscriptTurn } from "../runtime/transcriptLog";
+
+export interface OperatorCallRecord {
+  sessionId: string;
+  approvalId: string;
+  tokenJti: string;
+  callSid: string | null;
+  status: string;
+  startedAt: Date;
+  endedAt: Date | null;
+  turns: TranscriptTurn[];
+}
 
 export const CONTACT_CHANNELS = ["call", "sms", "email"] as const;
 export type ContactChannel = (typeof CONTACT_CHANNELS)[number];
@@ -130,6 +143,10 @@ export interface EmailPayload {
 export type ContactPayload = CallPayload | SmsPayload | EmailPayload;
 
 export interface PluginStore {
+  isOperatorOptedOut(phone: string): Promise<boolean>;
+  setOperatorOptOut(phone: string): Promise<void>;
+  saveOperatorCall(record: OperatorCallRecord): Promise<void>;
+  getOperatorCall(sessionId: string): Promise<OperatorCallRecord | null>;
   findToken(jti: string): Promise<ApiTokenRow | null>;
   touchToken(jti: string, at: Date): Promise<void>;
   insertToken(row: ApiTokenRow): Promise<void>;
@@ -255,6 +272,17 @@ export async function verifyStoredToken(
 }
 
 export class MemoryPluginStore implements PluginStore {
+  operatorOptOuts = new Set<string>();
+  async isOperatorOptedOut(phone: string): Promise<boolean> { return this.operatorOptOuts.has(phone); }
+  async setOperatorOptOut(phone: string): Promise<void> { this.operatorOptOuts.add(phone); }
+  operatorCalls = new Map<string, OperatorCallRecord>();
+  async saveOperatorCall(record: OperatorCallRecord): Promise<void> {
+    this.operatorCalls.set(record.sessionId, { ...record, turns: record.turns.map((turn) => ({ ...turn })) });
+  }
+  async getOperatorCall(sessionId: string): Promise<OperatorCallRecord | null> {
+    const record = this.operatorCalls.get(sessionId);
+    return record ? { ...record, turns: record.turns.map((turn) => ({ ...turn })) } : null;
+  }
   tokens = new Map<string, ApiTokenRow>();
   approvals = new Map<string, ContactApprovalRow>();
   outbox = new Map<string, MessageOutboxRow>();
@@ -558,6 +586,7 @@ export function publicApproval(row: ContactApprovalRow): Record<string, unknown>
   return {
     id: row.id,
     channel: row.channel,
+    ...(row.payload.callKind === "operator" ? { callKind: "operator", maskedNumber: `***${String(row.payload.phone).slice(-4)}` } : {}),
     status: row.status,
     ticketId: row.ticketId,
     ticketNumber: row.ticketNumber,
