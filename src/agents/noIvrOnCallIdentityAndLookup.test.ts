@@ -325,6 +325,15 @@ describe("a caller who declines details is still transferred", () => {
 });
 
 describe("a corrected schedule match never produces not-found", () => {
+  /**
+   * VA-76221's real case: the phone-matched patient (Dana Example, DOB on
+   * file) says "Exampel". Wayne's decision on #392 (2026-10-28): the
+   * chart-name retry needs that DOB to match and the spoken last name to be a
+   * close misspelling, so the recognised caller's pre-context is supplied.
+   */
+  const PHONE_MATCHED = {
+    precontext: { matched: true, firstName: "Dana", lastNameOnFile: "Example", dobOnFile: "1958-01-04" },
+  };
   it("keeps history-aware wording and main's unavailable appointment contract on a failed read", async () => {
     h.lookupByPhone.mockResolvedValue(CHART as any);
     h.lookupByNameAndDOB.mockResolvedValue({
@@ -332,7 +341,7 @@ describe("a corrected schedule match never produces not-found", () => {
       totalAppointmentsFound: 0, scheduleReadStatus: "unavailable",
     } as any);
     const agent = await createNoIvrAgent(async () => {}, {
-      callId: "call-unavailable", callSid: freshSid(), callerPhone: ANI,
+      callId: "call-unavailable", callSid: freshSid(), callerPhone: ANI, ...PHONE_MATCHED
     } as any);
 
     const result = await call(agent, "lookup_schedule", {
@@ -364,7 +373,7 @@ describe("a corrected schedule match never produces not-found", () => {
     const agent = await createNoIvrAgent(async () => {}, {
       callId: "call-lookup",
       callSid: freshSid(),
-      callerPhone: ANI,
+      callerPhone: ANI, ...PHONE_MATCHED
     } as any);
 
     const r = await call(agent, "lookup_schedule", {
@@ -381,6 +390,26 @@ describe("a corrected schedule match never produces not-found", () => {
     expect(r.lastProviderSeen).toBe("Dr. Example");
     expect(payloadSaysNotFound(r)).toBe(false);
     expect(JSON.stringify(r)).not.toMatch(/not found/i);
+  });
+
+  it("no retry without a DOB-confirmed phone match, or for a clearly different surname", async () => {
+    h.lookupByPhone.mockResolvedValue(CHART as any);
+    h.lookupByNameAndDOB.mockResolvedValue({
+      patientFound: false, upcomingAppointments: [], pastAppointments: [], totalAppointmentsFound: 0,
+    } as any);
+    const cases: Array<[Record<string, unknown>, string]> = [
+      [{}, "Exampel"],
+      [{ precontext: { ...PHONE_MATCHED.precontext, dobOnFile: "1958-01-05" } }, "Exampel"],
+      [PHONE_MATCHED, "Different"],
+    ];
+    for (const [meta, last_name] of cases) {
+      h.lookupByNameAndDOB.mockClear();
+      const agent = await createNoIvrAgent(async () => {}, {
+        callId: "call-no-retry", callSid: freshSid(), callerPhone: ANI, ...meta,
+      } as any);
+      await call(agent, "lookup_schedule", { first_name: "Dana", last_name, date_of_birth: "01/04/1958" });
+      expect(h.lookupByNameAndDOB).toHaveBeenCalledTimes(1);
+    }
   });
 
   it("an ambiguous chart-name retry is not treated as found", async () => {
@@ -401,7 +430,7 @@ describe("a corrected schedule match never produces not-found", () => {
     const agent = await createNoIvrAgent(async () => {}, {
       callId: "call-ambiguous",
       callSid: freshSid(),
-      callerPhone: ANI,
+      callerPhone: ANI, ...PHONE_MATCHED
     } as any);
 
     const r = await call(agent, "lookup_schedule", {
@@ -421,7 +450,7 @@ describe("a corrected schedule match never produces not-found", () => {
     const agent = await createNoIvrAgent(async () => {}, {
       callId: "call-unsure",
       callSid: freshSid(),
-      callerPhone: ANI,
+      callerPhone: ANI, ...PHONE_MATCHED
     } as any);
 
     const r = await call(agent, "lookup_schedule", {
