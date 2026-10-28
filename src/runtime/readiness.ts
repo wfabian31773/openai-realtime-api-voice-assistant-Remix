@@ -889,8 +889,14 @@ import { callEnvironment } from "./callRecord";
  * descriptions survive the SDK conversion on answering-service and no-ivr-v2.
  * On top of v116. No migration; production impact remains unmeasured.
  */
+/**
+ * v126 — PCP UNCLASSIFIED IS FLOOR ONLY (2026-10-28). The PCP agent cannot
+ * choose unclassified_call in its intake tool; the after-hangup floor still
+ * files unclassified calls for a person to route. On top of v117, which it
+ * contains. No migration; production impact remains unmeasured.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v117-contact-capture-20261027";
+  "voice-runtime-v126-pcp-unclassified-floor-only-20261028";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can
