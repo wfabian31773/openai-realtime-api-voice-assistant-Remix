@@ -18,6 +18,11 @@
  * fixture resets both stores so no test inherits another's spent ask.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+
+vi.mock('../services/ticketOutboxService', async () => {
+  const { queueTicketOutboxMock } = await import('../testUtils/queueTicketOutbox');
+  return queueTicketOutboxMock();
+});
 import { runTool } from './registry';
 import './sharedPatientTools';
 import './medicalRecordsTools';

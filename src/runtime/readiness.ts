@@ -887,7 +887,7 @@ import { callEnvironment } from "./callRecord";
  * an exact or uniquely fuzzy Console match on both ticket submission paths,
  * with the five-point margin checked against the entire roster. Contact field
  * descriptions survive the SDK conversion on answering-service and no-ivr-v2.
- * On top of v131 (main); renumbered from v127. No migration; production impact remains unmeasured.
+ * On top of v131 (main); renumbered from v123. No migration; production impact remains unmeasured.
  */
 /**
  * v126 — NO-IVR PROMPT TRIM (2026-10-28). Remove repeated explanations from
@@ -926,13 +926,27 @@ import { callEnvironment } from "./callRecord";
  * On top of v130 (#387); renumbered from v121; v127 is #376 on its open branch. No migration; production impact remains unmeasured.
  */
 /**
- * v133 — MUTUAL PATIENT DETECTOR (2026-10-28). The provider detector also
+ * v132 — CALLBACK EXTENSIONS (2026-10-28). Queue ticket tools validate and
+ * normalize the base callback number and preserve a marked extension in
+ * staff-only call notes. On top of v131 (main); renumbered from v123. Production impact is unmeasured.
+ * `src/utils/phone.ts`, `src/tools/`.
+ */
+/**
+ * v134 — GOODBYE GRACE HANGUP (2026-10-28). After a completed goodbye exchange
+ * (conservative English/Spanish matcher), the bridge waits GOODBYE_GRACE_MS
+ * (6s) after playback and then ends the call deliberately ("goodbye_grace").
+ * Caller speech, a new response or a tool call cancels it. Silence ladder and
+ * ghost-call wording unchanged; no prompt or tool text added.
+ * On top of v132 (#390, main); v127 is #376 and v133 is #391 on their open branches. No migration.
+ */
+/**
+ * v137 — MUTUAL PATIENT DETECTOR (2026-10-28). The provider detector also
  * recognizes "one mutual patient" and "the mutual patient", including
  * plurals, so these callers can pass the after-hours provider gate.
- * On top of v126. No migration; production impact remains unmeasured.
+ * On top of v134 (#396, main); renumbered from v133 (v135 is #392, v136 is #393). No migration; production impact remains unmeasured.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v133-mutual-patient-detector-20261028";
+  "voice-runtime-v137-mutual-patient-detector-20261028";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can
