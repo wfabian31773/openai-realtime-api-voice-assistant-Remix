@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { VoiceCallRecord } from '../runtime/mediaStreamBridge';
 
+vi.hoisted(() => {
+  process.env.OPENAI_API_KEY ||= 'test-unused';
+});
+
 const createTicket = vi.fn(async (_payload: any): Promise<{ success: boolean; ticketNumber?: string; statusCode?: number }> => ({ success: true, ticketNumber: 'VA-TEST' }));
 const updateTicketCallData = vi.fn(async (_payload: any) => ({ success: true }));
 vi.mock('../../server/db', () => ({
