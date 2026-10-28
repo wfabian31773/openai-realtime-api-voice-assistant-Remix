@@ -316,6 +316,9 @@ describe('a third party who names a document AND asks to schedule is scheduling 
     ['we received the eye exam report; please hold her appointment', 146],
     ['we received the eye exam report and her visit needs to be moved', 146],
     ['recibimos el informe del examen de la vista y hay que posponer su cita', 146],
+    // A follow-up NOUN on a verb no list carries (Codex P2 on head c239fa3).
+    ['we received the eye exam report and need to get her a follow-up', 146],
+    ['we received the eye exam report; she is due for her next follow-up', 146],
   ] as const) {
     it(`"${words}" reaches the HVA Hub (reason ${reason})`, async () => {
       const app = await fakeApp();
@@ -358,6 +361,10 @@ describe('a third party who names a document AND asks to schedule is scheduling 
       'we need the visit notes and the eye exam report',
       'please send the records from her last office visit and the eye exam report',
       'we need the eye exam report for her appointment next week',
+      // "follow up" the VERB is a records chase, not an ask.
+      'calling to follow up on the eye exam report we requested',
+      'we are following up on the eye exam report',
+      'please send the eye exam report and the follow-up visit notes',
     ]) expect(scheduledOnlyByAnExamName(bound), bound).toBe(true);
     for (const loose of [
       'we have the chart notes and need to book an eye exam',

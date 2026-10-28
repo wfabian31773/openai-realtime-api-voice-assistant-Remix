@@ -404,11 +404,16 @@ function hasSeparateAppointmentAsk(folded: string): boolean {
  * read the way an exam name already is: it must be bound to a document
  * ("the visit notes", "the records from her last visit", "the eye exam report
  * for her appointment"), or the request falls back to the Hub, which is what
- * this line did before v127. `follow-up` is not on this list on purpose:
- * "calling to follow up on the eye exam report" is a records chase, and the
- * noun form is `APPOINTMENT_ASK`'s.
+ * this line did before v127. `follow-up` counts only as a NOUN, after an
+ * article, a possessive or a kind ("get her A follow-up", "her NEXT
+ * follow-up"; Codex P2 on `c239fa3`), so the verb in "calling TO follow up on
+ * the eye exam report" is still a records chase.
  */
-const APPOINTMENT_NOUN = /\b(?:appointments?|appts?|visits?|citas?|visitas?)\b/g;
+const APPOINTMENT_NOUN =
+  /\b(?:appointments?|appts?|visits?|citas?|visitas?)\b|(?<=\b(?:a|an|the|her|his|their|my|our|another|next|upcoming|new|routine|return)\s+)follow[ -]?ups?\b/g;
+// "the follow-up VISIT report": the noun after a kind of visit is still the
+// document's.
+const THEN_APPOINTMENT_NOUN = /^\s+(?:visits?|appointments?|appts?)\b/;
 // The kinds of visit `APPOINTMENT_ASK` already reads, so "the eye exam report
 // from the FOLLOW-UP visit" is still bound to the report.
 const APPOINTMENT_KIND = /(?:\b(?:new|routine|follow[ -]?up|return|office|clinic)\s+)+$/;
@@ -416,7 +421,7 @@ const APPOINTMENT_KIND = /(?:\b(?:new|routine|follow[ -]?up|return|office|clinic
 function everyAppointmentIsTheDocuments(folded: string): boolean {
   for (const noun of folded.matchAll(APPOINTMENT_NOUN)) {
     const before = folded.slice(0, noun.index!).replace(APPOINTMENT_KIND, '');
-    const after = folded.slice(noun.index! + noun[0].length);
+    const after = folded.slice(noun.index! + noun[0].length).replace(THEN_APPOINTMENT_NOUN, '');
     if (!BOUND_AFTER.test(after) && !BOUND_BEFORE.test(before)) return false;
   }
   return true;
