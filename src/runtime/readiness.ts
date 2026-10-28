@@ -887,7 +887,7 @@ import { callEnvironment } from "./callRecord";
  * an exact or uniquely fuzzy Console match on both ticket submission paths,
  * with the five-point margin checked against the entire roster. Contact field
  * descriptions survive the SDK conversion on answering-service and no-ivr-v2.
- * On top of v116. No migration; production impact remains unmeasured.
+ * On top of v131 (main); renumbered from v123. No migration; production impact remains unmeasured.
  */
 /**
  * v126 — NO-IVR PROMPT TRIM (2026-10-28). Remove repeated explanations from
@@ -925,8 +925,14 @@ import { callEnvironment } from "./callRecord";
  * terminate_call refuses ghost_call after a caller transcript on SIP and runtime.
  * On top of v130 (#387); renumbered from v121; v127 is #376 on its open branch. No migration; production impact remains unmeasured.
  */
+/**
+ * v132 — CALLBACK EXTENSIONS (2026-10-28). Queue ticket tools validate and
+ * normalize the base callback number and preserve a marked extension in
+ * staff-only call notes. On top of v131 (main); renumbered from v123. Production impact is unmeasured.
+ * `src/utils/phone.ts`, `src/tools/`.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v131-silence-ladder-heard-callers-20261028";
+  "voice-runtime-v132-callback-extension-20261028";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can
