@@ -6,6 +6,7 @@
 
 import { dncKey } from "../runtime/outbound/store";
 import { prepareDobFromPayload } from "./callEnqueue";
+import { parseOperatorPayload, US_E164 } from "./operatorLine";
 import { hashPayload, hashSecret, isConfirmExpired } from "./tokens";
 import {
   issueConfirmOnApprove,
@@ -111,17 +112,21 @@ export async function prepareContact(
   tokenJti: string,
   input: PrepareInput,
   now = new Date(),
+  callKind?: "operator",
 ): Promise<GateResult> {
-  const picked = pickPreparePayload(input.channel, input.payload as unknown as Record<string, unknown>);
+  const picked = callKind === "operator"
+    ? parseOperatorPayload(input.payload)
+    : pickPreparePayload(input.channel, input.payload as unknown as Record<string, unknown>);
   if (!picked.ok) return { ok: false, status: 400, error: picked.error };
+  const payload = { ...picked.payload } as Record<string, unknown>;
   const narrowed = { channel: input.channel, payload: picked.payload } as unknown as PrepareInput;
-  const valid = validatePrepare(narrowed);
+  const valid = callKind === "operator" ? { ok: true as const } : validatePrepare(narrowed);
   if (!valid.ok) return { ok: false, status: 400, error: valid.error };
 
   const ticketId =
-    (typeof picked.payload.ticketId === "string" && picked.payload.ticketId) || null;
+    (typeof payload.ticketId === "string" && payload.ticketId) || null;
   const ticketNumber =
-    (typeof picked.payload.ticketNumber === "string" && picked.payload.ticketNumber) || null;
+    (typeof payload.ticketNumber === "string" && payload.ticketNumber) || null;
 
   const row: ContactApprovalRow = {
     id: newId(),
@@ -130,9 +135,10 @@ export async function prepareContact(
     tokenJti,
     ticketId,
     ticketNumber,
-    phoneKey: input.channel === "email" ? null : phoneKeyOfPayload(picked.payload),
-    payload: picked.payload,
-    payloadHash: hashPayload(picked.payload),
+    phoneKey: input.channel === "email" || (callKind === "operator" && !US_E164.test(String(payload.phone)))
+      ? null : phoneKeyOfPayload(payload),
+    payload,
+    payloadHash: hashPayload(payload),
     confirmTokenHash: null,
     confirmExpiresAt: null,
     confirmUsedAt: null,
@@ -170,6 +176,9 @@ export async function approveContact(
   }
   if (expectedPayloadHash !== current.payloadHash) {
     return { ok: false, status: 409, error: "payloadHash does not match the request on file" };
+  }
+  if (hashPayload(current.payload) !== current.payloadHash) {
+    return { ok: false, status: 409, error: "Stored payload does not match the locked hash" };
   }
   const confirm = issueConfirmOnApprove(now);
   const approval = await store.updateApproval(

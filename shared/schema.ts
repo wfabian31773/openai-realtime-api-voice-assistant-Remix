@@ -1555,6 +1555,26 @@ export const contactApprovals = pgTable("contact_approvals", {
   check("contact_approvals_status_check", sql`status IN ('pending', 'approved', 'sending', 'rejected', 'cancelled', 'committed', 'failed', 'unknown')`),
 ]);
 
+// Durable operator transcripts are separate from the PHI-free audit/result.
+// Additive DDL: migrations/add_operator_line.sql (apply separately).
+export const pluginOperatorCalls = pgTable("plugin_operator_calls", {
+  sessionId: varchar("session_id", { length: 64 }).primaryKey(),
+  approvalId: varchar("approval_id", { length: 64 }).notNull(),
+  tokenJti: varchar("token_jti", { length: 32 }).notNull(),
+  callSid: varchar("call_sid", { length: 64 }),
+  status: varchar("status", { length: 24 }).notNull(),
+  startedAt: timestamp("started_at", { withTimezone: true }).notNull(),
+  endedAt: timestamp("ended_at", { withTimezone: true }),
+  turns: jsonb("turns").notNull().default(sql`'[]'::jsonb`),
+});
+
+// The existing do_not_contact list uses US last-10 keys. International
+// operator opt-outs are keyed on the full E.164 destination here.
+export const pluginOperatorDnc = pgTable("plugin_operator_dnc", {
+  phone: varchar("phone", { length: 16 }).primaryKey(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
 export const pluginMessageOutbox = pgTable("plugin_message_outbox", {
   id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
   callSid: varchar("call_sid", { length: 64 }),
