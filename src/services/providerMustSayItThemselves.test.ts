@@ -175,6 +175,7 @@ describe('mutual patient self-identification', () => {
     'Jane Smith, the mutual patient. This is Dr. Lee calling.',
     'My name is Jane, calling about the mutual patient.',
     'My name is Jane, a nurse calling about the mutual patient.',
+    'This is Sarah, our office manager, about our mutual patient.',
     'My name is Jane Smith, the mutual patient. Calling about the mutual patient.',
     'My name is Jane Smith, the mutual patient. This is Dr. Lee calling.',
   ])('preserves independent provider evidence: %s', (spoken) => {
@@ -265,6 +266,50 @@ describe('mutual patient clauses after a provider introduction', () => {
         reason: 'Provider requesting the on-call physician',
         corroboration,
       }), feed).toMatchObject({ allowed: false, code: 'provider_not_stated_by_caller' });
+    }
+  });
+
+  it.each(
+    ['This is Sarah,', "I'm Sarah,", 'I am Sarah,', 'My name is Sarah,', 'Sarah,']
+      .flatMap((introduction) => ['the', 'a', 'your', 'our'].flatMap((article) =>
+        ['patient', 'patients'].flatMap((noun) => [
+          'referred to you',
+          'scheduled for tomorrow',
+          'seen last week',
+          "transferred from Dr. X's office",
+          'from yesterday',
+          'who called earlier',
+          'that you saw',
+        ].map((continuation) => `${introduction} ${article} mutual ${noun} ${continuation}.`)),
+      )),
+  )('keeps a named patient introduction excluded regardless of its modifier: %s', (spoken) => {
+    expect(callerSaysTheyAreAProvider(spoken)).toBe(false);
+    for (const feed of ['core', 'runtime'] as const) {
+      releaseCallerSpeech(CALL);
+      if (feed === 'core') recordCallerSpeech(CALL, spoken);
+      else noteCallerTranscript(CALL, [`CALLER: ${spoken}`]);
+      const corroboration = corroborate(CALL, '');
+      expect(corroboration.providerStated, feed).toBe(false);
+      expect(judgeEscalation({
+        callerType: 'healthcare_provider',
+        reason: 'Provider requesting the on-call physician',
+        corroboration,
+      }), feed).toMatchObject({ allowed: false, code: 'provider_not_stated_by_caller' });
+    }
+  });
+
+  it.each([
+    ['This is Sarah, the mutual patient referred to you. This is Dr. Lee calling.'],
+    ['This is Sarah, the mutual patient scheduled for tomorrow. Calling about our mutual patient.'],
+    ['This is Sarah, the mutual patient seen last week.', 'This is Dr. Lee calling.'],
+    ["This is Sarah, the mutual patient transferred from Dr. X's office.", 'Calling about our mutual patient.'],
+  ].map((turns) => ({ turns })))('preserves independent provider evidence after patient modifiers in $turns', ({ turns }) => {
+    expect(callerSaysTheyAreAProvider(turns)).toBe(true);
+    for (const feed of ['core', 'runtime'] as const) {
+      releaseCallerSpeech(CALL);
+      if (feed === 'core') turns.forEach((turn) => recordCallerSpeech(CALL, turn));
+      else noteCallerTranscript(CALL, turns.map((turn) => `CALLER: ${turn}`));
+      expect(corroborate(CALL, '').providerStated, feed).toBe(true);
     }
   });
 
@@ -484,6 +529,10 @@ describe('the gate', () => {
     'This is Sarah, the mutual patient’s nurse.',
     "This is Sarah, the mutual patients' nurse.",
     'This is Sarah, the mutual patients’ nurse.',
+    "This is Sarah, the mutual patients' doctor.",
+    'This is Sarah, the mutual patients’ doctor.',
+    "This is Sarah, your mutual patient's nurse.",
+    "This is Sarah, your mutual patients' doctor.",
     "I am Sarah, the mutual patient's physician.",
     "I'm Sarah, the mutual patient's nurse practitioner.",
     "My name is Sarah, the mutual patient's coordinator.",

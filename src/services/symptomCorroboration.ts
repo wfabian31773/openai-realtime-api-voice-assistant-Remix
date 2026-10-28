@@ -625,7 +625,7 @@ const PROVIDER_SELF_IDENTIFICATION: RegExp[] = [
 // A mutual patient can be the caller, so exclude self-identification for this
 // evidence only; other provider statements can still stand. Match the full
 // noun phrase so its leading words do not hide the caller's identification.
-const MUTUAL_PATIENT = /\b(?:the one mutual patients?|one of the mutual patients|(?:our|(?:a|one|the) mutual) (?:mutual )?patients?)\b/;
+const MUTUAL_PATIENT = /\b(?:the one mutual patients?|one of the mutual patients|your mutual patients?|(?:our|(?:a|one|the) mutual) (?:mutual )?patients?)\b/;
 const PATIENT_IDENTIFICATION_BEFORE =
   /\b(?:i(?:'m| am)|this is|it(?:'s| is) me,?)\s+(?:(?:actually|also|just|indeed)\s+)*(?:(?:calling as|me,?)\s+)?$/;
 // A name can sit between the identification and its appositive, but only
@@ -666,15 +666,14 @@ const PATIENT_PROVIDER_ROLE_AFTER = new RegExp(
   String.raw`^'(?:s)?\s+(?:${PROVIDER_ROLE}|${OFFICE_STAFF})\b${NOT_POSSESSIVE}`,
 );
 const PATIENT_CALL_DESCRIPTION_AFTER = /^\s+(?:calls?|callbacks?|follow-?ups?|consult(?:ation)?s?|referrals?|requests?|questions?)\b/;
-// A name followed by "the mutual patient" identifies the caller only when
-// the noun phrase ends the introduction. Possessives, relative/prepositional
-// modifiers and -ing participles still belong to that phrase ("the mutual
-// patient you called", "the mutual patient returning your call",
-// "the mutual patient's daughter"). Otherwise its continuation is a predicate
-// about someone else: "This is Sarah, our mutual patient has a question".
-// Check the phrase boundary rather than maintaining a list of predicate verbs.
-const PATIENT_APPOSITIVE_END_AFTER =
-  /^(?:\s*(?:[,.;:!?]|$)|'|\s+(?:i|we|you|he|she|it|they|who|whom|whose|that|which|here|there|of|from|at|in|on|for|with|[a-z][a-z'-]+ing)\b)/;
+// Preserve the established provider reading of separate subject/predicate
+// clauses: "This is Sarah, our mutual patient has a question". These finite
+// predicates are positive evidence of that form; all other continuations
+// belong to the named patient's introduction by default. In particular, no
+// list of allowed patient modifiers can cover every participle or relative
+// clause ("referred to you", "scheduled for tomorrow", "that you saw").
+const PATIENT_SEPARATE_CLAUSE_AFTER =
+  /^\s+(?:(?:still|never|usually)\s+)?(?:is|was|has(?:n't)?|had|will|won't|can(?:not)?|does|did|needs|requires|wants|calls|called|came|asked|left|received|got)\b/;
 
 /**
  * Pure, for tests: does this caller text identify the caller as a provider?
@@ -691,8 +690,9 @@ export function callerSaysTheyAreAProvider(spoken: string | readonly string[]): 
       PROVIDER_SELF_IDENTIFICATION.some((re) => affirmed(text, re)) ||
       affirmed(text, MUTUAL_PATIENT, (before, after) => {
         if (PATIENT_PROVIDER_ROLE_AFTER.test(after) || PATIENT_CALL_DESCRIPTION_AFTER.test(after)) return true;
-        const identifiesPatientByName = PATIENT_APPOSITIVE_END_AFTER.test(after) &&
-          (PATIENT_APPOSITIVE_BEFORE.test(before) || BARE_PATIENT_APPOSITIVE_BEFORE.test(before));
+        const identifiesPatientByName =
+          (PATIENT_APPOSITIVE_BEFORE.test(before) || BARE_PATIENT_APPOSITIVE_BEFORE.test(before)) &&
+          !PATIENT_SEPARATE_CLAUSE_AFTER.test(after);
         return !PATIENT_IDENTIFICATION_BEFORE.test(before) &&
           !identifiesPatientByName &&
           !(PATIENT_INTRODUCTION_START.test(before) && PATIENT_APPOSITIVE_AFTER.test(after)) &&
