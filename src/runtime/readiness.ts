@@ -887,7 +887,7 @@ import { callEnvironment } from "./callRecord";
  * an exact or uniquely fuzzy Console match on both ticket submission paths,
  * with the five-point margin checked against the entire roster. Contact field
  * descriptions survive the SDK conversion on answering-service and no-ivr-v2.
- * On top of v116. No migration; production impact remains unmeasured.
+ * On top of v131 (main); renumbered from v123. No migration; production impact remains unmeasured.
  */
 /**
  * v126 — NO-IVR PROMPT TRIM (2026-10-28). Remove repeated explanations from
@@ -926,9 +926,15 @@ import { callEnvironment } from "./callRecord";
  * On top of v130 (#387); renumbered from v121; v127 is #376 on its open branch. No migration; production impact remains unmeasured.
  */
 /**
+ * v132 — CALLBACK EXTENSIONS (2026-10-28). Queue ticket tools validate and
+ * normalize the base callback number and preserve a marked extension in
+ * staff-only call notes. On top of v131 (main); renumbered from v123. Production impact is unmeasured.
+ * `src/utils/phone.ts`, `src/tools/`.
+ */
+/**
  * v136 (renumbered from v126) — PCP UNCLASSIFIED IS FLOOR ONLY (2026-10-28). The PCP agent cannot
  * choose unclassified_call in its intake tool; the after-hangup floor still
- * files unclassified calls for a person to route. On top of v131 (#388); v127 is #376, v132 is #390, v133 is #391, v134 is #396 and v135 is #392 on their open branches. No migration; production impact remains unmeasured.
+ * files unclassified calls for a person to route. On top of v132 (#390, main); v127 is #376, v133 is #391, v134 is #396 and v135 is #392 on their open branches. No migration; production impact remains unmeasured.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
   "voice-runtime-v136-pcp-unclassified-floor-only-20261028";
