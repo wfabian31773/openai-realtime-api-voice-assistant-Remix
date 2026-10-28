@@ -33,6 +33,7 @@ import { registerTool, missing, type MissingFields, type ToolResult } from './re
 import { LAST_NAME_ASK, LAST_NAME_FIELD_DESCRIPTION } from './contactCaptureGuidance';
 import { gateRefusalsSoFar, noteGateRefusal, noteCallFact, callFactNoted } from './gateAttempts';
 import { forgetIfSameName, nameKey, rememberConfirmedClinic, rememberVerifiedIdentity, verifiedIdentityFor } from './verifiedIdentity';
+import { LOOKUP_UNSURE_FILE_FIX, LOOKUP_UNSURE_FIX, LOOKUP_UNSURE_SAY, spokenFirstNameAgreesWithChart } from './lookupUnsure';
 import { appointmentAccess } from '../services/appointmentAccess';
 import './patientAppointments';
 
@@ -401,6 +402,40 @@ registerTool({
     }
 
     /**
+     * VA-76221: the spoken last name and the chart last name disagree more
+     * often than they agree (transcription, maiden name). If this call
+     * already holds a chart name whose first name agrees, re-run the trio
+     * with THAT spelling before telling the model nobody is on file.
+     */
+    if (!resolved.patientFound && !explicitlyAmbiguous && first && last && dob) {
+      const held = verifiedIdentityFor(str(input.call_sid));
+      if (
+        held?.firstName &&
+        held.lastName &&
+        spokenFirstNameAgreesWithChart(first, held.firstName) &&
+        nameKey(held.lastName) !== nameKey(last)
+      ) {
+        const corrected = await scheduleLookupService.lookupPatient({
+          firstName: held.firstName,
+          lastName: held.lastName,
+          dateOfBirth: dob,
+          deadlineAt,
+        });
+        // Spoken DOB only, and only a name+DOB hit. The book's name rung
+        // would otherwise re-resolve the previous person after a different
+        // birthday missed the trio (Codex P1 on #375).
+        if (
+          corrected.patientFound &&
+          corrected.matchedBy === 'name_and_dob' &&
+          corrected.identity?.unique !== false
+        ) {
+          console.info('[TOOLS] lookup_patient: spoken name missed, matched on the chart name instead');
+          resolved = corrected;
+        }
+      }
+    }
+
+    /**
      * THE AFFIRMED FIRST NAME PICKS ONE PERSON AMONG SEVERAL ON A PHONE — v54.
      *
      * Measured 2026-09-16: every one of the 26 recognised-caller date-of-birth
@@ -495,30 +530,29 @@ registerTool({
           success: true,
           found: false,
           lookup_misses: misses,
-          message:
-            'No record found under those details. That is fine — I will take the request ' +
-            'as given and the team will match it to the chart.',
+          message: LOOKUP_UNSURE_SAY,
           fix:
-            `This is identity miss number ${misses} on this call. Do NOT ask the caller for ` +
-            'their name or date of birth again, and do not look them up again with different ' +
-            'spellings. Take the request and file it now with the details they gave — the ' +
-            'filing tool does not require a match.',
+            `This is identity miss number ${misses} on this call. ` +
+            LOOKUP_UNSURE_FILE_FIX +
+            ' Do NOT call lookup_patient again. Do NOT ask the caller for their name or date of birth again. Take the request and ' +
+            'file it now with the details they gave — the filing tool does not require a match.',
         };
       }
       return {
         success: true,
         found: false,
         lookup_misses: misses,
-        message:
-          'No record found. They may be new, or calling from a different number. ' +
-          'Ask for their name and date of birth if you have not already.',
+        message: askedAndMissed
+          ? LOOKUP_UNSURE_SAY
+          : 'No record found. They may be new, or calling from a different number. ' +
+            'Ask for their name and date of birth if you have not already.',
         ...(askedAndMissed
           ? {
               fix:
-                'That name and date of birth matched nobody on file. You may ask ONCE more — ' +
-                'have them spell the last name, and give the date of birth as month, then day, ' +
-                'then year — then look them up again. If that also misses, do not ask a third ' +
-                'time: take the request and file it with what they gave.',
+                LOOKUP_UNSURE_FIX +
+                ' You may ask ONCE more — have them spell the last name, and give the date of ' +
+                'birth as month, then day, then year — then look them up again. If that also ' +
+                'misses, do not ask a third time: take the request and file it with what they gave.',
             }
           : {}),
       };
