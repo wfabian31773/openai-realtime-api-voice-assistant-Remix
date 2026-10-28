@@ -23,12 +23,13 @@ vi.mock('../../server/services/ticketingApiClient', () => ({
 }));
 
 const writeToOutbox = vi.fn();
+const attemptSend = vi.fn();
 vi.mock('./ticketOutboxService', async (importOriginal) => {
   // The envelope helpers stay REAL. Stubbing `wrapCreateTicketPayload` would
   // make this suite agree with itself about the discriminator while the outbox
   // read a different one, which is the only way this wiring can silently fail.
   const actual = await importOriginal<typeof import('./ticketOutboxService')>();
-  return { ...actual, TicketOutboxService: { writeToOutbox } };
+  return { ...actual, TicketOutboxService: { writeToOutbox, attemptSend } };
 });
 
 // Registration is an import side effect, and askAsFor reads the registry — so
@@ -66,19 +67,23 @@ const OPTICAL_OTHER = {
 };
 
 beforeEach(() => {
-  vi.clearAllMocks();
+  vi.resetAllMocks();
   writeToOutbox.mockResolvedValue({ outboxId: 'ob-1', alreadyExists: false });
+  attemptSend.mockImplementation(async (outboxId: string) => {
+    const result = await createTicket(writeToOutbox.mock.calls[writeToOutbox.mock.calls.length - 1][0].params);
+    return { ...result, outboxId, ...(!result.success && (result.statusCode === 400 || result.statusCode === 422) ? { terminal: true } : {}) };
+  });
 });
 
-describe('the happy path is untouched', () => {
-  it('returns the ticket and never opens the outbox', async () => {
+describe('the happy path', () => {
+  it('persists before returning the ticket', async () => {
     createTicket.mockResolvedValue({ success: true, ticketNumber: 'VA-52001' });
 
     const res = await createTicketDurable(OPTICAL_OTHER);
 
     expect(res.ticketNumber).toBe('VA-52001');
     expect(res.queued).toBeUndefined();
-    expect(writeToOutbox).not.toHaveBeenCalled();
+    expect(writeToOutbox).toHaveBeenCalledOnce();
   });
 });
 
@@ -235,14 +240,14 @@ describe('a payload the server read and refused', () => {
     error: 'Missing required information: surgeon. Surgery tickets are assigned by surgeon.',
   };
 
-  it('is never queued — retrying cannot change a refusal', async () => {
+  it('does not promise a queued retry after a refusal', async () => {
     createTicket.mockResolvedValue(REFUSED);
 
     const res = await createTicketDurable(OPTICAL_OTHER);
 
     expect(res.terminal).toBe(true);
     expect(res.queued).toBe(false);
-    expect(writeToOutbox).not.toHaveBeenCalled();
+    expect(writeToOutbox).toHaveBeenCalledOnce();
   });
 
   it('becomes a question for the caller, in the tool\'s own words', async () => {
@@ -344,7 +349,7 @@ describe('a payload the server read and refused', () => {
       retryable?: boolean;
       error?: string;
     };
-    expect(writeToOutbox).not.toHaveBeenCalled();
+    expect(writeToOutbox).toHaveBeenCalledOnce();
     expect(out.success).toBe(false);
     expect(out.retryable).toBe(false);
     // The app's own text is withheld from the tool result (v116, thread
@@ -364,7 +369,7 @@ describe('a payload the server read and refused', () => {
     });
     const res = await createTicketDurable(OPTICAL_OTHER);
     expect(res.terminal).toBe(true);
-    expect(writeToOutbox).not.toHaveBeenCalled();
+    expect(writeToOutbox).toHaveBeenCalledOnce();
   });
 
   it('but the 2026-08-31 outage still gets captured', async () => {

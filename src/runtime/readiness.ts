@@ -889,7 +889,7 @@ import { callEnvironment } from "./callRecord";
  * an exact or uniquely fuzzy Console match on both ticket submission paths,
  * with the five-point margin checked against the entire roster. Contact field
  * descriptions survive the SDK conversion on answering-service and no-ivr-v2.
- * On top of v116. No migration; production impact remains unmeasured.
+ * On top of v131 (main); renumbered from v123. No migration; production impact remains unmeasured.
  */
 /**
  * v126 — NO-IVR PROMPT TRIM (2026-10-28). Remove repeated explanations from
@@ -927,8 +927,22 @@ import { callEnvironment } from "./callRecord";
  * terminate_call refuses ghost_call after a caller transcript on SIP and runtime.
  * On top of v130 (#387); renumbered from v121; v127 is #376 on its open branch. No migration; production impact remains unmeasured.
  */
+/**
+ * v132 — CALLBACK EXTENSIONS (2026-10-28). Queue ticket tools validate and
+ * normalize the base callback number and preserve a marked extension in
+ * staff-only call notes. On top of v131 (main); renumbered from v123. Production impact is unmeasured.
+ * `src/utils/phone.ts`, `src/tools/`.
+ */
+/**
+ * v134 — GOODBYE GRACE HANGUP (2026-10-28). After a completed goodbye exchange
+ * (conservative English/Spanish matcher), the bridge waits GOODBYE_GRACE_MS
+ * (6s) after playback and then ends the call deliberately ("goodbye_grace").
+ * Caller speech, a new response or a tool call cancels it. Silence ladder and
+ * ghost-call wording unchanged; no prompt or tool text added.
+ * On top of v132 (#390, main); v127 is #376 and v133 is #391 on their open branches. No migration.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v131-silence-ladder-heard-callers-20261028";
+  "voice-runtime-v134-goodbye-grace-hangup-20261028";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

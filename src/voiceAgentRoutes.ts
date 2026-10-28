@@ -8040,7 +8040,7 @@ export function setupVoiceAgentRoutes(app: Express): void {
         try {
           const ticketUpdateResult = await ticketingApiClient.updateTicketCallData({
             callSid: effectiveTwilioCallSid,
-            transcript: transcript || undefined,
+            transcript: (transcript || '') || undefined,
             callerPhone: callLog?.from || undefined,
             dialedNumber: callLog?.to || undefined,
             agentUsed: agentSlug || undefined,

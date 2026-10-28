@@ -7,6 +7,11 @@
  * would matter to a records clerk holding the ticket.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+
+vi.mock('../services/ticketOutboxService', async () => {
+  const { queueTicketOutboxMock } = await import('../testUtils/queueTicketOutbox');
+  return queueTicketOutboxMock();
+});
 import { runTool } from './registry';
 import './sharedPatientTools';
 import './medicalRecordsTools';
@@ -86,13 +91,30 @@ describe('patientPhone is the digits, not the raw string', () => {
     expect((out as { missingFields?: string[] }).missingFields).toContain('callback_number');
   });
 
-  it('refuses a second number or an extension instead of filing a wrong one', async () => {
+  it('keeps an explicitly marked extension in staff notes and the callback number separate', async () => {
+    const api = await client();
+    const create = vi.spyOn(api, 'createTicket').mockResolvedValueOnce(ok('VA-TEST-PHONE-EXT'));
+
+    const out = await runTool('file_records_ticket', {
+      ...BASE,
+      callback_number: '202-555-0142 ext 202',
+      request_description: 'I need a copy of my medical records',
+    });
+
+    expect(out.success).toBe(true);
+    const payload = create.mock.calls[0][0];
+    expect(payload.patientPhone).toBe('2025550142');
+    expect(payload.callData?.transcript).toContain('Callback extension: 202');
+    expect(payload.description).not.toContain('Callback extension:');
+  });
+
+  it('refuses a second number instead of filing a wrong one', async () => {
     const api = await client();
     const create = vi.spyOn(api, 'createTicket');
 
     const out = (await runTool('file_records_ticket', {
       ...BASE,
-      callback_number: '202-555-0142 ext 202',
+      callback_number: '202-555-0101 / 303-555-0102',
       request_description: 'I need a copy of my medical records',
     })) as Record<string, unknown>;
 
@@ -286,7 +308,7 @@ describe('the things that make a clerk ring the patient back', () => {
     expect(r.missingFields).toContain('date_of_birth');
   });
 
-  it('reports a failed filing rather than claiming a ticket', async () => {
+  it('queues a failed filing without claiming a ticket number', async () => {
     const api = await client();
     vi.spyOn(api, 'createTicket').mockResolvedValueOnce({ success: false, error: 'upstream 503' } as never);
 
@@ -295,8 +317,9 @@ describe('the things that make a clerk ring the patient back', () => {
       request_description: 'copy of my records',
     })) as Record<string, unknown>;
 
-    expect(r.success).toBe(false);
-    expect(r.retryable).toBe(true);
+    expect(r.success).toBe(true);
+    expect(r.filed_pending).toBe(true);
+    expect(r.ticket_number).toBeUndefined();
   });
 });
 

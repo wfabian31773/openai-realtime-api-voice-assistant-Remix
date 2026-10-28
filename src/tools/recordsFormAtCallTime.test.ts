@@ -15,6 +15,11 @@
  * say, the verbal directions, and the re-send's latch.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+
+vi.mock('../services/ticketOutboxService', async () => {
+  const { queueTicketOutboxMock } = await import('../testUtils/queueTicketOutbox');
+  return queueTicketOutboxMock();
+});
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { runTool } from './registry';
