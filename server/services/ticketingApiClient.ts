@@ -7,6 +7,7 @@ import { isNoTicketError } from './ticketingSyncPolicy';
 import type { PcpTicketPayload, PcpTicketResponse, PcpWithdrawRequest, PcpWithdrawResponse } from '../../src/pcp/pcpTicketing';
 import { noteTicketFiled } from './ticketFilingPulse';
 import { normalizeProviderNameForTicket } from '../../src/services/ticketFieldSanitizers';
+import { callbackExtensionFilings, syncWithCallbackExtensions } from '../../src/services/callbackExtensionNote';
 
 export interface CallData {
   callSid?: string;
@@ -114,6 +115,8 @@ export interface CreateTicketParams {
 
 export interface CreateTicketResponse {
   success: boolean;
+  /** The call was appended to an existing ticket as a separate contact. */
+  consolidated?: boolean;
   ticketId?: number;
   ticketNumber?: string;
   error?: string;
@@ -1110,6 +1113,17 @@ export class TicketingApiClient {
   }
 
   async updateTicketCallData(
+    params: UpdateTicketCallDataParams
+  ): Promise<UpdateTicketCallDataResponse> {
+    try {
+      return await syncWithCallbackExtensions(params, callbackExtensionFilings, payload => this.updateTicketCallDataDirect(payload));
+    } catch {
+      // Never replace staff notes when the durable filing cannot be read.
+      return { success: false, error: 'Could not load ticket filings for call data sync' };
+    }
+  }
+
+  private async updateTicketCallDataDirect(
     params: UpdateTicketCallDataParams
   ): Promise<UpdateTicketCallDataResponse> {
     console.info("[TICKETING API] Updating ticket with call data:", {

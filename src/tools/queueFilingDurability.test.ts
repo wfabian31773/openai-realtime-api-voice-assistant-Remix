@@ -18,9 +18,10 @@ import { join } from 'node:path';
 process.env.DATABASE_URL ||= 'postgresql://unused:unused@127.0.0.1:5432/unused';
 
 const writeToOutbox = vi.fn();
+const attemptSend = vi.fn();
 vi.mock('../services/ticketOutboxService', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../services/ticketOutboxService')>();
-  return { ...actual, TicketOutboxService: { writeToOutbox } };
+  return { ...actual, TicketOutboxService: { writeToOutbox, attemptSend } };
 });
 
 const QUEUE_TOOL_FILES: Array<[file: string, toolName: string]> = [
@@ -68,6 +69,10 @@ describe('the largest queue, end to end', () => {
     vi.restoreAllMocks();
     writeToOutbox.mockReset();
     writeToOutbox.mockResolvedValue({ outboxId: 'ob-tech-1', alreadyExists: false });
+    attemptSend.mockReset();
+    attemptSend.mockImplementation(async (outboxId: string) => ({
+      ...await (await client()).createTicket(writeToOutbox.mock.calls[writeToOutbox.mock.calls.length - 1][0].params), outboxId,
+    }));
   });
 
   it('captures the request when create-ticket fails, and says so without a number', async () => {
@@ -102,7 +107,7 @@ describe('the largest queue, end to end', () => {
     expect(res.ticket_number).toBeUndefined();
   });
 
-  it('does not touch the outbox on a normal filing', async () => {
+  it('does not touch the outbox on an unkeyed normal filing', async () => {
     const api = await client();
     vi.spyOn(api, 'createTicket').mockResolvedValue({
       success: true,

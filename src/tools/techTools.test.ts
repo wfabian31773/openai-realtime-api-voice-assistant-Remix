@@ -7,6 +7,11 @@
  * prescription with no prescriber.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+
+vi.mock('../services/ticketOutboxService', async () => {
+  const { queueTicketOutboxMock } = await import('../testUtils/queueTicketOutbox');
+  return queueTicketOutboxMock();
+});
 import { runTool } from './registry';
 import './sharedPatientTools';
 import './techTools';
@@ -77,13 +82,13 @@ describe('patientPhone is the digits, not the raw string', () => {
     expect((out as { missingFields?: string[] }).missingFields).toContain('callback_number');
   });
 
-  it('refuses a second number or an extension instead of filing a wrong one', async () => {
+  it('refuses a second number instead of filing a wrong one', async () => {
     const api = await client();
     const create = vi.spyOn(api, 'createTicket');
 
     const out = (await runTool('file_tech_ticket', {
       ...BASE,
-      callback_number: '555-555-0100 ext 202',
+      callback_number: '202-555-0101 / 303-555-0102',
       request_description: 'I need a refill of my Latanoprost',
     })) as Record<string, unknown>;
 
@@ -252,6 +257,7 @@ describe('what it refuses, and what it does not', () => {
     const api = await client();
     vi.spyOn(api, 'createTicket').mockResolvedValueOnce({
       success: false,
+      statusCode: 422,
       error: 'Validation failed',
     } as never);
 

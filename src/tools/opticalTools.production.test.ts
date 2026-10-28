@@ -1,6 +1,11 @@
 /** Synthetic patient history; external services are stubbed. */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
+vi.mock('../services/ticketOutboxService', async () => {
+  const { queueTicketOutboxMock } = await import('../testUtils/queueTicketOutbox');
+  return queueTicketOutboxMock();
+});
+
 vi.hoisted(() => {
   process.env.DATABASE_URL ??= 'postgres://test:test@127.0.0.1:5432/test';
 });
@@ -338,9 +343,9 @@ describe('lookup_patient, on a validated synthetic match, resolved against the f
     expect((out as { missingFields?: string[] }).missingFields).toContain('callback_number');
   });
 
-  it('refuses a second number or an extension instead of filing a wrong one', async () => {
+  it('refuses a second number instead of filing a wrong one', async () => {
     // The failure this ceiling exists to prevent: a raw digit count with no
-    // upper bound would have normalized a two-number or extension capture
+    // upper bound would have normalized a two-number capture
     // down to a plausible-looking (and wrong) 10 digits, filing a ticket
     // with a callback number nobody could reach — worse than the loud 400
     // it replaces, and invisible in a ticket-count metric.
@@ -352,7 +357,7 @@ describe('lookup_patient, on a validated synthetic match, resolved against the f
       first_name: 'Alex',
       last_name: 'Synthetic',
       date_of_birth: '01/02/1970',
-      callback_number: '555-555-0100 ext 202',
+      callback_number: '202-555-0101 / 303-555-0102',
       location: 'Eastvale',
       request_description: 'my glasses broke at the hinge',
     })) as Record<string, unknown>;
