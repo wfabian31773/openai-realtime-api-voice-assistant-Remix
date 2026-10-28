@@ -321,6 +321,10 @@ describe('a third party who names a document AND asks to schedule is scheduling 
       'we have the eye exam report and the patient wants an eye exam',
       'we received the eye exam report and need to set up a follow-up visit',
       'we received the eye exam report and want to arrange another office visit',
+      // A bare "follow-up" is the thing asked for, with no visit or
+      // appointment after it.
+      'we received the eye exam report and the patient needs a follow-up',
+      'we have the eye exam report and want to arrange a follow-up',
     ]) expect(scheduledOnlyByAnExamName(loose), loose).toBe(false);
   });
 });
