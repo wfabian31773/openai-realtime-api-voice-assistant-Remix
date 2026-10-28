@@ -23,3 +23,31 @@ it('create-ticket transport does not reattach a held record after a DOB correcti
     patientPhone: '5555550100', patientBirthYear: '1980', patientBirthMonth: '02', patientBirthDay: '03', description: 'Synthetic request', callData: { callSid: sid } });
   expect(send.mock.calls[0][2]).toMatchObject({ patientBirthYear: '1980', validatedPatient: undefined });
 });
+
+it.each([
+  ['Mary Ann', 'Synthetic'],
+  ['Mary Ann', 'Synthetic Example'],
+])('simplified transport preserves validated name boundaries: %s / %s', async (firstName, lastName) => {
+  const nextAppointment = { date: '2099-01-01', location: 'Synthetic Clinic' };
+  rememberVerifiedIdentity(sid, { firstName, lastName, dateOfBirth: '1970-01-02', certain: true,
+    personId: 'synthetic-person', nextAppointment });
+  const api = new TicketingApiClient();
+  vi.spyOn(api as any, 'warmUpIfStale').mockResolvedValue(true);
+  const send = vi.spyOn(api as any, 'makeRequest').mockResolvedValue({ success: false });
+  await api.submitTicket({ patientFullName: `  ${firstName}  ${lastName} `, patientDOB: 'Unknown',
+    reasonForCalling: 'Synthetic callback', preferredContactMethod: 'phone', callData: { callSid: sid } });
+  expect(send.mock.calls[0][2]).toMatchObject({ patientDOB: '1970-01-02', locationOfLastVisit: 'Synthetic Clinic',
+    validatedPatient: { firstName, lastName, personId: 'synthetic-person', nextAppointment } });
+});
+
+it.each([
+  ['Other Synthetic', 'Unknown'],
+  ['Mary Ann Synthetic', '1980-02-03'],
+])('simplified transport rejects conflicting name or DOB: %s / %s', async (patientFullName, patientDOB) => {
+  rememberVerifiedIdentity(sid, { firstName: 'Mary Ann', lastName: 'Synthetic', dateOfBirth: '1970-01-02', certain: true });
+  const api = new TicketingApiClient();
+  vi.spyOn(api as any, 'warmUpIfStale').mockResolvedValue(true);
+  const send = vi.spyOn(api as any, 'makeRequest').mockResolvedValue({ success: false });
+  await api.submitTicket({ patientFullName, patientDOB, reasonForCalling: 'Synthetic callback', preferredContactMethod: 'phone', callData: { callSid: sid } });
+  expect(send.mock.calls[0][2].validatedPatient).toBeUndefined();
+});

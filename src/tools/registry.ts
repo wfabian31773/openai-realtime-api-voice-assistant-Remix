@@ -1,5 +1,4 @@
 import { prepareTicketIdentity } from './ticketIdentity';
-import { detectCrossQueue } from './queueRouting';
 /**
  * THE TOOL LIBRARY.
  *
@@ -296,16 +295,8 @@ export async function runTool(
     // Keep that provenance instead of turning a held office into caller input.
     if (name === 'file_optical_ticket') prepared.input.location = input.location;
     input = prepared.input;
-    // DOB refusal belongs to the handler: it carries the diagnostic/fix and
-    // decideDobEscape's per-call ask-once budget. This enrichment must not
-    // introduce a second, unbounded refusal in front of it.
-    // Surgery can file into Optical too; its handler owns the same bounded
-    // office refusal for those redirects, including the exhausted-ask exit.
-    const redirectedToOptical = name === 'file_surgery_ticket' && prepared.missing === 'location' &&
-      detectCrossQueue(String(input.request_description ?? ''), 2)?.departmentId === 1;
-    if (prepared.missing && prepared.missing !== 'date_of_birth' && name !== 'file_optical_ticket' && !redirectedToOptical) {
-      return missing([prepared.missing], prepared.message!);
-    }
+    // Enrich only. Each handler owns its bounded refusals and fallback;
+    // Optical alone requires a clinic, including redirects into that lane.
   }
 
   const bad = validateInput(def, input);

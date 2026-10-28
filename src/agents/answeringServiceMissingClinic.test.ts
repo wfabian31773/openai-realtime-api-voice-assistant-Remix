@@ -28,6 +28,7 @@ vi.mock('../services/scheduleLookupService', () => ({
 vi.mock('../services/syncAgentService', () => ({ SyncAgentService: { submitSimplifiedTicket: h.submit } }));
 import { createAnsweringServiceAgent } from './answeringServiceAgent';
 import { resetVerifiedIdentities } from '../tools/verifiedIdentity';
+import { validatedPatientFor } from '../tools/ticketIdentity';
 
 const sid = 'CA' + 'e'.repeat(32);
 const args = { first_name: 'Alex', last_name: 'Synthetic', date_of_birth: '1970-01-02' };
@@ -89,4 +90,48 @@ it('a cannot-provide clinic note does not bypass the DOB gate', async () => {
     ...opticalRequest, date_of_birth: '', unresolved_info: 'Caller cannot provide their clinic',
   })).toMatchObject({ success: false, missingFields: ['date_of_birth'] });
   expect(h.submit).not.toHaveBeenCalled();
+});
+
+it.each([2, 3])('department %s files without a clinic', async (department_id) => {
+  h.lookup.mockResolvedValue({ ...record, upcomingAppointments: [], totalAppointmentsFound: 0 });
+  const agent = await createAnsweringServiceAgent(async () => {}, { callSid: sid });
+  expect(await invoke(agent, 'create_ticket', { ...opticalRequest, department_id, provider_name: 'Synthetic Surgeon' }))
+    .toMatchObject({ success: true });
+  expect(h.submit).toHaveBeenCalledTimes(1);
+});
+
+it.each([
+  [{ first_name: '', last_name: '' }, 'first_name'],
+  [{ first_name: 'Alex', last_name: '' }, 'last_name'],
+])('asks for missing names before filing (%j)', async (names, field) => {
+  const agent = await createAnsweringServiceAgent(async () => {}, { callSid: sid });
+  expect(await invoke(agent, 'create_ticket', { ...opticalRequest, ...names, location_name: 'Synthetic Clinic' }))
+    .toMatchObject({ success: false, missingFields: [field] });
+  expect(h.submit).not.toHaveBeenCalled();
+});
+
+it.each([true, false])('persists a unique secondary name+DOB match before submission (demographics returned: %s)', async (demographics) => {
+  h.lookup.mockResolvedValue({ ...record, patientData: { ...(demographics ? record.patientData : {}), personId: 'synthetic-person' } });
+  h.submit.mockImplementation(async () => {
+    expect(validatedPatientFor(sid, args.first_name, args.last_name, args.date_of_birth)).toMatchObject({
+      status: 'validated', personId: 'synthetic-person', dateOfBirth: '1970-01-02',
+      nextAppointment: { date: '2099-01-01', location: 'Synthetic Clinic' },
+    });
+    return { success: true, ticketNumber: 'VA-SYNTHETIC' };
+  });
+  const agent = await createAnsweringServiceAgent(async () => {}, { callSid: sid });
+  expect(await invoke(agent, 'create_ticket', { ...opticalRequest, location_name: 'Synthetic Clinic' }))
+    .toMatchObject({ success: true });
+  expect(h.lookup).toHaveBeenCalledTimes(1);
+});
+
+it.each([
+  { identity: { unique: false } },
+  { identityUnconfirmed: true },
+  { matchedBy: 'phone' },
+])('does not validate uncertain secondary results (%j)', async (uncertain) => {
+  h.lookup.mockResolvedValue({ ...record, ...uncertain });
+  const agent = await createAnsweringServiceAgent(async () => {}, { callSid: sid });
+  await invoke(agent, 'create_ticket', { ...opticalRequest, location_name: 'Synthetic Clinic' });
+  expect(validatedPatientFor(sid)).toBeUndefined();
 });

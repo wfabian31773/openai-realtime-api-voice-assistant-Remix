@@ -1,4 +1,4 @@
-import { ticketIdentityFields, validatedPatientFor } from './ticketIdentity';
+import { validatedPatientFor } from './ticketIdentity';
 /**
  * The tools an Optical-queue agent needs, and nothing else.
  *
@@ -18,7 +18,7 @@ import { EMAIL_FIELD_DESCRIPTION, LAST_NAME_ASK, LAST_NAME_FIELD_DESCRIPTION } f
 // lookup_patient, resolve_location and check_open_tickets are registered by the
 // shared module. Importing it here is what puts them in the registry for this
 // queue — the same three definitions Surgery uses, not copies of them.
-import { str, isTwilioCallSid, normalizePhone } from './sharedPatientTools';
+import { str, isTwilioCallSid, normalizePhone, mostRecentAcceptable } from './sharedPatientTools';
 import { createTicketDurable, postFailureToolResult } from '../services/durableTicketFiling';
 import { loggableLookupError } from '../services/loggableTicketingError';
 import { gateRefusalsSoFar, noteGateRefusal } from './gateAttempts';
@@ -245,11 +245,28 @@ registerTool({
     const { sanitizeProviderName, sanitizeLocationName } = await import(
       '../services/ticketFieldSanitizers'
     );
-    const validated = validatedPatientFor(callSid, first, last, dob);
+    let validated = validatedPatientFor(callSid, first, last, dob);
+    if (validated) {
+      const offices = new Map<string, Promise<string | null>>();
+      const acceptable = async (office?: string) => {
+        if (!office) return undefined;
+        if (!offices.has(office)) offices.set(office, mostRecentAcceptable([office], 'optical'));
+        return (await offices.get(office)) || undefined;
+      };
+      const [nextOffice, lastOffice, usualOffice] = await Promise.all([
+        acceptable(validated.nextAppointment?.location), acceptable(validated.lastVisit?.location),
+        acceptable(usualOfficeFor(callSid, first, last, dob)),
+      ]);
+      // Apply the queue's facility rules to the payload as well as routing:
+      // the receiver must not select a surgery center from carried history.
+      validated = { ...validated,
+        nextAppointment: nextOffice ? validated.nextAppointment : undefined,
+        lastVisit: lastOffice ? validated.lastVisit : undefined,
+        confirmedClinic: usualOffice,
+      };
+    }
     const historyOffice = validated?.nextAppointment?.location || validated?.lastVisit?.location;
-    // Joined history wins under the Oct 25 identity policy. Keep it on the
-    // record rung so a directory outage still waives the bounded office ask.
-    const cleanLocation = sanitizeLocationName(historyOffice ? undefined : location).value;
+    const cleanLocation = sanitizeLocationName(location).value;
     const cleanProvider = sanitizeProviderName(str(input.provider)).value;
 
     /**
@@ -342,7 +359,7 @@ registerTool({
       // `dob` is what the ticket is being filed under. Passed so an explicit,
       // parseable conflict with the verified record withholds the office
       // rather than routing a same-named relative's ticket (Codex P1, #291).
-      const onRecord = historyOffice || usualOfficeFor(callSid, first, last, dob);
+      const onRecord = historyOffice || validated?.confirmedClinic;
       if (onRecord) {
         officeFromRecord = onRecord;
         const byRecord = await ticketingApiClient.lookupProviderAndLocation({
@@ -723,7 +740,8 @@ registerTool({
     }
 
     const res = await createTicketDurable({
-      ...ticketIdentityFields(callSid, first, last, str(input.date_of_birth), cleanLocation || officeFromRecord),
+      ...(validated ? { validatedPatient: { ...validated,
+        confirmedClinic: cleanLocation || officeFromRecord || validated.confirmedClinic } } : {}),
       departmentId: filedDepartmentId,
       requestTypeId: filedTypeId,
       requestReasonId: filedReasonId,

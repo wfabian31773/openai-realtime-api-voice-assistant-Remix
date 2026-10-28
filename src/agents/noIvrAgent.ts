@@ -1817,7 +1817,7 @@ The ticket will include schedule context (last appointment info) automatically.`
         { firstName: params.first_name, lastName: params.last_name, dateOfBirth: params.date_of_birth,
           ...enrichedContext.patientData, ...joinedAppointments(enrichedContext), certain: true });
       const completedIdentity = prepareTicketIdentity({ ...params, call_sid: metadata.callSid });
-      if (completedIdentity.missing && !dobEscapeStatus && !isB2bNoDob) return { success: false, missingFields: [completedIdentity.missing], message: completedIdentity.message };
+      if (completedIdentity.missing && (completedIdentity.missing !== 'date_of_birth' || (!dobEscapeStatus && !isB2bNoDob))) return { success: false, missingFields: [completedIdentity.missing], message: completedIdentity.message };
       params.location = String(completedIdentity.input.location || '');
       const route = routeAfterHoursTicket({
         postOpMedication: params.post_op_prescription,

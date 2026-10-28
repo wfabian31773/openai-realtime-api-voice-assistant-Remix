@@ -1,4 +1,5 @@
 import { validatedPatientFor, type ValidatedPatient } from '../../src/tools/ticketIdentity';
+import { nameKey } from '../../src/tools/verifiedIdentity';
 import { readDobQuietly } from '../../src/tools/dobParts';
 import { getEnvironmentConfig } from '../../src/config/environment';
 import { shadowTap } from '../../src/shadow/tap'; // observation-only tap; no-op unless SHADOW_MODE_ENABLED
@@ -1001,8 +1002,11 @@ export class TicketingApiClient {
    */
   async submitTicket(params: SubmitTicketParams): Promise<SubmitTicketResponse> {
     const unnamed = !params.patientFullName.trim() || /^unknown caller$/i.test(params.patientFullName.trim());
-    const words = unnamed ? [] : params.patientFullName.trim().split(/\s+/);
-    const match = params.validatedPatient ?? validatedPatientFor(params.callData?.callSid, words[0], words.slice(1).join(' '), params.patientDOB);
+    // Full names have no recoverable first/last boundary. Compare the full
+    // spelling, then carry the validated record's original fields intact.
+    const held = validatedPatientFor(params.callData?.callSid, undefined, undefined, params.patientDOB);
+    const match = params.validatedPatient ?? (held && (unnamed ||
+      nameKey(params.patientFullName) === nameKey(`${held.firstName} ${held.lastName}`)) ? held : undefined);
     if (match) params = { ...params, validatedPatient: match, patientFullName: unnamed ? `${match.firstName} ${match.lastName}` : params.patientFullName,
       patientDOB: readDobQuietly(params.patientDOB) ? params.patientDOB : match.dateOfBirth || params.patientDOB,
       locationOfLastVisit: match.nextAppointment?.location || match.lastVisit?.location || match.confirmedClinic || params.locationOfLastVisit };

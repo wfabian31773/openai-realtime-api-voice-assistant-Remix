@@ -362,7 +362,7 @@ export function verifiedDobFor(
 /**
  * WHY inherit did not fill `date_of_birth` on this refusal.
  *
- * `verifiedDobFor` returns a date or `undefined`. Those five `undefined`s
+ * `verifiedDobFor` returns a date or `undefined`. Those guard exits
  * are one bucket in every log we have, which is why Bug B in PR #307
  * (32 certain matches that still refused) cannot be proven from what is
  * persisted. This is the same walk, with a named exit at each guard.
@@ -378,6 +378,7 @@ export type DobCarry =
   | 'fired'
   | 'no_entry'
   | 'entry_without_dob'
+  | 'uncertain_identity'
   | 'name_mismatch'
   | 'bad_call_sid';
 
@@ -389,6 +390,7 @@ export function dobCarry(
   if (!isTwilioCallSid(callSid)) return 'bad_call_sid';
   const entry = verified.get(callSid);
   if (!entry || Date.now() - entry.at > TTL_MS) return 'no_entry';
+  if (!entry.certain) return 'uncertain_identity';
   if (!namesAgree(firstName, lastName, entry.firstName, entry.lastName)) {
     return 'name_mismatch';
   }

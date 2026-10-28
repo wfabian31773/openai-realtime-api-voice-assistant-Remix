@@ -37,6 +37,10 @@ const h = vi.hoisted(() => ({
 }));
 
 vi.mock('../../server/db', () => ({ db: {} }));
+vi.mock('../services/toolTimeline', () => ({
+  recordingExecute: (_ctx: unknown, _name: string, execute: unknown) => execute,
+  recordToolEvent: vi.fn(), flushAzulTimeline: vi.fn(),
+}));
 vi.mock('../../server/storage', () => ({ storage: { updateCallLog: (...a: unknown[]) => h.updateCallLog(...(a as [])) } }));
 vi.mock('../services/syncAgentService', () => ({
   SyncAgentService: { submitSimplifiedTicket: async () => ({ success: true, ticketNumber: 'VA-TEST' }), checkOpenTickets: async () => [], requiresCallback: () => true },
@@ -93,6 +97,21 @@ beforeEach(() => {
   vi.spyOn(console, 'log').mockImplementation(() => undefined);
   vi.spyOn(console, 'info').mockImplementation(() => undefined);
   vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+});
+
+it.each([
+  [{ first_name: '', last_name: '' }, 'first_name'],
+  [{ first_name: 'Zelda', last_name: '' }, 'last_name'],
+])('asks for missing names rather than filing an anonymous ticket (%j)', async (names, field) => {
+  const agent = await createNoIvrAgent(async () => {}, META);
+  expect(await call(agent, 'create_ticket', { ...TICKET, ...names }))
+    .toMatchObject({ success: false, missingFields: [field] });
+});
+
+it('a missing DOB exception cannot bypass missing names', async () => {
+  const agent = await createNoIvrAgent(async () => {}, META);
+  expect(await call(agent, 'create_ticket', { ...TICKET, first_name: '', last_name: '', date_of_birth: 'Unknown' }))
+    .toMatchObject({ success: false, missingFields: ['first_name'] });
 });
 
 describe('a confirmed identity reaches the call row', () => {

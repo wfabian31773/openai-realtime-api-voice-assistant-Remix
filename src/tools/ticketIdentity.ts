@@ -56,8 +56,9 @@ export function prepareTicketIdentity(input: Record<string, unknown>): { input: 
     const spoken = spokenDobFor(value(input.call_sid));
     if (spoken) filled.date_of_birth = spoken;
   }
+  if (!value(filled.first_name)) return { input: filled, missing: 'first_name', message: 'May I please have the first name?' };
+  if (!value(filled.last_name)) return { input: filled, missing: 'last_name', message: 'May I please have the last name?' };
   if (!isoDOB(value(filled.date_of_birth))) return { input: filled, missing: 'date_of_birth', message: 'What is your date of birth, starting with the month, then the day, then the year?' };
   if (!value(filled.location)) filled.location = confirmedClinicFor(value(input.call_sid));
-  if (!value(filled.location)) return { input: filled, missing: 'location', message: 'Which of our clinics do you visit?' };
   return { input: filled };
 }

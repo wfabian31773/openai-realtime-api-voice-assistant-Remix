@@ -1012,8 +1012,7 @@ Use patient data from phone lookup when available - don't ask for info you alrea
     }),
     execute: async (params) => {
       const prepared = prepareTicketIdentity({ ...params, call_sid: callSid, location: params.location_name || (params.location_id ? String(params.location_id) : '') });
-      // Optical owns the ask-once office gate and unresolved_info fallback below.
-      if (prepared.missing && !(prepared.missing === 'location' && params.department_id === 1)) {
+      if (prepared.missing) {
         return { success: false, missingFields: [prepared.missing], message: prepared.message };
       }
       params = { ...params, first_name: String(prepared.input.first_name ?? ''), last_name: String(prepared.input.last_name ?? ''),
@@ -1095,7 +1094,15 @@ Use patient data from phone lookup when available - don't ask for info you alrea
             params.last_name,
             dobForLookup
           );
-          if (secondaryLookup.patientFound) {
+          const confirmed = secondaryLookup.patientFound && secondaryLookup.matchedBy === 'name_and_dob' &&
+            secondaryLookup.identity?.unique === true && !secondaryLookup.identityUnconfirmed;
+          if (confirmed) {
+            rememberVerifiedIdentity(callSid, { ...secondaryLookup.patientData,
+              firstName: secondaryLookup.patientData?.firstName || params.first_name,
+              lastName: secondaryLookup.patientData?.lastName || params.last_name,
+              dateOfBirth: secondaryLookup.patientData?.dateOfBirth || params.date_of_birth,
+              ...joinedAppointments(secondaryLookup), certain: true });
+            scheduleContext = secondaryLookup;
             enrichedContext = secondaryLookup;
             console.log(`[${agentTag}] Secondary lookup: patient found with schedule context`);
           } else {
