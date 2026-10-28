@@ -235,8 +235,37 @@ describe('mutual patient clauses after a provider introduction', () => {
     'Sarah, the mutual patient came in yesterday.',
     'This is Sarah, our mutual patient has a question. This is Jane, the mutual patient.',
     'This is Jane, the mutual patient. This is Sarah, our mutual patient has a question.',
+    'This is Sarah, our mutual patient is returning your call.',
+    'This is Sarah, calling about our mutual patient returning your call.',
+    'This is Sarah, the mutual patient returning your call. Calling about our mutual patient.',
+    'This is Sarah, the mutual patient calling about my appointment. This is Dr. Lee calling.',
   ])('handles introduction and clause boundaries in %s', (spoken) => {
     expect(callerSaysTheyAreAProvider(spoken)).toBe(true);
+  });
+
+  it.each(
+    ['This is Sarah,', 'This is Sarah', 'I am Sarah,', 'My name is Sarah,', 'Sarah,']
+      .flatMap((introduction) => [
+        'returning your call',
+        'calling about my appointment',
+        'waiting for my results',
+        'following up on my referral',
+        'checking on my prescription',
+      ].map((modifier) => `${introduction} the mutual patient ${modifier}.`)),
+  )('preserves patient introductions with participial modifiers: %s', (spoken) => {
+    expect(callerSaysTheyAreAProvider(spoken)).toBe(false);
+    for (const feed of ['core', 'runtime'] as const) {
+      releaseCallerSpeech(CALL);
+      if (feed === 'core') recordCallerSpeech(CALL, spoken);
+      else noteCallerTranscript(CALL, [`CALLER: ${spoken}`]);
+      const corroboration = corroborate(CALL, '');
+      expect(corroboration.providerStated, feed).toBe(false);
+      expect(judgeEscalation({
+        callerType: 'healthcare_provider',
+        reason: 'Provider requesting the on-call physician',
+        corroboration,
+      }), feed).toMatchObject({ allowed: false, code: 'provider_not_stated_by_caller' });
+    }
   });
 
   it.each([

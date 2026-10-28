@@ -667,13 +667,14 @@ const PATIENT_PROVIDER_ROLE_AFTER = new RegExp(
 );
 const PATIENT_CALL_DESCRIPTION_AFTER = /^\s+(?:calls?|callbacks?|follow-?ups?|consult(?:ation)?s?|referrals?|requests?|questions?)\b/;
 // A name followed by "the mutual patient" identifies the caller only when
-// the noun phrase ends the introduction. Possessives and relative/prepositional
-// modifiers still belong to that phrase ("the mutual patient you called",
+// the noun phrase ends the introduction. Possessives, relative/prepositional
+// modifiers and -ing participles still belong to that phrase ("the mutual
+// patient you called", "the mutual patient returning your call",
 // "the mutual patient's daughter"). Otherwise its continuation is a predicate
 // about someone else: "This is Sarah, our mutual patient has a question".
 // Check the phrase boundary rather than maintaining a list of predicate verbs.
 const PATIENT_APPOSITIVE_END_AFTER =
-  /^(?:\s*(?:[,.;:!?]|$)|'|\s+(?:i|we|you|he|she|it|they|who|whom|whose|that|which|here|there|of|from|at|in|on|for|with)\b)/;
+  /^(?:\s*(?:[,.;:!?]|$)|'|\s+(?:i|we|you|he|she|it|they|who|whom|whose|that|which|here|there|of|from|at|in|on|for|with|[a-z][a-z'-]+ing)\b)/;
 
 /**
  * Pure, for tests: does this caller text identify the caller as a provider?
