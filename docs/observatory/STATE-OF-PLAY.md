@@ -1702,3 +1702,19 @@ Fix: re-run with the chart name when the spoken first name agrees; accept
 only a unique `name_and_dob` hit. If still unsure, say "Let me make sure
 the team has your details." Never tell the caller they are not found when
 visit history exists.
+
+### 2026-10-27 — after-hours recognised-caller DOB lookup
+
+Last touched by: Codex. `createNoIvrAgent` now uses the phone pre-context's
+canonical name for `lookup_schedule` when the caller-supplied DOB matches.
+Pre-context provides no patient id, so this uses the existing canonical-name
+lookup. A mismatching, invalid or absent DOB keeps the current path; candidate
+surname, DOB and appointments remain outside the prompt and phone-only result.
+Synthetic tests invoke the live factory's tool on SIP and runtime metadata:
+eight regression cases failed before the fix; all 36 tests in the touched file
+passed afterwards. Marker: `voice-runtime-v135-after-hours-dob-confirm-lookup-20261028`,
+renumbered from v125, on top of `main`'s v134 (#396, `87766139`); v127 is #376 and v133 is #391 on their open branches. No migration,
+DB writes, commit, push, PR or deploy. Next: owner reviews and measures production
+impact; the reported 43 recognised callers among 118 misses was supplied by the
+owner and was not independently replayed in this session. Shared bridge notes
+are outside this worktree; this is the local handoff.

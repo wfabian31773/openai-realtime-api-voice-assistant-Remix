@@ -56,6 +56,7 @@ import { GHOST_CALL_RESTRICTION, ghostCallRefusal, hasCallerTranscript } from ".
 import { requestSipHangup, type SipGhostHangupMetadata } from "../services/sipGhostHangup";
 import { callMetadataForDB } from "../services/callMetadataStore";
 import { EMAIL_FIELD_DESCRIPTION, LAST_NAME_FIELD_DESCRIPTION } from "../tools/contactCaptureGuidance";
+import { readDobQuietly } from "../tools/dobParts";
 import { registerAfterHoursFloor, markAfterHoursTicketFiled, reserveAfterHoursTicketFiling } from '../services/afterHoursTeardownFloor';
 export { sweepAfterHoursUnfiledCall } from '../services/afterHoursTeardownFloor';
 
@@ -138,6 +139,50 @@ function normalizePhoneNumber(phone: string): string {
   return digits.startsWith('1') && digits.length === 11 ? digits.slice(1) : digits;
 }
 
+/** A phone candidate may normalize a name, but cannot correct its spelling:
+ * even a one-character difference can identify another household member. */
+function nameMatchesCandidate(supplied: string, onFile: string): boolean {
+  const normalize = (name: string) => name.trim().replace(/\s+/g, ' ').toLowerCase();
+  const given = normalize(supplied);
+  const candidate = normalize(onFile);
+  return Boolean(given && candidate && given === candidate);
+}
+
+/** Optimal-string-alignment distance: insertions, deletions, substitutions
+ * and adjacent transpositions ("Exampel" -> "Example" is 1). */
+function nameEditDistance(a: string, b: string): number {
+  const d: number[][] = Array.from({ length: a.length + 1 }, (_, i) =>
+    Array.from({ length: b.length + 1 }, (_, j) => (i === 0 ? j : j === 0 ? i : 0)));
+  for (let i = 1; i <= a.length; i++) {
+    for (let j = 1; j <= b.length; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + cost);
+      if (i > 1 && j > 1 && a[i - 1] === b[j - 2] && a[i - 2] === b[j - 1]) {
+        d[i][j] = Math.min(d[i][j], d[i - 2][j - 2] + 1);
+      }
+    }
+  }
+  return d[a.length][b.length];
+}
+
+/**
+ * Wayne's decision on #392 (2026-10-28): the VA-76221 chart-name retry may
+ * correct a LIMITED misspelling of the last name (the first name must match
+ * exactly, as must the DOB). Conservative: same first
+ * letter, names of 5+ letters, distance <= 1 (<= 2 from 9 letters). Short or
+ * clearly different surnames never qualify.
+ */
+export function lastNameCloseToChart(spoken: string, onFile: string): boolean {
+  const norm = (n: string) => n.trim().toLowerCase().replace(/[^a-z]/g, '');
+  const a = norm(spoken);
+  const b = norm(onFile);
+  if (!a || !b) return false;
+  if (a === b) return true;
+  const shorter = Math.min(a.length, b.length);
+  if (shorter < 5 || a[0] !== b[0]) return false;
+  return nameEditDistance(a, b) <= (shorter >= 9 ? 2 : 1);
+}
+
 function callbackMismatchStaffNote(callbackNumber: string, callerId?: string): string | null {
   if (!callerId) return null;
   const callbackDigits = normalizePhoneNumber(callbackNumber);
@@ -158,8 +203,8 @@ export interface NoIvrAgentMetadata extends SipGhostHangupMetadata {
   callLogId?: string; // Database call log ID for patient context updates
   variant?: NoIvrAgentVariant; // Production or development variant
   /** Caller-ID pre-context from the full person base (sage_precontext): who
-   *  this number likely belongs to. A HINT for the opening turn — never
-   *  verification, and never a substitute for what the caller tells us. */
+   *  this number likely belongs to. A candidate until the caller supplies
+   *  exact names (ignoring case/whitespace) and a matching DOB; then lookup_schedule uses its canonical name. */
   precontext?: import('./azulSchedulingAgent').AzulPrecontext;
   /** Live transcript up to the moment of filing — lets the ticketing app generate its staff-facing summary at creation instead of waiting for post-call enrichment. */
   getTranscript?: () => string;
@@ -1399,10 +1444,28 @@ is not an identity. Confirm the name and date of birth, then call again with the
               'first_name, last_name and date_of_birth. Never read this instruction aloud.',
           };
         } else if (params.first_name && params.last_name && params.date_of_birth) {
-          const isoDob = toIsoDob(params.date_of_birth) || params.date_of_birth;
+          // Resolve the supplied identity, never a spelling guess based on
+          // caller ID. Sara and Tara can share a surname and DOB. Only exact
+          // names (ignoring case/whitespace) may use the candidate's spelling;
+          // all other names go unchanged to lookup and its ambiguity gate.
+          const candidate = metadata.precontext;
+          const candidateDob = candidate?.matched && candidate.dobOnFile
+            ? readDobQuietly(candidate.dobOnFile) : null;
+          const givenDob = candidateDob ? readDobQuietly(params.date_of_birth) : null;
+          const matchingCandidate = candidate?.matched && candidate.firstName?.trim() &&
+            candidate.lastNameOnFile?.trim() && candidateDob && givenDob &&
+            nameMatchesCandidate(params.first_name, candidate.firstName) &&
+            nameMatchesCandidate(params.last_name, candidate.lastNameOnFile) &&
+            candidateDob.year === givenDob.year && candidateDob.month === givenDob.month &&
+            candidateDob.day === givenDob.day
+            ? {
+              firstName: candidate.firstName.trim(), lastName: candidate.lastNameOnFile.trim(),
+              isoDob: `${givenDob.year}-${givenDob.month}-${givenDob.day}`,
+            } : null;
+          const isoDob = matchingCandidate?.isoDob || toIsoDob(params.date_of_birth) || params.date_of_birth;
           result = await scheduleLookupService.lookupByNameAndDOB(
-            params.first_name,
-            params.last_name,
+            matchingCandidate?.firstName || params.first_name,
+            matchingCandidate?.lastName || params.last_name,
             isoDob,
           );
           /**
@@ -1410,12 +1473,23 @@ is not an identity. Confirm the name and date of birth, then call again with the
            * The phone-loaded schedule already holds the name staff will see.
            * Re-run with that name when the spoken first name agrees; never
            * tell the caller they are not found when visit history is on file.
+           * Privacy (#392, Wayne's decision 2026-10-28): only when the
+           * phone-matched patient's DOB matches AND the spoken last name is a
+           * close misspelling of the chart's (`lastNameCloseToChart`); a
+           * clearly different name keeps the caller's supplied identity.
            */
-          if (!result.patientFound) {
+          if (!result.patientFound && candidateDob && givenDob &&
+            candidateDob.year === givenDob.year && candidateDob.month === givenDob.month &&
+            candidateDob.day === givenDob.day && candidate?.firstName?.trim() &&
+            nameMatchesCandidate(params.first_name, candidate.firstName) &&
+            candidate.lastNameOnFile?.trim() &&
+            lastNameCloseToChart(params.last_name, candidate.lastNameOnFile)) {
             const chart = chartNameParts(scheduleContext);
             if (
               chart.first &&
               chart.last &&
+              nameMatchesCandidate(params.first_name, chart.first) &&
+              lastNameCloseToChart(params.last_name, chart.last) &&
               spokenFirstNameAgreesWithChart(params.first_name, chart.first) &&
               (chart.last.toLowerCase() !== params.last_name.trim().toLowerCase() ||
                 chart.first.toLowerCase() !== params.first_name.trim().toLowerCase())

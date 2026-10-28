@@ -940,10 +940,24 @@ import { callEnvironment } from "./callRecord";
  * On top of v132 (#390, main); v127 is #376 and v133 is #391 on their open branches. No migration.
  */
 /**
+ * v135 (renumbered from v125) — AFTER-HOURS DOB CONFIRMS THE PHONE CANDIDATE (2026-10-28).
+ * lookup_schedule uses the recognised caller's canonical name when the caller
+ * supplies a DOB matching pre-context, so a corrected spoken spelling does not
+ * lose the record. A mismatching DOB keeps the spoken-name lookup; candidate
+ * details stay withheld before confirmation. `noIvrPhoneMatchIsACandidate.test.ts`
+ * drives the live factory's tool on both pipelines. On top of v134 (#396). Merged to main as #392 (6ae60e33).
+ * No migration; production impact remains unmeasured.
+ */
+/**
+ * v136 (renumbered from v126) — PCP UNCLASSIFIED IS FLOOR ONLY (2026-10-28). The PCP agent cannot
+ * choose unclassified_call in its intake tool; the after-hangup floor still
+ * files unclassified calls for a person to route. On top of v135 (#392, main, 6ae60e33); v127 is #376 and v133 is #391 on their open branches. No migration; production impact remains unmeasured.
+ */
+/**
  * v137 — MUTUAL PATIENT DETECTOR (2026-10-28). The provider detector also
  * recognizes "one mutual patient" and "the mutual patient", including
  * plurals, so these callers can pass the after-hours provider gate.
- * On top of v134 (#396, main); renumbered from v133 (v135 is #392, v136 is #393). No migration; production impact remains unmeasured.
+ * On top of v136 (#393, main); renumbered from v133. No migration; production impact remains unmeasured.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
   "voice-runtime-v137-mutual-patient-detector-20261028";
