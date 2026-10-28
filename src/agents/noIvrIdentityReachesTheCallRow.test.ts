@@ -317,3 +317,35 @@ it.each([
   });
   expect(h.lookupByNameAndDOB).toHaveBeenCalledTimes(2);
 });
+
+describe.each([
+  ['live SIP', {}],
+  ['runtime', { pipeline: 'runtime' as const }],
+])('%s: fresh legacy name+DOB results keep the cache identity gate', (_label, pipeline) => {
+  it.each([true, false])('returns a fresh result without uniqueness metadata, then resolves the previous patient again (demographics: %j)', async (demographics) => {
+    const firstPatient = {
+      ...CONFIRMED,
+      patientData: { firstName: TICKET.first_name, lastName: TICKET.last_name, dateOfBirth: '1958-01-04' },
+      upcomingAppointments: [{ isoDate: '2099-01-01', location: 'Synthetic First Clinic' }],
+    };
+    h.lookupByNameAndDOB.mockResolvedValueOnce(firstPatient as any)
+      .mockResolvedValueOnce({ ...SECOND_PATIENT, identity: undefined,
+        patientData: demographics ? SECOND_PATIENT.patientData : undefined,
+      } as any)
+      .mockResolvedValueOnce(firstPatient as any);
+    const agent = await createNoIvrAgent(async () => {}, { ...META, ...pipeline });
+    await call(agent, 'lookup_schedule', TICKET);
+
+    expect(await call(agent, 'lookup_schedule', SECOND_IDENTITY)).toMatchObject({
+      found: true, appointment_access: 'available', upcomingAppointments: SECOND_PATIENT.upcomingAppointments,
+    });
+    // Without returned demographics, the previous identity is still held.
+    // That does not make this second patient's cached schedule theirs.
+    expect(await call(agent, 'lookup_schedule', TICKET)).toMatchObject({
+      found: true, appointment_access: 'available', upcomingAppointments: firstPatient.upcomingAppointments,
+    });
+    expect(h.lookupByNameAndDOB).toHaveBeenCalledTimes(3);
+    expect(h.lookupByNameAndDOB).toHaveBeenLastCalledWith('Zelda', 'Quixote', '1958-01-04');
+    expect(verifiedIdentityFor(SID)).toMatchObject(firstPatient.patientData);
+  });
+});

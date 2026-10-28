@@ -1533,7 +1533,10 @@ is not an identity. Confirm the name and date of birth, then call again with the
         }
 
         if (result.patientFound) {
-          const confirmed = result.matchedBy === 'name_and_dob' && result.identity?.unique === true && !result.identityUnconfirmed;
+          // A fresh name+DOB result may omit the legacy uniqueness metadata.
+          // Explicit ambiguity still blocks disclosure; cached reuse separately
+          // requires scheduleMatchesIdentity to prove whose record it is.
+          const confirmed = result.matchedBy === 'name_and_dob' && result.identity?.unique !== false && !result.identityUnconfirmed;
           if (!confirmed) return {
             found: true, identityUnconfirmed: true,
             ...appointmentAccess(result, false),
