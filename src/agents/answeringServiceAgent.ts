@@ -1013,7 +1013,11 @@ Use patient data from phone lookup when available - don't ask for info you alrea
       unresolved_info: z.string().optional().describe('Set this ONLY after you have already asked and the caller genuinely cannot provide a REQUIRED field (a surgeon for Surgery, an office/location for Optical). Briefly state what is missing (e.g., "caller does not know their office"). The ticket is then still submitted with the gap flagged for a human, so the request is never lost. Do NOT set this on a first attempt — always ask the caller first.'),
     }),
     execute: async (params) => {
-      const prepared = prepareTicketIdentity({ ...params, call_sid: callSid, location: params.location_name || (params.location_id ? String(params.location_id) : '') });
+      // The simplified endpoint routes by clinic name. Unknown IDs must leave
+      // the name empty so validated appointment history can supply the clinic.
+      const locationName = params.location_name ||
+        (params.location_id && LOCATIONS[params.location_id] ? getLocationName(params.location_id) : '');
+      const prepared = prepareTicketIdentity({ ...params, call_sid: callSid, location: locationName });
       if (prepared.missing) {
         return { success: false, missingFields: [prepared.missing], message: prepared.message };
       }

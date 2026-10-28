@@ -55,6 +55,42 @@ const opticalRequest = {
   description: 'Synthetic glasses question',
 };
 
+it.each([false, true])('Optical resolves an ID-only clinic from classify_request (held history: %s)', async (held) => {
+  if (!held) h.lookup.mockResolvedValue({ patientFound: false, upcomingAppointments: [], pastAppointments: [], totalAppointmentsFound: 0 });
+  const agent = await createAnsweringServiceAgent(async () => {}, { callSid: sid });
+  if (held) await invoke(agent, 'lookup_schedule', args);
+  const classification = await invoke(agent, 'classify_request', { request_description: 'Glasses pickup in Eastvale' });
+  expect(classification).toMatchObject({ locationId: 5, detectedLocation: 'Eastvale' });
+
+  expect(await invoke(agent, 'create_ticket', { ...opticalRequest, location_id: classification.locationId }))
+    .toMatchObject({ success: true });
+  expect(h.submit).toHaveBeenCalledTimes(1);
+  expect(h.submit).toHaveBeenCalledWith(expect.objectContaining({
+    locationOfLastVisit: 'Eastvale', reasonForCalling: expect.stringContaining('Location: Eastvale'),
+  }));
+  expect(h.lookup).toHaveBeenCalledTimes(1);
+});
+
+it('Optical falls back to held clinic history when the location ID is unknown', async () => {
+  const agent = await createAnsweringServiceAgent(async () => {}, { callSid: sid });
+  await invoke(agent, 'lookup_schedule', args);
+
+  expect(await invoke(agent, 'create_ticket', { ...opticalRequest, location_id: 999999 }))
+    .toMatchObject({ success: true });
+  expect(h.submit).toHaveBeenCalledWith(expect.objectContaining({ locationOfLastVisit: 'Synthetic Clinic' }));
+  expect(h.lookup).toHaveBeenCalledTimes(1);
+});
+
+it('Optical preserves an explicit clinic name over the location ID and held history', async () => {
+  const agent = await createAnsweringServiceAgent(async () => {}, { callSid: sid });
+  await invoke(agent, 'lookup_schedule', args);
+
+  expect(await invoke(agent, 'create_ticket', {
+    ...opticalRequest, location_id: 5, location_name: 'Synthetic Caller Clinic',
+  })).toMatchObject({ success: true });
+  expect(h.submit).toHaveBeenCalledWith(expect.objectContaining({ locationOfLastVisit: 'Synthetic Caller Clinic' }));
+});
+
 it.each([false, true])('Optical files a missing-clinic request for human review after asking (held identity: %s)', async (held) => {
   h.lookup.mockResolvedValue({ ...record, upcomingAppointments: [], totalAppointmentsFound: 0 });
   const agent = await createAnsweringServiceAgent(async () => {}, { callSid: sid });
