@@ -34,6 +34,7 @@
  */
 
 import { liveCallRegistry, type LiveCallRegistry, type LiveCallStatus } from "../../plugin/liveSessions";
+import { OPERATOR_SLUG } from "../../plugin/operatorLine";
 import { computeRuntimeReadiness } from "../readiness";
 import type { CallSessionRegistry } from "../sessionRegistry";
 import {
@@ -104,6 +105,7 @@ export async function handleOutboundAnswer(
 
   const live = liveSessionFor(slug, req, deps);
   if (live === false) return hangup();
+  if (slug === OPERATOR_SLUG && (!live || live.endedAt)) return hangup();
   if (live) (deps.liveCalls ?? liveCallRegistry).setStatus(live.sessionId, "in_progress");
 
   const answeredBy = req.body.AnsweredBy ?? "";
@@ -225,7 +227,8 @@ function liveSessionFor(slug: string, req: WebhookRequest, deps: OutboundWebhook
   const registry = deps.liveCalls ?? liveCallRegistry;
   const session = registry.get(id);
   const { contactId, attemptId } = queryOf(req);
-  if (slug !== "si-assistant" || !session || session.contactId !== contactId || session.attemptId !== attemptId ||
+  if ((slug !== "si-assistant" && slug !== OPERATOR_SLUG) || !session ||
+      (slug === OPERATOR_SLUG) !== Boolean(session.operatorCall) || session.contactId !== contactId || session.attemptId !== attemptId ||
       !registry.bindCall(id, req.body.CallSid ?? "")) return false;
   return session;
 }
