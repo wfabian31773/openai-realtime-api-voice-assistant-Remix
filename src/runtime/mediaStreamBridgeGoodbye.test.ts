@@ -44,6 +44,17 @@ beforeEach(() => { vi.useFakeTimers(); vi.spyOn(console, "info").mockImplementat
 afterEach(() => { vi.clearAllTimers(); vi.useRealTimers(); vi.restoreAllMocks(); });
 
 describe("VoiceCallBridge — goodbye grace", () => {
+  it("a re-emitted cumulative caller item keeps the agent's preceding question (Codex P2, #396)", () => {
+    const h = harness();
+    h.say("Is there anything else I can help you with?");
+    h.handlers.onCallerTranscript("Thank", "item_caller_1");
+    h.handlers.onCallerTranscript("Thank you", "item_caller_1");
+    h.say("You're welcome. Goodbye!");
+    vi.advanceTimersByTime(GOODBYE_GRACE_MS);
+    expect(h.outcomes).toEqual(["agent_ended"]);
+    expect(h.records[0]).toMatchObject({ teardownReason: "goodbye_grace" });
+  });
+
   it("hangs up exactly six seconds after the goodbye plays, through deliberate teardown", () => {
     expect(GOODBYE_GRACE_MS).toBe(6_000);
     const h = harness(); h.goodbye();

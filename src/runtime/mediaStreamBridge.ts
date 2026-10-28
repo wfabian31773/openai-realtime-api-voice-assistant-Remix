@@ -990,10 +990,6 @@ export class VoiceCallBridge {
           this.cancelGoodbye();
         }
         if (text.trim()) {
-          const previous = this.transcriptLog.lines[this.transcriptLog.lines.length - 1] ?? "";
-          this.callerClosing = callerConclusion(text, previous.startsWith("AGENT: ") ? previous.slice(7) : "");
-        }
-        if (text.trim()) {
           this.callerEverHeard = true;
           // A request can arrive while a previously allowed ghost hangup is
           // waiting for playback. Revoke both its mark and fallback timer.
@@ -1014,6 +1010,11 @@ export class VoiceCallBridge {
         // "before or after it" left to decide here — which is the point:
         // deciding it here, and at four other points, was PR #241.
         this.transcriptLog.callerCompleted(text, itemId);
+        // Classified AFTER the log applies its item-aware replace/keep rules,
+        // against the caller line's own predecessor: a re-emitted cumulative
+        // item ("Thank" then "Thank you") still answers the agent's question
+        // (Codex P2, #396).
+        if (text.trim()) this.callerClosing = this.callerClosingFromLog(text);
         /**
          * THE ONE PLACE THE CALLER'S OWN WORDS CAN REACH THE FILING TOOLS.
          *
@@ -1993,6 +1994,15 @@ export class VoiceCallBridge {
       if (line.startsWith("AGENT: ")) return line.slice(7);
     }
     return "";
+  }
+
+  private callerClosingFromLog(text: string): CallerConclusion | null {
+    const lines = this.transcriptLog.lines;
+    let i = lines.length - 1;
+    while (i >= 0 && !lines[i].startsWith("CALLER: ")) i--;
+    const callerText = i >= 0 ? lines[i].slice(8) : text;
+    const previous = i > 0 ? lines[i - 1] : "";
+    return callerConclusion(callerText, previous.startsWith("AGENT: ") ? previous.slice(7) : "");
   }
 
   private cancelGoodbye(): void {
