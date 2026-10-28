@@ -213,6 +213,19 @@ describe('PCP uses the unassigned exit after a routing-field refusal', () => {
     expect(ticketing.createTicket.mock.calls[2][0].patientPhone).toBe('5005550011');
   });
 
+  it('allows corrected contact details after the unassigned retry still names the routing field', async () => {
+    const missingOffice = { success: false, statusCode: 400, error: 'Missing required information: office.' };
+    ticketing.createTicket.mockResolvedValueOnce(missingOffice).mockResolvedValueOnce(missingOffice);
+    const { callId, file } = patientCall();
+    await file('My glasses broke.');
+    pcpDirector.update(callId, { callbackNumber: '5005550011' });
+
+    const result = await file('My glasses broke.', 'urgent');
+    expect(result).toMatchObject({ success: true, ticketNumber: 'VA-TEST-122' });
+    expect(ticketing.createTicket).toHaveBeenCalledTimes(3);
+    expect(ticketing.createTicket.mock.calls[2][0].patientPhone).toBe('5005550011');
+  });
+
   it.each([408, 429, 401, 403, 409, 503])(
     'allows a later filing after the unassigned retry receives HTTP %s',
     async (statusCode) => {

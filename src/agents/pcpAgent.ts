@@ -1154,7 +1154,11 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
         // Scope the refusal to this exact routed payload, without putting its
         // patient details or narrative into a director-state key.
         const refusalKey = createHash('sha256').update(JSON.stringify(patientPayload)).digest('hex');
-        const priorRoutingRefusal = state.patientRoutingRefusals?.[refusalKey];
+        // A repeated missing routing field cannot be fixed by changing priority.
+        const { priority: _priority, ...routingPayload } = patientPayload;
+        const routingRefusalKey = `routing:${createHash('sha256').update(JSON.stringify(routingPayload)).digest('hex')}`;
+        const priorRoutingRefusal = state.patientRoutingRefusals?.[refusalKey]
+          ?? state.patientRoutingRefusals?.[routingRefusalKey];
         if (priorRoutingRefusal !== undefined) {
           return refusePcp(priorRoutingRefusal, { guidance: exhaustedRoutingGuidance });
         }
@@ -1183,10 +1187,12 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
           // Only payload refusals are permanent; timeouts, rate limits and
           // credential failures can recover before a later tool invocation.
           if (unassignedExit && isTerminalRefusal(status)) {
+            const rejectedField = missingFieldFromError(patientResult.error);
+            const cacheKey = rejectedField === missingRoutingField ? routingRefusalKey : refusalKey;
             pcpDirector.update(callId, {
               patientRoutingRefusals: {
                 ...state.patientRoutingRefusals,
-                [refusalKey]: patientResult.error ?? 'ticket_creation_failed',
+                [cacheKey]: patientResult.error ?? 'ticket_creation_failed',
               },
             });
           }

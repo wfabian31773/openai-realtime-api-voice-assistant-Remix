@@ -209,7 +209,8 @@ export interface PcpConversationState {
   /**
    * Patient create-ticket filings whose unassigned routing retry was refused.
    * Keyed by a hash of the routed payload (including the patient-scoped
-   * idempotency key), so only an unchanged request stops before either POST.
+   * idempotency key). If the unassigned retry still names the same missing
+   * routing field, a priority-only change also stops before either POST.
    * Server-owned; never accepted from tool arguments.
    */
   patientRoutingRefusals?: Record<string, string>;
