@@ -271,7 +271,7 @@ describe("the sender the runtime uses in production", () => {
     alerts.fallbackTicket({
       callSid: "CAcaller",
       callerNumber: META.callerPhone,
-      escalationDetails: URGENT,
+      escalationDetails: { ...URGENT, patientFirstName: "Dana", patientLastName: "Example" },
       why: URGENT_TRANSFER_NOT_ANSWERED,
       dialTarget: ENV.HUMAN_AGENT_NUMBER,
       agentUsed: "no-ivr",
@@ -285,7 +285,8 @@ describe("the sender the runtime uses in production", () => {
       requestTypeId: 34,
       requestReasonId: 159,
       priority: "urgent",
-      patientFirstName: "Test",
+      patientFirstName: "Dana",
+      patientLastName: "Example",
       patientPhone: URGENT.callbackNumber,
       callData: { callSid: "CAcaller", callerPhone: META.callerPhone, agentUsed: "no-ivr" },
     });

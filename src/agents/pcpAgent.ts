@@ -1,4 +1,5 @@
 import { appointmentReadPolicy, appointmentReadReminder } from '../services/appointmentReadPolicy';
+import { createHash } from 'node:crypto';
 import { appointmentAccess } from '../services/appointmentAccess';
 import { RealtimeAgent, tool } from '@openai/agents/realtime';
 import { z } from 'zod';
@@ -10,6 +11,10 @@ import { recordingExecute } from '../services/toolTimeline';
 import { keepFieldDescriptions } from '../services/toolFieldDescriptions';
 import { EMAIL_CONFIRMATION_DESCRIPTION, LAST_NAME_FIELD_DESCRIPTION } from '../tools/contactCaptureGuidance';
 import { withToolDirection } from '../services/toolDirection';
+import { missingFieldFromError } from '../services/durableTicketFiling';
+import { isTerminalRefusal } from '../services/terminalRefusal';
+import { isTwilioCallSid } from '../tools/callSid';
+import type { CreateTicketParams } from '../../server/services/ticketingApiClient';
 import { scheduleLookupService } from '../services/scheduleLookupService';
 import {
   PCP_FACILITY_TYPES,
@@ -110,6 +115,8 @@ export interface PcpAgentMetadata {
   callerPhone?: string;
   dialedNumber?: string;
   getTranscript?: () => string;
+  /** Runtime transcript for the queue-withdrawal decision; leaves the hang-up floor unchanged. */
+  getTransferTranscript?: () => string;
   /** Audit status maintained by staff after intake; never solicited on the call. */
   professionalVerificationStatus?: PcpVerificationStatus;
 }
@@ -1079,7 +1086,14 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
       // reclassified is still a patient, and their request still does not
       // belong sitting in department 18. Same reason as director.next().
       if (!enrichingTheTicket && (state.callPurpose === 'patient_caller' || state.callerIsThePatient)) {
-        const [{ detectCrossQueue }, { otherReasonFor }, { ticketingApiClient }, { sanitizeForSms }] =
+        // A sentinel SID can be shared across callers; the runtime callId is
+        // per call and stays stable across retries and agent reconstruction.
+        const patientCallId = isTwilioCallSid(metadata.callSid) ? metadata.callSid : callId;
+        const patientTicketKey = `${patientCallId}-pcp-patient${pcpDirector.patientKeySuffix(callId)}`;
+        const exhaustedRoutingGuidance =
+          'The ticketing app still refused the unassigned filing. Do not ask for an office or surgeon ' +
+          'or repeat this filing. No ticket was created; do not say it was recorded or promise a callback.';
+        const [{ detectCrossQueue, schedulingRedirectForStatedIntent }, { otherReasonFor }, { ticketingApiClient }, { sanitizeForSms }] =
           await Promise.all([
             import('../tools/queueRouting'),
             import('../tools/otherReason'),
@@ -1108,7 +1122,13 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
         });
         if (toMedicalRecords) return toMedicalRecords as never;
 
-        const redirect = detectCrossQueue(narrative, PCP_DEPARTMENT_ID);
+        // A patient can retain a scheduling purpose alongside the patient
+        // latch. Honor that stated intent just as the professional Hub route
+        // does, before eyewear cues in the summary; keep the surgery exception.
+        const schedulingIntent = STATED_SCHEDULING_INTENT[state.callPurpose];
+        const redirect = (schedulingIntent
+          ? schedulingRedirectForStatedIntent(schedulingIntent, narrative, PCP_DEPARTMENT_ID)
+          : null) ?? detectCrossQueue(narrative, PCP_DEPARTMENT_ID);
         // Never null for 18, but handled rather than asserted: a missing
         // catch-all must not silently file into another department's Other.
         const home = otherReasonFor(PCP_DEPARTMENT_ID);
@@ -1123,7 +1143,7 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
         ).value;
 
         const nameParts = String(state.callerName ?? '').trim().split(/\s+/);
-        const patientResult = await ticketingApiClient.createTicket({
+        const patientPayload: CreateTicketParams = {
           departmentId: redirect?.departmentId ?? PCP_DEPARTMENT_ID,
           requestTypeId: redirect?.requestTypeId ?? home!.requestTypeId,
           requestReasonId: redirect?.requestReasonId ?? home!.requestReasonId,
@@ -1133,46 +1153,68 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
           preferredContactMethod: 'phone',
           description: body,
           priority: urgency === 'urgent' || urgency === 'high' ? 'high' : 'medium',
+          // Both POSTs and later tool invocations must replay the same write
+          // if the ticket was created but its response was lost.
+          idempotencyKey: patientTicketKey,
           callData: { agentUsed: 'pcp', ...(metadata.callSid ? { callSid: metadata.callSid } : {}) },
-        });
+        };
+        // Scope the refusal to this exact routed payload, without putting its
+        // patient details or narrative into a director-state key.
+        const refusalKey = createHash('sha256').update(JSON.stringify(patientPayload)).digest('hex');
+        // A repeated missing routing field cannot be fixed by changing priority.
+        const { priority: _priority, ...routingPayload } = patientPayload;
+        const routingRefusalKey = `routing:${createHash('sha256').update(JSON.stringify(routingPayload)).digest('hex')}`;
+        const priorRoutingRefusal = state.patientRoutingRefusals?.[refusalKey]
+          ?? state.patientRoutingRefusals?.[routingRefusalKey];
+        if (priorRoutingRefusal !== undefined) {
+          return refusePcp(priorRoutingRefusal, { guidance: exhaustedRoutingGuidance });
+        }
+        let patientResult = await ticketingApiClient.createTicket(patientPayload);
+        const missingRoutingField = missingFieldFromError(patientResult.error);
+        // PCP intake has no office/surgeon field to submit after a re-ask.
+        // A proven routing refusal uses the same unassigned exit as the queue
+        // tools. Persist an exhausted refusal for this payload.
+        // Outages and other fields keep their existing failure path; a
+        // rejected POST cannot have filed.
+        const unassignedExit = (!patientResult.success || !patientResult.ticketNumber)
+          && isTerminalRefusal(patientResult.statusCode)
+          && (patientPayload.departmentId === 1 || patientPayload.departmentId === 2)
+          && (missingRoutingField === 'office' || missingRoutingField === 'location'
+            || missingRoutingField === 'surgeon');
+        if (unassignedExit) {
+          patientResult = await ticketingApiClient.createTicket({ ...patientPayload, routingAskExhausted: true });
+        }
 
         if (!patientResult.success || !patientResult.ticketNumber) {
-          /**
-           * A 4xx IS A REFUSAL, AND A REFUSAL RETRIED IS A REFUSAL REPEATED.
-           *
-           * This returned `retryable: true` for EVERY failure, and on
-           * 2026-09-08 that cost a real call. `CAbf717457` reached this line
-           * with department 2 (the caller said "Loma Linda Surgery Center", so
-           * `detectCrossQueue` read a surgery cue), department 2 demands a
-           * surgeon, and create-ticket answered HTTP 400 "Missing required
-           * information: surgeon". The model obliged the retry flag SIX times
-           * in eighteen seconds, asked the caller who the surgeon was on a PCP
-           * call, filed nothing, and the caller hung up.
-           *
-           * That is the same shape as the 602 doomed POSTs across 181 surgery
-           * calls measured on 2026-09-01 — fixed there, never here.
-           * `CreateTicketResponse.statusCode` was added for exactly this
-           * distinction and this call site had not read it.
-           *
-           * So: a status the server chose in the 4xx range will fail
-           * identically forever, and the only useful thing to do with it is
-           * hand the server's own words to the model as something to ASK. No
-           * status at all is a timeout or a socket reset, which may well
-           * succeed next time.
-           */
+          // CAbf717457 reached six identical surgeon refusals. The unassigned
+          // exit above now handles routing fields; other refusals retain the
+          // existing guidance, without claiming a failed write was recorded.
           const status = patientResult.statusCode;
-          const refused = typeof status === 'number' && status >= 400 && status < 500;
+          const refused = isTerminalRefusal(status);
+          // Only payload refusals are permanent; timeouts, rate limits and
+          // credential failures can recover before a later tool invocation.
+          if (unassignedExit && isTerminalRefusal(status)) {
+            const rejectedField = missingFieldFromError(patientResult.error);
+            const cacheKey = rejectedField === missingRoutingField ? routingRefusalKey : refusalKey;
+            pcpDirector.update(callId, {
+              patientRoutingRefusals: {
+                ...state.patientRoutingRefusals,
+                [cacheKey]: patientResult.error ?? 'ticket_creation_failed',
+              },
+            });
+          }
           return refusePcp(patientResult.error ?? 'ticket_creation_failed', {
             ...(refused ? {} : { retryable: true }),
             ...(refused
               ? {
-                  guidance:
-                    'The ticketing system refused this payload and will refuse it again unchanged — ' +
-                    'do NOT call this tool again with the same details. Its own words were: ' +
-                    `"${patientResult.error ?? 'no reason given'}". If that names something the ` +
-                    'caller can answer, ask them for it in your own words and try once with it ' +
-                    'added. If it does not, take the rest of their request, tell them it is ' +
-                    'recorded, and move on.',
+                  guidance: unassignedExit
+                    ? exhaustedRoutingGuidance
+                    : 'The ticketing system refused this payload and will refuse it again unchanged — ' +
+                      'do NOT call this tool again with the same details. Its own words were: ' +
+                      `"${patientResult.error ?? 'no reason given'}". If that names something the ` +
+                      'caller can answer, ask them for it in your own words and try once with it ' +
+                      'added. If it does not, explain that the request has not been filed; ' +
+                      'do not promise a callback or say it is recorded.',
                 }
               : {}),
           });
@@ -1766,6 +1808,16 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
       /** Something is already on file for this caller as the dial goes out. */
       const filedBeforeTheDial = requestIsOnRecord || Boolean(initial?.success);
 
+      /**
+       * v130 extends v102's exemption to an answered queue. Snapshot before
+       * redirecting: the stream and director are released before the dial
+       * result arrives. Keep only the verdict in the pending callback.
+       */
+      const callerWasToldItWasRecorded = toldTheCallerItWasRecorded(
+        (metadata.getTransferTranscript ?? metadata.getTranscript)?.() ?? '',
+        (state.ticketsFiled ?? []).map((f) => f.ticketNumber).filter((t): t is string => Boolean(t)),
+      );
+
       escalationDetailsMap.set(callId, {
         agentSlug: 'pcp',
         /**
@@ -1808,11 +1860,15 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
                  * no patient (operator, 2026-10-19). The queue has them, or they
                  * left while it rang; either way nobody is owed a callback on a
                  * ticket that cannot say who it is about. The app keeps one
-                 * that names a patient.
+                 * that names a patient. v130 also keeps it when the queue
+                 * answers after the caller was told it is recorded.
                  */
-                if (filedBeforeTheDial) await submitPcpWithdrawal(callId, 'sent_to_queue');
+                if (filedBeforeTheDial && !(settlement.outcome === 'queue_answered' && callerWasToldItWasRecorded)) {
+                  await submitPcpWithdrawal(callId, 'sent_to_queue');
+                }
                 console.info(
-                  `[PCP] queue dial on the caller's own choice settled ${settlement.outcome} — no ticket, by ruling (${callId})`,
+                  `[PCP] queue dial on the caller's own choice settled ${settlement.outcome}` +
+                    ` — ${callerWasToldItWasRecorded && settlement.outcome === 'queue_answered' ? 'recorded ticket kept' : 'no ticket, by ruling'} (${callId})`,
                 );
                 return;
               }
@@ -1856,9 +1912,12 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
                * pre-dial ticket goes if it names no patient (operator,
                * 2026-10-19). A dial that did not land keeps it: the caller was
                * just told "I have your request recorded", and it is re-opened
-               * as a task above.
+               * as a task above. v130 keeps an answered queue's ticket when
+               * the caller was already told it is recorded.
                */
-              if (!queueChoiceOwesATicket(settlement)) await submitPcpWithdrawal(callId, 'sent_to_queue');
+              if (!queueChoiceOwesATicket(settlement) && !(settlement.outcome === 'queue_answered' && callerWasToldItWasRecorded)) {
+                await submitPcpWithdrawal(callId, 'sent_to_queue');
+              }
               console.info(
                 `[PCP] queue dial settled ${settlement.outcome} after ${settlement.ringSeconds}s ringing` +
                   `${settlement.connected ? `, ${settlement.talkSeconds ?? 0}s bridged` : ''}` +
