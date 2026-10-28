@@ -1,4 +1,6 @@
 import type { OutboundLanePolicy } from '../runtime/outbound/campaign';
+import { createOperatorLineAgent, operatorLinePolicy } from '../agents/operatorLineAgent';
+import { OPERATOR_SLUG } from '../plugin/operatorLine';
 import { createOutboundProofAgent, outboundProofAgentConfig, outboundProofPolicy } from '../agents/outboundProofAgent';
 import { createNpxOutreachAgent, npxOutreachAgentConfig, npxOutreachPolicy } from '../agents/npxOutreachAgent';
 import { createSiAssistantAgent, siAssistantAgentConfig, siAssistantPolicy } from '../agents/siAssistantAgent';
@@ -53,6 +55,11 @@ export class AgentRegistry {
   private agents: Map<string, AgentConfig> = new Map();
 
   constructor() {
+    this.register({
+      id: OPERATOR_SLUG, factory: createOperatorLineAgent, enabled: true,
+      description: "Approval-gated calls on behalf of Wayne Fabian; no patient identity or ticket tools.",
+      twilioNumbers: [], agentType: 'outbound', version: '1.0.0', voice: 'sage', outbound: operatorLinePolicy,
+    });
     // Primary inbound agent - handles all call types via tools (PRODUCTION)
     this.register({
       id: 'no-ivr',
