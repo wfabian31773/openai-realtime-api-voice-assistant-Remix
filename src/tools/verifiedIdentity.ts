@@ -37,6 +37,7 @@
 
 import { isTwilioCallSid } from './callSid';
 import { readDobQuietly } from './dobParts';
+import type { PatientScheduleContext } from '../services/scheduleLookupService';
 
 export interface IdentityAppointment { date: string; location: string; provider?: string }
 
@@ -104,6 +105,10 @@ export interface VerifiedIdentity {
 
 interface Entry extends VerifiedIdentity {
   at: number;
+  // Full read-only schedule, separate from the reduced ticket-routing fields.
+  // It shares the identity's CallSid, expiry and invalidation, and is never
+  // included in verifiedIdentityFor's ticket/teardown-facing return value.
+  appointmentContext?: PatientScheduleContext;
 }
 
 const verified = new Map<string, Entry>();
@@ -211,7 +216,7 @@ export type RememberOutcome = 'stored' | 'merged' | 'refused_sid' | 'refused_nam
 
 export function rememberVerifiedIdentity(
   callSid: string | undefined,
-  identity: Partial<VerifiedIdentity>,
+  identity: Partial<VerifiedIdentity> & Pick<Entry, 'appointmentContext'>,
 ): RememberOutcome {
   // Absent means NOT certain. A caller that forgets to say so must not get
   // the benefit of the doubt on a field this one is about.
@@ -307,6 +312,7 @@ export function rememberVerifiedIdentity(
         lastVisit: existingFresh.certain && !certain ? existingFresh.lastVisit : identity.lastVisit ?? existingFresh.lastVisit,
         lastPhysicianSeen: existingFresh.certain && !certain ? existingFresh.lastPhysicianSeen : identity.lastPhysicianSeen ?? existingFresh.lastPhysicianSeen,
         lastProviderSeen: existingFresh.certain && !certain ? existingFresh.lastProviderSeen : identity.lastProviderSeen ?? existingFresh.lastProviderSeen,
+        appointmentContext: existingFresh.certain && !certain ? existingFresh.appointmentContext : identity.appointmentContext ?? existingFresh.appointmentContext,
         certain: existingFresh.certain || certain,
         at: now,
       });
@@ -326,6 +332,7 @@ export function rememberVerifiedIdentity(
     lastVisit: identity.lastVisit,
     lastPhysicianSeen: identity.lastPhysicianSeen,
     lastProviderSeen: identity.lastProviderSeen,
+    appointmentContext: certain ? identity.appointmentContext : undefined,
     certain,
     at: now,
   });
@@ -523,6 +530,12 @@ export function verifiedIdentityFor(callSid: string | undefined): VerifiedIdenti
     ...(entry.lastPhysicianSeen ? { lastPhysicianSeen: entry.lastPhysicianSeen } : {}),
     ...(entry.lastProviderSeen ? { lastProviderSeen: entry.lastProviderSeen } : {}),
   };
+}
+
+/** Call-scoped schedule; readers must also prove it matches the held patient. */
+export function verifiedAppointmentContextFor(callSid: string | undefined): PatientScheduleContext | undefined {
+  if (!verifiedIdentityFor(callSid)) return undefined;
+  return verified.get(callSid!)?.appointmentContext;
 }
 
 /**

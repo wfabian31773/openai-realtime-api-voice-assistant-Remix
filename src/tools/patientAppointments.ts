@@ -1,7 +1,32 @@
 import { registerTool } from './registry';
 import { verifiedIdentityFor } from './verifiedIdentity';
-import { appointmentAccess } from '../services/appointmentAccess';
+import { appointmentAccess, type AppointmentClaim } from '../services/appointmentAccess';
 import { appointmentReadPolicy } from '../services/appointmentReadPolicy';
+
+/** Re-read the validated person's schedule without a model-supplied identity. */
+export async function readPatientAppointments(callSid: string | undefined, claim: AppointmentClaim = {}, deadlineAt = Date.now() + 3500) {
+  const identity = verifiedIdentityFor(callSid);
+  if (!identity) return {
+    success: true as const, appointment_access: 'identity_required', read_only: true,
+    scheduling_action: 'establish_identity',
+    appointment_instruction: 'Use lookup_patient to establish the patient record before reading appointments. Do not guess an identity or repeatedly search an unresolved caller; take their request with the match unresolved if necessary.',
+  };
+  if (!identity.personId) return {
+    success: true as const, appointment_access: 'unavailable', read_only: true,
+    has_upcoming_appointments: null, scheduling_action: 'request_schedule_review',
+    appointment_instruction: 'The matched record has no person key for another schedule read. Use any appointments already returned on this call; otherwise take a schedule-review request. Do not re-search the identified patient or claim there are no bookings.',
+  };
+  const { scheduleLookupService } = await import('../services/scheduleLookupService');
+  const context = await scheduleLookupService.lookupByPersonId(identity.personId, 'name_and_dob', deadlineAt);
+  // The read may finish after an explicit identity invalidation. Never return
+  // that former patient's schedule on a call now about somebody else.
+  const current = verifiedIdentityFor(callSid);
+  if (current?.personId !== identity.personId || current.firstName !== identity.firstName ||
+      current.lastName !== identity.lastName || current.dateOfBirth !== identity.dateOfBirth) {
+    return { success: true as const, ...appointmentAccess(context, false) };
+  }
+  return { success: true as const, ...appointmentAccess(context, true, claim) };
+}
 
 registerTool({
   name: 'check_patient_appointments',
@@ -16,27 +41,9 @@ registerTool({
     },
   },
   handler: async (input) => {
-    const identity = verifiedIdentityFor(typeof input.call_sid === 'string' ? input.call_sid : undefined);
-    if (!identity) return {
-      success: true, appointment_access: 'identity_required', read_only: true,
-      scheduling_action: 'establish_identity',
-      appointment_instruction: 'Use lookup_patient to establish the patient record before reading appointments. Do not guess an identity or repeatedly search an unresolved caller; take their request with the match unresolved if necessary.',
-    };
-    if (!identity.personId) return {
-      success: true, appointment_access: 'unavailable', read_only: true,
-      has_upcoming_appointments: null, scheduling_action: 'request_schedule_review',
-      appointment_instruction: 'The matched record has no person key for another schedule read. Use any appointments already returned on this call; otherwise take a schedule-review request. Do not re-search the identified patient or claim there are no bookings.',
-    };
-    const { scheduleLookupService } = await import('../services/scheduleLookupService');
-    const context = await scheduleLookupService.lookupByPersonId(identity.personId, 'name_and_dob', Date.now() + 3500);
-    // The read may finish after an explicit identity invalidation. Never return
-    // that former patient's schedule on a call now about somebody else.
-    if (verifiedIdentityFor(typeof input.call_sid === 'string' ? input.call_sid : undefined)?.personId !== identity.personId) {
-      return { success: true, ...appointmentAccess(context, false) };
-    }
-    return { success: true, ...appointmentAccess(context, true, {
+    return readPatientAppointments(typeof input.call_sid === 'string' ? input.call_sid : undefined, {
       provider: typeof input.provider === 'string' ? input.provider : undefined,
       office: typeof input.office === 'string' ? input.office : undefined,
-    }) };
+    });
   },
 });

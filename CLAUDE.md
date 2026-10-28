@@ -2587,7 +2587,24 @@ on it is evidence about current code.
 | **v132** or earlier — NOT the date; this branch is **v134**, ABOVE `main`'s v132 (#390, `76dd105f`), which it contains; v127 is #376 and v133 is #391 on their open branches | Goodbye grace hangup: after a completed caller/agent goodbye exchange, a 6s grace window after playback ends the call deliberately unless the caller speaks, a new response starts or a tool runs. No migration or new spoken wording. |
 | **v134** or earlier — NOT the date; v135 (renumbered from v125), now on `main` (#392, `6ae60e33`), is ABOVE `main`'s v134 (#396, `87766139`), which it contains; v127 is #376 and v133 is #391 on their open branches | After-hours confirms the phone-matched candidate on DOB, then looks up that record's schedule. No migration. |
 | **v135** or earlier — NOT the date; v136 (renumbered from v126) is on `main` (#393, `9bfccda`), above v135 (#392, `6ae60e33`); this is #384's base | The PCP model cannot choose unclassified_call; the teardown floor still files unclassified calls for a person to route. No migration. |
-| **v136** or earlier — NOT the date; this branch is **v139** (#384), above v136 (#393, main, `9bfccda`); v137 is #391 and v138 is #376 on their open branches | Verified identity is carried through ticket filing and teardown/sweep recovery. Both ticket client endpoints filter Optical's carried appointments and history-derived routing text/IDs, including no-IVR, after-hours, answering service, Surgery/Tech/Records redirects and retries. Submissions without a department use the same filter because the receiver can derive Optical. Caller-named offices are preserved. Explicit other departments and the held identity retain their history; Surgery files without a clinic when none is known. No migration; production impact is unmeasured. |
+| **v136** or earlier — NOT the date; this branch is **v139** (#384), above v136 (#393, main, `9bfccda`); v137 is #391 and v138 is #376 on their open branches | Verified identity is carried through ticket filing and teardown/sweep recovery. Both ticket client endpoints filter Optical's carried appointments and history-derived routing text/IDs, including no-IVR, after-hours, answering service, Surgery/Tech/Records redirects and retries. Submissions without a department use the same filter because the receiver can derive Optical. Caller-named offices are preserved. Explicit other departments and the held identity retain their history; Surgery files without a clinic when none is known. Repeated shared patient lookups preserve the complete appointment-read view, including times, additional bookings and partial/unavailable status, using an identity-checked, call-scoped schedule cache or a read by the held PersonID. No migration; production impact is unmeasured. |
+
+**#384 cached appointment-read review, 2026-10-28 (synthetic data only):**
+The full schedule shares the validated identity's CallSid, expiry and
+invalidation; the reduced appointment fields used for ticket routing remain
+separate. Caller-supplied identity checks run before cache reuse, and the
+cached patient's name, DOB and available PersonID must agree with the held
+identity. Without a matching full cache, the existing appointment reader uses
+the held PersonID; without that key it reports unavailable rather than an
+empty schedule. A patient change during the read withholds the result.
+No-IVR and answering-service sibling shortcuts already use the full
+appointment-read formatter; repeat-lookup regressions cover them too.
+The prompt/tool caps remain 15,000 / 13,200. No push, rebase, migration,
+deployment or production measurement.
+Validation: `tsc -p . --noEmit`, `git diff --check`, and 393 tests across
+21 relevant Vitest files pass, including both caps and the earlier identity,
+Optical filtering and Surgery-without-clinic regressions. The full suite was
+not run; changes remain uncommitted on `sd/1-4-identity-gate` at `2cbba58`.
 
 ### THE SURGEON CLAIM — BUILT, REVIEWED SIX TIMES, WITHDRAWN 2026-09-17
 
@@ -2677,7 +2694,8 @@ before and brought it in, so v12 contains both.
 **AND THE SEQUENCE HAS TWO HOLES IN IT ON PURPOSE: v13 AND v57. v139 IS THE
 NEWEST ON #384 — verified identity carried through filing and teardown/sweep
 recovery, Optical facility filtering, and Surgery filing when its clinic is
-unknown; no migration; production impact is unmeasured. It contains v136;
+unknown, with the full appointment-read view/status retained on identity
+reuse; no migration; production impact is unmeasured. It contains v136;
 v137 is #391 and v138 is #376 on their open branches —
 AND v136 IS WHAT `main` CARRIES, SINCE #393 MERGED 2026-10-28 (`9bfccda`):
 the PCP model cannot choose unclassified_call; the teardown floor still files

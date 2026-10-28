@@ -966,6 +966,9 @@ import { callEnvironment } from "./callRecord";
  * Answering-service DOB confirmation checks the current schedule patient,
  * never the original phone ledger. Answering-service and no-IVR cached schedule
  * reuse checks the patient against the held identity before reading or filing.
+ * Shared lookup reuse retains the complete appointment-read view and its
+ * available/partial/unavailable status, identity-checking the call-scoped
+ * schedule cache or reading the held PersonID when that cache is absent.
  * The v135 phone-candidate DOB confirmation remains supported.
  * Surgery files without a clinic when none is known. On top of v136 (#393, main,
  * 9bfccda); v137 is #391 and v138 is #376 on their open branches.

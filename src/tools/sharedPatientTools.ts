@@ -1,4 +1,4 @@
-import { joinedAppointments, validatedPatientFor } from './ticketIdentity';
+import { joinedAppointments, scheduleMatchesIdentity, validatedPatientFor } from './ticketIdentity';
 /**
  * The tools every queue needs: who is calling, which office, have they asked
  * already.
@@ -32,10 +32,10 @@ import { joinedAppointments, validatedPatientFor } from './ticketIdentity';
 import { registerTool, missing, type MissingFields, type ToolResult } from './registry';
 import { LAST_NAME_ASK, LAST_NAME_FIELD_DESCRIPTION } from './contactCaptureGuidance';
 import { gateRefusalsSoFar, noteGateRefusal, noteCallFact, callFactNoted } from './gateAttempts';
-import { forgetIfSameName, nameKey, rememberConfirmedClinic, rememberVerifiedIdentity, verifiedIdentityFor } from './verifiedIdentity';
+import { forgetIfSameName, nameKey, rememberConfirmedClinic, rememberVerifiedIdentity, verifiedAppointmentContextFor, verifiedIdentityFor } from './verifiedIdentity';
 import { LOOKUP_UNSURE_FILE_FIX, LOOKUP_UNSURE_FIX, LOOKUP_UNSURE_SAY, spokenFirstNameAgreesWithChart } from './lookupUnsure';
 import { appointmentAccess } from '../services/appointmentAccess';
-import './patientAppointments';
+import { readPatientAppointments } from './patientAppointments';
 
 import { acceptsFacility, mostRecentAcceptable, type ToolQueue } from './acceptableLocation';
 export { mostRecentAcceptable, type ToolQueue } from './acceptableLocation';
@@ -225,12 +225,25 @@ registerTool({
       forgetIfSameName(str(input.call_sid), held.firstName, held.lastName);
     } else {
       const locked = validatedPatientFor(str(input.call_sid), first, last, dob);
-      if (locked) return {
-        success: true, found: true, identity_is_certain: true, matched_by: 'name_and_dob',
-        patient_name: `${locked.firstName} ${locked.lastName}`, usual_office: held?.usualOffice ?? null,
-        usual_clinic: held?.usualOffice ?? null, last_visit: locked.lastVisit?.date ?? null,
-        last_provider: locked.lastVisit?.provider ?? null, next_appointment: locked.nextAppointment ?? null,
-      };
+      if (locked) {
+        // joinedAppointments is a reduced ticket-routing record. Reuse the
+        // complete read (times, all bookings and partial/unavailable status)
+        // only after both the input and cached patient match this identity.
+        const cached = verifiedAppointmentContextFor(locked.callSid);
+        const appointments = scheduleMatchesIdentity(cached, locked)
+          ? appointmentAccess(cached, true)
+          : await readPatientAppointments(locked.callSid, {}, deadlineAt);
+        if (appointments.appointment_access === 'identity_required') return {
+          ...appointments, success: true, found: false, identity_is_certain: false,
+        };
+        return {
+          ...appointments,
+          success: true, found: true, identity_is_certain: true, matched_by: 'name_and_dob',
+          patient_name: `${locked.firstName} ${locked.lastName}`, usual_office: held?.usualOffice ?? null,
+          usual_clinic: held?.usualOffice ?? null, last_visit: locked.lastVisit?.date ?? null,
+          last_provider: locked.lastVisit?.provider ?? null, next_appointment: locked.nextAppointment ?? null,
+        };
+      }
     }
 
 
@@ -619,6 +632,7 @@ registerTool({
          * use, which the store drops rather than writes.
          */
         ...joinedAppointments(resolved),
+        appointmentContext: resolved,
         // Joined history is unfiltered; keep the queue-filtered routing office.
         ...(queue === 'optical' ? { usualOffice: usualOffice || undefined } : {}),
         // The same `certain` reported to the model as `identity_is_certain`.
