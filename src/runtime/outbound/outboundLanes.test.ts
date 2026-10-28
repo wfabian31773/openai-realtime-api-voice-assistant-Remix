@@ -21,6 +21,7 @@ import {
 import { OUTBOUND_RECORDING_CLAUSE, type OutboundContact } from "./campaign";
 import { callbackGreeting, callbackSteps, withCallbackSteps, type CallbackContext } from "./callback";
 import { callEnds } from "../callRecord";
+import { OPERATOR_SLUG } from "../../plugin/operatorLine";
 
 const CONTACT: OutboundContact = {
   contactId: "c1",
@@ -57,6 +58,11 @@ describe("every registered outbound lane", () => {
     const r = await registry();
     for (const lane of r.getOutboundAgents().filter((a) => a.outbound)) {
       const g = lane.outbound!.greeting(CONTACT);
+      if (lane.id === OPERATOR_SLUG) {
+        expect(g).toContain("on behalf of Wayne Fabian");
+        expect(g).toContain(OUTBOUND_RECORDING_CLAUSE);
+        continue;
+      }
       expect(g, lane.id).toMatch(/Azul Vision/);
       expect(g, lane.id).toMatch(/automated/i);
       expect(g, lane.id).toContain(OUTBOUND_RECORDING_CLAUSE);
@@ -69,7 +75,7 @@ describe("every registered outbound lane", () => {
     const r = await registry();
     for (const lane of r.getOutboundAgents().filter((a) => a.outbound)) {
       const vm = lane.outbound!.voicemail();
-      expect(vm, lane.id).toMatch(/Azul Vision/);
+      expect(vm, lane.id).toMatch(lane.id === OPERATOR_SLUG ? /Wayne Fabian/ : /Azul Vision/);
       expect(vm, lane.id).not.toContain(CONTACT.firstName!);
       expect(vm, lane.id).not.toMatch(/appointment|exam|doctor|surgery|records/i);
     }
