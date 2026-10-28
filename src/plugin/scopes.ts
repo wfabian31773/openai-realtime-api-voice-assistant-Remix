@@ -12,6 +12,7 @@ export const PLUGIN_SCOPES = [
   "contacts:commit",
   "contacts:approve",
   "calls:direct",
+  "operator:call",
 ] as const;
 
 export type PluginScope = (typeof PLUGIN_SCOPES)[number];
@@ -19,6 +20,7 @@ export type PluginScope = (typeof PLUGIN_SCOPES)[number];
 export const DEFAULT_PLUGIN_SCOPES: PluginScope[] = ["fleet:read"];
 
 export const WRITE_PLUGIN_SCOPES: readonly PluginScope[] = [
+  "operator:call",
   "calls:direct",
   "contacts:prepare",
   "contacts:commit",
@@ -56,6 +58,9 @@ export function hasScope(granted: readonly string[] | null | undefined, needed: 
  * approving its own request.
  */
 export function mintScopesCompatible(scopes: readonly PluginScope[]): { ok: true } | { ok: false; error: string } {
+  if (scopes.includes("contacts:approve") && scopes.includes("operator:call")) {
+    return { ok: false, error: "operator:call is bot-only and cannot be minted with contacts:approve" };
+  }
   if (scopes.includes("contacts:approve") && scopes.includes("calls:direct")) {
     return { ok: false, error: "calls:direct is bot-only and cannot be minted with contacts:approve" };
   }
@@ -72,6 +77,8 @@ export function mintScopesCompatible(scopes: readonly PluginScope[]): { ok: true
 }
 
 export const SCOPE_FOR_TOOL: Record<string, PluginScope> = {
+  prepare_operator_call: "operator:call",
+  operator_call_transcript: "operator:call",
   direct_call: "calls:direct",
   capabilities: "fleet:read",
   confirm_token: "contacts:commit",

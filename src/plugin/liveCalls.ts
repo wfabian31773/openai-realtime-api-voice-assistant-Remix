@@ -6,6 +6,7 @@ import { callEnvironment } from "../runtime/callRecord";
 import { callbackRoutingProblem, isClearTwilioRefusal, RING_TIMEOUT_SECONDS, STALE_CLAIM_MS, statusUrl, type OutboundTwilio } from "../runtime/outbound/dialer";
 import type { DialerLock } from "../runtime/outbound/scheduler";
 import { NOT_PLACED, type OutboundStore } from "../runtime/outbound/store";
+import { OPERATOR_SLUG, US_E164, operatorFromProblem, parseOperatorPayload } from "./operatorLine";
 import { evaluateAndEnqueueCall, identityFromPreparePayload, siAssistantDialingProblem, siAssistantMayDial } from "./callEnqueue";
 import { SI_ASSISTANT_SLUG, SI_ASSISTANT_CAMPAIGN_KEY, siAssistantNumber } from "./siAssistantConstants";
 import type { ContactApprovalRow, PluginStore } from "./store";
@@ -126,6 +127,83 @@ function boundedCall<T>(work: Promise<T>): Promise<T> {
     const timer = setTimeout(() => reject(new Error("call_timeout")), 15_000);
     work.then((value) => { clearTimeout(timer); resolve(value); }, (error) => { clearTimeout(timer); reject(error); });
   });
+}
+
+export async function operatorOptOutGuard(store: OutboundStore, plugin: PluginStore, phone: string): Promise<string | null> {
+  // Keep the existing US voice/SMS identity and list unchanged. International
+  // operator opt-outs have their own E.164 list because the legacy key is US-only.
+  if (await plugin.isOperatorOptedOut(phone)) return "do_not_contact";
+  if (US_E164.test(phone) && await directCallOptOutGuard(store, plugin, phone)) return "do_not_contact";
+  return null;
+}
+
+/** One approved operator attempt on a separate lane and caller ID. No retries. */
+export async function placeOperatorCall(
+  deps: { store: OutboundStore; plugin: PluginStore; sender: LiveCallSender; sessions: LiveCallRegistry; env: Record<string, string | undefined> },
+  approval: ContactApprovalRow,
+  now: Date,
+): Promise<LiveResult> {
+  const refused = (reason: string): LiveResult => ({ ok: false, reason, mayHaveSent: false });
+  const problem = operatorFromProblem(deps.env);
+  if (problem) return refused(problem);
+  const parsed = parseOperatorPayload(approval.payload);
+  if (!parsed.ok) return refused("invalid_operator_payload");
+  const input = parsed.payload;
+  const domain = resolveAppDomain({
+    domain: deps.env.DOMAIN, replitDomains: deps.env.REPLIT_DOMAINS, replitDevDomain: deps.env.REPLIT_DEV_DOMAIN,
+    isProduction: callEnvironment(deps.env) === "production",
+  });
+  if (domain.source === "fallback") return refused("no_public_host");
+  let sessionId: string | undefined;
+  let contactId: string | undefined;
+  let attemptId: string | undefined;
+  let sent = false;
+  try {
+    if (await operatorOptOutGuard(deps.store, deps.plugin, input.phone)) return refused("do_not_contact");
+    const campaignId = await deps.store.ensureCampaign(OPERATOR_SLUG, OPERATOR_SLUG);
+    if (!campaignId) return refused("no_campaign");
+    const externalRef = `plugin:operator:${approval.id}`;
+    await deps.store.upsertSourceContacts(campaignId, [{
+      externalRef, phone: input.phone, firstName: null, lastName: null,
+      data: { source: OPERATOR_SLUG, plugin_live: true, plugin_operator: true },
+    }]);
+    const source = (await deps.store.sourceRows(campaignId)).find((row) => row.externalRef === externalRef);
+    if (!source) return refused("contact_missing");
+    contactId = source.id;
+    if (!(await deps.store.claimContact(contactId, now))) return refused("call_unavailable");
+    attemptId = await deps.store.startAttempt(contactId, campaignId, 1);
+    const session = deps.sessions.create({
+      approvalId: approval.id, tokenJti: approval.tokenJti, contactId, attemptId, operatorCall: input,
+      hardStop: (sid) => deps.sender.endCall(sid), persist: (record) => deps.plugin.saveOperatorCall(record),
+    });
+    sessionId = session.sessionId;
+    // Fail closed before dialing if the transcript table is unavailable.
+    await deps.sessions.persist(session);
+    const query = new URLSearchParams({ contact: contactId, attempt: attemptId, liveSession: sessionId });
+    if (await operatorOptOutGuard(deps.store, deps.plugin, input.phone)) throw new Error("do_not_contact");
+    if (session.endedAt) throw new Error("operator_deadline_exceeded");
+    sent = true;
+    const call = await boundedCall(deps.sender.createCall({
+      to: input.phone, from: deps.env.OPERATOR_LINE_FROM_NUMBER!.trim(),
+      url: `https://${domain.domain}/voice/${OPERATOR_SLUG}?${query}`,
+      method: "POST", timeout: RING_TIMEOUT_SECONDS, timeLimit: input.maxDurationSec,
+      statusCallback: `${statusUrl(domain.domain, OPERATOR_SLUG, contactId, attemptId)}&liveSession=${sessionId}`,
+      statusCallbackMethod: "POST", statusCallbackEvent: ["initiated", "ringing", "answered", "completed"],
+    }));
+    deps.sessions.bindCall(sessionId, call.sid);
+    await deps.store.markContactDialled(contactId);
+    await deps.store.setAttemptCallSid(attemptId, call.sid);
+    return { ok: true, callSid: call.sid, sessionId };
+  } catch (error) {
+    if (isClearTwilioRefusal(error)) sent = false;
+    if (!sent) {
+      if (sessionId) deps.sessions.setStatus(sessionId, "failed");
+      if (attemptId) await deps.store.finishAttempt(attemptId, { status: NOT_PLACED }).catch(() => undefined);
+      if (contactId) await deps.store.settleContact(contactId, "rescheduled", { onlyIfCalling: true }).catch(() => false);
+    }
+    return { ok: false, reason: sent ? "send_unknown" : error instanceof Error && error.message === "do_not_contact" ? "do_not_contact" : "operator_call_unavailable",
+      mayHaveSent: sent, ...(sessionId ? { sessionId } : {}) };
+  }
 }
 
 // OPT-OUT GUARD (removable): the same durable voice DNC / SMS STOP stores
