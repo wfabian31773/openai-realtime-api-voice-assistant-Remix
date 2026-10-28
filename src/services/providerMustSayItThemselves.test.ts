@@ -124,6 +124,14 @@ describe('mutual patient self-identification', () => {
     'I am Jane, the mutual patient you called.',
     "I'm Jane Smith, the mutual patient.",
     'This is Jane the mutual patient.',
+    'Jane Smith, the mutual patient',
+    'The mutual patient, Jane Smith',
+    'Jane, the mutual patient.',
+    "Jane Anne Smith-Jones, the mutual patient.",
+    'The mutual patient, Jane.',
+    "The mutual patient, Jane Anne Smith-Jones.",
+    'Hello. Jane Smith, the mutual patient.',
+    'Hello. The mutual patient, Jane Smith.',
     'The mutual patient is me.',
     "The mutual patient's me.",
   ])('does not mistake a patient identifying themselves for a provider: %s', (spoken) => {
@@ -141,6 +149,20 @@ describe('mutual patient self-identification', () => {
     expect(callerSaysTheyAreAProvider('The mutual patient is my mother.')).toBe(true);
     expect(callerSaysTheyAreAProvider('This is Jane, the mutual patient. Calling about the mutual patient.')).toBe(true);
     expect(callerSaysTheyAreAProvider('The mutual patient is me. Calling about the mutual patient.')).toBe(true);
+  });
+
+  it.each([
+    'Calling about Jane Smith, the mutual patient.',
+    'Calling about the mutual patient, Jane Smith.',
+    'Calling about Dr. Smith, the mutual patient.',
+    'Regarding Jane Smith, the mutual patient.',
+    'Regarding the mutual patient, Jane Smith.',
+    'The mutual patient, calling about a callback.',
+    'The mutual patient, Jane Smith. Calling about the mutual patient.',
+    'Jane Smith, the mutual patient. Calling about the mutual patient.',
+    'Jane Smith, the mutual patient. This is Dr. Lee calling.',
+  ])('preserves independent provider evidence: %s', (spoken) => {
+    expect(callerSaysTheyAreAProvider(spoken)).toBe(true);
   });
 });
 
@@ -275,6 +297,7 @@ describe('the gate', () => {
 
   it.each(["I'm the mutual patient.", 'I am the mutual patient you called.', 'This is the mutual patient.',
     'This is Jane, the mutual patient.', 'I am Jane, the mutual patient you called.', 'The mutual patient is me.',
+    'Jane Smith, the mutual patient', 'The mutual patient, Jane Smith',
   ])(
     'refuses an unstated provider escalation when the caller says %s', (spoken) => {
       const corroboration = corr(spoken);
@@ -287,8 +310,11 @@ describe('the gate', () => {
     },
   );
 
-  it('still allows an acute emergency described by the mutual patient', () => {
-    const spoken = "I'm the mutual patient, my eye is bleeding.";
+  it.each([
+    "I'm the mutual patient, my eye is bleeding.",
+    'Jane Smith, the mutual patient, my eye is bleeding.',
+    'The mutual patient, Jane Smith, my eye is bleeding.',
+  ])('still allows an acute emergency described by the mutual patient: %s', (spoken) => {
     expect(judgeEscalation({
       callerType: 'healthcare_provider',
       reason: 'Patient reports eye bleeding',

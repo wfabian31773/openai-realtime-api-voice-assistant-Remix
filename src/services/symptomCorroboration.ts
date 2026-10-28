@@ -622,13 +622,24 @@ const PROVIDER_SELF_IDENTIFICATION: RegExp[] = [
   /\b(?:nuestr[oa]|tengo un[a]?) paciente\b/,
 ];
 
-// A mutual patient can be the caller, so exclude first-person identification
-// for this evidence only; other provider statements can still stand.
+// A mutual patient can be the caller, so exclude self-identification for this
+// evidence only; other provider statements can still stand.
 const MUTUAL_PATIENT = /\b(?:our|(?:a|one|the) mutual) (?:mutual )?patients?\b/;
 const PATIENT_IDENTIFICATION_BEFORE = /\b(?:i(?:'m| am)|this is)\s+(?:(?:actually|also|just|indeed)\s+)*$/;
 // A name can sit between the identification and its appositive. Do not let
 // words describing a call turn a later patient reference into an appositive.
-const PATIENT_APPOSITIVE_BEFORE = /\b(?:i(?:'m| am)|this is)\s+(?:(?:actually|also|just|indeed)\s+)*(?:(?!(?:calling|about|regarding|for|from|with|on|a|an|the|my|our)\b)[a-z][a-z'-]*\s+){0,2}(?!(?:calling|about|regarding|for|from|with|on|a|an|the|my|our)\b)[a-z][a-z'-]*,?\s+$/;
+const PATIENT_NAME_WORD = String.raw`(?!(?:calling|about|regarding|for|from|with|on|a|an|the|my|our)\b)[a-z][a-z'-]*`;
+const PATIENT_NAME = String.raw`(?:${PATIENT_NAME_WORD}\s+){0,2}${PATIENT_NAME_WORD}`;
+const PATIENT_APPOSITIVE_BEFORE = new RegExp(
+  String.raw`\b(?:i(?:'m| am)|this is)\s+(?:(?:actually|also|just|indeed)\s+)*${PATIENT_NAME},?\s+$`,
+);
+// Bare introductions work in either order: "Jane Smith, the mutual patient"
+// and "The mutual patient, Jane Smith". Anchor them to the sentence start so
+// "Calling about the mutual patient, Jane Smith" remains provider evidence.
+const PATIENT_INTRODUCTION_BOUNDARY = String.raw`(?:^|${SENTENCE_END.source})\s*`;
+const BARE_PATIENT_APPOSITIVE_BEFORE = new RegExp(String.raw`${PATIENT_INTRODUCTION_BOUNDARY}${PATIENT_NAME},\s+$`);
+const PATIENT_INTRODUCTION_START = new RegExp(String.raw`${PATIENT_INTRODUCTION_BOUNDARY}$`);
+const PATIENT_APPOSITIVE_AFTER = new RegExp(String.raw`^\s*,\s+${PATIENT_NAME}(?=\s*(?:[,.?!]|$))`);
 const PATIENT_IDENTIFICATION_AFTER = /^(?:\s+is\s+|'s\s+)(?:me|myself)\b/;
 
 /**
@@ -644,6 +655,8 @@ export function callerSaysTheyAreAProvider(spoken: string | readonly string[]): 
     affirmed(text, MUTUAL_PATIENT, (before, after) =>
       !PATIENT_IDENTIFICATION_BEFORE.test(before) &&
       !PATIENT_APPOSITIVE_BEFORE.test(before) &&
+      !BARE_PATIENT_APPOSITIVE_BEFORE.test(before) &&
+      !(PATIENT_INTRODUCTION_START.test(before) && PATIENT_APPOSITIVE_AFTER.test(after)) &&
       !PATIENT_IDENTIFICATION_AFTER.test(after)) ||
     turns.some(answersWithAFacility)
   );
