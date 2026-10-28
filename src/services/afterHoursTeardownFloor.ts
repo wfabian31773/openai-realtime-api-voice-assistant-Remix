@@ -20,16 +20,36 @@ interface AfterHoursCall {
   getTranscript?: () => string;
 }
 
-const calls = new Map<string, { metadata: AfterHoursCall; agentUsed: string; ticketFiled?: boolean }>();
+const calls = new Map<string, {
+  metadata: AfterHoursCall;
+  agentUsed: string;
+  ticketFiled?: boolean;
+  pendingFiling?: Promise<void>;
+}>();
 
 export function registerAfterHoursFloor(metadata: AfterHoursCall, agentUsed: string): void {
   calls.set(metadata.callId, { metadata, agentUsed });
 }
 
-/** V2 has no fleet timeline; remember a successful filing even if row write-back failed. */
+/** Remember a successful live filing even if row write-back failed. */
 export function markAfterHoursTicketFiled(callId: string): void {
   const call = calls.get(callId);
   if (call) call.ticketFiled = true;
+}
+
+/** Reserve before handoff can trigger teardown; settle even when filing fails. */
+export function reserveAfterHoursTicketFiling(callId: string): (filed: boolean) => void {
+  const call = calls.get(callId);
+  if (!call) return () => {};
+  let release!: () => void;
+  call.pendingFiling = new Promise<void>((resolve) => { release = resolve; });
+  return (filed) => {
+    // Teardown may already have claimed/deleted the map entry, so update the
+    // captured call rather than looking it up again by id.
+    if (filed) call.ticketFiled = true;
+    call.pendingFiling = undefined;
+    release();
+  };
 }
 
 export async function sweepAfterHoursUnfiledCall(
@@ -41,6 +61,9 @@ export async function sweepAfterHoursUnfiledCall(
   calls.delete(callId);
   if (!call) return;
   try {
+    // The urgent transfer owns the normal per-call key while it is pending.
+    // A failed filing releases it so the floor can still recover the request.
+    if (call.pendingFiling) await call.pendingFiling;
     if (call.ticketFiled) return;
     const { metadata, agentUsed } = call;
     // A real carrier SID is required for the normal filing path's dedup key.

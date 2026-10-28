@@ -10,6 +10,8 @@ vi.hoisted(() => {
 const h = vi.hoisted(() => ({
   getCallLogBySid: vi.fn(),
   submitSimplifiedTicket: vi.fn(),
+  checkOpenTickets: vi.fn(),
+  lookupByPhone: vi.fn(),
 }));
 vi.mock('../../server/db', () => ({ db: {} }));
 vi.mock('../../server/storage', () => ({ storage: { getCallLogBySid: h.getCallLogBySid } }));
@@ -17,13 +19,13 @@ vi.mock('../services/syncAgentService', () => ({
   SyncAgentService: {
     submitSimplifiedTicket: h.submitSimplifiedTicket,
     createTicketFromAgentInput: async () => ({ success: true, ticketNumber: 'VA-SYNTHETIC' }),
-    checkOpenTickets: async () => [],
+    checkOpenTickets: h.checkOpenTickets,
     requiresCallback: () => true,
   },
 }));
 vi.mock('../services/scheduleLookupService', () => ({
   scheduleLookupService: {
-    lookupByPhone: async () => ({ patientFound: false, upcomingAppointments: [], pastAppointments: [] }),
+    lookupByPhone: h.lookupByPhone,
     lookupByNameAndDOB: async () => ({ patientFound: false, upcomingAppointments: [], pastAppointments: [] }),
     formatContextForAgent: () => '',
   },
@@ -48,26 +50,140 @@ let serial = 0;
 beforeEach(() => {
   h.getCallLogBySid.mockReset().mockResolvedValue(undefined);
   h.submitSimplifiedTicket.mockReset().mockResolvedValue({ success: true, ticketNumber: 'VA-SYNTHETIC' });
+  h.checkOpenTickets.mockReset().mockResolvedValue([]);
+  h.lookupByPhone.mockReset().mockResolvedValue({ patientFound: false, upcomingAppointments: [], pastAppointments: [] });
 });
 
 // Use the real registry and factory: v90 showed that a sweep imported apart
 // from its factory can read a different copy of the per-call state.
-async function call(slug: string, transcript?: string) {
+async function call(slug: string, transcript?: string, handoff = vi.fn(async () => {})) {
   const source = await defaultLaneSource();
   const config = source.getAgentConfig(slug)!;
   const callSid = `CA${String(++serial).padStart(32, '0')}`;
   const callId = `synthetic-sip-${serial}`;
-  const agent = await config.factory(...[async () => {}, {
+  const agent = await config.factory(...[handoff, {
     callId, callSid, callerPhone: '+12025550100',
     ...(transcript === undefined ? {} : { getTranscript: () => transcript }),
   }] as never[]);
   const finish = (runtimeTranscript?: string) => runLaneTeardownFloor({
     slug, callSid: callId, outcome: 'caller_hangup', transcript: runtimeTranscript ?? '',
   }, { source: async () => source });
-  return { callId, callSid, finish, agent: agent as { tools: LiveTool[] } };
+  return { callId, callSid, finish, handoff, agent: agent as { tools: LiveTool[] } };
 }
 
-describe.each(['no-ivr', 'no-ivr-v2'])('%s teardown floor', (slug) => {
+async function invoke(agent: { tools: LiveTool[] }, name: string, args = {}) {
+  const tool = agent.tools.find((t) => t.name === name)!;
+  const result = await tool.invoke!({}, JSON.stringify(args));
+  return typeof result === 'string' ? JSON.parse(result) : result;
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: Error) => void;
+  const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej; });
+  return { promise, resolve, reject };
+}
+
+const providerRequest = {
+  reason: 'Nurse from the hospital emergency department calling about a patient',
+  caller_type: 'healthcare_provider',
+  provider_info: 'hospital emergency department',
+};
+
+describe('urgent transfer filing owns the call before teardown', () => {
+  it.each(['during handoff', 'after handoff'])('waits for the urgent record when teardown starts %s', async (timing) => {
+    const handoff = deferred<void>();
+    const record = deferred<{ success: boolean; ticketNumber: string }>();
+    h.submitSimplifiedTicket.mockImplementationOnce(() => record.promise);
+    const c = await call('no-ivr', 'CALLER: I am a nurse calling from the hospital about a patient.', vi.fn(() => handoff.promise));
+    const escalation = invoke(c.agent, 'escalate_to_human', providerRequest);
+    await vi.waitFor(() => expect(c.handoff).toHaveBeenCalledTimes(1));
+    if (timing === 'after handoff') {
+      handoff.resolve();
+      expect(await escalation).toMatchObject({ success: true });
+      await vi.waitFor(() => expect(h.submitSimplifiedTicket).toHaveBeenCalledTimes(1));
+    }
+
+    let finished = false;
+    const teardown = c.finish().then(() => { finished = true; });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(finished).toBe(false);
+    expect(h.getCallLogBySid).not.toHaveBeenCalled();
+    expect(h.submitSimplifiedTicket).toHaveBeenCalledTimes(timing === 'during handoff' ? 0 : 1);
+
+    handoff.resolve();
+    expect(await escalation).toMatchObject({ success: true });
+    await vi.waitFor(() => expect(h.submitSimplifiedTicket).toHaveBeenCalledTimes(1));
+    expect(h.submitSimplifiedTicket).toHaveBeenCalledWith(expect.objectContaining({
+      priority: 'urgent', departmentId: 8, callSid: c.callSid,
+      reasonForCalling: expect.stringContaining('URGENT TRANSFER (record ticket'),
+    }));
+    record.resolve({ success: true, ticketNumber: 'VA-URGENT-SYNTHETIC' });
+    await teardown;
+    expect(h.submitSimplifiedTicket).toHaveBeenCalledTimes(1);
+    expect(h.getCallLogBySid).not.toHaveBeenCalled();
+    await c.finish();
+    expect(h.submitSimplifiedTicket).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['refused', 'rejected'])('allows the floor to recover when the urgent filing is %s', async (failure) => {
+    const record = deferred<{ success: boolean; error: string }>();
+    h.submitSimplifiedTicket.mockImplementationOnce(() => record.promise);
+    const c = await call('no-ivr', 'CALLER: I am a nurse calling from the hospital about a patient.');
+    expect(await invoke(c.agent, 'escalate_to_human', providerRequest)).toMatchObject({ success: true });
+    await vi.waitFor(() => expect(h.submitSimplifiedTicket).toHaveBeenCalledTimes(1));
+
+    const teardown = c.finish();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(h.submitSimplifiedTicket).toHaveBeenCalledTimes(1);
+    if (failure === 'rejected') record.reject(new Error('synthetic filing failure'));
+    else record.resolve({ success: false, error: 'synthetic filing failure' });
+    await teardown;
+    expect(h.submitSimplifiedTicket).toHaveBeenCalledTimes(2);
+    expect(h.submitSimplifiedTicket.mock.calls[1][0]).toMatchObject({
+      callSid: c.callSid,
+      additionalDetails: expect.stringContaining('AFTER-HOURS TEARDOWN'),
+    });
+  });
+
+  it('releases the reservation if the handoff fails', async () => {
+    const c = await call('no-ivr', 'CALLER: I am a nurse calling from the hospital about a patient.',
+      vi.fn(async () => { throw new Error('synthetic handoff failure'); }));
+    expect(await invoke(c.agent, 'escalate_to_human', providerRequest)).toMatchObject({ success: false });
+    await c.finish();
+    expect(h.submitSimplifiedTicket).toHaveBeenCalledTimes(1);
+    expect(h.submitSimplifiedTicket.mock.calls[0][0].additionalDetails).toContain('AFTER-HOURS TEARDOWN');
+  });
+});
+
+describe.each(['no-ivr-v2', 'dev-no-ivr'])('%s has no floor without dispositions', (slug) => {
+  it('does not register a teardown sweep', async () => {
+    expect((await defaultLaneSource()).getAgentConfig(slug)?.teardownSweep).toBeUndefined();
+  });
+
+  it('does not create staff work for an already-open ticket inquiry', async () => {
+    h.checkOpenTickets.mockResolvedValue([{ ticketNumber: 'VA-EXISTING-SYNTHETIC', reason: 'Callback request', daysAgo: 0 }]);
+    const c = await call(slug, 'CALLER: Can you check whether my callback request is still open?');
+    expect(await invoke(c.agent, 'check_open_tickets')).toMatchObject({ checked: true, hasOpenTickets: true });
+    await c.finish();
+    expect(h.submitSimplifiedTicket).not.toHaveBeenCalled();
+  });
+
+  it('does not create staff work for an answered appointment question', async () => {
+    const c = await call(slug, 'CALLER: When is my upcoming appointment?');
+    h.lookupByPhone.mockResolvedValue({
+      patientFound: true, upcomingAppointments: [{ date: '2030-01-02', time: '10:00' }], pastAppointments: [],
+    });
+    expect(await invoke(c.agent, 'lookup_schedule', { phone: '+12025550100' })).toMatchObject({
+      found: true, upcomingAppointments: [{ date: '2030-01-02', time: '10:00' }],
+    });
+    await c.finish();
+    expect(h.submitSimplifiedTicket).not.toHaveBeenCalled();
+  });
+});
+
+describe('no-ivr teardown floor', () => {
+  const slug = 'no-ivr';
   it('files the stated request through the After Hours path when no ticket exists', async () => {
     const c = await call(slug, 'AGENT: How can I help?\nCALLER: Please have someone call me about a refill.');
     await c.finish();

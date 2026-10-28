@@ -25,8 +25,6 @@ import { EMAIL_FIELD_DESCRIPTION, LAST_NAME_FIELD_DESCRIPTION } from "../tools/c
 import { keepFieldDescriptions } from "../services/toolFieldDescriptions";
 import { EMAIL_ASK_ONCE, EMAIL_ESCAPE_NOTE, emailEscapeMarker } from "./noIvrAgent";
 import { gateRefusalsSoFar, noteGateRefusal } from "../tools/gateAttempts";
-import { registerAfterHoursFloor, markAfterHoursTicketFiled } from '../services/afterHoursTeardownFloor';
-export { sweepAfterHoursUnfiledCall } from '../services/afterHoursTeardownFloor';
 
 const describedTool: typeof tool = ((def: any) =>
   keepFieldDescriptions(tool(def), def.parameters)) as typeof tool;
@@ -86,7 +84,6 @@ export async function createNoIvrAgentV2(
   handoffToHuman: () => Promise<void>,
   metadata: NoIvrAgentV2Metadata,
 ): Promise<RealtimeAgent> {
-  registerAfterHoursFloor(metadata, 'no-ivr-v2');
   const { callId, callerPhone } = metadata;
 
   let scheduleContext: PatientScheduleContext | undefined;
@@ -531,7 +528,6 @@ Call this ONLY when you have collected ALL required information.`,
       }
 
       if (result.success) {
-        markAfterHoursTicketFiled(callId);
         console.log("[No-IVR V2] ✓ Ticket created:", result.ticketNumber);
 
         // Write caller name back to call metadata so it is persisted at call-end

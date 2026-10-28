@@ -9,7 +9,7 @@ import { createAppointmentConfirmationAgent } from '../agents/appointmentConfirm
 import { createAnsweringServiceAgent, answeringServiceAgentConfig } from '../agents/answeringServiceAgent';
 import { createFantasyFootballAgent } from '../agents/fantasyFootballAgent';
 import { createNoIvrAgent, noIvrAgentConfig, sweepAfterHoursUnfiledCall, type NoIvrAgentMetadata } from '../agents/noIvrAgent';
-import { createNoIvrAgentV2, noIvrAgentV2Config, sweepAfterHoursUnfiledCall as sweepAfterHoursV2UnfiledCall } from '../agents/noIvrAgentV2';
+import { createNoIvrAgentV2, noIvrAgentV2Config } from '../agents/noIvrAgentV2';
 import { createAzulSchedulingAgent, azulSchedulingAgentConfig } from '../agents/azulSchedulingAgent';
 import { createPcpAgent, pcpAgentConfig, sweepPcpUnfiledCall } from '../agents/pcpAgent';
 import { createOpticalAgent, opticalAgentConfig } from '../agents/opticalAgent';
@@ -70,10 +70,10 @@ export class AgentRegistry {
     });
 
     // Development version - V2 Workflow-driven agent for testing
+    // Neither V2 lane has a teardown floor until it records no-followup dispositions.
     this.register({
       id: 'dev-no-ivr',
       factory: createNoIvrAgentV2 as AgentFactory,
-      teardownSweep: sweepAfterHoursV2UnfiledCall,
       enabled: true,
       description: 'DEV: ' + noIvrAgentV2Config.description,
       greeting: noIvrAgentV2Config.greeting,
@@ -86,7 +86,6 @@ export class AgentRegistry {
     this.register({
       id: 'no-ivr-v2',
       factory: createNoIvrAgentV2 as AgentFactory,
-      teardownSweep: sweepAfterHoursV2UnfiledCall,
       enabled: true,
       description: noIvrAgentV2Config.description,
       greeting: noIvrAgentV2Config.greeting,

@@ -43,7 +43,7 @@ import { corroborate } from "../services/symptomCorroboration";
 import { markCallConcluded } from "../services/callConclusion";
 import { callMetadataForDB } from "../services/callMetadataStore";
 import { EMAIL_FIELD_DESCRIPTION, LAST_NAME_FIELD_DESCRIPTION } from "../tools/contactCaptureGuidance";
-import { registerAfterHoursFloor, markAfterHoursTicketFiled } from '../services/afterHoursTeardownFloor';
+import { registerAfterHoursFloor, markAfterHoursTicketFiled, reserveAfterHoursTicketFiling } from '../services/afterHoursTeardownFloor';
 export { sweepAfterHoursUnfiledCall } from '../services/afterHoursTeardownFloor';
 
 /**
@@ -2332,6 +2332,9 @@ For healthcare provider calls — escalate immediately with whatever info you ha
       };
       escalationDetailsMap.set(callId, escalationDetails);
 
+      // The handoff itself can end the call. Reserve the urgent record before
+      // it starts so teardown cannot claim its key for a generic floor ticket.
+      const finishRecordFiling = reserveAfterHoursTicketFiling(callId);
       try {
         await handoffToHuman();
         console.info("[HANDOFF] ✓ handoffToHuman() completed successfully");
@@ -2343,6 +2346,7 @@ For healthcare provider calls — escalate immediately with whatever info you ha
         // (Failed transfers are covered by addHumanAgent's fallback ticket;
         // the per-callSid claim lock dedupes if both paths ever race.)
         void (async () => {
+          let filed = false;
           try {
             const { SyncAgentService } = await import("../services/syncAgentService");
             const { fullName: name, standIn } = nameOrStandIn(params.patient_first_name, params.patient_last_name);
@@ -2392,7 +2396,7 @@ For healthcare provider calls — escalate immediately with whatever info you ha
               // path above. The post-call update carries the complete one.
             });
             if (result.success) {
-              markAfterHoursTicketFiled(callId);
+              filed = true;
               console.info(
                 `[HANDOFF] ✓ Urgent transfer record ticket: ${result.ticketNumber}${earlier ? ` (beside ${earlier.ticketNumber})` : ''}`,
               );
@@ -2401,11 +2405,14 @@ For healthcare provider calls — escalate immediately with whatever info you ha
             }
           } catch (recordErr) {
             console.error('[HANDOFF] ✗ Exception creating urgent transfer record ticket:', recordErr);
+          } finally {
+            finishRecordFiling(filed);
           }
         })();
 
         return { success: true, message: "Call transferred to on-call provider." };
       } catch (handoffError) {
+        finishRecordFiling(false);
         console.error("[HANDOFF] ✗ handoffToHuman() threw error:", handoffError);
         return { success: false, message: "Transfer failed - please take a message instead." };
       }
