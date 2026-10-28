@@ -50,7 +50,7 @@ export function prepareTicketIdentity(input: Record<string, unknown>): { input: 
     filled.last_name = value(input.last_name) || match.lastName;
     if (match.dateOfBirth) filled.date_of_birth = match.dateOfBirth;
     const office = match.nextAppointment?.location || match.lastVisit?.location || match.confirmedClinic;
-    if (office) filled.location = office;
+    if (office && !value(filled.location)) filled.location = office;
   }
   if (!isoDOB(value(filled.date_of_birth))) {
     const spoken = spokenDobFor(value(input.call_sid));

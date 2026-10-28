@@ -51,3 +51,28 @@ it.each([
   await api.submitTicket({ patientFullName, patientDOB, reasonForCalling: 'Synthetic callback', preferredContactMethod: 'phone', callData: { callSid: sid } });
   expect((send.mock.calls[0][2] as { validatedPatient?: unknown }).validatedPatient).toBeUndefined();
 });
+
+it.each([
+  { nextAppointment: { date: '2099-01-01', location: 'Synthetic Next Clinic' },
+    lastVisit: { date: '2020-01-01', location: 'Synthetic Last Clinic' }, usualOffice: 'Synthetic Usual Clinic' },
+  { lastVisit: { date: '2020-01-01', location: 'Synthetic Last Clinic' }, usualOffice: 'Synthetic Usual Clinic' },
+  { usualOffice: 'Synthetic Usual Clinic' },
+])('simplified transport preserves an explicit clinic and uses history only as a fallback (%j)', async (history) => {
+  rememberVerifiedIdentity(sid, { firstName: 'Alex', lastName: 'Synthetic', dateOfBirth: '1970-01-02',
+    certain: true, ...history });
+  const api = new TicketingApiClient();
+  vi.spyOn(api as any, 'warmUpIfStale').mockResolvedValue(true);
+  const send = vi.spyOn(api as any, 'makeRequest').mockResolvedValue({ success: true });
+  const ticket = { patientFullName: 'Alex Synthetic', patientDOB: '1970-01-02',
+    reasonForCalling: 'Synthetic callback', preferredContactMethod: 'phone' as const, callData: { callSid: sid } };
+
+  await api.submitTicket({ ...ticket, locationOfLastVisit: 'Synthetic Caller Clinic' });
+  expect(send.mock.calls[0][2]).toMatchObject({ locationOfLastVisit: 'Synthetic Caller Clinic',
+    validatedPatient: { status: 'validated', callSid: sid } });
+
+  const fallback = history.nextAppointment?.location || history.lastVisit?.location || history.usualOffice;
+  for (const locationOfLastVisit of [undefined, '']) {
+    await api.submitTicket({ ...ticket, locationOfLastVisit });
+    expect(send.mock.lastCall?.[2]).toMatchObject({ locationOfLastVisit: fallback });
+  }
+});

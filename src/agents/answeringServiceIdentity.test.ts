@@ -14,6 +14,7 @@ vi.mock('../services/scheduleLookupService', async (original) => ({
 vi.mock('../services/syncAgentService', () => ({ SyncAgentService: { submitSimplifiedTicket: h.submit } }));
 import { createAnsweringServiceAgent } from './answeringServiceAgent';
 import { resetVerifiedIdentities } from '../tools/verifiedIdentity';
+import { clearAllLedgers } from '../services/callFactsLedger';
 
 const sid = 'CA' + 'e'.repeat(32);
 const args = { first_name: 'Alex', last_name: 'Synthetic', date_of_birth: '1970-01-02' };
@@ -25,6 +26,7 @@ const record = { patientFound: true, matchedBy: 'name_and_dob', identity: { uniq
 beforeEach(() => {
   vi.clearAllMocks();
   resetVerifiedIdentities();
+  clearAllLedgers();
   h.lookup.mockResolvedValue(record);
   h.phone.mockResolvedValue({ ...record, matchedBy: 'phone', identityUnconfirmed: true });
   h.submit.mockResolvedValue({ success: true, ticketNumber: 'VA-SYNTHETIC' });
@@ -63,4 +65,42 @@ it('VA-76198: answering-service phone lookup returns a candidate without visit h
   expect(result).toMatchObject({ found: true, identityUnconfirmed: true });
   expect(result.upcomingAppointments).toBeUndefined();
   expect(result.patientData).toBeUndefined();
+});
+
+it('keeps a preloaded phone match confirmed for later appointment questions without DOB', async () => {
+  const agent = await createAnsweringServiceAgent(async () => {}, { callSid: sid,
+    callId: 'synthetic-dob-confirmation', callLogId: 'synthetic-log', callerPhone: '5555550100' });
+  expect(await invoke(agent, 'lookup_schedule', { date_of_birth: args.date_of_birth }))
+    .toMatchObject({ verified: true, appointment_access: 'available' });
+
+  for (const query of [{}, { first_name: args.first_name, last_name: args.last_name }]) {
+    const result = await invoke(agent, 'lookup_schedule', query);
+    expect(result).toMatchObject({ found: true, appointment_access: 'available',
+      upcomingAppointments: record.upcomingAppointments });
+    expect(result.identityUnconfirmed).not.toBe(true);
+  }
+  expect(h.phone).toHaveBeenCalledTimes(1);
+  expect(h.lookup).not.toHaveBeenCalled();
+});
+
+it('keeps an ambiguous preloaded phone match restricted after a matching DOB', async () => {
+  h.phone.mockResolvedValue({ ...record, matchedBy: 'phone', identityUnconfirmed: true, identity: { unique: false } });
+  const agent = await createAnsweringServiceAgent(async () => {}, { callSid: sid,
+    callId: 'synthetic-ambiguous-dob', callLogId: 'synthetic-log', callerPhone: '5555550100' });
+  const result = await invoke(agent, 'lookup_schedule', { phone: '5555550100', date_of_birth: args.date_of_birth });
+  expect(result).toMatchObject({ found: true, identityUnconfirmed: true, appointment_access: 'identity_required' });
+  expect(result.upcomingAppointments).toBeUndefined();
+  expect(result.patientData).toBeUndefined();
+});
+
+it('preserves the requested clinic when filing with held appointment history', async () => {
+  const agent = await createAnsweringServiceAgent(async () => {}, { callSid: sid });
+  await invoke(agent, 'lookup_schedule', args);
+  expect(await invoke(agent, 'create_ticket', { department_id: 3, request_type_id: 1,
+    request_reason_id: 1, callback_number: '5555550100', subject: 'Callback requested',
+    description: 'Synthetic appointment question', location_name: 'Synthetic Caller Clinic' }))
+    .toMatchObject({ success: true });
+  expect(h.submit).toHaveBeenCalledWith(expect.objectContaining({ patientFullName: 'Alex Synthetic',
+    patientDOB: '1970-01-02', locationOfLastVisit: 'Synthetic Caller Clinic' }));
+  expect(h.lookup).toHaveBeenCalledTimes(1);
 });

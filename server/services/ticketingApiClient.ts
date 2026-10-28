@@ -1009,7 +1009,7 @@ export class TicketingApiClient {
       nameKey(params.patientFullName) === nameKey(`${held.firstName} ${held.lastName}`)) ? held : undefined);
     if (match) params = { ...params, validatedPatient: match, patientFullName: unnamed ? `${match.firstName} ${match.lastName}` : params.patientFullName,
       patientDOB: readDobQuietly(params.patientDOB) ? params.patientDOB : match.dateOfBirth || params.patientDOB,
-      locationOfLastVisit: match.nextAppointment?.location || match.lastVisit?.location || match.confirmedClinic || params.locationOfLastVisit };
+      locationOfLastVisit: params.locationOfLastVisit || match.nextAppointment?.location || match.lastVisit?.location || match.confirmedClinic };
     console.info("[TICKETING API] Submitting ticket (simplified endpoint):", {
       patientName: maskName(params.patientFullName),
       hasPhone: !!params.patientPhone,

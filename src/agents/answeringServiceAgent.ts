@@ -804,6 +804,8 @@ Use this data to answer appointment questions AND for ticket creation.`,
               lastName: lf?.matchedLastName,
               identityVerified: true,
             });
+            // Retain DOB confirmation for later held-identity schedule reads.
+            scheduleContext = { ...scheduleContext, matchedBy: 'name_and_dob', identityUnconfirmed: false };
             rememberVerifiedIdentity(callSid, { ...scheduleContext.patientData, ...joinedAppointments(scheduleContext), certain: true });
             console.log(`[${agentTag}] ✓ VERIFIED via context DOB match — returning pre-loaded record for ${callId}`);
             return {
