@@ -379,8 +379,8 @@ const ASK_VERB =
  * cancel/confirm/move a visit beside an exam report was held in Records.
  */
 const APPOINTMENT_ASK = new RegExp(
-  `\\b${ASK_VERB}(?:\\s+to\\s+${ASK_VERB})?\\s+(?:(?:an?|the|another|new|routine|follow[ -]?up|return|office|clinic|patient's|my|our|her|his|their)\\s+){0,5}(?:appointments?|appts?|visits?|follow[ -]?ups?)\\b` +
-    `|\\b(?:agendar|programar|reprogramar|hacer|cancelar|confirmar|cambiar|mover|pedir|solicitar|necesita(?:mos|n)?|quiere(?:n)?)\\s+(?:(?:una|un|la|el|su|otra|nueva|de|del|seguimiento)\\s+){0,4}(?:citas?|consultas?|visitas?)\\b`,
+  `\\b${ASK_VERB}(?:\\s+to\\s+${ASK_VERB})?\\s+(?:(?:an?|the|another|new|next|upcoming|annual|yearly|regular|routine|existing|current|scheduled|earlier|later|first|second|same|follow[ -]?up|return|office|clinic|eye|patient's|my|our|her|his|their|this|that)\\s+){0,5}(?:appointments?|appts?|visits?|follow[ -]?ups?)\\b` +
+    `|\\b(?:agendar|programar|reprogramar|hacer|cancelar|confirmar|cambiar|mover|pedir|solicitar|necesita(?:mos|n)?|quiere(?:n)?)\\s+(?:(?:una|un|la|el|su|otra|nueva|proxima|siguiente|de|del|seguimiento)\\s+){0,4}(?:citas?|consultas?|visitas?)\\b`,
   'g',
 );
 

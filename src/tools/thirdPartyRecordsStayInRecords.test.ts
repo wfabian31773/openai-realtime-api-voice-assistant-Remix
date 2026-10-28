@@ -307,6 +307,8 @@ describe('a third party who names a document AND asks to schedule is scheduling 
     ['we received the eye exam report and need to cancel her visit', 146],
     ['we received the eye exam report and need to confirm her visit', 146],
     ['we received the eye exam report and need to move her visit', 146],
+    // github-actions Codex P2 on head 5195e3f: a modifier like "next".
+    ['we received the eye exam report and need to schedule her next visit', 146],
   ] as const) {
     it(`"${words}" reaches the HVA Hub (reason ${reason})`, async () => {
       const app = await fakeApp();
@@ -360,6 +362,9 @@ describe('a third party who names a document AND asks to schedule is scheduling 
       'we received the eye exam report and need to cancel her visit',
       'we received the eye exam report and need to confirm her visit',
       'we received the eye exam report and need to move her visit',
+      'we received the eye exam report and need to schedule her next visit',
+      'we have the eye exam report and want to book her upcoming annual appointment',
+      'recibimos el informe del examen de la vista y necesitamos agendar su proxima cita',
       'we received the eye exam report and want to change her appointment',
       'recibimos el informe del examen de la vista y necesitamos cancelar su cita',
       'recibimos el informe del examen de la vista, necesita una cita',
