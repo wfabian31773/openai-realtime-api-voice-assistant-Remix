@@ -902,8 +902,16 @@ import { callEnvironment } from "./callRecord";
  * once with routingAskExhausted instead of sending PCP back through re-asks.
  * On top of v126 (#394); v127 is #376 on its open branch. No migration; production impact remains unmeasured.
  */
+/**
+ * v129 — AFTER-HOURS TEARDOWN FLOOR (2026-10-28). The no-ivr and no-ivr-v2
+ * agents reuse PCP's v90 registered sweep machinery on both voice pipelines.
+ * A transcribed request with no ticket files through the usual After Hours
+ * submission path; silent calls, identity-only calls and existing tickets
+ * are skipped. The normal per-call lock and idempotency key prevent duplicates.
+ * On top of v128 (#389); renumbered from v119; v127 is #376 on its open branch. No migration; production impact remains unmeasured.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v128-pcp-scheduling-hub-unassigned-exit-20261028";
+  "voice-runtime-v129-after-hours-teardown-floor-20261028";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

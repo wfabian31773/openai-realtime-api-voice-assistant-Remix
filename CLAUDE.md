@@ -656,9 +656,18 @@ is reading noise.
 
 ---
 
-## Current branch — PCP scheduling and unassigned exit (2026-10-28)
+## Current branch — after-hours teardown floor (2026-10-28)
 
-This branch carries **`voice-runtime-v128-pcp-scheduling-hub-unassigned-exit-20261028`**
+This branch carries **`voice-runtime-v129-after-hours-teardown-floor-20261028`**
+(renumbered from v119), on top of `main`'s v128 (#389, `558f288`); v127 is #376 on its open branch. Both voice pipelines run the registered after-hours floor for
+no-ivr and no-ivr-v2, reusing PCP's v90 runner and transcript request guard.
+It files to After Hours only for a transcribed request with no ticket, using
+the normal per-call lock and idempotency key. No migration or production
+measurement.
+
+v117's surname spelling and full email confirmation reach the agent's
+
+The v128 base (#389, `558f288`) carries **`voice-runtime-v128-pcp-scheduling-hub-unassigned-exit-20261028`**
 (renumbered from v122), on top of `main`'s v126 (#394, `036c39e`); v127 is #376
 on its open branch. PCP patient scheduling honors captured scheduling purposes;
 shared appointment cues also recognize "schedule my appointment" and
@@ -2380,6 +2389,7 @@ voice-runtime-v116-the-record-office-name-travels-20261023
 voice-runtime-v117-contact-capture-20261027
 voice-runtime-v126-noivr-prompt-trim-20261028
 voice-runtime-v128-pcp-scheduling-hub-unassigned-exit-20261028
+voice-runtime-v129-after-hours-teardown-floor-20261028
 ```
 
 Also printed at boot as `[voice-runtime] <marker>`. Anything ending in an
@@ -2506,6 +2516,7 @@ on it is evidence about current code.
 | **v117** or earlier — NOT the date; this branch is **v126**, above v117 | No-IVR Grok prompt trim: repeated explanations removed without changing rules; the length ratchet checks pinned daytime and overnight clocks. v122–v125 are on open branches. No migration. |
 
 | **v126** or earlier — NOT the date; this branch is **v128** (renumbered from v122), ABOVE `main`'s v126 (#394, `036c39e`), which it contains; v127 is #376 on its open branch | PCP patient scheduling reaches the HVA Hub; terminal Optical/Surgery office or surgeon refusals retry once with the existing unassigned flag. `src/pcp/patientSchedulingUnassigned.test.ts` exercises the live filing tool with synthetic data. No migration; production measurement outstanding. |
+| **v128** or earlier — NOT the date; this branch is **v129** (renumbered from v119), ABOVE `main`'s v128 (#389, `558f288`), which it contains; v127 is #376 on its open branch | No-IVR and no-ivr-v2 run PCP's v90 registered teardown floor on both pipelines: a transcribed request with no ticket files to After Hours via the normal path, per-call lock and idempotency key; silent, identity-only and already-ticketed calls are skipped. No migration. |
 
 ### THE SURGEON CLAIM — BUILT, REVIEWED SIX TIMES, WITHDRAWN 2026-09-17
 
@@ -2592,10 +2603,10 @@ v10 (the person base and the join), v11 (the locked record, #290) and v12
 (optical's office ladder) are a CHAIN on `main`: each merged after the one
 before and brought it in, so v12 contains both.
 
-**AND THE SEQUENCE HAS TWO HOLES IN IT ON PURPOSE: v13 AND v57. v128 IS THE
-NEWEST — PCP scheduling and unassigned exit, on its branch ABOVE `main`'s v126,
-which it contains; v127 is #376 on its open branch — AND v126 IS WHAT `main`
-CARRIES, SINCE #394 MERGED 2026-10-28 (`036c39e`): the no-IVR prompt trim, above
+**AND THE SEQUENCE HAS TWO HOLES IN IT ON PURPOSE: v13 AND v57. v129 IS THE
+NEWEST — the after-hours teardown floor, on its branch ABOVE `main`'s v128, which it contains; v127 is #376 on its open branch —
+AND v128 IS WHAT `main` CARRIES, SINCE #389 MERGED 2026-10-28 (`558f288`): PCP scheduling and
+unassigned exit, above v126 (#394, `036c39e`), the no-IVR prompt trim, above
 v117; v122–v125 are on open branches. v117 is contact capture (#14), above v116. v116 carries
 the record's office name on an optical ticket — on its branch
 ABOVE v115, which it contains — and v115 came from
@@ -2864,7 +2875,7 @@ never read v57; **v58 was that next ship** — the identity probe, an instrument
 and no behaviour change (see the v56 row below for what it measures). It is no
 longer the current marker: see the paragraph beneath this one.
 
-**v126 (#394) IS WHAT `main` CARRIES (merged 2026-10-28, `036c39e`), AND v57,
+**v128 (#389) IS WHAT `main` CARRIES (merged 2026-10-28, `558f288`), AND v57,
 v59, v60, v63, v65 AND v66 ARE RETIRED RATHER THAN REUSED.** Each of the last
 five was a branch's own number while it sat below `main`, and each was given up
 the moment a merge put it there: two branches carrying one version make two

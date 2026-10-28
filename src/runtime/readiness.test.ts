@@ -13,10 +13,6 @@ const FULL = {
 };
 
 describe("runtime readiness", () => {
-  it('identifies the PCP scheduling and unassigned-exit deployment', () => {
-    expect(VOICE_RUNTIME_DEPLOY_MARKER).toBe('voice-runtime-v128-pcp-scheduling-hub-unassigned-exit-20261028');
-  });
-
   it("is live-ready with the voice, the webhook auth and a database", () => {
     const r = computeRuntimeReadiness(FULL);
     expect(r.liveReady).toBe(true);
@@ -141,6 +137,10 @@ describe("runtime readiness", () => {
   it("carries the date it was set, so a build's age is readable from the marker", () => {
     expect(VOICE_RUNTIME_DEPLOY_MARKER).toMatch(/-\d{8}$/);
     expect(markerSetOn()).not.toBeNull();
+  });
+
+  it('identifies the after-hours teardown floor deployment', () => {
+    expect(VOICE_RUNTIME_DEPLOY_MARKER).toBe('voice-runtime-v129-after-hours-teardown-floor-20261028');
   });
 
   it("markerSetOn reports null rather than guessing when the suffix is gone", () => {

@@ -26,6 +26,7 @@ import { callLifecycleCoordinator, getMaxDurationMs } from './services/callLifec
 import { callMetadataForDB } from './services/callMetadataStore';
 import { recordingStatusTarget } from './services/recordingStatusTarget';
 import { landRecording } from './runtime/parkedRecordings';
+import { runLaneTeardownFloor } from './runtime/pcpFloor';
 import { callSessionService } from './services/callSessionService';
 import { withRetry, withResiliency, TICKETING_RETRY_CONFIG, TWILIO_RETRY_CONFIG, getCircuitBreaker } from './services/resilienceUtils';
 import { getGreeterOpeningGreeting } from './utils/timeAware';
@@ -3024,6 +3025,7 @@ async function observeCall(
         break;
       }
       
+      case 'no-ivr-v2':
       case 'dev-no-ivr':
         // DEV version of no-ivr agent - for development testing
         // v1.10.0-dev: direct appointment answers, ghost call filtering, improved language detection, same-day urgency
@@ -4632,14 +4634,13 @@ async function observeCall(
             new Promise((resolve) => setTimeout(resolve, 25_000)),
           ]),
         )
-      : agentConfig?.id === 'pcp'
-      ? import('./agents/pcpAgent').then(({ sweepPcpUnfiledCall }) =>
-          Promise.race([
-            sweepPcpUnfiledCall(callId),
-            new Promise((resolve) => setTimeout(resolve, 25_000)),
-          ]),
-        )
-      : Promise.resolve())
+      : runLaneTeardownFloor({
+          slug: effectiveSlug,
+          callSid: callId,
+          // Snapshot before the fire-and-forget cleanup deletes the transcript.
+          // Keep PCP's SIP ending unspecified, as it has always been.
+          transcript: (callTranscripts.get(callId) ?? []).join('\n'),
+        }, { source: async () => agentRegistry }))
       .catch(() => {})
       .then(() => flushAzulTimeline(callId))
       .catch((err) => console.error(`[AZUL-TIMELINE] teardown flush failed for ${callId}:`, err))
