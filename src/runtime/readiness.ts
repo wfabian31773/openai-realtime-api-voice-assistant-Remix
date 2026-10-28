@@ -890,10 +890,16 @@ import { callEnvironment } from "./callRecord";
  * On top of v116. No migration; production impact remains unmeasured.
  */
 /**
+ * v126 — NO-IVR PROMPT TRIM (2026-10-28). Remove repeated explanations from
+ * the Grok prompt while keeping its rules; the length ratchet checks pinned
+ * daytime and overnight clocks. On top of v117; v122–v125 are on open
+ * branches. `src/agents/noIvrPromptForGrok.ts`.
+ */
+/**
  * v124 — MUTUAL PATIENT DETECTOR (2026-10-28). The provider detector also
  * recognizes "one mutual patient" and "the mutual patient", including
  * plurals, so these callers can pass the after-hours provider gate.
- * On top of v117. No migration; production impact remains unmeasured.
+ * On top of v126. No migration; production impact remains unmeasured.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
   "voice-runtime-v124-mutual-patient-detector-20261028";
