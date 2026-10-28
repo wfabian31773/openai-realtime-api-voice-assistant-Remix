@@ -1104,6 +1104,41 @@ describe("one whole call, end to end, offline", () => {
     expect(seen[0].precontext).toEqual({ matched: true, firstName: "Alex", identityValidated: true });
   });
 
+  it("gives PCP the heard transcript for queue withdrawal without changing the hang-up getter", async () => {
+    let metadata: { getTransferTranscript?: () => string; getTranscript?: () => string } | undefined;
+    const h = await harness({
+      laneSource: laneSource({
+        id: "pcp",
+        factory: ((_handoff: unknown, context: typeof metadata) => {
+          metadata = context;
+          expect(metadata?.getTransferTranscript?.(), 'the bridge is built after the agent').toBe('');
+          return { instructions: "PCP agent", tools: [] };
+        }) as unknown as LaneConfig["factory"],
+      }),
+      env: { ...ENV, PCP_HUMAN_AGENT_NUMBER: "+18185551234", TWILIO_ACCOUNT_SID: "AC00000000000000000000000000000000", TWILIO_PHONE_NUMBER: "+18185550000", DOMAIN: "voice.example.test" },
+    });
+    const answered = await post(h, "/voice/pcp", { CallSid: "CA-transfer-transcript", From: "+1", To: "+2" });
+    const { ws, frames } = await openStream(h, "CA-transfer-transcript", tokenFrom(answered.text));
+    await settle();
+    expect(metadata?.getTransferTranscript).toBeTypeOf("function");
+    expect(metadata?.getTranscript).toBeUndefined();
+    const grok = h.transports[0];
+    grok.emit({ type: "session.created" } as GrokServerEvent);
+    grok.emit({ type: "session.updated" } as GrokServerEvent);
+    grok.emit({ type: "response.created" } as GrokServerEvent);
+    const line = "Your ticket number is PCP-58001.";
+    grok.emit({ type: "response.output_audio_transcript.delta", delta: line } as GrokServerEvent);
+    grok.emit({ type: "response.output_audio.delta", delta: Buffer.alloc(800, 0x7f).toString("base64") } as GrokServerEvent);
+    grok.emit({ type: "response.output_audio_transcript.done", transcript: line } as GrokServerEvent);
+    await settle();
+    expect(metadata?.getTransferTranscript?.()).toBe('');
+    const mark = frames.find((f) => f.event === "mark") as { mark: { name: string } };
+    expect(mark).toBeTruthy();
+    ws.send(JSON.stringify({ event: "mark", streamSid: "MZ1", mark: { name: mark.mark.name } }));
+    await settle();
+    expect(metadata?.getTransferTranscript?.()).toBe(`AGENT: ${line}`);
+  });
+
   it("proceeds without pre-context rather than waiting on a slow lookup", async () => {
     const seen: Array<Record<string, unknown>> = [];
     const laneSourceCapturing: LaneSource = {
@@ -1231,10 +1266,10 @@ describe("one whole call, end to end, offline", () => {
    * SAME source the call's agent was resolved from — asserted here with the
    * runtime's real default left in place.
    */
-  it("hands the pcp lane's own teardownSweep the CallSid, through the runtime's default", async () => {
+  it.each(['pcp', 'no-ivr', 'no-ivr-v2'])("hands %s its own teardownSweep through the runtime's default", async (slug) => {
     const teardownSweep = vi.fn(async () => undefined);
-    const h = await harness({ realPcpFloor: true, laneSource: laneSource({ id: "pcp", teardownSweep }), env: { ...ENV, PCP_HUMAN_AGENT_NUMBER: "+18185551234", TWILIO_ACCOUNT_SID: "AC00000000000000000000000000000000", TWILIO_PHONE_NUMBER: "+18185550000", DOMAIN: "voice.example.test" } });
-    const answered = await post(h, "/voice/pcp", { CallSid: "CA-floor-real", From: "+1", To: "+2" });
+    const h = await harness({ realPcpFloor: true, laneSource: laneSource({ id: slug, teardownSweep }), env: { ...ENV, PCP_HUMAN_AGENT_NUMBER: "+18185551234", TWILIO_ACCOUNT_SID: "AC00000000000000000000000000000000", TWILIO_PHONE_NUMBER: "+18185550000", DOMAIN: "voice.example.test" } });
+    const answered = await post(h, `/voice/${slug}`, { CallSid: "CA-floor-real", From: "+1", To: "+2" });
     const { ws } = await openStream(h, "CA-floor-real", tokenFrom(answered.text));
     await settle(2);
     ws.close();

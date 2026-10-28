@@ -120,16 +120,26 @@ export async function runPcpFloor(
   options: PcpFloorOptions = {},
 ): Promise<void> {
   if (record.slug !== PCP_FLOOR_LANE) return;
+  return runLaneTeardownFloor(record, options);
+}
+
+/** v129: share PCP's v90 registration lookup and teardown bound with after-hours. */
+export async function runLaneTeardownFloor(
+  record: Pick<VoiceCallRecord, 'slug' | 'callSid'> & { outcome?: string; transcript?: string },
+  options: PcpFloorOptions = {},
+): Promise<void> {
   const budgetMs = options.budgetMs ?? PCP_FLOOR_BUDGET_MS;
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     const sweep: PcpSweep | undefined =
       options.sweep ??
-      (options.source ? (await options.source()).getAgentConfig(PCP_FLOOR_LANE)?.teardownSweep : undefined);
+      (options.source ? (await options.source()).getAgentConfig(record.slug)?.teardownSweep : undefined);
     if (!sweep) {
       // A registration without its sweep is a wiring defect, not a quiet
       // call: say so loudly, because the alternative is v69's silence.
-      console.error(`[PCP FLOOR] the pcp lane registers no teardownSweep — nothing can file for ${record.callSid}`);
+      if (record.slug === PCP_FLOOR_LANE) {
+        console.error(`[PCP FLOOR] the pcp lane registers no teardownSweep — nothing can file for ${record.callSid}`);
+      }
       return;
     }
     await Promise.race([
@@ -143,8 +153,8 @@ export async function runPcpFloor(
         (timer as unknown as { unref?: () => void }).unref?.();
       }),
     ]);
-  } catch (e) {
-    console.error(`[PCP FLOOR] sweep failed for ${record.callSid} (call already ended):`, e);
+  } catch {
+    console.error(`[TEARDOWN FLOOR] ${record.slug} sweep failed for ${record.callSid} (call already ended)`);
   } finally {
     if (timer) clearTimeout(timer);
   }

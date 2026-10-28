@@ -102,10 +102,11 @@ export function spokenLanguageToolDescription(spokenLanguages?: readonly string[
   if (!names) return SET_SPOKEN_LANGUAGE_DESCRIPTION;
   return (
     `${renderLanguagePolicy(spokenLanguages)} Call this the moment the caller ` +
+    // Said once each: the policy head already tells an other-language caller
+    // what to hear, and the tail already says to answer in their language.
     `speaks ${names} other than the one you are using, or asks for it — then ` +
-    'carry on in that language and take their request as normal. Do NOT call ' +
-    'it for any other language: it will be refused, and you say in English ' +
-    `that this line can help in ${names} and continue in English. ` +
+    'take their request as normal. Do NOT call ' +
+    'it for any other language: it will be refused. ' +
     SET_SPOKEN_LANGUAGE_DESCRIPTION_TAIL
   );
 }

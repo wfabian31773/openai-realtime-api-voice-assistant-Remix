@@ -207,6 +207,14 @@ export interface PcpConversationState {
    */
   patientOrdinal?: number;
   /**
+   * Patient create-ticket filings whose unassigned routing retry was refused.
+   * Keyed by a hash of the routed payload (including the patient-scoped
+   * idempotency key). If the unassigned retry still names the same missing
+   * routing field, a priority-only change also stops before either POST.
+   * Server-owned; never accepted from tool arguments.
+   */
+  patientRoutingRefusals?: Record<string, string>;
+  /**
    * THE CALLER IS THE PATIENT, and it stays true once established.
    *
    * `callPurpose` is not safe to read for this. The records tool reclassifies

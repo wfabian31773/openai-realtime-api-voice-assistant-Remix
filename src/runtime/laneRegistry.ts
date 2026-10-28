@@ -109,9 +109,9 @@ export interface LaneConfig {
   /** The line the practice answers with. Present on every registered
    * inbound agent; the SIP path plays it and the prompts assume it. */
   greeting?: string;
-  /** The lane's teardown filer (PCP's floor), from the same module as
+  /** The lane's teardown filer (PCP and after-hours floors), from the same module as
    * `factory`. See src/runtime/pcpFloor.ts. */
-  teardownSweep?: (callId: string, ctx?: { outcome?: string }) => Promise<void>;
+  teardownSweep?: (callId: string, ctx?: { outcome?: string; transcript?: string }) => Promise<void>;
 }
 
 /**
@@ -256,6 +256,8 @@ export interface LaneCallMetadata {
   callId: string;
   callerPhone: string;
   dialedNumber: string;
+  /** PCP's queue-withdrawal exemption reads the live transcript before redirecting. */
+  getTransferTranscript?: () => string;
   /**
    * The call_logs row id.
    *
