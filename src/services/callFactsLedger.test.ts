@@ -76,4 +76,13 @@ describe('dobMatchesContext — verify against the pulled record, not the system
     seedLedger('d', {});
     expect(dobMatchesContext('d', '3/17/1973')).toBeNull();
   });
+  it('compares only the current record even when a ledger still holds a different phone candidate', async () => {
+    const { dobMatchesRecord } = await import('./callFactsLedger');
+    seedLedger('d', { matchedDob: '1973-03-17' });
+    const current = { dateOfBirth: '1983-05-10' };
+    expect(dobMatchesRecord(current, '3/17/1973')).toBe(false);
+    expect(dobMatchesRecord(current, 'May 10 1983')).toBe(true);
+    expect(dobMatchesRecord({}, '3/17/1973')).toBeNull();
+    expect(dobMatchesRecord(undefined, '3/17/1973')).toBeNull();
+  });
 });

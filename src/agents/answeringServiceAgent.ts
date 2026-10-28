@@ -1,6 +1,6 @@
 import { filterOpticalPatientLocations } from '../tools/acceptableLocation';
 import { nameKey, rememberVerifiedIdentity } from '../tools/verifiedIdentity';
-import { joinedAppointments, prepareTicketIdentity, validatedPatientFor, type TicketLocationSource } from '../tools/ticketIdentity';
+import { joinedAppointments, prepareTicketIdentity, scheduleMatchesIdentity, validatedPatientFor, type TicketLocationSource } from '../tools/ticketIdentity';
 import { appointmentReadPolicy } from '../services/appointmentReadPolicy';
 import { appointmentAccess, unavailableAppointmentAccess } from '../services/appointmentAccess';
 import { RealtimeAgent, tool } from '@openai/agents/realtime';
@@ -798,32 +798,37 @@ Use this data to answer appointment questions AND for ticket creation.`,
         // matches the matched record is VERIFIED — return that record
         // directly. No name search to garble, regardless of who is driving.
         if (callId && params.date_of_birth) {
-          const { dobMatchesContext, updateLedger: ul, getLedger: gl } = await import('../services/callFactsLedger');
-          if (dobMatchesContext(callId, params.date_of_birth) === true && scheduleContext?.patientFound &&
+          const { dobMatchesRecord, seedLedger } = await import('../services/callFactsLedger');
+          if (dobMatchesRecord(scheduleContext?.patientData, params.date_of_birth) === true && scheduleContext?.patientFound &&
               scheduleContext.identity?.unique === true &&
               (!params.first_name || nameKey(params.first_name) === nameKey(scheduleContext.patientData?.firstName ?? '')) &&
               (!params.last_name || nameKey(params.last_name) === nameKey(scheduleContext.patientData?.lastName ?? ''))) {
-            const lf = gl(callId);
-            ul(callId, {
-              firstName: lf?.matchedFirstName,
-              lastName: lf?.matchedLastName,
+            // A confirmed switch may replace a previously locked identity.
+            // Carry the patient just checked, never the original phone match.
+            seedLedger(callId, {
+              matchedFirstName: scheduleContext.patientData?.firstName,
+              matchedLastName: scheduleContext.patientData?.lastName,
+              matchedDob: scheduleContext.patientData?.dateOfBirth,
+              firstName: scheduleContext.patientData?.firstName,
+              lastName: scheduleContext.patientData?.lastName,
+              dateOfBirth: scheduleContext.patientData?.dateOfBirth,
               identityVerified: true,
             });
             // Retain DOB confirmation for later held-identity schedule reads.
             scheduleContext = { ...scheduleContext, matchedBy: 'name_and_dob', identityUnconfirmed: false };
             rememberVerifiedIdentity(callSid, { ...scheduleContext.patientData, ...joinedAppointments(scheduleContext), certain: true });
-            console.log(`[${agentTag}] ✓ VERIFIED via context DOB match — returning pre-loaded record for ${callId}`);
+            console.log(`[${agentTag}] ✓ VERIFIED via context DOB match — returning current record for ${callId}`);
             return {
               ...scheduleContext,
               ...appointmentAccess(scheduleContext, true, params),
               verified: true,
-              note: 'Caller VERIFIED: recognized phone number + date of birth matches the record on file. Greet them by first name and proceed — do NOT ask any further identity questions.',
+              note: 'Caller VERIFIED: date of birth matches the current patient record. Greet them by first name and proceed — do NOT ask any further identity questions.',
             };
           }
         }
 
         const held = validatedPatientFor(callSid, params.first_name, params.last_name, params.date_of_birth);
-        if (held && scheduleContext?.patientFound) {
+        if (scheduleMatchesIdentity(scheduleContext, held)) {
           result = scheduleContext;
         } else if (params.phone && !(params.first_name && params.last_name && params.date_of_birth)) {
           const normalizedPhone = normalizePhoneNumber(params.phone);
@@ -1103,8 +1108,9 @@ Use patient data from phone lookup when available - don't ask for info you alrea
       // SECONDARY LOOKUP: Enrich schedule context using name+DOB
       // This catches cases where caller phone doesn't match patient record (family member calling)
       const lockedIdentity = validatedPatientFor(callSid, params.first_name, params.last_name, params.date_of_birth);
-      let enrichedContext = lockedIdentity ? scheduleContext : undefined;
-      if (!lockedIdentity) {
+      const cachedIdentityMatches = scheduleMatchesIdentity(scheduleContext, lockedIdentity);
+      let enrichedContext = cachedIdentityMatches ? scheduleContext : undefined;
+      if (!cachedIdentityMatches) {
         console.log(`[${agentTag}] Performing secondary schedule lookup for ticket enrichment...`);
         try {
           const dobForLookup = parsedDOB.iso || `${parsedDOB.year}-${parsedDOB.month}-${parsedDOB.day}`;
@@ -1132,10 +1138,10 @@ Use patient data from phone lookup when available - don't ask for info you alrea
         }
       }
 
-      // A secondary lookup can establish identity during filing. Filter that
+      // A secondary lookup can establish or refresh identity during filing. Filter that
       // snapshot too, and pass it explicitly so the client cannot reattach raw
       // held history. Keep the held record intact for later Surgery requests.
-      if (!lockedIdentity) {
+      if (!cachedIdentityMatches) {
         validated = validatedPatientFor(callSid, params.first_name, params.last_name, params.date_of_birth);
         if (params.department_id === 1 && validated) {
           validated = await filterOpticalPatientLocations(validated);

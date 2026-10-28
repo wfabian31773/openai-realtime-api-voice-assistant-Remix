@@ -247,6 +247,24 @@ const SECOND_PATIENT = {
 };
 const SECOND_IDENTITY = { first_name: 'Blair', last_name: 'Synthetic', date_of_birth: '1970-02-03' };
 
+it('checks DOB-only requests against the current patient after an A to B schedule switch', async () => {
+  h.lookupByNameAndDOB.mockResolvedValueOnce({ ...CONFIRMED,
+    patientData: { firstName: TICKET.first_name, lastName: TICKET.last_name, dateOfBirth: '1958-01-04' },
+  } as any).mockResolvedValueOnce(SECOND_PATIENT as any);
+  const agent = await createNoIvrAgent(async () => {}, META);
+  await call(agent, 'lookup_schedule', TICKET);
+  await call(agent, 'lookup_schedule', SECOND_IDENTITY);
+
+  const staleDob = await call(agent, 'lookup_schedule', { date_of_birth: '1958-01-04' });
+  expect(staleDob.found).toBe(false);
+  expect(staleDob).not.toHaveProperty('upcomingAppointments');
+  expect(staleDob).not.toHaveProperty('upcoming_appointments');
+  expect(await call(agent, 'lookup_schedule', { date_of_birth: SECOND_IDENTITY.date_of_birth }))
+    .toMatchObject({ found: true, upcomingAppointments: SECOND_PATIENT.upcomingAppointments });
+  expect(h.lookupByNameAndDOB).toHaveBeenCalledTimes(2);
+  expect(verifiedIdentityFor(SID)).toMatchObject(SECOND_PATIENT.patientData);
+});
+
 it.each([
   { query: {}, demographics: true, firstIdentity: TICKET },
   { query: SECOND_IDENTITY, demographics: true, firstIdentity: TICKET },

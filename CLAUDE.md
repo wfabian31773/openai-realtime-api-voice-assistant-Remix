@@ -668,7 +668,14 @@ history-derived routing text/IDs, including no-IVR, after-hours, answering
 service, redirects and durable retries. Undefined departments use the same
 filter because the server can derive Optical. Caller-named offices are preserved;
 explicit other departments and the held identity keep full history. Surgery
-still files without a clinic when none is known. No migration; production impact is
+still files without a clinic when none is known. Answering-service DOB confirmation
+compares against the current schedule patient's DOB, never the original phone
+candidate in the ledger; successful confirmation carries that current patient's
+name and DOB into the ledger. Answering-service and no-IVR share the identity
+check before reusing cached schedules for appointment reads or ticket enrichment.
+The no-IVR v135 (#392) phone-candidate DOB confirmation remains supported. V2 and
+urgent after-hours have no ledger-based DOB confirmation shortcut. Prompt/tool
+caps remain 15,000 / 13,200 characters. No migration; production impact is
 unmeasured. Use v139 when verifying this branch.
 
 The v136 base (#393, main, `9bfccda`) carries

@@ -1,5 +1,5 @@
 import { nameKey, rememberVerifiedIdentity } from '../tools/verifiedIdentity';
-import { joinedAppointments, prepareTicketIdentity, validatedPatientFor, type ValidatedPatient, type TicketLocationSource } from '../tools/ticketIdentity';
+import { joinedAppointments, prepareTicketIdentity, scheduleMatchesIdentity, validatedPatientFor, type TicketLocationSource } from '../tools/ticketIdentity';
 import { readDobQuietly } from '../tools/dobParts';
 import { appointmentReadPolicy } from '../services/appointmentReadPolicy';
 import { appointmentAccess, unavailableAppointmentAccess } from '../services/appointmentAccess';
@@ -557,21 +557,6 @@ function parseDateOfBirth(dobString: string): {
 function toIsoDob(dobString: string): string | undefined {
   const parsed = parseDateOfBirth(dobString);
   return parsed.iso;
-}
-
-/** A held identity alone does not establish whose appointments are cached. */
-function scheduleMatchesIdentity(
-  context: PatientScheduleContext | undefined,
-  identity: ValidatedPatient | undefined,
-): context is PatientScheduleContext {
-  if (!identity || !context?.patientFound || context.matchedBy !== 'name_and_dob' ||
-      context.identity?.unique !== true || context.identityUnconfirmed) return false;
-  const patient = context.patientData;
-  if (patient?.personId && identity.personId && patient.personId !== identity.personId) return false;
-  const dob = readDobQuietly(patient?.dateOfBirth ?? '');
-  return nameKey(patient?.firstName) === nameKey(identity.firstName) &&
-    nameKey(patient?.lastName) === nameKey(identity.lastName) &&
-    Boolean(dob && `${dob.year}-${dob.month}-${dob.day}` === identity.dateOfBirth);
 }
 
 /**

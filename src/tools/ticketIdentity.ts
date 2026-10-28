@@ -35,6 +35,20 @@ export function validatedPatientFor(callSid?: string, first?: string, last?: str
     ...(held.nextAppointment ? { nextAppointment: held.nextAppointment } : {}),
     ...(held.lastVisit ? { lastVisit: held.lastVisit } : {}) };
 }
+/** A held identity alone does not establish whose appointments are cached. */
+export function scheduleMatchesIdentity(
+  context: PatientScheduleContext | undefined,
+  identity: ValidatedPatient | undefined,
+): context is PatientScheduleContext {
+  if (!identity || !context?.patientFound || context.matchedBy !== 'name_and_dob' ||
+      context.identity?.unique !== true || context.identityUnconfirmed) return false;
+  const patient = context.patientData;
+  if (patient?.personId && identity.personId && patient.personId !== identity.personId) return false;
+  const dob = isoDOB(patient?.dateOfBirth);
+  return nameKey(patient?.firstName) === nameKey(identity.firstName) &&
+    nameKey(patient?.lastName) === nameKey(identity.lastName) &&
+    Boolean(dob && dob === identity.dateOfBirth);
+}
 export function ticketIdentityFields(callSid: string, first: string, last: string, dob?: string, clinic?: string) {
   const validatedPatient = validatedPatientFor(callSid, first, last, dob);
   if (!validatedPatient) return {};

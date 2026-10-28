@@ -963,6 +963,10 @@ import { callEnvironment } from "./callRecord";
  * Simplified submissions with no department
  * use the same clinic-safe copy because the receiver can derive Optical;
  * explicit non-Optical filings and the held identity retain their history.
+ * Answering-service DOB confirmation checks the current schedule patient,
+ * never the original phone ledger. Answering-service and no-IVR cached schedule
+ * reuse checks the patient against the held identity before reading or filing.
+ * The v135 phone-candidate DOB confirmation remains supported.
  * Surgery files without a clinic when none is known. On top of v136 (#393, main,
  * 9bfccda); v137 is #391 and v138 is #376 on their open branches.
  * No migration; production impact is unmeasured.
