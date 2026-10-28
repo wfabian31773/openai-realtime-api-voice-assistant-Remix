@@ -21,6 +21,7 @@ constant-time compare, 5-minute single-use confirm token minted **on approve**.
 | `contacts:commit` | `commit_contact`, `commit_call_live`, `confirm_token` hand-off, live call controls | SI Assistant bot |
 | `contacts:approve` | `GET /approvals`, `POST /approvals/:id/approve`, `POST /approvals/:id/reject` | Support Center **Pending bot actions** page only. **Do not grant this to the bot.** |
 | `calls:direct` | `POST /calls/direct`, controls for the token's own direct live sessions | SI Assistant bot, explicit grant only |
+| `operator:call` | `prepare_operator_call`, operator `commit_call_live`, owned live controls and full transcript | Wayne operator bot, explicit grant only; incompatible with `contacts:approve` |
 
 Write scopes are never implied. An empty scope list becomes `fleet:read` only.
 Minting `calls:direct` together with staff scope `contacts:approve` is refused.
@@ -69,6 +70,12 @@ Minting `calls:direct` together with staff scope `contacts:approve` is refused.
 prepare, approve, reject, cancel, commit and all live call controls.
 
 ## Calls
+
+The approval-gated **Wayne operator line** uses its own caller ID and generic
+outbound lane. See [operator-line/README.md](operator-line/README.md) for the
+prepare → human approval → commit flow, hard duration limit, transcript API,
+additive migration, and QVO test scenarios. It accepts no patient or ticket
+fields and does not change the SI Assistant patient callback policy.
 
 ### Direct open-line calls
 

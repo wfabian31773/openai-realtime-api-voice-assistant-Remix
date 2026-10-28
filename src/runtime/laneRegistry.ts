@@ -48,6 +48,7 @@ import {
 } from "./config";
 import type { LiveTool } from "./agentBinding";
 import { normalizeSpokenLanguage } from "./language";
+import type { OperatorCallPayload } from "../plugin/operatorLine";
 /**
  * STATIC, ON PURPOSE — THIS LINE IS THE v78 FIX.
  *
@@ -285,6 +286,7 @@ export interface LaneCallMetadata {
   readonly outbound?: OutboundContact & { campaignKey: string };
   /** Only the owned SI Assistant direct live session supplies this. */
   readonly directCall?: { purpose: string; name?: string };
+  readonly operatorCall?: OperatorCallPayload;
   /**
    * On an outbound lane, a call somebody made TO it — the person ringing
    * back the number we call from (./outbound/callback.ts): who on the
@@ -390,7 +392,7 @@ export async function resolveLane(
     // The knowledge pack, placed by the binding as `## Business Facts` after
     // a five-section prompt's Role & Persona (the docs' order), or in front
     // of any other prompt (ADR-001's original arrangement).
-    instructionsPrefix: metadata.directCall ? undefined : buildKnowledgePack(),
+    instructionsPrefix: metadata.directCall || metadata.operatorCall ? undefined : buildKnowledgePack(),
     // The pipeline's own tools, on every lane, recorded to the timeline the
     // way the lane's own are.
     runtimeTools: [
@@ -419,14 +421,14 @@ export async function resolveLane(
       voiceName: pickLaneEnv(env, "XAI_VOICE_NAME", slug) ?? voice.voiceName,
       // Language IS provider-neutral ('en', 'es'), so the lane's own
       // registered value still counts.
-      language: normalizeSpokenLanguage(envLanguage ?? config.language ?? voice.language),
+      language: normalizeSpokenLanguage(metadata.operatorCall?.language ?? envLanguage ?? config.language ?? voice.language),
       // But only an ENV value is a choice. Every registered lane carries
       // `language: 'en'` from the old core, where the prompt did the
       // detecting; on this runtime that value would seed an English
       // transcription bias against every caller who opens in Spanish. The
       // handshake seeds a hint only for an explicit setting or a non-English
       // lane — see `seedsLanguageHint` (grokSession.ts) and the docs it cites.
-      languageExplicit: envLanguage !== undefined,
+      languageExplicit: metadata.operatorCall?.language !== undefined || envLanguage !== undefined,
     },
     version: config.version ?? null,
     greeting: config.greeting?.trim() || null,
@@ -530,7 +532,7 @@ function outboundRuntimeTools(
     },
     agentSlug: slug,
   };
-  const laneTools = metadata.directCall ? [] : [...(config.outbound.tools ?? [])];
+  const laneTools = metadata.directCall || metadata.operatorCall ? [] : [...(config.outbound.tools ?? [])];
   if (metadata.callback) {
     return realtimeToolsFor(
       [...RUNTIME_CALLBACK_TOOLS, ...laneTools],
