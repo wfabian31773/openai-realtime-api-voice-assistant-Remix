@@ -200,7 +200,7 @@ function derivedFlags(tool: string, args: Record<string, unknown>): Record<strin
   /**
    * WHETHER EACH HALF OF THE NAME WAS PASSED — two booleans, never the name.
    *
-   * v117. On CA63467308b45e3e7f9118cde1b67be7bf (2026-10-26) the caller spelled
+   * v118. On CA63467308b45e3e7f9118cde1b67be7bf (2026-10-26) the caller spelled
    * the patient's last name and gave the first name later, and the
    * create-ticket POST carried neither. "Did the model drop them, or the
    * tool?" had no answer in this table: a filing tool's row recorded the
@@ -314,7 +314,7 @@ function summarizeResult(tool: string, resultJson: string): Record<string, unkno
     // `form_applies: false`, so "how often is a routed-away caller offered a
     // link" is a count, not a transcript scan. A boolean, no PHI.
     'form_applies',
-    // v117: a records filing the ticketing app refused, logged instead as a
+    // v118: a records filing the ticketing app refused, logged instead as a
     // general Medical Records ticket BEFORE the caller was told it was taken
     // (Codex P2 on #376). A boolean, no PHI — "how often does the app refuse
     // a records filing outright" is a count, not a log search.

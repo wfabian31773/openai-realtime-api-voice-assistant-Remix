@@ -123,7 +123,7 @@ export function callFactNoted(callSid: string | undefined, fact: string): boolea
  * ceiling, recency eviction and "a sentinel is not a call" rule as the facts
  * above.
  *
- * v117, for one use: a half of the patient's name that `file_records_ticket`
+ * v118, for one use: a half of the patient's name that `file_records_ticket`
  * was handed on an earlier invocation of this call (CLAUDE.md RULE 2c — carry
  * the answer forward so it is never asked again). Patient data, which is why it
  * lives here, in memory, for one call, and nowhere durable.

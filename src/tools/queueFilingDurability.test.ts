@@ -49,7 +49,7 @@ describe('every queue filing tool files durably', () => {
       // the tool's own askAs wording rather than a generic sentence. Passing a
       // neighbour's name would silently ask the wrong question.
       // (Records wraps the result to add the model's `fix` on a refusal the
-      // caller cannot fix — v117 — so the call is matched, not the `return`.)
+      // caller cannot fix — v118 — so the call is matched, not the `return`.)
       expect(src).toContain(`postFailureToolResult(res, '${toolName}')`);
     });
   }

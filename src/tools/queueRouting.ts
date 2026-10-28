@@ -244,7 +244,7 @@ export function namesARecord(text: string): boolean {
 
 /**
  * Does this request ASK FOR a document — the narrow reading, for the one place
- * a document word OUTRANKS a scheduling cue (v117, Codex P1 on #376).
+ * a document word OUTRANKS a scheduling cue (v118, Codex P1 on #376).
  *
  * `namesARecord` is the records-line hold, and it is deliberately broad: it is
  * substring matching over `record`, `note` and `report`, and it was safe only
@@ -297,7 +297,7 @@ export function namesADocument(text: string): boolean {
 }
 
 /**
- * The `SCHEDULING` cues that are an exam's NAME, not an ask to book one — v117,
+ * The `SCHEDULING` cues that are an exam's NAME, not an ask to book one — v118,
  * Codex P2 on #376 (head `8e11d5e`).
  *
  * The defect `file_records_ticket` holds against is exactly one of these firing
@@ -335,7 +335,7 @@ export function scheduledOnlyByAnExamName(text: string): boolean {
  * the evidence is turned round: the hold needs each exam name to be BOUND to a
  * document — "eye exam REPORT", "the records FROM her last eye exam", "a copy
  * OF the dilated exam" — and anything phrased otherwise, an unknown verb
- * included, falls back to the Hub, which is what this line did before v117.
+ * included, falls back to the Hub, which is what this line did before v118.
  * A miss here costs the corpus fix on an odd phrasing; it can no longer keep an
  * appointment request out of the Hub.
  */

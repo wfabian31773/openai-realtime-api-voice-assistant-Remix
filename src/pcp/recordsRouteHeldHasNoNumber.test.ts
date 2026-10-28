@@ -4,7 +4,7 @@
  *
  * `file_records_ticket` answers `success: true` with `filed_pending` and no
  * `ticket_number` when the outbox holds the request: on a plain outage, and
- * since v117 when a refused filing's recovery POST fails too. PCP's records
+ * since v118 when a refused filing's recovery POST fails too. PCP's records
  * route read every success as numbered, so the agent was told "Filed as
  * undefined with our medical records team. Read the ticket number back".
  *

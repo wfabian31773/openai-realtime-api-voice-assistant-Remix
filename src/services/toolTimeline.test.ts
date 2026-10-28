@@ -159,7 +159,7 @@ describe('PHI discipline — the allow-list is the safety mechanism', () => {
   });
 
   /**
-   * v117: a records filing the app refused and the tool logged as a recovery
+   * v118: a records filing the app refused and the tool logged as a recovery
    * ticket is countable. Without the key it reads as an ordinary filing.
    */
   it('keeps recovered_after_refusal on a records filing, and still nothing about who', () => {
@@ -276,7 +276,7 @@ describe('PHI discipline — the allow-list is the safety mechanism', () => {
   });
 
   /**
-   * v117. CA63467308b45e3e7f9118cde1b67be7bf: the caller gave both halves of
+   * v118. CA63467308b45e3e7f9118cde1b67be7bf: the caller gave both halves of
    * the name and the POST carried neither, and this table could not say
    * whether the model ever passed them. Two booleans answer it; no name.
    */
