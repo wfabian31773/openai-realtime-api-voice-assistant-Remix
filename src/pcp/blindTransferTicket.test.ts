@@ -263,13 +263,12 @@ describe('CAbf717457 — the refusal that was retried six times', () => {
     expect(r.retryable).toBeUndefined();
   });
 
-  it("hands the server's own words back as something to ASK, not as an error", async () => {
+  it('tries the unassigned exit once and stops re-asking if it is also refused', async () => {
     const r = await patientCallHitting(SURGEON_400);
-    expect(r.guidance).toContain('will refuse it again unchanged');
-    expect(r.guidance).toContain('Missing required information: surgeon');
-    // And an exit that does not depend on the caller answering it, because on
-    // a PCP call they may have no surgeon to name.
-    expect(r.guidance).toContain('take the rest of their request');
+    expect(ticketing.createTicket).toHaveBeenCalledTimes(2);
+    expect(ticketing.createTicket).toHaveBeenLastCalledWith(expect.objectContaining({ routingAskExhausted: true }));
+    expect(r.guidance).toContain('Do not ask for an office or surgeon');
+    expect(r.guidance).toContain('No ticket was created');
   });
 
   /**

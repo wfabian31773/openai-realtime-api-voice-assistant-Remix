@@ -656,11 +656,21 @@ is reading noise.
 
 ---
 
-## Current branch — item #14 contact capture (2026-10-27)
+## Current branch — PCP scheduling and unassigned exit (2026-10-28)
 
-This branch carries **`voice-runtime-v117-contact-capture-20261027`**, on top
-of v116. Use that marker when verifying this change; the v116 history below
-predates it. Surname spelling and full email confirmation reach the agent's
+This branch carries **`voice-runtime-v122-pcp-scheduling-hub-unassigned-exit-20261028`**,
+on top of v117. PCP patient scheduling honors captured scheduling purposes;
+shared appointment cues also recognize "schedule my appointment" and
+"appointment scheduling" before eyewear. A terminal Optical/Surgery refusal
+for office/location/surgeon retries once with `routingAskExhausted` inside
+`create_pcp_task`. No repeated routing-field ask or callback promise after a
+refused unassigned write. Synthetic live-tool regressions:
+`src/pcp/patientSchedulingUnassigned.test.ts`. No migration or production
+measurement. v118..v126 are claimed by concurrent work; rebase the marker if
+needed before publishing. The contact-capture history below is retained.
+
+The v117 base carried **`voice-runtime-v117-contact-capture-20261027`**, on top
+of v116. Surname spelling and full email confirmation reach the agent's
 tool schemas, including answering-service and no-ivr-v2. Provider names use
 an exact or uniquely fuzzy Console match on both create-ticket and simplified
 submission paths. A fuzzy candidate must score at least 88% and beat every
@@ -2487,6 +2497,8 @@ on it is evidence about current code.
 
 | **v116** or earlier — NOT the date; this branch is **v117**, above v116 | Item #14 contact capture: surname spelling and complete email confirmation on agent-visible tool schemas; exact or unique fuzzy provider canonicalization on both ticket submission paths. Runner-up margin uses the whole roster; normalized collisions refuse a match. See `docs/observatory/STATE-OF-PLAY.md` §16. No migration; production measurement outstanding. |
 
+| **v117** or earlier — NOT the date; this branch is **v122**, on top of v117; intervening numbers belong to concurrent work | PCP patient scheduling reaches the HVA Hub; terminal Optical/Surgery office or surgeon refusals retry once with the existing unassigned flag. `src/pcp/patientSchedulingUnassigned.test.ts` exercises the live filing tool with synthetic data. No migration; production measurement outstanding. |
+
 ### THE SURGEON CLAIM — BUILT, REVIEWED SIX TIMES, WITHDRAWN 2026-09-17
 
 **Operator ruling, 2026-09-17:** *"if it's only 9 callers, I would remove if we
@@ -2572,8 +2584,10 @@ v10 (the person base and the join), v11 (the locked record, #290) and v12
 (optical's office ladder) are a CHAIN on `main`: each merged after the one
 before and brought it in, so v12 contains both.
 
-**AND THE SEQUENCE HAS TWO HOLES IN IT ON PURPOSE: v13 AND v57. v117 IS THE
-NEWEST — contact capture (#14), above v116, which it contains. v116 carries
+**AND THE SEQUENCE HAS TWO HOLES IN IT ON PURPOSE: v13 AND v57. v122 IS THE
+NEWEST — PCP scheduling and unassigned exit, on top of v117; v118..v121 are
+reserved by concurrent work. v117 carries contact capture (#14), above v116,
+which it contains. v116 carries
 the record's office name on an optical ticket — on its branch
 ABOVE `main`'s v115, which it contains — AND v115 IS WHAT `main` CARRIES, SINCE
 #367 MERGED 2026-10-22 (`df4b6bc`): the five #366 review fixes; on top of v114,

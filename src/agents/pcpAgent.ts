@@ -10,6 +10,9 @@ import { recordingExecute } from '../services/toolTimeline';
 import { keepFieldDescriptions } from '../services/toolFieldDescriptions';
 import { EMAIL_CONFIRMATION_DESCRIPTION, LAST_NAME_FIELD_DESCRIPTION } from '../tools/contactCaptureGuidance';
 import { withToolDirection } from '../services/toolDirection';
+import { missingFieldFromError } from '../services/durableTicketFiling';
+import { isTerminalRefusal } from '../services/terminalRefusal';
+import type { CreateTicketParams } from '../../server/services/ticketingApiClient';
 import { scheduleLookupService } from '../services/scheduleLookupService';
 import {
   PCP_FACILITY_TYPES,
@@ -1078,7 +1081,7 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
       // reclassified is still a patient, and their request still does not
       // belong sitting in department 18. Same reason as director.next().
       if (!enrichingTheTicket && (state.callPurpose === 'patient_caller' || state.callerIsThePatient)) {
-        const [{ detectCrossQueue }, { otherReasonFor }, { ticketingApiClient }, { sanitizeForSms }] =
+        const [{ detectCrossQueue, schedulingRedirectForStatedIntent }, { otherReasonFor }, { ticketingApiClient }, { sanitizeForSms }] =
           await Promise.all([
             import('../tools/queueRouting'),
             import('../tools/otherReason'),
@@ -1107,7 +1110,13 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
         });
         if (toMedicalRecords) return toMedicalRecords as never;
 
-        const redirect = detectCrossQueue(narrative, PCP_DEPARTMENT_ID);
+        // A patient can retain a scheduling purpose alongside the patient
+        // latch. Honor that stated intent just as the professional Hub route
+        // does, before eyewear cues in the summary; keep the surgery exception.
+        const schedulingIntent = STATED_SCHEDULING_INTENT[state.callPurpose];
+        const redirect = (schedulingIntent
+          ? schedulingRedirectForStatedIntent(schedulingIntent, narrative, PCP_DEPARTMENT_ID)
+          : null) ?? detectCrossQueue(narrative, PCP_DEPARTMENT_ID);
         // Never null for 18, but handled rather than asserted: a missing
         // catch-all must not silently file into another department's Other.
         const home = otherReasonFor(PCP_DEPARTMENT_ID);
@@ -1122,7 +1131,7 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
         ).value;
 
         const nameParts = String(state.callerName ?? '').trim().split(/\s+/);
-        const patientResult = await ticketingApiClient.createTicket({
+        const patientPayload: CreateTicketParams = {
           departmentId: redirect?.departmentId ?? PCP_DEPARTMENT_ID,
           requestTypeId: redirect?.requestTypeId ?? home!.requestTypeId,
           requestReasonId: redirect?.requestReasonId ?? home!.requestReasonId,
@@ -1133,45 +1142,41 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
           description: body,
           priority: urgency === 'urgent' || urgency === 'high' ? 'high' : 'medium',
           callData: { agentUsed: 'pcp', ...(metadata.callSid ? { callSid: metadata.callSid } : {}) },
-        });
+        };
+        let patientResult = await ticketingApiClient.createTicket(patientPayload);
+        const missingRoutingField = missingFieldFromError(patientResult.error);
+        // PCP intake has no office/surgeon field to submit after a re-ask.
+        // A proven routing refusal uses the same unassigned exit as the queue
+        // tools, once, inside this invocation. Outages and other fields keep
+        // their existing failure path; a rejected POST cannot have filed.
+        const unassignedExit = (!patientResult.success || !patientResult.ticketNumber)
+          && isTerminalRefusal(patientResult.statusCode)
+          && (patientPayload.departmentId === 1 || patientPayload.departmentId === 2)
+          && (missingRoutingField === 'office' || missingRoutingField === 'location'
+            || missingRoutingField === 'surgeon');
+        if (unassignedExit) {
+          patientResult = await ticketingApiClient.createTicket({ ...patientPayload, routingAskExhausted: true });
+        }
 
         if (!patientResult.success || !patientResult.ticketNumber) {
-          /**
-           * A 4xx IS A REFUSAL, AND A REFUSAL RETRIED IS A REFUSAL REPEATED.
-           *
-           * This returned `retryable: true` for EVERY failure, and on
-           * 2026-09-08 that cost a real call. `CAbf717457` reached this line
-           * with department 2 (the caller said "Loma Linda Surgery Center", so
-           * `detectCrossQueue` read a surgery cue), department 2 demands a
-           * surgeon, and create-ticket answered HTTP 400 "Missing required
-           * information: surgeon". The model obliged the retry flag SIX times
-           * in eighteen seconds, asked the caller who the surgeon was on a PCP
-           * call, filed nothing, and the caller hung up.
-           *
-           * That is the same shape as the 602 doomed POSTs across 181 surgery
-           * calls measured on 2026-09-01 — fixed there, never here.
-           * `CreateTicketResponse.statusCode` was added for exactly this
-           * distinction and this call site had not read it.
-           *
-           * So: a status the server chose in the 4xx range will fail
-           * identically forever, and the only useful thing to do with it is
-           * hand the server's own words to the model as something to ASK. No
-           * status at all is a timeout or a socket reset, which may well
-           * succeed next time.
-           */
+          // CAbf717457 reached six identical surgeon refusals. The unassigned
+          // exit above now handles routing fields; other refusals retain the
+          // existing guidance, without claiming a failed write was recorded.
           const status = patientResult.statusCode;
           const refused = typeof status === 'number' && status >= 400 && status < 500;
           return refusePcp(patientResult.error ?? 'ticket_creation_failed', {
             ...(refused ? {} : { retryable: true }),
             ...(refused
               ? {
-                  guidance:
-                    'The ticketing system refused this payload and will refuse it again unchanged — ' +
-                    'do NOT call this tool again with the same details. Its own words were: ' +
-                    `"${patientResult.error ?? 'no reason given'}". If that names something the ` +
-                    'caller can answer, ask them for it in your own words and try once with it ' +
-                    'added. If it does not, take the rest of their request, tell them it is ' +
-                    'recorded, and move on.',
+                  guidance: unassignedExit
+                    ? 'The ticketing app still refused the unassigned filing. Do not ask for an office or surgeon ' +
+                      'or repeat this filing. No ticket was created; do not say it was recorded or promise a callback.'
+                    : 'The ticketing system refused this payload and will refuse it again unchanged — ' +
+                      'do NOT call this tool again with the same details. Its own words were: ' +
+                      `"${patientResult.error ?? 'no reason given'}". If that names something the ` +
+                      'caller can answer, ask them for it in your own words and try once with it ' +
+                      'added. If it does not, explain that the request has not been filed; ' +
+                      'do not promise a callback or say it is recorded.',
                 }
               : {}),
           });
