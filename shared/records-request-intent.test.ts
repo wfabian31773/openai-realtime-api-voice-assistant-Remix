@@ -87,7 +87,7 @@ describe('review regressions: records evidence follows the caller request', () =
     'test results', 'lab results', 'exam results', 'diagnostic results',
     'progress notes', 'consultation notes', 'visit notes', 'office notes',
     'surgery notes', 'surgical notes', 'operative notes', 'notes',
-    'operative report', 'surgical report', 'optometry report', 'consultation report', 'op report', 'reports',
+    'medical report', 'operative report', 'surgical report', 'optometry report', 'consultation report', 'op report', 'reports',
     'imaging', 'OCT images', 'visual field', 'VF', 'DRS', 'fundus images', 'topography',
     'documentation', 'historial', 'informes', 'results',
   ])('honors a refusal to send %s', document => {
@@ -126,6 +126,15 @@ describe('review regressions: records evidence follows the caller request', () =
 
 describe('latest review: preserve the affirmative request', () => {
   it.each([
+    'I need a medical report',
+    'I need my medical reports',
+    'Please fax my medical report to my doctor',
+  ])('keeps established medical report requests in Medical Records: %s', text => {
+    expect(recordsLinePurpose(text)).toBe('records');
+    expect(recordsLineRedirect(text)).toBeNull();
+  });
+
+  it.each([
     'Please send my test results so I can discuss them with my doctor',
     'Please fax my records to my surgeon to discuss surgery',
     'Could you send my lab results so my doctor can interpret them?',
@@ -133,9 +142,22 @@ describe('latest review: preserve the affirmative request', () => {
     'Please email my lab results so I can review them with my doctor',
     'I want you to fax my records to discuss surgery with my surgeon',
     'Please get my test results so I can discuss them with my doctor',
+    'Could you have my test results sent so I can discuss them with my doctor?',
+    'Can someone please have my lab results faxed so my doctor can interpret them?',
+    'I need you to have my records emailed so I can discuss them with my doctor',
+    'Please have my medical report sent so I can discuss it with my doctor',
   ])('keeps explicit delivery in Medical Records: %s', text => {
     expect(recordsLinePurpose(text)).toBe('records');
     expect(recordsLineRedirect(text)).toBeNull();
+  });
+
+  it.each([
+    'Could you have someone explain my test results that were sent to me?',
+    'Could you have my doctor discuss the test results that were sent to me?',
+    'I have my test results sent to me so I can discuss them with my doctor',
+  ])('keeps interpretation requests in Clinical: %s', text => {
+    expect(recordsLinePurpose(text)).toBe('clinical');
+    expect(recordsLineRedirect(text)).toMatchObject({ departmentId: 3 });
   });
 
   it.each([

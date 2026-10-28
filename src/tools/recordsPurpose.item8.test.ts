@@ -126,6 +126,8 @@ describe('review: classification and filing agree on records intent', () => {
   it.each([
     "I don't need my whole chart, just send the operative report",
     'I need documentation from my last visit',
+    'I need a medical report',
+    'Could you have my test results sent so I can discuss them with my doctor?',
     'Please send my test results so I can discuss them with my doctor',
     'Please fax my records to my surgeon to discuss surgery',
   ])('retains the records workflow for %s', async request_description => {

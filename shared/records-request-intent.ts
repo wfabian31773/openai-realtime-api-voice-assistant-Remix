@@ -12,11 +12,14 @@ export function recordsRequestText(text: string): string {
 }
 
 const fold = (text: string) => recordsRequestText(text).toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[’‘]/g, "'");
-const DOC = /\b(?:documentation|records?|charts?|(?:progress|consult(?:ation)?|visit|office|surgery|surgical|operative) notes?|(?:operative|surgical|optometry|consultation|op) reports?|(?:test|lab|exam|diagnostic) results?|imaging|oct|visual field|vf|drs|fundus|topography|expedientes?|registros?|historial|informes?)\b/;
+const DOC = /\b(?:documentation|records?|charts?|(?:progress|consult(?:ation)?|visit|office|surgery|surgical|operative) notes?|(?:medical|operative|surgical|optometry|consultation|op) reports?|(?:test|lab|exam|diagnostic) results?|imaging|oct|visual field|vf|drs|fundus|topography|expedientes?|registros?|historial|informes?)\b/;
 const DELIVERY = /\b(?:copy|copies|get|fax(?:ed|ing)?|send|sent|email(?:ed)?|mail(?:ed)?|forward|release|obtain|retrieve|provide|inspect|inspection|copia|copias|envi\w*|mand\w*)\b/;
 // A delivery action asked of us is distinct from a past/future delivery
-// mentioned while asking someone to interpret results.
-const EXPLICIT_DELIVERY = /(?:^\s*(?:(?:please|just|only)\s+)*|\b(?:can|could|would|will) (?:you|someone) (?:please )?|\b(?:need|want|request|would like) (?:(?:you|someone) to |to )?(?:a |some )?)(?:send|fax|email|mail|forward|release|obtain|retrieve|provide|inspect|get|copy|copies)\b/;
+// mentioned while asking someone to interpret results. Causative requests
+// ("have my test results sent") must name the document before the delivery.
+const EXPLICIT_DELIVERY = new RegExp(
+  String.raw`(?:^\s*(?:(?:please|just|only)\s+)*|\b(?:can|could|would|will) (?:you|someone) (?:please )?|\b(?:need|want|request|would like) (?:(?:you|someone) to |to )?(?:a |some )?)(?:send|fax|email|mail|forward|release|obtain|retrieve|provide|inspect|get|copy|copies|have\s+[^.!?;]{0,65}${DOC.source}\s+(?:sent|faxed|emailed|mailed|forwarded|released|provided))\b`,
+);
 const WANT = /\b(?:need|want|request(?:ing|s|ed)?|would like|asking for|necesit\w*|solicit\w*|quiero)\b/;
 const SCHEDULE_ACTION = /\b(?:reschedul\w*|schedul\w*|cancel\w*|confirm\w*|book\w*|change|move|reprogram\w*|cambiar)\b[^.!?]{0,65}\b(?:appointments?|visits?|exam|date|cita)\b|\b(?:appointment|cita)\b[^.!?]{0,40}\b(?:change|cancel\w*|confirm\w*|reschedul\w*)\b/;
 // A refusal to send/get documents is not an access request. Split contrasted
