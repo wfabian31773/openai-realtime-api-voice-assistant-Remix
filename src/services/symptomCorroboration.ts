@@ -612,6 +612,9 @@ const PROVIDER_SELF_IDENTIFICATION: RegExp[] = [
   /\bpatient (?:is |that'?s |who'?s |who is )?(?:on|in|at) (?:our|the) (?:e\.? ?r\b|emergency|unit|floor|icu|facility)/,
   /\b(?:on|in) our (?:e\.? ?r\b|emergency|unit|floor|icu)/,
   /\bour (?:physician|provider|surgeon|nurse)\b/,
+  // "This is Jane, our mutual patient needs a consultation" describes care
+  // for someone else, even though the caller introduced themselves by name.
+  /\bour mutual patients? (?:needs?|requires?)\b/,
   /\bpeer[- ]?to[- ]?peer\b/,
   // Spanish: "soy la doctora", "llamo del hospital", "nuestro paciente"
   /\bsoy (?:el |la |un |una )?(?:doctor|doctora|dr\.?|m[eé]dic[oa]|enfermer[oa])\b/,
@@ -626,7 +629,8 @@ const PROVIDER_SELF_IDENTIFICATION: RegExp[] = [
 // evidence only; other provider statements can still stand. Match the full
 // noun phrase so its leading words do not hide the caller's identification.
 const MUTUAL_PATIENT = /\b(?:the one mutual patients?|one of the mutual patients|(?:our|(?:a|one|the) mutual) (?:mutual )?patients?)\b/;
-const PATIENT_IDENTIFICATION_BEFORE = /\b(?:i(?:'m| am)|this is)\s+(?:(?:actually|also|just|indeed)\s+)*$/;
+const PATIENT_IDENTIFICATION_BEFORE =
+  /\b(?:i(?:'m| am)|this is|it(?:'s| is) me,?)\s+(?:(?:actually|also|just|indeed)\s+)*(?:(?:calling as|me,?)\s+)?$/;
 // A name can sit between the identification and its appositive, but only
 // plausible name words count. Apply the same grammar to every token: -ing
 // actions ("seeing", "treating", "following"), function words, call

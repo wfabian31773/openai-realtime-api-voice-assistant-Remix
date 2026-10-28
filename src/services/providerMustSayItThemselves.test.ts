@@ -184,6 +184,16 @@ describe('mutual patient self-identification', () => {
 
 describe('patient introductions after greetings and across caller turns', () => {
   it.each([
+    { turns: ["It's me, the mutual patient."] },
+    { turns: ['It is me, the mutual patient.'] },
+    { turns: ['It’s me the mutual patient.'] },
+    { turns: ["I'm calling as the mutual patient."] },
+    { turns: ['I am calling as the mutual patient.'] },
+    { turns: ["I'm actually calling as the mutual patient."] },
+    { turns: ['This is me, the mutual patient.'] },
+    { turns: ["Hello, it's me, the mutual patient."] },
+    { turns: ['I need an appointment', "I'm calling as the mutual patient."] },
+    { turns: ['I need an appointment', 'This is me, the mutual patient.'] },
     { turns: ['Hello, Jane Smith, the mutual patient.'] },
     { turns: ['Hello, the mutual patient, Jane Smith.'] },
     { turns: ['Hi Jane Anne Smith-Jones, the mutual patient.'] },
@@ -215,6 +225,8 @@ describe('patient introductions after greetings and across caller turns', () => 
   });
 
   it.each([
+    { turns: ["It's me, the mutual patient. Calling about our mutual patient."] },
+    { turns: ["I'm calling as the mutual patient.", 'This is Dr. Lee calling.'] },
     { turns: ['Hello, calling about Jane Smith, the mutual patient.'] },
     { turns: ['Hello, calling about the mutual patient, Jane Smith.'] },
     { turns: ['Hello, regarding Jane Smith, the mutual patient.'] },
@@ -438,6 +450,7 @@ describe('the gate', () => {
         .flatMap((patient) => ["I'm ", 'I am ', 'I’m actually ', 'This is ', 'This is just ', '']
           .map((introduction) => `${introduction}${description} ${patient}.`)),
     ).concat([
+      'This is Jane, our mutual patient needs a consultation.',
       // Articles, roles and office descriptions are not personal names,
       // including roles that do not independently establish provider status.
       "I'm a scheduler, our mutual patient needs a consultation.",
