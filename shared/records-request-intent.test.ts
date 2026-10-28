@@ -183,3 +183,56 @@ describe('latest review: preserve the affirmative request', () => {
     expect(recordsLineRedirect(text)).toMatchObject({ departmentId, requestTypeId, requestReasonId });
   });
 });
+
+describe('review regressions: delivery, corrections, and access questions', () => {
+  it.each([
+    'I need my test results sent to my doctor so I can discuss them with her',
+    'I want my lab results faxed to my doctor so she can interpret them',
+    'I would like my medical records mailed to me so I can review them with my doctor',
+  ])('recognizes passive delivery requests: %s', text => {
+    expect(recordsLinePurpose(text)).toBe('records');
+    expect(recordsLineRedirect(text)).toBeNull();
+  });
+
+  it.each([
+    ["I don't need records, I have a billing question", 'billing', 4],
+    ["I don't need my chart, my glasses are broken", 'optical', 1],
+    ["I don't need my chart, we have an insurance question", 'professional', 18],
+    ["I don't need records, I have a question about getting my lab results", 'records', null],
+  ])('preserves an independent correction after a refusal: %s', (text, purpose, departmentId) => {
+    expect(recordsLinePurpose(text)).toBe(purpose);
+    if (departmentId === null) expect(recordsLineRedirect(text)).toBeNull();
+    else expect(recordsLineRedirect(text)).toMatchObject({ departmentId });
+  });
+
+  it.each([
+    'Do not send my records, my chart, or my imaging',
+    "I don't need my records, my chart, or my test results",
+  ])('does not revive a comma-separated list of refused documents: %s', text => {
+    expect(recordsLinePurpose(text)).toBe('unknown');
+    expect(recordsLineRedirect(text)).toMatchObject({ departmentId: 9 });
+  });
+
+  it.each([
+    'I have a question about getting a copy of my medical records',
+    'I have a question about the status of my records request',
+    'I have a question about getting my test results',
+    'I have a question about obtaining test results',
+    'I have a question about the status of my test results',
+    'I have a question about getting a copy of my test results so I can discuss them with my doctor',
+    'I have a question about my medical records',
+  ])('recognizes records access and status questions: %s', text => {
+    expect(recordsLinePurpose(text)).toBe('records');
+    expect(recordsLineRedirect(text)).toBeNull();
+  });
+
+  it.each([
+    'I have a question about my exam results that were faxed',
+    'I have a question about my test results before I get copies',
+    'I have a question about what my test results mean',
+    'I have a question about the meaning of my lab results',
+  ])('keeps questions about interpreting results in Clinical: %s', text => {
+    expect(recordsLinePurpose(text)).toBe('clinical');
+    expect(recordsLineRedirect(text)).toMatchObject({ departmentId: 3 });
+  });
+});

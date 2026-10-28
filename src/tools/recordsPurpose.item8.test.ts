@@ -115,6 +115,9 @@ describe('review: classification and filing agree on records intent', () => {
   it.each([
     ['Can someone explain the test results that were sent to me?', 3],
     ["Don't send my test results; please reschedule my appointment", 9],
+    ["I don't need records, I have a billing question", 4],
+    ["I don't need my chart, my glasses are broken", 1],
+    ['I have a question about what my test results mean', 3],
   ])('avoids records authorization for %s', async (request_description, departmentId) => {
     expect(await runTool('classify_records_request', { request_description })).toMatchObject({ is_records_request: false, department_id: departmentId });
     expect((await runTool('file_records_ticket', { ...BASE, requester: undefined, request_description })).success).toBe(true);
@@ -130,6 +133,9 @@ describe('review: classification and filing agree on records intent', () => {
     'Could you have my test results sent so I can discuss them with my doctor?',
     'Please send my test results so I can discuss them with my doctor',
     'Please fax my records to my surgeon to discuss surgery',
+    'I need my test results sent to my doctor so I can discuss them with her',
+    'I have a question about getting a copy of my medical records',
+    'I have a question about the status of my records request',
   ])('retains the records workflow for %s', async request_description => {
     expect(await runTool('classify_records_request', { request_description })).toMatchObject({ is_records_request: true, department_id: 16 });
     expect((await runTool('file_records_ticket', { ...BASE, request_description, form_channel: 'sms' })).success).toBe(true);

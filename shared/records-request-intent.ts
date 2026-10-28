@@ -16,9 +16,13 @@ const DOC = /\b(?:documentation|records?|charts?|(?:progress|consult(?:ation)?|v
 const DELIVERY = /\b(?:copy|copies|get|fax(?:ed|ing)?|send|sent|email(?:ed)?|mail(?:ed)?|forward|release|obtain|retrieve|provide|inspect|inspection|copia|copias|envi\w*|mand\w*)\b/;
 // A delivery action asked of us is distinct from a past/future delivery
 // mentioned while asking someone to interpret results. Causative requests
-// ("have my test results sent") must name the document before the delivery.
+// ("have my test results sent") and passive requests ("need my results sent")
+// must name the document immediately before the delivery.
 const EXPLICIT_DELIVERY = new RegExp(
-  String.raw`(?:^\s*(?:(?:please|just|only)\s+)*|\b(?:can|could|would|will) (?:you|someone) (?:please )?|\b(?:need|want|request|would like) (?:(?:you|someone) to |to )?(?:a |some )?)(?:send|fax|email|mail|forward|release|obtain|retrieve|provide|inspect|get|copy|copies|have\s+[^.!?;]{0,65}${DOC.source}\s+(?:sent|faxed|emailed|mailed|forwarded|released|provided))\b`,
+  String.raw`(?:^\s*(?:(?:please|just|only)\s+)*|\b(?:can|could|would|will) (?:you|someone) (?:please )?|\b(?:need|want|request|would like) (?:(?:you|someone) to |to )?(?:a |some )?)(?:send|fax|email|mail|forward|release|obtain|retrieve|provide|inspect|get|copy|copies|have\s+[^.!?;]{0,65}${DOC.source}\s+(?:sent|faxed|emailed|mailed|forwarded|released|provided))\b|\b(?:need|want|request|would like)\s+[^.!?;,]{0,65}${DOC.source}\s+(?:sent|faxed|emailed|mailed|forwarded|released|provided)\b`,
+);
+const ACCESS_QUESTION = new RegExp(
+  String.raw`\bquestion about\s+(?:(?:the )?status of|getting|obtaining|requesting|receiving|accessing|(?:a )?(?:copy|copies) of)\b[^.!?;]{0,100}${DOC.source}`,
 );
 const WANT = /\b(?:need|want|request(?:ing|s|ed)?|would like|asking for|necesit\w*|solicit\w*|quiero)\b/;
 const SCHEDULE_ACTION = /\b(?:reschedul\w*|schedul\w*|cancel\w*|confirm\w*|book\w*|change|move|reprogram\w*|cambiar)\b[^.!?]{0,65}\b(?:appointments?|visits?|exam|date|cita)\b|\b(?:appointment|cita)\b[^.!?]{0,40}\b(?:change|cancel\w*|confirm\w*|reschedul\w*)\b/;
@@ -32,9 +36,9 @@ const NEGATED_RECORDS = new RegExp(
 const RECORDS_WORKFLOW = /\b(?:roi|release of information|subpoena|authorization to release|medical release|disability (?:form|paperwork)|fmla|(?:inspect|inspection of)\b[^.!?]{0,30}\b(?:file|chart|records?)|(?:work|school|doctor'?s?) note|dmv (?:form|paperwork)|jury duty|verification of treatment|proof of treatment|(?:letter|carta) (?:for|from|stating|del)|fill out (?:a|this|my) form|paperwork to be filled|school form|constancia|comprobante|revisar mi expediente|ver mi expediente|send (?:me |us )?everything)\b/;
 
 function requestClauses(text: string): string[] {
-  // Split comma corrections only when a new request starts, keeping document
-  // lists together so a refusal still covers every document in the list.
-  return fold(text).split(/[.!?;\n]+|\bbut\b|,\s*(?=(?:just|only|please|(?:i|we) (?:need|want|would like)|(?:can|could|would|will) (?:you|someone)|reschedule|cancel|confirm|schedule|book|send|fax|email|mail)\b)/)
+  // A subject starting a new clause can correct a refusal even without an
+  // imperative. Keep comma-separated document lists within the refusal.
+  return fold(text).split(/[.!?;\n]+|\bbut\b|,\s*(?=(?:(?:i|we|you|he|she|they)\b|(?:my|our|your|his|her|their|the)\s+(?:[a-z'-]+\s+){1,5}(?:is|are|was|were|has|have|needs?|broke)\b|(?:just|only|please|(?:can|could|would|will) (?:you|someone)|reschedule|cancel|confirm|schedule|book|send|fax|email|mail)\b))/)
     .filter(c => !NEGATED_RECORDS.test(c));
 }
 
@@ -57,11 +61,13 @@ export function recordsLinePurpose(text: string): RecordsLinePurpose {
   if (clauses.some(clause => {
     // Keep interpretation clinical; an explicit delivery request can give a
     // later discussion as its purpose. Only that initial request is evidence.
-    const interpretation = clause.search(/\b(?:discuss|explain|interpret|question about)\b|\breview\b[^.!?]{0,40}\bresults?\b[^.!?]{0,40}\bwith\b/);
+    const interpretation = clause.search(/\b(?:discuss|explain|interpret)\b|\breview\b[^.!?]{0,40}\bresults?\b[^.!?]{0,40}\bwith\b|\bquestion about\s+(?:(?!(?:status|getting|get|obtaining|obtain|requesting|request|receiving|accessing|copy|copies|records?|charts?)\b)[a-z']+\s+){0,8}results?\b/);
     const c = interpretation < 0 ? clause : clause.slice(0, interpretation);
-    if (interpretation >= 0 && !EXPLICIT_DELIVERY.test(c)) return false;
+    const accessQuestion = ACCESS_QUESTION.test(c);
+    if (interpretation >= 0 && !EXPLICIT_DELIVERY.test(c) && !accessQuestion) return false;
     const document = DOC.test(c) || /\b(?:doctor'?s? note|notes? from|report from)\b/.test(c);
     const prescription = /\b(?:prescription|receta)\b/.test(c) && !/\b(?:refill|renew|pharmacy|medication|medicine|drops?)\b/.test(c);
+    if (accessQuestion) return true;
     if ((document || prescription || /\b(?:notes?|reports?|results?|imaging)\b/.test(c)) && DELIVERY.test(c)) return true;
     if (RECORDS_WORKFLOW.test(c)) return true;
     if ((document || prescription) && WANT.test(c) && !/\b(?:records? (?:line|department|office)|on (?:my |the )?record)\b/.test(c)) return true;
