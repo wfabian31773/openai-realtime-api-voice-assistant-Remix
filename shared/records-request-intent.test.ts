@@ -373,3 +373,75 @@ describe('review regressions: retain established records-line workflows', () => 
     expect(recordsLineRedirect(text)).toMatchObject({ departmentId: 3, requestTypeId: 72, requestReasonId: 542 });
   });
 });
+
+describe('review regressions: prescription actions, proof requests, and named exams', () => {
+  it.each([
+    'I need my prescription refilled',
+    'My prescription needs refilling',
+    'I need prescription refills',
+    'I need my prescription renewed',
+    'I need a prescription renewal',
+    'I need prescription renewals',
+    'I need help renewing my prescription',
+    'Can someone renew my prescription?',
+    'The doctor renews my prescription',
+    'I need my contact lens prescription renewed',
+  ])('routes prescription maintenance to Clinical: %s', text => {
+    expect(recordsLinePurpose(text)).toBe('clinical');
+    expect(recordsLineRedirect(text)).toMatchObject({
+      departmentId: 3, departmentName: 'Clinical Tech Support', requestTypeId: 72, requestReasonId: 542,
+    });
+  });
+
+  it.each([
+    'I need proof of service',
+    'I need proof that I was seen yesterday',
+    'Please send proof of service',
+    'Please provide proof that I was seen yesterday',
+    'I need a copy of my prescription',
+    'Please send my glasses prescription',
+    'I need a copy of my prescription before it is renewed',
+  ])('preserves records and proof workflows: %s', text => {
+    expect(recordsLinePurpose(text)).toBe('records');
+    expect(recordsLineRedirect(text)).toBeNull();
+  });
+
+  it.each([
+    'I need an annual exam',
+    'Annual exam',
+    'Yearly exam',
+    'Routine exam',
+    'Vision exam',
+    'Dilated exam',
+    'New patient exam',
+    'Check-up',
+    'Checkup',
+    'Examen de la vista',
+    'Examen de ojos',
+    'Revisión general',
+    'Revision general',
+  ])('uses new appointment reason 146 for named exams: %s', text => {
+    expect(recordsLinePurpose(text)).toBe('scheduling');
+    expect(recordsLineRedirect(text)).toMatchObject({
+      departmentId: 9, requestTypeId: 32, requestReasonId: 146, requestReason: 'New Appointment Request',
+    });
+  });
+
+  it.each([
+    ['Please cancel my annual exam', 148],
+    ['Please reschedule my annual exam', 147],
+    ['Please confirm my annual exam', 149],
+    ['I need an annual exam with a retina specialist', 152],
+  ])('preserves specific scheduling reasons for named exams: %s', (text, reason) => {
+    expect(recordsLinePurpose(text)).toBe('scheduling');
+    expect(recordsLineRedirect(text)).toMatchObject({ departmentId: 9, requestTypeId: 32, requestReasonId: reason });
+  });
+
+  it.each([
+    'Please send me a copy of my annual exam',
+    'I need my records before my examen de la vista',
+  ])('keeps document requests ahead of named exam cues: %s', text => {
+    expect(recordsLinePurpose(text)).toBe('records');
+    expect(recordsLineRedirect(text)).toBeNull();
+  });
+});
