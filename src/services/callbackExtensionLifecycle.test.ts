@@ -28,8 +28,8 @@ it('keeps the extension in the legacy finalized row and call-ended event', async
   const ended = vi.fn();
   coordinator.once('call-ended', ended);
   await coordinator.finalizeCall('test', 'completed');
-  expect(writes.at(-1)?.transcript).toBe('CALLER: Please call me back.\nCallback extension: 0204');
-  expect(ended.mock.calls[0][0].transcript).toBe(writes.at(-1)?.transcript);
+  expect(writes[writes.length - 1]?.transcript).toBe('CALLER: Please call me back.\nCallback extension: 0204');
+  expect(ended.mock.calls[0][0].transcript).toBe(writes[writes.length - 1]?.transcript);
 });
 
 it('does not attach a later retry’s extension to an earlier idempotent filing', async () => {
