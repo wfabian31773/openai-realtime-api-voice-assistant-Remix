@@ -896,7 +896,37 @@ import { callEnvironment } from "./callRecord";
  * branches. `src/agents/noIvrPromptForGrok.ts`.
  */
 /**
- * v127 — THE THIRD PARTY'S REPORT STAYS IN RECORDS (2026-10-26; renumbered from v117 to v118, then to v127 on 2026-10-28 because main took v117 in #379 and v126 in #394). On the
+ * v128 — PCP SCHEDULING AND UNASSIGNED EXIT (2026-10-28; renumbered from v122). Patient scheduling
+ * reaches the HVA Hub, including a captured scheduling purpose alongside the
+ * patient latch. A terminal Optical/Surgery office or surgeon refusal retries
+ * once with routingAskExhausted instead of sending PCP back through re-asks.
+ * On top of v126 (#394); v127 is #376 on its open branch. No migration; production impact remains unmeasured.
+ */
+/**
+ * v129 — AFTER-HOURS TEARDOWN FLOOR (2026-10-28). The no-ivr and no-ivr-v2
+ * agents reuse PCP's v90 registered sweep machinery on both voice pipelines.
+ * A transcribed request with no ticket files through the usual After Hours
+ * submission path; silent calls, identity-only calls and existing tickets
+ * are skipped. The normal per-call lock and idempotency key prevent duplicates.
+ * On top of v128 (#389); renumbered from v119; v127 is #376 on its open branch. No migration; production impact remains unmeasured.
+ */
+/**
+ * v130 — A PCP CALLER TOLD THEIR REQUEST IS RECORDED KEEPS IT WHEN THE QUEUE
+ * ANSWERS (2026-10-28). Both blind-transfer settlement paths apply v102's
+ * read-back / "I've taken this down" exemption, captured before redirecting
+ * while the transcript is available. A caller who heard neither still has
+ * the ticket withdrawn; hang-up behavior is unchanged. On top of v129 (#386); renumbered from v120; v127 is #376 on its open branch.
+ * No migration. `src/pcp/queueIsAChoice.test.ts`.
+ */
+/**
+ * v131 — HEARD CALLERS BYPASS THE SILENCE LADDER (2026-10-28). Once any
+ * non-empty caller transcript arrives, the ladder stands down before speaking
+ * and cannot end the call. Ghost-call prompts forbid use after a request;
+ * terminate_call refuses ghost_call after a caller transcript on SIP and runtime.
+ * On top of v130 (#387); renumbered from v121; v127 is #376 on its open branch. No migration; production impact remains unmeasured.
+ */
+/**
+ * v134 — THE THIRD PARTY'S REPORT STAYS IN RECORDS (2026-10-26; renumbered from v117 to v118, to v127, then to v134 on 2026-10-28 because main took v117 in #379, v126 in #394 and v128–v131 in #389, #386, #387 and #388, and v132/v133 are #390/#391 on their open branches). On the
  * records line, a provider's, plan's or other third party's request whose
  * words name a document is no longer sent to the HVA Hub on a scheduling cue
  * ("the most recent eye exam REPORT" read as "schedule an eye exam"); a
@@ -905,12 +935,12 @@ import { callEnvironment } from "./callRecord";
  * model, in `fix`, that nothing is lost and never to say "call back"; and a
  * name given in two halves across invocations reaches the payload. Seven
  * records-lane calls, 2026-10-12..10-26. A payload change on the ticket path
- * of the department under the CAP, so it gets its own marker. On top of v126
- * (#394), which it contains. `src/tools/medicalRecordsTools.ts`,
+ * of the department under the CAP, so it gets its own marker. On top of v131
+ * (#388), which it contains. `src/tools/medicalRecordsTools.ts`,
  * `thirdPartyRecordsStayInRecords.test.ts`.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v127-the-third-party-report-stays-in-records-20261028";
+  "voice-runtime-v134-the-third-party-report-stays-in-records-20261028";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can
