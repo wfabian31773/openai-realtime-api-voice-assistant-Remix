@@ -931,8 +931,16 @@ import { callEnvironment } from "./callRecord";
  * staff-only call notes. On top of v131 (main); renumbered from v123. Production impact is unmeasured.
  * `src/utils/phone.ts`, `src/tools/`.
  */
+/**
+ * v134 — GOODBYE GRACE HANGUP (2026-10-28). After a completed goodbye exchange
+ * (conservative English/Spanish matcher), the bridge waits GOODBYE_GRACE_MS
+ * (6s) after playback and then ends the call deliberately ("goodbye_grace").
+ * Caller speech, a new response or a tool call cancels it. Silence ladder and
+ * ghost-call wording unchanged; no prompt or tool text added.
+ * On top of v132 (#390, main); v127 is #376 and v133 is #391 on their open branches. No migration.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v132-callback-extension-20261028";
+  "voice-runtime-v134-goodbye-grace-hangup-20261028";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

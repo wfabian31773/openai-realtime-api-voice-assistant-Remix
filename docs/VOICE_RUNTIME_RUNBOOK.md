@@ -500,7 +500,7 @@ the code they add.
 
 Item #14 (`VA-76200`, `VA-76188`, `VA-76215`) is covered in the agent-visible
 tool descriptions and the common ticket client. Verify deployment using
-`voice-runtime-v132-callback-extension-20261028` from `/voice/health`:
+`voice-runtime-v134-goodbye-grace-hangup-20261028` from `/voice/health`:
 
 - A validated joined record supplies identity and contact fields it already
   holds. Do not ask for or overwrite those fields again.
