@@ -59,6 +59,8 @@ vi.mock("../services/callerMemoryService", () => ({
   callerMemoryService: { getCallerMemory: async () => null, buildContextForPrompt: () => "" },
 }));
 
+// Resolve the mock before concurrent fire-and-forget transfer records import it.
+await import("../services/syncAgentService");
 const { createNoIvrAgent } = await import("./noIvrAgent");
 const { resetGateAttempts } = await import("../tools/gateAttempts");
 const { escalationDetailsMap } = await import("../services/escalationStore");
@@ -278,7 +280,7 @@ describe("a caller who declines details is still transferred", () => {
     expect(handoff).not.toHaveBeenCalled();
   });
 
-  it("a successful transfer's record ticket keeps the ANI even if the model sent another number", async () => {
+  it("a successful transfer keeps ANI for handling and the caller's callback on its record", async () => {
     const callSid = freshSid();
     const handoff = vi.fn(async () => {});
     const agent = await createNoIvrAgent(handoff, {
@@ -297,6 +299,14 @@ describe("a caller who declines details is still transferred", () => {
     expect(r.success).toBe(true);
     expect(handoff).toHaveBeenCalledTimes(1);
     expect(escalationDetailsMap.get(`call-${callSid}`)?.callbackNumber).toBe(ANI);
+    await vi.waitFor(() => expect(
+      h.submitSimplifiedTicket.mock.calls.filter(([p]) => p.callSid === callSid),
+    ).toHaveLength(1));
+    const record = h.submitSimplifiedTicket.mock.calls.find(([p]) => p.callSid === callSid)![0];
+    expect(record).toMatchObject({ patientPhone: "5559990000", callerPhone: ANI });
+    expect(record.additionalDetails).toContain("CALLBACK NUMBER MISMATCH");
+    expect(record.additionalDetails).toContain("+15559990000");
+    expect(record.additionalDetails).toContain(ANI);
   });
 
   it("a 911-level emergency never waits on the ask", async () => {

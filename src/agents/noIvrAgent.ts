@@ -672,11 +672,10 @@ When name+DOB lookup fails, DO NOT immediately say "I can't find you." Instead:
    - Wait for them to say each part separately (e.g. "January... twelfth... nineteen thirty-seven")
    - Also retry with phone: lookup_schedule(phone: callerPhone)
    - If EITHER lookup succeeds → confirm their name and continue normally
-   - If both fail → say "Let me make sure the team has your details" and file — never tell them they are not found if a visit or schedule match exists under a different spelling. Note "existing patient — staff please verify" in the ticket details, and include their phone number
+   - If both fail → say "${LOOKUP_UNSURE_SAY}" and file with phone + "existing patient — staff please verify". Never tell them they are not found when visits match.
 
 3. IF NEW PATIENT:
-   - Do NOT attempt another lookup — proceed to collect their request details
-   - Create the ticket normally; new patients do not need to be found in the system
+   - No more lookups; collect the request and file normally.
 
 ⚠️ ALWAYS ask for the date of birth in parts — "starting with the month, then
 the day, then the year". Said whole, the phone's speech recognition merges the
@@ -997,17 +996,14 @@ Same-day tickets go to the After Hours team, who work them.
 Filing a partial ticket IS the job. Waking the on-call
 provider because you missed a detail is not.
 
-Call escalate_to_human FIRST and
-say nothing about connecting anyone until it answers. Before an on-call
-transfer: one quick ask for name and date of birth. A 911-level emergency
-still goes straight to 911/transfer handling. If they cannot or will not,
-transfer anyway. If it returns need_identity, ask and call it again — not a
-refusal. If it returns
-success=true, say: "Based on what you're describing, I'm connecting you
-with our on-call team right now." If it is refused, it has ALREADY filed
-a ticket for the caller: say exactly what its message tells you to say,
-and never say you will connect, transfer or put anyone through. After a
-sanctioned transfer, never call it a second time.
+One quick ask for name and date of birth; transfer even if declined.
+Clinicians and a 911-level emergency skip intake.
+Call escalate_to_human; say nothing about connecting anyone until it answers.
+On need_identity, ask its line and retry with answers or details_declined.
+On success=true: "I'm connecting you with our on-call team now."
+Never call again after a sanctioned transfer.
+If refused, it has ALREADY filed a ticket: say its message and
+never say you will connect, transfer or put anyone through.
 
 CLOSING (CRITICAL: SAY THIS ONLY ONCE)
 After a SUCCESSFUL ticket, give the success line above — once. Promise only
@@ -2260,8 +2256,7 @@ Answer office-hours questions directly without filing a ticket:
 NEVER file a ticket whose only content is "caller asked about office hours".
 A ticket is for something a human must DO.
 
-PREREQUISITE: collect the caller's name and DOB in at most one quick ask, then call. A 911-level emergency still goes straight to 911/transfer handling. If they cannot or will not, transfer anyway. Keep the calling number.
-For healthcare provider calls — escalate immediately with whatever info you have.`,
+PREREQUISITE: one quick ask for name and DOB; transfer even if unavailable. Clinicians and 911-level emergencies skip intake. Keep caller ID for transfer handling.`,
     parameters: z.object({
       reason: z.string().describe("Specific urgent symptoms or provider details - NOT general frustration. ALWAYS write in English, even if the caller speaks another language (this goes to English-speaking staff via SMS)."),
       /**
@@ -2415,9 +2410,8 @@ For healthcare provider calls — escalate immediately with whatever info you ha
           try {
             const { SyncAgentService } = await import("../services/syncAgentService");
             const { fullName: name, standIn } = nameOrStandIn(params.patient_first_name, params.patient_last_name);
-            const phone = normalizePhoneNumber(
-              onCallCallbackNumber(params.callback_number, metadata.callerPhone) || '',
-            );
+            // Transfer handling keeps ANI; the record keeps the caller's callback and flags any mismatch.
+            const phone = normalizePhoneNumber(params.callback_number || metadata.callerPhone || '');
             // A refusal earlier on this call may already have filed a ticket under
             // the call's key; the record must not be swallowed by it (Codex P1,
             // #339). See transferRecordCrossReference.
