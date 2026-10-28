@@ -605,8 +605,6 @@ const PROVIDER_SELF_IDENTIFICATION: RegExp[] = [
   new RegExp(String.raw`\b(?:i'?m|i am|we'?re|we are) (?:from|with) (?:the |a |an )?(?:${NAME_WORD}){0,5}?${FACILITY}(?![a-z])`),
   // "calling on behalf of Dr. Smith"
   /\bon behalf of (?:dr\.?|doctor) [a-z]/,
-  // "our mutual patient", "one mutual patient", "the mutual patient"
-  /\b(?:our|(?:a|one|the) mutual) (?:mutual )?patients?\b/,
   // At most ONE word between the article and "patient" ("a post-operative
   // patient"), never "been": "I have been a patient there for years" and "we
   // have a patient appointment tomorrow" are patients (review P2, #353).
@@ -624,6 +622,11 @@ const PROVIDER_SELF_IDENTIFICATION: RegExp[] = [
   /\b(?:nuestr[oa]|tengo un[a]?) paciente\b/,
 ];
 
+// A mutual patient can be the caller, so exclude first-person identification
+// for this evidence only; other provider statements can still stand.
+const MUTUAL_PATIENT = /\b(?:our|(?:a|one|the) mutual) (?:mutual )?patients?\b/;
+const PATIENT_IDENTIFICATION_BEFORE = /\bi(?:'m| am)\s+(?:(?:actually|also|just|indeed)\s+)*$/;
+
 /**
  * Pure, for tests: does this caller text identify the caller as a provider?
  * Given the caller's turns one by one, a turn that is only a facility answer
@@ -632,7 +635,11 @@ const PROVIDER_SELF_IDENTIFICATION: RegExp[] = [
 export function callerSaysTheyAreAProvider(spoken: string | readonly string[]): boolean {
   const turns = typeof spoken === 'string' ? [spoken ?? ''] : spoken;
   const text = ` ${turns.join(' ').toLowerCase().replace(/[’‘]/g, "'").replace(/\s+/g, ' ')} `;
-  return PROVIDER_SELF_IDENTIFICATION.some((re) => affirmed(text, re)) || turns.some(answersWithAFacility);
+  return (
+    PROVIDER_SELF_IDENTIFICATION.some((re) => affirmed(text, re)) ||
+    affirmed(text, MUTUAL_PATIENT, (before) => !PATIENT_IDENTIFICATION_BEFORE.test(before)) ||
+    turns.some(answersWithAFacility)
+  );
 }
 
 /**
@@ -653,13 +660,14 @@ export function callerSaysTheyAreAProvider(spoken: string | readonly string[]): 
 const NEGATED_BEFORE = /(?:^|[^a-z])(?:not|never|n't)\s+(?:[a-z']+\s+)?$/;
 const SPANISH_VERB_FIRST = /^(?:soy|llamo|hablo|estoy|le |llamamos|hablamos|tengo)\b/;
 const NO_STRAIGHT_BEFORE = /(?:^|[^a-z])no\s+$/;
-function affirmed(text: string, re: RegExp): boolean {
+function affirmed(text: string, re: RegExp, acceptBefore?: (before: string) => boolean): boolean {
   // Every occurrence, not only the first: in "I'm not calling from Mercy. I'm
   // calling from St. Joe's hospital." the second one stands.
   const all = new RegExp(re.source, re.flags.includes('g') ? re.flags : `${re.flags}g`);
   return [...text.matchAll(all)].some((m) => {
     const at = m.index ?? 0;
     const before = text.slice(Math.max(0, at - 24), at);
+    if (acceptBefore && !acceptBefore(text.slice(0, at))) return false;
     if (DENIES.test(m[0]) || NEGATED_BEFORE.test(before)) return false;
     return !(SPANISH_VERB_FIRST.test(m[0]) && NO_STRAIGHT_BEFORE.test(before));
   });

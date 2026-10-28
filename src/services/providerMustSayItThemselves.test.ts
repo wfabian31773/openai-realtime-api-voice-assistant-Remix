@@ -111,6 +111,22 @@ describe('mutual patient self-identification', () => {
   it.each(['one patient', 'the patient', 'not the mutual patient'])('does not infer a provider from %s', (phrase) => {
     expect(callerSaysTheyAreAProvider(`Calling about ${phrase}.`)).toBe(false);
   });
+
+  it.each([
+    "I'm the mutual patient.",
+    'I am the mutual patient you called.',
+    'I’m actually the mutual patient.',
+    "I'm a mutual patient.",
+    'I am also a mutual patient.',
+  ])('does not mistake a patient identifying themselves for a provider: %s', (spoken) => {
+    expect(callerSaysTheyAreAProvider(spoken)).toBe(false);
+  });
+
+  it('still recognizes independent provider identification in the same conversation', () => {
+    expect(callerSaysTheyAreAProvider(["I'm the mutual patient.", 'This is Dr. Lee calling.'])).toBe(true);
+    expect(callerSaysTheyAreAProvider("I'm the mutual patient. Calling about our mutual patient.")).toBe(true);
+    expect(callerSaysTheyAreAProvider("I'm the mutual patient. Calling about the mutual patient.")).toBe(true);
+  });
 });
 
 describe('asking for a doctor, an operator or a page is not saying you are one', () => {
@@ -241,6 +257,27 @@ describe('the gate', () => {
       expect(v).toEqual({ allowed: true, basis: 'provider_or_facility' });
     },
   );
+
+  it.each(["I'm the mutual patient.", 'I am the mutual patient you called.'])(
+    'refuses an unstated provider escalation when the caller says %s', (spoken) => {
+      const corroboration = corr(spoken);
+      expect(corroboration.providerStated).toBe(false);
+      expect(judgeEscalation({
+        callerType: 'healthcare_provider',
+        reason: 'Provider requesting the on-call physician',
+        corroboration,
+      })).toMatchObject({ allowed: false, code: 'provider_not_stated_by_caller' });
+    },
+  );
+
+  it('still allows an acute emergency described by the mutual patient', () => {
+    const spoken = "I'm the mutual patient, my eye is bleeding.";
+    expect(judgeEscalation({
+      callerType: 'healthcare_provider',
+      reason: 'Patient reports eye bleeding',
+      corroboration: corr(spoken, 'eye bleeding'),
+    })).toEqual({ allowed: true, basis: 'acute_clinical' });
+  });
 
   it('a patient who describes an emergency in their own words still rings, whatever the agent called them', () => {
     // "extreme pain" and "surgery today" are on neither acute list, so on main
