@@ -12,6 +12,7 @@ import { getNextBusinessDayContext, getPacificTimeContext } from '../utils/timeA
 import { escalationDetailsMap } from '../services/escalationStore';
 import { markCallConcluded } from '../services/callConclusion';
 import { GHOST_CALL_RESTRICTION, ghostCallRefusal, hasCallerTranscript } from '../services/ghostCallProtection';
+import { requestSipHangup, type SipGhostHangupMetadata } from '../services/sipGhostHangup';
 import { EMAIL_FIELD_DESCRIPTION, LAST_NAME_FIELD_DESCRIPTION } from '../tools/contactCaptureGuidance';
 
 // ── Content-based routing (operator mandate 2026-07-25) ─────────────────
@@ -219,7 +220,7 @@ const triageOutcomeEnum = z.enum([
 export async function createAfterHoursAgent(
   handoffCallback?: () => Promise<void>,
   recordPatientInfoCallback?: (info: any) => any,
-  metadata?: {
+  metadata?: SipGhostHangupMetadata & {
     campaignId?: string;
     contactId?: string;
     callerPhone?: string;
@@ -484,13 +485,16 @@ Always say a brief goodbye phrase BEFORE calling this tool.`,
           console.error('[TOOL] terminate_call - missing OPENAI_API_KEY');
           return { success: false, error: 'missing_api_key' };
         }
-        const response = await fetch(
+        const hangup = await requestSipHangup(params.reason, metadata, (signal) => fetch(
           `https://api.openai.com/v1/realtime/calls/${encodeURIComponent(callId)}/hangup`,
           {
             method: 'POST',
             headers: { Authorization: `Bearer ${apiKey}` },
+            signal,
           },
-        );
+        ));
+        if (hangup.refusal) return hangup.refusal;
+        const response = hangup.response;
         if (response.ok) {
           console.log(`[TOOL] terminate_call ✓ Call ${callId} terminated (${params.reason})`);
           // Deliberate, successful hangup — SIP recovery must not transfer

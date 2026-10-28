@@ -51,6 +51,7 @@ import { buildPcpTransferBriefing, buildWarmTransferScript } from './services/wa
 import { pcpAgentConfig, markPcpCallEnded, pcpCallIsLive } from './agents/pcpAgent';
 import { SipConferenceLifecycle } from './services/sipConferenceLifecycle';
 import { deadAirWatchdog, isActivityEvent, deadAirTimeoutMs } from './services/deadAirWatchdog';
+import { SipCallerActivity } from './services/sipGhostHangup';
 import { buildTranscriptionConfig, transcriptionModel } from './config/transcription';
 import { startProviderRosterRefresh } from './services/providerRoster';
 import { recordTurn, flushTurns, releaseTurns } from './services/turnLog';
@@ -2658,6 +2659,7 @@ async function observeCall(
   // The factory's callerMemory/schedule lookups run in parallel with DB ops.
   
   // Build after-hours specific metadata with caller phone for automatic caller ID recognition
+  const sipCallerActivity = new SipCallerActivity();
   const afterHoursMetadata = {
     ...metadata,
     callerPhone: from,
@@ -2667,6 +2669,7 @@ async function observeCall(
     // Tickets carry the conversation up to the moment of filing — the
     // ticketing app generates its staff-facing summary from it.
     getTranscript: () => (callTranscripts.get(callId) ?? []).join('\n'),
+    onCallerActivity: sipCallerActivity.subscribe,
   };
   
   // Create agent with correct signature per agent type
@@ -2723,6 +2726,7 @@ async function observeCall(
             get callLogId() { return liveCallLogId(); },
             precontext: asPrecontext ?? undefined,
             getTranscript: () => (callTranscripts.get(callId) ?? []).join('\n'),
+            onCallerActivity: sipCallerActivity.subscribe,
           }
         );
         break;
@@ -3020,6 +3024,7 @@ async function observeCall(
             // Tickets carry the conversation up to the moment of filing —
             // the ticketing app generates its staff-facing summary from it.
             getTranscript: () => (callTranscripts.get(callId) ?? []).join('\n'),
+            onCallerActivity: sipCallerActivity.subscribe,
           }
         );
         break;
@@ -3038,6 +3043,7 @@ async function observeCall(
             get callLogId() { return liveCallLogId(); },
             variant: 'development' as const, // DEVELOPMENT variant - testing new features before production
             getTranscript: () => (callTranscripts.get(callId) ?? []).join('\n'),
+            onCallerActivity: sipCallerActivity.subscribe,
           }
         );
         break;
@@ -3294,6 +3300,7 @@ async function observeCall(
   // CRITICAL: Listen to raw transport events for transcripts
   // The SDK's history_added fires before transcription completes
   session.transport.on('*', (event: any) => {
+    sipCallerActivity.onTransportEvent(event ?? {});
     const eventType = event?.type;
 
     // Proof of life for the dead-air watchdog. Transcript- and tool-shaped

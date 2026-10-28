@@ -42,6 +42,7 @@ import { nameOrStandIn, STAND_IN_NAME_NOTE } from "../services/standInName";
 import { corroborate } from "../services/symptomCorroboration";
 import { markCallConcluded } from "../services/callConclusion";
 import { GHOST_CALL_RESTRICTION, ghostCallRefusal, hasCallerTranscript } from "../services/ghostCallProtection";
+import { requestSipHangup, type SipGhostHangupMetadata } from "../services/sipGhostHangup";
 import { callMetadataForDB } from "../services/callMetadataStore";
 import { EMAIL_FIELD_DESCRIPTION, LAST_NAME_FIELD_DESCRIPTION } from "../tools/contactCaptureGuidance";
 
@@ -136,7 +137,7 @@ function callbackMismatchStaffNote(callbackNumber: string, callerId?: string): s
 
 export type NoIvrAgentVariant = 'production' | 'development';
 
-export interface NoIvrAgentMetadata {
+export interface NoIvrAgentMetadata extends SipGhostHangupMetadata {
   callId: string;
   callSid?: string;
   callerPhone?: string;
@@ -2028,17 +2029,20 @@ Always say a brief goodbye phrase BEFORE calling this tool.`,
       //
       // An escalation is a one-way door. Once it is open, ending the call is
       // the transfer's job (or the fallback ticket's), never the model's.
-      if (escalationDetailsMap.has(callId)) {
+      const checkEscalation = () => {
+        if (!escalationDetailsMap.has(callId)) return null;
         console.warn(
           `[TOOL] terminate_call REFUSED for ${callId} — escalate_to_human already fired ` +
             `(reason given: ${params.reason}). A handoff in flight outranks a hangup.`,
         );
         return {
-          success: false,
+          success: false as const,
           error: 'escalation_in_progress',
           say: 'Stay on the line — I am connecting you with someone now.',
         };
-      }
+      };
+      const escalationRefusal = checkEscalation();
+      if (escalationRefusal) return escalationRefusal;
 
       try {
         const apiKey = process.env.OPENAI_API_KEY;
@@ -2046,13 +2050,16 @@ Always say a brief goodbye phrase BEFORE calling this tool.`,
           console.error("[TOOL] terminate_call - missing OPENAI_API_KEY");
           return { success: false, error: "missing_api_key" };
         }
-        const response = await fetch(
+        const hangup = await requestSipHangup(params.reason, metadata, (signal) => fetch(
           `https://api.openai.com/v1/realtime/calls/${encodeURIComponent(callId)}/hangup`,
           {
             method: "POST",
             headers: { Authorization: `Bearer ${apiKey}` },
+            signal,
           },
-        );
+        ), checkEscalation);
+        if (hangup.refusal) return hangup.refusal;
+        const response = hangup.response;
         if (response.ok) {
           console.log(`[TOOL] terminate_call ✓ Call ${callId} terminated (${params.reason})`);
           // Deliberate, successful hangup — SIP recovery must hang up the

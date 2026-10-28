@@ -13,7 +13,7 @@ export const GHOST_CALL_RESTRICTION =
 export function ghostCallRefusal(reason: unknown, callerHeard: boolean) {
   if (reason !== 'ghost_call' || !callerHeard) return null;
   return {
-    success: false,
+    success: false as const,
     error: 'caller_already_heard',
     fix: GHOST_CALL_RESTRICTION,
   };

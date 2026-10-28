@@ -16,6 +16,7 @@ import { callMetadataForDB } from '../services/callMetadataStore';
 import { recordingExecute } from '../services/toolTimeline';
 import { markCallConcluded } from '../services/callConclusion';
 import { GHOST_CALL_RESTRICTION, ghostCallRefusal, hasCallerTranscript } from '../services/ghostCallProtection';
+import { requestSipHangup, type SipGhostHangupMetadata } from '../services/sipGhostHangup';
 import { buildCompactLocationReference } from '../config/azulVisionKnowledge';
 import {
   ANSWERING_SERVICE_DEPARTMENTS,
@@ -182,7 +183,7 @@ function toIsoDob(dobString: string): string {
   return parsed.iso;
 }
 
-export interface AnsweringServiceMetadata {
+export interface AnsweringServiceMetadata extends SipGhostHangupMetadata {
   /** Live caller/agent transcript from the voice route, read at tool invocation. */
   getTranscript?: () => string;
   callerPhone?: string;
@@ -1282,13 +1283,16 @@ Always say a brief goodbye phrase BEFORE calling this tool.`,
           console.error(`[${agentTag}] terminate_call - missing callId`);
           return { success: false, error: "missing_call_id" };
         }
-        const response = await fetch(
+        const hangup = await requestSipHangup(params.reason, metadata, (signal) => fetch(
           `https://api.openai.com/v1/realtime/calls/${encodeURIComponent(callId)}/hangup`,
           {
             method: "POST",
             headers: { Authorization: `Bearer ${apiKey}` },
+            signal,
           },
-        );
+        ));
+        if (hangup.refusal) return hangup.refusal;
+        const response = hangup.response;
         if (response.ok) {
           console.log(`[${agentTag}] terminate_call ✓ Call ${callId} terminated (${params.reason})`);
           // Deliberate, successful hangup — SIP recovery must not transfer
