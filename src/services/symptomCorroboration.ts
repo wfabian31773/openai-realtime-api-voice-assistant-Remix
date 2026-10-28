@@ -627,8 +627,9 @@ const PROVIDER_SELF_IDENTIFICATION: RegExp[] = [
 const MUTUAL_PATIENT = /\b(?:our|(?:a|one|the) mutual) (?:mutual )?patients?\b/;
 const PATIENT_IDENTIFICATION_BEFORE = /\b(?:i(?:'m| am)|this is)\s+(?:(?:actually|also|just|indeed)\s+)*$/;
 // A name can sit between the identification and its appositive. Do not let
-// words describing a call turn a later patient reference into an appositive.
-const PATIENT_NAME_WORD = String.raw`(?!(?:calling|about|regarding|for|from|with|on|a|an|the|my|our)\b)[a-z][a-z'-]*`;
+// words describing a call ("this is concerning a mutual patient") turn a
+// later patient reference into an appositive.
+const PATIENT_NAME_WORD = String.raw`(?!(?:calling|about|regarding|concerning|for|from|with|on|a|an|the|my|our)\b)[a-z][a-z'-]*`;
 const PATIENT_NAME = String.raw`(?:${PATIENT_NAME_WORD}\s+){0,2}${PATIENT_NAME_WORD}`;
 const PATIENT_APPOSITIVE_BEFORE = new RegExp(
   String.raw`\b(?:i(?:'m| am)|this is)\s+(?:(?:actually|also|just|indeed)\s+)*${PATIENT_NAME},?\s+$`,

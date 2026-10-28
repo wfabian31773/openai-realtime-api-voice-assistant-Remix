@@ -295,6 +295,22 @@ describe('the gate', () => {
     },
   );
 
+  it.each(
+    ['concerning', 'regarding', 'about', 'calling about', 'following up on'].flatMap((description) =>
+      ['a mutual patient', 'our mutual patient', 'Jane Smith, the mutual patient', 'the mutual patient, Jane Smith']
+        .flatMap((patient) => [`This is ${description} ${patient}.`, `${description} ${patient}.`]),
+    ),
+  )('recognizes a call description and allows provider escalation: %s', (spoken) => {
+    expect(callerSaysTheyAreAProvider(spoken)).toBe(true);
+    const corroboration = corr(spoken);
+    expect(corroboration.providerStated).toBe(true);
+    expect(judgeEscalation({
+      callerType: 'healthcare_provider',
+      reason: 'Provider requesting the on-call physician',
+      corroboration,
+    })).toEqual({ allowed: true, basis: 'provider_or_facility' });
+  });
+
   it.each(["I'm the mutual patient.", 'I am the mutual patient you called.', 'This is the mutual patient.',
     'This is Jane, the mutual patient.', 'I am Jane, the mutual patient you called.', 'The mutual patient is me.',
     'Jane Smith, the mutual patient', 'The mutual patient, Jane Smith',
