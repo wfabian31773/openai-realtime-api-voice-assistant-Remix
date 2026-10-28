@@ -7,7 +7,8 @@
  */
 
 import type { Express, NextFunction, Request, Response } from "express";
-import { hasScope, type PluginScope } from "./scopes";
+import { hasScope, mintScopesCompatible, type PluginScope } from "./scopes";
+import { isOperatorPayload, operatorFromProblem } from "./operatorLine";
 import { pluginWritesEnabled } from "./writesEnabled";
 import { parseBearerToken, type VerifiedPluginToken } from "./tokens";
 import { verifyStoredToken, publicApproval, approvalForApprover, type ContactApprovalRow, type PluginStore } from "./store";
@@ -23,7 +24,7 @@ import {
   rejectContact,
 } from "./approvals";
 import { hashPayload, hashSecret } from "./tokens";
-import { createLiveCallSender, placeLiveCall, placeDirectCall, type LiveCallSender } from "./liveCalls";
+import { createLiveCallSender, placeLiveCall, placeDirectCall, placeOperatorCall, type LiveCallSender } from "./liveCalls";
 import { liveCallRegistry, type LiveCallRegistry } from "./liveSessions";
 import type { DialerLock } from "../runtime/outbound/scheduler";
 import { checkTwilioSignature, type WebhookRequest } from "../runtime/voiceWebhook";
@@ -182,10 +183,58 @@ export function mountPluginApi(app: Express, deps: PluginApiDeps): void {
 
   const v1 = "/api/plugin/v1";
 
-  // Existing approval sessions still require contacts:commit. A direct-only
-  // token can control only its own direct sessions through the same routes.
+  const requireBot = (req: AuthedRequest, res: Response, next: NextFunction) => {
+    if (hasScope(req.pluginAuth?.scopes, "contacts:approve")) { jsonError(res, 403, "This operation is bot-only"); return; }
+    next();
+  };
+  const requireHuman = (req: AuthedRequest, res: Response, next: NextFunction) => {
+    if (!mintScopesCompatible(req.pluginAuth!.scopes).ok) { jsonError(res, 403, "Approval requires a human-only token"); return; }
+    next();
+  };
+  const requireCommitScope = (req: AuthedRequest, res: Response, next: NextFunction) => {
+    if (hasScope(req.pluginAuth?.scopes, "operator:call")) { next(); return; }
+    requireScope("contacts:commit")(req, res, next);
+  };
+
+  app.post(`${v1}/prepare_operator_call`, requireAuth, requireScope("operator:call"), requireBot, requireWrites, async (req: AuthedRequest, res) => {
+    res.setHeader("Cache-Control", "no-store");
+    const problem = operatorFromProblem(envOf(deps));
+    if (problem) { jsonError(res, 503, problem); return; }
+    try {
+      const result = await prepareContact(deps.store, req.pluginAuth!.jti,
+        { channel: "call", payload: req.body }, (deps.now ?? (() => new Date()))(), "operator");
+      if (!result.ok) { jsonError(res, result.status, result.error); return; }
+      res.status(201).json({ status: "pending_approval", approval: publicApproval(result.approval) });
+      await audit(deps, req.pluginAuth, req, "prepare_operator_call", "pending_approval", 201, { approvalId: result.approval.id });
+    } catch { jsonError(res, 503, "Operator request storage is unavailable"); }
+  });
+
+  app.get(`${v1}/calls/:id/transcript`, requireAuth, requireScope("operator:call"), requireBot, async (req: AuthedRequest, res) => {
+    res.setHeader("Cache-Control", "no-store");
+    const session = liveCalls.owned(req.params.id, req.pluginAuth!.jti);
+    if (session?.operatorCall) {
+      await liveCalls.persist(session).catch(() => undefined);
+      res.json({ sessionId: session.sessionId, ...liveCalls.view(session) });
+      return;
+    }
+    let record;
+    try { record = await deps.store.getOperatorCall(req.params.id); }
+    catch { jsonError(res, 503, "Operator transcript storage is unavailable"); return; }
+    if (!record || record.tokenJti !== req.pluginAuth!.jti) { jsonError(res, 404, "Operator call not found"); return; }
+    res.json({ sessionId: record.sessionId, callSid: record.callSid, status: record.status,
+      startedAt: record.startedAt.toISOString(), endedAt: record.endedAt?.toISOString() ?? null,
+      transcript: record.turns.map((turn) => ({ role: turn.role, text: turn.text, at: new Date(turn.atMs).toISOString() })),
+      nextAfter: record.turns.length - 1 });
+    await audit(deps, req.pluginAuth, req, "operator_call_transcript", "ok", 200, { approvalId: record.approvalId });
+  });
+
+  // Each kind retains its scope, and live controls always check the owner.
   const requireLiveScope = (req: AuthedRequest, res: Response, next: NextFunction) => {
     const owned = liveCalls.owned(req.params.sessionId, req.pluginAuth!.jti);
+    if (owned?.operatorCall) {
+      if (hasScope(req.pluginAuth?.scopes, "contacts:approve")) { jsonError(res, 403, "This operation is bot-only"); return; }
+      requireScope("operator:call")(req, res, next); return;
+    }
     if (owned?.directCall && hasScope(req.pluginAuth?.scopes, "calls:direct")) { next(); return; }
     requireScope("contacts:commit")(req, res, next);
   };
@@ -234,13 +283,17 @@ export function mountPluginApi(app: Express, deps: PluginApiDeps): void {
     await audit(deps, req.pluginAuth, req, "capabilities", "ok", 200);
   });
 
-  app.get(`${v1}/contact_requests/:id/confirm_token`, requireAuth, requireScope("contacts:commit"), async (req: AuthedRequest, res) => {
+  app.get(`${v1}/contact_requests/:id/confirm_token`, requireAuth, requireCommitScope, async (req: AuthedRequest, res) => {
     res.setHeader("Cache-Control", "no-store");
     const row = await deps.store.getApproval(req.params.id);
     if (!row || row.tokenJti !== req.pluginAuth!.jti) {
       jsonError(res, 404, "Contact request not found");
       await audit(deps, req.pluginAuth, req, "confirm_token", "denied", 404);
       return;
+    }
+    const needed = isOperatorPayload(row.payload) ? "operator:call" : "contacts:commit";
+    if (!hasScope(req.pluginAuth!.scopes, needed) || (isOperatorPayload(row.payload) && hasScope(req.pluginAuth!.scopes, "contacts:approve"))) {
+      jsonError(res, 403, `Bot scope ${needed} is required`); return;
     }
     const taken = await deps.store.takeConfirmToken(row.id, req.pluginAuth!.jti, (deps.now ?? (() => new Date()))());
     if (!taken) {
@@ -292,7 +345,7 @@ export function mountPluginApi(app: Express, deps: PluginApiDeps): void {
     await audit(deps, req.pluginAuth, req, "live_call_end", "ok", 200, { approvalId: session.approvalId });
   });
 
-  app.post(`${v1}/commit_call_live`, requireAuth, requireScope("contacts:commit"), requireWrites, async (req: AuthedRequest, res) => {
+  app.post(`${v1}/commit_call_live`, requireAuth, requireCommitScope, requireWrites, async (req: AuthedRequest, res) => {
     const confirmToken = typeof req.body?.confirmToken === "string" ? req.body.confirmToken : "";
     const now = (deps.now ?? (() => new Date()))();
     // A live call and its controls belong only to the bot that prepared it.
@@ -309,6 +362,17 @@ export function mountPluginApi(app: Express, deps: PluginApiDeps): void {
         await audit(deps, req.pluginAuth, req, "commit_call_live", "denied", 400);
         return;
       }
+      if (row) {
+        const operator = isOperatorPayload(row.payload);
+        const needed = operator ? "operator:call" : "contacts:commit";
+        if (!hasScope(req.pluginAuth!.scopes, needed) || (operator && hasScope(req.pluginAuth!.scopes, "contacts:approve"))) {
+          jsonError(res, 403, `Bot scope ${needed} is required`); return;
+        }
+        if (operator) {
+          const problem = operatorFromProblem(envOf(deps));
+          if (problem) { jsonError(res, 503, problem); return; }
+        }
+      }
     }
     const consumed = await consumeConfirmToken(deps.store, confirmToken, now);
     if (!consumed.ok) {
@@ -317,17 +381,22 @@ export function mountPluginApi(app: Express, deps: PluginApiDeps): void {
       return;
     }
     const row = consumed.approval;
+    const operator = isOperatorPayload(row.payload);
     const extra = { approvalId: row.id, ticketId: row.ticketId };
     let mayHaveSent = false;
+    let sessionId: string | undefined;
     try {
       let reason: string | null = hashPayload(row.payload) !== row.payloadHash ? "payload_hash_mismatch" : null;
       const sender = liveSender();
       if (!reason && !deps.outboundStore) reason = "no_outbound_store";
       if (!reason && !sender) reason = "no_twilio";
       if (!reason) {
-        const result = await placeLiveCall({
+        const result = operator ? await placeOperatorCall({
+          store: deps.outboundStore!, plugin: deps.store, sender: sender!, sessions: liveCalls, env: envOf(deps),
+        }, row, now) : await placeLiveCall({
           store: deps.outboundStore!, sender: sender!, sessions: liveCalls, env: envOf(deps), lock: deps.liveCallLock,
         }, row, now);
+        if (operator) sessionId = result.sessionId;
         if (result.ok) {
           mayHaveSent = true;
           const approval = await markCommitted(deps.store, row.id, { callSid: result.callSid, sessionId: result.sessionId, live: true }, now);
@@ -339,16 +408,18 @@ export function mountPluginApi(app: Express, deps: PluginApiDeps): void {
         reason = result.reason;
         mayHaveSent = result.mayHaveSent;
       }
-      const status = mayHaveSent ? 502 : reason === "payload_hash_mismatch" ? 409 : enqueueHttpStatus(reason!);
-      if (mayHaveSent) await markUnknown(deps.store, row.id, { reason }, now);
+      const refusalStatus = operator ? (reason === "do_not_contact" ? 409 : 503) : enqueueHttpStatus(reason!);
+      const status = mayHaveSent ? 502 : reason === "payload_hash_mismatch" ? 409 : refusalStatus;
+      if (mayHaveSent) await markUnknown(deps.store, row.id, { reason, ...(sessionId ? { sessionId } : {}) }, now);
       else await markFailed(deps.store, row.id, { reason }, now);
-      jsonError(res, status, mayHaveSent ? "Call outcome is unknown" : `Call was not placed: ${reason}`, mayHaveSent ? "unknown" : "not_sent");
+      res.status(status).json({ error: mayHaveSent ? "Call outcome is unknown" : `Call was not placed: ${reason}`,
+        outcome: mayHaveSent ? "unknown" : "not_sent", ...(sessionId ? { sessionId } : {}) });
       await audit(deps, req.pluginAuth, req, "commit_call_live", mayHaveSent ? "unknown" : "failed", status, extra);
     } catch {
       const outcome = mayHaveSent ? "unknown" : "not_sent";
       const mark = mayHaveSent ? markUnknown : markFailed;
-      await mark(deps.store, row.id, { reason: mayHaveSent ? "send_unknown" : "live_call_unavailable" }, now).catch(() => null);
-      jsonError(res, mayHaveSent ? 502 : 503, "Live call could not be completed", outcome);
+      await mark(deps.store, row.id, { reason: mayHaveSent ? "send_unknown" : "live_call_unavailable", ...(sessionId ? { sessionId } : {}) }, now).catch(() => null);
+      res.status(mayHaveSent ? 502 : 503).json({ error: "Live call could not be completed", outcome, ...(sessionId ? { sessionId } : {}) });
       await audit(deps, req.pluginAuth, req, "commit_call_live", mayHaveSent ? "unknown" : "failed", mayHaveSent ? 502 : 503, extra);
     }
   });
@@ -485,7 +556,8 @@ export function mountPluginApi(app: Express, deps: PluginApiDeps): void {
     await audit(deps, req.pluginAuth, req, "list_approvals", "ok", 200);
   });
 
-  app.post(`${v1}/approvals/:id/approve`, requireAuth, requireScope("contacts:approve"), requireWrites, async (req: AuthedRequest, res) => {
+  app.post(`${v1}/approvals/:id/approve`, requireAuth, requireScope("contacts:approve"), requireHuman, requireWrites, async (req: AuthedRequest, res) => {
+    res.setHeader("Cache-Control", "no-store");
     const payloadHash = String((req.body as { payloadHash?: string } | undefined)?.payloadHash ?? "");
     const result = await approveContact(
       deps.store,
@@ -532,6 +604,10 @@ export function mountPluginApi(app: Express, deps: PluginApiDeps): void {
 
   app.post(`${v1}/commit_contact`, requireAuth, requireScope("contacts:commit"), requireWrites, async (req: AuthedRequest, res) => {
     const confirmToken = String((req.body as { confirmToken?: string })?.confirmToken ?? "");
+    const requested = /^[a-f0-9]{64}$/.test(confirmToken) ? await deps.store.findApprovalByConfirmHash(hashSecret(confirmToken)) : null;
+    if (requested && isOperatorPayload(requested.payload)) {
+      jsonError(res, 400, "Operator calls require the preparing bot and commit_call_live"); return;
+    }
     const now = (deps.now ?? (() => new Date()))();
     try {
       await reapStaleSending(deps.store, now);
