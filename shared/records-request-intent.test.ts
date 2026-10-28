@@ -236,3 +236,64 @@ describe('review regressions: delivery, corrections, and access questions', () =
     expect(recordsLineRedirect(text)).toMatchObject({ departmentId: 3 });
   });
 });
+
+describe('review regressions: copy requests and scheduled exams', () => {
+  it.each([
+    'Can someone explain my test results and send me a copy?',
+    'Please interpret my lab results and fax them to my doctor',
+    'Can you discuss my results and have my records sent to me?',
+    'Can you explain my results and I need my test results sent to me?',
+    'Can you explain my results and I want a copy?',
+    'Can someone explain my MRI and send me a copy?',
+    'I need a copy of my MRI',
+    'Please send me a copy of my x-rays',
+    'Necesito una copia de mis resultados',
+    'Please send me a copy of my last eye exam',
+    'Please send me a copy of my file',
+    'Copy of my MRI',
+    'I have a question about getting a copy of my MRI',
+    'I have a question about getting a copy of my MRI so I can discuss it with my doctor',
+    'I need my records before I schedule an appointment',
+    'I need to schedule a visual field exam and send me my records',
+    'I need to schedule an OCT appointment and I need my records',
+  ])('keeps requested copies or delivery in Medical Records: %s', text => {
+    expect(recordsLinePurpose(text)).toBe('records');
+    expect(recordsLineRedirect(text)).toBeNull();
+  });
+
+  it.each([
+    'I need to schedule a visual field exam',
+    'I want to book an OCT appointment',
+    'Please schedule my visual field exam',
+    'I need to schedule an appointment for an OCT',
+    'I need to schedule my OCT',
+    'I need to schedule my OCT and get a ride to the appointment',
+  ])('routes an exam scheduling request to HVA Hub: %s', text => {
+    expect(recordsLinePurpose(text)).toBe('scheduling');
+    expect(recordsLineRedirect(text)).toMatchObject({ departmentId: 9, requestTypeId: 32, requestReasonId: 146 });
+  });
+
+  it.each([
+    'Can someone explain my test results and tell me when they were sent?',
+    'Please interpret my lab results and confirm they were faxed to my doctor',
+    'Can you explain my test results and why I need to send them to my doctor?',
+    'Can you explain my results and can you tell me why I need to send them?',
+    'Can you explain my test results and get a doctor to interpret them?',
+    'Can you explain my results and get a doctor to discuss my test results?',
+  ])('does not mistake interpretation or historical delivery for a copy request: %s', text => {
+    expect(recordsLinePurpose(text)).toBe('clinical');
+    expect(recordsLineRedirect(text)).toMatchObject({ departmentId: 3 });
+  });
+
+  it.each([
+    ['I do not need a copy of my MRI; please reschedule my appointment', 'scheduling'],
+    ["Don't send me a copy of my file; I have a billing question", 'billing'],
+    ['I already have a copy of my MRI', 'unknown'],
+    ['I need to know whether you sent me a copy of my MRI', 'unknown'],
+    ['I need to discuss my results, not a copy of my MRI', 'clinical'],
+    ['I need someone to discuss a copy of my MRI', 'unknown'],
+  ])('does not infer a generic copy request from a refusal or history: %s', (text, purpose) => {
+    expect(recordsLinePurpose(text)).toBe(purpose);
+    expect(recordsLineRedirect(text)?.departmentId).not.toBe(16);
+  });
+});

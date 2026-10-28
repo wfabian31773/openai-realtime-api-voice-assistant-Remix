@@ -118,6 +118,8 @@ describe('review: classification and filing agree on records intent', () => {
     ["I don't need records, I have a billing question", 4],
     ["I don't need my chart, my glasses are broken", 1],
     ['I have a question about what my test results mean', 3],
+    ['I need to schedule a visual field exam', 9],
+    ['I want to book an OCT appointment', 9],
   ])('avoids records authorization for %s', async (request_description, departmentId) => {
     expect(await runTool('classify_records_request', { request_description })).toMatchObject({ is_records_request: false, department_id: departmentId });
     expect((await runTool('file_records_ticket', { ...BASE, requester: undefined, request_description })).success).toBe(true);
@@ -136,6 +138,12 @@ describe('review: classification and filing agree on records intent', () => {
     'I need my test results sent to my doctor so I can discuss them with her',
     'I have a question about getting a copy of my medical records',
     'I have a question about the status of my records request',
+    'Can someone explain my test results and send me a copy?',
+    'I need a copy of my MRI',
+    'Please send me a copy of my x-rays',
+    'Necesito una copia de mis resultados',
+    'Please send me a copy of my last eye exam',
+    'Please send me a copy of my file',
   ])('retains the records workflow for %s', async request_description => {
     expect(await runTool('classify_records_request', { request_description })).toMatchObject({ is_records_request: true, department_id: 16 });
     expect((await runTool('file_records_ticket', { ...BASE, request_description, form_channel: 'sms' })).success).toBe(true);
