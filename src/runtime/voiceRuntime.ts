@@ -315,6 +315,7 @@ import { reportSiAssistantCall, shouldReportSiAssistantCall } from "../plugin/ca
 import { attachmentForSiAssistant } from "../plugin/returnedCaller";
 import { reattachTakenMessages } from "../plugin/messageOutbox";
 import { liveCallRegistry, type LiveCallRegistry } from "../plugin/liveSessions";
+import { OPERATOR_SLUG } from "../plugin/operatorLine";
 import { SI_ASSISTANT_DIRECT_GREETING } from "../agents/siAssistantAgent";
 import { closeSiAssistantIdentity, siAssistantIdentityFor } from "../plugin/siAssistantIdentity";
 import type { OutboundStore } from "./outbound/store";
@@ -871,7 +872,7 @@ export function mountVoiceRuntime(
       const source = (await laneSource()) as LaneSource & {
         getOutboundAgents?: () => Array<{ id: string }>;
       };
-      return (source.getOutboundAgents?.() ?? []).map((a) => a.id);
+      return (source.getOutboundAgents?.() ?? []).filter((a) => a.id !== OPERATOR_SLUG).map((a) => a.id);
     },
     store: outboundStore,
     twilio:
@@ -904,7 +905,7 @@ export function mountVoiceRuntime(
 
   app.post("/voice/:slug", async (req: Request, res: Response) => {
     const slug = String(req.params.slug ?? "");
-    if (slug === "si-assistant" && req.query.liveSession !== undefined) {
+    if ((slug === "si-assistant" && req.query.liveSession !== undefined) || slug === OPERATOR_SLUG) {
       try {
         send(res, await handleOutboundAnswer(slug, toWebhookRequest(req), await outboundDeps()));
       } catch {
@@ -1116,8 +1117,9 @@ export function mountVoiceRuntime(
       recordingHost?: string,
     ): Promise<void> {
       const startedAtMs = Date.now();
-      const isLiveCall = entry.slug === "si-assistant" && Boolean(entry.liveSessionId);
+      const isLiveCall = (entry.slug === "si-assistant" || entry.slug === OPERATOR_SLUG) && Boolean(entry.liveSessionId);
       const directCall = isLiveCall ? liveCalls.forCall(entry.callSid)?.directCall : undefined;
+      const operatorCall = entry.slug === OPERATOR_SLUG ? liveCalls.forCall(entry.callSid)?.operatorCall : undefined;
       // The call is answered once its stream has started, so Twilio will take
       // a REST recording from here. Never awaited, never on the call's path:
       // a failure is one console line and the call proceeds unrecorded, as
@@ -1272,7 +1274,8 @@ export function mountVoiceRuntime(
           registered !== undefined &&
           ((Boolean(entry.outbound) && !isOutboundLane) ||
             (entry.outbound !== undefined && !outboundContact) ||
-            (outboundContact?.data.plugin_direct === true && !directCall));
+            (outboundContact?.data.plugin_direct === true && !directCall) ||
+            (entry.slug === OPERATOR_SLUG && !operatorCall));
         if (directionMismatch) {
           console.warn(
             `[voice-runtime] ${entry.slug}: refused — ` +
@@ -1350,6 +1353,7 @@ export function mountVoiceRuntime(
               ? { outbound: { ...outboundContact, campaignKey: entry.outbound.campaignKey } }
               : {}),
             ...(directCall ? { directCall } : {}),
+            ...(operatorCall ? { operatorCall } : {}),
             // And who may be ringing back, on a call made TO an outbound lane.
             ...(callback ? { callback } : {}),
           },
@@ -1602,6 +1606,7 @@ export function mountVoiceRuntime(
           context,
           startedAtMs,
           agent: lane.agent,
+          ...(operatorCall ? { maxCallMs: operatorCall.maxDurationSec * 1000 } : {}),
           // The practice's own line, spoken before the agent's first turn,
           // personalised for a recognised caller exactly as the SIP path
           // personalises it — same two helpers, same per-agent style.
@@ -1707,8 +1712,9 @@ export function mountVoiceRuntime(
            * socket open for a ticket POST.
            */
           persistCallRecord: async (record) => {
-            // Live transcripts belong only to the short-lived registry. Tool
-            // arguments can contain the same PHI, so they are cleared too.
+            if (operatorCall) liveCalls.finishTranscript(entry.callSid, record.turns ?? []);
+            // Operator transcripts have their separate owner-only store. Keep
+            // all live transcripts/tool arguments out of call logs and sweeps.
             if (isLiveCall) record = { ...record, transcript: "", turns: [], toolEvents: [] };
             // Snapshot before closeCallbackSession deletes the map entry.
             // Message and call report use this same identity (P2-4).

@@ -1,6 +1,8 @@
-/** Process-local live call state. No transcript or guidance is persisted. */
+/** Process-local controls. Operator transcripts also have a durable snapshot. */
 import { randomUUID } from "node:crypto";
 import type { TranscriptTurn } from "../runtime/transcriptLog";
+import type { OperatorCallPayload } from "./operatorLine";
+import type { OperatorCallRecord } from "./store";
 
 export type LiveCallStatus = "dialing" | "ringing" | "in_progress" | "completed" | "failed" | "no_answer";
 export const LIVE_RETENTION_MS = 2 * 60 * 1000;
@@ -25,6 +27,11 @@ export interface LiveCallSession {
   endedAt: Date | null;
   turns: TranscriptTurn[];
   directCall?: { purpose: string; name?: string };
+  operatorCall?: OperatorCallPayload;
+  hardStop?: (callSid: string) => Promise<unknown>;
+  persist?: (record: OperatorCallRecord) => Promise<void>;
+  persistence?: Promise<void>;
+  deadlineExceeded?: boolean;
   controls?: LiveCallControls;
   timer?: ReturnType<typeof setTimeout>;
 }
@@ -33,7 +40,7 @@ export class LiveCallRegistry {
   private sessions = new Map<string, LiveCallSession>();
   constructor(private readonly now: () => Date = () => new Date()) {}
 
-  create(input: Pick<LiveCallSession, "approvalId" | "tokenJti" | "contactId" | "attemptId" | "directCall">): LiveCallSession {
+  create(input: Pick<LiveCallSession, "approvalId" | "tokenJti" | "contactId" | "attemptId" | "directCall" | "operatorCall" | "hardStop" | "persist">): LiveCallSession {
     const session: LiveCallSession = {
       ...input, sessionId: randomUUID(), callSid: null, status: "dialing",
       startedAt: this.now(), endedAt: null, turns: [],
@@ -41,9 +48,13 @@ export class LiveCallRegistry {
     this.sessions.set(session.sessionId, session);
     session.timer = setTimeout(() => {
       const end = session.controls?.end;
+      session.deadlineExceeded = true;
+      if (session.callSid) void session.hardStop?.(session.callSid).catch(() => {
+        console.error("[operator-line] hard stop REST hangup failed; provider timeLimit remains active");
+      });
       this.setStatus(session.sessionId, "failed");
       end?.();
-    }, LIVE_MAX_MS);
+    }, session.operatorCall ? session.operatorCall.maxDurationSec * 1000 : LIVE_MAX_MS);
     session.timer.unref?.();
     return session;
   }
@@ -74,6 +85,9 @@ export class LiveCallRegistry {
     const session = this.get(sessionId);
     if (!session || !callSid || (session.callSid && session.callSid !== callSid)) return false;
     session.callSid = callSid;
+    // A create response / signed callback may arrive after the deadline.
+    if (session.deadlineExceeded && session.operatorCall) void session.hardStop?.(callSid).catch(() => undefined);
+    this.persist(session);
     return true;
   }
 
@@ -99,6 +113,29 @@ export class LiveCallRegistry {
       session.timer = setTimeout(() => this.drop(sessionId), LIVE_RETENTION_MS);
       session.timer.unref?.();
     }
+    this.persist(session);
+  }
+
+  /** Serialized snapshots prevent a delayed progress write replacing the final transcript. */
+  persist(session: LiveCallSession): Promise<void> {
+    if (!session.persist || !session.approvalId) return Promise.resolve();
+    const record: OperatorCallRecord = {
+      sessionId: session.sessionId, approvalId: session.approvalId, tokenJti: session.tokenJti,
+      callSid: session.callSid, status: session.status, startedAt: session.startedAt, endedAt: session.endedAt,
+      turns: (session.controls?.turns() ?? session.turns).map((turn) => ({ ...turn })),
+    };
+    const save = session.persist;
+    session.persistence = (session.persistence ?? Promise.resolve()).catch(() => undefined).then(() => save(record));
+    void session.persistence.catch(() => console.error("[operator-line] transcript persistence failed"));
+    return session.persistence;
+  }
+
+  /** Bridge finalization can amend an interrupted final line after a REST hangup. */
+  finishTranscript(callSid: string, turns: TranscriptTurn[]): void {
+    const session = this.forCall(callSid);
+    if (!session?.operatorCall) return;
+    session.turns = turns.map((turn) => ({ ...turn }));
+    this.persist(session);
   }
 
   view(session: LiveCallSession, after = -1) {
