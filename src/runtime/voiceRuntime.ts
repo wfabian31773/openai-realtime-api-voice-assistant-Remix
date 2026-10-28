@@ -1343,6 +1343,10 @@ export function mountVoiceRuntime(
             get callLogId(): string | undefined {
               return callLogId;
             },
+            // PCP snapshots the exemption before redirecting, while the
+            // bridge still holds the caller's conversation. This getter is
+            // separate from getTranscript so the hang-up floor is unchanged.
+            ...(entry.slug === 'pcp' ? { getTransferTranscript: () => bridge?.getTranscript() ?? '' } : {}),
             // This pipeline names itself, so an agent with a prompt written
             // for Grok (the after-hours lane, v76) can pick it here and keep
             // the old core's prompt on the old core.

@@ -1651,7 +1651,7 @@ session's writable workspace; this entry is the local handoff.
 ## 18. Heard callers bypass silence and ghost-call termination — 2026-10-27
 
 v131 (`voice-runtime-v131-silence-ladder-heard-callers-20261028`), on top
-of `main`'s v129 (#386, `08734d7`): any non-empty caller transcript makes the runtime silence ladder
+of `main`'s v130 (#387, `3e861ad`): any non-empty caller transcript makes the runtime silence ladder
 stand down before speaking. Never-heard callers retain the original ladder.
 The no-IVR, answering-service and legacy after-hours prompts forbid ghost
 wording after a request; their live SIP tools refuse ghost termination after
@@ -1662,7 +1662,7 @@ Regression tests exercise the real bridge and agent tools with synthetic
 requests indexed by the three reported call SIDs. Validation: 291 tests passed
 in the five touched/added test files, run with nice and one worker; TypeScript
 (`tsc -p . --noEmit`) and `git diff --check` passed. Production impact remains
-unmeasured. Numbering rechecked: v131 sits above main v129 and open v127, v130;
+unmeasured. Numbering rechecked: v131 sits above main v130 and open v127;
 owner: verify the published marker and call behavior after deploy.
 
 ---
