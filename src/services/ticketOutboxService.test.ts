@@ -156,6 +156,17 @@ beforeEach(() => {
 });
 
 describe('a queue payload is re-sent exactly as the tool built it', () => {
+  it.each([true, false])('retains history provenance through durable retry (queue payload: %s)', async (queuePayload) => {
+    const params = { ...OPTICAL_OTHER, patientFirstName: 'Alex', patientLastName: 'Synthetic',
+      locationOfLastVisit: 'Synthetic Surgery Center', locationSource: 'history' as const, locationIdSource: 'history' as const };
+    lookupProviderAndLocation.mockResolvedValue({ success: true, locationId: 91 });
+    const payload = JSON.parse(JSON.stringify(queuePayload ? wrapCreateTicketPayload(params) : params));
+    updateResults.push(entry(payload), undefined);
+    await TicketOutboxService.attemptSend('ob-1');
+    expect(createTicket.mock.lastCall?.[0]).toMatchObject({ locationOfLastVisit: 'Synthetic Surgery Center',
+      locationSource: 'history', locationIdSource: 'history', locationId: queuePayload ? 12 : 91 });
+  });
+
   it('keeps the whole triple, the ids and the caller\'s words', async () => {
     updateResults.push(entry(wrapCreateTicketPayload(OPTICAL_OTHER)), undefined);
 

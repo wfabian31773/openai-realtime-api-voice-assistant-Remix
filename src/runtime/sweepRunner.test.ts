@@ -85,7 +85,7 @@ describe("recovering a request the agent did not file", () => {
     durableFile.mockResolvedValue({ success: false, queued: true });
     expect(await runRequestSweep(record())).toEqual({ filed: true });
     expect(durableFile).toHaveBeenCalledWith(expect.objectContaining({
-      patientBirthYear: '1950', patientBirthMonth: '01', patientBirthDay: '02', locationOfLastVisit: 'Synthetic Clinic',
+      patientBirthYear: '1950', patientBirthMonth: '01', patientBirthDay: '02', locationOfLastVisit: 'Synthetic Clinic', locationSource: 'history',
       validatedPatient: expect.objectContaining({ status: 'validated', callSid: SID, personId: '00000000-0000-4000-8000-000000000001' }),
     }));
   });

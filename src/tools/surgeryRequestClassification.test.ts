@@ -235,16 +235,17 @@ it.each([
   expect(create.mock.calls[0][0]).toMatchObject({ departmentId: 2, priority: 'urgent' });
 });
 
-it('#6 VA-75838: a redirected request carries the validated record office and DOB', async () => {
+it.each([undefined, 'Synthetic Caller Clinic'])('#6 VA-75838: a redirect hydrates an omitted office and preserves a supplied office (%s)', async (location) => {
   const callSid = 'CA' + 'a'.repeat(32);
   rememberVerifiedIdentity(callSid, { firstName: 'Avery', lastName: 'Example',
     dateOfBirth: '1980-01-02', usualOffice: 'Testville', certain: true });
   await runTool('file_surgery_ticket', {
     first_name: 'Avery', last_name: 'Example', callback_number: '2025550142',
     request_description: 'I need to order contact lenses.', call_sid: callSid,
-    location: 'Wrong office from model', surgery_date: '2026-12-01',
+    location, surgery_date: '2026-12-01',
   });
-  expect(create.mock.calls[0][0]).toMatchObject({ departmentId: 1, locationOfLastVisit: 'Testville',
+  expect(create.mock.calls[0][0]).toMatchObject({ departmentId: 1, locationOfLastVisit: location || 'Testville',
+    locationSource: location ? 'caller' : 'history',
     patientBirthYear: '1980', patientBirthMonth: '01', patientBirthDay: '02' });
 });
 it.each([

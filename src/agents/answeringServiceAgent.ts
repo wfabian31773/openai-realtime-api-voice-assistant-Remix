@@ -1,6 +1,6 @@
-import { mostRecentAcceptable, filterOpticalPatientLocations } from '../tools/acceptableLocation';
+import { filterOpticalPatientLocations } from '../tools/acceptableLocation';
 import { nameKey, rememberVerifiedIdentity } from '../tools/verifiedIdentity';
-import { joinedAppointments, prepareTicketIdentity, validatedPatientFor } from '../tools/ticketIdentity';
+import { joinedAppointments, prepareTicketIdentity, validatedPatientFor, type TicketLocationSource } from '../tools/ticketIdentity';
 import { appointmentReadPolicy } from '../services/appointmentReadPolicy';
 import { appointmentAccess, unavailableAppointmentAccess } from '../services/appointmentAccess';
 import { RealtimeAgent, tool } from '@openai/agents/realtime';
@@ -1011,7 +1011,7 @@ Use patient data from phone lookup when available - don't ask for info you alrea
       priority: z.enum(['low', 'normal', 'medium', 'high', 'urgent']).default('medium').describe('Priority level'),
       location_id: z.number().optional().describe('Location ID if patient mentioned their clinic'),
       provider_id: z.number().optional().describe('Provider ID if patient mentioned their doctor'),
-      location_name: z.string().optional().describe('Confirmed clinic, or the next appointment office / last visit office from the validated patient record.'),
+      location_name: z.string().optional().describe('Caller-named clinic only. Omit record-derived locations; filing fills them automatically.'),
       provider_name: z.string().optional().describe('Doctor the CALLER explicitly names (e.g., "Dr. Logan"). Do NOT use schedule/patient-history providers — those are context only.'),
       email: z.string().optional().describe(EMAIL_FIELD_DESCRIPTION),
       confirmation_type: z.enum(['text', 'email', 'phone', 'none']).optional().describe('How patient wants confirmation (text, email, phone, or none)'),
@@ -1023,20 +1023,16 @@ Use patient data from phone lookup when available - don't ask for info you alrea
       const locationName = params.location_name?.trim() ||
         (params.location_id && LOCATIONS[params.location_id] ? getLocationName(params.location_id) : '');
       const prepared = prepareTicketIdentity({ ...params, call_sid: callSid, location: locationName });
+      let locationSource = prepared.input.locationSource as TicketLocationSource | undefined;
       if (prepared.missing) {
         return { success: false, missingFields: [prepared.missing], message: prepared.message };
       }
       let validated = validatedPatientFor(callSid, String(prepared.input.first_name),
         String(prepared.input.last_name), String(prepared.input.date_of_birth));
-      const heldOffice = validated?.nextAppointment?.location || validated?.lastVisit?.location || validated?.confirmedClinic;
       if (params.department_id === 1 && validated) validated = await filterOpticalPatientLocations(validated);
-      if (params.department_id === 1 && !locationName) {
-        // The prepared fallback may be a caller-confirmed clinic. Preserve it
-        // only when it did not come from the held history we just filtered.
+      if (params.department_id === 1 && locationSource === 'history') {
         prepared.input.location = validated?.nextAppointment?.location || validated?.lastVisit?.location ||
-          validated?.confirmedClinic || (!heldOffice
-            ? await mostRecentAcceptable([String(prepared.input.location || '')].filter(Boolean), 'optical')
-            : '') || '';
+          validated?.confirmedClinic || '';
       }
       params = { ...params, first_name: String(prepared.input.first_name ?? ''), last_name: String(prepared.input.last_name ?? ''),
         date_of_birth: String(prepared.input.date_of_birth ?? ''), location_name: String(prepared.input.location ?? '') };
@@ -1143,8 +1139,10 @@ Use patient data from phone lookup when available - don't ask for info you alrea
         validated = validatedPatientFor(callSid, params.first_name, params.last_name, params.date_of_birth);
         if (params.department_id === 1 && validated) {
           validated = await filterOpticalPatientLocations(validated);
-          if (!params.location_name) params.location_name = validated.nextAppointment?.location ||
-            validated.lastVisit?.location || validated.confirmedClinic || '';
+          if (!params.location_name) {
+            params.location_name = validated.nextAppointment?.location || validated.lastVisit?.location || validated.confirmedClinic || '';
+            locationSource = 'history';
+          }
         }
       }
 
@@ -1249,6 +1247,8 @@ Use patient data from phone lookup when available - don't ask for info you alrea
           patientEmail: params.email,
           lastProviderSeen: params.provider_name || undefined,
           locationOfLastVisit: params.location_name || undefined,
+          locationSource: locationSource ?? (params.location_name ? 'caller' : 'history'),
+          departmentId: params.department_id,
           additionalDetails: ticketSubject,
           callSid,
           callerPhone,

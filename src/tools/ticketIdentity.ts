@@ -4,6 +4,8 @@ import { spokenDobFor } from './spokenDob';
 import type { PatientScheduleContext, AppointmentSummary } from '../services/scheduleLookupService';
 
 export type { IdentityAppointment } from './verifiedIdentity';
+/** Internal routing metadata. Never supplied by a model; retained by the outbox. */
+export type TicketLocationSource = 'caller' | 'history';
 export interface ValidatedPatient {
   status: 'validated'; callSid: string; personId?: string;
   firstName: string; lastName: string; dateOfBirth?: string; confirmedClinic?: string;
@@ -45,12 +47,22 @@ export function ticketIdentityFields(callSid: string, first: string, last: strin
 export function prepareTicketIdentity(input: Record<string, unknown>): { input: Record<string, unknown>; missing?: string; message?: string } {
   const match = validatedPatientFor(value(input.call_sid), value(input.first_name), value(input.last_name), value(input.date_of_birth));
   const filled = { ...input };
+  if (!value(filled.location)) {
+    const callerClinic = confirmedClinicFor(value(input.call_sid));
+    if (callerClinic) {
+      filled.location = callerClinic;
+      filled.locationSource = 'caller' satisfies TicketLocationSource;
+    }
+  }
   if (match) {
     filled.first_name = value(input.first_name) || match.firstName;
     filled.last_name = value(input.last_name) || match.lastName;
     if (match.dateOfBirth) filled.date_of_birth = match.dateOfBirth;
     const office = match.nextAppointment?.location || match.lastVisit?.location || match.confirmedClinic;
-    if (office && !value(filled.location)) filled.location = office;
+    if (office && !value(filled.location)) {
+      filled.location = office;
+      filled.locationSource = 'history' satisfies TicketLocationSource;
+    }
   }
   if (!isoDOB(value(filled.date_of_birth))) {
     const spoken = spokenDobFor(value(input.call_sid));
@@ -59,6 +71,6 @@ export function prepareTicketIdentity(input: Record<string, unknown>): { input: 
   if (!value(filled.first_name)) return { input: filled, missing: 'first_name', message: 'May I please have the first name?' };
   if (!value(filled.last_name)) return { input: filled, missing: 'last_name', message: 'May I please have the last name?' };
   if (!isoDOB(value(filled.date_of_birth))) return { input: filled, missing: 'date_of_birth', message: 'What is your date of birth, starting with the month, then the day, then the year?' };
-  if (!value(filled.location)) filled.location = confirmedClinicFor(value(input.call_sid));
+  if (!value(filled.location)) filled.location = undefined;
   return { input: filled };
 }

@@ -51,7 +51,7 @@ export interface SweepOutcome {
 
 /** The POST, injected so a test proves the payload without a network. */
 type SweepTicket = ReturnType<typeof buildSweptTicket> & Pick<CreateTicketParams,
-  'validatedPatient' | 'patientBirthYear' | 'patientBirthMonth' | 'patientBirthDay' | 'locationOfLastVisit'>;
+  'validatedPatient' | 'patientBirthYear' | 'patientBirthMonth' | 'patientBirthDay' | 'locationOfLastVisit' | 'locationSource'>;
 export type SweepFiler = (ticket: SweepTicket) => Promise<{
   success: boolean;
   ticketNumber?: string;
@@ -76,7 +76,7 @@ const defaultFiler: SweepFiler = async (ticket) => {
   const res = await createTicketDurable({
     ...(ticket.validatedPatient ? { validatedPatient: ticket.validatedPatient } : {}),
     ...(ticket.patientBirthYear ? { patientBirthYear: ticket.patientBirthYear, patientBirthMonth: ticket.patientBirthMonth, patientBirthDay: ticket.patientBirthDay } : {}),
-    ...(ticket.locationOfLastVisit ? { locationOfLastVisit: ticket.locationOfLastVisit } : {}),
+    ...(ticket.locationOfLastVisit ? { locationOfLastVisit: ticket.locationOfLastVisit, locationSource: ticket.locationSource } : {}),
     departmentId: ticket.departmentId,
     requestTypeId: ticket.requestTypeId,
     requestReasonId: ticket.requestReasonId,
@@ -207,7 +207,7 @@ export async function runRequestSweep(
       }
       Object.assign(ticket, fields,
         { ...(dob ? { patientBirthYear: dob.year, patientBirthMonth: dob.month, patientBirthDay: dob.day } : {}),
-          ...(office ? { locationOfLastVisit: office } : {}) });
+          ...(office ? { locationOfLastVisit: office, locationSource: 'history' } : {}) });
     }
     const res = await file(ticket);
     if (!res.success) {

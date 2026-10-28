@@ -1,6 +1,6 @@
 import { beforeEach, expect, it } from 'vitest';
 import { prepareTicketIdentity } from './ticketIdentity';
-import { rememberVerifiedIdentity, resetVerifiedIdentities } from './verifiedIdentity';
+import { rememberConfirmedClinic, rememberVerifiedIdentity, resetVerifiedIdentities } from './verifiedIdentity';
 
 const call_sid = 'CA' + 'f'.repeat(32);
 const input = { call_sid, date_of_birth: '1970-01-02', location: 'Synthetic Clinic' };
@@ -52,6 +52,7 @@ it.each([undefined, '', '   '])('fills an absent clinic from next appointment, l
   };
   rememberVerifiedIdentity(call_sid, history);
   expect(prepareTicketIdentity({ call_sid, location }).input.location).toBe('Synthetic Next Clinic');
+  expect(prepareTicketIdentity({ call_sid, location }).input.locationSource).toBe('history');
   resetVerifiedIdentities();
   const { nextAppointment, ...withoutNext } = history;
   rememberVerifiedIdentity(call_sid, withoutNext);
@@ -60,4 +61,17 @@ it.each([undefined, '', '   '])('fills an absent clinic from next appointment, l
   const { lastVisit, ...withoutVisits } = withoutNext;
   rememberVerifiedIdentity(call_sid, withoutVisits);
   expect(prepareTicketIdentity({ call_sid, location }).input.location).toBe('Synthetic Usual Clinic');
+});
+
+it('keeps history provenance across repeated preparation and caller-confirmed office provenance across omission', () => {
+  rememberVerifiedIdentity(call_sid, { firstName: 'Alex', lastName: 'Synthetic', dateOfBirth: '1970-01-02',
+    certain: true, nextAppointment: { date: '2099-01-01', location: 'Synthetic Surgery Center' } });
+  const prepared = prepareTicketIdentity({ call_sid }).input;
+  expect(prepareTicketIdentity(prepared).input).toMatchObject({ location: 'Synthetic Surgery Center', locationSource: 'history' });
+  resetVerifiedIdentities();
+  rememberConfirmedClinic(call_sid, 'Synthetic Caller Office');
+  rememberVerifiedIdentity(call_sid, { firstName: 'Alex', lastName: 'Synthetic', dateOfBirth: '1970-01-02',
+    certain: true, nextAppointment: { date: '2099-01-01', location: 'Synthetic Surgery Center' } });
+  expect(prepareTicketIdentity({ ...input, first_name: 'Alex', last_name: 'Synthetic', location: '' }).input)
+    .toMatchObject({ location: 'Synthetic Caller Office', locationSource: 'caller' });
 });

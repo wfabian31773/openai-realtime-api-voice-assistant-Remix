@@ -13,7 +13,8 @@ import './sharedPatientTools';
 import './surgeryTools';
 import './techTools';
 import './medicalRecordsTools';
-import { rememberVerifiedIdentity, resetVerifiedIdentities } from './verifiedIdentity';
+import './opticalTools';
+import { rememberConfirmedClinic, rememberVerifiedIdentity, resetVerifiedIdentities } from './verifiedIdentity';
 import { validatedPatientFor } from './ticketIdentity';
 import * as directory from '../services/consoleDirectory';
 
@@ -59,3 +60,68 @@ it.each(['file_surgery_ticket', 'file_tech_ticket', 'file_records_ticket'])(
     expect(validatedPatientFor(sid)).toEqual(held);
   },
 );
+
+it.each(['file_surgery_ticket', 'file_tech_ticket', 'file_records_ticket'])(
+  '%s filters hydrated routing text and IDs on an Optical redirect and preserves caller offices', async (tool) => {
+    const send = vi.spyOn(ticketingApiClient as any, 'makeRequest')
+      .mockResolvedValue({ success: true, ticketNumber: 'VA-SYNTHETIC' });
+    const args = { call_sid: sid, callback_number: '5555550100',
+      request_description: 'When will my glasses be ready for pickup?',
+      requester: 'I am the patient', form_channel: 'declined', deliver_to: 'to me', date_range: 'everything' };
+    for (const lastOffice of [clinic, virtual]) {
+      rememberVerifiedIdentity(sid, { firstName: 'Alex', lastName: 'Synthetic', dateOfBirth: '1970-01-02', certain: true,
+        usualOffice: surgery, nextAppointment: { date: '2099-01-01', location: surgery },
+        lastVisit: { date: '2020-01-01', location: lastOffice } });
+      const held = validatedPatientFor(sid);
+      expect(await runTool(tool, args)).toMatchObject({ success: true });
+      expect(send.mock.lastCall?.[2]).toMatchObject({ departmentId: 1, locationSource: 'history',
+        locationOfLastVisit: lastOffice === clinic ? clinic : undefined, locationId: undefined,
+        validatedPatient: { nextAppointment: undefined, lastVisit: lastOffice === clinic ? held!.lastVisit : undefined,
+          confirmedClinic: undefined } });
+      expect(validatedPatientFor(sid)).toEqual(held);
+
+      // A supplied office wins even if that exact name also occurs in history.
+      expect(await runTool(tool, { ...args, location: surgery })).toMatchObject({ success: true });
+      expect(send.mock.lastCall?.[2]).toMatchObject({ departmentId: 1, locationSource: 'caller',
+        locationOfLastVisit: surgery, locationId: 31 });
+    }
+  },
+);
+
+it('an Optical tool redirect to Surgery keeps full joined history', async () => {
+  rememberVerifiedIdentity(sid, { firstName: 'Alex', lastName: 'Synthetic', dateOfBirth: '1970-01-02', certain: true,
+    usualOffice: surgery, nextAppointment: { date: '2099-01-01', location: surgery },
+    lastVisit: { date: '2020-01-01', location: virtual } });
+  const held = validatedPatientFor(sid);
+  const send = vi.spyOn(ticketingApiClient as any, 'makeRequest')
+    .mockResolvedValue({ success: true, ticketNumber: 'VA-SYNTHETIC' });
+  expect(await runTool('file_optical_ticket', { call_sid: sid, callback_number: '5555550100',
+    request_description: 'What time should I arrive for my cataract surgery?' })).toMatchObject({ success: true });
+  expect(send.mock.lastCall?.[2]).toMatchObject({ departmentId: 2, locationOfLastVisit: surgery,
+    validatedPatient: held });
+  expect(validatedPatientFor(sid)).toEqual(held);
+});
+
+it('an Optical tool redirect to Surgery files without asking for an unknown clinic', async () => {
+  const send = vi.spyOn(ticketingApiClient as any, 'makeRequest')
+    .mockResolvedValue({ success: true, ticketNumber: 'VA-SYNTHETIC' });
+  expect(await runTool('file_optical_ticket', { call_sid: sid, callback_number: '5555550100',
+    first_name: 'Alex', last_name: 'Synthetic', date_of_birth: '1970-01-02',
+    request_description: 'What time should I arrive for my cataract surgery?' })).toMatchObject({ success: true });
+  const payload = send.mock.lastCall?.[2] as Record<string, unknown>;
+  expect(payload).toMatchObject({ departmentId: 2 });
+  expect(payload.locationOfLastVisit).toBeUndefined();
+  expect(payload.locationId).toBeUndefined();
+});
+
+it('Optical preserves the office the caller confirmed earlier instead of hydrating a different held office', async () => {
+  rememberVerifiedIdentity(sid, { firstName: 'Alex', lastName: 'Synthetic', dateOfBirth: '1970-01-02', certain: true,
+    usualOffice: clinic, nextAppointment: { date: '2099-01-01', location: virtual } });
+  rememberConfirmedClinic(sid, surgery);
+  const send = vi.spyOn(ticketingApiClient as any, 'makeRequest')
+    .mockResolvedValue({ success: true, ticketNumber: 'VA-SYNTHETIC' });
+  expect(await runTool('file_optical_ticket', { call_sid: sid, callback_number: '5555550100',
+    request_description: 'When will my glasses be ready?' })).toMatchObject({ success: true });
+  expect(send.mock.lastCall?.[2]).toMatchObject({ departmentId: 1, locationOfLastVisit: surgery,
+    locationId: 31, locationSource: 'caller' });
+});

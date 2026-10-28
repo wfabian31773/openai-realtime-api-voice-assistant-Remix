@@ -990,6 +990,8 @@ registerTool({
       ...(lookup.providerId ? { providerId: lookup.providerId } : {}),
       ...(lookup.locationId ? { locationId: lookup.locationId } : {}),
       ...(cleanLocation ? { locationOfLastVisit: cleanLocation } : {}),
+      locationSource: input.locationSource === 'history' ? 'history' : 'caller',
+      locationIdSource: input.locationSource === 'history' ? 'history' : 'caller',
       lastProviderSeen: cleanProvider || undefined,
       description: filedDescriptionWithDobStatus,
       // Raised only when an outage cost us an id we had the name for — never

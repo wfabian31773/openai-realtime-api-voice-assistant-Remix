@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { TicketingApiClient } from './ticketingApiClient';
-import { validatedPatientFor, type ValidatedPatient } from '../../src/tools/ticketIdentity';
+import { validatedPatientFor, type ValidatedPatient, type TicketLocationSource } from '../../src/tools/ticketIdentity';
 import { rememberVerifiedIdentity, resetVerifiedIdentities } from '../../src/tools/verifiedIdentity';
 import * as directory from '../../src/services/consoleDirectory';
 
@@ -38,8 +38,9 @@ function client() {
 }
 
 async function file(api: TicketingApiClient, endpoint: 'create' | 'submit', departmentId: number | undefined,
-  validatedPatient?: ValidatedPatient, locationOfLastVisit?: string) {
-  const identity = { validatedPatient, locationOfLastVisit, callData: { callSid: sid }, departmentId };
+  validatedPatient?: ValidatedPatient, locationOfLastVisit?: string, locationSource?: TicketLocationSource,
+  ids: { locationId?: number; locationIdSource?: TicketLocationSource } = {}) {
+  const identity = { validatedPatient, locationOfLastVisit, locationSource, ...ids, callData: { callSid: sid }, departmentId };
   if (endpoint === 'create') {
     await api.createTicket({ ...identity, departmentId: departmentId!, patientFirstName: 'Alex', patientLastName: 'Synthetic',
       patientPhone: '5555550100', description: 'Synthetic glasses question' });
@@ -101,6 +102,65 @@ describe.each(['create', 'submit'] as const)('%s-ticket Optical identity transpo
     vi.spyOn(directory, 'isDirectoryConfigured').mockReturnValue(false);
     await file(api, endpoint, 1);
     expect(send.mock.lastCall?.[2]).toMatchObject({ validatedPatient: patient });
+  });
+});
+
+describe.each(['create', 'submit'] as const)('%s-ticket hydrated routing provenance', (endpoint) => {
+  it.each([undefined, 1])('filters a nonempty history-derived location and its ID (department: %s)', async (department) => {
+    const patient = hold();
+    const { api, send } = client();
+    await file(api, endpoint, department, undefined, surgery, 'history', { locationId: 91 });
+    expect(send.mock.lastCall?.[2]).toMatchObject({ locationOfLastVisit: clinic, locationId: undefined,
+      locationSource: 'history', validatedPatient: { nextAppointment: undefined, lastVisit: patient.lastVisit } });
+    expect(validatedPatientFor(sid)).toEqual(patient);
+  });
+
+  it.each([undefined, 'caller'] as const)('keeps a caller office even when it equals held surgery history (source: %s)', async (source) => {
+    hold();
+    const { api, send } = client();
+    await file(api, endpoint, 1, undefined, surgery, source, { locationId: 91, locationIdSource: 'caller' });
+    expect(send.mock.lastCall?.[2]).toMatchObject({ locationOfLastVisit: surgery, locationId: 91 });
+  });
+
+  it.each([2, 3, 8, 16])('keeps history-derived text and IDs for explicit department %i', async (department) => {
+    const patient = hold();
+    const { api, send } = client();
+    await file(api, endpoint, department, undefined, surgery, 'history', { locationId: 91 });
+    expect(send.mock.lastCall?.[2]).toMatchObject({ locationOfLastVisit: surgery, locationId: 91, validatedPatient: patient });
+    expect(directory.lookupLocation).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])('filters persisted history after held identity is cleared (identity in payload: %s)', async (carried) => {
+    const patient = hold(surgery, virtual, surgery);
+    // The same JSON round trip as a durable retry; no live held record remains.
+    const saved = JSON.parse(JSON.stringify({ patient, office: virtual, source: 'history' }));
+    resetVerifiedIdentities();
+    const { api, send } = client();
+    await file(api, endpoint, 1, carried ? saved.patient : undefined, saved.office, saved.source,
+      { locationId: 91, locationIdSource: 'history' });
+    expect(send.mock.lastCall?.[2]).toMatchObject({ locationOfLastVisit: undefined, locationId: undefined });
+    expect(patient.nextAppointment?.location).toBe(surgery);
+  });
+
+  it('preserves a resolved history ID when its clinic is accepted', async () => {
+    const { api, send } = client();
+    await file(api, endpoint, 1, undefined, clinic, 'history', { locationId: 31, locationIdSource: 'history' });
+    expect(send.mock.lastCall?.[2]).toMatchObject({ locationOfLastVisit: clinic, locationId: 31 });
+  });
+
+  it('filters a history-derived ID independently of caller-supplied text', async () => {
+    const { api, send } = client();
+    await file(api, endpoint, 1, undefined, surgery, 'caller', { locationId: 91, locationIdSource: 'history' });
+    expect(send.mock.lastCall?.[2]).toMatchObject({ locationOfLastVisit: surgery, locationId: undefined });
+  });
+
+  it('drops an ID-only history location that cannot be checked, while keeping an independent caller ID', async () => {
+    hold();
+    const { api, send } = client();
+    await file(api, endpoint, 1, undefined, undefined, 'history', { locationId: 91, locationIdSource: 'history' });
+    expect(send.mock.lastCall?.[2]).toMatchObject({ locationOfLastVisit: clinic, locationId: undefined });
+    await file(api, endpoint, 1, undefined, surgery, 'history', { locationId: 31, locationIdSource: 'caller' });
+    expect(send.mock.lastCall?.[2]).toMatchObject({ locationOfLastVisit: clinic, locationId: 31 });
   });
 });
 

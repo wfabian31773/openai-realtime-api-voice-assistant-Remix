@@ -4,7 +4,46 @@
  * (see toolModulesAreImportedOneWay.test.ts).
  */
 
-import type { ValidatedPatient } from './ticketIdentity';
+import type { TicketLocationSource, ValidatedPatient } from './ticketIdentity';
+
+export interface TicketRoutingFields {
+  departmentId?: number;
+  validatedPatient?: ValidatedPatient;
+  locationOfLastVisit?: string;
+  /** Omitted on legacy caller input. Every automatic hydration must set history. */
+  locationSource?: TicketLocationSource;
+  locationId?: number;
+  /** Defaults to the text's source when the ID was resolved from that text. */
+  locationIdSource?: TicketLocationSource;
+}
+
+/** Apply facility policy at the final boundary, including previously hydrated text/IDs. */
+export async function filterTicketRouting<T extends TicketRoutingFields>(params: T, fillMissing = false): Promise<T> {
+  const optical = params.departmentId === 1 || params.departmentId === undefined;
+  const patient = optical && params.validatedPatient
+    ? await filterOpticalPatientLocations(params.validatedPatient) : params.validatedPatient;
+  let office = params.locationOfLastVisit;
+  let source = params.locationSource;
+  const historyId = (params.locationIdSource ?? params.locationSource) === 'history';
+  let acceptedHistoryOffice: string | undefined;
+  if (optical && (source === 'history' || historyId)) {
+    acceptedHistoryOffice = await mostRecentAcceptable(office?.trim() ? [office] : [], 'optical') || undefined;
+    if (source === 'history') office = acceptedHistoryOffice;
+  }
+  if (!office?.trim() && (fillMissing || source === 'history')) {
+    office = patient?.nextAppointment?.location || patient?.lastVisit?.location || patient?.confirmedClinic;
+    if (office) source = 'history';
+  }
+  // A lookup ID resolved from rejected history still routes the ticket even
+  // after its text was removed. Never retain that ID against a replacement
+  // clinic. An independently caller-supplied ID keeps its own provenance.
+  const dropId = optical && historyId && (!acceptedHistoryOffice || office !== params.locationOfLastVisit);
+  return { ...params,
+    ...(patient ? { validatedPatient: patient } : {}),
+    ...(office !== undefined || 'locationOfLastVisit' in params ? { locationOfLastVisit: office } : {}),
+    ...(source ? { locationSource: source } : {}),
+    ...(dropId ? { locationId: undefined } : {}) };
+}
 
 /** Which queue is asking. Injected as call context, never a model argument. */
 export type ToolQueue = 'optical' | 'surgery';

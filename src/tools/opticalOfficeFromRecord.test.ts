@@ -410,8 +410,7 @@ describe('the record office name is sent when our lookup does not resolve it', (
     record();
 
     const scheduling = { ...NO_OFFICE, request_description: 'I need to reschedule my appointment' };
-    await runTool('file_optical_ticket', scheduling);
-    await runTool('file_optical_ticket', scheduling);
+    expect(await runTool('file_optical_ticket', scheduling)).toMatchObject({ success: true });
 
     expect(create).toHaveBeenCalledTimes(1);
     const payload = create.mock.calls[0][0] as unknown as Record<string, unknown>;

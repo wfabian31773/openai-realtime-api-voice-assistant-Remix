@@ -661,12 +661,14 @@ is reading noise.
 This branch carries **`voice-runtime-v139-identity-gate-20261028`**, on top
 of v136 (#393, main, `9bfccda`); v137 is #391 and v138 is #376 on their
 open branches. Verified identity is carried through ticket filing and
-teardown/sweep recovery. Live Optical, answering-service Optical filing and
-Optical sweep recovery share the facility filter for carried appointments and
-offices, preventing known surgery centers from routing those Optical tickets.
-Answering-service filters secondary lookup history too and passes the filtered
-identity through simplified submission to the ticket client. Surgery still
-files without a clinic when none is known. No migration; production impact is
+teardown/sweep recovery. Ticket location provenance distinguishes caller-named
+offices from held identity, schedule, phone pre-context and appointment history.
+Both ticket client endpoints filter Optical's carried appointments and
+history-derived routing text/IDs, including no-IVR, after-hours, answering
+service, redirects and durable retries. Undefined departments use the same
+filter because the server can derive Optical. Caller-named offices are preserved;
+explicit other departments and the held identity keep full history. Surgery
+still files without a clinic when none is known. No migration; production impact is
 unmeasured. Use v139 when verifying this branch.
 
 The v136 base (#393, main, `9bfccda`) carries
@@ -2578,7 +2580,7 @@ on it is evidence about current code.
 | **v132** or earlier — NOT the date; this branch is **v134**, ABOVE `main`'s v132 (#390, `76dd105f`), which it contains; v127 is #376 and v133 is #391 on their open branches | Goodbye grace hangup: after a completed caller/agent goodbye exchange, a 6s grace window after playback ends the call deliberately unless the caller speaks, a new response starts or a tool runs. No migration or new spoken wording. |
 | **v134** or earlier — NOT the date; v135 (renumbered from v125), now on `main` (#392, `6ae60e33`), is ABOVE `main`'s v134 (#396, `87766139`), which it contains; v127 is #376 and v133 is #391 on their open branches | After-hours confirms the phone-matched candidate on DOB, then looks up that record's schedule. No migration. |
 | **v135** or earlier — NOT the date; v136 (renumbered from v126) is on `main` (#393, `9bfccda`), above v135 (#392, `6ae60e33`); this is #384's base | The PCP model cannot choose unclassified_call; the teardown floor still files unclassified calls for a person to route. No migration. |
-| **v136** or earlier — NOT the date; this branch is **v139** (#384), above v136 (#393, main, `9bfccda`); v137 is #391 and v138 is #376 on their open branches | Verified identity is carried through ticket filing and teardown/sweep recovery. The shared ticket client filters Optical's carried appointment and office locations, including Surgery/Tech/Records redirects and retries. Simplified submissions without a department use the same clinic-safe copy because the receiver can derive Optical. Explicit non-Optical filings and the held identity retain their history; Surgery files without a clinic when none is known. No migration; production impact is unmeasured. |
+| **v136** or earlier — NOT the date; this branch is **v139** (#384), above v136 (#393, main, `9bfccda`); v137 is #391 and v138 is #376 on their open branches | Verified identity is carried through ticket filing and teardown/sweep recovery. Both ticket client endpoints filter Optical's carried appointments and history-derived routing text/IDs, including no-IVR, after-hours, answering service, Surgery/Tech/Records redirects and retries. Submissions without a department use the same filter because the receiver can derive Optical. Caller-named offices are preserved. Explicit other departments and the held identity retain their history; Surgery files without a clinic when none is known. No migration; production impact is unmeasured. |
 
 ### THE SURGEON CLAIM — BUILT, REVIEWED SIX TIMES, WITHDRAWN 2026-09-17
 

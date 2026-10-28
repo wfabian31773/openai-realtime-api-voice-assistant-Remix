@@ -164,7 +164,7 @@ Goal: urgent or not, logged with emit_decision.
 Exit when: emit_decision has been called.
 
 ### 4) The details
-Goal: full name, DOB, clinic, callback, reason and contact method. Use the validated record's DOB and clinic if held; prefer next appointment, then last visit. Ask only for missing facts, one at a time; never guess or repeat unanswerable questions.
+Goal: full name, DOB, clinic, callback, reason and contact method. Use the validated record's DOB and clinic if held; omit location unless caller named it. Ask only for missing facts, one at a time; never guess or repeat unanswerable questions.
 - Ask for first name and surname in separate turns. For the surname say: "May I have your last name? Please spell it letter by letter."
 - If a record is on file: "I was able to pull up a record. Is this for [Name]?" then the date of birth.
 - Date of birth: "And your date of birth, starting with the month, then the day, then the year?" Said whole, the phone merges the digits.

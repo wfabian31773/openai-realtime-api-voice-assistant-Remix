@@ -417,6 +417,7 @@ export async function createAfterHoursAgent(
           patientEmail: params.patient_email ?? undefined,
           lastProviderSeen: params.provider_name ?? undefined,
           locationOfLastVisit: params.location_name ?? undefined,
+          locationSource: params.location_name?.trim() ? 'caller' : undefined,
           additionalDetails: extraDetails || undefined,
           priority: mapping.priority as 'low' | 'normal' | 'medium' | 'high' | 'urgent',
           callSid: metadata?.callSid,

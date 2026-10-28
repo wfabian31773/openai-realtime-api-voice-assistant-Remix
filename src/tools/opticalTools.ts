@@ -25,7 +25,7 @@ import { loggableLookupError } from '../services/loggableTicketingError';
 import { gateRefusalsSoFar, noteGateRefusal } from './gateAttempts';
 import { decideDobEscape, dobStatusNote, dobEscapeMarker, type DobStatus } from './dobEscape';
 import { usualOfficeFor, verifiedDobFor } from './verifiedIdentity';
-import { filterOpticalPatientLocations } from './acceptableLocation';
+import { filterOpticalPatientLocations, mostRecentAcceptable } from './acceptableLocation';
 
 /** This tool's own name, for the per-call gate counter. */
 const OPTICAL_FILE_TOOL = 'file_optical_ticket';
@@ -248,15 +248,20 @@ registerTool({
     const { sanitizeProviderName, sanitizeLocationName } = await import(
       '../services/ticketFieldSanitizers'
     );
+    const { detectCrossQueue } = await import('./queueRouting');
+    const redirect = detectCrossQueue(description, OPTICAL_DEPARTMENT_ID);
+    const filedDepartmentId = redirect?.departmentId ?? OPTICAL_DEPARTMENT_ID;
     let validated = validatedPatientFor(callSid, first, last, dob);
-    if (validated) {
+    if (validated && filedDepartmentId === OPTICAL_DEPARTMENT_ID) {
       // Apply the queue's facility rules to the payload as well as routing:
       // the receiver must not select a surgery center from carried history.
       validated = await filterOpticalPatientLocations({ ...validated,
         confirmedClinic: usualOfficeFor(callSid, first, last, dob) });
     }
     const historyOffice = validated?.nextAppointment?.location || validated?.lastVisit?.location;
-    const cleanLocation = sanitizeLocationName(location).value;
+    const namedLocation = sanitizeLocationName(location).value;
+    const cleanLocation = input.locationSource === 'history' && filedDepartmentId === OPTICAL_DEPARTMENT_ID
+      ? await mostRecentAcceptable(namedLocation ? [namedLocation] : [], 'optical') || undefined : namedLocation;
     const cleanProvider = sanitizeProviderName(str(input.provider)).value;
 
     /**
@@ -372,7 +377,7 @@ registerTool({
       }
     }
 
-    if (!cleanLocation && !recordLookup && !askedForOfficeAlready) {
+    if (filedDepartmentId === OPTICAL_DEPARTMENT_ID && !cleanLocation && !recordLookup && !askedForOfficeAlready) {
       noteGateRefusal(callSid, OPTICAL_FILE_TOOL, 'location');
       return missing(['location'], 'Which of our offices do you usually visit?');
     }
@@ -538,7 +543,7 @@ registerTool({
     const lookupRan = !lookupWasUnavailable(lookup);
 
 
-    if (lookupRan && !lookup.locationId) {
+    if (filedDepartmentId === OPTICAL_DEPARTMENT_ID && lookupRan && !lookup.locationId) {
       /**
        * A NAME THAT DOES NOT MATCH IS NOT A TRANSIENT ERROR, and this used to
        * say `retryable: true` while telling the agent to go and call
@@ -671,9 +676,6 @@ registerTool({
     // The detector stays silent unless the misroute is obvious — the line that
     // rang is better evidence than a keyword, and a redirect on a guess would
     // be worse than none.
-    const { detectCrossQueue } = await import('./queueRouting');
-    const redirect = detectCrossQueue(description, OPTICAL_DEPARTMENT_ID);
-    const filedDepartmentId = redirect?.departmentId ?? OPTICAL_DEPARTMENT_ID;
     const filedTypeId = redirect?.requestTypeId ?? filing.requestTypeId;
     const filedReasonId = redirect?.requestReasonId ?? filing.requestReasonId;
     const routedDescription = redirect
@@ -730,8 +732,8 @@ registerTool({
     }
 
     const res = await createTicketDurable({
-      ...(validated ? { validatedPatient: { ...validated,
-        confirmedClinic: cleanLocation || officeFromRecord || validated.confirmedClinic } } : {}),
+      ...(validated ? { validatedPatient: filedDepartmentId === OPTICAL_DEPARTMENT_ID ? { ...validated,
+        confirmedClinic: cleanLocation || officeFromRecord || validated.confirmedClinic } : validated } : {}),
       departmentId: filedDepartmentId,
       requestTypeId: filedTypeId,
       requestReasonId: filedReasonId,
@@ -815,6 +817,8 @@ registerTool({
       ...(cleanLocation || officeFromRecord
         ? { locationOfLastVisit: cleanLocation || officeFromRecord }
         : {}),
+      locationSource: cleanLocation && input.locationSource !== 'history' ? 'caller' : 'history',
+      locationIdSource: cleanLocation && input.locationSource !== 'history' ? 'caller' : 'history',
       ...(lookup.providerId ? { providerId: lookup.providerId } : {}),
       lastProviderSeen: cleanProvider || undefined,
       description: routedDescriptionWithDobStatus,

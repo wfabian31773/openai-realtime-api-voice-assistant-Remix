@@ -293,7 +293,11 @@ export async function runTool(
     const prepared = prepareTicketIdentity(input);
     // Optical owns its bounded office ask and the record-office outage exit.
     // Keep that provenance instead of turning a held office into caller input.
-    if (name === 'file_optical_ticket') prepared.input.location = input.location;
+    if (name === 'file_optical_ticket' && prepared.input.locationSource === 'history'
+      && !(typeof input.location === 'string' && input.location.trim())) {
+      prepared.input.location = input.location;
+      prepared.input.locationSource = input.locationSource;
+    }
     input = prepared.input;
     // Enrich only. Each handler owns its bounded refusals and fallback;
     // Optical alone requires a clinic, including redirects into that lane.

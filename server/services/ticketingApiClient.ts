@@ -1,5 +1,5 @@
-import { validatedPatientFor, type ValidatedPatient } from '../../src/tools/ticketIdentity';
-import { filterOpticalPatientLocations } from '../../src/tools/acceptableLocation';
+import { validatedPatientFor, type ValidatedPatient, type TicketLocationSource } from '../../src/tools/ticketIdentity';
+import { filterTicketRouting } from '../../src/tools/acceptableLocation';
 import { nameKey } from '../../src/tools/verifiedIdentity';
 import { readDobQuietly } from '../../src/tools/dobParts';
 import { getEnvironmentConfig } from '../../src/config/environment';
@@ -9,15 +9,6 @@ import type { PcpTicketPayload, PcpTicketResponse, PcpWithdrawRequest, PcpWithdr
 import { noteTicketFiled } from './ticketFilingPulse';
 import { normalizeProviderNameForTicket } from '../../src/services/ticketFieldSanitizers';
 import { callbackExtensionFilings, syncWithCallbackExtensions } from '../../src/services/callbackExtensionNote';
-
-/** Filter the outgoing copy, never the identity held for later Surgery requests. */
-async function patientForTicketDepartment(patient: ValidatedPatient | undefined, departmentId?: number): Promise<ValidatedPatient | undefined> {
-  // /submit-ticket derives a department when none is supplied, including
-  // Optical. Its carried history must be clinic-safe before that decision.
-  // Explicit non-Optical departments keep their full joined history.
-  return patient && (departmentId === 1 || departmentId === undefined)
-    ? filterOpticalPatientLocations(patient) : patient;
-}
 
 export interface CallData {
   callSid?: string;
@@ -93,10 +84,12 @@ export interface CreateTicketParams {
   preferredContactMethod?: "phone" | "text" | "email";
   lastProviderSeen?: string;
   locationOfLastVisit?: string;
+  locationSource?: TicketLocationSource;
   patientBirthMonth?: string;
   patientBirthDay?: string;
   patientBirthYear?: string;
   locationId?: number;
+  locationIdSource?: TicketLocationSource;
   providerId?: number;
   /**
    * "This call has already been asked for its routing field and still cannot
@@ -201,15 +194,16 @@ export interface SubmitTicketParams {
   patientEmail?: string;
   lastProviderSeen?: string;
   locationOfLastVisit?: string;
+  locationSource?: TicketLocationSource;
   additionalDetails?: string;
   /** Ticket priority — the app defaults urgent for Urgent/Emergency Transfer tickets and medium otherwise. */
   priority?: 'low' | 'normal' | 'medium' | 'high' | 'urgent';
   /**
-   * A DEPARTMENT THE OPERATOR HAS RULED ON, never a guess. Absent on nearly
-   * every call, which leaves the derivation above where it is. Sent only for
-   * the two kinds of after-hours call the operator routed himself on
-   * 2026-10-02 — see `afterHoursRouting.ts`. The endpoint validates it and
-   * lets it win over its own derivation (`resolveSuppliedDepartment`).
+   * An explicit filing department. Answering service supplies its classified
+   * department; no-IVR supplies one for the operator's two after-hours routes
+   * (see `afterHoursRouting.ts`). Other simplified calls leave derivation to
+   * the receiver. The endpoint validates a supplied department and lets it win
+   * over its own derivation (`resolveSuppliedDepartment`).
    */
   departmentId?: number;
   callData?: {
@@ -808,10 +802,10 @@ export class TicketingApiClient {
     const unnamed = /^unknown caller$/i.test(`${params.patientFirstName ?? ''} ${params.patientLastName ?? ''}`.trim());
     const suppliedDob = params.patientBirthYear && params.patientBirthMonth && params.patientBirthDay
       ? `${params.patientBirthYear}-${params.patientBirthMonth.padStart(2, '0')}-${params.patientBirthDay.padStart(2, '0')}` : undefined;
-    params = { ...params, validatedPatient: await patientForTicketDepartment(
+    params = await filterTicketRouting({ ...params, validatedPatient:
       params.validatedPatient ?? validatedPatientFor(params.callData?.callSid,
         unnamed ? undefined : params.patientFirstName, unnamed ? undefined : params.patientLastName, suppliedDob),
-      params.departmentId) };
+    });
     console.info("[TICKETING API] Creating ticket:", {
       patient: maskName(params.patientFirstName, params.patientLastName),
       phone: maskPhone(params.patientPhone),
@@ -1029,11 +1023,11 @@ export class TicketingApiClient {
     // Use the held first/last boundaries, allowing an optional middle initial,
     // and preserve the validated demographics while filtering routing history.
     const held = validatedPatientFor(params.callData?.callSid, undefined, undefined, params.patientDOB);
-    const match = await patientForTicketDepartment(params.validatedPatient ?? (held && (unnamed ||
-      fullNameMatchesPatient(params.patientFullName, held)) ? held : undefined), params.departmentId);
+    const match = params.validatedPatient ?? (held && (unnamed ||
+      fullNameMatchesPatient(params.patientFullName, held)) ? held : undefined);
     if (match) params = { ...params, validatedPatient: match, patientFullName: unnamed ? `${match.firstName} ${match.lastName}` : params.patientFullName,
-      patientDOB: readDobQuietly(params.patientDOB) ? params.patientDOB : match.dateOfBirth || params.patientDOB,
-      locationOfLastVisit: params.locationOfLastVisit || match.nextAppointment?.location || match.lastVisit?.location || match.confirmedClinic };
+      patientDOB: readDobQuietly(params.patientDOB) ? params.patientDOB : match.dateOfBirth || params.patientDOB };
+    params = await filterTicketRouting(params, true);
     console.info("[TICKETING API] Submitting ticket (simplified endpoint):", {
       patientName: maskName(params.patientFullName),
       hasPhone: !!params.patientPhone,

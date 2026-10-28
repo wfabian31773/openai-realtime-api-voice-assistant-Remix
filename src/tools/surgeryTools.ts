@@ -36,7 +36,7 @@ import { loggableLookupError } from '../services/loggableTicketingError';
 import { gateRefusalsSoFar, noteGateRefusal } from './gateAttempts';
 import { decideDobEscape, dobStatusNote, dobEscapeMarker, type DobStatus } from './dobEscape';
 import { correctSurgeryIntake, isSurgeryRequest, withoutSurgeryFields } from './requestClassification';
-import { usualOfficeFor, verifiedDobFor, verifiedIdentityFor } from './verifiedIdentity';
+import { verifiedDobFor, verifiedIdentityFor } from './verifiedIdentity';
 
 /** This tool's own name, for the per-call gate counter. */
 const SURGERY_FILE_TOOL = 'file_surgery_ticket';
@@ -272,8 +272,7 @@ registerTool({
     const { sanitizeProviderName, sanitizeLocationName } = await import(
       '../services/ticketFieldSanitizers'
     );
-    const recordOffice = filedDepartmentId === 1 ? usualOfficeFor(callSid, first, last, dob) : undefined;
-    const cleanLocation = sanitizeLocationName(recordOffice || str(input.location)).value;
+    const cleanLocation = sanitizeLocationName(str(input.location)).value;
     const cleanSurgeon = filedOnSurgeryQueue ? sanitizeProviderName(str(input.surgeon)).value : '';
 
     const { ticketingApiClient, lookupWasUnavailable } = await import(
@@ -799,6 +798,8 @@ registerTool({
         : {}),
       ...(lookup.locationId ? { locationId: lookup.locationId } : {}),
       ...(cleanLocation ? { locationOfLastVisit: cleanLocation } : {}),
+      locationSource: input.locationSource === 'history' ? 'history' : 'caller',
+      locationIdSource: input.locationSource === 'history' ? 'history' : 'caller',
       /**
        * THE SURGEON GOES ONLY ON A SURGERY TICKET.
        *

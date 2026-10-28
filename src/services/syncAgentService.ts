@@ -1,5 +1,5 @@
 import { ticketingApiClient } from '../../server/services/ticketingApiClient';
-import type { ValidatedPatient } from '../tools/ticketIdentity';
+import type { TicketLocationSource, ValidatedPatient } from '../tools/ticketIdentity';
 import { missingFieldsFromRefusal, spokenMissingFields } from './missingFieldsRefusal';
 import { loggableLookupError } from './loggableTicketingError';
 import { storage } from '../../server/storage';
@@ -51,6 +51,8 @@ export interface SyncAgentTicketParams {
   preferredContactMethod?: 'phone' | 'text' | 'email' | null;
   lastProviderSeen?: string | null;
   locationOfLastVisit?: string | null;
+  locationSource?: TicketLocationSource;
+  locationIdSource?: TicketLocationSource;
   patientBirthMonth?: string | null;
   patientBirthDay?: string | null;
   patientBirthYear?: string | null;
@@ -312,6 +314,8 @@ export class SyncAgentService {
         preferredContactMethod: params.preferredContactMethod ?? undefined,
         lastProviderSeen: lookupFields.lastProviderSeen,
         locationOfLastVisit: lookupFields.locationOfLastVisit,
+        locationSource: params.locationSource,
+        locationIdSource: params.locationSource,
         patientBirthMonth: params.patientBirthMonth ?? undefined,
         patientBirthDay: params.patientBirthDay ?? undefined,
         patientBirthYear: params.patientBirthYear ?? undefined,
@@ -409,6 +413,7 @@ export class SyncAgentService {
     email?: string | null;
     doctorName?: string | null;
     location?: string | null;
+    locationSource?: TicketLocationSource;
     appointmentTime?: string | null;
     departmentId?: number;
     requestTypeId?: number;
@@ -526,6 +531,7 @@ export class SyncAgentService {
       preferredContactMethod: params.preferredContact || undefined,
       lastProviderSeen: params.doctorName || undefined,
       locationOfLastVisit: params.location || undefined,
+      locationSource: params.locationSource,
       locationId: params.locationId,
       providerId: params.providerId,
       patientBirthMonth: params.birthMonth,
@@ -616,6 +622,7 @@ export class SyncAgentService {
     patientEmail?: string;
     lastProviderSeen?: string;
     locationOfLastVisit?: string;
+    locationSource?: TicketLocationSource;
     additionalDetails?: string;
     callSid?: string;
     callerPhone?: string;
@@ -625,7 +632,7 @@ export class SyncAgentService {
     callDurationSeconds?: number;
     transcript?: string;
     priority?: 'low' | 'normal' | 'medium' | 'high' | 'urgent';
-    /** An operator-ruled department — see SubmitTicketParams.departmentId. Usually absent. */
+    /** Explicit answering-service classification or operator route; otherwise absent. */
     departmentId?: number;
     /** Classification hint — see SubmitTicketParams. Never a routing decision. */
     suggestedRequestTypeId?: number;
@@ -808,6 +815,7 @@ export class SyncAgentService {
         patientEmail: params.patientEmail,
         lastProviderSeen: lookupFields.lastProviderSeen,
         locationOfLastVisit: lookupFields.locationOfLastVisit,
+        locationSource: params.locationSource,
         additionalDetails: smsSafe(params.additionalDetails),
         priority: params.priority,
         ...(params.departmentId ? { departmentId: params.departmentId } : {}),

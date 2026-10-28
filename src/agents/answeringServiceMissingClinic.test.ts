@@ -77,6 +77,16 @@ const opticalRequest = {
   description: 'Synthetic glasses question',
 };
 
+it('preserves an office confirmed earlier by the caller even when its facility kind is not Optical history', async () => {
+  const agent = await createAnsweringServiceAgent(async () => {}, { callSid: sid });
+  await invoke(agent, 'lookup_schedule', args);
+  rememberConfirmedClinic(sid, 'Synthetic Surgery Center');
+  const send = await captureHttpSubmission();
+  expect(await invoke(agent, 'create_ticket', opticalRequest)).toMatchObject({ success: true });
+  expect(send.mock.lastCall?.[2]).toMatchObject({ departmentId: 1, locationOfLastVisit: 'Synthetic Surgery Center',
+    locationSource: 'caller' });
+});
+
 it.each([false, true])('Optical resolves an ID-only clinic from classify_request (held history: %s)', async (held) => {
   if (!held) h.lookup.mockResolvedValue({ patientFound: false, upcomingAppointments: [], pastAppointments: [], totalAppointmentsFound: 0 });
   const agent = await createAnsweringServiceAgent(async () => {}, { callSid: sid });

@@ -1,5 +1,5 @@
 import { nameKey, rememberVerifiedIdentity } from '../tools/verifiedIdentity';
-import { joinedAppointments, prepareTicketIdentity, validatedPatientFor, type ValidatedPatient } from '../tools/ticketIdentity';
+import { joinedAppointments, prepareTicketIdentity, validatedPatientFor, type ValidatedPatient, type TicketLocationSource } from '../tools/ticketIdentity';
 import { readDobQuietly } from '../tools/dobParts';
 import { appointmentReadPolicy } from '../services/appointmentReadPolicy';
 import { appointmentAccess, unavailableAppointmentAccess } from '../services/appointmentAccess';
@@ -1718,7 +1718,7 @@ The ticket will include schedule context (last appointment info) automatically.`
         .describe("How they prefer to be contacted"),
       email: z.string().optional().describe(EMAIL_FIELD_DESCRIPTION),
       doctor_name: z.string().optional().describe("Doctor they want to see or usually see"),
-      location: z.string().optional().describe("Location they prefer or usually visit"),
+      location: z.string().optional().describe("Caller-named office; omit record history"),
       appointment_time: z.string().optional().describe("Relevant appointment date/time if applicable"),
       appointment_today: z
         .boolean()
@@ -1733,6 +1733,7 @@ The ticket will include schedule context (last appointment info) automatically.`
     }),
     execute: async (params) => {
       const prepared = prepareTicketIdentity({ ...params, call_sid: metadata.callSid });
+      let locationSource = prepared.input.locationSource as TicketLocationSource | undefined;
       // Hydrate held facts here; the bounded DOB/B2B rules below own refusals.
       params = { ...params, first_name: String(prepared.input.first_name ?? ''), last_name: String(prepared.input.last_name ?? ''),
         date_of_birth: String(prepared.input.date_of_birth ?? ''), location: String(prepared.input.location ?? '') };
@@ -1967,9 +1968,10 @@ The ticket will include schedule context (last appointment info) automatically.`
       // Every other call sends no department and the app decides as before.
       // See afterHoursRouting.ts. Only a CONFIRMED record's appointments count
       // — a phone candidate's appointments are somebody's, not the caller's.
-      const completedIdentity = prepareTicketIdentity({ ...params, call_sid: metadata.callSid });
+      const completedIdentity = prepareTicketIdentity({ ...params, locationSource, call_sid: metadata.callSid });
       if (completedIdentity.missing && (completedIdentity.missing !== 'date_of_birth' || (!dobEscapeStatus && !isB2bNoDob))) return { success: false, missingFields: [completedIdentity.missing], message: completedIdentity.message };
       params.location = String(completedIdentity.input.location || '');
+      locationSource = completedIdentity.input.locationSource as TicketLocationSource | undefined;
       const route = routeAfterHoursTicket({
         postOpMedication: params.post_op_prescription,
         appointmentToday: params.appointment_today,
@@ -1996,7 +1998,8 @@ The ticket will include schedule context (last appointment info) automatically.`
         // while an absent key is simply no email.
         patientEmail: emailGiven || undefined,
         lastProviderSeen: params.doctor_name || enrichedContext?.lastProviderSeen,
-        locationOfLastVisit: params.location || enrichedContext?.lastLocationSeen,
+        locationOfLastVisit: params.location.trim() ? params.location : enrichedContext?.lastLocationSeen,
+        locationSource: params.location.trim() ? locationSource ?? 'caller' : 'history',
         // The status note goes HERE and not at the head of reasonForCalling:
         // the `Request Type:` header must stay the first line of that field
         // (operator, 2026-07-25). The note never carries the caller's words.
