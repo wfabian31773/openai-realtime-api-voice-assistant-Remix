@@ -903,11 +903,19 @@ import { callEnvironment } from "./callRecord";
  * On top of v126 (#394); v127 is #376 on its open branch. No migration; production impact remains unmeasured.
  */
 /**
+ * v129 — AFTER-HOURS TEARDOWN FLOOR (2026-10-28). The no-ivr and no-ivr-v2
+ * agents reuse PCP's v90 registered sweep machinery on both voice pipelines.
+ * A transcribed request with no ticket files through the usual After Hours
+ * submission path; silent calls, identity-only calls and existing tickets
+ * are skipped. The normal per-call lock and idempotency key prevent duplicates.
+ * On top of v128 (#389); renumbered from v119; v127 is #376 on its open branch. No migration; production impact remains unmeasured.
+ */
+/**
  * v130 — A PCP CALLER TOLD THEIR REQUEST IS RECORDED KEEPS IT WHEN THE QUEUE
  * ANSWERS (2026-10-28). Both blind-transfer settlement paths apply v102's
  * read-back / "I've taken this down" exemption, captured before redirecting
  * while the transcript is available. A caller who heard neither still has
- * the ticket withdrawn; hang-up behavior is unchanged. On top of v128 (#389); renumbered from v120; v127 is #376 on its open branch; v129 is #386 on its open branch.
+ * the ticket withdrawn; hang-up behavior is unchanged. On top of v129 (#386); renumbered from v120; v127 is #376 on its open branch.
  * No migration. `src/pcp/queueIsAChoice.test.ts`.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =

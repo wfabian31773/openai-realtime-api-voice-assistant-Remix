@@ -8,6 +8,14 @@
 
 # State of Play — Azul Vision voice agents
 
+2026-10-28 after-hours teardown floor (offline, synthetic data):
+`voice-runtime-v129-after-hours-teardown-floor-20261028` (renumbered from v119), on top of `main`'s v128 (#389, `558f288`); v127 is #376 on its open branch.
+No-IVR and V2 reuse PCP's v90 registered, bounded teardown runner and its
+transcript request guard on both pipelines. Existing tickets, silent calls
+and explicitly answered questions are skipped; filings use the normal
+After Hours submission path and per-call idempotency. No migration or
+production measurement.
+
 2026-10-28 PCP scheduling/unassigned exit (offline, synthetic data):
 `CA9dfc0fa32af0d0548cbda1a764cd11c0` identifies the reported failure shape.
 The live PCP filing tool now honors captured patient scheduling intent and
