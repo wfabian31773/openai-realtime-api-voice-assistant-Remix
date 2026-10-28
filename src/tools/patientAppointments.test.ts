@@ -11,7 +11,7 @@ vi.mock('../services/toolTimeline', () => ({
   recordingExecute: (_ctx: unknown, _name: string, fn: unknown) => fn,
 }));
 import { getTool } from './registry';
-import { resetVerifiedIdentities, rememberVerifiedIdentity } from './verifiedIdentity';
+import { resetVerifiedIdentities, rememberVerifiedIdentity, verifiedIdentityFor } from './verifiedIdentity';
 import { realtimeToolsFor } from './realtimeAdapter';
 import './sharedPatientTools';
 
@@ -116,10 +116,25 @@ describe('item #15 joined appointment access', () => {
   });
 
   it('never exposes new appointment fields on an ambiguous lookup', async () => {
+    // An initial lookup must reach the service, rather than reuse the held identity.
+    resetVerifiedIdentities();
     lookupPatient.mockResolvedValue({ ...context, identity: { unique: false, candidateCount: 2 } });
     const result = await getTool('lookup_patient')!.handler({ caller_phone: '+15555550115', call_sid: sid });
     expect(result).toMatchObject({ appointment_access: 'identity_required' });
     expect(result).not.toHaveProperty('upcoming_appointments');
+    expect(lookupPatient).toHaveBeenCalledTimes(1);
+    expect(verifiedIdentityFor(sid)).toBeUndefined();
+  });
+
+  it('withholds appointments when an explicitly corrected identity lookup is ambiguous', async () => {
+    lookupPatient.mockResolvedValue({ ...context, identity: { unique: false, candidateCount: 2 } });
+    const result = await getTool('lookup_patient')!.handler({
+      caller_phone: '+15555550115', call_sid: sid, identity_corrected: true,
+    });
+    expect(result).toMatchObject({ appointment_access: 'identity_required' });
+    expect(result).not.toHaveProperty('upcoming_appointments');
+    expect(lookupPatient).toHaveBeenCalledTimes(1);
+    expect(verifiedIdentityFor(sid)).toBeUndefined();
   });
 
   it('does not re-search an identified patient whose record lacks a person key', async () => {

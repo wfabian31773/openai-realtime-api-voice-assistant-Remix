@@ -51,6 +51,14 @@ describe('contact guidance on the schema sent to the model', () => {
       .toContain('Invalid JSON input for tool');
   });
 
+  it('allows answering-service filing to omit identity fields supplied by a held record', () => {
+    const schema = toGrokTools(agents.get('answering-service')!).defs
+      .find((t) => t.name === 'create_ticket')!.parameters as { required?: string[] };
+    for (const field of ['first_name', 'last_name', 'date_of_birth']) {
+      expect(schema.required ?? []).not.toContain(field);
+    }
+  });
+
   it.each([
     ['answering-service', 'lookup_schedule', false],
     // Held validated identity can supply an omitted surname at filing.
