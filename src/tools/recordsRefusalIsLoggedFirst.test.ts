@@ -1,8 +1,8 @@
 /**
- * A REFUSED RECORDS FILING IS LOGGED BEFORE THE CALLER IS TOLD IT IS — v118,
+ * A REFUSED RECORDS FILING IS LOGGED BEFORE THE CALLER IS TOLD IT IS — v127,
  * Codex P2 on #376.
  *
- * The first version of v118 answered a refusal the caller cannot fix with a
+ * The first version of v127 answered a refusal the caller cannot fix with a
  * `fix` telling the model "nothing is lost … will be logged" and persisted
  * nothing. A terminal refusal bypasses the outbox by design, and the teardown
  * sweep is no guarantee: it skips a call where `check_open_tickets` found an

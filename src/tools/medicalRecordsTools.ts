@@ -168,7 +168,7 @@ const RECORDS_ROUTED_AWAY_FACT = 'records_ticket_routed_away';
 
 /**
  * Per-call latch: the request filed on this call READ as another team's but
- * was KEPT in Medical Records because it carries no patient name (v118), so no
+ * was KEPT in Medical Records because it carries no patient name (v127), so no
  * signing form applies to it either. Its own fact, because the routed-away
  * refusal's true line — "this request went to another team" — is false here.
  */
@@ -176,7 +176,7 @@ const RECORDS_HELD_NO_FORM_FACT = 'records_ticket_held_no_form';
 
 /**
  * Per-call latch: the filing on this call was REFUSED by the ticketing app and
- * logged instead as a general Medical Records recovery ticket (v118, Codex P2
+ * logged instead as a general Medical Records recovery ticket (v127, Codex P2
  * on #376). No link can go out from this call — the app never opened the case
  * the form belongs to — but a person classifies the ticket and a patient's
  * request still gets its form from the records team, so "no form to sign"
@@ -185,7 +185,7 @@ const RECORDS_HELD_NO_FORM_FACT = 'records_ticket_held_no_form';
 const RECORDS_RECOVERED_FACT = 'records_ticket_recovered_after_refusal';
 
 /**
- * THE HALVES OF THE NAME THIS CALL HAS ALREADY HANDED THE TOOL — v118.
+ * THE HALVES OF THE NAME THIS CALL HAS ALREADY HANDED THE TOOL — v127.
  *
  * CA63467308b45e3e7f9118cde1b67be7bf, 2026-10-26: the caller spelled the
  * patient's last name, gave the date of birth twice, and gave the first name
@@ -228,7 +228,7 @@ function forgetNameHalves(callSid: string, scope: string): void {
 }
 
 /**
- * WHAT HAPPENS WHEN THE TICKETING APP REFUSES THE FILING — v118.
+ * WHAT HAPPENS WHEN THE TICKETING APP REFUSES THE FILING — v127.
  *
  * The refusal used to come back as `HTTP 400 (response text withheld …)` and
  * nothing else, so the model improvised a line for the caller — on the seven
@@ -594,7 +594,7 @@ registerTool({
       } else if (gateRefusalsSoFar(callSid, RECORDS_TOOL, PATIENT_NAME_ASK) >= RECORDS_ASK_LIMIT) {
         // The app takes both names or neither, so a half cannot be SENT — but
         // it is what the caller gave, so it goes to the clerk on the staff
-        // line rather than nowhere (v118). Never the description: an SMS body.
+        // line rather than nowhere (v127). Never the description: an SMS body.
         const half = first
           ? `first name given on the call: ${first}`
           : last
@@ -685,7 +685,7 @@ registerTool({
     const crossQueue = detectCrossQueue(description, MEDICAL_RECORDS_DEPARTMENT_ID);
     /**
      * A THIRD PARTY ASKING FOR A PATIENT'S RECORDS OR REPORT IS NOT BOOKING
-     * AN EXAM — v118.
+     * AN EXAM — v127.
      *
      * Measured 2026-10-12..10-26 (Support Center `voice_agent_api_logs`, Hub
      * `call_logs`): seven records-lane calls sent a doctor's office's, a
@@ -736,7 +736,7 @@ registerTool({
     const redirect = thirdPartyRecordsHold ? null : crossQueue;
     /**
      * BELT AND BRACES: A REQUEST WITH NO NAME CANNOT LEAVE MEDICAL RECORDS —
-     * v118.
+     * v127.
      *
      * The ticketing app files a nameless request in Medical Records only, and
      * answers every other department HTTP 400 (`namelessRequestVerdict`). By
@@ -1260,7 +1260,7 @@ registerTool({
       // ticketing app is the half that has to change for the clock to be right.
       //
       // NOT SENT for a request KEPT here for want of a name whose requester is
-      // ON the clock (v118). It reads as another team's — an appointment, a
+      // ON the clock (v127). It reads as another team's — an appointment, a
       // pair of glasses — and the app takes a pathway the voice side states
       // as a classification no person needs to confirm (`decidePathway`,
       // `needsReview: false`), so sending `roa_patient` would open a clocked
@@ -1531,7 +1531,7 @@ registerTool({
       return refuse('channel must be "sms" or "email"', { fix: 'Call again with channel "sms" or "email".' });
     }
     if (!callFactNoted(callSid, RECORDS_FILED_FACT) && callFactNoted(callSid, RECORDS_RECOVERED_FACT)) {
-      // The app refused the filing and a recovery ticket holds it (v118). It
+      // The app refused the filing and a recovery ticket holds it (v127). It
       // opened no case for a link to belong to, and a person routes it — so
       // the caller is told the team will follow up, never that there is no
       // form, which is false for a patient's own request.
@@ -1545,7 +1545,7 @@ registerTool({
     }
     if (!callFactNoted(callSid, RECORDS_FILED_FACT) && callFactNoted(callSid, RECORDS_HELD_NO_FORM_FACT)) {
       // Kept in Medical Records for want of a name, but it reads as another
-      // team's and no form was ever offered for it (v118). Same refusal as
+      // team's and no form was ever offered for it (v127). Same refusal as
       // the routed-away one below, without its "another team", which is false
       // here.
       return refuse('the request on this call carries no signing form', {

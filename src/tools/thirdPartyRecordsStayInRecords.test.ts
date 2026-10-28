@@ -1,5 +1,5 @@
 /**
- * v118 — A THIRD PARTY'S RECORDS REQUEST STAYS IN MEDICAL RECORDS.
+ * v127 — A THIRD PARTY'S RECORDS REQUEST STAYS IN MEDICAL RECORDS.
  *
  * THE CORPUS (RULE THREE). Real CallSids, measured 2026-10-26 from the Support
  * Center's `voice_agent_api_logs` and the Hub's `call_logs`. The transcripts
@@ -361,7 +361,7 @@ describe('the guard: a genuine scheduling request on the records line still reac
   });
 
   it('a PATIENT is untouched: a document word beside an appointment ask still goes to the Hub (the operator\'s ruling)', async () => {
-    // v118 changes the THIRD-PARTY pathways only. For a patient the
+    // v127 changes the THIRD-PARTY pathways only. For a patient the
     // schedule-related-to-the-Hub ruling stands exactly as `detectCrossQueue`
     // applies it. (Whether a patient's "copy of my eye exam report" should
     // stay here too is a routing ruling for the operator, not this change.)
@@ -502,7 +502,7 @@ describe('the name the caller gave reaches the payload, whichever invocation it 
   /**
    * CA63467308b45e3e7f9118cde1b67be7bf, the shape: the caller SPELLED the last
    * name, gave the date of birth twice, and gave the first name later. Each
-   * half can reach the tool in a different invocation. Before v118 the tool
+   * half can reach the tool in a different invocation. Before v127 the tool
    * held neither across invocations, and once the one name ask was spent it
    * blanked a half name to nothing — so a name given in two parts reached the
    * POST as no name at all.

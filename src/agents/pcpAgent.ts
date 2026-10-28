@@ -2930,7 +2930,7 @@ async function fileToMedicalRecords(
    *
    * The records tool answers `success: true` with `filed_pending` and no
    * number when the outbox holds the request: on a plain outage, and since
-   * v118 when a refused filing's recovery POST fails too. This branch read
+   * v127 when a refused filing's recovery POST fails too. This branch read
    * every success as numbered and told the agent "Filed as undefined … Read
    * the ticket number back". The request is held and the worker will send it,
    * so it is still a filing; it just has no number to give.
