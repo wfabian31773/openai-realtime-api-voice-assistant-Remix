@@ -500,7 +500,7 @@ the code they add.
 
 Item #14 (`VA-76200`, `VA-76188`, `VA-76215`) is covered in the agent-visible
 tool descriptions and the common ticket client. Verify deployment using
-`voice-runtime-v126-pcp-unclassified-floor-only-20261028` from `/voice/health`
+`voice-runtime-v136-pcp-unclassified-floor-only-20261028` from `/voice/health`
 for this branch (which includes v117):
 
 - A validated joined record supplies identity and contact fields it already
