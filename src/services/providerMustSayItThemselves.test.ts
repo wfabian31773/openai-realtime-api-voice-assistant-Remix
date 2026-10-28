@@ -118,6 +118,13 @@ describe('mutual patient self-identification', () => {
     'I’m actually the mutual patient.',
     "I'm a mutual patient.",
     'I am also a mutual patient.',
+    "I'm the one mutual patient.",
+    'I am the one mutual patient you called.',
+    'I’m actually the one mutual patient.',
+    'I am one of the mutual patients.',
+    "I'm also one of the mutual patients you called.",
+    'This is Jane, the one mutual patient.',
+    'This is Jane, one of the mutual patients.',
     'This is the mutual patient.',
     'This is actually a mutual patient.',
     'This is Jane, the mutual patient.',
@@ -152,6 +159,8 @@ describe('mutual patient self-identification', () => {
     expect(callerSaysTheyAreAProvider('The mutual patient is my mother.')).toBe(true);
     expect(callerSaysTheyAreAProvider('This is Jane, the mutual patient. Calling about the mutual patient.')).toBe(true);
     expect(callerSaysTheyAreAProvider('The mutual patient is me. Calling about the mutual patient.')).toBe(true);
+    expect(callerSaysTheyAreAProvider("I'm the one mutual patient. This is Dr. Lee calling.")).toBe(true);
+    expect(callerSaysTheyAreAProvider('I am one of the mutual patients. Calling about the mutual patient.')).toBe(true);
   });
 
   it.each([
@@ -302,6 +311,21 @@ describe('the gate', () => {
     },
   );
 
+  it.each([
+    'Calling about the one mutual patient.',
+    "I'm treating the one mutual patient.",
+    'Calling about one of the mutual patients.',
+    "I'm following up on one of the mutual patients.",
+  ])('allows provider escalation for a reference to %s', (spoken) => {
+    const corroboration = corr(spoken);
+    expect(corroboration.providerStated).toBe(true);
+    expect(judgeEscalation({
+      callerType: 'healthcare_provider',
+      reason: 'Provider requesting the on-call physician',
+      corroboration,
+    })).toEqual({ allowed: true, basis: 'provider_or_facility' });
+  });
+
   it.each(
     [
       // Different clinical verbs exercise the -ing rule, rather than a list
@@ -346,6 +370,8 @@ describe('the gate', () => {
   });
 
   it.each(["I'm the mutual patient.", 'I am the mutual patient you called.', 'This is the mutual patient.',
+    "I'm the one mutual patient.", 'I am the one mutual patient you called.',
+    'I am one of the mutual patients.', "I'm also one of the mutual patients you called.",
     'This is Jane, the mutual patient.', 'I am Jane, the mutual patient you called.', 'The mutual patient is me.',
     'Jane Smith, the mutual patient', 'The mutual patient, Jane Smith',
     ...['Jane', 'Jane Smith', 'Jane Anne Smith-Jones', "Mary-Jane O'Connor", 'jane smith', 'Jane King', 'Ming Lee']
@@ -376,6 +402,8 @@ describe('the gate', () => {
 
   it.each([
     "I'm the mutual patient, my eye is bleeding.",
+    "I'm the one mutual patient, my eye is bleeding.",
+    'I am one of the mutual patients, my eye is bleeding.',
     'Jane Smith, the mutual patient, my eye is bleeding.',
     'The mutual patient, Jane Smith, my eye is bleeding.',
     'My name is Jane Smith, the mutual patient, my eye is bleeding.',

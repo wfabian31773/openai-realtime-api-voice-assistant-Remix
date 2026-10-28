@@ -623,8 +623,9 @@ const PROVIDER_SELF_IDENTIFICATION: RegExp[] = [
 ];
 
 // A mutual patient can be the caller, so exclude self-identification for this
-// evidence only; other provider statements can still stand.
-const MUTUAL_PATIENT = /\b(?:our|(?:a|one|the) mutual) (?:mutual )?patients?\b/;
+// evidence only; other provider statements can still stand. Match the full
+// noun phrase so its leading words do not hide the caller's identification.
+const MUTUAL_PATIENT = /\b(?:the one mutual patients?|one of the mutual patients|(?:our|(?:a|one|the) mutual) (?:mutual )?patients?)\b/;
 const PATIENT_IDENTIFICATION_BEFORE = /\b(?:i(?:'m| am)|this is)\s+(?:(?:actually|also|just|indeed)\s+)*$/;
 // A name can sit between the identification and its appositive, but only
 // plausible name words count. Apply the same grammar to every token: -ing
