@@ -933,7 +933,9 @@ export class VoiceCallBridge {
   private goodbyeOutputStarted = false;
   private goodbyeResponse: {
     epoch: number;
-    conclusion: CallerConclusion;
+    conclusion: CallerConclusion | null;
+    /** The agent line before this response, for a late caller transcript. */
+    previousAgent: string;
     text: string;
     mark: string | null;
     done: boolean;
@@ -975,10 +977,23 @@ export class VoiceCallBridge {
         this.noteTranscript("caller");
         // HEARD — for the rest of the call, whatever happens next. This is the
         // latch the operator's 2026-09-26 ruling turns on; see the field.
-        if (text.trim()) {
+        const late = this.goodbyeResponse;
+        const lateConclusion = text.trim() && late && late.conclusion === null
+          ? callerConclusion(text, late.previousAgent) : null;
+        if (late && lateConclusion) {
+          // The transcript of the turn this response answers, arriving late.
+          // Without speech_started it may instead be a new turn, so the next
+          // response keeps it too; each still has to complete a goodbye.
+          late.conclusion = lateConclusion;
+          this.armGoodbyeGrace();
+        } else if (text.trim()) {
           this.cancelGoodbye();
+        }
+        if (text.trim()) {
           const previous = this.transcriptLog.lines[this.transcriptLog.lines.length - 1] ?? "";
           this.callerClosing = callerConclusion(text, previous.startsWith("AGENT: ") ? previous.slice(7) : "");
+        }
+        if (text.trim()) {
           this.callerEverHeard = true;
           // A request can arrive while a previously allowed ghost hangup is
           // waiting for playback. Revoke both its mark and fallback timer.
@@ -1246,11 +1261,13 @@ export class VoiceCallBridge {
       // Capture the latest caller conclusion at the first output: its
       // transcript may have arrived after response.created. Once output
       // starts, later caller events revoke this response's eligibility.
-      if (this.callerClosing) {
-        this.goodbyeResponse = {
-          epoch, conclusion: this.callerClosing, text: "", mark: null, done: false,
-        };
-      }
+      // Tracked even without a conclusion yet: the caller's transcript can
+      // complete after this output starts (Codex P2, #396). Caller speech
+      // since then cancels this tracking, so only that late turn can fill it.
+      this.goodbyeResponse = {
+        epoch, conclusion: this.callerClosing, previousAgent: this.lastAgentLine(),
+        text: "", mark: null, done: false,
+      };
     }
     if (this.current && this.current.epoch !== epoch) {
       // The previous utterance never completed (it was superseded without
@@ -1970,6 +1987,14 @@ export class VoiceCallBridge {
     }
   }
 
+  private lastAgentLine(): string {
+    for (let i = this.transcriptLog.lines.length - 1; i >= 0; i--) {
+      const line = this.transcriptLog.lines[i];
+      if (line.startsWith("AGENT: ")) return line.slice(7);
+    }
+    return "";
+  }
+
   private cancelGoodbye(): void {
     if (this.goodbyeTimer !== null) this.clearTimer(this.goodbyeTimer);
     this.goodbyeTimer = null;
@@ -1985,7 +2010,8 @@ export class VoiceCallBridge {
 
   private armGoodbyeGrace(): void {
     const response = this.goodbyeResponse;
-    if (!response?.done || !response.mark || !completesGoodbye(response.text, response.conclusion)) return;
+    if (!response?.done || !response.mark || !response.conclusion ||
+        !completesGoodbye(response.text, response.conclusion)) return;
     if (this.pendingToolCalls || this.followUpOwed || this.endRequested || this.transferInFlight) return;
     if (this.goodbyeTimer !== null) this.clearTimer(this.goodbyeTimer);
     // Generation can finish ahead of playback. The newest mark starts the

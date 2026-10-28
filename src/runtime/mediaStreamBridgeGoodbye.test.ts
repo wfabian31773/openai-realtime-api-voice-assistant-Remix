@@ -97,6 +97,33 @@ describe("VoiceCallBridge — goodbye grace", () => {
     vi.advanceTimersByTime(GOODBYE_GRACE_MS); expect(h.outcomes).toEqual(["agent_ended"]);
   });
 
+  it("arms when the caller's goodbye transcript completes after the agent's reply (Codex P2, #396)", () => {
+    const h = harness(); h.start(); h.audioDone("Goodbye!");
+    h.handlers.onCallerTranscript("Bye.");
+    h.responseDone(); h.echo();
+    vi.advanceTimersByTime(GOODBYE_GRACE_MS); expect(h.outcomes).toEqual(["agent_ended"]);
+  });
+
+  it("arms when the late goodbye transcript arrives after the reply already finished playing", () => {
+    const h = harness(); h.say("Goodbye!");
+    vi.advanceTimersByTime(GOODBYE_GRACE_MS * 2); expect(h.outcomes).toEqual([]);
+    h.handlers.onCallerTranscript("Thanks, bye.");
+    vi.advanceTimersByTime(GOODBYE_GRACE_MS); expect(h.outcomes).toEqual(["agent_ended"]);
+  });
+
+  it("a late non-farewell transcript keeps the call open", () => {
+    const h = harness(); h.start(); h.audioDone("Goodbye!");
+    h.handlers.onCallerTranscript("I need to reschedule.");
+    h.responseDone(); h.echo();
+    vi.advanceTimersByTime(GOODBYE_GRACE_MS * 2); expect(h.outcomes).toEqual([]);
+  });
+
+  it("caller speech after the reply prevents a later transcript from closing it", () => {
+    const h = harness(); h.say("Goodbye!"); h.handlers.onSpeechStarted();
+    h.handlers.onCallerTranscript("Bye.");
+    vi.advanceTimersByTime(GOODBYE_GRACE_MS * 2); expect(h.outcomes).toEqual([]);
+  });
+
   it("a tool before the first audio prevents that response from arming grace", async () => {
     const h = harness(); h.handlers.onCallerTranscript("Bye."); h.start();
     h.handlers.onToolCall("tool-1", "lookup", {});
