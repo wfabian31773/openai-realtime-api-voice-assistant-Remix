@@ -68,6 +68,12 @@ describe("the follow-up summary", () => {
     expect(followUpEvent(record())).toBeNull();
   });
 
+  it("records a goodbye grace hangup even when no tools ran or silence prompts spoke", () => {
+    const ev = followUpEvent({ ...record(), outcome: "agent_ended", goodbyeGraceHangup: true });
+    expect(ev?.level).toBe("info");
+    expect(ev?.data).toMatchObject({ goodbyeGraceHangup: true, outcome: "agent_ended", owed: 0, silencePrompts: 0 });
+  });
+
   it("carries only counts and the outcome — nothing a caller said", () => {
     const ev = followUpEvent(record({ owed: 1, requested: 1, toolCallsAfterDone: 1, lastUnanswered: true }))!;
     // An EXACT key set, so a field carrying anything a caller said cannot be
@@ -83,6 +89,7 @@ describe("the follow-up summary", () => {
       silencePrompts: 0,
       silenceCut: false,
       silenceStoodDown: false,
+      goodbyeGraceHangup: false,
       outcome: "dead_air",
     });
   });

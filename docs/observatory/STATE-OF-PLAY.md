@@ -1648,6 +1648,19 @@ before merging ticket-path changes. Shared bridge files are outside this
 session's writable workspace; this entry is the local handoff.
 
 
+## 19. Goodbye grace hangup (v134) — 2026-10-28
+
+v134 (`voice-runtime-v134-goodbye-grace-hangup-20261028`), on top of `main`'s v132 (#390, `76dd105f`; v133 is #391 on its open branch): when a heard caller
+says goodbye and the agent's sign-off finishes playing but the line stays open,
+the bridge waits 6s (`GOODBYE_GRACE_MS`) and ends the call deliberately
+(`goodbye_grace`) instead of idling to the 10-minute cap. Caller speech, a new
+response or a tool call cancels the window. Matcher is conservative
+English/Spanish. Silence ladder and ghost-call wording unchanged; no prompt or
+tool text added; logs carry call SID and reason only. No migration. Production
+impact unmeasured; owner: verify after deploy.
+
+---
+
 ## 18. Heard callers bypass silence and ghost-call termination — 2026-10-27
 
 v131 (`voice-runtime-v131-silence-ladder-heard-callers-20261028`), on top
@@ -1700,7 +1713,7 @@ surname, DOB and appointments remain outside the prompt and phone-only result.
 Synthetic tests invoke the live factory's tool on SIP and runtime metadata:
 eight regression cases failed before the fix; all 36 tests in the touched file
 passed afterwards. Marker: `voice-runtime-v135-after-hours-dob-confirm-lookup-20261028`,
-renumbered from v125, on top of `main`'s v132 (#390, `76dd105f`); v127 is #376, v133 is #391 and v134 is #396 on their open branches. No migration,
+renumbered from v125, on top of `main`'s v134 (#396, `87766139`); v127 is #376 and v133 is #391 on their open branches. No migration,
 DB writes, commit, push, PR or deploy. Next: owner reviews and measures production
 impact; the reported 43 recognised callers among 118 misses was supplied by the
 owner and was not independently replayed in this session. Shared bridge notes

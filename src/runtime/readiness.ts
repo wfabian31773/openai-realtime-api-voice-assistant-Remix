@@ -932,12 +932,20 @@ import { callEnvironment } from "./callRecord";
  * `src/utils/phone.ts`, `src/tools/`.
  */
 /**
+ * v134 — GOODBYE GRACE HANGUP (2026-10-28). After a completed goodbye exchange
+ * (conservative English/Spanish matcher), the bridge waits GOODBYE_GRACE_MS
+ * (6s) after playback and then ends the call deliberately ("goodbye_grace").
+ * Caller speech, a new response or a tool call cancels it. Silence ladder and
+ * ghost-call wording unchanged; no prompt or tool text added.
+ * On top of v132 (#390, main); v127 is #376 and v133 is #391 on their open branches. No migration.
+ */
+/**
  * v135 (renumbered from v125) — AFTER-HOURS DOB CONFIRMS THE PHONE CANDIDATE (2026-10-28).
  * lookup_schedule uses the recognised caller's canonical name when the caller
  * supplies a DOB matching pre-context, so a corrected spoken spelling does not
  * lose the record. A mismatching DOB keeps the spoken-name lookup; candidate
  * details stay withheld before confirmation. `noIvrPhoneMatchIsACandidate.test.ts`
- * drives the live factory's tool on both pipelines. On top of v132 (#390, main); v127 is #376, v133 is #391 and v134 is #396 on their open branches.
+ * drives the live factory's tool on both pipelines. On top of v134 (#396, main); v127 is #376 and v133 is #391 on their open branches.
  * No migration; production impact remains unmeasured.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
