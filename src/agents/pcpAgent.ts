@@ -1081,6 +1081,14 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
       // reclassified is still a patient, and their request still does not
       // belong sitting in department 18. Same reason as director.next().
       if (!enrichingTheTicket && (state.callPurpose === 'patient_caller' || state.callerIsThePatient)) {
+        const patientTicketKey = `${metadata.callSid || callId}-pcp-patient${pcpDirector.patientKeySuffix(callId)}`;
+        const exhaustedRoutingGuidance =
+          'The ticketing app still refused the unassigned filing. Do not ask for an office or surgeon ' +
+          'or repeat this filing. No ticket was created; do not say it was recorded or promise a callback.';
+        const priorRoutingRefusal = state.patientRoutingRefusals?.[patientTicketKey];
+        if (priorRoutingRefusal !== undefined) {
+          return refusePcp(priorRoutingRefusal, { guidance: exhaustedRoutingGuidance });
+        }
         const [{ detectCrossQueue, schedulingRedirectForStatedIntent }, { otherReasonFor }, { ticketingApiClient }, { sanitizeForSms }] =
           await Promise.all([
             import('../tools/queueRouting'),
@@ -1141,14 +1149,18 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
           preferredContactMethod: 'phone',
           description: body,
           priority: urgency === 'urgent' || urgency === 'high' ? 'high' : 'medium',
+          // Both POSTs and later tool invocations must replay the same write
+          // if the ticket was created but its response was lost.
+          idempotencyKey: patientTicketKey,
           callData: { agentUsed: 'pcp', ...(metadata.callSid ? { callSid: metadata.callSid } : {}) },
         };
         let patientResult = await ticketingApiClient.createTicket(patientPayload);
         const missingRoutingField = missingFieldFromError(patientResult.error);
         // PCP intake has no office/surgeon field to submit after a re-ask.
         // A proven routing refusal uses the same unassigned exit as the queue
-        // tools, once, inside this invocation. Outages and other fields keep
-        // their existing failure path; a rejected POST cannot have filed.
+        // tools. Persist an exhausted refusal so later tool calls stop too.
+        // Outages and other fields keep their existing failure path; a
+        // rejected POST cannot have filed.
         const unassignedExit = (!patientResult.success || !patientResult.ticketNumber)
           && isTerminalRefusal(patientResult.statusCode)
           && (patientPayload.departmentId === 1 || patientPayload.departmentId === 2)
@@ -1164,13 +1176,20 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
           // existing guidance, without claiming a failed write was recorded.
           const status = patientResult.statusCode;
           const refused = typeof status === 'number' && status >= 400 && status < 500;
+          if (unassignedExit && refused) {
+            pcpDirector.update(callId, {
+              patientRoutingRefusals: {
+                ...state.patientRoutingRefusals,
+                [patientTicketKey]: patientResult.error ?? 'ticket_creation_failed',
+              },
+            });
+          }
           return refusePcp(patientResult.error ?? 'ticket_creation_failed', {
             ...(refused ? {} : { retryable: true }),
             ...(refused
               ? {
                   guidance: unassignedExit
-                    ? 'The ticketing app still refused the unassigned filing. Do not ask for an office or surgeon ' +
-                      'or repeat this filing. No ticket was created; do not say it was recorded or promise a callback.'
+                    ? exhaustedRoutingGuidance
                     : 'The ticketing system refused this payload and will refuse it again unchanged — ' +
                       'do NOT call this tool again with the same details. Its own words were: ' +
                       `"${patientResult.error ?? 'no reason given'}". If that names something the ` +

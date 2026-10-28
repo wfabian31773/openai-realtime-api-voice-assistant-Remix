@@ -207,6 +207,13 @@ export interface PcpConversationState {
    */
   patientOrdinal?: number;
   /**
+   * Patient create-ticket filings whose unassigned routing retry was refused.
+   * Keyed by the call/patient idempotency key so repeated tool calls stop
+   * before either POST, while another patient can still file independently.
+   * Server-owned; never accepted from tool arguments.
+   */
+  patientRoutingRefusals?: Record<string, string>;
+  /**
    * THE CALLER IS THE PATIENT, and it stays true once established.
    *
    * `callPurpose` is not safe to read for this. The records tool reclassifies

@@ -37,6 +37,7 @@
  * surgery calls — and this path never read it.
  */
 import { describe, it, expect, vi, beforeEach, beforeAll, afterAll } from 'vitest';
+import type { CreateTicketParams, CreateTicketResponse } from '../../server/services/ticketingApiClient';
 
 /**
  * PIN THE CLOCK — this file was red for exactly one hour every weekday.
@@ -73,10 +74,13 @@ process.env.DATABASE_URL ||= 'postgresql://unused:unused@127.0.0.1:5432/unused';
 process.env.OPENAI_API_KEY ||= 'test-unused';
 
 vi.mock('../../server/db', () => ({ db: {} }));
+vi.mock('../services/toolTimeline', () => ({
+  recordingExecute: (_context: unknown, _name: string, execute: (...args: any[]) => unknown) => execute,
+}));
 
 const ticketing = vi.hoisted(() => ({
   createPcpTicket: vi.fn(async () => ({ success: true, ticketNumber: 'PCP-57920' })),
-  createTicket: vi.fn(async () => ({ success: true, ticketNumber: 'VA-1' })),
+  createTicket: vi.fn(async (_payload: CreateTicketParams): Promise<CreateTicketResponse> => ({ success: true, ticketNumber: 'VA-1' })),
 }));
 vi.mock('../../server/services/ticketingApiClient', () => ({ ticketingApiClient: ticketing }));
 
@@ -123,9 +127,9 @@ async function call(agent: any, name: string, args: Record<string, unknown> = {}
 }
 
 let n = 0;
-function freshCall(handoff: () => Promise<unknown>) {
+function freshCall(handoff: () => Promise<unknown>, metadata: { callSid?: string } = {}) {
   const callId = `CAblind${++n}`;
-  return { agent: createPcpAgent(handoff as never, { callId } as never), callId };
+  return { agent: createPcpAgent(handoff as never, { callId, ...metadata } as never), callId };
 }
 
 /** The intake the live 2026-09-08 caller had given by the time he asked. */
@@ -243,17 +247,25 @@ describe('CAbf717457 — the refusal that was retried six times', () => {
       'surgeon — ask who their surgeon is, or who performed their consult.',
   };
 
-  async function patientCallHitting(response: Record<string, unknown>) {
-    ticketing.createTicket.mockImplementation(async () => response as never);
-    const { agent } = freshCall(async () => ({ ok: false, status: 'FAILED' }));
+  const PATIENT_TASK = {
+    narrative: 'Caller from Loma Linda Surgery Center needs to speak to a representative.',
+  };
+
+  async function freshPatientCall(metadata: { callSid?: string } = {}) {
+    const current = freshCall(async () => ({ ok: false, status: 'FAILED' }), metadata);
+    const { agent } = current;
     await call(agent, 'record_pcp_intake', {
       callerName: 'Test Caller',
       callbackNumber: '9515550100',
       callPurpose: 'patient_caller',
     });
-    return call(agent, 'create_pcp_task', {
-      narrative: 'Caller from Loma Linda Surgery Center needs to speak to a representative.',
-    });
+    return current;
+  }
+
+  async function patientCallHitting(response: Record<string, unknown>) {
+    ticketing.createTicket.mockImplementation(async () => response as never);
+    const { agent } = await freshPatientCall();
+    return call(agent, 'create_pcp_task', PATIENT_TASK);
   }
 
   it('does NOT tell the model to try again when the server refused the payload', async () => {
@@ -269,6 +281,72 @@ describe('CAbf717457 — the refusal that was retried six times', () => {
     expect(ticketing.createTicket).toHaveBeenLastCalledWith(expect.objectContaining({ routingAskExhausted: true }));
     expect(r.guidance).toContain('Do not ask for an office or surgeon');
     expect(r.guidance).toContain('No ticket was created');
+  });
+
+  it.each([400, 422])('does not POST again after the unassigned exit receives HTTP %s', async (statusCode) => {
+    ticketing.createTicket.mockResolvedValueOnce(SURGEON_400 as never);
+    ticketing.createTicket.mockResolvedValue({ ...SURGEON_400, statusCode } as never);
+    const { agent, callId } = await freshPatientCall();
+    const refused = await call(agent, 'create_pcp_task', PATIENT_TASK);
+    expect(ticketing.createTicket).toHaveBeenCalledTimes(2);
+
+    // Rebuilding the agent must retain the call's exhausted state too.
+    const rebuilt = createPcpAgent(async () => ({ ok: false, status: 'FAILED' }), { callId });
+    const again = await call(rebuilt, 'create_pcp_task', PATIENT_TASK);
+    expect(again).toEqual(refused);
+    await call(agent, 'create_pcp_task', { ...PATIENT_TASK, urgency: 'high' });
+    expect(ticketing.createTicket).toHaveBeenCalledTimes(2);
+    expect(ticketing.createPcpTicket).not.toHaveBeenCalled();
+  });
+
+  it.each([undefined, 'CA00000000000000000000000000000042'])(
+    'deduplicates an unassigned filing whose response was lost (callSid: %s)',
+    async (callSid) => {
+      const filed = new Map<string, string>();
+      let ticketsCreated = 0;
+      ticketing.createTicket.mockImplementation(async (payload) => {
+        const cached = payload.idempotencyKey ? filed.get(payload.idempotencyKey) : undefined;
+        if (cached) return { success: true, ticketNumber: cached };
+        if (!payload.routingAskExhausted) return SURGEON_400 as never;
+        const ticketNumber = `VA-${++ticketsCreated}`;
+        if (payload.idempotencyKey) filed.set(payload.idempotencyKey, ticketNumber);
+        if (ticketsCreated === 1) return { success: false, error: 'Response timed out' } as never;
+        return { success: true, ticketNumber };
+      });
+      const { agent, callId } = await freshPatientCall({ callSid });
+      const timedOut = await call(agent, 'create_pcp_task', PATIENT_TASK);
+      expect(timedOut.retryable).toBe(true);
+      const recovered = await call(agent, 'create_pcp_task', PATIENT_TASK);
+
+      expect(recovered.success).toBe(true);
+      expect(recovered.ticketNumber).toBe('VA-1');
+      expect(ticketsCreated).toBe(1);
+      const payloads = ticketing.createTicket.mock.calls.map(([payload]) => payload);
+      expect(payloads[1].routingAskExhausted).toBe(true);
+      expect(payloads.map((payload) => payload.idempotencyKey)).toEqual(
+        payloads.map(() => `${callSid || callId}-pcp-patient`),
+      );
+    },
+  );
+
+  it('gives another patient a new key and their own unassigned retry after a refusal', async () => {
+    ticketing.createTicket.mockResolvedValue(SURGEON_400 as never);
+    const { agent, callId } = await freshPatientCall();
+    await call(agent, 'record_pcp_intake', { patientFirstName: 'Test', patientLastName: 'One' });
+    await call(agent, 'create_pcp_task', PATIENT_TASK);
+
+    await call(agent, 'record_pcp_intake', { patientFirstName: 'Test', patientLastName: 'Two' });
+    ticketing.createTicket.mockResolvedValueOnce(SURGEON_400 as never);
+    ticketing.createTicket.mockResolvedValueOnce({ success: true, ticketNumber: 'VA-2' });
+    const second = await call(agent, 'create_pcp_task', PATIENT_TASK);
+
+    expect(second.ticketNumber).toBe('VA-2');
+    const payloads = ticketing.createTicket.mock.calls.map(([payload]) => payload);
+    expect(payloads.map((payload) => payload.idempotencyKey)).toEqual([
+      `${callId}-pcp-patient`, `${callId}-pcp-patient`,
+      `${callId}-pcp-patient-p1`, `${callId}-pcp-patient-p1`,
+    ]);
+    expect(payloads.map((payload) => payload.routingAskExhausted)).toEqual([undefined, true, undefined, true]);
   });
 
   /**
