@@ -1,4 +1,5 @@
 import { validatedPatientFor, type ValidatedPatient } from '../../src/tools/ticketIdentity';
+import { filterOpticalPatientLocations } from '../../src/tools/acceptableLocation';
 import { nameKey } from '../../src/tools/verifiedIdentity';
 import { readDobQuietly } from '../../src/tools/dobParts';
 import { getEnvironmentConfig } from '../../src/config/environment';
@@ -8,6 +9,15 @@ import type { PcpTicketPayload, PcpTicketResponse, PcpWithdrawRequest, PcpWithdr
 import { noteTicketFiled } from './ticketFilingPulse';
 import { normalizeProviderNameForTicket } from '../../src/services/ticketFieldSanitizers';
 import { callbackExtensionFilings, syncWithCallbackExtensions } from '../../src/services/callbackExtensionNote';
+
+/** Filter the outgoing copy, never the identity held for later Surgery requests. */
+async function patientForTicketDepartment(patient: ValidatedPatient | undefined, departmentId?: number): Promise<ValidatedPatient | undefined> {
+  // /submit-ticket derives a department when none is supplied, including
+  // Optical. Its carried history must be clinic-safe before that decision.
+  // Explicit non-Optical departments keep their full joined history.
+  return patient && (departmentId === 1 || departmentId === undefined)
+    ? filterOpticalPatientLocations(patient) : patient;
+}
 
 export interface CallData {
   callSid?: string;
@@ -798,8 +808,10 @@ export class TicketingApiClient {
     const unnamed = /^unknown caller$/i.test(`${params.patientFirstName ?? ''} ${params.patientLastName ?? ''}`.trim());
     const suppliedDob = params.patientBirthYear && params.patientBirthMonth && params.patientBirthDay
       ? `${params.patientBirthYear}-${params.patientBirthMonth.padStart(2, '0')}-${params.patientBirthDay.padStart(2, '0')}` : undefined;
-    params = { ...params, validatedPatient: params.validatedPatient ?? validatedPatientFor(params.callData?.callSid,
-      unnamed ? undefined : params.patientFirstName, unnamed ? undefined : params.patientLastName, suppliedDob) };
+    params = { ...params, validatedPatient: await patientForTicketDepartment(
+      params.validatedPatient ?? validatedPatientFor(params.callData?.callSid,
+        unnamed ? undefined : params.patientFirstName, unnamed ? undefined : params.patientLastName, suppliedDob),
+      params.departmentId) };
     console.info("[TICKETING API] Creating ticket:", {
       patient: maskName(params.patientFirstName, params.patientLastName),
       phone: maskPhone(params.patientPhone),
@@ -1015,10 +1027,10 @@ export class TicketingApiClient {
   async submitTicket(params: SubmitTicketParams): Promise<SubmitTicketResponse> {
     const unnamed = !params.patientFullName.trim() || /^unknown caller$/i.test(params.patientFullName.trim());
     // Use the held first/last boundaries, allowing an optional middle initial,
-    // then carry the validated record's original fields intact.
+    // and preserve the validated demographics while filtering routing history.
     const held = validatedPatientFor(params.callData?.callSid, undefined, undefined, params.patientDOB);
-    const match = params.validatedPatient ?? (held && (unnamed ||
-      fullNameMatchesPatient(params.patientFullName, held)) ? held : undefined);
+    const match = await patientForTicketDepartment(params.validatedPatient ?? (held && (unnamed ||
+      fullNameMatchesPatient(params.patientFullName, held)) ? held : undefined), params.departmentId);
     if (match) params = { ...params, validatedPatient: match, patientFullName: unnamed ? `${match.firstName} ${match.lastName}` : params.patientFullName,
       patientDOB: readDobQuietly(params.patientDOB) ? params.patientDOB : match.dateOfBirth || params.patientDOB,
       locationOfLastVisit: params.locationOfLastVisit || match.nextAppointment?.location || match.lastVisit?.location || match.confirmedClinic };

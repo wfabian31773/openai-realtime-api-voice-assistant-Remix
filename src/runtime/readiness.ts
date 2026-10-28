@@ -957,9 +957,12 @@ import { callEnvironment } from "./callRecord";
  */
 /**
  * v139 — IDENTITY GATE (#384, 2026-10-28). Verified identity is carried
- * through ticket filing and teardown/sweep recovery. Optical filters carried
- * appointment and office locations using the shared facility rules; Surgery
- * files without a clinic when none is known. On top of v136 (#393, main,
+ * through ticket filing and teardown/sweep recovery. The shared ticket client
+ * filters Optical's carried appointment and office locations, including
+ * cross-queue redirects and retries. Simplified submissions with no department
+ * use the same clinic-safe copy because the receiver can derive Optical;
+ * explicit non-Optical filings and the held identity retain their history.
+ * Surgery files without a clinic when none is known. On top of v136 (#393, main,
  * 9bfccda); v137 is #391 and v138 is #376 on their open branches.
  * No migration; production impact is unmeasured.
  */

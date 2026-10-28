@@ -1,5 +1,29 @@
 # Backend and state-machine handoff
 
+2026-10-28, PR #384 Optical identity review follow-up (offline, synthetic data):
+`TicketingApiClient.createTicket` and `submitTicket` now apply
+`filterOpticalPatientLocations` to outgoing validated identities for Optical.
+The simplified endpoint also filters when the department is absent, because
+the receiver derives the destination and can choose Optical. Explicit
+non-Optical departments retain the full history, and filtering never changes
+the held identity. Surgery's unknown-clinic filing behavior is unchanged.
+
+Path audit: Surgery, Tech, Records and Optical filing tools use durable filing
+and `createTicket`; so do queue teardown sweeps, setup-failure recovery, PCP's
+Optical redirects, generic/legacy ticket tools, and outbox replay. Answering
+Service, no-IVR, After Hours and their simplified recovery filings use
+`submitTicket`; no-IVR V2 uses `createTicketFromAgentInput` -> `createTicket`.
+The location-queue scheduling endpoint sends no validated identity, and the
+PCP-specific endpoint has no validated-patient payload. Existing local Optical
+filters remain where they select a clinic before filing; the client covers all
+outgoing carried identities, including persisted payloads after memory clears.
+No prompt/tool-description changes, migration, deployment or production
+measurement. Regression fixtures contain synthetic data only.
+Validation: `tsc -p . --noEmit` and 541 tests across 21 relevant Vitest files
+pass, including the unchanged 15,000-character no-IVR prompt and 13,200-character
+tool-description caps. Disabling the client filter reproduces 14 regression
+failures, including all three Surgery/Tech/Records redirects.
+
 **Written 2026-08-20, at the end of a week of work on the four queue agents.**
 
 This exists because the next session will not have the conversation that produced it.
