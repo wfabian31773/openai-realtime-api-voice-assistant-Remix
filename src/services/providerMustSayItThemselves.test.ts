@@ -120,6 +120,12 @@ describe('mutual patient self-identification', () => {
     'I am also a mutual patient.',
     'This is the mutual patient.',
     'This is actually a mutual patient.',
+    'This is Jane, the mutual patient.',
+    'I am Jane, the mutual patient you called.',
+    "I'm Jane Smith, the mutual patient.",
+    'This is Jane the mutual patient.',
+    'The mutual patient is me.',
+    "The mutual patient's me.",
   ])('does not mistake a patient identifying themselves for a provider: %s', (spoken) => {
     expect(callerSaysTheyAreAProvider(spoken)).toBe(false);
   });
@@ -130,6 +136,11 @@ describe('mutual patient self-identification', () => {
     expect(callerSaysTheyAreAProvider("I'm the mutual patient. Calling about the mutual patient.")).toBe(true);
     expect(callerSaysTheyAreAProvider('This is the mutual patient. Calling about the mutual patient.')).toBe(true);
     expect(callerSaysTheyAreAProvider(['This is the mutual patient.', 'This is Dr. Lee calling.'])).toBe(true);
+    expect(callerSaysTheyAreAProvider('This is Jane, calling about the mutual patient.')).toBe(true);
+    expect(callerSaysTheyAreAProvider('This is Jane, a nurse calling about the mutual patient.')).toBe(true);
+    expect(callerSaysTheyAreAProvider('The mutual patient is my mother.')).toBe(true);
+    expect(callerSaysTheyAreAProvider('This is Jane, the mutual patient. Calling about the mutual patient.')).toBe(true);
+    expect(callerSaysTheyAreAProvider('The mutual patient is me. Calling about the mutual patient.')).toBe(true);
   });
 });
 
@@ -262,7 +273,9 @@ describe('the gate', () => {
     },
   );
 
-  it.each(["I'm the mutual patient.", 'I am the mutual patient you called.', 'This is the mutual patient.'])(
+  it.each(["I'm the mutual patient.", 'I am the mutual patient you called.', 'This is the mutual patient.',
+    'This is Jane, the mutual patient.', 'I am Jane, the mutual patient you called.', 'The mutual patient is me.',
+  ])(
     'refuses an unstated provider escalation when the caller says %s', (spoken) => {
       const corroboration = corr(spoken);
       expect(corroboration.providerStated).toBe(false);

@@ -626,6 +626,10 @@ const PROVIDER_SELF_IDENTIFICATION: RegExp[] = [
 // for this evidence only; other provider statements can still stand.
 const MUTUAL_PATIENT = /\b(?:our|(?:a|one|the) mutual) (?:mutual )?patients?\b/;
 const PATIENT_IDENTIFICATION_BEFORE = /\b(?:i(?:'m| am)|this is)\s+(?:(?:actually|also|just|indeed)\s+)*$/;
+// A name can sit between the identification and its appositive. Do not let
+// words describing a call turn a later patient reference into an appositive.
+const PATIENT_APPOSITIVE_BEFORE = /\b(?:i(?:'m| am)|this is)\s+(?:(?:actually|also|just|indeed)\s+)*(?:(?!(?:calling|about|regarding|for|from|with|on|a|an|the|my|our)\b)[a-z][a-z'-]*\s+){0,2}(?!(?:calling|about|regarding|for|from|with|on|a|an|the|my|our)\b)[a-z][a-z'-]*,?\s+$/;
+const PATIENT_IDENTIFICATION_AFTER = /^(?:\s+is\s+|'s\s+)(?:me|myself)\b/;
 
 /**
  * Pure, for tests: does this caller text identify the caller as a provider?
@@ -637,7 +641,10 @@ export function callerSaysTheyAreAProvider(spoken: string | readonly string[]): 
   const text = ` ${turns.join(' ').toLowerCase().replace(/[’‘]/g, "'").replace(/\s+/g, ' ')} `;
   return (
     PROVIDER_SELF_IDENTIFICATION.some((re) => affirmed(text, re)) ||
-    affirmed(text, MUTUAL_PATIENT, (before) => !PATIENT_IDENTIFICATION_BEFORE.test(before)) ||
+    affirmed(text, MUTUAL_PATIENT, (before, after) =>
+      !PATIENT_IDENTIFICATION_BEFORE.test(before) &&
+      !PATIENT_APPOSITIVE_BEFORE.test(before) &&
+      !PATIENT_IDENTIFICATION_AFTER.test(after)) ||
     turns.some(answersWithAFacility)
   );
 }
@@ -660,14 +667,14 @@ export function callerSaysTheyAreAProvider(spoken: string | readonly string[]): 
 const NEGATED_BEFORE = /(?:^|[^a-z])(?:not|never|n't)\s+(?:[a-z']+\s+)?$/;
 const SPANISH_VERB_FIRST = /^(?:soy|llamo|hablo|estoy|le |llamamos|hablamos|tengo)\b/;
 const NO_STRAIGHT_BEFORE = /(?:^|[^a-z])no\s+$/;
-function affirmed(text: string, re: RegExp, acceptBefore?: (before: string) => boolean): boolean {
+function affirmed(text: string, re: RegExp, acceptMatch?: (before: string, after: string) => boolean): boolean {
   // Every occurrence, not only the first: in "I'm not calling from Mercy. I'm
   // calling from St. Joe's hospital." the second one stands.
   const all = new RegExp(re.source, re.flags.includes('g') ? re.flags : `${re.flags}g`);
   return [...text.matchAll(all)].some((m) => {
     const at = m.index ?? 0;
     const before = text.slice(Math.max(0, at - 24), at);
-    if (acceptBefore && !acceptBefore(text.slice(0, at))) return false;
+    if (acceptMatch && !acceptMatch(text.slice(0, at), text.slice(at + m[0].length))) return false;
     if (DENIES.test(m[0]) || NEGATED_BEFORE.test(before)) return false;
     return !(SPANISH_VERB_FIRST.test(m[0]) && NO_STRAIGHT_BEFORE.test(before));
   });
