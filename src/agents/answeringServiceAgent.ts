@@ -15,6 +15,8 @@ import { storage } from '../../server/storage';
 import { callMetadataForDB } from '../services/callMetadataStore';
 import { recordingExecute } from '../services/toolTimeline';
 import { markCallConcluded } from '../services/callConclusion';
+import { GHOST_CALL_RESTRICTION, ghostCallRefusal, hasCallerTranscript } from '../services/ghostCallProtection';
+import { requestSipHangup, type SipGhostHangupMetadata } from '../services/sipGhostHangup';
 import { buildCompactLocationReference } from '../config/azulVisionKnowledge';
 import {
   ANSWERING_SERVICE_DEPARTMENTS,
@@ -181,7 +183,9 @@ function toIsoDob(dobString: string): string {
   return parsed.iso;
 }
 
-export interface AnsweringServiceMetadata {
+export interface AnsweringServiceMetadata extends SipGhostHangupMetadata {
+  /** Live caller/agent transcript from the voice route, read at tool invocation. */
+  getTranscript?: () => string;
   callerPhone?: string;
   callSid?: string;
   callLogId?: string;
@@ -573,8 +577,8 @@ WHEN TRIGGERED:
 5. Do NOT skip ticket creation because the caller is agitated or provides minimal info
 
 ===== GHOST CALL DETECTION =====
-If caller is not engaging after 2 prompts:
-- Single syllables only: "mm", "uh", "ok" with no actual request
+${GHOST_CALL_RESTRICTION}
+Only if the caller has never been transcribed and is not engaging after 2 prompts:
 - No response to "How can I help you?"
 - Random noise or unclear audio only
 
@@ -1254,7 +1258,7 @@ Use patient data from phone lookup when available - don't ask for info you alrea
     description: `Terminate the call server-side immediately. Use this to actually end the call — do NOT rely solely on verbal goodbye.
 
 USE FOR:
-- ghost_call: caller not responding after 2 prompts
+- ghost_call: caller never transcribed and not responding after 2 prompts. NEVER use ghost_call after any non-empty caller transcript, including a request or question
 - robot_call: IVR bleed-through or automated system detected
 - spam: spam/telemarketing detected
 - max_turns_exceeded: call has gone on too long with no resolution
@@ -1267,6 +1271,8 @@ Always say a brief goodbye phrase BEFORE calling this tool.`,
     }),
     execute: async (params) => {
       console.log(`[${agentTag}] terminate_call - reason: ${params.reason}, callId: ${callId || 'unknown'}`);
+      const ghostRefusal = ghostCallRefusal(params.reason, hasCallerTranscript(metadata.getTranscript?.() ?? ''));
+      if (ghostRefusal) return ghostRefusal;
       try {
         const apiKey = process.env.OPENAI_API_KEY;
         if (!apiKey) {
@@ -1277,13 +1283,16 @@ Always say a brief goodbye phrase BEFORE calling this tool.`,
           console.error(`[${agentTag}] terminate_call - missing callId`);
           return { success: false, error: "missing_call_id" };
         }
-        const response = await fetch(
+        const hangup = await requestSipHangup(params.reason, metadata, (signal) => fetch(
           `https://api.openai.com/v1/realtime/calls/${encodeURIComponent(callId)}/hangup`,
           {
             method: "POST",
             headers: { Authorization: `Bearer ${apiKey}` },
+            signal,
           },
-        );
+        ));
+        if (hangup.refusal) return hangup.refusal;
+        const response = hangup.response;
         if (response.ok) {
           console.log(`[${agentTag}] terminate_call ✓ Call ${callId} terminated (${params.reason})`);
           // Deliberate, successful hangup — SIP recovery must not transfer

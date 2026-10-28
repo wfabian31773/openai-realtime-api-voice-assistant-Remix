@@ -656,9 +656,17 @@ is reading noise.
 
 ---
 
-## Current branch — queue withdrawal exemption (2026-10-28)
+## Current branch — heard callers bypass the silence ladder (2026-10-28)
 
-This branch carries **`voice-runtime-v130-queue-withdrawal-exemption-20261028`**
+This branch carries **`voice-runtime-v131-silence-ladder-heard-callers-20261028`**
+(renumbered from v121), on top of `main`'s v130 (#387, `3e861ad`); v127 is #376 on its open branch. Heard callers bypass the silence ladder before it speaks;
+SIP and runtime refuse ghost-call termination after any non-empty caller transcript.
+Both after-hours prompt bodies forbid the ghost line after a request.
+No new spoken wording. Numbering rechecked at v131 against
+main and open branches. The v117 contact-capture work remains included: surname spelling
+and full email confirmation reach the agent's
+
+The v130 base (#387, `3e861ad`) carries **`voice-runtime-v130-queue-withdrawal-exemption-20261028`**
 (renumbered from v120), on top of `main`'s v129 (#386, `08734d7`); v127 is #376 on its open branch. Both queue-answer settlement paths keep a PCP ticket after
 the caller heard a filed ticket number or "I've taken this down". The verdict
 is captured before redirecting, using a runtime getter scoped to transfers;
@@ -2404,6 +2412,7 @@ voice-runtime-v126-noivr-prompt-trim-20261028
 voice-runtime-v128-pcp-scheduling-hub-unassigned-exit-20261028
 voice-runtime-v129-after-hours-teardown-floor-20261028
 voice-runtime-v130-queue-withdrawal-exemption-20261028
+voice-runtime-v131-silence-ladder-heard-callers-20261028
 ```
 
 Also printed at boot as `[voice-runtime] <marker>`. Anything ending in an
@@ -2534,6 +2543,8 @@ on it is evidence about current code.
 
 | **v129** or earlier — NOT the date; this branch is **v130** (renumbered from v120), ABOVE `main`'s v129 (#386, `08734d7`), which it contains; v127 is #376 on its open branch | queue-withdrawal exemption: an answered queue after a read-back keeps the PCP ticket |
 
+| **v130** or earlier — NOT the date; this branch is **v131** (renumbered from v121), ABOVE `main`'s v130 (#387, `3e861ad`), which it contains; v127 is #376 on its open branch | Heard callers bypass the silence ladder before any cannot-hear prompt; never-heard callers retain the original ladder. Ghost-call prompts and termination tools forbid ghost treatment after any non-empty caller transcript, including a request. No migration or new spoken wording. Offline bridge and actual agent-tool tests use synthetic requests indexed by the three reported call SIDs. Production impact remains unmeasured. |
+
 ### THE SURGEON CLAIM — BUILT, REVIEWED SIX TIMES, WITHDRAWN 2026-09-17
 
 **Operator ruling, 2026-09-17:** *"if it's only 9 callers, I would remove if we
@@ -2619,9 +2630,9 @@ v10 (the person base and the join), v11 (the locked record, #290) and v12
 (optical's office ladder) are a CHAIN on `main`: each merged after the one
 before and brought it in, so v12 contains both.
 
-**AND THE SEQUENCE HAS TWO HOLES IN IT ON PURPOSE: v13 AND v57. v130 IS THE
-NEWEST — v130: keep the PCP ticket when an answered queue follows a read-back, on its branch ABOVE `main`'s v129, which it contains; v127 is #376 on its open branch —
-AND v129 IS WHAT `main` CARRIES, SINCE #386 MERGED 2026-10-28 (`08734d7`): the after-hours teardown floor, above v128 (#389, `558f288`), PCP scheduling and
+**AND THE SEQUENCE HAS TWO HOLES IN IT ON PURPOSE: v13 AND v57. v131 IS THE
+NEWEST — v131: once a caller is heard, the silence ladder and ghost-call exit stand down, on its branch ABOVE `main`'s v130, which it contains; v127 is #376 on its open branch —
+AND v130 IS WHAT `main` CARRIES, SINCE #387 MERGED 2026-10-28 (`3e861ad`): the PCP queue-withdrawal exemption, above v129 (#386, `08734d7`), the after-hours teardown floor, above v128 (#389, `558f288`), PCP scheduling and
 unassigned exit, above v126 (#394, `036c39e`), the no-IVR prompt trim, above
 v117; v122–v125 are on open branches. v117 is contact capture (#14), above v116. v116 carries
 the record's office name on an optical ticket — on its branch
@@ -2891,7 +2902,7 @@ never read v57; **v58 was that next ship** — the identity probe, an instrument
 and no behaviour change (see the v56 row below for what it measures). It is no
 longer the current marker: see the paragraph beneath this one.
 
-**v129 (#386) IS WHAT `main` CARRIES (merged 2026-10-28, `08734d7`), AND v57,
+**v130 (#387) IS WHAT `main` CARRIES (merged 2026-10-28, `3e861ad`), AND v57,
 v59, v60, v63, v65 AND v66 ARE RETIRED RATHER THAN REUSED.** Each of the last
 five was a branch's own number while it sat below `main`, and each was given up
 the moment a merge put it there: two branches carrying one version make two

@@ -52,6 +52,8 @@ import {
 } from "../tools/lookupUnsure";
 import { corroborate } from "../services/symptomCorroboration";
 import { markCallConcluded } from "../services/callConclusion";
+import { GHOST_CALL_RESTRICTION, ghostCallRefusal, hasCallerTranscript } from "../services/ghostCallProtection";
+import { requestSipHangup, type SipGhostHangupMetadata } from "../services/sipGhostHangup";
 import { callMetadataForDB } from "../services/callMetadataStore";
 import { EMAIL_FIELD_DESCRIPTION, LAST_NAME_FIELD_DESCRIPTION } from "../tools/contactCaptureGuidance";
 import { registerAfterHoursFloor, markAfterHoursTicketFiled, reserveAfterHoursTicketFiling } from '../services/afterHoursTeardownFloor';
@@ -148,7 +150,7 @@ function callbackMismatchStaffNote(callbackNumber: string, callerId?: string): s
 
 export type NoIvrAgentVariant = 'production' | 'development';
 
-export interface NoIvrAgentMetadata {
+export interface NoIvrAgentMetadata extends SipGhostHangupMetadata {
   callId: string;
   callSid?: string;
   callerPhone?: string;
@@ -735,11 +737,13 @@ ROBOT/SPAM CALL INDICATORS (any 1 of these = end immediately):
 ROBOT/SPAM PROTOCOL: say "We were unable to connect. Goodbye." then call
 terminate_call with reason "robot_call".
 
-GHOST CALL INDICATORS (any 2+ of these = ghost call):
-- Only heard single syllables: "mm", "uh", "ok", "hi", background noise
+${GHOST_CALL_RESTRICTION}
+
+GHOST CALL INDICATORS (only before any non-empty caller transcript):
+- Only silence or background noise, with no caller words transcribed
 - Caller hasn't stated any actual request or question
 - Caller doesn't respond to direct questions
-- Total conversation is just greetings with no substance after 3 prompts
+- No caller words after 3 prompts
 
 GHOST CALL PROTOCOL — three turns, then out:
 1. After first unclear response: "What can I help you with today?"
@@ -2044,7 +2048,7 @@ The ticket will include schedule context (last appointment info) automatically.`
     description: `Terminate the call server-side immediately. Use this to actually end the call — do NOT rely solely on verbal goodbye.
 
 USE FOR:
-- ghost_call: caller not responding after 3 prompts
+- ghost_call: caller never transcribed and not responding after 3 prompts. NEVER use ghost_call after any non-empty caller transcript, including a request or question
 - robot_call: IVR bleed-through or automated system detected
 - spam: spam/telemarketing detected
 - max_turns_exceeded: call has gone on too long with no resolution
@@ -2058,6 +2062,10 @@ Always say a brief goodbye phrase BEFORE calling this tool.`,
     execute: async (params) => {
       console.log(`[TOOL] terminate_call - reason: ${params.reason}, callId: ${callId}`);
 
+      // Read the live SIP-route transcript at invocation, never at construction.
+      const ghostRefusal = ghostCallRefusal(params.reason, hasCallerTranscript(metadata.getTranscript?.() ?? ''));
+      if (ghostRefusal) return ghostRefusal;
+
       // NEVER hang up on a call that is being handed to a human.
       //
       // 2026-08-04 03:55:09 the agent called escalate_to_human ("caller is
@@ -2070,17 +2078,20 @@ Always say a brief goodbye phrase BEFORE calling this tool.`,
       //
       // An escalation is a one-way door. Once it is open, ending the call is
       // the transfer's job (or the fallback ticket's), never the model's.
-      if (escalationDetailsMap.has(callId)) {
+      const checkEscalation = () => {
+        if (!escalationDetailsMap.has(callId)) return null;
         console.warn(
           `[TOOL] terminate_call REFUSED for ${callId} — escalate_to_human already fired ` +
             `(reason given: ${params.reason}). A handoff in flight outranks a hangup.`,
         );
         return {
-          success: false,
+          success: false as const,
           error: 'escalation_in_progress',
           say: 'Stay on the line — I am connecting you with someone now.',
         };
-      }
+      };
+      const escalationRefusal = checkEscalation();
+      if (escalationRefusal) return escalationRefusal;
 
       try {
         const apiKey = process.env.OPENAI_API_KEY;
@@ -2088,13 +2099,16 @@ Always say a brief goodbye phrase BEFORE calling this tool.`,
           console.error("[TOOL] terminate_call - missing OPENAI_API_KEY");
           return { success: false, error: "missing_api_key" };
         }
-        const response = await fetch(
+        const hangup = await requestSipHangup(params.reason, metadata, (signal) => fetch(
           `https://api.openai.com/v1/realtime/calls/${encodeURIComponent(callId)}/hangup`,
           {
             method: "POST",
             headers: { Authorization: `Bearer ${apiKey}` },
+            signal,
           },
-        );
+        ), checkEscalation);
+        if (hangup.refusal) return hangup.refusal;
+        const response = hangup.response;
         if (response.ok) {
           console.log(`[TOOL] terminate_call ✓ Call ${callId} terminated (${params.reason})`);
           // Deliberate, successful hangup — SIP recovery must hang up the

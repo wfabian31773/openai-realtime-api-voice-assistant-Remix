@@ -119,10 +119,6 @@ describe("runtime readiness", () => {
     );
   });
 
-  it("identifies the queue-answer withdrawal exemption build", () => {
-    expect(VOICE_RUNTIME_DEPLOY_MARKER).toBe("voice-runtime-v130-queue-withdrawal-exemption-20261028");
-  });
-
   /**
    * WHY A TEST GUARDS A STRING'S SUFFIX.
    *
@@ -139,6 +135,7 @@ describe("runtime readiness", () => {
    * quietly drop it and put us back where we were.
    */
   it("carries the date it was set, so a build's age is readable from the marker", () => {
+    expect(VOICE_RUNTIME_DEPLOY_MARKER).toBe("voice-runtime-v131-silence-ladder-heard-callers-20261028");
     expect(VOICE_RUNTIME_DEPLOY_MARKER).toMatch(/-\d{8}$/);
     expect(markerSetOn()).not.toBeNull();
   });
