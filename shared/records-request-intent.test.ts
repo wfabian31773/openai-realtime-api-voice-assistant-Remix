@@ -101,6 +101,10 @@ describe('review regressions: records evidence follows the caller request', () =
     'Please interpret the lab results that were emailed to me',
     'I have a question about my exam results that were faxed',
     'I need to review the results that were mailed with my doctor',
+    'Can you explain the test results my doctor will send me?',
+    'I want someone to explain the test results I get in the mail',
+    'Can someone get a doctor to explain my test results?',
+    'Can you explain my test results that I need to send to my doctor?',
   ])('keeps delivered results interpretation in clinical: %s', text => {
     expect(recordsLinePurpose(text)).toBe('clinical');
     expect(recordsLineRedirect(text)).toMatchObject({ departmentId: 3 });
@@ -117,5 +121,43 @@ describe('review regressions: records evidence follows the caller request', () =
   ])('preserves the affirmative document request: %s', text => {
     expect(recordsLinePurpose(text)).toBe('records');
     expect(recordsLineRedirect(text)).toBeNull();
+  });
+});
+
+describe('latest review: preserve the affirmative request', () => {
+  it.each([
+    'Please send my test results so I can discuss them with my doctor',
+    'Please fax my records to my surgeon to discuss surgery',
+    'Could you send my lab results so my doctor can interpret them?',
+    'I need copies of my test results to discuss with my doctor',
+    'Please email my lab results so I can review them with my doctor',
+    'I want you to fax my records to discuss surgery with my surgeon',
+    'Please get my test results so I can discuss them with my doctor',
+  ])('keeps explicit delivery in Medical Records: %s', text => {
+    expect(recordsLinePurpose(text)).toBe('records');
+    expect(recordsLineRedirect(text)).toBeNull();
+  });
+
+  it.each([
+    'I do not need records, please reschedule my appointment',
+    "I don't need my chart, can you reschedule my appointment?",
+    'I do not need records, I want to reschedule my appointment',
+    'I do not need records, reschedule my appointment',
+    'I do not need records for my canceled appointment, please reschedule my appointment',
+  ])('preserves rescheduling after a records refusal: %s', text => {
+    expect(recordsLinePurpose(text)).toBe('scheduling');
+    expect(recordsLineRedirect(text)).toMatchObject({
+      departmentId: 9, requestTypeId: 32, requestReasonId: 147,
+    });
+  });
+
+  it.each([
+    ['I do not need records, please cancel my appointment', 'scheduling', 9, 32, 148],
+    ['I do not need records, please confirm my appointment', 'scheduling', 9, 32, 149],
+    ['I do not need records, please help with my billing question', 'billing', 4, 78, 548],
+    ['Do not send my records, the results, or my imaging', 'unknown', 9, 69, 539],
+  ])('keeps the remaining callback intent without reviving refusals: %s', (text, purpose, departmentId, requestTypeId, requestReasonId) => {
+    expect(recordsLinePurpose(text)).toBe(purpose);
+    expect(recordsLineRedirect(text)).toMatchObject({ departmentId, requestTypeId, requestReasonId });
   });
 });

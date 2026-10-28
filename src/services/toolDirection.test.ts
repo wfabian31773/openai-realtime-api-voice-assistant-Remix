@@ -34,6 +34,28 @@ describe('toolDirection', () => {
     const d = directionFor('pcp', 'create_ticket', 'VA-2', 'call4')!;
     expect(d).toContain('follow up with your office');
   });
+
+  it('a resolved question with no callback does not get the filed-ticket script', () => {
+    const d = directionFor('no-ivr', 'create_ticket', {
+      success: true,
+      ticketCreated: false,
+      callbackRequired: false,
+    }, 'call5')!;
+    expect(d).toMatch(/no ticket was created/i);
+    expect(d).toMatch(/no callback was requested/i);
+    expect(d).not.toContain('passed that to the team');
+    expect(d).not.toContain('will call you back');
+  });
+
+  it('a filed ticket without a callback does not promise a phone call', () => {
+    const d = directionFor('no-ivr', 'create_ticket', JSON.stringify({
+      success: true,
+      ticketCreated: true,
+      callbackRequired: false,
+    }), 'no-phone-callback')!;
+    expect(d).toMatch(/submitted/i);
+    expect(d).not.toMatch(/call you back|first thing/i);
+  });
 });
 
 describe('acknowledgeDayMismatch — S6', () => {

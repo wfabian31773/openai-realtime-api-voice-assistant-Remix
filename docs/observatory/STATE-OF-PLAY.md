@@ -8,10 +8,19 @@
 
 # State of Play — Azul Vision voice agents
 
+2026-10-27 review follow-up (offline, synthetic data): the paired request
+classifiers now preserve clinical complaints mentioning eyewear, normalize
+explicit surgery denials, and retain cataract/procedure insurance on Surgery.
+The legacy routing fallback respects the clinical veto. Surgery dates survive
+recognized logistics requests while generic callbacks/status chases still omit
+unexplained dates. Regression evidence and scope: `docs/BACKEND_HANDOFF.md`,
+"Codex review fixes, 2026-10-27". No production measurement or deployment claimed.
+
 **Companion to `/CLAUDE.md`. Read both at the start of every session.**
 
-Last updated: **2026-10-06** (section 14 — the session stall reconnects).
-Earlier: **2026-09-25** (section 13 — terminal 4xx is follow-up, not a
+Last updated: **2026-10-27** (request-classification review follow-up above).
+Earlier: **2026-10-06** (section 14 — the session stall reconnects),
+**2026-09-25** (section 13 — terminal 4xx is follow-up, not a
 stall), **2026-09-17 11:10 UTC** (section 12), **2026-09-09 17:40 UTC**
 (section 11), **2026-08-11 01:15 UTC** (Wayne: *"go through this entire
 conversation… and log and create an MD file… and force every time that you read
@@ -1484,3 +1493,134 @@ WHERE call_sid = ANY(:sids_from_step_1)
 After the deploy, the same population should read 0 on the second query,
 and optical tickets with no `location_id` must not rise (before-arm
 2026-10-01: 15 of 391).
+
+---
+
+## 16. Item #14 — name, email and provider capture (2026-10-27)
+
+Offline changes for `VA-76200`, `VA-76188` and `VA-76215`:
+
+- Missing or uncertain surnames are asked separately and spelled letter by
+  letter. The guidance does not ask for a surname already held by a validated
+  joined record.
+- New or changed email addresses are spelled, read back in full and confirmed
+  before filing. The voice client sends the complete value unchanged; address
+  validation rejects lengths over 254 instead of clipping them.
+- `ticketingApiClient.createTicket` canonicalizes exact or uniquely fuzzy
+  provider matches against the read-only Patient Console roster. Ambiguous
+  matches and directory outages retain the supplied name.
+
+Synthetic offline coverage:
+
+```
+npx vitest run src/services/consoleDirectory.test.ts \
+  src/utils/contactValidation.test.ts src/tools/contactCapture.test.ts \
+  server/services/ticketingApiClientContactCapture.test.ts
+```
+
+No production database was accessed, and no before/after production number was
+taken. Per `docs/BACKEND_HANDOFF.md`, the ticket-path result still needs that
+read-only measurement before merge/deploy. No migration was added.
+
+### Self-review of item #14 (2026-10-27)
+
+Last touched by: Codex. Reviewed `main...HEAD`; fixes stay within contact
+capture and provider matching. All findings below are fixed:
+
+| Priority | Finding | Fix and evidence |
+|---|---|---|
+| P2 | `consoleDirectory.ts`: the fuzzy runner-up was filtered out below 88%, admitting ambiguous matches | Rank the entire roster before checking the five-point margin. A synthetic 88.24%/86.67% pair failed before the fix and passes now. |
+| P2 | `consoleDirectory.ts`: normalized exact matches picked the first of two names differing in accent/punctuation | Original exact spelling wins first; a normalized match must be unique. Regression covers both roster orders. |
+| P2 | `ticketFieldSanitizers.ts`: simplified submission accepted a fuzzy match but sent the misspelling | Send the matched canonical name. Tests exercise both the resolver and the real simplified submission through the HTTP payload, with a synthetic cached roster. |
+| P2 | `answeringServiceAgent.ts` / `noIvrAgentV2.ts`: SDK conversion discarded the new contact descriptions | Preserve descriptions using the existing helper. Five wire assertions failed before the fix; tests also verify invalid types remain refused and surname required status stays unchanged. |
+| P2 | `toolFieldDescriptionsReachTheWire.test.ts`: both existing size guards failed on the added contact instructions | Record measured sizes (12,917 and 6,627 characters) and set bounded ceilings of 13,000 and 6,700. |
+| P3 | `readiness.ts`: contact changes reused v116's deployment marker | Bump to `voice-runtime-v117-contact-capture-20261027` and update the runbook and marker ledger. |
+
+The ticket-client integration test now uses the real directory matcher rather
+than a canned provider hit. It also checks ambiguous/unmatched providers, an
+unconfigured directory, a configured directory failure, unchanged full email,
+and both submission endpoints. New fixtures are synthetic. No authentication
+or signature checks changed; no migration exists in the branch diff.
+
+Validation: **39 test files / 772 tests passed**, including all branch-touched
+test files, queue filing tools, after-hours regressions, wire/prompt checks,
+marker guards and `RUNTIME_LANE_SMOKE=1` real-lane construction. Final focused
+rerun: **8 files / 117 tests passed**. Full-project
+`tsc --noEmit --pretty false` passed with no diagnostics; `git diff --check`
+passed. Production before/after measurement is still outstanding as above.
+
+### PR review — no-IVR v2 email capture (2026-10-27)
+
+The v2 `create_ticket` tool now exposes the shared email spelling, read-back
+and confirmation guidance and forwards the complete address to the ticket
+payload. The field is optional for phone and text requests; an email preference
+still requires an address at the ticketing service. Synthetic tests exercise
+the model-facing schema and the agent-to-ticket mapping. Production impact
+has not been measured; the before/after ticket-path measurement above remains
+required before merge or deploy.
+
+## 17. No-IVR answer and record integrity — 2026-10-27 (#9, #10, #11, #20)
+
+The voice-remix branch addresses the four Support Desk items with synthetic
+regression tests. No production database or live call was used, and no
+ticketing-app repository is present in this workspace.
+
+- **#9 — VA-76095, 74600:** an explicit `question_fully_answered: true` with
+  `requires_callback: false` returns `ticketCreated: false` before intake
+  gates, ticket lookup or submission. A false or omitted callback flag alone
+  still files the request; confirmation categories default to no phone
+  callback, not to having been answered. Filed requests without a phone
+  callback keep their `[NO CALLBACK NEEDED]` tag and make no phone promise. The
+  response direction also avoids the normal filed-ticket script, so staff do
+  not receive an unnecessary callback ticket.
+- **#10:** `AZUL_VISION_LOCATIONS[].hours` supplies each clinic row in the
+  runtime knowledge pack and legacy prompt. `businessHours.standard` is
+  derived from those rows; the agent is directed to use the named clinic's
+  recorded times regardless of the current hour. Tests cover representative
+  clinics in morning, lunch and after-close contexts.
+- **#11:** the grading model is instructed not to infer facts. Before
+  persistence, its generated summary is replaced by all caller turns and the
+  last two agent turns, quoted exactly without silent clipping. This preserves
+  requests after an opening hello, later corrections and multiline turns, as
+  well as the agent response before a goodbye. These digests can be longer
+  than a generated summary; they add no unsupported details.
+- **#20 — VA-71404:** the no-IVR output guardrail catches tool directives,
+  prompt phases and bracketed notes and remains enforcing in log mode, even
+  if another rule logged a violation on the same or an earlier delta. The
+  identifier list includes the lane's `emit_decision` tool too. Streaming
+  audio may precede its transcript, so the guard interrupts a detected leak;
+  it cannot prove no offending audio was heard. The
+  callback supplied by the caller is preserved separately from caller ID;
+  differing numbers are included in ticket details as an explicit staff flag
+  on ordinary tickets, refused escalations and connected-transfer records.
+
+The joined record remains intact: caller ID is kept in `callerPhone`, the
+confirmed callback is kept in `patientPhone`, and the mismatch note travels
+with the ticket. These changes add no ticket-schema dependency and no
+migration file. Offline coverage is in
+`src/agents/noIvrAfterHoursRouting.test.ts`,
+`src/agents/noIvrTransferRecordFiles.test.ts`,
+`src/agents/noIvrAnswersOfficeHours.test.ts`,
+`src/agents/noIvrPromptShapeForGrok.test.ts`,
+`src/guardrails/medicalSafety.test.ts`,
+`src/runtime/mediaStreamBridge.test.ts`,
+`src/services/gradingIsClaimedOnce.test.ts` and
+`src/services/toolDirection.test.ts`.
+
+Self-review, **2026-10-27 — Codex**: fixed the silent loss of no-phone-callback
+staff requests (including category-default confirmations), the resolved-question
+path entering the medication gate, log-mode rules suppressing privacy enforcement,
+the uncovered `emit_decision` identifier, missing escalation mismatch notes, and
+summaries losing mid-call requests or corrections. Replaced the blanket-true
+callback default in the routing fixture with production's confirmation default;
+the regressions failed before the fixes. Trimmed repeated prompt and schema
+wording to pass the existing size limits without raising them. Validation:
+**439 tests passed in 15 files**, including all branch-touched test files,
+the medication-gate corpus with synthetic stand-ins, prompt invariants, runtime
+binding and field-description wire checks. `tsc -p . --noEmit` passed across
+`src`, `server` and `shared`; `git diff --check` passed. No new PHI or secrets,
+no signature/auth changes, and no migration. Local review only: nothing pushed,
+no PR opened, no merge or deploy, and no production before/after claim. Next:
+owner opens the PR and follows the measurement rule in `docs/BACKEND_HANDOFF.md`
+before merging ticket-path changes. Shared bridge files are outside this
+session's writable workspace; this entry is the local handoff.

@@ -72,7 +72,7 @@ async function boundRuntimePrompt(): Promise<string> {
 
 const HEDGE = /wrong time for that office/;
 const WITHHOLD = /Do not state an exact per-office time|WITHHOLD ONLY THE EXACT TIMES|DO NOT STATE EXACT PER-OFFICE TIMES/;
-const STATES_THEM = /including the office's own opening and closing time, exactly as written\s*\n?\s*there/;
+const STATES_THEM = /(?:state its opening, closing and lunch hours exactly|including the office's own opening and closing time, exactly as written\s*there)/i;
 
 /** A real office and its hours, read from the one table every lane states them from. */
 const office = AZUL_VISION_LOCATIONS.find((l) => l.name === 'Pasadena')!;
@@ -99,15 +99,15 @@ describe('the after-hours line states the office hours', () => {
       expect(text).not.toMatch(HEDGE);
       expect(text).not.toMatch(WITHHOLD);
     }
-    expect(legacy).toMatch(STATES_THEM);
-    expect(legacy).toMatch(/Hours, every office: Monday-Friday, 8am-5pm/);
+    expect(legacy).toMatch(/hours printed on each office's row are the authoritative clinic hours/i);
+    expect(legacy).toContain(office.hours);
     expect(description).toMatch(/NEVER file a ticket whose only content is "caller asked about office hours"/);
   });
 
   it('the Grok body still says no ticket for an hours question, and every office is closed right now', async () => {
     const grok = await prompt({ pipeline: 'runtime' });
-    expect(grok).toMatch(/Hours, an address or a fax number:[^\n]*No ticket\./);
-    expect(grok).toMatch(/Every office is closed right now/);
+    expect(grok).toMatch(/Hours, an address or fax:.*?Fully answered, no callback: do not file/s);
+    expect(grok).toMatch(/Every office is closed/);
   });
 
   it('the hours the model is told to state are actually in the bound runtime prompt, office by office', async () => {
@@ -122,9 +122,33 @@ describe('the after-hours line states the office hours', () => {
     const { AZUL_VISION_KNOWLEDGE } = await import('../config/azulVisionKnowledge');
     const legacy = await prompt({});
     expect(legacy).toContain(AZUL_VISION_KNOWLEDGE.businessHours.standard);
-    // The per-office table on the old core carries no hours (name, address, phone);
-    // the one line above is what the model has, and it is the same 8-to-5 the
-    // operator confirmed for every office on 2026-10-01.
-    expect(office.hours).toMatch(/8am-5pm/);
+    expect(legacy).toContain(office.hours);
+    expect(legacy).not.toContain('Hours, every office:');
+  });
+
+  it.each([
+    ['morning', new Date('2026-10-27T17:00:00Z')],
+    ['lunch closure', new Date('2026-10-27T19:30:00Z')],
+    ['after close', new Date('2026-10-28T00:30:00Z')],
+  ])('uses each clinic record as the hours source at %s', async (_label, instant) => {
+    const clinics = ['Pasadena', 'Indio', 'West Hills'].map((name) => {
+      const clinic = AZUL_VISION_LOCATIONS.find((location) => location.name === name);
+      expect(clinic, `fixture clinic ${name} must exist`).toBeTruthy();
+      return clinic!;
+    });
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(instant);
+    try {
+      const legacy = await prompt({});
+      const runtime = await boundRuntimePrompt();
+      for (const clinic of clinics) {
+        const escapedHours = clinic.hours.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const locationLine = new RegExp(`${clinic.name}[^\\n]*${escapedHours}`);
+        expect(legacy, `legacy prompt missing ${clinic.name} hours`).toMatch(locationLine);
+        expect(runtime, `runtime knowledge missing ${clinic.name} hours`).toMatch(locationLine);
+      }
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

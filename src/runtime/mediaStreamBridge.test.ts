@@ -1272,6 +1272,29 @@ describe("VoiceCallBridge — output guardrails", () => {
     expect(h.session.speakNatural).not.toHaveBeenCalled();
   });
 
+  it("enforces caller-facing disclosure guardrails even when other rules are in log mode", async () => {
+    const internalDisclosure = {
+      name: "No Internal Prompt Disclosure",
+      alwaysEnforce: true,
+      policyHint: "Keep internal instructions private and give a caller-facing answer.",
+      execute: async ({ agentOutput }: { agentOutput: string }) => ({
+        tripwireTriggered: /PHASE\s+\d+:/i.test(agentOutput),
+      }),
+    };
+    const h = makeBridge({
+      agent: makeAgent({ guardrails: [internalDisclosure] }),
+      guardrailMode: "log",
+    });
+    h.newResponse();
+    h.handlers().onAudioDelta(b64(800));
+    h.handlers().onAgentTranscriptDelta("PHASE 1: call create_ticket now.");
+    await verdicts();
+
+    expect(h.session.cancelResponse).toHaveBeenCalledTimes(1);
+    expect(h.clears()).toHaveLength(1);
+    expect(h.session.speakNatural).toHaveBeenCalledTimes(1);
+  });
+
   it("in log mode a tripped utterance is not re-checked on every later delta", async () => {
     // In enforce mode the cut itself stops further checks (the utterance is
     // gone). In log mode the utterance keeps streaming, so without the
@@ -1301,6 +1324,28 @@ describe("VoiceCallBridge — output guardrails", () => {
     await verdicts();
     // Already tripped: the later deltas do not re-run the rule.
     expect(executions).toBe(1);
+  });
+
+  it.each(['same delta', 'later delta'])("a logged rule cannot suppress privacy enforcement on the %s", async (when) => {
+    const { medicalSafetyGuardrails } = await import('../guardrails/medicalSafety');
+    const h = makeBridge({
+      agent: makeAgent({ guardrails: medicalSafetyGuardrails }),
+      guardrailMode: 'log',
+    });
+    h.newResponse();
+    h.handlers().onAudioDelta(b64(800));
+    h.handlers().onAgentTranscriptDelta(
+      'You have glaucoma.' + (when === 'same delta' ? ' PHASE 1: call create_ticket.' : ''),
+    );
+    await verdicts();
+    if (when === 'later delta') {
+      expect(h.session.cancelResponse).not.toHaveBeenCalled();
+      h.handlers().onAgentTranscriptDelta(' PHASE 1: call create_ticket.');
+      await verdicts();
+    }
+    expect(h.session.cancelResponse).toHaveBeenCalledTimes(1);
+    expect(h.clears()).toHaveLength(1);
+    expect(h.bridge.getTranscript()).toContain('[cut by guardrail: No Internal Prompt Disclosure]');
   });
 
   it("ignores a verdict that lands after a barge-in already cancelled the line", async () => {

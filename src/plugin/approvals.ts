@@ -179,6 +179,7 @@ export async function approveContact(
       approvedBy,
       approvedAt: now,
       confirmTokenHash: confirm.hash,
+      confirmTokenPlaintext: confirm.plaintext,
       confirmExpiresAt: confirm.expiresAt,
       confirmUsedAt: null,
       updatedAt: now,
@@ -247,6 +248,7 @@ export async function consumeConfirmToken(
   if (typeof confirmToken !== "string" || !/^[a-f0-9]{64}$/.test(confirmToken)) {
     return { ok: false, status: 400, error: "confirmToken is required" };
   }
+  await store.purgeExpiredConfirmTokens(now);
   const hash = hashSecret(confirmToken);
   const claimed = await store.claimConfirmToken(hash, now);
   if (claimed) return { ok: true, approval: claimed };
@@ -335,6 +337,7 @@ export async function reapStaleSending(
   now = new Date(),
   staleMs = STALE_SENDING_MS,
 ): Promise<ContactApprovalRow[]> {
+  await store.purgeExpiredConfirmTokens(now);
   const staleBefore = new Date(now.getTime() - staleMs);
   const rows = await store.reapStaleSending(now, staleBefore);
   for (const row of rows) {

@@ -14,6 +14,9 @@ export function recordsRequestText(text: string): string {
 const fold = (text: string) => recordsRequestText(text).toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[’‘]/g, "'");
 const DOC = /\b(?:documentation|records?|charts?|(?:progress|consult(?:ation)?|visit|office|surgery|surgical|operative) notes?|(?:operative|surgical|optometry|consultation|op) reports?|(?:test|lab|exam|diagnostic) results?|imaging|oct|visual field|vf|drs|fundus|topography|expedientes?|registros?|historial|informes?)\b/;
 const DELIVERY = /\b(?:copy|copies|get|fax(?:ed|ing)?|send|sent|email(?:ed)?|mail(?:ed)?|forward|release|obtain|retrieve|provide|inspect|inspection|copia|copias|envi\w*|mand\w*)\b/;
+// A delivery action asked of us is distinct from a past/future delivery
+// mentioned while asking someone to interpret results.
+const EXPLICIT_DELIVERY = /(?:^\s*(?:(?:please|just|only)\s+)*|\b(?:can|could|would|will) (?:you|someone) (?:please )?|\b(?:need|want|request|would like) (?:(?:you|someone) to |to )?(?:a |some )?)(?:send|fax|email|mail|forward|release|obtain|retrieve|provide|inspect|get|copy|copies)\b/;
 const WANT = /\b(?:need|want|request(?:ing|s|ed)?|would like|asking for|necesit\w*|solicit\w*|quiero)\b/;
 const SCHEDULE_ACTION = /\b(?:reschedul\w*|schedul\w*|cancel\w*|confirm\w*|book\w*|change|move|reprogram\w*|cambiar)\b[^.!?]{0,65}\b(?:appointments?|visits?|exam|date|cita)\b|\b(?:appointment|cita)\b[^.!?]{0,40}\b(?:change|cancel\w*|confirm\w*|reschedul\w*)\b/;
 // A refusal to send/get documents is not an access request. Split contrasted
@@ -24,6 +27,13 @@ const NEGATED_RECORDS = new RegExp(
   String.raw`\b(?:(?:don't|do not|doesn't|does not) (?:need|want|request|send|fax|mail|email|get)|not (?:requesting|asking for|about|a request for)|no (?:need to|necesito|quiero))\b[^.!?;]{0,50}(?:${DOC.source}|\b(?:notes?|reports?|results?|copies)\b)|\bno records (?:needed|required|requested)\b`,
 );
 const RECORDS_WORKFLOW = /\b(?:roi|release of information|subpoena|authorization to release|medical release|disability (?:form|paperwork)|fmla|(?:inspect|inspection of)\b[^.!?]{0,30}\b(?:file|chart|records?)|(?:work|school|doctor'?s?) note|dmv (?:form|paperwork)|jury duty|verification of treatment|proof of treatment|(?:letter|carta) (?:for|from|stating|del)|fill out (?:a|this|my) form|paperwork to be filled|school form|constancia|comprobante|revisar mi expediente|ver mi expediente|send (?:me |us )?everything)\b/;
+
+function requestClauses(text: string): string[] {
+  // Split comma corrections only when a new request starts, keeping document
+  // lists together so a refusal still covers every document in the list.
+  return fold(text).split(/[.!?;\n]+|\bbut\b|,\s*(?=(?:just|only|please|(?:i|we) (?:need|want|would like)|(?:can|could|would|will) (?:you|someone)|reschedule|cancel|confirm|schedule|book|send|fax|email|mail)\b)/)
+    .filter(c => !NEGATED_RECORDS.test(c));
+}
 
 // These are the scheduling workflows the existing queue router supports. Keep
 // specific requests ahead of the ordinary new-appointment fallback.
@@ -38,16 +48,17 @@ function schedulingReason(t: string): readonly [number, string] | null {
 }
 
 export function recordsLinePurpose(text: string): RecordsLinePurpose {
-  const t = fold(text);
   // An actual delivery/access request wins even if its purpose is an upcoming
   // appointment, operation, referral or payer audit. The requester never vetoes it.
-  const clauses = t.split(/[.!?;\n]+|\bbut\b|,\s*(?=(?:just|only)\b)/).filter(c => !NEGATED_RECORDS.test(c));
-  if (clauses.some(c => {
+  const clauses = requestClauses(text);
+  if (clauses.some(clause => {
+    // Keep interpretation clinical; an explicit delivery request can give a
+    // later discussion as its purpose. Only that initial request is evidence.
+    const interpretation = clause.search(/\b(?:discuss|explain|interpret|question about)\b|\breview\b[^.!?]{0,40}\bresults?\b[^.!?]{0,40}\bwith\b/);
+    const c = interpretation < 0 ? clause : clause.slice(0, interpretation);
+    if (interpretation >= 0 && !EXPLICIT_DELIVERY.test(c)) return false;
     const document = DOC.test(c) || /\b(?:doctor'?s? note|notes? from|report from)\b/.test(c);
     const prescription = /\b(?:prescription|receta)\b/.test(c) && !/\b(?:refill|renew|pharmacy|medication|medicine|drops?)\b/.test(c);
-    // Past delivery does not turn an interpretation question into access.
-    if (/\b(?:discuss|explain|interpret|question about)\b/.test(c)
-      || /\breview\b[^.!?]{0,40}\bresults?\b[^.!?]{0,40}\bwith\b/.test(c)) return false;
     if ((document || prescription || /\b(?:notes?|reports?|results?|imaging)\b/.test(c)) && DELIVERY.test(c)) return true;
     if (RECORDS_WORKFLOW.test(c)) return true;
     if ((document || prescription) && WANT.test(c) && !/\b(?:records? (?:line|department|office)|on (?:my |the )?record)\b/.test(c)) return true;
@@ -75,7 +86,7 @@ export function recordsLinePurpose(text: string): RecordsLinePurpose {
 export function recordsLineRedirect(text: string) {
   const purpose = recordsLinePurpose(text);
   if (purpose === 'records') return null;
-  const t = fold(text);
+  const t = requestClauses(text).join('; ');
   const targets = {
     surgery: [2, 'Surgery Coordination', 65, 535],
     referral: [18, 'PCP Support', 80, 550],

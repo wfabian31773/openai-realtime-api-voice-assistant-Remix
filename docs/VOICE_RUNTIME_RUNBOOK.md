@@ -4,6 +4,11 @@ The runtime (`src/runtime/`) answers a Twilio call on `POST /voice/:slug` and
 runs an existing agent on the Grok wire. This is what to do to put a lane on
 it, and how to tell what happened.
 
+For Support Desk item #15 (VA-74600, 76186, 67478, VA-75007), see
+[read-only appointment access](appointment-access.md): the joined schedule
+returned to the voice tools, provider/office checks, existing-booking review,
+and the distinction between an empty, partial and unavailable schedule.
+
 **Read this first: no live Grok call has ever been made on this runtime.**
 Every claim below is proven offline against fake sockets, plus one real
 resolution of the agents through their own registry. The wire itself is a
@@ -491,6 +496,42 @@ type. `surgery`, `tech` and `records` already resolve clean (§4). `no-ivr` and
 `pcp` need §6b first, because they do transfer and those six calls are exactly
 the code they add.
 
+## 6d. Name, email and provider capture
+
+Item #14 (`VA-76200`, `VA-76188`, `VA-76215`) is covered in the agent-visible
+tool descriptions and the common ticket client. Verify deployment using
+`voice-runtime-v117-contact-capture-20261027` from `/voice/health`:
+
+- A validated joined record supplies identity and contact fields it already
+  holds. Do not ask for or overwrite those fields again.
+- When the surname is missing or uncertain, ask for it separately, have the
+  caller spell it letter by letter, and repeat the spelling back when
+  transcription may have changed it into a place name.
+- For a newly supplied or changed email address, ask the caller to spell it,
+  read back the complete address, and wait for confirmation before filing.
+  Pass the entire confirmed address unchanged. Validation rejects an address
+  longer than 254 characters; it does not truncate one. The local
+  `patient_email` columns are unbounded `varchar` fields.
+- Both create-ticket and simplified submission canonicalize an exact or
+  uniquely close provider name using the read-only Patient Console roster. A
+  fuzzy hit must score at least 88% similarity and beat the next candidate in
+  the entire roster by five percentage points, including candidates below 88%.
+  Accent/punctuation normalization that matches multiple roster entries is
+  ambiguous; an original exact spelling wins before normalization. The common
+  create-ticket client keeps the original wording on ambiguity or directory
+  failure; simplified submission retains its existing unknown-provider policy.
+- Answering-service and no-ivr-v2 preserve the new field descriptions through
+  the SDK's schema conversion. Types, required fields and validation stay as
+  declared in their original schemas.
+
+Offline coverage uses synthetic names and addresses:
+`src/tools/contactCapture.test.ts`,
+`src/services/consoleDirectory.test.ts`,
+`src/utils/contactValidation.test.ts`, and
+`server/services/ticketingApiClientContactCapture.test.ts`. Agent-visible SDK
+schemas are exercised in `src/agents/contactCaptureWire.test.ts` and
+`src/runtime/toolFieldDescriptionsReachTheWire.test.ts`.
+
 ## 7. What is not covered
 
 - **`azul-scheduling` still cannot transfer** — see §3. Scheduling for San
@@ -535,15 +576,18 @@ surgery to Surgery Coordination, referral authorization and payer/vendor inquiri
 to PCP Support; unclear non-records work goes to HVA Hub / Other. Nobody is told
 to call another line. Existing identity and routing gates still apply.
 
-The intent policy checks clinical interpretation before delivery words: "explain
-the test results that were sent to me" stays clinical. A refusal covers all
-supported document terms, including notes, reports, results, imaging and
+The intent policy distinguishes interpretation from an explicit delivery request:
+"explain the test results that were sent to me" stays clinical, while "send my
+test results so I can discuss them with my doctor" stays in Medical Records.
+A refusal covers all supported document terms, including notes, reports, results, imaging and
 documentation. Corrections such as "I don't need my whole chart, just send the
-operative report" retain the affirmative request; documentation from a past
-visit is supported records work. Unknown requests still file to HVA Hub / Other,
-with `classified: false`, no spoken `message`, and model instructions in `fix`.
-The deployment marker for these review fixes is
-`voice-runtime-v117-records-intent-review-fixes-20261027`.
+operative report" retain the affirmative request; an inline "please reschedule
+my appointment" keeps its scheduling taxonomy after a records refusal.
+Documentation from a past visit is supported records work. Unknown requests
+still file to HVA Hub / Other, with `classified: false`, no spoken `message`,
+and model instructions in `fix`.
+The merged runtime retains main's deployment marker,
+`voice-runtime-v117-contact-capture-20261027`, without a marker bump.
 
 An actual records request stays in Medical Records even when it names an
 appointment, operation, referral, vendor or payer. Third-party requester handling
@@ -556,6 +600,8 @@ which owns the final decision on both voice creation endpoints and the case
 sweep. Keep the two copies and their shared policy tests aligned. Ship Ticketing
 first to protect older voice payloads; then voice stops offering the wrong form.
 No database/schema change or historical cleanup is included.
+The 2026-10-28 follow-up fixes are local to this voice worktree; align Ticketing's
+policy copy before deployment.
 
 Offline regression commands (external services mocked):
 
@@ -626,3 +672,65 @@ Four files could not pass under this sandbox (127 failed tests):
 requires a child Git process, refused with `spawnSync git EPERM`. Those checks
 and the authentication/signature rules remain intact. The targeted nine-file
 run passes independently of these environment restrictions.
+
+Follow-up review proof (2026-10-28): 252 tests pass across the eight targeted
+policy, records-tool, readiness and marker files. New policy/tool cases first
+failed 16 tests; two additional interpretation-boundary cases also failed before
+being fixed. Isolated policy copies fail when interpretation handling is removed
+(10), inline correction splitting is removed (10), or documentation is omitted
+(3). The neighboring PCP regression could not load because `@openai/agents` is
+absent from the available local dependencies. Only targeted Vitest files ran;
+no database writes or patient data were used.
+
+## 9. No-IVR speech, callback, and summary safeguards
+
+The no-IVR voice changes for #9, #10, #11 and #20 are pinned offline; use the
+synthetic fixtures in the cited tests when checking this branch.
+
+- **Answered question, no callback (#9; VA-76095, 74600):** the agent must not
+  file when it fully answered the caller and no follow-up was requested. If
+  `create_ticket` is reached with `question_fully_answered: true` AND
+  `requires_callback: false`, it returns `ticketCreated: false` without
+  entering intake gates; the tool direction must preserve that result and
+  must not say the request was submitted or promise a callback. A false or
+  omitted callback flag alone still files the request. The normal answered-only
+  path calls `record_answered_question` after asking if
+  anything else is needed, once no staff work remains. The timeline records
+  only boolean outcome flags. The missing-ticket warning and both ticket
+  graders recognize this disposition on no-IVR calls. Hangup and bookkeeping
+  (`terminate_call`, `end_call`, `emit_decision`, `set_spoken_language`) after
+  the marker do not revoke it. Any failed filing or escalation, or later
+  request-tool activity, leaves the call eligible for the warning and normal
+  grading.
+  This marker relies on the agent, and cannot prove that an unrecorded later
+  request did not occur. The existing category default for confirmations must
+  not discard a confirmation
+  staff still need to answer. Filed requests without a phone callback keep
+  their `[NO CALLBACK NEEDED]` tag and do not promise a phone call.
+- **Clinic hours (#10):** `AZUL_VISION_LOCATIONS[].hours` is the source for
+  each clinic's hours. The runtime knowledge pack renders each clinic's row,
+  and the shared standard-hours fact is derived from those rows. Answer from
+  the named clinic's row even during lunch or after closing; do not infer a
+  schedule from the clock. The synthetic morning, lunch and after-close cases
+  are in `src/agents/noIvrAnswersOfficeHours.test.ts`.
+- **Call grading summary (#11):** model-generated analysis is still used for
+  grading, but the stored summary is replaced with exact transcript excerpts
+  labeled by speaker: all caller turns and the last two agent turns. Keeping
+  the caller turns preserves mid-call requests, corrections and multiline
+  speech; keeping two agent turns prevents a goodbye from displacing the
+  preceding response. Quotes are never silently clipped. These digests can be
+  longer than the old generated summary; they do not infer an appointment,
+  request or outcome from those words.
+- **Internal text and callback number (#20; VA-71404):** the output guardrail
+  interrupts detected tool names, prompt phases and bracketed notes, even
+  when runtime guardrails are configured in log mode. A logged rule only
+  deduplicates itself; privacy rules still check that utterance and later
+  deltas. Streaming audio may precede the transcript, so this is an
+  interruption safeguard, not proof that no offending audio was heard. A
+  caller-provided callback number stays in the ticket's patient phone field; caller ID remains
+  in the caller phone field, and a mismatch is written into ticket details for
+  staff on ordinary tickets, refused-escalation tickets and connected-transfer
+  records.
+
+These are voice-remix behaviors. They do not change the Support Center's
+ticket schema or apply a database migration.

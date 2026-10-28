@@ -417,3 +417,101 @@ Recorded so they are not repeated.
 `VOICE_TOOL_API_KEY` is **unrotated**. It was deferred until agent testing finished.
 It is also the credential needed for any authenticated end-to-end test against the
 ticketing API, which is why no such test has been run from this side.
+
+
+## 2026-10-27 — #6/#7 and HVA request classification
+
+Scope: VA-75838, 75208, 74205, 71404; 67428, 67429, 67486, 67506,
+VA-76202; VA-76697 and VA-76341. Tests use synthetic failure shapes identified
+only by these ticket IDs. No production records were read or changed.
+
+`requestClassification.ts` corrects clear non-surgery requests on Surgery/HVA
+intake. Contact orders/status go to Optical, eye-exam/glaucoma-test appointments
+and non-surgical insurance to HVA, contact-prescription renewal and clinical
+results to Technicians. It does not classify records requests or the records line.
+Ambiguous requests and explicit operations retain their existing workflow.
+`classify_surgery_request` exposes the correction before filing;
+`file_surgery_ticket` repeats it before reading surgery-only arguments.
+A surgery date requires an operation or a recognized surgery-logistics request
+(drops, clearance, arrival/transport, rescheduling or financial questions).
+An unexplained callback/status chase, including one carrying a stale logistics
+reason ID, does not establish surgery-date context. A redirected ticket carries
+no surgeon/date from the surgery tool. For an Optical redirect, the validated
+record office wins over the model's office, through `usualOfficeFor` and its
+existing identity/DOB guard; verified DOB inheritance is unchanged.
+
+The companion Ticketing change enforces the same narrow correction on both
+creation endpoints before routing/enrichment. Its final stored taxonomy drives
+a deterministic acknowledgement, including LASIK versus neutral surgery,
+Optical/contact-lens, appointment, insurance and technician-support wording.
+This supersedes the historical statement above that create-ticket stores every
+incoming triple verbatim, for Surgery/HVA intake only.
+
+Offline regression: `npx vitest run src/tools/surgeryRequestClassification.test.ts`.
+The 11 issue cases failed before the fix; explicit-surgery and records-line
+controls passed. Added classification-tool, unexplained-date and joined-record
+carry checks also failed before their fixes. Production before/after rates are
+unmeasured: the task prohibits production DB access. No merge/deploy is claimed.
+No migrations. Rollback: revert this change and its companion Ticketing commit;
+that restores the old misclassification and generative acknowledgement behavior.
+
+### Self-review, 2026-10-27
+
+The correction preserves the Hub's existing cancellation/confirmation (including
+Spanish noun forms), availability, same-day and specialist appointment reasons.
+Synthetic regressions drive classification and filing, not just the pure matcher.
+An information request about contacts keeps the Optical catch-all rather than
+asserting an order merely because the caller said "more information".
+
+An Optical redirect also observes the destination's bounded office ask: a terminal
+`office`/`location` refusal from Ticketing spends this call's office ask, and its
+next attempt carries `routingAskExhausted`. The surgeon and office counters are
+separate. An outage, a different call or a sentinel SID cannot spend the ask.
+The API may reject an office id `/lookup` returned (for example, no assignable
+staff), so a previous office refusal is respected even when lookup returns an id.
+The new tests condition acceptance on the outgoing flag; without it they fail.
+Uncertain identity, another patient's name and a conflicting DOB never carry the
+record-only office onto a redirected ticket.
+
+The companion Ticketing self-review also clears the losing surgery provider
+before corrected assignment, covers legacy hints/headers without department or
+agent fields, and sends neutral acknowledgement wording for unknown type IDs.
+All measurements here are offline synthetic cases; production rates are still
+unmeasured. No schema change, migration or historical backfill is needed.
+
+Resumed validation: all 32 tests in `surgeryRequestClassification.test.ts` and
+all 64 tests in the four companion Ticketing classification/acknowledgement
+files pass. `tsc --noEmit` with each repository's existing compiler options and
+the branch's touched TypeScript files as roots passes (5 voice files, 9 Ticketing
+files, including imports). Six temporary reversions to the pre-review code were
+caught by assertions: voice classification (8 failures), voice office retry (2),
+Ticketing classification (9), legacy intake/provider handling (5), create-ticket
+provider handling (20), and unknown-taxonomy acknowledgements (3). Each reversion
+was restored; no mutation is part of the change.
+
+### Codex review fixes, 2026-10-27
+
+Both repositories' request matchers now decline routine corrections for clinical
+symptoms that merely mention eyewear, including when the caller also mentions
+an order. The legacy cross-queue fallback respects the same veto on Surgery/HVA
+intake, preserving the existing clinical/urgent workflow. Explicit surgery
+denials normalize contractions and need/want/planning phrases; a separate
+affirmative or uncertain operation request still keeps its surgery context.
+Cataract/procedure insurance questions stay with Surgery and keep their surgeon
+and surgery date. Existing `surgeryTaxonomy` logistics cues retain dates except
+for generic status/callback requests; a supplied reason alone cannot qualify.
+
+Synthetic regression files: `src/tools/requestClassification.test.ts` and
+`src/tools/surgeryRequestClassification.test.ts`. Each finding was reproduced
+before its fix. No production access, migrations, pushes, merges or deployments.
+
+Validation: 309 targeted tests pass across request classification, surgery
+filing/taxonomy, queue routing, unassigned exits, DOB carry and the synthetic PCP
+replay. Repository `tsc -p . --noEmit` and recommended ESLint/TypeScript rules on
+all five changed TypeScript files pass (ESLint supplied by the sibling Ticketing
+installation; this repo has no lint configuration). Five temporary reversions
+were caught: clinical veto (5 failures), denial handling (5), procedure cues (3),
+logistics dates (4), and the legacy routing veto (2). All were restored.
+The full suite could not complete in this sandbox: local listeners and
+`spawnSync` in `buildIdentity.test.ts` are denied with `EPERM`. GitHub check logs
+were unreachable, so the separately reported CI test could not be identified.

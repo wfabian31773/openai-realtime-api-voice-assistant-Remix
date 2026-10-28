@@ -178,6 +178,7 @@ export async function evaluateAndEnqueueCall(
   store: OutboundStore,
   input: EnqueueCallInput,
   now = new Date(),
+  live = false,
 ): Promise<EnqueueCallResult> {
   const key = dncKey(input.phone);
   if (!key) return { ok: false, reason: "invalid_phone" };
@@ -203,7 +204,8 @@ export async function evaluateAndEnqueueCall(
     (r) =>
       r.externalRef !== externalRef &&
       dncKey(r.phone) === key &&
-      (r.status === "calling" || (DIALABLE_STATUSES as readonly string[]).includes(r.status)),
+      (r.status === "calling" || r.status === "pending" ||
+        (r.customData.plugin_live !== true && (DIALABLE_STATUSES as readonly string[]).includes(r.status))),
   );
   if (stillDialling) return { ok: false, reason: "call_already_queued" };
   const onPhone = rows.find((r) => r.externalRef === externalRef) ?? rows.find((r) => dncKey(r.phone) === key);
@@ -222,6 +224,7 @@ export async function evaluateAndEnqueueCall(
       lastName,
       data: {
         source: "si-assistant",
+        ...(live ? { plugin_live: true } : {}),
         approval_id: input.approvalId,
         ticket_number: input.ticketNumber ?? null,
         ticket_id: input.ticketId ?? null,

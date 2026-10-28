@@ -126,9 +126,23 @@ describe('review: classification and filing agree on records intent', () => {
   it.each([
     "I don't need my whole chart, just send the operative report",
     'I need documentation from my last visit',
+    'Please send my test results so I can discuss them with my doctor',
+    'Please fax my records to my surgeon to discuss surgery',
   ])('retains the records workflow for %s', async request_description => {
     expect(await runTool('classify_records_request', { request_description })).toMatchObject({ is_records_request: true, department_id: 16 });
     expect((await runTool('file_records_ticket', { ...BASE, request_description, form_channel: 'sms' })).success).toBe(true);
     expect(api.createTicket.mock.calls[0]?.[0]).toMatchObject({ departmentId: 16, requestPathway: 'pending_authorization', capClockApplies: false, formChannel: 'sms' });
+  });
+
+  it('preserves the rescheduling taxonomy after an inline records refusal', async () => {
+    const request_description = 'I do not need records, please reschedule my appointment';
+    expect(await runTool('classify_records_request', { request_description })).toMatchObject({
+      classified: true, is_records_request: false, department_id: 9,
+      request_type_id: 32, request_reason_id: 147,
+    });
+    expect((await runTool('file_records_ticket', { ...BASE, requester: undefined, request_description })).success).toBe(true);
+    const payload = api.createTicket.mock.calls[0]?.[0];
+    expect(payload).toMatchObject({ departmentId: 9, requestTypeId: 32, requestReasonId: 147 });
+    for (const field of ['requestorType', 'requestPathway', 'capClockApplies', 'formChannel']) expect(payload).not.toHaveProperty(field);
   });
 });

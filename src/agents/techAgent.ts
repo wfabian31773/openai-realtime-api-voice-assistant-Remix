@@ -34,6 +34,7 @@
  * technician who has them does the job in one pass instead of three.
  */
 import { RealtimeAgent } from '@openai/agents/realtime';
+import { appointmentReadReminder } from '../services/appointmentReadPolicy';
 import { getPacificTimeContext, formatPhoneForSpeech, formatPhoneLast4 } from '../utils/timeAware';
 import { realtimeToolsFor } from '../tools/realtimeAdapter';
 // Registration is an import side effect, exactly as the HTTP server does it.
@@ -89,6 +90,7 @@ export const techAgentConfig = {
  */
 export const TECH_TOOLS = [
   'lookup_patient',
+  'check_patient_appointments',
   'resolve_location',
   'check_open_tickets',
   'classify_tech_request',
@@ -172,6 +174,8 @@ If they genuinely do not know, take the request anyway and say the team will
 follow up. Never turn a caller away over a detail they cannot supply.
 
 ${askScript}
+
+${appointmentReadReminder('check_patient_appointments')}
 
 ### How a call runs
 1. Find them. Call lookup_patient as soon as you have their phone number, or

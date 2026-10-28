@@ -881,10 +881,18 @@ import { callEnvironment } from "./callRecord";
  * BY office, so it gets its own marker. On top of v115 (#367), which it
  * contains. `src/tools/opticalTools.ts`, `opticalOfficeFromRecord.test.ts`.
  */
-// v117: records-intent review fixes — clinical interpretation before delivery,
-// document-wide refusals, inline corrections, documentation and unknown results.
+// Records-intent review fixes preserve interpretation, document refusals,
+// inline corrections, documentation and unknown-result handling.
+/**
+ * v117 — CONTACT CAPTURE (#14, 2026-10-27). Surnames are spelled when needed;
+ * new email addresses are read back and confirmed in full. Provider names use
+ * an exact or uniquely fuzzy Console match on both ticket submission paths,
+ * with the five-point margin checked against the entire roster. Contact field
+ * descriptions survive the SDK conversion on answering-service and no-ivr-v2.
+ * On top of v116. No migration; production impact remains unmeasured.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v117-records-intent-review-fixes-20261027";
+  "voice-runtime-v117-contact-capture-20261027";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

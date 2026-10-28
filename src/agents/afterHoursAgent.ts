@@ -11,6 +11,7 @@ import { buildPracticeKnowledgePrompt } from '../config/azulVisionKnowledge';
 import { getNextBusinessDayContext } from '../utils/timeAware';
 import { escalationDetailsMap } from '../services/escalationStore';
 import { markCallConcluded } from '../services/callConclusion';
+import { EMAIL_FIELD_DESCRIPTION, LAST_NAME_FIELD_DESCRIPTION } from '../tools/contactCaptureGuidance';
 
 // ── Content-based routing (operator mandate 2026-07-25) ─────────────────
 // Tickets go to the APPROPRIATE department for what the call was about;
@@ -107,8 +108,7 @@ You make this determination BASED STRICTLY ON THE PATIENT'S DETAILS - no coachin
    - Listen carefully before asking follow-up questions
 
 2. COLLECT IDENTITY (after understanding their reason):
-   - "May I have your first and last name?"
-   - If they only give first name, ask: "And your last name?"
+   - Ask for first name, then ask for the surname separately: "May I have your last name? Please spell it letter by letter."
    - "And your date of birth?"
 
 3. ASK ABOUT THEIR ISSUE:
@@ -343,14 +343,14 @@ export async function createAfterHoursAgent(
     description: 'Create a ticket for the call. Required for ALL calls. System determines routing based on triage outcome.',
     parameters: z.object({
       patient_first_name: z.string().describe('Patient first name'),
-      patient_last_name: z.string().describe('Patient last name'),
+      patient_last_name: z.string().describe(LAST_NAME_FIELD_DESCRIPTION),
       phone_number: z.string().describe('Callback phone number'),
       triage_outcome: triageOutcomeEnum.describe('Best match for the reason'),
       description: z.string().describe('Summary of the patient concern. ALWAYS write in English, even if the caller speaks another language (this is forwarded to English-speaking staff).'),
       patient_birth_month: z.string().nullable().describe('Birth month (2 digits) or null'),
       patient_birth_day: z.string().nullable().describe('Birth day (2 digits) or null'),
       patient_birth_year: z.string().nullable().describe('Birth year (4 digits) or null'),
-      patient_email: z.string().nullable().describe('Email if provided'),
+      patient_email: z.string().nullable().describe(EMAIL_FIELD_DESCRIPTION),
       provider_name: z.string().nullable().describe('Doctor name if mentioned'),
       location_name: z.string().nullable().describe('Office location if mentioned'),
       pharmacy_name: z.string().nullable().describe('Pharmacy for prescription issues'),

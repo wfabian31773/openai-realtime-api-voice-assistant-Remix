@@ -35,6 +35,7 @@
  * driven by location.
  */
 import { RealtimeAgent } from '@openai/agents/realtime';
+import { appointmentReadReminder } from '../services/appointmentReadPolicy';
 import { getPacificTimeContext, formatPhoneForSpeech, formatPhoneLast4 } from '../utils/timeAware';
 import { realtimeToolsFor } from '../tools/realtimeAdapter';
 // Registration is an import side effect, exactly as the HTTP server does it.
@@ -100,6 +101,7 @@ export const opticalAgentConfig = {
  */
 export const OPTICAL_TOOLS = [
   'lookup_patient',
+  'check_patient_appointments',
   'resolve_location',
   'check_open_tickets',
   'classify_optical_request',
@@ -176,6 +178,8 @@ own words and file it — the tool routes it to our scheduling hub. Do not attem
 to schedule anything yourself, and do not tell them to call another number.
 
 ${askScript}
+
+${appointmentReadReminder('check_patient_appointments')}
 
 ### How a call runs
 1. Find them. Call lookup_patient as soon as you have their phone number, or

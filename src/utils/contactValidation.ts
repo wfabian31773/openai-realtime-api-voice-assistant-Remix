@@ -38,7 +38,10 @@ export function validatePhoneNumber(phone: string): ValidationResult {
  * Validate email address format
  */
 export function validateEmail(email: string): ValidationResult {
-  const trimmed = email.trim().toLowerCase();
+  // Keep the address exactly as supplied after trimming outer whitespace.
+  // Do not lowercase the local part or clip a transcription; the caller must
+  // confirm the complete address before it is sent on.
+  const trimmed = email.trim();
   
   // RFC 5322 compliant email regex (simplified)
   const emailRegex = /^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$/;
