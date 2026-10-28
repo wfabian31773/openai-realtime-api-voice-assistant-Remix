@@ -1791,6 +1791,25 @@ The ticket will include schedule context (last appointment info) automatically.`
         }
       }
 
+      const recordConfirmed =
+        !!enrichedContext?.patientFound &&
+        enrichedContext.matchedBy === 'name_and_dob' &&
+        !phoneMatchIsUnconfirmed(enrichedContext) &&
+        enrichedContext.identity?.unique === true;
+      if (recordConfirmed && enrichedContext) {
+        // Replace the cache and held identity together, including when this
+        // ticket's secondary lookup validated a different family member.
+        enrichedContext = { ...enrichedContext, patientData: {
+          ...enrichedContext.patientData,
+          firstName: enrichedContext.patientData?.firstName || params.first_name,
+          lastName: enrichedContext.patientData?.lastName || params.last_name,
+          dateOfBirth: enrichedContext.patientData?.dateOfBirth || params.date_of_birth,
+        } };
+        scheduleContext = enrichedContext;
+        rememberVerifiedIdentity(metadata.callSid,
+          { ...enrichedContext.patientData, ...joinedAppointments(enrichedContext), certain: true });
+      }
+
       // THE RECORD REACHES THE AFTER-HOURS CALL ROW — only once it is CERTAIN
       // (v53). A phone match is a candidate (`phoneMatchIsUnconfirmed`, v47);
       // a name + date-of-birth match is the identity this lane's Phase 4
@@ -1804,12 +1823,7 @@ The ticket will include schedule context (last appointment info) automatically.`
       // `identity.unique: false` and the newest person's rows as the primary
       // context — writing that would record an arbitrary patient's name as
       // this caller's identity. One person, or nothing.
-      if (
-        enrichedContext?.patientFound &&
-        enrichedContext.matchedBy === 'name_and_dob' &&
-        !phoneMatchIsUnconfirmed(enrichedContext) &&
-        enrichedContext.identity?.unique === true
-      ) {
+      if (recordConfirmed && enrichedContext) {
         const liveCallLogId = metadata.callLogId;
         const confirmedDob = parsedDOB
           ? parsedDOB.iso || `${parsedDOB.year}-${parsedDOB.month}-${parsedDOB.day}`
@@ -1877,21 +1891,6 @@ The ticket will include schedule context (last appointment info) automatically.`
       // Every other call sends no department and the app decides as before.
       // See afterHoursRouting.ts. Only a CONFIRMED record's appointments count
       // — a phone candidate's appointments are somebody's, not the caller's.
-      const recordConfirmed =
-        !!enrichedContext?.patientFound &&
-        enrichedContext.matchedBy === 'name_and_dob' &&
-        !phoneMatchIsUnconfirmed(enrichedContext) &&
-        enrichedContext.identity?.unique === true;
-      if (recordConfirmed && enrichedContext) {
-        scheduleContext = { ...enrichedContext, patientData: {
-          ...enrichedContext.patientData,
-          firstName: enrichedContext.patientData?.firstName || params.first_name,
-          lastName: enrichedContext.patientData?.lastName || params.last_name,
-          dateOfBirth: enrichedContext.patientData?.dateOfBirth || params.date_of_birth,
-        } };
-        rememberVerifiedIdentity(metadata.callSid,
-          { ...scheduleContext.patientData, ...joinedAppointments(scheduleContext), certain: true });
-      }
       const completedIdentity = prepareTicketIdentity({ ...params, call_sid: metadata.callSid });
       if (completedIdentity.missing && (completedIdentity.missing !== 'date_of_birth' || (!dobEscapeStatus && !isB2bNoDob))) return { success: false, missingFields: [completedIdentity.missing], message: completedIdentity.message };
       params.location = String(completedIdentity.input.location || '');

@@ -248,18 +248,21 @@ const SECOND_PATIENT = {
 const SECOND_IDENTITY = { first_name: 'Blair', last_name: 'Synthetic', date_of_birth: '1970-02-03' };
 
 it.each([
-  { query: {}, demographics: true },
-  { query: SECOND_IDENTITY, demographics: true },
-  { query: {}, demographics: false },
-])('a secondary ticket lookup replaces the previous patient schedule before reuse (%j)', async ({ query, demographics }) => {
+  { query: {}, demographics: true, firstIdentity: TICKET },
+  { query: SECOND_IDENTITY, demographics: true, firstIdentity: TICKET },
+  { query: {}, demographics: false, firstIdentity: TICKET },
+  { query: SECOND_IDENTITY, demographics: false, firstIdentity: TICKET },
+  { query: {}, demographics: true, firstIdentity: { ...SECOND_IDENTITY, date_of_birth: '1980-04-05' } },
+])('a secondary ticket lookup replaces the previous patient schedule before reuse (%j)', async ({ query, demographics, firstIdentity }) => {
   h.lookupByNameAndDOB.mockResolvedValueOnce({ ...CONFIRMED,
-    patientData: { firstName: TICKET.first_name, lastName: TICKET.last_name, dateOfBirth: '1958-01-04' },
+    patientName: `${firstIdentity.first_name} ${firstIdentity.last_name}`,
+    patientData: { firstName: firstIdentity.first_name, lastName: firstIdentity.last_name, dateOfBirth: firstIdentity.date_of_birth },
     upcomingAppointments: [{ isoDate: '2099-01-01', location: 'Synthetic First Clinic' }],
   } as any).mockResolvedValueOnce({ ...SECOND_PATIENT,
     patientData: demographics ? SECOND_PATIENT.patientData : undefined,
   } as any);
   const agent = await createNoIvrAgent(async () => {}, META);
-  await call(agent, 'lookup_schedule', TICKET);
+  await call(agent, 'lookup_schedule', firstIdentity);
   expect(await call(agent, 'create_ticket', { ...TICKET, ...SECOND_IDENTITY })).toMatchObject({ success: true });
   expect(verifiedIdentityFor(SID)).toMatchObject(SECOND_PATIENT.patientData);
 
@@ -270,6 +273,10 @@ it.each([
     lastProviderSeen: SECOND_PATIENT.lastProviderSeen,
   });
   expect(h.lookupByNameAndDOB).toHaveBeenCalledTimes(2);
+  expect(verifiedIdentityFor(SID)).toMatchObject({
+    ...SECOND_PATIENT.patientData,
+    nextAppointment: { date: '2099-02-03', location: 'Synthetic Second Clinic' },
+  });
 });
 
 it('a ticket revalidates a stale schedule before using its history for enrichment', async () => {
