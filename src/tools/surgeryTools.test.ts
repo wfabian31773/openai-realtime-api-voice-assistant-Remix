@@ -297,8 +297,8 @@ describe('what it refuses, and what it does not', () => {
     expect(String(out.message)).toMatch(/ten digits/i);
   });
 
-  it('asks for a clinic before a live filing when neither history nor the caller supplied one', async () => {
-    // The shared live gate asks for missing clinic information once per attempt.
+  it('files without a clinic when neither history nor the caller supplied one', async () => {
+    // Operator ruling 2026-10-28: only Optical requires a clinic; surgery files without one.
     const api = await client();
     const lookup = vi.spyOn(api, 'lookupProviderAndLocation');
     const create = vi
@@ -311,11 +311,10 @@ describe('what it refuses, and what it does not', () => {
       request_description: 'I never got my clearance form',
     })) as Record<string, unknown>;
 
-    expect(out.success).toBe(false);
-    expect(out.missingFields).toEqual(['location']);
-    // No name to resolve means no reason to call the resolver at all.
+    expect(out.missingFields).toBeUndefined();
+    expect(create).toHaveBeenCalledTimes(1);
+    // No clinic name to resolve means no reason to call the resolver.
     expect(lookup).not.toHaveBeenCalled();
-    expect(create).not.toHaveBeenCalled();
   });
 
   it('reports a failed create rather than claiming success', async () => {
