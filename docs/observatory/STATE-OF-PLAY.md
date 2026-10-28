@@ -1648,9 +1648,9 @@ before merging ticket-path changes. Shared bridge files are outside this
 session's writable workspace; this entry is the local handoff.
 
 
-## 19. Goodbye grace hangup — 2026-10-28
+## 19. Goodbye grace hangup (v134) — 2026-10-28
 
-v132 (`voice-runtime-v132-goodbye-grace-hangup-20261028`), on top of `main`'s v131 (#388, `47bc78c`): when a heard caller
+v134 (`voice-runtime-v134-goodbye-grace-hangup-20261028`), on top of `main`'s v131 (#388, `47bc78c`; v132 is #390 and v133 is #391 on their open branches): when a heard caller
 says goodbye and the agent's sign-off finishes playing but the line stays open,
 the bridge waits 6s (`GOODBYE_GRACE_MS`) and ends the call deliberately
 (`goodbye_grace`) instead of idling to the 10-minute cap. Caller speech, a new
