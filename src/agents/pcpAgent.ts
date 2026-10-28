@@ -1176,7 +1176,9 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
           // existing guidance, without claiming a failed write was recorded.
           const status = patientResult.statusCode;
           const refused = typeof status === 'number' && status >= 400 && status < 500;
-          if (unassignedExit && refused) {
+          // Only payload refusals are permanent; timeouts, rate limits and
+          // credential failures can recover before a later tool invocation.
+          if (unassignedExit && isTerminalRefusal(status)) {
             pcpDirector.update(callId, {
               patientRoutingRefusals: {
                 ...state.patientRoutingRefusals,

@@ -151,4 +151,38 @@ describe('PCP uses the unassigned exit after a routing-field refusal', () => {
     expect(result.guidance).toMatch(/do not .*promise a callback/i);
     expect(pcpDirector.filedForCurrentPatient(callId)).toBeUndefined();
   });
+
+  it.each([400, 422])('caches an unassigned payload refusal (HTTP %s)', async (statusCode) => {
+    ticketing.createTicket
+      .mockResolvedValueOnce({ success: false, statusCode: 400, error: 'Missing required information: office.' })
+      .mockResolvedValueOnce({ success: false, statusCode, error: 'Payload refused.' });
+    const { file } = patientCall();
+    await file('My glasses broke.');
+    const repeated = await file('My glasses broke.');
+
+    expect(repeated).toMatchObject({ success: false, error: 'Payload refused.' });
+    expect(ticketing.createTicket).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([408, 429, 401, 403, 409, 503])(
+    'allows a later filing after the unassigned retry receives HTTP %s',
+    async (statusCode) => {
+      ticketing.createTicket
+        .mockResolvedValueOnce({ success: false, statusCode: 400, error: 'Missing required information: office.' })
+        .mockResolvedValueOnce({ success: false, statusCode, error: 'Temporarily unavailable.' })
+        .mockResolvedValueOnce({ success: true, ticketNumber: 'VA-TEST-122' });
+      const { callId, file } = patientCall();
+      const result = await file('My glasses broke.');
+
+      expect(result.success).toBe(false);
+      expect(ticketing.createTicket).toHaveBeenCalledTimes(2);
+      expect(pcpDirector.filedForCurrentPatient(callId)).toBeUndefined();
+
+      const recovered = await file('My glasses broke.');
+      expect(recovered).toMatchObject({ success: true, ticketNumber: 'VA-TEST-122' });
+      expect(ticketing.createTicket).toHaveBeenCalledTimes(3);
+      const payloads = ticketing.createTicket.mock.calls.map(([params]) => params);
+      expect(payloads[2].idempotencyKey).toBe(payloads[0].idempotencyKey);
+    },
+  );
 });
