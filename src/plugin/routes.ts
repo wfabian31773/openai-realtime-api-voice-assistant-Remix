@@ -2,8 +2,8 @@
  * HTTP surface for /api/plugin/v1.
  *
  * Bearer tokens (si.<jti>.<secret>), scopes, PLUGIN_WRITES_ENABLED off by
- * default. Writes create a pending contact_approvals row; nothing is sent
- * until a human approves it and commit_contact consumes the 5-minute token.
+ * default. Contact writes require approval and a confirm token; the explicit
+ * bot-only calls:direct scope also permits immediate open-line calls.
  */
 
 import type { Express, NextFunction, Request, Response } from "express";
@@ -22,7 +22,10 @@ import {
   reapStaleSending,
   rejectContact,
 } from "./approvals";
-import { hashPayload } from "./tokens";
+import { hashPayload, hashSecret } from "./tokens";
+import { createLiveCallSender, placeLiveCall, placeDirectCall, type LiveCallSender } from "./liveCalls";
+import { liveCallRegistry, type LiveCallRegistry } from "./liveSessions";
+import type { DialerLock } from "../runtime/outbound/scheduler";
 import { checkTwilioSignature, type WebhookRequest } from "../runtime/voiceWebhook";
 import { agentHealth, emptyFleetReader, listAgents, outboundStatus, type AgentSource, type FleetReader } from "./reads";
 import { evaluateAndEnqueueCall, identityFromPreparePayload, siAssistantDialingProblem } from "./callEnqueue";
@@ -31,7 +34,7 @@ import { createGraphMail, sendApprovedEmail, type GraphMail } from "./email";
 import { createCallbackReporter, type CallbackReporter } from "./callbackReport";
 import { flushOutboxRow, persistTakenMessage } from "./messageOutbox";
 import type { OutboundStore } from "../runtime/outbound/store";
-import type { PluginAuditOutcome } from "./audit";
+import { directCallAuditDetails, sanitizeAuditEntry, type PluginAuditEntry, type PluginAuditOutcome } from "./audit";
 
 export interface PluginApiDeps {
   store: PluginStore;
@@ -41,11 +44,16 @@ export interface PluginApiDeps {
   now?: () => Date;
   outboundStore?: OutboundStore;
   smsSender?: SmsSender | null;
+  liveCallSender?: LiveCallSender | null;
+  liveCalls?: LiveCallRegistry;
+  liveCallLock?: DialerLock;
   graphMail?: GraphMail | null;
   callbackReporter?: CallbackReporter | null;
 }
 
 type AuthedRequest = Request & { pluginAuth?: VerifiedPluginToken };
+
+const DIRECT_AUDIT_TIMEOUT_MS = 250;
 
 function envOf(deps: PluginApiDeps): Record<string, string | undefined> {
   return deps.env ?? process.env;
@@ -58,22 +66,44 @@ async function audit(
   tool: string,
   outcome: PluginAuditOutcome,
   httpStatus: number,
-  extra?: { approvalId?: string | null; ticketId?: string | null },
+  extra?: { approvalId?: string | null; ticketId?: string | null; reason?: string },
 ): Promise<void> {
-  if (!auth) return;
+  const direct = req.route?.path === "/api/plugin/v1/calls/direct";
+  if (!auth && !direct) return;
+  const entry: PluginAuditEntry = {
+    tokenJti: auth?.jti ?? parseBearerToken(req.headers.authorization)?.jti ?? "unauthenticated",
+    tool: direct ? "direct_call" : tool,
+    route: typeof req.route?.path === "string" ? req.route.path : req.path,
+    method: req.method,
+    approvalId: extra?.approvalId ?? null,
+    ticketId: extra?.ticketId ?? null,
+    outcome,
+    httpStatus,
+    ...(direct ? {
+      details: directCallAuditDetails(req.body, extra?.reason ?? tool),
+      createdAt: (deps.now ?? (() => new Date()))(),
+    } : {}),
+  };
+  let timeout: ReturnType<typeof setTimeout> | undefined;
   try {
-    await deps.store.writeAudit({
-      tokenJti: auth.jti,
-      tool,
-      route: req.path,
-      method: req.method,
-      approvalId: extra?.approvalId ?? null,
-      ticketId: extra?.ticketId ?? null,
-      outcome,
-      httpStatus,
-    });
+    if (direct) {
+      // A stalled audit database must not hold a direct-call response open.
+      await Promise.race([
+        deps.store.writeAudit(entry),
+        new Promise<never>((_, reject) => {
+          timeout = setTimeout(() => reject(new Error("audit write timed out")), DIRECT_AUDIT_TIMEOUT_MS);
+        }),
+      ]);
+    } else await deps.store.writeAudit(entry);
   } catch {
-    console.error("[plugin-audit] failed to write audit row");
+    if (direct) {
+      // Preserve a PHI-free attempt log even if the audit database is down.
+      console.error("[plugin-audit] direct attempt (database unavailable)", {
+        ...sanitizeAuditEntry(entry), at: entry.createdAt?.toISOString(),
+      });
+    } else console.error("[plugin-audit] failed to write audit row");
+  } finally {
+    if (timeout !== undefined) clearTimeout(timeout);
   }
 }
 
@@ -112,15 +142,19 @@ function enqueueHttpStatus(reason: string): number {
 
 export function mountPluginApi(app: Express, deps: PluginApiDeps): void {
   const fleet = deps.fleet ?? emptyFleetReader();
+  const liveCalls = deps.liveCalls ?? liveCallRegistry;
+  const liveSender = () => deps.liveCallSender === undefined ? createLiveCallSender(envOf(deps)) : deps.liveCallSender;
 
   const requireAuth = async (req: AuthedRequest, res: Response, next: NextFunction) => {
     const parsed = parseBearerToken(req.headers.authorization);
     if (!parsed) {
+      if (req.route?.path === "/api/plugin/v1/calls/direct") await audit(deps, undefined, req, "auth", "denied", 401);
       jsonError(res, 401, "Missing or invalid Bearer token");
       return;
     }
     const auth = await verifyStoredToken(deps.store, parsed, (deps.now ?? (() => new Date()))());
     if (!auth) {
+      if (req.route?.path === "/api/plugin/v1/calls/direct") await audit(deps, undefined, req, "auth", "denied", 401);
       jsonError(res, 401, "Invalid, expired, or revoked token");
       return;
     }
@@ -147,6 +181,177 @@ export function mountPluginApi(app: Express, deps: PluginApiDeps): void {
   };
 
   const v1 = "/api/plugin/v1";
+
+  // Existing approval sessions still require contacts:commit. A direct-only
+  // token can control only its own direct sessions through the same routes.
+  const requireLiveScope = (req: AuthedRequest, res: Response, next: NextFunction) => {
+    const owned = liveCalls.owned(req.params.sessionId, req.pluginAuth!.jti);
+    if (owned?.directCall && hasScope(req.pluginAuth?.scopes, "calls:direct")) { next(); return; }
+    requireScope("contacts:commit")(req, res, next);
+  };
+
+  // TODO(Wayne): calling-hours (9 AM–8 PM PT) intentionally not enforced on
+  // direct calls per Wayne; revisit.
+  app.post(`${v1}/calls/direct`, requireAuth, requireScope("calls:direct"), requireWrites, async (req: AuthedRequest, res) => {
+    res.setHeader("Cache-Control", "no-store");
+    const refuse = async (status: number, reason: string) => {
+      await audit(deps, req.pluginAuth, req, "direct_call", "denied", status, { reason });
+      res.status(status).json({ error: reason, reason, outcome: "not_sent" });
+    };
+    if (hasScope(req.pluginAuth!.scopes, "contacts:approve")) { await refuse(403, "bot_only"); return; }
+    const { phone, purpose, name } = req.body ?? {};
+    if (typeof phone !== "string" || !/^(?:\d{10}|\+1\d{10})$/.test(phone.trim())) {
+      await refuse(400, "phone must be a US 10-digit or +1 E.164 number"); return;
+    }
+    if (typeof purpose !== "string" || !purpose.trim() || purpose.length > 4000) {
+      await refuse(400, "purpose must contain 1 to 4000 characters"); return;
+    }
+    if (name !== undefined && (typeof name !== "string" || !name.trim() || name.length > 100)) {
+      await refuse(400, "name must contain 1 to 100 characters"); return;
+    }
+    try {
+      const sender = liveSender();
+      if (!sender || !deps.outboundStore) { await refuse(503, "direct_call_unavailable"); return; }
+      const result = await placeDirectCall({
+        store: deps.outboundStore, plugin: deps.store, sender, sessions: liveCalls, env: envOf(deps),
+      }, { phone: `+1${phone.trim().slice(-10)}`, purpose: purpose.trim(), name: name?.trim(), tokenJti: req.pluginAuth!.jti },
+      (deps.now ?? (() => new Date()))());
+      if (!result.ok) {
+        if (!result.mayHaveSent) { await refuse(result.reason === "do_not_contact" ? 409 : 503, result.reason); return; }
+        await audit(deps, req.pluginAuth, req, "direct_call", "unknown", 502, { reason: result.reason });
+        res.status(502).json({ error: result.reason, reason: result.reason, outcome: "unknown", sessionId: result.sessionId });
+        return;
+      }
+      res.json({ status: "live", sessionId: result.sessionId, callSid: result.callSid });
+      void audit(deps, req.pluginAuth, req, "direct_call", "committed", 200, { reason: "placed" });
+    } catch {
+      await refuse(503, "direct_call_unavailable");
+    }
+  });
+
+  app.get(`${v1}/capabilities`, requireAuth, requireScope("fleet:read"), async (req: AuthedRequest, res) => {
+    res.json({ liveCalls: true, confirmTokenHandoff: true, smsHoursEnforced: true });
+    await audit(deps, req.pluginAuth, req, "capabilities", "ok", 200);
+  });
+
+  app.get(`${v1}/contact_requests/:id/confirm_token`, requireAuth, requireScope("contacts:commit"), async (req: AuthedRequest, res) => {
+    res.setHeader("Cache-Control", "no-store");
+    const row = await deps.store.getApproval(req.params.id);
+    if (!row || row.tokenJti !== req.pluginAuth!.jti) {
+      jsonError(res, 404, "Contact request not found");
+      await audit(deps, req.pluginAuth, req, "confirm_token", "denied", 404);
+      return;
+    }
+    const taken = await deps.store.takeConfirmToken(row.id, req.pluginAuth!.jti, (deps.now ?? (() => new Date()))());
+    if (!taken) {
+      jsonError(res, 409, "Confirmation token is unavailable, used, or expired");
+      await audit(deps, req.pluginAuth, req, "confirm_token", "denied", 409, { approvalId: row.id });
+      return;
+    }
+    res.json({ confirmToken: taken.confirmToken, expiresAt: taken.expiresAt.toISOString() });
+    await audit(deps, req.pluginAuth, req, "confirm_token", "ok", 200, { approvalId: row.id });
+  });
+
+  app.get(`${v1}/live_calls/:sessionId`, requireAuth, requireLiveScope, requireWrites, async (req: AuthedRequest, res) => {
+    res.setHeader("Cache-Control", "no-store");
+    const session = liveCalls.owned(req.params.sessionId, req.pluginAuth!.jti);
+    if (!session) { jsonError(res, 404, "Live call not found"); return; }
+    const after = req.query.after === undefined ? -1 : Number(req.query.after);
+    if (!Number.isSafeInteger(after) || after < -1) { jsonError(res, 400, "after must be a turn index"); return; }
+    res.json(liveCalls.view(session, after));
+    await audit(deps, req.pluginAuth, req, "live_call_status", "ok", 200, { approvalId: session.approvalId });
+  });
+
+  app.post(`${v1}/live_calls/:sessionId/instruct`, requireAuth, requireLiveScope, requireWrites, async (req: AuthedRequest, res) => {
+    const session = liveCalls.owned(req.params.sessionId, req.pluginAuth!.jti);
+    if (!session) { jsonError(res, 404, "Live call not found"); return; }
+    const text = req.body?.text;
+    if (typeof text !== "string" || !text.trim() || text.length > 2000) {
+      jsonError(res, 400, "text must contain 1 to 2000 characters"); return;
+    }
+    if (!session.controls || session.endedAt) { jsonError(res, 409, "Live session is not running"); return; }
+    try { session.controls.instruct(text); }
+    catch { jsonError(res, 502, "Could not deliver guidance"); return; }
+    res.json({ status: "instructed" });
+    await audit(deps, req.pluginAuth, req, "live_call_instruct", "ok", 200, { approvalId: session.approvalId });
+  });
+
+  app.post(`${v1}/live_calls/:sessionId/end`, requireAuth, requireLiveScope, requireWrites, async (req: AuthedRequest, res) => {
+    const session = liveCalls.owned(req.params.sessionId, req.pluginAuth!.jti);
+    if (!session) { jsonError(res, 404, "Live call not found"); return; }
+    if (!session.endedAt) {
+      const sender = liveSender();
+      if (!sender || !session.callSid) { jsonError(res, 503, "Call control is unavailable"); return; }
+      try { await sender.endCall(session.callSid); }
+      catch { jsonError(res, 502, "Could not end the call"); return; }
+      const end = session.controls?.end;
+      end?.();
+      liveCalls.setStatus(session.sessionId, "completed");
+    }
+    res.json({ status: session.status });
+    await audit(deps, req.pluginAuth, req, "live_call_end", "ok", 200, { approvalId: session.approvalId });
+  });
+
+  app.post(`${v1}/commit_call_live`, requireAuth, requireScope("contacts:commit"), requireWrites, async (req: AuthedRequest, res) => {
+    const confirmToken = typeof req.body?.confirmToken === "string" ? req.body.confirmToken : "";
+    const now = (deps.now ?? (() => new Date()))();
+    // A live call and its controls belong only to the bot that prepared it.
+    // Check immutable owner/channel before consuming another kind of approval.
+    if (/^[a-f0-9]{64}$/.test(confirmToken)) {
+      const row = await deps.store.findApprovalByConfirmHash(hashSecret(confirmToken));
+      if (row && row.tokenJti !== req.pluginAuth!.jti) {
+        jsonError(res, 404, "Contact request not found");
+        await audit(deps, req.pluginAuth, req, "commit_call_live", "denied", 404);
+        return;
+      }
+      if (row && row.channel !== "call") {
+        jsonError(res, 400, "A call approval is required");
+        await audit(deps, req.pluginAuth, req, "commit_call_live", "denied", 400);
+        return;
+      }
+    }
+    const consumed = await consumeConfirmToken(deps.store, confirmToken, now);
+    if (!consumed.ok) {
+      jsonError(res, consumed.status, consumed.error);
+      await audit(deps, req.pluginAuth, req, "commit_call_live", "denied", consumed.status);
+      return;
+    }
+    const row = consumed.approval;
+    const extra = { approvalId: row.id, ticketId: row.ticketId };
+    let mayHaveSent = false;
+    try {
+      let reason: string | null = hashPayload(row.payload) !== row.payloadHash ? "payload_hash_mismatch" : null;
+      const sender = liveSender();
+      if (!reason && !deps.outboundStore) reason = "no_outbound_store";
+      if (!reason && !sender) reason = "no_twilio";
+      if (!reason) {
+        const result = await placeLiveCall({
+          store: deps.outboundStore!, sender: sender!, sessions: liveCalls, env: envOf(deps), lock: deps.liveCallLock,
+        }, row, now);
+        if (result.ok) {
+          mayHaveSent = true;
+          const approval = await markCommitted(deps.store, row.id, { callSid: result.callSid, sessionId: result.sessionId, live: true }, now);
+          if (!approval) throw new Error("commit_failed");
+          res.json({ status: "live", approval: publicApproval(approval), callSid: result.callSid, sessionId: result.sessionId });
+          await audit(deps, req.pluginAuth, req, "commit_call_live", "committed", 200, extra);
+          return;
+        }
+        reason = result.reason;
+        mayHaveSent = result.mayHaveSent;
+      }
+      const status = mayHaveSent ? 502 : reason === "payload_hash_mismatch" ? 409 : enqueueHttpStatus(reason!);
+      if (mayHaveSent) await markUnknown(deps.store, row.id, { reason }, now);
+      else await markFailed(deps.store, row.id, { reason }, now);
+      jsonError(res, status, mayHaveSent ? "Call outcome is unknown" : `Call was not placed: ${reason}`, mayHaveSent ? "unknown" : "not_sent");
+      await audit(deps, req.pluginAuth, req, "commit_call_live", mayHaveSent ? "unknown" : "failed", status, extra);
+    } catch {
+      const outcome = mayHaveSent ? "unknown" : "not_sent";
+      const mark = mayHaveSent ? markUnknown : markFailed;
+      await mark(deps.store, row.id, { reason: mayHaveSent ? "send_unknown" : "live_call_unavailable" }, now).catch(() => null);
+      jsonError(res, mayHaveSent ? 502 : 503, "Live call could not be completed", outcome);
+      await audit(deps, req.pluginAuth, req, "commit_call_live", mayHaveSent ? "unknown" : "failed", mayHaveSent ? 502 : 503, extra);
+    }
+  });
 
   app.get(`${v1}/health`, requireAuth, requireScope("fleet:read"), async (req: AuthedRequest, res) => {
     res.json({ ok: true, ...agentHealth(envOf(deps)) });
@@ -507,6 +712,7 @@ async function executeApproved(
       sender,
       { phone: String(approval.payload.phone ?? ""), body: String(approval.payload.body ?? "") },
       envOf(deps),
+      now,
     );
     if (!sent.ok) {
       if (sent.mayHaveSent) {

@@ -101,6 +101,8 @@ const META = { callId: 'call-c142', callSid: SID, callerPhone: '+15551234567' };
 
 beforeEach(() => {
   h.lookupByPhone.mockReset().mockResolvedValue(PHONE_MATCH as any);
+  // The real name+DOB reader labels a successful match with its own method;
+  // returning a phone candidate here would bypass the privacy discriminator.
   h.lookupByNameAndDOB.mockReset().mockResolvedValue({ ...PHONE_MATCH, matchedBy: 'name_and_dob', identity: { unique: true, candidateCount: 1, candidates: [] } } as any);
   vi.spyOn(console, 'log').mockImplementation(() => undefined);
 });

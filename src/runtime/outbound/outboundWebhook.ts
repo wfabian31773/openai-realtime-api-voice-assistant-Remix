@@ -33,6 +33,7 @@
  * ─────────────────────────────────────────────────────────────────────────────
  */
 
+import { liveCallRegistry, type LiveCallRegistry, type LiveCallStatus } from "../../plugin/liveSessions";
 import { computeRuntimeReadiness } from "../readiness";
 import type { CallSessionRegistry } from "../sessionRegistry";
 import {
@@ -63,6 +64,7 @@ export interface OutboundWebhookDeps {
   /** The policy for a registered outbound lane, or null for any other slug. */
   policyFor: (slug: string) => Promise<OutboundLanePolicy | null> | OutboundLanePolicy | null;
   now?: () => Date;
+  liveCalls?: LiveCallRegistry;
 }
 
 function gate(req: WebhookRequest, env: Record<string, string | undefined>): WebhookResponse | null {
@@ -100,6 +102,10 @@ export async function handleOutboundAnswer(
     return hangup();
   }
 
+  const live = liveSessionFor(slug, req, deps);
+  if (live === false) return hangup();
+  if (live) (deps.liveCalls ?? liveCallRegistry).setStatus(live.sessionId, "in_progress");
+
   const answeredBy = req.body.AnsweredBy ?? "";
   const now = (deps.now ?? (() => new Date()))();
 
@@ -121,6 +127,7 @@ export async function handleOutboundAnswer(
   }
 
   if (!computeRuntimeReadiness(deps.env).liveReady) {
+    if (live) (deps.liveCalls ?? liveCallRegistry).setStatus(live.sessionId, "failed");
     await deps.store.finishAttempt(attemptId, { status: "not_ready", answeredBy, ended: false });
     await deps.store.settleContact(contactId, "no_answer", {
       onlyIfCalling: true,
@@ -138,6 +145,7 @@ export async function handleOutboundAnswer(
     callerPhone: req.body.To ?? "",
     dialedNumber: req.body.From ?? "",
     outbound: { campaignKey: policy.campaignKey, contactId, attemptId },
+    ...(live ? { liveSessionId: live.sessionId } : {}),
   });
   const { host } = resolveRequestBase(req);
   return twimlResponse(
@@ -164,9 +172,23 @@ export async function handleOutboundStatus(
   if (gated) return gated;
   const ok: WebhookResponse = { status: 204, contentType: "text/plain", body: "" };
 
+  // A lost live session (e.g. restart) only skips the in-memory update; the
+  // signed, URL-bound callback still settles the durable attempt below.
+  const live = liveSessionFor(slug, req, deps);
+  const status = req.body.CallStatus ?? "";
+  if (live) {
+    const mapped: Record<string, LiveCallStatus> = {
+      queued: "dialing", initiated: "dialing", ringing: "ringing", answered: "in_progress", "in-progress": "in_progress",
+      completed: "completed", busy: "no_answer", "no-answer": "no_answer", failed: "failed", canceled: "failed",
+    };
+    if (mapped[status]) {
+      const end = TERMINAL.has(status) ? live.controls?.end : undefined;
+      (deps.liveCalls ?? liveCallRegistry).setStatus(live.sessionId, mapped[status]);
+      end?.();
+    }
+  }
   const policy = await deps.policyFor(slug);
   const { contactId, attemptId } = queryOf(req);
-  const status = req.body.CallStatus ?? "";
   if (!policy || !contactId || !attemptId || !TERMINAL.has(status)) return ok;
 
   const now = (deps.now ?? (() => new Date()))();
@@ -194,4 +216,16 @@ export async function handleOutboundStatus(
     { onlyIfCalling: true, onlyIfCurrentAttempt: attemptId, nextAttemptAt: nextLookAt(now, "too_soon", policy) },
   );
   return ok;
+}
+
+/** Called only after signature verification; the URL binds all three ids. */
+function liveSessionFor(slug: string, req: WebhookRequest, deps: OutboundWebhookDeps) {
+  const id = new URL(req.originalUrl, "https://x.invalid").searchParams.get("liveSession");
+  if (!id) return null;
+  const registry = deps.liveCalls ?? liveCallRegistry;
+  const session = registry.get(id);
+  const { contactId, attemptId } = queryOf(req);
+  if (slug !== "si-assistant" || !session || session.contactId !== contactId || session.attemptId !== attemptId ||
+      !registry.bindCall(id, req.body.CallSid ?? "")) return false;
+  return session;
 }

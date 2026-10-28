@@ -1,4 +1,5 @@
 import OpenAI from 'openai';
+import { answeredWithoutTicket } from './answeredCallDisposition';
 import { storage } from '../../server/storage';
 import { redactGraderResults } from './phiSanitizer';
 import { classifyAsk, isHumanRequest, humanRequestCapFor } from './conversationLoopGuard';
@@ -17,6 +18,27 @@ export interface QualityAnalysis {
   patientConcerns: string[];
 }
 
+/**
+ * Keep the stored call summary extractive. A generated summary can turn a
+ * question into an appointment, upgrade a tentative detail into a fact, or
+ * invent an outcome. These excerpts preserve exactly what the speakers said;
+ * the model still grades the other quality fields.
+ */
+export function transcriptGroundedSummary(transcript: string): string {
+  // Split on speaker boundaries, not newlines inside a spoken turn. Keep all
+  // caller turns: their request and corrections often come after "hello".
+  // Include the last two agent turns so a goodbye cannot displace the result.
+  // Never silently clip a quote: its tail may negate or correct its beginning.
+  const turns = [...transcript.matchAll(/^[ \t]*(CALLER|PATIENT|USER|AGENT)[ \t]*:[ \t]*([\s\S]*?)(?=^[ \t]*(?:CALLER|PATIENT|USER|AGENT)[ \t]*:|(?![\s\S]))/gim)]
+    .map((match) => ({ speaker: match[1].toUpperCase(), text: match[2].trim() }))
+    .filter((turn) => turn.text);
+  const finalAgents = turns.filter((turn) => turn.speaker === 'AGENT').slice(-2);
+  const parts = turns
+    .filter((turn) => turn.speaker !== 'AGENT' || finalAgents.includes(turn))
+    .map((turn) => `${turn.speaker === 'AGENT' ? 'Agent' : 'Caller'} said: “${turn.text}”`);
+  return parts.length ? parts.join(' ') : 'No caller or agent statement was captured in the transcript.';
+}
+
 export interface GraderResult {
   grader: string;
   pass: boolean;
@@ -32,6 +54,7 @@ export interface DeterministicGraderInput {
   transferredToHuman: boolean;
   ticketNumber: string | null;
   agentSlug: string | null;
+  toolTimeline?: unknown;
   totalTurns: number | null;
   interruptionCount: number | null;
   truncationCount: number | null;
@@ -628,6 +651,9 @@ function gradeLanguageConfigFault(input: DeterministicGraderInput): GraderResult
 }
 
 function gradeTicketRequiredVsCreated(input: DeterministicGraderInput): GraderResult {
+  if (input.agentSlug === 'no-ivr' && !input.ticketNumber && answeredWithoutTicket(input.toolTimeline)) {
+    return { grader: 'ticket_required_vs_created', pass: true, score: 1, reason: 'Question fully answered; no ticket or callback needed', metadata: { answeredWithoutTicket: true } };
+  }
   const transcriptLower = input.transcript.toLowerCase();
   const lines = input.transcript.split('\n');
   const callerLines = lines.filter(l => /^(caller|patient|user):/i.test(l.trim())).join(' ').toLowerCase();
@@ -1222,6 +1248,9 @@ function gradeProviderMustEscalate(input: DeterministicGraderInput): GraderResul
 }
 
 function gradeActionableRequestNeedsTicket(input: DeterministicGraderInput): GraderResult {
+  if (input.agentSlug === 'no-ivr' && !input.ticketNumber && answeredWithoutTicket(input.toolTimeline)) {
+    return { grader: 'actionable_request_needs_ticket', pass: true, score: 1, reason: 'Question fully answered; no ticket or callback needed', metadata: { answeredWithoutTicket: true } };
+  }
   const transcriptLower = input.transcript.toLowerCase();
   const lines = input.transcript.split('\n');
   const callerLines = lines.filter(l => /^(caller|patient|user):/i.test(l.trim())).join(' ').toLowerCase();
@@ -1619,8 +1648,10 @@ export class CallGradingService {
           return null;
         }
       }
-      const systemPrompt = `You are an expert call quality analyst for a healthcare ophthalmology practice. 
-Analyze the following call transcript between a patient and an AI voice agent.
+      const systemPrompt = `You are an expert call quality analyst for a healthcare ophthalmology practice.
+Analyze the following call transcript between a caller and an AI voice agent.
+
+SUMMARY GROUNDING: Only use facts explicitly present in the transcript. Do not infer a request, appointment, date, identity, diagnosis, action, or outcome. Treat agent statements as statements made by the agent, not as independently verified facts. If a detail is unclear or missing, omit it. The stored summary is guarded to transcript excerpts after your analysis.
 
 Evaluate based on:
 1. PATIENT SENTIMENT - How did the patient feel during and at the end of the call?
@@ -1674,6 +1705,7 @@ Respond with a JSON object only, no other text:
       }
 
       const analysis: QualityAnalysis = JSON.parse(content);
+      analysis.summary = transcriptGroundedSummary(transcript);
       
       if (!['satisfied', 'neutral', 'frustrated', 'irate'].includes(analysis.sentiment)) {
         analysis.sentiment = 'neutral';
@@ -1860,7 +1892,7 @@ Respond with a JSON object only, no other text:
   // transcript, which also repairs the rows graded against a partial one
   // (9 of 9 "missing reason" verdicts on 09-09 contradict the transcript now
   // stored).
-  static readonly CURRENT_GRADER_VERSION = 10;
+  static readonly CURRENT_GRADER_VERSION = 11;
 
   /** Re-run the deterministic graders on calls graded under an older
    *  grader version. Deterministic-only — the LLM analysis is not re-run,
@@ -1907,6 +1939,7 @@ Respond with a JSON object only, no other text:
         transferredToHuman: callLog.transferredToHuman || false,
         ticketNumber: callLog.ticketNumber || null,
         agentSlug: callLog.agentUsed || null,
+        toolTimeline: callLog.toolTimeline,
         totalTurns: callLog.totalTurns ?? null,
         interruptionCount: callLog.interruptionCount ?? null,
         truncationCount: callLog.truncationCount ?? null,

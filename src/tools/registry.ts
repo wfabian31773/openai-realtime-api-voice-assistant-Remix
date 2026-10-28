@@ -1,4 +1,5 @@
 import { prepareTicketIdentity } from './ticketIdentity';
+import { detectCrossQueue } from './queueRouting';
 /**
  * THE TOOL LIBRARY.
  *
@@ -298,7 +299,11 @@ export async function runTool(
     // DOB refusal belongs to the handler: it carries the diagnostic/fix and
     // decideDobEscape's per-call ask-once budget. This enrichment must not
     // introduce a second, unbounded refusal in front of it.
-    if (prepared.missing && prepared.missing !== 'date_of_birth' && name !== 'file_optical_ticket') {
+    // Surgery can file into Optical too; its handler owns the same bounded
+    // office refusal for those redirects, including the exhausted-ask exit.
+    const redirectedToOptical = name === 'file_surgery_ticket' && prepared.missing === 'location' &&
+      detectCrossQueue(String(input.request_description ?? ''), 2)?.departmentId === 1;
+    if (prepared.missing && prepared.missing !== 'date_of_birth' && name !== 'file_optical_ticket' && !redirectedToOptical) {
       return missing([prepared.missing], prepared.message!);
     }
   }

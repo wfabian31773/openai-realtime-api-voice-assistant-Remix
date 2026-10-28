@@ -1,3 +1,5 @@
+import { appointmentReadPolicy, appointmentReadReminder } from '../services/appointmentReadPolicy';
+import { appointmentAccess } from '../services/appointmentAccess';
 import { RealtimeAgent, tool } from '@openai/agents/realtime';
 import { z } from 'zod';
 import { buildPcpPublicKnowledgePrompt } from '../config/azulVisionKnowledge';
@@ -6,6 +8,7 @@ import { escalationDetailsMap } from '../services/escalationStore';
 import { markCallConcluded } from '../services/callConclusion';
 import { recordingExecute } from '../services/toolTimeline';
 import { keepFieldDescriptions } from '../services/toolFieldDescriptions';
+import { EMAIL_CONFIRMATION_DESCRIPTION, LAST_NAME_FIELD_DESCRIPTION } from '../tools/contactCaptureGuidance';
 import { withToolDirection } from '../services/toolDirection';
 import { scheduleLookupService } from '../services/scheduleLookupService';
 import {
@@ -290,6 +293,7 @@ either answer from an approved lookup, file a request, or connect them to the
 PCP team. Nothing else.
 
 ## Conversation Flow
+${appointmentReadReminder('lookup_patient_appointments')}
 ### The director decides, not you
 Ask only the single next question record_pcp_intake gives you, and never re-ask
 something already stored. It decides which fields are missing, whether a
@@ -737,7 +741,7 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
        * speech recognition, and a `.email()` here would refuse the whole
        * intake call rather than one field.
        */
-      callerEmail: z.string().min(3).optional(),
+      callerEmail: z.string().min(3).optional().describe(EMAIL_CONFIRMATION_DESCRIPTION),
       deliveryPreference: z.string().min(1).optional(),
       /**
        * WHERE A RECORDS REQUEST GOES. Operator, 2026-09-08 — his own test
@@ -769,7 +773,7 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
         + 'ask "who is the call about".',
       ),
       patientFirstName: z.string().min(1).optional(),
-      patientLastName: z.string().min(1).optional(),
+      patientLastName: z.string().min(1).optional().describe(LAST_NAME_FIELD_DESCRIPTION),
       patientDob: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
       patientMrn: z.string().min(1).optional(),
     }).strict(),
@@ -866,7 +870,7 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
 
   const appointmentLookup = recordedTool({
     name: 'lookup_patient_appointments',
-    description: 'Look up schedule/attendance for a patient-specific request after the required caller and patient context is collected.',
+    description: 'Read schedule/attendance after required intake. ' + appointmentReadPolicy('lookup_patient_appointments'),
     parameters: z.object({
       patientFirstName: z.string().min(1),
       patientLastName: z.string().min(1),
@@ -968,6 +972,7 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
         return {
           success: true,
           patientFound: context.patientFound,
+          ...appointmentAccess(context, confirmed),
           upcomingAppointments: context.upcomingAppointments,
           pastAppointments: context.pastAppointments,
         };

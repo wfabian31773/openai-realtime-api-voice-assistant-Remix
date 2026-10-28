@@ -14,6 +14,7 @@ import { ticketIdentityFields, validatedPatientFor } from './ticketIdentity';
  * whether the call is optical.
  */
 import { registerTool, missing, refuseDob, dobRefusalCopy, type ToolResult } from './registry';
+import { EMAIL_FIELD_DESCRIPTION, LAST_NAME_ASK, LAST_NAME_FIELD_DESCRIPTION } from './contactCaptureGuidance';
 // lookup_patient, resolve_location and check_open_tickets are registered by the
 // shared module. Importing it here is what puts them in the registry for this
 // queue — the same three definitions Surgery uses, not copies of them.
@@ -120,7 +121,7 @@ registerTool({
     type: 'object',
     properties: {
       first_name: { type: 'string', description: "Patient's first name.", askAs: 'May I please have the first name?' },
-      last_name: { type: 'string', description: "Patient's last name.", askAs: 'May I please have the last name?' },
+      last_name: { type: 'string', description: LAST_NAME_FIELD_DESCRIPTION, askAs: LAST_NAME_ASK },
       /**
        * LEAD THE ASK, AND ALWAYS SEND IT BACK. Two separate 2026-09-03 findings
        * in one field; see sharedPatientTools for the operator's wording.
@@ -142,7 +143,7 @@ registerTool({
       request_description: { type: 'string', description: "What they need, in their words.", askAs: 'What can we help you with?' },
       request_reason_id: { type: 'string', description: 'From classify_optical_request. Omit if it could not classify.' },
       provider: { type: 'string', description: 'Their doctor, if it came up. Optional — looked up if omitted.' },
-      email: { type: 'string', description: 'Optional — looked up if omitted.' },
+      email: { type: 'string', description: EMAIL_FIELD_DESCRIPTION },
       call_sid: { type: 'string', description: 'The call id, so a retry cannot double-file.' },
       caller_phone: { type: 'string', description: 'The number they called from, if different from the callback number.' },
       dialed_number: { type: 'string', description: 'The number they dialled.' },

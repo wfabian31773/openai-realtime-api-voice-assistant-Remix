@@ -222,6 +222,13 @@ describe('the rulings the finding named are among them', () => {
 describe('validation is the SDK zod parse, as it was', () => {
   const REFUSED = 'Invalid JSON input for tool';
 
+  it('no-ivr: the runtime dispatches the answered-only disposition', async () => {
+    const lane = built.get('no-ivr')!.lane;
+    const result = await lane.agent.dispatch('record_answered_question', {});
+    expect(result.ok).toBe(true);
+    expect(JSON.parse(result.output)).toMatchObject({ success: true, ticketCreated: false, callbackRequired: false });
+  });
+
   it('no-ivr: emit_decision still refuses a decision_type outside its enum', async () => {
     const lane = built.get('no-ivr')!.lane;
     const refused = await lane.agent.dispatch('emit_decision', { decision_type: 'not_a_type', value: 'x' });
@@ -253,8 +260,11 @@ describe('what the descriptions cost on the wire', () => {
    * unaffected; this is the first ceiling on the tools themselves.
    */
   it.each([
-    ['no-ivr', 12_500],
-    ['pcp', 6_400],
+    // Item #14 + main's appointment-access fields. Measured on the bound tools
+    // after that merge: no-ivr 13,113 chars; pcp 6,879 chars. The ceiling
+    // stays a ratchet, not a target — do not grow the descriptions to fill it.
+    ['no-ivr', 13_200],
+    ['pcp', 7_000],
   ] as const)('%s stays under %i characters', (slug, ceiling) => {
     expect(JSON.stringify(built.get(slug)!.lane.agent.tools).length).toBeLessThan(ceiling);
   });

@@ -49,10 +49,14 @@ describe('office labels are the Hub\'s, so routing does not change under the rea
   });
   it('uses the learned override where the prefix rule would be wrong', () => {
     expect(hubOfficeLabel('Azul Vision DTLA')).toBe('Downtown LA');
-    expect(hubOfficeLabel('Azul Vision Mission Hlls')).toBe('North Valley Eye');
+    expect(hubOfficeLabel('Azul Vision Mission Hlls')).toBe('Mission Hills');
     expect(hubOfficeLabel('Azul Vision Willow')).toBe('Long Beach Willow');
     expect(hubOfficeLabel('Atlantis Surgery Center At Montebello')).toBe('Montebello ASC');
     expect(hubOfficeLabel('Azul Vision Virtual Visit')).toBe('Virtual Visits');
+  });
+  it('speaks the current clinic name for a historical schedule label', () => {
+    expect(hubOfficeLabel('North Valley Eye')).toBe('Mission Hills');
+    expect(toScheduleRow(fact({ location_name: 'North Valley Eye' })).officeLocation).toBe('Mission Hills');
   });
   it('folds every offsite screening site under the DRS van, as the Hub did', () => {
     expect(hubOfficeLabel('Inland Empire Offside Fundus Screening')).toBe('Mobile DRS');

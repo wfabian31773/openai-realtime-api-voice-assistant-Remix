@@ -9,6 +9,31 @@ export interface Location {
   hours: string;
 }
 
+/** Retired clinic labels mapped to the name callers and staff use now. */
+export const RETIRED_CLINIC_NAMES: Readonly<Record<string, string>> = Object.freeze({
+  'north valley eye': 'Mission Hills',
+  magan: 'Covina',
+});
+
+/** Current clinic display name for a retired label; unknown names pass through. */
+export function currentClinicName(value: string | null | undefined): string | null {
+  if (typeof value !== 'string' || !value.trim()) return null;
+  const trimmed = value.trim();
+  const key = trimmed
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+  const core = key
+    .replace(/^(the|our|your)\s+/, '')
+    .replace(/^(azul vision|atlantis eyecare)\s+/, '')
+    .replace(/\s+(office|location|clinic)$/, '')
+    .trim();
+  const current = RETIRED_CLINIC_NAMES[key] ?? RETIRED_CLINIC_NAMES[core];
+  return typeof current === 'string' ? current : trimmed;
+}
+
 export const AZUL_VISION_LOCATIONS: Location[] = [
   { name: "Anaheim", address: "947 S. Anaheim Boulevard, Suite #120", city: "Anaheim", state: "CA", zip: "92805", phone: "(714) 991-4100", fax: "(714) 533-6800", hours: "Mon-Fri 8am-5pm, closed 12pm-1pm" },
   { name: "Covina", address: "420 W. Rowland Street", city: "Covina", state: "CA", zip: "91723", phone: "(626) 224-9980", fax: "(626) 470-4550", hours: "Mon-Fri 8am-5pm, closed 12pm-1pm" },
@@ -42,6 +67,13 @@ export const AZUL_VISION_LOCATIONS: Location[] = [
   { name: "Upland", address: "494 N. Mountain Ave", city: "Upland", state: "CA", zip: "91786", phone: "(909) 552-7200", fax: "(909) 552-7342", hours: "Mon-Fri 8am-5pm, closed 12pm-1pm" },
   { name: "West Hills", address: "7301 Medical Center Drive, Suite 301", city: "West Hills", state: "CA", zip: "91307", phone: "(818) 583-9115", fax: "(818) 583-9116", hours: "Mon-Fri 8am-5pm, closed 12pm-1pm" },
 ];
+
+function standardHoursFromClinicRows(): string {
+  const schedules = [...new Set(AZUL_VISION_LOCATIONS.map((location) => location.hours.trim()).filter(Boolean))];
+  if (schedules.length === 1) return schedules[0];
+  if (schedules.length > 1) return "Hours vary by location; use the hours listed on that clinic's row.";
+  return "Use the hours listed on each clinic's row.";
+}
 
 export const AZUL_VISION_SERVICES = {
   surgical: {
@@ -150,7 +182,7 @@ export const AZUL_VISION_KNOWLEDGE = {
   },
   
   partnerPractices: [
-    "North Valley Eye",
+    "Mission Hills",
     "Riverside Eye Partners", 
     "Atlantis Eyecare",
     "California Eye Specialists",
@@ -165,7 +197,7 @@ export const AZUL_VISION_KNOWLEDGE = {
   },
   
   businessHours: {
-    standard: "Monday-Friday, 8am-5pm (closed 12pm-1pm for lunch)",
+    standard: standardHoursFromClinicRows(),
     afterHours: "After-hours calls handled by answering service with next-business-day callback",
     holidays: "Closed on major holidays",
   },
@@ -406,9 +438,9 @@ When asking about locations, doctors, appointments, or medications:
 `;
 }
 
-export function buildCompactLocationReference(): string {
+export function buildCompactLocationReference(options: { includeHours?: boolean } = {}): string {
   return AZUL_VISION_LOCATIONS.map(loc => 
-    `${loc.name}: ${loc.address}, ${loc.city} ${loc.zip} | ${loc.phone}`
+    `${loc.name}: ${loc.address}, ${loc.city} ${loc.zip} | ${loc.phone}${options.includeHours ? ` | hours: ${loc.hours}` : ''}`
   ).join('\n');
 }
 

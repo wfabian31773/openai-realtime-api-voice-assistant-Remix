@@ -32,6 +32,12 @@ import { ticketIdentityFields } from './ticketIdentity';
  * NO HANDOFF. Operator ruling 2026-08-12: only PCP and Scheduling transfer.
  */
 import { registerTool, missing, refuseDob, dobRefusalCopy, type ToolResult } from './registry';
+import {
+  EMAIL_ASK,
+  EMAIL_FIELD_DESCRIPTION,
+  LAST_NAME_ASK,
+  LAST_NAME_FIELD_DESCRIPTION,
+} from './contactCaptureGuidance';
 import { str, isTwilioCallSid, normalizePhone } from './sharedPatientTools';
 import { decideDobEscape, dobStatusNote, dobEscapeMarker, type DobStatus } from './dobEscape';
 import { createTicketDurable, postFailureToolResult } from '../services/durableTicketFiling';
@@ -258,7 +264,7 @@ registerTool({
     type: 'object',
     properties: {
       first_name: { type: 'string', description: "Patient's first name.", askAs: 'May I please have the patient\'s first name?' },
-      last_name: { type: 'string', description: "Patient's last name.", askAs: 'May I please have the last name?' },
+      last_name: { type: 'string', description: LAST_NAME_FIELD_DESCRIPTION, askAs: LAST_NAME_ASK },
       /**
        * LEAD THE ASK, AND ALWAYS SEND IT BACK. Two separate 2026-09-03 findings
        * in one field; see sharedPatientTools for the operator's wording.
@@ -339,8 +345,8 @@ registerTool({
       provider: { type: 'string', description: 'The doctor they saw, if it came up.' },
       email: {
         type: 'string',
-        description: 'The email address, spelled out, when the patient chose to receive the form by email.',
-        askAs: "What's the email address? Please spell it out for me.",
+        description: EMAIL_FIELD_DESCRIPTION,
+        askAs: EMAIL_ASK,
       },
       form_channel: {
         type: 'string',
@@ -1143,8 +1149,8 @@ registerTool({
       },
       email: {
         type: 'string',
-        description: 'The email address, spelled out, when they chose email.',
-        askAs: "What's the email address? Please spell it out for me.",
+        description: EMAIL_FIELD_DESCRIPTION,
+        askAs: EMAIL_ASK,
       },
       call_sid: { type: 'string', description: 'The call id, so the request filed on this call is the one re-sent.' },
     },
