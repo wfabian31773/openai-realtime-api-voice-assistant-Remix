@@ -29,6 +29,7 @@
 import { registerTool, missing, refuseDob, dobRefusalCopy, type ToolResult } from './registry';
 import { EMAIL_FIELD_DESCRIPTION, LAST_NAME_ASK, LAST_NAME_FIELD_DESCRIPTION } from './contactCaptureGuidance';
 import { str, isTwilioCallSid, normalizePhone } from './sharedPatientTools';
+import { splitCallbackExtension } from '../utils/phone';
 import { decideDobEscape, dobStatusNote, dobEscapeMarker, type DobStatus } from './dobEscape';
 import { createTicketDurable, postFailureToolResult } from '../services/durableTicketFiling';
 import { loggableLookupError } from '../services/loggableTicketingError';
@@ -153,14 +154,15 @@ registerTool({
     const description = str(input.request_description);
     const callSid = str(input.call_sid);
 
-    const digits = phone.replace(/\D/g, '');
+    const { base: callbackBase, extension: callbackExtension } = splitCallbackExtension(phone);
+    const digits = callbackBase.replace(/\D/g, '');
     if (digits.length < 10) {
       return missing(['callback_number'], 'I only caught part of that number — can I get all ten digits?');
     }
     /**
      * THE CEILING THAT WAS MISSING, NOT JUST THE WRONG VALUE SENT.
      *
-     * A floor with no ceiling let a second number or an extension through as
+     * A floor with no ceiling let a second number through as
      * a plausible-looking phone. Sending it (even normalized) would have
      * filed a ticket with a callback number nobody could reach — worse than
      * the loud 400 it replaces, and invisible in the ticket count. 90-day
@@ -178,7 +180,7 @@ registerTool({
     if (digits.length > 11 || (digits.length === 11 && digits[0] !== '1')) {
       return missing(
         ['callback_number'],
-        "That's more digits than one phone number — can you give me just the callback number, without an extension or a second number?",
+        "That's more digits than one phone number — can you give me just the callback number, without a second number?",
       );
     }
 
@@ -444,7 +446,7 @@ registerTool({
       // days (their schema caps patientPhone at 20 chars, the raw string has
       // no upper bound). Safe format-wise: their own sendSMS() normalizer
       // strips non-digits and re-derives this same string before dialing out.
-      patientPhone: normalizePhone(phone),
+      patientPhone: normalizePhone(callbackBase),
       patientEmail: str(input.email) || undefined,
       preferredContactMethod: 'phone',
       // Omitted entirely when the escape was taken. create-ticket takes these
@@ -468,7 +470,9 @@ registerTool({
         agentUsed: 'tech',
         ...(callSid ? { callSid } : {}),
         // Staff-only. Never the description — that is an SMS body.
-        ...(dobStaffNote ? { transcript: dobStaffNote } : {}),
+        ...(dobStaffNote || callbackExtension
+          ? { transcript: [dobStaffNote, callbackExtension ? `Callback extension: ${callbackExtension}` : null].filter(Boolean).join('\n') }
+          : {}),
       },
       // Guarded: callSid can be a sentinel ("unknown", "latest", ...), never
       // a real Twilio SID, when the retry lands on someone else's key.

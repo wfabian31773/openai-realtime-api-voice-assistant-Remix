@@ -25,6 +25,9 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
+import { queueTicketOutboxMock } from '../testUtils/queueTicketOutbox';
+import { TicketOutboxService, type CreateTicketOutboxPayload } from '../services/ticketOutboxService';
+
 process.env.DATABASE_URL ||= 'postgresql://unused:unused@127.0.0.1:5432/unused';
 process.env.OPENAI_API_KEY ||= 'test-unused';
 vi.mock('../../server/db', () => ({ db: {} }));
@@ -61,6 +64,11 @@ async function client() {
 
 beforeEach(() => {
   vi.restoreAllMocks();
+  // Spy on the real exports so concurrent dynamic imports share this boundary.
+  const fixture = queueTicketOutboxMock().TicketOutboxService;
+  vi.spyOn(TicketOutboxService, 'writeToOutbox').mockImplementation(async payload =>
+    fixture.writeToOutbox(payload as CreateTicketOutboxPayload));
+  vi.spyOn(TicketOutboxService, 'attemptSend').mockImplementation(fixture.attemptSend);
   resetGateAttempts();
 });
 

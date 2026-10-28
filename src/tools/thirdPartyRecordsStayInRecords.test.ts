@@ -45,14 +45,11 @@ import { resetGateAttempts } from './gateAttempts';
 import { resetVerifiedIdentities } from './verifiedIdentity';
 
 vi.mock('../../server/db', () => ({ db: {} }));
-vi.mock('../services/ticketOutboxService', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../services/ticketOutboxService')>();
-  return {
-    ...actual,
-    TicketOutboxService: {
-      writeToOutbox: vi.fn(async () => { throw new Error('synthetic outbox outage'); }),
-    },
-  };
+// A keyed filing is persisted before it is posted (v132, #390); this fixture
+// keeps the tool on that real path and replaces only the database boundary.
+vi.mock('../services/ticketOutboxService', async () => {
+  const { queueTicketOutboxMock } = await import('../testUtils/queueTicketOutbox');
+  return queueTicketOutboxMock();
 });
 
 const MEDICAL_RECORDS = 16;
@@ -545,9 +542,11 @@ describe('belt and braces: a request still routed away with NO name files to Med
 describe('a refusal the caller cannot fix, and a transport failure', () => {
   // The refusal itself — the recovery ticket filed before the assurance — is
   // driven in recordsRefusalIsLoggedFirst.test.ts, which controls the outbox.
-  it('a transport failure (not a refusal) is unchanged: retryable, and the outbox is the safety net', async () => {
+  it('a transport failure (not a refusal) is unchanged: no recovery, and the outbox holds it', async () => {
     const api = await client();
-    vi.spyOn(api, 'createTicket').mockResolvedValueOnce({ success: false, error: 'upstream 503' } as never);
+    const spy = vi
+      .spyOn(api, 'createTicket')
+      .mockResolvedValueOnce({ success: false, error: 'upstream 503' } as never);
     const r = (await runTool('file_records_ticket', {
       first_name: 'Testpatient',
       last_name: 'Example',
@@ -559,8 +558,10 @@ describe('a refusal the caller cannot fix, and a transport failure', () => {
       date_range: 'everything',
       request_description: 'copy of my records',
     })) as Out;
-    expect(r.success).toBe(false);
-    expect(r.retryable).toBe(true);
+    expect(spy, 'no recovery ticket behind a transport failure').toHaveBeenCalledTimes(1);
+    expect(r.success).toBe(true);
+    expect(r.filed_pending).toBe(true);
+    expect(r).not.toHaveProperty('recovered_after_refusal');
   });
 });
 

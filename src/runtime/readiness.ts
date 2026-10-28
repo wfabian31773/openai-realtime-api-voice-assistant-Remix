@@ -887,7 +887,7 @@ import { callEnvironment } from "./callRecord";
  * an exact or uniquely fuzzy Console match on both ticket submission paths,
  * with the five-point margin checked against the entire roster. Contact field
  * descriptions survive the SDK conversion on answering-service and no-ivr-v2.
- * On top of v116. No migration; production impact remains unmeasured.
+ * On top of v131 (main); renumbered from v123. No migration; production impact remains unmeasured.
  */
 /**
  * v126 — NO-IVR PROMPT TRIM (2026-10-28). Remove repeated explanations from
@@ -926,7 +926,35 @@ import { callEnvironment } from "./callRecord";
  * On top of v130 (#387); renumbered from v121; v127 is #376 on its open branch. No migration; production impact remains unmeasured.
  */
 /**
- * v134 — THE THIRD PARTY'S REPORT STAYS IN RECORDS (2026-10-26; renumbered from v117 to v118, to v127, then to v134 on 2026-10-28 because main took v117 in #379, v126 in #394 and v128–v131 in #389, #386, #387 and #388, and v132/v133 are #390/#391 on their open branches). On the
+ * v132 — CALLBACK EXTENSIONS (2026-10-28). Queue ticket tools validate and
+ * normalize the base callback number and preserve a marked extension in
+ * staff-only call notes. On top of v131 (main); renumbered from v123. Production impact is unmeasured.
+ * `src/utils/phone.ts`, `src/tools/`.
+ */
+/**
+ * v134 — GOODBYE GRACE HANGUP (2026-10-28). After a completed goodbye exchange
+ * (conservative English/Spanish matcher), the bridge waits GOODBYE_GRACE_MS
+ * (6s) after playback and then ends the call deliberately ("goodbye_grace").
+ * Caller speech, a new response or a tool call cancels it. Silence ladder and
+ * ghost-call wording unchanged; no prompt or tool text added.
+ * On top of v132 (#390, main); v127 is #376 and v133 is #391 on their open branches. No migration.
+ */
+/**
+ * v135 (renumbered from v125) — AFTER-HOURS DOB CONFIRMS THE PHONE CANDIDATE (2026-10-28).
+ * lookup_schedule uses the recognised caller's canonical name when the caller
+ * supplies a DOB matching pre-context, so a corrected spoken spelling does not
+ * lose the record. A mismatching DOB keeps the spoken-name lookup; candidate
+ * details stay withheld before confirmation. `noIvrPhoneMatchIsACandidate.test.ts`
+ * drives the live factory's tool on both pipelines. On top of v134 (#396). Merged to main as #392 (6ae60e33).
+ * No migration; production impact remains unmeasured.
+ */
+/**
+ * v136 (renumbered from v126) — PCP UNCLASSIFIED IS FLOOR ONLY (2026-10-28). The PCP agent cannot
+ * choose unclassified_call in its intake tool; the after-hangup floor still
+ * files unclassified calls for a person to route. On top of v135 (#392, main, 6ae60e33); v127 is #376 and v133 is #391 on their open branches. No migration; production impact remains unmeasured.
+ */
+/**
+ * v138 — THE THIRD PARTY'S REPORT STAYS IN RECORDS (2026-10-26; renumbered from v117 to v118, to v127, to v134, then to v138 on 2026-10-28 because main took v117 in #379, v126 in #394, v128–v131 in #389, #386, #387 and #388, and v132, v134, v135 and v136 in #390, #396, #392 and #393, and v137 is #391 on its open branch). On the
  * records line, a provider's, plan's or other third party's request whose
  * words name a document is no longer sent to the HVA Hub on a scheduling cue
  * ("the most recent eye exam REPORT" read as "schedule an eye exam"); a
@@ -935,12 +963,14 @@ import { callEnvironment } from "./callRecord";
  * model, in `fix`, that nothing is lost and never to say "call back"; and a
  * name given in two halves across invocations reaches the payload. Seven
  * records-lane calls, 2026-10-12..10-26. A payload change on the ticket path
- * of the department under the CAP, so it gets its own marker. On top of v131
- * (#388), which it contains. `src/tools/medicalRecordsTools.ts`,
+ * of the department under the CAP, so it gets its own marker. On top of v136
+ * (#393), which it contains. The recovery ticket carries the callback
+ * number without its extension and the extension in the staff note, as
+ * v132's filing does. `src/tools/medicalRecordsTools.ts`,
  * `thirdPartyRecordsStayInRecords.test.ts`.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v134-the-third-party-report-stays-in-records-20261028";
+  "voice-runtime-v138-the-third-party-report-stays-in-records-20261028";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

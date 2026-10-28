@@ -759,7 +759,8 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
       recordsDeliveryMethod: z.enum(PCP_RECORDS_DELIVERY_METHODS).optional(),
       recordsDeliveryDestination: z.string().min(3).optional(),
       statedRelationship: z.string().min(1).optional(),
-      callPurpose: z.enum(PCP_CALL_PURPOSE_SLUGS).optional(),
+      // The unclassified slug belongs to the after-hangup floor, not the model.
+      callPurpose: z.enum(PCP_CALL_PURPOSE_SLUGS).exclude(['unclassified_call']).optional(),
       /**
        * Is the person on the phone the patient themselves?
        *

@@ -20,11 +20,31 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 process.env.DATABASE_URL ||= 'postgresql://unused:unused@127.0.0.1:5432/unused';
 
+// A keyed filing is persisted BEFORE it is posted (v132, #390), so both the
+// refused filing and its recovery go through the outbox. The fake keeps each
+// payload and sends it through the mocked app; a 400/422 is terminal.
+const stored = new Map<string, { params: Record<string, unknown> }>();
 const writeToOutbox = vi.fn();
+const attemptSend = vi.fn();
 vi.mock('../services/ticketOutboxService', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../services/ticketOutboxService')>();
-  return { ...actual, TicketOutboxService: { writeToOutbox } };
+  return { ...actual, TicketOutboxService: { writeToOutbox, attemptSend } };
 });
+function persistAndSend() {
+  writeToOutbox.mockImplementation(async (payload: { params: Record<string, unknown> }) => {
+    const outboxId = `ob-${stored.size}`;
+    stored.set(outboxId, payload);
+    return { outboxId, alreadyExists: false };
+  });
+  attemptSend.mockImplementation(async (outboxId: string) => {
+    const payload = stored.get(outboxId);
+    if (!payload) throw new Error('not persisted before sending');
+    const api = (await import('../../server/services/ticketingApiClient')).ticketingApiClient;
+    const res = await api.createTicket(payload.params as never);
+    const refused = !res.success && (res.statusCode === 400 || res.statusCode === 422);
+    return { ...res, outboxId, ...(refused ? { terminal: true } : {}) };
+  });
+}
 
 const { runTool } = await import('./registry');
 await import('./sharedPatientTools');
@@ -72,7 +92,10 @@ beforeEach(() => {
   vi.restoreAllMocks();
   resetGateAttempts();
   resetVerifiedIdentities();
+  stored.clear();
   writeToOutbox.mockReset();
+  attemptSend.mockReset();
+  persistAndSend();
 });
 
 describe('a refusal the caller cannot fix is logged before anyone is told it is', () => {
@@ -147,6 +170,19 @@ describe('a refusal the caller cannot fix is logged before anyone is told it is'
     expect(String(recovery.description)).not.toMatch(/Example Valley|Testdoctor|example\.com/);
   });
 
+  it('a callback extension rides on the staff note, not on the recovery\'s phone (v132)', async () => {
+    const { posts } = await app(UNASKABLE_400, FILED('VA-RECOVERED-7'));
+    await runTool('file_records_ticket', { ...THIRD_PARTY, callback_number: '845-555-0142 ext 22' });
+    const [refused, recovery] = posts();
+    // The same split the filing itself makes: ten digits on the phone field,
+    // the extension where a clerk reads it.
+    expect(refused.patientPhone).toBe('8455550142');
+    expect(recovery.patientPhone).toBe('8455550142');
+    const note = String((recovery.callData as Params).transcript);
+    expect(note).toContain('Callback extension: 22');
+    expect(note).toContain('Call back on 8455550142.');
+  });
+
   it('a routed request the app refuses says on the staff line where it read as belonging', async () => {
     const { posts } = await app(UNASKABLE_400, FILED('VA-RECOVERED-2'));
     const r = (await runTool('file_records_ticket', {
@@ -163,11 +199,15 @@ describe('a refusal the caller cannot fix is logged before anyone is told it is'
   });
 
   it('a recovery the outbox holds is still an assurance, without a number', async () => {
-    writeToOutbox.mockResolvedValue({ outboxId: 'ob-rec-1', alreadyExists: false });
     const { posts } = await app(UNASKABLE_400, OUTAGE);
     const r = (await runTool('file_records_ticket', THIRD_PARTY)) as Out;
     expect(posts()).toHaveLength(2);
-    expect(writeToOutbox).toHaveBeenCalledTimes(1);
+    // Both are persisted before they are posted; the second one is what the
+    // outbox now holds, and it is the recovery, not the refused filing.
+    expect(writeToOutbox).toHaveBeenCalledTimes(2);
+    const held = writeToOutbox.mock.calls[1][0].params as Params;
+    expect(held.departmentId).toBe(MEDICAL_RECORDS);
+    expect(held.description).toBe(SWEPT_TICKET_DESCRIPTION);
     expect(r.success).toBe(true);
     expect(r.filed_pending).toBe(true);
     expect(r).not.toHaveProperty('ticket_number');
@@ -189,9 +229,16 @@ describe('a refusal the caller cannot fix is logged before anyone is told it is'
   });
 
   it('a recovery neither the app nor the outbox could take is not an assurance either', async () => {
-    writeToOutbox.mockRejectedValue(new Error('database unreachable'));
-    await app(UNASKABLE_400, OUTAGE);
+    // The refused filing is persisted and refused; the recovery cannot even
+    // be persisted, so the app never sees it.
+    const persist = writeToOutbox.getMockImplementation()!;
+    writeToOutbox.mockReset();
+    writeToOutbox
+      .mockImplementationOnce(persist)
+      .mockRejectedValueOnce(new Error('database unreachable'));
+    const { posts } = await app(UNASKABLE_400);
     const r = (await runTool('file_records_ticket', THIRD_PARTY)) as Out;
+    expect(posts()).toHaveLength(1);
     expect(r.success).toBe(false);
     expect(r.fix).toBe(REFUSAL_NOT_LOGGED_FIX);
     expect(String(r.fix)).toMatch(/NOT logged/);
@@ -246,7 +293,6 @@ describe('what is not a refusal the caller cannot fix is answered as before', ()
   });
 
   it('a filing the outbox holds forgets its name halves, as a filed one does', async () => {
-    writeToOutbox.mockResolvedValue({ outboxId: 'ob-rec-3', alreadyExists: false });
     const { posts } = await app(OUTAGE, FILED('VA-NEXT-2'));
     await runTool('file_records_ticket', THIRD_PARTY);
     // The next patient on the call, with only a first name so far.
@@ -259,7 +305,6 @@ describe('what is not a refusal the caller cannot fix is answered as before', ()
   });
 
   it('an outage the outbox holds files no recovery: it is already persisted', async () => {
-    writeToOutbox.mockResolvedValue({ outboxId: 'ob-rec-2', alreadyExists: false });
     const { posts } = await app(OUTAGE);
     const r = (await runTool('file_records_ticket', THIRD_PARTY)) as Out;
     expect(posts()).toHaveLength(1);

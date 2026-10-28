@@ -7,6 +7,11 @@
  * classified ticket and the second looks like a filed one.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+
+vi.mock('../services/ticketOutboxService', async () => {
+  const { queueTicketOutboxMock } = await import('../testUtils/queueTicketOutbox');
+  return queueTicketOutboxMock();
+});
 import { readFileSync } from 'node:fs';
 
 // The surgeon fallback reads the schedule, and that module opens a database
@@ -87,9 +92,9 @@ describe('patientPhone is the digits, not the raw string', () => {
     expect((out as { missingFields?: string[] }).missingFields).toContain('callback_number');
   });
 
-  it('refuses a second number or an extension instead of filing a wrong one', async () => {
+  it('refuses a second number instead of filing a wrong one', async () => {
     // The failure this ceiling exists to prevent: a raw digit count with no
-    // upper bound would have normalized a two-number or extension capture
+    // upper bound would have normalized a two-number capture
     // down to a plausible-looking (and wrong) 10 digits, filing a ticket
     // with a callback number nobody could reach. That is worse than the
     // loud 400 it replaces, and invisible in a ticket-count metric.
@@ -98,7 +103,7 @@ describe('patientPhone is the digits, not the raw string', () => {
 
     const out = (await runTool('file_surgery_ticket', {
       ...BASE,
-      callback_number: '845-531-7471 ext 202',
+      callback_number: '202-555-0101 / 303-555-0102',
       request_description: 'a question about my upcoming procedure',
     })) as Record<string, unknown>;
 
@@ -324,6 +329,7 @@ describe('what it refuses, and what it does not', () => {
     const api = await client();
     vi.spyOn(api, 'createTicket').mockResolvedValueOnce({
       success: false,
+      statusCode: 422,
       error: 'Validation failed',
     } as never);
 
@@ -337,7 +343,7 @@ describe('what it refuses, and what it does not', () => {
     // PRRT_kwDORVukLs6vzltO on #371: that text can name the record's office).
     expect(String(out.error)).toMatch(/withheld/);
     expect(String(out.error)).not.toMatch(/Validation failed/);
-    expect(out.retryable).toBe(true);
+    expect(out.retryable).toBe(false);
   });
 });
 

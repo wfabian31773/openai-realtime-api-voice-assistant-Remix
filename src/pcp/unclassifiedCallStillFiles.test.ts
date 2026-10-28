@@ -51,6 +51,10 @@ afterAll(() => vi.useRealTimers());
 process.env.DATABASE_URL ||= 'postgresql://unused:unused@127.0.0.1:5432/unused';
 process.env.OPENAI_API_KEY ||= 'test-unused';
 vi.mock('../../server/db', () => ({ db: {} }));
+vi.mock('../services/toolTimeline', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../services/toolTimeline')>(),
+  recordingExecute: (_context: unknown, _name: string, execute: unknown) => execute,
+}));
 
 const ticketing = vi.hoisted(() => ({
   createPcpTicket: vi.fn(
@@ -64,6 +68,7 @@ vi.mock('../../server/services/ticketingApiClient', () => ({ ticketingApiClient:
 
 const { createPcpAgent, sweepPcpUnfiledCall, markPcpCallEnded } = await import('../agents/pcpAgent');
 const { PCP_CALL_PURPOSE_SLUGS } = await import('./policy');
+const { pcpDirector } = await import('./director');
 
 let n = 0;
 
@@ -103,6 +108,31 @@ beforeEach(() => {
 });
 
 describe('the 18 that filed nowhere', () => {
+  it('keeps the floor slug out of the live PCP agent tools and rejects it at intake', async () => {
+    const { agent, callId } = unclassifiedCall(A_REQUEST);
+    expect(JSON.stringify(agent.tools.map((tool: any) => tool.parameters))).not.toContain('unclassified_call');
+    expect(agent.instructions).not.toContain('unclassified_call');
+
+    const intake = agent.tools.find((tool: any) => tool.name === 'record_pcp_intake') as any;
+    expect(intake).toBeTruthy();
+    for (const slug of PCP_CALL_PURPOSE_SLUGS.filter((value) => value !== 'unclassified_call')) {
+      expect(JSON.stringify(intake.parameters)).toContain(`"${slug}"`);
+    }
+    expect(await intake.invoke({}, JSON.stringify({ callPurpose: 'unclassified_call' })))
+      .toContain('Invalid JSON input for tool');
+    expect(pcpDirector.get(callId).callPurpose).toBeUndefined();
+
+    await sweep(callId);
+    expect(ticketing.createPcpTicket).toHaveBeenCalledWith(
+      expect.objectContaining({ callPurpose: 'unclassified_call', disposition: 'CREATE_TASK' }),
+    );
+
+    const classified = unclassifiedCall(A_REQUEST);
+    const classifiedIntake = classified.agent.tools.find((tool: any) => tool.name === 'record_pcp_intake') as any;
+    await classifiedIntake.invoke({}, JSON.stringify({ callPurpose: 'service_inquiry' }));
+    expect(pcpDirector.get(classified.callId).callPurpose).toBe('service_inquiry');
+  });
+
   it('files a caller the model never classified', async () => {
     const { callId } = unclassifiedCall(A_REQUEST);
 
