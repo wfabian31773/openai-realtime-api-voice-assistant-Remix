@@ -143,7 +143,7 @@ describe("the wiring facts a behavioural test cannot see", () => {
       .filter((l) => !l.trim().startsWith("//"))
       .join("\n");
     expect(code).not.toMatch(/import\(["']\.\.\/agents\//);
-    expect(code).toMatch(/getAgentConfig\(PCP_FLOOR_LANE\)\?\.teardownSweep/);
+    expect(code).toMatch(/getAgentConfig\(record\.slug\)\?\.teardownSweep/);
   });
 
   it("registers the sweep from the SAME import statement as the factory", () => {
@@ -188,7 +188,7 @@ describe("the wiring facts a behavioural test cannot see", () => {
   it("is wired into the runtime's teardown, awaited, and after the row", () => {
     // The runtime hands the floor the SAME lane source it resolved the call's
     // agent from — that is what makes the sweep the factory's own module.
-    expect(runtime).toMatch(/options\.sweepPcpFloor \?\? \(\(record: VoiceCallRecord\) => runPcpFloor\(record, \{ source: laneSource \}\)\)/);
+    expect(runtime).toMatch(/options\.sweepPcpFloor \?\? \(\(record: VoiceCallRecord\) => runLaneTeardownFloor\(record, \{ source: laneSource \}\)\)/);
     const persist = runtime.indexOf("const persisted = await withinOrNull(");
     const floorCall = runtime.indexOf("await sweepPcpFloor(record)");
     expect(persist).toBeGreaterThan(-1);

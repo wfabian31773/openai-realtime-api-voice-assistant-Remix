@@ -132,16 +132,25 @@ describe("the Grok body is the shape xAI's Prompting Guide prescribes", () => {
     expect(p).not.toMatch(/=====\s*(INTERNAL|HARD RULES|ANTI-NARRATION|INTERRUPTION|CONFUSION)/);
   });
 
-  it('is much shorter — the migration text in one number', async () => {
-    const grok = await prompt({ pipeline: 'runtime' });
-    const legacy = await prompt({});
-    expect(grok.length).toBeLessThan(legacy.length / 2);
-    // A RATCHET, not a measurement: the built prompt with no caller context
-    // read 14,082 characters on 2026-09-28 against 28,801 for the legacy body
-    // — 49%, of which 2,489 is the triage block and the urgent-symptom list
-    // both bodies share verbatim. Raise it with the reason beside it, never
-    // silently; lower it when a trim lands.
-    expect(grok.length).toBeLessThan(15_000);
+  it.each([
+    ['Tuesday 13:00 Los Angeles', '2026-10-27T20:00:00Z', 'on the next business day'],
+    ['Wednesday 01:00 Los Angeles', '2026-10-28T08:00:00Z', 'later this morning when the office opens'],
+  ])('is much shorter at %s — the migration text in one number', async (_label, time, callback) => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(new Date(time));
+      const grok = await prompt({ pipeline: 'runtime' });
+      const legacy = await prompt({});
+      expect(grok).toContain(`Non-urgent callbacks will be made ${callback}.`);
+      expect(grok.length).toBeLessThan(legacy.length / 2);
+      // RATCHET: measured 2026-10-28 with this fixture and pinned clocks, the
+      // built Grok body is 14,771 characters by day and 14,801 overnight
+      // (before the trim: 14,981 and 15,011). The triage block and urgent
+      // symptoms are shared verbatim with legacy. Never raise this silently.
+      expect(grok.length).toBeLessThan(15_000);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('carries no second office list — the runtime prefixes the knowledge pack, which has one', async () => {
@@ -184,6 +193,7 @@ const RULINGS: Array<[string, RegExp]> = [
   ['the 1 AM robocall rule', /1 AM/],
   ['robot calls terminate', /terminate_call with reason "robot_call"/],
   ['ghost calls terminate', /terminate_call with reason "ghost_call"/],
+  ['ghost line and hangup forbidden after a request', /NEVER use the ghost-call line or terminate_call with reason "ghost_call" after any non-empty caller transcript, including any request or question/],
   ['date of birth is asked in parts', /starting with the month, then\s*\n?\s*the day, then the year/],
   ['the create_ticket wait line', /Give me one moment while I get this submitted for you/],
   ['B2B callers are not blocked on a date of birth', /DOB IS OPTIONAL FOR BUSINESS CALLERS/],
@@ -206,6 +216,10 @@ const RULINGS: Array<[string, RegExp]> = [
   // 2026-10-01: the operator rang the line, asked when an office opens and
   // was told "I don't want to give you the wrong time for that office". The
   // hours are the practice's own and every other lane states them.
+  ['one identity ask before an on-call transfer', /one quick ask for name and date of birth|collect the caller's name and DOB in at most one/i],
+  ['911-level skips the identity ask', /911-level emergency/],
+  ['need_identity is not a refused transfer', /need_identity/],
+  ['never tell them they are not found when a schedule match exists', /never tell them they are not found/i],
   ['office hours are answered from clinic facts, never hedged', /(?:named clinic's Business Facts row.*?opening, closing and lunch hours exactly|hours printed on each office's row are the authoritative clinic hours)/s],
   ['a fully answered question without a callback creates no ticket', /fully answered.{0,80}(?:no callback|did not ask for a callback).{0,30}(?:do not file|do not create a ticket)/is],
   ['no "is that correct?"', /DO NOT ask "Is that correct\?"|Do not ask "Is that correct\?"/],
@@ -244,6 +258,14 @@ describe('every ruling survives in both bodies', () => {
     expect(grok).toMatch(/take the last name in their own words, then the date of birth in parts/);
     // Unrecognised: no block at all.
     expect(await prompt({ pipeline: 'runtime' })).not.toContain('Caller-ID pre-context');
+  });
+
+  it('the Grok CRITICAL line treats need_identity as a follow-up, not a second transfer', async () => {
+    const p = await prompt({ pipeline: 'runtime' });
+    const critical = p.slice(p.indexOf('## CRITICAL INSTRUCTIONS'));
+    expect(critical).toMatch(/ONCE after a sanctioned transfer/);
+    expect(critical).toMatch(/need_identity result is not a transfer/);
+    expect(critical).not.toMatch(/ONCE per call/);
   });
 
   it('the withheld phone-match section rides into the Grok body unchanged', () => {

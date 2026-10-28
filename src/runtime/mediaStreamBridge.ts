@@ -111,6 +111,7 @@ import { CallTranscriptLog, type TranscriptTurn } from "./transcriptLog";
 import { noteSpokenDob } from "../tools/spokenDob";
 import { notePatientStatus } from "../tools/spokenPatientStatus";
 import { noteCallerTranscript } from "../services/symptomCorroboration";
+import { ghostCallRefusal } from "../services/ghostCallProtection";
 import { CallUsage, usageSummaryMarker, type UsageTotals } from "./tokenUsage";
 import type { TwilioInboundFrame, TwilioOutboundFrame } from "./twilioFrames";
 import {
@@ -501,10 +502,8 @@ export interface VoiceCallRecord {
   /** True when the ladder ran out of prompts and ended the call. */
   silenceCut?: boolean;
   /**
-   * True when the ladder spent its prompts on a caller who HAD been heard and
-   * therefore stood down instead of cutting (v72, operator ruling 2026-09-26).
-   * It is the after-number for that ruling: every one of these is a call the
-   * previous build would have ended.
+   * True when the ladder stands down because the caller has been heard.
+   * v72 waited until its prompts were spent; v131 stands down before speaking.
    */
   silenceStoodDown?: boolean;
 }
@@ -837,6 +836,7 @@ export class VoiceCallBridge {
   public lastArmedFinalFallbackMs: number | null = null;
   /** The agent's hangup tool ran and its guards allowed the termination. */
   private endRequested = false;
+  private ghostHangupRequested = false;
   /** Audio bytes of the most recently COMPLETED utterance, kept so a mark
    * already in flight can be adopted as the final one with a fallback
    * derived from its own audio rather than a constant. */
@@ -878,8 +878,8 @@ export class VoiceCallBridge {
   private deadAirCause: DeadAirCause | null = null;
   /**
    * CONSECUTIVE unanswered prompts — the ladder's own position. Reset the
-   * moment the caller is actually heard, because a caller who answers has
-   * earned a fresh three: the ladder is for a line nobody is talking on.
+   * moment the caller is actually heard. Once heard, the caller bypasses the
+   * ladder for the rest of the call.
    */
   private silenceStrikes = 0;
   /**
@@ -951,8 +951,13 @@ export class VoiceCallBridge {
         this.noteTranscript("caller");
         // HEARD — for the rest of the call, whatever happens next. This is the
         // latch the operator's 2026-09-26 ruling turns on; see the field.
-        this.callerEverHeard = true;
-        // HEARD, so the LADDER starts again from zero — and only the ladder.
+        if (text.trim()) {
+          this.callerEverHeard = true;
+          // A request can arrive while a previously allowed ghost hangup is
+          // waiting for playback. Revoke both its mark and fallback timer.
+          if (this.ghostHangupRequested) this.cancelRequestedHangup();
+        }
+        // HEARD, so the LADDER's strikes are cleared — and only the strikes.
         // `silencePrompts` is the cumulative count and is deliberately not
         // touched: a prompt that brought a caller back is the single most
         // useful thing this instrument records, and resetting it erased
@@ -961,7 +966,7 @@ export class VoiceCallBridge {
         // Deliberately keyed on a transcript rather than on `speech_stopped`:
         // the VAD fires on a cough and on hold music, and a ladder reset by
         // noise is a ladder a dialler can hold open for ever.
-        this.silenceStrikes = 0;
+        if (text.trim()) this.silenceStrikes = 0;
         // Straight through, greeting or no greeting. Where the greeting's own
         // line sits was settled when its audio started, so there is no
         // "before or after it" left to decide here — which is the point:
@@ -1647,9 +1652,10 @@ export class VoiceCallBridge {
    *     the hangup still waits for a Twilio round trip rather than cutting
    *     the line mid-buffer.
    */
-  private requestHangup(): void {
+  private requestHangup(reason: unknown): void {
     if (this.ended || this.endRequested) return;
     this.endRequested = true;
+    this.ghostHangupRequested = reason === "ghost_call";
     if (this.current !== null) return; // its completion will arm the mark
     const outstanding = this.awaitingMark[this.awaitingMark.length - 1];
     if (outstanding) {
@@ -1666,6 +1672,16 @@ export class VoiceCallBridge {
       mark: { name: markName },
     });
     this.armFinalMark(markName, 0);
+  }
+
+  private cancelRequestedHangup(): void {
+    this.endRequested = false;
+    this.ghostHangupRequested = false;
+    this.finalMarkName = null;
+    if (this.finalFallbackTimer !== null) {
+      this.clearTimer(this.finalFallbackTimer);
+      this.finalFallbackTimer = null;
+    }
   }
 
   private armFinalMark(markName: string, bytes: number): void {
@@ -1792,12 +1808,7 @@ export class VoiceCallBridge {
     // final and hang up on them, which is the opposite of what a barge-in
     // means (Codex review, PR #227). A fresh termination has to be
     // requested by the agent again, through its own guards.
-    this.endRequested = false;
-    this.finalMarkName = null;
-    if (this.finalFallbackTimer !== null) {
-      this.clearTimer(this.finalFallbackTimer);
-      this.finalFallbackTimer = null;
-    }
+    this.cancelRequestedHangup();
     this.session.cancelResponse();
     this.discardBufferedAudio();
   }
@@ -1993,6 +2004,19 @@ export class VoiceCallBridge {
         await this.batchSettled();
         if (this.ended) return;
       }
+      // Check after the batch wait so a transcript arriving during that wait
+      // also protects the caller. Never dispatch a ghost hangup once heard.
+      const ghostRefusal = isEndCall ? ghostCallRefusal(args.reason, this.callerEverHeard) : null;
+      if (ghostRefusal) {
+        this.toolEvents.push({
+          name, ok: false, succeeded: false,
+          atMs: Date.now() - this.startedAtMs,
+          error: ghostRefusal.error,
+        });
+        this.session.sendToolResult(callId, false, ghostRefusal);
+        this.toolCallSettled(true);
+        return;
+      }
       /**
        * THE REPEATED-FAILURE CEILING (toolCeiling.ts).
        *
@@ -2075,7 +2099,11 @@ export class VoiceCallBridge {
       }
 
       const result = await this.deps.agent.dispatch(name, args);
-      const output = decodeToolOutput(result.output);
+      // A caller transcript may have arrived while dispatch was awaiting the
+      // agent's result. Recheck before sending an answer or arming a hangup.
+      const output =
+        (isEndCall ? ghostCallRefusal(args.reason, this.callerEverHeard) : null) ??
+        decodeToolOutput(result.output);
       /**
        * `dispatch` answers `ok: true` whenever the tool RAN — a
        * `missing([...])` refusal comes back ok. The ceiling counts what the
@@ -2140,7 +2168,7 @@ export class VoiceCallBridge {
       }
       if (this.endCallToolNames.has(name)) {
         if (guardsAllowedTermination(output)) {
-          this.requestHangup();
+          this.requestHangup(args.reason);
           this.toolCallSettled(false);
         } else {
           // A refusal still needs the agent to speak — its `say` wording
@@ -2259,38 +2287,19 @@ export class VoiceCallBridge {
    */
   private handleCallerSilence(): void {
     if (this.ended) return;
+    // v131: stand down BEFORE speaking. A caller we have already heard
+    // must never get the cannot-hear ladder, even after later quiet turns.
+    if (this.callerEverHeard) {
+      this.silenceStoodDown = true;
+      this.clearDeadAir();
+      console.info(
+        `[bridge] caller already transcribed on ${this.deps.context.callSid} — ` +
+          `the silence ladder stands down without prompting or ending the call`,
+      );
+      return;
+    }
     const limit = this.deps.silenceStrikeLimit ?? SILENCE_STRIKE_LIMIT;
     if (this.silenceStrikes >= limit) {
-      /**
-       * THE PROMPTS ARE SPENT. WHO IS ON THE LINE DECIDES WHAT THAT MEANS.
-       *
-       * A caller we have never heard is what this ladder was asked for: a
-       * dialler, a robocall, an open line nobody spoke into. Ending that call
-       * is the protection, and it is unchanged.
-       *
-       * A caller we HAVE heard is a person, and ending their call ends their
-       * request — measured, six such calls left no ticket on 2026-09-25 alone.
-       * Operator ruling, 2026-09-26: do not cut them. So the ladder STANDS
-       * DOWN: it stops speaking and stops re-arming, and the call ends the way
-       * it would have before v68 existed — when the caller hangs up, or at
-       * `DEFAULT_MAX_CALL_MS`, which is what keeps standing down bounded.
-       *
-       * Standing down rather than prompting for ever is the other half of the
-       * ruling as measured: at a 12-second window an unbounded ladder would
-       * speak roughly fifty times inside the ten-minute ceiling, against a
-       * worst observed nineteen. Not cutting a caller is not a licence to
-       * talk over them indefinitely.
-       */
-      if (this.callerEverHeard) {
-        this.silenceStoodDown = true;
-        this.clearDeadAir();
-        console.info(
-          `[bridge] the caller went quiet after ${this.silenceStrikes} prompt(s) on ` +
-            `${this.deps.context.callSid} — they HAVE been heard, so the ladder stands ` +
-            `down instead of ending the call`,
-        );
-        return;
-      }
       this.silenceCut = true;
       console.warn(
         `[bridge] the caller said nothing after ${this.silenceStrikes} prompt(s) on ` +

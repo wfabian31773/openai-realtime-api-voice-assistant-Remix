@@ -890,16 +890,52 @@ import { callEnvironment } from "./callRecord";
  * On top of v116. No migration; production impact remains unmeasured.
  */
 /**
- * v125 — AFTER-HOURS DOB CONFIRMS THE PHONE CANDIDATE (2026-10-28).
+ * v126 — NO-IVR PROMPT TRIM (2026-10-28). Remove repeated explanations from
+ * the Grok prompt while keeping its rules; the length ratchet checks pinned
+ * daytime and overnight clocks. On top of v117; v122–v125 are on open
+ * branches. `src/agents/noIvrPromptForGrok.ts`.
+ */
+/**
+ * v128 — PCP SCHEDULING AND UNASSIGNED EXIT (2026-10-28; renumbered from v122). Patient scheduling
+ * reaches the HVA Hub, including a captured scheduling purpose alongside the
+ * patient latch. A terminal Optical/Surgery office or surgeon refusal retries
+ * once with routingAskExhausted instead of sending PCP back through re-asks.
+ * On top of v126 (#394); v127 is #376 on its open branch. No migration; production impact remains unmeasured.
+ */
+/**
+ * v129 — AFTER-HOURS TEARDOWN FLOOR (2026-10-28). The no-ivr and no-ivr-v2
+ * agents reuse PCP's v90 registered sweep machinery on both voice pipelines.
+ * A transcribed request with no ticket files through the usual After Hours
+ * submission path; silent calls, identity-only calls and existing tickets
+ * are skipped. The normal per-call lock and idempotency key prevent duplicates.
+ * On top of v128 (#389); renumbered from v119; v127 is #376 on its open branch. No migration; production impact remains unmeasured.
+ */
+/**
+ * v130 — A PCP CALLER TOLD THEIR REQUEST IS RECORDED KEEPS IT WHEN THE QUEUE
+ * ANSWERS (2026-10-28). Both blind-transfer settlement paths apply v102's
+ * read-back / "I've taken this down" exemption, captured before redirecting
+ * while the transcript is available. A caller who heard neither still has
+ * the ticket withdrawn; hang-up behavior is unchanged. On top of v129 (#386); renumbered from v120; v127 is #376 on its open branch.
+ * No migration. `src/pcp/queueIsAChoice.test.ts`.
+ */
+/**
+ * v131 — HEARD CALLERS BYPASS THE SILENCE LADDER (2026-10-28). Once any
+ * non-empty caller transcript arrives, the ladder stands down before speaking
+ * and cannot end the call. Ghost-call prompts forbid use after a request;
+ * terminate_call refuses ghost_call after a caller transcript on SIP and runtime.
+ * On top of v130 (#387); renumbered from v121; v127 is #376 on its open branch. No migration; production impact remains unmeasured.
+ */
+/**
+ * v135 (renumbered from v125) — AFTER-HOURS DOB CONFIRMS THE PHONE CANDIDATE (2026-10-28).
  * lookup_schedule uses the recognised caller's canonical name when the caller
  * supplies a DOB matching pre-context, so a corrected spoken spelling does not
  * lose the record. A mismatching DOB keeps the spoken-name lookup; candidate
  * details stay withheld before confirmation. `noIvrPhoneMatchIsACandidate.test.ts`
- * drives the live factory's tool on both pipelines. On top of v117.
+ * drives the live factory's tool on both pipelines. On top of v131 (#388); v127 is #376, v132 is #390, v133 is #391 and v134 is #396 on their open branches.
  * No migration; production impact remains unmeasured.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v125-after-hours-dob-confirm-lookup-20261028";
+  "voice-runtime-v135-after-hours-dob-confirm-lookup-20261028";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

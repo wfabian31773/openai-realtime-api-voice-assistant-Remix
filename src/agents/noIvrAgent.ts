@@ -39,11 +39,26 @@ import {
 } from "../services/afterHoursRouting";
 import { AFTER_HOURS_DEPARTMENT_ID as AFTER_HOURS_ROUTE_DEPARTMENT_ID } from "../tools/afterHoursTaxonomy";
 import { nameOrStandIn, STAND_IN_NAME_NOTE } from "../services/standInName";
+import {
+  decideOnCallIdentityAsk,
+  onCallCallbackNumber,
+} from "../services/onCallIdentityBeforeTransfer";
+import {
+  LOOKUP_UNSURE_FIX,
+  LOOKUP_UNSURE_SAY,
+  chartNameParts,
+  hasVisitHistory,
+  spokenFirstNameAgreesWithChart,
+} from "../tools/lookupUnsure";
 import { corroborate } from "../services/symptomCorroboration";
 import { markCallConcluded } from "../services/callConclusion";
+import { GHOST_CALL_RESTRICTION, ghostCallRefusal, hasCallerTranscript } from "../services/ghostCallProtection";
+import { requestSipHangup, type SipGhostHangupMetadata } from "../services/sipGhostHangup";
 import { callMetadataForDB } from "../services/callMetadataStore";
 import { EMAIL_FIELD_DESCRIPTION, LAST_NAME_FIELD_DESCRIPTION } from "../tools/contactCaptureGuidance";
 import { readDobQuietly } from "../tools/dobParts";
+import { registerAfterHoursFloor, markAfterHoursTicketFiled, reserveAfterHoursTicketFiling } from '../services/afterHoursTeardownFloor';
+export { sweepAfterHoursUnfiledCall } from '../services/afterHoursTeardownFloor';
 
 /**
  * AN EMAIL PREFERENCE WITHOUT AN ADDRESS IS A QUESTION, NOT A FAILURE.
@@ -145,7 +160,7 @@ function callbackMismatchStaffNote(callbackNumber: string, callerId?: string): s
 
 export type NoIvrAgentVariant = 'production' | 'development';
 
-export interface NoIvrAgentMetadata {
+export interface NoIvrAgentMetadata extends SipGhostHangupMetadata {
   callId: string;
   callSid?: string;
   callerPhone?: string;
@@ -671,11 +686,10 @@ When name+DOB lookup fails, DO NOT immediately say "I can't find you." Instead:
    - Wait for them to say each part separately (e.g. "January... twelfth... nineteen thirty-seven")
    - Also retry with phone: lookup_schedule(phone: callerPhone)
    - If EITHER lookup succeeds → confirm their name and continue normally
-   - If both fail → note "existing patient — not found in system, staff please verify" in the ticket details, and include their phone number
+   - If both fail → say "${LOOKUP_UNSURE_SAY}" and file with phone + "existing patient — staff please verify". Never tell them they are not found when visits match.
 
 3. IF NEW PATIENT:
-   - Do NOT attempt another lookup — proceed to collect their request details
-   - Create the ticket normally; new patients do not need to be found in the system
+   - No more lookups; collect the request and file normally.
 
 ⚠️ ALWAYS ask for the date of birth in parts — "starting with the month, then
 the day, then the year". Said whole, the phone's speech recognition merges the
@@ -733,11 +747,13 @@ ROBOT/SPAM CALL INDICATORS (any 1 of these = end immediately):
 ROBOT/SPAM PROTOCOL: say "We were unable to connect. Goodbye." then call
 terminate_call with reason "robot_call".
 
-GHOST CALL INDICATORS (any 2+ of these = ghost call):
-- Only heard single syllables: "mm", "uh", "ok", "hi", background noise
+${GHOST_CALL_RESTRICTION}
+
+GHOST CALL INDICATORS (only before any non-empty caller transcript):
+- Only silence or background noise, with no caller words transcribed
 - Caller hasn't stated any actual request or question
 - Caller doesn't respond to direct questions
-- Total conversation is just greetings with no substance after 3 prompts
+- No caller words after 3 prompts
 
 GHOST CALL PROTOCOL — three turns, then out:
 1. After first unclear response: "What can I help you with today?"
@@ -996,12 +1012,14 @@ Same-day tickets go to the After Hours team, who work them.
 Filing a partial ticket IS the job. Waking the on-call
 provider because you missed a detail is not.
 
-Call escalate_to_human FIRST — ONCE, never twice on one call — and
-say nothing about connecting anyone until it answers. If it returns
-success=true, say: "Based on what you're describing, I'm connecting you
-with our on-call team right now." If it is refused, it has ALREADY filed
-a ticket for the caller: say exactly what its message tells you to say,
-and never say you will connect, transfer or put anyone through.
+One quick ask for name and date of birth; transfer even if declined.
+Clinicians and a 911-level emergency skip intake.
+Call escalate_to_human; say nothing about connecting anyone until it answers.
+On need_identity, ask its line and retry with answers or details_declined.
+On success=true: "I'm connecting you with our on-call team now."
+Never call again after a sanctioned transfer.
+If refused, it has ALREADY filed a ticket: say its message and
+never say you will connect, transfer or put anyone through.
 
 CLOSING (CRITICAL: SAY THIS ONLY ONCE)
 After a SUCCESSFUL ticket, give the success line above — once. Promise only
@@ -1200,6 +1218,7 @@ export async function createNoIvrAgent(
   handoffToHuman: () => Promise<void>,
   metadata: NoIvrAgentMetadata,
 ): Promise<RealtimeAgent> {
+  registerAfterHoursFloor(metadata, 'no-ivr');
   // Lazy import callerMemoryService to prevent module initialization errors in production
   // Wrapped in try/catch to ensure agent factory NEVER throws - agent must always be created
   let callerMemoryService: typeof import("../services/callerMemoryService")["callerMemoryService"] | null = null;
@@ -1414,10 +1433,40 @@ is not an identity. Confirm the name and date of birth, then call again with the
             matchingCandidate?.lastName || params.last_name,
             isoDob,
           );
+          /**
+           * VA-76221: a spoken-name miss is often the chart's own spelling.
+           * The phone-loaded schedule already holds the name staff will see.
+           * Re-run with that name when the spoken first name agrees; never
+           * tell the caller they are not found when visit history is on file.
+           */
+          if (!result.patientFound) {
+            const chart = chartNameParts(scheduleContext);
+            if (
+              chart.first &&
+              chart.last &&
+              spokenFirstNameAgreesWithChart(params.first_name, chart.first) &&
+              (chart.last.toLowerCase() !== params.last_name.trim().toLowerCase() ||
+                chart.first.toLowerCase() !== params.first_name.trim().toLowerCase())
+            ) {
+              const corrected = await scheduleLookupService.lookupByNameAndDOB(
+                chart.first,
+                chart.last,
+                isoDob,
+              );
+              if (
+                corrected.patientFound &&
+                corrected.matchedBy === "name_and_dob" &&
+                corrected.identity?.unique !== false
+              ) {
+                result = corrected;
+              }
+            }
+          }
         } else {
           return {
             found: false,
-            message: "Need phone number OR (first name + last name + DOB) to search",
+            message: LOOKUP_UNSURE_SAY,
+            fix: 'Need phone number OR (first name + last name + DOB) to search. ' + LOOKUP_UNSURE_FIX,
           };
         }
 
@@ -1440,6 +1489,9 @@ is not an identity. Confirm the name and date of birth, then call again with the
 
         return {
           found: false,
+          ...(hasVisitHistory(scheduleContext) ? { visit_history_on_file: true } : {}),
+          message: LOOKUP_UNSURE_SAY,
+          fix: LOOKUP_UNSURE_FIX,
           ...(result.scheduleReadStatus === 'unavailable' ? unavailableAppointmentAccess() : {}),
         };
       } catch (error) {
@@ -1980,6 +2032,7 @@ The ticket will include schedule context (last appointment info) automatically.`
       }
 
       if (result.success && result.ticketNumber) {
+        markAfterHoursTicketFiled(callId);
         console.log(`[TICKET CREATE] ✓ SUCCESS for call ${metadata.callSid}: ${result.ticketNumber}`);
         console.log(`[TICKET CREATE]   Patient: ${params.first_name} ${params.last_name}, Category: ${params.request_category}`);
         
@@ -2023,7 +2076,7 @@ The ticket will include schedule context (last appointment info) automatically.`
     description: `Terminate the call server-side immediately. Use this to actually end the call — do NOT rely solely on verbal goodbye.
 
 USE FOR:
-- ghost_call: caller not responding after 3 prompts
+- ghost_call: caller never transcribed and not responding after 3 prompts. NEVER use ghost_call after any non-empty caller transcript, including a request or question
 - robot_call: IVR bleed-through or automated system detected
 - spam: spam/telemarketing detected
 - max_turns_exceeded: call has gone on too long with no resolution
@@ -2037,6 +2090,10 @@ Always say a brief goodbye phrase BEFORE calling this tool.`,
     execute: async (params) => {
       console.log(`[TOOL] terminate_call - reason: ${params.reason}, callId: ${callId}`);
 
+      // Read the live SIP-route transcript at invocation, never at construction.
+      const ghostRefusal = ghostCallRefusal(params.reason, hasCallerTranscript(metadata.getTranscript?.() ?? ''));
+      if (ghostRefusal) return ghostRefusal;
+
       // NEVER hang up on a call that is being handed to a human.
       //
       // 2026-08-04 03:55:09 the agent called escalate_to_human ("caller is
@@ -2049,17 +2106,20 @@ Always say a brief goodbye phrase BEFORE calling this tool.`,
       //
       // An escalation is a one-way door. Once it is open, ending the call is
       // the transfer's job (or the fallback ticket's), never the model's.
-      if (escalationDetailsMap.has(callId)) {
+      const checkEscalation = () => {
+        if (!escalationDetailsMap.has(callId)) return null;
         console.warn(
           `[TOOL] terminate_call REFUSED for ${callId} — escalate_to_human already fired ` +
             `(reason given: ${params.reason}). A handoff in flight outranks a hangup.`,
         );
         return {
-          success: false,
+          success: false as const,
           error: 'escalation_in_progress',
           say: 'Stay on the line — I am connecting you with someone now.',
         };
-      }
+      };
+      const escalationRefusal = checkEscalation();
+      if (escalationRefusal) return escalationRefusal;
 
       try {
         const apiKey = process.env.OPENAI_API_KEY;
@@ -2067,13 +2127,16 @@ Always say a brief goodbye phrase BEFORE calling this tool.`,
           console.error("[TOOL] terminate_call - missing OPENAI_API_KEY");
           return { success: false, error: "missing_api_key" };
         }
-        const response = await fetch(
+        const hangup = await requestSipHangup(params.reason, metadata, (signal) => fetch(
           `https://api.openai.com/v1/realtime/calls/${encodeURIComponent(callId)}/hangup`,
           {
             method: "POST",
             headers: { Authorization: `Bearer ${apiKey}` },
+            signal,
           },
-        );
+        ), checkEscalation);
+        if (hangup.refusal) return hangup.refusal;
+        const response = hangup.response;
         if (response.ok) {
           console.log(`[TOOL] terminate_call ✓ Call ${callId} terminated (${params.reason})`);
           // Deliberate, successful hangup — SIP recovery must hang up the
@@ -2186,6 +2249,7 @@ Always say a brief goodbye phrase BEFORE calling this tool.`,
         callStartTime: new Date().toISOString(),
       });
       if (result.success) {
+        markAfterHoursTicketFiled(callId);
         console.info(
           `[HANDOFF] refused escalation (${code}) filed as ${result.ticketNumber ?? 'a ticket'} on ${metadata.callSid}`,
         );
@@ -2239,8 +2303,7 @@ Answer office-hours questions directly without filing a ticket:
 NEVER file a ticket whose only content is "caller asked about office hours".
 A ticket is for something a human must DO.
 
-PREREQUISITE: For medical emergencies — collect caller info BEFORE calling this tool.
-For healthcare provider calls — escalate immediately with whatever info you have.`,
+PREREQUISITE: one quick ask for name and DOB; transfer even if unavailable. Clinicians and 911-level emergencies skip intake. Keep caller ID for transfer handling.`,
     parameters: z.object({
       reason: z.string().describe("Specific urgent symptoms or provider details - NOT general frustration. ALWAYS write in English, even if the caller speaks another language (this goes to English-speaking staff via SMS)."),
       /**
@@ -2270,6 +2333,10 @@ For healthcare provider calls — escalate immediately with whatever info you ha
       callback_number: z.string().optional().describe("Callback number if collected"),
       symptoms_summary: z.string().optional().describe("Summary of urgent symptoms if applicable. ALWAYS write in English regardless of the caller's language."),
       provider_info: z.string().optional().describe("Provider name/facility if healthcare provider call. ALWAYS write in English regardless of the caller's language."),
+      details_declined: z
+        .boolean()
+        .optional()
+        .describe("TRUE when they cannot or will not give name or DOB. Transfer anyway."),
     }),
     execute: async (params) => {
       console.info("[HANDOFF] escalate_to_human tool called:", {
@@ -2342,6 +2409,27 @@ For healthcare provider calls — escalate immediately with whatever info you ha
       }
       console.info(`[HANDOFF] escalation sanctioned for ${callId} — basis: ${verdict.basis}`);
 
+      /**
+       * VA-76222: collect name and DOB in at most one quick ask before the
+       * dial, unless this is 911-level or a clinician. Do NOT stamp the
+       * map on the ask — a stamp would make the second invocation (the
+       * one that transfers) look like a duplicate.
+       */
+      const identity = decideOnCallIdentityAsk({
+        callSid: metadata.callSid,
+        callerType: params.caller_type,
+        reason: params.reason,
+        symptomsSummary: params.symptoms_summary,
+        firstName: params.patient_first_name,
+        lastName: params.patient_last_name,
+        dob: params.patient_dob,
+        detailsDeclined: params.details_declined === true,
+      });
+      if (!identity.transferNow) {
+        console.info(`[HANDOFF] identity ask before on-call transfer for ${callId}`);
+        return { success: false, need_identity: true, message: identity.ask };
+      }
+
       const escalationDetails = {
         agentSlug: 'no-ivr',
         reason: params.reason,
@@ -2349,12 +2437,15 @@ For healthcare provider calls — escalate immediately with whatever info you ha
         patientFirstName: params.patient_first_name,
         patientLastName: params.patient_last_name,
         patientDob: params.patient_dob,
-        callbackNumber: params.callback_number,
+        callbackNumber: onCallCallbackNumber(params.callback_number, metadata.callerPhone),
         symptomsSummary: params.symptoms_summary,
         providerInfo: params.provider_info,
       };
       escalationDetailsMap.set(callId, escalationDetails);
 
+      // The handoff itself can end the call. Reserve the urgent record before
+      // it starts so teardown cannot claim its key for a generic floor ticket.
+      const finishRecordFiling = reserveAfterHoursTicketFiling(callId);
       try {
         await handoffToHuman();
         console.info("[HANDOFF] ✓ handoffToHuman() completed successfully");
@@ -2366,9 +2457,11 @@ For healthcare provider calls — escalate immediately with whatever info you ha
         // (Failed transfers are covered by addHumanAgent's fallback ticket;
         // the per-callSid claim lock dedupes if both paths ever race.)
         void (async () => {
+          let filed = false;
           try {
             const { SyncAgentService } = await import("../services/syncAgentService");
             const { fullName: name, standIn } = nameOrStandIn(params.patient_first_name, params.patient_last_name);
+            // Transfer handling keeps ANI; the record keeps the caller's callback and flags any mismatch.
             const phone = normalizePhoneNumber(params.callback_number || metadata.callerPhone || '');
             // A refusal earlier on this call may already have filed a ticket under
             // the call's key; the record must not be swallowed by it (Codex P1,
@@ -2415,6 +2508,7 @@ For healthcare provider calls — escalate immediately with whatever info you ha
               // path above. The post-call update carries the complete one.
             });
             if (result.success) {
+              filed = true;
               console.info(
                 `[HANDOFF] ✓ Urgent transfer record ticket: ${result.ticketNumber}${earlier ? ` (beside ${earlier.ticketNumber})` : ''}`,
               );
@@ -2423,11 +2517,14 @@ For healthcare provider calls — escalate immediately with whatever info you ha
             }
           } catch (recordErr) {
             console.error('[HANDOFF] ✗ Exception creating urgent transfer record ticket:', recordErr);
+          } finally {
+            finishRecordFiling(filed);
           }
         })();
 
         return { success: true, message: "Call transferred to on-call provider." };
       } catch (handoffError) {
+        finishRecordFiling(false);
         console.error("[HANDOFF] ✗ handoffToHuman() threw error:", handoffError);
         return { success: false, message: "Transfer failed - please take a message instead." };
       }

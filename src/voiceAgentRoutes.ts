@@ -26,6 +26,7 @@ import { callLifecycleCoordinator, getMaxDurationMs } from './services/callLifec
 import { callMetadataForDB } from './services/callMetadataStore';
 import { recordingStatusTarget } from './services/recordingStatusTarget';
 import { landRecording } from './runtime/parkedRecordings';
+import { runLaneTeardownFloor } from './runtime/pcpFloor';
 import { callSessionService } from './services/callSessionService';
 import { withRetry, withResiliency, TICKETING_RETRY_CONFIG, TWILIO_RETRY_CONFIG, getCircuitBreaker } from './services/resilienceUtils';
 import { getGreeterOpeningGreeting } from './utils/timeAware';
@@ -51,6 +52,7 @@ import { buildPcpTransferBriefing, buildWarmTransferScript } from './services/wa
 import { pcpAgentConfig, markPcpCallEnded, pcpCallIsLive } from './agents/pcpAgent';
 import { SipConferenceLifecycle } from './services/sipConferenceLifecycle';
 import { deadAirWatchdog, isActivityEvent, deadAirTimeoutMs } from './services/deadAirWatchdog';
+import { SipCallerActivity } from './services/sipGhostHangup';
 import { buildTranscriptionConfig, transcriptionModel } from './config/transcription';
 import { startProviderRosterRefresh } from './services/providerRoster';
 import { recordTurn, flushTurns, releaseTurns } from './services/turnLog';
@@ -2658,6 +2660,7 @@ async function observeCall(
   // The factory's callerMemory/schedule lookups run in parallel with DB ops.
   
   // Build after-hours specific metadata with caller phone for automatic caller ID recognition
+  const sipCallerActivity = new SipCallerActivity();
   const afterHoursMetadata = {
     ...metadata,
     callerPhone: from,
@@ -2667,6 +2670,7 @@ async function observeCall(
     // Tickets carry the conversation up to the moment of filing — the
     // ticketing app generates its staff-facing summary from it.
     getTranscript: () => (callTranscripts.get(callId) ?? []).join('\n'),
+    onCallerActivity: sipCallerActivity.subscribe,
   };
   
   // Create agent with correct signature per agent type
@@ -2722,6 +2726,8 @@ async function observeCall(
             dialedNumber: to,
             get callLogId() { return liveCallLogId(); },
             precontext: asPrecontext ?? undefined,
+            getTranscript: () => (callTranscripts.get(callId) ?? []).join('\n'),
+            onCallerActivity: sipCallerActivity.subscribe,
           }
         );
         break;
@@ -3019,11 +3025,13 @@ async function observeCall(
             // Tickets carry the conversation up to the moment of filing —
             // the ticketing app generates its staff-facing summary from it.
             getTranscript: () => (callTranscripts.get(callId) ?? []).join('\n'),
+            onCallerActivity: sipCallerActivity.subscribe,
           }
         );
         break;
       }
       
+      case 'no-ivr-v2':
       case 'dev-no-ivr':
         // DEV version of no-ivr agent - for development testing
         // v1.10.0-dev: direct appointment answers, ghost call filtering, improved language detection, same-day urgency
@@ -3037,6 +3045,7 @@ async function observeCall(
             get callLogId() { return liveCallLogId(); },
             variant: 'development' as const, // DEVELOPMENT variant - testing new features before production
             getTranscript: () => (callTranscripts.get(callId) ?? []).join('\n'),
+            onCallerActivity: sipCallerActivity.subscribe,
           }
         );
         break;
@@ -3293,6 +3302,7 @@ async function observeCall(
   // CRITICAL: Listen to raw transport events for transcripts
   // The SDK's history_added fires before transcription completes
   session.transport.on('*', (event: any) => {
+    sipCallerActivity.onTransportEvent(event ?? {});
     const eventType = event?.type;
 
     // Proof of life for the dead-air watchdog. Transcript- and tool-shaped
@@ -4632,14 +4642,13 @@ async function observeCall(
             new Promise((resolve) => setTimeout(resolve, 25_000)),
           ]),
         )
-      : agentConfig?.id === 'pcp'
-      ? import('./agents/pcpAgent').then(({ sweepPcpUnfiledCall }) =>
-          Promise.race([
-            sweepPcpUnfiledCall(callId),
-            new Promise((resolve) => setTimeout(resolve, 25_000)),
-          ]),
-        )
-      : Promise.resolve())
+      : runLaneTeardownFloor({
+          slug: effectiveSlug,
+          callSid: callId,
+          // Snapshot before the fire-and-forget cleanup deletes the transcript.
+          // Keep PCP's SIP ending unspecified, as it has always been.
+          transcript: (callTranscripts.get(callId) ?? []).join('\n'),
+        }, { source: async () => agentRegistry }))
       .catch(() => {})
       .then(() => flushAzulTimeline(callId))
       .catch((err) => console.error(`[AZUL-TIMELINE] teardown flush failed for ${callId}:`, err))
