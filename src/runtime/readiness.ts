@@ -896,13 +896,13 @@ import { callEnvironment } from "./callRecord";
  * branches. `src/agents/noIvrPromptForGrok.ts`.
  */
 /**
- * v124 — MUTUAL PATIENT DETECTOR (2026-10-28). The provider detector also
+ * v127 — MUTUAL PATIENT DETECTOR (2026-10-28). The provider detector also
  * recognizes "one mutual patient" and "the mutual patient", including
  * plurals, so these callers can pass the after-hours provider gate.
  * On top of v126. No migration; production impact remains unmeasured.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v124-mutual-patient-detector-20261028";
+  "voice-runtime-v127-mutual-patient-detector-20261028";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

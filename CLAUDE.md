@@ -2358,6 +2358,7 @@ voice-runtime-v115-the-si-assistant-review-fixes-20261022
 voice-runtime-v116-the-record-office-name-travels-20261023
 voice-runtime-v117-contact-capture-20261027
 voice-runtime-v126-noivr-prompt-trim-20261028
+voice-runtime-v127-mutual-patient-detector-20261028
 ```
 
 Also printed at boot as `[voice-runtime] <marker>`. Anything ending in an
@@ -2483,7 +2484,7 @@ on it is evidence about current code.
 | **v116** or earlier — NOT the date; this branch is **v117**, above v116 | Item #14 contact capture: surname spelling and complete email confirmation on agent-visible tool schemas; exact or unique fuzzy provider canonicalization on both ticket submission paths. Runner-up margin uses the whole roster; normalized collisions refuse a match. See `docs/observatory/STATE-OF-PLAY.md` §16. No migration; production measurement outstanding. |
 | **v117** or earlier — NOT the date; this branch is **v126**, above v117 | No-IVR Grok prompt trim: repeated explanations removed without changing rules; the length ratchet checks pinned daytime and overnight clocks. v122–v125 are on open branches. No migration. |
 
-| **v117** or earlier — NOT the date; this branch is **v124**, above v117 | The provider detector recognizes "one mutual patient" and "the mutual patient", including plurals, for the after-hours escalation gate. Call CA70722a91e13b9b657697ffff4257d36c was refused twice. Production impact remains unmeasured; marker number may need rebasing against concurrent work. |
+| **v126** or earlier — NOT the date; this branch is **v127**, above v126 | The provider detector recognizes "one mutual patient" and "the mutual patient", including plurals, for the after-hours escalation gate. Call CA70722a91e13b9b657697ffff4257d36c was refused twice. Production impact remains unmeasured; marker number may need rebasing against concurrent work. |
 
 ### THE SURGEON CLAIM — BUILT, REVIEWED SIX TIMES, WITHDRAWN 2026-09-17
 
@@ -2570,9 +2571,9 @@ v10 (the person base and the join), v11 (the locked record, #290) and v12
 (optical's office ladder) are a CHAIN on `main`: each merged after the one
 before and brought it in, so v12 contains both.
 
-**AND THE SEQUENCE HAS TWO HOLES IN IT ON PURPOSE: v13 AND v57. v126 IS THE
-NEWEST — the no-IVR prompt trim, above v117, which it contains; v122–v125 are
-on open branches. v117 is contact capture (#14), above v116. v116 carries
+**AND THE SEQUENCE HAS TWO HOLES IN IT ON PURPOSE: v13 AND v57. v127 IS THE
+NEWEST — the mutual-patient detector, above v126, which it contains; v126 is
+the no-IVR prompt trim, above v117; v122–v125 are on open branches. v117 is contact capture (#14), above v116. v116 carries
 the record's office name on an optical ticket — on its branch
 ABOVE `main`'s v115, which it contains — AND v115 IS WHAT `main` CARRIES, SINCE
 #367 MERGED 2026-10-22 (`df4b6bc`): the five #366 review fixes; on top of v114,
