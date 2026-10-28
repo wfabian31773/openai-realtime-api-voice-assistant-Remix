@@ -649,9 +649,11 @@ const PATIENT_APPOSITIVE_BEFORE = new RegExp(
   String.raw`\b(?:i(?:'m| am)|this is|my name is)\s+(?:(?:actually|also|just|indeed)\s+)*${PATIENT_NAME},?\s+$`,
 );
 // Bare introductions work in either order: "Jane Smith, the mutual patient"
-// and "The mutual patient, Jane Smith". Anchor them to the sentence start so
-// "Calling about the mutual patient, Jane Smith" remains provider evidence.
-const PATIENT_INTRODUCTION_BOUNDARY = String.raw`(?:^|${SENTENCE_END.source})\s*`;
+// and "The mutual patient, Jane Smith", including after a greeting or comma.
+// Keep a boundary before the name so "Calling about Jane Smith, the mutual
+// patient" remains provider evidence.
+const PATIENT_INTRODUCTION_BOUNDARY =
+  String.raw`(?:^|${SENTENCE_END.source}|,)\s*(?:(?:hello|hi|hey|good (?:morning|afternoon|evening))\s+)?`;
 const BARE_PATIENT_APPOSITIVE_BEFORE = new RegExp(String.raw`${PATIENT_INTRODUCTION_BOUNDARY}${PATIENT_NAME},\s+$`);
 const PATIENT_INTRODUCTION_START = new RegExp(String.raw`${PATIENT_INTRODUCTION_BOUNDARY}$`);
 const PATIENT_APPOSITIVE_AFTER = new RegExp(String.raw`^\s*,\s+${PATIENT_NAME}(?=\s*(?:[,.?!]|$))`);
@@ -671,19 +673,23 @@ const PATIENT_CALL_DESCRIPTION_AFTER = /^\s+(?:calls?|callbacks?|follow-?ups?|co
  */
 export function callerSaysTheyAreAProvider(spoken: string | readonly string[]): boolean {
   const turns = typeof spoken === 'string' ? [spoken ?? ''] : spoken;
-  const text = ` ${turns.join(' ').toLowerCase().replace(/[’‘]/g, "'").replace(/\s+/g, ' ')} `;
-  return (
-    PROVIDER_SELF_IDENTIFICATION.some((re) => affirmed(text, re)) ||
-    affirmed(text, MUTUAL_PATIENT, (before, after) => {
-      if (PATIENT_PROVIDER_ROLE_AFTER.test(after) || PATIENT_CALL_DESCRIPTION_AFTER.test(after)) return true;
-      return !PATIENT_IDENTIFICATION_BEFORE.test(before) &&
-        !PATIENT_APPOSITIVE_BEFORE.test(before) &&
-        !BARE_PATIENT_APPOSITIVE_BEFORE.test(before) &&
-        !(PATIENT_INTRODUCTION_START.test(before) && PATIENT_APPOSITIVE_AFTER.test(after)) &&
-        !PATIENT_IDENTIFICATION_AFTER.test(after);
-    }) ||
-    turns.some(answersWithAFacility)
-  );
+  // A new caller turn is an introduction boundary even when the preceding
+  // turn has no punctuation. Joining turns would erase that context.
+  return turns.some((turn) => {
+    const text = ` ${turn.toLowerCase().replace(/[’‘]/g, "'").replace(/\s+/g, ' ')} `;
+    return (
+      PROVIDER_SELF_IDENTIFICATION.some((re) => affirmed(text, re)) ||
+      affirmed(text, MUTUAL_PATIENT, (before, after) => {
+        if (PATIENT_PROVIDER_ROLE_AFTER.test(after) || PATIENT_CALL_DESCRIPTION_AFTER.test(after)) return true;
+        return !PATIENT_IDENTIFICATION_BEFORE.test(before) &&
+          !PATIENT_APPOSITIVE_BEFORE.test(before) &&
+          !BARE_PATIENT_APPOSITIVE_BEFORE.test(before) &&
+          !(PATIENT_INTRODUCTION_START.test(before) && PATIENT_APPOSITIVE_AFTER.test(after)) &&
+          !PATIENT_IDENTIFICATION_AFTER.test(after);
+      }) ||
+      answersWithAFacility(turn)
+    );
+  });
 }
 
 /**

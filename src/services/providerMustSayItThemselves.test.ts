@@ -182,6 +182,58 @@ describe('mutual patient self-identification', () => {
   });
 });
 
+describe('patient introductions after greetings and across caller turns', () => {
+  it.each([
+    { turns: ['Hello, Jane Smith, the mutual patient.'] },
+    { turns: ['Hello, the mutual patient, Jane Smith.'] },
+    { turns: ['Hi Jane Anne Smith-Jones, the mutual patient.'] },
+    { turns: ['Good morning the mutual patient, Jane Smith.'] },
+    { turns: ['I need an appointment, Jane Smith, the mutual patient.'] },
+    { turns: ['I need an appointment, the mutual patient, Jane Smith.'] },
+    { turns: ['I need an appointment', 'Jane Smith, the mutual patient'] },
+    { turns: ['I need an appointment', 'The mutual patient, Jane Smith'] },
+    { turns: ['I need an appointment', 'Hello, Jane Smith, the mutual patient.'] },
+    { turns: ['I need an appointment', 'Hello, the mutual patient, Jane Smith.'] },
+    { turns: ['I need an appointment', 'Hi Jane Anne Smith-Jones, the mutual patient.'] },
+  ])('refuses provider escalation for $turns', ({ turns }) => {
+    expect(callerSaysTheyAreAProvider(turns)).toBe(false);
+    if (turns.length === 1) expect(callerSaysTheyAreAProvider(turns[0])).toBe(false);
+
+    // Both transcript feeds must preserve the boundaries seen by the gate.
+    for (const feed of ['core', 'runtime'] as const) {
+      releaseCallerSpeech(CALL);
+      if (feed === 'core') turns.forEach((turn) => recordCallerSpeech(CALL, turn));
+      else noteCallerTranscript(CALL, turns.map((turn) => `CALLER: ${turn}`));
+      const corroboration = corroborate(CALL, '');
+      expect(corroboration.providerStated, feed).toBe(false);
+      expect(judgeEscalation({
+        callerType: 'healthcare_provider',
+        reason: 'Provider requesting the on-call physician',
+        corroboration,
+      }), feed).toMatchObject({ allowed: false, code: 'provider_not_stated_by_caller' });
+    }
+  });
+
+  it.each([
+    { turns: ['Hello, calling about Jane Smith, the mutual patient.'] },
+    { turns: ['Hello, calling about the mutual patient, Jane Smith.'] },
+    { turns: ['Hello, regarding Jane Smith, the mutual patient.'] },
+    { turns: ['Hello, regarding the mutual patient, Jane Smith.'] },
+    { turns: ['Hello, Jane Smith, the mutual patient. Calling about our mutual patient.'] },
+    { turns: ['Hello, Jane Smith, the mutual patient.', 'This is Dr. Lee calling.'] },
+    { turns: ['I need an appointment', 'Jane Smith, the mutual patient', 'Calling about our mutual patient.'] },
+    { turns: ['Hello, Jane Smith, the mutual patient.', 'Yes, Example Hospital.'] },
+  ])('preserves independent provider evidence in $turns', ({ turns }) => {
+    expect(callerSaysTheyAreAProvider(turns)).toBe(true);
+    noteCallerTranscript(CALL, turns.map((turn) => `CALLER: ${turn}`));
+    expect(judgeEscalation({
+      callerType: 'healthcare_provider',
+      reason: 'Provider requesting the on-call physician',
+      corroboration: corroborate(CALL, ''),
+    })).toEqual({ allowed: true, basis: 'provider_or_facility' });
+  });
+});
+
 describe('asking for a doctor, an operator or a page is not saying you are one', () => {
   const NOT_YET = [
     'Operator.',
