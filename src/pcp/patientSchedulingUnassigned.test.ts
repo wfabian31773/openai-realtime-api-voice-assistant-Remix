@@ -236,12 +236,11 @@ describe('PCP uses the unassigned exit after a routing-field refusal', () => {
       const { callId, file } = patientCall();
       const result = await file('My glasses broke.');
 
-      expect(result.success).toBe(false);
-      if (statusCode === 401 || statusCode === 403) {
-        expect(result.guidance).toMatch(/do not ask for an office or surgeon.*repeat this filing/i);
-      }
+      expect(result).toMatchObject({ success: false, retryable: true });
+      expect(result.guidance).not.toMatch(/do not .*repeat this filing|do not call this tool again/i);
       expect(ticketing.createTicket).toHaveBeenCalledTimes(2);
       expect(pcpDirector.filedForCurrentPatient(callId)).toBeUndefined();
+      expect(pcpDirector.get(callId).patientRoutingRefusals).toBeUndefined();
 
       const recovered = await file('My glasses broke.');
       expect(recovered).toMatchObject({ success: true, ticketNumber: 'VA-TEST-122' });

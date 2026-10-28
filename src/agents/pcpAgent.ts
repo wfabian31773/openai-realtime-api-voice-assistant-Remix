@@ -13,6 +13,7 @@ import { EMAIL_CONFIRMATION_DESCRIPTION, LAST_NAME_FIELD_DESCRIPTION } from '../
 import { withToolDirection } from '../services/toolDirection';
 import { missingFieldFromError } from '../services/durableTicketFiling';
 import { isTerminalRefusal } from '../services/terminalRefusal';
+import { isTwilioCallSid } from '../tools/callSid';
 import type { CreateTicketParams } from '../../server/services/ticketingApiClient';
 import { scheduleLookupService } from '../services/scheduleLookupService';
 import {
@@ -1082,7 +1083,10 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
       // reclassified is still a patient, and their request still does not
       // belong sitting in department 18. Same reason as director.next().
       if (!enrichingTheTicket && (state.callPurpose === 'patient_caller' || state.callerIsThePatient)) {
-        const patientTicketKey = `${metadata.callSid || callId}-pcp-patient${pcpDirector.patientKeySuffix(callId)}`;
+        // A sentinel SID can be shared across callers; the runtime callId is
+        // per call and stays stable across retries and agent reconstruction.
+        const patientCallId = isTwilioCallSid(metadata.callSid) ? metadata.callSid : callId;
+        const patientTicketKey = `${patientCallId}-pcp-patient${pcpDirector.patientKeySuffix(callId)}`;
         const exhaustedRoutingGuidance =
           'The ticketing app still refused the unassigned filing. Do not ask for an office or surgeon ' +
           'or repeat this filing. No ticket was created; do not say it was recorded or promise a callback.';
@@ -1183,7 +1187,7 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
           // exit above now handles routing fields; other refusals retain the
           // existing guidance, without claiming a failed write was recorded.
           const status = patientResult.statusCode;
-          const refused = typeof status === 'number' && status >= 400 && status < 500;
+          const refused = isTerminalRefusal(status);
           // Only payload refusals are permanent; timeouts, rate limits and
           // credential failures can recover before a later tool invocation.
           if (unassignedExit && isTerminalRefusal(status)) {

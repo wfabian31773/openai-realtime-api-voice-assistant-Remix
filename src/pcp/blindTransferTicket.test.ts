@@ -299,7 +299,7 @@ describe('CAbf717457 — the refusal that was retried six times', () => {
     expect(ticketing.createPcpTicket).not.toHaveBeenCalled();
   });
 
-  it.each([undefined, 'CA00000000000000000000000000000042'])(
+  it.each([undefined, 'unknown', 'latest', 'CA00000000000000000000000000000042'])(
     'deduplicates an unassigned filing whose response was lost (callSid: %s)',
     async (callSid) => {
       const filed = new Map<string, string>();
@@ -316,16 +316,47 @@ describe('CAbf717457 — the refusal that was retried six times', () => {
       const { agent, callId } = await freshPatientCall({ callSid });
       const timedOut = await call(agent, 'create_pcp_task', PATIENT_TASK);
       expect(timedOut.retryable).toBe(true);
-      const recovered = await call(agent, 'create_pcp_task', PATIENT_TASK);
+      const rebuilt = createPcpAgent(async () => ({ ok: false, status: 'FAILED' }), { callId, callSid });
+      const recovered = await call(rebuilt, 'create_pcp_task', PATIENT_TASK);
 
       expect(recovered.success).toBe(true);
       expect(recovered.ticketNumber).toBe('VA-1');
       expect(ticketsCreated).toBe(1);
       const payloads = ticketing.createTicket.mock.calls.map(([payload]) => payload);
       expect(payloads[1].routingAskExhausted).toBe(true);
+      const keyBase = callSid === 'CA00000000000000000000000000000042' ? callSid : callId;
       expect(payloads.map((payload) => payload.idempotencyKey)).toEqual(
-        payloads.map(() => `${callSid || callId}-pcp-patient`),
+        payloads.map(() => `${keyBase}-pcp-patient`),
       );
+    },
+  );
+
+  it.each(['unknown', 'latest', 'none', 'N/A', 'CAinvalid'])(
+    'keeps unrelated patient filings separate with a shared CallSid sentinel (%s)',
+    async (callSid) => {
+      // Model the endpoint's global idempotency cache across two calls.
+      const filed = new Map<string, string>();
+      ticketing.createTicket.mockImplementation(async (payload) => {
+        const key = payload.idempotencyKey!;
+        const cached = filed.get(key);
+        if (cached) return { success: true, ticketNumber: cached };
+        if (!payload.routingAskExhausted) return SURGEON_400 as never;
+        const ticketNumber = `VA-${filed.size + 1}`;
+        filed.set(key, ticketNumber);
+        return { success: true, ticketNumber };
+      });
+      const first = await freshPatientCall({ callSid });
+      const second = await freshPatientCall({ callSid });
+      const firstResult = await call(first.agent, 'create_pcp_task', PATIENT_TASK);
+      const secondResult = await call(second.agent, 'create_pcp_task', PATIENT_TASK);
+
+      expect(firstResult).toMatchObject({ success: true, ticketNumber: 'VA-1' });
+      expect(secondResult).toMatchObject({ success: true, ticketNumber: 'VA-2' });
+      expect(ticketing.createTicket).toHaveBeenCalledTimes(4);
+      expect([...filed.keys()]).toEqual([
+        `${first.callId}-pcp-patient`, `${second.callId}-pcp-patient`,
+      ]);
+      expect(ticketing.createPcpTicket).not.toHaveBeenCalled();
     },
   );
 
