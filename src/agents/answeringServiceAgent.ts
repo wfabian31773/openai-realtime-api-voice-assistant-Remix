@@ -449,7 +449,7 @@ When lookup_schedule returns found: false (patient not found by name+DOB or phon
    - Wait for them to say it in parts (e.g. "January... twelfth... nineteen thirty-seven")
    - Also call lookup_schedule with their phone number as a second attempt: lookup_schedule(phone: callerPhone)
    - If EITHER lookup succeeds → confirm their name and continue
-   - If both fail → still create the ticket, note "patient not found in system" in the details, and include their phone number so staff can manually locate them
+   - If both fail → still create the ticket, say "let me make sure the team has your details" — never tell them they are not found if a visit or schedule match exists under a different spelling — note "patient — staff please verify" in the details, and include their phone number so staff can manually locate them
 
 3. IF NEW PATIENT:
    - Do NOT attempt another lookup

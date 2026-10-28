@@ -273,7 +273,7 @@ describe('the hangup fallback', () => {
   it('exists and runs on PCP teardown only', () => {
     const routes = readFileSync(new URL('../voiceAgentRoutes.ts', import.meta.url), 'utf8');
     expect(code).toMatch(/export async function sweepPcpUnfiledCall/);
-    // v119: the SIP teardown runs the lane's REGISTERED sweep (pcp's is
+    // v129: the SIP teardown runs the lane's REGISTERED sweep (pcp's is
     // sweepPcpUnfiledCall), so the lane gate lives in the registry now.
     expect(routes).toMatch(/runLaneTeardownFloor\(\{\s*slug: effectiveSlug,\s*callSid: callId/);
     const registry = readFileSync(new URL('../config/agents.ts', import.meta.url), 'utf8');
@@ -284,7 +284,7 @@ describe('the hangup fallback', () => {
     // A wedged sweep must never block the timeline flush (2026-07-24).
     // Anchor on the sweep import — `id === 'pcp'` also appears earlier in the
     // file for the no-dead-air heartbeat.
-    // v119: bounded inside runLaneTeardownFloor by PCP_FLOOR_BUDGET_MS.
+    // v129: bounded inside runLaneTeardownFloor by PCP_FLOOR_BUDGET_MS.
     const floor = readFileSync(new URL('../runtime/pcpFloor.ts', import.meta.url), 'utf8');
     expect(floor).toMatch(/PCP_FLOOR_BUDGET_MS = 25_000/);
     const fn = floor.slice(floor.indexOf('export async function runLaneTeardownFloor'));

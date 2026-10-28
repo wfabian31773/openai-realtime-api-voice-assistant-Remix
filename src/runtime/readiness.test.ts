@@ -140,7 +140,7 @@ describe("runtime readiness", () => {
   });
 
   it('identifies the after-hours teardown floor deployment', () => {
-    expect(VOICE_RUNTIME_DEPLOY_MARKER).toBe('voice-runtime-v119-after-hours-teardown-floor-20261028');
+    expect(VOICE_RUNTIME_DEPLOY_MARKER).toBe('voice-runtime-v129-after-hours-teardown-floor-20261028');
   });
 
   it("markerSetOn reports null rather than guessing when the suffix is gone", () => {

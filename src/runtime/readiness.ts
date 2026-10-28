@@ -890,15 +890,28 @@ import { callEnvironment } from "./callRecord";
  * On top of v116. No migration; production impact remains unmeasured.
  */
 /**
- * v119 — AFTER-HOURS TEARDOWN FLOOR (2026-10-28). The no-ivr and no-ivr-v2
+ * v126 — NO-IVR PROMPT TRIM (2026-10-28). Remove repeated explanations from
+ * the Grok prompt while keeping its rules; the length ratchet checks pinned
+ * daytime and overnight clocks. On top of v117; v122–v125 are on open
+ * branches. `src/agents/noIvrPromptForGrok.ts`.
+ */
+/**
+ * v128 — PCP SCHEDULING AND UNASSIGNED EXIT (2026-10-28; renumbered from v122). Patient scheduling
+ * reaches the HVA Hub, including a captured scheduling purpose alongside the
+ * patient latch. A terminal Optical/Surgery office or surgeon refusal retries
+ * once with routingAskExhausted instead of sending PCP back through re-asks.
+ * On top of v126 (#394); v127 is #376 on its open branch. No migration; production impact remains unmeasured.
+ */
+/**
+ * v129 — AFTER-HOURS TEARDOWN FLOOR (2026-10-28). The no-ivr and no-ivr-v2
  * agents reuse PCP's v90 registered sweep machinery on both voice pipelines.
  * A transcribed request with no ticket files through the usual After Hours
  * submission path; silent calls, identity-only calls and existing tickets
  * are skipped. The normal per-call lock and idempotency key prevent duplicates.
- * On top of v117. No migration; production impact remains unmeasured.
+ * On top of v128 (#389); renumbered from v119; v127 is #376 on its open branch. No migration; production impact remains unmeasured.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v119-after-hours-teardown-floor-20261028";
+  "voice-runtime-v129-after-hours-teardown-floor-20261028";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can
