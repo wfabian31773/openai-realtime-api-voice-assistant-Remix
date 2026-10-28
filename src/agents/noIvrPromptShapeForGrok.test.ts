@@ -184,6 +184,7 @@ const RULINGS: Array<[string, RegExp]> = [
   ['the 1 AM robocall rule', /1 AM/],
   ['robot calls terminate', /terminate_call with reason "robot_call"/],
   ['ghost calls terminate', /terminate_call with reason "ghost_call"/],
+  ['ghost line and hangup forbidden after a request', /NEVER use the ghost-call line or terminate_call with reason "ghost_call" after any non-empty caller transcript, including any request or question/],
   ['date of birth is asked in parts', /starting with the month, then\s*\n?\s*the day, then the year/],
   ['the create_ticket wait line', /Give me one moment while I get this submitted for you/],
   ['B2B callers are not blocked on a date of birth', /DOB IS OPTIONAL FOR BUSINESS CALLERS/],

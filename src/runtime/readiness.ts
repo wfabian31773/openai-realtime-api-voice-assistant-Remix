@@ -889,8 +889,15 @@ import { callEnvironment } from "./callRecord";
  * descriptions survive the SDK conversion on answering-service and no-ivr-v2.
  * On top of v116. No migration; production impact remains unmeasured.
  */
+/**
+ * v121 — HEARD CALLERS BYPASS THE SILENCE LADDER (2026-10-28). Once any
+ * non-empty caller transcript arrives, the ladder stands down before speaking
+ * and cannot end the call. Ghost-call prompts forbid use after a request;
+ * terminate_call refuses ghost_call after a caller transcript on SIP and runtime.
+ * On top of v117. No migration; production impact remains unmeasured.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v117-contact-capture-20261027";
+  "voice-runtime-v121-silence-ladder-heard-callers-20261028";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

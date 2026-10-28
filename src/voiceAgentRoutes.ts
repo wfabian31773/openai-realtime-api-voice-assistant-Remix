@@ -2722,6 +2722,7 @@ async function observeCall(
             dialedNumber: to,
             get callLogId() { return liveCallLogId(); },
             precontext: asPrecontext ?? undefined,
+            getTranscript: () => (callTranscripts.get(callId) ?? []).join('\n'),
           }
         );
         break;

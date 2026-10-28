@@ -8,9 +8,10 @@ import {
   type TriageOutcome
 } from '../config/afterHoursTicketing';
 import { buildPracticeKnowledgePrompt } from '../config/azulVisionKnowledge';
-import { getNextBusinessDayContext } from '../utils/timeAware';
+import { getNextBusinessDayContext, getPacificTimeContext } from '../utils/timeAware';
 import { escalationDetailsMap } from '../services/escalationStore';
 import { markCallConcluded } from '../services/callConclusion';
+import { GHOST_CALL_RESTRICTION, ghostCallRefusal, hasCallerTranscript } from '../services/ghostCallProtection';
 import { EMAIL_FIELD_DESCRIPTION, LAST_NAME_FIELD_DESCRIPTION } from '../tools/contactCaptureGuidance';
 
 // ── Content-based routing (operator mandate 2026-07-25) ─────────────────
@@ -176,7 +177,8 @@ You make this determination BASED STRICTLY ON THE PATIENT'S DETAILS - no coachin
 - Once the language is confirmed (English or Spanish), STAY in that language for the entire call
 
 ===== GHOST CALL & ROBOT CALL PROTOCOL =====
-If caller is not engaging after 2-3 prompts (ghost call) or you detect IVR/robocall audio (robot call):
+${GHOST_CALL_RESTRICTION}
+If the caller has never been transcribed and is not engaging after 2-3 prompts (ghost call), or you detect IVR/robocall audio (robot call):
 1. Say a brief goodbye: "Take care, goodbye." or "We were unable to connect. Goodbye."
 2. Call the terminate_call tool with the appropriate reason
 3. Do NOT create a ticket
@@ -460,7 +462,7 @@ export async function createAfterHoursAgent(
     description: `Terminate the call server-side immediately. Use this to actually end the call — do NOT rely solely on verbal goodbye.
 
 USE FOR:
-- ghost_call: caller not responding after 2-3 prompts
+- ghost_call: caller never transcribed and not responding after 2-3 prompts. NEVER use ghost_call after any non-empty caller transcript, including a request or question
 - robot_call: IVR bleed-through or automated system detected
 - spam: spam/telemarketing detected
 - max_turns_exceeded: call has gone on too long with no resolution
@@ -474,6 +476,8 @@ Always say a brief goodbye phrase BEFORE calling this tool.`,
     execute: async (params) => {
       const callId = metadata?.callId || metadata?.callSid || '';
       console.log(`[TOOL] terminate_call - reason: ${params.reason}, callId: ${callId}`);
+      const ghostRefusal = ghostCallRefusal(params.reason, hasCallerTranscript(metadata?.getTranscript?.() ?? ''));
+      if (ghostRefusal) return ghostRefusal;
       try {
         const apiKey = process.env.OPENAI_API_KEY;
         if (!apiKey) {
@@ -513,7 +517,7 @@ Always say a brief goodbye phrase BEFORE calling this tool.`,
     voice: 'sage',
     handoffDescription: 'Handles after-hours urgent triage calls for Azul Vision',
     instructions: () => {
-      const timeContext = require('../utils/timeAware').getPacificTimeContext();
+      const timeContext = getPacificTimeContext();
       return buildSystemPrompt(callerPhone, scheduleContext) + 
         `\n\n===== TIME CONTEXT =====\n${timeContext}` +
         `\n\n===== PRACTICE KNOWLEDGE =====\n${practiceKnowledge}`;

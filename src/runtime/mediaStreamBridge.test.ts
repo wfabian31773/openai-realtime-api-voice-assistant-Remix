@@ -498,6 +498,28 @@ describe("VoiceCallBridge — the agent's own hangup guards (Codex review, PR #2
     expect(output.say).toMatch(/Stay on the line/);
   });
 
+  it("refuses ghost termination after hearing a caller, even if the agent would allow it", async () => {
+    const agent = permittingAgent();
+    const h = makeBridge({ agent });
+    h.handlers().onCallerTranscript("I need help with my appointment.", "request-1");
+    h.newResponse();
+    h.handlers().onToolCall("ghost-after-request", "terminate_call", { reason: "ghost_call" });
+    h.handlers().onResponseDone();
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(agent.dispatch).not.toHaveBeenCalled();
+    expect(h.session.sendToolResult).toHaveBeenCalledWith(
+      "ghost-after-request", false,
+      expect.objectContaining({ success: false, error: "caller_already_heard" }),
+    );
+    h.handlers().onAudioDelta(b64(800));
+    h.handlers().onAudioDone("Take your time.");
+    const name = h.marks()[h.marks().length - 1].mark.name;
+    h.bridge.handleTwilioFrame({ event: "mark", streamSid: "MZ-test", mark: { name } });
+    expect(h.outcomes).toEqual([]);
+  });
+
   it("hangs up once the agent's guards let the termination through", async () => {
     const h = makeBridge({ agent: permittingAgent() });
     h.newResponse();
@@ -511,6 +533,42 @@ describe("VoiceCallBridge — the agent's own hangup guards (Codex review, PR #2
     const name = h.marks()[h.marks().length - 1].mark.name;
     h.bridge.handleTwilioFrame({ event: "mark", streamSid: "MZ-test", mark: { name } });
     expect(h.outcomes).toEqual(["agent_ended"]);
+  });
+
+  it("refuses ghost termination when a transcript arrives during dispatch", async () => {
+    let settle!: (result: { ok: boolean; output: string }) => void;
+    const agent = makeAgent({
+      dispatch: vi.fn(() => new Promise<{ ok: boolean; output: string }>((resolve) => { settle = resolve; })),
+    });
+    const h = makeBridge({ agent });
+    h.handlers().onToolCall("pending-ghost", "terminate_call", { reason: "ghost_call" });
+    h.handlers().onResponseDone();
+    await Promise.resolve();
+    expect(agent.dispatch).toHaveBeenCalledTimes(1);
+    h.handlers().onCallerTranscript("Please help with my request.", "late-request");
+    settle({ ok: true, output: JSON.stringify({ success: true, reason: "ghost_call" }) });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(h.session.sendToolResult).toHaveBeenCalledWith(
+      "pending-ghost", expect.any(Boolean),
+      expect.objectContaining({ success: false, error: "caller_already_heard" }),
+    );
+    expect(h.marks()).toEqual([]);
+    expect(h.outcomes).toEqual([]);
+  });
+
+  it("revokes a ghost hangup if a caller is heard before its final mark", async () => {
+    const h = makeBridge({ agent: permittingAgent() });
+    h.handlers().onToolCall("ghost-before-request", "terminate_call", { reason: "ghost_call" });
+    h.handlers().onResponseDone();
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    const name = h.marks()[h.marks().length - 1].mark.name;
+    h.handlers().onCallerTranscript("I need to ask about an appointment.", "request-before-mark");
+    h.bridge.handleTwilioFrame({ event: "mark", streamSid: "MZ-test", mark: { name } });
+    expect(h.timers.fire(FINAL_MARK_GRACE_MS)).toBe(false);
+    expect(h.outcomes).toEqual([]);
   });
 
   it("adopts an ALREADY-SENT goodbye mark rather than waiting for an utterance that will never come", async () => {

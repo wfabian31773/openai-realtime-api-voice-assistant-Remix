@@ -1624,3 +1624,21 @@ no PR opened, no merge or deploy, and no production before/after claim. Next:
 owner opens the PR and follows the measurement rule in `docs/BACKEND_HANDOFF.md`
 before merging ticket-path changes. Shared bridge files are outside this
 session's writable workspace; this entry is the local handoff.
+
+
+## 18. Heard callers bypass silence and ghost-call termination — 2026-10-27
+
+v121 (`voice-runtime-v121-silence-ladder-heard-callers-20261028`), on top
+of v117: any non-empty caller transcript makes the runtime silence ladder
+stand down before speaking. Never-heard callers retain the original ladder.
+The no-IVR, answering-service and legacy after-hours prompts forbid ghost
+wording after a request; their live SIP tools refuse ghost termination after
+any caller words. The runtime also refuses it before dispatch, after an
+in-flight dispatch, and revokes pending ghost hangups before playback completes.
+No new spoken wording, migration, DB writes, commit, push or PR.
+Regression tests exercise the real bridge and agent tools with synthetic
+requests indexed by the three reported call SIDs. Validation: 291 tests passed
+in the five touched/added test files, run with nice and one worker; TypeScript
+(`tsc -p . --noEmit`) and `git diff --check` passed. Production impact remains
+unmeasured. Owner: check marker numbering against concurrent v118–v126 work
+before merge, then verify the published marker and call behavior after deploy.

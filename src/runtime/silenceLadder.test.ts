@@ -440,7 +440,7 @@ describe("the ladder itself", () => {
     expect(h.outcomes).not.toContain("dead_air");
   });
 
-  it("starts again from zero once the caller is actually HEARD", async () => {
+  it("stops prompting once a caller answers the previously unheard ladder", async () => {
     const h = await ladder();
     h.speak("How can I help you today?");
     h.timers.fire(WINDOW);
@@ -450,13 +450,13 @@ describe("the ladder itself", () => {
     h.handlers().onCallerTranscript("Sorry, I am here.", "item-1");
     h.speak("No problem. What can I do for you?");
 
-    // A fresh three, not a cut on the next window — the LADDER reset.
+    // The earlier prompts remain counted, but being heard retires the ladder.
     expect(h.timers.fire(WINDOW)).toBe(true);
     expect(h.outcomes).toEqual([]);
-    expect(h.session.speak).toHaveBeenCalledTimes(4);
+    expect(h.session.speak).toHaveBeenCalledTimes(3);
     // And the cumulative count kept every one of them.
     h.bridge.handleTwilioFrame({ event: "stop", streamSid: "MZ-test" } as never);
-    expect(h.records[0].silencePrompts).toBe(4);
+    expect(h.records[0].silencePrompts).toBe(3);
   });
 
   it("counts the prompts it SPOKE, and says whether they ran out, on the record", async () => {
@@ -532,9 +532,8 @@ describe("the row and the status", () => {
   });
 
   it("reads failed when the caller never spoke and completed when they did", () => {
-    // The dead_air rule, for the dead_air reason: the ladder resets on being
-    // heard, so it can end a call that HELD a conversation and then went
-    // quiet, and that call must still be graded and synced.
+    // Historical caller_silent records that held a conversation must still
+    // be graded and synced, even though heard callers now bypass the ladder.
     expect(statusFor("caller_silent", "")).toBe("failed");
     expect(statusFor("caller_silent", "AGENT: Hello?\nCALLER: Yes, hi.\n")).toBe("completed");
   });
@@ -563,15 +562,45 @@ describe("the window is a dial, and a typo cannot disarm the ladder", () => {
  * deliberately unchanged — the tests above are its guard, and one below
  * proves the new latch cannot disarm it.
  */
-describe("the prompts are spent, and who is on the line decides what that means", () => {
+describe("heard callers retire the ladder before it speaks (v121)", () => {
+  it.each(["Hello.", "I need help with an appointment.", "Necesito ayuda."])(
+    "never prompts or cuts after the first non-empty caller transcript: %s",
+    async (text) => {
+      const h = await ladder();
+      h.speak("How can I help you today?");
+      h.handlers().onCallerTranscript(text, "heard-1");
+      h.speak("Take your time.");
+      expect(h.timers.fire(WINDOW)).toBe(true);
+      for (let i = 0; i < 5; i += 1) h.timers.fire(WINDOW);
+      expect(h.session.speak).not.toHaveBeenCalled();
+      expect(h.outcomes).toEqual([]);
+      expect(h.session.close).not.toHaveBeenCalled();
+    },
+  );
+
+  it("keeps the original ladder for empty transcripts and VAD noise", async () => {
+    const h = await ladder();
+    h.handlers().onCallerTranscript("  \n ", "empty");
+    h.handlers().onSpeechStarted();
+    h.handlers().onSpeechStopped();
+    h.speak("How can I help you today?");
+    for (let i = 0; i < SILENCE_STRIKE_LIMIT; i += 1) {
+      h.timers.fire(WINDOW);
+      h.handlers().onCallerTranscript("  ", `empty-${i}`);
+    }
+    expect(h.session.speak).toHaveBeenCalledTimes(SILENCE_STRIKE_LIMIT);
+    h.timers.fire(WINDOW);
+    expect(h.outcomes).toEqual(["caller_silent"]);
+  });
+
   it("STANDS DOWN instead of cutting a caller it has heard", async () => {
     const h = await ladder({ silenceStrikeLimit: 1 });
     h.speak("How can I help you today?");
     h.handlers().onCallerTranscript("I need to check on my glasses order.", "i1");
     h.speak("Of course — one moment.");
-    h.timers.fire(WINDOW); // prompt 1
-    expect(h.session.speak).toHaveBeenCalledWith(SILENCE_PROMPT_LINE, { interruptible: true });
-    h.timers.fire(WINDOW); // prompts spent
+    h.timers.fire(WINDOW); // stands down before speaking
+    expect(h.session.speak).not.toHaveBeenCalled();
+    h.timers.fire(WINDOW); // no caller timer remains
     // The call is STILL OPEN. This is the whole ruling.
     expect(h.outcomes).toEqual([]);
   });
@@ -608,14 +637,19 @@ describe("the prompts are spent, and who is on the line decides what that means"
     // ladder fires it reads the same non-zero value whether the caller spoke
     // once and stopped or never spoke at all — it cannot answer the question
     // the ruling turns on. Here the caller speaks, then goes quiet for the
-    // FULL three prompts, which resets nothing and must still not cut.
+    // full silence window, which must neither prompt nor cut.
     const h = await ladder();
     h.speak("How can I help you today?");
     h.handlers().onCallerTranscript("It is about my order.", "i1");
     h.speak("One moment.");
-    for (let i = 0; i < SILENCE_STRIKE_LIMIT; i += 1) expect(h.timers.fire(WINDOW)).toBe(true);
-    expect(h.session.speak).toHaveBeenCalledTimes(SILENCE_STRIKE_LIMIT);
     expect(h.timers.fire(WINDOW)).toBe(true);
+    expect(h.session.speak).not.toHaveBeenCalled();
+    expect(h.timers.fire(WINDOW)).toBe(false);
+    // Later agent and caller turns cannot restart the cannot-hear prompts.
+    h.handlers().onCallerTranscript("I still need help with that order.", "i2");
+    h.speak("Take your time.");
+    h.timers.fire(WINDOW);
+    expect(h.session.speak).not.toHaveBeenCalled();
     expect(h.outcomes).toEqual([]);
   });
 
@@ -630,8 +664,7 @@ describe("the prompts are spent, and who is on the line decides what that means"
     const r = h.records[0];
     expect(r.silenceStoodDown).toBe(true);
     expect(r.silenceCut).not.toBe(true);
-    // The prompt that was spoken is still counted — v65's cumulative counter.
-    expect(r.silencePrompts).toBe(1);
+    expect(r.silencePrompts).toBe(0);
   });
 
   it("leaves silenceStoodDown false on a call that was cut, and on a quiet one", async () => {

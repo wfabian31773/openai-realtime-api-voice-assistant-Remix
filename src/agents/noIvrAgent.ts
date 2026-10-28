@@ -41,6 +41,7 @@ import { AFTER_HOURS_DEPARTMENT_ID as AFTER_HOURS_ROUTE_DEPARTMENT_ID } from "..
 import { nameOrStandIn, STAND_IN_NAME_NOTE } from "../services/standInName";
 import { corroborate } from "../services/symptomCorroboration";
 import { markCallConcluded } from "../services/callConclusion";
+import { GHOST_CALL_RESTRICTION, ghostCallRefusal, hasCallerTranscript } from "../services/ghostCallProtection";
 import { callMetadataForDB } from "../services/callMetadataStore";
 import { EMAIL_FIELD_DESCRIPTION, LAST_NAME_FIELD_DESCRIPTION } from "../tools/contactCaptureGuidance";
 
@@ -723,11 +724,13 @@ ROBOT/SPAM CALL INDICATORS (any 1 of these = end immediately):
 ROBOT/SPAM PROTOCOL: say "We were unable to connect. Goodbye." then call
 terminate_call with reason "robot_call".
 
-GHOST CALL INDICATORS (any 2+ of these = ghost call):
-- Only heard single syllables: "mm", "uh", "ok", "hi", background noise
+${GHOST_CALL_RESTRICTION}
+
+GHOST CALL INDICATORS (only before any non-empty caller transcript):
+- Only silence or background noise, with no caller words transcribed
 - Caller hasn't stated any actual request or question
 - Caller doesn't respond to direct questions
-- Total conversation is just greetings with no substance after 3 prompts
+- No caller words after 3 prompts
 
 GHOST CALL PROTOCOL — three turns, then out:
 1. After first unclear response: "What can I help you with today?"
@@ -1995,7 +1998,7 @@ The ticket will include schedule context (last appointment info) automatically.`
     description: `Terminate the call server-side immediately. Use this to actually end the call — do NOT rely solely on verbal goodbye.
 
 USE FOR:
-- ghost_call: caller not responding after 3 prompts
+- ghost_call: caller never transcribed and not responding after 3 prompts. NEVER use ghost_call after any non-empty caller transcript, including a request or question
 - robot_call: IVR bleed-through or automated system detected
 - spam: spam/telemarketing detected
 - max_turns_exceeded: call has gone on too long with no resolution
@@ -2008,6 +2011,10 @@ Always say a brief goodbye phrase BEFORE calling this tool.`,
     }),
     execute: async (params) => {
       console.log(`[TOOL] terminate_call - reason: ${params.reason}, callId: ${callId}`);
+
+      // Read the live SIP-route transcript at invocation, never at construction.
+      const ghostRefusal = ghostCallRefusal(params.reason, hasCallerTranscript(metadata.getTranscript?.() ?? ''));
+      if (ghostRefusal) return ghostRefusal;
 
       // NEVER hang up on a call that is being handed to a human.
       //
