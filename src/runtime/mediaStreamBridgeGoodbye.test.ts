@@ -55,6 +55,27 @@ describe("VoiceCallBridge — goodbye grace", () => {
     expect(h.records[0]).toMatchObject({ teardownReason: "goodbye_grace" });
   });
 
+  it("a shorter re-emission cannot turn a kept request into a goodbye (Codex P2, #396)", () => {
+    const h = harness();
+    h.say("Is there anything else I can help you with?");
+    h.handlers.onCallerTranscript("No, I need help with something else", "item_caller_2");
+    h.start(); h.audioDone("Okay, goodbye.");
+    h.handlers.onCallerTranscript("No");
+    h.responseDone(); h.echo();
+    vi.advanceTimersByTime(GOODBYE_GRACE_MS * 2);
+    expect(h.outcomes).toEqual([]);
+  });
+
+  it("re-emitting the same concluding turn keeps the goodbye armed (Codex P2, #396)", () => {
+    const h = harness();
+    h.handlers.onCallerTranscript("Bye.", "item_caller_3");
+    h.start(); h.audioDone("Goodbye.");
+    h.handlers.onCallerTranscript("Bye.", "item_caller_3");
+    h.responseDone(); h.echo();
+    vi.advanceTimersByTime(GOODBYE_GRACE_MS);
+    expect(h.outcomes).toEqual(["agent_ended"]);
+  });
+
   it("hangs up exactly six seconds after the goodbye plays, through deliberate teardown", () => {
     expect(GOODBYE_GRACE_MS).toBe(6_000);
     const h = harness(); h.goodbye();

@@ -977,18 +977,6 @@ export class VoiceCallBridge {
         this.noteTranscript("caller");
         // HEARD — for the rest of the call, whatever happens next. This is the
         // latch the operator's 2026-09-26 ruling turns on; see the field.
-        const late = this.goodbyeResponse;
-        const lateConclusion = text.trim() && late && late.conclusion === null
-          ? callerConclusion(text, late.previousAgent) : null;
-        if (late && lateConclusion) {
-          // The transcript of the turn this response answers, arriving late.
-          // Without speech_started it may instead be a new turn, so the next
-          // response keeps it too; each still has to complete a goodbye.
-          late.conclusion = lateConclusion;
-          this.armGoodbyeGrace();
-        } else if (text.trim()) {
-          this.cancelGoodbye();
-        }
         if (text.trim()) {
           this.callerEverHeard = true;
           // A request can arrive while a previously allowed ghost hangup is
@@ -1009,12 +997,29 @@ export class VoiceCallBridge {
         // line sits was settled when its audio started, so there is no
         // "before or after it" left to decide here — which is the point:
         // deciding it here, and at four other points, was PR #241.
+        const turnBefore = this.lastCallerLineIndex();
         this.transcriptLog.callerCompleted(text, itemId);
-        // Classified AFTER the log applies its item-aware replace/keep rules,
-        // against the caller line's own predecessor: a re-emitted cumulative
-        // item ("Thank" then "Thank you") still answers the agent's question
-        // (Codex P2, #396).
-        if (text.trim()) this.callerClosing = this.callerClosingFromLog(text);
+        // Goodbye detection reads the caller text the log RETAINED, after its
+        // item-aware replace/keep rules, against that line's own predecessor
+        // (Codex P2s, #396): a cumulative re-emission ("Thank" then "Thank
+        // you") keeps the agent's question, a shorter re-emission cannot
+        // turn a kept request into a goodbye, and re-emitting the same
+        // concluding turn does not cancel the goodbye it already started.
+        if (text.trim()) {
+          const turn = this.lastCallerLineIndex();
+          const sameTurn = turn >= 0 && turn === turnBefore;
+          const retained = turn >= 0 ? this.transcriptLog.lines[turn].slice(8) : text;
+          this.callerClosing = this.callerClosingFromLog(text);
+          const late = this.goodbyeResponse;
+          const lateConclusion = late ? callerConclusion(retained, late.previousAgent) : null;
+          if (late && late.conclusion === null && lateConclusion) {
+            // The transcript of the turn this response answers, arriving late.
+            late.conclusion = lateConclusion;
+            this.armGoodbyeGrace();
+          } else if (!(late && sameTurn && late.conclusion !== null && lateConclusion)) {
+            this.cancelGoodbye();
+          }
+        }
         /**
          * THE ONE PLACE THE CALLER'S OWN WORDS CAN REACH THE FILING TOOLS.
          *
@@ -1994,6 +1999,13 @@ export class VoiceCallBridge {
       if (line.startsWith("AGENT: ")) return line.slice(7);
     }
     return "";
+  }
+
+  private lastCallerLineIndex(): number {
+    const lines = this.transcriptLog.lines;
+    let i = lines.length - 1;
+    while (i >= 0 && !lines[i].startsWith("CALLER: ")) i--;
+    return i;
   }
 
   private callerClosingFromLog(text: string): CallerConclusion | null {
