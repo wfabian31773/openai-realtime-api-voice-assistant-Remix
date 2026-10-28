@@ -1,4 +1,5 @@
 import { appointmentReadPolicy, appointmentReadReminder } from '../services/appointmentReadPolicy';
+import { createHash } from 'node:crypto';
 import { appointmentAccess } from '../services/appointmentAccess';
 import { RealtimeAgent, tool } from '@openai/agents/realtime';
 import { z } from 'zod';
@@ -1085,10 +1086,6 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
         const exhaustedRoutingGuidance =
           'The ticketing app still refused the unassigned filing. Do not ask for an office or surgeon ' +
           'or repeat this filing. No ticket was created; do not say it was recorded or promise a callback.';
-        const priorRoutingRefusal = state.patientRoutingRefusals?.[patientTicketKey];
-        if (priorRoutingRefusal !== undefined) {
-          return refusePcp(priorRoutingRefusal, { guidance: exhaustedRoutingGuidance });
-        }
         const [{ detectCrossQueue, schedulingRedirectForStatedIntent }, { otherReasonFor }, { ticketingApiClient }, { sanitizeForSms }] =
           await Promise.all([
             import('../tools/queueRouting'),
@@ -1154,11 +1151,18 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
           idempotencyKey: patientTicketKey,
           callData: { agentUsed: 'pcp', ...(metadata.callSid ? { callSid: metadata.callSid } : {}) },
         };
+        // Scope the refusal to this exact routed payload, without putting its
+        // patient details or narrative into a director-state key.
+        const refusalKey = createHash('sha256').update(JSON.stringify(patientPayload)).digest('hex');
+        const priorRoutingRefusal = state.patientRoutingRefusals?.[refusalKey];
+        if (priorRoutingRefusal !== undefined) {
+          return refusePcp(priorRoutingRefusal, { guidance: exhaustedRoutingGuidance });
+        }
         let patientResult = await ticketingApiClient.createTicket(patientPayload);
         const missingRoutingField = missingFieldFromError(patientResult.error);
         // PCP intake has no office/surgeon field to submit after a re-ask.
         // A proven routing refusal uses the same unassigned exit as the queue
-        // tools. Persist an exhausted refusal so later tool calls stop too.
+        // tools. Persist an exhausted refusal for this payload.
         // Outages and other fields keep their existing failure path; a
         // rejected POST cannot have filed.
         const unassignedExit = (!patientResult.success || !patientResult.ticketNumber)
@@ -1182,7 +1186,7 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
             pcpDirector.update(callId, {
               patientRoutingRefusals: {
                 ...state.patientRoutingRefusals,
-                [patientTicketKey]: patientResult.error ?? 'ticket_creation_failed',
+                [refusalKey]: patientResult.error ?? 'ticket_creation_failed',
               },
             });
           }

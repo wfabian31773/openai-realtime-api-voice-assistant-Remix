@@ -15,7 +15,10 @@ const ticketing = vi.hoisted(() => ({
   createTicket: vi.fn<(params: CreateTicketParams) => Promise<CreateTicketResponse>>(),
   createPcpTicket: vi.fn(),
 }));
-vi.mock('../../server/services/ticketingApiClient', () => ({ ticketingApiClient: ticketing }));
+vi.mock('../../server/services/ticketingApiClient', () => ({
+  ticketingApiClient: ticketing,
+  lookupWasUnavailable: () => false,
+}));
 
 const { createPcpAgent } = await import('../agents/pcpAgent');
 const { pcpDirector } = await import('./director');
@@ -30,10 +33,10 @@ function patientCall() {
     callerName: 'Synthetic Patient',
     callbackNumber: '5005550006',
   });
-  const file = async (narrative: string) => {
+  const file = async (narrative: string, urgency = 'normal') => {
     const tool = agent.tools.find((candidate) => candidate.name === 'create_pcp_task')!;
     if (!('invoke' in tool)) throw new Error('create_pcp_task must be a function tool');
-    const raw = await tool.invoke(new RunContext({ history: [] }), JSON.stringify({ narrative }));
+    const raw = await tool.invoke(new RunContext({ history: [] }), JSON.stringify({ narrative, urgency }));
     return typeof raw === 'string' ? JSON.parse(raw) : raw;
   };
   return { callId, file };
@@ -164,6 +167,52 @@ describe('PCP uses the unassigned exit after a routing-field refusal', () => {
     expect(ticketing.createTicket).toHaveBeenCalledTimes(2);
   });
 
+  it('routes a later records request for the same patient after an Optical refusal', async () => {
+    ticketing.createTicket
+      .mockResolvedValueOnce({ success: false, statusCode: 400, error: 'Missing required information: office.' })
+      .mockResolvedValueOnce({ success: false, statusCode: 422, error: 'Payload refused.' });
+    const { callId, file } = patientCall();
+    pcpDirector.update(callId, {
+      patientDob: '1990-01-01', recordsDeliveryMethod: 'fax', recordsDeliveryDestination: '5005550010',
+    });
+    await file('My glasses broke.');
+
+    const records = await file('I need a copy of my records.');
+    expect(records).toMatchObject({ success: true, routed_to: 'Medical Records' });
+    expect(ticketing.createTicket).toHaveBeenCalledTimes(3);
+    expect(ticketing.createTicket.mock.calls[2][0].departmentId).toBe(16);
+  });
+
+  it.each([
+    ['a different route', 'I need a refill of my eye drops.', 'normal', 3],
+    ['a changed description on the same route', 'My glasses need a new lens.', 'normal', 1],
+    ['a changed priority on the same route', 'My glasses broke.', 'urgent', 1],
+  ])('allows %s after a rejected unassigned payload', async (_case, narrative, urgency, departmentId) => {
+    ticketing.createTicket
+      .mockResolvedValueOnce({ success: false, statusCode: 400, error: 'Missing required information: office.' })
+      .mockResolvedValueOnce({ success: false, statusCode: 422, error: 'Payload refused.' });
+    const { file } = patientCall();
+    await file('My glasses broke.');
+
+    const result = await file(narrative, urgency);
+    expect(result).toMatchObject({ success: true, ticketNumber: 'VA-TEST-122' });
+    expect(ticketing.createTicket).toHaveBeenCalledTimes(3);
+    expect(ticketing.createTicket.mock.calls[2][0].departmentId).toBe(departmentId);
+  });
+
+  it('allows a corrected contact number after a rejected unassigned payload', async () => {
+    ticketing.createTicket
+      .mockResolvedValueOnce({ success: false, statusCode: 400, error: 'Missing required information: office.' })
+      .mockResolvedValueOnce({ success: false, statusCode: 422, error: 'Payload refused.' });
+    const { callId, file } = patientCall();
+    await file('My glasses broke.');
+    pcpDirector.update(callId, { callbackNumber: '5005550011' });
+
+    const result = await file('My glasses broke.');
+    expect(result).toMatchObject({ success: true, ticketNumber: 'VA-TEST-122' });
+    expect(ticketing.createTicket.mock.calls[2][0].patientPhone).toBe('5005550011');
+  });
+
   it.each([408, 429, 401, 403, 409, 503])(
     'allows a later filing after the unassigned retry receives HTTP %s',
     async (statusCode) => {
@@ -175,6 +224,9 @@ describe('PCP uses the unassigned exit after a routing-field refusal', () => {
       const result = await file('My glasses broke.');
 
       expect(result.success).toBe(false);
+      if (statusCode === 401 || statusCode === 403) {
+        expect(result.guidance).toMatch(/do not ask for an office or surgeon.*repeat this filing/i);
+      }
       expect(ticketing.createTicket).toHaveBeenCalledTimes(2);
       expect(pcpDirector.filedForCurrentPatient(callId)).toBeUndefined();
 
