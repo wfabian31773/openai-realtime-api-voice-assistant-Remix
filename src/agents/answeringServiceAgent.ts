@@ -1,3 +1,4 @@
+import { mostRecentAcceptable } from '../tools/acceptableLocation';
 import { nameKey, rememberVerifiedIdentity } from '../tools/verifiedIdentity';
 import { joinedAppointments, prepareTicketIdentity, validatedPatientFor } from '../tools/ticketIdentity';
 import { appointmentReadPolicy } from '../services/appointmentReadPolicy';
@@ -1019,11 +1020,21 @@ Use patient data from phone lookup when available - don't ask for info you alrea
     execute: async (params) => {
       // The simplified endpoint routes by clinic name. Unknown IDs must leave
       // the name empty so validated appointment history can supply the clinic.
-      const locationName = params.location_name ||
+      const locationName = params.location_name?.trim() ||
         (params.location_id && LOCATIONS[params.location_id] ? getLocationName(params.location_id) : '');
       const prepared = prepareTicketIdentity({ ...params, call_sid: callSid, location: locationName });
       if (prepared.missing) {
         return { success: false, missingFields: [prepared.missing], message: prepared.message };
+      }
+      if (params.department_id === 1 && !locationName) {
+        const held = validatedPatientFor(callSid, String(prepared.input.first_name),
+          String(prepared.input.last_name), String(prepared.input.date_of_birth));
+        // The general identity gate can carry a surgery center. Apply Optical's
+        // facility rules before this inferred office reaches the routing field.
+        prepared.input.location = await mostRecentAcceptable([
+          held?.nextAppointment?.location, held?.lastVisit?.location,
+          held?.confirmedClinic || String(prepared.input.location || ''),
+        ].filter((office): office is string => Boolean(office)), 'optical') || '';
       }
       params = { ...params, first_name: String(prepared.input.first_name ?? ''), last_name: String(prepared.input.last_name ?? ''),
         date_of_birth: String(prepared.input.date_of_birth ?? ''), location_name: String(prepared.input.location ?? '') };

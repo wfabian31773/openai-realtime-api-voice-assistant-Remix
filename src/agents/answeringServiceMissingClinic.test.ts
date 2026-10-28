@@ -26,6 +26,14 @@ vi.mock('../services/scheduleLookupService', () => ({
   scheduleLookupService: { lookupByNameAndDOB: h.lookup, lookupByPhone: h.phone },
 }));
 vi.mock('../services/syncAgentService', () => ({ SyncAgentService: { submitSimplifiedTicket: h.submit } }));
+vi.mock('../services/consoleDirectory', () => ({
+  isDirectoryConfigured: () => true,
+  lookupLocation: async (name: string) => ({
+    canonical: name,
+    facilityKind: name === 'Synthetic Surgery Center' ? 'surgery_center'
+      : name === 'Synthetic Virtual Visits' ? 'virtual' : 'clinic',
+  }),
+}));
 import { createAnsweringServiceAgent } from './answeringServiceAgent';
 import { resetVerifiedIdentities } from '../tools/verifiedIdentity';
 import { validatedPatientFor } from '../tools/ticketIdentity';
@@ -79,6 +87,63 @@ it('Optical falls back to held clinic history when the location ID is unknown', 
     .toMatchObject({ success: true });
   expect(h.submit).toHaveBeenCalledWith(expect.objectContaining({ locationOfLastVisit: 'Synthetic Clinic' }));
   expect(h.lookup).toHaveBeenCalledTimes(1);
+});
+
+it.each([
+  { location: 'Synthetic Surgery Center', location_name: undefined },
+  { location: 'Synthetic Virtual Visits', location_name: undefined },
+  { location: 'Synthetic Surgery Center', location_name: '   ' },
+])(
+  'Optical skips an ineligible next appointment and routes to the last clinic (%j)', async ({ location, location_name }) => {
+    h.lookup.mockResolvedValue({ ...record,
+      upcomingAppointments: [{ isoDate: '2099-01-01', location }],
+      pastAppointments: [{ isoDate: '2020-01-01', location: 'Synthetic Clinic' }],
+    });
+    const agent = await createAnsweringServiceAgent(async () => {}, { callSid: sid });
+    await invoke(agent, 'lookup_schedule', args);
+    const { first_name, last_name, date_of_birth, ...request } = opticalRequest;
+
+    expect(await invoke(agent, 'create_ticket', { ...request, location_name })).toMatchObject({ success: true });
+    expect(h.submit).toHaveBeenCalledWith(expect.objectContaining({
+      patientFullName: 'Alex Synthetic', patientDOB: '1970-01-02',
+      locationOfLastVisit: 'Synthetic Clinic',
+    }));
+    expect(h.lookup).toHaveBeenCalledTimes(1);
+  },
+);
+
+it('Optical asks when all held facilities are ineligible, then files without a location for human review', async () => {
+  h.lookup.mockResolvedValue({ ...record,
+    upcomingAppointments: [{ isoDate: '2099-01-01', location: 'Synthetic Surgery Center' }],
+    pastAppointments: [{ isoDate: '2020-01-01', location: 'Synthetic Virtual Visits' }],
+  });
+  const agent = await createAnsweringServiceAgent(async () => {}, { callSid: sid });
+  await invoke(agent, 'lookup_schedule', args);
+
+  expect(await invoke(agent, 'create_ticket', opticalRequest))
+    .toMatchObject({ success: false, missingFields: ['office location'] });
+  expect(h.submit).not.toHaveBeenCalled();
+
+  expect(await invoke(agent, 'create_ticket', {
+    ...opticalRequest, unresolved_info: 'Asked; caller does not know an optical office',
+  })).toMatchObject({ success: true });
+  expect(h.submit).toHaveBeenCalledWith(expect.objectContaining({ locationOfLastVisit: undefined }));
+  expect(h.lookup).toHaveBeenCalledTimes(1);
+});
+
+it.each([
+  { department_id: 1, location_name: 'Synthetic Caller Clinic', expected: 'Synthetic Caller Clinic' },
+  { department_id: 1, location_id: 5, expected: 'Eastvale' },
+  { department_id: 3, expected: 'Synthetic Surgery Center' },
+])('preserves explicit clinics and non-Optical history (%j)', async ({ expected, ...route }) => {
+  h.lookup.mockResolvedValue({ ...record,
+    upcomingAppointments: [{ isoDate: '2099-01-01', location: 'Synthetic Surgery Center' }],
+  });
+  const agent = await createAnsweringServiceAgent(async () => {}, { callSid: sid });
+  await invoke(agent, 'lookup_schedule', args);
+
+  expect(await invoke(agent, 'create_ticket', { ...opticalRequest, ...route })).toMatchObject({ success: true });
+  expect(h.submit).toHaveBeenCalledWith(expect.objectContaining({ locationOfLastVisit: expected }));
 });
 
 it('Optical preserves an explicit clinic name over the location ID and held history', async () => {

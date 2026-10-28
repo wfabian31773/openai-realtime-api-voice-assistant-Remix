@@ -1,5 +1,6 @@
-import { rememberVerifiedIdentity } from '../tools/verifiedIdentity';
-import { joinedAppointments, prepareTicketIdentity, validatedPatientFor } from '../tools/ticketIdentity';
+import { nameKey, rememberVerifiedIdentity } from '../tools/verifiedIdentity';
+import { joinedAppointments, prepareTicketIdentity, validatedPatientFor, type ValidatedPatient } from '../tools/ticketIdentity';
+import { readDobQuietly } from '../tools/dobParts';
 import { appointmentReadPolicy } from '../services/appointmentReadPolicy';
 import { appointmentAccess, unavailableAppointmentAccess } from '../services/appointmentAccess';
 import { RealtimeAgent, tool } from "@openai/agents/realtime";
@@ -512,6 +513,21 @@ function parseDateOfBirth(dobString: string): {
 function toIsoDob(dobString: string): string | undefined {
   const parsed = parseDateOfBirth(dobString);
   return parsed.iso;
+}
+
+/** A held identity alone does not establish whose appointments are cached. */
+function scheduleMatchesIdentity(
+  context: PatientScheduleContext | undefined,
+  identity: ValidatedPatient | undefined,
+): context is PatientScheduleContext {
+  if (!identity || !context?.patientFound || context.matchedBy !== 'name_and_dob' ||
+      context.identity?.unique !== true || context.identityUnconfirmed) return false;
+  const patient = context.patientData;
+  if (patient?.personId && identity.personId && patient.personId !== identity.personId) return false;
+  const dob = readDobQuietly(patient?.dateOfBirth ?? '');
+  return nameKey(patient?.firstName) === nameKey(identity.firstName) &&
+    nameKey(patient?.lastName) === nameKey(identity.lastName) &&
+    Boolean(dob && `${dob.year}-${dob.month}-${dob.day}` === identity.dateOfBirth);
 }
 
 /**
@@ -1377,7 +1393,7 @@ is not an identity. Confirm the name and date of birth, then call again with the
         let result: PatientScheduleContext;
 
         const held = validatedPatientFor(metadata.callSid, params.first_name, params.last_name, params.date_of_birth);
-        if (held && scheduleContext?.patientFound) {
+        if (scheduleMatchesIdentity(scheduleContext, held)) {
           result = scheduleContext;
         } else if (params.phone && !(params.first_name && params.last_name && params.date_of_birth)) {
           // THE GATE, not a request. The prompt withholds a phone-matched
@@ -1753,8 +1769,9 @@ The ticket will include schedule context (last appointment info) automatically.`
       // SECONDARY LOOKUP: Enrich schedule context using name+DOB
       // This catches cases where caller phone doesn't match patient record (family member calling)
       const lockedIdentity = validatedPatientFor(metadata.callSid, params.first_name, params.last_name, params.date_of_birth);
-      let enrichedContext = lockedIdentity ? scheduleContext : undefined;
-      if (parsedDOB && !lockedIdentity) {
+      const cachedIdentityMatches = scheduleMatchesIdentity(scheduleContext, lockedIdentity);
+      let enrichedContext = cachedIdentityMatches ? scheduleContext : undefined;
+      if (parsedDOB && !cachedIdentityMatches) {
         console.log("[No-IVR Agent] Performing secondary schedule lookup...");
         try {
           const dobForLookup = parsedDOB.iso || `${parsedDOB.year}-${parsedDOB.month}-${parsedDOB.day}`;
@@ -1865,9 +1882,16 @@ The ticket will include schedule context (last appointment info) automatically.`
         enrichedContext.matchedBy === 'name_and_dob' &&
         !phoneMatchIsUnconfirmed(enrichedContext) &&
         enrichedContext.identity?.unique === true;
-      if (recordConfirmed && enrichedContext) rememberVerifiedIdentity(metadata.callSid,
-        { firstName: params.first_name, lastName: params.last_name, dateOfBirth: params.date_of_birth,
-          ...enrichedContext.patientData, ...joinedAppointments(enrichedContext), certain: true });
+      if (recordConfirmed && enrichedContext) {
+        scheduleContext = { ...enrichedContext, patientData: {
+          ...enrichedContext.patientData,
+          firstName: enrichedContext.patientData?.firstName || params.first_name,
+          lastName: enrichedContext.patientData?.lastName || params.last_name,
+          dateOfBirth: enrichedContext.patientData?.dateOfBirth || params.date_of_birth,
+        } };
+        rememberVerifiedIdentity(metadata.callSid,
+          { ...scheduleContext.patientData, ...joinedAppointments(scheduleContext), certain: true });
+      }
       const completedIdentity = prepareTicketIdentity({ ...params, call_sid: metadata.callSid });
       if (completedIdentity.missing && (completedIdentity.missing !== 'date_of_birth' || (!dobEscapeStatus && !isB2bNoDob))) return { success: false, missingFields: [completedIdentity.missing], message: completedIdentity.message };
       params.location = String(completedIdentity.input.location || '');
