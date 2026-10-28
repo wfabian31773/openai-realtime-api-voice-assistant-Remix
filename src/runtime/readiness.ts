@@ -889,8 +889,14 @@ import { callEnvironment } from "./callRecord";
  * descriptions survive the SDK conversion on answering-service and no-ivr-v2.
  * On top of v116. No migration; production impact remains unmeasured.
  */
+/**
+ * v124 — MUTUAL PATIENT DETECTOR (2026-10-28). The provider detector also
+ * recognizes "one mutual patient" and "the mutual patient", including
+ * plurals, so these callers can pass the after-hours provider gate.
+ * On top of v117. No migration; production impact remains unmeasured.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v117-contact-capture-20261027";
+  "voice-runtime-v124-mutual-patient-detector-20261028";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

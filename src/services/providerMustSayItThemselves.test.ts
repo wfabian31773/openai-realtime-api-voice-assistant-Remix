@@ -101,6 +101,18 @@ describe('a caller who says who they are is a provider', () => {
   for (const t of PROVIDERS) it(t, () => expect(callerSaysTheyAreAProvider(t)).toBe(true));
 });
 
+describe('mutual patient self-identification', () => {
+  it.each(['a mutual patient', 'our mutual patient', 'our patients',
+    'one mutual patient', 'the mutual patient', 'one mutual patients', 'the mutual patients',
+  ])('recognizes %s', (phrase) => {
+    expect(callerSaysTheyAreAProvider(`Calling about ${phrase}.`)).toBe(true);
+  });
+
+  it.each(['one patient', 'the patient', 'not the mutual patient'])('does not infer a provider from %s', (phrase) => {
+    expect(callerSaysTheyAreAProvider(`Calling about ${phrase}.`)).toBe(false);
+  });
+});
+
 describe('asking for a doctor, an operator or a page is not saying you are one', () => {
   const NOT_YET = [
     'Operator.',
@@ -218,6 +230,17 @@ describe('the gate', () => {
     });
     expect(v).toEqual({ allowed: true, basis: 'provider_or_facility' });
   });
+
+  it.each(['one mutual patient', 'the mutual patient', 'one mutual patients', 'the mutual patients'])(
+    'lets a caller saying %s through the provider gate', (phrase) => {
+      const v = judgeEscalation({
+        callerType: 'healthcare_provider',
+        reason: 'Provider requesting the on-call physician',
+        corroboration: corr(`Calling about ${phrase}.`),
+      });
+      expect(v).toEqual({ allowed: true, basis: 'provider_or_facility' });
+    },
+  );
 
   it('a patient who describes an emergency in their own words still rings, whatever the agent called them', () => {
     // "extreme pain" and "surgery today" are on neither acute list, so on main

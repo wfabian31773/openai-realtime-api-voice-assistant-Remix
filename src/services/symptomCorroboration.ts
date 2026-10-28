@@ -605,8 +605,8 @@ const PROVIDER_SELF_IDENTIFICATION: RegExp[] = [
   new RegExp(String.raw`\b(?:i'?m|i am|we'?re|we are) (?:from|with) (?:the |a |an )?(?:${NAME_WORD}){0,5}?${FACILITY}(?![a-z])`),
   // "calling on behalf of Dr. Smith"
   /\bon behalf of (?:dr\.?|doctor) [a-z]/,
-  // "our mutual patient", "I have a post-operative patient", "the patient is on our ER"
-  /\b(?:our|a mutual) (?:mutual )?patients?\b/,
+  // "our mutual patient", "one mutual patient", "the mutual patient"
+  /\b(?:our|(?:a|one|the) mutual) (?:mutual )?patients?\b/,
   // At most ONE word between the article and "patient" ("a post-operative
   // patient"), never "been": "I have been a patient there for years" and "we
   // have a patient appointment tomorrow" are patients (review P2, #353).

@@ -8,6 +8,11 @@
 
 # State of Play — Azul Vision voice agents
 
+2026-10-27: v124 extends provider self-identification to "one mutual patient"
+and "the mutual patient", including plurals, for the after-hours gate (call
+CA70722a91e13b9b657697ffff4257d36c). Production impact is unmeasured; the
+marker number may need rebasing against concurrent work.
+
 2026-10-27 review follow-up (offline, synthetic data): the paired request
 classifiers now preserve clinical complaints mentioning eyewear, normalize
 explicit surgery denials, and retain cataract/procedure insurance on Surgery.
