@@ -124,6 +124,9 @@ describe('mutual patient self-identification', () => {
     'I am Jane, the mutual patient you called.',
     "I'm Jane Smith, the mutual patient.",
     'This is Jane the mutual patient.',
+    'My name is Jane Smith, the mutual patient.',
+    'My name is Jane, a mutual patient.',
+    'My name is actually Jane Smith the mutual patient.',
     'Jane Smith, the mutual patient',
     'The mutual patient, Jane Smith',
     'Jane, the mutual patient.',
@@ -161,6 +164,10 @@ describe('mutual patient self-identification', () => {
     'The mutual patient, Jane Smith. Calling about the mutual patient.',
     'Jane Smith, the mutual patient. Calling about the mutual patient.',
     'Jane Smith, the mutual patient. This is Dr. Lee calling.',
+    'My name is Jane, calling about the mutual patient.',
+    'My name is Jane, a nurse calling about the mutual patient.',
+    'My name is Jane Smith, the mutual patient. Calling about the mutual patient.',
+    'My name is Jane Smith, the mutual patient. This is Dr. Lee calling.',
   ])('preserves independent provider evidence: %s', (spoken) => {
     expect(callerSaysTheyAreAProvider(spoken)).toBe(true);
   });
@@ -348,6 +355,9 @@ describe('the gate', () => {
         `I'm ${name}, the mutual patient.`,
         `I am ${name} the mutual patient.`,
         `This is ${name}, the mutual patient.`,
+        `My name is ${name}, the mutual patient.`,
+        `My name is ${name} the mutual patient.`,
+        `My name is actually ${name}, the mutual patient.`,
         `I'm actually ${name}, the mutual patient.`,
         `Hello. ${name}, the mutual patient.`,
         `Hello. The mutual patient, ${name}.`,
@@ -368,6 +378,7 @@ describe('the gate', () => {
     "I'm the mutual patient, my eye is bleeding.",
     'Jane Smith, the mutual patient, my eye is bleeding.',
     'The mutual patient, Jane Smith, my eye is bleeding.',
+    'My name is Jane Smith, the mutual patient, my eye is bleeding.',
   ])('still allows an acute emergency described by the mutual patient: %s', (spoken) => {
     expect(judgeEscalation({
       callerType: 'healthcare_provider',

@@ -645,7 +645,7 @@ const PATIENT_NAME_WORD =
   String.raw`(?!(?:${PATIENT_NAME_FUNCTION_WORD}|${PATIENT_NAME_CALL_WORD}|${PROVIDER_ROLE}|${OFFICE_STAFF}|provider|clinician)\b)[a-z][a-z'-]*`;
 const PATIENT_NAME = String.raw`(?:${PATIENT_NAME_WORD}\s+){0,2}${PATIENT_NAME_WORD}`;
 const PATIENT_APPOSITIVE_BEFORE = new RegExp(
-  String.raw`\b(?:i(?:'m| am)|this is)\s+(?:(?:actually|also|just|indeed)\s+)*${PATIENT_NAME},?\s+$`,
+  String.raw`\b(?:i(?:'m| am)|this is|my name is)\s+(?:(?:actually|also|just|indeed)\s+)*${PATIENT_NAME},?\s+$`,
 );
 // Bare introductions work in either order: "Jane Smith, the mutual patient"
 // and "The mutual patient, Jane Smith". Anchor them to the sentence start so
