@@ -395,6 +395,97 @@ describe('patient introductions after greetings and across caller turns', () => 
   });
 });
 
+describe('patient introductions with it is and Unicode names (synthetic)', () => {
+  const NAMES = ['María', 'José García', "O'Neil", 'Anne-Marie', 'María O’Neil', 'Élodie', '李 明', 'Paúl Andújar'];
+
+  it.each([
+    ...["It's", 'It is', 'It’s'].flatMap((introduction) => [
+      '', ' returning your call', ' you called', ' referred to you',
+      ' scheduled for tomorrow', ' who called earlier', ' from yesterday',
+    ].map((continuation) => `${introduction} the mutual patient${continuation}`)),
+    "It's me, actually the mutual patient returning your call",
+    'It is also the mutual patient you called',
+    ...NAMES.flatMap((name) => [
+      `This is ${name}, the mutual patient`,
+      `It's ${name}, the mutual patient returning your call`,
+      `It is ${name}, the mutual patient referred to you`,
+      `I'm ${name}, the mutual patient returning your call`,
+      `My name is ${name} the mutual patient referred to you`,
+      `${name}, the mutual patient`,
+      `Hello, ${name}, the mutual patient scheduled for tomorrow`,
+      `The mutual patient, ${name}`,
+    ]),
+  ])('refuses provider escalation for %s', (spoken) => {
+    expect(callerSaysTheyAreAProvider(spoken)).toBe(false);
+    for (const feed of ['core', 'runtime'] as const) {
+      releaseCallerSpeech(CALL);
+      if (feed === 'core') recordCallerSpeech(CALL, spoken);
+      else noteCallerTranscript(CALL, [`CALLER: ${spoken}`]);
+      const corroboration = corroborate(CALL, '');
+      expect(corroboration.providerStated, feed).toBe(false);
+      expect(judgeEscalation({
+        callerType: 'healthcare_provider',
+        reason: 'Provider requesting the on-call physician',
+        corroboration,
+      }), feed).toMatchObject({ allowed: false, code: 'provider_not_stated_by_caller' });
+    }
+  });
+
+  it.each([
+    "It's the mutual patient's nurse",
+    'It is a mutual patient referral',
+    "It's the mutual patient. This is Dr. Lee calling.",
+    'It is the mutual patient returning your call. Calling about our mutual patient.',
+    ...NAMES.flatMap((name) => [
+      `This is ${name}, our mutual patient has a question`,
+      `This is ${name}, the mutual patient's nurse`,
+      `Calling about ${name}, the mutual patient`,
+      `Calling about the mutual patient, ${name}`,
+      `This is ${name}, the mutual patient. This is Dr. Lee calling.`,
+    ]),
+  ])('preserves provider evidence in %s', (spoken) => {
+    expect(callerSaysTheyAreAProvider(spoken)).toBe(true);
+  });
+
+  it.each(['García', "O'Neil", 'Anne-Marie', 'Élodie', '李'])(
+    'recognizes doctor and facility names containing %s', (name) => {
+      for (const spoken of [
+        `Dr. ${name}'s office`,
+        `Office of Doctor ${name}`,
+        `I'm calling from Dr. ${name}'s office`,
+        `This is ${name} Hospital`,
+        `The hospital at ${name} calling`,
+        `I'm from ${name} Clinic`,
+        `I'm a PA ${name} calling`,
+        `I'm Dr. ${name}'s nurse`,
+        `Calling on behalf of Dr. ${name}`,
+        `Llamo de ${name} hospital`,
+      ]) expect(callerSaysTheyAreAProvider(spoken), spoken).toBe(true);
+
+      for (const spoken of [
+        `I'm Dr. ${name}'s patient`,
+        `My name is Doctor ${name}'s daughter`,
+        `I want Dr. ${name}'s office`,
+        `I need the ${name} clinic`,
+        `My ${name} clinic`,
+      ]) expect(callerSaysTheyAreAProvider(spoken), spoken).toBe(false);
+
+      // In the answer window a facility is positive evidence unless the
+      // caller describes being there or asks to reach it.
+      for (const answer of [
+        `My husband is in the ${name} hospital`,
+        `I need someone from the ${name} clinic to call me`,
+      ]) {
+        noteCallerTranscript(CALL, [
+          "AGENT: Are you calling from a doctor's office, a hospital, a clinic or a laboratory, and which one?",
+          `CALLER: ${answer}`,
+        ]);
+        expect(corroborate(CALL, '').providerStated, answer).toBe(false);
+      }
+    },
+  );
+});
+
 describe('asking for a doctor, an operator or a page is not saying you are one', () => {
   const NOT_YET = [
     'Operator.',
