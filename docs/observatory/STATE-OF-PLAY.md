@@ -1700,7 +1700,7 @@ surname, DOB and appointments remain outside the prompt and phone-only result.
 Synthetic tests invoke the live factory's tool on SIP and runtime metadata:
 eight regression cases failed before the fix; all 36 tests in the touched file
 passed afterwards. Marker: `voice-runtime-v135-after-hours-dob-confirm-lookup-20261028`,
-renumbered from v125, on top of `main`'s v131 (#388, `47bc78c`); v127 is #376, v132 is #390, v133 is #391 and v134 is #396 on their open branches. No migration,
+renumbered from v125, on top of `main`'s v132 (#390, `76dd105f`); v127 is #376, v133 is #391 and v134 is #396 on their open branches. No migration,
 DB writes, commit, push, PR or deploy. Next: owner reviews and measures production
 impact; the reported 43 recognised callers among 118 misses was supplied by the
 owner and was not independently replayed in this session. Shared bridge notes

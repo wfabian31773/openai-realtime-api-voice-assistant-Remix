@@ -658,7 +658,7 @@ is reading noise.
 
 ## Current branch — after-hours DOB confirms the phone candidate (2026-10-28)
 
-This branch carries **`voice-runtime-v135-after-hours-dob-confirm-lookup-20261028`** (renumbered from v125), on top of `main`'s v131 (#388, `47bc78c`); v127 is #376, v132 is #390, v133 is #391 and v134 is #396 on their open branches. After-hours confirms the phone-matched candidate on the date of
+This branch carries **`voice-runtime-v135-after-hours-dob-confirm-lookup-20261028`** (renumbered from v125), on top of `main`'s v132 (#390, `76dd105f`); v127 is #376, v133 is #391 and v134 is #396 on their open branches. After-hours confirms the phone-matched candidate on the date of
 birth, then uses that record for `lookup_schedule`. Surname spelling and full email confirmation reach the agent's
 
 The v131 base (#388, `47bc78c`) carries **`voice-runtime-v131-silence-ladder-heard-callers-20261028`**
@@ -2416,6 +2416,7 @@ voice-runtime-v128-pcp-scheduling-hub-unassigned-exit-20261028
 voice-runtime-v129-after-hours-teardown-floor-20261028
 voice-runtime-v130-queue-withdrawal-exemption-20261028
 voice-runtime-v131-silence-ladder-heard-callers-20261028
+voice-runtime-v132-callback-extension-20261028
 voice-runtime-v135-after-hours-dob-confirm-lookup-20261028
 ```
 
@@ -2548,7 +2549,8 @@ on it is evidence about current code.
 | **v129** or earlier — NOT the date; this branch is **v130** (renumbered from v120), ABOVE `main`'s v129 (#386, `08734d7`), which it contains; v127 is #376 on its open branch | queue-withdrawal exemption: an answered queue after a read-back keeps the PCP ticket |
 
 | **v130** or earlier — NOT the date; this branch is **v131** (renumbered from v121), ABOVE `main`'s v130 (#387, `3e861ad`), which it contains; v127 is #376 on its open branch | Heard callers bypass the silence ladder before any cannot-hear prompt; never-heard callers retain the original ladder. Ghost-call prompts and termination tools forbid ghost treatment after any non-empty caller transcript, including a request. No migration or new spoken wording. Offline bridge and actual agent-tool tests use synthetic requests indexed by the three reported call SIDs. Production impact remains unmeasured. |
-| **v131** or earlier — NOT the date; this branch is **v135** (renumbered from v125), ABOVE `main`'s v131 (#388, `47bc78c`), which it contains; v127 is #376, v132 is #390, v133 is #391 and v134 is #396 on their open branches | After-hours confirms the phone-matched candidate on DOB, then looks up that record's schedule. No migration. |
+| **v131** or earlier — NOT the date; this branch is **v132** (renumbered from v123), ABOVE `main`'s v131, which it contains; v127 is #376 on its open branch | Callback extensions are validated and kept in staff-only notes, per patient filing. No migration. |
+| **v132** or earlier — NOT the date; this branch is **v135** (renumbered from v125), ABOVE `main`'s v132 (#390, `76dd105f`), which it contains; v127 is #376, v133 is #391 and v134 is #396 on their open branches | After-hours confirms the phone-matched candidate on DOB, then looks up that record's schedule. No migration. |
 
 ### THE SURGEON CLAIM — BUILT, REVIEWED SIX TIMES, WITHDRAWN 2026-09-17
 
@@ -2636,8 +2638,8 @@ v10 (the person base and the join), v11 (the locked record, #290) and v12
 before and brought it in, so v12 contains both.
 
 **AND THE SEQUENCE HAS TWO HOLES IN IT ON PURPOSE: v13 AND v57. v135 IS THE
-NEWEST — v135 (renumbered from v125): After-hours confirms the phone-matched candidate on DOB, then looks up that record's schedule, on its branch ABOVE `main`'s v131, which it contains; v127 is #376, v132 is #390, v133 is #391 and v134 is #396 on their open branches —
-AND v131 IS WHAT `main` CARRIES, SINCE #388 MERGED 2026-10-28 (`47bc78c`): heard callers bypass the silence ladder, above v130 (#387, `3e861ad`), the PCP queue-withdrawal exemption, above v129 (#386, `08734d7`), the after-hours teardown floor, above v128 (#389, `558f288`), PCP scheduling and
+NEWEST — v135 (renumbered from v125): After-hours confirms the phone-matched candidate on DOB, then looks up that record's schedule, on its branch ABOVE `main`'s v132, which it contains; v127 is #376, v133 is #391 and v134 is #396 on their open branches —
+AND v132 IS WHAT `main` CARRIES, SINCE #390 MERGED 2026-10-28 (`76dd105f`): callback extensions validated and kept in staff-only notes, above v131 (#388, `47bc78c`), heard callers bypass the silence ladder, above v130 (#387, `3e861ad`), the PCP queue-withdrawal exemption, above v129 (#386, `08734d7`), the after-hours teardown floor, above v128 (#389, `558f288`), PCP scheduling and
 unassigned exit, above v126 (#394, `036c39e`), the no-IVR prompt trim, above
 v117; v122–v125 are on open branches. v117 is contact capture (#14), above v116. v116 carries
 the record's office name on an optical ticket — on its branch
@@ -2907,7 +2909,7 @@ never read v57; **v58 was that next ship** — the identity probe, an instrument
 and no behaviour change (see the v56 row below for what it measures). It is no
 longer the current marker: see the paragraph beneath this one.
 
-**v131 (#388) IS WHAT `main` CARRIES (merged 2026-10-28, `47bc78c`), AND v57,
+**v132 (#390) IS WHAT `main` CARRIES (merged 2026-10-28, `76dd105f`), AND v57,
 v59, v60, v63, v65 AND v66 ARE RETIRED RATHER THAN REUSED.** Each of the last
 five was a branch's own number while it sat below `main`, and each was given up
 the moment a merge put it there: two branches carrying one version make two
