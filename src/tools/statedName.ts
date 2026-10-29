@@ -60,16 +60,16 @@ export const STATED_NAME_TOOLS: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * One name part as the tool received it, or nothing. Refused: blank, a
- * digit anywhere (a date or a phone number in the wrong field), and any
- * value the ticketing app itself refuses as a placeholder ("Unknown",
- * "Caller", "Patient").
+ * One name part as the tool received it, or nothing. Refused: blank, and a
+ * digit anywhere (a date or a phone number in the wrong field). Placeholders
+ * are judged on the WHOLE name in `statedNameFor`, the way the ticketing app
+ * judges them: it refuses only a name whose every word is a placeholder, so
+ * "Alice Guest" is a name and "Unknown Caller" is not (Codex, PR #399).
  */
 function usablePart(v: unknown): string | undefined {
   if (typeof v !== 'string') return undefined;
   const t = v.trim().replace(/\s+/g, ' ');
   if (!t || /\d/.test(t)) return undefined;
-  if (appWouldRefuseName(t)) return undefined;
   return t;
 }
 
@@ -117,6 +117,7 @@ export function statedNameFor(callSid: string | undefined): StatedName | undefin
   const entry = stated.get(callSid!);
   if (!entry || Date.now() - entry.at > TTL_MS) return undefined;
   if (!entry.firstName || !entry.lastName) return undefined;
+  if (appWouldRefuseName(`${entry.firstName} ${entry.lastName}`)) return undefined;
   return { firstName: entry.firstName, lastName: entry.lastName };
 }
 

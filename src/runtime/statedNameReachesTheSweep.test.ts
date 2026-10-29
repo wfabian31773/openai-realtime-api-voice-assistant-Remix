@@ -190,6 +190,7 @@ describe('what counts as a stated name', () => {
   it('refuses the placeholders the ticketing app refuses, and anything with a digit', () => {
     noteStatedNameFromArgs('file_tech_ticket', { call_sid: TECH_SID, first_name: 'Unknown', last_name: 'Caller' });
     expect(statedNameFor(TECH_SID)).toBeUndefined();
+    resetStatedNames();
     noteStatedNameFromArgs('file_tech_ticket', { call_sid: TECH_SID, first_name: 'Owen', last_name: '03/17/1973' });
     expect(statedNameFor(TECH_SID)).toBeUndefined();
   });
@@ -198,6 +199,13 @@ describe('what counts as a stated name', () => {
   // sentinel too, so removing the write guard alone changes no answer (it
   // only lets a sentinel key sit in the map until the TTL). Both ends carry
   // the rule, as verifiedIdentity's do.
+  it('judges placeholders on the whole name, as the app does (Codex, PR #399)', () => {
+    // A placeholder WORD in a real name is still a name: the app refuses only
+    // a name whose every word is a placeholder.
+    noteStatedNameFromArgs('file_tech_ticket', { call_sid: TECH_SID, first_name: 'Alice', last_name: 'Guest' });
+    expect(statedNameFor(TECH_SID)).toEqual({ firstName: 'Alice', lastName: 'Guest' });
+  });
+
   it('only from a name-taking tool, and only on a real CallSid', () => {
     noteStatedNameFromArgs('check_open_tickets', { call_sid: TECH_SID, first_name: 'Owen', last_name: 'Benchmark' });
     expect(statedNameFor(TECH_SID)).toBeUndefined();
