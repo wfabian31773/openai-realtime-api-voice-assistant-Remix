@@ -206,7 +206,17 @@ export async function claimAutomaticSmsApproval(
   env: Record<string, string | undefined>,
 ): Promise<ContactApprovalRow | null> {
   if (approval.channel !== "sms" || approval.status !== "approved" || approval.approvedBy !== null
-    || approval.confirmUsedAt || !ownerSmsApprovalExempt(approval.payload.phone, env)) return null;
+    || approval.confirmUsedAt) return null;
+  if (!ownerSmsApprovalExempt(approval.payload.phone, env)) {
+    if (isOperatorSmsPayload(approval.payload)) {
+      // A former owner's automatic approval cannot be handed off to the bot.
+      await store.updateApproval(approval.id, {
+        status: "pending", confirmTokenHash: null, confirmTokenPlaintext: null,
+        confirmExpiresAt: null, updatedAt: now,
+      }, "approved");
+    }
+    return null;
+  }
   // Automatic approval needs no human token handoff. The status guard races
   // safely with another prepare or token commit, even after token expiry.
   return store.updateApproval(approval.id, {

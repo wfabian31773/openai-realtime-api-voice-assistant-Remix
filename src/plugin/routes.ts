@@ -889,6 +889,10 @@ async function executeApproved(
       if (!(await operatorLineEnabled(env, deps.store))) {
         return { ok: false, status: 503, error: "Operator line is disabled", reason: "operator_line_disabled" };
       }
+      // Automatic claims and token commits must still qualify for the owner exemption.
+      if (approval.approvedBy === null && !ownerSmsApprovalExempt(approval.payload.phone, env)) {
+        return { ok: false, status: 409, error: "Operator SMS was not sent: owner_changed", reason: "owner_changed" };
+      }
       const sender = deps.smsSender === undefined ? createTwilioSmsSender(env) : deps.smsSender;
       if (!sender) return { ok: false, status: 503, error: "SMS sender is not configured", reason: "no_sms" };
       const sent = await sendOperatorSms(deps.store, sender, {

@@ -177,6 +177,78 @@ describe("operator-line SMS send", () => {
     expect(await h.store.getApproval(prepared.approval.id)).toMatchObject({ status: "failed" });
   });
 
+  it.each([OTHER, undefined, "invalid", "+44206265550123"])("requires human approval on retry if the owner changes to %s", async (owner) => {
+    const h = boot();
+    const prepared = await prepareContact(h.store, h.bot.jti, { channel: "sms", payload: INPUT as never },
+      NIGHT, "operator_sms", h.env);
+    if (!prepared.ok) throw new Error(prepared.error);
+    const oldConfirmToken = prepared.confirmToken;
+    expect(typeof oldConfirmToken).toBe("string");
+    h.env.OPERATOR_OWNER_NUMBER = owner;
+
+    const retry = await h.request();
+    expect(retry).toMatchObject({ status: 200, body: { status: "pending_approval", deduplicated: true,
+      approval: { id: prepared.approval.id, status: "pending" } } });
+    expect(retry.body).not.toHaveProperty("confirmToken");
+    expect(await h.store.getApproval(prepared.approval.id)).toMatchObject({ status: "pending",
+      confirmTokenHash: null, confirmTokenPlaintext: null, confirmExpiresAt: null });
+    const handoff = await h.request(undefined, h.bot, `/contact_requests/${prepared.approval.id}/confirm_token`, "get");
+    expect(handoff.status).toBe(409);
+    expect(handoff.body).not.toHaveProperty("confirmToken");
+    expect((await h.request({ confirmToken: oldConfirmToken }, h.bot, "/commit_contact")).status).toBeGreaterThanOrEqual(400);
+    expect(h.sender.send).not.toHaveBeenCalled();
+
+    const approved = await approveContact(h.store, prepared.approval.id, h.staff.jti, h.clock.at, prepared.approval.payloadHash);
+    if (!approved.ok) throw new Error(approved.error);
+    expect((await h.request({ confirmToken: approved.confirmToken }, h.bot, "/commit_contact")).status).toBe(200);
+    expect(h.sender.send).toHaveBeenCalledExactlyOnceWith({ to: OWNER, from: FROM, body: INPUT.body });
+  });
+
+  it.each([OTHER, undefined, "invalid", "+44206265550123"])("refuses an automatic token commit if the owner changes to %s", async (owner) => {
+    const h = boot();
+    const prepared = await prepareContact(h.store, h.bot.jti, { channel: "sms", payload: INPUT as never },
+      NIGHT, "operator_sms", h.env);
+    if (!prepared.ok) throw new Error(prepared.error);
+    const handoff = await h.request(undefined, h.bot, `/contact_requests/${prepared.approval.id}/confirm_token`, "get");
+    expect(handoff.status).toBe(200);
+    h.env.OPERATOR_OWNER_NUMBER = owner;
+
+    const committed = await h.request({ confirmToken: handoff.body.confirmToken }, h.bot, "/commit_contact");
+    expect(committed).toMatchObject({ status: 409, body: {
+      error: "Operator SMS was not sent: owner_changed", outcome: "not_sent",
+    } });
+    expect(committed.body).not.toHaveProperty("confirmToken");
+    expect(await h.store.getApproval(prepared.approval.id)).toMatchObject({ status: "failed",
+      confirmTokenPlaintext: null, result: { reason: "owner_changed" } });
+    expect((await h.request({ confirmToken: handoff.body.confirmToken }, h.bot, "/commit_contact")).status).toBe(409);
+    expect((await h.request(undefined, h.bot, `/contact_requests/${prepared.approval.id}/confirm_token`, "get")).status).toBe(409);
+    expect(h.sender.send).not.toHaveBeenCalled();
+  });
+
+  it("rechecks the owner after claiming an automatic send", async () => {
+    const h = boot();
+    const updateApproval = h.store.updateApproval.bind(h.store);
+    vi.spyOn(h.store, "updateApproval").mockImplementation(async (...args) => {
+      const approval = await updateApproval(...args);
+      if (args[1].status === "sending") h.env.OPERATOR_OWNER_NUMBER = OTHER;
+      return approval;
+    });
+    expect(await h.request()).toMatchObject({ status: 409, body: {
+      error: "Operator SMS was not sent: owner_changed", outcome: "not_sent",
+    } });
+    expect(h.sender.send).not.toHaveBeenCalled();
+  });
+
+  it("allows an automatic commit when the current owner has equivalent phone formatting", async () => {
+    const h = boot();
+    const prepared = await prepareContact(h.store, h.bot.jti, { channel: "sms", payload: INPUT as never },
+      NIGHT, "operator_sms", h.env);
+    if (!prepared.ok) throw new Error(prepared.error);
+    h.env.OPERATOR_OWNER_NUMBER = " (626) 555-0123 ";
+    expect((await h.request({ confirmToken: prepared.confirmToken }, h.bot, "/commit_contact")).status).toBe(200);
+    expect(h.sender.send).toHaveBeenCalledExactlyOnceWith({ to: OWNER, from: FROM, body: INPUT.body });
+  });
+
   it.each([true, false])("retains a failed/unknown send without retrying (mayHaveSent=%s) and never exposes provider text", async (mayHaveSent) => {
     const h = boot();
     const log = vi.spyOn(console, "error").mockImplementation(() => {});
