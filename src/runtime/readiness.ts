@@ -956,7 +956,7 @@ import { callEnvironment } from "./callRecord";
  * No migration; production impact remains unmeasured.
  */
 /**
- * v139 — IDENTITY GATE (#384, 2026-10-28). Verified identity is carried
+ * v146 (renumbered from v139, above main's v143) — IDENTITY GATE (#384, 2026-10-29). Verified identity is carried
  * through ticket filing and teardown/sweep recovery. The shared ticket client
  * filters Optical's carried appointments and history-derived routing text/IDs,
  * preserving caller-named offices across hydration, redirects and retries.
@@ -989,7 +989,7 @@ import { callEnvironment } from "./callRecord";
  * their open branches. No migration; production impact remains unmeasured.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v139-identity-gate-20261028";
+  "voice-runtime-v146-identity-gate-20261029";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can
