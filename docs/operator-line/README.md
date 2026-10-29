@@ -46,6 +46,9 @@ controls remain active for both approval paths.
 - `OPERATOR_OWNER_NUMBER`: owner's E.164 number, used for persona selection
   and the approval exemption for calls to the owner. Never hardcode it.
 - `OPERATOR_LINE_MAX_CALL_MINUTES`: safety maximum, default **60**.
+- `OPERATOR_LINE_INBOUND_ENABLED=true`: hard gate for inbound and outbound
+  operator admission. The persisted staff switch must also be enabled. Admins
+  control it on the Voice Agents page; see the inbound guide for the API.
 - `PLUGIN_WRITES_ENABLED=true`: existing write switch for prepare/approve/
   commit and live controls. It is not required for inbound conversations.
 - Existing Twilio credentials, public domain, Hub database and runtime/provider
@@ -55,11 +58,16 @@ The bot needs `operator:call`; `fleet:read` is optional for the read endpoints.
 No bot gets `contacts:approve`. Prepare accepts `phone` (E.164), `purpose`
 (1..4000 characters), optional `language`, optional `maxDurationSec`, and
 provenance. Patient/ticket fields, caller scripts, and unknown keys are rejected.
+Alternatively, supply `scenario_id` (`A1`–`A10`) instead of `purpose` to load a
+goal from `test-bench/packs/pack-01.md` (ai-bridge PR #32,
+`claude/test-bench`). The explicit `phone` destination and normal approval
+policy still apply. There is no fingerprint gating.
 `maxDurationSec` defaults to the env safety maximum and may request a shorter
 integer duration from 30 seconds through that maximum. Commit passes it to
 Twilio's `timeLimit`; the process also requests REST hangup at the deadline
 measured from session creation, including dialing/setup time. Neither calling
-windows nor attempt caps apply to operator calls. Each send is one attempt;
+windows nor attempt caps apply to operator calls: **NO daily cap and NO peak
+window**. Each send is one attempt;
 ambiguous sends must be reconciled rather than retried automatically.
 
 Example request, with the destination supplied securely as `DESTINATION_E164`:

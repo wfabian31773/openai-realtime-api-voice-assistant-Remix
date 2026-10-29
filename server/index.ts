@@ -53,6 +53,9 @@ app.use('/api/voice', (req, res, next) => {
     '/api/voice/operator-line/inbound',
     '/api/voice/operator-line/inbound/status',
     '/api/voice/operator-line/inbound/after',
+    '/api/voice/operator-line/sms',
+    '/api/voice/operator-line/fallback',
+    '/api/voice/operator-line/voicemail',
   ].includes(req.originalUrl.split('?')[0])) return next();
   const startTime = Date.now();
   

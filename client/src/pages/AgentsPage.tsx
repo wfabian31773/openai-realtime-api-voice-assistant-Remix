@@ -20,6 +20,7 @@ import { Plus, Phone, Settings, Play, Pause, PhoneIncoming, PhoneOutgoing, Alert
 import type { Agent } from '@/types'
 import { VOICE_OPTIONS } from '@/types'
 import { formatPhoneNumber } from '@/lib/phoneFormat'
+import { OperatorLineToggle } from '@/components/OperatorLineToggle'
 
 export function AgentsPage() {
   const { addToast } = useToast()
@@ -204,6 +205,8 @@ export function AgentsPage() {
           Create Agent
         </Button>
       </div>
+
+      <OperatorLineToggle />
 
       {!agents || agents.length === 0 ? (
         <Card>

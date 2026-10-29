@@ -40,6 +40,8 @@ export function createOperatorLineAgent(_handoff: () => Promise<unknown>, metada
 
 // Transport policy only. Calls are created by commit_call_live, never by a
 // scheduled campaign. Every contact is plugin_live, which the dialer excludes.
+// NO daily cap and NO peak window. The window/caps below are unused interface
+// placeholders; operator admission must never evaluate them.
 export const operatorLinePolicy: OutboundLanePolicy = {
   campaignKey: OPERATOR_SLUG, enableEnv: "OUTBOUND_CAMPAIGN_WAYNE_OPERATOR", callerIdEnv: "OPERATOR_LINE_FROM_NUMBER",
   window: DEFAULT_CALLING_WINDOW, caps: DEFAULT_ATTEMPT_CAPS, concurrency: 1,

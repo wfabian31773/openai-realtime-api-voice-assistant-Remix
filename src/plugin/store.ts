@@ -66,6 +66,24 @@ export interface OperatorInboundCallRecord {
   transcriptUrl: string;
 }
 
+/** Private message/recording contents are only returned by operator:call fetches. */
+export interface OperatorSmsRecord {
+  messageSid: string;
+  callerNumber: string | null;
+  body: string;
+  receivedAt: Date;
+  fetchUrl: string;
+}
+export interface OperatorVoicemailRecord {
+  recordingSid: string;
+  callSid: string;
+  recordingUrl: string | null;
+  transcript: string | null;
+  transcriptionStatus: string | null;
+  receivedAt: Date;
+  fetchUrl: string;
+}
+
 export const CONTACT_CHANNELS = ["call", "sms", "email"] as const;
 export type ContactChannel = (typeof CONTACT_CHANNELS)[number];
 
@@ -168,6 +186,14 @@ export interface EmailPayload {
 export type ContactPayload = CallPayload | SmsPayload | EmailPayload;
 
 export interface PluginStore {
+  getOperatorLineEnabled(): Promise<boolean>;
+  setOperatorLineEnabled(enabled: boolean, updatedBy: string | null): Promise<void>;
+  /** First SMS with this MessageSid wins; null means a duplicate. */
+  saveOperatorSms(record: OperatorSmsRecord): Promise<OperatorSmsRecord | null>;
+  getOperatorSms(messageSid: string): Promise<OperatorSmsRecord | null>;
+  /** Merge asynchronous recording/transcription callbacks without losing either. */
+  saveOperatorVoicemail(record: OperatorVoicemailRecord): Promise<OperatorVoicemailRecord | null>;
+  getOperatorVoicemail(recordingSid: string): Promise<OperatorVoicemailRecord | null>;
   startOperatorInboundCall(record: OperatorInboundCallRecord): Promise<OperatorInboundCallRecord>;
   getOperatorInboundCall(callSid: string): Promise<OperatorInboundCallRecord | null>;
   setOperatorInboundOptOut(callSid: string): Promise<void>;
@@ -303,6 +329,27 @@ export async function verifyStoredToken(
 }
 
 export class MemoryPluginStore implements PluginStore {
+  operatorLineEnabled = true;
+  async getOperatorLineEnabled(): Promise<boolean> { return this.operatorLineEnabled; }
+  async setOperatorLineEnabled(enabled: boolean, _updatedBy: string | null): Promise<void> { this.operatorLineEnabled = enabled; }
+  operatorSms = new Map<string, OperatorSmsRecord>();
+  async saveOperatorSms(record: OperatorSmsRecord): Promise<OperatorSmsRecord | null> {
+    if (this.operatorSms.has(record.messageSid)) return null;
+    this.operatorSms.set(record.messageSid, structuredClone(record));
+    return structuredClone(record);
+  }
+  async getOperatorSms(messageSid: string): Promise<OperatorSmsRecord | null> { return structuredClone(this.operatorSms.get(messageSid) ?? null); }
+  operatorVoicemails = new Map<string, OperatorVoicemailRecord>();
+  async saveOperatorVoicemail(record: OperatorVoicemailRecord): Promise<OperatorVoicemailRecord | null> {
+    const prior = this.operatorVoicemails.get(record.recordingSid);
+    if (prior && prior.callSid !== record.callSid) return null;
+    const merged = prior ? { ...prior, recordingUrl: record.recordingUrl ?? prior.recordingUrl,
+      transcript: record.transcript ?? prior.transcript, transcriptionStatus: record.transcriptionStatus ?? prior.transcriptionStatus } : record;
+    if (prior && JSON.stringify(prior) === JSON.stringify(merged)) return null;
+    this.operatorVoicemails.set(record.recordingSid, structuredClone(merged));
+    return structuredClone(merged);
+  }
+  async getOperatorVoicemail(recordingSid: string): Promise<OperatorVoicemailRecord | null> { return structuredClone(this.operatorVoicemails.get(recordingSid) ?? null); }
   operatorInboundCalls = new Map<string, OperatorInboundCallRecord>();
   async startOperatorInboundCall(record: OperatorInboundCallRecord): Promise<OperatorInboundCallRecord> {
     if (!this.operatorInboundCalls.has(record.callSid)) this.operatorInboundCalls.set(record.callSid, structuredClone(record));

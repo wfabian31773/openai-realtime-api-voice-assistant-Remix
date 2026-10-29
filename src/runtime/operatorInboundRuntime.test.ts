@@ -199,5 +199,21 @@ describe("operator inbound live runtime, in process", () => {
     await vi.waitFor(() => expect(h.notify).toHaveBeenCalledTimes(1));
     expect(await h.store.getOperatorInboundCall(callSid)).toMatchObject({ status: "provider_failure", endedAt: expect.any(Date) });
     expect(h.fileSetupFailure).not.toHaveBeenCalled();
+    const fallback = await h.post(`${OPERATOR_INBOUND_PATH}/after`, { CallSid: callSid, From: PHONE, To: TO });
+    expect(fallback.body).toContain("<Record ");
+  });
+
+  it("checks the staff switch again between TwiML admission and provider setup", async () => {
+    const h = boot();
+    const callSid = `CA${"a".repeat(32)}`;
+    const body = { CallSid: callSid, From: PHONE, To: TO };
+    const response = await h.post(OPERATOR_INBOUND_PATH, body);
+    await h.store.setOperatorLineEnabled(false, "staff");
+    const socket = h.stream(callSid, response.body.match(/name="token" value="([^"]+)"/)![1]);
+    await vi.waitFor(() => expect(h.registry.get(callSid)?.outcome).toBe("provider_failure"));
+    expect(await h.store.getOperatorInboundCall(callSid)).toMatchObject({ status: "operator_line_disabled", endedAt: expect.any(Date) });
+    expect(h.provider.sent).toEqual([]);
+    expect((await h.post(`${OPERATOR_INBOUND_PATH}/after`, body)).body).not.toContain("<Record");
+    socket.close();
   });
 });

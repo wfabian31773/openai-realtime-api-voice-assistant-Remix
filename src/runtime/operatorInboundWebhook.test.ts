@@ -3,7 +3,7 @@ import twilio from "twilio";
 import { MemoryPluginStore } from "../plugin/store";
 import { FakeOutboundStore } from "./outbound/store.testkit";
 import { CallSessionRegistry } from "./sessionRegistry";
-import { OPERATOR_INBOUND_PATH, OperatorInboundWebhook } from "./operatorInboundWebhook";
+import { OPERATOR_INBOUND_PATH, OPERATOR_SMS_PATH, OPERATOR_FALLBACK_PATH, OPERATOR_VOICEMAIL_PATH, OperatorInboundWebhook } from "./operatorInboundWebhook";
 import type { WebhookRequest } from "./voiceWebhook";
 
 const CALL_SID = `CA${"b".repeat(32)}`;
@@ -29,7 +29,7 @@ function boot(over: Record<string, string | undefined> = {}) {
 }
 
 describe("signed operator inbound admission and completion", () => {
-  it.each(["inbound", "status", "after"] as const)("rejects missing, invalid and altered signatures on %s", async (method) => {
+  it.each(["inbound", "status", "after", "sms", "fallback", "voicemail"] as const)("rejects missing, invalid and altered signatures on %s", async (method) => {
     const { service, registry } = boot();
     for (const mutate of [
       (req: WebhookRequest) => { delete req.headers["x-twilio-signature"]; },
@@ -41,6 +41,114 @@ describe("signed operator inbound admission and completion", () => {
       expect((await service[method](req)).status).toBe(403);
     }
     expect(registry.activeCount()).toBe(0);
+  });
+
+  it("applies the persisted staff switch, the env hard off and storage failures to inbound", async () => {
+    const h = boot();
+    await h.store.setOperatorLineEnabled(false, "staff");
+    expect((await h.service.inbound(signed())).body).toContain("<Hangup/>");
+    expect(h.store.operatorInboundCalls.size).toBe(0);
+    await h.store.setOperatorLineEnabled(true, "staff");
+    expect((await h.service.inbound(signed())).body).toContain("<Stream");
+    const disabled = boot({ OPERATOR_LINE_INBOUND_ENABLED: "false" });
+    await disabled.store.setOperatorLineEnabled(true, "staff");
+    expect((await disabled.service.inbound(signed())).body).not.toContain("<Stream");
+    vi.spyOn(h.store, "getOperatorLineEnabled").mockRejectedValue(new Error("private database error"));
+    expect((await h.service.inbound(signed())).body).not.toContain("<Stream");
+  });
+
+  it("has NO daily cap and NO peak window on inbound operator admission", async () => {
+    const h = boot({ OUTBOUND_DAILY_CAP: "0", OUTBOUND_CAMPAIGN_WAYNE_OPERATOR: "0" });
+    const service = new OperatorInboundWebhook({ env: { TWILIO_AUTH_TOKEN: AUTH, XAI_API_KEY: "synthetic-key", DATABASE_URL: "postgres://unused",
+      OPERATOR_LINE_FROM_NUMBER: TO, OPERATOR_LINE_INBOUND_ENABLED: "true" }, registry: h.registry,
+      store: () => h.store, outbound: async () => h.outbound, now: () => new Date("2026-11-01T08:00:00Z") });
+    // Early Sunday morning Pacific; neither daily usage nor time of day gates it.
+    for (let i = 1; i <= 12; i++) {
+      expect((await service.inbound(signed({ CallSid: `CA${i.toString(16).padStart(32, "0")}` }))).body).toContain("<Stream");
+    }
+    expect(h.store.operatorInboundCalls.size).toBe(12);
+  });
+
+  it("persists inbound SMS once, acknowledges with empty TwiML and notifies only after storage", async () => {
+    const h = boot();
+    const messageSid = `SM${"a".repeat(32)}`;
+    const req = signed({ MessageSid: messageSid, Body: "PRIVATE message" }, OPERATOR_SMS_PATH);
+    const response = await h.service.sms(req);
+    expect(response).toMatchObject({ status: 200, contentType: "text/xml" });
+    expect(response.body).not.toMatch(/Say|Message|PRIVATE/);
+    expect(await h.store.getOperatorSms(messageSid)).toMatchObject({ body: "PRIVATE message", callerNumber: PHONE,
+      fetchUrl: `https://fleet.example/api/plugin/v1/operator-line/sms/${messageSid}` });
+    expect(h.notifier).toHaveBeenCalledOnce();
+    await h.service.sms(req);
+    expect(h.notifier).toHaveBeenCalledOnce();
+    const anonymous = signed({ MessageSid: `SM${"c".repeat(32)}`, Body: "private", From: "anonymous" }, OPERATOR_SMS_PATH);
+    await h.service.sms(anonymous);
+    expect((await h.store.getOperatorSms(anonymous.body.MessageSid))!.callerNumber).toBeNull();
+  });
+
+  it.each(["switch", "env", "number"])("ignores SMS and refuses voicemail fallback when disabled by %s", async (mode) => {
+    const h = boot(mode === "env" ? { OPERATOR_LINE_INBOUND_ENABLED: "false" } : mode === "number" ? { OPERATOR_LINE_FROM_NUMBER: "+15555550999" } : {});
+    if (mode === "switch") await h.store.setOperatorLineEnabled(false, "staff");
+    expect((await h.service.sms(signed({ MessageSid: `SM${"a".repeat(32)}`, Body: "private" }, OPERATOR_SMS_PATH))).body).not.toContain("Message");
+    expect(h.store.operatorSms.size).toBe(0);
+    expect(h.notifier).not.toHaveBeenCalled();
+    expect((await h.service.fallback(signed({}, OPERATOR_FALLBACK_PATH))).body).not.toContain("<Record");
+    expect(h.store.operatorInboundCalls.size).toBe(0);
+  });
+
+  it("returns a retryable failure if SMS persistence fails, without a notification", async () => {
+    const h = boot();
+    vi.spyOn(h.store, "saveOperatorSms").mockRejectedValue(new Error("private storage failure"));
+    expect((await h.service.sms(signed({ MessageSid: `SM${"a".repeat(32)}`, Body: "private" }, OPERATOR_SMS_PATH))).status).toBe(503);
+    expect(h.notifier).not.toHaveBeenCalled();
+  });
+
+  it("returns a retryable SMS error when the setting cannot be read, instead of treating storage failure as a staff kill", async () => {
+    const h = boot();
+    vi.spyOn(h.store, "getOperatorLineEnabled").mockRejectedValue(new Error("private storage error"));
+    expect((await h.service.sms(signed({ MessageSid: `SM${"a".repeat(32)}`, Body: "private" }, OPERATOR_SMS_PATH))).status).toBe(503);
+    expect(h.notifier).not.toHaveBeenCalled();
+    expect(h.store.operatorSms.size).toBe(0);
+  });
+
+  it("offers recording when realtime is unavailable and from the signed Voice Fallback URL", async () => {
+    const h = boot({ XAI_API_KEY: undefined });
+    for (const response of [await h.service.inbound(signed()), await h.service.fallback(signed({}, OPERATOR_FALLBACK_PATH))]) {
+      expect(response.body).toContain(`<Record action="${OPERATOR_VOICEMAIL_PATH}"`);
+      expect(response.body).toContain(`transcribeCallback="${OPERATOR_VOICEMAIL_PATH}"`);
+      expect(response.body).toContain(`recordingStatusCallback="${OPERATOR_VOICEMAIL_PATH}"`);
+      expect(response.body).not.toContain("<Stream");
+    }
+    expect(h.store.operatorInboundCalls.size).toBe(1);
+    expect(h.registry.activeCount()).toBe(0);
+  });
+
+  it.each([false, true])("merges recording/transcription callbacks in either order, deduplicates and saves accepted recordings after a kill (%s)", async (transcriptFirst) => {
+    const h = boot();
+    await h.service.fallback(signed({}, OPERATOR_FALLBACK_PATH));
+    await h.store.setOperatorLineEnabled(false, "staff");
+    const recordingSid = `RE${"a".repeat(32)}`;
+    const recording = signed({ RecordingSid: recordingSid, RecordingUrl: "https://api.twilio.com/private-recording" }, OPERATOR_VOICEMAIL_PATH);
+    const transcript = signed({ RecordingSid: recordingSid, TranscriptionText: "PRIVATE transcript", TranscriptionStatus: "completed" }, OPERATOR_VOICEMAIL_PATH);
+    for (const req of transcriptFirst ? [transcript, recording] : [recording, transcript]) {
+      expect((await h.service.voicemail(req)).status).toBe(200);
+    }
+    expect(await h.store.getOperatorVoicemail(recordingSid)).toMatchObject({ callSid: CALL_SID, recordingSid,
+      recordingUrl: recording.body.RecordingUrl, transcript: "PRIVATE transcript", transcriptionStatus: "completed" });
+    expect(h.notifier).toHaveBeenCalledTimes(2);
+    await h.service.voicemail(recording); await h.service.voicemail(transcript);
+    expect(h.notifier).toHaveBeenCalledTimes(2);
+  });
+
+  it("rejects unrelated or malformed voicemail callbacks and retries storage failures", async () => {
+    const h = boot();
+    const req = signed({ RecordingSid: `RE${"a".repeat(32)}` }, OPERATOR_VOICEMAIL_PATH);
+    expect((await h.service.voicemail(req)).status).toBe(404);
+    expect((await h.service.voicemail(signed({ RecordingSid: "bad" }, OPERATOR_VOICEMAIL_PATH))).status).toBe(400);
+    await h.service.fallback(signed({}, OPERATOR_FALLBACK_PATH));
+    vi.spyOn(h.store, "saveOperatorVoicemail").mockRejectedValue(new Error("private database failure"));
+    expect((await h.service.voicemail(req)).status).toBe(503);
+    expect(h.notifier).not.toHaveBeenCalled();
   });
 
   it("uses forwarded public URL reconstruction and the existing single-use stream gate", async () => {
@@ -175,11 +283,12 @@ describe("signed operator inbound admission and completion", () => {
     expect(await h.service.tools(CALL_SID).find((t) => t.name === "opt_out_of_calls")!.invoke!({}, "{}")).toMatchObject({ success: false });
   });
 
-  it("ends setup failures politely without promising a patient office follow-up", async () => {
+  it("offers voicemail after setup failures without promising a patient office follow-up", async () => {
     const h = boot(); await h.service.inbound(signed());
     h.registry.recordOutcome(CALL_SID, "provider_failure");
-    const response = h.service.after(signed({}, `${OPERATOR_INBOUND_PATH}/after`));
-    expect(response.body).toMatch(/unavailable.*<Hangup\/>/);
+    const response = await h.service.after(signed({}, `${OPERATOR_INBOUND_PATH}/after`));
+    expect(response.body).toContain("<Record ");
+    expect(response.body).toContain('transcribe="true"');
     expect(response.body).not.toMatch(/office|follow up/i);
     expect(h.registry.get(CALL_SID)).toBeUndefined();
   });

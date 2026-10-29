@@ -321,11 +321,12 @@ import { reportSiAssistantCall, shouldReportSiAssistantCall } from "../plugin/ca
 import { attachmentForSiAssistant } from "../plugin/returnedCaller";
 import { reattachTakenMessages } from "../plugin/messageOutbox";
 import { liveCallRegistry, type LiveCallRegistry } from "../plugin/liveSessions";
+import { operatorLineEnabled } from "../plugin/operatorLineSettings";
 import { OPERATOR_SLUG, operatorMaxDurationSec } from "../plugin/operatorLine";
 import { boundPluginStore } from "../plugin/bindings";
 import type { PluginStore } from "../plugin/store";
 import type { OperatorInboundNotifier } from "../plugin/operatorInboundNotifier";
-import { OperatorInboundWebhook, OPERATOR_INBOUND_PATH } from "./operatorInboundWebhook";
+import { OperatorInboundWebhook, OPERATOR_INBOUND_PATH, OPERATOR_SMS_PATH, OPERATOR_FALLBACK_PATH, OPERATOR_VOICEMAIL_PATH } from "./operatorInboundWebhook";
 import { OPERATOR_INBOUND_GREETING } from "../agents/operatorLineAgent";
 import { SI_ASSISTANT_DIRECT_GREETING } from "../agents/siAssistantAgent";
 import { closeSiAssistantIdentity, siAssistantIdentityFor } from "../plugin/siAssistantIdentity";
@@ -723,9 +724,14 @@ export function mountVoiceRuntime(
   app.post(`${OPERATOR_INBOUND_PATH}/status`, async (req: Request, res: Response) => {
     send(res, await operatorInbound.status(toWebhookRequest(req)));
   });
-  app.post(`${OPERATOR_INBOUND_PATH}/after`, (req: Request, res: Response) => {
-    send(res, operatorInbound.after(toWebhookRequest(req)));
+  app.post(`${OPERATOR_INBOUND_PATH}/after`, async (req: Request, res: Response) => {
+    send(res, await operatorInbound.after(toWebhookRequest(req)));
   });
+  for (const [path, method] of [[OPERATOR_SMS_PATH, "sms"], [OPERATOR_FALLBACK_PATH, "fallback"], [OPERATOR_VOICEMAIL_PATH, "voicemail"]] as const) {
+    app.post(path, async (req: Request, res: Response) => {
+      send(res, await operatorInbound[method](toWebhookRequest(req)));
+    });
+  }
   /** The policy of a registered, enabled outbound lane — null for any other
    * slug, so an inbound lane can never be reached through the outbound path. */
   const outboundPolicyFor = async (slug: string) => {
@@ -871,6 +877,7 @@ export function mountVoiceRuntime(
     registry,
     store: await outboundStore(),
     policyFor: outboundPolicyFor,
+    operatorStore: () => options.operatorInboundStore ?? boundPluginStore(),
     liveCalls,
   });
   app.post(`${OUTBOUND_PATH_PREFIX}/:slug/status`, async (req: Request, res: Response) => {
@@ -1301,6 +1308,13 @@ export function mountVoiceRuntime(
          */
         const registered = (await laneSource()).getAgentConfig(entry.slug);
         const isOutboundLane = registered?.agentType === "outbound" && Boolean(registered.outbound);
+        if (entry.slug === OPERATOR_SLUG && !(await operatorLineEnabled(env, options.operatorInboundStore ?? boundPluginStore()))) {
+          registry.recordOutcome(entry.callSid, "provider_failure");
+          if (entry.operatorInbound) await operatorInbound.complete(entry.callSid, [], "operator_line_disabled");
+          if (entry.liveSessionId) liveCalls.setStatus(entry.liveSessionId, "failed");
+          ws.close(1000, "operator line disabled");
+          return;
+        }
         const directionMismatch =
           registered !== undefined &&
           ((Boolean(entry.outbound) && !isOutboundLane) ||

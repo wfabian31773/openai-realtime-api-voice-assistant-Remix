@@ -17,9 +17,24 @@ import type {
   PluginStore,
   OperatorCallRecord,
   OperatorInboundCallRecord,
+  OperatorSmsRecord,
+  OperatorVoicemailRecord,
 } from "./store";
 
 export type SqlExec = (text: string, params?: unknown[]) => Promise<Record<string, unknown>[]>;
+
+function operatorSmsFrom(row: Record<string, unknown>): OperatorSmsRecord {
+  return { messageSid: String(row.message_sid), callerNumber: row.caller_number == null ? null : String(row.caller_number),
+    body: String(row.body), receivedAt: new Date(String(row.received_at)), fetchUrl: String(row.fetch_url) };
+}
+
+function operatorVoicemailFrom(row: Record<string, unknown>): OperatorVoicemailRecord {
+  return { recordingSid: String(row.recording_sid), callSid: String(row.call_sid),
+    recordingUrl: row.recording_url == null ? null : String(row.recording_url),
+    transcript: row.transcript == null ? null : String(row.transcript),
+    transcriptionStatus: row.transcription_status == null ? null : String(row.transcription_status),
+    receivedAt: new Date(String(row.received_at)), fetchUrl: String(row.fetch_url) };
+}
 
 function operatorInboundFrom(row: Record<string, unknown>): OperatorInboundCallRecord {
   return {
@@ -130,6 +145,45 @@ function suggestionsFrom(
 
 export function createSqlPluginStore(exec: SqlExec): PluginStore {
   return {
+    async getOperatorLineEnabled() {
+      const [row] = await exec("SELECT value FROM app_settings WHERE key = 'operator_line_enabled'");
+      // Missing settings use the env default. A missing table still throws/fails closed.
+      return !row || row.value === "true";
+    },
+    async setOperatorLineEnabled(enabled, updatedBy) {
+      await exec(`INSERT INTO app_settings (key, value, updated_by) VALUES ('operator_line_enabled', $1, $2)
+        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_by = EXCLUDED.updated_by, updated_at = NOW()`,
+      [String(enabled), updatedBy]);
+    },
+    async saveOperatorSms(record) {
+      const [row] = await exec(`INSERT INTO plugin_operator_sms (message_sid, caller_number, body, received_at, fetch_url)
+        VALUES ($1,$2,$3,$4,$5) ON CONFLICT (message_sid) DO NOTHING RETURNING *`,
+      [record.messageSid, record.callerNumber, record.body, record.receivedAt.toISOString(), record.fetchUrl]);
+      return row ? operatorSmsFrom(row) : null;
+    },
+    async getOperatorSms(messageSid) {
+      const [row] = await exec("SELECT * FROM plugin_operator_sms WHERE message_sid = $1", [messageSid]);
+      return row ? operatorSmsFrom(row) : null;
+    },
+    async saveOperatorVoicemail(record) {
+      const [row] = await exec(`INSERT INTO plugin_operator_voicemails
+        (recording_sid, call_sid, recording_url, transcript, transcription_status, received_at, fetch_url)
+        VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (recording_sid) DO UPDATE SET
+          recording_url = COALESCE(EXCLUDED.recording_url, plugin_operator_voicemails.recording_url),
+          transcript = COALESCE(EXCLUDED.transcript, plugin_operator_voicemails.transcript),
+          transcription_status = COALESCE(EXCLUDED.transcription_status, plugin_operator_voicemails.transcription_status)
+        WHERE plugin_operator_voicemails.call_sid = EXCLUDED.call_sid AND (
+          (EXCLUDED.recording_url IS NOT NULL AND plugin_operator_voicemails.recording_url IS DISTINCT FROM EXCLUDED.recording_url) OR
+          (EXCLUDED.transcript IS NOT NULL AND plugin_operator_voicemails.transcript IS DISTINCT FROM EXCLUDED.transcript) OR
+          (EXCLUDED.transcription_status IS NOT NULL AND plugin_operator_voicemails.transcription_status IS DISTINCT FROM EXCLUDED.transcription_status))
+        RETURNING *`, [record.recordingSid, record.callSid, record.recordingUrl, record.transcript, record.transcriptionStatus,
+        record.receivedAt.toISOString(), record.fetchUrl]);
+      return row ? operatorVoicemailFrom(row) : null;
+    },
+    async getOperatorVoicemail(recordingSid) {
+      const [row] = await exec("SELECT * FROM plugin_operator_voicemails WHERE recording_sid = $1", [recordingSid]);
+      return row ? operatorVoicemailFrom(row) : null;
+    },
     async startOperatorInboundCall(record) {
       await exec(`INSERT INTO plugin_operator_inbound_calls
         (call_id, call_sid, caller_number, status, started_at, transcript_url)

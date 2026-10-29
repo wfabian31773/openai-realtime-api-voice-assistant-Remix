@@ -1,4 +1,5 @@
 /** Operator requests have no patient identity or ticket fields. */
+import { lookupOperatorScenario, operatorScenarioGoal } from "./operatorScenarios";
 import { SI_ASSISTANT_NUMBER_DEFAULT, siAssistantNumber } from "./siAssistantConstants";
 
 export const OPERATOR_SLUG = "wayne-operator";
@@ -28,6 +29,7 @@ export interface OperatorCallPayload {
   callKind: "operator";
   phone: string;
   purpose: string;
+  scenario_id?: string;
   initiated_by: OperatorInitiator;
   language?: string;
   maxDurationSec: number;
@@ -49,11 +51,20 @@ export function parseOperatorPayload(raw: unknown, env: Env = process.env):
   const fail = (error: string) => ({ ok: false as const, error });
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return fail("An operator call object is required");
   const body = raw as Record<string, unknown>;
-  const keys = new Set(["callKind", "phone", "purpose", "initiated_by", "requested_by", "language", "maxDurationSec"]);
+  const keys = new Set(["callKind", "phone", "purpose", "scenario_id", "initiated_by", "requested_by", "language", "maxDurationSec"]);
   if (Object.keys(body).some((key) => !keys.has(key))) return fail("Unknown operator field; patient and ticket fields are not accepted");
   if (body.callKind !== undefined && body.callKind !== "operator") return fail("Invalid callKind");
   if (typeof body.phone !== "string" || !E164.test(body.phone.trim())) return fail("phone must be E.164");
-  if (typeof body.purpose !== "string" || !body.purpose.trim() || body.purpose.length > 4000) {
+  let purpose = body.purpose;
+  if (body.scenario_id !== undefined) {
+    if (typeof body.scenario_id !== "string") return fail("scenario_id must be A1 through A10");
+    const scenario = lookupOperatorScenario(body.scenario_id);
+    if (!scenario) return fail("Unknown scenario_id; expected A1 through A10");
+    const goal = operatorScenarioGoal(scenario);
+    if (purpose !== undefined && purpose !== goal) return fail("Choose purpose or scenario_id");
+    purpose = goal;
+  }
+  if (typeof purpose !== "string" || !purpose.trim() || purpose.length > 4000) {
     return fail("purpose must contain 1 to 4000 characters");
   }
   if (body.language !== undefined && (typeof body.language !== "string" || !/^[a-z]{2,3}(?:-[A-Za-z]{2,8})?$/.test(body.language))) {
@@ -70,7 +81,8 @@ export function parseOperatorPayload(raw: unknown, env: Env = process.env):
     return fail(`maxDurationSec must be an integer from 30 to ${maximum}`);
   }
   return { ok: true, payload: {
-    callKind: "operator", phone: body.phone.trim(), purpose: (body.purpose as string).trim(),
+    callKind: "operator", phone: body.phone.trim(), purpose: purpose.trim(),
+    ...(body.scenario_id ? { scenario_id: body.scenario_id as string } : {}),
     initiated_by: initiatedBy as OperatorInitiator, maxDurationSec,
     ...(body.language ? { language: body.language as string } : {}),
   } };

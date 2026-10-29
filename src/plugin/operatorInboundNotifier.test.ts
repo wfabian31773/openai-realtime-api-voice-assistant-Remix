@@ -13,6 +13,34 @@ const record: OperatorInboundCallRecord = {
 const webhookEnv = { OPERATOR_INBOUND_NOTIFIER: "webhook", OPERATOR_INBOUND_WEBHOOK_URL: "https://bot.example/handoff", OPERATOR_INBOUND_WEBHOOK_SECRET: "synthetic-signing-key" };
 
 describe("operator inbound notifier", () => {
+  it.each([undefined, "hmac", "bearer", "both"])("supports webhook auth mode %s without logging secrets", async (mode) => {
+    const request = vi.fn<typeof fetch>().mockResolvedValue(new Response(null, { status: 204 }));
+    const log = vi.fn();
+    await createOperatorInboundNotifier({ ...webhookEnv, ...(mode ? { OPERATOR_INBOUND_WEBHOOK_AUTH: mode } : {}) }, { fetch: request, log })(record);
+    const headers = request.mock.calls[0][1]!.headers as Record<string, string>;
+    expect(headers.Authorization).toBe(mode === "hmac" ? undefined : `Bearer ${webhookEnv.OPERATOR_INBOUND_WEBHOOK_SECRET}`);
+    if (mode === "bearer") {
+      expect(headers["X-Operator-Signature"]).toBeUndefined();
+      expect(headers["X-Operator-Timestamp"]).toBeUndefined();
+    } else expect(headers["X-Operator-Signature"]).toBe(operatorInboundSignature(webhookEnv.OPERATOR_INBOUND_WEBHOOK_SECRET, headers["X-Operator-Timestamp"], request.mock.calls[0][1]!.body as string));
+    expect(JSON.stringify(log.mock.calls)).not.toContain(webhookEnv.OPERATOR_INBOUND_WEBHOOK_SECRET);
+  });
+
+  it("never sends SMS bodies, voicemail text, recording URLs or full numbers to a notifier", async () => {
+    const request = vi.fn<typeof fetch>().mockResolvedValue(new Response(null, { status: 204 }));
+    const notify = createOperatorInboundNotifier(webhookEnv, { fetch: request, log: vi.fn() });
+    await notify({ messageSid: `SM${"a".repeat(32)}`, body: "PRIVATE SMS CONTENT", callerNumber: record.callerNumber,
+      receivedAt: record.startedAt, fetchUrl: "https://fleet.example/api/plugin/v1/operator-line/sms/SMabc" });
+    await notify({ recordingSid: `RE${"b".repeat(32)}`, callSid: record.callSid, recordingUrl: "https://recording.example/PRIVATE", transcript: "PRIVATE VOICEMAIL CONTENT",
+      transcriptionStatus: "completed", receivedAt: record.startedAt, fetchUrl: "https://fleet.example/api/plugin/v1/operator-line/voicemail/REabc" });
+    const payloads = request.mock.calls.map(([, init]) => JSON.parse(init!.body as string));
+    expect(payloads[0]).toEqual({ event: "operator_line.sms_received", message_sid: `SM${"a".repeat(32)}`,
+      message_url: "https://fleet.example/api/plugin/v1/operator-line/sms/SMabc", caller_last4: "0123" });
+    expect(payloads[1]).toEqual({ event: "operator_line.voicemail_received", call_sid: record.callSid, recording_sid: `RE${"b".repeat(32)}`,
+      voicemail_url: "https://fleet.example/api/plugin/v1/operator-line/voicemail/REabc" });
+    expect(JSON.stringify(payloads)).not.toMatch(/PRIVATE|15555550123|recording\.example/);
+  });
+
   it("signs the exact timestamp and raw JSON bytes with HMAC-SHA256", async () => {
     const request = vi.fn<typeof fetch>().mockResolvedValue(new Response(null, { status: 204 }));
     await createOperatorInboundNotifier(webhookEnv, { fetch: request, now: () => new Date("2026-10-29T15:01:13Z"), log: vi.fn() })(record);
@@ -63,6 +91,7 @@ describe("operator inbound notifier", () => {
   it.each([{}, { OPERATOR_INBOUND_NOTIFIER: "none" }, { OPERATOR_INBOUND_NOTIFIER: "unknown" },
     { OPERATOR_INBOUND_NOTIFIER: "webhook" }, { OPERATOR_INBOUND_NOTIFIER: "github" },
     { ...webhookEnv, OPERATOR_INBOUND_WEBHOOK_SECRET: "" },
+    { ...webhookEnv, OPERATOR_INBOUND_WEBHOOK_AUTH: "unknown" },
     { ...webhookEnv, OPERATOR_INBOUND_WEBHOOK_URL: "http://bot.example/handoff" },
   ])("defaults to a no-op when disabled or unconfigured (%#)", async (env) => {
     const request = vi.fn<typeof fetch>();

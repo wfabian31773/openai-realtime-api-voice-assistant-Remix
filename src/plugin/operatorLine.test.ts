@@ -17,6 +17,7 @@ import twilio from "twilio";
 import { CallSessionRegistry } from "../runtime/sessionRegistry";
 import { handleOutboundAnswer, handleOutboundStatus } from "../runtime/outbound/outboundWebhook";
 import { operatorLinePolicy } from "../agents/operatorLineAgent";
+import { enabledCampaigns } from "../runtime/outbound/scheduler";
 
 const PHONE = "+19094795435";
 const OPEN = "2026-10-22T18:00:00Z";
@@ -37,7 +38,7 @@ async function boot() {
   const sessions = new LiveCallRegistry(() => clock.at);
   registries.push(sessions);
   const env: Record<string, string | undefined> = {
-    PLUGIN_WRITES_ENABLED: "true", RUNTIME_OUTBOUND_DIALING: "1", OUTBOUND_CAMPAIGN_SI_ASSISTANT: "1",
+    OPERATOR_LINE_INBOUND_ENABLED: "true", PLUGIN_WRITES_ENABLED: "true", RUNTIME_OUTBOUND_DIALING: "1", OUTBOUND_CAMPAIGN_SI_ASSISTANT: "1",
     SI_ASSISTANT_NUMBER: "+19092553213", OPERATOR_LINE_FROM_NUMBER: "+15555550100", DOMAIN: "fleet.example", APP_ENV: "production",
   };
   const sender = {
@@ -96,6 +97,106 @@ async function boot() {
 }
 
 describe("open Wayne operator line with provenance-based outbound approval", () => {
+  it.each(["switch", "env", "storage"])("refuses preparation and previously approved outbound calls when disabled by %s", async (mode) => {
+    const h = await boot();
+    const approval = await h.approved();
+    if (mode === "switch") await h.store.setOperatorLineEnabled(false, "staff");
+    if (mode === "env") h.env.OPERATOR_LINE_INBOUND_ENABLED = "false";
+    if (mode === "storage") vi.spyOn(h.store, "getOperatorLineEnabled").mockRejectedValue(new Error("unavailable"));
+    expect((await h.request("/prepare_operator_call", INPUT)).status).toBe(503);
+    expect((await h.request("/commit_call_live", { confirmToken: approval.confirmToken })).status).toBe(503);
+    expect((await h.store.getApproval(approval.id))!.confirmUsedAt).toBeNull();
+    expect(h.sender.createCall).not.toHaveBeenCalled();
+  });
+
+  it("rechecks the kill-switch after storage preparation immediately before dialing", async () => {
+    const h = await boot(); const approval = await h.approved();
+    const persist = h.store.saveOperatorCall.bind(h.store);
+    vi.spyOn(h.store, "saveOperatorCall").mockImplementation(async (record) => {
+      await persist(record);
+      await h.store.setOperatorLineEnabled(false, "staff");
+    });
+    expect((await h.request("/commit_call_live", { confirmToken: approval.confirmToken })).body).toMatchObject({ error: "Call was not placed: operator_line_disabled", outcome: "not_sent" });
+    expect(h.sender.createCall).not.toHaveBeenCalled();
+  });
+
+  it("has NO daily cap and NO peak window, even for repeated calls to the same number", async () => {
+    const h = await boot();
+    h.clock.at = new Date("2026-11-01T08:00:00Z"); // Early Sunday morning Pacific.
+    h.env.OUTBOUND_DAILY_CAP = "0";
+    h.env.OUTBOUND_CAMPAIGN_WAYNE_OPERATOR = "0";
+    const prior = vi.spyOn(h.outbound, "priorAttempts").mockRejectedValue(new Error("campaign caps must not run"));
+    const count = vi.spyOn(h.outbound, "callsInFlight").mockRejectedValue(new Error("campaign caps must not run"));
+    for (let i = 0; i < 12; i++) {
+      const approved = await h.approved();
+      expect((await h.request("/commit_call_live", { confirmToken: approved.confirmToken })).status).toBe(200);
+    }
+    expect(h.sender.createCall).toHaveBeenCalledTimes(12);
+    expect(prior).not.toHaveBeenCalled();
+    expect(count).not.toHaveBeenCalled();
+  });
+
+  it("excludes the operator from scheduled campaigns even if its campaign flag is enabled", async () => {
+    const getAgentConfig = vi.fn(() => { throw new Error("operator campaign policy must not be evaluated"); });
+    expect(await enabledCampaigns({ env: { OUTBOUND_CAMPAIGN_WAYNE_OPERATOR: "1" }, slugs: async () => [OPERATOR_SLUG],
+      laneSource: async () => ({ getAgentConfig }) })).toEqual([]);
+    expect(getAgentConfig).not.toHaveBeenCalled();
+  });
+
+  it.each(["machine_end_beep", "busy", "failed"])("does not evaluate campaign caps/windows for operator completion %s", async (status) => {
+    const h = await boot(); const approved = await h.approved();
+    const live = await h.request("/commit_call_live", { confirmToken: approved.confirmToken });
+    expect(live.status).toBe(200);
+    const options = h.sender.createCall.mock.calls[0][0];
+    const policy = { ...operatorLinePolicy, get caps(): never { throw new Error("NO operator caps"); }, get window(): never { throw new Error("NO operator peak window"); } };
+    const env = { ...h.env, TWILIO_AUTH_TOKEN: "synthetic-auth", DATABASE_URL: "postgres://test", XAI_API_KEY: "synthetic-unused" };
+    const url = status.startsWith("machine") ? options.url : options.statusCallback;
+    const body = { CallSid: live.body.callSid, From: options.from, To: PHONE, AnsweredBy: status.startsWith("machine") ? status : "human", CallStatus: status };
+    const req = { originalUrl: new URL(url).pathname + new URL(url).search, body, headers: { host: "fleet.example", "x-forwarded-proto": "https",
+      "x-twilio-signature": twilio.getExpectedTwilioSignature(env.TWILIO_AUTH_TOKEN, url, body) } };
+    const deps = { env, registry: new CallSessionRegistry(), store: h.outbound, operatorStore: () => h.store, liveCalls: h.sessions, policyFor: () => policy };
+    const prior = vi.spyOn(h.outbound, "priorAttempts").mockRejectedValue(new Error("NO operator caps"));
+    const response = status.startsWith("machine") ? await handleOutboundAnswer(OPERATOR_SLUG, req, deps) : await handleOutboundStatus(OPERATOR_SLUG, req, deps);
+    expect(response.status).toBe(status.startsWith("machine") ? 200 : 204);
+    expect(prior).not.toHaveBeenCalled();
+  });
+
+  it("expands an optional scenario into the locked outbound free-form goal", async () => {
+    const h = await boot();
+    const approved = await h.approved({ phone: PHONE, scenario_id: "A9" });
+    const response = await h.request("/commit_call_live", { confirmToken: approved.confirmToken });
+    expect(response.status).toBe(200);
+    expect(h.sessions.get(response.body.sessionId)!.operatorCall).toMatchObject({ scenario_id: "A9", purpose: expect.stringContaining("Tomas Benchmark") });
+    expect((await h.store.getApproval(approved.id))!.payload).toMatchObject({ scenario_id: "A9" });
+  });
+
+  it.each(["sms", "voicemail"] as const)("fetches private %s content only with the operator bot scope and keeps audits redacted", async (kind) => {
+    const h = await boot();
+    const id = kind === "sms" ? `SM${"a".repeat(32)}` : `RE${"b".repeat(32)}`;
+    const fetchUrl = `https://fleet.example/api/plugin/v1/operator-line/${kind}/${id}`;
+    if (kind === "sms") await h.store.saveOperatorSms({ messageSid: id, callerNumber: PHONE, body: "PRIVATE SMS BODY", receivedAt: h.clock.at, fetchUrl });
+    else await h.store.saveOperatorVoicemail({ recordingSid: id, callSid: `CA${"c".repeat(32)}`, recordingUrl: "https://api.twilio.com/PRIVATE-recording",
+      transcript: "PRIVATE VOICEMAIL", transcriptionStatus: "completed", receivedAt: h.clock.at, fetchUrl });
+    await h.store.setOperatorLineEnabled(false, "staff"); // Existing content remains fetchable.
+    const path = `/operator-line/${kind}/${id}`;
+    for (const bot of [h.bot, h.store.mint(["operator:call"])]) {
+      const response = await h.request(path, undefined, bot);
+      expect(response.status).toBe(200);
+      expect(response.headers.get("Cache-Control")).toBe("no-store");
+      expect(kind === "sms" ? response.body.body : response.body.transcript).toContain("PRIVATE");
+    }
+    for (const token of [h.staff, h.other, h.store.mint(), h.store.mint(["operator:call", "contacts:approve"])]) {
+      expect((await h.request(path, undefined, token)).status).toBe(403);
+    }
+    expect((await h.request(`/operator-line/${kind}/unrelated`)).status).toBe(404);
+    const audit = JSON.stringify(await h.store.listAudit());
+    expect(audit).not.toContain(id);
+    expect(audit).not.toMatch(/PRIVATE|15555550123|19094795435/);
+    const get = kind === "sms" ? "getOperatorSms" : "getOperatorVoicemail";
+    vi.spyOn(h.store, get).mockRejectedValue(new Error("private error"));
+    expect((await h.request(path)).status).toBe(503);
+  });
+
   it.each(["owner_request", "bot_initiative", undefined] as const)("applies the outbound approval policy and persists %s", async (initiatedBy) => {
     const h = await boot();
     const prepared = await h.request("/prepare_operator_call", { ...INPUT, ...(initiatedBy ? { initiated_by: initiatedBy } : {}) });
@@ -423,7 +524,7 @@ describe("open Wayne operator line with provenance-based outbound approval", () 
   it("binds signed early operator webhooks and refuses wrong lanes and unsigned answers", async () => {
     const h = await boot(); const registry = new CallSessionRegistry();
     const env = { ...h.env, TWILIO_AUTH_TOKEN: "synthetic-auth", DATABASE_URL: "postgres://test", XAI_API_KEY: "synthetic-unused" };
-    const deps = { env, registry, store: h.outbound, liveCalls: h.sessions, policyFor: () => operatorLinePolicy };
+    const deps = { env, registry, store: h.outbound, operatorStore: () => h.store, liveCalls: h.sessions, policyFor: () => operatorLinePolicy };
     const body = { CallSid: "CA-operator-early", From: h.env.OPERATOR_LINE_FROM_NUMBER!, To: PHONE, AnsweredBy: "human" };
     function signed(url: string, fields: Record<string, string>) {
       return { originalUrl: new URL(url).pathname + new URL(url).search, body: fields, headers: { host: "fleet.example", "x-forwarded-proto": "https",
@@ -433,6 +534,9 @@ describe("open Wayne operator line with provenance-based outbound approval", () 
       const invalid = signed(options.url, body); invalid.headers["x-twilio-signature"] = "invalid";
       expect((await handleOutboundAnswer(OPERATOR_SLUG, invalid, deps)).status).toBe(403);
       expect((await handleOutboundAnswer("si-assistant", signed(options.url, body), deps)).body).toContain("<Hangup/>");
+      await h.store.setOperatorLineEnabled(false, "staff");
+      expect((await handleOutboundAnswer(OPERATOR_SLUG, signed(options.url, body), deps)).body).not.toContain("<Stream");
+      await h.store.setOperatorLineEnabled(true, "staff");
       expect((await handleOutboundAnswer(OPERATOR_SLUG, signed(options.url, body), deps)).body).toContain("<Connect><Stream");
       return { sid: body.CallSid };
     });
