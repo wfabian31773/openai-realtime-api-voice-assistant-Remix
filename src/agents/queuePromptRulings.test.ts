@@ -65,23 +65,6 @@ const SHARED: readonly Ruling[] = [
   // so a lane cannot drop it and a trim of a lane's own text cannot reach it.
   {
     /**
-     * Operator ruling, 2026-10-29: *"if the patients ask for a person in a
-     * line without transfer capabilities, apologize and say that they can only
-     * take a message and a team member will follow up."* Measured before it:
-     * the lanes already said they could not transfer and would take a
-     * message, with no apology, and the model improvised variants that dropped
-     * both halves ("There's no one I can connect you to"). All three parts are
-     * asserted: the apology, ONLY a message, and who follows up.
-     */
-    source: 'Operator, 2026-10-29 — asked for a person: apologise, only a message, a team member follows up',
-    requires: [
-      ["i'm sorry", 'apologise', 'apologize'],
-      ['can only take a message', 'only take a message'],
-      ['will follow up'],
-    ],
-  },
-  {
-    /**
      * Operator ruling, 2026-09-03: when a caller asks for a representative the
      * agent says it cannot transfer AND that it will take a message and raise a
      * request for staff to follow up. Bought with three calls in twelve minutes
@@ -331,6 +314,31 @@ check(surgery, [...SHARED, MEDICAL_SAFETY, ...SURGERY_ONLY], 'surgery prompt kee
 check(tech, [...SHARED, MEDICAL_SAFETY, ...TECH_ONLY], 'tech prompt keeps every ruling');
 check(optical, SHARED, 'optical prompt keeps every ruling');
 check(records, [...SHARED, ...RECORDS_ONLY], 'records prompt keeps every ruling');
+
+/**
+ * Operator ruling, 2026-10-29: *"if the patients ask for a person in a line
+ * without transfer capabilities, apologize and say that they can only take a
+ * message and a team member will follow up."* Before it the lanes said they
+ * could not transfer and would take a message, with no apology, and the model
+ * improvised variants that dropped both halves ("There's no one I can connect
+ * you to").
+ *
+ * BOUND TO THE QUOTED TRANSFER RESPONSE, not matched loosely like the rulings
+ * above: "apologise" alone also matches the prompts' own "do not apologise for
+ * the wait" and "do not over-apologise", so a loose match would survive the
+ * apology being deleted from the response (Codex, PR #401). All three parts —
+ * the apology, ONLY a message, who follows up — must sit in the one sentence
+ * the agent is given to say.
+ */
+describe('a request for a person gets sorry, only a message, and who follows up', () => {
+  const SENTENCE =
+    /"i'm sorry, i'm not able to transfer calls\. i can only take a message and put in a request, and the [a-z ]+ will follow up with you\."/;
+  for (const [lane, prompt] of [['optical', optical], ['surgery', surgery], ['tech', tech], ['records', records]] as const) {
+    it(`${lane} quotes it as one sentence`, () => {
+      expect(prompt.toLowerCase().replace(/\s+/g, ' ')).toMatch(SENTENCE);
+    });
+  }
+});
 
 /**
  * THE MUTATION GUARD FOR THE RULING ABOVE, stated as the defect rather than
