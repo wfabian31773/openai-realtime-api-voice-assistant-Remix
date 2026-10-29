@@ -7,7 +7,7 @@ import {
   buildStreamTwiml, buildUnavailableTwiml, checkTwilioSignature, handleAfterRedirect, resolveRequestBase,
   type WebhookRequest, type WebhookResponse,
 } from "./voiceWebhook";
-import { E164, OPERATOR_SLUG, operatorFromProblem } from "../plugin/operatorLine";
+import { E164, OPERATOR_SLUG, operatorFromProblem, operatorMaxDurationSec } from "../plugin/operatorLine";
 import type { PluginStore } from "../plugin/store";
 import type { OutboundStore } from "./outbound/store";
 import { recordOperatorOptOut } from "../plugin/operatorOptOut";
@@ -57,12 +57,12 @@ export class OperatorInboundWebhook {
         callId: randomUUID(), callSid, laneSlug: OPERATOR_SLUG, direction: "inbound",
         callerNumber: E164.test(req.body.From ?? "") ? req.body.From : null,
         status: "in_progress", startedAt: this.deps.now?.() ?? new Date(), endedAt: null,
-        turns: [], requestSummary: null, optedOut: false,
+        turns: [], queuedRequests: [], optedOut: false,
         transcriptUrl: `${protocol}://${host}/api/plugin/v1/operator-line/inbound/${callSid}`,
       });
       if (record.endedAt) return buildUnavailableTwiml(200, UNAVAILABLE);
       const entry = registry.register({ callSid, slug: OPERATOR_SLUG, callerPhone: record.callerNumber ?? "",
-        dialedNumber: req.body.To, operatorInbound: true });
+        dialedNumber: req.body.To, operatorInbound: true, retentionMs: (operatorMaxDurationSec(env) + 600) * 1000 });
       return buildStreamTwiml(req, entry, `${OPERATOR_INBOUND_PATH}/after`, `${OPERATOR_INBOUND_PATH}/status`);
     } catch {
       console.error("[operator-inbound] admission storage unavailable");
@@ -116,17 +116,20 @@ export class OperatorInboundWebhook {
     return [
       { name: "end_call", description: "End the call after a brief goodbye.",
         parameters: { type: "object", properties: {} }, invoke: async () => ({ success: true, ended: true }) },
-      { name: "record_call_outcome", description: "Save the request only after reading it back and receiving the caller's confirmation. Exclude patient, medical, and identity information.",
-        parameters: { type: "object", properties: { request_summary: { type: "string" }, confirmed: { type: "boolean" } }, required: ["request_summary", "confirmed"] },
+      { name: "queue_request_for_grok_bot", description: "Queue an action request privately for Grok Bot, then continue the conversation. Notification runs in the background; queued does not mean delivered or completed.",
+        parameters: { type: "object", properties: { request: { type: "string" } }, required: ["request"] },
         invoke: async (_ctx, raw) => {
           const args = JSON.parse(raw);
-          if (args.confirmed !== true || typeof args.request_summary !== "string" || !args.request_summary.trim() || args.request_summary.length > 2000) {
-            return { success: false, error: "Read back a short request summary and obtain confirmation first." };
+          if (typeof args.request !== "string" || !args.request.trim()) {
+            return { success: false, error: "A request is required." };
           }
-          const store = this.deps.store();
-          if (!store) return { success: false, error: "Request storage unavailable" };
-          await store.updateOperatorInboundRequest(callSid, { requestSummary: args.request_summary.trim() });
-          return { success: true };
+          const request = { id: randomUUID(), text: args.request.trim(), createdAt: (this.deps.now?.() ?? new Date()).toISOString() };
+          const record = await this.deps.store()?.appendOperatorInboundRequest(callSid, request);
+          if (!record) return { success: false, error: "Request storage unavailable or call ended" };
+          // Await durable storage only. Webhook retries and network latency must
+          // never hold a function result or the next conversational turn open.
+          void this.notify(record, request.id).catch(() => undefined);
+          return { success: true, status: "queued", request_id: request.id };
         } },
       { name: "opt_out_of_calls", description: "Immediately record a request not to receive calls, then acknowledge and end the call. Do not ask for identifiers.",
         parameters: { type: "object", properties: {} }, invoke: async () => {
@@ -134,7 +137,7 @@ export class OperatorInboundWebhook {
           const record = await store?.getOperatorInboundCall(callSid);
           if (!record?.callerNumber || !store) return { success: false, error: "Opt-out could not be saved; end politely without promising it was recorded." };
           await recordOperatorOptOut(record.callerNumber, store, this.deps.outbound);
-          await store.updateOperatorInboundRequest(callSid, { optedOut: true });
+          await store.setOperatorInboundOptOut(callSid);
           return { success: true, message: "Your request not to receive calls has been recorded. Goodbye." };
         } },
     ];

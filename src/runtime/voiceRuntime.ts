@@ -321,7 +321,7 @@ import { reportSiAssistantCall, shouldReportSiAssistantCall } from "../plugin/ca
 import { attachmentForSiAssistant } from "../plugin/returnedCaller";
 import { reattachTakenMessages } from "../plugin/messageOutbox";
 import { liveCallRegistry, type LiveCallRegistry } from "../plugin/liveSessions";
-import { OPERATOR_SLUG, OPERATOR_DEFAULT_DURATION } from "../plugin/operatorLine";
+import { OPERATOR_SLUG, operatorMaxDurationSec } from "../plugin/operatorLine";
 import { boundPluginStore } from "../plugin/bindings";
 import type { PluginStore } from "../plugin/store";
 import type { OperatorInboundNotifier } from "../plugin/operatorInboundNotifier";
@@ -1644,7 +1644,11 @@ export function mountVoiceRuntime(
           startedAtMs,
           agent: lane.agent,
           ...(operatorCall ? { maxCallMs: operatorCall.maxDurationSec * 1000 } : {}),
-          ...(entry.operatorInbound ? { maxCallMs: OPERATOR_DEFAULT_DURATION * 1000 } : {}),
+          ...(entry.operatorInbound ? { maxCallMs: operatorMaxDurationSec(env) * 1000 } : {}),
+          ...(entry.slug === OPERATOR_SLUG ? { toolCeiling: {
+            identicalFailures: Infinity, perToolFailures: Infinity, identicalSuccesses: Infinity,
+            perToolSuccesses: Infinity, perCallDispatches: Infinity,
+          } } : {}),
           // The practice's own line, spoken before the agent's first turn,
           // personalised for a recognised caller exactly as the SIP path
           // personalises it — same two helpers, same per-agent style.

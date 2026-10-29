@@ -148,6 +148,7 @@ export async function handleOutboundAnswer(
     dialedNumber: req.body.From ?? "",
     outbound: { campaignKey: policy.campaignKey, contactId, attemptId },
     ...(live ? { liveSessionId: live.sessionId } : {}),
+    ...(live && live.operatorCall ? { retentionMs: (live.operatorCall.maxDurationSec + 600) * 1000 } : {}),
   });
   const { host } = resolveRequestBase(req);
   return twimlResponse(

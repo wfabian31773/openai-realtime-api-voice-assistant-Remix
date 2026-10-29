@@ -146,7 +146,7 @@ export async function placeOperatorCall(
   const refused = (reason: string): LiveResult => ({ ok: false, reason, mayHaveSent: false });
   const problem = operatorFromProblem(deps.env);
   if (problem) return refused(problem);
-  const parsed = parseOperatorPayload(approval.payload);
+  const parsed = parseOperatorPayload(approval.payload, deps.env);
   if (!parsed.ok) return refused("invalid_operator_payload");
   const input = parsed.payload;
   const domain = resolveAppDomain({

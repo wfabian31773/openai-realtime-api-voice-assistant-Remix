@@ -7,7 +7,7 @@ const record: OperatorInboundCallRecord = {
   callId: "d02a4484-a48c-4076-9770-1293b3141973", callSid: `CA${"a".repeat(32)}`,
   direction: "inbound", laneSlug: "wayne-operator", callerNumber: "+15555550123", status: "completed",
   startedAt: new Date("2026-10-29T15:00:00Z"), endedAt: new Date("2026-10-29T15:01:12Z"),
-  turns: [{ role: "caller", text: "PRIVATE REQUEST TEXT", atMs: 1 }], requestSummary: "PRIVATE SUMMARY",
+  turns: [{ role: "caller", text: "PRIVATE REQUEST TEXT", atMs: 1 }], queuedRequests: [],
   optedOut: true, transcriptUrl: `https://fleet.example/api/plugin/v1/operator-line/inbound/CA${"a".repeat(32)}`,
 };
 const webhookEnv = { OPERATOR_INBOUND_NOTIFIER: "webhook", OPERATOR_INBOUND_WEBHOOK_URL: "https://bot.example/handoff", OPERATOR_INBOUND_WEBHOOK_SECRET: "synthetic-signing-key" };
@@ -28,12 +28,36 @@ describe("operator inbound notifier", () => {
 
   it("uses a strict payload allowlist and sends only the caller's last four digits", () => {
     expect(operatorInboundPayload(record)).toEqual({
-      event: "operator_line.inbound_completed", call_id: record.callId, call_sid: record.callSid,
+      event: "operator_line.inbound_completed", queued_requests: [], call_id: record.callId, call_sid: record.callSid,
       started_at: "2026-10-29T15:00:00.000Z", ended_at: "2026-10-29T15:01:12.000Z", duration_seconds: 72,
       caller_last4: "0123", opted_out: true, transcript_url: record.transcriptUrl,
     });
     expect(JSON.stringify(operatorInboundPayload(record))).not.toMatch(/PRIVATE|15555550123|requestSummary|turns/);
     expect(operatorInboundPayload({ ...record, callerNumber: null }).caller_last4).toBeNull();
+  });
+
+  it("sends signed mid-call request references and the final request list without private content", async () => {
+    const request = vi.fn<typeof fetch>().mockResolvedValue(new Response(null, { status: 204 }));
+    const queuedRequests = [
+      { id: "11111111-1111-4111-8111-111111111111", text: "PRIVATE patient Jane DOB 1950-01-01 has a diagnosis", createdAt: record.startedAt.toISOString() },
+      { id: "22222222-2222-4222-8222-222222222222", text: `PRIVATE call ${record.callerNumber}`, createdAt: record.startedAt.toISOString() },
+    ];
+    const notify = createOperatorInboundNotifier(webhookEnv, { fetch: request, log: vi.fn() });
+    await notify({ ...record, endedAt: null, queuedRequests }, queuedRequests[0].id);
+    await notify({ ...record, queuedRequests });
+    const payloads = request.mock.calls.map(([, init]) => {
+      const raw = init!.body as string;
+      const headers = init!.headers as Record<string, string>;
+      expect(headers["X-Operator-Signature"]).toBe(operatorInboundSignature(webhookEnv.OPERATOR_INBOUND_WEBHOOK_SECRET, headers["X-Operator-Timestamp"], raw));
+      expect(raw).not.toMatch(/PRIVATE|patient|Jane|1950|diagnosis|15555550123|transcript_text/);
+      const payload = JSON.parse(raw);
+      expect(payload.caller_last4).toBe("0123");
+      return payload;
+    });
+    expect(payloads[0]).toMatchObject({ event: "operator_line.request_queued", request_id: queuedRequests[0].id, ended_at: null,
+      queued_requests: [{ request_id: queuedRequests[0].id, request_url: `${record.transcriptUrl}#request-${queuedRequests[0].id}` }] });
+    expect(payloads[1]).toMatchObject({ event: "operator_line.inbound_completed", transcript_url: record.transcriptUrl,
+      queued_requests: queuedRequests.map((item) => ({ request_id: item.id, request_url: `${record.transcriptUrl}#request-${item.id}` })) });
   });
 
   it.each([{}, { OPERATOR_INBOUND_NOTIFIER: "none" }, { OPERATOR_INBOUND_NOTIFIER: "unknown" },

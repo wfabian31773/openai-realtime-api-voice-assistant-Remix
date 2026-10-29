@@ -656,9 +656,11 @@ is reading noise.
 
 ---
 
-## Current branch — the spoken stores reach the tools (2026-10-29)
+## Current branch — open Grok Bot operator line (2026-10-29)
 
-This branch carries **`voice-runtime-v141-the-spoken-stores-reach-the-tools-20261029`**, on top of `main`'s v140 (#397, `ab98229`); v137–v139 are on open branches. The four filing tools and `lookup_patient` now read the bridge's per-call stores (the spoken date of birth, the new-or-existing answer) through static imports, so Node 20 no longer hands them an empty second copy. Production impact is unmeasured.
+This branch carries **`voice-runtime-v142-operator-line-inbound-20261029`** (PR #402): open two-way Grok Bot conversations, env-based owner recognition, background signed request notifications, private transcript/request fetch, and outbound goal mode with owner-request versus bot-initiative approval. `OPERATOR_LINE_MAX_CALL_MINUTES` defaults to 60; no operator turn/tool count ceiling or caller admission policy applies. Apply `migrations/add_operator_line_inbound.sql` separately; it has not been applied. SI support, patient flows and staff permissions retain their existing behavior. See `docs/operator-line-inbound.md` and `docs/operator-line/README.md`.
+
+The v141 base carries **`voice-runtime-v141-the-spoken-stores-reach-the-tools-20261029`**, on top of `main`'s v140 (#397, `ab98229`); v137–v139 are on open branches. The four filing tools and `lookup_patient` now read the bridge's per-call stores (the spoken date of birth, the new-or-existing answer) through static imports, so Node 20 no longer hands them an empty second copy. Production impact is unmeasured.
 
 The v140 base (#397, `ab98229`) carries **`voice-runtime-v140-a-denied-greeting-asks-the-request-20261029`**, on top of `main`'s v136 (#393, `9bfccda`). A caller who answers "No" to the greeting's "Am I speaking with <name>?" is asked how we can help before any name or date of birth, and the agent then takes the patient's details. Production impact is unmeasured.
 
@@ -2436,6 +2438,7 @@ voice-runtime-v135-after-hours-dob-confirm-lookup-20261028
 voice-runtime-v136-pcp-unclassified-floor-only-20261028
 voice-runtime-v140-a-denied-greeting-asks-the-request-20261029
 voice-runtime-v141-the-spoken-stores-reach-the-tools-20261029
+voice-runtime-v142-operator-line-inbound-20261029
 ```
 
 Also printed at boot as `[voice-runtime] <marker>`. Anything ending in an
@@ -2573,6 +2576,7 @@ on it is evidence about current code.
 | **v135** or earlier — NOT the date; this branch is **v136** (renumbered from v126), ABOVE `main`'s v135 (#392, `6ae60e33`), which it contains; v127 is #376 and v133 is #391 on their open branches | The PCP model cannot choose unclassified_call; the teardown floor still files unclassified calls for a person to route. No migration. |
 | **v136** or earlier — NOT the date; v140 is ON `main` since #397 merged 2026-10-29 (`ab98229`), ABOVE `main`'s v136 (#393, `9bfccda`), which it contains; v137 is #391, v138 is #376 and v139 is #384 on their open branches | A caller who answers "No" to the greeting's "Am I speaking with <name>?" is asked how we can help BEFORE any name or date of birth, and the agent then takes the PATIENT's details, not the caller's. Before: queue lanes 10-20..10-28, a denial followed by a last-name question on 116 calls, 84 filed (72.4%); 41 heard callers hung up on an identity question with nothing filed. The recognised arm's net growth is ~10 tokens (the block's unpinned reason sentence after the NEVER-open rule was cut to pay for it), inside every ratchet. Corpus: `src/runtime/denialAsksTheRequestFirst.test.ts` (15 SIDs). After-number: denials whose next agent line asks a surname, target ~0; filing on denied calls, target ~90%. Guard: affirmed callers are still not re-asked. No migration. |
 | **v140** or earlier — NOT the date; this branch is **v141**, ABOVE `main`'s v140 (#397, `ab98229`), which it contains; v137 is #391, v138 is #376 and v139 is #384 on their open branches | the spoken date of birth and the new-or-existing answer reaching the tools on Node 20. The bridge writes both per-call stores through static imports (`noteSpokenDob`, `notePatientStatus`); the four filing tools and `lookup_patient` read them through `await import(...)`, and on Node 20, which Replit runs, that is a second module copy with an empty Map — the v78/v90/v115 class a fourth time. So the date-of-birth backstop (#280/#281, 2026-09-10) and the RULE ZERO 2a gate (v70) have never fired in production. Measured: 2026-10-20..10-28, 165 of 276 runtime `date_of_birth` refusals (60%) came after the caller had answered the date-of-birth question with a date (call_turns timestamps); 52 of the 54 such tickets on 10-26..10-28 carry no date of birth. Since v70, 0 `caller_said_new` suppressions in 9,292 queue-lane lookups, with at least 25 bare "New." answers. Fix: five static imports. `src/runtime/perCallStoresHaveOneImportStyle.test.ts` refuses a runtime `import()` of any src/tools or src/services module the runtime imports statically and that keeps a module-level Map (red on main with five offenders), and runs `probes/perCallStoresReachTheTools.probe.ts` under Node 20 when `NODE20_BIN` is set (red on main, green here). After-number: `date_of_birth` refusals after an answered ask, target ~0; queue-lane tickets with no date of birth fall; `caller_said_new` appears. Guards: tickets carrying a date of birth that is not the patient's stay 0 (the adjacency rule is unchanged); `lookup_patient` per call must not fall while tickets with no identity rise. No migration. |
+| **v141** or earlier — this branch is **v142**, above the v141 base | Open Grok Bot operator conversations with owner/general personas, a 60-minute env safety maximum, background signed request notifications, private transcript/queued-request fetch, and free-form outbound goals. Owner-requested calls and calls to the configured owner need no approval tap; third-party bot-initiative calls still require approval. Outbound provenance is durable. Apply `add_operator_line_inbound.sql` separately; not applied. SI support, patient flows and staff permissions are unchanged. |
 
 ### THE SURGEON CLAIM — BUILT, REVIEWED SIX TIMES, WITHDRAWN 2026-09-17
 
@@ -2659,8 +2663,8 @@ v10 (the person base and the join), v11 (the locked record, #290) and v12
 (optical's office ladder) are a CHAIN on `main`: each merged after the one
 before and brought it in, so v12 contains both.
 
-**AND THE SEQUENCE HAS TWO HOLES IN IT ON PURPOSE: v13 AND v57. v141 IS THE
-NEWEST — v141: the spoken date of birth and the new-or-existing answer reach the tools on Node 20, on its branch ABOVE `main`'s v140, which it contains; v137 is #391, v138 is #376 and v139 is #384 on their open branches —
+**AND THE SEQUENCE HAS TWO HOLES IN IT ON PURPOSE: v13 AND v57. v142 IS THE
+NEWEST — v142: open Grok Bot operator conversations, owner recognition, background request handoff, and outbound provenance/approval policy, above v141 (the spoken stores reach the tools), ABOVE `main`'s v140, which it contains; v137 is #391, v138 is #376 and v139 is #384 on their open branches —
 AND v140 IS WHAT `main` CARRIES, SINCE #397 MERGED 2026-10-29 (`ab98229`): a caller who answers "No" to the greeting's name is asked how we can help before any name or date of birth, and the agent takes the patient's details rather than the caller's, above v136 (#393, `9bfccda`) —
 AND BEFORE THAT v136 (#393, MERGED 2026-10-28, `9bfccda`): the PCP model cannot choose unclassified_call; the teardown floor still files unclassified calls for a person to route, above v135 (#392, `6ae60e33`): after-hours confirms the phone-matched candidate on DOB, then looks up that record's schedule, above v134 —
 AND BEFORE THAT v134 (#396, MERGED 2026-10-28, `87766139`): the goodbye grace hangup, above v132 (#390, `76dd105f`), callback extensions validated and kept in staff-only notes, above v131 (#388, `47bc78c`), heard callers bypass the silence ladder, above v130 (#387, `3e861ad`), the PCP queue-withdrawal exemption, above v129 (#386, `08734d7`), the after-hours teardown floor, above v128 (#389, `558f288`), PCP scheduling and

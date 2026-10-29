@@ -1559,6 +1559,7 @@ export const contactApprovals = pgTable("contact_approvals", {
 // Additive DDL: migrations/add_operator_line.sql (apply separately).
 export const pluginOperatorCalls = pgTable("plugin_operator_calls", {
   sessionId: varchar("session_id", { length: 64 }).primaryKey(),
+  initiatedBy: varchar("initiated_by", { length: 16 }).notNull().default("bot_initiative"),
   approvalId: varchar("approval_id", { length: 64 }).notNull(),
   tokenJti: varchar("token_jti", { length: 32 }).notNull(),
   callSid: varchar("call_sid", { length: 64 }),
@@ -1566,7 +1567,9 @@ export const pluginOperatorCalls = pgTable("plugin_operator_calls", {
   startedAt: timestamp("started_at", { withTimezone: true }).notNull(),
   endedAt: timestamp("ended_at", { withTimezone: true }),
   turns: jsonb("turns").notNull().default(sql`'[]'::jsonb`),
-});
+}, (table) => [
+  check("plugin_operator_calls_initiated_by_check", sql`${table.initiatedBy} IN ('owner_request', 'bot_initiative')`),
+]);
 
 // The existing do_not_contact list uses US last-10 keys. International
 // operator opt-outs are keyed on the full E.164 destination here.

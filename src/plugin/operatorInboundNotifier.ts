@@ -2,16 +2,20 @@ import { createHmac } from "node:crypto";
 import type { OperatorInboundCallRecord } from "./store";
 
 type Env = Record<string, string | undefined>;
-export type OperatorInboundNotifier = (record: OperatorInboundCallRecord) => Promise<void>;
+export type OperatorInboundNotifier = (record: OperatorInboundCallRecord, requestId?: string) => Promise<void>;
 
 export function operatorInboundSignature(secret: string, timestamp: string, rawBody: string): string {
   return `sha256=${createHmac("sha256", secret).update(`${timestamp}.${rawBody}`).digest("hex")}`;
 }
 
 /** Explicit allowlist: never spread the stored record into a notification. */
-export function operatorInboundPayload(record: OperatorInboundCallRecord) {
+export function operatorInboundPayload(record: OperatorInboundCallRecord, requestId?: string) {
   return {
-    event: "operator_line.inbound_completed",
+    event: requestId ? "operator_line.request_queued" : "operator_line.inbound_completed",
+    ...(requestId ? { request_id: requestId } : {}),
+    queued_requests: record.queuedRequests.filter((request) => !requestId || request.id === requestId).map((request) => ({
+      request_id: request.id, request_url: `${record.transcriptUrl}#request-${request.id}`,
+    })),
     call_id: record.callId, call_sid: record.callSid,
     started_at: record.startedAt.toISOString(), ended_at: record.endedAt?.toISOString() ?? null,
     duration_seconds: Math.max(0, Math.round(((record.endedAt ?? record.startedAt).getTime() - record.startedAt.getTime()) / 1000)),
@@ -41,17 +45,18 @@ export function createOperatorInboundNotifier(env: Env, deps: {
   if (!configured) return async () => {};
   const request = deps.fetch ?? fetch;
   const log = deps.log ?? ((message: string) => console.info(message));
-  return async (record) => {
+  return async (record, requestId) => {
     // Never let a custom logger, serialization error, or network failure escape.
     try {
-      if (!record.endedAt) return;
+      if (!record.endedAt && !requestId) return;
       for (let attempt = 0; attempt < 2; attempt++) {
         const controller = new AbortController();
         let timer: ReturnType<typeof setTimeout> | undefined;
         try {
           const timestamp = String(Math.floor((deps.now?.() ?? new Date()).getTime() / 1000));
-          const rawBody = mode === "webhook" ? JSON.stringify(operatorInboundPayload(record)) : JSON.stringify({
-            body: `<!-- operator_line.inbound_completed -->\n${record.callId}\n${record.transcriptUrl}`,
+          const rawBody = mode === "webhook" ? JSON.stringify(operatorInboundPayload(record, requestId)) : JSON.stringify({
+            body: [`<!-- ${requestId ? "operator_line.request_queued" : "operator_line.inbound_completed"} -->`, record.callId, record.transcriptUrl,
+              ...operatorInboundPayload(record, requestId).queued_requests.map((request) => request.request_url)].join("\n"),
           });
           const url = mode === "webhook" ? webhookUrl! : `https://api.github.com/repos/${repo}/issues/${issue}/comments`;
           const headers: Record<string, string> = mode === "webhook" ? {

@@ -54,7 +54,7 @@ describe("signed operator inbound admission and completion", () => {
     expect(h.registry.claimStream(CALL_SID, token)).toMatchObject({ slug: "wayne-operator", operatorInbound: true });
     expect(h.registry.claimStream(CALL_SID, token)).toBeNull();
     const record = await h.store.getOperatorInboundCall(CALL_SID);
-    expect(record).toMatchObject({ direction: "inbound", callerNumber: PHONE, requestSummary: null });
+    expect(record).toMatchObject({ direction: "inbound", callerNumber: PHONE, queuedRequests: [] });
     expect(response.body).not.toContain(PHONE);
   });
 
@@ -100,21 +100,53 @@ describe("signed operator inbound admission and completion", () => {
     expect((await other.service.inbound(signed())).body).not.toContain("<Stream");
   });
 
-  it("saves the confirmed summary and transcript once, before notifying", async () => {
+  it("retains long operator calls without changing the patient session expiry", async () => {
+    let now = Date.now();
+    const registry = new CallSessionRegistry(undefined, () => now);
+    const h = boot();
+    const service = new OperatorInboundWebhook({ env: { TWILIO_AUTH_TOKEN: AUTH, XAI_API_KEY: "synthetic-key", DATABASE_URL: "postgres://unused",
+      OPERATOR_LINE_FROM_NUMBER: TO, OPERATOR_LINE_INBOUND_ENABLED: "true", OPERATOR_LINE_MAX_CALL_MINUTES: "90" }, registry,
+      store: () => h.store, outbound: async () => h.outbound, notifier: h.notifier });
+    await service.inbound(signed());
+    registry.register({ callSid: "CA-patient", slug: "optical", callerPhone: PHONE, dialedNumber: TO });
+    now += 61 * 60_000;
+    expect(registry.get(CALL_SID)).toMatchObject({ operatorInbound: true });
+    expect(registry.get("CA-patient")).toBeUndefined();
+    expect((await service.status(signed({ CallStatus: "completed" }, `${OPERATOR_INBOUND_PATH}/status`))).status).toBe(204);
+    expect(h.notifier).toHaveBeenCalledOnce();
+  });
+
+  it("queues multiple requests without waiting for notifier delivery, and sends one final summary", async () => {
     const h = boot(); await h.service.inbound(signed());
+    // A notifier that never settles must not hold a tool response or hangup.
+    h.notifier.mockImplementation(() => new Promise(() => {}));
     const tools = h.service.tools(CALL_SID);
-    expect(tools.map((t) => t.name)).toEqual(["end_call", "record_call_outcome", "opt_out_of_calls"]);
-    const recordTool = tools.find((t) => t.name === "record_call_outcome")!;
-    expect(await recordTool.invoke!({}, JSON.stringify({ confirmed: false, request_summary: "Arrange a meeting" }))).toMatchObject({ success: false });
-    expect((await h.store.getOperatorInboundCall(CALL_SID))!.requestSummary).toBeNull();
-    await recordTool.invoke!({}, JSON.stringify({ confirmed: true, request_summary: "Arrange a meeting" }));
-    const turns = [{ role: "caller" as const, text: "Yes, that is correct.", atMs: Date.now() }];
+    expect(tools.map((t) => t.name)).toEqual(["end_call", "queue_request_for_grok_bot", "opt_out_of_calls"]);
+    const queue = tools.find((t) => t.name === "queue_request_for_grok_bot")!;
+    expect(await queue.invoke!({}, JSON.stringify({ request: "" }))).toMatchObject({ success: false });
+    const results = await Promise.all(["Arrange a meeting", "Send the agenda"].map((request) => queue.invoke!({}, JSON.stringify({ request }))));
+    expect(results).toEqual([expect.objectContaining({ success: true, status: "queued", request_id: expect.any(String) }), expect.objectContaining({ success: true, status: "queued" })]);
+    expect((await h.store.getOperatorInboundCall(CALL_SID))!.endedAt).toBeNull();
+    const requests = (await h.store.getOperatorInboundCall(CALL_SID))!.queuedRequests;
+    expect(requests.map((request) => request.text)).toEqual(["Arrange a meeting", "Send the agenda"]);
+    expect(h.notifier).toHaveBeenCalledTimes(2);
+    expect(h.notifier.mock.calls[0][1]).toBe(requests[0].id);
+    const turns = [{ role: "caller" as const, text: "Let's keep talking.", atMs: Date.now() }];
     await Promise.all([h.service.complete(CALL_SID, turns, "caller_hangup"), h.service.complete(CALL_SID, [], "completed")]);
-    expect(await h.store.getOperatorInboundCall(CALL_SID)).toMatchObject({ requestSummary: "Arrange a meeting", turns, endedAt: expect.any(Date) });
-    expect(h.notifier).toHaveBeenCalledTimes(1);
-    expect(h.notifier.mock.calls[0][0].turns).toEqual(turns);
+    expect(await h.store.getOperatorInboundCall(CALL_SID)).toMatchObject({ queuedRequests: requests, turns, endedAt: expect.any(Date) });
+    expect(h.notifier).toHaveBeenCalledTimes(3);
+    expect(h.notifier.mock.calls[2]).toEqual([expect.objectContaining({ queuedRequests: requests, turns })]);
+    expect(await queue.invoke!({}, JSON.stringify({ request: "Too late" }))).toMatchObject({ success: false });
     await h.service.status(signed({ CallStatus: "completed" }, `${OPERATOR_INBOUND_PATH}/status`));
-    expect(h.notifier).toHaveBeenCalledTimes(1);
+    expect(h.notifier).toHaveBeenCalledTimes(3);
+  });
+
+  it("does not notify or claim a queue success when durable storage fails", async () => {
+    const h = boot(); await h.service.inbound(signed());
+    vi.spyOn(h.store, "appendOperatorInboundRequest").mockRejectedValue(new Error("unavailable"));
+    const queue = h.service.tools(CALL_SID).find((tool) => tool.name === "queue_request_for_grok_bot")!;
+    await expect(queue.invoke!({}, JSON.stringify({ request: "A request" }))).rejects.toThrow("unavailable");
+    expect(h.notifier).not.toHaveBeenCalled();
   });
 
   it("lets the claimed stream own its transcript while completing an unclaimed call from signed status", async () => {

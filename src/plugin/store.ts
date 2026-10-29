@@ -28,9 +28,11 @@ import {
 import { sanitizeAuditEntry, type PluginAuditEntry } from "./audit";
 import { CONFIRM_TTL_MS } from "./tokens";
 import { ChannelDoNotContact } from "../runtime/outbound/channelDnc";
+import type { OperatorInitiator } from "./operatorLine";
 import type { TranscriptTurn } from "../runtime/transcriptLog";
 
 export interface OperatorCallRecord {
+  initiatedBy: OperatorInitiator;
   sessionId: string;
   approvalId: string;
   tokenJti: string;
@@ -39,6 +41,13 @@ export interface OperatorCallRecord {
   startedAt: Date;
   endedAt: Date | null;
   turns: TranscriptTurn[];
+}
+
+/** Request contents stay behind the authenticated transcript endpoint. */
+export interface OperatorQueuedRequest {
+  id: string;
+  text: string;
+  createdAt: string;
 }
 
 /** Separate from approval-owned outbound calls; never copied into audit. */
@@ -52,7 +61,7 @@ export interface OperatorInboundCallRecord {
   startedAt: Date;
   endedAt: Date | null;
   turns: TranscriptTurn[];
-  requestSummary: string | null;
+  queuedRequests: OperatorQueuedRequest[];
   optedOut: boolean;
   transcriptUrl: string;
 }
@@ -161,7 +170,8 @@ export type ContactPayload = CallPayload | SmsPayload | EmailPayload;
 export interface PluginStore {
   startOperatorInboundCall(record: OperatorInboundCallRecord): Promise<OperatorInboundCallRecord>;
   getOperatorInboundCall(callSid: string): Promise<OperatorInboundCallRecord | null>;
-  updateOperatorInboundRequest(callSid: string, patch: { requestSummary?: string; optedOut?: true }): Promise<void>;
+  setOperatorInboundOptOut(callSid: string): Promise<void>;
+  appendOperatorInboundRequest(callSid: string, request: OperatorQueuedRequest): Promise<OperatorInboundCallRecord | null>;
   /** Atomic first completion wins, including across callback retries. */
   finishOperatorInboundCall(callSid: string, endedAt: Date, status: string, turns: TranscriptTurn[]): Promise<OperatorInboundCallRecord | null>;
   isOperatorOptedOut(phone: string): Promise<boolean>;
@@ -301,9 +311,15 @@ export class MemoryPluginStore implements PluginStore {
   async getOperatorInboundCall(callSid: string): Promise<OperatorInboundCallRecord | null> {
     return structuredClone(this.operatorInboundCalls.get(callSid) ?? null);
   }
-  async updateOperatorInboundRequest(callSid: string, patch: { requestSummary?: string; optedOut?: true }): Promise<void> {
+  async setOperatorInboundOptOut(callSid: string): Promise<void> {
     const record = this.operatorInboundCalls.get(callSid);
-    if (record && !record.endedAt) Object.assign(record, patch);
+    if (record && !record.endedAt) record.optedOut = true;
+  }
+  async appendOperatorInboundRequest(callSid: string, request: OperatorQueuedRequest): Promise<OperatorInboundCallRecord | null> {
+    const record = this.operatorInboundCalls.get(callSid);
+    if (!record || record.endedAt) return null;
+    if (!record.queuedRequests.some((item) => item.id === request.id)) record.queuedRequests.push(structuredClone(request));
+    return structuredClone(record);
   }
   async finishOperatorInboundCall(callSid: string, endedAt: Date, status: string, turns: TranscriptTurn[]): Promise<OperatorInboundCallRecord | null> {
     const record = this.operatorInboundCalls.get(callSid);

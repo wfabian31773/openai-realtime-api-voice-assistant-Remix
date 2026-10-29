@@ -48,7 +48,7 @@ import {
 } from "./config";
 import type { LiveTool } from "./agentBinding";
 import { normalizeSpokenLanguage } from "./language";
-import type { OperatorCallPayload } from "../plugin/operatorLine";
+import { OPERATOR_SLUG, isOperatorOwner, type OperatorCallPayload } from "../plugin/operatorLine";
 /**
  * STATIC, ON PURPOSE — THIS LINE IS THE v78 FIX.
  *
@@ -287,6 +287,8 @@ export interface LaneCallMetadata {
   /** Only the owned SI Assistant direct live session supplies this. */
   readonly directCall?: { purpose: string; name?: string };
   readonly operatorCall?: OperatorCallPayload;
+  /** Derived by the resolver from the configured owner number. */
+  readonly operatorOwner?: boolean;
   readonly operatorInbound?: { tools: LiveTool[] };
   /**
    * On an outbound lane, a call somebody made TO it — the person ringing
@@ -386,7 +388,9 @@ export async function resolveLane(
   const handoff = deps.handoff && RUNTIME_TRANSFER_READY_LANES.has(config.id)
     ? deps.handoff(metadata)
     : refuseHandoff;
-  const created = await factory(handoff, metadata);
+  const created = await factory(handoff, slug === OPERATOR_SLUG ? {
+    ...metadata, operatorOwner: isOperatorOwner(metadata.operatorCall?.phone ?? metadata.callerPhone, deps.env ?? process.env),
+  } : metadata);
   const agent = created as BorrowableAgent;
 
   const bound = await bindAgent(agent, {

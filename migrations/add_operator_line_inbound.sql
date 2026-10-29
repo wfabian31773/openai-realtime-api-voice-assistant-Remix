@@ -10,9 +10,15 @@ CREATE TABLE IF NOT EXISTS plugin_operator_inbound_calls (
   started_at TIMESTAMPTZ NOT NULL,
   ended_at TIMESTAMPTZ,
   turns JSONB NOT NULL DEFAULT '[]'::jsonb,
-  request_summary TEXT,
+  queued_requests JSONB NOT NULL DEFAULT '[]'::jsonb,
   opted_out BOOLEAN NOT NULL DEFAULT FALSE,
   transcript_url TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS plugin_operator_inbound_started_idx ON plugin_operator_inbound_calls (started_at DESC);
 ALTER TABLE plugin_operator_inbound_calls ENABLE ROW LEVEL SECURITY;
+
+-- This migration is not yet applied. Operator outbound provenance is part of
+-- the durable call log as well as the locked contact_approvals payload.
+ALTER TABLE plugin_operator_calls
+  ADD COLUMN IF NOT EXISTS initiated_by VARCHAR(16) NOT NULL DEFAULT 'bot_initiative'
+    CHECK (initiated_by IN ('owner_request', 'bot_initiative'));

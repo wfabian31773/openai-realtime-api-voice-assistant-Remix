@@ -27,7 +27,7 @@ function operatorInboundFrom(row: Record<string, unknown>): OperatorInboundCallR
     callerNumber: row.caller_number == null ? null : String(row.caller_number), status: String(row.status),
     startedAt: new Date(String(row.started_at)), endedAt: row.ended_at ? new Date(String(row.ended_at)) : null,
     turns: (typeof row.turns === "string" ? JSON.parse(row.turns) : row.turns) as OperatorInboundCallRecord["turns"],
-    requestSummary: row.request_summary == null ? null : String(row.request_summary),
+    queuedRequests: (typeof row.queued_requests === "string" ? JSON.parse(row.queued_requests) : row.queued_requests ?? []) as OperatorInboundCallRecord["queuedRequests"],
     optedOut: row.opted_out === true, transcriptUrl: String(row.transcript_url),
   };
 }
@@ -143,11 +143,17 @@ export function createSqlPluginStore(exec: SqlExec): PluginStore {
       const [row] = await exec("SELECT * FROM plugin_operator_inbound_calls WHERE call_sid = $1 AND lane_slug = 'wayne-operator' AND direction = 'inbound'", [callSid]);
       return row ? operatorInboundFrom(row) : null;
     },
-    async updateOperatorInboundRequest(callSid, patch) {
-      await exec(`UPDATE plugin_operator_inbound_calls SET
-        request_summary = COALESCE($2, request_summary), opted_out = opted_out OR $3
-        WHERE call_sid = $1 AND ended_at IS NULL AND lane_slug = 'wayne-operator' AND direction = 'inbound'`,
-      [callSid, patch.requestSummary ?? null, patch.optedOut ?? false]);
+    async setOperatorInboundOptOut(callSid) {
+      await exec(`UPDATE plugin_operator_inbound_calls SET opted_out = TRUE
+        WHERE call_sid = $1 AND ended_at IS NULL AND lane_slug = 'wayne-operator' AND direction = 'inbound'`, [callSid]);
+    },
+    async appendOperatorInboundRequest(callSid, request) {
+      const [row] = await exec(`UPDATE plugin_operator_inbound_calls
+        SET queued_requests = queued_requests || $2::jsonb
+        WHERE call_sid = $1 AND ended_at IS NULL AND lane_slug = 'wayne-operator' AND direction = 'inbound'
+          AND NOT queued_requests @> $3::jsonb RETURNING *`,
+      [callSid, JSON.stringify([request]), JSON.stringify([{ id: request.id }])]);
+      return row ? operatorInboundFrom(row) : null;
     },
     async finishOperatorInboundCall(callSid, endedAt, status, turns) {
       const [row] = await exec(`UPDATE plugin_operator_inbound_calls
@@ -164,18 +170,19 @@ export function createSqlPluginStore(exec: SqlExec): PluginStore {
     },
     async saveOperatorCall(record) {
       await exec(`INSERT INTO plugin_operator_calls
-        (session_id, approval_id, token_jti, call_sid, status, started_at, ended_at, turns)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb)
+        (session_id, approval_id, token_jti, call_sid, status, started_at, ended_at, turns, initiated_by)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9)
         ON CONFLICT (session_id) DO UPDATE SET
           call_sid = COALESCE(EXCLUDED.call_sid, plugin_operator_calls.call_sid),
-          status = EXCLUDED.status, ended_at = EXCLUDED.ended_at, turns = EXCLUDED.turns`,
+          status = EXCLUDED.status, ended_at = EXCLUDED.ended_at, turns = EXCLUDED.turns, initiated_by = EXCLUDED.initiated_by`,
       [record.sessionId, record.approvalId, record.tokenJti, record.callSid, record.status,
-        record.startedAt.toISOString(), record.endedAt?.toISOString() ?? null, JSON.stringify(record.turns)]);
+        record.startedAt.toISOString(), record.endedAt?.toISOString() ?? null, JSON.stringify(record.turns), record.initiatedBy ?? "bot_initiative"]);
     },
     async getOperatorCall(sessionId) {
       const [row] = await exec("SELECT * FROM plugin_operator_calls WHERE session_id = $1 LIMIT 1", [sessionId]);
       if (!row) return null;
       return {
+        initiatedBy: row.initiated_by === "owner_request" ? "owner_request" : "bot_initiative",
         sessionId: String(row.session_id), approvalId: String(row.approval_id), tokenJti: String(row.token_jti),
         callSid: row.call_sid ? String(row.call_sid) : null, status: String(row.status),
         startedAt: new Date(String(row.started_at)), endedAt: row.ended_at ? new Date(String(row.ended_at)) : null,

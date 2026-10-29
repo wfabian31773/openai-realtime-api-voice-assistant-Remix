@@ -207,7 +207,7 @@ export function mountPluginApi(app: Express, deps: PluginApiDeps): void {
       }
       res.json({ callId: record.callId, callSid: record.callSid, direction: record.direction, status: record.status,
         startedAt: record.startedAt.toISOString(), endedAt: record.endedAt?.toISOString() ?? null,
-        callerNumber: record.callerNumber, requestSummary: record.requestSummary, optedOut: record.optedOut,
+        callerNumber: record.callerNumber, queuedRequests: record.queuedRequests, optedOut: record.optedOut,
         transcript: record.turns.map((turn) => ({ role: turn.role, text: turn.text, at: new Date(turn.atMs).toISOString() })) });
       await audit(deps, req.pluginAuth, req, "operator_inbound_transcript", "ok", 200);
     } catch {
@@ -222,10 +222,11 @@ export function mountPluginApi(app: Express, deps: PluginApiDeps): void {
     if (problem) { jsonError(res, 503, problem); return; }
     try {
       const result = await prepareContact(deps.store, req.pluginAuth!.jti,
-        { channel: "call", payload: req.body }, (deps.now ?? (() => new Date()))(), "operator");
+        { channel: "call", payload: req.body }, (deps.now ?? (() => new Date()))(), "operator", envOf(deps));
       if (!result.ok) { jsonError(res, result.status, result.error); return; }
-      res.status(201).json({ status: "pending_approval", approval: publicApproval(result.approval) });
-      await audit(deps, req.pluginAuth, req, "prepare_operator_call", "pending_approval", 201, { approvalId: result.approval.id });
+      res.status(201).json({ status: result.confirmToken ? "approved" : "pending_approval", approval: publicApproval(result.approval),
+        ...(result.confirmToken ? { confirmToken: result.confirmToken, expiresAt: result.approval.confirmExpiresAt?.toISOString() } : {}) });
+      await audit(deps, req.pluginAuth, req, "prepare_operator_call", result.confirmToken ? "approved" : "pending_approval", 201, { approvalId: result.approval.id });
     } catch { jsonError(res, 503, "Operator request storage is unavailable"); }
   });
 
@@ -241,7 +242,7 @@ export function mountPluginApi(app: Express, deps: PluginApiDeps): void {
     try { record = await deps.store.getOperatorCall(req.params.id); }
     catch { jsonError(res, 503, "Operator transcript storage is unavailable"); return; }
     if (!record || record.tokenJti !== req.pluginAuth!.jti) { jsonError(res, 404, "Operator call not found"); return; }
-    res.json({ sessionId: record.sessionId, callSid: record.callSid, status: record.status,
+    res.json({ sessionId: record.sessionId, initiated_by: record.initiatedBy, callSid: record.callSid, status: record.status,
       startedAt: record.startedAt.toISOString(), endedAt: record.endedAt?.toISOString() ?? null,
       transcript: record.turns.map((turn) => ({ role: turn.role, text: turn.text, at: new Date(turn.atMs).toISOString() })),
       nextAfter: record.turns.length - 1 });

@@ -38,6 +38,8 @@ export interface CallEntry {
   callerPhone: string;
   dialedNumber: string;
   createdAtMs: number;
+  /** Per-call retention for long operator conversations. */
+  retentionMs?: number;
   streamStarted: boolean;
   outcome: CallOutcome | null;
   /**
@@ -90,6 +92,7 @@ export class CallSessionRegistry {
     outbound?: CallEntry["outbound"];
     liveSessionId?: string;
     operatorInbound?: true;
+    retentionMs?: number;
   }): CallEntry {
     this.sweep();
     const existing = this.entries.get(input.callSid);
@@ -101,6 +104,7 @@ export class CallSessionRegistry {
       callerPhone: input.callerPhone,
       dialedNumber: input.dialedNumber,
       createdAtMs: this.now(),
+      ...(input.retentionMs ? { retentionMs: input.retentionMs } : {}),
       streamStarted: false,
       outcome: null,
       ...(input.outbound ? { outbound: { ...input.outbound } } : {}),
@@ -152,9 +156,9 @@ export class CallSessionRegistry {
   }
 
   private sweep(): void {
-    const cutoff = this.now() - this.ttlMs;
+    const now = this.now();
     for (const [callSid, entry] of this.entries) {
-      if (entry.createdAtMs < cutoff) this.entries.delete(callSid);
+      if (entry.createdAtMs < now - (entry.retentionMs ?? this.ttlMs)) this.entries.delete(callSid);
     }
   }
 }

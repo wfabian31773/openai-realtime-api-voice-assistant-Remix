@@ -58,7 +58,7 @@ const AUTH = "synthetic-auth-token";
 const PHONE = "+15555550123";
 const TO = "+15555550100";
 
-function boot(enabled = true) {
+function boot(enabled = true, env: Record<string, string | undefined> = {}) {
   const store = new MemoryPluginStore();
   const outbound = new FakeOutboundStore();
   const notify = vi.fn().mockResolvedValue(undefined);
@@ -78,7 +78,7 @@ function boot(enabled = true) {
     factory: createOperatorLineAgent as unknown as LaneConfig["factory"] };
   const registry = mountVoiceRuntime(app, server, {
     env: { TWILIO_AUTH_TOKEN: AUTH, XAI_API_KEY: "synthetic-key", DATABASE_URL: "postgres://unused",
-      OPERATOR_LINE_FROM_NUMBER: TO, OPERATOR_LINE_INBOUND_ENABLED: "true" },
+      OPERATOR_LINE_FROM_NUMBER: TO, OPERATOR_LINE_INBOUND_ENABLED: "true", ...env },
     laneSource: { getAgentConfig: (slug) => slug === OPERATOR_SLUG ? config : undefined },
     operatorInboundStore: store, operatorInboundNotifier: notify, outboundStore: outbound,
     fetchPrecontext, resolveGreeting, startRecording, persistCall, sweepCall, sweepPcpFloor, fileSetupFailure, gradeCall,
@@ -107,6 +107,51 @@ function boot(enabled = true) {
 }
 
 describe("operator inbound live runtime, in process", () => {
+  it.each([undefined, "90"])("enforces the inbound safety maximum (%s minutes, default 60)", async (minutes) => {
+    const timers = vi.spyOn(globalThis, "setTimeout");
+    const h = boot(true, { OPERATOR_LINE_MAX_CALL_MINUTES: minutes, OPERATOR_OWNER_NUMBER: PHONE });
+    const callSid = `CA${"f".repeat(32)}`;
+    const answer = await h.post(OPERATOR_INBOUND_PATH, { CallSid: callSid, From: PHONE, To: TO });
+    h.stream(callSid, answer.body.match(/name="token" value="([^"]+)"/)![1]);
+    await vi.waitFor(() => expect(h.provider.sent.some((event) => event.type === "session.update")).toBe(true));
+    h.provider.emit({ type: "session.updated" });
+    expect(h.provider.sent.find((event) => event.type === "session.update").session.instructions).toContain("full owner persona");
+    const deadline = timers.mock.calls.find(([, ms]) => ms === Number(minutes ?? 60) * 60_000)!;
+    expect(deadline).toBeDefined();
+    expect((await h.store.getOperatorInboundCall(callSid))!.endedAt).toBeNull();
+    (deadline[0] as () => void)();
+    await vi.waitFor(() => expect(h.notify).toHaveBeenCalledOnce());
+    expect(await h.store.getOperatorInboundCall(callSid)).toMatchObject({ status: "max_duration", endedAt: expect.any(Date) });
+  });
+
+  it("keeps talking past 100 caller turns and the shared forty-tool ceiling", async () => {
+    const h = boot();
+    const callSid = `CA${"a".repeat(32)}`;
+    const answer = await h.post(OPERATOR_INBOUND_PATH, { CallSid: callSid, From: PHONE, To: TO });
+    const socket = h.stream(callSid, answer.body.match(/name="token" value="([^"]+)"/)![1]);
+    await vi.waitFor(() => expect(h.provider.sent.some((event) => event.type === "session.update")).toBe(true));
+    h.provider.emit({ type: "session.updated" });
+    // Identical requests also exceed the patient lanes' ten-success ceiling.
+    for (let index = 0; index < 45; index++) {
+      h.provider.emit({ type: "response.created" });
+      h.provider.emit({ type: "response.function_call_arguments.done", call_id: `request-${index}`,
+        name: "queue_request_for_grok_bot", arguments: JSON.stringify({ request: "Please queue another reminder" }) });
+      h.provider.emit({ type: "response.done" });
+    }
+    for (let index = 0; index < 101; index++) {
+      h.provider.emit({ type: "conversation.item.input_audio_transcription.completed", item_id: `turn-${index}`, transcript: `Continue topic ${index}` });
+    }
+    await vi.waitFor(async () => expect((await h.store.getOperatorInboundCall(callSid))!.queuedRequests).toHaveLength(45));
+    expect(h.notify).toHaveBeenCalledTimes(45);
+    expect((await h.store.getOperatorInboundCall(callSid))!.endedAt).toBeNull();
+    expect(h.provider.closed).toBe(false);
+    socket.close();
+    await vi.waitFor(() => expect(h.notify).toHaveBeenCalledTimes(46));
+    const final = (await h.store.getOperatorInboundCall(callSid))!;
+    expect(final.turns.filter((turn) => turn.role === "caller")).toHaveLength(101);
+    expect(h.notify.mock.calls[45][0].queuedRequests).toHaveLength(45);
+  });
+
   it.each([false, true])("records the live conversation without patient work (opt-out=%s)", async (optOut) => {
     const h = boot();
     const callSid = `CA${(optOut ? "d" : "c").repeat(32)}`;
@@ -117,8 +162,8 @@ describe("operator inbound live runtime, in process", () => {
     const socket = h.stream(callSid, token);
     await vi.waitFor(() => expect(h.provider.sent.some((e) => e.type === "session.update")).toBe(true));
     const update = h.provider.sent.find((e) => e.type === "session.update");
-    expect(update.session.instructions).toContain("You answer Wayne Fabian's operator line");
-    expect(update.session.tools.map((tool: any) => tool.name)).toEqual(["end_call", "record_call_outcome", "opt_out_of_calls"]);
+    expect(update.session.instructions).toContain("You are Grok Bot");
+    expect(update.session.tools.map((tool: any) => tool.name)).toEqual(["end_call", "queue_request_for_grok_bot", "opt_out_of_calls"]);
     expect(update.session.instructions).not.toMatch(/Business Facts|Caller script\/persona|identify_callback_caller/);
     expect(h.fetchPrecontext).not.toHaveBeenCalled();
     expect(h.resolveGreeting).not.toHaveBeenCalled();
@@ -129,21 +174,21 @@ describe("operator inbound live runtime, in process", () => {
     h.provider.emit({ type: "conversation.item.input_audio_transcription.completed", item_id: "operator-caller", transcript: text });
     h.provider.emit({ type: "response.created" });
     h.provider.emit({ type: "response.function_call_arguments.done", call_id: "operator-result",
-      name: optOut ? "opt_out_of_calls" : "record_call_outcome",
-      arguments: JSON.stringify(optOut ? {} : { confirmed: true, request_summary: "Arrange a meeting" }) });
+      name: optOut ? "opt_out_of_calls" : "queue_request_for_grok_bot",
+      arguments: JSON.stringify(optOut ? {} : { request: "Arrange a meeting" }) });
     await vi.waitFor(async () => expect(await h.store.getOperatorInboundCall(callSid)).toMatchObject(
-      optOut ? { optedOut: true } : { requestSummary: "Arrange a meeting" }));
+      optOut ? { optedOut: true } : { queuedRequests: [expect.objectContaining({ text: "Arrange a meeting" })] }));
     socket.close();
-    await vi.waitFor(() => expect(h.notify).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(h.notify).toHaveBeenCalledTimes(optOut ? 1 : 2));
     const saved = await h.store.getOperatorInboundCall(callSid);
-    expect(saved).toMatchObject({ callerNumber: PHONE, direction: "inbound", optedOut: optOut, endedAt: expect.any(Date), requestSummary: optOut ? null : "Arrange a meeting" });
+    expect(saved).toMatchObject({ callerNumber: PHONE, direction: "inbound", optedOut: optOut, endedAt: expect.any(Date), queuedRequests: optOut ? [] : [expect.objectContaining({ text: "Arrange a meeting" })] });
     expect(saved!.turns).toContainEqual(expect.objectContaining({ role: "caller", text }));
     if (optOut) expect(await h.outbound.isDoNotContact(PHONE)).toBe(true);
     expect(h.persistCall).toHaveBeenCalledWith(expect.objectContaining({ transcript: "", turns: [], toolEvents: [] }));
     for (const hook of [h.sweepCall, h.sweepPcpFloor, h.fileSetupFailure, h.gradeCall]) expect(hook).not.toHaveBeenCalled();
     await h.post(`${OPERATOR_INBOUND_PATH}/after`, body);
     await h.post(`${OPERATOR_INBOUND_PATH}/status`, { ...body, CallStatus: "completed" });
-    expect(h.notify).toHaveBeenCalledTimes(1);
+    expect(h.notify).toHaveBeenCalledTimes(optOut ? 1 : 2);
   });
 
   it("persists failed setup without creating a patient ticket", async () => {
