@@ -143,7 +143,7 @@ the SI Assistant number. There is **no business-hours window, daily cap, or
 peak cap** for this route or its later approved commits.
 
 Body: `{ "to": "+1<US-number>", "body": "<message>", "idempotency_key": "<stable-event-key>" }`.
-US formatting is normalized to E.164. The body must contain 1–4000 characters.
+US formatting is normalized to E.164. The body must contain 1–1600 characters (Twilio limit; longer bodies get 400 before any approval or idempotency row is created).
 Optional `initiated_by` is `owner_request` or `bot_initiative` (default), matching
 operator calls; it is retained in the locked approval payload and redacted audit.
 Only a normalized match to the configured `OPERATOR_OWNER_NUMBER` skips human
