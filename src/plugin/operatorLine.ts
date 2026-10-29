@@ -114,8 +114,8 @@ export function parseOperatorSmsPayload(raw: unknown, env: Env):
   if (!key || !/^\+?[\d\s().-]+$/.test(to) || (to.startsWith("+") && !US_E164.test(`+${to.replace(/\D/g, "")}`))) {
     return fail("to must be a valid US phone number");
   }
-  if (typeof input.body !== "string" || !input.body.trim() || input.body.length > 4000) {
-    return fail("body must contain 1 to 4000 characters");
+  if (typeof input.body !== "string" || !input.body.trim() || input.body.length > 1600) {
+    return fail("body must contain 1 to 1600 characters");
   }
   const initiatedBy = input.initiated_by === undefined ? "bot_initiative" : input.initiated_by;
   if (initiatedBy !== "owner_request" && initiatedBy !== "bot_initiative") {

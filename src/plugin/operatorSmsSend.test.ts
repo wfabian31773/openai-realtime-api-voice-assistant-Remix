@@ -276,6 +276,30 @@ describe("operator-line SMS send", () => {
     expect(h.sender.send).toHaveBeenCalledTimes(2);
   });
 
+  it.each([OWNER, OTHER])("rejects 1601 characters before creating an approval and allows the same key with 1600 characters for %s", async (to) => {
+    const h = boot();
+    const insertApproval = vi.spyOn(h.store, "insertApproval");
+    expect(await h.request({ ...INPUT, to, body: "x".repeat(1601) })).toMatchObject({
+      status: 400, body: { error: "body must contain 1 to 1600 characters" },
+    });
+    expect(insertApproval).not.toHaveBeenCalled();
+    expect(h.store.approvals.size).toBe(0);
+    expect(await h.store.findApprovalByIdempotencyKey(h.bot.jti, INPUT.idempotency_key)).toBeNull();
+    expect(h.sender.send).not.toHaveBeenCalled();
+
+    const body = "x".repeat(1600);
+    const accepted = await h.request({ ...INPUT, to, body });
+    expect(accepted).toMatchObject({ status: to === OWNER ? 200 : 201, body: {
+      status: to === OWNER ? "committed" : "pending_approval",
+    } });
+    expect(accepted.body).not.toHaveProperty("deduplicated");
+    expect(h.store.approvals.size).toBe(1);
+    expect(await h.store.findApprovalByIdempotencyKey(h.bot.jti, INPUT.idempotency_key))
+      .toMatchObject({ id: accepted.body.approval.id, payload: { body } });
+    if (to === OWNER) expect(h.sender.send).toHaveBeenCalledExactlyOnceWith({ to, from: FROM, body });
+    else expect(h.sender.send).not.toHaveBeenCalled();
+  });
+
   it.each([null, {}, { ...INPUT, to: "garbage6265550123" }, { ...INPUT, to: "+44206265550123" },
     { ...INPUT, body: " " }, { ...INPUT, from: FROM }, { ...INPUT, initiated_by: "unknown" }])("rejects invalid bodies (%#)", async (body) => {
     const h = boot();
