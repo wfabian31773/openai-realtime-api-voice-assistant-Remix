@@ -541,3 +541,19 @@ were unreachable, so the separately reported CI test could not be identified.
   4. Repoint the Twilio number to the three URLs above.
 - **Unchanged:** the SI support line, patient flows and staff permissions.
 - **NOT MEASURED IN PRODUCTION.**
+
+---
+
+## Dependency security bump (#403, 2026-10-29)
+
+**Merged per Wayne's approval, 2026-10-29 8:49 AM ET.** The Replit republish had been blocked by the package firewall (Socket Security Policy, E403) on `vitest-4.0.16.tgz`. The policy was not bypassed.
+
+- **Critical fixes:**
+  - `vitest` and all `@vitest/*` packages: 4.0.16 → 4.1.12. Fixes CVE-2026-47429 / GHSA-5xrq-8626-4rwp (Vitest UI server could read and run arbitrary files).
+  - `proxy-addr` 2.0.7 → 2.0.8: CVE-2026-90711 / GHSA-jqcg-44mw-7w3h (IP spoofing).
+  - `fast-xml-parser` 5.2.5 (CVE-2026-25896 / GHSA-m7jm-9gc2-mpf2) is no longer in the dependency tree.
+  - Other high-severity transitive packages were updated with `npm audit fix`, which made semver-compatible updates only (no `--force`). `npm audit --audit-level=critical` is clean for root and `client/`.
+- **Repo hygiene:** the tracked `node_modules` symlink (pointing to `/workspace/opline-rework/node_modules`, dangling on Replit) was untracked. `.gitignore` now ignores both `node_modules/` and the bare `node_modules` symlink.
+- **Still open:** high-severity issues in `drizzle-orm`, `nodemailer` and `zod` need a semver-major bump, and `xlsx` has no upstream fix. These need dedicated PRs.
+- **Known flake:** `src/plugin/liveCalls.test.ts` "masks phone numbers…" can fail when a random `tokenJti` hex contains a forbidden substring such as "1950".
+- No code changes and no Twilio changes. Republishing is a separate step.
