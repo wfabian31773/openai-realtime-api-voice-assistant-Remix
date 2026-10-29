@@ -628,6 +628,14 @@ describe('records line: Codex round on 88122c5', () => {
   it('a records request naming the records department as its source stays records', () => {
     expect(recordsLinePurpose('I need my medical records from the records department')).toBe('records');
   });
+  it.each([
+    'I need help understanding my OCT results',
+    'I need help understanding my visual field results',
+    'I want to understand my retina scan results',
+  ])('help understanding named test results is clinical interpretation: %s', (text) => {
+    expect(recordsLinePurpose(text)).toBe('clinical');
+  });
+
   it('help understanding results is clinical interpretation', () => {
     expect(recordsLinePurpose('I need help understanding my test results')).toBe('clinical');
   });

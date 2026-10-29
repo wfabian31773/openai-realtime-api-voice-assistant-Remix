@@ -29,7 +29,9 @@ const ACCESS_QUESTION = new RegExp(
 const INTERPRETATION = new RegExp([
   // Explaining access or request status is records work, not clinical meaning.
   String.raw`\b(?:discuss|explain|interpret)\b(?!\s+(?:(?:the )?status of\b|how\s+(?:(?:i|we|you)\s+(?:can|could)\s+|to\s+)?(?:get|obtain|request|receive|access)\s+(?:(?:a|an|the|my|our|your|his|her|their|some)\s+)*(?:${DOC.source}|\b(?:copy|copies)\b)))`,
-  String.raw`\b(?:understand(?:ing)?|meaning of)\s+(?:(?:what|the|my|our|your|her|his|their|these|those|abnormal|normal|test|lab|exam|diagnostic)\s+)*results?\b`,
+  // Any named test may sit before "results" ("my OCT results", "my visual
+  // field results"); access/status words keep records logistics out.
+  String.raw`\b(?:understand(?:ing)?|meaning of)\s+(?:(?!(?:status|getting|get|obtaining|obtain|requesting|request|receiving|accessing|copy|copies|records?|charts?|how|where|when)\b)[a-z'-]+\s+){0,5}results?\b`,
   String.raw`\bwhat (?:do|does)\b[^.!?;]{0,65}\bresults?\b[^.!?;]{0,30}\bmean\b`,
   String.raw`\bwhy (?:are|is|were|was)\b[^.!?;]{0,65}\bresults?\b[^.!?;]{0,30}\b(?:abnormal|normal|high|low)\b`,
   String.raw`\breview\b[^.!?]{0,40}\bresults?\b[^.!?]{0,40}\bwith\b`,
