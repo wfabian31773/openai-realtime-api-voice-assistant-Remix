@@ -27,7 +27,8 @@ const ACCESS_QUESTION = new RegExp(
   String.raw`\bquestion about\s+(?:(?:the )?status of|getting|obtaining|requesting|receiving|accessing|(?:a )?(?:copy|copies) of)\b[^.!?;]{0,100}${DOC.source}`,
 );
 const INTERPRETATION = new RegExp([
-  String.raw`\b(?:discuss|explain|interpret)\b`,
+  // Explaining access or request status is records work, not clinical meaning.
+  String.raw`\b(?:discuss|explain|interpret)\b(?!\s+(?:(?:the )?status of\b|how\s+(?:(?:i|we|you)\s+(?:can|could)\s+|to\s+)?(?:get|obtain|request|receive|access)\s+(?:(?:a|an|the|my|our|your|his|her|their|some)\s+)*(?:${DOC.source}|\b(?:copy|copies)\b)))`,
   String.raw`\b(?:understand|meaning of)\s+(?:(?:what|the|my|our|your|her|his|their|these|those|abnormal|normal|test|lab|exam|diagnostic)\s+)*results?\b`,
   String.raw`\bwhat (?:do|does)\b[^.!?;]{0,65}\bresults?\b[^.!?;]{0,30}\bmean\b`,
   String.raw`\bwhy (?:are|is|were|was)\b[^.!?;]{0,65}\bresults?\b[^.!?;]{0,30}\b(?:abnormal|normal|high|low)\b`,
@@ -63,7 +64,7 @@ const PASSIVE_DELIVERY_REQUEST = new RegExp(String.raw`^(?:i|we) (?:need|want|wo
 // Reuse the document vocabulary so refusing results, notes or imaging has
 // the same effect as refusing a chart. Bare delivery objects count here too.
 const NEGATED_RECORDS = new RegExp(
-  String.raw`\b(?:(?:don't|do not|doesn't|does not) (?:need|want|request|send|fax|mail|email|get)|not (?:requesting|asking for|about|a request for)|no (?:need to|necesito|quiero))\b[^.!?;]{0,50}(?:${DOC.source}|\b(?:notes?|reports?|results?|copy|copies|copia|copias)\b)|\bno records (?:needed|required|requested)\b`,
+  String.raw`\b(?:(?:don't|do not|doesn't|does not) (?:need|want|request|send|fax|mail|email|get)|not (?:requesting|asking for|about|a request for)|no (?:need to|necesito|quiero))\b[^.!?;]{0,50}(?:${DOC.source}|\b(?:notes?|reports?|results?|copy|copies|copia|copias|prescriptions?|recetas?)\b)|\bno records (?:needed|required|requested)\b`,
 );
 const RECORDS_WORKFLOW = /\b(?:roi|release of information|subpoena|authorization to release|medical release|disability (?:form|paperwork)|fmla|(?:inspect|inspection of)\b[^.!?]{0,30}\b(?:file|chart|records?)|(?:work|school|doctor'?s?) note|note for (?:work|school)|write a letter|dmv (?:form|paperwork)|jury duty|verification of treatment|proof of (?:treatment|service)|proof that|(?:letter|carta) (?:for|from|stating|del)|fill out (?:a|this|my) form|paperwork to be filled|school form|constancia|comprobante|revisar mi expediente|ver mi expediente|send (?:me |us )?everything)\b/;
 // Preserve the specialist cues used by the existing queue router as well as

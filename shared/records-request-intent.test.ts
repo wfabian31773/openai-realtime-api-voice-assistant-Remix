@@ -1,6 +1,55 @@
 import { describe, expect, it } from 'vitest';
 import { recordsLinePurpose, recordsLineRedirect, recordsRequestText } from './records-request-intent';
 
+describe('review regressions: explanatory access questions and prescription refusals', () => {
+  it.each([
+    'Can you explain the status of my records request?',
+    'Can you explain how I can get a copy of my medical records?',
+    'Can we discuss the status of my records request?',
+    'Please explain how to obtain my test results',
+    'Can you explain how I can get my lab results?',
+  ])('keeps access and status explanations in Medical Records: %s', text => {
+    expect(recordsLinePurpose(text)).toBe('records');
+    expect(recordsLineRedirect(text)).toBeNull();
+  });
+
+  it.each([
+    'Can you explain what my test results mean?',
+    'Can you explain how to interpret my lab results?',
+    'Please explain the findings in my test results',
+    'Can you explain how I can get better test results?',
+    'Can you explain how I can get an understanding of my lab results?',
+  ])('keeps results-meaning explanations in Clinical: %s', text => {
+    expect(recordsLinePurpose(text)).toBe('clinical');
+    expect(recordsLineRedirect(text)).toMatchObject({ departmentId: 3, requestTypeId: 72, requestReasonId: 542 });
+  });
+
+  it.each([
+    "Don't send my prescription; please reschedule my appointment",
+    'Do not send my prescription and please reschedule my appointment',
+    "Don't send my glasses prescription, please reschedule my appointment",
+    'Do not send my receta; please reschedule my appointment',
+    'Do not send my prescriptions; please reschedule my appointment',
+  ])('preserves rescheduling after refusing a prescription: %s', text => {
+    expect(recordsLinePurpose(text)).toBe('scheduling');
+    expect(recordsLineRedirect(text)).toMatchObject({ departmentId: 9, requestTypeId: 32, requestReasonId: 147 });
+  });
+
+  it.each([
+    "Don't send my prescription",
+    'Do not send my receta',
+  ])('does not revive a refused prescription as fallback evidence: %s', text => {
+    expect(recordsLinePurpose(text)).toBe('unknown');
+    expect(recordsLineRedirect(text)).toMatchObject({ departmentId: 9 });
+  });
+
+  it('preserves a separate document request after refusing a prescription', () => {
+    const text = 'Do not send my prescription and please send my medical report';
+    expect(recordsLinePurpose(text)).toBe('records');
+    expect(recordsLineRedirect(text)).toBeNull();
+  });
+});
+
 describe('review regressions: document delivery and independent instructions', () => {
   it.each([
     'I called the medical records office to get an appointment',
