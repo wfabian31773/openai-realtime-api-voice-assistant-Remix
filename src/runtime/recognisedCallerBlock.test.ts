@@ -260,8 +260,20 @@ describe('the ask script agrees with the block above it', () => {
     ['recognised', RECOGNISED],
   ])('keeps the actual questions for a %s caller', (_label, pc) => {
     const script = identityAskScript(pc as never);
-    expect(script).toContain('May I please have your last name?');
+    expect(script).toContain('May I please have your first and last name?');
     expect(script).toMatch(/date of birth, starting with the month/);
+  });
+
+  // v145: the pack-01 A1 test call (CAe121c3c176d626e8a679536788e58d63) tried
+  // to file with no first name. The script asked for the last name alone,
+  // which suits a caller the greeting already named and nobody else, and
+  // both arms reach a caller the greeting did not name: an unrecognised
+  // caller, and one who denied it.
+  it.each([
+    ['unrecognised', undefined],
+    ['recognised', RECOGNISED],
+  ])('never asks a %s caller for a last name alone', (_label, pc) => {
+    expect(identityAskScript(pc as never)).not.toContain('"May I please have your last name?"');
   });
 
   it('names the denial and the not-the-caller case as the times it applies', () => {
@@ -274,7 +286,7 @@ describe('the ask script agrees with the block above it', () => {
   for (const { module } of RECOGNITION_BLOCK_LANES) {
     it(`${module} composes the ask script rather than inlining it`, () => {
       expect(agentSource(module)).toMatch(/identityAskScript\s*\(/);
-      expect(agentPromptText(module)).not.toContain('May I please have your last name?');
+      expect(agentPromptText(module)).not.toContain('May I please have your first and last name?');
     });
   }
 });

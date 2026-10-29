@@ -35,6 +35,7 @@ import { forgetIfSameName, nameKey, rememberVerifiedIdentity, verifiedIdentityFo
 import { LOOKUP_UNSURE_FILE_FIX, LOOKUP_UNSURE_FIX, LOOKUP_UNSURE_SAY, spokenFirstNameAgreesWithChart } from './lookupUnsure';
 import { appointmentAccess } from '../services/appointmentAccess';
 import { noteStatusOverride, patientStatusFor } from './spokenPatientStatus';
+import { rememberVerifiedOffice } from './verifiedOffice';
 import './patientAppointments';
 
 /** Which queue is asking. Injected as call context, never a model argument. */
@@ -1001,6 +1002,9 @@ registerTool({
     // and brand-stripping alone yields "DTLA" — a name the receiver has never
     // heard of, which is how a resolved office still failed to file.
     const fileable = hit.fileAs || sanitizeLocationName(hit.canonical).value || hit.canonical;
+    // So the filing tool does not ask for an office the caller has just
+    // named and we have just verified — see `verifiedOffice.ts`.
+    rememberVerifiedOffice(callSid, fileable);
 
     return {
       success: true,

@@ -158,10 +158,17 @@ export const RECOGNITION_BLOCK_LANES: ReadonlyArray<RecognitionBlockLane> = [
  * the caller may not be the patient, and the patient's own details are still
  * to be collected.
  *
- * The unrecognised arm is byte-for-byte what all four lanes carried before, so
- * that population is provably unchanged.
+ * THE NAME QUESTION ASKS FOR BOTH HALVES SINCE v145 (2026-10-29). It asked
+ * only *"May I please have your last name?"*, which is right after a greeting
+ * that already said the first name and wrong everywhere else: an unrecognised
+ * caller, or one who denied the greeting, was never asked a first name. The
+ * operator's pack-01 A1 test call (`CAe121c3c176d626e8a679536788e58d63`) tried
+ * to file with no first name, and over 2026-10-20..28 the queue lanes took 222
+ * filing refusals for a missing first name. *"What's your first and last name?"*
+ * is RULE ZERO 2b's own example: one self-introduction, in their own words.
+ * The date-of-birth question is unchanged.
  */
-const ASK_QUESTIONS = `  "May I please have your last name?"
+const ASK_QUESTIONS = `  "May I please have your first and last name?"
   "And may I please have your date of birth, starting with the month,
    then the day, then the year?"`;
 

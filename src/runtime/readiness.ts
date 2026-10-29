@@ -969,9 +969,19 @@ import { callEnvironment } from "./callRecord";
  */
 /** v144: open Grok Bot operator conversations, owner recognition, background
  * request handoff, and outbound provenance, above main's v143.
- * Apply add_operator_line_inbound.sql separately. */
+ * Apply add_operator_line_inbound.sql separately. Merged to main as #402
+ * (6cac333). */
+/**
+ * v145 — THE TEST CALL'S OFFICE AND NAME (2026-10-29). Three defects from the
+ * operator's pack-01 A1 test call: no queue prompt quotes a sample office any
+ * more (the optical agent offered one when no record was found), an office
+ * `resolve_location` verified on the call reaches `file_optical_ticket` when
+ * the model leaves `location` out (verifiedOffice.ts), and the ask script asks
+ * for the first and last name, RULE ZERO 2b's own wording. On top of v144
+ * (#402, main, 6cac333). No migration; production impact remains unmeasured.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v144-operator-line-inbound-20261029";
+  "voice-runtime-v145-the-test-calls-office-and-name-20261029";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

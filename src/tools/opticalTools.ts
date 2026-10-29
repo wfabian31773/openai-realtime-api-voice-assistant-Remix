@@ -24,6 +24,7 @@ import { loggableLookupError } from '../services/loggableTicketingError';
 import { gateRefusalsSoFar, noteGateRefusal } from './gateAttempts';
 import { decideDobEscape, dobStatusNote, dobEscapeMarker, type DobStatus } from './dobEscape';
 import { usualOfficeFor, verifiedDobFor } from './verifiedIdentity';
+import { verifiedOfficeFor } from './verifiedOffice';
 import { spokenDobFor } from './spokenDob';
 
 /** This tool's own name, for the per-call gate counter. */
@@ -247,7 +248,21 @@ registerTool({
     const { sanitizeProviderName, sanitizeLocationName } = await import(
       '../services/ticketFieldSanitizers'
     );
-    const cleanLocation = sanitizeLocationName(location).value;
+    const namedLocation = sanitizeLocationName(location).value;
+    /**
+     * AN OFFICE THE CALLER CONFIRMED ON THIS CALL IS AN OFFICE THE CALLER
+     * NAMED. When the model sends no `location` but `resolve_location` has
+     * already verified one on this call, file under that office instead of
+     * asking again — the 2026-10-29 test call asked twice (`verifiedOffice.ts`).
+     * It sits where the argument sits, so it outranks the record's usual office
+     * exactly as an office the caller names always has, and an office the
+     * model does send still wins over it.
+     */
+    const confirmedOffice = namedLocation ? undefined : verifiedOfficeFor(callSid);
+    if (confirmedOffice) {
+      console.info('[optical] the model sent no office — using the one resolve_location verified on this call');
+    }
+    const cleanLocation = namedLocation || confirmedOffice || '';
     const cleanProvider = sanitizeProviderName(str(input.provider)).value;
 
     /**
