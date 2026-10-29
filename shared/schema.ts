@@ -1527,6 +1527,7 @@ export const contactApprovals = pgTable("contact_approvals", {
   channel: varchar("channel", { length: 16 }).notNull(),
   status: varchar("status", { length: 24 }).notNull().default("pending"),
   tokenJti: varchar("token_jti", { length: 32 }).notNull(),
+  idempotencyKey: varchar("idempotency_key", { length: 200 }),
   ticketId: varchar("ticket_id", { length: 64 }),
   ticketNumber: varchar("ticket_number", { length: 64 }),
   phoneKey: varchar("phone_key", { length: 10 }),
@@ -1551,6 +1552,8 @@ export const contactApprovals = pgTable("contact_approvals", {
   index("idx_contact_approvals_ticket").on(table.ticketNumber),
   index("idx_contact_approvals_confirm").on(table.confirmTokenHash),
   index("idx_contact_approvals_phone_key").on(table.phoneKey),
+  uniqueIndex("contact_approvals_token_idempotency_idx").on(table.tokenJti, table.idempotencyKey)
+    .where(sql`${table.idempotencyKey} IS NOT NULL AND ${table.status} NOT IN ('rejected', 'cancelled')`),
   check("contact_approvals_channel_check", sql`channel IN ('call', 'sms', 'email')`),
   check("contact_approvals_status_check", sql`status IN ('pending', 'approved', 'sending', 'rejected', 'cancelled', 'committed', 'failed', 'unknown')`),
 ]);
@@ -1594,6 +1597,12 @@ export const pluginOperatorVoicemails = pgTable("plugin_operator_voicemails", {
 // operator opt-outs are keyed on the full E.164 destination here.
 export const pluginOperatorDnc = pgTable("plugin_operator_dnc", {
   phone: varchar("phone", { length: 16 }).primaryKey(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+// Additive DDL: migrations/add_operator_notification_claims.sql (apply separately).
+export const pluginOperatorNotifications = pgTable("plugin_operator_notifications", {
+  eventId: varchar("event_id").primaryKey(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 

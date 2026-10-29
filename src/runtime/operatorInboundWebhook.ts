@@ -33,7 +33,7 @@ export class OperatorInboundWebhook {
     outbound: () => Promise<OutboundStore>;
     notifier?: OperatorInboundNotifier;
     now?: () => Date;
-  }) { this.notify = deps.notifier ?? createOperatorInboundNotifier(deps.env); }
+  }) { this.notify = deps.notifier ?? createOperatorInboundNotifier(deps.env, { store: deps.store }); }
 
   private signed(req: WebhookRequest): WebhookResponse | null {
     return checkTwilioSignature(req, this.deps.env) === "valid" ? null

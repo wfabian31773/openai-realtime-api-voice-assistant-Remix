@@ -29,6 +29,29 @@ function boot(over: Record<string, string | undefined> = {}) {
 }
 
 describe("signed operator inbound admission and completion", () => {
+  it("notifies once when media-stream completion races the signed status callback", async () => {
+    const h = boot();
+    await h.service.inbound(signed());
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const finish = h.store.finishOperatorInboundCall.bind(h.store);
+    const writes = vi.spyOn(h.store, "finishOperatorInboundCall").mockImplementation(async (...args) => {
+      await gate;
+      return finish(...args);
+    });
+    const turns = [{ role: "caller" as const, text: "A synthetic final turn", atMs: 1 }];
+    // The media-stream close path calls complete() with its final transcript.
+    const close = h.service.complete(CALL_SID, turns, "caller_hangup");
+    const status = h.service.status(signed({ CallStatus: "completed" }, `${OPERATOR_INBOUND_PATH}/status`));
+    release();
+    await Promise.all([close, status]);
+    expect(writes).toHaveBeenCalledOnce();
+    expect(h.notifier).toHaveBeenCalledOnce();
+    expect(await h.store.getOperatorInboundCall(CALL_SID)).toMatchObject({ endedAt: expect.any(Date), turns });
+    await h.service.complete(CALL_SID, [], "completed");
+    expect(h.notifier).toHaveBeenCalledOnce();
+  });
+
   it.each(["inbound", "status", "after", "sms", "fallback", "voicemail"] as const)("rejects missing, invalid and altered signatures on %s", async (method) => {
     const { service, registry } = boot();
     for (const mutate of [

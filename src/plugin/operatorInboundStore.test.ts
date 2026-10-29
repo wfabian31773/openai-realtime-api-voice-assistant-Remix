@@ -4,6 +4,16 @@ import { operatorLineEnabled } from "./operatorLineSettings";
 import { MemoryPluginStore } from "./store";
 
 describe("durable operator settings and messages", () => {
+  it("claims notifications with an atomic conflict guard shared across SQL store instances", async () => {
+    const eventId = `opline:CA${"a".repeat(32)}:completed`;
+    const exec = vi.fn<SqlExec>().mockResolvedValueOnce([{ event_id: eventId }]).mockResolvedValueOnce([]);
+    expect(await createSqlPluginStore(exec).claimOperatorNotification(eventId)).toBe(true);
+    expect(await createSqlPluginStore(exec).claimOperatorNotification(eventId)).toBe(false);
+    expect(exec.mock.calls[0][0]).toContain("INSERT INTO plugin_operator_notifications (event_id)");
+    expect(exec.mock.calls[0][0]).toContain("ON CONFLICT DO NOTHING RETURNING event_id");
+    expect(exec.mock.calls[0][1]).toEqual([eventId]);
+  });
+
   it("uses the env hard default, the persisted switch and fail-closed storage", async () => {
     const store = new MemoryPluginStore();
     for (const flag of [undefined, "false", "TRUE", "1"]) expect(await operatorLineEnabled({ OPERATOR_LINE_INBOUND_ENABLED: flag }, store)).toBe(false);

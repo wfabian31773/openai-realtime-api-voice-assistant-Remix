@@ -1,5 +1,5 @@
 import { createHmac } from "node:crypto";
-import type { OperatorInboundCallRecord, OperatorSmsRecord, OperatorVoicemailRecord } from "./store";
+import type { OperatorInboundCallRecord, OperatorSmsRecord, OperatorVoicemailRecord, PluginStore } from "./store";
 
 type Env = Record<string, string | undefined>;
 export type OperatorInboundRecord = OperatorInboundCallRecord | OperatorSmsRecord | OperatorVoicemailRecord;
@@ -10,16 +10,23 @@ export function operatorInboundSignature(secret: string, timestamp: string, rawB
 }
 
 /** Explicit allowlist: never spread the stored record into a notification. */
-export function operatorInboundPayload(record: OperatorInboundRecord, requestId?: string) {
+export function operatorInboundPayload(record: OperatorInboundRecord, requestId?: string, deliveryAttempt = 1) {
+  const eventId = "messageSid" in record ? `opline:sms:${record.messageSid}`
+    : "recordingSid" in record ? `opline:vm:${record.recordingSid}:${record.transcript !== null || record.transcriptionStatus !== null ? "transcript" : "recording"}`
+    : requestId ? `opline:${record.callSid}:request:${requestId}` : `opline:${record.callSid}:completed`;
+  const delivery = { event_id: eventId, delivery_attempt: deliveryAttempt };
   if ("messageSid" in record) return {
+    ...delivery,
     event: "operator_line.sms_received", message_sid: record.messageSid, message_url: record.fetchUrl,
     caller_last4: record.callerNumber?.replace(/\D/g, "").slice(-4) || null,
   };
   if ("recordingSid" in record) return {
+    ...delivery,
     event: "operator_line.voicemail_received", call_sid: record.callSid, recording_sid: record.recordingSid,
     voicemail_url: record.fetchUrl,
   };
   return {
+    ...delivery,
     event: requestId ? "operator_line.request_queued" : "operator_line.inbound_completed",
     ...(requestId ? { request_id: requestId } : {}),
     queued_requests: record.queuedRequests.filter((request) => !requestId || request.id === requestId).map((request) => ({
@@ -42,6 +49,7 @@ function httpsUrl(value: string | undefined): string | null {
 
 export function createOperatorInboundNotifier(env: Env, deps: {
   fetch?: typeof fetch; now?: () => Date; timeoutMs?: number;
+  store?: () => PluginStore | null;
   log?: (message: string) => void;
 } = {}): OperatorInboundNotifier {
   const mode = env.OPERATOR_INBOUND_NOTIFIER ?? "none";
@@ -59,17 +67,33 @@ export function createOperatorInboundNotifier(env: Env, deps: {
     // Never let a custom logger, serialization error, or network failure escape.
     try {
       if ("endedAt" in record && !record.endedAt && !requestId) return;
+      const basePayload = operatorInboundPayload(record, requestId);
+      let claimed = true;
+      try {
+        const store = deps.store?.();
+        if (store) claimed = await store.claimOperatorNotification(basePayload.event_id);
+      } catch {
+        // Migration/storage may be unavailable: receivers still have event_id.
+        log("[operator-inbound] notification claim unavailable; sending");
+      }
+      if (!claimed) {
+        log("[operator-inbound] duplicate suppressed");
+        return;
+      }
+      // A timeout can follow successful receipt. Both attempts share one claim
+      // and event_id; receivers MUST deduplicate on event_id before acting.
       for (let attempt = 0; attempt < 2; attempt++) {
         const controller = new AbortController();
         let timer: ReturnType<typeof setTimeout> | undefined;
         try {
           const timestamp = String(Math.floor((deps.now?.() ?? new Date()).getTime() / 1000));
-          const payload = operatorInboundPayload(record, requestId);
+          const payload = { ...basePayload, delivery_attempt: attempt + 1 };
           const references = "callId" in record ? [record.callId, record.transcriptUrl,
             ...record.queuedRequests.filter((item) => !requestId || item.id === requestId).map((item) => `${record.transcriptUrl}#request-${item.id}`)]
             : "messageSid" in record ? [record.messageSid, record.fetchUrl] : [record.callSid, record.recordingSid, record.fetchUrl];
           const rawBody = mode === "webhook" ? JSON.stringify(payload) : JSON.stringify({
-            body: [`<!-- ${payload.event} -->`, ...references].join("\n"),
+            event_id: payload.event_id, delivery_attempt: payload.delivery_attempt,
+            body: [`<!-- ${payload.event} event_id=${payload.event_id} delivery_attempt=${payload.delivery_attempt} -->`, ...references].join("\n"),
           });
           const url = mode === "webhook" ? webhookUrl! : `https://api.github.com/repos/${repo}/issues/${issue}/comments`;
           const headers: Record<string, string> = mode === "webhook" ? {
@@ -81,6 +105,7 @@ export function createOperatorInboundNotifier(env: Env, deps: {
             "Content-Type": "application/json", Accept: "application/vnd.github+json",
             Authorization: `Bearer ${env.OPERATOR_INBOUND_GITHUB_TOKEN}`, "X-GitHub-Api-Version": "2022-11-28",
           };
+          headers["X-Operator-Event-Id"] = payload.event_id;
           const response = await Promise.race([
             request(url, { method: "POST", headers, body: rawBody, signal: controller.signal, redirect: "error" }),
             new Promise<never>((_, reject) => {

@@ -133,6 +133,8 @@ export interface ContactApprovalRow {
   status: ApprovalStatus;
   tokenJti: string;
   ticketId: string | null;
+  /** Request identity, separate from the human-approved payload/hash. */
+  idempotencyKey?: string | null;
   ticketNumber: string | null;
   /** Last-10 of the destination phone. Lookup key only; never written to audit. */
   phoneKey?: string | null;
@@ -171,6 +173,7 @@ export interface CallPayload {
 export interface SmsPayload {
   phone: string;
   body: string;
+  idempotency_key?: string;
   ticketId?: string | null;
   ticketNumber?: string | null;
 }
@@ -186,6 +189,8 @@ export interface EmailPayload {
 export type ContactPayload = CallPayload | SmsPayload | EmailPayload;
 
 export interface PluginStore {
+  /** Atomic, durable first delivery wins. Retries reuse the original claim. */
+  claimOperatorNotification(eventId: string): Promise<boolean>;
   getOperatorLineEnabled(): Promise<boolean>;
   setOperatorLineEnabled(enabled: boolean, updatedBy: string | null): Promise<void>;
   /** First SMS with this MessageSid wins; null means a duplicate. */
@@ -210,6 +215,7 @@ export interface PluginStore {
   revokeToken(jti: string, at: Date): Promise<boolean>;
 
   insertApproval(row: ContactApprovalRow): Promise<ContactApprovalRow>;
+  findApprovalByIdempotencyKey(tokenJti: string, key: string): Promise<ContactApprovalRow | null>;
   getApproval(id: string): Promise<ContactApprovalRow | null>;
   listApprovals(status?: ApprovalStatus): Promise<ContactApprovalRow[]>;
   updateApproval(id: string, patch: Partial<ContactApprovalRow>, onlyIfStatus?: ApprovalStatus): Promise<ContactApprovalRow | null>;
@@ -329,6 +335,12 @@ export async function verifyStoredToken(
 }
 
 export class MemoryPluginStore implements PluginStore {
+  operatorNotifications = new Set<string>();
+  async claimOperatorNotification(eventId: string): Promise<boolean> {
+    if (this.operatorNotifications.has(eventId)) return false;
+    this.operatorNotifications.add(eventId);
+    return true;
+  }
   operatorLineEnabled = true;
   async getOperatorLineEnabled(): Promise<boolean> { return this.operatorLineEnabled; }
   async setOperatorLineEnabled(enabled: boolean, _updatedBy: string | null): Promise<void> { this.operatorLineEnabled = enabled; }
@@ -430,8 +442,19 @@ export class MemoryPluginStore implements PluginStore {
   }
 
   async insertApproval(row: ContactApprovalRow): Promise<ContactApprovalRow> {
+    // No await between checking the key and inserting, including concurrent prepares.
+    if (row.idempotencyKey != null) {
+      const existing = [...this.approvals.values()].find((item) => item.tokenJti === row.tokenJti
+        && item.idempotencyKey === row.idempotencyKey && item.status !== "rejected" && item.status !== "cancelled");
+      if (existing) return { ...existing, payload: { ...existing.payload } };
+    }
     this.approvals.set(row.id, { ...row, payload: { ...row.payload } });
     return this.approvals.get(row.id)!;
+  }
+  async findApprovalByIdempotencyKey(tokenJti: string, key: string): Promise<ContactApprovalRow | null> {
+    const row = [...this.approvals.values()].find((item) => item.tokenJti === tokenJti
+      && item.idempotencyKey === key && item.status !== "rejected" && item.status !== "cancelled");
+    return row ? { ...row, payload: { ...row.payload } } : null;
   }
   async getApproval(id: string): Promise<ContactApprovalRow | null> {
     const row = this.approvals.get(id);

@@ -1,7 +1,7 @@
 import { createHmac } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { createOperatorInboundNotifier, operatorInboundPayload, operatorInboundSignature } from "./operatorInboundNotifier";
-import type { OperatorInboundCallRecord } from "./store";
+import { MemoryPluginStore, type OperatorInboundCallRecord } from "./store";
 
 const record: OperatorInboundCallRecord = {
   callId: "d02a4484-a48c-4076-9770-1293b3141973", callSid: `CA${"a".repeat(32)}`,
@@ -34,9 +34,9 @@ describe("operator inbound notifier", () => {
     await notify({ recordingSid: `RE${"b".repeat(32)}`, callSid: record.callSid, recordingUrl: "https://recording.example/PRIVATE", transcript: "PRIVATE VOICEMAIL CONTENT",
       transcriptionStatus: "completed", receivedAt: record.startedAt, fetchUrl: "https://fleet.example/api/plugin/v1/operator-line/voicemail/REabc" });
     const payloads = request.mock.calls.map(([, init]) => JSON.parse(init!.body as string));
-    expect(payloads[0]).toEqual({ event: "operator_line.sms_received", message_sid: `SM${"a".repeat(32)}`,
+    expect(payloads[0]).toEqual({ event: "operator_line.sms_received", event_id: `opline:sms:SM${"a".repeat(32)}`, delivery_attempt: 1, message_sid: `SM${"a".repeat(32)}`,
       message_url: "https://fleet.example/api/plugin/v1/operator-line/sms/SMabc", caller_last4: "0123" });
-    expect(payloads[1]).toEqual({ event: "operator_line.voicemail_received", call_sid: record.callSid, recording_sid: `RE${"b".repeat(32)}`,
+    expect(payloads[1]).toEqual({ event: "operator_line.voicemail_received", event_id: `opline:vm:RE${"b".repeat(32)}:transcript`, delivery_attempt: 1, call_sid: record.callSid, recording_sid: `RE${"b".repeat(32)}`,
       voicemail_url: "https://fleet.example/api/plugin/v1/operator-line/voicemail/REabc" });
     expect(JSON.stringify(payloads)).not.toMatch(/PRIVATE|15555550123|recording\.example/);
   });
@@ -56,12 +56,13 @@ describe("operator inbound notifier", () => {
 
   it("uses a strict payload allowlist and sends only the caller's last four digits", () => {
     expect(operatorInboundPayload(record)).toEqual({
-      event: "operator_line.inbound_completed", queued_requests: [], call_id: record.callId, call_sid: record.callSid,
+      event: "operator_line.inbound_completed", event_id: `opline:${record.callSid}:completed`, delivery_attempt: 1, queued_requests: [], call_id: record.callId, call_sid: record.callSid,
       started_at: "2026-10-29T15:00:00.000Z", ended_at: "2026-10-29T15:01:12.000Z", duration_seconds: 72,
       caller_last4: "0123", opted_out: true, transcript_url: record.transcriptUrl,
     });
     expect(JSON.stringify(operatorInboundPayload(record))).not.toMatch(/PRIVATE|15555550123|requestSummary|turns/);
-    expect(operatorInboundPayload({ ...record, callerNumber: null }).caller_last4).toBeNull();
+    const anonymous = operatorInboundPayload({ ...record, callerNumber: null });
+    expect("caller_last4" in anonymous && anonymous.caller_last4).toBeNull();
   });
 
   it("sends signed mid-call request references and the final request list without private content", async () => {
@@ -105,7 +106,7 @@ describe("operator inbound notifier", () => {
       OPERATOR_INBOUND_GITHUB_ISSUE: "12", OPERATOR_INBOUND_GITHUB_TOKEN: "synthetic-github-token" }, { fetch: request, log: vi.fn() })(record);
     expect(request.mock.calls[0][0]).toBe("https://api.github.com/repos/example/bot/issues/12/comments");
     const comment = JSON.parse(request.mock.calls[0][1]!.body as string).body;
-    expect(comment.split("\n")).toEqual(["<!-- operator_line.inbound_completed -->", record.callId, record.transcriptUrl]);
+    expect(comment.split("\n")).toEqual([`<!-- operator_line.inbound_completed event_id=opline:${record.callSid}:completed delivery_attempt=1 -->`, record.callId, record.transcriptUrl]);
     expect(comment).not.toMatch(/PRIVATE|0123/);
   });
 
@@ -125,6 +126,77 @@ describe("operator inbound notifier", () => {
     await createOperatorInboundNotifier(webhookEnv, { fetch: request, log })(record);
     expect(request).toHaveBeenCalledTimes(2);
     expect(log).toHaveBeenCalledWith("[operator-inbound] notifier=webhook delivered");
+  });
+
+  it("reuses the event ID and claim on timeout retry, signs both attempt numbers and suppresses later deliveries", async () => {
+    vi.useFakeTimers();
+    try {
+      const store = new MemoryPluginStore();
+      const claim = vi.spyOn(store, "claimOperatorNotification");
+      const request = vi.fn<typeof fetch>().mockImplementationOnce(() => new Promise(() => {}))
+        .mockResolvedValueOnce(new Response(null, { status: 204 }));
+      const notify = createOperatorInboundNotifier(webhookEnv, { fetch: request, store: () => store, timeoutMs: 20, log: vi.fn() });
+      const work = notify(record);
+      await vi.advanceTimersByTimeAsync(20);
+      await work;
+      expect(request).toHaveBeenCalledTimes(2);
+      expect(claim).toHaveBeenCalledOnce();
+      for (const [index, [, init]] of request.mock.calls.entries()) {
+        const payload = JSON.parse(init!.body as string);
+        const headers = init!.headers as Record<string, string>;
+        expect(payload).toMatchObject({ event_id: `opline:${record.callSid}:completed`, delivery_attempt: index + 1 });
+        expect(headers["X-Operator-Event-Id"]).toBe(payload.event_id);
+        expect(headers["X-Operator-Signature"]).toBe(operatorInboundSignature(webhookEnv.OPERATOR_INBOUND_WEBHOOK_SECRET, headers["X-Operator-Timestamp"], init!.body as string));
+      }
+      expect((request.mock.calls[0][1]!.signal as AbortSignal).aborted).toBe(true);
+      // Even a fresh notifier instance must observe the durable claim.
+      const log = vi.fn();
+      await createOperatorInboundNotifier(webhookEnv, { fetch: request, store: () => store, log })(record);
+      expect(request).toHaveBeenCalledTimes(2);
+      expect(log).toHaveBeenCalledWith("[operator-inbound] duplicate suppressed");
+      expect(JSON.stringify(log.mock.calls)).not.toMatch(/PRIVATE|15555550123/);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("claims once across concurrent notify calls", async () => {
+    const store = new MemoryPluginStore();
+    const request = vi.fn<typeof fetch>().mockResolvedValue(new Response(null, { status: 204 }));
+    const notify = createOperatorInboundNotifier(webhookEnv, { fetch: request, store: () => store, log: vi.fn() });
+    await Promise.all([notify(record), notify(record)]);
+    expect(request).toHaveBeenCalledOnce();
+  });
+
+  it.each(["missing", "throw"])("fails open with stable IDs when claim storage is %s", async (mode) => {
+    const store = new MemoryPluginStore();
+    vi.spyOn(store, "claimOperatorNotification").mockRejectedValue(new Error("PRIVATE database error"));
+    const request = vi.fn<typeof fetch>().mockResolvedValue(new Response(null, { status: 204 }));
+    const log = vi.fn();
+    await createOperatorInboundNotifier(webhookEnv, { fetch: request, store: () => mode === "missing" ? null : store, log })(record);
+    expect(request).toHaveBeenCalledOnce();
+    expect(JSON.parse(request.mock.calls[0][1]!.body as string).event_id).toBe(`opline:${record.callSid}:completed`);
+    expect(JSON.stringify(log.mock.calls)).not.toMatch(/PRIVATE|15555550123/);
+  });
+
+  it("uses separate stable IDs for queued requests, completion, SMS and voicemail phases", async () => {
+    const store = new MemoryPluginStore();
+    const request = vi.fn<typeof fetch>().mockResolvedValue(new Response(null, { status: 204 }));
+    const notify = createOperatorInboundNotifier(webhookEnv, { fetch: request, store: () => store, log: vi.fn() });
+    await notify(record, "request-a");
+    await notify(record, "request-a");
+    await notify(record, "request-b");
+    await notify(record);
+    const sms = { messageSid: "SM-synthetic", callerNumber: record.callerNumber, body: "PRIVATE", receivedAt: record.startedAt, fetchUrl: "https://fleet.example/sms" };
+    await notify(sms);
+    await notify(sms);
+    const voicemail = { recordingSid: "RE-synthetic", callSid: record.callSid, recordingUrl: "https://private.example/recording",
+      transcript: null, transcriptionStatus: null, receivedAt: record.startedAt, fetchUrl: "https://fleet.example/vm" };
+    await notify(voicemail);
+    await notify({ ...voicemail, transcript: "PRIVATE", transcriptionStatus: "completed" });
+    await notify({ ...voicemail, transcript: "PRIVATE", transcriptionStatus: "completed" });
+    expect(request.mock.calls.map(([, init]) => JSON.parse(init!.body as string).event_id)).toEqual([
+      `opline:${record.callSid}:request:request-a`, `opline:${record.callSid}:request:request-b`,
+      `opline:${record.callSid}:completed`, "opline:sms:SM-synthetic", "opline:vm:RE-synthetic:recording", "opline:vm:RE-synthetic:transcript",
+    ]);
   });
 
   it("bounds both attempts even if the transport ignores AbortSignal", async () => {
