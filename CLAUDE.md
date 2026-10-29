@@ -656,9 +656,11 @@ is reading noise.
 
 ---
 
-## Current branch — PCP unclassified is floor only (2026-10-28)
+## Current branch — a denied greeting asks the request first (2026-10-29)
 
-This branch carries **`voice-runtime-v136-pcp-unclassified-floor-only-20261028`** (renumbered from v126), on top of `main`'s v135 (#392, `6ae60e33`); v127 is #376 and v133 is #391 on their open branches. The PCP model cannot select `unclassified_call`; the teardown
+This branch carries **`voice-runtime-v140-a-denied-greeting-asks-the-request-20261029`**, on top of `main`'s v136 (#393, `9bfccda`); v137–v139 are on open branches and v141 is #398. A caller who answers "No" to the greeting's "Am I speaking with <name>?" is asked how we can help before any name or date of birth, and the agent then takes the patient's details. Use this marker when verifying the branch. Production impact is unmeasured.
+
+The v136 base (#393, `9bfccda`) carries **`voice-runtime-v136-pcp-unclassified-floor-only-20261028`** (renumbered from v126), on top of `main`'s v135 (#392, `6ae60e33`); v127 is #376 and v133 is #391 on their open branches. The PCP model cannot select `unclassified_call`; the teardown
 floor still uses it when no classification was recorded. Production impact is
 unmeasured. Use this marker when verifying the branch; the v116 history below
 predates it. Surname spelling and full email confirmation reach the agent's
