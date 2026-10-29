@@ -51,6 +51,9 @@ opt-out; Grok Bot must not claim it succeeded.
   Inbound does not require outbound dialing, plugin writes, or a campaign switch.
 - `OPERATOR_INBOUND_NOTIFIER=none|webhook|github`: default `none`. Unknown or
   incomplete configuration is a no-op; saved requests remain fetchable.
+- `OPERATOR_NOTIFICATION_CLAIM_LEASE_MS`: default **60000** milliseconds.
+  Undelivered claims older than this lease can be reclaimed by a later callback.
+  Invalid or nonpositive values fall back to the default.
 - Webhook: `OPERATOR_INBOUND_WEBHOOK_URL` (HTTPS) and
   `OPERATOR_INBOUND_WEBHOOK_SECRET`.
 - `OPERATOR_INBOUND_WEBHOOK_AUTH=hmac|bearer|both`: default **both**.
@@ -66,6 +69,16 @@ Keep secrets in the deployment's secret store. Notifications use a three-second
 attempt timeout and one retry. Delivery is best effort, without a durable
 retry queue; storage is durable, and delivery failures never break a call.
 A process restart can interrupt outstanding notification attempts.
+Before delivery, `plugin_operator_notifications` atomically claims the event
+across processes and restarts. The internal retry reuses that claim.
+Fresh claims block duplicates; successful deliveries retain the event permanently.
+Two failed attempts release the claim so a later callback can retry. An abandoned
+undelivered claim can be reclaimed after its lease expires. Each claim has a new
+token, so a stale worker cannot release or mark a reclaimed event delivered.
+If claim storage is unavailable, delivery fails open with the same event ID.
+Apply `migrations/add_operator_notification_claims.sql` separately; it is not
+applied by the application or this change. Keyed SMS prepares require its
+`contact_approvals.idempotency_key` column and unique index.
 
 ## Signed webhook contract
 
@@ -89,9 +102,53 @@ Both include:
   (zero until completion), `opted_out`, and `caller_last4` (string or null).
 
 Alerts never contain request text, transcript text, PHI, or full phone numbers.
-Only the last four caller digits appear. Receivers should deduplicate using
-`(event, call_id, request_id)`; final events use `(event, call_id)`. Mid-call
-and final deliveries may arrive out of order. Fetch remains authoritative.
+Only the last four caller digits appear. Every notification includes a stable
+`event_id`, also in `X-Operator-Event-Id`, and `delivery_attempt` (1 or 2).
+The event ID and attempt number are part of the exact HMAC-signed JSON body.
+GitHub comments include the same delivery identity in their fixed marker.
+
+| Event | Stable `event_id` |
+| --- | --- |
+| `operator_line.inbound_completed` | `opline:<callSid>:completed` |
+| `operator_line.request_queued` | `opline:<callSid>:request:<requestId>` |
+| `operator_line.sms_received` | `opline:sms:<messageSid>` |
+| `operator_line.voicemail_received` | `opline:vm:<recordingSid>:recording` or `opline:vm:<recordingSid>:transcript` |
+
+The voicemail discriminator is `transcript` when transcript text or a
+transcription status is available (including failed transcription); otherwise
+it is `recording`. These are separate updates to one private voicemail record.
+
+Receivers **must durably deduplicate on `event_id` before starting work**.
+A timeout/abort can occur after the receiver accepted the first POST, so the
+single retry deliberately retains its event ID. Neither the attempt number
+nor a new HTTP request is a new bot task. Mid-call and final deliveries may
+arrive out of order; fetch remains authoritative.
+
+A queued request emits both `request_queued` and `inbound_completed`. Handle
+the former as a new request; use the latter to reconcile the final request
+list and send at most one post-call confirmation. Do not start every queued
+request again from the completion event. Track processed requests by
+`callSid`/`requestId`, and key a call's confirmation on the completion
+`event_id` (or consistently on `callSid` if multiple event handlers can confirm
+the same call).
+
+For confirmation SMS, pass an optional string `idempotency_key` of at most
+200 characters to `POST /api/plugin/v1/prepare_sms`, for example
+`confirmation:opline:<callSid>:completed`. Keep it stable across bot retries
+and regenerated wording. For the same preparing token, an existing approval
+in any status except `rejected`/`cancelled` is returned with HTTP 200 and
+`deduplicated: true`; its locked payload and send outcome stay authoritative.
+The key is stored separately from that payload and its approval hash. Failed
+or unknown sends retain their keys and are never resent by replaying prepare.
+
+SMS to the exact owner cell configured in `OPERATOR_OWNER_NUMBER` skips the
+human approval step and immediately uses the existing confirm/commit send
+path. US formatting is normalized before comparison; unset or invalid owner
+settings grant no exemption. Normal SMS opt-out/DNC and calling-window checks
+still apply, along with operator opt-out. Successful owner prepares return
+the commit result (`status: "committed"`, HTTP 200). Other recipients retain
+the normal pending approval flow. Reusing an owner's SMS key returns the
+stored result without another send.
 
 To verify, preserve the **raw body bytes**, read Unix-seconds
 `X-Operator-Timestamp`, and compute HMAC-SHA256 using the shared secret over

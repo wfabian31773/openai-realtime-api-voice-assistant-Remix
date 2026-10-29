@@ -971,14 +971,19 @@ import { callEnvironment } from "./callRecord";
  * request handoff, and outbound provenance, above main's v143.
  * Apply add_operator_line_inbound.sql separately. Merged to main as #402
  * (6cac333). */
+/** v145: owner SMS exempt + notifier idempotency. Signed stable event IDs,
+ * durable notification claims and token-scoped SMS idempotency keys.
+ * Apply add_operator_notification_claims.sql separately; not applied here.
+ * Merged to main as #405 (7ad4fb8). */
 /**
  * v148 — THE TEST CALL'S OFFICE AND NAME (2026-10-29). Three defects from the
  * operator's pack-01 A1 test call: no queue prompt quotes a sample office any
  * more (the optical agent offered one when no record was found), an office
  * `resolve_location` verified on the call reaches `file_optical_ticket` when
  * the model leaves `location` out (verifiedOffice.ts), and the ask script asks
- * for the first and last name, RULE ZERO 2b's own wording. On top of v144
- * (#402, main, 6cac333). No migration; production impact remains unmeasured.
+ * for the first and last name, RULE ZERO 2b's own wording. On top of v145
+ * (#405, main, 7ad4fb8), which contains v144 (#402). No migration;
+ * production impact remains unmeasured.
  */
 /**
  * v149 — A LATER FILING ADDS TO THE TICKET (2026-10-29). Stacked on v148 in

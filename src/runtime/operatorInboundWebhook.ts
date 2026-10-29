@@ -33,7 +33,7 @@ export class OperatorInboundWebhook {
     outbound: () => Promise<OutboundStore>;
     notifier?: OperatorInboundNotifier;
     now?: () => Date;
-  }) { this.notify = deps.notifier ?? createOperatorInboundNotifier(deps.env); }
+  }) { this.notify = deps.notifier ?? createOperatorInboundNotifier(deps.env, { store: deps.store }); }
 
   private signed(req: WebhookRequest): WebhookResponse | null {
     return checkTwilioSignature(req, this.deps.env) === "valid" ? null
@@ -126,7 +126,9 @@ export class OperatorInboundWebhook {
         recordingUrl: req.body.RecordingUrl || null, transcript: req.body.TranscriptionText || null,
         transcriptionStatus: req.body.TranscriptionStatus || null, receivedAt: this.deps.now?.() ?? new Date(),
         fetchUrl: this.fetchUrl(req, `voicemail/${recordingSid}`) });
-      if (record) void this.notify(record).catch(() => undefined);
+      if (record) void this.notify({ ...record,
+        phase: req.body.TranscriptionText || req.body.TranscriptionStatus ? "transcript" : "recording",
+      }).catch(() => undefined);
       return twimlResponse(200, "");
     } catch { return { status: 503, contentType: "text/plain", body: "operator voicemail storage unavailable" }; }
   }
