@@ -36,6 +36,7 @@ import { forgetIfSameName, nameKey, rememberConfirmedClinic, rememberVerifiedIde
 import { LOOKUP_UNSURE_FILE_FIX, LOOKUP_UNSURE_FIX, LOOKUP_UNSURE_SAY, spokenFirstNameAgreesWithChart } from './lookupUnsure';
 import { appointmentAccess } from '../services/appointmentAccess';
 import { readPatientAppointments } from './patientAppointments';
+import { noteStatusOverride, patientStatusFor } from './spokenPatientStatus';
 
 import { acceptsFacility, mostRecentAcceptable, type ToolQueue } from './acceptableLocation';
 export { mostRecentAcceptable, type ToolQueue } from './acceptableLocation';
@@ -278,7 +279,6 @@ registerTool({
      * still answers. A new patient's ticket carries no match, which is correct
      * and expected rather than a gap.
      */
-    const { patientStatusFor, noteStatusOverride } = await import('./spokenPatientStatus');
     const { LANES_THAT_ASK } = await import('../runtime/newOrExistingAsk');
     // Only the way back is honoured. A model that sends `new` against the
     // schema's single value changes nothing — the store cannot hold it and this

@@ -41,6 +41,7 @@ import {
 import type { VoiceCallRecord } from "./mediaStreamBridge";
 import type { CreateTicketParams } from '../../server/services/ticketingApiClient';
 import { verifiedIdentityFor } from "../tools/verifiedIdentity";
+import { statedNameFor } from "../tools/statedName";
 
 export interface SweepOutcome {
   filed: boolean;
@@ -141,6 +142,9 @@ export async function runRequestSweep(
 ): Promise<SweepOutcome> {
   try {
     const identity = verifiedIdentityFor(record.callSid);
+    // A certain match wins. Without one, the name the caller gave, as the
+    // agent's own tools received it (operator ruling 2026-10-29).
+    const stated = identity ? undefined : statedNameFor(record.callSid);
     const input: SweepInput = {
       callSid: record.callSid,
       slug: record.slug,
@@ -164,7 +168,9 @@ export async function runRequestSweep(
       ticketAlreadyFiled: false,
       ...(identity
         ? { verifiedName: { firstName: identity.firstName, lastName: identity.lastName } }
-        : {}),
+        : stated
+          ? { verifiedName: { firstName: stated.firstName, lastName: stated.lastName }, nameSource: "stated" as const }
+          : {}),
     };
 
     const decision = decideSweep(input);
