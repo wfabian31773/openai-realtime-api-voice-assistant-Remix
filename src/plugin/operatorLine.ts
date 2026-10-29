@@ -11,6 +11,7 @@ export interface OperatorCallPayload {
   phone: string;
   purpose: string;
   callerScript: string;
+  scenarioId?: string;
   language?: string;
   maxDurationSec: number;
 }
@@ -31,7 +32,7 @@ export function parseOperatorPayload(raw: unknown):
   const fail = (error: string) => ({ ok: false as const, error });
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return fail("An operator call object is required");
   const body = raw as Record<string, unknown>;
-  const keys = new Set(["callKind", "phone", "purpose", "callerScript", "language", "maxDurationSec"]);
+  const keys = new Set(["callKind", "phone", "purpose", "callerScript", "scenarioId", "language", "maxDurationSec"]);
   if (Object.keys(body).some((key) => !keys.has(key))) return fail("Unknown operator field; patient and ticket fields are not accepted");
   if (body.callKind !== undefined && body.callKind !== "operator") return fail("Invalid callKind");
   if (typeof body.phone !== "string" || !E164.test(body.phone.trim())) return fail("phone must be E.164");
@@ -39,6 +40,9 @@ export function parseOperatorPayload(raw: unknown):
     if (typeof body[key] !== "string" || !body[key].trim() || body[key].length > 4000) {
       return fail(`${key} must contain 1 to 4000 characters`);
     }
+  }
+  if (body.scenarioId !== undefined && (typeof body.scenarioId !== "string" || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(body.scenarioId) || body.scenarioId.length > 80)) {
+    return fail("scenarioId must be a scenario name such as family-bookings");
   }
   if (body.language !== undefined && (typeof body.language !== "string" || !/^[a-z]{2,3}(?:-[A-Za-z]{2,8})?$/.test(body.language))) {
     return fail("language must be a language code such as en or es");
@@ -50,6 +54,7 @@ export function parseOperatorPayload(raw: unknown):
   return { ok: true, payload: {
     callKind: "operator", phone: body.phone.trim(), purpose: (body.purpose as string).trim(),
     callerScript: (body.callerScript as string).trim(), maxDurationSec,
+    ...(body.scenarioId ? { scenarioId: body.scenarioId as string } : {}),
     ...(body.language ? { language: body.language as string } : {}),
   } };
 }

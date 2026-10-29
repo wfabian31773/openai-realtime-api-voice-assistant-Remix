@@ -6,6 +6,7 @@
   "scripts": {
     "test": "vitest run",
     "test:watch": "vitest",
+    "operator:scenarios:check": "node --import tsx scripts/check-operator-scenarios.ts",
     "dev": "tsx watch src/server.ts",
     "build": "node scripts/write-build-info.cjs && tsc -p . && npm --prefix client run build",
     "start": "npx tsx src/server.ts",

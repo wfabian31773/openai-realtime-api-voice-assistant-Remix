@@ -7,6 +7,7 @@ import { callbackRoutingProblem, isClearTwilioRefusal, RING_TIMEOUT_SECONDS, STA
 import type { DialerLock } from "../runtime/outbound/scheduler";
 import { NOT_PLACED, type OutboundStore } from "../runtime/outbound/store";
 import { OPERATOR_SLUG, US_E164, operatorFromProblem, parseOperatorPayload } from "./operatorLine";
+import { operatorTestCommitProblem } from "./operatorTestPreapproval";
 import { evaluateAndEnqueueCall, identityFromPreparePayload, siAssistantDialingProblem, siAssistantMayDial } from "./callEnqueue";
 import { SI_ASSISTANT_SLUG, SI_ASSISTANT_CAMPAIGN_KEY, siAssistantNumber } from "./siAssistantConstants";
 import type { ContactApprovalRow, PluginStore } from "./store";
@@ -144,8 +145,9 @@ export async function placeOperatorCall(
   now: Date,
 ): Promise<LiveResult> {
   const refused = (reason: string): LiveResult => ({ ok: false, reason, mayHaveSent: false });
-  const problem = operatorFromProblem(deps.env);
+  const problem = operatorFromProblem(deps.env) || operatorTestCommitProblem(approval, deps.env, now);
   if (problem) return refused(problem);
+  const from = deps.env.OPERATOR_LINE_FROM_NUMBER!.trim();
   const parsed = parseOperatorPayload(approval.payload);
   if (!parsed.ok) return refused("invalid_operator_payload");
   const input = parsed.payload;
@@ -184,7 +186,7 @@ export async function placeOperatorCall(
     if (session.endedAt) throw new Error("operator_deadline_exceeded");
     sent = true;
     const call = await boundedCall(deps.sender.createCall({
-      to: input.phone, from: deps.env.OPERATOR_LINE_FROM_NUMBER!.trim(),
+      to: input.phone, from,
       url: `https://${domain.domain}/voice/${OPERATOR_SLUG}?${query}`,
       method: "POST", timeout: RING_TIMEOUT_SECONDS, timeLimit: input.maxDurationSec,
       statusCallback: `${statusUrl(domain.domain, OPERATOR_SLUG, contactId, attemptId)}&liveSession=${sessionId}`,

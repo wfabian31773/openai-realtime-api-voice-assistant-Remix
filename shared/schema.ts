@@ -1539,6 +1539,7 @@ export const contactApprovals = pgTable("contact_approvals", {
   confirmUsedAt: timestamp("confirm_used_at", { withTimezone: true }),
   approvedBy: varchar("approved_by", { length: 64 }),
   approvedAt: timestamp("approved_at", { withTimezone: true }),
+  preapprovalRule: jsonb("preapproval_rule"),
   rejectedBy: varchar("rejected_by", { length: 64 }),
   rejectedAt: timestamp("rejected_at", { withTimezone: true }),
   cancelledAt: timestamp("cancelled_at", { withTimezone: true }),
@@ -1551,6 +1552,7 @@ export const contactApprovals = pgTable("contact_approvals", {
   index("idx_contact_approvals_ticket").on(table.ticketNumber),
   index("idx_contact_approvals_confirm").on(table.confirmTokenHash),
   index("idx_contact_approvals_phone_key").on(table.phoneKey),
+  index("idx_contact_approvals_test_preapproval").on(table.approvedAt).where(sql`approved_by = 'test-preapproval-rule'`),
   check("contact_approvals_channel_check", sql`channel IN ('call', 'sms', 'email')`),
   check("contact_approvals_status_check", sql`status IN ('pending', 'approved', 'sending', 'rejected', 'cancelled', 'committed', 'failed', 'unknown')`),
 ]);

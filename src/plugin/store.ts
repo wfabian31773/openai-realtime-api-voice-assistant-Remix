@@ -20,6 +20,7 @@ import {
   generateConfirmToken,
   generateTokenParts,
   hashSecret,
+  hashPayload,
   isConfirmExpired,
   scopesOrDefault,
   verifyHashedSecret,
@@ -102,6 +103,8 @@ export interface ContactApprovalRow {
   confirmUsedAt: Date | null;
   approvedBy: string | null;
   approvedAt: Date | null;
+  /** Server rule provenance; contains no script, purpose or token. */
+  preapprovalRule?: OperatorTestRule | null;
   rejectedBy: string | null;
   rejectedAt: Date | null;
   cancelledAt: Date | null;
@@ -109,6 +112,13 @@ export interface ContactApprovalRow {
   result: Record<string, unknown> | null;
   createdAt: Date;
   updatedAt: Date;
+}
+
+export interface OperatorTestRule {
+  scenarioId: string;
+  scriptHash: string;
+  fromNumber: string;
+  reason: "committed-scenario-test";
 }
 
 export interface CallPayload {
@@ -153,6 +163,8 @@ export interface PluginStore {
   revokeToken(jti: string, at: Date): Promise<boolean>;
 
   insertApproval(row: ContactApprovalRow): Promise<ContactApprovalRow>;
+  /** Atomically count persisted auto-approvals and approve pending row under a global DB lock. */
+  tryApproveOperatorTest(row: ContactApprovalRow, rule: OperatorTestRule, maxApprovals: number, since: Date, now: Date): Promise<ContactApprovalRow | null>;
   getApproval(id: string): Promise<ContactApprovalRow | null>;
   listApprovals(status?: ApprovalStatus): Promise<ContactApprovalRow[]>;
   updateApproval(id: string, patch: Partial<ContactApprovalRow>, onlyIfStatus?: ApprovalStatus): Promise<ContactApprovalRow | null>;
@@ -330,6 +342,19 @@ export class MemoryPluginStore implements PluginStore {
   async insertApproval(row: ContactApprovalRow): Promise<ContactApprovalRow> {
     this.approvals.set(row.id, { ...row, payload: { ...row.payload } });
     return this.approvals.get(row.id)!;
+  }
+  async tryApproveOperatorTest(expected: ContactApprovalRow, rule: OperatorTestRule, maxApprovals: number, since: Date, now: Date): Promise<ContactApprovalRow | null> {
+    // No awaits between count and update: mirrors the SQL critical section.
+    const row = this.approvals.get(expected.id);
+    const count = [...this.approvals.values()].filter((approval) =>
+      approval.approvedBy === "test-preapproval-rule" && approval.approvedAt && approval.approvedAt > since).length;
+    if (count >= maxApprovals || !row || row.status !== "pending" || row.payloadHash !== expected.payloadHash || hashPayload(row.payload) !== expected.payloadHash ||
+        row.channel !== "call" || row.payload.callKind !== "operator") return null;
+    const confirm = issueConfirmOnApprove(now);
+    Object.assign(row, { status: "approved", approvedBy: "test-preapproval-rule", approvedAt: now,
+      preapprovalRule: { ...rule }, confirmTokenHash: confirm.hash, confirmTokenPlaintext: confirm.plaintext,
+      confirmExpiresAt: confirm.expiresAt, confirmUsedAt: null, updatedAt: now });
+    return { ...row, payload: { ...row.payload } };
   }
   async getApproval(id: string): Promise<ContactApprovalRow | null> {
     const row = this.approvals.get(id);
@@ -593,6 +618,10 @@ export function publicApproval(row: ContactApprovalRow): Record<string, unknown>
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
     approvedAt: row.approvedAt?.toISOString() ?? null,
+    ...(row.approvedBy === "test-preapproval-rule" && row.preapprovalRule ? {
+      autoApproved: true, approvedBy: row.approvedBy,
+      scenarioId: row.preapprovalRule.scenarioId, approvalReason: row.preapprovalRule.reason,
+    } : {}),
     rejectedAt: row.rejectedAt?.toISOString() ?? null,
     cancelledAt: row.cancelledAt?.toISOString() ?? null,
     committedAt: row.committedAt?.toISOString() ?? null,

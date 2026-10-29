@@ -1,7 +1,7 @@
 /**
- * The approval gate. Nothing leaves this fleet until a human approves a
- * pending contact_approvals row and commit_contact consumes a 5-minute
- * single-use token minted at approve.
+ * The approval gate. Contacts require human approval; the optional standing
+ * operator-test rule can approve its narrow test lane on the server. Both
+ * paths require a 5-minute single-use confirmation token at commit.
  */
 
 import { dncKey } from "../runtime/outbound/store";

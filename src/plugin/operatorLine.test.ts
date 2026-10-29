@@ -1,4 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { OPERATOR_SCENARIO_DIRECTORY } from "./operatorScenarios";
 import type { Express, RequestHandler } from "express";
 import { MemoryPluginStore } from "./store";
 import { mountPluginApi } from "./routes";
@@ -29,6 +32,7 @@ afterEach(() => {
   vi.restoreAllMocks();
   vi.useRealTimers();
 });
+
 async function boot() {
   const clock = { at: new Date(OPEN) };
   const store = new MemoryPluginStore();
@@ -347,5 +351,132 @@ describe("approval-gated Wayne operator line", () => {
     exec.mockResolvedValue([{ session_id: record.sessionId, approval_id: record.approvalId, token_jti: record.tokenJti, call_sid: record.callSid,
       status: record.status, started_at: record.startedAt.toISOString(), ended_at: record.endedAt.toISOString(), turns: JSON.stringify(record.turns) }]);
     expect(await store.getOperatorCall("session")).toEqual(record);
+  });
+});
+
+const COMMITTED_SCRIPT = readFileSync(join(OPERATOR_SCENARIO_DIRECTORY, "family-bookings.md"), "utf8");
+const TEST_INPUT = { ...INPUT, callerScript: COMMITTED_SCRIPT, scenarioId: "family-bookings" };
+async function preapprovalBoot() {
+  const h = await boot();
+  h.env.OPERATOR_TEST_PREAPPROVAL_ENABLED = "true";
+  h.clock.at = new Date("2026-10-24T19:00:00Z"); // Saturday noon PDT
+  return h;
+}
+
+describe("standing operator-test pre-approval HTTP flow", () => {
+  it("auto-approves without granting approve and preserves owner-only confirmation, commit and durable transcripts", async () => {
+    const h = await preapprovalBoot();
+    const scopes = ["fleet:read", "contacts:prepare", "contacts:commit", "calls:direct", "operator:call"];
+    const bot = h.store.mint(scopes);
+    expect(mintScopesCompatible(bot.scopes).ok).toBe(true);
+    expect(mintScopesCompatible([...bot.scopes, "contacts:approve"]).ok).toBe(false);
+    const prep = await h.request("/prepare_operator_call", TEST_INPUT, bot);
+    expect(prep).toMatchObject({ status: 201, body: { status: "auto_approved", approval: {
+      status: "approved", autoApproved: true, approvedBy: "test-preapproval-rule", scenarioId: "family-bookings", maskedNumber: "***5435",
+      approvalReason: "committed-scenario-test",
+    } } });
+    expect(h.sender.createCall).not.toHaveBeenCalled();
+    const id = prep.body.approval.id;
+    const row = (await h.store.getApproval(id))!;
+    expect(row).toMatchObject({ approvedBy: "test-preapproval-rule", preapprovalRule: {
+      scenarioId: "family-bookings", fromNumber: h.env.OPERATOR_LINE_FROM_NUMBER, reason: "committed-scenario-test",
+    } });
+    expect(row.confirmTokenHash).toMatch(/^[a-f0-9]{64}$/);
+    expect(row.confirmExpiresAt!.getTime() - h.clock.at.getTime()).toBe(CONFIRM_TTL_MS);
+    for (const secret of [PHONE, COMMITTED_SCRIPT.trim(), bot.plaintext, row.confirmTokenPlaintext!]) {
+      expect(JSON.stringify(prep.body)).not.toContain(secret);
+    }
+    expect((await h.request(`/approvals/${id}/approve`, { payloadHash: row.payloadHash }, bot)).status).toBe(403);
+    expect((await h.request(`/contact_requests/${id}/confirm_token`)).status).toBe(404);
+    const handoff = await h.request(`/contact_requests/${id}/confirm_token`, undefined, bot);
+    expect(handoff.status).toBe(200);
+    expect((await h.request(`/contact_requests/${id}/confirm_token`, undefined, bot)).status).toBe(409);
+    const live = await h.request("/commit_call_live", { confirmToken: handoff.body.confirmToken }, bot);
+    expect(live.status).toBe(200);
+    expect((await h.request("/commit_call_live", { confirmToken: handoff.body.confirmToken }, bot)).status).toBe(409);
+    expect(h.sender.createCall).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ to: PHONE, from: h.env.OPERATOR_LINE_FROM_NUMBER, timeLimit: 600 }));
+    const turns = [{ role: "agent" as const, text: "Synthetic test complete", atMs: h.clock.at.getTime() }];
+    h.sessions.finishTranscript(live.body.callSid, turns);
+    await h.sessions.get(live.body.sessionId)!.persistence;
+    h.sessions.clear();
+    const transcript = await h.request(`/calls/${live.body.sessionId}/transcript`, undefined, bot);
+    expect(transcript).toMatchObject({ status: 200, body: { transcript: [{ role: "agent", text: turns[0].text }] } });
+    expect((await h.store.getApproval(id))!.preapprovalRule).toEqual(row.preapprovalRule);
+    const audit = await h.store.listAudit();
+    expect(audit).toContainEqual(expect.objectContaining({ tool: "prepare_operator_call", outcome: "approved", approvalId: id }));
+    for (const secret of [PHONE, INPUT.purpose, COMMITTED_SCRIPT.trim(), bot.plaintext, handoff.body.confirmToken, turns[0].text]) {
+      expect(JSON.stringify(audit)).not.toContain(secret);
+    }
+    expect((await h.store.findToken(bot.jti))!.scopes).toEqual(scopes);
+    expect(bot.scopes).not.toContain("contacts:approve");
+  });
+
+  it.each(["disabled", "free-text", "wrong-scenario", "non-allowlisted", "peak", "cap"])("keeps %s requests pending for normal human approval", async (condition) => {
+    const h = await preapprovalBoot(); let input = { ...TEST_INPUT };
+    if (condition === "disabled") delete h.env.OPERATOR_TEST_PREAPPROVAL_ENABLED;
+    if (condition === "free-text") input.callerScript = INPUT.callerScript;
+    if (condition === "wrong-scenario") input.scenarioId = "spanish";
+    if (condition === "non-allowlisted") input.phone = "+15555550123";
+    if (condition === "peak") h.clock.at = new Date("2026-10-23T19:00:00Z");
+    if (condition === "cap") {
+      h.env.OPERATOR_TEST_MAX_AUTO_APPROVALS = "1";
+      expect((await h.request("/prepare_operator_call", TEST_INPUT)).body.status).toBe("auto_approved");
+    }
+    const prep = await h.request("/prepare_operator_call", input);
+    expect(prep).toMatchObject({ status: 201, body: { status: "pending_approval", approval: { status: "pending" } } });
+    expect(prep.body.approval).not.toHaveProperty("autoApproved");
+    const row = (await h.store.getApproval(prep.body.approval.id))!;
+    expect(row.approvedBy).toBeNull();
+    expect(row.confirmTokenHash).toBeNull();
+    expect((await h.request(`/contact_requests/${row.id}/confirm_token`)).status).toBe(409);
+    expect((await h.request(`/approvals/${row.id}/approve`, { payloadHash: row.payloadHash }, h.staff)).status).toBe(200);
+    expect((await h.store.getApproval(row.id))!.approvedBy).toBe(h.staff.jti);
+    expect(h.sender.createCall).not.toHaveBeenCalled();
+  });
+
+  it("retains the existing 503 with no request when the caller number is unset", async () => {
+    const h = await preapprovalBoot(); delete h.env.OPERATOR_LINE_FROM_NUMBER;
+    expect((await h.request("/prepare_operator_call", TEST_INPUT)).status).toBe(503);
+    expect(h.store.approvals.size).toBe(0);
+    expect(h.sender.createCall).not.toHaveBeenCalled();
+  });
+
+  it.each(["kill-switch", "peak", "caller-id", "allowlist"])("rechecks %s before consuming an auto-approved confirmation", async (condition) => {
+    const h = await preapprovalBoot();
+    h.env.OPERATOR_TEST_ALLOWLIST = "+15555550123";
+    const prep = await h.request("/prepare_operator_call", { ...TEST_INPUT, phone: "+15555550123" });
+    const id = prep.body.approval.id;
+    const handoff = await h.request(`/contact_requests/${id}/confirm_token`);
+    if (condition === "kill-switch") h.env.OPERATOR_TEST_PREAPPROVAL_ENABLED = "false";
+    if (condition === "peak") h.clock.at = new Date("2026-10-26T19:00:00Z");
+    if (condition === "caller-id") h.env.OPERATOR_LINE_FROM_NUMBER = "+15555550101";
+    if (condition === "allowlist") delete h.env.OPERATOR_TEST_ALLOWLIST;
+    expect((await h.request("/commit_call_live", { confirmToken: handoff.body.confirmToken })).status).toBe(503);
+    expect((await h.store.getApproval(id))!.confirmUsedAt).toBeNull();
+    expect(h.sender.createCall).not.toHaveBeenCalled();
+  });
+
+  it("retains opt-out and payload hash validation on auto-approved calls", async () => {
+    const h = await preapprovalBoot();
+    for (const guard of ["hash", "opt-out"]) {
+      const prep = await h.request("/prepare_operator_call", TEST_INPUT);
+      const id = prep.body.approval.id;
+      const handoff = await h.request(`/contact_requests/${id}/confirm_token`);
+      if (guard === "hash") h.store.approvals.get(id)!.payload.callerScript = "tampered";
+      if (guard === "opt-out") await h.store.setOperatorOptOut(PHONE);
+      expect((await h.request("/commit_call_live", { confirmToken: handoff.body.confirmToken })).status).toBe(guard === "hash" ? 503 : 409);
+    }
+    expect(h.sender.createCall).not.toHaveBeenCalled();
+  });
+
+  it("still rejects mixed human/bot tokens and client-supplied rule overrides", async () => {
+    const h = await preapprovalBoot();
+    for (const token of [h.staff, h.store.mint(["operator:call", "contacts:approve"])]) {
+      expect((await h.request("/prepare_operator_call", TEST_INPUT, token)).status).toBe(403);
+    }
+    for (const field of ["approvedBy", "preapprovalRule", "allowlist", "fromNumber", "autoApproved"]) {
+      expect((await h.request("/prepare_operator_call", { ...TEST_INPUT, [field]: "override" })).status).toBe(400);
+    }
+    expect(h.store.approvals.size).toBe(0);
   });
 });

@@ -9,6 +9,7 @@
 import type { Express, NextFunction, Request, Response } from "express";
 import { hasScope, mintScopesCompatible, type PluginScope } from "./scopes";
 import { isOperatorPayload, operatorFromProblem } from "./operatorLine";
+import { operatorTestCommitProblem, preapproveOperatorTest } from "./operatorTestPreapproval";
 import { pluginWritesEnabled } from "./writesEnabled";
 import { parseBearerToken, type VerifiedPluginToken } from "./tokens";
 import { verifyStoredToken, publicApproval, approvalForApprover, type ContactApprovalRow, type PluginStore } from "./store";
@@ -201,11 +202,14 @@ export function mountPluginApi(app: Express, deps: PluginApiDeps): void {
     const problem = operatorFromProblem(envOf(deps));
     if (problem) { jsonError(res, 503, problem); return; }
     try {
+      const now = (deps.now ?? (() => new Date()))();
       const result = await prepareContact(deps.store, req.pluginAuth!.jti,
-        { channel: "call", payload: req.body }, (deps.now ?? (() => new Date()))(), "operator");
+        { channel: "call", payload: req.body }, now, "operator");
       if (!result.ok) { jsonError(res, result.status, result.error); return; }
-      res.status(201).json({ status: "pending_approval", approval: publicApproval(result.approval) });
-      await audit(deps, req.pluginAuth, req, "prepare_operator_call", "pending_approval", 201, { approvalId: result.approval.id });
+      const approval = await preapproveOperatorTest(deps.store, result.approval, envOf(deps), now);
+      const autoApproved = approval.approvedBy === "test-preapproval-rule";
+      res.status(201).json({ status: autoApproved ? "auto_approved" : "pending_approval", approval: publicApproval(approval) });
+      await audit(deps, req.pluginAuth, req, "prepare_operator_call", autoApproved ? "approved" : "pending_approval", 201, { approvalId: approval.id });
     } catch { jsonError(res, 503, "Operator request storage is unavailable"); }
   });
 
@@ -369,7 +373,7 @@ export function mountPluginApi(app: Express, deps: PluginApiDeps): void {
           jsonError(res, 403, `Bot scope ${needed} is required`); return;
         }
         if (operator) {
-          const problem = operatorFromProblem(envOf(deps));
+          const problem = operatorFromProblem(envOf(deps)) || operatorTestCommitProblem(row, envOf(deps), now);
           if (problem) { jsonError(res, 503, problem); return; }
         }
       }

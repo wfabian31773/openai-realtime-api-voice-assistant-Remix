@@ -7,6 +7,7 @@
 import type { PluginAuditEntry } from "./audit";
 import { sanitizeAuditEntry } from "./audit";
 import { parseScopes } from "./scopes";
+import { issueConfirmOnApprove } from "./store";
 import type {
   ApiTokenRow,
   ApprovalStatus,
@@ -56,6 +57,8 @@ function approvalFrom(r: Record<string, unknown>): ContactApprovalRow {
     confirmUsedAt: r.confirm_used_at ? new Date(String(r.confirm_used_at)) : null,
     approvedBy: (r.approved_by as string | null) ?? null,
     approvedAt: r.approved_at ? new Date(String(r.approved_at)) : null,
+    ...(r.preapproval_rule ? { preapprovalRule: (typeof r.preapproval_rule === "string"
+      ? JSON.parse(r.preapproval_rule) : r.preapproval_rule) as ContactApprovalRow["preapprovalRule"] } : {}),
     rejectedBy: (r.rejected_by as string | null) ?? null,
     rejectedAt: r.rejected_at ? new Date(String(r.rejected_at)) : null,
     cancelledAt: r.cancelled_at ? new Date(String(r.cancelled_at)) : null,
@@ -184,6 +187,14 @@ export function createSqlPluginStore(exec: SqlExec): PluginStore {
         ],
       );
       return rows[0] ? approvalFrom(rows[0]) : row;
+    },
+    async tryApproveOperatorTest(row, rule, maxApprovals, since, now) {
+      const confirm = issueConfirmOnApprove(now);
+      // One DB invocation: the function locks, then counts with a fresh snapshot.
+      const rows = await exec(`SELECT * FROM approve_operator_test_call($1,$2,$3::jsonb,$4::jsonb,$5,$6,$7,$8,$9,$10)`,
+        [row.id, row.payloadHash, JSON.stringify(row.payload), JSON.stringify(rule), maxApprovals,
+          since.toISOString(), now.toISOString(), confirm.hash, confirm.plaintext, confirm.expiresAt.toISOString()]);
+      return rows[0] ? approvalFrom(rows[0]) : null;
     },
     async getApproval(id) {
       const rows = await exec("SELECT * FROM contact_approvals WHERE id = $1 LIMIT 1", [id]);

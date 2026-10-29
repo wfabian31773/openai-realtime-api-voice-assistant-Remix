@@ -1,6 +1,6 @@
 # Wayne operator line
 
-A human approves each call before a bot places it. This uses the Support Desk / Support Center **Pending bot actions** contract already implemented by the fleet: `GET /approvals` returns the complete locked payload and `payloadHash`, and a human posts that hash to approve. The Support Desk UI lives in the ticketing application, outside this repository. Operator requests appear as `channel: "call"`, `callKind: "operator"` with no ticket. Its existing call path approves without committing and does not require a ticket, so the preparing bot can fetch the confirmation afterward.
+A human approves each call by default before a bot places it. An optional, disabled-by-default [test pre-approval rule](test-preapproval.md) lets the server approve allowlisted committed test scenarios outside peak hours within a persistent quota. Human review uses the Support Desk / Support Center **Pending bot actions** contract already implemented by the fleet: `GET /approvals` returns the complete locked payload and `payloadHash`, and a human posts that hash to approve. The Support Desk UI lives in the ticketing application, outside this repository. Operator requests appear as `channel: "call"`, `callKind: "operator"` with no ticket. Its existing call path approves without committing and does not require a ticket, so the preparing bot can fetch the confirmation afterward.
 
 The checked ticketing UI currently previews only `purpose` for calls. Until that separate application displays `payload.callerScript`, `language` and `maxDurationSec`, the human must review the complete request through `GET /approvals` before approving. The API workflow below supports that full review today. No staff permissions or ticketing-app files are changed here.
 
@@ -37,7 +37,7 @@ All paths below are relative to `/api/plugin/v1`.
 
 Mint the bot explicitly, for example `npm run plugin:token -- --label wayne-operator --scopes fleet:read,operator:call`. The default remains `fleet:read`. Never give the bot `contacts:approve`; minting that scope alongside any bot write scope is rejected. Existing staff scopes are unchanged. Even an incorrectly stored mixed human/operator token cannot prepare, approve, commit or steer an operator call. `commit_contact` refuses operator confirmations without consuming them.
 
-Prepare accepts only `phone` (E.164), `purpose` (1..4000 characters), `callerScript` (1..4000), optional `language` (e.g. `en`, `es`), and optional `maxDurationSec`. It rejects patient fields, ticket fields, unknown keys, and out-of-range durations. The server adds `callKind: "operator"` to the hashed payload.
+Prepare accepts only `phone` (E.164), `purpose` (1..4000 characters), `callerScript` (1..4000), optional `scenarioId` (committed scenario filename without `.md`), optional `language` (e.g. `en`, `es`), and optional `maxDurationSec`. It rejects patient fields, ticket fields, unknown keys, and out-of-range durations. The server adds `callKind: "operator"` to the hashed payload.
 
 ## Run a synthetic scenario
 
@@ -52,7 +52,7 @@ curl -sS "$FLEET_BASE/api/plugin/v1/prepare_operator_call" \
   --data-binary @/tmp/operator-prepare.json
 ```
 
-Prepare returns `pending_approval` and an approval ID. It does not place a call. The human reviews the Pending bot actions entry (including script and duration), then approves its exact `payloadHash`:
+Prepare normally returns `pending_approval` and an approval ID. It does not place a call. If the test rule returns `auto_approved`, the bot proceeds directly to the confirmation handoff below. Otherwise the human reviews the Pending bot actions entry (including script and duration), then approves its exact `payloadHash`:
 
 ```bash
 curl -sS "$FLEET_BASE/api/plugin/v1/approvals?status=pending" \
