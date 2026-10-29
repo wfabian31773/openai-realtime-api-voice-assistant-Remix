@@ -969,14 +969,17 @@ import { callEnvironment } from "./callRecord";
  * v142 (#399, main, adf8dad); v137 is #391, v138 is #376 and v139 is #384 on
  * their open branches. No migration; production impact remains unmeasured.
  */
+/** v144: open Grok Bot operator conversations, owner recognition, background
+ * request handoff, and outbound provenance, above main's v143.
+ * Apply add_operator_line_inbound.sql separately. */
 /**
- * v144 — RECORDS QUESTION GUARD (2026-10-29). Records access and status
+ * v147 — RECORDS QUESTION GUARD (2026-10-29). Records access and status
  * explanations stay in Medical Records; results-meaning questions stay
  * clinical. Refused prescriptions no longer count as records requests.
- * On top of v143 (#401, main, 2c3c5fa). No migration; production impact remains unmeasured.
+ * On top of v144 (#402, main), which contains v143; v145 is #391 and v146 is #384 on their open branches. No migration; production impact remains unmeasured.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v144-records-question-guard-20261029";
+  "voice-runtime-v147-records-question-guard-20261029";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

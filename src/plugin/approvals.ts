@@ -6,7 +6,7 @@
 
 import { dncKey } from "../runtime/outbound/store";
 import { prepareDobFromPayload } from "./callEnqueue";
-import { parseOperatorPayload, US_E164 } from "./operatorLine";
+import { parseOperatorPayload, operatorApprovalRequired, US_E164, type OperatorCallPayload } from "./operatorLine";
 import { hashPayload, hashSecret, isConfirmExpired } from "./tokens";
 import {
   issueConfirmOnApprove,
@@ -113,9 +113,10 @@ export async function prepareContact(
   input: PrepareInput,
   now = new Date(),
   callKind?: "operator",
+  env: Record<string, string | undefined> = process.env,
 ): Promise<GateResult> {
   const picked = callKind === "operator"
-    ? parseOperatorPayload(input.payload)
+    ? parseOperatorPayload(input.payload, env)
     : pickPreparePayload(input.channel, input.payload as unknown as Record<string, unknown>);
   if (!picked.ok) return { ok: false, status: 400, error: picked.error };
   const payload = { ...picked.payload } as Record<string, unknown>;
@@ -152,8 +153,16 @@ export async function prepareContact(
     createdAt: now,
     updatedAt: now,
   };
+  // Operator bots declare provenance. Owner requests and calls to the owner
+  // need no approval tap; all unspecified provenance defaults to bot initiative.
+  const automatic = callKind === "operator" && !operatorApprovalRequired(picked.payload as OperatorCallPayload, env);
+  const confirm = automatic ? issueConfirmOnApprove(now) : null;
+  if (confirm) Object.assign(row, {
+    status: "approved", confirmTokenHash: confirm.hash, confirmTokenPlaintext: confirm.plaintext,
+    confirmExpiresAt: confirm.expiresAt,
+  });
   const approval = await store.insertApproval(row);
-  return { ok: true, approval };
+  return { ok: true, approval, ...(confirm ? { confirmToken: confirm.plaintext } : {}) };
 }
 
 export async function approveContact(

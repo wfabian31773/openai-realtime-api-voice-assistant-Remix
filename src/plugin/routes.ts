@@ -8,6 +8,7 @@
 
 import type { Express, NextFunction, Request, Response } from "express";
 import { hasScope, mintScopesCompatible, type PluginScope } from "./scopes";
+import { operatorLineEnabled } from "./operatorLineSettings";
 import { isOperatorPayload, operatorFromProblem } from "./operatorLine";
 import { pluginWritesEnabled } from "./writesEnabled";
 import { parseBearerToken, type VerifiedPluginToken } from "./tokens";
@@ -196,16 +197,59 @@ export function mountPluginApi(app: Express, deps: PluginApiDeps): void {
     requireScope("contacts:commit")(req, res, next);
   };
 
+  app.get(`${v1}/operator-line/inbound/:callSid`, requireAuth, requireScope("operator:call"), requireBot, async (req: AuthedRequest, res) => {
+    res.setHeader("Cache-Control", "no-store");
+    try {
+      const record = await deps.store.getOperatorInboundCall(req.params.callSid);
+      if (!record || record.laneSlug !== "wayne-operator" || record.direction !== "inbound") {
+        jsonError(res, 404, "Operator inbound call not found");
+        await audit(deps, req.pluginAuth, req, "operator_inbound_transcript", "denied", 404);
+        return;
+      }
+      res.json({ callId: record.callId, callSid: record.callSid, direction: record.direction, status: record.status,
+        startedAt: record.startedAt.toISOString(), endedAt: record.endedAt?.toISOString() ?? null,
+        callerNumber: record.callerNumber, queuedRequests: record.queuedRequests, optedOut: record.optedOut,
+        transcript: record.turns.map((turn) => ({ role: turn.role, text: turn.text, at: new Date(turn.atMs).toISOString() })) });
+      await audit(deps, req.pluginAuth, req, "operator_inbound_transcript", "ok", 200);
+    } catch {
+      jsonError(res, 503, "Operator inbound storage is unavailable");
+      await audit(deps, req.pluginAuth, req, "operator_inbound_transcript", "error", 503);
+    }
+  });
+
+  for (const kind of ["sms", "voicemail"] as const) {
+    const param = kind === "sms" ? "messageSid" : "recordingSid";
+    app.get(`${v1}/operator-line/${kind}/:${param}`, requireAuth, requireScope("operator:call"), requireBot, async (req: AuthedRequest, res) => {
+      res.setHeader("Cache-Control", "no-store");
+      const tool = kind === "sms" ? "operator_inbound_sms" : "operator_inbound_voicemail";
+      try {
+        const record = kind === "sms" ? await deps.store.getOperatorSms(req.params[param]) : await deps.store.getOperatorVoicemail(req.params[param]);
+        if (!record) {
+          jsonError(res, 404, "Operator message not found");
+          await audit(deps, req.pluginAuth, req, tool, "denied", 404);
+          return;
+        }
+        res.json(record);
+        await audit(deps, req.pluginAuth, req, tool, "ok", 200);
+      } catch {
+        jsonError(res, 503, "Operator message storage is unavailable");
+        await audit(deps, req.pluginAuth, req, tool, "error", 503);
+      }
+    });
+  }
+
   app.post(`${v1}/prepare_operator_call`, requireAuth, requireScope("operator:call"), requireBot, requireWrites, async (req: AuthedRequest, res) => {
     res.setHeader("Cache-Control", "no-store");
     const problem = operatorFromProblem(envOf(deps));
     if (problem) { jsonError(res, 503, problem); return; }
     try {
+      if (!(await operatorLineEnabled(envOf(deps), deps.store))) { jsonError(res, 503, "Operator line is disabled"); return; }
       const result = await prepareContact(deps.store, req.pluginAuth!.jti,
-        { channel: "call", payload: req.body }, (deps.now ?? (() => new Date()))(), "operator");
+        { channel: "call", payload: req.body }, (deps.now ?? (() => new Date()))(), "operator", envOf(deps));
       if (!result.ok) { jsonError(res, result.status, result.error); return; }
-      res.status(201).json({ status: "pending_approval", approval: publicApproval(result.approval) });
-      await audit(deps, req.pluginAuth, req, "prepare_operator_call", "pending_approval", 201, { approvalId: result.approval.id });
+      res.status(201).json({ status: result.confirmToken ? "approved" : "pending_approval", approval: publicApproval(result.approval),
+        ...(result.confirmToken ? { confirmToken: result.confirmToken, expiresAt: result.approval.confirmExpiresAt?.toISOString() } : {}) });
+      await audit(deps, req.pluginAuth, req, "prepare_operator_call", result.confirmToken ? "approved" : "pending_approval", 201, { approvalId: result.approval.id });
     } catch { jsonError(res, 503, "Operator request storage is unavailable"); }
   });
 
@@ -221,7 +265,7 @@ export function mountPluginApi(app: Express, deps: PluginApiDeps): void {
     try { record = await deps.store.getOperatorCall(req.params.id); }
     catch { jsonError(res, 503, "Operator transcript storage is unavailable"); return; }
     if (!record || record.tokenJti !== req.pluginAuth!.jti) { jsonError(res, 404, "Operator call not found"); return; }
-    res.json({ sessionId: record.sessionId, callSid: record.callSid, status: record.status,
+    res.json({ sessionId: record.sessionId, initiated_by: record.initiatedBy, callSid: record.callSid, status: record.status,
       startedAt: record.startedAt.toISOString(), endedAt: record.endedAt?.toISOString() ?? null,
       transcript: record.turns.map((turn) => ({ role: turn.role, text: turn.text, at: new Date(turn.atMs).toISOString() })),
       nextAfter: record.turns.length - 1 });
@@ -369,6 +413,7 @@ export function mountPluginApi(app: Express, deps: PluginApiDeps): void {
           jsonError(res, 403, `Bot scope ${needed} is required`); return;
         }
         if (operator) {
+          if (!(await operatorLineEnabled(envOf(deps), deps.store))) { jsonError(res, 503, "Operator line is disabled"); return; }
           const problem = operatorFromProblem(envOf(deps));
           if (problem) { jsonError(res, 503, problem); return; }
         }

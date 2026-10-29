@@ -38,6 +38,8 @@ export interface CallEntry {
   callerPhone: string;
   dialedNumber: string;
   createdAtMs: number;
+  /** Per-call retention for long operator conversations. */
+  retentionMs?: number;
   streamStarted: boolean;
   outcome: CallOutcome | null;
   /**
@@ -49,6 +51,8 @@ export interface CallEntry {
   outbound?: { campaignKey: string; contactId: string; attemptId: string };
   /** Marks live calls even after their ephemeral registry entry expires. */
   liveSessionId?: string;
+  /** Set only by the signed, number-gated operator inbound webhook. */
+  operatorInbound?: true;
 }
 
 /** How long a webhook-issued entry may wait for its stream and its after-
@@ -58,6 +62,10 @@ const DEFAULT_ENTRY_TTL_MS = 30 * 60 * 1000;
 
 export class CallSessionRegistry {
   private readonly entries = new Map<string, CallEntry>();
+  // Transcript ownership outlives the redirect's read-and-remove of entries.
+  // Release only after persistence succeeds; expiry must not turn a claimed
+  // operator call into an unclaimed call while its final write is pending.
+  private readonly pendingOperatorInboundStreams = new Set<string>();
 
   constructor(
     private readonly ttlMs: number = DEFAULT_ENTRY_TTL_MS,
@@ -87,6 +95,8 @@ export class CallSessionRegistry {
     dialedNumber: string;
     outbound?: CallEntry["outbound"];
     liveSessionId?: string;
+    operatorInbound?: true;
+    retentionMs?: number;
   }): CallEntry {
     this.sweep();
     const existing = this.entries.get(input.callSid);
@@ -98,10 +108,12 @@ export class CallSessionRegistry {
       callerPhone: input.callerPhone,
       dialedNumber: input.dialedNumber,
       createdAtMs: this.now(),
+      ...(input.retentionMs ? { retentionMs: input.retentionMs } : {}),
       streamStarted: false,
       outcome: null,
       ...(input.outbound ? { outbound: { ...input.outbound } } : {}),
       ...(input.liveSessionId ? { liveSessionId: input.liveSessionId } : {}),
+      ...(input.operatorInbound ? { operatorInbound: true as const } : {}),
     };
     this.entries.set(input.callSid, entry);
     return entry;
@@ -123,7 +135,16 @@ export class CallSessionRegistry {
     if (!timingSafeEqualString(entry.streamToken, streamToken)) return null;
     if (entry.streamStarted) return null;
     entry.streamStarted = true;
+    if (entry.operatorInbound) this.pendingOperatorInboundStreams.add(callSid);
     return entry;
+  }
+
+  hasPendingOperatorInboundStream(callSid: string): boolean {
+    return this.pendingOperatorInboundStreams.has(callSid);
+  }
+
+  releaseOperatorInboundStream(callSid: string): void {
+    this.pendingOperatorInboundStreams.delete(callSid);
   }
 
   /** First writer wins — teardown races cannot flip a recorded outcome. */
@@ -148,9 +169,9 @@ export class CallSessionRegistry {
   }
 
   private sweep(): void {
-    const cutoff = this.now() - this.ttlMs;
+    const now = this.now();
     for (const [callSid, entry] of this.entries) {
-      if (entry.createdAtMs < cutoff) this.entries.delete(callSid);
+      if (entry.createdAtMs < now - (entry.retentionMs ?? this.ttlMs)) this.entries.delete(callSid);
     }
   }
 }
