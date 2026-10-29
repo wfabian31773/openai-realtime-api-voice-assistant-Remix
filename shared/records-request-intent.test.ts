@@ -644,4 +644,10 @@ describe('records line: Codex round on 88122c5', () => {
   });
   it.each(['How can I get a copy of my MRI?', 'Can I get a copy of my file?', 'Where can I get a copy of my chart?'])(
     'a first-person copy-access question stays records: %s', (q) => expect(recordsLinePurpose(q)).toBe('records'));
+  it.each(['I need to order contacts', 'I need a new contact lens'])(
+    'contact orders stay optical: %s', (q) => expect(recordsLinePurpose(q)).toBe('optical'));
+  it('a booking problem is not a cancellation', () => {
+    expect(recordsLineRedirect('I cannot make an appointment online')).toMatchObject({ requestReasonId: 146 });
+    expect(recordsLineRedirect("I can't make my appointment tomorrow")).toMatchObject({ requestReasonId: 148 });
+  });
 });

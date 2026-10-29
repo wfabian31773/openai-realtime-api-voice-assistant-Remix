@@ -115,7 +115,8 @@ function schedulingCue(t: string) {
 
 function schedulingReason(t: string): readonly [number, string] | null {
   if (/\b(?:same.day|seen today|get in today|squeeze me in|earlier appointment|sooner appointment|move my appointment up|cita para hoy|hoy mismo)\b/.test(t)) return [151, 'Same-Day Appointment Request'];
-  if (/\b(?:cancel\w*|cannot make|can't make)\b/.test(t)) return [148, 'Cancel Appointment'];
+  // "Cannot make an appointment online" is a booking problem, not a cancel.
+  if (/\b(?:cancel\w*|(?:cannot|can't) make(?! (?:an?|new|any)\b))\b/.test(t)) return [148, 'Cancel Appointment'];
   if (/\b(?:reschedul\w*|change|move|mover|reprogram\w*|cambiar)\b/.test(t)) return [147, 'Reschedule Existing Appointment'];
   if (/\b(?:confirm\w*|what time|when is|is my appointment)\b/.test(t)) return [149, 'Appointment Confirmation Call'];
   if (/\b(?:openings|availability|next available|what times do you have|disponibilidad|que horarios)\b/.test(t)) return [150, 'Appointment Availability Inquiry'];
@@ -166,7 +167,7 @@ export function recordsLinePurpose(text: string): RecordsLinePurpose {
   if (/\b(?:referral|referido|autorizacion)\b/.test(request)) return 'referral';
   if (/\b(?:payer|payor|health plan|vendor|insurance|eligibility|claim)\b/.test(request)) return 'professional';
   if (PRESCRIPTION_ACTION.test(request) || prescriptionFulfillment(request)) return 'clinical';
-  if (/\b(?:glasses|frames?|contact lenses|eyeglasses|lentes|gafas)\b/.test(request)) return 'optical';
+  if (/\b(?:glasses|frames?|contacts|contact lens(?:es)?|eyeglasses|lentes|gafas)\b/.test(request)) return 'optical';
   if (MEDICATION.test(request) || /\b(?:prescription|receta|results?)\b/.test(request)) return 'clinical';
   if (BILLING.test(request)) return 'billing';
   if (/\b(?:surgery|surgical) cent(?:er|re)s?\b/.test(request)) return 'surgery';
