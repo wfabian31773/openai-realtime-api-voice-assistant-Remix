@@ -32,7 +32,7 @@ describe("operator inbound notifier", () => {
     await notify({ messageSid: `SM${"a".repeat(32)}`, body: "PRIVATE SMS CONTENT", callerNumber: record.callerNumber,
       receivedAt: record.startedAt, fetchUrl: "https://fleet.example/api/plugin/v1/operator-line/sms/SMabc" });
     await notify({ recordingSid: `RE${"b".repeat(32)}`, callSid: record.callSid, recordingUrl: "https://recording.example/PRIVATE", transcript: "PRIVATE VOICEMAIL CONTENT",
-      transcriptionStatus: "completed", receivedAt: record.startedAt, fetchUrl: "https://fleet.example/api/plugin/v1/operator-line/voicemail/REabc" });
+      transcriptionStatus: "completed", phase: "transcript", receivedAt: record.startedAt, fetchUrl: "https://fleet.example/api/plugin/v1/operator-line/voicemail/REabc" });
     const payloads = request.mock.calls.map(([, init]) => JSON.parse(init!.body as string));
     expect(payloads[0]).toEqual({ event: "operator_line.sms_received", event_id: `opline:sms:SM${"a".repeat(32)}`, delivery_attempt: 1, message_sid: `SM${"a".repeat(32)}`,
       message_url: "https://fleet.example/api/plugin/v1/operator-line/sms/SMabc", caller_last4: "0123" });
@@ -189,10 +189,10 @@ describe("operator inbound notifier", () => {
     await notify(sms);
     await notify(sms);
     const voicemail = { recordingSid: "RE-synthetic", callSid: record.callSid, recordingUrl: "https://private.example/recording",
-      transcript: null, transcriptionStatus: null, receivedAt: record.startedAt, fetchUrl: "https://fleet.example/vm" };
+      transcript: null, transcriptionStatus: null, phase: "recording" as const, receivedAt: record.startedAt, fetchUrl: "https://fleet.example/vm" };
     await notify(voicemail);
-    await notify({ ...voicemail, transcript: "PRIVATE", transcriptionStatus: "completed" });
-    await notify({ ...voicemail, transcript: "PRIVATE", transcriptionStatus: "completed" });
+    await notify({ ...voicemail, transcript: "PRIVATE", transcriptionStatus: "completed", phase: "transcript" });
+    await notify({ ...voicemail, transcript: "PRIVATE", transcriptionStatus: "completed", phase: "transcript" });
     expect(request.mock.calls.map(([, init]) => JSON.parse(init!.body as string).event_id)).toEqual([
       `opline:${record.callSid}:request:request-a`, `opline:${record.callSid}:request:request-b`,
       `opline:${record.callSid}:completed`, "opline:sms:SM-synthetic", "opline:vm:RE-synthetic:recording", "opline:vm:RE-synthetic:transcript",

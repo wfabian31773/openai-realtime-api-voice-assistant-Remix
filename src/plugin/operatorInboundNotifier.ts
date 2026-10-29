@@ -2,7 +2,8 @@ import { createHmac } from "node:crypto";
 import type { OperatorInboundCallRecord, OperatorSmsRecord, OperatorVoicemailRecord, PluginStore } from "./store";
 
 type Env = Record<string, string | undefined>;
-export type OperatorInboundRecord = OperatorInboundCallRecord | OperatorSmsRecord | OperatorVoicemailRecord;
+export type OperatorInboundRecord = OperatorInboundCallRecord | OperatorSmsRecord
+  | (OperatorVoicemailRecord & { phase: "recording" | "transcript" });
 export type OperatorInboundNotifier = (record: OperatorInboundRecord, requestId?: string) => Promise<void>;
 
 export function operatorInboundSignature(secret: string, timestamp: string, rawBody: string): string {
@@ -12,7 +13,7 @@ export function operatorInboundSignature(secret: string, timestamp: string, rawB
 /** Explicit allowlist: never spread the stored record into a notification. */
 export function operatorInboundPayload(record: OperatorInboundRecord, requestId?: string, deliveryAttempt = 1) {
   const eventId = "messageSid" in record ? `opline:sms:${record.messageSid}`
-    : "recordingSid" in record ? `opline:vm:${record.recordingSid}:${record.transcript !== null || record.transcriptionStatus !== null ? "transcript" : "recording"}`
+    : "recordingSid" in record ? `opline:vm:${record.recordingSid}:${record.phase}`
     : requestId ? `opline:${record.callSid}:request:${requestId}` : `opline:${record.callSid}:completed`;
   const delivery = { event_id: eventId, delivery_attempt: deliveryAttempt };
   if ("messageSid" in record) return {

@@ -187,6 +187,22 @@ export async function prepareContact(
   return { ok: true, approval, ...(confirm ? { confirmToken: confirm.plaintext } : {}) };
 }
 
+/** Claim an automatic owner send, including a prepare interrupted before commit. */
+export async function claimAutomaticSmsApproval(
+  store: PluginStore,
+  approval: ContactApprovalRow,
+  now: Date,
+  env: Record<string, string | undefined>,
+): Promise<ContactApprovalRow | null> {
+  if (approval.channel !== "sms" || approval.status !== "approved" || approval.approvedBy !== null
+    || approval.confirmUsedAt || !ownerSmsApprovalExempt(approval.payload.phone, env)) return null;
+  // Automatic approval needs no human token handoff. The status guard races
+  // safely with another prepare or token commit, even after token expiry.
+  return store.updateApproval(approval.id, {
+    status: "sending", confirmUsedAt: now, confirmTokenPlaintext: null, updatedAt: now,
+  }, "approved");
+}
+
 export async function approveContact(
   store: PluginStore,
   id: string,

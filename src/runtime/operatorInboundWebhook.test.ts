@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import twilio from "twilio";
 import { MemoryPluginStore } from "../plugin/store";
+import { createOperatorInboundNotifier } from "../plugin/operatorInboundNotifier";
 import { FakeOutboundStore } from "./outbound/store.testkit";
 import { CallSessionRegistry } from "./sessionRegistry";
 import { OPERATOR_INBOUND_PATH, OPERATOR_SMS_PATH, OPERATOR_FALLBACK_PATH, OPERATOR_VOICEMAIL_PATH, OperatorInboundWebhook } from "./operatorInboundWebhook";
@@ -148,6 +149,10 @@ describe("signed operator inbound admission and completion", () => {
 
   it.each([false, true])("merges recording/transcription callbacks in either order, deduplicates and saves accepted recordings after a kill (%s)", async (transcriptFirst) => {
     const h = boot();
+    const request = vi.fn<typeof fetch>().mockResolvedValue(new Response(null, { status: 204 }));
+    h.notifier.mockImplementation(createOperatorInboundNotifier({ OPERATOR_INBOUND_NOTIFIER: "webhook",
+      OPERATOR_INBOUND_WEBHOOK_URL: "https://bot.example/handoff", OPERATOR_INBOUND_WEBHOOK_SECRET: "synthetic-secret" },
+    { fetch: request, store: () => h.store, log: vi.fn() }));
     await h.service.fallback(signed({}, OPERATOR_FALLBACK_PATH));
     await h.store.setOperatorLineEnabled(false, "staff");
     const recordingSid = `RE${"a".repeat(32)}`;
@@ -155,12 +160,18 @@ describe("signed operator inbound admission and completion", () => {
     const transcript = signed({ RecordingSid: recordingSid, TranscriptionText: "PRIVATE transcript", TranscriptionStatus: "completed" }, OPERATOR_VOICEMAIL_PATH);
     for (const req of transcriptFirst ? [transcript, recording] : [recording, transcript]) {
       expect((await h.service.voicemail(req)).status).toBe(200);
+      await h.notifier.mock.results[h.notifier.mock.results.length - 1].value;
     }
     expect(await h.store.getOperatorVoicemail(recordingSid)).toMatchObject({ callSid: CALL_SID, recordingSid,
       recordingUrl: recording.body.RecordingUrl, transcript: "PRIVATE transcript", transcriptionStatus: "completed" });
     expect(h.notifier).toHaveBeenCalledTimes(2);
+    const phases = transcriptFirst ? ["transcript", "recording"] : ["recording", "transcript"];
+    expect(request.mock.calls.map(([, init]) => JSON.parse(init!.body as string).event_id)).toEqual(
+      phases.map((phase) => `opline:vm:${recordingSid}:${phase}`),
+    );
     await h.service.voicemail(recording); await h.service.voicemail(transcript);
     expect(h.notifier).toHaveBeenCalledTimes(2);
+    expect(request).toHaveBeenCalledTimes(2);
   });
 
   it("rejects unrelated or malformed voicemail callbacks and retries storage failures", async () => {

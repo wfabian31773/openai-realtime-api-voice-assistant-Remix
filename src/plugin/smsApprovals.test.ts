@@ -135,6 +135,41 @@ describe("owner SMS exemption and prepare idempotency", () => {
     expect(h.store.audit[h.store.audit.length - 1]?.outcome).toBe("deduplicated");
   });
 
+  it.each(["unexpired", "expired", "handed-off"])("resumes an interrupted automatic owner send exactly once (%s confirm token)", async (state) => {
+    const h = boot();
+    const prepared = await prepareContact(h.store, h.bot.jti,
+      { channel: "sms", payload: { ...SMS, idempotency_key: "interrupted" } },
+      new Date(NOW.getTime() - (state === "expired" ? 10 * 60_000 : 0)), undefined, h.env);
+    if (!prepared.ok) throw new Error(prepared.error);
+    if (state === "expired") await h.store.purgeExpiredConfirmTokens(NOW);
+    if (state === "handed-off") await h.store.takeConfirmToken(prepared.approval.id, h.bot.jti, NOW);
+    expect((await h.store.getApproval(prepared.approval.id))!.status).toBe("approved");
+
+    const responses = await Promise.all(Array.from({ length: 8 }, () => h.post({
+      phone: "+16265550124", body: "Changed replay text", idempotency_key: "interrupted",
+    })));
+    for (const response of responses) {
+      expect(response).toMatchObject({ status: 200, body: { deduplicated: true, approval: { id: prepared.approval.id } } });
+    }
+    expect(h.sender.send).toHaveBeenCalledOnce();
+    expect(h.sender.send.mock.calls[0][0]).toMatchObject({ to: PHONE, body: expect.stringContaining(SMS.body) });
+    expect(await h.store.getApproval(prepared.approval.id)).toMatchObject({ status: "committed", confirmUsedAt: NOW });
+    expect(await h.post({ ...SMS, idempotency_key: "interrupted" })).toMatchObject({ status: 200, body: { status: "committed", deduplicated: true } });
+    expect(h.sender.send).toHaveBeenCalledOnce();
+  });
+
+  it("does not automatically resume a human-approved owner SMS", async () => {
+    const h = boot("+16265550999");
+    const first = await h.post({ ...SMS, idempotency_key: "human-owner" });
+    const row = (await h.store.getApproval(first.body.approval.id))!;
+    await approveContact(h.store, row.id, "human-staff", NOW, row.payloadHash);
+    h.env.OPERATOR_OWNER_NUMBER = PHONE;
+    expect(await h.post({ ...SMS, idempotency_key: "human-owner" })).toMatchObject({
+      status: 200, body: { status: "approved", deduplicated: true },
+    });
+    expect(h.sender.send).not.toHaveBeenCalled();
+  });
+
   it.each([true, false])("handles racing prepares atomically (owner=%s)", async (owner) => {
     const h = boot(owner ? PHONE : "+16265550999");
     const responses = await Promise.all(Array.from({ length: 8 }, () => h.post({ ...SMS, idempotency_key: "racing" })));

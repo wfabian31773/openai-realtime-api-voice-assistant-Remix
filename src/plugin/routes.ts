@@ -16,6 +16,7 @@ import { verifyStoredToken, publicApproval, approvalForApprover, type ContactApp
 import {
   approveContact,
   cancelContact,
+  claimAutomaticSmsApproval,
   consumeConfirmToken,
   markCommitted,
   markFailed,
@@ -561,21 +562,25 @@ export function mountPluginApi(app: Express, deps: PluginApiDeps): void {
       return;
     }
     const extra = { approvalId: result.approval.id, ticketId: result.approval.ticketId };
-    if (result.deduplicated) {
-      res.status(200).json({
-        status: result.approval.status === "pending" ? "pending_approval" : result.approval.status,
-        approval: publicApproval(result.approval), deduplicated: true,
-        ...(result.approval.result ? { result: result.approval.result } : {}),
-      });
-      await audit(deps, req.pluginAuth, req, `prepare_${channel}`, "deduplicated", 200, extra);
-      return;
-    }
-    if (channel === "sms" && result.confirmToken) {
-      const committed = await commitConfirmedContact(deps, result.confirmToken, now);
-      res.status(committed.status).json(committed.body);
+    const automatic = channel === "sms"
+      ? await claimAutomaticSmsApproval(deps.store, result.approval, now, envOf(deps)) : null;
+    if (automatic) {
+      const committed = await commitClaimedContact(deps, automatic, now);
+      res.status(committed.status).json({ ...committed.body, ...(result.deduplicated ? { deduplicated: true } : {}) });
       await audit(deps, req.pluginAuth, req, `prepare_${channel}`, committed.outcome, committed.status, {
         ...extra, details: { initiatedBy: "bot", approvalExempt: true, exemptReason: "owner_number" },
       });
+      return;
+    }
+    if (result.deduplicated || result.confirmToken) {
+      // Another prepare or token commit may have won the automatic send claim.
+      const approval = await deps.store.getApproval(result.approval.id) ?? result.approval;
+      res.status(200).json({
+        status: approval.status === "pending" ? "pending_approval" : approval.status,
+        approval: publicApproval(approval), ...(result.deduplicated ? { deduplicated: true } : {}),
+        ...(approval.result ? { result: approval.result } : {}),
+      });
+      await audit(deps, req.pluginAuth, req, `prepare_${channel}`, "deduplicated", 200, extra);
       return;
     }
     res.status(201).json({ status: "pending_approval", approval: publicApproval(result.approval) });
@@ -734,13 +739,18 @@ export function mountPluginApi(app: Express, deps: PluginApiDeps): void {
   });
 }
 
-/** Both owner-exempt SMS and human-approved contacts consume the same claim and send path. */
-async function commitConfirmedContact(deps: PluginApiDeps, confirmToken: string, now: Date): Promise<{
+type ContactCommitResult = {
   status: number; body: Record<string, unknown>; outcome: PluginAuditOutcome; approval?: ContactApprovalRow;
-}> {
+};
+
+async function commitConfirmedContact(deps: PluginApiDeps, confirmToken: string, now: Date): Promise<ContactCommitResult> {
   const consumed = await consumeConfirmToken(deps.store, confirmToken, now);
   if (!consumed.ok) return { status: consumed.status, body: { error: consumed.error }, outcome: "denied" };
-  const approval = consumed.approval;
+  return commitClaimedContact(deps, consumed.approval, now);
+}
+
+/** Automatic sends and token commits share validation and send handling after claiming. */
+async function commitClaimedContact(deps: PluginApiDeps, approval: ContactApprovalRow, now: Date): Promise<ContactCommitResult> {
   if (hashPayload(approval.payload) !== approval.payloadHash) {
     await markFailed(deps.store, approval.id, { reason: "payload_hash_mismatch" }, now);
     return { status: 409, body: { error: "Approved payload no longer matches the locked hash", outcome: "not_sent" },
