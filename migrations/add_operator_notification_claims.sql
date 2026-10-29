@@ -1,7 +1,9 @@
 -- Additive and idempotent. Apply separately; never run automatically.
 CREATE TABLE IF NOT EXISTS plugin_operator_notifications (
   event_id VARCHAR PRIMARY KEY,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  -- NULL while in-flight; set only after a 2xx delivery response.
+  delivered_at TIMESTAMPTZ
 );
 ALTER TABLE plugin_operator_notifications ENABLE ROW LEVEL SECURITY;
 

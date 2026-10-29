@@ -151,6 +151,14 @@ export function createSqlPluginStore(exec: SqlExec): PluginStore {
         ON CONFLICT DO NOTHING RETURNING event_id`, [eventId]);
       return rows.length > 0;
     },
+    async markOperatorNotificationDelivered(eventId) {
+      await exec(`UPDATE plugin_operator_notifications SET delivered_at = NOW()
+        WHERE event_id = $1 AND delivered_at IS NULL`, [eventId]);
+    },
+    async releaseOperatorNotification(eventId) {
+      await exec(`DELETE FROM plugin_operator_notifications
+        WHERE event_id = $1 AND delivered_at IS NULL`, [eventId]);
+    },
     async getOperatorLineEnabled() {
       const [row] = await exec("SELECT value FROM app_settings WHERE key = 'operator_line_enabled'");
       // Missing settings use the env default. A missing table still throws/fails closed.

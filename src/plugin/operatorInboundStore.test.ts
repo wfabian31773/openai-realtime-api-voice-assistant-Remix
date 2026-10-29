@@ -14,6 +14,34 @@ describe("durable operator settings and messages", () => {
     expect(exec.mock.calls[0][1]).toEqual([eventId]);
   });
 
+  it("marks delivery separately and only releases undelivered SQL claims", async () => {
+    const eventId = "opline:sms:SM-synthetic";
+    const exec = vi.fn<SqlExec>().mockResolvedValue([]);
+    const store = createSqlPluginStore(exec);
+    await store.markOperatorNotificationDelivered(eventId);
+    await store.releaseOperatorNotification(eventId);
+    expect(exec.mock.calls[0][0]).toContain("UPDATE plugin_operator_notifications SET delivered_at = NOW()");
+    expect(exec.mock.calls[1][0]).toContain("DELETE FROM plugin_operator_notifications");
+    for (const [sql, params] of exec.mock.calls) {
+      expect(sql).toContain("WHERE event_id = $1 AND delivered_at IS NULL");
+      expect(params).toEqual([eventId]);
+    }
+  });
+
+  it("releases failed memory claims while retaining delivered events", async () => {
+    const store = new MemoryPluginStore();
+    const eventId = "opline:sms:SM-synthetic";
+    expect(await store.claimOperatorNotification(eventId)).toBe(true);
+    expect(await store.claimOperatorNotification(eventId)).toBe(false);
+    expect(store.operatorNotifications.get(eventId)).toBeNull();
+    await store.releaseOperatorNotification(eventId);
+    expect(await store.claimOperatorNotification(eventId)).toBe(true);
+    await store.markOperatorNotificationDelivered(eventId);
+    expect(store.operatorNotifications.get(eventId)).toBeInstanceOf(Date);
+    await store.releaseOperatorNotification(eventId);
+    expect(await store.claimOperatorNotification(eventId)).toBe(false);
+  });
+
   it("uses the env hard default, the persisted switch and fail-closed storage", async () => {
     const store = new MemoryPluginStore();
     for (const flag of [undefined, "false", "TRUE", "1"]) expect(await operatorLineEnabled({ OPERATOR_LINE_INBOUND_ENABLED: flag }, store)).toBe(false);

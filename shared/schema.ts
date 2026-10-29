@@ -1604,6 +1604,7 @@ export const pluginOperatorDnc = pgTable("plugin_operator_dnc", {
 export const pluginOperatorNotifications = pgTable("plugin_operator_notifications", {
   eventId: varchar("event_id").primaryKey(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  deliveredAt: timestamp("delivered_at", { withTimezone: true }),
 });
 
 export const pluginMessageOutbox = pgTable("plugin_message_outbox", {

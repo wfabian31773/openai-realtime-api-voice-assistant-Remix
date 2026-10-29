@@ -65,6 +65,8 @@ export function createOperatorInboundNotifier(env: Env, deps: {
   const request = deps.fetch ?? fetch;
   const log = deps.log ?? ((message: string) => console.info(message));
   return async (record, requestId) => {
+    let claim: { store: PluginStore; eventId: string } | null = null;
+    let delivered = false;
     // Never let a custom logger, serialization error, or network failure escape.
     try {
       if ("endedAt" in record && !record.endedAt && !requestId) return;
@@ -72,7 +74,10 @@ export function createOperatorInboundNotifier(env: Env, deps: {
       let claimed = true;
       try {
         const store = deps.store?.();
-        if (store) claimed = await store.claimOperatorNotification(basePayload.event_id);
+        if (store) {
+          claimed = await store.claimOperatorNotification(basePayload.event_id);
+          if (claimed) claim = { store, eventId: basePayload.event_id };
+        }
       } catch {
         // Migration/storage may be unavailable: receivers still have event_id.
         log("[operator-inbound] notification claim unavailable; sending");
@@ -116,14 +121,23 @@ export function createOperatorInboundNotifier(env: Env, deps: {
           // The response body may contain private provider details; never log it.
           void response.body?.cancel().catch(() => undefined);
           if (!response.ok) throw new Error("notification refused");
-          log(`[operator-inbound] notifier=${mode} delivered`);
-          return;
+          delivered = true;
+          break;
         } catch {
           if (attempt === 1) log(`[operator-inbound] notifier=${mode} failed after two attempts`);
         } finally {
           if (timer !== undefined) clearTimeout(timer);
         }
       }
+      if (delivered) log(`[operator-inbound] notifier=${mode} delivered`);
     } catch { /* best effort; the durable fetch endpoint remains available */ }
+    finally {
+      if (claim) {
+        try {
+          if (delivered) await claim.store.markOperatorNotificationDelivered(claim.eventId);
+          else await claim.store.releaseOperatorNotification(claim.eventId);
+        } catch { /* best effort if storage is unavailable */ }
+      }
+    }
   };
 }

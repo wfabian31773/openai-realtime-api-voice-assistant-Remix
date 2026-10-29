@@ -111,10 +111,12 @@ describe("operator inbound notifier", () => {
   });
 
   it("retries once on failure and logs no provider error, transcript or phone", async () => {
+    const store = new MemoryPluginStore();
     const request = vi.fn<typeof fetch>().mockRejectedValue(new Error(`private: ${record.callerNumber} PRIVATE`));
     const log = vi.fn();
-    await expect(createOperatorInboundNotifier(webhookEnv, { fetch: request, log })(record)).resolves.toBeUndefined();
+    await expect(createOperatorInboundNotifier(webhookEnv, { fetch: request, store: () => store, log })(record)).resolves.toBeUndefined();
     expect(request).toHaveBeenCalledTimes(2);
+    expect(store.operatorNotifications.has(`opline:${record.callSid}:completed`)).toBe(false);
     expect(log).toHaveBeenCalledWith("[operator-inbound] notifier=webhook failed after two attempts");
     expect(JSON.stringify(log.mock.calls)).not.toMatch(/PRIVATE|15555550123/);
   });
@@ -126,6 +128,43 @@ describe("operator inbound notifier", () => {
     await createOperatorInboundNotifier(webhookEnv, { fetch: request, log })(record);
     expect(request).toHaveBeenCalledTimes(2);
     expect(log).toHaveBeenCalledWith("[operator-inbound] notifier=webhook delivered");
+  });
+
+  it("releases the claim after two 503s so a later callback can deliver once", async () => {
+    const store = new MemoryPluginStore();
+    const markDelivered = vi.spyOn(store, "markOperatorNotificationDelivered");
+    const release = vi.spyOn(store, "releaseOperatorNotification");
+    const eventId = `opline:${record.callSid}:completed`;
+    const request = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(new Response(null, { status: 503 }))
+      .mockResolvedValueOnce(new Response(null, { status: 503 }))
+      .mockResolvedValue(new Response(null, { status: 204 }));
+    const log = vi.fn();
+    const notify = () => createOperatorInboundNotifier(webhookEnv, { fetch: request, store: () => store, log })(record);
+
+    await notify();
+    expect(request).toHaveBeenCalledTimes(2);
+    expect(log).not.toHaveBeenCalledWith("[operator-inbound] notifier=webhook delivered");
+    expect(markDelivered).not.toHaveBeenCalled();
+    expect(release).toHaveBeenCalledExactlyOnceWith(eventId);
+    expect(store.operatorNotifications.has(eventId)).toBe(false);
+
+    await notify();
+    expect(request).toHaveBeenCalledTimes(3);
+    expect(log.mock.calls.filter(([message]) => message === "[operator-inbound] notifier=webhook delivered")).toHaveLength(1);
+    expect(markDelivered).toHaveBeenCalledExactlyOnceWith(eventId);
+    expect(store.operatorNotifications.get(eventId)).toBeInstanceOf(Date);
+
+    await notify();
+    expect(request).toHaveBeenCalledTimes(3);
+    expect(markDelivered).toHaveBeenCalledOnce();
+    expect(release).toHaveBeenCalledOnce();
+    expect(log).toHaveBeenCalledWith("[operator-inbound] duplicate suppressed");
+    expect(request.mock.calls.map(([, init]) => JSON.parse(init!.body as string))).toEqual([
+      operatorInboundPayload(record, undefined, 1),
+      operatorInboundPayload(record, undefined, 2),
+      operatorInboundPayload(record, undefined, 1),
+    ]);
   });
 
   it("reuses the event ID and claim on timeout retry, signs both attempt numbers and suppresses later deliveries", async () => {
@@ -158,12 +197,41 @@ describe("operator inbound notifier", () => {
     } finally { vi.useRealTimers(); }
   });
 
-  it("claims once across concurrent notify calls", async () => {
+  it("blocks concurrent duplicates while each delivery attempt is in flight", async () => {
     const store = new MemoryPluginStore();
+    const eventId = `opline:${record.callSid}:completed`;
+    const replies: Array<(response: Response) => void> = [];
+    const request = vi.fn<typeof fetch>().mockImplementation(() => new Promise((resolve) => replies.push(resolve)));
+    const notify = createOperatorInboundNotifier(webhookEnv, { fetch: request, store: () => store, log: vi.fn() });
+    const work = notify(record);
+    await vi.waitFor(() => expect(request).toHaveBeenCalledOnce());
+    expect(store.operatorNotifications.get(eventId)).toBeNull();
+    await notify(record);
+    expect(request).toHaveBeenCalledOnce();
+
+    replies[0](new Response(null, { status: 503 }));
+    await vi.waitFor(() => expect(request).toHaveBeenCalledTimes(2));
+    expect(store.operatorNotifications.get(eventId)).toBeNull();
+    await notify(record);
+    expect(request).toHaveBeenCalledTimes(2);
+
+    replies[1](new Response(null, { status: 204 }));
+    await work;
+    expect(store.operatorNotifications.get(eventId)).toBeInstanceOf(Date);
+    await notify(record);
+    expect(request).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not resend or release a successful delivery if marking it delivered fails", async () => {
+    const store = new MemoryPluginStore();
+    vi.spyOn(store, "markOperatorNotificationDelivered").mockRejectedValue(new Error("PRIVATE database error"));
+    const release = vi.spyOn(store, "releaseOperatorNotification");
     const request = vi.fn<typeof fetch>().mockResolvedValue(new Response(null, { status: 204 }));
     const notify = createOperatorInboundNotifier(webhookEnv, { fetch: request, store: () => store, log: vi.fn() });
-    await Promise.all([notify(record), notify(record)]);
+    await expect(notify(record)).resolves.toBeUndefined();
+    await notify(record);
     expect(request).toHaveBeenCalledOnce();
+    expect(release).not.toHaveBeenCalled();
   });
 
   it.each(["missing", "throw"])("fails open with stable IDs when claim storage is %s", async (mode) => {
@@ -202,12 +270,14 @@ describe("operator inbound notifier", () => {
   it("bounds both attempts even if the transport ignores AbortSignal", async () => {
     vi.useFakeTimers();
     try {
+      const store = new MemoryPluginStore();
       const request = vi.fn<typeof fetch>().mockImplementation(() => new Promise(() => {}));
-      const work = createOperatorInboundNotifier(webhookEnv, { fetch: request, timeoutMs: 20, log: vi.fn() })(record);
+      const work = createOperatorInboundNotifier(webhookEnv, { fetch: request, store: () => store, timeoutMs: 20, log: vi.fn() })(record);
       await vi.advanceTimersByTimeAsync(40);
       await expect(work).resolves.toBeUndefined();
       expect(request).toHaveBeenCalledTimes(2);
       expect((request.mock.calls[0][1]!.signal as AbortSignal).aborted).toBe(true);
+      expect(store.operatorNotifications.has(`opline:${record.callSid}:completed`)).toBe(false);
     } finally { vi.useRealTimers(); }
   });
 

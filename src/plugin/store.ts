@@ -189,8 +189,12 @@ export interface EmailPayload {
 export type ContactPayload = CallPayload | SmsPayload | EmailPayload;
 
 export interface PluginStore {
-  /** Atomic, durable first delivery wins. Retries reuse the original claim. */
+  /** Atomic claim blocks in-flight and delivered duplicates. Retries reuse it. */
   claimOperatorNotification(eventId: string): Promise<boolean>;
+  /** Retain the claim permanently only after a successful delivery. */
+  markOperatorNotificationDelivered(eventId: string): Promise<void>;
+  /** Release an undelivered claim after all delivery attempts fail. */
+  releaseOperatorNotification(eventId: string): Promise<void>;
   getOperatorLineEnabled(): Promise<boolean>;
   setOperatorLineEnabled(enabled: boolean, updatedBy: string | null): Promise<void>;
   /** First SMS with this MessageSid wins; null means a duplicate. */
@@ -335,11 +339,18 @@ export async function verifyStoredToken(
 }
 
 export class MemoryPluginStore implements PluginStore {
-  operatorNotifications = new Set<string>();
+  // null means in-flight; a timestamp means delivered.
+  operatorNotifications = new Map<string, Date | null>();
   async claimOperatorNotification(eventId: string): Promise<boolean> {
     if (this.operatorNotifications.has(eventId)) return false;
-    this.operatorNotifications.add(eventId);
+    this.operatorNotifications.set(eventId, null);
     return true;
+  }
+  async markOperatorNotificationDelivered(eventId: string): Promise<void> {
+    if (this.operatorNotifications.get(eventId) === null) this.operatorNotifications.set(eventId, new Date());
+  }
+  async releaseOperatorNotification(eventId: string): Promise<void> {
+    if (this.operatorNotifications.get(eventId) === null) this.operatorNotifications.delete(eventId);
   }
   operatorLineEnabled = true;
   async getOperatorLineEnabled(): Promise<boolean> { return this.operatorLineEnabled; }
