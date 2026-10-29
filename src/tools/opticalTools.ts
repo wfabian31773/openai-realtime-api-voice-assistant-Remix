@@ -19,7 +19,7 @@ import { EMAIL_FIELD_DESCRIPTION, LAST_NAME_ASK, LAST_NAME_FIELD_DESCRIPTION } f
 // queue — the same three definitions Surgery uses, not copies of them.
 import { str, isTwilioCallSid, normalizePhone } from './sharedPatientTools';
 import { splitCallbackExtension } from '../utils/phone';
-import { createTicketDurable, postFailureToolResult } from '../services/durableTicketFiling';
+import { createTicketDurable, postFailureToolResult, repeatFilingFields } from '../services/durableTicketFiling';
 import { loggableLookupError } from '../services/loggableTicketingError';
 import { gateRefusalsSoFar, noteGateRefusal } from './gateAttempts';
 import { decideDobEscape, dobStatusNote, dobEscapeMarker, type DobStatus } from './dobEscape';
@@ -900,6 +900,8 @@ registerTool({
       message: redirect
         ? `Filed as ${res.ticketNumber} with our ${redirect.departmentName} team. Read the ticket number back and say that team will follow up.`
         : `Filed as ${res.ticketNumber}. Read the ticket number back to the caller.`,
+      // A repeat filing on this call answers for the ticket that exists, last.
+      ...repeatFilingFields(res),
     };
   },
 });

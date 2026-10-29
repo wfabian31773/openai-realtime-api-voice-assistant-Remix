@@ -239,6 +239,16 @@ export class TicketOutboxService {
     return { outboxId: entry.id, alreadyExists: false };
   }
 
+  /** The create-ticket parameters an outbox row holds, if it holds one. */
+  static async storedCreateParams(outboxId: string): Promise<CreateTicketParams | undefined> {
+    const [row] = await db
+      .select({ payload: ticketOutbox.payload })
+      .from(ticketOutbox)
+      .where(eq(ticketOutbox.id, outboxId))
+      .limit(1);
+    return row && isCreateTicketPayload(row.payload) ? row.payload.params : undefined;
+  }
+
   static async attemptSend(outboxId: string, options: { liveCaller?: boolean } = {}): Promise<OutboxSendResult> {
     /**
      * THE BACKOFF HAS TO BE PART OF THE CLAIM — Codex, PR #244.

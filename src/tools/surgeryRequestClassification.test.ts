@@ -5,6 +5,7 @@ const lookup = vi.fn();
 vi.mock('../services/durableTicketFiling', () => ({
   createTicketDurable: (...args: unknown[]) => create(...args),
   postFailureToolResult: (r: unknown) => r,
+  repeatFilingFields: () => ({}),
 }));
 vi.mock('../../server/services/ticketingApiClient', () => ({
   ticketingApiClient: { lookupProviderAndLocation: (...args: unknown[]) => lookup(...args) },

@@ -299,6 +299,13 @@ function summarizeResult(tool: string, resultJson: string): Record<string, unkno
     // `form_applies: false`, so "how often is a routed-away caller offered a
     // link" is a count, not a transcript scan. A boolean, no PHI.
     'form_applies',
+    // v146: a filing on a call that had already filed (`already_filed`) and
+    // whether its details reached the ticket (`details_added`). Two booleans,
+    // no PHI. The A1 test call's second filing was invisible in the timeline
+    // but for its 101 ms; with these, how often a later filing adds something
+    // is a count.
+    'already_filed',
+    'details_added',
     /**
      * WHY escalate_to_human was refused (one of the gate's three codes) and
      * whether the refusal FILED the ticket (2026-09-29). Both PHI-free. Until

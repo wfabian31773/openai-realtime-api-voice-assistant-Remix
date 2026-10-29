@@ -980,8 +980,17 @@ import { callEnvironment } from "./callRecord";
  * for the first and last name, RULE ZERO 2b's own wording. On top of v144
  * (#402, main, 6cac333). No migration; production impact remains unmeasured.
  */
+/**
+ * v146 — A LATER FILING ADDS TO THE TICKET (2026-10-29). Stacked on v145 in
+ * one PR; only v146 reaches a deployment. A filing on a call that has already
+ * filed used to be answered from the call's outbox row and sent nowhere; it is
+ * now sent on with the call's own key so the ticketing app adds its details
+ * to the ticket (ticketing-app #414), and the tool tells the model what
+ * happened instead of "read the ticket number back" a second time. No
+ * migration; production impact remains unmeasured.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v145-the-test-calls-office-and-name-20261029";
+  "voice-runtime-v146-a-later-filing-adds-to-the-ticket-20261029";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

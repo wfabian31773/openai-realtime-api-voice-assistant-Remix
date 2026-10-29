@@ -34,6 +34,7 @@ import { ticketingApiClient } from '../../server/services/ticketingApiClient';
 import { loggableTicketingError } from './loggableTicketingError';
 // One-way edge: the registry does not import this module, the tools import both.
 import { getTool } from '../tools/registry';
+import { createHash } from 'node:crypto';
 import type { CreateTicketParams, CreateTicketResponse } from '../../server/services/ticketingApiClient';
 
 export interface DurableCreateResult extends CreateTicketResponse {
@@ -48,7 +49,18 @@ export interface DurableCreateResult extends CreateTicketResponse {
    * `postFailureToolResult`, which is where the schema that decides is known.
    */
   missingField?: string;
+  /** This call had already filed this ticket; the answer names that ticket. */
+  alreadyFiled?: boolean;
+  /** What happened to what the repeat carried — see `forwardRepeatFiling`. */
+  addition?: RepeatAddition;
 }
+
+/**
+ * - `added`: the ticketing app put this filing's details on the ticket.
+ * - `nothing_new`: the same request as before, or an addition already sent.
+ * - `not_confirmed`: sent or queued, and the app did not say it landed.
+ */
+export type RepeatAddition = 'added' | 'nothing_new' | 'not_confirmed';
 
 /**
  * A REFUSAL IS NOT AN OUTAGE, and putting one in the outbox would be the worse
@@ -128,6 +140,117 @@ export function missingFieldFromError(error?: string): string | undefined {
 }
 
 /**
+ * A LATER FILING ON THE SAME CALL CARRIES SOMETHING, AND IT USED TO BE DROPPED.
+ *
+ * The outbox row for a call's key is `sent` once its ticket exists, and every
+ * later filing on that call was answered from it — the first ticket's number,
+ * with no POST — so whatever the later filing carried reached nobody. Measured
+ * on the runtime, 2026-10-20..28, optical + surgery + tech + records: 254 calls
+ * ran a second successful filing, 218 of them after the caller spoke again,
+ * and in eight sampled calls the agent had told the caller it was adding
+ * something (a second callback number, a pharmacy change, the doctor's name,
+ * "can they also text?"). On the operator's pack-01 A1 test call
+ * (`CAe121c3c176d626e8a679536788e58d63`) it was the office.
+ *
+ * Now a later filing that differs from what the row holds is sent on, through
+ * the outbox under its own row (`<key>-add-<fingerprint>`, so a repeat of the
+ * same addition is one row) but with the call's own idempotency key on the
+ * payload, which is what makes the ticketing app treat it as the same
+ * request: it adds the details to the ticket (ticketing-app #414) and says so
+ * in `detailsAdded`. The same request again sends nothing.
+ *
+ * Never throws: the caller is told about the ticket that exists either way.
+ */
+export function filingFingerprint(p: CreateTicketParams): string {
+  const canonical = JSON.stringify([
+    (p.description ?? '').trim().replace(/\s+/g, ' '),
+    (p.patientPhone ?? '').replace(/\D/g, '').slice(-10),
+    p.priority ?? '',
+    p.locationId ?? null,
+    p.providerId ?? null,
+    (p.locationOfLastVisit ?? '').trim().toLowerCase(),
+    (p.lastProviderSeen ?? '').trim().toLowerCase(),
+    p.preferredContactMethod ?? '',
+    (p.patientEmail ?? '').trim().toLowerCase(),
+  ]);
+  return createHash('sha256').update(canonical).digest('hex').slice(0, 12);
+}
+
+async function forwardRepeatFiling(
+  params: CreateTicketParams,
+  outboxKey: string,
+  firstOutboxId: string,
+): Promise<RepeatAddition> {
+  try {
+    const { TicketOutboxService, wrapCreateTicketPayload } = await import('./ticketOutboxService');
+    const first = await TicketOutboxService.storedCreateParams(firstOutboxId);
+    const fingerprint = filingFingerprint(params);
+    if (first && filingFingerprint(first) === fingerprint) return 'nothing_new';
+
+    const write = await TicketOutboxService.writeToOutbox(
+      wrapCreateTicketPayload(params),
+      `${outboxKey}-add-${fingerprint}`,
+    );
+    if (write.alreadyExists && write.status === 'sent') return 'nothing_new';
+
+    const sent = await TicketOutboxService.attemptSend(write.outboxId, { liveCaller: true });
+    if (sent.success && sent.detailsAdded === true) return 'added';
+    if (sent.success && sent.cached === true && sent.detailsAdded === false) return 'nothing_new';
+    console.info(
+      `[TICKET OUTBOX] a later filing on this call was ${sent.success ? 'sent' : 'queued'} ` +
+        'and the ticketing app did not confirm it reached the ticket',
+    );
+    return 'not_confirmed';
+  } catch {
+    console.error('[TICKET OUTBOX] a later filing on this call could not be persisted');
+    return 'not_confirmed';
+  }
+}
+
+/**
+ * What a filing tool tells the model when the call had already filed. One
+ * copy for the four queue tools. Spread LAST over the tool's success result,
+ * so its `message` replaces the "read the ticket number back" line: the A1
+ * agent, handed that line a second time, told the caller "that's the same
+ * ticket" out loud.
+ */
+export function repeatFilingFields(res: DurableCreateResult): Record<string, unknown> {
+  if (!res.alreadyFiled) return {};
+  const n = res.ticketNumber;
+  if (res.addition === 'added') {
+    return {
+      already_filed: true,
+      details_added: true,
+      message: `Added to ${n}.`,
+      fix:
+        `This was added to the request already filed on this call as ${n}. Tell the caller it is ` +
+        'added to that same request. It is not a new ticket: do not read the number again unless ' +
+        'they ask, and do not call it a second or new ticket.',
+    };
+  }
+  if (res.addition === 'not_confirmed') {
+    return {
+      already_filed: true,
+      details_added: false,
+      message: `Already filed as ${n}.`,
+      fix:
+        `The request is filed as ${n}, but the ticket system did not confirm this addition reached ` +
+        'the ticket. Do not say it was added to the ticket. You may say the team will see it in the ' +
+        'record of this call. Do not file again.',
+    };
+  }
+  return {
+    already_filed: true,
+    details_added: false,
+    message: `Already filed as ${n}.`,
+    fix:
+      `This request was already filed on this call as ${n}, with these same details. Do not file ` +
+      'it again, and do not tell the caller it is the same or a second ticket. If they have not ' +
+      'heard the number yet, read it once; otherwise carry on with the call.',
+  };
+}
+
+/**
  * Persist keyed filings before posting so the staff-only note can be restored
  * even if the process stops before call finalization. Unkeyed filings retain
  * the existing POST-first path because they cannot safely be deduplicated.
@@ -147,7 +270,8 @@ export async function createTicketDurable(params: CreateTicketParams): Promise<D
       const write = await TicketOutboxService.writeToOutbox(wrapCreateTicketPayload(params), key.slice(5));
       outboxId = write.outboxId;
       if (write.alreadyExists && write.status === 'sent' && write.ticketNumber) {
-        return { success: true, ticketNumber: write.ticketNumber };
+        const addition = await forwardRepeatFiling(params, key.slice(5), write.outboxId);
+        return { success: true, ticketNumber: write.ticketNumber, alreadyFiled: true, addition };
       }
       const sent = await TicketOutboxService.attemptSend(write.outboxId, { liveCaller: true });
       if (sent.success && sent.ticketNumber) return sent;

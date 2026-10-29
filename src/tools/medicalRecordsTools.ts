@@ -40,7 +40,7 @@ import {
 import { str, isTwilioCallSid, normalizePhone } from './sharedPatientTools';
 import { splitCallbackExtension } from '../utils/phone';
 import { decideDobEscape, dobStatusNote, dobEscapeMarker, type DobStatus } from './dobEscape';
-import { createTicketDurable, postFailureToolResult } from '../services/durableTicketFiling';
+import { createTicketDurable, postFailureToolResult, repeatFilingFields } from '../services/durableTicketFiling';
 import { loggableLookupError } from '../services/loggableTicketingError';
 import { verifiedDobFor, verifiedIdentityFor } from './verifiedIdentity';
 import { spokenDobFor } from './spokenDob';
@@ -1105,6 +1105,8 @@ registerTool({
         ? `Filed as ${res.ticketNumber} with our ${redirect.departmentName} team. Read the ticket number back and say that team will follow up.`
         : formMessage ??
           `Filed as ${res.ticketNumber}. Read the ticket number back to the caller. Do not promise a date or say the records have been sent.`,
+      // A repeat filing on this call answers for the ticket that exists, last.
+      ...repeatFilingFields(res),
     };
   },
 });
