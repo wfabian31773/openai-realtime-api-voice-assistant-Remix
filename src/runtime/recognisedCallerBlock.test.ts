@@ -179,7 +179,9 @@ describe('an affirmed greeting ends the identity step', () => {
   });
 
   it('still self-destructs on a denial — a phone match is a candidate, not an identity', () => {
-    expect(BLOCK).toMatch(/If they said NO[\s\S]*ignore this block/);
+    // v140 moved the discard after the request-first instruction (Codex P1, #397);
+    // the block still self-destructs, it just says so second.
+    expect(BLOCK).toMatch(/If they said NO[\s\S]*ignore the rest of this block/);
   });
 
   it('discloses nothing on the strength of the match alone', () => {
