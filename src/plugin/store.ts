@@ -749,6 +749,11 @@ export function publicApproval(row: ContactApprovalRow): Record<string, unknown>
     id: row.id,
     channel: row.channel,
     ...(row.payload.callKind === "operator" ? { callKind: "operator", maskedNumber: `***${String(row.payload.phone).slice(-4)}` } : {}),
+    ...(row.payload.smsKind === "operator" ? {
+      smsKind: "operator", laneSlug: row.payload.laneSlug, initiated_by: row.payload.initiated_by,
+      maskedNumber: `***${String(row.payload.phone).slice(-4)}`,
+      maskedFromNumber: `***${String(row.payload.fromNumber).slice(-4)}`,
+    } : {}),
     status: row.status,
     ticketId: row.ticketId,
     ticketNumber: row.ticketNumber,

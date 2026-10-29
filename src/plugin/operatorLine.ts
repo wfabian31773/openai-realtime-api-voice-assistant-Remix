@@ -1,6 +1,7 @@
 /** Operator requests have no patient identity or ticket fields. */
 import { lookupOperatorScenario, operatorScenarioGoal } from "./operatorScenarios";
 import { SI_ASSISTANT_NUMBER_DEFAULT, siAssistantNumber } from "./siAssistantConstants";
+import { dncKey } from "../runtime/outbound/store";
 
 export const OPERATOR_SLUG = "wayne-operator";
 export const OPERATOR_DEFAULT_DURATION = 60 * 60;
@@ -90,4 +91,38 @@ export function parseOperatorPayload(raw: unknown, env: Env = process.env):
 
 export function isOperatorPayload(payload: Record<string, unknown>): boolean {
   return payload.callKind === "operator";
+}
+
+export function isOperatorSmsPayload(payload: Record<string, unknown>): boolean {
+  return payload.smsKind === "operator";
+}
+
+/** Server-owned lane/from fields cannot be supplied by the bot. */
+export function parseOperatorSmsPayload(raw: unknown, env: Env):
+  | { ok: true; payload: Record<string, unknown> }
+  | { ok: false; error: string } {
+  const fail = (error: string) => ({ ok: false as const, error });
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return fail("An operator SMS object is required");
+  const input = raw as Record<string, unknown>;
+  const keys = new Set(["to", "body", "idempotency_key", "initiated_by"]);
+  if (Object.keys(input).some((key) => !keys.has(key))) return fail("Unknown operator SMS field");
+  if (typeof input.idempotency_key !== "string" || !input.idempotency_key.trim() || input.idempotency_key.length > 200) {
+    return fail("idempotency_key must contain 1 to 200 characters");
+  }
+  const to = typeof input.to === "string" ? input.to.trim() : "";
+  const key = dncKey(to);
+  if (!key || !/^\+?[\d\s().-]+$/.test(to) || (to.startsWith("+") && !US_E164.test(`+${to.replace(/\D/g, "")}`))) {
+    return fail("to must be a valid US phone number");
+  }
+  if (typeof input.body !== "string" || !input.body.trim() || input.body.length > 4000) {
+    return fail("body must contain 1 to 4000 characters");
+  }
+  const initiatedBy = input.initiated_by === undefined ? "bot_initiative" : input.initiated_by;
+  if (initiatedBy !== "owner_request" && initiatedBy !== "bot_initiative") {
+    return fail("initiated_by must be owner_request or bot_initiative");
+  }
+  return { ok: true, payload: {
+    smsKind: "operator", laneSlug: OPERATOR_SLUG, fromNumber: env.OPERATOR_LINE_FROM_NUMBER?.trim(),
+    phone: `+1${key}`, body: input.body, initiated_by: initiatedBy,
+  } };
 }

@@ -26,7 +26,9 @@ export interface PluginAuditEntry {
   createdAt?: Date;
   details?: { maskedNumber: string; purpose: string; reason: string; approvalExempt?: never }
     | { initiatedBy: "bot"; approvalExempt: true; exemptReason: "owner_number";
-      maskedNumber?: never; purpose?: never; reason?: never };
+      maskedNumber?: never; purpose?: never; reason?: never; operatorSms?: never }
+    | { operatorSms: true; initiatedBy: "owner_request" | "bot_initiative"; maskedNumber: string;
+      approvalExempt?: never; purpose?: never; reason?: never };
 }
 
 // Purpose is arbitrary caller-provided text and may contain PHI. Keep only
@@ -66,7 +68,10 @@ export function sanitizeAuditEntry(entry: PluginAuditEntry): PluginAuditEntry {
     httpStatus: entry.httpStatus,
   };
   if (entry.details) {
-    clean.details = entry.details.approvalExempt === true ? {
+    clean.details = "operatorSms" in entry.details && entry.details.operatorSms === true ? {
+      operatorSms: true, initiatedBy: entry.details.initiatedBy === "owner_request" ? "owner_request" : "bot_initiative",
+      maskedNumber: /^\*\*\*\d{4}$/.test(entry.details.maskedNumber) ? entry.details.maskedNumber : "unknown",
+    } : entry.details.approvalExempt === true ? {
       initiatedBy: "bot", approvalExempt: true, exemptReason: "owner_number",
     } : {
       maskedNumber: /^\*\*\*\d{4}$/.test(entry.details.maskedNumber) ? entry.details.maskedNumber : "unknown",

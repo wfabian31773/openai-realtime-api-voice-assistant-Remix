@@ -6,7 +6,7 @@
 import { dncKey } from "../runtime/outbound/store";
 import { normalizePhone } from "../utils/phone";
 import { prepareDobFromPayload } from "./callEnqueue";
-import { parseOperatorPayload, operatorApprovalRequired, US_E164, type OperatorCallPayload } from "./operatorLine";
+import { parseOperatorPayload, parseOperatorSmsPayload, isOperatorSmsPayload, operatorApprovalRequired, US_E164, type OperatorCallPayload } from "./operatorLine";
 import { hashPayload, hashSecret, isConfirmExpired } from "./tokens";
 import {
   issueConfirmOnApprove,
@@ -122,7 +122,7 @@ export async function prepareContact(
   tokenJti: string,
   input: PrepareInput,
   now = new Date(),
-  callKind?: "operator",
+  callKind?: "operator" | "operator_sms",
   env: Record<string, string | undefined> = process.env,
 ): Promise<GateResult> {
   const key = input.channel === "sms" ? input.payload.idempotency_key : undefined;
@@ -131,10 +131,16 @@ export async function prepareContact(
   }
   if (key !== undefined) {
     const existing = await store.findApprovalByIdempotencyKey(tokenJti, key);
-    if (existing) return { ok: true, approval: existing, deduplicated: true };
+    if (existing) {
+      if (isOperatorSmsPayload(existing.payload) !== (callKind === "operator_sms")) {
+        return { ok: false, status: 409, error: "idempotency_key belongs to a different contact lane" };
+      }
+      return { ok: true, approval: existing, deduplicated: true };
+    }
   }
   const picked = callKind === "operator"
     ? parseOperatorPayload(input.payload, env)
+    : callKind === "operator_sms" ? parseOperatorSmsPayload(input.payload, env)
     : pickPreparePayload(input.channel, input.payload as unknown as Record<string, unknown>);
   if (!picked.ok) return { ok: false, status: 400, error: picked.error };
   const payload = { ...picked.payload } as Record<string, unknown>;
@@ -183,7 +189,12 @@ export async function prepareContact(
   });
   const approval = await store.insertApproval(row);
   // An atomic insert may have lost a race to another prepare with this key.
-  if (approval.id !== row.id) return { ok: true, approval, deduplicated: true };
+  if (approval.id !== row.id) {
+    if (isOperatorSmsPayload(approval.payload) !== (callKind === "operator_sms")) {
+      return { ok: false, status: 409, error: "idempotency_key belongs to a different contact lane" };
+    }
+    return { ok: true, approval, deduplicated: true };
+  }
   return { ok: true, approval, ...(confirm ? { confirmToken: confirm.plaintext } : {}) };
 }
 

@@ -973,8 +973,10 @@ import { callEnvironment } from "./callRecord";
 /** v145: owner SMS exempt + notifier idempotency. Signed stable event IDs,
  * durable notification claims and token-scoped SMS idempotency keys.
  * Apply add_operator_notification_claims.sql separately; not applied here. */
+/** v146: dedicated operator SMS send, with no hours/caps, owner exemption,
+ * opt-outs, durable idempotency and operator-origin commits. No new migration. */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v145-owner-sms-exempt-notifier-idempotency-20261029";
+  "voice-runtime-v146-operator-sms-send-20261029";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can
