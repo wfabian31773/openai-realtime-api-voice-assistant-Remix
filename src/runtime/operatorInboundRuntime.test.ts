@@ -20,7 +20,7 @@ import { mountVoiceRuntime, type RuntimeTransport } from "./voiceRuntime";
 import { MemoryPluginStore } from "../plugin/store";
 import { FakeOutboundStore } from "./outbound/store.testkit";
 import { OPERATOR_SLUG } from "../plugin/operatorLine";
-import { OPERATOR_INBOUND_PATH } from "./operatorInboundWebhook";
+import { OPERATOR_INBOUND_PATH, OperatorInboundWebhook } from "./operatorInboundWebhook";
 import { createOperatorLineAgent, operatorLinePolicy, OPERATOR_INBOUND_GREETING } from "../agents/operatorLineAgent";
 import type { LaneConfig } from "./laneRegistry";
 
@@ -201,6 +201,48 @@ describe("operator inbound live runtime, in process", () => {
     expect(h.fileSetupFailure).not.toHaveBeenCalled();
     const fallback = await h.post(`${OPERATOR_INBOUND_PATH}/after`, { CallSid: callSid, From: PHONE, To: TO });
     expect(fallback.body).toContain("<Record ");
+  });
+
+  it("preserves the live transcript when terminal status follows /after before persistence starts", async () => {
+    const h = boot();
+    const callSid = `CA${"b".repeat(32)}`;
+    const body = { CallSid: callSid, From: PHONE, To: TO };
+    const answer = await h.post(OPERATOR_INBOUND_PATH, body);
+    const socket = h.stream(callSid, answer.body.match(/name="token" value="([^"]+)"/)![1]);
+    await vi.waitFor(() => expect(h.provider.sent.some((event) => event.type === "session.update")).toBe(true));
+    h.provider.emit({ type: "session.updated" });
+    const text = "Please preserve my meeting request.";
+    h.provider.emit({ type: "conversation.item.input_audio_transcription.completed", item_id: "final-turn", transcript: text });
+
+    // Hold the bridge's asynchronous persistence before complete() begins,
+    // so its in-flight write deduplication cannot mask the lost claim.
+    let resume!: () => void;
+    const gate = new Promise<void>((resolve) => { resume = resolve; });
+    const complete = OperatorInboundWebhook.prototype.complete;
+    vi.spyOn(OperatorInboundWebhook.prototype, "complete").mockImplementation(async function (
+      this: OperatorInboundWebhook, ...args: Parameters<OperatorInboundWebhook["complete"]>
+    ) {
+      if (args[1].length) await gate;
+      return complete.apply(this, args);
+    });
+    const finish = vi.spyOn(h.store, "finishOperatorInboundCall");
+    try {
+      socket.close();
+      expect(h.registry.get(callSid)?.outcome).toBe("caller_hangup");
+      await h.post(`${OPERATOR_INBOUND_PATH}/after`, body);
+      expect(h.registry.get(callSid)).toBeUndefined();
+      expect((await h.post(`${OPERATOR_INBOUND_PATH}/status`, { ...body, CallStatus: "completed" })).status).toBe(204);
+      expect(finish).not.toHaveBeenCalled();
+      expect((await h.store.getOperatorInboundCall(callSid))!.endedAt).toBeNull();
+      expect(h.notify).not.toHaveBeenCalled();
+    } finally { resume(); }
+
+    await vi.waitFor(() => expect(h.notify).toHaveBeenCalledOnce());
+    const saved = await h.store.getOperatorInboundCall(callSid);
+    expect(saved).toMatchObject({ endedAt: expect.any(Date), status: "caller_hangup" });
+    expect(saved!.turns).toContainEqual(expect.objectContaining({ role: "caller", text }));
+    expect(h.notify.mock.calls[0][0].turns).toEqual(saved!.turns);
+    expect(h.registry.hasPendingOperatorInboundStream(callSid)).toBe(false);
   });
 
   it("checks the staff switch again between TwiML admission and provider setup", async () => {

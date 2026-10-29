@@ -62,6 +62,10 @@ const DEFAULT_ENTRY_TTL_MS = 30 * 60 * 1000;
 
 export class CallSessionRegistry {
   private readonly entries = new Map<string, CallEntry>();
+  // Transcript ownership outlives the redirect's read-and-remove of entries.
+  // Release only after persistence succeeds; expiry must not turn a claimed
+  // operator call into an unclaimed call while its final write is pending.
+  private readonly pendingOperatorInboundStreams = new Set<string>();
 
   constructor(
     private readonly ttlMs: number = DEFAULT_ENTRY_TTL_MS,
@@ -131,7 +135,16 @@ export class CallSessionRegistry {
     if (!timingSafeEqualString(entry.streamToken, streamToken)) return null;
     if (entry.streamStarted) return null;
     entry.streamStarted = true;
+    if (entry.operatorInbound) this.pendingOperatorInboundStreams.add(callSid);
     return entry;
+  }
+
+  hasPendingOperatorInboundStream(callSid: string): boolean {
+    return this.pendingOperatorInboundStreams.has(callSid);
+  }
+
+  releaseOperatorInboundStream(callSid: string): void {
+    this.pendingOperatorInboundStreams.delete(callSid);
   }
 
   /** First writer wins — teardown races cannot flip a recorded outcome. */

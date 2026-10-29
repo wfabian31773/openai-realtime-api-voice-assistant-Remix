@@ -164,11 +164,13 @@ export class OperatorInboundWebhook {
   async status(req: WebhookRequest): Promise<WebhookResponse> {
     const denied = this.signed(req);
     if (denied) return denied;
-    // A claimed stream owns the final transcript. Stream-stop callbacks can
-    // arrive before its teardown; they must never win with an empty snapshot.
+    // A claimed stream owns the final transcript even after /after consumes
+    // its registry entry. Call/stream status must not win with an empty
+    // snapshot while the asynchronous teardown write is still pending.
     const terminal = ["completed", "failed", "busy", "no-answer", "canceled"].includes(req.body.CallStatus)
       || ["stream-stopped", "stream-error"].includes(req.body.StreamEvent);
-    if (terminal && !this.deps.registry.get(req.body.CallSid)?.streamStarted) {
+    if (terminal && !this.deps.registry.get(req.body.CallSid)?.streamStarted
+      && !this.deps.registry.hasPendingOperatorInboundStream(req.body.CallSid)) {
       await this.complete(req.body.CallSid, [], req.body.CallStatus || "provider_failure");
     }
     return empty();
@@ -196,7 +198,10 @@ export class OperatorInboundWebhook {
   private async finish(callSid: string, turns: TranscriptTurn[], status: string, endedAt: Date): Promise<boolean> {
     try {
       const record = await this.deps.store()?.finishOperatorInboundCall(callSid, endedAt, status, turns);
-      if (record) void this.notify(record).catch(() => undefined);
+      if (record) {
+        this.deps.registry.releaseOperatorInboundStream(callSid);
+        void this.notify(record).catch(() => undefined);
+      }
       return Boolean(record);
     } catch {
       console.error("[operator-inbound] completion storage unavailable");

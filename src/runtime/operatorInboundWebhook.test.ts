@@ -268,6 +268,52 @@ describe("signed operator inbound admission and completion", () => {
     expect((await noStream.service.inbound(signed())).body).not.toContain("<Stream");
   });
 
+  it.each<Record<string, string>>([
+    { CallStatus: "completed" }, { CallStatus: "failed" }, { CallStatus: "busy" },
+    { CallStatus: "no-answer" }, { CallStatus: "canceled" },
+    { StreamEvent: "stream-stopped" }, { StreamEvent: "stream-error" },
+  ])("protects a claimed transcript after /after removes the entry (%j)", async (status) => {
+    const h = boot();
+    const response = await h.service.inbound(signed());
+    h.registry.claimStream(CALL_SID, response.body.match(/name="token" value="([^"]+)"/)![1]);
+    h.registry.recordOutcome(CALL_SID, "caller_hangup");
+    await h.service.after(signed({}, `${OPERATOR_INBOUND_PATH}/after`));
+    expect(h.registry.get(CALL_SID)).toBeUndefined();
+
+    // The redirect and terminal status beat the bridge's persistence call.
+    await h.service.status(signed(status, `${OPERATOR_INBOUND_PATH}/status`));
+    expect((await h.store.getOperatorInboundCall(CALL_SID))!.endedAt).toBeNull();
+    expect(h.notifier).not.toHaveBeenCalled();
+    const turns = [{ role: "caller" as const, text: "Please keep this conversation.", atMs: Date.now() }];
+    expect(await h.service.complete(CALL_SID, turns, "caller_hangup")).toBe(true);
+    expect(await h.store.getOperatorInboundCall(CALL_SID)).toMatchObject({ turns, status: "caller_hangup", endedAt: expect.any(Date) });
+    expect(h.registry.hasPendingOperatorInboundStream(CALL_SID)).toBe(false);
+    await h.service.status(signed(status, `${OPERATOR_INBOUND_PATH}/status`));
+    expect(h.notifier).toHaveBeenCalledOnce();
+    expect(h.notifier.mock.calls[0][0].turns).toEqual(turns);
+  });
+
+  it("keeps transcript ownership after a failed write until a retry persists it", async () => {
+    const h = boot();
+    const response = await h.service.inbound(signed());
+    h.registry.claimStream(CALL_SID, response.body.match(/name="token" value="([^"]+)"/)![1]);
+    h.registry.recordOutcome(CALL_SID, "caller_hangup");
+    await h.service.after(signed({}, `${OPERATOR_INBOUND_PATH}/after`));
+    const finish = vi.spyOn(h.store, "finishOperatorInboundCall").mockRejectedValueOnce(new Error("unavailable"));
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    const turns = [{ role: "caller" as const, text: "Save this after the outage.", atMs: Date.now() }];
+    try {
+      expect(await h.service.complete(CALL_SID, turns, "caller_hangup")).toBe(false);
+      await h.service.status(signed({ CallStatus: "completed" }, `${OPERATOR_INBOUND_PATH}/status`));
+      expect(finish).toHaveBeenCalledTimes(1);
+      expect((await h.store.getOperatorInboundCall(CALL_SID))!.endedAt).toBeNull();
+      expect(await h.service.complete(CALL_SID, turns, "caller_hangup")).toBe(true);
+      expect(await h.store.getOperatorInboundCall(CALL_SID)).toMatchObject({ turns });
+      expect(h.registry.hasPendingOperatorInboundStream(CALL_SID)).toBe(false);
+      expect(h.notifier).toHaveBeenCalledOnce();
+    } finally { log.mockRestore(); }
+  });
+
   it.each([PHONE, "+442079460123"])("uses the outbound DNC mechanism for opt-out (%#)", async (phone) => {
     const h = boot(); await h.service.inbound(signed({ From: phone }));
     const optOut = h.service.tools(CALL_SID).find((t) => t.name === "opt_out_of_calls")!;
