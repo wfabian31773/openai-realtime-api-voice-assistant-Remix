@@ -122,15 +122,18 @@ function storesTheRuntimeHolds(): Set<string> {
  * `import('./x').SomeType` — loads nothing and is not counted; `.then(`,
  * `.catch(` and `.finally(` are runtime and are.
  */
-function runtimeImportTargets(file: string): string[] {
-  const source = withoutComments(readFileSync(file, 'utf8'));
+function runtimeImportSpecifiers(source: string): string[] {
   const out: string[] = [];
-  for (const m of source.matchAll(/\bimport\(\s*['"](\.[^'"]+)['"]\s*\)(\s*\.\s*([A-Za-z_$][\w$]*))?/g)) {
+  for (const m of withoutComments(source).matchAll(/\bimport\(\s*['"](\.[^'"]+)['"]\s*\)(\s*\.\s*([A-Za-z_$][\w$]*))?/g)) {
     const member = m[3];
     if (member && !['then', 'catch', 'finally'].includes(member)) continue;
-    out.push(resolveSpec(file, m[1]));
+    out.push(m[1]);
   }
   return out;
+}
+
+function runtimeImportTargets(file: string): string[] {
+  return runtimeImportSpecifiers(readFileSync(file, 'utf8')).map((spec) => resolveSpec(file, spec));
 }
 
 const rel = (p: string) => p.slice(SRC.length + 1);
@@ -163,6 +166,19 @@ describe('a per-call store the runtime writes is imported one way', () => {
     expect(runtimeImportTargets(join(SRC, 'services/afterHoursEscalationGate.ts')).map(rel)).not.toContain(
       'services/symptomCorroboration',
     );
+  });
+
+  it('the scan reads all three shapes: await, .then(), and a type position it skips', () => {
+    expect(
+      runtimeImportSpecifiers(
+        [
+          "const a = await import('./awaited');",
+          "import('./chained').then((m) => m.go());",
+          "let t: import('./typeOnly').Shape;",
+          "// await import('./commented')",
+        ].join('\n'),
+      ),
+    ).toEqual(['./awaited', './chained']);
   });
 
   it('the four filing tools read the spoken date of birth through a static import', () => {
