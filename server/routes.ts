@@ -11,6 +11,8 @@ import multer from "multer";
 import { parse } from "csv-parse/sync";
 import { getTwilioClient, getTwilioFromPhoneNumber } from "../src/lib/twilioClient";
 import { priceVoiceCall } from '../src/services/callCostService';
+import { mountOperatorLineSettings } from './operatorLineSettings';
+import { boundPluginStore } from '../src/plugin/bindings';
 
 // Hybrid authentication middleware - supports both Replit Auth and custom auth
 const isAuthenticated = (req: Request, res: Response, next: NextFunction) => {
@@ -62,6 +64,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
   
   // New custom auth routes (login, register, invite, password reset)
   app.use('/api/auth', authRouter);
+
+  mountOperatorLineSettings(app, { authenticate: isAuthenticated, admin: requireRole('admin'),
+    store: boundPluginStore, env: process.env });
 
   // ==================== Observatory (docs/observatory/) ====================
   // OBS-0 health: proves both data planes before any widget ships — this

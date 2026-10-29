@@ -988,6 +988,9 @@ import { callEnvironment } from "./callRecord";
  * v142 (#399, main, adf8dad); v137 is #391, v138 is #376 and v139 is #384 on
  * their open branches. No migration; production impact remains unmeasured.
  */
+/** v144: open Grok Bot operator conversations, owner recognition, background
+ * request handoff, and outbound provenance, above main's v143.
+ * Apply add_operator_line_inbound.sql separately. */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
   "voice-runtime-v146-identity-gate-20261029";
 

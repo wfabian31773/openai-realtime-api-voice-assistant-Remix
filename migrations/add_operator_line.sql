@@ -1,8 +1,9 @@
 -- Additive only. Do not run automatically; apply separately to the Hub.
 -- Existing approval rows use channel='call', payload.callKind='operator'.
--- Scripts stay in the approved payload; transcripts never enter audit logs.
+-- Goals stay in the locked payload; transcripts never enter audit logs.
 CREATE TABLE IF NOT EXISTS plugin_operator_calls (
   session_id VARCHAR(64) PRIMARY KEY,
+  initiated_by VARCHAR(16) NOT NULL DEFAULT 'bot_initiative' CHECK (initiated_by IN ('owner_request', 'bot_initiative')),
   approval_id VARCHAR(64) NOT NULL,
   token_jti VARCHAR(32) NOT NULL,
   call_sid VARCHAR(64),

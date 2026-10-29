@@ -120,6 +120,7 @@ export class LiveCallRegistry {
   persist(session: LiveCallSession): Promise<void> {
     if (!session.persist || !session.approvalId) return Promise.resolve();
     const record: OperatorCallRecord = {
+      initiatedBy: session.operatorCall?.initiated_by ?? "bot_initiative",
       sessionId: session.sessionId, approvalId: session.approvalId, tokenJti: session.tokenJti,
       callSid: session.callSid, status: session.status, startedAt: session.startedAt, endedAt: session.endedAt,
       turns: (session.controls?.turns() ?? session.turns).map((turn) => ({ ...turn })),
@@ -142,6 +143,7 @@ export class LiveCallRegistry {
     const turns = session.controls?.turns() ?? session.turns;
     return {
       status: session.status, callSid: session.callSid,
+      ...(session.operatorCall ? { initiated_by: session.operatorCall.initiated_by ?? "bot_initiative" } : {}),
       startedAt: session.startedAt.toISOString(), endedAt: session.endedAt?.toISOString() ?? null,
       transcript: turns.slice(after + 1).map((turn) => ({ role: turn.role, text: turn.text, at: new Date(turn.atMs).toISOString() })),
       nextAfter: turns.length - 1,

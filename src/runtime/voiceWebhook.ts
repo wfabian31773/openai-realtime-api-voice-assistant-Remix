@@ -47,7 +47,7 @@
 import twilio from "twilio";
 import { computeRuntimeReadiness } from "./readiness";
 import type { CallOutcome } from "./mediaStreamBridge";
-import type { CallSessionRegistry } from "./sessionRegistry";
+import type { CallEntry, CallSessionRegistry } from "./sessionRegistry";
 
 export const VOICE_PATH_PREFIX = "/voice";
 export const VOICE_STREAM_PATH = "/voice/stream";
@@ -232,19 +232,24 @@ export function handleVoiceWebhook(
     dialedNumber: req.body.To ?? "",
   });
 
-  const { host } = resolveRequestBase(req);
+  return buildStreamTwiml(req, entry, `${VOICE_PATH_PREFIX}/${slug}/after`);
+}
+
+/** Shared single-use media stream transport for signed voice webhooks. */
+export function buildStreamTwiml(req: WebhookRequest, entry: CallEntry, afterPath: string, statusPath?: string): WebhookResponse {
+  const { host, protocol } = resolveRequestBase(req);
   const streamUrl = `wss://${host}${VOICE_STREAM_PATH}`;
 
   return twimlResponse(
     200,
-    `<Connect><Stream url="${xmlEscape(streamUrl)}">` +
-      `<Parameter name="callSid" value="${xmlEscape(callSid)}"/>` +
+    `<Connect><Stream url="${xmlEscape(streamUrl)}"${statusPath ? ` statusCallback="${xmlEscape(`${protocol}://${host}${statusPath}`)}" statusCallbackMethod="POST"` : ""}>` +
+      `<Parameter name="callSid" value="${xmlEscape(entry.callSid)}"/>` +
       `<Parameter name="token" value="${xmlEscape(entry.streamToken)}"/>` +
       // The public host this webhook was reached on, so the runtime can name
       // its recording-status callback without a second way of learning it.
       `<Parameter name="host" value="${xmlEscape(host)}"/>` +
       `</Stream></Connect>` +
-      `<Redirect method="POST">${xmlEscape(`${VOICE_PATH_PREFIX}/${slug}/after`)}</Redirect>`,
+      `<Redirect method="POST">${xmlEscape(afterPath)}</Redirect>`,
   );
 }
 

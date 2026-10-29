@@ -57,7 +57,7 @@ export class AgentRegistry {
   constructor() {
     this.register({
       id: OPERATOR_SLUG, factory: createOperatorLineAgent, enabled: true,
-      description: "Approval-gated calls on behalf of Wayne Fabian; no patient identity or ticket tools.",
+      description: "Grok Bot's open operator line and outbound conversational goals on behalf of Wayne Fabian; no patient identity or ticket tools.",
       twilioNumbers: [], agentType: 'outbound', version: '1.0.0', voice: 'sage', outbound: operatorLinePolicy,
     });
     // Primary inbound agent - handles all call types via tools (PRODUCTION)
