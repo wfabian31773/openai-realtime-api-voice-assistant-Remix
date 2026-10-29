@@ -1163,3 +1163,10 @@ describe('the runtime feeds the ledger the gate reads', () => {
     expect(read('agents/noIvrAgent.ts')).toMatch(/const corroboration = corroborate\(\s*\n\s*callId,/);
   });
 });
+
+describe('"one of your/our mutual patients" self-identification (Codex P2 on be52b3f)', () => {
+  it.each(["I'm one of your mutual patients", 'i am one of your mutual patients', "Hi, I'm one of our mutual patients and my eye hurts"])(
+    'a patient: %s', (t) => expect(callerSaysTheyAreAProvider(t)).toBe(false));
+  it.each(['This is Dr. Lee, one of our mutual patients has a question', 'Calling about one of your mutual patients'])(
+    'still a provider: %s', (t) => expect(callerSaysTheyAreAProvider(t)).toBe(true));
+});
