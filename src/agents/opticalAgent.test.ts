@@ -263,7 +263,7 @@ describe('caller recognition — credibility, not cosmetics', () => {
     expect(matched).toMatch(/If they said YES, the identity step is DONE/i);
     expect(matched).toMatch(/Do not ask for their last name/i);
     expect(matched).toMatch(/matched the WRONG\s+person/i);
-    expect(matched).toMatch(/ignore this block from then on/i);
+    expect(matched).toMatch(/ignore the rest of this block from then on/i);
   });
 
   /**
