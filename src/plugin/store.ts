@@ -117,6 +117,23 @@ export const RETURNED_CALL_LOOKBACK_MS = 72 * 60 * 60 * 1000;
 /** Undelivered outbox rows older than this are deleted. Delivered bodies are purged on settle. */
 export const OUTBOX_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 
+export interface PluginStoreOptions {
+  operatorNotificationClaimLeaseMs?: number;
+}
+
+/** Invalid lease settings fall back to 60s rather than allowing immediate reclaims. */
+export function operatorNotificationClaimLeaseMs(options: PluginStoreOptions = {}): number {
+  const leaseMs = options.operatorNotificationClaimLeaseMs
+    ?? Number(process.env.OPERATOR_NOTIFICATION_CLAIM_LEASE_MS);
+  return Number.isSafeInteger(leaseMs) && leaseMs > 0 ? leaseMs : 60_000;
+}
+
+export interface OperatorNotificationClaim {
+  claimToken: string;
+  claimedAt: Date;
+  deliveredAt: Date | null;
+}
+
 export interface ApiTokenRow {
   jti: string;
   hashedSecret: string;
@@ -133,6 +150,8 @@ export interface ContactApprovalRow {
   status: ApprovalStatus;
   tokenJti: string;
   ticketId: string | null;
+  /** Request identity, separate from the human-approved payload/hash. */
+  idempotencyKey?: string | null;
   ticketNumber: string | null;
   /** Last-10 of the destination phone. Lookup key only; never written to audit. */
   phoneKey?: string | null;
@@ -171,6 +190,7 @@ export interface CallPayload {
 export interface SmsPayload {
   phone: string;
   body: string;
+  idempotency_key?: string;
   ticketId?: string | null;
   ticketNumber?: string | null;
 }
@@ -186,6 +206,12 @@ export interface EmailPayload {
 export type ContactPayload = CallPayload | SmsPayload | EmailPayload;
 
 export interface PluginStore {
+  /** Atomically claim a new or expired undelivered event; null means blocked. */
+  claimOperatorNotification(eventId: string): Promise<string | null>;
+  /** Only the current claim token can retain the event permanently after delivery. */
+  markOperatorNotificationDelivered(eventId: string, claimToken: string): Promise<void>;
+  /** Only the current claim token can release an undelivered event. */
+  releaseOperatorNotification(eventId: string, claimToken: string): Promise<void>;
   getOperatorLineEnabled(): Promise<boolean>;
   setOperatorLineEnabled(enabled: boolean, updatedBy: string | null): Promise<void>;
   /** First SMS with this MessageSid wins; null means a duplicate. */
@@ -210,6 +236,7 @@ export interface PluginStore {
   revokeToken(jti: string, at: Date): Promise<boolean>;
 
   insertApproval(row: ContactApprovalRow): Promise<ContactApprovalRow>;
+  findApprovalByIdempotencyKey(tokenJti: string, key: string): Promise<ContactApprovalRow | null>;
   getApproval(id: string): Promise<ContactApprovalRow | null>;
   listApprovals(status?: ApprovalStatus): Promise<ContactApprovalRow[]>;
   updateApproval(id: string, patch: Partial<ContactApprovalRow>, onlyIfStatus?: ApprovalStatus): Promise<ContactApprovalRow | null>;
@@ -329,6 +356,28 @@ export async function verifyStoredToken(
 }
 
 export class MemoryPluginStore implements PluginStore {
+  private readonly notificationClaimLeaseMs: number;
+  constructor(options: PluginStoreOptions = {}) {
+    this.notificationClaimLeaseMs = operatorNotificationClaimLeaseMs(options);
+  }
+  operatorNotifications = new Map<string, OperatorNotificationClaim>();
+  async claimOperatorNotification(eventId: string): Promise<string | null> {
+    const now = new Date();
+    const prior = this.operatorNotifications.get(eventId);
+    if (prior && (prior.deliveredAt !== null
+      || prior.claimedAt.getTime() >= now.getTime() - this.notificationClaimLeaseMs)) return null;
+    const claimToken = newId();
+    this.operatorNotifications.set(eventId, { claimToken, claimedAt: now, deliveredAt: null });
+    return claimToken;
+  }
+  async markOperatorNotificationDelivered(eventId: string, claimToken: string): Promise<void> {
+    const claim = this.operatorNotifications.get(eventId);
+    if (claim?.claimToken === claimToken && claim.deliveredAt === null) claim.deliveredAt = new Date();
+  }
+  async releaseOperatorNotification(eventId: string, claimToken: string): Promise<void> {
+    const claim = this.operatorNotifications.get(eventId);
+    if (claim?.claimToken === claimToken && claim.deliveredAt === null) this.operatorNotifications.delete(eventId);
+  }
   operatorLineEnabled = true;
   async getOperatorLineEnabled(): Promise<boolean> { return this.operatorLineEnabled; }
   async setOperatorLineEnabled(enabled: boolean, _updatedBy: string | null): Promise<void> { this.operatorLineEnabled = enabled; }
@@ -430,8 +479,19 @@ export class MemoryPluginStore implements PluginStore {
   }
 
   async insertApproval(row: ContactApprovalRow): Promise<ContactApprovalRow> {
+    // No await between checking the key and inserting, including concurrent prepares.
+    if (row.idempotencyKey != null) {
+      const existing = [...this.approvals.values()].find((item) => item.tokenJti === row.tokenJti
+        && item.idempotencyKey === row.idempotencyKey && item.status !== "rejected" && item.status !== "cancelled");
+      if (existing) return { ...existing, payload: { ...existing.payload } };
+    }
     this.approvals.set(row.id, { ...row, payload: { ...row.payload } });
     return this.approvals.get(row.id)!;
+  }
+  async findApprovalByIdempotencyKey(tokenJti: string, key: string): Promise<ContactApprovalRow | null> {
+    const row = [...this.approvals.values()].find((item) => item.tokenJti === tokenJti
+      && item.idempotencyKey === key && item.status !== "rejected" && item.status !== "cancelled");
+    return row ? { ...row, payload: { ...row.payload } } : null;
   }
   async getApproval(id: string): Promise<ContactApprovalRow | null> {
     const row = this.approvals.get(id);

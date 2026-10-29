@@ -7,6 +7,7 @@
 import type { PluginAuditEntry } from "./audit";
 import { sanitizeAuditEntry } from "./audit";
 import { parseScopes } from "./scopes";
+import { newId, operatorNotificationClaimLeaseMs } from "./store";
 import type {
   ApiTokenRow,
   ApprovalStatus,
@@ -15,6 +16,7 @@ import type {
   MessageOutboxRow,
   OutboxStatus,
   PluginStore,
+  PluginStoreOptions,
   OperatorCallRecord,
   OperatorInboundCallRecord,
   OperatorSmsRecord,
@@ -72,6 +74,7 @@ function approvalFrom(r: Record<string, unknown>): ContactApprovalRow {
     channel: r.channel as ContactChannel,
     status: r.status as ApprovalStatus,
     tokenJti: String(r.token_jti ?? r.tokenJti),
+    idempotencyKey: (r.idempotency_key as string | null) ?? null,
     ticketId: (r.ticket_id as string | null) ?? null,
     ticketNumber: (r.ticket_number as string | null) ?? null,
     phoneKey: (r.phone_key as string | null) ?? null,
@@ -143,8 +146,26 @@ function suggestionsFrom(
   return out;
 }
 
-export function createSqlPluginStore(exec: SqlExec): PluginStore {
+export function createSqlPluginStore(exec: SqlExec, options: PluginStoreOptions = {}): PluginStore {
+  const claimLeaseMs = operatorNotificationClaimLeaseMs(options);
   return {
+    async claimOperatorNotification(eventId) {
+      const [row] = await exec(`INSERT INTO plugin_operator_notifications (event_id, claimed_at, claim_token)
+        VALUES ($1, NOW(), $2)
+        ON CONFLICT (event_id) DO UPDATE SET claimed_at = EXCLUDED.claimed_at, claim_token = EXCLUDED.claim_token
+        WHERE plugin_operator_notifications.delivered_at IS NULL
+          AND plugin_operator_notifications.claimed_at < NOW() - ($3::double precision * INTERVAL '1 millisecond')
+        RETURNING claim_token`, [eventId, newId(), claimLeaseMs]);
+      return row ? String(row.claim_token) : null;
+    },
+    async markOperatorNotificationDelivered(eventId, claimToken) {
+      await exec(`UPDATE plugin_operator_notifications SET delivered_at = NOW()
+        WHERE event_id = $1 AND claim_token = $2 AND delivered_at IS NULL`, [eventId, claimToken]);
+    },
+    async releaseOperatorNotification(eventId, claimToken) {
+      await exec(`DELETE FROM plugin_operator_notifications
+        WHERE event_id = $1 AND claim_token = $2 AND delivered_at IS NULL`, [eventId, claimToken]);
+    },
     async getOperatorLineEnabled() {
       const [row] = await exec("SELECT value FROM app_settings WHERE key = 'operator_line_enabled'");
       // Missing settings use the env default. A missing table still throws/fails closed.
@@ -264,10 +285,15 @@ export function createSqlPluginStore(exec: SqlExec): PluginStore {
       return rows.length > 0;
     },
     async insertApproval(row) {
+      const keyed = row.idempotencyKey != null;
       const rows = await exec(
         `INSERT INTO contact_approvals (
-            id, channel, status, token_jti, ticket_id, ticket_number, phone_key, payload, payload_hash, created_at, updated_at
-          ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11) RETURNING *`,
+            id, channel, status, token_jti, ticket_id, ticket_number, phone_key, payload, payload_hash, created_at, updated_at,
+            confirm_token_hash, confirm_token_plaintext, confirm_expires_at${keyed ? ", idempotency_key" : ""}
+          ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11,$12,$13,$14${keyed ? ",$15" : ""})
+          ${keyed ? `ON CONFLICT (token_jti, idempotency_key)
+            WHERE idempotency_key IS NOT NULL AND status NOT IN ('rejected', 'cancelled') DO NOTHING` : ""}
+          RETURNING *`,
         [
           row.id,
           row.channel,
@@ -280,9 +306,24 @@ export function createSqlPluginStore(exec: SqlExec): PluginStore {
           row.payloadHash,
           row.createdAt.toISOString(),
           row.updatedAt.toISOString(),
+          row.confirmTokenHash,
+          row.confirmTokenPlaintext ?? null,
+          row.confirmExpiresAt?.toISOString() ?? null,
+          ...(keyed ? [row.idempotencyKey] : []),
         ],
       );
+      if (keyed && !rows[0]) {
+        // A fresh statement sees a concurrent winning insert after it commits.
+        const existing = await this.findApprovalByIdempotencyKey(row.tokenJti, row.idempotencyKey!);
+        if (!existing) throw new Error("Contact request idempotency conflict");
+        return existing;
+      }
       return rows[0] ? approvalFrom(rows[0]) : row;
+    },
+    async findApprovalByIdempotencyKey(tokenJti, key) {
+      const [row] = await exec(`SELECT * FROM contact_approvals
+        WHERE token_jti = $1 AND idempotency_key = $2 AND status NOT IN ('rejected', 'cancelled') LIMIT 1`, [tokenJti, key]);
+      return row ? approvalFrom(row) : null;
     },
     async getApproval(id) {
       const rows = await exec("SELECT * FROM contact_approvals WHERE id = $1 LIMIT 1", [id]);
@@ -631,10 +672,10 @@ export function createSqlPluginStore(exec: SqlExec): PluginStore {
       const clean = sanitizeAuditEntry(entry);
       if (clean.details) {
         await exec(
-          `INSERT INTO plugin_audit_log (token_jti, tool, route, method, outcome, http_status, details, created_at)
-           VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8)`,
+          `INSERT INTO plugin_audit_log (token_jti, tool, route, method, outcome, http_status, details, created_at, approval_id, ticket_id)
+           VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10)`,
           [clean.tokenJti, clean.tool, clean.route, clean.method, clean.outcome, clean.httpStatus,
-            JSON.stringify(clean.details), entry.createdAt ?? new Date()],
+            JSON.stringify(clean.details), entry.createdAt ?? new Date(), clean.approvalId, clean.ticketId],
         );
         return;
       }

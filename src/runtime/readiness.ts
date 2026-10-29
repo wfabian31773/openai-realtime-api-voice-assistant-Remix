@@ -970,8 +970,11 @@ import { callEnvironment } from "./callRecord";
 /** v144: open Grok Bot operator conversations, owner recognition, background
  * request handoff, and outbound provenance, above main's v143.
  * Apply add_operator_line_inbound.sql separately. */
+/** v145: owner SMS exempt + notifier idempotency. Signed stable event IDs,
+ * durable notification claims and token-scoped SMS idempotency keys.
+ * Apply add_operator_notification_claims.sql separately; not applied here. */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v144-operator-line-inbound-20261029";
+  "voice-runtime-v145-owner-sms-exempt-notifier-idempotency-20261029";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can
