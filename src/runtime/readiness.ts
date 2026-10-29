@@ -959,6 +959,9 @@ import { callEnvironment } from "./callRecord";
  * plurals, so these callers can pass the after-hours provider gate.
  * On top of v136 (#393, main); renumbered from v133. No migration; production impact remains unmeasured.
  */
+/** v144: open Grok Bot operator conversations, owner recognition, background
+ * request handoff, and outbound provenance, above main's v143.
+ * Apply add_operator_line_inbound.sql separately. */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
   "voice-runtime-v145-mutual-patient-detector-20261029";
 
