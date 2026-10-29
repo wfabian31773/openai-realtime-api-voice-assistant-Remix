@@ -43,7 +43,14 @@
  * target ~0 — and the filing rate of those calls, 72.4%, target the ~90% of
  * recognised calls that are not denied.
  */
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+
+// The agents reach server/db, which validates the environment at import. CI
+// sets no credentials (ci.yml), so the placeholder goes in before the imports.
+vi.hoisted(() => {
+  process.env.DATABASE_URL ||= 'postgresql://unused:unused@127.0.0.1:5432/unused';
+});
+
 import { buildOpticalPrompt } from '../agents/opticalAgent';
 import { buildRecordsPrompt } from '../agents/recordsAgent';
 import { buildSurgeryPrompt } from '../agents/surgeryAgent';
@@ -65,7 +72,17 @@ describe('a denied greeting asks the request before identity', () => {
 
   it('still discards the match: a phone number is a candidate, not an identity', () => {
     expect(bullet).toMatch(/WRONG\s+person/);
-    expect(bullet).toMatch(/ignore this block/);
+    expect(bullet).toMatch(/ignore the rest of this block/);
+  });
+
+  it('gives the request-first instruction BEFORE it discards the block (Codex P1, #397)', () => {
+    // A model reading in order that meets "ignore this block" first can drop
+    // everything after it, the instruction included — the v29 shape, an
+    // exception stated after the prohibition it excepts.
+    const ask = bullet.search(/Ask how you\s+can help BEFORE/);
+    const discard = bullet.search(/ignore the rest of this block/);
+    expect(ask).toBeGreaterThan(-1);
+    expect(discard).toBeGreaterThan(ask);
   });
 
   it('asks how it can help BEFORE any name or date of birth', () => {
