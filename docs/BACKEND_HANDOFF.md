@@ -515,3 +515,29 @@ logistics dates (4), and the legacy routing veto (2). All were restored.
 The full suite could not complete in this sandbox: local listeners and
 `spawnSync` in `buildIdentity.test.ts` are denied with `EPERM`. GitHub check logs
 were unreachable, so the separately reported CI test could not be identified.
+
+---
+
+## Operator line — open two-way Grok Bot line (#402, v144, 2026-10-29)
+
+**Merged per Wayne's approval, 2026-10-29 8:24 AM ET.** Supersedes #400, which was closed.
+
+- **What it does:** +1 626-548-2660 is an open line. Inbound voice is a free-form Grok Bot conversation: an owner persona for `OPERATOR_OWNER_NUMBER` and a general persona for everyone else. There are no turn caps, scripts, daily caps, peak windows or allowlists. The only limit is `OPERATOR_LINE_MAX_CALL_MINUTES` (default 60).
+- **Mid-call requests:** a non-blocking tool queues requests to the signed notifier. On hangup it sends a transcript reference plus the request list. Payloads carry IDs and links only, with no PHI and numbers masked to the last 4.
+- **SMS and voicemail:** inbound SMS is forwarded the same way. If the agent is unavailable, a voicemail is recorded.
+- **Outbound:** goal mode. Owner-requested calls and calls to the owner need no tap; `bot_initiative` calls still need owner approval. `initiated_by` is recorded in the call log.
+- **Kill-switch:** a staff setting (`/api/settings/operator-line`) that both inbound and outbound routes check. Env `OPERATOR_LINE_INBOUND_ENABLED` is the hard default.
+- **Twilio URLs (POST):**
+  - Voice: `/api/voice/operator-line/inbound`
+  - Voice fallback: `/api/voice/operator-line/fallback`
+  - SMS: `/api/voice/operator-line/sms`
+  - Voicemail callback: `/api/voice/operator-line/voicemail`
+- **Bot fetch endpoints** (scope `operator:call`): `/api/plugin/v1/operator-line/{inbound/:callSid, sms/:messageSid, voicemail/:recordingSid}`.
+- **Notifier env:** `OPERATOR_INBOUND_NOTIFIER=webhook`, `OPERATOR_INBOUND_WEBHOOK_URL`, `OPERATOR_INBOUND_WEBHOOK_SECRET`, `OPERATOR_INBOUND_WEBHOOK_AUTH=both` (HMAC `X-Operator-Signature` + Bearer).
+- **Order after merge:**
+  1. Apply `migrations/add_operator_line_inbound.sql`. It was unapplied at merge and adds `initiated_by`, the kill-switch setting, and the SMS and voicemail tables.
+  2. Set the env vars.
+  3. Republish.
+  4. Repoint the Twilio number to the three URLs above.
+- **Unchanged:** the SI support line, patient flows and staff permissions.
+- **NOT MEASURED IN PRODUCTION.**
