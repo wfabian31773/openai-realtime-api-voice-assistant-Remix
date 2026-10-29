@@ -953,8 +953,16 @@ import { callEnvironment } from "./callRecord";
  * choose unclassified_call in its intake tool; the after-hangup floor still
  * files unclassified calls for a person to route. On top of v135 (#392, main, 6ae60e33); v127 is #376 and v133 is #391 on their open branches. No migration; production impact remains unmeasured.
  */
+/**
+ * v142 — A GIVEN NAME REACHES THE SWEEP (2026-10-29). The teardown sweep files
+ * a request under the first and last name the caller gave, as a name-taking
+ * tool received it, when no certain lookup match exists (statedName.ts,
+ * operator ruling 2026-10-29). On top of v141 (#398, main, 2316c60); v137 is
+ * #391, v138 is #376 and v139 is #384 on their open branches. No migration;
+ * production impact remains unmeasured.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v141-the-spoken-stores-reach-the-tools-20261029";
+  "voice-runtime-v142-a-given-name-reaches-the-sweep-20261029";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

@@ -28,6 +28,7 @@
 
 import type { DobCarry } from './verifiedIdentity';
 import { dobCarry } from './verifiedIdentity';
+import { noteStatedNameFromArgs } from './statedName';
 
 /** A tool refused to run because the caller has not supplied enough. */
 export interface MissingFields {
@@ -287,6 +288,11 @@ export async function runTool(
 ): Promise<ToolResult> {
   const def = registry.get(name);
   if (!def) return { success: false, error: `no such tool: ${name}` };
+
+  // The name the caller gave, kept for the teardown sweep BEFORE anything
+  // validates or refuses: a filing refused for the date of birth still
+  // received the name (statedName.ts, operator ruling 2026-10-29).
+  noteStatedNameFromArgs(name, input);
 
   const bad = validateInput(def, input);
   if (bad) return bad;
