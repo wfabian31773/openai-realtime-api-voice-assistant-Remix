@@ -975,14 +975,17 @@ import { callEnvironment } from "./callRecord";
  * durable notification claims and token-scoped SMS idempotency keys.
  * Apply add_operator_notification_claims.sql separately; not applied here.
  * Merged to main as #405 (7ad4fb8). */
+/** v146: dedicated operator SMS send, with no hours/caps, owner exemption,
+ * opt-outs, durable idempotency and operator-origin commits. No new migration.
+ * Merged to main as #407 (04e1e80). */
 /**
  * v148 — THE TEST CALL'S OFFICE AND NAME (2026-10-29). Three defects from the
  * operator's pack-01 A1 test call: no queue prompt quotes a sample office any
  * more (the optical agent offered one when no record was found), an office
  * `resolve_location` verified on the call reaches `file_optical_ticket` when
  * the model leaves `location` out (verifiedOffice.ts), and the ask script asks
- * for the first and last name, RULE ZERO 2b's own wording. On top of v145
- * (#405, main, 7ad4fb8), which contains v144 (#402). No migration;
+ * for the first and last name, RULE ZERO 2b's own wording. On top of v146
+ * (#407, main, 04e1e80), which contains v145 (#405) and v144 (#402). No migration;
  * production impact remains unmeasured.
  */
 /**

@@ -5,7 +5,7 @@ Set the operator number's Twilio **A call comes in / Voice URL** to
 The number must match `OPERATOR_LINE_FROM_NUMBER`. Optionally set its call
 status callback to the same URL plus `/status`, also POST. Returned TwiML
 configures stream status callbacks there and an `/after` redirect.
-All operator voice/SMS POST routes validate `X-Twilio-Signature` using the forwarded public
+All inbound Twilio operator voice/SMS POST routes validate `X-Twilio-Signature` using the forwarded public
 protocol/host and original URL. Missing or invalid signatures return 403,
 including when the feature is disabled.
 
@@ -36,7 +36,7 @@ opt-out; Grok Bot must not claim it succeeded.
 ## Configuration
 
 - `OPERATOR_LINE_INBOUND_ENABLED=true`: hard gate for the entire operator
-  line: inbound voice, SMS, voicemail admission and outbound calls. Any other
+  line: inbound voice, SMS, voicemail admission and outbound calls/SMS. Any other
   value disables it, regardless of the persisted staff switch.
 - `OPERATOR_LINE_FROM_NUMBER`: operator Twilio number in E.164; must differ
   from the SI Assistant number.
@@ -132,23 +132,56 @@ request again from the completion event. Track processed requests by
 `event_id` (or consistently on `callSid` if multiple event handlers can confirm
 the same call).
 
-For confirmation SMS, pass an optional string `idempotency_key` of at most
-200 characters to `POST /api/plugin/v1/prepare_sms`, for example
+## Sending operator SMS (v146)
+
+Use `POST /api/plugin/v1/operator-line/sms/send` for operator texts and post-call
+confirmations. It requires a bot bearer token with `operator:call`,
+`PLUGIN_WRITES_ENABLED=true`, and the operator line enabled in both environment
+and staff settings. It uses the existing SMS sender abstraction, with
+`OPERATOR_LINE_FROM_NUMBER` as the origin, validated as E.164 and distinct from
+the SI Assistant number. There is **no business-hours window, daily cap, or
+peak cap** for this route or its later approved commits.
+
+Body: `{ "to": "+1<US-number>", "body": "<message>", "idempotency_key": "<stable-event-key>" }`.
+US formatting is normalized to E.164. The body must contain 1–1600 characters (Twilio limit; longer bodies get 400 before any approval or idempotency row is created).
+Optional `initiated_by` is `owner_request` or `bot_initiative` (default), matching
+operator calls; it is retained in the locked approval payload and redacted audit.
+Only a normalized match to the configured `OPERATOR_OWNER_NUMBER` skips human
+approval, regardless of initiator. Unset or invalid owner settings grant no exemption.
+
+Owner sends return HTTP 200, `status: "committed"`, a redacted approval, and
+`result.messageSid`. Other destinations return HTTP 201, `status: "pending_approval"`.
+Their approvals retain lane `wayne-operator` and the operator from-number.
+Use the existing human approval flow, then the preparing operator bot retrieves
+`GET /api/plugin/v1/contact_requests/:id/confirm_token` and posts that token to
+`POST /api/plugin/v1/commit_contact`. That commit also uses the locked operator
+from-number without SI hours/caps. A changed/invalid operator origin or disabled
+operator line fails closed. Responses mask phone numbers to the last four digits
+and never echo the SMS body; audits/logs never contain it. Human approvers still
+review the locked payload through the existing authenticated approval interface.
+
+Both owner and third-party requests honor SMS STOP, voice DNC, and operator
+opt-outs before creating an approval and again immediately before sending.
+Unreadable opt-out storage fails closed. Opt-outs return HTTP 409 with
+`outcome: "not_sent"`; storage failures return HTTP 503.
+
+The required nonblank `idempotency_key` is at most 200 characters, for example
 `confirmation:opline:<callSid>:completed`. Keep it stable across bot retries
 and regenerated wording. For the same preparing token, an existing approval
 in any status except `rejected`/`cancelled` is returned with HTTP 200 and
 `deduplicated: true`; its locked payload and send outcome stay authoritative.
 The key is stored separately from that payload and its approval hash. Failed
-or unknown sends retain their keys and are never resent by replaying prepare.
+or unknown sends retain their keys and are never resent by replaying the route.
+Concurrent retries claim a single send. Keys cannot cross between the general
+SMS and operator SMS lanes. The existing #405 column and unique index suffice:
+**no new migration is needed**. The earlier
+`migrations/add_operator_notification_claims.sql` must already be applied.
 
-SMS to the exact owner cell configured in `OPERATOR_OWNER_NUMBER` skips the
-human approval step and immediately uses the existing confirm/commit send
-path. US formatting is normalized before comparison; unset or invalid owner
-settings grant no exemption. Normal SMS opt-out/DNC and calling-window checks
-still apply, along with operator opt-out. Successful owner prepares return
-the commit result (`status: "committed"`, HTTP 200). Other recipients retain
-the normal pending approval flow. Reusing an owner's SMS key returns the
-stored result without another send.
+General `prepare_sms`, SI, and patient lanes retain their existing approval,
+opt-out, from-number, and hours/cap behavior. In particular, the general owner
+SMS exemption still refuses outside the SI hours window.
+
+## Verifying notifications
 
 To verify, preserve the **raw body bytes**, read Unix-seconds
 `X-Operator-Timestamp`, and compute HMAC-SHA256 using the shared secret over
