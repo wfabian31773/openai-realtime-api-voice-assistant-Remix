@@ -185,8 +185,19 @@ describe('mutual patient self-identification', () => {
 
 describe('mutual patient clauses after a provider introduction', () => {
   it.each(
-    ['our mutual patient', 'our mutual patients', 'the mutual patient', 'a mutual patient']
+    ['our mutual patient', 'our mutual patients', 'your mutual patient', 'the mutual patient', 'a mutual patient']
       .flatMap((patient) => [
+        // Separate predicates must not depend on a finite-verb allowlist.
+        'takes warfarin',
+        'developed a rash',
+        'reports nausea',
+        'uses eye drops',
+        'noticed swelling',
+        'complains of dizziness',
+        'complained of dizziness',
+        'developed after surgery',
+        'recently developed a rash',
+        'currently takes warfarin',
         'has a question about her medication',
         'is waiting for a response',
         'was seen yesterday',
@@ -252,6 +263,11 @@ describe('mutual patient clauses after a provider introduction', () => {
         'waiting for my results',
         'following up on my referral',
         'checking on my prescription',
+        'taking warfarin',
+        'reporting my new phone number',
+        'currently waiting for my results',
+        'here for my results',
+        'there for my appointment',
       ].map((modifier) => `${introduction} the mutual patient ${modifier}.`)),
   )('preserves patient introductions with participial modifiers: %s', (spoken) => {
     expect(callerSaysTheyAreAProvider(spoken)).toBe(false);
@@ -277,6 +293,8 @@ describe('mutual patient clauses after a provider introduction', () => {
           'scheduled for tomorrow',
           'seen last week',
           "transferred from Dr. X's office",
+          'evaluated at my last appointment',
+          'given a referral',
           'from yesterday',
           'who called earlier',
           'that you saw',

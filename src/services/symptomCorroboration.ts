@@ -678,13 +678,23 @@ const PATIENT_PROVIDER_ROLE_AFTER = new RegExp(
 );
 const PATIENT_CALL_DESCRIPTION_AFTER = /^\s+(?:calls?|callbacks?|follow-?ups?|consult(?:ation)?s?|referrals?|requests?|questions?)\b/;
 // Preserve the established provider reading of separate subject/predicate
-// clauses: "This is Sarah, our mutual patient has a question". These finite
-// predicates are positive evidence of that form; all other continuations
-// belong to the named patient's introduction by default. In particular, no
-// list of allowed patient modifiers can cover every participle or relative
-// clause ("referred to you", "scheduled for tomorrow", "that you saw").
-const PATIENT_SEPARATE_CLAUSE_AFTER =
-  /^\s+(?:(?:still|never|usually)\s+)?(?:is|was|has(?:n't)?|had|will|won't|can(?:not)?|does|did|needs|requires|wants|calls|called|came|asked|left|received|got)\b/;
+// clauses: "This is Sarah, our mutual patient takes warfarin". Accept a
+// predicate word unless its form introduces an appositive/modifier instead;
+// an unlisted finite verb must not turn the patient into the named caller.
+const PATIENT_PREDICATE_AFTER = /^\s+(?:(?:still|never|\p{L}+ly)\s+)*(\p{L}[\p{L}'-]*)(.*)$/u;
+const PATIENT_MODIFIER_WORD =
+  /^(?:here|there|who|whom|whose|which|that|where|when|i|we|you|he|she|it|they|a|an|the|my|our|your|his|her|their|its|and|or|but|about|after|as|at|before|by|for|from|in|of|on|to|under|with|without|\p{L}[\p{L}'-]*ing|been|seen|given|taken|known|shown)$/u;
+// Regular past verbs also serve as participles. A passive complement marks
+// "scheduled for tomorrow" / "referred to you",
+// while an object keeps "developed a rash" / "noticed swelling" separate.
+const PATIENT_PARTICIPLE_COMPLEMENT =
+  /^\s+(?:at|by|for|from|in|on|to|with)\b/;
+
+function hasSeparatePatientClause(after: string): boolean {
+  const predicate = PATIENT_PREDICATE_AFTER.exec(after);
+  if (!predicate || PATIENT_MODIFIER_WORD.test(predicate[1])) return false;
+  return !(/ed$/.test(predicate[1]) && PATIENT_PARTICIPLE_COMPLEMENT.test(predicate[2]));
+}
 
 /**
  * Pure, for tests: does this caller text identify the caller as a provider?
@@ -703,7 +713,7 @@ export function callerSaysTheyAreAProvider(spoken: string | readonly string[]): 
         if (PATIENT_PROVIDER_ROLE_AFTER.test(after) || PATIENT_CALL_DESCRIPTION_AFTER.test(after)) return true;
         const identifiesPatientByName =
           (PATIENT_APPOSITIVE_BEFORE.test(before) || BARE_PATIENT_APPOSITIVE_BEFORE.test(before)) &&
-          !PATIENT_SEPARATE_CLAUSE_AFTER.test(after);
+          !hasSeparatePatientClause(after);
         return !PATIENT_IDENTIFICATION_BEFORE.test(before) &&
           !identifiesPatientByName &&
           !(PATIENT_INTRODUCTION_START.test(before) && PATIENT_APPOSITIVE_AFTER.test(after)) &&
