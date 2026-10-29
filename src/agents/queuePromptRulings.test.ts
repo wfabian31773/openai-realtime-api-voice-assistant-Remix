@@ -65,6 +65,23 @@ const SHARED: readonly Ruling[] = [
   // so a lane cannot drop it and a trim of a lane's own text cannot reach it.
   {
     /**
+     * Operator ruling, 2026-10-29: *"if the patients ask for a person in a
+     * line without transfer capabilities, apologize and say that they can only
+     * take a message and a team member will follow up."* Measured before it:
+     * the lanes already said they could not transfer and would take a
+     * message, with no apology, and the model improvised variants that dropped
+     * both halves ("There's no one I can connect you to"). All three parts are
+     * asserted: the apology, ONLY a message, and who follows up.
+     */
+    source: 'Operator, 2026-10-29 — asked for a person: apologise, only a message, a team member follows up',
+    requires: [
+      ["i'm sorry", 'apologise', 'apologize'],
+      ['can only take a message', 'only take a message'],
+      ['will follow up'],
+    ],
+  },
+  {
+    /**
      * Operator ruling, 2026-09-03: when a caller asks for a representative the
      * agent says it cannot transfer AND that it will take a message and raise a
      * request for staff to follow up. Bought with three calls in twelve minutes
