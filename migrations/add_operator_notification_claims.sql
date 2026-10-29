@@ -2,6 +2,9 @@
 CREATE TABLE IF NOT EXISTS plugin_operator_notifications (
   event_id VARCHAR PRIMARY KEY,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  claimed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  -- Rotated on every claim/reclaim to fence off abandoned workers.
+  claim_token VARCHAR NOT NULL,
   -- NULL while in-flight; set only after a 2xx delivery response.
   delivered_at TIMESTAMPTZ
 );

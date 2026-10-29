@@ -1604,6 +1604,8 @@ export const pluginOperatorDnc = pgTable("plugin_operator_dnc", {
 export const pluginOperatorNotifications = pgTable("plugin_operator_notifications", {
   eventId: varchar("event_id").primaryKey(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  claimedAt: timestamp("claimed_at", { withTimezone: true }).notNull().defaultNow(),
+  claimToken: varchar("claim_token").notNull(),
   deliveredAt: timestamp("delivered_at", { withTimezone: true }),
 });
 

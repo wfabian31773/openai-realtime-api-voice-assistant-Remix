@@ -7,6 +7,7 @@
 import type { PluginAuditEntry } from "./audit";
 import { sanitizeAuditEntry } from "./audit";
 import { parseScopes } from "./scopes";
+import { newId, operatorNotificationClaimLeaseMs } from "./store";
 import type {
   ApiTokenRow,
   ApprovalStatus,
@@ -15,6 +16,7 @@ import type {
   MessageOutboxRow,
   OutboxStatus,
   PluginStore,
+  PluginStoreOptions,
   OperatorCallRecord,
   OperatorInboundCallRecord,
   OperatorSmsRecord,
@@ -144,20 +146,25 @@ function suggestionsFrom(
   return out;
 }
 
-export function createSqlPluginStore(exec: SqlExec): PluginStore {
+export function createSqlPluginStore(exec: SqlExec, options: PluginStoreOptions = {}): PluginStore {
+  const claimLeaseMs = operatorNotificationClaimLeaseMs(options);
   return {
     async claimOperatorNotification(eventId) {
-      const rows = await exec(`INSERT INTO plugin_operator_notifications (event_id) VALUES ($1)
-        ON CONFLICT DO NOTHING RETURNING event_id`, [eventId]);
-      return rows.length > 0;
+      const [row] = await exec(`INSERT INTO plugin_operator_notifications (event_id, claimed_at, claim_token)
+        VALUES ($1, NOW(), $2)
+        ON CONFLICT (event_id) DO UPDATE SET claimed_at = EXCLUDED.claimed_at, claim_token = EXCLUDED.claim_token
+        WHERE plugin_operator_notifications.delivered_at IS NULL
+          AND plugin_operator_notifications.claimed_at < NOW() - ($3::double precision * INTERVAL '1 millisecond')
+        RETURNING claim_token`, [eventId, newId(), claimLeaseMs]);
+      return row ? String(row.claim_token) : null;
     },
-    async markOperatorNotificationDelivered(eventId) {
+    async markOperatorNotificationDelivered(eventId, claimToken) {
       await exec(`UPDATE plugin_operator_notifications SET delivered_at = NOW()
-        WHERE event_id = $1 AND delivered_at IS NULL`, [eventId]);
+        WHERE event_id = $1 AND claim_token = $2 AND delivered_at IS NULL`, [eventId, claimToken]);
     },
-    async releaseOperatorNotification(eventId) {
+    async releaseOperatorNotification(eventId, claimToken) {
       await exec(`DELETE FROM plugin_operator_notifications
-        WHERE event_id = $1 AND delivered_at IS NULL`, [eventId]);
+        WHERE event_id = $1 AND claim_token = $2 AND delivered_at IS NULL`, [eventId, claimToken]);
     },
     async getOperatorLineEnabled() {
       const [row] = await exec("SELECT value FROM app_settings WHERE key = 'operator_line_enabled'");

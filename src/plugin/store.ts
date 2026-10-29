@@ -117,6 +117,23 @@ export const RETURNED_CALL_LOOKBACK_MS = 72 * 60 * 60 * 1000;
 /** Undelivered outbox rows older than this are deleted. Delivered bodies are purged on settle. */
 export const OUTBOX_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 
+export interface PluginStoreOptions {
+  operatorNotificationClaimLeaseMs?: number;
+}
+
+/** Invalid lease settings fall back to 60s rather than allowing immediate reclaims. */
+export function operatorNotificationClaimLeaseMs(options: PluginStoreOptions = {}): number {
+  const leaseMs = options.operatorNotificationClaimLeaseMs
+    ?? Number(process.env.OPERATOR_NOTIFICATION_CLAIM_LEASE_MS);
+  return Number.isSafeInteger(leaseMs) && leaseMs > 0 ? leaseMs : 60_000;
+}
+
+export interface OperatorNotificationClaim {
+  claimToken: string;
+  claimedAt: Date;
+  deliveredAt: Date | null;
+}
+
 export interface ApiTokenRow {
   jti: string;
   hashedSecret: string;
@@ -189,12 +206,12 @@ export interface EmailPayload {
 export type ContactPayload = CallPayload | SmsPayload | EmailPayload;
 
 export interface PluginStore {
-  /** Atomic claim blocks in-flight and delivered duplicates. Retries reuse it. */
-  claimOperatorNotification(eventId: string): Promise<boolean>;
-  /** Retain the claim permanently only after a successful delivery. */
-  markOperatorNotificationDelivered(eventId: string): Promise<void>;
-  /** Release an undelivered claim after all delivery attempts fail. */
-  releaseOperatorNotification(eventId: string): Promise<void>;
+  /** Atomically claim a new or expired undelivered event; null means blocked. */
+  claimOperatorNotification(eventId: string): Promise<string | null>;
+  /** Only the current claim token can retain the event permanently after delivery. */
+  markOperatorNotificationDelivered(eventId: string, claimToken: string): Promise<void>;
+  /** Only the current claim token can release an undelivered event. */
+  releaseOperatorNotification(eventId: string, claimToken: string): Promise<void>;
   getOperatorLineEnabled(): Promise<boolean>;
   setOperatorLineEnabled(enabled: boolean, updatedBy: string | null): Promise<void>;
   /** First SMS with this MessageSid wins; null means a duplicate. */
@@ -339,18 +356,27 @@ export async function verifyStoredToken(
 }
 
 export class MemoryPluginStore implements PluginStore {
-  // null means in-flight; a timestamp means delivered.
-  operatorNotifications = new Map<string, Date | null>();
-  async claimOperatorNotification(eventId: string): Promise<boolean> {
-    if (this.operatorNotifications.has(eventId)) return false;
-    this.operatorNotifications.set(eventId, null);
-    return true;
+  private readonly notificationClaimLeaseMs: number;
+  constructor(options: PluginStoreOptions = {}) {
+    this.notificationClaimLeaseMs = operatorNotificationClaimLeaseMs(options);
   }
-  async markOperatorNotificationDelivered(eventId: string): Promise<void> {
-    if (this.operatorNotifications.get(eventId) === null) this.operatorNotifications.set(eventId, new Date());
+  operatorNotifications = new Map<string, OperatorNotificationClaim>();
+  async claimOperatorNotification(eventId: string): Promise<string | null> {
+    const now = new Date();
+    const prior = this.operatorNotifications.get(eventId);
+    if (prior && (prior.deliveredAt !== null
+      || prior.claimedAt.getTime() >= now.getTime() - this.notificationClaimLeaseMs)) return null;
+    const claimToken = newId();
+    this.operatorNotifications.set(eventId, { claimToken, claimedAt: now, deliveredAt: null });
+    return claimToken;
   }
-  async releaseOperatorNotification(eventId: string): Promise<void> {
-    if (this.operatorNotifications.get(eventId) === null) this.operatorNotifications.delete(eventId);
+  async markOperatorNotificationDelivered(eventId: string, claimToken: string): Promise<void> {
+    const claim = this.operatorNotifications.get(eventId);
+    if (claim?.claimToken === claimToken && claim.deliveredAt === null) claim.deliveredAt = new Date();
+  }
+  async releaseOperatorNotification(eventId: string, claimToken: string): Promise<void> {
+    const claim = this.operatorNotifications.get(eventId);
+    if (claim?.claimToken === claimToken && claim.deliveredAt === null) this.operatorNotifications.delete(eventId);
   }
   operatorLineEnabled = true;
   async getOperatorLineEnabled(): Promise<boolean> { return this.operatorLineEnabled; }

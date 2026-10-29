@@ -51,6 +51,9 @@ opt-out; Grok Bot must not claim it succeeded.
   Inbound does not require outbound dialing, plugin writes, or a campaign switch.
 - `OPERATOR_INBOUND_NOTIFIER=none|webhook|github`: default `none`. Unknown or
   incomplete configuration is a no-op; saved requests remain fetchable.
+- `OPERATOR_NOTIFICATION_CLAIM_LEASE_MS`: default **60000** milliseconds.
+  Undelivered claims older than this lease can be reclaimed by a later callback.
+  Invalid or nonpositive values fall back to the default.
 - Webhook: `OPERATOR_INBOUND_WEBHOOK_URL` (HTTPS) and
   `OPERATOR_INBOUND_WEBHOOK_SECRET`.
 - `OPERATOR_INBOUND_WEBHOOK_AUTH=hmac|bearer|both`: default **both**.
@@ -67,8 +70,11 @@ attempt timeout and one retry. Delivery is best effort, without a durable
 retry queue; storage is durable, and delivery failures never break a call.
 A process restart can interrupt outstanding notification attempts.
 Before delivery, `plugin_operator_notifications` atomically claims the event
-once, across processes and restarts. The internal retry reuses that claim.
-Later calls for a claimed event are suppressed, even if both attempts failed.
+across processes and restarts. The internal retry reuses that claim.
+Fresh claims block duplicates; successful deliveries retain the event permanently.
+Two failed attempts release the claim so a later callback can retry. An abandoned
+undelivered claim can be reclaimed after its lease expires. Each claim has a new
+token, so a stale worker cannot release or mark a reclaimed event delivered.
 If claim storage is unavailable, delivery fails open with the same event ID.
 Apply `migrations/add_operator_notification_claims.sql` separately; it is not
 applied by the application or this change. Keyed SMS prepares require its

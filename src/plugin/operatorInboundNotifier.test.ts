@@ -146,14 +146,15 @@ describe("operator inbound notifier", () => {
     expect(request).toHaveBeenCalledTimes(2);
     expect(log).not.toHaveBeenCalledWith("[operator-inbound] notifier=webhook delivered");
     expect(markDelivered).not.toHaveBeenCalled();
-    expect(release).toHaveBeenCalledExactlyOnceWith(eventId);
+    expect(release).toHaveBeenCalledExactlyOnceWith(eventId, expect.any(String));
     expect(store.operatorNotifications.has(eventId)).toBe(false);
 
     await notify();
     expect(request).toHaveBeenCalledTimes(3);
     expect(log.mock.calls.filter(([message]) => message === "[operator-inbound] notifier=webhook delivered")).toHaveLength(1);
-    expect(markDelivered).toHaveBeenCalledExactlyOnceWith(eventId);
-    expect(store.operatorNotifications.get(eventId)).toBeInstanceOf(Date);
+    expect(markDelivered).toHaveBeenCalledExactlyOnceWith(eventId, store.operatorNotifications.get(eventId)?.claimToken);
+    expect(markDelivered.mock.calls[0][1]).not.toBe(release.mock.calls[0][1]);
+    expect(store.operatorNotifications.get(eventId)?.deliveredAt).toBeInstanceOf(Date);
 
     await notify();
     expect(request).toHaveBeenCalledTimes(3);
@@ -205,19 +206,19 @@ describe("operator inbound notifier", () => {
     const notify = createOperatorInboundNotifier(webhookEnv, { fetch: request, store: () => store, log: vi.fn() });
     const work = notify(record);
     await vi.waitFor(() => expect(request).toHaveBeenCalledOnce());
-    expect(store.operatorNotifications.get(eventId)).toBeNull();
+    expect(store.operatorNotifications.get(eventId)?.deliveredAt).toBeNull();
     await notify(record);
     expect(request).toHaveBeenCalledOnce();
 
     replies[0](new Response(null, { status: 503 }));
     await vi.waitFor(() => expect(request).toHaveBeenCalledTimes(2));
-    expect(store.operatorNotifications.get(eventId)).toBeNull();
+    expect(store.operatorNotifications.get(eventId)?.deliveredAt).toBeNull();
     await notify(record);
     expect(request).toHaveBeenCalledTimes(2);
 
     replies[1](new Response(null, { status: 204 }));
     await work;
-    expect(store.operatorNotifications.get(eventId)).toBeInstanceOf(Date);
+    expect(store.operatorNotifications.get(eventId)?.deliveredAt).toBeInstanceOf(Date);
     await notify(record);
     expect(request).toHaveBeenCalledTimes(2);
   });
@@ -232,6 +233,41 @@ describe("operator inbound notifier", () => {
     await notify(record);
     expect(request).toHaveBeenCalledOnce();
     expect(release).not.toHaveBeenCalled();
+  });
+
+  it.each([204, 503])("keeps a reclaimed claim when the stale notifier finishes with %s", async (status) => {
+    vi.useFakeTimers();
+    try {
+      const store = new MemoryPluginStore({ operatorNotificationClaimLeaseMs: 50 });
+      const eventId = `opline:${record.callSid}:completed`;
+      let finishStale!: (response: Response) => void;
+      let finishCurrent!: (response: Response) => void;
+      const request = vi.fn<typeof fetch>()
+        .mockImplementationOnce(() => new Promise((resolve) => { finishStale = resolve; }))
+        .mockImplementationOnce(() => new Promise((resolve) => { finishCurrent = resolve; }))
+        .mockResolvedValue(new Response(null, { status: 503 }));
+      const notify = createOperatorInboundNotifier(webhookEnv, { fetch: request, store: () => store, log: vi.fn() });
+      const staleWork = notify(record);
+      await vi.advanceTimersByTimeAsync(0);
+      const staleToken = store.operatorNotifications.get(eventId)?.claimToken;
+      await vi.advanceTimersByTimeAsync(51);
+      const currentWork = notify(record);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(request).toHaveBeenCalledTimes(2);
+      const current = structuredClone(store.operatorNotifications.get(eventId));
+      expect(current?.claimToken).not.toBe(staleToken);
+
+      finishStale(new Response(null, { status }));
+      await staleWork;
+      expect(store.operatorNotifications.get(eventId)).toEqual(current);
+      await notify(record);
+      expect(request).toHaveBeenCalledTimes(status === 204 ? 2 : 3);
+
+      finishCurrent(new Response(null, { status: 204 }));
+      await currentWork;
+      expect(store.operatorNotifications.get(eventId)?.claimToken).toBe(current?.claimToken);
+      expect(store.operatorNotifications.get(eventId)?.deliveredAt).toBeInstanceOf(Date);
+    } finally { vi.useRealTimers(); }
   });
 
   it.each(["missing", "throw"])("fails open with stable IDs when claim storage is %s", async (mode) => {

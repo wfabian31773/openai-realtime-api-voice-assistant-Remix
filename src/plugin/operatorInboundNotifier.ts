@@ -65,7 +65,7 @@ export function createOperatorInboundNotifier(env: Env, deps: {
   const request = deps.fetch ?? fetch;
   const log = deps.log ?? ((message: string) => console.info(message));
   return async (record, requestId) => {
-    let claim: { store: PluginStore; eventId: string } | null = null;
+    let claim: { store: PluginStore; eventId: string; claimToken: string } | null = null;
     let delivered = false;
     // Never let a custom logger, serialization error, or network failure escape.
     try {
@@ -75,8 +75,9 @@ export function createOperatorInboundNotifier(env: Env, deps: {
       try {
         const store = deps.store?.();
         if (store) {
-          claimed = await store.claimOperatorNotification(basePayload.event_id);
-          if (claimed) claim = { store, eventId: basePayload.event_id };
+          const claimToken = await store.claimOperatorNotification(basePayload.event_id);
+          claimed = claimToken !== null;
+          if (claimToken !== null) claim = { store, eventId: basePayload.event_id, claimToken };
         }
       } catch {
         // Migration/storage may be unavailable: receivers still have event_id.
@@ -134,8 +135,8 @@ export function createOperatorInboundNotifier(env: Env, deps: {
     finally {
       if (claim) {
         try {
-          if (delivered) await claim.store.markOperatorNotificationDelivered(claim.eventId);
-          else await claim.store.releaseOperatorNotification(claim.eventId);
+          if (delivered) await claim.store.markOperatorNotificationDelivered(claim.eventId, claim.claimToken);
+          else await claim.store.releaseOperatorNotification(claim.eventId, claim.claimToken);
         } catch { /* best effort if storage is unavailable */ }
       }
     }
