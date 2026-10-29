@@ -51,6 +51,8 @@ const prescriptionFulfillment = (text: string) => /\b(?:prescriptions?|recetas?)
 // Exclude billing objects here; a billing purpose for a medical copy still counts.
 const GENERIC_COPY = new RegExp(String.raw`\b(?:(?:copy|copies) of|(?:copia|copias) de)\s+(?!(?:(?:a|an|the|my|our|your|his|her|their|this|that|last|latest|recent|medical|hospital)\s+)*${BILLING.source})[a-z0-9]`);
 const GENERIC_COPY_REQUEST = /(?:^\s*(?:(?:please|just|only)\s+)*|\b(?:necesit\w*|solicit\w*|quiero)\s+(?:(?:una|unas)\s+)?)(?:copy|copies|copia|copias)\s+(?:of|de)\s+[a-z0-9]/;
+// First-person access questions ("How can I get a copy of my MRI?") ask for delivery.
+const GENERIC_COPY_QUESTION = /\b(?:how (?:can|do|could|would) (?:i|we)|(?:can|could|may) (?:i|we)|where (?:can|do) (?:i|we))\s+(?:please\s+)?(?:get|obtain|request|receive|pick up)\s+(?:(?:a|an|some)\s+)?(?:copy|copies) of\s+[a-z0-9]/;
 const GENERIC_COPY_ACCESS = /\bquestion about\s+(?:(?:the )?status of|getting|obtaining|requesting|receiving|accessing)\b[^.!?;]{0,100}\b(?:copy|copies) of\s+[a-z0-9]/;
 const WANT = /\b(?:need|want|request(?:ing|s|ed)?|would like|asking for|necesit\w*|solicit\w*|quiero)\b/;
 const SCHEDULE_ACTION = /\b(?:reschedul\w*|schedul\w*|cancel\w*|confirm\w*|book\w*|change|move|reprogram\w*|cambiar)\b[^.!?]{0,65}\b(?:appointments?|visits?|exam|date|cita)\b|\b(?:schedul\w*|book\w*)\b[^.!?;]{0,65}\b(?:oct|visual field|vf|drs|fundus|topography)\b|\b(?:appointment|cita)\b[^.!?]{0,40}\b(?:change|cancel\w*|confirm\w*|reschedul\w*)\b/;
@@ -132,7 +134,7 @@ export function recordsLinePurpose(text: string): RecordsLinePurpose {
     const interpretation = clause.search(INTERPRETATION);
     const c = interpretation < 0 ? clause : clause.slice(0, interpretation);
     const accessQuestion = ACCESS_QUESTION.test(c);
-    const genericCopyRequest = GENERIC_COPY.test(c) && (EXPLICIT_DELIVERY.test(c) || GENERIC_COPY_REQUEST.test(c) || GENERIC_COPY_ACCESS.test(c));
+    const genericCopyRequest = GENERIC_COPY.test(c) && (EXPLICIT_DELIVERY.test(c) || GENERIC_COPY_REQUEST.test(c) || GENERIC_COPY_ACCESS.test(c) || GENERIC_COPY_QUESTION.test(c));
     if (interpretation >= 0 && requestedDeliveryAfterInterpretation(clause, interpretation)) return true;
     if (interpretation >= 0 && !EXPLICIT_DELIVERY.test(c) && !accessQuestion && !genericCopyRequest) return false;
     const document = DOC.test(c) || /\b(?:doctor'?s? note|notes? from|report from)\b/.test(c);

@@ -642,4 +642,6 @@ describe('records line: Codex round on 88122c5', () => {
   it.each(['I need the records department', 'Is this the records department?'])('a bare office mention is not a records ask: %s', (t) => {
     expect(recordsLinePurpose(t)).not.toBe('records');
   });
+  it.each(['How can I get a copy of my MRI?', 'Can I get a copy of my file?', 'Where can I get a copy of my chart?'])(
+    'a first-person copy-access question stays records: %s', (q) => expect(recordsLinePurpose(q)).toBe('records'));
 });
