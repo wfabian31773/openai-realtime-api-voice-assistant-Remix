@@ -34,6 +34,7 @@ import { gateRefusalsSoFar, noteGateRefusal, noteCallFact, callFactNoted } from 
 import { forgetIfSameName, nameKey, rememberVerifiedIdentity, verifiedIdentityFor } from './verifiedIdentity';
 import { LOOKUP_UNSURE_FILE_FIX, LOOKUP_UNSURE_FIX, LOOKUP_UNSURE_SAY, spokenFirstNameAgreesWithChart } from './lookupUnsure';
 import { appointmentAccess } from '../services/appointmentAccess';
+import { noteStatusOverride, patientStatusFor } from './spokenPatientStatus';
 import './patientAppointments';
 
 /** Which queue is asking. Injected as call context, never a model argument. */
@@ -264,7 +265,6 @@ registerTool({
      * still answers. A new patient's ticket carries no match, which is correct
      * and expected rather than a gap.
      */
-    const { patientStatusFor, noteStatusOverride } = await import('./spokenPatientStatus');
     const { LANES_THAT_ASK } = await import('../runtime/newOrExistingAsk');
     // Only the way back is honoured. A model that sends `new` against the
     // schema's single value changes nothing — the store cannot hold it and this
