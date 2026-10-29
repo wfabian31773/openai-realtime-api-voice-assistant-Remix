@@ -316,6 +316,31 @@ check(optical, SHARED, 'optical prompt keeps every ruling');
 check(records, [...SHARED, ...RECORDS_ONLY], 'records prompt keeps every ruling');
 
 /**
+ * Operator ruling, 2026-10-29: *"if the patients ask for a person in a line
+ * without transfer capabilities, apologize and say that they can only take a
+ * message and a team member will follow up."* Before it the lanes said they
+ * could not transfer and would take a message, with no apology, and the model
+ * improvised variants that dropped both halves ("There's no one I can connect
+ * you to").
+ *
+ * BOUND TO THE QUOTED TRANSFER RESPONSE, not matched loosely like the rulings
+ * above: "apologise" alone also matches the prompts' own "do not apologise for
+ * the wait" and "do not over-apologise", so a loose match would survive the
+ * apology being deleted from the response (Codex, PR #401). All three parts —
+ * the apology, ONLY a message, who follows up — must sit in the one sentence
+ * the agent is given to say.
+ */
+describe('a request for a person gets sorry, only a message, and who follows up', () => {
+  const SENTENCE =
+    /"i'm sorry, i'm not able to transfer calls\. i can only take a message and put in a request, and the [a-z ]+ will follow up with you\."/;
+  for (const [lane, prompt] of [['optical', optical], ['surgery', surgery], ['tech', tech], ['records', records]] as const) {
+    it(`${lane} quotes it as one sentence`, () => {
+      expect(prompt.toLowerCase().replace(/\s+/g, ' ')).toMatch(SENTENCE);
+    });
+  }
+});
+
+/**
  * THE MUTATION GUARD FOR THE RULING ABOVE, stated as the defect rather than
  * the fix. "in this shape" is one way to say it and a future rewording is
  * fine; telling the model to use a quoted English question VERBATIM is not,

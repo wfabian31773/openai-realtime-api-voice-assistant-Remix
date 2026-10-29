@@ -34,6 +34,7 @@ import { decideDobEscape, dobStatusNote, dobEscapeMarker, type DobStatus } from 
 import { createTicketDurable, postFailureToolResult } from '../services/durableTicketFiling';
 import { loggableLookupError } from '../services/loggableTicketingError';
 import { verifiedDobFor } from './verifiedIdentity';
+import { spokenDobFor } from './spokenDob';
 
 // ---------------------------------------------------------------- what kind
 
@@ -277,7 +278,6 @@ registerTool({
        * than filing none — see spokenDob.ts for the adjacency rule and what it
        * still cannot catch.
        */
-      const { spokenDobFor } = await import('./spokenDob');
       const heard = spokenDobFor(callSid);
       parts = heard ? normalizeDobParts(heard) : null;
       if (parts) {
