@@ -16,9 +16,21 @@ import type {
   OutboxStatus,
   PluginStore,
   OperatorCallRecord,
+  OperatorInboundCallRecord,
 } from "./store";
 
 export type SqlExec = (text: string, params?: unknown[]) => Promise<Record<string, unknown>[]>;
+
+function operatorInboundFrom(row: Record<string, unknown>): OperatorInboundCallRecord {
+  return {
+    callId: String(row.call_id), callSid: String(row.call_sid), direction: "inbound", laneSlug: "wayne-operator",
+    callerNumber: row.caller_number == null ? null : String(row.caller_number), status: String(row.status),
+    startedAt: new Date(String(row.started_at)), endedAt: row.ended_at ? new Date(String(row.ended_at)) : null,
+    turns: (typeof row.turns === "string" ? JSON.parse(row.turns) : row.turns) as OperatorInboundCallRecord["turns"],
+    requestSummary: row.request_summary == null ? null : String(row.request_summary),
+    optedOut: row.opted_out === true, transcriptUrl: String(row.transcript_url),
+  };
+}
 
 function tokenFrom(r: Record<string, unknown>): ApiTokenRow {
   return {
@@ -118,6 +130,32 @@ function suggestionsFrom(
 
 export function createSqlPluginStore(exec: SqlExec): PluginStore {
   return {
+    async startOperatorInboundCall(record) {
+      await exec(`INSERT INTO plugin_operator_inbound_calls
+        (call_id, call_sid, caller_number, status, started_at, transcript_url)
+        VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (call_sid) DO NOTHING`,
+      [record.callId, record.callSid, record.callerNumber, record.status, record.startedAt.toISOString(), record.transcriptUrl]);
+      const [row] = await exec("SELECT * FROM plugin_operator_inbound_calls WHERE call_sid = $1 AND lane_slug = 'wayne-operator' AND direction = 'inbound'", [record.callSid]);
+      if (!row) throw new Error("operator inbound record unavailable");
+      return operatorInboundFrom(row);
+    },
+    async getOperatorInboundCall(callSid) {
+      const [row] = await exec("SELECT * FROM plugin_operator_inbound_calls WHERE call_sid = $1 AND lane_slug = 'wayne-operator' AND direction = 'inbound'", [callSid]);
+      return row ? operatorInboundFrom(row) : null;
+    },
+    async updateOperatorInboundRequest(callSid, patch) {
+      await exec(`UPDATE plugin_operator_inbound_calls SET
+        request_summary = COALESCE($2, request_summary), opted_out = opted_out OR $3
+        WHERE call_sid = $1 AND ended_at IS NULL AND lane_slug = 'wayne-operator' AND direction = 'inbound'`,
+      [callSid, patch.requestSummary ?? null, patch.optedOut ?? false]);
+    },
+    async finishOperatorInboundCall(callSid, endedAt, status, turns) {
+      const [row] = await exec(`UPDATE plugin_operator_inbound_calls
+        SET ended_at = $2, status = $3, turns = $4::jsonb
+        WHERE call_sid = $1 AND ended_at IS NULL AND lane_slug = 'wayne-operator' AND direction = 'inbound' RETURNING *`,
+      [callSid, endedAt.toISOString(), status, JSON.stringify(turns)]);
+      return row ? operatorInboundFrom(row) : null;
+    },
     async isOperatorOptedOut(phone) {
       return (await exec("SELECT 1 FROM plugin_operator_dnc WHERE phone = $1 LIMIT 1", [phone])).length > 0;
     },

@@ -287,6 +287,7 @@ export interface LaneCallMetadata {
   /** Only the owned SI Assistant direct live session supplies this. */
   readonly directCall?: { purpose: string; name?: string };
   readonly operatorCall?: OperatorCallPayload;
+  readonly operatorInbound?: { tools: LiveTool[] };
   /**
    * On an outbound lane, a call somebody made TO it — the person ringing
    * back the number we call from (./outbound/callback.ts): who on the
@@ -392,14 +393,15 @@ export async function resolveLane(
     // The knowledge pack, placed by the binding as `## Business Facts` after
     // a five-section prompt's Role & Persona (the docs' order), or in front
     // of any other prompt (ADR-001's original arrangement).
-    instructionsPrefix: metadata.directCall || metadata.operatorCall ? undefined : buildKnowledgePack(),
+    instructionsPrefix: metadata.directCall || metadata.operatorCall || metadata.operatorInbound ? undefined : buildKnowledgePack(),
     // The pipeline's own tools, on every lane, recorded to the timeline the
     // way the lane's own are.
-    runtimeTools: [
+    runtimeTools: metadata.operatorInbound ? metadata.operatorInbound.tools : [
       ...(await runtimeOwnedTools(slug, metadata, config.spokenLanguages)),
       ...outboundRuntimeTools(slug, metadata, config),
     ],
     spokenLanguages: config.spokenLanguages,
+    languageToolAvailable: !metadata.operatorInbound,
   });
 
   const env = deps.env ?? process.env;

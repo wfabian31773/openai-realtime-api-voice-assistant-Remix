@@ -96,6 +96,55 @@ async function boot() {
 }
 
 describe("approval-gated Wayne operator line", () => {
+  it("exposes inbound transcripts only to operator bots, scoped to the inbound table, with private caching and redacted audit", async () => {
+    const h = await boot();
+    const callSid = `CA${"a".repeat(32)}`;
+    await h.store.startOperatorInboundCall({ callId: "inbound-record", callSid, laneSlug: OPERATOR_SLUG, direction: "inbound",
+      callerNumber: PHONE, status: "in_progress", startedAt: h.clock.at, endedAt: null,
+      turns: [], requestSummary: null, optedOut: false,
+      transcriptUrl: `https://fleet.example/api/plugin/v1/operator-line/inbound/${callSid}` });
+    await h.store.updateOperatorInboundRequest(callSid, { requestSummary: "Please arrange a meeting" });
+    await h.store.finishOperatorInboundCall(callSid, h.clock.at, "completed", [{ role: "caller", text: "Confirmed meeting request", atMs: h.clock.at.getTime() }]);
+    const path = `/operator-line/inbound/${callSid}`;
+    const response = await h.request(path);
+    expect(response).toMatchObject({ status: 200, body: { callSid, callerNumber: PHONE, direction: "inbound", requestSummary: "Please arrange a meeting",
+      transcript: [{ role: "caller", text: "Confirmed meeting request", at: h.clock.at.toISOString() }] } });
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    // Inbound has no initiating token owner: any explicitly scoped bot can fetch.
+    expect((await h.request(path, undefined, h.store.mint(["operator:call"]))).status).toBe(200);
+    for (const token of [h.staff, h.other, h.store.mint(), h.store.mint(["operator:call", "contacts:approve"])]) {
+      expect((await h.request(path, undefined, token)).status).toBe(403);
+    }
+    expect((await h.request(path, undefined, { plaintext: "invalid" } as typeof h.bot)).status).toBe(401);
+    expect((await h.request("/operator-line/inbound/CA-unrelated")).status).toBe(404);
+    const approved = await h.approved();
+    const outbound = await h.request("/commit_call_live", { confirmToken: approved.confirmToken });
+    expect((await h.request(`/operator-line/inbound/${outbound.body.callSid}`)).status).toBe(404);
+    const audit = await h.store.listAudit();
+    expect(audit).toContainEqual(expect.objectContaining({ tool: "operator_inbound_transcript", outcome: "ok", httpStatus: 200 }));
+    expect(JSON.stringify(audit)).not.toContain(PHONE);
+    expect(JSON.stringify(audit)).not.toMatch(/Confirmed meeting request|Please arrange a meeting/);
+  });
+
+  it("fails closed if inbound transcript storage is unavailable", async () => {
+    const h = await boot();
+    vi.spyOn(h.store, "getOperatorInboundCall").mockRejectedValue(new Error("private provider error"));
+    expect(await h.request(`/operator-line/inbound/CA${"a".repeat(32)}`)).toMatchObject({ status: 503, body: { error: "Operator inbound storage is unavailable" } });
+  });
+
+  it("uses parameterized inbound SQL with atomic completion and explicit lane/direction constraints", async () => {
+    const exec = vi.fn().mockResolvedValue([]);
+    const store = createSqlPluginStore(exec);
+    await store.getOperatorInboundCall("CA-unrelated");
+    expect(exec).toHaveBeenLastCalledWith(expect.stringContaining("lane_slug = 'wayne-operator' AND direction = 'inbound'"), ["CA-unrelated"]);
+    await store.updateOperatorInboundRequest("CA-inbound", { requestSummary: "Arrange a meeting", optedOut: true });
+    expect(exec).toHaveBeenLastCalledWith(expect.stringContaining("ended_at IS NULL"), ["CA-inbound", "Arrange a meeting", true]);
+    expect(exec.mock.calls[exec.mock.calls.length - 1][0]).not.toContain("Arrange a meeting");
+    await store.finishOperatorInboundCall("CA-inbound", hDate(), "completed", []);
+    expect(exec).toHaveBeenLastCalledWith(expect.stringMatching(/ended_at IS NULL.*RETURNING/), ["CA-inbound", hDate().toISOString(), "completed", "[]"]);
+    function hDate() { return new Date(OPEN); }
+  });
+
   it("requires an explicit bot scope, preserves mint defaults and excludes mixed staff tokens", async () => {
     const h = await boot();
     expect(DEFAULT_PLUGIN_SCOPES).toEqual(["fleet:read"]);

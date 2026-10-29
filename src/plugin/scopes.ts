@@ -79,6 +79,7 @@ export function mintScopesCompatible(scopes: readonly PluginScope[]): { ok: true
 export const SCOPE_FOR_TOOL: Record<string, PluginScope> = {
   prepare_operator_call: "operator:call",
   operator_call_transcript: "operator:call",
+  operator_inbound_transcript: "operator:call",
   direct_call: "calls:direct",
   capabilities: "fleet:read",
   confirm_token: "contacts:commit",

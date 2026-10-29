@@ -2,11 +2,31 @@ import { describe, expect, it, vi } from "vitest";
 vi.hoisted(() => { process.env.DATABASE_URL ||= "postgres://stub:stub@ci-stub.invalid:5432/stub"; });
 import { resolveLane, RUNTIME_OUTBOUND_TOOLS } from "../runtime/laneRegistry";
 import { OPERATOR_SLUG } from "../plugin/operatorLine";
-import { OPERATOR_GREETING, operatorInstructions } from "./operatorLineAgent";
+import { OPERATOR_GREETING, OPERATOR_INBOUND_GREETING, operatorInstructions } from "./operatorLineAgent";
+import { OperatorInboundWebhook } from "../runtime/operatorInboundWebhook";
+import { CallSessionRegistry } from "../runtime/sessionRegistry";
+import { MemoryPluginStore } from "../plugin/store";
+import { FakeOutboundStore } from "../runtime/outbound/store.testkit";
 import { siAssistantNumber } from "../plugin/siAssistantConstants";
 import { siAssistantPolicy } from "./siAssistantAgent";
 
 describe("Wayne operator runtime agent", () => {
+  it("binds inbound mode with only request, opt-out and hangup tools and no patient or callback flow", async () => {
+    const { agentRegistry } = await import("../config/agents");
+    const service = new OperatorInboundWebhook({ env: {}, registry: new CallSessionRegistry(), store: () => new MemoryPluginStore(), outbound: async () => new FakeOutboundStore() });
+    const lane = await resolveLane(OPERATOR_SLUG, { callId: "CA-inbound", callSid: "CA-inbound", callerPhone: "+15555550123", dialedNumber: "+15555550100",
+      operatorInbound: { tools: service.tools("CA-inbound") } }, { source: agentRegistry, env: {} });
+    expect(lane!.agent.toolNames).toEqual(["end_call", "record_call_outcome", "opt_out_of_calls"]);
+    expect(lane!.agent.instructions).toContain("Only after the caller confirms");
+    expect(lane!.agent.instructions).toContain("Never ask for a date of birth, DOB");
+    expect(lane!.agent.instructions).not.toMatch(/Business Facts|Caller script\/persona|identify_callback_caller|set_spoken_language/);
+    expect(OPERATOR_INBOUND_GREETING).toContain("Wayne Fabian's operator line");
+    expect(OPERATOR_INBOUND_GREETING).toContain("AI assistant");
+    expect(OPERATOR_INBOUND_GREETING).toContain("call is recorded");
+    expect(await lane!.agent.dispatch("lookup_patient", {})).toMatchObject({ ok: false });
+    expect(await lane!.agent.dispatch("end_call", {})).toMatchObject({ ok: true });
+  });
+
   it("binds the caller script without patient tools, business facts or verification", async () => {
     const { agentRegistry } = await import("../config/agents");
     const operatorCall = { callKind: "operator" as const, phone: "+19094795435", purpose: "Synthetic test", callerScript: "I need two consecutive bookings. Flashes, but no vision loss.", language: "es", maxDurationSec: 60 };

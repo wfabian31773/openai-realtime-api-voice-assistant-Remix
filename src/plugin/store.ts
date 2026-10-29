@@ -41,6 +41,22 @@ export interface OperatorCallRecord {
   turns: TranscriptTurn[];
 }
 
+/** Separate from approval-owned outbound calls; never copied into audit. */
+export interface OperatorInboundCallRecord {
+  callId: string;
+  callSid: string;
+  direction: "inbound";
+  laneSlug: "wayne-operator";
+  callerNumber: string | null;
+  status: string;
+  startedAt: Date;
+  endedAt: Date | null;
+  turns: TranscriptTurn[];
+  requestSummary: string | null;
+  optedOut: boolean;
+  transcriptUrl: string;
+}
+
 export const CONTACT_CHANNELS = ["call", "sms", "email"] as const;
 export type ContactChannel = (typeof CONTACT_CHANNELS)[number];
 
@@ -143,6 +159,11 @@ export interface EmailPayload {
 export type ContactPayload = CallPayload | SmsPayload | EmailPayload;
 
 export interface PluginStore {
+  startOperatorInboundCall(record: OperatorInboundCallRecord): Promise<OperatorInboundCallRecord>;
+  getOperatorInboundCall(callSid: string): Promise<OperatorInboundCallRecord | null>;
+  updateOperatorInboundRequest(callSid: string, patch: { requestSummary?: string; optedOut?: true }): Promise<void>;
+  /** Atomic first completion wins, including across callback retries. */
+  finishOperatorInboundCall(callSid: string, endedAt: Date, status: string, turns: TranscriptTurn[]): Promise<OperatorInboundCallRecord | null>;
   isOperatorOptedOut(phone: string): Promise<boolean>;
   setOperatorOptOut(phone: string): Promise<void>;
   saveOperatorCall(record: OperatorCallRecord): Promise<void>;
@@ -272,6 +293,24 @@ export async function verifyStoredToken(
 }
 
 export class MemoryPluginStore implements PluginStore {
+  operatorInboundCalls = new Map<string, OperatorInboundCallRecord>();
+  async startOperatorInboundCall(record: OperatorInboundCallRecord): Promise<OperatorInboundCallRecord> {
+    if (!this.operatorInboundCalls.has(record.callSid)) this.operatorInboundCalls.set(record.callSid, structuredClone(record));
+    return structuredClone(this.operatorInboundCalls.get(record.callSid)!);
+  }
+  async getOperatorInboundCall(callSid: string): Promise<OperatorInboundCallRecord | null> {
+    return structuredClone(this.operatorInboundCalls.get(callSid) ?? null);
+  }
+  async updateOperatorInboundRequest(callSid: string, patch: { requestSummary?: string; optedOut?: true }): Promise<void> {
+    const record = this.operatorInboundCalls.get(callSid);
+    if (record && !record.endedAt) Object.assign(record, patch);
+  }
+  async finishOperatorInboundCall(callSid: string, endedAt: Date, status: string, turns: TranscriptTurn[]): Promise<OperatorInboundCallRecord | null> {
+    const record = this.operatorInboundCalls.get(callSid);
+    if (!record || record.endedAt) return null;
+    Object.assign(record, { endedAt, status, turns: structuredClone(turns) });
+    return structuredClone(record);
+  }
   operatorOptOuts = new Set<string>();
   async isOperatorOptedOut(phone: string): Promise<boolean> { return this.operatorOptOuts.has(phone); }
   async setOperatorOptOut(phone: string): Promise<void> { this.operatorOptOuts.add(phone); }

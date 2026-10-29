@@ -196,6 +196,26 @@ export function mountPluginApi(app: Express, deps: PluginApiDeps): void {
     requireScope("contacts:commit")(req, res, next);
   };
 
+  app.get(`${v1}/operator-line/inbound/:callSid`, requireAuth, requireScope("operator:call"), requireBot, async (req: AuthedRequest, res) => {
+    res.setHeader("Cache-Control", "no-store");
+    try {
+      const record = await deps.store.getOperatorInboundCall(req.params.callSid);
+      if (!record || record.laneSlug !== "wayne-operator" || record.direction !== "inbound") {
+        jsonError(res, 404, "Operator inbound call not found");
+        await audit(deps, req.pluginAuth, req, "operator_inbound_transcript", "denied", 404);
+        return;
+      }
+      res.json({ callId: record.callId, callSid: record.callSid, direction: record.direction, status: record.status,
+        startedAt: record.startedAt.toISOString(), endedAt: record.endedAt?.toISOString() ?? null,
+        callerNumber: record.callerNumber, requestSummary: record.requestSummary, optedOut: record.optedOut,
+        transcript: record.turns.map((turn) => ({ role: turn.role, text: turn.text, at: new Date(turn.atMs).toISOString() })) });
+      await audit(deps, req.pluginAuth, req, "operator_inbound_transcript", "ok", 200);
+    } catch {
+      jsonError(res, 503, "Operator inbound storage is unavailable");
+      await audit(deps, req.pluginAuth, req, "operator_inbound_transcript", "error", 503);
+    }
+  });
+
   app.post(`${v1}/prepare_operator_call`, requireAuth, requireScope("operator:call"), requireBot, requireWrites, async (req: AuthedRequest, res) => {
     res.setHeader("Cache-Control", "no-store");
     const problem = operatorFromProblem(envOf(deps));

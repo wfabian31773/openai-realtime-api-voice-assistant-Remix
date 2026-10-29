@@ -953,8 +953,10 @@ import { callEnvironment } from "./callRecord";
  * choose unclassified_call in its intake tool; the after-hangup floor still
  * files unclassified calls for a person to route. On top of v135 (#392, main, 6ae60e33); v127 is #376 and v133 is #391 on their open branches. No migration; production impact remains unmeasured.
  */
+/** v142: signed operator inbound, confirmed requests, private transcript fetch,
+ * and redacted bot handoff. Apply add_operator_line_inbound.sql separately. */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v141-the-spoken-stores-reach-the-tools-20261029";
+  "voice-runtime-v142-operator-line-inbound-20261029";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

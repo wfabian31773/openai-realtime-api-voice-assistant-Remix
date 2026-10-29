@@ -46,7 +46,14 @@ const HOP_BY_HOP_HEADERS = new Set([
 const healthState = createHealthState();
 registerHealthEndpoints(app, healthState);
 
-app.use('/api/voice', (req, res) => {
+app.use('/api/voice', (req, res, next) => {
+  // Operator inbound uses the public server's /voice/stream WebSocket runtime.
+  // Let its signed routes reach the body parsers and mountVoiceRuntime below.
+  if ([
+    '/api/voice/operator-line/inbound',
+    '/api/voice/operator-line/inbound/status',
+    '/api/voice/operator-line/inbound/after',
+  ].includes(req.originalUrl.split('?')[0])) return next();
   const startTime = Date.now();
   
   // Forward ALL headers except hop-by-hop ones to preserve signature verification metadata

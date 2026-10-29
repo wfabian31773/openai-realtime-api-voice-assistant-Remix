@@ -49,6 +49,8 @@ export interface CallEntry {
   outbound?: { campaignKey: string; contactId: string; attemptId: string };
   /** Marks live calls even after their ephemeral registry entry expires. */
   liveSessionId?: string;
+  /** Set only by the signed, number-gated operator inbound webhook. */
+  operatorInbound?: true;
 }
 
 /** How long a webhook-issued entry may wait for its stream and its after-
@@ -87,6 +89,7 @@ export class CallSessionRegistry {
     dialedNumber: string;
     outbound?: CallEntry["outbound"];
     liveSessionId?: string;
+    operatorInbound?: true;
   }): CallEntry {
     this.sweep();
     const existing = this.entries.get(input.callSid);
@@ -102,6 +105,7 @@ export class CallSessionRegistry {
       outcome: null,
       ...(input.outbound ? { outbound: { ...input.outbound } } : {}),
       ...(input.liveSessionId ? { liveSessionId: input.liveSessionId } : {}),
+      ...(input.operatorInbound ? { operatorInbound: true as const } : {}),
     };
     this.entries.set(input.callSid, entry);
     return entry;
