@@ -972,7 +972,7 @@ import { callEnvironment } from "./callRecord";
  * Apply add_operator_line_inbound.sql separately. Merged to main as #402
  * (6cac333). */
 /**
- * v145 — THE TEST CALL'S OFFICE AND NAME (2026-10-29). Three defects from the
+ * v148 — THE TEST CALL'S OFFICE AND NAME (2026-10-29). Three defects from the
  * operator's pack-01 A1 test call: no queue prompt quotes a sample office any
  * more (the optical agent offered one when no record was found), an office
  * `resolve_location` verified on the call reaches `file_optical_ticket` when
@@ -981,8 +981,8 @@ import { callEnvironment } from "./callRecord";
  * (#402, main, 6cac333). No migration; production impact remains unmeasured.
  */
 /**
- * v146 — A LATER FILING ADDS TO THE TICKET (2026-10-29). Stacked on v145 in
- * one PR; only v146 reaches a deployment. A filing on a call that has already
+ * v149 — A LATER FILING ADDS TO THE TICKET (2026-10-29). Stacked on v148 in
+ * one PR; only v149 reaches a deployment. A filing on a call that has already
  * filed used to be answered from the call's outbox row and sent nowhere; it is
  * now sent on with the call's own key so the ticketing app adds its details
  * to the ticket (ticketing-app #414), and the tool tells the model what
@@ -990,7 +990,7 @@ import { callEnvironment } from "./callRecord";
  * migration; production impact remains unmeasured.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v146-a-later-filing-adds-to-the-ticket-20261029";
+  "voice-runtime-v149-a-later-filing-adds-to-the-ticket-20261029";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

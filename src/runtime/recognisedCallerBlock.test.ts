@@ -264,7 +264,7 @@ describe('the ask script agrees with the block above it', () => {
     expect(script).toMatch(/date of birth, starting with the month/);
   });
 
-  // v145: the pack-01 A1 test call (CAe121c3c176d626e8a679536788e58d63) tried
+  // v148: the pack-01 A1 test call (CAe121c3c176d626e8a679536788e58d63) tried
   // to file with no first name. The script asked for the last name alone,
   // which suits a caller the greeting already named and nobody else, and
   // both arms reach a caller the greeting did not name: an unrecognised

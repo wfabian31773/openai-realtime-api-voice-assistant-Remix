@@ -1,6 +1,6 @@
 /**
  * AN OFFICE `resolve_location` VERIFIED ON THE CALL REACHES THE FILING TOOL
- * (v145, `verifiedOffice.ts`).
+ * (v148, `verifiedOffice.ts`).
  *
  * Found on the operator's pack-01 A1 test call, 2026-10-29
  * (`CAe121c3c176d626e8a679536788e58d63`, optical): the caller named Covina,
@@ -15,7 +15,7 @@
  * `resolve_location` on the same call had answered `verified: true`. 27 calls,
  * 37 such refusals. All 27 filed in the end (the gate asks once, then files),
  * so no request was lost; what each one cost was a caller asked a question
- * they had just answered. Under v145 none of those 37 refusals is reachable:
+ * they had just answered. Under v148 none of those 37 refusals is reachable:
  * the verified office fills the field the model left out.
  *
  * Synthetic patient throughout. The SIDs are the real calls; no transcript,
@@ -128,7 +128,7 @@ describe('the corpus: a verified office is not asked for again', () => {
     const resolved = await verify(sid, CONFIRMED);
     expect(resolved.verified).toBe(true);
 
-    // ONE filing call, with no office in it. Before v145 this was the
+    // ONE filing call, with no office in it. Before v148 this was the
     // `location` refusal and the caller was asked again.
     const r = (await runTool('file_optical_ticket', filing(sid))) as Record<string, unknown>;
 
