@@ -321,7 +321,13 @@ import { reportSiAssistantCall, shouldReportSiAssistantCall } from "../plugin/ca
 import { attachmentForSiAssistant } from "../plugin/returnedCaller";
 import { reattachTakenMessages } from "../plugin/messageOutbox";
 import { liveCallRegistry, type LiveCallRegistry } from "../plugin/liveSessions";
-import { OPERATOR_SLUG } from "../plugin/operatorLine";
+import { operatorLineEnabled } from "../plugin/operatorLineSettings";
+import { OPERATOR_SLUG, operatorMaxDurationSec } from "../plugin/operatorLine";
+import { boundPluginStore } from "../plugin/bindings";
+import type { PluginStore } from "../plugin/store";
+import type { OperatorInboundNotifier } from "../plugin/operatorInboundNotifier";
+import { OperatorInboundWebhook, OPERATOR_INBOUND_PATH, OPERATOR_SMS_PATH, OPERATOR_FALLBACK_PATH, OPERATOR_VOICEMAIL_PATH } from "./operatorInboundWebhook";
+import { OPERATOR_INBOUND_GREETING } from "../agents/operatorLineAgent";
 import { SI_ASSISTANT_DIRECT_GREETING } from "../agents/siAssistantAgent";
 import { closeSiAssistantIdentity, siAssistantIdentityFor } from "../plugin/siAssistantIdentity";
 import type { OutboundStore } from "./outbound/store";
@@ -476,6 +482,8 @@ export interface VoiceRuntimeOptions {
    */
   outboundStore?: OutboundStore;
   liveCalls?: LiveCallRegistry;
+  operatorInboundStore?: PluginStore;
+  operatorInboundNotifier?: OperatorInboundNotifier;
   /** Places outbound calls. Injected for tests; production wraps the Twilio
    * client, and only when RUNTIME_OUTBOUND_DIALING=1 starts the scheduler. */
   outboundTwilio?: () => Promise<OutboundTwilio>;
@@ -640,6 +648,10 @@ export function mountVoiceRuntime(
     record: VoiceCallRecord,
     identity?: RuntimeCallIdentity,
   ): Promise<boolean> => {
+    if (registry.get(record.callSid)?.operatorInbound) {
+      await operatorInbound.complete(record.callSid, record.turns ?? [], record.outcome, new Date(record.endedAtMs));
+      record = { ...record, transcript: "", turns: [], toolEvents: [] };
+    }
     const written = await persistCallRow(record, identity);
     if (written) stampCall(record.callSid, record.slug);
     return written;
@@ -683,6 +695,7 @@ export function mountVoiceRuntime(
       persistCall(record),
       options.persistBeforeSweepMs ?? PERSIST_BEFORE_SWEEP_MS,
     );
+    if (record.slug === OPERATOR_SLUG) return;
     await fileSetupFailure(record, ctx).catch(() => undefined);
   };
   /** Lanes proven available at least once, so the webhook's own check does
@@ -701,6 +714,24 @@ export function mountVoiceRuntime(
     });
     return outboundStorePromise;
   };
+  const operatorInbound = new OperatorInboundWebhook({
+    env, registry, store: () => options.operatorInboundStore ?? boundPluginStore(), outbound: outboundStore,
+    notifier: options.operatorInboundNotifier,
+  });
+  app.post(OPERATOR_INBOUND_PATH, async (req: Request, res: Response) => {
+    send(res, await operatorInbound.inbound(toWebhookRequest(req)));
+  });
+  app.post(`${OPERATOR_INBOUND_PATH}/status`, async (req: Request, res: Response) => {
+    send(res, await operatorInbound.status(toWebhookRequest(req)));
+  });
+  app.post(`${OPERATOR_INBOUND_PATH}/after`, async (req: Request, res: Response) => {
+    send(res, await operatorInbound.after(toWebhookRequest(req)));
+  });
+  for (const [path, method] of [[OPERATOR_SMS_PATH, "sms"], [OPERATOR_FALLBACK_PATH, "fallback"], [OPERATOR_VOICEMAIL_PATH, "voicemail"]] as const) {
+    app.post(path, async (req: Request, res: Response) => {
+      send(res, await operatorInbound[method](toWebhookRequest(req)));
+    });
+  }
   /** The policy of a registered, enabled outbound lane — null for any other
    * slug, so an inbound lane can never be reached through the outbound path. */
   const outboundPolicyFor = async (slug: string) => {
@@ -846,6 +877,7 @@ export function mountVoiceRuntime(
     registry,
     store: await outboundStore(),
     policyFor: outboundPolicyFor,
+    operatorStore: () => options.operatorInboundStore ?? boundPluginStore(),
     liveCalls,
   });
   app.post(`${OUTBOUND_PATH_PREFIX}/:slug/status`, async (req: Request, res: Response) => {
@@ -1163,13 +1195,13 @@ export function mountVoiceRuntime(
           // A DIALLED call already knows who it rang: the contact row names
           // them, so there is no caller-ID lookup to make — and a household
           // phone's other members are exactly what that lookup would surface.
-          options.fetchPrecontext && !entry.outbound
+          options.fetchPrecontext && !entry.outbound && !entry.operatorInbound
             ? withinOrNull(
                 options.fetchPrecontext(entry.callerPhone) as Promise<unknown>,
                 PRECONTEXT_DEADLINE_MS,
               )
             : Promise.resolve(null),
-          options.resolveGreeting
+          options.resolveGreeting && !entry.operatorInbound
             ? withinOrNull(
                 options.resolveGreeting(entry.slug),
                 PRECONTEXT_DEADLINE_MS,
@@ -1187,7 +1219,7 @@ export function mountVoiceRuntime(
           // back the number we call from (outbound/callback.ts): who on the
           // campaign's list that number belongs to. Bounded like the rest;
           // a miss here is retried by identify_callback_caller itself.
-          entry.outbound
+          entry.outbound || entry.operatorInbound
             ? Promise.resolve(null)
             : laneSource()
                 .then((source) => {
@@ -1276,12 +1308,19 @@ export function mountVoiceRuntime(
          */
         const registered = (await laneSource()).getAgentConfig(entry.slug);
         const isOutboundLane = registered?.agentType === "outbound" && Boolean(registered.outbound);
+        if (entry.slug === OPERATOR_SLUG && !(await operatorLineEnabled(env, options.operatorInboundStore ?? boundPluginStore()))) {
+          registry.recordOutcome(entry.callSid, "provider_failure");
+          if (entry.operatorInbound) await operatorInbound.complete(entry.callSid, [], "operator_line_disabled");
+          if (entry.liveSessionId) liveCalls.setStatus(entry.liveSessionId, "failed");
+          ws.close(1000, "operator line disabled");
+          return;
+        }
         const directionMismatch =
           registered !== undefined &&
           ((Boolean(entry.outbound) && !isOutboundLane) ||
             (entry.outbound !== undefined && !outboundContact) ||
             (outboundContact?.data.plugin_direct === true && !directCall) ||
-            (entry.slug === OPERATOR_SLUG && !operatorCall));
+            (entry.slug === OPERATOR_SLUG && !operatorCall && !entry.operatorInbound));
         if (directionMismatch) {
           console.warn(
             `[voice-runtime] ${entry.slug}: refused — ` +
@@ -1304,7 +1343,7 @@ export function mountVoiceRuntime(
          * identified (outbound/callback.ts, identify_callback_caller).
          */
         const callback: CallbackContext | null =
-          isOutboundLane && !entry.outbound && registered?.outbound
+          isOutboundLane && !entry.outbound && !entry.operatorInbound && registered?.outbound
             ? {
                 campaignKey: registered.outbound.campaignKey,
                 campaignId: callbackLookup?.campaignId ?? null,
@@ -1364,6 +1403,7 @@ export function mountVoiceRuntime(
               : {}),
             ...(directCall ? { directCall } : {}),
             ...(operatorCall ? { operatorCall } : {}),
+            ...(entry.operatorInbound ? { operatorInbound: { tools: operatorInbound.tools(entry.callSid) } } : {}),
             // And who may be ringing back, on a call made TO an outbound lane.
             ...(callback ? { callback } : {}),
           },
@@ -1551,6 +1591,7 @@ export function mountVoiceRuntime(
          * has to be told it was spoken.
          */
         const spokenGreeting =
+          entry.operatorInbound ? OPERATOR_INBOUND_GREETING :
           directCall ? SI_ASSISTANT_DIRECT_GREETING :
           // A dialled call opens with its campaign's own greeting, built for
           // the person it rang: who is calling, that it is automated, and
@@ -1617,6 +1658,11 @@ export function mountVoiceRuntime(
           startedAtMs,
           agent: lane.agent,
           ...(operatorCall ? { maxCallMs: operatorCall.maxDurationSec * 1000 } : {}),
+          ...(entry.operatorInbound ? { maxCallMs: operatorMaxDurationSec(env) * 1000 } : {}),
+          ...(entry.slug === OPERATOR_SLUG ? { toolCeiling: {
+            identicalFailures: Infinity, perToolFailures: Infinity, identicalSuccesses: Infinity,
+            perToolSuccesses: Infinity, perCallDispatches: Infinity,
+          } } : {}),
           // The practice's own line, spoken before the agent's first turn,
           // personalised for a recognised caller exactly as the SIP path
           // personalises it — same two helpers, same per-agent style.
@@ -1722,6 +1768,12 @@ export function mountVoiceRuntime(
            * socket open for a ticket POST.
            */
           persistCallRecord: async (record) => {
+            if (entry.operatorInbound) {
+              await operatorInbound.complete(entry.callSid, record.turns ?? [], record.outcome, new Date(record.endedAtMs));
+              // No patient sweep, ticket floor, identity work, or transcript grading.
+              await persistCallRow({ ...record, transcript: "", turns: [], toolEvents: [] }).catch(() => false);
+              return;
+            }
             if (operatorCall) liveCalls.finishTranscript(entry.callSid, record.turns ?? []);
             // Operator transcripts have their separate owner-only store. Keep
             // all live transcripts/tool arguments out of call logs and sweeps.
@@ -1958,7 +2010,7 @@ export function mountVoiceRuntime(
         for (const held of pendingFrames.splice(0)) bridge.handleTwilioFrame(held);
       } catch (error) {
         const err = error instanceof Error ? error : new Error(String(error));
-        console.error(`[voice-runtime] call setup failed for ${entry.callSid}:`, err.message);
+        console.error(`[voice-runtime] call setup failed for ${entry.callSid}:`, entry.operatorInbound ? "operator inbound setup failure" : err.message);
         if (bridge) {
           bridge.failSession(err);
         } else {

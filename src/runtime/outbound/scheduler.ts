@@ -24,6 +24,7 @@
  * ─────────────────────────────────────────────────────────────────────────────
  */
 
+import { OPERATOR_SLUG } from "../../plugin/operatorLine";
 import type { LaneSource } from "../laneRegistry";
 import type { OutboundLanePolicy } from "./campaign";
 import { computeRuntimeReadiness } from "../readiness";
@@ -66,6 +67,9 @@ export async function enabledCampaigns(
   const source = await deps.laneSource();
   const out: Array<{ slug: string; policy: OutboundLanePolicy }> = [];
   for (const slug of await deps.slugs()) {
+    // Operator calls are immediate free-form goals: NO daily cap or peak window.
+    // Never send this lane through campaign scheduling, even if its env is set.
+    if (slug === OPERATOR_SLUG) continue;
     const config = source.getAgentConfig(slug);
     if (!config?.enabled || config.agentType !== "outbound" || !config.outbound) continue;
     if (!campaignEnabled(config.outbound, deps.env)) continue;

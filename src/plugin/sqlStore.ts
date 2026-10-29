@@ -16,9 +16,36 @@ import type {
   OutboxStatus,
   PluginStore,
   OperatorCallRecord,
+  OperatorInboundCallRecord,
+  OperatorSmsRecord,
+  OperatorVoicemailRecord,
 } from "./store";
 
 export type SqlExec = (text: string, params?: unknown[]) => Promise<Record<string, unknown>[]>;
+
+function operatorSmsFrom(row: Record<string, unknown>): OperatorSmsRecord {
+  return { messageSid: String(row.message_sid), callerNumber: row.caller_number == null ? null : String(row.caller_number),
+    body: String(row.body), receivedAt: new Date(String(row.received_at)), fetchUrl: String(row.fetch_url) };
+}
+
+function operatorVoicemailFrom(row: Record<string, unknown>): OperatorVoicemailRecord {
+  return { recordingSid: String(row.recording_sid), callSid: String(row.call_sid),
+    recordingUrl: row.recording_url == null ? null : String(row.recording_url),
+    transcript: row.transcript == null ? null : String(row.transcript),
+    transcriptionStatus: row.transcription_status == null ? null : String(row.transcription_status),
+    receivedAt: new Date(String(row.received_at)), fetchUrl: String(row.fetch_url) };
+}
+
+function operatorInboundFrom(row: Record<string, unknown>): OperatorInboundCallRecord {
+  return {
+    callId: String(row.call_id), callSid: String(row.call_sid), direction: "inbound", laneSlug: "wayne-operator",
+    callerNumber: row.caller_number == null ? null : String(row.caller_number), status: String(row.status),
+    startedAt: new Date(String(row.started_at)), endedAt: row.ended_at ? new Date(String(row.ended_at)) : null,
+    turns: (typeof row.turns === "string" ? JSON.parse(row.turns) : row.turns) as OperatorInboundCallRecord["turns"],
+    queuedRequests: (typeof row.queued_requests === "string" ? JSON.parse(row.queued_requests) : row.queued_requests ?? []) as OperatorInboundCallRecord["queuedRequests"],
+    optedOut: row.opted_out === true, transcriptUrl: String(row.transcript_url),
+  };
+}
 
 function tokenFrom(r: Record<string, unknown>): ApiTokenRow {
   return {
@@ -118,6 +145,77 @@ function suggestionsFrom(
 
 export function createSqlPluginStore(exec: SqlExec): PluginStore {
   return {
+    async getOperatorLineEnabled() {
+      const [row] = await exec("SELECT value FROM app_settings WHERE key = 'operator_line_enabled'");
+      // Missing settings use the env default. A missing table still throws/fails closed.
+      return !row || row.value === "true";
+    },
+    async setOperatorLineEnabled(enabled, updatedBy) {
+      await exec(`INSERT INTO app_settings (key, value, updated_by) VALUES ('operator_line_enabled', $1, $2)
+        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_by = EXCLUDED.updated_by, updated_at = NOW()`,
+      [String(enabled), updatedBy]);
+    },
+    async saveOperatorSms(record) {
+      const [row] = await exec(`INSERT INTO plugin_operator_sms (message_sid, caller_number, body, received_at, fetch_url)
+        VALUES ($1,$2,$3,$4,$5) ON CONFLICT (message_sid) DO NOTHING RETURNING *`,
+      [record.messageSid, record.callerNumber, record.body, record.receivedAt.toISOString(), record.fetchUrl]);
+      return row ? operatorSmsFrom(row) : null;
+    },
+    async getOperatorSms(messageSid) {
+      const [row] = await exec("SELECT * FROM plugin_operator_sms WHERE message_sid = $1", [messageSid]);
+      return row ? operatorSmsFrom(row) : null;
+    },
+    async saveOperatorVoicemail(record) {
+      const [row] = await exec(`INSERT INTO plugin_operator_voicemails
+        (recording_sid, call_sid, recording_url, transcript, transcription_status, received_at, fetch_url)
+        VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (recording_sid) DO UPDATE SET
+          recording_url = COALESCE(EXCLUDED.recording_url, plugin_operator_voicemails.recording_url),
+          transcript = COALESCE(EXCLUDED.transcript, plugin_operator_voicemails.transcript),
+          transcription_status = COALESCE(EXCLUDED.transcription_status, plugin_operator_voicemails.transcription_status)
+        WHERE plugin_operator_voicemails.call_sid = EXCLUDED.call_sid AND (
+          (EXCLUDED.recording_url IS NOT NULL AND plugin_operator_voicemails.recording_url IS DISTINCT FROM EXCLUDED.recording_url) OR
+          (EXCLUDED.transcript IS NOT NULL AND plugin_operator_voicemails.transcript IS DISTINCT FROM EXCLUDED.transcript) OR
+          (EXCLUDED.transcription_status IS NOT NULL AND plugin_operator_voicemails.transcription_status IS DISTINCT FROM EXCLUDED.transcription_status))
+        RETURNING *`, [record.recordingSid, record.callSid, record.recordingUrl, record.transcript, record.transcriptionStatus,
+        record.receivedAt.toISOString(), record.fetchUrl]);
+      return row ? operatorVoicemailFrom(row) : null;
+    },
+    async getOperatorVoicemail(recordingSid) {
+      const [row] = await exec("SELECT * FROM plugin_operator_voicemails WHERE recording_sid = $1", [recordingSid]);
+      return row ? operatorVoicemailFrom(row) : null;
+    },
+    async startOperatorInboundCall(record) {
+      await exec(`INSERT INTO plugin_operator_inbound_calls
+        (call_id, call_sid, caller_number, status, started_at, transcript_url)
+        VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (call_sid) DO NOTHING`,
+      [record.callId, record.callSid, record.callerNumber, record.status, record.startedAt.toISOString(), record.transcriptUrl]);
+      const [row] = await exec("SELECT * FROM plugin_operator_inbound_calls WHERE call_sid = $1 AND lane_slug = 'wayne-operator' AND direction = 'inbound'", [record.callSid]);
+      if (!row) throw new Error("operator inbound record unavailable");
+      return operatorInboundFrom(row);
+    },
+    async getOperatorInboundCall(callSid) {
+      const [row] = await exec("SELECT * FROM plugin_operator_inbound_calls WHERE call_sid = $1 AND lane_slug = 'wayne-operator' AND direction = 'inbound'", [callSid]);
+      return row ? operatorInboundFrom(row) : null;
+    },
+    async setOperatorInboundOptOut(callSid) {
+      await exec(`UPDATE plugin_operator_inbound_calls SET opted_out = TRUE
+        WHERE call_sid = $1 AND ended_at IS NULL AND lane_slug = 'wayne-operator' AND direction = 'inbound'`, [callSid]);
+    },
+    async appendOperatorInboundRequest(callSid, request) {
+      const [row] = await exec(`UPDATE plugin_operator_inbound_calls
+        SET queued_requests = queued_requests || $2::jsonb
+        WHERE call_sid = $1 AND ended_at IS NULL AND lane_slug = 'wayne-operator' AND direction = 'inbound'
+          AND NOT queued_requests @> $3::jsonb RETURNING *`,
+      [callSid, JSON.stringify([request]), JSON.stringify([{ id: request.id }])]);
+      return row ? operatorInboundFrom(row) : null;
+    },
+    async finishOperatorInboundCall(callSid, endedAt, status, turns) {
+      const [row] = await exec(`UPDATE plugin_operator_inbound_calls
+        SET ended_at = $2, status = $3, turns = $4::jsonb
+        WHERE call_sid = $1 AND ended_at IS NULL AND lane_slug = 'wayne-operator' AND direction = 'inbound' RETURNING *`,
+      [callSid, endedAt.toISOString(), status, JSON.stringify(turns)]);
+      return row ? operatorInboundFrom(row) : null;
+    },
     async isOperatorOptedOut(phone) {
       return (await exec("SELECT 1 FROM plugin_operator_dnc WHERE phone = $1 LIMIT 1", [phone])).length > 0;
     },
@@ -126,18 +224,19 @@ export function createSqlPluginStore(exec: SqlExec): PluginStore {
     },
     async saveOperatorCall(record) {
       await exec(`INSERT INTO plugin_operator_calls
-        (session_id, approval_id, token_jti, call_sid, status, started_at, ended_at, turns)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb)
+        (session_id, approval_id, token_jti, call_sid, status, started_at, ended_at, turns, initiated_by)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9)
         ON CONFLICT (session_id) DO UPDATE SET
           call_sid = COALESCE(EXCLUDED.call_sid, plugin_operator_calls.call_sid),
-          status = EXCLUDED.status, ended_at = EXCLUDED.ended_at, turns = EXCLUDED.turns`,
+          status = EXCLUDED.status, ended_at = EXCLUDED.ended_at, turns = EXCLUDED.turns, initiated_by = EXCLUDED.initiated_by`,
       [record.sessionId, record.approvalId, record.tokenJti, record.callSid, record.status,
-        record.startedAt.toISOString(), record.endedAt?.toISOString() ?? null, JSON.stringify(record.turns)]);
+        record.startedAt.toISOString(), record.endedAt?.toISOString() ?? null, JSON.stringify(record.turns), record.initiatedBy ?? "bot_initiative"]);
     },
     async getOperatorCall(sessionId) {
       const [row] = await exec("SELECT * FROM plugin_operator_calls WHERE session_id = $1 LIMIT 1", [sessionId]);
       if (!row) return null;
       return {
+        initiatedBy: row.initiated_by === "owner_request" ? "owner_request" : "bot_initiative",
         sessionId: String(row.session_id), approvalId: String(row.approval_id), tokenJti: String(row.token_jti),
         callSid: row.call_sid ? String(row.call_sid) : null, status: String(row.status),
         startedAt: new Date(String(row.started_at)), endedAt: row.ended_at ? new Date(String(row.ended_at)) : null,
