@@ -29,7 +29,7 @@ const ACCESS_QUESTION = new RegExp(
 const INTERPRETATION = new RegExp([
   // Explaining access or request status is records work, not clinical meaning.
   String.raw`\b(?:discuss|explain|interpret)\b(?!\s+(?:(?:the )?status of\b|how\s+(?:(?:i|we|you)\s+(?:can|could)\s+|to\s+)?(?:get|obtain|request|receive|access)\s+(?:(?:a|an|the|my|our|your|his|her|their|some)\s+)*(?:${DOC.source}|\b(?:copy|copies)\b)))`,
-  String.raw`\b(?:understand|meaning of)\s+(?:(?:what|the|my|our|your|her|his|their|these|those|abnormal|normal|test|lab|exam|diagnostic)\s+)*results?\b`,
+  String.raw`\b(?:understand(?:ing)?|meaning of)\s+(?:(?:what|the|my|our|your|her|his|their|these|those|abnormal|normal|test|lab|exam|diagnostic)\s+)*results?\b`,
   String.raw`\bwhat (?:do|does)\b[^.!?;]{0,65}\bresults?\b[^.!?;]{0,30}\bmean\b`,
   String.raw`\bwhy (?:are|is|were|was)\b[^.!?;]{0,65}\bresults?\b[^.!?;]{0,30}\b(?:abnormal|normal|high|low)\b`,
   String.raw`\breview\b[^.!?]{0,40}\bresults?\b[^.!?]{0,40}\bwith\b`,
@@ -144,7 +144,10 @@ export function recordsLinePurpose(text: string): RecordsLinePurpose {
     if (RECORDS_WORKFLOW.test(c)) return true;
     const independentlyRequestedDocument = schedulingStart < 0 || ((DOC.test(beforeScheduling) || /\b(?:prescription|receta)\b/.test(beforeScheduling)) && WANT.test(beforeScheduling))
       || c.slice(schedulingStart).split(/\band\s+(?=(?:(?:i|we)\s+)?(?:need|want|request|would like)\b)/).slice(1).some(part => WANT.test(part) && DOC.test(part));
-    if ((document || prescription) && WANT.test(c) && independentlyRequestedDocument && !/\b(?:records? (?:line|department|office)|on (?:my |the )?record)\b/.test(c)) return true;
+    // The records office can be where the caller wants documents from; it
+    // only disqualifies when it is the sole document mention.
+    const officeFree = c.replace(/\b(?:the )?(?:medical )?records? (?:line|department|office)\b/g, ' ');
+    if ((DOC.test(officeFree) || prescription) && WANT.test(c) && independentlyRequestedDocument && !/\bon (?:my |the )?record\b/.test(c)) return true;
     // Short document requests and follow-ups need not repeat "send" each turn.
     return document && !SCHEDULE_ACTION.test(c) && !/\b(?:records? (?:line|department|office)|on (?:my |the )?record|note (?:that|my)|eligibility|claim|vendor)\b/.test(c)
       && /\b(?:my|her|his|their|our|medical|patient|some|the|for|from|review|status|follow.up|not received|has not|haven't)\b/.test(c);

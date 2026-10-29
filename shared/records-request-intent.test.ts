@@ -623,3 +623,15 @@ describe('review regressions: prescription actions, proof requests, and named ex
     expect(recordsLineRedirect(text)).toBeNull();
   });
 });
+
+describe('records line: Codex round on 88122c5', () => {
+  it('a records request naming the records department as its source stays records', () => {
+    expect(recordsLinePurpose('I need my medical records from the records department')).toBe('records');
+  });
+  it('help understanding results is clinical interpretation', () => {
+    expect(recordsLinePurpose('I need help understanding my test results')).toBe('clinical');
+  });
+  it.each(['I need the records department', 'Is this the records department?'])('a bare office mention is not a records ask: %s', (t) => {
+    expect(recordsLinePurpose(t)).not.toBe('records');
+  });
+});
