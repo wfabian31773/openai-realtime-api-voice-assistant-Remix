@@ -93,8 +93,11 @@ describe('a denied greeting asks the request before identity', () => {
     expect(bullet).toMatch(/calling for the\s+patient/);
   });
 
-  it("takes the PATIENT's details, not the caller's", () => {
-    expect(bullet).toMatch(/the PATIENT's details, not theirs/);
+  it("takes the PATIENT's details, and the caller's own only when the call is about them (Codex P2, #397)", () => {
+    // A shared or reassigned number: "No, this is Rosa" may be Rosa calling
+    // about herself, and then her details ARE the patient's.
+    expect(bullet).toMatch(/the PATIENT's details: theirs only\s+if the call is about them/);
+    expect(bullet).not.toMatch(/details, not theirs/);
   });
 
   it('a yes is untouched: still no surname and no date of birth after an affirmed greeting', () => {

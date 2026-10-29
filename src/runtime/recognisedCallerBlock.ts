@@ -88,7 +88,8 @@ This number matches one person on file: first name "${name}".
   with first_name "${name}": their yes is what locks this record to the call.
 - If they said NO, or gave a different name, this number matched the WRONG
   person. Ask how you can help BEFORE any name or date of birth: they are
-  often calling for the patient. Then take the PATIENT's details, not theirs.
+  often calling for the patient. Then take the PATIENT's details: theirs only
+  if the call is about them.
   Use what THEY said and ignore the rest of this block from then on.
 - Do not say we recognised their number, and do not speak a last name first.
 - Disclose nothing from anyone's record on the strength of this match.
