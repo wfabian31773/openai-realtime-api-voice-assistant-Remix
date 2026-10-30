@@ -167,8 +167,14 @@ describe('a records request survives an incomplete intake', () => {
     await fileAfterAsking(agent, "handle_patient_medical_records_request", { narrative: "Records request." });
 
     expect(filed).toHaveLength(1);
-    for (const gap of ['patient first name', 'patient last name', 'patient date of birth', 'relationship to the patient']) {
+    for (const gap of ['patient first name', 'patient last name']) {
       expect(filed[0].narrative).toContain(gap);
+    }
+    // DOB and relationship are no longer ASKED by the director (v34), so they
+    // are no longer reported as missing either: the gap list is the
+    // director's own required list (Support Desk intake, Oct 30).
+    for (const notAsked of ['patient date of birth', 'relationship to the patient', 'organization type']) {
+      expect(filed[0].narrative).not.toContain(notAsked);
     }
     // and it still files, which is the whole point
     expect(filed[0].callPurpose).toBe('patient_medical_records_request');

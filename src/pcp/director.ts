@@ -247,6 +247,14 @@ export interface PcpDirectorDecision {
   nextQuestion?: { field: keyof PcpConversationState; prompt: string };
   /** Fields still unset that we have stopped asking for — see MAX_ASKS_PER_FIELD. */
   askBudgetSpent?: string[];
+  /**
+   * The director's OWN required fields for this call reason that are still
+   * unanswered (`stillUnset`). This is the one list the ticket's
+   * "[Intake incomplete ...]" note is built from, so a field the director no
+   * longer asks for (role on a handoff purpose, facility type, relationship,
+   * DOB) can never be reported as missing. Field names only, no caller data.
+   */
+  intakeMissing: string[];
   disposition?: PcpDisposition;
   phiDisclosureAllowed: boolean;
   authoritativeToolAllowed: boolean;
@@ -1371,6 +1379,7 @@ export class PcpDirector {
        * repeating that.
        */
       askBudgetSpent: askBudgetSpent.length ? askBudgetSpent.map(String) : undefined,
+      intakeMissing: stillUnset.map(String),
       disposition,
       phiDisclosureAllowed,
       authoritativeToolAllowed,
