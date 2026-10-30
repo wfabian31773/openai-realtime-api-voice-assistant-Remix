@@ -684,16 +684,31 @@ const PATIENT_CALL_DESCRIPTION_AFTER = /^\s+(?:calls?|callbacks?|follow-?ups?|co
 const PATIENT_PREDICATE_AFTER = /^\s+(?:(?:still|never|\p{L}+ly)\s+)*(\p{L}[\p{L}'-]*)(.*)$/u;
 const PATIENT_MODIFIER_WORD =
   /^(?:here|there|who|whom|whose|which|that|where|when|i|we|you|he|she|it|they|a|an|the|my|our|your|his|her|their|its|and|or|but|about|after|as|at|before|by|for|from|in|of|on|to|under|with|without|\p{L}[\p{L}'-]*ing|been|seen|given|taken|known|shown)$/u;
-// Regular past verbs also serve as participles. A passive complement marks
-// "scheduled for tomorrow" / "referred to you",
-// while an object keeps "developed a rash" / "noticed swelling" separate.
+// A regular -ed form is either a finite past verb ("developed a rash") or a
+// passive participle modifying the patient ("discharged yesterday",
+// "referred to you"). Only an active-voice continuation makes it a separate
+// clause: a direct object or a non-passive preposition ("complained of",
+// "asked about"). A bare -ed form, or one followed only by a passive
+// complement or an adverbial (time, place, -ly), stays a patient modifier.
+// When the reading is ambiguous the gate fails closed: a patient must never
+// pass as a provider, and a real provider can still say who they are.
 const PATIENT_PARTICIPLE_COMPLEMENT =
   /^\s+(?:at|by|for|from|in|on|to|with)\b/;
+const PATIENT_PARTICIPLE_ADVERBIAL = new RegExp(
+  String.raw`^\s+(?:\p{L}+ly|yesterday|today|tonight|tomorrow|earlier|before|already|again|ago|home|back|` +
+    String.raw`(?:last|this|next|that)\s+(?:night|week|month|year|morning|afternoon|evening|weekend|\p{L}+day))(?![\p{L}'-])`,
+  'u',
+);
+const ACTIVE_CONTINUATION = /^\s+\p{L}/u;
 
 function hasSeparatePatientClause(after: string): boolean {
   const predicate = PATIENT_PREDICATE_AFTER.exec(after);
   if (!predicate || PATIENT_MODIFIER_WORD.test(predicate[1])) return false;
-  return !(/ed$/.test(predicate[1]) && PATIENT_PARTICIPLE_COMPLEMENT.test(predicate[2]));
+  if (!/ed$/.test(predicate[1])) return true;
+  const rest = predicate[2];
+  return ACTIVE_CONTINUATION.test(rest) &&
+    !PATIENT_PARTICIPLE_COMPLEMENT.test(rest) &&
+    !PATIENT_PARTICIPLE_ADVERBIAL.test(rest);
 }
 
 /**
