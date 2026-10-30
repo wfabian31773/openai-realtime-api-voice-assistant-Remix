@@ -299,13 +299,20 @@ export const AGENT_STALL_NUDGE_LIMIT = 2;
 
 /**
  * A LINE THAT HANDS THE CALLER THE TURN. A question anywhere in it ("What is
- * your date of birth? Take your time."), or a request put as an instruction
- * ("Please spell your last name for me."). After one of these the silence is
- * the caller's, and the agent is not nudged (Codex P2 on #404). A line it
- * misses fails toward today's behaviour: at most two nudges.
+ * your date of birth? Take your time."), or a sentence that OPENS with a
+ * request to the caller ("Please spell your last name for me.", "Go ahead
+ * with your date of birth."). After one of these the silence is the
+ * caller's, and the agent is not nudged (Codex P2 on #404).
+ *
+ * Only sentence-initial, because the same words narrate the agent's own
+ * action mid-sentence ("I'll go ahead and file that", "Let me repeat that
+ * back"), and reading those as asking would bring back the silence this
+ * exists to break (Codex P2, round 4). The two errors are not the same size:
+ * a request this misses costs at most two nudges; a narration it matched
+ * would cost the caller the call.
  */
 const ASKS_THE_CALLER =
-  /\?|\b(?:spell|repeat)\b|\b(?:tell|give|share|read)\s+me\s+(?:your|the)\b|\bgo ahead\b|\btake your time\b/i;
+  /\?|(?:^|[.!]\s+)(?:please\s+)?(?:spell|repeat|(?:tell|give|share|read)\s+me\s+(?:your|the)\b|go ahead|take your time)/i;
 
 /**
  * How long the caller may say nothing before each prompt.

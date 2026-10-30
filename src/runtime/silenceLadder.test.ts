@@ -827,6 +827,10 @@ describe("an agent that stalls on a heard caller is asked to carry on (v151)", (
     "Let me make sure the team has your details.",
     "Thank you. I'll take your request as given, and the team will match it to your chart.",
     "Let me confirm that for you.",
+    // Codex P2, round 4: the request words narrating the agent's own action.
+    "I'll go ahead and file that for you now.",
+    "Let me repeat that back to make sure I have it.",
+    "I'll spell it out on the ticket for the team.",
   ])("a line that asks for nothing is still a stall: %s", async (line) => {
     const h = await heardThenStalled(line);
     h.timers.fire(WINDOW);
