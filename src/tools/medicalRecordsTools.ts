@@ -1,4 +1,6 @@
 import { ticketIdentityFields } from './ticketIdentity';
+import { recordsLinePurpose, recordsRequestText, recordsLineRedirect } from '../../shared/records-request-intent';
+import { callerUtterances } from '../services/symptomCorroboration';
 /**
  * The tools a Medical Records agent needs, and nothing else.
  *
@@ -53,6 +55,25 @@ import { gateRefusalsSoFar, gateRefusalAgeMs, noteGateRefusal, noteCallFact, cal
  */
 export function patientScope(value: unknown): string {
   return typeof value === 'string' && /^-p\d{1,3}$/.test(value) ? value : '';
+}
+
+/**
+ * Correct a model's invented records summary only from an actual caller request.
+ * An employer or a surname containing a queue word is not contrary evidence.
+ * Keep turn boundaries: identity answers must not become the request/SMS body.
+ * A PCP patient scope owns its own narrative, independent of the other patients.
+ */
+function requestDescription(input: Record<string, unknown>): string {
+  const supplied = recordsRequestText(str(input.request_description));
+  if (patientScope(input.patient_scope) || recordsLinePurpose(supplied) !== 'records') return supplied;
+  const turns = callerUtterances(str(input.call_sid));
+  if (recordsLinePurpose(turns.join('\n')) === 'records') return supplied;
+  const requests = turns.filter(turn => {
+    const purpose = recordsLinePurpose(turn);
+    return purpose !== 'unknown' && purpose !== 'records'
+      && /\b(?:need|want|would like|please|question|what time|when|how|can you|has my|reschedul\w*|schedul\w*|cancel\w*|confirm\w*|reprogram\w*|necesit\w*|quiero|cambiar)\b/i.test(turn);
+  });
+  return requests.length ? recordsRequestText(requests.join('\n')) : supplied;
 }
 
 // ---------------------------------------------------------------- what kind
@@ -207,7 +228,8 @@ registerTool({
     'need, and before filing. It knows the difference between a copy for the ' +
     'patient, records going to another doctor, records for a health plan or an ' +
     'attorney, a letter or form, and an in-person review — so it always returns ' +
-    'something. Pass its request_reason_id to file_records_ticket.',
+    'something. A non-records request returns is_records_request false: do not offer a records form. ' +
+    'Pass its request_reason_id to file_records_ticket.',
   input_schema: {
     type: 'object',
     properties: {
@@ -225,11 +247,20 @@ registerTool({
     const { classifyRecordsRequest, MEDICAL_RECORDS_DEPARTMENT_ID } = await import(
       './medicalRecordsTaxonomy'
     );
-    const { classification, isCatchAll } = classifyRecordsRequest(str(input.request_description));
+    const description = requestDescription(input);
+    const redirect = recordsLineRedirect(description);
+    if (redirect) return {
+      success: true, classified: recordsLinePurpose(description) !== 'unknown', is_records_request: false,
+      department_id: redirect.departmentId, request_type_id: redirect.requestTypeId,
+      request_reason_id: redirect.requestReasonId, request_reason: redirect.requestReason,
+      fix: 'This is not a records request. Take the callback request with file_records_ticket; do not offer a records form or ask for delivery details. Preserve the caller request in the description.',
+    };
+    const { classification, isCatchAll } = classifyRecordsRequest(description);
 
     return {
       success: true,
       classified: !isCatchAll,
+      is_records_request: true,
       department_id: MEDICAL_RECORDS_DEPARTMENT_ID,
       request_type: classification.requestType,
       request_type_id: classification.requestTypeId,
@@ -387,15 +418,16 @@ registerTool({
      * refused for ever — eleven real conversations in fourteen business days,
      * none of them filed. The handler now asks ONCE and then files without.
      */
-    required: ['callback_number', 'request_description', 'requester'],
+    required: ['callback_number', 'request_description'],
   },
   handler: async (input): Promise<ToolResult> => {
     let first = str(input.first_name);
     let last = str(input.last_name);
     const dob = str(input.date_of_birth);
     const phone = str(input.callback_number);
-    const description = str(input.request_description);
     const callSid = str(input.call_sid);
+    const description = requestDescription(input);
+    const redirect = recordsLineRedirect(description);
 
     /**
      * THE NAME: the record first, one ask second, the request regardless.
@@ -488,7 +520,7 @@ registerTool({
     // can reconstruct this after the call ends, so the call is the only place
     // it can be got.
     const requesterRaw = str(input.requester);
-    if (!requesterRaw) {
+    if (!requesterRaw && !redirect) {
       return missing(
         ['requester'],
         'And just so I route this correctly — are you the patient yourself, or calling on someone\'s behalf?',
@@ -498,12 +530,9 @@ registerTool({
     const cap = determineCapClock(requesterType);
 
     // A CALLER WHO PRESSED THE WRONG OPTION IS NOT SENT AWAY — and is not
-    // offered a records form either. Decided HERE, before the channel ask,
+    // offered a records form either. Decided above, before the channel ask,
     // on the same words the redirect below reads, so the one question this
     // tool adds is never put to somebody who rang about an appointment.
-    const { detectCrossQueue } = await import('./queueRouting');
-    const redirect = detectCrossQueue(description, MEDICAL_RECORDS_DEPARTMENT_ID);
-
     // THE LINK, decided here so the on-clock gate below can stand down for it.
     // Only an on-clock requester ever gets one; a third party's `form_channel`
     // is ignored rather than refused, because the model may send it and the
@@ -705,7 +734,7 @@ registerTool({
     const dateRange = str(input.date_range);
     // The clock line goes FIRST. A records clerk opening this ticket should not
     // have to read to the bottom to learn whether it is CAP-reportable.
-    const body = [
+    const body = redirect ? description : [
       `${cap.note}`,
       `\n\n${description}`,
       `\n\nRequested by: ${requesterRaw} [${requesterType}]`,
@@ -1003,26 +1032,28 @@ registerTool({
       // 'roa_patient'. Extra fields are ignored by an endpoint that does not
       // read them yet, which is why they are safe to send today — but the
       // ticketing app is the half that has to change for the clock to be right.
-      requestorType: cap.requesterType,
-      // LOGGED, CLOCK NOT STARTED when the link goes out: the signed form is
-      // the written request and starts the clock on the same case (owner,
-      // 2026-09-27). A redirected ticket never carries a form — it left
-      // Medical Records.
-      requestPathway: formChannel && !redirect ? 'pending_authorization' : cap.pathway,
-      capClockApplies: formChannel && !redirect ? false : cap.onClock,
-      ...(formChannel && !redirect ? { formChannel } : {}),
-      // A NAME, not a description. The ticketing agent, 2026-08-13: "Send
-      // requestorName even when the requester is the patient. Zero of 470 rows
-      // carry one. The name is the evidence that a classification was made;
-      // without it an audit cannot tell 'confirmed patient' from 'defaulted to
-      // patient', which is the hole we are climbing out of."
-      //
-      // "I am the patient" is not evidence of anything. When the requester IS
-      // the patient the name is theirs; otherwise it is whatever they said,
-      // which is where the organisation usually sits ("SCAN Health Plan",
-      // "an attorney at Lexitas").
-      requestorName:
-        cap.requesterType === 'patient' ? `${first} ${last}`.trim() || undefined : requesterRaw,
+      ...(!redirect ? {
+        requestorType: cap.requesterType,
+        // LOGGED, CLOCK NOT STARTED when the link goes out: the signed form is
+        // the written request and starts the clock on the same case (owner,
+        // 2026-09-27). A redirected ticket never carries a form — it left
+        // Medical Records.
+        requestPathway: formChannel && !redirect ? 'pending_authorization' : cap.pathway,
+        capClockApplies: formChannel && !redirect ? false : cap.onClock,
+        ...(formChannel && !redirect ? { formChannel } : {}),
+        // A NAME, not a description. The ticketing agent, 2026-08-13: "Send
+        // requestorName even when the requester is the patient. Zero of 470 rows
+        // carry one. The name is the evidence that a classification was made;
+        // without it an audit cannot tell 'confirmed patient' from 'defaulted to
+        // patient', which is the hole we are climbing out of."
+        //
+        // "I am the patient" is not evidence of anything. When the requester IS
+        // the patient the name is theirs; otherwise it is whatever they said,
+        // which is where the organisation usually sits ("SCAN Health Plan",
+        // "an attorney at Lexitas").
+        requestorName:
+          cap.requesterType === 'patient' ? `${first} ${last}`.trim() || undefined : requesterRaw,
+      } : {}),
       callData: {
         agentUsed: 'records',
         ...(callSid ? { callSid } : {}),
@@ -1086,8 +1117,8 @@ registerTool({
       request_reason_id: filedReasonId,
       // Say plainly what is missing, so the agent can still ask before the call
       // ends rather than a clerk chasing it tomorrow.
-      requester_type: cap.requesterType,
-      cap_clock_applies: cap.onClock,
+      ...(!redirect ? { requester_type: cap.requesterType } : {}),
+      cap_clock_applies: !redirect && cap.onClock,
       // Not on a routed-away ticket: there is no records destination to ask
       // for, and the note would contradict the `fix` below (Codex P2 on #356).
       ...(deliverTo || redirect ? {} : { note_destination: 'No destination captured — ask where these should be sent.' }),
