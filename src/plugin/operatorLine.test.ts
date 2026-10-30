@@ -681,3 +681,25 @@ describe("open Wayne operator line with provenance-based outbound approval", () 
     expect(await store.getOperatorCall("session")).toEqual(record);
   });
 });
+
+describe("open two-way operator line (Wayne, Oct 29)", () => {
+  it.each(["bot_initiative", undefined] as const)("needs no human approval for a free-text %s call to any number", async (initiated_by) => {
+    const h = await boot();
+    h.env.OPERATOR_OWNER_NUMBER = "+15555550999"; // Not the destination.
+    const prepared = await h.request("/prepare_operator_call", { ...INPUT, ...(initiated_by ? { initiated_by } : {}) });
+    expect(prepared).toMatchObject({ status: 201, body: { status: "approved", approval: { status: "approved" } } });
+    expect(typeof prepared.body.confirmToken).toBe("string");
+    const live = await h.request("/commit_call_live", { confirmToken: prepared.body.confirmToken });
+    expect(live).toMatchObject({ status: 200, body: { status: "live" } });
+    expect(h.sender.createCall).toHaveBeenCalledOnce();
+  });
+
+  it("keeps task-specific lines (SI support desk) behind a human approval", async () => {
+    const h = await boot();
+    const patientBot = h.store.mint(["contacts:prepare", "contacts:commit"]);
+    const patient = await h.request("/prepare_call", { phone: PHONE, dateOfBirth: "1950-03-17", purpose: "Synthetic test" }, patientBot);
+    expect(patient).toMatchObject({ status: 201, body: { status: "pending_approval", approval: { status: "pending" } } });
+    expect(patient.body.confirmToken).toBeUndefined();
+    expect(h.sender.createCall).not.toHaveBeenCalled();
+  });
+});
