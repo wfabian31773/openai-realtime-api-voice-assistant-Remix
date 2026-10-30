@@ -798,6 +798,19 @@ describe("an agent that stalls on a heard caller is asked to carry on (v150)", (
     expect(h.session.requestResponse).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ["a hangup is on its way", "endRequested", true],
+    ["a goodbye grace window is running", "goodbyeTimer", {}],
+    ["a transfer is in flight", "transferInFlight", true],
+  ])("does not ask the agent for a turn while %s", async (_why, field, value) => {
+    const h = await heardThenStalled("Let me make sure the team has your details.");
+    // White-box on purpose: each of these states has its own full path and
+    // tests elsewhere; what is pinned here is that the nudge defers to it.
+    (h.bridge as unknown as Record<string, unknown>)[field] = value;
+    h.timers.fire(WINDOW);
+    expect(h.session.requestResponse).not.toHaveBeenCalled();
+  });
+
   it("a caller never heard still gets the ladder, never a nudge", async () => {
     const h = await ladder();
     h.speak("How can I help you today?");
