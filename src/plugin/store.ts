@@ -164,6 +164,8 @@ export interface ContactApprovalRow {
   confirmUsedAt: Date | null;
   approvedBy: string | null;
   approvedAt: Date | null;
+  /** Server-owned audit for scenario pre-approval; never part of bot input. */
+  approvalMetadata?: { scenario_id: string } | null;
   rejectedBy: string | null;
   rejectedAt: Date | null;
   cancelledAt: Date | null;
@@ -214,6 +216,8 @@ export interface PluginStore {
   releaseOperatorNotification(eventId: string, claimToken: string): Promise<void>;
   getOperatorLineEnabled(): Promise<boolean>;
   setOperatorLineEnabled(enabled: boolean, updatedBy: string | null): Promise<void>;
+  getOperatorScenarioPreapprovalEnabled(): Promise<boolean>;
+  setOperatorScenarioPreapprovalEnabled(enabled: boolean, updatedBy: string | null): Promise<void>;
   /** First SMS with this MessageSid wins; null means a duplicate. */
   saveOperatorSms(record: OperatorSmsRecord): Promise<OperatorSmsRecord | null>;
   getOperatorSms(messageSid: string): Promise<OperatorSmsRecord | null>;
@@ -381,6 +385,9 @@ export class MemoryPluginStore implements PluginStore {
   operatorLineEnabled = true;
   async getOperatorLineEnabled(): Promise<boolean> { return this.operatorLineEnabled; }
   async setOperatorLineEnabled(enabled: boolean, _updatedBy: string | null): Promise<void> { this.operatorLineEnabled = enabled; }
+  operatorScenarioPreapprovalEnabled = false;
+  async getOperatorScenarioPreapprovalEnabled(): Promise<boolean> { return this.operatorScenarioPreapprovalEnabled; }
+  async setOperatorScenarioPreapprovalEnabled(enabled: boolean, _updatedBy: string | null): Promise<void> { this.operatorScenarioPreapprovalEnabled = enabled; }
   operatorSms = new Map<string, OperatorSmsRecord>();
   async saveOperatorSms(record: OperatorSmsRecord): Promise<OperatorSmsRecord | null> {
     if (this.operatorSms.has(record.messageSid)) return null;
@@ -760,6 +767,9 @@ export function publicApproval(row: ContactApprovalRow): Record<string, unknown>
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
     approvedAt: row.approvedAt?.toISOString() ?? null,
+    ...(row.approvedBy === "scenario_preapproval" ? {
+      approvedBy: row.approvedBy, approvalMetadata: row.approvalMetadata ?? null,
+    } : {}),
     rejectedAt: row.rejectedAt?.toISOString() ?? null,
     cancelledAt: row.cancelledAt?.toISOString() ?? null,
     committedAt: row.committedAt?.toISOString() ?? null,

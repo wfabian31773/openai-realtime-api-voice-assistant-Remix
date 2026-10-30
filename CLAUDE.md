@@ -2723,8 +2723,10 @@ v10 (the person base and the join), v11 (the locked record, #290) and v12
 (optical's office ladder) are a CHAIN on `main`: each merged after the one
 before and brought it in, so v12 contains both.
 
-**AND THE SEQUENCE HAS TWO HOLES IN IT ON PURPOSE: v13 AND v57. v148 IS THE
-NEWEST ON #384 (renumbered from v146, earlier v139) — verified identity carried through filing and teardown/sweep
+**AND THE SEQUENCE HAS TWO HOLES IN IT ON PURPOSE: v13 AND v57. v151 IS THE
+NEWEST (operator-line scenario pre-approval, staff toggle default OFF;
+apply add_operator_scenario_preapproval.sql separately; v149/v150 are claimed
+by open branches). It sits on main's v148: v148 was the newest on #384 (renumbered from v146, earlier v139) — verified identity carried through filing and teardown/sweep
 recovery, Optical facility filtering, and Surgery filing when its clinic is
 unknown, with the full appointment-read view/status retained on identity
 reuse; no migration; production impact is unmeasured. It contains `main`'s v147 (#381)

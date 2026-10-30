@@ -30,4 +30,25 @@ export function mountOperatorLineSettings(app: Express, deps: {
       res.json(await view());
     } catch { res.status(503).json({ error: "Operator settings unavailable" }); }
   });
+
+  const scenarioView = async () => {
+    const store = deps.store();
+    if (!store) throw new Error("operator settings unavailable");
+    return { enabled: await store.getOperatorScenarioPreapprovalEnabled() };
+  };
+  app.get("/api/settings/operator-scenario-preapproval", deps.authenticate, async (_req, res) => {
+    res.setHeader("Cache-Control", "no-store");
+    try { res.json(await scenarioView()); }
+    catch { res.status(503).json({ enabled: false, error: "Operator scenario pre-approval settings unavailable" }); }
+  });
+  app.put("/api/settings/operator-scenario-preapproval", deps.authenticate, deps.admin, async (req, res) => {
+    res.setHeader("Cache-Control", "no-store");
+    if (typeof req.body?.enabled !== "boolean") { res.status(400).json({ error: "enabled must be a boolean" }); return; }
+    try {
+      const store = deps.store();
+      if (!store) throw new Error("operator settings unavailable");
+      await store.setOperatorScenarioPreapprovalEnabled(req.body.enabled, req.session?.userId ?? (req.user as any)?.claims?.sub ?? null);
+      res.json(await scenarioView());
+    } catch { res.status(503).json({ enabled: false, error: "Operator scenario pre-approval settings unavailable" }); }
+  });
 }

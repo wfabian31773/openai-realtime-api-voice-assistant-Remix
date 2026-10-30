@@ -8,3 +8,10 @@ export async function operatorLineEnabled(env: Record<string, string | undefined
   try { return await store.getOperatorLineEnabled(); }
   catch { return false; }
 }
+
+/** A missing or unreadable staff decision never grants scenario pre-approval. */
+export async function operatorScenarioPreapprovalEnabled(store: PluginStore | null): Promise<boolean> {
+  if (!store) return false;
+  try { return (await store.getOperatorScenarioPreapprovalEnabled()) === true; }
+  catch { return false; }
+}

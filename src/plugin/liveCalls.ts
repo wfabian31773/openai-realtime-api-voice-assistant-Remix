@@ -6,7 +6,7 @@ import { callEnvironment } from "../runtime/callRecord";
 import { callbackRoutingProblem, isClearTwilioRefusal, RING_TIMEOUT_SECONDS, STALE_CLAIM_MS, statusUrl, type OutboundTwilio } from "../runtime/outbound/dialer";
 import type { DialerLock } from "../runtime/outbound/scheduler";
 import { NOT_PLACED, type OutboundStore } from "../runtime/outbound/store";
-import { operatorLineEnabled } from "./operatorLineSettings";
+import { operatorLineEnabled, operatorScenarioPreapprovalEnabled } from "./operatorLineSettings";
 import { OPERATOR_SLUG, US_E164, operatorFromProblem, parseOperatorPayload } from "./operatorLine";
 import { evaluateAndEnqueueCall, identityFromPreparePayload, siAssistantDialingProblem, siAssistantMayDial } from "./callEnqueue";
 import { SI_ASSISTANT_SLUG, SI_ASSISTANT_CAMPAIGN_KEY, siAssistantNumber } from "./siAssistantConstants";
@@ -146,6 +146,9 @@ export async function placeOperatorCall(
 ): Promise<LiveResult> {
   const refused = (reason: string): LiveResult => ({ ok: false, reason, mayHaveSent: false });
   if (!(await operatorLineEnabled(deps.env, deps.plugin))) return refused("operator_line_disabled");
+  if (approval.approvedBy === "scenario_preapproval" && !(await operatorScenarioPreapprovalEnabled(deps.plugin))) {
+    return refused("operator_scenario_preapproval_disabled");
+  }
   const problem = operatorFromProblem(deps.env);
   if (problem) return refused(problem);
   const parsed = parseOperatorPayload(approval.payload, deps.env);
@@ -185,6 +188,9 @@ export async function placeOperatorCall(
     const query = new URLSearchParams({ contact: contactId, attempt: attemptId, liveSession: sessionId });
     if (await operatorOptOutGuard(deps.store, deps.plugin, input.phone)) throw new Error("do_not_contact");
     if (!(await operatorLineEnabled(deps.env, deps.plugin))) throw new Error("operator_line_disabled");
+    if (approval.approvedBy === "scenario_preapproval" && !(await operatorScenarioPreapprovalEnabled(deps.plugin))) {
+      throw new Error("operator_scenario_preapproval_disabled");
+    }
     if (session.endedAt) throw new Error("operator_deadline_exceeded");
     sent = true;
     const call = await boundedCall(deps.sender.createCall({
@@ -205,7 +211,7 @@ export async function placeOperatorCall(
       if (attemptId) await deps.store.finishAttempt(attemptId, { status: NOT_PLACED }).catch(() => undefined);
       if (contactId) await deps.store.settleContact(contactId, "rescheduled", { onlyIfCalling: true }).catch(() => false);
     }
-    return { ok: false, reason: sent ? "send_unknown" : error instanceof Error && ["do_not_contact", "operator_line_disabled"].includes(error.message) ? error.message : "operator_call_unavailable",
+    return { ok: false, reason: sent ? "send_unknown" : error instanceof Error && ["do_not_contact", "operator_line_disabled", "operator_scenario_preapproval_disabled"].includes(error.message) ? error.message : "operator_call_unavailable",
       mayHaveSent: sent, ...(sessionId ? { sessionId } : {}) };
   }
 }

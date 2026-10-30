@@ -20,8 +20,15 @@ export function isOperatorOwner(phone: string | null | undefined, env: Env): boo
   return Boolean(owner && E164.test(owner) && phone === owner);
 }
 
-export function operatorApprovalRequired(input: OperatorCallPayload, env: Env): boolean {
-  return input.initiated_by !== "owner_request" && !isOperatorOwner(input.phone, env);
+/**
+ * Wayne's rule (Oct 29): the operator line is an OPEN two-way line with no
+ * restrictions: no per-call approvals, scripts, caps, peak windows or
+ * allowlists. Operator calls therefore never wait for a human tap,
+ * whatever their provenance or destination. Task-specific lines (patient
+ * outreach, SI support desk) keep their own approval gates elsewhere.
+ */
+export function operatorApprovalRequired(_input: OperatorCallPayload, _env: Env): boolean {
+  return false;
 }
 export const E164 = /^\+[1-9]\d{7,14}$/;
 export const US_E164 = /^\+1\d{10}$/;

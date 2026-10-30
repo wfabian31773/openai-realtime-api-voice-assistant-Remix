@@ -1415,7 +1415,8 @@ export const ticketOutbox = pgTable("ticket_outbox", {
 export type TicketOutboxEntry = typeof ticketOutbox.$inferSelect;
 export type InsertTicketOutboxEntry = typeof ticketOutbox.$inferInsert;
 
-// Generic app-level settings (key-value store)
+// Generic app-level settings (key-value store). Scenario pre-approval is seeded
+// OFF by migrations/add_operator_scenario_preapproval.sql (apply separately).
 export const appSettings = pgTable("app_settings", {
   key: varchar("key").primaryKey(),
   value: text("value").notNull(),
@@ -1540,6 +1541,7 @@ export const contactApprovals = pgTable("contact_approvals", {
   confirmUsedAt: timestamp("confirm_used_at", { withTimezone: true }),
   approvedBy: varchar("approved_by", { length: 64 }),
   approvedAt: timestamp("approved_at", { withTimezone: true }),
+  approvalMetadata: jsonb("approval_metadata").$type<{ scenario_id: string }>(),
   rejectedBy: varchar("rejected_by", { length: 64 }),
   rejectedAt: timestamp("rejected_at", { withTimezone: true }),
   cancelledAt: timestamp("cancelled_at", { withTimezone: true }),

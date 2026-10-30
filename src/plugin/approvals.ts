@@ -6,6 +6,7 @@
 import { dncKey } from "../runtime/outbound/store";
 import { normalizePhone } from "../utils/phone";
 import { prepareDobFromPayload } from "./callEnqueue";
+import { operatorScenarioPreapprovalEnabled } from "./operatorLineSettings";
 import { parseOperatorPayload, parseOperatorSmsPayload, isOperatorSmsPayload, operatorApprovalRequired, US_E164, type OperatorCallPayload } from "./operatorLine";
 import { hashPayload, hashSecret, isConfirmExpired } from "./tokens";
 import {
@@ -170,6 +171,7 @@ export async function prepareContact(
     confirmUsedAt: null,
     approvedBy: null,
     approvedAt: null,
+    approvalMetadata: null,
     rejectedBy: null,
     rejectedAt: null,
     cancelledAt: null,
@@ -180,12 +182,19 @@ export async function prepareContact(
   };
   // Operator bots declare provenance. Owner requests and calls to the owner
   // need no approval tap; all unspecified provenance defaults to bot initiative.
-  const automatic = (callKind === "operator" && !operatorApprovalRequired(picked.payload as OperatorCallPayload, env))
+  // parseOperatorPayload resolved scenario_id against the committed pack above.
+  const scenarioPreapproval = callKind === "operator" && input.channel === "call"
+    && typeof payload.scenario_id === "string" && await operatorScenarioPreapprovalEnabled(store);
+  const automatic = scenarioPreapproval || (callKind === "operator" && !operatorApprovalRequired(picked.payload as OperatorCallPayload, env))
     || (input.channel === "sms" && ownerSmsApprovalExempt(payload.phone, env));
   const confirm = automatic ? issueConfirmOnApprove(now) : null;
   if (confirm) Object.assign(row, {
     status: "approved", confirmTokenHash: confirm.hash, confirmTokenPlaintext: confirm.plaintext,
     confirmExpiresAt: confirm.expiresAt,
+    ...(scenarioPreapproval ? {
+      approvedBy: "scenario_preapproval", approvedAt: now,
+      approvalMetadata: { scenario_id: payload.scenario_id as string },
+    } : {}),
   });
   const approval = await store.insertApproval(row);
   // An atomic insert may have lost a race to another prepare with this key.
