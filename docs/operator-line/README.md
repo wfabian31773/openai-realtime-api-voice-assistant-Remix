@@ -13,10 +13,14 @@ owner recognition, the mid-call queue tool, signed alerts, and private fetch.
 Set `initiated_by` (or its alias `requested_by`) to:
 
 - `owner_request`: the owner requested this call, including a call to a third
-  party. No approval tap is required.
-- `bot_initiative`: the bot chose to initiate this call. Human approval is
-  required, except when calling the configured owner number or using an
-  enabled scenario pre-approval as described below.
+  party.
+- `bot_initiative`: the bot chose to initiate this call.
+
+The operator line is an open two-way line (Wayne, Oct 29): no per-call
+approvals, scripts, caps, peak windows or allowlists. Neither provenance needs
+an approval tap, for free-text or scenario calls, to any number. Task-specific
+lines (patient outreach and the SI support desk via `prepare_call`) keep their
+human approval requirement.
 
 Omitted provenance defaults to `bot_initiative`. Invalid or conflicting values
 are rejected. Only explicitly scoped operator bots can declare provenance.
@@ -25,13 +29,9 @@ in `plugin_operator_calls`, and returned with live/durable call transcripts.
 Calling the owner does not rewrite the provenance supplied by the bot.
 
 `POST /api/plugin/v1/prepare_operator_call` returns `approved` plus a single-use
-five-minute `confirmToken` for calls exempt from an approval tap. The preparing
-bot sends that token to `POST /api/plugin/v1/commit_call_live`. Preparing alone
-does not dial. A default or explicit `bot_initiative` third-party call instead
-returns `pending_approval`; a human reviews the complete goal, destination,
-duration and payload hash through the existing approval flow before commit.
-The preparing bot can fetch the approved token once through
-`GET /contact_requests/:id/confirm_token`.
+five-minute `confirmToken`. The preparing bot sends that token to
+`POST /api/plugin/v1/commit_call_live`. Preparing alone does not dial. Opt-outs
+and the operator-line kill switch still stop a call.
 
 Admins can enable **Pre-approve operator test scenarios A1–A10** on the Voice
 Agents page. The separate `operator_scenario_preapproval_enabled` setting

@@ -88,23 +88,21 @@ async function boot() {
   async function approved(payload: Record<string, unknown> = INPUT) {
     const prep = await request("/prepare_operator_call", payload);
     if (prep.status !== 201) throw new Error(JSON.stringify(prep.body));
-    const row = (await store.getApproval(prep.body.approval.id))!;
-    const approved = await request(`/approvals/${row.id}/approve`, { payloadHash: row.payloadHash }, staff);
-    if (approved.status !== 200) throw new Error(JSON.stringify(approved.body));
-    return { id: row.id, confirmToken: approved.body.confirmToken as string };
+    // The operator line is open: prepare approves automatically, no human tap.
+    if (prep.body.status !== "approved" || typeof prep.body.confirmToken !== "string") throw new Error(JSON.stringify(prep.body));
+    return { id: prep.body.approval.id as string, confirmToken: prep.body.confirmToken as string };
   }
   return { clock, store, outbound, sessions, env, sender, bot, staff, other, request, approved };
 }
 
 describe("operator scenario pre-approval", () => {
-  it("keeps valid scenarios pending while the toggle is OFF", async () => {
+  it("approves valid scenarios on the open line without scenario audit while the toggle is OFF", async () => {
     const h = await boot();
     expect(await h.store.getOperatorScenarioPreapprovalEnabled()).toBe(false);
     const prepared = await h.request("/prepare_operator_call", { phone: PHONE, scenario_id: "A1" });
-    expect(prepared).toMatchObject({ status: 201, body: { status: "pending_approval", approval: { status: "pending" } } });
-    expect(prepared.body.confirmToken).toBeUndefined();
+    expect(prepared).toMatchObject({ status: 201, body: { status: "approved", approval: { status: "approved" } } });
+    expect(typeof prepared.body.confirmToken).toBe("string");
     expect(await h.store.getApproval(prepared.body.approval.id)).toMatchObject({ approvedBy: null, approvedAt: null, approvalMetadata: null });
-    expect((await h.request("/commit_call_live", {})).status).toBe(400);
     expect(h.sender.createCall).not.toHaveBeenCalled();
   });
 
@@ -135,12 +133,12 @@ describe("operator scenario pre-approval", () => {
     for (const secret of [PHONE, confirmToken, h.bot.plaintext]) expect(audit).not.toContain(secret);
   });
 
-  it("keeps free-text and patient/SI approvals pending when ON", async () => {
+  it("approves free-text operator calls without scenario audit and keeps patient/SI approvals pending when ON", async () => {
     const h = await boot();
     await h.store.setOperatorScenarioPreapprovalEnabled(true, "staff-id");
     const freeText = await h.request("/prepare_operator_call", INPUT);
-    expect(freeText).toMatchObject({ status: 201, body: { status: "pending_approval" } });
-    expect(freeText.body.confirmToken).toBeUndefined();
+    expect(freeText).toMatchObject({ status: 201, body: { status: "approved" } });
+    expect(await h.store.getApproval(freeText.body.approval.id)).toMatchObject({ approvedBy: null, approvalMetadata: null });
     const patientBot = h.store.mint(["contacts:prepare", "contacts:commit"]);
     const patient = await h.request("/prepare_call", { phone: PHONE, dateOfBirth: "1950-03-17", purpose: "Synthetic test", scenario_id: "A1" }, patientBot);
     expect(patient).toMatchObject({ status: 201, body: { status: "pending_approval", approval: { status: "pending" } } });
@@ -160,8 +158,7 @@ describe("operator scenario pre-approval", () => {
     await h.store.setOperatorScenarioPreapprovalEnabled(true, "staff-id");
     vi.spyOn(h.store, "getOperatorScenarioPreapprovalEnabled").mockRejectedValue(new Error("private"));
     const prepared = await h.request("/prepare_operator_call", { phone: PHONE, scenario_id: "A1" });
-    expect(prepared).toMatchObject({ status: 201, body: { status: "pending_approval" } });
-    expect(prepared.body.confirmToken).toBeUndefined();
+    expect(prepared).toMatchObject({ status: 201, body: { status: "approved" } });
     expect(await h.store.getApproval(prepared.body.approval.id)).toMatchObject({ approvedBy: null, approvalMetadata: null });
   });
 
@@ -311,7 +308,7 @@ describe("open Wayne operator line with provenance-based outbound approval", () 
   it.each(["owner_request", "bot_initiative", undefined] as const)("applies the outbound approval policy and persists %s", async (initiatedBy) => {
     const h = await boot();
     const prepared = await h.request("/prepare_operator_call", { ...INPUT, ...(initiatedBy ? { initiated_by: initiatedBy } : {}) });
-    const automatic = initiatedBy === "owner_request";
+    const automatic = true; // Open line: every provenance is approved at prepare.
     expect(prepared.status).toBe(201);
     expect(prepared.body.status).toBe(automatic ? "approved" : "pending_approval");
     const row = (await h.store.getApproval(prepared.body.approval.id))!;
@@ -345,7 +342,7 @@ describe("open Wayne operator line with provenance-based outbound approval", () 
     expect((await h.store.getApproval(prepared.body.approval.id))!.payload.initiated_by).toBe("bot_initiative");
     for (const owner of [undefined, "invalid", "+15555550999"]) {
       h.env.OPERATOR_OWNER_NUMBER = owner;
-      expect((await h.request("/prepare_operator_call", INPUT)).body.status).toBe("pending_approval");
+      expect((await h.request("/prepare_operator_call", INPUT)).body.status).toBe("approved");
     }
   });
 
@@ -437,31 +434,21 @@ describe("open Wayne operator line with provenance-based outbound approval", () 
     expect(h.sender.createCall).not.toHaveBeenCalled();
   });
 
-  it("shows a pending action to the human, disallows bot approval and gives the preparing bot a single handoff", async () => {
+  it("approves at prepare with a masked view, needs no human tap and gives only the preparing bot the handoff", async () => {
     const h = await boot();
-    const pending = await h.request("/prepare_operator_call", INPUT);
-    expect(pending).toMatchObject({ status: 201, body: { status: "pending_approval", approval: { callKind: "operator", maskedNumber: "***5435" } } });
-    expect(JSON.stringify(pending.body)).not.toContain(PHONE);
-    expect(pending.body.approval).not.toHaveProperty("payload");
+    const prepared = await h.request("/prepare_operator_call", INPUT);
+    expect(prepared).toMatchObject({ status: 201, body: { status: "approved", approval: { callKind: "operator", maskedNumber: "***5435" } } });
+    expect(JSON.stringify(prepared.body)).not.toContain(PHONE);
+    expect(prepared.body.approval).not.toHaveProperty("payload");
+    expect(prepared.body.confirmToken).toMatch(/^[a-f0-9]{64}$/);
     expect(h.sender.createCall).not.toHaveBeenCalled();
-    const row = (await h.store.getApproval(pending.body.approval.id))!;
-    expect(row).toMatchObject({ channel: "call", ticketId: null, ticketNumber: null, payload: { callKind: "operator", maxDurationSec: 3600 } });
-    expect((await h.request(`/approvals/${row.id}/approve`, { payloadHash: row.payloadHash })).status).toBe(403);
-    const mixed = h.store.mint(["operator:call", "contacts:approve"]);
-    expect((await h.request(`/approvals/${row.id}/approve`, { payloadHash: row.payloadHash }, mixed)).status).toBe(403);
-    const listed = await h.request("/approvals", undefined, h.staff);
-    expect(listed.body.approvals[0]).toMatchObject({ payload: { ...INPUT, callKind: "operator" }, payloadHash: row.payloadHash });
-    const approved = await h.request(`/approvals/${row.id}/approve`, { payloadHash: row.payloadHash }, h.staff);
-    expect(approved.status).toBe(200);
-    expect(approved.body.confirmToken).toMatch(/^[a-f0-9]{64}$/);
-    expect(Date.parse(approved.body.expiresAt) - h.clock.at.getTime()).toBe(CONFIRM_TTL_MS);
+    const row = (await h.store.getApproval(prepared.body.approval.id))!;
+    expect(row).toMatchObject({ channel: "call", status: "approved", approvedBy: null, ticketId: null, ticketNumber: null, payload: { callKind: "operator", maxDurationSec: 3600 } });
     const otherBot = h.store.mint(["operator:call"]);
     expect((await h.request(`/contact_requests/${row.id}/confirm_token`, undefined, otherBot)).status).toBe(404);
     expect((await h.request(`/contact_requests/${row.id}/confirm_token`, undefined, h.staff)).status).toBe(403);
-    expect((await h.request(`/contact_requests/${row.id}/confirm_token`)).body.confirmToken).toBe(approved.body.confirmToken);
-    expect((await h.request(`/contact_requests/${row.id}/confirm_token`)).status).toBe(409);
-    expect((await h.request("/commit_call_live", { confirmToken: approved.body.confirmToken }, h.staff)).status).toBe(403);
-    expect((await h.request("/commit_call_live", { confirmToken: approved.body.confirmToken }, otherBot)).status).toBe(404);
+    expect((await h.request("/commit_call_live", { confirmToken: prepared.body.confirmToken }, h.staff)).status).toBe(403);
+    expect((await h.request("/commit_call_live", { confirmToken: prepared.body.confirmToken }, otherBot)).status).toBe(404);
     expect((await h.store.getApproval(row.id))!.confirmUsedAt).toBeNull();
   });
 
