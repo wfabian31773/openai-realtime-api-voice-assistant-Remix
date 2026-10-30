@@ -54,6 +54,7 @@ vi.mock('../services/ticketOutboxService', () => ({
 import { runTool } from './registry';
 import './sharedPatientTools';
 import './techTools';
+import './medicalRecordsTools';
 import { filingFingerprint } from '../services/durableTicketFiling';
 
 const SID = 'CA71d9b6af768209a1f407e9ce5bec8d33';
@@ -204,6 +205,48 @@ describe('a later filing that carries something new', () => {
   });
 });
 
+describe('a later records filing that asks for the signing form', () => {
+  // Codex P2 on #404. The ticketing app sends the form only when it OPENS a
+  // case; a repeat filing just adds its details. So a later filing that asks
+  // for the link by email must tell the model the link was not sent, and how
+  // to send it, instead of a bare "Added to".
+  const RECORDS_SID = 'CA0b2c8e1f3a4d5c6b7a8f9e0d1c2b3a4f';
+  const RECORDS = {
+    requester: 'I am the patient',
+    first_name: 'Testpatient',
+    last_name: 'Example',
+    date_of_birth: '01/02/1950',
+    location: 'Synthetic Clinic',
+    callback_number: '202-555-0142',
+    request_description: 'I need a copy of my medical records',
+    call_sid: RECORDS_SID,
+  };
+
+  it('says this filing sent no form and names send_records_form with the channel asked for', async () => {
+    const api = await client();
+    const create = vi.spyOn(api, 'createTicket').mockResolvedValueOnce(
+      { success: true, ticketNumber: 'VA-90002', form: { requested: true, sent: true, channel: 'sms' } } as never,
+    );
+    const first = (await runTool('file_records_ticket', { ...RECORDS, form_channel: 'sms' })) as Result;
+    expect(first.form_sent).toBe(true);
+
+    create.mockResolvedValueOnce(
+      { success: true, ticketNumber: 'VA-90002', cached: true, detailsAdded: true } as never,
+    );
+    const later = (await runTool('file_records_ticket', {
+      ...RECORDS,
+      form_channel: 'email',
+      email: 'synthetic.patient@example.test',
+      request_description: 'I need a copy of my medical records, and I would rather get the form by email',
+    })) as Result;
+
+    expect(later).toMatchObject({ already_filed: true, details_added: true, form_sent: false });
+    expect(String(later.message)).toBe('Added to VA-90002.');
+    expect(String(later.fix)).toMatch(/did not send a signing form/);
+    expect(String(later.fix)).toMatch(/send_records_form once with channel "email"/);
+  });
+});
+
 describe('the fingerprint', () => {
   const params = (over: Record<string, unknown> = {}) => ({
     departmentId: 3, requestTypeId: 1, requestReasonId: 1,
@@ -242,8 +285,9 @@ describe('every queue filing tool answers a repeat the same way', () => {
       const { readFileSync } = await import('node:fs');
       const { join } = await import('node:path');
       const src = readFileSync(join(__dirname, `${file}.ts`), 'utf8');
-      expect(src).toMatch(/\.\.\.repeatFilingFields\(res\),\n {4}\};/);
-      expect(src.match(/repeatFilingFields\(res\)/g)).toHaveLength(1);
+      // A tool may add its own line to the repeat copy (records: the form).
+      expect(src).toMatch(/\.\.\.repeatFilingFields\(res(?:, \w+)?\),\n {4}\};/);
+      expect(src.match(/repeatFilingFields\(res\b/g)).toHaveLength(1);
     },
   );
 });

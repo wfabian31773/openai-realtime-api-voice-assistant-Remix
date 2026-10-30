@@ -223,8 +223,14 @@ async function forwardRepeatFiling(
  * agent, handed that line a second time, told the caller "that's the same
  * ticket" out loud.
  */
-export function repeatFilingFields(res: DurableCreateResult): Record<string, unknown> {
+export function repeatFilingFields(res: DurableCreateResult, extraFix?: string): Record<string, unknown> {
   if (!res.alreadyFiled) return {};
+  const fields = repeatFilingCopy(res);
+  return extraFix ? { ...fields, fix: `${String(fields.fix)} ${extraFix}` } : fields;
+}
+
+/** The repeat-filing copy itself; `extraFix` is the calling tool's own addition. */
+function repeatFilingCopy(res: DurableCreateResult): Record<string, unknown> {
   const n = res.ticketNumber;
   if (res.addition === 'added') {
     return {

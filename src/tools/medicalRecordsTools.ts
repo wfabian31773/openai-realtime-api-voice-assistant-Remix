@@ -1098,6 +1098,16 @@ registerTool({
               `${WEBSITE_DIRECTIONS}. Read the ticket number back. Do not promise a date.`
             : undefined;
 
+    // A repeat filing never sends the signing form: the ticketing app only adds
+    // the filing's details to the ticket it already has. So the model is told
+    // what this filing did NOT do, and how to do it (Codex P2 on #404).
+    const repeatFormNote = sendForm
+      ? `This filing did not send a signing form. If the caller wants the link, call send_records_form ` +
+        `once with channel "${byText ? 'sms' : 'email'}".`
+      : spokenDirections
+        ? `If the caller has not yet heard how to sign the authorization, tell them: ${WEBSITE_DIRECTIONS}.`
+        : undefined;
+
     return {
       success: true,
       ticket_number: res.ticketNumber,
@@ -1141,7 +1151,7 @@ registerTool({
         : formMessage ??
           `Filed as ${res.ticketNumber}. Read the ticket number back to the caller. Do not promise a date or say the records have been sent.`,
       // A repeat filing on this call answers for the ticket that exists, last.
-      ...repeatFilingFields(res),
+      ...repeatFilingFields(res, repeatFormNote),
     };
   },
 });
