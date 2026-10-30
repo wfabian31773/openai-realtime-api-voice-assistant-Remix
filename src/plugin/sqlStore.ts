@@ -86,6 +86,7 @@ function approvalFrom(r: Record<string, unknown>): ContactApprovalRow {
     confirmUsedAt: r.confirm_used_at ? new Date(String(r.confirm_used_at)) : null,
     approvedBy: (r.approved_by as string | null) ?? null,
     approvedAt: r.approved_at ? new Date(String(r.approved_at)) : null,
+    approvalMetadata: (typeof r.approval_metadata === "string" ? JSON.parse(r.approval_metadata) : r.approval_metadata ?? null) as ContactApprovalRow["approvalMetadata"],
     rejectedBy: (r.rejected_by as string | null) ?? null,
     rejectedAt: r.rejected_at ? new Date(String(r.rejected_at)) : null,
     cancelledAt: r.cancelled_at ? new Date(String(r.cancelled_at)) : null,
@@ -173,6 +174,15 @@ export function createSqlPluginStore(exec: SqlExec, options: PluginStoreOptions 
     },
     async setOperatorLineEnabled(enabled, updatedBy) {
       await exec(`INSERT INTO app_settings (key, value, updated_by) VALUES ('operator_line_enabled', $1, $2)
+        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_by = EXCLUDED.updated_by, updated_at = NOW()`,
+      [String(enabled), updatedBy]);
+    },
+    async getOperatorScenarioPreapprovalEnabled() {
+      const [row] = await exec("SELECT value FROM app_settings WHERE key = 'operator_scenario_preapproval_enabled'");
+      return row?.value === "true";
+    },
+    async setOperatorScenarioPreapprovalEnabled(enabled, updatedBy) {
+      await exec(`INSERT INTO app_settings (key, value, updated_by) VALUES ('operator_scenario_preapproval_enabled', $1, $2)
         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_by = EXCLUDED.updated_by, updated_at = NOW()`,
       [String(enabled), updatedBy]);
     },
@@ -286,11 +296,13 @@ export function createSqlPluginStore(exec: SqlExec, options: PluginStoreOptions 
     },
     async insertApproval(row) {
       const keyed = row.idempotencyKey != null;
+      // Only audited rows name approval_metadata, so other prepares work before the migration is applied.
+      const audited = row.approvalMetadata != null;
       const rows = await exec(
         `INSERT INTO contact_approvals (
             id, channel, status, token_jti, ticket_id, ticket_number, phone_key, payload, payload_hash, created_at, updated_at,
-            confirm_token_hash, confirm_token_plaintext, confirm_expires_at${keyed ? ", idempotency_key" : ""}
-          ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11,$12,$13,$14${keyed ? ",$15" : ""})
+            confirm_token_hash, confirm_token_plaintext, confirm_expires_at, approved_by, approved_at${audited ? ", approval_metadata" : ""}${keyed ? ", idempotency_key" : ""}
+          ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11,$12,$13,$14,$15,$16${audited ? ",$17::jsonb" : ""}${keyed ? `,$${audited ? 18 : 17}` : ""})
           ${keyed ? `ON CONFLICT (token_jti, idempotency_key)
             WHERE idempotency_key IS NOT NULL AND status NOT IN ('rejected', 'cancelled') DO NOTHING` : ""}
           RETURNING *`,
@@ -309,6 +321,9 @@ export function createSqlPluginStore(exec: SqlExec, options: PluginStoreOptions 
           row.confirmTokenHash,
           row.confirmTokenPlaintext ?? null,
           row.confirmExpiresAt?.toISOString() ?? null,
+          row.approvedBy,
+          row.approvedAt?.toISOString() ?? null,
+          ...(audited ? [JSON.stringify(row.approvalMetadata)] : []),
           ...(keyed ? [row.idempotencyKey] : []),
         ],
       );

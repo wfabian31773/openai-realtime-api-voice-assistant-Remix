@@ -1012,10 +1012,15 @@ import { callEnvironment } from "./callRecord";
  * v148 — IDENTITY GATE (#384, merged to main as 117c2d5). Verified identity
  * carried through ticket filing and teardown/sweep recovery.
  */
+/** v151: staff-controlled operator scenario pre-approval, default OFF, with
+ * approval audit and opt-out checks. Above main v148; v149/v150 are claimed.
+ * Merged to main as #408 (2f72c87).
+ * Apply add_operator_scenario_preapproval.sql separately; not applied here. */
 /**
- * v151 — THE SILENCE, A LATER FILING, AND THE A1 OFFICE AND NAME (2026-10-30).
+ * v152 — THE SILENCE, A LATER FILING, AND THE A1 OFFICE AND NAME (2026-10-30).
  * One marker for what was written as a v148 + v149 + v150 stack on #404: #384
- * took v148 on main and #391 / #376 hold v149 / v150 on open branches.
+ * took v148 on main, #391 / #376 hold v149 / v150 on open branches, and
+ * #408 took v151 on main, so it ships as v152.
  * (a) When a heard caller is silent after an agent line that asked nothing,
  * the bridge asks the AGENT for a turn, at most AGENT_STALL_NUDGE_LIMIT times
  * in a row; the lookup's miss lines carry the next step; PCP has no
@@ -1024,11 +1029,12 @@ import { callEnvironment } from "./callRecord";
  * (ticketing-app #414). (c) No queue prompt names a sample office and the
  * ask script asks for the first and last name. The office carry this branch
  * also wrote is #384's confirmed clinic on main and was dropped in the merge.
- * Above main's v148 (#384, 117c2d5). No migration; production impact
+ * Above main's v151 (#408, 2f72c87), which contains v148 (#384,
+ * 117c2d5). No migration; production impact
  * remains unmeasured.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v151-a-stalled-agent-carries-on-20261030";
+  "voice-runtime-v152-a-stalled-agent-carries-on-20261030";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can
