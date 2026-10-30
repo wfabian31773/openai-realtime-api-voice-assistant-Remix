@@ -881,6 +881,8 @@ import { callEnvironment } from "./callRecord";
  * BY office, so it gets its own marker. On top of v115 (#367), which it
  * contains. `src/tools/opticalTools.ts`, `opticalOfficeFromRecord.test.ts`.
  */
+// Records-intent review fixes preserve interpretation, document refusals,
+// inline corrections, documentation and unknown-result handling.
 /**
  * v117 — CONTACT CAPTURE (#14, 2026-10-27). Surnames are spelled when needed;
  * new email addresses are read back and confirmed in full. Provider names use
@@ -976,7 +978,13 @@ import { callEnvironment } from "./callRecord";
 /** v146: dedicated operator SMS send, with no hours/caps, owner exemption,
  * opt-outs, durable idempotency and operator-origin commits. No new migration. */
 /**
- * v150 — THE THIRD PARTY'S REPORT STAYS IN RECORDS (2026-10-26; renumbered from v117 to v118, to v127, to v134, to v138 on 2026-10-28, then to v150 on 2026-10-29 because main took v117 in #379, v126 in #394, v128–v131 in #389, #386, #387 and #388, and v132, v134, v135 and v136 in #390, #396, #392 and #393, and #397–#407 took v140–v146 on main; v147 is #381, v148 is #384 and v149 is #391 on their open branches). On the
+ * v147 — RECORDS QUESTION GUARD (2026-10-29). Records access and status
+ * explanations stay in Medical Records; results-meaning questions stay
+ * clinical. Refused prescriptions no longer count as records requests.
+ * On top of v146 (#407, main), which contains v145 and v144; v148 is #384, v149 is #391 and v150 is #376 on their open branches. No migration; production impact remains unmeasured.
+ */
+/**
+ * v150 — THE THIRD PARTY'S REPORT STAYS IN RECORDS (2026-10-26; renumbered from v117 to v118, to v127, to v134, to v138 on 2026-10-28, then to v150 on 2026-10-29 because main took v117 in #379, v126 in #394, v128–v131 in #389, #386, #387 and #388, and v132, v134, v135 and v136 in #390, #396, #392 and #393, #397–#407 took v140–v146 and #381 took v147 on main; v148 is #384, and v149 is claimed by both #391 and #404, on their open branches). On the
  * records line, a provider's, plan's or other third party's request whose
  * words name a document is no longer sent to the HVA Hub on a scheduling cue
  * ("the most recent eye exam REPORT" read as "schedule an eye exam"); a
@@ -985,8 +993,8 @@ import { callEnvironment } from "./callRecord";
  * model, in `fix`, that nothing is lost and never to say "call back"; and a
  * name given in two halves across invocations reaches the payload. Seven
  * records-lane calls, 2026-10-12..10-26. A payload change on the ticket path
- * of the department under the CAP, so it gets its own marker. On top of v146
- * (#407), which it contains. The recovery ticket carries the callback
+ * of the department under the CAP, so it gets its own marker. On top of v147
+ * (#381), which it contains; the holds read #381's `recordsLineRedirect`. The recovery ticket carries the callback
  * number without its extension and the extension in the staff note, as
  * v132's filing does. `src/tools/medicalRecordsTools.ts`,
  * `thirdPartyRecordsStayInRecords.test.ts`.

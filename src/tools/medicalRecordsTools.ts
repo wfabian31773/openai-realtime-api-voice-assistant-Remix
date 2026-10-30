@@ -1,3 +1,5 @@
+import { recordsLinePurpose, recordsRequestText, recordsLineRedirect } from '../../shared/records-request-intent';
+import { callerUtterances } from '../services/symptomCorroboration';
 /**
  * The tools a Medical Records agent needs, and nothing else.
  *
@@ -57,6 +59,25 @@ import {
  */
 export function patientScope(value: unknown): string {
   return typeof value === 'string' && /^-p\d{1,3}$/.test(value) ? value : '';
+}
+
+/**
+ * Correct a model's invented records summary only from an actual caller request.
+ * An employer or a surname containing a queue word is not contrary evidence.
+ * Keep turn boundaries: identity answers must not become the request/SMS body.
+ * A PCP patient scope owns its own narrative, independent of the other patients.
+ */
+function requestDescription(input: Record<string, unknown>): string {
+  const supplied = recordsRequestText(str(input.request_description));
+  if (patientScope(input.patient_scope) || recordsLinePurpose(supplied) !== 'records') return supplied;
+  const turns = callerUtterances(str(input.call_sid));
+  if (recordsLinePurpose(turns.join('\n')) === 'records') return supplied;
+  const requests = turns.filter(turn => {
+    const purpose = recordsLinePurpose(turn);
+    return purpose !== 'unknown' && purpose !== 'records'
+      && /\b(?:need|want|would like|please|question|what time|when|how|can you|has my|reschedul\w*|schedul\w*|cancel\w*|confirm\w*|reprogram\w*|necesit\w*|quiero|cambiar)\b/i.test(turn);
+  });
+  return requests.length ? recordsRequestText(requests.join('\n')) : supplied;
 }
 
 // ---------------------------------------------------------------- what kind
@@ -325,6 +346,9 @@ export function recoveryAfterRefusalNote(r: {
  * The staff line on a request KEPT in Medical Records for want of a name.
  * `callData.transcript`, never the description (an SMS body).
  */
+/** The HVA Hub, where `recordsLineRedirect` sends scheduling (and unknown) requests. */
+const HVA_HUB_DEPARTMENT_ID = 9;
+
 export function keptForNoNameNote(redirect: { departmentName: string; requestReason: string }): string {
   return (
     `KEPT IN MEDICAL RECORDS — the request reads as one for ${redirect.departmentName} ` +
@@ -376,7 +400,8 @@ registerTool({
     'need, and before filing. It knows the difference between a copy for the ' +
     'patient, records going to another doctor, records for a health plan or an ' +
     'attorney, a letter or form, and an in-person review — so it always returns ' +
-    'something. Pass its request_reason_id to file_records_ticket.',
+    'something. A non-records request returns is_records_request false: do not offer a records form. ' +
+    'Pass its request_reason_id to file_records_ticket.',
   input_schema: {
     type: 'object',
     properties: {
@@ -394,11 +419,20 @@ registerTool({
     const { classifyRecordsRequest, MEDICAL_RECORDS_DEPARTMENT_ID } = await import(
       './medicalRecordsTaxonomy'
     );
-    const { classification, isCatchAll } = classifyRecordsRequest(str(input.request_description));
+    const description = requestDescription(input);
+    const redirect = recordsLineRedirect(description);
+    if (redirect) return {
+      success: true, classified: recordsLinePurpose(description) !== 'unknown', is_records_request: false,
+      department_id: redirect.departmentId, request_type_id: redirect.requestTypeId,
+      request_reason_id: redirect.requestReasonId, request_reason: redirect.requestReason,
+      fix: 'This is not a records request. Take the callback request with file_records_ticket; do not offer a records form or ask for delivery details. Preserve the caller request in the description.',
+    };
+    const { classification, isCatchAll } = classifyRecordsRequest(description);
 
     return {
       success: true,
       classified: !isCatchAll,
+      is_records_request: true,
       department_id: MEDICAL_RECORDS_DEPARTMENT_ID,
       request_type: classification.requestType,
       request_type_id: classification.requestTypeId,
@@ -556,7 +590,7 @@ registerTool({
      * refused for ever — eleven real conversations in fourteen business days,
      * none of them filed. The handler now asks ONCE and then files without.
      */
-    required: ['callback_number', 'request_description', 'requester'],
+    required: ['callback_number', 'request_description'],
   },
   handler: async (input): Promise<ToolResult> => {
     const callSid = str(input.call_sid);
@@ -567,7 +601,12 @@ registerTool({
     let { first, last } = carryNameHalves(callSid, scope, str(input.first_name), str(input.last_name));
     const dob = str(input.date_of_birth);
     const phone = str(input.callback_number);
-    const description = str(input.request_description);
+    const description = requestDescription(input);
+    // The records line's own reading of the request (v147, #381), decided once
+    // on these words. A third party's document request or a request with no
+    // name may still be kept in Medical Records below — `redirect` is the
+    // decision after those holds.
+    const lineRedirect = recordsLineRedirect(description);
 
     /**
      * THE NAME: the record first, one ask second, the request regardless.
@@ -671,7 +710,7 @@ registerTool({
     // can reconstruct this after the call ends, so the call is the only place
     // it can be got.
     const requesterRaw = str(input.requester);
-    if (!requesterRaw) {
+    if (!requesterRaw && !lineRedirect) {
       return missing(
         ['requester'],
         'And just so I route this correctly — are you the patient yourself, or calling on someone\'s behalf?',
@@ -681,11 +720,10 @@ registerTool({
     const cap = determineCapClock(requesterType);
 
     // A CALLER WHO PRESSED THE WRONG OPTION IS NOT SENT AWAY — and is not
-    // offered a records form either. Decided HERE, before the channel ask,
+    // offered a records form either. Decided above, before the channel ask,
     // on the same words the redirect below reads, so the one question this
     // tool adds is never put to somebody who rang about an appointment.
-    const { detectCrossQueue, namesADocument, scheduledOnlyByAnExamName } = await import('./queueRouting');
-    const crossQueue = detectCrossQueue(description, MEDICAL_RECORDS_DEPARTMENT_ID);
+    const { namesADocument, scheduledOnlyByAnExamName } = await import('./queueRouting');
     /**
      * A THIRD PARTY ASKING FOR A PATIENT'S RECORDS OR REPORT IS NOT BOOKING
      * AN EXAM — v127.
@@ -695,22 +733,20 @@ registerTool({
      * health plan's or another third party's request for a patient's exam
      * REPORT to the HVA Hub (dept 9, type 32, reason 146) six times and to
      * department 3 once. Every one carried `requestPathway` third_party_*.
-     * The cause is in `detectCrossQueue`: scheduling is checked FIRST, the
-     * records-line hold deliberately does not cover it (the operator's
-     * schedule-related-to-the-Hub rule), and `'eye exam'` is a reason-146
-     * cue — so "the most recent eye exam report" left Medical Records before
-     * the word "report" was read.
+     * The cause was in `detectCrossQueue`: scheduling is checked FIRST and
+     * `'eye exam'` is a reason-146 cue — so "the most recent eye exam report"
+     * left Medical Records before the word "report" was read. The records
+     * line's own reading since v147 (#381, `recordsLineRedirect`) has the
+     * same gap: its document vocabulary has no "exam report", so that request
+     * still reads as scheduling and goes to the HVA Hub.
      *
-     * So on THIS line, the hold the subject-matter redirects already obey
-     * covers the scheduling one too, for a third-party pathway only: a
-     * provider, plan or other third party whose words name a document stays
-     * in Medical Records. (The optical, surgery and medication redirects
-     * already stand down on a document word inside `detectCrossQueue`, so the
-     * scheduling one is the only redirect this can withhold.) Nothing changes
-     * for a patient, nor for a third party who names no document — a doctor's
-     * office booking a mutual patient's exam still reaches the Hub.
-     * `detectCrossQueue`'s cue lists are untouched fleet-wide; changing them
-     * is open item #99 and needs its own department-2 measurement.
+     * So on THIS line, a provider, plan or other third party whose words name
+     * a document stays in Medical Records when the records line would send it
+     * to the HVA Hub — and only then; every other redirect `recordsLineRedirect`
+     * decides stands. Nothing changes for a patient, nor for a third party who
+     * names no document — a doctor's office booking a mutual patient's exam
+     * still reaches the Hub. `detectCrossQueue`'s cue lists are untouched
+     * fleet-wide; changing them is open item #99.
      *
      * THE DOCUMENT WORD IS THE NARROW ONE, `namesADocument`, NOT THE
      * RECORDS-LINE HOLD'S (Codex P1 on #376). That hold is substring matching
@@ -726,17 +762,18 @@ registerTool({
      * the Hub as it always has. See `EXAM_NAME_CUES`.
      */
     const thirdPartyRecordsHold =
-      crossQueue !== null &&
+      lineRedirect !== null &&
+      lineRedirect.departmentId === HVA_HUB_DEPARTMENT_ID &&
       cap.pathway !== 'roa_patient' &&
       namesADocument(description) &&
       scheduledOnlyByAnExamName(description);
     if (thirdPartyRecordsHold) {
       console.info(
         `[records] a third party's records request held in Medical Records against the ` +
-          `${crossQueue.requestReason} cue (${cap.pathway})`,
+          `${lineRedirect.requestReason} reading (${cap.pathway})`,
       );
     }
-    const redirect = thirdPartyRecordsHold ? null : crossQueue;
+    const redirect = thirdPartyRecordsHold ? null : lineRedirect;
     /**
      * BELT AND BRACES: A REQUEST WITH NO NAME CANNOT LEAVE MEDICAL RECORDS —
      * v127.
@@ -963,7 +1000,7 @@ registerTool({
     const dateRange = str(input.date_range);
     // The clock line goes FIRST. A records clerk opening this ticket should not
     // have to read to the bottom to learn whether it is CAP-reportable.
-    const body = [
+    const body = redirect ? description : [
       `${cap.note}`,
       `\n\n${description}`,
       `\n\nRequested by: ${requesterRaw} [${requesterType}]`,
@@ -1261,6 +1298,9 @@ registerTool({
       // read them yet, which is why they are safe to send today — but the
       // ticketing app is the half that has to change for the clock to be right.
       //
+      // A ticket ROUTED AWAY carries no records metadata at all (v147, #381):
+      // it left Medical Records, so no pathway, clock, form or requestor.
+      //
       // NOT SENT for a request KEPT here for want of a name whose requester is
       // ON the clock (v127). It reads as another team's — an appointment, a
       // pair of glasses — and the app takes a pathway the voice side states
@@ -1271,30 +1311,34 @@ registerTool({
       // person decides — where the teardown stub for the same call lands
       // today. A third party's stays: off the clock, off that report, and
       // who asked is what this tool knows on every filing.
-      ...(heldForNoName && cap.onClock
+      ...(routedAway
         ? {}
         : {
-            requestorType: cap.requesterType,
-            // LOGGED, CLOCK NOT STARTED when the link goes out: the signed form is
-            // the written request and starts the clock on the same case (owner,
-            // 2026-09-27). A redirected ticket never carries a form — it left
-            // Medical Records.
-            requestPathway: formChannel && !redirect ? 'pending_authorization' : cap.pathway,
-            capClockApplies: formChannel && !redirect ? false : cap.onClock,
+            ...(heldForNoName && cap.onClock
+              ? {}
+              : {
+                  requestorType: cap.requesterType,
+                  // LOGGED, CLOCK NOT STARTED when the link goes out: the signed form is
+                  // the written request and starts the clock on the same case (owner,
+                  // 2026-09-27). A redirected ticket never carries a form — it left
+                  // Medical Records.
+                  requestPathway: formChannel && !redirect ? 'pending_authorization' : cap.pathway,
+                  capClockApplies: formChannel && !redirect ? false : cap.onClock,
+                }),
+            ...(formChannel && !redirect ? { formChannel } : {}),
+            // A NAME, not a description. The ticketing agent, 2026-08-13: "Send
+            // requestorName even when the requester is the patient. Zero of 470 rows
+            // carry one. The name is the evidence that a classification was made;
+            // without it an audit cannot tell 'confirmed patient' from 'defaulted to
+            // patient', which is the hole we are climbing out of."
+            //
+            // "I am the patient" is not evidence of anything. When the requester IS
+            // the patient the name is theirs; otherwise it is whatever they said,
+            // which is where the organisation usually sits ("SCAN Health Plan",
+            // "an attorney at Lexitas").
+            requestorName:
+              cap.requesterType === 'patient' ? `${first} ${last}`.trim() || undefined : requesterRaw,
           }),
-      ...(formChannel && !redirect ? { formChannel } : {}),
-      // A NAME, not a description. The ticketing agent, 2026-08-13: "Send
-      // requestorName even when the requester is the patient. Zero of 470 rows
-      // carry one. The name is the evidence that a classification was made;
-      // without it an audit cannot tell 'confirmed patient' from 'defaulted to
-      // patient', which is the hole we are climbing out of."
-      //
-      // "I am the patient" is not evidence of anything. When the requester IS
-      // the patient the name is theirs; otherwise it is whatever they said,
-      // which is where the organisation usually sits ("SCAN Health Plan",
-      // "an attorney at Lexitas").
-      requestorName:
-        cap.requesterType === 'patient' ? `${first} ${last}`.trim() || undefined : requesterRaw,
       callData: {
         agentUsed: 'records',
         ...(callSid ? { callSid } : {}),
@@ -1458,8 +1502,8 @@ registerTool({
       request_reason_id: filedReasonId,
       // Say plainly what is missing, so the agent can still ask before the call
       // ends rather than a clerk chasing it tomorrow.
-      requester_type: cap.requesterType,
-      cap_clock_applies: cap.onClock,
+      ...(!redirect ? { requester_type: cap.requesterType } : {}),
+      cap_clock_applies: !redirect && cap.onClock,
       // Not on a routed-away ticket: there is no records destination to ask
       // for, and the note would contradict the `fix` below (Codex P2 on #356).
       ...(deliverTo || redirect ? {} : { note_destination: 'No destination captured — ask where these should be sent.' }),

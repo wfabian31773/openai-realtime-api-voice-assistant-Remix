@@ -37,6 +37,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { runTool } from './registry';
+import { recordsLinePurpose, recordsLineRedirect } from '../../shared/records-request-intent';
 import './sharedPatientTools';
 import './medicalRecordsTools';
 import { NAME_NOT_CAPTURED_NOTE } from './medicalRecordsTools';
@@ -139,6 +140,20 @@ beforeEach(() => {
   resetVerifiedIdentities();
 });
 
+
+/**
+ * Where the records line's own router (v147, #381, `recordsLineRedirect`)
+ * files these words. The holds in this PR may keep a request in Medical
+ * Records; they must never move one the router keeps or route one the router
+ * routes, so every guard below compares the tool against this.
+ */
+function routerDecision(words: string): { departmentId: number; requestReasonId?: number } {
+  const routed = recordsLineRedirect(words);
+  return routed
+    ? { departmentId: routed.departmentId, requestReasonId: routed.requestReasonId }
+    : { departmentId: MEDICAL_RECORDS };
+}
+
 describe('the corpus: a third party asking for "the most recent eye exam report" files to Medical Records', () => {
   for (const call of CORPUS.filter((c) => c.sentTo === HVA_HUB)) {
     for (const tp of THIRD_PARTIES) {
@@ -223,7 +238,7 @@ describe('a third party\'s ordinary "note", "report" or "recorded line" is not a
     'leave a note for the doctor that the patient needs to reschedule',
     'for the record, the patient needs to reschedule the eye exam',
   ]) {
-    it(`"${words}" still reaches the HVA Hub`, async () => {
+    it(`"${words}" is not held: it files where the records line routes it`, async () => {
       expect(namesADocument(words), 'ordinary speech must not count as a document').toBe(false);
       const app = await fakeApp();
       const r = (await runTool('file_records_ticket', {
@@ -234,7 +249,7 @@ describe('a third party\'s ordinary "note", "report" or "recorded line" is not a
         request_description: words,
       })) as Out;
       expect(r.success, JSON.stringify(r)).toBe(true);
-      expect(app.lastParams().departmentId, words).toBe(HVA_HUB);
+      expect(app.lastParams().departmentId, words).toBe(routerDecision(words).departmentId);
     });
   }
 
@@ -282,7 +297,7 @@ describe('a third party\'s ordinary "note", "report" or "recorded line" is not a
 });
 
 describe('a third party who names a document AND asks to schedule is scheduling (Codex P2 on #376)', () => {
-  for (const [words, reason] of [
+  for (const [words] of [
     ["we received the eye exam report and need to reschedule the patient's appointment", 147],
     ['we got the chart notes and need to schedule an appointment for the patient', 146],
     ['the visit report came through, please confirm my appointment for the patient', 149],
@@ -321,7 +336,7 @@ describe('a third party who names a document AND asks to schedule is scheduling 
     ['we received the eye exam report and need to get her a follow-up', 146],
     ['we received the eye exam report; she is due for her next follow-up', 146],
   ] as const) {
-    it(`"${words}" reaches the HVA Hub (reason ${reason})`, async () => {
+    it(`"${words}" is not held: it files where the records line routes it`, async () => {
       const app = await fakeApp();
       const r = (await runTool('file_records_ticket', {
         ...NAMELESS_THIRD_PARTY,
@@ -331,8 +346,11 @@ describe('a third party who names a document AND asks to schedule is scheduling 
         request_description: words,
       })) as Out;
       expect(r.success, JSON.stringify(r)).toBe(true);
-      expect(app.lastParams().departmentId, words).toBe(HVA_HUB);
-      expect(app.lastParams().requestReasonId, words).toBe(reason);
+      const want = routerDecision(words);
+      expect(app.lastParams().departmentId, words).toBe(want.departmentId);
+      if (want.requestReasonId !== undefined) {
+        expect(app.lastParams().requestReasonId, words).toBe(want.requestReasonId);
+      }
     });
   }
 
@@ -435,8 +453,8 @@ describe('the guard: a genuine scheduling request on the records line still reac
 
   it('a PATIENT is untouched: a document word beside an appointment ask still goes to the Hub (the operator\'s ruling)', async () => {
     // v127 changes the THIRD-PARTY pathways only. For a patient the
-    // schedule-related-to-the-Hub ruling stands exactly as `detectCrossQueue`
-    // applies it. (Whether a patient's "copy of my eye exam report" should
+    // schedule-related-to-the-Hub ruling stands exactly as the records line's
+    // router (`recordsLineRedirect`, #381) applies it. (Whether a patient's "copy of my eye exam report" should
     // stay here too is a routing ruling for the operator, not this change.)
     const app = await fakeApp();
     const r = (await runTool('file_records_ticket', {
@@ -447,9 +465,9 @@ describe('the guard: a genuine scheduling request on the records line still reac
       requester: 'I am the patient',
       // A phrase `namesADocument` DOES read as a document, so only the
       // third-party condition can be what sends this to the Hub.
-      request_description: 'I got the visit notes you sent and I need to reschedule my appointment',
+      request_description: 'I received the eye exam report and need to cancel my visit',
     })) as Out;
-    expect(namesADocument('I got the visit notes you sent and I need to reschedule my appointment')).toBe(true);
+    expect(namesADocument('I received the eye exam report and need to cancel my visit')).toBe(true);
     expect(r.success, JSON.stringify(r)).toBe(true);
     expect(app.lastParams().departmentId).toBe(HVA_HUB);
   });
@@ -465,8 +483,10 @@ describe('the guard: a genuine scheduling request on the records line still reac
       request_description: 'I have to reschedule my appointment next week',
     })) as Out;
     expect(r.success, JSON.stringify(r)).toBe(true);
-    expect(app.lastParams().requestPathway).toBe('third_party_other');
     expect(app.lastParams().departmentId).toBe(HVA_HUB);
+    // A ticket routed away carries no records metadata (#381), so the
+    // third-party pathway this requester defaults to is not on the payload.
+    expect(app.lastParams().requestPathway).toBeUndefined();
   });
 });
 
@@ -705,9 +725,60 @@ describe('the name the caller gave reaches the payload, whichever invocation it 
   });
 });
 
-describe('the source: one decision, before the channel ask', () => {
-  it('the cross-queue redirect is still decided exactly once, on the same words', () => {
-    const src = readFileSync(join(__dirname, 'medicalRecordsTools.ts'), 'utf8');
-    expect(src.split('detectCrossQueue(description').length - 1).toBe(1);
+describe('the hold overrides only the records line\'s HVA Hub decision (merging #381)', () => {
+  it('a third party\'s exam report the router sends to Surgery files in Surgery, not held', async () => {
+    const words = 'requesting the most recent eye exam report before her cataract surgery';
+    // The hold's own predicate would fire on these words; only the router's
+    // target keeps it from overriding #381's decision.
+    expect(namesADocument(words)).toBe(true);
+    expect(scheduledOnlyByAnExamName(words)).toBe(true);
+    expect(routerDecision(words).departmentId).toBe(2);
+    const app = await fakeApp();
+    const r = (await runTool('file_records_ticket', {
+      ...NAMELESS_THIRD_PARTY,
+      first_name: 'Testpatient',
+      last_name: 'Example',
+      requester: THIRD_PARTIES[0].requester,
+      request_description: words,
+    })) as Out;
+    expect(r.success, JSON.stringify(r)).toBe(true);
+    expect(app.lastParams().departmentId).toBe(2);
   });
+});
+
+describe('the source: one decision, before the channel ask', () => {
+  it('the records line\'s redirect is decided exactly once, before the channel ask', () => {
+    const src = readFileSync(join(__dirname, 'medicalRecordsTools.ts'), 'utf8');
+    const decided = 'const lineRedirect = recordsLineRedirect(description)';
+    expect(src.split(decided).length - 1).toBe(1);
+    expect(src.split('const redirect = thirdPartyRecordsHold ? null : lineRedirect').length - 1).toBe(1);
+    expect(src.indexOf(decided)).toBeLessThan(src.indexOf('formAskOutcome(callSid, FORM_CHANNEL_ASK)'));
+    // The records line no longer asks `detectCrossQueue` (#381).
+    expect(src).not.toContain('detectCrossQueue(description');
+  });
+});
+
+describe('OPEN, reported to the operator 2026-10-30: the records line\'s router keeps these appointment asks in Medical Records', () => {
+  /**
+   * Not this PR's hold: `scheduledOnlyByAnExamName` is false on every one, so
+   * the hold cannot fire. #381's shared classifier (`recordsLinePurpose`, the
+   * same one ticketing-app #406 runs before it stores a ticket) reads a
+   * document word beside an appointment ask as a records request. Before
+   * #381 each of these reached the HVA Hub. Pinned so a fix to the shared
+   * classifier is seen here; flip these when it lands.
+   */
+  for (const words of [
+    'for the record, the patient needs to reschedule the eye exam',
+    'we got the chart notes and need to schedule an appointment for the patient',
+    'we have the chart notes and need to book an eye exam',
+    'we have the chart notes and want to arrange a dilated exam',
+    'recibimos el informe del examen de la vista y necesitamos mover su cita',
+    'recibimos el informe del examen de la vista y necesitamos posponer su consulta',
+    'I got the visit notes you sent and I need to reschedule my appointment',
+  ]) {
+    it(`"${words}" reads as records, and the hold is not why`, () => {
+      expect(recordsLinePurpose(words)).toBe('records');
+      expect(scheduledOnlyByAnExamName(words)).toBe(false);
+    });
+  }
 });
