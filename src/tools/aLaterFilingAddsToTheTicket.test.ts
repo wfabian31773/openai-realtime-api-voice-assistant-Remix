@@ -288,6 +288,12 @@ describe('the fingerprint', () => {
     expect(filingFingerprint(params({ requestorType: 'personal_representative' }))).not.toBe(filingFingerprint(params()));
     expect(filingFingerprint(params({ requestPathway: 'pending_authorization' }))).not.toBe(filingFingerprint(params()));
     expect(filingFingerprint(params({ capClockApplies: false }))).not.toBe(filingFingerprint(params()));
+    expect(filingFingerprint(params({ requestorName: 'Example Health Plan' })))
+      .not.toBe(filingFingerprint(params({ requestorName: 'Example Medical Group' })));
+    expect(filingFingerprint(params({ requestorName: ' example health plan ' })))
+      .toBe(filingFingerprint(params({ requestorName: 'Example Health Plan' })));
+    expect(filingFingerprint(params({ validatedPatient: { personId: 'person-1' } })))
+      .not.toBe(filingFingerprint(params()));
   });
 
   it('sees a callback extension, which rides in the staff note, and nothing else in that note', () => {

@@ -179,8 +179,11 @@ export function filingFingerprint(p: CreateTicketParams): string {
     (p.patientLastName ?? '').trim().toLowerCase(),
     [p.patientBirthYear, p.patientBirthMonth, p.patientBirthDay].map((x) => (x ?? '').trim()).join('-'),
     p.requestorType ?? '',
+    (p.requestorName ?? '').trim().toLowerCase(),
     p.requestPathway ?? '',
     p.capClockApplies ?? null,
+    // A record matched after the first filing is something new to carry.
+    p.validatedPatient?.personId ?? null,
     // The callback extension rides in the staff-only note, not in
     // `patientPhone` (v132), so a later "it's extension 22" is read from there
     // (Codex P2 on #404). Only that line: the rest of the note is not a detail
