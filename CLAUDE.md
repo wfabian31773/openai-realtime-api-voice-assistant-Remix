@@ -2956,7 +2956,7 @@ never read v57; **v58 was that next ship** — the identity probe, an instrument
 and no behaviour change (see the v56 row below for what it measures). It is no
 longer the current marker: see the paragraph beneath this one.
 
-**v144 (#402) IS WHAT `main` CARRIES (merged 2026-10-29, `6cac333`), ABOVE v143 (#401, `2c3c5fa`) and v142 (#399, `adf8dad`), AND v57,
+**v146 (#407) IS WHAT `main` CARRIES (merged 2026-10-29, `04e1e80`), ABOVE v145 (#405), v144 (#402, `6cac333`) and v143 (#401, `2c3c5fa`), AND v57,
 v59, v60, v63, v65 AND v66 ARE RETIRED RATHER THAN REUSED.** Each of the last
 five was a branch's own number while it sat below `main`, and each was given up
 the moment a merge put it there: two branches carrying one version make two
