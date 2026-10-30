@@ -17,6 +17,7 @@
  */
 import { describe, it, expect, vi } from "vitest";
 import {
+  AGENT_STALL_NUDGE_LIMIT,
   SILENCE_PROMPT_LINE,
   SILENCE_STRIKE_LIMIT,
   clampSilenceWindow,
@@ -638,18 +639,22 @@ describe("heard callers retire the ladder before it speaks (v131)", () => {
     // once and stopped or never spoke at all — it cannot answer the question
     // the ruling turns on. Here the caller speaks, then goes quiet for the
     // full silence window, which must neither prompt nor cut.
+    // The agent's lines here ask the caller something, so the silence is the
+    // CALLER's (v151 asks the AGENT to carry on only when its line asked
+    // nothing — see the describe block below). This test is the ladder's.
     const h = await ladder();
     h.speak("How can I help you today?");
     h.handlers().onCallerTranscript("It is about my order.", "i1");
-    h.speak("One moment.");
+    h.speak("What is the order number?");
     expect(h.timers.fire(WINDOW)).toBe(true);
     expect(h.session.speak).not.toHaveBeenCalled();
     expect(h.timers.fire(WINDOW)).toBe(false);
     // Later agent and caller turns cannot restart the cannot-hear prompts.
     h.handlers().onCallerTranscript("I still need help with that order.", "i2");
-    h.speak("Take your time.");
+    h.speak("Can you read me the number on the receipt?");
     h.timers.fire(WINDOW);
     expect(h.session.speak).not.toHaveBeenCalled();
+    expect(h.session.requestResponse).not.toHaveBeenCalled();
     expect(h.outcomes).toEqual([]);
   });
 
@@ -724,3 +729,133 @@ describe("heard callers retire the ladder before it speaks (v131)", () => {
     expect(h.outcomes).toEqual(["max_duration"]);
   });
 });
+
+describe("an agent that stalls on a heard caller is asked to carry on (v151)", () => {
+  // Corpus, 2026-10-29: the lookup's "Let me make sure the team has your
+  // details." (tech CAa4a4c5aca113baa2126fca579680a78d,
+  // CAaa2396b71203a1f50a187c85d1fa5462, CA189b73620b65a9782191310e346eecdd,
+  // CAaa725aab98f148de3d7b38835f2f8dc5; surgery
+  // CA8e04e05d30a2e57ec4afe90451407fe4) and PCP's "Still with you — one
+  // moment." (CA066d1483875fdc58b760ddcb4b447f58,
+  // CA2bb4de0d901405fa60cc95f6bc8ea578, CA6f22688980fafd85a463d9250fc62a92,
+  // CA9b039511066658d903c86ec5a0a0b095) were the agent's last words, the
+  // caller waited 39 to 233 seconds, and nothing filed.
+  const heardThenStalled = async (line: string) => {
+    const h = await ladder();
+    h.speak("How can I help you today?");
+    h.handlers().onCallerTranscript("I need a refill on my eye drops.", "i1");
+    h.speak(line);
+    return h;
+  };
+
+  it("asks the AGENT for a turn when its last line asked the caller nothing, and says nothing itself", async () => {
+    const h = await heardThenStalled("Let me make sure the team has your details.");
+    expect(h.timers.fire(WINDOW)).toBe(true);
+    expect(h.session.requestResponse).toHaveBeenCalledTimes(1);
+    expect(h.session.speak).not.toHaveBeenCalled();
+    expect(h.outcomes).toEqual([]);
+  });
+
+  it("is bounded: two in a row, then it stands down as v131 does", async () => {
+    const h = await heardThenStalled("Still with you — one moment.");
+    h.timers.fire(WINDOW);
+    h.speak("One moment while I get that into our system.");
+    h.timers.fire(WINDOW);
+    h.speak("Thank you.");
+    h.timers.fire(WINDOW);
+    expect(h.session.requestResponse).toHaveBeenCalledTimes(AGENT_STALL_NUDGE_LIMIT);
+    expect(h.session.speak).not.toHaveBeenCalled();
+    expect(h.timers.fire(WINDOW)).toBe(false);
+    await h.bridge.handleTwilioFrame({ event: "stop", streamSid: "MZ-test" } as never);
+    expect(h.records[0].agentStallNudges).toBe(AGENT_STALL_NUDGE_LIMIT);
+    expect(h.records[0].silenceStoodDown).toBe(true);
+  });
+
+  it("a nudge the provider is slow to answer is not followed by a second one", async () => {
+    // Codex P2 on #404: the caller's 12-second window must not run while the
+    // agent owes the turn it was just asked for.
+    const h = await heardThenStalled("Let me make sure the team has your details.");
+    expect(h.timers.fire(WINDOW)).toBe(true);
+    expect(h.timers.armed(WINDOW)).toBe(0);
+    expect(h.timers.fire(WINDOW)).toBe(false);
+    expect(h.session.requestResponse).toHaveBeenCalledTimes(1);
+    // The agent's own watchdog holds the debt instead.
+    expect(h.timers.armed(AGENT_WINDOW)).toBe(1);
+  });
+
+  it("the caller speaking resets the bound", async () => {
+    const h = await heardThenStalled("Let me make sure the team has your details.");
+    h.timers.fire(WINDOW);
+    h.speak("One moment.");
+    h.timers.fire(WINDOW);
+    h.handlers().onCallerTranscript("Hello?", "i2");
+    h.speak("Got it.");
+    h.timers.fire(WINDOW);
+    expect(h.session.requestResponse).toHaveBeenCalledTimes(3);
+  });
+
+  it("a last line that asks a question is the caller's turn: no nudge, v131 unchanged", async () => {
+    const h = await heardThenStalled("Could you spell your last name for me, letter by letter?");
+    h.timers.fire(WINDOW);
+    expect(h.session.requestResponse).not.toHaveBeenCalled();
+    expect(h.session.speak).not.toHaveBeenCalled();
+    await h.bridge.handleTwilioFrame({ event: "stop", streamSid: "MZ-test" } as never);
+    expect(h.records[0].agentStallNudges).toBe(0);
+    expect(h.records[0].silenceStoodDown).toBe(true);
+  });
+
+  it("a question cut off by the caller still counts as a question", async () => {
+    const h = await heardThenStalled("Which office do you usually visit? [interrupted]");
+    h.timers.fire(WINDOW);
+    expect(h.session.requestResponse).not.toHaveBeenCalled();
+  });
+
+  // Codex P2 on #404: a request put as an instruction, or a question followed
+  // by reassurance, hands the caller the turn as surely as a closing "?".
+  it.each([
+    "Please spell your last name for me, letter by letter.",
+    "What is your date of birth? Take your time.",
+    "Go ahead with your date of birth when you're ready.",
+    "Please tell me the name of the medication.",
+  ])("a line that asks the caller for something is their turn: %s", async (line) => {
+    const h = await heardThenStalled(line);
+    h.timers.fire(WINDOW);
+    expect(h.session.requestResponse).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    "Let me make sure the team has your details.",
+    "Thank you. I'll take your request as given, and the team will match it to your chart.",
+    "Let me confirm that for you.",
+    // Codex P2, round 4: the request words narrating the agent's own action.
+    "I'll go ahead and file that for you now.",
+    "Let me repeat that back to make sure I have it.",
+    "I'll spell it out on the ticket for the team.",
+  ])("a line that asks for nothing is still a stall: %s", async (line) => {
+    const h = await heardThenStalled(line);
+    h.timers.fire(WINDOW);
+    expect(h.session.requestResponse).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ["a hangup is on its way", "endRequested", true],
+    ["a goodbye grace window is running", "goodbyeTimer", {}],
+    ["a transfer is in flight", "transferInFlight", true],
+  ])("does not ask the agent for a turn while %s", async (_why, field, value) => {
+    const h = await heardThenStalled("Let me make sure the team has your details.");
+    // White-box on purpose: each of these states has its own full path and
+    // tests elsewhere; what is pinned here is that the nudge defers to it.
+    (h.bridge as unknown as Record<string, unknown>)[field] = value;
+    h.timers.fire(WINDOW);
+    expect(h.session.requestResponse).not.toHaveBeenCalled();
+  });
+
+  it("a caller never heard still gets the ladder, never a nudge", async () => {
+    const h = await ladder();
+    h.speak("How can I help you today?");
+    h.timers.fire(WINDOW);
+    expect(h.session.speak).toHaveBeenCalledWith(SILENCE_PROMPT_LINE, { interruptible: true });
+    expect(h.session.requestResponse).not.toHaveBeenCalled();
+  });
+});
+

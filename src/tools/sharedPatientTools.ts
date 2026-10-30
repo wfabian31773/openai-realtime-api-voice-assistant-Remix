@@ -33,7 +33,7 @@ import { registerTool, missing, type MissingFields, type ToolResult } from './re
 import { LAST_NAME_ASK, LAST_NAME_FIELD_DESCRIPTION } from './contactCaptureGuidance';
 import { gateRefusalsSoFar, noteGateRefusal, noteCallFact, callFactNoted } from './gateAttempts';
 import { forgetIfSameName, nameKey, rememberConfirmedClinic, rememberVerifiedIdentity, verifiedAppointmentContextFor, verifiedIdentityFor } from './verifiedIdentity';
-import { LOOKUP_UNSURE_FILE_FIX, LOOKUP_UNSURE_FIX, LOOKUP_UNSURE_SAY, spokenFirstNameAgreesWithChart } from './lookupUnsure';
+import { LOOKUP_CARRY_ON_SAY, LOOKUP_REASK_FIX, LOOKUP_REASK_SAY, lookupSpentFix, spokenFirstNameAgreesWithChart } from './lookupUnsure';
 import { appointmentAccess } from '../services/appointmentAccess';
 import { readPatientAppointments } from './patientAppointments';
 import { noteStatusOverride, patientStatusFor } from './spokenPatientStatus';
@@ -529,12 +529,8 @@ registerTool({
           success: true,
           found: false,
           lookup_misses: misses,
-          message: LOOKUP_UNSURE_SAY,
-          fix:
-            `This is identity miss number ${misses} on this call. ` +
-            LOOKUP_UNSURE_FILE_FIX +
-            ' Do NOT call lookup_patient again. Do NOT ask the caller for their name or date of birth again. Take the request and ' +
-            'file it now with the details they gave — the filing tool does not require a match.',
+          message: LOOKUP_CARRY_ON_SAY,
+          fix: lookupSpentFix(misses),
         };
       }
       return {
@@ -542,18 +538,10 @@ registerTool({
         found: false,
         lookup_misses: misses,
         message: askedAndMissed
-          ? LOOKUP_UNSURE_SAY
+          ? LOOKUP_REASK_SAY
           : 'No record found. They may be new, or calling from a different number. ' +
             'Ask for their name and date of birth if you have not already.',
-        ...(askedAndMissed
-          ? {
-              fix:
-                LOOKUP_UNSURE_FIX +
-                ' You may ask ONCE more — have them spell the last name, and give the date of ' +
-                'birth as month, then day, then year — then look them up again. If that also ' +
-                'misses, do not ask a third time: take the request and file it with what they gave.',
-            }
-          : {}),
+        ...(askedAndMissed ? { fix: LOOKUP_REASK_FIX } : {}),
       };
     }
 

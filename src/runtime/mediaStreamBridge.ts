@@ -282,6 +282,39 @@ export const TOOL_DISPATCH_GRACE_MS = 15_000;
 export const SILENCE_PROMPT_LINE = "I'm sorry, I cannot hear you. Are you still there?";
 
 /**
+ * HOW MANY TIMES IN A ROW THE AGENT IS ASKED TO CARRY ON (v151).
+ *
+ * v131 stood the silence ladder down for a caller we have heard, which was
+ * right for the caller and removed the only thing that ever broke the silence
+ * when the AGENT stalled: a holding line ("Let me make sure the team has your
+ * details", "Still with you — one moment") with nothing after it. On
+ * 2026-10-29, 14 queue and PCP calls ended on such a line and 10 left no
+ * ticket; on 10-28, before v131, the same lines were followed by the ladder's
+ * prompt and 0 calls ended on them. When the agent's last line asked the
+ * caller nothing, the silence is the agent's, so the runtime asks the AGENT
+ * for a turn — never the caller, and nothing is spoken by the runtime. Two in
+ * a row, then it stands down as v131 does; the caller speaking resets it.
+ */
+export const AGENT_STALL_NUDGE_LIMIT = 2;
+
+/**
+ * A LINE THAT HANDS THE CALLER THE TURN. A question anywhere in it ("What is
+ * your date of birth? Take your time."), or a sentence that OPENS with a
+ * request to the caller ("Please spell your last name for me.", "Go ahead
+ * with your date of birth."). After one of these the silence is the
+ * caller's, and the agent is not nudged (Codex P2 on #404).
+ *
+ * Only sentence-initial, because the same words narrate the agent's own
+ * action mid-sentence ("I'll go ahead and file that", "Let me repeat that
+ * back"), and reading those as asking would bring back the silence this
+ * exists to break (Codex P2, round 4). The two errors are not the same size:
+ * a request this misses costs at most two nudges; a narration it matched
+ * would cost the caller the call.
+ */
+const ASKS_THE_CALLER =
+  /\?|(?:^|[.!]\s+)(?:please\s+)?(?:spell|repeat|(?:tell|give|share|read)\s+me\s+(?:your|the)\b|go ahead|take your time)/i;
+
+/**
  * How long the caller may say nothing before each prompt.
  *
  * A JUDGEMENT, not a measurement, and nothing in production can inform it
@@ -510,6 +543,11 @@ export interface VoiceCallRecord {
    * v72 waited until its prompts were spent; v131 stands down before speaking.
    */
   silenceStoodDown?: boolean;
+  /**
+   * v151: turns the runtime asked the AGENT for because a caller we had heard
+   * went quiet after an agent line that asked them nothing (a stall).
+   */
+  agentStallNudges?: number;
   /** Deliberate completion after the goodbye grace window. */
   goodbyeGraceHangup?: boolean;
   teardownReason?: "goodbye_grace";
@@ -925,6 +963,11 @@ export class VoiceCallBridge {
   private callerEverHeard = false;
   /** See VoiceCallRecord.silenceStoodDown. */
   private silenceStoodDown = false;
+  /** v151: agent turns requested after a stall, in a row; reset when the
+   * caller is heard. AGENT_STALL_NUDGE_LIMIT bounds it. */
+  private stallNudgeStrikes = 0;
+  /** v151: the same, cumulatively, for the record. Never reset. */
+  private agentStallNudges = 0;
 
   private goodbyeTimer: unknown = null;
   private goodbyeGraceHangup = false;
@@ -994,7 +1037,10 @@ export class VoiceCallBridge {
         // Deliberately keyed on a transcript rather than on `speech_stopped`:
         // the VAD fires on a cough and on hold music, and a ladder reset by
         // noise is a ladder a dialler can hold open for ever.
-        if (text.trim()) this.silenceStrikes = 0;
+        if (text.trim()) {
+          this.silenceStrikes = 0;
+          this.stallNudgeStrikes = 0;
+        }
         // Straight through, greeting or no greeting. Where the greeting's own
         // line sits was settled when its audio started, so there is no
         // "before or after it" left to decide here — which is the point:
@@ -2438,6 +2484,23 @@ export class VoiceCallBridge {
     // v131: stand down BEFORE speaking. A caller we have already heard
     // must never get the cannot-hear ladder, even after later quiet turns.
     if (this.callerEverHeard) {
+      if (this.agentStalled() && this.stallNudgeStrikes < AGENT_STALL_NUDGE_LIMIT) {
+        this.stallNudgeStrikes += 1;
+        this.agentStallNudges += 1;
+        console.info(
+          `[bridge] the agent's last line asked the caller nothing on ${this.deps.context.callSid} — ` +
+            `asking the agent to carry on (${this.stallNudgeStrikes} of ${AGENT_STALL_NUDGE_LIMIT})`,
+        );
+        // The agent's own prompt and the call so far decide what comes next;
+        // nothing is said to the caller by the runtime. The agent now OWES a
+        // turn, so the agent's watchdog runs, not the caller's window: a
+        // provider slow to start must not get a second nudge queued behind
+        // the first (Codex P2 on #404). The response's own completion
+        // re-arms the caller's window, as every completed turn does.
+        this.session.requestResponse();
+        this.armDeadAir("response");
+        return;
+      }
       this.silenceStoodDown = true;
       this.clearDeadAir();
       console.info(
@@ -2469,6 +2532,24 @@ export class VoiceCallBridge {
     // nothing running and the call silent to the ceiling — and `armDeadAir`
     // clears first, so arming twice is one clock either way.
     this.armDeadAir("caller");
+  }
+
+  /**
+   * True when the silence is the AGENT's: its last line handed the caller no
+   * question, and nothing else is in motion that owns the silence (a hangup
+   * on its way, a goodbye grace window, a transfer). A last line that ends in
+   * a question is the caller's turn, and the caller may be thinking (the
+   * operator's 2026-09-26 ruling); that silence stays theirs.
+   */
+  private agentStalled(): boolean {
+    if (this.endRequested || this.goodbyeTimer !== null || this.transferInFlight) return false;
+    const lines = this.transcriptLog.lines;
+    const last = lines[lines.length - 1];
+    if (last === undefined) return false;
+    // A caller line last means the agent answered it with no words at all.
+    if (!last.startsWith("AGENT: ")) return true;
+    const said = last.slice(7).replace(/\[interrupted\]\s*$/, "").trim();
+    return !ASKS_THE_CALLER.test(said);
   }
 
   private clearDeadAir(): void {
@@ -2650,6 +2731,7 @@ export class VoiceCallBridge {
         silencePrompts: this.silencePrompts,
         silenceCut: this.silenceCut,
         silenceStoodDown: this.silenceStoodDown,
+        agentStallNudges: this.agentStallNudges,
         goodbyeGraceHangup: this.goodbyeGraceHangup,
         ...(reason ? { teardownReason: reason } : {}),
         followUps: {

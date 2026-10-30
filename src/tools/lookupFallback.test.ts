@@ -127,7 +127,9 @@ describe('a mis-transcribed date of birth does not lose a known patient', () => 
     })) as Record<string, unknown>;
 
     expect(out.found).toBe(false);
-    expect(String(out.message)).toMatch(/make sure the team has your details/i);
+    // v151: the first miss asks the re-ask question; it never says not found.
+    expect(String(out.message)).toMatch(/spell your last name/i);
+    expect(String(out.message)).not.toMatch(/not found|no record/i);
   });
 
   it('a chart-name correction never produces "not found"', async () => {

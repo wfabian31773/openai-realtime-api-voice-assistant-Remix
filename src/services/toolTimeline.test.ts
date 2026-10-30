@@ -159,6 +159,44 @@ describe('PHI discipline — the allow-list is the safety mechanism', () => {
   });
 
   /**
+   * v153: a repeat filing on a call that already filed is countable, and so
+   * is whether what it carried reached the ticket.
+   */
+  it('keeps already_filed and details_added on a repeat filing, and still nothing about who', () => {
+    const callId = freshCall();
+    recordToolEvent(
+      callId,
+      'file_tech_ticket',
+      { description: 'Paula Kolterman also wants a text when it is ready.' },
+      JSON.stringify({ success: true, ticket_number: 'VA-1', already_filed: true, details_added: true }),
+      5,
+      { agentSlug: 'tech' },
+    );
+    const [ev] = getAzulTimeline(callId)!;
+    expect(ev.outcome).toMatchObject({ already_filed: true, details_added: true });
+    expect(JSON.stringify(ev)).not.toContain('Kolterman');
+  });
+
+  /**
+   * v127: a records filing the app refused and the tool logged as a recovery
+   * ticket is countable. Without the key it reads as an ordinary filing.
+   */
+  it('keeps recovered_after_refusal on a records filing, and still nothing about who', () => {
+    const callId = freshCall();
+    recordToolEvent(
+      callId,
+      'file_records_ticket',
+      { description: 'Paula Kolterman wants her chart.' },
+      JSON.stringify({ success: true, ticket_number: 'VA-1', recovered_after_refusal: true, form_applies: false }),
+      5,
+      { agentSlug: 'records' },
+    );
+    const [ev] = getAzulTimeline(callId)!;
+    expect(ev.outcome).toMatchObject({ recovered_after_refusal: true, form_applies: false });
+    expect(JSON.stringify(ev)).not.toContain('Kolterman');
+  });
+
+  /**
    * v75: WHICH language a switch went TO is countable. 574 switch events in
    * the fourteen days to 2026-09-27 and not one said; 76 of them were on
    * calls with no Spanish cue — the worst filing arm — and nothing could say
@@ -254,6 +292,31 @@ describe('PHI discipline — the allow-list is the safety mechanism', () => {
     const lookup = freshCall();
     recordToolEvent(lookup, 'lookup_patient', TICKET_ARGS, '{}', 1, { agentSlug: 'surgery' });
     expect(getAzulTimeline(lookup)![0].args).not.toHaveProperty('dobShape');
+  });
+
+  /**
+   * v127. CA63467308b45e3e7f9118cde1b67be7bf: the caller gave both halves of
+   * the name and the POST carried neither, and this table could not say
+   * whether the model ever passed them. Two booleans answer it; no name.
+   */
+  it('says whether each half of the name reached a filing tool, and never the name', () => {
+    const half = freshCall();
+    recordToolEvent(
+      half, 'file_records_ticket', { ...TICKET_ARGS, first_name: '  ' }, '{}', 1, { agentSlug: 'records' },
+    );
+    const [ev] = getAzulTimeline(half)!;
+    expect(ev.args.hasFirstName).toBe(false);
+    expect(ev.args.hasLastName).toBe(true);
+    expect(JSON.stringify(ev)).not.toContain('Kolterman');
+
+    const none = freshCall();
+    recordToolEvent(none, 'file_optical_ticket', { request_reason_id: 3 }, '{}', 1, { agentSlug: 'optical' });
+    expect(getAzulTimeline(none)![0].args).toMatchObject({ hasFirstName: false, hasLastName: false });
+
+    // create_ticket keeps its own combined flag and does not grow these.
+    const fleet = freshCall();
+    recordToolEvent(fleet, 'create_ticket', TICKET_ARGS, '{}', 1, { agentSlug: 'answering-service' });
+    expect(getAzulTimeline(fleet)![0].args).not.toHaveProperty('hasFirstName');
   });
 
   it('records missing FIELD NAMES on a validation failure, not their values', () => {

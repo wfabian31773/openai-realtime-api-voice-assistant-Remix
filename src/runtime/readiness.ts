@@ -977,27 +977,88 @@ import { callEnvironment } from "./callRecord";
  * No migration; production impact is unmeasured.
  */
 /**
- * v149 (renumbered from v145, earlier v137; above main's v146) — MUTUAL PATIENT DETECTOR (2026-10-29). The provider detector also
- * recognizes "one mutual patient" and "the mutual patient", including
- * plurals, so these callers can pass the after-hours provider gate.
- * On top of v136 (#393, main); renumbered from v133. No migration; production impact remains unmeasured.
+ * v142 — A GIVEN NAME REACHES THE SWEEP (2026-10-29). The teardown sweep files
+ * a request under the first and last name the caller gave, as a name-taking
+ * tool received it, when no certain lookup match exists (statedName.ts,
+ * operator ruling 2026-10-29). On top of v141 (#398, main, 2316c60). Merged to
+ * main as #399 (adf8dad). No migration; production impact remains unmeasured.
+ */
+/**
+ * v143 — SORRY, ONLY A MESSAGE (2026-10-29). On the four queue lanes a caller
+ * who asks for a person hears an apology, that the agent can only take a
+ * message, and who will follow up (operator ruling 2026-10-29). On top of
+ * v142 (#399, main, adf8dad); v137 is #391, v138 is #376 and v139 is #384 on
+ * their open branches. No migration; production impact remains unmeasured.
  */
 /** v144: open Grok Bot operator conversations, owner recognition, background
  * request handoff, and outbound provenance, above main's v143.
- * Apply add_operator_line_inbound.sql separately. */
+ * Apply add_operator_line_inbound.sql separately. Merged to main as #402
+ * (6cac333). */
 /** v145: owner SMS exempt + notifier idempotency. Signed stable event IDs,
  * durable notification claims and token-scoped SMS idempotency keys.
- * Apply add_operator_notification_claims.sql separately; not applied here. */
+ * Apply add_operator_notification_claims.sql separately; not applied here.
+ * Merged to main as #405 (7ad4fb8). */
 /** v146: dedicated operator SMS send, with no hours/caps, owner exemption,
- * opt-outs, durable idempotency and operator-origin commits. No new migration. */
+ * opt-outs, durable idempotency and operator-origin commits. No new migration.
+ * Merged to main as #407 (04e1e80). */
 /**
  * v147 — RECORDS QUESTION GUARD (2026-10-29). Records access and status
  * explanations stay in Medical Records; results-meaning questions stay
  * clinical. Refused prescriptions no longer count as records requests.
- * On top of v146 (#407, main), which contains v145 and v144; v148 is #384, v149 is #391 and v150 is #376 on their open branches. No migration; production impact remains unmeasured.
+ * On top of v146 (#407). Merged to main as #381 (d153a3d). No migration;
+ * production impact remains unmeasured.
+ */
+/**
+ * v148 — IDENTITY GATE (#384, merged to main as 117c2d5). Verified identity
+ * carried through ticket filing and teardown/sweep recovery.
+ */
+/** v151: staff-controlled operator scenario pre-approval, default OFF, with
+ * approval audit and opt-out checks. Above main v148; v149/v150 are claimed.
+ * Merged to main as #408 (2f72c87).
+ * Apply add_operator_scenario_preapproval.sql separately; not applied here. */
+/**
+ * v152 — THE THIRD PARTY'S REPORT STAYS IN RECORDS (2026-10-26; renumbered from v117 to v118, to v127, to v134, to v138 on 2026-10-28, to v150 on 2026-10-29, then to v152 on 2026-10-30 because main took v117 in #379, v126 in #394, v128–v131 in #389, #386, #387 and #388, and v132, v134, v135 and v136 in #390, #396, #392 and #393, #397–#407 took v140–v146 and #381, #384 and #408 took v147, v148 and v151 on main; v149 is claimed by #391 and v151 also by #404 on their open branches). On the
+ * records line, a provider's, plan's or other third party's request whose
+ * words name a document is no longer sent to the HVA Hub on a scheduling cue
+ * ("the most recent eye exam REPORT" read as "schedule an eye exam"); a
+ * request still redirected with no patient name files in Medical Records
+ * instead of drawing the app's 400; a refusal the caller cannot fix tells the
+ * model, in `fix`, that nothing is lost and never to say "call back"; and a
+ * name given in two halves across invocations reaches the payload. Seven
+ * records-lane calls, 2026-10-12..10-26. A payload change on the ticket path
+ * of the department under the CAP, so it gets its own marker. On top of v151
+ * (#408), which contains v148 (#384) and v147 (#381); the holds read #381's `recordsLineRedirect`. The recovery ticket carries the callback
+ * number without its extension and the extension in the staff note, as
+ * v132's filing does. `src/tools/medicalRecordsTools.ts`,
+ * `thirdPartyRecordsStayInRecords.test.ts`. Merged to main as #376 (44b037c).
+ */
+/**
+ * v153 — THE SILENCE, A LATER FILING, AND THE A1 OFFICE AND NAME (2026-10-30).
+ * One marker for what was written as a v148 + v149 + v150 stack on #404: #384
+ * took v148 on main, #391 holds v149, #408 took v151 on main and #376 took
+ * v152 on its open branch, so it ships as v153.
+ * (a) When a heard caller is silent after an agent line that asked nothing,
+ * the bridge asks the AGENT for a turn, at most AGENT_STALL_NUDGE_LIMIT times
+ * in a row; the lookup's miss lines carry the next step; PCP has no
+ * free-standing holding line. (b) A filing on a call that has already filed
+ * is sent on with the call's own key so the ticketing app adds its details
+ * (ticketing-app #414). (c) No queue prompt names a sample office and the
+ * ask script asks for the first and last name. The office carry this branch
+ * also wrote is #384's confirmed clinic on main and was dropped in the merge.
+ * Above main's v152 (#376, 44b037c), which contains v151 (#408, 2f72c87)
+ * and v148 (#384, 117c2d5). No migration; production impact
+ * remains unmeasured.
+ */
+/**
+ * v154 — MUTUAL PATIENT DETECTOR (2026-10-30; renumbered from v133, v137,
+ * v145 and v149 as other ships took those numbers on main). The provider
+ * detector also recognizes "one mutual patient" and "the mutual patient",
+ * including plurals, so these callers can pass the after-hours provider gate.
+ * Above main's v153 (#404, 4a7d429), which contains v152 (#376) and v151
+ * (#408). No migration; production impact remains unmeasured.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v149-mutual-patient-detector-20261029";
+  "voice-runtime-v154-mutual-patient-detector-20261030";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

@@ -120,6 +120,13 @@ export interface CreateTicketResponse {
   success: boolean;
   /** The call was appended to an existing ticket as a separate contact. */
   consolidated?: boolean;
+  /** The key had already filed this ticket; the answer is a replay. */
+  cached?: boolean;
+  /**
+   * On a replay: this request's details reached the ticket as a Contact
+   * History entry (ticketing-app #414). Absent from an app without it.
+   */
+  detailsAdded?: boolean;
   ticketId?: number;
   ticketNumber?: string;
   error?: string;

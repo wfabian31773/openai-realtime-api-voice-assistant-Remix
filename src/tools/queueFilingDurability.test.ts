@@ -49,7 +49,9 @@ describe('every queue filing tool files durably', () => {
       // Its OWN name, because that is how the refusal reaches the caller in
       // the tool's own askAs wording rather than a generic sentence. Passing a
       // neighbour's name would silently ask the wrong question.
-      expect(src).toContain(`return postFailureToolResult(res, '${toolName}');`);
+      // (Records wraps the result to add the model's `fix` on a refusal the
+      // caller cannot fix — v127 — so the call is matched, not the `return`.)
+      expect(src).toContain(`postFailureToolResult(res, '${toolName}')`);
     });
   }
 });

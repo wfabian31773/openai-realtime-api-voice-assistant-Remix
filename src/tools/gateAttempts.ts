@@ -24,6 +24,8 @@
 interface Attempt {
   n: number;
   at: number;
+  /** Only on a per-call VALUE (`noteCallValue`); counts and facts carry none. */
+  value?: string;
 }
 
 import { isTwilioCallSid } from './callSid';
@@ -114,6 +116,42 @@ export function noteCallFact(callSid: string | undefined, fact: string): void {
 /** Whether this call recorded that fact, within the TTL. */
 export function callFactNoted(callSid: string | undefined, fact: string): boolean {
   return gateRefusalsSoFar(callSid, FACT_TOOL, fact) > 0;
+}
+
+/**
+ * A per-call VALUE — a fact that carries a string. Same map, so the same TTL,
+ * ceiling, recency eviction and "a sentinel is not a call" rule as the facts
+ * above.
+ *
+ * v127, for one use: a half of the patient's name that `file_records_ticket`
+ * was handed on an earlier invocation of this call (CLAUDE.md RULE 2c — carry
+ * the answer forward so it is never asked again). Patient data, which is why it
+ * lives here, in memory, for one call, and nowhere durable.
+ */
+const VALUE_TOOL = "__value";
+
+/** Remember a value for this call. Ignored for a sentinel, like every write here. */
+export function noteCallValue(callSid: string | undefined, name: string, value: string): void {
+  if (!isTwilioCallSid(callSid)) return;
+  const now = Date.now();
+  sweep(now);
+  const k = key(callSid, VALUE_TOOL, name);
+  attempts.delete(k); // re-insert so insertion order tracks recency
+  attempts.set(k, { n: 1, at: now, value });
+}
+
+/** The value this call remembered, within the TTL, or undefined. */
+export function callValue(callSid: string | undefined, name: string): string | undefined {
+  if (!isTwilioCallSid(callSid)) return undefined;
+  const entry = attempts.get(key(callSid, VALUE_TOOL, name));
+  if (!entry || Date.now() - entry.at > TTL_MS) return undefined;
+  return entry.value;
+}
+
+/** Forget a value — once it has done its job, it should not outlive it. */
+export function forgetCallValue(callSid: string | undefined, name: string): void {
+  if (!isTwilioCallSid(callSid)) return;
+  attempts.delete(key(callSid, VALUE_TOOL, name));
 }
 
 /**

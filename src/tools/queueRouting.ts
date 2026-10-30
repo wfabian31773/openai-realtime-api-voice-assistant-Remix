@@ -173,6 +173,207 @@ function hit(text: string, cues: string[]): boolean {
 }
 
 /**
+ * Does this request name a document — a record, a chart, a note, a report?
+ *
+ * The records-line hold below. Broad on purpose — see RECORDS_CUES — and NOT
+ * what `file_records_ticket` reads to keep a third party's request home: that
+ * turns the order round, so it reads the narrow `namesADocument`.
+ */
+export function namesARecord(text: string): boolean {
+  return hit(fold(text), RECORDS_CUES);
+}
+
+/**
+ * Does this request ASK FOR a document — the narrow reading, for the one place
+ * a document word OUTRANKS a scheduling cue (v127, Codex P1 on #376).
+ *
+ * `namesARecord` is the records-line hold, and it is deliberately broad: it is
+ * substring matching over `record`, `note` and `report`, and it was safe only
+ * because `detectCrossQueue` reads scheduling BEFORE it, so a scheduling cue
+ * always won. `file_records_ticket` reads a document word to WITHHOLD the
+ * scheduling redirect for a third party, which turns that order round, and the
+ * broad list then reads ordinary speech as a document: *"please NOTE the
+ * patient needs to reschedule"*, *"calling to REPORT that the patient needs an
+ * eye exam"*, and — on most professional calls — *"calling on a RECORDED
+ * line"*. Each would have kept a third party's appointment request in Medical
+ * Records instead of the HVA Hub, the guard this change promised not to move.
+ *
+ * So this asks for the NOUN, as a whole word, and the ambiguous ones only in a
+ * document phrase: `records`, `chart(s)`, `documentation`, `copy of`, `release
+ * of information`; `record`, `notes` and `report(s)` after a determiner or a
+ * clinical word ("the most recent eye exam REPORT", "chart NOTES", "her
+ * medical RECORD"; `record` and `report(s)` also after `a`/`an`, and `record`
+ * after `patient` — "the patient RECORD from her last eye exam", Codex P2 on
+ * `9e5b8a6`), and singular `note` only after a clinical word, because
+ * "leave a note for the doctor" is a message, not a chart. A verb never
+ * matches: "to report", "please note", "the patient reports". "For the
+ * record" is not a request for one.
+ *
+ * Its own list rather than a narrowed `RECORDS_CUES`: the records-line hold is
+ * live on every records-lane call and keeps its reading; only the new order
+ * needs the narrow one.
+ */
+const DOCUMENT_CLINICAL =
+  "(?:chart|office|visit|progress|clinic|clinical|consult|consultation|op|operative|surgical|surgery|" +
+  "exam|examination|medical|pathology|lab|labs|imaging|oct|field|test|testing|radiology|discharge|" +
+  "treatment|encounter|doctor|doctors|doctor's|physician|physicians|physician's|provider|providers|provider's)";
+const DOCUMENT_DETERMINER =
+  "(?:the|this|that|these|those|his|her|their|its|any|all|latest|recent|last|final|full|written)";
+const DOCUMENT_PATTERNS: readonly RegExp[] = [
+  /\brecords\b/,
+  new RegExp(`\\b(?:${DOCUMENT_CLINICAL}|${DOCUMENT_DETERMINER}|patients?|patient's|patients'|a|an)\\s+record\\b`),
+  /\bcharts?\b/,
+  new RegExp(`\\b${DOCUMENT_CLINICAL}\\s+notes?\\b`),
+  new RegExp(`\\b${DOCUMENT_DETERMINER}\\s+notes\\b`),
+  /\bnotes\s+(?:from|for)\b/,
+  new RegExp(`\\b(?:${DOCUMENT_CLINICAL}|${DOCUMENT_DETERMINER}|a|an)\\s+reports?\\b`),
+  /\breports?\s+from\b/,
+  /\bdocumentation\b/,
+  /\bcop(?:y|ies)\s+of\b/,
+  /\brelease\s+of\s+information\b/,
+  /\b(?:expediente|historial|copias?|informes?)\b/,
+];
+
+export function namesADocument(text: string): boolean {
+  const t = fold(text).replace(/\bfor\s+the\s+record\b/g, ' ');
+  return DOCUMENT_PATTERNS.some((re) => re.test(t));
+}
+
+/**
+ * The `SCHEDULING` cues that are an exam's NAME, not an ask to book one — v127,
+ * Codex P2 on #376 (head `8e11d5e`).
+ *
+ * The defect `file_records_ticket` holds against is exactly one of these firing
+ * on a document's own name: "the most recent EYE EXAM report" matched reason
+ * 146 on `'eye exam'` with nothing in it asking for an appointment. A caller
+ * who ALSO asks to book, move, cancel or confirm ("we received the eye exam
+ * report and need to reschedule the patient") is making a scheduling request,
+ * and every other `SCHEDULING` cue is that kind of ask. So the hold fires only
+ * when an exam name was the whole of the scheduling signal.
+ *
+ * A subset of reason 146's cues, asserted by a test so it cannot drift from
+ * the list `detectCrossQueue` reads; the list itself is unchanged.
+ */
+export const EXAM_NAME_CUES: readonly string[] = [
+  'eye exam', 'new patient exam', 'check-up', 'checkup', 'annual exam', 'yearly exam',
+  'routine exam', 'vision exam', 'dilated exam',
+  'examen de la vista', 'examen de ojos', 'revision general', 'revisión general',
+];
+
+export function scheduledOnlyByAnExamName(text: string): boolean {
+  const t = fold(text);
+  const names = new Set(EXAM_NAME_CUES.map(fold));
+  const fired = SCHEDULING.flatMap((s) => s.cues).map(fold).filter((c) => t.includes(c));
+  return (
+    fired.length > 0 && fired.every((c) => names.has(c)) &&
+    everyExamNameIsTheDocuments(t) && everyAppointmentIsTheDocuments(t) &&
+    !hasSeparateAppointmentAsk(t)
+  );
+}
+
+/**
+ * EVERY EXAM NAMED IS THE SUBJECT OF A DOCUMENT — Codex P2 on #376, head
+ * `48dde27`.
+ *
+ * An ask in words `SCHEDULING` does not list ("we have the chart notes and need
+ * to BOOK an eye exam") fired only an exam name, so the rule above read it as
+ * document-only. Adding the missing verbs would be one more list that can
+ * always be one verb short — the shape of every round so far on this hold. So
+ * the evidence is turned round: the hold needs each exam name to be BOUND to a
+ * document — "eye exam REPORT", "the records FROM her last eye exam", "a copy
+ * OF the dilated exam" — and anything phrased otherwise, an unknown verb
+ * included, falls back to the Hub, which is what this line did before v127.
+ * A miss here costs the corpus fix on an odd phrasing; it can no longer keep an
+ * appointment request out of the Hub. Binding alone does not establish that
+ * the whole request is document-only: a caller may also ask to arrange a visit
+ * without naming the exam again.
+ */
+const BOUND_AFTER = /^\s+(?:reports?|notes?|records?|results?|summary|findings|documentation|informe|informes|notas|resultados)\b/;
+const BOUND_BEFORE =
+  /\b(?:reports?|notes?|records?|results?|charts?|summary|findings|documentation|copy|copies|informe|informes|notas|resultados|expediente|historial|copia|copias)\s+(?:from|of|for|on|de|del)\s+(?:(?:the|her|his|their|its|this|that|a|an|la|el|su|last|latest|recent|most|prior|previous|ultimo|ultima)\s+){0,3}$/;
+
+function everyExamNameIsTheDocuments(folded: string): boolean {
+  for (const name of EXAM_NAME_CUES.map(fold)) {
+    let at = folded.indexOf(name);
+    while (at !== -1) {
+      const before = folded.slice(0, at);
+      const after = folded.slice(at + name.length);
+      if (!BOUND_AFTER.test(after) && !BOUND_BEFORE.test(before)) return false;
+      at = folded.indexOf(name, at + name.length);
+    }
+  }
+  return true;
+}
+
+/**
+ * Preserve an existing redirect when an appointment ask is phrased separately
+ * from the exam report, e.g. "received the eye exam report and need to set up
+ * a follow-up visit". These phrases need not match SCHEDULING themselves.
+ * A request for a "follow-up visit report" is still a document request.
+ */
+const ASK_VERB =
+  "(?:book(?:ing)?|schedul(?:e|ing)|reschedul(?:e|ing)|arrang(?:e|ing)|set(?:ting)?[ -]+up|mak(?:e|ing)|" +
+  "request(?:s|ing)?|needs?|wants?|would\\s+like|cancel(?:l?ing)?|confirm(?:ing)?|mov(?:e|ing)|chang(?:e|ing)|" +
+  "postpon(?:e|ing)|push(?:ing)?(?:\\s+back)?|check(?:ing)?\\s+on)";
+/**
+ * The verb may be chained ("need to CANCEL her visit"), and the ask may be in
+ * Spanish ("necesitamos cancelar su cita") — Codex P2 on #376, head `abe568e`:
+ * cancel/confirm/move a visit beside an exam report was held in Records.
+ */
+const APPOINTMENT_ASK = new RegExp(
+  `\\b${ASK_VERB}(?:\\s+to\\s+${ASK_VERB})?\\s+(?:(?:an?|the|another|new|next|upcoming|annual|yearly|regular|routine|existing|current|scheduled|earlier|later|first|second|same|follow[ -]?up|return|office|clinic|eye|patient's|my|our|her|his|their|this|that)\\s+){0,5}(?:appointments?|appts?|visits?|follow[ -]?ups?)\\b` +
+    `|\\b(?:agendar|programar|reprogramar|hacer|cancelar|confirmar|cambiar|mover|pedir|solicitar|necesita(?:mos|n)?|quiere(?:n)?)\\s+(?:(?:una|un|la|el|su|otra|nueva|proxima|siguiente|de|del|seguimiento)\\s+){0,4}(?:citas?|consultas?|visitas?)\\b`,
+  'g',
+);
+
+function hasSeparateAppointmentAsk(folded: string): boolean {
+  for (const ask of folded.matchAll(APPOINTMENT_ASK)) {
+    if (!BOUND_AFTER.test(folded.slice(ask.index! + ask[0].length))) return true;
+  }
+  return false;
+}
+
+/**
+ * EVERY APPOINTMENT NAMED IS THE DOCUMENT'S TOO — Codex P2 on #376, head
+ * `abe568e`.
+ *
+ * `APPOINTMENT_ASK` reads an ask by its verb, and a verb list is one verb
+ * short: "we received the eye exam report and need to CANCEL her visit" (or
+ * confirm it, or move it, or cancel her appointment) fired only the exam name
+ * — `SCHEDULING`'s cues are first-person ("cancel my appointment") — so the
+ * hold kept an appointment request out of the Hub. So the appointment NOUN is
+ * read the way an exam name already is: it must be bound to a document
+ * ("the visit notes", "the records from her last visit", "the eye exam report
+ * for her appointment"), or the request falls back to the Hub, which is what
+ * this line did before v127. `follow-up` counts only as a NOUN, after an
+ * article, a possessive or a kind ("get her A follow-up", "her NEXT
+ * follow-up"; Codex P2 on `c239fa3`), so the verb in "calling TO follow up on
+ * the eye exam report" is still a records chase.
+ */
+const APPOINTMENT_NOUN =
+  /\b(?:appointments?|appts?|visits?|citas?|consultas?|visitas?)\b|(?<=\b(?:a|an|the|her|his|their|my|our|another|next|upcoming|new|routine|return)\s+)follow[ -]?ups?\b/g;
+// `consulta(s)` is the noun `APPOINTMENT_ASK` already reads (Codex P2 on #376,
+// head `b02c127`): "… necesitamos posponer su consulta" carries a verb on no
+// list. It also means "a question" ("tengo una consulta sobre el informe"),
+// which now falls back to the Hub — the accepted cost, where it went before
+// v127.
+// "the follow-up VISIT report": the noun after a kind of visit is still the
+// document's.
+const THEN_APPOINTMENT_NOUN = /^\s+(?:visits?|appointments?|appts?)\b/;
+// The kinds of visit `APPOINTMENT_ASK` already reads, so "the eye exam report
+// from the FOLLOW-UP visit" is still bound to the report.
+const APPOINTMENT_KIND = /(?:\b(?:new|routine|follow[ -]?up|return|office|clinic)\s+)+$/;
+
+function everyAppointmentIsTheDocuments(folded: string): boolean {
+  for (const noun of folded.matchAll(APPOINTMENT_NOUN)) {
+    const before = folded.slice(0, noun.index!).replace(APPOINTMENT_KIND, '');
+    const after = folded.slice(noun.index! + noun[0].length).replace(THEN_APPOINTMENT_NOUN, '');
+    if (!BOUND_AFTER.test(after) && !BOUND_BEFORE.test(before)) return false;
+  }
+  return true;
+}
+
+/**
  * `hit`, but the cue has to stand as a WHOLE WORD — Codex P2 round 2, PR #298.
  *
  * `hit` is a substring test, which is right for `detectCrossQueue`: several of
@@ -259,7 +460,7 @@ export function detectCrossQueue(text: string, homeDepartmentId: number): QueueR
    * ruling is that schedule-related requests go to the Hub from every queue,
    * and a records line is one of them.
    */
-  const holdsOnRecordsLine = homeDepartmentId === MEDICAL_RECORDS && hit(t, RECORDS_CUES);
+  const holdsOnRecordsLine = homeDepartmentId === MEDICAL_RECORDS && namesARecord(t);
 
   // 1. Appointments -> HVA Hub, from anywhere, unless it is a surgery date.
   //
