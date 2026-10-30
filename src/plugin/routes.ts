@@ -8,8 +8,8 @@
 
 import type { Express, NextFunction, Request, Response } from "express";
 import { hasScope, mintScopesCompatible, type PluginScope } from "./scopes";
-import { operatorLineEnabled } from "./operatorLineSettings";
-import { isOperatorPayload, isOperatorSmsPayload, parseOperatorSmsPayload, operatorFromProblem } from "./operatorLine";
+import { operatorLineEnabled, operatorScenarioPreapprovalEnabled } from "./operatorLineSettings";
+import { isOperatorPayload, isOperatorSmsPayload, parseOperatorPayload, parseOperatorSmsPayload, operatorFromProblem } from "./operatorLine";
 import { pluginWritesEnabled } from "./writesEnabled";
 import { parseBearerToken, type VerifiedPluginToken } from "./tokens";
 import { verifyStoredToken, publicApproval, approvalForApprover, type ContactApprovalRow, type PluginStore } from "./store";
@@ -27,7 +27,7 @@ import {
   rejectContact,
 } from "./approvals";
 import { hashPayload, hashSecret } from "./tokens";
-import { createLiveCallSender, placeLiveCall, placeDirectCall, placeOperatorCall, type LiveCallSender } from "./liveCalls";
+import { createLiveCallSender, placeLiveCall, placeDirectCall, placeOperatorCall, operatorOptOutGuard, type LiveCallSender } from "./liveCalls";
 import { liveCallRegistry, type LiveCallRegistry } from "./liveSessions";
 import type { DialerLock } from "../runtime/outbound/scheduler";
 import { checkTwilioSignature, type WebhookRequest } from "../runtime/voiceWebhook";
@@ -293,6 +293,12 @@ export function mountPluginApi(app: Express, deps: PluginApiDeps): void {
     if (problem) { jsonError(res, 503, problem); return; }
     try {
       if (!(await operatorLineEnabled(envOf(deps), deps.store))) { jsonError(res, 503, "Operator line is disabled"); return; }
+      const parsed = parseOperatorPayload(req.body, envOf(deps));
+      if (!parsed.ok) { jsonError(res, 400, parsed.error); return; }
+      if (!deps.outboundStore) { jsonError(res, 503, "Operator opt-out storage is unavailable"); return; }
+      if (await operatorOptOutGuard(deps.outboundStore, deps.store, parsed.payload.phone)) {
+        jsonError(res, 409, "Call was not prepared: do_not_contact", "not_sent"); return;
+      }
       const result = await prepareContact(deps.store, req.pluginAuth!.jti,
         { channel: "call", payload: req.body }, (deps.now ?? (() => new Date()))(), "operator", envOf(deps));
       if (!result.ok) { jsonError(res, result.status, result.error); return; }
@@ -464,6 +470,9 @@ export function mountPluginApi(app: Express, deps: PluginApiDeps): void {
         }
         if (operator) {
           if (!(await operatorLineEnabled(envOf(deps), deps.store))) { jsonError(res, 503, "Operator line is disabled"); return; }
+          if (row.approvedBy === "scenario_preapproval" && !(await operatorScenarioPreapprovalEnabled(deps.store))) {
+            jsonError(res, 503, "Operator scenario pre-approval is disabled"); return;
+          }
           const problem = operatorFromProblem(envOf(deps));
           if (problem) { jsonError(res, 503, problem); return; }
         }

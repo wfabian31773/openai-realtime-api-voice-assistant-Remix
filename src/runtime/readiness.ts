@@ -1004,8 +1004,11 @@ import { callEnvironment } from "./callRecord";
  * clinical. Refused prescriptions no longer count as records requests.
  * On top of v146 (#407, main), which contains v145 and v144; v148 is #384, v149 is #391 and v150 is #376 on their open branches. No migration; production impact remains unmeasured.
  */
+/** v151: staff-controlled operator scenario pre-approval, default OFF, with
+ * approval audit and opt-out checks. Above main v148; v149/v150 are claimed.
+ * Apply add_operator_scenario_preapproval.sql separately; not applied here. */
 /**
- * v150 — THE THIRD PARTY'S REPORT STAYS IN RECORDS (2026-10-26; renumbered from v117 to v118, to v127, to v134, to v138 on 2026-10-28, then to v150 on 2026-10-29 because main took v117 in #379, v126 in #394, v128–v131 in #389, #386, #387 and #388, and v132, v134, v135 and v136 in #390, #396, #392 and #393, #397–#407 took v140–v146 and #381 and #384 took v147 and v148 on main; v149 is claimed by both #391 and #404 on their open branches). On the
+ * v152 — THE THIRD PARTY'S REPORT STAYS IN RECORDS (2026-10-26; renumbered from v117 to v118, to v127, to v134, to v138 on 2026-10-28, to v150 on 2026-10-29, then to v152 on 2026-10-30 because main took v117 in #379, v126 in #394, v128–v131 in #389, #386, #387 and #388, and v132, v134, v135 and v136 in #390, #396, #392 and #393, #397–#407 took v140–v146 and #381, #384 and #408 took v147, v148 and v151 on main; v149 is claimed by #391 and v151 also by #404 on their open branches). On the
  * records line, a provider's, plan's or other third party's request whose
  * words name a document is no longer sent to the HVA Hub on a scheduling cue
  * ("the most recent eye exam REPORT" read as "schedule an eye exam"); a
@@ -1014,14 +1017,14 @@ import { callEnvironment } from "./callRecord";
  * model, in `fix`, that nothing is lost and never to say "call back"; and a
  * name given in two halves across invocations reaches the payload. Seven
  * records-lane calls, 2026-10-12..10-26. A payload change on the ticket path
- * of the department under the CAP, so it gets its own marker. On top of v148
- * (#384), which contains v147 (#381); the holds read #381's `recordsLineRedirect`. The recovery ticket carries the callback
+ * of the department under the CAP, so it gets its own marker. On top of v151
+ * (#408), which contains v148 (#384) and v147 (#381); the holds read #381's `recordsLineRedirect`. The recovery ticket carries the callback
  * number without its extension and the extension in the staff note, as
  * v132's filing does. `src/tools/medicalRecordsTools.ts`,
  * `thirdPartyRecordsStayInRecords.test.ts`.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v150-the-third-party-report-stays-in-records-20261029";
+  "voice-runtime-v152-the-third-party-report-stays-in-records-20261030";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can
