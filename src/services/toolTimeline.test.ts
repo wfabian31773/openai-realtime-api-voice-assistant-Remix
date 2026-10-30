@@ -159,6 +159,25 @@ describe('PHI discipline — the allow-list is the safety mechanism', () => {
   });
 
   /**
+   * v153: a repeat filing on a call that already filed is countable, and so
+   * is whether what it carried reached the ticket.
+   */
+  it('keeps already_filed and details_added on a repeat filing, and still nothing about who', () => {
+    const callId = freshCall();
+    recordToolEvent(
+      callId,
+      'file_tech_ticket',
+      { description: 'Paula Kolterman also wants a text when it is ready.' },
+      JSON.stringify({ success: true, ticket_number: 'VA-1', already_filed: true, details_added: true }),
+      5,
+      { agentSlug: 'tech' },
+    );
+    const [ev] = getAzulTimeline(callId)!;
+    expect(ev.outcome).toMatchObject({ already_filed: true, details_added: true });
+    expect(JSON.stringify(ev)).not.toContain('Kolterman');
+  });
+
+  /**
    * v127: a records filing the app refused and the tool logged as a recovery
    * ticket is countable. Without the key it reads as an ordinary filing.
    */

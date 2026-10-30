@@ -74,6 +74,13 @@ describe("the follow-up summary", () => {
     expect(ev?.data).toMatchObject({ goodbyeGraceHangup: true, outcome: "agent_ended", owed: 0, silencePrompts: 0 });
   });
 
+  it("writes a row for a call whose only turn-taking event was asking a stalled agent to carry on (v151)", () => {
+    const ev = followUpEvent({ ...record(), agentStallNudges: 2 });
+    expect(ev).not.toBeNull();
+    expect(ev!.data).toMatchObject({ agentStallNudges: 2, owed: 0, silencePrompts: 0 });
+    expect(ev!.level).toBe("info");
+  });
+
   it("carries only counts and the outcome — nothing a caller said", () => {
     const ev = followUpEvent(record({ owed: 1, requested: 1, toolCallsAfterDone: 1, lastUnanswered: true }))!;
     // An EXACT key set, so a field carrying anything a caller said cannot be
@@ -89,6 +96,7 @@ describe("the follow-up summary", () => {
       silencePrompts: 0,
       silenceCut: false,
       silenceStoodDown: false,
+      agentStallNudges: 0,
       goodbyeGraceHangup: false,
       outcome: "dead_air",
     });

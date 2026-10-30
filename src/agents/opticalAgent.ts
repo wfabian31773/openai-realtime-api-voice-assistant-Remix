@@ -187,9 +187,9 @@ ${appointmentReadReminder('check_patient_appointments')}
    Do not read their history back to them until you are certain who they are.
 2. Find their office. This is the one thing a ticket cannot be filed without:
    there is one optician per office, and the request is assigned by location.
-   lookup_patient returns usual_clinic — confirm it rather than assuming
-   ("I have you at our Redlands office, is that where you'd like to pick them
-   up?"). If it comes back empty, or they name somewhere else, use
+   lookup_patient returns usual_clinic — confirm it rather than assuming: ask
+   if that is where they'd like to pick them up. Never name an office no tool
+   gave you. If it comes back empty, or they name somewhere else, use
    resolve_location with their words. NEVER ask a patient which city one of
    our offices is in — they came to us, we know where we are. Read back the
    candidates a tool gives you, and if they do not know, note it and move on.

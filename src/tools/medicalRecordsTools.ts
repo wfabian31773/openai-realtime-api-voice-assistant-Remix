@@ -43,7 +43,7 @@ import {
 import { str, isTwilioCallSid, normalizePhone } from './sharedPatientTools';
 import { splitCallbackExtension } from '../utils/phone';
 import { decideDobEscape, dobStatusNote, dobEscapeMarker, type DobStatus } from './dobEscape';
-import { createTicketDurable, postFailureToolResult } from '../services/durableTicketFiling';
+import { createTicketDurable, postFailureToolResult, repeatFilingFields } from '../services/durableTicketFiling';
 import { SWEPT_TICKET_DESCRIPTION } from '../runtime/requestSweep';
 import { otherReasonFor } from './otherReason';
 import { loggableLookupError } from '../services/loggableTicketingError';
@@ -172,6 +172,13 @@ function formAskOutcome(callSid: string | undefined, field: string): FormAsk {
 }
 /** Per-call latch: a records request has been filed on this call, so a re-send has something to re-send. */
 const RECORDS_FILED_FACT = 'records_ticket_filed';
+/**
+ * The signing link already went out on this call, by this channel. A repeat
+ * filing reads it so it never tells the model to send the link again: a
+ * re-send mints a new single-use token and kills the link the caller has
+ * (Codex P2 on #404).
+ */
+const RECORDS_FORM_SENT_FACT = 'records_form_sent';
 
 /**
  * Per-call latch: the request filed on this call was ROUTED OUT of Medical
@@ -1487,6 +1494,21 @@ registerTool({
               `${WEBSITE_DIRECTIONS}. Read the ticket number back. Do not promise a date.`
             : undefined;
 
+    // A repeat filing never sends the signing form: the ticketing app only adds
+    // the filing's details to the ticket it already has. So the model is told
+    // what this filing did NOT do, and how to do it (Codex P2 on #404).
+    const formAlreadySent = sendForm && callFactNoted(callSid, `${RECORDS_FORM_SENT_FACT}:${formChannel}`);
+    if (formSent) noteCallFact(callSid, `${RECORDS_FORM_SENT_FACT}:${formChannel}`);
+    const repeatFormNote = formAlreadySent
+      ? `The signing link was already sent by ${byText ? 'text' : 'email'} earlier on this call. Do not ` +
+        'send it again unless the caller says it has not arrived.'
+      : sendForm
+      ? `This filing did not send a signing form. If the caller wants the link, call send_records_form ` +
+        `once with channel "${byText ? 'sms' : 'email'}".`
+      : spokenDirections
+        ? `If the caller has not yet heard how to sign the authorization, tell them: ${WEBSITE_DIRECTIONS}.`
+        : undefined;
+
     return {
       success: true,
       ticket_number: res.ticketNumber,
@@ -1537,6 +1559,8 @@ registerTool({
         ? `Filed as ${res.ticketNumber} with our ${routedAway.departmentName} team. Read the ticket number back and say that team will follow up.`
         : formMessage ??
           `Filed as ${res.ticketNumber}. Read the ticket number back to the caller. Do not promise a date or say the records have been sent.`,
+      // A repeat filing on this call answers for the ticket that exists, last.
+      ...repeatFilingFields(res, repeatFormNote),
     };
   },
 });
@@ -1657,6 +1681,7 @@ registerTool({
         fix: `The re-send failed (${r.error ?? 'unknown'}). Do not try again on this call; say the team will send it.`,
       });
     }
+    noteCallFact(callSid, `${RECORDS_FORM_SENT_FACT}:${channel}`);
     return {
       success: true,
       form_channel: channel,

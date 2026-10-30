@@ -277,7 +277,7 @@ describe('caller recognition — credibility, not cosmetics', () => {
     expect(matched).toMatch(/do not\s+collect their date\s+of\s+birth/);
     expect(matched).not.toContain('Collect their last name and date of birth');
     // Denial still has the words — the ask script keeps them.
-    expect(matched).toContain('May I please have your last name?');
+    expect(matched).toContain('May I please have your first and last name?');
   });
 
   /**

@@ -13,7 +13,8 @@ vi.mock('../services/scheduleLookupService', () => ({ scheduleLookupService: { l
 vi.mock('../services/consoleDirectory', () => ({ isDirectoryConfigured: () => directory.configured,
   lookupLocation: async (name: string) => ({ canonical: name, fileAs: name,
     facilityKind: name === 'Synthetic Surgery Center' ? 'surgery_center' : 'clinic' }) }));
-vi.mock('../services/durableTicketFiling', () => ({ createTicketDurable: file, postFailureToolResult: () => ({ success: false }) }));
+// `repeatFilingFields` is spread into every filing tool's success (v151); a first filing adds nothing.
+vi.mock('../services/durableTicketFiling', () => ({ createTicketDurable: file, postFailureToolResult: () => ({ success: false }), repeatFilingFields: () => ({}) }));
 vi.mock('../../server/services/ticketingApiClient', () => ({
   ticketingApiClient: { lookupProviderAndLocation: async (input: { providerName?: string }) => ({ success: true, locationId: 31,
     ...(input.providerName === 'Synthetic Surgeon' ? { providerId: 77 } : {}) }) },
