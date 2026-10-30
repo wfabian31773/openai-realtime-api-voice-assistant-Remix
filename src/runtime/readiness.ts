@@ -1057,8 +1057,18 @@ import { callEnvironment } from "./callRecord";
  * Above main's v153 (#404, 4a7d429), which contains v152 (#376) and v151
  * (#408). No migration; production impact remains unmeasured.
  */
+/**
+ * v155 — THE PCP "INTAKE INCOMPLETE" NOTE IS THE DIRECTOR'S OWN LIST
+ * (2026-10-30). `ticketState()` read a static nine-field list, so tickets were
+ * flagged for role, organization type, relationship and DOB the director had
+ * stopped asking. It now reads `PcpDirectorDecision.intakeMissing`, the
+ * director's `stillUnset` for the call reason. Support Desk tickets 69644,
+ * 69593, 69579, 69578, 69577, 69557, 69549, 69544, 69540.
+ * `src/pcp/intakeGapsFromDirector.test.ts`. Above main's v154 (#391,
+ * 31c5251). No migration; production impact remains unmeasured.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v154-mutual-patient-detector-20261030";
+  "voice-runtime-v155-pcp-gap-list-from-director-20261030";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can
