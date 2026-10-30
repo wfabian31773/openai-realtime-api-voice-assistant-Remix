@@ -338,11 +338,12 @@ const LABORATORIO =
 const PROVIDER_ROLE =
   String.raw`(?:dr\.?|doctor|doctora|nurse|nurse practitioner|physician|physician assistant|surgeon|resident|` +
   String.raw`ophthalmologist|optometrist|np|pa|rn|md|charge nurse|(?:er|emergency(?: room)?) (?:doctor|physician|nurse))`;
+// Name fragments use Unicode letters; their consuming regexes need the u flag.
 const FACILITY =
   String.raw`(?:hospital|medical (?:center|group|office|clinic)|clinic|e\.? ?r\b\.?|emergency (?:room|department)|` +
   String.raw`urgent care|surgery center|surgical center|nursing (?:home|facility)|skilled nursing|` +
-  String.raw`rehab(?:ilitation)? (?:center|facility)|doctor'?s office|(?:dr\.?|doctor) [a-z'-]+'?s office|` +
-  String.raw`office of (?:dr\.?|doctor) [a-z'-]+|optometry|ophthalmology|eye (?:center|clinic|institute)|icu|intensive care|` +
+  String.raw`rehab(?:ilitation)? (?:center|facility)|doctor'?s office|(?:dr\.?|doctor) [\p{L}'-]+'?s office|` +
+  String.raw`office of (?:dr\.?|doctor) [\p{L}'-]+|optometry|ophthalmology|eye (?:center|clinic|institute)|icu|intensive care|` +
   LAB_WORD + String.raw`)`;
 
 /**
@@ -367,7 +368,7 @@ const RELATIVE =
   String.raw`grandson|granddaughter|grandmother|grandfather|grandma|grandpa|grandchild|brother|sister|aunt|uncle|` +
   String.raw`niece|nephew|boyfriend|girlfriend|friend|neighbou?r|family)\b`;
 const NOT_THEIR_PROVIDER = String.raw`(?:patients?\b|${RELATIVE})`;
-const NOT_POSSESSIVE = String.raw`(?!'?s ${NOT_THEIR_PROVIDER})(?!\.? ?[a-z-]+'s ${NOT_THEIR_PROVIDER})`;
+const NOT_POSSESSIVE = String.raw`(?!'?s ${NOT_THEIR_PROVIDER})(?!\.? ?[\p{L}'-]+'s ${NOT_THEIR_PROVIDER})`;
 const OFFICE_STAFF =
   String.raw`(?:nurse|ma|medical assistant|assistant|coordinator|surgical coordinator|surgery coordinator|office|staff|` +
   String.raw`tech|technician|scheduler|front desk)\b`;
@@ -386,7 +387,7 @@ const OFFICE_STAFF =
  * hospital yesterday" do not.
  */
 const NAME_TOKEN =
-  String.raw`(?!(?:i|i'?m|he|he'?s|she|she'?s|we|they|my|his|her|our|their|is|was|were|are|am|be|been|in|at|to|on|of|for|from|about|with|went|go|going|this|that|it|it'?s|a|an|and|but|not|no|bill|bills|billing|records?|visit|stay|yesterday|today|tonight|tomorrow|last|ago|there|here|mi|su|en|es|esta|está|estoy|ayer|hoy)(?![a-z0-9'&-]))[a-z0-9'&.-]+`;
+  String.raw`(?!(?:i|i'?m|he|he'?s|she|she'?s|we|they|my|his|her|our|their|is|was|were|are|am|be|been|in|at|to|on|of|for|from|about|with|went|go|going|this|that|it|it'?s|a|an|and|but|not|no|bill|bills|billing|records?|visit|stay|yesterday|today|tonight|tomorrow|last|ago|there|here|mi|su|en|es|esta|está|estoy|ayer|hoy)(?![\p{L}0-9'&-]))[\p{L}0-9'&.-]+`;
 const NAME_WORD = String.raw`${NAME_TOKEN} `;
 const ANY_FACILITY = String.raw`(?:${FACILITY}|cl[ií]nica|consultorio|${LABORATORIO}|sala de emergencias?)(?![a-z])`;
 /**
@@ -406,6 +407,7 @@ const BARE_FACILITY_ANSWER = new RegExp(
     ANY_FACILITY +
     String.raw`(?:(?:\s*,\s*|\s+(?:at|in|de|del)\s+|\s+)(?:the |el |la )?${NAME_TOKEN}(?: ${NAME_TOKEN}){0,3})?` +
     String.raw`[\s.,!?]*$`,
+  'u',
 );
 
 /** Lowercase, straight apostrophes, dashes to commas, STT fillers out. */
@@ -460,6 +462,7 @@ const WANTS_IT = new RegExp(
     String.raw`patient (?:of|at|with)|about|soy paciente(?: de| del)?|quiero|necesito|busco|` +
     String.raw`(?<!\b(?:work|works|working|calling) )for)` +
     String.raw`(?: (?:the|a|an|to|el|la|un|una|al|del|de))?(?: ${NAME_TOKEN}){0,3}[\s,]*$`,
+  'u',
 );
 /**
  * "FROM" IS NOT ALWAYS "I AM CALLING FROM". Narrowing the want to the words
@@ -481,9 +484,10 @@ const WANTS_IT = new RegExp(
  * somebody from the Covina clinic", review r6 P2).
  */
 const WANTS_FROM_IT = new RegExp(
-  String.raw`(?:(?:^|[^a-z])(?:want|wanna|need|needs|like|talk|speak|looking for|trying to (?:reach|get)|quiero|necesito|busco|hablar)(?: [a-z'\u00e0-\u00ff-]+){1,3} (?:from|de|del|desde)` +
-    String.raw`|(?:^|[^a-z])me(?: [a-z'-]+){0,2} from|(?:^|[^a-z])by)` +
+  String.raw`(?:(?:^|[^a-z])(?:want|wanna|need|needs|like|talk|speak|looking for|trying to (?:reach|get)|quiero|necesito|busco|hablar)(?: [\p{L}'-]+){1,3} (?:from|de|del|desde)` +
+    String.raw`|(?:^|[^a-z])me(?: [\p{L}'-]+){0,2} from|(?:^|[^a-z])by)` +
     String.raw`(?: (?:the|a|an|el|la|un|una))?(?: ${NAME_TOKEN}){0,3}[\s,]*$`,
+  'u',
 );
 /**
  * Review r6 P2 (#353): two more shapes are not an answer, whatever governs the
@@ -495,7 +499,7 @@ const WANTS_FROM_IT = new RegExp(
  *   relative only: "calling for my patient from Methodist Hospital ER" is a
  *   clinician (review r7 P2).
  */
-const MY_FACILITY = new RegExp(String.raw`(?:^|[^a-z])(?:my|mi|mis)(?: ${NAME_TOKEN}){0,2}[\s,]*$`);
+const MY_FACILITY = new RegExp(String.raw`(?:^|[^a-z])(?:my|mi|mis)(?: ${NAME_TOKEN}){0,2}[\s,]*$`, 'u');
 const CALLING_FOR_A_RELATIVE = new RegExp(String.raw`\bcalling for (?:my|mi) ${RELATIVE}`);
 /**
  * "please" asks for something only when it is all the turn adds to a bare
@@ -552,12 +556,13 @@ function answersWithAFacility(line: string): boolean {
  * hospital"), a bare "At the hospital." with no name, and a question back
  * ("Is this Dr. Lee's office?").
  */
-const FACILITY_ANYWHERE = new RegExp(String.raw`(?:^|[^a-z])${ANY_FACILITY}`);
+const FACILITY_ANYWHERE = new RegExp(String.raw`(?:^|[^a-z])${ANY_FACILITY}`, 'u');
 const SOMEONE_AT_A_FACILITY = new RegExp(
   String.raw`\b(?:i|he|she|they|you|my|his|her|their|mi|su|[eé]l|ella|yo)\b[^.?!]*?` +
-    String.raw`\b(?:in|at|to|into|en|al|a la)\s+(?:the |el |la |a |an )?(?:[a-z0-9'&.-]+ ){0,3}?${ANY_FACILITY}`,
+    String.raw`\b(?:in|at|to|into|en|al|a la)\s+(?:the |el |la |a |an )?(?:[\p{L}0-9'&.-]+ ){0,3}?${ANY_FACILITY}`,
+  'u',
 );
-const BARE_AT_A_FACILITY = new RegExp(String.raw`^(?:at|in|en|al) (?:the |el |la )?${ANY_FACILITY}[\s.,!?]*$`);
+const BARE_AT_A_FACILITY = new RegExp(String.raw`^(?:at|in|en|al) (?:the |el |la )?${ANY_FACILITY}[\s.,!?]*$`, 'u');
 const ASKS_BACK = /^(?:is|are|was|do|does|can|could|es|est[aá])\b[^?]*\?/;
 /**
  * A NO IS NOT A YES. The question is a yes-or-no question, and a patient's
@@ -581,37 +586,38 @@ function answerNamesAFacility(turn: string): boolean {
 
 const PROVIDER_SELF_IDENTIFICATION: RegExp[] = [
   // "this is Dr. Brown", "this is an emergency room doctor"
-  new RegExp(String.raw`\b(?:this is|i'?m|i am)\s+(?:a |an |the |your )?${STRONG_ROLE}\b${NOT_POSSESSIVE}`),
+  new RegExp(String.raw`\b(?:this is|i'?m|i am)\s+(?:a |an |the |your )?${STRONG_ROLE}(?!\p{L})${NOT_POSSESSIVE}`, 'u'),
   // "I'm a PA calling", "I'm the resident on call", "I'm an NP with the clinic"
   new RegExp(
-    String.raw`\b(?:this is|i'?m|i am)\s+(?:a |an |the |your )?${AMBIGUOUS_ROLE}\b` +
-      String.raw`(?: [a-z-]+)?? (?:calling|on call|from|with|at|on behalf)\b`,
+    String.raw`\b(?:this is|i'?m|i am)\s+(?:a |an |the |your )?${AMBIGUOUS_ROLE}(?!\p{L})` +
+      String.raw`(?: [\p{L}'-]+)?? (?:calling|on call|from|with|at|on behalf)\b`,
+    'u',
   ),
   // "I'm Dr. Kim's nurse", "this is Dr. Lee's surgical coordinator", "I'm
   // Doctor Patel's MA, calling about a patient" — office staff naming their
   // doctor (review r2 P2, #353).
   new RegExp(
-    String.raw`\b(?:this is|i'?m|i am)\s+(?:a |an |the |your )?${STRONG_ROLE}(?:\.? ?[a-z-]+)?'s ${OFFICE_STAFF}`,
+    String.raw`\b(?:this is|i'?m|i am)\s+(?:a |an |the |your )?${STRONG_ROLE}(?:\.? ?[\p{L}'-]+)?'s ${OFFICE_STAFF}`,
+    'u',
   ),
   // "my name is Doctor Perez"
-  new RegExp(String.raw`\bmy name is (?:a |an |the )?${PROVIDER_ROLE}\b${NOT_POSSESSIVE}`),
+  new RegExp(String.raw`\bmy name is (?:a |an |the )?${PROVIDER_ROLE}(?!\p{L})${NOT_POSSESSIVE}`, 'u'),
   // "referring doctor on the phone", "a doctor calling"
   new RegExp(String.raw`\b${PROVIDER_ROLE} (?:here|calling|on the (?:phone|line))\b`),
   // "calling from St. Joe's emergency room", "speaking on behalf of a clinic"
   new RegExp(
     String.raw`\b(?:calling|speaking|reaching out)\s+(?:from|with|on behalf of)\s+(?:the |a |an |our )?` +
       String.raw`(?:${NAME_WORD}){0,5}?${FACILITY}(?![a-z])`,
+    'u',
   ),
   // "this is the emergency room", "this is St. Joe's hospital"
-  new RegExp(String.raw`\bthis is (?:the |a |an )?(?:${NAME_WORD}){0,4}?${FACILITY}(?![a-z])`),
+  new RegExp(String.raw`\bthis is (?:the |a |an )?(?:${NAME_WORD}){0,4}?${FACILITY}(?![a-z])`, 'u'),
   // "the emergency room at Huntington calling"
-  new RegExp(String.raw`${FACILITY}(?![a-z])(?: [a-z0-9'&.-]+){0,3} calling\b`),
+  new RegExp(String.raw`${FACILITY}(?![a-z])(?: [\p{L}0-9'&.-]+){0,3} calling\b`, 'u'),
   // "I'm with the ER", "we're from the clinic"
-  new RegExp(String.raw`\b(?:i'?m|i am|we'?re|we are) (?:from|with) (?:the |a |an )?(?:${NAME_WORD}){0,5}?${FACILITY}(?![a-z])`),
+  new RegExp(String.raw`\b(?:i'?m|i am|we'?re|we are) (?:from|with) (?:the |a |an )?(?:${NAME_WORD}){0,5}?${FACILITY}(?![a-z])`, 'u'),
   // "calling on behalf of Dr. Smith"
-  /\bon behalf of (?:dr\.?|doctor) [a-z]/,
-  // "our mutual patient", "I have a post-operative patient", "the patient is on our ER"
-  /\b(?:our|a mutual) (?:mutual )?patients?\b/,
+  /\bon behalf of (?:dr\.?|doctor) \p{L}/u,
   // At most ONE word between the article and "patient" ("a post-operative
   // patient"), never "been": "I have been a patient there for years" and "we
   // have a patient appointment tomorrow" are patients (review P2, #353).
@@ -623,11 +629,92 @@ const PROVIDER_SELF_IDENTIFICATION: RegExp[] = [
   // Spanish: "soy la doctora", "llamo del hospital", "nuestro paciente"
   /\bsoy (?:el |la |un |una )?(?:doctor|doctora|dr\.?|m[eé]dic[oa]|enfermer[oa])\b/,
   new RegExp(
-    String.raw`\b(?:llamo|hablo|estoy llamando|le llamo|le hablo|llamamos|hablamos) (?:de|del|desde) (?:el |la |un |una )?(?:[a-z\u00e0-\u00ff'.-]+ ){0,4}?` +
+    String.raw`\b(?:llamo|hablo|estoy llamando|le llamo|le hablo|llamamos|hablamos) (?:de|del|desde) (?:el |la |un |una )?(?:[\p{L}'.-]+ ){0,4}?` +
       String.raw`(?:hospital|cl[ií]nica|consultorio|laboratorio${NOT_OPTICAL_ES}|sala de emergencias?|emergencias|centro m[eé]dico|oficina del (?:doctor|dr\.?))`,
+    'u',
   ),
   /\b(?:nuestr[oa]|tengo un[a]?) paciente\b/,
 ];
+
+// A mutual patient can be the caller, so exclude self-identification for this
+// evidence only; other provider statements can still stand. Match the full
+// noun phrase so its leading words do not hide the caller's identification.
+const MUTUAL_PATIENT = /\b(?:the one mutual patients?|one of (?:the|your|our) mutual patients|your mutual patients?|(?:our|(?:a|one|the) mutual) (?:mutual )?patients?)\b/;
+const PATIENT_IDENTIFICATION_BEFORE =
+  /\b(?:i(?:'m| am)|this is|it(?:'s| is)(?: me,?)?)\s+(?:(?:actually|also|just|indeed)\s+)*(?:(?:calling as|me,?)\s+)?$/;
+// A name can sit between the identification and its appositive, but only
+// plausible name words count. Apply the same grammar to every token: -ing
+// actions ("seeing", "treating", "following"), function words, call
+// descriptions and provider/office roles must not turn a patient reference
+// into the caller's identity. Speech is already lowercased, so capitalization
+// cannot distinguish names from these other parts of speech.
+const PATIENT_NAME_FUNCTION_WORD =
+  String.raw`(?:a|an|the|my|our|your|his|her|their|its|this|that|these|those|` +
+  String.raw`i|we|you|he|she|it|they|am|is|are|was|were|be|been|and|or|but|` +
+  String.raw`about|above|across|after|against|along|among|around|as|at|before|behind|below|beneath|` +
+  String.raw`beside|between|beyond|by|during|for|from|in|into|of|off|on|onto|over|through|to|under|until|upon|with|within|without)`;
+const PATIENT_NAME_CALL_WORD = String.raw`(?:calls?|callbacks?|follow-?ups?|consult(?:ation)?|referrals?|up|re|regards?|reference|requests?|questions?|here|there)`;
+const PATIENT_NAME_WORD =
+  // A verb stem before -ing has at least two letters; names like King and
+  // Ming are still plausible names, including inside a longer introduction.
+  String.raw`(?!\p{L}[\p{L}'-]+ing(?![\p{L}'-]))(?![\p{L}'-]*'s\b)` +
+  String.raw`(?!(?:${PATIENT_NAME_FUNCTION_WORD}|${PATIENT_NAME_CALL_WORD}|${PROVIDER_ROLE}|${OFFICE_STAFF}|provider|clinician)(?![\p{L}'-]))\p{L}[\p{L}'-]*`;
+const PATIENT_NAME = String.raw`(?:${PATIENT_NAME_WORD}\s+){0,2}${PATIENT_NAME_WORD}`;
+const PATIENT_APPOSITIVE_BEFORE = new RegExp(
+  String.raw`\b(?:i(?:'m| am)|this is|it(?:'s| is)|my name is)\s+(?:(?:actually|also|just|indeed)\s+)*${PATIENT_NAME},?\s+$`,
+  'u',
+);
+// Bare introductions work in either order: "Jane Smith, the mutual patient"
+// and "The mutual patient, Jane Smith", including after a greeting or comma.
+// Keep a boundary before the name so "Calling about Jane Smith, the mutual
+// patient" remains provider evidence.
+const PATIENT_INTRODUCTION_BOUNDARY =
+  String.raw`(?:^|${SENTENCE_END.source}|,)\s*(?:(?:hello|hi|hey|good (?:morning|afternoon|evening))\s+)?`;
+const BARE_PATIENT_APPOSITIVE_BEFORE = new RegExp(String.raw`${PATIENT_INTRODUCTION_BOUNDARY}${PATIENT_NAME},\s+$`, 'u');
+const PATIENT_INTRODUCTION_START = new RegExp(String.raw`${PATIENT_INTRODUCTION_BOUNDARY}$`);
+const PATIENT_APPOSITIVE_AFTER = new RegExp(String.raw`^\s*,\s+${PATIENT_NAME}(?=\s*(?:[,.?!]|$))`, 'u');
+const PATIENT_IDENTIFICATION_AFTER = /^(?:\s+is\s+|'s\s+)(?:me|myself)\b/;
+// In "the mutual patient's nurse" and "a mutual patient referral", the
+// patient phrase modifies the caller's role or call description. Check these
+// continuations before treating an introduction as the patient's identity.
+const PATIENT_PROVIDER_ROLE_AFTER = new RegExp(
+  String.raw`^'(?:s)?\s+(?:${PROVIDER_ROLE}|${OFFICE_STAFF})\b${NOT_POSSESSIVE}`,
+  'u',
+);
+const PATIENT_CALL_DESCRIPTION_AFTER = /^\s+(?:calls?|callbacks?|follow-?ups?|consult(?:ation)?s?|referrals?|requests?|questions?)\b/;
+// Preserve the established provider reading of separate subject/predicate
+// clauses: "This is Sarah, our mutual patient takes warfarin". Accept a
+// predicate word unless its form introduces an appositive/modifier instead;
+// an unlisted finite verb must not turn the patient into the named caller.
+const PATIENT_PREDICATE_AFTER = /^\s+(?:(?:still|never|\p{L}+ly)\s+)*(\p{L}[\p{L}'-]*)(.*)$/u;
+const PATIENT_MODIFIER_WORD =
+  /^(?:here|there|who|whom|whose|which|that|where|when|i|we|you|he|she|it|they|a|an|the|my|our|your|his|her|their|its|and|or|but|about|after|as|at|before|by|for|from|in|of|on|to|under|with|without|\p{L}[\p{L}'-]*ing|been|seen|given|taken|known|shown)$/u;
+// A regular -ed form is either a finite past verb ("developed a rash") or a
+// passive participle modifying the patient ("discharged yesterday",
+// "referred to you"). Only an active-voice continuation makes it a separate
+// clause: a direct object or a non-passive preposition ("complained of",
+// "asked about"). A bare -ed form, or one followed only by a passive
+// complement or an adverbial (time, place, -ly), stays a patient modifier.
+// When the reading is ambiguous the gate fails closed: a patient must never
+// pass as a provider, and a real provider can still say who they are.
+const PATIENT_PARTICIPLE_COMPLEMENT =
+  /^\s+(?:at|by|for|from|in|on|to|with)\b/;
+const PATIENT_PARTICIPLE_ADVERBIAL = new RegExp(
+  String.raw`^\s+(?:\p{L}+ly|yesterday|today|tonight|tomorrow|earlier|before|already|again|ago|home|back|` +
+    String.raw`(?:last|this|next|that)\s+(?:night|week|month|year|morning|afternoon|evening|weekend|\p{L}+day))(?![\p{L}'-])`,
+  'u',
+);
+const ACTIVE_CONTINUATION = /^\s+\p{L}/u;
+
+function hasSeparatePatientClause(after: string): boolean {
+  const predicate = PATIENT_PREDICATE_AFTER.exec(after);
+  if (!predicate || PATIENT_MODIFIER_WORD.test(predicate[1])) return false;
+  if (!/ed$/.test(predicate[1])) return true;
+  const rest = predicate[2];
+  return ACTIVE_CONTINUATION.test(rest) &&
+    !PATIENT_PARTICIPLE_COMPLEMENT.test(rest) &&
+    !PATIENT_PARTICIPLE_ADVERBIAL.test(rest);
+}
 
 /**
  * Pure, for tests: does this caller text identify the caller as a provider?
@@ -636,8 +723,25 @@ const PROVIDER_SELF_IDENTIFICATION: RegExp[] = [
  */
 export function callerSaysTheyAreAProvider(spoken: string | readonly string[]): boolean {
   const turns = typeof spoken === 'string' ? [spoken ?? ''] : spoken;
-  const text = ` ${turns.join(' ').toLowerCase().replace(/[’‘]/g, "'").replace(/\s+/g, ' ')} `;
-  return PROVIDER_SELF_IDENTIFICATION.some((re) => affirmed(text, re)) || turns.some(answersWithAFacility);
+  // A new caller turn is an introduction boundary even when the preceding
+  // turn has no punctuation. Joining turns would erase that context.
+  return turns.some((turn) => {
+    const text = ` ${turn.toLowerCase().replace(/[’‘]/g, "'").replace(/\s+/g, ' ')} `;
+    return (
+      PROVIDER_SELF_IDENTIFICATION.some((re) => affirmed(text, re)) ||
+      affirmed(text, MUTUAL_PATIENT, (before, after) => {
+        if (PATIENT_PROVIDER_ROLE_AFTER.test(after) || PATIENT_CALL_DESCRIPTION_AFTER.test(after)) return true;
+        const identifiesPatientByName =
+          (PATIENT_APPOSITIVE_BEFORE.test(before) || BARE_PATIENT_APPOSITIVE_BEFORE.test(before)) &&
+          !hasSeparatePatientClause(after);
+        return !PATIENT_IDENTIFICATION_BEFORE.test(before) &&
+          !identifiesPatientByName &&
+          !(PATIENT_INTRODUCTION_START.test(before) && PATIENT_APPOSITIVE_AFTER.test(after)) &&
+          !PATIENT_IDENTIFICATION_AFTER.test(after);
+      }) ||
+      answersWithAFacility(turn)
+    );
+  });
 }
 
 /**
@@ -658,13 +762,14 @@ export function callerSaysTheyAreAProvider(spoken: string | readonly string[]): 
 const NEGATED_BEFORE = /(?:^|[^a-z])(?:not|never|n't)\s+(?:[a-z']+\s+)?$/;
 const SPANISH_VERB_FIRST = /^(?:soy|llamo|hablo|estoy|le |llamamos|hablamos|tengo)\b/;
 const NO_STRAIGHT_BEFORE = /(?:^|[^a-z])no\s+$/;
-function affirmed(text: string, re: RegExp): boolean {
+function affirmed(text: string, re: RegExp, acceptMatch?: (before: string, after: string) => boolean): boolean {
   // Every occurrence, not only the first: in "I'm not calling from Mercy. I'm
   // calling from St. Joe's hospital." the second one stands.
   const all = new RegExp(re.source, re.flags.includes('g') ? re.flags : `${re.flags}g`);
   return [...text.matchAll(all)].some((m) => {
     const at = m.index ?? 0;
     const before = text.slice(Math.max(0, at - 24), at);
+    if (acceptMatch && !acceptMatch(text.slice(0, at), text.slice(at + m[0].length))) return false;
     if (DENIES.test(m[0]) || NEGATED_BEFORE.test(before)) return false;
     return !(SPANISH_VERB_FIRST.test(m[0]) && NO_STRAIGHT_BEFORE.test(before));
   });

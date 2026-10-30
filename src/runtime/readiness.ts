@@ -1049,8 +1049,16 @@ import { callEnvironment } from "./callRecord";
  * and v148 (#384, 117c2d5). No migration; production impact
  * remains unmeasured.
  */
+/**
+ * v154 — MUTUAL PATIENT DETECTOR (2026-10-30; renumbered from v133, v137,
+ * v145 and v149 as other ships took those numbers on main). The provider
+ * detector also recognizes "one mutual patient" and "the mutual patient",
+ * including plurals, so these callers can pass the after-hours provider gate.
+ * Above main's v153 (#404, 4a7d429), which contains v152 (#376) and v151
+ * (#408). No migration; production impact remains unmeasured.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v153-a-stalled-agent-carries-on-20261030";
+  "voice-runtime-v154-mutual-patient-detector-20261030";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

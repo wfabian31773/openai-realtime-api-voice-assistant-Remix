@@ -500,13 +500,13 @@ the code they add.
 
 Item #14 (`VA-76200`, `VA-76188`, `VA-76215`) is covered in the agent-visible
 tool descriptions and the common ticket client. Verify deployment using
-`voice-runtime-v139-identity-gate-20261028` from `/voice/health`
-for #384, on top of v136 (#393, main, `9bfccda`); v137 is #391 and v138
-is #376 on their open branches. This build carries verified identity through
-ticket filing and teardown/sweep recovery, filters Optical appointment and
-office locations with the shared facility rules, and lets Surgery file without
-a clinic when none is known. No migration; production impact is unmeasured.
-It includes v117's contact capture:
+`voice-runtime-v149-mutual-patient-detector-20261029` from `/voice/health`
+for #391, on top of v148 (#384, main, `117c2d5`). This build adds the
+mutual-patient provider detector to #384's build, which carries verified
+identity through ticket filing and teardown/sweep recovery, filters Optical
+appointment and office locations with the shared facility rules, and lets
+Surgery file without a clinic when none is known. No migration; production
+impact is unmeasured. It includes v117's contact capture:
 
 - A validated joined record supplies identity and contact fields it already
   holds. Do not ask for or overwrite those fields again.
