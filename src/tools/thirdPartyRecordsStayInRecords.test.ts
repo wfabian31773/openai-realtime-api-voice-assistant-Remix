@@ -313,6 +313,10 @@ describe('a third party who names a document AND asks to schedule is scheduling 
     ['we received the eye exam report; please hold her appointment', 146],
     ['we received the eye exam report and her visit needs to be moved', 146],
     ['recibimos el informe del examen de la vista y hay que posponer su cita', 146],
+    // Codex P2 on head b02c127: Spanish `consulta` is an appointment noun
+    // too, so a verb on no list still reaches the Hub.
+    ['recibimos el informe del examen de la vista y necesitamos posponer su consulta', 146],
+    ['recibimos el informe del examen de la vista y hay que posponer sus consultas', 146],
     // A follow-up NOUN on a verb no list carries (Codex P2 on head c239fa3).
     ['we received the eye exam report and need to get her a follow-up', 146],
     ['we received the eye exam report; she is due for her next follow-up', 146],
@@ -362,6 +366,8 @@ describe('a third party who names a document AND asks to schedule is scheduling 
       'calling to follow up on the eye exam report we requested',
       'we are following up on the eye exam report',
       'please send the eye exam report and the follow-up visit notes',
+      // A `consulta` bound to the document is the document's.
+      'necesitamos el informe de la consulta y el informe del examen de la vista',
     ]) expect(scheduledOnlyByAnExamName(bound), bound).toBe(true);
     for (const loose of [
       'we have the chart notes and need to book an eye exam',
@@ -384,10 +390,14 @@ describe('a third party who names a document AND asks to schedule is scheduling 
       'recibimos el informe del examen de la vista y necesitamos cancelar su cita',
       'recibimos el informe del examen de la vista, necesita una cita',
       'we received the eye exam report, can you update her appointment',
+      'recibimos el informe del examen de la vista y necesitamos posponer su consulta',
       // The accepted cost of reading the noun: an appointment mentioned as
       // context, not bound to the document, falls back to the Hub — where it
       // went before v127.
       'we need the eye exam report before her appointment next week',
+      // The same cost in Spanish, where `consulta` can also mean a question:
+      // "I have a question about the report" falls back to the Hub, as before.
+      'tengo una consulta sobre el informe del examen de la vista',
     ]) expect(scheduledOnlyByAnExamName(loose), loose).toBe(false);
   });
 });

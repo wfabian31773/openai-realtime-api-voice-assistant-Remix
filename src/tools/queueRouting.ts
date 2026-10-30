@@ -410,7 +410,12 @@ function hasSeparateAppointmentAsk(folded: string): boolean {
  * the eye exam report" is still a records chase.
  */
 const APPOINTMENT_NOUN =
-  /\b(?:appointments?|appts?|visits?|citas?|visitas?)\b|(?<=\b(?:a|an|the|her|his|their|my|our|another|next|upcoming|new|routine|return)\s+)follow[ -]?ups?\b/g;
+  /\b(?:appointments?|appts?|visits?|citas?|consultas?|visitas?)\b|(?<=\b(?:a|an|the|her|his|their|my|our|another|next|upcoming|new|routine|return)\s+)follow[ -]?ups?\b/g;
+// `consulta(s)` is the noun `APPOINTMENT_ASK` already reads (Codex P2 on #376,
+// head `b02c127`): "… necesitamos posponer su consulta" carries a verb on no
+// list. It also means "a question" ("tengo una consulta sobre el informe"),
+// which now falls back to the Hub — the accepted cost, where it went before
+// v127.
 // "the follow-up VISIT report": the noun after a kind of visit is still the
 // document's.
 const THEN_APPOINTMENT_NOUN = /^\s+(?:visits?|appointments?|appts?)\b/;
