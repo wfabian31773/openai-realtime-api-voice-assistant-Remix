@@ -6,6 +6,7 @@ import { callEnvironment } from "../runtime/callRecord";
 import { callbackRoutingProblem, isClearTwilioRefusal, RING_TIMEOUT_SECONDS, STALE_CLAIM_MS, statusUrl, type OutboundTwilio } from "../runtime/outbound/dialer";
 import type { DialerLock } from "../runtime/outbound/scheduler";
 import { NOT_PLACED, type OutboundStore } from "../runtime/outbound/store";
+import { operatorLineEnabled } from "./operatorLineSettings";
 import { OPERATOR_SLUG, US_E164, operatorFromProblem, parseOperatorPayload } from "./operatorLine";
 import { evaluateAndEnqueueCall, identityFromPreparePayload, siAssistantDialingProblem, siAssistantMayDial } from "./callEnqueue";
 import { SI_ASSISTANT_SLUG, SI_ASSISTANT_CAMPAIGN_KEY, siAssistantNumber } from "./siAssistantConstants";
@@ -144,9 +145,10 @@ export async function placeOperatorCall(
   now: Date,
 ): Promise<LiveResult> {
   const refused = (reason: string): LiveResult => ({ ok: false, reason, mayHaveSent: false });
+  if (!(await operatorLineEnabled(deps.env, deps.plugin))) return refused("operator_line_disabled");
   const problem = operatorFromProblem(deps.env);
   if (problem) return refused(problem);
-  const parsed = parseOperatorPayload(approval.payload);
+  const parsed = parseOperatorPayload(approval.payload, deps.env);
   if (!parsed.ok) return refused("invalid_operator_payload");
   const input = parsed.payload;
   const domain = resolveAppDomain({
@@ -160,6 +162,7 @@ export async function placeOperatorCall(
   let sent = false;
   try {
     if (await operatorOptOutGuard(deps.store, deps.plugin, input.phone)) return refused("do_not_contact");
+    // NO daily cap and NO peak window: operator attempts bypass campaign admission.
     const campaignId = await deps.store.ensureCampaign(OPERATOR_SLUG, OPERATOR_SLUG);
     if (!campaignId) return refused("no_campaign");
     const externalRef = `plugin:operator:${approval.id}`;
@@ -181,6 +184,7 @@ export async function placeOperatorCall(
     await deps.sessions.persist(session);
     const query = new URLSearchParams({ contact: contactId, attempt: attemptId, liveSession: sessionId });
     if (await operatorOptOutGuard(deps.store, deps.plugin, input.phone)) throw new Error("do_not_contact");
+    if (!(await operatorLineEnabled(deps.env, deps.plugin))) throw new Error("operator_line_disabled");
     if (session.endedAt) throw new Error("operator_deadline_exceeded");
     sent = true;
     const call = await boundedCall(deps.sender.createCall({
@@ -201,7 +205,7 @@ export async function placeOperatorCall(
       if (attemptId) await deps.store.finishAttempt(attemptId, { status: NOT_PLACED }).catch(() => undefined);
       if (contactId) await deps.store.settleContact(contactId, "rescheduled", { onlyIfCalling: true }).catch(() => false);
     }
-    return { ok: false, reason: sent ? "send_unknown" : error instanceof Error && error.message === "do_not_contact" ? "do_not_contact" : "operator_call_unavailable",
+    return { ok: false, reason: sent ? "send_unknown" : error instanceof Error && ["do_not_contact", "operator_line_disabled"].includes(error.message) ? error.message : "operator_call_unavailable",
       mayHaveSent: sent, ...(sessionId ? { sessionId } : {}) };
   }
 }

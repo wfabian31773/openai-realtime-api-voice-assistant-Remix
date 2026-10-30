@@ -95,6 +95,13 @@ export interface SweepInput {
    * sweep does not file — see decideSweep.
    */
   verifiedName?: { firstName: string; lastName: string };
+  /**
+   * WHERE `verifiedName` CAME FROM. `verified` (or absent) is a certain lookup
+   * match. `stated` is the name the caller gave, as a name-taking tool
+   * received it (`statedName.ts`, operator ruling 2026-10-29: a caller whose
+   * name we got is not nameless). The swept ticket tells staff which it is.
+   */
+  nameSource?: "verified" | "stated";
 }
 
 export type SweepDecision =
@@ -564,7 +571,9 @@ export function buildSweptTicket(
     staffNote:
       `Recovered at teardown — the agent did not file this request.\n` +
       (decision.firstName && decision.lastName
-        ? ""
+        ? input.nameSource === "stated"
+          ? `NAME AS THE CALLER GAVE IT — not matched to a patient record; confirm it against the chart before acting.\n`
+          : ""
         : `PATIENT NAME NOT CAPTURED — nobody was identified on this call; take the name from the recording before matching this to a chart.\n`) +
       `Call back on ${input.callerPhone}. Call reference ${input.callSid}.\n` +
       `What the caller said: ${callerSaid}`,

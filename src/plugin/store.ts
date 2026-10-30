@@ -28,9 +28,11 @@ import {
 import { sanitizeAuditEntry, type PluginAuditEntry } from "./audit";
 import { CONFIRM_TTL_MS } from "./tokens";
 import { ChannelDoNotContact } from "../runtime/outbound/channelDnc";
+import type { OperatorInitiator } from "./operatorLine";
 import type { TranscriptTurn } from "../runtime/transcriptLog";
 
 export interface OperatorCallRecord {
+  initiatedBy: OperatorInitiator;
   sessionId: string;
   approvalId: string;
   tokenJti: string;
@@ -39,6 +41,47 @@ export interface OperatorCallRecord {
   startedAt: Date;
   endedAt: Date | null;
   turns: TranscriptTurn[];
+}
+
+/** Request contents stay behind the authenticated transcript endpoint. */
+export interface OperatorQueuedRequest {
+  id: string;
+  text: string;
+  createdAt: string;
+}
+
+/** Separate from approval-owned outbound calls; never copied into audit. */
+export interface OperatorInboundCallRecord {
+  callId: string;
+  callSid: string;
+  direction: "inbound";
+  laneSlug: "wayne-operator";
+  callerNumber: string | null;
+  status: string;
+  startedAt: Date;
+  endedAt: Date | null;
+  turns: TranscriptTurn[];
+  queuedRequests: OperatorQueuedRequest[];
+  optedOut: boolean;
+  transcriptUrl: string;
+}
+
+/** Private message/recording contents are only returned by operator:call fetches. */
+export interface OperatorSmsRecord {
+  messageSid: string;
+  callerNumber: string | null;
+  body: string;
+  receivedAt: Date;
+  fetchUrl: string;
+}
+export interface OperatorVoicemailRecord {
+  recordingSid: string;
+  callSid: string;
+  recordingUrl: string | null;
+  transcript: string | null;
+  transcriptionStatus: string | null;
+  receivedAt: Date;
+  fetchUrl: string;
 }
 
 export const CONTACT_CHANNELS = ["call", "sms", "email"] as const;
@@ -74,6 +117,23 @@ export const RETURNED_CALL_LOOKBACK_MS = 72 * 60 * 60 * 1000;
 /** Undelivered outbox rows older than this are deleted. Delivered bodies are purged on settle. */
 export const OUTBOX_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 
+export interface PluginStoreOptions {
+  operatorNotificationClaimLeaseMs?: number;
+}
+
+/** Invalid lease settings fall back to 60s rather than allowing immediate reclaims. */
+export function operatorNotificationClaimLeaseMs(options: PluginStoreOptions = {}): number {
+  const leaseMs = options.operatorNotificationClaimLeaseMs
+    ?? Number(process.env.OPERATOR_NOTIFICATION_CLAIM_LEASE_MS);
+  return Number.isSafeInteger(leaseMs) && leaseMs > 0 ? leaseMs : 60_000;
+}
+
+export interface OperatorNotificationClaim {
+  claimToken: string;
+  claimedAt: Date;
+  deliveredAt: Date | null;
+}
+
 export interface ApiTokenRow {
   jti: string;
   hashedSecret: string;
@@ -90,6 +150,8 @@ export interface ContactApprovalRow {
   status: ApprovalStatus;
   tokenJti: string;
   ticketId: string | null;
+  /** Request identity, separate from the human-approved payload/hash. */
+  idempotencyKey?: string | null;
   ticketNumber: string | null;
   /** Last-10 of the destination phone. Lookup key only; never written to audit. */
   phoneKey?: string | null;
@@ -128,6 +190,7 @@ export interface CallPayload {
 export interface SmsPayload {
   phone: string;
   body: string;
+  idempotency_key?: string;
   ticketId?: string | null;
   ticketNumber?: string | null;
 }
@@ -143,6 +206,26 @@ export interface EmailPayload {
 export type ContactPayload = CallPayload | SmsPayload | EmailPayload;
 
 export interface PluginStore {
+  /** Atomically claim a new or expired undelivered event; null means blocked. */
+  claimOperatorNotification(eventId: string): Promise<string | null>;
+  /** Only the current claim token can retain the event permanently after delivery. */
+  markOperatorNotificationDelivered(eventId: string, claimToken: string): Promise<void>;
+  /** Only the current claim token can release an undelivered event. */
+  releaseOperatorNotification(eventId: string, claimToken: string): Promise<void>;
+  getOperatorLineEnabled(): Promise<boolean>;
+  setOperatorLineEnabled(enabled: boolean, updatedBy: string | null): Promise<void>;
+  /** First SMS with this MessageSid wins; null means a duplicate. */
+  saveOperatorSms(record: OperatorSmsRecord): Promise<OperatorSmsRecord | null>;
+  getOperatorSms(messageSid: string): Promise<OperatorSmsRecord | null>;
+  /** Merge asynchronous recording/transcription callbacks without losing either. */
+  saveOperatorVoicemail(record: OperatorVoicemailRecord): Promise<OperatorVoicemailRecord | null>;
+  getOperatorVoicemail(recordingSid: string): Promise<OperatorVoicemailRecord | null>;
+  startOperatorInboundCall(record: OperatorInboundCallRecord): Promise<OperatorInboundCallRecord>;
+  getOperatorInboundCall(callSid: string): Promise<OperatorInboundCallRecord | null>;
+  setOperatorInboundOptOut(callSid: string): Promise<void>;
+  appendOperatorInboundRequest(callSid: string, request: OperatorQueuedRequest): Promise<OperatorInboundCallRecord | null>;
+  /** Atomic first completion wins, including across callback retries. */
+  finishOperatorInboundCall(callSid: string, endedAt: Date, status: string, turns: TranscriptTurn[]): Promise<OperatorInboundCallRecord | null>;
   isOperatorOptedOut(phone: string): Promise<boolean>;
   setOperatorOptOut(phone: string): Promise<void>;
   saveOperatorCall(record: OperatorCallRecord): Promise<void>;
@@ -153,6 +236,7 @@ export interface PluginStore {
   revokeToken(jti: string, at: Date): Promise<boolean>;
 
   insertApproval(row: ContactApprovalRow): Promise<ContactApprovalRow>;
+  findApprovalByIdempotencyKey(tokenJti: string, key: string): Promise<ContactApprovalRow | null>;
   getApproval(id: string): Promise<ContactApprovalRow | null>;
   listApprovals(status?: ApprovalStatus): Promise<ContactApprovalRow[]>;
   updateApproval(id: string, patch: Partial<ContactApprovalRow>, onlyIfStatus?: ApprovalStatus): Promise<ContactApprovalRow | null>;
@@ -272,6 +356,73 @@ export async function verifyStoredToken(
 }
 
 export class MemoryPluginStore implements PluginStore {
+  private readonly notificationClaimLeaseMs: number;
+  constructor(options: PluginStoreOptions = {}) {
+    this.notificationClaimLeaseMs = operatorNotificationClaimLeaseMs(options);
+  }
+  operatorNotifications = new Map<string, OperatorNotificationClaim>();
+  async claimOperatorNotification(eventId: string): Promise<string | null> {
+    const now = new Date();
+    const prior = this.operatorNotifications.get(eventId);
+    if (prior && (prior.deliveredAt !== null
+      || prior.claimedAt.getTime() >= now.getTime() - this.notificationClaimLeaseMs)) return null;
+    const claimToken = newId();
+    this.operatorNotifications.set(eventId, { claimToken, claimedAt: now, deliveredAt: null });
+    return claimToken;
+  }
+  async markOperatorNotificationDelivered(eventId: string, claimToken: string): Promise<void> {
+    const claim = this.operatorNotifications.get(eventId);
+    if (claim?.claimToken === claimToken && claim.deliveredAt === null) claim.deliveredAt = new Date();
+  }
+  async releaseOperatorNotification(eventId: string, claimToken: string): Promise<void> {
+    const claim = this.operatorNotifications.get(eventId);
+    if (claim?.claimToken === claimToken && claim.deliveredAt === null) this.operatorNotifications.delete(eventId);
+  }
+  operatorLineEnabled = true;
+  async getOperatorLineEnabled(): Promise<boolean> { return this.operatorLineEnabled; }
+  async setOperatorLineEnabled(enabled: boolean, _updatedBy: string | null): Promise<void> { this.operatorLineEnabled = enabled; }
+  operatorSms = new Map<string, OperatorSmsRecord>();
+  async saveOperatorSms(record: OperatorSmsRecord): Promise<OperatorSmsRecord | null> {
+    if (this.operatorSms.has(record.messageSid)) return null;
+    this.operatorSms.set(record.messageSid, structuredClone(record));
+    return structuredClone(record);
+  }
+  async getOperatorSms(messageSid: string): Promise<OperatorSmsRecord | null> { return structuredClone(this.operatorSms.get(messageSid) ?? null); }
+  operatorVoicemails = new Map<string, OperatorVoicemailRecord>();
+  async saveOperatorVoicemail(record: OperatorVoicemailRecord): Promise<OperatorVoicemailRecord | null> {
+    const prior = this.operatorVoicemails.get(record.recordingSid);
+    if (prior && prior.callSid !== record.callSid) return null;
+    const merged = prior ? { ...prior, recordingUrl: record.recordingUrl ?? prior.recordingUrl,
+      transcript: record.transcript ?? prior.transcript, transcriptionStatus: record.transcriptionStatus ?? prior.transcriptionStatus } : record;
+    if (prior && JSON.stringify(prior) === JSON.stringify(merged)) return null;
+    this.operatorVoicemails.set(record.recordingSid, structuredClone(merged));
+    return structuredClone(merged);
+  }
+  async getOperatorVoicemail(recordingSid: string): Promise<OperatorVoicemailRecord | null> { return structuredClone(this.operatorVoicemails.get(recordingSid) ?? null); }
+  operatorInboundCalls = new Map<string, OperatorInboundCallRecord>();
+  async startOperatorInboundCall(record: OperatorInboundCallRecord): Promise<OperatorInboundCallRecord> {
+    if (!this.operatorInboundCalls.has(record.callSid)) this.operatorInboundCalls.set(record.callSid, structuredClone(record));
+    return structuredClone(this.operatorInboundCalls.get(record.callSid)!);
+  }
+  async getOperatorInboundCall(callSid: string): Promise<OperatorInboundCallRecord | null> {
+    return structuredClone(this.operatorInboundCalls.get(callSid) ?? null);
+  }
+  async setOperatorInboundOptOut(callSid: string): Promise<void> {
+    const record = this.operatorInboundCalls.get(callSid);
+    if (record && !record.endedAt) record.optedOut = true;
+  }
+  async appendOperatorInboundRequest(callSid: string, request: OperatorQueuedRequest): Promise<OperatorInboundCallRecord | null> {
+    const record = this.operatorInboundCalls.get(callSid);
+    if (!record || record.endedAt) return null;
+    if (!record.queuedRequests.some((item) => item.id === request.id)) record.queuedRequests.push(structuredClone(request));
+    return structuredClone(record);
+  }
+  async finishOperatorInboundCall(callSid: string, endedAt: Date, status: string, turns: TranscriptTurn[]): Promise<OperatorInboundCallRecord | null> {
+    const record = this.operatorInboundCalls.get(callSid);
+    if (!record || record.endedAt) return null;
+    Object.assign(record, { endedAt, status, turns: structuredClone(turns) });
+    return structuredClone(record);
+  }
   operatorOptOuts = new Set<string>();
   async isOperatorOptedOut(phone: string): Promise<boolean> { return this.operatorOptOuts.has(phone); }
   async setOperatorOptOut(phone: string): Promise<void> { this.operatorOptOuts.add(phone); }
@@ -328,8 +479,19 @@ export class MemoryPluginStore implements PluginStore {
   }
 
   async insertApproval(row: ContactApprovalRow): Promise<ContactApprovalRow> {
+    // No await between checking the key and inserting, including concurrent prepares.
+    if (row.idempotencyKey != null) {
+      const existing = [...this.approvals.values()].find((item) => item.tokenJti === row.tokenJti
+        && item.idempotencyKey === row.idempotencyKey && item.status !== "rejected" && item.status !== "cancelled");
+      if (existing) return { ...existing, payload: { ...existing.payload } };
+    }
     this.approvals.set(row.id, { ...row, payload: { ...row.payload } });
     return this.approvals.get(row.id)!;
+  }
+  async findApprovalByIdempotencyKey(tokenJti: string, key: string): Promise<ContactApprovalRow | null> {
+    const row = [...this.approvals.values()].find((item) => item.tokenJti === tokenJti
+      && item.idempotencyKey === key && item.status !== "rejected" && item.status !== "cancelled");
+    return row ? { ...row, payload: { ...row.payload } } : null;
   }
   async getApproval(id: string): Promise<ContactApprovalRow | null> {
     const row = this.approvals.get(id);
@@ -587,6 +749,11 @@ export function publicApproval(row: ContactApprovalRow): Record<string, unknown>
     id: row.id,
     channel: row.channel,
     ...(row.payload.callKind === "operator" ? { callKind: "operator", maskedNumber: `***${String(row.payload.phone).slice(-4)}` } : {}),
+    ...(row.payload.smsKind === "operator" ? {
+      smsKind: "operator", laneSlug: row.payload.laneSlug, initiated_by: row.payload.initiated_by,
+      maskedNumber: `***${String(row.payload.phone).slice(-4)}`,
+      maskedFromNumber: `***${String(row.payload.fromNumber).slice(-4)}`,
+    } : {}),
     status: row.status,
     ticketId: row.ticketId,
     ticketNumber: row.ticketNumber,

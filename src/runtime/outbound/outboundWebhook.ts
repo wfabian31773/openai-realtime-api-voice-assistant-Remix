@@ -34,6 +34,9 @@
  */
 
 import { liveCallRegistry, type LiveCallRegistry, type LiveCallStatus } from "../../plugin/liveSessions";
+import { operatorLineEnabled } from "../../plugin/operatorLineSettings";
+import { boundPluginStore } from "../../plugin/bindings";
+import type { PluginStore } from "../../plugin/store";
 import { OPERATOR_SLUG } from "../../plugin/operatorLine";
 import { computeRuntimeReadiness } from "../readiness";
 import type { CallSessionRegistry } from "../sessionRegistry";
@@ -66,6 +69,7 @@ export interface OutboundWebhookDeps {
   policyFor: (slug: string) => Promise<OutboundLanePolicy | null> | OutboundLanePolicy | null;
   now?: () => Date;
   liveCalls?: LiveCallRegistry;
+  operatorStore?: () => PluginStore | null;
 }
 
 function gate(req: WebhookRequest, env: Record<string, string | undefined>): WebhookResponse | null {
@@ -94,6 +98,8 @@ export async function handleOutboundAnswer(
   if (gated) return gated;
   if (!isValidSlug(slug)) return { status: 404, contentType: "text/plain", body: "unknown lane" };
 
+  if (slug === OPERATOR_SLUG && !(await operatorLineEnabled(deps.env, deps.operatorStore?.() ?? boundPluginStore()))) return hangup();
+
   const policy = await deps.policyFor(slug);
   const { contactId, attemptId } = queryOf(req);
   const callSid = req.body.CallSid ?? "";
@@ -119,6 +125,11 @@ export async function handleOutboundAnswer(
 
   if (answeredBy.startsWith("machine")) {
     await deps.store.finishAttempt(attemptId, { status: "voicemail", answeredBy, ended: false });
+    if (slug === OPERATOR_SLUG) {
+      // NO daily cap, peak window, or campaign retry scheduling for operator calls.
+      await deps.store.settleContact(contactId, "voicemail", { onlyIfCalling: true, onlyIfCurrentAttempt: attemptId });
+      return twimlResponse(200, `<Say>${xmlEscape(policy.voicemail())}</Say><Hangup/>`);
+    }
     const prior = await deps.store.priorAttempts(contactId);
     await deps.store.settleContact(
       contactId,
@@ -134,7 +145,7 @@ export async function handleOutboundAnswer(
     await deps.store.settleContact(contactId, "no_answer", {
       onlyIfCalling: true,
       onlyIfCurrentAttempt: attemptId,
-      nextAttemptAt: nextLookAt(now, "too_soon", policy),
+      ...(slug === OPERATOR_SLUG ? {} : { nextAttemptAt: nextLookAt(now, "too_soon", policy) }),
     });
     return twimlResponse(200, `<Say>${xmlEscape(OUTBOUND_UNAVAILABLE_LINE)}</Say><Hangup/>`);
   }
@@ -148,6 +159,7 @@ export async function handleOutboundAnswer(
     dialedNumber: req.body.From ?? "",
     outbound: { campaignKey: policy.campaignKey, contactId, attemptId },
     ...(live ? { liveSessionId: live.sessionId } : {}),
+    ...(live && live.operatorCall ? { retentionMs: (live.operatorCall.maxDurationSec + 600) * 1000 } : {}),
   });
   const { host } = resolveRequestBase(req);
   return twimlResponse(
@@ -211,6 +223,10 @@ export async function handleOutboundStatus(
     return ok;
   }
 
+  if (slug === OPERATOR_SLUG) {
+    await deps.store.settleContact(contactId, "no_answer", { onlyIfCalling: true, onlyIfCurrentAttempt: attemptId });
+    return ok;
+  }
   const prior = await deps.store.priorAttempts(contactId);
   await deps.store.settleContact(
     contactId,

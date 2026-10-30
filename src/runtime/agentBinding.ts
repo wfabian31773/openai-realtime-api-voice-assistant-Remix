@@ -257,6 +257,8 @@ export async function bindAgent(
     runtimeTools?: LiveTool[];
     /** The lane's language policy, from its registration — see languageMechanism.ts. */
     spokenLanguages?: readonly string[];
+    /** Restricted tool sets can omit language switching entirely. */
+    languageToolAvailable?: boolean;
   } = {},
 ): Promise<BoundAgent> {
   const resolved = await resolveInstructions(agent);
@@ -268,7 +270,7 @@ export async function bindAgent(
   // The runtime's own copy of the language mechanism, then the practice facts
   // in the docs' place. Both are the pipeline's, so both are done here and
   // nowhere else.
-  const own = withLanguageMechanism(resolved, opts.spokenLanguages);
+  const own = opts.languageToolAvailable === false ? resolved : withLanguageMechanism(resolved, opts.spokenLanguages);
   const instructions = composeWithBusinessFacts(own, opts.instructionsPrefix);
 
   const declared = (Array.isArray(agent.tools) ? agent.tools : []) as LiveTool[];

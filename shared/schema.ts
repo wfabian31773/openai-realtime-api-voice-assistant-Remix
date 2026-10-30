@@ -1527,6 +1527,7 @@ export const contactApprovals = pgTable("contact_approvals", {
   channel: varchar("channel", { length: 16 }).notNull(),
   status: varchar("status", { length: 24 }).notNull().default("pending"),
   tokenJti: varchar("token_jti", { length: 32 }).notNull(),
+  idempotencyKey: varchar("idempotency_key", { length: 200 }),
   ticketId: varchar("ticket_id", { length: 64 }),
   ticketNumber: varchar("ticket_number", { length: 64 }),
   phoneKey: varchar("phone_key", { length: 10 }),
@@ -1551,6 +1552,8 @@ export const contactApprovals = pgTable("contact_approvals", {
   index("idx_contact_approvals_ticket").on(table.ticketNumber),
   index("idx_contact_approvals_confirm").on(table.confirmTokenHash),
   index("idx_contact_approvals_phone_key").on(table.phoneKey),
+  uniqueIndex("contact_approvals_token_idempotency_idx").on(table.tokenJti, table.idempotencyKey)
+    .where(sql`${table.idempotencyKey} IS NOT NULL AND ${table.status} NOT IN ('rejected', 'cancelled')`),
   check("contact_approvals_channel_check", sql`channel IN ('call', 'sms', 'email')`),
   check("contact_approvals_status_check", sql`status IN ('pending', 'approved', 'sending', 'rejected', 'cancelled', 'committed', 'failed', 'unknown')`),
 ]);
@@ -1559,6 +1562,7 @@ export const contactApprovals = pgTable("contact_approvals", {
 // Additive DDL: migrations/add_operator_line.sql (apply separately).
 export const pluginOperatorCalls = pgTable("plugin_operator_calls", {
   sessionId: varchar("session_id", { length: 64 }).primaryKey(),
+  initiatedBy: varchar("initiated_by", { length: 16 }).notNull().default("bot_initiative"),
   approvalId: varchar("approval_id", { length: 64 }).notNull(),
   tokenJti: varchar("token_jti", { length: 32 }).notNull(),
   callSid: varchar("call_sid", { length: 64 }),
@@ -1566,6 +1570,27 @@ export const pluginOperatorCalls = pgTable("plugin_operator_calls", {
   startedAt: timestamp("started_at", { withTimezone: true }).notNull(),
   endedAt: timestamp("ended_at", { withTimezone: true }),
   turns: jsonb("turns").notNull().default(sql`'[]'::jsonb`),
+}, (table) => [
+  check("plugin_operator_calls_initiated_by_check", sql`${table.initiatedBy} IN ('owner_request', 'bot_initiative')`),
+]);
+
+// Additive DDL: migrations/add_operator_line_inbound.sql (apply separately).
+export const pluginOperatorSms = pgTable("plugin_operator_sms", {
+  messageSid: varchar("message_sid", { length: 64 }).primaryKey(),
+  callerNumber: varchar("caller_number", { length: 16 }),
+  body: text("body").notNull(),
+  receivedAt: timestamp("received_at", { withTimezone: true }).notNull(),
+  fetchUrl: text("fetch_url").notNull(),
+});
+
+export const pluginOperatorVoicemails = pgTable("plugin_operator_voicemails", {
+  recordingSid: varchar("recording_sid", { length: 64 }).primaryKey(),
+  callSid: varchar("call_sid", { length: 64 }).notNull(),
+  recordingUrl: text("recording_url"),
+  transcript: text("transcript"),
+  transcriptionStatus: varchar("transcription_status", { length: 32 }),
+  receivedAt: timestamp("received_at", { withTimezone: true }).notNull(),
+  fetchUrl: text("fetch_url").notNull(),
 });
 
 // The existing do_not_contact list uses US last-10 keys. International
@@ -1573,6 +1598,15 @@ export const pluginOperatorCalls = pgTable("plugin_operator_calls", {
 export const pluginOperatorDnc = pgTable("plugin_operator_dnc", {
   phone: varchar("phone", { length: 16 }).primaryKey(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+// Additive DDL: migrations/add_operator_notification_claims.sql (apply separately).
+export const pluginOperatorNotifications = pgTable("plugin_operator_notifications", {
+  eventId: varchar("event_id").primaryKey(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  claimedAt: timestamp("claimed_at", { withTimezone: true }).notNull().defaultNow(),
+  claimToken: varchar("claim_token").notNull(),
+  deliveredAt: timestamp("delivered_at", { withTimezone: true }),
 });
 
 export const pluginMessageOutbox = pgTable("plugin_message_outbox", {

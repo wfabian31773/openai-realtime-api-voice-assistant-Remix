@@ -954,7 +954,29 @@ import { callEnvironment } from "./callRecord";
  * files unclassified calls for a person to route. On top of v135 (#392, main, 6ae60e33); v127 is #376 and v133 is #391 on their open branches. No migration; production impact remains unmeasured.
  */
 /**
- * v138 — THE THIRD PARTY'S REPORT STAYS IN RECORDS (2026-10-26; renumbered from v117 to v118, to v127, to v134, then to v138 on 2026-10-28 because main took v117 in #379, v126 in #394, v128–v131 in #389, #386, #387 and #388, and v132, v134, v135 and v136 in #390, #396, #392 and #393, and v137 is #391 on its open branch). On the
+ * v142 — A GIVEN NAME REACHES THE SWEEP (2026-10-29). The teardown sweep files
+ * a request under the first and last name the caller gave, as a name-taking
+ * tool received it, when no certain lookup match exists (statedName.ts,
+ * operator ruling 2026-10-29). On top of v141 (#398, main, 2316c60). Merged to
+ * main as #399 (adf8dad). No migration; production impact remains unmeasured.
+ */
+/**
+ * v143 — SORRY, ONLY A MESSAGE (2026-10-29). On the four queue lanes a caller
+ * who asks for a person hears an apology, that the agent can only take a
+ * message, and who will follow up (operator ruling 2026-10-29). On top of
+ * v142 (#399, main, adf8dad); v137 is #391, v138 is #376 and v139 is #384 on
+ * their open branches. No migration; production impact remains unmeasured.
+ */
+/** v144: open Grok Bot operator conversations, owner recognition, background
+ * request handoff, and outbound provenance, above main's v143.
+ * Apply add_operator_line_inbound.sql separately. */
+/** v145: owner SMS exempt + notifier idempotency. Signed stable event IDs,
+ * durable notification claims and token-scoped SMS idempotency keys.
+ * Apply add_operator_notification_claims.sql separately; not applied here. */
+/** v146: dedicated operator SMS send, with no hours/caps, owner exemption,
+ * opt-outs, durable idempotency and operator-origin commits. No new migration. */
+/**
+ * v150 — THE THIRD PARTY'S REPORT STAYS IN RECORDS (2026-10-26; renumbered from v117 to v118, to v127, to v134, to v138 on 2026-10-28, then to v150 on 2026-10-29 because main took v117 in #379, v126 in #394, v128–v131 in #389, #386, #387 and #388, and v132, v134, v135 and v136 in #390, #396, #392 and #393, and #397–#407 took v140–v146 on main; v147 is #381, v148 is #384 and v149 is #391 on their open branches). On the
  * records line, a provider's, plan's or other third party's request whose
  * words name a document is no longer sent to the HVA Hub on a scheduling cue
  * ("the most recent eye exam REPORT" read as "schedule an eye exam"); a
@@ -963,14 +985,14 @@ import { callEnvironment } from "./callRecord";
  * model, in `fix`, that nothing is lost and never to say "call back"; and a
  * name given in two halves across invocations reaches the payload. Seven
  * records-lane calls, 2026-10-12..10-26. A payload change on the ticket path
- * of the department under the CAP, so it gets its own marker. On top of v136
- * (#393), which it contains. The recovery ticket carries the callback
+ * of the department under the CAP, so it gets its own marker. On top of v146
+ * (#407), which it contains. The recovery ticket carries the callback
  * number without its extension and the extension in the staff note, as
  * v132's filing does. `src/tools/medicalRecordsTools.ts`,
  * `thirdPartyRecordsStayInRecords.test.ts`.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v138-the-third-party-report-stays-in-records-20261028";
+  "voice-runtime-v150-the-third-party-report-stays-in-records-20261029";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

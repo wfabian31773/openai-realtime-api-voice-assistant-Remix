@@ -45,6 +45,7 @@ import { SWEPT_TICKET_DESCRIPTION } from '../runtime/requestSweep';
 import { otherReasonFor } from './otherReason';
 import { loggableLookupError } from '../services/loggableTicketingError';
 import { verifiedDobFor, verifiedIdentityFor } from './verifiedIdentity';
+import { spokenDobFor } from './spokenDob';
 import {
   gateRefusalsSoFar, gateRefusalAgeMs, noteGateRefusal, noteCallFact, callFactNoted,
   noteCallValue, callValue, forgetCallValue,
@@ -1076,7 +1077,6 @@ registerTool({
        * than filing none — see spokenDob.ts for the adjacency rule and what it
        * still cannot catch.
        */
-      const { spokenDobFor } = await import('./spokenDob');
       const heard = spokenDobFor(callSid);
       parts = heard ? normalizeDobParts(heard) : null;
       if (parts) {

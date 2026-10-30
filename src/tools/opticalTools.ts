@@ -24,6 +24,7 @@ import { loggableLookupError } from '../services/loggableTicketingError';
 import { gateRefusalsSoFar, noteGateRefusal } from './gateAttempts';
 import { decideDobEscape, dobStatusNote, dobEscapeMarker, type DobStatus } from './dobEscape';
 import { usualOfficeFor, verifiedDobFor } from './verifiedIdentity';
+import { spokenDobFor } from './spokenDob';
 
 /** This tool's own name, for the per-call gate counter. */
 const OPTICAL_FILE_TOOL = 'file_optical_ticket';
@@ -442,7 +443,6 @@ registerTool({
        * than filing none — see spokenDob.ts for the adjacency rule and what it
        * still cannot catch.
        */
-      const { spokenDobFor } = await import('./spokenDob');
       const heard = spokenDobFor(callSid);
       parts = heard ? normalizeDobParts(heard) : null;
       if (parts) {
