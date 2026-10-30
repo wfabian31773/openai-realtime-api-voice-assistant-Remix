@@ -15,7 +15,8 @@ Set `initiated_by` (or its alias `requested_by`) to:
 - `owner_request`: the owner requested this call, including a call to a third
   party. No approval tap is required.
 - `bot_initiative`: the bot chose to initiate this call. Human approval is
-  required, except when calling the configured owner number.
+  required, except when calling the configured owner number or using an
+  enabled scenario pre-approval as described below.
 
 Omitted provenance defaults to `bot_initiative`. Invalid or conflicting values
 are rejected. Only explicitly scoped operator bots can declare provenance.
@@ -31,6 +32,20 @@ returns `pending_approval`; a human reviews the complete goal, destination,
 duration and payload hash through the existing approval flow before commit.
 The preparing bot can fetch the approved token once through
 `GET /contact_requests/:id/confirm_token`.
+
+Admins can enable **Pre-approve operator test scenarios A1–A10** on the Voice
+Agents page. The separate `operator_scenario_preapproval_enabled` setting
+defaults **OFF**. Staff sessions can read `GET /api/settings/operator-scenario-preapproval`;
+only admin sessions can `PUT` the same path with `{ "enabled": true|false }`.
+Bot bearer tokens cannot change it. When enabled, a valid `scenario_id` from
+the committed pack receives an approved row and confirmation token at prepare,
+with `approved_by='scenario_preapproval'`, `approved_at`, and
+`approval_metadata={"scenario_id":"A1"}` (using the selected ID).
+Missing or unreadable settings mean OFF. Commit checks the switch again,
+including immediately before dialing. Opt-outs block prepare and commit.
+Free-text, patient and SI approval policies retain their existing behavior.
+Apply `migrations/add_operator_scenario_preapproval.sql` separately; this change
+does not apply it or change a database.
 
 A bot cannot approve its own pending request. Existing staff permissions and
 token defaults are unchanged. Mixed `operator:call`/`contacts:approve` tokens
@@ -60,8 +75,8 @@ No bot gets `contacts:approve`. Prepare accepts `phone` (E.164), `purpose`
 provenance. Patient/ticket fields, caller scripts, and unknown keys are rejected.
 Alternatively, supply `scenario_id` (`A1`–`A10`) instead of `purpose` to load a
 goal from `test-bench/packs/pack-01.md` (ai-bridge PR #32,
-`claude/test-bench`). The explicit `phone` destination and normal approval
-policy still apply. There is no fingerprint gating.
+`claude/test-bench`). The explicit `phone` destination still applies; scenario
+pre-approval is available only through the staff setting above. There is no fingerprint gating.
 `maxDurationSec` defaults to the env safety maximum and may request a shorter
 integer duration from 30 seconds through that maximum. Commit passes it to
 Twilio's `timeLimit`; the process also requests REST hangup at the deadline

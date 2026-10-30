@@ -9,17 +9,18 @@ vi.mock("./db", () => ({ db: {} }));
 function boot(environmentEnabled = "true") {
   const store = new MemoryPluginStore();
   const routes: Record<string, RequestHandler[]> = {};
-  const app = { get: (_path: string, ...handlers: RequestHandler[]) => { routes.GET = handlers; },
-    put: (_path: string, ...handlers: RequestHandler[]) => { routes.PUT = handlers; } } as unknown as Express;
+  const app = { get: (path: string, ...handlers: RequestHandler[]) => { routes[`GET ${path}`] = handlers; },
+    put: (path: string, ...handlers: RequestHandler[]) => { routes[`PUT ${path}`] = handlers; } } as unknown as Express;
   mountOperatorLineSettings(app, { store: () => store, env: { OPERATOR_LINE_INBOUND_ENABLED: environmentEnabled },
     authenticate: requireAuth, admin: requireRole("admin") });
-  async function request(method: string, role?: string, body?: unknown) {
-    const req = { session: role ? { userId: "staff-id", userRole: role } : {}, body };
+  async function request(method: string, role?: string, body?: unknown, path = "/api/settings/operator-line", bearer?: string) {
+    const req = { session: role ? { userId: "staff-id", userRole: role } : {}, body,
+      headers: bearer ? { authorization: `Bearer ${bearer}` } : {} };
     const result = { status: 200, body: undefined as any, headers: new Headers() };
     const res = { status(code: number) { result.status = code; return res; }, json(value: unknown) { result.body = value; return res; },
       setHeader(name: string, value: string) { result.headers.set(name, value); } };
     async function run(index: number): Promise<void> {
-      const handler = routes[method][index];
+      const handler = routes[`${method} ${path}`][index];
       if (!handler) return;
       let next: Promise<void> | undefined;
       await handler(req as never, res as never, () => { next = run(index + 1); });
@@ -64,5 +65,43 @@ describe("staff operator line setting with existing session/role permissions", (
     expect((await h.request("GET", "user")).status).toBe(503);
     vi.spyOn(h.store, "setOperatorLineEnabled").mockRejectedValue(new Error("private"));
     expect((await h.request("PUT", "admin", { enabled: false })).status).toBe(503);
+  });
+});
+
+describe("staff operator scenario pre-approval setting", () => {
+  const path = "/api/settings/operator-scenario-preapproval";
+
+  it("defaults OFF and only the existing admin session role can flip it", async () => {
+    const h = boot();
+    expect((await h.request("GET", "user", undefined, path)).body).toEqual({ enabled: false });
+    const bot = h.store.mint(["operator:call"]);
+    expect((await h.request("PUT", undefined, { enabled: true }, path, bot.plaintext)).status).toBe(401);
+    expect((await h.request("GET", undefined, undefined, path, bot.plaintext)).status).toBe(401);
+    for (const role of [undefined, "user", "manager"]) {
+      expect((await h.request("PUT", role, { enabled: true }, path)).status).toBe(role ? 403 : 401);
+    }
+    expect(await h.store.getOperatorScenarioPreapprovalEnabled()).toBe(false);
+    const write = vi.spyOn(h.store, "setOperatorScenarioPreapprovalEnabled");
+    expect((await h.request("PUT", "admin", { enabled: true }, path)).body).toEqual({ enabled: true });
+    expect(write).toHaveBeenCalledWith(true, "staff-id");
+    const read = await h.request("GET", "user", undefined, path);
+    expect(read.body).toEqual({ enabled: true });
+    expect(read.headers.get("Cache-Control")).toBe("no-store");
+    expect((await h.request("PUT", "admin", { enabled: false }, path)).body).toEqual({ enabled: false });
+  });
+
+  it.each([undefined, null, "true", 1])("rejects invalid enabled values (%s)", async (enabled) => {
+    const h = boot();
+    expect((await h.request("PUT", "admin", { enabled }, path)).status).toBe(400);
+    expect(await h.store.getOperatorScenarioPreapprovalEnabled()).toBe(false);
+  });
+
+  it("reports OFF when reading or writing the setting fails", async () => {
+    const h = boot();
+    await h.store.setOperatorScenarioPreapprovalEnabled(true, "staff-id");
+    vi.spyOn(h.store, "getOperatorScenarioPreapprovalEnabled").mockRejectedValue(new Error("private"));
+    expect(await h.request("GET", "user", undefined, path)).toMatchObject({ status: 503, body: { enabled: false } });
+    vi.spyOn(h.store, "setOperatorScenarioPreapprovalEnabled").mockRejectedValue(new Error("private"));
+    expect(await h.request("PUT", "admin", { enabled: false }, path)).toMatchObject({ status: 503, body: { enabled: false } });
   });
 });

@@ -1004,8 +1004,11 @@ import { callEnvironment } from "./callRecord";
  * clinical. Refused prescriptions no longer count as records requests.
  * On top of v146 (#407, main), which contains v145 and v144; v148 is #384, v149 is #391 and v150 is #376 on their open branches. No migration; production impact remains unmeasured.
  */
+/** v151: staff-controlled operator scenario pre-approval, default OFF, with
+ * approval audit and opt-out checks. Above main v148; v149/v150 are claimed.
+ * Apply add_operator_scenario_preapproval.sql separately; not applied here. */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v148-identity-gate-20261029";
+  "voice-runtime-v151-operator-scenario-preapproval-20261029";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

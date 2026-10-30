@@ -96,6 +96,117 @@ async function boot() {
   return { clock, store, outbound, sessions, env, sender, bot, staff, other, request, approved };
 }
 
+describe("operator scenario pre-approval", () => {
+  it("keeps valid scenarios pending while the toggle is OFF", async () => {
+    const h = await boot();
+    expect(await h.store.getOperatorScenarioPreapprovalEnabled()).toBe(false);
+    const prepared = await h.request("/prepare_operator_call", { phone: PHONE, scenario_id: "A1" });
+    expect(prepared).toMatchObject({ status: 201, body: { status: "pending_approval", approval: { status: "pending" } } });
+    expect(prepared.body.confirmToken).toBeUndefined();
+    expect(await h.store.getApproval(prepared.body.approval.id)).toMatchObject({ approvedBy: null, approvedAt: null, approvalMetadata: null });
+    expect((await h.request("/commit_call_live", {})).status).toBe(400);
+    expect(h.sender.createCall).not.toHaveBeenCalled();
+  });
+
+  it.each(Array.from({ length: 10 }, (_, index) => `A${index + 1}`))("pre-approves %s with audit and permits one bot commit when ON", async (scenario_id) => {
+    const h = await boot();
+    await h.store.setOperatorScenarioPreapprovalEnabled(true, "staff-id");
+    h.clock.at = new Date("2026-11-01T08:00:00Z"); // Outside patient dialing hours.
+    h.env.OUTBOUND_DAILY_CAP = "0";
+    const prepared = await h.request("/prepare_operator_call", { phone: PHONE, scenario_id });
+    expect(prepared).toMatchObject({ status: 201, body: { status: "approved", approval: {
+      status: "approved", approvedBy: "scenario_preapproval", approvalMetadata: { scenario_id },
+    } } });
+    const id = prepared.body.approval.id;
+    expect(await h.store.getApproval(id)).toMatchObject({
+      approvedBy: "scenario_preapproval", approvedAt: h.clock.at, approvalMetadata: { scenario_id },
+      payload: { callKind: "operator", scenario_id, initiated_by: "bot_initiative" },
+    });
+    expect(h.bot.scopes).not.toContain("contacts:approve");
+    expect((await h.request(`/approvals/${id}/approve`, {}, h.bot)).status).toBe(403);
+    const confirmToken = prepared.body.confirmToken;
+    const result = await h.request("/commit_call_live", { confirmToken });
+    expect(result).toMatchObject({ status: 200, body: { status: "live" } });
+    expect(h.sessions.get(result.body.sessionId)?.operatorCall?.scenario_id).toBe(scenario_id);
+    expect(await h.store.getApproval(id)).toMatchObject({ status: "committed", approvedBy: "scenario_preapproval", approvalMetadata: { scenario_id } });
+    expect((await h.request("/commit_call_live", { confirmToken })).status).toBe(409);
+    expect(h.sender.createCall).toHaveBeenCalledOnce();
+    const audit = JSON.stringify(await h.store.listAudit());
+    for (const secret of [PHONE, confirmToken, h.bot.plaintext]) expect(audit).not.toContain(secret);
+  });
+
+  it("keeps free-text and patient/SI approvals pending when ON", async () => {
+    const h = await boot();
+    await h.store.setOperatorScenarioPreapprovalEnabled(true, "staff-id");
+    const freeText = await h.request("/prepare_operator_call", INPUT);
+    expect(freeText).toMatchObject({ status: 201, body: { status: "pending_approval" } });
+    expect(freeText.body.confirmToken).toBeUndefined();
+    const patientBot = h.store.mint(["contacts:prepare", "contacts:commit"]);
+    const patient = await h.request("/prepare_call", { phone: PHONE, dateOfBirth: "1950-03-17", purpose: "Synthetic test", scenario_id: "A1" }, patientBot);
+    expect(patient).toMatchObject({ status: 201, body: { status: "pending_approval", approval: { status: "pending" } } });
+    expect(await h.store.getApproval(patient.body.approval.id)).toMatchObject({ approvedBy: null, approvalMetadata: null });
+    expect(h.sender.createCall).not.toHaveBeenCalled();
+  });
+
+  it.each(["A0", "A11", "a1", "", 1])("rejects invalid scenario %s when ON", async (scenario_id) => {
+    const h = await boot();
+    await h.store.setOperatorScenarioPreapprovalEnabled(true, "staff-id");
+    expect((await h.request("/prepare_operator_call", { phone: PHONE, scenario_id })).status).toBe(400);
+    expect(await h.store.listApprovals()).toEqual([]);
+  });
+
+  it("treats a settings read failure as OFF during prepare", async () => {
+    const h = await boot();
+    await h.store.setOperatorScenarioPreapprovalEnabled(true, "staff-id");
+    vi.spyOn(h.store, "getOperatorScenarioPreapprovalEnabled").mockRejectedValue(new Error("private"));
+    const prepared = await h.request("/prepare_operator_call", { phone: PHONE, scenario_id: "A1" });
+    expect(prepared).toMatchObject({ status: 201, body: { status: "pending_approval" } });
+    expect(prepared.body.confirmToken).toBeUndefined();
+    expect(await h.store.getApproval(prepared.body.approval.id)).toMatchObject({ approvedBy: null, approvalMetadata: null });
+  });
+
+  it.each(["off", "unreadable"])("blocks an automatic commit when the setting becomes %s", async (mode) => {
+    const h = await boot();
+    await h.store.setOperatorScenarioPreapprovalEnabled(true, "staff-id");
+    const prepared = await h.request("/prepare_operator_call", { phone: PHONE, scenario_id: "A1" });
+    if (mode === "off") await h.store.setOperatorScenarioPreapprovalEnabled(false, "staff-id");
+    else vi.spyOn(h.store, "getOperatorScenarioPreapprovalEnabled").mockRejectedValue(new Error("private"));
+    expect((await h.request("/commit_call_live", { confirmToken: prepared.body.confirmToken })).status).toBe(503);
+    expect((await h.store.getApproval(prepared.body.approval.id))?.confirmUsedAt).toBeNull();
+    expect(h.sender.createCall).not.toHaveBeenCalled();
+  });
+
+  it("rechecks pre-approval immediately before dialing", async () => {
+    const h = await boot();
+    await h.store.setOperatorScenarioPreapprovalEnabled(true, "staff-id");
+    const prepared = await h.request("/prepare_operator_call", { phone: PHONE, scenario_id: "A1" });
+    const persist = h.store.saveOperatorCall.bind(h.store);
+    vi.spyOn(h.store, "saveOperatorCall").mockImplementation(async (record) => {
+      await persist(record);
+      await h.store.setOperatorScenarioPreapprovalEnabled(false, "staff-id");
+    });
+    expect((await h.request("/commit_call_live", { confirmToken: prepared.body.confirmToken })).body).toMatchObject({
+      error: "Call was not placed: operator_scenario_preapproval_disabled", outcome: "not_sent",
+    });
+    expect(h.sender.createCall).not.toHaveBeenCalled();
+  });
+
+  it.each(["voice", "sms", "operator", "international"])("honors %s opt-outs at prepare and after pre-approval", async (kind) => {
+    const h = await boot();
+    await h.store.setOperatorScenarioPreapprovalEnabled(true, "staff-id");
+    const phone = kind === "international" ? "+442079460123" : PHONE;
+    const input = { phone, scenario_id: "A1" };
+    const prepared = await h.request("/prepare_operator_call", input);
+    if (kind === "voice") await h.outbound.stampDoNotContact(phone, "voice");
+    else if (kind === "sms") await h.store.setSmsOptOut(phone.slice(-10), true);
+    else await h.store.setOperatorOptOut(phone);
+    expect(await h.request("/prepare_operator_call", input)).toMatchObject({ status: 409, body: { outcome: "not_sent" } });
+    expect(await h.store.listApprovals()).toHaveLength(1);
+    expect(await h.request("/commit_call_live", { confirmToken: prepared.body.confirmToken })).toMatchObject({ status: 409, body: { outcome: "not_sent" } });
+    expect(h.sender.createCall).not.toHaveBeenCalled();
+  });
+});
+
 describe("open Wayne operator line with provenance-based outbound approval", () => {
   it.each(["switch", "env", "storage"])("refuses preparation and previously approved outbound calls when disabled by %s", async (mode) => {
     const h = await boot();
@@ -431,8 +542,7 @@ describe("open Wayne operator line with provenance-based outbound approval", () 
     const outcome = await getTool(OPT_OUT_TOOL_NAME)!.handler({ outbound_phone: phone, outbound_campaign: OPERATOR_SLUG, outbound_contact_id: session.contactId });
     expect(outcome.success).toBe(true);
     expect(await h.store.isOperatorOptedOut(phone)).toBe(true);
-    const next = await h.approved({ ...INPUT, phone });
-    expect((await h.request("/commit_call_live", { confirmToken: next.confirmToken })).status).toBe(409);
+    expect((await h.request("/prepare_operator_call", { ...INPUT, phone })).status).toBe(409);
   });
 
   it.each([undefined, "", "+19092553213", "9092553213"])("fails prepare and commit safely for invalid/missing operator caller ID %j", async (from) => {
