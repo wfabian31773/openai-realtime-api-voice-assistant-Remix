@@ -44,36 +44,36 @@ beforeEach(() => {
 });
 
 describe('verifiedIdentity refuses to key on a sentinel', () => {
-  const WAYNE = { firstName: 'Wayne', lastName: 'Fabian', dateOfBirth: '1973-03-17' };
+  const SYNTHETIC = { certain: true, firstName: 'Alex', lastName: 'Synthetic', dateOfBirth: '1970-01-02' };
 
   it.each(SENTINELS)('does not remember an identity under %s', (sentinel) => {
-    rememberVerifiedIdentity(sentinel, WAYNE);
-    expect(verifiedDobFor(sentinel, 'Wayne', 'Fabian')).toBeUndefined();
+    rememberVerifiedIdentity(sentinel, SYNTHETIC);
+    expect(verifiedDobFor(sentinel, 'Alex', 'Synthetic')).toBeUndefined();
   });
 
   it('cannot hand one caller the date of birth of another with the same name', () => {
     // The father calls. His record is certain, and under the old truthiness
     // check this was stored under the key "unknown".
-    rememberVerifiedIdentity('unknown', WAYNE);
+    rememberVerifiedIdentity('unknown', SYNTHETIC);
 
     // The son calls later. Same name, same missing SID, different person and a
     // different date of birth — and nothing about the names distinguishes them.
-    expect(verifiedDobFor('unknown', 'Wayne', 'Fabian')).toBeUndefined();
+    expect(verifiedDobFor('unknown', 'Alex', 'Synthetic')).toBeUndefined();
   });
 
   it('still works normally for a real CallSid', () => {
-    rememberVerifiedIdentity(REAL_A, WAYNE);
-    expect(verifiedDobFor(REAL_A, 'Wayne', 'Fabian')).toBe('1973-03-17');
+    rememberVerifiedIdentity(REAL_A, SYNTHETIC);
+    expect(verifiedDobFor(REAL_A, 'Alex', 'Synthetic')).toBe('1970-01-02');
   });
 
   it('keeps each real call separate', () => {
-    rememberVerifiedIdentity(REAL_A, WAYNE);
-    expect(verifiedDobFor(REAL_B, 'Wayne', 'Fabian')).toBeUndefined();
+    rememberVerifiedIdentity(REAL_A, SYNTHETIC);
+    expect(verifiedDobFor(REAL_B, 'Alex', 'Synthetic')).toBeUndefined();
   });
 
   it('rejects a uuid, which is what the old metadata fallback produced', () => {
-    rememberVerifiedIdentity('3f2a9c1e-7b44-4d51-9e02-6c8f1a2b3d4e', WAYNE);
-    expect(verifiedDobFor('3f2a9c1e-7b44-4d51-9e02-6c8f1a2b3d4e', 'Wayne', 'Fabian')).toBeUndefined();
+    rememberVerifiedIdentity('3f2a9c1e-7b44-4d51-9e02-6c8f1a2b3d4e', SYNTHETIC);
+    expect(verifiedDobFor('3f2a9c1e-7b44-4d51-9e02-6c8f1a2b3d4e', 'Alex', 'Synthetic')).toBeUndefined();
   });
 });
 

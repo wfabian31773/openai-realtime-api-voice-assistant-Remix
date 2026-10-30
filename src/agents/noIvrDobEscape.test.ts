@@ -107,6 +107,7 @@ const request = (date_of_birth: string) => ({
   first_name: 'Test',
   last_name: 'Caller',
   date_of_birth,
+  location: 'Synthetic Clinic',
   callback_number: '5551234567',
   request_category: 'general_question',
   request_summary: 'Wants to know whether the drops were called in to the pharmacy.',

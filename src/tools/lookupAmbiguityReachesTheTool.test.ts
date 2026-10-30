@@ -18,6 +18,7 @@ process.env.DATABASE_URL ||= 'postgresql://unused:unused@127.0.0.1:5432/unused';
 
 import { runTool } from './registry';
 import './sharedPatientTools';
+import { resetVerifiedIdentities, identityStoreProbe, verifiedDobFor } from './verifiedIdentity';
 
 const { lookupSpy } = vi.hoisted(() => ({ lookupSpy: vi.fn() }));
 vi.mock('../services/scheduleLookupService', () => ({
@@ -43,6 +44,7 @@ const EMPTY = {
  */
 beforeEach(() => {
   lookupSpy.mockReset();
+  resetVerifiedIdentities();
 });
 
 describe('an ambiguous person-base hit, as the MODEL receives it', () => {
@@ -147,7 +149,7 @@ describe('the phone retry may NOT overwrite an explicit ambiguity', () => {
     })) as Record<string, unknown>;
 
     expect(out.found).toBe(true);
-    expect(out.identity_is_certain).toBe(true);
+    expect(out.identity_is_certain).toBe(false);
   });
 });
 
@@ -172,7 +174,7 @@ describe('caller ID says who OWNS the number, not who is calling', () => {
     patientData: { firstName: 'Testcaller', lastName: 'Mirror', dateOfBirth: '1950-01-01' },
   };
 
-  it('a PERSON BASE phone hit is NOT certain, and still returns the record', async () => {
+  it('a PERSON BASE phone hit is NOT certain, and withholds visit history', async () => {
     /**
      * Codex P1 on PR #292, and the most serious finding of the review. This PR
      * made `matchedBy: 'phone'` mean two different claims — the schedule's own
@@ -197,26 +199,21 @@ describe('caller ID says who OWNS the number, not who is calling', () => {
     expect(out.found).toBe(true);
     expect(out.identity_is_certain, 'caller ID alone never confirms who is speaking').toBe(false);
     expect(String(out.identity_warning)).toMatch(/nobody has confirmed the CALLER is that person/);
-    // NOT a withholding: the record is the point of the join. What changes is
-    // that the agent must confirm before using it.
-    expect(out.usual_office).toBe('Covina');
-    expect(out.total_appointments).toBe(4);
+    // Keep candidate history out of the model until identity is validated.
+    expect(out.usual_office).toBeNull();
+    expect(out.last_visit).toBeNull();
+    expect(out.total_appointments).toBe(0);
     // And the ambiguity wording must not leak in — this hit is unique.
     expect(String(out.identity_warning)).not.toMatch(/different people on file/);
   });
 
-  it('DOES cache the chart date from a unique caller-ID-only hit — the name guard is the confirmation', async () => {
+  it('caches a candidate chart date internally but never exposes it for filing', async () => {
     /**
      * v26. The strip at the person-base write was Bug A: it erased a date
      * v11 had already stored, then `verifiedDobFor` had nothing to inherit.
      * A unique hit that returned a date stores that date. `certain` stays
-     * false. Filing still requires the ticket name to match.
-     *
-     * Do not "fix" this back to undefined. That is the wipe.
+     * false. The identity gate now also requires certainty when reading it.
      */
-    const { resetVerifiedIdentities, verifiedDobFor } = await import('./verifiedIdentity');
-    resetVerifiedIdentities();
-
     lookupSpy.mockResolvedValue({
       ...RECORD, matchedBy: 'phone', identityUnconfirmed: true,
     } as never);
@@ -225,10 +222,8 @@ describe('caller ID says who OWNS the number, not who is calling', () => {
       queue: 'optical', call_sid: SID, caller_phone: '555-555-0147',
     });
 
-    expect(
-      verifiedDobFor(SID, 'Testcaller', 'Mirror'),
-      'a unique person-base hit that held a date must leave it for inherit',
-    ).toBe('1950-01-01');
+    expect(identityStoreProbe(SID)).toMatchObject({ entryHasDob: true, entryCertain: false });
+    expect(verifiedDobFor(SID, 'Testcaller', 'Mirror')).toBeUndefined();
   });
 
   it('DOES cache the date of birth when the caller confirmed who they are', async () => {
@@ -264,17 +259,13 @@ describe('caller ID says who OWNS the number, not who is calling', () => {
     expect(out.identity_warning).toBeUndefined();
   });
 
-  it('the SCHEDULE phone rung is untouched and stays certain', async () => {
-    // Pre-existing behaviour on every lane, deliberately NOT changed here: that
-    // rung matches a number written on this person's own appointment record,
-    // and altering it is a ticket-path change needing its own before/after
-    // measurement under docs/BACKEND_HANDOFF.md.
+  it('the SCHEDULE phone rung also needs caller validation', async () => {
     lookupSpy.mockResolvedValue({ ...RECORD, matchedBy: 'phone' } as never);
 
     const out = (await runTool('lookup_patient', {
       queue: 'optical', call_sid: SID, caller_phone: '555-555-0147',
     })) as Record<string, unknown>;
 
-    expect(out.identity_is_certain).toBe(true);
+    expect(out.identity_is_certain).toBe(false);
   });
 });

@@ -881,6 +881,8 @@ import { callEnvironment } from "./callRecord";
  * BY office, so it gets its own marker. On top of v115 (#367), which it
  * contains. `src/tools/opticalTools.ts`, `opticalOfficeFromRecord.test.ts`.
  */
+// Records-intent review fixes preserve interpretation, document refusals,
+// inline corrections, documentation and unknown-result handling.
 /**
  * v117 — CONTACT CAPTURE (#14, 2026-10-27). Surnames are spelled when needed;
  * new email addresses are read back and confirmed in full. Provider names use
@@ -951,7 +953,28 @@ import { callEnvironment } from "./callRecord";
 /**
  * v136 (renumbered from v126) — PCP UNCLASSIFIED IS FLOOR ONLY (2026-10-28). The PCP agent cannot
  * choose unclassified_call in its intake tool; the after-hangup floor still
- * files unclassified calls for a person to route. On top of v135 (#392, main, 6ae60e33); v127 is #376 and v133 is #391 on their open branches. No migration; production impact remains unmeasured.
+ * files unclassified calls for a person to route. Merged to main as #393
+ * (9bfccda), on top of v135 (#392, 6ae60e33); this is #384's base.
+ * No migration; production impact remains unmeasured.
+ */
+/**
+ * v148 (renumbered from v146, earlier v139; above main's v146) — IDENTITY GATE (#384, 2026-10-29). Verified identity is carried
+ * through ticket filing and teardown/sweep recovery. The shared ticket client
+ * filters Optical's carried appointments and history-derived routing text/IDs,
+ * preserving caller-named offices across hydration, redirects and retries.
+ * Simplified submissions with no department
+ * use the same clinic-safe copy because the receiver can derive Optical;
+ * explicit non-Optical filings and the held identity retain their history.
+ * Answering-service DOB confirmation checks the current schedule patient,
+ * never the original phone ledger. Answering-service and no-IVR cached schedule
+ * reuse checks the patient against the held identity before reading or filing.
+ * Shared lookup reuse retains the complete appointment-read view and its
+ * available/partial/unavailable status, identity-checking the call-scoped
+ * schedule cache or reading the held PersonID when that cache is absent.
+ * The v135 phone-candidate DOB confirmation remains supported.
+ * Surgery files without a clinic when none is known. On top of v136 (#393, main,
+ * 9bfccda); v137 is #391 and v138 is #376 on their open branches.
+ * No migration; production impact is unmeasured.
  */
 /**
  * v142 — A GIVEN NAME REACHES THE SWEEP (2026-10-29). The teardown sweep files
@@ -979,26 +1002,33 @@ import { callEnvironment } from "./callRecord";
  * opt-outs, durable idempotency and operator-origin commits. No new migration.
  * Merged to main as #407 (04e1e80). */
 /**
- * v148 — THE TEST CALL'S OFFICE AND NAME (2026-10-29). Three defects from the
- * operator's pack-01 A1 test call: no queue prompt quotes a sample office any
- * more (the optical agent offered one when no record was found), an office
- * `resolve_location` verified on the call reaches `file_optical_ticket` when
- * the model leaves `location` out (verifiedOffice.ts), and the ask script asks
- * for the first and last name, RULE ZERO 2b's own wording. On top of v146
- * (#407, main, 04e1e80), which contains v145 (#405) and v144 (#402). No migration;
+ * v147 — RECORDS QUESTION GUARD (2026-10-29). Records access and status
+ * explanations stay in Medical Records; results-meaning questions stay
+ * clinical. Refused prescriptions no longer count as records requests.
+ * On top of v146 (#407). Merged to main as #381 (d153a3d). No migration;
  * production impact remains unmeasured.
  */
 /**
- * v149 — A LATER FILING ADDS TO THE TICKET (2026-10-29). Stacked on v148 in
- * one PR; only v149 reaches a deployment. A filing on a call that has already
- * filed used to be answered from the call's outbox row and sent nowhere; it is
- * now sent on with the call's own key so the ticketing app adds its details
- * to the ticket (ticketing-app #414), and the tool tells the model what
- * happened instead of "read the ticket number back" a second time. No
- * migration; production impact remains unmeasured.
+ * v148 — IDENTITY GATE (#384, merged to main as 117c2d5). Verified identity
+ * carried through ticket filing and teardown/sweep recovery.
+ */
+/**
+ * v151 — THE SILENCE, A LATER FILING, AND THE A1 OFFICE AND NAME (2026-10-30).
+ * One marker for what was written as a v148 + v149 + v150 stack on #404: #384
+ * took v148 on main and #391 / #376 hold v149 / v150 on open branches.
+ * (a) When a heard caller is silent after an agent line that asked nothing,
+ * the bridge asks the AGENT for a turn, at most AGENT_STALL_NUDGE_LIMIT times
+ * in a row; the lookup's miss lines carry the next step; PCP has no
+ * free-standing holding line. (b) A filing on a call that has already filed
+ * is sent on with the call's own key so the ticketing app adds its details
+ * (ticketing-app #414). (c) No queue prompt names a sample office and the
+ * ask script asks for the first and last name. The office carry this branch
+ * also wrote is #384's confirmed clinic on main and was dropped in the merge.
+ * Above main's v148 (#384, 117c2d5). No migration; production impact
+ * remains unmeasured.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v150-a-stalled-agent-carries-on-20261030";
+  "voice-runtime-v151-a-stalled-agent-carries-on-20261030";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

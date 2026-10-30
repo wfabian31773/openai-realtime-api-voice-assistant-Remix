@@ -82,6 +82,7 @@ const refill = (summary: string, over: Record<string, unknown> = {}) => ({
   first_name: 'Ana',
   last_name: 'Example',
   date_of_birth: '01/04/1958',
+  location: 'Synthetic Clinic', // Complete live intake before testing this lane.
   callback_number: '5551234567',
   request_category: 'medication_refill',
   request_summary: summary,

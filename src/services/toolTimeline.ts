@@ -299,7 +299,7 @@ function summarizeResult(tool: string, resultJson: string): Record<string, unkno
     // `form_applies: false`, so "how often is a routed-away caller offered a
     // link" is a count, not a transcript scan. A boolean, no PHI.
     'form_applies',
-    // v149: a filing on a call that had already filed (`already_filed`) and
+    // v151: a filing on a call that had already filed (`already_filed`) and
     // whether its details reached the ticket (`details_added`). Two booleans,
     // no PHI. The A1 test call's second filing was invisible in the timeline
     // but for its 101 ms; with these, how often a later filing adds something
@@ -397,13 +397,13 @@ function summarizeResult(tool: string, resultJson: string): Record<string, unkno
    * `dobShape` on args already answers "did the model send it?". This
    * answers the next question: if it did not, and the gate still fired,
    * was there an entry, did it hold a date, and did the name guard reject
-   * it? The five arms are the diagnosis in PR #307. A string that is not
-   * one of those five is dropped rather than stored — the allow-list is
+   * it, or was the candidate uncertain? A string outside the enum is
+   * dropped rather than stored — the allow-list is
    * the safety mechanism, same as every other outcome key.
    */
   if (
     typeof parsed?.carry === 'string'
-    && ['fired', 'no_entry', 'entry_without_dob', 'name_mismatch', 'bad_call_sid'].includes(parsed.carry)
+    && ['fired', 'no_entry', 'entry_without_dob', 'uncertain_identity', 'name_mismatch', 'bad_call_sid'].includes(parsed.carry)
   ) {
     out.carry = parsed.carry;
   }

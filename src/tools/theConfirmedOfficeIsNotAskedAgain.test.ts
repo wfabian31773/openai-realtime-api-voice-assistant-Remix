@@ -1,6 +1,11 @@
 /**
- * AN OFFICE `resolve_location` VERIFIED ON THE CALL REACHES THE FILING TOOL
- * (v148, `verifiedOffice.ts`).
+ * AN OFFICE `resolve_location` VERIFIED ON THE CALL REACHES THE FILING TOOL.
+ *
+ * Written for this branch's own office store (`verifiedOffice.ts`); #384
+ * shipped the same fix on `main` as `rememberConfirmedClinic` /
+ * `confirmedClinicFor` in `verifiedIdentity.ts`, read by
+ * `prepareTicketIdentity`. The store here was dropped in the merge so one
+ * fact has one store, and this corpus now runs against #384's.
  *
  * Found on the operator's pack-01 A1 test call, 2026-10-29
  * (`CAe121c3c176d626e8a679536788e58d63`, optical): the caller named Covina,
@@ -15,8 +20,8 @@
  * `resolve_location` on the same call had answered `verified: true`. 27 calls,
  * 37 such refusals. All 27 filed in the end (the gate asks once, then files),
  * so no request was lost; what each one cost was a caller asked a question
- * they had just answered. Under v148 none of those 37 refusals is reachable:
- * the verified office fills the field the model left out.
+ * they had just answered. With the confirmed office carried, none of those 37
+ * refusals is reachable: it fills the field the model left out.
  *
  * Synthetic patient throughout. The SIDs are the real calls; no transcript,
  * name, date of birth or number from them is in this file.
@@ -36,12 +41,12 @@ import { runTool } from './registry';
 import './sharedPatientTools';
 import './opticalTools';
 import { resetGateAttempts } from './gateAttempts';
-import { rememberVerifiedIdentity, resetVerifiedIdentities } from './verifiedIdentity';
 import {
-  rememberVerifiedOffice,
-  resetVerifiedOffices,
-  verifiedOfficeFor,
-} from './verifiedOffice';
+  confirmedClinicFor,
+  rememberConfirmedClinic,
+  rememberVerifiedIdentity,
+  resetVerifiedIdentities,
+} from './verifiedIdentity';
 
 const A1 = 'CAe121c3c176d626e8a679536788e58d63';
 
@@ -119,7 +124,6 @@ beforeEach(() => {
   vi.restoreAllMocks();
   resetGateAttempts();
   resetVerifiedIdentities();
-  resetVerifiedOffices();
 });
 
 describe('the corpus: a verified office is not asked for again', () => {
@@ -128,8 +132,8 @@ describe('the corpus: a verified office is not asked for again', () => {
     const resolved = await verify(sid, CONFIRMED);
     expect(resolved.verified).toBe(true);
 
-    // ONE filing call, with no office in it. Before v148 this was the
-    // `location` refusal and the caller was asked again.
+    // ONE filing call, with no office in it. Before the confirmed office was
+    // carried this was the `location` refusal and the caller was asked again.
     const r = (await runTool('file_optical_ticket', filing(sid))) as Record<string, unknown>;
 
     expect(r.missingFields ?? []).not.toContain('location');
@@ -188,25 +192,15 @@ describe('the narrowness', () => {
 
   it('a sentinel CallSid carries nothing', async () => {
     await verify('unknown', CONFIRMED);
-    expect(verifiedOfficeFor('unknown')).toBeUndefined();
-    rememberVerifiedOffice('unknown', CONFIRMED);
-    expect(verifiedOfficeFor('unknown')).toBeUndefined();
+    expect(confirmedClinicFor('unknown')).toBeUndefined();
+    rememberConfirmedClinic('unknown', CONFIRMED);
+    expect(confirmedClinicFor('unknown')).toBeUndefined();
   });
 
-  it('an office the caller named that the directory could NOT verify is not carried', async () => {
-    // The bounded ask (RESOLVE_ASK_LIMIT) hands the caller's words back
-    // unverified on the third try. Those words are not a confirmed office.
-    const dir = await directory();
-    vi.spyOn(dir, 'isDirectoryConfigured').mockReturnValue(true);
-    vi.spyOn(dir, 'lookupLocation').mockResolvedValue(null as never);
-    const args = { spoken_location: 'Somewhere Else', queue: 'optical', call_sid: A1 };
-    await runTool('resolve_location', args);
-    await runTool('resolve_location', args);
-    const third = (await runTool('resolve_location', args)) as Record<string, unknown>;
-
-    expect(third.verified).toBe(false);
-    expect(verifiedOfficeFor(A1)).toBeUndefined();
-  });
+  // NOT ASSERTED HERE: an office the directory could not verify. This
+  // branch's store kept only verified offices; #384's keeps the caller's own
+  // words on the spent-ask passthrough too, and filing still resolves them
+  // through the ticketing API. Main's rule stands.
 
   it('an office of the wrong kind for the queue is not carried', async () => {
     const dir = await directory();
@@ -220,6 +214,6 @@ describe('the narrowness', () => {
       spoken_location: 'Loma Linda Surgery Center', queue: 'optical', call_sid: A1,
     });
 
-    expect(verifiedOfficeFor(A1)).toBeUndefined();
+    expect(confirmedClinicFor(A1)).toBeUndefined();
   });
 });

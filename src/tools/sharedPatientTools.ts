@@ -1,3 +1,4 @@
+import { joinedAppointments, scheduleMatchesIdentity, validatedPatientFor } from './ticketIdentity';
 /**
  * The tools every queue needs: who is calling, which office, have they asked
  * already.
@@ -31,29 +32,14 @@
 import { registerTool, missing, type MissingFields, type ToolResult } from './registry';
 import { LAST_NAME_ASK, LAST_NAME_FIELD_DESCRIPTION } from './contactCaptureGuidance';
 import { gateRefusalsSoFar, noteGateRefusal, noteCallFact, callFactNoted } from './gateAttempts';
-import { forgetIfSameName, nameKey, rememberVerifiedIdentity, verifiedIdentityFor } from './verifiedIdentity';
+import { forgetIfSameName, nameKey, rememberConfirmedClinic, rememberVerifiedIdentity, verifiedAppointmentContextFor, verifiedIdentityFor } from './verifiedIdentity';
 import { LOOKUP_CARRY_ON_SAY, LOOKUP_REASK_FIX, LOOKUP_REASK_SAY, lookupSpentFix, spokenFirstNameAgreesWithChart } from './lookupUnsure';
 import { appointmentAccess } from '../services/appointmentAccess';
+import { readPatientAppointments } from './patientAppointments';
 import { noteStatusOverride, patientStatusFor } from './spokenPatientStatus';
-import { rememberVerifiedOffice } from './verifiedOffice';
-import './patientAppointments';
 
-/** Which queue is asking. Injected as call context, never a model argument. */
-export type ToolQueue = 'optical' | 'surgery';
-
-/** What kind of place this queue can actually action a request at. */
-function acceptsFacility(queue: ToolQueue | undefined, kind: string | null | undefined): boolean {
-  // Unknown facility kinds are accepted everywhere. The Console mirror is
-  // incomplete, and a location we have not classified is far more likely to be
-  // a real office than a wrong one — `file_*_ticket` resolves it against the
-  // ticketing app before anything is filed, which is the gate that matters.
-  if (kind == null) return true;
-  if (queue === 'optical') return kind === 'clinic';
-  // Surgery coordinates AT surgery centres, and its patients are seen in
-  // clinics for consults, measurements and post-op. Both are correct.
-  if (queue === 'surgery') return kind === 'clinic' || kind === 'surgery_center';
-  return true;
-}
+import { acceptsFacility, mostRecentAcceptable, type ToolQueue } from './acceptableLocation';
+export { mostRecentAcceptable, type ToolQueue } from './acceptableLocation';
 
 function facilityWord(queue: ToolQueue | undefined): string {
   return queue === 'optical' ? 'optical office' : queue === 'surgery' ? 'office' : 'office';
@@ -156,6 +142,7 @@ registerTool({
        * question narrows what arrives, which is the cheaper half and the one
        * that was there before and got lost.
        */
+      identity_corrected: { type: 'boolean', askAs: 'Are you correcting whose request this is?', description: 'True only when the caller explicitly corrects the previously validated identity.' },
       phone: { type: 'string', description: 'Any format. The number they are calling from is usually best.', askAs: 'What is the best phone number for you?' },
       first_name: { type: 'string', description: "Patient's first name as they said it.", askAs: 'And may I please have your first name?' },
       last_name: { type: 'string', description: LAST_NAME_FIELD_DESCRIPTION, askAs: LAST_NAME_ASK },
@@ -234,6 +221,32 @@ registerTool({
     const first = str(input.first_name);
     const last = str(input.last_name);
     const dob = str(input.date_of_birth);
+    const held = verifiedIdentityFor(str(input.call_sid));
+    if (input.identity_corrected === true && held) {
+      forgetIfSameName(str(input.call_sid), held.firstName, held.lastName);
+    } else {
+      const locked = validatedPatientFor(str(input.call_sid), first, last, dob);
+      if (locked) {
+        // joinedAppointments is a reduced ticket-routing record. Reuse the
+        // complete read (times, all bookings and partial/unavailable status)
+        // only after both the input and cached patient match this identity.
+        const cached = verifiedAppointmentContextFor(locked.callSid);
+        const appointments = scheduleMatchesIdentity(cached, locked)
+          ? appointmentAccess(cached, true)
+          : await readPatientAppointments(locked.callSid, {}, deadlineAt);
+        if (appointments.appointment_access === 'identity_required') return {
+          ...appointments, success: true, found: false, identity_is_certain: false,
+        };
+        return {
+          ...appointments,
+          success: true, found: true, identity_is_certain: true, matched_by: 'name_and_dob',
+          patient_name: `${locked.firstName} ${locked.lastName}`, usual_office: held?.usualOffice ?? null,
+          usual_clinic: held?.usualOffice ?? null, last_visit: locked.lastVisit?.date ?? null,
+          last_provider: locked.lastVisit?.provider ?? null, next_appointment: locked.nextAppointment ?? null,
+        };
+      }
+    }
+
 
     /**
      * RULE ZERO 2a — A CALLER WHO SAID THEY ARE NEW IS NOT LOOKED UP.
@@ -558,100 +571,14 @@ registerTool({
     // be confirmed and the history must not be read back.
     const uniqueMatch = resolved.identity?.unique !== false;
 
-    /**
-     * A NAME-ONLY HIT IS NOT AN IDENTITY, AND THE TOOL SAYS SO NOW.
-     *
-     * `identity_is_certain` used to mean only "the match was unique". But
-     * `lookupPatient` falls back from name+DOB to the PHONE NUMBER and then to
-     * the NAME ALONE, and a lone Smith on file is unique — so a name-only hit
-     * on a common surname came back `found: true, identity_is_certain: true`,
-     * and it is somebody else's chart.
-     *
-     * Nothing stopped that except six lines of prompt telling the model to
-     * distrust this very field:
-     *
-     *   "THEN CHECK matched_by BEFORE YOU BELIEVE IT ... If matched_by is not
-     *    name_and_dob, treat it as NOT FOUND: say nothing about their
-     *    appointments, read no history back"
-     *
-     * A safety rule that holds only while the model obeys an instruction is
-     * not a safety rule. The check belongs here, where it cannot be talked
-     * out of, and the prompt lines it replaces are deleted (task #25 — the
-     * queue prompts carry workarounds written for a model that needed them).
-     *
-     * `phone` from the SCHEDULE stays certain: it is the one field nobody
-     * mis-transcribed, and that rung only matches a number written on this
-     * person's own appointment record.
-     *
-     * `phone` FROM THE PERSON BASE DOES NOT, and that distinction is new.
-     * Codex P1 on PR #292. This PR made `matchedBy: 'phone'` mean two
-     * different claims: the schedule rung above, and a caller-ID hit in a
-     * 915,843-row person base. The second one establishes only who OWNS the
-     * number — a family member on the household phone, a reassigned number
-     * and a spoofed caller ID all look identical to it — and the PersonID
-     * join now hands that answer a full visit history, office and provider.
-     * The queue prompts ask for name and date of birth only when this flag is
-     * false, so leaving it true is a PHI disclosure gated on nothing.
-     *
-     * It also contradicts Rule Zero, written the same day: MATCH, then
-     * VALIDATE — "a phone number is a candidate to CONFIRM, never an
-     * identity". The service says which kind it is via `identityUnconfirmed`.
-     *
-     * THE LESSON, since it is one CLAUDE.md already names: a change that
-     * widens what a value MEANS invalidates the sentence that justified how
-     * it was treated. I widened `matchedBy: 'phone'` and left the comment
-     * above it standing.
-     *
-     * THE DATE STILL GOES INTO THE MAP. v11 already wrote the chart date
-     * from pre-context; stripping it here was Bug A (24 calls on 2026-09-14)
-     * — an empty person-base write overwrote a full one. The name guard on
-     * `verifiedDobFor` IS the confirmation (a caller who says "no, that's my
-     * father" is not filed under that name). We do not invent a date, and we
-     * do not promote `certain: false` to `true`.
-     */
-    const certain =
-      uniqueMatch &&
-      resolved.matchedBy !== 'name' &&
-      resolved.matchedBy !== 'dob' &&
-      !resolved.identityUnconfirmed;
+    // A phone hit, whether from appointments or the person base, is only a
+    // candidate. A unique name-and-DOB validation establishes the identity.
+    const certain = resolved.identity?.unique === true &&
+      resolved.matchedBy === 'name_and_dob' && !resolved.identityUnconfirmed;
 
-    /**
-     * PASS THE RECORD ALONG — operator instruction, 2026-09-01.
-     *
-     * The service has already returned this patient's date of birth in
-     * `patientData`, and nothing carried it the twenty lines to the filing
-     * tool. So the agent asked for a date of birth the process was holding,
-     * and when the caller could not give it the request was lost: 45 calls
-     * refused for a date of birth in fourteen days, 23 of them for a patient
-     * this tool had already identified.
-     *
-     * A unique match is remembered, including an unconfirmed caller-ID hit.
-     * It is only ever read back for the same name — see verifiedIdentity.ts.
-     * `certain` stays false until something else confirms; the name guard
-     * is what lets a filing tool inherit the chart date.
-     */
-    /**
-     * DELIBERATELY `uniqueMatch`, NOT `certain` — do not "tidy" this to the
-     * stricter flag above.
-     *
-     * This carry-forward is the operator's 2026-09-01 fix: it recovered 45
-     * calls in a fortnight that were refused for a date of birth the process
-     * was already holding, 23 of them for a patient this tool had identified.
-     * Narrowing it to `certain` would drop every phone-matched caller back
-     * into that gate and undo the fix.
-     *
-     * It stays safe on its own terms: `verifiedDobFor` only ever reads a
-     * remembered date back for the SAME NAME, so a unique phone match carries
-     * that person's date of birth and nobody else's.
-     *
-     * The remaining hazard is a unique NAME-ONLY match banking a date of birth
-     * for a caller who is not on file. It is pre-existing, it is invisible in
-     * the data today — `matched_by` was never recorded on the timeline, so
-     * 2,819 lookups in fourteen days say nothing about how often this happens
-     * — and BACKEND_HANDOFF forbids changing the ticket path on a number
-     * nobody can measure. That is why `matched_by` joins the recorded outcome
-     * below rather than being fixed blind here.
-     */
+    // Carry the joined record by CallSid. Candidate facts may be remembered,
+    // but neither DOB nor identity readers expose them until certainty is true.
+    // Matching a caller-stated name alone does not validate a phone candidate.
     /**
      * WHAT THE WRITE DID, carried onto this tool's own recorded outcome.
      *
@@ -674,7 +601,7 @@ registerTool({
          * phone rung). That write then replaced the v11 pre-context entry
          * and erased a date the process already held — Bug A.
          *
-         * The name guard on `verifiedDobFor` is the confirmation. Storing a
+         * The certainty AND name guards on `verifiedDobFor` protect filing. Storing a
          * date the unique hit actually returned is not inventing one. We
          * still do not set `certain: true` here. A non-unique match never
          * reaches this branch.
@@ -692,7 +619,10 @@ registerTool({
          * refusals. `null` when the history holds no office this queue can
          * use, which the store drops rather than writes.
          */
-        ...(usualOffice ? { usualOffice } : {}),
+        ...joinedAppointments(resolved),
+        appointmentContext: resolved,
+        // Joined history is unfiltered; keep the queue-filtered routing office.
+        ...(queue === 'optical' ? { usualOffice: usualOffice || undefined } : {}),
         // The same `certain` reported to the model as `identity_is_certain`.
         // It was computed twenty lines up and then dropped here, so a
         // name-only hit was stored as though it were a verified identity
@@ -734,7 +664,7 @@ registerTool({
     return {
       success: true,
       found: true,
-      patient_name: resolved.patientName,
+      patient_name: certain ? resolved.patientName : undefined,
       matched_by: resolved.matchedBy,
       identity_is_certain: certain,
       ...appointmentAccess(resolved, certain),
@@ -758,14 +688,14 @@ registerTool({
                 `confirm who they are.`,
           }),
       // The field this queue routes on.
-      usual_clinic: usualOffice,
-      usual_office: usualOffice,
+      usual_clinic: certain ? usualOffice : null,
+      usual_office: certain ? usualOffice : null,
       // Where they were seen last, whatever kind of place that is.
-      last_location_any_kind: resolved.lastLocationSeen ?? null,
-      last_provider: resolved.lastProviderSeen ?? null,
-      last_visit: resolved.lastVisitDate ?? null,
-      recent_locations: seen.slice(0, 4),
-      total_appointments: resolved.totalAppointmentsFound,
+      last_location_any_kind: certain ? resolved.lastLocationSeen ?? null : null,
+      last_provider: certain ? resolved.lastProviderSeen ?? null : null,
+      last_visit: certain ? resolved.lastVisitDate ?? null : null,
+      recent_locations: certain ? seen.slice(0, 4) : [],
+      total_appointments: certain ? resolved.totalAppointmentsFound : 0,
       ...(usualOffice
         ? {}
         : {
@@ -815,6 +745,9 @@ function officeAskSpent(callSid: string | undefined): boolean {
  * `resolved: false` is the tool saying plainly that it could not place this.
  */
 function unresolvedPassthrough(callSid: string | undefined, spoken: string): ToolResult {
+  // Keep the caller's answer even when it could not be mapped. This does not
+  // validate the office; filing still resolves it through the ticketing API.
+  rememberConfirmedClinic(callSid, spoken);
   /**
    * A LIVE COUNTER OF CALLS, AND IT HAS TO BE ONE PER CALL TO BE THAT.
    *
@@ -887,6 +820,7 @@ registerTool({
     const { lookupLocation, isDirectoryConfigured } = await import('../services/consoleDirectory');
     if (!isDirectoryConfigured()) {
       // No mirror: pass the cleaned string through rather than block a call.
+      rememberConfirmedClinic(callSid, cleaned.value);
       return { success: true, resolved: false, location: cleaned.value, verified: false };
     }
 
@@ -990,9 +924,7 @@ registerTool({
     // and brand-stripping alone yields "DTLA" — a name the receiver has never
     // heard of, which is how a resolved office still failed to file.
     const fileable = hit.fileAs || sanitizeLocationName(hit.canonical).value || hit.canonical;
-    // So the filing tool does not ask for an office the caller has just
-    // named and we have just verified — see `verifiedOffice.ts`.
-    rememberVerifiedOffice(callSid, fileable);
+    rememberConfirmedClinic(callSid, fileable);
 
     return {
       success: true,
@@ -1066,99 +998,3 @@ export { isTwilioCallSid } from './callSid';
 // does and why it lives there rather than here or in scheduleLookupService.
 export { normalizePhone } from '../utils/phone';
 
-/**
- * The first place in this list this queue can actually use.
- *
- * `locations` is already newest-first, so the first acceptable one is the most
- * recent. Returns null when nothing in the history fits — which is a real
- * answer, not a failure, and the agent should ask rather than assume.
- *
- * Falls back to the first entry when the Console mirror is unreachable: a best
- * guess beats blocking the call, and `resolve_location` will catch it before a
- * ticket is filed.
- */
-export async function mostRecentAcceptable(
-  locations: string[],
-  queue: ToolQueue | undefined,
-  deadlineAt?: number,
-): Promise<string | null> {
-  if (locations.length === 0) return null;
-
-  /**
-   * THE LAST UNBOUNDED AWAIT BEFORE THE TOOL ANSWERS.
-   *
-   * Codex P1 round 3 on PR #292. `lookupLocation` reads a cached snapshot, but
-   * a COLD OR STALE one triggers a refresh with a 5s connection timeout — and
-   * this is a LOOP, one lookup per past location. The 250ms margin covers
-   * building the result, not a database round trip, so `runTool`'s race can
-   * still fire here and discard an identity the join went to some trouble to
-   * preserve.
-   *
-   * MY CHANGE MADE THIS REACHABLE, which is why it belongs in this PR rather
-   * than in #68. Before the PersonID join a mirror-identified caller had NO
-   * past locations, so this returned `null` immediately; now they have several
-   * and the loop runs. The join created the population that pays this cost.
-   *
-   * Out of time falls back to `locations[0]` — the raw most-recent office —
-   * which is exactly what this function already does when the directory is
-   * unconfigured or a lookup throws. A known fallback, not a new behaviour:
-   * the office is unrefined, `resolve_location` is still the gate that
-   * matters, and the caller keeps their identity.
-   */
-  const remaining = deadlineAt === undefined ? Infinity : deadlineAt - Date.now();
-  if (remaining <= 0) return locations[0];
-
-  const refine = async (): Promise<string | null> => {
-    const { lookupLocation, isDirectoryConfigured } = await import('../services/consoleDirectory');
-    if (!isDirectoryConfigured()) return locations[0];
-
-    for (const name of locations) {
-      try {
-        const hit = await lookupLocation(name);
-        // An unknown location is more likely an office we have not mirrored
-        // than a wrong one, so it is not disqualified here — resolve_location
-        // is the gate that matters.
-        if (!hit || acceptsFacility(queue, hit.facilityKind)) return name;
-      } catch {
-        return locations[0];
-      }
-    }
-    return null;
-  };
-
-  if (remaining === Infinity) return refine();
-
-  /**
-   * CAPPED, not merely pre-checked. Checking the clock BEFORE each lookup
-   * bounds nothing: the stall happens INSIDE one call, so the check that
-   * matters has to be able to interrupt it. Same shape as the PersonID join —
-   * a race, because the catch below only ever covered rejections.
-   */
-  /**
-   * THE LOSING TIMER MUST BE CLEARED. Codex P2 on `ec45286`, and it is the kind
-   * of bug this repo has been burned by twice: an instrument that fires when
-   * nothing is wrong. Left dangling, the timer runs seconds AFTER the tool has
-   * already answered — on every ordinary call, including the cached-directory
-   * and unconfigured-directory paths — and logs "ran out of tool budget" for a
-   * lookup that did not. That line is meant to be a live counter of a real
-   * failure; firing it on success makes it count nothing. It also holds the
-   * closure alive until the deadline.
-   */
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  try {
-    return await Promise.race([
-      refine(),
-      new Promise<string | null>((resolve) => {
-        timer = setTimeout(() => {
-          console.warn(
-            '[TOOLS] lookup_patient: the office refinement ran out of tool budget — ' +
-              'using the most recent office unrefined',
-          );
-          resolve(locations[0]);
-        }, remaining);
-      }),
-    ]);
-  } finally {
-    if (timer) clearTimeout(timer);
-  }
-}

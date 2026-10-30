@@ -27,7 +27,7 @@ await import('./techTools');
 await import('./medicalRecordsTools');
 
 const CALL = 'CA00000000000000000000000000000001';
-const WAYNE = { firstName: 'Wayne', lastName: 'Fabian', dateOfBirth: '03/17/1973' };
+const WAYNE = { firstName: 'Wayne', lastName: 'Fabian', dateOfBirth: '03/17/1973', certain: true };
 
 beforeEach(async () => {
   resetVerifiedIdentities();
@@ -38,6 +38,12 @@ beforeEach(async () => {
 });
 
 describe('dobCarry names the same exits verifiedDobFor collapses', () => {
+  it('uncertain_identity — a phone candidate cannot carry its DOB', () => {
+    rememberVerifiedIdentity(CALL, { firstName: 'Alex', lastName: 'Synthetic', dateOfBirth: '1970-01-02', certain: false });
+    expect(verifiedDobFor(CALL, 'Alex', 'Synthetic')).toBeUndefined();
+    expect(dobCarry(CALL, 'Alex', 'Synthetic')).toBe('uncertain_identity');
+    expect(refuseDob(CALL, 'Alex', 'Synthetic', 'Confirm date of birth')).toMatchObject({ carry: 'uncertain_identity' });
+  });
   it('bad_call_sid — a sentinel is not a key', () => {
     rememberVerifiedIdentity(CALL, WAYNE);
     expect(dobCarry('unknown', 'Wayne', 'Fabian')).toBe('bad_call_sid');
@@ -63,7 +69,7 @@ describe('dobCarry names the same exits verifiedDobFor collapses', () => {
   });
 
   it('entry_without_dob — names match, the date was never stored', () => {
-    rememberVerifiedIdentity(CALL, { firstName: 'Wayne', lastName: 'Fabian' });
+    rememberVerifiedIdentity(CALL, { firstName: 'Wayne', lastName: 'Fabian', certain: true });
     expect(dobCarry(CALL, 'Wayne', 'Fabian')).toBe('entry_without_dob');
     expect(verifiedDobFor(CALL, 'Wayne', 'Fabian')).toBeUndefined();
   });
@@ -80,6 +86,7 @@ describe('dobCarry names the same exits verifiedDobFor collapses', () => {
       firstName: 'Ana',
       lastName: 'Garcia-Lopez',
       dateOfBirth: '03/17/1973',
+      certain: true,
     });
     expect(dobCarry(CALL, 'Ana', 'Garcia Lopez')).toBe('fired');
     expect(verifiedDobFor(CALL, 'Ana', 'Garcia Lopez')).toBe('03/17/1973');
@@ -149,7 +156,7 @@ describe('each filing tool writes carry onto a date-of-birth refusal', () => {
   });
 
   it('entry_without_dob when the map holds the name and no date', async () => {
-    rememberVerifiedIdentity(CALL, { firstName: 'Wayne', lastName: 'Fabian' });
+    rememberVerifiedIdentity(CALL, { firstName: 'Wayne', lastName: 'Fabian', certain: true });
     for (const { tool, extra } of FILING) {
       const out = (await runTool(tool, payload(CALL, 'Wayne', 'Fabian', extra))) as Record<string, unknown>;
       expect(out.carry, tool).toBe('entry_without_dob');
@@ -182,6 +189,7 @@ describe('each filing tool writes carry onto a date-of-birth refusal', () => {
       firstName: 'Wayne',
       lastName: 'Fabian',
       dateOfBirth: 'not-a-date',
+      certain: true,
     });
     for (const { tool, extra } of FILING) {
       const out = (await runTool(tool, payload(CALL, 'Wayne', 'Fabian', extra))) as Record<string, unknown>;

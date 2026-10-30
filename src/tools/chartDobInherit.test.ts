@@ -38,6 +38,7 @@ vi.mock('../services/consoleDirectory', () => ({
 const {
   rememberVerifiedIdentity,
   verifiedDobFor,
+  identityStoreProbe,
   dobCarry,
   resetVerifiedIdentities,
 } = await import('./verifiedIdentity');
@@ -141,6 +142,9 @@ describe('Invariant B — empty cannot clear a date already stored for that pers
       lastName: 'Mirror',
       certain: false,
     });
+    expect(identityStoreProbe(SID)).toMatchObject({ entryHasDob: true, entryCertain: false });
+    expect(verifiedDobFor(SID, 'Testcaller', 'Mirror')).toBeUndefined();
+    rememberVerifiedIdentity(SID, { firstName: 'Testcaller', lastName: 'Mirror', certain: true });
     expect(verifiedDobFor(SID, 'Testcaller', 'Mirror')).toBe(CHART);
   });
 
@@ -180,10 +184,11 @@ describe('Invariant B — empty cannot clear a date already stored for that pers
       caller_phone: '555-555-0147',
     });
 
-    expect(
-      verifiedDobFor(SID, 'Testcaller', 'Mirror'),
-      'an empty person-base write must not erase the pre-context chart date',
-    ).toBe(CHART);
+    // Retain a candidate's date internally, but never expose it for filing.
+    expect(identityStoreProbe(SID)).toMatchObject({ entryHasDob: true, entryCertain: false });
+    expect(verifiedDobFor(SID, 'Testcaller', 'Mirror')).toBeUndefined();
+    rememberVerifiedIdentity(SID, { firstName: 'Testcaller', lastName: 'Mirror', certain: true });
+    expect(verifiedDobFor(SID, 'Testcaller', 'Mirror')).toBe(CHART);
   });
 });
 
@@ -195,7 +200,7 @@ describe('Invariant A — inherit on file after the person-base lookup', () => {
       dateOfBirth: CHART,
       certain: false,
     });
-    lookupSpy.mockResolvedValue(RECORD as never);
+    lookupSpy.mockResolvedValue({ ...RECORD, matchedBy: 'name_and_dob', identityUnconfirmed: false } as never);
     await runTool('lookup_patient', {
       queue: 'optical',
       call_sid: SID,
@@ -225,7 +230,8 @@ describe('Invariant A — inherit on file after the person-base lookup', () => {
         firstName: 'Testcaller',
         lastName: 'Mirror',
         dateOfBirth: CHART,
-        certain: false,
+        certain: true,
+        usualOffice: 'Synthetic Clinic',
       });
       const create = await spyCreate();
       create.mockClear();

@@ -53,10 +53,8 @@ describe('with the Console configured, the person base is the first rung', () =>
     expect(ctx.patientFound).toBe(true);
     expect(ctx.patientName).toBe('Testcaller Mirror');
     expect(ctx.matchedBy).toBe('phone');
-    // v86: `findByPhone` verifies only ONE person, so a verified phone match is
-    // certain — the rule the Schedule rung ran for months. v85 shipped it as
-    // unconfirmed and every recognised caller was asked for name and DOB again.
-    expect(ctx.identityUnconfirmed).toBe(false);
+    // A unique phone record is still a candidate until the caller validates it.
+    expect(ctx.identityUnconfirmed).toBe(true);
     expect(bookCalls(s)).toBe(0);
     expect(s.lookupByPersonId).toHaveBeenCalledWith(PERSON.personId, 'phone', undefined);
   });

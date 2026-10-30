@@ -640,7 +640,7 @@ describe("heard callers retire the ladder before it speaks (v131)", () => {
     // the ruling turns on. Here the caller speaks, then goes quiet for the
     // full silence window, which must neither prompt nor cut.
     // The agent's lines here ask the caller something, so the silence is the
-    // CALLER's (v150 asks the AGENT to carry on only when its line asked
+    // CALLER's (v151 asks the AGENT to carry on only when its line asked
     // nothing — see the describe block below). This test is the ladder's.
     const h = await ladder();
     h.speak("How can I help you today?");
@@ -730,7 +730,7 @@ describe("heard callers retire the ladder before it speaks (v131)", () => {
   });
 });
 
-describe("an agent that stalls on a heard caller is asked to carry on (v150)", () => {
+describe("an agent that stalls on a heard caller is asked to carry on (v151)", () => {
   // Corpus, 2026-10-29: the lookup's "Let me make sure the team has your
   // details." (tech CAa4a4c5aca113baa2126fca579680a78d,
   // CAaa2396b71203a1f50a187c85d1fa5462, CA189b73620b65a9782191310e346eecdd,

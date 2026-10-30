@@ -100,7 +100,7 @@ describe('a mis-transcribed date of birth does not lose a known patient', () => 
     expect(typeof retry.deadlineAt).toBe('number');
     expect(Object.keys(retry).sort()).toEqual(['deadlineAt', 'phone']);
     expect(out.found, 'a known patient was reported as unknown').toBe(true);
-    expect(out.patient_name).toBe('Wayne Fabian');
+    expect(out.patient_name, 'phone fallback remains a candidate').toBeUndefined();
   });
 
   it('does not retry when there was no name or DOB to miss on', async () => {
@@ -127,7 +127,7 @@ describe('a mis-transcribed date of birth does not lose a known patient', () => 
     })) as Record<string, unknown>;
 
     expect(out.found).toBe(false);
-    // v150: the first miss asks the re-ask question; it never says not found.
+    // v151: the first miss asks the re-ask question; it never says not found.
     expect(String(out.message)).toMatch(/spell your last name/i);
     expect(String(out.message)).not.toMatch(/not found|no record/i);
   });

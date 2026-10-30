@@ -36,9 +36,8 @@ function freshSid(): string {
   return `CA${sidCounter.toString(16).padStart(32, '0')}`;
 }
 
-// A complete on-the-clock patient request with NO name. The date of birth is
-// here so the date-of-birth gate — which has its own one-ask escape — is not
-// what these tests measure.
+// A complete on-the-clock patient request with NO name. The DOB and clinic
+// are present so the live identity gate is not what these tests measure.
 const NAMELESS = {
   requester: 'I am the patient',
   // v79 asks a patient the form-channel question first; "declined" keeps
@@ -47,6 +46,7 @@ const NAMELESS = {
   deliver_to: 'to me',
   date_range: 'everything',
   date_of_birth: '01/02/1950',
+  location: 'Synthetic Clinic', // Complete live intake before testing this lane.
   callback_number: '845-531-7471',
   request_description: 'I need a copy of my records',
 };
@@ -221,6 +221,7 @@ describe('the on-clock gate asks once and then files with the gap written on the
     first_name: 'Testpatient',
     last_name: 'Example',
     date_of_birth: '01/02/1950',
+    location: 'Synthetic Clinic', // Complete live intake before testing this lane.
     callback_number: '845-531-7471',
     request_description: 'I need my records',
   };

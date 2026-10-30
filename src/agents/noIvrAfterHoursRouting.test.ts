@@ -84,6 +84,7 @@ const TICKET = {
   first_name: 'Testa',
   last_name: 'Patient',
   date_of_birth: 'January 15, 1980',
+  location: 'Synthetic Clinic', // Complete live intake before testing this lane.
   callback_number: '5551234567',
   preferred_contact: 'phone',
 };

@@ -49,6 +49,7 @@ const forgetIfSameName = vi.fn((..._args: unknown[]) => false);
 vi.mock('./verifiedIdentity', () => ({
   rememberVerifiedIdentity: (...a: unknown[]) => rememberVerifiedIdentity(...a),
   verifiedDobFor: () => null,
+  rememberConfirmedClinic: vi.fn(),
   forgetIfSameName: (...a: unknown[]) => forgetIfSameName(...a),
   /**
    * RULE ZERO 2a's gate reads this to let Rule 1 outrank a spoken "new" — an
@@ -76,7 +77,7 @@ const RECORD = { firstName: 'Testpatient', lastName: 'Example', dateOfBirth: '19
 
 const FOUND = {
   patientFound: true,
-  patientName: 'Wayne Fabian',
+  patientName: 'Alex Synthetic',
   matchedBy: 'phone',
   identity: { unique: true, candidateCount: 1 },
   pastAppointments: [{ location: 'Encinitas' }, { location: 'Redlands' }],
@@ -85,6 +86,8 @@ const FOUND = {
   lastVisitDate: '2026-07-01',
   totalAppointmentsFound: 4,
 };
+const VALIDATED_FOUND = { ...FOUND, matchedBy: 'name_and_dob', patientData: RECORD };
+const VALIDATED_ARGS = { first_name: RECORD.firstName, last_name: RECORD.lastName, date_of_birth: RECORD.dateOfBirth };
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -98,7 +101,7 @@ describe('lookup_patient', () => {
   it('uses the number the call arrived on when the model does not pass one', async () => {
     /**
      * The live failure, 2026-08-13: the transcriber heard "Thanks." and "No.
-     * March 17th, 1973." for a name and date of birth, the model looked up
+     * January 2nd, 1970." for a name and date of birth, the model looked up
      * that mangled trio, and the tool answered "no record found" for a patient
      * the process had matched by phone before the caller spoke.
      *
@@ -121,7 +124,7 @@ describe('lookup_patient', () => {
       caller_phone: '+17605551234',
       first_name: 'Thanks',
       last_name: 'No',
-      date_of_birth: 'March 17th 1973',
+      date_of_birth: 'January 2nd 1970',
     });
     expect(r.found).toBe(true);
     expect(lookupPatient).toHaveBeenCalledTimes(2);
@@ -152,7 +155,7 @@ describe('lookup_patient', () => {
   it('refuses as a MISSING FIELD when it has neither a phone nor a full trio', async () => {
     // Half a trio is not a lookup. The refusal must name the fields so the
     // agent asks for them rather than reporting a technical problem.
-    const r = await run('lookup_patient', { first_name: 'Wayne' });
+    const r = await run('lookup_patient', { first_name: 'Alex' });
     expect(r.success).toBe(false);
     expect(r.missingFields).toEqual(expect.arrayContaining(['last_name', 'date_of_birth']));
     expect(r.missingFields).not.toContain('first_name');
@@ -184,10 +187,10 @@ describe('lookup_patient', () => {
     expect(r.identity_is_certain).toBe(false);
   });
 
-  it('a unique PHONE match stays certain — the one field nobody mis-transcribes', async () => {
+  it('a unique PHONE match remains a candidate', async () => {
     lookupPatient.mockResolvedValue({ ...FOUND, matchedBy: 'phone' });
     const r = await run('lookup_patient', { caller_phone: '+17605551234' });
-    expect(r.identity_is_certain).toBe(true);
+    expect(r.identity_is_certain).toBe(false);
   });
 
   it('a unique NAME_AND_DOB match is certain', async () => {
@@ -247,30 +250,18 @@ describe('lookup_patient', () => {
     }
   });
 
-  it('still carries the date of birth forward on a unique phone match — the 09-01 fix', async () => {
-    /**
-     * THE REGRESSION THIS GUARDS. `rememberVerifiedIdentity` is gated on
-     * `uniqueMatch`, NOT on the stricter `identity_is_certain` beside it.
-     * Narrowing it would drop every phone-matched caller back into the
-     * date-of-birth gate — the one the operator's 2026-09-01 fix emptied,
-     * worth 45 refused calls in a fortnight, 23 of them for a patient this
-     * tool had already identified.
-     *
-     * A first draft of this test used `vi.doMock` after import, so the mock
-     * never bound and it asserted a flag that was true either way. It passed
-     * while the regression was live. The mock is hoisted now and the
-     * assertion is on the call itself.
-     */
+  it('retains a phone candidate with certainty false; filing cannot inherit it', async () => {
+    // The candidate remains unvalidated and cannot supply filing demographics.
     lookupPatient.mockResolvedValue({
       ...FOUND,
       matchedBy: 'phone',
-      patientData: { firstName: 'Wayne', lastName: 'Fabian', dateOfBirth: '1973-03-17' },
+      patientData: { firstName: 'Alex', lastName: 'Synthetic', dateOfBirth: '1970-01-02' },
     });
     const r = await run('lookup_patient', { caller_phone: '+17605551234', call_sid: 'CA1' });
-    expect(r.identity_is_certain).toBe(true);
+    expect(r.identity_is_certain).toBe(false);
     expect(rememberVerifiedIdentity).toHaveBeenCalledWith(
       'CA1',
-      expect.objectContaining({ dateOfBirth: '1973-03-17' }),
+      expect.objectContaining({ dateOfBirth: '1970-01-02', certain: false }),
     );
   });
 
@@ -289,7 +280,7 @@ describe('lookup_patient', () => {
     lookupPatient.mockResolvedValue({
       ...FOUND,
       matchedBy: 'name',
-      patientData: { firstName: 'Wayne', lastName: 'Fabian', dateOfBirth: '1973-03-17' },
+      patientData: { firstName: 'Alex', lastName: 'Synthetic', dateOfBirth: '1970-01-02' },
     });
     const r = await run('lookup_patient', { caller_phone: '+17605551234', call_sid: 'CA2' });
     expect(r.identity_is_certain).toBe(false);
@@ -301,25 +292,25 @@ describe('lookup_patient', () => {
       ...FOUND,
       matchedBy: 'phone',
       identityUnconfirmed: true,
-      patientData: { firstName: 'Wayne', lastName: 'Fabian', dateOfBirth: '1973-03-17' },
+      patientData: { firstName: 'Alex', lastName: 'Synthetic', dateOfBirth: '1970-01-02' },
     });
     const r = await run('lookup_patient', { caller_phone: '+17605551234', call_sid: 'CA4' });
     expect(r.identity_is_certain).toBe(false);
     expect(rememberVerifiedIdentity).toHaveBeenCalledWith(
       'CA4',
-      expect.objectContaining({ dateOfBirth: '1973-03-17', certain: false }),
+      expect.objectContaining({ dateOfBirth: '1970-01-02', certain: false }),
     );
   });
 
   it('never carries a date of birth forward from a NON-UNIQUE match', async () => {
-    // Wayne's own number resolves to eight records in the mirror. Banking one
+    // Alex's own number resolves to eight records in the mirror. Banking one
     // of their dates of birth would file a ticket against the wrong person —
     // a phone match is a candidate to confirm, never an identity.
     lookupPatient.mockResolvedValue({
       ...FOUND,
       matchedBy: 'phone',
       identity: { unique: false, candidateCount: 8 },
-      patientData: { firstName: 'Wayne', lastName: 'Fabian', dateOfBirth: '1973-03-17' },
+      patientData: { firstName: 'Alex', lastName: 'Synthetic', dateOfBirth: '1970-01-02' },
     });
     const r = await run('lookup_patient', { caller_phone: '+17605551234', call_sid: 'CA3' });
     expect(r.identity_is_certain).toBe(false);
@@ -329,7 +320,7 @@ describe('lookup_patient', () => {
     // PR #291: without that, an early certain match kept its `certain: true`
     // and the office reader answered from a result the tool had just stopped
     // believing.
-    expect(forgetIfSameName).toHaveBeenCalledWith('CA3', 'Wayne', 'Fabian');
+    expect(forgetIfSameName).toHaveBeenCalledWith('CA3', 'Alex', 'Synthetic');
   });
 
   it('reports "not found" as a success, not a failure', async () => {
@@ -343,7 +334,7 @@ describe('lookup_patient', () => {
   });
 
   it('warns, and withholds history, when the match is one of several people', async () => {
-    // Wayne's own number resolves to eight records in the mirror. An uncertain
+    // Alex's own number resolves to eight records in the mirror. An uncertain
     // match is one real person's record and still a guess among several.
     lookupPatient.mockResolvedValue({ ...FOUND, identity: { unique: false, candidateCount: 8 } });
     const r = await run('lookup_patient', { caller_phone: '+17605551234' });
@@ -360,7 +351,7 @@ describe('lookup_patient', () => {
      * useful fact on the call.
      */
     lookupPatient.mockResolvedValue({
-      ...FOUND,
+      ...VALIDATED_FOUND,
       pastAppointments: [{ location: 'Loma Linda Surgery Center' }, { location: 'Encinitas' }],
     });
     lookupLocation.mockImplementation(async (n: string) =>
@@ -369,10 +360,10 @@ describe('lookup_patient', () => {
         : { canonical: n, facilityKind: 'clinic' },
     );
 
-    const optical = await run('lookup_patient', { caller_phone: '+1760', queue: 'optical' });
+    const optical = await run('lookup_patient', { ...VALIDATED_ARGS, queue: 'optical' });
     expect(optical.usual_office).toBe('Encinitas');
 
-    const surgery = await run('lookup_patient', { caller_phone: '+1760', queue: 'surgery' });
+    const surgery = await run('lookup_patient', { ...VALIDATED_ARGS, queue: 'surgery' });
     expect(surgery.usual_office).toBe('Loma Linda Surgery Center');
 
     // The raw most-recent stays available to both, clearly labelled.
@@ -380,17 +371,17 @@ describe('lookup_patient', () => {
   });
 
   it('asks the right question when the history has nothing this queue can use', async () => {
-    lookupPatient.mockResolvedValue({ ...FOUND, pastAppointments: [{ location: 'Loma Linda Surgery Center' }] });
+    lookupPatient.mockResolvedValue({ ...VALIDATED_FOUND, pastAppointments: [{ location: 'Loma Linda Surgery Center' }] });
     lookupLocation.mockResolvedValue({ canonical: 'Loma Linda Surgery Center', facilityKind: 'surgery_center' });
-    const r = await run('lookup_patient', { caller_phone: '+1760', queue: 'optical' });
+    const r = await run('lookup_patient', { ...VALIDATED_ARGS, queue: 'optical' });
     expect(r.usual_office).toBeNull();
     expect(r.message).toMatch(/glasses or contacts/i);
   });
 
   it('is neutral with no queue — the HTTP surface is not a queue', async () => {
-    lookupPatient.mockResolvedValue({ ...FOUND, pastAppointments: [{ location: 'Loma Linda Surgery Center' }] });
+    lookupPatient.mockResolvedValue({ ...VALIDATED_FOUND, pastAppointments: [{ location: 'Loma Linda Surgery Center' }] });
     lookupLocation.mockResolvedValue({ canonical: 'Loma Linda Surgery Center', facilityKind: 'surgery_center' });
-    const r = await run('lookup_patient', { caller_phone: '+1760' });
+    const r = await run('lookup_patient', VALIDATED_ARGS);
     expect(r.usual_office).toBe('Loma Linda Surgery Center');
   });
 
@@ -398,8 +389,8 @@ describe('lookup_patient', () => {
     // A best guess beats blocking the call; file_*_ticket resolves it against
     // the ticketing app before anything is written.
     isDirectoryConfigured.mockReturnValue(false);
-    lookupPatient.mockResolvedValue(FOUND);
-    const r = await run('lookup_patient', { caller_phone: '+1760', queue: 'optical' });
+    lookupPatient.mockResolvedValue(VALIDATED_FOUND);
+    const r = await run('lookup_patient', { ...VALIDATED_ARGS, queue: 'optical' });
     expect(r.usual_office).toBe('Encinitas');
   });
 });

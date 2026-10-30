@@ -282,7 +282,7 @@ export const TOOL_DISPATCH_GRACE_MS = 15_000;
 export const SILENCE_PROMPT_LINE = "I'm sorry, I cannot hear you. Are you still there?";
 
 /**
- * HOW MANY TIMES IN A ROW THE AGENT IS ASKED TO CARRY ON (v150).
+ * HOW MANY TIMES IN A ROW THE AGENT IS ASKED TO CARRY ON (v151).
  *
  * v131 stood the silence ladder down for a caller we have heard, which was
  * right for the caller and removed the only thing that ever broke the silence
@@ -527,7 +527,7 @@ export interface VoiceCallRecord {
    */
   silenceStoodDown?: boolean;
   /**
-   * v150: turns the runtime asked the AGENT for because a caller we had heard
+   * v151: turns the runtime asked the AGENT for because a caller we had heard
    * went quiet after an agent line that asked them nothing (a stall).
    */
   agentStallNudges?: number;
@@ -946,10 +946,10 @@ export class VoiceCallBridge {
   private callerEverHeard = false;
   /** See VoiceCallRecord.silenceStoodDown. */
   private silenceStoodDown = false;
-  /** v150: agent turns requested after a stall, in a row; reset when the
+  /** v151: agent turns requested after a stall, in a row; reset when the
    * caller is heard. AGENT_STALL_NUDGE_LIMIT bounds it. */
   private stallNudgeStrikes = 0;
-  /** v150: the same, cumulatively, for the record. Never reset. */
+  /** v151: the same, cumulatively, for the record. Never reset. */
   private agentStallNudges = 0;
 
   private goodbyeTimer: unknown = null;

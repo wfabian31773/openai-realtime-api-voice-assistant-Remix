@@ -64,7 +64,7 @@ describe('what counts as a miss', () => {
   it('the first identity miss coaches ONE re-ask in the format the funnel needs', async () => {
     const out = await lookup({ ...identity, call_sid: SID });
     expect(out.lookup_misses).toBe(1);
-    // v150: the spoken line IS the re-ask, so the turn ends on a question.
+    // v151: the spoken line IS the re-ask, so the turn ends on a question.
     expect(String(out.message)).toBe(LOOKUP_REASK_SAY);
     expect(String(out.message)).toMatch(/\?$/);
     expect(payloadSaysNotFound(out)).toBe(false);
@@ -84,7 +84,7 @@ describe('what counts as a miss', () => {
     // The spoken line no longer sends the model back for another round.
     expect(String(out.message)).toBe(LOOKUP_CARRY_ON_SAY);
     expect(payloadSaysNotFound(out)).toBe(false);
-    // v150: one instruction, not two — file in this same turn.
+    // v151: one instruction, not two — file in this same turn.
     expect(String(out.fix)).toMatch(/in this same turn/);
     expect(String(out.fix)).not.toMatch(/ONCE more/);
     expect(String(out.message)).not.toMatch(/Ask for their name/);

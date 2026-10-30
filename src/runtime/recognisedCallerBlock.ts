@@ -158,7 +158,7 @@ export const RECOGNITION_BLOCK_LANES: ReadonlyArray<RecognitionBlockLane> = [
  * the caller may not be the patient, and the patient's own details are still
  * to be collected.
  *
- * THE NAME QUESTION ASKS FOR BOTH HALVES SINCE v148 (2026-10-29). It asked
+ * THE NAME QUESTION ASKS FOR BOTH HALVES SINCE v151 (written 2026-10-29). It asked
  * only *"May I please have your last name?"*, which is right after a greeting
  * that already said the first name and wrong everywhere else: an unrecognised
  * caller, or one who denied the greeting, was never asked a first name. The
