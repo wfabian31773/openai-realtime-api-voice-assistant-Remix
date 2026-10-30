@@ -998,7 +998,7 @@ import { callEnvironment } from "./callRecord";
  * migration; production impact remains unmeasured.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v149-a-later-filing-adds-to-the-ticket-20261029";
+  "voice-runtime-v150-a-stalled-agent-carries-on-20261030";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

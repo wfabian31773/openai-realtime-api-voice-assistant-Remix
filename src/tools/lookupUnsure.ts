@@ -37,6 +37,55 @@ export const LOOKUP_UNSURE_FIX =
   LOOKUP_UNSURE_FILE_FIX + " If they confirmed the first name on " +
   "file, call this tool again with that chart name.";
 
+/**
+ * WHAT THE QUEUE LANES' LOOKUP SAYS ON A MISS — v150.
+ *
+ * #375 (live 2026-10-28 14:28 UTC) made LOOKUP_UNSURE_SAY the spoken line on
+ * EVERY identity miss, and paired it with a fix that said "say exactly this
+ * and file" beside "you may ask once more". The line sounds like a sign-off,
+ * the two instructions disagree, and the model said it and stopped: on the
+ * queue lanes it was said on 0 calls on 2026-10-27, 30 on 10-28 and 32 on
+ * 10-29. On 10-28 the silence ladder's "I cannot hear you" broke the silence
+ * that followed; v131 (live 10-29 00:56 UTC) correctly stopped saying that to
+ * a caller we have heard, and on 10-29 the line was the agent's LAST words on
+ * 7 calls, 6 of them with no ticket (tech 4, surgery 1, records 1 of 7).
+ *
+ * So each miss now speaks the step that comes next, and the model is told one
+ * thing, not two. The first miss asks the one re-ask question RULE ZERO 2b
+ * shapes (the last name, spelled); the spent ask says the request is being
+ * taken and the model files in the same turn. Neither says "not found".
+ * LOOKUP_UNSURE_SAY stays for the after-hours line's own lookup.
+ */
+export const LOOKUP_REASK_SAY = "Could you spell your last name for me, letter by letter?";
+
+/** The miss that spends the identity ask: the request is taken as given. */
+export const LOOKUP_CARRY_ON_SAY =
+  "Thank you. I'll take your request as given, and the team will match it to your chart.";
+
+const NOT_FOUND_BAN =
+  "Do NOT tell the caller they are not in the system, and do not say we have " +
+  "no record of them. A schedule or visit-history match may exist under a " +
+  "different spelling of their name.";
+
+/** The first identity miss: one re-ask, in the format the funnel needs. */
+export const LOOKUP_REASK_FIX =
+  NOT_FOUND_BAN +
+  " The line in `message` is your next question — have them spell the last name — then ask the date of birth as " +
+  "month, then day, then year, and call lookup_patient ONCE more with what they give. " +
+  "If they confirmed the first name on file, call this tool again with that chart name. " +
+  "If that also misses, do not ask a third time: take the request and file it with what they gave.";
+
+/** The miss that spends the ask: say the line and file in the same turn. */
+export function lookupSpentFix(misses: number): string {
+  return (
+    `This is identity miss number ${misses} on this call. ` +
+    NOT_FOUND_BAN +
+    " Do NOT call lookup_patient again. Do NOT ask the caller for their name or date of birth again. " +
+    "Say the line in `message`, then take the request and file it now with the details they gave, " +
+    "in this same turn, before you stop speaking — the filing tool does not require a match."
+  );
+}
+
 export function chartNameParts(context?: Pick<PatientScheduleContext, "patientName" | "patientData"> | null): {
   first?: string;
   last?: string;

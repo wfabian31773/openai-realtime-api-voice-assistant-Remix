@@ -135,7 +135,7 @@ describe("runtime readiness", () => {
    * quietly drop it and put us back where we were.
    */
   it("carries the date it was set, so a build's age is readable from the marker", () => {
-    expect(VOICE_RUNTIME_DEPLOY_MARKER).toBe("voice-runtime-v149-a-later-filing-adds-to-the-ticket-20261029");
+    expect(VOICE_RUNTIME_DEPLOY_MARKER).toBe("voice-runtime-v150-a-stalled-agent-carries-on-20261030");
     expect(VOICE_RUNTIME_DEPLOY_MARKER).toMatch(/-\d{8}$/);
     expect(markerSetOn()).not.toBeNull();
   });

@@ -24,7 +24,7 @@ vi.mock('../services/consoleDirectory', () => ({
 
 const { runTool } = await import('./registry');
 const { LOOKUP_MISS_LIMIT } = await import('./sharedPatientTools');
-const { LOOKUP_UNSURE_SAY } = await import('./lookupUnsure');
+const { LOOKUP_CARRY_ON_SAY, LOOKUP_REASK_SAY, payloadSaysNotFound } = await import('./lookupUnsure');
 const { resetGateAttempts } = await import('./gateAttempts');
 
 const SID = 'CA000000000000000000000000000000a5';
@@ -64,7 +64,10 @@ describe('what counts as a miss', () => {
   it('the first identity miss coaches ONE re-ask in the format the funnel needs', async () => {
     const out = await lookup({ ...identity, call_sid: SID });
     expect(out.lookup_misses).toBe(1);
-    expect(String(out.message)).toBe(LOOKUP_UNSURE_SAY);
+    // v150: the spoken line IS the re-ask, so the turn ends on a question.
+    expect(String(out.message)).toBe(LOOKUP_REASK_SAY);
+    expect(String(out.message)).toMatch(/\?$/);
+    expect(payloadSaysNotFound(out)).toBe(false);
     expect(String(out.fix)).toMatch(/ONCE more/);
     expect(String(out.fix)).toMatch(/spell the last name/i);
     expect(String(out.fix)).toMatch(/month, then day, then year/i);
@@ -79,7 +82,11 @@ describe('what counts as a miss', () => {
     expect(String(out.fix)).toMatch(/Do NOT ask the caller for their name or date of birth again/);
     expect(String(out.fix)).toMatch(/file it now/i);
     // The spoken line no longer sends the model back for another round.
-    expect(String(out.message)).toBe(LOOKUP_UNSURE_SAY);
+    expect(String(out.message)).toBe(LOOKUP_CARRY_ON_SAY);
+    expect(payloadSaysNotFound(out)).toBe(false);
+    // v150: one instruction, not two — file in this same turn.
+    expect(String(out.fix)).toMatch(/in this same turn/);
+    expect(String(out.fix)).not.toMatch(/ONCE more/);
     expect(String(out.message)).not.toMatch(/Ask for their name/);
     expect(String(out.fix)).toMatch(/file it now/i);
   });
@@ -91,7 +98,7 @@ describe('what counts as a miss', () => {
     for (let misses = LOOKUP_MISS_LIMIT; misses <= LOOKUP_MISS_LIMIT + 2; misses++) {
       const out = await lookup({ ...identity, call_sid: SID });
       expect(out.lookup_misses).toBe(misses);
-      expect(out.message).toBe(LOOKUP_UNSURE_SAY);
+      expect(out.message).toBe(LOOKUP_CARRY_ON_SAY);
       expect(String(out.fix)).toMatch(/file it now/i);
       expect(String(out.fix)).toContain('Do NOT call lookup_patient again.');
       expect(String(out.fix)).toMatch(/Do NOT ask the caller for their name or date of birth again/);
@@ -136,7 +143,7 @@ describe('the count is the CALL\'s', () => {
       const out = await lookup({ ...identity, call_sid: 'unknown' });
       expect(out.lookup_misses).toBe(0);
       expect(String(out.fix ?? '')).not.toMatch(/Do NOT ask the caller/);
-      expect(String(out.message)).toBe(LOOKUP_UNSURE_SAY);
+      expect(String(out.message)).toBe(LOOKUP_REASK_SAY);
       expect(String(out.fix ?? '')).toMatch(/ONCE more/);
     }
   });

@@ -40,12 +40,20 @@ export interface FollowUpEvent {
 export function followUpEvent(
   record: Pick<
     VoiceCallRecord,
-    "followUps" | "outcome" | "hangupsHeld" | "silencePrompts" | "silenceCut" | "silenceStoodDown" | "goodbyeGraceHangup"
+    | "followUps"
+    | "outcome"
+    | "hangupsHeld"
+    | "silencePrompts"
+    | "silenceCut"
+    | "silenceStoodDown"
+    | "agentStallNudges"
+    | "goodbyeGraceHangup"
   >,
 ): FollowUpEvent | null {
   const f = record.followUps;
   const prompts = record.silencePrompts ?? 0;
-  if ((!f || f.owed === 0) && prompts === 0 && !record.goodbyeGraceHangup) return null;
+  const nudges = record.agentStallNudges ?? 0;
+  if ((!f || f.owed === 0) && prompts === 0 && nudges === 0 && !record.goodbyeGraceHangup) return null;
   const suspicious =
     (f?.lastUnanswered ?? false) || (f?.toolCallsAfterDone ?? 0) > 0 || record.silenceCut === true;
   return {
@@ -73,6 +81,8 @@ export function followUpEvent(
        * warns, because that arm ends a call.
        */
       silenceStoodDown: record.silenceStoodDown === true,
+      // v150: turns asked of the agent after it stalled on a heard caller.
+      agentStallNudges: nudges,
       goodbyeGraceHangup: record.goodbyeGraceHangup === true,
       outcome: record.outcome,
     },
