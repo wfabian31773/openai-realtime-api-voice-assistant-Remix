@@ -197,6 +197,21 @@ function derivedFlags(tool: string, args: Record<string, unknown>): Record<strin
   if (tool === 'create_ticket' || /^file_[a-z_]+_ticket$/.test(tool)) {
     out.dobShape = dobShape(args?.date_of_birth);
   }
+  /**
+   * WHETHER EACH HALF OF THE NAME WAS PASSED — two booleans, never the name.
+   *
+   * v127. On CA63467308b45e3e7f9118cde1b67be7bf (2026-10-26) the caller spelled
+   * the patient's last name and gave the first name later, and the
+   * create-ticket POST carried neither. "Did the model drop them, or the
+   * tool?" had no answer in this table: a filing tool's row recorded the
+   * date's SHAPE and nothing about the name, and the tool blanks a half name
+   * once its one ask is spent. With these two, the next one is a query.
+   * `create_ticket` keeps its own combined `hasPatientName` above.
+   */
+  if (/^file_[a-z_]+_ticket$/.test(tool)) {
+    out.hasFirstName = typeof args?.first_name === 'string' && args.first_name.trim() !== '';
+    out.hasLastName = typeof args?.last_name === 'string' && args.last_name.trim() !== '';
+  }
   if (tool === 'record_pcp_intake') {
     const keys = Object.keys(args ?? {}).filter((k) => args?.[k] != null && args[k] !== '');
     out.recorded = keys;
@@ -299,6 +314,11 @@ function summarizeResult(tool: string, resultJson: string): Record<string, unkno
     // `form_applies: false`, so "how often is a routed-away caller offered a
     // link" is a count, not a transcript scan. A boolean, no PHI.
     'form_applies',
+    // v127: a records filing the ticketing app refused, logged instead as a
+    // general Medical Records ticket BEFORE the caller was told it was taken
+    // (Codex P2 on #376). A boolean, no PHI — "how often does the app refuse
+    // a records filing outright" is a count, not a log search.
+    'recovered_after_refusal',
     /**
      * WHY escalate_to_human was refused (one of the gate's three codes) and
      * whether the refusal FILED the ticket (2026-09-29). Both PHI-free. Until

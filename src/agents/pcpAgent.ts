@@ -2393,7 +2393,13 @@ function alreadyFiledOnThisCall(callId: string, ticketNumber: string | undefined
     ...(ticketNumber ? { ticketNumber } : {}),
     guidance:
       `This request is ALREADY FILED on this call${ticketNumber ? ` as ${ticketNumber}` : ''} — nothing new was ` +
-      'created and you must not file it again. If you have not read the number back, read it now. Anything the ' +
+      'created and you must not file it again. ' +
+      // A request the outbox holds has no number yet; telling the model to
+      // read one back is how it would invent one.
+      (ticketNumber
+        ? 'If you have not read the number back, read it now. '
+        : 'There is no ticket number yet — do not read one back and do not invent one. ') +
+      'Anything the ' +
       'caller added is on the call recording and reaches the team with the transcript after the call. Ask if there ' +
       'is anything else before ending the call.',
   };
@@ -2975,18 +2981,51 @@ async function fileToMedicalRecords(
    * ticket the caller cannot quote is most of the way to not filing one.
    */
   const filedNumber = recordsResult.ticket_number ?? recordsResult.ticketNumber;
+  // Passed through so the PCP tool's own timeline counts a recovery: the
+  // records tool is called as a plain handler here and is not recorded itself.
+  const recovered = recordsResult.recovered_after_refusal === true ? { recovered_after_refusal: true } : {};
+
+  /**
+   * HELD, NOT NUMBERED — Codex P2 on #376.
+   *
+   * The records tool answers `success: true` with `filed_pending` and no
+   * number when the outbox holds the request: on a plain outage, and since
+   * v127 when a refused filing's recovery POST fails too. This branch read
+   * every success as numbered and told the agent "Filed as undefined … Read
+   * the ticket number back". The request is held and the worker will send it,
+   * so it is still a filing; it just has no number to give.
+   */
+  if (!filedNumber) {
+    pcpDirector.recordDisposition(callId, 'CREATE_TASK');
+    pcpDirector.markTicketFiled(callId, 'create_ticket');
+    console.info(
+      `[PCP] records request held for Medical Records — no ticket number yet, the outbox will send it ` +
+        `(${recordsHit.requestReason}, requester ${recordsResult.requester_type ?? requesterType})`,
+    );
+    return {
+      success: true,
+      filed_pending: true,
+      routed_to: 'Medical Records',
+      ...recovered,
+      message:
+        'Their request has been recorded and our medical records team will follow up. Say that. There is no ' +
+        'ticket number yet — do not read one back, do not invent one, and do not ask them to call back. ' +
+        'Do not promise a date.',
+    };
+  }
 
   pcpDirector.recordDisposition(callId, 'CREATE_TASK');
   pcpDirector.markTicketFiled(callId, 'create_ticket', filedNumber);
   console.info(
     `[PCP] records request filed to Medical Records as ${filedNumber} ` +
-      `(${recordsHit.requestReason}, requester ${recordsResult.requester_type}, ` +
+      `(${recordsHit.requestReason}, requester ${recordsResult.requester_type ?? requesterType}, ` +
       `clock ${recordsResult.cap_clock_applies ? 'ON' : 'off'})`,
   );
   return {
     success: true,
     ticketNumber: filedNumber,
     routed_to: 'Medical Records',
+    ...recovered,
     message: `Filed as ${filedNumber} with our medical records team. Read the ticket number back and say that team will follow up. Do not promise a date.`,
   };
 }

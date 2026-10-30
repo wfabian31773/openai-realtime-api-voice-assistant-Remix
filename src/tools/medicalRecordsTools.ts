@@ -44,10 +44,15 @@ import { str, isTwilioCallSid, normalizePhone } from './sharedPatientTools';
 import { splitCallbackExtension } from '../utils/phone';
 import { decideDobEscape, dobStatusNote, dobEscapeMarker, type DobStatus } from './dobEscape';
 import { createTicketDurable, postFailureToolResult } from '../services/durableTicketFiling';
+import { SWEPT_TICKET_DESCRIPTION } from '../runtime/requestSweep';
+import { otherReasonFor } from './otherReason';
 import { loggableLookupError } from '../services/loggableTicketingError';
 import { verifiedDobFor, verifiedIdentityFor } from './verifiedIdentity';
 import { spokenDobFor } from './spokenDob';
-import { gateRefusalsSoFar, gateRefusalAgeMs, noteGateRefusal, noteCallFact, callFactNoted } from './gateAttempts';
+import {
+  gateRefusalsSoFar, gateRefusalAgeMs, noteGateRefusal, noteCallFact, callFactNoted,
+  noteCallValue, callValue, forgetCallValue,
+} from './gateAttempts';
 
 /**
  * The per-patient suffix PCP passes for a call's second and later patients.
@@ -184,6 +189,174 @@ const RECORDS_FILED_FACT = 'records_ticket_filed';
  * asking the app and repeating a promise nobody will keep.
  */
 const RECORDS_ROUTED_AWAY_FACT = 'records_ticket_routed_away';
+
+/**
+ * Per-call latch: the request filed on this call READ as another team's but
+ * was KEPT in Medical Records because it carries no patient name (v127), so no
+ * signing form applies to it either. Its own fact, because the routed-away
+ * refusal's true line — "this request went to another team" — is false here.
+ */
+const RECORDS_HELD_NO_FORM_FACT = 'records_ticket_held_no_form';
+
+/**
+ * Per-call latch: the filing on this call was REFUSED by the ticketing app and
+ * logged instead as a general Medical Records recovery ticket (v127, Codex P2
+ * on #376). No link can go out from this call — the app never opened the case
+ * the form belongs to — but a person classifies the ticket and a patient's
+ * request still gets its form from the records team, so "no form to sign"
+ * would be false here.
+ */
+const RECORDS_RECOVERED_FACT = 'records_ticket_recovered_after_refusal';
+
+/**
+ * THE HALVES OF THE NAME THIS CALL HAS ALREADY HANDED THE TOOL — v127.
+ *
+ * CA63467308b45e3e7f9118cde1b67be7bf, 2026-10-26: the caller spelled the
+ * patient's last name, gave the date of birth twice, and gave the first name
+ * later, and the create-ticket POST carried neither name. Each invocation of
+ * this tool saw only its own arguments, so a name given in two parts could
+ * arrive as two halves in two invocations; and once the one name ask was
+ * spent, the handler blanked a half name to nothing (the app takes both names
+ * or, on Medical Records, neither). A name the caller gave and the model
+ * relayed was lost inside the tool.
+ *
+ * So a half the model passes is kept for the call (RULE ZERO 2c: carry the
+ * answer forward so it is never asked again) and fills the other half's gap on
+ * a later invocation. Only a gap — a half the model sends again replaces it,
+ * because the caller corrected it. Scoped by `patient_scope` so PCP's second
+ * patient never inherits the first one's surname, and forgotten once the
+ * request files.
+ */
+const NAME_CARRY_FIRST = 'records_first_name';
+const NAME_CARRY_LAST = 'records_last_name';
+
+function carryNameHalves(
+  callSid: string,
+  scope: string,
+  first: string,
+  last: string,
+): { first: string; last: string } {
+  const firstKey = `${NAME_CARRY_FIRST}${scope}`;
+  const lastKey = `${NAME_CARRY_LAST}${scope}`;
+  if (first) noteCallValue(callSid, firstKey, first);
+  if (last) noteCallValue(callSid, lastKey, last);
+  return {
+    first: first || callValue(callSid, firstKey) || '',
+    last: last || callValue(callSid, lastKey) || '',
+  };
+}
+
+function forgetNameHalves(callSid: string, scope: string): void {
+  forgetCallValue(callSid, `${NAME_CARRY_FIRST}${scope}`);
+  forgetCallValue(callSid, `${NAME_CARRY_LAST}${scope}`);
+}
+
+/**
+ * WHAT HAPPENS WHEN THE TICKETING APP REFUSES THE FILING — v127.
+ *
+ * The refusal used to come back as `HTTP 400 (response text withheld …)` and
+ * nothing else, so the model improvised a line for the caller — on the seven
+ * records-lane calls of 2026-10-12..10-26, that the system was not accepting
+ * the entry, and on CA63467308b45e3e7f9118cde1b67be7bf *"I'd recommend calling
+ * back shortly so we can get it filed"*: standing instruction 10, *nobody is
+ * told to call back*, broken by a sentence the code never wrote.
+ *
+ * THE REQUEST IS LOGGED BEFORE THE CALLER IS TOLD IT IS (Codex P2 on #376).
+ * The first version of this answer told the model "nothing is lost … will be
+ * logged" and persisted nothing: a terminal refusal bypasses the outbox, and
+ * the teardown sweep is no guarantee — it skips a call where
+ * `check_open_tickets` found an existing ticket, a call whose caller said
+ * only their name, and every lane but records. So a refusal now files a
+ * RECOVERY ticket in Medical Records first, in the shape the teardown sweep
+ * has filed nameless records requests in since 2026-09-27 (department 16, its
+ * own "Other - See Description", no name, the sweep's SMS-safe description,
+ * everything from the call on the staff side), on the same idempotency key, so
+ * the sweep and this collapse to one ticket. Only a recovery the app took —
+ * or the outbox holds — earns the assurance. If the recovery is refused too,
+ * the model is told the truth: nothing was logged.
+ *
+ * Both in `fix`, never in `message` (v43): they are instructions to the model.
+ */
+export const RECOVERED_AFTER_REFUSAL_FIX =
+  'The ticketing system turned the first filing down, so this request was logged as a general ' +
+  'ticket for the Medical Records team instead, who will route it. Nothing the caller can say ' +
+  'would change the refusal, so do not ask them to repeat anything, do not call ' +
+  'file_records_ticket again, and do not tell them the system is not accepting it. No link goes ' +
+  'out from this call: do not offer one, do not ask text or email, and do not call ' +
+  'send_records_form; if you already offered a link, tell the caller the team will follow up ' +
+  'about it. Tell the caller their request has been taken and the team will follow up with them. ' +
+  'Never tell them to call back.';
+
+export const REFUSAL_NOT_LOGGED_FIX =
+  'The ticketing system turned this filing down, and the backup filing was not taken either, so ' +
+  'this request is NOT logged. Do not tell the caller it was taken or that the team will follow ' +
+  'up, do not call file_records_ticket again, and do not tell them the system is not accepting ' +
+  'it. Tell them plainly that you were not able to log the request on your end, and apologise. ' +
+  'Never tell them to call back.';
+
+/**
+ * The staff side of a recovery ticket. `callData.transcript`, never the
+ * description (an SMS body) — so the caller's name and what they asked for
+ * may sit here, where only staff read it, exactly as the teardown sweep's
+ * note carries the caller's words.
+ */
+export function recoveryAfterRefusalNote(r: {
+  statusCode?: number;
+  redirect?: { departmentName: string; requestReason: string } | null;
+  name?: string;
+  dob?: string;
+  requester?: string;
+  request: string;
+  phone: string;
+  callSid: string;
+  staffLines: ReadonlyArray<string | undefined>;
+  /**
+   * What the caller already gave that the recovery payload does not carry.
+   * The destination and the date range need no field: they are already lines
+   * of `request`, the body this tool builds.
+   */
+  office?: string;
+  provider?: string;
+  email?: string;
+}): string {
+  return [
+    `RECOVERED AFTER A REFUSAL — the ticketing app refused this records filing` +
+      `${r.statusCode ? ` (HTTP ${r.statusCode})` : ''}, so the request is held here and is not lost. ` +
+      'Route it to the right team if it is not a Medical Records request.',
+    r.redirect
+      ? `The request read as one for ${r.redirect.departmentName} (${r.redirect.requestReason}).`
+      : undefined,
+    ...r.staffLines,
+    r.name ? `Patient name given on the call: ${r.name}.` : undefined,
+    r.dob ? `Date of birth given on the call: ${r.dob}.` : undefined,
+    r.requester ? `Requester: ${r.requester}.` : undefined,
+    `What was asked, as the agent described it: ${r.request}`,
+    // Collected on the call and NOT on the recovery payload, which carries
+    // the sweep's shape only — so they ride here or nobody sees them (Codex
+    // P2 on #376, head 48dde27).
+    r.office ? `Office given on the call: ${r.office}.` : undefined,
+    r.provider ? `Provider given on the call: ${r.provider}.` : undefined,
+    r.email ? `Email given on the call: ${r.email}.` : undefined,
+    `Call back on ${r.phone}. Call reference ${r.callSid || 'not captured'}.`,
+  ]
+    .filter(Boolean)
+    .join('\n');
+}
+
+/**
+ * The staff line on a request KEPT in Medical Records for want of a name.
+ * `callData.transcript`, never the description (an SMS body).
+ */
+/** The HVA Hub, where `recordsLineRedirect` sends scheduling (and unknown) requests. */
+const HVA_HUB_DEPARTMENT_ID = 9;
+
+export function keptForNoNameNote(redirect: { departmentName: string; requestReason: string }): string {
+  return (
+    `KEPT IN MEDICAL RECORDS — the request reads as one for ${redirect.departmentName} ` +
+    `(${redirect.requestReason}), but no patient name was captured and only a Medical Records ` +
+    'request may file without one. Move it to that team if it is not a records request.'
+  );
+}
 
 /**
  * THE FORM AT CALL TIME — owner, 2026-09-27.
@@ -421,13 +594,20 @@ registerTool({
     required: ['callback_number', 'request_description'],
   },
   handler: async (input): Promise<ToolResult> => {
-    let first = str(input.first_name);
-    let last = str(input.last_name);
+    const callSid = str(input.call_sid);
+    const scope = patientScope(input.patient_scope);
+    // A half handed over on an earlier invocation fills this one's gap — see
+    // NAME_CARRY_FIRST. Before the record and before the ask, so neither the
+    // record nor the caller is consulted for a name this call already gave.
+    let { first, last } = carryNameHalves(callSid, scope, str(input.first_name), str(input.last_name));
     const dob = str(input.date_of_birth);
     const phone = str(input.callback_number);
-    const callSid = str(input.call_sid);
     const description = requestDescription(input);
-    const redirect = recordsLineRedirect(description);
+    // The records line's own reading of the request (v147, #381), decided once
+    // on these words. A third party's document request or a request with no
+    // name may still be kept in Medical Records below — `redirect` is the
+    // decision after those holds.
+    const lineRedirect = recordsLineRedirect(description);
 
     /**
      * THE NAME: the record first, one ask second, the request regardless.
@@ -454,11 +634,22 @@ registerTool({
         // would still be the patient.
         console.info('[records] patient name taken from the verified record for this call');
       } else if (gateRefusalsSoFar(callSid, RECORDS_TOOL, PATIENT_NAME_ASK) >= RECORDS_ASK_LIMIT) {
+        // The app takes both names or neither, so a half cannot be SENT — but
+        // it is what the caller gave, so it goes to the clerk on the staff
+        // line rather than nowhere (v127). Never the description: an SMS body.
+        const half = first
+          ? `first name given on the call: ${first}`
+          : last
+            ? `last name given on the call: ${last}`
+            : '';
         first = '';
         last = '';
-        nameNote = NAME_NOT_CAPTURED_NOTE;
+        nameNote = half
+          ? `${NAME_NOT_CAPTURED_NOTE} Only part of it reached the filing — ${half}.`
+          : NAME_NOT_CAPTURED_NOTE;
         console.warn(
-          `[RECORDS] patient name not captured and the ask is spent — filing to Medical Records without one (${callSid || 'no sid'})`,
+          `[RECORDS] patient name not captured and the ask is spent — filing to Medical Records without one` +
+            `${half ? ' (the half that was given is on the staff line)' : ''} (${callSid || 'no sid'})`,
         );
       } else {
         noteGateRefusal(callSid, RECORDS_TOOL, PATIENT_NAME_ASK);
@@ -520,7 +711,7 @@ registerTool({
     // can reconstruct this after the call ends, so the call is the only place
     // it can be got.
     const requesterRaw = str(input.requester);
-    if (!requesterRaw && !redirect) {
+    if (!requesterRaw && !lineRedirect) {
       return missing(
         ['requester'],
         'And just so I route this correctly — are you the patient yourself, or calling on someone\'s behalf?',
@@ -533,6 +724,82 @@ registerTool({
     // offered a records form either. Decided above, before the channel ask,
     // on the same words the redirect below reads, so the one question this
     // tool adds is never put to somebody who rang about an appointment.
+    const { namesADocument, scheduledOnlyByAnExamName } = await import('./queueRouting');
+    /**
+     * A THIRD PARTY ASKING FOR A PATIENT'S RECORDS OR REPORT IS NOT BOOKING
+     * AN EXAM — v127.
+     *
+     * Measured 2026-10-12..10-26 (Support Center `voice_agent_api_logs`, Hub
+     * `call_logs`): seven records-lane calls sent a doctor's office's, a
+     * health plan's or another third party's request for a patient's exam
+     * REPORT to the HVA Hub (dept 9, type 32, reason 146) six times and to
+     * department 3 once. Every one carried `requestPathway` third_party_*.
+     * The cause was in `detectCrossQueue`: scheduling is checked FIRST and
+     * `'eye exam'` is a reason-146 cue — so "the most recent eye exam report"
+     * left Medical Records before the word "report" was read. The records
+     * line's own reading since v147 (#381, `recordsLineRedirect`) has the
+     * same gap: its document vocabulary has no "exam report", so that request
+     * still reads as scheduling and goes to the HVA Hub.
+     *
+     * So on THIS line, a provider, plan or other third party whose words name
+     * a document stays in Medical Records when the records line would send it
+     * to the HVA Hub — and only then; every other redirect `recordsLineRedirect`
+     * decides stands. Nothing changes for a patient, nor for a third party who
+     * names no document — a doctor's office booking a mutual patient's exam
+     * still reaches the Hub. `detectCrossQueue`'s cue lists are untouched
+     * fleet-wide; changing them is open item #99.
+     *
+     * THE DOCUMENT WORD IS THE NARROW ONE, `namesADocument`, NOT THE
+     * RECORDS-LINE HOLD'S (Codex P1 on #376). That hold is substring matching
+     * over `note`, `report` and `record`, safe only while scheduling is read
+     * first; read here, ahead of scheduling, it kept "please note the patient
+     * needs to reschedule", "calling to report that the patient needs an eye
+     * exam" and "calling on a recorded line" out of the Hub.
+     *
+     * AND ONLY WHEN THE EXAM'S NAME WAS THE WHOLE SCHEDULING SIGNAL (Codex P2
+     * on #376, head `8e11d5e`). A third party who mentions a document and
+     * also asks to book, move, cancel or confirm — "we received the eye exam
+     * report and need to reschedule the patient" — is scheduling, and goes to
+     * the Hub as it always has. See `EXAM_NAME_CUES`.
+     */
+    const thirdPartyRecordsHold =
+      lineRedirect !== null &&
+      lineRedirect.departmentId === HVA_HUB_DEPARTMENT_ID &&
+      cap.pathway !== 'roa_patient' &&
+      namesADocument(description) &&
+      scheduledOnlyByAnExamName(description);
+    if (thirdPartyRecordsHold) {
+      console.info(
+        `[records] a third party's records request held in Medical Records against the ` +
+          `${lineRedirect.requestReason} reading (${cap.pathway})`,
+      );
+    }
+    const redirect = thirdPartyRecordsHold ? null : lineRedirect;
+    /**
+     * BELT AND BRACES: A REQUEST WITH NO NAME CANNOT LEAVE MEDICAL RECORDS —
+     * v127.
+     *
+     * The ticketing app files a nameless request in Medical Records only, and
+     * answers every other department HTTP 400 (`namelessRequestVerdict`). By
+     * this point the name gate has settled it: both names, or none (the ask
+     * is spent). So a redirected request with none is a payload the app WILL
+     * refuse — and a refusal on a call is a caller told their request was not
+     * taken. It files in Medical Records instead, with a staff line saying
+     * where it reads as belonging.
+     *
+     * `redirect` keeps its meaning for every question and form below — the
+     * request still reads as another team's, so nobody is asked for a signing
+     * link or a records destination over it. Only where it FILES changes.
+     */
+    const heldForNoName = redirect !== null && !(first && last);
+    const routedAway = heldForNoName ? null : redirect;
+    if (heldForNoName) {
+      console.warn(
+        `[RECORDS] reads as ${redirect.departmentName} (dept ${redirect.departmentId}) but carries no patient ` +
+          `name — kept in Medical Records, the only department that files without one (${callSid || 'no sid'})`,
+      );
+    }
+
     // THE LINK, decided here so the on-clock gate below can stand down for it.
     // Only an on-clock requester ever gets one; a third party's `form_channel`
     // is ignored rather than refused, because the model may send it and the
@@ -942,12 +1209,13 @@ registerTool({
     // cataract surgery"), and queueRouting holds those here. What it still
     // catches is the genuinely different request — someone who reached records
     // and wants an appointment.
-    // `redirect` was decided above the channel ask, on these same words.
-    const filedDepartmentId = redirect?.departmentId ?? MEDICAL_RECORDS_DEPARTMENT_ID;
-    const filedTypeId = redirect?.requestTypeId ?? cls.requestTypeId;
-    const filedReasonId = redirect?.requestReasonId ?? cls.requestReasonId;
-    const filedDescription = redirect
-      ? `${redirect.note}\n\n${cleanDescription.value}`
+    // `redirect` was decided above the channel ask, on these same words;
+    // `routedAway` is that redirect unless it was kept here for want of a name.
+    const filedDepartmentId = routedAway?.departmentId ?? MEDICAL_RECORDS_DEPARTMENT_ID;
+    const filedTypeId = routedAway?.requestTypeId ?? cls.requestTypeId;
+    const filedReasonId = routedAway?.requestReasonId ?? cls.requestReasonId;
+    const filedDescription = routedAway
+      ? `${routedAway.note}\n\n${cleanDescription.value}`
       : cleanDescription.value;
     /**
      * THE STATUS GOES FIRST, ABOVE THE CALLER'S OWN WORDS.
@@ -975,10 +1243,11 @@ registerTool({
      */
     const filedDescriptionWithDobStatus = filedDescription;
     const dobStaffNote = dobStatus ? dobStatusNote(dobStatus) : undefined;
-    if (redirect) {
+    const keptNote = heldForNoName && redirect ? keptForNoNameNote(redirect) : undefined;
+    if (routedAway) {
       console.info(
-        `[records] routed to ${redirect.departmentName} (dept ${redirect.departmentId}) — ` +
-          `${redirect.requestReason}`,
+        `[records] routed to ${routedAway.departmentName} (dept ${routedAway.departmentId}) — ` +
+          `${routedAway.requestReason}`,
       );
     }
 
@@ -1032,34 +1301,63 @@ registerTool({
       // 'roa_patient'. Extra fields are ignored by an endpoint that does not
       // read them yet, which is why they are safe to send today — but the
       // ticketing app is the half that has to change for the clock to be right.
-      ...(!redirect ? {
-        requestorType: cap.requesterType,
-        // LOGGED, CLOCK NOT STARTED when the link goes out: the signed form is
-        // the written request and starts the clock on the same case (owner,
-        // 2026-09-27). A redirected ticket never carries a form — it left
-        // Medical Records.
-        requestPathway: formChannel && !redirect ? 'pending_authorization' : cap.pathway,
-        capClockApplies: formChannel && !redirect ? false : cap.onClock,
-        ...(formChannel && !redirect ? { formChannel } : {}),
-        // A NAME, not a description. The ticketing agent, 2026-08-13: "Send
-        // requestorName even when the requester is the patient. Zero of 470 rows
-        // carry one. The name is the evidence that a classification was made;
-        // without it an audit cannot tell 'confirmed patient' from 'defaulted to
-        // patient', which is the hole we are climbing out of."
-        //
-        // "I am the patient" is not evidence of anything. When the requester IS
-        // the patient the name is theirs; otherwise it is whatever they said,
-        // which is where the organisation usually sits ("SCAN Health Plan",
-        // "an attorney at Lexitas").
-        requestorName:
-          cap.requesterType === 'patient' ? `${first} ${last}`.trim() || undefined : requesterRaw,
-      } : {}),
+      //
+      // A ticket ROUTED AWAY carries no records metadata at all (v147, #381):
+      // it left Medical Records, so no pathway, clock, form or requestor.
+      //
+      // NOT SENT for a request KEPT here for want of a name whose requester is
+      // ON the clock (v127). It reads as another team's — an appointment, a
+      // pair of glasses — and the app takes a pathway the voice side states
+      // as a classification no person needs to confirm (`decidePathway`,
+      // `needsReview: false`), so sending `roa_patient` would open a clocked
+      // case on the § V.B population for something that is not an access
+      // request. Left off, the app puts the case on `pathway_review` and a
+      // person decides — where the teardown stub for the same call lands
+      // today. A third party's stays: off the clock, off that report, and
+      // who asked is what this tool knows on every filing.
+      ...(routedAway
+        ? {}
+        : {
+            ...(heldForNoName && cap.onClock
+              ? {}
+              : {
+                  requestorType: cap.requesterType,
+                  // LOGGED, CLOCK NOT STARTED when the link goes out: the signed form is
+                  // the written request and starts the clock on the same case (owner,
+                  // 2026-09-27). A redirected ticket never carries a form — it left
+                  // Medical Records.
+                  requestPathway: formChannel && !redirect ? 'pending_authorization' : cap.pathway,
+                  capClockApplies: formChannel && !redirect ? false : cap.onClock,
+                }),
+            ...(formChannel && !redirect ? { formChannel } : {}),
+            // A NAME, not a description. The ticketing agent, 2026-08-13: "Send
+            // requestorName even when the requester is the patient. Zero of 470 rows
+            // carry one. The name is the evidence that a classification was made;
+            // without it an audit cannot tell 'confirmed patient' from 'defaulted to
+            // patient', which is the hole we are climbing out of."
+            //
+            // "I am the patient" is not evidence of anything. When the requester IS
+            // the patient the name is theirs; otherwise it is whatever they said,
+            // which is where the organisation usually sits ("SCAN Health Plan",
+            // "an attorney at Lexitas").
+            requestorName:
+              cap.requesterType === 'patient' ? `${first} ${last}`.trim() || undefined : requesterRaw,
+          }),
       callData: {
         agentUsed: 'records',
         ...(callSid ? { callSid } : {}),
         // Staff-only. Never the description — that is an SMS body.
-        ...(nameNote || dobStaffNote || callbackExtension
-          ? { transcript: [nameNote, dobStaffNote, callbackExtension ? `Callback extension: ${callbackExtension}` : null].filter(Boolean).join('\n') }
+        ...(nameNote || dobStaffNote || keptNote || callbackExtension
+          ? {
+              transcript: [
+                keptNote,
+                nameNote,
+                dobStaffNote,
+                callbackExtension ? `Callback extension: ${callbackExtension}` : null,
+              ]
+                .filter(Boolean)
+                .join('\n'),
+            }
           : {}),
       },
       // Guarded: callSid can be a sentinel ("unknown", "latest", ...), never
@@ -1068,17 +1366,108 @@ registerTool({
       // one call needs two keys, or the second comes back as the first's
       // ticket. Not a schema field, so no model on any lane is offered it.
       // Codex P1, #351.
-      ...(isTwilioCallSid(callSid) ? { idempotencyKey: `call-${callSid}${patientScope(input.patient_scope)}` } : {}),
+      ...(isTwilioCallSid(callSid) ? { idempotencyKey: `call-${callSid}${scope}` } : {}),
     });
 
     if (!res.success || !res.ticketNumber) {
-      return postFailureToolResult(res, 'file_records_ticket');
+      const failed = postFailureToolResult(res, 'file_records_ticket');
+      // A field the tool can ask for is a question, and an outage the outbox
+      // is holding is already persisted: both are answered as before. A
+      // queued filing is filed as far as this call is concerned, so its
+      // carried name halves are forgotten like a filed one's — or the next
+      // patient on the call inherits this one's surname (Codex P2 on #376).
+      if (!res.terminal || 'missingFields' in failed) {
+        if (res.queued) forgetNameHalves(callSid, scope);
+        return failed;
+      }
+
+      // A refusal the caller cannot fix. Log the request BEFORE anybody is
+      // told it is logged — see RECOVERED_AFTER_REFUSAL_FIX.
+      const other = otherReasonFor(MEDICAL_RECORDS_DEPARTMENT_ID)!;
+      const recovery = await createTicketDurable({
+        departmentId: MEDICAL_RECORDS_DEPARTMENT_ID,
+        requestTypeId: other.requestTypeId,
+        requestReasonId: other.requestReasonId,
+        patientPhone: normalizePhone(callbackBase),
+        preferredContactMethod: 'phone',
+        description: SWEPT_TICKET_DESCRIPTION,
+        priority: 'high',
+        callData: {
+          agentUsed: 'records',
+          ...(callSid ? { callSid } : {}),
+          transcript: recoveryAfterRefusalNote({
+            statusCode: res.statusCode,
+            redirect,
+            name: `${first} ${last}`.trim() || undefined,
+            dob: parts ? `${parts.month}/${parts.day}/${parts.year}` : undefined,
+            requester: requesterRaw || cap.requesterType,
+            request: cleanDescription.value,
+            phone: normalizePhone(callbackBase),
+            callSid,
+            staffLines: [
+              keptNote,
+              nameNote,
+              dobStaffNote,
+              callbackExtension ? `Callback extension: ${callbackExtension}` : undefined,
+            ],
+            office: cleanLocation || undefined,
+            provider: cleanProvider || undefined,
+            email: str(input.email) || undefined,
+          }),
+        },
+        // The same key as the refused POST and as the teardown sweep: the app
+        // stores a key only once a ticket exists, so the refusal left none,
+        // and the sweep collapses onto this ticket instead of opening another.
+        ...(isTwilioCallSid(callSid) ? { idempotencyKey: `call-${callSid}${scope}` } : {}),
+      });
+      const queued = (recovery as { queued?: boolean }).queued === true;
+      if (!(recovery.success && recovery.ticketNumber) && !queued) {
+        console.error(
+          `[records] ✗✗ the filing AND its recovery were both turned down — this request is NOT logged ` +
+            `(${callSid || 'no call reference'})`,
+        );
+        return { ...failed, fix: REFUSAL_NOT_LOGGED_FIX } as ToolResult;
+      }
+      console.warn(
+        `[records] filing refused (HTTP ${res.statusCode ?? '?'}) — recovered as ` +
+          `${recovery.ticketNumber ?? 'a queued ticket'} in Medical Records (${callSid || 'no call reference'})`,
+      );
+      forgetNameHalves(callSid, scope);
+      // A general ticket for a person to route; no link goes out from here.
+      noteCallFact(callSid, RECORDS_RECOVERED_FACT);
+      return {
+        success: true,
+        ...(recovery.ticketNumber
+          ? {
+              ticket_number: recovery.ticketNumber,
+              message:
+                `Filed as ${recovery.ticketNumber}. Read the ticket number back to the caller and say the ` +
+                'team will follow up. Do not promise a date.',
+            }
+          : {
+              filed_pending: true,
+              message:
+                'Their request has been recorded and our team will follow up. Say that. There is no ticket ' +
+                'number yet — do not read one back, do not invent one, and do not ask them to call back.',
+            }),
+        recovered_after_refusal: true,
+        form_applies: false,
+        fix: RECOVERED_AFTER_REFUSAL_FIX,
+      } as ToolResult;
     }
+
+    // The request filed, so the halves it carried have done their job.
+    forgetNameHalves(callSid, scope);
 
     // A records request exists on this call: `send_records_form` may now
     // re-send. A request routed out of Medical Records is not one — it
-    // carries no form — so it gets its own fact and the re-send refuses it.
-    noteCallFact(callSid, redirect ? RECORDS_ROUTED_AWAY_FACT : RECORDS_FILED_FACT);
+    // carries no form — so it gets its own fact and the re-send refuses it;
+    // so does one kept here for want of a name, which reads as another
+    // team's and was never offered a form.
+    noteCallFact(
+      callSid,
+      routedAway ? RECORDS_ROUTED_AWAY_FACT : heldForNoName ? RECORDS_HELD_NO_FORM_FACT : RECORDS_FILED_FACT,
+    );
 
     const sendForm = Boolean(formChannel) && !redirect;
     const formSent = sendForm && res.form?.sent === true;
@@ -1113,7 +1502,7 @@ registerTool({
       // department 3's catch-all, which is not on the ticket and not the
       // department's. The number the agent reads back has to be the number a
       // person will find.
-      request_reason: redirect ? redirect.requestReason : cls.requestReason,
+      request_reason: routedAway ? routedAway.requestReason : cls.requestReason,
       request_reason_id: filedReasonId,
       // Say plainly what is missing, so the agent can still ask before the call
       // ends rather than a clerk chasing it tomorrow.
@@ -1122,22 +1511,30 @@ registerTool({
       // Not on a routed-away ticket: there is no records destination to ask
       // for, and the note would contradict the `fix` below (Codex P2 on #356).
       ...(deliverTo || redirect ? {} : { note_destination: 'No destination captured — ask where these should be sent.' }),
-      ...(redirect
+      ...(routedAway
         ? {
-            routed_to: redirect.departmentName,
-            routed_department_id: redirect.departmentId,
+            routed_to: routedAway.departmentName,
+            routed_department_id: routedAway.departmentId,
             form_applies: false,
             // The model channel, not `message` (v43). The link may already
             // have been offered on the prompt's say-so before this answer.
             fix:
-              `This request was routed to the ${redirect.departmentName} team, not Medical Records, so no ` +
+              `This request was routed to the ${routedAway.departmentName} team, not Medical Records, so no ` +
               `signing form applies to it. Do not offer a link, do not ask text or email, and do not call ` +
               `send_records_form. If you already offered a link, tell the caller no form is needed for this ` +
-              `request and that the ${redirect.departmentName} team will follow up.`,
+              `request and that the ${routedAway.departmentName} team will follow up.`,
           }
-        : {}),
-      message: redirect
-        ? `Filed as ${res.ticketNumber} with our ${redirect.departmentName} team. Read the ticket number back and say that team will follow up.`
+        : heldForNoName
+          ? {
+              form_applies: false,
+              fix:
+                'This request was filed with the team, and no signing form applies to it. Do not offer a ' +
+                'link, do not ask text or email, and do not call send_records_form. If you already offered ' +
+                'a link, tell the caller no form is needed for this request and that the team will follow up.',
+            }
+          : {}),
+      message: routedAway
+        ? `Filed as ${res.ticketNumber} with our ${routedAway.departmentName} team. Read the ticket number back and say that team will follow up.`
         : formMessage ??
           `Filed as ${res.ticketNumber}. Read the ticket number back to the caller. Do not promise a date or say the records have been sent.`,
     };
@@ -1196,6 +1593,31 @@ registerTool({
     const channel = str(input.channel).toLowerCase();
     if (channel !== 'sms' && channel !== 'email') {
       return refuse('channel must be "sms" or "email"', { fix: 'Call again with channel "sms" or "email".' });
+    }
+    if (!callFactNoted(callSid, RECORDS_FILED_FACT) && callFactNoted(callSid, RECORDS_RECOVERED_FACT)) {
+      // The app refused the filing and a recovery ticket holds it (v127). It
+      // opened no case for a link to belong to, and a person routes it — so
+      // the caller is told the team will follow up, never that there is no
+      // form, which is false for a patient's own request.
+      return refuse('the request on this call was logged as a recovery ticket', {
+        message: 'The team will follow up with you about that.',
+        fix:
+          'The filing on this call was refused and logged as a recovery ticket (recovered_after_refusal on the ' +
+          'filing), so no link can be sent from this call. Do not offer one again and do not call ' +
+          'send_records_form again.',
+      });
+    }
+    if (!callFactNoted(callSid, RECORDS_FILED_FACT) && callFactNoted(callSid, RECORDS_HELD_NO_FORM_FACT)) {
+      // Kept in Medical Records for want of a name, but it reads as another
+      // team's and no form was ever offered for it (v127). Same refusal as
+      // the routed-away one below, without its "another team", which is false
+      // here.
+      return refuse('the request on this call carries no signing form', {
+        message: 'There is no form to sign for this request — the team will follow up with you.',
+        fix:
+          'The request filed on this call has no signing form (form_applies was false on the filing). ' +
+          'Do not offer a link again and do not call send_records_form again.',
+      });
     }
     if (!callFactNoted(callSid, RECORDS_FILED_FACT) && callFactNoted(callSid, RECORDS_ROUTED_AWAY_FACT)) {
       // The request on this call left Medical Records, so there is nothing to
