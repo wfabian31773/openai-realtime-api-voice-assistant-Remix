@@ -1017,6 +1017,22 @@ import { callEnvironment } from "./callRecord";
  * Merged to main as #408 (2f72c87).
  * Apply add_operator_scenario_preapproval.sql separately; not applied here. */
 /**
+ * v152 — THE THIRD PARTY'S REPORT STAYS IN RECORDS (2026-10-26; renumbered from v117 to v118, to v127, to v134, to v138 on 2026-10-28, to v150 on 2026-10-29, then to v152 on 2026-10-30 because main took v117 in #379, v126 in #394, v128–v131 in #389, #386, #387 and #388, and v132, v134, v135 and v136 in #390, #396, #392 and #393, #397–#407 took v140–v146 and #381, #384 and #408 took v147, v148 and v151 on main; v149 is claimed by #391 and v151 also by #404 on their open branches). On the
+ * records line, a provider's, plan's or other third party's request whose
+ * words name a document is no longer sent to the HVA Hub on a scheduling cue
+ * ("the most recent eye exam REPORT" read as "schedule an eye exam"); a
+ * request still redirected with no patient name files in Medical Records
+ * instead of drawing the app's 400; a refusal the caller cannot fix tells the
+ * model, in `fix`, that nothing is lost and never to say "call back"; and a
+ * name given in two halves across invocations reaches the payload. Seven
+ * records-lane calls, 2026-10-12..10-26. A payload change on the ticket path
+ * of the department under the CAP, so it gets its own marker. On top of v151
+ * (#408), which contains v148 (#384) and v147 (#381); the holds read #381's `recordsLineRedirect`. The recovery ticket carries the callback
+ * number without its extension and the extension in the staff note, as
+ * v132's filing does. `src/tools/medicalRecordsTools.ts`,
+ * `thirdPartyRecordsStayInRecords.test.ts`. Merged to main as #376 (44b037c).
+ */
+/**
  * v153 — THE SILENCE, A LATER FILING, AND THE A1 OFFICE AND NAME (2026-10-30).
  * One marker for what was written as a v148 + v149 + v150 stack on #404: #384
  * took v148 on main, #391 holds v149, #408 took v151 on main and #376 took
@@ -1029,8 +1045,8 @@ import { callEnvironment } from "./callRecord";
  * (ticketing-app #414). (c) No queue prompt names a sample office and the
  * ask script asks for the first and last name. The office carry this branch
  * also wrote is #384's confirmed clinic on main and was dropped in the merge.
- * Above main's v151 (#408, 2f72c87), which contains v148 (#384,
- * 117c2d5). No migration; production impact
+ * Above main's v152 (#376, 44b037c), which contains v151 (#408, 2f72c87)
+ * and v148 (#384, 117c2d5). No migration; production impact
  * remains unmeasured.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
