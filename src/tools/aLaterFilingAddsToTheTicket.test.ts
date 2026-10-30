@@ -106,6 +106,21 @@ describe('the same request again', () => {
 });
 
 describe('a later filing that carries something new', () => {
+  // Codex P1 on #404: a later filing that only corrects who the request is
+  // about (a spelled surname, a name given after the first filing went out
+  // unnamed) used to read as the same request and was never sent.
+  it('a later filing that only corrects the name is sent on', async () => {
+    const { create } = await fileFirst();
+    create.mockResolvedValueOnce(
+      { success: true, ticketNumber: 'VA-90001', cached: true, detailsAdded: true } as never,
+    );
+
+    const later = (await runTool('file_tech_ticket', { ...BASE, last_name: 'Techman' })) as Result;
+
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(later).toMatchObject({ already_filed: true, details_added: true });
+  });
+
   it('is sent on with the call’s own key, and is told it was added when the app says so', async () => {
     const { create } = await fileFirst();
     create.mockResolvedValueOnce(
@@ -202,6 +217,18 @@ describe('the fingerprint', () => {
     expect(filingFingerprint(params({ patientPhone: '5555550199' }))).not.toBe(base);
     expect(filingFingerprint(params({ locationId: 4401 }))).not.toBe(base);
     expect(filingFingerprint(params({ providerId: 77 }))).not.toBe(base);
+  });
+
+  it('sees who the request is about: a name, a date of birth, the requester', () => {
+    const named = filingFingerprint(params({ patientFirstName: 'Testcaller', patientLastName: 'Tech' }));
+    expect(filingFingerprint(params({ patientFirstName: 'TESTCALLER ', patientLastName: 'tech' }))).toBe(named);
+    expect(named).not.toBe(filingFingerprint(params()));
+    expect(filingFingerprint(params({ patientLastName: 'Techman' }))).not.toBe(filingFingerprint(params({ patientLastName: 'Tech' })));
+    expect(filingFingerprint(params({ patientBirthYear: '1950', patientBirthMonth: '01', patientBirthDay: '01' })))
+      .not.toBe(filingFingerprint(params()));
+    expect(filingFingerprint(params({ requestorType: 'personal_representative' }))).not.toBe(filingFingerprint(params()));
+    expect(filingFingerprint(params({ requestPathway: 'pending_authorization' }))).not.toBe(filingFingerprint(params()));
+    expect(filingFingerprint(params({ capClockApplies: false }))).not.toBe(filingFingerprint(params()));
   });
 });
 

@@ -798,6 +798,29 @@ describe("an agent that stalls on a heard caller is asked to carry on (v151)", (
     expect(h.session.requestResponse).not.toHaveBeenCalled();
   });
 
+  // Codex P2 on #404: a request put as an instruction, or a question followed
+  // by reassurance, hands the caller the turn as surely as a closing "?".
+  it.each([
+    "Please spell your last name for me, letter by letter.",
+    "What is your date of birth? Take your time.",
+    "Go ahead with your date of birth when you're ready.",
+    "Please tell me the name of the medication.",
+  ])("a line that asks the caller for something is their turn: %s", async (line) => {
+    const h = await heardThenStalled(line);
+    h.timers.fire(WINDOW);
+    expect(h.session.requestResponse).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    "Let me make sure the team has your details.",
+    "Thank you. I'll take your request as given, and the team will match it to your chart.",
+    "Let me confirm that for you.",
+  ])("a line that asks for nothing is still a stall: %s", async (line) => {
+    const h = await heardThenStalled(line);
+    h.timers.fire(WINDOW);
+    expect(h.session.requestResponse).toHaveBeenCalledTimes(1);
+  });
+
   it.each([
     ["a hangup is on its way", "endRequested", true],
     ["a goodbye grace window is running", "goodbyeTimer", {}],

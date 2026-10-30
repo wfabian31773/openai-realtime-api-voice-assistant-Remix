@@ -298,6 +298,16 @@ export const SILENCE_PROMPT_LINE = "I'm sorry, I cannot hear you. Are you still 
 export const AGENT_STALL_NUDGE_LIMIT = 2;
 
 /**
+ * A LINE THAT HANDS THE CALLER THE TURN. A question anywhere in it ("What is
+ * your date of birth? Take your time."), or a request put as an instruction
+ * ("Please spell your last name for me."). After one of these the silence is
+ * the caller's, and the agent is not nudged (Codex P2 on #404). A line it
+ * misses fails toward today's behaviour: at most two nudges.
+ */
+const ASKS_THE_CALLER =
+  /\?|\b(?:spell|repeat)\b|\b(?:tell|give|share|read)\s+me\s+(?:your|the)\b|\bgo ahead\b|\btake your time\b/i;
+
+/**
  * How long the caller may say nothing before each prompt.
  *
  * A JUDGEMENT, not a measurement, and nothing in production can inform it
@@ -2530,7 +2540,7 @@ export class VoiceCallBridge {
     // A caller line last means the agent answered it with no words at all.
     if (!last.startsWith("AGENT: ")) return true;
     const said = last.slice(7).replace(/\[interrupted\]\s*$/, "").trim();
-    return !/\?["'”’)]*$/.test(said);
+    return !ASKS_THE_CALLER.test(said);
   }
 
   private clearDeadAir(): void {

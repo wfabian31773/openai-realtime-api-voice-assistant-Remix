@@ -172,6 +172,15 @@ export function filingFingerprint(p: CreateTicketParams): string {
     (p.lastProviderSeen ?? '').trim().toLowerCase(),
     p.preferredContactMethod ?? '',
     (p.patientEmail ?? '').trim().toLowerCase(),
+    // Who the request is about, so a later filing that only adds a name or a
+    // date of birth (the records lane can file unnamed first) is sent on, not
+    // read as the same request (Codex P1 on #404).
+    (p.patientFirstName ?? '').trim().toLowerCase(),
+    (p.patientLastName ?? '').trim().toLowerCase(),
+    [p.patientBirthYear, p.patientBirthMonth, p.patientBirthDay].map((x) => (x ?? '').trim()).join('-'),
+    p.requestorType ?? '',
+    p.requestPathway ?? '',
+    p.capClockApplies ?? null,
   ]);
   return createHash('sha256').update(canonical).digest('hex').slice(0, 12);
 }
@@ -244,7 +253,8 @@ export function repeatFilingFields(res: DurableCreateResult): Record<string, unk
     details_added: false,
     message: `Already filed as ${n}.`,
     fix:
-      `This request was already filed on this call as ${n}, with these same details. Do not file ` +
+      `This request was already filed on this call as ${n}, and the ticket system found nothing in ` +
+      'this filing to add to it. Do not file ' +
       'it again, and do not tell the caller it is the same or a second ticket. If they have not ' +
       'heard the number yet, read it once; otherwise carry on with the call.',
   };
