@@ -1,3 +1,4 @@
+import { ticketIdentityFields, validatedPatientFor } from './ticketIdentity';
 /**
  * The tools a Surgery-Coordination agent needs, and nothing else.
  *
@@ -35,7 +36,7 @@ import { loggableLookupError } from '../services/loggableTicketingError';
 import { gateRefusalsSoFar, noteGateRefusal } from './gateAttempts';
 import { decideDobEscape, dobStatusNote, dobEscapeMarker, type DobStatus } from './dobEscape';
 import { correctSurgeryIntake, isSurgeryRequest, withoutSurgeryFields } from './requestClassification';
-import { usualOfficeFor, verifiedDobFor } from './verifiedIdentity';
+import { usualOfficeFor, verifiedDobFor, verifiedIdentityFor } from './verifiedIdentity';
 import { spokenDobFor } from './spokenDob';
 
 /** This tool's own name, for the per-call gate counter. */
@@ -272,8 +273,7 @@ registerTool({
     const { sanitizeProviderName, sanitizeLocationName } = await import(
       '../services/ticketFieldSanitizers'
     );
-    const recordOffice = filedDepartmentId === 1 ? usualOfficeFor(callSid, first, last, dob) : undefined;
-    const cleanLocation = sanitizeLocationName(recordOffice || str(input.location)).value;
+    const cleanLocation = sanitizeLocationName(str(input.location)).value;
     const cleanSurgeon = filedOnSurgeryQueue ? sanitizeProviderName(str(input.surgeon)).value : '';
 
     const { ticketingApiClient, lookupWasUnavailable } = await import(
@@ -616,12 +616,15 @@ registerTool({
          * still be true, because it only describes the phone result. We would
          * attach that person's clinician. Found in review, 2026-08-18.
          */
-        const ctx = await scheduleLookupService.lookupByNameAndDOB(
-          first,
-          last,
-          `${parts.year}-${parts.month}-${parts.day}`,
-          { logIdentifiers: false },
-        );
+        const locked = validatedPatientFor(callSid, first, last, dob) ? verifiedIdentityFor(callSid) : undefined;
+        const ctx = locked
+          ? { patientFound: true, identity: { unique: true }, lastPhysicianSeen: locked.lastPhysicianSeen, lastProviderSeen: locked.lastProviderSeen }
+          : await scheduleLookupService.lookupByNameAndDOB(
+              first,
+              last,
+              `${parts.year}-${parts.month}-${parts.day}`,
+              { logIdentifiers: false },
+            );
         if (ctx.patientFound && ctx.identity?.unique !== false) {
           const rungs: Array<['patient_record' | 'last_clinician', string | undefined]> = [
             ['patient_record', ctx.lastPhysicianSeen],
@@ -765,6 +768,7 @@ registerTool({
     }
 
     const res = await createTicketDurable({
+      ...ticketIdentityFields(callSid, first, last, str(input.date_of_birth)),
       departmentId: filedDepartmentId,
       requestTypeId: filedTypeId,
       requestReasonId: filedReasonId,
@@ -794,6 +798,8 @@ registerTool({
         : {}),
       ...(lookup.locationId ? { locationId: lookup.locationId } : {}),
       ...(cleanLocation ? { locationOfLastVisit: cleanLocation } : {}),
+      locationSource: input.locationSource === 'history' ? 'history' : 'caller',
+      locationIdSource: input.locationSource === 'history' ? 'history' : 'caller',
       /**
        * THE SURGEON GOES ONLY ON A SURGERY TICKET.
        *

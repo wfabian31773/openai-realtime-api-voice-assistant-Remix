@@ -656,9 +656,35 @@ is reading noise.
 
 ---
 
-## Current branch — operator SMS send (2026-10-29)
+## Current branch — Identity gate (#384, 2026-10-28)
 
-This branch carries **`voice-runtime-v146-operator-sms-send-20261029`**, above v145 (#405) and the v144 operator-line base (#402). The dedicated bot-only `POST /api/plugin/v1/operator-line/sms/send` uses the env operator from-number with no business-hours window or daily/peak caps. Owner destinations send immediately; other destinations require approval and later commit from the operator number. STOP/voice/operator opt-outs, locked initiator provenance, and existing atomic SMS idempotency remain enforced. General `prepare_sms`, SI and patient lanes retain their existing policy. No new migration is needed for v146. Notifications carry signed stable event IDs and attempt numbers, with durable one-shot claims and one retry. Token-scoped SMS idempotency keys retain the original approval/send result even if the bot regenerates its wording. Apply `migrations/add_operator_notification_claims.sql` separately; it has not been applied. Production impact remains unmeasured. See `docs/operator-line-inbound.md`.
+This branch carries **`voice-runtime-v148-identity-gate-20261029`**, on top
+of v146 (#407, main, `04e1e80`); v147 is #381, v149 is #391 and v150 is #376 on their open branches. Verified identity is carried through ticket filing and
+teardown/sweep recovery. Ticket location provenance distinguishes caller-named
+offices from held identity, schedule, phone pre-context and appointment history.
+Both ticket client endpoints filter Optical's carried appointments and
+history-derived routing text/IDs, including no-IVR, after-hours, answering
+service, redirects and durable retries. Undefined departments use the same
+filter because the server can derive Optical. Caller-named offices are preserved;
+explicit other departments and the held identity keep full history. Surgery
+still files without a clinic when none is known. Answering-service DOB confirmation
+compares against the current schedule patient's DOB, never the original phone
+candidate in the ledger; successful confirmation carries that current patient's
+name and DOB into the ledger. Answering-service and no-IVR share the identity
+check before reusing cached schedules for appointment reads or ticket enrichment.
+The no-IVR v135 (#392) phone-candidate DOB confirmation remains supported. V2 and
+urgent after-hours have no ledger-based DOB confirmation shortcut. Prompt/tool
+caps remain 15,000 / 13,200 characters. No migration; production impact is
+unmeasured. Use v148 when verifying this branch.
+
+The v136 base (#393, main, `9bfccda`) carries
+**`voice-runtime-v136-pcp-unclassified-floor-only-20261028`** (renumbered
+from v126), on top of v135 (#392, `6ae60e33`). The PCP model cannot select
+`unclassified_call`; the teardown floor still uses it when no classification
+was recorded. The earlier branch notes below are retained as history.
+## `main` base — operator SMS send, v146 (2026-10-29)
+
+`main` carries **`voice-runtime-v146-operator-sms-send-20261029`** (#407, `04e1e80`), above v145 (#405) and the v144 operator-line base (#402). The dedicated bot-only `POST /api/plugin/v1/operator-line/sms/send` uses the env operator from-number with no business-hours window or daily/peak caps. Owner destinations send immediately; other destinations require approval and later commit from the operator number. STOP/voice/operator opt-outs, locked initiator provenance, and existing atomic SMS idempotency remain enforced. General `prepare_sms`, SI and patient lanes retain their existing policy. No new migration is needed for v146. Notifications carry signed stable event IDs and attempt numbers, with durable one-shot claims and one retry. Token-scoped SMS idempotency keys retain the original approval/send result even if the bot regenerates its wording. Apply `migrations/add_operator_notification_claims.sql` separately; it has not been applied. Production impact remains unmeasured. See `docs/operator-line-inbound.md`.
 
 ## The v143 base — sorry, only a message (2026-10-29)
 
@@ -2449,6 +2475,7 @@ voice-runtime-v143-sorry-only-a-message-20261029
 voice-runtime-v144-operator-line-inbound-20261029
 voice-runtime-v145-owner-sms-exempt-notifier-idempotency-20261029
 voice-runtime-v146-operator-sms-send-20261029
+voice-runtime-v148-identity-gate-20261029
 ```
 
 Also printed at boot as `[voice-runtime] <marker>`. Anything ending in an
@@ -2591,7 +2618,25 @@ on it is evidence about current code.
 | **v143** or earlier — the **v144** operator-line base (#402), above `main`'s v143 (#401, `2c3c5fa`, sorry, only a message), which includes v142 (#399, `adf8dad`) | Open Grok Bot operator conversations with owner/general personas, a 60-minute env safety maximum, background signed request notifications, private transcript/queued-request fetch, and free-form outbound goals. Owner-requested calls and calls to the configured owner need no approval tap; third-party bot-initiative calls still require approval. Outbound provenance is durable. Apply `add_operator_line_inbound.sql` separately; not applied. SI support, patient flows and staff permissions are unchanged. |
 | **v144** or earlier — **v145**, above the v144 operator-line base (#402) | Owner SMS exempt + notifier idempotency: normalized env-only owner matching immediately commits through the existing send path; SMS/DNC and operator opt-outs remain enforced. Signed stable event IDs and attempt numbers, durable notification claims, and token-scoped SMS idempotency keys suppress repeated bot work/sends. Queued-request and completion events remain distinct; receivers must reconcile requests and key confirmations on event ID/callSid. Apply `add_operator_notification_claims.sql` separately; not applied. Production impact is unmeasured. |
 | **v145** or earlier — this branch is **v146** | Dedicated `POST /api/plugin/v1/operator-line/sms/send`, bot-only `operator:call` plus writes and operator feature gates. Env operator origin, no business-hours/daily/peak caps, normalized owner exemption, third-party pending approval and later operator-origin commit. STOP/voice/operator opt-outs checked before approval and send. Existing token-scoped idempotency suppresses concurrent/replayed sends; initiator is retained and phones are masked. General SMS/SI/patient policy is unchanged. No new migration; existing #405 idempotency column/index required. Production impact remains unmeasured. |
-| **v146** or earlier — NOT the date; this branch is **v147** (#381), ABOVE `main`'s v146 (#407), which contains v145 (#405) and v144 (#402); v148 is #384, v149 is #391 and v150 is #376 on their open branches | records-line questions about the status of a request or how to get a copy stay records, not clinical interpretation; a refused prescription is not a records ask. |
+| **v146** or earlier — NOT the date; **v147** (#381, merged to `main` as `d153a3d`), ABOVE v146 (#407), which contains v145 (#405) and v144 (#402) | records-line questions about the status of a request or how to get a copy stay records, not clinical interpretation; a refused prescription is not a records ask. |
+| **v147** or earlier — NOT the date; this branch is **v148** (#384, renumbered from v146, earlier v139), ABOVE `main`'s v147 (#381, `d153a3d`), which it contains along with v146 (#407); v149 is #391 and v150 is #376 on their open branches | Verified identity is carried through ticket filing and teardown/sweep recovery. Both ticket client endpoints filter Optical's carried appointments and history-derived routing text/IDs, including no-IVR, after-hours, answering service, Surgery/Tech/Records redirects and retries. Submissions without a department use the same filter because the receiver can derive Optical. Caller-named offices are preserved. Explicit other departments and the held identity retain their history; Surgery files without a clinic when none is known. Repeated shared patient lookups preserve the complete appointment-read view, including times, additional bookings and partial/unavailable status, using an identity-checked, call-scoped schedule cache or a read by the held PersonID. No migration; production impact is unmeasured. |
+
+**#384 cached appointment-read review, 2026-10-28 (synthetic data only):**
+The full schedule shares the validated identity's CallSid, expiry and
+invalidation; the reduced appointment fields used for ticket routing remain
+separate. Caller-supplied identity checks run before cache reuse, and the
+cached patient's name, DOB and available PersonID must agree with the held
+identity. Without a matching full cache, the existing appointment reader uses
+the held PersonID; without that key it reports unavailable rather than an
+empty schedule. A patient change during the read withholds the result.
+No-IVR and answering-service sibling shortcuts already use the full
+appointment-read formatter; repeat-lookup regressions cover them too.
+The prompt/tool caps remain 15,000 / 13,200. No push, rebase, migration,
+deployment or production measurement.
+Validation: `tsc -p . --noEmit`, `git diff --check`, and 393 tests across
+21 relevant Vitest files pass, including both caps and the earlier identity,
+Optical filtering and Surgery-without-clinic regressions. The full suite was
+not run; changes remain uncommitted on `sd/1-4-identity-gate` at `2cbba58`.
 
 ### THE SURGEON CLAIM — BUILT, REVIEWED SIX TIMES, WITHDRAWN 2026-09-17
 
@@ -2678,8 +2723,12 @@ v10 (the person base and the join), v11 (the locked record, #290) and v12
 (optical's office ladder) are a CHAIN on `main`: each merged after the one
 before and brought it in, so v12 contains both.
 
-**AND THE SEQUENCE HAS TWO HOLES IN IT ON PURPOSE: v13 AND v57. v147 IS THE
-NEWEST — v147: records-line status and how-to-get-a-copy questions stay records, on its branch (#381) ABOVE `main`'s v146 (#407), which it contains; v148 is #384, v149 is #391 and v150 is #376 on their open branches —
+**AND THE SEQUENCE HAS TWO HOLES IN IT ON PURPOSE: v13 AND v57. v148 IS THE
+NEWEST ON #384 (renumbered from v146, earlier v139) — verified identity carried through filing and teardown/sweep
+recovery, Optical facility filtering, and Surgery filing when its clinic is
+unknown, with the full appointment-read view/status retained on identity
+reuse; no migration; production impact is unmeasured. It contains `main`'s v147 (#381)
+and v146; v149 is #391 and v150 is #376 on their open branches —
 AND v146 IS WHAT `main` CARRIES, SINCE #407 MERGED 2026-10-29 (`04e1e80`): dedicated operator SMS send with no hours/caps, owner-only approval exemption, opt-outs and idempotency; no new migration, above v145, which it contains. v145: owner SMS exempt + notifier idempotency, above the v144 operator-line base (#402), which it contains. v144: open Grok Bot operator conversations, owner recognition, background request handoff, and outbound provenance/approval policy (PR #402), above `main`'s v143, which it contains —
 AND BEFORE THAT v143 (#401, MERGED 2026-10-29, `2c3c5fa`): a caller asking for a person on a lane that cannot transfer hears an apology and that the agent can only take a message, ABOVE v142, which it contains; v137 is #391, v138 is #376 and v139 is #384 on their open branches —
 AND BEFORE THAT v142, SINCE #399 MERGED 2026-10-29 (`adf8dad`): a caller who gave their name is filed at teardown under that name, above v141 (#398, `2316c60`) —

@@ -37,6 +37,9 @@
 
 import { isTwilioCallSid } from './callSid';
 import { readDobQuietly } from './dobParts';
+import type { PatientScheduleContext } from '../services/scheduleLookupService';
+
+export interface IdentityAppointment { date: string; location: string; provider?: string }
 
 export interface VerifiedIdentity {
   firstName: string;
@@ -94,13 +97,22 @@ export interface VerifiedIdentity {
    * makes a name insufficient.
    */
   personId?: string;
+  nextAppointment?: IdentityAppointment;
+  lastVisit?: IdentityAppointment;
+  lastPhysicianSeen?: string;
+  lastProviderSeen?: string;
 }
 
 interface Entry extends VerifiedIdentity {
   at: number;
+  // Full read-only schedule, separate from the reduced ticket-routing fields.
+  // It shares the identity's CallSid, expiry and invalidation, and is never
+  // included in verifiedIdentityFor's ticket/teardown-facing return value.
+  appointmentContext?: PatientScheduleContext;
 }
 
 const verified = new Map<string, Entry>();
+const confirmedClinics = new Map<string, { clinic: string; at: number }>();
 
 /** Longer than any call, short enough that the map cannot become a leak. */
 const TTL_MS = 30 * 60_000;
@@ -140,6 +152,10 @@ function namesAgree(
 }
 
 function sweep(now: number): void {
+  for (const [key, entry] of confirmedClinics) {
+    if (now - entry.at > TTL_MS) confirmedClinics.delete(key);
+  }
+  while (confirmedClinics.size > MAX_ENTRIES) confirmedClinics.delete(confirmedClinics.keys().next().value!);
   for (const [k, v] of verified) {
     if (now - v.at > TTL_MS) verified.delete(k);
   }
@@ -200,7 +216,7 @@ export type RememberOutcome = 'stored' | 'merged' | 'refused_sid' | 'refused_nam
 
 export function rememberVerifiedIdentity(
   callSid: string | undefined,
-  identity: Partial<VerifiedIdentity>,
+  identity: Partial<VerifiedIdentity> & Pick<Entry, 'appointmentContext'>,
 ): RememberOutcome {
   // Absent means NOT certain. A caller that forgets to say so must not get
   // the benefit of the doubt on a field this one is about.
@@ -259,9 +275,9 @@ export function rememberVerifiedIdentity(
    * `personId` replaces the whole row — a father then a son (Invariant C).
    * Names that do not match, and ids that do not prove same, also replace.
    *
-   * Incoming date wins when present (the record). Incoming empty keeps the
-   * date already stored. Certainty never downgrades. Names come from the
-   * incoming write so the store tracks the record's spelling.
+   * Empty never erases a held date. Unconfirmed enrichment cannot replace a
+   * validated name, DOB, office or appointment, and conflicting DOBs cannot
+   * merge two otherwise identical names.
    */
   const incomingPersonId = (identity.personId ?? '').trim() || undefined;
   const existing = verified.get(callSid);
@@ -277,18 +293,26 @@ export function rememberVerifiedIdentity(
       firstName,
       lastName,
     );
-    const samePerson = sameById || (!bothIds && sameByName);
+    const incomingDob = readDobQuietly(dateOfBirth);
+    const existingDob = readDobQuietly(existingFresh.dateOfBirth ?? '');
+    const dobConflict = incomingDob && existingDob && JSON.stringify(incomingDob) !== JSON.stringify(existingDob);
+    const samePerson = !dobConflict && (sameById || (!bothIds && sameByName));
 
     if (!differentPerson && samePerson) {
-      const keptDate = dateOfBirth || existingFresh.dateOfBirth || '';
-      const keptOffice = usualOffice || existingFresh.usualOffice || '';
-      const keptPersonId = incomingPersonId || existingFresh.personId;
+      const keptDate = existingFresh.certain && !certain ? existingFresh.dateOfBirth || '' : dateOfBirth || existingFresh.dateOfBirth || '';
+      const keptOffice = existingFresh.certain && !certain ? existingFresh.usualOffice || '' : usualOffice || existingFresh.usualOffice || '';
+      const keptPersonId = existingFresh.certain && !certain ? existingFresh.personId : incomingPersonId || existingFresh.personId;
       verified.set(callSid, {
-        firstName,
-        lastName,
+        firstName: existingFresh.certain ? existingFresh.firstName : firstName,
+        lastName: existingFresh.certain ? existingFresh.lastName : lastName,
         ...(keptDate ? { dateOfBirth: keptDate } : {}),
         ...(keptOffice ? { usualOffice: keptOffice } : {}),
         ...(keptPersonId ? { personId: keptPersonId } : {}),
+        nextAppointment: existingFresh.certain && !certain ? existingFresh.nextAppointment : identity.nextAppointment ?? existingFresh.nextAppointment,
+        lastVisit: existingFresh.certain && !certain ? existingFresh.lastVisit : identity.lastVisit ?? existingFresh.lastVisit,
+        lastPhysicianSeen: existingFresh.certain && !certain ? existingFresh.lastPhysicianSeen : identity.lastPhysicianSeen ?? existingFresh.lastPhysicianSeen,
+        lastProviderSeen: existingFresh.certain && !certain ? existingFresh.lastProviderSeen : identity.lastProviderSeen ?? existingFresh.lastProviderSeen,
+        appointmentContext: existingFresh.certain && !certain ? existingFresh.appointmentContext : identity.appointmentContext ?? existingFresh.appointmentContext,
         certain: existingFresh.certain || certain,
         at: now,
       });
@@ -296,6 +320,7 @@ export function rememberVerifiedIdentity(
     }
   }
 
+  if (existingFresh) confirmedClinics.delete(callSid);
   verified.delete(callSid);
   verified.set(callSid, {
     firstName,
@@ -303,6 +328,11 @@ export function rememberVerifiedIdentity(
     ...(dateOfBirth ? { dateOfBirth } : {}),
     ...(usualOffice ? { usualOffice } : {}),
     ...(incomingPersonId ? { personId: incomingPersonId } : {}),
+    nextAppointment: identity.nextAppointment,
+    lastVisit: identity.lastVisit,
+    lastPhysicianSeen: identity.lastPhysicianSeen,
+    lastProviderSeen: identity.lastProviderSeen,
+    appointmentContext: certain ? identity.appointmentContext : undefined,
     certain,
     at: now,
   });
@@ -328,7 +358,7 @@ export function verifiedDobFor(
   // later relaxing the write. Both ends state the same rule.
   if (!isTwilioCallSid(callSid)) return undefined;
   const entry = verified.get(callSid);
-  if (!entry) return undefined;
+  if (!entry || !entry.certain) return undefined;
   if (Date.now() - entry.at > TTL_MS) return undefined;
   if (!namesAgree(firstName, lastName, entry.firstName, entry.lastName)) {
     return undefined;
@@ -339,7 +369,7 @@ export function verifiedDobFor(
 /**
  * WHY inherit did not fill `date_of_birth` on this refusal.
  *
- * `verifiedDobFor` returns a date or `undefined`. Those five `undefined`s
+ * `verifiedDobFor` returns a date or `undefined`. Those guard exits
  * are one bucket in every log we have, which is why Bug B in PR #307
  * (32 certain matches that still refused) cannot be proven from what is
  * persisted. This is the same walk, with a named exit at each guard.
@@ -355,6 +385,7 @@ export type DobCarry =
   | 'fired'
   | 'no_entry'
   | 'entry_without_dob'
+  | 'uncertain_identity'
   | 'name_mismatch'
   | 'bad_call_sid';
 
@@ -366,6 +397,7 @@ export function dobCarry(
   if (!isTwilioCallSid(callSid)) return 'bad_call_sid';
   const entry = verified.get(callSid);
   if (!entry || Date.now() - entry.at > TTL_MS) return 'no_entry';
+  if (!entry.certain) return 'uncertain_identity';
   if (!namesAgree(firstName, lastName, entry.firstName, entry.lastName)) {
     return 'name_mismatch';
   }
@@ -481,10 +513,8 @@ export function verifiedIdentityFor(callSid: string | undefined): VerifiedIdenti
    * patient's name is worse than not filing it, which is saying something,
    * because "no name, no ticket" already costs 47 recoveries a day.
    *
-   * `verifiedDobFor` deliberately keeps its existing behaviour: it answers a
-   * different question ("is this ticket for that same person?") and applies
-   * its own name guard, and narrowing it is a ticket-path change that
-   * BACKEND_HANDOFF says needs a before/after number. Raised, not done here.
+   * `verifiedDobFor` also requires certainty and the same caller name. Phone
+   * candidates cannot supply demographics to either live or recovery filing.
    */
   if (!entry.certain) return undefined;
   return {
@@ -493,7 +523,19 @@ export function verifiedIdentityFor(callSid: string | undefined): VerifiedIdenti
     ...(entry.dateOfBirth ? { dateOfBirth: entry.dateOfBirth } : {}),
     ...(entry.personId ? { personId: entry.personId } : {}),
     certain: true,
+    ...(entry.personId ? { personId: entry.personId } : {}),
+    ...(entry.usualOffice ? { usualOffice: entry.usualOffice } : {}),
+    ...(entry.nextAppointment ? { nextAppointment: entry.nextAppointment } : {}),
+    ...(entry.lastVisit ? { lastVisit: entry.lastVisit } : {}),
+    ...(entry.lastPhysicianSeen ? { lastPhysicianSeen: entry.lastPhysicianSeen } : {}),
+    ...(entry.lastProviderSeen ? { lastProviderSeen: entry.lastProviderSeen } : {}),
   };
+}
+
+/** Call-scoped schedule; readers must also prove it matches the held patient. */
+export function verifiedAppointmentContextFor(callSid: string | undefined): PatientScheduleContext | undefined {
+  if (!verifiedIdentityFor(callSid)) return undefined;
+  return verified.get(callSid!)?.appointmentContext;
 }
 
 /**
@@ -596,6 +638,20 @@ export function identityStoreProbe(callSid: string | undefined): IdentityStorePr
 /** Tests only. */
 export function resetVerifiedIdentities(): void {
   verified.clear();
+  confirmedClinics.clear();
+}
+
+/** A caller-confirmed office is a call fact, never a phone-keyed identity. */
+export function rememberConfirmedClinic(callSid: string | undefined, clinic: string): void {
+  if (!isTwilioCallSid(callSid) || !clinic.trim()) return;
+  sweep(Date.now());
+  confirmedClinics.set(callSid, { clinic: clinic.trim(), at: Date.now() });
+}
+
+export function confirmedClinicFor(callSid: string | undefined): string | undefined {
+  if (!isTwilioCallSid(callSid)) return undefined;
+  const entry = confirmedClinics.get(callSid);
+  return entry && Date.now() - entry.at <= TTL_MS ? entry.clinic : undefined;
 }
 
 /**
@@ -639,5 +695,6 @@ export function forgetIfSameName(
     return false;
   }
   verified.delete(callSid);
+  confirmedClinics.delete(callSid);
   return true;
 }

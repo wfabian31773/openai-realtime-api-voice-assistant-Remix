@@ -86,6 +86,7 @@ const request = (over: Record<string, unknown> = {}) => ({
   first_name: 'Test',
   last_name: 'Caller',
   date_of_birth: '01/04/1958',
+  location: 'Synthetic Clinic', // Complete live intake before testing this lane.
   callback_number: '5551234567',
   request_category: 'reschedule_appointment',
   request_summary: "Needs to move next week's appointment to a later date.",

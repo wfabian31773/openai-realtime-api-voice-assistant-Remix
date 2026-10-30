@@ -1,3 +1,5 @@
+import { ticketIdentityFields } from '../tools/ticketIdentity';
+import { readDobQuietly } from '../tools/dobParts';
 /**
  * RUNNING THE SWEEP AT TEARDOWN — the last thing that happens to a call.
  *
@@ -37,6 +39,7 @@ import {
   type SweepSkipReason,
 } from "./requestSweep";
 import type { VoiceCallRecord } from "./mediaStreamBridge";
+import type { CreateTicketParams } from '../../server/services/ticketingApiClient';
 import { verifiedIdentityFor } from "../tools/verifiedIdentity";
 import { statedNameFor } from "../tools/statedName";
 
@@ -48,7 +51,9 @@ export interface SweepOutcome {
 }
 
 /** The POST, injected so a test proves the payload without a network. */
-export type SweepFiler = (ticket: ReturnType<typeof buildSweptTicket>) => Promise<{
+type SweepTicket = ReturnType<typeof buildSweptTicket> & Pick<CreateTicketParams,
+  'validatedPatient' | 'patientBirthYear' | 'patientBirthMonth' | 'patientBirthDay' | 'locationOfLastVisit' | 'locationSource'>;
+export type SweepFiler = (ticket: SweepTicket) => Promise<{
   success: boolean;
   ticketNumber?: string;
   /** Durably queued in the outbox; a number will follow from the retry worker. */
@@ -70,6 +75,9 @@ export type SweepFiler = (ticket: ReturnType<typeof buildSweptTicket>) => Promis
 const defaultFiler: SweepFiler = async (ticket) => {
   const { createTicketDurable } = await import("../services/durableTicketFiling");
   const res = await createTicketDurable({
+    ...(ticket.validatedPatient ? { validatedPatient: ticket.validatedPatient } : {}),
+    ...(ticket.patientBirthYear ? { patientBirthYear: ticket.patientBirthYear, patientBirthMonth: ticket.patientBirthMonth, patientBirthDay: ticket.patientBirthDay } : {}),
+    ...(ticket.locationOfLastVisit ? { locationOfLastVisit: ticket.locationOfLastVisit, locationSource: ticket.locationSource } : {}),
     departmentId: ticket.departmentId,
     requestTypeId: ticket.requestTypeId,
     requestReasonId: ticket.requestReasonId,
@@ -118,12 +126,13 @@ const defaultFiler: SweepFiler = async (ticket) => {
 };
 
 /**
- * NO DATE OF BIRTH IS SENT, AND THAT IS NOT AN OVERSIGHT.
+ * NO DATE OF BIRTH IS REQUIRED.
  *
  * Traced 2026-09-03: `/api/voice-agent/create-ticket` validates
  * `patientBirthMonth/Day/Year` as OPTIONAL. Every `missingFields:
- * ["date_of_birth"]` refusal in that day's logs came from OUR OWN tools. A
- * swept ticket therefore files cleanly without one, and the request survives
+ * ["date_of_birth"]` refusal in that day's logs came from OUR OWN tools.
+ * A captured validated DOB is carried when held. A swept ticket still files
+ * without one, and the request survives
  * a gate that was never the server's — which is the single largest reason
  * these requests were lost.
  */
@@ -189,7 +198,23 @@ export async function runRequestSweep(
     }
 
     console.info(sweepMarker(record.slug, record.callSid));
-    const ticket = buildSweptTicket(input, decision);
+    const ticket: SweepTicket = buildSweptTicket(input, decision);
+    if (identity) {
+      const dob = readDobQuietly(identity.dateOfBirth ?? '');
+      const fields = ticketIdentityFields(record.callSid, identity.firstName, identity.lastName);
+      let office = identity.usualOffice;
+      if (record.slug === 'optical' && fields.validatedPatient) {
+        const { filterOpticalPatientLocations } = await import('../tools/acceptableLocation');
+        // Use the live Optical path's facility rules on carried history too:
+        // the receiver prefers joined appointments over the fallback office.
+        const patient = await filterOpticalPatientLocations(fields.validatedPatient);
+        fields.validatedPatient = patient;
+        office = patient.nextAppointment?.location || patient.lastVisit?.location || patient.confirmedClinic;
+      }
+      Object.assign(ticket, fields,
+        { ...(dob ? { patientBirthYear: dob.year, patientBirthMonth: dob.month, patientBirthDay: dob.day } : {}),
+          ...(office ? { locationOfLastVisit: office, locationSource: 'history' } : {}) });
+    }
     const res = await file(ticket);
     if (!res.success) {
       console.error(

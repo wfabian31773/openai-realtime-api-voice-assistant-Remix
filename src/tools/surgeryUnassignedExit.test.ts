@@ -44,6 +44,7 @@ const NO_SURGEON = {
   first_name: 'Linda',
   last_name: 'Sisco',
   date_of_birth: '05/22/1948',
+  location: 'Synthetic Clinic', // Complete live intake before testing this lane.
   callback_number: '909-555-0147',
   request_description: 'I need to know when my cataract surgery is scheduled',
   call_sid: SID,

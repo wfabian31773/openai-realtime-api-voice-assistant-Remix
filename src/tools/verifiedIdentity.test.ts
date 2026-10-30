@@ -38,20 +38,20 @@ const {
 } = await import('./verifiedIdentity');
 
 const CALL = 'CA00000000000000000000000000000001';
-const WAYNE = { firstName: 'Wayne', lastName: 'Fabian', dateOfBirth: '03/17/1973' };
+const SYNTHETIC = { certain: true, firstName: 'Alex', lastName: 'Synthetic', dateOfBirth: '01/02/1970' };
 
 beforeEach(() => resetVerifiedIdentities());
 
 describe('what the lookup verified is available to the tool that files', () => {
   it('gives back the date of birth for the person it was verified for', () => {
-    rememberVerifiedIdentity(CALL, WAYNE);
-    expect(verifiedDobFor(CALL, 'Wayne', 'Fabian')).toBe('03/17/1973');
+    rememberVerifiedIdentity(CALL, SYNTHETIC);
+    expect(verifiedDobFor(CALL, 'Alex', 'Synthetic')).toBe('01/02/1970');
   });
 
   it('does not care about case or stray spacing in the name', () => {
     // The model types the name it heard; the record holds the name it holds.
-    rememberVerifiedIdentity(CALL, WAYNE);
-    expect(verifiedDobFor(CALL, '  wayne ', 'FABIAN')).toBe('03/17/1973');
+    rememberVerifiedIdentity(CALL, SYNTHETIC);
+    expect(verifiedDobFor(CALL, '  alex ', 'SYNTHETIC')).toBe('01/02/1970');
   });
 });
 
@@ -59,28 +59,28 @@ describe('the two guards, which are the whole reason this is safe', () => {
   it('never hands one caller\'s date of birth to a ticket for someone else', () => {
     // A daughter ringing about her father is an ordinary call on these lines.
     // Filing his request under her date of birth would be worse than asking.
-    rememberVerifiedIdentity(CALL, WAYNE);
-    expect(verifiedDobFor(CALL, 'Maria', 'Fabian')).toBeUndefined();
-    expect(verifiedDobFor(CALL, 'Wayne', 'Nguyen')).toBeUndefined();
+    rememberVerifiedIdentity(CALL, SYNTHETIC);
+    expect(verifiedDobFor(CALL, 'Maria', 'Synthetic')).toBeUndefined();
+    expect(verifiedDobFor(CALL, 'Alex', 'Nguyen')).toBeUndefined();
   });
 
   it('never crosses calls', () => {
-    rememberVerifiedIdentity(CALL, WAYNE);
-    expect(verifiedDobFor('CA00000000000000000000000000000002', 'Wayne', 'Fabian')).toBeUndefined();
+    rememberVerifiedIdentity(CALL, SYNTHETIC);
+    expect(verifiedDobFor('CA00000000000000000000000000000002', 'Alex', 'Synthetic')).toBeUndefined();
     // And with no CallSid there is nothing to key on, so nothing is returned —
     // rather than falling back to "the last patient this process saw".
-    expect(verifiedDobFor(undefined, 'Wayne', 'Fabian')).toBeUndefined();
+    expect(verifiedDobFor(undefined, 'Alex', 'Synthetic')).toBeUndefined();
   });
 
   it('stores nothing it could not match back to a person', () => {
-    rememberVerifiedIdentity(CALL, { firstName: 'Wayne', lastName: '', dateOfBirth: '03/17/1973' });
-    expect(verifiedDobFor(CALL, 'Wayne', '')).toBeUndefined();
+    rememberVerifiedIdentity(CALL, { firstName: 'Alex', lastName: '', dateOfBirth: '01/02/1970' });
+    expect(verifiedDobFor(CALL, 'Alex', '')).toBeUndefined();
 
-    rememberVerifiedIdentity(CALL, { firstName: 'Wayne', lastName: 'Fabian' });
-    expect(verifiedDobFor(CALL, 'Wayne', 'Fabian')).toBeUndefined();
+    rememberVerifiedIdentity(CALL, { firstName: 'Alex', lastName: 'Synthetic' });
+    expect(verifiedDobFor(CALL, 'Alex', 'Synthetic')).toBeUndefined();
 
-    rememberVerifiedIdentity(undefined, WAYNE);
-    expect(verifiedDobFor(undefined, 'Wayne', 'Fabian')).toBeUndefined();
+    rememberVerifiedIdentity(undefined, SYNTHETIC);
+    expect(verifiedDobFor(undefined, 'Alex', 'Synthetic')).toBeUndefined();
   });
 });
 
@@ -101,9 +101,9 @@ describe('end to end: the filing tool stops asking twice', () => {
   });
 
   const CALLER = {
-    first_name: 'Wayne',
-    last_name: 'Fabian',
-    callback_number: '845-531-7471',
+    first_name: 'Alex',
+    last_name: 'Synthetic',
+    callback_number: '555-555-0100',
     location: 'Eastvale',
     request_description: 'my glasses broke at the hinge',
     call_sid: CALL,
@@ -123,16 +123,16 @@ describe('end to end: the filing tool stops asking twice', () => {
     } as never);
 
     // What lookup_patient does on a certain match.
-    rememberVerifiedIdentity(CALL, WAYNE);
+    rememberVerifiedIdentity(CALL, SYNTHETIC);
 
     const out = await runTool('file_optical_ticket', CALLER);
 
     expect(out.success).toBe(true);
     const filed = create.mock.calls[0][0] as unknown as Record<string, unknown>;
     // Split the way create-ticket wants it, from the record rather than the ear.
-    expect(filed.patientBirthMonth).toBe('03');
-    expect(filed.patientBirthDay).toBe('17');
-    expect(filed.patientBirthYear).toBe('1973');
+    expect(filed.patientBirthMonth).toBe('01');
+    expect(filed.patientBirthDay).toBe('02');
+    expect(filed.patientBirthYear).toBe('1970');
   });
 
   it('still refuses when nothing was verified for this call', async () => {
@@ -159,7 +159,7 @@ describe('end to end: the filing tool stops asking twice', () => {
       ticketNumber: 'VA-SPOKEN',
     } as never);
 
-    rememberVerifiedIdentity(CALL, WAYNE);
+    rememberVerifiedIdentity(CALL, SYNTHETIC);
     await runTool('file_optical_ticket', { ...CALLER, date_of_birth: 'January 2nd, 1960' });
 
     // The record fills a gap; it does not overrule a person. If those two
@@ -190,7 +190,7 @@ describe('the sweep only ever sees a CERTAIN identity', () => {
     rememberVerifiedIdentity(SID, {
       firstName: 'Testpatient',
       lastName: 'Example',
-      dateOfBirth: '1973-03-17',
+      dateOfBirth: '1970-01-02',
       certain,
     });
 
@@ -214,7 +214,7 @@ describe('the sweep only ever sees a CERTAIN identity', () => {
     rememberVerifiedIdentity(SID, {
       firstName: 'Testpatient',
       lastName: 'Example',
-      dateOfBirth: '1973-03-17',
+      dateOfBirth: '1970-01-02',
     });
     expect(verifiedIdentityFor(SID)).toBeUndefined();
   });
@@ -251,7 +251,7 @@ describe('the sweep only ever sees a CERTAIN identity', () => {
   });
 
   it('still refuses a nameless entry — a name is the part that is required', () => {
-    rememberVerifiedIdentity(SID, { lastName: 'Example', dateOfBirth: '1973-03-17', certain: true });
+    rememberVerifiedIdentity(SID, { lastName: 'Example', dateOfBirth: '1970-01-02', certain: true });
     expect(verifiedIdentityFor(SID)).toBeUndefined();
   });
 
@@ -262,9 +262,9 @@ describe('the sweep only ever sees a CERTAIN identity', () => {
    * still sees an uncertain entry. Pinned so the difference is a decision
    * rather than an oversight.
    */
-  it('still lets verifiedDobFor see an uncertain entry, deliberately', () => {
+  it('VA-76205: withholds DOB from an uncertain phone candidate', () => {
     remember(false);
-    expect(verifiedDobFor(SID, 'Testpatient', 'Example')).toBe('1973-03-17');
+    expect(verifiedDobFor(SID, 'Testpatient', 'Example')).toBeUndefined();
   });
 });
 

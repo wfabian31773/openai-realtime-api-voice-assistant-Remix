@@ -38,6 +38,7 @@ const PATIENT = {
   first_name: 'Testpatient',
   last_name: 'Example',
   date_of_birth: '01/02/1950',
+  location: 'Synthetic Clinic', // Complete live intake before testing this lane.
   callback_number: '202-555-0142',
   request_description: 'I need a copy of my medical records',
 };

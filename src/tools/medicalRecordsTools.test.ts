@@ -17,6 +17,7 @@ import './sharedPatientTools';
 import './medicalRecordsTools';
 
 const BASE = {
+  location: 'Testville',
   // A complete, on-the-clock patient request. deliver_to and date_range are
   // here because the CAP gate refuses a patient request without them — see the
   // gate tests at the bottom, which strip them deliberately.

@@ -1,3 +1,4 @@
+import { ticketIdentityFields } from './ticketIdentity';
 import { recordsLinePurpose, recordsRequestText, recordsLineRedirect } from '../../shared/records-request-intent';
 import { callerUtterances } from '../services/symptomCorroboration';
 /**
@@ -985,6 +986,7 @@ registerTool({
     // Never submit-ticket: it re-derives the DEPARTMENT server-side and
     // defaults to 8.
     const res = await createTicketDurable({
+      ...ticketIdentityFields(callSid, first, last, str(input.date_of_birth)),
       departmentId: filedDepartmentId,
       requestTypeId: filedTypeId,
       requestReasonId: filedReasonId,
@@ -1017,6 +1019,8 @@ registerTool({
       ...(lookup.providerId ? { providerId: lookup.providerId } : {}),
       ...(lookup.locationId ? { locationId: lookup.locationId } : {}),
       ...(cleanLocation ? { locationOfLastVisit: cleanLocation } : {}),
+      locationSource: input.locationSource === 'history' ? 'history' : 'caller',
+      locationIdSource: input.locationSource === 'history' ? 'history' : 'caller',
       lastProviderSeen: cleanProvider || undefined,
       description: filedDescriptionWithDobStatus,
       // Raised only when an outage cost us an id we had the name for — never

@@ -38,7 +38,7 @@ const SID = 'CA00000000000000000000000000000043';
 const FOUND = {
   patientFound: true,
   patientName: 'Testcaller Optical',
-  matchedBy: 'name_dob',
+  matchedBy: 'name_and_dob',
   patientData: {
     firstName: 'Testcaller',
     lastName: 'Optical',
@@ -139,7 +139,7 @@ describe('an ambiguous second lookup on the same call', () => {
       matchedBy: 'phone',
       identity: { unique: false, candidateCount: 2, candidates: [] },
     } as never);
-    await runTool('lookup_patient', { ...ARGS, phone: '555-555-0147' });
+    await runTool('lookup_patient', { ...ARGS, phone: '555-555-0147', identity_corrected: true });
 
     // The office is the field that cannot be checked against the ticket.
     expect(usualOfficeFor(SID, 'Testcaller', 'Optical')).toBeUndefined();

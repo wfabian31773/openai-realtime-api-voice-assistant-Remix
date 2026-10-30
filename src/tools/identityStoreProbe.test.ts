@@ -38,11 +38,11 @@ const SENTINEL = 'unknown';
 const QUILL = { firstName: 'Quill', lastName: 'Everard', dateOfBirth: '1959-07-07', appointmentCount: 3 };
 const RUE = { firstName: 'Rue', lastName: 'Everard', dateOfBirth: '1962-02-02', appointmentCount: 1 };
 
-/** ONE person on the number: the production shape behind 187 of 09-17's 209 certain lookups. */
-const oneOnThePhone = {
+/** A unique name+DOB validation is required for a certain entry. */
+const oneValidated = {
   patientFound: true,
   patientName: 'Quill Everard',
-  matchedBy: 'phone' as const,
+  matchedBy: 'name_and_dob' as const,
   identity: { unique: true, candidateCount: 1, candidates: [QUILL] },
   patientData: { firstName: 'Quill', lastName: 'Everard', dateOfBirth: '1959-07-07', personId: 'p-quill' },
   upcomingAppointments: [], pastAppointments: [], totalAppointmentsFound: 3,
@@ -57,7 +57,8 @@ const oneOnThePhone = {
  * is internally consistent rather than surprising.
  */
 const twoOnThePhone = {
-  ...oneOnThePhone,
+  ...oneValidated,
+  matchedBy: 'phone' as const,
   identity: { unique: false, candidateCount: 2, candidates: [QUILL, RUE] },
 };
 /**
@@ -66,7 +67,7 @@ const twoOnThePhone = {
  * shape that actually puts an uncertain entry in the store.
  */
 const oneByNameAlone = {
-  ...oneOnThePhone,
+  ...oneValidated,
   matchedBy: 'name' as const,
   identity: { unique: true, candidateCount: 1, candidates: [QUILL] },
 };
@@ -80,7 +81,7 @@ beforeEach(() => {
 
 describe('the four facts behind one undefined', () => {
   it('A CERTAIN MATCH: entry, certain, with a date — and it reaches the row', async () => {
-    lookupSpy.mockImplementation(async () => oneOnThePhone);
+    lookupSpy.mockImplementation(async () => oneValidated);
     await runTool('lookup_patient', { queue: 'surgery', call_sid: SID, caller_phone: '555-555-0199' });
 
     const probe = identityStoreProbe(SID);
@@ -129,7 +130,7 @@ describe('the four facts behind one undefined', () => {
   });
 
   it('KEY MISMATCH: the store holds a certain entry under ANOTHER call, and none under this one', async () => {
-    lookupSpy.mockImplementation(async () => oneOnThePhone);
+    lookupSpy.mockImplementation(async () => oneValidated);
     await runTool('lookup_patient', { queue: 'surgery', call_sid: OTHER_SID, caller_phone: '555-555-0199' });
 
     const probe = identityStoreProbe(SID);
@@ -164,7 +165,7 @@ describe('the four facts behind one undefined', () => {
 
 describe('what the probe must not do', () => {
   it('carries no patient data at all — counts, booleans and nothing else', async () => {
-    lookupSpy.mockImplementation(async () => oneOnThePhone);
+    lookupSpy.mockImplementation(async () => oneValidated);
     await runTool('lookup_patient', { queue: 'surgery', call_sid: SID, caller_phone: '555-555-0199' });
 
     const before = Date.now();
@@ -200,7 +201,7 @@ describe('what the probe must not do', () => {
    * 5). It must be the instant of THIS read, not of the process or the entry.
    */
   it('reports the instant it read the store, not the entry it found', async () => {
-    lookupSpy.mockImplementation(async () => oneOnThePhone);
+    lookupSpy.mockImplementation(async () => oneValidated);
     await runTool('lookup_patient', { queue: 'surgery', call_sid: SID, caller_phone: '555-555-0199' });
 
     const first = identityStoreProbe(SID).at;
@@ -210,7 +211,7 @@ describe('what the probe must not do', () => {
   });
 
   it('is a PURE READ — probing does not evict the entry it just reported', async () => {
-    lookupSpy.mockImplementation(async () => oneOnThePhone);
+    lookupSpy.mockImplementation(async () => oneValidated);
     await runTool('lookup_patient', { queue: 'surgery', call_sid: SID, caller_phone: '555-555-0199' });
 
     expect(identityStoreProbe(SID).hasEntry).toBe(true);
