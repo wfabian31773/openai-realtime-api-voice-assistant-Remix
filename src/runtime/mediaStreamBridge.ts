@@ -2485,11 +2485,13 @@ export class VoiceCallBridge {
             `asking the agent to carry on (${this.stallNudgeStrikes} of ${AGENT_STALL_NUDGE_LIMIT})`,
         );
         // The agent's own prompt and the call so far decide what comes next;
-        // nothing is said to the caller by the runtime. The response's own
-        // completion re-arms this window, and so does the line below, for the
-        // reason the ladder gives for arming twice.
+        // nothing is said to the caller by the runtime. The agent now OWES a
+        // turn, so the agent's watchdog runs, not the caller's window: a
+        // provider slow to start must not get a second nudge queued behind
+        // the first (Codex P2 on #404). The response's own completion
+        // re-arms the caller's window, as every completed turn does.
         this.session.requestResponse();
-        this.armDeadAir("caller");
+        this.armDeadAir("response");
         return;
       }
       this.silenceStoodDown = true;

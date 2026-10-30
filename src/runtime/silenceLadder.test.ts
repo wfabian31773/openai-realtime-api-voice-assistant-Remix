@@ -771,6 +771,18 @@ describe("an agent that stalls on a heard caller is asked to carry on (v151)", (
     expect(h.records[0].silenceStoodDown).toBe(true);
   });
 
+  it("a nudge the provider is slow to answer is not followed by a second one", async () => {
+    // Codex P2 on #404: the caller's 12-second window must not run while the
+    // agent owes the turn it was just asked for.
+    const h = await heardThenStalled("Let me make sure the team has your details.");
+    expect(h.timers.fire(WINDOW)).toBe(true);
+    expect(h.timers.armed(WINDOW)).toBe(0);
+    expect(h.timers.fire(WINDOW)).toBe(false);
+    expect(h.session.requestResponse).toHaveBeenCalledTimes(1);
+    // The agent's own watchdog holds the debt instead.
+    expect(h.timers.armed(AGENT_WINDOW)).toBe(1);
+  });
+
   it("the caller speaking resets the bound", async () => {
     const h = await heardThenStalled("Let me make sure the team has your details.");
     h.timers.fire(WINDOW);
