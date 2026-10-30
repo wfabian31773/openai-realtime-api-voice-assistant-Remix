@@ -155,6 +155,11 @@ export function answersToTheFacilityQuestion(lines: readonly string[]): string[]
   return out.slice(-MAX_LINES);
 }
 
+/** Caller turns in order, copied so consumers cannot change the ledger. */
+export function callerUtterances(callId: string | undefined): readonly string[] {
+  return callId ? [...(callerSpeech.get(callId) ?? [])] : [];
+}
+
 /** Everything the caller said on this call, joined. Empty when unknown. */
 export function callerSaid(callId: string | undefined): string {
   return callId ? (callerSpeech.get(callId) ?? []).join(' ') : '';

@@ -881,6 +881,8 @@ import { callEnvironment } from "./callRecord";
  * BY office, so it gets its own marker. On top of v115 (#367), which it
  * contains. `src/tools/opticalTools.ts`, `opticalOfficeFromRecord.test.ts`.
  */
+// Records-intent review fixes preserve interpretation, document refusals,
+// inline corrections, documentation and unknown-result handling.
 /**
  * v117 — CONTACT CAPTURE (#14, 2026-10-27). Surnames are spelled when needed;
  * new email addresses are read back and confirmed in full. Provider names use
@@ -975,8 +977,14 @@ import { callEnvironment } from "./callRecord";
  * Apply add_operator_notification_claims.sql separately; not applied here. */
 /** v146: dedicated operator SMS send, with no hours/caps, owner exemption,
  * opt-outs, durable idempotency and operator-origin commits. No new migration. */
+/**
+ * v147 — RECORDS QUESTION GUARD (2026-10-29). Records access and status
+ * explanations stay in Medical Records; results-meaning questions stay
+ * clinical. Refused prescriptions no longer count as records requests.
+ * On top of v146 (#407, main), which contains v145 and v144; v148 is #384, v149 is #391 and v150 is #376 on their open branches. No migration; production impact remains unmeasured.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v146-operator-sms-send-20261029";
+  "voice-runtime-v147-records-question-guard-20261029";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

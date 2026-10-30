@@ -2591,6 +2591,7 @@ on it is evidence about current code.
 | **v143** or earlier — the **v144** operator-line base (#402), above `main`'s v143 (#401, `2c3c5fa`, sorry, only a message), which includes v142 (#399, `adf8dad`) | Open Grok Bot operator conversations with owner/general personas, a 60-minute env safety maximum, background signed request notifications, private transcript/queued-request fetch, and free-form outbound goals. Owner-requested calls and calls to the configured owner need no approval tap; third-party bot-initiative calls still require approval. Outbound provenance is durable. Apply `add_operator_line_inbound.sql` separately; not applied. SI support, patient flows and staff permissions are unchanged. |
 | **v144** or earlier — **v145**, above the v144 operator-line base (#402) | Owner SMS exempt + notifier idempotency: normalized env-only owner matching immediately commits through the existing send path; SMS/DNC and operator opt-outs remain enforced. Signed stable event IDs and attempt numbers, durable notification claims, and token-scoped SMS idempotency keys suppress repeated bot work/sends. Queued-request and completion events remain distinct; receivers must reconcile requests and key confirmations on event ID/callSid. Apply `add_operator_notification_claims.sql` separately; not applied. Production impact is unmeasured. |
 | **v145** or earlier — this branch is **v146** | Dedicated `POST /api/plugin/v1/operator-line/sms/send`, bot-only `operator:call` plus writes and operator feature gates. Env operator origin, no business-hours/daily/peak caps, normalized owner exemption, third-party pending approval and later operator-origin commit. STOP/voice/operator opt-outs checked before approval and send. Existing token-scoped idempotency suppresses concurrent/replayed sends; initiator is retained and phones are masked. General SMS/SI/patient policy is unchanged. No new migration; existing #405 idempotency column/index required. Production impact remains unmeasured. |
+| **v146** or earlier — NOT the date; this branch is **v147** (#381), ABOVE `main`'s v146 (#407), which contains v145 (#405) and v144 (#402); v148 is #384, v149 is #391 and v150 is #376 on their open branches | records-line questions about the status of a request or how to get a copy stay records, not clinical interpretation; a refused prescription is not a records ask. |
 
 ### THE SURGEON CLAIM — BUILT, REVIEWED SIX TIMES, WITHDRAWN 2026-09-17
 
@@ -2677,9 +2678,10 @@ v10 (the person base and the join), v11 (the locked record, #290) and v12
 (optical's office ladder) are a CHAIN on `main`: each merged after the one
 before and brought it in, so v12 contains both.
 
-**AND THE SEQUENCE HAS TWO HOLES IN IT ON PURPOSE: v13 AND v57. v146 IS THE
-NEWEST — v146: dedicated operator SMS send with no hours/caps, owner-only approval exemption, opt-outs and idempotency; no new migration, above v145, which it contains. v145: owner SMS exempt + notifier idempotency, above the v144 operator-line base (#402), which it contains. v144: open Grok Bot operator conversations, owner recognition, background request handoff, and outbound provenance/approval policy (PR #402), above `main`'s v143, which it contains —
-AND v143 IS WHAT `main` CARRIES, SINCE #401 MERGED 2026-10-29 (`2c3c5fa`): a caller asking for a person on a lane that cannot transfer hears an apology and that the agent can only take a message, ABOVE v142, which it contains; v137 is #391, v138 is #376 and v139 is #384 on their open branches —
+**AND THE SEQUENCE HAS TWO HOLES IN IT ON PURPOSE: v13 AND v57. v147 IS THE
+NEWEST — v147: records-line status and how-to-get-a-copy questions stay records, on its branch (#381) ABOVE `main`'s v146 (#407), which it contains; v148 is #384, v149 is #391 and v150 is #376 on their open branches —
+AND v146 IS WHAT `main` CARRIES, SINCE #407 MERGED 2026-10-29 (`04e1e80`): dedicated operator SMS send with no hours/caps, owner-only approval exemption, opt-outs and idempotency; no new migration, above v145, which it contains. v145: owner SMS exempt + notifier idempotency, above the v144 operator-line base (#402), which it contains. v144: open Grok Bot operator conversations, owner recognition, background request handoff, and outbound provenance/approval policy (PR #402), above `main`'s v143, which it contains —
+AND BEFORE THAT v143 (#401, MERGED 2026-10-29, `2c3c5fa`): a caller asking for a person on a lane that cannot transfer hears an apology and that the agent can only take a message, ABOVE v142, which it contains; v137 is #391, v138 is #376 and v139 is #384 on their open branches —
 AND BEFORE THAT v142, SINCE #399 MERGED 2026-10-29 (`adf8dad`): a caller who gave their name is filed at teardown under that name, above v141 (#398, `2316c60`) —
 AND BEFORE THAT v141 (#398, MERGED 2026-10-29, `2316c60`): the spoken date of birth and the new-or-existing answer reach the tools on Node 20, above v140 (#397, `ab98229`) —
 AND BEFORE THAT v140 (#397, MERGED 2026-10-29, `ab98229`): a caller who answers "No" to the greeting's name is asked how we can help before any name or date of birth, and the agent takes the patient's details rather than the caller's, above v136 (#393, `9bfccda`) —
@@ -2954,7 +2956,7 @@ never read v57; **v58 was that next ship** — the identity probe, an instrument
 and no behaviour change (see the v56 row below for what it measures). It is no
 longer the current marker: see the paragraph beneath this one.
 
-**v143 (#401) IS WHAT `main` CARRIES (merged 2026-10-29, `2c3c5fa`), ABOVE v142 (#399, `adf8dad`), AND v57,
+**v146 (#407) IS WHAT `main` CARRIES (merged 2026-10-29, `04e1e80`), ABOVE v145 (#405), v144 (#402, `6cac333`) and v143 (#401, `2c3c5fa`), AND v57,
 v59, v60, v63, v65 AND v66 ARE RETIRED RATHER THAN REUSED.** Each of the last
 five was a branch's own number while it sat below `main`, and each was given up
 the moment a merge put it there: two branches carrying one version make two
