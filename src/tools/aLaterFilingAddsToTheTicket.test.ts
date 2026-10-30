@@ -242,6 +242,8 @@ describe('a later records filing that asks for the signing form', () => {
 
     expect(later).toMatchObject({ already_filed: true, details_added: true, form_sent: false });
     expect(String(later.message)).toBe('Added to VA-90002.');
+    // The repeat copy stays; the form line is added to it, not put in its place.
+    expect(String(later.fix)).toMatch(/added to the request already filed on this call as VA-90002/);
     expect(String(later.fix)).toMatch(/did not send a signing form/);
     expect(String(later.fix)).toMatch(/send_records_form once with channel "email"/);
   });
