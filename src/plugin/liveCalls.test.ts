@@ -208,7 +208,7 @@ describe("direct open-line calls", () => {
     const entries = await h.store.listAudit();
     expect(entries[0]).toMatchObject({ tokenJti: bot.jti, createdAt: h.clock.at, tool: "direct_call", outcome: "committed",
       details: { maskedNumber: "***0111", reason: "placed" } });
-    expect(entries[0].details!.purpose.length).toBeLessThanOrEqual(160);
+    expect(entries[0].details!.purpose!.length).toBeLessThanOrEqual(160);
     for (const secret of [PHONE, "555555", "Private", "Recipient", "1950", "secret@example.com", "cataract"]) {
       expect(JSON.stringify(entries)).not.toContain(secret);
     }

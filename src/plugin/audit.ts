@@ -9,6 +9,7 @@ export type PluginAuditOutcome =
   | "rejected"
   | "cancelled"
   | "committed"
+  | "deduplicated"
   | "failed"
   | "unknown"
   | "expired";
@@ -23,7 +24,11 @@ export interface PluginAuditEntry {
   outcome: PluginAuditOutcome;
   httpStatus: number;
   createdAt?: Date;
-  details?: { maskedNumber: string; purpose: string; reason: string };
+  details?: { maskedNumber: string; purpose: string; reason: string; approvalExempt?: never }
+    | { initiatedBy: "bot"; approvalExempt: true; exemptReason: "owner_number";
+      maskedNumber?: never; purpose?: never; reason?: never; operatorSms?: never }
+    | { operatorSms: true; initiatedBy: "owner_request" | "bot_initiative"; maskedNumber: string;
+      approvalExempt?: never; purpose?: never; reason?: never };
 }
 
 // Purpose is arbitrary caller-provided text and may contain PHI. Keep only
@@ -33,7 +38,7 @@ export interface PluginAuditEntry {
 // Regex-only phone/DOB masking cannot safely retain names or clinical details.
 const PURPOSE_AUDIT_WORDS = new Set("call ask about the a an and or for to from with on behalf of practice assistant office hours opening closing availability available schedule reservation confirm cancel order delivery pickup quote please thanks thank you find out check whether is are can could would open closed today tomorrow".split(" "));
 
-export function directCallAuditDetails(body: unknown, reason: string): NonNullable<PluginAuditEntry["details"]> {
+export function directCallAuditDetails(body: unknown, reason: string): { maskedNumber: string; purpose: string; reason: string } {
   const input = body && typeof body === "object" ? body as Record<string, unknown> : {};
   const digits = typeof input.phone === "string" ? input.phone.replace(/\D/g, "") : "";
   const purpose = typeof input.purpose === "string" ? input.purpose : "";
@@ -63,7 +68,12 @@ export function sanitizeAuditEntry(entry: PluginAuditEntry): PluginAuditEntry {
     httpStatus: entry.httpStatus,
   };
   if (entry.details) {
-    clean.details = {
+    clean.details = "operatorSms" in entry.details && entry.details.operatorSms === true ? {
+      operatorSms: true, initiatedBy: entry.details.initiatedBy === "owner_request" ? "owner_request" : "bot_initiative",
+      maskedNumber: /^\*\*\*\d{4}$/.test(entry.details.maskedNumber) ? entry.details.maskedNumber : "unknown",
+    } : entry.details.approvalExempt === true ? {
+      initiatedBy: "bot", approvalExempt: true, exemptReason: "owner_number",
+    } : {
       maskedNumber: /^\*\*\*\d{4}$/.test(entry.details.maskedNumber) ? entry.details.maskedNumber : "unknown",
       purpose: directCallAuditDetails({ purpose: entry.details.purpose }, "").purpose,
       reason: entry.details.reason,

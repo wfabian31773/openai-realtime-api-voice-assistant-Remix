@@ -954,7 +954,7 @@ import { callEnvironment } from "./callRecord";
  * files unclassified calls for a person to route. On top of v135 (#392, main, 6ae60e33); v127 is #376 and v133 is #391 on their open branches. No migration; production impact remains unmeasured.
  */
 /**
- * v145 (renumbered from v137, above main's v143) — MUTUAL PATIENT DETECTOR (2026-10-29). The provider detector also
+ * v149 (renumbered from v145, earlier v137; above main's v146) — MUTUAL PATIENT DETECTOR (2026-10-29). The provider detector also
  * recognizes "one mutual patient" and "the mutual patient", including
  * plurals, so these callers can pass the after-hours provider gate.
  * On top of v136 (#393, main); renumbered from v133. No migration; production impact remains unmeasured.
@@ -962,8 +962,13 @@ import { callEnvironment } from "./callRecord";
 /** v144: open Grok Bot operator conversations, owner recognition, background
  * request handoff, and outbound provenance, above main's v143.
  * Apply add_operator_line_inbound.sql separately. */
+/** v145: owner SMS exempt + notifier idempotency. Signed stable event IDs,
+ * durable notification claims and token-scoped SMS idempotency keys.
+ * Apply add_operator_notification_claims.sql separately; not applied here. */
+/** v146: dedicated operator SMS send, with no hours/caps, owner exemption,
+ * opt-outs, durable idempotency and operator-origin commits. No new migration. */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v145-mutual-patient-detector-20261029";
+  "voice-runtime-v149-mutual-patient-detector-20261029";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can
