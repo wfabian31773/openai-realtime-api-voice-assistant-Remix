@@ -1017,10 +1017,10 @@ import { callEnvironment } from "./callRecord";
  * Merged to main as #408 (2f72c87).
  * Apply add_operator_scenario_preapproval.sql separately; not applied here. */
 /**
- * v152 — THE SILENCE, A LATER FILING, AND THE A1 OFFICE AND NAME (2026-10-30).
+ * v153 — THE SILENCE, A LATER FILING, AND THE A1 OFFICE AND NAME (2026-10-30).
  * One marker for what was written as a v148 + v149 + v150 stack on #404: #384
- * took v148 on main, #391 / #376 hold v149 / v150 on open branches, and
- * #408 took v151 on main, so it ships as v152.
+ * took v148 on main, #391 holds v149, #408 took v151 on main and #376 took
+ * v152 on its open branch, so it ships as v153.
  * (a) When a heard caller is silent after an agent line that asked nothing,
  * the bridge asks the AGENT for a turn, at most AGENT_STALL_NUDGE_LIMIT times
  * in a row; the lookup's miss lines carry the next step; PCP has no
@@ -1034,7 +1034,7 @@ import { callEnvironment } from "./callRecord";
  * remains unmeasured.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v152-a-stalled-agent-carries-on-20261030";
+  "voice-runtime-v153-a-stalled-agent-carries-on-20261030";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can
