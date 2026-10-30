@@ -52,6 +52,34 @@ export function classifyInboundSms(body: string): InboundSmsCommand {
   return "other";
 }
 
+/** STOP and voice opt-outs apply to every operator recipient. Fail closed. */
+export async function operatorSmsOptOutProblem(store: PluginStore, phone: string): Promise<string | null> {
+  const key = dncKey(phone);
+  if (!key) return "invalid_phone";
+  try {
+    return await store.isSmsOptedOut(key) || await store.isOperatorOptedOut(`+1${key}`)
+      ? "do_not_contact" : null;
+  } catch {
+    return "opt_out_read_failed";
+  }
+}
+
+/** Operator SMS has its own origin and no SI hours/campaign policy. */
+export async function sendOperatorSms(
+  store: PluginStore, sender: SmsSender, input: { phone: string; from: string; body: string },
+): Promise<{ ok: true; sid: string } | SendFailure> {
+  const problem = await operatorSmsOptOutProblem(store, input.phone);
+  if (problem) return { ok: false, reason: problem, mayHaveSent: false };
+  try {
+    const sent = await sender.send({ to: input.phone, from: input.from, body: input.body });
+    return { ok: true, sid: sent.sid };
+  } catch (err) {
+    const failure = failureFromUnknown(err);
+    // Provider errors are never echoed: they can contain the message body.
+    return { ...failure, reason: failure.mayHaveSent ? "unknown" : "rejected" };
+  }
+}
+
 export async function sendApprovedSms(
   store: PluginStore,
   sender: SmsSender,

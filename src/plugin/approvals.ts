@@ -1,12 +1,12 @@
 /**
- * The approval gate. Nothing leaves this fleet until a human approves a
- * pending contact_approvals row and commit_contact consumes a 5-minute
- * single-use token minted at approve.
+ * The approval gate. Explicit operator/owner exemptions still use a locked
+ * contact_approvals row and the same single-use confirm/commit path.
  */
 
 import { dncKey } from "../runtime/outbound/store";
+import { normalizePhone } from "../utils/phone";
 import { prepareDobFromPayload } from "./callEnqueue";
-import { parseOperatorPayload, operatorApprovalRequired, US_E164, type OperatorCallPayload } from "./operatorLine";
+import { parseOperatorPayload, parseOperatorSmsPayload, isOperatorSmsPayload, operatorApprovalRequired, US_E164, type OperatorCallPayload } from "./operatorLine";
 import { hashPayload, hashSecret, isConfirmExpired } from "./tokens";
 import {
   issueConfirmOnApprove,
@@ -68,12 +68,22 @@ export type PrepareInput =
   | { channel: "email"; payload: EmailPayload };
 
 export type GateResult =
-  | { ok: true; approval: ContactApprovalRow; confirmToken?: string }
+  | { ok: true; approval: ContactApprovalRow; confirmToken?: string; deduplicated?: boolean }
   | { ok: false; status: number; error: string };
 
 function requirePhone(phone: unknown): string | null {
   if (typeof phone !== "string" || !phone.trim()) return null;
   return dncKey(phone.trim());
+}
+
+/** SMS supports US numbers. Validate before the shared last-ten normalizer. */
+export function ownerSmsApprovalExempt(phone: unknown, env: Record<string, string | undefined>): boolean {
+  const owner = env.OPERATOR_OWNER_NUMBER?.trim();
+  if (!owner || typeof phone !== "string") return false;
+  const valid = (value: string) => /^\+?[\d\s().-]+$/.test(value) && dncKey(value) !== null
+    && (!value.startsWith("+") || value.replace(/\D/g, "").length === 11);
+  return valid(owner) && valid(phone.trim())
+    && `+1${normalizePhone(owner)}` === `+1${normalizePhone(phone)}`;
 }
 
 function requireEmail(value: unknown): string | null {
@@ -112,11 +122,25 @@ export async function prepareContact(
   tokenJti: string,
   input: PrepareInput,
   now = new Date(),
-  callKind?: "operator",
+  callKind?: "operator" | "operator_sms",
   env: Record<string, string | undefined> = process.env,
 ): Promise<GateResult> {
+  const key = input.channel === "sms" ? input.payload.idempotency_key : undefined;
+  if (key !== undefined && (typeof key !== "string" || key.length > 200)) {
+    return { ok: false, status: 400, error: "idempotency_key must be a string of at most 200 characters" };
+  }
+  if (key !== undefined) {
+    const existing = await store.findApprovalByIdempotencyKey(tokenJti, key);
+    if (existing) {
+      if (isOperatorSmsPayload(existing.payload) !== (callKind === "operator_sms")) {
+        return { ok: false, status: 409, error: "idempotency_key belongs to a different contact lane" };
+      }
+      return { ok: true, approval: existing, deduplicated: true };
+    }
+  }
   const picked = callKind === "operator"
     ? parseOperatorPayload(input.payload, env)
+    : callKind === "operator_sms" ? parseOperatorSmsPayload(input.payload, env)
     : pickPreparePayload(input.channel, input.payload as unknown as Record<string, unknown>);
   if (!picked.ok) return { ok: false, status: 400, error: picked.error };
   const payload = { ...picked.payload } as Record<string, unknown>;
@@ -134,6 +158,7 @@ export async function prepareContact(
     channel: input.channel,
     status: "pending",
     tokenJti,
+    idempotencyKey: key ?? null,
     ticketId,
     ticketNumber,
     phoneKey: input.channel === "email" || (callKind === "operator" && !US_E164.test(String(payload.phone)))
@@ -155,14 +180,48 @@ export async function prepareContact(
   };
   // Operator bots declare provenance. Owner requests and calls to the owner
   // need no approval tap; all unspecified provenance defaults to bot initiative.
-  const automatic = callKind === "operator" && !operatorApprovalRequired(picked.payload as OperatorCallPayload, env);
+  const automatic = (callKind === "operator" && !operatorApprovalRequired(picked.payload as OperatorCallPayload, env))
+    || (input.channel === "sms" && ownerSmsApprovalExempt(payload.phone, env));
   const confirm = automatic ? issueConfirmOnApprove(now) : null;
   if (confirm) Object.assign(row, {
     status: "approved", confirmTokenHash: confirm.hash, confirmTokenPlaintext: confirm.plaintext,
     confirmExpiresAt: confirm.expiresAt,
   });
   const approval = await store.insertApproval(row);
+  // An atomic insert may have lost a race to another prepare with this key.
+  if (approval.id !== row.id) {
+    if (isOperatorSmsPayload(approval.payload) !== (callKind === "operator_sms")) {
+      return { ok: false, status: 409, error: "idempotency_key belongs to a different contact lane" };
+    }
+    return { ok: true, approval, deduplicated: true };
+  }
   return { ok: true, approval, ...(confirm ? { confirmToken: confirm.plaintext } : {}) };
+}
+
+/** Claim an automatic owner send, including a prepare interrupted before commit. */
+export async function claimAutomaticSmsApproval(
+  store: PluginStore,
+  approval: ContactApprovalRow,
+  now: Date,
+  env: Record<string, string | undefined>,
+): Promise<ContactApprovalRow | null> {
+  if (approval.channel !== "sms" || approval.status !== "approved" || approval.approvedBy !== null
+    || approval.confirmUsedAt) return null;
+  if (!ownerSmsApprovalExempt(approval.payload.phone, env)) {
+    if (isOperatorSmsPayload(approval.payload)) {
+      // A former owner's automatic approval cannot be handed off to the bot.
+      await store.updateApproval(approval.id, {
+        status: "pending", confirmTokenHash: null, confirmTokenPlaintext: null,
+        confirmExpiresAt: null, updatedAt: now,
+      }, "approved");
+    }
+    return null;
+  }
+  // Automatic approval needs no human token handoff. The status guard races
+  // safely with another prepare or token commit, even after token expiry.
+  return store.updateApproval(approval.id, {
+    status: "sending", confirmUsedAt: now, confirmTokenPlaintext: null, updatedAt: now,
+  }, "approved");
 }
 
 export async function approveContact(

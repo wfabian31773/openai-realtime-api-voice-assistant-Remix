@@ -9,18 +9,20 @@
 import type { Express, NextFunction, Request, Response } from "express";
 import { hasScope, mintScopesCompatible, type PluginScope } from "./scopes";
 import { operatorLineEnabled } from "./operatorLineSettings";
-import { isOperatorPayload, operatorFromProblem } from "./operatorLine";
+import { isOperatorPayload, isOperatorSmsPayload, parseOperatorSmsPayload, operatorFromProblem } from "./operatorLine";
 import { pluginWritesEnabled } from "./writesEnabled";
 import { parseBearerToken, type VerifiedPluginToken } from "./tokens";
 import { verifyStoredToken, publicApproval, approvalForApprover, type ContactApprovalRow, type PluginStore } from "./store";
 import {
   approveContact,
   cancelContact,
+  claimAutomaticSmsApproval,
   consumeConfirmToken,
   markCommitted,
   markFailed,
   markUnknown,
   prepareContact,
+  ownerSmsApprovalExempt,
   reapStaleSending,
   rejectContact,
 } from "./approvals";
@@ -31,11 +33,12 @@ import type { DialerLock } from "../runtime/outbound/scheduler";
 import { checkTwilioSignature, type WebhookRequest } from "../runtime/voiceWebhook";
 import { agentHealth, emptyFleetReader, listAgents, outboundStatus, type AgentSource, type FleetReader } from "./reads";
 import { evaluateAndEnqueueCall, identityFromPreparePayload, siAssistantDialingProblem } from "./callEnqueue";
-import { classifyInboundSms, createTwilioSmsSender, handleInboundSms, inboundSmsPreview, sendApprovedSms, type SmsSender } from "./sms";
+import { classifyInboundSms, createTwilioSmsSender, handleInboundSms, inboundSmsPreview, operatorSmsOptOutProblem, sendOperatorSms, sendApprovedSms, type SmsSender } from "./sms";
 import { createGraphMail, sendApprovedEmail, type GraphMail } from "./email";
 import { createCallbackReporter, type CallbackReporter } from "./callbackReport";
 import { flushOutboxRow, persistTakenMessage } from "./messageOutbox";
 import type { OutboundStore } from "../runtime/outbound/store";
+import { normalizePhone } from "../utils/phone";
 import { directCallAuditDetails, sanitizeAuditEntry, type PluginAuditEntry, type PluginAuditOutcome } from "./audit";
 
 export interface PluginApiDeps {
@@ -68,7 +71,7 @@ async function audit(
   tool: string,
   outcome: PluginAuditOutcome,
   httpStatus: number,
-  extra?: { approvalId?: string | null; ticketId?: string | null; reason?: string },
+  extra?: { approvalId?: string | null; ticketId?: string | null; reason?: string; details?: PluginAuditEntry["details"] },
 ): Promise<void> {
   const direct = req.route?.path === "/api/plugin/v1/calls/direct";
   if (!auth && !direct) return;
@@ -81,6 +84,7 @@ async function audit(
     ticketId: extra?.ticketId ?? null,
     outcome,
     httpStatus,
+    ...(extra?.details ? { details: extra.details } : {}),
     ...(direct ? {
       details: directCallAuditDetails(req.body, extra?.reason ?? tool),
       createdAt: (deps.now ?? (() => new Date()))(),
@@ -238,6 +242,51 @@ export function mountPluginApi(app: Express, deps: PluginApiDeps): void {
     });
   }
 
+  app.post(`${v1}/operator-line/sms/send`, requireAuth, requireScope("operator:call"), requireBot, requireWrites, async (req: AuthedRequest, res) => {
+    res.setHeader("Cache-Control", "no-store");
+    const env = envOf(deps);
+    const problem = operatorFromProblem(env);
+    if (problem) { jsonError(res, 503, problem); return; }
+    const parsed = parseOperatorSmsPayload(req.body, env);
+    if (!parsed.ok) { jsonError(res, 400, parsed.error); return; }
+    const now = (deps.now ?? (() => new Date()))();
+    try {
+      if (!(await operatorLineEnabled(env, deps.store))) { jsonError(res, 503, "Operator line is disabled"); return; }
+      const existing = await deps.store.findApprovalByIdempotencyKey(req.pluginAuth!.jti, req.body.idempotency_key);
+      if (!existing) {
+        const blocked = await operatorSmsOptOutProblem(deps.store, String(parsed.payload.phone));
+        if (blocked) {
+          const status = blocked === "opt_out_read_failed" ? 503 : 409;
+          jsonError(res, status, "Operator SMS was not sent: " + blocked, "not_sent");
+          await audit(deps, req.pluginAuth, req, "operator_sms_send", "denied", status);
+          return;
+        }
+      }
+      const prepared = await prepareContact(deps.store, req.pluginAuth!.jti,
+        { channel: "sms", payload: req.body }, now, "operator_sms", env);
+      if (!prepared.ok) { jsonError(res, prepared.status, prepared.error); return; }
+      const extra = { approvalId: prepared.approval.id, details: {
+        operatorSms: true as const, initiatedBy: prepared.approval.payload.initiated_by as "owner_request" | "bot_initiative",
+        maskedNumber: `***${String(prepared.approval.payload.phone).slice(-4)}`,
+      } };
+      const automatic = await claimAutomaticSmsApproval(deps.store, prepared.approval, now, env);
+      if (automatic) {
+        const committed = await commitClaimedContact(deps, automatic, now);
+        res.status(committed.status).json({ ...committed.body, ...(prepared.deduplicated ? { deduplicated: true } : {}) });
+        await audit(deps, req.pluginAuth, req, "operator_sms_send", committed.outcome, committed.status, extra);
+        return;
+      }
+      const approval = await deps.store.getApproval(prepared.approval.id) ?? prepared.approval;
+      const status = prepared.deduplicated ? 200 : 201;
+      res.status(status).json({
+        status: approval.status === "pending" ? "pending_approval" : approval.status,
+        approval: publicApproval(approval), ...(prepared.deduplicated ? { deduplicated: true } : {}),
+        ...(approval.result ? { result: approval.result } : {}),
+      });
+      await audit(deps, req.pluginAuth, req, "operator_sms_send", prepared.deduplicated ? "deduplicated" : "pending_approval", status, extra);
+    } catch { jsonError(res, 503, "Operator SMS storage is unavailable"); }
+  });
+
   app.post(`${v1}/prepare_operator_call`, requireAuth, requireScope("operator:call"), requireBot, requireWrites, async (req: AuthedRequest, res) => {
     res.setHeader("Cache-Control", "no-store");
     const problem = operatorFromProblem(envOf(deps));
@@ -335,8 +384,9 @@ export function mountPluginApi(app: Express, deps: PluginApiDeps): void {
       await audit(deps, req.pluginAuth, req, "confirm_token", "denied", 404);
       return;
     }
-    const needed = isOperatorPayload(row.payload) ? "operator:call" : "contacts:commit";
-    if (!hasScope(req.pluginAuth!.scopes, needed) || (isOperatorPayload(row.payload) && hasScope(req.pluginAuth!.scopes, "contacts:approve"))) {
+    const operator = isOperatorPayload(row.payload) || isOperatorSmsPayload(row.payload);
+    const needed = operator ? "operator:call" : "contacts:commit";
+    if (!hasScope(req.pluginAuth!.scopes, needed) || (operator && hasScope(req.pluginAuth!.scopes, "contacts:approve"))) {
       jsonError(res, 403, `Bot scope ${needed} is required`); return;
     }
     const taken = await deps.store.takeConfirmToken(row.id, req.pluginAuth!.jti, (deps.now ?? (() => new Date()))());
@@ -548,25 +598,39 @@ export function mountPluginApi(app: Express, deps: PluginApiDeps): void {
 
   const prepare = (channel: "call" | "sms" | "email") => async (req: AuthedRequest, res: Response) => {
     const body = (req.body ?? {}) as Record<string, unknown>;
+    const now = (deps.now ?? (() => new Date()))();
     const result = await prepareContact(
-      deps.store,
-      req.pluginAuth!.jti,
-      { channel, payload: body as never },
-      (deps.now ?? (() => new Date()))(),
+      deps.store, req.pluginAuth!.jti, { channel, payload: body as never }, now, undefined, envOf(deps),
     );
     if (!result.ok) {
       jsonError(res, result.status, result.error);
       await audit(deps, req.pluginAuth, req, `prepare_${channel}`, "error", result.status);
       return;
     }
-    res.status(201).json({
-      status: "pending_approval",
-      approval: publicApproval(result.approval),
-    });
-    await audit(deps, req.pluginAuth, req, `prepare_${channel}`, "pending_approval", 201, {
-      approvalId: result.approval.id,
-      ticketId: result.approval.ticketId,
-    });
+    const extra = { approvalId: result.approval.id, ticketId: result.approval.ticketId };
+    const automatic = channel === "sms"
+      ? await claimAutomaticSmsApproval(deps.store, result.approval, now, envOf(deps)) : null;
+    if (automatic) {
+      const committed = await commitClaimedContact(deps, automatic, now);
+      res.status(committed.status).json({ ...committed.body, ...(result.deduplicated ? { deduplicated: true } : {}) });
+      await audit(deps, req.pluginAuth, req, `prepare_${channel}`, committed.outcome, committed.status, {
+        ...extra, details: { initiatedBy: "bot", approvalExempt: true, exemptReason: "owner_number" },
+      });
+      return;
+    }
+    if (result.deduplicated || result.confirmToken) {
+      // Another prepare or token commit may have won the automatic send claim.
+      const approval = await deps.store.getApproval(result.approval.id) ?? result.approval;
+      res.status(200).json({
+        status: approval.status === "pending" ? "pending_approval" : approval.status,
+        approval: publicApproval(approval), ...(result.deduplicated ? { deduplicated: true } : {}),
+        ...(approval.result ? { result: approval.result } : {}),
+      });
+      await audit(deps, req.pluginAuth, req, `prepare_${channel}`, "deduplicated", 200, extra);
+      return;
+    }
+    res.status(201).json({ status: "pending_approval", approval: publicApproval(result.approval) });
+    await audit(deps, req.pluginAuth, req, `prepare_${channel}`, "pending_approval", 201, extra);
   };
 
   app.post(`${v1}/prepare_call`, requireAuth, requireScope("contacts:prepare"), requireWrites, prepare("call"));
@@ -647,11 +711,19 @@ export function mountPluginApi(app: Express, deps: PluginApiDeps): void {
     });
   });
 
-  app.post(`${v1}/commit_contact`, requireAuth, requireScope("contacts:commit"), requireWrites, async (req: AuthedRequest, res) => {
+  app.post(`${v1}/commit_contact`, requireAuth, requireCommitScope, requireWrites, async (req: AuthedRequest, res) => {
     const confirmToken = String((req.body as { confirmToken?: string })?.confirmToken ?? "");
     const requested = /^[a-f0-9]{64}$/.test(confirmToken) ? await deps.store.findApprovalByConfirmHash(hashSecret(confirmToken)) : null;
     if (requested && isOperatorPayload(requested.payload)) {
       jsonError(res, 400, "Operator calls require the preparing bot and commit_call_live"); return;
+    }
+    if (requested && isOperatorSmsPayload(requested.payload)) {
+      if (requested.tokenJti !== req.pluginAuth!.jti) { jsonError(res, 404, "Contact request not found"); return; }
+      if (!hasScope(req.pluginAuth!.scopes, "operator:call") || hasScope(req.pluginAuth!.scopes, "contacts:approve")) {
+        jsonError(res, 403, "Bot scope operator:call is required"); return;
+      }
+    } else if (!hasScope(req.pluginAuth!.scopes, "contacts:commit")) {
+      jsonError(res, 403, "Missing required scope: contacts:commit"); return;
     }
     const now = (deps.now ?? (() => new Date()))();
     try {
@@ -659,62 +731,10 @@ export function mountPluginApi(app: Express, deps: PluginApiDeps): void {
     } catch {
       console.error("[plugin] stale-send sweep failed");
     }
-    const consumed = await consumeConfirmToken(deps.store, confirmToken, now);
-    if (!consumed.ok) {
-      jsonError(res, consumed.status, consumed.error);
-      await audit(deps, req.pluginAuth, req, "commit_contact", "denied", consumed.status);
-      return;
-    }
-
-    if (hashPayload(consumed.approval.payload) !== consumed.approval.payloadHash) {
-      await markFailed(deps.store, consumed.approval.id, { reason: "payload_hash_mismatch" }, now);
-      jsonError(res, 409, "Approved payload no longer matches the locked hash", "not_sent");
-      await audit(deps, req.pluginAuth, req, "commit_contact", "error", 409, {
-        approvalId: consumed.approval.id,
-        ticketId: consumed.approval.ticketId,
-      });
-      return;
-    }
-
-    let executed: Awaited<ReturnType<typeof executeApproved>>;
-    try {
-      executed = await executeApproved(deps, consumed.approval, now);
-    } catch {
-      // Timeout / throw after the send may already have gone out.
-      await markUnknown(deps.store, consumed.approval.id, { reason: "send_unknown" }, now);
-      jsonError(res, 502, "The send outcome is unknown", "unknown");
-      await audit(deps, req.pluginAuth, req, "commit_contact", "unknown", 502, {
-        approvalId: consumed.approval.id,
-        ticketId: consumed.approval.ticketId,
-      });
-      return;
-    }
-    if (!executed.ok) {
-      if (executed.reason === "unknown") {
-        await markUnknown(deps.store, consumed.approval.id, { reason: "unknown" }, now);
-        jsonError(res, executed.status, executed.error, "unknown");
-        await audit(deps, req.pluginAuth, req, "commit_contact", "unknown", executed.status, {
-          approvalId: consumed.approval.id,
-          ticketId: consumed.approval.ticketId,
-        });
-        return;
-      }
-      await markFailed(deps.store, consumed.approval.id, { reason: executed.reason }, now);
-      jsonError(res, executed.status, executed.error, "not_sent");
-      await audit(deps, req.pluginAuth, req, "commit_contact", "failed", executed.status, {
-        approvalId: consumed.approval.id,
-        ticketId: consumed.approval.ticketId,
-      });
-      return;
-    }
-    res.json({
-      status: "committed",
-      approval: publicApproval(executed.approval),
-      result: executed.result,
-    });
-    await audit(deps, req.pluginAuth, req, "commit_contact", "committed", 200, {
-      approvalId: consumed.approval.id,
-      ticketId: consumed.approval.ticketId,
+    const committed = await commitConfirmedContact(deps, confirmToken, now);
+    res.status(committed.status).json(committed.body);
+    await audit(deps, req.pluginAuth, req, "commit_contact", committed.outcome, committed.status, {
+      approvalId: committed.approval?.id, ticketId: committed.approval?.ticketId,
     });
   });
 
@@ -773,6 +793,41 @@ export function mountPluginApi(app: Express, deps: PluginApiDeps): void {
   });
 }
 
+type ContactCommitResult = {
+  status: number; body: Record<string, unknown>; outcome: PluginAuditOutcome; approval?: ContactApprovalRow;
+};
+
+async function commitConfirmedContact(deps: PluginApiDeps, confirmToken: string, now: Date): Promise<ContactCommitResult> {
+  const consumed = await consumeConfirmToken(deps.store, confirmToken, now);
+  if (!consumed.ok) return { status: consumed.status, body: { error: consumed.error }, outcome: "denied" };
+  return commitClaimedContact(deps, consumed.approval, now);
+}
+
+/** Automatic sends and token commits share validation and send handling after claiming. */
+async function commitClaimedContact(deps: PluginApiDeps, approval: ContactApprovalRow, now: Date): Promise<ContactCommitResult> {
+  if (hashPayload(approval.payload) !== approval.payloadHash) {
+    await markFailed(deps.store, approval.id, { reason: "payload_hash_mismatch" }, now);
+    return { status: 409, body: { error: "Approved payload no longer matches the locked hash", outcome: "not_sent" },
+      outcome: "error", approval };
+  }
+  let executed: Awaited<ReturnType<typeof executeApproved>>;
+  try {
+    executed = await executeApproved(deps, approval, now);
+  } catch {
+    // Timeout / throw after the send may already have gone out. Never resend.
+    await markUnknown(deps.store, approval.id, { reason: "send_unknown" }, now);
+    return { status: 502, body: { error: "The send outcome is unknown", outcome: "unknown" }, outcome: "unknown", approval };
+  }
+  if (!executed.ok) {
+    const unknown = executed.reason === "unknown";
+    await (unknown ? markUnknown : markFailed)(deps.store, approval.id, { reason: executed.reason }, now);
+    return { status: executed.status, body: { error: executed.error, outcome: unknown ? "unknown" : "not_sent" },
+      outcome: unknown ? "unknown" : "failed", approval };
+  }
+  return { status: 200, body: { status: "committed", approval: publicApproval(executed.approval), result: executed.result },
+    outcome: "committed", approval: executed.approval };
+}
+
 async function executeApproved(
   deps: PluginApiDeps,
   approval: Awaited<ReturnType<PluginStore["getApproval"]> & object>,
@@ -826,6 +881,39 @@ async function executeApproved(
   }
 
   if (approval.channel === "sms") {
+    if (isOperatorSmsPayload(approval.payload)) {
+      const env = envOf(deps);
+      if (operatorFromProblem(env) || approval.payload.fromNumber !== env.OPERATOR_LINE_FROM_NUMBER?.trim()) {
+        return { ok: false, status: 503, error: "Operator SMS origin is unavailable or changed", reason: "operator_from_unavailable" };
+      }
+      if (!(await operatorLineEnabled(env, deps.store))) {
+        return { ok: false, status: 503, error: "Operator line is disabled", reason: "operator_line_disabled" };
+      }
+      // Automatic claims and token commits must still qualify for the owner exemption.
+      if (approval.approvedBy === null && !ownerSmsApprovalExempt(approval.payload.phone, env)) {
+        return { ok: false, status: 409, error: "Operator SMS was not sent: owner_changed", reason: "owner_changed" };
+      }
+      const sender = deps.smsSender === undefined ? createTwilioSmsSender(env) : deps.smsSender;
+      if (!sender) return { ok: false, status: 503, error: "SMS sender is not configured", reason: "no_sms" };
+      const sent = await sendOperatorSms(deps.store, sender, {
+        phone: String(approval.payload.phone), from: String(approval.payload.fromNumber), body: String(approval.payload.body),
+      });
+      if (!sent.ok) {
+        return { ok: false, status: sent.mayHaveSent ? 502 : sent.reason === "opt_out_read_failed" ? 503 : 409,
+          error: sent.mayHaveSent ? "Operator SMS outcome is unknown" : `Operator SMS was not sent: ${sent.reason}`,
+          reason: sent.mayHaveSent ? "unknown" : sent.reason };
+      }
+      return commitSend(deps, approval, { messageSid: sent.sid }, now);
+    }
+    if (ownerSmsApprovalExempt(approval.payload.phone, envOf(deps))) {
+      try {
+        if (await deps.store.isOperatorOptedOut(`+1${normalizePhone(String(approval.payload.phone))}`)) {
+          return { ok: false, status: 409, error: "SMS was not sent: do_not_contact", reason: "do_not_contact" };
+        }
+      } catch {
+        return { ok: false, status: 503, error: "Operator opt-out storage unavailable", reason: "operator_opt_out_read_failed" };
+      }
+    }
     const sender = deps.smsSender === undefined ? createTwilioSmsSender(envOf(deps)) : deps.smsSender;
     if (!sender) return { ok: false, status: 503, error: "SMS sender is not configured", reason: "no_sms" };
     const sent = await sendApprovedSms(

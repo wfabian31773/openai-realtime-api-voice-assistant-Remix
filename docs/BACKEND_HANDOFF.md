@@ -581,3 +581,21 @@ were unreachable, so the separately reported CI test could not be identified.
 - **Still open:** high-severity issues in `drizzle-orm`, `nodemailer` and `zod` need a semver-major bump, and `xlsx` has no upstream fix. These need dedicated PRs.
 - **Known flake:** `src/plugin/liveCalls.test.ts` "masks phone numbers…" can fail when a random `tokenJti` hex contains a forbidden substring such as "1950".
 - No code changes and no Twilio changes. Republishing is a separate step.
+
+---
+
+## Operator line — owner-SMS exemption + notifier idempotency (#405, v145, 2026-10-29)
+
+**Merged per Wayne's approval, 2026-10-29 11:04 AM ET** as `7ad4fb86` (head `5565400`). Migration `add_operator_notification_claims` applied to `pslzngjciiifowemrzza` (version 20261029150454).
+
+- **Owner-cell exemption:** operator-line outbound SMS to `OPERATOR_OWNER_NUMBER` (E.164-normalized, not hardcoded) sends without a pending-actions approval; the audit log records the exempt reason. Every other number still needs approval; opt-out still blocks. SI line and patient flows unchanged.
+- **Duplicate confirmation texts (root cause):** after one inbound call the bot handler ran twice (two transcript fetches by the same plugin token, then two `prepare_sms` chains with different bodies and no idempotency key → approvals `6a79b535`, `cee408fb`, left untouched). Not a Twilio retry. Our triggers: the notifier's 3 s timeout retry re-POSTed without a shared id, and a call with a queued request emits both `request_queued` and `inbound_completed`.
+- **Fix:**
+  - Stable `event_id` per notification, sent as `X-Operator-Event-Id` with `delivery_attempt`.
+  - `plugin_operator_notifications` claims: marked delivered only after a 2xx; the claim is released on final failure; undelivered claims older than a lease (default 60 s, `OPERATOR_NOTIFICATION_CLAIM_LEASE_MS`) are reclaimed atomically, and claim tokens fence stale workers.
+  - `contact_approvals.idempotency_key` with a partial unique index on `(token_jti, idempotency_key)`; a keyed retry returns the existing approval (and resumes an approved owner send).
+- **Bot side still needed:** send an `idempotency_key` tied to the call, and send confirmations only on `inbound_completed`.
+- **Republish:** pending at entry time (live marker was still v144).
+- No Twilio changes. **NOT MEASURED IN PRODUCTION.**
+
+Requested-by: Wayne Fabian (via Grok Bot) · Coding-agent: Codex (gpt-6.1-sol) · Tier: hard · Source: Grok Bot relay, Oct 29 2026 · Owner: tinkabot

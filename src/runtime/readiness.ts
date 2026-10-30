@@ -956,7 +956,7 @@ import { callEnvironment } from "./callRecord";
  * No migration; production impact remains unmeasured.
  */
 /**
- * v146 (renumbered from v139, above main's v143) — IDENTITY GATE (#384, 2026-10-29). Verified identity is carried
+ * v148 (renumbered from v146, earlier v139; above main's v146) — IDENTITY GATE (#384, 2026-10-29). Verified identity is carried
  * through ticket filing and teardown/sweep recovery. The shared ticket client
  * filters Optical's carried appointments and history-derived routing text/IDs,
  * preserving caller-named offices across hydration, redirects and retries.
@@ -991,8 +991,13 @@ import { callEnvironment } from "./callRecord";
 /** v144: open Grok Bot operator conversations, owner recognition, background
  * request handoff, and outbound provenance, above main's v143.
  * Apply add_operator_line_inbound.sql separately. */
+/** v145: owner SMS exempt + notifier idempotency. Signed stable event IDs,
+ * durable notification claims and token-scoped SMS idempotency keys.
+ * Apply add_operator_notification_claims.sql separately; not applied here. */
+/** v146: dedicated operator SMS send, with no hours/caps, owner exemption,
+ * opt-outs, durable idempotency and operator-origin commits. No new migration. */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v146-identity-gate-20261029";
+  "voice-runtime-v148-identity-gate-20261029";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can
