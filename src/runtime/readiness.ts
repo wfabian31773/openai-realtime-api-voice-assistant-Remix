@@ -972,11 +972,16 @@ import { callEnvironment } from "./callRecord";
 /** v144: open Grok Bot operator conversations, owner recognition, background
  * request handoff, and outbound provenance, above main's v143.
  * Apply add_operator_line_inbound.sql separately. */
+/** v145: owner SMS exempt + notifier idempotency. Signed stable event IDs,
+ * durable notification claims and token-scoped SMS idempotency keys.
+ * Apply add_operator_notification_claims.sql separately; not applied here. */
+/** v146: dedicated operator SMS send, with no hours/caps, owner exemption,
+ * opt-outs, durable idempotency and operator-origin commits. No new migration. */
 /**
  * v147 — RECORDS QUESTION GUARD (2026-10-29). Records access and status
  * explanations stay in Medical Records; results-meaning questions stay
  * clinical. Refused prescriptions no longer count as records requests.
- * On top of v144 (#402, main), which contains v143; v145 is #391 and v146 is #384 on their open branches. No migration; production impact remains unmeasured.
+ * On top of v146 (#407, main), which contains v145 and v144; v148 is #384, v149 is #391 and v150 is #376 on their open branches. No migration; production impact remains unmeasured.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
   "voice-runtime-v147-records-question-guard-20261029";
