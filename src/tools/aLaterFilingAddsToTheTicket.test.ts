@@ -110,6 +110,20 @@ describe('a later filing that carries something new', () => {
   // Codex P1 on #404: a later filing that only corrects who the request is
   // about (a spelled surname, a name given after the first filing went out
   // unnamed) used to read as the same request and was never sent.
+  it('a later filing that only adds a callback extension is sent on', async () => {
+    const { create } = await fileFirst();
+    create.mockResolvedValueOnce(
+      { success: true, ticketNumber: 'VA-90001', cached: true, detailsAdded: true } as never,
+    );
+
+    const later = (await runTool('file_tech_ticket', { ...BASE, callback_number: '555-555-0147 ext 22' })) as Result;
+
+    expect(create).toHaveBeenCalledTimes(1);
+    const sent = create.mock.calls[0][0] as unknown as { callData?: { transcript?: string } };
+    expect(sent.callData?.transcript).toMatch(/Callback extension: 22/);
+    expect(later).toMatchObject({ already_filed: true, details_added: true });
+  });
+
   it('a later filing that only corrects the name is sent on', async () => {
     const { create } = await fileFirst();
     create.mockResolvedValueOnce(
@@ -274,6 +288,14 @@ describe('the fingerprint', () => {
     expect(filingFingerprint(params({ requestorType: 'personal_representative' }))).not.toBe(filingFingerprint(params()));
     expect(filingFingerprint(params({ requestPathway: 'pending_authorization' }))).not.toBe(filingFingerprint(params()));
     expect(filingFingerprint(params({ capClockApplies: false }))).not.toBe(filingFingerprint(params()));
+  });
+
+  it('sees a callback extension, which rides in the staff note, and nothing else in that note', () => {
+    const withNote = (transcript: string) => params({ callData: { transcript } });
+    expect(filingFingerprint(withNote('Callback extension: 22'))).not.toBe(filingFingerprint(params()));
+    expect(filingFingerprint(withNote('Callback extension: 22'))).not.toBe(filingFingerprint(withNote('Callback extension: 23')));
+    expect(filingFingerprint(withNote('DATE OF BIRTH UNAVAILABLE\nCallback extension: 22')))
+      .toBe(filingFingerprint(withNote('Callback extension: 22')));
   });
 });
 

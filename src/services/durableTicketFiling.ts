@@ -181,6 +181,11 @@ export function filingFingerprint(p: CreateTicketParams): string {
     p.requestorType ?? '',
     p.requestPathway ?? '',
     p.capClockApplies ?? null,
+    // The callback extension rides in the staff-only note, not in
+    // `patientPhone` (v132), so a later "it's extension 22" is read from there
+    // (Codex P2 on #404). Only that line: the rest of the note is not a detail
+    // the caller added.
+    /^Callback extension: (.+)$/m.exec(p.callData?.transcript ?? '')?.[1]?.trim() ?? '',
   ]);
   return createHash('sha256').update(canonical).digest('hex').slice(0, 12);
 }
