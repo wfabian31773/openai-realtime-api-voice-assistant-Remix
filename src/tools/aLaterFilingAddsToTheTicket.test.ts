@@ -236,6 +236,24 @@ describe('a later records filing that asks for the signing form', () => {
     call_sid: RECORDS_SID,
   };
 
+  it('an identical retry of a filing that already sent the link is told not to send it again', async () => {
+    // Codex P2 on #404: a re-send mints a new single-use token and kills the
+    // link the caller just received.
+    const sid = 'CA1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f';
+    const api = await client();
+    const create = vi.spyOn(api, 'createTicket').mockResolvedValueOnce(
+      { success: true, ticketNumber: 'VA-90003', form: { requested: true, sent: true, channel: 'sms' } } as never,
+    );
+    await runTool('file_records_ticket', { ...RECORDS, call_sid: sid, form_channel: 'sms' });
+    create.mockClear();
+
+    const again = (await runTool('file_records_ticket', { ...RECORDS, call_sid: sid, form_channel: 'sms' })) as Result;
+
+    expect(create).not.toHaveBeenCalled();
+    expect(String(again.fix)).toMatch(/already sent by text earlier on this call/);
+    expect(String(again.fix)).not.toMatch(/call send_records_form/);
+  });
+
   it('says this filing sent no form and names send_records_form with the channel asked for', async () => {
     const api = await client();
     const create = vi.spyOn(api, 'createTicket').mockResolvedValueOnce(

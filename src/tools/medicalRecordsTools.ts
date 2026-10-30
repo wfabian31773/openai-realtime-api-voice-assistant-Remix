@@ -167,6 +167,13 @@ function formAskOutcome(callSid: string | undefined, field: string): FormAsk {
 }
 /** Per-call latch: a records request has been filed on this call, so a re-send has something to re-send. */
 const RECORDS_FILED_FACT = 'records_ticket_filed';
+/**
+ * The signing link already went out on this call, by this channel. A repeat
+ * filing reads it so it never tells the model to send the link again: a
+ * re-send mints a new single-use token and kills the link the caller has
+ * (Codex P2 on #404).
+ */
+const RECORDS_FORM_SENT_FACT = 'records_form_sent';
 
 /**
  * Per-call latch: the request filed on this call was ROUTED OUT of Medical
@@ -1101,7 +1108,12 @@ registerTool({
     // A repeat filing never sends the signing form: the ticketing app only adds
     // the filing's details to the ticket it already has. So the model is told
     // what this filing did NOT do, and how to do it (Codex P2 on #404).
-    const repeatFormNote = sendForm
+    const formAlreadySent = sendForm && callFactNoted(callSid, `${RECORDS_FORM_SENT_FACT}:${formChannel}`);
+    if (formSent) noteCallFact(callSid, `${RECORDS_FORM_SENT_FACT}:${formChannel}`);
+    const repeatFormNote = formAlreadySent
+      ? `The signing link was already sent by ${byText ? 'text' : 'email'} earlier on this call. Do not ` +
+        'send it again unless the caller says it has not arrived.'
+      : sendForm
       ? `This filing did not send a signing form. If the caller wants the link, call send_records_form ` +
         `once with channel "${byText ? 'sms' : 'email'}".`
       : spokenDirections
@@ -1247,6 +1259,7 @@ registerTool({
         fix: `The re-send failed (${r.error ?? 'unknown'}). Do not try again on this call; say the team will send it.`,
       });
     }
+    noteCallFact(callSid, `${RECORDS_FORM_SENT_FACT}:${channel}`);
     return {
       success: true,
       form_channel: channel,
