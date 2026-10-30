@@ -25,18 +25,20 @@ import './sharedPatientTools';
 import './surgeryTools';
 
 const BASE = {
-  first_name: 'Wayne',
-  last_name: 'Fabian',
-  date_of_birth: '03/17/1973',
-  callback_number: '845-531-7471',
+  location: 'Testville',
+  first_name: 'Alex',
+  last_name: 'Synthetic',
+  date_of_birth: '01/02/1970',
+  callback_number: '555-555-0100',
 };
 
 async function client() {
   return (await import('../../server/services/ticketingApiClient')).ticketingApiClient;
 }
 
-beforeEach(() => {
+beforeEach(async () => {
   vi.restoreAllMocks();
+  vi.spyOn(await client(), 'lookupProviderAndLocation').mockResolvedValue({ success: true, locationId: 31 } as never);
 });
 
 describe('patientPhone is the digits, not the raw string', () => {
@@ -55,7 +57,7 @@ describe('patientPhone is the digits, not the raw string', () => {
       request_description: 'a question about my upcoming procedure',
     });
 
-    expect(create.mock.calls[0][0].patientPhone).toBe('8455317471');
+    expect(create.mock.calls[0][0].patientPhone).toBe('5555550100');
   });
 
   it('drops a leading 1, not the area code', async () => {
@@ -66,11 +68,11 @@ describe('patientPhone is the digits, not the raw string', () => {
 
     await runTool('file_surgery_ticket', {
       ...BASE,
-      callback_number: '1-845-531-7471',
+      callback_number: '1-555-555-0100',
       request_description: 'a question about my upcoming procedure',
     });
 
-    expect(create.mock.calls[0][0].patientPhone).toBe('8455317471');
+    expect(create.mock.calls[0][0].patientPhone).toBe('5555550100');
   });
 
   it('refuses 11 digits that do not start with 1, rather than dropping the first one', async () => {
@@ -83,7 +85,7 @@ describe('patientPhone is the digits, not the raw string', () => {
 
     const out = (await runTool('file_surgery_ticket', {
       ...BASE,
-      callback_number: '2-845-531-7471',
+      callback_number: '2-555-555-0100',
       request_description: 'a question about my upcoming procedure',
     })) as Record<string, unknown>;
 
@@ -291,7 +293,7 @@ describe('what it refuses, and what it does not', () => {
   it('refuses a partial callback number', async () => {
     const out = (await runTool('file_surgery_ticket', {
       ...BASE,
-      callback_number: '845-531',
+      callback_number: '555-555',
       request_description: 'anything',
     })) as Record<string, unknown>;
 
@@ -300,11 +302,8 @@ describe('what it refuses, and what it does not', () => {
     expect(String(out.message)).toMatch(/ten digits/i);
   });
 
-  it('files WITHOUT a location — unlike Optical, which refuses', async () => {
-    // Optical refuses because one optician per office IS its assignment rule.
-    // Surgery assigns 3,396 of 3,446 tickets and only 3 of the 50 unassigned
-    // lacked a location. Copying the refusal would cost real calls to prevent
-    // a failure this queue does not have.
+  it('files without a clinic when neither history nor the caller supplied one', async () => {
+    // Operator ruling 2026-10-28: only Optical requires a clinic; surgery files without one.
     const api = await client();
     const lookup = vi.spyOn(api, 'lookupProviderAndLocation');
     const create = vi
@@ -313,14 +312,14 @@ describe('what it refuses, and what it does not', () => {
 
     const out = (await runTool('file_surgery_ticket', {
       ...BASE,
+      location: undefined,
       request_description: 'I never got my clearance form',
     })) as Record<string, unknown>;
 
-    expect(out.success).toBe(true);
-    expect(out.location_id).toBeNull();
-    // No name to resolve means no reason to call the resolver at all.
+    expect(out.missingFields).toBeUndefined();
+    expect(create).toHaveBeenCalledTimes(1);
+    // No clinic name to resolve means no reason to call the resolver.
     expect(lookup).not.toHaveBeenCalled();
-    expect(create.mock.calls[0][0].departmentId).toBe(2);
   });
 
   it('reports a failed create rather than claiming success', async () => {
@@ -397,7 +396,7 @@ describe('a surgery ticket without a surgeon', () => {
       .mockResolvedValueOnce({ success: true, ticketNumber: 'VA-TEST-REC' } as never);
     const lookup = vi
       .spyOn(api, 'lookupProviderAndLocation')
-      .mockResolvedValueOnce({ success: true, providerId: 49 } as never);
+      .mockImplementation(async (input) => ({ success: true, ...(input.providerName ? { providerId: 49 } : { locationId: 31 }) }) as never);
 
     const sched = await import('../services/scheduleLookupService');
     vi.spyOn(sched.scheduleLookupService, 'lookupByNameAndDOB').mockResolvedValueOnce({
@@ -416,7 +415,7 @@ describe('a surgery ticket without a surgeon', () => {
     })) as Record<string, unknown>;
 
     // The chart's PHYSICIAN was used — never the A-Scan machine.
-    expect(lookup.mock.calls[0][0].providerName).toMatch(/Dwayne Logan/);
+    expect(lookup.mock.calls.find(call => call[0].providerName)?.[0].providerName).toMatch(/Dwayne Logan/);
     expect(create.mock.calls[0][0].providerId).toBe(49);
     expect(out.provider_id).toBe(49);
     expect(out.surgeon_source).toBe('patient_record');
@@ -463,11 +462,10 @@ describe('a surgery ticket without a surgeon', () => {
     const create = vi
       .spyOn(api, 'createTicket')
       .mockResolvedValueOnce({ success: true, ticketNumber: 'VA-TEST-OD' } as never);
-    // With no location and no caller-named surgeon, the first resolve
-    // short-circuits without touching the API — only the clinician rung calls it.
+    // Resolve the clinic separately from the clinician rung.
     const lookup = vi
       .spyOn(api, 'lookupProviderAndLocation')
-      .mockResolvedValue({ success: true, providerId: 45 } as never);
+      .mockImplementation(async (input) => ({ success: true, ...(input.providerName ? { providerId: 45 } : { locationId: 31 }) }) as never);
 
     const sched = await import('../services/scheduleLookupService');
     vi.spyOn(sched.scheduleLookupService, 'lookupByNameAndDOB').mockResolvedValueOnce({
@@ -803,7 +801,7 @@ describe('the date of birth the caller said, when the model sent none', () => {
   const SID = 'CA0000000000000000000000000000dead';
   const ASKED_AND_ANSWERED = [
     'AGENT: May I have your date of birth?',
-    'CALLER: March 17th, 1973.',
+    'CALLER: January 2nd, 1970.',
   ];
 
   beforeEach(async () => {
@@ -836,9 +834,9 @@ describe('the date of birth the caller said, when the model sent none', () => {
 
     expect(out.success).toBe(true);
     const sent = create.mock.calls[0][0];
-    expect(sent.patientBirthYear).toBe('1973');
-    expect(sent.patientBirthMonth).toBe('03');
-    expect(sent.patientBirthDay).toBe('17');
+    expect(sent.patientBirthYear).toBe('1970');
+    expect(sent.patientBirthMonth).toBe('01');
+    expect(sent.patientBirthDay).toBe('02');
   });
 
   it('still refuses when the caller never answered — this is not a way to skip the gate', async () => {
@@ -846,7 +844,7 @@ describe('the date of birth the caller said, when the model sent none', () => {
     // The caller talked about a date, but not in answer to being asked for one.
     noteSpokenDob(SID, [
       'AGENT: What can I help you with?',
-      'CALLER: My surgery was on March 17th, 1973.',
+      'CALLER: My surgery was on January 2nd, 1970.',
     ]);
 
     const api = await client();
@@ -901,6 +899,6 @@ describe('the date of birth the caller said, when the model sent none', () => {
     })) as Record<string, unknown>;
 
     expect(out.success).toBe(true);
-    expect(create.mock.calls[0][0].patientBirthYear).toBe('1973');
+    expect(create.mock.calls[0][0].patientBirthYear).toBe('1970');
   });
 });

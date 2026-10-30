@@ -26,7 +26,8 @@ const PHONE_CANDIDATE = {
   lastLocationSeen: 'Quixotic Vision Testville',
   lastProviderSeen: 'Dr. Xavier Zebrastripe',
 };
-const CONFIRMED = { ...PHONE_CANDIDATE, matchedBy: 'name_and_dob' as const };
+const CONFIRMED = { ...PHONE_CANDIDATE, matchedBy: 'name_and_dob' as const,
+  identity: { unique: true, candidateCount: 1, candidates: [] } };
 
 const h = vi.hoisted(() => ({
   lookupByPhone: vi.fn(async () => ({ patientFound: false, upcomingAppointments: [], pastAppointments: [], totalAppointmentsFound: 0 })),
@@ -36,6 +37,10 @@ const h = vi.hoisted(() => ({
 }));
 
 vi.mock('../../server/db', () => ({ db: {} }));
+vi.mock('../services/toolTimeline', () => ({
+  recordingExecute: (_ctx: unknown, _name: string, execute: unknown) => execute,
+  recordToolEvent: vi.fn(), flushAzulTimeline: vi.fn(),
+}));
 vi.mock('../../server/storage', () => ({ storage: { updateCallLog: (...a: unknown[]) => h.updateCallLog(...(a as [])) } }));
 vi.mock('../services/syncAgentService', () => ({
   SyncAgentService: { submitSimplifiedTicket: async () => ({ success: true, ticketNumber: 'VA-TEST' }), checkOpenTickets: async () => [], requiresCallback: () => true },
@@ -55,6 +60,7 @@ vi.mock('../services/callerMemoryService', () => ({
   callerMemoryService: { getCallerMemory: async () => null, buildContextForPrompt: () => '' },
 }));
 
+const { rememberVerifiedIdentity, resetVerifiedIdentities, verifiedIdentityFor } = await import('../tools/verifiedIdentity');
 const { createNoIvrAgent } = await import('./noIvrAgent');
 
 async function call(agent: any, name: string, args: Record<string, unknown>) {
@@ -79,9 +85,11 @@ const TICKET = {
   callback_number: '5551234567',
   request_category: 'general_question',
   request_summary: 'test request',
+  location: 'Synthetic Clinic',
 };
 
 beforeEach(() => {
+  resetVerifiedIdentities();
   h.lookupByPhone.mockReset().mockResolvedValue(PHONE_CANDIDATE as any);
   h.lookupByNameAndDOB.mockReset().mockResolvedValue(EMPTY as any);
   h.updateCallLog.mockReset().mockResolvedValue(undefined);
@@ -89,6 +97,21 @@ beforeEach(() => {
   vi.spyOn(console, 'log').mockImplementation(() => undefined);
   vi.spyOn(console, 'info').mockImplementation(() => undefined);
   vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+});
+
+it.each([
+  [{ first_name: '', last_name: '' }, 'first_name'],
+  [{ first_name: 'Zelda', last_name: '' }, 'last_name'],
+])('asks for missing names rather than filing an anonymous ticket (%j)', async (names, field) => {
+  const agent = await createNoIvrAgent(async () => {}, META);
+  expect(await call(agent, 'create_ticket', { ...TICKET, ...names }))
+    .toMatchObject({ success: false, missingFields: [field] });
+});
+
+it('a missing DOB exception cannot bypass missing names', async () => {
+  const agent = await createNoIvrAgent(async () => {}, META);
+  expect(await call(agent, 'create_ticket', { ...TICKET, first_name: '', last_name: '', date_of_birth: 'Unknown' }))
+    .toMatchObject({ success: false, missingFields: ['first_name'] });
 });
 
 describe('a confirmed identity reaches the call row', () => {
@@ -127,12 +150,33 @@ describe('a candidate is not an identity', () => {
     expect(h.updateCallLog).not.toHaveBeenCalled();
   });
 
-  it('a B2B caller with no date of birth writes nothing — the phone context is all there is', async () => {
+  it('a reachable caller with an unreadable date of birth is asked before filing; phone context cannot fill it', async () => {
     const agent = await createNoIvrAgent(async () => {}, META);
     h.liveCallLogId = 'log-row-c153';
-    const res = await call(agent, 'create_ticket', { ...TICKET, date_of_birth: 'DOB not available' });
+    const res = await call(agent, 'create_ticket', { ...TICKET, date_of_birth: 'not a readable date' });
+    expect(res.success).toBe(false);
+    expect(h.lookupByNameAndDOB).not.toHaveBeenCalled();
+    expect(h.updateCallLog).not.toHaveBeenCalled();
+  });
+
+  it('the B2B no-DOB path files without a clinic and never promotes the phone candidate', async () => {
+    const agent = await createNoIvrAgent(async () => {}, META);
+    h.liveCallLogId = 'log-row-c153';
+    const { location, ...request } = TICKET;
+    const res = await call(agent, 'create_ticket', { ...request, date_of_birth: 'DOB not available' });
     expect(res.success).toBe(true);
     expect(h.lookupByNameAndDOB).not.toHaveBeenCalled();
+    expect(h.updateCallLog).not.toHaveBeenCalled();
+  });
+
+  it('a unique name-only fallback cannot become the validated filing identity', async () => {
+    h.lookupByNameAndDOB.mockResolvedValue({ ...CONFIRMED, matchedBy: 'name',
+      patientData: { firstName: 'Zelda', lastName: 'Quixote', dateOfBirth: '1958-01-04' } } as any);
+    const agent = await createNoIvrAgent(async () => {}, META);
+    h.liveCallLogId = 'log-row-c153';
+    const res = await call(agent, 'create_ticket', TICKET);
+    expect(res.success).toBe(true);
+    expect(verifiedIdentityFor(SID)).toBeUndefined();
     expect(h.updateCallLog).not.toHaveBeenCalled();
   });
 
@@ -157,5 +201,169 @@ describe('several people on the name and date of birth write nothing — Codex P
     expect(res.success).toBe(true);
     await new Promise((r) => setTimeout(r, 25));
     expect(h.updateCallLog).not.toHaveBeenCalled();
+  });
+});
+
+it('VA-75419 / #12: a validated lookup supplies omitted demographics to create_ticket without another lookup', async () => {
+  h.lookupByNameAndDOB.mockResolvedValue({ ...CONFIRMED, identity: { unique: true },
+    patientData: { firstName: 'Zelda', lastName: 'Quixote', dateOfBirth: '1958-01-04', personId: '00000000-0000-4000-8000-000000000001' },
+    upcomingAppointments: [{ isoDate: '2099-01-01', location: 'Synthetic Clinic' }] } as any);
+  const agent = await createNoIvrAgent(async () => {}, META);
+  await call(agent, 'lookup_schedule', { first_name: 'Zelda', last_name: 'Quixote', date_of_birth: '1958-01-04' });
+  const { first_name, last_name, date_of_birth, location, ...rest } = TICKET;
+  const res = await call(agent, 'create_ticket', rest);
+  expect(res.success).toBe(true);
+  expect(h.lookupByNameAndDOB).toHaveBeenCalledTimes(1);
+});
+
+it('VA-75419: repeated appointment questions reuse the validated joined record', async () => {
+  h.lookupByNameAndDOB.mockResolvedValue({ ...CONFIRMED, identity: { unique: true },
+    patientData: { firstName: 'Zelda', lastName: 'Quixote', dateOfBirth: '1958-01-04' },
+    upcomingAppointments: [{ isoDate: '2099-01-01', location: 'Synthetic Clinic' }] } as any);
+  const agent = await createNoIvrAgent(async () => {}, META);
+  const args = { first_name: 'Zelda', last_name: 'Quixote', date_of_birth: '1958-01-04' };
+  await call(agent, 'lookup_schedule', args);
+  h.lookupByNameAndDOB.mockResolvedValue(EMPTY as any);
+  const result = await call(agent, 'lookup_schedule', args);
+  expect(result).toMatchObject({ found: true, upcomingAppointments: [{ location: 'Synthetic Clinic' }] });
+  expect(h.lookupByNameAndDOB).toHaveBeenCalledTimes(1);
+});
+
+it('VA-76198: an ambiguous lookup exposes no selected patient visit history', async () => {
+  h.lookupByNameAndDOB.mockResolvedValue({ ...CONFIRMED, identity: { unique: false, candidateCount: 2 },
+    upcomingAppointments: [{ isoDate: '2099-01-01', location: 'Synthetic Clinic' }] } as any);
+  const agent = await createNoIvrAgent(async () => {}, META);
+  const result = await call(agent, 'lookup_schedule', { first_name: 'Zelda', last_name: 'Quixote', date_of_birth: '1958-01-04' });
+  expect(result).toMatchObject({ found: true, identityUnconfirmed: true });
+  expect(result.upcomingAppointments).toBeUndefined();
+});
+
+const SECOND_PATIENT = {
+  ...CONFIRMED,
+  patientName: 'Blair Synthetic',
+  patientData: { firstName: 'Blair', lastName: 'Synthetic', dateOfBirth: '1970-02-03' },
+  upcomingAppointments: [{ isoDate: '2099-02-03', location: 'Synthetic Second Clinic' }],
+  lastLocationSeen: 'Synthetic Second Clinic', lastProviderSeen: 'Dr. Synthetic Second',
+};
+const SECOND_IDENTITY = { first_name: 'Blair', last_name: 'Synthetic', date_of_birth: '1970-02-03' };
+
+it('checks DOB-only requests against the current patient after an A to B schedule switch', async () => {
+  h.lookupByNameAndDOB.mockResolvedValueOnce({ ...CONFIRMED,
+    patientData: { firstName: TICKET.first_name, lastName: TICKET.last_name, dateOfBirth: '1958-01-04' },
+  } as any).mockResolvedValueOnce(SECOND_PATIENT as any);
+  const agent = await createNoIvrAgent(async () => {}, META);
+  await call(agent, 'lookup_schedule', TICKET);
+  await call(agent, 'lookup_schedule', SECOND_IDENTITY);
+
+  const staleDob = await call(agent, 'lookup_schedule', { date_of_birth: '1958-01-04' });
+  expect(staleDob.found).toBe(false);
+  expect(staleDob).not.toHaveProperty('upcomingAppointments');
+  expect(staleDob).not.toHaveProperty('upcoming_appointments');
+  expect(await call(agent, 'lookup_schedule', { date_of_birth: SECOND_IDENTITY.date_of_birth }))
+    .toMatchObject({ found: true, upcomingAppointments: SECOND_PATIENT.upcomingAppointments });
+  expect(h.lookupByNameAndDOB).toHaveBeenCalledTimes(2);
+  expect(verifiedIdentityFor(SID)).toMatchObject(SECOND_PATIENT.patientData);
+});
+
+it.each([
+  { query: {}, demographics: true, firstIdentity: TICKET },
+  { query: SECOND_IDENTITY, demographics: true, firstIdentity: TICKET },
+  { query: {}, demographics: false, firstIdentity: TICKET },
+  { query: SECOND_IDENTITY, demographics: false, firstIdentity: TICKET },
+  { query: {}, demographics: true, firstIdentity: { ...SECOND_IDENTITY, date_of_birth: '1980-04-05' } },
+])('a secondary ticket lookup replaces the previous patient schedule before reuse (%j)', async ({ query, demographics, firstIdentity }) => {
+  h.lookupByNameAndDOB.mockResolvedValueOnce({ ...CONFIRMED,
+    patientName: `${firstIdentity.first_name} ${firstIdentity.last_name}`,
+    patientData: { firstName: firstIdentity.first_name, lastName: firstIdentity.last_name, dateOfBirth: firstIdentity.date_of_birth },
+    upcomingAppointments: [{ isoDate: '2099-01-01', location: 'Synthetic First Clinic' }],
+  } as any).mockResolvedValueOnce({ ...SECOND_PATIENT,
+    patientData: demographics ? SECOND_PATIENT.patientData : undefined,
+  } as any);
+  const agent = await createNoIvrAgent(async () => {}, META);
+  await call(agent, 'lookup_schedule', firstIdentity);
+  expect(await call(agent, 'create_ticket', { ...TICKET, ...SECOND_IDENTITY })).toMatchObject({ success: true });
+  expect(verifiedIdentityFor(SID)).toMatchObject(SECOND_PATIENT.patientData);
+
+  expect(await call(agent, 'lookup_schedule', query)).toMatchObject({
+    found: true, appointment_access: 'available',
+    upcomingAppointments: SECOND_PATIENT.upcomingAppointments,
+    lastLocationSeen: SECOND_PATIENT.lastLocationSeen,
+    lastProviderSeen: SECOND_PATIENT.lastProviderSeen,
+  });
+  expect(h.lookupByNameAndDOB).toHaveBeenCalledTimes(2);
+  expect(verifiedIdentityFor(SID)).toMatchObject({
+    ...SECOND_PATIENT.patientData,
+    nextAppointment: { date: '2099-02-03', location: 'Synthetic Second Clinic' },
+  });
+});
+
+it('a ticket revalidates a stale schedule before using its history for enrichment', async () => {
+  h.lookupByNameAndDOB.mockResolvedValueOnce({ ...SECOND_PATIENT,
+    patientData: { ...SECOND_PATIENT.patientData, dateOfBirth: '1980-04-05' },
+    upcomingAppointments: [{ isoDate: '2099-01-01', location: 'Synthetic Other Patient Clinic' }],
+  } as any).mockResolvedValueOnce(SECOND_PATIENT as any);
+  const agent = await createNoIvrAgent(async () => {}, META);
+  await call(agent, 'lookup_schedule', { ...SECOND_IDENTITY, date_of_birth: '1980-04-05' });
+  rememberVerifiedIdentity(SID, { ...SECOND_PATIENT.patientData, certain: true });
+
+  expect(await call(agent, 'create_ticket', { ...TICKET, ...SECOND_IDENTITY })).toMatchObject({ success: true });
+  expect(h.lookupByNameAndDOB).toHaveBeenCalledTimes(2);
+  expect(await call(agent, 'lookup_schedule', {})).toMatchObject({
+    found: true, upcomingAppointments: SECOND_PATIENT.upcomingAppointments,
+  });
+});
+
+it.each([
+  { firstName: 'Another', lastName: 'Synthetic', dateOfBirth: '1970-02-03' },
+  { ...SECOND_PATIENT.patientData, dateOfBirth: '1980-04-05' },
+  { ...SECOND_PATIENT.patientData, personId: 'synthetic-other-person' },
+])('revalidates a cached schedule that disagrees with the held identity (%j)', async (cachedIdentity) => {
+  const currentIdentity = { ...SECOND_PATIENT.patientData, personId: 'synthetic-current-person', certain: true };
+  h.lookupByNameAndDOB.mockResolvedValueOnce({ ...SECOND_PATIENT,
+    patientData: cachedIdentity,
+    upcomingAppointments: [{ isoDate: '2099-01-01', location: 'Synthetic Other Patient Clinic' }],
+  } as any).mockResolvedValueOnce(SECOND_PATIENT as any);
+  const agent = await createNoIvrAgent(async () => {}, META);
+  await call(agent, 'lookup_schedule', {
+    first_name: cachedIdentity.firstName, last_name: cachedIdentity.lastName, date_of_birth: cachedIdentity.dateOfBirth,
+  });
+  // Other call tools share the held identity store; a cache must prove it still belongs to that person.
+  rememberVerifiedIdentity(SID, currentIdentity);
+
+  expect(await call(agent, 'lookup_schedule', SECOND_IDENTITY)).toMatchObject({
+    found: true, upcomingAppointments: SECOND_PATIENT.upcomingAppointments,
+  });
+  expect(h.lookupByNameAndDOB).toHaveBeenCalledTimes(2);
+});
+
+describe.each([
+  ['live SIP', {}],
+  ['runtime', { pipeline: 'runtime' as const }],
+])('%s: fresh legacy name+DOB results keep the cache identity gate', (_label, pipeline) => {
+  it.each([true, false])('returns a fresh result without uniqueness metadata, then resolves the previous patient again (demographics: %j)', async (demographics) => {
+    const firstPatient = {
+      ...CONFIRMED,
+      patientData: { firstName: TICKET.first_name, lastName: TICKET.last_name, dateOfBirth: '1958-01-04' },
+      upcomingAppointments: [{ isoDate: '2099-01-01', location: 'Synthetic First Clinic' }],
+    };
+    h.lookupByNameAndDOB.mockResolvedValueOnce(firstPatient as any)
+      .mockResolvedValueOnce({ ...SECOND_PATIENT, identity: undefined,
+        patientData: demographics ? SECOND_PATIENT.patientData : undefined,
+      } as any)
+      .mockResolvedValueOnce(firstPatient as any);
+    const agent = await createNoIvrAgent(async () => {}, { ...META, ...pipeline });
+    await call(agent, 'lookup_schedule', TICKET);
+
+    expect(await call(agent, 'lookup_schedule', SECOND_IDENTITY)).toMatchObject({
+      found: true, appointment_access: 'available', upcomingAppointments: SECOND_PATIENT.upcomingAppointments,
+    });
+    // Without returned demographics, the previous identity is still held.
+    // That does not make this second patient's cached schedule theirs.
+    expect(await call(agent, 'lookup_schedule', TICKET)).toMatchObject({
+      found: true, appointment_access: 'available', upcomingAppointments: firstPatient.upcomingAppointments,
+    });
+    expect(h.lookupByNameAndDOB).toHaveBeenCalledTimes(3);
+    expect(h.lookupByNameAndDOB).toHaveBeenLastCalledWith('Zelda', 'Quixote', '1958-01-04');
+    expect(verifiedIdentityFor(SID)).toMatchObject(firstPatient.patientData);
   });
 });

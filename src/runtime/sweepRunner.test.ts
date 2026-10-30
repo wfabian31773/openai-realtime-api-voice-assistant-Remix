@@ -7,6 +7,10 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { runRequestSweep, type SweepFiler } from "./sweepRunner";
 import type { VoiceCallRecord, ToolEvent } from "./mediaStreamBridge";
 import { rememberVerifiedIdentity, resetVerifiedIdentities } from "../tools/verifiedIdentity";
+import * as directory from '../services/consoleDirectory';
+
+const { durableFile } = vi.hoisted(() => ({ durableFile: vi.fn() }));
+vi.mock('../services/durableTicketFiling', () => ({ createTicketDurable: durableFile }));
 
 const SID = "CA00000000000000000000000000000042";
 
@@ -49,6 +53,12 @@ function filer(): SweepFiler & { calls: unknown[] } {
 }
 
 beforeEach(() => {
+  durableFile.mockReset();
+  vi.spyOn(directory, 'isDirectoryConfigured').mockReturnValue(true);
+  vi.spyOn(directory, 'lookupLocation').mockImplementation(async (name) => ({
+    canonical: name, key: name.toLowerCase(), volume90d: 1,
+    facilityKind: name === 'Synthetic Surgery Center' ? 'surgery_center' : 'clinic',
+  }));
   resetVerifiedIdentities();
   rememberVerifiedIdentity(SID, {
     firstName: "Testpatient",
@@ -69,6 +79,58 @@ afterEach(() => {
 });
 
 describe("recovering a request the agent did not file", () => {
+  it('the production filer carries identity into the durable payload, not only the injected test filer', async () => {
+    rememberVerifiedIdentity(SID, { firstName: 'Testpatient', lastName: 'Example', dateOfBirth: '1950-01-02',
+      certain: true, personId: '00000000-0000-4000-8000-000000000001', usualOffice: 'Synthetic Clinic' });
+    durableFile.mockResolvedValue({ success: false, queued: true });
+    expect(await runRequestSweep(record())).toEqual({ filed: true });
+    expect(durableFile).toHaveBeenCalledWith(expect.objectContaining({
+      patientBirthYear: '1950', patientBirthMonth: '01', patientBirthDay: '02', locationOfLastVisit: 'Synthetic Clinic', locationSource: 'history',
+      validatedPatient: expect.objectContaining({ status: 'validated', callSid: SID, personId: '00000000-0000-4000-8000-000000000001' }),
+    }));
+  });
+
+  it.each([
+    ['Synthetic Surgery Center', 'Synthetic Last Clinic', 'Synthetic Usual Clinic'],
+    ['Synthetic Next Clinic', 'Synthetic Surgery Center', 'Synthetic Usual Clinic'],
+    ['Synthetic Surgery Center', 'Synthetic Surgery Center', 'Synthetic Usual Clinic'],
+    ['Synthetic Surgery Center', 'Synthetic Surgery Center', 'Synthetic Surgery Center'],
+  ])('filters Optical recovery history before durable filing: %s / %s / %s', async (nextOffice, lastOffice, usualOffice) => {
+    const nextAppointment = { date: '2099-01-01', location: nextOffice };
+    const lastVisit = { date: '2020-01-01', location: lastOffice };
+    rememberVerifiedIdentity(SID, { firstName: 'Testpatient', lastName: 'Example', dateOfBirth: '1950-01-02',
+      certain: true, personId: 'synthetic-person', nextAppointment, lastVisit, usualOffice });
+    durableFile.mockResolvedValue({ success: true, ticketNumber: 'VA-SYNTHETIC' });
+
+    expect(await runRequestSweep(record({ slug: 'optical',
+      transcript: 'AGENT: How can I help?\nCALLER: I need new glasses.' }))).toEqual({ filed: true, ticketNumber: 'VA-SYNTHETIC' });
+
+    expect(durableFile).toHaveBeenCalledOnce();
+    const payload = durableFile.mock.calls[0][0];
+    const acceptable = (office: string) => office !== 'Synthetic Surgery Center';
+    expect(payload.validatedPatient).toMatchObject({ status: 'validated', callSid: SID, personId: 'synthetic-person' });
+    expect(payload.validatedPatient.nextAppointment).toEqual(acceptable(nextOffice) ? nextAppointment : undefined);
+    expect(payload.validatedPatient.lastVisit).toEqual(acceptable(lastOffice) ? lastVisit : undefined);
+    expect(payload.validatedPatient.confirmedClinic).toBe(acceptable(usualOffice) ? usualOffice : undefined);
+    expect(payload.locationOfLastVisit).toBe([nextOffice, lastOffice, usualOffice].find(acceptable));
+    expect(JSON.stringify(payload)).not.toContain('Synthetic Surgery Center');
+  });
+
+  it('keeps surgery-center appointment history on Surgery recovery tickets', async () => {
+    const nextAppointment = { date: '2099-01-01', location: 'Synthetic Surgery Center' };
+    rememberVerifiedIdentity(SID, { firstName: 'Testpatient', lastName: 'Example', dateOfBirth: '1950-01-02',
+      certain: true, nextAppointment, usualOffice: 'Synthetic Usual Clinic' });
+    durableFile.mockResolvedValue({ success: true, ticketNumber: 'VA-SYNTHETIC' });
+
+    expect(await runRequestSweep(record({ slug: 'surgery',
+      transcript: 'AGENT: How can I help?\nCALLER: I need to schedule my surgery.' }))).toMatchObject({ filed: true });
+
+    expect(durableFile).toHaveBeenCalledWith(expect.objectContaining({
+      validatedPatient: expect.objectContaining({ nextAppointment }), locationOfLastVisit: 'Synthetic Usual Clinic',
+    }));
+    expect(directory.lookupLocation).not.toHaveBeenCalled();
+  });
+
   it("files it, on the queue the call arrived on", async () => {
     const file = filer();
     const out = await runRequestSweep(record(), file);

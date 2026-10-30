@@ -144,7 +144,7 @@ describe("the Grok body is the shape xAI's Prompting Guide prescribes", () => {
       expect(grok).toContain(`Non-urgent callbacks will be made ${callback}.`);
       expect(grok.length).toBeLessThan(legacy.length / 2);
       // RATCHET: measured 2026-10-28 with this fixture and pinned clocks, the
-      // built Grok body is 14,771 characters by day and 14,801 overnight
+      // built Grok body is 14,767 characters by day and 14,797 overnight
       // (before the trim: 14,981 and 15,011). The triage block and urgent
       // symptoms are shared verbatim with legacy. Never raise this silently.
       expect(grok.length).toBeLessThan(15_000);
@@ -196,7 +196,7 @@ const RULINGS: Array<[string, RegExp]> = [
   ['ghost line and hangup forbidden after a request', /NEVER use the ghost-call line or terminate_call with reason "ghost_call" after any non-empty caller transcript, including any request or question/],
   ['date of birth is asked in parts', /starting with the month, then\s*\n?\s*the day, then the year/],
   ['the create_ticket wait line', /Give me one moment while I get this submitted for you/],
-  ['B2B callers are not blocked on a date of birth', /DOB IS OPTIONAL FOR BUSINESS CALLERS/],
+  ['held DOB and clinic are used before asking for missing facts', /use the validated record's DOB and clinic if held/i],
   ['new-or-existing on a lookup miss', /are you a new patient with us, or have you been seen/],
   ['filing a partial ticket is the job', /Filing a partial ticket IS the job/],
   ['a failed tool is never an escalation', /A failed tool is NOT an escalation case/],

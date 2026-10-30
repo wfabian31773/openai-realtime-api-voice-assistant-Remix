@@ -451,3 +451,10 @@ export function missingMandatoryCopy(
   const text = String(greeting ?? '');
   return required.filter((r) => !r.present(text)).map((r) => r.label);
 }
+/** Caller ID identifies a candidate, so its name must not be spoken as identity. */
+export function recognisedFirstName(precontext: unknown): string {
+  if (!precontext || typeof precontext !== 'object') return '';
+  const pc = precontext as { matched?: unknown; firstName?: unknown; identityValidated?: unknown };
+  if (pc.matched !== true || pc.identityValidated !== true) return '';
+  return typeof pc.firstName === 'string' ? pc.firstName.trim() : '';
+}

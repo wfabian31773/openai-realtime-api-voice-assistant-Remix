@@ -500,8 +500,13 @@ the code they add.
 
 Item #14 (`VA-76200`, `VA-76188`, `VA-76215`) is covered in the agent-visible
 tool descriptions and the common ticket client. Verify deployment using
-`voice-runtime-v137-mutual-patient-detector-20261028` from `/voice/health`
-for this branch (which includes v117):
+`voice-runtime-v149-mutual-patient-detector-20261029` from `/voice/health`
+for #391, on top of v148 (#384, main, `117c2d5`). This build adds the
+mutual-patient provider detector to #384's build, which carries verified
+identity through ticket filing and teardown/sweep recovery, filters Optical
+appointment and office locations with the shared facility rules, and lets
+Surgery file without a clinic when none is known. No migration; production
+impact is unmeasured. It includes v117's contact capture:
 
 - A validated joined record supplies identity and contact fields it already
   holds. Do not ask for or overwrite those fields again.
@@ -558,6 +563,130 @@ schemas are exercised in `src/agents/contactCaptureWire.test.ts` and
 4. Put the failing utterance into an offline test before changing code.
    `src/runtime/voiceRuntime.test.ts` drives a whole call with fake sockets
    on both sides; a real failure should be reproducible there first.
+
+
+## Records-line purpose gate — item #8 (2026-10-27)
+
+References: VA-73593, 73510, 73485, 73880, 75992, 67520, 67482, 67461, 67473, 67533; HVA VA-76695, 76349.
+
+`classify_records_request` returns `is_records_request: false` and the ordinary
+callback destination when the request is not for records. `file_records_ticket`
+rechecks deterministically before the form/channel/delivery asks. It uses the
+caller's captured request when that contradicts a model-generated MR request;
+identity-only speech does not override the request, and a scoped multi-patient
+request keeps its own narrative. Verified patient identity carry is unchanged.
+
+Non-records tickets have no CAP statement, records requester/pathway/clock fields,
+form channel, or delivery/date-range instructions. Scheduling goes to HVA Hub,
+surgery to Surgery Coordination, referral authorization and payer/vendor inquiries
+to PCP Support; unclear non-records work goes to HVA Hub / Other. Nobody is told
+to call another line. Existing identity and routing gates still apply.
+
+The intent policy distinguishes interpretation from an explicit delivery request:
+"explain the test results that were sent to me" stays clinical, while "send my
+test results so I can discuss them with my doctor" stays in Medical Records.
+A refusal covers all supported document terms, including notes, reports, results, imaging and
+documentation. Corrections such as "I don't need my whole chart, just send the
+operative report" retain the affirmative request; an inline "please reschedule
+my appointment" keeps its scheduling taxonomy after a records refusal.
+Documentation from a past visit is supported records work. Unknown requests
+still file to HVA Hub / Other, with `classified: false`, no spoken `message`,
+and model instructions in `fix`.
+The merged runtime retains main's deployment marker,
+`voice-runtime-v117-contact-capture-20261027`, without a marker bump.
+
+An actual records request stays in Medical Records even when it names an
+appointment, operation, referral, vendor or payer. Third-party requester handling
+and the patient pending-authorization/signature flow are unchanged. The nearby
+PR #376 behavior is protected without edits to PCP routing or queueRouting.ts.
+Ticketing's Support Desk bot classification still takes effect immediately.
+
+The pure policy in `shared/records-request-intent.ts` is mirrored in Ticketing,
+which owns the final decision on both voice creation endpoints and the case
+sweep. Keep the two copies and their shared policy tests aligned. Ship Ticketing
+first to protect older voice payloads; then voice stops offering the wrong form.
+No database/schema change or historical cleanup is included.
+The 2026-10-28 follow-up fixes are local to this voice worktree; align Ticketing's
+policy copy before deployment.
+
+Offline regression commands (external services mocked):
+
+```sh
+npx vitest run shared/records-request-intent.test.ts src/tools/recordsPurpose.item8.test.ts src/tools/medicalRecordsTools.test.ts src/tools/recordsFormAtCallTime.test.ts src/tools/recordsFilesWithoutAName.test.ts src/pcp/professionalRecordsReachMedicalRecords.test.ts
+npx tsc --noEmit -p .
+```
+
+All issue references use synthetic stand-ins, not retrieved transcripts. No
+production DB access or writes were permitted for this work. Population counts,
+production before/after effects and live call behavior are unmeasured; this is
+local proof only. Following deployment, the metric is non-records calls producing
+an MR case (target zero); the guard is genuine records requests, especially
+third-party requests, still reaching Medical Records. Do not bulk reclassify
+existing cases to improve that metric.
+
+Regression evidence for this change: the initial voice suite failed 14 of 17
+checks before the fix; a later result-envelope check failed all 12 non-records
+rows until `cap_clock_applies` was also corrected. The selected voice suites
+pass 236 tests. Ticketing's inline/sweep regression failed all 12 issue rows
+before the fix; removing its create-ticket normalization makes 14 API tests
+fail. Both variants were restored and retested. The requested root typechecks
+pass. The dashboard production build is blocked by unavailable client React,
+React Router and React Query dependencies/types; the server build passes.
+
+
+Self-review (2026-10-27) extends the request evidence to the existing ROI,
+imaging/OCT/visual-field, inspection and letter/form workflows. It excludes
+refused delivery and clinical interpretation, and keeps the established
+scheduling reasons (including same-day/availability and Spanish scheduling).
+Classification and filing now read the same captured request turns. A caller's
+employer or identity-only answer cannot override a genuine records summary,
+and those answers are not copied into a redirected request's SMS body. PCP's
+per-patient scopes still keep their own narrative. Tests exercise the runtime's
+transcript-feed function and both real tool entry points; the redirect-before-form
+check now asserts behavior instead of source-code order.
+
+Resume validation: all 150 tests in the four touched test files pass, and a
+TypeScript project covering the branch's changed files and their imports passes.
+Restoring the initial intent policy fails 23 policy checks. Bypassing captured
+request evidence in classification fails the classification/filing regression.
+Both mutations were restored before the final run. The shared policy and its
+tests are identical in both repositories. No migration is included in this branch.
+
+
+Review-fix proof (2026-10-27): the policy/tool/CI regressions failed 42 tests
+before the fixes. The selected policy, classification/filing, records form/name,
+professional-request, readiness and marker suites now pass all 242 tests (9 files),
+including `src/tools/theToolDoesNotNarrateItsRule.test.ts`. Root `tsc -p .
+--noEmit` passes. This repo has no ESLint dependency/config; touched TypeScript
+files were linted with the paired Ticketing repo's ESLint and TypeScript parser,
+using its unused-symbol rule, without changing dependencies or disabling checks.
+
+Independent temporary-copy mutations of the mirrored policy each fail: restoring
+narrow document negation (29), delivery before interpretation (4), dropping inline
+correction splitting (2), and dropping documentation (3). Restored policy passes
+all 85 checks. Both repos retain identical policy sources and policy tests.
+The optional dashboard typecheck is blocked by absent client dependencies; an
+`npm ci` attempt failed with npm registry DNS `EAI_AGAIN`. No live services,
+patient data or migrations were used.
+
+
+Full-suite attempt: 344 files / 6,832 tests passed; one file / 16 tests skipped.
+Four files could not pass under this sandbox (127 failed tests):
+`server/health.test.ts`, `src/plugin/pluginApi.test.ts` and
+`src/runtime/voiceRuntime.test.ts` require local listening sockets, refused with
+`listen EPERM` and followed by harness timeouts; `src/runtime/buildIdentity.test.ts`
+requires a child Git process, refused with `spawnSync git EPERM`. Those checks
+and the authentication/signature rules remain intact. The targeted nine-file
+run passes independently of these environment restrictions.
+
+Follow-up review proof (2026-10-28): 252 tests pass across the eight targeted
+policy, records-tool, readiness and marker files. New policy/tool cases first
+failed 16 tests; two additional interpretation-boundary cases also failed before
+being fixed. Isolated policy copies fail when interpretation handling is removed
+(10), inline correction splitting is removed (10), or documentation is omitted
+(3). The neighboring PCP regression could not load because `@openai/agents` is
+absent from the available local dependencies. Only targeted Vitest files ran;
+no database writes or patient data were used.
 
 ## 9. No-IVR speech, callback, and summary safeguards
 

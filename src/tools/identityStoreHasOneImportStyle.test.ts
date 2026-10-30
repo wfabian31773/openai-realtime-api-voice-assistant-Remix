@@ -41,6 +41,7 @@
 import { describe, expect, it } from 'vitest';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
+import ts from 'typescript';
 
 const SRC = join(__dirname, '..');
 
@@ -106,7 +107,10 @@ describe('the identity store has one import style', () => {
 
   it('stays a leaf module, which is what makes a static import free', () => {
     const source = readFileSync(join(SRC, 'tools/verifiedIdentity.ts'), 'utf8');
-    const specifiers = [...source.matchAll(/^import .*from '([^']+)';$/gm)].map((m) => m[1]);
+    // Type-only schedule contracts add no load-time dependency. Check what
+    // actually runs so a value import of a service still fails this guard.
+    const runtime = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.ESNext } }).outputText;
+    const specifiers = [...runtime.matchAll(/^import .*from ['"]([^'"]+)['"];$/gm)].map((m) => m[1]);
 
     expect(specifiers.sort()).toEqual(['./callSid', './dobParts']);
   });

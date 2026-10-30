@@ -21,7 +21,7 @@ export interface CallFacts {
   /** Matched via caller-ID pre-context — a hint until verified. */
   matchedFirstName?: string;
   matchedLastName?: string;
-  /** DOB from the matched record — verification compares against THIS. */
+  /** DOB from the seeded match; schedule verification uses its current record. */
   matchedDob?: string;
   /** Stated/confirmed by the caller. */
   firstName?: string;
@@ -211,14 +211,18 @@ export function dobKey(raw: string | undefined | null): string | null {
 }
 
 /**
- * "Why are we comparing to the system when we should compare to the context
- * we already pulled?" (Wayne 2026-08-07) — recognized callers verify by
- * DIRECT comparison against the matched record's DOB. No lookup, no miss.
+ * Compare directly against the current record's DOB. Pass the record being
+ * returned explicitly: the ledger's original phone candidate may be stale.
  */
-export function dobMatchesContext(callId: string, spokenDob: string): boolean | null {
-  const f = ledgers.get(callId) as (CallFacts & { matchedDob?: string }) | undefined;
-  const known = dobKey(f?.matchedDob);
+export function dobMatchesRecord(record: { dateOfBirth?: string } | undefined, spokenDob: string): boolean | null {
+  const known = dobKey(record?.dateOfBirth);
   if (!known) return null; // no context DOB — caller falls back to lookup
   const spoken = dobKey(spokenDob);
   return spoken !== null && spoken === known;
+}
+
+/** Opening ramp comparison against its seeded candidate, not a schedule read.
+ * Schedule confirmation must use dobMatchesRecord with the current patient. */
+export function dobMatchesContext(callId: string, spokenDob: string): boolean | null {
+  return dobMatchesRecord({ dateOfBirth: ledgers.get(callId)?.matchedDob }, spokenDob);
 }

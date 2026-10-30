@@ -63,16 +63,16 @@ beforeEach(() => {
 });
 
 describe('a phone that carries two people', () => {
-  it('with the affirmed first name, locks THAT person — certain, remembered with the chart date', async () => {
+  it('with only the affirmed first name, narrows the candidate but still needs caller validation', async () => {
     const out = await lookup({ queue: 'surgery', call_sid: SID, caller_phone: '555-555-0147', first_name: 'Zelda' });
     expect(out.found).toBe(true);
-    expect(out.identity_is_certain).toBe(true);
+    expect(out.identity_is_certain).toBe(false);
     expect(out.matched_by).toBe('phone');
     // The re-resolve asked for Zelda's own trio, not Xavier's.
     const trio = lookupSpy.mock.calls.map((c) => c[0] as Record<string, unknown>).find(byTrio);
     expect(trio).toMatchObject({ firstName: 'Zelda', lastName: 'Quixote', dateOfBirth: '1958-01-04' });
     const remembered = verifiedIdentityFor(SID);
-    expect(remembered).toMatchObject({ firstName: 'Zelda', lastName: 'Quixote', dateOfBirth: '1958-01-04', certain: true });
+    expect(remembered).toBeUndefined();
   });
 
   it('with no first name, the match stays a guess among two and nothing is remembered', async () => {

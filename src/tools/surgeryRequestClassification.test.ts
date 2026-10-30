@@ -143,7 +143,7 @@ describe('#6/#7 and HVA: actual request wins on the surgery line', () => {
     await runTool('file_surgery_ticket', {
       first_name: 'Avery', last_name: 'Example', date_of_birth: '01/02/1980',
       callback_number: '2025550142', request_description: 'Reschedule my LASIK surgery.',
-      surgery_date: '2026-12-01', surgeon: 'Synthetic Surgeon',
+      surgery_date: '2026-12-01', surgeon: 'Synthetic Surgeon', location: 'Testville',
     });
     expect(create.mock.calls[0][0]).toMatchObject({ departmentId: 2, providerId: 88 });
     expect(create.mock.calls[0][0].description).toContain('Surgery date given by caller: 2026-12-01');
@@ -157,7 +157,7 @@ it('HVA VA-76697: an unexplained date is not evidence of a surgery request', asy
   await runTool('file_surgery_ticket', {
     first_name: 'Avery', last_name: 'Example', date_of_birth: '01/02/1980',
     callback_number: '2025550142', request_description: 'Please call me back about my question.',
-    surgery_date: '2026-12-01', surgeon: 'Synthetic Surgeon',
+    surgery_date: '2026-12-01', surgeon: 'Synthetic Surgeon', location: 'Testville',
   });
   expect(create.mock.calls[0][0].description).not.toContain('Surgery date');
 });
@@ -176,7 +176,7 @@ it.each([
   expect(await runTool('file_surgery_ticket', {
     first_name: 'Avery', last_name: 'Example', date_of_birth: '01/02/1980',
     callback_number: '2025550142', request_description,
-    surgery_date: '2026-12-01', surgeon: 'Synthetic Surgeon',
+    surgery_date: '2026-12-01', surgeon: 'Synthetic Surgeon', location: 'Testville',
   })).toMatchObject({ success: true });
   expect(create.mock.calls[0][0]).toMatchObject({ departmentId: 2, providerId: 88 });
   expect(create.mock.calls[0][0].description).toContain('Surgery date given by caller: 2026-12-01');
@@ -195,7 +195,7 @@ it.each([
   expect(await runTool('file_surgery_ticket', {
     first_name: 'Avery', last_name: 'Example', date_of_birth: '01/02/1980',
     callback_number: '2025550142', request_description,
-    surgery_date: '2026-12-01', surgeon: 'Synthetic Surgeon',
+    surgery_date: '2026-12-01', surgeon: 'Synthetic Surgeon', location: 'Testville',
   })).toMatchObject({ success: true });
   expect(create.mock.calls[0][0]).toMatchObject({ departmentId: 2, requestReasonId });
   expect(create.mock.calls[0][0].description).toContain('Surgery date given by caller: 2026-12-01');
@@ -205,7 +205,7 @@ it('an unexplained callback cannot acquire a surgery date from a stale logistics
   await runTool('file_surgery_ticket', {
     first_name: 'Avery', last_name: 'Example', date_of_birth: '01/02/1980',
     callback_number: '2025550142', request_description: 'Please call me back.',
-    request_reason_id: '530', surgery_date: '2026-12-01', surgeon: 'Synthetic Surgeon',
+    request_reason_id: '530', surgery_date: '2026-12-01', surgeon: 'Synthetic Surgeon', location: 'Testville',
   });
   expect(create.mock.calls[0][0].description).not.toContain('Surgery date');
 });
@@ -230,21 +230,22 @@ it.each([
   expect(result).toMatchObject({ department_id: 2 });
   await runTool('file_surgery_ticket', {
     first_name: 'Avery', last_name: 'Example', date_of_birth: '01/02/1980',
-    callback_number: '2025550142', request_description, urgent: 'true', surgeon: 'Synthetic Surgeon',
+    callback_number: '2025550142', request_description, urgent: 'true', surgeon: 'Synthetic Surgeon', location: 'Testville',
   });
   expect(create.mock.calls[0][0]).toMatchObject({ departmentId: 2, priority: 'urgent' });
 });
 
-it('#6 VA-75838: a redirected request carries the validated record office and DOB', async () => {
+it.each([undefined, 'Synthetic Caller Clinic'])('#6 VA-75838: a redirect hydrates an omitted office and preserves a supplied office (%s)', async (location) => {
   const callSid = 'CA' + 'a'.repeat(32);
   rememberVerifiedIdentity(callSid, { firstName: 'Avery', lastName: 'Example',
     dateOfBirth: '1980-01-02', usualOffice: 'Testville', certain: true });
   await runTool('file_surgery_ticket', {
     first_name: 'Avery', last_name: 'Example', callback_number: '2025550142',
     request_description: 'I need to order contact lenses.', call_sid: callSid,
-    location: 'Wrong office from model', surgery_date: '2026-12-01',
+    location, surgery_date: '2026-12-01',
   });
-  expect(create.mock.calls[0][0]).toMatchObject({ departmentId: 1, locationOfLastVisit: 'Testville',
+  expect(create.mock.calls[0][0]).toMatchObject({ departmentId: 1, locationOfLastVisit: location || 'Testville',
+    locationSource: location ? 'caller' : 'history',
     patientBirthYear: '1980', patientBirthMonth: '01', patientBirthDay: '02' });
 });
 it.each([

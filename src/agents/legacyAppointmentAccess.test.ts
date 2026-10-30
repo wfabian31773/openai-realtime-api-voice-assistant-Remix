@@ -13,6 +13,7 @@ vi.mock('../services/scheduleLookupService', () => ({ scheduleLookupService: { l
 import { createNoIvrAgent, buildNoIvrSystemPrompt } from './noIvrAgent';
 import { createAnsweringServiceAgent } from './answeringServiceAgent';
 import { buildPcpPrompt } from './pcpAgent';
+import { resetVerifiedIdentities } from '../tools/verifiedIdentity';
 
 const record = {
   patientFound: true, matchedBy: 'name_and_dob', identity: { unique: true },
@@ -30,6 +31,7 @@ async function callLookup(factory: typeof factories[number], args = patient) {
 }
 beforeEach(() => {
   vi.clearAllMocks();
+  resetVerifiedIdentities();
   lookupByNameAndDOB.mockResolvedValue(record);
   lookupByPhone.mockResolvedValue(record);
 });
@@ -51,6 +53,38 @@ describe('item #15 existing appointment tools keep the same read-only policy', (
     expect(JSON.stringify(result)).not.toMatch(/Example North|Morgan Example|2099-11-04/);
     expect(result).not.toHaveProperty('upcomingAppointments');
     expect(result).not.toHaveProperty('pastAppointments');
+  });
+  it.each(factories)('preserves appointment times, every booking, status and claim checks when reusing a validated schedule', async (factory) => {
+    for (const state of [
+      { scheduleReadStatus: 'available', scheduleTruncated: false, access: 'available', bookings: true },
+      { scheduleReadStatus: 'available', scheduleTruncated: true, access: 'partial', bookings: true },
+      { scheduleReadStatus: 'available', scheduleTruncated: true, access: 'partial', bookings: false },
+      { scheduleReadStatus: 'unavailable', scheduleTruncated: false, access: 'unavailable', bookings: false },
+    ]) {
+      resetVerifiedIdentities();
+      lookupByNameAndDOB.mockResolvedValue({
+        ...record, ...state,
+        patientData: { firstName: patient.first_name, lastName: patient.last_name, dateOfBirth: patient.date_of_birth, personId: 'synthetic-person' },
+        upcomingAppointments: state.bookings ? [record.upcomingAppointments[0], {
+          ...record.upcomingAppointments[0], isoDate: '2099-12-04', startTime: '2:00 PM',
+        }] : [],
+      });
+      const agent = await factory(async () => {}, { callId: 'synthetic-repeat', callSid: `CA${'38'.repeat(16)}` });
+      const tool = agent.tools.find((t) => t.name === 'lookup_schedule')!;
+      const invoke = (args: Record<string, unknown>) => (tool as any).invoke({}, JSON.stringify(args));
+      const args = { ...patient, office: 'Example South' };
+      const fresh = decode(await invoke(args));
+      const calls = lookupByNameAndDOB.mock.calls.length;
+      // No DOB on the repeat: exercise the held-identity shortcut, including
+      // answering service's path below its separate DOB-confirmation shortcut.
+      const repeated = decode(await invoke({ office: args.office }));
+      const fields = ['appointment_access', 'read_only', 'upcoming_appointments', 'has_upcoming_appointments',
+        'provider_check', 'office_check', 'booking_details_match', 'scheduling_action', 'appointment_instruction'];
+      for (const field of fields) expect(repeated[field], field).toEqual(fresh[field]);
+      expect(repeated.appointment_access).toBe(state.access);
+      if (state.bookings) expect(repeated.upcoming_appointments.map((a: any) => a.time)).toEqual(['9:30 AM', '2:00 PM']);
+      expect(lookupByNameAndDOB).toHaveBeenCalledTimes(calls);
+    }
   });
   it('does not disclose the answering-service phone candidate through its prompt or tool', async () => {
     lookupByPhone.mockResolvedValue({ ...record, matchedBy: 'phone' });

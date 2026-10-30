@@ -188,31 +188,16 @@ describe('identity in the mirror pulls the whole record from the schedule', () =
     expect(out.identity).toMatchObject({ unique: true, candidateCount: 1 });
   });
 
-  it('carries a UNIQUE caller-ID match as certain — one person on the number is not a guess', async () => {
-    /**
-     * v86, reversing the v10 rule this test used to pin (Codex P1 on PR
-     * #292: "a phone hit is a candidate to confirm", `identityUnconfirmed:
-     * true`). That rule was harmless while the person base was the LAST
-     * rung; v85 made it the FIRST, and from its first minute every phone
-     * match on every runtime lane read `identity_is_certain: false` and the
-     * queue prompts asked recognised callers for name and date of birth
-     * again — RULE ZERO's own named loss, on every lane at once.
-     *
-     * `findByPhone` answers `verified` only for exactly ONE person (unique on
-     * the number, or narrowed to one by the affirmed first name); several
-     * people is `ambiguous` and never reaches this branch. So a verified
-     * phone match is the Schedule rung's unique phone match, which production
-     * carried as certain for months, and it is carried the same way here.
-     * The tool decides `identity_is_certain` from this flag, so this proves
-     * the SERVICE sets it — deleting the flag from the service fails this.
-     */
+  it('VA-76198: a unique caller-ID match stays a candidate until validated', async () => {
+    // A single household candidate still needs validation. This pins the
+    // service flag as well as the tool's independent certainty guard.
     state.answer = { rows: [row()] };
 
     const out = await bookFoundNobody().lookupPatient({ phone: '5555550147' });
 
     expect(out.patientFound).toBe(true);
     expect(out.matchedBy).toBe('phone');
-    expect(out.identityUnconfirmed, 'one person on the number is certain').toBe(false);
+    expect(out.identityUnconfirmed, 'phone alone is never identity').toBe(true);
   });
 
   it('does NOT mark a spoken name+DOB match as unconfirmed', async () => {

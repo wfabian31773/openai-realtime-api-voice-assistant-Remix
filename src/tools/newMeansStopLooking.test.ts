@@ -141,7 +141,8 @@ describe('RULE 1 OUTRANKS THE ANSWER — the operator-named failure mode', () =>
     } as never);
     notePatientStatus(SID, [ASK, 'CALLER: New.']);
     const out = await lookup({ queue: 'optical', lane: 'optical', call_sid: SID, caller_phone: '555-555-0101' });
-    expect(lookupSpy).toHaveBeenCalledTimes(1);
+    expect(lookupSpy).not.toHaveBeenCalled();
+    expect(out.identity_is_certain).toBe(true);
     expect(out.suppressed).toBeUndefined();
   });
 });
