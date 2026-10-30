@@ -337,7 +337,15 @@ describe('PHI discipline — the allow-list is the safety mechanism', () => {
     expect(blob).not.toContain('Wayne');
   });
 
-  it('drops a carry value that is not one of the five arms', () => {
+  it('records the uncertain identity carry outcome', () => {
+    const callId = freshCall();
+    recordToolEvent(callId, 'file_tech_ticket', TICKET_ARGS,
+      JSON.stringify({ success: false, missingFields: ['date_of_birth'], carry: 'uncertain_identity' }),
+      1, { agentSlug: 'tech' });
+    expect(getAzulTimeline(callId)![0].outcome.carry).toBe('uncertain_identity');
+  });
+
+  it('drops a carry value outside the closed enum', () => {
     const callId = freshCall();
     recordToolEvent(
       callId, 'file_tech_ticket', TICKET_ARGS,

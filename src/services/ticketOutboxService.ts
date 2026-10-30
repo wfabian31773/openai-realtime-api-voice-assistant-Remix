@@ -498,6 +498,8 @@ export class TicketOutboxService {
       preferredContactMethod: params.preferredContactMethod ?? undefined,
       lastProviderSeen: params.lastProviderSeen ?? undefined,
       locationOfLastVisit: params.locationOfLastVisit ?? undefined,
+      locationSource: params.locationSource,
+      locationIdSource: params.locationSource,
       patientBirthMonth: params.patientBirthMonth ?? undefined,
       patientBirthDay: params.patientBirthDay ?? undefined,
       patientBirthYear: params.patientBirthYear ?? undefined,

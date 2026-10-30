@@ -42,7 +42,7 @@ const PHONE = '+15550000199';
 const ONE = {
   patientFound: true,
   patientName: 'Wren Oakhollow',
-  matchedBy: 'phone' as const,
+  matchedBy: 'name_and_dob' as const,
   identity: { unique: true, candidateCount: 1, candidates: [] },
   patientData: {
     firstName: 'Wren',
@@ -70,9 +70,9 @@ describe('the lookup tool says what its identity write did', () => {
     expect(identityStoreProbe(SID)).toMatchObject({ size: 1, hasEntry: true, entryCertain: true });
   });
 
-  it('reports merged when the same person is written twice on one call', async () => {
+  it('reports merged when validation enriches a candidate on the same call', async () => {
     lookupSpy.mockResolvedValue(ONE);
-    await runTool('lookup_patient', { phone: PHONE, call_sid: SID });
+    rememberVerifiedIdentity(SID, { ...ONE.patientData, certain: false });
     const res: any = await runTool('lookup_patient', { phone: PHONE, call_sid: SID });
     expect(res.identity_write).toBe('merged');
     expect(identityStoreProbe(SID)).toMatchObject({ size: 1, hasEntry: true });

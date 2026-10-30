@@ -1,6 +1,8 @@
+import { filterOpticalPatientLocations } from '../tools/acceptableLocation';
+import { nameKey, rememberVerifiedIdentity } from '../tools/verifiedIdentity';
+import { joinedAppointments, prepareTicketIdentity, scheduleMatchesIdentity, validatedPatientFor, type TicketLocationSource } from '../tools/ticketIdentity';
 import { appointmentReadPolicy } from '../services/appointmentReadPolicy';
 import { appointmentAccess, unavailableAppointmentAccess } from '../services/appointmentAccess';
-import { nameKey } from '../tools/verifiedIdentity';
 import { RealtimeAgent, tool } from '@openai/agents/realtime';
 import { z } from 'zod';
 import { EMAIL_FIELD_DESCRIPTION, LAST_NAME_FIELD_DESCRIPTION } from '../tools/contactCaptureGuidance';
@@ -796,28 +798,39 @@ Use this data to answer appointment questions AND for ticket creation.`,
         // matches the matched record is VERIFIED — return that record
         // directly. No name search to garble, regardless of who is driving.
         if (callId && params.date_of_birth) {
-          const { dobMatchesContext, updateLedger: ul, getLedger: gl } = await import('../services/callFactsLedger');
-          if (dobMatchesContext(callId, params.date_of_birth) === true && scheduleContext?.patientFound &&
-              scheduleContext.identity?.unique !== false && !scheduleContext.identityUnconfirmed &&
-              (!params.first_name || nameKey(params.first_name) === nameKey(scheduleContext.patientData?.firstName)) &&
-              (!params.last_name || nameKey(params.last_name) === nameKey(scheduleContext.patientData?.lastName))) {
-            const lf = gl(callId);
-            ul(callId, {
-              firstName: lf?.matchedFirstName,
-              lastName: lf?.matchedLastName,
+          const { dobMatchesRecord, seedLedger } = await import('../services/callFactsLedger');
+          if (dobMatchesRecord(scheduleContext?.patientData, params.date_of_birth) === true && scheduleContext?.patientFound &&
+              scheduleContext.identity?.unique === true &&
+              (!params.first_name || nameKey(params.first_name) === nameKey(scheduleContext.patientData?.firstName ?? '')) &&
+              (!params.last_name || nameKey(params.last_name) === nameKey(scheduleContext.patientData?.lastName ?? ''))) {
+            // A confirmed switch may replace a previously locked identity.
+            // Carry the patient just checked, never the original phone match.
+            seedLedger(callId, {
+              matchedFirstName: scheduleContext.patientData?.firstName,
+              matchedLastName: scheduleContext.patientData?.lastName,
+              matchedDob: scheduleContext.patientData?.dateOfBirth,
+              firstName: scheduleContext.patientData?.firstName,
+              lastName: scheduleContext.patientData?.lastName,
+              dateOfBirth: scheduleContext.patientData?.dateOfBirth,
               identityVerified: true,
             });
-            console.log(`[${agentTag}] ✓ VERIFIED via context DOB match — returning pre-loaded record for ${callId}`);
+            // Retain DOB confirmation for later held-identity schedule reads.
+            scheduleContext = { ...scheduleContext, matchedBy: 'name_and_dob', identityUnconfirmed: false };
+            rememberVerifiedIdentity(callSid, { ...scheduleContext.patientData, ...joinedAppointments(scheduleContext), certain: true });
+            console.log(`[${agentTag}] ✓ VERIFIED via context DOB match — returning current record for ${callId}`);
             return {
               ...scheduleContext,
               ...appointmentAccess(scheduleContext, true, params),
               verified: true,
-              note: 'Caller VERIFIED: recognized phone number + date of birth matches the record on file. Greet them by first name and proceed — do NOT ask any further identity questions.',
+              note: 'Caller VERIFIED: date of birth matches the current patient record. Greet them by first name and proceed — do NOT ask any further identity questions.',
             };
           }
         }
 
-        if (params.phone && !(params.first_name && params.last_name && params.date_of_birth)) {
+        const held = validatedPatientFor(callSid, params.first_name, params.last_name, params.date_of_birth);
+        if (scheduleMatchesIdentity(scheduleContext, held)) {
+          result = scheduleContext;
+        } else if (params.phone && !(params.first_name && params.last_name && params.date_of_birth)) {
           const normalizedPhone = normalizePhoneNumber(params.phone);
           result = await withTimeout(
             scheduleLookupService.lookupByPhone(normalizedPhone),
@@ -843,11 +856,13 @@ Use this data to answer appointment questions AND for ticket creation.`,
         }
         
         if (result.patientFound) {
-          const confirmed = result.matchedBy === 'name_and_dob' && result.identity?.unique !== false && !result.identityUnconfirmed;
+          const confirmed = result.matchedBy === 'name_and_dob' && result.identity?.unique === true && !result.identityUnconfirmed;
           if (!confirmed) return {
             found: true, identityUnconfirmed: true,
             ...appointmentAccess(result, false),
           };
+          rememberVerifiedIdentity(callSid, { ...result.patientData, ...joinedAppointments(result), certain: true });
+          scheduleContext = result;
           const pd = result.patientData;
           return {
             found: true,
@@ -991,23 +1006,41 @@ Use patient data from phone lookup when available - don't ask for info you alrea
       department_id: z.number().describe('Department ID: 1=Optical, 2=Surgery, 3=Tech'),
       request_type_id: z.number().describe('Request type ID from classify_request'),
       request_reason_id: z.number().describe('Request reason ID from classify_request'),
-      first_name: z.string().describe('Patient first name'),
+      first_name: z.string().optional().default('').describe('Patient first name'),
       middle_initial: z.string().optional().describe('Patient middle initial (optional)'),
-      last_name: z.string().describe(LAST_NAME_FIELD_DESCRIPTION),
-      date_of_birth: z.string().describe('Date of birth in any format'),
+      last_name: z.string().optional().default('').describe(LAST_NAME_FIELD_DESCRIPTION),
+      date_of_birth: z.string().optional().default('').describe('Date of birth in any format'),
       callback_number: z.string().describe('Phone number for callback'),
       subject: z.string().describe('Brief summary of the request (1-2 sentences) for ticket subject line'),
       description: z.string().describe('Detailed description of what the patient needs - be thorough!'),
       priority: z.enum(['low', 'normal', 'medium', 'high', 'urgent']).default('medium').describe('Priority level'),
       location_id: z.number().optional().describe('Location ID if patient mentioned their clinic'),
       provider_id: z.number().optional().describe('Provider ID if patient mentioned their doctor'),
-      location_name: z.string().optional().describe('Office the CALLER explicitly states (e.g., "West Covina"). Do NOT use schedule/patient-history locations — those are context only, never the ticket location.'),
+      location_name: z.string().optional().describe('Caller-named clinic only. Omit record-derived locations; filing fills them automatically.'),
       provider_name: z.string().optional().describe('Doctor the CALLER explicitly names (e.g., "Dr. Logan"). Do NOT use schedule/patient-history providers — those are context only.'),
       email: z.string().optional().describe(EMAIL_FIELD_DESCRIPTION),
       confirmation_type: z.enum(['text', 'email', 'phone', 'none']).optional().describe('How patient wants confirmation (text, email, phone, or none)'),
       unresolved_info: z.string().optional().describe('Set this ONLY after you have already asked and the caller genuinely cannot provide a REQUIRED field (a surgeon for Surgery, an office/location for Optical). Briefly state what is missing (e.g., "caller does not know their office"). The ticket is then still submitted with the gap flagged for a human, so the request is never lost. Do NOT set this on a first attempt — always ask the caller first.'),
     }),
     execute: async (params) => {
+      // The simplified endpoint routes by clinic name. Unknown IDs must leave
+      // the name empty so validated appointment history can supply the clinic.
+      const locationName = params.location_name?.trim() ||
+        (params.location_id && LOCATIONS[params.location_id] ? getLocationName(params.location_id) : '');
+      const prepared = prepareTicketIdentity({ ...params, call_sid: callSid, location: locationName });
+      let locationSource = prepared.input.locationSource as TicketLocationSource | undefined;
+      if (prepared.missing) {
+        return { success: false, missingFields: [prepared.missing], message: prepared.message };
+      }
+      let validated = validatedPatientFor(callSid, String(prepared.input.first_name),
+        String(prepared.input.last_name), String(prepared.input.date_of_birth));
+      if (params.department_id === 1 && validated) validated = await filterOpticalPatientLocations(validated);
+      if (params.department_id === 1 && locationSource === 'history') {
+        prepared.input.location = validated?.nextAppointment?.location || validated?.lastVisit?.location ||
+          validated?.confirmedClinic || '';
+      }
+      params = { ...params, first_name: String(prepared.input.first_name ?? ''), last_name: String(prepared.input.last_name ?? ''),
+        date_of_birth: String(prepared.input.date_of_birth ?? ''), location_name: String(prepared.input.location ?? '') };
       // Lazy import to avoid module initialization during agent bootstrap
       const { SyncAgentService } = await import('../services/syncAgentService');
       
@@ -1074,8 +1107,10 @@ Use patient data from phone lookup when available - don't ask for info you alrea
 
       // SECONDARY LOOKUP: Enrich schedule context using name+DOB
       // This catches cases where caller phone doesn't match patient record (family member calling)
-      let enrichedContext = scheduleContext;
-      if (!scheduleContext?.patientFound || scheduleContext.matchedBy === 'phone') {
+      const lockedIdentity = validatedPatientFor(callSid, params.first_name, params.last_name, params.date_of_birth);
+      const cachedIdentityMatches = scheduleMatchesIdentity(scheduleContext, lockedIdentity);
+      let enrichedContext = cachedIdentityMatches ? scheduleContext : undefined;
+      if (!cachedIdentityMatches) {
         console.log(`[${agentTag}] Performing secondary schedule lookup for ticket enrichment...`);
         try {
           const dobForLookup = parsedDOB.iso || `${parsedDOB.year}-${parsedDOB.month}-${parsedDOB.day}`;
@@ -1084,7 +1119,15 @@ Use patient data from phone lookup when available - don't ask for info you alrea
             params.last_name,
             dobForLookup
           );
-          if (secondaryLookup.patientFound) {
+          const confirmed = secondaryLookup.patientFound && secondaryLookup.matchedBy === 'name_and_dob' &&
+            secondaryLookup.identity?.unique === true && !secondaryLookup.identityUnconfirmed;
+          if (confirmed) {
+            rememberVerifiedIdentity(callSid, { ...secondaryLookup.patientData,
+              firstName: secondaryLookup.patientData?.firstName || params.first_name,
+              lastName: secondaryLookup.patientData?.lastName || params.last_name,
+              dateOfBirth: secondaryLookup.patientData?.dateOfBirth || params.date_of_birth,
+              ...joinedAppointments(secondaryLookup), certain: true });
+            scheduleContext = secondaryLookup;
             enrichedContext = secondaryLookup;
             console.log(`[${agentTag}] Secondary lookup: patient found with schedule context`);
           } else {
@@ -1092,6 +1135,20 @@ Use patient data from phone lookup when available - don't ask for info you alrea
           }
         } catch (lookupError) {
           console.error(`[${agentTag}] Secondary lookup error:`, lookupError);
+        }
+      }
+
+      // A secondary lookup can establish or refresh identity during filing. Filter that
+      // snapshot too, and pass it explicitly so the client cannot reattach raw
+      // held history. Keep the held record intact for later Surgery requests.
+      if (!cachedIdentityMatches) {
+        validated = validatedPatientFor(callSid, params.first_name, params.last_name, params.date_of_birth);
+        if (params.department_id === 1 && validated) {
+          validated = await filterOpticalPatientLocations(validated);
+          if (!params.location_name) {
+            params.location_name = validated.nextAppointment?.location || validated.lastVisit?.location || validated.confirmedClinic || '';
+            locationSource = 'history';
+          }
         }
       }
 
@@ -1107,8 +1164,10 @@ Use patient data from phone lookup when available - don't ask for info you alrea
       if (!resolvedLocationId && params.location_name) {
         resolvedLocationId = findLocationByName(params.location_name);
       }
-      if (!resolvedLocationId && enrichedContext?.lastLocationSeen) {
-        resolvedLocationId = findLocationByName(enrichedContext.lastLocationSeen);
+      const lastLocationSeen = params.department_id === 1
+        ? validated?.lastVisit?.location : enrichedContext?.lastLocationSeen;
+      if (!resolvedLocationId && lastLocationSeen) {
+        resolvedLocationId = findLocationByName(lastLocationSeen);
       }
       
       let resolvedProviderId = params.provider_id;
@@ -1127,18 +1186,20 @@ Use patient data from phone lookup when available - don't ask for info you alrea
       // Build schedule context section for ticket if we have enriched data
       const scheduleSection: string[] = [];
       if (enrichedContext?.patientFound) {
+        const lastVisitDate = params.department_id === 1 ? validated?.lastVisit?.date : enrichedContext.lastVisitDate;
+        const lastProviderSeen = params.department_id === 1 ? validated?.lastVisit?.provider : enrichedContext.lastProviderSeen;
+        const nextAppt = params.department_id === 1 ? validated?.nextAppointment : enrichedContext.upcomingAppointments?.[0];
         scheduleSection.push('--- Patient History (from schedule) ---');
-        if (enrichedContext.lastVisitDate) {
-          scheduleSection.push(`Last Visit: ${enrichedContext.lastVisitDate}`);
+        if (lastVisitDate) {
+          scheduleSection.push(`Last Visit: ${lastVisitDate}`);
         }
-        if (enrichedContext.lastProviderSeen) {
-          scheduleSection.push(`Last Provider: ${enrichedContext.lastProviderSeen}`);
+        if (lastProviderSeen) {
+          scheduleSection.push(`Last Provider: ${lastProviderSeen}`);
         }
-        if (enrichedContext.lastLocationSeen) {
-          scheduleSection.push(`Last Location: ${enrichedContext.lastLocationSeen}`);
+        if (lastLocationSeen) {
+          scheduleSection.push(`Last Location: ${lastLocationSeen}`);
         }
-        if (enrichedContext.upcomingAppointments?.length > 0) {
-          const nextAppt = enrichedContext.upcomingAppointments[0];
+        if (nextAppt) {
           scheduleSection.push(`Next Appointment: ${nextAppt.date} at ${nextAppt.location} with ${nextAppt.provider}`);
         }
         if (enrichedContext.patientData?.email) {
@@ -1183,6 +1244,7 @@ Use patient data from phone lookup when available - don't ask for info you alrea
 
         // Use NEW SIMPLIFIED ENDPOINT - more reliable, all mapping done server-side
         const result = await SyncAgentService.submitSimplifiedTicket({
+          ...(validated ? { validatedPatient: validated } : {}),
           patientFullName,
           patientDOB: params.date_of_birth, // Any format - API handles parsing
           reasonForCalling: fullDescription, // Full description becomes the reason
@@ -1191,6 +1253,8 @@ Use patient data from phone lookup when available - don't ask for info you alrea
           patientEmail: params.email,
           lastProviderSeen: params.provider_name || undefined,
           locationOfLastVisit: params.location_name || undefined,
+          locationSource: locationSource ?? (params.location_name ? 'caller' : 'history'),
+          departmentId: params.department_id,
           additionalDetails: ticketSubject,
           callSid,
           callerPhone,

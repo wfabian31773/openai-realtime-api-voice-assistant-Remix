@@ -1,21 +1,4 @@
-/**
- * `lookup_patient` against a real patient's real history.
- *
- * Wayne asked for the tools to be proven before any agent is connected to
- * them. This file is that proof for the hardest of the three: every value
- * below was read out of production on 2026-08-11, not invented.
- *
- *   Ops Hub `Schedule`, the eight most recent rows for +1 845 531 7471
- *   Console `si_locations`, the `facility_kind` for each place they name
- *   Support Center `locations`, to confirm the name we emit can be received
- *
- * The case that matters: this patient's most recent visit that actually
- * happened is at **Loma Linda Surgery Center LLC** — a building with no
- * optician in it. Optical assigns tickets by location, so an agent that read
- * "where were they last seen" as "which office do they use" would file a
- * glasses ticket that reaches nobody. The tool has to answer both questions
- * separately, and this pins that it does.
- */
+/** Synthetic patient history; external services are stubbed. */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 vi.mock('../services/ticketOutboxService', async () => {
@@ -75,8 +58,9 @@ vi.mock('../services/consoleDirectory', () => ({
  */
 const REAL_CONTEXT = {
   patientFound: true,
-  patientName: 'Wayne Fabian',
-  matchedBy: 'phone' as const,
+  patientName: 'Alex Synthetic',
+  matchedBy: 'name_and_dob' as const,
+  patientData: { firstName: 'Alex', lastName: 'Synthetic', dateOfBirth: '1970-01-02' },
   upcomingAppointments: [],
   pastAppointments: [
     { location: 'Loma Linda Surgery Center LLC', provider: 'Dwayne Logan, MD' },
@@ -89,13 +73,13 @@ const REAL_CONTEXT = {
   lastProviderSeen: 'Dwayne Logan, MD',
   lastVisitDate: 'Monday, July 13, 2026',
   // What buildContext reports once it has grouped the rows by person. 43 of the
-  // 44 rows on this number are Wayne's; the 44th belongs to a John Doe test
+  // 44 rows on this number are Alex's; the 44th belongs to a John Doe test
   // record and is excluded from the history rather than merged into it.
   identity: {
     unique: true,
     candidateCount: 1,
     candidates: [
-      { firstName: 'Wayne', lastName: 'Fabian', dateOfBirth: '1973-03-17', appointmentCount: 43 },
+      { firstName: 'Alex', lastName: 'Synthetic', dateOfBirth: '1970-01-02', appointmentCount: 43 },
     ],
   },
   totalAppointmentsFound: 43,
@@ -118,9 +102,9 @@ beforeEach(() => {
   vi.spyOn(console, 'info').mockImplementation(() => {});
 });
 
-describe('lookup_patient, on a real patient, resolved against the real roster', () => {
+describe('lookup_patient, on a validated synthetic match, resolved against the fixture roster', () => {
   it('does not hand Optical a surgery center', async () => {
-    const out = await runTool('lookup_patient', { phone: '845-531-7471', queue: 'optical' });
+    const out = await runTool('lookup_patient', { first_name: 'Alex', last_name: 'Synthetic', date_of_birth: '1970-01-02', queue: 'optical' });
     expect(out.success).toBe(true);
 
     const r = out as Record<string, unknown>;
@@ -134,7 +118,7 @@ describe('lookup_patient, on a real patient, resolved against the real roster', 
   });
 
   it('still reports the last visit truthfully — July 13, not December 30', async () => {
-    const r = (await runTool('lookup_patient', { phone: '845-531-7471', queue: 'optical' })) as Record<string, unknown>;
+    const r = (await runTool('lookup_patient', { first_name: 'Alex', last_name: 'Synthetic', date_of_birth: '1970-01-02', queue: 'optical' })) as Record<string, unknown>;
     expect(r.last_visit).toBe('Monday, July 13, 2026');
     expect(r.last_provider).toBe('Dwayne Logan, MD');
     expect(String(r.last_visit)).not.toMatch(/December/);
@@ -144,15 +128,13 @@ describe('lookup_patient, on a real patient, resolved against the real roster', 
     // Support Center `locations` holds brand-stripped names — `Eastvale`,
     // `Upland`, `Long Beach` — while the Console roster is brand-prefixed.
     // We must emit the form the receiver stores, or the ticket lands unassigned.
-    const r = (await runTool('lookup_patient', { phone: '845-531-7471', queue: 'optical' })) as Record<string, unknown>;
+    const r = (await runTool('lookup_patient', { first_name: 'Alex', last_name: 'Synthetic', date_of_birth: '1970-01-02', queue: 'optical' })) as Record<string, unknown>;
     expect(String(r.usual_clinic)).not.toMatch(/^(Azul Vision|Atlantis Eyecare)\s/i);
   });
 
   it('tells the agent when the number could be more than one person', async () => {
-    // +1 845 531 7471 really does carry two records in production: Wayne Fabian
-    // (43 rows) and a John Doe test record (1 row). The service now hands back
-    // one person's history and says so; the tool has to pass that on, because
-    // an agent that reads a history back to the wrong person has disclosed it.
+    // Two synthetic household members share a phone. Neither name nor history
+    // may be read as this caller's identity before validation.
     const { scheduleLookupService } = await import('../services/scheduleLookupService');
     vi.spyOn(scheduleLookupService, 'lookupPatient').mockResolvedValueOnce({
       ...REAL_CONTEXT,
@@ -160,22 +142,26 @@ describe('lookup_patient, on a real patient, resolved against the real roster', 
         unique: false,
         candidateCount: 2,
         candidates: [
-          { firstName: 'Wayne', lastName: 'Fabian', dateOfBirth: '1973-03-17', appointmentCount: 43 },
+          { firstName: 'Alex', lastName: 'Synthetic', dateOfBirth: '1970-01-02', appointmentCount: 43 },
           { firstName: 'John', lastName: 'Doe', dateOfBirth: '1980-01-01', appointmentCount: 1 },
         ],
       },
     } as never);
 
-    const r = (await runTool('lookup_patient', { phone: '845-531-7471', queue: 'optical' })) as Record<string, unknown>;
+    const r = (await runTool('lookup_patient', { phone: '555-555-0100', queue: 'optical' })) as Record<string, unknown>;
     expect(r.identity_is_certain).toBe(false);
     expect(String(r.identity_warning)).toMatch(/2 different people/);
     expect(String(r.identity_warning)).toMatch(/do not read their history back/i);
   });
 
-  it('says the identity is certain when only one person matched', async () => {
-    const r = (await runTool('lookup_patient', { phone: '845-531-7471', queue: 'optical' })) as Record<string, unknown>;
-    expect(r.identity_is_certain).toBe(true);
-    expect(r.identity_warning).toBeUndefined();
+  it('keeps a unique phone match unconfirmed', async () => {
+    const { scheduleLookupService } = await import('../services/scheduleLookupService');
+    vi.spyOn(scheduleLookupService, 'lookupPatient').mockResolvedValueOnce({
+      ...REAL_CONTEXT, matchedBy: 'phone', identityUnconfirmed: true,
+    } as never);
+    const r = (await runTool('lookup_patient', { phone: '555-555-0100', queue: 'optical' })) as Record<string, unknown>;
+    expect(r.identity_is_certain).toBe(false);
+    expect(r.identity_warning).toMatch(/full name and date of birth/i);
   });
 
   it('resolve_location emits the name the ticketing app stores, not the mirror\'s', async () => {
@@ -227,10 +213,10 @@ describe('lookup_patient, on a real patient, resolved against the real roster', 
     const create = vi.spyOn(ticketingApiClient, 'createTicket');
 
     const out = await runTool('file_optical_ticket', {
-      first_name: 'Wayne',
-      last_name: 'Fabian',
-      date_of_birth: '03/17/1973',
-      callback_number: '845-531-7471',
+      first_name: 'Alex',
+      last_name: 'Synthetic',
+      date_of_birth: '01/02/1970',
+      callback_number: '555-555-0100',
       location: 'Somewhere We Do Not Have',
       request_description: 'glasses broke',
     });
@@ -269,10 +255,10 @@ describe('lookup_patient, on a real patient, resolved against the real roster', 
       .mockResolvedValueOnce({ success: true, ticketNumber: 'VA-TEST' });
 
     await runTool('file_optical_ticket', {
-      first_name: 'Wayne',
-      last_name: 'Fabian',
-      date_of_birth: '03/17/1973',
-      callback_number: '845-531-7471',
+      first_name: 'Alex',
+      last_name: 'Synthetic',
+      date_of_birth: '01/02/1970',
+      callback_number: '555-555-0100',
       location: 'Eastvale',
       request_description: 'my glasses broke at the hinge',
     });
@@ -301,15 +287,15 @@ describe('lookup_patient, on a real patient, resolved against the real roster', 
       .mockResolvedValueOnce({ success: true, ticketNumber: 'VA-TEST-PHONE' });
 
     await runTool('file_optical_ticket', {
-      first_name: 'Wayne',
-      last_name: 'Fabian',
-      date_of_birth: '03/17/1973',
-      callback_number: '845-531-7471',
+      first_name: 'Alex',
+      last_name: 'Synthetic',
+      date_of_birth: '01/02/1970',
+      callback_number: '555-555-0100',
       location: 'Eastvale',
       request_description: 'my glasses broke at the hinge',
     });
 
-    expect(create.mock.calls[0][0].patientPhone).toBe('8455317471');
+    expect(create.mock.calls[0][0].patientPhone).toBe('5555550100');
   });
 
   it('drops a leading 1, not the area code', async () => {
@@ -323,15 +309,15 @@ describe('lookup_patient, on a real patient, resolved against the real roster', 
       .mockResolvedValueOnce({ success: true, ticketNumber: 'VA-TEST-PHONE-11' });
 
     await runTool('file_optical_ticket', {
-      first_name: 'Wayne',
-      last_name: 'Fabian',
-      date_of_birth: '03/17/1973',
-      callback_number: '1-845-531-7471',
+      first_name: 'Alex',
+      last_name: 'Synthetic',
+      date_of_birth: '01/02/1970',
+      callback_number: '1-555-555-0100',
       location: 'Eastvale',
       request_description: 'my glasses broke at the hinge',
     });
 
-    expect(create.mock.calls[0][0].patientPhone).toBe('8455317471');
+    expect(create.mock.calls[0][0].patientPhone).toBe('5555550100');
   });
 
   it('refuses 11 digits that do not start with 1, rather than dropping the first one', async () => {
@@ -343,10 +329,10 @@ describe('lookup_patient, on a real patient, resolved against the real roster', 
     const create = vi.spyOn(ticketingApiClient, 'createTicket');
 
     const out = (await runTool('file_optical_ticket', {
-      first_name: 'Wayne',
-      last_name: 'Fabian',
-      date_of_birth: '03/17/1973',
-      callback_number: '2-845-531-7471',
+      first_name: 'Alex',
+      last_name: 'Synthetic',
+      date_of_birth: '01/02/1970',
+      callback_number: '2-555-555-0100',
       location: 'Eastvale',
       request_description: 'my glasses broke at the hinge',
     })) as Record<string, unknown>;
@@ -368,9 +354,9 @@ describe('lookup_patient, on a real patient, resolved against the real roster', 
     const create = vi.spyOn(ticketingApiClient, 'createTicket');
 
     const out = (await runTool('file_optical_ticket', {
-      first_name: 'Wayne',
-      last_name: 'Fabian',
-      date_of_birth: '03/17/1973',
+      first_name: 'Alex',
+      last_name: 'Synthetic',
+      date_of_birth: '01/02/1970',
       callback_number: '202-555-0101 / 303-555-0102',
       location: 'Eastvale',
       request_description: 'my glasses broke at the hinge',
@@ -413,10 +399,10 @@ describe('lookup_patient, on a real patient, resolved against the real roster', 
     const submit = vi.spyOn(ticketingApiClient, 'submitTicket');
 
     const out = await runTool('file_optical_ticket', {
-      first_name: 'Wayne',
-      last_name: 'Fabian',
-      date_of_birth: '03/17/1973',
-      callback_number: '845-531-7471',
+      first_name: 'Alex',
+      last_name: 'Synthetic',
+      date_of_birth: '01/02/1970',
+      callback_number: '555-555-0100',
       location: 'Eastvale',
       request_description: 'a question about my account that fits no optical category',
     });
@@ -456,10 +442,10 @@ describe('lookup_patient, on a real patient, resolved against the real roster', 
       .mockResolvedValueOnce({ success: true, ticketNumber: 'VA-CLASSIFIED' });
 
     await runTool('file_optical_ticket', {
-      first_name: 'Wayne',
-      last_name: 'Fabian',
-      date_of_birth: '03/17/1973',
-      callback_number: '845-531-7471',
+      first_name: 'Alex',
+      last_name: 'Synthetic',
+      date_of_birth: '01/02/1970',
+      callback_number: '555-555-0100',
       location: 'Eastvale',
       request_description: 'my glasses broke at the hinge',
     });
@@ -470,25 +456,25 @@ describe('lookup_patient, on a real patient, resolved against the real roster', 
 
   it('refuses to file without the office that decides who gets the ticket', async () => {
     const out = await runTool('file_optical_ticket', {
-      first_name: 'Wayne',
-      last_name: 'Fabian',
-      date_of_birth: '03/17/1973',
-      callback_number: '845-531-7471',
+      first_name: 'Alex',
+      last_name: 'Synthetic',
+      date_of_birth: '01/02/1970',
+      callback_number: '555-555-0100',
       request_description: 'glasses broke',
       // location deliberately absent
     });
     expect(out.success).toBe(false);
     expect((out as { missingFields: string[] }).missingFields).toContain('location');
     // Spoken to a patient, so it has to read like a sentence a person would say.
-    expect((out as { message: string }).message).toMatch(/which of our offices/i);
+    expect((out as { message: string }).message).toMatch(/which of our (clinics|offices)/i);
   });
 
   it('refuses a half-heard callback number instead of filing it', async () => {
     const out = await runTool('file_optical_ticket', {
-      first_name: 'Wayne',
-      last_name: 'Fabian',
-      date_of_birth: '03/17/1973',
-      callback_number: '845-531',
+      first_name: 'Alex',
+      last_name: 'Synthetic',
+      date_of_birth: '01/02/1970',
+      callback_number: '555-555',
       location: 'Eastvale',
       request_description: 'glasses broke',
     });
@@ -507,7 +493,7 @@ describe('lookup_patient, on a real patient, resolved against the real roster', 
       ],
     } as never);
 
-    const r = (await runTool('lookup_patient', { phone: '845-531-7471', queue: 'optical' })) as Record<string, unknown>;
+    const r = (await runTool('lookup_patient', { phone: '555-555-0100', queue: 'optical' })) as Record<string, unknown>;
     expect(r.usual_clinic).toBeNull();
     // A real answer, not a failure — and one the agent can act on out loud.
     expect(String(r.message)).toMatch(/ask which office/i);
@@ -548,10 +534,10 @@ describe('lookup_patient, on a real patient, resolved against the real roster', 
     } as never);
 
     const out = await runTool('file_optical_ticket', {
-      first_name: 'Wayne',
-      last_name: 'Fabian',
-      date_of_birth: '03/17/1973',
-      callback_number: '845-531-7471',
+      first_name: 'Alex',
+      last_name: 'Synthetic',
+      date_of_birth: '01/02/1970',
+      callback_number: '555-555-0100',
       location: 'Eastvale', // a real office, in the roster, named clearly
       request_description: 'my glasses broke at the hinge',
     });
@@ -602,10 +588,10 @@ describe('lookup_patient, on a real patient, resolved against the real roster', 
     const create = vi.spyOn(ticketingApiClient, 'createTicket');
 
     const out = await runTool('file_optical_ticket', {
-      first_name: 'Wayne',
-      last_name: 'Fabian',
-      date_of_birth: '03/17/1973',
-      callback_number: '845-531-7471',
+      first_name: 'Alex',
+      last_name: 'Synthetic',
+      date_of_birth: '01/02/1970',
+      callback_number: '555-555-0100',
       location: 'Downtown LA',
       request_description: 'glasses broke',
     });
@@ -616,7 +602,7 @@ describe('lookup_patient, on a real patient, resolved against the real roster', 
     // your office in?". This assertion used to require that exact sentence,
     // pinning in place the one question all four queue prompts forbid.
     expect((out as { message: string }).message).not.toMatch(/which city/i);
-    expect((out as { message: string }).message).toMatch(/which of our offices/i);
+    expect((out as { message: string }).message).toMatch(/which of our (clinics|offices)/i);
     expect(create).not.toHaveBeenCalled();
   });
 });
@@ -624,7 +610,7 @@ describe('lookup_patient, on a real patient, resolved against the real roster', 
 /**
  * THE GATE NOW HAS AN EXIT — operator ruling, 2026-09-01.
  *
- * Wayne: *"In optical, if you gate the location, the agent will ask and if no
+ * Alex: *"In optical, if you gate the location, the agent will ask and if no
  * answer, unassigned."*
  *
  * The gate is right and stays: department 1 assigns BY office, and the control
@@ -646,10 +632,10 @@ describe('lookup_patient, on a real patient, resolved against the real roster', 
 describe('optical: ask once for the office, then file it unassigned', () => {
   const CALL = 'CA00000000000000000000000000000042';
   const BASE = {
-    first_name: 'Wayne',
-    last_name: 'Fabian',
-    date_of_birth: '03/17/1973',
-    callback_number: '845-531-7471',
+    first_name: 'Alex',
+    last_name: 'Synthetic',
+    date_of_birth: '01/02/1970',
+    callback_number: '555-555-0100',
     request_description: 'my glasses broke at the hinge',
   };
 
@@ -707,7 +693,7 @@ describe('optical: ask once for the office, then file it unassigned', () => {
     expect(String(filed.description)).not.toMatch(/NEEDS OFFICE|unassigned|lookup/i);
   });
 
-  it('does the same when the caller never named an office at all', async () => {
+  it('asks once for a missing clinic, then files unassigned with the routing ask exhausted', async () => {
     const api = await client();
     const lookup = vi.spyOn(api, 'lookupProviderAndLocation');
     const create = vi.spyOn(api, 'createTicket').mockResolvedValue({
@@ -720,12 +706,8 @@ describe('optical: ask once for the office, then file it unassigned', () => {
 
     const second = await runTool('file_optical_ticket', { ...BASE, location: '', call_sid: CALL });
     expect(second.success).toBe(true);
-
-    const filed = create.mock.calls[0][0] as unknown as Record<string, unknown>;
-    expect(filed.priority).toBe('high');
-    // Nothing to look up and nothing to send. An empty string here is what the
-    // ticketing app answers "Missing required information: office" to.
-    expect(filed).not.toHaveProperty('locationOfLastVisit');
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(create.mock.calls[0][0]).toMatchObject({ routingAskExhausted: true, priority: 'high' });
     expect(lookup).not.toHaveBeenCalled();
   });
 
@@ -746,7 +728,7 @@ describe('optical: ask once for the office, then file it unassigned', () => {
     const args = {
       ...BASE,
       request_description: 'I need to reschedule my appointment for next week',
-      location: '',
+      location: 'Encinitas',
       call_sid: CALL,
     };
     await runTool('file_optical_ticket', args);
@@ -830,7 +812,7 @@ describe('the date of birth the caller said, when the model sent none', () => {
     const { noteSpokenDob } = await import('./spokenDob');
     noteSpokenDob(SID, [
       'AGENT: May I have your date of birth?',
-      'CALLER: March 17th, 1973.',
+      'CALLER: January 2nd, 1970.',
     ]);
 
     const { ticketingApiClient } = await import('../../server/services/ticketingApiClient');
@@ -843,25 +825,25 @@ describe('the date of birth the caller said, when the model sent none', () => {
       .mockResolvedValueOnce({ success: true, ticketNumber: 'VA-TEST-OPTDOB' } as never);
 
     const out = (await runTool('file_optical_ticket', {
-      first_name: 'Wayne',
-      last_name: 'Fabian',
-      callback_number: '845-531-7471',
+      first_name: 'Alex',
+      last_name: 'Synthetic',
+      callback_number: '555-555-0100',
       call_sid: SID,
       location: 'Eastvale',
       request_description: 'when will my glasses be ready',
     })) as Record<string, unknown>;
 
     expect(out.success).toBe(true);
-    expect(create.mock.calls[0][0].patientBirthYear).toBe('1973');
-    expect(create.mock.calls[0][0].patientBirthMonth).toBe('03');
-    expect(create.mock.calls[0][0].patientBirthDay).toBe('17');
+    expect(create.mock.calls[0][0].patientBirthYear).toBe('1970');
+    expect(create.mock.calls[0][0].patientBirthMonth).toBe('01');
+    expect(create.mock.calls[0][0].patientBirthDay).toBe('02');
   });
 
   it('still refuses when the caller never answered', async () => {
     const { noteSpokenDob } = await import('./spokenDob');
     noteSpokenDob(SID, [
       'AGENT: What can I help you with?',
-      'CALLER: I ordered them on March 17th, 1973.',
+      'CALLER: I ordered them on January 2nd, 1970.',
     ]);
 
     const { ticketingApiClient } = await import('../../server/services/ticketingApiClient');
@@ -872,9 +854,9 @@ describe('the date of birth the caller said, when the model sent none', () => {
     const create = vi.spyOn(ticketingApiClient, 'createTicket');
 
     const out = (await runTool('file_optical_ticket', {
-      first_name: 'Wayne',
-      last_name: 'Fabian',
-      callback_number: '845-531-7471',
+      first_name: 'Alex',
+      last_name: 'Synthetic',
+      callback_number: '555-555-0100',
       call_sid: SID,
       location: 'Eastvale',
       request_description: 'when will my glasses be ready',

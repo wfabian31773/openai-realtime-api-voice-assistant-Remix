@@ -89,6 +89,7 @@ describe('the largest queue, end to end', () => {
       first_name: 'Wayne',
       last_name: 'Fabian',
       date_of_birth: '03/17/1973',
+      location: 'Synthetic Clinic', // Complete live intake before testing this lane.
       callback_number: '845-531-7471',
       request_description: 'I need a refill of my Latanoprost',
       call_sid: 'CA00000000000000000000000000000009',
@@ -119,6 +120,7 @@ describe('the largest queue, end to end', () => {
       first_name: 'Wayne',
       last_name: 'Fabian',
       date_of_birth: '03/17/1973',
+      location: 'Synthetic Clinic', // Complete live intake before testing this lane.
       callback_number: '845-531-7471',
       request_description: 'I need a refill of my Latanoprost',
     })) as Record<string, unknown>;

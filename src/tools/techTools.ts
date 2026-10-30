@@ -1,3 +1,4 @@
+import { ticketIdentityFields } from './ticketIdentity';
 /**
  * The tools a Clinical Tech Support agent needs, and nothing else.
  *
@@ -433,6 +434,7 @@ registerTool({
     }
 
     const res = await createTicketDurable({
+      ...ticketIdentityFields(callSid, first, last, str(input.date_of_birth)),
       departmentId: filedDepartmentId,
       requestTypeId: filedTypeId,
       requestReasonId: filedReasonId,
@@ -463,6 +465,8 @@ registerTool({
       ...(lookup.providerId ? { providerId: lookup.providerId } : {}),
       ...(lookup.locationId ? { locationId: lookup.locationId } : {}),
       ...(cleanLocation ? { locationOfLastVisit: cleanLocation } : {}),
+      locationSource: input.locationSource === 'history' ? 'history' : 'caller',
+      locationIdSource: input.locationSource === 'history' ? 'history' : 'caller',
       lastProviderSeen: cleanProvider || undefined,
       description: filedDescriptionWithDobStatus,
       priority,

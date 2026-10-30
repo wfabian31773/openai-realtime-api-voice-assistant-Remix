@@ -953,7 +953,28 @@ import { callEnvironment } from "./callRecord";
 /**
  * v136 (renumbered from v126) — PCP UNCLASSIFIED IS FLOOR ONLY (2026-10-28). The PCP agent cannot
  * choose unclassified_call in its intake tool; the after-hangup floor still
- * files unclassified calls for a person to route. On top of v135 (#392, main, 6ae60e33); v127 is #376 and v133 is #391 on their open branches. No migration; production impact remains unmeasured.
+ * files unclassified calls for a person to route. Merged to main as #393
+ * (9bfccda), on top of v135 (#392, 6ae60e33); this is #384's base.
+ * No migration; production impact remains unmeasured.
+ */
+/**
+ * v148 (renumbered from v146, earlier v139; above main's v146) — IDENTITY GATE (#384, 2026-10-29). Verified identity is carried
+ * through ticket filing and teardown/sweep recovery. The shared ticket client
+ * filters Optical's carried appointments and history-derived routing text/IDs,
+ * preserving caller-named offices across hydration, redirects and retries.
+ * Simplified submissions with no department
+ * use the same clinic-safe copy because the receiver can derive Optical;
+ * explicit non-Optical filings and the held identity retain their history.
+ * Answering-service DOB confirmation checks the current schedule patient,
+ * never the original phone ledger. Answering-service and no-IVR cached schedule
+ * reuse checks the patient against the held identity before reading or filing.
+ * Shared lookup reuse retains the complete appointment-read view and its
+ * available/partial/unavailable status, identity-checking the call-scoped
+ * schedule cache or reading the held PersonID when that cache is absent.
+ * The v135 phone-candidate DOB confirmation remains supported.
+ * Surgery files without a clinic when none is known. On top of v136 (#393, main,
+ * 9bfccda); v137 is #391 and v138 is #376 on their open branches.
+ * No migration; production impact is unmeasured.
  */
 /**
  * v142 — A GIVEN NAME REACHES THE SWEEP (2026-10-29). The teardown sweep files
@@ -984,7 +1005,7 @@ import { callEnvironment } from "./callRecord";
  * On top of v146 (#407, main), which contains v145 and v144; v148 is #384, v149 is #391 and v150 is #376 on their open branches. No migration; production impact remains unmeasured.
  */
 /**
- * v150 — THE THIRD PARTY'S REPORT STAYS IN RECORDS (2026-10-26; renumbered from v117 to v118, to v127, to v134, to v138 on 2026-10-28, then to v150 on 2026-10-29 because main took v117 in #379, v126 in #394, v128–v131 in #389, #386, #387 and #388, and v132, v134, v135 and v136 in #390, #396, #392 and #393, #397–#407 took v140–v146 and #381 took v147 on main; v148 is #384, and v149 is claimed by both #391 and #404, on their open branches). On the
+ * v150 — THE THIRD PARTY'S REPORT STAYS IN RECORDS (2026-10-26; renumbered from v117 to v118, to v127, to v134, to v138 on 2026-10-28, then to v150 on 2026-10-29 because main took v117 in #379, v126 in #394, v128–v131 in #389, #386, #387 and #388, and v132, v134, v135 and v136 in #390, #396, #392 and #393, #397–#407 took v140–v146 and #381 and #384 took v147 and v148 on main; v149 is claimed by both #391 and #404 on their open branches). On the
  * records line, a provider's, plan's or other third party's request whose
  * words name a document is no longer sent to the HVA Hub on a scheduling cue
  * ("the most recent eye exam REPORT" read as "schedule an eye exam"); a
@@ -993,8 +1014,8 @@ import { callEnvironment } from "./callRecord";
  * model, in `fix`, that nothing is lost and never to say "call back"; and a
  * name given in two halves across invocations reaches the payload. Seven
  * records-lane calls, 2026-10-12..10-26. A payload change on the ticket path
- * of the department under the CAP, so it gets its own marker. On top of v147
- * (#381), which it contains; the holds read #381's `recordsLineRedirect`. The recovery ticket carries the callback
+ * of the department under the CAP, so it gets its own marker. On top of v148
+ * (#384), which contains v147 (#381); the holds read #381's `recordsLineRedirect`. The recovery ticket carries the callback
  * number without its extension and the extension in the staff note, as
  * v132's filing does. `src/tools/medicalRecordsTools.ts`,
  * `thirdPartyRecordsStayInRecords.test.ts`.
