@@ -42,6 +42,14 @@ describe("v158 operator callerScript drives persona and opening", () => {
     expect(openingFromScript('You are Benchmark Tester.\nOpening: "Hi, this is Benchmark Tester." Wait for a reply.')).toBe("Hi, this is Benchmark Tester.");
   });
 
+  it.each([
+    ['Opening: Hi, please say "ready" when you can hear me.', 'Hi, please say "ready" when you can hear me.'],
+    ["Opening: 'Hi, this is Benchmark Tester.' Wait for a reply.", "Hi, this is Benchmark Tester."],
+    ["Opening: \u201CHi, it's Benchmark Tester.\u201D Pause.", "Hi, it's Benchmark Tester."],
+  ])("labelled opening %j speaks %j", (script, spoken) => {
+    expect(openingFromScript(script)).toBe(spoken);
+  });
+
   it("openingLine without a script: instructions describe that opening, not the default disclosure", () => {
     const text = operatorInstructions({ ...base, openingLine: "Hi, do you have two minutes?" });
     expect(text).toContain('You already opened the call with: "Hi, do you have two minutes?"');
