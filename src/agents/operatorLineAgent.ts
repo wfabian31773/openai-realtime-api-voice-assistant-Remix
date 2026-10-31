@@ -6,6 +6,21 @@ import { OPERATOR_SLUG, type OperatorCallPayload } from "../plugin/operatorLine"
 export const OPERATOR_GREETING = "Hello, I'm Grok Bot, an AI assistant calling on behalf of Wayne Fabian. This call is recorded. How are you?";
 export const OPERATOR_INBOUND_GREETING = "Hello, I'm Grok Bot, an AI assistant. This call is recorded. How can I help?";
 
+/** Reads the first line to speak from a caller script: an "Opening:"/"Greeting:"/"Say:" line, else the first quoted line, else the first line. */
+export function openingFromScript(script: string): string | null {
+  const unquote = (text: string) => text.trim().replace(/^["\u201C']+|["\u201D']+$/g, "").trim();
+  const labelled = script.match(/^\s*(?:opening(?: line)?|greeting|first line|say)\s*[:\-]\s*(.+)$/im);
+  const quoted = script.match(/["\u201C]([^"\u201C\u201D\n]{8,500})["\u201D]/);
+  const first = script.split(/\r?\n/).map((line) => line.trim()).find(Boolean);
+  const picked = labelled ? unquote(labelled[1]) : quoted ? quoted[1].trim() : first ? unquote(first) : "";
+  return picked ? picked.slice(0, 500) : null;
+}
+
+/** v158: the line the bridge speaks first. The default only when no script or opening was given. */
+export function operatorOpening(input?: OperatorCallPayload): string {
+  return input?.openingLine?.trim() || (input?.callerScript ? openingFromScript(input.callerScript) : null) || OPERATOR_GREETING;
+}
+
 function persona(owner: boolean): string {
   return owner
     ? "You are Grok Bot, Wayne Fabian's personal assistant. You are speaking with your owner, recognized by the system. Use the full owner persona: be candid, familiar, thoughtful and proactive, discuss their plans and requests using available owner context. Treat their requests as owner requests. Never invent private facts or claim access to information or capabilities you do not have."
@@ -24,9 +39,21 @@ When the caller wants Grok Bot to take an action outside this conversation, use 
 Your tools are end_call, queue_request_for_grok_bot, and opt_out_of_calls.`;
 }
 
+function scriptedPersona(input: OperatorCallPayload, owner: boolean): string {
+  return `Caller script/persona — this defines who you are on this call, how you introduce yourself and what you say. Follow it in place of any default Grok Bot persona:
+${input.callerScript}
+You already opened the call with: ${JSON.stringify(operatorOpening(input))} Do not repeat it; continue from there in the script's persona.
+Never claim to be a human; if sincerely asked, say you are an AI assistant.${owner ? "" : " Do not reveal Wayne Fabian's private information, plans or requests from other calls."}`;
+}
+
+const SCRIPTED_COMMON = COMMON.replace("The greeting has already disclosed that you are an AI assistant and this call is recorded; do not repeat it. ", "");
+
 export function operatorInstructions(input?: OperatorCallPayload, owner = false): string {
-  return `${persona(owner)}
-${COMMON}
+  const scripted = Boolean(input?.callerScript);
+  const head = scripted ? `${scriptedPersona(input!, owner)}
+${SCRIPTED_COMMON}` : `${persona(owner)}
+${COMMON}${input?.openingLine ? `\nYou opened the call with: ${JSON.stringify(input.openingLine)}` : ""}`;
+  return `${head}
 Pursue the stated goal through a natural, free-form conversation. Decide useful questions and next steps from what the other party says; there is no script or turn limit. When the goal is complete, record_call_outcome and end politely. Do not end simply because one question has been answered.
 ${input ? `Goal (context): ${JSON.stringify(input.purpose)}
 Language: ${JSON.stringify(input.language ?? "Follow the other party's language")}
@@ -45,7 +72,7 @@ export function createOperatorLineAgent(_handoff: () => Promise<unknown>, metada
 export const operatorLinePolicy: OutboundLanePolicy = {
   campaignKey: OPERATOR_SLUG, enableEnv: "OUTBOUND_CAMPAIGN_WAYNE_OPERATOR", callerIdEnv: "OPERATOR_LINE_FROM_NUMBER",
   window: DEFAULT_CALLING_WINDOW, caps: DEFAULT_ATTEMPT_CAPS, concurrency: 1,
-  greeting: () => OPERATOR_GREETING,
+  greeting: () => OPERATOR_GREETING, // the runtime speaks operatorOpening(operatorCall) instead
   voicemail: () => "Hello, this is an assistant calling on behalf of Wayne Fabian. Goodbye.",
   callbackPurpose: "an operator request from Wayne Fabian.",
   tools: [],

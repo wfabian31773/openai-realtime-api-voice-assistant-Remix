@@ -321,7 +321,7 @@ import { boundPluginStore } from "../plugin/bindings";
 import type { PluginStore } from "../plugin/store";
 import type { OperatorInboundNotifier } from "../plugin/operatorInboundNotifier";
 import { OperatorInboundWebhook, OPERATOR_INBOUND_PATH, OPERATOR_SMS_PATH, OPERATOR_FALLBACK_PATH, OPERATOR_VOICEMAIL_PATH } from "./operatorInboundWebhook";
-import { OPERATOR_INBOUND_GREETING } from "../agents/operatorLineAgent";
+import { OPERATOR_INBOUND_GREETING, operatorOpening } from "../agents/operatorLineAgent";
 import { SI_ASSISTANT_DIRECT_GREETING } from "../agents/siAssistantAgent";
 import { closeSiAssistantIdentity, siAssistantIdentityFor } from "../plugin/siAssistantIdentity";
 import type { OutboundStore } from "./outbound/store";
@@ -1587,6 +1587,9 @@ export function mountVoiceRuntime(
         const spokenGreeting =
           entry.operatorInbound ? OPERATOR_INBOUND_GREETING :
           directCall ? SI_ASSISTANT_DIRECT_GREETING :
+          // v158: an operator call opens from its callerScript/openingLine;
+          // the default Grok Bot greeting only when neither was given.
+          operatorCall ? operatorOpening(operatorCall) :
           // A dialled call opens with its campaign's own greeting, built for
           // the person it rang: who is calling, that it is automated, and
           // that the call is recorded, before anything else (outbound/).

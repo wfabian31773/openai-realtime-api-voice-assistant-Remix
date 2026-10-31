@@ -1086,8 +1086,17 @@ import { callEnvironment } from "./callRecord";
  * Above main's v156 (#410, ce8d94f), which contains v155 (#409). No
  * migration; production impact remains unmeasured.
  */
+/**
+ * v158 — THE OPERATOR CALL'S SCRIPT DRIVES ITS PERSONA AND OPENING (2026-10-31).
+ * prepare_operator_call rejected callerScript as an unknown field and every
+ * operator outbound call opened with the default Grok Bot greeting (CA e8113f…,
+ * session 2226ee26, 08:38 ET). callerScript/openingLine are accepted; the
+ * runtime speaks operatorOpening(operatorCall) and the instructions take the
+ * script's persona. Default greeting only with no script. Line stays OPEN.
+ * Above main's v157 (#411, 4861a9f). No migration.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v157-the-prompt-describes-the-greeting-heard-20261031";
+  "voice-runtime-v158-operator-caller-script-drives-opening-20261031";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can
