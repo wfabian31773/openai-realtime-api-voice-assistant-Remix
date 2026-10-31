@@ -601,6 +601,13 @@ class SystemAlertService {
           );
           return;
         }
+        if (verdict.suppressedOutboxByConfirmedFiling) {
+          console.log(
+            `[ALERT SERVICE] Ticket filing alarm HELD — ${verdict.outboxHeld} request(s) are held in ` +
+              'the outbox but a ticket was confirmed filed; filing has not stopped',
+          );
+          return;
+        }
         console.log(
           `[ALERT SERVICE] Ticket filing OK — ${verdict.unfiledRun} call(s) since the last ticket ` +
             `(${verdict.greetingOnlySkipped} greeting-only hangup(s) not counted), ` +

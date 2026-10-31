@@ -134,6 +134,11 @@ describe('terminal refusals are notified beside the filing alarm, not through it
     source.indexOf('startTicketFilingSchedule'),
   );
 
+  it('logs when a confirmed filing held plane B, the Oct 30 shape', () => {
+    expect(check).toMatch(/suppressedOutboxByConfirmedFiling/);
+    expect(check).toMatch(/outbox but a ticket was confirmed filed/);
+  });
+
   it('always calls notifyTerminalRefusals, including when the verdict is not stalled', () => {
     expect(check).toMatch(/notifyTerminalRefusals/);
     const notifyAt = check.indexOf('await notifyTerminalRefusals()');

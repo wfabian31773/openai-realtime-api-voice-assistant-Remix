@@ -1103,8 +1103,20 @@ import { callEnvironment } from "./callRecord";
  * Above main's v158
  * (#412, d785e29). No migration.
  */
+/**
+ * v162 — PLANE B DOES NOT SAY FILING STOPPED WHILE TICKETS LAND (2026-10-31).
+ * Renumbered from v160: #414 took v160 and the optical-routing agent took
+ * v161. Oct 30 21:21–00:21 UTC: 1–3 ticket_outbox rows retried a records-line
+ * 500 (department name Tech Support; id 3 is Technicians Support) and one
+ * transport-dead-lettered. Tickets kept filing (97 sent in the window;
+ * ticketing-app health 200). assessTicketFiling stalled on outboxHeld >= 3
+ * and then on outboxDeadLetter > 0. A confirmed filing inside ten minutes
+ * (pulse or newest outbox sent_at) now holds plane B; the held count is
+ * still reported. Plane A is unchanged. Above main's v159 (#413, 55b5434).
+ * No migration.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v159-operator-script-live-no-silence-after-opening-20261031";
+  "voice-runtime-v162-outbox-stall-holds-when-tickets-land-20261031";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can
