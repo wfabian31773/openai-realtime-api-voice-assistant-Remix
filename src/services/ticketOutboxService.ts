@@ -48,7 +48,6 @@ const SENDING_LEASE_TIMEOUT_MS = 120_000;
  * so that no migration stands between this and a deploy.
  */
 import { isTerminalRefusal } from './terminalRefusal';
-import { isTestCall, markTestCall, testTicketNumber } from './testCalls';
 
 export const CREATE_TICKET_PAYLOAD_KIND = 'create_ticket_v1';
 
@@ -58,23 +57,6 @@ export interface CreateTicketOutboxPayload {
 }
 
 export type OutboxPayload = SyncAgentTicketParams | CreateTicketOutboxPayload;
-
-/**
- * THE TEST MARK SURVIVES A RESTART (v159). The mark on a test call lives in
- * memory and a queued payload may hold only the CallSid, so a replay after a
- * restart would otherwise file a real ticket and its text. The flag is written
- * only on a test call and is read before anything is sent.
- */
-function callDataOf(payload: OutboxPayload): CreateTicketParams['callData'] {
-  return (isCreateTicketPayload(payload) ? payload.params.callData : payload.callData) as CreateTicketParams['callData'];
-}
-
-function withTestFlag(payload: OutboxPayload, callSid?: string): OutboxPayload {
-  const callData = callDataOf(payload);
-  return isTestCall({ ...callData, callSid: callData?.callSid ?? callSid })
-    ? ({ ...payload, testCall: true } as OutboxPayload)
-    : payload;
-}
 
 export function wrapCreateTicketPayload(params: CreateTicketParams): CreateTicketOutboxPayload {
   return { kind: CREATE_TICKET_PAYLOAD_KIND, params };
@@ -138,7 +120,6 @@ export class TicketOutboxService {
     callLogId?: string,
   ): Promise<OutboxWriteResult> {
     const idempotencyKey = callSid ? `call-${callSid}` : undefined;
-    params = withTestFlag(params, callSid);
 
     if (idempotencyKey) {
       const [entry] = await db
@@ -341,13 +322,7 @@ export class TicketOutboxService {
     const params = isCreateTicketPayload(stored) ? null : (stored as SyncAgentTicketParams);
 
     try {
-      const testSid = callDataOf(stored as OutboxPayload)?.callSid ?? entry.callSid;
-      const isTestReplay = (stored as { testCall?: boolean }).testCall === true;
-      // Restored too, so the post-call sync for this call stays suppressed.
-      if (isTestReplay && testSid) markTestCall(testSid);
-      const response: CreateTicketResponse = isTestReplay
-        ? { success: true, ticketNumber: testTicketNumber(testSid) }
-        : isCreateTicketPayload(stored)
+      const response = isCreateTicketPayload(stored)
         ? await TicketOutboxService.sendVerbatim(stored, outboxId)
         : await TicketOutboxService.sendSyncAgentPayload(stored as SyncAgentTicketParams, outboxId);
 

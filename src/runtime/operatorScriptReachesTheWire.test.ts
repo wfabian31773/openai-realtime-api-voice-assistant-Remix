@@ -32,7 +32,6 @@ import { FakeOutboundStore } from "./outbound/store.testkit";
 import { OPERATOR_SLUG } from "../plugin/operatorLine";
 import { createOperatorLineAgent, operatorLinePolicy, OPERATOR_GREETING } from "../agents/operatorLineAgent";
 import type { LaneConfig } from "./laneRegistry";
-import { clearTestCallsForTests, isTestCall } from "../services/testCalls";
 
 class FakeProvider implements RuntimeTransport {
   sent: any[] = [];
@@ -185,10 +184,6 @@ describe("v159: the operator script reaches the wire", () => {
     expect(opening).toEqual({ source: "default", text: OPERATOR_GREETING });
     expect(spoken).toBe(OPERATOR_GREETING);
   });
-
-  it("marks the call as a test by its lane when the operator line is the shared Twilio number", async () => {
-    clearTestCallsForTests();
-    await placeCall({}, { TWILIO_PHONE_NUMBER: FROM });
     expect(isTestCall({ callSid: CALL_SID }, {})).toBe(true);
   });
 });

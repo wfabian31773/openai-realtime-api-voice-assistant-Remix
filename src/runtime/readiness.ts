@@ -1097,15 +1097,14 @@ import { callEnvironment } from "./callRecord";
  */
 /**
  * v159 — THE OPERATOR SCRIPT IS PROVEN TO THE WIRE, THE OPENING IS NOT FOLLOWED
- * BY SILENCE, AND TEST CALLS FILE NOTHING (2026-10-31). Prepare answers with
+ * BY SILENCE (2026-10-31). Prepare answers with
  * the opening it will speak and call setup logs where it came from. A call we
  * placed answers speech over its opening and carries on after 4 s of silence.
- * A call on the operator line or VOICE_TEST_LINE_NUMBERS is tagged
- * environment = 'test' and never reaches the ticketing app. Above main's v158
+ * Above main's v158
  * (#412, d785e29). No migration.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v159-operator-script-live-silence-test-tagging-20261031";
+  "voice-runtime-v159-operator-script-live-no-silence-after-opening-20261031";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

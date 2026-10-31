@@ -322,7 +322,6 @@ import type { PluginStore } from "../plugin/store";
 import type { OperatorInboundNotifier } from "../plugin/operatorInboundNotifier";
 import { OperatorInboundWebhook, OPERATOR_INBOUND_PATH, OPERATOR_SMS_PATH, OPERATOR_FALLBACK_PATH, OPERATOR_VOICEMAIL_PATH } from "./operatorInboundWebhook";
 import { OPERATOR_INBOUND_GREETING, operatorOpening, operatorOpeningSource } from "../agents/operatorLineAgent";
-import { isTestCall, markTestCall } from "../services/testCalls";
 import { SI_ASSISTANT_DIRECT_GREETING } from "../agents/siAssistantAgent";
 import { closeSiAssistantIdentity, siAssistantIdentityFor } from "../plugin/siAssistantIdentity";
 import type { OutboundStore } from "./outbound/store";
@@ -1153,14 +1152,6 @@ export function mountVoiceRuntime(
       const isLiveCall = (entry.slug === "si-assistant" || entry.slug === OPERATOR_SLUG) && Boolean(entry.liveSessionId);
       const directCall = isLiveCall ? liveCalls.forCall(entry.callSid)?.directCall : undefined;
       const operatorCall = entry.slug === OPERATOR_SLUG ? liveCalls.forCall(entry.callSid)?.operatorCall : undefined;
-      // Before anything can file: the tools and the sweep read this by CallSid.
-      // The operator lane is a test call by lane, whatever its numbers: outbound,
-      // callerPhone is the destination, and an operator line that is also
-      // TWILIO_PHONE_NUMBER does not count as dialedNumber.
-      if (entry.slug === OPERATOR_SLUG || isTestCall({ trustedCallerPhone: entry.callerPhone, dialedNumber: entry.dialedNumber }, env)) {
-        markTestCall(entry.callSid);
-        console.info(`[voice-runtime] ${entry.slug} ${entry.callSid}: test call, nothing is filed or texted`);
-      }
       if (operatorCall) {
         console.info(`[voice-runtime] operator call ${entry.callSid}: opening from ${operatorOpeningSource(operatorCall)}`);
       }

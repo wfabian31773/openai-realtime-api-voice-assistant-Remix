@@ -31,8 +31,6 @@ import { normalizeDobParts } from '../tools/dobParts';
 
 export interface UrgentTransferSmsOptions {
   callerNumber?: string;
-  /** Reads the call's test mark (services/testCalls.ts); never in the text. */
-  callSid?: string;
   escalationDetails?: EscalationDetails;
   /** Extra context line for fallback paths, e.g. why this is a direct dial. */
   note?: string;

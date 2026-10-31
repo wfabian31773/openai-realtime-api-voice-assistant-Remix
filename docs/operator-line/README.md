@@ -61,9 +61,6 @@ controls remain active for both approval paths.
 - `OPERATOR_OWNER_NUMBER`: owner's E.164 number, used for persona selection
   and the approval exemption for calls to the owner. Never hardcode it.
 - `OPERATOR_LINE_MAX_CALL_MINUTES`: safety maximum, default **60**.
-- `VOICE_TEST_LINE_NUMBERS`: optional comma-separated numbers. A call with one
-  of these or `OPERATOR_LINE_FROM_NUMBER` on either end is tagged
-  `environment = 'test'` and files no ticket and sends no automated text.
 - `OPERATOR_LINE_INBOUND_ENABLED=true`: hard gate for inbound and outbound
   operator admission. The persisted staff switch must also be enabled. Admins
   control it on the Voice Agents page; see the inbound guide for the API.
