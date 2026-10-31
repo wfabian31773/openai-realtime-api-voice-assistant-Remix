@@ -98,7 +98,9 @@ export type TriageOutcome =
   | 'general_question'
   | 'message_for_provider'
   | 'test_results'
-  | 'follow_up_care';
+  | 'follow_up_care'
+  /** Glasses, frames, lenses, contacts as products — order, status, pickup, repair. */
+  | 'optical_request';
 
 interface TriageMapping {
   requestTypeId: number;
@@ -251,6 +253,15 @@ export const TRIAGE_OUTCOME_MAPPINGS: Record<TriageOutcome, TriageMapping> = {
     requestTypeId: REQUEST_TYPES.CATARACT_SURGERY,
     requestReasonId: 46,
     priority: 'medium',
+    requiresTransfer: false,
+  },
+  // Optical Support's own Other. The model named the department; the
+  // eighteen-way optical reason is not this line's job. Ticketing assigns
+  // Optical tickets by location once department 1 is set.
+  optical_request: {
+    requestTypeId: 66,
+    requestReasonId: 536,
+    priority: 'normal',
     requiresTransfer: false,
   },
 };

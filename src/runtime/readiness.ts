@@ -1103,8 +1103,19 @@ import { callEnvironment } from "./callRecord";
  * Above main's v158
  * (#412, d785e29). No migration.
  */
+/**
+ * v161 — AFTER-HOURS OPTICAL REQUESTS THE MODEL NAMED FILE TO OPTICAL
+ * (2026-10-31). /voice/no-ivr create_ticket accepts request_category
+ * optical_request (glasses, frames, lenses, contacts as products: order,
+ * status, pickup, repair). That category files to Optical Support
+ * (department 1) with Optical Other (66/536) and the office when the
+ * caller named it or the confirmed record holds one. Classification is
+ * the model's category, not a glasses keyword list. Post-op medication
+ * still outranks it. Above main's v159 (#413, 55b5434). v160 is #414
+ * and #415. No migration.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v159-operator-script-live-no-silence-after-opening-20261031";
+  "voice-runtime-v161-after-hours-optical-files-to-optical-20261031";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

@@ -221,6 +221,7 @@ const RULINGS: Array<[string, RegExp]> = [
   ['need_identity is not a refused transfer', /need_identity/],
   ['never tell them they are not found when a schedule match exists', /never tell them they are not found/i],
   ['office hours are answered from clinic facts, never hedged', /(?:named clinic's Business Facts row.*?opening, closing and lunch hours exactly|hours printed on each office's row are the authoritative clinic hours)/s],
+  ['glasses and optical orders file as optical_request', /optical_request on create_ticket/],
   ['a fully answered question without a callback creates no ticket', /fully answered.{0,80}(?:no callback|did not ask for a callback).{0,30}(?:do not file|do not create a ticket)/is],
   ['no "is that correct?"', /DO NOT ask "Is that correct\?"|Do not ask "Is that correct\?"/],
   ['the ticket number is not read out', /(DO NOT|Do not) read (out )?the ticket number/],

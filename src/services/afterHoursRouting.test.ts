@@ -144,6 +144,49 @@ describe('same-day', () => {
   });
 });
 
+describe('optical — the model names it, the words do not', () => {
+  it('files to Optical only when the model set optical_request', () => {
+    expect(routeAfterHoursTicket({ opticalRequest: true, text: 'When will they be ready?', now: EVENING })).toEqual({
+      kind: 'optical',
+      departmentId: 1,
+    });
+  });
+
+  it('does not infer Optical from glasses or contacts in the summary', () => {
+    for (const text of [
+      'When will my glasses be ready for pickup?',
+      'Caller stated that their glasses broke at the hinge',
+      'Are my contacts ready?',
+      'I need to order new frames',
+    ]) {
+      expect(routeAfterHoursTicket({ text, now: EVENING }), text).toEqual({ kind: 'default' });
+      expect(routeAfterHoursTicket({ text, now: MORNING }), text).toEqual({ kind: 'default' });
+    }
+  });
+
+  it('a pickup today is still Optical, not same-day After Hours', () => {
+    expect(
+      routeAfterHoursTicket({
+        opticalRequest: true,
+        appointmentToday: true,
+        text: 'Picking up glasses today',
+        now: MORNING,
+      }).kind,
+    ).toBe('optical');
+  });
+
+  it('post-op medication still outranks Optical', () => {
+    expect(
+      routeAfterHoursTicket({
+        opticalRequest: true,
+        postOpMedication: true,
+        text: 'x',
+        now: EVENING,
+      }).kind,
+    ).toBe('post_op_medication');
+  });
+});
+
 describe('the clock is the practice\'s', () => {
   it('reads Pacific whatever the server runs', () => {
     expect(pacificNow(MORNING)).toEqual({ isoDate: '2026-10-02', minutes: 6 * 60 + 30 });
@@ -165,6 +208,8 @@ describe('the staff note', () => {
     expect(afterHoursRouteNote('post_op_medication')).toMatch(/URGENT/);
     expect(afterHoursRouteNote('post_op_medication')).toMatch(/not a reason to ring/);
     expect(afterHoursRouteNote('same_day')).toMatch(/SAME-DAY/);
+    expect(afterHoursRouteNote('optical')).toMatch(/OPTICAL/);
+    expect(afterHoursRouteNote('optical')).toMatch(/Optical Support/);
     expect(afterHoursRouteNote('default')).toBeNull();
   });
 });
