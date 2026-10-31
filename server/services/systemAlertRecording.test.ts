@@ -152,15 +152,15 @@ describe('terminal refusals are notified beside the filing alarm, not through it
     expect(sendAt).toBeGreaterThan(stallAt);
   });
 
-  it('the held branch emails transport dead letters before returning (Codex P2, #415)', () => {
-    const heldAt = check.indexOf('if (verdict.suppressedOutboxByConfirmedFiling)');
-    expect(heldAt).toBeGreaterThan(-1);
-    const held = check.slice(heldAt, check.indexOf('return;', heldAt) + 'return;'.length);
-    expect(held).toMatch(/if \(snapshot\.outboxDeadLetter > 0\)/);
-    expect(held).toMatch(/await notifyTransportDeadLetters\(\)/);
-    // A throw from the notice must not escape the held branch.
-    expect(held).toMatch(/catch \(transportErr\)/);
-    // Only the held branch: when plane B fires, the critical alarm covers them.
+  it('a held plane B emails transport dead letters before ANY held branch returns (Codex P2 x2, #415)', () => {
+    const at = check.indexOf('await notifyTransportDeadLetters()');
+    expect(at).toBeGreaterThan(-1);
+    const guard = check.lastIndexOf('if (', at);
+    expect(check.slice(guard, at)).toMatch(/!verdict\.stalled && verdict\.suppressedOutboxByConfirmedFiling && snapshot\.outboxDeadLetter > 0/);
+    expect(check.slice(at)).toMatch(/catch \(transportErr\)/);
+    // Above both held returns, so a held run cannot skip it.
+    expect(at).toBeLessThan(check.indexOf('if (verdict.suppressedByConfirmedFiling)'));
+    expect(at).toBeLessThan(check.indexOf('if (verdict.suppressedOutboxByConfirmedFiling)'));
     expect(check.match(/notifyTransportDeadLetters\(\)/g)).toHaveLength(1);
   });
 
