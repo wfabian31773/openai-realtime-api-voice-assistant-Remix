@@ -140,3 +140,13 @@ describe('an unvalidated match: no name anywhere, and the funnel ends without a 
     expect(recognisedCallerBlock({ matched: true } as never)).toBe('');
   });
 });
+
+describe('the SIP greeting decides by the same recognisedFirstName (v157, Codex on #411)', () => {
+  it('voiceAgentRoutes takes the name from recognisedFirstName, not raw precontext.firstName', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { join } = await import('node:path');
+    const src = readFileSync(join(__dirname, '..', 'voiceAgentRoutes.ts'), 'utf8');
+    expect(src).toContain('sharedRecognisedFirstName(azulMetadataRef?.precontext)');
+    expect(src).not.toMatch(/precontext\?\.matched\s*\?\s*String\(azulMetadataRef\.precontext\.firstName/);
+  });
+});

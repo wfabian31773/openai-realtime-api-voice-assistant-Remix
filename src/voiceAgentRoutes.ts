@@ -4433,9 +4433,11 @@ async function observeCall(
         agentGreeting = lunchGreeting;
       }
     }
-    const recognisedFirstName = azulMetadataRef?.precontext?.matched
-      ? String(azulMetadataRef.precontext.firstName ?? '').trim()
-      : '';
+    // v157 (Codex on #411): the SIP greeting decides by the same
+    // recognisedFirstName the runtime uses, so an unvalidated caller-ID match
+    // is not greeted by name here while the prompt block says it was not.
+    const { recognisedFirstName: sharedRecognisedFirstName } = await import('./services/greetingPersonalisation');
+    const recognisedFirstName = sharedRecognisedFirstName(azulMetadataRef?.precontext);
     if (recognisedFirstName && agentGreeting) {
       // The QUEUE lines keep their own opening and swap only its closing
       // question. Their greeting does a second job besides saying hello: "All
