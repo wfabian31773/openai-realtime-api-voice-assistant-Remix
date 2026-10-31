@@ -184,6 +184,4 @@ describe("v159: the operator script reaches the wire", () => {
     expect(opening).toEqual({ source: "default", text: OPERATOR_GREETING });
     expect(spoken).toBe(OPERATOR_GREETING);
   });
-    expect(isTestCall({ callSid: CALL_SID }, {})).toBe(true);
-  });
 });
