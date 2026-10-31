@@ -15,11 +15,12 @@ async function call(proceedAfterOpening: boolean) {
   const pending = new Map<number, { fn: () => void; ms: number }>();
   let next = 1;
   let epoch = 0;
+  let responseActive = false;
   const marks: string[] = [];
   const session = {
     appendAudio: vi.fn(), cancelResponse: vi.fn(), sendToolResult: vi.fn(), close: vi.fn(), setSpokenLanguage: vi.fn(),
     requestResponse: vi.fn(), speakNatural: vi.fn(), speak: vi.fn(),
-    getResponseEpoch: () => epoch, isResponseActive: () => false,
+    getResponseEpoch: () => epoch, isResponseActive: () => responseActive,
   };
   let handlers!: BridgeSessionHandlers;
   const bridge = new VoiceCallBridge({
@@ -54,6 +55,7 @@ async function call(proceedAfterOpening: boolean) {
       return false;
     },
     newResponse: () => { epoch += 1; },
+    setResponseActive: (active: boolean) => { responseActive = active; },
   };
 }
 
@@ -153,6 +155,49 @@ describe("v159: an operator call carries on after its opening", () => {
     c.handlers.onSpeechStopped();
     expect(c.fire(OPENING_PROCEED_MS)).toBe(false);
     expect(c.session.requestResponse).not.toHaveBeenCalled();
+  });
+
+  it("a response created with no words yet is left to answer: no second turn, no cannot-hear line", async () => {
+    const c = await call(true);
+    c.openingPlays();
+    c.played();
+    c.handlers.onSpeechStarted();
+    c.handlers.onSpeechStopped();
+    c.newResponse();
+    c.setResponseActive(true);
+    expect(c.fire(OPENING_PROCEED_MS)).toBe(true);
+    expect(c.session.requestResponse).not.toHaveBeenCalled();
+    expect(c.session.speak).not.toHaveBeenCalled();
+    // The agent's own watchdog runs while it owes the words.
+    expect(c.fire(30_000)).toBe(true);
+  });
+
+  it("a transcribed reply gets no extra turn while the provider is answering it", async () => {
+    const c = await call(true);
+    c.openingPlays();
+    c.played();
+    c.handlers.onSpeechStarted();
+    c.handlers.onSpeechStopped();
+    c.handlers.onCallerTranscript("Yes, go ahead.");
+    c.newResponse();
+    c.setResponseActive(true);
+    c.fire(OPENING_PROCEED_MS);
+    expect(c.session.requestResponse).not.toHaveBeenCalled();
+    expect(c.session.speak).not.toHaveBeenCalled();
+  });
+
+  it("a response that already finished empty leaves the full window, not the short one's prompt", async () => {
+    const c = await call(true);
+    c.openingPlays();
+    c.played();
+    c.handlers.onSpeechStarted();
+    c.handlers.onSpeechStopped();
+    c.newResponse();
+    expect(c.fire(OPENING_PROCEED_MS)).toBe(true);
+    expect(c.session.speak).not.toHaveBeenCalled();
+    expect(c.session.requestResponse).not.toHaveBeenCalled();
+    expect(c.fire(WINDOW)).toBe(true);
+    expect(c.session.speak).toHaveBeenCalledWith(SILENCE_PROMPT_LINE, { interruptible: true });
   });
 
   it("a patient lane is unchanged: nothing is requested and the ladder keeps its window", async () => {

@@ -2625,6 +2625,12 @@ export class VoiceCallBridge {
         this.takeTurnAfterOpening();
         return;
       }
+      // The turn is taken, so this short window is not the ladder's to act on.
+      // A response still open owes its words and its watchdog runs; anything
+      // else gets the full window. Speaking here would queue a second turn.
+      this.openingProceedSettled = true;
+      this.armDeadAir(this.session.isResponseActive() ? "response" : "caller");
+      return;
     }
     // v131: stand down BEFORE speaking. A caller we have already heard
     // must never get the cannot-hear ladder, even after later quiet turns.

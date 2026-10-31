@@ -1279,8 +1279,13 @@ async function fileUrgentHandoffFallbackTicket(
  * Callers pass whatever context they have; escalation details are included
  * when the call got far enough to record them.
  */
+/** The CallSid a conference is named for: the key the SIP webhook marks a test call under. */
+function sipCallSidOf(conferenceName: string): string {
+  return conferenceName.replace(/^(test_|outbound_)?conf_/, '');
+}
+
 function sendUrgentTransferSms(opts: UrgentTransferSmsOptions): void {
-  if (isTestCall({ callerPhone: opts.callerNumber })) {
+  if (isTestCall({ callSid: opts.callSid, callerPhone: opts.callerNumber })) {
     console.log('[HANDOFF] ℹ️ SMS notification skipped - test call');
     return;
   }
@@ -1449,6 +1454,7 @@ async function addHumanAgent(openAiCallId: string): Promise<HandoffOutcome> {
     if (policy.policy !== 'pcp') {
       const routedToOffice = urgentSource === 'office_queue';
       sendUrgentTransferSms({
+        callSid: sipCallSidOf(conferenceName),
         callerNumber: callerID,
         escalationDetails,
         ...(routedToOffice ? { kind: 'routed' as const, routedTo: urgentQueueLabel } : {}),
@@ -1935,6 +1941,7 @@ async function recoverCallerAfterSipTermination(conferenceName: string, status: 
     // who most needs somebody told. Sending it after the branch meant that
     // caller was the only one nobody was paged about.
     sendUrgentTransferSms({
+      callSid: sipCallSidOf(conferenceName),
       callerNumber: getCallerNumber(conferenceName) || callerCall.from,
       escalationDetails: escalation,
       kind: fallbackNumber ? 'transfer' : 'callback',
@@ -5370,7 +5377,7 @@ export function setupVoiceAgentRoutes(app: Express): void {
         console.info(`[WEBHOOK] Creating session for call: ${callId} with voice=${voiceForCall}, language=${languageForCall}`);
         
         // Before the agent exists: the SIP filing paths read this by CallSid.
-        const twilioCallSidFromSIP = conferenceNameFromSIP?.replace(/^(test_|outbound_)?conf_/, '');
+        const twilioCallSidFromSIP = conferenceNameFromSIP ? sipCallSidOf(conferenceNameFromSIP) : undefined;
         if (markSipTestCall({ callSid: twilioCallSidFromSIP, xCallerPhone, dialedNumber: realDialedNumber })) {
           console.info(`[WEBHOOK] ${twilioCallSidFromSIP}: test call, nothing is filed or texted`);
         }

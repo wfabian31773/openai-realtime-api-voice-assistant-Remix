@@ -1154,7 +1154,7 @@ export function mountVoiceRuntime(
       const directCall = isLiveCall ? liveCalls.forCall(entry.callSid)?.directCall : undefined;
       const operatorCall = entry.slug === OPERATOR_SLUG ? liveCalls.forCall(entry.callSid)?.operatorCall : undefined;
       // Before anything can file: the tools and the sweep read this by CallSid.
-      if (isTestCall(entry, env)) {
+      if (isTestCall({ trustedCallerPhone: entry.callerPhone, dialedNumber: entry.dialedNumber }, env)) {
         markTestCall(entry.callSid);
         console.info(`[voice-runtime] ${entry.slug} ${entry.callSid}: test call, nothing is filed or texted`);
       }

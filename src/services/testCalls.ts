@@ -11,9 +11,12 @@
  * Only OPERATOR_LINE_FROM_NUMBER and VOICE_TEST_LINE_NUMBERS (comma-separated)
  * count. Both are numbers we own, compared as whole E.164 values, so a patient
  * can never match by accident. A ticket's callback number is deliberately NOT
- * read: a real caller may leave any number. TWILIO_PHONE_NUMBER never counts,
- * even if listed: the old core writes it in place of a dialled number it could
- * not find, and SIP's own From header carries it, on real patients' calls.
+ * read: a real caller may leave any number. TWILIO_PHONE_NUMBER does not count
+ * on a number that may be substituted, even if listed: the old core writes it in
+ * place of a dialled number it could not find, and SIP's own From header carries
+ * it, on real patients' calls. It does count on `trustedCallerPhone`, the number
+ * Twilio gave the webhook as the caller, because operator admission permits the
+ * operator line to be that number.
  *
  * The marks live on globalThis because a dynamic import can evaluate a module
  * twice on Node 20 (the v78/v90/v141 class), and an empty second copy here
@@ -40,11 +43,14 @@ function e164(phone: string | null | undefined): string | null {
   return digits.length >= 8 && digits.length <= 15 ? digits : null;
 }
 
-export function isTestLineNumber(phone: string | null | undefined, env: Env = process.env): boolean {
+function isConfiguredTestLine(phone: string | null | undefined, env: Env): boolean {
   const target = e164(phone);
-  if (!target || target === e164(env.TWILIO_PHONE_NUMBER)) return false;
-  return [env.OPERATOR_LINE_FROM_NUMBER, ...(env.VOICE_TEST_LINE_NUMBERS ?? "").split(",")]
+  return Boolean(target) && [env.OPERATOR_LINE_FROM_NUMBER, ...(env.VOICE_TEST_LINE_NUMBERS ?? "").split(",")]
     .some((line) => e164(line) === target);
+}
+
+export function isTestLineNumber(phone: string | null | undefined, env: Env = process.env): boolean {
+  return e164(phone) !== e164(env.TWILIO_PHONE_NUMBER) && isConfiguredTestLine(phone, env);
 }
 
 export function markTestCall(callSid: string): void {
@@ -55,10 +61,11 @@ export function markTestCall(callSid: string): void {
 }
 
 export function isTestCall(
-  call: { callSid?: string | null; callerPhone?: string | null; dialedNumber?: string | null },
+  call: { callSid?: string | null; callerPhone?: string | null; trustedCallerPhone?: string | null; dialedNumber?: string | null },
   env: Env = process.env,
 ): boolean {
   return (Boolean(call.callSid) && marks().has(call.callSid!))
+    || isConfiguredTestLine(call.trustedCallerPhone, env)
     || isTestLineNumber(call.callerPhone, env) || isTestLineNumber(call.dialedNumber, env);
 }
 
@@ -73,7 +80,7 @@ export function markSipTestCall(
   call: { callSid?: string | null; xCallerPhone?: string | null; dialedNumber?: string | null },
   env: Env = process.env,
 ): boolean {
-  if (!call.callSid || !isTestCall({ callerPhone: call.xCallerPhone, dialedNumber: call.dialedNumber }, env)) return false;
+  if (!call.callSid || !isTestCall({ trustedCallerPhone: call.xCallerPhone, dialedNumber: call.dialedNumber }, env)) return false;
   markTestCall(call.callSid);
   return true;
 }

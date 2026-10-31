@@ -336,7 +336,7 @@ export function toCallLogRow(
     // Counted from real wire events, not estimated from wall time — the
     // distinction the column exists to record.
     telemetrySource: "realtime_events",
-    environment: isTestCall(record, env) ? TEST_CALL_ENVIRONMENT : callEnvironment(env),
+    environment: isTestCall({ callSid: record.callSid, trustedCallerPhone: record.callerPhone, dialedNumber: record.dialedNumber }, env) ? TEST_CALL_ENVIRONMENT : callEnvironment(env),
     /**
      * The transfer column the SIP path writes and the dashboards read.
      * Omitted (never false) except on a transferred outcome, so this writer
@@ -497,7 +497,7 @@ export async function openRuntimeCall(
       // permanent row where endTime - startTime is short by the whole
       // setup delay (Codex review, PR #227 round 13).
       startTime: new Date(context.startedAtMs),
-      environment: isTestCall(context, env) ? TEST_CALL_ENVIRONMENT : callEnvironment(env),
+      environment: isTestCall({ callSid: context.callSid, trustedCallerPhone: context.callerPhone, dialedNumber: context.dialedNumber }, env) ? TEST_CALL_ENVIRONMENT : callEnvironment(env),
       voiceProvider: "grok",
     });
   } catch (error) {

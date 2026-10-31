@@ -59,8 +59,20 @@ describe("what counts as a test call", () => {
     expect(isTestLineNumber("+4582345678", { OPERATOR_LINE_FROM_NUMBER: "+4582345678" })).toBe(true);
   });
 
-  it("the shared Twilio number never counts, even if listed", () => {
-    expect(isTestLineNumber(OPERATOR, { OPERATOR_LINE_FROM_NUMBER: OPERATOR, TWILIO_PHONE_NUMBER: OPERATOR })).toBe(false);
+  it("the shared Twilio number never counts where it may be substituted, even if listed", () => {
+    const env = { OPERATOR_LINE_FROM_NUMBER: OPERATOR, TWILIO_PHONE_NUMBER: OPERATOR };
+    expect(isTestLineNumber(OPERATOR, env)).toBe(false);
+    expect(isTestCall({ callerPhone: PATIENT, dialedNumber: OPERATOR }, env)).toBe(false);
+    expect(isTestCall({ callerPhone: OPERATOR }, env)).toBe(false);
+  });
+
+  it("the operator line counts as the trusted caller even when it is the shared Twilio number", () => {
+    const env = { OPERATOR_LINE_FROM_NUMBER: OPERATOR, TWILIO_PHONE_NUMBER: OPERATOR };
+    expect(isTestCall({ trustedCallerPhone: OPERATOR, dialedNumber: "+15555550999" }, env)).toBe(true);
+    expect(isTestCall({ trustedCallerPhone: PATIENT, dialedNumber: OPERATOR }, env)).toBe(false);
+    expect(markSipTestCall({ callSid: SID, xCallerPhone: OPERATOR, dialedNumber: "+15555550999" }, env)).toBe(true);
+    clearTestCallsForTests();
+    expect(markSipTestCall({ callSid: SID, xCallerPhone: PATIENT, dialedNumber: OPERATOR }, env)).toBe(false);
   });
 
   it("a marked CallSid counts with no numbers at hand, as the tools have", () => {
@@ -151,6 +163,21 @@ describe("the SIP path, whose filing tools hand over only a CallSid", () => {
 describe("the tag and the on-call text", () => {
   const record = { callSid: SID, slug: "no-ivr", callerPhone: OPERATOR, dialedNumber: "+15555550999", direction: "inbound",
     startedAtMs: 0, endedAtMs: 1000, outcome: "caller_hangup", transcript: "", toolEvents: [] } as never;
+
+  it("the SIP on-call text reads the test mark on both the handoff and the recovery path", () => {
+    const src = readFileSync(new URL("../voiceAgentRoutes.ts", import.meta.url), "utf8");
+    expect(src).toContain("isTestCall({ callSid: opts.callSid, callerPhone: opts.callerNumber })");
+    const sends = src.split("sendUrgentTransferSms({").slice(1);
+    expect(sends).toHaveLength(2);
+    for (const send of sends) expect(send.slice(0, 80)).toContain("callSid: sipCallSidOf(conferenceName)");
+  });
+
+  it("tags the operator's call on the shared Twilio number, and the runtime marks it", () => {
+    const env = { OPERATOR_LINE_FROM_NUMBER: OPERATOR, TWILIO_PHONE_NUMBER: OPERATOR, APP_ENV: "production" };
+    expect(toCallLogRow(record, {}, env).environment).toBe("test");
+    const src = readFileSync(new URL("../runtime/voiceRuntime.ts", import.meta.url), "utf8");
+    expect(src).toContain("isTestCall({ trustedCallerPhone: entry.callerPhone, dialedNumber: entry.dialedNumber }, env)");
+  });
 
   it("tags the call row in the existing environment column", () => {
     expect(toCallLogRow(record, {}, { OPERATOR_LINE_FROM_NUMBER: OPERATOR, APP_ENV: "production" }).environment).toBe("test");
