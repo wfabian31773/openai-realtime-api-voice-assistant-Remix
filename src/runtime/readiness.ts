@@ -1068,13 +1068,22 @@ import { callEnvironment } from "./callRecord";
  * 31c5251). No migration; production impact remains unmeasured.
  */
 /**
+ * v156 — A NUDGE THE AGENT ANSWERS WITH NOTHING STANDS DOWN (2026-10-31).
+ * v153's agent-stall nudge arms the agent's watchdog; an empty response
+ * (created, done, no transcript) never re-armed the caller's window, so the
+ * call ended as dead_air with the technical-trouble line — 10 of 92 nudged
+ * calls on 2026-10-30. `settleStallNudge` stands the ladder down instead.
+ * Above main's v155 (#409, 1ddaa9f). No migration; production impact
+ * remains unmeasured.
+ */
+/**
  * v157 — THE PROMPT DESCRIBES THE GREETING THE CALLER HEARD (2026-10-31).
  * #384 stopped the greeting saying a caller-ID candidate's name; the
  * recognised-caller block kept claiming it had asked "Am I speaking with
  * <name>?". The block, ask script and identity_is_certain guidance now read
  * the runtime's own recognisedFirstName; an unvalidated match asks for the
  * first and last name and not the date of birth once the lookup is certain.
- * Above main's v155 (#409, 1ddaa9f); v156 is #410 on its open branch. No
+ * Above main's v155 (#409, 1ddaa9f); v156 (#410, merged 2026-10-31, `ce8d94f`) is now contained. No
  * migration; production impact remains unmeasured.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
