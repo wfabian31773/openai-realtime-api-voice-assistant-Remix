@@ -1083,7 +1083,7 @@ import { callEnvironment } from "./callRecord";
  * <name>?". The block, ask script and identity_is_certain guidance now read
  * the runtime's own recognisedFirstName; an unvalidated match asks for the
  * first and last name and not the date of birth once the lookup is certain.
- * Above main's v155 (#409, 1ddaa9f); v156 (#410, merged 2026-10-31, `ce8d94f`) is now contained. No
+ * Above main's v156 (#410, ce8d94f), which contains v155 (#409). No
  * migration; production impact remains unmeasured.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
