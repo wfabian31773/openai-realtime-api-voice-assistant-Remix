@@ -656,9 +656,13 @@ is reading noise.
 
 ---
 
-## Current branch — after-hours optical requests the model named file to Optical, v161 (2026-10-31)
+## Current branch — plane B holds when tickets are still landing, v162 (2026-10-31)
 
-This branch carries **`voice-runtime-v161-after-hours-optical-files-to-optical-20261031`**, above `main`'s v159 (#413, `55b5434`). v160 is #414 and #415. The marker-table row has the detail. After-hours calls on `/voice/no-ivr` about glasses or optical orders (status, pickup, repairs, contacts) that the model classifies as `optical_request` file to Optical Support (department 1) with Optical Other (type 66 / reason 536) and the caller's office when known — the caller-named clinic, or the confirmed record's. Classification is the model's `request_category`, not a glasses keyword list. Post-op medication still outranks it. Tests: `src/services/afterHoursRouting.test.ts`, `src/agents/noIvrAfterHoursRouting.test.ts`. No migration; production impact is unmeasured.
+This branch carries **`voice-runtime-v162-outbox-stall-holds-when-tickets-land-20261031`**, above `main`'s v161 (#416), which contains v159 (#413, `55b5434`). Renumbered from v160: #414 took v160 and the optical-routing agent took v161. Oct 30 5:21–8:21 PM ET: 1–3 `ticket_outbox` rows retried a records-line HTTP 500 (ticketing-app mapped `clinical` to the missing department name `Tech Support`; id 3 is Technicians Support — fixed there as #425) while 97 other rows sent and `/health` stayed 200. Plane B emailed `ticket_filing_stalled` on `outboxHeld >= 3` and then on one transport dead letter. A confirmed filing inside ten minutes (in-process pulse or newest `ticket_outbox.sent_at`) now holds that plane; the held count is still reported. Plane A is unchanged. While plane B is held, each transport dead letter (no status, or not 400/422) gets one `ticket_transport_dead_letter` email (`notifyTransportDeadLetters`, claimed on `followup_notified_at`), because the held alarm was its only notice (Codex P2, #415). Tests: `server/services/ticketFilingHealth.test.ts` (the Oct 30 block), `ticketFollowupNotice.test.ts`, `ticketFollowupEmail.test.ts`, `systemAlertRecording.test.ts`. No migration; production impact is unmeasured. Do not replay the resolved dead letter.
+
+## `main` base — after-hours optical requests the model named file to Optical, v161 (#416, merged 2026-10-31)
+
+#416 carries **`voice-runtime-v161-after-hours-optical-files-to-optical-20261031`**, above `main`'s v159 (#413, `55b5434`). The marker-table row has the detail. After-hours calls on `/voice/no-ivr` about glasses or optical orders (status, pickup, repairs, contacts) that the model classifies as `optical_request` file to Optical Support (department 1) with Optical Other (type 66 / reason 536) and the caller's office when known — the caller-named clinic, or the confirmed record's. Classification is the model's `request_category`, not a glasses keyword list. Post-op medication still outranks it. Tests: `src/services/afterHoursRouting.test.ts`, `src/agents/noIvrAfterHoursRouting.test.ts`. No migration; production impact is unmeasured.
 
 ## `main` base — the sweep derives a request reason, v160 (#414, merged 2026-10-31)
 
@@ -2540,6 +2544,7 @@ voice-runtime-v158-operator-caller-script-drives-opening-20261031
 voice-runtime-v159-operator-script-live-no-silence-after-opening-20261031
 voice-runtime-v160-sweep-derives-request-reason-20261031
 voice-runtime-v161-after-hours-optical-files-to-optical-20261031
+voice-runtime-v162-outbox-stall-holds-when-tickets-land-20261031
 ```
 
 Also printed at boot as `[voice-runtime] <marker>`. Anything ending in an
@@ -2797,8 +2802,8 @@ v10 (the person base and the join), v11 (the locked record, #290) and v12
 (optical's office ladder) are a CHAIN on `main`: each merged after the one
 before and brought it in, so v12 contains both.
 
-**AND THE SEQUENCE HAS TWO HOLES IN IT ON PURPOSE: v13 AND v57. v161 IS THE
-NEWEST — v161 on this branch: after-hours optical requests the model named file to Optical — above `main`'s v159, which it contains (v160 is #414/#415) —
+**AND THE SEQUENCE HAS TWO HOLES IN IT ON PURPOSE: v13 AND v57. v162 IS THE
+NEWEST — v162 on this branch: plane B holds when tickets are still landing — above `main`'s v161 (#416, after-hours optical files to Optical), which it contains —
 AND v159 IS WHAT `main` CARRIES, SINCE #413 MERGED 2026-10-31 (`55b5434`): the operator script proven to the wire, no silence after the opening, above v158 (#412, `d785e29`) —
 AND v158 IS WHAT `main` CARRIED, SINCE #412 MERGED 2026-10-31 (`d785e29`): an operator call's callerScript drives its persona and opening line, above v157 (#411, `4861a9f`) —
 AND BEFORE THAT v157, MERGED 2026-10-31: the recognised-caller block describes the greeting the caller actually heard, and an unvalidated match asks for the name and not the date of birth — above `main`'s v156, which it contains —
@@ -2953,7 +2958,7 @@ re-bumps only when it falls BELOW `main`, where it would read as a failed pull.
 **NEWEST IS NOT THE SAME AS CONTAINED:** v70 contains v69 because `main` was
 merged into it, not because 70 > 69. **A build must never read v13, v57, v59,
 v60, v63, v65 or v66** — v13 and v57 were withdrawn, and the other five were
-branch numbers given up the moment a merge put them below `main`. The next ship takes **v162**. v19-v24 were siblings off v18 on 2026-09-15 — v19 the PCP lost-requestfloor (#300), v20 the blind transfer telemetry (#302), v21 the ask detection
+branch numbers given up the moment a merge put them below `main`. v160 is #414 and v161 is the optical-routing agent; this branch is v162; the next ship takes **v163**. v19-v24 were siblings off v18 on 2026-09-15 — v19 the PCP lost-requestfloor (#300), v20 the blind transfer telemetry (#302), v21 the ask detection
 (#301), v22 the question format (#303), v23 the recording disclosure (#304),
 v24 the answerable queue choice (#306). Distinct numbers were assigned UP FRONT
 precisely so six open branches could never make six different builds read alike

@@ -18,6 +18,8 @@ import {
   UNFILED_RUN_ALARM,
   OUTBOX_HELD_ALARM,
   TRAFFIC_RECENCY_MS,
+  CONFIRMED_FILING_RECENCY_MS,
+  newestConfirmedFilingAtMs,
   isGreetingOnly,
   type TicketFilingSnapshot,
 } from './ticketFilingHealth';
@@ -54,6 +56,7 @@ function snapshot(over: Partial<TicketFilingSnapshot> = {}): TicketFilingSnapsho
     outboxDeadLetter: 0,
     outboxTerminalDeadLetter: 0,
     lastTicketFiledAtMs: null,
+    lastOutboxSentAtMs: null,
     nowMs: NOW,
     ...over,
   };
@@ -234,6 +237,12 @@ describe('what the snapshot query is allowed to forget', () => {
     );
     expect(observatory).toMatch(/readTicketFilingSnapshot/);
     expect(observatory).not.toMatch(/FROM ticket_outbox/);
+  });
+
+  it('reads the newest outbox sent_at so a restart can still see a live pipe', () => {
+    expect(source).toMatch(/MAX\(sent_at\)/);
+    expect(source).toMatch(/lastOutboxSentAtMs/);
+    expect(source).toMatch(/INTERVAL '1 hour'/);
   });
 
   it('falls back to the pre-split count when the additive columns are missing', () => {
@@ -639,17 +648,19 @@ describe('a confirmed filing inside the run disconfirms the stall', () => {
     expect(v.suppressedByConfirmedFiling).toBe(false);
   });
 
-  it('cannot silence the outbox planes — those are requests we are holding', () => {
-    // A ticket filing normally elsewhere says nothing about payloads stuck in
-    // our own outbox, so the pulse must not reach plane A or B.
+  it('a STALE confirmed filing still leaves plane B free to fire', () => {
+    // The pulse from before the outage is not evidence the pipe is up now.
+    const stale = NOW - CONFIRMED_FILING_RECENCY_MS - MIN;
     const dead = assessTicketFiling(
-      snapshot({ outboxDeadLetter: 1, lastTicketFiledAtMs: NOW }),
+      snapshot({ outboxDeadLetter: 1, lastTicketFiledAtMs: stale }),
     );
     expect(dead.stalled).toBe(true);
+    expect(dead.suppressedOutboxByConfirmedFiling).toBe(false);
     const held = assessTicketFiling(
-      snapshot({ outboxFailed: 3, lastTicketFiledAtMs: NOW }),
+      snapshot({ outboxFailed: 3, lastTicketFiledAtMs: stale }),
     );
     expect(held.stalled).toBe(true);
+    expect(held.suppressedOutboxByConfirmedFiling).toBe(false);
   });
 
   it('cannot silence the 2026-08-31 outage — nothing filed anywhere in its span', () => {
@@ -661,5 +672,97 @@ describe('a confirmed filing inside the run disconfirms the stall', () => {
       }),
     );
     expect(v.stalled).toBe(true);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 2026-10-30: plane B emailed STOPPED while tickets were still landing
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('plane B does not claim filing has stopped when tickets are still landing', () => {
+  it('holds the stall on three held rows when a ticket was just confirmed', () => {
+    // Oct 30 21:21 UTC: 3 failed retries (dept_ambiguous 500s) and tickets
+    // landing every few minutes. Plane B used to email STOPPED.
+    const v = assessTicketFiling(
+      snapshot({ outboxPending: 2, outboxFailed: 1, lastTicketFiledAtMs: NOW - 2 * MIN }),
+    );
+    expect(v.stalled).toBe(false);
+    expect(v.outboxHeld).toBe(3);
+    expect(v.suppressedOutboxByConfirmedFiling).toBe(true);
+    expect(v.reason).toBeNull();
+  });
+
+  it('holds the stall on a transport dead letter when the outbox is still sending', () => {
+    // Oct 30 after 23:26 UTC: two of the three 500s had sent, the oldest
+    // exhausted 12 retries and sat as a transport dead letter until 00:21.
+    // Filing continued. Plane B used to fire on outboxDeadLetter > 0.
+    const v = assessTicketFiling(
+      snapshot({ outboxDeadLetter: 1, lastOutboxSentAtMs: NOW - 3 * MIN }),
+    );
+    expect(v.stalled).toBe(false);
+    expect(v.outboxHeld).toBe(1);
+    expect(v.suppressedOutboxByConfirmedFiling).toBe(true);
+  });
+
+  it('the pulse and the outbox sent_at are the same fact — newest wins', () => {
+    expect(
+      newestConfirmedFilingAtMs(
+        snapshot({ lastTicketFiledAtMs: NOW - 8 * MIN, lastOutboxSentAtMs: NOW - 1 * MIN }),
+      ),
+    ).toBe(NOW - 1 * MIN);
+    expect(
+      newestConfirmedFilingAtMs(snapshot({ lastTicketFiledAtMs: NOW - 2 * MIN, lastOutboxSentAtMs: null })),
+    ).toBe(NOW - 2 * MIN);
+    expect(newestConfirmedFilingAtMs(snapshot())).toBeNull();
+  });
+
+  it('fires the moment the confirmed-filing window expires', () => {
+    const justInside = assessTicketFiling(
+      snapshot({
+        outboxFailed: OUTBOX_HELD_ALARM,
+        lastTicketFiledAtMs: NOW - CONFIRMED_FILING_RECENCY_MS,
+      }),
+    );
+    expect(justInside.stalled).toBe(false);
+    expect(justInside.suppressedOutboxByConfirmedFiling).toBe(true);
+
+    const justOutside = assessTicketFiling(
+      snapshot({
+        outboxFailed: OUTBOX_HELD_ALARM,
+        lastTicketFiledAtMs: NOW - CONFIRMED_FILING_RECENCY_MS - 1,
+      }),
+    );
+    expect(justOutside.stalled).toBe(true);
+    expect(justOutside.reason).toMatch(/refusing POSTs/);
+    expect(justOutside.suppressedOutboxByConfirmedFiling).toBe(false);
+  });
+
+  it('does not hide 2026-08-31 — plane A still fires while plane B is held', () => {
+    // Last ticket 20:15:38, twelve unfiled calls by 20:23:06. The pulse is
+    // eight minutes old — inside the ten-minute window, so plane B holds —
+    // and it predates the run, so plane A still pages. Packed at 40s
+    // because that evening arrived faster than the 90s fixture.
+    const packed: TicketFilingSnapshot['recentQueueCalls'] = [];
+    for (let i = 0; i < UNFILED_RUN_ALARM; i++) {
+      packed.push({ createdAtMs: NOW - i * 40_000, hasTicket: false, ...SUBSTANTIVE });
+    }
+    packed.push({ createdAtMs: NOW - 8 * MIN, hasTicket: true, ...SUBSTANTIVE });
+    const v = assessTicketFiling(
+      snapshot({
+        recentQueueCalls: packed,
+        lastTicketFiledAtMs: NOW - 8 * MIN,
+        outboxFailed: 4,
+      }),
+    );
+    expect(v.stalled).toBe(true);
+    expect(v.reason).toMatch(/12 queue calls in a row/);
+    expect(v.suppressedOutboxByConfirmedFiling).toBe(true);
+  });
+
+  it('an omitted lastOutboxSentAtMs is treated as none so older snapshots stay valid', () => {
+    const { lastOutboxSentAtMs: _drop, ...cold } = snapshot({ outboxDeadLetter: 1 });
+    const v = assessTicketFiling(cold);
+    expect(v.stalled).toBe(true);
+    expect(v.suppressedOutboxByConfirmedFiling).toBe(false);
   });
 });

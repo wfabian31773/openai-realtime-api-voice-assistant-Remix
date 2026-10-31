@@ -8,6 +8,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   TICKET_NEEDS_FOLLOWUP,
+  TICKET_TRANSPORT_DEAD_LETTER,
   buildFollowupEmail,
   followupFactsFromPayload,
   type FollowupNoticeRow,
@@ -102,6 +103,38 @@ describe('buildFollowupEmail', () => {
     const mail = buildFollowupEmail([row()]);
     expect(mail.html).not.toMatch(/Wayne|Fabian|patient/i);
     expect(mail.text).not.toMatch(/Wayne|Fabian/);
+  });
+
+  it("defaults to the refusal body — passing 'refusal' changes nothing", () => {
+    expect(buildFollowupEmail([row()], 'refusal')).toEqual(buildFollowupEmail([row()]));
+  });
+
+  it('the transport body says the request gave up, is replayable, and filing is healthy', () => {
+    const mail = buildFollowupEmail(
+      [row({ refusalStatusCode: 500, lastError: 'secret app echo' })],
+      'transport',
+    );
+    expect(mail.to).toBe('wfabian@azulvision.com');
+    expect(mail.subject).toContain('gave up after every retry');
+    expect(mail.subject).toContain('CAf1c375ee5dc57dd6d705939a7f15cee7');
+    for (const body of [mail.html, mail.text]) {
+      expect(body).toMatch(/gave up after every retry on a transport or server error/);
+      expect(body).toMatch(/will not retry on their own/);
+      expect(body).toMatch(/replayed from the Observatory outbox/);
+      expect(body).toMatch(/Filing itself is healthy/);
+      expect(body).toContain('HTTP 500');
+      expect(body).toContain(TICKET_TRANSPORT_DEAD_LETTER);
+      expect(body).not.toContain('secret app echo');
+      expect(body).not.toMatch(/refused by the ticketing app/);
+    }
+    expect(mail.html).not.toMatch(/critical/i);
+  });
+
+  it('the transport body names a missing status rather than inventing one', () => {
+    const mail = buildFollowupEmail([row({ refusalStatusCode: null })], 'transport');
+    expect(mail.text).toContain('no HTTP status');
+    const many = buildFollowupEmail([row(), row({ id: 'ob-2' })], 'transport');
+    expect(many.subject).toBe('[Azul Vision] 2 ticket requests gave up after every retry');
   });
 
   it('escapes HTML in the refusal reason', () => {

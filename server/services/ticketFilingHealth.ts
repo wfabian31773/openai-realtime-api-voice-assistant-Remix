@@ -64,7 +64,23 @@
  *   A payload refusal (400/422) is not plane B. Measured 2026-09-25: three
  *   terminal 400s re-fired ticket_filing_stalled all evening while tickets
  *   were still landing. Those rows are `outboxTerminalDeadLetter` and a
- *   follow-up notice, not a stall. Transport dead letters still are.
+ *   follow-up notice, not a stall.
+ *
+ *   A CONFIRMED FILING HOLDS PLANE B TOO — 2026-10-30. Three records-line
+ *   clinical redirects POSTed a department name the ticketing app did not
+ *   have (`Tech Support`; id 3 is Technicians Support). create-ticket
+ *   answered 500, the outbox treated that as transport, and 1–3 rows sat
+ *   in `failed` then one transport-dead-lettered. Tickets kept landing
+ *   (97 sent in the same window; health 200). Plane B emailed
+ *   ticket_filing_stalled every five to ten minutes from 21:21–00:21 UTC
+ *   because `outboxHeld >= 3` and then `outboxDeadLetter > 0`, and the
+ *   pulse that already disconfirms plane A was forbidden from reaching
+ *   this plane. Filing had not stopped. A recent confirmed filing now
+ *   holds plane B the same way; the held count is still reported. A
+ *   real outage has no recent filing — 2026-08-31 had none after 20:15 —
+ *   so this cannot silence one. Transport dead letters still need a
+ *   staffer to resolve or replay them; that is the follow-up list, not
+ *   "TICKET FILING HAS STOPPED".
  */
 
 /** One queue call, as the alarm needs to see it. */
@@ -136,6 +152,13 @@ export interface TicketFilingSnapshot {
    * when nothing has filed since this process started.
    */
   lastTicketFiledAtMs: number | null;
+  /**
+   * Newest `ticket_outbox.sent_at` in the recent window. Optional so older
+   * snapshots stay valid. Survives a process restart, which the pulse does
+   * not — Oct 30's 97 sent rows would have been invisible after a republish
+   * if we only read memory.
+   */
+  lastOutboxSentAtMs?: number | null;
   nowMs: number;
 }
 
@@ -158,6 +181,11 @@ export interface TicketFilingVerdict {
   greetingOnlySkipped: number;
   /** True when a confirmed filing inside the run's span held the alarm back. */
   suppressedByConfirmedFiling: boolean;
+  /**
+   * True when plane B would have stalled and a confirmed filing inside
+   * CONFIRMED_FILING_RECENCY_MS held it back. The held count is still true.
+   */
+  suppressedOutboxByConfirmedFiling: boolean;
 }
 
 /**
@@ -173,6 +201,17 @@ export const UNFILED_RUN_ALARM = 12;
  * flight does not raise a banner.
  */
 export const OUTBOX_HELD_ALARM = 3;
+
+/**
+ * How recent a confirmed filing must be before plane B may claim the pipe
+ * is down. Ten minutes: Oct 30 tickets landed every one to four minutes
+ * (STATE-OF-PLAY 09-25 measured the same cadence), so a live pipe stays
+ * inside it, and 2026-08-31's last ticket at 20:15:38 ages out before
+ * plane A's 20:23:06 only if nothing else files — which is the outage.
+ * Shorter re-admits a normal gap between tickets; longer delays the
+ * early outbox signal past the run plane for no gain.
+ */
+export const CONFIRMED_FILING_RECENCY_MS = 10 * 60 * 1000;
 
 /**
  * An hour with no queue call at all. This bounds the run plane twice over:
@@ -206,6 +245,21 @@ export const OUTBOX_HELD_ALARM = 3;
  * we are holding, which is equally true at 3am, and they still fire.
  */
 export const TRAFFIC_RECENCY_MS = 60 * 60 * 1000;
+
+/** The newest confirmed filing the snapshot can see — pulse or outbox sent_at. */
+export function newestConfirmedFilingAtMs(snapshot: TicketFilingSnapshot): number | null {
+  const pulse = snapshot.lastTicketFiledAtMs;
+  const sent = snapshot.lastOutboxSentAtMs ?? null;
+  if (pulse === null && sent === null) return null;
+  if (pulse === null) return sent;
+  if (sent === null) return pulse;
+  return Math.max(pulse, sent);
+}
+
+function confirmedFilingIsRecent(snapshot: TicketFilingSnapshot): boolean {
+  const newest = newestConfirmedFilingAtMs(snapshot);
+  return newest !== null && snapshot.nowMs - newest <= CONFIRMED_FILING_RECENCY_MS;
+}
 
 /** Pure: no clock, no database, so the outage can be replayed against it. */
 export function assessTicketFiling(snapshot: TicketFilingSnapshot): TicketFilingVerdict {
@@ -243,10 +297,15 @@ export function assessTicketFiling(snapshot: TicketFilingSnapshot): TicketFiling
   // still trying to send, and not proof the pipe is down. Held stays the
   // transport plane: pending + failed + transport dead letters.
   const outboxHeld = snapshot.outboxPending + snapshot.outboxFailed + snapshot.outboxDeadLetter;
+  const wouldStallOutbox = snapshot.outboxDeadLetter > 0 || outboxHeld >= OUTBOX_HELD_ALARM;
+  const filingRecentlyConfirmed = confirmedFilingIsRecent(snapshot);
+  const suppressedOutboxByConfirmedFiling = wouldStallOutbox && filingRecentlyConfirmed;
 
   // Plane B first: it is the earlier signal, and it names our own POSTs rather
-  // than an inference from what did not happen.
-  if (snapshot.outboxDeadLetter > 0) {
+  // than an inference from what did not happen. A confirmed filing inside the
+  // recency window means those POSTs are not the pipe — Oct 30, 97 tickets
+  // sent while three rows retried a 500.
+  if (snapshot.outboxDeadLetter > 0 && !filingRecentlyConfirmed) {
     return {
       stalled: true,
       reason:
@@ -259,9 +318,10 @@ export function assessTicketFiling(snapshot: TicketFilingSnapshot): TicketFiling
       outboxTerminalDeadLetter,
       greetingOnlySkipped,
       suppressedByConfirmedFiling: false,
+      suppressedOutboxByConfirmedFiling: false,
     };
   }
-  if (outboxHeld >= OUTBOX_HELD_ALARM) {
+  if (outboxHeld >= OUTBOX_HELD_ALARM && !filingRecentlyConfirmed) {
     return {
       stalled: true,
       reason:
@@ -274,6 +334,7 @@ export function assessTicketFiling(snapshot: TicketFilingSnapshot): TicketFiling
       outboxTerminalDeadLetter,
       greetingOnlySkipped,
       suppressedByConfirmedFiling: false,
+      suppressedOutboxByConfirmedFiling: false,
     };
   }
 
@@ -322,6 +383,7 @@ export function assessTicketFiling(snapshot: TicketFilingSnapshot): TicketFiling
       outboxTerminalDeadLetter,
       greetingOnlySkipped,
       suppressedByConfirmedFiling: false,
+      suppressedOutboxByConfirmedFiling,
     };
   }
 
@@ -329,6 +391,7 @@ export function assessTicketFiling(snapshot: TicketFilingSnapshot): TicketFiling
     stalled: false,
     reason: null,
     suppressedByConfirmedFiling: trafficIsLive && unfiledRun >= UNFILED_RUN_ALARM && filedInsideRun,
+    suppressedOutboxByConfirmedFiling,
     greetingOnlySkipped,
     unfiledRun,
     lastFiledAtMs,
@@ -475,6 +538,23 @@ export async function readTicketFilingSnapshot(): Promise<TicketFilingSnapshot |
 
     const { lastTicketFiledAtMs } = await import('./ticketFilingPulse');
 
+    let lastOutboxSentAtMs: number | null = null;
+    try {
+      const sent = await db.execute(sql`
+        SELECT (EXTRACT(EPOCH FROM MAX(sent_at)) * 1000)::bigint AS last_sent_ms
+        FROM ticket_outbox
+        WHERE sent_at IS NOT NULL
+          AND sent_at > NOW() - INTERVAL '1 hour'
+      `);
+      const raw = (sent.rows as Array<{ last_sent_ms: string | number | null }>)[0]?.last_sent_ms;
+      lastOutboxSentAtMs = raw == null ? null : Number(raw);
+    } catch (sentErr) {
+      // A missing sent_at must not disarm the rest of the snapshot. The
+      // in-process pulse still covers a live process; after a restart this
+      // degrades to "no recent send", which is the loud direction.
+      console.warn('[TICKET FILING HEALTH] could not read last outbox sent_at:', sentErr);
+    }
+
     return {
       recentQueueCalls: (
         calls.rows as Array<{
@@ -492,6 +572,7 @@ export async function readTicketFilingSnapshot(): Promise<TicketFilingSnapshot |
         durationSeconds: r.duration === null ? null : Number(r.duration),
       })),
       lastTicketFiledAtMs: lastTicketFiledAtMs(),
+      lastOutboxSentAtMs,
       // `sending` counts as held: a lease that never completes is a request
       // nobody is holding on to.
       outboxPending: (held.pending ?? 0) + (held.sending ?? 0),

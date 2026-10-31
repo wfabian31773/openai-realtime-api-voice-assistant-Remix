@@ -134,6 +134,11 @@ describe('terminal refusals are notified beside the filing alarm, not through it
     source.indexOf('startTicketFilingSchedule'),
   );
 
+  it('logs when a confirmed filing held plane B, the Oct 30 shape', () => {
+    expect(check).toMatch(/suppressedOutboxByConfirmedFiling/);
+    expect(check).toMatch(/outbox but a ticket was confirmed filed/);
+  });
+
   it('always calls notifyTerminalRefusals, including when the verdict is not stalled', () => {
     expect(check).toMatch(/notifyTerminalRefusals/);
     const notifyAt = check.indexOf('await notifyTerminalRefusals()');
@@ -145,6 +150,18 @@ describe('terminal refusals are notified beside the filing alarm, not through it
     expect(snapshotMissAt).toBeGreaterThan(notifyAt);
     expect(stallAt).toBeGreaterThan(notifyAt);
     expect(sendAt).toBeGreaterThan(stallAt);
+  });
+
+  it('a held plane B emails transport dead letters before ANY held branch returns (Codex P2 x2, #415)', () => {
+    const at = check.indexOf('await notifyTransportDeadLetters()');
+    expect(at).toBeGreaterThan(-1);
+    const guard = check.lastIndexOf('if (', at);
+    expect(check.slice(guard, at)).toMatch(/!verdict\.stalled && verdict\.suppressedOutboxByConfirmedFiling && snapshot\.outboxDeadLetter > 0/);
+    expect(check.slice(at)).toMatch(/catch \(transportErr\)/);
+    // Above both held returns, so a held run cannot skip it.
+    expect(at).toBeLessThan(check.indexOf('if (verdict.suppressedByConfirmedFiling)'));
+    expect(at).toBeLessThan(check.indexOf('if (verdict.suppressedOutboxByConfirmedFiling)'));
+    expect(check.match(/notifyTransportDeadLetters\(\)/g)).toHaveLength(1);
   });
 
   it('does not send the follow-up through sendAlert', () => {
