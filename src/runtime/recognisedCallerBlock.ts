@@ -134,6 +134,9 @@ This number matches one person on file: first name "${name}".
  * someone else, so the PATIENT's details are taken (the proxy exception the
  * named block already had), and the date of birth is always asked, because
  * lookup_patient is only certain on name_and_dob — a name alone never is.
+ * Codex P2 on ea83f0a: the retry is bounded by lookup_patient's own budget
+ * (LOOKUP_MISS_LIMIT): once the tool says the ask is spent, the block says
+ * file, not ask again, so the two instructions agree.
  */
 const CANDIDATE_BLOCK = `
 ### This number matches someone on file
@@ -150,7 +153,9 @@ their number.
   date of birth, completes the identity step. A name alone is never certain:
   do not skip the date of birth on a name-only lookup.
 - If it does not come back certain, ask again as below and CALL lookup_patient
-  AGAIN with all three.
+  AGAIN with all three — unless lookup_patient says the identity ask is spent.
+  Then the identity step is over: say its line and file the request with the
+  details they gave. Do not ask again.
 - Disclose nothing from anyone's record until lookup_patient says certain.
 `;
 
@@ -351,7 +356,7 @@ loses it.`;
  */
 export function identityCertainMeaning(pc: RecognisedCaller | undefined): string {
   if (candidateOnly(pc)) {
-    return `If lookup_patient says identity_is_certain is false, ask the date of birth as above, then CALL lookup_patient AGAIN with all three. Never tell the caller how many records matched, and never say a name they have not said.`;
+    return `If lookup_patient says identity_is_certain is false, ask the date of birth as above, then CALL lookup_patient AGAIN with all three — unless it says the identity ask is spent; then file with what they gave and do not ask again. Never tell the caller how many records matched, and never say a name they have not said.`;
   }
   const recognised = !!pc?.matched && !!pc.firstName;
 

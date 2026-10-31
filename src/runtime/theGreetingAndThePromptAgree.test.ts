@@ -119,6 +119,15 @@ describe('an unvalidated match: no name anywhere, and the funnel ends without a 
     });
   }
 
+  it('the retry stops where lookup_patient says the identity ask is spent (Codex P2 on ea83f0a)', () => {
+    // lookupSpentFix tells the model to stop asking and file after the second
+    // miss; the candidate block and the meaning line must not send it back.
+    const block = recognisedCallerBlock(CANDIDATE);
+    expect(block).toMatch(/unless lookup_patient says the identity ask is spent/);
+    expect(block).toMatch(/file the request with the\s+details they gave\. Do not ask again\./);
+    expect(identityCertainMeaning(CANDIDATE)).toMatch(/unless it says the identity ask is spent; then file with what they gave/);
+  });
+
   it('greetingNamedThem is false, and the ask script and the meaning take the candidate arm', () => {
     expect(greetingNamedThem(CANDIDATE)).toBe(false);
     expect(identityAskScript(CANDIDATE)).toMatch(/A name alone is never certain: ask the date of\s+birth too/);
