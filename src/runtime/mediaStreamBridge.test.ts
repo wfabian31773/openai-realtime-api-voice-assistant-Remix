@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import {
   decodeToolOutput,
+  requestReasonIdFromTool,
   VoiceCallBridge,
   FINAL_MARK_GRACE_MS,
   MULAW_BYTES_PER_MS,
@@ -189,6 +190,21 @@ function speakUtterance(
   const marks = h.marks();
   return marks[marks.length - 1].mark.name;
 }
+
+describe("requestReasonIdFromTool", () => {
+  it("reads the id the model passed to a filing tool", () => {
+    expect(requestReasonIdFromTool({ request_reason_id: "500" }, { success: false })).toBe(500);
+  });
+
+  it("reads the id a classify tool returned", () => {
+    expect(requestReasonIdFromTool({}, { request_reason_id: 502, request_reason: "Records Sent to Another Provider" })).toBe(502);
+  });
+
+  it("ignores a reason NAME and a non-positive id", () => {
+    expect(requestReasonIdFromTool({ request_reason: "Copies of Records" }, {})).toBeUndefined();
+    expect(requestReasonIdFromTool({ request_reason_id: 0 }, {})).toBeUndefined();
+  });
+});
 
 describe("VoiceCallBridge — audio path", () => {
   it("passes caller audio to the session untouched (no transcoding anywhere)", () => {

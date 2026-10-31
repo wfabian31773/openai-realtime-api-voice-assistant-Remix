@@ -154,7 +154,9 @@ export async function runRequestSweep(
         name: e.name,
         succeeded: e.succeeded,
         ...(e.foundOpenTicket === undefined ? {} : { foundOpenTicket: e.foundOpenTicket }),
+        ...(typeof e.requestReasonId === "number" ? { requestReasonId: e.requestReasonId } : {}),
       })),
+      ...(record.summary?.trim() ? { summary: record.summary.trim() } : {}),
       /**
        * Still false, and still for the reason below — but the evidence that
        * DOES matter now travels in `toolEvents`, where `decideSweep` reads a
