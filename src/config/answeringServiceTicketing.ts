@@ -1,3 +1,4 @@
+import { otherReasonFor } from '../tools/otherReason';
 export const ANSWERING_SERVICE_DEPARTMENTS = {
   OPTICAL: 1,
   SURGERY: 2,
@@ -560,6 +561,15 @@ export function getValidatedTicketIds(departmentId: number, requestTypeId: numbe
         `if this department is real, add it there and here.`,
     );
     return { ...DEFAULT_TICKET };
+  }
+
+  // A department's own "Other - See Description" pair (otherReason.ts) is
+  // valid by construction — e.g. after-hours optical files 1/66/536. The
+  // type-to-reason tables below predate those types and would rewrite it to
+  // 1/1/1 (Frame Selection / New Rx). Exact pair for THIS department only.
+  const other = otherReasonFor(departmentId);
+  if (other && requestTypeId === other.requestTypeId && requestReasonId === other.requestReasonId) {
+    return { departmentId, requestTypeId, requestReasonId };
   }
 
   // Step 1: the department is one this module owns, so Steps 2 and 3 below

@@ -1113,6 +1113,16 @@ import { callEnvironment } from "./callRecord";
  * unmeasured.
  */
 /**
+ * v161 — AFTER-HOURS OPTICAL REQUESTS THE MODEL NAMED FILE TO OPTICAL
+ * (2026-10-31). /voice/no-ivr create_ticket accepts request_category
+ * optical_request (glasses, frames, lenses, contacts as products: order,
+ * status, pickup, repair). That category files to Optical Support
+ * (department 1) with Optical Other (66/536) and the office when the
+ * caller named it or the confirmed record holds one. Classification is
+ * the model's category, not a glasses keyword list. Post-op medication
+ * still outranks it. Above main's v160 (#414). No migration.
+ */
+/**
  * v162 — PLANE B DOES NOT SAY FILING STOPPED WHILE TICKETS LAND (2026-10-31).
  * Renumbered from v160: #414 took v160 and the optical-routing agent took
  * v161. Oct 30 21:21–00:21 UTC: 1–3 ticket_outbox rows retried a records-line
@@ -1121,7 +1131,7 @@ import { callEnvironment } from "./callRecord";
  * ticketing-app health 200). assessTicketFiling stalled on outboxHeld >= 3
  * and then on outboxDeadLetter > 0. A confirmed filing inside ten minutes
  * (pulse or newest outbox sent_at) now holds plane B; the held count is
- * still reported. Plane A is unchanged. Above main's v160.
+ * still reported. Plane A is unchanged. Above main's v161 (#416).
  * While plane B is held, transport dead letters (no status, or not 400/422)
  * get one ticket_transport_dead_letter email each via notifyTransportDeadLetters
  * (Codex P2, #415), since the held alarm was their only notice.

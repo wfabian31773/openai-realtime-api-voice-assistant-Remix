@@ -47,6 +47,7 @@ const REQUEST_TYPE_HEADER: Partial<Record<TriageOutcome, string>> = {
   // Medication family → Medication Refill (routes to Technicians).
   medication_refill: 'Medication Refill',
   prescription_question: 'Medication Refill',
+  optical_request: 'Optical Request',
   // billing/insurance/general/test_results/message_for_provider/follow_up_care:
   // no header — the app's keyword router (incl. multilingual tables) decides.
 };

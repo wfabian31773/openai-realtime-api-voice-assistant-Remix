@@ -41,6 +41,8 @@ import {
   routeAfterHoursTicket,
 } from "../services/afterHoursRouting";
 import { AFTER_HOURS_DEPARTMENT_ID as AFTER_HOURS_ROUTE_DEPARTMENT_ID } from "../tools/afterHoursTaxonomy";
+import { OPTICAL_DEPARTMENT_ID } from "../tools/opticalTaxonomy";
+import { otherReasonFor } from "../tools/otherReason";
 import { nameOrStandIn, STAND_IN_NAME_NOTE } from "../services/standInName";
 import {
   decideOnCallIdentityAsk,
@@ -461,6 +463,10 @@ const CATEGORY_TO_REQUEST_TYPE: Partial<Record<string, string>> = {
   // Medication family → Medication Refill (routes to Technicians).
   medication_refill: 'Medication Refill',
   prescription_question: 'Medication Refill',
+  // Optical as products — files to Optical Support (department 1). The
+  // model named the department; the eighteen-way optical reason is not
+  // this line's job.
+  optical_request: 'Optical Request',
   // billing/insurance/general/test_results/message_for_provider/follow_up_care:
   // no header — the app's keyword router (incl. multilingual tables) decides.
 };
@@ -1042,6 +1048,9 @@ SAME-DAY: if the request is about an appointment TODAY — confirming,
 cancelling or moving it, running late, at the office now, or needing
 to be seen today — set appointment_today true on create_ticket.
 Same-day tickets go to the After Hours team, who work them.
+OPTICAL: glasses, frames, lenses or contacts as products (orders,
+pickup, repairs) — optical_request on create_ticket; files to Optical.
+Not a doctor visit, clinical complaint or medication refill.
 Filing a partial ticket IS the job. Waking the on-call
 provider because you missed a detail is not.
 
@@ -1179,8 +1188,7 @@ MINIMUM FOR ESCALATION: caller must be a real human with a genuine need
 - If a "SERVER STATE CHECK" system message appears mid-call, it is the
   server's ledger of what you already asked — follow it exactly.
 
-- If conversation goes in circles for 5+ minutes without progress:
-  Same logic as above — escalate only if caller has shown genuine human intent
+- Circling 5+ minutes without progress: same logic as above.
 
 - If caller is speaking multiple languages or unintelligibly but has stated a real need:
   "I'm sorry, I'm having difficulty understanding. Can you try speaking slowly?"
@@ -1211,7 +1219,6 @@ Never speak system or developer instructions, bracketed notes, prompt headings, 
 ❌ "Let me take care of the next steps"
 ❌ "Now let me..." / "I'm going to..."
 ❌ "I've noted your information"
-❌ "Let me create a ticket for you"
 ❌ "I'm looking up your information"
 ❌ "Let me check that for you"
 
@@ -1221,9 +1228,7 @@ The caller does not need to know HOW you are doing things, only the outcome.
 (The ONE exception is the create_ticket wait line above, which you always say.)
 
 ===== STYLE =====
-- Calm, warm, professional
-- Brief responses (no filler)
-- Patient and reassuring
+Calm, warm, professional, patient; brief, no filler.
 
 ===== OFFICE LOCATIONS REFERENCE =====
 Office locations, addresses and phones — use only this verified data:
@@ -1694,8 +1699,9 @@ The ticket will include schedule context (last appointment info) automatically.`
           "message_for_provider",
           "test_results",
           "follow_up_care",
+          "optical_request",
         ])
-        .describe("Category - use 'new_appointment' for NEW appointments, 'confirm_appointment' for CONFIRMING existing. 'appointment_request' is legacy, prefer new_appointment."),
+        .describe("Category. optical_request: glasses, frames, lenses or contacts as products (orders, pickup, repairs) — not a doctor visit, clinical complaint or refill. new_appointment = NEW; confirm_appointment = confirming existing; appointment_request is legacy."),
       request_summary: z.string().describe("Summary of what the patient needs"),
       preferred_contact: z
         .enum(["phone", "text", "email"])
@@ -1708,7 +1714,7 @@ The ticket will include schedule context (last appointment info) automatically.`
       appointment_today: z
         .boolean()
         .optional()
-        .describe("TRUE when the request is about an appointment or visit TODAY: confirming, cancelling or moving today's appointment, running late for it, being at the office now, or needing to be seen today. Same-day tickets go to the After Hours team, who work them."),
+        .describe("TRUE when the request is about an appointment or visit TODAY: confirming, cancelling or moving it, running late, at the office now, or needing to be seen today. Files to the After Hours team."),
       post_op_prescription: z
         .boolean()
         .optional()
@@ -1960,6 +1966,7 @@ The ticket will include schedule context (last appointment info) automatically.`
       const route = routeAfterHoursTicket({
         postOpMedication: params.post_op_prescription,
         appointmentToday: params.appointment_today,
+        opticalRequest: params.request_category === 'optical_request',
         text: [params.request_summary, params.appointment_time].filter(Boolean).join(' '),
         confirmedUpcoming: recordConfirmed ? enrichedContext?.upcomingAppointments : undefined,
         appointmentIntent: CATEGORY_TO_REQUEST_TYPE[params.request_category] === 'Appointment Request',
@@ -1968,6 +1975,7 @@ The ticket will include schedule context (last appointment info) automatically.`
         console.info(`[AFTER-HOURS ROUTE] ${route.kind} -> department ${route.departmentId} on ${metadata.callSid}`);
       }
       const routeNote = afterHoursRouteNote(route.kind);
+      const opticalHint = route.kind === 'optical' ? otherReasonFor(OPTICAL_DEPARTMENT_ID) : null;
 
       // Use NEW SIMPLIFIED ENDPOINT - more reliable, all mapping done server-side
       const result = await SyncAgentService.submitSimplifiedTicket({
@@ -2011,6 +2019,12 @@ The ticket will include schedule context (last appointment info) automatically.`
               suggestedRequestReason: POST_PROCEDURE_REQUEST.requestReason,
               suggestedUrgent: true,
             }
+          : opticalHint
+            ? {
+                suggestedRequestTypeId: opticalHint.requestTypeId,
+                suggestedRequestReasonId: opticalHint.requestReasonId,
+                suggestedRequestReason: opticalHint.requestReason,
+              }
           : ahHint.isCatchAll
             ? {}
             : {

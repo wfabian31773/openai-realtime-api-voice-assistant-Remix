@@ -24,6 +24,14 @@
  *      after both 8:00 appointments. VA-66656, a patient outside a closed
  *      building for a 7:15 surgery, had no human touch at all.
  *
+ *   3. AN OPTICAL REQUEST — glasses, frames, lenses, contacts as products:
+ *      order status, pickup, repairs, new orders. The model names this on
+ *      `create_ticket` (`request_category: optical_request`). Ticketing
+ *      already assigns Optical tickets by location, so the voice side sends
+ *      department 1 and the office when known. Classification is the model's
+ *      job (standing instruction 3) — this module does not scan the words
+ *      for "glasses".
+ *
  * Everything else is left to the app exactly as before: this returns
  * `{ kind: 'default' }` and the caller sends no department.
  *
@@ -39,6 +47,7 @@
  * ringing is the escalation gate's decision, never this module's.
  */
 import { AFTER_HOURS_DEPARTMENT_ID } from '../tools/afterHoursTaxonomy';
+import { OPTICAL_DEPARTMENT_ID } from '../tools/opticalTaxonomy';
 
 /** The Support Center's own pair for a post-op question in department 8. */
 export const POST_PROCEDURE_REQUEST = {
@@ -50,6 +59,7 @@ export const POST_PROCEDURE_REQUEST = {
 export type AfterHoursRoute =
   | { kind: 'post_op_medication'; departmentId: number; priority: 'urgent' }
   | { kind: 'same_day'; departmentId: number }
+  | { kind: 'optical'; departmentId: number }
   | { kind: 'default' };
 
 const fold = (s: string) =>
@@ -166,6 +176,12 @@ export function routeAfterHoursTicket(input: {
   postOpMedication?: boolean;
   /** The model's own reading — `appointment_today` on create_ticket. */
   appointmentToday?: boolean;
+  /**
+   * The model's own reading — `request_category: optical_request`.
+   * Never inferred from the words. A glasses request the model left as
+   * `general_question` stays the app's to route.
+   */
+  opticalRequest?: boolean;
   /** What the caller needs, as the model wrote it. */
   text: string;
   /** Only a CONFIRMED record's appointments; a phone candidate's are not the caller's. */
@@ -177,6 +193,11 @@ export function routeAfterHoursTicket(input: {
   const now = input.now ?? new Date();
   if (input.postOpMedication === true || mentionsPostOpMedication(input.text)) {
     return { kind: 'post_op_medication', departmentId: AFTER_HOURS_DEPARTMENT_ID, priority: 'urgent' };
+  }
+  // The model named Optical. A pickup or repair "today" is still Optical's
+  // work; same-day After Hours is for appointments, not eyewear.
+  if (input.opticalRequest === true) {
+    return { kind: 'optical', departmentId: OPTICAL_DEPARTMENT_ID };
   }
   if (pacificNow(now).minutes >= OFFICE_DAY_ENDS_AT) return { kind: 'default' };
   // The record says WHEN the caller is due, never WHAT they are calling about:
@@ -201,6 +222,8 @@ export function afterHoursRouteNote(kind: AfterHoursRoute['kind']): string | nul
       return 'POST-OP MEDICATION — URGENT: a post-operative patient with a medication or prescription problem. Filed urgent to After Hours (operator ruling 2026-10-02); not a reason to ring the on-call provider.';
     case 'same_day':
       return 'SAME-DAY: this request is about an appointment today. Routed to After Hours, who work same-day tickets.';
+    case 'optical':
+      return 'OPTICAL: the model classified this as glasses, frames, lenses or contacts (order, status, pickup or repair). Filed to Optical Support; the ticketing app assigns by location.';
     default:
       return null;
   }

@@ -182,18 +182,20 @@ describe('a queue payload is re-sent exactly as the tool built it', () => {
   });
 
   it('is why the legacy path could not simply be reused', async () => {
-    // THE CONTROL. Same triple, stored in the OLD unmarked shape, so it takes
-    // the validating branch. This is not a bug being asserted — it is correct
-    // for an answering-service payload, and it is exactly what would happen to
-    // every queue ticket if the verbatim branch above did not exist.
-    updateResults.push(entry({ ...OPTICAL_OTHER, callData: undefined }), undefined);
+    // THE CONTROL. A queue triple stored in the OLD unmarked shape takes the
+    // validating branch. Optical's own Other pair (1/66/536) is now accepted
+    // there too, so the control uses a triple the legacy tables still
+    // rewrite: department 1 carrying Technicians' Other pair (72/542). That is
+    // correct for an answering-service payload, and it is what would happen to
+    // queue tickets if the verbatim branch above did not exist.
+    updateResults.push(entry({ ...OPTICAL_OTHER, requestTypeId: 72, requestReasonId: 542, callData: undefined }), undefined);
 
     await TicketOutboxService.attemptSend('ob-1');
 
     const sent = createTicket.mock.calls[0][0];
     expect(sent.departmentId).toBe(1);
-    expect(sent.requestTypeId).not.toBe(66);
-    expect(sent.requestReasonId).not.toBe(536);
+    expect(sent.requestTypeId).not.toBe(72);
+    expect(sent.requestReasonId).not.toBe(542);
     expect(sent.requestTypeId).toBe(1); // Frame Selection
     expect(sent.requestReasonId).toBe(1); // New Rx - Frame Selection
   });
