@@ -17,6 +17,8 @@ async function call(proceedAfterOpening: boolean) {
   let epoch = 0;
   let responseActive = false;
   const marks: string[] = [];
+  const frames: string[] = [];
+  const outcomes: string[] = [];
   const session = {
     appendAudio: vi.fn(), cancelResponse: vi.fn(), sendToolResult: vi.fn(), close: vi.fn(), setSpokenLanguage: vi.fn(),
     requestResponse: vi.fn(), speakNatural: vi.fn(), speak: vi.fn(),
@@ -27,9 +29,9 @@ async function call(proceedAfterOpening: boolean) {
     context: { callSid: `CA${"b".repeat(32)}`, streamSid: "MZ-test", slug: "wayne-operator", callerPhone: "+15555550123", dialedNumber: "+15555550100" },
     agent: { instructions: "operator", tools: [], skipped: [], dispatch: async () => ({ ok: true, output: {} }), guardrails: [] } as never,
     greeting: OPENING,
-    twilio: { sendFrame: (f: { event: string; mark?: { name: string } }) => { if (f.event === "mark" && f.mark) marks.push(f.mark.name); }, close: () => undefined },
+    twilio: { sendFrame: (f: { event: string; mark?: { name: string } }) => { frames.push(f.event); if (f.event === "mark" && f.mark) marks.push(f.mark.name); }, close: () => undefined },
     createSession: (h: BridgeSessionHandlers) => { handlers = h; return session as never; },
-    onOutcome: () => undefined,
+    onOutcome: (o: string) => { outcomes.push(o); },
     persistCallRecord: async () => undefined,
     maxCallMs: 600_000, deadAirMs: 30_000, silencePromptMs: WINDOW,
     setTimer: (fn: () => void, ms: number) => { const id = next++; pending.set(id, { fn, ms }); return id; },
@@ -47,7 +49,7 @@ async function call(proceedAfterOpening: boolean) {
     handlers.onResponseDone();
   };
   return {
-    session, handlers, openingPlays,
+    session, handlers, openingPlays, frames, outcomes,
     /** Twilio echoes the newest mark: the caller has now heard the whole line. */
     played: () => bridge.handleTwilioFrame({ event: "mark", streamSid: "MZ-test", mark: { name: marks[marks.length - 1] } } as never),
     fire(ms: number) {
@@ -213,6 +215,101 @@ describe("v159: an operator call carries on after its opening", () => {
     expect(c.session.requestResponse).not.toHaveBeenCalled();
     expect(c.fire(WINDOW)).toBe(true);
     expect(c.session.speak).toHaveBeenCalledWith(SILENCE_PROMPT_LINE, { interruptible: true });
+  });
+
+  describe("the carry-on turn", () => {
+    type Call = Awaited<ReturnType<typeof call>>;
+    const carryOn = async () => {
+      const c = await call(true);
+      c.openingPlays();
+      c.played();
+      c.handlers.onSpeechStarted();
+      c.handlers.onSpeechStopped();
+      expect(c.fire(OPENING_PROCEED_MS)).toBe(true);
+      expect(c.session.requestResponse).toHaveBeenCalledOnce();
+      return c;
+    };
+    const audioSent = (c: Call) => c.frames.filter((f) => f === "media").length;
+    const start = (c: Call) => { c.newResponse(); c.handlers.onResponseStarted?.(); };
+    const speak = (c: Call, words: string) => {
+      c.handlers.onAgentTranscriptDelta(words);
+      c.handlers.onAudioDelta(Buffer.alloc(800).toString("base64"));
+      c.handlers.onAudioDone(words);
+      c.handlers.onResponseDone();
+    };
+
+    it("a provider reply landing after our request is cancelled once the first has spoken, and its audio is dropped", async () => {
+      const c = await carryOn();
+      start(c);
+      speak(c, "Thanks for taking my call.");
+      const before = audioSent(c);
+      expect(before).toBeGreaterThan(0);
+      expect(c.session.cancelResponse).not.toHaveBeenCalled();
+      start(c);
+      expect(c.session.cancelResponse).toHaveBeenCalledOnce();
+      speak(c, "Thanks for taking my call, again.");
+      expect(audioSent(c)).toBe(before);
+    });
+
+    it("a first answer with no audio does not cost the real one", async () => {
+      const c = await carryOn();
+      start(c);
+      c.handlers.onResponseDone();
+      const before = audioSent(c);
+      start(c);
+      speak(c, "Thanks for taking my call.");
+      expect(c.session.cancelResponse).not.toHaveBeenCalled();
+      expect(audioSent(c)).toBeGreaterThan(before);
+    });
+
+    it("the person speaking again ends the guard: their next reply is not cancelled", async () => {
+      const c = await carryOn();
+      start(c);
+      speak(c, "Thanks for taking my call.");
+      c.played();
+      c.handlers.onSpeechStarted();
+      c.handlers.onSpeechStopped();
+      start(c);
+      expect(c.session.cancelResponse).not.toHaveBeenCalled();
+    });
+
+    it("a tool's follow-up is not cancelled", async () => {
+      const c = await carryOn();
+      start(c);
+      c.handlers.onAgentTranscriptDelta("One moment.");
+      c.handlers.onAudioDelta(Buffer.alloc(800).toString("base64"));
+      c.handlers.onToolCall("call-1", "lookup", {});
+      start(c);
+      expect(c.session.cancelResponse).not.toHaveBeenCalled();
+    });
+
+    it("an empty answer from someone who never spoke leaves the ladder running through its prompts to the cut", async () => {
+      const c = await call(true);
+      c.openingPlays();
+      c.played();
+      expect(c.fire(OPENING_PROCEED_MS)).toBe(true);
+      start(c);
+      c.handlers.onResponseDone();
+      // Not the agent's watchdog: this silence is not a provider fault.
+      expect(c.fire(30_000)).toBe(false);
+      expect(c.fire(WINDOW)).toBe(true);
+      expect(c.session.speak).toHaveBeenCalledWith(SILENCE_PROMPT_LINE, { interruptible: true });
+      c.fire(WINDOW);
+      c.fire(WINDOW);
+      expect(c.outcomes).toEqual([]);
+      expect(c.fire(WINDOW)).toBe(true);
+      expect(c.outcomes).toEqual(["caller_silent"]);
+    });
+
+    it("a request the provider never answers still ends at the agent's watchdog", async () => {
+      const c = await call(true);
+      c.openingPlays();
+      c.played();
+      c.fire(OPENING_PROCEED_MS);
+      expect(c.fire(WINDOW)).toBe(false);
+      expect(c.fire(30_000)).toBe(true);
+      expect(c.outcomes).toEqual(["dead_air"]);
+    });
   });
 
   it("a patient lane is unchanged: nothing is requested and the ladder keeps its window", async () => {

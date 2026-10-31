@@ -593,12 +593,14 @@ export class GrokVoiceSession {
       case "response.created":
         this.wireResponseActive = true;
         this.responseEpoch += 1;
-        this.handlers.onResponseStarted?.();
         this.awaitingSayStart = false;
         // A NEW response cycle settles whatever became of any earlier
         // cancel, so the debt ends here rather than persisting for the
         // rest of the call.
         this.cancelDoneOwed = false;
+        // After the reset: the bridge may cancel this response from the
+        // handler, and that cancel's debt must survive (v159).
+        this.handlers.onResponseStarted?.();
         break;
       case "response.done":
         this.wireResponseActive = false;

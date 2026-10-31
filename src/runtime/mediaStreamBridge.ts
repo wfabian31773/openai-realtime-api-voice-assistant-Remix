@@ -1486,6 +1486,7 @@ export class VoiceCallBridge {
     // The replacement turn. Content decided here, phrasing left to the
     // model — the case speakNatural exists for. The rule's own policyHint
     // is the instruction, so each guardrail corrects in its own terms.
+    this.openingTurn = null;
     this.session.speakNatural(
       `Your previous reply was stopped by a safety rule: ${
         guardrail.policyHint ?? guardrail.name
@@ -1498,6 +1499,7 @@ export class VoiceCallBridge {
   private handleAudioDelta(base64Audio: string): void {
     if (this.ended) return;
     const current = this.openOrGetCurrent();
+    if (current && this.openingTurn?.answerEpoch === current.epoch) this.openingTurn.answerSpoke = true;
     // Stale audio from a cancelled response is DROPPED, not forwarded:
     // Twilio was just told to `clear`, and pushing the tail of the
     // cancelled line straight back is the one thing `clear` exists to
@@ -1844,6 +1846,12 @@ export class VoiceCallBridge {
   private openingProceedArmed = false;
   private openingProceedSettled = false;
   private openingPlayed = false;
+  /**
+   * The turn `takeTurnAfterOpening` asked for, until it is answered or the
+   * conversation moves on. `answerEpoch` is the response answering it, and
+   * `answerSpoke` whether that response has sent audio.
+   */
+  private openingTurn: { epoch: number; answerEpoch: number | null; answerSpoke: boolean } | null = null;
 
   private releaseGreetingLock(): void {
     const wasLocked = this.greetingLocked;
@@ -1894,14 +1902,46 @@ export class VoiceCallBridge {
   private takeTurnAfterOpening(): void {
     this.openingProceedSettled = true;
     console.info(`[bridge] asking the agent to carry on after its opening on ${this.deps.context.callSid}`);
-    // The nudge's bookkeeping: an empty answer stands down instead of ending
-    // the call as dead air (v156).
-    this.stallNudgePending = {
-      epoch: this.session.getResponseEpoch(),
-      followUps: this.followUps.requested,
-    };
+    this.openingTurn = { epoch: this.session.getResponseEpoch(), answerEpoch: null, answerSpoke: false };
     this.session.requestResponse();
     this.armDeadAir("response");
+  }
+
+  /**
+   * Our request and a late reply from the provider's own turn detection can
+   * both produce a response, and the wire does not say whose is whose. The
+   * first one to speak answers the person; a second is cancelled and its audio
+   * dropped by the epoch check. Returns true when this response was cancelled.
+   * Caller speech, a tool call and the silence ladder all end this guard, so a
+   * real later turn is never cancelled.
+   */
+  private cancelSecondOpeningTurn(): boolean {
+    const turn = this.openingTurn;
+    if (turn === null) return false;
+    const epoch = this.session.getResponseEpoch();
+    if (epoch <= turn.epoch || epoch === turn.answerEpoch) return false;
+    if (turn.answerEpoch === null) {
+      turn.answerEpoch = epoch;
+      turn.answerSpoke = false;
+      return false;
+    }
+    this.openingTurn = null;
+    console.info(`[bridge] cancelling a second response after the opening on ${this.deps.context.callSid}`);
+    this.cancelledEpoch = epoch;
+    this.session.cancelResponse();
+    return true;
+  }
+
+  /**
+   * The carry-on turn finished with no audio. This is not v156's stand-down:
+   * the person may never have spoken, so the silence ladder must keep its
+   * prompts and its cut. A later response may still be the real answer.
+   */
+  private settleOpeningTurn(): void {
+    const turn = this.openingTurn;
+    if (turn === null || turn.answerEpoch !== this.session.getResponseEpoch() || turn.answerSpoke) return;
+    turn.answerEpoch = null;
+    if (this.deadAirCause === "response") this.armDeadAir("caller", this.unplayedAudioMs());
   }
 
   /**
@@ -1956,6 +1996,7 @@ export class VoiceCallBridge {
     this.callerClosing = null;
     this.callerSpeaking = true;
     this.openingProceedArmed = false;
+    this.openingTurn = null;
     // The caller is talking: not dead air, and any open caller line in the
     // record crossed a speech boundary (transcript correlation only). Applied
     // HERE, as it arrives. Buffering these alongside the caller lines they
@@ -2133,6 +2174,7 @@ export class VoiceCallBridge {
       this.armGoodbyeGrace();
     }
     this.settleStallNudge();
+    this.settleOpeningTurn();
   }
 
   /**
@@ -2209,6 +2251,7 @@ export class VoiceCallBridge {
 
   private handleResponseStarted(): void {
     if (this.ended) return;
+    if (this.cancelSecondOpeningTurn()) return;
     this.cancelGoodbye();
     this.goodbyeEpoch = this.session.getResponseEpoch();
     this.goodbyeOutputStarted = false;
@@ -2260,6 +2303,8 @@ export class VoiceCallBridge {
   }
 
   private handleToolCall(callId: string, name: string, args: Record<string, unknown>): void {
+    // Its follow-up is a real later turn, not a second answer.
+    this.openingTurn = null;
     if (this.ended) return;
     this.cancelGoodbye();
     // Even a tool before the first audio makes this an unfinished exchange.
@@ -2615,6 +2660,7 @@ export class VoiceCallBridge {
    */
   private handleCallerSilence(): void {
     if (this.ended) return;
+    this.openingTurn = null;
     if (this.openingProceedArmed) {
       this.openingProceedArmed = false;
       if (!this.turnTakenSinceOpening()) {
