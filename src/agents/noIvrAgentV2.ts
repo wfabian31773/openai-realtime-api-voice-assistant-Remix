@@ -10,6 +10,8 @@ import {
   type CallerMemory,
 } from "../services/callerMemoryService";
 import { type TriageOutcome } from "../config/afterHoursTicketing";
+import { OPTICAL_DEPARTMENT_ID } from "../tools/opticalTaxonomy";
+import { otherReasonFor } from "../tools/otherReason";
 import { storage } from "../../server/storage";
 import { escalationDetailsMap } from "../services/escalationStore";
 import { callMetadataForDB } from "../services/callMetadataStore";
@@ -425,7 +427,8 @@ Call this ONLY when you have collected ALL required information.`,
         "message_for_provider",
         "test_results",
         "follow_up_care",
-      ]).describe("Category of request"),
+        "optical_request",
+      ]).describe("Category. optical_request = glasses, frames, lenses or contacts as products (order, status, pickup, repair) — not an appointment, clinical complaint, or medication refill."),
       request_summary: z.string().describe("Summary of what the patient needs"),
       preferred_contact: z.enum(["phone", "text", "email"]).optional(),
       email: z.string().optional().describe(`${EMAIL_FIELD_DESCRIPTION} Required when preferred_contact is email.`),
@@ -497,6 +500,8 @@ Call this ONLY when you have collected ALL required information.`,
         : `[NO CALLBACK NEEDED] ${params.request_summary}`;
       const finalSummary = emailEscaped ? `${taggedSummary}\n${EMAIL_ESCAPE_NOTE}` : taggedSummary;
 
+      const opticalHint =
+        params.request_category === 'optical_request' ? otherReasonFor(OPTICAL_DEPARTMENT_ID) : null;
       const result = await SyncAgentService.createTicketFromAgentInput({
         firstName: params.first_name,
         lastName: params.last_name,
@@ -511,6 +516,13 @@ Call this ONLY when you have collected ALL required information.`,
         doctorName: params.doctor_name || enrichedContext?.lastProviderSeen || undefined,
         location: params.location?.trim() ? params.location : enrichedContext?.lastLocationSeen || undefined,
         locationSource: params.location?.trim() ? 'caller' : 'history',
+        ...(opticalHint
+          ? {
+              departmentId: OPTICAL_DEPARTMENT_ID,
+              requestTypeId: opticalHint.requestTypeId,
+              requestReasonId: opticalHint.requestReasonId,
+            }
+          : {}),
         callData: {
           callSid: metadata.callSid,
           callerPhone: metadata.callerPhone,

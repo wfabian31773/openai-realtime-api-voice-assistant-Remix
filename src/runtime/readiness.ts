@@ -1112,8 +1112,18 @@ import { callEnvironment } from "./callRecord";
  * a summary nor a transcript exists. No migration; production impact is
  * unmeasured.
  */
+/**
+ * v161 — AFTER-HOURS OPTICAL REQUESTS THE MODEL NAMED FILE TO OPTICAL
+ * (2026-10-31). /voice/no-ivr create_ticket accepts request_category
+ * optical_request (glasses, frames, lenses, contacts as products: order,
+ * status, pickup, repair). That category files to Optical Support
+ * (department 1) with Optical Other (66/536) and the office when the
+ * caller named it or the confirmed record holds one. Classification is
+ * the model's category, not a glasses keyword list. Post-op medication
+ * still outranks it. Above main's v160 (#414). No migration.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v160-sweep-derives-request-reason-20261031";
+  "voice-runtime-v161-after-hours-optical-files-to-optical-20261031";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can
