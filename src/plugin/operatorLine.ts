@@ -37,6 +37,10 @@ export interface OperatorCallPayload {
   callKind: "operator";
   phone: string;
   purpose: string;
+  /** v158: the caller's script/persona; drives who the agent is and its opening line. */
+  callerScript?: string;
+  /** v158: an explicit first line; otherwise it is read from callerScript. */
+  openingLine?: string;
   scenario_id?: string;
   initiated_by: OperatorInitiator;
   language?: string;
@@ -59,7 +63,7 @@ export function parseOperatorPayload(raw: unknown, env: Env = process.env):
   const fail = (error: string) => ({ ok: false as const, error });
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return fail("An operator call object is required");
   const body = raw as Record<string, unknown>;
-  const keys = new Set(["callKind", "phone", "purpose", "scenario_id", "initiated_by", "requested_by", "language", "maxDurationSec"]);
+  const keys = new Set(["callKind", "phone", "purpose", "callerScript", "openingLine", "scenario_id", "initiated_by", "requested_by", "language", "maxDurationSec"]);
   if (Object.keys(body).some((key) => !keys.has(key))) return fail("Unknown operator field; patient and ticket fields are not accepted");
   if (body.callKind !== undefined && body.callKind !== "operator") return fail("Invalid callKind");
   if (typeof body.phone !== "string" || !E164.test(body.phone.trim())) return fail("phone must be E.164");
@@ -74,6 +78,12 @@ export function parseOperatorPayload(raw: unknown, env: Env = process.env):
   }
   if (typeof purpose !== "string" || !purpose.trim() || purpose.length > 4000) {
     return fail("purpose must contain 1 to 4000 characters");
+  }
+  for (const [field, max] of [["callerScript", 8000], ["openingLine", 500]] as const) {
+    const value = body[field];
+    if (value !== undefined && (typeof value !== "string" || !value.trim() || value.length > max)) {
+      return fail(`${field} must contain 1 to ${max} characters`);
+    }
   }
   if (body.language !== undefined && (typeof body.language !== "string" || !/^[a-z]{2,3}(?:-[A-Za-z]{2,8})?$/.test(body.language))) {
     return fail("language must be a language code such as en or es");
@@ -90,6 +100,8 @@ export function parseOperatorPayload(raw: unknown, env: Env = process.env):
   }
   return { ok: true, payload: {
     callKind: "operator", phone: body.phone.trim(), purpose: purpose.trim(),
+    ...(typeof body.callerScript === "string" ? { callerScript: body.callerScript.trim() } : {}),
+    ...(typeof body.openingLine === "string" ? { openingLine: body.openingLine.trim() } : {}),
     ...(body.scenario_id ? { scenario_id: body.scenario_id as string } : {}),
     initiated_by: initiatedBy as OperatorInitiator, maxDurationSec,
     ...(body.language ? { language: body.language as string } : {}),
