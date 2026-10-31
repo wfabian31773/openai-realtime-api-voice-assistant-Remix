@@ -1104,6 +1104,15 @@ import { callEnvironment } from "./callRecord";
  * (#412, d785e29). No migration.
  */
 /**
+ * v160 — THE SWEEP DERIVES A REQUEST REASON (2026-10-31). Six records tickets
+ * on 2026-10-30..31 filed with no usable reason even though the call summary
+ * already named one (Support Desk batch Oct 31 item 3). The teardown sweep
+ * now uses the reason the agent captured, else classifies the summary, else
+ * the caller's words, and uses "Other - See Description" only when neither
+ * a summary nor a transcript exists. No migration; production impact is
+ * unmeasured.
+ */
+/**
  * v161 — AFTER-HOURS OPTICAL REQUESTS THE MODEL NAMED FILE TO OPTICAL
  * (2026-10-31). /voice/no-ivr create_ticket accepts request_category
  * optical_request (glasses, frames, lenses, contacts as products: order,
@@ -1111,8 +1120,7 @@ import { callEnvironment } from "./callRecord";
  * (department 1) with Optical Other (66/536) and the office when the
  * caller named it or the confirmed record holds one. Classification is
  * the model's category, not a glasses keyword list. Post-op medication
- * still outranks it. Above main's v159 (#413, 55b5434). v160 is #414
- * and #415. No migration.
+ * still outranks it. Above main's v160 (#414). No migration.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
   "voice-runtime-v161-after-hours-optical-files-to-optical-20261031";

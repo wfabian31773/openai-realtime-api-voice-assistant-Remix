@@ -151,6 +151,23 @@ describe("recovering a request the agent did not file", () => {
      */
     expect(String(t.description)).not.toContain("I need a refill on my drops.");
     expect(String(t.staffNote)).toContain("I need a refill on my drops.");
+    // The transcript classifies this as an eye-drop refill, not the catch-all.
+    expect(t.requestReasonId).toBe(154);
+  });
+
+  it("derives a records reason from the call summary when the agent captured none", async () => {
+    const file = filer();
+    const out = await runRequestSweep(
+      record({
+        slug: "records",
+        summary: "Patient is requesting copies of medical records.",
+        transcript: "AGENT: How can I help?\nCALLER: Can you help with this please.",
+      }),
+      file,
+    );
+    expect(out.filed).toBe(true);
+    expect((file.calls[0] as Record<string, unknown>).requestReasonId).toBe(500);
+    expect((file.calls[0] as Record<string, unknown>).requestTypeId).toBe(58);
   });
 
   /**
