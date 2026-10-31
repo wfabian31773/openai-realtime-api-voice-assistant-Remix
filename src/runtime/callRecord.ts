@@ -39,6 +39,7 @@ import type { VoiceCallRecord } from "./mediaStreamBridge";
 import { peekParkedRecording, releaseParkedRecording } from "./parkedRecordings";
 import { resolveAgentId, type AgentIdLookup } from "./agentIdentity";
 import { type RuntimeTransferOutcome } from "./transferOutcomeLog";
+import { isTestCall } from "../services/testCalls";
 
 /**
  * Identity the runtime was TOLD, never identity it inferred. Supplied by
@@ -165,6 +166,10 @@ export function toConflictUpdate(row: RuntimeCallLogRow): Partial<RuntimeCallLog
  * the full secret schema and throws on a missing one, and a logging path
  * must never be the thing that dies over configuration.
  */
+/** A call on the operator or a test line (services/testCalls.ts): the existing
+ * varchar column carries the tag, so no migration. */
+export const TEST_CALL_ENVIRONMENT = "test";
+
 export function callEnvironment(env: Record<string, string | undefined>): string {
   const domains = env.REPLIT_DOMAINS ?? "";
   const publishedDomain = domains.includes(".replit.app") && !domains.includes(".replit.dev");
@@ -331,7 +336,7 @@ export function toCallLogRow(
     // Counted from real wire events, not estimated from wall time — the
     // distinction the column exists to record.
     telemetrySource: "realtime_events",
-    environment: callEnvironment(env),
+    environment: isTestCall(record, env) ? TEST_CALL_ENVIRONMENT : callEnvironment(env),
     /**
      * The transfer column the SIP path writes and the dashboards read.
      * Omitted (never false) except on a transferred outcome, so this writer
@@ -492,7 +497,7 @@ export async function openRuntimeCall(
       // permanent row where endTime - startTime is short by the whole
       // setup delay (Codex review, PR #227 round 13).
       startTime: new Date(context.startedAtMs),
-      environment: callEnvironment(env),
+      environment: isTestCall(context, env) ? TEST_CALL_ENVIRONMENT : callEnvironment(env),
       voiceProvider: "grok",
     });
   } catch (error) {

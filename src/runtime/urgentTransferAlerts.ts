@@ -19,10 +19,11 @@ import {
   urgentRingOutBesideParams,
   type UrgentRingOutBesideParams,
 } from "../services/urgentTransferAlert";
+import { isTestCall } from "../services/testCalls";
 
 export interface UrgentTransferAlerts {
   /** The heads-up text, sent BEFORE the on-call phone rings. */
-  smsBeforeDial(input: { callerNumber?: string; escalationDetails?: EscalationDetails }): void;
+  smsBeforeDial(input: { callSid?: string; callerNumber?: string; escalationDetails?: EscalationDetails }): void;
   /** The urgent ticket, filed when a transfer rang and nobody took it. */
   fallbackTicket(input: {
     callSid: string;
@@ -111,6 +112,10 @@ export function defaultUrgentTransferAlerts(
 
   return {
     smsBeforeDial(input) {
+      if (isTestCall({ callSid: input.callSid, callerPhone: input.callerNumber }, env)) {
+        log("[runtime-xfer] urgent SMS skipped - test call");
+        return;
+      }
       if (!urgentAlertStatus(env).ready) {
         log(
           "[runtime-xfer] urgent SMS skipped - URGENT_NOTIFICATION_NUMBER or TWILIO_PHONE_NUMBER not configured",

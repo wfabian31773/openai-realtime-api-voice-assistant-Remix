@@ -297,6 +297,11 @@ export const SILENCE_PROMPT_LINE = "I'm sorry, I cannot hear you. Are you still 
  */
 export const AGENT_STALL_NUDGE_LIMIT = 2;
 
+/** v159: how long an operator call waits for a reply to its opening before
+ * the agent carries on. Long enough to answer a question, far short of the
+ * silence ladder's window. A judgement, not a measurement. */
+export const OPENING_PROCEED_MS = 4_000;
+
 /**
  * A LINE THAT HANDS THE CALLER THE TURN. A question anywhere in it ("What is
  * your date of birth? Take your time."), or a sentence that OPENS with a
@@ -672,6 +677,10 @@ export interface VoiceCallBridgeDeps {
    * the window's production value comes from `SILENCE_PROMPT_MS`. */
   silencePromptMs?: number;
   silenceStrikeLimit?: number;
+  /** v159: an outbound call WE placed does not wait in silence after its
+   * opening. See `proceedPastOpening`. Patient lanes leave this unset. */
+  proceedAfterOpening?: boolean;
+  openingProceedMs?: number;
   goodbyeGraceMs?: number;
   /**
    * When the call actually began — the moment the stream was claimed.
@@ -1830,13 +1839,69 @@ export class VoiceCallBridge {
 
   /** One way out of the lock, whether the echo arrived or the wait expired.
    * Barge-in is all it governs: the transcript has nothing waiting on it. */
+  /** v159 — see proceedPastOpening. */
+  private callerSpeaking = false;
+  private callerSpokeOverOpening = false;
+  private openingProceedArmed = false;
+  private openingProceedSettled = false;
+
   private releaseGreetingLock(): void {
+    const wasLocked = this.greetingLocked;
     this.greetingLocked = false;
     this.greetingMarkName = null;
     if (this.greetingLockTimer !== null) {
       this.clearTimer(this.greetingLockTimer);
       this.greetingLockTimer = null;
     }
+    if (wasLocked) this.proceedPastOpening();
+  }
+
+  /**
+   * AFTER THE OPENING OF A CALL WE PLACED (v159).
+   *
+   * An opening that ends in a question requests nothing (`handleSessionConfigured`),
+   * and speech that lands under the greeting lock only arms a watchdog: the
+   * only thing that could answer it is the provider's own turn detection, and
+   * nothing here makes it. On an inbound lane the caller then says what they
+   * rang about. On a call we placed the person says "Hello?" over our opening
+   * and waits for us, so both ends sit in silence. Live 2026-10-31: about 23 s
+   * on both test calls.
+   *
+   * Runs once the opening has played. A caller who spoke over it gets an answer
+   * now; otherwise they get a short window to reply, then the agent carries on.
+   * Any response since the opening means the turn is already taken.
+   */
+  private proceedPastOpening(): void {
+    if (!this.deps.proceedAfterOpening || this.ended || this.openingProceedSettled) return;
+    if (this.turnTakenSinceOpening()) {
+      this.openingProceedSettled = true;
+      return;
+    }
+    if (this.callerSpeaking) return;
+    if (this.callerSpokeOverOpening) {
+      this.takeTurnAfterOpening();
+      return;
+    }
+    this.openingProceedArmed = true;
+    this.armDeadAir("caller");
+  }
+
+  private turnTakenSinceOpening(): boolean {
+    return this.session.getResponseEpoch() !== this.greetingEpoch || this.followUps.requested > 0 ||
+      this.pendingToolCalls > 0 || this.followUpOwed || this.endRequested || this.transferInFlight;
+  }
+
+  private takeTurnAfterOpening(): void {
+    this.openingProceedSettled = true;
+    console.info(`[bridge] asking the agent to carry on after its opening on ${this.deps.context.callSid}`);
+    // The nudge's bookkeeping: an empty answer stands down instead of ending
+    // the call as dead air (v156).
+    this.stallNudgePending = {
+      epoch: this.session.getResponseEpoch(),
+      followUps: this.followUps.requested,
+    };
+    this.session.requestResponse();
+    this.armDeadAir("response");
   }
 
   /**
@@ -1889,6 +1954,8 @@ export class VoiceCallBridge {
     if (this.ended) return;
     this.cancelGoodbye();
     this.callerClosing = null;
+    this.callerSpeaking = true;
+    this.openingProceedArmed = false;
     // The caller is talking: not dead air, and any open caller line in the
     // record crossed a speech boundary (transcript correlation only). Applied
     // HERE, as it arrives. Buffering these alongside the caller lines they
@@ -1952,6 +2019,8 @@ export class VoiceCallBridge {
 
   private handleCallerSpeechStopped(): void {
     if (this.ended) return;
+    this.callerSpeaking = false;
+    if (this.greetingLocked) this.callerSpokeOverOpening = true;
     // The caller finished a turn: a response is now OWED. If neither an
     // utterance nor its audio arrives before the ceiling, the call is
     // stuck in dead air — tear down rather than bill silence.
@@ -2506,7 +2575,9 @@ export class VoiceCallBridge {
     // being spoken to. Everything else is unchanged.
     const base =
       cause === "caller"
-        ? (this.deps.silencePromptMs ?? SILENCE_PROMPT_MS)
+        ? this.openingProceedArmed
+          ? (this.deps.openingProceedMs ?? OPENING_PROCEED_MS)
+          : (this.deps.silencePromptMs ?? SILENCE_PROMPT_MS)
         : (this.deps.deadAirMs ?? DEFAULT_DEAD_AIR_MS);
     this.deadAirTimer = this.setTimer(
       () => (cause === "caller" ? this.handleCallerSilence() : this.teardown("dead_air")),
@@ -2532,6 +2603,13 @@ export class VoiceCallBridge {
    */
   private handleCallerSilence(): void {
     if (this.ended) return;
+    if (this.openingProceedArmed) {
+      this.openingProceedArmed = false;
+      if (!this.turnTakenSinceOpening()) {
+        this.takeTurnAfterOpening();
+        return;
+      }
+    }
     // v131: stand down BEFORE speaking. A caller we have already heard
     // must never get the cannot-hear ladder, even after later quiet turns.
     if (this.callerEverHeard) {

@@ -1159,6 +1159,7 @@ import {
   urgentFallbackTicketParams,
   type UrgentTransferSmsOptions,
 } from './services/urgentTransferAlert';
+import { isTestCall } from './services/testCalls';
 import { markCallConcluded, getCallConclusion, linkConferenceToCall, callIdForConference } from './services/callConclusion';
 import { filesTickets } from './config/agentCapabilities';
 import { recordCallerSpeech, releaseCallerSpeech } from './services/symptomCorroboration';
@@ -1278,6 +1279,10 @@ async function fileUrgentHandoffFallbackTicket(
  * when the call got far enough to record them.
  */
 function sendUrgentTransferSms(opts: UrgentTransferSmsOptions): void {
+  if (isTestCall({ callerPhone: opts.callerNumber })) {
+    console.log('[HANDOFF] ℹ️ SMS notification skipped - test call');
+    return;
+  }
   const to = envConfig.twilio.urgentNotificationNumber;
   const from = envConfig.twilio.phoneNumber;
   if (!to || !from) {

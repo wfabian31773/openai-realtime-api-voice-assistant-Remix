@@ -24,6 +24,12 @@ export function operatorOpening(input?: OperatorCallPayload): string {
   return input?.openingLine?.trim() || (input?.callerScript ? openingFromScript(input.callerScript) : null) || OPERATOR_GREETING;
 }
 
+/** v159: where the opening came from, returned at prepare and logged at call setup. */
+export function operatorOpeningSource(input?: OperatorCallPayload): "openingLine" | "callerScript" | "default" {
+  if (input?.openingLine?.trim()) return "openingLine";
+  return input?.callerScript && openingFromScript(input.callerScript) ? "callerScript" : "default";
+}
+
 function persona(owner: boolean): string {
   return owner
     ? "You are Grok Bot, Wayne Fabian's personal assistant. You are speaking with your owner, recognized by the system. Use the full owner persona: be candid, familiar, thoughtful and proactive, discuss their plans and requests using available owner context. Treat their requests as owner requests. Never invent private facts or claim access to information or capabilities you do not have."
@@ -59,6 +65,7 @@ ${SCRIPTED_COMMON}
 You already opened the call with: ${JSON.stringify(input.openingLine)} Do not repeat it.` : `${persona(owner)}
 ${COMMON}`;
   return `${head}
+If you are given a turn right after your opening and they have not replied, say the next thing your goal calls for in one short line. Never repeat the opening.
 Pursue the stated goal through a natural, free-form conversation. Decide useful questions and next steps from what the other party says; there is no script or turn limit. When the goal is complete, record_call_outcome and end politely. Do not end simply because one question has been answered.
 ${input ? `Goal (context): ${JSON.stringify(input.purpose)}
 Language: ${JSON.stringify(input.language ?? "Follow the other party's language")}

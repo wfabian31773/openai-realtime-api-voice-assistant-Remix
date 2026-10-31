@@ -27,6 +27,7 @@ import {
   rejectContact,
 } from "./approvals";
 import { hashPayload, hashSecret } from "./tokens";
+import { operatorOpening, operatorOpeningSource } from "../agents/operatorLineAgent";
 import { createLiveCallSender, placeLiveCall, placeDirectCall, placeOperatorCall, operatorOptOutGuard, type LiveCallSender } from "./liveCalls";
 import { liveCallRegistry, type LiveCallRegistry } from "./liveSessions";
 import type { DialerLock } from "../runtime/outbound/scheduler";
@@ -303,6 +304,8 @@ export function mountPluginApi(app: Express, deps: PluginApiDeps): void {
         { channel: "call", payload: req.body }, (deps.now ?? (() => new Date()))(), "operator", envOf(deps));
       if (!result.ok) { jsonError(res, result.status, result.error); return; }
       res.status(201).json({ status: result.confirmToken ? "approved" : "pending_approval", approval: publicApproval(result.approval),
+        // What this call will open with, so a dropped script shows at prepare.
+        opening: { source: operatorOpeningSource(parsed.payload), text: operatorOpening(parsed.payload) },
         ...(result.confirmToken ? { confirmToken: result.confirmToken, expiresAt: result.approval.confirmExpiresAt?.toISOString() } : {}) });
       await audit(deps, req.pluginAuth, req, "prepare_operator_call", result.confirmToken ? "approved" : "pending_approval", 201, { approvalId: result.approval.id });
     } catch { jsonError(res, 503, "Operator request storage is unavailable"); }

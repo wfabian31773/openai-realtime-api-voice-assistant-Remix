@@ -9,6 +9,7 @@ import type { PcpTicketPayload, PcpTicketResponse, PcpWithdrawRequest, PcpWithdr
 import { noteTicketFiled } from './ticketFilingPulse';
 import { normalizeProviderNameForTicket } from '../../src/services/ticketFieldSanitizers';
 import { callbackExtensionFilings, syncWithCallbackExtensions } from '../../src/services/callbackExtensionNote';
+import { isTestCall, testTicketNumber, TEST_TICKET_PREFIX } from '../../src/services/testCalls';
 
 export interface CallData {
   callSid?: string;
@@ -806,7 +807,11 @@ export class TicketingApiClient {
   }
 
   async createTicket(params: CreateTicketParams): Promise<CreateTicketResponse> {
-    const unnamed = /^unknown caller$/i.test(`${params.patientFirstName ?? ''} ${params.patientLastName ?? ''}`.trim());
+    if (isTestCall(params.callData ?? {})) {
+      console.info(`[TICKETING API] test call ${params.callData?.callSid}: no ticket filed`);
+      return { success: true, ticketNumber: testTicketNumber(params.callData?.callSid) };
+    }
+    const unnamed =/^unknown caller$/i.test(`${params.patientFirstName ?? ''} ${params.patientLastName ?? ''}`.trim());
     const suppliedDob = params.patientBirthYear && params.patientBirthMonth && params.patientBirthDay
       ? `${params.patientBirthYear}-${params.patientBirthMonth.padStart(2, '0')}-${params.patientBirthDay.padStart(2, '0')}` : undefined;
     params = await filterTicketRouting({ ...params, validatedPatient:
@@ -946,6 +951,10 @@ export class TicketingApiClient {
     body: Record<string, unknown>;
     callSid?: string;
   }): Promise<{ ok: boolean; status: number; text: string; ticketNumber?: string; refiled?: boolean }> {
+    if (isTestCall({ callSid: params.callSid })) {
+      console.info(`[TICKETING API] test call ${params.callSid}: no location-queue ticket filed`);
+      return { ok: true, status: 200, text: 'test call', ticketNumber: testTicketNumber(params.callSid) };
+    }
     this.ensureInitialized();
     if (!this.baseUrl || !this.apiKey) {
       // Same shape a failed POST returns, so the caller has one path to handle.
@@ -1026,7 +1035,11 @@ export class TicketingApiClient {
    * This is the preferred method for voice agents - more reliable than the legacy createTicket
    */
   async submitTicket(params: SubmitTicketParams): Promise<SubmitTicketResponse> {
-    const unnamed = !params.patientFullName.trim() || /^unknown caller$/i.test(params.patientFullName.trim());
+    if (isTestCall(params.callData ?? {})) {
+      console.info(`[TICKETING API] test call ${params.callData?.callSid}: no ticket submitted`);
+      return { success: true, ticketNumber: testTicketNumber(params.callData?.callSid) };
+    }
+    const unnamed =!params.patientFullName.trim() || /^unknown caller$/i.test(params.patientFullName.trim());
     // Use the held first/last boundaries, allowing an optional middle initial,
     // and preserve the validated demographics while filtering routing history.
     const held = validatedPatientFor(params.callData?.callSid, undefined, undefined, params.patientDOB);
@@ -1137,6 +1150,10 @@ export class TicketingApiClient {
   async updateTicketCallData(
     params: UpdateTicketCallDataParams
   ): Promise<UpdateTicketCallDataResponse> {
+    // A test call filed nothing, so there is no ticket to stamp.
+    if (params.ticketNumber?.startsWith(TEST_TICKET_PREFIX) || isTestCall(params)) {
+      return { success: true, ticketNumber: params.ticketNumber };
+    }
     try {
       return await syncWithCallbackExtensions(params, callbackExtensionFilings, payload => this.updateTicketCallDataDirect(payload));
     } catch {
@@ -1204,6 +1221,11 @@ export class TicketingApiClient {
     channel: 'sms' | 'email';
     email?: string;
   }): Promise<{ success: boolean; error?: string; statusCode?: number; channel?: string; expiresAt?: string; ticketNumber?: string }> {
+    // The app texts or emails this link, so a test call must not reach it.
+    if (params.ticketNumber?.startsWith(TEST_TICKET_PREFIX) || isTestCall({ callSid: params.callSid })) {
+      console.info(`[TICKETING API] test call ${params.callSid}: no records link sent`);
+      return { success: true, channel: params.channel, ticketNumber: params.ticketNumber };
+    }
     try {
       const response = await this.makeRequest<{
         success: boolean; error?: string; channel?: string; expiresAt?: string; ticketNumber?: string;
@@ -1217,6 +1239,10 @@ export class TicketingApiClient {
   }
 
   async createPcpTicket(params: PcpTicketPayload): Promise<PcpTicketResponse> {
+    if (isTestCall({ callSid: params.callSid })) {
+      console.info(`[TICKETING API] test call ${params.callSid}: no PCP ticket filed`);
+      return { success: true, ticketNumber: testTicketNumber(params.callSid) };
+    }
     try {
       const response = await this.makeRequest<PcpTicketResponse>(
         '/api/voice-agent/pcp-ticket',

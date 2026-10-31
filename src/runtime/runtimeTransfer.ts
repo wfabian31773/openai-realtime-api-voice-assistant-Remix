@@ -577,7 +577,7 @@ export function createRuntimeTransfer(options: RuntimeTransferOptions): RuntimeT
            * fails must never delay the dial.
            */
           if (policy.allowed && policy.policy !== "pcp") {
-            urgentAlerts.smsBeforeDial({ callerNumber: metadata.callerPhone, escalationDetails: details });
+            urgentAlerts.smsBeforeDial({ callSid: metadata.callSid, callerNumber: metadata.callerPhone, escalationDetails: details });
           }
           if (mode === "blind") {
             /**
