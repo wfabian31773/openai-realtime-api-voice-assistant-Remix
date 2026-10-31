@@ -656,9 +656,13 @@ is reading noise.
 
 ---
 
-## Current branch — the operator script proven to the wire, no silence after the opening, v159 (2026-10-31)
+## Current branch — plane B holds when tickets are still landing, v160 (2026-10-31)
 
-This branch carries **`voice-runtime-v159-operator-script-live-no-silence-after-opening-20261031`**, above `main`'s v158 (#412, `d785e29`). The v159 row in the marker table has the detail. A prepared `callerScript` reaches the wire on v158 code, proven end to end; `prepare_operator_call` now answers with the opening it will speak, so a dropped script shows at prepare. A call we placed answers speech over its opening and carries on after 4 s of silence. Tests: `src/runtime/operatorScriptReachesTheWire.test.ts`, `src/runtime/operatorOpeningProceeds.test.ts`. No migration; production impact is unmeasured.
+This branch carries **`voice-runtime-v160-outbox-stall-holds-when-tickets-land-20261031`**, above `main`'s v159 (#413, `55b5434`). Oct 30 5:21–8:21 PM ET: 1–3 `ticket_outbox` rows retried a records-line HTTP 500 (ticketing-app mapped `clinical` to the missing department name `Tech Support`; id 3 is Technicians Support — fixed there as #425) while 97 other rows sent and `/health` stayed 200. Plane B emailed `ticket_filing_stalled` on `outboxHeld >= 3` and then on one transport dead letter. A confirmed filing inside ten minutes (in-process pulse or newest `ticket_outbox.sent_at`) now holds that plane; the held count is still reported. Plane A is unchanged. Tests: `server/services/ticketFilingHealth.test.ts` (the Oct 30 block). No migration; production impact is unmeasured. Do not replay the resolved dead letter.
+
+## `main` base — the operator script proven to the wire, no silence after the opening, v159 (#413, merged 2026-10-31, `55b5434`)
+
+#413 carries **`voice-runtime-v159-operator-script-live-no-silence-after-opening-20261031`**, above `main`'s v158 (#412, `d785e29`). The v159 row in the marker table has the detail. A prepared `callerScript` reaches the wire on v158 code, proven end to end; `prepare_operator_call` now answers with the opening it will speak, so a dropped script shows at prepare. A call we placed answers speech over its opening and carries on after 4 s of silence. Tests: `src/runtime/operatorScriptReachesTheWire.test.ts`, `src/runtime/operatorOpeningProceeds.test.ts`. No migration; production impact is unmeasured.
 
 ## `main` base — the operator call's script drives its persona and opening, v158 (#412, merged 2026-10-31, `d785e29`)
 
@@ -2530,6 +2534,7 @@ voice-runtime-v156-an-empty-nudge-reply-stands-down-20261031
 voice-runtime-v157-the-prompt-describes-the-greeting-heard-20261031
 voice-runtime-v158-operator-caller-script-drives-opening-20261031
 voice-runtime-v159-operator-script-live-no-silence-after-opening-20261031
+voice-runtime-v160-outbox-stall-holds-when-tickets-land-20261031
 ```
 
 Also printed at boot as `[voice-runtime] <marker>`. Anything ending in an
@@ -2785,9 +2790,9 @@ v10 (the person base and the join), v11 (the locked record, #290) and v12
 (optical's office ladder) are a CHAIN on `main`: each merged after the one
 before and brought it in, so v12 contains both.
 
-**AND THE SEQUENCE HAS TWO HOLES IN IT ON PURPOSE: v13 AND v57. v159 IS THE
-NEWEST — v159 on this branch: the operator script proven to the wire, no silence after the opening — above `main`'s v158, which it contains —
-AND v158 IS WHAT `main` CARRIES, SINCE #412 MERGED 2026-10-31 (`d785e29`): an operator call's callerScript drives its persona and opening line, above v157 (#411, `4861a9f`) —
+**AND THE SEQUENCE HAS TWO HOLES IN IT ON PURPOSE: v13 AND v57. v160 IS THE
+NEWEST — v160 on this branch: plane B holds when tickets are still landing — above `main`'s v159, which it contains —
+AND v159 IS WHAT `main` CARRIES, SINCE #413 MERGED 2026-10-31 (`55b5434`): the operator script proven to the wire, no silence after the opening, above v158 (#412, `d785e29`) —
 AND BEFORE THAT v157, MERGED 2026-10-31: the recognised-caller block describes the greeting the caller actually heard, and an unvalidated match asks for the name and not the date of birth — above `main`'s v156, which it contains —
 AND BEFORE THAT v156 (#410), MERGED 2026-10-31 (`ce8d94f`): a nudge the agent answers with nothing stands the silence ladder down instead of ending the call as dead air, above v155 (#409, `1ddaa9f`) —
 AND BEFORE THAT v155 (#409, MERGED 2026-10-30, `1ddaa9f`): the PCP "Intake incomplete" note lists only what the director still requires for the call reason, above v154 (#391, `31c5251`) —
@@ -3075,7 +3080,7 @@ never read v57; **v58 was that next ship** — the identity probe, an instrument
 and no behaviour change (see the v56 row below for what it measures). It is no
 longer the current marker: see the paragraph beneath this one.
 
-**v158 (#412) IS WHAT `main` CARRIES (merged 2026-10-31, `d785e29`), ABOVE v157 (#411, `4861a9f`), v156 (#410, `ce8d94f`), v155 (#409, `1ddaa9f`), v154 (#391, `31c5251`), v153 (#404, `4a7d429`), v152 (#376, `44b037c`), v151 (#408, `2f72c87`), v148 (#384, `117c2d5`), v147 (#381, `d153a3d`) and v146 (#407, `04e1e80`), AND v57,
+**v159 (#413) IS WHAT `main` CARRIES (merged 2026-10-31, `55b5434`), ABOVE v158 (#412, `d785e29`), v157 (#411, `4861a9f`), v156 (#410, `ce8d94f`), v155 (#409, `1ddaa9f`), v154 (#391, `31c5251`), v153 (#404, `4a7d429`), v152 (#376, `44b037c`), v151 (#408, `2f72c87`), v148 (#384, `117c2d5`), v147 (#381, `d153a3d`) and v146 (#407, `04e1e80`), AND v57,
 v59, v60, v63, v65 AND v66 ARE RETIRED RATHER THAN REUSED.** Each of the last
 five was a branch's own number while it sat below `main`, and each was given up
 the moment a merge put it there: two branches carrying one version make two
