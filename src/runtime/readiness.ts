@@ -1095,8 +1095,16 @@ import { callEnvironment } from "./callRecord";
  * script's persona. Default greeting only with no script. Line stays OPEN.
  * Above main's v157 (#411, 4861a9f). No migration.
  */
+/**
+ * v159 — THE OPERATOR SCRIPT IS PROVEN TO THE WIRE, THE OPENING IS NOT FOLLOWED
+ * BY SILENCE (2026-10-31). Prepare answers with
+ * the opening it will speak and call setup logs where it came from. A call we
+ * placed answers speech over its opening and carries on after 4 s of silence.
+ * Above main's v158
+ * (#412, d785e29). No migration.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v158-operator-caller-script-drives-opening-20261031";
+  "voice-runtime-v159-operator-script-live-no-silence-after-opening-20261031";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

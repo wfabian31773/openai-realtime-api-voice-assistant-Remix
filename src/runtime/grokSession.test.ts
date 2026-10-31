@@ -471,6 +471,28 @@ describe("response.cancel gating (production lesson: cancelling a non-open respo
     expect(onResponseDone).toHaveBeenCalledTimes(1);
   });
 
+  it("a cancel sent from onResponseStarted keeps its debt, so its rejection is absorbed (v159)", () => {
+    const onError = vi.fn();
+    const built: { session?: GrokVoiceSession } = {};
+    const { transport, session } = makeSession({
+      onError,
+      onResponseStarted: () => built.session?.cancelResponse(),
+    });
+    built.session = session;
+    transport.emit({ type: "session.created", conversation: { id: "s1" } });
+    transport.emit({ type: "session.updated" });
+    transport.emit({ type: "response.created" });
+    transport.emit({
+      type: "error",
+      error: {
+        type: "invalid_request_error",
+        message: "cancellation failed: no active response found",
+      },
+    });
+    expect(onError).not.toHaveBeenCalled();
+    expect(session.getState()).toBe("configured");
+  });
+
   it("only absorbs that error while a cancel is actually outstanding — every other provider error stays fatal", () => {
     const onError = vi.fn();
     const { transport, session } = makeSession({ onError });

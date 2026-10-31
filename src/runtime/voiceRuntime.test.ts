@@ -1249,8 +1249,7 @@ describe("one whole call, end to end, offline", () => {
     const { ws } = await openStream(h, "CA-floor", tokenFrom(answered.text));
     await settle(2);
     ws.close();
-    await settle(8);
-    expect(h.pcpSwept).toHaveLength(1);
+    await vi.waitFor(() => expect(h.pcpSwept).toHaveLength(1), { timeout: 2000 });
     expect(h.pcpSwept[0]).toMatchObject({ callSid: "CA-floor", slug: "optical" });
     // The durable record landed before the floor saw the call, exactly as for
     // the generic sweep: the row is the evidence every measurement rests on.

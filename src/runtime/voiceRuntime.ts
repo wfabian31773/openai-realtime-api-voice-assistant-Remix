@@ -321,7 +321,7 @@ import { boundPluginStore } from "../plugin/bindings";
 import type { PluginStore } from "../plugin/store";
 import type { OperatorInboundNotifier } from "../plugin/operatorInboundNotifier";
 import { OperatorInboundWebhook, OPERATOR_INBOUND_PATH, OPERATOR_SMS_PATH, OPERATOR_FALLBACK_PATH, OPERATOR_VOICEMAIL_PATH } from "./operatorInboundWebhook";
-import { OPERATOR_INBOUND_GREETING, operatorOpening } from "../agents/operatorLineAgent";
+import { OPERATOR_INBOUND_GREETING, operatorOpening, operatorOpeningSource } from "../agents/operatorLineAgent";
 import { SI_ASSISTANT_DIRECT_GREETING } from "../agents/siAssistantAgent";
 import { closeSiAssistantIdentity, siAssistantIdentityFor } from "../plugin/siAssistantIdentity";
 import type { OutboundStore } from "./outbound/store";
@@ -1152,6 +1152,9 @@ export function mountVoiceRuntime(
       const isLiveCall = (entry.slug === "si-assistant" || entry.slug === OPERATOR_SLUG) && Boolean(entry.liveSessionId);
       const directCall = isLiveCall ? liveCalls.forCall(entry.callSid)?.directCall : undefined;
       const operatorCall = entry.slug === OPERATOR_SLUG ? liveCalls.forCall(entry.callSid)?.operatorCall : undefined;
+      if (operatorCall) {
+        console.info(`[voice-runtime] operator call ${entry.callSid}: opening from ${operatorOpeningSource(operatorCall)}`);
+      }
       // The call is answered once its stream has started, so Twilio will take
       // a REST recording from here. Never awaited, never on the call's path:
       // a failure is one console line and the call proceeds unrecorded, as
@@ -1654,7 +1657,7 @@ export function mountVoiceRuntime(
           context,
           startedAtMs,
           agent: lane.agent,
-          ...(operatorCall ? { maxCallMs: operatorCall.maxDurationSec * 1000 } : {}),
+          ...(operatorCall ? { maxCallMs: operatorCall.maxDurationSec * 1000, proceedAfterOpening: true } : {}),
           ...(entry.operatorInbound ? { maxCallMs: operatorMaxDurationSec(env) * 1000 } : {}),
           ...(entry.slug === OPERATOR_SLUG ? { toolCeiling: {
             identicalFailures: Infinity, perToolFailures: Infinity, identicalSuccesses: Infinity,
