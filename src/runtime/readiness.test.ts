@@ -135,7 +135,7 @@ describe("runtime readiness", () => {
    * quietly drop it and put us back where we were.
    */
   it("carries the date it was set, so a build's age is readable from the marker", () => {
-    expect(VOICE_RUNTIME_DEPLOY_MARKER).toBe("voice-runtime-v159-operator-script-live-no-silence-after-opening-20261031");
+    expect(VOICE_RUNTIME_DEPLOY_MARKER).toBe("voice-runtime-v161-after-hours-optical-files-to-optical-20261031");
     expect(VOICE_RUNTIME_DEPLOY_MARKER).toMatch(/-\d{8}$/);
     expect(markerSetOn()).not.toBeNull();
   });

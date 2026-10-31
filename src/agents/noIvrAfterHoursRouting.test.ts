@@ -285,6 +285,60 @@ describe('a same-day request files to After Hours', () => {
   });
 });
 
+describe('an optical request the model named files to Optical with the office', () => {
+  it('on request_category optical_request, with the caller-named office', async () => {
+    const { agent } = await agentFor();
+    await call(agent, 'create_ticket', {
+      ...TICKET,
+      location: 'Eastvale',
+      request_category: 'optical_request',
+      request_summary: 'Wants to know if the order is ready to pick up',
+    });
+    const p = lastSubmit();
+    expect(p.departmentId).toBe(1);
+    expect(p.suggestedRequestTypeId).toBe(66);
+    expect(p.suggestedRequestReasonId).toBe(536);
+    expect(p.locationOfLastVisit).toBe('Eastvale');
+    expect(p.locationSource).toBe('caller');
+    expect(p.reasonForCalling).toMatch(/^Request Type: Optical Request/);
+    expect(p.additionalDetails).toMatch(/OPTICAL/);
+    expect(p.priority).toBeUndefined();
+  });
+
+  it('uses the confirmed record\'s office when the caller named none', async () => {
+    h.byNameAndDob.mockResolvedValue({
+      ...NOT_FOUND,
+      patientFound: true,
+      matchedBy: 'name_and_dob',
+      identity: { unique: true, candidateCount: 1, candidates: [] },
+      lastLocationSeen: 'Fontana',
+    });
+    const { agent } = await agentFor();
+    await call(agent, 'create_ticket', {
+      ...TICKET,
+      location: '',
+      request_category: 'optical_request',
+      request_summary: 'Frames need a repair at the hinge',
+    });
+    const p = lastSubmit();
+    expect(p.departmentId).toBe(1);
+    expect(p.locationOfLastVisit).toBe('Fontana');
+    expect(p.locationSource).toBe('history');
+  });
+
+  it('a glasses summary the model left as general_question is still the app\'s to route', async () => {
+    const { agent } = await agentFor();
+    await call(agent, 'create_ticket', {
+      ...TICKET,
+      request_category: 'general_question',
+      request_summary: 'When will my glasses be ready for pickup?',
+    });
+    const p = lastSubmit();
+    expect(p.departmentId).toBeUndefined();
+    expect(p.suggestedRequestTypeId).not.toBe(66);
+  });
+});
+
 describe('every other call is the app\'s to route, exactly as before', () => {
   it('sends no department and no priority', async () => {
     const { agent } = await agentFor();

@@ -8,6 +8,14 @@
 
 # State of Play — Azul Vision voice agents
 
+2026-10-31 after-hours Optical filing (offline, synthetic data):
+`voice-runtime-v161-after-hours-optical-files-to-optical-20261031`, on top of
+`main`'s v159 (#413, `55b5434`); v160 is #414 and #415. After-hours
+`/voice/no-ivr` calls the model classifies as `optical_request` (glasses,
+frames, lenses, contacts as products: order, status, pickup, repair) file to
+Optical Support with the office when known. Not a keyword list. No migration
+or production measurement.
+
 2026-10-28 after-hours teardown floor (offline, synthetic data):
 `voice-runtime-v129-after-hours-teardown-floor-20261028` (renumbered from v119), on top of `main`'s v128 (#389, `558f288`); v127 is #376 on its open branch.
 No-IVR and V2 reuse PCP's v90 registered, bounded teardown runner and its
@@ -39,7 +47,7 @@ unexplained dates. Regression evidence and scope: `docs/BACKEND_HANDOFF.md`,
 
 **Companion to `/CLAUDE.md`. Read both at the start of every session.**
 
-Last updated: **2026-10-27** (request-classification review follow-up above).
+Last updated: **2026-10-31** (after-hours Optical filing, v161, above).
 Earlier: **2026-10-26** (VA-76222 / VA-76221 — on-call identity before transfer, and a lookup miss that is not "not found").
 Earlier: **2026-10-06** (section 14 — the session stall reconnects),
 **2026-09-25** (section 13 — terminal 4xx is follow-up, not a

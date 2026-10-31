@@ -79,17 +79,19 @@ describe('nothing else about the overnight path moved', () => {
     expect(call).not.toMatch(/requestReasonId:/);
   });
 
-  it('names a department ONLY for the two kinds of call the operator routed himself (v89)', () => {
+  it('names a department ONLY when the after-hours route picked one (v161)', () => {
     // Until 2026-10-02 this asserted no department at all. The operator then
     // ruled on two kinds of call — a post-op medication problem and a same-day
-    // request both go to After Hours — and only those may carry one. Every
-    // other night call still sends none and the app derives it, which is what
-    // this guard was written to keep: the department comes from the route, the
-    // route answers 'default' for everything else, and nothing here classifies.
+    // request both go to After Hours — and v161 adds a third: the model
+    // named optical_request, which files to Optical. Every other night call
+    // still sends none and the app derives it. The department comes from the
+    // route, never from a glasses keyword in this file.
     const call = submitCall();
     const departments = call.match(/departmentId:/g) ?? [];
     expect(departments).toHaveLength(1);
     expect(call).toMatch(/route\.kind === 'default' \? \{\} : \{ departmentId: route\.departmentId \}/);
+    expect(AGENT).toMatch(/opticalRequest: params\.request_category === 'optical_request'/);
+    expect(AGENT).not.toMatch(/classifyOptical\(/);
   });
 
   it('still sends no transcript at filing', () => {
