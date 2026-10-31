@@ -19,6 +19,7 @@ async function call(proceedAfterOpening: boolean) {
   const marks: string[] = [];
   const frames: string[] = [];
   const outcomes: string[] = [];
+  const dispatch = vi.fn(async (..._args: unknown[]): Promise<unknown> => ({ ok: true, output: {} }));
   const session = {
     appendAudio: vi.fn(), cancelResponse: vi.fn(), sendToolResult: vi.fn(), close: vi.fn(), setSpokenLanguage: vi.fn(),
     requestResponse: vi.fn(), speakNatural: vi.fn(), speak: vi.fn(),
@@ -27,7 +28,7 @@ async function call(proceedAfterOpening: boolean) {
   let handlers!: BridgeSessionHandlers;
   const bridge = new VoiceCallBridge({
     context: { callSid: `CA${"b".repeat(32)}`, streamSid: "MZ-test", slug: "wayne-operator", callerPhone: "+15555550123", dialedNumber: "+15555550100" },
-    agent: { instructions: "operator", tools: [], skipped: [], dispatch: async () => ({ ok: true, output: {} }), guardrails: [] } as never,
+    agent: { instructions: "operator", tools: [], skipped: [], dispatch, guardrails: [] } as never,
     greeting: OPENING,
     twilio: { sendFrame: (f: { event: string; mark?: { name: string } }) => { frames.push(f.event); if (f.event === "mark" && f.mark) marks.push(f.mark.name); }, close: () => undefined },
     createSession: (h: BridgeSessionHandlers) => { handlers = h; return session as never; },
@@ -49,7 +50,7 @@ async function call(proceedAfterOpening: boolean) {
     handlers.onResponseDone();
   };
   return {
-    session, handlers, openingPlays, frames, outcomes,
+    session, handlers, openingPlays, frames, outcomes, dispatch,
     /** Twilio echoes the newest mark: the caller has now heard the whole line. */
     played: () => bridge.handleTwilioFrame({ event: "mark", streamSid: "MZ-test", mark: { name: marks[marks.length - 1] } } as never),
     fire(ms: number) {
@@ -273,14 +274,84 @@ describe("v159: an operator call carries on after its opening", () => {
       expect(c.session.cancelResponse).not.toHaveBeenCalled();
     });
 
-    it("a tool's follow-up is not cancelled", async () => {
-      const c = await carryOn();
+    /** The answer calls a tool and finishes; the tool's follow-up is requested. */
+    const toolFollowUpRequested = async (c: Call, tool: string) => {
       start(c);
+      c.setResponseActive(true);
       c.handlers.onAgentTranscriptDelta("One moment.");
       c.handlers.onAudioDelta(Buffer.alloc(800).toString("base64"));
-      c.handlers.onToolCall("call-1", "lookup", {});
+      c.handlers.onToolCall("call-1", tool, {});
+      c.setResponseActive(false);
+      c.handlers.onResponseDone();
+      await vi.waitFor(() => expect(c.session.requestResponse).toHaveBeenCalledTimes(2));
+    };
+
+    it("a tool's follow-up is not cancelled", async () => {
+      const c = await carryOn();
+      await toolFollowUpRequested(c, "lookup");
       start(c);
       expect(c.session.cancelResponse).not.toHaveBeenCalled();
+    });
+
+    it("a late provider reply and a tool's follow-up do not both speak", async () => {
+      const c = await carryOn();
+      await toolFollowUpRequested(c, "set_spoken_language");
+      start(c);
+      speak(c, "Claro, seguimos en español.");
+      const before = audioSent(c);
+      start(c);
+      expect(c.session.cancelResponse).toHaveBeenCalledOnce();
+      speak(c, "Claro, seguimos en español, otra vez.");
+      expect(audioSent(c)).toBe(before);
+    });
+
+    it("a provider reply while the tool is still running is cancelled, and the follow-up still speaks", async () => {
+      const c = await carryOn();
+      let finish!: (v: unknown) => void;
+      c.dispatch.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+      start(c);
+      c.setResponseActive(true);
+      c.handlers.onToolCall("call-1", "lookup", {});
+      c.setResponseActive(false);
+      c.handlers.onResponseDone();
+      await vi.waitFor(() => expect(c.dispatch).toHaveBeenCalledOnce());
+      start(c);
+      expect(c.session.cancelResponse).toHaveBeenCalledOnce();
+      c.handlers.onResponseDone();
+      finish({ ok: true, output: {} });
+      await vi.waitFor(() => expect(c.session.requestResponse).toHaveBeenCalledTimes(2));
+      start(c);
+      const before = audioSent(c);
+      speak(c, "I found it.");
+      expect(c.session.cancelResponse).toHaveBeenCalledOnce();
+      expect(audioSent(c)).toBeGreaterThan(before);
+    });
+
+    it("a tool call from a cancelled duplicate is not run, not answered and asks for nothing", async () => {
+      const c = await carryOn();
+      start(c);
+      speak(c, "Thanks for taking my call.");
+      start(c);
+      expect(c.session.cancelResponse).toHaveBeenCalledOnce();
+      c.handlers.onToolCall("call-dup", "record_call_outcome", {});
+      c.handlers.onResponseDone();
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(c.dispatch).not.toHaveBeenCalled();
+      expect(c.session.sendToolResult).not.toHaveBeenCalled();
+      expect(c.session.requestResponse).toHaveBeenCalledOnce();
+    });
+
+    it("a tool call from a response the caller talked over still runs", async () => {
+      const c = await call(false);
+      c.openingPlays();
+      c.played();
+      start(c);
+      c.handlers.onAgentTranscriptDelta("Let me get this logged.");
+      c.handlers.onAudioDelta(Buffer.alloc(800).toString("base64"));
+      c.handlers.onSpeechStarted();
+      expect(c.session.cancelResponse).toHaveBeenCalledOnce();
+      c.handlers.onToolCall("call-1", "file_optical_ticket", {});
+      await vi.waitFor(() => expect(c.dispatch).toHaveBeenCalledOnce());
     });
 
     it("an empty answer from someone who never spoke leaves the ladder running through its prompts to the cut", async () => {

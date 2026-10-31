@@ -1852,6 +1852,12 @@ export class VoiceCallBridge {
    * `answerSpoke` whether that response has sent audio.
    */
   private openingTurn: { epoch: number; answerEpoch: number | null; answerSpoke: boolean } | null = null;
+  /**
+   * The response `cancelSecondOpeningTurn` cancelled. Separate from
+   * `cancelledEpoch`, which a barge-in also sets: a filing tool from a response
+   * the caller talked over must still run, and a duplicate's tool must not.
+   */
+  private cancelledDuplicateEpoch: number | null = null;
 
   private releaseGreetingLock(): void {
     const wasLocked = this.greetingLocked;
@@ -1912,22 +1918,29 @@ export class VoiceCallBridge {
    * both produce a response, and the wire does not say whose is whose. The
    * first one to speak answers the person; a second is cancelled and its audio
    * dropped by the epoch check. Returns true when this response was cancelled.
-   * Caller speech, a tool call and the silence ladder all end this guard, so a
-   * real later turn is never cancelled.
+   * Caller speech and the silence ladder end this guard, so a real later turn
+   * is never cancelled. A tool call reopens it (`handleToolCall`): the answer
+   * is then the tool's follow-up, or a response that can already read the
+   * tool's result. A response starting before that result is sent can be
+   * neither, and taking it as the answer would cancel the real one.
    */
   private cancelSecondOpeningTurn(): boolean {
     const turn = this.openingTurn;
     if (turn === null) return false;
     const epoch = this.session.getResponseEpoch();
     if (epoch <= turn.epoch || epoch === turn.answerEpoch) return false;
-    if (turn.answerEpoch === null) {
-      turn.answerEpoch = epoch;
-      turn.answerSpoke = false;
-      return false;
+    const toolOutstanding = this.pendingToolCalls > 0 || this.followUpOwed;
+    if (!toolOutstanding) {
+      if (turn.answerEpoch === null) {
+        turn.answerEpoch = epoch;
+        turn.answerSpoke = false;
+        return false;
+      }
+      this.openingTurn = null;
     }
-    this.openingTurn = null;
     console.info(`[bridge] cancelling a second response after the opening on ${this.deps.context.callSid}`);
     this.cancelledEpoch = epoch;
+    this.cancelledDuplicateEpoch = epoch;
     this.session.cancelResponse();
     return true;
   }
@@ -2303,9 +2316,20 @@ export class VoiceCallBridge {
   }
 
   private handleToolCall(callId: string, name: string, args: Record<string, unknown>): void {
-    // Its follow-up is a real later turn, not a second answer.
-    this.openingTurn = null;
     if (this.ended) return;
+    // A duplicate we cancelled does not act. Nothing is dispatched or owed, and
+    // no result is sent: the provider may have dropped the call with its
+    // response, and any error it answers with other than a late cancel is fatal.
+    if (this.cancelledDuplicateEpoch === this.session.getResponseEpoch()) {
+      console.info(`[bridge] dropped ${name} from a cancelled duplicate response on ${this.deps.context.callSid}`);
+      return;
+    }
+    // The turn is not answered yet: its follow-up is still to come, and a late
+    // provider reply must not speak beside it.
+    if (this.openingTurn) {
+      this.openingTurn.answerEpoch = null;
+      this.openingTurn.answerSpoke = false;
+    }
     this.cancelGoodbye();
     // Even a tool before the first audio makes this an unfinished exchange.
     this.goodbyeEpoch = this.session.getResponseEpoch();
