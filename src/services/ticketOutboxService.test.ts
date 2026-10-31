@@ -26,6 +26,7 @@ const updateResults: unknown[] = [];
 const selectResults: unknown[] = [];
 const insertResults: unknown[] = [];
 const setPayloads: Record<string, unknown>[] = [];
+const insertedValues: Record<string, unknown>[] = [];
 /**
  * The columns each `.where(...)` was built from, in call order.
  *
@@ -47,9 +48,13 @@ function columnsOf(node: unknown, out: string[] = []): string[] {
 
 function chain(next: () => unknown) {
   const self: Record<string, unknown> = {};
-  for (const m of ['from', 'limit', 'values', 'onConflictDoNothing', 'returning', 'groupBy']) {
+  for (const m of ['from', 'limit', 'onConflictDoNothing', 'returning', 'groupBy']) {
     self[m] = () => self;
   }
+  self.values = (v: Record<string, unknown>) => {
+    insertedValues.push(v);
+    return self;
+  };
   self.where = (condition: unknown) => {
     whereCols.push(columnsOf(condition));
     return self;
@@ -87,6 +92,7 @@ vi.mock('../../server/services/ticketingApiClient', () => ({
 }));
 
 const { TicketOutboxService, wrapCreateTicketPayload } = await import('./ticketOutboxService');
+const { clearTestCallsForTests, isTestCall, markTestCall, TEST_TICKET_PREFIX } = await import('./testCalls');
 
 describe('checking whether an outbox payload was refused', () => {
   it.each([
@@ -150,9 +156,52 @@ beforeEach(() => {
   selectResults.length = 0;
   insertResults.length = 0;
   setPayloads.length = 0;
+  insertedValues.length = 0;
   whereCols.length = 0;
+  clearTestCallsForTests();
   createTicket.mockResolvedValue({ success: true, ticketNumber: 'VA-52100', ticketId: 9001 });
   lookupProviderAndLocation.mockResolvedValue({ success: true, outcome: 'matched', locationId: null });
+});
+
+describe('a test call in the outbox stays a test call across a restart', () => {
+  const SID = `CA${'e'.repeat(32)}`;
+  const queued = () => wrapCreateTicketPayload({ ...OPTICAL_OTHER, callData: { agentUsed: 'optical', callSid: SID } });
+
+  it('persists the flag on a marked call, and only there', async () => {
+    insertResults.push([{ id: 'ob-1' }], [{ id: 'ob-2' }]);
+    await TicketOutboxService.writeToOutbox(queued(), SID);
+    expect(insertedValues[0].payload).not.toHaveProperty('testCall');
+    markTestCall(SID);
+    await TicketOutboxService.writeToOutbox(queued(), SID);
+    expect(insertedValues[1].payload).toMatchObject({ testCall: true, kind: 'create_ticket_v1' });
+  });
+
+  it('persists it on a reopened dead letter too', async () => {
+    markTestCall(SID);
+    selectResults.push([{ id: 'ob-1', ticketNumber: null, status: 'dead_letter' }]);
+    updateResults.push([{ id: 'ob-1' }]);
+    await TicketOutboxService.writeToOutbox(queued(), SID);
+    expect(setPayloads[0].payload).toMatchObject({ testCall: true });
+  });
+
+  it.each([true, false])('a replay with no mark in memory posts nothing (queue payload: %s)', async (queuePayload) => {
+    const params = { ...OPTICAL_OTHER, callData: { agentUsed: 'optical', callSid: SID } };
+    const stored = { ...(queuePayload ? wrapCreateTicketPayload(params) : params), testCall: true };
+    updateResults.push([{ id: 'ob-1', callSid: SID, callLogId: null, payload: stored, retryCount: 0 }]);
+
+    const res = await TicketOutboxService.attemptSend('ob-1');
+
+    expect(res.success).toBe(true);
+    expect(res.ticketNumber?.startsWith(TEST_TICKET_PREFIX)).toBe(true);
+    expect(createTicket).not.toHaveBeenCalled();
+    expect(isTestCall({ callSid: SID })).toBe(true);
+  });
+
+  it('an unflagged payload still sends', async () => {
+    updateResults.push(entry(queued()), undefined);
+    await TicketOutboxService.attemptSend('ob-1');
+    expect(createTicket).toHaveBeenCalledOnce();
+  });
 });
 
 describe('a queue payload is re-sent exactly as the tool built it', () => {

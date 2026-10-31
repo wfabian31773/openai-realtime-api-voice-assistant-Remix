@@ -1841,7 +1841,6 @@ export class VoiceCallBridge {
    * Barge-in is all it governs: the transcript has nothing waiting on it. */
   /** v159 — see proceedPastOpening. */
   private callerSpeaking = false;
-  private callerSpokeOverOpening = false;
   private openingProceedArmed = false;
   private openingProceedSettled = false;
   private openingPlayed = false;
@@ -1868,9 +1867,11 @@ export class VoiceCallBridge {
    * and waits for us, so both ends sit in silence. Live 2026-10-31: about 23 s
    * on both test calls.
    *
-   * Runs once the opening has played. A caller who spoke over it gets an answer
-   * now; otherwise they get a short window to reply, then the agent carries on.
-   * Any response since the opening means the turn is already taken.
+   * Runs once the opening has played. Whether or not the caller spoke over it,
+   * there is a short window before the agent carries on: speech that stopped
+   * just before the mark can have the provider's own reply on its way, and
+   * requesting at once would race it. Any response since the opening means the
+   * turn is already taken.
    */
   private proceedPastOpening(): void {
     if (!this.deps.proceedAfterOpening || this.ended || this.openingProceedSettled) return;
@@ -1881,10 +1882,6 @@ export class VoiceCallBridge {
     }
     // Still talking: handleCallerSpeechStopped picks this up when they finish.
     if (this.callerSpeaking) return;
-    if (this.callerSpokeOverOpening) {
-      this.takeTurnAfterOpening();
-      return;
-    }
     this.openingProceedArmed = true;
     this.armDeadAir("caller");
   }
@@ -2023,7 +2020,6 @@ export class VoiceCallBridge {
   private handleCallerSpeechStopped(): void {
     if (this.ended) return;
     this.callerSpeaking = false;
-    if (this.greetingLocked) this.callerSpokeOverOpening = true;
     // The caller finished a turn: a response is now OWED. If neither an
     // utterance nor its audio arrives before the ceiling, the call is
     // stuck in dead air — tear down rather than bill silence.

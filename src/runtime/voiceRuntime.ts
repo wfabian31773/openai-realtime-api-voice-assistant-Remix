@@ -1154,7 +1154,10 @@ export function mountVoiceRuntime(
       const directCall = isLiveCall ? liveCalls.forCall(entry.callSid)?.directCall : undefined;
       const operatorCall = entry.slug === OPERATOR_SLUG ? liveCalls.forCall(entry.callSid)?.operatorCall : undefined;
       // Before anything can file: the tools and the sweep read this by CallSid.
-      if (isTestCall({ trustedCallerPhone: entry.callerPhone, dialedNumber: entry.dialedNumber }, env)) {
+      // The operator lane is a test call by lane, whatever its numbers: outbound,
+      // callerPhone is the destination, and an operator line that is also
+      // TWILIO_PHONE_NUMBER does not count as dialedNumber.
+      if (entry.slug === OPERATOR_SLUG || isTestCall({ trustedCallerPhone: entry.callerPhone, dialedNumber: entry.dialedNumber }, env)) {
         markTestCall(entry.callSid);
         console.info(`[voice-runtime] ${entry.slug} ${entry.callSid}: test call, nothing is filed or texted`);
       }

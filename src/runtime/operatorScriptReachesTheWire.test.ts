@@ -32,6 +32,7 @@ import { FakeOutboundStore } from "./outbound/store.testkit";
 import { OPERATOR_SLUG } from "../plugin/operatorLine";
 import { createOperatorLineAgent, operatorLinePolicy, OPERATOR_GREETING } from "../agents/operatorLineAgent";
 import type { LaneConfig } from "./laneRegistry";
+import { clearTestCallsForTests, isTestCall } from "../services/testCalls";
 
 class FakeProvider implements RuntimeTransport {
   sent: any[] = [];
@@ -75,7 +76,7 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-async function placeCall(payload: Record<string, unknown>) {
+async function placeCall(payload: Record<string, unknown>, extraEnv: Record<string, string> = {}) {
   const store = new MemoryPluginStore();
   const outbound = new FakeOutboundStore();
   outbound.channelDnc = store.channelDnc;
@@ -84,7 +85,7 @@ async function placeCall(payload: Record<string, unknown>) {
   const env: Record<string, string | undefined> = {
     TWILIO_AUTH_TOKEN: AUTH, XAI_API_KEY: "synthetic-key", DATABASE_URL: "postgres://unused",
     OPERATOR_LINE_FROM_NUMBER: FROM, OPERATOR_LINE_INBOUND_ENABLED: "true", PLUGIN_WRITES_ENABLED: "true",
-    SI_ASSISTANT_NUMBER: "+19092553213", DOMAIN: "fleet.example", APP_ENV: "production",
+    SI_ASSISTANT_NUMBER: "+19092553213", DOMAIN: "fleet.example", APP_ENV: "production", ...extraEnv,
   };
   const sender = {
     createCall: vi.fn().mockResolvedValue({ sid: CALL_SID }),
@@ -183,5 +184,11 @@ describe("v159: the operator script reaches the wire", () => {
     const { spoken, opening } = await placeCall({});
     expect(opening).toEqual({ source: "default", text: OPERATOR_GREETING });
     expect(spoken).toBe(OPERATOR_GREETING);
+  });
+
+  it("marks the call as a test by its lane when the operator line is the shared Twilio number", async () => {
+    clearTestCallsForTests();
+    await placeCall({}, { TWILIO_PHONE_NUMBER: FROM });
+    expect(isTestCall({ callSid: CALL_SID }, {})).toBe(true);
   });
 });

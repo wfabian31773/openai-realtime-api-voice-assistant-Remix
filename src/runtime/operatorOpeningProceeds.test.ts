@@ -60,14 +60,29 @@ async function call(proceedAfterOpening: boolean) {
 }
 
 describe("v159: an operator call carries on after its opening", () => {
-  it("answers a person who spoke over the opening as soon as it has played", async () => {
+  it("answers a person who spoke over the opening after the provider's window, when it stays silent", async () => {
     const c = await call(true);
     c.handlers.onSpeechStarted();
     c.handlers.onSpeechStopped();
     c.openingPlays();
     expect(c.session.requestResponse).not.toHaveBeenCalled();
     c.played();
+    expect(c.session.requestResponse).not.toHaveBeenCalled();
+    expect(c.fire(OPENING_PROCEED_MS)).toBe(true);
     expect(c.session.requestResponse).toHaveBeenCalledOnce();
+  });
+
+  it("speech stopping just before the mark leaves the provider's pending reply to arrive: no duplicate", async () => {
+    const c = await call(true);
+    c.openingPlays();
+    c.handlers.onSpeechStarted();
+    c.handlers.onSpeechStopped();
+    c.played();
+    expect(c.session.requestResponse).not.toHaveBeenCalled();
+    c.newResponse();
+    c.setResponseActive(true);
+    expect(c.fire(OPENING_PROCEED_MS)).toBe(true);
+    expect(c.session.requestResponse).not.toHaveBeenCalled();
   });
 
   it("does not answer twice when the provider already answered them", async () => {
@@ -167,7 +182,7 @@ describe("v159: an operator call carries on after its opening", () => {
     c.setResponseActive(true);
     expect(c.fire(OPENING_PROCEED_MS)).toBe(true);
     expect(c.session.requestResponse).not.toHaveBeenCalled();
-    expect(c.session.speak).not.toHaveBeenCalled();
+    expect(c.session.speak).not.toHaveBeenCalledWith(SILENCE_PROMPT_LINE, expect.anything());
     // The agent's own watchdog runs while it owes the words.
     expect(c.fire(30_000)).toBe(true);
   });
@@ -183,7 +198,7 @@ describe("v159: an operator call carries on after its opening", () => {
     c.setResponseActive(true);
     c.fire(OPENING_PROCEED_MS);
     expect(c.session.requestResponse).not.toHaveBeenCalled();
-    expect(c.session.speak).not.toHaveBeenCalled();
+    expect(c.session.speak).not.toHaveBeenCalledWith(SILENCE_PROMPT_LINE, expect.anything());
   });
 
   it("a response that already finished empty leaves the full window, not the short one's prompt", async () => {
@@ -194,7 +209,7 @@ describe("v159: an operator call carries on after its opening", () => {
     c.handlers.onSpeechStopped();
     c.newResponse();
     expect(c.fire(OPENING_PROCEED_MS)).toBe(true);
-    expect(c.session.speak).not.toHaveBeenCalled();
+    expect(c.session.speak).not.toHaveBeenCalledWith(SILENCE_PROMPT_LINE, expect.anything());
     expect(c.session.requestResponse).not.toHaveBeenCalled();
     expect(c.fire(WINDOW)).toBe(true);
     expect(c.session.speak).toHaveBeenCalledWith(SILENCE_PROMPT_LINE, { interruptible: true });

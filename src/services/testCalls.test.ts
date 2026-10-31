@@ -176,7 +176,7 @@ describe("the tag and the on-call text", () => {
     const env = { OPERATOR_LINE_FROM_NUMBER: OPERATOR, TWILIO_PHONE_NUMBER: OPERATOR, APP_ENV: "production" };
     expect(toCallLogRow(record, {}, env).environment).toBe("test");
     const src = readFileSync(new URL("../runtime/voiceRuntime.ts", import.meta.url), "utf8");
-    expect(src).toContain("isTestCall({ trustedCallerPhone: entry.callerPhone, dialedNumber: entry.dialedNumber }, env)");
+    expect(src).toContain("entry.slug === OPERATOR_SLUG || isTestCall({ trustedCallerPhone: entry.callerPhone, dialedNumber: entry.dialedNumber }, env)");
   });
 
   it("tags the call row in the existing environment column", () => {
