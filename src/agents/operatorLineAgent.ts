@@ -10,11 +10,11 @@ export const OPERATOR_INBOUND_GREETING = "Hello, I'm Grok Bot, an AI assistant. 
 export function openingFromScript(script: string): string | null {
   const unquote = (text: string) => text.trim().replace(/^["\u201C']+|["\u201D']+$/g, "").trim();
   const labelled = script.match(/^\s*(?:opening(?: line)?|greeting|first line|say)\s*[:\-]\s*(.+)$/im);
-  const quoted = script.match(/["\u201C]([^"\u201C\u201D\n]{8,500})["\u201D]/);
+  const quoted = script.match(/["\u201C]([^"\u201C\u201D\n]{2,500})["\u201D]/);
   const first = script.split(/\r?\n/).map((line) => line.trim()).find(Boolean);
   // A quote only delimits the line when the value OPENS with it; a quote inside
   // an unquoted value ("say \"ready\" when ...") is part of what is spoken.
-  const labelledQuote = labelled?.[1].trim().match(/^(?:"([^"\n]+)"|\u201C([^\u201D\n]+)\u201D|'([^'\n]+)'(?=\s|$))/);
+  const labelledQuote = labelled?.[1].trim().match(/^(?:"([^"\n]+)"|\u201C([^\u201D\n]+)\u201D|'([^\n]+?)'(?=\s|$))/);
   const picked = labelledQuote ? (labelledQuote[1] ?? labelledQuote[2] ?? labelledQuote[3]).trim() : labelled ? unquote(labelled[1]) : quoted ? quoted[1].trim() : first ? unquote(first) : "";
   return picked ? picked.slice(0, 500) : null;
 }

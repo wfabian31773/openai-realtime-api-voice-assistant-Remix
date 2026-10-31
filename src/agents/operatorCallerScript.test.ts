@@ -46,6 +46,8 @@ describe("v158 operator callerScript drives persona and opening", () => {
     ['Opening: Hi, please say "ready" when you can hear me.', 'Hi, please say "ready" when you can hear me.'],
     ["Opening: 'Hi, this is Benchmark Tester.' Wait for a reply.", "Hi, this is Benchmark Tester."],
     ["Opening: \u201CHi, it's Benchmark Tester.\u201D Pause.", "Hi, it's Benchmark Tester."],
+    ["Opening: 'Hi, I'm Benchmark Tester.' Wait for a reply.", "Hi, I'm Benchmark Tester."],
+    ['You are Benchmark Tester.\nStart with "Hello."', "Hello."],
   ])("labelled opening %j speaks %j", (script, spoken) => {
     expect(openingFromScript(script)).toBe(spoken);
   });
