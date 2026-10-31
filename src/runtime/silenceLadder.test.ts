@@ -156,6 +156,16 @@ async function ladder(
     const name = marks[marks.length - 1];
     bridge.handleTwilioFrame({ event: "mark", streamSid: "MZ-test", mark: { name } } as never);
   };
+  /**
+   * A response that carries nothing: `response.created`, then
+   * `response.done`, and no transcript or audio in between. What Grok sends
+   * when asked for a turn the model has nothing to say in.
+   */
+  const emptyReply = () => {
+    epoch += 1;
+    handlers.onResponseStarted?.();
+    handlers.onResponseDone();
+  };
   return {
     bridge,
     session,
@@ -167,6 +177,7 @@ async function ladder(
     speak,
     generate,
     echoMark,
+    emptyReply,
     handlers: () => handlers,
   };
 }
@@ -859,3 +870,100 @@ describe("an agent that stalls on a heard caller is asked to carry on (v151)", (
   });
 });
 
+
+describe("a nudge the agent answers with nothing stands down instead of ending the call (v156)", () => {
+  // Corpus, 2026-10-30, every runtime call that a nudge preceded and that
+  // ended as dead_air: surgery CA242a8104f7791ec79e09ffeb6a6519bd ("Thank
+  // you." / "Take care."), CAdead5c981d5a7038d3d951c6846675bf ("You're
+  // welcome. Safe travels."), CAb67ae61f44b85939ef627bf68e699014 (the caller
+  // said "Hold one." to look up their surgeon, the agent said "Sure."); tech
+  // CA8a051f43984a06b2968d0cf697820db1 (a sign-off with the caller's name),
+  // CA32c24a7a68187c19a50609bd44a46211; records
+  // CAe646b37e8bad9a4c2bc4aac27c3be7a6, CAfe5ed6728528aa480b9416ff967d9a1e
+  // ("Alright, take care."); optical CA69a3b6d8274ede8cee7cb1a818e7ef06
+  // ("when you remember, tell me", in Spanish); pcp
+  // CA567610a3f48351643e3023b1895a2550, CA8f6fc8f2b4080a0b6c66ec32faffeedd.
+  // Each time the model answered the nudge with an empty response, the
+  // agent's 30-second watchdog fired, and the caller heard the
+  // technical-trouble line after being told goodbye.
+  const nudged = async (callerSaid: string, agentSaid: string) => {
+    const h = await ladder();
+    h.speak("How can I help you today?");
+    h.handlers().onCallerTranscript(callerSaid, "i1");
+    h.speak(agentSaid);
+    expect(h.timers.fire(WINDOW)).toBe(true);
+    expect(h.session.requestResponse).toHaveBeenCalledTimes(1);
+    return h;
+  };
+
+  it.each([
+    ["Thank you.", "Take care."],
+    ["Thank you.", "You're welcome. Safe travels."],
+    ["No, thank you.", "You're welcome, Dana. Take care."],
+    ["Hold one.", "Sure."],
+    ["A ver.", "Pienso en el lugar. Cuando se acuerde, me dice."],
+  ])("caller %j, agent %j, then an empty answer: no dead air, the ladder stands down", async (callerSaid, agentSaid) => {
+    const h = await nudged(callerSaid, agentSaid);
+    h.emptyReply();
+    expect(h.timers.armed(AGENT_WINDOW)).toBe(0);
+    expect(h.timers.fire(AGENT_WINDOW)).toBe(false);
+    expect(h.timers.fire(WINDOW)).toBe(false);
+    expect(h.outcomes).toEqual([]);
+    await h.bridge.handleTwilioFrame({ event: "stop", streamSid: "MZ-test" } as never);
+    expect(h.records[0].outcome).not.toBe("dead_air");
+    expect(h.records[0].silenceStoodDown).toBe(true);
+    expect(h.records[0].agentStallNudges).toBe(1);
+  });
+
+  it("a nudge the wire never answers still ends at the watchdog: that is a provider stall", async () => {
+    const h = await nudged("I need a refill on my eye drops.", "Let me make sure the team has your details.");
+    expect(h.timers.fire(AGENT_WINDOW)).toBe(true);
+    expect(h.outcomes).toEqual(["dead_air"]);
+  });
+
+  it("a response that finishes without a new one being created is not the nudge's answer", async () => {
+    // A `response.done` belonging to the turn before the nudge (no
+    // `response.created` after it) must not stand the watchdog down.
+    const h = await nudged("I need a refill on my eye drops.", "Let me make sure the team has your details.");
+    h.handlers().onResponseDone();
+    expect(h.timers.armed(AGENT_WINDOW)).toBe(1);
+  });
+
+  it("a nudge answered with words hands the silence back to the caller, as before", async () => {
+    const h = await nudged("I need a refill on my eye drops.", "Let me make sure the team has your details.");
+    h.speak("I've filed that. Is there anything else I can help you with?");
+    h.handlers().onResponseDone();
+    expect(h.timers.armed(AGENT_WINDOW)).toBe(0);
+    expect(h.timers.armed(WINDOW)).toBe(1);
+  });
+
+  it("a nudged response that called a tool keeps the agent's watchdog: the follow-up owns the silence", async () => {
+    const h = await nudged("I need a refill on my eye drops.", "Let me make sure the team has your details.");
+    // White-box, as the deferral tests above are: the tool path has its own
+    // suites; pinned here is only that an empty answer carrying a tool is not
+    // read as the agent declining.
+    (h.bridge as unknown as Record<string, unknown>).pendingToolCalls = 1;
+    h.emptyReply();
+    expect(h.timers.armed(AGENT_WINDOW)).toBe(1);
+  });
+
+  it("a tool answer that settled inside the nudged response still gets its follow-up and its watchdog", async () => {
+    const h = await nudged("I need a refill on my eye drops.", "Let me make sure the team has your details.");
+    // The nudged response carried a tool that answered before its done; the
+    // follow-up is requested AT that done, so the empty response is not the
+    // agent declining.
+    (h.bridge as unknown as Record<string, unknown>).followUpOwed = true;
+    h.emptyReply();
+    expect(h.session.requestResponse).toHaveBeenCalledTimes(2);
+    expect(h.timers.armed(AGENT_WINDOW)).toBe(1);
+  });
+
+  it("the caller speaking after the nudge takes the turn back; a late empty answer changes nothing", async () => {
+    const h = await nudged("I need a refill on my eye drops.", "Let me make sure the team has your details.");
+    h.handlers().onSpeechStopped();
+    h.handlers().onCallerTranscript("Hello? Are you there?", "i2");
+    h.emptyReply();
+    // The caller's own turn now owes a reply, so the agent's clock stays.
+    expect(h.timers.armed(AGENT_WINDOW)).toBe(1);
+  });
+});

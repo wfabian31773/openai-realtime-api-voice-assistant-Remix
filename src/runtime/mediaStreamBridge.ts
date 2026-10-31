@@ -968,6 +968,12 @@ export class VoiceCallBridge {
   private stallNudgeStrikes = 0;
   /** v151: the same, cumulatively, for the record. Never reset. */
   private agentStallNudges = 0;
+  /**
+   * v156: the nudge still waiting for its answer — the response epoch when it
+   * was sent, and how many tool follow-ups had been requested by then.
+   * `settleStallNudge` reads it at the next `response.done`.
+   */
+  private stallNudgePending: { epoch: number; followUps: number } | null = null;
 
   private goodbyeTimer: unknown = null;
   private goodbyeGraceHangup = false;
@@ -1040,6 +1046,8 @@ export class VoiceCallBridge {
         if (text.trim()) {
           this.silenceStrikes = 0;
           this.stallNudgeStrikes = 0;
+          // The caller took the turn back; the nudge has nothing left to answer.
+          this.stallNudgePending = null;
         }
         // Straight through, greeting or no greeting. Where the greeting's own
         // line sits was settled when its audio started, so there is no
@@ -2045,6 +2053,49 @@ export class VoiceCallBridge {
       this.goodbyeResponse.done = true;
       this.armGoodbyeGrace();
     }
+    this.settleStallNudge();
+  }
+
+  /**
+   * THE AGENT ANSWERED A NUDGE WITH NOTHING (v156).
+   *
+   * A nudge arms the agent's 30-second watchdog, because the agent now owes
+   * a turn. When the model has nothing to add — the commonest case is a call
+   * that has already closed: "Thank you." / "Take care." — Grok answers with
+   * a response that carries no audio: `response.created`, then
+   * `response.done`, and no transcript. `handleAudioDone` never runs, so
+   * nothing re-arms the caller's window, the watchdog fires, and the call
+   * is torn down as `dead_air` with the technical-trouble line spoken to a
+   * caller who had just been told goodbye. On 2026-10-30 that was 10 of the
+   * 92 calls a nudge fired on (the other 82 were answered or ended normally),
+   * including a caller who had said "Hold one." to look up their surgeon.
+   *
+   * An empty answer is the agent declining the turn, which is the state
+   * v131 left a heard caller in: the silence is theirs, the ladder stands
+   * down, and the call ends on their hangup or the ceiling. A nudge that
+   * the wire never answers at all (no `response.created`) still ends at the
+   * watchdog — that IS a provider stall — and so does a nudged response
+   * that called a tool, whose own follow-up owns the silence.
+   */
+  private settleStallNudge(): void {
+    const nudge = this.stallNudgePending;
+    if (nudge === null) return;
+    // Only a response created AFTER the nudge can be its answer.
+    if (this.session.getResponseEpoch() <= nudge.epoch) return;
+    this.stallNudgePending = null;
+    // A tool took the turn; its follow-up and its watchdog own what happens next.
+    if (this.pendingToolCalls > 0 || this.followUpOwed || this.followUps.requested !== nudge.followUps) return;
+    if (this.endRequested || this.transferInFlight || this.goodbyeTimer !== null) return;
+    // Still the watchdog the nudge armed. Words the caller heard moved it to
+    // "utterance" and then to the caller's window, so an answer with words
+    // never reaches the line below.
+    if (this.deadAirCause !== "response") return;
+    this.silenceStoodDown = true;
+    this.clearDeadAir();
+    console.info(
+      `[bridge] the agent answered the nudge with nothing on ${this.deps.context.callSid} — ` +
+        `standing down without ending the call`,
+    );
   }
 
   private lastAgentLine(): string {
@@ -2497,6 +2548,10 @@ export class VoiceCallBridge {
         // provider slow to start must not get a second nudge queued behind
         // the first (Codex P2 on #404). The response's own completion
         // re-arms the caller's window, as every completed turn does.
+        this.stallNudgePending = {
+          epoch: this.session.getResponseEpoch(),
+          followUps: this.followUps.requested,
+        };
         this.session.requestResponse();
         this.armDeadAir("response");
         return;

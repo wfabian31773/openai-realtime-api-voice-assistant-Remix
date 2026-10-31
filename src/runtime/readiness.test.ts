@@ -135,7 +135,7 @@ describe("runtime readiness", () => {
    * quietly drop it and put us back where we were.
    */
   it("carries the date it was set, so a build's age is readable from the marker", () => {
-    expect(VOICE_RUNTIME_DEPLOY_MARKER).toBe("voice-runtime-v155-pcp-gap-list-from-director-20261030");
+    expect(VOICE_RUNTIME_DEPLOY_MARKER).toBe("voice-runtime-v156-an-empty-nudge-reply-stands-down-20261031");
     expect(VOICE_RUNTIME_DEPLOY_MARKER).toMatch(/-\d{8}$/);
     expect(markerSetOn()).not.toBeNull();
   });
