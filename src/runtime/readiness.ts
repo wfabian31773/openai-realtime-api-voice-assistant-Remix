@@ -1067,8 +1067,17 @@ import { callEnvironment } from "./callRecord";
  * `src/pcp/intakeGapsFromDirector.test.ts`. Above main's v154 (#391,
  * 31c5251). No migration; production impact remains unmeasured.
  */
+/**
+ * v156 — A NUDGE THE AGENT ANSWERS WITH NOTHING STANDS DOWN (2026-10-31).
+ * v153's agent-stall nudge arms the agent's watchdog; an empty response
+ * (created, done, no transcript) never re-armed the caller's window, so the
+ * call ended as dead_air with the technical-trouble line — 10 of 92 nudged
+ * calls on 2026-10-30. `settleStallNudge` stands the ladder down instead.
+ * Above main's v155 (#409, 1ddaa9f). No migration; production impact
+ * remains unmeasured.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v155-pcp-gap-list-from-director-20261030";
+  "voice-runtime-v156-an-empty-nudge-reply-stands-down-20261031";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can
