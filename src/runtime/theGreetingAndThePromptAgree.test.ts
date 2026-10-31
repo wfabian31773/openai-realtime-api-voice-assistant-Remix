@@ -95,21 +95,35 @@ describe('an unvalidated match: no name anywhere, and the funnel ends without a 
       expect(prompt).toContain('This number matches someone on file');
       expect(prompt).toMatch(/first and\s+last name\?"/);
       expect(prompt).toMatch(/call lookup_patient with what they say/);
+      expect(prompt).toMatch(/patient's first and last name/);
     });
 
-    it(`${lane} does not ask a date of birth once the lookup is certain`, () => {
-      expect(prompt).toMatch(/identity_is_certain true, the identity step is DONE\. Do not\s+ask for their date of birth/);
+    it(`${lane} gates the identity step on a certain name AND date-of-birth lookup`, () => {
+      expect(prompt).toMatch(/identity_is_certain true, from a name AND a\s+date of birth, completes the identity step/);
+      expect(prompt).toMatch(/A name alone is never certain:\s+do not skip the date of birth on a name-only lookup/);
+      expect(prompt).not.toMatch(/Do not\s+ask for their date of birth — we hold it/);
     });
 
-    it(`${lane} still asks the date of birth when the lookup is not certain`, () => {
-      expect(prompt).toMatch(/If it does not, ask the date of birth/);
-      expect(prompt).toContain('CALL lookup_patient AGAIN with all three');
+    it(`${lane} still asks again when the lookup is not certain`, () => {
+      expect(prompt).toMatch(/If it does not come back certain, ask again/);
+      expect(prompt).toContain('CALL lookup_patient\n  AGAIN with all three');
+    });
+
+    it(`${lane} takes the PATIENT's details from a proxy caller (calling for a parent)`, () => {
+      expect(prompt).toMatch(/calling for someone else \(a parent/);
+      expect(prompt).toMatch(/take the\s+PATIENT's details: the caller's own only if the call is about them/);
+      expect(prompt).toMatch(/Never\s+file a request about someone else under the caller's name/);
+      const ask = prompt.indexOf('Ask how you can help BEFORE any name');
+      expect(ask).toBeGreaterThan(-1);
+      expect(ask).toBeLessThan(prompt.indexOf("Ask the patient's first and last name"));
     });
   }
 
   it('greetingNamedThem is false, and the ask script and the meaning take the candidate arm', () => {
     expect(greetingNamedThem(CANDIDATE)).toBe(false);
-    expect(identityAskScript(CANDIDATE)).toMatch(/Skip the date of birth once lookup_patient has said\s+identity_is_certain true/);
+    expect(identityAskScript(CANDIDATE)).toMatch(/A name alone is never certain: ask the date of\s+birth too/);
+    expect(identityAskScript(CANDIDATE)).not.toMatch(/Skip the date of birth/);
+    expect(identityAskScript(CANDIDATE)).toMatch(/PATIENT's details when the call is about someone\s+else/);
     expect(identityAskScript(CANDIDATE)).not.toContain('the block above says\nnot to ask');
     expect(identityCertainMeaning(CANDIDATE)).not.toContain('Then confirm the');
     expect(identityCertainMeaning(CANDIDATE)).toContain('never say a name they have not said');
