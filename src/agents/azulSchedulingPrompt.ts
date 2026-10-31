@@ -28,6 +28,9 @@ export interface AzulPrecontext {
   dobOnFile?: string | null;
   language?: string | null;
   hasChart?: boolean;
+  /** True only once something has validated the match (#384); the greeting
+   *  says the name only then, and the recognised-caller block follows it. */
+  identityValidated?: boolean;
 }
 
 export interface AzulSchedulingMetadata {

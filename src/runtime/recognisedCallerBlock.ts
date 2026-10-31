@@ -60,9 +60,38 @@
  * the block exactly as before; that half was always right.
  */
 
+import { recognisedFirstName } from '../services/greetingPersonalisation';
+
 export interface RecognisedCaller {
   matched?: boolean;
   firstName?: string;
+  /** Set only when something has validated the match; see `greetingNamedThem`. */
+  identityValidated?: boolean;
+}
+
+/**
+ * WHETHER THE GREETING SAID THEIR NAME (v157) — the one question the block,
+ * the ask script and the `identity_is_certain` guidance all turn on.
+ *
+ * Answered by `recognisedFirstName`, the function the runtime itself uses to
+ * build the greeting, so the prompt can never again describe a greeting the
+ * caller did not hear. #384 (VA-76205) made that function return no name
+ * unless the match is validated, and nothing sets `identityValidated` yet, so
+ * from the 2026-10-30 deploy no greeting said a name. The block went on
+ * telling the model "Your greeting has already ASKED 'Am I speaking with
+ * <name>?'", with the name in it. Recognised queue-lane callers, 10-29 against
+ * 10-30: greeted by name 251 of 251 against 2 of 238; asked their date of
+ * birth 15 against 132; a certain lookup 231 against 104; the model speaking
+ * the candidate's name itself 12 against 34; filed (write-back) 235 against
+ * 187; date-of-birth refusals 3 against 30.
+ */
+export function greetingNamedThem(pc: RecognisedCaller | undefined): boolean {
+  return recognisedFirstName(pc) !== '';
+}
+
+/** Caller ID matched someone, but the greeting did not say who. */
+function candidateOnly(pc: RecognisedCaller | undefined): boolean {
+  return !!pc?.matched && !!pc.firstName && !greetingNamedThem(pc);
 }
 
 /**
@@ -73,8 +102,9 @@ export interface RecognisedCaller {
  * say so out loud.
  */
 export function recognisedCallerBlock(pc: RecognisedCaller | undefined): string {
+  if (candidateOnly(pc)) return CANDIDATE_BLOCK;
   if (!pc?.matched || !pc.firstName) return '';
-  const name = pc.firstName;
+  const name = pc.firstName as string;
   return `
 ### You already know who this probably is
 This number matches one person on file: first name "${name}".
@@ -95,6 +125,25 @@ This number matches one person on file: first name "${name}".
 - Disclose nothing from anyone's record on the strength of this match.
 `;
 }
+
+/**
+ * THE CANDIDATE ARM (v157): caller ID matched someone and the greeting did not
+ * say a name. No name appears here, so the model cannot speak one (#384's
+ * intent), and the funnel is RULE ZERO 2b's: one question for the name, then a
+ * lookup that carries it. A certain answer locks the record, and we hold the
+ * date of birth from then on, so it is not asked (RULE ZERO step 5).
+ */
+const CANDIDATE_BLOCK = `
+### This number matches someone on file
+Nobody has confirmed the caller is that person, so the greeting said no name.
+Do not say a name, guess one, or say we recognised their number.
+- After they tell you what they need, ask "May I please have your first and
+  last name?" and call lookup_patient with what they say.
+- If it comes back identity_is_certain true, the identity step is DONE. Do not
+  ask for their date of birth — we hold it.
+- If it does not, ask the date of birth as below and call lookup_patient again.
+- Disclose nothing from anyone's record until lookup_patient says certain.
+`;
 
 /**
  * The lanes that compose their prompt from this block, and the module each
@@ -173,6 +222,13 @@ const ASK_QUESTIONS = `  "May I please have your first and last name?"
    then the day, then the year?"`;
 
 export function identityAskScript(pc: RecognisedCaller | undefined): string {
+  if (candidateOnly(pc)) {
+    return `### Lead the ask — one at a time, in this shape
+${ASK_QUESTIONS}
+Never both in one breath, never a bare "date of birth" — say the order every
+time you DO ask. Skip the date of birth once lookup_patient has said
+identity_is_certain true for the name they gave.`;
+  }
   const recognised = !!pc?.matched && !!pc.firstName;
 
   if (!recognised) {
@@ -284,6 +340,9 @@ loses it.`;
  * trigger it. Enumerate the branches before choosing the key.
  */
 export function identityCertainMeaning(pc: RecognisedCaller | undefined): string {
+  if (candidateOnly(pc)) {
+    return `If lookup_patient says identity_is_certain is false, ask the date of birth as above, then CALL lookup_patient AGAIN with all three. Never tell the caller how many records matched, and never say a name they have not said.`;
+  }
   const recognised = !!pc?.matched && !!pc.firstName;
 
   if (!recognised) {

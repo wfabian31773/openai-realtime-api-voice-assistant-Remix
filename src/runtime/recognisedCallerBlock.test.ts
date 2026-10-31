@@ -78,7 +78,7 @@ const agentPromptText = (module: string) =>
     .filter((line) => !/^\s*(\/\/|\/\*|\*)/.test(line))
     .join('\n');
 
-const BLOCK = recognisedCallerBlock({ matched: true, firstName: 'Wayne' });
+const BLOCK = recognisedCallerBlock({ matched: true, firstName: 'Wayne', identityValidated: true });
 
 describe('the block is composed from ONE copy, and every lane imports it', () => {
   /**
@@ -213,7 +213,7 @@ describe('an unrecognised caller gets no block at all', () => {
   });
 
   it('uses the caller’s own first name when there is one', () => {
-    expect(recognisedCallerBlock({ matched: true, firstName: 'Rosa' })).toContain(
+    expect(recognisedCallerBlock({ matched: true, firstName: 'Rosa', identityValidated: true })).toContain(
       'Am I speaking with Rosa?',
     );
   });
@@ -235,7 +235,7 @@ describe('the ask script agrees with the block above it', () => {
    * model given both may keep asking, and then the affirmed match buys the
    * caller nothing while the change still reads as shipped.
    */
-  const RECOGNISED = { matched: true, firstName: 'Wayne' };
+  const RECOGNISED = { matched: true, firstName: 'Wayne', identityValidated: true };
 
   it('an unrecognised caller still gets the unconditional instruction', () => {
     const cold = identityAskScript(undefined);
@@ -305,7 +305,7 @@ describe('How a call runs agrees with the block — leftover on #310', () => {
    * Tests that only asserted `identityAskScript` stayed green with that
    * paragraph intact. Mutate the leftover or the review is decoration.
    */
-  const RECOGNISED = { matched: true, firstName: 'Wayne' };
+  const RECOGNISED = { matched: true, firstName: 'Wayne', identityValidated: true };
 
   it('an unrecognised caller is still told to collect last name and date of birth', () => {
     const cold = identityCertainMeaning(undefined);

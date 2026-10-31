@@ -108,7 +108,7 @@ describe('a phone that carries two people', () => {
 
 describe('the recognised-caller block feeds the tool the affirmed name', () => {
   it('tells the model to call lookup_patient with first_name after a YES', () => {
-    const block = recognisedCallerBlock({ matched: true, firstName: 'Zelda' } as never);
+    const block = recognisedCallerBlock({ matched: true, firstName: 'Zelda', identityValidated: true } as never);
     const yes = block.slice(block.indexOf('If they said YES'));
     expect(yes).toMatch(/Call lookup_patient\s+with first_name "Zelda"/);
   });
