@@ -1159,7 +1159,8 @@ import {
   urgentFallbackTicketParams,
   type UrgentTransferSmsOptions,
 } from './services/urgentTransferAlert';
-import { isTestCall } from './services/testCalls';
+import { isTestCall, markSipTestCall } from './services/testCalls';
+import { TEST_CALL_ENVIRONMENT } from './runtime/callRecord';
 import { markCallConcluded, getCallConclusion, linkConferenceToCall, callIdForConference } from './services/callConclusion';
 import { filesTickets } from './config/agentCapabilities';
 import { recordCallerSpeech, releaseCallerSpeech } from './services/symptomCorroboration';
@@ -2569,7 +2570,7 @@ async function observeCall(
             agentId: agentRecord?.id,
             status: 'in_progress',
             startTime: new Date(),
-            environment: environment,
+            environment: isTestCall({ callSid: twilioCallSid }) ? TEST_CALL_ENVIRONMENT : environment,
             agentUsed: effectiveSlug,
             agentVersion: agentVersionForLog,
             dialedNumber: to || undefined,
@@ -5099,6 +5100,7 @@ export function setupVoiceAgentRoutes(app: Express): void {
         let conferenceNameFromSIP: string | undefined;
         let dialedPhoneNumber: string | undefined;
         let callerPhoneNumber: string | undefined;
+        let xCallerPhone: string | undefined;
         let agentSlugFromSIP: string | undefined;
         let sipDomain: string | undefined; // Domain from SIP URI for environment isolation check
         let callEnvironment: string | undefined; // Environment tag from originating server
@@ -5164,6 +5166,7 @@ export function setupVoiceAgentRoutes(app: Express): void {
           // Prefer X-CallerPhone (actual caller) over From header (Twilio's number)
           if (callerPhoneHeader?.value) {
             callerPhoneNumber = decodeURIComponent(callerPhoneHeader.value);
+            xCallerPhone = callerPhoneNumber;
             console.info(`[WEBHOOK] Caller number from X-CallerPhone: ${callerPhoneNumber}`);
           } else if (fromHeader?.value) {
             // Fallback to From header for legacy flows
@@ -5366,6 +5369,12 @@ export function setupVoiceAgentRoutes(app: Express): void {
         const languageForCall = isSpanishCall ? 'es' : 'en';
         console.info(`[WEBHOOK] Creating session for call: ${callId} with voice=${voiceForCall}, language=${languageForCall}`);
         
+        // Before the agent exists: the SIP filing paths read this by CallSid.
+        const twilioCallSidFromSIP = conferenceNameFromSIP?.replace(/^(test_|outbound_)?conf_/, '');
+        if (markSipTestCall({ callSid: twilioCallSidFromSIP, xCallerPhone, dialedNumber: realDialedNumber })) {
+          console.info(`[WEBHOOK] ${twilioCallSidFromSIP}: test call, nothing is filed or texted`);
+        }
+
         // Extend metadata with voice/language settings and caller info for session configuration
         const extendedMetadata = {
           ...fullMetadata,
@@ -5376,7 +5385,7 @@ export function setupVoiceAgentRoutes(app: Express): void {
           // CRITICAL: Only use realDialedNumber (from mapping) - dialedPhoneNumber from SIP is project ID, not phone
           // Don't fall back to dialedPhoneNumber as it's like "proj_fsAu2Z4CM..." which fails ticketing validation
           dialedPhoneFromSIP: realDialedNumber || undefined,
-          twilioCallSidFromSIP: conferenceNameFromSIP?.replace(/^(test_|outbound_)?conf_/, ''),
+          twilioCallSidFromSIP,
           conferenceNameFromSIP,
         };
         

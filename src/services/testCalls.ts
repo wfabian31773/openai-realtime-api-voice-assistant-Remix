@@ -11,7 +11,9 @@
  * Only OPERATOR_LINE_FROM_NUMBER and VOICE_TEST_LINE_NUMBERS (comma-separated)
  * count. Both are numbers we own, compared as whole E.164 values, so a patient
  * can never match by accident. A ticket's callback number is deliberately NOT
- * read: a real caller may leave any number.
+ * read: a real caller may leave any number. TWILIO_PHONE_NUMBER never counts,
+ * even if listed: the old core writes it in place of a dialled number it could
+ * not find, and SIP's own From header carries it, on real patients' calls.
  *
  * The marks live on globalThis because a dynamic import can evaluate a module
  * twice on Node 20 (the v78/v90/v141 class), and an empty second copy here
@@ -30,14 +32,17 @@ function marks(): Set<string> {
 }
 
 function e164(phone: string | null | undefined): string | null {
-  const digits = (phone ?? "").replace(/\D/g, "");
-  if (digits.length === 10) return `1${digits}`;
+  const raw = (phone ?? "").trim();
+  const digits = raw.replace(/\D/g, "");
+  // Only a number with no country code is assumed to be US: +45 82 34 56 78 is
+  // ten digits too, and is not +1 458 234 5678.
+  if (digits.length === 10 && !raw.startsWith("+")) return `1${digits}`;
   return digits.length >= 8 && digits.length <= 15 ? digits : null;
 }
 
 export function isTestLineNumber(phone: string | null | undefined, env: Env = process.env): boolean {
   const target = e164(phone);
-  if (!target) return false;
+  if (!target || target === e164(env.TWILIO_PHONE_NUMBER)) return false;
   return [env.OPERATOR_LINE_FROM_NUMBER, ...(env.VOICE_TEST_LINE_NUMBERS ?? "").split(",")]
     .some((line) => e164(line) === target);
 }
@@ -55,6 +60,22 @@ export function isTestCall(
 ): boolean {
   return (Boolean(call.callSid) && marks().has(call.callSid!))
     || isTestLineNumber(call.callerPhone, env) || isTestLineNumber(call.dialedNumber, env);
+}
+
+/**
+ * The old core's half. Its SIP filing paths hand the ticket client a CallSid and
+ * little else, so the mark is what suppresses them. `xCallerPhone` is our own
+ * X-CallerPhone header and `dialedNumber` the conference mapping, the caller's
+ * and dialled numbers Twilio gave us. SIP's From and To are not passed: they are
+ * Twilio's number and the OpenAI project id.
+ */
+export function markSipTestCall(
+  call: { callSid?: string | null; xCallerPhone?: string | null; dialedNumber?: string | null },
+  env: Env = process.env,
+): boolean {
+  if (!call.callSid || !isTestCall({ callerPhone: call.xCallerPhone, dialedNumber: call.dialedNumber }, env)) return false;
+  markTestCall(call.callSid);
+  return true;
 }
 
 /** The number a suppressed filing answers with, so the agent carries on as it would. */

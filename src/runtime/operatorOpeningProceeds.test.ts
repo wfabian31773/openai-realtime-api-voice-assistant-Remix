@@ -106,6 +106,55 @@ describe("v159: an operator call carries on after its opening", () => {
     expect(c.session.requestResponse).not.toHaveBeenCalled();
   });
 
+  it("speech that crosses the end of the opening is still answered when the provider stays silent", async () => {
+    const c = await call(true);
+    c.openingPlays();
+    c.handlers.onSpeechStarted();
+    c.played();
+    c.handlers.onSpeechStopped();
+    expect(c.session.requestResponse).not.toHaveBeenCalled();
+    expect(c.fire(OPENING_PROCEED_MS)).toBe(true);
+    expect(c.session.requestResponse).toHaveBeenCalledOnce();
+  });
+
+  it("a reply inside the window is answered too when the provider stays silent", async () => {
+    const c = await call(true);
+    c.openingPlays();
+    c.played();
+    c.handlers.onSpeechStarted();
+    c.handlers.onSpeechStopped();
+    expect(c.fire(OPENING_PROCEED_MS)).toBe(true);
+    expect(c.session.requestResponse).toHaveBeenCalledOnce();
+  });
+
+  it("does not add a request when the provider answers that speech, and the next window is the full one", async () => {
+    const c = await call(true);
+    c.openingPlays();
+    c.handlers.onSpeechStarted();
+    c.played();
+    c.handlers.onSpeechStopped();
+    c.newResponse();
+    c.handlers.onResponseStarted?.();
+    c.handlers.onAgentTranscriptDelta("Yes, thanks.");
+    c.handlers.onAudioDelta(Buffer.alloc(800).toString("base64"));
+    c.handlers.onAudioDone("Yes, thanks.");
+    c.handlers.onResponseDone();
+    c.played();
+    expect(c.fire(OPENING_PROCEED_MS)).toBe(false);
+    expect(c.session.requestResponse).not.toHaveBeenCalled();
+  });
+
+  it("speech already answered by a response is not retried after it stops", async () => {
+    const c = await call(true);
+    c.openingPlays();
+    c.handlers.onSpeechStarted();
+    c.played();
+    c.newResponse();
+    c.handlers.onSpeechStopped();
+    expect(c.fire(OPENING_PROCEED_MS)).toBe(false);
+    expect(c.session.requestResponse).not.toHaveBeenCalled();
+  });
+
   it("a patient lane is unchanged: nothing is requested and the ladder keeps its window", async () => {
     const c = await call(false);
     c.handlers.onSpeechStarted();
@@ -120,5 +169,12 @@ describe("v159: an operator call carries on after its opening", () => {
     expect(quiet.fire(OPENING_PROCEED_MS)).toBe(false);
     expect(quiet.fire(WINDOW)).toBe(true);
     expect(quiet.session.speak).toHaveBeenCalledWith(SILENCE_PROMPT_LINE, { interruptible: true });
+
+    const crossing = await call(false);
+    crossing.openingPlays();
+    crossing.handlers.onSpeechStarted();
+    crossing.played();
+    crossing.handlers.onSpeechStopped();
+    expect(crossing.fire(OPENING_PROCEED_MS)).toBe(false);
   });
 });

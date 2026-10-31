@@ -12,7 +12,8 @@ vi.hoisted(() => {
 import { ticketingApiClient } from "../../server/services/ticketingApiClient";
 import { toCallLogRow } from "../runtime/callRecord";
 import { defaultUrgentTransferAlerts } from "../runtime/urgentTransferAlerts";
-import { clearTestCallsForTests, isTestCall, isTestLineNumber, markTestCall, TEST_TICKET_PREFIX } from "./testCalls";
+import { readFileSync } from "node:fs";
+import { clearTestCallsForTests, isTestCall, isTestLineNumber, markSipTestCall, markTestCall, TEST_TICKET_PREFIX } from "./testCalls";
 
 const OPERATOR = "+15555550100";
 const TEST_LINE = "+15555550177";
@@ -47,6 +48,19 @@ describe("what counts as a test call", () => {
     delete process.env.OPERATOR_LINE_FROM_NUMBER;
     delete process.env.VOICE_TEST_LINE_NUMBERS;
     expect(isTestCall({ callerPhone: OPERATOR })).toBe(false);
+  });
+
+  it("does not read an international number as the US number with the same ten digits", () => {
+    const env = { OPERATOR_LINE_FROM_NUMBER: "+14582345678" };
+    expect(isTestLineNumber("+4582345678", env)).toBe(false);
+    expect(isTestLineNumber("+45 82 34 56 78", env)).toBe(false);
+    expect(isTestLineNumber("+14582345678", env)).toBe(true);
+    expect(isTestLineNumber("4582345678", env)).toBe(true);
+    expect(isTestLineNumber("+4582345678", { OPERATOR_LINE_FROM_NUMBER: "+4582345678" })).toBe(true);
+  });
+
+  it("the shared Twilio number never counts, even if listed", () => {
+    expect(isTestLineNumber(OPERATOR, { OPERATOR_LINE_FROM_NUMBER: OPERATOR, TWILIO_PHONE_NUMBER: OPERATOR })).toBe(false);
   });
 
   it("a marked CallSid counts with no numbers at hand, as the tools have", () => {
@@ -92,6 +106,45 @@ describe("a test call never reaches the ticketing app", () => {
     process.env.TICKETING_API_KEY = "synthetic";
     await ticketingApiClient.createTicket({ ...(ticket as object), patientPhone: PATIENT, callData: { callSid: `CA${"d".repeat(32)}`, callerPhone: PATIENT } } as never).catch(() => undefined);
     expect(fetchSpy).toHaveBeenCalled();
+  });
+});
+
+describe("the SIP path, whose filing tools hand over only a CallSid", () => {
+  const posted = async () => {
+    fetchSpy.mockResolvedValue(new Response(JSON.stringify({ success: true, ticketNumber: "PCP-1" }), { status: 200, headers: { "content-type": "application/json" } }));
+    process.env.TICKETING_SYSTEM_URL = "https://ticketing.example";
+    process.env.TICKETING_API_KEY = "synthetic";
+    await ticketingApiClient.createPcpTicket({ callSid: SID } as never).catch(() => undefined);
+    return fetchSpy.mock.calls.length > 0;
+  };
+
+  it("a test number on X-CallerPhone or the dialled mapping suppresses the CallSid-only filing", async () => {
+    expect(markSipTestCall({ callSid: SID, xCallerPhone: OPERATOR, dialedNumber: "+15555550999" })).toBe(true);
+    expect(await posted()).toBe(false);
+    clearTestCallsForTests();
+    expect(markSipTestCall({ callSid: SID, xCallerPhone: PATIENT, dialedNumber: TEST_LINE })).toBe(true);
+    expect(await posted()).toBe(false);
+  });
+
+  it("a real caller on a real line is not marked and still files", async () => {
+    expect(markSipTestCall({ callSid: SID, xCallerPhone: PATIENT, dialedNumber: "+15555550999" })).toBe(false);
+    expect(await posted()).toBe(true);
+  });
+
+  it("no CallSid, or missing numbers, marks nothing", () => {
+    expect(markSipTestCall({ callSid: undefined, xCallerPhone: OPERATOR })).toBe(false);
+    expect(markSipTestCall({ callSid: SID })).toBe(false);
+    expect(isTestCall({ callSid: SID })).toBe(false);
+  });
+
+  it("the webhook marks from X-CallerPhone and the mapping, before the session, and tags the row", () => {
+    const src = readFileSync(new URL("../voiceAgentRoutes.ts", import.meta.url), "utf8");
+    expect(src).toContain("markSipTestCall({ callSid: twilioCallSidFromSIP, xCallerPhone, dialedNumber: realDialedNumber })");
+    expect(src.indexOf("markSipTestCall({")).toBeLessThan(src.indexOf("const extendedMetadata = {"));
+    // Only the header: the From fallback carries Twilio's number on a real call.
+    expect(src).toMatch(/callerPhoneNumber = decodeURIComponent\(callerPhoneHeader\.value\);\s+xCallerPhone = callerPhoneNumber;/);
+    expect(src.match(/xCallerPhone = /g)).toHaveLength(1);
+    expect(src).toContain("environment: isTestCall({ callSid: twilioCallSid }) ? TEST_CALL_ENVIRONMENT : environment");
   });
 });
 

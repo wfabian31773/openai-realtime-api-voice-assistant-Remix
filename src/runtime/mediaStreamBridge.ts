@@ -1844,6 +1844,7 @@ export class VoiceCallBridge {
   private callerSpokeOverOpening = false;
   private openingProceedArmed = false;
   private openingProceedSettled = false;
+  private openingPlayed = false;
 
   private releaseGreetingLock(): void {
     const wasLocked = this.greetingLocked;
@@ -1873,10 +1874,12 @@ export class VoiceCallBridge {
    */
   private proceedPastOpening(): void {
     if (!this.deps.proceedAfterOpening || this.ended || this.openingProceedSettled) return;
+    this.openingPlayed = true;
     if (this.turnTakenSinceOpening()) {
       this.openingProceedSettled = true;
       return;
     }
+    // Still talking: handleCallerSpeechStopped picks this up when they finish.
     if (this.callerSpeaking) return;
     if (this.callerSpokeOverOpening) {
       this.takeTurnAfterOpening();
@@ -2025,6 +2028,17 @@ export class VoiceCallBridge {
     // utterance nor its audio arrives before the ceiling, the call is
     // stuck in dead air — tear down rather than bill silence.
     this.armDeadAir("response");
+    // The opening has played and nobody has taken a turn since. The provider
+    // normally answers now, so it gets the short window first; requesting at
+    // once could race its own response.
+    if (this.deps.proceedAfterOpening && this.openingPlayed && !this.openingProceedSettled) {
+      if (this.turnTakenSinceOpening()) {
+        this.openingProceedSettled = true;
+      } else {
+        this.openingProceedArmed = true;
+        this.armDeadAir("caller");
+      }
+    }
     // Under the greeting lock this arm does not survive: the greeting is
     // still playing, its deltas re-arm the clock as `"utterance"`, and its
     // completion clears it. Remember the debt so completion can re-arm it.
@@ -2569,6 +2583,8 @@ export class VoiceCallBridge {
 
   private armDeadAir(cause: DeadAirCause, extraMs = 0): void {
     this.clearDeadAir();
+    // Any other clock means the turn moved on; the next caller window is the full one.
+    if (cause !== "caller") this.openingProceedArmed = false;
     this.deadAirCause = cause;
     // The caller's own window is SHORTER than the agent's, because it is not
     // a failure bound: it is how long a person is left in silence before
