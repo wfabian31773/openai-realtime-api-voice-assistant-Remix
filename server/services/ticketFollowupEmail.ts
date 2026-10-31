@@ -80,7 +80,93 @@ function rowLine(row: FollowupNoticeRow): { html: string; text: string } {
   return { html, text };
 }
 
-export function buildFollowupEmail(rows: FollowupNoticeRow[]): EmailOptions {
+/**
+ * A transport dead letter (5xx, timeout, network, NULL status) gave up after
+ * every retry. While a confirmed filing is recent, plane B holds the critical
+ * alarm (v162), so this notice is the only word that these rows exist.
+ *
+ * last_error is NOT printed here: on a transport failure it can be the
+ * ticketing app's raw response text, which may echo request fields. The
+ * status code alone is shown; the row's detail is in the Observatory.
+ */
+export const TICKET_TRANSPORT_DEAD_LETTER = 'ticket_transport_dead_letter';
+
+export type FollowupKind = 'refusal' | 'transport';
+
+function transportRowLine(row: FollowupNoticeRow): { html: string; text: string } {
+  const sid = row.callSid ?? '(no call sid)';
+  const when = row.createdAt.toISOString();
+  const status = row.refusalStatusCode == null ? 'no HTTP status' : `HTTP ${row.refusalStatusCode}`;
+  const html =
+    `<tr>` +
+    `<td style="padding:6px 12px 6px 0;font-family:monospace;font-size:13px;">${escapeHtml(sid)}</td>` +
+    `<td style="padding:6px 12px 6px 0;font-size:13px;">${escapeHtml(row.agentUsed)} / dept ${escapeHtml(row.departmentId)}</td>` +
+    `<td style="padding:6px 12px 6px 0;font-family:monospace;font-size:13px;">${escapeHtml(when)}</td>` +
+    `<td style="padding:6px 0;font-size:13px;">${escapeHtml(status)}</td>` +
+    `</tr>`;
+  const text = `- ${sid}  ${row.agentUsed} / dept ${row.departmentId}  ${when}  ${status}`;
+  return { html, text };
+}
+
+function buildTransportEmail(rows: FollowupNoticeRow[]): EmailOptions {
+  const n = rows.length;
+  const subject =
+    n === 1
+      ? `[Azul Vision] Ticket request gave up after every retry — ${rows[0].callSid ?? rows[0].id}`
+      : `[Azul Vision] ${n} ticket requests gave up after every retry`;
+  const rendered = rows.map(transportRowLine);
+  const lead =
+    `${n} ticket request${n === 1 ? '' : 's'} gave up after every retry on a transport or server error ` +
+    'and will not retry on their own.';
+  const tail =
+    'The payloads are intact and can be replayed from the Observatory outbox. Filing itself is healthy.';
+  const html = `
+<div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#1f2937;">
+  <p style="margin:0 0 4px;font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:#b45309;font-weight:600;">
+    Azul Vision — needs follow-up
+  </p>
+  <p style="margin:0 0 16px;font-size:17px;font-weight:600;">
+    ${lead}
+    ${tail}
+  </p>
+  <table style="border-collapse:collapse;margin-bottom:16px;">
+    <tr>
+      <th style="text-align:left;padding:4px 12px 8px 0;color:#6b7280;font-size:12px;">call</th>
+      <th style="text-align:left;padding:4px 12px 8px 0;color:#6b7280;font-size:12px;">agent / department</th>
+      <th style="text-align:left;padding:4px 12px 8px 0;color:#6b7280;font-size:12px;">created (UTC)</th>
+      <th style="text-align:left;padding:4px 0 8px 0;color:#6b7280;font-size:12px;">last status</th>
+    </tr>
+    ${rendered.map((r) => r.html).join('')}
+  </table>
+  <p style="margin:0;font-size:12px;color:#9ca3af;">
+    type: ${TICKET_TRANSPORT_DEAD_LETTER}. Each row is emailed once. Resolve it from the Observatory outbox list when it is handled.
+  </p>
+</div>`.trim();
+
+  const text = [
+    'AZUL VISION — NEEDS FOLLOW-UP',
+    '',
+    lead,
+    tail,
+    '',
+    ...rendered.map((r) => r.text),
+    '',
+    `type: ${TICKET_TRANSPORT_DEAD_LETTER}`,
+  ].join('\n');
+
+  return {
+    to: alertEmailRecipient(),
+    subject: subject.slice(0, 180),
+    html,
+    text,
+  };
+}
+
+export function buildFollowupEmail(
+  rows: FollowupNoticeRow[],
+  kind: FollowupKind = 'refusal',
+): EmailOptions {
+  if (kind === 'transport') return buildTransportEmail(rows);
   const n = rows.length;
   const subject =
     n === 1

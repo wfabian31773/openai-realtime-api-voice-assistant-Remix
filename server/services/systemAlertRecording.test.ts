@@ -152,6 +152,18 @@ describe('terminal refusals are notified beside the filing alarm, not through it
     expect(sendAt).toBeGreaterThan(stallAt);
   });
 
+  it('the held branch emails transport dead letters before returning (Codex P2, #415)', () => {
+    const heldAt = check.indexOf('if (verdict.suppressedOutboxByConfirmedFiling)');
+    expect(heldAt).toBeGreaterThan(-1);
+    const held = check.slice(heldAt, check.indexOf('return;', heldAt) + 'return;'.length);
+    expect(held).toMatch(/if \(snapshot\.outboxDeadLetter > 0\)/);
+    expect(held).toMatch(/await notifyTransportDeadLetters\(\)/);
+    // A throw from the notice must not escape the held branch.
+    expect(held).toMatch(/catch \(transportErr\)/);
+    // Only the held branch: when plane B fires, the critical alarm covers them.
+    expect(check.match(/notifyTransportDeadLetters\(\)/g)).toHaveLength(1);
+  });
+
   it('does not send the follow-up through sendAlert', () => {
     expect(check).not.toMatch(/ticket_needs_followup/);
     expect(check).not.toMatch(/sendAlert\(\{[\s\S]*ticket_needs_followup/);

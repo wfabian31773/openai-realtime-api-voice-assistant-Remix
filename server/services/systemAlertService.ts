@@ -606,6 +606,20 @@ class SystemAlertService {
             `[ALERT SERVICE] Ticket filing alarm HELD — ${verdict.outboxHeld} request(s) are held in ` +
               'the outbox but a ticket was confirmed filed; filing has not stopped',
           );
+          /**
+           * Holding the critical alarm must not hide a transport dead letter:
+           * it no longer retries, and the alarm was its only notice. Email it
+           * once here (Codex P2, #415). When plane B is NOT held the critical
+           * alarm covers these rows, so this runs on the held branch only.
+           */
+          if (snapshot.outboxDeadLetter > 0) {
+            try {
+              const { notifyTransportDeadLetters } = await import('./ticketFollowupNotice');
+              await notifyTransportDeadLetters();
+            } catch (transportErr) {
+              console.error('[ALERT SERVICE] transport dead-letter notice failed:', transportErr);
+            }
+          }
           return;
         }
         console.log(

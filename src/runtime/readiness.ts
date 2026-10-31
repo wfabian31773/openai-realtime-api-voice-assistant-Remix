@@ -1122,6 +1122,9 @@ import { callEnvironment } from "./callRecord";
  * and then on outboxDeadLetter > 0. A confirmed filing inside ten minutes
  * (pulse or newest outbox sent_at) now holds plane B; the held count is
  * still reported. Plane A is unchanged. Above main's v160.
+ * While plane B is held, transport dead letters (no status, or not 400/422)
+ * get one ticket_transport_dead_letter email each via notifyTransportDeadLetters
+ * (Codex P2, #415), since the held alarm was their only notice.
  * No migration.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =

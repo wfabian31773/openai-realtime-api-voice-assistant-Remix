@@ -54,8 +54,13 @@ vi.mock('./emailService', () => ({
   sendEmail: (...a: unknown[]) => sendEmail(...a),
 }));
 
-const { isFollowupEligible, notifyTerminalRefusals } = await import('./ticketFollowupNotice');
-const { TICKET_NEEDS_FOLLOWUP } = await import('./ticketFollowupEmail');
+const {
+  isFollowupEligible,
+  notifyTerminalRefusals,
+  isTransportDeadLetterEligible,
+  notifyTransportDeadLetters,
+} = await import('./ticketFollowupNotice');
+const { TICKET_NEEDS_FOLLOWUP, TICKET_TRANSPORT_DEAD_LETTER } = await import('./ticketFollowupEmail');
 
 const CREATED = new Date('2026-09-25T18:11:00.000Z');
 
@@ -248,6 +253,109 @@ describe('notifyTerminalRefusals', () => {
     expect(sendEmail).toHaveBeenCalledOnce();
     const mail = sendEmail.mock.calls[0][0] as { subject: string };
     expect(mail.subject).toContain('2 tickets need follow-up');
+  });
+});
+
+/**
+ * TRANSPORT DEAD LETTERS — Codex P2 on #415. v162 holds ticket_filing_stalled
+ * while filing is confirmed, which was the only email a 5xx dead letter got.
+ */
+describe('isTransportDeadLetterEligible', () => {
+  const base = { followupNotifiedAt: null, resolvedAt: null, status: 'dead_letter' };
+
+  it.each([500, 502, 503, 408, 429])('accepts HTTP %i', (code) => {
+    expect(isTransportDeadLetterEligible({ ...base, refusalStatusCode: code })).toBe(true);
+  });
+
+  it('accepts a NULL status (timeout, network, or a pre-column row)', () => {
+    expect(isTransportDeadLetterEligible({ ...base, refusalStatusCode: null })).toBe(true);
+  });
+
+  it.each([400, 422])('refuses HTTP %i — that is the terminal-refusal notice', (code) => {
+    expect(isTransportDeadLetterEligible({ ...base, refusalStatusCode: code })).toBe(false);
+  });
+
+  it('refuses a notified, a resolved, or a still-retrying row', () => {
+    expect(
+      isTransportDeadLetterEligible({ ...base, refusalStatusCode: 500, followupNotifiedAt: new Date() }),
+    ).toBe(false);
+    expect(
+      isTransportDeadLetterEligible({ ...base, refusalStatusCode: 500, resolvedAt: new Date() }),
+    ).toBe(false);
+    expect(
+      isTransportDeadLetterEligible({ ...base, refusalStatusCode: 500, status: 'failed' }),
+    ).toBe(false);
+  });
+});
+
+describe('notifyTransportDeadLetters', () => {
+  const transport = () =>
+    pending({
+      refusalStatusCode: 500,
+      lastError: 'HTTP 500: Department "Tech Support" not found',
+      payload: {
+        kind: 'create_ticket_v1',
+        params: { departmentId: 16, callData: { agentUsed: 'records' } },
+      },
+    });
+
+  it('claims, sends the transport notice once, and keeps the claim', async () => {
+    const row = transport();
+    selectResults.push([row]);
+    updateResults.push([row]);
+
+    const res = await notifyTransportDeadLetters();
+
+    expect(res).toEqual({ notified: 1 });
+    expect(sendEmail).toHaveBeenCalledOnce();
+    const mail = sendEmail.mock.calls[0][0] as { subject: string; html: string; text: string };
+    expect(mail.html).toContain(TICKET_TRANSPORT_DEAD_LETTER);
+    expect(mail.html).toContain('records / dept 16');
+    expect(mail.html).toContain('HTTP 500');
+    // The app's raw error text never reaches the email.
+    expect(mail.html).not.toContain('Tech Support');
+    expect(mail.text).not.toContain('Tech Support');
+    expect(setPayloads[0]?.followupNotifiedAt).toBeInstanceOf(Date);
+    expect(setPayloads).toHaveLength(1);
+  });
+
+  it('unclaims when the send fails', async () => {
+    const row = transport();
+    selectResults.push([row]);
+    updateResults.push([row], undefined);
+    sendEmail.mockResolvedValue(false);
+    expect(await notifyTransportDeadLetters()).toEqual({ notified: 0 });
+    expect(setPayloads[1]?.followupNotifiedAt).toBeNull();
+  });
+
+  it('unclaims when the send throws', async () => {
+    const row = transport();
+    selectResults.push([row]);
+    updateResults.push([row], undefined);
+    sendEmail.mockRejectedValue(new Error('smtp down'));
+    expect(await notifyTransportDeadLetters()).toEqual({ notified: 0 });
+    expect(setPayloads[1]?.followupNotifiedAt).toBeNull();
+  });
+
+  it('does not claim a selected payload refusal — that row belongs to the other notice', async () => {
+    selectResults.push([pending({ refusalStatusCode: 400 })]);
+    expect(await notifyTransportDeadLetters()).toEqual({ notified: 0 });
+    expect(sendEmail).not.toHaveBeenCalled();
+    expect(setPayloads).toHaveLength(0);
+  });
+
+  it('selects NULL or non-payload statuses and claims only un-notified, unresolved rows', () => {
+    const source = readFileSync(new URL('./ticketFollowupNotice.ts', import.meta.url), 'utf8');
+    const fn = source.slice(source.indexOf('export async function notifyTransportDeadLetters'));
+    const select = fn.slice(fn.indexOf('.where('), fn.indexOf('const transportEligible'));
+    expect(select).toMatch(/isNull\(ticketOutbox\.refusalStatusCode\)/);
+    expect(select).toMatch(/notInArray\(ticketOutbox\.refusalStatusCode, \[\.\.\.PAYLOAD_REFUSAL_STATUSES\]\)/);
+    expect(select).not.toMatch(/lastError|last_error/);
+    const claim = fn.slice(fn.indexOf('const transportClaimed'), fn.indexOf('if (transportClaimed.length'));
+    expect(claim).toMatch(/isNull\(ticketOutbox\.followupNotifiedAt\)/);
+    expect(claim).toMatch(/isNull\(ticketOutbox\.resolvedAt\)/);
+    expect(fn).toMatch(/await sendEmail\(buildFollowupEmail\(noticeRows, 'transport'\)\)/);
+    expect(fn).not.toMatch(/sendAlert/);
   });
 });
 
