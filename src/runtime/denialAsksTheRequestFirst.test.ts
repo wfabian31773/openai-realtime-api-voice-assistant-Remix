@@ -57,7 +57,7 @@ import { buildSurgeryPrompt } from '../agents/surgeryAgent';
 import { buildTechPrompt } from '../agents/techAgent';
 import { recognisedCallerBlock } from './recognisedCallerBlock';
 
-const BLOCK = recognisedCallerBlock({ matched: true, firstName: 'Casey' });
+const BLOCK = recognisedCallerBlock({ matched: true, firstName: 'Casey', identityValidated: true });
 
 /** The denial bullet alone, from "- If they said NO" to the next bullet. */
 function denialBullet(text: string): string {
@@ -107,7 +107,7 @@ describe('a denied greeting asks the request before identity', () => {
 });
 
 describe('every lane that composes the block carries the rule on its real built prompt', () => {
-  const meta = { callerPhone: '+17605551234', precontext: { matched: true, firstName: 'Casey' } } as never;
+  const meta = { callerPhone: '+17605551234', precontext: { matched: true, firstName: 'Casey', identityValidated: true } } as never;
   const cold = { callerPhone: '+17605551234' } as never;
 
   for (const [lane, build] of [

@@ -229,7 +229,7 @@ describe('caller recognition — credibility, not cosmetics', () => {
   // opposite.
   const matched = buildOpticalPrompt({
     callerPhone: '8455317471',
-    precontext: { matched: true, firstName: 'Wayne', lastNameOnFile: 'Fabian', dobOnFile: '1973-03-17' },
+    precontext: { matched: true, firstName: 'Wayne', lastNameOnFile: 'Fabian', dobOnFile: '1973-03-17', identityValidated: true },
   });
 
   it('opens by confirming the name rather than asking for it', () => {
