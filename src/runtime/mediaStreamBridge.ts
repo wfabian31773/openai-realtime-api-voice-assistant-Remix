@@ -148,6 +148,28 @@ export function decodeToolOutput(output: string): Record<string, unknown> {
 }
 
 /**
+ * A request-reason id the tool named, or undefined.
+ *
+ * Reads `request_reason_id` / `requestReasonId` from the arguments first
+ * (what the model passed to `file_*_ticket`) and then from the output
+ * (`classify_*_request`). A number only — never the reason NAME, which is
+ * caller-shaped text and does not belong on the event.
+ */
+export function requestReasonIdFromTool(
+  args: Record<string, unknown>,
+  output: unknown,
+): number | undefined {
+  const fromOutput =
+    output !== null && typeof output === "object" && !Array.isArray(output)
+      ? (output as Record<string, unknown>).request_reason_id ??
+        (output as Record<string, unknown>).requestReasonId
+      : undefined;
+  const raw = args.request_reason_id ?? args.requestReasonId ?? fromOutput;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? Math.trunc(n) : undefined;
+}
+
+/**
  * Did the agent's own terminate tool let the hangup through?
  *
  * Generic across every agent rather than a per-agent error list, because
@@ -477,6 +499,12 @@ export interface ToolEvent {
    * check (Codex, PR #268 round 2).
    */
   foundOpenTicket?: boolean;
+  /**
+   * A request-reason id the tool named — `classify_*_request` or
+   * `file_*_ticket`. The teardown sweep uses it when the agent captured a
+   * reason and then did not file. A number only; never caller text.
+   */
+  requestReasonId?: number;
   /** ms from call start, so a timeline is readable without timestamps. */
   atMs: number;
   error?: string;
@@ -510,6 +538,13 @@ export interface VoiceCallRecord {
   transferMethod?: "warm" | "blind";
   /** CALLER/AGENT lines in spoken order — '' when nothing was said. */
   transcript: string;
+  /**
+   * Staff-facing call summary, when one already exists. The teardown sweep
+   * classifies a missing request reason from this before the raw transcript.
+   * Optional so older fixtures still type-check; the live bridge does not
+   * write one (grading does, after the sweep).
+   */
+  summary?: string;
   /** The same lines with the moment each was first written, for
    * `call_turns`. Optional only so older fixtures still type-check; the
    * bridge always sets it. */
@@ -2523,6 +2558,7 @@ export class VoiceCallBridge {
         output !== null && typeof output === "object"
           ? (output as Record<string, unknown>).has_open_tickets
           : undefined;
+      const namedReasonId = requestReasonIdFromTool(args, output);
       this.toolEvents.push({
         name,
         ok: result.ok,
@@ -2530,6 +2566,7 @@ export class VoiceCallBridge {
         ...(typeof declaredOpenTicket === "boolean"
           ? { foundOpenTicket: declaredOpenTicket }
           : {}),
+        ...(namedReasonId !== undefined ? { requestReasonId: namedReasonId } : {}),
         atMs: Date.now() - this.startedAtMs,
         ...(result.error ? { error: result.error } : {}),
       });

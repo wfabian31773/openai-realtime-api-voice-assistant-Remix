@@ -1103,8 +1103,17 @@ import { callEnvironment } from "./callRecord";
  * Above main's v158
  * (#412, d785e29). No migration.
  */
+/**
+ * v160 — THE SWEEP DERIVES A REQUEST REASON (2026-10-31). Six records tickets
+ * on 2026-10-30..31 filed with no usable reason even though the call summary
+ * already named one (Support Desk batch Oct 31 item 3). The teardown sweep
+ * now uses the reason the agent captured, else classifies the summary, else
+ * the caller's words, and uses "Other - See Description" only when neither
+ * a summary nor a transcript exists. No migration; production impact is
+ * unmeasured.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v159-operator-script-live-no-silence-after-opening-20261031";
+  "voice-runtime-v160-sweep-derives-request-reason-20261031";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can
