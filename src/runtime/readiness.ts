@@ -1104,6 +1104,15 @@ import { callEnvironment } from "./callRecord";
  * (#412, d785e29). No migration.
  */
 /**
+ * v160 — THE SWEEP DERIVES A REQUEST REASON (2026-10-31). Six records tickets
+ * on 2026-10-30..31 filed with no usable reason even though the call summary
+ * already named one (Support Desk batch Oct 31 item 3). The teardown sweep
+ * now uses the reason the agent captured, else classifies the summary, else
+ * the caller's words, and uses "Other - See Description" only when neither
+ * a summary nor a transcript exists. No migration; production impact is
+ * unmeasured.
+ */
+/**
  * v162 — PLANE B DOES NOT SAY FILING STOPPED WHILE TICKETS LAND (2026-10-31).
  * Renumbered from v160: #414 took v160 and the optical-routing agent took
  * v161. Oct 30 21:21–00:21 UTC: 1–3 ticket_outbox rows retried a records-line
@@ -1112,7 +1121,7 @@ import { callEnvironment } from "./callRecord";
  * ticketing-app health 200). assessTicketFiling stalled on outboxHeld >= 3
  * and then on outboxDeadLetter > 0. A confirmed filing inside ten minutes
  * (pulse or newest outbox sent_at) now holds plane B; the held count is
- * still reported. Plane A is unchanged. Above main's v159 (#413, 55b5434).
+ * still reported. Plane A is unchanged. Above main's v160.
  * No migration.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =

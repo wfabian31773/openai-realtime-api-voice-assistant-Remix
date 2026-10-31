@@ -49,6 +49,10 @@
  */
 import { otherReasonFor } from "../tools/otherReason";
 import { monthNumberFromWord } from "../tools/dobParts";
+import { classifyRecordsRequest, recordsReasonById } from "../tools/medicalRecordsTaxonomy";
+import { classifyTechRequest, techReasonById } from "../tools/techTaxonomy";
+import { classifySurgeryRequest, surgeryReasonById } from "../tools/surgeryTaxonomy";
+import { classifyOptical, classificationByReasonId } from "../tools/opticalTaxonomy";
 
 /** The lanes this runs on. Each is a queue whose department is its routing. */
 const DEPARTMENT_BY_SLUG: Record<string, number> = {
@@ -74,6 +78,11 @@ export interface SweepToolEvent {
    * on a live call.
    */
   succeeded: boolean;
+  /**
+   * A request-reason id the agent already named — from `classify_*_request`
+   * or a refused `file_*_ticket`. A number only; never caller text.
+   */
+  requestReasonId?: number;
 }
 
 export interface SweepInput {
@@ -102,6 +111,18 @@ export interface SweepInput {
    * name we got is not nameless). The swept ticket tells staff which it is.
    */
   nameSource?: "verified" | "stated";
+  /**
+   * Staff-facing call summary, when one already exists (a backfill, or a
+   * row written before the sweep). Preferred over the raw transcript for
+   * classifying the request — it is already isolated from the identity
+   * interview. Never put in the patient-facing description.
+   */
+  summary?: string;
+  /**
+   * A (type, reason) the agent already named. Wins over summary and
+   * transcript. Ignored when it does not belong to this queue.
+   */
+  capturedReason?: { requestTypeId: number; requestReasonId: number };
 }
 
 export type SweepDecision =
@@ -486,6 +507,164 @@ export const SWEPT_TICKET_DESCRIPTION =
  */
 export const TEARDOWN_UNASSIGNED_EXIT_DEPARTMENTS: ReadonlySet<number> = new Set([1, 2]);
 
+export type SweepReasonSource = "captured" | "summary" | "transcript" | "placeholder";
+
+export interface SweepReason {
+  requestTypeId: number;
+  requestReasonId: number;
+  source: SweepReasonSource;
+}
+
+/**
+ * WHERE THE SWEPT TICKET'S REASON COMES FROM.
+ *
+ * The sweep used to file every recovered request as the department's
+ * "Other - See Description". Six records tickets on 2026-10-30..31 landed
+ * with no usable reason even though the call summary already named one
+ * (Support Desk batch Oct 31 item 3). The order is fixed:
+ *
+ *   1. the reason the agent already captured (classify_* / file_*)
+ *   2. classify the call summary, when one exists
+ *   3. classify the caller's own words
+ *   4. the placeholder, and ONLY when neither a summary nor a transcript
+ *      exists to derive from
+ *
+ * Classification is the lane's own taxonomy, so a records copy request
+ * becomes 500 and not 547, and a reason from another department is dropped
+ * the same way the live filing tools drop it.
+ */
+export function resolveSweepReason(input: {
+  departmentId: number;
+  capturedReason?: { requestTypeId: number; requestReasonId: number };
+  summary?: string;
+  callerSaid?: string;
+  toolEvents?: readonly SweepToolEvent[];
+}): SweepReason {
+  const placeholder = otherReasonFor(input.departmentId);
+  if (!placeholder) {
+    throw new Error(`resolveSweepReason: no catch-all for department ${input.departmentId}`);
+  }
+  const floor = (): SweepReason => ({
+    requestTypeId: placeholder.requestTypeId,
+    requestReasonId: placeholder.requestReasonId,
+    source: "placeholder",
+  });
+
+  const captured =
+    pairIfOwned(input.departmentId, input.capturedReason) ??
+    capturedReasonFromEvents(input.departmentId, input.toolEvents);
+  if (captured) return { ...captured, source: "captured" };
+
+  const summary = input.summary?.trim();
+  if (summary) {
+    const hit = classifySweepText(input.departmentId, summary);
+    if (hit) return { ...hit, source: "summary" };
+  }
+
+  const spoken = input.callerSaid?.trim();
+  if (spoken) {
+    const hit = classifySweepText(input.departmentId, spoken);
+    if (hit) return { ...hit, source: "transcript" };
+  }
+
+  return floor();
+}
+
+function capturedReasonFromEvents(
+  departmentId: number,
+  events: readonly SweepToolEvent[] | undefined,
+): { requestTypeId: number; requestReasonId: number } | undefined {
+  if (!events) return undefined;
+  for (let i = events.length - 1; i >= 0; i--) {
+    const id = events[i].requestReasonId;
+    if (typeof id !== "number" || !Number.isFinite(id) || id <= 0) continue;
+    const pair = reasonPairFor(departmentId, id);
+    if (pair) return pair;
+  }
+  return undefined;
+}
+
+function pairIfOwned(
+  departmentId: number,
+  pair: { requestTypeId: number; requestReasonId: number } | undefined,
+): { requestTypeId: number; requestReasonId: number } | undefined {
+  if (!pair) return undefined;
+  const owned = reasonPairFor(departmentId, pair.requestReasonId);
+  if (!owned) return undefined;
+  // Trust the looked-up type, not a type the caller invented beside a valid id.
+  return owned;
+}
+
+function reasonPairFor(
+  departmentId: number,
+  reasonId: number,
+): { requestTypeId: number; requestReasonId: number } | null {
+  const named = (() => {
+    switch (departmentId) {
+      case 16: {
+        const hit = recordsReasonById(reasonId);
+        return hit
+          ? { requestTypeId: hit.requestTypeId, requestReasonId: hit.requestReasonId }
+          : null;
+      }
+      case 3: {
+        const hit = techReasonById(reasonId);
+        return hit
+          ? { requestTypeId: hit.requestTypeId, requestReasonId: hit.requestReasonId }
+          : null;
+      }
+      case 2: {
+        const hit = surgeryReasonById(reasonId);
+        return hit
+          ? { requestTypeId: hit.requestTypeId, requestReasonId: hit.requestReasonId }
+          : null;
+      }
+      case 1: {
+        const hit = classificationByReasonId(reasonId);
+        return hit
+          ? { requestTypeId: hit.requestTypeId, requestReasonId: hit.requestReasonId }
+          : null;
+      }
+      default:
+        return null;
+    }
+  })();
+  if (named) return named;
+  const other = otherReasonFor(departmentId);
+  if (other && other.requestReasonId === reasonId) {
+    return { requestTypeId: other.requestTypeId, requestReasonId: other.requestReasonId };
+  }
+  return null;
+}
+
+function classifySweepText(
+  departmentId: number,
+  text: string,
+): { requestTypeId: number; requestReasonId: number } | null {
+  switch (departmentId) {
+    case 16: {
+      const { classification } = classifyRecordsRequest(text);
+      return { requestTypeId: classification.requestTypeId, requestReasonId: classification.requestReasonId };
+    }
+    case 3: {
+      const { classification } = classifyTechRequest(text);
+      return { requestTypeId: classification.requestTypeId, requestReasonId: classification.requestReasonId };
+    }
+    case 2: {
+      const { classification } = classifySurgeryRequest(text);
+      return { requestTypeId: classification.requestTypeId, requestReasonId: classification.requestReasonId };
+    }
+    case 1: {
+      const hit = classifyOptical(text);
+      return hit
+        ? { requestTypeId: hit.requestTypeId, requestReasonId: hit.requestReasonId }
+        : null;
+    }
+    default:
+      return null;
+  }
+}
+
 export interface SweptTicket {
   /** Staff-only. Travels in callData, never in the patient-facing description. */
   staffNote: string;
@@ -523,13 +702,19 @@ export function buildSweptTicket(
   decision: Extract<SweepDecision, { file: true }>,
 ): SweptTicket {
   const departmentId = DEPARTMENT_BY_SLUG[input.slug]!;
-  const other = otherReasonFor(departmentId)!;
   const callerSaid = decision.callerSaid;
+  const reason = resolveSweepReason({
+    departmentId,
+    capturedReason: input.capturedReason,
+    summary: input.summary,
+    callerSaid,
+    toolEvents: input.toolEvents,
+  });
   return {
     slug: input.slug,
     departmentId,
-    requestTypeId: other.requestTypeId,
-    requestReasonId: other.requestReasonId,
+    requestTypeId: reason.requestTypeId,
+    requestReasonId: reason.requestReasonId,
     ...(decision.firstName ? { patientFirstName: decision.firstName } : {}),
     ...(decision.lastName ? { patientLastName: decision.lastName } : {}),
     patientPhone: input.callerPhone,

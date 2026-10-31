@@ -11,6 +11,7 @@ import {
   alreadyFiledByTool,
   decideSweep,
   buildSweptTicket,
+  resolveSweepReason,
   sweepMarker,
   SWEPT_TICKET_DESCRIPTION,
   type SweepInput,
@@ -151,13 +152,14 @@ describe("the ticket it builds", () => {
   if (!d.file) throw new Error("fixture must be fileable");
   const t = buildSweptTicket(input, d);
 
-  it("routes to the queue's own department and its catch-all", () => {
+  it("routes to the queue's own department, classified from what the caller said", () => {
     // The queue IS the classification (operator, 2026-08-11). Surgery is
-    // department 2, and 65/535 is its own "Other - See Description" — never
-    // another department's, which is the bug that produced VA-50811.
+    // department 2. "book a procedure" is this lane's own scheduling reason
+    // (10/43), not the catch-all and never another department's — which is
+    // the bug that produced VA-50811.
     expect(t.departmentId).toBe(2);
-    expect(t.requestTypeId).toBe(65);
-    expect(t.requestReasonId).toBe(535);
+    expect(t.requestTypeId).toBe(10);
+    expect(t.requestReasonId).toBe(43);
   });
 
   it("carries the caller's own words to STAFF, not a summary", () => {
@@ -609,5 +611,134 @@ describe("an anonymous caller who only answered the identity questions (records)
       { text: "Sorry, 1951.", answersIdentityAsk: true },
       { text: "Records please.", answersIdentityAsk: false },
     ]);
+  });
+});
+
+/**
+ * THE REASON ON A SWEPT TICKET. Support Desk batch Oct 31 item 3: six
+ * records tickets on 2026-10-30..31 filed with no reason even though the
+ * call summary already named one. The placeholder is last, and only when
+ * neither a summary nor a transcript exists to derive from.
+ *
+ * Synthetic wording only — no real names, dates or numbers.
+ */
+describe("the reason on a swept ticket", () => {
+  it("classifies a records copy request from the transcript", () => {
+    const input = call({
+      slug: "records",
+      transcript: "AGENT: How can I help?\nCALLER: I need a copy of my records.",
+    });
+    const d = decideSweep(input);
+    if (!d.file) throw new Error("expected a filing decision");
+    const t = buildSweptTicket(input, d);
+    expect(t.requestTypeId).toBe(58);
+    expect(t.requestReasonId).toBe(500);
+  });
+
+  it("prefers the call summary over the transcript", () => {
+    // Summary is already isolated; the transcript still has the identity
+    // interview. A fax-to-provider summary must not be overwritten by a
+    // later "copy of my records" line.
+    const input = call({
+      slug: "records",
+      summary: "Please fax the records to the referring doctor.",
+      transcript: "AGENT: How can I help?\nCALLER: I need a copy of my records.",
+    });
+    const d = decideSweep(input);
+    if (!d.file) throw new Error("expected a filing decision");
+    expect(buildSweptTicket(input, d).requestReasonId).toBe(502);
+  });
+
+  it("uses a summary when the transcript does not classify", () => {
+    const input = call({
+      slug: "records",
+      summary: "Patient is requesting copies of medical records.",
+      transcript: "AGENT: How can I help?\nCALLER: Can you help with this please.",
+    });
+    const d = decideSweep(input);
+    if (!d.file) throw new Error("expected a filing decision");
+    expect(buildSweptTicket(input, d).requestReasonId).toBe(500);
+  });
+
+  it("uses the reason the agent already captured, ahead of summary and transcript", () => {
+    const input = call({
+      slug: "records",
+      capturedReason: { requestTypeId: 58, requestReasonId: 501 },
+      summary: "Please fax the records to the referring doctor.",
+      transcript: "AGENT: How can I help?\nCALLER: I need a copy of my records.",
+    });
+    const d = decideSweep(input);
+    if (!d.file) throw new Error("expected a filing decision");
+    expect(buildSweptTicket(input, d).requestReasonId).toBe(501);
+  });
+
+  it("reads a captured reason off a classify/file tool event", () => {
+    const input = call({
+      slug: "records",
+      transcript: "AGENT: How can I help?\nCALLER: I need a copy of my records.",
+      toolEvents: [
+        { name: "classify_records_request", succeeded: true, requestReasonId: 503 },
+        { name: "file_records_ticket", succeeded: false },
+      ],
+    });
+    const d = decideSweep(input);
+    if (!d.file) throw new Error("expected a filing decision");
+    expect(buildSweptTicket(input, d).requestReasonId).toBe(503);
+  });
+
+  it("ignores a captured reason that belongs to another department", () => {
+    // 153 is Clinical Tech Support's medication refill. The live records
+    // tool already drops it; the sweep must too, then derive from the words.
+    const input = call({
+      slug: "records",
+      capturedReason: { requestTypeId: 33, requestReasonId: 153 },
+      transcript: "AGENT: How can I help?\nCALLER: I need a copy of my records.",
+    });
+    const d = decideSweep(input);
+    if (!d.file) throw new Error("expected a filing decision");
+    expect(buildSweptTicket(input, d).requestReasonId).toBe(500);
+  });
+
+  it("falls back to the placeholder only when neither a summary nor a transcript exists", () => {
+    const reason = resolveSweepReason({ departmentId: 16 });
+    expect(reason).toEqual({
+      requestTypeId: 77,
+      requestReasonId: 547,
+      source: "placeholder",
+    });
+    const swept = buildSweptTicket(
+      {
+        callSid: "CA00000000000000000000000000000001",
+        slug: "records",
+        callerPhone: "+15555550100",
+        transcript: "",
+        toolEvents: [],
+        ticketAlreadyFiled: false,
+      },
+      { file: true, callerSaid: "" },
+    );
+    expect(swept.requestTypeId).toBe(77);
+    expect(swept.requestReasonId).toBe(547);
+  });
+
+  it("does not treat an unclassifiable summary as 'neither exists' — it still derives", () => {
+    // Words that match no records cue still produce this department's own
+    // catch-all, which is a derivation from the summary, not a missing source.
+    const reason = resolveSweepReason({
+      departmentId: 16,
+      summary: "A question that fits no records category at all.",
+    });
+    expect(reason.source).toBe("summary");
+    expect(reason.requestReasonId).toBe(547);
+  });
+
+  it("classifies a tech refill from the transcript", () => {
+    const input = call({
+      slug: "tech",
+      transcript: "AGENT: How can I help?\nCALLER: I need a refill on my drops.",
+    });
+    const d = decideSweep(input);
+    if (!d.file) throw new Error("expected a filing decision");
+    expect(buildSweptTicket(input, d).requestReasonId).toBe(154);
   });
 });
