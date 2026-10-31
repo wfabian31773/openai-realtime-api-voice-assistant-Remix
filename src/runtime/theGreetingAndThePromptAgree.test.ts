@@ -88,6 +88,7 @@ describe('an unvalidated match: no name anywhere, and the funnel ends without a 
     it(`${lane} never puts the candidate's name in front of the model`, () => {
       expect(prompt).not.toContain('Alex');
       expect(prompt).not.toContain('Am I speaking with');
+      expect(prompt).toMatch(/Do not say a name they have not told you/);
     });
 
     it(`${lane} asks for the first and last name and calls lookup_patient with it`, () => {

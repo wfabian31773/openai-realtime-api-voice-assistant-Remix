@@ -136,7 +136,8 @@ This number matches one person on file: first name "${name}".
 const CANDIDATE_BLOCK = `
 ### This number matches someone on file
 Nobody has confirmed the caller is that person, so the greeting said no name.
-Do not say a name, guess one, or say we recognised their number.
+Do not say a name they have not told you, guess one, or say we recognised
+their number.
 - After they tell you what they need, ask "May I please have your first and
   last name?" and call lookup_patient with what they say.
 - If it comes back identity_is_certain true, the identity step is DONE. Do not
