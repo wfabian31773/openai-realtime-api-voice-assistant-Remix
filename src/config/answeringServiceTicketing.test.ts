@@ -91,3 +91,22 @@ describe('getValidatedTicketIds keeps the department it was given', () => {
     err.mockRestore();
   });
 });
+
+describe("a department's own Other - See Description pair passes through (PR #416)", () => {
+  it('keeps after-hours optical 1/66/536 instead of rewriting it to 1/1/1', () => {
+    expect(getValidatedTicketIds(1, 66, 536)).toEqual({ departmentId: 1, requestTypeId: 66, requestReasonId: 536 });
+  });
+  it('keeps every owned department on its own Other pair', () => {
+    expect(getValidatedTicketIds(2, 65, 535)).toEqual({ departmentId: 2, requestTypeId: 65, requestReasonId: 535 });
+    expect(getValidatedTicketIds(3, 72, 542)).toEqual({ departmentId: 3, requestTypeId: 72, requestReasonId: 542 });
+  });
+  it("does not let one department borrow another's Other pair", () => {
+    const out = getValidatedTicketIds(1, 72, 542);
+    expect(out.requestTypeId).not.toBe(72);
+    expect(out.requestReasonId).not.toBe(542);
+  });
+  it('leaves the existing mappings unchanged', () => {
+    expect(getValidatedTicketIds(1, 9999, 9999)).toEqual({ departmentId: 1, requestTypeId: 1, requestReasonId: 1 });
+    expect(getValidatedTicketIds(1, 66, 9999).requestReasonId).not.toBe(536);
+  });
+});
