@@ -38,6 +38,17 @@ describe("v158 operator callerScript drives persona and opening", () => {
     expect(openingFromScript("Hello, this is Sam from the test team.\nThen ask about latency.")).toBe("Hello, this is Sam from the test team.");
   });
 
+  it("a labelled quoted opening speaks only the quote, not trailing directions", () => {
+    expect(openingFromScript('You are Benchmark Tester.\nOpening: "Hi, this is Benchmark Tester." Wait for a reply.')).toBe("Hi, this is Benchmark Tester.");
+  });
+
+  it("openingLine without a script: instructions describe that opening, not the default disclosure", () => {
+    const text = operatorInstructions({ ...base, openingLine: "Hi, do you have two minutes?" });
+    expect(text).toContain('You already opened the call with: "Hi, do you have two minutes?"');
+    expect(text).not.toContain("The greeting has already disclosed");
+    expect(text).toContain("You are Grok Bot");
+  });
+
   it("an explicit openingLine wins over the script", () => {
     expect(operatorOpening({ ...base, callerScript: SCRIPT, openingLine: "Hey, quick test call." })).toBe("Hey, quick test call.");
   });

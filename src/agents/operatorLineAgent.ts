@@ -12,7 +12,8 @@ export function openingFromScript(script: string): string | null {
   const labelled = script.match(/^\s*(?:opening(?: line)?|greeting|first line|say)\s*[:\-]\s*(.+)$/im);
   const quoted = script.match(/["\u201C]([^"\u201C\u201D\n]{8,500})["\u201D]/);
   const first = script.split(/\r?\n/).map((line) => line.trim()).find(Boolean);
-  const picked = labelled ? unquote(labelled[1]) : quoted ? quoted[1].trim() : first ? unquote(first) : "";
+  const labelledQuote = labelled?.[1].match(/["\u201C]([^"\u201C\u201D\n]+)["\u201D]/);
+  const picked = labelledQuote ? labelledQuote[1].trim() : labelled ? unquote(labelled[1]) : quoted ? quoted[1].trim() : first ? unquote(first) : "";
   return picked ? picked.slice(0, 500) : null;
 }
 
@@ -51,8 +52,10 @@ const SCRIPTED_COMMON = COMMON.replace("The greeting has already disclosed that 
 export function operatorInstructions(input?: OperatorCallPayload, owner = false): string {
   const scripted = Boolean(input?.callerScript);
   const head = scripted ? `${scriptedPersona(input!, owner)}
-${SCRIPTED_COMMON}` : `${persona(owner)}
-${COMMON}${input?.openingLine ? `\nYou opened the call with: ${JSON.stringify(input.openingLine)}` : ""}`;
+${SCRIPTED_COMMON}` : input?.openingLine ? `${persona(owner)}
+${SCRIPTED_COMMON}
+You already opened the call with: ${JSON.stringify(input.openingLine)} Do not repeat it.` : `${persona(owner)}
+${COMMON}`;
   return `${head}
 Pursue the stated goal through a natural, free-form conversation. Decide useful questions and next steps from what the other party says; there is no script or turn limit. When the goal is complete, record_call_outcome and end politely. Do not end simply because one question has been answered.
 ${input ? `Goal (context): ${JSON.stringify(input.purpose)}
