@@ -612,6 +612,11 @@ describe('the teardown floor (the 70150 shape)', () => {
     expect(sent.locationOfLastVisit).toBe('Downey');
   });
 
+  it('keeps alternatives in a yes to a readback ambiguous', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: Covina, correct?\nCALLER: Yes, Covina or Downey.`);
+    expect(sent.locationOfLastVisit).toBeUndefined();
+  });
+
   it('keeps the office over a records-destination sentence', async () => {
     const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina. My doctor in Downey needs my records.`);
     expect(sent.locationOfLastVisit).toBe('Covina');

@@ -154,6 +154,8 @@ function officeAnswers(transcript: string): string[] {
       const butTail = reply.split(/\b(?:but|pero)\b/i)[1];
       if (AFFIRM.test(fr) && butTail && /\b(?:office|oficina|clinic|clinica|go to|voy a|visit)\b/.test(foldAccents(butTail))
         && !DENIAL.test(foldAccents(butTail).trim())) { corrections.push(butTail.trim()); return; }
+      // "Yes, Covina or Downey" is still a guess between offices.
+      if (/\b(?:or|o|either|both|ambos)\b/.test(fr)) { corrections.push(reply); return; }
       if (!AFFIRM.test(fr) || CORRECTION.test(fr) || (DENIAL.test(fr.replace(AFFIRM, ''))
         // "Yes, I do not go to Covina anymore" after "The Downey office, correct?" denies the OLD office.
         && !namedWords().some((w) => new RegExp(`\\b${w}\\b`).test(fr) && !new RegExp(`\\b${w}\\b`).test(fl)))) corrections.push(reply);
