@@ -48,7 +48,7 @@ const AMBIGUOUS_ASK = /\b(?:which|what|que|cual)\s+(?:[a-z]+\s+)?(?:location|ubi
 /** A readback the caller can reject: "Covina, is that correct?". */
 const CONFIRM_ASK = /\b(?:is that (?:correct|right)|correct|right|did you say|confirm|correcto|verdad)\b[^?]*\?/;
 /** Readbacks about something other than the office. */
-const NOT_OFFICE_TOPIC = /\b(?:pharmacy|farmacia|number|phone|callback|telefono|numero|birth|nacimiento|date|fecha|name|nombre)\b/;
+const NOT_OFFICE_TOPIC = /\b(?:pharmacy|farmacia|send|sent|records|fax|enviar|expediente|number|phone|callback|telefono|numero|birth|nacimiento|date|fecha|name|nombre)\b/;
 /** A readback that names an office: a proper noun past the first word, or "<Name> office". */
 function namesAnOffice(text: string): boolean {
   const clause = (text.split('?')[0].split(/[.!]/).pop() ?? '').trim();
@@ -173,7 +173,7 @@ function officeAnswers(transcript: string): string[] {
         continue;
       }
       if (!CORRECTION.test(fl0)) {
-        if (DENIAL.test(fl0.trim()) && namedWords().some((w) => new RegExp(`\\b${w}\\b`).test(fl0))) corrections.push('No.');
+        if (DENIAL.test(fl0.trim()) && (namedWords().some((w) => new RegExp(`\\b${w}\\b`).test(fl0)) || /\b(?:there|that office|that one|esa oficina|ahi|alli|ese lugar)\b/.test(fl0))) corrections.push('No.');
         continue;
       }
       // The whole correcting turn: transcription may split "Actually," and "Downey."
@@ -234,7 +234,10 @@ export async function officeTheCallerGave(transcript: string | undefined): Promi
     || sentences.slice(1).some((x) => { const f = foldAccents(x); return DENIAL.test(f.trim())
       && foldAccents(sentences[0]).split(/[^a-z]+/).some((w) => w.length >= 4 && new RegExp(`\\b${w}\\b`).test(f)); })) return undefined;
   // The office is the first sentence: "Springfield. My doctor in Covina needs my records." is Springfield.
-  const [first, ...rest] = last.split(/(?<=[.!;])\s+/);
+  const parts = last.split(/(?<=[.!;])\s+/);
+  // A filler lead-in ("Let me think.": several words, no proper noun) is not the answer.
+  while (parts.length > 1 && parts[0].trim().split(/\s+/).length >= 2 && !/\p{Lu}/u.test(parts[0].trim().slice(1))) parts.shift();
+  const [first, ...rest] = parts;
   // "Covina or Springfield" is a guess between offices, never one office.
   if (/\b(?:or|o|either|both|ambos)\b/.test(foldAccents(first))) return undefined;
   try {

@@ -483,6 +483,21 @@ describe('the teardown floor (the 70150 shape)', () => {
     expect(sent.locationOfLastVisit).toBe('Covina');
   });
 
+  it.each(['I do not go there anymore.', 'Ya no voy a esa oficina.'])('clears the office on "%s"', async (reply) => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: Thank you.\nCALLER: ${reply}`);
+    expect(sent.locationOfLastVisit).toBeUndefined();
+  });
+
+  it('does not read a records-destination readback as an office readback', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: Your records should be sent to Covina, correct?\nCALLER: No, Downey.`);
+    expect(sent.locationOfLastVisit).toBe('Covina');
+  });
+
+  it('reads the office after a filler lead-in', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Let me think. Covina.`);
+    expect(sent.locationOfLastVisit).toBe('Covina');
+  });
+
   it('takes the answer to the last office ask', async () => {
     const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: Sorry, which office was that?\nCALLER: Downey.`);
     expect(sent.locationOfLastVisit).toBe('Downey');
