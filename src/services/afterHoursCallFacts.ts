@@ -135,7 +135,10 @@ function officeAnswers(transcript: string): string[] {
       const l = lines[k];
       // Any agent question closes the window, wherever its "?" falls.
       if (l.startsWith('AGENT: ')) {
-        if (!l.includes('?')) continue;
+        if (!l.includes('?')) {
+          if (/\b(?:tell me|give me|provide|dime|deme|digame)\b/.test(foldAccents(l)) || NOT_OFFICE_TOPIC.test(foldAccents(l))) break;
+          continue;
+        }
         // A readback of the office keeps the window open: "No, Downey" corrects it.
         // Only a readback OF THE OFFICE: it names an office word or what the
         // caller answered, and is not about the pharmacy.
@@ -252,6 +255,8 @@ export async function officeTheCallerGave(transcript: string | undefined): Promi
     parts.shift();
   }
   const [first, ...rest] = parts;
+  // "I live in Covina, this is my first visit.": a residence is not the office.
+  if (/\b(?:i live|live in|vivo|my home|mi casa)\b/.test(foldAccents(first))) return undefined;
   // "This is my first visit. I live in Covina.": a promoted sentence naming another place is not the office.
   if (first !== last.split(/(?<=[.!;])\s+/)[0] && OTHER_PLACE.test(foldAccents(first))) return undefined;
   if (DENIAL.test(foldAccents(first).trim())) return undefined;

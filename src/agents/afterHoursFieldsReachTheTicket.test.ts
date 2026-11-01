@@ -541,6 +541,19 @@ describe('the teardown floor (the 70150 shape)', () => {
     expect(sent.locationOfLastVisit).toBeUndefined();
   });
 
+  it.each([
+    ['I live in Covina, this is my first visit.'],
+    ['Vivo en Covina, es mi primera visita.'],
+  ])('does not file a residence as the office: %s', async (line) => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: ${line}`);
+    expect(sent.locationOfLastVisit).toBeUndefined();
+  });
+
+  it('closes the readback window on a statement request for the pharmacy', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: Covina, correct?\nAGENT: Tell me where your pharmacy is.\nCALLER: Downey.`);
+    expect(sent.locationOfLastVisit).toBe('Covina');
+  });
+
   it('keeps the office over a records-destination sentence', async () => {
     const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina. My doctor in Downey needs my records.`);
     expect(sent.locationOfLastVisit).toBe('Covina');
