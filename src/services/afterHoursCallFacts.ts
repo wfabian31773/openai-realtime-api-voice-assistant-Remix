@@ -116,16 +116,20 @@ function officeAnswers(transcript: string): string[] {
         const fl = foldAccents(l);
         const STOP = new Set(['usually', 'normally', 'that', 'this', 'there', 'office', 'the', 'one', 'yes', 'actually', 'sorry']);
         // Only a proper noun the caller said (an office name is capitalized), never "a refill".
-        const echoes = [...said, ...corrections].some((a) => (corrected(a).match(/\p{Lu}[\p{L}]+/gu) ?? [])
+        // A short answer ("covina") is all name; a sentence offers only its proper nouns.
+        const nameWords = (a: string) => { const c = corrected(a); return c.trim().split(/\s+/).length <= 3 ? c.split(/[^\p{L}]+/u) : (c.match(/\p{Lu}[\p{L}]+/gu) ?? []); };
+        const echoes = [...said, ...corrections].some((a) => nameWords(a)
           .map(foldAccents).some((w) => w.length >= 4 && !STOP.has(w) && new RegExp(`\\b${w}\\b`).test(fl)));
-        if (!CONFIRM_ASK.test(fl) || NOT_OFFICE_TOPIC.test(fl)
+        if ((l.match(/\?/g) ?? []).length > 1 || !CONFIRM_ASK.test(fl) || NOT_OFFICE_TOPIC.test(fl)
           || !(echoes || /\b(?:office|location|clinic|oficina|clinica|consultorio|ubicacion)\b/.test(fl))) break;
         const turn: string[] = [];
         while (lines[k + 1]?.startsWith('CALLER: ')) { k += 1; turn.push(lines[k].slice('CALLER: '.length)); }
         const reply = turn.join(' ').trim();
-        if (reply && (!AFFIRM.test(foldAccents(reply)) || CORRECTION.test(foldAccents(reply)))) corrections.push(reply);
-        // "Yes" confirms the office the readback named ("The Downey office, correct?").
-        else if (reply) corrections.push(l.slice('AGENT: '.length).split('?')[0]);
+        const fr = foldAccents(reply);
+        if (reply && (!AFFIRM.test(fr) || CORRECTION.test(fr) || DENIAL.test(fr.replace(AFFIRM, '')))) corrections.push(reply);
+        // "Yes" confirms the office the readback named ("The Downey office, correct?");
+        // a generic "Is that the correct office?" names none and leaves the answer.
+        else if (reply && /\p{Lu}/u.test(l.slice('AGENT: '.length + 1).replace(/\bI\b/g, ''))) corrections.push(l.slice('AGENT: '.length).split('?')[0]);
         continue;
       }
       if (!l.startsWith('CALLER: ') || !CORRECTION.test(foldAccents(l))) continue;

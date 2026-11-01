@@ -293,6 +293,26 @@ describe('the teardown floor (the 70150 shape)', () => {
     expect(sent.locationOfLastVisit).toBe('Downey');
   });
 
+  it('closes the window on a readback followed by another question', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: Covina, correct? Where should your records be sent?\nCALLER: To a doctor in Downey.`);
+    expect(sent.locationOfLastVisit).toBe('Covina');
+  });
+
+  it('reads a readback of a lowercase answer', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: covina\nAGENT: Covina, correct?\nCALLER: No, Downey.`);
+    expect(sent.locationOfLastVisit).toBe('Downey');
+  });
+
+  it('honors a denial after an affirmation on a readback', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: Covina, correcto?\nCALLER: Sí, pero ya no voy a Covina.`);
+    expect(sent.locationOfLastVisit).toBeUndefined();
+  });
+
+  it('keeps the answer on a generic office confirmation', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: Is that the correct office?\nCALLER: Yes.`);
+    expect(sent.locationOfLastVisit).toBe('Covina');
+  });
+
   it('takes the answer to the last office ask', async () => {
     const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: Sorry, which office was that?\nCALLER: Downey.`);
     expect(sent.locationOfLastVisit).toBe('Downey');
