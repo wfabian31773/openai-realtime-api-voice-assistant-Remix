@@ -283,6 +283,16 @@ describe('the teardown floor (the 70150 shape)', () => {
     expect(sent.locationOfLastVisit).toBe('Covina');
   });
 
+  it('does not read a readback of the request as an office readback', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina, I need a refill.\nAGENT: A refill, correct?\nCALLER: No, I need records sent to a doctor in Downey.`);
+    expect(sent.locationOfLastVisit).toBe('Covina');
+  });
+
+  it('files the office a confirmed readback named', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: The Downey office, correct?\nCALLER: Yes.`);
+    expect(sent.locationOfLastVisit).toBe('Downey');
+  });
+
   it('takes the answer to the last office ask', async () => {
     const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: Sorry, which office was that?\nCALLER: Downey.`);
     expect(sent.locationOfLastVisit).toBe('Downey');

@@ -115,14 +115,17 @@ function officeAnswers(transcript: string): string[] {
         // caller answered, and is not about the pharmacy.
         const fl = foldAccents(l);
         const STOP = new Set(['usually', 'normally', 'that', 'this', 'there', 'office', 'the', 'one', 'yes', 'actually', 'sorry']);
-        const echoes = [...said, ...corrections].some((a) => foldAccents(corrected(a)).split(/[^a-z]+/)
-          .some((w) => w.length >= 4 && !STOP.has(w) && new RegExp(`\\b${w}\\b`).test(fl)));
+        // Only a proper noun the caller said (an office name is capitalized), never "a refill".
+        const echoes = [...said, ...corrections].some((a) => (corrected(a).match(/\p{Lu}[\p{L}]+/gu) ?? [])
+          .map(foldAccents).some((w) => w.length >= 4 && !STOP.has(w) && new RegExp(`\\b${w}\\b`).test(fl)));
         if (!CONFIRM_ASK.test(fl) || NOT_OFFICE_TOPIC.test(fl)
           || !(echoes || /\b(?:office|location|clinic|oficina|clinica|consultorio|ubicacion)\b/.test(fl))) break;
         const turn: string[] = [];
         while (lines[k + 1]?.startsWith('CALLER: ')) { k += 1; turn.push(lines[k].slice('CALLER: '.length)); }
         const reply = turn.join(' ').trim();
         if (reply && (!AFFIRM.test(foldAccents(reply)) || CORRECTION.test(foldAccents(reply)))) corrections.push(reply);
+        // "Yes" confirms the office the readback named ("The Downey office, correct?").
+        else if (reply) corrections.push(l.slice('AGENT: '.length).split('?')[0]);
         continue;
       }
       if (!l.startsWith('CALLER: ') || !CORRECTION.test(foldAccents(l))) continue;
