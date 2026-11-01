@@ -140,11 +140,26 @@ function officeAnswers(transcript: string): string[] {
     // not about the office.
     const corrections: string[] = [];
     let pendingReadback = false;
-    let pendingClause = '';
     // Every office the caller has named so far, for a later cue-less denial.
     // The office currently on the table: the latest correction, else the answer.
     const namedWords = () => [corrections.length ? corrections[corrections.length - 1] : said.join(' ')].flatMap((a) => foldAccents(corrected(a)).split(/[^a-z]+/))
       .filter((w) => w.length >= 4 && !['usually', 'office', 'that', 'this', 'there'].includes(w));
+    let pendingLine = '';
+    // One reading of a reply to an office readback, prompt or delayed.
+    const answerReadback = (reply: string, readback: string) => {
+      const fr = foldAccents(reply);
+      const fl = foldAccents(readback);
+      const clause = (readback.slice('AGENT: '.length).split('?')[0].split(/[.!]/).pop() ?? '').trim();
+      // "Yes, but my office is Downey" names a different office.
+      const butTail = reply.split(/\b(?:but|pero)\b/i)[1];
+      if (AFFIRM.test(fr) && butTail && /\b(?:office|oficina|clinic|clinica|go to|voy a|visit)\b/.test(foldAccents(butTail))
+        && !DENIAL.test(foldAccents(butTail).trim())) { corrections.push(butTail.trim()); return; }
+      if (!AFFIRM.test(fr) || CORRECTION.test(fr) || (DENIAL.test(fr.replace(AFFIRM, ''))
+        // "Yes, I do not go to Covina anymore" after "The Downey office, correct?" denies the OLD office.
+        && !namedWords().some((w) => new RegExp(`\\b${w}\\b`).test(fr) && !new RegExp(`\\b${w}\\b`).test(fl)))) corrections.push(reply);
+      // "Yes" confirms the office the readback named; a generic "Is that the correct office?" leaves the answer.
+      else if (namesAnOffice(clause)) corrections.push(clause);
+    };
     for (let k = j; k < lines.length; k += 1) {
       const l = lines[k];
       // Any agent question closes the window, wherever its "?" falls.
@@ -170,17 +185,8 @@ function officeAnswers(transcript: string): string[] {
         const reply = turn.join(' ').trim();
         // An acknowledgment can sit between the readback and its reply.
         pendingReadback = !reply;
-        pendingClause = (l.slice('AGENT: '.length).split('?')[0].split(/[.!]/).pop() ?? '').trim();
-        const fr = foldAccents(reply);
-        if (reply && (!AFFIRM.test(fr) || CORRECTION.test(fr) || (DENIAL.test(fr.replace(AFFIRM, ''))
-          // "Yes, I do not go to Covina anymore" after "The Downey office, correct?" denies the OLD office.
-          && !namedWords().some((w) => new RegExp(`\\b${w}\\b`).test(fr) && !new RegExp(`\\b${w}\\b`).test(fl))))) corrections.push(reply);
-        // "Yes" confirms the office the readback named ("The Downey office, correct?");
-        // a generic "Is that the correct office?" names none and leaves the answer.
-        else if (reply) {
-          const clause = (l.slice('AGENT: '.length).split('?')[0].split(/[.!]/).pop() ?? '').trim();
-          if (namesAnOffice(clause)) corrections.push(clause);
-        }
+        pendingLine = l;
+        if (reply) answerReadback(reply, l);
         continue;
       }
       if (!l.startsWith('CALLER: ')) continue;
@@ -191,9 +197,7 @@ function officeAnswers(transcript: string): string[] {
         const turn: string[] = [l.slice('CALLER: '.length)];
         while (lines[k + 1]?.startsWith('CALLER: ')) { k += 1; turn.push(lines[k].slice('CALLER: '.length)); }
         const reply = turn.join(' ').trim();
-        const fr = foldAccents(reply);
-        if (!AFFIRM.test(fr) || CORRECTION.test(fr) || DENIAL.test(fr.replace(AFFIRM, ''))) corrections.push(reply);
-        else if (namesAnOffice(pendingClause)) corrections.push(pendingClause);
+        answerReadback(reply, pendingLine);
         continue;
       }
       if (!CORRECTION.test(fl0)) {

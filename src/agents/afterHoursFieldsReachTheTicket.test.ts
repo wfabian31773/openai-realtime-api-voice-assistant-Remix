@@ -602,6 +602,16 @@ describe('the teardown floor (the 70150 shape)', () => {
     expect(sent.locationOfLastVisit).toBe('Downey');
   });
 
+  it.each([['Yes, but my office is Downey.', 'Downey'], ['Yes, but my office is Springfield.', undefined]])('reads a yes-but office in a readback reply: %s', async (reply, want) => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: Is that the correct office?\nCALLER: ${reply}`);
+    expect(sent.locationOfLastVisit).toBe(want);
+  });
+
+  it('confirms a delayed readback whose yes denies the old office', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: The Downey office, correct?\nAGENT: Take your time.\nCALLER: Yes, I do not go to Covina anymore.`);
+    expect(sent.locationOfLastVisit).toBe('Downey');
+  });
+
   it('keeps the office over a records-destination sentence', async () => {
     const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina. My doctor in Downey needs my records.`);
     expect(sent.locationOfLastVisit).toBe('Covina');
