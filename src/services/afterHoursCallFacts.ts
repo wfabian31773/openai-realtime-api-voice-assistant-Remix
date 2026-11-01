@@ -49,6 +49,12 @@ const AMBIGUOUS_ASK = /\b(?:which|what|que|cual)\s+(?:[a-z]+\s+)?(?:location|ubi
 const CONFIRM_ASK = /\b(?:is that (?:correct|right)|correct|right|did you say|confirm|correcto|verdad)\b[^?]*\?/;
 /** Readbacks about something other than the office. */
 const NOT_OFFICE_TOPIC = /\b(?:pharmacy|farmacia|number|phone|callback|telefono|numero|birth|nacimiento|date|fecha|name|nombre)\b/;
+/** A readback that names an office: a proper noun past the first word, or "<Name> office". */
+function namesAnOffice(text: string): boolean {
+  const clause = (text.split('?')[0].split(/[.!]/).pop() ?? '').trim();
+  return /\p{Lu}/u.test(clause.replace(/^\S+/, '').replace(/\bI\b/g, ''))
+    || /^\p{Lu}\p{L}+(?:\s*,|\s+(?:office|location|clinic)\b)/u.test(clause);
+}
 const AFFIRM = /^(?:yes|yeah|yep|correct|right|that'?s right|si|correcto|exacto)\b/;
 /** "Not Covina", "I don't go there", "no voy": a denial never names an office. "No, Covina" does. */
 const DENIAL = /\b(?:not|never|nunca|anymore)\b|n['’]t\b|(?<!^)\bno\b|^no\b(?!\s*[,.])/;
@@ -92,7 +98,7 @@ function officeAnswers(transcript: string): string[] {
     const ambiguous = AMBIGUOUS_ASK.test(folded);
     const bare = words.length <= 3;
     // A readback of the office ("Covina, correct?") keeps the office context for a re-ask.
-    if (!matches && prevWasOffice && (line.match(/\?/g) ?? []).length === 1 && CONFIRM_ASK.test(folded) && !NOT_OFFICE_TOPIC.test(folded)) return;
+    if (!matches && prevWasOffice && (line.match(/\?/g) ?? []).length === 1 && CONFIRM_ASK.test(folded) && namesAnOffice(line.slice('AGENT: '.length)) && !NOT_OFFICE_TOPIC.test(folded)) return;
     const isOffice = matches && (!ambiguous || prevWasOffice || (!bare && !lastQuestionWasPharmacy));
     lastQuestionWasOffice = isOffice;
     lastQuestionWasPharmacy = /\b(?:pharmacy|farmacia)\b/.test(folded) || (ambiguous && !isOffice && lastQuestionWasPharmacy);
@@ -131,7 +137,7 @@ function officeAnswers(transcript: string): string[] {
         // a generic "Is that the correct office?" names none and leaves the answer.
         else if (reply) {
           const clause = (l.slice('AGENT: '.length).split('?')[0].split(/[.!]/).pop() ?? '').trim();
-          if (/\p{Lu}/u.test(clause.slice(1).replace(/\bI\b/g, ''))) corrections.push(clause);
+          if (namesAnOffice(clause)) corrections.push(clause);
         }
         continue;
       }
