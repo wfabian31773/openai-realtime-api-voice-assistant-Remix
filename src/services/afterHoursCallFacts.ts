@@ -97,7 +97,7 @@ function officeAnswers(transcript: string): string[] {
   let lastAnswerWords: string[] = [];
   lines.forEach((line, i) => {
     if (line.startsWith('AGENT: ') && !line.includes('?')
-      && /\b(?:tell me|give me|provide|dime|deme|digame)\b/.test(foldAccents(line))) {
+      && (/\b(?:tell me|give me|provide|dime|deme|digame)\b/.test(foldAccents(line)) || NOT_OFFICE_TOPIC.test(foldAccents(line)))) {
       // A statement request ("Tell me which pharmacy you use.") sets the topic like a question.
       lastQuestionWasOffice = false;
       lastQuestionWasPharmacy = /\b(?:pharmacy|farmacia)\b/.test(foldAccents(line));
