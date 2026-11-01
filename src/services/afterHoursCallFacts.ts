@@ -160,7 +160,7 @@ function officeAnswers(transcript: string): string[] {
         const STOP = new Set(['usually', 'normally', 'that', 'this', 'there', 'office', 'the', 'one', 'yes', 'actually', 'sorry']);
         // Only a proper noun the caller said (an office name is capitalized), never "a refill".
         // A short answer ("covina") is all name; a sentence offers only its proper nouns.
-        const nameWords = (a: string) => { const c = corrected(a).replace(/^[\s,.]*(?:no|yes|si|sí)\b[\s,.]*/i, ''); return c.trim().split(/\s+/).length <= 3 ? (c.split(/[,.;]/)[0] ?? '').split(/[^\p{L}]+/u) : (c.match(/\p{Lu}[\p{L}]+/gu) ?? []); };
+        const nameWords = (a: string) => { const c = corrected(a).replace(/^[\s,.;:!-]+/, '').replace(/^(?:no|yes|si|sí)\b[\s,.]*/i, ''); return c.trim().split(/\s+/).length <= 3 ? (c.split(/[,.;]/)[0] ?? '').split(/[^\p{L}]+/u) : (c.match(/\p{Lu}[\p{L}]+/gu) ?? []); };
         const echoes = [...said, ...corrections].some((a) => nameWords(a)
           .map(foldAccents).some((w) => w.length >= 4 && !STOP.has(w) && new RegExp(`\\b${w}\\b`).test(fl)));
         if ((l.match(/\?/g) ?? []).length > 1 || !CONFIRM_ASK.test(fl) || NOT_OFFICE_TOPIC.test(fl)
@@ -172,7 +172,9 @@ function officeAnswers(transcript: string): string[] {
         pendingReadback = !reply;
         pendingClause = (l.slice('AGENT: '.length).split('?')[0].split(/[.!]/).pop() ?? '').trim();
         const fr = foldAccents(reply);
-        if (reply && (!AFFIRM.test(fr) || CORRECTION.test(fr) || DENIAL.test(fr.replace(AFFIRM, '')))) corrections.push(reply);
+        if (reply && (!AFFIRM.test(fr) || CORRECTION.test(fr) || (DENIAL.test(fr.replace(AFFIRM, ''))
+          // "Yes, I do not go to Covina anymore" after "The Downey office, correct?" denies the OLD office.
+          && !(reply.match(/\p{Lu}\p{L}{3,}/gu) ?? []).some((w) => !new RegExp(`\\b${w}\\b`).test(l))))) corrections.push(reply);
         // "Yes" confirms the office the readback named ("The Downey office, correct?");
         // a generic "Is that the correct office?" names none and leaves the answer.
         else if (reply) {

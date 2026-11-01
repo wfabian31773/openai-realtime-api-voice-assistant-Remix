@@ -577,6 +577,16 @@ describe('the teardown floor (the 70150 shape)', () => {
     expect(sent.locationOfLastVisit).toBe('Downey');
   });
 
+  it('honors a rejected readback of a later correction', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: Thank you.\nCALLER: Actually, Downey.\nAGENT: Downey, correct?\nCALLER: No, Springfield.`);
+    expect(sent.locationOfLastVisit).toBeUndefined();
+  });
+
+  it('confirms the readback office when the yes denies the old one', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: The Downey office, correct?\nCALLER: Yes, I do not go to Covina anymore.`);
+    expect(sent.locationOfLastVisit).toBe('Downey');
+  });
+
   it('keeps the office over a records-destination sentence', async () => {
     const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina. My doctor in Downey needs my records.`);
     expect(sent.locationOfLastVisit).toBe('Covina');
