@@ -128,7 +128,7 @@ function officeAnswers(transcript: string): string[] {
         const STOP = new Set(['usually', 'normally', 'that', 'this', 'there', 'office', 'the', 'one', 'yes', 'actually', 'sorry']);
         // Only a proper noun the caller said (an office name is capitalized), never "a refill".
         // A short answer ("covina") is all name; a sentence offers only its proper nouns.
-        const nameWords = (a: string) => { const c = corrected(a); return c.trim().split(/\s+/).length <= 3 ? c.split(/[^\p{L}]+/u) : (c.match(/\p{Lu}[\p{L}]+/gu) ?? []); };
+        const nameWords = (a: string) => { const c = corrected(a).replace(/^[\s,.]*(?:no|yes|si|sí)\b[\s,.]*/i, ''); return c.trim().split(/\s+/).length <= 3 ? (c.split(/[,.;]/)[0] ?? '').split(/[^\p{L}]+/u) : (c.match(/\p{Lu}[\p{L}]+/gu) ?? []); };
         const echoes = [...said, ...corrections].some((a) => nameWords(a)
           .map(foldAccents).some((w) => w.length >= 4 && !STOP.has(w) && new RegExp(`\\b${w}\\b`).test(fl)));
         if ((l.match(/\?/g) ?? []).length > 1 || !CONFIRM_ASK.test(fl) || NOT_OFFICE_TOPIC.test(fl)
@@ -174,7 +174,10 @@ function officeAnswers(transcript: string): string[] {
  * outage reads as no office and must never cost the floor its ticket.
  */
 export async function officeTheCallerGave(transcript: string | undefined): Promise<string | undefined> {
-  const answers = officeAnswers(transcript ?? '');
+  // A sentence about the pharmacy ("Sorry, the pharmacy is in Downey") never names the office.
+  const answers = officeAnswers(transcript ?? '')
+    .map((a) => a.split(/(?<=[.!;])\s+/).filter((part) => !/\b(?:pharmacy|farmacia)\b/.test(foldAccents(part))).join(' '))
+    .filter((a) => a.trim());
   const lastLine = answers.length > 1 ? answers[answers.length - 1] : answers[0];
   // Only the corrected portion counts: "Covina, actually Springfield" is Springfield.
   const last = lastLine === undefined ? undefined : corrected(lastLine).replace(/^[\s,.;:!-]+/, '');
