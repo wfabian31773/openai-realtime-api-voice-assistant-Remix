@@ -153,7 +153,7 @@ function officeAnswers(transcript: string): string[] {
       // "Yes, but my office is Downey" names a different office.
       const butTail = reply.split(/\b(?:but|pero)\b/i)[1];
       if (AFFIRM.test(fr) && butTail && /\b(?:office|oficina|clinic|clinica|go to|voy a|visit)\b/.test(foldAccents(butTail))
-        && !DENIAL.test(foldAccents(butTail).trim())) { corrections.push(butTail.trim()); return; }
+        && !DENIAL.test(foldAccents(butTail.replace(NOT_THAT, '')).trim())) { corrections.push(butTail.replace(NOT_THAT, '').trim()); return; }
       // "Yes, Covina or Downey" is still a guess between offices.
       if (/\b(?:or|o|either|both|ambos)\b/.test(fr)) { corrections.push(reply); return; }
       if (!AFFIRM.test(fr) || CORRECTION.test(fr) || (DENIAL.test(fr.replace(AFFIRM, ''))
@@ -244,6 +244,9 @@ function officeAnswers(transcript: string): string[] {
  * the earlier office: the last answer decides, never a stale one. A directory
  * outage reads as no office and must never cost the floor its ticket.
  */
+// ", not Downey" / ", no a Downey" after the office named.
+const NOT_THAT = /,?\s*(?:not|no)\s+(?:a\s+|en\s+|the\s+)?\p{Lu}[\p{L}]+.*$/u;
+
 const OTHER_PLACE = /\b(?:doctor|records|pharmacy|farmacia|live|lives|home|work|send|sent|medico|casa|vivo|trabajo)\b/;
 
 export async function officeTheCallerGave(transcript: string | undefined): Promise<string | undefined> {
@@ -273,7 +276,9 @@ export async function officeTheCallerGave(transcript: string | undefined): Promi
     let start = -1;
     const cut = lastLine.length - corrected(lastLine).length;
     for (const m of folded.matchAll(CORRECTION_ALL)) if (m.index! + m[0].length === cut) start = m.index!;
-    last = lastLine.slice(0, start).replace(/[\s,.;:!-]+$/, '');
+    // Earlier corrections still apply: "Covina. Actually, Springfield. Sorry, I live in Downey." is Springfield.
+    const before = lastLine.slice(0, start).replace(/[\s,.;:!-]+$/, '');
+    last = corrected(before).replace(/^[\s,.;:!-]+/, '');
   }
   // Only the office sentence can deny it: "Covina. I do not remember the doctor." is Covina.
   const sentences = last?.split(/(?<=[.!;])\s+/) ?? [];
@@ -293,6 +298,8 @@ export async function officeTheCallerGave(transcript: string | undefined): Promi
     parts.shift();
   }
   const [first, ...rest] = parts;
+  // "My doctor in Downey needs my records" names another place, not the office.
+  if (first.trim().split(/\s+/).length > 3 && OTHER_PLACE.test(foldAccents(first)) && !/\b(?:office|oficina|clinic|clinica|go to|went to|visit|voy a|va a)\b/.test(foldAccents(first))) return undefined;
   // "I live in Covina, this is my first visit.": a residence is not the office.
   if (/\b(?:i live|live in|vivo|my home|mi casa)\b/.test(foldAccents(first))) return undefined;
   // "This is my first visit. I live in Covina.": a promoted sentence naming another place is not the office.

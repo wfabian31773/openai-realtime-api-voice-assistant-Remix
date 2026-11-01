@@ -627,6 +627,21 @@ describe('the teardown floor (the 70150 shape)', () => {
     expect(sent.locationOfLastVisit).toBe('Covina');
   });
 
+  it.each([['Yes, but I go to Covina, not Downey.'], ['Sí, pero voy a Covina, no a Downey.']])('reads a yes-but rejection of the readback office: %s', async (reply) => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: The Downey office, correct?\nCALLER: ${reply}`);
+    expect(sent.locationOfLastVisit).toBe('Covina');
+  });
+
+  it('keeps an earlier unknown correction under a later home apology', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina. Actually, Springfield. Sorry, I live in Downey.`);
+    expect(sent.locationOfLastVisit).toBeUndefined();
+  });
+
+  it('does not file a records destination given as the answer', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: My doctor in Downey needs my records.`);
+    expect(sent.locationOfLastVisit).toBeUndefined();
+  });
+
   it('keeps the office over a records-destination sentence', async () => {
     const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina. My doctor in Downey needs my records.`);
     expect(sent.locationOfLastVisit).toBe('Covina');
