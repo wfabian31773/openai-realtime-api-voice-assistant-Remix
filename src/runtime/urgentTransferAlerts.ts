@@ -17,6 +17,7 @@ import {
   urgentAlertTime,
   urgentFallbackTicketParams,
   urgentRingOutBesideParams,
+  type UrgentHandoffFailure,
   type UrgentRingOutBesideParams,
 } from "../services/urgentTransferAlert";
 
@@ -31,6 +32,8 @@ export interface UrgentTransferAlerts {
     why: string;
     dialTarget?: string;
     agentUsed: string;
+    /** What the dial did, written on the ticket as a HANDOFF FAILED line (v163). */
+    handoff?: UrgentHandoffFailure;
   }): void;
 }
 
@@ -170,6 +173,7 @@ export function defaultUrgentTransferAlerts(
                   callSid: input.callSid,
                   agentUsed: input.agentUsed,
                   earlierTicket: earlier,
+                  handoff: input.handoff,
                 }),
               )
             : await createTicket(
@@ -180,6 +184,7 @@ export function defaultUrgentTransferAlerts(
                   callerId: input.callerNumber,
                   callSid: input.callSid,
                   agentUsed: input.agentUsed,
+                  handoff: input.handoff,
                 }),
               );
           if (result.success) {

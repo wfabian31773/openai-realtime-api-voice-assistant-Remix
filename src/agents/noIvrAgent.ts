@@ -1,6 +1,7 @@
 import { nameKey, rememberVerifiedIdentity } from '../tools/verifiedIdentity';
 import { joinedAppointments, prepareTicketIdentity, scheduleMatchesIdentity, validatedPatientFor, type TicketLocationSource } from '../tools/ticketIdentity';
 import { readDobQuietly } from '../tools/dobParts';
+import { dobTheCallerGave, isoDobToUs } from '../services/afterHoursCallFacts';
 import { appointmentReadPolicy } from '../services/appointmentReadPolicy';
 import { appointmentAccess, unavailableAppointmentAccess } from '../services/appointmentAccess';
 import { RealtimeAgent, tool } from "@openai/agents/realtime";
@@ -453,6 +454,35 @@ export function transferRecordCrossReference(earlier: RefusedEscalationRecord): 
   );
 }
 
+/**
+ * What escalate_to_human hands the model when the on-call dial rang out
+ * unanswered (v163, ticket 70166). Model-facing, as every
+ * message on this hand-built agent is. The runtime has started the URGENT After
+ * Hours callback record (runtimeTransfer.ts settle, fire-and-forget, so it may
+ * not have landed or may fail), so the agent must not ring again, must not say
+ * the caller was connected, and files the caller's own request through
+ * create_ticket — which returns that record's number when the record landed
+ * first, or files the request itself.
+ */
+export const HANDOFF_FAILED_DIRECTIVE =
+  'The on-call provider did not answer and the caller was NOT connected. An URGENT callback record for ' +
+  'the on-call team is being filed. Do not call escalate_to_human again. Tell the caller you could ' +
+  'not reach the on-call team and they will be called back as soon as possible; confirm the callback number ' +
+  'once; then call create_ticket with what you have. Never say they were connected or that their request was ' +
+  'submitted before create_ticket returns success.';
+
+/** Same, when no dial was placed at all (no destination, or policy withheld it). */
+export const HANDOFF_NOT_PLACED_DIRECTIVE =
+  'The transfer could not be placed and the caller was NOT connected. Do not call escalate_to_human again. ' +
+  'Take a message: confirm the callback number once, then call create_ticket with what you have. Never say ' +
+  'they were connected or that their request was submitted before create_ticket returns success.';
+
+/** Same, for any other failure (a leg failure, a decline, a throw): no claim about an answer or a record. */
+export const HANDOFF_ERROR_DIRECTIVE =
+  'Transfer failed - please take a message instead. The caller was NOT connected. Do not call escalate_to_human ' +
+  'again. Confirm the callback number once, then call create_ticket with what you have. Never say they were ' +
+  'connected or that their request was submitted before create_ticket returns success.';
+
 const CATEGORY_TO_REQUEST_TYPE: Partial<Record<string, string>> = {
   // Appointment family → Appointment Request (routes per the app's taxonomy).
   new_appointment: 'Appointment Request',
@@ -486,6 +516,13 @@ function parseDateOfBirth(dobString: string): {
   const result: { month?: string; day?: string; year?: string; raw: string; iso?: string } = {
     raw: dobString,
   };
+
+  // YYYY-MM-DD first: the unanchored m/d/y pattern below reads "1961-03-03" as
+  // month 61, day 03, year 03.
+  const iso = dobString.trim().match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (iso) {
+    return { raw: dobString, year: iso[1], month: iso[2], day: iso[3], iso: `${iso[1]}-${iso[2]}-${iso[3]}` };
+  }
 
   // Standard m/d/y with slash, dash, space, or period separators
   const mmddyyyy = dobString.match(
@@ -1728,6 +1765,16 @@ The ticket will include schedule context (last appointment info) automatically.`
       // Hydrate held facts here; the bounded DOB/B2B rules below own refusals.
       params = { ...params, first_name: String(prepared.input.first_name ?? ''), last_name: String(prepared.input.last_name ?? ''),
         date_of_birth: String(prepared.input.date_of_birth ?? ''), location: String(prepared.input.location ?? '') };
+      // v163: an omitted date_of_birth read as a B2B "no DOB" and filed
+      // `Unknown`, even when the caller had answered the date-of-birth question
+      // (ticket 70150: answered twice). Take the caller's own answer first.
+      if (!params.date_of_birth.trim()) {
+        const spoken = dobTheCallerGave(metadata.callSid, metadata.getTranscript?.());
+        if (spoken) {
+          params.date_of_birth = spoken;
+          console.info(`[No-IVR Agent] date_of_birth taken from the caller's answer on ${metadata.callSid ?? 'unknown'}`);
+        }
+      }
       // Lazy import to avoid module initialization during agent bootstrap
       const { SyncAgentService } = await import("../services/syncAgentService");
       
@@ -1980,7 +2027,10 @@ The ticket will include schedule context (last appointment info) automatically.`
       // Use NEW SIMPLIFIED ENDPOINT - more reliable, all mapping done server-side
       const result = await SyncAgentService.submitSimplifiedTicket({
         patientFullName,
-        patientDOB: (isB2bNoDob || dobEscapeStatus) ? 'Unknown' : params.date_of_birth, // B2B callers may not have DOB; the escape never sends unreadable words in a date field
+        // B2B callers may not have DOB; the escape never sends unreadable words in a date field.
+        // prepareTicketIdentity hydrates a held or spoken date as YYYY-MM-DD; only this
+        // payload takes month/day/year, because the lookups and the held identity read ISO.
+        patientDOB: (isB2bNoDob || dobEscapeStatus) ? 'Unknown' : (isoDobToUs(params.date_of_birth) ?? params.date_of_birth),
         reasonForCalling: finalSummary,
         // An email preference the caller could not complete files for a PHONE
         // callback — the number is on every request — never as an email
@@ -2615,7 +2665,18 @@ PREREQUISITE: one quick ask for name and DOB; transfer even if unavailable. Clin
       } catch (handoffError) {
         finishRecordFiling(false);
         console.error("[HANDOFF] ✗ handoffToHuman() threw error:", handoffError);
-        return { success: false, message: "Transfer failed - please take a message instead." };
+        // v163 (ticket 70166): say what happened, keyed on the transfer layer's
+        // fixed status slug. Only a real NO_ANSWER says nobody answered; UNAVAILABLE
+        // rang nobody; anything else keeps the "Transfer failed" wording. Never
+        // claim the caller was connected or that a request was submitted before
+        // create_ticket returns.
+        const failure = handoffError instanceof Error ? handoffError.message : String(handoffError);
+        const message = failure === 'handoff_failed:NO_ANSWER'
+          ? HANDOFF_FAILED_DIRECTIVE
+          : failure === 'handoff_failed:UNAVAILABLE'
+            ? HANDOFF_NOT_PLACED_DIRECTIVE
+            : HANDOFF_ERROR_DIRECTIVE;
+        return { success: false, handoffFailed: true, message };
       }
     },
   });

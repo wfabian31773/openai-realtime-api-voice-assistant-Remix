@@ -131,6 +131,7 @@ export function urgentFallbackTicketParams(input: {
   callerId?: string | null;
   callSid?: string;
   agentUsed: string;
+  handoff?: UrgentHandoffFailure;
 }): SyncAgentTicketParams {
   const d = input.escalationDetails;
   const formattedPhone = fallbackCallbackPhone(d?.callbackNumber, input.callerId);
@@ -203,14 +204,38 @@ function fallbackCallbackPhone(collected: string | undefined, callerId: string |
   return digits.length === 10 ? `+1${digits}` : rawPhone.startsWith('+') ? rawPhone : `+${digits}`;
 }
 
+/**
+ * What the on-call dial did, when the pipeline knows (the runtime does).
+ *
+ * v163, ticket 70166: an urgent after-hours transfer rang out and the ticket's
+ * only trace of it was the "URGENT TRANSFER NOT ANSWERED" sentence — whose
+ * "was transferred" reads as if the caller reached somebody. The handoff
+ * columns on a ticket (`human_handoff_occurred`, `pcp_handoff_*`) belong to the
+ * PCP endpoint and the post-call sync; a `/create-ticket` or `/submit-ticket`
+ * payload cannot carry them, so the failure is written as one fixed line a
+ * staffer and a report can both find: `HANDOFF FAILED`.
+ */
+export interface UrgentHandoffFailure {
+  status: 'NO_ANSWER' | 'DECLINED' | 'FAILED';
+  ringSeconds?: number;
+}
+
+/** The fixed staff line for a failed on-call handoff. No caller data in it. */
+export function handoffFailedLine(h: UrgentHandoffFailure): string {
+  const rang = typeof h.ringSeconds === 'number' && h.ringSeconds >= 0 ? `, ${h.ringSeconds}s after the dial started` : '';
+  return `HANDOFF FAILED (${h.status}${rang}): the caller was NOT connected to the on-call provider.`;
+}
+
 /** What happened, what to do, what was attempted — one copy for both payloads. */
 function fallbackDescriptionLines(input: {
   why: string;
   dialTarget?: string;
   escalationDetails?: Pick<EscalationDetails, 'reason' | 'symptomsSummary'>;
+  handoff?: UrgentHandoffFailure;
 }): string[] {
   const d = input.escalationDetails;
   const lines: string[] = [input.why, 'Please call the patient back immediately.'];
+  if (input.handoff) lines.push(handoffFailedLine(input.handoff));
   if (input.dialTarget) lines.push(`Attempted transfer to: ${input.dialTarget}`);
   if (d?.reason) lines.push(`Reason: ${d.reason}`);
   if (d?.symptomsSummary) lines.push(`Symptoms: ${d.symptomsSummary}`);
@@ -273,6 +298,7 @@ export function urgentRingOutBesideParams(input: {
   callSid: string;
   agentUsed: string;
   earlierTicket: string;
+  handoff?: UrgentHandoffFailure;
 }): UrgentRingOutBesideParams {
   const d = input.escalationDetails;
   const { fullName, standIn } = nameOrStandIn(d?.patientFirstName, d?.patientLastName);
