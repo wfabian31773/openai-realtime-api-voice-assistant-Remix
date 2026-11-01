@@ -69,7 +69,8 @@ function officeAnswers(transcript: string): string[] {
   const lines = transcript.split('\n');
   let answers: string[] = [];
   lines.forEach((line, i) => {
-    if (!line.startsWith('AGENT: ') || !OFFICE_ASK.test(foldAccents(line))) return;
+    // A pharmacy question ("which pharmacy should the office send it to?") is not an office ask.
+    if (!line.startsWith('AGENT: ') || !OFFICE_ASK.test(foldAccents(line)) || /\b(?:pharmacy|farmacia)\b/.test(foldAccents(line))) return;
     const said: string[] = [];
     let j = i + 1;
     for (; lines[j]?.startsWith('CALLER: '); j += 1) said.push(lines[j].slice('CALLER: '.length));
@@ -90,7 +91,9 @@ function officeAnswers(transcript: string): string[] {
     }
     // The first answer turn, then each in-window line after it that corrects
     // it, then each later correcting line: the last one decides.
-    answers = [said.join(' '), ...said.slice(1).filter((l) => CORRECTION.test(foldAccents(l))), ...corrections];
+    // The whole answer turn (an in-window correction is resolved by `corrected`,
+    // which keeps everything after the last cue), then each later correcting turn.
+    answers = [said.join(' '), ...corrections];
   });
   return answers;
 }

@@ -198,6 +198,11 @@ describe('the teardown floor (the 70150 shape)', () => {
     expect(sent.locationOfLastVisit).toBe('Downey');
   });
 
+  it('does not read a pharmacy question as an office ask', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: Which pharmacy should the office send your refill to?\nCALLER: The CVS in Downey.`);
+    expect(sent.locationOfLastVisit).toBe('Covina');
+  });
+
   it('takes the answer to the last office ask', async () => {
     const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: Sorry, which office was that?\nCALLER: Downey.`);
     expect(sent.locationOfLastVisit).toBe('Downey');
@@ -217,6 +222,7 @@ describe('the teardown floor (the 70150 shape)', () => {
     ['a same-line correction to an unknown office', `AGENT: How may I assist you?\nCALLER: Please call me back about my refill.\n${OFFICE_ASK}\nCALLER: Covina, actually Springfield.`],
     ['a trailing Spanish "no"', `AGENT: How may I assist you?\nCALLER: Please call me back about my refill.\n${OFFICE_ASK}\nCALLER: Covina, no.`],
     ['a trailing English "No."', `AGENT: How may I assist you?\nCALLER: Please call me back about my refill.\n${OFFICE_ASK}\nCALLER: Covina? No.`],
+    ['an in-window correction that names two offices', `AGENT: How may I assist you?\nCALLER: Please call me back about my refill.\n${OFFICE_ASK}\nCALLER: Covina.\nCALLER: Actually, Downey\nCALLER: or Covina.`],
     ['an office the directory does not know', `AGENT: How may I assist you?\nCALLER: Please call me back about my refill.\n${OFFICE_ASK}\nCALLER: Springfield.`],
   ])('sends no office on %s', async (_label, transcript) => {
     const sent = await officeSent(transcript);
