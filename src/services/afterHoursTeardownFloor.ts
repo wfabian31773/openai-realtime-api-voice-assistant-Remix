@@ -7,7 +7,7 @@
 import { storage } from '../../server/storage';
 import { callerLines, saidMoreThanTheirOwnIdentity } from '../runtime/requestSweep';
 import { confirmedClinicFor, verifiedIdentityFor } from '../tools/verifiedIdentity';
-import { dobTheCallerGave, floorRequestType } from './afterHoursCallFacts';
+import { dobTheCallerGave, floorRequestType, officeTheCallerGave } from './afterHoursCallFacts';
 import { AFTER_HOURS_DEPARTMENT_ID } from '../tools/afterHoursTaxonomy';
 import { answeredWithoutTicket } from './answeredCallDisposition';
 import { nameOrStandIn, STAND_IN_NAME_NOTE } from './standInName';
@@ -85,10 +85,11 @@ export async function sweepAfterHoursUnfiledCall(
     const { fullName, standIn } = nameOrStandIn(identity?.firstName, identity?.lastName);
     const callerText = callerLines(transcript).join('\n');
     // v163: the date of birth the caller gave when asked (70150), the office
-    // the caller confirmed, and department 8's own request type — before
-    // this the floor sent only a certain match's date, no office and no type.
+    // the caller confirmed or named when asked (no-IVR has no tool that fills
+    // the confirmed store), and department 8's own request type — before this
+    // the floor sent only a certain match's date, no office and no type.
     const spokenDob = identity?.dateOfBirth ? undefined : dobTheCallerGave(metadata.callSid, transcript);
-    const clinic = confirmedClinicFor(metadata.callSid);
+    const clinic = confirmedClinicFor(metadata.callSid) ?? await officeTheCallerGave(transcript);
     const requestType = floorRequestType(callerText);
     const { SyncAgentService } = await import('./syncAgentService');
     const result = await SyncAgentService.submitSimplifiedTicket({

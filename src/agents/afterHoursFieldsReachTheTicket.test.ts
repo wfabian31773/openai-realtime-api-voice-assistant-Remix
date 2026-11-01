@@ -50,6 +50,7 @@ const { rememberConfirmedClinic } = await import('../tools/verifiedIdentity');
 const { AFTER_HOURS_CATCHALL, AFTER_HOURS_REASON_IDS } = await import('../tools/afterHoursTaxonomy');
 const { HANDOFF_ERROR_DIRECTIVE, HANDOFF_FAILED_DIRECTIVE, HANDOFF_NOT_PLACED_DIRECTIVE, createNoIvrAgent } = await import('./noIvrAgent');
 const { isoDobToUs, dobTheCallerGave } = await import('../services/afterHoursCallFacts');
+const { __resetDirectory } = await import('../services/consoleDirectory');
 
 const DOB_ASK = 'AGENT: And your date of birth, starting with the month, then the day, then the year?';
 
@@ -58,6 +59,13 @@ beforeEach(() => {
   h.getCallLogBySid.mockReset().mockResolvedValue(undefined);
   h.submitSimplifiedTicket.mockReset().mockResolvedValue({ success: true, ticketNumber: 'VA-SYNTHETIC' });
   h.lookupByNameAndDOB.mockClear();
+  const office = (key: string, canonical: string, fileAs?: string) =>
+    [key, { canonical, key, facilityKind: 'clinic', volume90d: 1, fileAs }] as const;
+  __resetDirectory({
+    providers: new Map(),
+    locations: new Map([office('covina', 'Covina'), office('downey', 'Downey'), office('dtla', 'DTLA', 'Los Angeles')]),
+    loadedAt: Date.now(),
+  } as never);
 });
 
 async function call(transcript?: string, handoff = vi.fn(async () => {})) {
@@ -135,14 +143,576 @@ describe('the teardown floor (the 70150 shape)', () => {
     expect(AFTER_HOURS_REASON_IDS.has(174)).toBe(true);
   });
 
-  it('carries the office the caller confirmed', async () => {
-    const c = await call(REQUEST);
+  const OFFICE_ASK = 'AGENT: Which office do you usually visit?';
+  const officeSent = async (transcript: string) => {
+    const c = await call(transcript);
+    await c.finish();
+    return h.submitSimplifiedTicket.mock.calls[0][0];
+  };
+
+  it('prefers the confirmed office over the transcript', async () => {
+    const c = await call(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.`);
     rememberConfirmedClinic(c.callSid, 'Synthetic Office');
     await c.finish();
     expect(h.submitSimplifiedTicket.mock.calls[0][0]).toMatchObject({
       locationOfLastVisit: 'Synthetic Office',
       locationSource: 'caller',
     });
+  });
+
+  it.each([
+    ['English', OFFICE_ASK, 'CALLER: Covina.', 'Covina'],
+    ['a sentence', OFFICE_ASK, 'CALLER: Usually the Downey office.', 'Downey'],
+    ['Spanish', 'AGENT: ¿A qué oficina va normalmente?', 'CALLER: A Covina.', 'Covina'],
+    ['leading no', OFFICE_ASK, 'CALLER: No, Downey.', 'Downey'],
+    ['the name the app files', OFFICE_ASK, 'CALLER: DTLA.', 'Los Angeles'],
+  ])('recovers the office the caller named when asked with no store seeded (%s)', async (_label, ask, answer, office) => {
+    expect(await officeSent(`${REQUEST}\n${ask}\n${answer}`)).toMatchObject({
+      locationOfLastVisit: office,
+      locationSource: 'caller',
+    });
+  });
+
+  it('takes a correction to a known office over the first answer', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: Thank you.\nCALLER: Actually, Downey.`);
+    expect(sent.locationOfLastVisit).toBe('Downey');
+  });
+
+  it('takes a same-line correction to a known office', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina, actually Downey.`);
+    expect(sent.locationOfLastVisit).toBe('Downey');
+  });
+
+  it('ignores a "sorry" after the agent has moved to another question', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: And what is the best number to reach you?\nCALLER: Sorry, I also need a refill at the Downey pharmacy.`);
+    expect(sent.locationOfLastVisit).toBe('Covina');
+  });
+
+  it('closes the office window on a question whose "?" is mid-line', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: What is your callback number? Please include the area code.\nCALLER: Sorry, refill at the Downey pharmacy.`);
+    expect(sent.locationOfLastVisit).toBe('Covina');
+  });
+
+  it('reads a correcting turn split across caller lines', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: Thank you.\nCALLER: Actually,\nCALLER: Downey.`);
+    expect(sent.locationOfLastVisit).toBe('Downey');
+  });
+
+  it('does not read a pharmacy question as an office ask', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: Which pharmacy should the office send your refill to?\nCALLER: The CVS in Downey.`);
+    expect(sent.locationOfLastVisit).toBe('Covina');
+  });
+
+  it('does not read a bare "Which location?" after a pharmacy question as an office ask', async () => {
+    const sent = await officeSent(`${REQUEST}\nAGENT: Which office do you usually visit?\nCALLER: Covina.\nAGENT: Which pharmacy?\nCALLER: CVS.\nAGENT: Which location?\nCALLER: Downey.`);
+    expect(sent.locationOfLastVisit).toBe('Covina');
+  });
+
+  it('reads a bare "Which location?" that follows an office ask', async () => {
+    const sent = await officeSent(`${REQUEST}\nAGENT: Which office do you usually visit?\nCALLER: Um.\nAGENT: Which location?\nCALLER: Downey.`);
+    expect(sent.locationOfLastVisit).toBe('Downey');
+  });
+
+  it('does not read a bare "Which location?" with no office context', async () => {
+    const sent = await officeSent(`${REQUEST}\nAGENT: Which location?\nCALLER: Downey.`);
+    expect(sent.locationOfLastVisit).toBeUndefined();
+  });
+
+  it('does not read "What can our office help you with?" as an office ask', async () => {
+    const sent = await officeSent(`${REQUEST}\nAGENT: What can our office help you with?\nCALLER: Send my prescription to CVS in Downey.`);
+    expect(sent.locationOfLastVisit).toBeUndefined();
+  });
+
+  it('reads a bare "Which office?" as an office ask', async () => {
+    const sent = await officeSent(`${REQUEST}\nAGENT: Which office?\nCALLER: Downey.`);
+    expect(sent.locationOfLastVisit).toBe('Downey');
+  });
+
+  it('takes the correction to an office readback', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: Covina, is that correct?\nCALLER: No, Downey.`);
+    expect(sent.locationOfLastVisit).toBe('Downey');
+  });
+
+  it('keeps the office the caller confirms on a readback', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: Covina, is that correct?\nCALLER: Yes.`);
+    expect(sent.locationOfLastVisit).toBe('Covina');
+  });
+
+  it('does not read a pharmacy confirmation as an office readback', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: Can you confirm which pharmacy?\nCALLER: CVS in Downey.`);
+    expect(sent.locationOfLastVisit).toBe('Covina');
+  });
+
+  it('takes a correction that follows an affirmation on a readback', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: Covina, correcto?\nCALLER: Sí, perdón, quise decir Downey.`);
+    expect(sent.locationOfLastVisit).toBe('Downey');
+  });
+
+  it('does not read "Which location is that?" after a pharmacy question as an office ask', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: Which pharmacy?\nCALLER: CVS.\nAGENT: Which location is that?\nCALLER: Downey.`);
+    expect(sent.locationOfLastVisit).toBe('Covina');
+  });
+
+  it('takes the correction to a second readback', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: Covina, is that correct?\nCALLER: No, Downey.\nAGENT: Downey, is that correct?\nCALLER: No, Springfield.`);
+    expect(sent.locationOfLastVisit).toBeUndefined();
+  });
+
+  it('reads a readback of a sentence answer', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Usually the Covina office.\nAGENT: Covina, is that correct?\nCALLER: No, Downey.`);
+    expect(sent.locationOfLastVisit).toBe('Downey');
+  });
+
+  it('files no office when the caller rejects the readback', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Usually the Covina office.\nAGENT: Covina, is that correct?\nCALLER: No.`);
+    expect(sent.locationOfLastVisit).toBeUndefined();
+  });
+
+  it('reads a re-ask after a rejected readback', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: Covina, correct?\nCALLER: No.\nAGENT: Which location?\nCALLER: Downey.`);
+    expect(sent.locationOfLastVisit).toBe('Downey');
+  });
+
+  it('does not read a callback-number confirmation as an office readback', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: Can you confirm your callback number for the office?\nCALLER: Five five five, one two one two.`);
+    expect(sent.locationOfLastVisit).toBe('Covina');
+  });
+
+  it('does not read a pharmacy correction as an office correction', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: Thank you.\nCALLER: Sorry, the pharmacy is in Downey.`);
+    expect(sent.locationOfLastVisit).toBe('Covina');
+  });
+
+  it('does not read a readback of the request as an office readback', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina, I need a refill.\nAGENT: A refill, correct?\nCALLER: No, I need records sent to a doctor in Downey.`);
+    expect(sent.locationOfLastVisit).toBe('Covina');
+  });
+
+  it('files the office a confirmed readback named', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: The Downey office, correct?\nCALLER: Yes.`);
+    expect(sent.locationOfLastVisit).toBe('Downey');
+  });
+
+  it('closes the window on a readback followed by another question', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: Covina, correct? Where should your records be sent?\nCALLER: To a doctor in Downey.`);
+    expect(sent.locationOfLastVisit).toBe('Covina');
+  });
+
+  it('reads a readback of a lowercase answer', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: covina\nAGENT: Covina, correct?\nCALLER: No, Downey.`);
+    expect(sent.locationOfLastVisit).toBe('Downey');
+  });
+
+  it('honors a denial after an affirmation on a readback', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: Covina, correcto?\nCALLER: Sí, pero ya no voy a Covina.`);
+    expect(sent.locationOfLastVisit).toBeUndefined();
+  });
+
+  it('keeps the answer on a generic office confirmation', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: Is that the correct office?\nCALLER: Yes.`);
+    expect(sent.locationOfLastVisit).toBe('Covina');
+  });
+
+  it('does not keep office context through a readback that asks something else', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: Covina, correct? Where should your records be sent?\nCALLER: A doctor.\nAGENT: Which location?\nCALLER: Downey.`);
+    expect(sent.locationOfLastVisit).toBe('Covina');
+  });
+
+  it('ignores a later correction about something else', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: Thank you.\nCALLER: Actually, my doctor in Downey needs the records.`);
+    expect(sent.locationOfLastVisit).toBe('Covina');
+  });
+
+  it('keeps the answer on a generic confirmation after a sentence', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: Thank you. Is that the correct office?\nCALLER: Yes.`);
+    expect(sent.locationOfLastVisit).toBe('Covina');
+  });
+
+  it('does not keep office context through an unrelated confirmation', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: You need records sent to another doctor, correct?\nCALLER: Yes.\nAGENT: Which location?\nCALLER: Downey.`);
+    expect(sent.locationOfLastVisit).toBe('Covina');
+  });
+
+  it.each([['Downey office, is that correct?', 'Downey'], ['Springfield office, is that correct?', undefined]])('files what a confirmed "%s" names', async (q, want) => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: ${q}\nCALLER: Yes.`);
+    expect(sent.locationOfLastVisit).toBe(want);
+  });
+
+  it('does not read a records-destination office question as the office visited', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: Which office should we send your records to?\nCALLER: Downey.`);
+    expect(sent.locationOfLastVisit).toBe('Covina');
+  });
+
+  it('drops a pharmacy line inside the answer turn', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nCALLER: Sorry, the pharmacy is in Downey.`);
+    expect(sent.locationOfLastVisit).toBe('Covina');
+  });
+
+  it('reads a re-ask after a rejected generic office confirmation', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: Is that the correct office?\nCALLER: No.\nAGENT: Which location?\nCALLER: Downey.`);
+    expect(sent.locationOfLastVisit).toBe('Downey');
+  });
+
+  it('drops a same-line pharmacy sentence from the answer', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina. Sorry, the pharmacy is in Downey.`);
+    expect(sent.locationOfLastVisit).toBe('Covina');
+  });
+
+  it('does not read a readback of the request word as an office readback', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina, records.\nAGENT: Records, correct?\nCALLER: No, send the prescription to a pharmacy in Downey.`);
+    expect(sent.locationOfLastVisit).toBe('Covina');
+  });
+
+  it('keeps the office when the answer turn moves to a new topic after a cue', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina. Actually, my doctor in Downey needs the records.`);
+    expect(sent.locationOfLastVisit).toBe('Covina');
+  });
+
+  it('does not keep office context through a confirmation naming a doctor', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: You want records sent to Doctor Example, correct?\nCALLER: Yes.\nAGENT: Which location?\nCALLER: Downey.`);
+    expect(sent.locationOfLastVisit).toBe('Covina');
+  });
+
+  it('does not read "Which location is that?" after a records topic as an office ask', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: Where should we send the records?\nCALLER: To my new doctor.\nAGENT: Which location is that?\nCALLER: Downey.`);
+    expect(sent.locationOfLastVisit).toBe('Covina');
+  });
+
+  it('does not keep office context through "Records, correct?"', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: Records, correct?\nCALLER: Yes.\nAGENT: Which location?\nCALLER: Downey.`);
+    expect(sent.locationOfLastVisit).toBe('Covina');
+  });
+
+  it('files no office when the readback is rejected as the pharmacy', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: Covina, correct?\nCALLER: No, that is my pharmacy.`);
+    expect(sent.locationOfLastVisit).toBeUndefined();
+  });
+
+  it('does not keep office context through a readback of a later answer word', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina, records.\nAGENT: Records, correct?\nCALLER: Yes.\nAGENT: Which location?\nCALLER: Downey.`);
+    expect(sent.locationOfLastVisit).toBe('Covina');
+  });
+
+  it('files no office when a split answer turn rejects it as the pharmacy', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nCALLER: No, that is my pharmacy.`);
+    expect(sent.locationOfLastVisit).toBeUndefined();
+  });
+
+  it('does not read an office ask followed by another question on the line', async () => {
+    const sent = await officeSent(`${REQUEST}\nAGENT: Which office do you usually visit? Where should we deliver your prescription?\nCALLER: My home in Downey.`);
+    expect(sent.locationOfLastVisit).toBeUndefined();
+  });
+
+  it.each(['That is my pharmacy, not my office.', 'Esa es mi farmacia, no mi oficina.'])('files no office after "%s" on a readback', async (reply) => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: Covina, correct?\nCALLER: ${reply}`);
+    expect(sent.locationOfLastVisit).toBeUndefined();
+  });
+
+  it('keeps office context through a readback of the corrected office', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: Covina, correct?\nCALLER: No, Downey.\nAGENT: Downey, correct?\nCALLER: Yes.\nAGENT: Which location?\nCALLER: Covina.`);
+    expect(sent.locationOfLastVisit).toBe('Covina');
+  });
+
+  it('looks up only the first sentence of the answer', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Springfield. My doctor in Covina needs my records.`);
+    expect(sent.locationOfLastVisit).toBeUndefined();
+  });
+
+  it('takes a long explicit correction to an office', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: Thank you.\nCALLER: Actually, I usually go to Downey.`);
+    expect(sent.locationOfLastVisit).toBe('Downey');
+  });
+
+  it('clears the office on a later denial without a cue', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: Thank you.\nCALLER: No voy a Covina.`);
+    expect(sent.locationOfLastVisit).toBeUndefined();
+  });
+
+  it('files no office when a later sentence names a second office', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina. Or Downey, I go to both.`);
+    expect(sent.locationOfLastVisit).toBeUndefined();
+  });
+
+  it('reads an office ask after a statement that mentions sending', async () => {
+    const sent = await officeSent(`${REQUEST}\nAGENT: I will send the message. Which office do you usually visit?\nCALLER: Downey.`);
+    expect(sent.locationOfLastVisit).toBe('Downey');
+  });
+
+  it('clears a corrected office on a later denial of it', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina, actually Downey.\nAGENT: Thank you.\nCALLER: No voy a Downey.`);
+    expect(sent.locationOfLastVisit).toBeUndefined();
+  });
+
+  it('reads a readback reply that follows an acknowledgment', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: Covina, correct?\nAGENT: Take your time.\nCALLER: No, Downey.`);
+    expect(sent.locationOfLastVisit).toBe('Downey');
+  });
+
+  it('files no office when a later sentence offers alternatives', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina. Or Downey or DTLA.`);
+    expect(sent.locationOfLastVisit).toBeUndefined();
+  });
+
+  it('files the office a delayed affirmation confirms', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: The Downey office, correct?\nAGENT: Take your time.\nCALLER: Yes.`);
+    expect(sent.locationOfLastVisit).toBe('Downey');
+  });
+
+  it('ignores a denial in a later unrelated sentence', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina. I do not remember the name of the doctor.`);
+    expect(sent.locationOfLastVisit).toBe('Covina');
+  });
+
+  it('files no office for "Covina or Springfield"', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina or Springfield.`);
+    expect(sent.locationOfLastVisit).toBeUndefined();
+  });
+
+  it('clears the office on a split-line denial of it', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nCALLER: No voy a Covina.`);
+    expect(sent.locationOfLastVisit).toBeUndefined();
+  });
+
+  it('takes a correction whose turn also mentions the pharmacy', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: Thank you.\nCALLER: Actually, Downey. My pharmacy is in Covina.`);
+    expect(sent.locationOfLastVisit).toBe('Downey');
+  });
+
+  it('reads an answer after an agent acknowledgment', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nAGENT: Take your time.\nCALLER: Covina.`);
+    expect(sent.locationOfLastVisit).toBe('Covina');
+  });
+
+  it.each(['I do not go there anymore.', 'Ya no voy a esa oficina.'])('clears the office on "%s"', async (reply) => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: Thank you.\nCALLER: ${reply}`);
+    expect(sent.locationOfLastVisit).toBeUndefined();
+  });
+
+  it('does not read a records-destination readback as an office readback', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: Your records should be sent to Covina, correct?\nCALLER: No, Downey.`);
+    expect(sent.locationOfLastVisit).toBe('Covina');
+  });
+
+  it('reads the office after a filler lead-in', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Let me think. Covina.`);
+    expect(sent.locationOfLastVisit).toBe('Covina');
+  });
+
+  it('keeps "Covina, please." over a later home city', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina, please. I live in Downey.`);
+    expect(sent.locationOfLastVisit).toBe('Covina');
+  });
+
+  it('honors a denial after a filler lead-in', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Let me think. No voy a Covina.`);
+    expect(sent.locationOfLastVisit).toBeUndefined();
+  });
+
+  it('keeps a correction when the caller then denies the old office', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: Thank you.\nCALLER: Actually, Downey.\nCALLER: I do not go to Covina anymore.`);
+    expect(sent.locationOfLastVisit).toBe('Downey');
+  });
+
+  it.each([
+    ['Covina. I do not go there anymore.'],
+    ['Covina. Ya no voy a esa oficina.'],
+  ])('honors a same-line denial by reference: %s', async (line) => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: ${line}`);
+    expect(sent.locationOfLastVisit).toBeUndefined();
+  });
+
+  it('does not promote a records sentence over an office description', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: The one near my home. My doctor in Covina needs my records.`);
+    expect(sent.locationOfLastVisit).toBeUndefined();
+  });
+
+  it('keeps the office over a short home-city correction', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina. Actually, I live in Downey.`);
+    expect(sent.locationOfLastVisit).toBe('Covina');
+  });
+
+  it('does not promote a home city over a first-visit answer', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: This is my first visit. I live in Covina.`);
+    expect(sent.locationOfLastVisit).toBeUndefined();
+  });
+
+  it('closes the answer window on a statement request for the pharmacy', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nAGENT: Tell me which pharmacy you use.\nCALLER: CVS in Downey.`);
+    expect(sent.locationOfLastVisit).toBeUndefined();
+  });
+
+  it.each([
+    ['I live in Covina, this is my first visit.'],
+    ['Vivo en Covina, es mi primera visita.'],
+  ])('does not file a residence as the office: %s', async (line) => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: ${line}`);
+    expect(sent.locationOfLastVisit).toBeUndefined();
+  });
+
+  it('closes the readback window on a statement request for the pharmacy', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: Covina, correct?\nAGENT: Tell me where your pharmacy is.\nCALLER: Downey.`);
+    expect(sent.locationOfLastVisit).toBe('Covina');
+  });
+
+  it('does not read a bare location ask after a statement pharmacy request', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: Tell me which pharmacy you use.\nCALLER: CVS.\nAGENT: Which location?\nCALLER: Downey.`);
+    expect(sent.locationOfLastVisit).toBe('Covina');
+  });
+
+  it('keeps a correction followed by an unrelated apology', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina. Actually, Downey. Sorry, the connection is bad.`);
+    expect(sent.locationOfLastVisit).toBe('Downey');
+  });
+
+  it.each([
+    ['Actually, Covina is my pharmacy, not my office.'],
+    ['En realidad, Covina es mi farmacia, no es mi oficina.'],
+  ])('honors a pharmacy-not-office retraction: %s', async (line) => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: Thank you.\nCALLER: ${line}`);
+    expect(sent.locationOfLastVisit).toBeUndefined();
+  });
+
+  it('keeps a correction over a later home sentence', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina. Actually, Downey. I live in Covina.`);
+    expect(sent.locationOfLastVisit).toBe('Downey');
+  });
+
+  it('honors a rejected readback of a later correction', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: Thank you.\nCALLER: Actually, Downey.\nAGENT: Downey, correct?\nCALLER: No, Springfield.`);
+    expect(sent.locationOfLastVisit).toBeUndefined();
+  });
+
+  it('confirms the readback office when the yes denies the old one', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: The Downey office, correct?\nCALLER: Yes, I do not go to Covina anymore.`);
+    expect(sent.locationOfLastVisit).toBe('Downey');
+  });
+
+  it('honors a referential denial inside a yes with another capitalized word', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: The Covina office, correct?\nCALLER: Sí, pero ya no voy ahí. Necesito otra oficina.`);
+    expect(sent.locationOfLastVisit).toBeUndefined();
+  });
+
+  it('keeps the office clause of a correction that also names the pharmacy', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: Thank you.\nCALLER: Actually, my office is Downey and my pharmacy is Covina.`);
+    expect(sent.locationOfLastVisit).toBe('Downey');
+  });
+
+  it('takes the office clause of a readback reply that also names the pharmacy', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: Covina, correct?\nCALLER: Actually, my office is Downey and my pharmacy is Covina.`);
+    expect(sent.locationOfLastVisit).toBe('Downey');
+  });
+
+  it.each([['Yes, but my office is Downey.', 'Downey'], ['Yes, but my office is Springfield.', undefined]])('reads a yes-but office in a readback reply: %s', async (reply, want) => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: Is that the correct office?\nCALLER: ${reply}`);
+    expect(sent.locationOfLastVisit).toBe(want);
+  });
+
+  it('confirms a delayed readback whose yes denies the old office', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: The Downey office, correct?\nAGENT: Take your time.\nCALLER: Yes, I do not go to Covina anymore.`);
+    expect(sent.locationOfLastVisit).toBe('Downey');
+  });
+
+  it('keeps alternatives in a yes to a readback ambiguous', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: Covina, correct?\nCALLER: Yes, Covina or Downey.`);
+    expect(sent.locationOfLastVisit).toBeUndefined();
+  });
+
+  it('honors a yes-but denial of the readback office after a visit answer', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: I usually visit Covina.\nAGENT: The Covina office, correct?\nCALLER: Yes, but I do not visit Covina anymore.`);
+    expect(sent.locationOfLastVisit).toBeUndefined();
+  });
+
+  it('keeps the office over a negated pharmacy sentence', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina. My pharmacy is not open.`);
+    expect(sent.locationOfLastVisit).toBe('Covina');
+  });
+
+  it.each([['Yes, but I go to Covina, not Downey.'], ['Sí, pero voy a Covina, no a Downey.']])('reads a yes-but rejection of the readback office: %s', async (reply) => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: The Downey office, correct?\nCALLER: ${reply}`);
+    expect(sent.locationOfLastVisit).toBe('Covina');
+  });
+
+  it('keeps an earlier unknown correction under a later home apology', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina. Actually, Springfield. Sorry, I live in Downey.`);
+    expect(sent.locationOfLastVisit).toBeUndefined();
+  });
+
+  it('does not file a records destination given as the answer', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: My doctor in Downey needs my records.`);
+    expect(sent.locationOfLastVisit).toBeUndefined();
+  });
+
+  it('honors a denial split across caller lines', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: Thank you.\nCALLER: No voy a\nCALLER: Covina.`);
+    expect(sent.locationOfLastVisit).toBeUndefined();
+  });
+
+  it('takes a lowercase final correction over an earlier one', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina. Actually, downey. Sorry, springfield.`);
+    expect(sent.locationOfLastVisit).toBeUndefined();
+  });
+
+  it('does not read a bare location ask after a pharmacy statement', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: I will also need your pharmacy.\nCALLER: CVS.\nAGENT: Which location?\nCALLER: Downey.`);
+    expect(sent.locationOfLastVisit).toBe('Covina');
+  });
+
+  it('does not read a request confirmation as an office readback', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: You need a refill from the office, correct?\nCALLER: No, I need a referral to a specialist in Downey.`);
+    expect(sent.locationOfLastVisit).toBe('Covina');
+  });
+
+  it.each([
+    ['Covina. Actually, downey. Sorry, my office is springfield.'],
+    ['Covina. Actually, I think it was Springfield.'],
+    ['Covina. Actually, I do not go there anymore.'],
+  ])('clears the office for a later correction to an unknown or denied office: %s', async (line) => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: ${line}`);
+    expect(sent.locationOfLastVisit).toBeUndefined();
+  });
+
+  it('keeps the office over a records-destination sentence', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina. My doctor in Downey needs my records.`);
+    expect(sent.locationOfLastVisit).toBe('Covina');
+  });
+
+  it('takes the answer to the last office ask', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: Sorry, which office was that?\nCALLER: Downey.`);
+    expect(sent.locationOfLastVisit).toBe('Downey');
+  });
+
+  it.each([
+    ['a mention with no ask', 'AGENT: How may I assist you?\nCALLER: I need a refill from the Covina office and a call back.'],
+    ['a mention after the answer window closed', `${OFFICE_ASK}\nCALLER: I am not sure.\nAGENT: That is fine. How can we help?\nCALLER: I need a refill from the Covina office and a call back.`],
+    ['an agent line that only states an office', 'AGENT: Our Covina office opens at eight.\nCALLER: Downey is closer, please call me back about my refill.'],
+    ['two offices in the answer', `AGENT: How may I assist you?\nCALLER: Please call me back about my refill.\n${OFFICE_ASK}\nCALLER: Covina or Downey.`],
+    ['a denied office', `AGENT: How may I assist you?\nCALLER: Please call me back about my refill.\n${OFFICE_ASK}\nCALLER: Not Covina anymore.`],
+    ['a city that only contains an office name', `AGENT: How may I assist you?\nCALLER: Please call me back about my refill.\n${OFFICE_ASK}\nCALLER: West Covina.`],
+    ['a Spanish denial ("No voy a ...")', `AGENT: How may I assist you?\nCALLER: Please call me back about my refill.\n${OFFICE_ASK}\nCALLER: No voy a Covina.`],
+    ['an in-window correction to an unknown office', `AGENT: How may I assist you?\nCALLER: Please call me back about my refill.\n${OFFICE_ASK}\nCALLER: Covina.\nCALLER: Actually, Springfield.`],
+    ['a later correction to an unknown office', `AGENT: How may I assist you?\nCALLER: Please call me back about my refill.\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: Thank you.\nCALLER: Sorry, I mean Springfield.`],
+    ['a re-ask answered with an unknown office', `AGENT: How may I assist you?\nCALLER: Please call me back about my refill.\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: Sorry, which office was that?\nCALLER: Springfield.`],
+    ['a same-line correction to an unknown office', `AGENT: How may I assist you?\nCALLER: Please call me back about my refill.\n${OFFICE_ASK}\nCALLER: Covina, actually Springfield.`],
+    ['a trailing Spanish "no"', `AGENT: How may I assist you?\nCALLER: Please call me back about my refill.\n${OFFICE_ASK}\nCALLER: Covina, no.`],
+    ['a trailing English "No."', `AGENT: How may I assist you?\nCALLER: Please call me back about my refill.\n${OFFICE_ASK}\nCALLER: Covina? No.`],
+    ['an in-window correction that names two offices', `AGENT: How may I assist you?\nCALLER: Please call me back about my refill.\n${OFFICE_ASK}\nCALLER: Covina.\nCALLER: Actually, Downey\nCALLER: or Covina.`],
+    ['an office the directory does not know', `AGENT: How may I assist you?\nCALLER: Please call me back about my refill.\n${OFFICE_ASK}\nCALLER: Springfield.`],
+  ])('sends no office on %s', async (_label, transcript) => {
+    const sent = await officeSent(transcript);
+    expect(sent).not.toHaveProperty('locationOfLastVisit');
+    expect(sent).not.toHaveProperty('locationSource');
+  });
+
+  it('still files the ticket when the directory is down', async () => {
+    __resetDirectory(null);
+    const before = process.env.OBS_CONSOLE_DATABASE_URL;
+    delete process.env.OBS_CONSOLE_DATABASE_URL;
+    try {
+      const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.`);
+      expect(sent).not.toHaveProperty('locationOfLastVisit');
+    } finally {
+      if (before !== undefined) process.env.OBS_CONSOLE_DATABASE_URL = before;
+    }
   });
 });
 
