@@ -203,6 +203,8 @@ function officeAnswers(transcript: string): string[] {
       while (lines[k + 1]?.startsWith('CALLER: ')) { k += 1; turn.push(lines[k].slice('CALLER: '.length)); }
       // "Sorry, the pharmacy is in Downey" corrects the pharmacy, not the office.
       // and a long sentence after the cue is a new topic ("Actually, my doctor in Downey needs the records").
+      // "Actually, Covina is my pharmacy, not my office" rejects the office first.
+      if (/\b(?:not my office|not the office|no es mi oficina|no es la oficina)\b/.test(foldAccents(turn.join(' ')))) { corrections.push('No.'); continue; }
       const noPharmacy = turn.join(' ').split(/(?<=[.!;])\s+/).filter((x) => !/\b(?:pharmacy|farmacia)\b/.test(foldAccents(x))).join(' ');
       const after = corrected(noPharmacy).trim();
       if (noPharmacy.trim() && CORRECTION.test(foldAccents(noPharmacy))
@@ -245,7 +247,7 @@ export async function officeTheCallerGave(transcript: string | undefined): Promi
   // does not correct the office: keep what came before the cue.
   let last = lastLine === undefined ? undefined : corrected(lastLine).replace(/^[\s,.;:!-]+/, '');
   if (lastLine !== undefined && last !== undefined && last !== lastLine && (last.split(/(?<=[.!;])\s+/)[0].trim().split(/\s+/).length > 4
-    || OTHER_PLACE.test(foldAccents(last))) && !/\b(?:office|oficina|clinic|clinica|location|go to|went to|visit|voy a|va a)\b/.test(foldAccents(last))) {
+    || OTHER_PLACE.test(foldAccents(last.split(/(?<=[.!;])\s+/)[0]))) && !/\b(?:office|oficina|clinic|clinica|location|go to|went to|visit|voy a|va a)\b/.test(foldAccents(last))) {
     const folded = foldAccents(lastLine);
     let start = -1;
     const cut = lastLine.length - corrected(lastLine).length;

@@ -564,6 +564,19 @@ describe('the teardown floor (the 70150 shape)', () => {
     expect(sent.locationOfLastVisit).toBe('Downey');
   });
 
+  it.each([
+    ['Actually, Covina is my pharmacy, not my office.'],
+    ['En realidad, Covina es mi farmacia, no es mi oficina.'],
+  ])('honors a pharmacy-not-office retraction: %s', async (line) => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: Thank you.\nCALLER: ${line}`);
+    expect(sent.locationOfLastVisit).toBeUndefined();
+  });
+
+  it('keeps a correction over a later home sentence', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina. Actually, Downey. I live in Covina.`);
+    expect(sent.locationOfLastVisit).toBe('Downey');
+  });
+
   it('keeps the office over a records-destination sentence', async () => {
     const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina. My doctor in Downey needs my records.`);
     expect(sent.locationOfLastVisit).toBe('Covina');
