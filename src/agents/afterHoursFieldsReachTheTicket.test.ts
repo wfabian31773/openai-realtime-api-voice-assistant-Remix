@@ -657,6 +657,20 @@ describe('the teardown floor (the 70150 shape)', () => {
     expect(sent.locationOfLastVisit).toBe('Covina');
   });
 
+  it('does not read a request confirmation as an office readback', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: You need a refill from the office, correct?\nCALLER: No, I need a referral to a specialist in Downey.`);
+    expect(sent.locationOfLastVisit).toBe('Covina');
+  });
+
+  it.each([
+    ['Covina. Actually, downey. Sorry, my office is springfield.'],
+    ['Covina. Actually, I think it was Springfield.'],
+    ['Covina. Actually, I do not go there anymore.'],
+  ])('clears the office for a later correction to an unknown or denied office: %s', async (line) => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: ${line}`);
+    expect(sent.locationOfLastVisit).toBeUndefined();
+  });
+
   it('keeps the office over a records-destination sentence', async () => {
     const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina. My doctor in Downey needs my records.`);
     expect(sent.locationOfLastVisit).toBe('Covina');

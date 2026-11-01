@@ -75,7 +75,7 @@ function corrected(line: string): string {
     // does not undo the earlier correction.
     const clause = line.slice(e).split(/[.!;?]/)[0];
     // A name-less clause is an apology, whatever the transcript's capitalization.
-    if (end >= 0 && /^[\s,.:-]*(?:the|i|for|my|it|that|this|el|la|mi|lo|por|you|we)\b/i.test(clause) && !/\p{Lu}\p{L}{3,}/u.test(clause.replace(/^[\s,.:-]*\p{L}+/u, ''))) continue;
+    if (end >= 0 && /^[\s,.:-]*(?:the|i|for|my|it|that|this|el|la|mi|lo|por|you|we)\b/i.test(clause) && !/\b(?:office|oficina|clinic|clinica|go to|voy a|it was|it is|era|es)\b/.test(foldAccents(clause)) && !/\p{Lu}\p{L}{3,}/u.test(clause.replace(/^[\s,.:-]*\p{L}+/u, ''))) continue;
     end = e;
   }
   return end < 0 ? line : line.slice(end);
@@ -182,6 +182,8 @@ function officeAnswers(transcript: string): string[] {
         const echoes = [...said, ...corrections].some((a) => nameWords(a)
           .map(foldAccents).some((w) => w.length >= 4 && !STOP.has(w) && new RegExp(`\\b${w}\\b`).test(fl)));
         if ((l.match(/\?/g) ?? []).length > 1 || !CONFIRM_ASK.test(fl) || NOT_OFFICE_TOPIC.test(fl)
+          // "You need a refill from the office, correct?" confirms the request, not the office.
+          || /\b(?:refill|referral|prescription|appointment|medication|need|receta|cita|necesita)\b/.test(fl)
           || !(echoes || /\b(?:office|location|clinic|oficina|clinica|consultorio|ubicacion)\b/.test(fl))) break;
         const turn: string[] = [];
         while (lines[k + 1]?.startsWith('CALLER: ')) { k += 1; turn.push(lines[k].slice('CALLER: '.length)); }
@@ -276,7 +278,7 @@ export async function officeTheCallerGave(transcript: string | undefined): Promi
   // does not correct the office: keep what came before the cue.
   let last = lastLine === undefined ? undefined : corrected(lastLine).replace(/^[\s,.;:!-]+/, '');
   if (lastLine !== undefined && last !== undefined && last !== lastLine && (last.split(/(?<=[.!;])\s+/)[0].trim().split(/\s+/).length > 4
-    || OTHER_PLACE.test(foldAccents(last.split(/(?<=[.!;])\s+/)[0]))) && !/\b(?:office|oficina|clinic|clinica|location|go to|went to|visit|voy a|va a)\b/.test(foldAccents(last))) {
+    || OTHER_PLACE.test(foldAccents(last.split(/(?<=[.!;])\s+/)[0]))) && !/\b(?:office|oficina|clinic|clinica|location|go to|went to|visit|voy a|va a|it was|it is|it's|the one in|la de|el de|era|fue|go there|anymore|ya no)\b/.test(foldAccents(last))) {
     const folded = foldAccents(lastLine);
     let start = -1;
     const cut = lastLine.length - corrected(lastLine).length;
