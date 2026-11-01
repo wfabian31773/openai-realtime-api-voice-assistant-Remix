@@ -47,6 +47,8 @@ const OFFICE_ASK = /\b(?:which|what|que|cual)\s+(?:[a-z]+\s+)?(?:office|location
 const AMBIGUOUS_ASK = /\b(?:which|what|que|cual)\s+(?:[a-z]+\s+)?(?:location|ubicacion)\b/;
 /** A readback the caller can reject: "Covina, is that correct?". */
 const CONFIRM_ASK = /\b(?:is that (?:correct|right)|correct|right|did you say|confirm|correcto|verdad)\b[^?]*\?/;
+/** Readbacks about something other than the office. */
+const NOT_OFFICE_TOPIC = /\b(?:pharmacy|farmacia|number|phone|callback|telefono|numero|birth|nacimiento|date|fecha|name|nombre)\b/;
 const AFFIRM = /^(?:yes|yeah|yep|correct|right|that'?s right|si|correcto|exacto)\b/;
 /** "Not Covina", "I don't go there", "no voy": a denial never names an office. "No, Covina" does. */
 const DENIAL = /\b(?:not|never|nunca|anymore)\b|n['’]t\b|(?<!^)\bno\b|^no\b(?!\s*[,.])/;
@@ -89,6 +91,8 @@ function officeAnswers(transcript: string): string[] {
     // pharmacy question it is the pharmacy's; bare, it needs an office ask before it.
     const ambiguous = AMBIGUOUS_ASK.test(folded);
     const bare = words.length <= 3;
+    // A readback of the office ("Covina, correct?") keeps the office context for a re-ask.
+    if (!matches && prevWasOffice && CONFIRM_ASK.test(folded) && !NOT_OFFICE_TOPIC.test(folded)) return;
     const isOffice = matches && (!ambiguous || prevWasOffice || (!bare && !lastQuestionWasPharmacy));
     lastQuestionWasOffice = isOffice;
     lastQuestionWasPharmacy = /\b(?:pharmacy|farmacia)\b/.test(folded) || (ambiguous && !isOffice && lastQuestionWasPharmacy);
@@ -113,7 +117,7 @@ function officeAnswers(transcript: string): string[] {
         const STOP = new Set(['usually', 'normally', 'that', 'this', 'there', 'office', 'the', 'one', 'yes', 'actually', 'sorry']);
         const echoes = [...said, ...corrections].some((a) => foldAccents(corrected(a)).split(/[^a-z]+/)
           .some((w) => w.length >= 4 && !STOP.has(w) && new RegExp(`\\b${w}\\b`).test(fl)));
-        if (!CONFIRM_ASK.test(fl) || /\b(?:pharmacy|farmacia)\b/.test(fl)
+        if (!CONFIRM_ASK.test(fl) || NOT_OFFICE_TOPIC.test(fl)
           || !(echoes || /\b(?:office|location|clinic|oficina|clinica|consultorio|ubicacion)\b/.test(fl))) break;
         const turn: string[] = [];
         while (lines[k + 1]?.startsWith('CALLER: ')) { k += 1; turn.push(lines[k].slice('CALLER: '.length)); }
