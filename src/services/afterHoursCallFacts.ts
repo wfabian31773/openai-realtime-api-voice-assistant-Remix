@@ -69,7 +69,14 @@ const CORRECTION_ALL = new RegExp(CORRECTION.source, 'g');
 function corrected(line: string): string {
   const folded = foldAccents(line);
   let end = -1;
-  for (const m of folded.matchAll(CORRECTION_ALL)) end = m.index! + m[0].length;
+  for (const m of folded.matchAll(CORRECTION_ALL)) {
+    const e = m.index! + m[0].length;
+    // A later apology that names nothing ("Actually, Downey. Sorry, the connection is bad.")
+    // does not undo the earlier correction.
+    const clause = line.slice(e).split(/[.!;?]/)[0];
+    if (end >= 0 && !/\p{Lu}\p{L}{3,}/u.test(clause)) continue;
+    end = e;
+  }
   return end < 0 ? line : line.slice(end);
 }
 
@@ -88,6 +95,13 @@ function officeAnswers(transcript: string): string[] {
   let lastQuestionWasPharmacy = false;
   let lastAnswerWords: string[] = [];
   lines.forEach((line, i) => {
+    if (line.startsWith('AGENT: ') && !line.includes('?')
+      && /\b(?:tell me|give me|provide|dime|deme|digame)\b/.test(foldAccents(line))) {
+      // A statement request ("Tell me which pharmacy you use.") sets the topic like a question.
+      lastQuestionWasOffice = false;
+      lastQuestionWasPharmacy = /\b(?:pharmacy|farmacia)\b/.test(foldAccents(line));
+      return;
+    }
     if (!line.startsWith('AGENT: ') || !line.includes('?')) return;
     const folded = foldAccents(line);
     const prevWasOffice = lastQuestionWasOffice;
@@ -230,11 +244,12 @@ export async function officeTheCallerGave(transcript: string | undefined): Promi
   // A long new topic after the cue ("Covina. Actually, my doctor in Downey needs the records")
   // does not correct the office: keep what came before the cue.
   let last = lastLine === undefined ? undefined : corrected(lastLine).replace(/^[\s,.;:!-]+/, '');
-  if (lastLine !== undefined && last !== undefined && last !== lastLine && (last.trim().split(/\s+/).length > 4
+  if (lastLine !== undefined && last !== undefined && last !== lastLine && (last.split(/(?<=[.!;])\s+/)[0].trim().split(/\s+/).length > 4
     || OTHER_PLACE.test(foldAccents(last))) && !/\b(?:office|oficina|clinic|clinica|location|go to|went to|visit|voy a|va a)\b/.test(foldAccents(last))) {
     const folded = foldAccents(lastLine);
     let start = -1;
-    for (const m of folded.matchAll(CORRECTION_ALL)) start = m.index!;
+    const cut = lastLine.length - corrected(lastLine).length;
+    for (const m of folded.matchAll(CORRECTION_ALL)) if (m.index! + m[0].length === cut) start = m.index!;
     last = lastLine.slice(0, start).replace(/[\s,.;:!-]+$/, '');
   }
   // Only the office sentence can deny it: "Covina. I do not remember the doctor." is Covina.

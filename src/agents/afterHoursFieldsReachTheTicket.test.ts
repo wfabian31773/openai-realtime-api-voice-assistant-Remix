@@ -554,6 +554,16 @@ describe('the teardown floor (the 70150 shape)', () => {
     expect(sent.locationOfLastVisit).toBe('Covina');
   });
 
+  it('does not read a bare location ask after a statement pharmacy request', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: Tell me which pharmacy you use.\nCALLER: CVS.\nAGENT: Which location?\nCALLER: Downey.`);
+    expect(sent.locationOfLastVisit).toBe('Covina');
+  });
+
+  it('keeps a correction followed by an unrelated apology', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina. Actually, Downey. Sorry, the connection is bad.`);
+    expect(sent.locationOfLastVisit).toBe('Downey');
+  });
+
   it('keeps the office over a records-destination sentence', async () => {
     const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina. My doctor in Downey needs my records.`);
     expect(sent.locationOfLastVisit).toBe('Covina');
