@@ -115,7 +115,7 @@ function officeAnswers(transcript: string): string[] {
     // An answer line about the pharmacy ("Sorry, the pharmacy is in Downey") is not the office.
     if (said.length > 1) { const kept = said.filter((a) => !/\b(?:pharmacy|farmacia)\b/.test(foldAccents(a))); said.splice(0, said.length, ...kept); }
     if (!said.length) return;
-    lastAnswerWords = foldAccents(said.join(' ')).split(/[^a-z]+/).filter((w) => !['usually','the','office','that','this'].includes(w));
+    lastAnswerWords = foldAccents(said.join(' ').split(/[,.;]/)[0] ?? '').split(/[^a-z]+/).filter((w) => !['usually','the','office','that','this'].includes(w));
     // A later caller turn corrects the office only until the agent asks
     // something else: "Sorry, I need a refill" after the next question is
     // not about the office.
@@ -180,7 +180,10 @@ function officeAnswers(transcript: string): string[] {
 export async function officeTheCallerGave(transcript: string | undefined): Promise<string | undefined> {
   // A sentence about the pharmacy ("Sorry, the pharmacy is in Downey") never names the office.
   const answers = officeAnswers(transcript ?? '')
-    .map((a) => a.split(/(?<=[.!;])\s+/).filter((part) => !/\b(?:pharmacy|farmacia)\b/.test(foldAccents(part))).join(' '))
+    .map((a) => a.split(/(?<=[.!;])\s+/)
+      // "No, that is my pharmacy" still rejects the office: keep the "No".
+      .map((part) => (/\b(?:pharmacy|farmacia)\b/.test(foldAccents(part)) ? (/^\s*no\b/i.test(part) ? 'No.' : '') : part))
+      .filter(Boolean).join(' '))
     .filter((a) => a.trim());
   const lastLine = answers.length > 1 ? answers[answers.length - 1] : answers[0];
   // Only the corrected portion counts: "Covina, actually Springfield" is Springfield.

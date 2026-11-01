@@ -383,6 +383,16 @@ describe('the teardown floor (the 70150 shape)', () => {
     expect(sent.locationOfLastVisit).toBe('Covina');
   });
 
+  it('files no office when the readback is rejected as the pharmacy', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: Covina, correct?\nCALLER: No, that is my pharmacy.`);
+    expect(sent.locationOfLastVisit).toBeUndefined();
+  });
+
+  it('does not keep office context through a readback of a later answer word', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina, records.\nAGENT: Records, correct?\nCALLER: Yes.\nAGENT: Which location?\nCALLER: Downey.`);
+    expect(sent.locationOfLastVisit).toBe('Covina');
+  });
+
   it('takes the answer to the last office ask', async () => {
     const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: Sorry, which office was that?\nCALLER: Downey.`);
     expect(sent.locationOfLastVisit).toBe('Downey');
