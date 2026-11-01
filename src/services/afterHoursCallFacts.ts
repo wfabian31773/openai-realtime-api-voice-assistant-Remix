@@ -42,7 +42,12 @@ export function dobTheCallerGave(callSid: string | undefined, transcript?: strin
 }
 
 /** An agent QUESTION about which office, English or Spanish, accents folded. */
-const OFFICE_ASK = /\b(?:which|what|que|cual)\b[^.?!]*\b(?:office|location|clinic|oficina|clinica|consultorio|ubicacion)\b[^.?!]*\?/;
+const OFFICE_ASK = /\b(?:which|what|que|cual)\s+(?:[a-z]+\s+)?(?:office|location|clinic|oficina|clinica|consultorio|ubicacion)\b[^.?!]*\?/;
+/** "Location" alone is ambiguous (a pharmacy's location); "office"/"clinic" is not. */
+const AMBIGUOUS_ASK = /\b(?:which|what|que|cual)\s+(?:[a-z]+\s+)?(?:location|ubicacion)\b/;
+/** A readback the caller can reject: "Covina, is that correct?". */
+const CONFIRM_ASK = /\b(?:is that (?:correct|right)|correct|right|did you say|confirm|correcto|verdad)\b[^?]*\?/;
+const AFFIRM = /^(?:yes|yeah|yep|correct|right|that'?s right|si|correcto|exacto)\b/;
 /** "Not Covina", "I don't go there", "no voy": a denial never names an office. "No, Covina" does. */
 const DENIAL = /\b(?:not|never|nunca|anymore)\b|n['’]t\b|(?<!^)\bno\b|^no\b(?!\s*[,.])/;
 
@@ -79,7 +84,7 @@ function officeAnswers(transcript: string): string[] {
     // A pharmacy question ("which pharmacy should the office send it to?") is not an office ask.
     const matches = OFFICE_ASK.test(folded) && !/\b(?:pharmacy|farmacia)\b/.test(folded);
     const words = folded.slice('agent: '.length).split('?')[0].replace(/[^a-z\s]/g, ' ').trim().split(/\s+/).filter(Boolean);
-    const bare = words.length <= 3;
+    const bare = words.length <= 3 && AMBIGUOUS_ASK.test(folded);
     const isOffice = matches && (!bare || prevWasOffice);
     lastQuestionWasOffice = isOffice;
     if (!isOffice) return;
@@ -94,7 +99,16 @@ function officeAnswers(transcript: string): string[] {
     for (let k = j; k < lines.length; k += 1) {
       const l = lines[k];
       // Any agent question closes the window, wherever its "?" falls.
-      if (l.startsWith('AGENT: ')) { if (l.includes('?')) break; continue; }
+      if (l.startsWith('AGENT: ')) {
+        if (!l.includes('?')) continue;
+        // A readback of the office keeps the window open: "No, Downey" corrects it.
+        if (!CONFIRM_ASK.test(foldAccents(l))) break;
+        const turn: string[] = [];
+        while (lines[k + 1]?.startsWith('CALLER: ')) { k += 1; turn.push(lines[k].slice('CALLER: '.length)); }
+        const reply = turn.join(' ').trim();
+        if (reply && !AFFIRM.test(foldAccents(reply))) corrections.push(reply);
+        continue;
+      }
       if (!l.startsWith('CALLER: ') || !CORRECTION.test(foldAccents(l))) continue;
       // The whole correcting turn: transcription may split "Actually," and "Downey."
       const turn: string[] = [l.slice('CALLER: '.length)];

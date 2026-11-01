@@ -218,6 +218,26 @@ describe('the teardown floor (the 70150 shape)', () => {
     expect(sent.locationOfLastVisit).toBeUndefined();
   });
 
+  it('does not read "What can our office help you with?" as an office ask', async () => {
+    const sent = await officeSent(`${REQUEST}\nAGENT: What can our office help you with?\nCALLER: Send my prescription to CVS in Downey.`);
+    expect(sent.locationOfLastVisit).toBeUndefined();
+  });
+
+  it('reads a bare "Which office?" as an office ask', async () => {
+    const sent = await officeSent(`${REQUEST}\nAGENT: Which office?\nCALLER: Downey.`);
+    expect(sent.locationOfLastVisit).toBe('Downey');
+  });
+
+  it('takes the correction to an office readback', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: Covina, is that correct?\nCALLER: No, Downey.`);
+    expect(sent.locationOfLastVisit).toBe('Downey');
+  });
+
+  it('keeps the office the caller confirms on a readback', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: Covina, is that correct?\nCALLER: Yes.`);
+    expect(sent.locationOfLastVisit).toBe('Covina');
+  });
+
   it('takes the answer to the last office ask', async () => {
     const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: Sorry, which office was that?\nCALLER: Downey.`);
     expect(sent.locationOfLastVisit).toBe('Downey');
