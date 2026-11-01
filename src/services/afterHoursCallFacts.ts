@@ -233,13 +233,18 @@ export async function officeTheCallerGave(transcript: string | undefined): Promi
   if (!last || DENIAL.test(foldAccents(sentences[0]).trim()) || sentences.some((x) => /^no[.!]?$/i.test(x.trim()))
     // "Covina. No voy a Covina.": a later sentence denying the office named.
     || sentences.slice(1).some((x) => { const f = foldAccents(x); return DENIAL.test(f.trim())
-      && foldAccents(sentences[0]).split(/[^a-z]+/).some((w) => w.length >= 4 && new RegExp(`\\b${w}\\b`).test(f)); })) return undefined;
+      && (/\b(?:there|it|that office|that one|esa oficina|ahi|alli|alla)\b/.test(f)
+        || foldAccents(sentences[0]).split(/[^a-z]+/).some((w) => w.length >= 4 && new RegExp(`\\b${w}\\b`).test(f))); })) return undefined;
   // The office is the first sentence: "Springfield. My doctor in Covina needs my records." is Springfield.
   const parts = last.split(/(?<=[.!;])\s+/);
   // A filler lead-in ("Let me think.": several words, no proper noun) is not the answer.
   const resolves = async (x: string) => { try { return await lookupLocation(x); } catch { return undefined; } };
   while (parts.length > 1 && parts[0].trim().split(/\s+/).length >= 2 && !/\p{Lu}/u.test(parts[0].trim().slice(1))
-    && !(await resolves(parts[0]))) parts.shift();
+    && !(await resolves(parts[0]))) {
+    // "The one near my home." describes the office: never promote a later sentence over it.
+    if (/\b(?:one|near|by|close|office|oficina|clinic|clinica|cerca|la que|el que)\b/.test(foldAccents(parts[0]))) return undefined;
+    parts.shift();
+  }
   const [first, ...rest] = parts;
   if (DENIAL.test(foldAccents(first).trim())) return undefined;
   // "Covina or Springfield" is a guess between offices, never one office.
