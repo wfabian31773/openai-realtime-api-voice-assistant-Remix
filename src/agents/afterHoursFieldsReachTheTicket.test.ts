@@ -453,6 +453,21 @@ describe('the teardown floor (the 70150 shape)', () => {
     expect(sent.locationOfLastVisit).toBeUndefined();
   });
 
+  it('files the office a delayed affirmation confirms', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: The Downey office, correct?\nAGENT: Take your time.\nCALLER: Yes.`);
+    expect(sent.locationOfLastVisit).toBe('Downey');
+  });
+
+  it('ignores a denial in a later unrelated sentence', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina. I do not remember the name of the doctor.`);
+    expect(sent.locationOfLastVisit).toBe('Covina');
+  });
+
+  it('files no office for "Covina or Springfield"', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina or Springfield.`);
+    expect(sent.locationOfLastVisit).toBeUndefined();
+  });
+
   it('takes the answer to the last office ask', async () => {
     const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: Sorry, which office was that?\nCALLER: Downey.`);
     expect(sent.locationOfLastVisit).toBe('Downey');

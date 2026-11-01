@@ -120,6 +120,7 @@ function officeAnswers(transcript: string): string[] {
     // not about the office.
     const corrections: string[] = [];
     let pendingReadback = false;
+    let pendingClause = '';
     // Every office the caller has named so far, for a later cue-less denial.
     const namedWords = () => [...said, ...corrections].flatMap((a) => foldAccents(corrected(a)).split(/[^a-z]+/))
       .filter((w) => w.length >= 4 && !['usually', 'office', 'that', 'this', 'there'].includes(w));
@@ -145,6 +146,7 @@ function officeAnswers(transcript: string): string[] {
         const reply = turn.join(' ').trim();
         // An acknowledgment can sit between the readback and its reply.
         pendingReadback = !reply;
+        pendingClause = (l.slice('AGENT: '.length).split('?')[0].split(/[.!]/).pop() ?? '').trim();
         const fr = foldAccents(reply);
         if (reply && (!AFFIRM.test(fr) || CORRECTION.test(fr) || DENIAL.test(fr.replace(AFFIRM, '')))) corrections.push(reply);
         // "Yes" confirms the office the readback named ("The Downey office, correct?");
@@ -165,6 +167,7 @@ function officeAnswers(transcript: string): string[] {
         const reply = turn.join(' ').trim();
         const fr = foldAccents(reply);
         if (!AFFIRM.test(fr) || CORRECTION.test(fr) || DENIAL.test(fr.replace(AFFIRM, ''))) corrections.push(reply);
+        else if (namesAnOffice(pendingClause)) corrections.push(pendingClause);
         continue;
       }
       if (!CORRECTION.test(fl0)) {
@@ -221,9 +224,13 @@ export async function officeTheCallerGave(transcript: string | undefined): Promi
     for (const m of folded.matchAll(CORRECTION_ALL)) start = m.index!;
     last = lastLine.slice(0, start).replace(/[\s,.;:!-]+$/, '');
   }
-  if (!last || DENIAL.test(foldAccents(last).trim())) return undefined;
+  // Only the office sentence can deny it: "Covina. I do not remember the doctor." is Covina.
+  const sentences = last?.split(/(?<=[.!;])\s+/) ?? [];
+  if (!last || DENIAL.test(foldAccents(sentences[0]).trim()) || sentences.some((x) => /^no[.!]?$/i.test(x.trim()))) return undefined;
   // The office is the first sentence: "Springfield. My doctor in Covina needs my records." is Springfield.
   const [first, ...rest] = last.split(/(?<=[.!;])\s+/);
+  // "Covina or Springfield" is a guess between offices, never one office.
+  if (/\b(?:or|o|either|both|ambos)\b/.test(foldAccents(first))) return undefined;
   try {
     const office = await lookupLocation(first);
     // A later sentence naming another office ("Or Downey, I go to both") makes it ambiguous.
