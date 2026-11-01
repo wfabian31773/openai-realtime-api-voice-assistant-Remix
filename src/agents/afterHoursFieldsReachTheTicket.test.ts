@@ -338,6 +338,21 @@ describe('the teardown floor (the 70150 shape)', () => {
     expect(sent.locationOfLastVisit).toBe(want);
   });
 
+  it('does not read a records-destination office question as the office visited', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: Which office should we send your records to?\nCALLER: Downey.`);
+    expect(sent.locationOfLastVisit).toBe('Covina');
+  });
+
+  it('drops a pharmacy line inside the answer turn', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nCALLER: Sorry, the pharmacy is in Downey.`);
+    expect(sent.locationOfLastVisit).toBe('Covina');
+  });
+
+  it('reads a re-ask after a rejected generic office confirmation', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: Is that the correct office?\nCALLER: No.\nAGENT: Which location?\nCALLER: Downey.`);
+    expect(sent.locationOfLastVisit).toBe('Downey');
+  });
+
   it('takes the answer to the last office ask', async () => {
     const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: Sorry, which office was that?\nCALLER: Downey.`);
     expect(sent.locationOfLastVisit).toBe('Downey');

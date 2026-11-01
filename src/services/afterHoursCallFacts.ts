@@ -91,14 +91,16 @@ function officeAnswers(transcript: string): string[] {
     const folded = foldAccents(line);
     const prevWasOffice = lastQuestionWasOffice;
     // A pharmacy question ("which pharmacy should the office send it to?") is not an office ask.
-    const matches = OFFICE_ASK.test(folded) && !/\b(?:pharmacy|farmacia)\b/.test(folded);
+    // "Which office should we send your records to?" asks for a destination, not the office visited.
+    const matches = OFFICE_ASK.test(folded) && !/\b(?:pharmacy|farmacia)\b/.test(folded)
+      && !/\b(?:send|sent|fax|forward|transfer|mail|enviar|enviamos|mandar)\b/.test(folded);
     const words = folded.slice('agent: '.length).split('?')[0].replace(/[^a-z\s]/g, ' ').trim().split(/\s+/).filter(Boolean);
     // "Location" borrows its subject from the question before it: after a
     // pharmacy question it is the pharmacy's; bare, it needs an office ask before it.
     const ambiguous = AMBIGUOUS_ASK.test(folded);
     const bare = words.length <= 3;
     // A readback of the office ("Covina, correct?") keeps the office context for a re-ask.
-    if (!matches && prevWasOffice && (line.match(/\?/g) ?? []).length === 1 && CONFIRM_ASK.test(folded) && namesAnOffice(line.slice('AGENT: '.length)) && !NOT_OFFICE_TOPIC.test(folded)) return;
+    if (!matches && prevWasOffice && (line.match(/\?/g) ?? []).length === 1 && CONFIRM_ASK.test(folded) && (namesAnOffice(line.slice('AGENT: '.length)) || /\b(?:office|location|clinic|oficina|clinica|ubicacion)\b/.test(folded)) && !NOT_OFFICE_TOPIC.test(folded)) return;
     const isOffice = matches && (!ambiguous || prevWasOffice || (!bare && !lastQuestionWasPharmacy));
     lastQuestionWasOffice = isOffice;
     lastQuestionWasPharmacy = /\b(?:pharmacy|farmacia)\b/.test(folded) || (ambiguous && !isOffice && lastQuestionWasPharmacy);
@@ -106,6 +108,9 @@ function officeAnswers(transcript: string): string[] {
     const said: string[] = [];
     let j = i + 1;
     for (; lines[j]?.startsWith('CALLER: '); j += 1) said.push(lines[j].slice('CALLER: '.length));
+    if (!said.length) return;
+    // An answer line about the pharmacy ("Sorry, the pharmacy is in Downey") is not the office.
+    if (said.length > 1) { const kept = said.filter((a) => !/\b(?:pharmacy|farmacia)\b/.test(foldAccents(a))); said.splice(0, said.length, ...kept); }
     if (!said.length) return;
     // A later caller turn corrects the office only until the agent asks
     // something else: "Sorry, I need a refill" after the next question is
