@@ -112,6 +112,8 @@ function officeAnswers(transcript: string): string[] {
     if (!isOffice) return;
     const said: string[] = [];
     let j = i + 1;
+    // An acknowledgment ("Take your time.") can sit between the ask and the answer.
+    while (lines[j]?.startsWith('AGENT: ') && !lines[j].includes('?')) j += 1;
     for (; lines[j]?.startsWith('CALLER: '); j += 1) said.push(lines[j].slice('CALLER: '.length));
     if (!said.length) return;
     lastAnswerWords = foldAccents(said.join(' ').split(/[,.;]/)[0] ?? '').split(/[^a-z]+/).filter((w) => !['usually','the','office','that','this'].includes(w));
@@ -179,8 +181,9 @@ function officeAnswers(transcript: string): string[] {
       while (lines[k + 1]?.startsWith('CALLER: ')) { k += 1; turn.push(lines[k].slice('CALLER: '.length)); }
       // "Sorry, the pharmacy is in Downey" corrects the pharmacy, not the office.
       // and a long sentence after the cue is a new topic ("Actually, my doctor in Downey needs the records").
-      const after = corrected(turn.join(' ')).trim();
-      if (!/\b(?:pharmacy|farmacia)\b/.test(foldAccents(turn.join(' ')))
+      const noPharmacy = turn.join(' ').split(/(?<=[.!;])\s+/).filter((x) => !/\b(?:pharmacy|farmacia)\b/.test(foldAccents(x))).join(' ');
+      const after = corrected(noPharmacy).trim();
+      if (noPharmacy.trim() && CORRECTION.test(foldAccents(noPharmacy))
         && (after.split(/\s+/).length <= 4 || /\b(?:office|oficina|clinic|clinica|location|go to|went to|visit|voy a|va a)\b/.test(foldAccents(after)))) corrections.push(turn.join(' '));
     }
     // The first answer turn, then each in-window line after it that corrects
@@ -226,7 +229,10 @@ export async function officeTheCallerGave(transcript: string | undefined): Promi
   }
   // Only the office sentence can deny it: "Covina. I do not remember the doctor." is Covina.
   const sentences = last?.split(/(?<=[.!;])\s+/) ?? [];
-  if (!last || DENIAL.test(foldAccents(sentences[0]).trim()) || sentences.some((x) => /^no[.!]?$/i.test(x.trim()))) return undefined;
+  if (!last || DENIAL.test(foldAccents(sentences[0]).trim()) || sentences.some((x) => /^no[.!]?$/i.test(x.trim()))
+    // "Covina. No voy a Covina.": a later sentence denying the office named.
+    || sentences.slice(1).some((x) => { const f = foldAccents(x); return DENIAL.test(f.trim())
+      && foldAccents(sentences[0]).split(/[^a-z]+/).some((w) => w.length >= 4 && new RegExp(`\\b${w}\\b`).test(f)); })) return undefined;
   // The office is the first sentence: "Springfield. My doctor in Covina needs my records." is Springfield.
   const [first, ...rest] = last.split(/(?<=[.!;])\s+/);
   // "Covina or Springfield" is a guess between offices, never one office.
