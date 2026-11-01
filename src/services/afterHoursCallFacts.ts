@@ -94,9 +94,9 @@ function officeAnswers(transcript: string): string[] {
     // A pharmacy question ("which pharmacy should the office send it to?") is not an office ask.
     // "Which office should we send your records to?" asks for a destination, not the office visited.
     // The caller answers the LAST question on the line: "Which office…? Where should we deliver…?" is about delivery.
-    const lastQuestion = (folded.match(/[^?]*\?/g) ?? []).pop() ?? folded;
-    const matches = OFFICE_ASK.test(lastQuestion) && !/\b(?:pharmacy|farmacia)\b/.test(folded)
-      && !/\b(?:send|sent|fax|forward|transfer|mail|enviar|enviamos|mandar)\b/.test(folded);
+    const lastQuestion = ((folded.match(/[^?]*\?/g) ?? []).pop() ?? folded).split(/[.!]/).pop() ?? folded;
+    const matches = OFFICE_ASK.test(lastQuestion) && !/\b(?:pharmacy|farmacia)\b/.test(lastQuestion)
+      && !/\b(?:send|sent|fax|forward|transfer|mail|enviar|enviamos|mandar)\b/.test(lastQuestion);
     const words = folded.slice('agent: '.length).split('?')[0].replace(/[^a-z\s]/g, ' ').trim().split(/\s+/).filter(Boolean);
     // "Location" borrows its subject from the question before it: after a
     // pharmacy question it is the pharmacy's; bare, it needs an office ask before it.
@@ -149,7 +149,13 @@ function officeAnswers(transcript: string): string[] {
         }
         continue;
       }
-      if (!l.startsWith('CALLER: ') || !CORRECTION.test(foldAccents(l))) continue;
+      if (!l.startsWith('CALLER: ')) continue;
+      // A later denial of the office named ("No voy a Covina") clears it, cue or not.
+      const fl0 = foldAccents(l.slice('CALLER: '.length));
+      if (!CORRECTION.test(fl0)) {
+        if (DENIAL.test(fl0.trim()) && lastAnswerWords.some((w) => w.length >= 4 && new RegExp(`\\b${w}\\b`).test(fl0))) corrections.push('No.');
+        continue;
+      }
       // The whole correcting turn: transcription may split "Actually," and "Downey."
       const turn: string[] = [l.slice('CALLER: '.length)];
       while (lines[k + 1]?.startsWith('CALLER: ')) { k += 1; turn.push(lines[k].slice('CALLER: '.length)); }
@@ -202,9 +208,14 @@ export async function officeTheCallerGave(transcript: string | undefined): Promi
   }
   if (!last || DENIAL.test(foldAccents(last).trim())) return undefined;
   // The office is the first sentence: "Springfield. My doctor in Covina needs my records." is Springfield.
-  last = last.split(/(?<=[.!;])\s+/)[0];
+  const [first, ...rest] = last.split(/(?<=[.!;])\s+/);
   try {
-    const office = await lookupLocation(last);
+    const office = await lookupLocation(first);
+    // A later sentence naming another office ("Or Downey, I go to both") makes it ambiguous.
+    for (const sentence of rest) {
+      const other = await lookupLocation(sentence);
+      if (other && office && other.canonical !== office.canonical) return undefined;
+    }
     return office ? office.fileAs || sanitizeLocationName(office.canonical).value || office.canonical : undefined;
   } catch {
     return undefined;

@@ -423,6 +423,21 @@ describe('the teardown floor (the 70150 shape)', () => {
     expect(sent.locationOfLastVisit).toBe('Downey');
   });
 
+  it('clears the office on a later denial without a cue', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: Thank you.\nCALLER: No voy a Covina.`);
+    expect(sent.locationOfLastVisit).toBeUndefined();
+  });
+
+  it('files no office when a later sentence names a second office', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina. Or Downey, I go to both.`);
+    expect(sent.locationOfLastVisit).toBeUndefined();
+  });
+
+  it('reads an office ask after a statement that mentions sending', async () => {
+    const sent = await officeSent(`${REQUEST}\nAGENT: I will send the message. Which office do you usually visit?\nCALLER: Downey.`);
+    expect(sent.locationOfLastVisit).toBe('Downey');
+  });
+
   it('takes the answer to the last office ask', async () => {
     const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: Sorry, which office was that?\nCALLER: Downey.`);
     expect(sent.locationOfLastVisit).toBe('Downey');
