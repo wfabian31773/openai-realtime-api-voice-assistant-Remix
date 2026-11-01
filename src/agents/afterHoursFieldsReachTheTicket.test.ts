@@ -393,6 +393,16 @@ describe('the teardown floor (the 70150 shape)', () => {
     expect(sent.locationOfLastVisit).toBe('Covina');
   });
 
+  it('files no office when a split answer turn rejects it as the pharmacy', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nCALLER: No, that is my pharmacy.`);
+    expect(sent.locationOfLastVisit).toBeUndefined();
+  });
+
+  it('does not read an office ask followed by another question on the line', async () => {
+    const sent = await officeSent(`${REQUEST}\nAGENT: Which office do you usually visit? Where should we deliver your prescription?\nCALLER: My home in Downey.`);
+    expect(sent.locationOfLastVisit).toBeUndefined();
+  });
+
   it('takes the answer to the last office ask', async () => {
     const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: Sorry, which office was that?\nCALLER: Downey.`);
     expect(sent.locationOfLastVisit).toBe('Downey');

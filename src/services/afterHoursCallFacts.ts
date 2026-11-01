@@ -93,7 +93,9 @@ function officeAnswers(transcript: string): string[] {
     const prevWasOffice = lastQuestionWasOffice;
     // A pharmacy question ("which pharmacy should the office send it to?") is not an office ask.
     // "Which office should we send your records to?" asks for a destination, not the office visited.
-    const matches = OFFICE_ASK.test(folded) && !/\b(?:pharmacy|farmacia)\b/.test(folded)
+    // The caller answers the LAST question on the line: "Which office…? Where should we deliver…?" is about delivery.
+    const lastQuestion = (folded.match(/[^?]*\?/g) ?? []).pop() ?? folded;
+    const matches = OFFICE_ASK.test(lastQuestion) && !/\b(?:pharmacy|farmacia)\b/.test(folded)
       && !/\b(?:send|sent|fax|forward|transfer|mail|enviar|enviamos|mandar)\b/.test(folded);
     const words = folded.slice('agent: '.length).split('?')[0].replace(/[^a-z\s]/g, ' ').trim().split(/\s+/).filter(Boolean);
     // "Location" borrows its subject from the question before it: after a
@@ -111,9 +113,6 @@ function officeAnswers(transcript: string): string[] {
     const said: string[] = [];
     let j = i + 1;
     for (; lines[j]?.startsWith('CALLER: '); j += 1) said.push(lines[j].slice('CALLER: '.length));
-    if (!said.length) return;
-    // An answer line about the pharmacy ("Sorry, the pharmacy is in Downey") is not the office.
-    if (said.length > 1) { const kept = said.filter((a) => !/\b(?:pharmacy|farmacia)\b/.test(foldAccents(a))); said.splice(0, said.length, ...kept); }
     if (!said.length) return;
     lastAnswerWords = foldAccents(said.join(' ').split(/[,.;]/)[0] ?? '').split(/[^a-z]+/).filter((w) => !['usually','the','office','that','this'].includes(w));
     // A later caller turn corrects the office only until the agent asks
