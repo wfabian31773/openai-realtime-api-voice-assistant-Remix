@@ -102,11 +102,16 @@ function officeAnswers(transcript: string): string[] {
       if (l.startsWith('AGENT: ')) {
         if (!l.includes('?')) continue;
         // A readback of the office keeps the window open: "No, Downey" corrects it.
-        if (!CONFIRM_ASK.test(foldAccents(l))) break;
+        // Only a readback OF THE OFFICE: it names an office word or what the
+        // caller answered, and is not about the pharmacy.
+        const fl = foldAccents(l);
+        const echoes = said.some((a) => { const w = foldAccents(a).replace(/[^a-z\s]/g, ' ').trim(); return w.length > 2 && fl.includes(w); });
+        if (!CONFIRM_ASK.test(fl) || /\b(?:pharmacy|farmacia)\b/.test(fl)
+          || !(echoes || /\b(?:office|location|clinic|oficina|clinica|consultorio|ubicacion)\b/.test(fl))) break;
         const turn: string[] = [];
         while (lines[k + 1]?.startsWith('CALLER: ')) { k += 1; turn.push(lines[k].slice('CALLER: '.length)); }
         const reply = turn.join(' ').trim();
-        if (reply && !AFFIRM.test(foldAccents(reply))) corrections.push(reply);
+        if (reply && (!AFFIRM.test(foldAccents(reply)) || CORRECTION.test(foldAccents(reply)))) corrections.push(reply);
         continue;
       }
       if (!l.startsWith('CALLER: ') || !CORRECTION.test(foldAccents(l))) continue;
