@@ -174,7 +174,7 @@ function officeAnswers(transcript: string): string[] {
         const fr = foldAccents(reply);
         if (reply && (!AFFIRM.test(fr) || CORRECTION.test(fr) || (DENIAL.test(fr.replace(AFFIRM, ''))
           // "Yes, I do not go to Covina anymore" after "The Downey office, correct?" denies the OLD office.
-          && !(reply.match(/\p{Lu}\p{L}{3,}/gu) ?? []).some((w) => !new RegExp(`\\b${w}\\b`).test(l))))) corrections.push(reply);
+          && !namedWords().some((w) => new RegExp(`\\b${w}\\b`).test(fr) && !new RegExp(`\\b${w}\\b`).test(fl))))) corrections.push(reply);
         // "Yes" confirms the office the readback named ("The Downey office, correct?");
         // a generic "Is that the correct office?" names none and leaves the answer.
         else if (reply) {
@@ -207,10 +207,15 @@ function officeAnswers(transcript: string): string[] {
       // and a long sentence after the cue is a new topic ("Actually, my doctor in Downey needs the records").
       // "Actually, Covina is my pharmacy, not my office" rejects the office first.
       if (/\b(?:not my office|not the office|no es mi oficina|no es la oficina)\b/.test(foldAccents(turn.join(' ')))) { corrections.push('No.'); continue; }
-      const noPharmacy = turn.join(' ').split(/(?<=[.!;])\s+/).filter((x) => !/\b(?:pharmacy|farmacia)\b/.test(foldAccents(x))).join(' ');
+      const noPharmacy = turn.join(' ').split(/(?<=[.!;])\s+/).map((x) => {
+        // "My office is Downey and my pharmacy is Covina": keep the office clause.
+        if (!/\b(?:pharmacy|farmacia)\b/.test(foldAccents(x))) return x;
+        if (!/\b(?:office|oficina|clinic|clinica|visit|go to|voy a)\b/.test(foldAccents(x))) return '';
+        return x.split(/,\s*|\s+(?:and|y|but|pero)\s+/).filter((c) => !/\b(?:pharmacy|farmacia)\b/.test(foldAccents(c))).join(', ');
+      }).filter(Boolean).join(' ');
       const after = corrected(noPharmacy).trim();
       if (noPharmacy.trim() && CORRECTION.test(foldAccents(noPharmacy))
-        && (after.split(/\s+/).length <= 4 || /\b(?:office|oficina|clinic|clinica|location|go to|went to|visit|voy a|va a)\b/.test(foldAccents(after)))) corrections.push(turn.join(' '));
+        && (after.split(/\s+/).length <= 4 || /\b(?:office|oficina|clinic|clinica|location|go to|went to|visit|voy a|va a)\b/.test(foldAccents(after)))) corrections.push(noPharmacy);
     }
     // The first answer turn, then each in-window line after it that corrects
     // it, then each later correcting line: the last one decides.

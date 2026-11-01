@@ -587,6 +587,16 @@ describe('the teardown floor (the 70150 shape)', () => {
     expect(sent.locationOfLastVisit).toBe('Downey');
   });
 
+  it('honors a referential denial inside a yes with another capitalized word', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: The Covina office, correct?\nCALLER: Sí, pero ya no voy ahí. Necesito otra oficina.`);
+    expect(sent.locationOfLastVisit).toBeUndefined();
+  });
+
+  it('keeps the office clause of a correction that also names the pharmacy', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: Thank you.\nCALLER: Actually, my office is Downey and my pharmacy is Covina.`);
+    expect(sent.locationOfLastVisit).toBe('Downey');
+  });
+
   it('keeps the office over a records-destination sentence', async () => {
     const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina. My doctor in Downey needs my records.`);
     expect(sent.locationOfLastVisit).toBe('Covina');
