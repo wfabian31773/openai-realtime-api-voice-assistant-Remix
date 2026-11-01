@@ -110,7 +110,9 @@ function officeAnswers(transcript: string): string[] {
         // Only a readback OF THE OFFICE: it names an office word or what the
         // caller answered, and is not about the pharmacy.
         const fl = foldAccents(l);
-        const echoes = [...said, ...corrections].some((a) => { const w = foldAccents(corrected(a)).replace(/[^a-z\s]/g, ' ').trim().replace(/^no\s+/, '').replace(/\s+/g, ' '); return w.length > 2 && fl.includes(w); });
+        const STOP = new Set(['usually', 'normally', 'that', 'this', 'there', 'office', 'the', 'one', 'yes', 'actually', 'sorry']);
+        const echoes = [...said, ...corrections].some((a) => foldAccents(corrected(a)).split(/[^a-z]+/)
+          .some((w) => w.length >= 4 && !STOP.has(w) && new RegExp(`\\b${w}\\b`).test(fl)));
         if (!CONFIRM_ASK.test(fl) || /\b(?:pharmacy|farmacia)\b/.test(fl)
           || !(echoes || /\b(?:office|location|clinic|oficina|clinica|consultorio|ubicacion)\b/.test(fl))) break;
         const turn: string[] = [];

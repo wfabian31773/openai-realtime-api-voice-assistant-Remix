@@ -258,6 +258,16 @@ describe('the teardown floor (the 70150 shape)', () => {
     expect(sent.locationOfLastVisit).toBeUndefined();
   });
 
+  it('reads a readback of a sentence answer', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Usually the Covina office.\nAGENT: Covina, is that correct?\nCALLER: No, Downey.`);
+    expect(sent.locationOfLastVisit).toBe('Downey');
+  });
+
+  it('files no office when the caller rejects the readback', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Usually the Covina office.\nAGENT: Covina, is that correct?\nCALLER: No.`);
+    expect(sent.locationOfLastVisit).toBeUndefined();
+  });
+
   it('takes the answer to the last office ask', async () => {
     const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: Sorry, which office was that?\nCALLER: Downey.`);
     expect(sent.locationOfLastVisit).toBe('Downey');
