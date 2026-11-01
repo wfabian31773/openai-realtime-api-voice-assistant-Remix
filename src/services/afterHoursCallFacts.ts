@@ -18,6 +18,8 @@
  */
 import { dobFromCallerAnswer, spokenDobFor } from '../tools/spokenDob';
 import { classifyAfterHoursRequest, type AfterHoursClassification } from '../tools/afterHoursTaxonomy';
+import { lookupLocation } from './consoleDirectory';
+import { sanitizeLocationName } from './ticketFieldSanitizers';
 
 /** `YYYY-MM-DD` -> `MM/DD/YYYY`, the shape every after-hours DOB parser reads. */
 export function isoDobToUs(iso: string | undefined): string | undefined {
@@ -37,6 +39,60 @@ export function dobTheCallerGave(callSid: string | undefined, transcript?: strin
   if (stored) return stored;
   if (!transcript?.trim()) return undefined;
   return isoDobToUs(dobFromCallerAnswer(transcript.split('\n')));
+}
+
+/** An agent QUESTION about which office, English or Spanish, accents folded. */
+const OFFICE_ASK = /\b(?:which|what|que|cual)\b[^.?!]*\b(?:office|location|clinic|oficina|clinica|consultorio|ubicacion)\b[^.?!]*\?/;
+/** "Not Covina", "I don't go there", "no voy": a denial never names an office. "No, Covina" does. */
+const DENIAL = /\b(?:not|never|nunca|anymore)\b|n['’]t\b|\bno\b(?!\s*[,.])/;
+
+const foldAccents = (text: string) => text.normalize('NFD').replace(/\p{Diacritic}/gu, '').toLowerCase();
+
+/** "Actually", "I mean", "perdón", "mejor dicho": the caller is correcting what they said. */
+const CORRECTION = /\b(?:actually|i mean|i meant|sorry|correction|wait|perdon|quise decir|mejor dicho|en realidad)\b/;
+
+/**
+ * The caller's words answering the LAST office ask, then any later caller line
+ * that corrects it, in order. A later ask that drew an answer replaces an
+ * earlier one; a mention elsewhere is not read.
+ */
+function officeAnswers(transcript: string): string[] {
+  const lines = transcript.split('\n');
+  let answers: string[] = [];
+  lines.forEach((line, i) => {
+    if (!line.startsWith('AGENT: ') || !OFFICE_ASK.test(foldAccents(line))) return;
+    const said: string[] = [];
+    let j = i + 1;
+    for (; lines[j]?.startsWith('CALLER: '); j += 1) said.push(lines[j].slice('CALLER: '.length));
+    if (!said.length) return;
+    const corrections = lines.slice(j)
+      .filter((l) => l.startsWith('CALLER: ') && CORRECTION.test(foldAccents(l)))
+      .map((l) => l.slice('CALLER: '.length));
+    // The first answer turn, then each in-window line after it that corrects
+    // it, then each later correcting line: the last one decides.
+    answers = [said.join(' '), ...said.slice(1).filter((l) => CORRECTION.test(foldAccents(l))), ...corrections];
+  });
+  return answers;
+}
+
+/**
+ * The office the caller named when asked, as the directory files it, or
+ * undefined. `lookupLocation` is the guard against a guess: it refuses a phrase
+ * naming two offices and a city that only contains an office's name. A
+ * correction to an office the directory does not know (or a denial) clears
+ * the earlier office: the last answer decides, never a stale one. A directory
+ * outage reads as no office and must never cost the floor its ticket.
+ */
+export async function officeTheCallerGave(transcript: string | undefined): Promise<string | undefined> {
+  const answers = officeAnswers(transcript ?? '');
+  const last = answers.length > 1 ? answers[answers.length - 1] : answers[0];
+  if (!last || DENIAL.test(foldAccents(last))) return undefined;
+  try {
+    const office = await lookupLocation(last);
+    return office ? office.fileAs || sanitizeLocationName(office.canonical).value || office.canonical : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /**
