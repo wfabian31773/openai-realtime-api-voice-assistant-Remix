@@ -642,6 +642,16 @@ describe('the teardown floor (the 70150 shape)', () => {
     expect(sent.locationOfLastVisit).toBeUndefined();
   });
 
+  it('honors a denial split across caller lines', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: Thank you.\nCALLER: No voy a\nCALLER: Covina.`);
+    expect(sent.locationOfLastVisit).toBeUndefined();
+  });
+
+  it('takes a lowercase final correction over an earlier one', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina. Actually, downey. Sorry, springfield.`);
+    expect(sent.locationOfLastVisit).toBeUndefined();
+  });
+
   it('keeps the office over a records-destination sentence', async () => {
     const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina. My doctor in Downey needs my records.`);
     expect(sent.locationOfLastVisit).toBe('Covina');

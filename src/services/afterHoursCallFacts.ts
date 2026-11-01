@@ -74,7 +74,8 @@ function corrected(line: string): string {
     // A later apology that names nothing ("Actually, Downey. Sorry, the connection is bad.")
     // does not undo the earlier correction.
     const clause = line.slice(e).split(/[.!;?]/)[0];
-    if (end >= 0 && !/\p{Lu}\p{L}{3,}/u.test(clause)) continue;
+    // A name-less clause is an apology, whatever the transcript's capitalization.
+    if (end >= 0 && /^[\s,.:-]*(?:the|i|for|my|it|that|this|el|la|mi|lo|por|you|we)\b/i.test(clause) && !/\p{Lu}\p{L}{3,}/u.test(clause.replace(/^[\s,.:-]*\p{L}+/u, ''))) continue;
     end = e;
   }
   return end < 0 ? line : line.slice(end);
@@ -203,6 +204,10 @@ function officeAnswers(transcript: string): string[] {
         continue;
       }
       if (!CORRECTION.test(fl0)) {
+        // "No voy a" / "Covina." split across lines is one denial.
+        let joined = fl0;
+        for (let m = k + 1; lines[m]?.startsWith('CALLER: ') && !CORRECTION.test(foldAccents(lines[m])); m += 1) joined += ' ' + foldAccents(lines[m].slice('CALLER: '.length));
+        if (joined !== fl0 && DENIAL.test(joined.trim()) && namedWords().some((w) => new RegExp(`\\b${w}\\b`).test(joined))) { corrections.push('No.'); continue; }
         if (DENIAL.test(fl0.trim()) && (namedWords().some((w) => new RegExp(`\\b${w}\\b`).test(fl0)) || /\b(?:there|that office|that one|esa oficina|ahi|alli|ese lugar)\b/.test(fl0))) corrections.push('No.');
         continue;
       }
