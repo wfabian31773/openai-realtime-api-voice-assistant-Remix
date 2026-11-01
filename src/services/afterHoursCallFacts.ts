@@ -164,6 +164,10 @@ function officeAnswers(transcript: string): string[] {
     // The whole answer turn (an in-window correction is resolved by `corrected`,
     // which keeps everything after the last cue), then each later correcting turn.
     answers = [said.join(' '), ...corrections];
+    // A readback of the corrected office keeps context too ("No, Downey" -> "Downey, correct?").
+    for (const c of corrections) {
+      lastAnswerWords.push(...foldAccents(corrected(c).replace(/^[\s,.]*(?:no|yes|si|sí)\b[\s,.]*/i, '').split(/[,.;]/)[0] ?? '').split(/[^a-z]+/));
+    }
   });
   return answers;
 }
@@ -181,7 +185,7 @@ export async function officeTheCallerGave(transcript: string | undefined): Promi
   const answers = officeAnswers(transcript ?? '')
     .map((a) => a.split(/(?<=[.!;])\s+/)
       // "No, that is my pharmacy" still rejects the office: keep the "No".
-      .map((part) => (/\b(?:pharmacy|farmacia)\b/.test(foldAccents(part)) ? (/^\s*no\b/i.test(part) ? 'No.' : '') : part))
+      .map((part) => (/\b(?:pharmacy|farmacia)\b/.test(foldAccents(part)) ? (/^\s*no\b/i.test(part) || DENIAL.test(foldAccents(part)) ? 'No.' : '') : part))
       .filter(Boolean).join(' '))
     .filter((a) => a.trim());
   const lastLine = answers.length > 1 ? answers[answers.length - 1] : answers[0];

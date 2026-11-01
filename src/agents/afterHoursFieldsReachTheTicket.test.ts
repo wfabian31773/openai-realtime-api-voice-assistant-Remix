@@ -403,6 +403,16 @@ describe('the teardown floor (the 70150 shape)', () => {
     expect(sent.locationOfLastVisit).toBeUndefined();
   });
 
+  it.each(['That is my pharmacy, not my office.', 'Esa es mi farmacia, no mi oficina.'])('files no office after "%s" on a readback', async (reply) => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: Covina, correct?\nCALLER: ${reply}`);
+    expect(sent.locationOfLastVisit).toBeUndefined();
+  });
+
+  it('keeps office context through a readback of the corrected office', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: Covina, correct?\nCALLER: No, Downey.\nAGENT: Downey, correct?\nCALLER: Yes.\nAGENT: Which location?\nCALLER: Covina.`);
+    expect(sent.locationOfLastVisit).toBe('Covina');
+  });
+
   it('takes the answer to the last office ask', async () => {
     const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: Sorry, which office was that?\nCALLER: Downey.`);
     expect(sent.locationOfLastVisit).toBe('Downey');
