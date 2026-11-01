@@ -124,7 +124,8 @@ function officeAnswers(transcript: string): string[] {
     let pendingReadback = false;
     let pendingClause = '';
     // Every office the caller has named so far, for a later cue-less denial.
-    const namedWords = () => [...said, ...corrections].flatMap((a) => foldAccents(corrected(a)).split(/[^a-z]+/))
+    // The office currently on the table: the latest correction, else the answer.
+    const namedWords = () => [corrections.length ? corrections[corrections.length - 1] : said.join(' ')].flatMap((a) => foldAccents(corrected(a)).split(/[^a-z]+/))
       .filter((w) => w.length >= 4 && !['usually', 'office', 'that', 'this', 'there'].includes(w));
     for (let k = j; k < lines.length; k += 1) {
       const l = lines[k];
@@ -236,8 +237,11 @@ export async function officeTheCallerGave(transcript: string | undefined): Promi
   // The office is the first sentence: "Springfield. My doctor in Covina needs my records." is Springfield.
   const parts = last.split(/(?<=[.!;])\s+/);
   // A filler lead-in ("Let me think.": several words, no proper noun) is not the answer.
-  while (parts.length > 1 && parts[0].trim().split(/\s+/).length >= 2 && !/\p{Lu}/u.test(parts[0].trim().slice(1))) parts.shift();
+  const resolves = async (x: string) => { try { return await lookupLocation(x); } catch { return undefined; } };
+  while (parts.length > 1 && parts[0].trim().split(/\s+/).length >= 2 && !/\p{Lu}/u.test(parts[0].trim().slice(1))
+    && !(await resolves(parts[0]))) parts.shift();
   const [first, ...rest] = parts;
+  if (DENIAL.test(foldAccents(first).trim())) return undefined;
   // "Covina or Springfield" is a guess between offices, never one office.
   if (/\b(?:or|o|either|both|ambos)\b/.test(foldAccents(first))) return undefined;
   try {
@@ -245,6 +249,8 @@ export async function officeTheCallerGave(transcript: string | undefined): Promi
     // A later sentence naming another office ("Or Downey, I go to both") makes it ambiguous.
     if (rest.some((sentence) => /\b(?:or|o|both|ambos|either)\b/.test(foldAccents(sentence)))) return undefined;
     for (const sentence of rest) {
+      // "My doctor in Downey needs my records" names another place, not another office answer.
+      if (/\b(?:doctor|records|pharmacy|farmacia|live|home|work|send|sent|medico|casa|vivo)\b/.test(foldAccents(sentence)) || DENIAL.test(foldAccents(sentence).trim())) continue;
       const other = await lookupLocation(sentence);
       if (other && office && other.canonical !== office.canonical) return undefined;
     }

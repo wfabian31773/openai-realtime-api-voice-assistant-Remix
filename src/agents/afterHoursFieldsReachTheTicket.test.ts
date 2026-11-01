@@ -498,6 +498,26 @@ describe('the teardown floor (the 70150 shape)', () => {
     expect(sent.locationOfLastVisit).toBe('Covina');
   });
 
+  it('keeps "Covina, please." over a later home city', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina, please. I live in Downey.`);
+    expect(sent.locationOfLastVisit).toBe('Covina');
+  });
+
+  it('honors a denial after a filler lead-in', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Let me think. No voy a Covina.`);
+    expect(sent.locationOfLastVisit).toBeUndefined();
+  });
+
+  it('keeps a correction when the caller then denies the old office', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: Thank you.\nCALLER: Actually, Downey.\nCALLER: I do not go to Covina anymore.`);
+    expect(sent.locationOfLastVisit).toBe('Downey');
+  });
+
+  it('keeps the office over a records-destination sentence', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina. My doctor in Downey needs my records.`);
+    expect(sent.locationOfLastVisit).toBe('Covina');
+  });
+
   it('takes the answer to the last office ask', async () => {
     const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: Sorry, which office was that?\nCALLER: Downey.`);
     expect(sent.locationOfLastVisit).toBe('Downey');
