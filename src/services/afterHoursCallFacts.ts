@@ -80,8 +80,13 @@ function officeAnswers(transcript: string): string[] {
     const corrections: string[] = [];
     for (let k = j; k < lines.length; k += 1) {
       const l = lines[k];
-      if (l.startsWith('AGENT: ')) { if (/\?\s*$/.test(l)) break; continue; }
-      if (l.startsWith('CALLER: ') && CORRECTION.test(foldAccents(l))) corrections.push(l.slice('CALLER: '.length));
+      // Any agent question closes the window, wherever its "?" falls.
+      if (l.startsWith('AGENT: ')) { if (l.includes('?')) break; continue; }
+      if (!l.startsWith('CALLER: ') || !CORRECTION.test(foldAccents(l))) continue;
+      // The whole correcting turn: transcription may split "Actually," and "Downey."
+      const turn: string[] = [l.slice('CALLER: '.length)];
+      while (lines[k + 1]?.startsWith('CALLER: ')) { k += 1; turn.push(lines[k].slice('CALLER: '.length)); }
+      corrections.push(turn.join(' '));
     }
     // The first answer turn, then each in-window line after it that corrects
     // it, then each later correcting line: the last one decides.
