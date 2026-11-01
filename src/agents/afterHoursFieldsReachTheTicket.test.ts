@@ -363,6 +363,16 @@ describe('the teardown floor (the 70150 shape)', () => {
     expect(sent.locationOfLastVisit).toBe('Covina');
   });
 
+  it('keeps the office when the answer turn moves to a new topic after a cue', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina. Actually, my doctor in Downey needs the records.`);
+    expect(sent.locationOfLastVisit).toBe('Covina');
+  });
+
+  it('does not keep office context through a confirmation naming a doctor', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: You want records sent to Doctor Example, correct?\nCALLER: Yes.\nAGENT: Which location?\nCALLER: Downey.`);
+    expect(sent.locationOfLastVisit).toBe('Covina');
+  });
+
   it('takes the answer to the last office ask', async () => {
     const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: Sorry, which office was that?\nCALLER: Downey.`);
     expect(sent.locationOfLastVisit).toBe('Downey');

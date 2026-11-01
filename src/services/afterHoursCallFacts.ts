@@ -100,7 +100,7 @@ function officeAnswers(transcript: string): string[] {
     const ambiguous = AMBIGUOUS_ASK.test(folded);
     const bare = words.length <= 3;
     // A readback of the office ("Covina, correct?") keeps the office context for a re-ask.
-    if (!matches && prevWasOffice && (line.match(/\?/g) ?? []).length === 1 && CONFIRM_ASK.test(folded) && (namesAnOffice(line.slice('AGENT: '.length)) || /\b(?:office|location|clinic|oficina|clinica|ubicacion)\b/.test(folded)) && !NOT_OFFICE_TOPIC.test(folded)) return;
+    if (!matches && prevWasOffice && (line.match(/\?/g) ?? []).length === 1 && CONFIRM_ASK.test(folded) && (/^\p{Lu}\p{L}+(?:\s*,|\s+(?:office|location|clinic)\b)/u.test(line.slice('AGENT: '.length).trim()) || /\b(?:office|location|clinic|oficina|clinica|ubicacion)\b/.test(folded)) && !NOT_OFFICE_TOPIC.test(folded)) return;
     const isOffice = matches && (!ambiguous || prevWasOffice || (!bare && !lastQuestionWasPharmacy));
     lastQuestionWasOffice = isOffice;
     lastQuestionWasPharmacy = /\b(?:pharmacy|farmacia)\b/.test(folded) || (ambiguous && !isOffice && lastQuestionWasPharmacy);
@@ -180,7 +180,16 @@ export async function officeTheCallerGave(transcript: string | undefined): Promi
     .filter((a) => a.trim());
   const lastLine = answers.length > 1 ? answers[answers.length - 1] : answers[0];
   // Only the corrected portion counts: "Covina, actually Springfield" is Springfield.
-  const last = lastLine === undefined ? undefined : corrected(lastLine).replace(/^[\s,.;:!-]+/, '');
+  // A long new topic after the cue ("Covina. Actually, my doctor in Downey needs the records")
+  // does not correct the office: keep what came before the cue.
+  let last = lastLine === undefined ? undefined : corrected(lastLine).replace(/^[\s,.;:!-]+/, '');
+  if (lastLine !== undefined && last !== undefined && last !== lastLine && last.trim().split(/\s+/).length > 4
+    && !/\b(?:office|oficina|clinic|clinica|location)\b/.test(foldAccents(last))) {
+    const folded = foldAccents(lastLine);
+    let start = -1;
+    for (const m of folded.matchAll(CORRECTION_ALL)) start = m.index!;
+    last = lastLine.slice(0, start).replace(/[\s,.;:!-]+$/, '');
+  }
   if (!last || DENIAL.test(foldAccents(last).trim())) return undefined;
   try {
     const office = await lookupLocation(last);
