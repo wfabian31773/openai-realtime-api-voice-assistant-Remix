@@ -157,7 +157,7 @@ function officeAnswers(transcript: string): string[] {
       // and a long sentence after the cue is a new topic ("Actually, my doctor in Downey needs the records").
       const after = corrected(turn.join(' ')).trim();
       if (!/\b(?:pharmacy|farmacia)\b/.test(foldAccents(turn.join(' ')))
-        && (after.split(/\s+/).length <= 4 || /\b(?:office|oficina|clinic|clinica|location)\b/.test(foldAccents(after)))) corrections.push(turn.join(' '));
+        && (after.split(/\s+/).length <= 4 || /\b(?:office|oficina|clinic|clinica|location|go to|went to|visit|voy a|va a)\b/.test(foldAccents(after)))) corrections.push(turn.join(' '));
     }
     // The first answer turn, then each in-window line after it that corrects
     // it, then each later correcting line: the last one decides.
@@ -194,13 +194,15 @@ export async function officeTheCallerGave(transcript: string | undefined): Promi
   // does not correct the office: keep what came before the cue.
   let last = lastLine === undefined ? undefined : corrected(lastLine).replace(/^[\s,.;:!-]+/, '');
   if (lastLine !== undefined && last !== undefined && last !== lastLine && last.trim().split(/\s+/).length > 4
-    && !/\b(?:office|oficina|clinic|clinica|location)\b/.test(foldAccents(last))) {
+    && !/\b(?:office|oficina|clinic|clinica|location|go to|went to|visit|voy a|va a)\b/.test(foldAccents(last))) {
     const folded = foldAccents(lastLine);
     let start = -1;
     for (const m of folded.matchAll(CORRECTION_ALL)) start = m.index!;
     last = lastLine.slice(0, start).replace(/[\s,.;:!-]+$/, '');
   }
   if (!last || DENIAL.test(foldAccents(last).trim())) return undefined;
+  // The office is the first sentence: "Springfield. My doctor in Covina needs my records." is Springfield.
+  last = last.split(/(?<=[.!;])\s+/)[0];
   try {
     const office = await lookupLocation(last);
     return office ? office.fileAs || sanitizeLocationName(office.canonical).value || office.canonical : undefined;
