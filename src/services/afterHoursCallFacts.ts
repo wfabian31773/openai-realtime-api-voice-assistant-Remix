@@ -92,7 +92,7 @@ function officeAnswers(transcript: string): string[] {
     const ambiguous = AMBIGUOUS_ASK.test(folded);
     const bare = words.length <= 3;
     // A readback of the office ("Covina, correct?") keeps the office context for a re-ask.
-    if (!matches && prevWasOffice && CONFIRM_ASK.test(folded) && !NOT_OFFICE_TOPIC.test(folded)) return;
+    if (!matches && prevWasOffice && (line.match(/\?/g) ?? []).length === 1 && CONFIRM_ASK.test(folded) && !NOT_OFFICE_TOPIC.test(folded)) return;
     const isOffice = matches && (!ambiguous || prevWasOffice || (!bare && !lastQuestionWasPharmacy));
     lastQuestionWasOffice = isOffice;
     lastQuestionWasPharmacy = /\b(?:pharmacy|farmacia)\b/.test(folded) || (ambiguous && !isOffice && lastQuestionWasPharmacy);
@@ -129,7 +129,10 @@ function officeAnswers(transcript: string): string[] {
         if (reply && (!AFFIRM.test(fr) || CORRECTION.test(fr) || DENIAL.test(fr.replace(AFFIRM, '')))) corrections.push(reply);
         // "Yes" confirms the office the readback named ("The Downey office, correct?");
         // a generic "Is that the correct office?" names none and leaves the answer.
-        else if (reply && /\p{Lu}/u.test(l.slice('AGENT: '.length + 1).replace(/\bI\b/g, ''))) corrections.push(l.slice('AGENT: '.length).split('?')[0]);
+        else if (reply) {
+          const clause = (l.slice('AGENT: '.length).split('?')[0].split(/[.!]/).pop() ?? '').trim();
+          if (/\p{Lu}/u.test(clause.slice(1).replace(/\bI\b/g, ''))) corrections.push(clause);
+        }
         continue;
       }
       if (!l.startsWith('CALLER: ') || !CORRECTION.test(foldAccents(l))) continue;
@@ -137,7 +140,10 @@ function officeAnswers(transcript: string): string[] {
       const turn: string[] = [l.slice('CALLER: '.length)];
       while (lines[k + 1]?.startsWith('CALLER: ')) { k += 1; turn.push(lines[k].slice('CALLER: '.length)); }
       // "Sorry, the pharmacy is in Downey" corrects the pharmacy, not the office.
-      if (!/\b(?:pharmacy|farmacia)\b/.test(foldAccents(turn.join(' ')))) corrections.push(turn.join(' '));
+      // and a long sentence after the cue is a new topic ("Actually, my doctor in Downey needs the records").
+      const after = corrected(turn.join(' ')).trim();
+      if (!/\b(?:pharmacy|farmacia)\b/.test(foldAccents(turn.join(' ')))
+        && (after.split(/\s+/).length <= 4 || /\b(?:office|oficina|clinic|clinica|location)\b/.test(foldAccents(after)))) corrections.push(turn.join(' '));
     }
     // The first answer turn, then each in-window line after it that corrects
     // it, then each later correcting line: the last one decides.
