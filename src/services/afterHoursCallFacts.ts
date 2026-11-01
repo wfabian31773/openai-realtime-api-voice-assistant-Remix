@@ -44,12 +44,21 @@ export function dobTheCallerGave(callSid: string | undefined, transcript?: strin
 /** An agent QUESTION about which office, English or Spanish, accents folded. */
 const OFFICE_ASK = /\b(?:which|what|que|cual)\b[^.?!]*\b(?:office|location|clinic|oficina|clinica|consultorio|ubicacion)\b[^.?!]*\?/;
 /** "Not Covina", "I don't go there", "no voy": a denial never names an office. "No, Covina" does. */
-const DENIAL = /\b(?:not|never|nunca|anymore)\b|n['’]t\b|\bno\b(?!\s*[,.])/;
+const DENIAL = /\b(?:not|never|nunca|anymore)\b|n['’]t\b|(?<!^)\bno\b|^no\b(?!\s*[,.])/;
 
 const foldAccents = (text: string) => text.normalize('NFD').replace(/\p{Diacritic}/gu, '').toLowerCase();
 
 /** "Actually", "I mean", "perdón", "mejor dicho": the caller is correcting what they said. */
 const CORRECTION = /\b(?:actually|i mean|i meant|sorry|correction|wait|perdon|quise decir|mejor dicho|en realidad)\b/;
+const CORRECTION_ALL = new RegExp(CORRECTION.source, 'g');
+
+/** The part of a line after its last correction cue ("Covina, actually Downey" -> " Downey"). */
+function corrected(line: string): string {
+  const folded = foldAccents(line);
+  let end = -1;
+  for (const m of folded.matchAll(CORRECTION_ALL)) end = m.index! + m[0].length;
+  return end < 0 ? line : line.slice(end);
+}
 
 /**
  * The caller's words answering the LAST office ask, then any later caller line
@@ -65,9 +74,15 @@ function officeAnswers(transcript: string): string[] {
     let j = i + 1;
     for (; lines[j]?.startsWith('CALLER: '); j += 1) said.push(lines[j].slice('CALLER: '.length));
     if (!said.length) return;
-    const corrections = lines.slice(j)
-      .filter((l) => l.startsWith('CALLER: ') && CORRECTION.test(foldAccents(l)))
-      .map((l) => l.slice('CALLER: '.length));
+    // A later caller turn corrects the office only until the agent asks
+    // something else: "Sorry, I need a refill" after the next question is
+    // not about the office.
+    const corrections: string[] = [];
+    for (let k = j; k < lines.length; k += 1) {
+      const l = lines[k];
+      if (l.startsWith('AGENT: ')) { if (/\?\s*$/.test(l)) break; continue; }
+      if (l.startsWith('CALLER: ') && CORRECTION.test(foldAccents(l))) corrections.push(l.slice('CALLER: '.length));
+    }
     // The first answer turn, then each in-window line after it that corrects
     // it, then each later correcting line: the last one decides.
     answers = [said.join(' '), ...said.slice(1).filter((l) => CORRECTION.test(foldAccents(l))), ...corrections];
@@ -85,8 +100,10 @@ function officeAnswers(transcript: string): string[] {
  */
 export async function officeTheCallerGave(transcript: string | undefined): Promise<string | undefined> {
   const answers = officeAnswers(transcript ?? '');
-  const last = answers.length > 1 ? answers[answers.length - 1] : answers[0];
-  if (!last || DENIAL.test(foldAccents(last))) return undefined;
+  const lastLine = answers.length > 1 ? answers[answers.length - 1] : answers[0];
+  // Only the corrected portion counts: "Covina, actually Springfield" is Springfield.
+  const last = lastLine === undefined ? undefined : corrected(lastLine).replace(/^[\s,.;:!-]+/, '');
+  if (!last || DENIAL.test(foldAccents(last).trim())) return undefined;
   try {
     const office = await lookupLocation(last);
     return office ? office.fileAs || sanitizeLocationName(office.canonical).value || office.canonical : undefined;
