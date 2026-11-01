@@ -248,6 +248,16 @@ describe('the teardown floor (the 70150 shape)', () => {
     expect(sent.locationOfLastVisit).toBe('Downey');
   });
 
+  it('does not read "Which location is that?" after a pharmacy question as an office ask', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: Which pharmacy?\nCALLER: CVS.\nAGENT: Which location is that?\nCALLER: Downey.`);
+    expect(sent.locationOfLastVisit).toBe('Covina');
+  });
+
+  it('takes the correction to a second readback', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: Covina, is that correct?\nCALLER: No, Downey.\nAGENT: Downey, is that correct?\nCALLER: No, Springfield.`);
+    expect(sent.locationOfLastVisit).toBeUndefined();
+  });
+
   it('takes the answer to the last office ask', async () => {
     const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: Sorry, which office was that?\nCALLER: Downey.`);
     expect(sent.locationOfLastVisit).toBe('Downey');

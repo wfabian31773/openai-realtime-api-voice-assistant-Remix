@@ -77,6 +77,7 @@ function officeAnswers(transcript: string): string[] {
   // ("Which location?") borrows its topic from it, so after "Which pharmacy?"
   // it asks about the pharmacy, never the office.
   let lastQuestionWasOffice = false;
+  let lastQuestionWasPharmacy = false;
   lines.forEach((line, i) => {
     if (!line.startsWith('AGENT: ') || !line.includes('?')) return;
     const folded = foldAccents(line);
@@ -84,9 +85,13 @@ function officeAnswers(transcript: string): string[] {
     // A pharmacy question ("which pharmacy should the office send it to?") is not an office ask.
     const matches = OFFICE_ASK.test(folded) && !/\b(?:pharmacy|farmacia)\b/.test(folded);
     const words = folded.slice('agent: '.length).split('?')[0].replace(/[^a-z\s]/g, ' ').trim().split(/\s+/).filter(Boolean);
-    const bare = words.length <= 3 && AMBIGUOUS_ASK.test(folded);
-    const isOffice = matches && (!bare || prevWasOffice);
+    // "Location" borrows its subject from the question before it: after a
+    // pharmacy question it is the pharmacy's; bare, it needs an office ask before it.
+    const ambiguous = AMBIGUOUS_ASK.test(folded);
+    const bare = words.length <= 3;
+    const isOffice = matches && (!ambiguous || prevWasOffice || (!bare && !lastQuestionWasPharmacy));
     lastQuestionWasOffice = isOffice;
+    lastQuestionWasPharmacy = /\b(?:pharmacy|farmacia)\b/.test(folded) || (ambiguous && !isOffice && lastQuestionWasPharmacy);
     if (!isOffice) return;
     const said: string[] = [];
     let j = i + 1;
@@ -105,7 +110,7 @@ function officeAnswers(transcript: string): string[] {
         // Only a readback OF THE OFFICE: it names an office word or what the
         // caller answered, and is not about the pharmacy.
         const fl = foldAccents(l);
-        const echoes = said.some((a) => { const w = foldAccents(a).replace(/[^a-z\s]/g, ' ').trim(); return w.length > 2 && fl.includes(w); });
+        const echoes = [...said, ...corrections].some((a) => { const w = foldAccents(corrected(a)).replace(/[^a-z\s]/g, ' ').trim().replace(/^no\s+/, '').replace(/\s+/g, ' '); return w.length > 2 && fl.includes(w); });
         if (!CONFIRM_ASK.test(fl) || /\b(?:pharmacy|farmacia)\b/.test(fl)
           || !(echoes || /\b(?:office|location|clinic|oficina|clinica|consultorio|ubicacion)\b/.test(fl))) break;
         const turn: string[] = [];
