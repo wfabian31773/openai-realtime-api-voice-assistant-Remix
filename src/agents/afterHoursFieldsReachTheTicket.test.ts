@@ -1,0 +1,242 @@
+/**
+ * v163: WHAT THE AFTER-HOURS CALLER SAID REACHES THE TICKET.
+ *
+ * Tickets 70150, 70157, 70160, 70162 (and the noise calls 70148/70149/70170)
+ * reached staff with no date of birth, no office and no request type. On 70150
+ * the caller answered the date-of-birth question twice; the floor read a date
+ * only from a certain lookup, and the live create_ticket filed an omitted
+ * date_of_birth as `Unknown` without looking at the caller's answer. Ticket
+ * 70166 was an urgent on-call transfer that rang out.
+ *
+ * Synthetic callers only — no name, date, number or words from those calls.
+ */
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import type { LiveTool } from '../runtime/agentBinding';
+
+vi.hoisted(() => {
+  process.env.DATABASE_URL ||= 'postgresql://unused:unused@127.0.0.1:5432/unused';
+  process.env.OPENAI_API_KEY ||= 'test-unused';
+});
+
+const h = vi.hoisted(() => ({
+  getCallLogBySid: vi.fn(),
+  submitSimplifiedTicket: vi.fn(),
+  lookupByNameAndDOB: vi.fn(async () => ({ patientFound: false, upcomingAppointments: [], pastAppointments: [] })),
+}));
+vi.mock('../../server/db', () => ({ db: {} }));
+vi.mock('../../server/storage', () => ({ storage: { getCallLogBySid: h.getCallLogBySid } }));
+vi.mock('../services/syncAgentService', () => ({
+  SyncAgentService: {
+    submitSimplifiedTicket: h.submitSimplifiedTicket,
+    checkOpenTickets: async () => [],
+    requiresCallback: () => true,
+  },
+}));
+vi.mock('../services/scheduleLookupService', () => ({
+  scheduleLookupService: {
+    lookupByPhone: async () => ({ patientFound: false, upcomingAppointments: [], pastAppointments: [] }),
+    lookupByNameAndDOB: h.lookupByNameAndDOB,
+    formatContextForAgent: () => '',
+  },
+}));
+vi.mock('../services/callerMemoryService', () => ({
+  callerMemoryService: { getCallerMemory: async () => null, buildContextForPrompt: () => '' },
+}));
+
+const { defaultLaneSource } = await import('../runtime/laneRegistry');
+const { runLaneTeardownFloor } = await import('../runtime/pcpFloor');
+const { noteSpokenDob } = await import('../tools/spokenDob');
+const { rememberConfirmedClinic } = await import('../tools/verifiedIdentity');
+const { AFTER_HOURS_CATCHALL, AFTER_HOURS_REASON_IDS } = await import('../tools/afterHoursTaxonomy');
+const { HANDOFF_ERROR_DIRECTIVE, HANDOFF_FAILED_DIRECTIVE, HANDOFF_NOT_PLACED_DIRECTIVE, createNoIvrAgent } = await import('./noIvrAgent');
+const { isoDobToUs, dobTheCallerGave } = await import('../services/afterHoursCallFacts');
+
+const DOB_ASK = 'AGENT: And your date of birth, starting with the month, then the day, then the year?';
+
+let serial = 0;
+beforeEach(() => {
+  h.getCallLogBySid.mockReset().mockResolvedValue(undefined);
+  h.submitSimplifiedTicket.mockReset().mockResolvedValue({ success: true, ticketNumber: 'VA-SYNTHETIC' });
+  h.lookupByNameAndDOB.mockClear();
+});
+
+async function call(transcript?: string, handoff = vi.fn(async () => {})) {
+  const source = await defaultLaneSource();
+  const config = source.getAgentConfig('no-ivr')!;
+  const callSid = `CA${String(9000 + ++serial).padStart(32, '0')}`;
+  const callId = `synthetic-v163-${serial}`;
+  const agent = await config.factory(...[handoff, {
+    callId, callSid, callerPhone: '+12025550100',
+    ...(transcript === undefined ? {} : { getTranscript: () => transcript }),
+  }] as never[]);
+  const finish = () => runLaneTeardownFloor(
+    { slug: 'no-ivr', callSid: callId, outcome: 'caller_hangup', transcript: '' },
+    { source: async () => source },
+  );
+  return { callId, callSid, finish, agent: agent as { tools: LiveTool[] } };
+}
+
+async function invoke(agent: { tools: LiveTool[] }, name: string, args = {}) {
+  const tool = agent.tools.find((t) => t.name === name)!;
+  const result = await tool.invoke!({}, JSON.stringify(args));
+  return typeof result === 'string' ? JSON.parse(result) : result;
+}
+
+describe('the date of birth the caller gave', () => {
+  it('reads an ISO answer as month/day/year, and nothing else', () => {
+    expect(isoDobToUs('1961-03-03')).toBe('03/03/1961');
+    expect(isoDobToUs('March 3')).toBeUndefined();
+    expect(isoDobToUs(undefined)).toBeUndefined();
+  });
+
+  it('counts only an answer to a date-of-birth ask, never a mention', () => {
+    expect(dobTheCallerGave(undefined, `${DOB_ASK}\nCALLER: March 3rd, 1961.`)).toBe('03/03/1961');
+    expect(dobTheCallerGave(undefined, 'AGENT: How can I help?\nCALLER: My appointment is March 3rd, 2027.')).toBeUndefined();
+  });
+});
+
+describe('the teardown floor (the 70150 shape)', () => {
+  const REQUEST = `AGENT: How may I assist you?\nCALLER: I want to make an appointment.\n${DOB_ASK}\nCALLER: March 3rd, 1961.`;
+
+  it('files the date of birth the caller gave, flagged as not matched to a record', async () => {
+    const c = await call(REQUEST);
+    await c.finish();
+    expect(h.submitSimplifiedTicket).toHaveBeenCalledTimes(1);
+    const sent = h.submitSimplifiedTicket.mock.calls[0][0];
+    expect(sent.patientDOB).toBe('03/03/1961');
+    expect(sent.additionalDetails).toContain('DATE OF BIRTH as the caller gave it');
+  });
+
+  it("files `Unknown` with no date note when the caller never answered the question", async () => {
+    const c = await call('AGENT: How may I assist you?\nCALLER: Please cancel my appointment and call me back.');
+    await c.finish();
+    const sent = h.submitSimplifiedTicket.mock.calls[0][0];
+    expect(sent.patientDOB).toBe('Unknown');
+    expect(sent.additionalDetails).not.toContain('DATE OF BIRTH');
+  });
+
+  it('takes department 8\'s catch-all when no cue matches, so the ticket is never type-less (70157 shape)', async () => {
+    const c = await call('AGENT: How may I assist you?\nCALLER: Please cancel my appointment for next week, I have a conflict.');
+    await c.finish();
+    const sent = h.submitSimplifiedTicket.mock.calls[0][0];
+    expect(sent.departmentId).toBe(8);
+    expect(sent.suggestedRequestTypeId).toBe(AFTER_HOURS_CATCHALL.requestTypeId);
+    expect(sent.suggestedRequestReasonId).toBe(AFTER_HOURS_CATCHALL.requestReasonId);
+    expect(AFTER_HOURS_REASON_IDS.has(sent.suggestedRequestReasonId)).toBe(true);
+  });
+
+  it('carries the department-8 pair the caller\'s words match: "call me back" is 36/174', async () => {
+    const c = await call('AGENT: How may I assist you?\nCALLER: Please cancel my appointment and call me back.');
+    await c.finish();
+    const sent = h.submitSimplifiedTicket.mock.calls[0][0];
+    expect(sent.departmentId).toBe(8);
+    expect(sent.suggestedRequestTypeId).toBe(36);
+    expect(sent.suggestedRequestReasonId).toBe(174);
+    expect(AFTER_HOURS_REASON_IDS.has(174)).toBe(true);
+  });
+
+  it('carries the office the caller confirmed', async () => {
+    const c = await call(REQUEST);
+    rememberConfirmedClinic(c.callSid, 'Synthetic Office');
+    await c.finish();
+    expect(h.submitSimplifiedTicket.mock.calls[0][0]).toMatchObject({
+      locationOfLastVisit: 'Synthetic Office',
+      locationSource: 'caller',
+    });
+  });
+});
+
+describe('the live create_ticket', () => {
+  const ARGS = {
+    first_name: 'Synthetic', last_name: 'Example',
+    callback_number: '2025550100', request_category: 'general_question',
+    request_summary: 'Please return my call about a message for the office.',
+  };
+
+  it('takes the caller\'s spoken answer when the model omits date_of_birth (bridge store)', async () => {
+    const c = await call();
+    noteSpokenDob(c.callSid, [DOB_ASK, 'CALLER: March 3rd, 1961.']);
+    expect(await invoke(c.agent, 'create_ticket', ARGS)).toMatchObject({ success: true });
+    expect(h.submitSimplifiedTicket.mock.calls[0][0].patientDOB).toBe('03/03/1961');
+  });
+
+  it('falls back to the transcript when the store is empty', async () => {
+    const c = await call(`${DOB_ASK}\nCALLER: March 3rd, 1961.`);
+    expect(await invoke(c.agent, 'create_ticket', ARGS)).toMatchObject({ success: true });
+    expect(h.submitSimplifiedTicket.mock.calls[0][0].patientDOB).toBe('03/03/1961');
+  });
+
+  it('looks the record up on the right date when the spoken answer hydrates as YYYY-MM-DD', async () => {
+    const c = await call();
+    noteSpokenDob(c.callSid, [DOB_ASK, 'CALLER: March 3rd, 1961.']);
+    await invoke(c.agent, 'create_ticket', ARGS);
+    expect(h.lookupByNameAndDOB).toHaveBeenCalledWith('Synthetic', 'Example', '1961-03-03');
+  });
+
+  it('converts to month/day/year on the payload only: a date sent as ISO stays ISO for the lookup', async () => {
+    const c = await call();
+    await invoke(c.agent, 'create_ticket', { ...ARGS, date_of_birth: '1961-03-03' });
+    expect(h.lookupByNameAndDOB).toHaveBeenCalledWith('Synthetic', 'Example', '1961-03-03');
+    expect(h.submitSimplifiedTicket.mock.calls[0][0].patientDOB).toBe('03/03/1961');
+  });
+
+  it('sends month/day/year when the model itself sends YYYY-MM-DD', async () => {
+    const c = await call();
+    await invoke(c.agent, 'create_ticket', { ...ARGS, date_of_birth: '1961-03-03' });
+    expect(h.submitSimplifiedTicket.mock.calls[0][0].patientDOB).toBe('03/03/1961');
+  });
+
+  it('never overrides a date the model did send', async () => {
+    const c = await call(`${DOB_ASK}\nCALLER: March 3rd, 1961.`);
+    await invoke(c.agent, 'create_ticket', { ...ARGS, date_of_birth: '01/02/1980' });
+    expect(h.submitSimplifiedTicket.mock.calls[0][0].patientDOB).toBe('01/02/1980');
+  });
+});
+
+describe('the Grok prompt asks for the office', () => {
+  it('asks once when no clinic is held, and no longer tells the model to omit it', async () => {
+    const agent = await createNoIvrAgent(async () => {}, {
+      callId: 'v163-prompt', callSid: 'CA0000000000000000000000000000f163', callerPhone: '+15555550100', pipeline: 'runtime',
+    } as any);
+    const p = String((agent as any).instructions);
+    expect(p).toContain('Which office do you usually visit?');
+    expect(p).not.toMatch(/omit location unless caller named it/);
+  });
+});
+
+describe('a failed on-call transfer (the 70166 shape)', () => {
+  const PROVIDER = {
+    reason: 'Nurse from the hospital emergency department calling about a patient',
+    caller_type: 'healthcare_provider',
+    provider_info: 'hospital emergency department',
+  };
+  const NURSE = 'CALLER: I am a nurse calling from the hospital about a patient.';
+
+  it('tells the model the urgent record is filed and the caller was not connected', async () => {
+    const c = await call(NURSE, vi.fn(async () => { throw new Error('handoff_failed:NO_ANSWER'); }));
+    expect(await invoke(c.agent, 'escalate_to_human', PROVIDER)).toMatchObject({
+      success: false, handoffFailed: true, message: HANDOFF_FAILED_DIRECTIVE,
+    });
+    expect(HANDOFF_FAILED_DIRECTIVE).toMatch(/NOT connected/);
+    expect(HANDOFF_FAILED_DIRECTIVE).toMatch(/Do not call escalate_to_human again/);
+  });
+
+  it('never claims an urgent record when no dial was placed', async () => {
+    const c = await call(NURSE, vi.fn(async () => { throw new Error('handoff_failed:UNAVAILABLE'); }));
+    const r = await invoke(c.agent, 'escalate_to_human', PROVIDER);
+    expect(r.message).toBe(HANDOFF_NOT_PLACED_DIRECTIVE);
+    expect(HANDOFF_NOT_PLACED_DIRECTIVE).not.toMatch(/already been filed/);
+  });
+
+  it.each(['on-call leg failed', 'handoff_failed:FAILED', 'handoff_failed:DECLINED'])(
+    'keeps "Transfer failed" and says nobody-answered only on NO_ANSWER (%s)',
+    async (thrown) => {
+      const c = await call(NURSE, vi.fn(async () => { throw new Error(thrown); }));
+      const r = await invoke(c.agent, 'escalate_to_human', PROVIDER);
+      expect(r.message).toBe(HANDOFF_ERROR_DIRECTIVE);
+      expect(r.message).toMatch(/Transfer failed/);
+      expect(r.message).toMatch(/NOT connected/);
+      expect(r.message).not.toMatch(/did not answer/);
+    },
+  );
+});

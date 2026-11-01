@@ -736,6 +736,7 @@ export function createRuntimeTransfer(options: RuntimeTransferOptions): RuntimeT
            * refusals as dials.
            */
           if (!outcome.ok && outcome.status === "UNAVAILABLE") return outcome;
+          const ringSeconds = Math.round((Date.now() - dialStartedAt) / 1000);
           /**
            * THE URGENT SAFETY NET — the old core's `fileUrgentHandoffFallbackTicket`.
            *
@@ -763,6 +764,10 @@ export function createRuntimeTransfer(options: RuntimeTransferOptions): RuntimeT
                   : `Transfer dial failed: ${outcome.reason}`,
               dialTarget: outcome.destination,
               agentUsed: slug,
+              // v163: the failure itself, structured, so the ticket says the
+              // caller was never connected and how long the phone rang (70166).
+              // UNAVAILABLE returned above; the ternary only narrows the type.
+              handoff: { status: outcome.status === "UNAVAILABLE" ? "FAILED" : outcome.status, ringSeconds },
             });
           }
           /**
@@ -784,7 +789,7 @@ export function createRuntimeTransfer(options: RuntimeTransferOptions): RuntimeT
            */
           const toPersist = recordRuntimeTransferOutcome(
             metadata.callSid,
-            toRecordedOutcome(outcome, Math.round((Date.now() - dialStartedAt) / 1000), briefing),
+            toRecordedOutcome(outcome, ringSeconds, briefing),
             attemptId,
           );
           writeOutcome(metadata.callSid, toPersist);

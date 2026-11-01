@@ -1137,8 +1137,22 @@ import { callEnvironment } from "./callRecord";
  * (Codex P2, #415), since the held alarm was their only notice.
  * No migration.
  */
+/**
+ * v163 — THE AFTER-HOURS CALLER'S DETAILS REACH THE TICKET, AND A FAILED
+ * ON-CALL HANDOFF SAYS SO (2026-11-01). Tickets 70148/70149, 70150, 70157,
+ * 70160, 70162, 70170 reached staff with no date of birth and no request type;
+ * 70166 was an urgent transfer that rang out. The after-hours teardown floor
+ * now files the date of birth the caller gave when asked (the bridge's
+ * spoken-DOB store, then the transcript), the office the caller confirmed,
+ * and department 8's own request-type pair. The live create_ticket takes the
+ * caller's answer when the model omits date_of_birth. The Grok prompt asks
+ * the office once when no record clinic is held. The runtime hands the
+ * failed dial's status and ring time to the urgent fallback, which writes a
+ * fixed HANDOFF FAILED line; escalate_to_human tells the model the caller was
+ * not connected. Above main's v162 (#415). No migration.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v162-outbox-stall-holds-when-tickets-land-20261031";
+  "voice-runtime-v163-after-hours-details-reach-the-ticket-20261101";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

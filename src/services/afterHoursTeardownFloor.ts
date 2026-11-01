@@ -6,7 +6,8 @@
  */
 import { storage } from '../../server/storage';
 import { callerLines, saidMoreThanTheirOwnIdentity } from '../runtime/requestSweep';
-import { verifiedIdentityFor } from '../tools/verifiedIdentity';
+import { confirmedClinicFor, verifiedIdentityFor } from '../tools/verifiedIdentity';
+import { dobTheCallerGave, floorRequestType } from './afterHoursCallFacts';
 import { AFTER_HOURS_DEPARTMENT_ID } from '../tools/afterHoursTaxonomy';
 import { answeredWithoutTicket } from './answeredCallDisposition';
 import { nameOrStandIn, STAND_IN_NAME_NOTE } from './standInName';
@@ -82,17 +83,31 @@ export async function sweepAfterHoursUnfiledCall(
     if (row?.ticketNumber) return;
 
     const { fullName, standIn } = nameOrStandIn(identity?.firstName, identity?.lastName);
+    const callerText = callerLines(transcript).join('\n');
+    // v163: the date of birth the caller gave when asked (70150), the office
+    // the caller confirmed, and department 8's own request type — before
+    // this the floor sent only a certain match's date, no office and no type.
+    const spokenDob = identity?.dateOfBirth ? undefined : dobTheCallerGave(metadata.callSid, transcript);
+    const clinic = confirmedClinicFor(metadata.callSid);
+    const requestType = floorRequestType(callerText);
     const { SyncAgentService } = await import('./syncAgentService');
     const result = await SyncAgentService.submitSimplifiedTicket({
       patientFullName: fullName,
-      patientDOB: identity?.dateOfBirth ?? 'Unknown',
-      reasonForCalling: callerLines(transcript).join('\n'),
+      patientDOB: identity?.dateOfBirth ?? spokenDob ?? 'Unknown',
+      reasonForCalling: callerText,
       preferredContactMethod: 'phone',
       patientPhone: metadata.callerPhone,
       departmentId: AFTER_HOURS_DEPARTMENT_ID,
+      ...(clinic ? { locationOfLastVisit: clinic, locationSource: 'caller' as const } : {}),
+      // The department-8 pair, so the hint and the pinned department agree.
+      suggestedRequestTypeId: requestType.requestTypeId,
+      suggestedRequestReasonId: requestType.requestReasonId,
+      suggestedRequestReason: requestType.requestReason,
+      ...(requestType.urgent ? { suggestedUrgent: true } : {}),
       additionalDetails: [
         'AFTER-HOURS TEARDOWN: the call ended with a stated request and no recorded ticket. Please review the conversation and complete the request.',
         standIn ? STAND_IN_NAME_NOTE : undefined,
+        spokenDob ? 'DATE OF BIRTH as the caller gave it on the call — not matched to a patient record.' : undefined,
       ].filter(Boolean).join('\n'),
       callSid: metadata.callSid,
       callerPhone: metadata.callerPhone,
