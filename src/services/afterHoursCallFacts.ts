@@ -119,6 +119,10 @@ function officeAnswers(transcript: string): string[] {
     // something else: "Sorry, I need a refill" after the next question is
     // not about the office.
     const corrections: string[] = [];
+    let pendingReadback = false;
+    // Every office the caller has named so far, for a later cue-less denial.
+    const namedWords = () => [...said, ...corrections].flatMap((a) => foldAccents(corrected(a)).split(/[^a-z]+/))
+      .filter((w) => w.length >= 4 && !['usually', 'office', 'that', 'this', 'there'].includes(w));
     for (let k = j; k < lines.length; k += 1) {
       const l = lines[k];
       // Any agent question closes the window, wherever its "?" falls.
@@ -139,6 +143,8 @@ function officeAnswers(transcript: string): string[] {
         const turn: string[] = [];
         while (lines[k + 1]?.startsWith('CALLER: ')) { k += 1; turn.push(lines[k].slice('CALLER: '.length)); }
         const reply = turn.join(' ').trim();
+        // An acknowledgment can sit between the readback and its reply.
+        pendingReadback = !reply;
         const fr = foldAccents(reply);
         if (reply && (!AFFIRM.test(fr) || CORRECTION.test(fr) || DENIAL.test(fr.replace(AFFIRM, '')))) corrections.push(reply);
         // "Yes" confirms the office the readback named ("The Downey office, correct?");
@@ -152,8 +158,17 @@ function officeAnswers(transcript: string): string[] {
       if (!l.startsWith('CALLER: ')) continue;
       // A later denial of the office named ("No voy a Covina") clears it, cue or not.
       const fl0 = foldAccents(l.slice('CALLER: '.length));
+      if (pendingReadback) {
+        pendingReadback = false;
+        const turn: string[] = [l.slice('CALLER: '.length)];
+        while (lines[k + 1]?.startsWith('CALLER: ')) { k += 1; turn.push(lines[k].slice('CALLER: '.length)); }
+        const reply = turn.join(' ').trim();
+        const fr = foldAccents(reply);
+        if (!AFFIRM.test(fr) || CORRECTION.test(fr) || DENIAL.test(fr.replace(AFFIRM, ''))) corrections.push(reply);
+        continue;
+      }
       if (!CORRECTION.test(fl0)) {
-        if (DENIAL.test(fl0.trim()) && lastAnswerWords.some((w) => w.length >= 4 && new RegExp(`\\b${w}\\b`).test(fl0))) corrections.push('No.');
+        if (DENIAL.test(fl0.trim()) && namedWords().some((w) => new RegExp(`\\b${w}\\b`).test(fl0))) corrections.push('No.');
         continue;
       }
       // The whole correcting turn: transcription may split "Actually," and "Downey."
@@ -212,6 +227,7 @@ export async function officeTheCallerGave(transcript: string | undefined): Promi
   try {
     const office = await lookupLocation(first);
     // A later sentence naming another office ("Or Downey, I go to both") makes it ambiguous.
+    if (rest.some((sentence) => /\b(?:or|o|both|ambos|either)\b/.test(foldAccents(sentence)))) return undefined;
     for (const sentence of rest) {
       const other = await lookupLocation(sentence);
       if (other && office && other.canonical !== office.canonical) return undefined;
