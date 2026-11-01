@@ -18,6 +18,8 @@
  */
 import { dobFromCallerAnswer, spokenDobFor } from '../tools/spokenDob';
 import { classifyAfterHoursRequest, type AfterHoursClassification } from '../tools/afterHoursTaxonomy';
+import { lookupLocation } from './consoleDirectory';
+import { sanitizeLocationName } from './ticketFieldSanitizers';
 
 /** `YYYY-MM-DD` -> `MM/DD/YYYY`, the shape every after-hours DOB parser reads. */
 export function isoDobToUs(iso: string | undefined): string | undefined {
@@ -37,6 +39,46 @@ export function dobTheCallerGave(callSid: string | undefined, transcript?: strin
   if (stored) return stored;
   if (!transcript?.trim()) return undefined;
   return isoDobToUs(dobFromCallerAnswer(transcript.split('\n')));
+}
+
+/** An agent QUESTION about which office, English or Spanish, accents folded. */
+const OFFICE_ASK = /\b(?:which|what|que|cual)\b[^.?!]*\b(?:office|location|clinic|oficina|clinica|consultorio|ubicacion)\b[^.?!]*\?/;
+/** "Not Covina", "I don't go there", "no voy": a denial never names an office. "No, Covina" does. */
+const DENIAL = /\b(?:not|never|nunca|anymore)\b|n['’]t\b|\bno\b(?!\s*[,.])/;
+
+const foldAccents = (text: string) => text.normalize('NFD').replace(/\p{Diacritic}/gu, '').toLowerCase();
+
+/**
+ * The caller's words answering the LAST office ask, or undefined. A later ask
+ * that drew an answer replaces an earlier one; a mention elsewhere is not read.
+ */
+function officeAnswer(transcript: string): string | undefined {
+  const lines = transcript.split('\n');
+  let answer: string | undefined;
+  lines.forEach((line, i) => {
+    if (!line.startsWith('AGENT: ') || !OFFICE_ASK.test(foldAccents(line))) return;
+    const said: string[] = [];
+    for (let j = i + 1; lines[j]?.startsWith('CALLER: '); j += 1) said.push(lines[j].slice('CALLER: '.length));
+    if (said.length) answer = said.join(' ');
+  });
+  return answer;
+}
+
+/**
+ * The office the caller named when asked, as the directory files it, or
+ * undefined. `lookupLocation` is the guard against a guess: it refuses a phrase
+ * naming two offices and a city that only contains an office's name. A directory
+ * outage reads as no office and must never cost the floor its ticket.
+ */
+export async function officeTheCallerGave(transcript: string | undefined): Promise<string | undefined> {
+  const answer = officeAnswer(transcript ?? '');
+  if (!answer || DENIAL.test(foldAccents(answer))) return undefined;
+  try {
+    const office = await lookupLocation(answer);
+    return office ? office.fileAs || sanitizeLocationName(office.canonical).value || office.canonical : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /**

@@ -50,6 +50,7 @@ const { rememberConfirmedClinic } = await import('../tools/verifiedIdentity');
 const { AFTER_HOURS_CATCHALL, AFTER_HOURS_REASON_IDS } = await import('../tools/afterHoursTaxonomy');
 const { HANDOFF_ERROR_DIRECTIVE, HANDOFF_FAILED_DIRECTIVE, HANDOFF_NOT_PLACED_DIRECTIVE, createNoIvrAgent } = await import('./noIvrAgent');
 const { isoDobToUs, dobTheCallerGave } = await import('../services/afterHoursCallFacts');
+const { __resetDirectory } = await import('../services/consoleDirectory');
 
 const DOB_ASK = 'AGENT: And your date of birth, starting with the month, then the day, then the year?';
 
@@ -58,6 +59,13 @@ beforeEach(() => {
   h.getCallLogBySid.mockReset().mockResolvedValue(undefined);
   h.submitSimplifiedTicket.mockReset().mockResolvedValue({ success: true, ticketNumber: 'VA-SYNTHETIC' });
   h.lookupByNameAndDOB.mockClear();
+  const office = (key: string, canonical: string, fileAs?: string) =>
+    [key, { canonical, key, facilityKind: 'clinic', volume90d: 1, fileAs }] as const;
+  __resetDirectory({
+    providers: new Map(),
+    locations: new Map([office('covina', 'Covina'), office('downey', 'Downey'), office('dtla', 'DTLA', 'Los Angeles')]),
+    loadedAt: Date.now(),
+  } as never);
 });
 
 async function call(transcript?: string, handoff = vi.fn(async () => {})) {
@@ -135,14 +143,65 @@ describe('the teardown floor (the 70150 shape)', () => {
     expect(AFTER_HOURS_REASON_IDS.has(174)).toBe(true);
   });
 
-  it('carries the office the caller confirmed', async () => {
-    const c = await call(REQUEST);
+  const OFFICE_ASK = 'AGENT: Which office do you usually visit?';
+  const officeSent = async (transcript: string) => {
+    const c = await call(transcript);
+    await c.finish();
+    return h.submitSimplifiedTicket.mock.calls[0][0];
+  };
+
+  it('prefers the confirmed office over the transcript', async () => {
+    const c = await call(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.`);
     rememberConfirmedClinic(c.callSid, 'Synthetic Office');
     await c.finish();
     expect(h.submitSimplifiedTicket.mock.calls[0][0]).toMatchObject({
       locationOfLastVisit: 'Synthetic Office',
       locationSource: 'caller',
     });
+  });
+
+  it.each([
+    ['English', OFFICE_ASK, 'CALLER: Covina.', 'Covina'],
+    ['a sentence', OFFICE_ASK, 'CALLER: Usually the Downey office.', 'Downey'],
+    ['Spanish', 'AGENT: ¿A qué oficina va normalmente?', 'CALLER: A Covina.', 'Covina'],
+    ['leading no', OFFICE_ASK, 'CALLER: No, Downey.', 'Downey'],
+    ['the name the app files', OFFICE_ASK, 'CALLER: DTLA.', 'Los Angeles'],
+  ])('recovers the office the caller named when asked with no store seeded (%s)', async (_label, ask, answer, office) => {
+    expect(await officeSent(`${REQUEST}\n${ask}\n${answer}`)).toMatchObject({
+      locationOfLastVisit: office,
+      locationSource: 'caller',
+    });
+  });
+
+  it('takes the answer to the last office ask', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: Sorry, which office was that?\nCALLER: Downey.`);
+    expect(sent.locationOfLastVisit).toBe('Downey');
+  });
+
+  it.each([
+    ['a mention with no ask', 'AGENT: How may I assist you?\nCALLER: I need a refill from the Covina office and a call back.'],
+    ['a mention after the answer window closed', `${OFFICE_ASK}\nCALLER: I am not sure.\nAGENT: That is fine. How can we help?\nCALLER: I need a refill from the Covina office and a call back.`],
+    ['an agent line that only states an office', 'AGENT: Our Covina office opens at eight.\nCALLER: Downey is closer, please call me back about my refill.'],
+    ['two offices in the answer', `AGENT: How may I assist you?\nCALLER: Please call me back about my refill.\n${OFFICE_ASK}\nCALLER: Covina or Downey.`],
+    ['a denied office', `AGENT: How may I assist you?\nCALLER: Please call me back about my refill.\n${OFFICE_ASK}\nCALLER: Not Covina anymore.`],
+    ['a city that only contains an office name', `AGENT: How may I assist you?\nCALLER: Please call me back about my refill.\n${OFFICE_ASK}\nCALLER: West Covina.`],
+    ['an office the directory does not know', `AGENT: How may I assist you?\nCALLER: Please call me back about my refill.\n${OFFICE_ASK}\nCALLER: Springfield.`],
+  ])('sends no office on %s', async (_label, transcript) => {
+    const sent = await officeSent(transcript);
+    expect(sent).not.toHaveProperty('locationOfLastVisit');
+    expect(sent).not.toHaveProperty('locationSource');
+  });
+
+  it('still files the ticket when the directory is down', async () => {
+    __resetDirectory(null);
+    const before = process.env.OBS_CONSOLE_DATABASE_URL;
+    delete process.env.OBS_CONSOLE_DATABASE_URL;
+    try {
+      const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.`);
+      expect(sent).not.toHaveProperty('locationOfLastVisit');
+    } finally {
+      if (before !== undefined) process.env.OBS_CONSOLE_DATABASE_URL = before;
+    }
   });
 });
 

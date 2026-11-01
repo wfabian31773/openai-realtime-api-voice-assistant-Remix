@@ -1,0 +1,20 @@
+Reading additional input from stdin...
+OpenAI Codex v0.165.0
+--------
+workdir: /workspace/r417
+model: gpt-6.1-sol
+provider: openai
+approval: never
+sandbox: workspace-write [workdir, /tmp, $TMPDIR]
+reasoning effort: high
+reasoning summaries: none
+session id: 01a19770-1b71-7081-bfa7-7e02fde9093c
+--------
+user
+
+codex
+What would you like me to work on?
+tokens used
+13,328
+What would you like me to work on?
+EXIT:0 SECS:2
