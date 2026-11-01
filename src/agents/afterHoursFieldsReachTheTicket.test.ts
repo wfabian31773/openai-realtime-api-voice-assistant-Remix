@@ -203,6 +203,21 @@ describe('the teardown floor (the 70150 shape)', () => {
     expect(sent.locationOfLastVisit).toBe('Covina');
   });
 
+  it('does not read a bare "Which location?" after a pharmacy question as an office ask', async () => {
+    const sent = await officeSent(`${REQUEST}\nAGENT: Which office do you usually visit?\nCALLER: Covina.\nAGENT: Which pharmacy?\nCALLER: CVS.\nAGENT: Which location?\nCALLER: Downey.`);
+    expect(sent.locationOfLastVisit).toBe('Covina');
+  });
+
+  it('reads a bare "Which location?" that follows an office ask', async () => {
+    const sent = await officeSent(`${REQUEST}\nAGENT: Which office do you usually visit?\nCALLER: Um.\nAGENT: Which location?\nCALLER: Downey.`);
+    expect(sent.locationOfLastVisit).toBe('Downey');
+  });
+
+  it('does not read a bare "Which location?" with no office context', async () => {
+    const sent = await officeSent(`${REQUEST}\nAGENT: Which location?\nCALLER: Downey.`);
+    expect(sent.locationOfLastVisit).toBeUndefined();
+  });
+
   it('takes the answer to the last office ask', async () => {
     const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: Sorry, which office was that?\nCALLER: Downey.`);
     expect(sent.locationOfLastVisit).toBe('Downey');

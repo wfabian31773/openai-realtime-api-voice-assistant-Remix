@@ -68,9 +68,21 @@ function corrected(line: string): string {
 function officeAnswers(transcript: string): string[] {
   const lines = transcript.split('\n');
   let answers: string[] = [];
+  // Whether the agent's previous QUESTION was an office ask: a bare follow-up
+  // ("Which location?") borrows its topic from it, so after "Which pharmacy?"
+  // it asks about the pharmacy, never the office.
+  let lastQuestionWasOffice = false;
   lines.forEach((line, i) => {
+    if (!line.startsWith('AGENT: ') || !line.includes('?')) return;
+    const folded = foldAccents(line);
+    const prevWasOffice = lastQuestionWasOffice;
     // A pharmacy question ("which pharmacy should the office send it to?") is not an office ask.
-    if (!line.startsWith('AGENT: ') || !OFFICE_ASK.test(foldAccents(line)) || /\b(?:pharmacy|farmacia)\b/.test(foldAccents(line))) return;
+    const matches = OFFICE_ASK.test(folded) && !/\b(?:pharmacy|farmacia)\b/.test(folded);
+    const words = folded.slice('agent: '.length).split('?')[0].replace(/[^a-z\s]/g, ' ').trim().split(/\s+/).filter(Boolean);
+    const bare = words.length <= 3;
+    const isOffice = matches && (!bare || prevWasOffice);
+    lastQuestionWasOffice = isOffice;
+    if (!isOffice) return;
     const said: string[] = [];
     let j = i + 1;
     for (; lines[j]?.startsWith('CALLER: '); j += 1) said.push(lines[j].slice('CALLER: '.length));
