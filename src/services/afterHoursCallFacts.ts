@@ -113,7 +113,11 @@ function officeAnswers(transcript: string): string[] {
     const said: string[] = [];
     let j = i + 1;
     // An acknowledgment ("Take your time.") can sit between the ask and the answer.
-    while (lines[j]?.startsWith('AGENT: ') && !lines[j].includes('?')) j += 1;
+    // A request for another fact ("Tell me which pharmacy you use.") closes the window.
+    while (lines[j]?.startsWith('AGENT: ') && !lines[j].includes('?')) {
+      if (NOT_OFFICE_TOPIC.test(foldAccents(lines[j])) || /\b(?:tell me|give me|provide|dime|deme|digame)\b/.test(foldAccents(lines[j]))) return;
+      j += 1;
+    }
     for (; lines[j]?.startsWith('CALLER: '); j += 1) said.push(lines[j].slice('CALLER: '.length));
     if (!said.length) return;
     lastAnswerWords = foldAccents(said.join(' ').split(/[,.;]/)[0] ?? '').split(/[^a-z]+/).filter((w) => !['usually','the','office','that','this'].includes(w));
@@ -208,6 +212,8 @@ function officeAnswers(transcript: string): string[] {
  * the earlier office: the last answer decides, never a stale one. A directory
  * outage reads as no office and must never cost the floor its ticket.
  */
+const OTHER_PLACE = /\b(?:doctor|records|pharmacy|farmacia|live|lives|home|work|send|sent|medico|casa|vivo|trabajo)\b/;
+
 export async function officeTheCallerGave(transcript: string | undefined): Promise<string | undefined> {
   // A sentence about the pharmacy ("Sorry, the pharmacy is in Downey") never names the office.
   const answers = officeAnswers(transcript ?? '')
@@ -221,8 +227,8 @@ export async function officeTheCallerGave(transcript: string | undefined): Promi
   // A long new topic after the cue ("Covina. Actually, my doctor in Downey needs the records")
   // does not correct the office: keep what came before the cue.
   let last = lastLine === undefined ? undefined : corrected(lastLine).replace(/^[\s,.;:!-]+/, '');
-  if (lastLine !== undefined && last !== undefined && last !== lastLine && last.trim().split(/\s+/).length > 4
-    && !/\b(?:office|oficina|clinic|clinica|location|go to|went to|visit|voy a|va a)\b/.test(foldAccents(last))) {
+  if (lastLine !== undefined && last !== undefined && last !== lastLine && (last.trim().split(/\s+/).length > 4
+    || OTHER_PLACE.test(foldAccents(last))) && !/\b(?:office|oficina|clinic|clinica|location|go to|went to|visit|voy a|va a)\b/.test(foldAccents(last))) {
     const folded = foldAccents(lastLine);
     let start = -1;
     for (const m of folded.matchAll(CORRECTION_ALL)) start = m.index!;
@@ -246,6 +252,8 @@ export async function officeTheCallerGave(transcript: string | undefined): Promi
     parts.shift();
   }
   const [first, ...rest] = parts;
+  // "This is my first visit. I live in Covina.": a promoted sentence naming another place is not the office.
+  if (first !== last.split(/(?<=[.!;])\s+/)[0] && OTHER_PLACE.test(foldAccents(first))) return undefined;
   if (DENIAL.test(foldAccents(first).trim())) return undefined;
   // "Covina or Springfield" is a guess between offices, never one office.
   if (/\b(?:or|o|either|both|ambos)\b/.test(foldAccents(first))) return undefined;
@@ -255,7 +263,7 @@ export async function officeTheCallerGave(transcript: string | undefined): Promi
     if (rest.some((sentence) => /\b(?:or|o|both|ambos|either)\b/.test(foldAccents(sentence)))) return undefined;
     for (const sentence of rest) {
       // "My doctor in Downey needs my records" names another place, not another office answer.
-      if (/\b(?:doctor|records|pharmacy|farmacia|live|home|work|send|sent|medico|casa|vivo)\b/.test(foldAccents(sentence)) || DENIAL.test(foldAccents(sentence).trim())) continue;
+      if (OTHER_PLACE.test(foldAccents(sentence)) || DENIAL.test(foldAccents(sentence).trim())) continue;
       const other = await lookupLocation(sentence);
       if (other && office && other.canonical !== office.canonical) return undefined;
     }

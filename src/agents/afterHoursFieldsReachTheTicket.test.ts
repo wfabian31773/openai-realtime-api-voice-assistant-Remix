@@ -526,6 +526,21 @@ describe('the teardown floor (the 70150 shape)', () => {
     expect(sent.locationOfLastVisit).toBeUndefined();
   });
 
+  it('keeps the office over a short home-city correction', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina. Actually, I live in Downey.`);
+    expect(sent.locationOfLastVisit).toBe('Covina');
+  });
+
+  it('does not promote a home city over a first-visit answer', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: This is my first visit. I live in Covina.`);
+    expect(sent.locationOfLastVisit).toBeUndefined();
+  });
+
+  it('closes the answer window on a statement request for the pharmacy', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nAGENT: Tell me which pharmacy you use.\nCALLER: CVS in Downey.`);
+    expect(sent.locationOfLastVisit).toBeUndefined();
+  });
+
   it('keeps the office over a records-destination sentence', async () => {
     const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina. My doctor in Downey needs my records.`);
     expect(sent.locationOfLastVisit).toBe('Covina');
