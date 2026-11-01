@@ -143,7 +143,7 @@ function officeAnswers(transcript: string): string[] {
     // Every office the caller has named so far, for a later cue-less denial.
     // The office currently on the table: the latest correction, else the answer.
     const namedWords = () => [corrections.length ? corrections[corrections.length - 1] : said.join(' ')].flatMap((a) => foldAccents(corrected(a)).split(/[^a-z]+/))
-      .filter((w) => w.length >= 4 && !['usually', 'office', 'that', 'this', 'there'].includes(w));
+      .filter((w) => w.length >= 4 && !['usually', 'normally', 'office', 'oficina', 'that', 'this', 'there', 'visit', 'visita', 'clinic', 'location', 'always'].includes(w));
     let pendingLine = '';
     // One reading of a reply to an office readback, prompt or delayed.
     const answerReadback = (reply: string, readback: string) => {
@@ -254,7 +254,8 @@ export async function officeTheCallerGave(transcript: string | undefined): Promi
       .map((part) => {
         const f = foldAccents(part);
         if (!/\b(?:pharmacy|farmacia)\b/.test(f)) return part;
-        if (/^\s*no\b/i.test(part) || DENIAL.test(f)) return 'No.';
+        // Only a pharmacy sentence rejecting the office answer: "My pharmacy is not open" is not one.
+        if (/^\s*no\b/i.test(part) || (DENIAL.test(f) && /\b(?:office|oficina|is my pharmacy|es mi farmacia|that is the pharmacy|go to|voy a)\b/.test(f))) return 'No.';
         // "Actually, my office is Downey and my pharmacy is Covina": keep the office clause.
         if (!/\b(?:office|oficina|clinic|clinica|visit|go to|voy a)\b/.test(f)) return '';
         return part.split(/,\s*|\s+(?:and|y|but|pero)\s+/).filter((c) => !/\b(?:pharmacy|farmacia)\b/.test(foldAccents(c))).join(', ');

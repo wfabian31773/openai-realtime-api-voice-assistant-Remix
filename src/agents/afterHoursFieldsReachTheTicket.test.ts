@@ -617,6 +617,16 @@ describe('the teardown floor (the 70150 shape)', () => {
     expect(sent.locationOfLastVisit).toBeUndefined();
   });
 
+  it('honors a yes-but denial of the readback office after a visit answer', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: I usually visit Covina.\nAGENT: The Covina office, correct?\nCALLER: Yes, but I do not visit Covina anymore.`);
+    expect(sent.locationOfLastVisit).toBeUndefined();
+  });
+
+  it('keeps the office over a negated pharmacy sentence', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina. My pharmacy is not open.`);
+    expect(sent.locationOfLastVisit).toBe('Covina');
+  });
+
   it('keeps the office over a records-destination sentence', async () => {
     const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina. My doctor in Downey needs my records.`);
     expect(sent.locationOfLastVisit).toBe('Covina');
