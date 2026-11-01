@@ -86,6 +86,7 @@ function officeAnswers(transcript: string): string[] {
   // it asks about the pharmacy, never the office.
   let lastQuestionWasOffice = false;
   let lastQuestionWasPharmacy = false;
+  let lastAnswerWords: string[] = [];
   lines.forEach((line, i) => {
     if (!line.startsWith('AGENT: ') || !line.includes('?')) return;
     const folded = foldAccents(line);
@@ -100,8 +101,10 @@ function officeAnswers(transcript: string): string[] {
     const ambiguous = AMBIGUOUS_ASK.test(folded);
     const bare = words.length <= 3;
     // A readback of the office ("Covina, correct?") keeps the office context for a re-ask.
-    if (!matches && prevWasOffice && (line.match(/\?/g) ?? []).length === 1 && CONFIRM_ASK.test(folded) && (/^\p{Lu}\p{L}+(?:\s*,|\s+(?:office|location|clinic)\b)/u.test(line.slice('AGENT: '.length).trim()) || /\b(?:office|location|clinic|oficina|clinica|ubicacion)\b/.test(folded)) && !NOT_OFFICE_TOPIC.test(folded)) return;
-    const isOffice = matches && (!ambiguous || prevWasOffice || (!bare && !lastQuestionWasPharmacy));
+    if (!matches && prevWasOffice && (line.match(/\?/g) ?? []).length === 1 && CONFIRM_ASK.test(folded) && (lastAnswerWords.some((w) => w.length >= 4 && new RegExp(`\\b${w}\\b`).test(folded)) || /\b(?:office|location|clinic|oficina|clinica|ubicacion)\b/.test(folded)) && !NOT_OFFICE_TOPIC.test(folded)) return;
+    // A longer "location" question counts on its own only when it asks where the caller is seen.
+    const visitWords = /\b(?:visit|usually|go|seen|normally|visita|va)\b/.test(folded);
+    const isOffice = matches && (!ambiguous || prevWasOffice || (!bare && visitWords && !lastQuestionWasPharmacy));
     lastQuestionWasOffice = isOffice;
     lastQuestionWasPharmacy = /\b(?:pharmacy|farmacia)\b/.test(folded) || (ambiguous && !isOffice && lastQuestionWasPharmacy);
     if (!isOffice) return;
@@ -112,6 +115,7 @@ function officeAnswers(transcript: string): string[] {
     // An answer line about the pharmacy ("Sorry, the pharmacy is in Downey") is not the office.
     if (said.length > 1) { const kept = said.filter((a) => !/\b(?:pharmacy|farmacia)\b/.test(foldAccents(a))); said.splice(0, said.length, ...kept); }
     if (!said.length) return;
+    lastAnswerWords = foldAccents(said.join(' ')).split(/[^a-z]+/).filter((w) => !['usually','the','office','that','this'].includes(w));
     // A later caller turn corrects the office only until the agent asks
     // something else: "Sorry, I need a refill" after the next question is
     // not about the office.
