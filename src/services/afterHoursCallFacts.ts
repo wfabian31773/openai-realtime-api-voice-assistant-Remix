@@ -245,7 +245,14 @@ export async function officeTheCallerGave(transcript: string | undefined): Promi
   const answers = officeAnswers(transcript ?? '')
     .map((a) => a.split(/(?<=[.!;])\s+/)
       // "No, that is my pharmacy" still rejects the office: keep the "No".
-      .map((part) => (/\b(?:pharmacy|farmacia)\b/.test(foldAccents(part)) ? (/^\s*no\b/i.test(part) || DENIAL.test(foldAccents(part)) ? 'No.' : '') : part))
+      .map((part) => {
+        const f = foldAccents(part);
+        if (!/\b(?:pharmacy|farmacia)\b/.test(f)) return part;
+        if (/^\s*no\b/i.test(part) || DENIAL.test(f)) return 'No.';
+        // "Actually, my office is Downey and my pharmacy is Covina": keep the office clause.
+        if (!/\b(?:office|oficina|clinic|clinica|visit|go to|voy a)\b/.test(f)) return '';
+        return part.split(/,\s*|\s+(?:and|y|but|pero)\s+/).filter((c) => !/\b(?:pharmacy|farmacia)\b/.test(foldAccents(c))).join(', ');
+      })
       .filter(Boolean).join(' '))
     .filter((a) => a.trim());
   const lastLine = answers.length > 1 ? answers[answers.length - 1] : answers[0];
