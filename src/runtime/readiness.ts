@@ -1151,8 +1151,16 @@ import { callEnvironment } from "./callRecord";
  * fixed HANDOFF FAILED line; escalate_to_human tells the model the caller was
  * not connected. Above main's v162 (#415). No migration.
  */
+/**
+ * v164 — THE AFTER-HOURS FLOOR FILES THE OFFICE THE CALLER NAMED (2026-11-01).
+ * v163's floor read the office only from confirmedClinicFor, which no-IVR never
+ * fills, so a caller who answered the office question and hung up still filed
+ * with no location (Codex P2 on #417). The floor now falls back to the caller's
+ * answer to the agent's office ask, read from the transcript and accepted only
+ * through lookupLocation. Above main's v163 (#417). No migration.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v163-after-hours-details-reach-the-ticket-20261101";
+  "voice-runtime-v164-after-hours-floor-files-the-office-named-20261101";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can
