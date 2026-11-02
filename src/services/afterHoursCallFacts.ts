@@ -153,7 +153,8 @@ function officeAnswers(transcript: string): string[] {
       const clause = (readback.slice('AGENT: '.length).split('?')[0].split(/[.!]/).pop() ?? '').trim();
       // "Yes, but my office is Downey" names a different office.
       const butTail = reply.split(/\b(?:but|pero)\b/i)[1];
-      if (AFFIRM.test(fr) && butTail && /\b(?:office|oficina|clinic|clinica|go to|voy a|visit)\b/.test(foldAccents(butTail))
+      // "Yes, but it is Covina, not Downey": an explicit "X, not Y" names X too.
+      if (AFFIRM.test(fr) && butTail && (/\b(?:office|oficina|clinic|clinica|go to|voy a|visit)\b/.test(foldAccents(butTail)) || (NOT_THAT.test(butTail) && /\p{Lu}\p{L}{2,}/u.test(butTail.replace(NOT_THAT, ''))))
         && !DENIAL.test(foldAccents(butTail.replace(NOT_THAT, '')).trim())) { corrections.push(butTail.replace(NOT_THAT, '').trim()); return; }
       // "Yes, Covina or Downey" is still a guess between offices.
       if (/\b(?:or|o|either|both|ambos)\b/.test(fr)) { corrections.push(reply); return; }
@@ -254,6 +255,9 @@ function officeAnswers(transcript: string): string[] {
 // ", not Downey" / ", no a Downey" after the office named.
 const NOT_THAT = /,?\s*(?:not|no)\s+(?:a\s+|en\s+|the\s+)?\p{Lu}[\p{L}]+.*$/u;
 
+/** "My old office", "where I used to go", "mi oficina anterior": a former office, not the answer. */
+const RETRACTED = /\b(?:old|former|previous|used to|anterior|antigua|antiguo|vieja|viejo)\b/;
+
 const OTHER_PLACE = /\b(?:doctor|records|pharmacy|farmacia|live|lives|home|work|send|sent|medico|casa|vivo|trabajo)\b/;
 
 export async function officeTheCallerGave(transcript: string | undefined): Promise<string | undefined> {
@@ -290,6 +294,8 @@ export async function officeTheCallerGave(transcript: string | undefined): Promi
   // Only the office sentence can deny it: "Covina. I do not remember the doctor." is Covina.
   const sentences = last?.split(/(?<=[.!;])\s+/) ?? [];
   if (!last || DENIAL.test(foldAccents(sentences[0]).trim()) || sentences.some((x) => /^no[.!]?$/i.test(x.trim()))
+    // "Covina. No, that was my old office.": a later sentence retracting it as a former office.
+    || sentences.slice(1).some((x) => { const f = foldAccents(x).trim(); return RETRACTED.test(f) && (/^no\b/.test(f) || /\b(?:that|it|there|esa|eso|era)\b/.test(f)); })
     // "Covina. No voy a Covina.": a later sentence denying the office named.
     || sentences.slice(1).some((x) => { const f = foldAccents(x); return DENIAL.test(f.trim())
       && (/\b(?:there|it|that office|that one|esa oficina|ahi|alli|alla)\b/.test(f)
