@@ -53,6 +53,7 @@ import { classifyRecordsRequest, recordsReasonById } from "../tools/medicalRecor
 import { classifyTechRequest, techReasonById } from "../tools/techTaxonomy";
 import { classifySurgeryRequest, surgeryReasonById } from "../tools/surgeryTaxonomy";
 import { classifyOptical, classificationByReasonId } from "../tools/opticalTaxonomy";
+import { sanitizeForSms } from "../services/gsm7";
 
 /** The lanes this runs on. Each is a queue whose department is its routing. */
 const DEPARTMENT_BY_SLUG: Record<string, number> = {
@@ -123,6 +124,13 @@ export interface SweepInput {
    * transcript. Ignored when it does not belong to this queue.
    */
   capturedReason?: { requestTypeId: number; requestReasonId: number };
+  /**
+   * The request as the MODEL wrote it in `request_description` on a classify
+   * or filing tool this call — kept even when that tool refused
+   * (`draftedRequest.ts`, v166). The same text every ordinary filing sends as
+   * its description, so unlike the transcript it may go in the description.
+   */
+  draftedRequest?: string;
 }
 
 export type SweepDecision =
@@ -507,7 +515,7 @@ export const SWEPT_TICKET_DESCRIPTION =
  */
 export const TEARDOWN_UNASSIGNED_EXIT_DEPARTMENTS: ReadonlySet<number> = new Set([1, 2]);
 
-export type SweepReasonSource = "captured" | "summary" | "transcript" | "placeholder";
+export type SweepReasonSource = "captured" | "drafted" | "summary" | "transcript" | "placeholder";
 
 export interface SweepReason {
   requestTypeId: number;
@@ -538,6 +546,7 @@ export function resolveSweepReason(input: {
   capturedReason?: { requestTypeId: number; requestReasonId: number };
   summary?: string;
   callerSaid?: string;
+  draftedRequest?: string;
   toolEvents?: readonly SweepToolEvent[];
 }): SweepReason {
   const placeholder = otherReasonFor(input.departmentId);
@@ -554,6 +563,16 @@ export function resolveSweepReason(input: {
     pairIfOwned(input.departmentId, input.capturedReason) ??
     capturedReasonFromEvents(input.departmentId, input.toolEvents);
   if (captured) return { ...captured, source: "captured" };
+
+  // v166: the model's own `request_description`, before the summary and the
+  // caller's raw words — it is the request already isolated from the
+  // identity interview. Only a specific hit counts; a catch-all reading of it
+  // lets the summary and the transcript have their say.
+  const drafted = input.draftedRequest?.trim();
+  if (drafted) {
+    const hit = classifySweepText(input.departmentId, drafted);
+    if (hit && !isCatchAll(input.departmentId, hit.requestReasonId)) return { ...hit, source: "drafted" };
+  }
 
   const summary = input.summary?.trim();
   if (summary) {
@@ -637,6 +656,88 @@ function reasonPairFor(
   return null;
 }
 
+/** The department's own "Other - See Description" — or a reason named like one. */
+function isCatchAll(departmentId: number, reasonId: number): boolean {
+  if (otherReasonFor(departmentId)?.requestReasonId === reasonId) return true;
+  return /\bother\b/i.test(reasonLabelFor(departmentId, reasonId) ?? "");
+}
+
+/** The taxonomy's own name for a reason on this queue. Never caller text. */
+export function reasonLabelFor(departmentId: number, reasonId: number): string | undefined {
+  switch (departmentId) {
+    case 16:
+      return recordsReasonById(reasonId)?.requestReason;
+    case 3:
+      return techReasonById(reasonId)?.requestReason;
+    case 2:
+      return surgeryReasonById(reasonId)?.requestReason;
+    case 1:
+      return classificationByReasonId(reasonId)?.requestReason;
+    default:
+      return undefined;
+  }
+}
+
+/**
+ * THE SWEPT TICKET'S DESCRIPTION — v166.
+ *
+ * The ticketing app files any voice ticket whose description is exactly the
+ * placeholder below as "Callback needed - reason not captured"
+ * (`lib/voice-agent/no-reason.ts`). Six calls on 2026-10-28..11-01 landed
+ * there, several with the reason already known. In order:
+ *
+ *   1. the request as the MODEL wrote it (`draftedRequest`) — the text every
+ *      ordinary filing sends as its description, GSM-7 sanitised;
+ *   2. on queues other than Medical Records, a specific reason the sweep
+ *      classified, by the taxonomy's own NAME (never the caller's words);
+ *   3. the placeholder.
+ *
+ * NOT 2 ON MEDICAL RECORDS: a records ticket with a reason opens an access
+ * case and can start the CAP clock, and a regex reading of the transcript is
+ * not enough to start a statutory clock on (the app keeps a placeholder
+ * ticket out of that on purpose).
+ */
+export function sweptTicketDescription(
+  departmentId: number,
+  reason: SweepReason,
+  draftedRequest: string | undefined,
+): string {
+  const drafted = draftedRequest ? sanitizeForSms(draftedRequest).value.replace(/\s+/g, " ").trim() : "";
+  if (drafted) return drafted;
+  if (departmentId !== 16 && reason.source !== "placeholder" && !isCatchAll(departmentId, reason.requestReasonId)) {
+    const label = reasonLabelFor(departmentId, reason.requestReasonId);
+    if (label) return `Callback request about: ${sanitizeForSms(label).value}. A team member will follow up with you.`;
+  }
+  return SWEPT_TICKET_DESCRIPTION;
+}
+
+/**
+ * A CALL THAT LOOKS ANSWERED, NOT A REQUEST — v166, ticket 70265.
+ *
+ * An insurance representative asked only for the fax number, was given it,
+ * said thanks, and the sweep filed a callback ticket. Telling an answered
+ * question from a request is a judgement about content (standing instruction
+ * 3), so this does NOT skip the filing. It only says so on the staff note
+ * when every one of these holds: no classify or filing tool ran, the model
+ * drafted no request, an agent line gave a phone or fax number, and the
+ * caller's LAST line was a thank-you or a goodbye.
+ */
+export function looksInfoOnly(input: Pick<SweepInput, "transcript" | "toolEvents" | "draftedRequest">): boolean {
+  if (input.draftedRequest?.trim()) return false;
+  if (input.toolEvents.some((e) => /^(file_.*_ticket|classify_.*_request)$/.test(e.name))) return false;
+  const lines = input.transcript.split("\n");
+  const agentGaveNumber = lines.some(
+    (l) => l.startsWith("AGENT:") && /(\d[\s.-]?){10}/.test(l.replace(/[()]/g, "")),
+  );
+  if (!agentGaveNumber) return false;
+  const said = callerLines(input.transcript);
+  const last = (said[said.length - 1] ?? "").toLowerCase().replace(/[.,!?¿¡]/g, "").trim();
+  return /\b(thank you|thanks|thank|bye|goodbye|gracias|adios|that's all|that is all|perfect)\b/.test(last);
+}
+
+export const INFO_ONLY_NOTE =
+  "POSSIBLY INFO-ONLY (info_only): the agent gave a phone/fax number and the caller ended with thanks; no request tool ran. Close if no follow-up is needed.";
+
 function classifySweepText(
   departmentId: number,
   text: string,
@@ -708,8 +809,10 @@ export function buildSweptTicket(
     capturedReason: input.capturedReason,
     summary: input.summary,
     callerSaid,
+    draftedRequest: input.draftedRequest,
     toolEvents: input.toolEvents,
   });
+  const infoOnly = looksInfoOnly(input);
   return {
     slug: input.slug,
     departmentId,
@@ -744,7 +847,10 @@ export function buildSweptTicket(
      * description says only that a request was taken. Everything the caller
      * said goes to staff below, where the patient never sees it.
      */
-    description: SWEPT_TICKET_DESCRIPTION,
+    // v166: the model's drafted request, else a classified reason's name off
+    // Medical Records, else the placeholder — see sweptTicketDescription.
+    // Still never the caller's raw words.
+    description: sweptTicketDescription(departmentId, reason, input.draftedRequest),
     /**
      * The staff side. `callData` maps to the ticket's own call-metadata
      * columns and is not part of any message to the patient, so the
@@ -760,6 +866,7 @@ export function buildSweptTicket(
           ? `NAME AS THE CALLER GAVE IT — not matched to a patient record; confirm it against the chart before acting.\n`
           : ""
         : `PATIENT NAME NOT CAPTURED — nobody was identified on this call; take the name from the recording before matching this to a chart.\n`) +
+      (infoOnly ? `${INFO_ONLY_NOTE}\n` : "") +
       `Call back on ${input.callerPhone}. Call reference ${input.callSid}.\n` +
       `What the caller said: ${callerSaid}`,
     // Not "medium". Nobody has looked at this request yet and the caller has

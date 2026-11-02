@@ -215,6 +215,75 @@ export function routeAfterHoursTicket(input: {
   return { kind: 'default' };
 }
 
+/**
+ * A time the caller said, read loosely: "8", "8:30", "8 am", "8:30 a.m.",
+ * "at 2:15pm", "9:00 AM". Returns minutes after midnight and whether a.m./p.m.
+ * was stated. Undefined when no hour can be read.
+ */
+export function spokenTimeOf(text: string | undefined): { minutes: number; meridiemStated: boolean } | undefined {
+  const t = fold(text ?? '');
+  // A time has a colon, an a.m./p.m., or follows "at" / "a las". A bare number
+  // (a date part, a count) is not a time.
+  const m =
+    /\b(\d{1,2}):(\d{2})\s*(a\.?\s?m\.?|p\.?\s?m\.?)?/i.exec(t) ??
+    /\b(\d{1,2})()\s*(a\.?\s?m\.?|p\.?\s?m\.?)/i.exec(t) ??
+    /\b(?:at|a las)\s+(\d{1,2})()(?![\d/:])()/i.exec(t);
+  if (!m) return undefined;
+  const hour = Number(m[1]);
+  const minute = m[2] ? Number(m[2]) : 0;
+  if (hour < 1 || hour > 12 || minute > 59) {
+    // A 24-hour time ("14:30") is still a time; anything else is not.
+    if (hour >= 13 && hour <= 23 && minute <= 59 && !m[3]) return { minutes: hour * 60 + minute, meridiemStated: true };
+    return undefined;
+  }
+  if (!m[3]) return { minutes: (hour % 12) * 60 + minute, meridiemStated: false };
+  const pm = /^p/i.test(m[3]);
+  return { minutes: ((hour % 12) + (pm ? 12 : 0)) * 60 + minute, meridiemStated: true };
+}
+
+export interface SameDayTimeConflict {
+  callerTime: string;
+  recordTimes: string[];
+}
+
+/**
+ * THE CALLER'S TIME TODAY DISAGREES WITH THE RECORD'S — v166.
+ *
+ * A caller who believes their appointment today is at one time while the
+ * confirmed record holds another is about to miss it, or arrive for it at the
+ * wrong hour. Only a CONFIRMED record's appointments count (a phone
+ * candidate's are somebody else's), only appointments dated today in the
+ * practice's time zone, and only record times that can be read. A caller time
+ * with no a.m./p.m. matches either half of the clock, so "eight" never
+ * conflicts with 8:00 PM or 8:00 AM.
+ */
+export function sameDayTimeConflict(input: {
+  callerTime: string | undefined;
+  confirmedUpcoming?: ReadonlyArray<{ isoDate?: string; startTime?: string }>;
+  now?: Date;
+}): SameDayTimeConflict | null {
+  const spoken = spokenTimeOf(input.callerTime);
+  if (!spoken) return null;
+  const { isoDate } = pacificNow(input.now ?? new Date());
+  const today = (input.confirmedUpcoming ?? [])
+    .filter((apt) => apt.isoDate === isoDate)
+    .map((apt) => ({ label: apt.startTime ?? '', at: minutesOf(apt.startTime) }))
+    .filter((apt): apt is { label: string; at: number } => apt.at !== undefined);
+  if (today.length === 0) return null;
+  const matches = today.some((apt) =>
+    spoken.meridiemStated ? apt.at === spoken.minutes : apt.at % 720 === spoken.minutes % 720,
+  );
+  if (matches) return null;
+  return { callerTime: (input.callerTime ?? '').trim(), recordTimes: today.map((apt) => apt.label) };
+}
+
+export function sameDayTimeConflictNote(conflict: SameDayTimeConflict): string {
+  return (
+    `APPOINTMENT TIME CONFLICT — TODAY: the caller said ${conflict.callerTime}; the patient record shows ` +
+    `${conflict.recordTimes.join(', ')} today. Confirm the correct time with the patient before the appointment.`
+  );
+}
+
 /** The line a staffer reads first, in `additionalDetails`. Never the caller's words. */
 export function afterHoursRouteNote(kind: AfterHoursRoute['kind']): string | null {
   switch (kind) {

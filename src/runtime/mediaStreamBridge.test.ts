@@ -3119,6 +3119,21 @@ describe("VoiceCallBridge — v165: the reply to a follow-up is timed, and empty
     expect(records[0].followUps).toMatchObject({ emptyReplies: 0, spokenReplies: 0, endedAwaitingAudio: true, awaitingAudioMsAtEnd: 12_600, lastUnanswered: false });
   });
 
+  it("a barge-in that discards the queued follow-up leaves nothing waiting, so the caller's next reply is not timed against it (Codex P2)", async () => {
+    const records: VoiceCallRecord[] = [];
+    const h = await followUpRequested(records);
+    // Still playing the tool response's audio when the caller cuts in: the
+    // session drops its queued turns, including the follow-up.
+    h.handlers().onAudioDelta(b64(400));
+    h.handlers().onSpeechStarted();
+    expect(h.session.cancelResponse).toHaveBeenCalled();
+    created(h); // the response to the caller's new turn
+    h.handlers().onResponseDone();
+    h.bridge.handleTwilioFrame({ event: "stop", streamSid: "MZ-test" });
+    await Promise.resolve();
+    expect(records[0].followUps).toMatchObject({ emptyReplies: 0, spokenReplies: 0, endedAwaitingAudio: false });
+  });
+
   it("two follow-ups queued before either reply starts are timed separately, each from its own request (Codex r2)", async () => {
     vi.useFakeTimers({ now: 3_000_000, toFake: ["Date"] });
     const records: VoiceCallRecord[] = [];

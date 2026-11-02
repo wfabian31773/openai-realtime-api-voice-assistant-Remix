@@ -114,9 +114,12 @@ describe('a refusal the caller cannot fix is logged before anyone is told it is'
     expect(recovery).not.toHaveProperty('patientFirstName');
     expect(recovery).not.toHaveProperty('patientLastName');
     expect(recovery.priority).toBe('high');
-    // The description is an SMS body: nothing from the call in it.
-    expect(recovery.description).toBe(SWEPT_TICKET_DESCRIPTION);
-    expect(String(recovery.description)).not.toContain('chart notes');
+    // v166 (ticket 70217): the request as the MODEL wrote it, the description
+    // every ordinary filing sends — not the placeholder the ticketing app
+    // files as "reason not captured". Still nothing else from the call.
+    expect(recovery.description).toBe('requesting a copy of the chart notes from the last visit');
+    expect(recovery.description).not.toBe(SWEPT_TICKET_DESCRIPTION);
+    expect(String(recovery.description)).not.toMatch(/Testpatient|8455550142|1950|Requested by/);
     // Everything a clerk needs is on the staff side.
     const note = String((recovery.callData as Params).transcript);
     expect(note).toMatch(/^RECOVERED AFTER A REFUSAL/);
@@ -207,7 +210,7 @@ describe('a refusal the caller cannot fix is logged before anyone is told it is'
     expect(writeToOutbox).toHaveBeenCalledTimes(2);
     const held = writeToOutbox.mock.calls[1][0].params as Params;
     expect(held.departmentId).toBe(MEDICAL_RECORDS);
-    expect(held.description).toBe(SWEPT_TICKET_DESCRIPTION);
+    expect(held.description).toBe('requesting a copy of the chart notes from the last visit');
     expect(r.success).toBe(true);
     expect(r.filed_pending).toBe(true);
     expect(r).not.toHaveProperty('ticket_number');
@@ -215,10 +218,32 @@ describe('a refusal the caller cannot fix is logged before anyone is told it is'
     expect(r.fix).toBe(RECOVERED_AFTER_REFUSAL_FIX);
   });
 
-  it('a recovery refused too tells the model the truth: nothing was logged', async () => {
-    const { posts } = await app(UNASKABLE_400, UNASKABLE_400);
+  it('a recovery refused with the request text retries once with the placeholder (v166)', async () => {
+    const { posts } = await app(UNASKABLE_400, UNASKABLE_400, FILED('VA-RECOVERED-8'));
     const r = (await runTool('file_records_ticket', THIRD_PARTY)) as Out;
-    expect(posts()).toHaveLength(2);
+    const [, withText, withPlaceholder] = posts();
+    expect(posts()).toHaveLength(3);
+    expect(withText.description).toBe('requesting a copy of the chart notes from the last visit');
+    expect(withPlaceholder.description).toBe(SWEPT_TICKET_DESCRIPTION);
+    expect(withPlaceholder.idempotencyKey).toBe(withText.idempotencyKey);
+    expect(r.success).toBe(true);
+    expect(r.ticket_number).toBe('VA-RECOVERED-8');
+  });
+
+  it('a recovery carries the name this call validated, and only that (v166)', async () => {
+    const { rememberVerifiedIdentity } = await import('./verifiedIdentity');
+    rememberVerifiedIdentity(SID, { firstName: 'Testpatient', lastName: 'Example', dateOfBirth: '1950-01-02', certain: true });
+    const { posts } = await app(UNASKABLE_400, FILED('VA-RECOVERED-9'));
+    await runTool('file_records_ticket', THIRD_PARTY);
+    const [, recovery] = posts();
+    expect(recovery.patientFirstName).toBe('Testpatient');
+    expect(recovery.patientLastName).toBe('Example');
+  });
+
+  it('a recovery refused too tells the model the truth: nothing was logged', async () => {
+    const { posts } = await app(UNASKABLE_400, UNASKABLE_400, UNASKABLE_400);
+    const r = (await runTool('file_records_ticket', THIRD_PARTY)) as Out;
+    expect(posts()).toHaveLength(3);
     expect(r.success).toBe(false);
     expect(r.retryable).toBe(false);
     expect(r.fix).toBe(REFUSAL_NOT_LOGGED_FIX);

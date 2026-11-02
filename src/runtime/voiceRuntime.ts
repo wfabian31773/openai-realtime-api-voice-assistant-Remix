@@ -269,6 +269,7 @@ import { openRuntimeCall, persistRuntimeCall, type CallLogInsert, type RuntimeCa
 import { identityForRow } from "./runtimeIdentity";
 import { identityStoreProbe, rememberVerifiedIdentity } from "../tools/verifiedIdentity";
 import { logRuntimeIdentity } from "./identityTelemetry";
+import { logTicketToolOutcomes } from "./ticketToolTelemetry";
 import { runRequestSweep } from "./sweepRunner";
 import { runLaneTeardownFloor } from "./pcpFloor";
 import { persistRuntimeTurns } from "./runtimeTurns";
@@ -529,6 +530,16 @@ export interface VoiceRuntimeOptions {
     ids: { callLogId?: string },
     opts?: { after?: Promise<unknown> },
   ) => Promise<unknown>;
+  /**
+   * Why each ticket-tool call did or did not file (v166,
+   * ticketToolTelemetry.ts) — one PHI-free row, only on calls that ran a
+   * ticket tool. Injected for tests.
+   */
+  logTicketTools?: (
+    call: { callSid: string; slug: string },
+    ids: { callLogId?: string },
+    opts?: { after?: Promise<unknown> },
+  ) => Promise<unknown>;
   /** Bound on opening the call row. Defaults to CALL_ROW_DEADLINE_MS. */
   callRowDeadlineMs?: number;
   /**
@@ -657,6 +668,7 @@ export function mountVoiceRuntime(
   const logFollowUps = options.logFollowUps ?? logRuntimeFollowUps;
   const logIdentity = options.logIdentity ?? logRuntimeIdentity;
   const logAudio = options.logCallerAudio ?? logCallerAudio;
+  const logTicketTools = options.logTicketTools ?? logTicketToolOutcomes;
   let laneSourcePromise: Promise<LaneSource> | null = null;
   const laneSource = () => {
     if (options.laneSource) return Promise.resolve(options.laneSource);
@@ -1921,7 +1933,18 @@ export function mountVoiceRuntime(
              * flushing, never awaited by teardown, and changes nothing a caller
              * hears. `callerAudioEnergy.ts` carries the measurement.
              */
-            void logAudio(record, callerAudio.counts(), { callLogId }, { after: identityWritten })
+            /**
+             * AND WHY EACH TICKET-TOOL CALL DID OR DID NOT FILE (v166):
+             * the tool, a verdict and refused field NAMES, one row, only on
+             * calls that ran a ticket tool. Same discipline as the writers
+             * above; changes nothing a caller hears.
+             */
+            const ticketToolsWritten = logTicketTools(
+              { callSid: record.callSid, slug: record.slug },
+              { callLogId },
+              { after: identityWritten },
+            ).catch(() => undefined);
+            void logAudio(record, callerAudio.counts(), { callLogId }, { after: ticketToolsWritten })
               .catch(() => undefined);
             // SI Assistant callbacks (and the outbound leg) are reported to
             // the ticketing app so they land on the ticket and in My Messages.

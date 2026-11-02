@@ -1534,7 +1534,7 @@ export class VoiceCallBridge {
       this.clearTimer(this.finalFallbackTimer);
       this.finalFallbackTimer = null;
     }
-    this.session.cancelResponse();
+    this.cancelSessionResponse();
     this.discardBufferedAudio();
     // The replacement turn. Content decided here, phrasing left to the
     // model — the case speakNatural exists for. The rule's own policyHint
@@ -1641,6 +1641,15 @@ export class VoiceCallBridge {
       endedAwaitingAudio: started,
       ...(started ? { awaitingAudioMsAtEnd: Math.max(0, Date.now() - r!.requestedAtMs) } : {}),
     };
+  }
+
+  /** v167: the session's cancelResponse also discards every queued turn
+   * (grokSession pendingSays), so a follow-up request still waiting in that
+   * queue will never get a response; forget it, or the next unrelated
+   * response would bind to its stale timestamp (Codex P2, #419). */
+  private cancelSessionResponse(): void {
+    this.session.cancelResponse();
+    this.followUpRequestsWaiting.length = 0;
   }
 
   /** v165, logging only: a response was created — it answers the oldest
@@ -2071,7 +2080,7 @@ export class VoiceCallBridge {
     console.info(`[bridge] cancelling a second response after the opening on ${this.deps.context.callSid}`);
     this.cancelledEpoch = epoch;
     this.cancelledDuplicateEpoch = epoch;
-    this.session.cancelResponse();
+    this.cancelSessionResponse();
     return true;
   }
 
@@ -2197,7 +2206,7 @@ export class VoiceCallBridge {
     // means (Codex review, PR #227). A fresh termination has to be
     // requested by the agent again, through its own guards.
     this.cancelRequestedHangup();
-    this.session.cancelResponse();
+    this.cancelSessionResponse();
     this.discardBufferedAudio();
   }
 

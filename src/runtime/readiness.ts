@@ -1159,8 +1159,21 @@ import { callEnvironment } from "./callRecord";
  * answer to the agent's office ask, read from the transcript and accepted only
  * through lookupLocation. Above main's v163 (#417). No migration.
  */
+/**
+ * v166 — THE SWEPT TICKET CARRIES ITS REASON (2026-11-02). Six tickets landed
+ * as "Callback needed - reason not captured" (70230, 68501, 70298, 70217,
+ * 70265, 70357). The sweep now files the model's drafted request (kept from
+ * any classify/file tool call, refused or not), else a classified reason's
+ * name off Medical Records; the records refusal-recovery carries the request
+ * text; `file_records_ticket` accepts a requester given only as
+ * `requester_type` ("patient", "self"); each ticket-tool outcome is written as
+ * one `ticket_tool_summary` call_events row; no-ivr never tags NO CALLBACK
+ * NEEDED when the caller chose a contact method or asked to be called; a
+ * same-day appointment-time conflict files high. v165 is #419's. Above main's
+ * v164 (#418). No migration.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v165-follow-up-replies-are-timed-20261102";
+  "voice-runtime-v167-follow-up-replies-are-timed-20261102";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

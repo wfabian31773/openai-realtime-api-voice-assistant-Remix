@@ -40,7 +40,10 @@ import {
   afterHoursRouteNote,
   POST_PROCEDURE_REQUEST,
   routeAfterHoursTicket,
+  sameDayTimeConflict,
+  sameDayTimeConflictNote,
 } from "../services/afterHoursRouting";
+import { callbackNeeded } from "../services/callbackRequested";
 import { AFTER_HOURS_DEPARTMENT_ID as AFTER_HOURS_ROUTE_DEPARTMENT_ID } from "../tools/afterHoursTaxonomy";
 import { OPTICAL_DEPARTMENT_ID } from "../tools/opticalTaxonomy";
 import { otherReasonFor } from "../tools/otherReason";
@@ -56,7 +59,7 @@ import {
   hasVisitHistory,
   spokenFirstNameAgreesWithChart,
 } from "../tools/lookupUnsure";
-import { corroborate } from "../services/symptomCorroboration";
+import { callerSaid, corroborate } from "../services/symptomCorroboration";
 import { markCallConcluded } from "../services/callConclusion";
 import { GHOST_CALL_RESTRICTION, ghostCallRefusal, hasCallerTranscript } from "../services/ghostCallProtection";
 import { requestSipHangup, type SipGhostHangupMetadata } from "../services/sipGhostHangup";
@@ -1778,10 +1781,21 @@ The ticket will include schedule context (last appointment info) automatically.`
       // Lazy import to avoid module initialization during agent bootstrap
       const { SyncAgentService } = await import("../services/syncAgentService");
       
-      // Auto-determine callback requirement based on category if not explicitly set
-      const requiresCallback = params.requires_callback !== undefined 
-        ? params.requires_callback 
-        : SyncAgentService.requiresCallback(params.request_category as TriageOutcome);
+      // Callback requirement: the caller's own choice outranks the model's
+      // FALSE (v166, ticket 70202 — "Call, please" filed as NO CALLBACK).
+      // A chosen contact method or an explicit "call me" means a callback.
+      const callback = callbackNeeded({
+        modelSays: params.requires_callback,
+        categoryDefault: SyncAgentService.requiresCallback(params.request_category as TriageOutcome),
+        preferredContact: params.preferred_contact,
+        fullyAnswered: params.question_fully_answered,
+        callerWords: callerSaid(metadata.callId),
+      });
+      const requiresCallback = callback.required;
+      if (callback.overridden) {
+        console.info(`[No-IVR Agent] requires_callback=false overridden: the caller asked to be contacted (${metadata.callSid ?? 'unknown'})`);
+        params = { ...params, requires_callback: true };
+      }
 
       if (answeredWithoutFollowup(params)) {
         console.info('[No-IVR Agent] Fully answered request; caller did not request follow-up, so no ticket was created.');
@@ -2022,6 +2036,19 @@ The ticket will include schedule context (last appointment info) automatically.`
         console.info(`[AFTER-HOURS ROUTE] ${route.kind} -> department ${route.departmentId} on ${metadata.callSid}`);
       }
       const routeNote = afterHoursRouteNote(route.kind);
+      // v166: the time the caller gave for TODAY's appointment against the
+      // confirmed record's. A disagreement is somebody about to miss a visit,
+      // so the ticket goes HIGH (post-op stays urgent) with a conflict line.
+      const timeConflict =
+        recordConfirmed && (route.kind === 'same_day' || params.appointment_today === true)
+          ? sameDayTimeConflict({
+              callerTime: params.appointment_time,
+              confirmedUpcoming: enrichedContext?.upcomingAppointments,
+            })
+          : null;
+      if (timeConflict) {
+        console.warn(`[AFTER-HOURS ROUTE] same-day appointment time conflict on ${metadata.callSid} — filed high`);
+      }
       const opticalHint = route.kind === 'optical' ? otherReasonFor(OPTICAL_DEPARTMENT_ID) : null;
 
       // Use NEW SIMPLIFIED ENDPOINT - more reliable, all mapping done server-side
@@ -2047,6 +2074,7 @@ The ticket will include schedule context (last appointment info) automatically.`
         // the `Request Type:` header must stay the first line of that field
         // (operator, 2026-07-25). The note never carries the caller's words.
         additionalDetails: [
+          timeConflict ? sameDayTimeConflictNote(timeConflict) : null,
           routeNote,
           callbackMismatchStaffNote(callbackNormalized, metadata.callerPhone),
           dobEscapeStatus ? dobStatusNote(dobEscapeStatus) : null,
@@ -2058,6 +2086,7 @@ The ticket will include schedule context (last appointment info) automatically.`
         dialedNumber: metadata.dialedNumber,
         agentUsed: 'no-ivr',
         ...(route.kind === 'default' ? {} : { departmentId: route.departmentId }),
+        ...(timeConflict && route.kind !== 'post_op_medication' ? { priority: 'high' as const } : {}),
         ...(route.kind === 'post_op_medication'
           ? {
               priority: route.priority,
@@ -2194,7 +2223,9 @@ The ticket will include schedule context (last appointment info) automatically.`
           ticketCreated: true,
           callbackRequired: requiresCallback,
           message: requiresCallback
-            ? "Request submitted successfully. Confirm to patient that their request has been submitted and they will receive a callback."
+            ? !emailEscaped && (params.preferred_contact === 'text' || params.preferred_contact === 'email')
+              ? `Request submitted successfully. Confirm to patient that their request has been submitted and the team will follow up by ${params.preferred_contact === 'text' ? 'text' : 'email'}.`
+              : "Request submitted successfully. Confirm to patient that their request has been submitted and they will receive a callback."
             : "Request submitted successfully. Confirm submission, but do not promise a phone callback; none was requested."
         };
       } else {
