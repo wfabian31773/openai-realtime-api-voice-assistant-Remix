@@ -2819,8 +2819,8 @@ v10 (the person base and the join), v11 (the locked record, #290) and v12
 (optical's office ladder) are a CHAIN on `main`: each merged after the one
 before and brought it in, so v12 contains both.
 
-**AND THE SEQUENCE HAS TWO HOLES IN IT ON PURPOSE: v13 AND v57. v164 IS THE
-NEWEST — v164 on this branch: the after-hours floor files the office the caller named — above v163 (#417, `49696c9`, on `main`: the after-hours caller's details reach the ticket and a failed on-call handoff says so), which it contains —
+**AND THE SEQUENCE HAS TWO HOLES IN IT ON PURPOSE: v13 AND v57. v165 IS THE
+NEWEST — v165 on this branch: follow-up replies are timed, logging only — above v164 (#418, on `main`: the after-hours floor files the office the caller named), above v163 (#417, `49696c9`, on `main`: the after-hours caller's details reach the ticket and a failed on-call handoff says so), which it contains —
 AND v159 IS WHAT `main` CARRIES, SINCE #413 MERGED 2026-10-31 (`55b5434`): the operator script proven to the wire, no silence after the opening, above v158 (#412, `d785e29`) —
 AND v158 IS WHAT `main` CARRIED, SINCE #412 MERGED 2026-10-31 (`d785e29`): an operator call's callerScript drives its persona and opening line, above v157 (#411, `4861a9f`) —
 AND BEFORE THAT v157, MERGED 2026-10-31: the recognised-caller block describes the greeting the caller actually heard, and an unvalidated match asks for the name and not the date of birth — above `main`'s v156, which it contains —

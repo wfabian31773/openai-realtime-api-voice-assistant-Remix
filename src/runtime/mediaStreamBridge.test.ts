@@ -3091,6 +3091,18 @@ describe("VoiceCallBridge — v165: the reply to a follow-up is timed, and empty
     expect(records[0].followUps).toMatchObject({ emptyReplies: 0, toolOnlyReplies: 1 });
   });
 
+  it("a tool call arriving AFTER the reply's done re-files an 'empty' reply as tool-only (Codex P2)", async () => {
+    const records: VoiceCallRecord[] = [];
+    const h = await followUpRequested(records);
+    h.newResponse();
+    h.handlers().onResponseDone();
+    h.setResponseActive(false);
+    h.handlers().onToolCall("c2", "emit_decision", {});
+    h.bridge.handleTwilioFrame({ event: "stop", streamSid: "MZ-test" });
+    await Promise.resolve();
+    expect(records[0].followUps).toMatchObject({ emptyReplies: 0, toolOnlyReplies: 1 });
+  });
+
   it("a call that ends while a started reply still has no audio is SLOW, with how long it waited", async () => {
     vi.useFakeTimers({ now: 2_000_000, toFake: ["Date"] });
     const records: VoiceCallRecord[] = [];

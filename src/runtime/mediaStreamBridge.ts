@@ -1647,7 +1647,10 @@ export class VoiceCallBridge {
     if (wait === null || this.session.getResponseEpoch() <= wait.epoch) return;
     this.followUpAudioWait = null;
     if (this.pendingToolCalls > 0 || this.followUpOwed) this.followUpAudio.toolOnlyReplies += 1;
-    else this.followUpAudio.emptyReplies += 1;
+    else {
+      this.followUpAudio.emptyReplies += 1;
+      this.lastEmptyReplyEpoch = this.session.getResponseEpoch();
+    }
   }
 
   /**
@@ -2222,6 +2225,9 @@ export class VoiceCallBridge {
   private readonly followUps = { owed: 0, requested: 0, toolCallsAfterDone: 0 };
   /** v165 — logging only: what became of the latest follow-up request. */
   private followUpAudioWait: { epoch: number; requestedAtMs: number } | null = null;
+  /** The epoch of the last reply counted EMPTY: a function-call event that
+   * arrives after its done (the v55 shape) re-files it as tool-only. */
+  private lastEmptyReplyEpoch: number | null = null;
   private readonly followUpAudio = {
     spokenReplies: 0,
     emptyReplies: 0,
@@ -2449,6 +2455,13 @@ export class VoiceCallBridge {
     this.awaitingToolResponseDone = carryingResponseOpen;
     if (!carryingResponseOpen) {
       this.followUps.toolCallsAfterDone += 1;
+      // v165, logging only: the reply counted empty at its done carried this
+      // tool after all.
+      if (this.lastEmptyReplyEpoch !== null && this.lastEmptyReplyEpoch === this.session.getResponseEpoch()) {
+        this.lastEmptyReplyEpoch = null;
+        this.followUpAudio.emptyReplies -= 1;
+        this.followUpAudio.toolOnlyReplies += 1;
+      }
       // A late event opens (or re-opens) a batch the wire cannot close for
       // us; the grace window closes it, measured from this — the latest —
       // arrival. Armed HERE and not only in maybeRequestFollowUp (round 13):
