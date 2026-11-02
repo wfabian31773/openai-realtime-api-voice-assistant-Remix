@@ -470,6 +470,8 @@ export function normalizeRequesterType(raw: string | null | undefined): Requeste
   if (REQUESTER_TYPES.has(snake as RequesterType)) return snake as RequesterType;
   // The raw text, so the possessive guard ("the patient's attorney") still sees
   // its apostrophe.
+  // "power-of-attorney"/"power_of_attorney" must not fall to "attorney" → legal. (Codex, PR #420.)
+  if (/\b(power of attorney|poa)\b/.test(t)) return 'personal_representative';
   const classified = classifyRequester(String(raw));
   if (classified) return classified;
   // Insurance and legal first: "insurance/provider representative" is a health plan or
