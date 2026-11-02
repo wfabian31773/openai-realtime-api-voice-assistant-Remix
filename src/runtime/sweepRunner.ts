@@ -140,8 +140,8 @@ const defaultFiler: SweepFiler = async (ticket) => {
   if (ticket.description === SWEPT_TICKET_DESCRIPTION) return first;
   return fileOnce({
     ...ticket,
+    // Same idempotency key: a re-run sweep must not create a second ticket. (Codex, PR #420.)
     description: SWEPT_TICKET_DESCRIPTION,
-    ...(ticket.idempotencyKey ? { idempotencyKey: `${ticket.idempotencyKey}:placeholder` } : {}),
   });
 };
 
