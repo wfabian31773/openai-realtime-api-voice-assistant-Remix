@@ -618,6 +618,22 @@ export interface FollowUpStats {
   /** True when a follow-up was requested and no response was ever created
    * after it — the call ended waiting on a turn the wire never started. */
   lastUnanswered: boolean;
+  /** v165 — follow-up replies whose first audio reached the caller. */
+  spokenReplies?: number;
+  /** v165 — ms from the follow-up request to the first audio frame sent to
+   * the caller: the latest reply's, and the slowest on the call. */
+  firstAudioMsLast?: number;
+  firstAudioMsMax?: number;
+  /** v165 — follow-up replies that finished (response.done) with no audio
+   * and no tool call: the EMPTY reply. */
+  emptyReplies?: number;
+  /** v165 — follow-up replies that finished with no audio but called a
+   * tool, whose own follow-up owns the next words. */
+  toolOnlyReplies?: number;
+  /** v165 — the call ended while a reply the wire HAD started was still
+   * without audio: the SLOW reply, with how long it had been waiting. */
+  endedAwaitingAudio?: boolean;
+  awaitingAudioMsAtEnd?: number;
 }
 
 export interface VoiceCallContext {
@@ -641,7 +657,9 @@ export interface VoiceCallContext {
  * it structurally; tests substitute a fake with no wire at all. */
 export interface BridgeSession {
   appendAudio(base64Audio: string): void;
-  cancelResponse(): void;
+  /** Returns the number of queued open turns it discarded (a fake may
+   * return nothing, read as none). */
+  cancelResponse(): number | void;
   sendToolResult(callId: string, ok: boolean, output: Record<string, unknown>): void;
   requestResponse(): void;
   /** A response-gated turn whose content the RUNTIME decides and the model
@@ -666,7 +684,9 @@ export interface BridgeSession {
 }
 
 export interface TwilioSocket {
-  sendFrame(frame: TwilioOutboundFrame): void;
+  /** `false` when the frame was dropped (socket not open); void/true = sent.
+   * Read only by v165's follow-up telemetry. */
+  sendFrame(frame: TwilioOutboundFrame): void | boolean;
   close(): void;
 }
 
@@ -1516,7 +1536,7 @@ export class VoiceCallBridge {
       this.clearTimer(this.finalFallbackTimer);
       this.finalFallbackTimer = null;
     }
-    this.session.cancelResponse();
+    this.cancelSessionResponse();
     this.discardBufferedAudio();
     // The replacement turn. Content decided here, phrasing left to the
     // model — the case speakNatural exists for. The rule's own policyHint
@@ -1588,12 +1608,100 @@ export class VoiceCallBridge {
     // for a cancelled epoch, which is what keeps a stale delta from
     // downgrading a response-owed clock its stale completion could clear.
     this.armDeadAir("utterance");
-    this.sendFrame({
+    const sent = this.sendFrame({
       event: "media",
       streamSid: this.deps.context.streamSid,
       media: { payload: base64Audio },
     });
+    if (sent) this.noteFollowUpAudio(current.epoch);
   }
+
+  /** v165, logging only: the first frame of a follow-up's reply reached
+   * Twilio — record how long after the request. */
+  private noteFollowUpAudio(epoch: number): void {
+    const r = this.followUpReply;
+    if (r === null || r.audio || r.counted !== null || r.epoch !== epoch) return;
+    r.audio = true;
+    const ms = Math.max(0, Date.now() - r.requestedAtMs);
+    const a = this.followUpAudio;
+    a.spokenReplies += 1;
+    a.firstAudioMsLast = ms;
+    a.firstAudioMsMax = Math.max(a.firstAudioMsMax ?? 0, ms);
+  }
+
+
+  private followUpAudioAtTeardown(): Partial<FollowUpStats> {
+    const a = this.followUpAudio;
+    const r = this.followUpReply;
+    const started = r !== null && !r.audio && r.counted === null;
+    return {
+      spokenReplies: a.spokenReplies,
+      emptyReplies: a.emptyReplies,
+      toolOnlyReplies: a.toolOnlyReplies,
+      ...(a.firstAudioMsLast !== undefined ? { firstAudioMsLast: a.firstAudioMsLast } : {}),
+      ...(a.firstAudioMsMax !== undefined ? { firstAudioMsMax: a.firstAudioMsMax } : {}),
+      endedAwaitingAudio: started,
+      ...(started ? { awaitingAudioMsAtEnd: Math.max(0, Date.now() - r!.requestedAtMs) } : {}),
+    };
+  }
+
+  /** v167: the session's cancelResponse also discards its queued turns
+   * (grokSession pendingSays), so a follow-up request still in that queue
+   * will never get a response; forget exactly those (the newest), or the next
+   * unrelated response would bind to a stale timestamp. A follow-up already
+   * SENT survives the barge-in and keeps its timestamp (Codex P2, #419 r3). */
+  private cancelSessionResponse(): void {
+    const discarded = this.session.cancelResponse() ?? 0;
+    const w = this.followUpRequestsWaiting;
+    if (discarded > 0) w.splice(Math.max(0, w.length - discarded));
+  }
+
+  /** v165, logging only: a response was created — it answers the oldest
+   * waiting follow-up request, if any. */
+  private bindFollowUpReply(): void {
+    // Two paths call handleResponseStarted; one response binds once.
+    const epoch = this.session.getResponseEpoch();
+    if (epoch <= this.lastSeenResponseEpoch) return;
+    this.lastSeenResponseEpoch = epoch;
+    const requestedAtMs = this.followUpRequestsWaiting.shift();
+    if (requestedAtMs === undefined) return;
+    this.followUpReply = {
+      epoch,
+      requestedAtMs,
+      audio: false,
+      tool: false,
+      counted: null,
+    };
+  }
+
+  /** v165, logging only: a function call arrived — if it belongs to the
+   * bound reply, that reply is tool-only, never empty, even when the event
+   * arrives after its done (the v55 shape). */
+  private noteFollowUpTool(): void {
+    const r = this.followUpReply;
+    if (r === null || r.epoch !== this.session.getResponseEpoch()) return;
+    r.tool = true;
+    if (r.counted === "empty") {
+      this.followUpAudio.emptyReplies -= 1;
+      this.followUpAudio.toolOnlyReplies += 1;
+      r.counted = "tool";
+    }
+  }
+
+  /** v165, logging only: the bound reply finished. Called at response.done,
+   * before the done is acted on. */
+  private noteFollowUpReplyDone(): void {
+    const r = this.followUpReply;
+    if (r === null || r.audio || r.counted !== null || r.epoch !== this.session.getResponseEpoch()) return;
+    if (r.tool) {
+      r.counted = "tool";
+      this.followUpAudio.toolOnlyReplies += 1;
+    } else {
+      r.counted = "empty";
+      this.followUpAudio.emptyReplies += 1;
+    }
+  }
+
 
   /**
    * Stamp the transcript-timing window the latency and tail graders read.
@@ -1976,7 +2084,7 @@ export class VoiceCallBridge {
     console.info(`[bridge] cancelling a second response after the opening on ${this.deps.context.callSid}`);
     this.cancelledEpoch = epoch;
     this.cancelledDuplicateEpoch = epoch;
-    this.session.cancelResponse();
+    this.cancelSessionResponse();
     return true;
   }
 
@@ -2102,7 +2210,7 @@ export class VoiceCallBridge {
     // means (Codex review, PR #227). A fresh termination has to be
     // requested by the agent again, through its own guards.
     this.cancelRequestedHangup();
-    this.session.cancelResponse();
+    this.cancelSessionResponse();
     this.discardBufferedAudio();
   }
 
@@ -2165,6 +2273,26 @@ export class VoiceCallBridge {
   private awaitingToolResponseDone = false;
   /** v55 — see FollowUpStats. */
   private readonly followUps = { owed: 0, requested: 0, toolCallsAfterDone: 0 };
+  /** v165 — logging only: what became of the latest follow-up request. */
+  /** Follow-up requests not yet answered by a created response, FIFO (the
+   * session queues them the same way), as request timestamps. */
+  private followUpRequestsWaiting: number[] = [];
+  private lastSeenResponseEpoch = 0;
+  /** The created response bound to the oldest waiting request. */
+  private followUpReply: {
+    epoch: number;
+    requestedAtMs: number;
+    audio: boolean;
+    tool: boolean;
+    counted: "empty" | "tool" | null;
+  } | null = null;
+  private readonly followUpAudio = {
+    spokenReplies: 0,
+    emptyReplies: 0,
+    toolOnlyReplies: 0,
+    firstAudioMsLast: undefined as number | undefined,
+    firstAudioMsMax: undefined as number | undefined,
+  };
   /** The response epoch at the moment the last follow-up was requested; a
    * created response advances the epoch, so equality at teardown means the
    * wire never answered that request. */
@@ -2213,6 +2341,7 @@ export class VoiceCallBridge {
     // should not silently drop its tokens.
     if (raw !== undefined) this.usage.add(raw);
     if (this.ended) return;
+    this.noteFollowUpReplyDone();
     this.awaitingToolResponseDone = false;
     // The boundary an end-call may be waiting on (round 13).
     this.wakeSiblingWaiters();
@@ -2299,6 +2428,7 @@ export class VoiceCallBridge {
 
   private handleResponseStarted(): void {
     if (this.ended) return;
+    this.bindFollowUpReply();
     if (this.cancelSecondOpeningTurn()) return;
     this.cancelGoodbye();
     this.goodbyeEpoch = this.session.getResponseEpoch();
@@ -2342,6 +2472,7 @@ export class VoiceCallBridge {
     if (!this.endRequested) {
       this.followUps.requested += 1;
       this.lastFollowUpEpoch = this.session.getResponseEpoch();
+      this.followUpRequestsWaiting.push(Date.now());
       this.session.requestResponse();
       // The follow-up is a response owed ANEW: it gets its own window,
       // not whatever remains of the tool's (Codex review, PR #227
@@ -2365,6 +2496,7 @@ export class VoiceCallBridge {
       this.openingTurn.answerEpoch = null;
       this.openingTurn.answerSpoke = false;
     }
+    this.noteFollowUpTool();
     this.cancelGoodbye();
     // Even a tool before the first audio makes this an unfinished exchange.
     this.goodbyeEpoch = this.session.getResponseEpoch();
@@ -2831,12 +2963,13 @@ export class VoiceCallBridge {
     this.teardown("provider_failure");
   }
 
-  private sendFrame(frame: TwilioOutboundFrame): void {
+  private sendFrame(frame: TwilioOutboundFrame): boolean {
     try {
-      this.deps.twilio.sendFrame(frame);
+      return this.deps.twilio.sendFrame(frame) !== false;
     } catch {
       // A socket that died mid-frame is a hangup, handled by its own close
       // path — never an exception thrown up through an event handler.
+      return false;
     }
   }
 
@@ -2997,6 +3130,7 @@ export class VoiceCallBridge {
           lastUnanswered:
             this.lastFollowUpEpoch !== null &&
             this.session.getResponseEpoch() === this.lastFollowUpEpoch,
+          ...this.followUpAudioAtTeardown(),
         },
         startedAtMs: this.startedAtMs,
         endedAtMs: Date.now(),

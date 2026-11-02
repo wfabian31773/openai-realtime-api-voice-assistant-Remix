@@ -16,7 +16,7 @@
  * a failure is one console line — with the buffer kept for a retry, never
  * deleted on the failure that made it worth keeping.
  */
-import type { VoiceCallRecord } from "./mediaStreamBridge";
+import type { FollowUpStats, VoiceCallRecord } from "./mediaStreamBridge";
 import { PERSIST_RETRY_BACKOFF_MS } from "./callRecord";
 
 export const FOLLOW_UP_EVENT = "follow_up_summary";
@@ -37,6 +37,16 @@ export interface FollowUpEvent {
  * v56's `hangupsHeld` is this call's turn-taking bookkeeping, and silence
  * prompts are that.
  */
+/** v165: one word for the end-of-call summary — `slow` outranks `empty`
+ * because it describes the reply the call ended on. */
+export function replyVerdict(f: FollowUpStats | undefined): "slow" | "empty" | "spoke" | null {
+  if (!f) return null;
+  if (f.endedAwaitingAudio) return "slow";
+  if ((f.emptyReplies ?? 0) > 0) return "empty";
+  if ((f.spokenReplies ?? 0) > 0) return "spoke";
+  return null;
+}
+
 export function followUpEvent(
   record: Pick<
     VoiceCallRecord,
@@ -63,6 +73,17 @@ export function followUpEvent(
       requested: f?.requested ?? 0,
       toolCallsAfterDone: f?.toolCallsAfterDone ?? 0,
       lastUnanswered: f?.lastUnanswered ?? false,
+      // v165: what the reply to a follow-up did. `empty` = a reply finished
+      // with no audio and no tool; `slow` = the call ended while a started
+      // reply still had no audio; `spoke` = the latest reply reached audio.
+      spokenReplies: f?.spokenReplies ?? 0,
+      emptyReplies: f?.emptyReplies ?? 0,
+      toolOnlyReplies: f?.toolOnlyReplies ?? 0,
+      firstAudioMsLast: f?.firstAudioMsLast ?? null,
+      firstAudioMsMax: f?.firstAudioMsMax ?? null,
+      endedAwaitingAudio: f?.endedAwaitingAudio ?? false,
+      awaitingAudioMsAtEnd: f?.awaitingAudioMsAtEnd ?? null,
+      replyVerdict: replyVerdict(f),
       // v56: end-call tool calls refused because a tool answer was never voiced.
       hangupsHeld: record.hangupsHeld ?? 0,
       // v65: silence prompts SPOKEN, and whether they ran out. The second is

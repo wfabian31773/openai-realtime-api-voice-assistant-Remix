@@ -371,6 +371,20 @@ describe("response.cancel gating (production lesson: cancelling a non-open respo
     expect(transport.sent.filter((e) => e.type === "response.cancel")).toHaveLength(1);
   });
 
+  it("cancelResponse() reports how many queued OPEN turns it discarded, and none for a sent one (v167)", () => {
+    const { transport, session } = makeSession();
+    transport.emit({ type: "response.created" });
+    session.requestResponse(); // queued behind the open response
+    session.speak("A scripted line.");
+    expect(session.cancelResponse()).toBe(1);
+    const fresh = makeSession();
+    fresh.transport.emit({ type: "session.created" } as GrokServerEvent);
+    fresh.transport.emit({ type: "session.updated" } as GrokServerEvent);
+    fresh.session.requestResponse(); // nothing open: sent straight away
+    expect(fresh.transport.sent.some((e) => e.type === "response.create")).toBe(true);
+    expect(fresh.session.cancelResponse()).toBe(0);
+  });
+
   it("barge-in DISCARDS the queued scripted lines — the cancelled response's own done must not speak stale text", () => {
     // Codex review, PR #200 round 4: the bridge writes off every
     // outstanding utterance at barge-in, so a held line flushed by the

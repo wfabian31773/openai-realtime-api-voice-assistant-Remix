@@ -1066,7 +1066,9 @@ export function mountVoiceRuntime(
 
     const twilioSocket = {
       sendFrame: (frame: TwilioOutboundFrame) => {
-        if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(frame));
+        if (ws.readyState !== ws.OPEN) return false;
+        ws.send(JSON.stringify(frame));
+        return true;
       },
       close: () => {
         try {

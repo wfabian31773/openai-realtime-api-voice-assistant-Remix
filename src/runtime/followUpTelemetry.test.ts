@@ -27,7 +27,7 @@ vi.mock("../services/callEventLog", () => ({
   releaseCallEvents: (id?: string) => void log.released.push(id),
 }));
 
-const { followUpEvent, logRuntimeFollowUps, FOLLOW_UP_EVENT } = await import("./followUpTelemetry");
+const { followUpEvent, replyVerdict, logRuntimeFollowUps, FOLLOW_UP_EVENT } = await import("./followUpTelemetry");
 
 const SID = "CA00000000000000000000000000000f55";
 function record(followUps?: VoiceCallRecord["followUps"]): VoiceCallRecord {
@@ -92,6 +92,15 @@ describe("the follow-up summary", () => {
       requested: 1,
       toolCallsAfterDone: 1,
       lastUnanswered: true,
+      // v165: counts, durations in ms, a boolean and a fixed verdict word.
+      spokenReplies: 0,
+      emptyReplies: 0,
+      toolOnlyReplies: 0,
+      firstAudioMsLast: null,
+      firstAudioMsMax: null,
+      endedAwaitingAudio: false,
+      awaitingAudioMsAtEnd: null,
+      replyVerdict: null,
       hangupsHeld: 0,
       silencePrompts: 0,
       silenceCut: false,
@@ -176,5 +185,20 @@ describe("the runtime writes it at teardown, after the row and the sweep", () =>
     // Never awaited: teardown must not wait on telemetry.
     expect(src.slice(Math.max(0, follow - 60), follow)).not.toMatch(/\bawait\s*$/);
     expect(src).not.toMatch(/await logFollowUps\(/);
+  });
+});
+
+describe("v165 replyVerdict — the summary tells an empty reply from a slow one", () => {
+  const base = { owed: 1, requested: 1, toolCallsAfterDone: 0, lastUnanswered: false };
+  it("slow when the call ended on a started reply with no audio, even after an earlier empty one", () => {
+    expect(replyVerdict({ ...base, emptyReplies: 1, endedAwaitingAudio: true })).toBe("slow");
+  });
+  it("empty when a reply finished with nothing", () => {
+    expect(replyVerdict({ ...base, emptyReplies: 1, spokenReplies: 2 })).toBe("empty");
+  });
+  it("spoke when every reply reached audio, null with nothing to say", () => {
+    expect(replyVerdict({ ...base, spokenReplies: 1 })).toBe("spoke");
+    expect(replyVerdict(base)).toBeNull();
+    expect(replyVerdict(undefined)).toBeNull();
   });
 });

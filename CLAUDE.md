@@ -656,11 +656,11 @@ is reading noise.
 
 ---
 
-## Current branch — the swept ticket carries its reason, v166 (2026-11-02)
+## Current branch — follow-up replies are timed, v167 (opened as v165) (2026-11-02)
 
-This branch carries **`voice-runtime-v166-the-swept-ticket-carries-its-reason-20261102`**, above `main`'s v164 (#418, `89a1760`), which it contains; v165 is #419 on its open branch. Six voice tickets landed as the ticketing app's "Callback needed - reason not captured" (by id only: 70230, 68501, 70298, 70217, 70265, 70357). The sweep files the model's drafted `request_description` (kept from any classify/file tool call, refused or not; `src/tools/draftedRequest.ts`), else a classified reason's taxonomy name off Medical Records, else the placeholder; a call that looks info-only gets a staff-note tag, not a skip. The records refusal-recovery carries the request text (70217). `file_records_ticket` accepts a requester given only as `requester_type` and reads a bare "patient"/"self" as the patient (70298). Each ticket-tool call writes into one `ticket_tool_summary` `call_events` row (field names only). No-IVR never tags `[NO CALLBACK NEEDED]` when the caller chose a contact method or asked to be called (70202), and a same-day appointment-time conflict against the confirmed record files high. No migration; production impact is unmeasured.
+This branch carries **`voice-runtime-v167-follow-up-replies-are-timed-20261102`**, above `main`'s v166 (#420, `1db002a`), which it contains. LOGGING ONLY, no behaviour change. A Support Desk call (2026-11-01) went 12.6 s silent after two `emit_decision` calls: `follow_up_summary` showed the follow-up requested and a response created, and nothing could say whether that reply was EMPTY or SLOW (8 of 2,767 follow-up calls in 7 days had the same shape). `follow_up_summary` now carries `spokenReplies`, `firstAudioMsLast`/`firstAudioMsMax` (follow-up request → first audio frame sent to Twilio), `emptyReplies` (a reply that finished with no audio and no tool), `toolOnlyReplies`, `endedAwaitingAudio` + `awaitingAudioMsAtEnd` (the call ended while a started reply had no audio), and `replyVerdict` (`slow` | `empty` | `spoke` | null). The ghost-call guard drafted as 9798d90 is NOT included: none of the reported calls reached `terminate_call`.
 
-## `main` base — the after-hours floor files the office the caller named, v164 (#418, merged 2026-11-02, `89a1760`)
+## Previous — v166 (#420): the swept ticket carries its reason. Before that — the after-hours floor files the office the caller named, v164 (2026-11-01)
 
 This branch carries **`voice-runtime-v164-after-hours-floor-files-the-office-named-20261101`**, above `main`'s v163 (#417, `49696c9`), which it contains. #417 merged before its Codex P2 fix landed: v163's teardown floor read the office only from `confirmedClinicFor`, which no-IVR never fills. `officeTheCallerGave()` (`src/services/afterHoursCallFacts.ts`) reads the caller's answer to the agent's office ask from the transcript (English/Spanish, last answered ask wins, a denial names no office) and accepts it only through `lookupLocation`; the floor uses it after `confirmedClinicFor`. A directory outage files with no office. Tests: `src/agents/afterHoursFieldsReachTheTicket.test.ts`. No migration; production impact is unmeasured.
 
@@ -2560,6 +2560,7 @@ voice-runtime-v162-outbox-stall-holds-when-tickets-land-20261031
 voice-runtime-v163-after-hours-details-reach-the-ticket-20261101
 voice-runtime-v164-after-hours-floor-files-the-office-named-20261101
 voice-runtime-v166-the-swept-ticket-carries-its-reason-20261102
+voice-runtime-v167-follow-up-replies-are-timed-20261102
 ```
 
 Also printed at boot as `[voice-runtime] <marker>`. Anything ending in an
@@ -2820,8 +2821,9 @@ v10 (the person base and the join), v11 (the locked record, #290) and v12
 (optical's office ladder) are a CHAIN on `main`: each merged after the one
 before and brought it in, so v12 contains both.
 
-**AND THE SEQUENCE HAS TWO HOLES IN IT ON PURPOSE: v13 AND v57. v166 IS THE
-NEWEST — v166 on this branch: the swept ticket carries its reason — above v164 (#418, `89a1760`, on `main`: the after-hours floor files the office the caller named), which it contains; v165 is #419 on its open branch —
+**AND THE SEQUENCE HAS TWO HOLES IN IT ON PURPOSE: v13 AND v57. v167 IS THE
+NEWEST — v167 on this branch (opened as v165; renumbered after #420 merged): follow-up replies are timed, logging only — above v166 (#420, `1db002a`, on `main`: the swept ticket carries its reason) —
+AND BEFORE THAT v166 (#420): the swept ticket carries its reason — above v164 (#418, `89a1760`, on `main`: the after-hours floor files the office the caller named), which it contains —
 AND BEFORE THAT v164 (#418): the after-hours floor files the office the caller named, above v163 (#417, `49696c9`: the after-hours caller's details reach the ticket and a failed on-call handoff says so) —
 AND v159 IS WHAT `main` CARRIES, SINCE #413 MERGED 2026-10-31 (`55b5434`): the operator script proven to the wire, no silence after the opening, above v158 (#412, `d785e29`) —
 AND v158 IS WHAT `main` CARRIED, SINCE #412 MERGED 2026-10-31 (`d785e29`): an operator call's callerScript drives its persona and opening line, above v157 (#411, `4861a9f`) —
