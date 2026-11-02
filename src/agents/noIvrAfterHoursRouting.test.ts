@@ -381,7 +381,10 @@ describe('caller-requested callback handling — VA-76095 / 74600 / VA-71404', (
     expect(h.submitSimplifiedTicket).not.toHaveBeenCalled();
   });
 
-  it('keeps a staff action even when no telephone callback was requested', async () => {
+  // v166 (ticket 70202): a caller who chose how to be contacted asked for a
+  // follow-up. This used to assert `[NO CALLBACK NEEDED]` on a caller who
+  // chose a text — the tag told staff not to contact somebody who asked to be.
+  it('keeps a staff action and follows up on the channel the caller chose', async () => {
     const { agent } = await agentFor();
     const result = await call(agent, 'create_ticket', {
       ...TICKET,
@@ -391,10 +394,88 @@ describe('caller-requested callback handling — VA-76095 / 74600 / VA-71404', (
       requires_callback: false,
     });
 
+    expect(result).toMatchObject({ success: true, ticketCreated: true, callbackRequired: true });
+    expect(lastSubmit().reasonForCalling).not.toContain('[NO CALLBACK NEEDED]');
+    expect(lastSubmit().preferredContactMethod).toBe('sms');
+    expect(String(result.message)).toMatch(/follow up by text/i);
+    expect(String(result.message)).not.toMatch(/receive a callback|call you back/i);
+  });
+
+  it('a same-day time that disagrees with the confirmed record files high with the conflict line', async () => {
+    h.byNameAndDob.mockResolvedValue({
+      ...NOT_FOUND,
+      patientFound: true,
+      matchedBy: 'name_and_dob',
+      identity: { unique: true, candidateCount: 1, candidates: [] },
+      upcomingAppointments: [{ isoDate: '2026-10-02', startTime: '9:20 AM' }],
+    });
+    const { agent } = await agentFor();
+    await call(agent, 'create_ticket', {
+      ...TICKET,
+      request_category: 'confirm_appointment',
+      request_summary: 'Confirming the appointment today',
+      appointment_today: true,
+      appointment_time: '8:00 AM',
+    });
+    const p = lastSubmit();
+    expect(p.priority).toBe('high');
+    expect(p.additionalDetails).toContain('APPOINTMENT TIME CONFLICT');
+    expect(p.additionalDetails).toContain('9:20 AM');
+  });
+
+  it('the same time as the record is no conflict', async () => {
+    h.byNameAndDob.mockResolvedValue({
+      ...NOT_FOUND,
+      patientFound: true,
+      matchedBy: 'name_and_dob',
+      identity: { unique: true, candidateCount: 1, candidates: [] },
+      upcomingAppointments: [{ isoDate: '2026-10-02', startTime: '9:20 AM' }],
+    });
+    const { agent } = await agentFor();
+    await call(agent, 'create_ticket', {
+      ...TICKET,
+      request_category: 'confirm_appointment',
+      request_summary: 'Confirming the appointment today',
+      appointment_today: true,
+      appointment_time: '9:20 AM',
+    });
+    const p = lastSubmit();
+    expect(p.priority).toBeUndefined();
+    expect(String(p.additionalDetails ?? '')).not.toContain('APPOINTMENT TIME CONFLICT');
+  });
+
+  // v166, the 70202 shape on the pipeline the lane runs on: the runtime hands
+  // the agent NO getTranscript, only the caller-speech ledger.
+  it('a spoken callback ask outranks the model\'s FALSE with no getTranscript on the metadata', async () => {
+    const { noteCallerTranscript, releaseCallerSpeech } = await import('../services/symptomCorroboration');
+    const { agent, callSid } = await agentFor();
+    noteCallerTranscript(`call-${callSid}`, [
+      'AGENT: Is there anything else?',
+      'CALLER: Could they call me when they get into the office?',
+    ]);
+    const { preferred_contact: _unset, ...noPreference } = TICKET;
+    const result = await call(agent, 'create_ticket', {
+      ...noPreference,
+      request_category: 'cancel_appointment',
+      request_summary: 'Wants to cancel a visit.',
+      requires_callback: false,
+    });
+    releaseCallerSpeech(`call-${callSid}`);
+    expect(result).toMatchObject({ success: true, ticketCreated: true, callbackRequired: true });
+    expect(lastSubmit().reasonForCalling).not.toContain('[NO CALLBACK NEEDED]');
+  });
+
+  it('a caller who asked for nothing keeps the tag', async () => {
+    const { agent } = await agentFor();
+    const { preferred_contact: _unset, ...noPreference } = TICKET;
+    const result = await call(agent, 'create_ticket', {
+      ...noPreference,
+      request_category: 'cancel_appointment',
+      request_summary: 'Wants to cancel a visit.',
+      requires_callback: false,
+    });
     expect(result).toMatchObject({ success: true, ticketCreated: true, callbackRequired: false });
     expect(lastSubmit().reasonForCalling).toContain('[NO CALLBACK NEEDED]');
-    expect(lastSubmit().preferredContactMethod).toBe('sms');
-    expect(String(result.message)).not.toMatch(/receive a callback|call you back/i);
   });
 
   it('a fully answered medication question does not enter the refill intake gate', async () => {

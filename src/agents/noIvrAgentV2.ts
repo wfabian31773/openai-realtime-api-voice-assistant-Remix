@@ -25,6 +25,8 @@ import {
 import { buildWorkflowDrivenPrompt, getWorkflowDirectiveForContext } from "../workflows/workflowPromptBuilder";
 import { EMAIL_FIELD_DESCRIPTION, LAST_NAME_FIELD_DESCRIPTION } from "../tools/contactCaptureGuidance";
 import { keepFieldDescriptions } from "../services/toolFieldDescriptions";
+import { callbackNeeded } from "../services/callbackRequested";
+import { callerSaid } from "../services/symptomCorroboration";
 import { EMAIL_ASK_ONCE, EMAIL_ESCAPE_NOTE, emailEscapeMarker } from "./noIvrAgent";
 import { gateRefusalsSoFar, noteGateRefusal } from "../tools/gateAttempts";
 
@@ -440,9 +442,14 @@ Call this ONLY when you have collected ALL required information.`,
       // Lazy import to avoid module initialization during agent bootstrap
       const { SyncAgentService } = await import("../services/syncAgentService");
       
-      const requiresCallback = params.requires_callback !== undefined
-        ? params.requires_callback
-        : SyncAgentService.requiresCallback(params.request_category as TriageOutcome);
+      // v166: a caller who chose a contact method or asked to be called back
+      // is never filed as NO CALLBACK NEEDED, whatever the model sent.
+      const requiresCallback = callbackNeeded({
+        modelSays: params.requires_callback,
+        categoryDefault: SyncAgentService.requiresCallback(params.request_category as TriageOutcome),
+        preferredContact: params.preferred_contact,
+        callerWords: callerSaid(metadata.callId),
+      }).required;
 
       console.log("[No-IVR V2] create_ticket called:", {
         name: `${params.first_name} ${params.last_name}`,

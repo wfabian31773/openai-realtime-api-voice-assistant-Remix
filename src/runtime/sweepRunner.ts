@@ -42,6 +42,7 @@ import type { VoiceCallRecord } from "./mediaStreamBridge";
 import type { CreateTicketParams } from '../../server/services/ticketingApiClient';
 import { verifiedIdentityFor } from "../tools/verifiedIdentity";
 import { statedNameFor } from "../tools/statedName";
+import { draftedRequestFor } from "../tools/draftedRequest";
 
 export interface SweepOutcome {
   filed: boolean;
@@ -72,7 +73,7 @@ export type SweepFiler = (ticket: SweepTicket) => Promise<{
  * the outbox pulls in the database; a test that never files must not need a
  * DATABASE_URL.
  */
-const defaultFiler: SweepFiler = async (ticket) => {
+const fileOnce: SweepFiler = async (ticket) => {
   const { createTicketDurable } = await import("../services/durableTicketFiling");
   const res = await createTicketDurable({
     ...(ticket.validatedPatient ? { validatedPatient: ticket.validatedPatient } : {}),
@@ -126,6 +127,25 @@ const defaultFiler: SweepFiler = async (ticket) => {
 };
 
 /**
+ * A drafted description can be refused (or re-routed and then refused) by the
+ * app where the placeholder never is — e.g. a nameless records call whose
+ * draft names an appointment. Refused outright (not queued), the sweep files
+ * once more with the placeholder, so v166 never loses a request the old
+ * placeholder-only sweep would have filed. (Codex, PR #420.)
+ */
+const defaultFiler: SweepFiler = async (ticket) => {
+  const first = await fileOnce(ticket);
+  if (first.success || first.queued) return first;
+  const { SWEPT_TICKET_DESCRIPTION } = await import("./requestSweep");
+  if (ticket.description === SWEPT_TICKET_DESCRIPTION) return first;
+  return fileOnce({
+    ...ticket,
+    // Same idempotency key: a re-run sweep must not create a second ticket. (Codex, PR #420.)
+    description: SWEPT_TICKET_DESCRIPTION,
+  });
+};
+
+/**
  * NO DATE OF BIRTH IS REQUIRED.
  *
  * Traced 2026-09-03: `/api/voice-agent/create-ticket` validates
@@ -145,6 +165,7 @@ export async function runRequestSweep(
     // A certain match wins. Without one, the name the caller gave, as the
     // agent's own tools received it (operator ruling 2026-10-29).
     const stated = identity ? undefined : statedNameFor(record.callSid);
+    const drafted = draftedRequestFor(record.callSid);
     const input: SweepInput = {
       callSid: record.callSid,
       slug: record.slug,
@@ -157,6 +178,9 @@ export async function runRequestSweep(
         ...(typeof e.requestReasonId === "number" ? { requestReasonId: e.requestReasonId } : {}),
       })),
       ...(record.summary?.trim() ? { summary: record.summary.trim() } : {}),
+      // v166: what the model wrote as the request on a classify or filing
+      // tool, refused or not — the reason the swept ticket used to lose.
+      ...(drafted ? { draftedRequest: drafted } : {}),
       /**
        * Still false, and still for the reason below — but the evidence that
        * DOES matter now travels in `toolEvents`, where `decideSweep` reads a

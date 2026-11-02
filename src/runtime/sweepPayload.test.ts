@@ -82,7 +82,9 @@ describe("the payload a swept request produces", () => {
    */
   it("puts NOTHING from the call in the patient-facing description", async () => {
     const p = await filed();
-    expect(p.description).toBe(SWEPT_TICKET_DESCRIPTION);
+    // v166: the classified reason's taxonomy name, never the caller's words.
+    expect(p.description).toMatch(/^Callback request about: [A-Za-z /-]+\. A team member will follow up with you\.$/);
+    expect(p.description).not.toBe(SWEPT_TICKET_DESCRIPTION);
     expect(String(p.description)).not.toContain("I need a refill on my drops");
     // The fixture's own PHI, named rather than checked by shape — a shape
     // check is exactly what let the leak stand for two rounds.
@@ -139,10 +141,9 @@ describe("when the ticketing app is down and the outbox takes it", () => {
   });
 
   it("a genuine refusal is still a failure", async () => {
-    createTicketDurable.mockResolvedValueOnce({
-      success: false,
-      error: "Validation failed",
-    } as never);
+    // Refused with the drafted description AND with the placeholder retry.
+    createTicketDurable.mockResolvedValueOnce({ success: false, error: "Validation failed" } as never);
+    createTicketDurable.mockResolvedValueOnce({ success: false, error: "Validation failed" } as never);
     const out = await runRequestSweep(record());
     expect(out).toEqual({ filed: false, reason: "create-failed" });
   });
