@@ -618,6 +618,22 @@ export interface FollowUpStats {
   /** True when a follow-up was requested and no response was ever created
    * after it — the call ended waiting on a turn the wire never started. */
   lastUnanswered: boolean;
+  /** v165 — follow-up replies whose first audio reached the caller. */
+  spokenReplies?: number;
+  /** v165 — ms from the follow-up request to the first audio frame sent to
+   * the caller: the latest reply's, and the slowest on the call. */
+  firstAudioMsLast?: number;
+  firstAudioMsMax?: number;
+  /** v165 — follow-up replies that finished (response.done) with no audio
+   * and no tool call: the EMPTY reply. */
+  emptyReplies?: number;
+  /** v165 — follow-up replies that finished with no audio but called a
+   * tool, whose own follow-up owns the next words. */
+  toolOnlyReplies?: number;
+  /** v165 — the call ended while a reply the wire HAD started was still
+   * without audio: the SLOW reply, with how long it had been waiting. */
+  endedAwaitingAudio?: boolean;
+  awaitingAudioMsAtEnd?: number;
 }
 
 export interface VoiceCallContext {
@@ -1593,6 +1609,45 @@ export class VoiceCallBridge {
       streamSid: this.deps.context.streamSid,
       media: { payload: base64Audio },
     });
+    this.noteFollowUpAudio(current.epoch);
+  }
+
+  /** v165, logging only: the first frame of a follow-up's reply reached
+   * Twilio — record how long after the request. */
+  private noteFollowUpAudio(epoch: number): void {
+    const wait = this.followUpAudioWait;
+    if (wait === null || epoch <= wait.epoch) return;
+    this.followUpAudioWait = null;
+    const ms = Math.max(0, Date.now() - wait.requestedAtMs);
+    const a = this.followUpAudio;
+    a.spokenReplies += 1;
+    a.firstAudioMsLast = ms;
+    a.firstAudioMsMax = Math.max(a.firstAudioMsMax ?? 0, ms);
+  }
+
+  private followUpAudioAtTeardown(): Partial<FollowUpStats> {
+    const a = this.followUpAudio;
+    const wait = this.followUpAudioWait;
+    const started = wait !== null && this.session.getResponseEpoch() > wait.epoch;
+    return {
+      spokenReplies: a.spokenReplies,
+      emptyReplies: a.emptyReplies,
+      toolOnlyReplies: a.toolOnlyReplies,
+      ...(a.firstAudioMsLast !== undefined ? { firstAudioMsLast: a.firstAudioMsLast } : {}),
+      ...(a.firstAudioMsMax !== undefined ? { firstAudioMsMax: a.firstAudioMsMax } : {}),
+      endedAwaitingAudio: started,
+      ...(started ? { awaitingAudioMsAtEnd: Math.max(0, Date.now() - wait!.requestedAtMs) } : {}),
+    };
+  }
+
+  /** v165, logging only: a reply to a follow-up finished with no audio.
+   * Called at response.done, before the done is acted on. */
+  private noteFollowUpReplyDone(): void {
+    const wait = this.followUpAudioWait;
+    if (wait === null || this.session.getResponseEpoch() <= wait.epoch) return;
+    this.followUpAudioWait = null;
+    if (this.pendingToolCalls > 0 || this.followUpOwed) this.followUpAudio.toolOnlyReplies += 1;
+    else this.followUpAudio.emptyReplies += 1;
   }
 
   /**
@@ -2165,6 +2220,15 @@ export class VoiceCallBridge {
   private awaitingToolResponseDone = false;
   /** v55 — see FollowUpStats. */
   private readonly followUps = { owed: 0, requested: 0, toolCallsAfterDone: 0 };
+  /** v165 — logging only: what became of the latest follow-up request. */
+  private followUpAudioWait: { epoch: number; requestedAtMs: number } | null = null;
+  private readonly followUpAudio = {
+    spokenReplies: 0,
+    emptyReplies: 0,
+    toolOnlyReplies: 0,
+    firstAudioMsLast: undefined as number | undefined,
+    firstAudioMsMax: undefined as number | undefined,
+  };
   /** The response epoch at the moment the last follow-up was requested; a
    * created response advances the epoch, so equality at teardown means the
    * wire never answered that request. */
@@ -2213,6 +2277,7 @@ export class VoiceCallBridge {
     // should not silently drop its tokens.
     if (raw !== undefined) this.usage.add(raw);
     if (this.ended) return;
+    this.noteFollowUpReplyDone();
     this.awaitingToolResponseDone = false;
     // The boundary an end-call may be waiting on (round 13).
     this.wakeSiblingWaiters();
@@ -2342,6 +2407,7 @@ export class VoiceCallBridge {
     if (!this.endRequested) {
       this.followUps.requested += 1;
       this.lastFollowUpEpoch = this.session.getResponseEpoch();
+      this.followUpAudioWait = { epoch: this.lastFollowUpEpoch, requestedAtMs: Date.now() };
       this.session.requestResponse();
       // The follow-up is a response owed ANEW: it gets its own window,
       // not whatever remains of the tool's (Codex review, PR #227
@@ -2997,6 +3063,7 @@ export class VoiceCallBridge {
           lastUnanswered:
             this.lastFollowUpEpoch !== null &&
             this.session.getResponseEpoch() === this.lastFollowUpEpoch,
+          ...this.followUpAudioAtTeardown(),
         },
         startedAtMs: this.startedAtMs,
         endedAtMs: Date.now(),

@@ -656,7 +656,11 @@ is reading noise.
 
 ---
 
-## Current branch — the after-hours floor files the office the caller named, v164 (2026-11-01)
+## Current branch — follow-up replies are timed, v165 (2026-11-02)
+
+This branch carries **`voice-runtime-v165-follow-up-replies-are-timed-20261102`**, above `main`'s v164 (#418). LOGGING ONLY, no behaviour change. A Support Desk call (2026-11-01) went 12.6 s silent after two `emit_decision` calls: `follow_up_summary` showed the follow-up requested and a response created, and nothing could say whether that reply was EMPTY or SLOW (8 of 2,767 follow-up calls in 7 days had the same shape). `follow_up_summary` now carries `spokenReplies`, `firstAudioMsLast`/`firstAudioMsMax` (follow-up request → first audio frame sent to Twilio), `emptyReplies` (a reply that finished with no audio and no tool), `toolOnlyReplies`, `endedAwaitingAudio` + `awaitingAudioMsAtEnd` (the call ended while a started reply had no audio), and `replyVerdict` (`slow` | `empty` | `spoke` | null). The ghost-call guard drafted as 9798d90 is NOT included: none of the reported calls reached `terminate_call`.
+
+## Previous — the after-hours floor files the office the caller named, v164 (2026-11-01)
 
 This branch carries **`voice-runtime-v164-after-hours-floor-files-the-office-named-20261101`**, above `main`'s v163 (#417, `49696c9`), which it contains. #417 merged before its Codex P2 fix landed: v163's teardown floor read the office only from `confirmedClinicFor`, which no-IVR never fills. `officeTheCallerGave()` (`src/services/afterHoursCallFacts.ts`) reads the caller's answer to the agent's office ask from the transcript (English/Spanish, last answered ask wins, a denial names no office) and accepts it only through `lookupLocation`; the floor uses it after `confirmedClinicFor`. A directory outage files with no office. Tests: `src/agents/afterHoursFieldsReachTheTicket.test.ts`. No migration; production impact is unmeasured.
 
@@ -2555,6 +2559,7 @@ voice-runtime-v161-after-hours-optical-files-to-optical-20261031
 voice-runtime-v162-outbox-stall-holds-when-tickets-land-20261031
 voice-runtime-v163-after-hours-details-reach-the-ticket-20261101
 voice-runtime-v164-after-hours-floor-files-the-office-named-20261101
+voice-runtime-v165-follow-up-replies-are-timed-20261102
 ```
 
 Also printed at boot as `[voice-runtime] <marker>`. Anything ending in an
