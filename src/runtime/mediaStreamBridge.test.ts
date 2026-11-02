@@ -3124,6 +3124,7 @@ describe("VoiceCallBridge — v165: the reply to a follow-up is timed, and empty
     const h = await followUpRequested(records);
     // Still playing the tool response's audio when the caller cuts in: the
     // session drops its queued turns, including the follow-up.
+    vi.mocked(h.session.cancelResponse).mockReturnValueOnce(1); // the session dropped one queued open turn
     h.handlers().onAudioDelta(b64(400));
     h.handlers().onSpeechStarted();
     expect(h.session.cancelResponse).toHaveBeenCalled();
@@ -3132,6 +3133,20 @@ describe("VoiceCallBridge — v165: the reply to a follow-up is timed, and empty
     h.bridge.handleTwilioFrame({ event: "stop", streamSid: "MZ-test" });
     await Promise.resolve();
     expect(records[0].followUps).toMatchObject({ emptyReplies: 0, spokenReplies: 0, endedAwaitingAudio: false });
+  });
+
+  it("a barge-in after the follow-up was already SENT keeps it, so its reply is still timed (Codex r3)", async () => {
+    const records: VoiceCallRecord[] = [];
+    const h = await followUpRequested(records);
+    vi.mocked(h.session.cancelResponse).mockReturnValueOnce(0); // nothing queued: it is on the wire
+    h.handlers().onAudioDelta(b64(400));
+    h.handlers().onSpeechStarted();
+    created(h);
+    h.handlers().onAudioDelta(b64(160));
+    h.handlers().onResponseDone();
+    h.bridge.handleTwilioFrame({ event: "stop", streamSid: "MZ-test" });
+    await Promise.resolve();
+    expect(records[0].followUps).toMatchObject({ spokenReplies: 1 });
   });
 
   it("two follow-ups queued before either reply starts are timed separately, each from its own request (Codex r2)", async () => {

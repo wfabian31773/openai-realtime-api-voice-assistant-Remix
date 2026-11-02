@@ -848,22 +848,26 @@ export class GrokVoiceSession {
    * provider speaks the then-current action; a turn that produces no
    * accepted report is caught by the bridge's dead-air watchdog, which
    * re-renders the current question. */
-  cancelResponse(): void {
+  cancelResponse(): number {
     // The queue discard happens on EVERY barge-in — it is about stale
-    // scripted speech, independent of whether a cancel goes out.
+    // scripted speech, independent of whether a cancel goes out. Returns how
+    // many queued OPEN turns (requestResponse) were discarded, so the bridge
+    // can forget exactly those follow-up requests and keep any already sent.
+    const discardedOpen = this.pendingSays.filter((p) => p.mode === "open").length;
     this.pendingSays.length = 0;
-    if (!this.wireResponseActive) return;
+    if (!this.wireResponseActive) return discardedOpen;
     // At most ONE cancel per response cycle (Codex review, PR #213 r2). A
     // stale audio delta re-arms the bridge's assistantAudioPlaying after a
     // barge-in, so a second caller segment re-enters here with
     // wireResponseActive still true. A duplicate cancel would draw a second
     // rejection, and only one is absorbable — the extra would land in the
     // fatal branch and tear down the call this change exists to save.
-    if (this.cancelDoneOwed) return;
+    if (this.cancelDoneOwed) return discardedOpen;
     this.send({ type: "response.cancel" });
     // The provider now owes us a settlement for this cancel — see
     // cancelDoneOwed and the `error` case.
     this.cancelDoneOwed = true;
+    return discardedOpen;
   }
 
   close(): void {

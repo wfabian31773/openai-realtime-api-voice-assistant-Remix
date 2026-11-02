@@ -657,7 +657,9 @@ export interface VoiceCallContext {
  * it structurally; tests substitute a fake with no wire at all. */
 export interface BridgeSession {
   appendAudio(base64Audio: string): void;
-  cancelResponse(): void;
+  /** Returns the number of queued open turns it discarded (a fake may
+   * return nothing, read as none). */
+  cancelResponse(): number | void;
   sendToolResult(callId: string, ok: boolean, output: Record<string, unknown>): void;
   requestResponse(): void;
   /** A response-gated turn whose content the RUNTIME decides and the model
@@ -1643,13 +1645,15 @@ export class VoiceCallBridge {
     };
   }
 
-  /** v167: the session's cancelResponse also discards every queued turn
-   * (grokSession pendingSays), so a follow-up request still waiting in that
-   * queue will never get a response; forget it, or the next unrelated
-   * response would bind to its stale timestamp (Codex P2, #419). */
+  /** v167: the session's cancelResponse also discards its queued turns
+   * (grokSession pendingSays), so a follow-up request still in that queue
+   * will never get a response; forget exactly those (the newest), or the next
+   * unrelated response would bind to a stale timestamp. A follow-up already
+   * SENT survives the barge-in and keeps its timestamp (Codex P2, #419 r3). */
   private cancelSessionResponse(): void {
-    this.session.cancelResponse();
-    this.followUpRequestsWaiting.length = 0;
+    const discarded = this.session.cancelResponse() ?? 0;
+    const w = this.followUpRequestsWaiting;
+    if (discarded > 0) w.splice(Math.max(0, w.length - discarded));
   }
 
   /** v165, logging only: a response was created — it answers the oldest
