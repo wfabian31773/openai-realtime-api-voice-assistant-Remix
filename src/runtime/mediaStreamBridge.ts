@@ -682,7 +682,9 @@ export interface BridgeSession {
 }
 
 export interface TwilioSocket {
-  sendFrame(frame: TwilioOutboundFrame): void;
+  /** `false` when the frame was dropped (socket not open); void/true = sent.
+   * Read only by v165's follow-up telemetry. */
+  sendFrame(frame: TwilioOutboundFrame): void | boolean;
   close(): void;
 }
 
@@ -1604,31 +1606,32 @@ export class VoiceCallBridge {
     // for a cancelled epoch, which is what keeps a stale delta from
     // downgrading a response-owed clock its stale completion could clear.
     this.armDeadAir("utterance");
-    this.sendFrame({
+    const sent = this.sendFrame({
       event: "media",
       streamSid: this.deps.context.streamSid,
       media: { payload: base64Audio },
     });
-    this.noteFollowUpAudio(current.epoch);
+    if (sent) this.noteFollowUpAudio(current.epoch);
   }
 
   /** v165, logging only: the first frame of a follow-up's reply reached
    * Twilio — record how long after the request. */
   private noteFollowUpAudio(epoch: number): void {
-    const wait = this.followUpAudioWait;
-    if (wait === null || epoch <= wait.epoch) return;
-    this.followUpAudioWait = null;
-    const ms = Math.max(0, Date.now() - wait.requestedAtMs);
+    const r = this.followUpReply;
+    if (r === null || r.audio || r.counted !== null || r.epoch !== epoch) return;
+    r.audio = true;
+    const ms = Math.max(0, Date.now() - r.requestedAtMs);
     const a = this.followUpAudio;
     a.spokenReplies += 1;
     a.firstAudioMsLast = ms;
     a.firstAudioMsMax = Math.max(a.firstAudioMsMax ?? 0, ms);
   }
 
+
   private followUpAudioAtTeardown(): Partial<FollowUpStats> {
     const a = this.followUpAudio;
-    const wait = this.followUpAudioWait;
-    const started = wait !== null && this.session.getResponseEpoch() > wait.epoch;
+    const r = this.followUpReply;
+    const started = r !== null && !r.audio && r.counted === null;
     return {
       spokenReplies: a.spokenReplies,
       emptyReplies: a.emptyReplies,
@@ -1636,22 +1639,56 @@ export class VoiceCallBridge {
       ...(a.firstAudioMsLast !== undefined ? { firstAudioMsLast: a.firstAudioMsLast } : {}),
       ...(a.firstAudioMsMax !== undefined ? { firstAudioMsMax: a.firstAudioMsMax } : {}),
       endedAwaitingAudio: started,
-      ...(started ? { awaitingAudioMsAtEnd: Math.max(0, Date.now() - wait!.requestedAtMs) } : {}),
+      ...(started ? { awaitingAudioMsAtEnd: Math.max(0, Date.now() - r!.requestedAtMs) } : {}),
     };
   }
 
-  /** v165, logging only: a reply to a follow-up finished with no audio.
-   * Called at response.done, before the done is acted on. */
-  private noteFollowUpReplyDone(): void {
-    const wait = this.followUpAudioWait;
-    if (wait === null || this.session.getResponseEpoch() <= wait.epoch) return;
-    this.followUpAudioWait = null;
-    if (this.pendingToolCalls > 0 || this.followUpOwed) this.followUpAudio.toolOnlyReplies += 1;
-    else {
-      this.followUpAudio.emptyReplies += 1;
-      this.lastEmptyReplyEpoch = this.session.getResponseEpoch();
+  /** v165, logging only: a response was created — it answers the oldest
+   * waiting follow-up request, if any. */
+  private bindFollowUpReply(): void {
+    // Two paths call handleResponseStarted; one response binds once.
+    const epoch = this.session.getResponseEpoch();
+    if (epoch <= this.lastSeenResponseEpoch) return;
+    this.lastSeenResponseEpoch = epoch;
+    const requestedAtMs = this.followUpRequestsWaiting.shift();
+    if (requestedAtMs === undefined) return;
+    this.followUpReply = {
+      epoch,
+      requestedAtMs,
+      audio: false,
+      tool: false,
+      counted: null,
+    };
+  }
+
+  /** v165, logging only: a function call arrived — if it belongs to the
+   * bound reply, that reply is tool-only, never empty, even when the event
+   * arrives after its done (the v55 shape). */
+  private noteFollowUpTool(): void {
+    const r = this.followUpReply;
+    if (r === null || r.epoch !== this.session.getResponseEpoch()) return;
+    r.tool = true;
+    if (r.counted === "empty") {
+      this.followUpAudio.emptyReplies -= 1;
+      this.followUpAudio.toolOnlyReplies += 1;
+      r.counted = "tool";
     }
   }
+
+  /** v165, logging only: the bound reply finished. Called at response.done,
+   * before the done is acted on. */
+  private noteFollowUpReplyDone(): void {
+    const r = this.followUpReply;
+    if (r === null || r.audio || r.counted !== null || r.epoch !== this.session.getResponseEpoch()) return;
+    if (r.tool) {
+      r.counted = "tool";
+      this.followUpAudio.toolOnlyReplies += 1;
+    } else {
+      r.counted = "empty";
+      this.followUpAudio.emptyReplies += 1;
+    }
+  }
+
 
   /**
    * Stamp the transcript-timing window the latency and tail graders read.
@@ -2224,10 +2261,18 @@ export class VoiceCallBridge {
   /** v55 — see FollowUpStats. */
   private readonly followUps = { owed: 0, requested: 0, toolCallsAfterDone: 0 };
   /** v165 — logging only: what became of the latest follow-up request. */
-  private followUpAudioWait: { epoch: number; requestedAtMs: number } | null = null;
-  /** The epoch of the last reply counted EMPTY: a function-call event that
-   * arrives after its done (the v55 shape) re-files it as tool-only. */
-  private lastEmptyReplyEpoch: number | null = null;
+  /** Follow-up requests not yet answered by a created response, FIFO (the
+   * session queues them the same way), as request timestamps. */
+  private followUpRequestsWaiting: number[] = [];
+  private lastSeenResponseEpoch = 0;
+  /** The created response bound to the oldest waiting request. */
+  private followUpReply: {
+    epoch: number;
+    requestedAtMs: number;
+    audio: boolean;
+    tool: boolean;
+    counted: "empty" | "tool" | null;
+  } | null = null;
   private readonly followUpAudio = {
     spokenReplies: 0,
     emptyReplies: 0,
@@ -2370,6 +2415,7 @@ export class VoiceCallBridge {
 
   private handleResponseStarted(): void {
     if (this.ended) return;
+    this.bindFollowUpReply();
     if (this.cancelSecondOpeningTurn()) return;
     this.cancelGoodbye();
     this.goodbyeEpoch = this.session.getResponseEpoch();
@@ -2413,7 +2459,7 @@ export class VoiceCallBridge {
     if (!this.endRequested) {
       this.followUps.requested += 1;
       this.lastFollowUpEpoch = this.session.getResponseEpoch();
-      this.followUpAudioWait = { epoch: this.lastFollowUpEpoch, requestedAtMs: Date.now() };
+      this.followUpRequestsWaiting.push(Date.now());
       this.session.requestResponse();
       // The follow-up is a response owed ANEW: it gets its own window,
       // not whatever remains of the tool's (Codex review, PR #227
@@ -2437,6 +2483,7 @@ export class VoiceCallBridge {
       this.openingTurn.answerEpoch = null;
       this.openingTurn.answerSpoke = false;
     }
+    this.noteFollowUpTool();
     this.cancelGoodbye();
     // Even a tool before the first audio makes this an unfinished exchange.
     this.goodbyeEpoch = this.session.getResponseEpoch();
@@ -2455,13 +2502,6 @@ export class VoiceCallBridge {
     this.awaitingToolResponseDone = carryingResponseOpen;
     if (!carryingResponseOpen) {
       this.followUps.toolCallsAfterDone += 1;
-      // v165, logging only: the reply counted empty at its done carried this
-      // tool after all.
-      if (this.lastEmptyReplyEpoch !== null && this.lastEmptyReplyEpoch === this.session.getResponseEpoch()) {
-        this.lastEmptyReplyEpoch = null;
-        this.followUpAudio.emptyReplies -= 1;
-        this.followUpAudio.toolOnlyReplies += 1;
-      }
       // A late event opens (or re-opens) a batch the wire cannot close for
       // us; the grace window closes it, measured from this — the latest —
       // arrival. Armed HERE and not only in maybeRequestFollowUp (round 13):
@@ -2910,12 +2950,13 @@ export class VoiceCallBridge {
     this.teardown("provider_failure");
   }
 
-  private sendFrame(frame: TwilioOutboundFrame): void {
+  private sendFrame(frame: TwilioOutboundFrame): boolean {
     try {
-      this.deps.twilio.sendFrame(frame);
+      return this.deps.twilio.sendFrame(frame) !== false;
     } catch {
       // A socket that died mid-frame is a hangup, handled by its own close
       // path — never an exception thrown up through an event handler.
+      return false;
     }
   }
 

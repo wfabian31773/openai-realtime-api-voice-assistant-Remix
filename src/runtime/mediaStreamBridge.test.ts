@@ -127,7 +127,7 @@ function makeBridge(
     agent,
     greeting: over.greeting,
     twilio: {
-      sendFrame: (f) => frames.push(f),
+      sendFrame: (f) => void frames.push(f),
       close: twilioClose,
     },
     createSession: (h) => {
@@ -3050,6 +3050,11 @@ describe("VoiceCallBridge — v165: the reply to a follow-up is timed, and empty
     expect(h.session.requestResponse).toHaveBeenCalledTimes(1);
     return h;
   }
+  /** response.created at the wire, as the real session reports it. */
+  function created(h: ReturnType<typeof makeBridge>) {
+    h.newResponse();
+    h.handlers().onResponseStarted?.();
+  }
   afterEach(() => vi.useRealTimers());
 
   it("a reply that speaks records the time from the request to its first audio frame", async () => {
@@ -3057,7 +3062,7 @@ describe("VoiceCallBridge — v165: the reply to a follow-up is timed, and empty
     const records: VoiceCallRecord[] = [];
     const h = await followUpRequested(records);
     vi.setSystemTime(1_001_500);
-    h.newResponse();
+    created(h);
     h.handlers().onAudioDelta(b64(160));
     vi.setSystemTime(1_003_000);
     h.handlers().onAudioDelta(b64(160)); // later frames do not move the number
@@ -3072,7 +3077,7 @@ describe("VoiceCallBridge — v165: the reply to a follow-up is timed, and empty
   it("a reply that finishes with no audio and no tool is EMPTY", async () => {
     const records: VoiceCallRecord[] = [];
     const h = await followUpRequested(records);
-    h.newResponse();
+    created(h);
     h.handlers().onResponseDone();
     h.bridge.handleTwilioFrame({ event: "stop", streamSid: "MZ-test" });
     await Promise.resolve();
@@ -3083,7 +3088,7 @@ describe("VoiceCallBridge — v165: the reply to a follow-up is timed, and empty
   it("a reply that only calls another tool is not empty", async () => {
     const records: VoiceCallRecord[] = [];
     const h = await followUpRequested(records);
-    h.newResponse();
+    created(h);
     h.handlers().onToolCall("c2", "emit_decision", {});
     h.handlers().onResponseDone();
     h.bridge.handleTwilioFrame({ event: "stop", streamSid: "MZ-test" });
@@ -3094,7 +3099,7 @@ describe("VoiceCallBridge — v165: the reply to a follow-up is timed, and empty
   it("a tool call arriving AFTER the reply's done re-files an 'empty' reply as tool-only (Codex P2)", async () => {
     const records: VoiceCallRecord[] = [];
     const h = await followUpRequested(records);
-    h.newResponse();
+    created(h);
     h.handlers().onResponseDone();
     h.setResponseActive(false);
     h.handlers().onToolCall("c2", "emit_decision", {});
@@ -3107,17 +3112,65 @@ describe("VoiceCallBridge — v165: the reply to a follow-up is timed, and empty
     vi.useFakeTimers({ now: 2_000_000, toFake: ["Date"] });
     const records: VoiceCallRecord[] = [];
     const h = await followUpRequested(records);
-    h.newResponse();
+    created(h);
     vi.setSystemTime(2_012_600);
     h.bridge.handleTwilioFrame({ event: "stop", streamSid: "MZ-test" });
     await Promise.resolve();
     expect(records[0].followUps).toMatchObject({ emptyReplies: 0, spokenReplies: 0, endedAwaitingAudio: true, awaitingAudioMsAtEnd: 12_600, lastUnanswered: false });
   });
 
+  it("two follow-ups queued before either reply starts are timed separately, each from its own request (Codex r2)", async () => {
+    vi.useFakeTimers({ now: 3_000_000, toFake: ["Date"] });
+    const records: VoiceCallRecord[] = [];
+    const h = await followUpRequested(records);
+    vi.setSystemTime(3_000_350);
+    // A late sibling owes a second follow-up before the first reply exists.
+    h.setResponseActive(false);
+    h.handlers().onToolCall("c2", "emit_decision", {});
+    await Promise.resolve();
+    await Promise.resolve();
+    h.timers.fire(LATE_TOOL_BATCH_GRACE_MS);
+    expect(h.session.requestResponse).toHaveBeenCalledTimes(2);
+    vi.setSystemTime(3_000_500);
+    created(h);
+    h.handlers().onAudioDelta(b64(160));
+    h.handlers().onResponseDone();
+    vi.setSystemTime(3_000_800);
+    created(h);
+    h.handlers().onAudioDelta(b64(160));
+    h.handlers().onResponseDone();
+    h.bridge.handleTwilioFrame({ event: "stop", streamSid: "MZ-test" });
+    await Promise.resolve();
+    expect(records[0].followUps).toMatchObject({ spokenReplies: 2, firstAudioMsMax: 500, firstAudioMsLast: 450 });
+  });
+
+  it("a tool still pending from the PREVIOUS response does not hide an empty reply (Codex r2)", async () => {
+    const records: VoiceCallRecord[] = [];
+    const h = await followUpRequested(records);
+    created(h);
+    // Bridge-wide state says a follow-up is owed, but not by THIS reply.
+    (h.bridge as unknown as { followUpOwed: boolean }).followUpOwed = true;
+    h.handlers().onResponseDone();
+    h.bridge.handleTwilioFrame({ event: "stop", streamSid: "MZ-test" });
+    await Promise.resolve();
+    expect(records[0].followUps).toMatchObject({ emptyReplies: 1, toolOnlyReplies: 0 });
+  });
+
+  it("a frame the socket dropped is not a spoken reply (Codex r2)", async () => {
+    const records: VoiceCallRecord[] = [];
+    const h = await followUpRequested(records);
+    (h.bridge as unknown as { deps: { twilio: { sendFrame: () => boolean } } }).deps.twilio.sendFrame = () => false;
+    created(h);
+    h.handlers().onAudioDelta(b64(160));
+    h.bridge.handleTwilioFrame({ event: "stop", streamSid: "MZ-test" });
+    await Promise.resolve();
+    expect(records[0].followUps).toMatchObject({ spokenReplies: 0, endedAwaitingAudio: true });
+  });
+
   it("logging only: the empty reply changes nothing the bridge does next", async () => {
     const records: VoiceCallRecord[] = [];
     const h = await followUpRequested(records);
-    h.newResponse();
+    created(h);
     h.handlers().onResponseDone();
     expect(h.session.requestResponse).toHaveBeenCalledTimes(1);
   });
