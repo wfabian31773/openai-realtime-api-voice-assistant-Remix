@@ -141,10 +141,9 @@ describe("when the ticketing app is down and the outbox takes it", () => {
   });
 
   it("a genuine refusal is still a failure", async () => {
-    createTicketDurable.mockResolvedValueOnce({
-      success: false,
-      error: "Validation failed",
-    } as never);
+    // Refused with the drafted description AND with the placeholder retry.
+    createTicketDurable.mockResolvedValueOnce({ success: false, error: "Validation failed" } as never);
+    createTicketDurable.mockResolvedValueOnce({ success: false, error: "Validation failed" } as never);
     const out = await runRequestSweep(record());
     expect(out).toEqual({ filed: false, reason: "create-failed" });
   });

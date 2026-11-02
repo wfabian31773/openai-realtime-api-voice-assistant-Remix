@@ -472,10 +472,12 @@ export function normalizeRequesterType(raw: string | null | undefined): Requeste
   // its apostrophe.
   const classified = classifyRequester(String(raw));
   if (classified) return classified;
-  if (/\b(family|relative|representative|poa|guardian|parent|caregiver|spouse)\b/.test(t)) return 'personal_representative';
-  if (/\b(doctor|physician|provider|clinic|office|hospital|nurse)\b/.test(t)) return 'provider';
+  // Insurance and legal first: "insurance representative" is a health plan,
+  // not a personal representative. (Codex, PR #420.)
   if (/\b(insurance|insurer|plan|payer)\b/.test(t)) return 'health_plan';
   if (/\b(attorney|lawyer|legal|court)\b/.test(t)) return 'legal';
+  if (/\b(family|relative|representative|poa|guardian|parent|caregiver|spouse)\b/.test(t)) return 'personal_representative';
+  if (/\b(doctor|physician|provider|clinic|office|hospital|nurse)\b/.test(t)) return 'provider';
   return undefined;
 }
 

@@ -73,7 +73,7 @@ export type SweepFiler = (ticket: SweepTicket) => Promise<{
  * the outbox pulls in the database; a test that never files must not need a
  * DATABASE_URL.
  */
-const defaultFiler: SweepFiler = async (ticket) => {
+const fileOnce: SweepFiler = async (ticket) => {
   const { createTicketDurable } = await import("../services/durableTicketFiling");
   const res = await createTicketDurable({
     ...(ticket.validatedPatient ? { validatedPatient: ticket.validatedPatient } : {}),
@@ -124,6 +124,25 @@ const defaultFiler: SweepFiler = async (ticket) => {
     ...(queued && !res.ticketNumber ? { queued: true } : {}),
     ...(res.error ? { error: res.error } : {}),
   };
+};
+
+/**
+ * A drafted description can be refused (or re-routed and then refused) by the
+ * app where the placeholder never is — e.g. a nameless records call whose
+ * draft names an appointment. Refused outright (not queued), the sweep files
+ * once more with the placeholder, so v166 never loses a request the old
+ * placeholder-only sweep would have filed. (Codex, PR #420.)
+ */
+const defaultFiler: SweepFiler = async (ticket) => {
+  const first = await fileOnce(ticket);
+  if (first.success || first.queued) return first;
+  const { SWEPT_TICKET_DESCRIPTION } = await import("./requestSweep");
+  if (ticket.description === SWEPT_TICKET_DESCRIPTION) return first;
+  return fileOnce({
+    ...ticket,
+    description: SWEPT_TICKET_DESCRIPTION,
+    ...(ticket.idempotencyKey ? { idempotencyKey: `${ticket.idempotencyKey}:placeholder` } : {}),
+  });
 };
 
 /**
