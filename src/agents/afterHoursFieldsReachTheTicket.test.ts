@@ -642,6 +642,16 @@ describe('the teardown floor (the 70150 shape)', () => {
     expect(sent.locationOfLastVisit).toBeUndefined();
   });
 
+  it('keeps a later correction after a yes-but "X, not Y" reply', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: The Downey office, correct?\nCALLER: Yes, but it is Covina, not Downey. Actually, DTLA.`);
+    expect(sent.locationOfLastVisit).toBe('Los Angeles');
+  });
+
+  it('keeps the office when "previous" describes something else', async () => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina. My previous doctor there retired.`);
+    expect(sent.locationOfLastVisit).toBe('Covina');
+  });
+
   it('keeps an earlier unknown correction under a later home apology', async () => {
     const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina. Actually, Springfield. Sorry, I live in Downey.`);
     expect(sent.locationOfLastVisit).toBeUndefined();

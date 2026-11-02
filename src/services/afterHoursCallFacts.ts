@@ -253,10 +253,10 @@ function officeAnswers(transcript: string): string[] {
  * outage reads as no office and must never cost the floor its ticket.
  */
 // ", not Downey" / ", no a Downey" after the office named.
-const NOT_THAT = /,?\s*(?:not|no)\s+(?:a\s+|en\s+|the\s+)?\p{Lu}[\p{L}]+.*$/u;
+const NOT_THAT = /,?\s*(?:not|no)\s+(?:a\s+|en\s+|the\s+)?\p{Lu}[\p{L}]+[^.!?;]*/u;
 
 /** "My old office", "where I used to go", "mi oficina anterior": a former office, not the answer. */
-const RETRACTED = /\b(?:old|former|previous|used to|anterior|antigua|antiguo|vieja|viejo)\b/;
+const RETRACTED = /\b(?:old|former|previous)\s+(?:office|one|location|clinic)\b|\b(?:oficina|clinica)\s+(?:anterior|antigua|vieja)\b|\b(?:antigua|vieja)\s+oficina\b|\bused to go\b/;
 
 const OTHER_PLACE = /\b(?:doctor|records|pharmacy|farmacia|live|lives|home|work|send|sent|medico|casa|vivo|trabajo)\b/;
 
