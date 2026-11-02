@@ -83,6 +83,7 @@ function requestDescription(input: Record<string, unknown>): string {
 }
 
 registerDraftCorrector('file_records_ticket', requestDescription);
+registerDraftCorrector('classify_records_request', requestDescription);
 
 // ---------------------------------------------------------------- what kind
 
