@@ -52,11 +52,26 @@ function prune(now: number): void {
 }
 
 /** Note the request text a request-taking tool was called with. A later one replaces it. */
+/**
+ * A tool whose handler corrects the model's request text (records:
+ * `requestDescription` replaces an invented records summary with the caller's
+ * actual request) registers that correction here, so the sweep restores the
+ * corrected text, not the invented one. (Codex, PR #420.)
+ */
+const correctors = new Map<string, (input: Record<string, unknown>) => string>();
+export function registerDraftCorrector(tool: string, fn: (input: Record<string, unknown>) => string): void {
+  correctors.set(tool, fn);
+}
+
 export function noteDraftedRequestFromArgs(tool: string, input: Record<string, unknown>): void {
   if (!DRAFTED_REQUEST_TOOLS.has(tool)) return;
   const callSid = typeof input.call_sid === 'string' ? input.call_sid : undefined;
   if (!isTwilioCallSid(callSid)) return;
-  const raw = input.request_description;
+  const corrector = correctors.get(tool);
+  let raw: unknown = input.request_description;
+  if (corrector && typeof raw === 'string') {
+    try { raw = corrector(input); } catch { /* keep the model's text */ }
+  }
   if (typeof raw !== 'string') return;
   const text = raw.replace(/\s+/g, ' ').trim();
   if (text.length < 3) return;

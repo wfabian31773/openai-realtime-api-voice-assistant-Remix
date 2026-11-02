@@ -33,6 +33,7 @@ import { callerUtterances } from '../services/symptomCorroboration';
  *
  * NO HANDOFF. Operator ruling 2026-08-12: only PCP and Scheduling transfer.
  */
+import { registerDraftCorrector } from './draftedRequest';
 import { registerTool, missing, refuseDob, dobRefusalCopy, type ToolResult } from './registry';
 import {
   EMAIL_ASK,
@@ -80,6 +81,8 @@ function requestDescription(input: Record<string, unknown>): string {
   });
   return requests.length ? recordsRequestText(requests.join('\n')) : supplied;
 }
+
+registerDraftCorrector('file_records_ticket', requestDescription);
 
 // ---------------------------------------------------------------- what kind
 
@@ -1420,7 +1423,11 @@ registerTool({
         departmentId: MEDICAL_RECORDS_DEPARTMENT_ID,
         requestTypeId: other.requestTypeId,
         requestReasonId: other.requestReasonId,
-        ...(known?.firstName && known?.lastName
+        // Only when the verified identity is THIS request's patient: same name
+        // as given here, and not a scoped (multi-patient) filing. (Codex, PR #420.)
+        ...(known?.firstName && known?.lastName && !patientScope(input.patient_scope)
+          && known.firstName.trim().toLowerCase() === first.trim().toLowerCase()
+          && known.lastName.trim().toLowerCase() === last.trim().toLowerCase()
           ? { patientFirstName: known.firstName, patientLastName: known.lastName }
           : {}),
         patientPhone: normalizePhone(callbackBase),
