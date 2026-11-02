@@ -429,10 +429,79 @@ const REQUESTER_CUES: Array<{ type: RequesterType; cues: string[] }> = [
   ] },
 ];
 
+/**
+ * A BARE SELF-ANSWER — v166, ticket 70298.
+ *
+ * The question this field is asked with is *"are you the patient yourself, or
+ * calling on someone's behalf?"*, and the model writes the answer down the way
+ * the question put it: `"patient"`, `"self"`, `"the patient yourself"`. None of
+ * those contains a cue above ("i am the patient", "patient myself"…), so a
+ * bare `"patient"` classified as `null` → `other` — a patient's own request
+ * taken OFF the records clock, the dangerous direction. Matched WHOLE after
+ * stripping punctuation, never as a substring, so "the patient's attorney"
+ * cannot reach it.
+ */
+const BARE_SELF_ANSWERS = new Set([
+  'patient', 'the patient', 'self', 'myself', 'me', 'patient self', 'self patient',
+  'patient yourself', 'the patient yourself', 'patient themselves', 'the patient themselves',
+  'patient myself', 'the patient myself', 'yes the patient', 'yes patient', 'yes myself',
+  'i am', 'it is me', 'its me', 'paciente', 'el paciente', 'la paciente', 'yo', 'yo mismo', 'yo misma',
+]);
+
+function bareSelfAnswer(text: string): boolean {
+  const t = fold(text).replace(/[^a-z\s]/g, ' ').replace(/\s+/g, ' ').trim();
+  return BARE_SELF_ANSWERS.has(t);
+}
+
+/**
+ * `requester_type` as the model wrote it, mapped to the enum — v166.
+ *
+ * The schema lists `patient | personal_representative | provider | health_plan
+ * | legal | other`, and the model sends what the caller said instead: `self`,
+ * `the patient`, `family`, `doctor's office`. An unknown value used to be
+ * ignored, so the request then depended on `requester` alone, and when that
+ * was empty the tool refused for the requester field (70298: the caller said
+ * "I'm the patient" and the agent hit the same wall over and over).
+ */
+export function normalizeRequesterType(raw: string | null | undefined): RequesterType | undefined {
+  const t = fold(String(raw ?? '')).replace(/[^a-z\s]/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!t) return undefined;
+  const snake = t.replace(/ /g, '_');
+  if (REQUESTER_TYPES.has(snake as RequesterType)) return snake as RequesterType;
+  // The raw text, so the possessive guard ("the patient's attorney") still sees
+  // its apostrophe.
+  const classified = classifyRequester(String(raw));
+  if (classified) return classified;
+  if (/\b(family|relative|representative|poa|guardian|parent|caregiver|spouse)\b/.test(t)) return 'personal_representative';
+  if (/\b(doctor|physician|provider|clinic|office|hospital|nurse)\b/.test(t)) return 'provider';
+  if (/\b(insurance|insurer|plan|payer)\b/.test(t)) return 'health_plan';
+  if (/\b(attorney|lawyer|legal|court)\b/.test(t)) return 'legal';
+  return undefined;
+}
+
+/** The prose `requester` a stated type stands for, when the model sent only the type. */
+export function requesterProseFor(type: RequesterType): string {
+  switch (type) {
+    case 'patient':
+      return 'the patient themselves';
+    case 'personal_representative':
+      return 'personal representative';
+    case 'provider':
+      return 'referring provider';
+    case 'health_plan':
+      return 'health plan';
+    case 'legal':
+      return 'legal';
+    default:
+      return 'other';
+  }
+}
+
 /** Who is asking, from whatever the caller said. Null when it cannot be told. */
 export function classifyRequester(text: string): RequesterType | null {
   const t = fold(text);
   if (!t.trim()) return null;
+  if (bareSelfAnswer(text)) return 'patient';
   const speaksForAnother = SPEAKING_FOR_ANOTHER.some((c) => t.includes(fold(c)));
   for (const r of REQUESTER_CUES) {
     if (r.type === 'patient' && speaksForAnother) continue;

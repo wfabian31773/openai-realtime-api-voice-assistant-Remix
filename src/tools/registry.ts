@@ -30,6 +30,8 @@ import { prepareTicketIdentity } from './ticketIdentity';
 import type { DobCarry } from './verifiedIdentity';
 import { dobCarry } from './verifiedIdentity';
 import { noteStatedNameFromArgs } from './statedName';
+import { noteDraftedRequestFromArgs } from './draftedRequest';
+import { noteTicketToolOutcome } from './ticketToolOutcomes';
 
 /** A tool refused to run because the caller has not supplied enough. */
 export interface MissingFields {
@@ -294,6 +296,9 @@ export async function runTool(
   // validates or refuses: a filing refused for the date of birth still
   // received the name (statedName.ts, operator ruling 2026-10-29).
   noteStatedNameFromArgs(name, input);
+  // And the request as the model wrote it, for the same sweep (v166): a
+  // refused filing still received it (draftedRequest.ts).
+  noteDraftedRequestFromArgs(name, input);
 
   if (['file_optical_ticket', 'file_surgery_ticket', 'file_tech_ticket', 'file_records_ticket'].includes(name)) {
     const prepared = prepareTicketIdentity(input);
@@ -310,20 +315,32 @@ export async function runTool(
   }
 
   const bad = validateInput(def, input);
-  if (bad) return bad;
+  if (bad) {
+    noteTicketToolOutcome(name, input, bad);
+    return bad;
+  }
 
+  let timedOut = false;
+  let result: ToolResult;
   try {
-    return await Promise.race([
+    result = await Promise.race([
       def.handler(input),
       new Promise<ToolResult>((resolve) =>
         setTimeout(
-          () => resolve({ success: false, error: `${name} timed out`, retryable: true }),
+          () => {
+            timedOut = true;
+            resolve({ success: false, error: `${name} timed out`, retryable: true });
+          },
           def.timeoutMs,
         ),
       ),
     ]);
   } catch (e) {
     // A thrown tool is information for the agent, never a dead call.
-    return { success: false, error: (e as Error).message, retryable: true };
+    result = { success: false, error: (e as Error).message, retryable: true };
   }
+  // Why a filing did or did not land, for the call_events row at teardown
+  // (v166). Field NAMES only — never a value (ticketToolOutcomes.ts).
+  noteTicketToolOutcome(name, input, result, { timedOut });
+  return result;
 }

@@ -704,7 +704,8 @@ registerTool({
     }
 
     const { MEDICAL_RECORDS_DEPARTMENT_ID, recordsReasonById, classifyRecordsRequest,
-            classifyRequester, determineCapClock, resolveRequesterType } = await import('./medicalRecordsTaxonomy');
+            classifyRequester, determineCapClock, resolveRequesterType,
+            normalizeRequesterType, requesterProseFor } = await import('./medicalRecordsTaxonomy');
 
     // WHO IS ASKING IS HARD-REQUIRED ON THIS QUEUE, the way LOCATION is on
     // Optical — and for a stronger reason than assignment.
@@ -717,14 +718,19 @@ registerTool({
     // captured. At least 77 are demonstrably third-party. Nothing downstream
     // can reconstruct this after the call ends, so the call is the only place
     // it can be got.
-    const requesterRaw = str(input.requester);
+    // v166, ticket 70298: the model put the caller's answer in `requester_type`
+    // ("patient", "self") and left `requester` empty, and this refused for the
+    // requester field on every attempt — the caller had already said "I'm the
+    // patient". A stated type the enum can read IS the answer.
+    const statedRequesterType = normalizeRequesterType(str(input.requester_type));
+    const requesterRaw = str(input.requester) || (statedRequesterType ? requesterProseFor(statedRequesterType) : '');
     if (!requesterRaw && !lineRedirect) {
       return missing(
         ['requester'],
         'And just so I route this correctly — are you the patient yourself, or calling on someone\'s behalf?',
       );
     }
-    const requesterType = resolveRequesterType(str(input.requester_type), classifyRequester(requesterRaw));
+    const requesterType = resolveRequesterType(statedRequesterType, classifyRequester(requesterRaw));
     const cap = determineCapClock(requesterType);
 
     // A CALLER WHO PRESSED THE WRONG OPTION IS NOT SENT AWAY — and is not
@@ -1391,13 +1397,35 @@ registerTool({
       // A refusal the caller cannot fix. Log the request BEFORE anybody is
       // told it is logged — see RECOVERED_AFTER_REFUSAL_FIX.
       const other = otherReasonFor(MEDICAL_RECORDS_DEPARTMENT_ID)!;
-      const recovery = await createTicketDurable({
+      /**
+       * THE REQUEST TRAVELS ON THE RECOVERY — v166, ticket 70217.
+       *
+       * The recovery used to send only the sweep placeholder as its
+       * description, which the ticketing app reads as "Callback needed -
+       * reason not captured" (`no-reason.ts`). On 70217 the caller was read
+       * their ticket number and the ticket said nobody knew why they called,
+       * though the model had written the request into `request_description`.
+       * The request in the model's own words is what every ordinary filing
+       * sends as the description, so it goes here too (GSM-7 sanitised). A
+       * name rides only when this call VALIDATED one — a half name or an
+       * unconfirmed one stays on the staff line.
+       *
+       * If the app refuses THAT as well, the placeholder is sent once more:
+       * the placeholder is the shape the app never re-routes or re-refuses,
+       * and a logged request without its reason beats no request.
+       */
+      const known = verifiedIdentityFor(callSid);
+      const requestText = sanitizeForSms(description).value.trim();
+      const recoveryWith = (recoveryDescription: string) => createTicketDurable({
         departmentId: MEDICAL_RECORDS_DEPARTMENT_ID,
         requestTypeId: other.requestTypeId,
         requestReasonId: other.requestReasonId,
+        ...(known?.firstName && known?.lastName
+          ? { patientFirstName: known.firstName, patientLastName: known.lastName }
+          : {}),
         patientPhone: normalizePhone(callbackBase),
         preferredContactMethod: 'phone',
-        description: SWEPT_TICKET_DESCRIPTION,
+        description: recoveryDescription,
         priority: 'high',
         callData: {
           agentUsed: 'records',
@@ -1427,6 +1455,14 @@ registerTool({
         // and the sweep collapses onto this ticket instead of opening another.
         ...(isTwilioCallSid(callSid) ? { idempotencyKey: `call-${callSid}${scope}` } : {}),
       });
+      let recovery = await recoveryWith(requestText || SWEPT_TICKET_DESCRIPTION);
+      if (requestText && !recovery.success && !(recovery as { queued?: boolean }).queued && recovery.terminal) {
+        console.warn(
+          `[records] the recovery with the request text was refused too — retrying with the placeholder ` +
+            `(${callSid || 'no call reference'})`,
+        );
+        recovery = await recoveryWith(SWEPT_TICKET_DESCRIPTION);
+      }
       const queued = (recovery as { queued?: boolean }).queued === true;
       if (!(recovery.success && recovery.ticketNumber) && !queued) {
         console.error(

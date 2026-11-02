@@ -42,6 +42,7 @@ import type { VoiceCallRecord } from "./mediaStreamBridge";
 import type { CreateTicketParams } from '../../server/services/ticketingApiClient';
 import { verifiedIdentityFor } from "../tools/verifiedIdentity";
 import { statedNameFor } from "../tools/statedName";
+import { draftedRequestFor } from "../tools/draftedRequest";
 
 export interface SweepOutcome {
   filed: boolean;
@@ -145,6 +146,7 @@ export async function runRequestSweep(
     // A certain match wins. Without one, the name the caller gave, as the
     // agent's own tools received it (operator ruling 2026-10-29).
     const stated = identity ? undefined : statedNameFor(record.callSid);
+    const drafted = draftedRequestFor(record.callSid);
     const input: SweepInput = {
       callSid: record.callSid,
       slug: record.slug,
@@ -157,6 +159,9 @@ export async function runRequestSweep(
         ...(typeof e.requestReasonId === "number" ? { requestReasonId: e.requestReasonId } : {}),
       })),
       ...(record.summary?.trim() ? { summary: record.summary.trim() } : {}),
+      // v166: what the model wrote as the request on a classify or filing
+      // tool, refused or not — the reason the swept ticket used to lose.
+      ...(drafted ? { draftedRequest: drafted } : {}),
       /**
        * Still false, and still for the reason below — but the evidence that
        * DOES matter now travels in `toolEvents`, where `decideSweep` reads a

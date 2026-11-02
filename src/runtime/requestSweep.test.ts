@@ -191,7 +191,13 @@ describe("the ticket it builds", () => {
    * rather than on a shape, because a shape check is what let this stand.
    */
   it("puts nothing from the call in the patient-facing description", () => {
-    expect(t.description).toBe(SWEPT_TICKET_DESCRIPTION);
+    // v166: the classified reason's TAXONOMY name (never the caller's words)
+    // replaces the placeholder the ticketing app files as "reason not
+    // captured". Everything below still holds.
+    expect(t.description).toBe(
+      "Callback request about: Surgery Scheduling. A team member will follow up with you.",
+    );
+    expect(t.description).not.toBe(SWEPT_TICKET_DESCRIPTION);
     // Nothing the caller said.
     expect(t.description).not.toContain("book a procedure");
     expect(t.description).not.toContain(d.callerSaid);
