@@ -652,6 +652,16 @@ describe('the teardown floor (the 70150 shape)', () => {
     expect(sent.locationOfLastVisit).toBe('Covina');
   });
 
+  it.each([['Yes, but it is Covina, not downey.'], ['Sí, pero es Covina, no a downey.']])('reads a lowercase "X, not y" rejection of the readback office: %s', async (reply) => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: The Downey office, correct?\nCALLER: ${reply}`);
+    expect(sent.locationOfLastVisit).toBe('Covina');
+  });
+
+  it.each([['No, that was my old office.'], ['No, esa era mi oficina anterior.']])('files no office when a later caller turn retracts it: %s', async (line) => {
+    const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina.\nAGENT: Thank you.\nCALLER: ${line}`);
+    expect(sent.locationOfLastVisit).toBeUndefined();
+  });
+
   it('keeps an earlier unknown correction under a later home apology', async () => {
     const sent = await officeSent(`${REQUEST}\n${OFFICE_ASK}\nCALLER: Covina. Actually, Springfield. Sorry, I live in Downey.`);
     expect(sent.locationOfLastVisit).toBeUndefined();

@@ -211,6 +211,8 @@ function officeAnswers(transcript: string): string[] {
         let joined = fl0;
         for (let m = k + 1; lines[m]?.startsWith('CALLER: ') && !CORRECTION.test(foldAccents(lines[m])); m += 1) joined += ' ' + foldAccents(lines[m].slice('CALLER: '.length));
         if (joined !== fl0 && DENIAL.test(joined.trim()) && namedWords().some((w) => new RegExp(`\\b${w}\\b`).test(joined))) { corrections.push('No.'); continue; }
+        // "No, that was my old office" in a later caller turn retracts the office named.
+        if (RETRACTED.test(fl0) && (/^no\b/.test(fl0.trim()) || /\b(?:that|it|there|esa|eso|era)\b/.test(fl0))) { corrections.push('No.'); continue; }
         if (DENIAL.test(fl0.trim()) && (namedWords().some((w) => new RegExp(`\\b${w}\\b`).test(fl0)) || /\b(?:there|that office|that one|esa oficina|ahi|alli|ese lugar)\b/.test(fl0))) corrections.push('No.');
         continue;
       }
@@ -253,7 +255,7 @@ function officeAnswers(transcript: string): string[] {
  * outage reads as no office and must never cost the floor its ticket.
  */
 // ", not Downey" / ", no a Downey" after the office named.
-const NOT_THAT = /,?\s*(?:not|no)\s+(?:a\s+|en\s+|the\s+)?\p{Lu}[\p{L}]+[^.!?;]*/u;
+const NOT_THAT = /,?\s*(?:not|no)\s+(?:a\s+|en\s+|the\s+)?\p{L}{3,}[^.!?;]*/iu;
 
 /** "My old office", "where I used to go", "mi oficina anterior": a former office, not the answer. */
 const RETRACTED = /\b(?:old|former|previous)\s+(?:office|one|location|clinic)\b|\b(?:oficina|clinica)\s+(?:anterior|antigua|vieja)\b|\b(?:antigua|vieja)\s+oficina\b|\bused to go\b/;
