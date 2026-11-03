@@ -136,9 +136,12 @@ export function callerSaidTheName(
       (line) =>
         /["\u201C\u201D\u00AB\u00BB]|(?:^|[^\p{L}])['`\u2018\u2019]|['`\u2018\u2019](?![\p{L}])/u.test(line) ||
         fold(line).split(/[ _]/).some((w) => REPORTERS.has(w)) ||
-        [...fold(line).matchAll(/ (?:i[ _]mean(?:t)?|quiero decir) ([a-z]+)/g)].some(
-          ([, w]) => !NOT_A_NAME.has(w) && !FILLER.has(w),
-        ),
+        [...fold(line).matchAll(/ (?:i[ _]mean(?:t)?|quiero decir)((?: [a-z_]+)*)/g)].some(([, tail]) => {
+          const w = tail.trim().split(/[ _]/).find((x) => !FILLER.has(x)) ?? "";
+          return w !== "" && !NOT_A_NAME.has(w);
+        }) ||
+        // A colon introduces what someone else said ("My mother replied: …").
+        /:/.test(line),
     )
   ) {
     return false;
@@ -157,22 +160,29 @@ export function callerSaidTheName(
       for (const ev of introductions(clause, name)) {
         if (ev.denied || ev.cancels) return false;
         if (ev.who === false) return false;
-        if (ev.who === true) confirmed = true;
+        // Only an introduction that OPENS its clause (greetings and filler
+        // aside) is the caller's own: "My mother would say this is Mary
+        // Smith" or "the message said this is Mary Smith" is a mention.
+        if (ev.who === true && ev.opens) confirmed = true;
       }
     }
   }
   return confirmed;
 }
 
+/** Words that may come before an introduction that opens its clause. */
+const OPENERS = new Set(["hi", "hello", "hey", "yes", "yeah", "yep", "ok", "okay", "so", "and", "good", "morning",
+  "afternoon", "evening", "hola", "buenos", "buenas", "dias", "tardes", "noches", "si", "bueno", "alo", "there"]);
+
 /** Clauses that carry no content of their own ("Sorry, I mean …"). */
-const FILLER = new Set(["sorry", "oops", "no", "wait", "um", "uh", "er", "oh", "actually", "perdon", "perdón", "digo"]);
+const FILLER = new Set(["sorry", "oops", "no", "wait", "um", "umm", "uh", "uhm", "er", "erm", "hmm", "oh", "like", "actually", "well", "perdon", "perdón", "digo"]);
 
 const NEGATORS = new Set(["no", "not", "never", "nunca"]);
 
 /** Folded caller words that mark reported speech somewhere in the call. */
 const REPORTERS = new Set([
   "said", "says", "saying", "told", "tells", "asked", "wrote", "stated",
-  "states", "say", "tell", "telling", "answered", "answers", "answering", "greeting", "repeated", "introduced", "introduces", "herself", "himself", "themselves", "announced", "claimed", "claims", "shows", "showed", "screen", "message", "email", "mail", "text", "letter", "note", "reads", "read", "recording", "voicemail", "dijo", "dice", "decia", "mensaje",
+  "states", "replied", "replies", "responded", "say", "tell", "telling", "answered", "answers", "answering", "greeting", "repeated", "introduced", "introduces", "herself", "himself", "themselves", "announced", "claimed", "claims", "shows", "showed", "screen", "message", "email", "mail", "text", "letter", "note", "reads", "read", "recording", "voicemail", "dijo", "dice", "decia", "mensaje",
 ]);
 
 /** Introductions that name a person whatever the transcript's casing. */
@@ -199,7 +209,7 @@ function capitalised(clause: string, w: string): boolean {
   return clause.split(/[^\p{L}\p{M}'\u2019-]+/u).some((raw) => /^\p{Lu}/u.test(raw) && fold(raw).trim() === w);
 }
 
-type Intro = { who: boolean | null; denied: boolean; cancels: boolean };
+type Intro = { who: boolean | null; denied: boolean; cancels: boolean; opens: boolean };
 
 /**
  * Every introduction in one clause, in order. `who` is true when it names
@@ -219,13 +229,14 @@ function introductions(clause: string, name: string): Intro[] {
     const head = folded.slice(0, m.index).trim().split(/[ _]/);
     const before = head.pop() ?? "";
     const rest = folded.slice(m.index + m[0].length);
+    const opens = head.concat(before).filter(Boolean).every((w) => OPENERS.has(w) || FILLER.has(w));
     // English negates AFTER the verb ("I am not…"); a leading "No" is a
     // correction ("No, I am John Jones"). Spanish negates before ("No soy…").
     const negated = before === "no" ? /^(?:soy|habla|me llamo)$/.test(intro) : NEGATORS.has(before);
     const ignored = negated;
     // "I'm not Mary Smith" / "this is not Mary Smith": a denial of this name.
     if (new RegExp(`^ (?:not|never|no) ${name}(?= )`).test(rest)) {
-      out.push({ who: null, denied: true, cancels: false });
+      out.push({ who: null, denied: true, cancels: false, opens });
       continue;
     }
     if (new RegExp(`^ ${name}(?= )`).test(rest)) {
@@ -233,7 +244,7 @@ function introductions(clause: string, name: string): Intro[] {
       // A possessive the joiner missed ("Smith 's daughter") still folds to
       // "smith s daughter"; Spanish negates BEFORE the verb ("No soy Mary Smith").
       const possessive = /^s(?: |$)/.test(after);
-      out.push({ who: ignored || possessive || correction ? null : true, denied: negated && !possessive, cancels: correction && !negated });
+      out.push({ who: ignored || possessive || correction ? null : true, denied: negated && !possessive, cancels: correction && !negated, opens });
       continue;
     }
     const [w1 = "", w2 = ""] = rest.trim().split(" ");
@@ -241,12 +252,18 @@ function introductions(clause: string, name: string): Intro[] {
     // Vries"): a false conflict only fails safe. Ordinary words after "I am" are
     // listed in NOT_A_NAME; no suffix rule ("mohammed", "kimberly" are names).
     const looksLikeName =
-      w1.length >= 1 && w1 !== "a" && w1 !== "i" && !NEGATORS.has(w1) && !/^s(?:_|$)/.test(w1) &&
+      w1.length >= 1 && !NEGATORS.has(w1) &&
+      // "a"/"i" is an article or pronoun unless written as an initial
+      // ("I am A. Jones", or "I am A Jones").
+      (!["a", "i"].includes(w1) ||
+        // …or "I am A." cut off by the initial's own period.
+        (/^\s*$/.test(rest.trim().split(" ").slice(1).join(" ")) && /\b(?:am|is|m)\s+[AI]\s*$/.test(clause)) ||
+        (capitalised(clause, w1) && capitalised(clause, w2) && !NOT_A_NAME.has(w2))) && !/^s(?:_|$)/.test(w1) &&
       (STRONG.has(intro) || capitalised(clause, w1) ||
         !NOT_A_NAME.has(w1));
     // A correction cancels on any name-like word, initials included ("I mean J. Jones").
     const cancels = correction && !ignored && w1.length >= 1 && !NOT_A_NAME.has(w1) && !FILLER.has(w1);
-    out.push({ who: !ignored && looksLikeName ? false : null, denied: false, cancels });
+    out.push({ who: !ignored && looksLikeName ? false : null, denied: false, cancels, opens });
   }
   return out;
 }

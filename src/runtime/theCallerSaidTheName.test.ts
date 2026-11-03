@@ -529,4 +529,12 @@ describe('callerSaidTheName', () => {
     expect(said('This is Mary Smith. Actually, I am J. Jones.', 'Mary', 'Smith')).toBe(false);
     expect(said('This is Mary Smith. Sorry, I am not actually Mary Smith, I am her daughter.', 'Mary', 'Smith')).toBe(false);
   });
+
+  it('Codex round 10: unlisted reporting verbs, filler inside a correction, initials A and I', () => {
+    expect(said('My mother replied: this is Mary Smith.', 'Mary', 'Smith')).toBe(false);
+    expect(said('My mother always answers the phone with this is Mary Smith.', 'Mary', 'Smith')).toBe(false);
+    expect(said('This is Mary Smith. Sorry, I mean, um, Mary Jones.', 'Mary', 'Smith')).toBe(false);
+    expect(said('This is Mary Smith. Actually, I am A. Jones.', 'Mary', 'Smith')).toBe(false);
+    expect(said('This is Mary Smith. I am a patient of Dr. Lee.', 'Mary', 'Smith')).toBe(true);
+  });
 });
