@@ -1984,11 +1984,17 @@ The ticket will include schedule context (last appointment info) automatically.`
         }
       }
 
-      const recordConfirmed =
+      // A record the caller's yes confirmed is as confirmed as a name-and-date-
+      // of-birth match: it routes same-day and checks the appointment time the
+      // same way (Codex P2 on #425 — reusing it above skipped the secondary
+      // lookup that used to supply the name_and_dob match here).
+      const confirmedByGreetingHere = cachedIdentityMatches &&
+        greetingConfirmedMatches(greetingConfirmed, enrichedContext, lockedIdentity);
+      const recordConfirmed = confirmedByGreetingHere || (
         !!enrichedContext?.patientFound &&
         enrichedContext.matchedBy === 'name_and_dob' &&
         !phoneMatchIsUnconfirmed(enrichedContext) &&
-        enrichedContext.identity?.unique === true;
+        enrichedContext.identity?.unique === true);
       if (recordConfirmed && enrichedContext) {
         // Replace the cache and held identity together, including when this
         // ticket's secondary lookup validated a different family member.
@@ -1999,6 +2005,8 @@ The ticket will include schedule context (last appointment info) automatically.`
           dateOfBirth: enrichedContext.patientData?.dateOfBirth || params.date_of_birth,
         } };
         scheduleContext = enrichedContext;
+        // The cache was just replaced; the yes still confirms this record.
+        if (confirmedByGreetingHere) greetingConfirmed = enrichedContext;
         rememberVerifiedIdentity(metadata.callSid,
           { ...enrichedContext.patientData, ...joinedAppointments(enrichedContext), certain: true });
       }

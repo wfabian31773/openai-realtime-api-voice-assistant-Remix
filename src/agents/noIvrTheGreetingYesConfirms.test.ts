@@ -46,6 +46,7 @@ const h = vi.hoisted(() => ({
   lookupByPhone: vi.fn(),
   lookupByNameAndDOB: vi.fn(async () => ({ patientFound: false, upcomingAppointments: [], pastAppointments: [], totalAppointmentsFound: 0 })),
   submitSimplifiedTicket: vi.fn(async (_p: Record<string, unknown>) => ({ success: true, ticketNumber: 'VA-TEST' })),
+  updateCallLog: vi.fn(async () => undefined),
 }));
 
 vi.mock('@openai/agents/realtime', () => ({
@@ -61,7 +62,7 @@ vi.mock('../../server/db', () => ({
     select: () => ({ from: () => ({ where: () => ({ limit: async () => [] }) }) }),
   },
 }));
-vi.mock('../../server/storage', () => ({ storage: { updateCallLog: async () => undefined } }));
+vi.mock('../../server/storage', () => ({ storage: { updateCallLog: (...a: unknown[]) => h.updateCallLog(...(a as [])) } }));
 vi.mock('../services/syncAgentService', () => ({
   SyncAgentService: {
     submitSimplifiedTicket: (p: Record<string, unknown>) => h.submitSimplifiedTicket(p),
@@ -108,6 +109,7 @@ beforeEach(() => {
   h.lookupByPhone.mockReset().mockResolvedValue(ONE_PERSON_ON_THE_NUMBER as any);
   h.lookupByNameAndDOB.mockClear();
   h.submitSimplifiedTicket.mockClear();
+  h.updateCallLog.mockClear();
   resetVerifiedIdentities();
   vi.spyOn(console, 'log').mockImplementation(() => undefined);
   vi.spyOn(console, 'info').mockImplementation(() => undefined);
@@ -223,5 +225,31 @@ describe('the yes holds for the rest of the call (Codex P2 on #425)', () => {
     expect(greetingConfirmedMatches(ctx, ctx, { ...held, personId: 'p-other' })).toBe(false);
     expect(greetingConfirmedMatches(ctx, ctx, { ...held, dateOfBirth: '1990-07-01' })).toBe(false);
     expect(greetingConfirmedMatches(ctx, ctx, undefined)).toBe(false);
+  });
+});
+
+describe('a greeting-confirmed record is a confirmed record on the ticket (Codex P2 on #425)', () => {
+  const SID = 'CA0000000000000000000000000000d172';
+  const ticket = {
+    first_name: 'Zelda', last_name: 'Quixote', date_of_birth: '01/04/1958', location: 'Synthetic Clinic',
+    callback_number: '5551234567', request_category: 'general_question',
+    request_summary: 'Wants to know whether the drops were called in to the pharmacy.',
+  };
+
+  it('create_ticket treats it as confirmed (the call-row write fires) and the yes still holds afterwards', async () => {
+    const agent = await createNoIvrAgent(async () => {}, {
+      callId: `call-${SID}`, callSid: SID, callerPhone: '+15551234567', precontext: GREETED,
+      pipeline: 'runtime', callLogId: 'row-d172',
+    } as any);
+    await call(agent, 'lookup_schedule', { first_name: 'Zelda' });
+    const filed = await call(agent, 'create_ticket', ticket);
+    expect(filed.success).toBe(true);
+    // The secondary name-and-date-of-birth lookup is not needed and not run.
+    expect(h.lookupByNameAndDOB).not.toHaveBeenCalled();
+    // recordConfirmed: the confirmed identity reaches the call row (v53's write).
+    expect(h.updateCallLog).toHaveBeenCalledWith('row-d172', expect.objectContaining({ patientFound: true }));
+    // The ticket replaced the cache; a later phone-only lookup is still confirmed.
+    const again = await call(agent, 'lookup_schedule', { phone: '5551234567' });
+    expect(again.upcomingAppointments).toHaveLength(1);
   });
 });
