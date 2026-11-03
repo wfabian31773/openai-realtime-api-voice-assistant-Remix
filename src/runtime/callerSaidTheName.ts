@@ -28,11 +28,17 @@ function fold(text: string): string {
 }
 
 /**
- * True when the caller's own lines — never the agent's — say the first word of
- * `firstName` followed by the whole of `lastName`, as ONE name: adjacent, or
- * with a single middle name or initial between them. Two halves found apart
- * prove nothing — "This is John Smith. Please call Mary Jones" contains both
- * Mary and Smith and names neither Mary Smith (Codex P2, #421).
+ * True when ONE sentence of ONE caller line — never the agent's — says the
+ * first word of `firstName` immediately followed by the whole of `lastName`.
+ *
+ * Adjacent, inside one sentence, inside one turn, and nothing between them:
+ * two halves found apart prove nothing (Codex P2, #421, twice). "This is John
+ * Smith. Please call Mary Jones" contains both Mary and Smith; "This is Mary
+ * Jones. Smith is my surgeon" puts them next to each other only once the full
+ * stop is thrown away; an answer "Mary." followed by "Smith is my surgeon" does
+ * the same across two turns. None of them names Mary Smith. A middle name said
+ * aloud ("Mary Ann Smith") therefore does not match either — that fails safe,
+ * and no call in the corpus needed it.
  *
  * The first name is cut to its first word because the record carries middle
  * initials and second names ("Vince V") that nobody says; the surname is kept
@@ -48,14 +54,12 @@ export function callerSaidTheName(
   const first = fold(firstName).trim().split(" ")[0] ?? "";
   const last = fold(lastName).trim();
   if (first.length < 2 || last.length < 2) return false;
-  const callerWords = fold(
-    transcript
-      .split("\n")
-      .filter((line) => line.startsWith("CALLER:"))
-      .map((line) => line.slice("CALLER:".length))
-      .join(" "),
-  );
-  // Both halves are letters and spaces only after `fold`, so they need no
-  // escaping inside the pattern.
-  return new RegExp(` ${first} (?:[a-z]+ )?${last} `).test(callerWords);
+  const name = ` ${first} ${last} `;
+  return transcript
+    .split("\n")
+    .filter((line) => line.startsWith("CALLER:"))
+    // Sentence boundaries are cut BEFORE folding, which would turn them into
+    // spaces and join the end of one sentence to the start of the next.
+    .flatMap((line) => line.slice("CALLER:".length).split(/[.!?;:,]+/))
+    .some((sentence) => fold(sentence).includes(name));
 }
