@@ -1173,6 +1173,19 @@ import { callEnvironment } from "./callRecord";
  * v164 (#418). No migration.
  */
 /**
+ * v169 — A GOODBYE THAT NAMES THE CALLER IS STILL A GOODBYE (2026-11-03).
+ * v134's goodbye grace missed three ordinary closings — a sign-off that names
+ * the caller ("You're welcome, Irene. Take care."), the agent's goodbye
+ * answered by a thank-you ("Adiós." / "Gracias." / "Con gusto."), and a bare
+ * thank-you before the agent's full sign-off — so those calls sat open until
+ * the dead-air watchdog: 34 dead_air endings on 2026-11-02, 53 s of silence on
+ * average. The matcher now ignores a comma-set capitalised name, reads a polite
+ * reply to the agent's own goodbye as the caller's farewell, and lets a bare
+ * thank-you close only when the agent's reply is a full sign-off (never a
+ * thank-you that answers a question). v168 is #421's. Above main's v167 (#419).
+ * No migration.
+ */
+/**
  * v170 — THE NAMED GREETING IS BACK (2026-11-03). Operator: "that was a hard
  * rule and should have never been replaced." #384 (VA-76205) made the
  * greeting's first name require identityValidated, which nothing sets at
