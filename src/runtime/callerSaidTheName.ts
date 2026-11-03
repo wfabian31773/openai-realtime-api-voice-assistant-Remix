@@ -109,7 +109,7 @@ export function callerSaidTheName(
   const callerLines = rawCaller.filter((l, i) => !rawCaller.some((m, j) => j > i && fold(m).startsWith(fold(l).trimEnd())));
   if (!structurallySingle(callerLines, lines, first, last, firstWords, firstAlt)) return false;
   const agentLines = lines.filter((l) => !l.startsWith("CALLER:"));
-  if (rawCaller.some((line) => /\b(?:transcri\w*|dictat\w*|reading|recit\w*|repeat\w*|relay\w*)/i.test(line))) return false;
+  if (rawCaller.some((line) => /\b(?:transcri\w*|(?:hear|heard|hearing) (?:the following|this|it say|a message|a recording)|leave your|apolog\w*|dictat\w*|reading|recit\w*|repeat\w*|relay\w*)/i.test(line))) return false;
   // Guards read every raw turn, before duplicates are merged.
   if (
     rawCaller.some(
@@ -264,6 +264,7 @@ function structurallySingle(callerLines: string[], lines: string[], first: strin
       // A sentence-opening name is still a name when it introduces a
       // speaker: "Jane speaking", "Jane here", "Jane calling".
       const t0 = fold(tokens[0] ?? "").trim();
+      if (/^(?:is|was)$/i.test(fold(tokens[1] ?? "").trim()) && /^[A-Z]/.test(tokens[0] ?? "") && !/^(?:this|it|that|there|he|she|what|here|my|who|which|today|tomorrow|everything|nothing)$/i.test(t0) && !t0.split(/[ _]/).every((x) => own.has(x))) return false;
       const lead = /^\s*([A-Z][\p{L}'-]*)\s*,/u.exec(sentence)?.[1];
       if (lead && !/^(?:hi|hello|hey|yes|yeah|yep|okay|ok|well|so|um|uh|oh|sorry|thanks|please|no|hola|bueno|si|s\u00ed|gracias|good|alright|right|sure)$/i.test(lead) && !fold(lead).trim().split(/[ _]/).every((x) => own.has(x))) return false;
       if (/^(?:speaking|here|calling|from|habla|hablando|aqui|llamando)$/i.test(fold(tokens[1] ?? "").trim()) && !t0.split(/[ _]/).every((x) => own.has(x))) return false;

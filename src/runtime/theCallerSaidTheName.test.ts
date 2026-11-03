@@ -688,3 +688,12 @@ describe("structural rule, Codex round 2", () => {
   });
 });
 
+describe("structural rule, Codex round 3", () => {
+  it("fails safe", () => {
+    const c = (x: string) => callerSaidTheName(`AGENT: Hello?\n${x}`, "Mary", "Smith");
+    expect(c("CALLER: I hear the following when I call. This is Mary Smith. Please leave your number.")).toBe(false);
+    expect(c("CALLER: this is mary smith. apologies, jane jones. i need my eye drops refilled.")).toBe(false);
+    expect(c("CALLER: This is Mary Smith. Jane is speaking for the patient. Please refill the eye drops.")).toBe(false);
+  });
+});
+
