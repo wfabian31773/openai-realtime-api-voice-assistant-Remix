@@ -114,27 +114,44 @@ export function callerSaidTheName(
   // So every introduction on every caller line is read IN SPOKEN ORDER, and
   // the answer is true only when, after the last correction, at least one
   // genuine self-introduction names this person and none names anyone else.
+  //
+  // Where that reading is ambiguous it fails SAFE (false, no ticket):
+  //   - reported speech: once a caller line mentions a message, a voicemail or
+  //     someone saying something, every introduction after it on that line is
+  //     quoted, and if one of them names anyone the whole call answers false;
+  //   - a correction ("I mean …") replaces earlier identities only when the
+  //     clause just before it (filler like "sorry" aside), or its own clause
+  //     before it, held a self-introduction; otherwise it may be correcting a
+  //     mention of somebody else and is weighed as one more identity.
   let ids: boolean[] = [];
+  let lastWasIntro = false;
   for (const line of transcript.split("\n")) {
     if (!line.startsWith("CALLER:")) continue;
-    // Reported speech runs to the end of its SENTENCE, across commas and
-    // colons ('The message said: "This is Mary Smith."').
-    for (const sentence of line.slice("CALLER:".length).split(/[.!?]+/)) {
-      let reported = false;
+    let reported = false;
+    for (const clause of line.slice("CALLER:".length).split(/[.!?;:,\u2012-\u2015]+/)) {
       // Clause boundaries are cut BEFORE folding, which would turn them into
       // spaces and join one clause to the next. An en or em dash is a clause
       // break, not a joiner; only a hyphen (ASCII, U+2010, U+2011) joins.
-      for (const clause of sentence.split(/[;:,\u2012-\u2015]+/)) {
-        for (const ev of introductions(clause, name, reported)) {
-          if (ev.correction && ev.who !== null) ids = [];
-          if (ev.who !== null) ids.push(ev.who);
-        }
-        if (fold(clause).split(" ").some((w) => REPORTERS.has(w))) reported = true;
+      const words = fold(clause).trim().split(" ").filter(Boolean);
+      if (words.length === 0 || words.every((w) => FILLER.has(w))) continue;
+      const events = introductions(clause, name, reported);
+      if (reported && events.some((ev) => ev.named)) return false;
+      let introHere = false;
+      for (const ev of events) {
+        if (ev.who === null) continue;
+        if (ev.correction && (lastWasIntro || introHere)) ids = [];
+        ids.push(ev.who);
+        introHere = true;
       }
+      lastWasIntro = introHere;
+      if (words.some((w) => REPORTERS.has(w))) reported = true;
     }
   }
   return ids.length > 0 && ids.every(Boolean);
 }
+
+/** Clauses that carry no content of their own ("Sorry, I mean …"). */
+const FILLER = new Set(["sorry", "oops", "no", "wait", "um", "uh", "er", "oh", "actually", "perdon", "perdón", "digo"]);
 
 const NEGATORS = new Set(["no", "not", "never", "nunca"]);
 
@@ -147,19 +164,18 @@ const REPORTERS = new Set([
 /** Introductions that name a person whatever the transcript's casing. */
 const STRONG = new Set(["my name is", "my name s", "mi nombre es", "me llamo"]);
 
-/** Introductions that name a lowercase pair unless it reads as ordinary words. */
-const PERSONAL = new Set(["i am", "i m", "soy", "i mean", "i meant", "quiero decir"]);
 
 /**
  * Words that, straight after a weak introduction ("this is", "I am", "it's"),
  * show it is not a name: "I am calling about…", "this is urgent". A weak
  * introduction followed by two other words counts as a name when either is
- * capitalised in the raw clause; after a personal one ("I am", "soy", "I mean")
- * also when lowercase, unless it reads as ordinary words ("I am calling").
+ * capitalised in the raw clause, or when lowercase unless it reads as ordinary
+ * words ("I am calling", "I am completely out").
  */
 const NOT_A_NAME = new Set(("a an the my his her their our your about calling call going here " +
   "just still also really very so not no sorry trying looking wondering having getting urgent " +
   "fine ok okay good his to for in on at with from regarding concerning back again only " +
+  "tomorrow today yesterday because been out over sick having done ready able sure afraid glad happy calling worried scared unable available home back late early new old waiting " +
   "tomorrow today yesterday because that what who how why when where there this it is was " +
   "la el su mi un una de que para por muy").split(" "));
 
@@ -168,7 +184,7 @@ function capitalised(clause: string, w: string): boolean {
   return clause.split(/[^\p{L}\p{M}'\u2019-]+/u).some((raw) => /^\p{Lu}/u.test(raw) && fold(raw).trim() === w);
 }
 
-type Intro = { who: boolean | null; correction: boolean };
+type Intro = { who: boolean | null; correction: boolean; named: boolean };
 
 /**
  * Every introduction in one clause, in order. `who` is true when it names
@@ -193,16 +209,17 @@ function introductions(clause: string, name: string, reported: boolean): Intro[]
       const after = rest.replace(new RegExp(`^ ${name} `), "");
       // A possessive the joiner missed ("Smith 's daughter") still folds to
       // "smith s daughter"; Spanish negates BEFORE the verb ("No soy Mary Smith").
-      out.push({ who: ignored || /^s(?: |$)/.test(after) ? null : true, correction });
+      const possessive = /^s(?: |$)/.test(after);
+      out.push({ who: ignored || possessive ? null : true, correction, named: !possessive });
       continue;
     }
     const [w1 = "", w2 = ""] = rest.trim().split(" ");
     const looksLikeName =
       w1.length > 1 && w2.length > 1 && !NEGATORS.has(w1) && !/^s(?:_|$)/.test(w1) &&
       (STRONG.has(intro) ||
-        (PERSONAL.has(intro) && !NOT_A_NAME.has(w1) && !NOT_A_NAME.has(w2) && !/(?:ing|ed)$/.test(w1)) ||
-        (capitalised(clause, w1) && capitalised(clause, w2)));
-    out.push({ who: !ignored && looksLikeName ? false : null, correction });
+        (capitalised(clause, w1) && capitalised(clause, w2)) ||
+        (!NOT_A_NAME.has(w1) && !NOT_A_NAME.has(w2) && !/(?:ing|ed|ly)$/.test(w1)));
+    out.push({ who: !ignored && looksLikeName ? false : null, correction, named: looksLikeName });
   }
   return out;
 }

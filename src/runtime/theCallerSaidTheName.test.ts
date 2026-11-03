@@ -467,4 +467,12 @@ describe('callerSaidTheName', () => {
     expect(said('This is Mary Smith. I mean my appointment is tomorrow.', 'Mary', 'Smith')).toBe(true);
     expect(said('this is mary smith, i am calling about my glasses, it is urgent.', 'Mary', 'Smith')).toBe(true);
   });
+
+  it('Codex round 3: quotes past a period, lowercase conflicts, corrections of a mention', () => {
+    expect(said('The message said: "Hello. This is Mary Smith."', 'Mary', 'Smith')).toBe(false);
+    expect(said('This is Mary Smith. this is john jones.', 'Mary', 'Smith')).toBe(false);
+    expect(said('This is Mary Smith. Sorry about the message, I mean Mary Jones.', 'Mary', 'Jones')).toBe(false);
+    expect(said('This is John Jones. I am calling about Mary Jones, sorry, I mean Mary Smith.', 'Mary', 'Smith')).toBe(false);
+    expect(said('This is Mary Smith. I am completely out of medication.', 'Mary', 'Smith')).toBe(true);
+  });
 });
