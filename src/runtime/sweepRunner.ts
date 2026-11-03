@@ -40,7 +40,8 @@ import {
 } from "./requestSweep";
 import type { VoiceCallRecord } from "./mediaStreamBridge";
 import type { CreateTicketParams } from '../../server/services/ticketingApiClient';
-import { verifiedIdentityFor } from "../tools/verifiedIdentity";
+import { unconfirmedCandidateFor, verifiedIdentityFor } from "../tools/verifiedIdentity";
+import { callerSaidTheName } from "./callerSaidTheName";
 import { statedNameFor } from "../tools/statedName";
 import { draftedRequestFor } from "../tools/draftedRequest";
 
@@ -165,6 +166,20 @@ export async function runRequestSweep(
     // A certain match wins. Without one, the name the caller gave, as the
     // agent's own tools received it (operator ruling 2026-10-29).
     const stated = identity ? undefined : statedNameFor(record.callSid);
+    // v168, the other half of that ruling: the person the calling number
+    // belongs to, when the caller SAID both halves of that name on the call.
+    // Never on its own — an unconfirmed candidate is not an identity.
+    const candidate = identity || stated ? undefined : unconfirmedCandidateFor(record.callSid);
+    const spoken =
+      candidate && callerSaidTheName(record.transcript, candidate.firstName, candidate.lastName)
+        ? candidate
+        : undefined;
+    if (spoken) {
+      console.info(
+        `[REQUEST SWEEP] ${record.slug}: the caller said the name the calling number belongs to — ` +
+          `filing under it, unconfirmed (${record.callSid})`,
+      );
+    }
     const drafted = draftedRequestFor(record.callSid);
     const input: SweepInput = {
       callSid: record.callSid,
@@ -196,7 +211,9 @@ export async function runRequestSweep(
         ? { verifiedName: { firstName: identity.firstName, lastName: identity.lastName } }
         : stated
           ? { verifiedName: { firstName: stated.firstName, lastName: stated.lastName }, nameSource: "stated" as const }
-          : {}),
+          : spoken
+            ? { verifiedName: { firstName: spoken.firstName, lastName: spoken.lastName }, nameSource: "spoken" as const }
+            : {}),
     };
 
     const decision = decideSweep(input);

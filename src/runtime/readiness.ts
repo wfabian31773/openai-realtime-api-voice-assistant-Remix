@@ -1198,8 +1198,20 @@ import { callEnvironment } from "./callRecord";
  * other ticket-side rules are unchanged. v168 is #421's. Above main's v169
  * (#422), which it contains. No migration.
  */
+/**
+ * v171 (was v168 on its branch) — THE CALLER SAID THE RECORD'S NAME (2026-11-03). Callers who left a
+ * whole message in one breath after the greeting (name, request, callback) and
+ * hung up were skipped by the teardown sweep as "no-name": no tool had
+ * received the name, and the calling number's pre-context match is held
+ * `certain: false` since #384. On 2026-11-02 that was 6 of the day's 10 lost
+ * requests. The sweep now files under the calling number's record when the
+ * caller introduced themselves by that name ("my name is", "this is", "soy"…)
+ * (`callerSaidTheName`, the operator's 2026-10-29 ruling), with a staff note
+ * that no date of birth was confirmed; it carries no chart date of birth or
+ * history. Above main's v170 (#423), which it contains. No migration.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v170-the-named-greeting-is-back-20261103";
+  "voice-runtime-v171-the-caller-said-the-records-name-20261103";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

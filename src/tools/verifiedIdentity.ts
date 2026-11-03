@@ -532,6 +532,32 @@ export function verifiedIdentityFor(callSid: string | undefined): VerifiedIdenti
   };
 }
 
+/**
+ * THE PERSON THE PROCESS FOUND FOR THIS CALL AND NOBODY CONFIRMED — the
+ * caller-ID pre-context match (written `certain: false` by the runtime, and
+ * by `lookup_patient` on a phone match since #384), or a unique name-only hit.
+ *
+ * Names only: no date of birth, no office, no history. This reader exists for
+ * ONE caller, the teardown sweep, and the sweep may use it only after the
+ * caller has SAID both of these names on the call (`callerSaidTheName`), which
+ * is the validation RULE ZERO step 2 asks for. On its own an unconfirmed entry
+ * is a candidate, never an identity (standing instruction 6), and nothing here
+ * changes `verifiedIdentityFor`, which still refuses it.
+ *
+ * A certain entry answers undefined: `verifiedIdentityFor` already covers it,
+ * and two readers answering for one entry is how a rule drifts.
+ */
+export function unconfirmedCandidateFor(
+  callSid: string | undefined,
+): { firstName: string; lastName: string } | undefined {
+  if (!isTwilioCallSid(callSid)) return undefined;
+  const entry = verified.get(callSid);
+  if (!entry || entry.certain) return undefined;
+  if (Date.now() - entry.at > TTL_MS) return undefined;
+  if (!entry.firstName || !entry.lastName) return undefined;
+  return { firstName: entry.firstName, lastName: entry.lastName };
+}
+
 /** Call-scoped schedule; readers must also prove it matches the held patient. */
 export function verifiedAppointmentContextFor(callSid: string | undefined): PatientScheduleContext | undefined {
   if (!verifiedIdentityFor(callSid)) return undefined;

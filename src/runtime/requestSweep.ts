@@ -109,9 +109,12 @@ export interface SweepInput {
    * WHERE `verifiedName` CAME FROM. `verified` (or absent) is a certain lookup
    * match. `stated` is the name the caller gave, as a name-taking tool
    * received it (`statedName.ts`, operator ruling 2026-10-29: a caller whose
-   * name we got is not nameless). The swept ticket tells staff which it is.
+   * name we got is not nameless). `spoken` is the person the calling number
+   * belongs to, used only because the caller said both halves of that name on
+   * the call (`callerSaidTheName`, v168 — the same ruling's "nor did we match
+   * the phone number to a patient"). The swept ticket tells staff which it is.
    */
-  nameSource?: "verified" | "stated";
+  nameSource?: "verified" | "stated" | "spoken";
   /**
    * Staff-facing call summary, when one already exists (a backfill, or a
    * row written before the sweep). Preferred over the raw transcript for
@@ -864,7 +867,9 @@ export function buildSweptTicket(
       (decision.firstName && decision.lastName
         ? input.nameSource === "stated"
           ? `NAME AS THE CALLER GAVE IT — not matched to a patient record; confirm it against the chart before acting.\n`
-          : ""
+          : input.nameSource === "spoken"
+            ? `NAME FROM THE CALLING NUMBER'S PATIENT RECORD — the caller said this name on the call, but no date of birth was confirmed; check the chart before acting.\n`
+            : ""
         : `PATIENT NAME NOT CAPTURED — nobody was identified on this call; take the name from the recording before matching this to a chart.\n`) +
       (infoOnly ? `${INFO_ONLY_NOTE}\n` : "") +
       `Call back on ${input.callerPhone}. Call reference ${input.callSid}.\n` +
