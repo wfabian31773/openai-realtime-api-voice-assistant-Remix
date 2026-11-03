@@ -482,4 +482,13 @@ describe('callerSaidTheName', () => {
     expect(said('This is Mary Smith. I am fred jones.', 'Mary', 'Smith')).toBe(false);
     expect(said('This is Mary Smith. Sorry, I mean emily jones.', 'Mary', 'Smith')).toBe(false);
   });
+
+  it('Codex round 5: attribution after a quote or on another turn, particles, a leading "No"', () => {
+    expect(said('"This is Mary Smith," the message said.', 'Mary', 'Smith')).toBe(false);
+    expect(
+      callerSaidTheName('CALLER: The message said:\nAGENT: What did it say?\nCALLER: This is Mary Smith.', 'Mary', 'Smith'),
+    ).toBe(false);
+    expect(said('This is Mary Smith. Sorry, I mean John de Vries.', 'Mary', 'Smith')).toBe(false);
+    expect(said('This is Mary Smith. No I am John Jones.', 'Mary', 'Smith')).toBe(false);
+  });
 });
