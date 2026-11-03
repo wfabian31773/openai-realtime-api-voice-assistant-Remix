@@ -131,6 +131,14 @@ export function callerSaidTheName(
   // Sentences of caller speech, commas and dashes ignored (folding the
   // sentence would otherwise hide nothing; a comma inside an introduction —
   // "My name is, Mary Smith" — is not a boundary).
+  // The caller's words count only as an answer to a greeting, a name request
+  // or a plain prompt. Any other agent question before a caller turn ("What
+  // do you hear when you dial that number?") may make the answer a quotation.
+  for (let i = 0; i < lines.length; i++) {
+    if (lines[i]?.startsWith("CALLER:")) continue;
+    if (!lines.slice(i + 1).some((l) => l.startsWith("CALLER:"))) break;
+    if (!AGENT_OK.test(fold(lines[i] ?? ""))) return false;
+  }
   const sentences = callerLines
     .flatMap((l) => l.split(/[.!?;]+/))
     .map((s) => fold(s.replace(/[,\u2012-\u2015]+/g, " ")))
@@ -149,6 +157,9 @@ export function callerSaidTheName(
   const firstRe = new RegExp(`(?<= )${firstAlt}(?= )`, "g");
   const lastRe = new RegExp(`(?<= )${last.split(/[ _]/).join("[ _]")}(?= )`, "g");
   for (const s of sentences) {
+    // After a match, an apology or an "X here" introduction is a correction.
+    if (matched > 0 && / (?:sorry|perdon|disculpe) /.test(s)) return false;
+    if (/ here $/.test(s) && !new RegExp(`(?<= )${name} here $`).test(s)) return false;
     mentions += (s.match(firstRe) ?? []).length + (s.match(lastRe) ?? []).length;
     for (const m of s.matchAll(INTRO_RE)) {
       const phrase = m[1] ?? "";
@@ -236,6 +247,9 @@ const DENIAL = new RegExp(
  * my mother", "How does your mother introduce herself?". A caller speaking for
  * or about someone else is ambiguity. */
 const THIRD_PARTY = / (?:she|he|her|him|his|hers|herself|himself|mother|mom|mum|father|dad|daughter|son|husband|wife|sister|brother|grandmother|grandfather|grandma|grandpa|aunt|uncle|niece|nephew|cousin|child|kid|parent|parents|spouse|partner|caregiver|guardian|behalf|relative|family|friend|neighbor|ella|el_la|madre|mama|padre|papa|hija|hijo|esposo|esposa|hermana|hermano|abuela|abuelo|introduce|introduces|introduced|presenta) /;
+
+/** Agent turns a caller's self-introduction may answer. */
+const AGENT_OK = / (?:how can i help|how may i help|help you|name|nombre|who is|who am i|speaking|hello|hi|go ahead|ayudar|en que) /;
 
 const NAME_TALK = / (?:name|names|named|nombre|llamo|llama|apellido|surname|surnames) /;
 
