@@ -1185,8 +1185,21 @@ import { callEnvironment } from "./callRecord";
  * thank-you that answers a question). v168 is #421's. Above main's v167 (#419).
  * No migration.
  */
+/**
+ * v170 — THE NAMED GREETING IS BACK (2026-11-03). Operator: "that was a hard
+ * rule and should have never been replaced." #384 (VA-76205) made the
+ * greeting's first name require identityValidated, which nothing sets at
+ * greeting time, so from the 2026-10-30 deploy no greeting asked "Am I
+ * speaking with <name>?" (optical/surgery/tech 245 of 355 on 10-29, 0 of 433
+ * on 11-02). recognisedFirstName names a matched caller again; the
+ * recognised-caller block follows it (v157's candidate arm is gone with the
+ * case it served). And the caller's yes to that name confirms a number that
+ * is one person (operator ruling, same day; greetingAffirmation.ts); #384's
+ * other ticket-side rules are unchanged. v168 is #421's. Above main's v169
+ * (#422), which it contains. No migration.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v169-a-goodbye-that-names-the-caller-20261103";
+  "voice-runtime-v170-the-named-greeting-is-back-20261103";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can
