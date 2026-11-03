@@ -124,7 +124,10 @@ export function callerSaidTheName(
   //     before it, held a self-introduction; otherwise it may be correcting a
   //     mention of somebody else and is weighed as one more identity.
   let ids: boolean[] = [];
-  let lastWasIntro = false;
+  // True while nothing but filler has been said since the end of the last
+  // self-introduced name: only then is "I mean …" correcting THAT name.
+  let open = false;
+  const fillerOnly = (text: string) => text.trim().split(/[ _]/).filter(Boolean).every((w) => FILLER.has(w));
   for (const line of transcript.split("\n")) {
     if (!line.startsWith("CALLER:")) continue;
     let reported = false;
@@ -132,19 +135,33 @@ export function callerSaidTheName(
       // Clause boundaries are cut BEFORE folding, which would turn them into
       // spaces and join one clause to the next. An en or em dash is a clause
       // break, not a joiner; only a hyphen (ASCII, U+2010, U+2011) joins.
-      const words = fold(clause).trim().split(" ").filter(Boolean);
-      if (words.length === 0 || words.every((w) => FILLER.has(w))) continue;
+      const folded = fold(clause);
+      if (fillerOnly(folded)) continue;
       const events = introductions(clause, name, reported);
       if (reported && events.some((ev) => ev.named)) return false;
-      let introHere = false;
+      let cursor = 0;
       for (const ev of events) {
-        if (ev.who === null) continue;
-        if (ev.correction && (lastWasIntro || introHere)) ids = [];
+        const adjacent = open && fillerOnly(folded.slice(cursor, ev.start));
+        if (ev.who === null) {
+          open = false;
+          continue;
+        }
+        if (ev.correction) {
+          // A correction straight after a self-introduction replaces it. Any
+          // other correction may be of a mention ("calling about Mary Jones,
+          // sorry, I mean Mary Smith"): it can still conflict, never confirm.
+          if (adjacent) ids = [];
+          else if (ev.who) {
+            open = false;
+            continue;
+          }
+        }
         ids.push(ev.who);
-        introHere = true;
+        open = true;
+        cursor = ev.end;
       }
-      lastWasIntro = introHere;
-      if (words.some((w) => REPORTERS.has(w))) reported = true;
+      if (open && !fillerOnly(folded.slice(cursor))) open = false;
+      if (fold(clause).split(" ").some((w) => REPORTERS.has(w))) reported = true;
     }
   }
   return ids.length > 0 && ids.every(Boolean);
@@ -175,7 +192,7 @@ const STRONG = new Set(["my name is", "my name s", "mi nombre es", "me llamo"]);
 const NOT_A_NAME = new Set(("a an the my his her their our your about calling call going here " +
   "just still also really very so not no sorry trying looking wondering having getting urgent " +
   "fine ok okay good his to for in on at with from regarding concerning back again only " +
-  "tomorrow today yesterday because been out over sick having done ready able sure afraid glad happy calling worried scared unable available home back late early new old waiting " +
+  "tomorrow today yesterday because completely totally almost currently already been out over sick having done ready able sure afraid glad happy calling worried scared unable available home back late early new old waiting " +
   "tomorrow today yesterday because that what who how why when where there this it is was " +
   "la el su mi un una de que para por muy").split(" "));
 
@@ -184,7 +201,7 @@ function capitalised(clause: string, w: string): boolean {
   return clause.split(/[^\p{L}\p{M}'\u2019-]+/u).some((raw) => /^\p{Lu}/u.test(raw) && fold(raw).trim() === w);
 }
 
-type Intro = { who: boolean | null; correction: boolean; named: boolean };
+type Intro = { who: boolean | null; correction: boolean; named: boolean; start: number; end: number };
 
 /**
  * Every introduction in one clause, in order. `who` is true when it names
@@ -210,7 +227,8 @@ function introductions(clause: string, name: string, reported: boolean): Intro[]
       // A possessive the joiner missed ("Smith 's daughter") still folds to
       // "smith s daughter"; Spanish negates BEFORE the verb ("No soy Mary Smith").
       const possessive = /^s(?: |$)/.test(after);
-      out.push({ who: ignored || possessive ? null : true, correction, named: !possessive });
+      const end = folded.length - after.length;
+      out.push({ who: ignored || possessive ? null : true, correction, named: !possessive, start: m.index, end });
       continue;
     }
     const [w1 = "", w2 = ""] = rest.trim().split(" ");
@@ -218,8 +236,9 @@ function introductions(clause: string, name: string, reported: boolean): Intro[]
       w1.length > 1 && w2.length > 1 && !NEGATORS.has(w1) && !/^s(?:_|$)/.test(w1) &&
       (STRONG.has(intro) ||
         (capitalised(clause, w1) && capitalised(clause, w2)) ||
-        (!NOT_A_NAME.has(w1) && !NOT_A_NAME.has(w2) && !/(?:ing|ed|ly)$/.test(w1)));
-    out.push({ who: !ignored && looksLikeName ? false : null, correction, named: looksLikeName });
+        (!NOT_A_NAME.has(w1) && !NOT_A_NAME.has(w2)));
+    const end = m.index + m[0].length + 1 + `${w1} ${w2}`.length;
+    out.push({ who: !ignored && looksLikeName ? false : null, correction, named: looksLikeName, start: m.index, end });
   }
   return out;
 }

@@ -475,4 +475,11 @@ describe('callerSaidTheName', () => {
     expect(said('This is John Jones. I am calling about Mary Jones, sorry, I mean Mary Smith.', 'Mary', 'Smith')).toBe(false);
     expect(said('This is Mary Smith. I am completely out of medication.', 'Mary', 'Smith')).toBe(true);
   });
+
+  it('Codex round 4: a correction of a mention never confirms; lowercase names conflict', () => {
+    expect(said('I am calling about Mary Jones. Sorry, I mean Mary Smith.', 'Mary', 'Smith')).toBe(false);
+    expect(said('This is John Jones calling about Mary Jones, sorry, I mean Mary Smith.', 'Mary', 'Smith')).toBe(false);
+    expect(said('This is Mary Smith. I am fred jones.', 'Mary', 'Smith')).toBe(false);
+    expect(said('This is Mary Smith. Sorry, I mean emily jones.', 'Mary', 'Smith')).toBe(false);
+  });
 });
