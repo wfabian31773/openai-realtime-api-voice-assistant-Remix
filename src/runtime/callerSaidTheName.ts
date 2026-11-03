@@ -113,7 +113,8 @@ export function callerSaidTheName(
   ) {
     return false;
   }
-  if (agentLines.some((line) => AGENT_QUOTING.test(fold(line)))) return false;
+  if (agentLines.some((line) => AGENT_QUOTING.test(fold(line)) || THIRD_PARTY.test(fold(line)))) return false;
+  if (callerLines.some((line) => THIRD_PARTY.test(fold(line)))) return false;
 
   // Sentences of caller speech, commas and dashes ignored (folding the
   // sentence would otherwise hide nothing; a comma inside an introduction —
@@ -186,19 +187,19 @@ const INTRO_RE = new RegExp(`(?<= )(${INTRO_PHRASES.map((p) => p.replace(/ /g, "
  * also a given name or surname belongs here; a missing word only fails safe. */
 const CONTINUATIONS = new Set((
   "calling call here trying looking wondering having going gonna scheduled supposed worried concerned " +
-  "sorry sure about for regarding in at with from the my your his her our their this that been " +
+  "sorry sure about for regarding in at with from the my your this that been " +
   "returning following getting interested needing waiting ready able unable confused urgent important " +
   "paciente la el de para su del mama madre hijo hija esposo esposa llamando"
 ).split(" "));
 
 /** Words that may directly follow the name in a genuine introduction. */
 const AFTER_NAME = new Set((
-  "and i calling speaking here from again um uh my the um_hm hi hello yes ok okay thank thanks please " +
+  "and i calling speaking here again um uh um_hm yes ok okay thank thanks please " +
   "y llamando hablando de desde estoy zero oh one two three four five six seven eight nine cero uno dos tres cuatro cinco seis siete ocho nueve"
 ).split(" "));
 
 /** Any correction anywhere in the caller's speech. */
-const CORRECTION = / (?:i[ _]mean|i[ _]meant|quiero decir|that should be|should be|should have been|correction|scratch that|i said|no wait|rather|digo|i misspoke|let me correct|actually it s|actually it is|actually this is|actually my) /;
+const CORRECTION = / (?:i[ _]mean|i[ _]meant|quiero decir|that should be|should be|should have been|correction|scratch that|i said|no wait|rather|digo|i misspoke|let me correct|actually it s|actually it is|actually this is|actually my|make that|make it|change that|instead|wait|oops|my bad|i meant to say|let me rephrase|i got that wrong|err) /;
 
 /** Negation of an introduction or a name word anywhere ("I'm not…", "my
  * surname is not…", "no soy…", "that's not my name"). */
@@ -207,6 +208,11 @@ const DENIAL = new RegExp(
     `| (?:not|never|nunca|no|isn_t|wasn_t|ain_t) (?:\\w+ ){0,2}(?:name|names|surname|apellido|nombre|me|mine|him|her) ` +
     `| (?:isn_t|wasn_t|ain_t|n_t) (?:\\w+ ){0,1}(?:name|surname) | no soy | no me llamo `,
 );
+
+/** Any other person in the caller's or agent's words: "This is Mary Smith,
+ * my mother", "How does your mother introduce herself?". A caller speaking for
+ * or about someone else is ambiguity. */
+const THIRD_PARTY = / (?:she|he|her|him|his|hers|herself|himself|mother|mom|mum|father|dad|daughter|son|husband|wife|sister|brother|grandmother|grandfather|grandma|grandpa|aunt|uncle|niece|nephew|cousin|child|kid|parent|parents|spouse|partner|caregiver|guardian|behalf|relative|family|friend|neighbor|ella|el_la|madre|mama|padre|papa|hija|hijo|esposo|esposa|hermana|hermano|abuela|abuelo|introduce|introduces|introduced|presenta) /;
 
 /** An agent turn that makes the caller's next words a quotation. */
 const AGENT_QUOTING = / (?:said|say|says|saying|quote|quoted|repeat|read|reads|reading|aloud|loud|verbatim|word for word|exactly|dijo|dice|decia|leer|lea|lealo) /;

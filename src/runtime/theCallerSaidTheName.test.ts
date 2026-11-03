@@ -593,3 +593,13 @@ describe("allowlist design (#421): round-13 cases and common-word names", () => 
     expect(said("My name is Rose Bush.", "Rose", "Bush")).toBe(true);
   });
 });
+
+describe("allowlist design, Codex round 15: third parties, other corrections", () => {
+  it("fails safe", () => {
+    const said = (c: string) => callerSaidTheName(`AGENT: Hello?\nCALLER: ${c}`, "Mary", "Smith");
+    expect(said("This is Mary Smith, my mother. I am her daughter Ana, calling for my own prescription.")).toBe(false);
+    expect(said("This is Mary Smith. Sorry, make that John Jones.")).toBe(false);
+    expect(callerSaidTheName("AGENT: How does your mother introduce herself?\nCALLER: This is Mary Smith.", "Mary", "Smith")).toBe(false);
+  });
+});
+
