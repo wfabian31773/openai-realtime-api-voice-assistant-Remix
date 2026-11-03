@@ -544,4 +544,15 @@ describe('callerSaidTheName', () => {
     ).toBe(false);
     expect(said('My mother always goes, this is Mary Smith.', 'Mary', 'Smith')).toBe(false);
   });
+
+  it('Codex round 12: punctuation inside an introduction, half-name corrections, qualifiers, S., agent prompts', () => {
+    expect(said('This is Mary Smith. My name is, John Jones.', 'Mary', 'Smith')).toBe(false);
+    expect(said('This is Mary Smith. Sorry, I mean my last name is Jones.', 'Mary', 'Smith')).toBe(false);
+    expect(said('This is Mary Smith. I am really John Jones.', 'Mary', 'Smith')).toBe(false);
+    expect(said('This is Mary Smith. My name is S. Jones.', 'Mary', 'Smith')).toBe(false);
+    expect(
+      callerSaidTheName('AGENT: What exactly did the message say?\nCALLER: This is Mary Smith.', 'Mary', 'Smith'),
+    ).toBe(false);
+    expect(said('This is Mary Smith. My last name is Smith.', 'Mary', 'Smith')).toBe(true);
+  });
 });

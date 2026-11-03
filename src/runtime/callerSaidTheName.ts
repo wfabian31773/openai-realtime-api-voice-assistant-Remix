@@ -148,6 +148,25 @@ export function callerSaidTheName(
   ) {
     return false;
   }
+  // An agent turn that asks what someone else said ("What did the message
+  // say?") makes the caller's next words a quotation.
+  if (
+    transcript
+      .split("\n")
+      .filter((line) => !line.startsWith("CALLER:"))
+      .some((line) =>
+        / (?:what|que) (?:did|does|do|was|is) (?:.* )?(?:say|said|read|write|wrote|tell|dijo|dice) | (?:message|voicemail|email|text|note|letter|recording|mensaje) (?:.* )?(?:say|said|says|read|reads) /.test(
+          fold(line),
+        ),
+      )
+  ) {
+    return false;
+  }
+  // Conflicts are looked for across punctuation too ("My name is, John
+  // Jones"; "I mean my last name is Jones"; "I am really John Jones"): on
+  // the whole caller line, every introduction must be followed — past
+  // qualifiers and filler — by this name or by plainly ordinary words.
+  for (const line of callerLines) if (conflicts(line, first, last, name)) return false;
   let confirmed = false;
   for (const line of callerLines) {
     // Clause boundaries are cut BEFORE folding, which would turn them into
@@ -177,6 +196,52 @@ export function callerSaidTheName(
     }
   }
   return confirmed;
+}
+
+/** Words a caller may put between an introduction and the name. */
+const QUALIFIERS = new Set(["really", "actually", "just", "truly", "honestly", "actual", "real", "um", "umm", "uh",
+  "uhm", "er", "erm", "hmm", "like", "well", "oh", "so", "ah"]);
+
+/** Introductions of one half of a name. */
+const HALF = [
+  { re: "my (?:last|family) name is|my surname is|my last name s|mi apellido es", half: "last" },
+  { re: "my first name is|my first name s|mi primer nombre es", half: "first" },
+] as const;
+
+/**
+ * True when a caller sentence, commas and colons ignored, introduces the caller
+ * as someone other than this name. Fails safe: an unclear name after a
+ * strong introduction ("my name is …") counts as a conflict.
+ */
+function conflicts(line: string, first: string, last: string, name: string): boolean {
+  // Within a sentence only: "…, I'm sorry. Can you call me back?" is not a name.
+  return line.split(/[.!?]+/).some((sentence) => sentenceConflicts(sentence, first, last, name));
+}
+
+function sentenceConflicts(sentence: string, first: string, last: string, name: string): boolean {
+  const folded = fold(sentence.replace(/[;:,\u2012-\u2015]+/g, " "));
+  const lastRe = last.split(/[ _]/).join("[ _]");
+  const firstRe = first;
+  const sources: { re: string; want: string; strong: boolean }[] = [
+    ...HALF.map((h) => ({ re: h.re, want: h.half === "last" ? lastRe : firstRe, strong: true })),
+    ...INTRODUCTIONS.map((i) => ({ re: i.replace(/ /g, "[ _]"), want: name, strong: STRONG.has(i) })),
+  ];
+  for (const { re, want, strong } of sources) {
+    for (const m of folded.matchAll(new RegExp(`(?<= )(?:${re})(?= )`, "g"))) {
+      const before = folded.slice(0, m.index).trim().split(/[ _]/).pop() ?? "";
+      if (NEGATORS.has(before) && before !== "no") continue;
+      const words = folded.slice(m.index + m[0].length).trim().split(" ").filter(Boolean);
+      while (words.length && QUALIFIERS.has(words[0])) words.shift();
+      if (NEGATORS.has(words[0] ?? "")) continue; // a denial, handled elsewhere
+      const rest = ` ${words.join(" ")} `;
+      if (new RegExp(`^ ${want}(?= )`).test(rest)) continue;
+      const w = words[0] ?? "";
+      if (strong) return true;
+      if (w === "" || w === "a" || w === "i") continue;
+      if (!NOT_A_NAME.has(w) && !/^s_/.test(w)) return true;
+    }
+  }
+  return false;
 }
 
 /** Words that may come before an introduction that opens its clause. */
