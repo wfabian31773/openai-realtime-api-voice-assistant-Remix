@@ -603,3 +603,12 @@ describe("allowlist design, Codex round 15: third parties, other corrections", (
   });
 });
 
+describe("allowlist design, Codex round 16", () => {
+  it("fails safe", () => {
+    const said = (c: string, f = "Mary", l = "Smith") => callerSaidTheName(`AGENT: Hello?\nCALLER: ${c}`, f, l);
+    expect(said("Mi nombre es Maria Garcia de la Cruz. Necesito cambiar mi cita.", "Maria", "Garcia")).toBe(false);
+    expect(said("This is Mary Smith. Sorry, that was wrong; Jane Jones is my name. Please call me about my surgery.")).toBe(false);
+    expect(callerSaidTheName("AGENT: How does the voicemail begin?\nCALLER: This is Mary Smith.", "Mary", "Smith")).toBe(false);
+  });
+});
+

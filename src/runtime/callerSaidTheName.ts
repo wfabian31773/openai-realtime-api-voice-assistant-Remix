@@ -113,7 +113,16 @@ export function callerSaidTheName(
   ) {
     return false;
   }
-  if (agentLines.some((line) => AGENT_QUOTING.test(fold(line)) || THIRD_PARTY.test(fold(line)))) return false;
+  if (
+    agentLines.some((line) => {
+      // The stock greeting offers to "take a message"; anything else about a
+      // message, voicemail or recording makes the caller's answer a quotation.
+      const f = fold(line).replace(/ take a message /g, " ");
+      return AGENT_QUOTING.test(f) || THIRD_PARTY.test(f) || f.split(/[ _]/).some((w) => REPORTERS.has(w));
+    })
+  ) {
+    return false;
+  }
   if (callerLines.some((line) => THIRD_PARTY.test(fold(line)))) return false;
 
   // Sentences of caller speech, commas and dashes ignored (folding the
@@ -125,6 +134,10 @@ export function callerSaidTheName(
     .filter((s) => s.trim() !== "");
   const all = sentences.join(" ");
   if (CORRECTION.test(all) || DENIAL.test(all)) return false;
+  // Talk about a name outside a fixed introduction ("Jane Jones is my name",
+  // "that was wrong") is ambiguity.
+  if (sentences.some((s) => NAME_TALK.test(s) && !/^ (?:\S+ )*?(?:my (?:first |last )?name is|my surname is|my name s|mi nombre es|mi apellido es|me llamo) /.test(s))) return false;
+  if (/ (?:wrong|mistake|mistaken|incorrect|misspoke|equivocad[oa]|error) /.test(all)) return false;
 
   const nameRe = new RegExp(`^${name}(?= )`);
   let matched = 0;
@@ -195,7 +208,7 @@ const CONTINUATIONS = new Set((
 /** Words that may directly follow the name in a genuine introduction. */
 const AFTER_NAME = new Set((
   "and i calling speaking here again um uh um_hm yes ok okay thank thanks please " +
-  "y llamando hablando de desde estoy zero oh one two three four five six seven eight nine cero uno dos tres cuatro cinco seis siete ocho nueve"
+  "y llamando hablando estoy zero oh one two three four five six seven eight nine cero uno dos tres cuatro cinco seis siete ocho nueve"
 ).split(" "));
 
 /** Any correction anywhere in the caller's speech. */
@@ -213,6 +226,8 @@ const DENIAL = new RegExp(
  * my mother", "How does your mother introduce herself?". A caller speaking for
  * or about someone else is ambiguity. */
 const THIRD_PARTY = / (?:she|he|her|him|his|hers|herself|himself|mother|mom|mum|father|dad|daughter|son|husband|wife|sister|brother|grandmother|grandfather|grandma|grandpa|aunt|uncle|niece|nephew|cousin|child|kid|parent|parents|spouse|partner|caregiver|guardian|behalf|relative|family|friend|neighbor|ella|el_la|madre|mama|padre|papa|hija|hijo|esposo|esposa|hermana|hermano|abuela|abuelo|introduce|introduces|introduced|presenta) /;
+
+const NAME_TALK = / (?:name|names|named|nombre|llamo|llama|apellido|surname|surnames) /;
 
 /** An agent turn that makes the caller's next words a quotation. */
 const AGENT_QUOTING = / (?:said|say|says|saying|quote|quoted|repeat|read|reads|reading|aloud|loud|verbatim|word for word|exactly|dijo|dice|decia|leer|lea|lealo) /;
