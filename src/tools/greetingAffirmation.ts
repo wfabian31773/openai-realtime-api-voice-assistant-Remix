@@ -46,9 +46,13 @@ export function callerAffirmedThePhoneMatch(
   const chart = resolved.patientData;
   const said = spoken.firstName?.trim();
   if (!said || !chart?.firstName) return false;
-  if (nameKey(said) !== nameKey(chart.firstName) && firstWord(said) !== firstWord(chart.firstName)) {
-    return false;
-  }
+  // The record's whole first name, or — for a compound record name such as
+  // "Mary Ann" — its first word said ON ITS OWN. Two compound names that only
+  // share a first word ("Mary Jane" against "Mary Ann") are two people
+  // (Codex P2 on #423), and a name longer than the record's is not the record.
+  // (A name of two words can never equal one word, so one comparison covers both.)
+  const saidKey = nameKey(said);
+  if (saidKey !== nameKey(chart.firstName) && saidKey !== firstWord(chart.firstName)) return false;
 
   if (spoken.lastName?.trim() && nameKey(spoken.lastName) !== nameKey(chart.lastName)) return false;
 

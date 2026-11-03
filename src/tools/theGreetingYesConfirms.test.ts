@@ -175,6 +175,13 @@ describe('the rule itself', () => {
     expect(callerAffirmedThePhoneMatch(onePersonOnTheNumber({ ...ALEX, firstName: 'Mary Ann' }), { firstName: 'Mary' })).toBe(true);
   });
 
+  it('two compound names that share only a first word are two people; a longer name is not the record', () => {
+    const maryAnn = onePersonOnTheNumber({ ...ALEX, firstName: 'Mary Ann' });
+    expect(callerAffirmedThePhoneMatch(maryAnn, { firstName: 'Mary Jane' })).toBe(false);
+    expect(callerAffirmedThePhoneMatch(maryAnn, { firstName: 'Mary Ann' })).toBe(true);
+    expect(callerAffirmedThePhoneMatch(onePersonOnTheNumber({ ...ALEX, firstName: 'Mary' }), { firstName: 'Mary Ann' })).toBe(false);
+  });
+
   it('refuses a blank name, an unreadable date and a non-phone match', () => {
     expect(callerAffirmedThePhoneMatch(resolved, { firstName: '  ' })).toBe(false);
     expect(callerAffirmedThePhoneMatch(resolved, { firstName: 'Alex', dateOfBirth: 'sometime in April' })).toBe(false);
