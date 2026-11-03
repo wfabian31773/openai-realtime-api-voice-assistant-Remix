@@ -1172,8 +1172,21 @@ import { callEnvironment } from "./callRecord";
  * same-day appointment-time conflict files high. v165 is #419's. Above main's
  * v164 (#418). No migration.
  */
+/**
+ * v169 — A GOODBYE THAT NAMES THE CALLER IS STILL A GOODBYE (2026-11-03).
+ * v134's goodbye grace missed three ordinary closings — a sign-off that names
+ * the caller ("You're welcome, Irene. Take care."), the agent's goodbye
+ * answered by a thank-you ("Adiós." / "Gracias." / "Con gusto."), and a bare
+ * thank-you before the agent's full sign-off — so those calls sat open until
+ * the dead-air watchdog: 34 dead_air endings on 2026-11-02, 53 s of silence on
+ * average. The matcher now ignores a comma-set capitalised name, reads a polite
+ * reply to the agent's own goodbye as the caller's farewell, and lets a bare
+ * thank-you close only when the agent's reply is a full sign-off (never a
+ * thank-you that answers a question). v168 is #421's. Above main's v167 (#419).
+ * No migration.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v167-follow-up-replies-are-timed-20261102";
+  "voice-runtime-v169-a-goodbye-that-names-the-caller-20261103";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can
