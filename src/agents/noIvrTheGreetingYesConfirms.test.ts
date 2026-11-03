@@ -85,7 +85,7 @@ vi.mock('../services/callerMemoryService', () => ({
   callerMemoryService: { getCallerMemory: async () => null, buildContextForPrompt: () => '' },
 }));
 
-const { createNoIvrAgent, greetingYesConfirms, greetingConfirmedMatches } = await import('./noIvrAgent');
+const { createNoIvrAgent, greetingYesConfirms, greetingConfirmedMatches, greetingConfirmedFirstName } = await import('./noIvrAgent');
 const { verifiedIdentityFor, resetVerifiedIdentities } = await import('../tools/verifiedIdentity');
 const { prepareTicketIdentity } = await import('../tools/ticketIdentity');
 
@@ -251,5 +251,45 @@ describe('a greeting-confirmed record is a confirmed record on the ticket (Codex
     // The ticket replaced the cache; a later phone-only lookup is still confirmed.
     const again = await call(agent, 'lookup_schedule', { phone: '5551234567' });
     expect(again.upcomingAppointments).toHaveLength(1);
+  });
+});
+
+describe('a compound first name the yes confirmed (Codex P2 on #425)', () => {
+  const SID = 'CA0000000000000000000000000000c172';
+  const ROSA_MAE = { firstName: 'Rosa Mae', lastName: 'Quixote', dateOfBirth: '1958-01-04', personId: 'p-compound' };
+  const ROSA_MAE_ON_THE_NUMBER = {
+    ...ONE_PERSON_ON_THE_NUMBER,
+    patientName: 'Rosa Mae Quixote',
+    identity: { unique: true, candidateCount: 1, candidates: [{ ...ROSA_MAE, appointmentCount: 1 }] },
+    patientData: ROSA_MAE,
+  };
+
+  it('a ticket filed under the first word alone inherits the surname and date of birth', async () => {
+    h.lookupByPhone.mockResolvedValue(ROSA_MAE_ON_THE_NUMBER as any);
+    const agent = await createNoIvrAgent(async () => {}, {
+      callId: `call-${SID}`, callSid: SID, callerPhone: '+15551234567',
+      precontext: { matched: true, firstName: 'Rosa Mae' }, pipeline: 'runtime', callLogId: 'row-c172',
+    } as any);
+    const looked = await call(agent, 'lookup_schedule', { first_name: 'Rosa' });
+    expect(looked.upcomingAppointments).toHaveLength(1);
+    const filed = await call(agent, 'create_ticket', {
+      first_name: 'Rosa', location: 'Synthetic Clinic', callback_number: '5551234567',
+      request_category: 'general_question', request_summary: 'Wants to know whether the drops were called in.',
+    });
+    expect(filed.missingFields).toBeUndefined();
+    expect(filed.success).toBe(true);
+    const sent = h.submitSimplifiedTicket.mock.calls[h.submitSimplifiedTicket.mock.calls.length - 1]?.[0] as Record<string, unknown>;
+    expect(sent.patientFullName).toBe('Rosa Mae Quixote');
+    expect(sent.patientDOB).toBe('01/04/1958');
+  });
+
+  it('rewrites only the first word of the confirmed record, never another name or surname', () => {
+    const confirmed = ROSA_MAE_ON_THE_NUMBER as any;
+    expect(greetingConfirmedFirstName(confirmed, { first_name: 'Rosa' })).toBe('Rosa Mae');
+    expect(greetingConfirmedFirstName(confirmed, { first_name: 'rosa', last_name: 'Quixote' })).toBe('Rosa Mae');
+    expect(greetingConfirmedFirstName(confirmed, { first_name: 'Rosa Mae' })).toBe('Rosa Mae');
+    expect(greetingConfirmedFirstName(confirmed, { first_name: 'Rosa', last_name: 'Lopez' })).toBe('Rosa');
+    expect(greetingConfirmedFirstName(confirmed, { first_name: 'Mae' })).toBe('Mae');
+    expect(greetingConfirmedFirstName(undefined, { first_name: 'Rosa' })).toBe('Rosa');
   });
 });

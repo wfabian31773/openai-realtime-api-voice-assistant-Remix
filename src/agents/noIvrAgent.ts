@@ -640,6 +640,30 @@ export function greetingConfirmedMatches(
 }
 
 /**
+ * The record's own first name when the model passes only the first word of a
+ * compound first name the greeting's yes confirmed ("Mary" for a record that
+ * reads "Mary Ann"). The confirmed identity is held under the record's name,
+ * and `validatedPatientFor` compares names exactly, so without this the
+ * ticket could not inherit the surname and date of birth the yes confirmed
+ * (Codex P2 on #425). Only that one shape is rewritten: the record's whole
+ * first name, any other name, or a surname that is not the record's are left
+ * as passed.
+ */
+export function greetingConfirmedFirstName(
+  confirmed: PatientScheduleContext | undefined,
+  params: { first_name?: string; last_name?: string },
+): string | undefined {
+  const said = params.first_name?.trim();
+  const chart = confirmed?.patientData;
+  if (!said || !chart?.firstName) return params.first_name;
+  const chartKey = nameKey(chart.firstName);
+  const saidKey = nameKey(said);
+  if (saidKey === chartKey || saidKey !== chartKey.split(' ')[0]) return params.first_name;
+  if (params.last_name?.trim() && nameKey(params.last_name) !== nameKey(chart.lastName)) return params.first_name;
+  return chart.firstName;
+}
+
+/**
  * Whether this lookup carries the caller's YES to the greeting's "Am I
  * speaking with <first name>?" on a number that is one person on file (v172).
  * The greeting named them only when caller ID matched one person with a first
@@ -1826,6 +1850,9 @@ The ticket will include schedule context (last appointment info) automatically.`
       question_fully_answered: z.boolean().optional().describe("TRUE only when fully answered with no staff work or follow-up left. Skips filing only with requires_callback FALSE. Default FALSE."),
     }),
     execute: async (params) => {
+      // A compound first name the greeting's yes confirmed is filed under the
+      // record's whole first name, so the held identity is found (Codex P2 on #425).
+      params = { ...params, first_name: greetingConfirmedFirstName(greetingConfirmed, params) ?? params.first_name };
       const prepared = prepareTicketIdentity({ ...params, call_sid: metadata.callSid });
       let locationSource = prepared.input.locationSource as TicketLocationSource | undefined;
       // Hydrate held facts here; the bounded DOB/B2B rules below own refusals.
