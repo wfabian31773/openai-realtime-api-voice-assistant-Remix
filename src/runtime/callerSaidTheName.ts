@@ -108,7 +108,10 @@ export function callerSaidTheName(
     callerLines.some(
       (line) =>
         /["\u201C\u201D\u00AB\u00BB:]|(?:^|[^\p{L}])['`\u2018\u2019]|['`\u2018\u2019](?![\p{L}])/u.test(line) ||
-        fold(line).split(/[ _]/).some((w) => REPORTERS.has(w)),
+        fold(line).split(/[ _]/).some((w) => REPORTERS.has(w)) ||
+        LISTENING.test(fold(line)) ||
+        // "I hear this. This is Mary Smith": a sentence pointing at what follows.
+        /(?:^|[^\p{L}])(?:this|that|esto|eso)\s*[.!;,]/iu.test(line),
     )
   ) {
     return false;
@@ -137,7 +140,7 @@ export function callerSaidTheName(
   for (let i = 0; i < lines.length; i++) {
     if (lines[i]?.startsWith("CALLER:")) continue;
     if (!lines.slice(i + 1).some((l) => l.startsWith("CALLER:"))) break;
-    if (!AGENT_OK.test(fold(lines[i] ?? ""))) return false;
+    if (!AGENT_OK.test(fold(lines[i] ?? "")) || LISTENING.test(fold(lines[i] ?? ""))) return false;
   }
   const sentences = callerLines
     .flatMap((l) => l.split(/[.!?;]+/))
@@ -157,8 +160,8 @@ export function callerSaidTheName(
   const firstRe = new RegExp(`(?<= )${firstAlt}(?= )`, "g");
   const lastRe = new RegExp(`(?<= )${last.split(/[ _]/).join("[ _]")}(?= )`, "g");
   for (const s of sentences) {
-    // After a match, an apology or an "X here" introduction is a correction.
-    if (matched > 0 && / (?:sorry|perdon|disculpe) /.test(s)) return false;
+    // After a match, an apology, "actually" or an "X here" introduction is a correction.
+    if (matched > 0 && / (?:sorry|perdon|disculpe|actually|wait|oops|no|rather) /.test(s)) return false;
     if (/ here $/.test(s) && !new RegExp(`(?<= )${name} here $`).test(s)) return false;
     mentions += (s.match(firstRe) ?? []).length + (s.match(lastRe) ?? []).length;
     for (const m of s.matchAll(INTRO_RE)) {
@@ -250,6 +253,9 @@ const THIRD_PARTY = / (?:she|he|her|him|his|hers|herself|himself|mother|mom|mum|
 
 /** Agent turns a caller's self-introduction may answer. */
 const AGENT_OK = / (?:how can i help|how may i help|help you|name|nombre|who is|who am i|speaking|hello|hi|go ahead|ayudar|en que) /;
+
+/** Words about hearing or playing audio: what follows may be a recording. */
+const LISTENING = / (?:listen|listened|listening|dial|dialed|dialled|dialing|sound|sounds|sounded|play|plays|played|playing|machine|audio|goes|went|escucho|escuche|oigo|suena) /;
 
 const NAME_TALK = / (?:name|names|named|nombre|llamo|llama|apellido|surname|surnames) /;
 

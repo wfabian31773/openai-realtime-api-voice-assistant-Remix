@@ -630,3 +630,11 @@ describe("allowlist design, Codex round 18", () => {
   });
 });
 
+describe("allowlist design, Codex round 19", () => {
+  it("fails safe", () => {
+    expect(callerSaidTheName("AGENT: Hello?\nCALLER: This is Mary Smith. Actually, Jane Jones. I need to reschedule my appointment.", "Mary", "Smith")).toBe(false);
+    expect(callerSaidTheName("AGENT: Hello, what do you hear when you dial that number?\nCALLER: This is Mary Smith. I need to reschedule my own appointment.", "Mary", "Smith")).toBe(false);
+    expect(callerSaidTheName("AGENT: Hello?\nCALLER: When I dial your number, I hear this. This is Mary Smith. Can you help me book an appointment?", "Mary", "Smith")).toBe(false);
+  });
+});
+
