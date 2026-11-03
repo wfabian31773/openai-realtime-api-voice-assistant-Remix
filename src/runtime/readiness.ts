@@ -1173,7 +1173,33 @@ import { callEnvironment } from "./callRecord";
  * v164 (#418). No migration.
  */
 /**
- * v168 — THE CALLER SAID THE RECORD'S NAME (2026-11-03). Callers who left a
+ * v169 — A GOODBYE THAT NAMES THE CALLER IS STILL A GOODBYE (2026-11-03).
+ * v134's goodbye grace missed three ordinary closings — a sign-off that names
+ * the caller ("You're welcome, Irene. Take care."), the agent's goodbye
+ * answered by a thank-you ("Adiós." / "Gracias." / "Con gusto."), and a bare
+ * thank-you before the agent's full sign-off — so those calls sat open until
+ * the dead-air watchdog: 34 dead_air endings on 2026-11-02, 53 s of silence on
+ * average. The matcher now ignores a comma-set capitalised name, reads a polite
+ * reply to the agent's own goodbye as the caller's farewell, and lets a bare
+ * thank-you close only when the agent's reply is a full sign-off (never a
+ * thank-you that answers a question). v168 is #421's. Above main's v167 (#419).
+ * No migration.
+ */
+/**
+ * v170 — THE NAMED GREETING IS BACK (2026-11-03). Operator: "that was a hard
+ * rule and should have never been replaced." #384 (VA-76205) made the
+ * greeting's first name require identityValidated, which nothing sets at
+ * greeting time, so from the 2026-10-30 deploy no greeting asked "Am I
+ * speaking with <name>?" (optical/surgery/tech 245 of 355 on 10-29, 0 of 433
+ * on 11-02). recognisedFirstName names a matched caller again; the
+ * recognised-caller block follows it (v157's candidate arm is gone with the
+ * case it served). And the caller's yes to that name confirms a number that
+ * is one person (operator ruling, same day; greetingAffirmation.ts); #384's
+ * other ticket-side rules are unchanged. v168 is #421's. Above main's v169
+ * (#422), which it contains. No migration.
+ */
+/**
+ * v171 (was v168 on its branch) — THE CALLER SAID THE RECORD'S NAME (2026-11-03). Callers who left a
  * whole message in one breath after the greeting (name, request, callback) and
  * hung up were skipped by the teardown sweep as "no-name": no tool had
  * received the name, and the calling number's pre-context match is held
@@ -1182,10 +1208,10 @@ import { callEnvironment } from "./callRecord";
  * caller introduced themselves by that name ("my name is", "this is", "soy"…)
  * (`callerSaidTheName`, the operator's 2026-10-29 ruling), with a staff note
  * that no date of birth was confirmed; it carries no chart date of birth or
- * history. Above main's v167 (#419). No migration.
+ * history. Above main's v170 (#423), which it contains. No migration.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v168-the-caller-said-the-records-name-20261103";
+  "voice-runtime-v171-the-caller-said-the-records-name-20261103";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

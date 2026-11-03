@@ -39,6 +39,7 @@ import { readPatientAppointments } from './patientAppointments';
 import { noteStatusOverride, patientStatusFor } from './spokenPatientStatus';
 
 import { acceptsFacility, mostRecentAcceptable, type ToolQueue } from './acceptableLocation';
+import { callerAffirmedThePhoneMatch } from './greetingAffirmation';
 export { mostRecentAcceptable, type ToolQueue } from './acceptableLocation';
 
 function facilityWord(queue: ToolQueue | undefined): string {
@@ -572,9 +573,14 @@ registerTool({
     const uniqueMatch = resolved.identity?.unique !== false;
 
     // A phone hit, whether from appointments or the person base, is only a
-    // candidate. A unique name-and-DOB validation establishes the identity.
-    const certain = resolved.identity?.unique === true &&
-      resolved.matchedBy === 'name_and_dob' && !resolved.identityUnconfirmed;
+    // candidate until it is validated. Two things validate it: a unique
+    // name-and-DOB match (#384), or the caller's yes to the greeting's
+    // "Am I speaking with <first name>?" on a number that is one person —
+    // the operator's ruling of 2026-11-03 (v170, greetingAffirmation.ts).
+    const certain = resolved.identity?.unique === true && (
+      (resolved.matchedBy === 'name_and_dob' && !resolved.identityUnconfirmed) ||
+      callerAffirmedThePhoneMatch(resolved, { firstName: first, lastName: last, dateOfBirth: dob })
+    );
 
     // Carry the joined record by CallSid. Candidate facts may be remembered,
     // but neither DOB nor identity readers expose them until certainty is true.
