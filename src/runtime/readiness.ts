@@ -1199,6 +1199,18 @@ import { callEnvironment } from "./callRecord";
  * (#422), which it contains. No migration.
  */
 /**
+ * v171 (was v168 on its branch) — THE CALLER SAID THE RECORD'S NAME (2026-11-03). Callers who left a
+ * whole message in one breath after the greeting (name, request, callback) and
+ * hung up were skipped by the teardown sweep as "no-name": no tool had
+ * received the name, and the calling number's pre-context match is held
+ * `certain: false` since #384. On 2026-11-02 that was 6 of the day's 10 lost
+ * requests. The sweep now files under the calling number's record when the
+ * caller introduced themselves by that name ("my name is", "this is", "soy"…)
+ * (`callerSaidTheName`, the operator's 2026-10-29 ruling), with a staff note
+ * that no date of birth was confirmed; it carries no chart date of birth or
+ * history. Above main's v170 (#423), which it contains. No migration.
+ */
+/**
  * v172 — THE AFTER-HOURS GREETING ASKS THE NAME, AND THE YES COUNTS THERE TOO
  * (2026-11-03). Operator, choosing "After-hours too": "Am I speaking with
  * <first name>?" closes the after-hours greeting, after the closed notice,
@@ -1208,8 +1220,8 @@ import { callEnvironment } from "./callRecord";
  * (`greetingYesConfirms`), so the record's last name and date of birth reach
  * the ticket without being asked. Before (no-ivr, 10-20..11-02, recognised
  * callers): asked the name on 185 of 377, and asked a surname or date of
- * birth after all 159 yeses. v171 is #421's. Above main's v170 (#423), which
- * it contains. No migration.
+ * birth after all 159 yeses. Above main's v171 (#421, the sweep files under
+ * the record's name), which it contains. No migration.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
   "voice-runtime-v172-the-after-hours-greeting-asks-the-name-20261103";
