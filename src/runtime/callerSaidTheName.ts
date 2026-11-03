@@ -110,81 +110,50 @@ export function callerSaidTheName(
   // Codex P1s, #421: one clause matching is not enough. A name the caller
   // QUOTES ("the message said this is Mary Smith") is not their own, a second
   // self-introduction ("…and I am John Jones") is conflicting evidence, and a
-  // correction ("Sorry, I mean Mary Jones") overrides everything before it.
-  // So every introduction on every caller line is read IN SPOKEN ORDER, and
-  // the answer is true only when, after the last correction, at least one
-  // genuine self-introduction names this person and none names anyone else.
+  // correction ("Sorry, I mean Mary Jones") overrides what came before. So
+  // every introduction on every caller line is weighed, and the answer is
+  // true only when at least one genuine self-introduction names this person
+  // and nothing else in the call identifies the caller differently.
   //
-  // Where that reading is ambiguous it fails SAFE (false, no ticket):
-  //   - reported speech: a caller who mentions a message, a voicemail or
-  //     someone saying something anywhere in the call answers false;
-  //   - a correction ("I mean …") replaces earlier identities only when the
-  //     clause just before it (filler like "sorry" aside), or its own clause
-  //     before it, held a self-introduction; otherwise it may be correcting a
-  //     mention of somebody else and is weighed as one more identity.
-  let ids: boolean[] = [];
-  // True while nothing but filler has been said since the end of the last
-  // self-introduced name: only then is "I mean …" correcting THAT name.
-  let open = false;
-  const fillerOnly = (text: string) => text.trim().split(/[ _]/).filter(Boolean).every((w) => FILLER.has(w));
-  const callerLines = transcript.split("\n").filter((line) => line.startsWith("CALLER:"));
-  // Reported speech is not bounded reliably — the attribution can come after
-  // the quote ('"This is Mary Smith," the message said') or on another turn
-  // — so a call where the caller talks about a message or about what someone
-  // said or wrote, or quotes anything, never confirms a name from the transcript (fails safe).
+  // Where that reading is ambiguous it fails SAFE (false, no ticket), because
+  // a false "yes" files a ticket under the wrong patient and a false "no"
+  // only leaves the call as it was before v168:
+  //   - reported speech: a caller who quotes anything, or mentions a message,
+  //     a voicemail, an email, or someone saying or introducing something,
+  //     anywhere in the call;
+  //   - any correction ("I mean …", "I meant …") followed by a name-like
+  //     word. A correction always overrides the earlier introduction, but
+  //     whether it corrects the caller's own name or a mention of someone
+  //     else ("calling about Mary Jones, sorry, I mean Mary Smith") cannot be
+  //     told apart reliably, so it never confirms — it only cancels;
+  //   - a denial of this name ("Actually, I'm not Mary Smith") anywhere.
+  const callerLines = transcript
+    .split("\n")
+    .filter((line) => line.startsWith("CALLER:"))
+    .map((line) => line.slice("CALLER:".length));
   if (
     callerLines.some(
       (line) =>
-        /["\u201C\u201D\u00AB\u00BB]|(?:^|[^\p{L}])['`\u2018\u2019]|['`\u2018\u2019](?![\p{L}])/u.test(line.slice("CALLER:".length)) ||
-        fold(line.slice("CALLER:".length)).split(/[ _]/).some((w) => REPORTERS.has(w)),
+        /["\u201C\u201D\u00AB\u00BB]|(?:^|[^\p{L}])['`\u2018\u2019]|['`\u2018\u2019](?![\p{L}])/u.test(line) ||
+        fold(line).split(/[ _]/).some((w) => REPORTERS.has(w)),
     )
   ) {
     return false;
   }
-  for (const line of transcript.split("\n")) {
-    // Any other turn (the agent asking "calling about Mary Jones?") ends the
-    // run in which "I mean …" can correct the caller's own introduction.
-    if (!line.startsWith("CALLER:")) {
-      open = false;
-      continue;
-    }
-    for (const clause of line.slice("CALLER:".length).split(/[.!?;:,\u2012-\u2015]+/)) {
-      // Clause boundaries are cut BEFORE folding, which would turn them into
-      // spaces and join one clause to the next. An en or em dash is a clause
-      // break, not a joiner; only a hyphen (ASCII, U+2010, U+2011) joins.
-      const folded = fold(clause);
-      if (fillerOnly(folded)) continue;
-      const events = introductions(clause, name);
-      let cursor = 0;
-      for (const ev of events) {
-        const adjacent = open && fillerOnly(folded.slice(cursor, ev.start));
-        // A denial of this very name anywhere ("Actually, I'm not Mary Smith")
-        // outweighs any confirmation of it.
-        if (ev.denied) return false;
-        if (ev.who === null) {
-          open = false;
-          continue;
-        }
-        if (ev.correction) {
-          // A correction straight after a self-introduction replaces it. Any
-          // other correction may be of a mention ("calling about Mary Jones,
-          // sorry, I mean Mary Smith"), and one that runs on ("I mean Mary
-          // Smith is the patient") may name someone else: either can still
-          // conflict, never confirm.
-          if (adjacent && (!ev.who || fillerOnly(folded.slice(ev.end)))) ids = [];
-          else if (ev.who) {
-            open = false;
-            continue;
-          }
-        }
-        ids.push(ev.who);
-        open = true;
-        cursor = ev.end;
+  let confirmed = false;
+  for (const line of callerLines) {
+    // Clause boundaries are cut BEFORE folding, which would turn them into
+    // spaces and join one clause to the next. An en or em dash is a clause
+    // break, not a joiner; only a hyphen (ASCII, U+2010, U+2011) joins.
+    for (const clause of line.split(/[.!?;:,\u2012-\u2015]+/)) {
+      for (const ev of introductions(clause, name)) {
+        if (ev.denied || ev.cancels) return false;
+        if (ev.who === false) return false;
+        if (ev.who === true) confirmed = true;
       }
-      if (open && !fillerOnly(folded.slice(cursor))) open = false;
     }
   }
-  return ids.length > 0 && ids.every(Boolean);
+  return confirmed;
 }
 
 /** Clauses that carry no content of their own ("Sorry, I mean …"). */
@@ -195,7 +164,7 @@ const NEGATORS = new Set(["no", "not", "never", "nunca"]);
 /** Folded caller words that mark reported speech somewhere in the call. */
 const REPORTERS = new Set([
   "said", "says", "saying", "told", "tells", "asked", "wrote", "stated",
-  "states", "message", "email", "mail", "text", "letter", "note", "reads", "read", "recording", "voicemail", "dijo", "dice", "decia", "mensaje",
+  "states", "introduced", "introduces", "herself", "himself", "themselves", "announced", "claimed", "claims", "shows", "showed", "screen", "message", "email", "mail", "text", "letter", "note", "reads", "read", "recording", "voicemail", "dijo", "dice", "decia", "mensaje",
 ]);
 
 /** Introductions that name a person whatever the transcript's casing. */
@@ -222,7 +191,7 @@ function capitalised(clause: string, w: string): boolean {
   return clause.split(/[^\p{L}\p{M}'\u2019-]+/u).some((raw) => /^\p{Lu}/u.test(raw) && fold(raw).trim() === w);
 }
 
-type Intro = { who: boolean | null; correction: boolean; denied: boolean; start: number; end: number };
+type Intro = { who: boolean | null; denied: boolean; cancels: boolean };
 
 /**
  * Every introduction in one clause, in order. `who` is true when it names
@@ -248,7 +217,7 @@ function introductions(clause: string, name: string): Intro[] {
     const ignored = negated;
     // "I'm not Mary Smith" / "this is not Mary Smith": a denial of this name.
     if (new RegExp(`^ (?:not|never|no) ${name}(?= )`).test(rest)) {
-      out.push({ who: null, correction, denied: true, start: m.index, end: m.index });
+      out.push({ who: null, denied: true, cancels: false });
       continue;
     }
     if (new RegExp(`^ ${name}(?= )`).test(rest)) {
@@ -256,8 +225,7 @@ function introductions(clause: string, name: string): Intro[] {
       // A possessive the joiner missed ("Smith 's daughter") still folds to
       // "smith s daughter"; Spanish negates BEFORE the verb ("No soy Mary Smith").
       const possessive = /^s(?: |$)/.test(after);
-      const end = folded.length - after.length;
-      out.push({ who: ignored || possessive ? null : true, correction, denied: negated && !possessive, start: m.index, end });
+      out.push({ who: ignored || possessive || correction ? null : true, denied: negated && !possessive, cancels: correction && !negated });
       continue;
     }
     const [w1 = "", w2 = ""] = rest.trim().split(" ");
@@ -268,8 +236,9 @@ function introductions(clause: string, name: string): Intro[] {
       w1.length > 1 && !NEGATORS.has(w1) && !/^s(?:_|$)/.test(w1) &&
       (STRONG.has(intro) || capitalised(clause, w1) ||
         !NOT_A_NAME.has(w1));
-    const end = m.index + m[0].length + 1 + `${w1} ${w2}`.length;
-    out.push({ who: !ignored && looksLikeName ? false : null, correction, denied: false, start: m.index, end });
+    // A correction cancels on any name-like word, initials included ("I mean J. Jones").
+    const cancels = correction && !ignored && w1.length >= 1 && !NOT_A_NAME.has(w1) && !FILLER.has(w1);
+    out.push({ who: !ignored && looksLikeName ? false : null, denied: false, cancels });
   }
   return out;
 }

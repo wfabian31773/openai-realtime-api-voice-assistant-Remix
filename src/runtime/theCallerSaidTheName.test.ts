@@ -453,7 +453,9 @@ describe('callerSaidTheName', () => {
 
   it('a later self-introduction or correction overrides an earlier one (Codex P1, #421)', () => {
     expect(said('This is Mary Smith. Sorry, I mean Mary Jones', 'Mary', 'Smith')).toBe(false);
-    expect(said('This is Mary Smith. Sorry, I mean Mary Jones', 'Mary', 'Jones')).toBe(true);
+    // The correction overrides Smith; it cannot be told from a correction of a
+    // mention, so it never confirms either name (fails safe).
+    expect(said('This is Mary Smith. Sorry, I mean Mary Jones', 'Mary', 'Jones')).toBe(false);
     expect(callerSaidTheName('CALLER: This is Mary Smith.\nCALLER: My name is Ana Ruiz.', 'Mary', 'Smith')).toBe(false);
     expect(said('This is Mary Smith. I am calling about my glasses.', 'Mary', 'Smith')).toBe(true);
   });
@@ -462,7 +464,7 @@ describe('callerSaidTheName', () => {
     expect(said('The message said: "This is Mary Smith."', 'Mary', 'Smith')).toBe(false);
     expect(said('This is Mary Smith and I am John Jones.', 'Mary', 'Smith')).toBe(false);
     expect(said('This is Mary Smith sorry I mean Mary Jones.', 'Mary', 'Smith')).toBe(false);
-    expect(said('This is Mary Smith sorry I mean Mary Jones.', 'Mary', 'Jones')).toBe(true);
+    expect(said('This is Mary Smith sorry I mean Mary Jones.', 'Mary', 'Jones')).toBe(false);
     expect(said('This is Mary Smith. I am john jones.', 'Mary', 'Smith')).toBe(false);
     expect(said('This is Mary Smith. I mean my appointment is tomorrow.', 'Mary', 'Smith')).toBe(true);
     expect(said('this is mary smith, i am calling about my glasses, it is urgent.', 'Mary', 'Smith')).toBe(true);
@@ -511,5 +513,13 @@ describe('callerSaidTheName', () => {
     expect(said("This is John Jones. Sorry, I mean Mary Smith is the patient, I'm her son.", 'Mary', 'Smith')).toBe(false);
     expect(said("The screen shows 'This is Mary Smith'.", 'Mary', 'Smith')).toBe(false);
     expect(said("The voicemail's first words were this is Mary Smith.", 'Mary', 'Smith')).toBe(false);
+  });
+
+  it('Codex round 8: an introduction attributed to someone else, comma run-ons, initials', () => {
+    expect(said('My mother introduced herself: my name is Mary Smith.', 'Mary', 'Smith')).toBe(false);
+    expect(
+      said("This is John Jones. Sorry, I mean Mary Smith, my mother, is the patient. I'm her son.", 'Mary', 'Smith'),
+    ).toBe(false);
+    expect(said('This is Mary Smith. Sorry, I mean J. Jones.', 'Mary', 'Smith')).toBe(false);
   });
 });
