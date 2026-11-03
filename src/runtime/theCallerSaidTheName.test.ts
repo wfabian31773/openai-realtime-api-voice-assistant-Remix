@@ -720,6 +720,7 @@ describe("closing round: relatives in any form, and speakers in any case", () =>
     expect(c("This is Mary Smith. Calling for my grandson to refill eye drops.")).toBe(false);
     expect(c("This is Mary Smith. Calling about my mother's appointment.")).toBe(false);
     expect(c("This is Mary Smith. My kids' appointments need to move.")).toBe(false);
+    expect(c("This is Mary Smith. Calling about the patient's eye drops. Please call me back.")).toBe(false);
     expect(callerSaidTheName("AGENT: Hello?\nCALLER: Soy María García. Llamo por mi nieta, necesita sus gotas.", "María", "García")).toBe(false);
     // Without "llamo", which is also name talk, so only the relative word refuses it.
     expect(callerSaidTheName("AGENT: Hello?\nCALLER: Soy María García. Es para mi nieta, necesita sus gotas.", "María", "García")).toBe(false);
