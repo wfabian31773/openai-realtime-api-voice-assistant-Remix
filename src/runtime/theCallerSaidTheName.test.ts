@@ -255,6 +255,17 @@ describe('the same day\'s correct refusals still file nothing', () => {
     expect(file.calls).toHaveLength(0);
   });
 
+  it('two people in one message do not add up to the record (Codex P2, #421)', async () => {
+    const sid = 'CA0000000000000000000000000000a006';
+    onFileAs(sid, 'Mary', 'Smith');
+    const transcript =
+      `${SURGERY_GREETING}\n` +
+      'CALLER: This is John Smith. Please call Mary Jones about her surgery date. Thank you.';
+    const file = filer();
+    expect(await runRequestSweep(record(sid, 'surgery', transcript), file)).toEqual({ filed: false, reason: 'no-name' });
+    expect(file.calls).toHaveLength(0);
+  });
+
   it('a household member: the same surname and a different first name is not the record', async () => {
     const sid = 'CA0000000000000000000000000000a001';
     onFileAs(sid, 'Maria', 'Plantilla');
@@ -323,6 +334,14 @@ describe('callerSaidTheName', () => {
     expect(said('This is Ana Garcia-Lopez.', 'Ana', 'Garcia Lopez')).toBe(true);
     expect(said("This is Ana O'Brien.", 'Ana', 'OBrien')).toBe(false);
     expect(said('This is Annabel Benchmarking.', 'Anna', 'Benchmark')).toBe(false);
+  });
+
+  it('the two halves must be ONE name, not two people (Codex P2, #421)', () => {
+    expect(said('This is John Smith. Please call Mary Jones about her surgery.', 'Mary', 'Smith')).toBe(false);
+    expect(said('Smith here, calling about Mary.', 'Mary', 'Smith')).toBe(false);
+    expect(said('This is Mary Ann Smith.', 'Mary', 'Smith')).toBe(true);
+    expect(said('This is Mary J Smith.', 'Mary', 'Smith')).toBe(true);
+    expect(said('This is Mary, um, about Smith.', 'Mary', 'Smith')).toBe(false);
   });
 
   it('cuts the first name to its first word and keeps the surname whole', () => {

@@ -28,8 +28,11 @@ function fold(text: string): string {
 }
 
 /**
- * True when the caller's own lines — never the agent's — contain the first
- * word of `firstName` and the whole of `lastName`, each as whole words.
+ * True when the caller's own lines — never the agent's — say the first word of
+ * `firstName` followed by the whole of `lastName`, as ONE name: adjacent, or
+ * with a single middle name or initial between them. Two halves found apart
+ * prove nothing — "This is John Smith. Please call Mary Jones" contains both
+ * Mary and Smith and names neither Mary Smith (Codex P2, #421).
  *
  * The first name is cut to its first word because the record carries middle
  * initials and second names ("Vince V") that nobody says; the surname is kept
@@ -52,5 +55,7 @@ export function callerSaidTheName(
       .map((line) => line.slice("CALLER:".length))
       .join(" "),
   );
-  return callerWords.includes(` ${first} `) && callerWords.includes(` ${last} `);
+  // Both halves are letters and spaces only after `fold`, so they need no
+  // escaping inside the pattern.
+  return new RegExp(` ${first} (?:[a-z]+ )?${last} `).test(callerWords);
 }
