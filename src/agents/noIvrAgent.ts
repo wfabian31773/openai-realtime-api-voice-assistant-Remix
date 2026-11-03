@@ -1,5 +1,6 @@
 import { nameKey, rememberVerifiedIdentity } from '../tools/verifiedIdentity';
 import { callerAffirmedThePhoneMatch } from '../tools/greetingAffirmation';
+import { dobKey } from '../services/callFactsLedger';
 import { recognisedFirstName } from '../services/greetingPersonalisation';
 import { joinedAppointments, prepareTicketIdentity, scheduleMatchesIdentity, validatedPatientFor, type TicketLocationSource } from '../tools/ticketIdentity';
 import { readDobQuietly } from '../tools/dobParts';
@@ -615,6 +616,27 @@ function toIsoDob(dobString: string): string | undefined {
  */
 export function phoneMatchIsUnconfirmed(context: PatientScheduleContext): boolean {
   return context.matchedBy === 'phone' || context.identityUnconfirmed === true;
+}
+
+/**
+ * Whether the cached schedule is still the one the caller's yes confirmed, and
+ * the identity held for the call is that same person. A phone-matched context
+ * never passes `scheduleMatchesIdentity` (it proves whose record is cached by a
+ * name-and-date-of-birth match), so the confirmation is carried here, by
+ * reference: it ends the moment the cache is replaced.
+ */
+export function greetingConfirmedMatches(
+  confirmed: PatientScheduleContext | undefined,
+  current: PatientScheduleContext | undefined,
+  held: { firstName?: string; lastName?: string; dateOfBirth?: string; personId?: string } | undefined,
+): boolean {
+  if (!confirmed || !current || confirmed !== current || !held) return false;
+  const chart = current.patientData;
+  if (nameKey(chart?.firstName) !== nameKey(held.firstName) || nameKey(chart?.lastName) !== nameKey(held.lastName)) return false;
+  if (chart?.personId && held.personId && chart.personId !== held.personId) return false;
+  const chartDob = dobKey(chart?.dateOfBirth);
+  const heldDob = dobKey(held.dateOfBirth);
+  return !chartDob || !heldDob || chartDob === heldDob;
 }
 
 /**
@@ -1368,6 +1390,8 @@ export async function createNoIvrAgent(
     )) as typeof tool;
 
   let scheduleContext: PatientScheduleContext | undefined;
+  /** The schedule the caller's yes to the greeting confirmed on this call (v172). */
+  let greetingConfirmed: PatientScheduleContext | undefined;
   let callerMemory: CallerMemory | null = null;
 
   if (callerPhone) {
@@ -1491,6 +1515,12 @@ is not an identity. Confirm the name and date of birth, then call again with the
         let confirmedByGreeting = false;
         if (scheduleMatchesIdentity(scheduleContext, held)) {
           result = scheduleContext;
+        } else if (scheduleContext && greetingConfirmedMatches(greetingConfirmed, scheduleContext, held)) {
+          // The same record the caller's yes already confirmed on this call
+          // (Codex P2 on #425): a later lookup, phone-only included, reuses
+          // it as confirmed instead of asking for the name and date of birth.
+          result = scheduleContext;
+          confirmedByGreeting = true;
         } else if (scheduleContext && greetingYesConfirms(metadata.precontext, scheduleContext, params)) {
           // THE CALLER'S YES TO THE GREETING'S NAME COUNTS HERE TOO (v172,
           // operator 2026-11-03, "After-hours too"): the greeting asked "Am
@@ -1604,6 +1634,7 @@ is not an identity. Confirm the name and date of birth, then call again with the
           };
           rememberVerifiedIdentity(metadata.callSid, { ...result.patientData, ...joinedAppointments(result), certain: true });
           scheduleContext = result;
+          if (confirmedByGreeting) greetingConfirmed = result;
           return {
             found: true,
             ...appointmentAccess(result, confirmed, params),
@@ -1929,7 +1960,8 @@ The ticket will include schedule context (last appointment info) automatically.`
       // SECONDARY LOOKUP: Enrich schedule context using name+DOB
       // This catches cases where caller phone doesn't match patient record (family member calling)
       const lockedIdentity = validatedPatientFor(metadata.callSid, params.first_name, params.last_name, params.date_of_birth);
-      const cachedIdentityMatches = scheduleMatchesIdentity(scheduleContext, lockedIdentity);
+      const cachedIdentityMatches = scheduleMatchesIdentity(scheduleContext, lockedIdentity) ||
+        greetingConfirmedMatches(greetingConfirmed, scheduleContext, lockedIdentity);
       let enrichedContext = cachedIdentityMatches ? scheduleContext : undefined;
       if (parsedDOB && !cachedIdentityMatches) {
         console.log("[No-IVR Agent] Performing secondary schedule lookup...");

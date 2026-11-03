@@ -84,7 +84,7 @@ vi.mock('../services/callerMemoryService', () => ({
   callerMemoryService: { getCallerMemory: async () => null, buildContextForPrompt: () => '' },
 }));
 
-const { createNoIvrAgent, greetingYesConfirms } = await import('./noIvrAgent');
+const { createNoIvrAgent, greetingYesConfirms, greetingConfirmedMatches } = await import('./noIvrAgent');
 const { verifiedIdentityFor, resetVerifiedIdentities } = await import('../tools/verifiedIdentity');
 const { prepareTicketIdentity } = await import('../tools/ticketIdentity');
 
@@ -177,5 +177,30 @@ describe('what the yes does NOT confirm', () => {
 
   it('a name-and-date-of-birth match is not this path (it confirms the old way)', () => {
     expect(greetingYesConfirms(GREETED, { ...ONE_PERSON_ON_THE_NUMBER, matchedBy: 'name_and_dob' } as any, { first_name: 'Zelda' })).toBe(false);
+  });
+});
+
+describe('the yes holds for the rest of the call (Codex P2 on #425)', () => {
+  const SID = 'CA0000000000000000000000000000b172';
+
+  it('a later phone-only lookup returns the confirmed appointment, not a candidate', async () => {
+    const agent = await agentFor(SID);
+    await call(agent, 'lookup_schedule', { first_name: 'Zelda' });
+    const again = await call(agent, 'lookup_schedule', { phone: '5551234567' });
+    expect(again.identityUnconfirmed).toBeUndefined();
+    expect(again.upcomingAppointments).toHaveLength(1);
+    expect(String(again.fix ?? '')).not.toMatch(/first_name, last_name and date_of_birth/);
+  });
+
+  it('only the record the yes confirmed, and only while it is still the cached one', () => {
+    const ctx = { ...ONE_PERSON_ON_THE_NUMBER } as any;
+    const held = { firstName: 'Zelda', lastName: 'Quixote', dateOfBirth: '1958-01-04', personId: 'p-synthetic' };
+    expect(greetingConfirmedMatches(ctx, ctx, held)).toBe(true);
+    expect(greetingConfirmedMatches(undefined, ctx, held)).toBe(false);
+    expect(greetingConfirmedMatches(ctx, { ...ctx }, held)).toBe(false);
+    expect(greetingConfirmedMatches(ctx, ctx, { ...held, firstName: 'Jordan' })).toBe(false);
+    expect(greetingConfirmedMatches(ctx, ctx, { ...held, personId: 'p-other' })).toBe(false);
+    expect(greetingConfirmedMatches(ctx, ctx, { ...held, dateOfBirth: '1990-07-01' })).toBe(false);
+    expect(greetingConfirmedMatches(ctx, ctx, undefined)).toBe(false);
   });
 });
