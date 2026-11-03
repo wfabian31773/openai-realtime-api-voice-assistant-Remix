@@ -491,4 +491,18 @@ describe('callerSaidTheName', () => {
     expect(said('This is Mary Smith. Sorry, I mean John de Vries.', 'Mary', 'Smith')).toBe(false);
     expect(said('This is Mary Smith. No I am John Jones.', 'Mary', 'Smith')).toBe(false);
   });
+
+  it('Codex round 6: other written sources, -ly names, an agent turn, a later denial', () => {
+    expect(said('The email reads: "This is Mary Smith."', 'Mary', 'Smith')).toBe(false);
+    expect(said('This is Mary Smith. I am kimberly jones.', 'Mary', 'Smith')).toBe(false);
+    expect(said('This is Mary Smith. Sorry, I mean beverly jones.', 'Mary', 'Smith')).toBe(false);
+    expect(
+      callerSaidTheName(
+        'CALLER: My name is John Jones.\nAGENT: Are you calling about Mary Jones?\nCALLER: Sorry, I mean Mary Smith.',
+        'Mary',
+        'Smith',
+      ),
+    ).toBe(false);
+    expect(said("This is Mary Smith. Actually, I'm not Mary Smith, I'm her daughter.", 'Mary', 'Smith')).toBe(false);
+  });
 });

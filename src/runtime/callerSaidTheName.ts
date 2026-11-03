@@ -131,11 +131,23 @@ export function callerSaidTheName(
   // Reported speech is not bounded reliably — the attribution can come after
   // the quote ('"This is Mary Smith," the message said') or on another turn
   // — so a call where the caller talks about a message or about what someone
-  // said or wrote never confirms a name from the transcript (fails safe).
-  if (callerLines.some((line) => fold(line.slice("CALLER:".length)).split(" ").some((w) => REPORTERS.has(w)))) {
+  // said or wrote, or quotes anything, never confirms a name from the transcript (fails safe).
+  if (
+    callerLines.some(
+      (line) =>
+        /["\u201C\u201D\u00AB\u00BB]/.test(line) ||
+        fold(line.slice("CALLER:".length)).split(" ").some((w) => REPORTERS.has(w)),
+    )
+  ) {
     return false;
   }
-  for (const line of callerLines) {
+  for (const line of transcript.split("\n")) {
+    // Any other turn (the agent asking "calling about Mary Jones?") ends the
+    // run in which "I mean …" can correct the caller's own introduction.
+    if (!line.startsWith("CALLER:")) {
+      open = false;
+      continue;
+    }
     for (const clause of line.slice("CALLER:".length).split(/[.!?;:,\u2012-\u2015]+/)) {
       // Clause boundaries are cut BEFORE folding, which would turn them into
       // spaces and join one clause to the next. An en or em dash is a clause
@@ -146,6 +158,9 @@ export function callerSaidTheName(
       let cursor = 0;
       for (const ev of events) {
         const adjacent = open && fillerOnly(folded.slice(cursor, ev.start));
+        // A denial of this very name anywhere ("Actually, I'm not Mary Smith")
+        // outweighs any confirmation of it.
+        if (ev.denied) return false;
         if (ev.who === null) {
           open = false;
           continue;
@@ -178,7 +193,7 @@ const NEGATORS = new Set(["no", "not", "never", "nunca"]);
 /** Folded caller words that mark reported speech somewhere in the call. */
 const REPORTERS = new Set([
   "said", "says", "saying", "told", "tells", "asked", "wrote", "stated",
-  "states", "message", "voicemail", "dijo", "dice", "decia", "mensaje",
+  "states", "message", "email", "mail", "text", "letter", "note", "reads", "read", "recording", "voicemail", "dijo", "dice", "decia", "mensaje",
 ]);
 
 /** Introductions that name a person whatever the transcript's casing. */
@@ -204,7 +219,7 @@ function capitalised(clause: string, w: string): boolean {
   return clause.split(/[^\p{L}\p{M}'\u2019-]+/u).some((raw) => /^\p{Lu}/u.test(raw) && fold(raw).trim() === w);
 }
 
-type Intro = { who: boolean | null; correction: boolean; named: boolean; start: number; end: number };
+type Intro = { who: boolean | null; correction: boolean; denied: boolean; start: number; end: number };
 
 /**
  * Every introduction in one clause, in order. `who` is true when it names
@@ -228,25 +243,30 @@ function introductions(clause: string, name: string): Intro[] {
     // correction ("No, I am John Jones"). Spanish negates before ("No soy…").
     const negated = before === "no" ? /^(?:soy|habla|me llamo)$/.test(intro) : NEGATORS.has(before);
     const ignored = negated;
+    // "I'm not Mary Smith" / "this is not Mary Smith": a denial of this name.
+    if (new RegExp(`^ (?:not|never|no) ${name}(?= )`).test(rest)) {
+      out.push({ who: null, correction, denied: true, start: m.index, end: m.index });
+      continue;
+    }
     if (new RegExp(`^ ${name}(?= )`).test(rest)) {
       const after = rest.replace(new RegExp(`^ ${name} `), "");
       // A possessive the joiner missed ("Smith 's daughter") still folds to
       // "smith s daughter"; Spanish negates BEFORE the verb ("No soy Mary Smith").
       const possessive = /^s(?: |$)/.test(after);
       const end = folded.length - after.length;
-      out.push({ who: ignored || possessive ? null : true, correction, named: !possessive, start: m.index, end });
+      out.push({ who: ignored || possessive ? null : true, correction, denied: negated && !possessive, start: m.index, end });
       continue;
     }
     const [w1 = "", w2 = ""] = rest.trim().split(" ");
     // One name-like word is enough to be someone else ("I mean John de
-    // Vries"): a false conflict only fails safe. A long lowercase -ing/-ed/-ly
-    // word is a verb or adverb ("I'm scheduled", "I am completely out").
+    // Vries"): a false conflict only fails safe. A long lowercase -ing/-ed word
+    // is a verb ("I'm scheduled"); -ly is not, it ends names ("kimberly").
     const looksLikeName =
       w1.length > 1 && !NEGATORS.has(w1) && !/^s(?:_|$)/.test(w1) &&
       (STRONG.has(intro) || capitalised(clause, w1) ||
-        (!NOT_A_NAME.has(w1) && !(w1.length > 5 && /(?:ing|ed|ly)$/.test(w1))));
+        (!NOT_A_NAME.has(w1) && !(w1.length > 5 && /(?:ing|ed)$/.test(w1))));
     const end = m.index + m[0].length + 1 + `${w1} ${w2}`.length;
-    out.push({ who: !ignored && looksLikeName ? false : null, correction, named: looksLikeName, start: m.index, end });
+    out.push({ who: !ignored && looksLikeName ? false : null, correction, denied: false, start: m.index, end });
   }
   return out;
 }
