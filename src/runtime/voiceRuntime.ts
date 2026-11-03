@@ -72,9 +72,8 @@ import {
 import { releaseCallHandoff } from "../tools/handoffBroker";
 import { releaseCallerSpeech } from "../services/symptomCorroboration";
 import {
-  greetingStyleFor,
   missingMandatoryCopy,
-  personaliseGreeting,
+  personaliseLaneGreeting,
   recognisedFirstName,
 } from "../services/greetingPersonalisation";
 
@@ -1616,10 +1615,11 @@ export function mountVoiceRuntime(
               // say nothing about why we called (outbound/callback.ts).
               callback
               ? callbackGreeting(callback.match, { sayName: entry.slug !== "si-assistant" })
-              : personaliseGreeting(
+              : personaliseLaneGreeting(
+                entry.slug,
                 chooseGreeting(entry.slug, configuredGreeting, lane.greeting),
+                lane.greeting,
                 recognisedFirstName(precontext),
-                greetingStyleFor(entry.slug),
               ) || null;
         /**
          * FIRST-EVENT RETRY, BEFORE THE BRIDGE (v91).

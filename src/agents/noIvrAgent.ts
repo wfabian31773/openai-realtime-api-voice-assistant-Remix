@@ -1,4 +1,6 @@
 import { nameKey, rememberVerifiedIdentity } from '../tools/verifiedIdentity';
+import { callerAffirmedThePhoneMatch } from '../tools/greetingAffirmation';
+import { recognisedFirstName } from '../services/greetingPersonalisation';
 import { joinedAppointments, prepareTicketIdentity, scheduleMatchesIdentity, validatedPatientFor, type TicketLocationSource } from '../tools/ticketIdentity';
 import { readDobQuietly } from '../tools/dobParts';
 import { dobTheCallerGave, isoDobToUs } from '../services/afterHoursCallFacts';
@@ -615,6 +617,31 @@ export function phoneMatchIsUnconfirmed(context: PatientScheduleContext): boolea
   return context.matchedBy === 'phone' || context.identityUnconfirmed === true;
 }
 
+/**
+ * Whether this lookup carries the caller's YES to the greeting's "Am I
+ * speaking with <first name>?" on a number that is one person on file (v172).
+ * The greeting named them only when caller ID matched one person with a first
+ * name (`recognisedFirstName`, the runtime's own source for the greeting), the
+ * first name passed must be the one the greeting asked (or its first word),
+ * and `callerAffirmedThePhoneMatch` holds the schedule's own record to the
+ * same rule the queue lanes use: one person, that first name, and any stated
+ * surname or date of birth agreeing.
+ */
+export function greetingYesConfirms(
+  precontext: unknown,
+  scheduleContext: PatientScheduleContext | undefined,
+  params: { first_name?: string; last_name?: string; date_of_birth?: string },
+): boolean {
+  const greeted = recognisedFirstName(precontext);
+  const said = params.first_name?.trim();
+  if (!greeted || !said || !scheduleContext?.patientFound) return false;
+  const saidKey = nameKey(said);
+  if (saidKey !== nameKey(greeted) && saidKey !== nameKey(greeted).split(' ')[0]) return false;
+  return callerAffirmedThePhoneMatch(scheduleContext, {
+    firstName: said, lastName: params.last_name, dateOfBirth: params.date_of_birth,
+  });
+}
+
 export function buildNoIvrSystemPrompt(
   metadata: NoIvrAgentMetadata,
   scheduleContext?: PatientScheduleContext,
@@ -632,35 +659,25 @@ export function buildNoIvrSystemPrompt(
   const pc = metadata.precontext;
   if (pc?.matched && pc.firstName) {
     precontextSection = `
-===== CALLER-ID PRE-CONTEXT (a hint, NOT verification) =====
+===== CALLER-ID PRE-CONTEXT — THE GREETING ALREADY ASKED =====
 This phone number matches ONE person on file: first name "${pc.firstName}".
 
-- DO NOT OPEN WITH A NAME CONFIRMATION, AND DO NOT SPEAK OVER THE GREETING.
-  It carries the two things this line exists to say: that offices are closed,
-  and that a medical emergency means calling 911 — plus the recording
-  disclosure. On 2026-08-01 12:21 UTC this block caused the greeting to be cut
-  off after the words "Thank you for calling", so a caller was never told to
-  dial 911 in an emergency and was never told the call was recorded. That must
-  never happen again. Never shorten it, never paraphrase it, and never say it
-  a second time.
-- This is an AFTER-HOURS MESSAGE-TAKING line, not a check-in desk. Do not
-  open with an identity interview. Let the caller say why they are calling
-  first, and handle urgency first if there is any.
-- WHEN YOU DO NEED THEIR IDENTITY for the message or ticket, NEVER ask "could
-  I get your name?" — you already have it. Say "am I speaking with
-  ${pc.firstName}?" On the 13:35 UTC call the agent asked for the name cold
-  even though this block was present; that is the failure mode to avoid.
-  Then take the last name AND the date of birth IN ONE question, never one
-  and then the other.
-- CONFIRMING A FIRST NAME DOES NOT CONFIRM A LAST NAME. Take the last name in
-  their own words. If it differs from what you expected, this number matched
-  the WRONG person — use what THEY said and ignore this block from then on.
-- READ THE DATE OF BIRTH BACK once you have it. A caller-ID match tells you
-  nothing about a date of birth.
+- YOUR GREETING HAS ALREADY spoken the closed notice, the 911 direction and the
+  recording disclosure, and has already ASKED "Am I speaking with ${pc.firstName}?"
+  (v172, operator 2026-11-03). Never repeat the greeting or the question, and
+  never speak over it: on 2026-08-01 12:21 UTC it was cut off after "Thank you
+  for calling", so a caller was never told to dial 911 in an emergency and was
+  never told the call was recorded. The caller's first words answer it.
+- If they said YES, or answered as ${pc.firstName}: call lookup_schedule with
+  first_name "${pc.firstName}". Their yes confirms the record, which holds their last
+  name and date of birth; do not ask for either unless that lookup comes back
+  unconfirmed.
+- If they said NO, gave another name, or are calling for someone else: discard
+  this block and collect everything fresh for the ACTUAL patient.
+- This is an AFTER-HOURS MESSAGE-TAKING line. Let the caller say why they are
+  calling; handle urgency first if there is any.
 - Do NOT say we recognized their number. Do NOT speak a last name first.
-- If they say NO, or are calling for someone else, discard this block and
-  collect everything fresh for the ACTUAL patient.
-- Disclose nothing from anyone's record on the strength of this match.
+- Disclose nothing from the record until lookup_schedule has returned it.
 `;
   }
 
@@ -688,6 +705,7 @@ This phone number matches ONE person on file: first name "${pc.firstName}".
      * once that is done, from the tool result rather than from memory.
      */
     const firstName = (scheduleContext.patientName ?? '').trim().split(/\s+/)[0] || 'the patient on file';
+    const greetedFirst = pc?.matched && pc.firstName ? pc.firstName : '';
     console.log('[No-IVR Agent] PHONE MATCH IS A CANDIDATE — appointment details withheld from the prompt until the name and date of birth are confirmed');
     scheduleContextSection = `
 ===== PATIENT CONTEXT (PHONE MATCH — UNCONFIRMED, a candidate only) =====
@@ -699,7 +717,10 @@ NOT loaded here.
 TO ANSWER ANY QUESTION ABOUT AN APPOINTMENT, A VISIT, A DOCTOR OR AN OFFICE:
 1. Confirm identity first — "I was able to pull up a record. Is this for ${firstName}?",
    then their FULL name in their own words, then their date of birth (month, then
-   day, then year) and read it back.
+   day, then year) and read it back.${greetedFirst ? `
+   YOUR GREETING ALREADY ASKED "Am I speaking with ${greetedFirst}?": if they said yes,
+   call lookup_schedule with first_name "${greetedFirst}" instead — that confirms the
+   record and returns the appointment; skip the rest of step 1 and step 2.` : ''}
 2. THEN call lookup_schedule(first_name, last_name, date_of_birth).
 3. Read the appointment from the TOOL RESULT, never from memory.
 If they say no, or are asking about someone else, collect THAT person's full name
@@ -1467,8 +1488,17 @@ is not an identity. Confirm the name and date of birth, then call again with the
         let result: PatientScheduleContext;
 
         const held = validatedPatientFor(metadata.callSid, params.first_name, params.last_name, params.date_of_birth);
+        let confirmedByGreeting = false;
         if (scheduleMatchesIdentity(scheduleContext, held)) {
           result = scheduleContext;
+        } else if (scheduleContext && greetingYesConfirms(metadata.precontext, scheduleContext, params)) {
+          // THE CALLER'S YES TO THE GREETING'S NAME COUNTS HERE TOO (v172,
+          // operator 2026-11-03, "After-hours too"): the greeting asked "Am
+          // I speaking with <first name>?", the number is one person on file,
+          // and the model passes the first name the caller said yes to. Any
+          // surname or date of birth it also passes must agree with the record.
+          result = scheduleContext;
+          confirmedByGreeting = true;
         } else if (params.phone && !(params.first_name && params.last_name && params.date_of_birth)) {
           // THE GATE, not a request. The prompt withholds a phone-matched
           // appointment until the name and date of birth are confirmed; this
@@ -1566,7 +1596,8 @@ is not an identity. Confirm the name and date of birth, then call again with the
           // A fresh name+DOB result may omit the legacy uniqueness metadata.
           // Explicit ambiguity still blocks disclosure; cached reuse separately
           // requires scheduleMatchesIdentity to prove whose record it is.
-          const confirmed = result.matchedBy === 'name_and_dob' && result.identity?.unique !== false && !result.identityUnconfirmed;
+          const confirmed = confirmedByGreeting ||
+            (result.matchedBy === 'name_and_dob' && result.identity?.unique !== false && !result.identityUnconfirmed);
           if (!confirmed) return {
             found: true, identityUnconfirmed: true,
             ...appointmentAccess(result, false),
