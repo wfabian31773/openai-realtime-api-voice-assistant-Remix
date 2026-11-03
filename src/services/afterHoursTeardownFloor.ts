@@ -48,6 +48,11 @@ export function officeForDialedNumber(dialedNumber?: string): string | undefined
  * The last office seen for the ONE person on the caller's number. A number
  * shared by several people answers nothing: that office could be anyone's.
  * Routing only — the match is never written onto the ticket as an identity.
+ *
+ * Reads through `lookupPatient`, not `lookupByPhone`: the person base
+ * (`patients_master`) answers first and its PersonID join brings the visit
+ * history, so a caller whose number is only on their chart — not on any
+ * appointment row — still yields their office (RULE ZERO step 1).
  */
 export async function officeFromCallerHistory(
   callerPhone: string | undefined,
@@ -58,7 +63,11 @@ export async function officeFromCallerHistory(
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     const context = await Promise.race([
-      scheduleLookupService.lookupByPhone(callerPhone!).catch(() => {
+      scheduleLookupService.lookupPatient({
+        phone: callerPhone!,
+        deadlineAt: Date.now() + timeoutMs,
+        logIdentifiers: false,
+      }).catch(() => {
         console.warn(`[AFTER-HOURS FLOOR] ${callSid}: caller-ID history lookup failed`);
         return null;
       }),

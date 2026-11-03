@@ -12,7 +12,7 @@ vi.hoisted(() => {
 const h = vi.hoisted(() => ({
   getCallLogBySid: vi.fn(),
   submitSimplifiedTicket: vi.fn(),
-  lookupByPhone: vi.fn(),
+  lookupPatient: vi.fn(),
   confirmedClinicFor: vi.fn(),
   verifiedIdentityFor: vi.fn(),
   officeTheCallerGave: vi.fn(),
@@ -23,7 +23,7 @@ vi.mock('./syncAgentService', () => ({
   SyncAgentService: { submitSimplifiedTicket: h.submitSimplifiedTicket },
 }));
 vi.mock('./scheduleLookupService', () => ({
-  scheduleLookupService: { lookupByPhone: h.lookupByPhone },
+  scheduleLookupService: { lookupPatient: h.lookupPatient },
 }));
 vi.mock('../tools/verifiedIdentity', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../tools/verifiedIdentity')>()),
@@ -60,7 +60,7 @@ async function sweep(opts: { dialedNumber?: string } = {}) {
 beforeEach(() => {
   h.getCallLogBySid.mockReset().mockResolvedValue(undefined);
   h.submitSimplifiedTicket.mockReset().mockResolvedValue({ success: true, ticketNumber: 'VA-SYNTHETIC' });
-  h.lookupByPhone.mockReset().mockResolvedValue({ patientFound: false, upcomingAppointments: [], pastAppointments: [] });
+  h.lookupPatient.mockReset().mockResolvedValue({ patientFound: false, upcomingAppointments: [], pastAppointments: [] });
   h.confirmedClinicFor.mockReset().mockReturnValue(undefined);
   h.verifiedIdentityFor.mockReset().mockReturnValue(undefined);
   h.officeTheCallerGave.mockReset().mockResolvedValue(undefined);
@@ -68,12 +68,12 @@ beforeEach(() => {
 
 describe('after-hours floor with no office named', () => {
   it('(a) takes the office from the caller-ID visit history', async () => {
-    h.lookupByPhone.mockResolvedValue({
+    h.lookupPatient.mockResolvedValue({
       patientFound: true, identity: { unique: true }, lastLocationSeen: 'Redlands',
       upcomingAppointments: [], pastAppointments: [],
     });
     const p = await sweep({ dialedNumber: officeLine });
-    expect(h.lookupByPhone).toHaveBeenCalledWith('+12025550100');
+    expect(h.lookupPatient).toHaveBeenCalledWith(expect.objectContaining({ phone: '+12025550100' }));
     expect(p).toMatchObject({ locationOfLastVisit: 'Redlands', locationSource: 'history' });
     expect(p.additionalDetails).toContain(floor.FLOOR_NEEDS_REVIEW_NOTE);
     expect(p.additionalDetails).toContain(floor.FLOOR_HISTORY_LOCATION_NOTE);
@@ -82,7 +82,7 @@ describe('after-hours floor with no office named', () => {
   });
 
   it('a number shared by several people gives no history office', async () => {
-    h.lookupByPhone.mockResolvedValue({
+    h.lookupPatient.mockResolvedValue({
       patientFound: true, identity: { unique: false }, lastLocationSeen: 'Redlands',
       upcomingAppointments: [], pastAppointments: [],
     });
@@ -99,14 +99,14 @@ describe('after-hours floor with no office named', () => {
   });
 
   it('a failed or slow history lookup is swallowed and the dialled line still routes', async () => {
-    h.lookupByPhone.mockRejectedValue(new Error('synthetic outage'));
+    h.lookupPatient.mockRejectedValue(new Error('synthetic outage'));
     const p = await sweep({ dialedNumber: officeLine });
     expect(p).toMatchObject({ locationOfLastVisit: office.name, locationSource: 'history' });
 
     vi.useFakeTimers();
     try {
       h.submitSimplifiedTicket.mockClear();
-      h.lookupByPhone.mockReturnValue(new Promise(() => {}));
+      h.lookupPatient.mockReturnValue(new Promise(() => {}));
       const pending = floor.officeFromCallerHistory('+12025550100', 'CA-synthetic');
       await vi.advanceTimersByTimeAsync(floor.FLOOR_HISTORY_LOOKUP_TIMEOUT_MS);
       await expect(pending).resolves.toBeUndefined();
@@ -142,7 +142,7 @@ describe('after-hours floor with an office named', () => {
     h.officeTheCallerGave.mockResolvedValue('Covina');
     const p = await sweep({ dialedNumber: officeLine });
     expect(p).toMatchObject({ locationOfLastVisit: 'Covina', locationSource: 'caller', departmentId: 8 });
-    expect(h.lookupByPhone).not.toHaveBeenCalled();
+    expect(h.lookupPatient).not.toHaveBeenCalled();
     expect(p.additionalDetails).toContain(floor.FLOOR_NEEDS_REVIEW_NOTE);
     expect(p.additionalDetails).not.toContain(floor.FLOOR_MISSING_LOCATION_NOTE);
     expect(p.additionalDetails).not.toContain(floor.FLOOR_DIALED_LOCATION_NOTE);
