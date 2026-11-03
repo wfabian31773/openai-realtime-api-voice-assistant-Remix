@@ -466,7 +466,8 @@ describe('callerSaidTheName', () => {
     expect(said('This is Mary Smith sorry I mean Mary Jones.', 'Mary', 'Smith')).toBe(false);
     expect(said('This is Mary Smith sorry I mean Mary Jones.', 'Mary', 'Jones')).toBe(false);
     expect(said('This is Mary Smith. I am john jones.', 'Mary', 'Smith')).toBe(false);
-    expect(said('This is Mary Smith. I mean my appointment is tomorrow.', 'Mary', 'Smith')).toBe(true);
+    // Round 13: any correction cancels (fail-safe; a missed confirmation only falls back).
+    expect(said('This is Mary Smith. I mean my appointment is tomorrow.', 'Mary', 'Smith')).toBe(false);
     expect(said('this is mary smith, i am calling about my glasses, it is urgent.', 'Mary', 'Smith')).toBe(true);
   });
 
@@ -556,3 +557,21 @@ describe('callerSaidTheName', () => {
     expect(said('This is Mary Smith. My last name is Smith.', 'Mary', 'Smith')).toBe(true);
   });
 });
+
+describe("Codex round 13: corrections, half-name denials, agent read-aloud", () => {
+  const T = (body: string) => body;
+  it("any correction cancels", () => {
+    expect(callerSaidTheName(T("CALLER: This is Mary Smith. Sorry, I mean the last name is Jones."), "Mary", "Smith")).toBe(false);
+    expect(callerSaidTheName(T("CALLER: This is Mary Smith. Sorry, I mean this is her daughter."), "Mary", "Smith")).toBe(false);
+  });
+  it("a denied surname cancels", () => {
+    expect(callerSaidTheName(T("CALLER: This is Mary Smith. My last name is not Smith but Jones."), "Mary", "Smith")).toBe(false);
+  });
+  it("an agent asking to read a voicemail aloud cancels", () => {
+    expect(callerSaidTheName(T("AGENT: Please read the voicemail aloud.\nCALLER: This is Mary Smith."), "Mary", "Smith")).toBe(false);
+  });
+  it("a plain introduction still confirms", () => {
+    expect(callerSaidTheName(T("CALLER: This is Mary Smith."), "Mary", "Smith")).toBe(true);
+  });
+});
+

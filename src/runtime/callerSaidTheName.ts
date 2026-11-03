@@ -136,12 +136,11 @@ export function callerSaidTheName(
       (line) =>
         /["\u201C\u201D\u00AB\u00BB]|(?:^|[^\p{L}])['`\u2018\u2019]|['`\u2018\u2019](?![\p{L}])/u.test(line) ||
         fold(line).split(/[ _]/).some((w) => REPORTERS.has(w)) ||
-        [...fold(line).matchAll(/ (?:i[ _]mean(?:t)?|quiero decir)((?: [a-z_]+)*)/g)].some(([, tail]) => {
-          const w = tail.trim().split(/[ _]/).find((x) => !FILLER.has(x)) ?? "";
-          // A correction with nothing after it ("Sorry, I mean" — the name
-          // comes on the next turn) is unresolved, and cancels too.
-          return w === "" || !NOT_A_NAME.has(w);
-        }) ||
+        // Any correction ("Sorry, I mean the last name is Jones", "I mean this
+        // is her daughter") leaves the identity unresolved, and cancels.
+        / (?:i[ _]mean(?:t)?|quiero decir) /.test(fold(line)) ||
+        // A denied name part ("My last name is not Smith") is unresolved too.
+        / name (?:is|s|es)[ _](?:not|never|no|n_t) | name isn_t /.test(fold(line)) ||
         // A colon introduces what someone else said ("My mother replied: …").
         /:/.test(line),
     )
@@ -155,7 +154,7 @@ export function callerSaidTheName(
       .split("\n")
       .filter((line) => !line.startsWith("CALLER:"))
       .some((line) =>
-        / (?:what|que) (?:did|does|do|was|is) (?:.* )?(?:say|said|read|write|wrote|tell|dijo|dice) | (?:message|voicemail|email|text|note|letter|recording|mensaje) (?:.* )?(?:say|said|says|read|reads) /.test(
+        / (?:what|que) (?:did|does|do|was|is) (?:.* )?(?:say|said|read|write|wrote|tell|dijo|dice) | (?:message|voicemail|email|text|note|letter|recording|mensaje) (?:.* )?(?:say|said|says|read|reads) | (?:read|reads|reading|leer|lea) (?:.* )?(?:message|voicemail|email|text|note|letter|recording|mensaje) | aloud | out loud /.test(
           fold(line),
         ),
       )
