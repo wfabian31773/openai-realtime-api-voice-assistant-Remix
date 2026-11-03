@@ -22,9 +22,20 @@
  */
 import { nameKey } from "../tools/verifiedIdentity";
 
-/** Whole words only, letters only, case and accents folded the store's way. */
+/**
+ * Whole words only, letters only, case and accents folded the store's way.
+ *
+ * A hyphen or an apostrophe BETWEEN two letters joins them into one token
+ * ("Smith-Jones" -> "smith_jones", "O'Brien" -> "o_brien", "Smith's" ->
+ * "smith_s"), so a surname can only match a whole spoken token. Before this,
+ * `nameKey` turned the joiner into a space and "Mary Smith" matched "This is
+ * Mary Smith-Jones" (Codex P2, #421). The record's surname is folded the same
+ * way, so a hyphenated surname still matches when it is said in full.
+ */
+const JOINER = /(\p{L}\p{M}*)\s*[-\u2010\u2011]\s*(?=\p{L})|(\p{L}\p{M}*)['`\u2018\u2019\u02BC](?=\p{L})/gu;
 function fold(text: string): string {
-  return ` ${nameKey(text).replace(/[^a-z\s]/g, " ").replace(/\s+/g, " ").trim()} `;
+  const joined = text.replace(JOINER, (_m, a?: string, b?: string) => `${a ?? b}_`);
+  return ` ${nameKey(joined).replace(/[^a-z_\s]/g, " ").replace(/\s+/g, " ").trim()} `;
 }
 
 /**
@@ -77,32 +88,50 @@ export function callerSaidTheName(
   firstName: string,
   lastName: string,
 ): boolean {
-  const first = fold(firstName).trim().split(" ")[0] ?? "";
+  const firstWords = fold(firstName).trim().split(/[ _]/);
+  const first = firstWords[0] ?? "";
   const last = fold(lastName).trim();
   if (first.length < 2 || last.length < 2) return false;
-  const name = `${first} ${last}`;
+  // Inside the record's name a space and a joiner are the same separator
+  // ("Garcia Lopez" on file, "Garcia-Lopez" said), but the match must END on a
+  // token boundary: a joiner straight after it means the speaker's surname
+  // carries on ("Smith" on file, "Smith-Jones" said) and is not this name.
+  // The first name is its first word ("Anne" for "Anne-Marie") or, when
+  // joined, the whole of it said in full ("Anne-Marie" / "Anne Marie").
+  const firstAlt =
+    firstWords.length > 1 && firstName.match(/[-\u2010-\u2015'`\u2018\u2019\u02BC]/)
+      ? `(?:${first}|${firstWords.join("[ _]")})`
+      : first;
+  const name = [firstAlt, ...last.split(/[ _]/)].join("[ _]");
   return transcript
     .split("\n")
     .filter((line) => line.startsWith("CALLER:"))
     // Sentence boundaries are cut BEFORE folding, which would turn them into
-    // spaces and join the end of one sentence to the start of the next.
-    .flatMap((line) => line.slice("CALLER:".length).split(/[.!?;:,]+/))
+    // spaces and join the end of one sentence to the start of the next. An
+    // en or em dash ("Mary Smith — I need…") is a clause break, not a joiner;
+    // only a hyphen (ASCII, U+2010, U+2011) joins a surname.
+    .flatMap((line) => line.slice("CALLER:".length).split(/[.!?;:,\u2012-\u2015]+/))
     .some((sentence) => introducesAs(fold(sentence), name));
 }
 
 const NEGATORS = new Set(["no", "not", "never", "nunca"]);
 
-/** `folded` is padded with a space at each end (see `fold`). */
+/**
+ * `folded` is padded with a space at each end (see `fold`); `name` is a regex
+ * source of letters and `[ _]` only. The name must be followed by a SPACE:
+ * "_" after it is a hyphenated surname carrying on ("smith_jones") or a
+ * possessive ("smith_s" — "Mary Smith's daughter").
+ */
 function introducesAs(folded: string, name: string): boolean {
   for (const intro of INTRODUCTIONS) {
-    let at = folded.indexOf(` ${intro} ${name} `);
-    while (at !== -1) {
-      const after = folded.slice(at + intro.length + name.length + 3);
-      const before = folded.slice(0, at).trim().split(" ").pop() ?? "";
-      // "Mary Smith's daughter" folds to "mary smith s daughter"; Spanish
-      // negates BEFORE the verb ("No soy Mary Smith").
+    // "I'm" folds to "i_m" (a joined apostrophe), listed here as "i m".
+    const re = new RegExp(`(?<= )${intro.replace(/ /g, "[ _]")} ${name}(?= )`, "g");
+    for (const m of folded.matchAll(re)) {
+      const before = folded.slice(0, m.index).trim().split(/[ _]/).pop() ?? "";
+      const after = folded.slice(m.index + m[0].length + 1);
+      // A possessive the joiner missed ("Smith 's daughter") still folds to
+      // "smith s daughter"; Spanish negates BEFORE the verb ("No soy Mary Smith").
       if (!/^s(?: |$)/.test(after) && !NEGATORS.has(before)) return true;
-      at = folded.indexOf(` ${intro} ${name} `, at + 1);
     }
   }
   return false;

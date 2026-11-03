@@ -374,6 +374,34 @@ describe('callerSaidTheName', () => {
     ).toBe(false);
   });
 
+  it('the surname must be a whole token, not a prefix of a longer surname (Codex P2, #421 round 4)', () => {
+    // Smith on file, Smith-Jones said: a different surname.
+    expect(said('This is Mary Smith-Jones.', 'Mary', 'Smith')).toBe(false);
+    expect(said('This is Mary Smith - Jones.', 'Mary', 'Smith')).toBe(false);
+    expect(said('This is Mary Smith\u2010Jones calling.', 'Mary', 'Smith')).toBe(false);
+    expect(said("This is Mary Smith'son.", 'Mary', 'Smith')).toBe(false);
+    expect(said('This is Mary Smithson.', 'Mary', 'Smith')).toBe(false);
+    // Multi-word surname on file, said only in part.
+    expect(said('This is Ana Garcia, calling about my surgery.', 'Ana', 'Garcia Lopez')).toBe(false);
+    expect(said('This is Ana Garcia-Lo.', 'Ana', 'Garcia Lopez')).toBe(false);
+    // Positive: an exact match, and a hyphenated surname said in full.
+    expect(said('This is Mary Smith.', 'Mary', 'Smith')).toBe(true);
+    expect(said('This is Mary Smith calling about my surgery.', 'Mary', 'Smith')).toBe(true);
+    expect(said('This is Mary Smith-Jones.', 'Mary', 'Smith-Jones')).toBe(true);
+    expect(said('My name is Mary Smith Jones.', 'Mary', 'Smith-Jones')).toBe(true);
+    expect(said("This is Ana O'Brien.", 'Ana', "O'Brien")).toBe(true);
+    // Review round 4: possessives the joiner misses, and hyphenated first names.
+    expect(said("This is Mary Smith 's daughter.", 'Mary', 'Smith')).toBe(false);
+    expect(said('This is Mary Smith\u02BCs daughter.', 'Mary', 'Smith')).toBe(false);
+    expect(said('This is Anne Smith.', 'Anne-Marie', 'Smith')).toBe(true);
+    expect(said('This is Anne-Marie Smith.', 'Anne-Marie', 'Smith')).toBe(true);
+    expect(said('This is Annemarie Smith.', 'Anne-Marie', 'Smith')).toBe(false);
+    // Review round 4b: a dash is a clause break; a negator joined by a hyphen still negates.
+    expect(said('This is Mary Smith \u2014 I need to reschedule.', 'Mary', 'Smith')).toBe(true);
+    expect(said('This is Mary Smith\u2013I need to reschedule.', 'Mary', 'Smith')).toBe(true);
+    expect(said('No-no soy Mary Smith, soy su hija.', 'Mary', 'Smith')).toBe(false);
+  });
+
   it('a denial, a mention or a possessive is not an introduction (Codex P2, #421 round 3)', () => {
     expect(said('I am not Mary Smith, she is my mother. I need to reschedule my own surgery.', 'Mary', 'Smith')).toBe(false);
     expect(said("I'm not Mary Smith.", 'Mary', 'Smith')).toBe(false);
