@@ -28,17 +28,43 @@ function fold(text: string): string {
 }
 
 /**
- * True when ONE sentence of ONE caller line — never the agent's — says the
- * first word of `firstName` immediately followed by the whole of `lastName`.
+ * THE CALLER'S OWN INTRODUCTION — the only place a name is evidence of who is
+ * speaking. Folded the same way as the sentence (`fold`), so "I'm" is "i m"
+ * and "Mi nombre es" carries no accent.
+ */
+const INTRODUCTIONS = [
+  "my name is",
+  "my name s",
+  "this is",
+  "i am",
+  "i m",
+  "it is",
+  "it s",
+  "mi nombre es",
+  "me llamo",
+  "soy",
+  "habla",
+];
+
+/**
+ * True when ONE sentence of ONE caller line — never the agent's — introduces
+ * the caller by this name: an introduction ("my name is", "this is", "I'm",
+ * "mi nombre es", "soy"…) immediately followed by the first word of
+ * `firstName` and then the whole of `lastName`, with nothing between.
  *
- * Adjacent, inside one sentence, inside one turn, and nothing between them:
- * two halves found apart prove nothing (Codex P2, #421, twice). "This is John
- * Smith. Please call Mary Jones" contains both Mary and Smith; "This is Mary
- * Jones. Smith is my surgeon" puts them next to each other only once the full
- * stop is thrown away; an answer "Mary." followed by "Smith is my surgeon" does
- * the same across two turns. None of them names Mary Smith. A middle name said
- * aloud ("Mary Ann Smith") therefore does not match either — that fails safe,
- * and no call in the corpus needed it.
+ * Three Codex rounds on #421 found three ways for a bare mention to name the
+ * wrong person, and each was the same root cause — reading a MENTION as an
+ * INTRODUCTION:
+ *   - two people: "This is John Smith. Please call Mary Jones";
+ *   - a boundary folded away: "This is Mary Jones. Smith is my surgeon", or an
+ *     answer "Mary." followed by "Smith is my surgeon";
+ *   - a denial: "I am not Mary Smith, she is my mother."
+ * So the name must follow the introduction directly, inside one sentence of
+ * one turn: "I am not Mary Smith" fails (not), "this call is for Mary Smith"
+ * fails (call is for), and "this is Mary Smith's daughter" fails (a possessive
+ * after the name). A middle name said aloud fails too. Every one of those
+ * fails SAFE — no ticket, as before — and all seven corpus callers introduced
+ * themselves plainly ("This is…", "My name is…", "Mi nombre es…").
  *
  * The first name is cut to its first word because the record carries middle
  * initials and second names ("Vince V") that nobody says; the surname is kept
@@ -54,12 +80,30 @@ export function callerSaidTheName(
   const first = fold(firstName).trim().split(" ")[0] ?? "";
   const last = fold(lastName).trim();
   if (first.length < 2 || last.length < 2) return false;
-  const name = ` ${first} ${last} `;
+  const name = `${first} ${last}`;
   return transcript
     .split("\n")
     .filter((line) => line.startsWith("CALLER:"))
     // Sentence boundaries are cut BEFORE folding, which would turn them into
     // spaces and join the end of one sentence to the start of the next.
     .flatMap((line) => line.slice("CALLER:".length).split(/[.!?;:,]+/))
-    .some((sentence) => fold(sentence).includes(name));
+    .some((sentence) => introducesAs(fold(sentence), name));
+}
+
+const NEGATORS = new Set(["no", "not", "never", "nunca"]);
+
+/** `folded` is padded with a space at each end (see `fold`). */
+function introducesAs(folded: string, name: string): boolean {
+  for (const intro of INTRODUCTIONS) {
+    let at = folded.indexOf(` ${intro} ${name} `);
+    while (at !== -1) {
+      const after = folded.slice(at + intro.length + name.length + 3);
+      const before = folded.slice(0, at).trim().split(" ").pop() ?? "";
+      // "Mary Smith's daughter" folds to "mary smith s daughter"; Spanish
+      // negates BEFORE the verb ("No soy Mary Smith").
+      if (!/^s(?: |$)/.test(after) && !NEGATORS.has(before)) return true;
+      at = folded.indexOf(` ${intro} ${name} `, at + 1);
+    }
+  }
+  return false;
 }

@@ -255,6 +255,16 @@ describe('the same day\'s correct refusals still file nothing', () => {
     expect(file.calls).toHaveLength(0);
   });
 
+  it('a caller who denies being the record is not filed under it (Codex P2, #421 round 3)', async () => {
+    const sid = 'CA0000000000000000000000000000a008';
+    onFileAs(sid, 'Mary', 'Smith');
+    const transcript =
+      `${SURGERY_GREETING}\n` +
+      'CALLER: I am not Mary Smith, she is my mother. I need to reschedule my own surgery, please call me back.';
+    const file = filer();
+    expect(await runRequestSweep(record(sid, 'surgery', transcript), file)).toEqual({ filed: false, reason: 'no-name' });
+  });
+
   it('a name split by a full stop is not the record (Codex P2, #421 round 2)', async () => {
     const sid = 'CA0000000000000000000000000000a007';
     onFileAs(sid, 'Mary', 'Smith');
@@ -362,6 +372,26 @@ describe('callerSaidTheName', () => {
     expect(
       callerSaidTheName('AGENT: Your name?\nCALLER: Mary\nCALLER: Smith is my surgeon', 'Mary', 'Smith'),
     ).toBe(false);
+  });
+
+  it('a denial, a mention or a possessive is not an introduction (Codex P2, #421 round 3)', () => {
+    expect(said('I am not Mary Smith, she is my mother. I need to reschedule my own surgery.', 'Mary', 'Smith')).toBe(false);
+    expect(said("I'm not Mary Smith.", 'Mary', 'Smith')).toBe(false);
+    expect(said('No soy Mary Smith, soy su hija.', 'Mary', 'Smith')).toBe(false);
+    expect(said('This call is for Mary Smith.', 'Mary', 'Smith')).toBe(false);
+    expect(said("This is Mary Smith's daughter.", 'Mary', 'Smith')).toBe(false);
+    expect(said('Calling about my mother Mary Smith.', 'Mary', 'Smith')).toBe(false);
+    expect(said('Mary Smith.', 'Mary', 'Smith')).toBe(false);
+  });
+
+  it('the introductions callers actually use', () => {
+    expect(said('Hi, this is Mary Smith.', 'Mary', 'Smith')).toBe(true);
+    expect(said('My name is Mary Smith.', 'Mary', 'Smith')).toBe(true);
+    expect(said("Hi, I'm Mary Smith, calling about my glasses.", 'Mary', 'Smith')).toBe(true);
+    expect(said("It's Mary Smith.", 'Mary', 'Smith')).toBe(true);
+    expect(said('Mi nombre es María Smith.', 'Maria', 'Smith')).toBe(true);
+    expect(said('Me llamo María Smith.', 'Maria', 'Smith')).toBe(true);
+    expect(said('Soy María Smith.', 'Maria', 'Smith')).toBe(true);
   });
 
   it('nothing may stand between the halves, so a spoken middle name fails safe', () => {

@@ -1179,7 +1179,7 @@ import { callEnvironment } from "./callRecord";
  * received the name, and the calling number's pre-context match is held
  * `certain: false` since #384. On 2026-11-02 that was 6 of the day's 10 lost
  * requests. The sweep now files under the calling number's record when the
- * caller said that name in their own words, first then last, adjacent in one sentence
+ * caller introduced themselves by that name ("my name is", "this is", "soy"…)
  * (`callerSaidTheName`, the operator's 2026-10-29 ruling), with a staff note
  * that no date of birth was confirmed; it carries no chart date of birth or
  * history. Above main's v167 (#419). No migration.
