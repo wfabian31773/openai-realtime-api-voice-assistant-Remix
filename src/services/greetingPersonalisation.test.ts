@@ -1,6 +1,8 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import {
   personaliseGreeting,
+  personaliseKeepingCopy,
+  personaliseLaneGreeting,
   stripTrailingQuestion,
   greetingStyleFor,
   missingMandatoryCopy,
@@ -111,7 +113,9 @@ describe('which lines append, which replace, and which are left alone', () => {
     // runtime — which fetches pre-context on EVERY lane, unlike the SIP path —
     // would have rewritten these openings the first time it recognised a
     // caller. Codex, #240.
-    expect(greetingStyleFor('no-ivr')).toBeNull();
+    // no-ivr earned a style on 2026-11-03 (v172, "After-hours too"): see the
+    // after-hours block below. pcp still has none.
+    expect(greetingStyleFor('no-ivr')).toBe('keep-copy');
     expect(greetingStyleFor('pcp')).toBeNull();
     expect(greetingStyleFor('after-hours')).toBeNull();
     expect(greetingStyleFor(undefined)).toBeNull();
@@ -119,31 +123,64 @@ describe('which lines append, which replace, and which are left alone', () => {
   });
 });
 
-describe('the after-hours greeting reaches the caller whole', () => {
-  // noIvrAgent's own pre-context block: "YOUR GREETING IS NOT OPTIONAL AND
-  // MUST NOT BE SHORTENED... DO NOT open with a name confirmation", citing
-  // 2026-08-01 12:21 UTC, when it was cut off after "Thank you for calling"
-  // and a caller was never told to dial 911 nor that the call was recorded.
-  // The forced greeting is the one place the model cannot decline, so a
-  // rewrite here is not a nudge — it is the incident, reproduced on purpose.
+describe('the after-hours greeting reaches the caller whole — and asks the name (v172)', () => {
+  // Operator ruling 2026-11-03, "After-hours too": the named greeting covers
+  // the after-hours line, with the closed notice, the 911 direction and the
+  // recording disclosure kept word for word. The 2026-08-01 incident (cut off
+  // after "Thank you for calling") was the MODEL truncating the greeting; this
+  // one is played whole by the transport, so the rule this block guards is
+  // that no required statement is ever cut to make room for the name.
   const NO_IVR =
     'Thank you for calling Azul Vision, all of our offices are currently closed, you have ' +
     'reached the after hours call service. If this is a medical emergency, please dial 911. ' +
     'All calls are being recorded for quality assurance purposes, how can I help you?';
+  // The live agents.welcome_greeting row, 2026-11-03.
+  const NO_IVR_ROW =
+    'Thank you for calling Azul Vision. Our offices are currently closed. All calls are being ' +
+    'recorded for quality assurance purposes. If this is a medical emergency, please hang up and ' +
+    "dial 911. Otherwise, I'm happy to help — how may I assist you?";
 
-  it('says it verbatim to a recognised caller', () => {
+  it('the built-in greeting keeps all three statements and ends on the name', () => {
     const out = personaliseGreeting(NO_IVR, 'Wayne', greetingStyleFor('no-ivr'));
-    expect(out).toBe(NO_IVR);
-    expect(out).toContain('dial 911');
-    expect(out).toContain('being recorded');
-    expect(out).toContain('currently closed');
-    expect(out).not.toContain('Am I speaking with');
+    expect(out).toBe(
+      'Thank you for calling Azul Vision, all of our offices are currently closed, you have ' +
+        'reached the after hours call service. If this is a medical emergency, please dial 911. ' +
+        'All calls are being recorded for quality assurance purposes. Am I speaking with Wayne?',
+    );
+    expect(missingMandatoryCopy('no-ivr', out)).toEqual([]);
   });
 
-  it('would lose the recording disclosure even to an append, which is why it is not appended', () => {
-    // Not a rule being asserted — the reason the rule cannot be "append
-    // everywhere instead of replace". The disclosure shares its sentence with
-    // the trailing question, so stripping the question strips the disclosure.
+  it('the live database greeting keeps all three statements and ends on the name', () => {
+    const out = personaliseGreeting(NO_IVR_ROW, 'Wayne', greetingStyleFor('no-ivr'));
+    expect(out).toBe(
+      'Thank you for calling Azul Vision. Our offices are currently closed. All calls are being ' +
+        'recorded for quality assurance purposes. If this is a medical emergency, please hang up and ' +
+        'dial 911. Am I speaking with Wayne?',
+    );
+    expect(missingMandatoryCopy('no-ivr', out)).toEqual([]);
+  });
+
+  it('a greeting whose question cannot be cut without a statement is said verbatim, never trimmed', () => {
+    const fused = 'Our offices are closed and calls are recorded, so dial 911 in an emergency or tell me how I can help?';
+    expect(personaliseKeepingCopy(fused, 'Wayne')).toBeNull();
+    expect(personaliseGreeting(fused, 'Wayne', 'keep-copy')).toBe(fused);
+  });
+
+  it('an edited row that cannot be cut falls back to the built-in greeting, named', () => {
+    const fused = 'Our offices are closed and calls are recorded, so dial 911 in an emergency or tell me how I can help?';
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const out = personaliseLaneGreeting('no-ivr', fused, NO_IVR, 'Wayne');
+    expect(out.endsWith('Am I speaking with Wayne?')).toBe(true);
+    expect(missingMandatoryCopy('no-ivr', out)).toEqual([]);
+  });
+
+  it('no name, no change; and the queue lanes are personaliseGreeting unchanged', () => {
+    expect(personaliseLaneGreeting('no-ivr', NO_IVR_ROW, NO_IVR, '')).toBe(NO_IVR_ROW);
+    const SURG = 'Thank you for calling. All calls are being recorded for quality assurance purposes. How can I help you today?';
+    expect(personaliseLaneGreeting('surgery', SURG, SURG, 'Wayne')).toBe(personaliseGreeting(SURG, 'Wayne', 'append'));
+  });
+
+  it('would lose the recording disclosure to a plain append, which is why it is not appended', () => {
     expect(stripTrailingQuestion(NO_IVR)).not.toContain('being recorded');
     expect(stripTrailingQuestion(NO_IVR)).toContain('dial 911');
   });

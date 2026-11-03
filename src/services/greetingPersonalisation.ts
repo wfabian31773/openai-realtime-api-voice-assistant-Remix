@@ -25,9 +25,13 @@ import { isLunchClosure } from '../utils/timeAware';
  *
  *   'replace'  the confirm question IS the greeting.
  *   'append'   keep the greeting, swap only its closing question.
+ *   'keep-copy' the after-hours line (v172): swap the closing question too,
+ *              but only when every required statement the greeting carried
+ *              (closed notice, 911, recording disclosure) is still there,
+ *              word for word, afterwards. Otherwise say it verbatim.
  *   null       say the greeting verbatim; do not personalise it at all.
  */
-export type GreetingStyle = 'replace' | 'append';
+export type GreetingStyle = 'replace' | 'append' | 'keep-copy';
 
 /**
  * A line EARNS personalisation. The default is to say its greeting verbatim.
@@ -72,7 +76,25 @@ export type GreetingStyle = 'replace' | 'append';
  * CANNOT transfer. Operator-dictated, and worth more than the sentence it
  * costs. azul-scheduling keeps the wholesale replacement it has always had.
  */
+/**
+ * THE AFTER-HOURS LINE NOW EARNS IT TOO — v172, operator ruling 2026-11-03
+ * ("After-hours too"): the named greeting is a hard rule (standing
+ * instruction 16) and it now covers the after-hours line, with the closed
+ * notice, the 911 direction and the recording disclosure kept word for word.
+ * The objection above was to WHERE the name went, not to the name: 'replace'
+ * deletes all three statements and 'append' can strip the disclosure when it
+ * shares a sentence with the closing question. 'keep-copy' cuts only the
+ * closing question, tries the sentence and then the clause, and refuses any
+ * cut that loses a statement the greeting carried. The 2026-08-01 incident
+ * was the MODEL cutting the greeting off; this greeting is played by the
+ * transport, whole, before the model says anything.
+ *
+ * Before (no-ivr, 2026-10-20..11-02, callers the number recognised): 377
+ * calls; the agent asked "Am I speaking with" on 185, and on all 159 where
+ * the caller said yes it then asked for the last name or date of birth.
+ */
 const GREETING_STYLES: Readonly<Record<string, GreetingStyle>> = {
+  'no-ivr': 'keep-copy',
   'answering-service': 'append',
   optical: 'append',
   surgery: 'append',
@@ -144,7 +166,68 @@ export function personaliseGreeting(
   if (style === 'replace') {
     return `Hello, thank you for calling Azul Vision. Am I speaking with ${name}?`;
   }
+  if (style === 'keep-copy') return personaliseKeepingCopy(greeting, name) ?? greeting;
   return `${stripTrailingQuestion(greeting)} Am I speaking with ${name}?`.trim();
+}
+
+/**
+ * The greeting with its closing question swapped for "Am I speaking with
+ * <name>?", or null when no cut keeps every required statement the greeting
+ * carried. Two cuts, in order: the whole closing sentence ("…dial 911.
+ * Otherwise, I'm happy to help — how may I assist you?"), then only the
+ * closing clause of that sentence ("…All calls are being recorded for quality
+ * assurance purposes, how can I help you?"), which is how the built-in
+ * after-hours greeting joins its disclosure to its question.
+ */
+export function personaliseKeepingCopy(greeting: string, recognisedFirstName: string): string | null {
+  const name = String(recognisedFirstName ?? '').trim();
+  const text = String(greeting ?? '').trim();
+  if (!name || !text.endsWith('?')) return null;
+  const carried = requiredStatementsIn(text);
+  const bySentence = text.replace(/\s*[^.!?]*\?\s*$/, '').trim();
+  const lastSentence = text.slice(text.search(/[^.!?]*\?\s*$/));
+  const comma = lastSentence.lastIndexOf(',');
+  const byClause = comma > 0 ? `${text.slice(0, text.length - lastSentence.length + comma).trim()}.` : '';
+  for (const stem of [bySentence, byClause]) {
+    if (!stem) continue;
+    const kept = requiredStatementsIn(stem);
+    if (carried.every((label) => kept.includes(label))) return `${stem} Am I speaking with ${name}?`;
+  }
+  return null;
+}
+
+/** Every required statement, from any lane, that this text carries. */
+function requiredStatementsIn(text: string): string[] {
+  const labels = new Set<string>();
+  for (const list of Object.values(MANDATORY_GREETING_COPY)) {
+    for (const r of list) if (r.present(text)) labels.add(r.label);
+  }
+  return [...labels];
+}
+
+/**
+ * The greeting a lane plays for a recognised caller. For the after-hours line
+ * ('keep-copy') an edited greeting that cannot be cut safely falls back to the
+ * built-in one, which can (a test pins that), so a recognised caller is always
+ * asked the question the prompt says was asked; every other lane is
+ * `personaliseGreeting` unchanged.
+ */
+export function personaliseLaneGreeting(
+  agentSlug: string | undefined,
+  chosen: string,
+  registry: string | null | undefined,
+  recognisedFirstName: string,
+): string {
+  const style = greetingStyleFor(agentSlug);
+  if (style !== 'keep-copy' || !String(recognisedFirstName ?? '').trim()) {
+    return personaliseGreeting(chosen, recognisedFirstName, style);
+  }
+  const fromChosen = personaliseKeepingCopy(chosen, recognisedFirstName);
+  if (fromChosen) return fromChosen;
+  const fromRegistry = registry ? personaliseKeepingCopy(registry, recognisedFirstName) : null;
+  if (fromRegistry) return fromRegistry;
+  console.error(`[greeting] ${agentSlug}: no safe place for the caller's name in either greeting — said verbatim. FIX agents.welcome_greeting`);
+  return chosen;
 }
 
 /**

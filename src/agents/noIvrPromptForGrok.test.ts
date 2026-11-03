@@ -70,10 +70,13 @@ describe('the greeting block contradicts neither pipeline', () => {
   });
 
   it('still forbids the two things that truncated it on 2026-08-01', () => {
+    // This is the SIP core's body, whose greeting is never personalised (the
+    // runtime's is, v172; see noIvrPromptShapeForGrok.test.ts), so the agent
+    // still asks the name itself and must not open with it.
     const p = promptSource();
     expect(p).toContain('DO NOT OPEN WITH A NAME CONFIRMATION');
     expect(p).toMatch(/DO NOT SPEAK OVER THE GREETING/i);
-    expect(p).toMatch(/never say it\s*\n?\s*a second time/i);
+    expect(p).toMatch(/say it a second\s*\n?\s*time/i);
   });
 
   it('keeps the compliance content the greeting exists to carry', () => {
@@ -83,8 +86,7 @@ describe('the greeting block contradicts neither pipeline', () => {
     // off — so a loose match stays green while either sentence is deleted.
     // Assert the statement of WHAT THE GREETING CARRIES, which is the one a
     // future edit would drop as redundant.
-    expect(p).toMatch(/medical emergency\s*\n?\s*means calling 911/);
-    expect(p).toMatch(/plus the recording\s*\n?\s*disclosure/i);
+    expect(p).toMatch(/the closed notice, the 911 direction and the\s+recording\s+disclosure/);
     // And the account of what happened when it was truncated, which is the
     // only reason anyone leaves the rule alone.
     expect(p).toMatch(/never told to\s*\n?\s*dial 911 in an emergency/);

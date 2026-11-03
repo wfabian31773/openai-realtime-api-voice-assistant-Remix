@@ -1210,8 +1210,21 @@ import { callEnvironment } from "./callRecord";
  * that no date of birth was confirmed; it carries no chart date of birth or
  * history. Above main's v170 (#423), which it contains. No migration.
  */
+/**
+ * v172 — THE AFTER-HOURS GREETING ASKS THE NAME, AND THE YES COUNTS THERE TOO
+ * (2026-11-03). Operator, choosing "After-hours too": "Am I speaking with
+ * <first name>?" closes the after-hours greeting, after the closed notice,
+ * the 911 direction and the recording disclosure, which stay word for word
+ * (greetingPersonalisation 'keep-copy'); and the caller's yes to that name
+ * confirms a number that is one person through lookup_schedule
+ * (`greetingYesConfirms`), so the record's last name and date of birth reach
+ * the ticket without being asked. Before (no-ivr, 10-20..11-02, recognised
+ * callers): asked the name on 185 of 377, and asked a surname or date of
+ * birth after all 159 yeses. Above main's v171 (#421, the sweep files under
+ * the record's name), which it contains. No migration.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v171-the-caller-said-the-records-name-20261103";
+  "voice-runtime-v172-the-after-hours-greeting-asks-the-name-20261103";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

@@ -251,12 +251,15 @@ describe('every ruling survives in both bodies', () => {
   it('a recognised caller: the block keeps its rules and asks one field at a time (RULE ZERO 2b)', async () => {
     const pc = { matched: true, firstName: 'Zelda' };
     const grok = await prompt({ pipeline: 'runtime', precontext: pc });
-    expect(grok).toContain('DO NOT OPEN WITH A NAME CONFIRMATION, AND DO NOT SPEAK OVER THE GREETING');
-    expect(grok).toContain('am I speaking with Zelda?');
+    // v172 (operator 2026-11-03): the greeting itself asks the name, and a yes
+    // confirms the record through lookup_schedule instead of an interview.
+    expect(grok).toContain('then ASKED "Am I speaking with Zelda?". Never repeat either');
+    expect(grok).toContain('call lookup_schedule with first_name "Zelda"');
+    expect(grok).toMatch(/ask for neither unless that lookup returns unconfirmed/);
+    expect(grok).toMatch(/NO, another name, or calling for someone else: discard this block/);
     expect(grok).toMatch(/Disclose nothing from anyone's record/);
-    // The deliberate change, for the operator to overrule: not two fields in one breath.
+    // Never two fields in one breath (RULE ZERO 2b).
     expect(grok).not.toMatch(/IN ONE question, never one\s*\n?\s*and then the other/);
-    expect(grok).toMatch(/take the last name in their own words, then the date of birth in parts/);
     // Unrecognised: no block at all.
     expect(await prompt({ pipeline: 'runtime' })).not.toContain('Caller-ID pre-context');
   });

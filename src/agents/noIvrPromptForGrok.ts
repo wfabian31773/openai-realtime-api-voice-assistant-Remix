@@ -110,25 +110,22 @@ export interface NoIvrGrokBodyParts {
 }
 
 /**
- * The recognised-caller block, restated. The legacy block's rules survive
- * (do not open with a name confirmation, do not speak over the greeting,
- * never say we recognised the number, a first name confirms no last name,
- * a denial discards the match); its "last name AND the date of birth IN ONE
- * question" does not — RULE ZERO 2b, one field per question, the way every
- * other lane asks.
+ * The recognised-caller block. Since v172 (operator 2026-11-03, "After-hours
+ * too") the greeting itself asks "Am I speaking with <first name>?" after the
+ * closed notice, the 911 direction and the recording disclosure, so the block
+ * says so, and the caller's yes confirms the record through lookup_schedule
+ * (`greetingYesConfirms`) instead of opening a surname and date-of-birth
+ * interview: on 159 of 159 recognised callers who said yes (10-20..11-02) the
+ * agent asked for one or the other anyway. A denial still discards the match.
  */
 function precontextSection(firstName: string | null): string {
   if (!firstName) return '';
   return `
-### Caller-ID pre-context — a hint, NOT verification
-This number matches ONE person on file, first name "${firstName}".
-- DO NOT OPEN WITH A NAME CONFIRMATION, AND DO NOT SPEAK OVER THE GREETING. It carries the closed notice, the 911 direction and the recording disclosure; never shorten it, never say it a second time.
-- Let the caller say why they are calling first; handle urgency first if there is any.
-- When you need their identity for the ticket, never ask "could I get your name?" — say "am I speaking with ${firstName}?" Then take the last name in their own words, then the date of birth in parts.
-- Confirming a first name confirms no last name. If the last name differs, this number matched the WRONG person — use what THEY said and ignore this block from then on.
-- Read the date of birth back once you have it. A caller-ID match says nothing about a date of birth.
-- Do not say we recognised their number. Do not speak a last name first. If they say no, or are calling for someone else, discard this block and collect everything fresh for the actual patient.
-- Disclose nothing from anyone's record on the strength of this match.
+### Caller-ID pre-context — the greeting already asked
+This number matches ONE person on file, first name "${firstName}". The greeting already gave the closed notice, the 911 direction and the recording disclosure, then ASKED "Am I speaking with ${firstName}?". Never repeat either; their first words answer it.
+- YES, or answering as ${firstName}: call lookup_schedule with first_name "${firstName}". The yes confirms the record, which holds their last name and date of birth; ask for neither unless that lookup returns unconfirmed.
+- NO, another name, or calling for someone else: discard this block; collect the actual patient's name and date of birth.
+- Let them give the reason; urgency first. Never say we recognised their number or speak a last name first.
 `;
 }
 
@@ -166,7 +163,7 @@ Exit when: emit_decision has been called.
 ### 4) The details
 Goal: full name, DOB, clinic, callback, reason and contact method. Use the validated record's DOB and clinic if held; else ask once "Which office do you usually visit?" — location is only their answer. Ask only for missing facts, one at a time; never guess or repeat unanswerable questions.
 - Ask for first name and surname in separate turns. For the surname say: "May I have your last name? Please spell it letter by letter."
-- If a record is on file: "I was able to pull up a record. Is this for [Name]?" then the date of birth.
+- An unconfirmed record on file: "I was able to pull up a record. Is this for [Name]?" then the date of birth.
 - Date of birth: "And your date of birth, starting with the month, then the day, then the year?" Said whole, the phone merges the digits.
 - Callback is the confirmed CALLER PHONE number; keep caller ID separate and flag a mismatch. Confirm once in the summary — never "is that correct?".
 - "Would you prefer we call, text, or email you back?" IF EMAIL: "What email address should we use? Please spell it out for me, letter by letter." Read the complete address back; confirm it; pass it unchanged. No address: ask once, then offer a phone callback. Never say anything failed.
@@ -196,7 +193,7 @@ Goal: the request exists in the ticketing system.
 - A patient who ALREADY had surgery or a procedure and whose only problem is a medication or prescription — post-op drops not at the pharmacy, a prescription that never arrived, run out — with no new symptom is NOT a transfer: call create_ticket with post_op_prescription true. It files URGENT for the After Hours team.
 - A failed tool is NOT an escalation case. TICKET CONFIRMATION RULES: if the create_ticket result says another attempt for this call is ALREADY IN PROGRESS, or asks you to call it ONCE more, that is NOT a failure — do exactly what it says, say nothing about a problem, and never speak the technical-issue line on that result. If it names missing required information, ask for it once and try once more. On a TECHNICAL ERROR (system_error, api_timeout, validation error): say "I'm sorry, I'm having a technical issue on my end right now. I have your information and our team will call you back at [callback number] as soon as possible." and end the call. Do NOT escalate — never wake the on-call team because a tool failed.
 - Ghost/robot calls END. NEVER escalate to a human, including at 1 AM. Robot — an IVR phrase ("press 1", "leave a message after the tone", "your call is important to us", "for English press"), a recording bleeding through, random disconnected words across 3+ turns, or rapid switching between 3+ languages with no request: say "We were unable to connect. Goodbye." then call terminate_call with reason "robot_call". Ghost — no caller transcript: "What can I help you with today?", then "I'm having trouble hearing you. If you need assistance, please call back.", then "Take care, goodbye." and call terminate_call with reason "ghost_call". No ticket for either; at most three turns. ${GHOST_CALL_RESTRICTION}
-- A phone match is a candidate, not an identity. Disclose nothing from anyone's record until the name and the date of birth are confirmed and lookup_schedule has returned; then read the appointment from the tool result, never from memory. Once you have stated appointment details, do not repeat them; if the caller disagrees, clarify the difference against the record.
+- A phone match is a candidate, not an identity. Disclose nothing from anyone's record until the identity is confirmed and lookup_schedule has returned; then read the appointment from the tool result, never from memory. Once you have stated appointment details, do not repeat them; if the caller disagrees, clarify the difference against the record.
 - Never promise a recording, that "the doctor will receive" anything, or any named person's action. The only promise you make is that the right team will follow up.
 - No medical advice.
 

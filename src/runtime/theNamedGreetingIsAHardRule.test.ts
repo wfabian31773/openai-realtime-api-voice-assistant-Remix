@@ -166,7 +166,7 @@ describe('the rule itself', () => {
     const { join } = await import('node:path');
     const src = readFileSync(join(__dirname, 'voiceRuntime.ts'), 'utf8');
     expect(src).toMatch(
-      /personaliseGreeting\(\s*chooseGreeting\(entry\.slug, configuredGreeting, lane\.greeting\),\s*recognisedFirstName\(precontext\),/,
+      /personaliseLaneGreeting\(\s*entry\.slug,\s*chooseGreeting\(entry\.slug, configuredGreeting, lane\.greeting\),\s*lane\.greeting,\s*recognisedFirstName\(precontext\),/,
     );
   });
 
