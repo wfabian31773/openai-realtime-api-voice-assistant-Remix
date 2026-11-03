@@ -1172,8 +1172,19 @@ import { callEnvironment } from "./callRecord";
  * same-day appointment-time conflict files high. v165 is #419's. Above main's
  * v164 (#418). No migration.
  */
+/**
+ * v170 — THE NAMED GREETING IS BACK (2026-11-03). Operator: "that was a hard
+ * rule and should have never been replaced." #384 (VA-76205) made the
+ * greeting's first name require identityValidated, which nothing sets at
+ * greeting time, so from the 2026-10-30 deploy no greeting asked "Am I
+ * speaking with <name>?" (optical/surgery/tech 245 of 355 on 10-29, 0 of 433
+ * on 11-02). recognisedFirstName names a matched caller again; the
+ * recognised-caller block follows it (v157's candidate arm is gone with the
+ * case it served). Ticket-side identity rules are unchanged. v168 is #421's
+ * and v169 is #422's. Above main's v167 (#419). No migration.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v167-follow-up-replies-are-timed-20261102";
+  "voice-runtime-v170-the-named-greeting-is-back-20261103";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

@@ -41,6 +41,13 @@ const { buildRecordsPrompt } = await import('../agents/recordsAgent');
  * CA1ecb4216b73ca6200159b130232094eb, CA04c23871f54f7024393b7126c298473a.
  * 30 refusals against 3 on 10-29, when every recognised caller was greeted by
  * name. Synthetic stand-ins below; the real names stay out of git.
+ *
+ * v170 (operator, 2026-11-03) restores the named greeting, so an unvalidated
+ * caller-ID match is greeted by name again and the block says so. The
+ * agreement property below is unchanged and still holds in every arm; the
+ * candidate arm v157 added for a match the greeting did not name is gone,
+ * because no matched caller with a first name can reach it.
+ * `theNamedGreetingIsAHardRule.test.ts` runs the corpus above against v170.
  */
 
 const GREETING = 'Thank you for calling Azul Vision. How can I help you today?';
@@ -81,57 +88,37 @@ describe('the prompt says the greeting asked for a name only when it did (v157)'
   });
 });
 
-describe('an unvalidated match: no name anywhere, and the funnel ends without a date of birth (v157)', () => {
+describe('a caller-ID match is greeted by name again, and the block says so (v170)', () => {
   for (const [lane, build] of builders) {
     const prompt = build({ precontext: CANDIDATE, callerPhone: '+15550001111' });
 
-    it(`${lane} never puts the candidate's name in front of the model`, () => {
-      expect(prompt).not.toContain('Alex');
-      expect(prompt).not.toContain('Am I speaking with');
-      expect(prompt).toMatch(/Do not say a name they have not told you/);
+    it(`${lane}: the greeting asks the candidate by first name`, () => {
+      expect(spokenGreeting(lane, CANDIDATE)).toContain('Am I speaking with Alex?');
     });
 
-    it(`${lane} asks for the first and last name and calls lookup_patient with it`, () => {
-      expect(prompt).toContain('This number matches someone on file');
-      expect(prompt).toMatch(/first and\s+last name\?"/);
-      expect(prompt).toMatch(/call lookup_patient with what they say/);
-      expect(prompt).toMatch(/patient's first and last name/);
-    });
-
-    it(`${lane} gates the identity step on a certain name AND date-of-birth lookup`, () => {
-      expect(prompt).toMatch(/identity_is_certain true, from a name AND a\s+date of birth, completes the identity step/);
-      expect(prompt).toMatch(/A name alone is never certain:\s+do not skip the date of birth on a name-only lookup/);
-      expect(prompt).not.toMatch(/Do not\s+ask for their date of birth — we hold it/);
-    });
-
-    it(`${lane} still asks again when the lookup is not certain`, () => {
-      expect(prompt).toMatch(/If it does not come back certain, ask again/);
-      expect(prompt).toContain('CALL lookup_patient\n  AGAIN with all three');
-    });
-
-    it(`${lane} takes the PATIENT's details from a proxy caller (calling for a parent)`, () => {
-      expect(prompt).toMatch(/calling for someone else \(a parent/);
-      expect(prompt).toMatch(/take the\s+PATIENT's details: the caller's own only if the call is about them/);
-      expect(prompt).toMatch(/Never\s+file a request about someone else under the caller's name/);
-      const ask = prompt.indexOf('Ask how you can help BEFORE any name');
-      expect(ask).toBeGreaterThan(-1);
-      expect(ask).toBeLessThan(prompt.indexOf("Ask the patient's first and last name"));
+    it(`${lane}: the prompt says the greeting asked, and a yes ends the identity step`, () => {
+      expect(prompt).toContain('Your greeting has already ASKED "Am I speaking with Alex?"');
+      expect(prompt).toMatch(/If they said YES, the identity step is DONE/);
+      expect(prompt).not.toContain('This number matches someone on file');
     });
   }
 
-  it('greetingNamedThem is false, and the ask script and the meaning take the candidate arm', () => {
-    expect(greetingNamedThem(CANDIDATE)).toBe(false);
-    expect(identityAskScript(CANDIDATE)).toMatch(/A name alone is never certain: ask the date of\s+birth too/);
-    expect(identityAskScript(CANDIDATE)).not.toMatch(/Skip the date of birth/);
-    expect(identityAskScript(CANDIDATE)).toMatch(/PATIENT's details when the call is about someone\s+else/);
-    expect(identityAskScript(CANDIDATE)).not.toContain('the block above says\nnot to ask');
-    expect(identityCertainMeaning(CANDIDATE)).not.toContain('Then confirm the');
-    expect(identityCertainMeaning(CANDIDATE)).toContain('never say a name they have not said');
+  it('greetingNamedThem is true, and the ask script and the meaning take the recognised arm', () => {
+    expect(greetingNamedThem(CANDIDATE)).toBe(true);
+    expect(identityAskScript(CANDIDATE)).toContain('the block above says\nnot to ask');
+    expect(identityCertainMeaning(CANDIDATE)).toContain('Then confirm the');
   });
 
   it('a validated match keeps the named block, word for word as before', () => {
     expect(greetingNamedThem(VALIDATED)).toBe(true);
     expect(recognisedCallerBlock(VALIDATED)).toContain('Your greeting has already ASKED "Am I speaking with Alex?"');
+  });
+
+  it('a blank first name names nobody, in the greeting or the prompt', () => {
+    const blank = { matched: true, firstName: '   ' };
+    expect(spokenGreeting('optical', blank)).not.toContain('Am I speaking with');
+    expect(greetingNamedThem(blank)).toBe(false);
+    expect(recognisedCallerBlock(blank)).toBe('');
   });
 
   it('no match is unchanged: no block at all', () => {

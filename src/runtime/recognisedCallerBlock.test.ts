@@ -78,7 +78,7 @@ const agentPromptText = (module: string) =>
     .filter((line) => !/^\s*(\/\/|\/\*|\*)/.test(line))
     .join('\n');
 
-const BLOCK = recognisedCallerBlock({ matched: true, firstName: 'Wayne', identityValidated: true });
+const BLOCK = recognisedCallerBlock({ matched: true, firstName: 'Wayne' });
 
 describe('the block is composed from ONE copy, and every lane imports it', () => {
   /**
@@ -213,7 +213,7 @@ describe('an unrecognised caller gets no block at all', () => {
   });
 
   it('uses the caller’s own first name when there is one', () => {
-    expect(recognisedCallerBlock({ matched: true, firstName: 'Rosa', identityValidated: true })).toContain(
+    expect(recognisedCallerBlock({ matched: true, firstName: 'Rosa' })).toContain(
       'Am I speaking with Rosa?',
     );
   });
