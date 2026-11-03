@@ -105,6 +105,8 @@ interface CorpusCall {
   slug: 'surgery' | 'tech' | 'optical';
   record: [string, string];
   transcript: string;
+  /** Why the #421 structural rule now refuses this call (fails safe). */
+  structuralFlip?: string;
 }
 
 const RESCUED: CorpusCall[] = [
@@ -154,6 +156,7 @@ const RESCUED: CorpusCall[] = [
   },
   {
     sid: 'CA82885cc3e29c834e1d5d874b4c16f78e',
+    structuralFlip: 'names another person ("Coordinator Placeholder") besides the caller',
     slug: 'surgery',
     record: ['Jay', 'Muestra'],
     transcript:
@@ -201,6 +204,12 @@ describe('the 2026-11-02 corpus: a whole message left in one breath, on the pati
       const file = filer();
       const out = await runRequestSweep(record(call.sid, call.slug, call.transcript), file);
 
+      if (call.structuralFlip) {
+        // Intentionally flipped by the structural rule: no ticket, as before v168.
+        expect(out).toEqual({ filed: false, reason: 'no-name' });
+        expect(file.calls).toHaveLength(0);
+        return;
+      }
       expect(out).toEqual({ filed: true, ticketNumber: 'VA-SWEEP-1' });
       expect(file.calls).toHaveLength(1);
       expect(file.calls[0].patientFirstName).toBe(call.record[0]);
@@ -554,7 +563,8 @@ describe('callerSaidTheName', () => {
     expect(
       callerSaidTheName('AGENT: What exactly did the message say?\nCALLER: This is Mary Smith.', 'Mary', 'Smith'),
     ).toBe(false);
-    expect(said('This is Mary Smith. My last name is Smith.', 'Mary', 'Smith')).toBe(true);
+    // Structural rule: two introduction phrases => no match (intentional flip).
+    expect(said('This is Mary Smith. My last name is Smith.', 'Mary', 'Smith')).toBe(false);
   });
 });
 
@@ -588,7 +598,9 @@ describe("allowlist design (#421): round-13 cases and common-word names", () => 
     expect(said("This is Mary Smith. I am just John Jones.", "Mary", "Smith")).toBe(false);
   });
   it("matches case-insensitively and keeps names that are common words", () => {
-    expect(said("THIS IS MARY SMITH.", "Mary", "Smith")).toBe(true);
+    // Structural rule: in an all-caps line every word looks like a name (intentional flip).
+    expect(said("THIS IS MARY SMITH.", "Mary", "Smith")).toBe(false);
+    expect(said("this is mary smith.", "Mary", "Smith")).toBe(true);
     expect(said("hi this is will long, calling about my glasses.", "Will", "Long")).toBe(true);
     expect(said("My name is Rose Bush.", "Rose", "Bush")).toBe(true);
   });
@@ -638,3 +650,23 @@ describe("allowlist design, Codex round 19", () => {
   });
 });
 
+
+describe("structural rule (GitHub Assistant block on #421)", () => {
+  const said = (c: string, f: string, l: string) => callerSaidTheName(`AGENT: Hello?\nCALLER: ${c}`, f, l);
+  it("the five blocking examples fail safe", () => {
+    expect(said("La grabación comienza así. Mi nombre es María García. Necesito renovar mis gotas.", "María", "García")).toBe(false);
+    expect(said("My name is Mary Smith. Excuse me, Jane Jones. I need my eye drops refilled.", "Mary", "Smith")).toBe(false);
+    expect(said("Mi nombre es María García. Mejor dicho, Ana Ruiz. Necesito renovar mis gotas.", "María", "García")).toBe(false);
+    expect(said("Soy María García. En realidad soy la paciente Ana Ruiz. Necesito renovar mis gotas.", "María", "García")).toBe(false);
+    expect(said("This is Mary Smith. It is the patient Jane Jones speaking. I need my eye drops refilled.", "Mary", "Smith")).toBe(false);
+  });
+  it("lowercase second introductions and later-turn introductions fail safe", () => {
+    expect(said("soy maría garcía. en realidad soy la paciente ana ruiz.", "María", "García")).toBe(false);
+    expect(callerSaidTheName("AGENT: Hello?\nCALLER: I need my eye drops refilled please.\nAGENT: Go ahead.\nCALLER: This is Mary Smith.", "Mary", "Smith")).toBe(false);
+    expect(said("This is Mary Smith. Please have Jane call me back.", "Mary", "Smith")).toBe(false);
+  });
+  it("a plain introduction, said once or repeated, still confirms", () => {
+    expect(said("Mi nombre es María García. Necesito renovar mis gotas.", "María", "García")).toBe(true);
+    expect(said("My name is Mary Smith. Call me back on Monday. My name is Mary Smith.", "Mary", "Smith")).toBe(true);
+  });
+});

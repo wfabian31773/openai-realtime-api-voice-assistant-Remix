@@ -102,7 +102,12 @@ export function callerSaidTheName(
   //     as "too common to be a name": "i am an nguyen" is a conflict;
   //   - any other mention of either half of this name outside a match.
   const lines = transcript.split("\n");
-  const callerLines = lines.filter((l) => l.startsWith("CALLER:")).map((l) => l.slice("CALLER:".length));
+  const rawCaller = lines.filter((l) => l.startsWith("CALLER:")).map((l) => l.slice("CALLER:".length).trim());
+  // A transcriber often re-emits a turn with more words ("I wanted to…" then
+  // "I wanted to… My name is…"): a caller line repeated, or extended, by a
+  // later one is the same turn and is read once.
+  const callerLines = rawCaller.filter((l, i) => !rawCaller.some((m, j) => j > i && fold(m).startsWith(fold(l).trimEnd())));
+  if (!structurallySingle(callerLines, lines, first, last, firstWords, firstAlt)) return false;
   const agentLines = lines.filter((l) => !l.startsWith("CALLER:"));
   if (
     callerLines.some(
@@ -206,6 +211,82 @@ export function callerSaidTheName(
   if (matched === 0 || mentions !== matched * 2 + halves) return false;
   return true;
 }
+
+/**
+ * THE STRUCTURAL RULE (GitHub Assistant block on #421): patterns alone kept
+ * leaking, so before any phrasing is read the call must have this shape, or
+ * the answer is false:
+ *   - exactly ONE introduction phrase in all the caller's turns, and it is in
+ *     the caller's first substantive turn (three words or more);
+ *   - no correction or apology marker anywhere after it, in any language;
+ *   - no quoting, recording or reading cue anywhere in the call;
+ *   - no other personal name: any capitalised token that does not open a
+ *     sentence and is not a stopword, a clinic word, a day or a month counts
+ *     as one unless it is a token of this name.
+ * Conservative on purpose: anything that might be another name fails safe.
+ */
+function structurallySingle(callerLines: string[], lines: string[], first: string, last: string, firstWords: string[], firstAlt: string): boolean {
+  const own = new Set([first, ...firstWords, ...last.split(/[ _]/)]);
+  const quoting = (t: string) => QUOTING_CUES.test(fold(t).replace(/ take a message | calls are being recorded /g, " "));
+  if (lines.some(quoting)) return false;
+  let count = 0;
+  let introLine = -1;
+  let introAt = 0;
+  const seen = new Set<string>();
+  callerLines.forEach((line, i) => {
+    const f = fold(line.replace(/[.!?;,\u2012-\u2015]+/g, " "));
+    for (const m of f.matchAll(INTRO_RE)) {
+      const next = f.slice((m.index ?? 0) + m[0].length).trim().split(" ")[0] ?? "";
+      if (NOT_INTRO_AFTER.has(next) || (next === "my" && /^(?:this is|it is|it s)$/.test((m[1] ?? "").replace(/_/g, " ")))) continue;
+      // The same introduction of this same name said twice ("My name is
+      // Vance Ejemplo … My name is Vance Ejemplo") is one introduction.
+      const tail = f.slice((m.index ?? 0) + m[0].length);
+      const key = new RegExp(`^ ${firstAlt}[ _]${last.split(/[ _]/).join("[ _]")}(?= )`).test(tail) ? `self:${m[1]}` : `${i}:${m.index}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      count++;
+      if (introLine >= 0) continue;
+      introLine = i;
+      introAt = m.index ?? 0;
+    }
+  });
+  if (count !== 1) return false;
+  const firstSubstantive = callerLines.findIndex((l) => l.split(/\s+/).filter(Boolean).length >= 3);
+  if (introLine !== firstSubstantive) return false;
+  const introF = fold((callerLines[introLine] ?? "").replace(/[.!?;,\u2012-\u2015]+/g, " "));
+  const after = introF.slice(introAt) + " " + callerLines.slice(introLine + 1).map((l) => fold(l.replace(/[.!?;,\u2012-\u2015]+/g, " "))).join(" ");
+  if (AFTER_CORRECTION.test(after)) return false;
+  for (const line of callerLines) {
+    for (const sentence of line.split(/[.!?;]+/)) {
+      const tokens = sentence.trim().split(/[\s,\u2012-\u2015]+/).filter(Boolean);
+      for (let k = 1; k < tokens.length; k++) {
+        const t = tokens[k] ?? "";
+        if (!/^\p{Lu}/u.test(t)) continue;
+        const f = fold(t).trim();
+        if (f === "" || NAME_STOPWORDS.has(f) || f.split(/[ _]/).every((x) => own.has(x))) continue;
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+/** Words after an introduction phrase that make it plainly not one. */
+const NOT_INTRO_AFTER = new Set("sorry sure been about for regarding going gonna calling scheduled trying looking having urgent important".split(" "));
+
+/** Correction or apology markers that must not follow the introduction. */
+const AFTER_CORRECTION = / (?:excuse me|pardon|sorry|i mean|i meant|actually|mejor dicho|perdon|perdona|disculpe|disculpa|en realidad|quiero decir|digo|o sea|corrijo|rectifico|make that|wait|oops|no) /;
+
+/** Quoting, recording or reading cues anywhere in the call. */
+const QUOTING_CUES = / (?:grabacion|grabado|grabada|comienza|empieza|asi|mensaje|dice|dijo|decia|lee|leer|contestadora|buzon|recording|recorded|begins|began|starts|started|reads|read|says|said|quote|quoted|voicemail|message|transcript|playback) /;
+
+/** Capitalised words that are not a personal name. */
+const NAME_STOPWORDS = new Set((
+  "i i_m i_ve i_ll i_d ok okay dr doctor mr mrs ms miss azul vision coordinator coordinators " +
+  "monday tuesday wednesday thursday friday saturday sunday " +
+  "january february march april may june july august september october november december " +
+  "lunes martes miercoles jueves viernes sabado domingo enero febrero marzo abril mayo junio julio agosto septiembre octubre noviembre diciembre"
+).split(" "));
 
 /** Words that may precede a genuine introduction in its sentence. */
 const OPENERS = new Set((
