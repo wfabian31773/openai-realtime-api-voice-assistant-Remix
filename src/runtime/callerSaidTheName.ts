@@ -135,8 +135,8 @@ export function callerSaidTheName(
   if (
     callerLines.some(
       (line) =>
-        /["\u201C\u201D\u00AB\u00BB]/.test(line) ||
-        fold(line.slice("CALLER:".length)).split(" ").some((w) => REPORTERS.has(w)),
+        /["\u201C\u201D\u00AB\u00BB]|(?:^|[^\p{L}])['`\u2018\u2019]|['`\u2018\u2019](?![\p{L}])/u.test(line.slice("CALLER:".length)) ||
+        fold(line.slice("CALLER:".length)).split(/[ _]/).some((w) => REPORTERS.has(w)),
     )
   ) {
     return false;
@@ -168,8 +168,10 @@ export function callerSaidTheName(
         if (ev.correction) {
           // A correction straight after a self-introduction replaces it. Any
           // other correction may be of a mention ("calling about Mary Jones,
-          // sorry, I mean Mary Smith"): it can still conflict, never confirm.
-          if (adjacent) ids = [];
+          // sorry, I mean Mary Smith"), and one that runs on ("I mean Mary
+          // Smith is the patient") may name someone else: either can still
+          // conflict, never confirm.
+          if (adjacent && (!ev.who || fillerOnly(folded.slice(ev.end)))) ids = [];
           else if (ev.who) {
             open = false;
             continue;
@@ -210,6 +212,7 @@ const STRONG = new Set(["my name is", "my name s", "mi nombre es", "me llamo"]);
 const NOT_A_NAME = new Set(("a an the my his her their our your about calling call going here " +
   "just still also really very so not no sorry trying looking wondering having getting urgent " +
   "fine ok okay good his to for in on at with from regarding concerning back again only " +
+  "scheduled supposed worried concerned interested confused booked married pregnant diabetic " +
   "tomorrow today yesterday because completely totally almost currently already been out over sick having done ready able sure afraid glad happy calling worried scared unable available home back late early new old waiting " +
   "tomorrow today yesterday because that what who how why when where there this it is was " +
   "la el su mi un una de que para por muy").split(" "));
@@ -259,12 +262,12 @@ function introductions(clause: string, name: string): Intro[] {
     }
     const [w1 = "", w2 = ""] = rest.trim().split(" ");
     // One name-like word is enough to be someone else ("I mean John de
-    // Vries"): a false conflict only fails safe. A long lowercase -ing/-ed word
-    // is a verb ("I'm scheduled"); -ly is not, it ends names ("kimberly").
+    // Vries"): a false conflict only fails safe. Ordinary words after "I am" are
+    // listed in NOT_A_NAME; no suffix rule ("mohammed", "kimberly" are names).
     const looksLikeName =
       w1.length > 1 && !NEGATORS.has(w1) && !/^s(?:_|$)/.test(w1) &&
       (STRONG.has(intro) || capitalised(clause, w1) ||
-        (!NOT_A_NAME.has(w1) && !(w1.length > 5 && /(?:ing|ed)$/.test(w1))));
+        !NOT_A_NAME.has(w1));
     const end = m.index + m[0].length + 1 + `${w1} ${w2}`.length;
     out.push({ who: !ignored && looksLikeName ? false : null, correction, denied: false, start: m.index, end });
   }

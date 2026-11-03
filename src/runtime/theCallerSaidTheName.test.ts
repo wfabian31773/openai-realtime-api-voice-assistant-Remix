@@ -505,4 +505,11 @@ describe('callerSaidTheName', () => {
     ).toBe(false);
     expect(said("This is Mary Smith. Actually, I'm not Mary Smith, I'm her daughter.", 'Mary', 'Smith')).toBe(false);
   });
+
+  it('Codex round 7: -ed names, a correction that runs on, single quotes, possessive reporters', () => {
+    expect(said('This is Mary Smith. Sorry, I mean mohammed jones.', 'Mary', 'Smith')).toBe(false);
+    expect(said("This is John Jones. Sorry, I mean Mary Smith is the patient, I'm her son.", 'Mary', 'Smith')).toBe(false);
+    expect(said("The screen shows 'This is Mary Smith'.", 'Mary', 'Smith')).toBe(false);
+    expect(said("The voicemail's first words were this is Mary Smith.", 'Mary', 'Smith')).toBe(false);
+  });
 });
