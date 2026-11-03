@@ -96,8 +96,11 @@ async function call(agent: any, name: string, args: Record<string, unknown>) {
 }
 
 const GREETED = { matched: true, firstName: 'Zelda' };
-const agentFor = (callSid: string, precontext: unknown = GREETED) =>
-  createNoIvrAgent(async () => {}, { callId: `call-${callSid}`, callSid, callerPhone: '+15551234567', precontext } as any);
+const agentFor = (callSid: string, precontext: unknown = GREETED, pipeline: 'runtime' | 'sip' = 'runtime') =>
+  createNoIvrAgent(async () => {}, {
+    callId: `call-${callSid}`, callSid, callerPhone: '+15551234567', precontext,
+    ...(pipeline === 'runtime' ? { pipeline: 'runtime' } : {}),
+  } as any);
 
 const CORPUS = ['CAbf3977601223f045515bc3775c6431d3', 'CA28bc2f551fd823cca0e188f2f4c29c2e'] as const;
 
@@ -138,6 +141,24 @@ describe('the corpus: a recognised after-hours caller who says yes is confirmed,
     // Still withheld until then.
     expect(prompt).not.toContain('Zebrastripe');
     expect(prompt).not.toContain('3:10 PM');
+  });
+
+  it('the SIP core, whose greeting is never personalised, does not claim the greeting asked (Codex P2 on #425)', async () => {
+    const agent = await agentFor(CORPUS[0], GREETED, 'sip');
+    const prompt = String((agent as any).instructions);
+    expect(prompt).not.toContain('ASKED "Am I speaking with');
+    expect(prompt).not.toContain('YOUR GREETING ALREADY ASKED');
+    // The agent asks it there, and the same yes confirms through the same tool.
+    expect(prompt).toMatch(/say "am I speaking with Zelda\?"/);
+    expect(prompt).toContain('call lookup_schedule with first_name "Zelda"');
+  });
+
+  it('a yes to the SIP agent\'s own question confirms through the same tool', async () => {
+    const sid = 'CA0000000000000000000000000000c172';
+    const agent = await agentFor(sid, GREETED, 'sip');
+    const r = await call(agent, 'lookup_schedule', { first_name: 'Zelda' });
+    expect(r.upcomingAppointments).toHaveLength(1);
+    expect(verifiedIdentityFor(sid)?.certain).toBe(true);
   });
 });
 

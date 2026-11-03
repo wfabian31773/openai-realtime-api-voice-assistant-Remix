@@ -680,24 +680,24 @@ export function buildNoIvrSystemPrompt(
   let precontextSection = "";
   const pc = metadata.precontext;
   if (pc?.matched && pc.firstName) {
+    // This body is the OpenAI SIP core's, which never personalises the
+    // after-hours greeting (Codex P2 on #425): the AGENT asks the name here,
+    // and a yes confirms the record the same way the runtime's greeting does.
     precontextSection = `
-===== CALLER-ID PRE-CONTEXT — THE GREETING ALREADY ASKED =====
+===== CALLER-ID PRE-CONTEXT (a hint, NOT verification) =====
 This phone number matches ONE person on file: first name "${pc.firstName}".
 
-- YOUR GREETING HAS ALREADY spoken the closed notice, the 911 direction and the
-  recording disclosure, and has already ASKED "Am I speaking with ${pc.firstName}?"
-  (v172, operator 2026-11-03). Never repeat the greeting or the question, and
-  never speak over it: on 2026-08-01 12:21 UTC it was cut off after "Thank you
-  for calling", so a caller was never told to dial 911 in an emergency and was
-  never told the call was recorded. The caller's first words answer it.
-- If they said YES, or answered as ${pc.firstName}: call lookup_schedule with
-  first_name "${pc.firstName}". Their yes confirms the record, which holds their last
-  name and date of birth; do not ask for either unless that lookup comes back
-  unconfirmed.
-- If they said NO, gave another name, or are calling for someone else: discard
-  this block and collect everything fresh for the ACTUAL patient.
-- This is an AFTER-HOURS MESSAGE-TAKING line. Let the caller say why they are
-  calling; handle urgency first if there is any.
+- DO NOT OPEN WITH A NAME CONFIRMATION, AND DO NOT SPEAK OVER THE GREETING.
+  It carries the closed notice, the 911 direction and the recording disclosure;
+  on 2026-08-01 12:21 UTC it was cut off, so a caller was never told to
+  dial 911 in an emergency or that the call was recorded. Never shorten it or
+  say it a second time.
+- Let the caller give the reason first; urgency first if there is any.
+- For their identity say "am I speaking with ${pc.firstName}?" — never "could I
+  get your name?". YES: call lookup_schedule with first_name "${pc.firstName}";
+  the yes confirms the record, so ask neither last name nor date of birth
+  unless that lookup comes back unconfirmed (v172). NO, another name, or for
+  someone else: discard this block; collect the ACTUAL patient's details.
 - Do NOT say we recognized their number. Do NOT speak a last name first.
 - Disclose nothing from the record until lookup_schedule has returned it.
 `;
@@ -727,7 +727,8 @@ This phone number matches ONE person on file: first name "${pc.firstName}".
      * once that is done, from the tool result rather than from memory.
      */
     const firstName = (scheduleContext.patientName ?? '').trim().split(/\s+/)[0] || 'the patient on file';
-    const greetedFirst = pc?.matched && pc.firstName ? pc.firstName : '';
+    // Only the runtime's greeting asks the name (personaliseLaneGreeting); the SIP core's never does.
+    const greetedFirst = noIvrPromptShape(metadata) === 'grok' && pc?.matched && pc.firstName ? pc.firstName : '';
     console.log('[No-IVR Agent] PHONE MATCH IS A CANDIDATE — appointment details withheld from the prompt until the name and date of birth are confirmed');
     scheduleContextSection = `
 ===== PATIENT CONTEXT (PHONE MATCH — UNCONFIRMED, a candidate only) =====
