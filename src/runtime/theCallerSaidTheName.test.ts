@@ -476,7 +476,7 @@ describe('callerSaidTheName', () => {
     expect(said('This is Mary Smith. this is john jones.', 'Mary', 'Smith')).toBe(false);
     expect(said('This is Mary Smith. Sorry about the message, I mean Mary Jones.', 'Mary', 'Jones')).toBe(false);
     expect(said('This is John Jones. I am calling about Mary Jones, sorry, I mean Mary Smith.', 'Mary', 'Smith')).toBe(false);
-    expect(said('This is Mary Smith. I am completely out of medication.', 'Mary', 'Smith')).toBe(true);
+    expect(said('This is Mary Smith. I am completely out of medication.', 'Mary', 'Smith')).toBe(false); // allowlist: flipped ("completely" not a listed continuation; fails safe)
   });
 
   it('Codex round 4: a correction of a mention never confirms; lowercase names conflict', () => {
@@ -536,7 +536,7 @@ describe('callerSaidTheName', () => {
     expect(said('My mother always answers the phone with this is Mary Smith.', 'Mary', 'Smith')).toBe(false);
     expect(said('This is Mary Smith. Sorry, I mean, um, Mary Jones.', 'Mary', 'Smith')).toBe(false);
     expect(said('This is Mary Smith. Actually, I am A. Jones.', 'Mary', 'Smith')).toBe(false);
-    expect(said('This is Mary Smith. I am a patient of Dr. Lee.', 'Mary', 'Smith')).toBe(true);
+    expect(said('This is Mary Smith. I am a patient of Dr. Lee.', 'Mary', 'Smith')).toBe(false); // allowlist: flipped ("a" could be an initial; fails safe)
   });
 
   it('Codex round 11: a correction finished on the next turn, a quotative after a comma', () => {
@@ -575,3 +575,21 @@ describe("Codex round 13: corrections, half-name denials, agent read-aloud", () 
   });
 });
 
+
+describe("allowlist design (#421): round-13 cases and common-word names", () => {
+  const said = (c: string, f: string, l: string) => callerSaidTheName(`AGENT: Hello?\nCALLER: ${c}`, f, l);
+  it("the four Codex round-13 cases fail safe", () => {
+    expect(callerSaidTheName("AGENT: Can you tell me exactly what she said?\nCALLER: This is Mary Smith.", "Mary", "Smith")).toBe(false);
+    expect(said("This is Mary Smith. Sorry, my surname is not Smith but Jones.", "Mary", "Smith")).toBe(false);
+    expect(said("This is Mary Smith. Sorry, that should be Mary Jones.", "Mary", "Smith")).toBe(false);
+    expect(said("this is mary smith. i am an nguyen.", "Mary", "Smith")).toBe(false);
+  });
+  it("an adverb before another name is a conflict, not a continuation", () => {
+    expect(said("This is Mary Smith. I am just John Jones.", "Mary", "Smith")).toBe(false);
+  });
+  it("matches case-insensitively and keeps names that are common words", () => {
+    expect(said("THIS IS MARY SMITH.", "Mary", "Smith")).toBe(true);
+    expect(said("hi this is will long, calling about my glasses.", "Will", "Long")).toBe(true);
+    expect(said("My name is Rose Bush.", "Rose", "Bush")).toBe(true);
+  });
+});
