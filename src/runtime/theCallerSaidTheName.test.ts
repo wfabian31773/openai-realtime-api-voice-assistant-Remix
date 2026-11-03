@@ -442,4 +442,19 @@ describe('callerSaidTheName', () => {
       callerSaidTheName('AGENT: Is this Rosa Benchmark?\nCALLER: I need my glasses.', 'Rosa', 'Benchmark'),
     ).toBe(false);
   });
+
+  it('a quoted name is not a self-introduction, and conflicting identity fails safe (Codex P1, #421)', () => {
+    expect(
+      said('The message you left said this is Mary Smith. I am John Jones and need my own prescription refilled.', 'Mary', 'Smith'),
+    ).toBe(false);
+    expect(said('The message said this is Mary Smith.', 'Mary', 'Smith')).toBe(false);
+    expect(said('This is Mary Smith. I am John Jones.', 'Mary', 'Smith')).toBe(false);
+  });
+
+  it('a later self-introduction or correction overrides an earlier one (Codex P1, #421)', () => {
+    expect(said('This is Mary Smith. Sorry, I mean Mary Jones', 'Mary', 'Smith')).toBe(false);
+    expect(said('This is Mary Smith. Sorry, I mean Mary Jones', 'Mary', 'Jones')).toBe(true);
+    expect(callerSaidTheName('CALLER: This is Mary Smith.\nCALLER: My name is Ana Ruiz.', 'Mary', 'Smith')).toBe(false);
+    expect(said('This is Mary Smith. I am calling about my glasses.', 'Mary', 'Smith')).toBe(true);
+  });
 });

@@ -55,7 +55,14 @@ const INTRODUCTIONS = [
   "me llamo",
   "soy",
   "habla",
+  // Corrections ("Sorry, I mean Mary Jones") — see CORRECTION below.
+  "i mean",
+  "i meant",
+  "quiero decir",
 ];
+
+/** A correction discards every earlier identification: the last one wins. */
+const CORRECTION = / i[ _]mean(?:t)? | quiero decir /;
 
 /**
  * True when ONE sentence of ONE caller line — never the agent's — introduces
@@ -111,7 +118,45 @@ export function callerSaidTheName(
     // en or em dash ("Mary Smith — I need…") is a clause break, not a joiner;
     // only a hyphen (ASCII, U+2010, U+2011) joins a surname.
     .flatMap((line) => line.slice("CALLER:".length).split(/[.!?;:,\u2012-\u2015]+/))
-    .some((sentence) => introducesAs(fold(sentence), name));
+    // Codex P1s, #421: one sentence matching is not enough. A name the caller
+    // QUOTES ("the message said this is Mary Smith") is not their own, and a
+    // later self-introduction or correction ("Sorry, I mean Mary Jones")
+    // overrides an earlier one. So every sentence that introduces the caller
+    // by ANY name is weighed: the match stands only if at least one genuine
+    // self-introduction names this person and none names somebody else —
+    // counting only from the last correction ("I mean …"), which resets it.
+    .reduce<boolean | null>((verdict: boolean | null, sentence) => {
+      const folded = fold(sentence);
+      if (CORRECTION.test(folded)) verdict = null;
+      if (verdict === false) return false;
+      if (introducesAs(folded, name)) return true;
+      return introducesSomeoneElse(sentence) ? false : verdict;
+    }, null) === true;
+}
+
+/** Folded words that make the introduction after them reported speech. */
+const REPORTERS = new Set([
+  "said", "says", "saying", "say", "told", "tells", "asked", "wrote", "read",
+  "reads", "stated", "states", "that", "dijo", "dice", "decia", "que",
+]);
+
+/**
+ * A raw (unfolded) sentence where the caller introduces or corrects
+ * themselves as a capitalised two-word name: "I am John Jones", "I mean Mary
+ * Jones", "Me llamo Ana Ruiz". Callers only ever call this for a sentence that
+ * did NOT introduce them as the record's name, so any hit is conflicting
+ * identity evidence and the answer fails safe (false). Reported speech and
+ * negations are skipped, as in `introducesAs`.
+ */
+const SELF_ID = [...INTRODUCTIONS.filter((i) => !i.endsWith(" s") && i !== "i m"), "my name's", "i'm", "it's"]
+  .map((i) => i.replace(/[a-z]/g, (c) => `[${c}${c.toUpperCase()}]`).replace(/ /g, "\\s+").replace(/'/g, "['\u2019]"));
+const SELF_ID_RE = new RegExp(`(?<![\\p{L}'\u2019])(?:${SELF_ID.join("|")})\\s+\\p{Lu}\\p{L}+(?:['\u2019-]\\p{L}+)*\\s+\\p{Lu}`, "gu");
+function introducesSomeoneElse(sentence: string): boolean {
+  for (const m of sentence.matchAll(SELF_ID_RE)) {
+    const before = fold(sentence.slice(0, m.index)).trim().split(/[ _]/).pop() ?? "";
+    if (!NEGATORS.has(before) && !REPORTERS.has(before)) return true;
+  }
+  return false;
 }
 
 const NEGATORS = new Set(["no", "not", "never", "nunca"]);
@@ -131,7 +176,7 @@ function introducesAs(folded: string, name: string): boolean {
       const after = folded.slice(m.index + m[0].length + 1);
       // A possessive the joiner missed ("Smith 's daughter") still folds to
       // "smith s daughter"; Spanish negates BEFORE the verb ("No soy Mary Smith").
-      if (!/^s(?: |$)/.test(after) && !NEGATORS.has(before)) return true;
+      if (!/^s(?: |$)/.test(after) && !NEGATORS.has(before) && !REPORTERS.has(before)) return true;
     }
   }
   return false;
