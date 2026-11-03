@@ -537,4 +537,11 @@ describe('callerSaidTheName', () => {
     expect(said('This is Mary Smith. Actually, I am A. Jones.', 'Mary', 'Smith')).toBe(false);
     expect(said('This is Mary Smith. I am a patient of Dr. Lee.', 'Mary', 'Smith')).toBe(true);
   });
+
+  it('Codex round 11: a correction finished on the next turn, a quotative after a comma', () => {
+    expect(
+      callerSaidTheName('CALLER: This is Mary Smith. Sorry, I mean\nAGENT: Go ahead.\nCALLER: Mary Jones.', 'Mary', 'Smith'),
+    ).toBe(false);
+    expect(said('My mother always goes, this is Mary Smith.', 'Mary', 'Smith')).toBe(false);
+  });
 });

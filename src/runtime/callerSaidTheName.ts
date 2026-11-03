@@ -138,7 +138,9 @@ export function callerSaidTheName(
         fold(line).split(/[ _]/).some((w) => REPORTERS.has(w)) ||
         [...fold(line).matchAll(/ (?:i[ _]mean(?:t)?|quiero decir)((?: [a-z_]+)*)/g)].some(([, tail]) => {
           const w = tail.trim().split(/[ _]/).find((x) => !FILLER.has(x)) ?? "";
-          return w !== "" && !NOT_A_NAME.has(w);
+          // A correction with nothing after it ("Sorry, I mean" — the name
+          // comes on the next turn) is unresolved, and cancels too.
+          return w === "" || !NOT_A_NAME.has(w);
         }) ||
         // A colon introduces what someone else said ("My mother replied: …").
         /:/.test(line),
@@ -151,19 +153,26 @@ export function callerSaidTheName(
     // Clause boundaries are cut BEFORE folding, which would turn them into
     // spaces and join one clause to the next. An en or em dash is a clause
     // break, not a joiner; only a hyphen (ASCII, U+2010, U+2011) joins.
-    for (const clause of line.split(/[.!?;:,\u2012-\u2015]+/)) {
-      // "I am not actually Mary Smith": an introduction, a negation and this
-      // name in one clause, in that order, is a denial however it is worded.
-      const f = fold(clause);
-      const intro = INTRODUCTIONS.map((i) => i.replace(/ /g, "[ _]")).join("|");
-      if (new RegExp(`(?<= )(?:${intro}) (?:.* )?(?:not|never|nunca) (?:.* )?${name}(?= )`).test(f)) return false;
-      for (const ev of introductions(clause, name)) {
-        if (ev.denied || ev.cancels) return false;
-        if (ev.who === false) return false;
-        // Only an introduction that OPENS its clause (greetings and filler
-        // aside) is the caller's own: "My mother would say this is Mary
-        // Smith" or "the message said this is Mary Smith" is a mention.
-        if (ev.who === true && ev.opens) confirmed = true;
+    for (const sentence of line.split(/[.!?]+/)) {
+      // An introduction is the caller's own only if nothing but greetings and
+      // filler precede it in its SENTENCE ("My mother always goes, this is
+      // Mary Smith" is a mention).
+      let prefixPlain = true;
+      for (const clause of sentence.split(/[;:,\u2012-\u2015]+/)) {
+        // "I am not actually Mary Smith": an introduction, a negation and this
+        // name in one clause, in that order, is a denial however it is worded.
+        const f = fold(clause);
+        const intro = INTRODUCTIONS.map((i) => i.replace(/ /g, "[ _]")).join("|");
+        if (new RegExp(`(?<= )(?:${intro}) (?:.* )?(?:not|never|nunca) (?:.* )?${name}(?= )`).test(f)) return false;
+        for (const ev of introductions(clause, name)) {
+          if (ev.denied || ev.cancels) return false;
+          if (ev.who === false) return false;
+          // Only an introduction that OPENS its clause (greetings and filler
+          // aside) is the caller's own: "My mother would say this is Mary
+          // Smith" or "the message said this is Mary Smith" is a mention.
+          if (ev.who === true && ev.opens && prefixPlain) confirmed = true;
+        }
+        if (!f.trim().split(/[ _]/).filter(Boolean).every((w) => OPENERS.has(w) || FILLER.has(w))) prefixPlain = false;
       }
     }
   }
