@@ -612,3 +612,13 @@ describe("allowlist design, Codex round 16", () => {
   });
 });
 
+describe("allowlist design, Codex round 17", () => {
+  it("fails safe", () => {
+    const said = (c: string, f = "Mary", l = "Smith") => callerSaidTheName(`AGENT: Hello?\nCALLER: ${c}`, f, l);
+    expect(said("This is Mary Smith and I am your patient Jane Jones, calling to refill my eye drops.")).toBe(false);
+    expect(callerSaidTheName("AGENT: Is this Mary Smith?\nCALLER: This is Mary Smith? No, Jane Jones here. I need my eye drops refilled.", "Mary", "Smith")).toBe(false);
+    expect(said("Mi nombre es María García y López. Necesito cambiar mi cita.", "María", "García")).toBe(false);
+    expect(said("This is Mary Smith and I am calling about my glasses.")).toBe(true);
+  });
+});
+

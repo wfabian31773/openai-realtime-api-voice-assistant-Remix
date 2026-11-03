@@ -113,6 +113,9 @@ export function callerSaidTheName(
   ) {
     return false;
   }
+  // An introduction asked as a question ("This is Mary Smith?") or a bare "No" is
+  // an echo or a rejection, never a confirmation.
+  if (callerLines.some((line) => (line.match(/[^.!?;\u00BF]*\?|\u00BF[^.!?;]*/g) ?? []).some((q) => new RegExp(INTRO_RE.source).test(fold(q))) || /(?:^|[.!;,]\s*)no\b/i.test(line.trim()))) return false;
   if (
     agentLines.some((line) => {
       // The stock greeting offers to "take a message"; anything else about a
@@ -162,7 +165,10 @@ export function callerSaidTheName(
       }
       const hit = nameRe.exec(tail.slice(1));
       if (hit) {
-        const after = tail.slice(1 + hit[0].length).trim().split(" ")[0] ?? "";
+        const rest = tail.slice(1 + hit[0].length).trim().split(" ");
+        // "and" may join only a new clause ("…and I am calling"), never a
+        // longer surname ("García y López").
+        const after = rest[0] === "and" ? (["i", "i_m", "i_ve", "i_d"].includes(rest[1] ?? "") ? "and" : "?") : (rest[0] ?? "");
         // Only an introduction that opens its sentence (greetings and filler
         // aside) is the caller's own: "My mother always goes, this is Mary
         // Smith" is a mention, and a mention of this name is ambiguity.
@@ -174,6 +180,10 @@ export function callerSaidTheName(
         }
         return false; // "This is Mary Smith Jones", "Mary Smith_s"
       }
+      // "This is my fourth request", "it's the pharmacy": a thing, not a
+      // person — but only after "this is"/"it is"; "I am your patient Jane
+      // Jones" is a conflict.
+      if (["my", "the"].includes(w1) && /^(?:this is|it is|it s)$/.test(phrase.replace(/_/g, " "))) continue;
       if (w1 === "" || !CONTINUATIONS.has(w1)) return false;
     }
   }
@@ -200,7 +210,7 @@ const INTRO_RE = new RegExp(`(?<= )(${INTRO_PHRASES.map((p) => p.replace(/ /g, "
  * also a given name or surname belongs here; a missing word only fails safe. */
 const CONTINUATIONS = new Set((
   "calling call here trying looking wondering having going gonna scheduled supposed worried concerned " +
-  "sorry sure about for regarding in at with from the my your this that been " +
+  "sorry sure about for regarding been " +
   "returning following getting interested needing waiting ready able unable confused urgent important " +
   "paciente la el de para su del mama madre hijo hija esposo esposa llamando"
 ).split(" "));
@@ -208,7 +218,7 @@ const CONTINUATIONS = new Set((
 /** Words that may directly follow the name in a genuine introduction. */
 const AFTER_NAME = new Set((
   "and i calling speaking here again um uh um_hm yes ok okay thank thanks please " +
-  "y llamando hablando estoy zero oh one two three four five six seven eight nine cero uno dos tres cuatro cinco seis siete ocho nueve"
+  "llamando hablando estoy zero oh one two three four five six seven eight nine cero uno dos tres cuatro cinco seis siete ocho nueve"
 ).split(" "));
 
 /** Any correction anywhere in the caller's speech. */
