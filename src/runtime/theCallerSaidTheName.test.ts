@@ -457,4 +457,14 @@ describe('callerSaidTheName', () => {
     expect(callerSaidTheName('CALLER: This is Mary Smith.\nCALLER: My name is Ana Ruiz.', 'Mary', 'Smith')).toBe(false);
     expect(said('This is Mary Smith. I am calling about my glasses.', 'Mary', 'Smith')).toBe(true);
   });
+
+  it('Codex round 2 on the P1 fix: punctuation, same-clause conflicts, casing, unrelated "I mean"', () => {
+    expect(said('The message said: "This is Mary Smith."', 'Mary', 'Smith')).toBe(false);
+    expect(said('This is Mary Smith and I am John Jones.', 'Mary', 'Smith')).toBe(false);
+    expect(said('This is Mary Smith sorry I mean Mary Jones.', 'Mary', 'Smith')).toBe(false);
+    expect(said('This is Mary Smith sorry I mean Mary Jones.', 'Mary', 'Jones')).toBe(true);
+    expect(said('This is Mary Smith. I am john jones.', 'Mary', 'Smith')).toBe(false);
+    expect(said('This is Mary Smith. I mean my appointment is tomorrow.', 'Mary', 'Smith')).toBe(true);
+    expect(said('this is mary smith, i am calling about my glasses, it is urgent.', 'Mary', 'Smith')).toBe(true);
+  });
 });
