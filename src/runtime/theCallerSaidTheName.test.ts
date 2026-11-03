@@ -670,3 +670,13 @@ describe("structural rule (GitHub Assistant block on #421)", () => {
     expect(said("My name is Mary Smith. Call me back on Monday. My name is Mary Smith.", "Mary", "Smith")).toBe(true);
   });
 });
+
+describe("structural rule, Codex round 1", () => {
+  it("fails safe", () => {
+    const c = (x: string) => callerSaidTheName(`AGENT: Hello?\n${x}`, "Mary", "Smith");
+    expect(c("CALLER: Reading from the patient chart. This is Mary Smith.")).toBe(false);
+    expect(c("CALLER: This is Mary Smith. Jane speaking, a nurse calling about this patient.")).toBe(false);
+    expect(c('CALLER: "This is Mary Smith."\nCALLER: This is Mary Smith.')).toBe(false);
+  });
+});
+

@@ -109,8 +109,9 @@ export function callerSaidTheName(
   const callerLines = rawCaller.filter((l, i) => !rawCaller.some((m, j) => j > i && fold(m).startsWith(fold(l).trimEnd())));
   if (!structurallySingle(callerLines, lines, first, last, firstWords, firstAlt)) return false;
   const agentLines = lines.filter((l) => !l.startsWith("CALLER:"));
+  // Guards read every raw turn, before duplicates are merged.
   if (
-    callerLines.some(
+    rawCaller.some(
       (line) =>
         /["\u201C\u201D\u00AB\u00BB:]|(?:^|[^\p{L}])['`\u2018\u2019]|['`\u2018\u2019](?![\p{L}])/u.test(line) ||
         fold(line).split(/[ _]/).some((w) => REPORTERS.has(w)) ||
@@ -123,7 +124,7 @@ export function callerSaidTheName(
   }
   // An introduction asked as a question ("This is Mary Smith?") or a bare "No" is
   // an echo or a rejection, never a confirmation.
-  if (callerLines.some((line) => (line.match(/[^.!?;\u00BF]*\?|\u00BF[^.!?;]*/g) ?? []).some((q) => new RegExp(INTRO_RE.source).test(fold(q))) || /(?:^|[.!;,]\s*)no\b/i.test(line.trim()))) return false;
+  if (rawCaller.some((line) => (line.match(/[^.!?;\u00BF]*\?|\u00BF[^.!?;]*/g) ?? []).some((q) => new RegExp(INTRO_RE.source).test(fold(q))) || /(?:^|[.!;,]\s*)no\b/i.test(line.trim()))) return false;
   if (
     agentLines.some((line) => {
       // The stock greeting offers to "take a message"; anything else about a
@@ -134,7 +135,7 @@ export function callerSaidTheName(
   ) {
     return false;
   }
-  if (callerLines.some((line) => THIRD_PARTY.test(fold(line)))) return false;
+  if (rawCaller.some((line) => THIRD_PARTY.test(fold(line)))) return false;
 
   // Sentences of caller speech, commas and dashes ignored (folding the
   // sentence would otherwise hide nothing; a comma inside an introduction —
@@ -259,6 +260,10 @@ function structurallySingle(callerLines: string[], lines: string[], first: strin
   for (const line of callerLines) {
     for (const sentence of line.split(/[.!?;]+/)) {
       const tokens = sentence.trim().split(/[\s,\u2012-\u2015]+/).filter(Boolean);
+      // A sentence-opening name is still a name when it introduces a
+      // speaker: "Jane speaking", "Jane here", "Jane calling".
+      const t0 = fold(tokens[0] ?? "").trim();
+      if (/^(?:speaking|here|calling|from|habla|hablando|aqui|llamando)$/i.test(fold(tokens[1] ?? "").trim()) && !t0.split(/[ _]/).every((x) => own.has(x))) return false;
       for (let k = 1; k < tokens.length; k++) {
         const t = tokens[k] ?? "";
         if (!/^\p{Lu}/u.test(t)) continue;
@@ -278,7 +283,7 @@ const NOT_INTRO_AFTER = new Set("sorry sure been about for regarding going gonna
 const AFTER_CORRECTION = / (?:excuse me|pardon|sorry|i mean|i meant|actually|mejor dicho|perdon|perdona|disculpe|disculpa|en realidad|quiero decir|digo|o sea|corrijo|rectifico|make that|wait|oops|no) /;
 
 /** Quoting, recording or reading cues anywhere in the call. */
-const QUOTING_CUES = / (?:grabacion|grabado|grabada|comienza|empieza|asi|mensaje|dice|dijo|decia|lee|leer|contestadora|buzon|recording|recorded|begins|began|starts|started|reads|read|says|said|quote|quoted|voicemail|message|transcript|playback) /;
+const QUOTING_CUES = / (?:grabacion|grabado|grabada|comienza|empieza|asi|mensaje|dice|dijo|decia|lee|leer|contestadora|buzon|recording|recorded|begins|began|starts|started|reads|read|says|said|quote|quoted|voicemail|message|transcript|playback|reading|chart|charts|expediente|leyendo|leo) /;
 
 /** Capitalised words that are not a personal name. */
 const NAME_STOPWORDS = new Set((
