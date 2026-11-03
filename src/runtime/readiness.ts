@@ -1193,8 +1193,10 @@ import { callEnvironment } from "./callRecord";
  * speaking with <name>?" (optical/surgery/tech 245 of 355 on 10-29, 0 of 433
  * on 11-02). recognisedFirstName names a matched caller again; the
  * recognised-caller block follows it (v157's candidate arm is gone with the
- * case it served). Ticket-side identity rules are unchanged. v168 is #421's
- * and v169 is #422's. Above main's v167 (#419). No migration.
+ * case it served). And the caller's yes to that name confirms a number that
+ * is one person (operator ruling, same day; greetingAffirmation.ts); #384's
+ * other ticket-side rules are unchanged. v168 is #421's. Above main's v169
+ * (#422), which it contains. No migration.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
   "voice-runtime-v170-the-named-greeting-is-back-20261103";
