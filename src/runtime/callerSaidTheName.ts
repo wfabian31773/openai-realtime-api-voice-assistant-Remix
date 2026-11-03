@@ -122,7 +122,7 @@ export function callerSaidTheName(
   //     a voicemail, an email, or someone saying or introducing something,
   //     anywhere in the call;
   //   - any correction ("I mean …", "I meant …") followed by a name-like
-  //     word. A correction always overrides the earlier introduction, but
+  //     word, however it is punctuated ("I mean, Mary Jones"). A correction always overrides the earlier introduction, but
   //     whether it corrects the caller's own name or a mention of someone
   //     else ("calling about Mary Jones, sorry, I mean Mary Smith") cannot be
   //     told apart reliably, so it never confirms — it only cancels;
@@ -135,7 +135,10 @@ export function callerSaidTheName(
     callerLines.some(
       (line) =>
         /["\u201C\u201D\u00AB\u00BB]|(?:^|[^\p{L}])['`\u2018\u2019]|['`\u2018\u2019](?![\p{L}])/u.test(line) ||
-        fold(line).split(/[ _]/).some((w) => REPORTERS.has(w)),
+        fold(line).split(/[ _]/).some((w) => REPORTERS.has(w)) ||
+        [...fold(line).matchAll(/ (?:i[ _]mean(?:t)?|quiero decir) ([a-z]+)/g)].some(
+          ([, w]) => !NOT_A_NAME.has(w) && !FILLER.has(w),
+        ),
     )
   ) {
     return false;
@@ -146,6 +149,11 @@ export function callerSaidTheName(
     // spaces and join one clause to the next. An en or em dash is a clause
     // break, not a joiner; only a hyphen (ASCII, U+2010, U+2011) joins.
     for (const clause of line.split(/[.!?;:,\u2012-\u2015]+/)) {
+      // "I am not actually Mary Smith": an introduction, a negation and this
+      // name in one clause, in that order, is a denial however it is worded.
+      const f = fold(clause);
+      const intro = INTRODUCTIONS.map((i) => i.replace(/ /g, "[ _]")).join("|");
+      if (new RegExp(`(?<= )(?:${intro}) (?:.* )?(?:not|never|nunca) (?:.* )?${name}(?= )`).test(f)) return false;
       for (const ev of introductions(clause, name)) {
         if (ev.denied || ev.cancels) return false;
         if (ev.who === false) return false;
@@ -164,7 +172,7 @@ const NEGATORS = new Set(["no", "not", "never", "nunca"]);
 /** Folded caller words that mark reported speech somewhere in the call. */
 const REPORTERS = new Set([
   "said", "says", "saying", "told", "tells", "asked", "wrote", "stated",
-  "states", "introduced", "introduces", "herself", "himself", "themselves", "announced", "claimed", "claims", "shows", "showed", "screen", "message", "email", "mail", "text", "letter", "note", "reads", "read", "recording", "voicemail", "dijo", "dice", "decia", "mensaje",
+  "states", "say", "tell", "telling", "answered", "answers", "answering", "greeting", "repeated", "introduced", "introduces", "herself", "himself", "themselves", "announced", "claimed", "claims", "shows", "showed", "screen", "message", "email", "mail", "text", "letter", "note", "reads", "read", "recording", "voicemail", "dijo", "dice", "decia", "mensaje",
 ]);
 
 /** Introductions that name a person whatever the transcript's casing. */
@@ -233,7 +241,7 @@ function introductions(clause: string, name: string): Intro[] {
     // Vries"): a false conflict only fails safe. Ordinary words after "I am" are
     // listed in NOT_A_NAME; no suffix rule ("mohammed", "kimberly" are names).
     const looksLikeName =
-      w1.length > 1 && !NEGATORS.has(w1) && !/^s(?:_|$)/.test(w1) &&
+      w1.length >= 1 && w1 !== "a" && w1 !== "i" && !NEGATORS.has(w1) && !/^s(?:_|$)/.test(w1) &&
       (STRONG.has(intro) || capitalised(clause, w1) ||
         !NOT_A_NAME.has(w1));
     // A correction cancels on any name-like word, initials included ("I mean J. Jones").

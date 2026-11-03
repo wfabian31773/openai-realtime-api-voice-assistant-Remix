@@ -522,4 +522,11 @@ describe('callerSaidTheName', () => {
     ).toBe(false);
     expect(said('This is Mary Smith. Sorry, I mean J. Jones.', 'Mary', 'Smith')).toBe(false);
   });
+
+  it('Codex round 9: punctuated corrections, more reporting verbs, initials, a hedged denial', () => {
+    expect(said('This is Mary Smith. Sorry, I mean, Mary Jones.', 'Mary', 'Smith')).toBe(false);
+    expect(said('My mother would say this is Mary Smith when she answered the phone.', 'Mary', 'Smith')).toBe(false);
+    expect(said('This is Mary Smith. Actually, I am J. Jones.', 'Mary', 'Smith')).toBe(false);
+    expect(said('This is Mary Smith. Sorry, I am not actually Mary Smith, I am her daughter.', 'Mary', 'Smith')).toBe(false);
+  });
 });
