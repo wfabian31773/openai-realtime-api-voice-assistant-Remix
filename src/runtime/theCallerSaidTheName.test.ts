@@ -697,3 +697,60 @@ describe("structural rule, Codex round 3", () => {
   });
 });
 
+
+/**
+ * THE LAST ROUND THIS READER TAKES — 2026-11-03, taken over from the Codex
+ * fix loop on the operator's word. Three open findings close here, and the
+ * class they belong to (a caller who gives their name and then talks about
+ * somebody else) is priced rather than chased further.
+ *
+ * MEASURED, queue lanes, 2026-10-20..11-02, calls the pre-context recognised
+ * and that left no ticket (the only calls this sweep path can touch): 261.
+ * 32 carried a self-introduction; 2 of those also mentioned "my <relative>"
+ * or "my patient"; 0 of the 11 single-turn message-and-hang-up calls the PR
+ * is for did. A relative word anywhere in the caller's words now fails safe,
+ * possessive and plural included, and a speaker declaration is read without
+ * regard to case. A further phrasing of the same class is declined with that
+ * number rather than added as one more cue.
+ */
+describe("closing round: relatives in any form, and speakers in any case", () => {
+  const c = (x: string) => callerSaidTheName(`AGENT: Hello?\nCALLER: ${x}`, "Mary", "Smith");
+  it("a grandchild, a possessive relative, or a Spanish relative fails safe", () => {
+    expect(c("This is Mary Smith. Calling about my granddaughter's eye drops. Please call me back.")).toBe(false);
+    expect(c("This is Mary Smith. Calling for my grandson to refill eye drops.")).toBe(false);
+    expect(c("This is Mary Smith. Calling about my mother's appointment.")).toBe(false);
+    expect(c("This is Mary Smith. My kids' appointments need to move.")).toBe(false);
+    expect(callerSaidTheName("AGENT: Hello?\nCALLER: Soy María García. Llamo por mi nieta, necesita sus gotas.", "María", "García")).toBe(false);
+  });
+  it("a speaker declared in lower case fails safe", () => {
+    expect(c("This is Mary Smith. jane is speaking for the patient. please refill the eye drops.")).toBe(false);
+    expect(c("this is mary smith. jane is calling for the patient.")).toBe(false);
+  });
+  it("the caller's own request still confirms", () => {
+    expect(c("This is Mary Smith. I need my eye drops refilled. Please call me back.")).toBe(true);
+    expect(callerSaidTheName("AGENT: Hello?\nCALLER: Mi nombre es María García. Necesito renovar mis gotas.", "María", "García")).toBe(true);
+  });
+});
+
+describe("closing round: the v170 named greeting, and a name that is also a relative word", () => {
+  // v170 puts the record's first name in the greeting itself. A caller who
+  // answers it and leaves the message must still confirm, and the greeting's
+  // name must not read as a third party.
+  const NAMED = (first: string) =>
+    'AGENT: Thank you for calling Azul Vision surgery coordination. All of our coordinators are currently ' +
+    'assisting other patients, but I can take a message and they will follow up with you. All calls are being ' +
+    `recorded for quality assurance purposes. Am I speaking with ${first}?`;
+  it("a yes and a plain introduction after the named greeting confirms", () => {
+    expect(callerSaidTheName(`${NAMED("Mary")}\nCALLER: Yes, this is Mary Smith. I need my eye drops refilled. Please call me back.`, "Mary", "Smith")).toBe(true);
+  });
+  it("a no after the named greeting does not", () => {
+    expect(callerSaidTheName(`${NAMED("Mary")}\nCALLER: No, this is Jane Smith. I need my eye drops refilled.`, "Mary", "Smith")).toBe(false);
+  });
+  it("a record named Ella or Tia is not a relative of itself", () => {
+    expect(callerSaidTheName(`${NAMED("Ella")}\nCALLER: Yes, this is Ella Smith. I need my eye drops refilled.`, "Ella", "Smith")).toBe(true);
+    expect(callerSaidTheName("AGENT: Hello?\nCALLER: Soy Tia García. Necesito renovar mis gotas.", "Tia", "García")).toBe(true);
+  });
+  it("but the same word used for somebody else still fails safe", () => {
+    expect(callerSaidTheName("AGENT: Hello?\nCALLER: Soy María García. Llamo por mi tía, necesita sus gotas.", "María", "García")).toBe(false);
+  });
+});

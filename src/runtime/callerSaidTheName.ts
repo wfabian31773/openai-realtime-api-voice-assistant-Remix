@@ -84,6 +84,7 @@ export function callerSaidTheName(
       ? `(?:${first}|${firstWords.join("[ _]")})`
       : first;
   const name = [firstAlt, ...last.split(/[ _]/)].join("[ _]");
+  const ownTokens = [first, ...firstWords, ...last.split(/[ _]/)];
   // ALLOWLIST DESIGN (#421, after thirteen Codex rounds of patching): the
   // answer is true only when the caller's own words contain a fixed
   // self-introduction phrasing with this name IMMEDIATELY after it, and
@@ -131,12 +132,12 @@ export function callerSaidTheName(
       // The stock greeting offers to "take a message"; anything else about a
       // message, voicemail or recording makes the caller's answer a quotation.
       const f = fold(line).replace(/ take a message /g, " ");
-      return AGENT_QUOTING.test(f) || THIRD_PARTY.test(f) || f.split(/[ _]/).some((w) => REPORTERS.has(w));
+      return AGENT_QUOTING.test(f) || THIRD_PARTY.test(withoutOwnName(f, ownTokens)) || f.split(/[ _]/).some((w) => REPORTERS.has(w));
     })
   ) {
     return false;
   }
-  if (rawCaller.some((line) => THIRD_PARTY.test(fold(line)))) return false;
+  if (rawCaller.some((line) => THIRD_PARTY.test(withoutOwnName(fold(line), ownTokens)))) return false;
 
   // Sentences of caller speech, commas and dashes ignored (folding the
   // sentence would otherwise hide nothing; a comma inside an introduction —
@@ -268,6 +269,9 @@ function structurallySingle(callerLines: string[], lines: string[], first: strin
       const lead = /^\s*([A-Z][\p{L}'-]*)\s*,/u.exec(sentence)?.[1];
       if (lead && !/^(?:hi|hello|hey|yes|yeah|yep|okay|ok|well|so|um|uh|oh|sorry|thanks|please|no|hola|bueno|si|s\u00ed|gracias|good|alright|right|sure)$/i.test(lead) && !fold(lead).trim().split(/[ _]/).every((x) => own.has(x))) return false;
       if (/^(?:speaking|here|calling|from|habla|hablando|aqui|llamando)$/i.test(fold(tokens[1] ?? "").trim()) && !t0.split(/[ _]/).every((x) => own.has(x))) return false;
+      // "Jane is speaking", in any case: a transcriber that writes "jane is
+      // speaking" declares a different speaker all the same (Codex, #421).
+      if (/^(?:is|was|esta|estaba)$/.test(fold(tokens[1] ?? "").trim()) && /^(?:speaking|calling|here|hablando|llamando|aqui)$/.test(fold(tokens[2] ?? "").trim()) && !t0.split(/[ _]/).every((x) => own.has(x))) return false;
       for (let k = 1; k < tokens.length; k++) {
         const t = tokens[k] ?? "";
         if (!/^\p{Lu}/u.test(t)) continue;
@@ -338,8 +342,36 @@ const DENIAL = new RegExp(
 
 /** Any other person in the caller's or agent's words: "This is Mary Smith,
  * my mother", "How does your mother introduce herself?". A caller speaking for
- * or about someone else is ambiguity. */
-const THIRD_PARTY = / (?:she|he|her|him|his|hers|herself|himself|mother|mom|mum|father|dad|daughter|son|husband|wife|sister|brother|grandmother|grandfather|grandma|grandpa|aunt|uncle|niece|nephew|cousin|child|kid|parent|parents|spouse|partner|caregiver|guardian|behalf|relative|family|friend|neighbor|ella|el_la|madre|mama|padre|papa|hija|hijo|esposo|esposa|hermana|hermano|abuela|abuelo|introduce|introduces|introduced|presenta) /;
+ * or about someone else is ambiguity.
+ *
+ * Read as a TOKEN START, so a plural or a possessive ("my granddaughter's",
+ * "my kids'", "mother-in-law", which fold to granddaughter_s, kids,
+ * mother_in_law) is the same word: three Codex rounds on #421 found a
+ * relative the bare word list missed (grandson, granddaughter's, "for the
+ * patient"). The caller's OWN name is blanked before this is read, so a
+ * record named Ella, Tia or Son is not a relative of itself (`withoutOwnName`). */
+const RELATION_WORDS = (
+  "she he her him his hers herself himself mother mom mum father dad daughter son husband wife sister brother " +
+  "grandmother grandfather grandma grandpa grandson granddaughter grandchild grandchildren grandkid granddad grandmom grandparent " +
+  "stepson stepdaughter stepmother stepfather stepmom stepdad aunt uncle niece nephew cousin child children kid parent spouse partner " +
+  "caregiver guardian behalf relative family friend neighbor " +
+  "ella el_la madre mama padre papa hija hijo esposo esposa marido hermana hermano abuela abuelo nieto nieta " +
+  "sobrino sobrina primo prima tia tio suegro suegra yerno nuera novio novia " +
+  "introduce introduces introduced presenta"
+).split(" ");
+const THIRD_PARTY = new RegExp(
+  `(?<= )(?:${RELATION_WORDS.join("|")})(?:s|es)?(?=[ _])` +
+    `|(?<= )(?:the|my|our|this|la|el|mi|su|nuestra|nuestro) (?:patient|paciente)(?:s|es)?(?=[ _])`,
+);
+
+/** A folded line with the record's own name tokens blanked, so the name being
+ * confirmed never reads as somebody else. A second mention of it is still
+ * caught by the mention count. */
+function withoutOwnName(folded: string, own: readonly string[]): string {
+  const words = own.filter((w) => w.length >= 2);
+  if (words.length === 0) return folded;
+  return folded.replace(new RegExp(`(?<= )(?:${words.join("|")})(?=[ _])`, "g"), " ");
+}
 
 /** Agent turns a caller's self-introduction may answer. */
 const AGENT_OK = / (?:how can i help|how may i help|help you|name|nombre|who is|who am i|speaking|hello|hi|go ahead|ayudar|en que) /;
