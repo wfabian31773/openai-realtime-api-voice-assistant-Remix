@@ -1223,8 +1223,21 @@ import { callEnvironment } from "./callRecord";
  * birth after all 159 yeses. Above main's v171 (#421, the sweep files under
  * the record's name), which it contains. No migration.
  */
+/**
+ * v173 — A PCP TOOL'S INPUT ERROR NAMES THE FIELD (2026-11-03). When the
+ * model's arguments failed a hand-built PCP tool's zod schema, the SDK answered
+ * "An error occurred while running the tool. Please try again.": no field, a
+ * string the tool ceiling counted as a success, and nothing on the timeline.
+ * On CAa36ae68ef6d5654594fe11253d30a942 record_pcp_intake looped to the
+ * ceiling, the purpose was never recorded, every filing tool refused, and the
+ * caller was told her request was with the team; no ticket exists. The
+ * arguments are now checked against the same schema first, and a refusal
+ * names each field and what it needs, is a failure the runtime can see, and
+ * is recorded (`toolInputRefusal.ts`). Valid arguments run as before. Above
+ * main's v172 (#425), which it contains. No migration.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v172-the-after-hours-greeting-asks-the-name-20261103";
+  "voice-runtime-v173-a-tool-input-error-names-the-field-20261103";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

@@ -206,7 +206,7 @@ describe('arguments the schema accepts run exactly as before', () => {
 
   it('a valid call is handed to the SDK invoke untouched', async () => {
     const schema = z.object({ a: z.string() }).strict();
-    const inner = vi.fn(async () => 'ran');
+    const inner = vi.fn(async (..._args: unknown[]): Promise<unknown> => 'ran');
     const wrapped = refuseInvalidInputByName({ invoke: inner }, schema, vi.fn());
     expect(await wrapped.invoke!({}, '{"a":"x"}', { id: 1 })).toBe('ran');
     expect(inner).toHaveBeenCalledWith({}, '{"a":"x"}', { id: 1 });
@@ -214,9 +214,9 @@ describe('arguments the schema accepts run exactly as before', () => {
 
   it('a refused call never reaches the SDK invoke, and a failing recorder does not change the answer', async () => {
     const schema = z.object({ a: z.string() }).strict();
-    const inner = vi.fn(async () => 'ran');
+    const inner = vi.fn(async (..._args: unknown[]): Promise<unknown> => 'ran');
     const wrapped = refuseInvalidInputByName({ invoke: inner }, schema, () => { throw new Error('db down'); });
-    const out = (await wrapped.invoke!({}, '{"b":1}')) as Record<string, any>;
+    const out = (await wrapped.invoke!({}, '{"b":1}')) as unknown as Record<string, any>;
     expect(inner).not.toHaveBeenCalled();
     expect(out.invalidFields.sort()).toEqual(['a', 'b']);
   });

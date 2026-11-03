@@ -206,12 +206,12 @@ type Invoke = (ctx: unknown, input: string, details?: unknown) => Promise<unknow
  * the tool's answer; anything the schema accepts goes to the SDK's own
  * `invoke`, unchanged.
  */
-export function refuseInvalidInputByName<T extends { invoke?: Invoke }>(
+export function refuseInvalidInputByName<T extends { invoke?: (...args: any[]) => Promise<any> }>(
   built: T,
   schema: unknown,
   onRefusal?: (args: Record<string, unknown>, refusal: ToolInputRefusal) => unknown,
 ): T {
-  const original = built.invoke;
+  const original = built.invoke as Invoke | undefined;
   const zod = schema as ZodLike | undefined;
   if (typeof original !== 'function' || typeof zod?.safeParse !== 'function') return built;
   const invoke: Invoke = async (ctx, input, details) => {
