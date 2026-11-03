@@ -65,33 +65,30 @@ import { recognisedFirstName } from '../services/greetingPersonalisation';
 export interface RecognisedCaller {
   matched?: boolean;
   firstName?: string;
-  /** Set only when something has validated the match; see `greetingNamedThem`. */
-  identityValidated?: boolean;
 }
 
 /**
- * WHETHER THE GREETING SAID THEIR NAME (v157) — the one question the block,
- * the ask script and the `identity_is_certain` guidance all turn on.
+ * WHETHER THE GREETING SAID THEIR NAME — the one question the block, the ask
+ * script and the `identity_is_certain` guidance all turn on.
  *
  * Answered by `recognisedFirstName`, the function the runtime itself uses to
- * build the greeting, so the prompt can never again describe a greeting the
- * caller did not hear. #384 (VA-76205) made that function return no name
- * unless the match is validated, and nothing sets `identityValidated` yet, so
- * from the 2026-10-30 deploy no greeting said a name. The block went on
- * telling the model "Your greeting has already ASKED 'Am I speaking with
- * <name>?'", with the name in it. Recognised queue-lane callers, 10-29 against
- * 10-30: greeted by name 251 of 251 against 2 of 238; asked their date of
- * birth 15 against 132; a certain lookup 231 against 104; the model speaking
- * the candidate's name itself 12 against 34; filed (write-back) 235 against
- * 187; date-of-birth refusals 3 against 30.
+ * build the greeting, so the prompt can never describe a greeting the caller
+ * did not hear (v157). v157 existed because #384 (VA-76205) had made that
+ * function drop the name for every unvalidated caller-ID match, and the block
+ * kept claiming the greeting had asked. v170 restores the named greeting
+ * (operator, 2026-11-03: a hard rule), so a matched caller with a first name
+ * is greeted by name again and this answers true for them, as it did before
+ * 2026-10-30. v157's candidate arm — the block for a match the greeting did
+ * not name — went with it: no matched caller with a name can reach it, and
+ * `theNamedGreetingIsAHardRule.test.ts` keeps it that way.
+ *
+ * What #384 measured against, kept as the before-arm: recognised queue-lane
+ * callers, 10-29 against 10-30, greeted by name 251 of 251 against 2 of 238;
+ * asked their date of birth 15 against 132; a certain lookup 231 against 104;
+ * filed (write-back) 235 against 187; date-of-birth refusals 3 against 30.
  */
 export function greetingNamedThem(pc: RecognisedCaller | undefined): boolean {
   return recognisedFirstName(pc) !== '';
-}
-
-/** Caller ID matched someone, but the greeting did not say who. */
-function candidateOnly(pc: RecognisedCaller | undefined): boolean {
-  return !!pc?.matched && !!pc.firstName && !greetingNamedThem(pc);
 }
 
 /**
@@ -102,9 +99,8 @@ function candidateOnly(pc: RecognisedCaller | undefined): boolean {
  * say so out loud.
  */
 export function recognisedCallerBlock(pc: RecognisedCaller | undefined): string {
-  if (candidateOnly(pc)) return CANDIDATE_BLOCK;
-  if (!pc?.matched || !pc.firstName) return '';
-  const name = pc.firstName as string;
+  if (!greetingNamedThem(pc)) return '';
+  const name = recognisedFirstName(pc);
   return `
 ### You already know who this probably is
 This number matches one person on file: first name "${name}".
@@ -125,34 +121,6 @@ This number matches one person on file: first name "${name}".
 - Disclose nothing from anyone's record on the strength of this match.
 `;
 }
-
-/**
- * THE CANDIDATE ARM (v157): caller ID matched someone and the greeting did not
- * say a name. No name appears here, so the model cannot speak one (#384's
- * intent), and the funnel is RULE ZERO 2b's: one question for the name, then a
- * lookup that carries it. Codex P1/P2 on #411: the caller may be calling for
- * someone else, so the PATIENT's details are taken (the proxy exception the
- * named block already had), and the date of birth is always asked, because
- * lookup_patient is only certain on name_and_dob — a name alone never is.
- */
-const CANDIDATE_BLOCK = `
-### This number matches someone on file
-Nobody has confirmed the caller is that person, so the greeting said no name.
-Do not say a name they have not told you, guess one, or say we recognised
-their number.
-- Ask how you can help BEFORE any name or date of birth: they are often
-  calling for someone else (a parent, a child, a spouse). Then take the
-  PATIENT's details: the caller's own only if the call is about them. Never
-  file a request about someone else under the caller's name.
-- Ask the patient's first and last name, then their date of birth in the
-  order below, and call lookup_patient with what they say — all three.
-- Only a lookup_patient answer of identity_is_certain true, from a name AND a
-  date of birth, completes the identity step. A name alone is never certain:
-  do not skip the date of birth on a name-only lookup.
-- If it does not come back certain, ask again as below and CALL lookup_patient
-  AGAIN with all three.
-- Disclose nothing from anyone's record until lookup_patient says certain.
-`;
 
 /**
  * The lanes that compose their prompt from this block, and the module each
@@ -231,15 +199,7 @@ const ASK_QUESTIONS = `  "May I please have your first and last name?"
    then the day, then the year?"`;
 
 export function identityAskScript(pc: RecognisedCaller | undefined): string {
-  if (candidateOnly(pc)) {
-    return `### Lead the ask — one at a time, in this shape
-${ASK_QUESTIONS}
-Never both in one breath, never a bare "date of birth" — say the order every
-time you DO ask. A name alone is never certain: ask the date of
-birth too, and ask for the PATIENT's details when the call is about someone
-else.`;
-  }
-  const recognised = !!pc?.matched && !!pc.firstName;
+  const recognised = greetingNamedThem(pc);
 
   if (!recognised) {
     return `### Lead the ask — one at a time, in this shape
@@ -350,10 +310,7 @@ loses it.`;
  * trigger it. Enumerate the branches before choosing the key.
  */
 export function identityCertainMeaning(pc: RecognisedCaller | undefined): string {
-  if (candidateOnly(pc)) {
-    return `If lookup_patient says identity_is_certain is false, ask the date of birth as above, then CALL lookup_patient AGAIN with all three. Never tell the caller how many records matched, and never say a name they have not said.`;
-  }
-  const recognised = !!pc?.matched && !!pc.firstName;
+  const recognised = greetingNamedThem(pc);
 
   if (!recognised) {
     return `If it says identity_is_certain is false, that is also a unique patients_master phone hit, not only more than one person — ask as above, then CALL lookup_patient AGAIN with all three. Never tell the caller how many records matched.`;

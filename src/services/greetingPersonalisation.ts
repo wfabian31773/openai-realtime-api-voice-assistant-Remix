@@ -451,10 +451,29 @@ export function missingMandatoryCopy(
   const text = String(greeting ?? '');
   return required.filter((r) => !r.present(text)).map((r) => r.label);
 }
-/** Caller ID identifies a candidate, so its name must not be spoken as identity. */
+/**
+ * THE FIRST NAME THE GREETING ASKS ABOUT — "Am I speaking with <name>?".
+ *
+ * OPERATOR RULE, 2026-11-03, and it is a HARD RULE: *"that was a hard rule and
+ * should have never been replaced, I want the familiar greeting back."* A
+ * caller-ID match on one person is greeted with the question. That question IS
+ * RULE ZERO step 2's validation: the phone match is a candidate, and the
+ * caller's own yes or no is what confirms or discards it (v27, v140). Nothing
+ * private is said: one first name, as a question, to the number it belongs to.
+ *
+ * #384 (VA-76205, merged 2026-10-29) required `identityValidated` here, and
+ * nothing ever sets it at greeting time, so from the 2026-10-30 deploy no
+ * greeting said a name: optical, surgery and tech, first agent line, 245 of 355
+ * on 10-29 against 0 of 433 on 11-02. The ticket-side protections #384 added
+ * (no unvalidated identity on a ticket, no history disclosed before
+ * validation) are untouched; only the greeting's question comes back.
+ *
+ * `theNamedGreetingIsAHardRule.test.ts` fails if this ever demands more than
+ * a matched caller with a first name again.
+ */
 export function recognisedFirstName(precontext: unknown): string {
   if (!precontext || typeof precontext !== 'object') return '';
-  const pc = precontext as { matched?: unknown; firstName?: unknown; identityValidated?: unknown };
-  if (pc.matched !== true || pc.identityValidated !== true) return '';
+  const pc = precontext as { matched?: unknown; firstName?: unknown };
+  if (pc.matched !== true) return '';
   return typeof pc.firstName === 'string' ? pc.firstName.trim() : '';
 }

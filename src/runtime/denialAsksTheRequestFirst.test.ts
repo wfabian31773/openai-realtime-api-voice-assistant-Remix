@@ -57,7 +57,7 @@ import { buildSurgeryPrompt } from '../agents/surgeryAgent';
 import { buildTechPrompt } from '../agents/techAgent';
 import { recognisedCallerBlock } from './recognisedCallerBlock';
 
-const BLOCK = recognisedCallerBlock({ matched: true, firstName: 'Casey', identityValidated: true });
+const BLOCK = recognisedCallerBlock({ matched: true, firstName: 'Casey' });
 
 /** The denial bullet alone, from "- If they said NO" to the next bullet. */
 function denialBullet(text: string): string {
