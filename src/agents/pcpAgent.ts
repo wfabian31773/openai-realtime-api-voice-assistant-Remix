@@ -9,6 +9,7 @@ import { escalationDetailsMap } from '../services/escalationStore';
 import { markCallConcluded } from '../services/callConclusion';
 import { recordingExecute } from '../services/toolTimeline';
 import { keepFieldDescriptions } from '../services/toolFieldDescriptions';
+import { refuseInvalidInputByName } from '../services/toolInputRefusal';
 import { EMAIL_CONFIRMATION_DESCRIPTION, LAST_NAME_FIELD_DESCRIPTION } from '../tools/contactCaptureGuidance';
 import { withToolDirection } from '../services/toolDirection';
 import { missingFieldFromError } from '../services/durableTicketFiling';
@@ -702,19 +703,28 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
   const timelineCtx = { callId, callSid: metadata.callSid, agentSlug: 'pcp' };
   // v109: the SDK drops every field `.describe()` from a schema with an
   // optional field, so they are copied back from the zod — see
-  // toolFieldDescriptions.ts. Validation stays the SDK's zod parse.
+  // toolFieldDescriptions.ts.
+  // v173: arguments the schema refuses are answered with the field names, as
+  // a failure, and recorded — instead of the SDK's "Please try again" string,
+  // which named nothing, read as a success to the tool ceiling and never
+  // reached the timeline (CAa36ae68ef6d5654594fe11253d30a942; see
+  // toolInputRefusal.ts). Arguments it accepts go to the SDK unchanged.
   const recordedTool: typeof tool = ((def: any) =>
-    keepFieldDescriptions(
-      tool({
-        ...def,
-        // CP-3: the approved next line rides inside the tool result (script-listing §6).
-        execute: trackPcpFiling(
-          callId,
-          def.name,
-          withToolDirection('pcp', callId, def.name, recordingExecute(timelineCtx, def.name, def.execute)),
-        ),
-      }),
+    refuseInvalidInputByName(
+      keepFieldDescriptions(
+        tool({
+          ...def,
+          // CP-3: the approved next line rides inside the tool result (script-listing §6).
+          execute: trackPcpFiling(
+            callId,
+            def.name,
+            withToolDirection('pcp', callId, def.name, recordingExecute(timelineCtx, def.name, def.execute)),
+          ),
+        }),
+        def.parameters,
+      ),
       def.parameters,
+      (args, refusal) => recordingExecute(timelineCtx, def.name, () => refusal)(args),
     )) as typeof tool;
 
   const recordIntake = recordedTool({
