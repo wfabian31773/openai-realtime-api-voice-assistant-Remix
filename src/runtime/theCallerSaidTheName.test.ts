@@ -721,10 +721,14 @@ describe("closing round: relatives in any form, and speakers in any case", () =>
     expect(c("This is Mary Smith. Calling about my mother's appointment.")).toBe(false);
     expect(c("This is Mary Smith. My kids' appointments need to move.")).toBe(false);
     expect(callerSaidTheName("AGENT: Hello?\nCALLER: Soy María García. Llamo por mi nieta, necesita sus gotas.", "María", "García")).toBe(false);
+    // Without "llamo", which is also name talk, so only the relative word refuses it.
+    expect(callerSaidTheName("AGENT: Hello?\nCALLER: Soy María García. Es para mi nieta, necesita sus gotas.", "María", "García")).toBe(false);
   });
   it("a speaker declared in lower case fails safe", () => {
     expect(c("This is Mary Smith. jane is speaking for the patient. please refill the eye drops.")).toBe(false);
     expect(c("this is mary smith. jane is calling for the patient.")).toBe(false);
+    // With no "the patient" beside it, so only the speaker declaration refuses it.
+    expect(c("This is Mary Smith. jane is speaking now. Please refill my eye drops.")).toBe(false);
   });
   it("the caller's own request still confirms", () => {
     expect(c("This is Mary Smith. I need my eye drops refilled. Please call me back.")).toBe(true);
@@ -752,5 +756,6 @@ describe("closing round: the v170 named greeting, and a name that is also a rela
   });
   it("but the same word used for somebody else still fails safe", () => {
     expect(callerSaidTheName("AGENT: Hello?\nCALLER: Soy María García. Llamo por mi tía, necesita sus gotas.", "María", "García")).toBe(false);
+    expect(callerSaidTheName("AGENT: Hello?\nCALLER: Soy María García. Es para mi tía, necesita sus gotas.", "María", "García")).toBe(false);
   });
 });
