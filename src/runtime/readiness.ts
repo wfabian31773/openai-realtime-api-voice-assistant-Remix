@@ -1172,8 +1172,18 @@ import { callEnvironment } from "./callRecord";
  * same-day appointment-time conflict files high. v165 is #419's. Above main's
  * v164 (#418). No migration.
  */
+/**
+ * v171 — THE AFTER-HOURS FLOOR FINDS AN OFFICE AND ASKS FOR REVIEW
+ * (2026-11-03). Floor tickets with no named office filed with no location and
+ * nothing flagging them. With no office named or confirmed, the floor now
+ * tries the one patient on the caller's number (bounded caller-ID history
+ * lookup), then the office line that was dialled; every floor ticket carries
+ * a NEEDS REVIEW line, plus MISSING LOCATION / MISSING IDENTITY when either is
+ * absent. A dialled-number office is sent as locationSource 'history' (the API
+ * accepts only 'caller' | 'history'). Above main's v167. No migration.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v167-follow-up-replies-are-timed-20261102";
+  "voice-runtime-v171-after-hours-floor-finds-an-office-20261103";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

@@ -2561,6 +2561,7 @@ voice-runtime-v163-after-hours-details-reach-the-ticket-20261101
 voice-runtime-v164-after-hours-floor-files-the-office-named-20261101
 voice-runtime-v166-the-swept-ticket-carries-its-reason-20261102
 voice-runtime-v167-follow-up-replies-are-timed-20261102
+voice-runtime-v171-after-hours-floor-finds-an-office-20261103
 ```
 
 Also printed at boot as `[voice-runtime] <marker>`. Anything ending in an
@@ -2821,8 +2822,9 @@ v10 (the person base and the join), v11 (the locked record, #290) and v12
 (optical's office ladder) are a CHAIN on `main`: each merged after the one
 before and brought it in, so v12 contains both.
 
-**AND THE SEQUENCE HAS TWO HOLES IN IT ON PURPOSE: v13 AND v57. v167 IS THE
-NEWEST — v167 on this branch (opened as v165; renumbered after #420 merged): follow-up replies are timed, logging only — above v166 (#420, `1db002a`, on `main`: the swept ticket carries its reason) —
+**AND THE SEQUENCE HAS TWO HOLES IN IT ON PURPOSE: v13 AND v57. v171 IS THE
+NEWEST — v171 on this branch: the after-hours teardown floor finds an office from the caller-ID history or the dialled number and marks every floor ticket NEEDS REVIEW — above v167 (#419, `a62c51a`, on `main`) —
+AND BEFORE THAT v167 (opened as v165; renumbered after #420 merged): follow-up replies are timed, logging only — above v166 (#420, `1db002a`, on `main`: the swept ticket carries its reason) —
 AND BEFORE THAT v166 (#420): the swept ticket carries its reason — above v164 (#418, `89a1760`, on `main`: the after-hours floor files the office the caller named), which it contains —
 AND BEFORE THAT v164 (#418): the after-hours floor files the office the caller named, above v163 (#417, `49696c9`: the after-hours caller's details reach the ticket and a failed on-call handoff says so) —
 AND v159 IS WHAT `main` CARRIES, SINCE #413 MERGED 2026-10-31 (`55b5434`): the operator script proven to the wire, no silence after the opening, above v158 (#412, `d785e29`) —
