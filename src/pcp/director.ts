@@ -261,6 +261,15 @@ export interface PcpDirectorDecision {
   handoffEligible: boolean;
   mustCreateFallbackTicket: boolean;
   mayTerminate: boolean;
+  /**
+   * Whether an explicit ask for a person would be granted right now: not a
+   * patient, no failed transfer on this call, not the lunch closure. It is
+   * `eligibleByAsk` without the ask itself, which only `handoff_to_pcp` can
+   * latch. `intakeNextStep.ts` reads it so a done intake never sends the model
+   * to `handoff_to_pcp` when that tool would only file its own fallback ticket
+   * and skip `create_pcp_task`'s routing (Codex P2 on #427).
+   */
+  transferOnAsk?: boolean;
 }
 
 /**
@@ -1334,7 +1343,8 @@ export class PcpDirector {
      * disposition the director just granted, and mayTerminate below no longer
      * demands that a recorded disposition still match a recomputed one.
      */
-    const eligibleByAsk = askedForAPerson && !handoffFailed && !lunchClosure;
+    const transferOnAsk = !isPatient && !handoffFailed && !lunchClosure;
+    const eligibleByAsk = askedForAPerson && transferOnAsk;
     if (eligibleByAsk && disposition !== 'HAND_OFF') disposition = 'HAND_OFF';
     /**
      * A PATIENT IS NEVER DIALLED INTO THE PCP QUEUE — on either branch.
@@ -1385,6 +1395,7 @@ export class PcpDirector {
       authoritativeToolAllowed,
       handoffEligible,
       mustCreateFallbackTicket: Boolean(handoffFailed),
+      transferOnAsk,
       /**
        * A RECORDED DISPOSITION IS ENOUGH. It no longer has to be the one the
        * director happens to compute at this instant.

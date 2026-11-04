@@ -53,7 +53,7 @@ vi.mock('../../server/services/ticketingApiClient', () => ({ ticketingApiClient:
 const { createPcpAgent } = await import('../agents/pcpAgent');
 const { pcpDirector } = await import('./director');
 const { recordToolEvent, getAzulTimeline } = await import('../services/toolTimeline');
-const { FILING_LINE } = await import('./intakeNextStep');
+const { FILING_LINE, NO_TRANSFER_LINE } = await import('./intakeNextStep');
 
 async function call(agent: any, name: string, args: Record<string, unknown> = {}) {
   const t = agent.tools.find((x: any) => x.name === name);
@@ -128,7 +128,7 @@ describe('the 25 corpus calls: what the model is handed when the intake runs out
     expect(done.nextStep).toBe('connect_answer_or_file');
     expect(done.guidance).toContain('Do not ask for their title, role or email address now');
     expect(done.guidance).toContain('call create_pcp_task');
-    expect(done.guidance).toContain('call handoff_to_pcp');
+    expect(done.guidance).toContain('If the caller asked to speak to a person, call handoff_to_pcp now');
     expect(done.guidance).toContain(FILING_LINE);
   });
 
@@ -171,6 +171,42 @@ describe('the next step fits the purpose', () => {
     // not forbid that (Codex P2 on #427).
     expect(done.guidance).toContain('If you do not yet know what they need, ask that first.');
     expect(done.guidance).not.toMatch(/do not ask anything else/i);
+  });
+});
+
+describe('a transfer the director would refuse is never offered (Codex P2 on #427)', () => {
+  // 12:30 Pacific on a weekday: the lunch closure, when no one takes a transfer.
+  const LUNCH = new Date('2026-11-03T20:30:00Z');
+  afterAll(() => {
+    vi.setSystemTime(NOT_LUNCH);
+  });
+
+  it('at lunch, a caller who asked for a person is filed through create_pcp_task, not handoff_to_pcp', async () => {
+    vi.setSystemTime(LUNCH);
+    const { done } = await intakeToTheEnd('CAlu00000000000000000000000000001', 'schedule_appointment');
+    vi.setSystemTime(NOT_LUNCH);
+    expect(done.transferOnAsk).toBe(false);
+    expect(done.nextStep).toBe('connect_answer_or_file');
+    expect(done.guidance).toContain('do not call handoff_to_pcp');
+    expect(done.guidance).not.toContain('If the caller asked to speak to a person, call handoff_to_pcp');
+    expect(done.guidance).toContain(NO_TRANSFER_LINE);
+    expect(done.guidance).toContain('call create_pcp_task');
+  });
+
+  it('after a failed transfer the same: no second dial offered', async () => {
+    const sid = 'CAhf00000000000000000000000000001';
+    const agent = agentFor(sid);
+    await call(agent, 'record_pcp_intake', { callPurpose: 'service_inquiry' });
+    pcpDirector.update(sid, { handoffStatus: 'NO_ANSWER' } as never);
+    const done = await call(agent, 'record_pcp_intake', CALLER);
+    expect(done.transferOnAsk).toBe(false);
+    expect(done.guidance).toContain('do not call handoff_to_pcp');
+  });
+
+  it('outside lunch the same scheduling call is offered the transfer', async () => {
+    const { done } = await intakeToTheEnd('CAnl00000000000000000000000000001', 'schedule_appointment');
+    expect(done.transferOnAsk).toBe(true);
+    expect(done.guidance).toContain('If the caller asked to speak to a person, call handoff_to_pcp now');
   });
 });
 

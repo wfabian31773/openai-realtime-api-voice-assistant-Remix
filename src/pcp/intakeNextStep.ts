@@ -52,6 +52,10 @@ export type PcpIntakeNextStep = 'connect_answer_or_file' | 'file';
 /** The filing line the prompt already scripts for create_pcp_task. */
 export const FILING_LINE = 'Let me get this logged for you — one moment.';
 
+/** The prompt's own line for a caller who cannot be put through. */
+export const NO_TRANSFER_LINE =
+  "I'm not able to put you through from this line, but I'll take this down and the right team will call you back.";
+
 const LOOKUP_FOR_SOURCE: Record<string, string> = {
   knowledge_base: 'get_public_practice_information',
   scheduling: 'lookup_patient_appointments',
@@ -90,8 +94,18 @@ export function nextStepWhenIntakeIsDone(
     lookup && purpose.allowedDispositions.includes('AUTOMATE') && decision.authoritativeToolAllowed,
   );
 
+  /**
+   * Only when the director would grant an ask. During the lunch closure, or
+   * after a failed transfer, `handoff_to_pcp` cannot dial and files its own
+   * fallback ticket straight to PCP Support, skipping `create_pcp_task`'s
+   * routing (a scheduling request would miss the HVA Hub). Codex P2 on #427.
+   */
+  const personStep = decision.transferOnAsk === true
+    ? 'If the caller asked to speak to a person, call handoff_to_pcp now, with their words in the narrative.'
+    : `No one can be put through right now, so do not call handoff_to_pcp. If the caller asked to speak to a person, say "${NO_TRANSFER_LINE}" and call create_pcp_task.`;
+
   const steps = [
-    'If the caller asked to speak to a person, call handoff_to_pcp now, with their words in the narrative.',
+    personStep,
     mayAnswer
       ? `If what they want is something ${lookup} answers, call it (follow its description), tell them the answer, then call record_automated_resolution.`
       : undefined,
