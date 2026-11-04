@@ -167,6 +167,10 @@ describe('the next step fits the purpose', () => {
     expect(done.nextStep).toBe('file');
     expect(done.guidance).toContain('call create_pcp_task');
     expect(done.guidance).not.toContain('handoff_to_pcp');
+    // The prompt asks a patient what they need before filing; the step must
+    // not forbid that (Codex P2 on #427).
+    expect(done.guidance).toContain('If you do not yet know what they need, ask that first.');
+    expect(done.guidance).not.toMatch(/do not ask anything else/i);
   });
 });
 

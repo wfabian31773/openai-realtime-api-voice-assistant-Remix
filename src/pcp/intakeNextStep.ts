@@ -75,9 +75,12 @@ export function nextStepWhenIntakeIsDone(
   if (isPatient) {
     return {
       nextStep: 'file',
+      // The prompt asks a patient for what they need before filing, and its
+      // callback rules (a number seeded from caller ID is not asked for unless
+      // the caller offers another) stand as written; this names the step only.
       guidance:
-        `The intake has nothing more to ask. On this turn, say "${FILING_LINE}" and call create_pcp_task. ` +
-        'Do not ask anything else first.',
+        'The intake has nothing more to ask. If you do not yet know what they need, ask that first. ' +
+        `Then say "${FILING_LINE}" and call create_pcp_task.`,
     };
   }
 
