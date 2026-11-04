@@ -453,6 +453,11 @@ function summarizeResult(tool: string, resultJson: string): Record<string, unkno
     for (const k of ['disposition', 'handoffEligible', 'mayTerminate', 'phiDisclosureAllowed', 'authoritativeToolAllowed', 'mustCreateFallbackTicket', 'askBudgetSpent']) {
       if (parsed?.[k] !== undefined) out[k] = parsed[k];
     }
+    // `nextStep` is a fixed code (src/pcp/intakeNextStep.ts) saying the intake
+    // was done with nothing on record and which next step the reply named. It
+    // is what a count reads; the `guidance` beside it is fixed wording too and
+    // is kept by the general allow-list above.
+    if (parsed?.nextStep === 'connect_answer_or_file' || parsed?.nextStep === 'file') out.nextStep = parsed.nextStep;
   }
   return out;
 }
