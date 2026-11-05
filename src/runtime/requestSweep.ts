@@ -54,6 +54,7 @@ import { classifyTechRequest, techReasonById } from "../tools/techTaxonomy";
 import { classifySurgeryRequest, surgeryReasonById } from "../tools/surgeryTaxonomy";
 import { classifyOptical, classificationByReasonId } from "../tools/opticalTaxonomy";
 import { sanitizeForSms } from "../services/gsm7";
+import { NAME_SCAFFOLDING } from "./nameScaffolding";
 
 /** The lanes this runs on. Each is a queue whose department is its routing. */
 const DEPARTMENT_BY_SLUG: Record<string, number> = {
@@ -340,6 +341,9 @@ const IDENTITY_WORDS = new Set([
   "this", "is", "it", "i", "am", "my", "name", "the", "of", "birth", "date",
   "was", "born", "on", "in", "a", "and", "speaking", "here", "that", "s",
   "im", "its", "mr", "mrs", "ms", "dr", "junior", "senior", "jr", "sr",
+  // v180: the words the name extractor accepts around a name ("last name",
+  // "mi apellido es"), so a bare introduction is identity on every path.
+  ...NAME_SCAFFOLDING,
 ]);
 
 /** Spoken numbers, so "March seventeenth nineteen seventy three" is a date. */

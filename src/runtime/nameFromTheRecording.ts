@@ -36,6 +36,7 @@
  */
 import OpenAI from "openai";
 import { APP_PLACEHOLDER_NAME_WORDS } from "../services/standInName";
+import { NAME_SCAFFOLDING } from "./nameScaffolding";
 
 export interface HeardName {
   firstName: string;
@@ -92,15 +93,11 @@ function fold(s: string): string {
 }
 
 /**
- * Words that may stand between the two halves of ONE spoken name: "My name is
- * Jane, my last name is Lake", "Jones, first name Mary", "se escribe". A word
- * not on this list between them means two names, or a name and something else.
+ * Words that may stand between the two halves of ONE spoken name. A word not
+ * on this list between them means two names, or a name and something else.
+ * The request sweep reads the same list (`nameScaffolding.ts`).
  */
-const BETWEEN_ONE_NAME = new Set([
-  "my", "her", "his", "their", "the", "and", "is", "its", "last", "first", "name", "names", "surname",
-  "patient", "patients", "that", "thats", "spelled", "spell", "spelling",
-  "mi", "su", "es", "y", "apellido", "nombre", "se", "escribe",
-]);
+const BETWEEN_ONE_NAME = new Set(NAME_SCAFFOLDING);
 
 /** One place in a caller's turn: the words it can stand for, and whether it may sit inside one name. */
 interface Spot {

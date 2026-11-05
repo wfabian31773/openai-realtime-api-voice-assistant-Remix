@@ -270,6 +270,23 @@ describe('the sweep still decides', () => {
     expect(out).toEqual({ filed: false, reason: 'identity-only' });
     expect(f.calls).toHaveLength(0);
   });
+  it('a bare introduction with "last name" and a spelling is still identity-only (Codex P2 on #431)', async () => {
+    const f = filer();
+    const out = await runRequestSweep(record('CA00000000000000000000000000000184', 'surgery', 'My name is Jane, last name L A K E.'), f, answers('Jane', 'Lake'));
+    expect(out).toEqual({ filed: false, reason: 'identity-only' });
+    expect(f.calls).toHaveLength(0);
+  });
+  it('the same in Spanish', async () => {
+    const f = filer();
+    const out = await runRequestSweep(record('CA00000000000000000000000000000185', 'surgery', 'Mi nombre es Testa, mi apellido es Cole.'), f, answers('Testa', 'Cole'));
+    expect(out).toEqual({ filed: false, reason: 'identity-only' });
+  });
+  it('the same introduction with a request after it still files', async () => {
+    const f = filer();
+    const out = await runRequestSweep(record('CA00000000000000000000000000000186', 'surgery', 'My name is Jane, last name L A K E. I need my surgery moved to next week.'), f, answers('Jane', 'Lake'));
+    expect(out.filed).toBe(true);
+    expect(f.calls[0].patientLastName).toBe('Lake');
+  });
   it('the model is asked only when the sweep would drop the request for having no name', async () => {
     const ask = vi.fn(answers('Testa', 'Cole'));
     const silent = record('CA00000000000000000000000000000182', 'surgery', '');
