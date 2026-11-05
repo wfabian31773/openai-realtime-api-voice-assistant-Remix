@@ -1282,6 +1282,17 @@ import { callEnvironment } from "./callRecord";
  * with v176 (#429). No migration.
  */
 /**
+ * v179 — ONE PERSON CHARTED TWICE IS ONE PATIENT (2026-11-05). Operator,
+ * choosing (a): records that share a first name, a date of birth and a phone
+ * are one patient; the chart with a medical record answers, then the one with
+ * the most recent visit. On 2026-11-04, 7 of the 9 queue calls where the caller
+ * said yes and the lookup still answered ambiguous were one person with two
+ * charts under two last names; the other 2 numbers held two people with
+ * different dates of birth, who stay apart. The other chart's last name travels
+ * as an alias so either surname validates (`patientVerification.ts`
+ * `oneChartedTwice`). Above main's v178 (#427), which it contains. Merged to
+ * main as #430 (`f70b2f46`). No migration.
+ *
  * v180 — THE PATIENT'S NAME FROM THE RECORDING (2026-11-05). Operator,
  * 2026-10-29: "make sure that we did not get the name in transcripts"; and
  * 2026-11-05: "thought we had agreed to do that". Where the teardown sweep
@@ -1289,8 +1300,9 @@ import { callEnvironment } from "./callRecord";
  * last name from the transcript and the sweep files under it only if every
  * word was said by the caller (`nameFromTheRecording.ts`). 17 one-breath
  * messages from unmatched numbers filed nothing on the queue lanes over
- * 2026-10-22..11-04; 11 say a full name. Above main's v178 (#427), which it
- * contains; v179 is #430 on its open branch. No migration.
+ * 2026-10-22..11-04; 11 say a full name. Re-keyed after #430 squash-merged:
+ * above main's v179 (#430, `f70b2f46`), which it contains because main was
+ * merged in. The number stays v180 — it never fell below main. No migration.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
   "voice-runtime-v180-the-name-from-the-recording-20261105";
