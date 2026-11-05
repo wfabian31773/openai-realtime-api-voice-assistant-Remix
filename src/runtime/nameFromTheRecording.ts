@@ -19,9 +19,12 @@
  *
  * What makes it safe enough to put on a ticket nobody watched being filed:
  *   1. It runs only where the sweep would otherwise skip as `no-name`.
- *   2. The model's answer is CHECKED: every word of both names must appear in
- *      the CALLER's own lines (spelled letters count). A name the model made
- *      up, or took from the agent, never reaches a ticket.
+ *   2. The model's answer is CHECKED: the caller must have said it as ONE
+ *      name, in one of their own turns — the first and last name together,
+ *      either order, with nothing between but spelled letters, an initial or
+ *      words like "my last name is". A name the model made up, took from the
+ *      agent, or put together from two people the caller named, never reaches
+ *      a ticket.
  *   3. Both halves, two letters at least, and not a word the ticketing app
  *      refuses as a placeholder. A first name alone files nothing.
  *   4. The ticket says where the name came from (see the sweep's staff note).
@@ -88,34 +91,109 @@ function fold(s: string): string {
     .trim();
 }
 
-/** The caller's words as tokens, plus runs of spelled letters joined ("L A K E" -> "lake"). */
-function callerTokens(transcript: string): Set<string> {
-  const lines = transcript
-    .split(/\r?\n/)
-    .filter((l) => /^\s*CALLER\s*:/i.test(l))
-    .map((l) => l.replace(/^\s*CALLER\s*:/i, ""));
-  const tokens = new Set<string>();
-  for (const line of lines) {
-    const words = fold(line).split(" ").filter(Boolean);
-    let run = "";
-    for (const w of words) {
-      tokens.add(w);
-      if (w.length === 1) run += w;
-      else {
-        if (run.length >= 2) tokens.add(run);
-        run = "";
-      }
-    }
-    if (run.length >= 2) tokens.add(run);
-  }
-  return tokens;
+/**
+ * Words that may stand between the two halves of ONE spoken name: "My name is
+ * Jane, my last name is Lake", "Jones, first name Mary", "se escribe". A word
+ * not on this list between them means two names, or a name and something else.
+ */
+const BETWEEN_ONE_NAME = new Set([
+  "my", "her", "his", "their", "the", "and", "is", "its", "last", "first", "name", "names", "surname",
+  "patient", "patients", "that", "thats", "spelled", "spell", "spelling",
+  "mi", "su", "es", "y", "apellido", "nombre", "se", "escribe",
+]);
+
+/** One place in a caller's turn: the words it can stand for, and whether it may sit inside one name. */
+interface Spot {
+  words: Set<string>;
+  between: boolean;
 }
 
-/** Every word of both names is in the caller's own lines. */
+/**
+ * A caller's turn as places. A run of single letters is ONE place standing for
+ * the letters joined ("L A K E" -> "lake"); a full stop inside the run also
+ * ends a word, so "L A K E. I need" stands for "lake" as well as "lakei"
+ * (Codex P2 on #431), while "L. A. K. E." still reads "lake". A single letter
+ * alone is an initial. Spelled letters and initials may sit inside a name.
+ */
+function spots(line: string): Spot[] {
+  const raw = line
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[.!?]+/g, " . ")
+    .replace(/[^a-z.]+/g, " ")
+    .split(/\s+/)
+    .filter(Boolean);
+  const out: Spot[] = [];
+  let letters: string[] = [];
+  const flush = () => {
+    const only = letters.filter((l) => l !== ".");
+    if (only.length === 1) out.push({ words: new Set(only), between: true });
+    else if (only.length >= 2) {
+      const words = new Set([only.join("")]);
+      for (const part of letters.join("").split(".")) if (part.length >= 2) words.add(part);
+      out.push({ words, between: true });
+    }
+    letters = [];
+  };
+  for (const t of raw) {
+    if (t === ".") {
+      if (letters.length) letters.push(".");
+      continue;
+    }
+    if (t.length === 1) {
+      letters.push(t);
+      continue;
+    }
+    flush();
+    out.push({ words: new Set([t]), between: BETWEEN_ONE_NAME.has(t) });
+  }
+  flush();
+  return out;
+}
+
+/** Where `seq` (a name half, word by word) ends if it starts at place `i`, else -1. */
+function matchAt(sp: Spot[], i: number, seq: string[]): number {
+  if (i >= sp.length) return -1;
+  if (seq.length > 1 && sp[i].words.has(seq.join(""))) return i + 1; // a multi-word half spelled out
+  let j = i;
+  for (const w of seq) {
+    if (j >= sp.length || !sp[j].words.has(w)) return -1;
+    j += 1;
+  }
+  return j;
+}
+
+/** `a` then `b` in this turn, with only what may sit inside one name between them. */
+function saidTogether(sp: Spot[], a: string[], b: string[]): boolean {
+  for (let i = 0; i < sp.length; i++) {
+    const end = matchAt(sp, i, a);
+    if (end < 0) continue;
+    for (let k = end; k < sp.length; k++) {
+      if (matchAt(sp, k, b) >= 0) return true;
+      if (!sp[k].between) break;
+    }
+  }
+  return false;
+}
+
+/**
+ * The caller said this as ONE name, in one of their own turns: first and last
+ * together, either order ("Jones, Mary"). Each word appearing somewhere in the
+ * caller's lines is not enough (Codex P1 on #431): a clinic caller who gives
+ * her own name and the patient's would otherwise validate a model answer that
+ * crossed the two. A name given across two turns does not count; that call
+ * files nothing, as before.
+ */
 export function nameWasSaidByTheCaller(transcript: string, name: HeardName): boolean {
-  const tokens = callerTokens(transcript);
-  const words = [...fold(name.firstName).split(" "), ...fold(name.lastName).split(" ")].filter(Boolean);
-  return words.length >= 2 && words.every((w) => tokens.has(w));
+  const first = fold(name.firstName).split(" ").filter(Boolean);
+  const last = fold(name.lastName).split(" ").filter(Boolean);
+  if (!first.length || !last.length) return false;
+  return transcript
+    .split(/\r?\n/)
+    .filter((l) => /^\s*CALLER\s*:/i.test(l))
+    .map((l) => spots(l.replace(/^\s*CALLER\s*:/i, "")))
+    .some((sp) => saidTogether(sp, first, last) || saidTogether(sp, last, first));
 }
 
 function usable(part: string | null | undefined): string | undefined {

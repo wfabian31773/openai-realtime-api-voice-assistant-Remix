@@ -12,10 +12,16 @@
  * number matched no record, and no ticket of any provenance exists — checked
  * by SID in the Support Center. 17 calls. Read by hand:
  *
- *   11 say the patient's first AND last name (6 of them a pharmacy, a clinic
+ *   10 say the patient's first AND last name (6 of them a pharmacy, a clinic
  *      or a relative calling about somebody else) -> filed under it
- *    3 say a first name only                        -> still nothing filed
+ *    4 say one name word only                       -> still nothing filed
  *    3 say no name                                  -> still nothing filed
+ *
+ * Re-read 2026-11-05 with every capitalised word masked (Codex P1 on #431):
+ * all 10 say the name as one name — first and last together, once with a
+ * middle initial between. CA00483637f3eb17a94a4ac57a3c04a468 was first
+ * counted among them and is not: its transcript has one name word after "the
+ * patient name is".
  *
  * The model is faked here with the answer a correct reading gives; what this
  * pins is the CODE around it: a both-halves name the caller said files, with
@@ -77,8 +83,6 @@ const answers = (firstName: string | null, lastName: string | null): NameAsker =
 interface Call { sid: string; slug: 'surgery' | 'tech' | 'optical'; says: string; model: [string | null, string | null] }
 
 const NAMED: Call[] = [
-  { sid: 'CA00483637f3eb17a94a4ac57a3c04a468', slug: 'tech', model: ['Testa', 'Pharmon'],
-    says: "Hi, I'm calling from a pharmacy for a refill for the patient, date of birth 1/02/1950, and the patient name is Testa Pharmon, for timolol drops. Could you look into it and give me a callback? Thank you." },
   { sid: 'CA14a1aa67d7e411c287b23f626fd54143', slug: 'surgery', model: ['Testa', 'Ruiz'],
     says: 'Hola, quiero saber si la cirugía de Testa Ruiz es para el día veinte de octubre. Que me devuelvas la llamada, por favor. Gracias.' },
   { sid: 'CA27d8459380d334bb66c37fdf6b81485a', slug: 'optical', model: ['Testa', 'Lake'],
@@ -102,6 +106,8 @@ const NAMED: Call[] = [
 ];
 
 const FIRST_NAME_ONLY: Call[] = [
+  { sid: 'CA00483637f3eb17a94a4ac57a3c04a468', slug: 'tech', model: [null, 'Pharmon'],
+    says: "Hi, I'm calling from a pharmacy for a refill for the patient, date of birth 1/02/1950, and the patient name is Pharmon, for timolol drops. Could you look into it and give me a callback? Thank you." },
   { sid: 'CA01b6ab7178b7e73c2782b1cd53af7eec', slug: 'surgery', model: ['Testa', null],
     says: 'Hi, yeah. My name is Testa. I have a cataract surgery appointment on the tenth and need to move it.' },
   { sid: 'CA6de7de53eb0cae521c7450a458cb16b6', slug: 'tech', model: ['Testa', null],
@@ -138,7 +144,7 @@ describe('the corpus: 17 messages from numbers that match no record, 2026-10-22.
     expect(String(f.calls[0].staffNote)).not.toContain('PATIENT NAME NOT CAPTURED');
   });
 
-  it.each(FIRST_NAME_ONLY)('$sid — a first name alone files nothing', async ({ sid, slug, says, model }) => {
+  it.each(FIRST_NAME_ONLY)('$sid — one name word alone files nothing', async ({ sid, slug, says, model }) => {
     const f = filer();
     const out = await runRequestSweep(record(sid, slug, says), f, answers(...model));
     expect(out).toEqual({ filed: false, reason: 'no-name' });
@@ -200,6 +206,57 @@ describe('a name the caller did not say never reaches a ticket', () => {
     const t = 'CALLER: Habla Testa Núñez, por favor llámeme.';
     expect(nameWasSaidByTheCaller(t, { firstName: 'TESTA', lastName: 'Nunez' })).toBe(true);
     expect(nameWasSaidByTheCaller(t, { firstName: 'Test', lastName: 'Nunez' })).toBe(false);
+  });
+});
+
+describe('said as ONE name, not two names crossed (Codex P1 on #431)', () => {
+  const said = (t: string, firstName: string, lastName: string) => nameWasSaidByTheCaller(t, { firstName, lastName });
+
+  it('CA3d9442bd1ce325133a16a8c35ec4f3d9 — the caller\'s first name with the patient\'s surname is refused, and nothing files', async () => {
+    const c = NAMED.find((x) => x.sid === 'CA3d9442bd1ce325133a16a8c35ec4f3d9')!;
+    expect(said(`CALLER: ${c.says}`, 'Testa', 'de la Torre')).toBe(false);
+    const f = filer();
+    expect((await runRequestSweep(record(c.sid, c.slug, c.says), f, answers('Testa', 'de la Torre'))).filed).toBe(false);
+    expect(f.calls).toHaveLength(0);
+  });
+  it('a clinic caller who gives her name and the patient\'s: either name passes, the two crossed do not', () => {
+    const t = 'CALLER: This is Testa Smithy calling about my patient Restu Jonas, please call back.';
+    expect(said(t, 'Restu', 'Jonas')).toBe(true);
+    expect(said(t, 'Testa', 'Smithy')).toBe(true);
+    expect(said(t, 'Testa', 'Jonas')).toBe(false);
+    expect(said(t, 'Restu', 'Smithy')).toBe(false);
+  });
+  it('surname first counts ("Jonas, Restu")', () => {
+    expect(said('CALLER: The patient is Jonas, Restu, date of birth 1 2 1950.', 'Restu', 'Jonas')).toBe(true);
+  });
+  it('the halves may be labelled', () => {
+    expect(said('CALLER: First name Restu, last name Jonas.', 'Restu', 'Jonas')).toBe(true);
+    expect(said('CALLER: My name is Restu and my last name is Jonas.', 'Restu', 'Jonas')).toBe(true);
+    expect(said('CALLER: Mi nombre es Restu, mi apellido es Jonas.', 'Restu', 'Jonas')).toBe(true);
+  });
+  it('a middle initial may sit between; a middle name may not (nothing files, as before)', () => {
+    expect(said('CALLER: My name is Restu D. Jonas, call me.', 'Restu', 'Jonas')).toBe(true);
+    expect(said('CALLER: My name is Restu Marie Jonas, call me.', 'Restu', 'Jonas')).toBe(false);
+  });
+  it('a spelling of the first half may sit between', () => {
+    expect(said('CALLER: This is Restu, R E S T U, Jonas.', 'Restu', 'Jonas')).toBe(true);
+  });
+  it('a two-word half spelled as one run counts', () => {
+    expect(said('CALLER: The patient is T E S T A R A E Jonas.', 'Testa Rae', 'Jonas')).toBe(true);
+  });
+  it('a name given across two of the caller\'s turns does not count', () => {
+    const t = 'CALLER: My name is Restu.\nAGENT: And your last name?\nCALLER: Jonas. I need a refill.';
+    expect(said(t, 'Restu', 'Jonas')).toBe(false);
+  });
+});
+
+describe('a spelled name ends at a full stop (Codex P2 on #431)', () => {
+  const said = (t: string, firstName: string, lastName: string) => nameWasSaidByTheCaller(t, { firstName, lastName });
+  it('"L A K E. I need a refill" reads "lake", not only "lakei"', () => {
+    expect(said('CALLER: My name is Jane, last name L A K E. I need a refill.', 'Jane', 'Lake')).toBe(true);
+  });
+  it('letters written with full stops still join ("L. A. K. E.")', () => {
+    expect(said('CALLER: My name is Jane, last name L. A. K. E. Call me back.', 'Jane', 'Lake')).toBe(true);
   });
 });
 
