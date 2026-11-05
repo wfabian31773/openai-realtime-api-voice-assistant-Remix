@@ -175,6 +175,13 @@ describe('an accent on one chart does not pick that chart before the duplicate r
     expect(r.chartsOnFile).toBeUndefined();
   });
 
+  it('the accent can be on the caller\'s side: "Raúl" sent, "Raul" on the chart', async () => {
+    console_([chart('01', 'Raul', 'Household'), chart('02', 'Otra', 'Household', { date_of_birth: '1990-01-01' })]);
+    const r = await findByPhone(PHONE, 'Raúl');
+    expect(r.verified).toBe(true);
+    expect(r.patient?.personId).toBe(pid('01'));
+  });
+
   it('the shared-opening step folds too: "Raulito" narrows to the one "Raúl" on the number', async () => {
     console_([chart('01', 'Raúl', 'Household'), chart('02', 'Otra', 'Household', { date_of_birth: '1990-01-01' })]);
     const r = await findByPhone(PHONE, 'Raulito');
