@@ -189,6 +189,13 @@ describe('a name the caller did not say never reaches a ticket', () => {
     const throws: NameAsker = async () => { throw new Error('timeout'); };
     expect(await nameFromTheRecording('CALLER: My name is Testa Cole.', throws)).toBeNull();
   });
+  it('a spelled last name at the very end of the message still counts', () => {
+    const t = 'CALLER: Please call me back, this is Testa, last name L A K E';
+    expect(nameWasSaidByTheCaller(t, { firstName: 'Testa', lastName: 'Lake' })).toBe(true);
+  });
+  it('a digit in a name is not a name', async () => {
+    expect(await nameFromTheRecording('CALLER: My name is Testa Cole, call me.', answers('Testa', 'Cole1'))).toBeNull();
+  });
   it('accents and case do not matter; whole words do', () => {
     const t = 'CALLER: Habla Testa Núñez, por favor llámeme.';
     expect(nameWasSaidByTheCaller(t, { firstName: 'TESTA', lastName: 'Nunez' })).toBe(true);

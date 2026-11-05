@@ -82,7 +82,7 @@ export const askModelForThePatientName: NameAsker = async (transcript) => {
 function fold(s: string): string {
   return s
     .normalize("NFD")
-    .replace(/[̀-ͯ]/g, "")
+    .replace(/[\u0300-\u036f]/g, "")
     .toLowerCase()
     .replace(/[^a-z]+/g, " ")
     .trim();
