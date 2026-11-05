@@ -190,6 +190,28 @@ describe('an accent on one chart does not pick that chart before the duplicate r
   });
 });
 
+describe('names outside the Latin alphabet (Codex P2 on #430)', () => {
+  const kBase = { date_of_birth: DOB, phones: [DIGITS] };
+  it('an affirmed Korean first name still picks its one person on a shared number', async () => {
+    console_([chart('01', '민수', 'Household'), chart('02', '지수', 'Household', { date_of_birth: '1990-01-01' })]);
+    const r = await findByPhone(PHONE, '민수');
+    expect(r.verified).toBe(true);
+    expect(r.patient?.personId).toBe(pid('01'));
+  });
+  it('the shared-opening step reads whole syllables: "민수" picks "민수호", not "민지"', async () => {
+    console_([chart('01', '민수호', 'Household'), chart('02', '민지', 'Household', { date_of_birth: '1990-01-01' })]);
+    const r = await findByPhone(PHONE, '민수');
+    expect(r.verified).toBe(true);
+    expect(r.patient?.personId).toBe(pid('01'));
+  });
+  it('two people with different Korean first names, one birthday and one phone, are two people', () => {
+    expect(oneChartedTwice([{ first_name: '민수', ...kBase }, { first_name: '지수', ...kBase }])).toBe(false);
+  });
+  it('the same Chinese first name twice, one birthday, one phone, is one person charted twice', () => {
+    expect(oneChartedTwice([{ first_name: '张伟', ...kBase }, { first_name: '张伟', ...kBase }])).toBe(true);
+  });
+});
+
 describe('joinedAppointments carries the other charts\' last names into every identity write', () => {
   it('a context with aliases puts them on the record; one without adds nothing', async () => {
     const { joinedAppointments } = await import('../tools/ticketIdentity');

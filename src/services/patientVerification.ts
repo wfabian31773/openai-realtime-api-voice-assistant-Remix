@@ -550,11 +550,15 @@ export async function findByPhone(rawPhone: string | undefined | null, firstName
  * This only decides when two charts are one person.
  */
 function foldName(s: string | null | undefined): string {
+  // Accents off, every other letter kept (Codex P2 on #430): a Korean or
+  // Chinese name folds to itself, not to nothing. NFC after the strip puts
+  // Hangul syllables back together, since NFD splits them into jamo.
   return String(s ?? '')
     .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/\p{M}/gu, '')
+    .normalize('NFC')
     .toLowerCase()
-    .replace(/[^a-z]+/g, ' ')
+    .replace(/[^\p{L}]+/gu, ' ')
     .trim();
 }
 
