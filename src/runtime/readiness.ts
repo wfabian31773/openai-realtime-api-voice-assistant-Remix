@@ -1254,6 +1254,20 @@ import { callEnvironment } from "./callRecord";
  * (#427) are on their open branches. No migration.
  */
 /**
+ * v177 — A PCP TOOL'S INPUT ERROR NAMES THE FIELD (2026-11-03). When the
+ * model's arguments failed a hand-built PCP tool's zod schema, the SDK answered
+ * "An error occurred while running the tool. Please try again.": no field, a
+ * string the tool ceiling counted as a success, and nothing on the timeline.
+ * On CAa36ae68ef6d5654594fe11253d30a942 record_pcp_intake looped to the
+ * ceiling, the purpose was never recorded, every filing tool refused, and the
+ * caller was told her request was with the team; no ticket exists. The
+ * arguments are now checked against the same schema first, and a refusal
+ * names each field and what it needs, is a failure the runtime can see, and
+ * is recorded (`toolInputRefusal.ts`). Valid arguments run as before.
+ * Renumbered from v173 (#426) when main moved to v176 (#429), which it
+ * contains; v178 is #427 on its open branch. No migration.
+ */
+/**
  * v178 — A DONE PCP INTAKE NAMES THE NEXT STEP (2026-11-04). record_pcp_intake
  * returned the director's whole decision, so the model received the ticket's
  * gap list (`intakeMissing`, v155), which names the title and email held back
@@ -1264,8 +1278,8 @@ import { callEnvironment } from "./callRecord";
  * on this side, and a done intake with nothing on record names the next step:
  * connect a caller who asked for a person, answer from the purpose's approved
  * lookup, or file (`src/pcp/intakeNextStep.ts`). Renumbered from v174 (#427)
- * when main moved to v176 (#429), which it contains; v177 is #426 on its open
- * branch. No migration.
+ * when main moved past it; above main's v177 (#426), which it contains along
+ * with v176 (#429). No migration.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
   "voice-runtime-v178-a-done-intake-names-the-next-step-20261105";

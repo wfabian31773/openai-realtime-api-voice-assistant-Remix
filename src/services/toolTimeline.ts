@@ -411,6 +411,11 @@ function summarizeResult(tool: string, resultJson: string): Record<string, unkno
   if (Array.isArray(parsed?.missingFields)) {
     out.missingFields = parsed.missingFields.map(String);
   }
+  // v177: the fields a tool's own schema refused, before it ran — names only,
+  // never what the model sent (toolInputRefusal.ts).
+  if (Array.isArray(parsed?.invalidFields)) {
+    out.invalidFields = parsed.invalidFields.map(String);
+  }
   /**
    * WHY inherit did not fill date_of_birth — a closed enum, never a value.
    *
