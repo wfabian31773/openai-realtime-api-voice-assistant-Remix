@@ -26,7 +26,9 @@ export function joinedAppointments(context: PatientScheduleContext): Pick<Verifi
 export function validatedPatientFor(callSid?: string, first?: string, last?: string, dob?: string): ValidatedPatient | undefined {
   const held = verifiedIdentityFor(callSid);
   if (!held || !callSid) return undefined;
-  if ((first && nameKey(first) !== nameKey(held.firstName)) || (last && nameKey(last) !== nameKey(held.lastName))) return undefined;
+  // v179: a patient charted twice answers to either chart's last name.
+  const knownLast = [held.lastName, ...(held.alsoKnownAs ?? [])].map((l) => nameKey(l));
+  if ((first && nameKey(first) !== nameKey(held.firstName)) || (last && !knownLast.includes(nameKey(last)))) return undefined;
   if (dob && isoDOB(dob) && isoDOB(held.dateOfBirth) && isoDOB(dob) !== isoDOB(held.dateOfBirth)) return undefined;
   return { status: 'validated', callSid, firstName: held.firstName, lastName: held.lastName,
     ...(held.personId ? { personId: held.personId } : {}),

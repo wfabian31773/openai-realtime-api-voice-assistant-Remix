@@ -41,7 +41,11 @@ describe('findByPhone with an affirmed first name', () => {
     expect(r.reason).toBe('ambiguous');
   });
   it('stays ambiguous when two people share the name as well as the number', async () => {
-    query.mockResolvedValue({ rows: [TWO[0], row('00000000-0000-4000-8000-000000000003', 'Alpha')] });
+    // v179: two PEOPLE — a parent and a child — differ by date of birth. Two
+    // charts with the same first name, birth date and phone are one person
+    // charted twice (oneChartedTwiceIsOnePatient.test.ts), which this fixture
+    // used to be by accident.
+    query.mockResolvedValue({ rows: [TWO[0], { ...row('00000000-0000-4000-8000-000000000003', 'Alpha'), date_of_birth: '1990-01-01' }] });
     const r = await findByPhone('+15555550100', 'Alpha');
     expect(r.reason).toBe('ambiguous');
   });

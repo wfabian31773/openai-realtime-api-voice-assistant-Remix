@@ -69,6 +69,17 @@ export interface VerificationResult {
   candidates: number;
   /** Which table answered. 'schedule' means the mirror was unreachable. */
   source?: 'mirror' | 'schedule';
+  /**
+   * v179: how many charts the answer stands for when one person is charted
+   * more than once (same first name, date of birth and phone). Absent for an
+   * ordinary single chart.
+   */
+  chartsOnFile?: number;
+  /**
+   * v179: the other charts' last names, so a caller who gives either surname
+   * is still the same patient (a maiden and a married name, a re-registration).
+   */
+  alsoKnownAs?: string[];
 }
 
 /**
@@ -201,6 +212,8 @@ interface Row {
   has_medical_record: boolean | null;
   language: string | null;
   phones: string[] | null;
+  /** v179: the newest-chart tie-break when no visit settles it. */
+  source_updated_at?: string | null;
 }
 
 export interface VerifyInput {
@@ -244,7 +257,8 @@ export async function verifyPatient(input: VerifyInput): Promise<VerificationRes
               to_char(date_of_birth, 'YYYY-MM-DD') AS date_of_birth,
               has_medical_record,
               language,
-              ARRAY[cell_phone, home_phone, day_phone, alt_phone, sec_home_phone] AS phones
+              ARRAY[cell_phone, home_phone, day_phone, alt_phone, sec_home_phone] AS phones,
+              to_char(source_updated_at, 'YYYY-MM-DD"T"HH24:MI:SS') AS source_updated_at
          FROM public.patients_master
         WHERE lower(last_name) = lower($1)
           AND date_of_birth = $2::date
@@ -275,6 +289,9 @@ export async function verifyPatient(input: VerifyInput): Promise<VerificationRes
   if (narrowed.length === 1) {
     return { verified: true, reason: 'match', candidates, patient: toPatient(narrowed[0]), source: 'mirror' };
   }
+  // v179: one person charted twice is one patient, not two (operator,
+  // 2026-11-05). Same first name, same date of birth, a phone they share.
+  if (oneChartedTwice(narrowed)) return oneOfTheCharts(narrowed, candidates);
   // Two real people, same surname, same birthday. Guessing here attaches a
   // ticket to the wrong chart, so it stays unverified and a human decides.
   return { verified: false, reason: 'ambiguous', candidates };
@@ -465,7 +482,8 @@ export async function findByPhone(rawPhone: string | undefined | null, firstName
               to_char(date_of_birth, 'YYYY-MM-DD') AS date_of_birth,
               has_medical_record,
               language,
-              ARRAY[cell_phone, home_phone, day_phone, alt_phone, sec_home_phone] AS phones
+              ARRAY[cell_phone, home_phone, day_phone, alt_phone, sec_home_phone] AS phones,
+              to_char(source_updated_at, 'YYYY-MM-DD"T"HH24:MI:SS') AS source_updated_at
          FROM public.patients_master
         WHERE right(regexp_replace(coalesce(cell_phone,''),     '\\D', '', 'g'), 10) = $1
            OR right(regexp_replace(coalesce(home_phone,''),     '\\D', '', 'g'), 10) = $1
@@ -498,12 +516,129 @@ export async function findByPhone(rawPhone: string | undefined | null, firstName
   if (people.length === 1) {
     return { verified: true, reason: 'match', candidates: 1, patient: toPatient(people[0]), source: 'mirror' };
   }
+  let left = people;
   if (firstName && firstName.trim()) {
     const picked = narrow(people, firstName.trim(), undefined);
     if (picked.length === 1) {
       console.info(`[VERIFY] ${people.length} people share this number; the affirmed first name picked one`);
       return { verified: true, reason: 'match', candidates: people.length, patient: toPatient(picked[0]), source: 'mirror' };
     }
+    left = picked;
   }
+  // v179: the people left are one person charted twice (operator, 2026-11-05).
+  if (oneChartedTwice(left)) return oneOfTheCharts(left, people.length);
   return { verified: false, reason: 'ambiguous', candidates: people.length };
+}
+
+/**
+ * ONE PERSON CHARTED TWICE IS ONE PATIENT — v179.
+ *
+ * Operator, 2026-11-05, choosing (a): records that share a first name, a date
+ * of birth and a phone are one patient. Measured on 2026-11-04: of 9 queue
+ * calls where the caller said yes to the greeting and the lookup still could
+ * not tell who it was, 7 were one person with two charts under different
+ * last names (a maiden and a married name, a re-registration) and 2 were two
+ * people with the same last name and different dates of birth. Before this,
+ * the two charts read as two people, standing instruction 6 refused to pick,
+ * and the caller was asked again — 11 and 12 lookups on two of the calls.
+ *
+ * Standing instruction 6 is unchanged for two PEOPLE: a different date of
+ * birth, a different first name, or no phone in common keeps them apart.
+ * This only decides when two charts are one person.
+ */
+function foldName(s: string | null | undefined): string {
+  return String(s ?? '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z]+/g, ' ')
+    .trim();
+}
+
+export function oneChartedTwice(rows: readonly Pick<Row, 'first_name' | 'date_of_birth' | 'phones'>[]): boolean {
+  if (rows.length < 2) return false;
+  const first = foldName(rows[0].first_name);
+  const dob = rows[0].date_of_birth;
+  if (!first || !dob) return false;
+  if (!rows.every((r) => foldName(r.first_name) === first && r.date_of_birth === dob)) return false;
+  // A number every chart carries — the "same phone" half of the rule.
+  const numbers = rows.map(
+    (r) => new Set((r.phones ?? []).map((p) => phoneDigits(p)).filter((d) => d.length >= 10).map((d) => d.slice(-10))),
+  );
+  return [...numbers[0]].some((n) => numbers.every((set) => set.has(n)));
+}
+
+/**
+ * Which chart answers for the patient: the one with a medical record, then the
+ * one with the most recent visit, then the most recently updated, then the
+ * lowest person number (so the same call always gets the same chart).
+ */
+async function oneOfTheCharts(rows: Row[], candidates: number): Promise<VerificationResult> {
+  const withRecord = rows.filter((r) => r.has_medical_record);
+  let chosen: Row;
+  if (withRecord.length === 1) {
+    chosen = withRecord[0];
+  } else {
+    const pool = withRecord.length ? withRecord : rows;
+    const visits = await lastVisits(pool.map((r) => r.person_id));
+    chosen = [...pool].sort(
+      (a, b) =>
+        (visits.get(b.person_id) ?? '').localeCompare(visits.get(a.person_id) ?? '') ||
+        (b.source_updated_at ?? '').localeCompare(a.source_updated_at ?? '') ||
+        String(a.person_nbr ?? a.person_id).localeCompare(String(b.person_nbr ?? b.person_id)),
+    )[0];
+  }
+  const chosenLast = foldName(chosen.last_name);
+  const alsoKnownAs = [
+    ...new Set(
+      rows
+        .filter((r) => r !== chosen)
+        .map((r) => (r.last_name ?? '').trim())
+        .filter((l) => l && foldName(l) !== chosenLast),
+    ),
+  ];
+  // Counts only — never a name, a date or a chart number.
+  console.info(`[VERIFY] ${rows.length} charts on file for one patient (same first name, date of birth and phone); answering with one`);
+  return {
+    verified: true,
+    reason: 'match',
+    candidates,
+    patient: toPatient(chosen),
+    source: 'mirror',
+    chartsOnFile: rows.length,
+    ...(alsoKnownAs.length ? { alsoKnownAs } : {}),
+  };
+}
+
+/**
+ * The most recent visit on each chart, from the Console's schedule mirror.
+ * A visit is a past appointment that was not cancelled, not moved and not
+ * marked unkept (the NextGen Bible's §2 rule). Bounded; a failure answers an
+ * empty map, and the tie-break falls through to the next rule.
+ */
+async function lastVisits(personIds: string[]): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  if (personIds.length < 2) return out;
+  try {
+    const q = getPool().query<{ person_id: string; last_visit: string }>(
+      `SELECT person_id::text AS person_id,
+              to_char(max(appointment_date), 'YYYY-MM-DD') AS last_visit
+         FROM public.si_appointment_facts
+        WHERE person_id = ANY($1::uuid[])
+          AND appointment_date <= current_date
+          AND is_cancelled IS NOT TRUE
+          AND (is_rescheduled IS NOT TRUE OR is_kept IS TRUE)
+          AND is_kept IS DISTINCT FROM FALSE
+        GROUP BY person_id`,
+      [personIds],
+    );
+    const { rows } = await Promise.race([
+      q,
+      new Promise<never>((_, rej) => setTimeout(() => rej(new Error('timeout')), lookupTimeoutMs())),
+    ]);
+    for (const r of rows) if (r.last_visit) out.set(r.person_id, r.last_visit);
+  } catch (e) {
+    console.warn(`[VERIFY] last-visit tie-break unavailable (${(e as Error).message}) — using the newest chart`);
+  }
+  return out;
 }

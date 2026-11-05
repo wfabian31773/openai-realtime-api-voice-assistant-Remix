@@ -629,6 +629,8 @@ registerTool({
         appointmentContext: resolved,
         // Joined history is unfiltered; keep the queue-filtered routing office.
         ...(queue === 'optical' ? { usualOffice: usualOffice || undefined } : {}),
+        // v179: the other charts' last names, when one patient is charted twice.
+        ...(resolved.alsoKnownAs?.length ? { alsoKnownAs: resolved.alsoKnownAs } : {}),
         // The same `certain` reported to the model as `identity_is_certain`.
         // It was computed twenty lines up and then dropped here, so a
         // name-only hit was stored as though it were a verified identity
@@ -678,6 +680,8 @@ registerTool({
       // it is SQL rather than a console line. A fixed word from a closed set,
       // never caller data.
       ...(identityWrite ? { identity_write: identityWrite } : {}),
+      // v179: a count, never a name — how many charts this one patient has.
+      ...(resolved.chartsOnFile && resolved.chartsOnFile > 1 ? { charts_on_file: resolved.chartsOnFile } : {}),
       ...(certain
         ? {}
         : {

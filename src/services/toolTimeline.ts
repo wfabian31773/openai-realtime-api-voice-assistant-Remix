@@ -356,6 +356,11 @@ function summarizeResult(tool: string, resultJson: string): Record<string, unkno
      */
     'identity_write',
     /**
+     * v179: how many charts one patient has when the person base answered with
+     * one of several (same first name, date of birth and phone). A count.
+     */
+    'charts_on_file',
+    /**
      * WHICH LANGUAGE `set_spoken_language` switched the call TO — the tag
      * `normalizeSpokenLanguage` produced ('es', 'tl', 'ko'), never the
      * caller's word for it (that is the ARGUMENT, and it stays dropped).
