@@ -1281,8 +1281,19 @@ import { callEnvironment } from "./callRecord";
  * when main moved past it; above main's v177 (#426), which it contains along
  * with v176 (#429). No migration.
  */
+/**
+ * v180 — THE PATIENT'S NAME FROM THE RECORDING (2026-11-05). Operator,
+ * 2026-10-29: "make sure that we did not get the name in transcripts"; and
+ * 2026-11-05: "thought we had agreed to do that". Where the teardown sweep
+ * would skip a request as `no-name`, a model reads the patient's first and
+ * last name from the transcript and the sweep files under it only if every
+ * word was said by the caller (`nameFromTheRecording.ts`). 17 one-breath
+ * messages from unmatched numbers filed nothing on the queue lanes over
+ * 2026-10-22..11-04; 11 say a full name. Above main's v178 (#427), which it
+ * contains; v179 is #430 on its open branch. No migration.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v178-a-done-intake-names-the-next-step-20261105";
+  "voice-runtime-v180-the-name-from-the-recording-20261105";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can
