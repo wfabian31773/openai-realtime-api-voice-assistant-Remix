@@ -1239,8 +1239,22 @@ import { callEnvironment } from "./callRecord";
  * main's v172 (#425), which it contains; v173 is #426 and v174 is #427 on
  * their open branches. No migration.
  */
+/**
+ * v176 — AN AFTERNOON GOODBYE IS A GOODBYE (2026-11-05). v134's goodbye grace
+ * still missed two closings on 2026-11-04, both already filed: the agent's
+ * "That's everything on my end. Have a good afternoon, <name>." (the matcher
+ * knew day, evening, night and weekend only, and "everything on my end" was
+ * an unknown phrase), and a Spanish caller's "Okey. Igualmente, bendiciones.
+ * Adiós." (a blessing was an unknown word). `goodbye.ts` adds afternoon and
+ * morning to the sign-off, "that's everything / all on my end" as an agent
+ * courtesy that never closes a call by itself, and blessings ("bendiciones",
+ * "Dios le/la/lo bendiga", "God bless") as farewells. Caller speech, a new
+ * response or a tool inside the window still cancels it. Above main's v175
+ * (#428), which it contains along with v172 (#425); v173 (#426) and v174
+ * (#427) are on their open branches. No migration.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v175-the-after-hours-yes-asks-the-person-base-20261105";
+  "voice-runtime-v176-an-afternoon-goodbye-is-a-goodbye-20261105";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can
