@@ -1290,10 +1290,23 @@ import { callEnvironment } from "./callRecord";
  * charts under two last names; the other 2 numbers held two people with
  * different dates of birth, who stay apart. The other chart's last name travels
  * as an alias so either surname validates (`patientVerification.ts`
- * `oneChartedTwice`). Above main's v178 (#427), which it contains. No migration.
+ * `oneChartedTwice`). Above main's v178 (#427), which it contains. Merged to
+ * main as #430 (`f70b2f46`). No migration.
+ */
+/**
+ * v180 — THE PATIENT'S NAME FROM THE RECORDING (2026-11-05). Operator,
+ * 2026-10-29: "make sure that we did not get the name in transcripts"; and
+ * 2026-11-05: "thought we had agreed to do that". Where the teardown sweep
+ * would skip a request as `no-name`, a model reads the patient's first and
+ * last name from the transcript and the sweep files under it only if the
+ * caller said it as one name in one of their turns (`nameFromTheRecording.ts`).
+ * 17 one-breath messages from unmatched numbers filed nothing on the queue
+ * lanes over 2026-10-22..11-04; 10 say the patient's first and last name.
+ * Above main's v179 (#430, `f70b2f46`), which it contains because main was
+ * merged in; the number stays v180, it never fell below main. No migration.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v179-one-person-charted-twice-is-one-patient-20261105";
+  "voice-runtime-v180-the-name-from-the-recording-20261105";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

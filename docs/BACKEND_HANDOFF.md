@@ -599,3 +599,11 @@ were unreachable, so the separately reported CI test could not be identified.
 - No Twilio changes. **NOT MEASURED IN PRODUCTION.**
 
 Requested-by: Wayne Fabian (via Grok Bot) · Coding-agent: Codex (gpt-6.1-sol) · Tier: hard · Source: Grok Bot relay, Oct 29 2026 · Owner: tinkabot
+
+---
+
+## HANDOFF — #430 squash-merged to main (2026-11-05 ~2:53 PM PT)
+
+#430 (v179, one person charted twice is one patient) squash-merged to `main` as `f70b2f46`. No migration. Not measured in production. Sibling #431 (v180, the name from the recording) is resolving its conflict against that tip on this branch; republish of v179 still needed.
+
+GitHub Assistant / 2026-11-05 ~2:53 PM PT
