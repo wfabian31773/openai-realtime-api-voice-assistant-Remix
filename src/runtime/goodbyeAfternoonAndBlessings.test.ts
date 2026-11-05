@@ -99,6 +99,8 @@ const STAYS_OPEN: Array<[label: string, before: string, caller: string, after: s
     "Your ticket number is VA-11176.", "God bless, and I also need a refill.", "Of course. Which medication?"],
   ["\"that's everything on my end\" alone does not close the call",
     "Your ticket number is VA-11177.", "Thank you.", "That's everything on my end."],
+  ["\"that's all on my end\" alone does not close the call either",
+    "Your ticket number is VA-11178.", "Thank you.", "That's all on my end."],
   ["a thank-you answering a question still keeps it open after an afternoon sign-off",
     "Is there anything else I can help with today?", "Thank you.", "Have a good afternoon, Marisol."],
 ];
@@ -130,6 +132,12 @@ describe("the phrases themselves", () => {
     expect(isAgentSignOff("That's everything on my end. Have a good afternoon.")).toBe(true);
     expect(isAgentSignOff("That is all from my end. Take care.")).toBe(true);
     expect(isAgentSignOff("That's everything on my end.")).toBe(false);
+    // "that's all" is a farewell on its own; inside "that's all on my end" it is not (Codex P2, #429).
+    expect(isAgentSignOff("That's all on my end.")).toBe(false);
+    expect(isAgentSignOff("That's all from my end, Marisol.")).toBe(false);
+    expect(isAgentSignOff("That's all on my end. You're welcome.")).toBe(false);
+    expect(isAgentSignOff("That's all on my end. Have a good day.")).toBe(true);
+    expect(isAgentSignOff("That's all.")).toBe(true);
     expect(isAgentSignOff("Good morning, thank you for calling.")).toBe(false);
   });
 

@@ -19,8 +19,11 @@ const FAREWELL = "goodbye|good bye|bye(?: bye)?|thats all|have a (?:good|great|n
 const POLITE = "ok|okay|okey|yes|yeah|no|all right|alright|thanks|thank you|thank you very much|thanks so much|muchas gracias|gracias|vale|igualmente|you too|a usted tambien|usted tambien";
 const THANKS = "thanks|thank you|thank you very much|thanks so much|muchas gracias|gracias";
 // v176: "That's everything on my end." closes the agent's own part of the
-// call; it is never a farewell by itself (the line still needs one).
-const AGENT_POLITE = `${POLITE}|youre welcome|you are welcome|de nada|con gusto|thank you for calling(?: azul vision)?|gracias por llamar|glad i could help|(?:thats|that is) (?:everything|all) (?:on|from) my end`;
+// call; it is never a farewell by itself (the line still needs one). Its
+// "that's all" form contains FAREWELL's "thats all", so the farewell test in
+// `isAgentSignOff` reads the line with this phrase taken out (Codex P2, #429).
+const MY_END = "(?:thats|that is) (?:everything|all) (?:on|from) my end";
+const AGENT_POLITE = `${POLITE}|youre welcome|you are welcome|de nada|con gusto|thank you for calling(?: azul vision)?|gracias por llamar|glad i could help|${MY_END}`;
 const DONE = "no|thats it|that is it|nothing else|nada mas|thanks|thank you|thank you very much|thanks so much|gracias|muchas gracias";
 
 const MAX_WORDS = 24;
@@ -81,8 +84,9 @@ export function callerConclusion(text: string, previousAgentText: string): Calle
 
 export function isAgentSignOff(text: string): boolean {
   const bare = withoutVocative(text);
+  const withoutMyEnd = normalize(bare).replace(new RegExp(`(?:^| )${MY_END}(?= |$)`, "g"), " ");
   return onlyPhrases(bare, `${FAREWELL}|${AGENT_POLITE}`) &&
-    new RegExp(`(?:^| )(?:${FAREWELL})(?: |$)`).test(normalize(bare));
+    new RegExp(`(?:^| )(?:${FAREWELL})(?: |$)`).test(withoutMyEnd);
 }
 
 /** A direct caller farewell can also be answered with just "you're welcome";
