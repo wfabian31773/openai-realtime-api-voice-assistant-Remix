@@ -241,6 +241,9 @@ describe('said as ONE name, not two names crossed (Codex P1 on #431)', () => {
   it('a spelling of the first half may sit between', () => {
     expect(said('CALLER: This is Restu, R E S T U, Jonas.', 'Restu', 'Jonas')).toBe(true);
   });
+  it('so may a spelling the transcriber misheard, which spells neither half', () => {
+    expect(said('CALLER: This is Restu, R E Z D U, Jonas.', 'Restu', 'Jonas')).toBe(true);
+  });
   it('a two-word half spelled as one run counts', () => {
     expect(said('CALLER: The patient is T E S T A R A E Jonas.', 'Testa Rae', 'Jonas')).toBe(true);
   });
