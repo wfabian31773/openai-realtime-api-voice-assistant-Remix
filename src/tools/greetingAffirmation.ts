@@ -34,7 +34,7 @@ import { nameKey } from './verifiedIdentity';
 const firstWord = (s: string | undefined) => nameKey(s).split(' ')[0] ?? '';
 
 export function callerAffirmedThePhoneMatch(
-  resolved: Pick<PatientScheduleContext, 'matchedBy' | 'identity' | 'patientData'>,
+  resolved: Pick<PatientScheduleContext, 'matchedBy' | 'identity' | 'patientData' | 'alsoKnownAs'>,
   spoken: { firstName?: string; lastName?: string; dateOfBirth?: string },
 ): boolean {
   if (resolved.matchedBy !== 'phone') return false;
@@ -54,7 +54,12 @@ export function callerAffirmedThePhoneMatch(
   const saidKey = nameKey(said);
   if (saidKey !== nameKey(chart.firstName) && saidKey !== firstWord(chart.firstName)) return false;
 
-  if (spoken.lastName?.trim() && nameKey(spoken.lastName) !== nameKey(chart.lastName)) return false;
+  // v179: a patient charted twice answers to either chart's last name.
+  if (spoken.lastName?.trim()) {
+    const said = nameKey(spoken.lastName);
+    const known = [chart.lastName, ...(resolved.alsoKnownAs ?? [])].map((l) => nameKey(l));
+    if (!known.includes(said)) return false;
+  }
 
   if (spoken.dateOfBirth?.trim()) {
     const saidDob = dobKey(spoken.dateOfBirth);

@@ -1281,8 +1281,19 @@ import { callEnvironment } from "./callRecord";
  * when main moved past it; above main's v177 (#426), which it contains along
  * with v176 (#429). No migration.
  */
+/**
+ * v179 — ONE PERSON CHARTED TWICE IS ONE PATIENT (2026-11-05). Operator,
+ * choosing (a): records that share a first name, a date of birth and a phone
+ * are one patient; the chart with a medical record answers, then the one with
+ * the most recent visit. On 2026-11-04, 7 of the 9 queue calls where the caller
+ * said yes and the lookup still answered ambiguous were one person with two
+ * charts under two last names; the other 2 numbers held two people with
+ * different dates of birth, who stay apart. The other chart's last name travels
+ * as an alias so either surname validates (`patientVerification.ts`
+ * `oneChartedTwice`). Above main's v178 (#427), which it contains. No migration.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v178-a-done-intake-names-the-next-step-20261105";
+  "voice-runtime-v179-one-person-charted-twice-is-one-patient-20261105";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can
