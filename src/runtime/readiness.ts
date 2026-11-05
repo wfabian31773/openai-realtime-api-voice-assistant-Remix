@@ -1267,8 +1267,22 @@ import { callEnvironment } from "./callRecord";
  * Renumbered from v173 (#426) when main moved to v176 (#429), which it
  * contains; v178 is #427 on its open branch. No migration.
  */
+/**
+ * v178 — A DONE PCP INTAKE NAMES THE NEXT STEP (2026-11-04). record_pcp_intake
+ * returned the director's whole decision, so the model received the ticket's
+ * gap list (`intakeMissing`, v155), which names the title and email held back
+ * until a request is filed, and asked both first; and with no next question on
+ * an AUTOMATE purpose (where v136 now puts the calls it cannot classify) the
+ * reply named no next step. 32 PCP calls on 10-30, 11-02 and 11-03 ended there
+ * with no ticket, 25 of them asked for a title or email. The gap list now stays
+ * on this side, and a done intake with nothing on record names the next step:
+ * connect a caller who asked for a person, answer from the purpose's approved
+ * lookup, or file (`src/pcp/intakeNextStep.ts`). Renumbered from v174 (#427)
+ * when main moved past it; above main's v177 (#426), which it contains along
+ * with v176 (#429). No migration.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v177-a-tool-input-error-names-the-field-20261105";
+  "voice-runtime-v178-a-done-intake-names-the-next-step-20261105";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

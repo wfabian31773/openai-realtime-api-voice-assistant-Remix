@@ -54,6 +54,7 @@ import {
 import { ticketReadiness, nextRequiredAsk, annotationFor, MAX_BLOCKS } from '../pcp/ticketRequirements';
 import { namesAPatient, submitPcpTicket, submitPcpWithdrawal, type PcpTicketPayload } from '../pcp/pcpTicketing';
 import { toldTheCallerItWasRecorded } from '../pcp/toldItWasRecorded';
+import { intakeReplyForTheModel } from '../pcp/intakeNextStep';
 import { getPacificTimeContext, formatPhoneForSpeech, formatPhoneLast4 } from '../utils/timeAware';
 // STATIC, NOT `await import(…)` — the v78 rule. A dynamic import of a module
 // that registers tools at load evaluated it a second time on Node 20 (Replit)
@@ -858,7 +859,22 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
         // misreport the one field this budget exists to cap.
         console.log(`[PCP ASK BUDGET] ${callId}: stopped asking for ${decision.askBudgetSpent.join(', ')} — budget spent`);
       }
-      return decision;
+      /**
+       * THE TICKET'S GAP LIST STAYS HERE, AND A DONE INTAKE SAYS WHAT IS NEXT.
+       *
+       * Returning the whole decision handed the model `intakeMissing` (v155),
+       * which names the title and email `ENRICHMENT_AFTER_FILING` holds back
+       * until a request is filed, and the model asked both first. And when the
+       * intake had nothing left to ask on an AUTOMATE purpose, the reply named
+       * no next step. 32 PCP calls on 2026-10-30, 11-02 and 11-03 ended at
+       * that point with no ticket; 25 were asked their title or email. See
+       * src/pcp/intakeNextStep.ts.
+       */
+      const reply = intakeReplyForTheModel(decision, pcpDirector.get(callId));
+      if (reply.nextStep) {
+        console.log(`[PCP INTAKE] ${callId}: intake done, nothing on record — next step ${reply.nextStep}`);
+      }
+      return reply;
     },
   });
 
