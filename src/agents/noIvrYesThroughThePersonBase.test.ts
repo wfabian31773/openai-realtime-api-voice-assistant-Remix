@@ -221,21 +221,30 @@ describe('what stays exactly as it was', () => {
     expect(h.lookupPatient).not.toHaveBeenCalled();
   });
 
-  it('a person base that throws leaves the lookup as it was, and never throws itself', async () => {
-    h.lookupByPhone.mockResolvedValue(EMPTY as any);
+  it('a person base that throws leaves the lookup to go on exactly as before (here, the phone gate)', async () => {
+    // Start of call: the book has nothing. Later, the phone gate finds a candidate.
+    h.lookupByPhone.mockResolvedValueOnce(EMPTY as any).mockResolvedValue(severalPeople(2) as any);
     h.lookupPatient.mockRejectedValue(new Error('console unreachable'));
     const agent = await agentFor('CAa0000000000000000000000000000007');
-    const r = await call(agent, 'lookup_schedule', { first_name: 'Zelda' });
-    expect(r.found).toBe(false);
+    const r = await call(agent, 'lookup_schedule', { first_name: 'Zelda', phone: CALLER_PHONE });
+    expect(r.found).toBe(true);
+    expect(r.identityUnconfirmed).toBe(true);
+    expect(verifiedIdentityFor('CAa0000000000000000000000000000007')).toBeUndefined();
   });
 });
 
 describe('the helper on its own', () => {
   const lookup = async () => PERSON_BASE_ZELDA as any;
-  it('confirms the greeted name and its first word only', async () => {
+  it('confirms the greeted name and its first word only, and asks the person base nothing for any other name', async () => {
     expect(await greetingYesFromPersonBase(GREETED, CALLER_PHONE, { first_name: 'zelda' }, lookup)).toBeTruthy();
     expect(await greetingYesFromPersonBase({ matched: true, firstName: 'Zelda Mae' }, CALLER_PHONE, { first_name: 'Zelda' }, lookup)).toBeTruthy();
-    expect(await greetingYesFromPersonBase(GREETED, CALLER_PHONE, { first_name: 'Zel' }, lookup)).toBeUndefined();
+    const spy = vi.fn(lookup);
+    expect(await greetingYesFromPersonBase(GREETED, CALLER_PHONE, { first_name: 'Zel' }, spy)).toBeUndefined();
+    expect(spy).not.toHaveBeenCalled();
+  });
+  it('never throws: a lookup that rejects answers undefined', async () => {
+    const failing = async () => { throw new Error('console unreachable'); };
+    await expect(greetingYesFromPersonBase(GREETED, CALLER_PHONE, { first_name: 'Zelda' }, failing)).resolves.toBeUndefined();
   });
   it('needs a calling number', async () => {
     expect(await greetingYesFromPersonBase(GREETED, undefined, { first_name: 'Zelda' }, lookup)).toBeUndefined();
