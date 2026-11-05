@@ -10,12 +10,17 @@ function normalize(text: string): string {
     .replace(/[’']/g, "").replace(/[.,!¡;:\-]/g, " ").replace(/\s+/g, " ").trim();
 }
 
-const FAREWELL = "goodbye|good bye|bye(?: bye)?|thats all|have a (?:good|great|nice) (?:day|evening|night|weekend)|take care|adios|hasta luego|hasta pronto|chao|chau|nos vemos|que (?:tenga|tengas|tengan) (?:un )?buen dia|que le vaya bien|eso es todo";
+// v176: "have a good afternoon / morning" (the agent's sign-off on afternoon
+// calls, 2026-11-04 CA5e11), and a blessing, which is how many Spanish
+// callers say goodbye ("Okey. Igualmente, bendiciones. Adiós.", CAd598).
+const FAREWELL = "goodbye|good bye|bye(?: bye)?|thats all|have a (?:good|great|nice) (?:day|evening|night|weekend|afternoon|morning)|take care|adios|hasta luego|hasta pronto|chao|chau|nos vemos|que (?:tenga|tengas|tengan) (?:un )?buen dia|que le vaya bien|eso es todo|bendiciones|(?:que )?dios (?:le|la|lo|los|las|te) bendiga|god bless(?: you)?";
 // v169: "okey" is how Spanish callers' "okay" is transcribed; "a usted
 // también" is Spanish "you too" (2026-11-02, CAe04c, CA5b3e).
 const POLITE = "ok|okay|okey|yes|yeah|no|all right|alright|thanks|thank you|thank you very much|thanks so much|muchas gracias|gracias|vale|igualmente|you too|a usted tambien|usted tambien";
 const THANKS = "thanks|thank you|thank you very much|thanks so much|muchas gracias|gracias";
-const AGENT_POLITE = `${POLITE}|youre welcome|you are welcome|de nada|con gusto|thank you for calling(?: azul vision)?|gracias por llamar|glad i could help`;
+// v176: "That's everything on my end." closes the agent's own part of the
+// call; it is never a farewell by itself (the line still needs one).
+const AGENT_POLITE = `${POLITE}|youre welcome|you are welcome|de nada|con gusto|thank you for calling(?: azul vision)?|gracias por llamar|glad i could help|(?:thats|that is) (?:everything|all) (?:on|from) my end`;
 const DONE = "no|thats it|that is it|nothing else|nada mas|thanks|thank you|thank you very much|thanks so much|gracias|muchas gracias";
 
 const MAX_WORDS = 24;
