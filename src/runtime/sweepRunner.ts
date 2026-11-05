@@ -231,8 +231,8 @@ export async function runRequestSweep(
      * v180: NO NAME, SO READ IT FROM THE RECORDING. Operator, 2026-10-29: "make
      * sure that we did not get the name in transcripts". Only here, where the
      * request would otherwise be dropped for want of a name; a model reads the
-     * patient's name and the code files under it only if every word was said by
-     * the caller. Re-decided with that name, so a caller who said nothing but
+     * patient's name and the code files under it only if the caller said it as
+     * one name in one of their turns. Re-decided with that name, so a caller who said nothing but
      * their name is still `identity-only`.
      */
     if (!decision.file && decision.reason === "no-name") {

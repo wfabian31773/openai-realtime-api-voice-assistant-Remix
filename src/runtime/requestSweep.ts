@@ -478,8 +478,8 @@ export function decideSweep(input: SweepInput): SweepDecision {
  * v180: the same instruction says extraction is the MODEL's job, and the
  * operator's 2026-10-29 ruling asked for the name in the transcript. So where
  * this would skip as `no-name`, the runner asks a model for the patient's name
- * and files under it only when every word was said by the caller
- * (`nameFromTheRecording.ts`). Still no placeholder: no name found, no ticket.
+ * and files under it only when the caller said it as one name in one of
+ * their turns (`nameFromTheRecording.ts`). Still no placeholder: no name found, no ticket.
  */
 
 /**
