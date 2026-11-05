@@ -688,6 +688,53 @@ export function greetingYesConfirms(
   });
 }
 
+/**
+ * THE CALLER'S YES, CHECKED AGAINST THE PERSON BASE WHEN THE BOOK CANNOT — v175.
+ *
+ * `greetingYesConfirms` reads the context loaded at call start, and on this
+ * lane that context is the appointment book's phone search
+ * (`lookupByPhone`: cell and home phone, appointment rows only). The queue
+ * lanes ask the person base first (`lookupPatient`, v85), which narrows a
+ * shared number by the affirmed first name inside `patients_master`
+ * (`findByPhone`, RULE ZERO step 2) and joins the record on PersonID.
+ *
+ * So the after-hours yes failed for callers the queue lanes would have
+ * confirmed. Measured on v172's first full night, 2026-11-04: 20 recognised
+ * after-hours callers said yes to the greeting's name, and on 4 the first
+ * `lookup_schedule` with that name answered found: false and the agent went
+ * on to ask the last name and date of birth. On every one of the 4 the
+ * greeted first name is ONE person in `patients_master`; the book held either
+ * no rows for the number (1) or several people (3).
+ *
+ * This asks the person base the queue lanes' question — the calling number,
+ * narrowed by the first name the caller said yes to — and holds the answer to
+ * the same `greetingYesConfirms` rule: the greeting's own name, one person,
+ * that first name on the record, any stated surname or date of birth
+ * agreeing. Two people on the number who share the first name stay two people
+ * (`findByPhone` reports them ambiguous), so nothing here picks between
+ * people. A miss or an outage answers undefined and the lookup goes on
+ * exactly as before.
+ */
+export async function greetingYesFromPersonBase(
+  precontext: unknown,
+  callerPhone: string | undefined,
+  params: { first_name?: string; last_name?: string; date_of_birth?: string },
+  lookupPatient: (q: { phone: string; firstName: string }) => Promise<PatientScheduleContext>,
+): Promise<PatientScheduleContext | undefined> {
+  const greeted = recognisedFirstName(precontext);
+  const said = params.first_name?.trim();
+  const phone = callerPhone?.trim();
+  if (!greeted || !said || !phone) return undefined;
+  const saidKey = nameKey(said);
+  if (saidKey !== nameKey(greeted) && saidKey !== nameKey(greeted).split(' ')[0]) return undefined;
+  try {
+    const ctx = await lookupPatient({ phone, firstName: said });
+    return greetingYesConfirms(precontext, ctx, params) ? ctx : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export function buildNoIvrSystemPrompt(
   metadata: NoIvrAgentMetadata,
   scheduleContext?: PatientScheduleContext,
@@ -1538,6 +1585,16 @@ is not an identity. Confirm the name and date of birth, then call again with the
 
         const held = validatedPatientFor(metadata.callSid, params.first_name, params.last_name, params.date_of_birth);
         let confirmedByGreeting = false;
+        // v175: the yes the start-of-call context cannot confirm (the book has
+        // no rows for the number, or several people on it) is asked of the
+        // person base, narrowed by the affirmed first name, as on the queue lanes.
+        const yesFromPersonBase =
+          !scheduleMatchesIdentity(scheduleContext, held) &&
+          !(scheduleContext && greetingConfirmedMatches(greetingConfirmed, scheduleContext, held)) &&
+          !(scheduleContext && greetingYesConfirms(metadata.precontext, scheduleContext, params))
+            ? await greetingYesFromPersonBase(metadata.precontext, callerPhone, params,
+              (q) => scheduleLookupService.lookupPatient(q))
+            : undefined;
         if (scheduleMatchesIdentity(scheduleContext, held)) {
           result = scheduleContext;
         } else if (scheduleContext && greetingConfirmedMatches(greetingConfirmed, scheduleContext, held)) {
@@ -1553,6 +1610,12 @@ is not an identity. Confirm the name and date of birth, then call again with the
           // and the model passes the first name the caller said yes to. Any
           // surname or date of birth it also passes must agree with the record.
           result = scheduleContext;
+          confirmedByGreeting = true;
+        } else if (yesFromPersonBase) {
+          // The same yes, confirmed by the person base (v175): one person on
+          // the number carries the greeted first name. PHI-free marker.
+          console.info('[No-IVR Agent] the greeting\'s yes confirmed through the person base');
+          result = yesFromPersonBase;
           confirmedByGreeting = true;
         } else if (params.phone && !(params.first_name && params.last_name && params.date_of_birth)) {
           // THE GATE, not a request. The prompt withholds a phone-matched

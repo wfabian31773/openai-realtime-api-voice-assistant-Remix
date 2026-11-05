@@ -1223,8 +1223,24 @@ import { callEnvironment } from "./callRecord";
  * birth after all 159 yeses. Above main's v171 (#421, the sweep files under
  * the record's name), which it contains. No migration.
  */
+/**
+ * v175 — THE AFTER-HOURS YES IS CONFIRMED THROUGH THE PERSON BASE (2026-11-05).
+ * v172 checked the caller's yes to "Am I speaking with <first name>?" only
+ * against the context loaded at call start, which on the after-hours line is
+ * the appointment book's phone search. On v172's first full night (11-04), 4
+ * of the 20 recognised callers who said yes got found: false on the first
+ * `lookup_schedule` and were then asked their last name and date of birth;
+ * the book had no rows for the number (1), or held other people on it (3),
+ * while the greeted first name is one person in `patients_master` on all 4.
+ * When the start-of-call context cannot confirm the yes, `lookup_schedule`
+ * now asks the person base the queue lanes' question (the calling number,
+ * narrowed by the affirmed first name, `lookupPatient`) and holds the answer
+ * to the same `greetingYesConfirms` rule (`greetingYesFromPersonBase`). Above
+ * main's v172 (#425), which it contains; v173 is #426 and v174 is #427 on
+ * their open branches. No migration.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v172-the-after-hours-greeting-asks-the-name-20261103";
+  "voice-runtime-v175-the-after-hours-yes-asks-the-person-base-20261105";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can
