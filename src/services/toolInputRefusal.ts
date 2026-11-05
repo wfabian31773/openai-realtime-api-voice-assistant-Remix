@@ -1,7 +1,7 @@
 /**
  * src/services/toolInputRefusal.ts
  * ─────────────────────────────────────────────────────────────────────────────
- * A HAND-BUILT TOOL'S INPUT ERROR NAMES THE FIELD (v173).
+ * A HAND-BUILT TOOL'S INPUT ERROR NAMES THE FIELD (v177; v173 while #426 was open).
  *
  * `tool()` from `@openai/agents` 0.3.7 parses the model's arguments with the
  * tool's zod schema inside `invoke` (`@openai/agents-core/dist/tool.js`). When

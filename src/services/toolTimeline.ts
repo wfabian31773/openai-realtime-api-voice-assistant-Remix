@@ -411,7 +411,7 @@ function summarizeResult(tool: string, resultJson: string): Record<string, unkno
   if (Array.isArray(parsed?.missingFields)) {
     out.missingFields = parsed.missingFields.map(String);
   }
-  // v173: the fields a tool's own schema refused, before it ran — names only,
+  // v177: the fields a tool's own schema refused, before it ran — names only,
   // never what the model sent (toolInputRefusal.ts).
   if (Array.isArray(parsed?.invalidFields)) {
     out.invalidFields = parsed.invalidFields.map(String);

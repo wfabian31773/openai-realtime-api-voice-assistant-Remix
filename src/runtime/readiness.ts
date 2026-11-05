@@ -1224,7 +1224,37 @@ import { callEnvironment } from "./callRecord";
  * the record's name), which it contains. No migration.
  */
 /**
- * v173 — A PCP TOOL'S INPUT ERROR NAMES THE FIELD (2026-11-03). When the
+ * v175 — THE AFTER-HOURS YES IS CONFIRMED THROUGH THE PERSON BASE (2026-11-05).
+ * v172 checked the caller's yes to "Am I speaking with <first name>?" only
+ * against the context loaded at call start, which on the after-hours line is
+ * the appointment book's phone search. On v172's first full night (11-04), 4
+ * of the 20 recognised callers who said yes got found: false on the first
+ * `lookup_schedule` and were then asked their last name and date of birth;
+ * the book had no rows for the number (1), or held other people on it (3),
+ * while the greeted first name is one person in `patients_master` on all 4.
+ * When the start-of-call context cannot confirm the yes, `lookup_schedule`
+ * now asks the person base the queue lanes' question (the calling number,
+ * narrowed by the affirmed first name, `lookupPatient`) and holds the answer
+ * to the same `greetingYesConfirms` rule (`greetingYesFromPersonBase`). Above
+ * main's v172 (#425), which it contains; v173 is #426 and v174 is #427 on
+ * their open branches. No migration.
+ */
+/**
+ * v176 — AN AFTERNOON GOODBYE IS A GOODBYE (2026-11-05). v134's goodbye grace
+ * still missed two closings on 2026-11-04, both already filed: the agent's
+ * "That's everything on my end. Have a good afternoon, <name>." (the matcher
+ * knew day, evening, night and weekend only, and "everything on my end" was
+ * an unknown phrase), and a Spanish caller's "Okey. Igualmente, bendiciones.
+ * Adiós." (a blessing was an unknown word). `goodbye.ts` adds afternoon and
+ * morning to the sign-off, "that's everything / all on my end" as an agent
+ * courtesy that never closes a call by itself, and blessings ("bendiciones",
+ * "Dios le/la/lo bendiga", "God bless") as farewells. Caller speech, a new
+ * response or a tool inside the window still cancels it. Above main's v175
+ * (#428), which it contains along with v172 (#425); v173 (#426) and v174
+ * (#427) are on their open branches. No migration.
+ */
+/**
+ * v177 — A PCP TOOL'S INPUT ERROR NAMES THE FIELD (2026-11-03). When the
  * model's arguments failed a hand-built PCP tool's zod schema, the SDK answered
  * "An error occurred while running the tool. Please try again.": no field, a
  * string the tool ceiling counted as a success, and nothing on the timeline.
@@ -1233,11 +1263,12 @@ import { callEnvironment } from "./callRecord";
  * caller was told her request was with the team; no ticket exists. The
  * arguments are now checked against the same schema first, and a refusal
  * names each field and what it needs, is a failure the runtime can see, and
- * is recorded (`toolInputRefusal.ts`). Valid arguments run as before. Above
- * main's v172 (#425), which it contains. No migration.
+ * is recorded (`toolInputRefusal.ts`). Valid arguments run as before.
+ * Renumbered from v173 (#426) when main moved to v176 (#429), which it
+ * contains; v178 is #427 on its open branch. No migration.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v173-a-tool-input-error-names-the-field-20261103";
+  "voice-runtime-v177-a-tool-input-error-names-the-field-20261105";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

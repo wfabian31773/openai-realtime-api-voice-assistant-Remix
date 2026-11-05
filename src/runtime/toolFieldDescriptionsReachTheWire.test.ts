@@ -238,7 +238,7 @@ describe('validation is the SDK zod parse, as it was', () => {
   });
 
   it('pcp: record_pcp_intake still refuses a date of birth not in YYYY-MM-DD, and a field it does not have', async () => {
-    // v173: the same schema refuses the same inputs, and since then the
+    // v177: the same schema refuses the same inputs, and since then the
     // refusal names the field instead of the SDK's bare REFUSED string
     // (toolInputRefusal.ts). Through the runtime's own dispatch, so the
     // wrapper is proven to reach the binding the runtime uses.

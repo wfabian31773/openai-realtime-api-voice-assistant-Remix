@@ -704,7 +704,7 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
   // v109: the SDK drops every field `.describe()` from a schema with an
   // optional field, so they are copied back from the zod — see
   // toolFieldDescriptions.ts.
-  // v173: arguments the schema refuses are answered with the field names, as
+  // v177: arguments the schema refuses are answered with the field names, as
   // a failure, and recorded — instead of the SDK's "Please try again" string,
   // which named nothing, read as a success to the tool ceiling and never
   // reached the timeline (CAa36ae68ef6d5654594fe11253d30a942; see

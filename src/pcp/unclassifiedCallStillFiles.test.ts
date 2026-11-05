@@ -118,7 +118,7 @@ describe('the 18 that filed nowhere', () => {
     for (const slug of PCP_CALL_PURPOSE_SLUGS.filter((value) => value !== 'unclassified_call')) {
       expect(JSON.stringify(intake.parameters)).toContain(`"${slug}"`);
     }
-    // v173: still refused by the schema, now as a refusal that names the field
+    // v177: still refused by the schema, now as a refusal that names the field
     // (toolInputRefusal.ts) and never offers the floor's slug back.
     const refusedSlug = await intake.invoke({}, JSON.stringify({ callPurpose: 'unclassified_call' }));
     expect(refusedSlug).toMatchObject({ success: false, refused: 'invalid_arguments', invalidFields: ['callPurpose'] });
