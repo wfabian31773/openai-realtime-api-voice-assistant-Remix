@@ -269,7 +269,7 @@ import { identityForRow } from "./runtimeIdentity";
 import { identityStoreProbe, rememberVerifiedIdentity } from "../tools/verifiedIdentity";
 import { logRuntimeIdentity } from "./identityTelemetry";
 import { logTicketToolOutcomes } from "./ticketToolTelemetry";
-import { runRequestSweep } from "./sweepRunner";
+import { runProductionSweep } from "./sweepRunner";
 import { runLaneTeardownFloor } from "./pcpFloor";
 import { persistRuntimeTurns } from "./runtimeTurns";
 import { makeRecordingStarter } from "./callRecording";
@@ -660,7 +660,9 @@ export function mountVoiceRuntime(
     if (written) stampCall(record.callSid, record.slug);
     return written;
   };
-  const sweepCall = options.sweepCall ?? runRequestSweep;
+  // v180: the production sweep reads the patient's name from the recording
+  // when the call captured none (`nameFromTheRecording.ts`).
+  const sweepCall = options.sweepCall ?? runProductionSweep;
   const persistTurns = options.persistTurns ?? persistRuntimeTurns;
   const startRecording = options.startRecording ?? makeRecordingStarter(env);
   const gradeCall = options.gradeCall ?? gradeRuntimeCall;
