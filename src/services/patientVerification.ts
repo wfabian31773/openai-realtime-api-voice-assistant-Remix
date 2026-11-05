@@ -575,19 +575,16 @@ export function oneChartedTwice(rows: readonly Pick<Row, 'first_name' | 'date_of
  */
 async function oneOfTheCharts(rows: Row[], candidates: number): Promise<VerificationResult> {
   const withRecord = rows.filter((r) => r.has_medical_record);
-  let chosen: Row;
-  if (withRecord.length === 1) {
-    chosen = withRecord[0];
-  } else {
-    const pool = withRecord.length ? withRecord : rows;
-    const visits = await lastVisits(pool.map((r) => r.person_id));
-    chosen = [...pool].sort(
-      (a, b) =>
-        (visits.get(b.person_id) ?? '').localeCompare(visits.get(a.person_id) ?? '') ||
-        (b.source_updated_at ?? '').localeCompare(a.source_updated_at ?? '') ||
-        String(a.person_nbr ?? a.person_id).localeCompare(String(b.person_nbr ?? b.person_id)),
-    )[0];
-  }
+  // Only the charts with a medical record compete, when any have one. A single
+  // such chart answers without a visit read (`lastVisits` needs two to compare).
+  const pool = withRecord.length ? withRecord : rows;
+  const visits = await lastVisits(pool.map((r) => r.person_id));
+  const chosen = [...pool].sort(
+    (a, b) =>
+      (visits.get(b.person_id) ?? '').localeCompare(visits.get(a.person_id) ?? '') ||
+      (b.source_updated_at ?? '').localeCompare(a.source_updated_at ?? '') ||
+      String(a.person_nbr ?? a.person_id).localeCompare(String(b.person_nbr ?? b.person_id)),
+  )[0];
   const chosenLast = foldName(chosen.last_name);
   const alsoKnownAs = [
     ...new Set(

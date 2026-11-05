@@ -156,7 +156,8 @@ describe('what counts as one person charted twice', () => {
     expect(oneChartedTwice([{ first_name: 'Testa', ...base }, { first_name: 'testa ', ...base }])).toBe(true);
   });
   it('an accent or case difference in the first name is the same name', () => {
-    expect(oneChartedTwice([{ first_name: 'José', ...base }, { first_name: 'JOSE', ...base }])).toBe(true);
+    // Mid-word, where dropping the mark (not just spacing it out) is what makes them equal.
+    expect(oneChartedTwice([{ first_name: 'Raúl', ...base }, { first_name: 'RAUL', ...base }])).toBe(true);
   });
   it('a different first name is a different person', () => {
     expect(oneChartedTwice([{ first_name: 'Testa', ...base }, { first_name: 'Testb', ...base }])).toBe(false);
@@ -202,6 +203,15 @@ describe('the tie-break', () => {
     // The next lookup still reaches the mirror.
     console_([chart('05', 'Single', 'Person')]);
     expect((await findByPhone(PHONE)).verified).toBe(true);
+  });
+  it('one chart with a record answers without reading visits at all (no extra Console read on a live call)', async () => {
+    console_(
+      [chart('01', 'Testa', 'Maiden', { has_medical_record: false }), chart('02', 'Testa', 'Married')],
+      { [pid('01')]: '2026-10-30' },
+    );
+    expect((await findByPhone(PHONE, 'Testa')).patient?.personId).toBe(pid('02'));
+    const visitReads = query.mock.calls.filter(([sql]) => /si_appointment_facts/.test(String(sql)));
+    expect(visitReads).toHaveLength(0);
   });
   it('a chart with a record wins over a more recent visit on a chart without one', async () => {
     console_(
@@ -264,6 +274,24 @@ describe('through lookup_patient and the filing gate', () => {
     const ticket = prepareTicketIdentity({ call_sid: sid, first_name: 'Testa', last_name: 'Maiden' });
     expect(ticket.missing).toBeUndefined();
     expect(ticket.input.date_of_birth).toBe(DOB);
+  });
+
+  it(`${ONE_PERSON_ONE_RECORD[2]} — with visit history on the chosen chart, the other surname still validates`, async () => {
+    vi.mocked(scheduleLookupService.lookupByPersonId).mockImplementation(async (_id, matchedBy) => ({
+      patientFound: true,
+      patientName: 'Testa Married',
+      upcomingAppointments: [],
+      pastAppointments: [],
+      totalAppointmentsFound: 1,
+      scheduleReadStatus: 'available',
+      matchedBy,
+      identity: { unique: true, candidateCount: 1, candidates: [] },
+      patientData: {},
+    }));
+    const sid = ONE_PERSON_ONE_RECORD[2];
+    const out = await lookup({ call_sid: sid, phone: PHONE, first_name: 'Testa', last_name: 'Maiden' });
+    expect(out.identity_is_certain).toBe(true);
+    expect(out.charts_on_file).toBe(2);
   });
 
   it('a last name that is on neither chart is not this patient', async () => {
