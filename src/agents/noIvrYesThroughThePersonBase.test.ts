@@ -272,3 +272,34 @@ describe('the wiring', () => {
     expect(block).toContain('confirmedByGreeting = true;');
   });
 });
+
+/**
+ * v179, Codex P2 on #430: a patient charted twice answers to either chart's
+ * last name. The person base hands back `alsoKnownAs`; the after-hours
+ * lookup's identity lock left it out, so a caller giving the other chart's
+ * surname on the ticket was refused the record the lookup had confirmed.
+ */
+describe('v179: a patient charted twice keeps the other chart\'s last name on the after-hours line', () => {
+  it('the lock carries the other surname, and the ticket inherits the record under it', async () => {
+    h.lookupByPhone.mockResolvedValue(EMPTY as any);
+    h.lookupPatient.mockResolvedValue({ ...PERSON_BASE_ZELDA, chartsOnFile: 2, alsoKnownAs: ['Maidenly'] } as any);
+    const sid = 'CAa0000000000000000000000000000179';
+    const agent = await agentFor(sid);
+    const r = await call(agent, 'lookup_schedule', { first_name: 'Zelda' });
+    expect(r.found).toBe(true);
+    expect(verifiedIdentityFor(sid)?.alsoKnownAs).toEqual(['Maidenly']);
+    const filed = prepareTicketIdentity({ call_sid: sid, first_name: 'Zelda', last_name: 'Maidenly' });
+    expect(filed.missing).toBeUndefined();
+    expect(filed.input.date_of_birth).toBe('1958-01-04');
+  });
+
+  it('a surname on neither chart is still not this patient', async () => {
+    h.lookupByPhone.mockResolvedValue(EMPTY as any);
+    h.lookupPatient.mockResolvedValue({ ...PERSON_BASE_ZELDA, chartsOnFile: 2, alsoKnownAs: ['Maidenly'] } as any);
+    const sid = 'CAa0000000000000000000000000000180';
+    const agent = await agentFor(sid);
+    await call(agent, 'lookup_schedule', { first_name: 'Zelda' });
+    const filed = prepareTicketIdentity({ call_sid: sid, first_name: 'Zelda', last_name: 'Stranger' });
+    expect(filed.input.date_of_birth).toBeUndefined();
+  });
+});

@@ -352,15 +352,18 @@ async function verifyAgainstSchedule(
 /** Exact first name, then a prefix, then the caller's own number. */
 function narrow(rows: Row[], first: string, callerPhone: string | null | undefined): Row[] {
   let out = rows;
-  if (first) {
-    const f = first.toLowerCase();
-    const exact = out.filter((r) => (r.first_name ?? '').trim().toLowerCase() === f);
+  // Folded the way `oneChartedTwice` folds (v179, Codex P2 on #430): "Raul"
+  // and "Raúl" are one name, so an accent cannot pick one chart of a person
+  // charted twice before the duplicate rule sees both.
+  const f = foldName(first);
+  if (f) {
+    const exact = out.filter((r) => foldName(r.first_name) === f);
     if (exact.length) out = exact;
     else {
       // "Bob" for Robert, "Kathy" for Katherine — a shared opening is worth
       // trying before giving up, but only as a narrowing step.
       const stem = f.slice(0, 3);
-      const prefix = out.filter((r) => (r.first_name ?? '').trim().toLowerCase().startsWith(stem));
+      const prefix = out.filter((r) => foldName(r.first_name).startsWith(stem));
       if (prefix.length) out = prefix;
     }
   }

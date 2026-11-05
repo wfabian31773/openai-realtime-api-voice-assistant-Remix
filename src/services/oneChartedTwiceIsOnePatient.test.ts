@@ -150,6 +150,49 @@ describe('the 2026-11-04 corpus through findByPhone', () => {
   });
 });
 
+describe('an accent on one chart does not pick that chart before the duplicate rule (Codex P2 on #430)', () => {
+  it('"Raul" affirmed, "Raul" without a record and "Raúl" with one: the chart with the record answers, the other surname carried', async () => {
+    console_([chart('01', 'Raul', 'Maiden', { has_medical_record: false }), chart('02', 'Raúl', 'Married')]);
+    const r = await findByPhone(PHONE, 'Raul');
+    expect(r.verified).toBe(true);
+    expect(r.patient?.personId).toBe(pid('02'));
+    expect(r.chartsOnFile).toBe(2);
+    expect(r.alsoKnownAs).toEqual(['Maiden']);
+  });
+
+  it('the same on the name-and-date-of-birth path', async () => {
+    console_([chart('01', 'Raul', 'Shared', { has_medical_record: false }), chart('02', 'Raúl', 'Shared')]);
+    const r = await verifyPatient({ firstName: 'Raul', lastName: 'Shared', dob: DOB });
+    expect(r.verified).toBe(true);
+    expect(r.patient?.personId).toBe(pid('02'));
+  });
+
+  it('an accented first name the caller says still narrows a shared number to the one person', async () => {
+    console_([chart('01', 'Raúl', 'Household'), chart('02', 'Otra', 'Household', { date_of_birth: '1990-01-01' })]);
+    const r = await findByPhone(PHONE, 'Raul');
+    expect(r.verified).toBe(true);
+    expect(r.patient?.personId).toBe(pid('01'));
+    expect(r.chartsOnFile).toBeUndefined();
+  });
+
+  it('the shared-opening step folds too: "Raulito" narrows to the one "Raúl" on the number', async () => {
+    console_([chart('01', 'Raúl', 'Household'), chart('02', 'Otra', 'Household', { date_of_birth: '1990-01-01' })]);
+    const r = await findByPhone(PHONE, 'Raulito');
+    expect(r.verified).toBe(true);
+    expect(r.patient?.personId).toBe(pid('01'));
+  });
+});
+
+describe('joinedAppointments carries the other charts\' last names into every identity write', () => {
+  it('a context with aliases puts them on the record; one without adds nothing', async () => {
+    const { joinedAppointments } = await import('../tools/ticketIdentity');
+    const base = { patientFound: true, upcomingAppointments: [], pastAppointments: [], totalAppointmentsFound: 0 } as any;
+    expect(joinedAppointments({ ...base, alsoKnownAs: ['Maiden'] }).alsoKnownAs).toEqual(['Maiden']);
+    expect('alsoKnownAs' in joinedAppointments(base)).toBe(false);
+    expect('alsoKnownAs' in joinedAppointments({ ...base, alsoKnownAs: [] })).toBe(false);
+  });
+});
+
 describe('what counts as one person charted twice', () => {
   const base = { date_of_birth: DOB, phones: [DIGITS] };
   it('same first name, same date of birth and a shared phone', () => {

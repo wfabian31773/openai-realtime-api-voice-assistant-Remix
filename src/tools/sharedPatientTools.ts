@@ -625,12 +625,11 @@ registerTool({
          * refusals. `null` when the history holds no office this queue can
          * use, which the store drops rather than writes.
          */
+        // Also the other charts' last names (v179), when charted twice.
         ...joinedAppointments(resolved),
         appointmentContext: resolved,
         // Joined history is unfiltered; keep the queue-filtered routing office.
         ...(queue === 'optical' ? { usualOffice: usualOffice || undefined } : {}),
-        // v179: the other charts' last names, when one patient is charted twice.
-        ...(resolved.alsoKnownAs?.length ? { alsoKnownAs: resolved.alsoKnownAs } : {}),
         // The same `certain` reported to the model as `identity_is_certain`.
         // It was computed twenty lines up and then dropped here, so a
         // name-only hit was stored as though it were a verified identity
