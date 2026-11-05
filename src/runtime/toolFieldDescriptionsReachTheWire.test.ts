@@ -238,9 +238,15 @@ describe('validation is the SDK zod parse, as it was', () => {
   });
 
   it('pcp: record_pcp_intake still refuses a date of birth not in YYYY-MM-DD, and a field it does not have', async () => {
+    // v177: the same schema refuses the same inputs, and since then the
+    // refusal names the field instead of the SDK's bare REFUSED string
+    // (toolInputRefusal.ts). Through the runtime's own dispatch, so the
+    // wrapper is proven to reach the binding the runtime uses.
     const lane = built.get('pcp')!.lane;
-    expect((await lane.agent.dispatch('record_pcp_intake', { patientDob: '03/17/1973' })).output).toContain(REFUSED);
-    expect((await lane.agent.dispatch('record_pcp_intake', { notAField: 'x' })).output).toContain(REFUSED);
+    const dob = JSON.parse((await lane.agent.dispatch('record_pcp_intake', { patientDob: '03/17/1973' })).output);
+    expect(dob).toMatchObject({ success: false, refused: 'invalid_arguments', invalidFields: ['patientDob'] });
+    const extra = JSON.parse((await lane.agent.dispatch('record_pcp_intake', { notAField: 'x' })).output);
+    expect(extra).toMatchObject({ success: false, refused: 'invalid_arguments', invalidFields: ['notAField'] });
   });
 });
 
