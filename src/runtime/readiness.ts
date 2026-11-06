@@ -1305,8 +1305,18 @@ import { callEnvironment } from "./callRecord";
  * Above main's v179 (#430, `f70b2f46`), which it contains because main was
  * merged in; the number stays v180, it never fell below main. No migration.
  */
+/**
+ * v181 — A MISSED HANG-UP ENDS THE CALL (2026-11-06). On four calls in the
+ * fourteen days to 2026-11-05 Twilio stopped sending the caller's frames at
+ * exactly its own call duration and sent neither a stop frame nor a socket
+ * close, so the bridge held each one to the ten-minute ceiling as
+ * `max_duration`. Fifteen seconds with no caller frame now ends the call
+ * with the outcome a stop frame would have given (`MEDIA_GAP_MS`,
+ * `RUNTIME_MEDIA_GAP_MS`, 0 off). Above main's v180 (#431, `678e246f`),
+ * which it contains. No migration.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v180-the-name-from-the-recording-20261105";
+  "voice-runtime-v181-a-missed-hangup-ends-the-call-20261106";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

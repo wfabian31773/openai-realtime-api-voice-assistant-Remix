@@ -58,12 +58,20 @@ export function followUpEvent(
     | "silenceStoodDown"
     | "agentStallNudges"
     | "goodbyeGraceHangup"
+    | "mediaGapHangup"
   >,
 ): FollowUpEvent | null {
   const f = record.followUps;
   const prompts = record.silencePrompts ?? 0;
   const nudges = record.agentStallNudges ?? 0;
-  if ((!f || f.owed === 0) && prompts === 0 && nudges === 0 && !record.goodbyeGraceHangup) return null;
+  if (
+    (!f || f.owed === 0) &&
+    prompts === 0 &&
+    nudges === 0 &&
+    !record.goodbyeGraceHangup &&
+    !record.mediaGapHangup
+  )
+    return null;
   const suspicious =
     (f?.lastUnanswered ?? false) || (f?.toolCallsAfterDone ?? 0) > 0 || record.silenceCut === true;
   return {
@@ -105,6 +113,11 @@ export function followUpEvent(
       // v151: turns asked of the agent after it stalled on a heard caller.
       agentStallNudges: nudges,
       goodbyeGraceHangup: record.goodbyeGraceHangup === true,
+      // v181: Twilio stopped sending caller audio with no stop frame and no
+      // socket close, and the call was ended as the caller's hang-up. A true
+      // here on a call whose Twilio duration is as long as ours would be a
+      // live call cut; the guard is that count staying 0.
+      mediaGapHangup: record.mediaGapHangup === true,
       outcome: record.outcome,
     },
   };
