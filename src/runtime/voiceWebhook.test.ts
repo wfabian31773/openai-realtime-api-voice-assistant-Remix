@@ -8,6 +8,7 @@ import {
   RUNTIME_UNAVAILABLE_LINE,
   RUNTIME_TECHNICAL_TROUBLE_LINE,
   RUNTIME_CANNOT_HEAR_LINE,
+  RUNTIME_FILED_SILENCE_LINE,
   VOICE_STREAM_PATH,
   type WebhookRequest,
 } from "./voiceWebhook";
@@ -215,6 +216,24 @@ describe("the post-stream redirect", () => {
     expect(spoken(res.body)).toBe(RUNTIME_CANNOT_HEAR_LINE);
     expect(spoken(res.body)).not.toBe(RUNTIME_TECHNICAL_TROUBLE_LINE);
     expect(res.body).toContain("<Hangup/>");
+  });
+
+  it("signs off with the request on record when a filed call went silent (v183)", () => {
+    // A heard caller whose request was filed said nothing for two minutes.
+    // Said over TwiML for the ladder's reason; not the cannot-hear line (we
+    // HAD heard them) and not the trouble line (nothing failed).
+    const registry = new CallSessionRegistry();
+    registry.register({ callSid: "CA183", slug: "optical", callerPhone: "", dialedNumber: "" });
+    registry.recordOutcome("CA183", "filed_silence");
+    const res = handleAfterRedirect(
+      signedRequest("/voice/optical/after", { CallSid: "CA183" }),
+      deps({ registry }),
+    );
+    expect(spoken(res.body)).toBe(RUNTIME_FILED_SILENCE_LINE);
+    expect(res.body).toContain("<Hangup/>");
+    // Standing instruction 10: nobody is told to call back.
+    expect(RUNTIME_FILED_SILENCE_LINE).not.toMatch(/call (us )?back/i);
+    expect(RUNTIME_FILED_SILENCE_LINE).toMatch(/request/i);
   });
 
   it("hangs up cleanly after a normal ending — no invented apology", () => {
