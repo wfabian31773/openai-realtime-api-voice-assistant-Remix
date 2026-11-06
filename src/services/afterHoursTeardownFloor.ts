@@ -12,6 +12,76 @@ import { AFTER_HOURS_DEPARTMENT_ID } from '../tools/afterHoursTaxonomy';
 import { answeredWithoutTicket } from './answeredCallDisposition';
 import { nameOrStandIn, STAND_IN_NAME_NOTE } from './standInName';
 import { getAzulTimeline } from './toolTimeline';
+import { scheduleLookupService } from './scheduleLookupService';
+import { AZUL_VISION_LOCATIONS, currentClinicName } from '../config/azulVisionKnowledge';
+import type { TicketLocationSource } from '../tools/ticketIdentity';
+
+/** Bound on the caller-ID history read at teardown; the caller is already gone. */
+export const FLOOR_HISTORY_LOOKUP_TIMEOUT_MS = 2000;
+
+/**
+ * The ticket API has no review flag on `/submit-ticket` (its schema is strict,
+ * so an unknown field risks a 400), so every floor ticket carries this line.
+ */
+export const FLOOR_NEEDS_REVIEW_NOTE =
+  'NEEDS REVIEW — filed by the after-hours teardown floor, not by the agent.';
+export const FLOOR_MISSING_LOCATION_NOTE =
+  'MISSING LOCATION — no office was named, confirmed, found in the caller-ID visit history or matched to the number dialled.';
+export const FLOOR_MISSING_IDENTITY_NOTE =
+  'MISSING IDENTITY — stand-in name; no verified patient record on this call.';
+export const FLOOR_HISTORY_LOCATION_NOTE =
+  'LOCATION from the caller-ID visit history (the last office seen for the one patient on this number) — not confirmed by the caller.';
+export const FLOOR_DIALED_LOCATION_NOTE =
+  'LOCATION from the number dialled (an office line) — not confirmed by the caller.';
+
+const last10 = (v?: string) => (v ?? '').replace(/\D/g, '').slice(-10);
+
+/** The office whose public line was dialled, when exactly one office has it. */
+export function officeForDialedNumber(dialedNumber?: string): string | undefined {
+  const digits = last10(dialedNumber);
+  if (digits.length !== 10) return undefined;
+  const hits = AZUL_VISION_LOCATIONS.filter((loc) => last10(loc.phone) === digits);
+  return hits.length === 1 ? hits[0].name : undefined;
+}
+
+/**
+ * The last office seen for the ONE person on the caller's number. A number
+ * shared by several people answers nothing: that office could be anyone's.
+ * Routing only — the match is never written onto the ticket as an identity.
+ *
+ * Reads through `lookupPatient`, not `lookupByPhone`: the person base
+ * (`patients_master`) answers first and its PersonID join brings the visit
+ * history, so a caller whose number is only on their chart — not on any
+ * appointment row — still yields their office (RULE ZERO step 1).
+ */
+export async function officeFromCallerHistory(
+  callerPhone: string | undefined,
+  callSid: string,
+  timeoutMs = FLOOR_HISTORY_LOOKUP_TIMEOUT_MS,
+): Promise<string | undefined> {
+  if (last10(callerPhone).length !== 10) return undefined;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const context = await Promise.race([
+      scheduleLookupService.lookupPatient({
+        phone: callerPhone!,
+        deadlineAt: Date.now() + timeoutMs,
+        logIdentifiers: false,
+      }).catch(() => {
+        console.warn(`[AFTER-HOURS FLOOR] ${callSid}: caller-ID history lookup failed`);
+        return null;
+      }),
+      new Promise<null>((resolve) => { timer = setTimeout(() => resolve(null), timeoutMs); }),
+    ]);
+    if (!context?.patientFound || context.identity?.unique === false) return undefined;
+    return currentClinicName(context.lastLocationSeen) ?? undefined;
+  } catch {
+    console.warn(`[AFTER-HOURS FLOOR] ${callSid}: caller-ID history lookup failed`);
+    return undefined;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
 
 interface AfterHoursCall {
   callId: string;
@@ -89,7 +159,15 @@ export async function sweepAfterHoursUnfiledCall(
     // the confirmed store), and department 8's own request type — before this
     // the floor sent only a certain match's date, no office and no type.
     const spokenDob = identity?.dateOfBirth ? undefined : dobTheCallerGave(metadata.callSid, transcript);
-    const clinic = confirmedClinicFor(metadata.callSid) ?? await officeTheCallerGave(transcript);
+    const named = confirmedClinicFor(metadata.callSid) ?? await officeTheCallerGave(transcript);
+    // v184: with no office named, try the one patient on the caller's number,
+    // then the office line that was dialled. The ticket API accepts only
+    // 'caller' | 'history', so a dialled-number office is sent as 'history'
+    // (automatic, not caller-stated) and the staff note says where it came from.
+    const fromHistory = named ? undefined : await officeFromCallerHistory(metadata.callerPhone, metadata.callSid);
+    const fromDialed = named || fromHistory ? undefined : officeForDialedNumber(metadata.dialedNumber);
+    const clinic = named ?? fromHistory ?? fromDialed;
+    const locationSource: TicketLocationSource | undefined = named ? 'caller' : clinic ? 'history' : undefined;
     const requestType = floorRequestType(callerText);
     const { SyncAgentService } = await import('./syncAgentService');
     const result = await SyncAgentService.submitSimplifiedTicket({
@@ -99,14 +177,19 @@ export async function sweepAfterHoursUnfiledCall(
       preferredContactMethod: 'phone',
       patientPhone: metadata.callerPhone,
       departmentId: AFTER_HOURS_DEPARTMENT_ID,
-      ...(clinic ? { locationOfLastVisit: clinic, locationSource: 'caller' as const } : {}),
+      ...(clinic && locationSource ? { locationOfLastVisit: clinic, locationSource } : {}),
       // The department-8 pair, so the hint and the pinned department agree.
       suggestedRequestTypeId: requestType.requestTypeId,
       suggestedRequestReasonId: requestType.requestReasonId,
       suggestedRequestReason: requestType.requestReason,
       ...(requestType.urgent ? { suggestedUrgent: true } : {}),
       additionalDetails: [
+        FLOOR_NEEDS_REVIEW_NOTE,
         'AFTER-HOURS TEARDOWN: the call ended with a stated request and no recorded ticket. Please review the conversation and complete the request.',
+        clinic ? undefined : FLOOR_MISSING_LOCATION_NOTE,
+        fromHistory ? FLOOR_HISTORY_LOCATION_NOTE : undefined,
+        fromDialed ? FLOOR_DIALED_LOCATION_NOTE : undefined,
+        standIn ? FLOOR_MISSING_IDENTITY_NOTE : undefined,
         standIn ? STAND_IN_NAME_NOTE : undefined,
         spokenDob ? 'DATE OF BIRTH as the caller gave it on the call — not matched to a patient record.' : undefined,
       ].filter(Boolean).join('\n'),

@@ -26,6 +26,7 @@ vi.mock('../services/syncAgentService', () => ({
 vi.mock('../services/scheduleLookupService', () => ({
   scheduleLookupService: {
     lookupByPhone: h.lookupByPhone,
+    lookupPatient: async () => ({ patientFound: false, upcomingAppointments: [], pastAppointments: [] }),
     lookupByNameAndDOB: async () => ({ patientFound: false, upcomingAppointments: [], pastAppointments: [] }),
     formatContextForAgent: () => '',
   },

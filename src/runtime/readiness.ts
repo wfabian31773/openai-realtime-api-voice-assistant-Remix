@@ -1331,8 +1331,19 @@ import { callEnvironment } from "./callRecord";
  * Operator, 2026-11-06. Above main's v182 (#433, `c0006543`), which it
  * contains along with v181 (#432, `684f3f3d`). No migration.
  */
+/**
+ * v184 — THE AFTER-HOURS FLOOR FINDS AN OFFICE AND ASKS FOR REVIEW
+ * (2026-11-03). Floor tickets with no named office filed with no location and
+ * nothing flagging them. With no office named or confirmed, the floor now
+ * tries the one patient on the caller's number (bounded caller-ID history
+ * lookup), then the office line that was dialled; every floor ticket carries
+ * a NEEDS REVIEW line, plus MISSING LOCATION / MISSING IDENTITY when either is
+ * absent. A dialled-number office is sent as locationSource 'history' (the API
+ * accepts only 'caller' | 'history'). Renumbered from v171 (#424) when main
+ * moved past it (main's v171 is #421; v183 is #434, `5920eb77`). No migration.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v183-a-filed-call-ends-after-silence-20261106";
+  "voice-runtime-v184-after-hours-floor-finds-an-office-20261106";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can
