@@ -461,17 +461,19 @@ export const FILING_TOOL = /^(?:file_[a-z_]+_ticket|create_ticket|create_pcp_tas
  * succeeded, OR a tool that failed at its own job and filed the request
  * anyway and says so in its result (Codex P2 on #434): PCP's
  * `handoff_to_pcp` answers `success: false` when the dial fails or is
- * refused, while its pre-dial ticket (`ticketNumber`) or fallback task
- * (`fallbackRecorded`) is on record and the caller is told so; the
+ * refused, while the ticket it filed — the pre-dial ticket or the fallback
+ * task — is on its result as `ticketNumber` and the caller is told so; the
  * after-hours line's refused `escalate_to_human` files its ticket and says
- * `ticket_filed: true` (v80). A queue transfer the caller chose files nothing
- * (v87) and carries neither, and moves the caller off the line anyway.
+ * `ticket_filed: true` (v80). `fallbackRecorded` is not read: whenever it is
+ * true the fallback's number is on `ticketNumber` too. A queue transfer the
+ * caller chose files nothing (v87), carries no number, and moves the caller
+ * off the line anyway.
  */
 export function toolLeftATicket(name: string, succeeded: boolean, output: unknown): boolean {
   if (succeeded && FILING_TOOL.test(name)) return true;
   if (output === null || typeof output !== "object") return false;
   const o = output as Record<string, unknown>;
-  if (o.fallbackRecorded === true || o.ticket_filed === true) return true;
+  if (o.ticket_filed === true) return true;
   return name === "handoff_to_pcp" && typeof o.ticketNumber === "string" && o.ticketNumber.trim() !== "";
 }
 
