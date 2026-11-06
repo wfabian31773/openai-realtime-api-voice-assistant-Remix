@@ -83,9 +83,17 @@ function harness(opts: { slug?: string; outputs?: Record<string, string>; filedS
     await Promise.resolve();
   };
   const caller = (text: string) => handlers.onCallerTranscript(text);
+  /** An agent line generated but whose playback Twilio has NOT confirmed. */
+  const sayUnechoed = (text: string, audioMs: number) => {
+    epoch++; active = true; handlers.onResponseStarted?.();
+    handlers.onAgentTranscriptDelta(text);
+    handlers.onAudioDelta(Buffer.alloc(8 * audioMs, 0x7f).toString("base64"));
+    handlers.onAudioDone(text);
+    active = false; handlers.onResponseDone();
+  };
   const emptyReply = () => { epoch++; handlers.onResponseStarted?.(); handlers.onResponseDone(); };
   const stop = () => bridge.handleTwilioFrame({ event: "stop", streamSid: "MZ-test" } as never);
-  return { bridge, session, records, outcomes, say, tool, caller, emptyReply, stop };
+  return { bridge, session, records, outcomes, say, sayUnechoed, tool, caller, emptyReply, stop };
 }
 
 beforeEach(() => { vi.useFakeTimers(); vi.spyOn(console, "info").mockImplementation(() => {}); });
@@ -261,6 +269,26 @@ describe("the silence is the caller's, measured honestly", () => {
     // At the stand-down, one caller window has already passed.
     vi.advanceTimersByTime(SILENCE_PROMPT_MS);
     expect(h.outcomes).toEqual([]);
+    vi.advanceTimersByTime(FILED_SILENCE_MS - SILENCE_PROMPT_MS - 1);
+    expect(h.outcomes).toEqual([]);
+    vi.advanceTimersByTime(1);
+    expect(h.outcomes).toEqual(["filed_silence"]);
+  });
+
+  it("a playback mark Twilio never echoes counts the unplayed audio as the agent's, not the caller's silence", async () => {
+    // Codex P2 on #434: thirty seconds of readback still playing when the
+    // provider finished generating must not come off the caller's two minutes.
+    const h = harness({ outputs: { file_optical_ticket: FILED } });
+    h.say("How can I help you today?");
+    h.caller("Checking on my glasses order.");
+    await h.tool("file_optical_ticket");
+    h.sayUnechoed("I've filed that for you. Is there anything else I can help you with?", 30_000);
+    // The caller's window carries the 30 s of unplayed audio. An unechoed line
+    // is not yet in the transcript, so the bridge asks the agent to carry on;
+    // it answers with nothing and the ladder stands down (v156).
+    vi.advanceTimersByTime(30_000 + SILENCE_PROMPT_MS);
+    expect(h.session.requestResponse).toHaveBeenCalled();
+    h.emptyReply();
     vi.advanceTimersByTime(FILED_SILENCE_MS - SILENCE_PROMPT_MS - 1);
     expect(h.outcomes).toEqual([]);
     vi.advanceTimersByTime(1);

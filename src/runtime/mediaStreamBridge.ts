@@ -3011,7 +3011,11 @@ export class VoiceCallBridge {
     // Any other clock means the turn moved on; the next caller window is the full one.
     if (cause !== "caller") this.openingProceedArmed = false;
     this.deadAirCause = cause;
-    if (cause === "caller") this.callerWindowArmedAtMs = Date.now();
+    // v183: the caller's silence starts when the agent's line finishes
+    // PLAYING. `extraMs` is the unplayed audio, an upper bound on that, so a
+    // mark Twilio is slow to echo makes the filed-silence clock more patient,
+    // never less (Codex P2 on #434). A mark echo re-arms with 0.
+    if (cause === "caller") this.callerWindowArmedAtMs = Date.now() + extraMs;
     // The caller's own window is SHORTER than the agent's, because it is not
     // a failure bound: it is how long a person is left in silence before
     // being spoken to. Everything else is unchanged.
