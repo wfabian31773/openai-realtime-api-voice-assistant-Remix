@@ -1316,12 +1316,20 @@ import { callEnvironment } from "./callRecord";
  * which it contains. No migration.
  */
 /**
+ * v182 — A NAMELESS MESSAGE FILES UNDER THE NUMBER'S ONE PATIENT (2026-11-06).
+ * Where the teardown sweep would skip a request as no-name after v171 and
+ * v180, it asks the person base who the calling number belongs to; one
+ * person files under that name with a note that it is not confirmed, several
+ * file nothing. Operator ruling 2026-10-29, approved as filed 2026-11-06.
+ * Above main's v181 (#432, `684f3f3d`), which it contains. No migration.
+ */
+/**
  * v183 — A FILED CALL ENDS AFTER TWO MINUTES OF CALLER SILENCE (2026-11-06).
  * Where the silence ladder stands down for a heard caller and a filing tool
  * succeeded on the call, a separate clock ends it after FILED_SILENCE_MS of
  * the caller saying nothing; the TwiML speaks a sign-off (`filed_silence`).
- * Operator, 2026-11-06. Above main's v181 (#432, `684f3f3d`), which it
- * contains; v182 is #433 on its open branch. No migration.
+ * Operator, 2026-11-06. Above main's v182 (#433, `c0006543`), which it
+ * contains along with v181 (#432, `684f3f3d`). No migration.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
   "voice-runtime-v183-a-filed-call-ends-after-silence-20261106";
