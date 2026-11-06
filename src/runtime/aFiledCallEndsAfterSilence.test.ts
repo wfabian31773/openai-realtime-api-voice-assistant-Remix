@@ -305,6 +305,25 @@ describe("the silence is the caller's, measured honestly", () => {
     expect(h.outcomes).toEqual([]);
   });
 
+  it("a caller who just stopped speaking, words not yet transcribed, is not cut off", async () => {
+    // Codex P2 on #434: speech_stopped clears callerSpeaking and arms the
+    // response watchdog; the transcript and the reply may land after expiry.
+    const h = await filedThenSilent("optical", "file_optical_ticket");
+    vi.advanceTimersByTime(FILED_SILENCE_MS - 1_000);
+    const b = h.bridge as unknown as { handleCallerSpeechStarted(): void; handleCallerSpeechStopped(): void };
+    b.handleCallerSpeechStarted();
+    vi.advanceTimersByTime(500);
+    b.handleCallerSpeechStopped();
+    vi.advanceTimersByTime(600);
+    expect(h.outcomes).toEqual([]);
+    h.caller("Actually, can they email me instead?");
+    h.say("Of course, I've noted that. Is there anything else?");
+    vi.advanceTimersByTime(FILED_SILENCE_MS - 1);
+    expect(h.outcomes).toEqual([]);
+    vi.advanceTimersByTime(1);
+    expect(h.outcomes).toEqual(["filed_silence"]);
+  });
+
   it("an agent turn starting cancels it", async () => {
     const h = await filedThenSilent("optical", "file_optical_ticket");
     vi.advanceTimersByTime(60_000);

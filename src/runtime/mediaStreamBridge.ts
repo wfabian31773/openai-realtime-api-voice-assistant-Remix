@@ -3171,9 +3171,12 @@ export class VoiceCallBridge {
     // through the ladder once it completes.
     if (this.endRequested || this.transferInFlight || this.goodbyeTimer !== null) return;
     if (this.pendingToolCalls > 0 || this.followUpOwed || this.session.isResponseActive()) return;
-    if (this.callerSpeaking) {
-      // Mid-sentence: their transcript cancels this when it lands. If it was
-      // only noise, look again one caller window later.
+    // Mid-sentence, or just finished speaking with their words not yet
+    // transcribed (speech_stopped arms the response watchdog, so a debt is
+    // open; Codex P2 on #434): their transcript or the agent's reply cancels
+    // this when it lands. If it was only noise, look again one caller window
+    // later.
+    if (this.callerSpeaking || this.deadAirCause !== null) {
       this.filedSilenceTimer = this.setTimer(
         () => this.handleFiledSilence(),
         this.deps.silencePromptMs ?? SILENCE_PROMPT_MS,
