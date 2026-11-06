@@ -356,6 +356,11 @@ function summarizeResult(tool: string, resultJson: string): Record<string, unkno
      */
     'identity_write',
     /**
+     * v179: how many charts one patient has when the person base answered with
+     * one of several (same first name, date of birth and phone). A count.
+     */
+    'charts_on_file',
+    /**
      * WHICH LANGUAGE `set_spoken_language` switched the call TO — the tag
      * `normalizeSpokenLanguage` produced ('es', 'tl', 'ko'), never the
      * caller's word for it (that is the ARGUMENT, and it stays dropped).
@@ -411,6 +416,11 @@ function summarizeResult(tool: string, resultJson: string): Record<string, unkno
   if (Array.isArray(parsed?.missingFields)) {
     out.missingFields = parsed.missingFields.map(String);
   }
+  // v177: the fields a tool's own schema refused, before it ran — names only,
+  // never what the model sent (toolInputRefusal.ts).
+  if (Array.isArray(parsed?.invalidFields)) {
+    out.invalidFields = parsed.invalidFields.map(String);
+  }
   /**
    * WHY inherit did not fill date_of_birth — a closed enum, never a value.
    *
@@ -453,6 +463,11 @@ function summarizeResult(tool: string, resultJson: string): Record<string, unkno
     for (const k of ['disposition', 'handoffEligible', 'mayTerminate', 'phiDisclosureAllowed', 'authoritativeToolAllowed', 'mustCreateFallbackTicket', 'askBudgetSpent']) {
       if (parsed?.[k] !== undefined) out[k] = parsed[k];
     }
+    // `nextStep` is a fixed code (src/pcp/intakeNextStep.ts) saying the intake
+    // was done with nothing on record and which next step the reply named. It
+    // is what a count reads; the `guidance` beside it is fixed wording too and
+    // is kept by the general allow-list above.
+    if (parsed?.nextStep === 'connect_answer_or_file' || parsed?.nextStep === 'file') out.nextStep = parsed.nextStep;
   }
   return out;
 }

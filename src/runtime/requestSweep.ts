@@ -54,6 +54,7 @@ import { classifyTechRequest, techReasonById } from "../tools/techTaxonomy";
 import { classifySurgeryRequest, surgeryReasonById } from "../tools/surgeryTaxonomy";
 import { classifyOptical, classificationByReasonId } from "../tools/opticalTaxonomy";
 import { sanitizeForSms } from "../services/gsm7";
+import { NAME_SCAFFOLDING } from "./nameScaffolding";
 
 /** The lanes this runs on. Each is a queue whose department is its routing. */
 const DEPARTMENT_BY_SLUG: Record<string, number> = {
@@ -109,9 +110,15 @@ export interface SweepInput {
    * WHERE `verifiedName` CAME FROM. `verified` (or absent) is a certain lookup
    * match. `stated` is the name the caller gave, as a name-taking tool
    * received it (`statedName.ts`, operator ruling 2026-10-29: a caller whose
-   * name we got is not nameless). The swept ticket tells staff which it is.
+   * name we got is not nameless). `spoken` is the person the calling number
+   * belongs to, used only because the caller said both halves of that name on
+   * the call (`callerSaidTheName`, v168 — the same ruling's "nor did we match
+   * the phone number to a patient"). `heard` is the patient's name a model read
+   * out of the transcript and the code then found in the caller's own lines
+   * (`nameFromTheRecording.ts`, v180 — the ruling's "did not get the name in
+   * transcripts"). The swept ticket tells staff which it is.
    */
-  nameSource?: "verified" | "stated";
+  nameSource?: "verified" | "stated" | "spoken" | "heard";
   /**
    * Staff-facing call summary, when one already exists (a backfill, or a
    * row written before the sweep). Preferred over the raw transcript for
@@ -334,6 +341,9 @@ const IDENTITY_WORDS = new Set([
   "this", "is", "it", "i", "am", "my", "name", "the", "of", "birth", "date",
   "was", "born", "on", "in", "a", "and", "speaking", "here", "that", "s",
   "im", "its", "mr", "mrs", "ms", "dr", "junior", "senior", "jr", "sr",
+  // v180: the words the name extractor accepts around a name ("last name",
+  // "mi apellido es"), so a bare introduction is identity on every path.
+  ...NAME_SCAFFOLDING,
 ]);
 
 /** Spoken numbers, so "March seventeenth nineteen seventy three" is a date. */
@@ -468,6 +478,12 @@ export function decideSweep(input: SweepInput): SweepDecision {
  * first name is? You'll never ever get it to work like that"* — rules out this
  * module regexing for a capitalised word, and it was right when it was said.
  * The name used is the one `lookup_patient` verified against the record.
+ *
+ * v180: the same instruction says extraction is the MODEL's job, and the
+ * operator's 2026-10-29 ruling asked for the name in the transcript. So where
+ * this would skip as `no-name`, the runner asks a model for the patient's name
+ * and files under it only when the caller said it as one name in one of
+ * their turns (`nameFromTheRecording.ts`). Still no placeholder: no name found, no ticket.
  */
 
 /**
@@ -864,7 +880,11 @@ export function buildSweptTicket(
       (decision.firstName && decision.lastName
         ? input.nameSource === "stated"
           ? `NAME AS THE CALLER GAVE IT — not matched to a patient record; confirm it against the chart before acting.\n`
-          : ""
+          : input.nameSource === "spoken"
+            ? `NAME FROM THE CALLING NUMBER'S PATIENT RECORD — the caller said this name on the call, but no date of birth was confirmed; check the chart before acting.\n`
+            : input.nameSource === "heard"
+              ? `NAME TAKEN FROM THE RECORDING — the caller said this name on the call; it is not matched to a patient record. Confirm it against the chart before acting.\n`
+              : ""
         : `PATIENT NAME NOT CAPTURED — nobody was identified on this call; take the name from the recording before matching this to a chart.\n`) +
       (infoOnly ? `${INFO_ONLY_NOTE}\n` : "") +
       `Call back on ${input.callerPhone}. Call reference ${input.callSid}.\n` +

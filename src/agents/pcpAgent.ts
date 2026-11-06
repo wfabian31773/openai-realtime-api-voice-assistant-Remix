@@ -9,6 +9,7 @@ import { escalationDetailsMap } from '../services/escalationStore';
 import { markCallConcluded } from '../services/callConclusion';
 import { recordingExecute } from '../services/toolTimeline';
 import { keepFieldDescriptions } from '../services/toolFieldDescriptions';
+import { refuseInvalidInputByName } from '../services/toolInputRefusal';
 import { EMAIL_CONFIRMATION_DESCRIPTION, LAST_NAME_FIELD_DESCRIPTION } from '../tools/contactCaptureGuidance';
 import { withToolDirection } from '../services/toolDirection';
 import { missingFieldFromError } from '../services/durableTicketFiling';
@@ -53,6 +54,7 @@ import {
 import { ticketReadiness, nextRequiredAsk, annotationFor, MAX_BLOCKS } from '../pcp/ticketRequirements';
 import { namesAPatient, submitPcpTicket, submitPcpWithdrawal, type PcpTicketPayload } from '../pcp/pcpTicketing';
 import { toldTheCallerItWasRecorded } from '../pcp/toldItWasRecorded';
+import { intakeReplyForTheModel } from '../pcp/intakeNextStep';
 import { getPacificTimeContext, formatPhoneForSpeech, formatPhoneLast4 } from '../utils/timeAware';
 // STATIC, NOT `await import(…)` — the v78 rule. A dynamic import of a module
 // that registers tools at load evaluated it a second time on Node 20 (Replit)
@@ -702,19 +704,28 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
   const timelineCtx = { callId, callSid: metadata.callSid, agentSlug: 'pcp' };
   // v109: the SDK drops every field `.describe()` from a schema with an
   // optional field, so they are copied back from the zod — see
-  // toolFieldDescriptions.ts. Validation stays the SDK's zod parse.
+  // toolFieldDescriptions.ts.
+  // v177: arguments the schema refuses are answered with the field names, as
+  // a failure, and recorded — instead of the SDK's "Please try again" string,
+  // which named nothing, read as a success to the tool ceiling and never
+  // reached the timeline (CAa36ae68ef6d5654594fe11253d30a942; see
+  // toolInputRefusal.ts). Arguments it accepts go to the SDK unchanged.
   const recordedTool: typeof tool = ((def: any) =>
-    keepFieldDescriptions(
-      tool({
-        ...def,
-        // CP-3: the approved next line rides inside the tool result (script-listing §6).
-        execute: trackPcpFiling(
-          callId,
-          def.name,
-          withToolDirection('pcp', callId, def.name, recordingExecute(timelineCtx, def.name, def.execute)),
-        ),
-      }),
+    refuseInvalidInputByName(
+      keepFieldDescriptions(
+        tool({
+          ...def,
+          // CP-3: the approved next line rides inside the tool result (script-listing §6).
+          execute: trackPcpFiling(
+            callId,
+            def.name,
+            withToolDirection('pcp', callId, def.name, recordingExecute(timelineCtx, def.name, def.execute)),
+          ),
+        }),
+        def.parameters,
+      ),
       def.parameters,
+      (args, refusal) => recordingExecute(timelineCtx, def.name, () => refusal)(args),
     )) as typeof tool;
 
   const recordIntake = recordedTool({
@@ -848,7 +859,22 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
         // misreport the one field this budget exists to cap.
         console.log(`[PCP ASK BUDGET] ${callId}: stopped asking for ${decision.askBudgetSpent.join(', ')} — budget spent`);
       }
-      return decision;
+      /**
+       * THE TICKET'S GAP LIST STAYS HERE, AND A DONE INTAKE SAYS WHAT IS NEXT.
+       *
+       * Returning the whole decision handed the model `intakeMissing` (v155),
+       * which names the title and email `ENRICHMENT_AFTER_FILING` holds back
+       * until a request is filed, and the model asked both first. And when the
+       * intake had nothing left to ask on an AUTOMATE purpose, the reply named
+       * no next step. 32 PCP calls on 2026-10-30, 11-02 and 11-03 ended at
+       * that point with no ticket; 25 were asked their title or email. See
+       * src/pcp/intakeNextStep.ts.
+       */
+      const reply = intakeReplyForTheModel(decision, pcpDirector.get(callId));
+      if (reply.nextStep) {
+        console.log(`[PCP INTAKE] ${callId}: intake done, nothing on record — next step ${reply.nextStep}`);
+      }
+      return reply;
     },
   });
 

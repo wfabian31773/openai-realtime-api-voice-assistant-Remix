@@ -625,6 +625,7 @@ registerTool({
          * refusals. `null` when the history holds no office this queue can
          * use, which the store drops rather than writes.
          */
+        // Also the other charts' last names (v179), when charted twice.
         ...joinedAppointments(resolved),
         appointmentContext: resolved,
         // Joined history is unfiltered; keep the queue-filtered routing office.
@@ -678,6 +679,8 @@ registerTool({
       // it is SQL rather than a console line. A fixed word from a closed set,
       // never caller data.
       ...(identityWrite ? { identity_write: identityWrite } : {}),
+      // v179: a count, never a name — how many charts this one patient has.
+      ...(resolved.chartsOnFile && resolved.chartsOnFile > 1 ? { charts_on_file: resolved.chartsOnFile } : {}),
       ...(certain
         ? {}
         : {

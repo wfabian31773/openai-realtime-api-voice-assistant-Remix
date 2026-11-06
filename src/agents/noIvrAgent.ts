@@ -1,4 +1,7 @@
 import { nameKey, rememberVerifiedIdentity } from '../tools/verifiedIdentity';
+import { callerAffirmedThePhoneMatch } from '../tools/greetingAffirmation';
+import { dobKey } from '../services/callFactsLedger';
+import { recognisedFirstName } from '../services/greetingPersonalisation';
 import { joinedAppointments, prepareTicketIdentity, scheduleMatchesIdentity, validatedPatientFor, type TicketLocationSource } from '../tools/ticketIdentity';
 import { readDobQuietly } from '../tools/dobParts';
 import { dobTheCallerGave, isoDobToUs } from '../services/afterHoursCallFacts';
@@ -615,6 +618,123 @@ export function phoneMatchIsUnconfirmed(context: PatientScheduleContext): boolea
   return context.matchedBy === 'phone' || context.identityUnconfirmed === true;
 }
 
+/**
+ * Whether the cached schedule is still the one the caller's yes confirmed, and
+ * the identity held for the call is that same person. A phone-matched context
+ * never passes `scheduleMatchesIdentity` (it proves whose record is cached by a
+ * name-and-date-of-birth match), so the confirmation is carried here, by
+ * reference: it ends the moment the cache is replaced.
+ */
+export function greetingConfirmedMatches(
+  confirmed: PatientScheduleContext | undefined,
+  current: PatientScheduleContext | undefined,
+  held: { firstName?: string; lastName?: string; dateOfBirth?: string; personId?: string } | undefined,
+): boolean {
+  if (!confirmed || !current || confirmed !== current || !held) return false;
+  const chart = current.patientData;
+  if (nameKey(chart?.firstName) !== nameKey(held.firstName) || nameKey(chart?.lastName) !== nameKey(held.lastName)) return false;
+  if (chart?.personId && held.personId && chart.personId !== held.personId) return false;
+  const chartDob = dobKey(chart?.dateOfBirth);
+  const heldDob = dobKey(held.dateOfBirth);
+  return !chartDob || !heldDob || chartDob === heldDob;
+}
+
+/**
+ * The record's own first name when the model passes only the first word of a
+ * compound first name the greeting's yes confirmed ("Mary" for a record that
+ * reads "Mary Ann"). The confirmed identity is held under the record's name,
+ * and `validatedPatientFor` compares names exactly, so without this the
+ * ticket could not inherit the surname and date of birth the yes confirmed
+ * (Codex P2 on #425). Only that one shape is rewritten: the record's whole
+ * first name, any other name, or a surname that is not the record's are left
+ * as passed.
+ */
+export function greetingConfirmedFirstName(
+  confirmed: PatientScheduleContext | undefined,
+  params: { first_name?: string; last_name?: string },
+): string | undefined {
+  const said = params.first_name?.trim();
+  const chart = confirmed?.patientData;
+  if (!said || !chart?.firstName) return params.first_name;
+  const chartKey = nameKey(chart.firstName);
+  const saidKey = nameKey(said);
+  if (saidKey === chartKey || saidKey !== chartKey.split(' ')[0]) return params.first_name;
+  if (params.last_name?.trim() && nameKey(params.last_name) !== nameKey(chart.lastName)) return params.first_name;
+  return chart.firstName;
+}
+
+/**
+ * Whether this lookup carries the caller's YES to the greeting's "Am I
+ * speaking with <first name>?" on a number that is one person on file (v172).
+ * The greeting named them only when caller ID matched one person with a first
+ * name (`recognisedFirstName`, the runtime's own source for the greeting), the
+ * first name passed must be the one the greeting asked (or its first word),
+ * and `callerAffirmedThePhoneMatch` holds the schedule's own record to the
+ * same rule the queue lanes use: one person, that first name, and any stated
+ * surname or date of birth agreeing.
+ */
+export function greetingYesConfirms(
+  precontext: unknown,
+  scheduleContext: PatientScheduleContext | undefined,
+  params: { first_name?: string; last_name?: string; date_of_birth?: string },
+): boolean {
+  const greeted = recognisedFirstName(precontext);
+  const said = params.first_name?.trim();
+  if (!greeted || !said || !scheduleContext?.patientFound) return false;
+  const saidKey = nameKey(said);
+  if (saidKey !== nameKey(greeted) && saidKey !== nameKey(greeted).split(' ')[0]) return false;
+  return callerAffirmedThePhoneMatch(scheduleContext, {
+    firstName: said, lastName: params.last_name, dateOfBirth: params.date_of_birth,
+  });
+}
+
+/**
+ * THE CALLER'S YES, CHECKED AGAINST THE PERSON BASE WHEN THE BOOK CANNOT — v175.
+ *
+ * `greetingYesConfirms` reads the context loaded at call start, and on this
+ * lane that context is the appointment book's phone search
+ * (`lookupByPhone`: cell and home phone, appointment rows only). The queue
+ * lanes ask the person base first (`lookupPatient`, v85), which narrows a
+ * shared number by the affirmed first name inside `patients_master`
+ * (`findByPhone`, RULE ZERO step 2) and joins the record on PersonID.
+ *
+ * So the after-hours yes failed for callers the queue lanes would have
+ * confirmed. Measured on v172's first full night, 2026-11-04: 20 recognised
+ * after-hours callers said yes to the greeting's name, and on 4 the first
+ * `lookup_schedule` with that name answered found: false and the agent went
+ * on to ask the last name and date of birth. On every one of the 4 the
+ * greeted first name is ONE person in `patients_master`; the book held either
+ * no rows for the number (1) or several people (3).
+ *
+ * This asks the person base the queue lanes' question — the calling number,
+ * narrowed by the first name the caller said yes to — and holds the answer to
+ * the same `greetingYesConfirms` rule: the greeting's own name, one person,
+ * that first name on the record, any stated surname or date of birth
+ * agreeing. Two people on the number who share the first name stay two people
+ * (`findByPhone` reports them ambiguous), so nothing here picks between
+ * people. A miss or an outage answers undefined and the lookup goes on
+ * exactly as before.
+ */
+export async function greetingYesFromPersonBase(
+  precontext: unknown,
+  callerPhone: string | undefined,
+  params: { first_name?: string; last_name?: string; date_of_birth?: string },
+  lookupPatient: (q: { phone: string; firstName: string }) => Promise<PatientScheduleContext>,
+): Promise<PatientScheduleContext | undefined> {
+  const greeted = recognisedFirstName(precontext);
+  const said = params.first_name?.trim();
+  const phone = callerPhone?.trim();
+  if (!greeted || !said || !phone) return undefined;
+  const saidKey = nameKey(said);
+  if (saidKey !== nameKey(greeted) && saidKey !== nameKey(greeted).split(' ')[0]) return undefined;
+  try {
+    const ctx = await lookupPatient({ phone, firstName: said });
+    return greetingYesConfirms(precontext, ctx, params) ? ctx : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export function buildNoIvrSystemPrompt(
   metadata: NoIvrAgentMetadata,
   scheduleContext?: PatientScheduleContext,
@@ -631,36 +751,26 @@ export function buildNoIvrSystemPrompt(
   let precontextSection = "";
   const pc = metadata.precontext;
   if (pc?.matched && pc.firstName) {
+    // This body is the OpenAI SIP core's, which never personalises the
+    // after-hours greeting (Codex P2 on #425): the AGENT asks the name here,
+    // and a yes confirms the record the same way the runtime's greeting does.
     precontextSection = `
 ===== CALLER-ID PRE-CONTEXT (a hint, NOT verification) =====
 This phone number matches ONE person on file: first name "${pc.firstName}".
 
 - DO NOT OPEN WITH A NAME CONFIRMATION, AND DO NOT SPEAK OVER THE GREETING.
-  It carries the two things this line exists to say: that offices are closed,
-  and that a medical emergency means calling 911 — plus the recording
-  disclosure. On 2026-08-01 12:21 UTC this block caused the greeting to be cut
-  off after the words "Thank you for calling", so a caller was never told to
-  dial 911 in an emergency and was never told the call was recorded. That must
-  never happen again. Never shorten it, never paraphrase it, and never say it
-  a second time.
-- This is an AFTER-HOURS MESSAGE-TAKING line, not a check-in desk. Do not
-  open with an identity interview. Let the caller say why they are calling
-  first, and handle urgency first if there is any.
-- WHEN YOU DO NEED THEIR IDENTITY for the message or ticket, NEVER ask "could
-  I get your name?" — you already have it. Say "am I speaking with
-  ${pc.firstName}?" On the 13:35 UTC call the agent asked for the name cold
-  even though this block was present; that is the failure mode to avoid.
-  Then take the last name AND the date of birth IN ONE question, never one
-  and then the other.
-- CONFIRMING A FIRST NAME DOES NOT CONFIRM A LAST NAME. Take the last name in
-  their own words. If it differs from what you expected, this number matched
-  the WRONG person — use what THEY said and ignore this block from then on.
-- READ THE DATE OF BIRTH BACK once you have it. A caller-ID match tells you
-  nothing about a date of birth.
+  It carries the closed notice, the 911 direction and the recording disclosure;
+  on 2026-08-01 12:21 UTC it was cut off, so a caller was never told to
+  dial 911 in an emergency or that the call was recorded. Never shorten it or
+  say it a second time.
+- Let the caller give the reason first; urgency first if there is any.
+- For their identity say "am I speaking with ${pc.firstName}?" — never "could I
+  get your name?". YES: call lookup_schedule with first_name "${pc.firstName}";
+  the yes confirms the record, so ask neither last name nor date of birth
+  unless that lookup comes back unconfirmed (v172). NO, another name, or for
+  someone else: discard this block; collect the ACTUAL patient's details.
 - Do NOT say we recognized their number. Do NOT speak a last name first.
-- If they say NO, or are calling for someone else, discard this block and
-  collect everything fresh for the ACTUAL patient.
-- Disclose nothing from anyone's record on the strength of this match.
+- Disclose nothing from the record until lookup_schedule has returned it.
 `;
   }
 
@@ -688,6 +798,8 @@ This phone number matches ONE person on file: first name "${pc.firstName}".
      * once that is done, from the tool result rather than from memory.
      */
     const firstName = (scheduleContext.patientName ?? '').trim().split(/\s+/)[0] || 'the patient on file';
+    // Only the runtime's greeting asks the name (personaliseLaneGreeting); the SIP core's never does.
+    const greetedFirst = noIvrPromptShape(metadata) === 'grok' && pc?.matched && pc.firstName ? pc.firstName : '';
     console.log('[No-IVR Agent] PHONE MATCH IS A CANDIDATE — appointment details withheld from the prompt until the name and date of birth are confirmed');
     scheduleContextSection = `
 ===== PATIENT CONTEXT (PHONE MATCH — UNCONFIRMED, a candidate only) =====
@@ -699,7 +811,10 @@ NOT loaded here.
 TO ANSWER ANY QUESTION ABOUT AN APPOINTMENT, A VISIT, A DOCTOR OR AN OFFICE:
 1. Confirm identity first — "I was able to pull up a record. Is this for ${firstName}?",
    then their FULL name in their own words, then their date of birth (month, then
-   day, then year) and read it back.
+   day, then year) and read it back.${greetedFirst ? `
+   YOUR GREETING ALREADY ASKED "Am I speaking with ${greetedFirst}?": if they said yes,
+   call lookup_schedule with first_name "${greetedFirst}" instead — that confirms the
+   record and returns the appointment; skip the rest of step 1 and step 2.` : ''}
 2. THEN call lookup_schedule(first_name, last_name, date_of_birth).
 3. Read the appointment from the TOOL RESULT, never from memory.
 If they say no, or are asking about someone else, collect THAT person's full name
@@ -1347,6 +1462,8 @@ export async function createNoIvrAgent(
     )) as typeof tool;
 
   let scheduleContext: PatientScheduleContext | undefined;
+  /** The schedule the caller's yes to the greeting confirmed on this call (v172). */
+  let greetingConfirmed: PatientScheduleContext | undefined;
   let callerMemory: CallerMemory | null = null;
 
   if (callerPhone) {
@@ -1467,8 +1584,39 @@ is not an identity. Confirm the name and date of birth, then call again with the
         let result: PatientScheduleContext;
 
         const held = validatedPatientFor(metadata.callSid, params.first_name, params.last_name, params.date_of_birth);
+        let confirmedByGreeting = false;
+        // v175: the yes the start-of-call context cannot confirm (the book has
+        // no rows for the number, or several people on it) is asked of the
+        // person base, narrowed by the affirmed first name, as on the queue lanes.
+        const yesFromPersonBase =
+          !scheduleMatchesIdentity(scheduleContext, held) &&
+          !(scheduleContext && greetingConfirmedMatches(greetingConfirmed, scheduleContext, held)) &&
+          !(scheduleContext && greetingYesConfirms(metadata.precontext, scheduleContext, params))
+            ? await greetingYesFromPersonBase(metadata.precontext, callerPhone, params,
+              (q) => scheduleLookupService.lookupPatient(q))
+            : undefined;
         if (scheduleMatchesIdentity(scheduleContext, held)) {
           result = scheduleContext;
+        } else if (scheduleContext && greetingConfirmedMatches(greetingConfirmed, scheduleContext, held)) {
+          // The same record the caller's yes already confirmed on this call
+          // (Codex P2 on #425): a later lookup, phone-only included, reuses
+          // it as confirmed instead of asking for the name and date of birth.
+          result = scheduleContext;
+          confirmedByGreeting = true;
+        } else if (scheduleContext && greetingYesConfirms(metadata.precontext, scheduleContext, params)) {
+          // THE CALLER'S YES TO THE GREETING'S NAME COUNTS HERE TOO (v172,
+          // operator 2026-11-03, "After-hours too"): the greeting asked "Am
+          // I speaking with <first name>?", the number is one person on file,
+          // and the model passes the first name the caller said yes to. Any
+          // surname or date of birth it also passes must agree with the record.
+          result = scheduleContext;
+          confirmedByGreeting = true;
+        } else if (yesFromPersonBase) {
+          // The same yes, confirmed by the person base (v175): one person on
+          // the number carries the greeted first name. PHI-free marker.
+          console.info('[No-IVR Agent] the greeting\'s yes confirmed through the person base');
+          result = yesFromPersonBase;
+          confirmedByGreeting = true;
         } else if (params.phone && !(params.first_name && params.last_name && params.date_of_birth)) {
           // THE GATE, not a request. The prompt withholds a phone-matched
           // appointment until the name and date of birth are confirmed; this
@@ -1566,13 +1714,15 @@ is not an identity. Confirm the name and date of birth, then call again with the
           // A fresh name+DOB result may omit the legacy uniqueness metadata.
           // Explicit ambiguity still blocks disclosure; cached reuse separately
           // requires scheduleMatchesIdentity to prove whose record it is.
-          const confirmed = result.matchedBy === 'name_and_dob' && result.identity?.unique !== false && !result.identityUnconfirmed;
+          const confirmed = confirmedByGreeting ||
+            (result.matchedBy === 'name_and_dob' && result.identity?.unique !== false && !result.identityUnconfirmed);
           if (!confirmed) return {
             found: true, identityUnconfirmed: true,
             ...appointmentAccess(result, false),
           };
           rememberVerifiedIdentity(metadata.callSid, { ...result.patientData, ...joinedAppointments(result), certain: true });
           scheduleContext = result;
+          if (confirmedByGreeting) greetingConfirmed = result;
           return {
             found: true,
             ...appointmentAccess(result, confirmed, params),
@@ -1763,6 +1913,9 @@ The ticket will include schedule context (last appointment info) automatically.`
       question_fully_answered: z.boolean().optional().describe("TRUE only when fully answered with no staff work or follow-up left. Skips filing only with requires_callback FALSE. Default FALSE."),
     }),
     execute: async (params) => {
+      // A compound first name the greeting's yes confirmed is filed under the
+      // record's whole first name, so the held identity is found (Codex P2 on #425).
+      params = { ...params, first_name: greetingConfirmedFirstName(greetingConfirmed, params) ?? params.first_name };
       const prepared = prepareTicketIdentity({ ...params, call_sid: metadata.callSid });
       let locationSource = prepared.input.locationSource as TicketLocationSource | undefined;
       // Hydrate held facts here; the bounded DOB/B2B rules below own refusals.
@@ -1898,7 +2051,8 @@ The ticket will include schedule context (last appointment info) automatically.`
       // SECONDARY LOOKUP: Enrich schedule context using name+DOB
       // This catches cases where caller phone doesn't match patient record (family member calling)
       const lockedIdentity = validatedPatientFor(metadata.callSid, params.first_name, params.last_name, params.date_of_birth);
-      const cachedIdentityMatches = scheduleMatchesIdentity(scheduleContext, lockedIdentity);
+      const cachedIdentityMatches = scheduleMatchesIdentity(scheduleContext, lockedIdentity) ||
+        greetingConfirmedMatches(greetingConfirmed, scheduleContext, lockedIdentity);
       let enrichedContext = cachedIdentityMatches ? scheduleContext : undefined;
       if (parsedDOB && !cachedIdentityMatches) {
         console.log("[No-IVR Agent] Performing secondary schedule lookup...");
@@ -1920,11 +2074,17 @@ The ticket will include schedule context (last appointment info) automatically.`
         }
       }
 
-      const recordConfirmed =
+      // A record the caller's yes confirmed is as confirmed as a name-and-date-
+      // of-birth match: it routes same-day and checks the appointment time the
+      // same way (Codex P2 on #425 — reusing it above skipped the secondary
+      // lookup that used to supply the name_and_dob match here).
+      const confirmedByGreetingHere = cachedIdentityMatches &&
+        greetingConfirmedMatches(greetingConfirmed, enrichedContext, lockedIdentity);
+      const recordConfirmed = confirmedByGreetingHere || (
         !!enrichedContext?.patientFound &&
         enrichedContext.matchedBy === 'name_and_dob' &&
         !phoneMatchIsUnconfirmed(enrichedContext) &&
-        enrichedContext.identity?.unique === true;
+        enrichedContext.identity?.unique === true);
       if (recordConfirmed && enrichedContext) {
         // Replace the cache and held identity together, including when this
         // ticket's secondary lookup validated a different family member.
@@ -1935,6 +2095,8 @@ The ticket will include schedule context (last appointment info) automatically.`
           dateOfBirth: enrichedContext.patientData?.dateOfBirth || params.date_of_birth,
         } };
         scheduleContext = enrichedContext;
+        // The cache was just replaced; the yes still confirms this record.
+        if (confirmedByGreetingHere) greetingConfirmed = enrichedContext;
         rememberVerifiedIdentity(metadata.callSid,
           { ...enrichedContext.patientData, ...joinedAppointments(enrichedContext), certain: true });
       }

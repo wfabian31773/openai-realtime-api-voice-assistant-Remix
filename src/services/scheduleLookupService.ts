@@ -61,6 +61,14 @@ export interface PatientScheduleContext {
    * tool can keep the record and still refuse to call it certain.
    */
   identityUnconfirmed?: boolean;
+  /**
+   * v179: the person base found this patient charted more than once (same
+   * first name, date of birth and phone) and answered with one chart. The
+   * count, and the other charts' last names so a caller who gives either is
+   * still this patient.
+   */
+  chartsOnFile?: number;
+  alsoKnownAs?: string[];
   upcomingAppointments: AppointmentSummary[];
   pastAppointments: AppointmentSummary[];
   lastProviderSeen?: string;
@@ -1011,6 +1019,10 @@ export class ScheduleLookupService {
     }
 
     const p = result.patient!;
+    // v179: one patient charted twice — say so, and carry the other surname.
+    const charts = result.chartsOnFile && result.chartsOnFile > 1
+      ? { chartsOnFile: result.chartsOnFile, ...(result.alsoKnownAs?.length ? { alsoKnownAs: result.alsoKnownAs } : {}) }
+      : {};
 
     /**
      * ONE PERSON IS CERTAIN, SEVERAL IS AMBIGUOUS — v86, and v85 got this
@@ -1052,6 +1064,7 @@ export class ScheduleLookupService {
       );
       return {
         ...joined,
+        ...charts,
         identityUnconfirmed: matchedBy === 'phone',
         /**
          * The mirror wins on WHO, the schedule supplies everything else.
@@ -1095,6 +1108,7 @@ export class ScheduleLookupService {
       totalAppointmentsFound: 0,
       identity: { unique: true, candidateCount: 1, candidates: [] },
       patientData: { firstName: p.firstName, lastName: p.lastName, dateOfBirth: p.dob, personId: p.personId },
+      ...charts,
     };
   }
 

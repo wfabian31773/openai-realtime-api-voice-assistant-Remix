@@ -107,6 +107,8 @@ describe("the follow-up summary", () => {
       silenceStoodDown: false,
       agentStallNudges: 0,
       goodbyeGraceHangup: false,
+      // v181: a boolean, gained deliberately.
+      mediaGapHangup: false,
       outcome: "dead_air",
     });
   });

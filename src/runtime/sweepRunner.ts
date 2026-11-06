@@ -40,8 +40,13 @@ import {
 } from "./requestSweep";
 import type { VoiceCallRecord } from "./mediaStreamBridge";
 import type { CreateTicketParams } from '../../server/services/ticketingApiClient';
-import { verifiedIdentityFor } from "../tools/verifiedIdentity";
+import { unconfirmedCandidateFor, verifiedIdentityFor } from "../tools/verifiedIdentity";
+import { callerSaidTheName } from "./callerSaidTheName";
 import { statedNameFor } from "../tools/statedName";
+import { askModelForThePatientName, nameFromTheRecording, type NameAsker } from "./nameFromTheRecording";
+
+/** Reads nothing — the default for any caller that did not choose the model. */
+const noNameFromTheRecording: NameAsker = async () => null;
 import { draftedRequestFor } from "../tools/draftedRequest";
 
 export interface SweepOutcome {
@@ -159,14 +164,34 @@ const defaultFiler: SweepFiler = async (ticket) => {
 export async function runRequestSweep(
   record: VoiceCallRecord,
   file: SweepFiler = defaultFiler,
+  /**
+   * v180: who reads the patient's name out of the transcript. The default reads
+   * nothing; production passes the model through `runProductionSweep`, so no
+   * test that calls this directly can reach the network.
+   */
+  askName: NameAsker = noNameFromTheRecording,
 ): Promise<SweepOutcome> {
   try {
     const identity = verifiedIdentityFor(record.callSid);
     // A certain match wins. Without one, the name the caller gave, as the
     // agent's own tools received it (operator ruling 2026-10-29).
     const stated = identity ? undefined : statedNameFor(record.callSid);
+    // v168, the other half of that ruling: the person the calling number
+    // belongs to, when the caller SAID both halves of that name on the call.
+    // Never on its own — an unconfirmed candidate is not an identity.
+    const candidate = identity || stated ? undefined : unconfirmedCandidateFor(record.callSid);
+    const spoken =
+      candidate && callerSaidTheName(record.transcript, candidate.firstName, candidate.lastName)
+        ? candidate
+        : undefined;
+    if (spoken) {
+      console.info(
+        `[REQUEST SWEEP] ${record.slug}: the caller said the name the calling number belongs to — ` +
+          `filing under it, unconfirmed (${record.callSid})`,
+      );
+    }
     const drafted = draftedRequestFor(record.callSid);
-    const input: SweepInput = {
+    let input: SweepInput = {
       callSid: record.callSid,
       slug: record.slug,
       callerPhone: record.callerPhone,
@@ -196,10 +221,33 @@ export async function runRequestSweep(
         ? { verifiedName: { firstName: identity.firstName, lastName: identity.lastName } }
         : stated
           ? { verifiedName: { firstName: stated.firstName, lastName: stated.lastName }, nameSource: "stated" as const }
-          : {}),
+          : spoken
+            ? { verifiedName: { firstName: spoken.firstName, lastName: spoken.lastName }, nameSource: "spoken" as const }
+            : {}),
     };
 
-    const decision = decideSweep(input);
+    let decision = decideSweep(input);
+    /**
+     * v180: NO NAME, SO READ IT FROM THE RECORDING. Operator, 2026-10-29: "make
+     * sure that we did not get the name in transcripts". Only here, where the
+     * request would otherwise be dropped for want of a name; a model reads the
+     * patient's name and the code files under it only if the caller said it as
+     * one name in one of their turns. Re-decided with that name, so a caller who said nothing but
+     * their name is still `identity-only`.
+     */
+    if (!decision.file && decision.reason === "no-name") {
+      const heard = await nameFromTheRecording(record.transcript, askName);
+      if (heard) {
+        input = { ...input, verifiedName: heard, nameSource: "heard" };
+        decision = decideSweep(input);
+        if (decision.file) {
+          console.info(
+            `[REQUEST SWEEP] ${record.slug}: no name was captured on the call — filing under the ` +
+              `patient name the caller said, read from the recording (${record.callSid})`,
+          );
+        }
+      }
+    }
     if (!decision.file) {
       /**
        * A SKIP IS LOGGED TOO, and only "no-name" loudly.
@@ -268,4 +316,13 @@ export async function runRequestSweep(
     );
     return { filed: false, reason: "threw" };
   }
+}
+
+/**
+ * THE SWEEP THE RUNTIME RUNS (v180): the real filer and the model that reads
+ * the patient's name out of the transcript when the call captured none.
+ * `voiceRuntime` uses this as its default; `sweepRunner.wiring` pins it.
+ */
+export function runProductionSweep(record: VoiceCallRecord): Promise<SweepOutcome> {
+  return runRequestSweep(record, defaultFiler, askModelForThePatientName);
 }

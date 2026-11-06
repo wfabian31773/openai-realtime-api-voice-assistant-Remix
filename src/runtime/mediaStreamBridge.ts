@@ -375,6 +375,45 @@ export function clampSilenceWindow(ms: number): number {
 export const SILENCE_STRIKE_LIMIT = 3;
 
 /**
+ * v181 — HOW LONG TWILIO MAY SEND NO CALLER AUDIO BEFORE THE CALL IS OVER.
+ *
+ * A bidirectional Media Stream delivers the caller's track as a 20 ms frame,
+ * fifty a second, for as long as the call is up, silence included: a live
+ * call that went ten minutes with nothing voiced still delivered 30,067
+ * frames in 601 s (CA2934ce30d26c006d6ed5e3567e7f4eb4, 2026-11-05). When the
+ * caller hangs up, Twilio sends a `stop` frame and closes the socket, and
+ * either one ends the call here. On four calls in the fourteen days to
+ * 2026-11-05 neither arrived: the frames stopped at exactly Twilio's own
+ * duration (CA5567f94d1f03a8cc3f39b8032322d873: 3,800 frames, Twilio 76 s)
+ * and the bridge sat on a socket that carried nothing until the ten-minute
+ * ceiling, recorded `max_duration`. That outcome is "an ending WE caused" to
+ * the PCP and after-hours floors (v100), so a hang-up read as one could file
+ * a ticket behind a caller who had left.
+ *
+ * So the frames are the evidence, and their absence is the hang-up. Fifteen
+ * seconds is a judgement with a wide margin: a live call is never silent on
+ * the wire for even one, so the only way to be wrong is a stream that pauses
+ * for fifteen seconds and then resumes, which none of the 14 days shows.
+ *
+ * `RUNTIME_MEDIA_GAP_MS` moves it without a deploy, clamped to 5–120 s;
+ * `0` switches the watchdog off and restores the old behaviour exactly.
+ */
+export const MEDIA_GAP_MS = mediaGapFromEnv(process.env.RUNTIME_MEDIA_GAP_MS);
+
+export function mediaGapFromEnv(raw: string | undefined): number {
+  if (raw === undefined || raw.trim() === "") return 15_000;
+  const ms = Number(raw);
+  if (ms === 0) return 0;
+  if (!Number.isFinite(ms)) return 15_000;
+  return Math.min(120_000, Math.max(5_000, Math.round(ms)));
+}
+
+/** The watchdog looks this many times per gap, so it notices a gap between
+ * one and one-and-a-third gaps after the last frame without re-arming a
+ * timer on every 20 ms frame. */
+const MEDIA_GAP_TICKS = 3;
+
+/**
  * A function-call event that arrives AFTER its response's `response.done`
  * has no done ahead of it to say when its batch is complete, so the bridge
  * holds the follow-up for this long after the LAST such event ARRIVES; a
@@ -590,7 +629,10 @@ export interface VoiceCallRecord {
   agentStallNudges?: number;
   /** Deliberate completion after the goodbye grace window. */
   goodbyeGraceHangup?: boolean;
-  teardownReason?: "goodbye_grace";
+  /** v181: the call ended because Twilio stopped sending caller audio with no
+   * stop frame and no socket close (`MEDIA_GAP_MS`). */
+  mediaGapHangup?: boolean;
+  teardownReason?: "goodbye_grace" | "media_gap";
 }
 
 /**
@@ -737,6 +779,10 @@ export interface VoiceCallBridgeDeps {
   proceedAfterOpening?: boolean;
   openingProceedMs?: number;
   goodbyeGraceMs?: number;
+  /** v181: how long Twilio may send no caller audio before the call is
+   * treated as hung up. Injected for tests; production reads `MEDIA_GAP_MS`.
+   * 0 switches the watchdog off. */
+  mediaGapMs?: number;
   /**
    * When the call actually began — the moment the stream was claimed.
    *
@@ -1041,6 +1087,13 @@ export class VoiceCallBridge {
 
   private goodbyeTimer: unknown = null;
   private goodbyeGraceHangup = false;
+  /** v181: the media-gap watchdog. Armed by the first caller frame, so a
+   * stream that never delivered audio (and every test that sends none) is
+   * untouched. */
+  private mediaGapTimer: unknown = null;
+  private mediaSinceTick = false;
+  private emptyMediaTicks = 0;
+  private mediaGapHangup = false;
   private callerClosing: CallerConclusion | null = null;
   /** The provider item id of the last non-empty caller transcript. */
   private lastCallerItemId: string | null = null;
@@ -1226,6 +1279,7 @@ export class VoiceCallBridge {
         // was dropped there is precisely what the instrument must not report
         // as a line nobody spoke into (Codex P2, #327).
         this.session.appendAudio(frame.media.payload);
+        this.noteCallerFrame();
         break;
       case "mark":
         this.handleTwilioMark(frame.mark.name);
@@ -1245,6 +1299,47 @@ export class VoiceCallBridge {
    * gone. Same single teardown path. */
   handleSocketClosed(): void {
     this.teardown(this.hangupOutcome());
+  }
+
+  /**
+   * v181: a caller frame arrived. The first one arms the watchdog; every one
+   * after it only flips a flag, so a frame costs one assignment and the timer
+   * is re-armed once per tick rather than fifty times a second.
+   */
+  private noteCallerFrame(): void {
+    this.mediaSinceTick = true;
+    if (this.mediaGapTimer === null && !this.ended) this.armMediaGapTick();
+  }
+
+  private armMediaGapTick(): void {
+    const gapMs = this.deps.mediaGapMs ?? MEDIA_GAP_MS;
+    if (gapMs <= 0 || this.ended) return;
+    const tickMs = Math.ceil(gapMs / MEDIA_GAP_TICKS);
+    this.mediaGapTimer = this.setTimer(() => {
+      this.mediaGapTimer = null;
+      if (this.ended) return;
+      if (this.mediaSinceTick) {
+        this.mediaSinceTick = false;
+        this.emptyMediaTicks = 0;
+      } else {
+        this.emptyMediaTicks += 1;
+      }
+      if (this.emptyMediaTicks >= MEDIA_GAP_TICKS) {
+        // No `stop` frame and no socket close, and nothing on the wire for a
+        // whole gap: Twilio has ended the call. The SAME outcome a stop frame
+        // or a close would have produced (`hangupOutcome`), so a hang-up
+        // stays a hang-up and a transfer in flight stays a transfer.
+        this.mediaGapHangup = true;
+        console.warn(
+          `[bridge] ${this.deps.context.callSid}: no caller audio from Twilio for ${Math.round(
+            (tickMs * MEDIA_GAP_TICKS) / 1000,
+          )} s and no stop frame or socket close — the call has ended; ending it as the caller's hang-up`,
+        );
+        this.teardown(this.hangupOutcome(), "media_gap");
+        return;
+      }
+      this.armMediaGapTick();
+    }, tickMs);
   }
 
   /** For the server glue: a session that failed before/while connecting
@@ -3041,10 +3136,14 @@ export class VoiceCallBridge {
 
   private transferWaitExtraMs = 0;
 
-  private teardown(outcome: CallOutcome, reason?: "goodbye_grace"): void {
+  private teardown(outcome: CallOutcome, reason?: "goodbye_grace" | "media_gap"): void {
     if (this.ended) return;
     this.ended = true;
     this.cancelGoodbye();
+    if (this.mediaGapTimer !== null) {
+      this.clearTimer(this.mediaGapTimer);
+      this.mediaGapTimer = null;
+    }
     // Whatever close event won the race — Twilio's stop frame, the socket
     // closing, the provider session dying as the stream ends — the caller
     // was moved to a human on purpose. That is the outcome.
@@ -3124,6 +3223,7 @@ export class VoiceCallBridge {
         silenceStoodDown: this.silenceStoodDown,
         agentStallNudges: this.agentStallNudges,
         goodbyeGraceHangup: this.goodbyeGraceHangup,
+        mediaGapHangup: this.mediaGapHangup,
         ...(reason ? { teardownReason: reason } : {}),
         followUps: {
           ...this.followUps,

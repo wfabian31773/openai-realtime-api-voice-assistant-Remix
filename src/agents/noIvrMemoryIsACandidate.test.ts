@@ -142,7 +142,7 @@ describe.each([
   it('the sanctioned first-name path is untouched: the candidate is offered to confirm, the surname is not', async () => {
     const prompt = await builtPrompt(meta);
     expect(prompt).toContain('Is this for Zelda?');
-    expect(prompt).toMatch(/am I speaking with\s+Zelda\?/);
+    expect(prompt).toMatch(/[Aa]m I speaking with\s+Zelda\?/);
     expect(prompt).not.toContain('Quixote');
   });
 

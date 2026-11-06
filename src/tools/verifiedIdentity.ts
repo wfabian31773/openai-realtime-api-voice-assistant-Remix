@@ -101,6 +101,13 @@ export interface VerifiedIdentity {
   lastVisit?: IdentityAppointment;
   lastPhysicianSeen?: string;
   lastProviderSeen?: string;
+  /**
+   * v179: the last names on this patient's OTHER charts (one person charted
+   * twice — same first name, date of birth and phone). A ticket under either
+   * surname is the same patient. Only the person base's duplicate-chart rule
+   * writes it.
+   */
+  alsoKnownAs?: string[];
 }
 
 interface Entry extends VerifiedIdentity {
@@ -145,10 +152,13 @@ function namesAgree(
   lastA: string | undefined,
   firstB: string | undefined,
   lastB: string | undefined,
+  /** v179: B's other charts' last names. */
+  aliasesB: readonly string[] = [],
 ): boolean {
   const first = nameKey(firstA);
   const last = nameKey(lastA);
-  return first !== '' && last !== '' && first === nameKey(firstB) && last === nameKey(lastB);
+  return first !== '' && last !== '' && first === nameKey(firstB) &&
+    (last === nameKey(lastB) || aliasesB.some((a) => nameKey(a) === last));
 }
 
 function sweep(now: number): void {
@@ -312,6 +322,7 @@ export function rememberVerifiedIdentity(
         lastVisit: existingFresh.certain && !certain ? existingFresh.lastVisit : identity.lastVisit ?? existingFresh.lastVisit,
         lastPhysicianSeen: existingFresh.certain && !certain ? existingFresh.lastPhysicianSeen : identity.lastPhysicianSeen ?? existingFresh.lastPhysicianSeen,
         lastProviderSeen: existingFresh.certain && !certain ? existingFresh.lastProviderSeen : identity.lastProviderSeen ?? existingFresh.lastProviderSeen,
+        alsoKnownAs: existingFresh.certain && !certain ? existingFresh.alsoKnownAs : identity.alsoKnownAs ?? existingFresh.alsoKnownAs,
         appointmentContext: existingFresh.certain && !certain ? existingFresh.appointmentContext : identity.appointmentContext ?? existingFresh.appointmentContext,
         certain: existingFresh.certain || certain,
         at: now,
@@ -332,6 +343,7 @@ export function rememberVerifiedIdentity(
     lastVisit: identity.lastVisit,
     lastPhysicianSeen: identity.lastPhysicianSeen,
     lastProviderSeen: identity.lastProviderSeen,
+    ...(identity.alsoKnownAs?.length ? { alsoKnownAs: identity.alsoKnownAs } : {}),
     appointmentContext: certain ? identity.appointmentContext : undefined,
     certain,
     at: now,
@@ -360,7 +372,7 @@ export function verifiedDobFor(
   const entry = verified.get(callSid);
   if (!entry || !entry.certain) return undefined;
   if (Date.now() - entry.at > TTL_MS) return undefined;
-  if (!namesAgree(firstName, lastName, entry.firstName, entry.lastName)) {
+  if (!namesAgree(firstName, lastName, entry.firstName, entry.lastName, entry.alsoKnownAs)) {
     return undefined;
   }
   return entry.dateOfBirth;
@@ -398,7 +410,7 @@ export function dobCarry(
   const entry = verified.get(callSid);
   if (!entry || Date.now() - entry.at > TTL_MS) return 'no_entry';
   if (!entry.certain) return 'uncertain_identity';
-  if (!namesAgree(firstName, lastName, entry.firstName, entry.lastName)) {
+  if (!namesAgree(firstName, lastName, entry.firstName, entry.lastName, entry.alsoKnownAs)) {
     return 'name_mismatch';
   }
   if (!entry.dateOfBirth) return 'entry_without_dob';
@@ -442,7 +454,7 @@ export function usualOfficeFor(
   if (!entry) return undefined;
   if (Date.now() - entry.at > TTL_MS) return undefined;
   if (!entry.certain) return undefined;
-  if (!namesAgree(firstName, lastName, entry.firstName, entry.lastName)) {
+  if (!namesAgree(firstName, lastName, entry.firstName, entry.lastName, entry.alsoKnownAs)) {
     return undefined;
   }
   /**
@@ -529,7 +541,34 @@ export function verifiedIdentityFor(callSid: string | undefined): VerifiedIdenti
     ...(entry.lastVisit ? { lastVisit: entry.lastVisit } : {}),
     ...(entry.lastPhysicianSeen ? { lastPhysicianSeen: entry.lastPhysicianSeen } : {}),
     ...(entry.lastProviderSeen ? { lastProviderSeen: entry.lastProviderSeen } : {}),
+    ...(entry.alsoKnownAs?.length ? { alsoKnownAs: entry.alsoKnownAs } : {}),
   };
+}
+
+/**
+ * THE PERSON THE PROCESS FOUND FOR THIS CALL AND NOBODY CONFIRMED — the
+ * caller-ID pre-context match (written `certain: false` by the runtime, and
+ * by `lookup_patient` on a phone match since #384), or a unique name-only hit.
+ *
+ * Names only: no date of birth, no office, no history. This reader exists for
+ * ONE caller, the teardown sweep, and the sweep may use it only after the
+ * caller has SAID both of these names on the call (`callerSaidTheName`), which
+ * is the validation RULE ZERO step 2 asks for. On its own an unconfirmed entry
+ * is a candidate, never an identity (standing instruction 6), and nothing here
+ * changes `verifiedIdentityFor`, which still refuses it.
+ *
+ * A certain entry answers undefined: `verifiedIdentityFor` already covers it,
+ * and two readers answering for one entry is how a rule drifts.
+ */
+export function unconfirmedCandidateFor(
+  callSid: string | undefined,
+): { firstName: string; lastName: string } | undefined {
+  if (!isTwilioCallSid(callSid)) return undefined;
+  const entry = verified.get(callSid);
+  if (!entry || entry.certain) return undefined;
+  if (Date.now() - entry.at > TTL_MS) return undefined;
+  if (!entry.firstName || !entry.lastName) return undefined;
+  return { firstName: entry.firstName, lastName: entry.lastName };
 }
 
 /** Call-scoped schedule; readers must also prove it matches the held patient. */
@@ -691,7 +730,7 @@ export function forgetIfSameName(
   if (!nameKey(firstName) || !nameKey(lastName)) return false;
   const entry = verified.get(callSid);
   if (!entry) return false;
-  if (!namesAgree(firstName, lastName, entry.firstName, entry.lastName)) {
+  if (!namesAgree(firstName, lastName, entry.firstName, entry.lastName, entry.alsoKnownAs)) {
     return false;
   }
   verified.delete(callSid);

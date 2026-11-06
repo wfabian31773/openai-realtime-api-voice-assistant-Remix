@@ -1199,18 +1199,136 @@ import { callEnvironment } from "./callRecord";
  * (#422), which it contains. No migration.
  */
 /**
- * v171 — THE AFTER-HOURS FLOOR FINDS AN OFFICE AND ASKS FOR REVIEW
+ * v171 (was v168 on its branch) — THE CALLER SAID THE RECORD'S NAME (2026-11-03). Callers who left a
+ * whole message in one breath after the greeting (name, request, callback) and
+ * hung up were skipped by the teardown sweep as "no-name": no tool had
+ * received the name, and the calling number's pre-context match is held
+ * `certain: false` since #384. On 2026-11-02 that was 6 of the day's 10 lost
+ * requests. The sweep now files under the calling number's record when the
+ * caller introduced themselves by that name ("my name is", "this is", "soy"…)
+ * (`callerSaidTheName`, the operator's 2026-10-29 ruling), with a staff note
+ * that no date of birth was confirmed; it carries no chart date of birth or
+ * history. Above main's v170 (#423), which it contains. No migration.
+ */
+/**
+ * v172 — THE AFTER-HOURS GREETING ASKS THE NAME, AND THE YES COUNTS THERE TOO
+ * (2026-11-03). Operator, choosing "After-hours too": "Am I speaking with
+ * <first name>?" closes the after-hours greeting, after the closed notice,
+ * the 911 direction and the recording disclosure, which stay word for word
+ * (greetingPersonalisation 'keep-copy'); and the caller's yes to that name
+ * confirms a number that is one person through lookup_schedule
+ * (`greetingYesConfirms`), so the record's last name and date of birth reach
+ * the ticket without being asked. Before (no-ivr, 10-20..11-02, recognised
+ * callers): asked the name on 185 of 377, and asked a surname or date of
+ * birth after all 159 yeses. Above main's v171 (#421, the sweep files under
+ * the record's name), which it contains. No migration.
+ */
+/**
+ * v175 — THE AFTER-HOURS YES IS CONFIRMED THROUGH THE PERSON BASE (2026-11-05).
+ * v172 checked the caller's yes to "Am I speaking with <first name>?" only
+ * against the context loaded at call start, which on the after-hours line is
+ * the appointment book's phone search. On v172's first full night (11-04), 4
+ * of the 20 recognised callers who said yes got found: false on the first
+ * `lookup_schedule` and were then asked their last name and date of birth;
+ * the book had no rows for the number (1), or held other people on it (3),
+ * while the greeted first name is one person in `patients_master` on all 4.
+ * When the start-of-call context cannot confirm the yes, `lookup_schedule`
+ * now asks the person base the queue lanes' question (the calling number,
+ * narrowed by the affirmed first name, `lookupPatient`) and holds the answer
+ * to the same `greetingYesConfirms` rule (`greetingYesFromPersonBase`). Above
+ * main's v172 (#425), which it contains; v173 is #426 and v174 is #427 on
+ * their open branches. No migration.
+ */
+/**
+ * v176 — AN AFTERNOON GOODBYE IS A GOODBYE (2026-11-05). v134's goodbye grace
+ * still missed two closings on 2026-11-04, both already filed: the agent's
+ * "That's everything on my end. Have a good afternoon, <name>." (the matcher
+ * knew day, evening, night and weekend only, and "everything on my end" was
+ * an unknown phrase), and a Spanish caller's "Okey. Igualmente, bendiciones.
+ * Adiós." (a blessing was an unknown word). `goodbye.ts` adds afternoon and
+ * morning to the sign-off, "that's everything / all on my end" as an agent
+ * courtesy that never closes a call by itself, and blessings ("bendiciones",
+ * "Dios le/la/lo bendiga", "God bless") as farewells. Caller speech, a new
+ * response or a tool inside the window still cancels it. Above main's v175
+ * (#428), which it contains along with v172 (#425); v173 (#426) and v174
+ * (#427) are on their open branches. No migration.
+ */
+/**
+ * v177 — A PCP TOOL'S INPUT ERROR NAMES THE FIELD (2026-11-03). When the
+ * model's arguments failed a hand-built PCP tool's zod schema, the SDK answered
+ * "An error occurred while running the tool. Please try again.": no field, a
+ * string the tool ceiling counted as a success, and nothing on the timeline.
+ * On CAa36ae68ef6d5654594fe11253d30a942 record_pcp_intake looped to the
+ * ceiling, the purpose was never recorded, every filing tool refused, and the
+ * caller was told her request was with the team; no ticket exists. The
+ * arguments are now checked against the same schema first, and a refusal
+ * names each field and what it needs, is a failure the runtime can see, and
+ * is recorded (`toolInputRefusal.ts`). Valid arguments run as before.
+ * Renumbered from v173 (#426) when main moved to v176 (#429), which it
+ * contains; v178 is #427 on its open branch. No migration.
+ */
+/**
+ * v178 — A DONE PCP INTAKE NAMES THE NEXT STEP (2026-11-04). record_pcp_intake
+ * returned the director's whole decision, so the model received the ticket's
+ * gap list (`intakeMissing`, v155), which names the title and email held back
+ * until a request is filed, and asked both first; and with no next question on
+ * an AUTOMATE purpose (where v136 now puts the calls it cannot classify) the
+ * reply named no next step. 32 PCP calls on 10-30, 11-02 and 11-03 ended there
+ * with no ticket, 25 of them asked for a title or email. The gap list now stays
+ * on this side, and a done intake with nothing on record names the next step:
+ * connect a caller who asked for a person, answer from the purpose's approved
+ * lookup, or file (`src/pcp/intakeNextStep.ts`). Renumbered from v174 (#427)
+ * when main moved past it; above main's v177 (#426), which it contains along
+ * with v176 (#429). No migration.
+ */
+/**
+ * v179 — ONE PERSON CHARTED TWICE IS ONE PATIENT (2026-11-05). Operator,
+ * choosing (a): records that share a first name, a date of birth and a phone
+ * are one patient; the chart with a medical record answers, then the one with
+ * the most recent visit. On 2026-11-04, 7 of the 9 queue calls where the caller
+ * said yes and the lookup still answered ambiguous were one person with two
+ * charts under two last names; the other 2 numbers held two people with
+ * different dates of birth, who stay apart. The other chart's last name travels
+ * as an alias so either surname validates (`patientVerification.ts`
+ * `oneChartedTwice`). Above main's v178 (#427), which it contains. Merged to
+ * main as #430 (`f70b2f46`). No migration.
+ */
+/**
+ * v180 — THE PATIENT'S NAME FROM THE RECORDING (2026-11-05). Operator,
+ * 2026-10-29: "make sure that we did not get the name in transcripts"; and
+ * 2026-11-05: "thought we had agreed to do that". Where the teardown sweep
+ * would skip a request as `no-name`, a model reads the patient's first and
+ * last name from the transcript and the sweep files under it only if the
+ * caller said it as one name in one of their turns (`nameFromTheRecording.ts`).
+ * 17 one-breath messages from unmatched numbers filed nothing on the queue
+ * lanes over 2026-10-22..11-04; 10 say the patient's first and last name.
+ * Above main's v179 (#430, `f70b2f46`), which it contains because main was
+ * merged in; the number stays v180, it never fell below main. No migration.
+ */
+/**
+ * v181 — A MISSED HANG-UP ENDS THE CALL (2026-11-06). On four calls in the
+ * fourteen days to 2026-11-05 Twilio stopped sending the caller's frames at
+ * exactly its own call duration and sent neither a stop frame nor a socket
+ * close, so the bridge held each one to the ten-minute ceiling as
+ * `max_duration`. Fifteen seconds with no caller frame now ends the call
+ * with the outcome a stop frame would have given (`MEDIA_GAP_MS`,
+ * `RUNTIME_MEDIA_GAP_MS`, 0 off). Above main's v180 (#431, `678e246f`),
+ * which it contains. No migration.
+ */
+/**
+ * v182 — THE AFTER-HOURS FLOOR FINDS AN OFFICE AND ASKS FOR REVIEW
  * (2026-11-03). Floor tickets with no named office filed with no location and
  * nothing flagging them. With no office named or confirmed, the floor now
  * tries the one patient on the caller's number (bounded caller-ID history
  * lookup), then the office line that was dialled; every floor ticket carries
  * a NEEDS REVIEW line, plus MISSING LOCATION / MISSING IDENTITY when either is
  * absent. A dialled-number office is sent as locationSource 'history' (the API
- * accepts only 'caller' | 'history'). Above main's v170 (#423),
- * which it contains. No migration.
+ * accepts only 'caller' | 'history'). Renumbered from v171 (#424) when main
+ * moved to v181 (#432, `684f3f3d`), which it contains along with a different
+ * v171 (#421). No migration.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v171-after-hours-floor-finds-an-office-20261103";
+  "voice-runtime-v182-after-hours-floor-finds-an-office-20261106";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can
