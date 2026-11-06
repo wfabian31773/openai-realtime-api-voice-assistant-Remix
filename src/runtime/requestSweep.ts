@@ -116,9 +116,13 @@ export interface SweepInput {
    * the phone number to a patient"). `heard` is the patient's name a model read
    * out of the transcript and the code then found in the caller's own lines
    * (`nameFromTheRecording.ts`, v180 — the ruling's "did not get the name in
-   * transcripts"). The swept ticket tells staff which it is.
+   * transcripts"). `number` is the one patient the calling number belongs to
+   * in the person base, used when nobody on the call said any patient's name
+   * (v182, the same ruling's "nor did we match the phone number to a patient
+   * on lookup", approved as filed 2026-11-06). The swept ticket tells staff
+   * which it is.
    */
-  nameSource?: "verified" | "stated" | "spoken" | "heard";
+  nameSource?: "verified" | "stated" | "spoken" | "heard" | "number";
   /**
    * Staff-facing call summary, when one already exists (a backfill, or a
    * row written before the sweep). Preferred over the raw transcript for
@@ -809,6 +813,20 @@ export interface SweptTicket {
 }
 
 /**
+ * v182: THE STAFF NOTE WHEN THE NAME CAME FROM THE CALLING NUMBER.
+ *
+ * Nobody on the call said a patient's name. The number belongs to one patient
+ * in the person base, so the request is filed under that record rather than
+ * dropped (operator ruling 2026-10-29, the phone-match half; approved as filed
+ * 2026-11-06). It is not confirmed: the caller may be the patient, a relative
+ * calling about the patient, or someone calling about somebody else, and the
+ * note says so. Exported so the test reads the same words the ticket carries.
+ */
+export const NUMBER_RECORD_NOTE =
+  `NAME FROM THE CALLING NUMBER'S PATIENT RECORD — no patient name was said on the call; the calling number belongs to this one patient on file. ` +
+  `Not confirmed: the caller may be a relative or someone else calling about this patient, or about someone else. Check the recording and the chart before acting.`;
+
+/**
  * The payload. `idempotencyKey` is derived from the call sid so a retry, a
  * re-run of the backfill over the same call, and the live sweep racing the
  * backfill all collapse to one ticket — the key is what held duplicate filing
@@ -884,7 +902,9 @@ export function buildSweptTicket(
             ? `NAME FROM THE CALLING NUMBER'S PATIENT RECORD — the caller said this name on the call, but no date of birth was confirmed; check the chart before acting.\n`
             : input.nameSource === "heard"
               ? `NAME TAKEN FROM THE RECORDING — the caller said this name on the call; it is not matched to a patient record. Confirm it against the chart before acting.\n`
-              : ""
+              : input.nameSource === "number"
+                ? `${NUMBER_RECORD_NOTE}\n`
+                : ""
         : `PATIENT NAME NOT CAPTURED — nobody was identified on this call; take the name from the recording before matching this to a chart.\n`) +
       (infoOnly ? `${INFO_ONLY_NOTE}\n` : "") +
       `Call back on ${input.callerPhone}. Call reference ${input.callSid}.\n` +
