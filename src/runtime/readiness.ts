@@ -1315,8 +1315,16 @@ import { callEnvironment } from "./callRecord";
  * `RUNTIME_MEDIA_GAP_MS`, 0 off). Above main's v180 (#431, `678e246f`),
  * which it contains. No migration.
  */
+/**
+ * v183 — A FILED CALL ENDS AFTER TWO MINUTES OF CALLER SILENCE (2026-11-06).
+ * Where the silence ladder stands down for a heard caller and a filing tool
+ * succeeded on the call, a separate clock ends it after FILED_SILENCE_MS of
+ * the caller saying nothing; the TwiML speaks a sign-off (`filed_silence`).
+ * Operator, 2026-11-06. Above main's v181 (#432, `684f3f3d`), which it
+ * contains; v182 is #433 on its open branch. No migration.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v181-a-missed-hangup-ends-the-call-20261106";
+  "voice-runtime-v183-a-filed-call-ends-after-silence-20261106";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

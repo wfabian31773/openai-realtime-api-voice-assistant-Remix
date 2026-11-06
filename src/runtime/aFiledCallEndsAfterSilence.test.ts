@@ -196,6 +196,16 @@ describe("the silence is the caller's, measured honestly", () => {
     expect(h.outcomes).toEqual(["filed_silence"]);
   });
 
+  it("the caller's words alone cancel it, before any agent reply", async () => {
+    const h = await filedThenSilent("optical", "file_optical_ticket");
+    vi.advanceTimersByTime(90_000);
+    h.caller("Hold on, let me find my card.");
+    // No agent turn yet. The deadline armed at the stand-down must not end
+    // a call whose caller spoke thirty seconds ago.
+    vi.advanceTimersByTime(FILED_SILENCE_MS - 90_000);
+    expect(h.outcomes).toEqual([]);
+  });
+
   it("the time in the ladder's window counts: the clock is armed for what is left of two minutes", async () => {
     const h = await filedThenSilent("tech", "file_tech_ticket");
     // At the stand-down, one caller window has already passed.
