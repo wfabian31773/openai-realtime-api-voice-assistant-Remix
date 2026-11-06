@@ -470,9 +470,11 @@ export const FILING_TOOL = /^(?:file_[a-z_]+_ticket|create_ticket|create_pcp_tas
  * off the line anyway.
  */
 export function toolLeftATicket(name: string, succeeded: boolean, output: unknown): boolean {
-  if (succeeded && FILING_TOOL.test(name)) return true;
-  if (output === null || typeof output !== "object") return false;
-  const o = output as Record<string, unknown>;
+  const o = output !== null && typeof output === "object" ? (output as Record<string, unknown>) : {};
+  // A filing tool can succeed and file nothing: the after-hours line answers a
+  // question it fully answered with `success: true, ticketCreated: false`, and
+  // the sign-off would then claim a request that does not exist (Codex P2 on #434).
+  if (succeeded && FILING_TOOL.test(name)) return o.ticketCreated !== false;
   if (o.ticket_filed === true) return true;
   return name === "handoff_to_pcp" && typeof o.ticketNumber === "string" && o.ticketNumber.trim() !== "";
 }

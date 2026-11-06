@@ -182,6 +182,22 @@ describe("NOT FILED DURING THE CALL: the ticket came from the teardown filer, so
     expect(h.outcomes).toEqual([]);
   });
 
+  it("an after-hours create_ticket that succeeded but filed nothing does not count (Codex P2 on #434)", async () => {
+    // A question fully answered with no follow-up asked: success, no ticket.
+    const h = harness({ slug: "no-ivr", outputs: {
+      create_ticket: '{"success":true,"ticketCreated":false,"callbackRequired":false}',
+    } });
+    h.say("How can I help you tonight?");
+    h.caller("What time do you open tomorrow?");
+    await h.tool("create_ticket");
+    h.say("We open at eight. Is there anything else I can help you with?");
+    vi.advanceTimersByTime(FILED_SILENCE_MS * 2);
+    expect(h.outcomes).toEqual([]);
+    // And one that did file still counts.
+    expect(toolLeftATicket("create_ticket", true, { success: true, ticketCreated: true, ticketNumber: "VA-1" })).toBe(true);
+    expect(toolLeftATicket("create_ticket", true, { success: true, ticketNumber: "VA-1" })).toBe(true);
+  });
+
   it("finding an EXISTING open ticket does not count", async () => {
     const h = harness({ outputs: { check_open_tickets: OPEN_TICKETS } });
     h.say("How can I help you today?");
