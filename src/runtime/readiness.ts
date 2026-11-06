@@ -1316,7 +1316,15 @@ import { callEnvironment } from "./callRecord";
  * which it contains. No migration.
  */
 /**
- * v182 — THE AFTER-HOURS FLOOR FINDS AN OFFICE AND ASKS FOR REVIEW
+ * v182 — A NAMELESS MESSAGE FILES UNDER THE NUMBER'S ONE PATIENT (2026-11-06).
+ * Where the teardown sweep would skip a request as no-name after v171 and
+ * v180, it asks the person base who the calling number belongs to; one
+ * person files under that name with a note that it is not confirmed, several
+ * file nothing. Operator ruling 2026-10-29, approved as filed 2026-11-06.
+ * Above main's v181 (#432, `684f3f3d`), which it contains. No migration.
+ */
+/**
+ * v183 — THE AFTER-HOURS FLOOR FINDS AN OFFICE AND ASKS FOR REVIEW
  * (2026-11-03). Floor tickets with no named office filed with no location and
  * nothing flagging them. With no office named or confirmed, the floor now
  * tries the one patient on the caller's number (bounded caller-ID history
@@ -1324,11 +1332,10 @@ import { callEnvironment } from "./callRecord";
  * a NEEDS REVIEW line, plus MISSING LOCATION / MISSING IDENTITY when either is
  * absent. A dialled-number office is sent as locationSource 'history' (the API
  * accepts only 'caller' | 'history'). Renumbered from v171 (#424) when main
- * moved to v181 (#432, `684f3f3d`), which it contains along with a different
- * v171 (#421). No migration.
+ * moved past it (main's v171 is #421; v182 is #433, `c0006543`). No migration.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v182-after-hours-floor-finds-an-office-20261106";
+  "voice-runtime-v183-after-hours-floor-finds-an-office-20261106";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

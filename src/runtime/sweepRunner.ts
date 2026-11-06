@@ -48,6 +48,40 @@ import { askModelForThePatientName, nameFromTheRecording, type NameAsker } from 
 /** Reads nothing — the default for any caller that did not choose the model. */
 const noNameFromTheRecording: NameAsker = async () => null;
 import { draftedRequestFor } from "../tools/draftedRequest";
+import { findByPhone } from "../services/patientVerification";
+
+/**
+ * v182: WHO THE CALLING NUMBER BELONGS TO, when it is exactly one person.
+ *
+ * Operator ruling, 2026-10-29: "we should not be filing nameless tickets but
+ * we also need to make sure that we did not get the name in transcripts nor
+ * did we match the phone number to a patient on lookup." v171 built the half
+ * where the caller said the record's name, v180 the half where a name is in
+ * the transcript; this is the phone-match half, approved as filed on
+ * 2026-11-06 ("going with proposed changes").
+ *
+ * ONE PERSON, NEVER A PICK (standing instruction 6). `findByPhone` answers
+ * `verified` only when the number belongs to one person in `patients_master`,
+ * or to one person charted twice (v179); several people on the number answer
+ * `ambiguous` and nothing files, exactly as before. The pre-context candidate
+ * is NOT used for this: the service's `matched` flag is not a uniqueness
+ * promise (17 of 38 named numbers on 2026-09-11 held two or three people), and
+ * the corpus call this was written for is one of those.
+ *
+ * The default reads nothing, so no test that calls `runRequestSweep` directly
+ * can reach the person base; production passes `lookUpTheCallingNumber`.
+ */
+export type NumberLookup = (
+  phone: string | undefined,
+) => Promise<{ firstName: string; lastName: string } | null>;
+export const noNumberLookup: NumberLookup = async () => null;
+export const lookUpTheCallingNumber: NumberLookup = async (phone) => {
+  const res = await findByPhone(phone);
+  if (!res.verified || !res.patient) return null;
+  const firstName = res.patient.firstName.trim();
+  const lastName = res.patient.lastName.trim();
+  return firstName && lastName ? { firstName, lastName } : null;
+};
 
 export interface SweepOutcome {
   filed: boolean;
@@ -170,6 +204,8 @@ export async function runRequestSweep(
    * test that calls this directly can reach the network.
    */
   askName: NameAsker = noNameFromTheRecording,
+  /** v182: who the calling number belongs to. The default reads nothing. */
+  lookupNumber: NumberLookup = noNumberLookup,
 ): Promise<SweepOutcome> {
   try {
     const identity = verifiedIdentityFor(record.callSid);
@@ -248,6 +284,26 @@ export async function runRequestSweep(
         }
       }
     }
+    /**
+     * v182: STILL NO NAME, SO ASK WHO THE NUMBER BELONGS TO. Last, after every
+     * name the call itself carried: a caller who named a patient identifies
+     * that patient, even from another person's phone. Only a number that
+     * belongs to one person files; the ticket says the name came from the
+     * number and is not confirmed. A lookup that fails files nothing.
+     */
+    if (!decision.file && decision.reason === "no-name") {
+      const owner = await lookupNumber(record.callerPhone).catch(() => null);
+      if (owner) {
+        input = { ...input, verifiedName: owner, nameSource: "number" };
+        decision = decideSweep(input);
+        if (decision.file) {
+          console.info(
+            `[REQUEST SWEEP] ${record.slug}: no patient name was said — the calling number belongs to ` +
+              `one patient on file; filing under that record, unconfirmed (${record.callSid})`,
+          );
+        }
+      }
+    }
     if (!decision.file) {
       /**
        * A SKIP IS LOGGED TOO, and only "no-name" loudly.
@@ -319,10 +375,11 @@ export async function runRequestSweep(
 }
 
 /**
- * THE SWEEP THE RUNTIME RUNS (v180): the real filer and the model that reads
- * the patient's name out of the transcript when the call captured none.
+ * THE SWEEP THE RUNTIME RUNS (v180, v182): the real filer, the model that
+ * reads the patient's name out of the transcript when the call captured none,
+ * and the person-base lookup of who the calling number belongs to.
  * `voiceRuntime` uses this as its default; `sweepRunner.wiring` pins it.
  */
 export function runProductionSweep(record: VoiceCallRecord): Promise<SweepOutcome> {
-  return runRequestSweep(record, defaultFiler, askModelForThePatientName);
+  return runRequestSweep(record, defaultFiler, askModelForThePatientName, lookUpTheCallingNumber);
 }
