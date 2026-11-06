@@ -90,11 +90,13 @@ function filer(): SweepFiler & { calls: Record<string, unknown>[] } {
 const noName: NameAsker = async () => ({ firstName: null, lastName: null });
 const ONE_PERSON = { firstName: 'Dana', lastName: 'Whitfield' };
 function owner(answer: { firstName: string; lastName: string } | null): NumberLookup & { asked: number } {
-  const fn = (async () => {
-    fn.asked += 1;
-    return answer;
-  }) as NumberLookup & { asked: number };
-  fn.asked = 0;
+  const fn = Object.assign(
+    async () => {
+      fn.asked += 1;
+      return answer;
+    },
+    { asked: 0 },
+  );
   return fn;
 }
 

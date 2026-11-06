@@ -1315,8 +1315,16 @@ import { callEnvironment } from "./callRecord";
  * `RUNTIME_MEDIA_GAP_MS`, 0 off). Above main's v180 (#431, `678e246f`),
  * which it contains. No migration.
  */
+/**
+ * v182 — A NAMELESS MESSAGE FILES UNDER THE NUMBER'S ONE PATIENT (2026-11-06).
+ * Where the teardown sweep would skip a request as no-name after v171 and
+ * v180, it asks the person base who the calling number belongs to; one
+ * person files under that name with a note that it is not confirmed, several
+ * file nothing. Operator ruling 2026-10-29, approved as filed 2026-11-06.
+ * Above main's v181 (#432, `684f3f3d`), which it contains. No migration.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v181-a-missed-hangup-ends-the-call-20261106";
+  "voice-runtime-v182-a-nameless-message-files-under-the-number-20261106";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can
