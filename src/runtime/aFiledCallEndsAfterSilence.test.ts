@@ -25,6 +25,7 @@ import {
   SILENCE_PROMPT_MS,
   VoiceCallBridge,
   filedSilenceFromEnv,
+  toolLeftATicket,
   type BridgeSessionHandlers,
   type CallOutcome,
   type VoiceCallRecord,
@@ -181,6 +182,55 @@ describe("NOT FILED DURING THE CALL: the ticket came from the teardown filer, so
     h.say("I see an open request, VA-70000. Is there anything else?");
     vi.advanceTimersByTime(FILED_SILENCE_MS * 2);
     expect(h.outcomes).toEqual([]);
+  });
+});
+
+describe("a tool that failed at its own job but left the request on record (Codex P2 on #434)", () => {
+  // PCP's handoff_to_pcp answers success:false when the dial fails or is
+  // refused, while its pre-dial ticket or fallback task is on record and the
+  // caller is told so; no-ivr's refused escalate_to_human files its ticket and
+  // says ticket_filed:true (v80).
+  const recordedThenSilent = async (slug: string, toolName: string, output: string) => {
+    const h = harness({ slug, outputs: { [toolName]: output } });
+    h.say("How can I help you today?");
+    h.caller("Can I speak to someone please?");
+    await h.tool(toolName);
+    h.say("I couldn't reach the team just now, but I have your request recorded. Is there anything else?");
+    return h;
+  };
+
+  it.each([
+    ["a failed dial after the pre-dial ticket", "pcp", "handoff_to_pcp",
+      '{"success":false,"handoffStatus":"NO_ANSWER","ticketNumber":"PCP-80001","fallbackRecorded":false}'],
+    ["a refused transfer whose fallback task filed", "pcp", "handoff_to_pcp",
+      '{"success":false,"handoffStatus":"HANDOFF_UNAVAILABLE","ticketNumber":"PCP-80002","fallbackRecorded":true}'],
+    ["a refused after-hours escalation that filed", "no-ivr", "escalate_to_human",
+      '{"success":false,"refused":"symptoms_not_stated_by_caller","ticket_filed":true}'],
+  ])("%s ends after two minutes of silence", async (_label, slug, toolName, output) => {
+    const h = await recordedThenSilent(slug, toolName, output);
+    vi.advanceTimersByTime(FILED_SILENCE_MS - 1);
+    expect(h.outcomes).toEqual([]);
+    vi.advanceTimersByTime(1);
+    expect(h.outcomes).toEqual(["filed_silence"]);
+  });
+
+  it.each([
+    ["a refused transfer whose fallback task did not file", "pcp", "handoff_to_pcp",
+      '{"success":false,"handoffStatus":"HANDOFF_UNAVAILABLE","fallbackRecorded":false}'],
+    ["a refused escalation that filed nothing", "no-ivr", "escalate_to_human",
+      '{"success":false,"refused":"duplicate","ticket_filed":false}'],
+  ])("%s does not", async (_label, slug, toolName, output) => {
+    const h = await recordedThenSilent(slug, toolName, output);
+    vi.advanceTimersByTime(FILED_SILENCE_MS * 2);
+    expect(h.outcomes).toEqual([]);
+  });
+
+  it("a queue transfer the caller chose files nothing, so it is not a filing", () => {
+    expect(toolLeftATicket("handoff_to_pcp", true, { success: true, handoffStatus: "DIALING", fallbackRecorded: false })).toBe(false);
+    // A ticket number on another tool's result is not read as a filing.
+    expect(toolLeftATicket("check_open_tickets", true, { success: true, ticketNumber: "VA-70000" })).toBe(false);
+    expect(toolLeftATicket("handoff_to_pcp", false, { success: false, ticketNumber: "  " })).toBe(false);
+    expect(toolLeftATicket("handoff_to_pcp", false, null)).toBe(false);
   });
 });
 

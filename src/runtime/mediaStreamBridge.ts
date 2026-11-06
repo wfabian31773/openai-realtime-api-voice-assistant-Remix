@@ -457,6 +457,25 @@ export function filedSilenceFromEnv(raw: string | undefined): number {
 export const FILING_TOOL = /^(?:file_[a-z_]+_ticket|create_ticket|create_pcp_task|handle_patient_medical_records_request)$/;
 
 /**
+ * Whether this tool call left a ticket on record. A filing tool that
+ * succeeded, OR a tool that failed at its own job and filed the request
+ * anyway and says so in its result (Codex P2 on #434): PCP's
+ * `handoff_to_pcp` answers `success: false` when the dial fails or is
+ * refused, while its pre-dial ticket (`ticketNumber`) or fallback task
+ * (`fallbackRecorded`) is on record and the caller is told so; the
+ * after-hours line's refused `escalate_to_human` files its ticket and says
+ * `ticket_filed: true` (v80). A queue transfer the caller chose files nothing
+ * (v87) and carries neither, and moves the caller off the line anyway.
+ */
+export function toolLeftATicket(name: string, succeeded: boolean, output: unknown): boolean {
+  if (succeeded && FILING_TOOL.test(name)) return true;
+  if (output === null || typeof output !== "object") return false;
+  const o = output as Record<string, unknown>;
+  if (o.fallbackRecorded === true || o.ticket_filed === true) return true;
+  return name === "handoff_to_pcp" && typeof o.ticketNumber === "string" && o.ticketNumber.trim() !== "";
+}
+
+/**
  * A function-call event that arrives AFTER its response's `response.done`
  * has no done ahead of it to say when its batch is complete, so the bridge
  * holds the follow-up for this long after the LAST such event ARRIVES; a
@@ -1151,7 +1170,7 @@ export class VoiceCallBridge {
   private mediaSinceTick = false;
   private emptyMediaTicks = 0;
   private mediaGapHangup = false;
-  /** v183: a filing tool succeeded on this call. Latched; never cleared. */
+  /** v183: a ticket is on record from this call (`toolLeftATicket`). Latched; never cleared. */
   private ticketFiledOnCall = false;
   private filedSilenceTimer: unknown = null;
   private filedSilenceHangup = false;
@@ -2860,7 +2879,7 @@ export class VoiceCallBridge {
           ? (output as Record<string, unknown>).has_open_tickets
           : undefined;
       const namedReasonId = requestReasonIdFromTool(args, output);
-      if (toolSucceeded && FILING_TOOL.test(name)) this.ticketFiledOnCall = true;
+      if (toolLeftATicket(name, toolSucceeded, output)) this.ticketFiledOnCall = true;
       this.toolEvents.push({
         name,
         ok: result.ok,
