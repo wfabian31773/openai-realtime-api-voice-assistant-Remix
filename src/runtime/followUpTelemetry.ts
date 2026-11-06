@@ -59,6 +59,7 @@ export function followUpEvent(
     | "agentStallNudges"
     | "goodbyeGraceHangup"
     | "mediaGapHangup"
+    | "filedSilenceHangup"
   >,
 ): FollowUpEvent | null {
   const f = record.followUps;
@@ -69,7 +70,8 @@ export function followUpEvent(
     prompts === 0 &&
     nudges === 0 &&
     !record.goodbyeGraceHangup &&
-    !record.mediaGapHangup
+    !record.mediaGapHangup &&
+    !record.filedSilenceHangup
   )
     return null;
   const suspicious =
@@ -118,6 +120,10 @@ export function followUpEvent(
       // here on a call whose Twilio duration is as long as ours would be a
       // live call cut; the guard is that count staying 0.
       mediaGapHangup: record.mediaGapHangup === true,
+      // v183: a heard caller whose request was filed said nothing for two
+      // minutes and the call was ended with a sign-off. Also readable as
+      // `runtime_outcome = 'filed_silence'`.
+      filedSilenceHangup: record.filedSilenceHangup === true,
       outcome: record.outcome,
     },
   };

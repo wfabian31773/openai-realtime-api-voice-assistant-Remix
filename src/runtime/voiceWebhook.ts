@@ -78,6 +78,18 @@ export const RUNTIME_CANNOT_HEAR_LINE =
   "I'm sorry, I still cannot hear you, so I'll let you go. " +
   "Please call us back when you can. Goodbye.";
 
+/**
+ * Spoken when a heard caller whose request was filed said nothing for two
+ * minutes (v183, `filed_silence`). Over TwiML for the same reason as the line
+ * above. It claims only what is true at that point — a request was filed —
+ * and asks nothing of the caller: no "call us back" (standing instruction
+ * 10), and no callback number, which this side cannot vouch for here.
+ * Proposed wording, the operator's to overrule.
+ */
+export const RUNTIME_FILED_SILENCE_LINE =
+  "I haven't heard from you in a little while, so I'll let you go. " +
+  "Your request is with our team, and they will follow up with you. Goodbye.";
+
 export interface WebhookRequest {
   headers: Record<string, string | string[] | undefined>;
   /** Parsed application/x-www-form-urlencoded POST params. */
@@ -273,6 +285,11 @@ export function handleAfterRedirect(
     // The ladder spoke three times and heard nothing. A sign-off, not an
     // apology for a fault that did not happen — see RUNTIME_CANNOT_HEAR_LINE.
     return twimlResponse(200, `<Say>${xmlEscape(RUNTIME_CANNOT_HEAR_LINE)}</Say><Hangup/>`);
+  }
+  if (outcome === "filed_silence") {
+    // v183: the request is filed and the caller went quiet. A sign-off that
+    // says so, not an apology and not the cannot-hear line.
+    return twimlResponse(200, `<Say>${xmlEscape(RUNTIME_FILED_SILENCE_LINE)}</Say><Hangup/>`);
   }
   if (outcome === "provider_failure" || outcome === "dead_air") {
     // The two endings the runtime itself caused. A caller who was cut off

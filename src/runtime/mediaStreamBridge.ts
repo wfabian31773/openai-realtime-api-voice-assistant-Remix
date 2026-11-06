@@ -414,6 +414,72 @@ export function mediaGapFromEnv(raw: string | undefined): number {
 const MEDIA_GAP_TICKS = 3;
 
 /**
+ * v183 — HOW LONG A HEARD CALLER WHOSE REQUEST IS FILED MAY SAY NOTHING.
+ *
+ * Operator, 2026-11-06, approving the proposal: once a ticket is filed and
+ * the caller has been silent for two minutes, say a sign-off and hang up.
+ * v131 stands the silence ladder down for a caller we have heard, so that
+ * caller is never told we cannot hear them and never cut by the ladder; the
+ * call then stayed open until the caller hung up or the ten-minute ceiling.
+ * Measured, live runtime `max_duration` calls 2026-10-23..11-05: 22, and on
+ * 5 of them a filing tool had succeeded during the call and the caller then
+ * said nothing for five to eight minutes before the ceiling ended it
+ * (CA44cc950a5a3a834c3881bbe171889c89, CAacd6dc415476b2105fc16ac11221c4fe,
+ * CAcab0f70c9e19a39b387f4275eaa686c2, CA02ad88524f4aaa2f6f7b5efc5cb98b24,
+ * CAe2b0a77610d49652ceb23ed9150d4a7f).
+ *
+ * The silence is counted from the later of the caller's last transcribed
+ * words and the moment the agent's last line finished playing, so the agent
+ * talking never counts as the caller being silent. Keyed on a transcript, as
+ * the ladder is: the VAD fires on a cough and on hold music.
+ *
+ * `RUNTIME_FILED_SILENCE_MS` moves it without a deploy, clamped to 30 s–9 min;
+ * `0` switches it off and restores the old behaviour exactly.
+ */
+export const FILED_SILENCE_MS = filedSilenceFromEnv(process.env.RUNTIME_FILED_SILENCE_MS);
+
+export function filedSilenceFromEnv(raw: string | undefined): number {
+  if (raw === undefined || raw.trim() === "") return 120_000;
+  const ms = Number(raw);
+  if (ms === 0) return 0;
+  if (!Number.isFinite(ms)) return 120_000;
+  return Math.min(540_000, Math.max(30_000, Math.round(ms)));
+}
+
+/**
+ * The tools that FILE a request, one per lane: the queue lanes'
+ * `file_*_ticket` (the request sweep's own `alreadyFiledByTool` pattern),
+ * the after-hours line's `create_ticket`, and PCP's `create_pcp_task` and
+ * records tool. A filing counts only when the tool SUCCEEDED (`succeeded`,
+ * not `ok`: a refusal is `ok`). `check_open_tickets` is deliberately absent:
+ * a caller chasing an existing ticket has filed nothing on this call.
+ */
+export const FILING_TOOL = /^(?:file_[a-z_]+_ticket|create_ticket|create_pcp_task|handle_patient_medical_records_request)$/;
+
+/**
+ * Whether this tool call left a ticket on record. A filing tool that
+ * succeeded, OR a tool that failed at its own job and filed the request
+ * anyway and says so in its result (Codex P2 on #434): PCP's
+ * `handoff_to_pcp` answers `success: false` when the dial fails or is
+ * refused, while the ticket it filed — the pre-dial ticket or the fallback
+ * task — is on its result as `ticketNumber` and the caller is told so; the
+ * after-hours line's refused `escalate_to_human` files its ticket and says
+ * `ticket_filed: true` (v80). `fallbackRecorded` is not read: whenever it is
+ * true the fallback's number is on `ticketNumber` too. A queue transfer the
+ * caller chose files nothing (v87), carries no number, and moves the caller
+ * off the line anyway.
+ */
+export function toolLeftATicket(name: string, succeeded: boolean, output: unknown): boolean {
+  const o = output !== null && typeof output === "object" ? (output as Record<string, unknown>) : {};
+  // A filing tool can succeed and file nothing: the after-hours line answers a
+  // question it fully answered with `success: true, ticketCreated: false`, and
+  // the sign-off would then claim a request that does not exist (Codex P2 on #434).
+  if (succeeded && FILING_TOOL.test(name)) return o.ticketCreated !== false;
+  if (o.ticket_filed === true) return true;
+  return name === "handoff_to_pcp" && typeof o.ticketNumber === "string" && o.ticketNumber.trim() !== "";
+}
+
+/**
  * A function-call event that arrives AFTER its response's `response.done`
  * has no done ahead of it to say when its batch is complete, so the bridge
  * holds the follow-up for this long after the LAST such event ARRIVES; a
@@ -488,6 +554,14 @@ export type CallOutcome =
    * behind it moving at all.
    */
   | "caller_silent"
+  /**
+   * v183: a caller we HAD heard, whose request was filed during the call,
+   * said nothing for `FILED_SILENCE_MS`. Distinct from `caller_silent` (a
+   * caller never heard, cut by the ladder) and from `agent_ended`, so it is
+   * countable from `runtime_outcome` alone. Not a hang-up: the PCP lane's
+   * hang-up withdrawal (v100) reads `caller_hangup` and leaves this ticket.
+   */
+  | "filed_silence"
   | "max_duration";
 
 /**
@@ -632,6 +706,9 @@ export interface VoiceCallRecord {
   /** v181: the call ended because Twilio stopped sending caller audio with no
    * stop frame and no socket close (`MEDIA_GAP_MS`). */
   mediaGapHangup?: boolean;
+  /** v183: the call ended because a heard caller whose request was filed
+   * said nothing for `FILED_SILENCE_MS` (outcome `filed_silence`). */
+  filedSilenceHangup?: boolean;
   teardownReason?: "goodbye_grace" | "media_gap";
 }
 
@@ -783,6 +860,9 @@ export interface VoiceCallBridgeDeps {
    * treated as hung up. Injected for tests; production reads `MEDIA_GAP_MS`.
    * 0 switches the watchdog off. */
   mediaGapMs?: number;
+  /** v183: how long a heard caller whose request is filed may say nothing.
+   * Injected for tests; production reads `FILED_SILENCE_MS`. 0 switches it off. */
+  filedSilenceMs?: number;
   /**
    * When the call actually began — the moment the stream was claimed.
    *
@@ -1094,6 +1174,15 @@ export class VoiceCallBridge {
   private mediaSinceTick = false;
   private emptyMediaTicks = 0;
   private mediaGapHangup = false;
+  /** v183: a ticket is on record from this call (`toolLeftATicket`). Latched; never cleared. */
+  private ticketFiledOnCall = false;
+  private filedSilenceTimer: unknown = null;
+  private filedSilenceHangup = false;
+  /** v183: when the caller's last non-empty transcript arrived. */
+  private lastCallerHeardAtMs: number | undefined;
+  /** v183: when the caller's window was last armed — the moment the agent's
+   * last line finished playing (or the ladder re-armed after a prompt). */
+  private callerWindowArmedAtMs: number | undefined;
   private callerClosing: CallerConclusion | null = null;
   /** The provider item id of the last non-empty caller transcript. */
   private lastCallerItemId: string | null = null;
@@ -1147,6 +1236,9 @@ export class VoiceCallBridge {
         // latch the operator's 2026-09-26 ruling turns on; see the field.
         if (text.trim()) {
           this.callerEverHeard = true;
+          // v183: the caller spoke, so the silence a filed call ends on is over.
+          this.lastCallerHeardAtMs = Date.now();
+          this.clearFiledSilence();
           // A request can arrive while a previously allowed ghost hangup is
           // waiting for playback. Revoke both its mark and fallback timer.
           if (this.ghostHangupRequested) this.cancelRequestedHangup();
@@ -2485,6 +2577,7 @@ export class VoiceCallBridge {
     if (this.deadAirCause !== "response") return;
     this.silenceStoodDown = true;
     this.clearDeadAir();
+    this.armFiledSilence();
     console.info(
       `[bridge] the agent answered the nudge with nothing on ${this.deps.context.callSid} — ` +
         `standing down without ending the call`,
@@ -2523,6 +2616,10 @@ export class VoiceCallBridge {
 
   private handleResponseStarted(): void {
     if (this.ended) return;
+    // v183: the agent is taking a turn; the line is not silent. Its
+    // completion re-arms the caller's window, and the ladder's stand-down
+    // re-arms this clock.
+    this.clearFiledSilence();
     this.bindFollowUpReply();
     if (this.cancelSecondOpeningTurn()) return;
     this.cancelGoodbye();
@@ -2786,6 +2883,7 @@ export class VoiceCallBridge {
           ? (output as Record<string, unknown>).has_open_tickets
           : undefined;
       const namedReasonId = requestReasonIdFromTool(args, output);
+      if (toolLeftATicket(name, toolSucceeded, output)) this.ticketFiledOnCall = true;
       this.toolEvents.push({
         name,
         ok: result.ok,
@@ -2915,6 +3013,11 @@ export class VoiceCallBridge {
     // Any other clock means the turn moved on; the next caller window is the full one.
     if (cause !== "caller") this.openingProceedArmed = false;
     this.deadAirCause = cause;
+    // v183: the caller's silence starts when the agent's line finishes
+    // PLAYING. `extraMs` is the unplayed audio, an upper bound on that, so a
+    // mark Twilio is slow to echo makes the filed-silence clock more patient,
+    // never less (Codex P2 on #434). A mark echo re-arms with 0.
+    if (cause === "caller") this.callerWindowArmedAtMs = Date.now() + extraMs;
     // The caller's own window is SHORTER than the agent's, because it is not
     // a failure bound: it is how long a person is left in silence before
     // being spoken to. Everything else is unchanged.
@@ -2988,6 +3091,7 @@ export class VoiceCallBridge {
       }
       this.silenceStoodDown = true;
       this.clearDeadAir();
+      this.armFiledSilence();
       console.info(
         `[bridge] caller already transcribed on ${this.deps.context.callSid} — ` +
           `the silence ladder stands down without prompting or ending the call`,
@@ -3035,6 +3139,62 @@ export class VoiceCallBridge {
     if (!last.startsWith("AGENT: ")) return true;
     const said = last.slice(7).replace(/\[interrupted\]\s*$/, "").trim();
     return !ASKS_THE_CALLER.test(said);
+  }
+
+  /**
+   * v183: the ladder has stood down for a heard caller. When a request was
+   * filed on this call, start the clock that ends it after `FILED_SILENCE_MS`
+   * of the caller saying nothing. Counted from the later of their last words
+   * and the end of the agent's last line, so the time already spent in the
+   * ladder's window counts and the agent's own speech never does.
+   */
+  private armFiledSilence(): void {
+    this.clearFiledSilence();
+    const windowMs = this.deps.filedSilenceMs ?? FILED_SILENCE_MS;
+    if (windowMs <= 0 || !this.ticketFiledOnCall || this.ended) return;
+    const now = Date.now();
+    const quietSince = Math.max(this.lastCallerHeardAtMs ?? 0, this.callerWindowArmedAtMs ?? 0) || now;
+    const remaining = Math.max(0, windowMs - (now - quietSince));
+    this.filedSilenceTimer = this.setTimer(() => this.handleFiledSilence(), remaining);
+  }
+
+  private clearFiledSilence(): void {
+    if (this.filedSilenceTimer !== null) {
+      this.clearTimer(this.filedSilenceTimer);
+      this.filedSilenceTimer = null;
+    }
+  }
+
+  /**
+   * THE SIGN-OFF IS NOT SPOKEN HERE, for the ladder's reason: teardown closes
+   * the media stream, so a line started now is cut mid-word.
+   * `handleAfterRedirect` says `RUNTIME_FILED_SILENCE_LINE` over TwiML.
+   */
+  private handleFiledSilence(): void {
+    this.filedSilenceTimer = null;
+    if (this.ended) return;
+    // Anything else in motion owns the call's end, or will re-arm this clock
+    // through the ladder once it completes.
+    if (this.endRequested || this.transferInFlight || this.goodbyeTimer !== null) return;
+    if (this.pendingToolCalls > 0 || this.followUpOwed || this.session.isResponseActive()) return;
+    // Mid-sentence, or just finished speaking with their words not yet
+    // transcribed (speech_stopped arms the response watchdog, so a debt is
+    // open; Codex P2 on #434): their transcript or the agent's reply cancels
+    // this when it lands. If it was only noise, look again one caller window
+    // later.
+    if (this.callerSpeaking || this.deadAirCause !== null) {
+      this.filedSilenceTimer = this.setTimer(
+        () => this.handleFiledSilence(),
+        this.deps.silencePromptMs ?? SILENCE_PROMPT_MS,
+      );
+      return;
+    }
+    this.filedSilenceHangup = true;
+    console.info(
+      `[bridge] ${this.deps.context.callSid} filed_silence — the request is filed and the caller ` +
+        `has said nothing for ${Math.round((this.deps.filedSilenceMs ?? FILED_SILENCE_MS) / 1000)}s; ending the call`,
+    );
+    this.teardown("filed_silence");
   }
 
   private clearDeadAir(): void {
@@ -3144,6 +3304,7 @@ export class VoiceCallBridge {
       this.clearTimer(this.mediaGapTimer);
       this.mediaGapTimer = null;
     }
+    this.clearFiledSilence();
     // Whatever close event won the race — Twilio's stop frame, the socket
     // closing, the provider session dying as the stream ends — the caller
     // was moved to a human on purpose. That is the outcome.
@@ -3224,6 +3385,7 @@ export class VoiceCallBridge {
         agentStallNudges: this.agentStallNudges,
         goodbyeGraceHangup: this.goodbyeGraceHangup,
         mediaGapHangup: this.mediaGapHangup,
+        filedSilenceHangup: this.filedSilenceHangup,
         ...(reason ? { teardownReason: reason } : {}),
         followUps: {
           ...this.followUps,

@@ -109,6 +109,8 @@ describe("the follow-up summary", () => {
       goodbyeGraceHangup: false,
       // v181: a boolean, gained deliberately.
       mediaGapHangup: false,
+      // v183: a boolean, gained deliberately.
+      filedSilenceHangup: false,
       outcome: "dead_air",
     });
   });
