@@ -1342,8 +1342,19 @@ import { callEnvironment } from "./callRecord";
  * accepts only 'caller' | 'history'). Renumbered from v171 (#424) when main
  * moved past it (main's v171 is #421; v183 is #434, `5920eb77`). No migration.
  */
+/**
+ * v185 — A CALLER FROM A BUSINESS IS NOT ASKED WHETHER THEY ARE A NEW PATIENT
+ * (2026-11-07). Operator: "go ahead and skip new-or-existing for business
+ * callers." On optical, surgery and tech the ask (`newOrExistingAsk.ts`) now
+ * says first that a pharmacy, health plan or insurer, doctor's or provider's
+ * office, clinic, hospital, lab or medical group is not asked, and that an
+ * answer naming a business ends the asking. Measured 2026-10-24..11-06: 90 of
+ * 652 calls asked were business callers, 13 asked two or three times, 28 left
+ * no ticket. Above main's v184 (#424, `101cdea6`), which it contains. No
+ * migration.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v184-after-hours-floor-finds-an-office-20261106";
+  "voice-runtime-v185-business-callers-are-not-asked-new-or-existing-20261107";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can
