@@ -89,6 +89,19 @@ export function missingFieldsFromRefusal(error: string | null | undefined): stri
   if (!error) return null;
   const text = String(error).trim();
 
+  const head = /^Missing required (?:information|fields):\s*([^.\n]+)/i.exec(text);
+  const list = head?.[1];
+  if (list) {
+    // Every listed field, routing ones included: "location, patientEmail"
+    // asks for both, so the retry is not refused a second time for the one
+    // the agent was never told about (Codex P2, #436).
+    const fields = list
+      .split(',')
+      .map((f) => f.trim())
+      .filter((f) => f.length > 0);
+    return fields.length > 0 ? fields : null;
+  }
+
   // v186: a NAME the app could not match is a refusal for that routing field
   // too, worded without the head. /submit-ticket answers "The surgeon "X" was
   // not found in our system — please confirm the surgeon's name." and "The
@@ -98,33 +111,26 @@ export function missingFieldsFromRefusal(error: string | null | undefined): stri
   // to the technical-issue apology: CA93323bf5677ec2d8fad28ff0c014f0b1
   // (no-ivr, 2026-10-27) was told the system had a problem and left with no
   // ticket of any provenance.
-  const routing = routingFieldFromRefusal(text);
-  if (routing) return [routing];
+  const named = notFoundField(text);
+  return named ? [named] : null;
+}
 
-  const head = /^Missing required (?:information|fields):\s*([^.\n]+)/i.exec(text);
-  const list = head?.[1];
-  if (!list) return null;
-
-  const fields = list
-    .split(',')
-    .map((f) => f.trim())
-    .filter((f) => f.length > 0);
-  return fields.length > 0 ? fields : null;
+function notFoundField(text: string): 'location' | 'surgeon name' | null {
+  if (/^The surgeon ".*" was not found in our system/i.test(text)) return 'surgeon name';
+  if (/^The office ".*" (?:was not recognized|matches more than one)/i.test(text)) return 'location';
+  return null;
 }
 
 /**
  * The routing field an Optical or Surgery refusal is about — `location` or
- * `surgeon name`, the app's own field names — or null. Reads the head shape
- * and the two not-found shapes; the head shape is also read by
- * `missingFieldsFromRefusal`, so this is the one place the after-hours line
- * asks "is this the office or the surgeon?".
+ * `surgeon name`, the app's own field names — or null. Read from the same
+ * field list `missingFieldsFromRefusal` returns, wherever the routing field
+ * sits in it, so the two readers cannot disagree about one refusal.
  */
 export function routingFieldFromRefusal(error: string | null | undefined): 'location' | 'surgeon name' | null {
-  if (!error) return null;
-  const text = String(error).trim();
-  if (/^Missing required (?:information|fields):\s*surgeon name\b/i.test(text)) return 'surgeon name';
-  if (/^Missing required (?:information|fields):\s*location\b/i.test(text)) return 'location';
-  if (/^The surgeon ".*" was not found in our system/i.test(text)) return 'surgeon name';
-  if (/^The office ".*" (?:was not recognized|matches more than one)/i.test(text)) return 'location';
+  const fields = missingFieldsFromRefusal(error);
+  if (!fields) return null;
+  if (fields.includes('surgeon name')) return 'surgeon name';
+  if (fields.includes('location')) return 'location';
   return null;
 }

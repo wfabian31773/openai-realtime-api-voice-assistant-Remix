@@ -162,6 +162,20 @@ describe('v186 — the flag is the agent’s record, not a guess', () => {
     expect(h.submitSimplifiedTicket.mock.calls[1][0].routingAskExhausted).toBeUndefined();
   });
 
+  it('a refusal listing another field beside the office asks for both (Codex P2, #436)', async () => {
+    const sid = 'CA0000000000000000000000000000e186';
+    const agent = await createNoIvrAgent(async () => {}, { callId: `call-${sid}`, callSid: sid });
+    h.submitSimplifiedTicket.mockImplementationOnce(async () => ({
+      success: false, error: 'Missing required information: location, patientEmail', message: 'I need more.',
+    }));
+    const first = await call(agent, request('location'));
+    expect(first.success).toBe(false);
+    expect(first.validation_errors).toEqual(['location', 'patientEmail']);
+    expect(first.message).toMatch(/ONCE/);
+    expect(first.message).toMatch(/It also needs the email address/);
+    expect(first.message).not.toMatch(THE_APOLOGY);
+  });
+
   it('refused even with the flag (the app not yet deployed): the answer is today’s, never the apology', async () => {
     const sid = 'CA0000000000000000000000000000d186';
     const agent = await createNoIvrAgent(async () => {}, { callId: `call-${sid}`, callSid: sid });

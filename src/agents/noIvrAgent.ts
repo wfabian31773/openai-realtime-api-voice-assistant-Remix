@@ -2329,11 +2329,18 @@ The ticket will include schedule context (last appointment info) automatically.`
           // is not deployed. This answer is today's, so nothing is worse.
           console.warn(`[ROUTING EXIT] create_ticket on ${metadata.callSid} refused for the ${routingField} with routingAskExhausted set — is the ticketing app's /submit-ticket exit deployed?`);
         }
+        // The same refusal can list other fields beside the routing one
+        // ("location, patientEmail"): ask for those too, or the retry is
+        // refused again for a field the agent was never told about.
+        const alsoMissing = (missingFieldsFromRefusal(result.error) ?? []).filter((f) => f !== routingField);
         return {
           success: false,
-          validation_errors: [routingField],
+          validation_errors: [routingField, ...alsoMissing],
           message:
             `The request needs ${spokenFieldName(routingField)}. Ask the caller for it ONCE. ` +
+            (alsoMissing.length > 0
+              ? `It also needs ${spokenMissingFields(alsoMissing)}: ask for those too, one field per question, with the format in the question. `
+              : "") +
             "If they tell you, call create_ticket again with it. If they do not know it, " +
             "that is fine: tell them so, and call create_ticket again straight away without " +
             "it — the request will be taken and the team will route it. Do not ask for it a " +

@@ -72,6 +72,13 @@ describe('the refusal reader', () => {
     expect(routingFieldFromRefusal(undefined)).toBeNull();
   });
 
+  it('a combined refusal keeps every field, wherever the routing one sits (Codex P2, #436)', () => {
+    expect(missingFieldsFromRefusal('Missing required information: location, patientEmail')).toEqual(['location', 'patientEmail']);
+    expect(routingFieldFromRefusal('Missing required information: location, patientEmail')).toBe('location');
+    expect(missingFieldsFromRefusal('Missing required information: patientEmail, surgeon name. Surgery tickets are assigned by surgeon')).toEqual(['patientEmail', 'surgeon name']);
+    expect(routingFieldFromRefusal('Missing required information: patientEmail, surgeon name. Surgery tickets are assigned by surgeon')).toBe('surgeon name');
+  });
+
   it('a not-found name is a missing field, not an outage', () => {
     expect(missingFieldsFromRefusal(NOT_FOUND.surgeon)).toEqual(['surgeon name']);
     expect(missingFieldsFromRefusal(NOT_FOUND.office)).toEqual(['location']);
