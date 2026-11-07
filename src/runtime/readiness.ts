@@ -1343,6 +1343,17 @@ import { callEnvironment } from "./callRecord";
  * moved past it (main's v171 is #421; v183 is #434, `5920eb77`). No migration.
  */
 /**
+ * v185 — A CALLER FROM A BUSINESS IS NOT ASKED WHETHER THEY ARE A NEW PATIENT
+ * (2026-11-07). Operator: "go ahead and skip new-or-existing for business
+ * callers." On optical, surgery and tech the ask (`newOrExistingAsk.ts`) now
+ * says first that a pharmacy, health plan or insurer, doctor's or provider's
+ * office, clinic, hospital, lab or medical group is not asked, and that an
+ * answer naming a business ends the asking. Measured 2026-10-24..11-06: 90 of
+ * 652 calls asked were business callers, 13 asked two or three times, 28 left
+ * no ticket. Above main's v184 (#424, `101cdea6`), which it contains. No
+ * migration.
+ */
+/**
  * v186 — THE AFTER-HOURS LINE ASKS FOR THE OFFICE OR THE SURGEON ONCE
  * (2026-11-07). /submit-ticket refused an Optical request with no office and a
  * Surgery request with no surgeon on every attempt; 9 after-hours calls in the
@@ -1351,8 +1362,8 @@ import { callEnvironment } from "./callRecord";
  * attempt (ticketing-app's takesUnassignedExit, carried to /submit-ticket by
  * the paired ticketing PR, which deploys first), and reads the app's "was not
  * found / not recognized" wording as the routing field instead of an outage.
- * Above main's v184 (#424, `101cdea6`), which it contains; v185 is #435 on
- * its open branch. No migration.
+ * Above main's v185 (#435, `b3660b3a`), which it contains along with v184
+ * (#424, `101cdea6`). No migration.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
   "voice-runtime-v186-the-after-hours-line-asks-for-the-office-once-20261107";

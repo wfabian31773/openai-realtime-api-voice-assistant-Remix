@@ -2181,6 +2181,11 @@ describe("Rule Zero 2a reaches the session, and stands down when Rule 1 answered
     );
     expect(instructions).toContain("new patient or an existing patient");
     expect(instructions).toContain("STOP LOOKING");
+    // v185: the business exception reaches the session too, ahead of the
+    // question it excepts.
+    const exception = instructions.indexOf("A caller from a business");
+    expect(exception).toBeGreaterThan(-1);
+    expect(exception).toBeLessThan(instructions.indexOf("new patient or an existing patient"));
   });
 
   it("asks when pre-context could not be reached at all", async () => {

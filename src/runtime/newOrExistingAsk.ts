@@ -109,13 +109,48 @@
  */
 export const LANES_THAT_ASK: ReadonlySet<string> = new Set(['optical', 'surgery', 'tech']);
 
+/**
+ * A CALLER FROM A BUSINESS IS NOT ASKED — operator, 2026-11-07: "go ahead and
+ * skip new-or-existing for business callers."
+ *
+ * The question asks whether the CALLER is a patient. On the queue lanes a
+ * pharmacy, a health plan, a doctor's office or a clinic calls about a
+ * patient, and the question is about the wrong person: it is the records
+ * finding of Codex round 5 on a lane that keeps the question. MEASURED,
+ * optical + surgery + tech, 2026-10-24..11-06, substantive calls on which the
+ * agent asked it: **652 calls, 90 of them a business caller** (tech 83, almost
+ * all pharmacies; surgery 5; optical 2). **73 of the 90 answered the question
+ * by naming their business** ("Pharmacy."), which the reader correctly reads
+ * as no answer, and **13 were asked it twice or three times**. 62 of the 90
+ * carried a ticket on the call row (69%) against 458 of the other 562 (81%),
+ * and **28 left no ticket of any provenance** (checked by SID in the Support
+ * Center). `businessCallersAreNotAskedNewOrExisting.test.ts` is indexed by
+ * those 28 and the 5 more that were asked twice and filed.
+ *
+ * THE EXCEPTION IS STATED BEFORE THE QUESTION, deliberately (the v29 lesson):
+ * a model reading in order meets "ask once" before it meets the carve-out
+ * otherwise. And the second clause — an answer naming a business makes them a
+ * business caller — is for the caller who never said where they were calling
+ * from until they were asked; it is what stops the second and third asks.
+ *
+ * WHAT IT DOES NOT COVER: a relative or a caregiver calling for a patient is
+ * not a business and is still asked. The operator accepted that residue on
+ * 2026-09-21 ("forget about that 1.2%"). The reader is unchanged: it never
+ * read a business name as new or existing, so nothing a business caller says
+ * can suppress a lookup.
+ */
 export const NEW_OR_EXISTING_ASK =
-  ' Before you try to identify anybody — before lookup_patient, before asking ' +
-  'for a name or a date of birth — ask once: "Are you a new patient or an ' +
-  'existing patient?" NEW means STOP LOOKING: no lookup, no appointment ' +
-  'search, and never tell them we have no record of them — there is none to ' +
-  'find and that is expected, not a failure. EXISTING means find them, and ' +
-  'keep going until you do. Pass their answer to lookup_patient as ' +
+  " A caller from a business — a pharmacy, a health plan or insurer, a doctor's " +
+  "or provider's office, a clinic, a hospital, a lab or a medical group — is " +
+  'not the patient: never ask them whether they are new or existing; go ' +
+  'straight to the patient they are calling about. Everyone else: before you ' +
+  'try to identify anybody — before lookup_patient, before asking for a name ' +
+  'or a date of birth — ask once: "Are you a new patient or an existing ' +
+  'patient?" If they answer with a business ("Pharmacy."), they are a ' +
+  'business caller: do not ask again. NEW means STOP LOOKING: no lookup, no ' +
+  'appointment search, and never tell them we have no record of them — there ' +
+  'is none to find and that is expected, not a failure. EXISTING means find ' +
+  'them, and keep going until you do. Pass their answer to lookup_patient as ' +
   'patient_status.';
 
 /**
