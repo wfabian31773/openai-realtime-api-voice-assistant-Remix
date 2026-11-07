@@ -650,6 +650,8 @@ export class SyncAgentService {
      * caller's request ticket stays the call's ticket for the post-call sync.
      */
     secondTicketOnThisCall?: { keySuffix: string };
+    /** v186: see SubmitTicketParams.routingAskExhausted. */
+    routingAskExhausted?: boolean;
   }): Promise<SyncAgentResponse> {
     const { callSid } = params;
 
@@ -819,6 +821,7 @@ export class SyncAgentService {
         additionalDetails: smsSafe(params.additionalDetails),
         priority: params.priority,
         ...(params.departmentId ? { departmentId: params.departmentId } : {}),
+        ...(params.routingAskExhausted ? { routingAskExhausted: true } : {}),
         callData: callSid ? {
           callSid,
           callerPhone: params.callerPhone,

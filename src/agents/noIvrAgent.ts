@@ -30,8 +30,8 @@ import { keepFieldDescriptions } from "../services/toolFieldDescriptions";
 import { decideDobEscape, dobStatusNote, dobEscapeMarker, type DobStatus } from "../tools/dobEscape";
 // One retry per call on a ticket-API timeout; keyed on the call SID like every
 // other bounded ask in this repo.
-import { gateRefusalsSoFar, noteGateRefusal } from "../tools/gateAttempts";
-import { missingFieldsFromRefusal, spokenMissingFields } from "../services/missingFieldsRefusal";
+import { gateRefusalAgeMs, gateRefusalsSoFar, noteGateRefusal } from "../tools/gateAttempts";
+import { missingFieldsFromRefusal, routingFieldFromRefusal, spokenFieldName, spokenMissingFields } from "../services/missingFieldsRefusal";
 import { buildCompactLocationReference } from "../config/azulVisionKnowledge";
 import { buildNoIvrGrokBody, noIvrPromptShape } from "./noIvrPromptForGrok";
 import { getNextBusinessDayContext } from "../utils/timeAware";
@@ -107,6 +107,15 @@ export { sweepAfterHoursUnfiledCall } from '../services/afterHoursTeardownFloor'
  * this was written for, and that would have sent a staffer past an address
  * sitting in the recording.
  */
+/**
+ * v186: the gateAttempts key for the after-hours office-or-surgeon ask, and the
+ * batch window inside which a second invocation is the same model response,
+ * not a later turn (the records lane's ASK_BATCH_WINDOW_MS, 2 s, measured on
+ * #338: siblings 3–1,178 ms apart, the first genuine re-ask at 4,807 ms).
+ */
+export const ROUTING_ASK_FIELD = 'routing_field';
+export const ROUTING_ASK_BATCH_WINDOW_MS = 2_000;
+
 export const EMAIL_ASK_ONCE =
   "Missing required information: email address. The caller asked to be reached by EMAIL " +
   "and no address was sent, so the request cannot be filed that way yet. Ask ONCE, in " +
@@ -2213,6 +2222,20 @@ The ticket will include schedule context (last appointment info) automatically.`
       }
       const opticalHint = route.kind === 'optical' ? otherReasonFor(OPTICAL_DEPARTMENT_ID) : null;
 
+      // v186: THE OFFICE OR THE SURGEON IS ASKED ONCE. /submit-ticket refuses
+      // an Optical request with no office and a Surgery request with no surgeon,
+      // and until now refused it on every attempt: 9 calls in the 14 days to
+      // 2026-11-06 (CAa0bdf3a5f68c1c070798f6996db11226 and
+      // CA9b02ea2cd46b91e03e055f382acb5f82 six times each), 3 told the system
+      // had a technical issue, 1 with no ticket at all. After one refusal on
+      // this call, the next attempt tells the app the caller was asked
+      // (routingAskExhausted, the queue lanes' 2026-09-02 unassigned exit), and
+      // the app takes it unassigned with a note. A sibling dispatched in the
+      // same model response is not a later turn: inside the batch window the
+      // caller has not heard the question yet (the v79 window, Codex P1 #338).
+      const routingAskAge = gateRefusalAgeMs(metadata.callSid, 'create_ticket', ROUTING_ASK_FIELD);
+      const routingAskSpent = routingAskAge !== undefined && routingAskAge >= ROUTING_ASK_BATCH_WINDOW_MS;
+
       // Use NEW SIMPLIFIED ENDPOINT - more reliable, all mapping done server-side
       const result = await SyncAgentService.submitSimplifiedTicket({
         patientFullName,
@@ -2248,6 +2271,7 @@ The ticket will include schedule context (last appointment info) automatically.`
         dialedNumber: metadata.dialedNumber,
         agentUsed: 'no-ivr',
         ...(route.kind === 'default' ? {} : { departmentId: route.departmentId }),
+        ...(routingAskSpent ? { routingAskExhausted: true } : {}),
         ...(timeConflict && route.kind !== 'post_op_medication' ? { priority: 'high' as const } : {}),
         ...(route.kind === 'post_op_medication'
           ? {
@@ -2296,6 +2320,35 @@ The ticket will include schedule context (last appointment info) automatically.`
       // app's column names — and is told plainly that nothing failed, because
       // the branch below this one speaks the technical-issue apology, and on
       // CA42f5b35d3924b8a1e5e66c00ee927742 that is what a refusal became.
+      const routingField = routingFieldFromRefusal(result.error);
+      if (routingField) {
+        if (gateRefusalsSoFar(metadata.callSid, 'create_ticket', ROUTING_ASK_FIELD) === 0) {
+          noteGateRefusal(metadata.callSid, 'create_ticket', ROUTING_ASK_FIELD);
+        } else if (routingAskSpent) {
+          // The flag went and the app refused anyway: its /submit-ticket exit
+          // is not deployed. This answer is today's, so nothing is worse.
+          console.warn(`[ROUTING EXIT] create_ticket on ${metadata.callSid} refused for the ${routingField} with routingAskExhausted set — is the ticketing app's /submit-ticket exit deployed?`);
+        }
+        // The same refusal can list other fields beside the routing one
+        // ("location, patientEmail"): ask for those too, or the retry is
+        // refused again for a field the agent was never told about.
+        const alsoMissing = (missingFieldsFromRefusal(result.error) ?? []).filter((f) => f !== routingField);
+        return {
+          success: false,
+          validation_errors: [routingField, ...alsoMissing],
+          message:
+            `The request needs ${spokenFieldName(routingField)}. Ask the caller for it ONCE. ` +
+            (alsoMissing.length > 0
+              ? `It also needs ${spokenMissingFields(alsoMissing)}: ask for those too, one field per question, with the format in the question. `
+              : "") +
+            "If they tell you, call create_ticket again with it. If they do not know it, " +
+            "that is fine: tell them so, and call create_ticket again straight away without " +
+            "it — the request will be taken and the team will route it. Do not ask for it a " +
+            "second time. Nothing has failed: do not apologise and do not say there was a " +
+            "technical issue.",
+        };
+      }
+
       const missingFromApi = missingFieldsFromRefusal(result.error);
       if (missingFromApi) {
         console.log("[No-IVR Agent] VALIDATION FAILED:", result.error);

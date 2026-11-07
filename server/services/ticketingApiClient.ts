@@ -223,6 +223,14 @@ export interface SubmitTicketParams {
     transcript?: string;
   };
   idempotencyKey?: string; // Recommended: "call-{callSid}" to prevent duplicates
+  /**
+   * v186: the caller was already asked for the office or the surgeon on this
+   * call and could not give one — set from the agent's own record of an
+   * earlier refusal, never a model argument. The app takes an Optical or
+   * Surgery request unassigned instead of refusing it again (ticketing-app's
+   * takesUnassignedExit; an app that does not know the field drops it).
+   */
+  routingAskExhausted?: boolean;
 }
 
 export interface SubmitTicketResponse {

@@ -12,7 +12,8 @@
  *     provider (21 found in call_logs, all transferred) and none of them has a
  *     ticket of any provenance. Recent: CAf746549c0b24b252a761959031c097f4,
  *     CA62977ba64183d6a3227b0c22a3be45e6, CA7ae28b7165f09fc1a7652c0428f993d8.
- *   - 9 refused "Missing required information: surgeon" — no department was
+ *   - 9 refused "Missing required information: surgeon name" (the
+ *     /submit-ticket wording; the bare "surgeon" is create-ticket's) — no department was
  *     named, the app classified the description as Surgery, and Surgery demands
  *     a surgeon. Of 54 records that DID file, only 32 landed in After Hours.
  *
