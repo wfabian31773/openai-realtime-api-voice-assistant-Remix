@@ -1342,8 +1342,20 @@ import { callEnvironment } from "./callRecord";
  * accepts only 'caller' | 'history'). Renumbered from v171 (#424) when main
  * moved past it (main's v171 is #421; v183 is #434, `5920eb77`). No migration.
  */
+/**
+ * v186 — THE AFTER-HOURS LINE ASKS FOR THE OFFICE OR THE SURGEON ONCE
+ * (2026-11-07). /submit-ticket refused an Optical request with no office and a
+ * Surgery request with no surgeon on every attempt; 9 after-hours calls in the
+ * 14 days to 11-06, 3 told the system had a technical issue, 1 with no ticket.
+ * create_ticket now asks once, sends the unassigned-exit flag on the next
+ * attempt (ticketing-app's takesUnassignedExit, carried to /submit-ticket by
+ * the paired ticketing PR, which deploys first), and reads the app's "was not
+ * found / not recognized" wording as the routing field instead of an outage.
+ * Above main's v184 (#424, `101cdea6`), which it contains; v185 is #435 on
+ * its open branch. No migration.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v184-after-hours-floor-finds-an-office-20261106";
+  "voice-runtime-v186-the-after-hours-line-asks-for-the-office-once-20261107";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can
