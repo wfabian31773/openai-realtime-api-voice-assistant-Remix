@@ -984,8 +984,11 @@ registerTool({
         : null;
     // Off the clock the destination was never asked before v188; with a method
     // in hand it is one question, once. On the clock the gate below asks it.
+    // The ask is counted PER METHOD: a caller who says fax, hears the fax-number
+    // question and then switches to email is asked for the email address — a
+    // different question — once. Three methods bound it at three (Codex P2, #438).
     if (deliveryAsked && !cap.onClock && destinationQuestion && !effectiveDeliverTo) {
-      if (formAskOutcome(callSid, DELIVERY_DESTINATION_ASK) !== 'spent') {
+      if (formAskOutcome(callSid, `${DELIVERY_DESTINATION_ASK}:${deliveryMethod}`) !== 'spent') {
         return missing(
           ['deliver_to'],
           destinationQuestion,

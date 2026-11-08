@@ -114,6 +114,26 @@ describe('the method is asked, in the words PCP already uses', () => {
     expect(String(p.description)).toContain('Send to: 202-555-0199');
   });
 
+  it('a caller who switches method is asked the new destination once, not filed without it (Codex P2, #438)', async () => {
+    const create = vi.spyOn(await client(), 'createTicket').mockResolvedValueOnce(filed('VA-188-SWITCH'));
+    const sid = freshSid();
+    await runTool('file_records_ticket', { ...PROVIDER, call_sid: sid });
+    laterTurn();
+    const fax = (await runTool('file_records_ticket', { ...PROVIDER, delivery_method: 'fax', call_sid: sid })) as Out;
+    expect(fax.message).toBe(DELIVERY_DESTINATION_QUESTION.fax);
+    laterTurn();
+    const email = (await runTool('file_records_ticket', { ...PROVIDER, delivery_method: 'email', call_sid: sid })) as Out;
+    expect(email.success).toBe(false);
+    expect(email.missingFields).toEqual(['deliver_to']);
+    expect(email.message).toBe(DELIVERY_DESTINATION_QUESTION.email);
+    expect(create).not.toHaveBeenCalled();
+    // The email ask is spent too now: the next call with no address files.
+    laterTurn();
+    const filedNow = (await runTool('file_records_ticket', { ...PROVIDER, delivery_method: 'email', call_sid: sid })) as Out;
+    expect(filedNow.success, JSON.stringify(filedNow)).toBe(true);
+    expect(String((create.mock.calls[0][0] as unknown as Record<string, unknown>).description)).toContain('Send to: NOT CAPTURED');
+  });
+
   it('a caller who never answers still files — the gap is written on the ticket, never a refusal', async () => {
     const create = vi.spyOn(await client(), 'createTicket').mockResolvedValueOnce(filed('VA-188-2'));
     const sid = freshSid();
