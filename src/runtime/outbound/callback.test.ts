@@ -78,11 +78,38 @@ describe("the greeting on a returned call", () => {
   it("greets a single match by first name, never the last name (operator, 2026-10-21)", () => {
     const g = callbackGreeting({ kind: "one", contact: candidate({ contactId: "a" }) });
     expect(g).toBe(
-      `Hello, Testa. Thank you for calling Azul Vision. This is an automated assistant. ${OUTBOUND_RECORDING_CLAUSE}.`,
+      `Hello, thank you for calling Azul Vision. This is an automated assistant. ${OUTBOUND_RECORDING_CLAUSE}. Am I speaking with Testa?`,
     );
     expect(g).not.toContain("Person"); // never the last name
-    // It asks nothing: the caller's reply is the answer the steps act on.
-    expect(g).not.toContain("?");
+  });
+
+  it("ends by asking the first name, so the caller has something to answer (v187)", () => {
+    // 2026-11-07: the greeting asked nothing, xAI answered the turn the bridge
+    // then requested with no response at all, and 4 of 4 returned calls on
+    // npx-outreach (CA69113809677891515366d94468818c6d,
+    // CAa242b68efc425009e46d90375548ac89, CA6c18fe9dd556ee8094b0b9303c6a9040,
+    // CA2769f88718b62e8365e3d4f7a8ac95f2) heard silence until they hung up.
+    // A greeting ending in a question owes the agent no turn (the bridge's
+    // rule), so the caller's answer is the next voice, and silence is met by
+    // the silence ladder rather than dead air.
+    const g = callbackGreeting({ kind: "one", contact: candidate({ contactId: "a" }) });
+    expect(g).toMatch(/Am I speaking with Testa\?$/);
+    // The name is said once.
+    expect(g.split("Testa").length - 1).toBe(1);
+    // The disclosures still come before the question.
+    expect(g.indexOf(OUTBOUND_RECORDING_CLAUSE)).toBeLessThan(g.indexOf("Am I speaking"));
+    expect(g.indexOf("automated assistant")).toBeLessThan(g.indexOf("Am I speaking"));
+  });
+
+  it("every greeting a returned call can hear ends in a question", () => {
+    for (const match of [
+      { kind: "one", contact: candidate({ contactId: "a" }) } as const,
+      { kind: "several", people: 2 } as const,
+      { kind: "none" } as const,
+    ]) {
+      expect(callbackGreeting(match).trim()).toMatch(/\?$/);
+      expect(callbackGreeting(match, { sayName: false }).trim()).toMatch(/\?$/);
+    }
   });
 
   it("does not say the patient's name before they are verified when sayName is false", () => {
@@ -131,13 +158,32 @@ describe("the steps on a returned call", () => {
   it("tells the agent to identify a single match by the first name they confirm", () => {
     const steps = callbackSteps(ctx({ kind: "one", contact: candidate({ contactId: "a" }) }));
     expect(steps).toContain('call identify_callback_caller with first_name "Testa"');
-    // The greeting asked nothing, so a reply that is not a denial is the answer.
-    expect(steps).toContain("Unless their reply says they are not Testa");
-    expect(steps).toContain("If they say they are not Testa");
+    // The greeting asks "Am I speaking with Testa?" (v187); any reply that is not a no is the answer.
+    expect(steps).toContain("Otherwise — a yes, or any reply that is not a no — they are Testa");
+    expect(steps).toContain("they are NOT Testa");
     expect(steps).not.toContain("Person");
     expect(steps).toContain("Never tell them why we called");
     // Why we called comes only after identification.
     expect(steps.indexOf("Once they are identified")).toBeGreaterThan(steps.indexOf("identify_callback_caller"));
+  });
+
+  it("states the no BEFORE the yes, and forbids identifying a caller who said they are someone else (v187)", () => {
+    // Offline against xAI, 2026-11-07, the lane's real prompt: with the yes
+    // rule first, "No, this is her husband." was answered with
+    // identify_callback_caller({ first_name: "Testa" }) 3 of 3 times — a family
+    // member identified as the patient, then told why we called. With the no
+    // first, 6 of 6 denials were asked their own name, and the yes still
+    // identified 3 of 3.
+    const steps = callbackSteps(ctx({ kind: "one", contact: candidate({ contactId: "a" }) }));
+    const no = steps.indexOf("If their reply is a no");
+    const yes = steps.indexOf("Otherwise — a yes");
+    expect(no).toBeGreaterThan(-1);
+    expect(yes).toBeGreaterThan(no);
+    const noLine = steps.slice(no, yes);
+    expect(noLine).toContain('Do not call identify_callback_caller with first_name "Testa"');
+    expect(noLine).toContain("do not say why we called");
+    expect(noLine).toContain("the name THEY give");
+    expect(noLine).toMatch(/husband/);
   });
 
   it("names nobody when the number belongs to several people", () => {

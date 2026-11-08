@@ -2642,7 +2642,7 @@ describe("a call the runtime dialled (src/runtime/outbound/)", () => {
     await dialled(store);
     const { h, ws, update } = await returnedCall(store, "CA91");
     expect(spokenText(h)).toEqual([
-      "Hello, Testa. Thank you for calling Azul Vision. This is an automated assistant. This call is recorded.",
+      "Hello, thank you for calling Azul Vision. This is an automated assistant. This call is recorded. Am I speaking with Testa?",
     ]);
     // The agent knows who the number belongs to and why we called — as a
     // candidate, with nothing said until they are identified.

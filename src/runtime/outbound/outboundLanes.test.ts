@@ -191,8 +191,8 @@ describe("a returned call on an outbound lane (v106)", () => {
       const g = callbackGreeting(match);
       expect(g).toMatch(/Azul Vision/);
       expect(g).toContain(OUTBOUND_RECORDING_CLAUSE);
-      // A single match is greeted by name and asked nothing; anyone else is
-      // asked who is calling, after the clause.
+      // A single match is asked "Am I speaking with <first name>?" (v187);
+      // anyone else is asked who is calling. Either way, after the clause.
       const asks = g.indexOf("?");
       if (asks >= 0) expect(g.indexOf(OUTBOUND_RECORDING_CLAUSE)).toBeLessThan(asks);
     }
