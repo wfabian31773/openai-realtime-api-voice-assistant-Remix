@@ -18,6 +18,7 @@ import {
   NPX_OUTREACH_TOOLS,
   STAFF_CALLBACK_TOOL_NAME,
   outreachSessionFor,
+  resetOutreachAvailabilityForTests,
   resetOutreachSessionsForTests,
   setNpxOutreachDepsForTests,
   spokenClock,
@@ -54,7 +55,12 @@ const DATA = {
 
 let store: FakeOutboundStore;
 let attemptId: string;
-let npx: { offer: ReturnType<typeof vi.fn>; book: ReturnType<typeof vi.fn>; reportCancel: ReturnType<typeof vi.fn> };
+let npx: {
+  availability: ReturnType<typeof vi.fn>;
+  offer: ReturnType<typeof vi.fn>;
+  book: ReturnType<typeof vi.fn>;
+  reportCancel: ReturnType<typeof vi.fn>;
+};
 let cancel: ReturnType<typeof vi.fn>;
 let fileTicket: ReturnType<typeof vi.fn>;
 
@@ -64,10 +70,12 @@ beforeEach(async () => {
   // swaps all three (npxOutreachDemo.test.ts).
   vi.stubEnv('NPX_OUTREACH_MODE', 'live');
   resetOutreachSessionsForTests();
+  resetOutreachAvailabilityForTests();
   store = new FakeOutboundStore();
   store.addContact({ id: 'c1', phone: '+15555550111', status: 'calling', firstName: 'Testa', lastName: 'Synthetic', customData: { ...DATA } });
   attemptId = await store.startAttempt('c1', store.campaignId, 1);
   npx = {
+    availability: vi.fn(async () => ({ ok: true, latestDay: '2041-02-27', slots: [SLOT_A, SLOT_B], truncated: false })),
     offer: vi.fn(async () => ({ ok: true, latestDay: '2041-02-27', slots: [SLOT_A, SLOT_B] })),
     book: vi.fn(async () => ({ ok: true, bookingId: 'booking-1', alreadyBooked: false, recordGroupDiffers: false, slot: SLOT_A })),
     reportCancel: vi.fn(async () => ({ ok: true })),
@@ -97,12 +105,12 @@ const DIALLED = () => ({
 const run = (name: string, args: Record<string, unknown> = {}) => getTool(name)!.handler({ ...DIALLED(), ...args });
 const verify = () => run(CONFIRM_DOB_TOOL_NAME, { date_of_birth: 'January 2nd, 1950' });
 
-describe('describe_upcoming_appointment (operator, 2026-10-21: the visit and its date, then the offer)', () => {
-  it('says the kind of visit and its date and offers a sooner appointment — not the time, the office or the doctor', async () => {
+describe('describe_upcoming_appointment (operator, 2026-10-21 and 2026-11-08: the visit and its date, then where the openings are and what works best)', () => {
+  it('says the kind of visit and its date, where the sooner openings are, and asks what day and time work best — not the time, the office or the doctor', async () => {
     const r = (await run(DESCRIBE_TOOL_NAME)) as Record<string, unknown>;
     expect(r).toMatchObject({ success: true, appointment: 'a dilated eye exam on Wednesday, March 20' });
     expect(r.say).toBe(
-      "Our records show you have a dilated eye exam on Wednesday, March 20. The reason for this call is that we'd like to offer you a sooner appointment. Does that interest you?",
+      'Our records show you have a dilated eye exam on Wednesday, March 20. We have availability sooner at our partner location in Testville. What day and time work best for you?',
     );
     expect(JSON.stringify(r)).not.toMatch(/9:00|Test Office|Partner One|1950|Test Group/);
     expect(outreachSessionFor(SID)!.described).toBe(true);
@@ -118,16 +126,18 @@ describe('describe_upcoming_appointment (operator, 2026-10-21: the visit and its
     expect(next).toContain('not_interested');
   });
 
-  it('after the offer, a matching date of birth goes straight to the options', async () => {
+  it('after the offer, a matching date of birth goes straight to the search, with the day and time they said', async () => {
     await run(DESCRIBE_TOOL_NAME);
     const r = (await verify()) as Record<string, unknown>;
     expect(r).toMatchObject({ success: true, verified: true });
-    expect(JSON.stringify(r)).toContain(`Call ${FIND_SOONER_TOOL_NAME} now`);
+    expect(String(r.next)).toContain(`call ${FIND_SOONER_TOOL_NAME} now`);
+    expect(String(r.next)).toContain('What day and time work best for you?');
   });
 
-  it('without the offer first, a matching date of birth makes it then', async () => {
+  it('without the offer first, a matching date of birth makes it then, asking what works best', async () => {
     const r = (await verify()) as Record<string, unknown>;
-    expect(JSON.stringify(r)).toMatch(/we'd like to offer them a sooner appointment/);
+    expect(String(r.next)).toMatch(/we have availability sooner at a partner location/);
+    expect(String(r.next)).toContain('What day and time work best for you?');
   });
 
   it('once confirmed, says so instead of offering again', async () => {
@@ -290,7 +300,10 @@ describe('confirm_patient_birthdate', () => {
 
   it('asks the model only for what the person said', () => {
     expect(Object.keys(getTool(CONFIRM_DOB_TOOL_NAME)!.input_schema.properties)).toEqual(['date_of_birth']);
-    expect(getTool(FIND_SOONER_TOOL_NAME)!.input_schema.properties).toEqual({});
+    // What the person asked for, never who they are.
+    expect(Object.keys(getTool(FIND_SOONER_TOOL_NAME)!.input_schema.properties)).toEqual([
+      'on_date', 'from_date', 'to_date', 'weekdays', 'time_of_day', 'earliest_time', 'latest_time', 'city',
+    ]);
     expect(Object.keys(getTool(BOOK_SOONER_TOOL_NAME)!.input_schema.properties)).toEqual(['option']);
   });
 });
@@ -298,25 +311,32 @@ describe('confirm_patient_birthdate', () => {
 describe('find_sooner_exam', () => {
   it('will not look before the person is confirmed', async () => {
     expect(await run(FIND_SOONER_TOOL_NAME)).toMatchObject({ success: false, error: 'not_confirmed_yet' });
-    expect(npx.offer).not.toHaveBeenCalled();
   });
 
-  it('asks NPX with the record\'s medical group, partners and appointment date, and reads the slots back', async () => {
+  it('reads the availability with the record\'s medical group, partners and appointment date, and offers day, date, time and city', async () => {
     await verify();
-    const r = (await run(FIND_SOONER_TOOL_NAME)) as unknown as { options: Array<{ option: number; when_and_where: string }> };
-    expect(npx.offer).toHaveBeenCalledWith({
+    const r = (await run(FIND_SOONER_TOOL_NAME)) as unknown as {
+      options: Array<{ option: number; when: string; city: string; provider: string }>;
+      say: string;
+    };
+    expect(npx.availability).toHaveBeenCalledWith({
       medicalGroupName: 'Test Group CAP',
       partnerNames: ['Partner One Optometry'],
       replacedAppointmentDate: '2041-03-20',
       minDaysSooner: MIN_DAYS_SOONER,
+      limit: 300,
     });
+    expect(npx.offer).not.toHaveBeenCalled();
     expect(r.options.map((o) => o.option)).toEqual([1, 2]);
-    expect(r.options[0].when_and_where).toBe('Monday, February 4 at 9:00 AM, at Partner One Optometry, 1 Test St, Testville, CA 90000');
+    expect(r.options[0]).toMatchObject({ when: 'Monday, February 4 at 9:00 AM', city: 'Testville', provider: 'Dr Test' });
+    expect(r.say).toBe('I have Monday, February 4 at 9:00 AM or Wednesday, February 6 at 2:30 PM, in Testville. Would either of those work for you?');
+    // Never the street address before it is booked.
+    expect(r.say).not.toContain('1 Test St');
   });
 
   it('nothing sooner is an answer: the current appointment stays', async () => {
     await verify();
-    npx.offer.mockResolvedValueOnce({ ok: true, latestDay: '2041-02-27', slots: [] });
+    npx.availability.mockResolvedValueOnce({ ok: true, latestDay: '2041-02-27', slots: [], truncated: false });
     const r = await run(FIND_SOONER_TOOL_NAME);
     expect(r).toMatchObject({ success: true, options: [] });
     expect(JSON.stringify(r)).toMatch(/stays as it is/);
@@ -324,7 +344,7 @@ describe('find_sooner_exam', () => {
 
   it('an NPX failure is never spoken as one', async () => {
     await verify();
-    npx.offer.mockResolvedValueOnce({ ok: false, error: 'server' });
+    npx.availability.mockResolvedValue({ ok: false, error: 'server' });
     const r = await run(FIND_SOONER_TOOL_NAME);
     expect(r).toMatchObject({ success: false, error: 'server' });
     expect(JSON.stringify(r)).toMatch(/Do not say anything failed/);
@@ -351,7 +371,9 @@ describe('book_sooner_exam', () => {
     expect(npx.reportCancel).toHaveBeenCalledWith('booking-1', 'cancelled');
     expect(store.contacts.get('c1')!.status).toBe('completed');
     expect(store.contacts.get('c1')!.notes).toBe('npx_booking:booking-1');
-    expect(String(r.say)).toMatch(/You're booked for Monday, February 4 at 9:00 AM, at Partner One Optometry/);
+    // Said once, after booking: when, with whom, and the street address without the state and ZIP.
+    expect(String(r.say)).toMatch(/^You're booked for Monday, February 4 at 9:00 AM with Dr Test, at Partner One Optometry, 1 Test St, Testville\. /);
+    expect(String(r.say)).not.toContain('CA 90000');
     expect(String(r.say)).toMatch(/I've also cancelled your appointment with us on Wednesday, March 20/);
   });
 

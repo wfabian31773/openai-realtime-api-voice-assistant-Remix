@@ -36,6 +36,7 @@ import {
   NPX_OUTREACH_LIVE_CAMPAIGN_KEY,
   NPX_OUTREACH_TOOLS,
   STAFF_CALLBACK_TOOL_NAME,
+  resetOutreachAvailabilityForTests,
   resetOutreachSessionsForTests,
   setNpxOutreachDepsForTests,
 } from '../tools/npxOutreachTools';
@@ -152,6 +153,7 @@ const SLOT: NpxSlot = {
 function fakeNpx() {
   return {
     configured: true,
+    availability: vi.fn(async () => ({ ok: true, latestDay: '2041-02-27', slots: [SLOT], truncated: false })),
     offer: vi.fn(async () => ({ ok: true, latestDay: '2041-02-27', slots: [SLOT] })),
     book: vi.fn(async () => ({ ok: true, bookingId: 'booking-1', alreadyBooked: false, recordGroupDiffers: false, slot: SLOT })),
     reportCancel: vi.fn(async () => ({ ok: true })),
@@ -173,6 +175,7 @@ function seed(source: string) {
 
 beforeEach(async () => {
   resetOutreachSessionsForTests();
+  resetOutreachAvailabilityForTests();
   seed(NPX_OUTREACH_DEMO_SOURCE);
   attemptId = await store.startAttempt('c1', store.campaignId, 1);
   live = fakeNpx();
@@ -216,14 +219,14 @@ describe('a demo call books in the demo NPX and touches nothing live', () => {
     const info = vi.spyOn(console, 'info').mockImplementation(() => {});
     const r = await bookThrough(NPX_OUTREACH_DEMO_CAMPAIGN_KEY);
     expect(r).toMatchObject({ success: true, booked: true });
-    expect(demo.offer).toHaveBeenCalledTimes(1);
+    expect(demo.availability).toHaveBeenCalledTimes(1);
     expect(demo.book).toHaveBeenCalledTimes(1);
     expect(demo.reportCancel).toHaveBeenCalledWith('booking-1', 'cancelled');
-    expect(demo.offer.mock.calls[0]).toEqual([
+    expect(demo.availability.mock.calls[0]).toEqual([
       expect.objectContaining({ medicalGroupName: DEMO_PATIENTS[0].medicalGroup, partnerNames: [DEMO_PARTNER] }),
     ]);
     // Nothing live: not production NPX, not NextGen.
-    expect(live.offer).not.toHaveBeenCalled();
+    expect(live.availability).not.toHaveBeenCalled();
     expect(live.book).not.toHaveBeenCalled();
     expect(live.reportCancel).not.toHaveBeenCalled();
     expect(cancel).not.toHaveBeenCalled();
@@ -256,7 +259,7 @@ describe('a demo call books in the demo NPX and touches nothing live', () => {
     vi.spyOn(console, 'info').mockImplementation(() => {});
     await bookThrough(campaign);
     expect(demo.book).toHaveBeenCalledTimes(1);
-    expect(live.offer).not.toHaveBeenCalled();
+    expect(live.availability).not.toHaveBeenCalled();
     expect(live.book).not.toHaveBeenCalled();
     expect(cancel).not.toHaveBeenCalled();
     await run(campaign, STAFF_CALLBACK_TOOL_NAME, { request: 'a person please' });
@@ -270,7 +273,7 @@ describe('a demo call books in the demo NPX and touches nothing live', () => {
     await bookThrough(NPX_OUTREACH_LIVE_CAMPAIGN_KEY);
     expect(live.book).toHaveBeenCalledTimes(1);
     expect(cancel).toHaveBeenCalledTimes(1);
-    expect(demo.offer).not.toHaveBeenCalled();
+    expect(demo.availability).not.toHaveBeenCalled();
     expect(demo.book).not.toHaveBeenCalled();
     await run(NPX_OUTREACH_LIVE_CAMPAIGN_KEY, STAFF_CALLBACK_TOOL_NAME, { request: 'a person please' });
     expect(fileTicket).toHaveBeenCalledTimes(1);
@@ -405,7 +408,7 @@ describe('one lane in both modes: going live is the environment variable and not
       (lane!.agent as unknown as { dispatch(n: string, a: object): Promise<{ output: string }> }).dispatch(n, a);
     expect(JSON.parse((await dispatch(CONFIRM_DOB_TOOL_NAME, { date_of_birth: '03/15/1980' })).output)).toMatchObject({ verified: true });
     await dispatch(FIND_SOONER_TOOL_NAME, {});
-    expect(demo.offer).toHaveBeenCalledTimes(1);
-    expect(live.offer).not.toHaveBeenCalled();
+    expect(demo.availability).toHaveBeenCalledTimes(1);
+    expect(live.availability).not.toHaveBeenCalled();
   });
 });

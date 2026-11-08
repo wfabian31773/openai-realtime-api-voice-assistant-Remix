@@ -35,6 +35,29 @@ describe('without a key', () => {
   });
 });
 
+describe('availability (2026-11-08: every slot the call may offer, by the offer\'s rules)', () => {
+  const ASK = { medicalGroupName: 'Test Group CAP', partnerNames: ['Partner One'], replacedAppointmentDate: '2041-03-20', minDaysSooner: 21, limit: 300 };
+
+  it('posts to the availability endpoint and hands back every slot and whether more qualify', async () => {
+    const f = reply(200, { ok: true, latestDay: '2041-02-27', count: 3, truncated: true, slots: [SLOT, SLOT, SLOT] });
+    const r = await createNpxOutreachClient(ENV, f as never).availability(ASK);
+    expect(r).toEqual({ ok: true, latestDay: '2041-02-27', slots: [SLOT, SLOT, SLOT], truncated: true });
+    const [url, init] = f.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe(`${NPX_OUTREACH_DEFAULT_BASE_URL}/api/exchange/outreach/availability`);
+    expect(JSON.parse(String(init.body))).toEqual(ASK);
+  });
+
+  it('an NPX without the endpoint says not_supported, so the tools can fall back to the offer', async () => {
+    const r = await createNpxOutreachClient(ENV, reply(404, { error: 'Not found' }) as never).availability(ASK);
+    expect(r).toEqual({ ok: false, error: 'not_supported' });
+  });
+
+  it('fails closed like every other call', async () => {
+    expect(await createNpxOutreachClient({}, vi.fn() as never).availability(ASK)).toEqual({ ok: false, error: 'not_configured' });
+    expect(await createNpxOutreachClient(ENV, reply(422, { error: 'no_partners' }) as never).availability(ASK)).toEqual({ ok: false, error: 'no_partners' });
+  });
+});
+
 describe('offer', () => {
   it('posts to the offer endpoint with the bearer key and hands back at most two slots', async () => {
     const f = reply(200, { ok: true, latestDay: '2041-02-27', count: 3, slots: [SLOT, SLOT, SLOT] });
