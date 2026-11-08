@@ -1444,9 +1444,14 @@ registerTool({
                 }),
             ...(formChannel && !redirect ? { formChannel } : {}),
             // v188: onto the records case as `delivery_method_requested`, which
-            // no voice path set before. An app without the field strips it.
+            // no voice path set before. `deliveryMethodRequested` is the field
+            // ticketing-app #443 (merged 2026-11-08) added to create-ticket and
+            // writes onto the case it opens. That field is an enum with no
+            // fallback, so a value outside CASE_DELIVERY_METHODS is a 400:
+            // caseDeliveryMethod only ever returns one of four values in it.
+            // An app without #443 strips the field (its schema is not strict).
             ...(caseDeliveryMethod(deliveryMethod)
-              ? { recordsDeliveryMethod: caseDeliveryMethod(deliveryMethod) }
+              ? { deliveryMethodRequested: caseDeliveryMethod(deliveryMethod) }
               : {}),
             // A NAME, not a description. The ticketing agent, 2026-08-13: "Send
             // requestorName even when the requester is the patient. Zero of 470 rows

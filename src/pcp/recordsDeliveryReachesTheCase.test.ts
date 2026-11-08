@@ -75,7 +75,7 @@ describe('the method PCP asked travels as a field', () => {
       const p = (ticketing.createTicket.mock.calls as unknown as unknown[][])[0]?.[0] as Record<string, unknown> | undefined;
       expect(p, `the records library must be the one that filed: ${JSON.stringify(filed)} pcp=${ticketing.createPcpTicket.mock.calls.length}`).toBeTruthy();
       expect(p!.departmentId).toBe(16);
-      expect(p!.recordsDeliveryMethod).toBe(onCase);
+      expect(p!.deliveryMethodRequested).toBe(onCase);
       expect(String(p!.description)).toContain(`Delivery: by ${said}`);
     });
   }
@@ -86,7 +86,7 @@ describe('the method PCP asked travels as a field', () => {
     const filed = await call(agent, 'create_pcp_task', { narrative: 'Requesting a copy of the records for a mutual patient.' });
     expect(filed.success, JSON.stringify(filed)).toBe(true);
     const p = (ticketing.createTicket.mock.calls as unknown as unknown[][])[0]?.[0] as Record<string, unknown>;
-    expect(p.recordsDeliveryMethod).toBeUndefined();
+    expect(p.deliveryMethodRequested).toBeUndefined();
     expect(String(p.description)).toContain('Delivery: NOT CAPTURED');
   });
 });

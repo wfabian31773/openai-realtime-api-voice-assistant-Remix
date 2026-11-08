@@ -11,8 +11,8 @@
  * Driven through `runTool`, the entry point the model calls, with the ticketing
  * client mocked at `createTicket`. What is pinned: the question (in PCP's own
  * words), one field per question, each asked once, the destination in the
- * words of the method, the ticket's Delivery line, and `recordsDeliveryMethod`
- * on the payload — never on a redirected request, and never asked when the
+ * words of the method, the ticket's Delivery line, and `deliveryMethodRequested`
+ * on the payload (ticketing-app #443's create-ticket field) — never on a redirected request, and never asked when the
  * signing form asks it. Synthetic callers throughout.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
@@ -31,6 +31,7 @@ import {
   DELIVERY_DESTINATION_QUESTION,
   normalizeDeliveryMethod,
   caseDeliveryMethod,
+  RECORDS_DELIVERY_METHODS,
 } from './recordsDeliveryMethod';
 import { PROMPTS as DIRECTOR_PROMPTS } from '../pcp/director';
 
@@ -109,7 +110,7 @@ describe('the method is asked, in the words PCP already uses', () => {
     expect(third.success, JSON.stringify(third)).toBe(true);
     const p = create.mock.calls[0][0] as unknown as Record<string, unknown>;
     expect(p.departmentId).toBe(16);
-    expect(p.recordsDeliveryMethod).toBe('fax');
+    expect(p.deliveryMethodRequested).toBe('fax');
     expect(String(p.description)).toContain('Delivery: by fax');
     expect(String(p.description)).toContain('Send to: 202-555-0199');
   });
@@ -142,7 +143,7 @@ describe('the method is asked, in the words PCP already uses', () => {
     const r = (await runTool('file_records_ticket', { ...PROVIDER, call_sid: sid })) as Out;
     expect(r.success, JSON.stringify(r)).toBe(true);
     const p = create.mock.calls[0][0] as unknown as Record<string, unknown>;
-    expect(p.recordsDeliveryMethod).toBeUndefined();
+    expect(p.deliveryMethodRequested).toBeUndefined();
     expect(String(p.description)).toContain('Delivery: NOT CAPTURED');
   });
 
@@ -166,7 +167,7 @@ describe('each method reaches the case in the ticketing app’s own vocabulary',
     })) as Out;
     expect(r.success, JSON.stringify(r)).toBe(true);
     const p = create.mock.calls[0][0] as unknown as Record<string, unknown>;
-    expect(p.recordsDeliveryMethod).toBe('secure_email');
+    expect(p.deliveryMethodRequested).toBe('secure_email');
     expect(String(p.description)).toContain('Delivery: by email');
     expect(String(p.description)).toContain('Send to: office@example.test');
   });
@@ -176,7 +177,7 @@ describe('each method reaches the case in the ticketing app’s own vocabulary',
     const r = (await runTool('file_records_ticket', { ...PROVIDER, delivery_method: 'pick up', call_sid: freshSid() })) as Out;
     expect(r.success, JSON.stringify(r)).toBe(true);
     const p = create.mock.calls[0][0] as unknown as Record<string, unknown>;
-    expect(p.recordsDeliveryMethod).toBe('pickup');
+    expect(p.deliveryMethodRequested).toBe('pickup');
     expect(String(p.description)).toContain('Send to: pick up at the office');
   });
 
@@ -186,8 +187,22 @@ describe('each method reaches the case in the ticketing app’s own vocabulary',
       ...PROVIDER, delivery_method: 'mail', deliver_to: '1 Example Way, Testville', call_sid: freshSid(),
     });
     const p = create.mock.calls[0][0] as unknown as Record<string, unknown>;
-    expect(p.recordsDeliveryMethod).toBe('mail');
+    expect(p.deliveryMethodRequested).toBe('mail');
     expect(String(p.description)).toContain('Delivery: by mail');
+  });
+
+  /**
+   * Ticketing-app #443's create-ticket takes `deliveryMethodRequested` as an
+   * enum with no fallback, so a value outside its list is an HTTP 400 and the
+   * request loses its ticket. Pinned copy of `CASE_DELIVERY_METHODS`
+   * (ticketing-app lib/medical-records/delivery-format.ts, read 2026-11-08).
+   */
+  it('every value the payload can carry is one the ticketing app accepts', () => {
+    const APP_CASE_DELIVERY_METHODS = ['fax', 'secure_email', 'portal', 'e_fax', 'mail', 'in_person', 'pickup', 'other'];
+    for (const m of [...RECORDS_DELIVERY_METHODS, 'unspecified', null] as const) {
+      const v = caseDeliveryMethod(m);
+      if (v !== undefined) expect(APP_CASE_DELIVERY_METHODS).toContain(v);
+    }
   });
 
   it('reads the words a model sends', () => {
@@ -246,7 +261,7 @@ describe('on the clock', () => {
     expect(second.success, JSON.stringify(second)).toBe(true);
     const p = create.mock.calls[0][0] as unknown as Record<string, unknown>;
     expect(p.capClockApplies).toBe(true);
-    expect(p.recordsDeliveryMethod).toBeUndefined();
+    expect(p.deliveryMethodRequested).toBeUndefined();
     expect(String(p.description)).toContain('Delivery: NOT CAPTURED');
     expect(String(p.description)).toContain('Send to: NOT CAPTURED');
   });
@@ -279,7 +294,7 @@ describe('on the clock', () => {
     })) as Out;
     expect(r.success, JSON.stringify(r)).toBe(true);
     const p = create.mock.calls[0][0] as unknown as Record<string, unknown>;
-    expect(p.recordsDeliveryMethod).toBeUndefined();
+    expect(p.deliveryMethodRequested).toBeUndefined();
     expect(String(p.description)).toContain('Delivery: on the signed form.');
     expect(String(p.description)).not.toContain('NOT CAPTURED');
   });
@@ -294,7 +309,7 @@ describe('never asked where it does not belong', () => {
     expect(r.success, JSON.stringify(r)).toBe(true);
     const p = create.mock.calls[0][0] as unknown as Record<string, unknown>;
     expect(p.departmentId).not.toBe(16);
-    expect(p.recordsDeliveryMethod).toBeUndefined();
+    expect(p.deliveryMethodRequested).toBeUndefined();
     expect(String(p.description)).not.toContain('Delivery:');
   });
 
@@ -306,7 +321,7 @@ describe('never asked where it does not belong', () => {
     })) as Out;
     expect(r.success, JSON.stringify(r)).toBe(true);
     const p = create.mock.calls[0][0] as unknown as Record<string, unknown>;
-    expect(p.recordsDeliveryMethod).toBe('fax');
+    expect(p.deliveryMethodRequested).toBe('fax');
   });
 
   it('…and a PCP filing with no method is not asked either', async () => {

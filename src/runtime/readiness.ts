@@ -1382,7 +1382,8 @@ import { callEnvironment } from "./callRecord";
  * 2026-10-25..11-07) and no voice path set the case's requested delivery
  * method, so even PCP's answers (asked on 103 of 108) reached the ticket only
  * as prose. file_records_ticket asks the method, then the destination, each
- * once, and sends recordsDeliveryMethod for the case; PCP forwards its own.
+ * once, and sends deliveryMethodRequested for the case (ticketing-app #443's
+ * create-ticket field); PCP forwards its own.
  * Above main's v187 (#437, `ca7f65be`), which it contains. No migration.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
