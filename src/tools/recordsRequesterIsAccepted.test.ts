@@ -33,6 +33,9 @@ const PATIENT_REQUEST = {
   first_name: 'Synthia',
   last_name: 'Example',
   date_of_birth: '01/02/1950',
+  // v188 asks how they want the records; "unspecified" keeps every path
+  // these tests measure as it was.
+  delivery_method: 'unspecified',
   callback_number: '845-555-0142',
   request_description: 'a copy of my records from the last visit',
   form_channel: 'declined',

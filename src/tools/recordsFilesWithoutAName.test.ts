@@ -47,6 +47,9 @@ const NAMELESS = {
   date_range: 'everything',
   date_of_birth: '01/02/1950',
   location: 'Synthetic Clinic', // Complete live intake before testing this lane.
+  // v188 asks how they want the records. A method is answered here so the
+  // description carries no NOT CAPTURED line the name note could hide behind.
+  delivery_method: 'mail',
   callback_number: '845-531-7471',
   request_description: 'I need a copy of my records',
 };
@@ -222,6 +225,10 @@ describe('the on-clock gate asks once and then files with the gap written on the
     last_name: 'Example',
     date_of_birth: '01/02/1950',
     location: 'Synthetic Clinic', // Complete live intake before testing this lane.
+    // v188 asks how they want the records. A stated method keeps the
+    // destination-and-dates gate as these tests measure it; "unspecified"
+    // would end the destination ask (Codex P2, #438).
+    delivery_method: 'mail',
     callback_number: '845-531-7471',
     request_description: 'I need my records',
   };

@@ -51,6 +51,13 @@ import { loggableLookupError } from '../services/loggableTicketingError';
 import { verifiedDobFor, verifiedIdentityFor } from './verifiedIdentity';
 import { spokenDobFor } from './spokenDob';
 import {
+  DELIVERY_METHOD_QUESTION,
+  DELIVERY_DESTINATION_QUESTION,
+  normalizeDeliveryMethod,
+  caseDeliveryMethod,
+  deliveryLine,
+} from './recordsDeliveryMethod';
+import {
   gateRefusalsSoFar, gateRefusalAgeMs, noteGateRefusal, noteCallFact, callFactNoted,
   noteCallValue, callValue, forgetCallValue,
 } from './gateAttempts';
@@ -121,6 +128,8 @@ const PATIENT_NAME_ASK = 'patient_name';
 const ON_CLOCK_ASK = 'on_clock_fields';
 const FORM_EMAIL_ASK = 'form_email';
 const FORM_CHANNEL_ASK = 'form_channel';
+const DELIVERY_METHOD_ASK = 'delivery_method';
+const DELIVERY_DESTINATION_ASK = 'delivery_destination';
 
 /**
  * A REFUSAL NOTED LESS THAN THIS LONG AGO WAS NOTED FOR A BATCH SIBLING, NOT
@@ -548,9 +557,19 @@ registerTool({
           'case with the gap recorded on it instead of refusing. Do not set this to skip a question ' +
           'you are able to ask.',
       },
+      delivery_method: {
+        type: 'string',
+        description:
+          'How the requester wants the records: "fax", "email", "mail", or "pickup" — or ' +
+          '"unspecified" if they do not know. Not needed when a signing link was sent ' +
+          '(form_channel sms or email): the form asks it.',
+        askAs: DELIVERY_METHOD_QUESTION,
+      },
       deliver_to: {
         type: 'string',
-        description: 'Where it should go: a fax number, an office and city, an address, or "to the patient".',
+        description:
+          'Where it should go, for the method they chose: the fax number, the email address, the ' +
+          'mailing address, or an office and city.',
         askAs: 'Where should these be sent?',
       },
       date_range: {
@@ -910,6 +929,79 @@ registerTool({
       }
     }
 
+    /**
+     * HOW THEY WANT THE RECORDS, THEN WHERE — v188. Operator, 2026-11-08:
+     * *"we are never asking, how would you like to receive the records and
+     * that is never being passed back to the request."* Measured 2026-10-25..
+     * 11-07: asked on 0 of 152 records-line calls, and set on no voice case.
+     *
+     * Asked of every records request this tool keeps in Medical Records —
+     * on the clock or off it — EXCEPT when a signing link is going out (the
+     * form asks it), and except on a lane that has declared it cannot ask
+     * (`on_clock_ask_exhausted`: PCP, which asks its own and forwards the
+     * answer as `delivery_method`). A redirected request is never asked: no
+     * records leave on a ticket that left Medical Records.
+     *
+     * ONE FIELD PER QUESTION (RULE ZERO 2b): the method first, in PCP's own
+     * words, then the destination in the words of that method. Each ONCE,
+     * keyed on the call like every other ask here; a spent ask files with the
+     * gap written on the ticket, never a refusal.
+     */
+    let deliveryMethod = normalizeDeliveryMethod(input.delivery_method);
+    const formCollectsDelivery = Boolean(formChannel) && !redirect;
+    const deliveryAsked = !redirect && !formCollectsDelivery && !askExhausted;
+    // `formAskOutcome`, not a bare count: a batched sibling inside
+    // ASK_BATCH_WINDOW_MS gets the same question and spends nothing, so two
+    // filing calls in one response cannot file with the method NOT CAPTURED
+    // before the caller has heard the question (the #338 shape).
+    if (deliveryAsked && !deliveryMethod) {
+      if (formAskOutcome(callSid, DELIVERY_METHOD_ASK) === 'spent') {
+        deliveryMethod = 'unspecified';
+        console.warn(
+          `[RECORDS] delivery method not stated after one ask — filing with it NOT CAPTURED ` +
+            `(${callSid || 'no sid'})`,
+        );
+      } else {
+        return missing(
+          ['delivery_method'],
+          DELIVERY_METHOD_QUESTION,
+          'Ask exactly that, ONCE. Then call file_records_ticket again with delivery_method "fax", ' +
+            '"email", "mail" or "pickup" — or "unspecified" if they do not know — and everything ' +
+            'else you have.',
+        );
+      }
+    }
+    // A pickup needs no destination, and an email address the caller already
+    // spelled for the form is the destination for an email of the records.
+    const statedDeliverTo = str(input.deliver_to);
+    const effectiveDeliverTo =
+      statedDeliverTo ||
+      (deliveryMethod === 'pickup' ? 'pick up at the office' : '') ||
+      (deliveryMethod === 'email' && str(input.email) ? str(input.email) : '');
+    const destinationQuestion =
+      deliveryMethod === 'fax' || deliveryMethod === 'email' || deliveryMethod === 'mail'
+        ? DELIVERY_DESTINATION_QUESTION[deliveryMethod]
+        : null;
+    // Off the clock the destination was never asked before v188; with a method
+    // in hand it is one question, once. On the clock the gate below asks it.
+    // The ask is counted PER METHOD: a caller who says fax, hears the fax-number
+    // question and then switches to email is asked for the email address — a
+    // different question — once. Three methods bound it at three (Codex P2, #438).
+    if (deliveryAsked && !cap.onClock && destinationQuestion && !effectiveDeliverTo) {
+      if (formAskOutcome(callSid, `${DELIVERY_DESTINATION_ASK}:${deliveryMethod}`) !== 'spent') {
+        return missing(
+          ['deliver_to'],
+          destinationQuestion,
+          'Ask ONCE and read it back. Then call file_records_ticket again with deliver_to set to ' +
+            'what they gave, or with nothing if they cannot — it will file with the gap noted.',
+        );
+      }
+      console.warn(
+        `[RECORDS] delivery destination not given after one ask — filing with it NOT CAPTURED ` +
+          `(${callSid || 'no sid'})`,
+      );
+    }
+
     // ON THE CLOCK MEANS THE FIELDS ARE NOT OPTIONAL.
     //
     // Operator, 2026-08-13: "can we hard gate the records to require the
@@ -942,7 +1034,9 @@ registerTool({
     // decided above, once, on the same words.
     if (cap.onClock && !formChannel && !redirect) {
       const gaps: string[] = [];
-      if (!str(input.deliver_to)) gaps.push('deliver_to');
+      // An "unspecified" method is an answer about delivery (or the one ask spent),
+      // so the destination is not asked again; the dates still are (Codex P2, #438).
+      if (!effectiveDeliverTo && deliveryMethod !== 'unspecified') gaps.push('deliver_to');
       if (!str(input.date_range)) gaps.push('date_range');
       /**
        * THE UNASSIGNED EXIT, FOR A RECORDS CASE. Operator ruling, 2026-09-13,
@@ -997,7 +1091,7 @@ registerTool({
           gaps.length === 2
             ? 'Two quick things so the records team can start on this — where should these be sent, and which dates do you need covered?'
             : gaps[0] === 'deliver_to'
-              ? 'And where should these be sent — to you, or to an office?'
+              ? destinationQuestion ?? 'And where should these be sent — to you, or to an office?'
               : 'And which dates do you need covered? "Everything" is a fine answer.',
           'Ask ONCE. Whatever they answer — or if they cannot — call file_records_ticket again ' +
             'with everything you have; it will file with the gap noted for the records team.',
@@ -1014,7 +1108,7 @@ registerTool({
     // Who is asking and where it goes are the two facts this queue turns on.
     // On their own lines so a records clerk reads them rather than hunting
     // through a paragraph for a fax number.
-    const deliverTo = str(input.deliver_to);
+    const deliverTo = effectiveDeliverTo;
     const dateRange = str(input.date_range);
     // The clock line goes FIRST. A records clerk opening this ticket should not
     // have to read to the bottom to learn whether it is CAP-reportable.
@@ -1050,6 +1144,8 @@ registerTool({
        * Same wording as `ticketDeliveryNote`, so a staffer sees one phrase
        * whichever path filed the case.
        */
+      // v188: how they want it, on its own line, before where.
+      deliveryLine(deliveryMethod, formCollectsDelivery),
       deliverTo
         ? `\nSend to: ${deliverTo}`
         : formChannel
@@ -1347,6 +1443,16 @@ registerTool({
                   capClockApplies: formChannel && !redirect ? false : cap.onClock,
                 }),
             ...(formChannel && !redirect ? { formChannel } : {}),
+            // v188: onto the records case as `delivery_method_requested`, which
+            // no voice path set before. `deliveryMethodRequested` is the field
+            // ticketing-app #443 (merged 2026-11-08) added to create-ticket and
+            // writes onto the case it opens. That field is an enum with no
+            // fallback, so a value outside CASE_DELIVERY_METHODS is a 400:
+            // caseDeliveryMethod only ever returns one of four values in it.
+            // An app without #443 strips the field (its schema is not strict).
+            ...(caseDeliveryMethod(deliveryMethod)
+              ? { deliveryMethodRequested: caseDeliveryMethod(deliveryMethod) }
+              : {}),
             // A NAME, not a description. The ticketing agent, 2026-08-13: "Send
             // requestorName even when the requester is the patient. Zero of 470 rows
             // carry one. The name is the evidence that a classification was made;

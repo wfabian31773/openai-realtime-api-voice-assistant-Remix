@@ -52,6 +52,9 @@ const PCP_CALL = {
   first_name: 'Wayne',
   last_name: 'Fabian',
   date_of_birth: '03/17/1973',
+  // v188 asks how they want the records; "unspecified" keeps every path
+  // these tests measure as it was.
+  delivery_method: 'unspecified',
   callback_number: '7605551234',
   request_description: 'Patient called the PCP Support line.\n\nI need a copy of my records.',
   requester: 'the patient themselves (Wayne Fabian)',
@@ -93,20 +96,22 @@ describe('a records case always says where it is going, or that nobody said', ()
 describe('the hard gate PCP was bypassing', () => {
   it('refuses to file a patient request without a destination and a date range', async () => {
     // The exact defect: PCP filed this immediately, on the clock, with neither.
-    const r = await run();
+    // v188: a stated method keeps the destination asked; "unspecified" ends it.
+    const r = await run({ delivery_method: 'mail' });
     expect(r.success).toBe(false);
     expect(r.missingFields).toEqual(expect.arrayContaining(['deliver_to', 'date_range']));
     expect(createTicket).not.toHaveBeenCalled();
   });
 
   it('asks for whichever one is missing, in words the agent can say', async () => {
-    const noDates = await run({ deliver_to: 'to me' });
+    const noDates = await run({ delivery_method: 'mail', deliver_to: 'to me' });
     expect(noDates.missingFields).toEqual(['date_range']);
     expect(noDates.message).toMatch(/which dates/i);
 
-    const noDest = await run({ date_range: 'everything' });
+    // v188: the destination is asked in the words of the method they chose.
+    const noDest = await run({ delivery_method: 'mail', date_range: 'everything' });
     expect(noDest.missingFields).toEqual(['deliver_to']);
-    expect(noDest.message).toMatch(/where should these be sent/i);
+    expect(noDest.message).toMatch(/what mailing address should we send them to/i);
   });
 
   it('accepts vague answers — the gate is on presence, not quality', async () => {

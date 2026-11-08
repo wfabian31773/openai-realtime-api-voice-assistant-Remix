@@ -2942,6 +2942,15 @@ async function fileToMedicalRecords(
         ? { deliver_to: String(state.recordsDeliveryMethod) }
         : {}),
     /**
+     * AND THE METHOD ITSELF, AS A FIELD — v188. PCP asked it on 103 of 108
+     * records calls (2026-10-25..11-07) and the answer reached the ticket only
+     * inside the "Send to:" prose; `mr_cases.delivery_method_requested` was
+     * empty on every PCP case until a staffer filled it. Forwarded so the
+     * records tool puts it on the case. "unspecified" is passed too: it is an
+     * answer, and it tells the tool not to ask a question this lane already did.
+     */
+    ...(state.recordsDeliveryMethod ? { delivery_method: state.recordsDeliveryMethod } : {}),
+    /**
      * PCP CANNOT ASK, SO IT SAYS SO. Operator ruling, 2026-09-13, choosing this
      * over adding a date-range question to this lane.
      *
