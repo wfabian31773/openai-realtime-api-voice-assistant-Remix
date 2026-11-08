@@ -1031,7 +1031,9 @@ registerTool({
     // decided above, once, on the same words.
     if (cap.onClock && !formChannel && !redirect) {
       const gaps: string[] = [];
-      if (!effectiveDeliverTo) gaps.push('deliver_to');
+      // An "unspecified" method is an answer about delivery (or the one ask spent),
+      // so the destination is not asked again; the dates still are (Codex P2, #438).
+      if (!effectiveDeliverTo && deliveryMethod !== 'unspecified') gaps.push('deliver_to');
       if (!str(input.date_range)) gaps.push('date_range');
       /**
        * THE UNASSIGNED EXIT, FOR A RECORDS CASE. Operator ruling, 2026-09-13,

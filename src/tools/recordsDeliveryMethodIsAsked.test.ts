@@ -203,6 +203,44 @@ describe('on the clock', () => {
     expect(create).not.toHaveBeenCalled();
   });
 
+  /**
+   * Codex P2, #438. "I don't know" is an ANSWER to how they want the records,
+   * and so is a method ask that went unanswered. Asking where to send them next
+   * is a second delivery question to a caller who has just said they cannot
+   * say — so only the dates are asked, and the case files with the destination
+   * written as not captured.
+   */
+  it('"unspecified" ends the delivery questions: only the dates are asked, then it files with the destination NOT CAPTURED', async () => {
+    const create = vi.spyOn(await client(), 'createTicket').mockResolvedValueOnce(filed('VA-188-ONCLOCK-U'));
+    const sid = freshSid();
+    const first = (await runTool('file_records_ticket', {
+      ...PATIENT_NO_LINK, delivery_method: 'unspecified', call_sid: sid,
+    })) as Out;
+    expect(first.missingFields).toEqual(['date_range']);
+    expect(String(first.message)).toMatch(/which dates/i);
+    expect(String(first.message)).not.toMatch(/where should these be sent|send them to/i);
+    laterTurn();
+    const second = (await runTool('file_records_ticket', {
+      ...PATIENT_NO_LINK, delivery_method: 'unspecified', date_range: 'everything', call_sid: sid,
+    })) as Out;
+    expect(second.success, JSON.stringify(second)).toBe(true);
+    const p = create.mock.calls[0][0] as unknown as Record<string, unknown>;
+    expect(p.capClockApplies).toBe(true);
+    expect(p.recordsDeliveryMethod).toBeUndefined();
+    expect(String(p.description)).toContain('Delivery: NOT CAPTURED');
+    expect(String(p.description)).toContain('Send to: NOT CAPTURED');
+  });
+
+  it('an unanswered method ask counts the same: the destination is not asked after it', async () => {
+    vi.spyOn(await client(), 'createTicket');
+    const sid = freshSid();
+    const first = (await runTool('file_records_ticket', { ...PATIENT_NO_LINK, call_sid: sid })) as Out;
+    expect(first.missingFields).toEqual(['delivery_method']);
+    laterTurn();
+    const second = (await runTool('file_records_ticket', { ...PATIENT_NO_LINK, call_sid: sid })) as Out;
+    expect(second.missingFields).toEqual(['date_range']);
+  });
+
   it('with only the destination missing, it is asked in the words of the method', async () => {
     vi.spyOn(await client(), 'createTicket');
     const r = (await runTool('file_records_ticket', {

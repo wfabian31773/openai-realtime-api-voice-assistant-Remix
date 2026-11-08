@@ -163,12 +163,12 @@ describe('the caller with no mobile and no email hears where the form is', () =>
     const api = await client();
     const create = vi.spyOn(api, 'createTicket').mockResolvedValueOnce(filed('VA-FORM-6'));
     const sid = freshSid();
-    const first = (await runTool('file_records_ticket', { ...PATIENT, form_channel: 'verbal', call_sid: sid })) as Out;
+    const first = (await runTool('file_records_ticket', { ...PATIENT, form_channel: 'verbal', delivery_method: 'mail', call_sid: sid })) as Out;
     expect(first.success).toBe(false);
     expect(first.missingFields).toEqual(['deliver_to', 'date_range']);
 
     const r = (await runTool('file_records_ticket', {
-      ...PATIENT, form_channel: 'verbal', deliver_to: 'to me', date_range: 'everything', call_sid: sid,
+      ...PATIENT, form_channel: 'verbal', delivery_method: 'mail', deliver_to: 'to me', date_range: 'everything', call_sid: sid,
     })) as Out;
     expect(r.success).toBe(true);
     const p = create.mock.calls[0][0] as unknown as Record<string, unknown>;
@@ -318,7 +318,7 @@ describe('v79 — the tool asks the channel when the model did not', () => {
   });
 
   it('"declined" is an answer: not asked again, the destination-and-dates gate takes over as before', async () => {
-    const r = (await runTool('file_records_ticket', { ...PATIENT, form_channel: 'declined', call_sid: freshSid() })) as Out;
+    const r = (await runTool('file_records_ticket', { ...PATIENT, form_channel: 'declined', delivery_method: 'mail', call_sid: freshSid() })) as Out;
     expect(r.success).toBe(false);
     expect(r.missingFields).toEqual(['deliver_to', 'date_range']);
   });
@@ -414,7 +414,7 @@ describe('v103 — a request routed out of Medical Records', () => {
   it('a records request the patient declined the link on still gets the destination-and-dates ask (the control)', async () => {
     const api = await client();
     const create = vi.spyOn(api, 'createTicket');
-    const r = (await runTool('file_records_ticket', { ...PATIENT, form_channel: 'declined', call_sid: freshSid() })) as Out;
+    const r = (await runTool('file_records_ticket', { ...PATIENT, form_channel: 'declined', delivery_method: 'mail', call_sid: freshSid() })) as Out;
     expect(r.success).toBe(false);
     expect(r.missingFields).toEqual(['deliver_to', 'date_range']);
     expect(create).not.toHaveBeenCalled();

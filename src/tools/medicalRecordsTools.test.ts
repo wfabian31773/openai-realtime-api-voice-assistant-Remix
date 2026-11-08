@@ -525,6 +525,8 @@ describe('the CAP fields are required when the clock is running', () => {
     const { deliver_to, date_range, ...bare } = BASE;
     const r = (await runTool('file_records_ticket', {
       ...bare,
+      // v188: a stated method keeps the destination asked; "unspecified" ends it.
+      delivery_method: 'mail',
       requester: 'I am the patient',
       request_description: 'I need my records',
     })) as Record<string, unknown>;
@@ -539,6 +541,7 @@ describe('the CAP fields are required when the clock is running', () => {
     const { deliver_to: _d, date_range: _r, ...bare } = BASE;
     const withDest = (await runTool('file_records_ticket', {
       ...bare,
+      delivery_method: 'mail',
       deliver_to: 'to me',
       request_description: 'I need my records',
     })) as Record<string, unknown>;
@@ -547,6 +550,7 @@ describe('the CAP fields are required when the clock is running', () => {
 
     const withDates = (await runTool('file_records_ticket', {
       ...bare,
+      delivery_method: 'mail',
       date_range: 'everything',
       request_description: 'I need my records',
     })) as Record<string, unknown>;
@@ -591,6 +595,7 @@ describe('the CAP fields are required when the clock is running', () => {
     const { deliver_to, date_range, ...bare } = BASE;
     const r = (await runTool('file_records_ticket', {
       ...bare,
+      delivery_method: 'mail',
       requester: 'I have power of attorney for my mother',
       request_description: 'her chart',
     })) as Record<string, unknown>;
