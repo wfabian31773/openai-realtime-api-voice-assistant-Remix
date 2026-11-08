@@ -129,12 +129,25 @@ function firstNameOf(match: CallbackMatch): string | null {
  * is calling. Either way it says it is automated and recorded before anything
  * is asked (OUTBOUND_RECORDING_CLAUSE), never says the last name, and never
  * says why we called: that waits for identification.
+ *
+ * v187: THE NAME IS ASKED AS A QUESTION, "Am I speaking with <first name>?",
+ * the form standing instruction 16 makes the hard rule on every other lane.
+ * Until v187 this greeting asked nothing ("Hello, Wayne. … This call is
+ * recorded."), and a greeting that asks nothing leaves the caller nothing to
+ * answer: the bridge owes the agent a turn after it, and xAI answers that
+ * bare `response.create` with no response at all — 11 of 11 times against the
+ * lane's real prompt, offline, 2026-11-07. Live the same evening, 4 of 4
+ * returned calls on npx-outreach heard the greeting and then silence until
+ * they hung up (11–41 s); one caller rang back three times. A caller who
+ * speaks over the greeting is not heard either (the opening is not
+ * interruptible), so the question at its end is what makes them speak again.
+ * Asked rather than said, the name is said once.
  */
 export function callbackGreeting(match: CallbackMatch, opts: { sayName?: boolean } = {}): string {
   const first = firstNameOf(match);
   // SI Assistant must not name the patient before they are verified (P2-A).
   if (first && opts.sayName !== false) {
-    return `Hello, ${first}. Thank you for calling Azul Vision. This is an automated assistant. ${OUTBOUND_RECORDING_CLAUSE}.`;
+    return `Hello, thank you for calling Azul Vision. This is an automated assistant. ${OUTBOUND_RECORDING_CLAUSE}. Am I speaking with ${first}?`;
   }
   return `Thank you for calling Azul Vision. This is an automated assistant. ${OUTBOUND_RECORDING_CLAUSE}. May I have your first and last name?`;
 }
@@ -189,9 +202,13 @@ export function callbackSteps(ctx: CallbackContext, opts: { nameBeforeVerify?: b
     );
   } else if (ctx.match.kind === "one" && first) {
     lines.push(
-      `Their number matches someone we called: ${first}, and your opening greeted them by that name. ${describeLastAttempt(ctx.match.contact)}`,
-      `Unless their reply says they are not ${first}, or that ${first} is not there, they are ${first}: call ${IDENTIFY_TOOL} with first_name "${first}" before you say anything else.`,
-      `If they say they are not ${first}, or that ${first} is not there: do not say why we called. Ask for their first and last name and call ${IDENTIFY_TOOL} with what they say.`,
+      `Their number matches someone we called: ${first}, and your opening asked "Am I speaking with ${first}?". ${describeLastAttempt(ctx.match.contact)}`,
+      // v187: the "no" comes FIRST. Read after the yes rule, the model called
+      // the tool with this first name for a caller who had just said they were
+      // somebody else, 3 of 3 times offline.
+      `If their reply is a no — they are someone else (a husband, a wife, a parent, a child, anyone), or ${first} is not there — they are NOT ${first}. ` +
+        `Do not call ${IDENTIFY_TOOL} with first_name "${first}", and do not say why we called. Ask for their first and last name, then call ${IDENTIFY_TOOL} with the name THEY give.`,
+      `Otherwise — a yes, or any reply that is not a no — they are ${first}: call ${IDENTIFY_TOOL} with first_name "${first}" before you say anything else.`,
     );
   } else if (ctx.match.kind === "several") {
     lines.push(

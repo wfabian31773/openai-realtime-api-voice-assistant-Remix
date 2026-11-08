@@ -1365,8 +1365,19 @@ import { callEnvironment } from "./callRecord";
  * Above main's v185 (#435, `b3660b3a`), which it contains along with v184
  * (#424, `101cdea6`). No migration.
  */
+/**
+ * v187 — A RETURNED CALL IS ASKED WHO IT IS (2026-11-08). The outbound lanes'
+ * returned-call greeting asked nothing ("Hello, <first name>. … This call is
+ * recorded."); the bridge then owed the agent a turn, and xAI answers that
+ * bare response.create with no response (11 of 11 offline). Live 2026-11-07,
+ * 4 of 4 returned calls on npx-outreach heard silence until they hung up. The
+ * greeting now ends "Am I speaking with <first name>?", and the callback steps
+ * state the no before the yes: with the yes first, a caller who said they were
+ * somebody else was identified as the patient (3 of 3 offline). Above main's
+ * v186 (#436, `70497012`), which it contains. No migration.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v186-the-after-hours-line-asks-for-the-office-once-20261107";
+  "voice-runtime-v187-a-returned-call-is-asked-who-it-is-20261108";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can
