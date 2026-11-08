@@ -44,11 +44,18 @@ export const DELIVERY_DESTINATION_QUESTION: Record<Exclude<RecordsDeliveryMethod
  */
 export function normalizeDeliveryMethod(raw: unknown): RecordsDeliveryMethod | 'unspecified' | null {
   if (typeof raw !== 'string') return null;
-  const s = raw.trim().toLowerCase().replace(/['’]/g, '').replace(/[\s_-]+/g, ' ');
+  // A leading "by" is how the question invites the answer ("by fax, by email,
+  // or by mail"), so it is read off before anything else (Codex P2, #438).
+  const s = raw
+    .trim()
+    .toLowerCase()
+    .replace(/['’]/g, '')
+    .replace(/[\s_-]+/g, ' ')
+    .replace(/^(by|via|through) /, '');
   if (!s) return null;
   if (/^(e ?fax|fax|facsimile)\b/.test(s)) return 'fax';
   if (/^(e ?mail|secure e ?mail|email)\b/.test(s)) return 'email';
-  if (/^(mail|postal|post|us mail|by mail|regular mail|snail mail)\b/.test(s)) return 'mail';
+  if (/^(mail|postal|post|us mail|regular mail|snail mail)\b/.test(s)) return 'mail';
   if (/^(pick ?up|in person|collect|come (in|by))\b/.test(s)) return 'pickup';
   if (/^(unspecified|unknown|not sure|don ?t know|dont know|declined|none|any)\b/.test(s)) return 'unspecified';
   return null;

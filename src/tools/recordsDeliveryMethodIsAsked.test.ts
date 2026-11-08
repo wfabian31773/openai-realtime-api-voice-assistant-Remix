@@ -172,6 +172,11 @@ describe('each method reaches the case in the ticketing app’s own vocabulary',
 
   it('reads the words a model sends', () => {
     expect(normalizeDeliveryMethod('Fax')).toBe('fax');
+    // The question invites "by …" for every method (Codex P2, #438).
+    expect(normalizeDeliveryMethod('by fax')).toBe('fax');
+    expect(normalizeDeliveryMethod('By email')).toBe('email');
+    expect(normalizeDeliveryMethod('by mail')).toBe('mail');
+    expect(normalizeDeliveryMethod('via e-mail')).toBe('email');
     expect(normalizeDeliveryMethod('e-mail')).toBe('email');
     expect(normalizeDeliveryMethod('secure email')).toBe('email');
     expect(normalizeDeliveryMethod('US mail')).toBe('mail');
