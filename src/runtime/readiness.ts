@@ -1376,8 +1376,17 @@ import { callEnvironment } from "./callRecord";
  * somebody else was identified as the patient (3 of 3 offline). Above main's
  * v186 (#436, `70497012`), which it contains. No migration.
  */
+/**
+ * v188 — RECORDS REQUESTS ASK HOW THE RECORDS SHOULD GO (2026-11-08). The
+ * records line never asked how a requester wanted the records (0 of 152 calls,
+ * 2026-10-25..11-07) and no voice path set the case's requested delivery
+ * method, so even PCP's answers (asked on 103 of 108) reached the ticket only
+ * as prose. file_records_ticket asks the method, then the destination, each
+ * once, and sends recordsDeliveryMethod for the case; PCP forwards its own.
+ * Above main's v187 (#437, `ca7f65be`), which it contains. No migration.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v187-a-returned-call-is-asked-who-it-is-20261108";
+  "voice-runtime-v188-records-ask-how-they-want-them-20261108";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

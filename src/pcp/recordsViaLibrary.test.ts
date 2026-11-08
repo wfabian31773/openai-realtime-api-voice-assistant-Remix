@@ -52,6 +52,9 @@ const PCP_CALL = {
   first_name: 'Wayne',
   last_name: 'Fabian',
   date_of_birth: '03/17/1973',
+  // v188 asks how they want the records; "unspecified" keeps every path
+  // these tests measure as it was.
+  delivery_method: 'unspecified',
   callback_number: '7605551234',
   request_description: 'Patient called the PCP Support line.\n\nI need a copy of my records.',
   requester: 'the patient themselves (Wayne Fabian)',

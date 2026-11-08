@@ -70,6 +70,9 @@ const THIRD_PARTY = {
   first_name: 'Testpatient',
   last_name: 'Example',
   date_of_birth: '01/02/1950',
+  // v188 asks how they want the records; "unspecified" keeps every path
+  // these tests measure as it was.
+  delivery_method: 'unspecified',
   callback_number: '845-555-0142',
   requester: "Dr. Example's office, a referring provider",
   request_description: 'requesting a copy of the chart notes from the last visit',
@@ -175,7 +178,7 @@ describe('a refusal the caller cannot fix is logged before anyone is told it is'
 
   it('a callback extension rides on the staff note, not on the recovery\'s phone (v132)', async () => {
     const { posts } = await app(UNASKABLE_400, FILED('VA-RECOVERED-7'));
-    await runTool('file_records_ticket', { ...THIRD_PARTY, callback_number: '845-555-0142 ext 22' });
+    await runTool('file_records_ticket', { ...THIRD_PARTY, delivery_method: 'unspecified', callback_number: '845-555-0142 ext 22' });
     const [refused, recovery] = posts();
     // The same split the filing itself makes: ten digits on the phone field,
     // the extension where a clerk reads it.

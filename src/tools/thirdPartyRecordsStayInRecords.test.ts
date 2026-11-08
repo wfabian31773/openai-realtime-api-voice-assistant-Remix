@@ -81,6 +81,9 @@ const THIRD_PARTIES = [
 const EXAM_REPORT = 'requesting the most recent eye exam report for the patient';
 
 const NAMELESS_THIRD_PARTY = {
+  // v188 asks how they want the records; "unspecified" keeps every path
+  // these tests measure as it was.
+  delivery_method: 'unspecified',
   callback_number: '845-555-0142',
   date_of_birth: '01/02/1950',
   deliver_to: 'fax 845-555-0199',
@@ -427,6 +430,9 @@ describe('the guard: a genuine scheduling request on the records line still reac
       first_name: 'Testpatient',
       last_name: 'Example',
       date_of_birth: '01/02/1950',
+      // v188 asks how they want the records; "unspecified" keeps every path
+      // these tests measure as it was.
+      delivery_method: 'unspecified',
       callback_number: '845-555-0142',
       requester: 'I am the patient',
       request_description: 'I need to reschedule my eye exam',
@@ -442,6 +448,9 @@ describe('the guard: a genuine scheduling request on the records line still reac
       first_name: 'Testpatient',
       last_name: 'Example',
       date_of_birth: '01/02/1950',
+      // v188 asks how they want the records; "unspecified" keeps every path
+      // these tests measure as it was.
+      delivery_method: 'unspecified',
       callback_number: '845-555-0142',
       requester: THIRD_PARTIES[0].requester,
       request_description: 'we need to schedule an eye exam for our mutual patient',
@@ -461,6 +470,9 @@ describe('the guard: a genuine scheduling request on the records line still reac
       first_name: 'Testpatient',
       last_name: 'Example',
       date_of_birth: '01/02/1950',
+      // v188 asks how they want the records; "unspecified" keeps every path
+      // these tests measure as it was.
+      delivery_method: 'unspecified',
       callback_number: '845-555-0142',
       requester: 'I am the patient',
       // A phrase `namesADocument` DOES read as a document, so only the
@@ -478,6 +490,9 @@ describe('the guard: a genuine scheduling request on the records line still reac
       first_name: 'Testpatient',
       last_name: 'Example',
       date_of_birth: '01/02/1950',
+      // v188 asks how they want the records; "unspecified" keeps every path
+      // these tests measure as it was.
+      delivery_method: 'unspecified',
       callback_number: '845-555-0142',
       requester: 'Testpatient',
       request_description: 'I have to reschedule my appointment next week',
@@ -523,6 +538,9 @@ describe('belt and braces: a request still routed away with NO name files to Med
     const app = await fakeApp();
     const sid = 'CA' + 'a'.repeat(32);
     const args = {
+      // v188 asks how they want the records; "unspecified" keeps every path
+      // these tests measure as it was.
+      delivery_method: 'unspecified',
       callback_number: '845-555-0142',
       date_of_birth: '01/02/1950',
       requester: 'I am the patient',
@@ -581,6 +599,9 @@ describe('a refusal the caller cannot fix, and a transport failure', () => {
       first_name: 'Testpatient',
       last_name: 'Example',
       date_of_birth: '01/02/1950',
+      // v188 asks how they want the records; "unspecified" keeps every path
+      // these tests measure as it was.
+      delivery_method: 'unspecified',
       callback_number: '845-555-0142',
       requester: 'I am the patient',
       form_channel: 'declined',

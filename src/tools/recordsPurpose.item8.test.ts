@@ -11,7 +11,7 @@ import { resetGateAttempts } from './gateAttempts';
 import { recordCallerSpeech, releaseCallerSpeech, noteCallerTranscript } from '../services/symptomCorroboration';
 const api = vi.hoisted(() => ({ createTicket: vi.fn(), lookupProviderAndLocation: vi.fn() }));
 vi.mock('../../server/services/ticketingApiClient', () => ({ ticketingApiClient: api, lookupWasUnavailable: () => false }));
-const BASE = { first_name: 'Taylor', last_name: 'Example', date_of_birth: '01/02/1980', callback_number: '2025550142', requester: 'I am the patient' };
+const BASE = { first_name: 'Taylor', last_name: 'Example', date_of_birth: '01/02/1980', delivery_method: 'unspecified', callback_number: '2025550142', requester: 'I am the patient' };
 beforeEach(() => { vi.clearAllMocks(); resetGateAttempts(); api.createTicket.mockResolvedValue({ success: true, ticketNumber: 'VA-SYNTHETIC' }); });
 const CASES = [
   ['VA-73593', 'I need to change the date of my appointment', 9],

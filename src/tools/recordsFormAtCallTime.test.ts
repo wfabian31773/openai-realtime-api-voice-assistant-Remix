@@ -39,6 +39,9 @@ const PATIENT = {
   last_name: 'Example',
   date_of_birth: '01/02/1950',
   location: 'Synthetic Clinic', // Complete live intake before testing this lane.
+  // v188 asks how they want the records; "unspecified" keeps every path
+  // these tests measure as it was.
+  delivery_method: 'unspecified',
   callback_number: '202-555-0142',
   request_description: 'I need a copy of my medical records',
 };

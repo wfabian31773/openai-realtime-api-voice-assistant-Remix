@@ -32,6 +32,9 @@ const BASE = {
   first_name: 'Taylor',
   last_name: 'Example',
   date_of_birth: '01/02/1980',
+  // v188 asks how they want the records; "unspecified" keeps every path
+  // these tests measure as it was.
+  delivery_method: 'unspecified',
   callback_number: '202-555-0142',
 };
 
@@ -70,6 +73,9 @@ describe('patientPhone is the digits, not the raw string', () => {
 
     await runTool('file_records_ticket', {
       ...BASE,
+      // v188 asks how they want the records; "unspecified" keeps every path
+      // these tests measure as it was.
+      delivery_method: 'unspecified',
       callback_number: '1-202-555-0142',
       request_description: 'I need a copy of my medical records',
     });
@@ -83,6 +89,9 @@ describe('patientPhone is the digits, not the raw string', () => {
 
     const out = (await runTool('file_records_ticket', {
       ...BASE,
+      // v188 asks how they want the records; "unspecified" keeps every path
+      // these tests measure as it was.
+      delivery_method: 'unspecified',
       callback_number: '2-202-555-0142',
       request_description: 'I need a copy of my medical records',
     })) as Record<string, unknown>;
@@ -98,6 +107,9 @@ describe('patientPhone is the digits, not the raw string', () => {
 
     const out = await runTool('file_records_ticket', {
       ...BASE,
+      // v188 asks how they want the records; "unspecified" keeps every path
+      // these tests measure as it was.
+      delivery_method: 'unspecified',
       callback_number: '202-555-0142 ext 202',
       request_description: 'I need a copy of my medical records',
     });
@@ -115,6 +127,9 @@ describe('patientPhone is the digits, not the raw string', () => {
 
     const out = (await runTool('file_records_ticket', {
       ...BASE,
+      // v188 asks how they want the records; "unspecified" keeps every path
+      // these tests measure as it was.
+      delivery_method: 'unspecified',
       callback_number: '202-555-0101 / 303-555-0102',
       request_description: 'I need a copy of my medical records',
     })) as Record<string, unknown>;
@@ -289,6 +304,9 @@ describe('the things that make a clerk ring the patient back', () => {
   it('refuses a partial callback number with a speakable line', async () => {
     const r = (await runTool('file_records_ticket', {
       ...BASE,
+      // v188 asks how they want the records; "unspecified" keeps every path
+      // these tests measure as it was.
+      delivery_method: 'unspecified',
       callback_number: '202-555',
       request_description: 'copy of my records',
     })) as Record<string, unknown>;
