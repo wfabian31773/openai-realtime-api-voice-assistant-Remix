@@ -199,11 +199,17 @@ export function routeAfterHoursTicket(input: {
   now?: Date;
 }): AfterHoursRoute {
   const now = input.now ?? new Date();
-  if (input.postOpMedication === true || mentionsPostOpMedication(input.text)) {
+  if (input.postOpMedication === true) {
     return { kind: 'post_op_medication', departmentId: AFTER_HOURS_DEPARTMENT_ID, priority: 'urgent' };
   }
+  // A records request outranks the post-op WORDS: records about a surgery
+  // name the surgery and its drops, and are still a records request. The
+  // model's own post-op flag above still wins.
   if (input.recordsRequest === true) {
     return { kind: 'medical_records', departmentId: MEDICAL_RECORDS_DEPARTMENT_ID };
+  }
+  if (mentionsPostOpMedication(input.text)) {
+    return { kind: 'post_op_medication', departmentId: AFTER_HOURS_DEPARTMENT_ID, priority: 'urgent' };
   }
   // The model named Optical. A pickup or repair "today" is still Optical's
   // work; same-day After Hours is for appointments, not eyewear.

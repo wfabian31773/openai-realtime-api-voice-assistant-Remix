@@ -1975,6 +1975,17 @@ The ticket will include schedule context (last appointment info) automatically.`
       // A compound first name the greeting's yes confirmed is filed under the
       // record's whole first name, so the held identity is found (Codex P2 on #425).
       params = { ...params, first_name: greetingConfirmedFirstName(greetingConfirmed, params) ?? params.first_name };
+      // v190: a records request is noted, with who asked, BEFORE any ask below
+      // can return — a caller who hangs up on the date-of-birth or email
+      // question is still filed to Medical Records by the floor with the
+      // requester the model gave (review of #441).
+      if (params.request_category === 'medical_records_request') {
+        const asked = params.records_requester ? RECORDS_REQUESTER_TYPES[params.records_requester] : undefined;
+        noteAfterHoursRecordsRequest(metadata.callSid, {
+          requester: asked,
+          requesterName: asked && asked !== 'patient' ? params.requester_name : undefined,
+        });
+      }
       const prepared = prepareTicketIdentity({ ...params, call_sid: metadata.callSid });
       let locationSource = prepared.input.locationSource as TicketLocationSource | undefined;
       // Hydrate held facts here; the bounded DOB/B2B rules below own refusals.
@@ -2258,10 +2269,16 @@ The ticket will include schedule context (last appointment info) automatically.`
       // gate refused on this call — files to Medical Records with who asked.
       const recordsNoted = afterHoursRecordsRequestFor(metadata.callSid);
       const recordsRequest = params.request_category === 'medical_records_request' || Boolean(recordsNoted);
+      const recordsAskedBy =
+        (params.records_requester ? RECORDS_REQUESTER_TYPES[params.records_requester] : undefined) ?? recordsNoted?.requester;
       const recordsRequester = recordsRequest
         ? recordsRequesterPayload(
-            (params.records_requester ? RECORDS_REQUESTER_TYPES[params.records_requester] : undefined) ?? recordsNoted?.requester,
-            params.requester_name ?? recordsNoted?.requesterName,
+            recordsAskedBy,
+            // A patient's own request names no requester: a doctor's office
+            // the patient mentions is where the records go, not who asked.
+            recordsAskedBy && recordsAskedBy !== 'patient'
+              ? params.requester_name ?? recordsNoted?.requesterName
+              : undefined,
           )
         : undefined;
       if (recordsRequest) noteAfterHoursRecordsRequest(metadata.callSid, {});
@@ -2858,9 +2875,12 @@ PREREQUISITE: one quick ask for name and DOB; transfer even if unavailable. Clin
         // the PATIENT's details. Who is asking is noted for create_ticket and
         // for the teardown floor, which files to Medical Records on a hang-up.
         if (verdict.code === 'records_request') {
+          // Who asked only when the caller SAID they are a provider; otherwise
+          // `provider_info` is likely where the records go (review of #441).
+          const providerAsked = corroboration.providerStated ? requesterFromCallerType(params.caller_type) : undefined;
           noteAfterHoursRecordsRequest(metadata.callSid, {
-            requester: corroboration.providerStated ? requesterFromCallerType(params.caller_type) : undefined,
-            requesterName: params.provider_info,
+            requester: providerAsked,
+            requesterName: providerAsked ? params.provider_info : undefined,
           });
           return recordsRequestEscalationResult(verdict.directive);
         }

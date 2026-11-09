@@ -130,23 +130,59 @@ describe('the gate: a records request never rings, whoever asks', () => {
     expect(v).toMatchObject({ allowed: false, code: 'records_request' });
   });
 
-  it('an eye emergency the caller described still rings, records or not', () => {
-    const v = judgeEscalation({
-      callerType: 'patient_urgent_medical',
-      reason: 'Sudden loss of vision in the left eye; also wants their records',
-      corroboration: { haveSpeech: true, providerStated: false, symptomStated: true, acuteStated: true, supported: ['vision loss'], unsupported: [] } as never,
-    });
+  const PROVIDER_SAID = { haveSpeech: true, providerStated: true, symptomStated: false, acuteStated: false, supported: [], unsupported: [] } as never;
+  const ACUTE_SAID = { haveSpeech: true, providerStated: true, symptomStated: true, acuteStated: true, supported: ['vision loss'], unsupported: [] } as never;
+
+  it.each([
+    "We need the medical records for our mutual patient's retinal detachment repair",
+    'Co-managing office asking for her post-op notes and medical records',
+    "Law office requesting records for our client's eye injury",
+    'Patient wants my medical records from when I had the flashes and floaters checked',
+  ])('records that name an eye condition are still a records request: %s', (reason) => {
+    // The acute word is the subject of the records, not an emergency now.
+    const v = judgeEscalation({ callerType: 'healthcare_provider', reason, corroboration: ACUTE_SAID });
+    expect(v).toMatchObject({ allowed: false, code: 'records_request' });
+  });
+
+  it.each([
+    "Dr. Lee's office calling with a request for records on a mutual patient",
+    'Provider office asking for records',
+    'Clinic needs records faxed',
+    'Hospital calling to obtain records',
+    'Office wants to get records sent over',
+    'Office requesting copies of records',
+    'Caller from clinic requesting the patient\u2019s records',
+    'Surgery center requesting the operative report',
+    'Office needs the exam notes',
+  ])('a records request in other words is still refused: %s', (reason) => {
+    const v = judgeEscalation({ callerType: 'healthcare_provider', reason, corroboration: PROVIDER_SAID });
+    expect(v).toMatchObject({ allowed: false, code: 'records_request' });
+  });
+
+  it.each([
+    'Dr. Kim in the emergency room at Example Hospital, acute angle closure, pressure is 58, I have her chart from your office. I need the on-call ophthalmologist.',
+    'ER physician needs the on-call ophthalmologist and has her chart',
+    'Provider calling, the records show prior glaucoma surgery, patient now has a corneal ulcer',
+    'Provider needs her medical record number to verify the patient before an urgent consult',
+  ])('a document merely mentioned is not a records request, and a clinician still rings: %s', (reason) => {
+    const v = judgeEscalation({ callerType: 'healthcare_provider', reason, corroboration: PROVIDER_SAID });
     expect(v.allowed).toBe(true);
   });
 
-  it('"on record" is not a records request: a provider about a patient on file still rings', () => {
-    expect(RECORDS_REQUEST.test(' the referral for our mutual patient is on record with your office ')).toBe(false);
-    const v = judgeEscalation({
-      callerType: 'healthcare_provider',
-      reason: "Dr. Lee's office calling about a mutual patient whose referral is on record with the practice",
-      corroboration: { haveSpeech: true, providerStated: true, symptomStated: false, acuteStated: false, supported: [], unsupported: [] } as never,
+  it('records plus an emergency: refused, told to escalate the emergency alone, and that rings', () => {
+    const both = judgeEscalation({
+      callerType: 'patient_urgent_medical',
+      reason: 'Sudden loss of vision in the left eye; also wants a copy of their records',
+      corroboration: ACUTE_SAID,
     });
-    expect(v).toMatchObject({ allowed: true, basis: 'provider_or_facility' });
+    expect(both).toMatchObject({ allowed: false, code: 'records_request' });
+    expect(both.allowed === false && both.directive).toMatch(/call escalate_to_human again at once with a reason that describes only that emergency/);
+    const alone = judgeEscalation({
+      callerType: 'patient_urgent_medical',
+      reason: 'Sudden loss of vision in the left eye',
+      corroboration: ACUTE_SAID,
+    });
+    expect(alone.allowed).toBe(true);
   });
 
   it('a lab calling on a recorded line is not a records request', () => {
@@ -278,6 +314,55 @@ describe('call 1: a date of birth the caller cannot give is not a technical issu
     expect(r.success).toBe(false);
     expect(r.message).toMatch(/call create_ticket again straight away with date_of_birth "unknown"/);
     expect(r.message).toMatch(/never tell the caller there is a technical issue/);
+  });
+});
+
+describe('who asked survives an ask, a post-op word and a patient naming their doctor', () => {
+  it('a records filing refused for the date of birth, then a hang-up, is filed to Medical Records with the requester', async () => {
+    const c = await call(['This is the front desk at a clinic, we need records for a patient.']);
+    const r = await invoke(c.agent, 'create_ticket', {
+      first_name: 'Pat', last_name: 'Example', date_of_birth: 'the third', callback_number: '2025550100',
+      request_category: 'medical_records_request', records_requester: 'provider_office',
+      requester_name: 'Front desk, Example Clinic', request_summary: 'Clinic requesting a patient\'s records',
+    });
+    expect(r.success).toBe(false);
+    expect(h.submitSimplifiedTicket).not.toHaveBeenCalled();
+    await c.finish();
+    const sent = h.submitSimplifiedTicket.mock.calls[0][0] as Record<string, unknown>;
+    expect(sent.departmentId).toBe(16);
+    expect(sent.recordsRequester).toMatchObject({
+      requestorType: 'provider', capClockApplies: false, requestorName: 'Front desk, Example Clinic',
+    });
+  });
+
+  it('a records request that mentions post-op drops still goes to Medical Records with the requester', async () => {
+    const c = await call(['We are the co-managing office and need her surgery records.']);
+    await invoke(c.agent, 'create_ticket', {
+      first_name: 'Pat', last_name: 'Example', date_of_birth: '03/04/1960', callback_number: '2025550100',
+      request_category: 'medical_records_request', records_requester: 'provider_office',
+      request_summary: 'Co-managing optometry office requesting records from cataract surgery last week, including the post-op drops instructions',
+    });
+    const sent = h.submitSimplifiedTicket.mock.calls[0][0] as Record<string, unknown>;
+    expect(sent.departmentId).toBe(16);
+    expect(sent.priority).not.toBe('urgent');
+    expect(sent.recordsRequester).toMatchObject({ requestorType: 'provider' });
+  });
+
+  it('a patient who names the doctor the records go to is not filed with that doctor as the requester', async () => {
+    const c = await call(["I need a copy of my medical records sent to my new doctor, Dr. Patel's office."]);
+    const e = await invoke(c.agent, 'escalate_to_human', {
+      reason: "Patient requesting a copy of their medical records sent to Dr. Patel's office",
+      caller_type: 'patient_urgent_medical', provider_info: "Dr. Patel's office",
+    });
+    expect(e).toMatchObject({ refused: 'records_request' });
+    await invoke(c.agent, 'create_ticket', {
+      first_name: 'Pat', last_name: 'Example', date_of_birth: '03/04/1960', callback_number: '2025550100',
+      request_category: 'medical_records_request', records_requester: 'patient',
+      request_summary: "Patient requesting a copy of their records, to be sent to their new doctor",
+    });
+    const sent = h.submitSimplifiedTicket.mock.calls[0][0] as Record<string, unknown>;
+    expect(sent.recordsRequester).toMatchObject({ requestorType: 'patient', capClockApplies: true });
+    expect((sent.recordsRequester as Record<string, unknown>).requestorName).toBeUndefined();
   });
 });
 

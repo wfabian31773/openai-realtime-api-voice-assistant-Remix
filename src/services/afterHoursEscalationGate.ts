@@ -168,7 +168,7 @@ const ADMINISTRATIVE_SUBJECTS = [
 const SYMPTOM_PATTERN =
   /\b(pain|painful|hurt|hurts|hurting|ache|aching|sore|red|redness|swollen|swelling|vision|blur|blurry|blurred|see|seeing|sight|light|flash|flashes|floater|floaters|curtain|shadow|discharge|pus|bleed|bleeding|blood|pressure|itch|itchy|burning|watering|nausea|vomit|fever|dolor|duele|rojo|roja|hinchad\w*|vision|borros\w*|sangr\w*|veo|ver)\b/;
 
-const norm = (s?: string) => ` ${(s ?? '').toLowerCase().replace(/\s+/g, ' ')} `;
+const norm = (s?: string) => ` ${(s ?? '').replace(/[’‘]/g, "'").toLowerCase().replace(/\s+/g, ' ')} `;
 
 /**
  * A MEDICAL RECORDS REQUEST. Operator ruling, 2026-11-09: "records requests
@@ -177,12 +177,29 @@ const norm = (s?: string) => ` ${(s ?? '').toLowerCase().replace(/\s+/g, ' ')} `
  * Records on the next business day, never a page.
  *
  * Read from the model's own sentence (reason, symptoms, provider info), the
- * same text every other check here reads. Plural "records" and named document
- * phrases only: the singular "record" is in "calling on a recorded line",
- * which labs say on every call, and a lab reporting results is still case 1.
+ * same text every other check here reads, and only where an ASKING word
+ * governs a document: "requesting the patient's records", "needs records
+ * faxed", "a copy of her chart", "asking for the operative report". A
+ * document merely mentioned does not count — "I have her chart from your
+ * office", "the records show", "her medical record number" — because an ER
+ * physician with an emergency mentions the chart they are holding. The window
+ * between the two stops at punctuation and at a new clause (a pronoun or
+ * "has"/"and"), so "needs the on-call, I have her chart" is not a request for
+ * the chart. "Calling on a recorded line" (labs) has no asking word.
  */
-export const RECORDS_REQUEST =
-  /\b(medical records?|records? requests?|request(?:ing|s|ed)? (?:the |her |his |their |a |any )?(?:patient'?s? )?records|(?:patient'?s?|her|his|their|the|my|your|any|some) (?:medical )?(?:records|chart)|chart notes|office notes|visit notes|clinic notes|copy of (?:the |her |his |their |my )?(?:records|chart))\b/;
+const RECORDS_ASK =
+  "(?:request(?:s|ed|ing)?|need(?:s|ed|ing)?|want(?:s|ed|ing)?|ask(?:s|ed|ing)? for|looking for|" +
+  "obtain(?:s|ed|ing)?|get(?:ting)?|send(?:s|ing)?|fax(?:es|ed|ing)?|e-?mail(?:s|ed|ing)?|forward(?:s|ed|ing)?|" +
+  "cop(?:y|ies) of|release(?: of)?)";
+const RECORDS_WINDOW =
+  "(?:(?!(?:and|but|i|we|she|he|they|has|have|had|is|was|with|who|because)\\b)[a-z0-9'-]+ ){0,4}";
+const RECORDS_DOC =
+  "(?:(?:medical|health|eye|patient'?s?|office|visit|clinic|chart|exam|progress|consult(?:ation)?|" +
+  "operative|op|surgical|surgery|pathology|imaging|oct|lab|test) )*" +
+  "(?:records?(?! number| no\\b| #)|charts?|notes|(?:operative|op|surgical|surgery|pathology|imaging|consult(?:ation)?|exam|visit|lab|oct) reports?)";
+export const RECORDS_REQUEST = new RegExp(
+  `\\b(?:${RECORDS_ASK} ${RECORDS_WINDOW}${RECORDS_DOC}\\b|records? requests?|requests? for (?:medical )?records|release of information|records release)`,
+);
 const hits = (haystack: string, needles: string[]) => needles.some((n) => haystack.includes(n));
 
 /**
@@ -215,11 +232,13 @@ export function judgeEscalation(req: EscalationRequest): EscalationVerdict {
    * minutes (CAbccc433f0627622f50d32ff4abd7cec8, 47 s, declined;
    * CAe8f5c1f0daedc324c21dc244dce7832d, 24 s, no answer).
    *
-   * The one thing that still rings is an eye emergency the CALLER described in
-   * their own words (`acuteStated`) — that call is case 3 on its own, and the
-   * records it also mentions are not why it rings.
+   * No exception here, deliberately: records about an eye condition name it
+   * ("records for her retinal detachment repair", "post-op notes"), so an
+   * acute-word exception let records requests ring. A caller who wants records
+   * AND has an emergency happening now is told, below, to escalate again with
+   * the emergency alone — that second call is judged on its own.
    */
-  if (RECORDS_REQUEST.test(text) && !req.corroboration?.acuteStated) {
+  if (RECORDS_REQUEST.test(text)) {
     return {
       allowed: false,
       code: 'records_request',
@@ -231,7 +250,9 @@ export function judgeEscalation(req: EscalationRequest): EscalationVerdict {
         'last name, then the patient\'s date of birth starting with the month, then the day, then the year — ' +
         'never the caller\'s own — then where the records should be sent. Then call create_ticket with ' +
         'request_category medical_records_request, records_requester and requester_name, and tell the caller ' +
-        'Medical Records will follow up on the next business day.',
+        'Medical Records will follow up on the next business day. Only if the caller ALSO says, in their own words, ' +
+        'that an eye emergency is happening right now (sudden loss of vision, a curtain, a chemical or an injury ' +
+        'to the eye) call escalate_to_human again at once with a reason that describes only that emergency.',
     };
   }
 
