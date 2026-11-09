@@ -1386,8 +1386,31 @@ import { callEnvironment } from "./callRecord";
  * create-ticket field); PCP forwards its own.
  * Above main's v187 (#437, `ca7f65be`), which it contains. No migration.
  */
+/**
+ * v191 — FILING QUALITY FROM THE TRANSCRIPT (2026-11-09). Operator: "we have
+ * always focused on execution of task but never on quality of task ... the
+ * actual transcript has to tell us what should have been filed and what fields
+ * should have been populated." A worker reads each substantive call's
+ * transcript (the grader's model and account) and stores the ticket it called
+ * for in the Hub's filing_expectations table; scripts/filing-quality.ts
+ * compares those rows with the Support Center tickets for the Daybook. Changes
+ * nothing a caller hears or a ticket carries. Above main's v190 (#441,
+ * `ce0bee67`), which it contains along with v188 (#438, `fca1e6f3`). The
+ * table is created on first write (CREATE TABLE IF NOT EXISTS); the migration
+ * file documents it.
+ */
+/**
+ * v192 — THE NPX OUTREACH CALL ASKS WHAT DAY AND TIME WORK BEST (2026-11-08;
+ * v189 while #439 was open). Operator: "it should always be what day and time
+ * works best for you as the starting point" and "it only offers what the
+ * patient qualifies for in terms of credentialing." find_sooner_exam searches
+ * the patient's whole qualifying availability (NPX's outreach availability
+ * endpoint) by day, range, weekday, time and city, offers up to three choices,
+ * and steps back one constraint at a time when nothing matches. Above main's
+ * v191 (#440, `41a6854a`), which it contains. No migration.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v189-npx-what-day-and-time-works-20261108";
+  "voice-runtime-v192-npx-what-day-and-time-works-20261109";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can
