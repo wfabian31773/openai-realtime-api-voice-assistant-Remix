@@ -47,6 +47,7 @@
  * ringing is the escalation gate's decision, never this module's.
  */
 import { AFTER_HOURS_DEPARTMENT_ID } from '../tools/afterHoursTaxonomy';
+import { MEDICAL_RECORDS_DEPARTMENT_ID } from '../tools/medicalRecordsTaxonomy';
 import { OPTICAL_DEPARTMENT_ID } from '../tools/opticalTaxonomy';
 
 /** The Support Center's own pair for a post-op question in department 8. */
@@ -60,6 +61,7 @@ export type AfterHoursRoute =
   | { kind: 'post_op_medication'; departmentId: number; priority: 'urgent' }
   | { kind: 'same_day'; departmentId: number }
   | { kind: 'optical'; departmentId: number }
+  | { kind: 'medical_records'; departmentId: number }
   | { kind: 'default' };
 
 const fold = (s: string) =>
@@ -188,10 +190,25 @@ export function routeAfterHoursTicket(input: {
   confirmedUpcoming?: ReadonlyArray<{ isoDate?: string; startTime?: string }>;
   /** The request's own category is an appointment one (confirm, cancel, move, book). */
   appointmentIntent?: boolean;
+  /**
+   * v190: a medical records request — the model's category, or a records
+   * request the escalation gate refused on this call. Files to Medical
+   * Records (operator, 2026-11-09: records requests never ring the on-call).
+   */
+  recordsRequest?: boolean;
   now?: Date;
 }): AfterHoursRoute {
   const now = input.now ?? new Date();
-  if (input.postOpMedication === true || mentionsPostOpMedication(input.text)) {
+  if (input.postOpMedication === true) {
+    return { kind: 'post_op_medication', departmentId: AFTER_HOURS_DEPARTMENT_ID, priority: 'urgent' };
+  }
+  // A records request outranks the post-op WORDS: records about a surgery
+  // name the surgery and its drops, and are still a records request. The
+  // model's own post-op flag above still wins.
+  if (input.recordsRequest === true) {
+    return { kind: 'medical_records', departmentId: MEDICAL_RECORDS_DEPARTMENT_ID };
+  }
+  if (mentionsPostOpMedication(input.text)) {
     return { kind: 'post_op_medication', departmentId: AFTER_HOURS_DEPARTMENT_ID, priority: 'urgent' };
   }
   // The model named Optical. A pickup or repair "today" is still Optical's
@@ -293,6 +310,8 @@ export function afterHoursRouteNote(kind: AfterHoursRoute['kind']): string | nul
       return 'SAME-DAY: this request is about an appointment today. Routed to After Hours, who work same-day tickets.';
     case 'optical':
       return 'OPTICAL: the model classified this as glasses, frames, lenses or contacts (order, status, pickup or repair). Filed to Optical Support; the ticketing app assigns by location.';
+    case 'medical_records':
+      return 'MEDICAL RECORDS: an after-hours records request. Filed to Medical Records; records requests never ring the on-call (operator ruling 2026-11-09).';
     default:
       return null;
   }
