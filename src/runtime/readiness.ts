@@ -1395,12 +1395,22 @@ import { callEnvironment } from "./callRecord";
  * for in the Hub's filing_expectations table; scripts/filing-quality.ts
  * compares those rows with the Support Center tickets for the Daybook. Changes
  * nothing a caller hears or a ticket carries. Above main's v190 (#441,
- * `ce0bee67`), which it contains along with v188 (#438, `fca1e6f3`); v189
- * (#439) is open on its branch. The table is created on first write (CREATE
- * TABLE IF NOT EXISTS); the migration file documents it.
+ * `ce0bee67`), which it contains along with v188 (#438, `fca1e6f3`). The
+ * table is created on first write (CREATE TABLE IF NOT EXISTS); the migration
+ * file documents it.
+ */
+/**
+ * v192 — THE NPX OUTREACH CALL ASKS WHAT DAY AND TIME WORK BEST (2026-11-08;
+ * v189 while #439 was open). Operator: "it should always be what day and time
+ * works best for you as the starting point" and "it only offers what the
+ * patient qualifies for in terms of credentialing." find_sooner_exam searches
+ * the patient's whole qualifying availability (NPX's outreach availability
+ * endpoint) by day, range, weekday, time and city, offers up to three choices,
+ * and steps back one constraint at a time when nothing matches. Above main's
+ * v191 (#440, `41a6854a`), which it contains. No migration.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v191-filing-quality-from-the-transcript-20261109";
+  "voice-runtime-v192-npx-what-day-and-time-works-20261109";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

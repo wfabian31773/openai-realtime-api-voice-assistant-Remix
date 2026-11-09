@@ -7,7 +7,11 @@
  * appointment is cancelled in NextGen. NPX's side merged as EPC #281; its
  * contract is `apps/npx/docs/modules/OUTREACH_AGENT.md` in the Console repo.
  *
- * Three calls, each bounded and each failing CLOSED:
+ * Four calls, each bounded and each failing CLOSED:
+ *  - availability: every slot the call may offer this patient, by the offer's
+ *            own rules (EPC, 2026-11-08), no patient data either way; an NPX
+ *            without the endpoint answers `not_supported`, and the tools fall
+ *            back to the offer;
  *  - offer:  up to two slots, no patient data either way;
  *  - book:   the patient's identity in, ids and the practice out;
  *  - report: whether the Azul appointment was cancelled (no patient data).
@@ -25,7 +29,7 @@ export const NPX_OUTREACH_DEMO_DEFAULT_BASE_URL = 'https://cec-npx-demo.vercel.a
 /** Per-call budgets. The booking runs a transaction under a lock on NPX's
  * side, so it gets the longest; all three sit well inside the bridge's
  * tool-dispatch watchdog. */
-export const NPX_TIMEOUT_MS = { offer: 8_000, book: 12_000, report: 8_000 } as const;
+export const NPX_TIMEOUT_MS = { availability: 10_000, offer: 8_000, book: 12_000, report: 8_000 } as const;
 
 export interface NpxSlot {
   slotId: string;
@@ -38,6 +42,9 @@ export interface NpxSlot {
   clinicId: string;
   clinicName: string;
   address: string;
+  /** The clinic's city ("Fontana"). Sent by NPX since 2026-11-08; an older
+   * NPX omits it, and cityOf reads it from the address instead. */
+  city?: string;
   phone: string;
   providerName: string;
   visitType: string;
@@ -54,6 +61,18 @@ export interface NpxOfferRequest {
 export type NpxOfferResult =
   | { ok: true; latestDay: string; slots: NpxSlot[] }
   | { ok: false; error: NpxError };
+
+export interface NpxAvailabilityRequest extends NpxOfferRequest {
+  /** YYYY-MM-DD, Pacific: narrow the window (never widen it). */
+  fromDay?: string;
+  toDay?: string;
+  /** 1–500; NPX's default is 300. */
+  limit?: number;
+}
+
+export type NpxAvailabilityResult =
+  | { ok: true; latestDay: string; slots: NpxSlot[]; truncated: boolean }
+  | { ok: false; error: NpxError | 'not_supported' };
 
 export interface NpxBookRequest {
   slotId: string;
@@ -118,9 +137,22 @@ export const NPX_REASON_CODE = /^[a-z0-9_]{1,64}$/;
 
 type Fetch = typeof fetch;
 
+/**
+ * A read that must answer inside a caller's budget: the request is aborted at
+ * whichever comes first, its own limit or `timeoutMs`.
+ */
+export interface NpxReadOptions {
+  timeoutMs?: number;
+}
+
+/** The read's own limit, cut to what the caller has left (never below 1 ms). */
+const within = (limit: number, opts?: NpxReadOptions) =>
+  opts?.timeoutMs === undefined ? limit : Math.max(1, Math.min(limit, Math.floor(opts.timeoutMs)));
+
 export interface NpxOutreachClient {
   configured: boolean;
-  offer(req: NpxOfferRequest): Promise<NpxOfferResult>;
+  availability(req: NpxAvailabilityRequest, opts?: NpxReadOptions): Promise<NpxAvailabilityResult>;
+  offer(req: NpxOfferRequest, opts?: NpxReadOptions): Promise<NpxOfferResult>;
   book(req: NpxBookRequest): Promise<NpxBookResult>;
   reportCancel(bookingId: string, outcome: 'cancelled' | { failed: string }): Promise<NpxReportResult>;
 }
@@ -197,8 +229,24 @@ export function createNpxOutreachClient(
   return {
     configured: Boolean(key),
 
-    async offer(req) {
-      const reply = await send('POST', '/api/exchange/outreach/offer', req, NPX_TIMEOUT_MS.offer);
+    async availability(req, opts) {
+      const reply = await send('POST', '/api/exchange/outreach/availability', req, within(NPX_TIMEOUT_MS.availability, opts));
+      if (typeof reply !== 'string' && reply.status === 200 && reply.body?.ok === true) {
+        const slots = Array.isArray(reply.body.slots) ? (reply.body.slots as NpxSlot[]) : [];
+        return {
+          ok: true,
+          latestDay: String(reply.body.latestDay ?? ''),
+          slots,
+          truncated: reply.body.truncated === true,
+        };
+      }
+      // An NPX that predates the endpoint: the caller falls back to the offer.
+      if (typeof reply !== 'string' && reply.status === 404) return { ok: false, error: 'not_supported' };
+      return { ok: false, error: failure(reply, 'availability') };
+    },
+
+    async offer(req, opts) {
+      const reply = await send('POST', '/api/exchange/outreach/offer', req, within(NPX_TIMEOUT_MS.offer, opts));
       if (typeof reply !== 'string' && reply.status === 200 && reply.body?.ok === true) {
         const slots = Array.isArray(reply.body.slots) ? (reply.body.slots as NpxSlot[]) : [];
         return { ok: true, latestDay: String(reply.body.latestDay ?? ''), slots: slots.slice(0, 2) };

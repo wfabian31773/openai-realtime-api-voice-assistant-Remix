@@ -35,6 +35,29 @@ describe('without a key', () => {
   });
 });
 
+describe('availability (2026-11-08: every slot the call may offer, by the offer\'s rules)', () => {
+  const ASK = { medicalGroupName: 'Test Group CAP', partnerNames: ['Partner One'], replacedAppointmentDate: '2041-03-20', minDaysSooner: 21, limit: 300 };
+
+  it('posts to the availability endpoint and hands back every slot and whether more qualify', async () => {
+    const f = reply(200, { ok: true, latestDay: '2041-02-27', count: 3, truncated: true, slots: [SLOT, SLOT, SLOT] });
+    const r = await createNpxOutreachClient(ENV, f as never).availability(ASK);
+    expect(r).toEqual({ ok: true, latestDay: '2041-02-27', slots: [SLOT, SLOT, SLOT], truncated: true });
+    const [url, init] = f.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe(`${NPX_OUTREACH_DEFAULT_BASE_URL}/api/exchange/outreach/availability`);
+    expect(JSON.parse(String(init.body))).toEqual(ASK);
+  });
+
+  it('an NPX without the endpoint says not_supported, so the tools can fall back to the offer', async () => {
+    const r = await createNpxOutreachClient(ENV, reply(404, { error: 'Not found' }) as never).availability(ASK);
+    expect(r).toEqual({ ok: false, error: 'not_supported' });
+  });
+
+  it('fails closed like every other call', async () => {
+    expect(await createNpxOutreachClient({}, vi.fn() as never).availability(ASK)).toEqual({ ok: false, error: 'not_configured' });
+    expect(await createNpxOutreachClient(ENV, reply(422, { error: 'no_partners' }) as never).availability(ASK)).toEqual({ ok: false, error: 'no_partners' });
+  });
+});
+
 describe('offer', () => {
   it('posts to the offer endpoint with the bearer key and hands back at most two slots', async () => {
     const f = reply(200, { ok: true, latestDay: '2041-02-27', count: 3, slots: [SLOT, SLOT, SLOT] });
@@ -71,6 +94,32 @@ describe('offer', () => {
       const p = createNpxOutreachClient(ENV, f as never).offer({ medicalGroupName: 'g', partnerNames: ['p'], replacedAppointmentDate: '2041-03-20' });
       await vi.advanceTimersByTimeAsync(NPX_TIMEOUT_MS.offer + 1);
       expect(await p).toEqual({ ok: false, error: 'timeout' });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a caller with less time left cuts the read short, and never lengthens it (Codex P2, #439)', async () => {
+    vi.useFakeTimers();
+    try {
+      const hang = () =>
+        vi.fn((_u: string, init: RequestInit) => new Promise<Response>((_res, rej) => {
+          init.signal!.addEventListener('abort', () => rej(new Error('aborted')));
+        }));
+      const ask = { medicalGroupName: 'g', partnerNames: ['p'], replacedAppointmentDate: '2041-03-20', minDaysSooner: 21, limit: 300 };
+      const short = createNpxOutreachClient(ENV, hang() as never).availability(ask, { timeoutMs: 3_000 });
+      await vi.advanceTimersByTimeAsync(3_001);
+      expect(await short).toEqual({ ok: false, error: 'timeout' });
+      // A longer budget than the read's own limit does not stretch it.
+      let settled = false;
+      const long = createNpxOutreachClient(ENV, hang() as never).availability(ask, { timeoutMs: 60_000 }).then((r) => ((settled = true), r));
+      await vi.advanceTimersByTimeAsync(NPX_TIMEOUT_MS.availability + 1);
+      expect(settled).toBe(true);
+      expect(await long).toEqual({ ok: false, error: 'timeout' });
+      // The offer takes the same bound.
+      const offer = createNpxOutreachClient(ENV, hang() as never).offer(ask, { timeoutMs: 2_000 });
+      await vi.advanceTimersByTimeAsync(2_001);
+      expect(await offer).toEqual({ ok: false, error: 'timeout' });
     } finally {
       vi.useRealTimers();
     }
