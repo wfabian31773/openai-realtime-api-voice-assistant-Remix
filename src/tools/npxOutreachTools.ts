@@ -84,11 +84,13 @@ import {
   citiesWithOpenings,
   cityOf,
   joinWords,
+  matches,
   offerLine,
   overviewLine,
   practiceToday,
   preferenceFrom,
   searchSlots,
+  type SlotPreference,
   spokenAddress,
   spokenWhen,
   type Relaxed,
@@ -706,18 +708,21 @@ function notVerified(): Refusal {
  * Tuesday has nothing to say about Tuesday afternoon). A date asked for, or a
  * range that reaches the last day or past it, is read again from NPX — from
  * the later of that day and the first day asked, to the last day asked — the
- * same rules applied, before any preference is relaxed.
+ * same rules applied, before any preference is relaxed. A search with no date
+ * (a weekday, a time, a city) is read again from the last day on when nothing
+ * in the list fits it (Codex round 2, #439: "Thursday afternoons" against a
+ * list that stops on a Thursday morning).
  */
 export function incompleteRange(
   avail: { slots: NpxSlot[]; truncated: boolean },
-  pref: { onDate?: string; fromDate?: string; toDate?: string },
+  pref: SlotPreference,
 ): { fromDay: string; toDay?: string } | null {
   if (!avail.truncated || avail.slots.length === 0) return null;
   const from = pref.onDate ?? pref.fromDate;
   const to = pref.onDate ?? pref.toDate;
-  if (!from && !to) return null;
   const lastDay = avail.slots[avail.slots.length - 1].day;
   if (to && to < lastDay) return null;
+  if (!from && !to && avail.slots.some((x) => matches(x, pref))) return null;
   return { fromDay: from && from > lastDay ? from : lastDay, ...(to ? { toDay: to } : {}) };
 }
 
@@ -818,9 +823,13 @@ registerTool({
     }
     let pool = avail.slots;
     const range = incompleteRange(avail, pref);
+    let unread = range !== null;
     if (range && left() >= MIN_NPX_READ_MS) {
       const more = await soon(readAvailability(s.contact, s.demo, range, deadline), left());
-      if (more && !('error' in more)) pool = withRange(pool, range.fromDay, more.slots);
+      if (more && !('error' in more)) {
+        pool = withRange(pool, range.fromDay, more.slots);
+        unread = false;
+      }
     }
     const today = practiceToday();
     if (pool.length === 0) {
@@ -833,6 +842,22 @@ registerTool({
       };
     }
     const { picked, relaxed } = searchSlots(pool, pref, OPTIONS_PER_SEARCH);
+    // The part of the schedule that could answer them was not read (Codex
+    // round 2, #439): never step back from a day or time nobody checked. What
+    // was offered before stays bookable.
+    if (unread && relaxed !== null) {
+      return {
+        success: true,
+        options: [],
+        unchecked: true,
+        today: today.words,
+        today_date: today.date,
+        fix:
+          'That day or time could not be checked just now. Do not say it is full and do not offer another day in its place. ' +
+          'Say you could not check that one just now and ask whether another day or time works; call this again with what they say. ' +
+          'Any choices you read them before still stand.',
+      };
+    }
     s.slots = picked;
     return {
       success: true,

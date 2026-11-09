@@ -407,6 +407,64 @@ describe('the availability is read once, early, and only by the rules NPX applie
     ]);
   });
 
+  // Codex round 2, #439: a weekday, a time or a city with no date asked for is
+  // read again from the last day on when nothing in the cut-short list fits.
+  it('a weekday and time with nothing in a cut-short list: read from the last day on, then offered', async () => {
+    npx.availability.mockResolvedValueOnce({ ok: true, latestDay: '2041-12-02', slots: WEEK.slice(0, 7), truncated: true });
+    npx.availability.mockResolvedValueOnce({ ok: true, latestDay: '2041-12-02', slots: WEEK.slice(5), truncated: false });
+    await run(CORPUS[0], CONFIRM_DOB_TOOL_NAME, { date_of_birth: '01/02/1950' });
+    const r = (await run(CORPUS[0], FIND_SOONER_TOOL_NAME, { weekdays: 'thursday', time_of_day: 'afternoon' })) as Record<string, unknown>;
+    expect(npx.availability).toHaveBeenCalledTimes(2);
+    const [req] = npx.availability.mock.calls[1] as unknown as [{ fromDay?: string; toDay?: string }];
+    expect(req.fromDay).toBe('2041-11-21');
+    expect(req.toDay).toBeUndefined();
+    expect(r.exact).toBe(true);
+    expect(r.say).toBe('On Thursday, November 21 I have 1:00 PM or 4:00 PM, in Testville. Would either of those work for you?');
+  });
+
+  it('a city with nothing in a cut-short list: read again, not stepped back to another city', async () => {
+    npx.availability.mockResolvedValueOnce({ ok: true, latestDay: '2041-12-02', slots: WEEK.slice(0, 3), truncated: true });
+    npx.availability.mockResolvedValueOnce({ ok: true, latestDay: '2041-12-02', slots: WEEK.slice(0, 5), truncated: false });
+    await run(CORPUS[0], CONFIRM_DOB_TOOL_NAME, { date_of_birth: '01/02/1950' });
+    const r = (await run(CORPUS[0], FIND_SOONER_TOOL_NAME, { city: 'Second City' })) as Record<string, unknown>;
+    expect(npx.availability).toHaveBeenCalledTimes(2);
+    expect(r.exact).toBe(true);
+    expect(String(r.say)).toContain('Second City');
+  });
+
+  it('a weekday the cut-short list already has: no second read', async () => {
+    npx.availability.mockResolvedValueOnce({ ok: true, latestDay: '2041-12-02', slots: WEEK.slice(0, 7), truncated: true });
+    await run(CORPUS[0], CONFIRM_DOB_TOOL_NAME, { date_of_birth: '01/02/1950' });
+    const r = (await run(CORPUS[0], FIND_SOONER_TOOL_NAME, { weekdays: 'tuesday' })) as Record<string, unknown>;
+    expect(npx.availability).toHaveBeenCalledTimes(1);
+    expect(r.exact).toBe(true);
+  });
+
+  it('the read that could answer them failed: nothing stepped back, and the earlier choices still book', async () => {
+    npx.availability.mockResolvedValueOnce({ ok: true, latestDay: '2041-12-02', slots: WEEK.slice(0, 7), truncated: true });
+    npx.availability.mockResolvedValueOnce({ ok: false, error: 'network' } as never);
+    await run(CORPUS[0], CONFIRM_DOB_TOOL_NAME, { date_of_birth: '01/02/1950' });
+    const first = (await run(CORPUS[0], FIND_SOONER_TOOL_NAME, {})) as unknown as { options: Array<{ when: string }> };
+    expect(first.options.length).toBeGreaterThan(0);
+    const r = (await run(CORPUS[0], FIND_SOONER_TOOL_NAME, { weekdays: 'thursday', time_of_day: 'afternoon' })) as Record<string, unknown>;
+    expect(r).toMatchObject({ success: true, options: [], unchecked: true });
+    expect(r.say).toBeUndefined();
+    expect(String(r.fix)).toMatch(/could not be checked/);
+    expect(String(r.fix)).toMatch(/do not offer another day/i);
+    await run(CORPUS[0], BOOK_SOONER_TOOL_NAME, { option: '1' });
+    expect(npx.book).toHaveBeenCalledWith(expect.objectContaining({ slotId: 'mon-0900' }));
+  });
+
+  it('the read failed but the list in hand fits: those are offered as asked', async () => {
+    npx.availability.mockResolvedValueOnce({ ok: true, latestDay: '2041-12-02', slots: WEEK.slice(0, 7), truncated: true });
+    npx.availability.mockResolvedValueOnce({ ok: false, error: 'network' } as never);
+    await run(CORPUS[0], CONFIRM_DOB_TOOL_NAME, { date_of_birth: '01/02/1950' });
+    const r = (await run(CORPUS[0], FIND_SOONER_TOOL_NAME, { on_date: '2041-11-21' })) as Record<string, unknown>;
+    expect(npx.availability).toHaveBeenCalledTimes(2);
+    expect(r.exact).toBe(true);
+    expect(r.unchecked).toBeUndefined();
+  });
+
   it('which part of a request a cut-short list cannot answer', () => {
     const cut = { slots: WEEK.slice(0, 7), truncated: true };
     expect(incompleteRange({ ...cut, truncated: false }, { onDate: '2041-11-21' })).toBeNull();
@@ -417,6 +475,12 @@ describe('the availability is read once, early, and only by the rules NPX applie
     expect(incompleteRange(cut, { onDate: '2041-11-25' })).toEqual({ fromDay: '2041-11-25', toDay: '2041-11-25' });
     expect(incompleteRange(cut, { fromDate: '2041-11-20' })).toEqual({ fromDay: '2041-11-21' });
     expect(incompleteRange(cut, { toDate: '2041-11-30' })).toEqual({ fromDay: '2041-11-21', toDay: '2041-11-30' });
+    // No date asked: read again only when nothing in the list fits.
+    expect(incompleteRange(cut, { weekdays: ['monday'] })).toBeNull();
+    expect(incompleteRange(cut, { city: 'Second City' })).toBeNull();
+    expect(incompleteRange(cut, { weekdays: ['wednesday'] })).toEqual({ fromDay: '2041-11-21' });
+    expect(incompleteRange(cut, { weekdays: ['thursday'], timeOfDay: 'afternoon' })).toEqual({ fromDay: '2041-11-21' });
+    expect(incompleteRange(cut, { city: 'Nowhere' })).toEqual({ fromDay: '2041-11-21' });
     // The range read replaces the cut day; the whole days before it stay, once each.
     const merged = withRange(WEEK.slice(0, 7), '2041-11-21', [WEEK[6], WEEK[7], WEEK[3]]);
     expect(merged.map((x) => x.slotId)).toEqual(['mon-0900', 'mon-0920', 'mon-1400', 'tue-0900', 'tue-1540', 'thu-1030', 'thu-1300']);
@@ -493,8 +557,9 @@ describe('the availability is read once, early, and only by the rules NPX applie
       expect(Date.now() - start).toBeLessThanOrEqual(FIND_BUDGET_MS);
       expect(npx.availability).toHaveBeenCalledTimes(2);
       expect((npx.availability.mock.calls[1] as unknown as [unknown, { timeoutMs: number }])[1].timeoutMs).toBeLessThanOrEqual(3_000);
-      // Thursday's morning slot from the list in hand, said as stepped back.
-      expect(r).toMatchObject({ success: true, exact: false });
+      // Thursday afternoon was never read, so nothing is stepped back to (Codex round 2, #439).
+      expect(r).toMatchObject({ success: true, options: [], unchecked: true });
+      expect(r.say).toBeUndefined();
     });
   });
 
