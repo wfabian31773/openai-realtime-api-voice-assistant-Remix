@@ -830,13 +830,19 @@ registerTool({
     let pool = avail.slots;
     let range = incompleteRange(avail, pref);
     // Whether the pool now runs to the end of the window: the first list was
-    // whole, or a read on with no last day came back whole.
+    // whole, or every read on started where the one before it stopped and the
+    // last, with no last day, came back whole. A read on that starts later than
+    // the cut leaves the days between unread (Codex, #439).
     let complete = !avail.truncated;
+    let edge = avail.slots[avail.slots.length - 1]?.day;
+    let gap = false;
     for (let reads = 0; range && reads < MAX_RANGE_READS && left() >= MIN_NPX_READ_MS; reads++) {
+      if (!edge || range.fromDay > edge) gap = true;
       const more = await soon(readAvailability(s.contact, s.demo, range, deadline), left());
       if (!more || 'error' in more) break;
       pool = withRange(pool, range.fromDay, more.slots);
-      if (!range.toDay && !more.truncated) complete = true;
+      if (!range.toDay && !more.truncated && !gap) complete = true;
+      edge = more.slots[more.slots.length - 1]?.day ?? edge;
       const next = incompleteRange(more, pref);
       if (next && next.fromDay <= range.fromDay) break;
       range = next;

@@ -341,7 +341,8 @@ export function overviewLine(slots: NpxSlot[], moreAfter = false): string {
   const where = cities.length ? `, in ${joinWords(cities)}` : '';
   const line = `Openings on ${joinWords(weekdays.map((w) => PLURAL_DAY[w]))}, ${when}, ${span}${where}.`;
   // A list cut short describes only its earliest openings (Codex, #439).
-  return moreAfter ? `${line} Those are the earliest; there are more after ${last}.` : line;
+  // Said the same whether the unread part is after the list or a gap inside it.
+  return moreAfter ? `${line} There are more openings than these.` : line;
 }
 
 /** The street address without the state and ZIP: "11000 Eucalyptus St, 185, Rancho Cucamonga". */

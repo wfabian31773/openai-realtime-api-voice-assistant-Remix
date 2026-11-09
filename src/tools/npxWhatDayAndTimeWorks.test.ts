@@ -103,9 +103,9 @@ describe('the search, in memory (no network between a question and its answer)',
     expect(offerLine([WEEK[0], WEEK[1]])).toMatch(/, in Testville\. /);
   });
 
-  it('the overview of a cut-short list says there is more after it', () => {
-    expect(overviewLine(WEEK.slice(0, 3), true)).toMatch(/Those are the earliest; there are more after Monday, November 18\.$/);
-    expect(overviewLine(WEEK.slice(0, 3))).not.toMatch(/more after/);
+  it('the overview of a cut-short list says there are more openings than it shows', () => {
+    expect(overviewLine(WEEK.slice(0, 3), true)).toMatch(/ There are more openings than these\.$/);
+    expect(overviewLine(WEEK.slice(0, 3))).not.toMatch(/more openings/);
   });
 
   it('a slot whose city cannot be read matches no city the caller names', () => {
@@ -468,10 +468,10 @@ describe('the availability is read once, early, and only by the rules NPX applie
     npx.availability.mockResolvedValueOnce({ ok: true, latestDay: '2041-12-02', slots: WEEK.slice(0, 7), truncated: true });
     await run(CORPUS[0], CONFIRM_DOB_TOOL_NAME, { date_of_birth: '01/02/1950' });
     const cut = (await run(CORPUS[0], FIND_SOONER_TOOL_NAME, {})) as Record<string, unknown>;
-    expect(String(cut.overview)).toMatch(/there are more after Thursday, November 21\.$/);
+    expect(String(cut.overview)).toMatch(/ There are more openings than these\.$/);
     npx.availability.mockResolvedValueOnce({ ok: true, latestDay: '2041-12-02', slots: WEEK.slice(5), truncated: false });
     const whole = (await run(CORPUS[0], FIND_SOONER_TOOL_NAME, { weekdays: 'wednesday' })) as Record<string, unknown>;
-    expect(String(whole.overview)).not.toMatch(/more after/);
+    expect(String(whole.overview)).not.toMatch(/more openings/);
   });
 
   it('a read on for one day does not make the overview whole: the days after it are still unread', async () => {
@@ -480,7 +480,19 @@ describe('the availability is read once, early, and only by the rules NPX applie
     await run(CORPUS[0], CONFIRM_DOB_TOOL_NAME, { date_of_birth: '01/02/1950' });
     const r = (await run(CORPUS[0], FIND_SOONER_TOOL_NAME, { on_date: '2041-11-21', time_of_day: 'afternoon' })) as Record<string, unknown>;
     expect(r.exact).toBe(true);
-    expect(String(r.overview)).toMatch(/there are more after Thursday, November 21\.$/);
+    expect(String(r.overview)).toMatch(/ There are more openings than these\.$/);
+  });
+
+  it('a read on that starts after the cut leaves the days between unread: the overview stays caveated', async () => {
+    npx.availability.mockResolvedValueOnce({ ok: true, latestDay: '2041-12-02', slots: WEEK.slice(0, 3), truncated: true });
+    npx.availability.mockResolvedValueOnce({ ok: true, latestDay: '2041-12-02', slots: [WEEK[9]], truncated: false });
+    await run(CORPUS[0], CONFIRM_DOB_TOOL_NAME, { date_of_birth: '01/02/1950' });
+    const r = (await run(CORPUS[0], FIND_SOONER_TOOL_NAME, { from_date: '2041-11-25' })) as Record<string, unknown>;
+    const [req] = npx.availability.mock.calls[1] as unknown as [{ fromDay?: string; toDay?: string }];
+    expect(req.fromDay).toBe('2041-11-25');
+    expect(req.toDay).toBeUndefined();
+    expect(r.exact).toBe(true);
+    expect(String(r.overview)).toMatch(/ There are more openings than these\.$/);
   });
 
   it('a weekday the cut-short list already has: no second read', async () => {
