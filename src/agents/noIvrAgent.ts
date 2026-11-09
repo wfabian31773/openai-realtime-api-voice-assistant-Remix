@@ -1945,12 +1945,12 @@ The ticket will include schedule context (last appointment info) automatically.`
           "optical_request",
           "medical_records_request",
         ])
-        .describe("Category. optical_request: glasses, frames, lenses or contacts as products (orders, pickup, repairs) — not a doctor visit, clinical complaint or refill. medical_records_request: anyone asking for a patient's medical records or chart. new_appointment = NEW; confirm_appointment = confirming existing; appointment_request is legacy."),
+        .describe("Category. optical_request: glasses, frames, lenses or contacts as products (orders, pickup, repairs) — not a doctor visit, clinical complaint or refill. medical_records_request: any records request. new_appointment = NEW; confirm_appointment = confirming existing; appointment_request is legacy."),
       records_requester: z
         .enum(["patient", "family_or_representative", "provider_office", "health_plan", "attorney", "other"])
         .optional()
-        .describe("medical_records_request only: who is asking, as the caller said. When it is not the patient, first_name, last_name and date_of_birth are the PATIENT's, never the caller's."),
-      requester_name: z.string().optional().describe("medical_records_request only, when the caller is not the patient: the caller's name and their office or organization."),
+        .describe("Records only: who is asking. If not the patient, name and DOB fields are the PATIENT's."),
+      requester_name: z.string().optional().describe("Records only, not the patient: caller's name and office."),
       request_summary: z.string().describe("Summary of what the patient needs"),
       preferred_contact: z
         .enum(["phone", "text", "email"])
