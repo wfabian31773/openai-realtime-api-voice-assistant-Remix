@@ -38,6 +38,7 @@ import {
 } from './npxOutreachTools';
 import {
   cityOf,
+  matches,
   minutesOf,
   offerLine,
   overviewLine,
@@ -95,6 +96,13 @@ const WEEK: NpxSlot[] = [
 ];
 
 describe('the search, in memory (no network between a question and its answer)', () => {
+  it('a slot whose city cannot be read matches no city the caller names', () => {
+    const unknown = slot('nocity', '2041-11-18', '09:00', { city: '', address: 'Suite 4' });
+    expect(matches(unknown, { city: 'Testville' })).toBe(false);
+    expect(matches(unknown, {})).toBe(true);
+    expect(matches(WEEK[0], { city: 'Testville' })).toBe(true);
+  });
+
   it('nothing asked: the earliest opening on each of three days', () => {
     expect(searchSlots(WEEK, {}).picked.map((s) => s.slotId)).toEqual(['mon-0900', 'tue-0900', 'thu-0800']);
   });

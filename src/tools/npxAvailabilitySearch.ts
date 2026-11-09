@@ -147,7 +147,8 @@ function cityMatches(s: NpxSlot, p: SlotPreference): boolean {
   if (!p.city) return true;
   const want = fold(p.city);
   const have = fold(cityOf(s));
-  return Boolean(want) && (have.includes(want) || want.includes(have));
+  // A slot whose city cannot be read matches no city: '' is in every string (Codex, #439).
+  return Boolean(want) && Boolean(have) && (have.includes(want) || want.includes(have));
 }
 
 export function matches(s: NpxSlot, p: SlotPreference): boolean {
