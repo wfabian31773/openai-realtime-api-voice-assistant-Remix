@@ -1386,8 +1386,21 @@ import { callEnvironment } from "./callRecord";
  * create-ticket field); PCP forwards its own.
  * Above main's v187 (#437, `ca7f65be`), which it contains. No migration.
  */
+/**
+ * v191 — FILING QUALITY FROM THE TRANSCRIPT (2026-11-09). Operator: "we have
+ * always focused on execution of task but never on quality of task ... the
+ * actual transcript has to tell us what should have been filed and what fields
+ * should have been populated." A worker reads each substantive call's
+ * transcript (the grader's model and account) and stores the ticket it called
+ * for in the Hub's filing_expectations table; scripts/filing-quality.ts
+ * compares those rows with the Support Center tickets for the Daybook. Changes
+ * nothing a caller hears or a ticket carries. Above main's v190 (#441,
+ * `ce0bee67`), which it contains along with v188 (#438, `fca1e6f3`); v189
+ * (#439) is open on its branch. The table is created on first write (CREATE
+ * TABLE IF NOT EXISTS); the migration file documents it.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v190-after-hours-records-never-ring-20261109";
+  "voice-runtime-v191-filing-quality-from-the-transcript-20261109";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can
