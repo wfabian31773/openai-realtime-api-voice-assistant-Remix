@@ -231,6 +231,16 @@ export interface SubmitTicketParams {
    * takesUnassignedExit; an app that does not know the field drops it).
    */
   routingAskExhausted?: boolean;
+  /**
+   * v190: who is asking, on an after-hours medical records request — the
+   * vocabulary /create-ticket has carried since 2026-09 (ticketing-app #450
+   * takes it on /submit-ticket; an app without it logs and drops the fields).
+   * Sent only when somebody said who is asking.
+   */
+  requestorType?: 'patient' | 'personal_representative' | 'provider' | 'health_plan' | 'legal' | 'other';
+  requestPathway?: 'roa_patient' | 'third_party_treatment' | 'third_party_plan' | 'third_party_legal' | 'third_party_other';
+  capClockApplies?: boolean;
+  requestorName?: string;
 }
 
 export interface SubmitTicketResponse {

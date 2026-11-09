@@ -652,6 +652,13 @@ export class SyncAgentService {
     secondTicketOnThisCall?: { keySuffix: string };
     /** v186: see SubmitTicketParams.routingAskExhausted. */
     routingAskExhausted?: boolean;
+    /** v190: see SubmitTicketParams.requestorType. */
+    recordsRequester?: {
+      requestorType: NonNullable<import('../../server/services/ticketingApiClient').SubmitTicketParams['requestorType']>;
+      requestPathway: NonNullable<import('../../server/services/ticketingApiClient').SubmitTicketParams['requestPathway']>;
+      capClockApplies: boolean;
+      requestorName?: string;
+    };
   }): Promise<SyncAgentResponse> {
     const { callSid } = params;
 
@@ -822,6 +829,7 @@ export class SyncAgentService {
         priority: params.priority,
         ...(params.departmentId ? { departmentId: params.departmentId } : {}),
         ...(params.routingAskExhausted ? { routingAskExhausted: true } : {}),
+        ...(params.recordsRequester ? params.recordsRequester : {}),
         callData: callSid ? {
           callSid,
           callerPhone: params.callerPhone,

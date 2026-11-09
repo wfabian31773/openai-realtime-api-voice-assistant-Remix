@@ -15,6 +15,7 @@ import { getAzulTimeline } from './toolTimeline';
 import { scheduleLookupService } from './scheduleLookupService';
 import { AZUL_VISION_LOCATIONS, currentClinicName } from '../config/azulVisionKnowledge';
 import type { TicketLocationSource } from '../tools/ticketIdentity';
+import { afterHoursRecordsRequestFor, forgetAfterHoursRecordsRequest, MEDICAL_RECORDS_DEPARTMENT_ID, recordsRequesterPayload } from './afterHoursRecordsRequest';
 
 /** Bound on the caller-ID history read at teardown; the caller is already gone. */
 export const FLOOR_HISTORY_LOOKUP_TIMEOUT_MS = 2000;
@@ -31,6 +32,14 @@ export const FLOOR_MISSING_IDENTITY_NOTE =
   'MISSING IDENTITY — stand-in name; no verified patient record on this call.';
 export const FLOOR_HISTORY_LOCATION_NOTE =
   'LOCATION from the caller-ID visit history (the last office seen for the one patient on this number) — not confirmed by the caller.';
+/**
+ * v190: a records request the escalation gate refused on this call files to
+ * Medical Records, never After Hours, with who asked when the caller said it
+ * (operator, 2026-11-09). Ticket #73052 was this call shape filed to After
+ * Hours with no requester, and became a patient-clock case when staff moved it.
+ */
+export const FLOOR_RECORDS_NOTE =
+  'MEDICAL RECORDS REQUEST — the caller asked for medical records and hung up before the agent filed it. Filed to Medical Records; records requests never ring the on-call (operator ruling 2026-11-09).';
 export const FLOOR_DIALED_LOCATION_NOTE =
   'LOCATION from the number dialled (an office line) — not confirmed by the caller.';
 
@@ -169,6 +178,9 @@ export async function sweepAfterHoursUnfiledCall(
     const clinic = named ?? fromHistory ?? fromDialed;
     const locationSource: TicketLocationSource | undefined = named ? 'caller' : clinic ? 'history' : undefined;
     const requestType = floorRequestType(callerText);
+    const records = afterHoursRecordsRequestFor(metadata.callSid);
+    forgetAfterHoursRecordsRequest(metadata.callSid);
+    const recordsRequester = records ? recordsRequesterPayload(records.requester, records.requesterName) : undefined;
     const { SyncAgentService } = await import('./syncAgentService');
     const result = await SyncAgentService.submitSimplifiedTicket({
       patientFullName: fullName,
@@ -176,15 +188,21 @@ export async function sweepAfterHoursUnfiledCall(
       reasonForCalling: callerText,
       preferredContactMethod: 'phone',
       patientPhone: metadata.callerPhone,
-      departmentId: AFTER_HOURS_DEPARTMENT_ID,
+      departmentId: records ? MEDICAL_RECORDS_DEPARTMENT_ID : AFTER_HOURS_DEPARTMENT_ID,
       ...(clinic && locationSource ? { locationOfLastVisit: clinic, locationSource } : {}),
-      // The department-8 pair, so the hint and the pinned department agree.
-      suggestedRequestTypeId: requestType.requestTypeId,
-      suggestedRequestReasonId: requestType.requestReasonId,
-      suggestedRequestReason: requestType.requestReason,
-      ...(requestType.urgent ? { suggestedUrgent: true } : {}),
+      // The department-8 pair, so the hint and the pinned department agree —
+      // and none on a records request, which is not department 8's.
+      ...(records
+        ? recordsRequester ? { recordsRequester } : {}
+        : {
+            suggestedRequestTypeId: requestType.requestTypeId,
+            suggestedRequestReasonId: requestType.requestReasonId,
+            suggestedRequestReason: requestType.requestReason,
+            ...(requestType.urgent ? { suggestedUrgent: true } : {}),
+          }),
       additionalDetails: [
         FLOOR_NEEDS_REVIEW_NOTE,
+        records ? FLOOR_RECORDS_NOTE : undefined,
         'AFTER-HOURS TEARDOWN: the call ended with a stated request and no recorded ticket. Please review the conversation and complete the request.',
         clinic ? undefined : FLOOR_MISSING_LOCATION_NOTE,
         fromHistory ? FLOOR_HISTORY_LOCATION_NOTE : undefined,
