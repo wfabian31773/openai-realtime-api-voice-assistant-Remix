@@ -174,6 +174,13 @@ describe('both halves spelled as one run read as the name (finding 4)', () => {
   it('the pieces are read only where the stops fall, never split elsewhere', () => {
     expect(said('CALLER: T E S T A. L A K E. I need a refill.', 'Test', 'Alake')).toBe(false);
     expect(said('CALLER: T E S T A. L A K E. I need a refill.', 'Lake', 'I')).toBe(false);
+    // Codex P2 on #442 (review of e238680): the letters joined across the stop
+    // must not stand in for the pieces.
+    expect(said('CALLER: T E S T A. L A K E.', 'Test', 'Alake')).toBe(false);
+    expect(said('CALLER: T E S T A. L A K E.', 'Testal', 'Ake')).toBe(false);
+  });
+  it('letters each written with a full stop mark no boundary, and still read whole', () => {
+    expect(said('CALLER: The patient is T. E. S. T. A. L. A. K. E.', 'Testa', 'Lake')).toBe(true);
   });
   it('run straight into "I" with no stop is refused (findings 3 and 4 together: the residue above)', () => {
     expect(said('CALLER: This is T E S T A L A K E I need a refill.', 'Testa', 'Lake')).toBe(false);

@@ -220,14 +220,17 @@ function spelledWhole(sp: Spot[], a: string[], b: string[]): boolean {
   const whole = a.join("") + b.join("");
   const first = a.join("");
   const second = b.join("");
-  return sp.some(
-    (s) =>
-      s.spelled === true &&
-      (s.words.has(whole) ||
-        (first.length >= 2 &&
-          second.length >= 2 &&
-          (s.parts ?? []).some((p, i, ps) => p === first && ps[i + 1] === second))),
-  );
+  return sp.some((s) => {
+    if (s.spelled !== true) return false;
+    const parts = s.parts ?? [];
+    // A full stop between two pieces of two letters or more is a boundary the
+    // transcriber wrote; one-letter pieces ("T. E. S. T. A.") mark none.
+    // Across a boundary only the pieces themselves can be the halves, so
+    // "T E S T A. L A K E." is Testa Lake and never Test Alake (Codex P2 on #442).
+    const bounded = parts.filter((p) => p.length >= 2).length >= 2;
+    if (!bounded) return s.words.has(whole);
+    return first.length >= 2 && second.length >= 2 && parts.some((p, i) => p === first && parts[i + 1] === second);
+  });
 }
 
 /**
