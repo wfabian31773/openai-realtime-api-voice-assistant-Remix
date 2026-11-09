@@ -162,6 +162,7 @@ describe('the gate: a records request never rings, whoever asks', () => {
   it.each([
     'Dr. Kim in the emergency room at Example Hospital, acute angle closure, pressure is 58, I have her chart from your office. I need the on-call ophthalmologist.',
     'ER physician needs the on-call ophthalmologist and has her chart',
+    'ER doctor needs on-call and has her chart',
     'Provider calling, the records show prior glaucoma surgery, patient now has a corneal ulcer',
     'Provider needs her medical record number to verify the patient before an urgent consult',
   ])('a document merely mentioned is not a records request, and a clinician still rings: %s', (reason) => {
@@ -362,6 +363,35 @@ describe('who asked survives an ask, a post-op word and a patient naming their d
     });
     const sent = h.submitSimplifiedTicket.mock.calls[0][0] as Record<string, unknown>;
     expect(sent.recordsRequester).toMatchObject({ requestorType: 'patient', capClockApplies: true });
+    expect((sent.recordsRequester as Record<string, unknown>).requestorName).toBeUndefined();
+  });
+});
+
+describe('a requester name is the requester, never the destination', () => {
+  it('a patient filing that names a doctor as requester_name sends no requester name', async () => {
+    const c = await call(['I need a copy of my records sent to my new doctor.']);
+    await invoke(c.agent, 'create_ticket', {
+      first_name: 'Pat', last_name: 'Example', date_of_birth: '03/04/1960', callback_number: '2025550100',
+      request_category: 'medical_records_request', records_requester: 'patient',
+      requester_name: "Dr. Patel's office", request_summary: 'Patient requesting a copy of their records',
+    });
+    const sent = h.submitSimplifiedTicket.mock.calls[0][0] as Record<string, unknown>;
+    expect((sent.recordsRequester as Record<string, unknown>).requestorName).toBeUndefined();
+  });
+
+  it('a family member whose escalation named the destination doctor is not filed with that doctor as requester', async () => {
+    const c = await call(["I'm calling for my mother's records, they need to go to Dr. Patel's office."]);
+    await invoke(c.agent, 'escalate_to_human', {
+      reason: "Family member requesting the patient's records for Dr. Patel's office",
+      caller_type: 'patient_urgent_medical', provider_info: "Dr. Patel's office",
+    });
+    await invoke(c.agent, 'create_ticket', {
+      first_name: 'Pat', last_name: 'Example', date_of_birth: '03/04/1960', callback_number: '2025550100',
+      request_category: 'medical_records_request', records_requester: 'family_or_representative',
+      request_summary: "Family member requesting the patient's records",
+    });
+    const sent = h.submitSimplifiedTicket.mock.calls[0][0] as Record<string, unknown>;
+    expect(sent.recordsRequester).toMatchObject({ requestorType: 'personal_representative' });
     expect((sent.recordsRequester as Record<string, unknown>).requestorName).toBeUndefined();
   });
 });
