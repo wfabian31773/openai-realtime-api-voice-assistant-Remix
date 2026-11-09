@@ -542,6 +542,8 @@ describe('the availability is read once, early, and only by the rules NPX applie
     expect(req2.fromDay).toBe('2041-11-18');
     expect(req3.fromDay).toBe('2041-11-19');
     expect(r.exact).toBe(true);
+    // Each read started where the last stopped and the last came back whole: nothing is unread.
+    expect(String(r.overview)).not.toMatch(/more openings/);
     expect(r.say).toBe('On Thursday, November 21 I have 1:00 PM or 4:00 PM, in Testville. Would either of those work for you?');
   });
 
