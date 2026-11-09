@@ -374,6 +374,16 @@ describe('the availability is read once, early, and only by the rules NPX applie
     expect(r.options.map((o) => o.when)).not.toContain('Monday, November 18 at 9:00 AM');
   });
 
+  // Codex, #439: the two-slot offer is never the schedule.
+  it('an NPX without the availability endpoint: a day the two offered openings lack is not stepped back from', async () => {
+    npx.availability.mockResolvedValue({ ok: false, error: 'not_supported' });
+    await run(CORPUS[2], CONFIRM_DOB_TOOL_NAME, { date_of_birth: '01/02/1950' });
+    const r = (await run(CORPUS[2], FIND_SOONER_TOOL_NAME, { weekdays: 'thursday' })) as Record<string, unknown>;
+    expect(npx.offer).toHaveBeenCalledTimes(1);
+    expect(r).toMatchObject({ success: true, options: [], unchecked: true });
+    expect(r.say).toBeUndefined();
+  });
+
   it('an NPX without the availability endpoint: the two-slot offer, searched the same way', async () => {
     npx.availability.mockResolvedValue({ ok: false, error: 'not_supported' });
     await run(CORPUS[2], CONFIRM_DOB_TOOL_NAME, { date_of_birth: '01/02/1950' });

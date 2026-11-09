@@ -229,11 +229,13 @@ Short sentences. One question at a time, then stop and listen. Say dates and tim
 
 export function createNpxOutreachAgent(
   _handoffToHuman: () => Promise<void>,
-  metadata: { outbound?: OutboundContact; callback?: unknown } = {},
+  metadata: { outbound?: OutboundContact & { campaignKey?: string }; callback?: unknown } = {},
 ): RealtimeAgent {
   // The availability is read while the greeting plays, so the opening line
   // can name where the openings are and every search answers from memory.
-  warmOutreachAvailability(metadata.outbound);
+  // The call's campaign goes with it: a demo-campaign call reads the demo NPX
+  // whatever mode the process is in.
+  warmOutreachAvailability(metadata.outbound, metadata.outbound?.campaignKey);
   return new RealtimeAgent({
     name: npxOutreachAgentConfig.name,
     voice: npxOutreachAgentConfig.voice,

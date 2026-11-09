@@ -375,6 +375,28 @@ describe('one lane in both modes: going live is the environment variable and not
     expect(prompts[0]).toBe(prompts[1]);
   });
 
+  // Codex, #439: the greeting's warm-up read dropped the campaign, so in live
+  // mode a demo-campaign call read production NPX before any tool ran.
+  it('the warm-up read goes where the call\'s campaign says: demo campaign to the demo NPX, even in live mode', async () => {
+    vi.stubEnv('NPX_OUTREACH_MODE', 'live');
+    seed('console_movable');
+    attemptId = await store.startAttempt('c1', store.campaignId, 1);
+    const contact = (await store.loadCallContact('c1', attemptId))!;
+    createNpxOutreachAgent(async () => undefined, { outbound: { ...contact, campaignKey: NPX_OUTREACH_DEMO_CAMPAIGN_KEY } });
+    await vi.waitFor(() => expect(demo.availability).toHaveBeenCalledTimes(1));
+    expect(live.availability).not.toHaveBeenCalled();
+  });
+
+  it('the warm-up read of a live-campaign call in live mode goes to production NPX', async () => {
+    vi.stubEnv('NPX_OUTREACH_MODE', 'live');
+    seed('console_movable');
+    attemptId = await store.startAttempt('c1', store.campaignId, 1);
+    const contact = (await store.loadCallContact('c1', attemptId))!;
+    createNpxOutreachAgent(async () => undefined, { outbound: { ...contact, campaignKey: npxOutreachPolicy.campaignKey } });
+    await vi.waitFor(() => expect(live.availability).toHaveBeenCalledTimes(1));
+    expect(demo.availability).not.toHaveBeenCalled();
+  });
+
   it('a returned call carries the campaign it was resolved under, so a demo callback still reaches the demo NPX', async () => {
     const callback: CallbackContext = {
       campaignKey: npxOutreachPolicy.campaignKey,

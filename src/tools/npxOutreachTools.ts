@@ -326,10 +326,7 @@ async function sessionFor(input: Record<string, unknown>): Promise<{ sid: string
   if (!contactId || !attemptId) return NOT_THIS_CALL;
   const contact = await (await live().store()).loadCallContact(contactId, attemptId);
   if (!contact) return NOT_THIS_CALL;
-  const demo =
-    npxOutreachMode() === 'demo' ||
-    input.outbound_campaign === NPX_OUTREACH_DEMO_CAMPAIGN_KEY ||
-    contact.data.source === NPX_OUTREACH_DEMO_SOURCE;
+  const demo = isDemoNpxCall(contact, input.outbound_campaign);
   return {
     sid,
     s: keep(
@@ -406,7 +403,8 @@ async function readAvailability(
   const second = readLimit(deadlineAt);
   if (second === null) return { error: 'timeout' };
   const o = await npx.offer({ ...ask, minDaysSooner: MIN_DAYS_SOONER }, second);
-  return o.ok ? { slots: o.slots, truncated: false, from: 'offer', fetchedAtMs: Date.now() } : { error: o.error };
+  // At most two of the openings, never the schedule: truncated (Codex, #439).
+  return o.ok ? { slots: o.slots, truncated: true, from: 'offer', fetchedAtMs: Date.now() } : { error: o.error };
 }
 
 /** The contact's availability: the cached read while it is fresh, else a new
@@ -437,9 +435,24 @@ function loadAvailability(c: OutboundContact, demo: boolean, fresh = false, dead
  * agent factory; sends NPX nothing about the patient (the medical group, the
  * practices in reach and the appointment date), and never throws.
  */
-export function warmOutreachAvailability(contact: OutboundContact | undefined): void {
+/**
+ * A demo call: the process is in demo mode, OR the call's injected campaign is
+ * the demo campaign, OR its contact came from the demo seed. Any one is enough,
+ * and the tools and the greeting's warm-up read decide it the same way, so a
+ * demo call never reads production NPX (Codex, #439: the warm-up dropped the
+ * campaign and, in live mode, read production for a demo-campaign call).
+ */
+export function isDemoNpxCall(contact: OutboundContact, campaignKey?: unknown): boolean {
+  return (
+    npxOutreachMode() === 'demo' ||
+    campaignKey === NPX_OUTREACH_DEMO_CAMPAIGN_KEY ||
+    contact.data.source === NPX_OUTREACH_DEMO_SOURCE
+  );
+}
+
+export function warmOutreachAvailability(contact: OutboundContact | undefined, campaignKey?: string): void {
   if (!contact) return;
-  const demo = npxOutreachMode() === 'demo' || contact.data.source === NPX_OUTREACH_DEMO_SOURCE;
+  const demo = isDemoNpxCall(contact, campaignKey);
   if (!offerAsk(contact)) return;
   void loadAvailability(contact, demo).catch(() => undefined);
 }
@@ -841,7 +854,10 @@ registerTool({
     // a read that fails, a budget that runs out, or a day that holds more than a
     // whole list leaves it unread.
     let pool = avail.slots;
-    let range = incompleteRange(avail, pref);
+    // An NPX without the availability endpoint answers with two openings and
+    // cannot be read any further: nothing it lacks is ever stepped back from.
+    const offerOnly = avail.from === 'offer';
+    let range = offerOnly ? null : incompleteRange(avail, pref);
     // What has been read: `complete` when the pool runs to the end of the
     // window, otherwise `edge`, the day before which every day has been read.
     // A read on that starts later than the edge leaves the days between it
@@ -863,7 +879,7 @@ registerTool({
       if (next && next.fromDay <= range.fromDay) break;
       range = next;
     }
-    const unread = range !== null;
+    const unread = range !== null || offerOnly;
     const today = practiceToday();
     const unchecked: ToolResult = {
       success: true,
@@ -898,7 +914,7 @@ registerTool({
     // #439: Thursday in one city must not give way to another city while that
     // city's Tuesday is unread). Once, inside the budget; then step back over
     // what was read.
-    if (relaxed !== null && !complete && edge && left() >= MIN_NPX_READ_MS) {
+    if (relaxed !== null && !complete && !offerOnly && edge && left() >= MIN_NPX_READ_MS) {
       const from = edge;
       const fill = await soon(readAvailability(s.contact, s.demo, { fromDay: from }, deadline), left());
       if (fill && !('error' in fill)) {
