@@ -513,6 +513,26 @@ describe('the availability is read once, early, and only by the rules NPX applie
     expect(String(r.overview)).toMatch(/more openings/);
   });
 
+  it('the read before stepping back adds to what was read, from the edge, and keeps the day already read', async () => {
+    const wed = slot('wed-0900', '2041-11-20', '09:00');
+    const thuSecond = slot('thu-sc-0900', '2041-11-21', '09:00', SECOND);
+    npx.availability.mockResolvedValueOnce({ ok: true, latestDay: '2041-12-02', slots: [...WEEK.slice(0, 3), wed], truncated: true });
+    npx.availability.mockResolvedValueOnce({ ok: true, latestDay: '2041-12-02', slots: [...WEEK.slice(5, 9), thuSecond], truncated: false });
+    npx.availability.mockResolvedValueOnce({ ok: true, latestDay: '2041-12-02', slots: [wed], truncated: true });
+    await run(CORPUS[0], CONFIRM_DOB_TOOL_NAME, { date_of_birth: '01/02/1950' });
+    const r = (await run(CORPUS[0], FIND_SOONER_TOOL_NAME, {
+      on_date: '2041-11-21',
+      time_of_day: 'afternoon',
+      city: 'Second City',
+    })) as Record<string, unknown>;
+    expect(npx.availability).toHaveBeenCalledTimes(3);
+    const [fill] = npx.availability.mock.calls[2] as unknown as [{ fromDay?: string }];
+    expect(fill.fromDay).toBe('2041-11-20');
+    // Thursday's Second City morning, read before the fill, is still there to offer.
+    expect(String(r.say)).toMatch(/^I don't have that time open, but/);
+    expect(String(r.say)).toContain('Second City');
+  });
+
   it('the read before stepping back fails: it steps back over what was read', async () => {
     npx.availability.mockResolvedValueOnce({ ok: true, latestDay: '2041-12-02', slots: WEEK.slice(0, 3), truncated: true });
     npx.availability.mockResolvedValueOnce({ ok: true, latestDay: '2041-12-02', slots: WEEK.slice(5, 9), truncated: false });
