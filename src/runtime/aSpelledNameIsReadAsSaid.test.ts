@@ -167,17 +167,24 @@ describe('both halves spelled as one run read as the name (finding 4)', () => {
   it('surname first ("L A K E T E S T A")', () => {
     expect(said('CALLER: The patient is L A K E T E S T A, please call back.', 'Testa', 'Lake')).toBe(true);
   });
-  it('with a full stop between the two spellings, read from the pieces the stops mark', () => {
-    expect(said('CALLER: T E S T A. L A K E. I need a refill.', 'Testa', 'Lake')).toBe(true);
-    expect(said('CALLER: T E S T A. L A K E.', 'Testa', 'Lake')).toBe(true);
-  });
-  it('the pieces are read only where the stops fall, never split elsewhere', () => {
-    expect(said('CALLER: T E S T A. L A K E. I need a refill.', 'Test', 'Alake')).toBe(false);
-    expect(said('CALLER: T E S T A. L A K E. I need a refill.', 'Lake', 'I')).toBe(false);
-    // Codex P2 on #442 (review of e238680): the letters joined across the stop
-    // must not stand in for the pieces.
+  it('a run with a full stop between two spelled pieces is never a whole name (three Codex P2s on #442; 0 of the 10 rescues)', () => {
+    // The accepted residue: the right name is refused too, and that call files
+    // under no heard name, as before v180.
+    expect(said('CALLER: T E S T A. L A K E. I need a refill.', 'Testa', 'Lake')).toBe(false);
+    expect(said('CALLER: T E S T A. L A K E.', 'Testa', 'Lake')).toBe(false);
+    // Review of e238680: the letters joined across the stop.
     expect(said('CALLER: T E S T A. L A K E.', 'Test', 'Alake')).toBe(false);
     expect(said('CALLER: T E S T A. L A K E.', 'Testal', 'Ake')).toBe(false);
+    expect(said('CALLER: T E S T A. L A K E. I need a refill.', 'Lake', 'I')).toBe(false);
+    // Review of 25cd221: two pieces matched, a third dropped.
+    expect(said('CALLER: T E S T A. L A K E. S M I T H.', 'Testa', 'Lake')).toBe(false);
+    expect(said('CALLER: T E S T A L A K E. S M I T H.', 'Testa', 'Lake')).toBe(false);
+  });
+  it('a run spelling three names with no stop is not the first two', () => {
+    expect(said('CALLER: The patient is T E S T A L A K E S M I T H.', 'Testa', 'Lake')).toBe(false);
+  });
+  it('a one-letter piece after the run is not a boundary ("… L A K E. I need", as on main)', () => {
+    expect(said('CALLER: This is T E S T A L A K E. I need a refill.', 'Testa', 'Lake')).toBe(true);
   });
   it('letters each written with a full stop mark no boundary, and still read whole', () => {
     expect(said('CALLER: The patient is T. E. S. T. A. L. A. K. E.', 'Testa', 'Lake')).toBe(true);

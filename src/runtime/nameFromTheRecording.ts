@@ -205,31 +205,27 @@ function saidTogether(sp: Spot[], a: string[], b: string[]): boolean {
 }
 
 /**
- * v193: both halves spelled in one run ("T E S T A L A K E", or "T E S T A.
- * L A K E.") are one place standing for the whole name, which matches neither
- * half alone (review of #431: 10 of about 750 verified callers' names came out
- * whole only this way, 2026-10-10..11-09). The model's name must be every
- * letter of the run, in order, and nothing else — no letter dropped or added
- * (that is what refusing the i/a strip keeps true, Codex P2 on #442). Where
- * the first name ends and the last begins is the model's reading: all 10 of
- * those callers spelled the two halves with no boundary between. With a
- * full stop the transcriber wrote ("T E S T A. L A K E. I need") the pieces
- * on either side of it must BE the two halves.
+ * v193: both halves spelled in one run ("T E S T A L A K E") are one place
+ * standing for the whole name, which matches neither half alone (review of
+ * #431: 10 of about 750 verified callers' names came out whole only this way,
+ * 2026-10-10..11-09, every one plain letters with no full stop anywhere
+ * inside). The model's name must be every letter of the run, in order, and
+ * nothing else — no letter dropped or added (that is what refusing the i/a
+ * strip keeps true, Codex P2 on #442). Where the first name ends and the last
+ * begins is the model's reading.
+ *
+ * A run with a full stop between two pieces of two letters or more ("T E S T
+ * A. L A K E.", "… L A K E. S M I T H.") is NEVER read as a whole name: the
+ * stop is a boundary the transcriber wrote, any reading of the pieces either
+ * crosses it or leaves a piece out (three Codex P2s on #442), and none of the
+ * 10 was that shape. One-letter pieces ("T. E. S. T. A.") mark no boundary.
  */
 function spelledWhole(sp: Spot[], a: string[], b: string[]): boolean {
   const whole = a.join("") + b.join("");
-  const first = a.join("");
-  const second = b.join("");
   return sp.some((s) => {
     if (s.spelled !== true) return false;
-    const parts = s.parts ?? [];
-    // A full stop between two pieces of two letters or more is a boundary the
-    // transcriber wrote; one-letter pieces ("T. E. S. T. A.") mark none.
-    // Across a boundary only the pieces themselves can be the halves, so
-    // "T E S T A. L A K E." is Testa Lake and never Test Alake (Codex P2 on #442).
-    const bounded = parts.filter((p) => p.length >= 2).length >= 2;
-    if (!bounded) return s.words.has(whole);
-    return first.length >= 2 && second.length >= 2 && parts.some((p, i) => p === first && parts[i + 1] === second);
+    const bounded = (s.parts ?? []).filter((p) => p.length >= 2).length >= 2;
+    return !bounded && s.words.has(whole);
   });
 }
 
