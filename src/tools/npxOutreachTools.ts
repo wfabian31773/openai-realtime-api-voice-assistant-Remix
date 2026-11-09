@@ -728,6 +728,19 @@ export function incompleteRange(
   return { fromDay: from && from > lastDay ? from : lastDay, ...(to ? { toDay: to } : {}) };
 }
 
+/** The later of two YYYY-MM-DD days. */
+function laterDay(a: string, b: string | undefined): string {
+  return b && b > a ? b : a;
+}
+
+/** Every slot in either list once, in time order. */
+export function unionSlots(a: NpxSlot[], b: NpxSlot[]): NpxSlot[] {
+  const seen = new Set<string>();
+  return [...a, ...b]
+    .filter((x) => (seen.has(x.slotId) ? false : (seen.add(x.slotId), true)))
+    .sort((x, y) => Date.parse(x.startAt) - Date.parse(y.startAt));
+}
+
 /** The whole days of `pool` before `fromDay`, then the range read, in time order. */
 export function withRange(pool: NpxSlot[], fromDay: string, range: NpxSlot[]): NpxSlot[] {
   const seen = new Set<string>();
@@ -829,20 +842,23 @@ registerTool({
     // whole list leaves it unread.
     let pool = avail.slots;
     let range = incompleteRange(avail, pref);
-    // Whether the pool now runs to the end of the window: the first list was
-    // whole, or every read on started where the one before it stopped and the
-    // last, with no last day, came back whole. A read on that starts later than
-    // the cut leaves the days between unread (Codex, #439).
+    // What has been read: `complete` when the pool runs to the end of the
+    // window, otherwise `edge`, the day before which every day has been read.
+    // A read on that starts later than the edge leaves the days between it
+    // unread and does not move it (Codex, #439).
     let complete = !avail.truncated;
     let edge = avail.slots[avail.slots.length - 1]?.day;
-    let gap = false;
+    const noteRead = (from: string, to: string | undefined, got: Availability) => {
+      if (complete || !edge || from > edge) return;
+      if (got.truncated) edge = laterDay(edge, got.slots[got.slots.length - 1]?.day);
+      else if (to) edge = laterDay(edge, to);
+      else complete = true;
+    };
     for (let reads = 0; range && reads < MAX_RANGE_READS && left() >= MIN_NPX_READ_MS; reads++) {
-      if (!edge || range.fromDay > edge) gap = true;
       const more = await soon(readAvailability(s.contact, s.demo, range, deadline), left());
       if (!more || 'error' in more) break;
       pool = withRange(pool, range.fromDay, more.slots);
-      if (!range.toDay && !more.truncated && !gap) complete = true;
-      edge = more.slots[more.slots.length - 1]?.day ?? edge;
+      noteRead(range.fromDay, range.toDay, more);
       const next = incompleteRange(more, pref);
       if (next && next.fromDay <= range.fromDay) break;
       range = next;
@@ -872,11 +888,25 @@ registerTool({
         fix: 'Nothing sooner is open right now. Tell them their current appointment stays as it is, thank them, call record_call_outcome with done, say goodbye and call end_call.',
       };
     }
-    const { picked, relaxed } = searchSlots(pool, pref, OPTIONS_PER_SEARCH);
+    let { picked, relaxed } = searchSlots(pool, pref, OPTIONS_PER_SEARCH);
     // The part of the schedule that could answer them was not read (Codex
     // round 2, #439): never step back from a day or time nobody checked. What
     // was offered before stays bookable.
     if (unread && relaxed !== null) return unchecked;
+    // What was asked was read and has nothing; before stepping back from it,
+    // read the openings the alternatives come from, from the edge on (Codex,
+    // #439: Thursday in one city must not give way to another city while that
+    // city's Tuesday is unread). Once, inside the budget; then step back over
+    // what was read.
+    if (relaxed !== null && !complete && edge && left() >= MIN_NPX_READ_MS) {
+      const from = edge;
+      const fill = await soon(readAvailability(s.contact, s.demo, { fromDay: from }, deadline), left());
+      if (fill && !('error' in fill)) {
+        pool = unionSlots(pool, fill.slots);
+        noteRead(from, undefined, fill);
+        ({ picked, relaxed } = searchSlots(pool, pref, OPTIONS_PER_SEARCH));
+      }
+    }
     s.slots = picked;
     return {
       success: true,
