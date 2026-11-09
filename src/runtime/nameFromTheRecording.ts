@@ -109,6 +109,8 @@ interface Spot {
   parts?: string[];
   /** v193: a full stop outside a spelled run — a sentence ended here. */
   stop?: true;
+  /** v193: what a spelled run reads as when it is the whole name (Codex round 5 on #442). */
+  runs?: string[];
 }
 
 /**
@@ -125,6 +127,9 @@ interface Spot {
  * "V O R L I" as "vorl" too would validate a surname the caller never spelled
  * (Codex P2 on #442), and the shape refused no measured correct name.
  */
+/** One-letter words a sentence can start with straight after a spelled run ("… L A K E. I need"). */
+const SENTENCE_START: ReadonlySet<string> = new Set(["i", "a", "y"]);
+
 function spots(line: string): Spot[] {
   const raw = line
     .normalize("NFD")
@@ -143,7 +148,15 @@ function spots(line: string): Spot[] {
       const words = new Set([only.join("")]);
       const parts = letters.join("").split(".").filter(Boolean);
       for (const part of parts) if (part.length >= 2) words.add(part);
-      out.push({ words, between: true, spelled: true, parts });
+      // The readings of the run as ONE whole name: every letter, or every
+      // letter but a one-letter word that starts the next sentence straight
+      // after a piece of two letters or more ("… L A K E. I need").
+      const runs = [only.join("")];
+      const tail = parts[parts.length - 1];
+      if (parts.length >= 2 && tail.length === 1 && SENTENCE_START.has(tail) && parts[parts.length - 2].length >= 2) {
+        runs.push(parts.slice(0, -1).join(""));
+      }
+      out.push({ words, between: true, spelled: true, parts, runs });
     }
     letters = [];
   };
@@ -219,13 +232,18 @@ function saidTogether(sp: Spot[], a: string[], b: string[]): boolean {
  * stop is a boundary the transcriber wrote, any reading of the pieces either
  * crosses it or leaves a piece out (three Codex P2s on #442), and none of the
  * 10 was that shape. One-letter pieces ("T. E. S. T. A.") mark no boundary.
+ *
+ * The match is against the WHOLE run, never one of its pieces (Codex round 5
+ * on #442: "T E S T A L A K E. S. M. I. T. H." validated "Testa Lake" while
+ * the caller spelled more). The one exception is a one-letter word starting
+ * the next sentence straight after the run (`runs` in `spots`).
  */
 function spelledWhole(sp: Spot[], a: string[], b: string[]): boolean {
   const whole = a.join("") + b.join("");
   return sp.some((s) => {
     if (s.spelled !== true) return false;
     const bounded = (s.parts ?? []).filter((p) => p.length >= 2).length >= 2;
-    return !bounded && s.words.has(whole);
+    return !bounded && (s.runs ?? []).includes(whole);
   });
 }
 

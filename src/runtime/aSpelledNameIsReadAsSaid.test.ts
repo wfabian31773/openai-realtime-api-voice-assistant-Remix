@@ -211,3 +211,32 @@ describe('both halves spelled as one run read as the name (finding 4)', () => {
     expect(f.calls[0].patientLastName).toBe('Lake');
   });
 });
+
+/**
+ * Codex round 5 on #442: the whole-name match read any piece of a run, so
+ * letters spelled after the first piece were dropped. "T E S T A L A K E. S.
+ * M. I. T. H." validated "Testa Lake" while the caller spelled more; `main`
+ * refused it. The whole name must now be every letter of the run. The one
+ * exception kept is a sentence starting straight after the run with a
+ * one-letter word ("… L A K E. I need", "… L A K E. A refill",
+ * "… L A K E. Y necesito"), and only after a piece of two letters or more, so
+ * a run of single dotted letters ("R. O. S. S. I.") never loses its last one.
+ */
+describe('the whole name is the whole run (Codex round 5 on #442)', () => {
+  it('letters spelled after the run are not dropped', () => {
+    expect(said('CALLER: The patient is T E S T A L A K E. S. M. I. T. H. Please call back.', 'Testa', 'Lake')).toBe(false);
+    expect(said('CALLER: The patient is T E S T A L A K E. S. Please call back.', 'Testa', 'Lake')).toBe(false);
+  });
+  it('the whole run still reads, the trailing letters included', () => {
+    expect(said('CALLER: The patient is T E S T A L A K E. S. M. I. T. H. Please call back.', 'Testa', 'Lakesmith')).toBe(true);
+  });
+  it('a sentence starting with a one-letter word after the run is not part of it', () => {
+    expect(said('CALLER: This is T E S T A L A K E. I need a refill.', 'Testa', 'Lake')).toBe(true);
+    expect(said('CALLER: This is T E S T A L A K E. A refill, please.', 'Testa', 'Lake')).toBe(true);
+    expect(said('CALLER: Es T E S T A L A K E. Y necesito una receta.', 'Testa', 'Lake')).toBe(true);
+  });
+  it('a dotted spelling never loses its last letter', () => {
+    expect(said('CALLER: The patient is J A N E R. O. S. S. I.', 'Jane', 'Ross')).toBe(false);
+    expect(said('CALLER: The patient is T. E. S. T. A. L. A. K. E. I.', 'Testa', 'Lake')).toBe(false);
+  });
+});
