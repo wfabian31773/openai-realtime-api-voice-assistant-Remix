@@ -390,6 +390,8 @@ describe('the availability is read once, early, and only by the rules NPX applie
     const r = (await run(CORPUS[2], FIND_SOONER_TOOL_NAME, {})) as unknown as { options: Array<{ when: string }> };
     expect(npx.offer).toHaveBeenCalledTimes(1);
     expect(r.options.map((o) => o.when)).toEqual(['Monday, November 18 at 9:00 AM', 'Monday, November 18 at 9:20 AM']);
+    // Two openings are never the schedule.
+    expect(String((r as unknown as { overview: string }).overview)).toMatch(/ There are more openings than these\.$/);
   });
 
   it('a day past the end of a truncated list is read from NPX for that range', async () => {
