@@ -139,6 +139,16 @@ describe('the gate: a records request never rings, whoever asks', () => {
     expect(v.allowed).toBe(true);
   });
 
+  it('"on record" is not a records request: a provider about a patient on file still rings', () => {
+    expect(RECORDS_REQUEST.test(' the referral for our mutual patient is on record with your office ')).toBe(false);
+    const v = judgeEscalation({
+      callerType: 'healthcare_provider',
+      reason: "Dr. Lee's office calling about a mutual patient whose referral is on record with the practice",
+      corroboration: { haveSpeech: true, providerStated: true, symptomStated: false, acuteStated: false, supported: [], unsupported: [] } as never,
+    });
+    expect(v).toMatchObject({ allowed: true, basis: 'provider_or_facility' });
+  });
+
   it('a lab calling on a recorded line is not a records request', () => {
     expect(RECORDS_REQUEST.test(' example lab calling on a recorded line with stat results for dr. lee ')).toBe(false);
     const v = judgeEscalation({
@@ -201,6 +211,21 @@ describe('the agent: nothing rings, the patient is asked for, and the request re
     expect(sent.departmentId).toBe(16);
     // The provider was noted at the refusal: the caller said who they were.
     expect(sent.recordsRequester).toMatchObject({ requestorType: 'provider', capClockApplies: false });
+  });
+
+  it('a records ticket carries no After Hours request-type hint, even when its summary would classify', async () => {
+    const c = await call(CALL_2_SAID);
+    await invoke(c.agent, 'escalate_to_human', CALL_2_ESCALATION);
+    await invoke(c.agent, 'create_ticket', {
+      first_name: 'Pat', last_name: 'Example', date_of_birth: '03/04/1960', callback_number: '2025550100',
+      request_category: 'medical_records_request', records_requester: 'provider_office',
+      // This summary classifies as an After Hours type (test results), not the catch-all.
+      request_summary: "Office requesting the patient's records and test results",
+    });
+    const sent = h.submitSimplifiedTicket.mock.calls[0][0] as Record<string, unknown>;
+    expect(sent.departmentId).toBe(16);
+    expect(sent.suggestedRequestTypeId).toBeUndefined();
+    expect(sent.suggestedRequestReasonId).toBeUndefined();
   });
 
   it('a patient asking for their own records stays on the clock', async () => {
