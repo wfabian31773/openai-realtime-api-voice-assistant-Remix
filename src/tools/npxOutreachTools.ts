@@ -803,7 +803,10 @@ registerTool({
       time_of_day: { type: 'string', enum: ['morning', 'afternoon', 'any'], description: 'Morning (before noon) or afternoon.' },
       earliest_time: { type: 'string', description: 'No earlier than this, 24-hour HH:MM ("after 10" is 10:00).' },
       latest_time: { type: 'string', description: 'No later than this, 24-hour HH:MM ("before 3" is 15:00).' },
-      city: { type: 'string', description: 'A city they asked for, if they named one.' },
+      city: {
+        type: 'string',
+        description: 'A city they asked for, if they named one, spelled as the city is named (the overview and the choices name them). Only that city matches: "Chino" is not "Chino Hills".',
+      },
     },
     required: [],
   },

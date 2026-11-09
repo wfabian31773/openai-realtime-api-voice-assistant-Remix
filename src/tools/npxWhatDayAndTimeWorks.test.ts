@@ -108,6 +108,15 @@ describe('the search, in memory (no network between a question and its answer)',
     expect(overviewLine(WEEK.slice(0, 3))).not.toMatch(/more openings/);
   });
 
+  it('a city matches only itself: Chino is not Chino Hills, either way round', () => {
+    const chino = slot('chino', '2041-11-18', '09:00', { city: 'Chino' });
+    const hills = slot('hills', '2041-11-18', '10:00', { city: 'Chino Hills' });
+    expect(matches(chino, { city: 'Chino Hills' })).toBe(false);
+    expect(matches(hills, { city: 'Chino' })).toBe(false);
+    expect(matches(hills, { city: 'chino  hills' })).toBe(true);
+    expect(matches(chino, { city: 'Chino.' })).toBe(true);
+  });
+
   it('a slot whose city cannot be read matches no city the caller names', () => {
     const unknown = slot('nocity', '2041-11-18', '09:00', { city: '', address: 'Suite 4' });
     expect(matches(unknown, { city: 'Testville' })).toBe(false);
