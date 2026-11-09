@@ -269,7 +269,11 @@ describe('what the descriptions cost on the wire', () => {
     // Item #14 + main's appointment-access fields. Measured on the bound tools
     // after that merge: no-ivr 13,113 chars; pcp 6,879 chars. The ceiling
     // stays a ratchet, not a target — do not grow the descriptions to fill it.
-    ['no-ivr', 13_200],
+    // v190 RAISED no-ivr once, 13,200 -> 13,650: create_ticket gained the
+    // records requester and requester name (operator ruling 2026-11-09,
+    // records never ring the on-call; who asked has to reach Medical Records).
+    // Measured 13,569 after trimming the new descriptions to one line each.
+    ['no-ivr', 13_650],
     ['pcp', 7_000],
   ] as const)('%s stays under %i characters', (slug, ceiling) => {
     expect(JSON.stringify(built.get(slug)!.lane.agent.tools).length).toBeLessThan(ceiling);
