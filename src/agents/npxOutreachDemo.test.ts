@@ -224,6 +224,7 @@ describe('a demo call books in the demo NPX and touches nothing live', () => {
     expect(demo.reportCancel).toHaveBeenCalledWith('booking-1', 'cancelled');
     expect(demo.availability.mock.calls[0]).toEqual([
       expect.objectContaining({ medicalGroupName: DEMO_PATIENTS[0].medicalGroup, partnerNames: [DEMO_PARTNER] }),
+      { timeoutMs: expect.any(Number) },
     ]);
     // Nothing live: not production NPX, not NextGen.
     expect(live.availability).not.toHaveBeenCalled();

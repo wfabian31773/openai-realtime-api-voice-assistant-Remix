@@ -319,13 +319,17 @@ describe('find_sooner_exam', () => {
       options: Array<{ option: number; when: string; city: string; provider: string }>;
       say: string;
     };
-    expect(npx.availability).toHaveBeenCalledWith({
-      medicalGroupName: 'Test Group CAP',
-      partnerNames: ['Partner One Optometry'],
-      replacedAppointmentDate: '2041-03-20',
-      minDaysSooner: MIN_DAYS_SOONER,
-      limit: 300,
-    });
+    expect(npx.availability).toHaveBeenCalledWith(
+      {
+        medicalGroupName: 'Test Group CAP',
+        partnerNames: ['Partner One Optometry'],
+        replacedAppointmentDate: '2041-03-20',
+        minDaysSooner: MIN_DAYS_SOONER,
+        limit: 300,
+      },
+      // The search's read answers inside its budget (Codex P2, #439).
+      { timeoutMs: expect.any(Number) },
+    );
     expect(npx.offer).not.toHaveBeenCalled();
     expect(r.options.map((o) => o.option)).toEqual([1, 2]);
     expect(r.options[0]).toMatchObject({ when: 'Monday, February 4 at 9:00 AM', city: 'Testville', provider: 'Dr Test' });

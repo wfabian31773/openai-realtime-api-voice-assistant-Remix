@@ -33,7 +33,7 @@ export interface SlotPreference {
 }
 
 /** How far a search had to step back from what was asked to find anything. */
-export type Relaxed = null | 'time' | 'day' | 'city' | 'all';
+export type Relaxed = null | 'time' | 'day' | 'when' | 'city' | 'all';
 
 /** Options read to the caller at once. */
 export const OPTIONS_PER_SEARCH = 3;
@@ -217,7 +217,15 @@ export function pickSpread(slots: NpxSlot[], max = OPTIONS_PER_SEARCH, target?: 
  * The choices for what the caller asked. When nothing matches exactly, the
  * search steps back one constraint at a time — the time of day first (the
  * same day at another time), then the day (the same time on another day,
- * nearest first), then the city — and says how far it stepped.
+ * nearest first), then both (another time on the nearest day) — all in the
+ * city they named, and only then the city, and says how far it stepped.
+ *
+ * THE STEPS ACCUMULATE BEFORE THE CITY GOES (Codex P2, #439). Each step was
+ * built from the original preference, so a caller who named a day, a time and
+ * a city, with nothing on that day at all and something at another time on a
+ * nearby day in that city, missed all three single steps and was offered any
+ * city. Dropping the day AND the time while keeping the city is now a step of
+ * its own, ahead of dropping the city.
  */
 export function searchSlots(
   slots: NpxSlot[],
@@ -228,8 +236,11 @@ export function searchSlots(
   if (exact.length) return { picked: pickSpread(exact, max), relaxed: null, matching: distinctTimes(exact).length };
   const target = p.onDate ?? p.fromDate;
   const steps: Array<[Exclude<Relaxed, null>, SlotPreference, string | undefined]> = [];
-  if (hasTime(p)) steps.push(['time', { ...p, timeOfDay: undefined, earliestTime: undefined, latestTime: undefined }, undefined]);
-  if (hasDay(p)) steps.push(['day', { ...p, onDate: undefined, fromDate: undefined, toDate: undefined, weekdays: undefined }, target]);
+  const noTime = { timeOfDay: undefined, earliestTime: undefined, latestTime: undefined };
+  const noDay = { onDate: undefined, fromDate: undefined, toDate: undefined, weekdays: undefined };
+  if (hasTime(p)) steps.push(['time', { ...p, ...noTime }, undefined]);
+  if (hasDay(p)) steps.push(['day', { ...p, ...noDay }, target]);
+  if (hasTime(p) && hasDay(p)) steps.push(['when', { ...p, ...noTime, ...noDay }, target]);
   if (p.city) steps.push(['city', { ...p, city: undefined }, target]);
   steps.push(['all', {}, target]);
   for (const [relaxed, pref, near] of steps) {

@@ -23,8 +23,13 @@ import {
   DESCRIBE_AVAILABILITY_WAIT_MS,
   DESCRIBE_TOOL_NAME,
   FIND_SOONER_TOOL_NAME,
+  FIND_BUDGET_MS,
+  FIND_TOOL_TIMEOUT_MS,
   MAX_SEARCHES,
+  MIN_NPX_READ_MS,
   choicesLine,
+  incompleteRange,
+  withRange,
   resetOutreachAvailabilityForTests,
   resetOutreachSessionsForTests,
   setNpxOutreachDepsForTests,
@@ -136,6 +141,23 @@ describe('the search, in memory (no network between a question and its answer)',
     expect(r.relaxed).toBe('day');
     // Mon 25 (a day off), Thu 21 (three), Tue 19 (five) — read in date order.
     expect(r.picked.map((s) => s.slotId)).toEqual(['tue-0900', 'thu-0800', 'mon2-1000']);
+  });
+
+  // Codex P2, #439: day, time and city all named; nothing that day in that
+  // city, another time on a nearby day there, and the exact day and time in
+  // another city. The caller's city is kept before it is given up.
+  it('the day and the time are both let go before the city is', () => {
+    // Second City has only Tuesday at 9:00 and 3:40. Asked: Thursday after 4:30 there.
+    const r = searchSlots(WEEK, preferenceFrom({ on_date: '2041-11-21', earliest_time: '16:30', city: 'second city' }));
+    expect(r.relaxed).toBe('when');
+    expect(r.picked.map((s) => s.slotId)).toEqual(['tue-0900', 'tue-1540']);
+    expect(choicesLine(r.picked, r.relaxed)).toBe(
+      "I don't have that day or time open, but on Tuesday, November 19 I have 9:00 AM or 3:40 PM, in Second City. Would either of those work for you?",
+    );
+    // Only when nothing in that city matches either does the city go.
+    const away = searchSlots(WEEK, preferenceFrom({ on_date: '2041-11-21', time_of_day: 'morning', city: 'nowhere' }));
+    expect(away.relaxed).toBe('city');
+    expect(away.picked.map((s) => s.slotId)).toEqual(['thu-0800', 'thu-1030']);
   });
 
   it('two providers at one office at one time are one choice', () => {
@@ -344,8 +366,136 @@ describe('the availability is read once, early, and only by the rules NPX applie
     npx.availability.mockResolvedValueOnce({ ok: true, latestDay: '2041-12-02', slots: [WEEK[9]], truncated: false });
     await run(CORPUS[0], CONFIRM_DOB_TOOL_NAME, { date_of_birth: '01/02/1950' });
     const r = (await run(CORPUS[0], FIND_SOONER_TOOL_NAME, { on_date: '2041-11-25' })) as Record<string, unknown>;
-    expect(npx.availability).toHaveBeenLastCalledWith(expect.objectContaining({ fromDay: '2041-11-25', toDay: '2041-11-25' }));
+    expect(npx.availability).toHaveBeenLastCalledWith(expect.objectContaining({ fromDay: '2041-11-25', toDay: '2041-11-25' }), {
+      timeoutMs: expect.any(Number),
+    });
     expect(r.exact).toBe(true);
+  });
+
+  // Codex P2, #439: a list cut short part way through a day says nothing about
+  // the rest of that day. Mon 18 and Tue 19 are whole; the list stops at
+  // Thursday 10:30, so Thursday afternoon must be read before anything is relaxed.
+  it('a truncated list that ends on the day asked for: that day is read again, not relaxed', async () => {
+    npx.availability.mockResolvedValueOnce({ ok: true, latestDay: '2041-12-02', slots: WEEK.slice(0, 7), truncated: true });
+    npx.availability.mockResolvedValueOnce({ ok: true, latestDay: '2041-12-02', slots: WEEK.slice(5, 9), truncated: false });
+    await run(CORPUS[0], CONFIRM_DOB_TOOL_NAME, { date_of_birth: '01/02/1950' });
+    const r = (await run(CORPUS[0], FIND_SOONER_TOOL_NAME, { on_date: '2041-11-21', time_of_day: 'afternoon' })) as Record<string, unknown>;
+    expect(npx.availability).toHaveBeenCalledTimes(2);
+    expect(npx.availability).toHaveBeenLastCalledWith(expect.objectContaining({ fromDay: '2041-11-21', toDay: '2041-11-21' }), {
+      timeoutMs: expect.any(Number),
+    });
+    expect(r.exact).toBe(true);
+    expect(r.say).toBe('On Thursday, November 21 I have 1:00 PM or 4:00 PM, in Testville. Would either of those work for you?');
+  });
+
+  it('a range that crosses the cut: read from the last day on, and the whole days before it kept', async () => {
+    npx.availability.mockResolvedValueOnce({ ok: true, latestDay: '2041-12-02', slots: WEEK.slice(0, 7), truncated: true });
+    npx.availability.mockResolvedValueOnce({ ok: true, latestDay: '2041-12-02', slots: WEEK.slice(5), truncated: false });
+    await run(CORPUS[0], CONFIRM_DOB_TOOL_NAME, { date_of_birth: '01/02/1950' });
+    const r = (await run(CORPUS[0], FIND_SOONER_TOOL_NAME, {
+      from_date: '2041-11-18',
+      to_date: '2041-11-25',
+      time_of_day: 'afternoon',
+    })) as unknown as { options: Array<{ when: string }> };
+    expect(npx.availability).toHaveBeenLastCalledWith(expect.objectContaining({ fromDay: '2041-11-21', toDay: '2041-11-25' }), {
+      timeoutMs: expect.any(Number),
+    });
+    expect(r.options.map((o) => o.when)).toEqual([
+      'Monday, November 18 at 2:00 PM',
+      'Tuesday, November 19 at 3:40 PM',
+      'Thursday, November 21 at 1:00 PM',
+    ]);
+  });
+
+  it('which part of a request a cut-short list cannot answer', () => {
+    const cut = { slots: WEEK.slice(0, 7), truncated: true };
+    expect(incompleteRange({ ...cut, truncated: false }, { onDate: '2041-11-21' })).toBeNull();
+    expect(incompleteRange(cut, {})).toBeNull();
+    expect(incompleteRange(cut, { onDate: '2041-11-19' })).toBeNull();
+    expect(incompleteRange(cut, { fromDate: '2041-11-18', toDate: '2041-11-20' })).toBeNull();
+    expect(incompleteRange(cut, { onDate: '2041-11-21' })).toEqual({ fromDay: '2041-11-21', toDay: '2041-11-21' });
+    expect(incompleteRange(cut, { onDate: '2041-11-25' })).toEqual({ fromDay: '2041-11-25', toDay: '2041-11-25' });
+    expect(incompleteRange(cut, { fromDate: '2041-11-20' })).toEqual({ fromDay: '2041-11-21' });
+    expect(incompleteRange(cut, { toDate: '2041-11-30' })).toEqual({ fromDay: '2041-11-21', toDay: '2041-11-30' });
+    // The range read replaces the cut day; the whole days before it stay, once each.
+    const merged = withRange(WEEK.slice(0, 7), '2041-11-21', [WEEK[6], WEEK[7], WEEK[3]]);
+    expect(merged.map((x) => x.slotId)).toEqual(['mon-0900', 'mon-0920', 'mon-1400', 'tue-0900', 'tue-1540', 'thu-1030', 'thu-1300']);
+  });
+
+  // Codex P2, #439: one read may take its whole 10 seconds, and a retry or a
+  // range read after it another 10 — past the tool's own 15. Every read a
+  // search makes now answers inside FIND_BUDGET_MS, so the caller hears the
+  // safe answer and never a tool timeout.
+  describe('every read a search makes answers inside the tool timeout', () => {
+    /** A fake NPX that takes the whole time it is given, then times out. */
+    const hangs = (_req: unknown, opts?: { timeoutMs?: number }) =>
+      new Promise((res) => setTimeout(() => res({ ok: false, error: 'timeout' }), opts?.timeoutMs ?? 10_000));
+
+    it('the budget leaves the tool room to answer', () => {
+      expect(getTool(FIND_SOONER_TOOL_NAME)!.timeoutMs).toBe(FIND_TOOL_TIMEOUT_MS);
+      expect(FIND_BUDGET_MS + MIN_NPX_READ_MS).toBeLessThanOrEqual(FIND_TOOL_TIMEOUT_MS - 1_000);
+    });
+
+    it('a read that takes all its time: the safe answer inside the budget, and no second read', async () => {
+      await run(CORPUS[0], CONFIRM_DOB_TOOL_NAME, { date_of_birth: '01/02/1950' });
+      npx.availability.mockImplementation(hangs as never);
+      vi.useFakeTimers();
+      const start = Date.now();
+      let done = false;
+      const p = run(CORPUS[0], FIND_SOONER_TOOL_NAME, { weekdays: 'thursday' }).then((r) => ((done = true), r));
+      await vi.advanceTimersByTimeAsync(FIND_BUDGET_MS);
+      expect(done).toBe(true);
+      const r = (await p) as Record<string, unknown>;
+      expect(Date.now() - start).toBeLessThanOrEqual(FIND_BUDGET_MS);
+      expect(r).toMatchObject({ success: false, error: 'timeout' });
+      expect(String(r.fix)).toMatch(/current appointment stays as it is/);
+      expect(npx.availability).toHaveBeenCalledTimes(1);
+      expect(npx.availability.mock.calls[0][1]).toEqual({ timeoutMs: FIND_BUDGET_MS });
+    });
+
+    it('a read that fails at once is tried again, inside what is left', async () => {
+      await run(CORPUS[0], CONFIRM_DOB_TOOL_NAME, { date_of_birth: '01/02/1950' });
+      npx.availability.mockResolvedValueOnce({ ok: false, error: 'network' } as never);
+      const r = (await run(CORPUS[0], FIND_SOONER_TOOL_NAME, { weekdays: 'thursday', time_of_day: 'afternoon' })) as Record<string, unknown>;
+      expect(r.exact).toBe(true);
+      expect(npx.availability).toHaveBeenCalledTimes(2);
+      for (const [, opts] of npx.availability.mock.calls as unknown as Array<[unknown, { timeoutMs: number }]>) {
+        expect(opts.timeoutMs).toBeLessThanOrEqual(FIND_BUDGET_MS);
+      }
+    });
+
+    it('the read the greeting started, still hanging, is held to the budget', async () => {
+      // The greeting's read has no deadline of its own; this one hangs past even its own limit.
+      npx.availability.mockImplementation(((req: unknown, opts?: { timeoutMs?: number }) =>
+        opts ? hangs(req, opts) : new Promise((res) => setTimeout(() => res({ ok: false, error: 'timeout' }), 30_000))) as never);
+      warmOutreachAvailability(await contact());
+      await run(CORPUS[0], CONFIRM_DOB_TOOL_NAME, { date_of_birth: '01/02/1950' });
+      vi.useFakeTimers();
+      const start = Date.now();
+      const p = run(CORPUS[0], FIND_SOONER_TOOL_NAME, {});
+      await vi.advanceTimersByTimeAsync(FIND_BUDGET_MS);
+      expect(await p).toMatchObject({ success: false, error: 'timeout' });
+      expect(Date.now() - start).toBeLessThanOrEqual(FIND_BUDGET_MS);
+    });
+
+    it('a range read that would outlast the budget is cut short, and the list in hand answers', async () => {
+      await run(CORPUS[0], CONFIRM_DOB_TOOL_NAME, { date_of_birth: '01/02/1950' });
+      npx.availability
+        .mockImplementationOnce(
+          () => new Promise((res) => setTimeout(() => res({ ok: true, latestDay: '2041-12-02', slots: WEEK.slice(0, 7), truncated: true }), 9_000)) as never,
+        )
+        .mockImplementationOnce(hangs as never);
+      vi.useFakeTimers();
+      const start = Date.now();
+      const p = run(CORPUS[0], FIND_SOONER_TOOL_NAME, { on_date: '2041-11-21', time_of_day: 'afternoon' });
+      await vi.advanceTimersByTimeAsync(FIND_BUDGET_MS);
+      const r = (await p) as Record<string, unknown>;
+      expect(Date.now() - start).toBeLessThanOrEqual(FIND_BUDGET_MS);
+      expect(npx.availability).toHaveBeenCalledTimes(2);
+      expect((npx.availability.mock.calls[1] as unknown as [unknown, { timeoutMs: number }])[1].timeoutMs).toBeLessThanOrEqual(3_000);
+      // Thursday's morning slot from the list in hand, said as stepped back.
+      expect(r).toMatchObject({ success: true, exact: false });
+    });
   });
 
   it('a model in a loop is stopped', async () => {

@@ -99,6 +99,32 @@ describe('offer', () => {
     }
   });
 
+  it('a caller with less time left cuts the read short, and never lengthens it (Codex P2, #439)', async () => {
+    vi.useFakeTimers();
+    try {
+      const hang = () =>
+        vi.fn((_u: string, init: RequestInit) => new Promise<Response>((_res, rej) => {
+          init.signal!.addEventListener('abort', () => rej(new Error('aborted')));
+        }));
+      const ask = { medicalGroupName: 'g', partnerNames: ['p'], replacedAppointmentDate: '2041-03-20', minDaysSooner: 21, limit: 300 };
+      const short = createNpxOutreachClient(ENV, hang() as never).availability(ask, { timeoutMs: 3_000 });
+      await vi.advanceTimersByTimeAsync(3_001);
+      expect(await short).toEqual({ ok: false, error: 'timeout' });
+      // A longer budget than the read's own limit does not stretch it.
+      let settled = false;
+      const long = createNpxOutreachClient(ENV, hang() as never).availability(ask, { timeoutMs: 60_000 }).then((r) => ((settled = true), r));
+      await vi.advanceTimersByTimeAsync(NPX_TIMEOUT_MS.availability + 1);
+      expect(settled).toBe(true);
+      expect(await long).toEqual({ ok: false, error: 'timeout' });
+      // The offer takes the same bound.
+      const offer = createNpxOutreachClient(ENV, hang() as never).offer(ask, { timeoutMs: 2_000 });
+      await vi.advanceTimersByTimeAsync(2_001);
+      expect(await offer).toEqual({ ok: false, error: 'timeout' });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('honours a base URL override', async () => {
     const f = reply(200, { ok: true, latestDay: '', slots: [] });
     await createNpxOutreachClient({ ...ENV, NPX_OUTREACH_BASE_URL: 'https://npx.example.test/' }, f as never).offer({ medicalGroupName: 'g', partnerNames: ['p'], replacedAppointmentDate: '2041-03-20' });

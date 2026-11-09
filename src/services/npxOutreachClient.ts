@@ -137,10 +137,22 @@ export const NPX_REASON_CODE = /^[a-z0-9_]{1,64}$/;
 
 type Fetch = typeof fetch;
 
+/**
+ * A read that must answer inside a caller's budget: the request is aborted at
+ * whichever comes first, its own limit or `timeoutMs`.
+ */
+export interface NpxReadOptions {
+  timeoutMs?: number;
+}
+
+/** The read's own limit, cut to what the caller has left (never below 1 ms). */
+const within = (limit: number, opts?: NpxReadOptions) =>
+  opts?.timeoutMs === undefined ? limit : Math.max(1, Math.min(limit, Math.floor(opts.timeoutMs)));
+
 export interface NpxOutreachClient {
   configured: boolean;
-  availability(req: NpxAvailabilityRequest): Promise<NpxAvailabilityResult>;
-  offer(req: NpxOfferRequest): Promise<NpxOfferResult>;
+  availability(req: NpxAvailabilityRequest, opts?: NpxReadOptions): Promise<NpxAvailabilityResult>;
+  offer(req: NpxOfferRequest, opts?: NpxReadOptions): Promise<NpxOfferResult>;
   book(req: NpxBookRequest): Promise<NpxBookResult>;
   reportCancel(bookingId: string, outcome: 'cancelled' | { failed: string }): Promise<NpxReportResult>;
 }
@@ -217,8 +229,8 @@ export function createNpxOutreachClient(
   return {
     configured: Boolean(key),
 
-    async availability(req) {
-      const reply = await send('POST', '/api/exchange/outreach/availability', req, NPX_TIMEOUT_MS.availability);
+    async availability(req, opts) {
+      const reply = await send('POST', '/api/exchange/outreach/availability', req, within(NPX_TIMEOUT_MS.availability, opts));
       if (typeof reply !== 'string' && reply.status === 200 && reply.body?.ok === true) {
         const slots = Array.isArray(reply.body.slots) ? (reply.body.slots as NpxSlot[]) : [];
         return {
@@ -233,8 +245,8 @@ export function createNpxOutreachClient(
       return { ok: false, error: failure(reply, 'availability') };
     },
 
-    async offer(req) {
-      const reply = await send('POST', '/api/exchange/outreach/offer', req, NPX_TIMEOUT_MS.offer);
+    async offer(req, opts) {
+      const reply = await send('POST', '/api/exchange/outreach/offer', req, within(NPX_TIMEOUT_MS.offer, opts));
       if (typeof reply !== 'string' && reply.status === 200 && reply.body?.ok === true) {
         const slots = Array.isArray(reply.body.slots) ? (reply.body.slots as NpxSlot[]) : [];
         return { ok: true, latestDay: String(reply.body.latestDay ?? ''), slots: slots.slice(0, 2) };

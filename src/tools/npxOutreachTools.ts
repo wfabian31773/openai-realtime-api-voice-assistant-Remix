@@ -73,6 +73,7 @@ import {
   createNpxOutreachDemoClient,
   NPX_TIMEOUT_MS,
   type NpxOutreachClient,
+  type NpxReadOptions,
   type NpxSlot,
 } from '../services/npxOutreachClient';
 import { cancelAzulAppointment, type AzulCancelRequest, type AzulCancelResult } from '../services/outreachAzulCancel';
@@ -149,6 +150,18 @@ export const AVAILABILITY_LIMIT = 300;
 export const AVAILABILITY_TTL_MS = 10 * 60 * 1000;
 /** How long the opening line waits for the availability to name the city. */
 export const DESCRIBE_AVAILABILITY_WAIT_MS = 2_500;
+/** find_sooner_exam's timeout, as registered. */
+export const FIND_TOOL_TIMEOUT_MS = 15_000;
+/**
+ * EVERY NPX READ A SEARCH MAKES ANSWERS INSIDE THIS (Codex P2, #439). One
+ * availability read may take its whole 10-second limit, and a retry or a
+ * range read after it another 10, so a search could outlive the tool's own
+ * 15 seconds and the caller hear a timeout instead of the safe answer that
+ * their appointment stays as it is. The budget leaves the tool 3 seconds.
+ */
+export const FIND_BUDGET_MS = 12_000;
+/** A second read is not started with less than this left of the budget. */
+export const MIN_NPX_READ_MS = 2_000;
 /** NPX's own default: offer only an exam at least three weeks sooner. */
 export const MIN_DAYS_SOONER = 21;
 
@@ -360,20 +373,41 @@ function offerAsk(c: OutboundContact): { medicalGroupName: string; partnerNames:
   return medicalGroupName && partnerNames.length && replacedAppointmentDate ? { medicalGroupName, partnerNames, replacedAppointmentDate } : null;
 }
 
-async function readAvailability(c: OutboundContact, demo: boolean, range?: { fromDay?: string; toDay?: string }): Promise<AvailabilityLoad> {
+/**
+ * What is left before `deadlineAt`, as a read limit: undefined when there is
+ * no deadline (the read keeps its own limit), null when too little is left
+ * to start one.
+ */
+function readLimit(deadlineAt: number | undefined): NpxReadOptions | undefined | null {
+  if (deadlineAt === undefined) return undefined;
+  const left = deadlineAt - Date.now();
+  return left >= MIN_NPX_READ_MS ? { timeoutMs: left } : null;
+}
+
+async function readAvailability(
+  c: OutboundContact,
+  demo: boolean,
+  range?: { fromDay?: string; toDay?: string },
+  deadlineAt?: number,
+): Promise<AvailabilityLoad> {
   const ask = offerAsk(c);
   if (!ask) return { error: 'record_incomplete' };
   const npx = demo ? live().npxDemo : live().npx;
-  const r = await npx.availability({ ...ask, minDaysSooner: MIN_DAYS_SOONER, limit: AVAILABILITY_LIMIT, ...range });
+  const first = readLimit(deadlineAt);
+  if (first === null) return { error: 'timeout' };
+  const r = await npx.availability({ ...ask, minDaysSooner: MIN_DAYS_SOONER, limit: AVAILABILITY_LIMIT, ...range }, first);
   if (r.ok) return { slots: r.slots, truncated: r.truncated, from: 'availability', fetchedAtMs: Date.now() };
   if (r.error !== 'not_supported') return { error: r.error };
   // An NPX that predates the endpoint: the two-slot offer, searched the same way.
-  const o = await npx.offer({ ...ask, minDaysSooner: MIN_DAYS_SOONER });
+  const second = readLimit(deadlineAt);
+  if (second === null) return { error: 'timeout' };
+  const o = await npx.offer({ ...ask, minDaysSooner: MIN_DAYS_SOONER }, second);
   return o.ok ? { slots: o.slots, truncated: false, from: 'offer', fetchedAtMs: Date.now() } : { error: o.error };
 }
 
-/** The contact's availability: the cached read while it is fresh, else a new one. */
-function loadAvailability(c: OutboundContact, demo: boolean, fresh = false): Promise<AvailabilityLoad> {
+/** The contact's availability: the cached read while it is fresh, else a new
+ * one, bounded by `deadlineAt` when a search started it. */
+function loadAvailability(c: OutboundContact, demo: boolean, fresh = false, deadlineAt?: number): Promise<AvailabilityLoad> {
   const key = availabilityKey(c, demo);
   const now = Date.now();
   const hit = availabilityCache.get(key);
@@ -384,7 +418,7 @@ function loadAvailability(c: OutboundContact, demo: boolean, fresh = false): Pro
     if (oldest === undefined) break;
     availabilityCache.delete(oldest);
   }
-  const load = readAvailability(c, demo).then((r) => {
+  const load = readAvailability(c, demo, undefined, deadlineAt).then((r) => {
     // A failed read is not kept: the next search tries again.
     if ('error' in r) availabilityCache.delete(key);
     return r;
@@ -664,10 +698,42 @@ function notVerified(): Refusal {
   };
 }
 
+/**
+ * The part of what was asked that a cut-short list cannot answer, or null.
+ *
+ * The list stops at its limit, so every day before its last is whole and its
+ * last day may be cut part way (Codex P2, #439: a list ending at 11:40 on a
+ * Tuesday has nothing to say about Tuesday afternoon). A date asked for, or a
+ * range that reaches the last day or past it, is read again from NPX — from
+ * the later of that day and the first day asked, to the last day asked — the
+ * same rules applied, before any preference is relaxed.
+ */
+export function incompleteRange(
+  avail: { slots: NpxSlot[]; truncated: boolean },
+  pref: { onDate?: string; fromDate?: string; toDate?: string },
+): { fromDay: string; toDay?: string } | null {
+  if (!avail.truncated || avail.slots.length === 0) return null;
+  const from = pref.onDate ?? pref.fromDate;
+  const to = pref.onDate ?? pref.toDate;
+  if (!from && !to) return null;
+  const lastDay = avail.slots[avail.slots.length - 1].day;
+  if (to && to < lastDay) return null;
+  return { fromDay: from && from > lastDay ? from : lastDay, ...(to ? { toDay: to } : {}) };
+}
+
+/** The whole days of `pool` before `fromDay`, then the range read, in time order. */
+export function withRange(pool: NpxSlot[], fromDay: string, range: NpxSlot[]): NpxSlot[] {
+  const seen = new Set<string>();
+  return [...pool.filter((x) => x.day < fromDay), ...range]
+    .filter((x) => (seen.has(x.slotId) ? false : (seen.add(x.slotId), true)))
+    .sort((a, b) => Date.parse(a.startAt) - Date.parse(b.startAt));
+}
+
 /** The lead-in when a search had to step back from what was asked. */
 const RELAXED_LEAD: Record<Exclude<Relaxed, null>, string> = {
   time: "I don't have that time open, but",
   day: "I don't have that day open, but",
+  when: "I don't have that day or time open, but",
   city: "I don't have anything open there then, but",
   all: "I don't have anything open then, but",
 };
@@ -683,7 +749,7 @@ export function choicesLine(picked: NpxSlot[], relaxed: Relaxed): string {
 registerTool({
   name: FIND_SOONER_TOOL_NAME,
   layer: 'agent',
-  timeoutMs: 15_000,
+  timeoutMs: FIND_TOOL_TIMEOUT_MS,
   description:
     'Search the sooner openings at our partner locations for the day and time the patient says works best, and get up to ' +
     'three choices to offer. Pass what they asked for: a date, a range of dates, weekdays, morning or afternoon, a time ' +
@@ -734,8 +800,14 @@ registerTool({
       return r;
     }
     const pref = preferenceFrom(input);
-    let avail = await loadAvailability(s.contact, s.demo);
-    if ('error' in avail) avail = await loadAvailability(s.contact, s.demo, true);
+    const deadline = Date.now() + FIND_BUDGET_MS;
+    const left = () => deadline - Date.now();
+    // The cached read may be the one the agent factory started, which keeps its
+    // own 10 seconds; the race holds it to the budget.
+    let avail: AvailabilityLoad = (await soon(loadAvailability(s.contact, s.demo, false, deadline), left())) ?? { error: 'timeout' };
+    if ('error' in avail && left() >= MIN_NPX_READ_MS) {
+      avail = (await soon(loadAvailability(s.contact, s.demo, true, deadline), left())) ?? { error: 'timeout' };
+    }
     if ('error' in avail) {
       const r: Refusal = {
         success: false,
@@ -745,13 +817,10 @@ registerTool({
       return r;
     }
     let pool = avail.slots;
-    // The list stops at its limit: a day asked for past its last slot is read
-    // from NPX for that range, the same rules applied.
-    const asked = pref.onDate ?? pref.fromDate;
-    const lastDay = pool.length ? pool[pool.length - 1].day : '';
-    if (avail.truncated && asked && asked > lastDay) {
-      const more = await readAvailability(s.contact, s.demo, { fromDay: asked, toDay: pref.onDate ?? pref.toDate });
-      if (!('error' in more)) pool = more.slots;
+    const range = incompleteRange(avail, pref);
+    if (range && left() >= MIN_NPX_READ_MS) {
+      const more = await soon(readAvailability(s.contact, s.demo, range, deadline), left());
+      if (more && !('error' in more)) pool = withRange(pool, range.fromDay, more.slots);
     }
     const today = practiceToday();
     if (pool.length === 0) {
