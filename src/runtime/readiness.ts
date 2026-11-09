@@ -1417,9 +1417,9 @@ import { callEnvironment } from "./callRecord";
  * is no longer cut down to a name and skipped (0 of 12,044 calls changed yet,
  * 2026-10-10..11-09). The heard-name check refuses a bare full stop between
  * two whole words (1 correct name of 728 refused, against 25 for the review's
- * fix), reads a spelled half run into "I" or "a", and reads both halves
- * spelled in one run (10 of about 750 verified callers' names came out whole
- * only that way). Above main's v192 (#439, `aab80916`), which it contains
+ * fix) and reads both halves spelled in one run (10 of about 750 verified
+ * callers' names came out whole only that way); a spelled half run into "I"
+ * or "a" stays refused (Codex P2 on #442). Above main's v192 (#439, `aab80916`), which it contains
  * along with v191 (#440, `41a6854a`), v190 (#441, `ce0bee67`) and v188 (#438,
  * `fca1e6f3`). No migration.
  */

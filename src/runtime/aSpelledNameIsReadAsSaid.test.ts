@@ -22,9 +22,13 @@
  *    1 of the 728 (CA03ddc908591815343eb6b578e78b7298); the review's version
  *    would have cost 25.
  * 3. A spelled half run into the pronoun "I" or the article "a" ("L A K E, I
- *    need") joined into "lakei". 1 verified call has that shape, and its name
- *    was accepted another way: 0 rejected. Fixed with the same change because
- *    it only adds a reading and never removes one.
+ *    need") joins into "lakei". 1 verified call has that shape, and its name
+ *    was accepted another way: 0 rejected. NOT FIXED. The first version read
+ *    every run ending in i or a without that letter too, and Codex (P2 on
+ *    #442) showed what that costs: "V O R L I" would also validate a model
+ *    answer of "Vorl", a surname the caller never spelled — the model error
+ *    this check exists to catch. Nothing measured was rescued, so the shape
+ *    stays refused, and the tests below say so.
  * 4. Both halves spelled as one run ("T E S T A L A K E") made one word that
  *    matched neither half. 12 verified calls spelled it that way, and for 10
  *    of them that was the only way the name came out whole, which is 10 correct
@@ -126,31 +130,33 @@ describe('a bare full stop between two whole words ends a name (finding 2)', () 
   });
 });
 
-describe('a spelled half followed by "I" or "a" still reads (finding 3)', () => {
-  it('"L A K E, I need a refill" reads "lake"', () => {
-    expect(said('CALLER: My name is Testa, L A K E, I need a refill.', 'Testa', 'Lake')).toBe(true);
+describe('a spelled surname is never read shorter than it was spelled (finding 3, not fixed; Codex P2 on #442)', () => {
+  it('"V O R L I" validates Vorli and never Vorl', () => {
+    const t = 'CALLER: My name is Testa, V O R L I, calling about a refill.';
+    expect(said(t, 'Testa', 'Vorli')).toBe(true);
+    expect(said(t, 'Testa', 'Vorl')).toBe(false);
   });
-  it('the same with every letter stopped ("L. A. K. E. I need")', () => {
-    expect(said('CALLER: My name is Testa, L. A. K. E. I need a refill.', 'Testa', 'Lake')).toBe(true);
+  it('the same for a surname ending in A, and for a spelled first name', () => {
+    expect(said('CALLER: My name is Testa, L A K E A, calling about a refill.', 'Testa', 'Lake')).toBe(false);
+    expect(said('CALLER: Lake, first name T E S T A, calling about my drops.', 'Test', 'Lake')).toBe(false);
   });
-  it('and before the article "a"', () => {
-    expect(said('CALLER: This is Testa, L A K E, a refill please.', 'Testa', 'Lake')).toBe(true);
+  it('the accepted residue: a spelling run straight into "I" or "a" is refused (0 measured, 2026-10-10..11-09)', () => {
+    expect(said('CALLER: My name is Testa, L A K E, I need a refill.', 'Testa', 'Lake')).toBe(false);
+    expect(said('CALLER: This is Testa, L A K E, a refill please.', 'Testa', 'Lake')).toBe(false);
+    expect(said('CALLER: My name is Testa, L. A. K. E. I need a refill.', 'Testa', 'Lake')).toBe(false);
   });
-  it('a spelled first half too ("T E S T A, I am")', () => {
-    expect(said('CALLER: Lake, first name T E S T A, I am calling about my drops.', 'Testa', 'Lake')).toBe(true);
+  it('a full stop the transcriber wrote after the spelling still ends it, as on main (Codex P2 on #431)', () => {
+    expect(said('CALLER: My name is Testa, L A K E. I need a refill.', 'Testa', 'Lake')).toBe(true);
   });
-  it('a name that really ends in A still reads whole', () => {
-    expect(said('CALLER: My name is Testa, L A K E A, I need a refill.', 'Testa', 'Lakea')).toBe(true);
-  });
-  it('the sweep files under it', async () => {
+  it('the sweep files nothing under a name read that way', async () => {
     const f = filer();
     const out = await runRequestSweep(
-      surgery('CA00000000000000000000000000000196', 'My name is Testa, L A K E, I need my surgery moved to next week.'),
+      surgery('CA00000000000000000000000000000196', 'My name is Testa, V O R L I, I need my surgery moved to next week.'),
       f,
-      answers('Testa', 'Lake'),
+      answers('Testa', 'Vorl'),
     );
-    expect(out.filed).toBe(true);
-    expect(f.calls[0].patientLastName).toBe('Lake');
+    expect(out).toEqual({ filed: false, reason: 'no-name' });
+    expect(f.calls).toHaveLength(0);
   });
 });
 
@@ -161,11 +167,16 @@ describe('both halves spelled as one run read as the name (finding 4)', () => {
   it('surname first ("L A K E T E S T A")', () => {
     expect(said('CALLER: The patient is L A K E T E S T A, please call back.', 'Testa', 'Lake')).toBe(true);
   });
-  it('with a full stop between the two spellings', () => {
+  it('with a full stop between the two spellings, read from the pieces the stops mark', () => {
     expect(said('CALLER: T E S T A. L A K E. I need a refill.', 'Testa', 'Lake')).toBe(true);
+    expect(said('CALLER: T E S T A. L A K E.', 'Testa', 'Lake')).toBe(true);
   });
-  it('run into "I" as well (findings 3 and 4 together)', () => {
-    expect(said('CALLER: This is T E S T A L A K E I need a refill.', 'Testa', 'Lake')).toBe(true);
+  it('the pieces are read only where the stops fall, never split elsewhere', () => {
+    expect(said('CALLER: T E S T A. L A K E. I need a refill.', 'Test', 'Alake')).toBe(false);
+    expect(said('CALLER: T E S T A. L A K E. I need a refill.', 'Lake', 'I')).toBe(false);
+  });
+  it('run straight into "I" with no stop is refused (findings 3 and 4 together: the residue above)', () => {
+    expect(said('CALLER: This is T E S T A L A K E I need a refill.', 'Testa', 'Lake')).toBe(false);
   });
   it('a two-word half spelled into the run', () => {
     expect(said('CALLER: The patient is T E S T A R A E L A K E.', 'Testa Rae', 'Lake')).toBe(true);

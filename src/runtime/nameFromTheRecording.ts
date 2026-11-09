@@ -105,12 +105,11 @@ interface Spot {
   between: boolean;
   /** Spelled letters or an initial, not a word the caller said whole. */
   spelled?: true;
+  /** v193: a spelled run's pieces between full stops, in order ("T E S T A. L A K E." -> testa, lake). */
+  parts?: string[];
   /** v193: a full stop outside a spelled run — a sentence ended here. */
   stop?: true;
 }
-
-/** "I" and "a", the one-letter words a caller says straight after spelling. */
-const ONE_LETTER_WORDS = new Set(["i", "a"]);
 
 /**
  * A caller's turn as places. A run of single letters is ONE place standing for
@@ -119,11 +118,12 @@ const ONE_LETTER_WORDS = new Set(["i", "a"]);
  * (Codex P2 on #431), while "L. A. K. E." still reads "lake". A single letter
  * alone is an initial. Spelled letters and initials may sit inside a name.
  *
- * v193 (review of #431): a run that ends in "i" or "a" also stands for the run
- * without it, so "L A K E, I need" reads "lake" (the comma is gone by now);
- * it only ever adds a reading. And a full stop outside a run is kept as a
- * place of its own, so a sentence break between two whole words can end a
- * name (see `saidTogether`).
+ * v193 (review of #431): a full stop outside a run is kept as a place of its
+ * own, so a sentence break between two whole words can end a name (see
+ * `saidTogether`). A run with no full stop after its last letter is NOT also
+ * read without that letter: "L A K E, I need" stays "lakei", because reading
+ * "V O R L I" as "vorl" too would validate a surname the caller never spelled
+ * (Codex P2 on #442), and the shape refused no measured correct name.
  */
 function spots(line: string): Spot[] {
   const raw = line
@@ -141,11 +141,9 @@ function spots(line: string): Spot[] {
     if (only.length === 1) out.push({ words: new Set(only), between: true, spelled: true });
     else if (only.length >= 2) {
       const words = new Set([only.join("")]);
-      for (const part of letters.join("").split(".")) if (part.length >= 2) words.add(part);
-      for (const w of [...words]) {
-        if (w.length >= 3 && ONE_LETTER_WORDS.has(w[w.length - 1])) words.add(w.slice(0, -1));
-      }
-      out.push({ words, between: true, spelled: true });
+      const parts = letters.join("").split(".").filter(Boolean);
+      for (const part of parts) if (part.length >= 2) words.add(part);
+      out.push({ words, between: true, spelled: true, parts });
     }
     letters = [];
   };
@@ -210,11 +208,26 @@ function saidTogether(sp: Spot[], a: string[], b: string[]): boolean {
  * v193: both halves spelled in one run ("T E S T A L A K E", or "T E S T A.
  * L A K E.") are one place standing for the whole name, which matches neither
  * half alone (review of #431: 10 of about 750 verified callers' names came out
- * whole only this way, 2026-10-10..11-09).
+ * whole only this way, 2026-10-10..11-09). The model's name must be every
+ * letter of the run, in order, and nothing else — no letter dropped or added
+ * (that is what refusing the i/a strip keeps true, Codex P2 on #442). Where
+ * the first name ends and the last begins is the model's reading: all 10 of
+ * those callers spelled the two halves with no boundary between. With a
+ * full stop the transcriber wrote ("T E S T A. L A K E. I need") the pieces
+ * on either side of it must BE the two halves.
  */
 function spelledWhole(sp: Spot[], a: string[], b: string[]): boolean {
   const whole = a.join("") + b.join("");
-  return sp.some((s) => s.spelled === true && s.words.has(whole));
+  const first = a.join("");
+  const second = b.join("");
+  return sp.some(
+    (s) =>
+      s.spelled === true &&
+      (s.words.has(whole) ||
+        (first.length >= 2 &&
+          second.length >= 2 &&
+          (s.parts ?? []).some((p, i, ps) => p === first && ps[i + 1] === second))),
+  );
 }
 
 /**
