@@ -432,6 +432,17 @@ describe('the availability is read once, early, and only by the rules NPX applie
     expect(String(r.say)).toContain('Second City');
   });
 
+  it('the rest was read and still has nothing for that day: then, and only then, it steps back', async () => {
+    npx.availability.mockResolvedValueOnce({ ok: true, latestDay: '2041-12-02', slots: WEEK.slice(0, 7), truncated: true });
+    npx.availability.mockResolvedValueOnce({ ok: true, latestDay: '2041-12-02', slots: WEEK.slice(5), truncated: false });
+    await run(CORPUS[0], CONFIRM_DOB_TOOL_NAME, { date_of_birth: '01/02/1950' });
+    const r = (await run(CORPUS[0], FIND_SOONER_TOOL_NAME, { weekdays: 'wednesday' })) as Record<string, unknown>;
+    expect(npx.availability).toHaveBeenCalledTimes(2);
+    expect(r.unchecked).toBeUndefined();
+    expect(r.exact).toBe(false);
+    expect(String(r.say)).toMatch(/^I don't have that day open, but/);
+  });
+
   it('a weekday the cut-short list already has: no second read', async () => {
     npx.availability.mockResolvedValueOnce({ ok: true, latestDay: '2041-12-02', slots: WEEK.slice(0, 7), truncated: true });
     await run(CORPUS[0], CONFIRM_DOB_TOOL_NAME, { date_of_birth: '01/02/1950' });
