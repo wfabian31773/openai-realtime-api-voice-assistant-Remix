@@ -98,3 +98,49 @@ describe('what v180 needed the scaffolding for still holds', () => {
     expect(saidMoreThanTheirOwnIdentity(`${NAME_ASK}\nCALLER: Testa Lake, her glasses are ready.`, held)).toBe(true);
   });
 });
+
+/**
+ * Codex round 4 on #442. With no name held (the records lane files nameless,
+ * and the floors run before any name is known), an introduction that names
+ * the name ("her first name is ..., her last name is ...") left more than
+ * three words once the scaffolding was kept, so the records sweep filed a
+ * ticket with no request in it. `main` skipped these. A turn that says
+ * "name" / "nombre" / "apellido" is answering in the shape of an
+ * introduction, so its name-sized count is taken without the scaffolding, as
+ * `main` took it; a turn that does not ("His last visit was cancelled") keeps
+ * the scaffolding and files.
+ */
+describe('an introduction with no name held is still identity (Codex round 4 on #442)', () => {
+  const asked = (says: string) => `${NAME_ASK}\nCALLER: ${says}`;
+  it('the introduction shapes are skipped as identity-only', () => {
+    for (const says of [
+      'My first name is Testa and my last name is Lake.',
+      'Her first name is Testa and her last name is Lake.',
+      'His first name is Testa, his last name is Lake.',
+      "The patient's first name is Testa, last name Lake.",
+      'Testa, last name Lake, spelled L A K E.',
+      'Her name is Testa Ann Lake.',
+    ]) {
+      expect(saidMoreThanTheirOwnIdentity(asked(says), undefined)).toBe(false);
+    }
+    for (const says of ['Mi nombre es Testa, mi apellido es Lake.', 'Su nombre es Testa y su apellido es Lake.']) {
+      expect(saidMoreThanTheirOwnIdentity(`AGENT: ${SPANISH_NAME_ASK}\nCALLER: ${says}`, undefined)).toBe(false);
+    }
+  });
+  it('the records sweep skips it rather than filing a nameless request', () => {
+    const d = records('CA00000000000000000000000000000195', asked('Her first name is Testa and her last name is Lake.'));
+    expect(d.file).toBe(false);
+  });
+  it('a short request that does not say "name" still files with no name held', () => {
+    for (const says of ['His last visit was cancelled.', 'Their patient portal is down.', 'Her surname changed, please update it.']) {
+      expect(saidMoreThanTheirOwnIdentity(asked(says), undefined)).toBe(true);
+    }
+    expect(saidMoreThanTheirOwnIdentity(`AGENT: ${SPANISH_NAME_ASK}\nCALLER: Es su receta, se le acabó.`, undefined)).toBe(true);
+  });
+  it('an introduction with a request in it still files', () => {
+    expect(saidMoreThanTheirOwnIdentity(asked('Her first name is Testa and her last name is Lake, her glasses are ready.'), undefined)).toBe(true);
+  });
+  it('the accepted residue: a request of three words or fewer that says "name" is skipped, as on main', () => {
+    expect(saidMoreThanTheirOwnIdentity(asked('Her name changed, please update it.'), undefined)).toBe(false);
+  });
+});

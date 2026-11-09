@@ -316,7 +316,24 @@ export function saidMoreThanTheirOwnIdentity(
      * closing it needs a name detector; it is the same residue v31 accepted on
      * the PCP sweep, and on this lane it costs a clerk a cancellation.
      */
-    if (turn.answersIdentityAsk && leftover.length <= NAME_SIZED_ANSWER) continue;
+    /**
+     * v193, Codex round 4 on #442: AN INTRODUCTION IS COUNTED WITHOUT ITS
+     * SCAFFOLDING. With no name held, "Her first name is Mary and her last
+     * name is Smith" keeps "her her last" beside the name and is five words,
+     * so the records sweep filed it with no request in it; `main` skipped it.
+     * A turn that says "name" / "nombre" / "apellido" is answering in the
+     * shape of an introduction, so its name-sized count drops the scaffolding,
+     * exactly as `main` counted it; a turn that does not ("His last visit was
+     * cancelled") keeps it and files. "surname" is not in the list, so "Her
+     * surname changed, please update it" still files. The accepted residue,
+     * the same as `main`'s: a request of three words or fewer that says
+     * "name" ("Her name changed, please update it"). Every turn now decides
+     * either as `main` or as v179, so the 12,044-call measurement above holds.
+     */
+    const counted = words.some((w) => INTRODUCES_A_NAME.has(w))
+      ? leftover.filter((w) => !NAME_SCAFFOLDING_WORDS.has(w))
+      : leftover;
+    if (turn.answersIdentityAsk && counted.length <= NAME_SIZED_ANSWER) continue;
     return true;
   }
   return false;
@@ -369,6 +386,8 @@ const IDENTITY_WORDS = new Set([
  * but they are never subtracted from a turn that says more (v193).
  */
 const NAME_SCAFFOLDING_WORDS: ReadonlySet<string> = new Set(NAME_SCAFFOLDING);
+/** The words that make a turn an introduction (Codex round 4 on #442). */
+const INTRODUCES_A_NAME: ReadonlySet<string> = new Set(["name", "names", "nombre", "apellido"]);
 
 /** Spoken numbers, so "March seventeenth nineteen seventy three" is a date. */
 const NUMBER_WORDS = new Set([
