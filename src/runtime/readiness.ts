@@ -1386,8 +1386,21 @@ import { callEnvironment } from "./callRecord";
  * create-ticket field); PCP forwards its own.
  * Above main's v187 (#437, `ca7f65be`), which it contains. No migration.
  */
+/**
+ * v192 — A NAME AS THE CALLER SAID IT, AND A REQUEST AS THEY MADE IT
+ * (2026-11-09). Review of #431 (v180), measured first. The words around a
+ * name ("his", "last", "patient", "su") count as identity only when they are
+ * all that is left of a turn, so a short request in answer to a name question
+ * is no longer cut down to a name and skipped (0 of 12,044 calls changed yet,
+ * 2026-10-10..11-09). The heard-name check refuses a bare full stop between
+ * two whole words (1 correct name of 728 refused, against 25 for the review's
+ * fix), reads a spelled half run into "I" or "a", and reads both halves
+ * spelled in one run (10 of about 750 verified callers' names came out whole
+ * only that way). Above main's v188 (#438, `fca1e6f3`), which it contains;
+ * v189-v191 are open PRs #439, #441 and #440. No migration.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v188-records-ask-how-they-want-them-20261108";
+  "voice-runtime-v192-a-name-as-said-and-a-request-as-made-20261109";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

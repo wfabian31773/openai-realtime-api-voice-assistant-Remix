@@ -272,6 +272,22 @@ export function saidMoreThanTheirOwnIdentity(
     );
     if (leftover.length === 0) continue;
     /**
+     * v192: THE WORDS AROUND A NAME ARE IDENTITY ONLY WHEN NOTHING ELSE IS LEFT.
+     *
+     * v180 put `NAME_SCAFFOLDING` ("his", "her", "last", "patient", "su",
+     * "se", ...) into IDENTITY_WORDS, so it was subtracted from every turn
+     * before the name-sized rule below counted what was left. A short request
+     * said in answer to a name question then shrank to a name: "His last
+     * visit was cancelled" left "visit cancelled" and was skipped as
+     * identity-only, here and on the PCP and after-hours floors, which call
+     * this too (review of #431). Here the scaffolding can only finish off a
+     * bare introduction ("my last name is L A K E", the Codex P2 on #431 it
+     * was added for); it never shortens a request. Measured over 12,044
+     * runtime calls with caller speech, 2026-10-10..11-09: this decides as
+     * v179 did on every call a sweep or floor reaches.
+     */
+    if (leftover.every((w) => NAME_SCAFFOLDING_WORDS.has(w))) continue;
+    /**
      * THE ANSWER TO AN IDENTITY QUESTION IS IDENTITY, whatever the words are.
      *
      * Codex P1 on #333: the records lane now files with no verified name, and
@@ -345,10 +361,14 @@ const IDENTITY_WORDS = new Set([
   "this", "is", "it", "i", "am", "my", "name", "the", "of", "birth", "date",
   "was", "born", "on", "in", "a", "and", "speaking", "here", "that", "s",
   "im", "its", "mr", "mrs", "ms", "dr", "junior", "senior", "jr", "sr",
-  // v180: the words the name extractor accepts around a name ("last name",
-  // "mi apellido es"), so a bare introduction is identity on every path.
-  ...NAME_SCAFFOLDING,
 ]);
+
+/**
+ * The words the name extractor accepts around a name ("last name", "mi
+ * apellido es"). Not identity words: a turn made of nothing else is identity,
+ * but they are never subtracted from a turn that says more (v192).
+ */
+const NAME_SCAFFOLDING_WORDS: ReadonlySet<string> = new Set(NAME_SCAFFOLDING);
 
 /** Spoken numbers, so "March seventeenth nineteen seventy three" is a date. */
 const NUMBER_WORDS = new Set([

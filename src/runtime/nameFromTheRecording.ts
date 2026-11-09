@@ -103,7 +103,14 @@ const BETWEEN_ONE_NAME = new Set(NAME_SCAFFOLDING);
 interface Spot {
   words: Set<string>;
   between: boolean;
+  /** Spelled letters or an initial, not a word the caller said whole. */
+  spelled?: true;
+  /** v192: a full stop outside a spelled run — a sentence ended here. */
+  stop?: true;
 }
+
+/** "I" and "a", the one-letter words a caller says straight after spelling. */
+const ONE_LETTER_WORDS = new Set(["i", "a"]);
 
 /**
  * A caller's turn as places. A run of single letters is ONE place standing for
@@ -111,6 +118,12 @@ interface Spot {
  * ends a word, so "L A K E. I need" stands for "lake" as well as "lakei"
  * (Codex P2 on #431), while "L. A. K. E." still reads "lake". A single letter
  * alone is an initial. Spelled letters and initials may sit inside a name.
+ *
+ * v192 (review of #431): a run that ends in "i" or "a" also stands for the run
+ * without it, so "L A K E, I need" reads "lake" (the comma is gone by now);
+ * it only ever adds a reading. And a full stop outside a run is kept as a
+ * place of its own, so a sentence break between two whole words can end a
+ * name (see `saidTogether`).
  */
 function spots(line: string): Spot[] {
   const raw = line
@@ -125,17 +138,21 @@ function spots(line: string): Spot[] {
   let letters: string[] = [];
   const flush = () => {
     const only = letters.filter((l) => l !== ".");
-    if (only.length === 1) out.push({ words: new Set(only), between: true });
+    if (only.length === 1) out.push({ words: new Set(only), between: true, spelled: true });
     else if (only.length >= 2) {
       const words = new Set([only.join("")]);
       for (const part of letters.join("").split(".")) if (part.length >= 2) words.add(part);
-      out.push({ words, between: true });
+      for (const w of [...words]) {
+        if (w.length >= 3 && ONE_LETTER_WORDS.has(w[w.length - 1])) words.add(w.slice(0, -1));
+      }
+      out.push({ words, between: true, spelled: true });
     }
     letters = [];
   };
   for (const t of raw) {
     if (t === ".") {
       if (letters.length) letters.push(".");
+      else out.push({ words: new Set(), between: true, stop: true });
       continue;
     }
     if (t.length === 1) {
@@ -161,17 +178,43 @@ function matchAt(sp: Spot[], i: number, seq: string[]): number {
   return j;
 }
 
-/** `a` then `b` in this turn, with only what may sit inside one name between them. */
+/**
+ * `a` then `b` in this turn, with only what may sit inside one name between them.
+ *
+ * v192: NOT A BARE FULL STOP BETWEEN TWO WHOLE WORDS. "about Testa. Lake
+ * Pharmacy here" is two sentences, not the name Testa Lake (review of #431).
+ * A full stop followed by "my last name is" or by a spelling is still one
+ * person giving one name: measured on verified callers 2026-10-10..11-09,
+ * 28 of 728 said their own name across a full stop, and only 1 of them said
+ * it no other way than across a bare one. A spelled half on either side is
+ * unchanged.
+ */
 function saidTogether(sp: Spot[], a: string[], b: string[]): boolean {
   for (let i = 0; i < sp.length; i++) {
     const end = matchAt(sp, i, a);
     if (end < 0) continue;
+    let onlyStops = true;
     for (let k = end; k < sp.length; k++) {
-      if (matchAt(sp, k, b) >= 0) return true;
+      if (matchAt(sp, k, b) >= 0) {
+        const bareStop = k > end && onlyStops && !sp[end - 1].spelled && !sp[k].spelled;
+        if (!bareStop) return true;
+      }
       if (!sp[k].between) break;
+      if (!sp[k].stop) onlyStops = false;
     }
   }
   return false;
+}
+
+/**
+ * v192: both halves spelled in one run ("T E S T A L A K E", or "T E S T A.
+ * L A K E.") are one place standing for the whole name, which matches neither
+ * half alone (review of #431: 10 of about 750 verified callers' names came out
+ * whole only this way, 2026-10-10..11-09).
+ */
+function spelledWhole(sp: Spot[], a: string[], b: string[]): boolean {
+  const whole = a.join("") + b.join("");
+  return sp.some((s) => s.spelled === true && s.words.has(whole));
 }
 
 /**
@@ -190,7 +233,13 @@ export function nameWasSaidByTheCaller(transcript: string, name: HeardName): boo
     .split(/\r?\n/)
     .filter((l) => /^\s*CALLER\s*:/i.test(l))
     .map((l) => spots(l.replace(/^\s*CALLER\s*:/i, "")))
-    .some((sp) => saidTogether(sp, first, last) || saidTogether(sp, last, first));
+    .some(
+      (sp) =>
+        saidTogether(sp, first, last) ||
+        saidTogether(sp, last, first) ||
+        spelledWhole(sp, first, last) ||
+        spelledWhole(sp, last, first),
+    );
 }
 
 function usable(part: string | null | undefined): string | undefined {
