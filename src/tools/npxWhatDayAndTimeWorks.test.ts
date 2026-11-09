@@ -474,6 +474,15 @@ describe('the availability is read once, early, and only by the rules NPX applie
     expect(String(whole.overview)).not.toMatch(/more after/);
   });
 
+  it('a read on for one day does not make the overview whole: the days after it are still unread', async () => {
+    npx.availability.mockResolvedValueOnce({ ok: true, latestDay: '2041-12-02', slots: WEEK.slice(0, 7), truncated: true });
+    npx.availability.mockResolvedValueOnce({ ok: true, latestDay: '2041-12-02', slots: WEEK.slice(5, 9), truncated: false });
+    await run(CORPUS[0], CONFIRM_DOB_TOOL_NAME, { date_of_birth: '01/02/1950' });
+    const r = (await run(CORPUS[0], FIND_SOONER_TOOL_NAME, { on_date: '2041-11-21', time_of_day: 'afternoon' })) as Record<string, unknown>;
+    expect(r.exact).toBe(true);
+    expect(String(r.overview)).toMatch(/there are more after Thursday, November 21\.$/);
+  });
+
   it('a weekday the cut-short list already has: no second read', async () => {
     npx.availability.mockResolvedValueOnce({ ok: true, latestDay: '2041-12-02', slots: WEEK.slice(0, 7), truncated: true });
     await run(CORPUS[0], CONFIRM_DOB_TOOL_NAME, { date_of_birth: '01/02/1950' });
