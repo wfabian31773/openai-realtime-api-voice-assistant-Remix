@@ -96,6 +96,18 @@ const WEEK: NpxSlot[] = [
 ];
 
 describe('the search, in memory (no network between a question and its answer)', () => {
+  it('a choice whose city cannot be read is not said to be in the other choice\'s city', () => {
+    const unknown = slot('nocity', '2041-11-18', '09:00', { city: '', address: 'Suite 4' });
+    const line = offerLine([unknown, WEEK[3]]);
+    expect(line).toBe('I have Monday, November 18 at 9:00 AM or Tuesday, November 19 at 9:00 AM in Second City. Would either of those work for you?');
+    expect(offerLine([WEEK[0], WEEK[1]])).toMatch(/, in Testville\. /);
+  });
+
+  it('the overview of a cut-short list says there is more after it', () => {
+    expect(overviewLine(WEEK.slice(0, 3), true)).toMatch(/Those are the earliest; there are more after Monday, November 18\.$/);
+    expect(overviewLine(WEEK.slice(0, 3))).not.toMatch(/more after/);
+  });
+
   it('a slot whose city cannot be read matches no city the caller names', () => {
     const unknown = slot('nocity', '2041-11-18', '09:00', { city: '', address: 'Suite 4' });
     expect(matches(unknown, { city: 'Testville' })).toBe(false);
@@ -450,6 +462,16 @@ describe('the availability is read once, early, and only by the rules NPX applie
     expect(r.unchecked).toBeUndefined();
     expect(r.exact).toBe(false);
     expect(String(r.say)).toMatch(/^I don't have that day open, but/);
+  });
+
+  it('the overview the agent is handed: caveated while the list is cut short, plain once it is read to the end', async () => {
+    npx.availability.mockResolvedValueOnce({ ok: true, latestDay: '2041-12-02', slots: WEEK.slice(0, 7), truncated: true });
+    await run(CORPUS[0], CONFIRM_DOB_TOOL_NAME, { date_of_birth: '01/02/1950' });
+    const cut = (await run(CORPUS[0], FIND_SOONER_TOOL_NAME, {})) as Record<string, unknown>;
+    expect(String(cut.overview)).toMatch(/there are more after Thursday, November 21\.$/);
+    npx.availability.mockResolvedValueOnce({ ok: true, latestDay: '2041-12-02', slots: WEEK.slice(5), truncated: false });
+    const whole = (await run(CORPUS[0], FIND_SOONER_TOOL_NAME, { weekdays: 'wednesday' })) as Record<string, unknown>;
+    expect(String(whole.overview)).not.toMatch(/more after/);
   });
 
   it('a weekday the cut-short list already has: no second read', async () => {

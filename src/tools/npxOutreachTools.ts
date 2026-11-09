@@ -829,10 +829,14 @@ registerTool({
     // whole list leaves it unread.
     let pool = avail.slots;
     let range = incompleteRange(avail, pref);
+    // Whether the pool now runs to the end of the window: the first list was
+    // whole, or a read on with no last day came back whole.
+    let complete = !avail.truncated;
     for (let reads = 0; range && reads < MAX_RANGE_READS && left() >= MIN_NPX_READ_MS; reads++) {
       const more = await soon(readAvailability(s.contact, s.demo, range, deadline), left());
       if (!more || 'error' in more) break;
       pool = withRange(pool, range.fromDay, more.slots);
+      if (!range.toDay && !more.truncated) complete = true;
       const next = incompleteRange(more, pref);
       if (next && next.fromDay <= range.fromDay) break;
       range = next;
@@ -879,7 +883,7 @@ registerTool({
         practice: slot.partnerName,
       })),
       say: choicesLine(picked, relaxed),
-      overview: overviewLine(pool),
+      overview: overviewLine(pool, !complete),
       today: today.words,
       today_date: today.date,
       next:

@@ -291,15 +291,19 @@ export function citiesWithOpenings(slots: NpxSlot[], max = 3): string[] {
  */
 export function offerLine(picked: NpxSlot[]): string {
   if (picked.length === 0) return '';
-  const cities = [...new Set(picked.map(cityOf).filter(Boolean))];
-  const oneCity = cities.length <= 1;
+  const named = picked.map(cityOf);
+  const cities = [...new Set(named.filter(Boolean))];
+  // One city only when every choice is in it: a choice whose city cannot be
+  // read is never said to be in another choice's city (Codex, #439).
+  const oneCity = cities.length === 0 || (cities.length === 1 && named.every(Boolean));
+  const inCity = (s: NpxSlot) => (cityOf(s) ? ` in ${cityOf(s)}` : '');
   const days = [...new Set(picked.map(spokenSlotDay))];
   let body: string;
   if (days.length === 1 && picked.length > 1) {
-    const times = picked.map((s) => (oneCity ? spokenSlotTime(s) : `${spokenSlotTime(s)} in ${cityOf(s)}`));
+    const times = picked.map((s) => (oneCity ? spokenSlotTime(s) : `${spokenSlotTime(s)}${inCity(s)}`));
     body = `On ${days[0]} I have ${joinWords(times, 'or')}`;
   } else {
-    const items = picked.map((s) => (oneCity ? spokenWhen(s) : `${spokenWhen(s)} in ${cityOf(s)}`));
+    const items = picked.map((s) => (oneCity ? spokenWhen(s) : `${spokenWhen(s)}${inCity(s)}`));
     body = `I have ${joinWords(items, 'or')}`;
   }
   if (oneCity && cities[0]) body += `, in ${cities[0]}`;
@@ -322,7 +326,7 @@ const PLURAL_DAY: Record<Weekday, string> = {
  * What is open overall, for a caller who asks "what do you have?":
  * which weekdays, from when to when, mornings and/or afternoons, and where.
  */
-export function overviewLine(slots: NpxSlot[]): string {
+export function overviewLine(slots: NpxSlot[], moreAfter = false): string {
   const list = distinctTimes(slots);
   if (list.length === 0) return '';
   const parts = list.map(localParts);
@@ -335,7 +339,9 @@ export function overviewLine(slots: NpxSlot[]): string {
   const last = spokenSlotDay(list[list.length - 1]);
   const span = first === last ? `on ${first}` : `from ${first} through ${last}`;
   const where = cities.length ? `, in ${joinWords(cities)}` : '';
-  return `Openings on ${joinWords(weekdays.map((w) => PLURAL_DAY[w]))}, ${when}, ${span}${where}.`;
+  const line = `Openings on ${joinWords(weekdays.map((w) => PLURAL_DAY[w]))}, ${when}, ${span}${where}.`;
+  // A list cut short describes only its earliest openings (Codex, #439).
+  return moreAfter ? `${line} Those are the earliest; there are more after ${last}.` : line;
 }
 
 /** The street address without the state and ZIP: "11000 Eucalyptus St, 185, Rancho Cucamonga". */
