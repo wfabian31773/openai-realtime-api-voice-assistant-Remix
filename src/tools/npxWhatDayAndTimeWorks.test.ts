@@ -27,6 +27,7 @@ import {
   FIND_TOOL_TIMEOUT_MS,
   MAX_SEARCHES,
   MIN_NPX_READ_MS,
+  MAX_RANGE_READS,
   choicesLine,
   incompleteRange,
   withRange,
@@ -475,6 +476,43 @@ describe('the availability is read once, early, and only by the rules NPX applie
     expect(npx.availability).toHaveBeenCalledTimes(2);
     expect(r).toMatchObject({ success: true, options: [], unchecked: true });
     expect(String(r.fix)).not.toMatch(/end_call/);
+  });
+
+  // Codex round 3, #439: the read on can itself come back cut short.
+  it('a read on that is itself cut short is read on again from its own last day', async () => {
+    npx.availability.mockResolvedValueOnce({ ok: true, latestDay: '2041-12-02', slots: WEEK.slice(0, 3), truncated: true });
+    npx.availability.mockResolvedValueOnce({ ok: true, latestDay: '2041-12-02', slots: WEEK.slice(0, 5), truncated: true });
+    npx.availability.mockResolvedValueOnce({ ok: true, latestDay: '2041-12-02', slots: WEEK.slice(3), truncated: false });
+    await run(CORPUS[0], CONFIRM_DOB_TOOL_NAME, { date_of_birth: '01/02/1950' });
+    const r = (await run(CORPUS[0], FIND_SOONER_TOOL_NAME, { weekdays: 'thursday', time_of_day: 'afternoon' })) as Record<string, unknown>;
+    expect(npx.availability).toHaveBeenCalledTimes(3);
+    const [req2] = npx.availability.mock.calls[1] as unknown as [{ fromDay?: string }];
+    const [req3] = npx.availability.mock.calls[2] as unknown as [{ fromDay?: string }];
+    expect(req2.fromDay).toBe('2041-11-18');
+    expect(req3.fromDay).toBe('2041-11-19');
+    expect(r.exact).toBe(true);
+    expect(r.say).toBe('On Thursday, November 21 I have 1:00 PM or 4:00 PM, in Testville. Would either of those work for you?');
+  });
+
+  it('a read on that is cut short on the same day cannot go further: unchecked, not stepped back', async () => {
+    npx.availability.mockResolvedValueOnce({ ok: true, latestDay: '2041-12-02', slots: WEEK.slice(0, 7), truncated: true });
+    npx.availability.mockResolvedValueOnce({ ok: true, latestDay: '2041-12-02', slots: WEEK.slice(5, 7), truncated: true });
+    await run(CORPUS[0], CONFIRM_DOB_TOOL_NAME, { date_of_birth: '01/02/1950' });
+    const r = (await run(CORPUS[0], FIND_SOONER_TOOL_NAME, { on_date: '2041-11-21', time_of_day: 'afternoon' })) as Record<string, unknown>;
+    expect(npx.availability).toHaveBeenCalledTimes(2);
+    expect(r).toMatchObject({ success: true, options: [], unchecked: true });
+  });
+
+  it('reading on stops after MAX_RANGE_READS, and what is still unread is not stepped back from', async () => {
+    const days = ['2041-11-18', '2041-11-19', '2041-11-20', '2041-11-22', '2041-11-23'];
+    npx.availability.mockResolvedValueOnce({ ok: true, latestDay: '2041-12-02', slots: [slot('d0', days[0], '09:00')], truncated: true });
+    for (let i = 1; i < days.length; i++) {
+      npx.availability.mockResolvedValueOnce({ ok: true, latestDay: '2041-12-02', slots: [slot(`d${i}`, days[i], '09:00')], truncated: true });
+    }
+    await run(CORPUS[0], CONFIRM_DOB_TOOL_NAME, { date_of_birth: '01/02/1950' });
+    const r = (await run(CORPUS[0], FIND_SOONER_TOOL_NAME, { weekdays: 'thursday' })) as Record<string, unknown>;
+    expect(npx.availability).toHaveBeenCalledTimes(1 + MAX_RANGE_READS);
+    expect(r).toMatchObject({ success: true, options: [], unchecked: true });
   });
 
   it('the read failed but the list in hand fits: those are offered as asked', async () => {

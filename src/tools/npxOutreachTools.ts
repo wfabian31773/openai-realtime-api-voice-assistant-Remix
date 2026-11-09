@@ -164,6 +164,8 @@ export const FIND_TOOL_TIMEOUT_MS = 15_000;
 export const FIND_BUDGET_MS = 12_000;
 /** A second read is not started with less than this left of the budget. */
 export const MIN_NPX_READ_MS = 2_000;
+/** How many times one search may read on past a cut-short list. */
+export const MAX_RANGE_READS = 3;
 /** NPX's own default: offer only an exam at least three weeks sooner. */
 export const MIN_DAYS_SOONER = 21;
 
@@ -821,16 +823,21 @@ registerTool({
       };
       return r;
     }
+    // Read on until the part that could answer them is in hand. A read that is
+    // itself cut short is read on from its own last day (Codex round 3, #439);
+    // a read that fails, a budget that runs out, or a day that holds more than a
+    // whole list leaves it unread.
     let pool = avail.slots;
-    const range = incompleteRange(avail, pref);
-    let unread = range !== null;
-    if (range && left() >= MIN_NPX_READ_MS) {
+    let range = incompleteRange(avail, pref);
+    for (let reads = 0; range && reads < MAX_RANGE_READS && left() >= MIN_NPX_READ_MS; reads++) {
       const more = await soon(readAvailability(s.contact, s.demo, range, deadline), left());
-      if (more && !('error' in more)) {
-        pool = withRange(pool, range.fromDay, more.slots);
-        unread = false;
-      }
+      if (!more || 'error' in more) break;
+      pool = withRange(pool, range.fromDay, more.slots);
+      const next = incompleteRange(more, pref);
+      if (next && next.fromDay <= range.fromDay) break;
+      range = next;
     }
+    const unread = range !== null;
     const today = practiceToday();
     const unchecked: ToolResult = {
       success: true,
