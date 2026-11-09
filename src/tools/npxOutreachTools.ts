@@ -832,6 +832,20 @@ registerTool({
       }
     }
     const today = practiceToday();
+    const unchecked: ToolResult = {
+      success: true,
+      options: [],
+      unchecked: true,
+      today: today.words,
+      today_date: today.date,
+      fix:
+        'That day or time could not be checked just now. Do not say it is full and do not offer another day in its place. ' +
+        'Say you could not check that one just now and ask whether another day or time works; call this again with what they say. ' +
+        'Any choices you read them before still stand.',
+    };
+    // "Nothing sooner" only from a list that had nothing: a truncated list whose
+    // re-read came back empty says nothing about the days after it.
+    if (pool.length === 0 && avail.slots.length > 0) return unchecked;
     if (pool.length === 0) {
       return {
         success: true,
@@ -845,19 +859,7 @@ registerTool({
     // The part of the schedule that could answer them was not read (Codex
     // round 2, #439): never step back from a day or time nobody checked. What
     // was offered before stays bookable.
-    if (unread && relaxed !== null) {
-      return {
-        success: true,
-        options: [],
-        unchecked: true,
-        today: today.words,
-        today_date: today.date,
-        fix:
-          'That day or time could not be checked just now. Do not say it is full and do not offer another day in its place. ' +
-          'Say you could not check that one just now and ask whether another day or time works; call this again with what they say. ' +
-          'Any choices you read them before still stand.',
-      };
-    }
+    if (unread && relaxed !== null) return unchecked;
     s.slots = picked;
     return {
       success: true,

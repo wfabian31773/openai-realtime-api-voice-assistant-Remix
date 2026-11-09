@@ -466,6 +466,17 @@ describe('the availability is read once, early, and only by the rules NPX applie
     expect(npx.book).toHaveBeenCalledWith(expect.objectContaining({ slotId: 'mon-0900' }));
   });
 
+  it('a one-day truncated list whose re-read comes back empty: not "nothing sooner", the call goes on', async () => {
+    const monday = WEEK.slice(0, 3);
+    npx.availability.mockResolvedValueOnce({ ok: true, latestDay: '2041-12-02', slots: monday, truncated: true });
+    npx.availability.mockResolvedValueOnce({ ok: true, latestDay: '2041-12-02', slots: [], truncated: false });
+    await run(CORPUS[0], CONFIRM_DOB_TOOL_NAME, { date_of_birth: '01/02/1950' });
+    const r = (await run(CORPUS[0], FIND_SOONER_TOOL_NAME, { on_date: '2041-11-18' })) as Record<string, unknown>;
+    expect(npx.availability).toHaveBeenCalledTimes(2);
+    expect(r).toMatchObject({ success: true, options: [], unchecked: true });
+    expect(String(r.fix)).not.toMatch(/end_call/);
+  });
+
   it('the read failed but the list in hand fits: those are offered as asked', async () => {
     npx.availability.mockResolvedValueOnce({ ok: true, latestDay: '2041-12-02', slots: WEEK.slice(0, 7), truncated: true });
     npx.availability.mockResolvedValueOnce({ ok: false, error: 'network' } as never);
