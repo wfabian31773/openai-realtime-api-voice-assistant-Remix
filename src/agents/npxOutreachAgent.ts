@@ -8,9 +8,11 @@
  * a yes, book it in NPX and cancel the Azul appointment.
  *
  * Who is called: the Console's live movable list (v107), re-checked per
- * person at the dial. What the call does: confirm who answered by their date
- * of birth, offer up to two sooner slots (NPX, EPC #281), book the one they
- * choose, cancel the Azul appointment, report it to NPX
+ * person at the dial. What the call does: say there is availability sooner at
+ * a partner location and ask what day and time work best (operator,
+ * 2026-11-08), confirm who answered by their date of birth, search every slot
+ * NPX may offer them for that day and time, book the one they choose, cancel
+ * the Azul appointment, report it to NPX
  * (src/tools/npxOutreachTools.ts). A patient who rings the number back
  * reaches this same lane (v106).
  *
@@ -49,6 +51,7 @@ import {
   NPX_OUTREACH_TOOLS,
   STAFF_CALLBACK_TOOL_NAME,
   npxOutreachMode,
+  warmOutreachAvailability,
 } from '../tools/npxOutreachTools';
 import { NPX_OUTREACH_DEMO_CAPS, npxOutreachDemoSource } from './npxOutreachDemo';
 
@@ -173,10 +176,11 @@ export const npxOutreachPolicy: OutboundLanePolicy = {
 /**
  * THE ORDER IS THE OPERATOR'S (2026-10-21), the same both ways: the patient is
  * asked for (or, on a returned call, greeted) by first name; on their answer
- * the agent says the kind of visit they have booked and its date, that we
- * would like to offer a sooner appointment, and asks if that interests them;
- * on a yes it confirms their date of birth, month then day then year, and
- * only then offers times. Before the date of birth matches, the visit and its
+ * the agent says the kind of visit they have booked and its date, that there
+ * is availability sooner at a partner location, and asks what day and time
+ * work best for them (operator, 2026-11-08: "When we call we should not have a
+ * set appointment to offer"); on interest it confirms their date of birth,
+ * month then day then year, and only then searches and offers times. Before the date of birth matches, the visit and its
  * date are all that is said — not the time, the office or the doctor — and
  * both come from describe_upcoming_appointment, never from this prompt, which
  * carries nothing from the record (the v47 lesson).
@@ -203,11 +207,11 @@ Offer the patient a sooner appointment at a partner practice that takes their me
 ## Conversation Flow
 ${opening}
 ### Confirm who you are speaking with
-If they want to hear about a sooner appointment, say: "In order to continue, let me confirm your identity. Can I please have your date of birth, starting with the month, then the day, then the year?" Then call ${CONFIRM_DOB_TOOL_NAME} with what they say. If they would rather keep their current appointment, thank them, call record_call_outcome with not_interested, say goodbye and call end_call.
-### The options
-When it answers verified, call ${FIND_SOONER_TOOL_NAME} and read each option in order.
+${DESCRIBE_TOOL_NAME} ends by asking what day and time work best for them. If they name a day or a time, or say they are interested, remember what they said and say: "In order to continue, let me confirm your identity. Can I please have your date of birth, starting with the month, then the day, then the year?" Then call ${CONFIRM_DOB_TOOL_NAME} with what they say. If they would rather keep their current appointment, thank them, call record_call_outcome with not_interested, say goodbye and call end_call.
+### Finding a time
+There is no set appointment to offer: start from what works for them. When ${CONFIRM_DOB_TOOL_NAME} answers verified, call ${FIND_SOONER_TOOL_NAME} with the day and time they said; if they have not said one, ask "What day and time work best for you?" and call it with their answer. Pass what they asked for as its fields: a date, a range ("next week"), weekdays, morning or afternoon, a time window. Offer what it gives you the way its say line does. When they want something else ("anything Thursday?", "later in the day"), call it again with that: it answers at once. If they ask what is open, use its overview.
 ### Booking
-When they choose, say the option back in full, say that booking it cancels their current appointment with us, and ask them to confirm. On a yes, call ${BOOK_SOONER_TOOL_NAME} with the option number and say the confirmation it gives you, word for word.
+When they choose one, say it back with the doctor and the city, say that booking it cancels their current appointment with us, and ask them to confirm. On a yes, call ${BOOK_SOONER_TOOL_NAME} with that option number and say the confirmation it gives you, word for word.
 ### Close
 Ask if there is anything else about this, then say goodbye and call end_call.
 
@@ -220,13 +224,18 @@ Ask if there is anything else about this, then say goodbye and call end_call.
 - When a tool tells you what to say or do next, do that.
 
 ## Voice & Communication Style
-Short sentences. One question at a time, then stop and listen. Say dates and times the way a person would.`;
+Short sentences. One question at a time, then stop and listen. Say dates and times the way a person would. Offer at most three times at once, and never read a street address until it is booked.`;
 }
 
 export function createNpxOutreachAgent(
   _handoffToHuman: () => Promise<void>,
-  metadata: { outbound?: OutboundContact; callback?: unknown } = {},
+  metadata: { outbound?: OutboundContact & { campaignKey?: string }; callback?: unknown } = {},
 ): RealtimeAgent {
+  // The availability is read while the greeting plays, so the opening line
+  // can name where the openings are and every search answers from memory.
+  // The call's campaign goes with it: a demo-campaign call reads the demo NPX
+  // whatever mode the process is in.
+  warmOutreachAvailability(metadata.outbound, metadata.outbound?.campaignKey);
   return new RealtimeAgent({
     name: npxOutreachAgentConfig.name,
     voice: npxOutreachAgentConfig.voice,

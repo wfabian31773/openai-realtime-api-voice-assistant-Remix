@@ -105,7 +105,7 @@ interface Spot {
   between: boolean;
   /** Spelled letters or an initial, not a word the caller said whole. */
   spelled?: true;
-  /** v192: a full stop outside a spelled run — a sentence ended here. */
+  /** v193: a full stop outside a spelled run — a sentence ended here. */
   stop?: true;
 }
 
@@ -119,7 +119,7 @@ const ONE_LETTER_WORDS = new Set(["i", "a"]);
  * (Codex P2 on #431), while "L. A. K. E." still reads "lake". A single letter
  * alone is an initial. Spelled letters and initials may sit inside a name.
  *
- * v192 (review of #431): a run that ends in "i" or "a" also stands for the run
+ * v193 (review of #431): a run that ends in "i" or "a" also stands for the run
  * without it, so "L A K E, I need" reads "lake" (the comma is gone by now);
  * it only ever adds a reading. And a full stop outside a run is kept as a
  * place of its own, so a sentence break between two whole words can end a
@@ -181,7 +181,7 @@ function matchAt(sp: Spot[], i: number, seq: string[]): number {
 /**
  * `a` then `b` in this turn, with only what may sit inside one name between them.
  *
- * v192: NOT A BARE FULL STOP BETWEEN TWO WHOLE WORDS. "about Testa. Lake
+ * v193: NOT A BARE FULL STOP BETWEEN TWO WHOLE WORDS. "about Testa. Lake
  * Pharmacy here" is two sentences, not the name Testa Lake (review of #431).
  * A full stop followed by "my last name is" or by a spelling is still one
  * person giving one name: measured on verified callers 2026-10-10..11-09,
@@ -207,7 +207,7 @@ function saidTogether(sp: Spot[], a: string[], b: string[]): boolean {
 }
 
 /**
- * v192: both halves spelled in one run ("T E S T A L A K E", or "T E S T A.
+ * v193: both halves spelled in one run ("T E S T A L A K E", or "T E S T A.
  * L A K E.") are one place standing for the whole name, which matches neither
  * half alone (review of #431: 10 of about 750 verified callers' names came out
  * whole only this way, 2026-10-10..11-09).

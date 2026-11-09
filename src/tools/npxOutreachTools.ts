@@ -12,9 +12,17 @@
  *   confirm_patient_birthdate  the person gives their date of birth; it must
  *                              match the record the call is about. The full
  *                              appointment is in this tool's answer.
- *   find_sooner_exam           asks NPX for up to two sooner routine exams at
- *                              a partner that takes the patient's medical
- *                              group, in reach of them.
+ *   find_sooner_exam           searches the patient's partner availability for
+ *                              the day and time THEY say works best, and hands
+ *                              back up to three choices (operator, 2026-11-08:
+ *                              "it should always be what day and time works
+ *                              best for you as the starting point"). The
+ *                              availability is every slot NPX may offer this
+ *                              patient — credentialed for their medical group
+ *                              at that office, in reach, a routine exam, three
+ *                              weeks sooner — read once per call (warmed when
+ *                              the call starts) and searched in memory, so
+ *                              "what about next week?" answers at once.
  *   book_sooner_exam           books the one they chose in NPX, cancels the
  *                              Azul appointment it replaces, reports the
  *                              cancel to NPX, and says only what happened.
@@ -65,10 +73,28 @@ import {
   createNpxOutreachDemoClient,
   NPX_TIMEOUT_MS,
   type NpxOutreachClient,
+  type NpxReadOptions,
   type NpxSlot,
 } from '../services/npxOutreachClient';
 import { cancelAzulAppointment, type AzulCancelRequest, type AzulCancelResult } from '../services/outreachAzulCancel';
 import { fold, SCHEDULING } from './queueRouting';
+import {
+  OPTIONS_PER_SEARCH,
+  WEEKDAYS,
+  citiesWithOpenings,
+  cityOf,
+  joinWords,
+  matches,
+  offerLine,
+  overviewLine,
+  practiceToday,
+  preferenceFrom,
+  searchSlots,
+  type SlotPreference,
+  spokenAddress,
+  spokenWhen,
+  type Relaxed,
+} from './npxAvailabilitySearch';
 import { sanitizeForSms } from '../services/gsm7';
 import type { CreateTicketParams, CreateTicketResponse } from '../../server/services/ticketingApiClient';
 
@@ -116,8 +142,30 @@ const DEFAULT_STAFF_REASON_ID = 147;
 
 /** Two tries at the date of birth: once to ask, once in case it was misheard. */
 export const MAX_DOB_TRIES = 2;
-/** How many times NPX is asked for slots on one call (a taken slot asks again). */
-export const MAX_OFFERS = 3;
+/** How many searches one call may run. Each is answered from memory, so the
+ * bound is against a model in a loop, not against NPX. */
+export const MAX_SEARCHES = 12;
+/** Slots read from NPX for one patient: the whole sooner window in practice
+ * (measured 2026-11-08: a few hundred at most per medical group). */
+export const AVAILABILITY_LIMIT = 300;
+/** A call's availability is read again after this long. */
+export const AVAILABILITY_TTL_MS = 10 * 60 * 1000;
+/** How long the opening line waits for the availability to name the city. */
+export const DESCRIBE_AVAILABILITY_WAIT_MS = 2_500;
+/** find_sooner_exam's timeout, as registered. */
+export const FIND_TOOL_TIMEOUT_MS = 15_000;
+/**
+ * EVERY NPX READ A SEARCH MAKES ANSWERS INSIDE THIS (Codex P2, #439). One
+ * availability read may take its whole 10-second limit, and a retry or a
+ * range read after it another 10, so a search could outlive the tool's own
+ * 15 seconds and the caller hear a timeout instead of the safe answer that
+ * their appointment stays as it is. The budget leaves the tool 3 seconds.
+ */
+export const FIND_BUDGET_MS = 12_000;
+/** A second read is not started with less than this left of the budget. */
+export const MIN_NPX_READ_MS = 2_000;
+/** How many times one search may read on past a cut-short list. */
+export const MAX_RANGE_READS = 3;
 /** NPX's own default: offer only an exam at least three weeks sooner. */
 export const MIN_DAYS_SOONER = 21;
 
@@ -193,7 +241,8 @@ interface OutreachSession {
   described: boolean;
   verified: boolean;
   dobTries: number;
-  offers: number;
+  searches: number;
+  /** The choices last read to the caller: book_sooner_exam's option numbers. */
   slots: NpxSlot[];
   booking: { bookingId: string; slot: NpxSlot; cancel: AzulCancelResult } | null;
   /** A book_sooner_exam still running: a second call waits for it rather
@@ -277,10 +326,7 @@ async function sessionFor(input: Record<string, unknown>): Promise<{ sid: string
   if (!contactId || !attemptId) return NOT_THIS_CALL;
   const contact = await (await live().store()).loadCallContact(contactId, attemptId);
   if (!contact) return NOT_THIS_CALL;
-  const demo =
-    npxOutreachMode() === 'demo' ||
-    input.outbound_campaign === NPX_OUTREACH_DEMO_CAMPAIGN_KEY ||
-    contact.data.source === NPX_OUTREACH_DEMO_SOURCE;
+  const demo = isDemoNpxCall(contact, input.outbound_campaign);
   return {
     sid,
     s: keep(
@@ -291,7 +337,7 @@ async function sessionFor(input: Record<string, unknown>): Promise<{ sid: string
         described: false,
         verified: false,
         dobTries: 0,
-        offers: 0,
+        searches: 0,
         slots: [],
         booking: null,
         bookingInFlight: null,
@@ -301,6 +347,136 @@ async function sessionFor(input: Record<string, unknown>): Promise<{ sid: string
       now,
     ),
   };
+}
+
+// ── The patient's partner availability ─────────────────────────────────────
+
+interface Availability {
+  slots: NpxSlot[];
+  truncated: boolean;
+  /** `offer`: an NPX without the availability endpoint; at most two slots. */
+  from: 'availability' | 'offer';
+  fetchedAtMs: number;
+}
+type AvailabilityLoad = Availability | { error: string };
+
+/** Keyed on the contact and the mode, so the agent factory can warm it before
+ * any tool has opened a session. Holds no patient data: slots only. */
+const availabilityCache = new Map<string, { at: number; load: Promise<AvailabilityLoad> }>();
+const MAX_AVAILABILITY_ENTRIES = 200;
+
+const availabilityKey = (c: OutboundContact, demo: boolean) => `${demo ? 'demo' : 'live'}:${c.contactId}`;
+
+function offerAsk(c: OutboundContact): { medicalGroupName: string; partnerNames: string[]; replacedAppointmentDate: string } | null {
+  const medicalGroupName = field(c, 'medical_group');
+  const partnerNames = Array.isArray(c.data.partners) ? (c.data.partners as unknown[]).map(String) : [];
+  const replacedAppointmentDate = field(c, 'appointment_date');
+  return medicalGroupName && partnerNames.length && replacedAppointmentDate ? { medicalGroupName, partnerNames, replacedAppointmentDate } : null;
+}
+
+/**
+ * What is left before `deadlineAt`, as a read limit: undefined when there is
+ * no deadline (the read keeps its own limit), null when too little is left
+ * to start one.
+ */
+function readLimit(deadlineAt: number | undefined): NpxReadOptions | undefined | null {
+  if (deadlineAt === undefined) return undefined;
+  const left = deadlineAt - Date.now();
+  return left >= MIN_NPX_READ_MS ? { timeoutMs: left } : null;
+}
+
+async function readAvailability(
+  c: OutboundContact,
+  demo: boolean,
+  range?: { fromDay?: string; toDay?: string },
+  deadlineAt?: number,
+): Promise<AvailabilityLoad> {
+  const ask = offerAsk(c);
+  if (!ask) return { error: 'record_incomplete' };
+  const npx = demo ? live().npxDemo : live().npx;
+  const first = readLimit(deadlineAt);
+  if (first === null) return { error: 'timeout' };
+  const r = await npx.availability({ ...ask, minDaysSooner: MIN_DAYS_SOONER, limit: AVAILABILITY_LIMIT, ...range }, first);
+  if (r.ok) return { slots: r.slots, truncated: r.truncated, from: 'availability', fetchedAtMs: Date.now() };
+  if (r.error !== 'not_supported') return { error: r.error };
+  // An NPX that predates the endpoint: the two-slot offer, searched the same way.
+  const second = readLimit(deadlineAt);
+  if (second === null) return { error: 'timeout' };
+  const o = await npx.offer({ ...ask, minDaysSooner: MIN_DAYS_SOONER }, second);
+  // At most two of the openings, never the schedule: truncated (Codex, #439).
+  return o.ok ? { slots: o.slots, truncated: true, from: 'offer', fetchedAtMs: Date.now() } : { error: o.error };
+}
+
+/** The contact's availability: the cached read while it is fresh, else a new
+ * one, bounded by `deadlineAt` when a search started it. */
+function loadAvailability(c: OutboundContact, demo: boolean, fresh = false, deadlineAt?: number): Promise<AvailabilityLoad> {
+  const key = availabilityKey(c, demo);
+  const now = Date.now();
+  const hit = availabilityCache.get(key);
+  if (hit && !fresh && now - hit.at < AVAILABILITY_TTL_MS) return hit.load;
+  for (const [k, v] of availabilityCache) if (now - v.at >= AVAILABILITY_TTL_MS) availabilityCache.delete(k);
+  while (availabilityCache.size >= MAX_AVAILABILITY_ENTRIES) {
+    const oldest = availabilityCache.keys().next().value;
+    if (oldest === undefined) break;
+    availabilityCache.delete(oldest);
+  }
+  const load = readAvailability(c, demo, undefined, deadlineAt).then((r) => {
+    // A failed read is not kept: the next search tries again.
+    if ('error' in r) availabilityCache.delete(key);
+    return r;
+  });
+  availabilityCache.set(key, { at: now, load });
+  return load;
+}
+
+/**
+ * Start reading a dialled patient's availability as the call connects, so it
+ * is in hand by the time they say what day and time work best. Called by the
+ * agent factory; sends NPX nothing about the patient (the medical group, the
+ * practices in reach and the appointment date), and never throws.
+ */
+/**
+ * A demo call: the process is in demo mode, OR the call's injected campaign is
+ * the demo campaign, OR its contact came from the demo seed. Any one is enough,
+ * and the tools and the greeting's warm-up read decide it the same way, so a
+ * demo call never reads production NPX (Codex, #439: the warm-up dropped the
+ * campaign and, in live mode, read production for a demo-campaign call).
+ */
+export function isDemoNpxCall(contact: OutboundContact, campaignKey?: unknown): boolean {
+  return (
+    npxOutreachMode() === 'demo' ||
+    campaignKey === NPX_OUTREACH_DEMO_CAMPAIGN_KEY ||
+    contact.data.source === NPX_OUTREACH_DEMO_SOURCE
+  );
+}
+
+export function warmOutreachAvailability(contact: OutboundContact | undefined, campaignKey?: string): void {
+  if (!contact) return;
+  const demo = isDemoNpxCall(contact, campaignKey);
+  if (!offerAsk(contact)) return;
+  void loadAvailability(contact, demo).catch(() => undefined);
+}
+
+/** A taken slot leaves the call's list, so it is never offered again. */
+function forgetSlot(c: OutboundContact, demo: boolean, slotId: string): void {
+  const hit = availabilityCache.get(availabilityKey(c, demo));
+  if (!hit) return;
+  hit.load = hit.load.then((r) => ('error' in r ? r : { ...r, slots: r.slots.filter((x) => x.slotId !== slotId) }));
+}
+
+/** `p`, or null once `ms` has passed. */
+async function soon<T>(p: Promise<T>, ms: number): Promise<T | null> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([p, new Promise<null>((resolve) => (timer = setTimeout(() => resolve(null), Math.max(0, ms))))]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** Tests only. */
+export function resetOutreachAvailabilityForTests(): void {
+  availabilityCache.clear();
 }
 
 // ── What the record says, in words ──────────────────────────────────────────
@@ -327,17 +503,12 @@ export function spokenClock(hhmm: string): string {
   return `${h12}:${min} ${suffix}`;
 }
 
-/** An offered slot as one sentence, in the clinic's own time zone. */
+/** A booked slot in full, said once, after booking: when, with whom, and
+ * where — the street address without the state and ZIP. */
 export function spokenSlot(slot: NpxSlot): string {
-  const when = new Date(slot.startAt).toLocaleString('en-US', {
-    timeZone: slot.timezone || 'America/Los_Angeles',
-    weekday: 'long',
-    month: 'long',
-    day: 'numeric',
-    hour: 'numeric',
-    minute: '2-digit',
-  });
-  return `${when}, at ${slot.partnerName}, ${slot.address}`;
+  const who = slot.providerName ? ` with ${slot.providerName}` : '';
+  const at = [slot.partnerName, spokenAddress(slot)].filter(Boolean).join(', ');
+  return `${spokenWhen(slot)}${who}${at ? `, at ${at}` : ''}`;
 }
 
 /**
@@ -378,6 +549,7 @@ function currentAppointment(c: OutboundContact): string {
 }
 
 const DOB_ASK = 'Can I please have your date of birth, starting with the month, then the day, then the year?';
+const WHEN_ASK = 'What day and time work best for you?';
 
 // ── describe_upcoming_appointment ───────────────────────────────────────────
 
@@ -404,25 +576,47 @@ registerTool({
     }
     s.described = true;
     const appointment = briefAppointment(s.contact);
+    const today = practiceToday();
     if (s.verified) {
       return {
         success: true,
         appointment,
         verified: true,
-        next: 'Their identity is already confirmed. Call find_sooner_exam and read the options it gives you.',
+        today: today.words,
+        today_date: today.date,
+        next: `Their identity is already confirmed. Ask: "${WHEN_ASK}" and call ${FIND_SOONER_TOOL_NAME} with what they say.`,
       };
     }
+    // The opening names where the openings are, when the availability warmed
+    // at call start is in hand; it never waits long for it.
+    const avail = await soon(loadAvailability(s.contact, s.demo), DESCRIBE_AVAILABILITY_WAIT_MS);
+    const known = avail && !('error' in avail) ? avail : null;
+    if (known && known.slots.length === 0) {
+      return {
+        success: true,
+        appointment,
+        nothing_sooner: true,
+        say:
+          `Our records show you have ${appointment}. We were calling to offer you a sooner appointment, but nothing ` +
+          'sooner is open right now, so your appointment stays as it is.',
+        next: 'Say that, thank them, call record_call_outcome with done, say goodbye and call end_call.',
+      };
+    }
+    const cities = known ? citiesWithOpenings(known.slots) : [];
+    const where = cities.length
+      ? `at our partner ${cities.length > 1 ? 'locations' : 'location'} in ${joinWords(cities)}`
+      : 'at one of our partner locations nearby';
     return {
       success: true,
       appointment,
-      say:
-        `Our records show you have ${appointment}. The reason for this call is that we'd like to offer you ` +
-        'a sooner appointment. Does that interest you?',
+      today: today.words,
+      today_date: today.date,
+      say: `Our records show you have ${appointment}. We have availability sooner ${where}. ${WHEN_ASK}`,
       next:
-        `If they say yes, say: "In order to continue, let me confirm your identity. ${DOB_ASK}" and call ` +
-        `${CONFIRM_DOB_TOOL_NAME} with what they say. If they would rather keep their appointment, thank them, call ` +
-        'record_call_outcome with not_interested, say goodbye and call end_call. Say nothing else about the ' +
-        'appointment — not the time, the office or the doctor — until the date of birth matches.',
+        'If they name a day or a time, or say they are interested, remember what they said and say: ' +
+        `"In order to continue, let me confirm your identity. ${DOB_ASK}" Then call ${CONFIRM_DOB_TOOL_NAME} with what they say. ` +
+        'If they would rather keep their appointment, thank them, call record_call_outcome with not_interested, say goodbye and call end_call. ' +
+        'Say nothing else about the appointment — not the time, the office or the doctor — until the date of birth matches.',
     };
   },
 });
@@ -497,10 +691,10 @@ registerTool({
  * options; otherwise the offer is made now. */
 function afterVerified(s: OutreachSession): string {
   return s.described
-    ? `Their identity is confirmed. Call ${FIND_SOONER_TOOL_NAME} now and read the options it gives you.`
-    : `Tell them our records show they have ${currentAppointment(s.contact)}, and that we'd like to offer them a ` +
-        `sooner appointment at a partner practice that takes their medical group. Ask if that interests them; if yes, ` +
-        `call ${FIND_SOONER_TOOL_NAME}.`;
+    ? `Their identity is confirmed. If they already said what day or time works best, call ${FIND_SOONER_TOOL_NAME} now ` +
+        `with it. If not, ask: "${WHEN_ASK}" and call ${FIND_SOONER_TOOL_NAME} with their answer.`
+    : `Tell them our records show they have ${currentAppointment(s.contact)}, and that we have availability sooner at a ` +
+        `partner location that takes their medical group. Ask: "${WHEN_ASK}" and call ${FIND_SOONER_TOOL_NAME} with their answer.`;
 }
 
 function notConfirmed(): Refusal {
@@ -521,14 +715,101 @@ function notVerified(): Refusal {
   };
 }
 
+/**
+ * The part of what was asked that a cut-short list cannot answer, or null.
+ *
+ * The list stops at its limit, so every day before its last is whole and its
+ * last day may be cut part way (Codex P2, #439: a list ending at 11:40 on a
+ * Tuesday has nothing to say about Tuesday afternoon). A date asked for, or a
+ * range that reaches the last day or past it, is read again from NPX — from
+ * the later of that day and the first day asked, to the last day asked — the
+ * same rules applied, before any preference is relaxed. A search with no date
+ * (a weekday, a time, a city) is read again from the last day on when nothing
+ * in the list fits it (Codex round 2, #439: "Thursday afternoons" against a
+ * list that stops on a Thursday morning).
+ */
+export function incompleteRange(
+  avail: { slots: NpxSlot[]; truncated: boolean },
+  pref: SlotPreference,
+): { fromDay: string; toDay?: string } | null {
+  if (!avail.truncated || avail.slots.length === 0) return null;
+  const from = pref.onDate ?? pref.fromDate;
+  const to = pref.onDate ?? pref.toDate;
+  const lastDay = avail.slots[avail.slots.length - 1].day;
+  if (to && to < lastDay) return null;
+  if (!from && !to && avail.slots.some((x) => matches(x, pref))) return null;
+  return { fromDay: from && from > lastDay ? from : lastDay, ...(to ? { toDay: to } : {}) };
+}
+
+/** The later of two YYYY-MM-DD days. */
+function laterDay(a: string, b: string | undefined): string {
+  return b && b > a ? b : a;
+}
+
+/** Every slot in either list once, in time order. */
+export function unionSlots(a: NpxSlot[], b: NpxSlot[]): NpxSlot[] {
+  const seen = new Set<string>();
+  return [...a, ...b]
+    .filter((x) => (seen.has(x.slotId) ? false : (seen.add(x.slotId), true)))
+    .sort((x, y) => Date.parse(x.startAt) - Date.parse(y.startAt));
+}
+
+/** The whole days of `pool` before `fromDay`, then the range read, in time order. */
+export function withRange(pool: NpxSlot[], fromDay: string, range: NpxSlot[]): NpxSlot[] {
+  const seen = new Set<string>();
+  return [...pool.filter((x) => x.day < fromDay), ...range]
+    .filter((x) => (seen.has(x.slotId) ? false : (seen.add(x.slotId), true)))
+    .sort((a, b) => Date.parse(a.startAt) - Date.parse(b.startAt));
+}
+
+/** The lead-in when a search had to step back from what was asked. */
+const RELAXED_LEAD: Record<Exclude<Relaxed, null>, string> = {
+  time: "I don't have that time open, but",
+  day: "I don't have that day open, but",
+  when: "I don't have that day or time open, but",
+  city: "I don't have anything open there then, but",
+  all: "I don't have anything open then, but",
+};
+
+/** The choices as the caller hears them: "On Tuesday, November 17 I have …"
+ * or "I have …", after the lead-in when the search stepped back. */
+export function choicesLine(picked: NpxSlot[], relaxed: Relaxed): string {
+  const line = offerLine(picked);
+  if (!relaxed || !line) return line;
+  return `${RELAXED_LEAD[relaxed]} ${line.startsWith('On ') ? `on ${line.slice(3)}` : line}`;
+}
+
 registerTool({
   name: FIND_SOONER_TOOL_NAME,
   layer: 'agent',
-  timeoutMs: 10_000,
+  timeoutMs: FIND_TOOL_TIMEOUT_MS,
   description:
-    'Find up to two sooner routine eye exams at a partner practice that takes this patient\'s medical group. ' +
-    'Call it only after confirm_patient_birthdate answered verified and the person wants to hear the options.',
-  input_schema: { type: 'object', properties: {}, required: [] },
+    'Search the sooner openings at our partner locations for the day and time the patient says works best, and get up to ' +
+    'three choices to offer. Pass what they asked for: a date, a range of dates, weekdays, morning or afternoon, a time ' +
+    'window, a city. Dates are YYYY-MM-DD; today\'s date is in describe_upcoming_appointment\'s answer and in this one. ' +
+    'With nothing passed it gives the earliest openings. Every opening it returns is one this patient qualifies for. ' +
+    'It answers at once: call it again every time they ask about another day or time. ' +
+    'Call it only after confirm_patient_birthdate answered verified.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      on_date: { type: 'string', description: 'A single day they asked for, YYYY-MM-DD.' },
+      from_date: { type: 'string', description: 'The first day of a range they asked for ("next week", "after the 20th"), YYYY-MM-DD.' },
+      to_date: { type: 'string', description: 'The last day of that range, YYYY-MM-DD.' },
+      weekdays: {
+        type: 'string',
+        description: `Days of the week they can come, comma-separated, from: ${WEEKDAYS.join(', ')} ("Tuesdays or Thursdays" is "tuesday,thursday").`,
+      },
+      time_of_day: { type: 'string', enum: ['morning', 'afternoon', 'any'], description: 'Morning (before noon) or afternoon.' },
+      earliest_time: { type: 'string', description: 'No earlier than this, 24-hour HH:MM ("after 10" is 10:00).' },
+      latest_time: { type: 'string', description: 'No later than this, 24-hour HH:MM ("before 3" is 15:00).' },
+      city: {
+        type: 'string',
+        description: 'A city they asked for, if they named one, spelled as the city is named (the overview and the choices name them). Only that city matches: "Chino" is not "Chino Hills".',
+      },
+    },
+    required: [],
+  },
   handler: async (input): Promise<ToolResult> => {
     const found = await sessionFor(input);
     if ('success' in found) return found;
@@ -537,19 +818,16 @@ registerTool({
     if (s.booking) {
       return { success: true, already_booked: true, fix: 'The exam is already booked on this call. Do not look again; confirm the booking with them.' };
     }
-    if (s.offers >= MAX_OFFERS) {
+    if (s.searches >= MAX_SEARCHES) {
       const r: Refusal = {
         success: false,
-        error: 'offer_limit',
-        fix: 'Stop looking. Tell them their current appointment stays as it is, thank them, call record_call_outcome with done, say goodbye and call end_call.',
+        error: 'search_limit',
+        fix: 'Stop looking. Offer once more the choices you last read, or tell them their current appointment stays as it is; if they want neither, thank them, call record_call_outcome with done, say goodbye and call end_call.',
       };
       return r;
     }
-    s.offers += 1;
-    const medicalGroup = field(s.contact, 'medical_group');
-    const partners = Array.isArray(s.contact.data.partners) ? (s.contact.data.partners as unknown[]).map(String) : [];
-    const replaced = field(s.contact, 'appointment_date');
-    if (!medicalGroup || partners.length === 0 || !replaced) {
+    s.searches += 1;
+    if (!offerAsk(s.contact)) {
       const r: Refusal = {
         success: false,
         error: 'record_incomplete',
@@ -557,35 +835,117 @@ registerTool({
       };
       return r;
     }
-    const offer = await npxFor(s).offer({
-      medicalGroupName: medicalGroup,
-      partnerNames: partners,
-      replacedAppointmentDate: replaced,
-      minDaysSooner: MIN_DAYS_SOONER,
-    });
-    if (!offer.ok) {
+    const pref = preferenceFrom(input);
+    const deadline = Date.now() + FIND_BUDGET_MS;
+    const left = () => deadline - Date.now();
+    // The cached read may be the one the agent factory started, which keeps its
+    // own 10 seconds; the race holds it to the budget.
+    let avail: AvailabilityLoad = (await soon(loadAvailability(s.contact, s.demo, false, deadline), left())) ?? { error: 'timeout' };
+    if ('error' in avail && left() >= MIN_NPX_READ_MS) {
+      avail = (await soon(loadAvailability(s.contact, s.demo, true, deadline), left())) ?? { error: 'timeout' };
+    }
+    if ('error' in avail) {
       const r: Refusal = {
         success: false,
-        error: offer.error,
+        error: avail.error,
         fix: 'The partner schedule could not be read just now. Do not say anything failed. Tell them their current appointment stays as it is and we may reach out another time, call record_call_outcome with call_back_later, say goodbye and call end_call.',
       };
       return r;
     }
-    s.slots = offer.slots;
-    if (offer.slots.length === 0) {
+    // Read on until the part that could answer them is in hand. A read that is
+    // itself cut short is read on from its own last day (Codex round 3, #439);
+    // a read that fails, a budget that runs out, or a day that holds more than a
+    // whole list leaves it unread.
+    let pool = avail.slots;
+    // An NPX without the availability endpoint answers with two openings and
+    // cannot be read any further: nothing it lacks is ever stepped back from.
+    const offerOnly = avail.from === 'offer';
+    let range = offerOnly ? null : incompleteRange(avail, pref);
+    // What has been read: `complete` when the pool runs to the end of the
+    // window, otherwise `edge`, the day before which every day has been read.
+    // A read on that starts later than the edge leaves the days between it
+    // unread and does not move it (Codex, #439).
+    let complete = !avail.truncated;
+    let edge = avail.slots[avail.slots.length - 1]?.day;
+    const noteRead = (from: string, to: string | undefined, got: Availability) => {
+      if (complete || !edge || from > edge) return;
+      if (got.truncated) edge = laterDay(edge, got.slots[got.slots.length - 1]?.day);
+      else if (to) edge = laterDay(edge, to);
+      else complete = true;
+    };
+    for (let reads = 0; range && reads < MAX_RANGE_READS && left() >= MIN_NPX_READ_MS; reads++) {
+      const more = await soon(readAvailability(s.contact, s.demo, range, deadline), left());
+      if (!more || 'error' in more) break;
+      pool = withRange(pool, range.fromDay, more.slots);
+      noteRead(range.fromDay, range.toDay, more);
+      const next = incompleteRange(more, pref);
+      if (next && next.fromDay <= range.fromDay) break;
+      range = next;
+    }
+    const unread = range !== null || offerOnly;
+    const today = practiceToday();
+    const unchecked: ToolResult = {
+      success: true,
+      options: [],
+      unchecked: true,
+      today: today.words,
+      today_date: today.date,
+      fix:
+        'That day or time could not be checked just now. Do not say it is full and do not offer another day in its place. ' +
+        'Say you could not check that one just now and ask whether another day or time works; call this again with what they say. ' +
+        'Any choices you read them before still stand.',
+    };
+    // "Nothing sooner" only from a list that had nothing: a truncated list whose
+    // re-read came back empty says nothing about the days after it.
+    if (pool.length === 0 && avail.slots.length > 0) return unchecked;
+    if (pool.length === 0) {
       return {
         success: true,
         options: [],
+        today: today.words,
+        today_date: today.date,
         fix: 'Nothing sooner is open right now. Tell them their current appointment stays as it is, thank them, call record_call_outcome with done, say goodbye and call end_call.',
       };
     }
+    let { picked, relaxed } = searchSlots(pool, pref, OPTIONS_PER_SEARCH);
+    // The part of the schedule that could answer them was not read (Codex
+    // round 2, #439): never step back from a day or time nobody checked. What
+    // was offered before stays bookable.
+    if (unread && relaxed !== null) return unchecked;
+    // What was asked was read and has nothing; before stepping back from it,
+    // read the openings the alternatives come from, from the edge on (Codex,
+    // #439: Thursday in one city must not give way to another city while that
+    // city's Tuesday is unread). Once, inside the budget; then step back over
+    // what was read.
+    if (relaxed !== null && !complete && !offerOnly && edge && left() >= MIN_NPX_READ_MS) {
+      const from = edge;
+      const fill = await soon(readAvailability(s.contact, s.demo, { fromDay: from }, deadline), left());
+      if (fill && !('error' in fill)) {
+        pool = unionSlots(pool, fill.slots);
+        noteRead(from, undefined, fill);
+        ({ picked, relaxed } = searchSlots(pool, pref, OPTIONS_PER_SEARCH));
+      }
+    }
+    s.slots = picked;
     return {
       success: true,
-      options: offer.slots.map((slot, i) => ({ option: i + 1, when_and_where: spokenSlot(slot), provider: slot.providerName })),
+      exact: relaxed === null,
+      options: picked.map((slot, i) => ({
+        option: i + 1,
+        when: spokenWhen(slot),
+        city: cityOf(slot),
+        provider: slot.providerName,
+        practice: slot.partnerName,
+      })),
+      say: choicesLine(picked, relaxed),
+      overview: overviewLine(pool, !complete),
+      today: today.words,
+      today_date: today.date,
       next:
-        'Read the options in order, one at a time, then ask which they would like, or whether they would rather keep their current appointment. ' +
-        'On a choice, say it back in full and ask them to confirm before calling book_sooner_exam with that option number. ' +
-        'Booking it cancels their current appointment with us; say so before they confirm.',
+        'Say the choices as the say line does: the day, date, time and city — not the street address. ' +
+        'If they want a different day or time, call this again with what they now say. If they ask what is open, use the overview. ' +
+        'When they pick one, say it back with the doctor and the city, say that booking it cancels their current appointment with us, ' +
+        'and ask them to confirm; on a yes, call book_sooner_exam with that option number.',
     };
   },
 });
@@ -639,9 +999,9 @@ registerTool({
     properties: {
       option: {
         type: 'string',
-        enum: ['1', '2'],
-        description: 'The option number they chose.',
-        askAs: 'Which option would you like?',
+        enum: ['1', '2', '3'],
+        description: 'The option number they chose, from the last find_sooner_exam answer.',
+        askAs: 'Which of those would you like?',
       },
     },
     required: ['option'],
@@ -678,7 +1038,7 @@ async function bookChosen(
     const r: Refusal = {
       success: false,
       error: 'no_such_option',
-      fix: 'That option was not offered. Call find_sooner_exam first, read the options, and book only one they chose.',
+      fix: 'That option was not offered. Call find_sooner_exam with what they want, offer its choices, and book only one they chose.',
     };
     return r;
   }
@@ -710,11 +1070,12 @@ async function bookChosen(
   if (!book.ok) {
     if (book.next === 'offer_again') {
       s.slots = [];
+      forgetSlot(s.contact, s.demo, slot.slotId);
       const r: Refusal = {
         success: false,
         error: 'slot_unavailable',
-        say: 'I\'m sorry, that time was just taken. Let me look again.',
-        fix: 'Call find_sooner_exam again and read the new options. Their current appointment has not been touched.',
+        say: 'I\'m sorry, that time was just taken. Let me check what else is open.',
+        fix: 'Call find_sooner_exam again with what they asked for and offer what it gives you. Their current appointment has not been touched.',
       };
       return r;
     }

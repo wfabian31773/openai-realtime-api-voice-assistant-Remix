@@ -9,7 +9,7 @@
  * `identity-only` (Codex P2 on #431: "last" was left over, and the re-decided
  * sweep filed a ticket with no request in it).
  *
- * v192: ONLY when they are all that is left of the turn. v180 subtracted them
+ * v193: ONLY when they are all that is left of the turn. v180 subtracted them
  * from every turn, so "His last visit was cancelled", said in answer to a name
  * question, shrank to a name-sized answer and was skipped (review of #431).
  */

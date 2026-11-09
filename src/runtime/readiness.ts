@@ -1395,13 +1395,23 @@ import { callEnvironment } from "./callRecord";
  * for in the Hub's filing_expectations table; scripts/filing-quality.ts
  * compares those rows with the Support Center tickets for the Daybook. Changes
  * nothing a caller hears or a ticket carries. Above main's v190 (#441,
- * `ce0bee67`), which it contains along with v188 (#438, `fca1e6f3`); v189
- * (#439) is open on its branch. The table is created on first write (CREATE
- * TABLE IF NOT EXISTS); the migration file documents it.
+ * `ce0bee67`), which it contains along with v188 (#438, `fca1e6f3`). The
+ * table is created on first write (CREATE TABLE IF NOT EXISTS); the migration
+ * file documents it.
  */
 /**
- * v192 — A NAME AS THE CALLER SAID IT, AND A REQUEST AS THEY MADE IT
- * (2026-11-09). Review of #431 (v180), measured first. The words around a
+ * v192 — THE NPX OUTREACH CALL ASKS WHAT DAY AND TIME WORK BEST (2026-11-08;
+ * v189 while #439 was open). Operator: "it should always be what day and time
+ * works best for you as the starting point" and "it only offers what the
+ * patient qualifies for in terms of credentialing." find_sooner_exam searches
+ * the patient's whole qualifying availability (NPX's outreach availability
+ * endpoint) by day, range, weekday, time and city, offers up to three choices,
+ * and steps back one constraint at a time when nothing matches. Above main's
+ * v191 (#440, `41a6854a`), which it contains. No migration.
+ */
+/**
+ * v193 — A NAME AS THE CALLER SAID IT, AND A REQUEST AS THEY MADE IT
+ * (2026-11-09; v192 while #442 was open). Review of #431 (v180), measured first. The words around a
  * name ("his", "last", "patient", "su") count as identity only when they are
  * all that is left of a turn, so a short request in answer to a name question
  * is no longer cut down to a name and skipped (0 of 12,044 calls changed yet,
@@ -1409,12 +1419,12 @@ import { callEnvironment } from "./callRecord";
  * two whole words (1 correct name of 728 refused, against 25 for the review's
  * fix), reads a spelled half run into "I" or "a", and reads both halves
  * spelled in one run (10 of about 750 verified callers' names came out whole
- * only that way). Above main's v191 (#440, `41a6854a`), which it contains
- * along with v190 (#441, `ce0bee67`) and v188 (#438, `fca1e6f3`); v189 (#439)
- * is open on its branch. No migration.
+ * only that way). Above main's v192 (#439, `aab80916`), which it contains
+ * along with v191 (#440, `41a6854a`), v190 (#441, `ce0bee67`) and v188 (#438,
+ * `fca1e6f3`). No migration.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v192-a-name-as-said-and-a-request-as-made-20261109";
+  "voice-runtime-v193-a-name-as-said-and-a-request-as-made-20261109";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

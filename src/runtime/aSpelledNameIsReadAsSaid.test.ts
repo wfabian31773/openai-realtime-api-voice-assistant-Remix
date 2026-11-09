@@ -1,5 +1,5 @@
 /**
- * THE NAME CHECK READS A NAME THE WAY THE CALLER SAID IT — v192.
+ * THE NAME CHECK READS A NAME THE WAY THE CALLER SAID IT — v193.
  *
  * Review of #431 (v180), findings 2-4, on `spots()` in
  * `nameFromTheRecording.ts`. MEASURED before fixing, on the callers whose name

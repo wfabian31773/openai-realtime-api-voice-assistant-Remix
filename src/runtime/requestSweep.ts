@@ -272,7 +272,7 @@ export function saidMoreThanTheirOwnIdentity(
     );
     if (leftover.length === 0) continue;
     /**
-     * v192: THE WORDS AROUND A NAME ARE IDENTITY ONLY WHEN NOTHING ELSE IS LEFT.
+     * v193: THE WORDS AROUND A NAME ARE IDENTITY ONLY WHEN NOTHING ELSE IS LEFT.
      *
      * v180 put `NAME_SCAFFOLDING` ("his", "her", "last", "patient", "su",
      * "se", ...) into IDENTITY_WORDS, so it was subtracted from every turn
@@ -366,7 +366,7 @@ const IDENTITY_WORDS = new Set([
 /**
  * The words the name extractor accepts around a name ("last name", "mi
  * apellido es"). Not identity words: a turn made of nothing else is identity,
- * but they are never subtracted from a turn that says more (v192).
+ * but they are never subtracted from a turn that says more (v193).
  */
 const NAME_SCAFFOLDING_WORDS: ReadonlySet<string> = new Set(NAME_SCAFFOLDING);
 
