@@ -3,6 +3,7 @@ import { callerAffirmedThePhoneMatch } from '../tools/greetingAffirmation';
 import { dobKey } from '../services/callFactsLedger';
 import { recognisedFirstName } from '../services/greetingPersonalisation';
 import { joinedAppointments, prepareTicketIdentity, scheduleMatchesIdentity, validatedPatientFor, type TicketLocationSource } from '../tools/ticketIdentity';
+import { afterHoursRecordsRequestFor, noteAfterHoursRecordsRequest, recordsRequesterPayload, requesterFromCallerType } from '../services/afterHoursRecordsRequest';
 import { readDobQuietly } from '../tools/dobParts';
 import { dobTheCallerGave, isoDobToUs } from '../services/afterHoursCallFacts';
 import { appointmentReadPolicy } from '../services/appointmentReadPolicy';
@@ -286,7 +287,8 @@ export type RefusedEscalationCode =
   | 'administrative_request'
   | 'symptoms_not_stated_by_caller'
   | 'post_op_medication'
-  | 'provider_not_stated_by_caller';
+  | 'provider_not_stated_by_caller'
+  | 'records_request';
 
 export const REFUSED_ESCALATION_WHY: Record<RefusedEscalationCode, string> = {
   communication_failure:
@@ -303,7 +305,46 @@ export const REFUSED_ESCALATION_WHY: Record<RefusedEscalationCode, string> = {
     'the caller has not said they are a doctor, a nurse, or calling from a doctor\'s office, hospital, ER, ' +
     'lab or clinic, and this line transfers a provider call only when the caller says so (operator rulings ' +
     '2026-10-19 and 2026-10-21)',
+  records_request:
+    'a medical records request is never a transfer on this line, whoever is asking (operator ruling 2026-11-09)',
 };
+
+/**
+ * v190: who is asking for records, as create_ticket's `records_requester`
+ * offers it to the model, mapped to the records lane's requester types.
+ */
+export const RECORDS_REQUESTER_TYPES = {
+  patient: 'patient',
+  family_or_representative: 'personal_representative',
+  provider_office: 'provider',
+  health_plan: 'health_plan',
+  attorney: 'legal',
+  other: 'other',
+} as const;
+
+/**
+ * v190: the escalation result for a records request. Nothing is filed here,
+ * unlike every other refusal (v80): the caller is still on the line and the
+ * request needs the PATIENT's details, which the agent collects next and files
+ * with create_ticket. A caller who hangs up first is filed by the teardown
+ * floor, to Medical Records, with the requester noted below.
+ */
+export function recordsRequestEscalationResult(directive: string): {
+  success: false;
+  refused: 'records_request';
+  ticket_filed: false;
+  message: string;
+} {
+  return {
+    success: false,
+    refused: 'records_request',
+    ticket_filed: false,
+    message:
+      `Escalation is not available: ${REFUSED_ESCALATION_WHY.records_request}. Nothing has been filed yet. ` +
+      'Do NOT say you will connect, transfer or put anyone through, and do NOT say there is a technical issue. ' +
+      directive,
+  };
+}
 
 export const REFUSED_ESCALATION_LINE = {
   gave:
@@ -1047,6 +1088,9 @@ Detect ANY of these signals immediately:
 • "peer-to-peer" / "peer to peer"
 • "I'm calling from [medical facility name]"
 • Any caller identifying as a healthcare professional
+
+EXCEPT RECORDS — never a transfer: get the PATIENT's name and DOB,
+then create_ticket (medical_records_request).
 
 ⚡ DO NOT wait until you have collected all patient info.
 The moment you detect a provider call:
@@ -1899,8 +1943,14 @@ The ticket will include schedule context (last appointment info) automatically.`
           "test_results",
           "follow_up_care",
           "optical_request",
+          "medical_records_request",
         ])
-        .describe("Category. optical_request: glasses, frames, lenses or contacts as products (orders, pickup, repairs) — not a doctor visit, clinical complaint or refill. new_appointment = NEW; confirm_appointment = confirming existing; appointment_request is legacy."),
+        .describe("Category. optical_request: glasses, frames, lenses or contacts as products (orders, pickup, repairs) — not a doctor visit, clinical complaint or refill. medical_records_request: anyone asking for a patient's medical records or chart. new_appointment = NEW; confirm_appointment = confirming existing; appointment_request is legacy."),
+      records_requester: z
+        .enum(["patient", "family_or_representative", "provider_office", "health_plan", "attorney", "other"])
+        .optional()
+        .describe("medical_records_request only: who is asking, as the caller said. When it is not the patient, first_name, last_name and date_of_birth are the PATIENT's, never the caller's."),
+      requester_name: z.string().optional().describe("medical_records_request only, when the caller is not the patient: the caller's name and their office or organization."),
       request_summary: z.string().describe("Summary of what the patient needs"),
       preferred_contact: z
         .enum(["phone", "text", "email"])
@@ -1997,7 +2047,12 @@ The ticket will include schedule context (last appointment info) automatically.`
       const isB2bNoDob = dobLower.includes('not available') || dobLower.includes('n/a') || 
                          dobLower.includes('unknown') || dobLower.includes('b2b') ||
                          dobLower.includes('unavailable') || dobLower.includes('none') ||
-                         dobLower === '';
+                         dobLower === '' ||
+                         // v190: the model's own words for "the caller cannot give it" — on
+                         // CAbccc433f0627622f50d32ff4abd7cec8 it wrote "not provided - caller
+                         // provider's office", none of the words above matched, and the
+                         // refusal that followed was spoken as a technical issue.
+                         /\b(not (provided|given|known)|declined|refused|cannot|can't|doesn't know|does not know|don't know|do not know)\b/.test(dobLower);
       
       let parsedDOB = isB2bNoDob ? null : parseDateOfBirth(params.date_of_birth);
       // ASK ONCE, THEN FILE ANYWAY. Until 2026-09-17 this refusal had no
@@ -2020,7 +2075,11 @@ The ticket will include schedule context (last appointment info) automatically.`
           return {
             success: false,
             validation_errors: ["complete date of birth (month, day, and year)"],
-            message: "Missing required information: complete date of birth (month, day, and year)",
+            message:
+              "Missing required information: complete date of birth (month, day, and year). Ask for it once, " +
+              "starting with the month, then the day, then the year. If the caller says they do not have it or " +
+              "cannot give it, call create_ticket again straight away with date_of_birth \"unknown\" — the request " +
+              "files without it. Nothing has failed: never tell the caller there is a technical issue.",
           };
         }
         dobEscapeStatus = escape.status;
@@ -2195,9 +2254,21 @@ The ticket will include schedule context (last appointment info) automatically.`
       if (completedIdentity.missing && (completedIdentity.missing !== 'date_of_birth' || (!dobEscapeStatus && !isB2bNoDob))) return { success: false, missingFields: [completedIdentity.missing], message: completedIdentity.message };
       params.location = String(completedIdentity.input.location || '');
       locationSource = completedIdentity.input.locationSource as TicketLocationSource | undefined;
+      // v190: a records request — the model's category, or one the escalation
+      // gate refused on this call — files to Medical Records with who asked.
+      const recordsNoted = afterHoursRecordsRequestFor(metadata.callSid);
+      const recordsRequest = params.request_category === 'medical_records_request' || Boolean(recordsNoted);
+      const recordsRequester = recordsRequest
+        ? recordsRequesterPayload(
+            (params.records_requester ? RECORDS_REQUESTER_TYPES[params.records_requester] : undefined) ?? recordsNoted?.requester,
+            params.requester_name ?? recordsNoted?.requesterName,
+          )
+        : undefined;
+      if (recordsRequest) noteAfterHoursRecordsRequest(metadata.callSid, {});
       const route = routeAfterHoursTicket({
         postOpMedication: params.post_op_prescription,
         appointmentToday: params.appointment_today,
+        recordsRequest,
         opticalRequest: params.request_category === 'optical_request',
         text: [params.request_summary, params.appointment_time].filter(Boolean).join(' '),
         confirmedUpcoming: recordConfirmed ? enrichedContext?.upcomingAppointments : undefined,
@@ -2272,6 +2343,7 @@ The ticket will include schedule context (last appointment info) automatically.`
         agentUsed: 'no-ivr',
         ...(route.kind === 'default' ? {} : { departmentId: route.departmentId }),
         ...(routingAskSpent ? { routingAskExhausted: true } : {}),
+        ...(recordsRequester && route.kind === 'medical_records' ? { recordsRequester } : {}),
         ...(timeConflict && route.kind !== 'post_op_medication' ? { priority: 'high' as const } : {}),
         ...(route.kind === 'post_op_medication'
           ? {
@@ -2290,7 +2362,7 @@ The ticket will include schedule context (last appointment info) automatically.`
                 suggestedRequestReasonId: opticalHint.requestReasonId,
                 suggestedRequestReason: opticalHint.requestReason,
               }
-          : ahHint.isCatchAll
+          : ahHint.isCatchAll || route.kind === 'medical_records'
             ? {}
             : {
                 suggestedRequestTypeId: ahHint.classification.requestTypeId,
@@ -2781,6 +2853,17 @@ PREREQUISITE: one quick ask for name and DOB; transfer even if unavailable. Clin
         console.warn(
           `[HANDOFF] escalation refused for ${callId} — ${verdict.code}: ${params.reason?.substring(0, 120)}`,
         );
+        // v190: RECORDS REQUESTS NEVER RING (operator, 2026-11-09), and are not
+        // filed here: the caller is still on the line, and the request needs
+        // the PATIENT's details. Who is asking is noted for create_ticket and
+        // for the teardown floor, which files to Medical Records on a hang-up.
+        if (verdict.code === 'records_request') {
+          noteAfterHoursRecordsRequest(metadata.callSid, {
+            requester: corroboration.providerStated ? requesterFromCallerType(params.caller_type) : undefined,
+            requesterName: params.provider_info,
+          });
+          return recordsRequestEscalationResult(verdict.directive);
+        }
         // A REFUSED ESCALATION FILES THE TICKET — see the rules above
         // CATEGORY_TO_REQUEST_TYPE. The directive alone was a sentence the
         // model could ignore, and on 3 of 9 refusals in fourteen days it did.

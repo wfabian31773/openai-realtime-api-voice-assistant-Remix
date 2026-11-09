@@ -73,7 +73,8 @@ export type EscalationVerdict =
         | 'administrative_request'
         | 'symptoms_not_stated_by_caller'
         | 'post_op_medication'
-        | 'provider_not_stated_by_caller';
+        | 'provider_not_stated_by_caller'
+        | 'records_request';
       directive: string;
     };
 
@@ -168,6 +169,20 @@ const SYMPTOM_PATTERN =
   /\b(pain|painful|hurt|hurts|hurting|ache|aching|sore|red|redness|swollen|swelling|vision|blur|blurry|blurred|see|seeing|sight|light|flash|flashes|floater|floaters|curtain|shadow|discharge|pus|bleed|bleeding|blood|pressure|itch|itchy|burning|watering|nausea|vomit|fever|dolor|duele|rojo|roja|hinchad\w*|vision|borros\w*|sangr\w*|veo|ver)\b/;
 
 const norm = (s?: string) => ` ${(s ?? '').toLowerCase().replace(/\s+/g, ' ')} `;
+
+/**
+ * A MEDICAL RECORDS REQUEST. Operator ruling, 2026-11-09: "records requests
+ * never ring the on-call." Whoever is asking — a provider's office, a hospital,
+ * a health plan, the patient — a request for records is a message for Medical
+ * Records on the next business day, never a page.
+ *
+ * Read from the model's own sentence (reason, symptoms, provider info), the
+ * same text every other check here reads. Plural "records" and named document
+ * phrases only: the singular "record" is in "calling on a recorded line",
+ * which labs say on every call, and a lab reporting results is still case 1.
+ */
+export const RECORDS_REQUEST =
+  /\b(medical records?|records? requests?|request(?:ing|s|ed)? (?:the |her |his |their |a |any )?(?:patient'?s? )?records|(?:patient'?s?|her|his|their|the|my|your|any|some) (?:medical )?(?:records|chart)|chart notes|office notes|visit notes|clinic notes|copy of (?:the |her |his |their |my )?(?:records|chart))\b/;
 const hits = (haystack: string, needles: string[]) => needles.some((n) => haystack.includes(n));
 
 /**
@@ -192,6 +207,33 @@ export function describesAcuteEvent(raw: string): boolean {
 export function judgeEscalation(req: EscalationRequest): EscalationVerdict {
   const text = norm([req.reason, req.symptomsSummary, req.providerInfo].filter(Boolean).join(' . '));
   const callerType = (req.callerType ?? '').toLowerCase();
+
+  /**
+   * RECORDS REQUESTS NEVER RING (operator, 2026-11-09). Checked FIRST, ahead
+   * of the provider case: on 2026-11-07 a provider's office asking for a
+   * patient's records was case 1 here and rang the on-call phone twice in four
+   * minutes (CAbccc433f0627622f50d32ff4abd7cec8, 47 s, declined;
+   * CAe8f5c1f0daedc324c21dc244dce7832d, 24 s, no answer).
+   *
+   * The one thing that still rings is an eye emergency the CALLER described in
+   * their own words (`acuteStated`) — that call is case 3 on its own, and the
+   * records it also mentions are not why it rings.
+   */
+  if (RECORDS_REQUEST.test(text) && !req.corroboration?.acuteStated) {
+    return {
+      allowed: false,
+      code: 'records_request',
+      directive:
+        'A medical records request is never a transfer on this line, whoever is asking. Do not call ' +
+        'escalate_to_human for it again. Take it as a message for Medical Records. If the caller is asking for ' +
+        "someone else's records (a doctor's office, hospital, health plan, attorney or family member), ask " +
+        'their name and the office or organization first, then ONE question at a time: the PATIENT\'s first and ' +
+        'last name, then the patient\'s date of birth starting with the month, then the day, then the year — ' +
+        'never the caller\'s own — then where the records should be sent. Then call create_ticket with ' +
+        'request_category medical_records_request, records_requester and requester_name, and tell the caller ' +
+        'Medical Records will follow up on the next business day.',
+    };
+  }
 
   /**
    * CASE 1 + 2 — a provider's office or a hospital. Highest precedence, BUT
