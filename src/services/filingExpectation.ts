@@ -28,7 +28,7 @@ import OpenAI from "openai";
 
 export const FILING_EXPECTATION_MODEL = "gpt-4o-mini";
 /** Bump when the instructions or the schema change; stored on every row. */
-export const FILING_EXPECTATION_PROMPT_VERSION = "fq-1-20261109";
+export const FILING_EXPECTATION_PROMPT_VERSION = "fq-2-20261109";
 /** A backfill read, not a caller waiting: bounded, never retried in place. */
 export const FILING_EXPECTATION_TIMEOUT_MS = 15_000;
 
@@ -121,7 +121,7 @@ export const FILING_EXPECTATION_INSTRUCTIONS =
   "callback_number is the ten-digit number to call back, only when the caller said it or confirmed it; " +
   "callback_is_caller_id is true when the caller confirmed the number the agent read back as the one they are calling from. " +
   "email is an email address the caller gave. office_named is an Azul Vision office or city the caller named for this request. " +
-  "provider_named is a doctor or surgeon the caller named. medication_named is a medication the caller named. " +
+  "provider_named is an Azul Vision doctor or surgeon the caller named as the patient's doctor for this request, not a doctor or office the caller is calling from or on behalf of. medication_named is a medication the caller named. " +
   "records_delivery is how the caller asked records to be sent (fax, email, mail, portal or pickup). " +
   "contact_preference is how the caller asked to be contacted (phone, text or email). " +
   "request_summary is one short line saying what the caller needs, without names, dates of birth or phone numbers.";

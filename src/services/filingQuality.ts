@@ -61,6 +61,12 @@ export interface TicketRow {
   pcp_caller_callback_number: string | null;
   pcp_caller_email: string | null;
   merged: boolean | null;
+  /**
+   * The ticket was withdrawn by the PCP hang-up rule (v100, archived with that
+   * rule's reason). A withdrawn ticket is no filing: the call reads as the
+   * ruling, not as a filing.
+   */
+  withdrawn?: boolean | null;
   created_at: string | null;
 }
 
@@ -70,6 +76,12 @@ export interface ExpectationRow {
   agent_used: string | null;
   call_started_at: string | null;
   runtime_outcome: string | null;
+  /**
+   * `call_logs.ticket_number`: the ticket THIS call filed, by the write-back.
+   * A ticket's own call_sid can be a later call's (the app folds a callback
+   * onto the open ticket and re-stamps it), so tickets are matched on this too.
+   */
+  ticket_number?: string | null;
   expectation: FilingExpectation | null;
   skipped_reason: string | null;
 }
@@ -115,30 +127,47 @@ export interface FilingComparison {
   clean: boolean;
 }
 
+/** A PCP records request from these callers is routed to Medical Records (v15/v16). */
+const PCP_RECORDS_ROUTED = new Set(["patient", "family_or_personal_representative", "provider_office_or_facility", "health_plan", "attorney_or_legal"]);
+/** A professional caller on PCP: their requests stay in PCP Support. */
+const PCP_PROFESSIONALS = new Set(["provider_office_or_facility", "health_plan", "pharmacy", "attorney_or_legal", "other_business"]);
+
 /**
  * The department the rulings send this request to, or null when there is no
- * recorded ruling for it on this line. Encodes only:
- *   - records go to Medical Records from every line (2026-09-12/14 rulings, v15/v16, v73);
- *   - PCP: records 16, scheduling the HVA Hub (v17), everything else PCP Support,
- *     a surgery date included (the surgery exception keeps it in 18);
+ * recorded ruling for it on this line, or when the code makes a judgement the
+ * transcript cannot see. Encodes only:
+ *   - records go to Medical Records from every line (2026-09-12/14 rulings,
+ *     v15/v16, v73; after hours v190, operator 2026-11-09). On PCP only for a
+ *     patient, family, provider, plan or attorney: a pharmaceutical rep or a
+ *     professional the agent cannot identify stays in PCP Support by design (v16);
+ *   - PCP: scheduling goes to the HVA Hub (v17); a professional's other requests
+ *     stay in PCP Support; a PATIENT's request is routed by topic like a queue
+ *     call (glasses to Optical), and anything else from a patient has no rule;
  *   - glasses, contacts and optical orders go to Optical on every line, after hours too (v161);
- *   - scheduling goes to the HVA Hub from every queue, except a surgery date
- *     (standing instruction 10); after hours a same-day request goes to After
- *     Hours (v89) and the topic cannot say which, so after-hours scheduling has no rule;
+ *   - after hours: an urgent symptom's record is After Hours (v88, v93). Nothing
+ *     else after hours has a rule here: a same-day request of any topic goes to
+ *     After Hours (v89) and the transcript cannot say the call was same-day;
  *   - surgery coordination goes to Surgery Coordination;
- *   - after hours, an urgent symptom is the on-call's and its record is After Hours (v88, v93).
+ *   - scheduling goes to the HVA Hub from every queue (standing instruction 10).
  */
-export function expectedDepartment(topic: Topic, lane: string, urgent: boolean): number | null {
+export function expectedDepartment(topic: Topic, lane: string, urgent: boolean, callerRole?: string): number | null {
   const afterHours = AFTER_HOURS_LANES.has(lane);
-  if (topic === "records") return DEPARTMENTS.medicalRecords;
   if (lane === "pcp") {
+    if (topic === "records") return callerRole && PCP_RECORDS_ROUTED.has(callerRole) ? DEPARTMENTS.medicalRecords : null;
     if (topic === "scheduling_new_or_change_or_cancel_or_confirm") return DEPARTMENTS.hvaHub;
-    return DEPARTMENTS.pcpSupport;
+    if (callerRole && PCP_PROFESSIONALS.has(callerRole)) return DEPARTMENTS.pcpSupport;
+    if (callerRole === "patient" || callerRole === "family_or_personal_representative") {
+      return topic === "optical_order_or_glasses_or_contacts" ? DEPARTMENTS.optical : null;
+    }
+    return null;
   }
+  if (topic === "records") return DEPARTMENTS.medicalRecords;
   if (topic === "optical_order_or_glasses_or_contacts") return DEPARTMENTS.optical;
+  if (afterHours) {
+    return urgent && (topic === "clinical_question_or_symptom" || topic === "medication_or_refill") ? DEPARTMENTS.afterHours : null;
+  }
   if (topic === "surgery_date_or_surgery_coordination") return DEPARTMENTS.surgery;
-  if (topic === "scheduling_new_or_change_or_cancel_or_confirm") return afterHours ? null : QUEUE_LANES.has(lane) ? DEPARTMENTS.hvaHub : null;
-  if (afterHours && urgent && (topic === "clinical_question_or_symptom" || topic === "medication_or_refill")) return DEPARTMENTS.afterHours;
+  if (topic === "scheduling_new_or_change_or_cancel_or_confirm") return QUEUE_LANES.has(lane) ? DEPARTMENTS.hvaHub : null;
   return null;
 }
 
@@ -285,14 +314,18 @@ export function compareRecordsRequester(e: FilingExpectation, t: TicketRow): "co
 
 function requesterVerdict(e: FilingExpectation, t: TicketRow, lane: string): FieldVerdict | null {
   if (!NOT_THE_PATIENT.has(e.callerRole) && e.callerRole !== "family_or_personal_representative") return null;
-  // A structured requester field exists only on PCP and on records tickets.
-  const filed =
-    lane === "pcp"
-      ? t.pcp_caller_name || t.pcp_caller_organization
-      : e.topic === "records"
-        ? t.records_requestor_name
-        : undefined;
-  if (filed === undefined) return null;
+  // A structured requester field exists only on a records ticket and on a PCP
+  // Support ticket. A PCP request routed elsewhere (a scheduling request to the
+  // HVA Hub) carries the requester only in its description: not checked.
+  const dept = t.filed_department_id ?? t.department_id;
+  let filed: string | null;
+  if (dept === DEPARTMENTS.medicalRecords || e.topic === "records") {
+    filed = t.records_requestor_name || (lane === "pcp" ? t.pcp_caller_name || t.pcp_caller_organization : null) || null;
+  } else if (lane === "pcp" && dept === DEPARTMENTS.pcpSupport) {
+    filed = t.pcp_caller_name || t.pcp_caller_organization || null;
+  } else {
+    return null;
+  }
   const said = e.requesterName || e.requesterOrganization;
   if (!said) return filed ? "beyond_transcript" : null;
   return filed ? "match" : "missing";
@@ -309,8 +342,22 @@ function fieldsFor(e: FilingExpectation, t: TicketRow, lane: string): Partial<Re
   put("callback_number", comparePhone(e.callbackNumber, lane === "pcp" ? t.pcp_caller_callback_number || t.patient_phone : t.patient_phone));
   put("email", compareEmail(e.email, lane === "pcp" ? t.pcp_caller_email || t.patient_email : t.patient_email));
   put("office", comparePresence(e.officeNamed, t.location_id));
-  put("provider", comparePresence(e.providerNamed, t.provider_id));
+  // A provider id is the routing contract on Surgery only. Elsewhere a doctor
+  // the caller names is often not ours (an office calling on a doctor's
+  // behalf), so a ticket without one is not charged.
+  const provider = comparePresence(e.providerNamed, t.provider_id);
+  put("provider", lane === "surgery" || provider !== "missing" ? provider : null);
   put("requester", requesterVerdict(e, t, lane));
+  // One person charted twice (v179): the caller may say one chart's surname
+  // while the ticket carries the other's. With the first name and the date of
+  // birth agreeing, another surname is read as a spelling, not a wrong patient.
+  if (
+    out.patient_last_name === "differs" &&
+    (out.patient_first_name === "match" || out.patient_first_name === "variant") &&
+    out.patient_dob === "match"
+  ) {
+    out.patient_last_name = "variant";
+  }
   return out;
 }
 
@@ -353,7 +400,7 @@ export function compareFiling(row: ExpectationRow, tickets: TicketRow[]): Filing
   };
   const e = row.expectation;
   if (!e) return base;
-  base.expectedDepartment = expectedDepartment(e.topic, lane, e.urgent);
+  base.expectedDepartment = expectedDepartment(e.topic, lane, e.urgent, e.callerRole);
   if (tickets.length === 0) {
     base.verdict = e.shouldFile ? (noTicketByRuling(lane, row.runtime_outcome) ? "no_ticket_by_ruling" : "missed_filing") : "correctly_not_filed";
     base.clean = !e.shouldFile || base.verdict === "no_ticket_by_ruling";
@@ -368,7 +415,12 @@ export function compareFiling(row: ExpectationRow, tickets: TicketRow[]): Filing
   base.fields = judged.fields;
   base.filedDepartment = t.filed_department_id ?? t.department_id;
   base.movedByStaff = t.filed_department_id !== null && t.department_id !== null && t.filed_department_id !== t.department_id;
-  base.department = base.expectedDepartment === null ? "no_rule" : base.filedDepartment === base.expectedDepartment ? "match" : "mismatch";
+  // Where it went is a property of the call: a request ticket beside its
+  // urgent ring-out record (v93/v95) is routed right when either is where the
+  // ruling sends it.
+  const inExpected = tickets.find((x) => (x.filed_department_id ?? x.department_id) === base.expectedDepartment);
+  base.department = base.expectedDepartment === null ? "no_rule" : inExpected ? "match" : "mismatch";
+  if (inExpected) base.filedDepartment = inExpected.filed_department_id ?? inExpected.department_id;
   base.recordsRequester = compareRecordsRequester(e, t);
   base.urgencyMissed = e.urgent && !tickets.some((x) => x.priority === "urgent" || x.priority === "high");
   base.clean =

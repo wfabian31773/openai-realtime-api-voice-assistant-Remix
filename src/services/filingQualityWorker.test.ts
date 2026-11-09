@@ -94,7 +94,7 @@ describe("one cycle", () => {
     expect(inserted[0]).toMatchObject({ callSid: sid(1), expectation: null, skipped: "no_usable_answer" });
   });
 
-  it("a failure is retried next cycle, then left alone after three tries", async () => {
+  it("a failure is retried next cycle, then stored as given up after three tries", async () => {
     const { store, inserted, skips } = fakeStore([candidate(1)]);
     const attempts = new Map<string, number>();
     const ask = vi.fn().mockRejectedValue(Object.assign(new Error("x"), { status: 503 }));
@@ -102,11 +102,24 @@ describe("one cycle", () => {
       const r = await runFilingQualityCycle({ store, lock: fakeLock(), ask, log: quietLog(), attempts });
       expect(r.failed).toBe(1);
     }
-    expect(attempts.get(sid(1))).toBe(FILING_QUALITY_MAX_ATTEMPTS);
+    // The third failure stores the give-up row, so the count is no longer needed.
+    expect(attempts.has(sid(1))).toBe(false);
     const after = await runFilingQualityCycle({ store, lock: fakeLock(), ask, log: quietLog(), attempts });
     expect(after.read).toBe(0);
-    expect(skips[skips.length - 1]).toEqual([sid(1)]);
-    expect(inserted).toHaveLength(0);
+    // Given up: stored as skipped so the Daybook counts it as unreadable,
+    // never a call that silently leaves the denominator (review of #440).
+    expect(inserted).toHaveLength(1);
+    expect(inserted[0]).toMatchObject({ callSid: sid(1), expectation: null, skipped: "model_failed:http_503" });
+    expect(skips.length).toBeGreaterThan(0);
+  });
+
+  it("a call nobody spoke on is stored as skipped without asking the model", async () => {
+    const { store, inserted } = fakeStore([{ ...candidate(2), transcript: "AGENT: Hello? Is anyone there?" }]);
+    const ask = vi.fn();
+    const r = await runFilingQualityCycle({ store, lock: fakeLock(), ask, log: quietLog(), attempts: new Map() });
+    expect(ask).not.toHaveBeenCalled();
+    expect(r.skipped).toBe(1);
+    expect(inserted[0]).toMatchObject({ callSid: sid(2), expectation: null, skipped: "no_caller_line" });
   });
 
   it("logs a failure by call SID and kind only, never what the caller said", async () => {
@@ -175,7 +188,9 @@ describe("the switch", () => {
 describe("the SQL, pinned", () => {
   it("selects substantive, finished, real calls with no expectation yet, newest first", () => {
     expect(CANDIDATES_SQL).toContain("c.duration >= 30");
-    expect(CANDIDATES_SQL).toContain("c.transcript LIKE '%CALLER:%'");
+    // No transcript filter: it ran before the anti-join and re-read every
+    // transcript in the window each cycle; the worker skips a silent call itself.
+    expect(CANDIDATES_SQL).not.toContain("LIKE '%CALLER:%'");
     expect(CANDIDATES_SQL).toContain("c.call_sid ~* '^CA[0-9a-f]{32}$'");
     expect(CANDIDATES_SQL).toContain("<> 'wayne-operator'");
     expect(CANDIDATES_SQL).toMatch(/"from", ''\) NOT LIKE \('%' \|\| \$3::text\)/);

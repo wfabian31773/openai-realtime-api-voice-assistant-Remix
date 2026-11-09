@@ -16,7 +16,7 @@
  * have filed, read from its transcript by the v191 worker.
  * ---------------------------------------------------------------------------
  *   SELECT f.call_sid, f.agent_used, f.call_started_at, c.runtime_outcome,
- *          f.expectation, f.skipped_reason
+ *          c.ticket_number, f.expectation, f.skipped_reason
  *   FROM filing_expectations f
  *   LEFT JOIN call_logs c ON c.call_sid = f.call_sid
  *   WHERE f.call_started_at >= '<from>'::timestamptz
@@ -51,7 +51,9 @@
  *          t.patient_phone, t.patient_email,
  *          t.records_requestor_type, t.records_request_pathway, t.records_requestor_name,
  *          t.pcp_caller_name, t.pcp_caller_organization, t.pcp_caller_callback_number, t.pcp_caller_email,
- *          (t.merged_into_id IS NOT NULL) AS merged, t.created_at
+ *          (t.merged_into_id IS NOT NULL) AS merged,
+ *          coalesce(t.archive_reason LIKE 'Operator ruling 2026-10-19:%', false) AS withdrawn,
+ *          t.created_at
  *   FROM tickets t
  *   WHERE t.call_sid ~* '^CA[0-9a-f]{32}$'
  *     AND t.created_by_id IS NULL AND t.agent_used IS NOT NULL
@@ -87,14 +89,27 @@ function asObject(v: unknown): ExpectationRow["expectation"] {
 
 export function run(expectationsPath: string, ticketsPath: string, window?: { from?: string; to?: string }) {
   const expectations = load<ExpectationRow>(expectationsPath).map((r) => ({ ...r, expectation: asObject(r.expectation) }));
-  const tickets = load<TicketRow>(ticketsPath);
+  // A ticket the PCP hang-up rule withdrew (v100) is no filing.
+  const tickets = load<TicketRow>(ticketsPath).filter((t) => !t.withdrawn);
   const byCall = new Map<string, TicketRow[]>();
+  const byNumber = new Map<string, TicketRow>();
   for (const t of tickets) {
     const key = (t.call_sid ?? "").trim();
-    if (!key) continue;
-    (byCall.get(key) ?? byCall.set(key, []).get(key)!).push(t);
+    if (key) (byCall.get(key) ?? byCall.set(key, []).get(key)!).push(t);
+    if (t.ticket_number) byNumber.set(t.ticket_number.trim(), t);
   }
-  const comparisons = expectations.map((row) => compareFiling(row, byCall.get(row.call_sid) ?? []));
+  // A ticket's call_sid can be a later call's (the app folds a callback onto
+  // the open ticket and re-stamps it), so a call also owns the ticket its own
+  // write-back names.
+  const ticketsFor = (row: ExpectationRow): TicketRow[] => {
+    const own = [...(byCall.get(row.call_sid) ?? [])];
+    const written = row.ticket_number ? byNumber.get(row.ticket_number.trim()) : undefined;
+    if (written && !own.includes(written)) own.push(written);
+    return own;
+  };
+  // A call nobody spoke on is not a filing question at all (ruling-correct).
+  const heard = expectations.filter((row) => row.skipped_reason !== "no_caller_line");
+  const comparisons = heard.map((row) => compareFiling(row, ticketsFor(row)));
   return {
     window: window ?? null,
     promptVersion: FILING_EXPECTATION_PROMPT_VERSION,

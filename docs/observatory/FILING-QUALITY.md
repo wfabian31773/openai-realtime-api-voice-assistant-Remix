@@ -42,7 +42,7 @@ us what should have been filed and what fields should have been populated."
 
 ```sql
 SELECT f.call_sid, f.agent_used, f.call_started_at, c.runtime_outcome,
-       f.expectation, f.skipped_reason
+       c.ticket_number, f.expectation, f.skipped_reason
 FROM filing_expectations f
 LEFT JOIN call_logs c ON c.call_sid = f.call_sid
 WHERE f.call_started_at >= '<from>'::timestamptz
@@ -69,7 +69,9 @@ SELECT t.call_sid, t.ticket_number,
        t.patient_phone, t.patient_email,
        t.records_requestor_type, t.records_request_pathway, t.records_requestor_name,
        t.pcp_caller_name, t.pcp_caller_organization, t.pcp_caller_callback_number, t.pcp_caller_email,
-       (t.merged_into_id IS NOT NULL) AS merged, t.created_at
+       (t.merged_into_id IS NOT NULL) AS merged,
+       coalesce(t.archive_reason LIKE 'Operator ruling 2026-10-19:%', false) AS withdrawn,
+       t.created_at
 FROM tickets t
 WHERE t.call_sid ~* '^CA[0-9a-f]{32}$'
   AND t.created_by_id IS NULL AND t.agent_used IS NOT NULL

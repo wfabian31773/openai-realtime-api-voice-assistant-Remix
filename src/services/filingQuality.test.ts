@@ -111,15 +111,30 @@ describe("where it went", () => {
   it("encodes only recorded rulings", () => {
     expect(expectedDepartment("records", "no-ivr", false)).toBe(DEPARTMENTS.medicalRecords);
     expect(expectedDepartment("records", "tech", false)).toBe(DEPARTMENTS.medicalRecords);
-    expect(expectedDepartment("records", "pcp", false)).toBe(DEPARTMENTS.medicalRecords);
-    expect(expectedDepartment("scheduling_new_or_change_or_cancel_or_confirm", "pcp", false)).toBe(DEPARTMENTS.hvaHub);
-    expect(expectedDepartment("surgery_date_or_surgery_coordination", "pcp", false)).toBe(DEPARTMENTS.pcpSupport);
-    expect(expectedDepartment("billing", "pcp", false)).toBe(DEPARTMENTS.pcpSupport);
+    // PCP records: Medical Records for a patient, family, provider, plan or
+    // attorney; a pharmaceutical rep or an unidentified professional stays in
+    // PCP Support by design (v16), so no rule.
+    expect(expectedDepartment("records", "pcp", false, "provider_office_or_facility")).toBe(DEPARTMENTS.medicalRecords);
+    expect(expectedDepartment("records", "pcp", false, "patient")).toBe(DEPARTMENTS.medicalRecords);
+    expect(expectedDepartment("records", "pcp", false, "pharmacy")).toBeNull();
+    expect(expectedDepartment("records", "pcp", false, "unknown")).toBeNull();
+    expect(expectedDepartment("scheduling_new_or_change_or_cancel_or_confirm", "pcp", false, "provider_office_or_facility")).toBe(DEPARTMENTS.hvaHub);
+    // A professional's other requests stay in PCP Support.
+    expect(expectedDepartment("surgery_date_or_surgery_coordination", "pcp", false, "provider_office_or_facility")).toBe(DEPARTMENTS.pcpSupport);
+    expect(expectedDepartment("billing", "pcp", false, "health_plan")).toBe(DEPARTMENTS.pcpSupport);
+    // A PATIENT on PCP is routed by topic like a queue call (detectCrossQueue):
+    // glasses to Optical; anything else is the router's judgement, no rule.
+    expect(expectedDepartment("optical_order_or_glasses_or_contacts", "pcp", false, "patient")).toBe(DEPARTMENTS.optical);
+    expect(expectedDepartment("medication_or_refill", "pcp", false, "patient")).toBeNull();
+    expect(expectedDepartment("surgery_date_or_surgery_coordination", "pcp", false, "patient")).toBeNull();
     expect(expectedDepartment("optical_order_or_glasses_or_contacts", "no-ivr", false)).toBe(DEPARTMENTS.optical);
     expect(expectedDepartment("optical_order_or_glasses_or_contacts", "tech", false)).toBe(DEPARTMENTS.optical);
     expect(expectedDepartment("scheduling_new_or_change_or_cancel_or_confirm", "tech", false)).toBe(DEPARTMENTS.hvaHub);
     expect(expectedDepartment("scheduling_new_or_change_or_cancel_or_confirm", "no-ivr", false)).toBeNull();
     expect(expectedDepartment("surgery_date_or_surgery_coordination", "optical", false)).toBe(DEPARTMENTS.surgery);
+    // After hours a same-day request of any topic goes to After Hours (v89), and
+    // the transcript cannot say the call was same-day: no surgery rule there.
+    expect(expectedDepartment("surgery_date_or_surgery_coordination", "no-ivr", false)).toBeNull();
     expect(expectedDepartment("clinical_question_or_symptom", "no-ivr", true)).toBe(DEPARTMENTS.afterHours);
     expect(expectedDepartment("clinical_question_or_symptom", "no-ivr", false)).toBeNull();
     expect(expectedDepartment("medication_or_refill", "tech", false)).toBeNull();
@@ -296,5 +311,64 @@ describe("the summary", () => {
   it("splits by lane", () => {
     expect(s.lanes.tech.callsRead).toBe(5);
     expect(s.lanes.tech.missedFiling).toBe(1);
+  });
+});
+
+describe("review of #440: correct filings are not charged", () => {
+  it("a PCP patient's glasses request in Optical matches; a refill in Tech is no rule", () => {
+    const glasses = compareFiling(row(expectation({ topic: "optical_order_or_glasses_or_contacts" }), { agent_used: "pcp" }), [ticket({ filed_department_id: DEPARTMENTS.optical, department_id: DEPARTMENTS.optical })]);
+    expect(glasses.department).toBe("match");
+    const refill = compareFiling(row(expectation(), { agent_used: "pcp" }), [ticket({ filed_department_id: DEPARTMENTS.tech, department_id: DEPARTMENTS.tech })]);
+    expect(refill.department).toBe("no_rule");
+  });
+
+  it("a PCP professional's records request carries its requester on the records ticket", () => {
+    const e = expectation({ topic: "records", callerRole: "provider_office_or_facility", requesterName: "Pat Example", requesterOrganization: "Example Clinic" });
+    const c = compareFiling(row(e, { agent_used: "pcp" }), [ticket({
+      filed_department_id: DEPARTMENTS.medicalRecords, department_id: DEPARTMENTS.medicalRecords,
+      records_requestor_type: "provider", records_request_pathway: "third_party_treatment", records_requestor_name: "Example Clinic",
+    })]);
+    expect(c.fields.requester).toBe("match");
+    expect(c.recordsRequester).toBe("correct");
+    expect(c.clean).toBe(true);
+  });
+
+  it("a PCP scheduling request in the HVA Hub is not checked for a requester column it cannot have", () => {
+    const e = expectation({ topic: "scheduling_new_or_change_or_cancel_or_confirm", callerRole: "provider_office_or_facility", requesterName: "Pat Example" });
+    const c = compareFiling(row(e, { agent_used: "pcp" }), [ticket({ filed_department_id: DEPARTMENTS.hvaHub, department_id: DEPARTMENTS.hvaHub })]);
+    expect(c.fields.requester).toBeUndefined();
+    expect(c.department).toBe("match");
+  });
+
+  it("a doctor the caller names is charged as missing on Surgery only", () => {
+    const e = expectation({ providerNamed: "Dr. Example" });
+    expect(compareFiling(row(e, { agent_used: "pcp" }), [ticket({ filed_department_id: 18, department_id: 18 })]).fields.provider).toBeUndefined();
+    expect(compareFiling(row(e, { agent_used: "tech" }), [ticket()]).fields.provider).toBeUndefined();
+    expect(compareFiling(row(e, { agent_used: "surgery" }), [ticket({ filed_department_id: 2, department_id: 2 })]).fields.provider).toBe("missing");
+    expect(compareFiling(row(e, { agent_used: "tech" }), [ticket({ provider_id: 7 })]).fields.provider).toBe("match");
+  });
+
+  it("an after-hours surgery-day request filed in After Hours is not a mismatch", () => {
+    const e = expectation({ topic: "surgery_date_or_surgery_coordination" });
+    const c = compareFiling(row(e, { agent_used: "no-ivr" }), [ticket({ filed_department_id: DEPARTMENTS.afterHours, department_id: DEPARTMENTS.afterHours })]);
+    expect(c.department).toBe("no_rule");
+  });
+
+  it("an urgent symptom whose ring-out record is in After Hours matches, beside a request ticket elsewhere", () => {
+    const e = expectation({ topic: "clinical_question_or_symptom", urgent: true });
+    const request = ticket({ ticket_number: "VA-1", filed_department_id: DEPARTMENTS.tech, department_id: DEPARTMENTS.tech, priority: "medium" });
+    const record = ticket({ ticket_number: "VA-2", filed_department_id: DEPARTMENTS.afterHours, department_id: DEPARTMENTS.afterHours, priority: "urgent", patient_first_name: "Unnamed", patient_last_name: "Caller", created_at: "2026-11-09T17:05:00Z" });
+    const c = compareFiling(row(e, { agent_used: "no-ivr" }), [request, record]);
+    expect(c.department).toBe("match");
+    expect(c.filedDepartment).toBe(DEPARTMENTS.afterHours);
+    expect(c.urgencyMissed).toBe(false);
+  });
+
+  it("one person charted twice: another surname with the first name and date of birth agreeing is a spelling", () => {
+    const c = compareFiling(row(expectation({ patientLastName: "Maidenname" })), [ticket({ patient_last_name: "Marriedname" })]);
+    expect(c.fields.patient_last_name).toBe("variant");
+    expect(c.clean).toBe(true);
+    const wrongPerson = compareFiling(row(expectation({ patientLastName: "Maidenname", patientDob: "1960-02-02" })), [ticket({ patient_last_name: "Marriedname" })]);
+    expect(wrongPerson.fields.patient_last_name).toBe("differs");
   });
 });

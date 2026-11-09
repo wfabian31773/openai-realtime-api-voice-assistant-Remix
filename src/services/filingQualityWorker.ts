@@ -75,7 +75,13 @@ export const ENSURE_INDEX_SQL = `
   CREATE INDEX IF NOT EXISTS idx_filing_expectations_started ON filing_expectations (call_started_at)`;
 
 /**
- * Substantive, finished, real calls with no expectation yet. `created_at` is
+ * Substantive, finished, real calls with no expectation yet. No transcript
+ * filter here: a call with no caller line is stored as skipped
+ * (`no_caller_line`) by the worker without asking the model, so once the
+ * window is caught up this walks the created_at index and probes the primary
+ * key, and never reads a transcript it has already judged (review of #440:
+ * a LIKE on the transcript ran before the anti-join and re-read every
+ * transcript in the window each cycle). `created_at` is
  * a timestamp without time zone holding UTC, so NOW() is read in UTC. The
  * created_at range uses idx_call_logs_created (checked with EXPLAIN on the
  * Hub, 2026-11-09).
@@ -87,7 +93,6 @@ export const CANDIDATES_SQL = `
     AND coalesce(c.end_time, c.created_at) <= (NOW() AT TIME ZONE 'UTC') - INTERVAL '2 minutes'
     AND c.duration >= 30
     AND c.call_sid ~* '^CA[0-9a-f]{32}$'
-    AND c.transcript LIKE '%CALLER:%'
     AND coalesce(c.agent_used, '') <> 'wayne-operator'
     AND coalesce(c."from", '') NOT LIKE ('%' || $3::text)
     AND coalesce(c."to", '') NOT LIKE ('%' || $3::text)
@@ -213,6 +218,17 @@ export async function runFilingQualityCycle(deps: CycleDeps): Promise<CycleResul
     const rows = await deps.store.candidates(FILING_QUALITY_BATCH, givenUp);
     result.read = rows.length;
     await inPool(rows, FILING_QUALITY_CONCURRENCY, async (row) => {
+      if (!row.transcript || !row.transcript.includes("CALLER:")) {
+        // Never heard: nothing for the model to read, and no request to file.
+        try {
+          await deps.store.insert({ callSid: row.callSid, agentUsed: row.agentUsed, startedAt: row.startedAt, expectation: null, skipped: "no_caller_line" });
+          result.skipped++;
+        } catch (err) {
+          result.failed++;
+          log.warn(`[FILING QUALITY] ${row.callSid}: not stored (${failureKind(err)})`);
+        }
+        return;
+      }
       try {
         const expectation = await extractFilingExpectation(
           { transcript: row.transcript, lane: row.agentUsed, callStartedAt: row.startedAt },
@@ -235,6 +251,16 @@ export async function runFilingQualityCycle(deps: CycleDeps): Promise<CycleResul
         const n = (attempts.get(row.callSid) ?? 0) + 1;
         attempts.set(row.callSid, n);
         log.warn(`[FILING QUALITY] ${row.callSid}: not read (${failureKind(err)}), attempt ${n} of ${FILING_QUALITY_MAX_ATTEMPTS}`);
+        // Given up: stored as skipped so the Daybook counts it as unreadable
+        // rather than the call silently leaving the denominator (review of #440).
+        if (n >= FILING_QUALITY_MAX_ATTEMPTS) {
+          try {
+            await deps.store.insert({ callSid: row.callSid, agentUsed: row.agentUsed, startedAt: row.startedAt, expectation: null, skipped: `model_failed:${failureKind(err)}` });
+            attempts.delete(row.callSid);
+          } catch {
+            // Left in the per-process skip list; the next process tries again.
+          }
+        }
       }
     });
     if (result.read > 0) {
