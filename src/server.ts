@@ -201,6 +201,13 @@ async function startVoiceServer() {
       TicketOutboxService.startWorker();
     }).catch(err => console.error('[STARTUP] Failed to start ticket outbox worker:', err));
     
+    // v191: write down, from each call's transcript alone, the ticket it called
+    // for, so the Daybook can measure what was filed against it. One table it
+    // owns; off without OPENAI_API_KEY or with FILING_QUALITY_DISABLED=1.
+    import('./services/filingQualityWorker').then(({ startFilingQualityWorker }) => {
+      startFilingQualityWorker();
+    }).catch(err => console.error('[STARTUP] Failed to start filing quality worker:', err));
+
     // Start daily OpenAI cost reconciliation scheduler
     dailyOpenaiReconciliation.startDailySchedule();
     
