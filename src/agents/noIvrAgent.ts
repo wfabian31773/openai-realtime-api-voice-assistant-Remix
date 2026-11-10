@@ -1943,8 +1943,8 @@ This does NOT affect the call - it's purely for internal tracking.`,
 This is NOT the callback queue - it creates a ticket that will be processed by staff.
 
 Required: first_name, last_name, date_of_birth (month, day, year), callback_number (10+ digits),
-request_summary. When lookup_schedule confirmed the caller, the record supplies last_name and
-date_of_birth: do not ask for them.
+request_summary. When lookup_schedule returns identity_on_record, the record supplies last_name
+and date_of_birth: do not ask for them.
 
 The ticket will include schedule context (last appointment info) automatically.`,
     parameters: z.object({

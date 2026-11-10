@@ -196,13 +196,13 @@ describe('the prompt and the tool no longer tell the model to collect what the r
     const agent: any = await agentFor('CA0000000000000000000000000000f194');
     const desc = agent.tools.find((t: any) => t.name === 'create_ticket').description as string;
     expect(desc).not.toMatch(/collected ALL required fields/);
-    expect(desc).toMatch(/When lookup_schedule confirmed the caller, the record supplies last_name and\s+date_of_birth: do not ask for them\./);
+    expect(desc).toMatch(/When lookup_schedule returns identity_on_record, the record supplies last_name\s+and date_of_birth: do not ask for them\./);
   });
 
   it('the runtime body says a confirmed lookup holds both, and to omit a held date of birth from the summary', async () => {
     const agent: any = await agentFor('CA0000000000000000000000000000f195');
     const prompt = String(agent.instructions);
-    expect(prompt).toMatch(/a confirmed lookup_schedule holds last name and DOB: ask neither/);
+    expect(prompt).toMatch(/identity_on_record: record holds last name and DOB; ask neither/);
     expect(prompt).toMatch(/\[reason\]\." Omit a DOB the record holds\./);
     // The ruling the rulings map pins is kept word for word.
     expect(prompt).toMatch(/Use the validated record's DOB and clinic if held/);
