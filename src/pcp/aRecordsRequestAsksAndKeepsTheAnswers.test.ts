@@ -322,4 +322,19 @@ describe('an office is not the patient: the case never opens on the patient\'s c
     expect(p, 'the records library filed it').toBeTruthy();
     expect(p.requestorType).toBe('patient');
   });
+
+  it('a patient who also names a workplace is still the patient', async () => {
+    // The caller said they are the patient; where they work does not make
+    // their own request a third party's.
+    const { agent } = build('CA9161cc5d90836e8e7104daee7d744a5f');
+    await call(agent, 'record_pcp_intake', {
+      callerName: 'Testpatient Example', callerIsThePatient: true, callerOrganization: 'Example Medical Group',
+      patientDob: '1950-01-02', ...FAX,
+    });
+    const filed = await call(agent, RECORDS, { narrative: NARRATIVE });
+    expect(filed.success, JSON.stringify(filed)).not.toBe(false);
+    const p = (ticketing.createTicket.mock.calls as unknown as unknown[][])[0]?.[0] as Record<string, unknown>;
+    expect(p, 'the records library filed it').toBeTruthy();
+    expect(p.requestorType).toBe('patient');
+  });
 });
