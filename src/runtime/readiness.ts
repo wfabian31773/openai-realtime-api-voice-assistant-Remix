@@ -1434,6 +1434,17 @@ import { callEnvironment } from "./callRecord";
  * No migration.
  */
 /**
+ * v196 — BEAUMONT AND FULLERTON ARE OUR OFFICES (2026-11-10). Support Desk:
+ * on 2026-11-09 the records agent told a caller Beaumont "doesn't match any
+ * of our locations" (CA1169700883a2a647582fe0cd44b097ba) after
+ * resolve_location had verified it, because the office list every lane
+ * knows by heart (AZUL_VISION_LOCATIONS) held 31 offices against the
+ * Console's 33 active clinics. Beaumont and Fullerton are added from the
+ * Console's own rows, a missing fax reads "not on file", and a test pins
+ * the Console's active-clinic list one for one. Above main's v195 (#442,
+ * `e190383a`), which it contains. No migration.
+ */
+/**
  * v197 — A PCP RECORDS REQUEST ASKS WHO, WHOSE, HOW AND WHERE (2026-11-10).
  * Operator, on PCP-82755: "what good does it do us if we create a ticket that
  * leads us to more work than had we taken the call ourselves." Of 171 PCP
@@ -1444,8 +1455,8 @@ import { callEnvironment } from "./callRecord";
  * its own argument, and files with the gaps written when an answer does not
  * come. A caller who names where they call from and is not the patient takes
  * the professional records route (2 of 13 patient-clock cases in the window
- * were an office). Above main's v195 (#442, `e190383a`); v196 is #444 on its
- * open branch. No migration.
+ * were an office). Above main's v196 (#444, `fe330544`), which it contains.
+ * No migration.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
   "voice-runtime-v197-a-records-request-asks-who-and-whose-20261110";
