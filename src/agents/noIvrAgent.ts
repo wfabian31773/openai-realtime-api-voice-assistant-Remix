@@ -731,6 +731,16 @@ export const RECORD_HOLDS_THE_IDENTITY_FIX =
   "Only if the request is about someone else, take that patient's name and date of birth. Never read this aloud.";
 
 /**
+ * Whether the confirmed record can actually supply both fields: a last name,
+ * and a date of birth `prepareTicketIdentity` can read. A unique phone match
+ * may carry a chart with no date of birth (Codex on #443); there the result
+ * says nothing, and the model asks for what the record lacks, as before v194.
+ */
+export function recordHoldsTheIdentity(held: { lastName?: string; dateOfBirth?: string } | undefined): boolean {
+  return Boolean(held?.lastName?.trim() && held.dateOfBirth && readDobQuietly(held.dateOfBirth));
+}
+
+/**
  * Whether this lookup carries the caller's YES to the greeting's "Am I
  * speaking with <first name>?" on a number that is one person on file (v172).
  * The greeting named them only when caller ID matched one person with a first
@@ -1795,8 +1805,9 @@ is not an identity. Confirm the name and date of birth, then call again with the
           if (confirmedByGreeting) greetingConfirmed = result;
           return {
             found: true,
-            identity_on_record: true,
-            fix: RECORD_HOLDS_THE_IDENTITY_FIX,
+            ...(recordHoldsTheIdentity(result.patientData)
+              ? { identity_on_record: true, fix: RECORD_HOLDS_THE_IDENTITY_FIX }
+              : {}),
             ...appointmentAccess(result, confirmed, params),
             upcomingAppointments: result.upcomingAppointments,
             pastAppointments: result.pastAppointments.slice(0, 3),

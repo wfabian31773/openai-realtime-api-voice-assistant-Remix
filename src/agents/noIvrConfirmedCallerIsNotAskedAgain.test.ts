@@ -84,7 +84,7 @@ vi.mock('../services/callerMemoryService', () => ({
   callerMemoryService: { getCallerMemory: async () => null, buildContextForPrompt: () => '' },
 }));
 
-const { createNoIvrAgent, RECORD_HOLDS_THE_IDENTITY_FIX } = await import('./noIvrAgent');
+const { createNoIvrAgent, RECORD_HOLDS_THE_IDENTITY_FIX, recordHoldsTheIdentity } = await import('./noIvrAgent');
 const { resetVerifiedIdentities } = await import('../tools/verifiedIdentity');
 
 async function call(agent: any, name: string, args: Record<string, unknown>) {
@@ -160,6 +160,27 @@ describe('the instruction says what it must, and only on a confirmed record', ()
     expect(r.identityUnconfirmed).toBe(true);
     expect(r.identity_on_record).toBeUndefined();
     expect(r.fix).not.toBe(RECORD_HOLDS_THE_IDENTITY_FIX);
+  });
+
+  it('a confirmed chart with no date of birth on file is not said to hold one (Codex on #443)', async () => {
+    const NO_DOB = { firstName: 'Zelda', lastName: 'Quixote', personId: 'p-synthetic' };
+    h.lookupByPhone.mockReset().mockResolvedValue({
+      ...ONE_PERSON_ON_THE_NUMBER,
+      identity: { unique: true, candidateCount: 1, candidates: [{ ...NO_DOB, appointmentCount: 1 }] },
+      patientData: NO_DOB,
+    } as any);
+    const agent = await agentFor('CA0000000000000000000000000000a194');
+    const r = await call(agent, 'lookup_schedule', { first_name: 'Zelda' });
+    expect(r.identity_on_record).toBeUndefined();
+    expect(r.fix).not.toBe(RECORD_HOLDS_THE_IDENTITY_FIX);
+  });
+
+  it('holds the identity only with a last name and a readable date of birth', () => {
+    expect(recordHoldsTheIdentity({ lastName: 'Quixote', dateOfBirth: '1958-01-04' })).toBe(true);
+    expect(recordHoldsTheIdentity({ lastName: 'Quixote' })).toBe(false);
+    expect(recordHoldsTheIdentity({ lastName: 'Quixote', dateOfBirth: 'unknown' })).toBe(false);
+    expect(recordHoldsTheIdentity({ lastName: ' ', dateOfBirth: '1958-01-04' })).toBe(false);
+    expect(recordHoldsTheIdentity(undefined)).toBe(false);
   });
 
   it('a different first name ("no, this is her husband") gets no such instruction', async () => {
