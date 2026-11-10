@@ -714,6 +714,23 @@ export function greetingConfirmedFirstName(
 }
 
 /**
+ * v194: what a CONFIRMED lookup_schedule tells the model, in the model channel.
+ *
+ * v172 made the caller's yes to the greeting confirm the record, and
+ * `prepareTicketIdentity` files the record's last name and date of birth with
+ * no question asked. The confirmed result still said nothing of the kind, while
+ * create_ticket's description said to collect "ALL required fields" first, so
+ * the model asked anyway: on 2026-11-09, 12 of 27 after-hours callers who said
+ * yes were asked their last name or date of birth after a confirmed lookup
+ * (2026-11-05..09: 66 of 149). RULE ZERO step 5: nothing re-asks a field the
+ * record holds.
+ */
+export const RECORD_HOLDS_THE_IDENTITY_FIX =
+  "Confirmed: the record holds this caller's last name and date of birth, and create_ticket fills both from it. " +
+  'Do not ask the caller for either; file with their first name, and leave the date of birth out of your summary. ' +
+  "Only if the request is about someone else, take that patient's name and date of birth. Never read this aloud.";
+
+/**
  * Whether this lookup carries the caller's YES to the greeting's "Am I
  * speaking with <first name>?" on a number that is one person on file (v172).
  * The greeting named them only when caller ID matched one person with a first
@@ -1778,6 +1795,8 @@ is not an identity. Confirm the name and date of birth, then call again with the
           if (confirmedByGreeting) greetingConfirmed = result;
           return {
             found: true,
+            identity_on_record: true,
+            fix: RECORD_HOLDS_THE_IDENTITY_FIX,
             ...appointmentAccess(result, confirmed, params),
             upcomingAppointments: result.upcomingAppointments,
             pastAppointments: result.pastAppointments.slice(0, 3),
@@ -1912,12 +1931,9 @@ This does NOT affect the call - it's purely for internal tracking.`,
     description: `Create a ticket in the EXTERNAL TICKETING SYSTEM for non-urgent after-hours requests. 
 This is NOT the callback queue - it creates a ticket that will be processed by staff.
 
-Call this ONLY when you have collected ALL required fields:
-- first_name (2+ characters)
-- last_name (2+ characters)  
-- date_of_birth (month, day, year)
-- callback_number (10+ digits)
-- request_summary (what they need)
+Required: first_name, last_name, date_of_birth (month, day, year), callback_number (10+ digits),
+request_summary. When lookup_schedule confirmed the caller, the record supplies last_name and
+date_of_birth: do not ask for them.
 
 The ticket will include schedule context (last appointment info) automatically.`,
     parameters: z.object({

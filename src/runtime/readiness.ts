@@ -1409,8 +1409,18 @@ import { callEnvironment } from "./callRecord";
  * and steps back one constraint at a time when nothing matches. Above main's
  * v191 (#440, `41a6854a`), which it contains. No migration.
  */
+/**
+ * v194 — A CONFIRMED AFTER-HOURS CALLER IS NOT ASKED AGAIN (2026-11-10). v172
+ * made the yes to the greeting confirm the record, and the ticket inherits its
+ * last name and date of birth, but the confirmed lookup_schedule said nothing
+ * of it while create_ticket's description said to collect every field first:
+ * 66 of 149 no-ivr callers who said yes (2026-11-05..09) were then asked their
+ * last name or date of birth. The confirmed result now says the record holds
+ * both (`RECORD_HOLDS_THE_IDENTITY_FIX`); create_ticket and the prompt agree.
+ * Above main's v192 (#439, `aab80916`) and open #442's v193. No migration.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v192-npx-what-day-and-time-works-20261109";
+  "voice-runtime-v194-a-confirmed-caller-is-not-asked-again-20261110";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can
