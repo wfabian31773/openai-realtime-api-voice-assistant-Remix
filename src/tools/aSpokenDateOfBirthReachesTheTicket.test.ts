@@ -296,6 +296,8 @@ describe('the other rules hold their lines', () => {
     // Shape E with a correction in it: the whole turn does not read, and the
     // correction carries no month and one number, so only its opening word marks it.
     expect(dobFromCallerAnswer([ASK_EN, C('June 3, 1944. Wait, the fourth. 82 years old.')])).toBeUndefined();
+    // "Not" opens a correction but is not a denial word on its own.
+    expect(dobFromCallerAnswer([ASK_EN, C('June 3, 1944. Not the third. 82 years old.')])).toBeUndefined();
   });
 
   it('an age or a remark beside the date still stands aside (shape E)', () => {
@@ -335,6 +337,34 @@ describe('the other rules hold their lines', () => {
     expect(dobFromCallerAnswer([ASK_EN, C('4, 1952.'), RB, C('Actually, April fifth.')])).toBeUndefined();
     expect(dobFromCallerAnswer([ASK_EN, C('4, 1952.'), RB, C('April fifth.')])).toBeUndefined();
     expect(dobFromCallerAnswer([ASK_EN, C('4, 1952.'), RB, C('Wait, let me check my card.')])).toBeUndefined();
+  });
+
+  // Codex P1 on #447 (head 61684e02): one rule for any line read sentence by sentence.
+  it('a denial in any sentence beside the date refuses the turn', () => {
+    expect(dobFromCallerAnswer([ASK_EN, C("June 3, 1944. That's wrong. I'm 82.")])).toBeUndefined();
+  });
+
+  it('a sentence that IS the date stands even with a "no" in it', () => {
+    expect(dobFromCallerAnswer([ASK_EN, C('Hmm. No, June 3, 1944. 82 years old.')])).toBe('1944-06-03');
+  });
+
+  it('a readback the agent corrects inside the same line is not a readback', () => {
+    expect(
+      dobFromCallerAnswer([
+        ASK_EN, C('4, 1952.'), A('April fourth, nineteen fifty-two. Sorry, April fifth. Is that right?'), C('Yes.'),
+      ]),
+    ).toBeUndefined();
+  });
+
+  it('a readback with nothing else in it still stands (Spanish too)', () => {
+    expect(
+      dobFromCallerAnswer([ASK_EN, C('4, 1952.'), A('April fourth, nineteen fifty-two. Is that right?'), C('Yes.')]),
+    ).toBe('1952-04-04');
+    expect(
+      dobFromCallerAnswer([
+        ASK_EN, C('4, 1952.'), A('Nacida el cuatro de abril de mil novecientos cincuenta y dos. ¿Es correcto?'), C('Sí.'),
+      ]),
+    ).toBe('1952-04-04');
   });
 
   it('a caller who repeats the read-back date confirms it', () => {

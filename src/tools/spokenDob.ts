@@ -380,10 +380,28 @@ function isoFromParts(parts: { year: string; month: string; day: string }): stri
  * date reads as the SAME date; two different dates in one turn stay refused.
  */
 function isoFromSentences(text: string): string | undefined {
-  const sentences = text.split(/(?<=[.!?])\s+/).filter((x) => x.trim());
-  if (sentences.length < 2) return undefined;
+  if (sentencesOf(text).length < 2) return undefined;
+  return oneDateIn(text);
+}
+
+function sentencesOf(text: string): string[] {
+  return text.split(/(?<=[.!?])\s+/).filter((x) => x.trim());
+}
+
+/**
+ * THE ONE DATE IN A LINE READ SENTENCE BY SENTENCE (Codex rounds 1-3 on #447).
+ *
+ * Both places that take a date from one sentence of a longer line use this:
+ * the caller's turn (shape E) and the agent's readback (shape H). The line
+ * gives a date only when every sentence that reads as a date reads as the
+ * same one, and no other sentence could be a second date or a rejection (see
+ * `competesWithADate`). Anything else gives no date. A sentence that reads as
+ * a date is the date, even with a "no" in it: "No, June 3, 1944." is a caller
+ * giving the date, not rejecting it.
+ */
+function oneDateIn(text: string): string | undefined {
   const dates = new Set<string>();
-  for (const sentence of sentences) {
+  for (const sentence of sentencesOf(text)) {
     const parts = readDobQuietly(sentence);
     if (parts) dates.add(isoFromParts(parts));
     else if (competesWithADate(sentence)) return undefined;
@@ -392,13 +410,14 @@ function isoFromSentences(text: string): string | undefined {
 }
 
 /**
- * A SENTENCE THAT MAY CORRECT THE DATE BESIDE IT REFUSES THE TURN (Codex P1 on
+ * A SENTENCE THAT MAY CORRECT THE DATE BESIDE IT REFUSES THE LINE (Codex P1 on
  * #447). "June 3, 1944. No, June 4." is a caller correcting the day, and the
  * correction does not read as a date on its own (no year). Taking the one
  * sentence that does read would file the date the caller has just rejected.
- * So a sentence that does not read as a date, but opens with a correction or
- * a denial, names a month, or carries two or more numbers, makes the turn
- * more than one date, and it is refused. An age ("82 years old.") and a remark
+ * So a sentence that does not read as a date, but opens with a correction,
+ * holds a denial or correction word anywhere ("That's wrong."), names a month,
+ * or carries two or more numbers, makes the line more than one date, and it
+ * is refused. An age ("82 years old.") and a remark
  * carry none of those and stand aside, which is the shape E case this exists
  * for.
  */
@@ -406,7 +425,7 @@ const OPENS_A_CORRECTION = /^(no|nope|nah|not|sorry|actually|wait|i mean|i meant
 
 function competesWithADate(sentence: string): boolean {
   const folded = fold(sentence);
-  if (OPENS_A_CORRECTION.test(folded)) return true;
+  if (OPENS_A_CORRECTION.test(folded) || rejectsADate(sentence)) return true;
   if (folded.split(' ').some((w) => monthNumberFromWord(w))) return true;
   return numbersIn(sentence).length >= 2;
 }
@@ -584,13 +603,9 @@ function readBack(lines: readonly string[], at: number, attempts: readonly strin
   const agentLine = (lines[at] ?? '').slice(AGENT_PREFIX.length);
   const folded = fold(agentLine);
   if (EXAMPLE_CUES.some((c) => folded.includes(c))) return undefined;
-  const dates = new Set<string>();
-  for (const sentence of agentLine.split(/(?<=[.!?])\s+/)) {
-    const parts = readDobQuietly(sentence);
-    if (parts) dates.add(isoFromParts(parts));
-  }
-  if (dates.size !== 1) return undefined;
-  const iso = [...dates][0]!;
+  // One date, and nothing in the line that corrects it ("Sorry, April fifth").
+  const iso = oneDateIn(agentLine);
+  if (!iso) return undefined;
   const year = Number(iso.slice(0, 4));
   // The year sits last in what the caller said ("6 3 12 del 49", "4, 1952").
   const lastSaid = attempts.map((a) => numbersIn(a).slice(-1)[0]).filter((n): n is number => n !== undefined);
