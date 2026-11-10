@@ -319,6 +319,51 @@ describe('PHI discipline — the allow-list is the safety mechanism', () => {
     expect(getAzulTimeline(fleet)![0].args).not.toHaveProperty('hasFirstName');
   });
 
+  /**
+   * v198. Which fields each filing tool RECEIVED, as names. The daily ticket
+   * review turns on it: a field the caller said and the ticket lacks is a
+   * different defect when the tool never got it than when the tool dropped it.
+   */
+  it('records the argument NAMES each filing tool received, and never a value', () => {
+    for (const tool of [
+      'create_ticket', 'create_pcp_task', 'handle_patient_medical_records_request',
+      'handoff_to_pcp', 'record_automated_resolution', 'escalate_to_human', 'file_records_ticket',
+    ]) {
+      const callId = freshCall();
+      recordToolEvent(
+        callId, tool,
+        { ...TICKET_ARGS, call_sid: 'CA' + '0'.repeat(32), caller_phone: '+17605550000', email: '', narrative: 'Paula Kolterman wants her chart' },
+        '{}', 1, { agentSlug: 'pcp' },
+      );
+      const [ev] = getAzulTimeline(callId)!;
+      const supplied = ev.args.supplied as string[];
+      expect(supplied).toEqual(expect.arrayContaining(['first_name', 'last_name', 'date_of_birth', 'narrative']));
+      // A blank value was not supplied; injected keys say nothing about the model.
+      expect(supplied).not.toContain('email');
+      expect(supplied).not.toContain('call_sid');
+      expect(supplied).not.toContain('caller_phone');
+      const blob = JSON.stringify(ev);
+      for (const secret of ['Paula', 'Kolterman', '1952-08-29', '7605551234', 'chart']) {
+        expect(blob).not.toContain(secret);
+      }
+    }
+  });
+
+  it('records no supplied names on a tool that is not a filing tool', () => {
+    const callId = freshCall();
+    recordToolEvent(callId, 'lookup_patient', TICKET_ARGS, '{}', 1, { agentSlug: 'surgery' });
+    expect(getAzulTimeline(callId)![0].args).not.toHaveProperty('supplied');
+  });
+
+  it('records the supplied names through recordingExecute, the path the hand-built tools take', async () => {
+    const callId = freshCall();
+    const run = recordingExecute({ callId, agentSlug: 'pcp' }, 'create_pcp_task', async () => ({ success: true }));
+    await run({ narrative: 'something', patientFirstName: 'Paula', patientLastName: '', urgency: 'routine' });
+    const [ev] = getAzulTimeline(callId)!;
+    expect(ev.args.supplied).toEqual(['narrative', 'patientFirstName', 'urgency']);
+    expect(JSON.stringify(ev)).not.toContain('Paula');
+  });
+
   it('records missing FIELD NAMES on a validation failure, not their values', () => {
     const callId = freshCall();
     recordToolEvent(

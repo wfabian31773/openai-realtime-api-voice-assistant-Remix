@@ -28,6 +28,7 @@ import { shadowTap } from '../shadow/tap'; // observation-only tap; no-op unless
 import { callMetadataForDB } from './callMetadataStore';
 import type { DirectorAction } from '../director/director';
 import { dobShape } from '../tools/dobParts';
+import { suppliedArgNames } from '../tools/ticketToolOutcomes';
 import { answeredWithoutTicket } from './answeredCallDisposition';
 
 export interface AzulToolEvent {
@@ -149,6 +150,17 @@ const SAFE_ARG_KEYS = new Set([
 /** Booleans derived from arguments we must NOT store verbatim. "Did the agent
  *  flag a gap?" is the diagnostic question; the caller's phrasing of the gap
  *  is PHI-adjacent free text and never leaves the call. */
+/** The filing tools whose argument NAMES the timeline records as `supplied`
+ *  (v198), beside every `file_*_ticket`. */
+const SUPPLIED_NAME_TOOLS: ReadonlySet<string> = new Set([
+  'create_ticket',
+  'create_pcp_task',
+  'handle_patient_medical_records_request',
+  'handoff_to_pcp',
+  'record_automated_resolution',
+  'escalate_to_human',
+]);
+
 function derivedFlags(tool: string, args: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   if (tool === 'create_ticket') {
@@ -211,6 +223,23 @@ function derivedFlags(tool: string, args: Record<string, unknown>): Record<strin
   if (/^file_[a-z_]+_ticket$/.test(tool)) {
     out.hasFirstName = typeof args?.first_name === 'string' && args.first_name.trim() !== '';
     out.hasLastName = typeof args?.last_name === 'string' && args.last_name.trim() !== '';
+  }
+  /**
+   * WHICH FIELDS EACH FILING TOOL WAS GIVEN — names, never values. v198.
+   *
+   * Operator, 2026-11-10, on PCP-82755: "we need to understand why these
+   * fields are not being populated correctly", with a daily review of every
+   * ticket. A field the caller gave and the ticket lacks has four causes: the
+   * model never put it in a field (it went into the narrative, or nowhere),
+   * the ticket filed before the caller was asked, the tool dropped it, or the
+   * app did. The first two need to know what the tool RECEIVED, and only the
+   * queue lanes' registry path recorded that (`ticket_tool_summary`, v166);
+   * PCP's and the after-hours line's hand-built filing tools recorded only
+   * the routing keys on the allow-list. `record_pcp_intake` already records
+   * its own names as `recorded` below.
+   */
+  if (SUPPLIED_NAME_TOOLS.has(tool) || /^file_[a-z_]+_ticket$/.test(tool)) {
+    out.supplied = suppliedArgNames(args ?? {});
   }
   if (tool === 'record_pcp_intake') {
     const keys = Object.keys(args ?? {}).filter((k) => args?.[k] != null && args[k] !== '');
