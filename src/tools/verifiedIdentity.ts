@@ -108,6 +108,19 @@ export interface VerifiedIdentity {
    * writes it.
    */
   alsoKnownAs?: string[];
+  /**
+   * v199: first names the person base accepted as THIS person, together with
+   * the last name and the date of birth, on this call — the name the caller
+   * gave when `lookup_patient` matched on name and date of birth, where it is
+   * spelled differently from the chart's but shares its opening (the person
+   * base's own prefix step, `narrow` in patientVerification.ts). A filing
+   * under that spelling is the same patient. Without it the chart's date of
+   * birth was refused as `carry: name_mismatch` on a match the process had
+   * already made certain (CA284c…, CA5839c1001d626c79524c020609999c16 and
+   * CAc15f284e621b7299919495ac1027187c on 2026-11-07..10). Only names sharing
+   * the opening are kept; a different first name is not this.
+   */
+  heardAs?: string[];
 }
 
 interface Entry extends VerifiedIdentity {
@@ -154,11 +167,36 @@ function namesAgree(
   lastB: string | undefined,
   /** v179: B's other charts' last names. */
   aliasesB: readonly string[] = [],
+  /** v199: first names the person base accepted as B on this call. */
+  heardAsB: readonly string[] = [],
 ): boolean {
   const first = nameKey(firstA);
   const last = nameKey(lastA);
-  return first !== '' && last !== '' && first === nameKey(firstB) &&
+  return first !== '' && last !== '' &&
+    (first === nameKey(firstB) || heardAsB.some((h) => nameKey(h) === first)) &&
     (last === nameKey(lastB) || aliasesB.some((a) => nameKey(a) === last));
+}
+
+/** The opening the person base narrows a first name by (three letters, folded). */
+function opening(name: string | undefined): string {
+  return nameKey(name).replace(/ /g, '').slice(0, 3);
+}
+
+/**
+ * The heard spellings worth keeping: different from the chart's first name,
+ * sharing its opening. Anything else is a different first name, which the
+ * name guard exists to refuse.
+ */
+function keptHeardAs(recordFirst: string, heard: readonly string[] | undefined): string[] {
+  const want = opening(recordFirst);
+  const out: string[] = [];
+  for (const h of heard ?? []) {
+    const name = (h ?? '').trim();
+    if (!name || nameKey(name) === nameKey(recordFirst)) continue;
+    if (want.length < 3 || opening(name) !== want) continue;
+    if (!out.some((o) => nameKey(o) === nameKey(name))) out.push(name);
+  }
+  return out;
 }
 
 function sweep(now: number): void {
@@ -323,6 +361,14 @@ export function rememberVerifiedIdentity(
         lastPhysicianSeen: existingFresh.certain && !certain ? existingFresh.lastPhysicianSeen : identity.lastPhysicianSeen ?? existingFresh.lastPhysicianSeen,
         lastProviderSeen: existingFresh.certain && !certain ? existingFresh.lastProviderSeen : identity.lastProviderSeen ?? existingFresh.lastProviderSeen,
         alsoKnownAs: existingFresh.certain && !certain ? existingFresh.alsoKnownAs : identity.alsoKnownAs ?? existingFresh.alsoKnownAs,
+        ...((): { heardAs?: string[] } => {
+          const keptFirst = existingFresh.certain ? existingFresh.firstName : firstName;
+          const heardAs = keptHeardAs(keptFirst, [
+            ...(existingFresh.heardAs ?? []),
+            ...(certain ? identity.heardAs ?? [] : []),
+          ]);
+          return heardAs.length ? { heardAs } : {};
+        })(),
         appointmentContext: existingFresh.certain && !certain ? existingFresh.appointmentContext : identity.appointmentContext ?? existingFresh.appointmentContext,
         certain: existingFresh.certain || certain,
         at: now,
@@ -344,6 +390,9 @@ export function rememberVerifiedIdentity(
     lastPhysicianSeen: identity.lastPhysicianSeen,
     lastProviderSeen: identity.lastProviderSeen,
     ...(identity.alsoKnownAs?.length ? { alsoKnownAs: identity.alsoKnownAs } : {}),
+    ...(certain && keptHeardAs(firstName, identity.heardAs).length
+      ? { heardAs: keptHeardAs(firstName, identity.heardAs) }
+      : {}),
     appointmentContext: certain ? identity.appointmentContext : undefined,
     certain,
     at: now,
@@ -372,7 +421,7 @@ export function verifiedDobFor(
   const entry = verified.get(callSid);
   if (!entry || !entry.certain) return undefined;
   if (Date.now() - entry.at > TTL_MS) return undefined;
-  if (!namesAgree(firstName, lastName, entry.firstName, entry.lastName, entry.alsoKnownAs)) {
+  if (!namesAgree(firstName, lastName, entry.firstName, entry.lastName, entry.alsoKnownAs, entry.heardAs)) {
     return undefined;
   }
   return entry.dateOfBirth;
@@ -410,7 +459,7 @@ export function dobCarry(
   const entry = verified.get(callSid);
   if (!entry || Date.now() - entry.at > TTL_MS) return 'no_entry';
   if (!entry.certain) return 'uncertain_identity';
-  if (!namesAgree(firstName, lastName, entry.firstName, entry.lastName, entry.alsoKnownAs)) {
+  if (!namesAgree(firstName, lastName, entry.firstName, entry.lastName, entry.alsoKnownAs, entry.heardAs)) {
     return 'name_mismatch';
   }
   if (!entry.dateOfBirth) return 'entry_without_dob';
@@ -454,7 +503,7 @@ export function usualOfficeFor(
   if (!entry) return undefined;
   if (Date.now() - entry.at > TTL_MS) return undefined;
   if (!entry.certain) return undefined;
-  if (!namesAgree(firstName, lastName, entry.firstName, entry.lastName, entry.alsoKnownAs)) {
+  if (!namesAgree(firstName, lastName, entry.firstName, entry.lastName, entry.alsoKnownAs, entry.heardAs)) {
     return undefined;
   }
   /**
@@ -542,6 +591,7 @@ export function verifiedIdentityFor(callSid: string | undefined): VerifiedIdenti
     ...(entry.lastPhysicianSeen ? { lastPhysicianSeen: entry.lastPhysicianSeen } : {}),
     ...(entry.lastProviderSeen ? { lastProviderSeen: entry.lastProviderSeen } : {}),
     ...(entry.alsoKnownAs?.length ? { alsoKnownAs: entry.alsoKnownAs } : {}),
+    ...(entry.heardAs?.length ? { heardAs: entry.heardAs } : {}),
   };
 }
 
@@ -730,7 +780,7 @@ export function forgetIfSameName(
   if (!nameKey(firstName) || !nameKey(lastName)) return false;
   const entry = verified.get(callSid);
   if (!entry) return false;
-  if (!namesAgree(firstName, lastName, entry.firstName, entry.lastName, entry.alsoKnownAs)) {
+  if (!namesAgree(firstName, lastName, entry.firstName, entry.lastName, entry.alsoKnownAs, entry.heardAs)) {
     return false;
   }
   verified.delete(callSid);

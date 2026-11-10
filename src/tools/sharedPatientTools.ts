@@ -627,6 +627,10 @@ registerTool({
          */
         // Also the other charts' last names (v179), when charted twice.
         ...joinedAppointments(resolved),
+        // v199: the first name the caller gave, when the person base matched
+        // it with the date of birth and the chart spells it differently. The
+        // store keeps it only when it shares the chart name's opening.
+        ...(certain && resolved.matchedBy === 'name_and_dob' && first ? { heardAs: [first] } : {}),
         appointmentContext: resolved,
         // Joined history is unfiltered; keep the queue-filtered routing office.
         ...(queue === 'optical' ? { usualOffice: usualOffice || undefined } : {}),

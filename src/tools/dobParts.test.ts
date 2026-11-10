@@ -3,7 +3,7 @@
  * worse than not having it, so this parser refuses rather than guesses.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { normalizeDobParts, dobShape } from './dobParts';
+import { normalizeDobParts, dobShape, numberWordsToDigits } from './dobParts';
 
 describe('the formats callers actually use', () => {
   const cases: Array<[string, string]> = [
@@ -412,9 +412,9 @@ describe('the shape a date of birth arrived in', () => {
  * out digit by digit produces FIVE. Five is neither, so it fell through to the
  * branch whose job is refusing phone numbers.
  *
- * The Spanish line above is NOT closed by this — "veintidos" and "cincuenta"
- * are words, and spelled-out digits in either language still refuse. That gap
- * is recorded, not fixed.
+ * The Spanish line above is closed since v199, by the number-word reader
+ * (`numberWordsToDigits`), which runs only after the digits have been refused.
+ * See "a date of birth said in words" below.
  */
 describe('a date of birth said one digit at a time', () => {
   const cases: Array<[string, string, string]> = [
@@ -457,5 +457,81 @@ describe('a date of birth said one digit at a time', () => {
    */
   it('will not sweep the digits out of a sentence', () => {
     expect(normalizeDobParts('my number is 0 1 0 4 58')).toBeNull();
+  });
+});
+
+/**
+ * A DATE OF BIRTH SAID IN WORDS — v199.
+ *
+ * On grok-voice-3.0 the transcriber writes a year the way it was spoken, and
+ * the agent reads dates back in words. `numberWordsToDigits` turns the words
+ * into digits and the same parser reads them, ONLY after the digits were
+ * refused. Synthetic dates; the shapes are the 2026-11-07..10 corpus's
+ * (`aSpokenDateOfBirthReachesTheTicket.test.ts`).
+ */
+describe('a date of birth said in words', () => {
+  const reads: Array<[string, string]> = [
+    ['July seventh, nineteen fifty-one.', '1951-07-07'],
+    ['nacida el tres de marzo de mil novecientos cuarenta y ocho', '1948-03-03'],
+    ['Noviembre nueve de mil novecientos treinta y nueve.', '1939-11-09'],
+    ['Cero tres veintidos del cincuenta', '1950-03-22'],
+    ['0 6 zero 2 19 47.', '1947-06-02'],
+    ['zero one zero four five eight', '1958-01-04'],
+    ['the second of may nineteen fifty five', '1955-05-02'],
+    ['veintidos de febrero de dos mil once', '2011-02-22'],
+    ['march seventeenth nineteen seventy three', '1973-03-17'],
+  ];
+  for (const [spoken, iso] of reads) {
+    it(`reads "${spoken}"`, () => {
+      const p = normalizeDobParts(spoken);
+      expect(p && `${p.year}-${p.month}-${p.day}`).toBe(iso);
+    });
+  }
+
+  it('still refuses a worded date that is not a date', () => {
+    expect(normalizeDobParts('zero three thirty two of fifty')).toBeNull();
+    expect(normalizeDobParts('nineteen seventy three')).toBeNull();
+  });
+
+  it('reads an ordinary word as a word: "oh", "one", "second" count only beside a number or a month', () => {
+    expect(numberWordsToDigits('just a second')).toBeNull();
+    expect(numberWordsToDigits('oh it is march')).toBeNull();
+    expect(numberWordsToDigits('I have one question')).toBeNull();
+    expect(numberWordsToDigits('the second of may')).toBe('the 2 of may');
+  });
+
+  it('a teen then a tens is two numbers, the halves of a year', () => {
+    expect(numberWordsToDigits('nineteen fifty-one')).toBe('19 51');
+    expect(numberWordsToDigits('mil novecientos cincuenta y seis')).toBe('1956');
+    expect(numberWordsToDigits('two thousand eleven')).toBe('2011');
+    expect(numberWordsToDigits('nineteen hundred and five')).toBe('1905');
+  });
+
+  it('changes no answer the digits already gave', () => {
+    // The word reader runs only after the digits were refused. "May 5, 19
+    // fifty" reads from its digits alone as May 5th 2019, and that answer
+    // stands, as it did before v199, even though the words would read 1950:
+    // widening what the word reader may override is its own change.
+    const p = normalizeDobParts('May 5, 19 fifty');
+    expect(p && `${p.year}-${p.month}-${p.day}`).toBe('2019-05-05');
+    const q = normalizeDobParts("Yes, that's the one, March 3rd 1955");
+    expect(q && `${q.year}-${q.month}-${q.day}`).toBe('1955-03-03');
+  });
+});
+
+describe('digit forms read since v199', () => {
+  const reads: Array<[string, string]> = [
+    ['0 3 14, 1949.', '1949-03-14'],
+    ['10, 10, 19, 1961.', '1961-10-10'],
+    ['10 21 del 4 7.', '1947-10-21'],
+  ];
+  for (const [spoken, iso] of reads) {
+    it(`reads "${spoken}"`, () => {
+      const p = normalizeDobParts(spoken);
+      expect(p && `${p.year}-${p.month}-${p.day}`).toBe(iso);
+    });
+  }
+  it('still refuses a phone number with commas in it', () => {
+    expect(normalizeDobParts('909, 555, 0100')).toBeNull();
   });
 });

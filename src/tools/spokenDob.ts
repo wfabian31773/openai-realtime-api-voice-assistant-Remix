@@ -72,7 +72,7 @@
  * date standing (Codex P1a). What DOES clear it is an attempted date the
  * parser refused: `dobShape` shows digits, a month word, or two-plus spoken
  * number words, and `readDobQuietly` returned nothing. "No, zero three
- * twenty two of fifty" is that case — a wrong birthday filed is worse than
+ * thirty two of fifty" is that case — a wrong birthday filed is worse than
  * a missing one, and `noteSpokenDob` deletes the cache entry rather than
  * returning early and leaving the stale value.
  *
@@ -88,9 +88,12 @@
  *    no window opened at all. Same known gap as the month table in
  *    `dobParts.ts`, and it needs the same evidence before it is filled: which
  *    phrasings actually arrive, in real transcripts.
- *  - Digits spelled out as WORDS still refuse, in both languages — the parser
- *    cannot read "zero one zero four five eight", so neither can this. That
- *    refusal now CLEARS a previously cached date instead of filing it.
+ *  - A date said in WORDS reads since v199 (`numberWordsToDigits` in
+ *    dobParts.ts), in both languages. A worded date that is still not a date
+ *    ("zero three thirty two of fifty") is refused, and that refusal CLEARS a
+ *    previously cached date instead of filing it.
+ *  - A caller who volunteers a date of birth before anyone asks for one, and
+ *    is never asked afterwards, opens no window. Nothing here reads it.
  *
  * ── STORAGE ────────────────────────────────────────────────────────────────
  *
@@ -101,7 +104,7 @@
  */
 
 import { isTwilioCallSid } from './callSid';
-import { dobShape, monthNumberFromWord, readDobQuietly } from './dobParts';
+import { dobShape, monthNumberFromWord, numberWordsToDigits, readDobQuietly } from './dobParts';
 
 // ── Reading the answer out of the record ────────────────────────────────────
 
@@ -246,11 +249,70 @@ function sentenceOpensDobWindow(sentence: string): boolean {
   return !TOPIC_CHANGE_ASKS.some((p) => folded.includes(p));
 }
 
-function opensDobWindow(agentLine: string): boolean {
-  if (agentLine.split(/(?<=[.!?])\s+/).some(sentenceOpensDobWindow)) return true;
+/**
+ * THE FORMAT, ASKED ON ITS OWN (v199).
+ *
+ * The scripted ask is one long sentence, and on a busy line the caller cuts
+ * it off. The agent then finishes it in a line of its own — "with the month,
+ * then the day, then the year." / "con el mes, luego el día y después el año."
+ * / "Month, day, year again, please." — and the caller answers THAT line. It
+ * names no date of birth, so until v199 it opened no window and the answer
+ * went unread: 5 of the 14 calls of 2026-11-07..10 whose caller was asked and
+ * whose ticket carried no date of birth (CAb6183fa70bab1e1575b9bcf867ad01e5,
+ * CA2c5949f3178f9e88f08a413b1accb606, CA855265389fad269027dddc8b4b84e597,
+ * CA489604ea2dd121748a8aa1f119afb134, CAf2e29ef64db1f961d224eab7cdbfcbd6).
+ *
+ * A sentence opens a window as the format when it is NOTHING BUT the format:
+ * at least two of month / day / year (mes / día / año), and every other word
+ * a filler ("with", "then", "the", "again", "please", "luego", "y", ...). "And
+ * what day and year did you get them?" is not, so a glasses date cannot land
+ * in it. And only once a date of birth was asked earlier on the call, and when
+ * neither this line nor the agent line before it names another date (a
+ * surgery, an appointment, a visit, an exam).
+ */
+const FORMAT_WORDS_EN = ['month', 'day', 'year'];
+const FORMAT_WORDS_ES = ['mes', 'dia', 'ano'];
+const FORMAT_FILLERS = new Set([
+  'with', 'then', 'the', 'and', 'starting', 'start', 'beginning', 'again', 'please', 'first', 'next',
+  'followed', 'by', 'after', 'that', 'finally', 'last', 'lastly', 'so', 'ok', 'okay', 'just', 'sorry',
+  'in', 'order', 'of', 'a', 'your', 'interrupted', 'its', 'it', 's',
+  'el', 'la', 'con', 'luego', 'y', 'despues', 'primero', 'empezando', 'comenzando', 'por', 'de', 'del',
+  'en', 'orden', 'otra', 'vez', 'favor', 'su', 'solo', 'okey', 'perdon', 'e', 'al', 'final',
+]);
+const OTHER_DATE_SUBJECTS = new Set([
+  'surgery', 'surgeries', 'procedure', 'operation', 'appointment', 'appointments', 'appt', 'visit',
+  'exam', 'cirugia', 'operacion', 'procedimiento', 'cita', 'citas', 'consulta', 'visita', 'examen',
+]);
+
+function namesAnotherDate(folded: string): boolean {
+  return folded.split(' ').some((w) => OTHER_DATE_SUBJECTS.has(w));
+}
+
+function sentenceIsTheFormat(sentence: string): boolean {
+  const words = fold(sentence).split(' ').filter(Boolean);
+  const present = (list: string[]) => list.filter((w) => words.includes(w)).length;
+  const list = present(FORMAT_WORDS_EN) >= 2 ? FORMAT_WORDS_EN : present(FORMAT_WORDS_ES) >= 2 ? FORMAT_WORDS_ES : null;
+  if (!list) return false;
+  return words.every((w) => list.includes(w) || FORMAT_FILLERS.has(w));
+}
+
+interface WindowContext {
+  /** Some earlier agent line on this call mentioned a date of birth. */
+  dobAskedBefore: boolean;
+  /** The agent line before this one, for the other-date check. */
+  previousAgentLine?: string;
+}
+
+function opensDobWindow(agentLine: string, context: WindowContext): boolean {
+  const sentences = agentLine.split(/(?<=[.!?])\s+/);
+  if (sentences.some(sentenceOpensDobWindow)) return true;
   const folded = fold(agentLine);
-  if (!mentionsDobTopic(folded)) return false;
-  return LINE_REASK_CUES.some((c) => folded.includes(c));
+  if (mentionsDobTopic(folded) && LINE_REASK_CUES.some((c) => folded.includes(c))) return true;
+  if (!sentences.some(sentenceIsTheFormat)) return false;
+  if (namesAnotherDate(folded)) return false;
+  if (mentionsDobTopic(folded)) return true;
+  if (!context.dobAskedBefore) return false;
+  return !namesAnotherDate(fold(context.previousAgentLine ?? ''));
 }
 
 /**
@@ -266,6 +328,18 @@ const CORRECTION_CUES = [
   'queria decir',
 ];
 
+/**
+ * A BARE "SORRY" CORRECTS ONLY A DATE SAID BEFORE IT (v199).
+ *
+ * CA46c62db6bf01da345c74d15b7f28f35d, in shape "2 14, 2009, sorry, 2 21, 2010.", is a
+ * caller correcting themselves mid-breath, and the strong cues above do not
+ * see it. "Sorry" alone is everywhere ("Sorry, and my surgery is September
+ * 12th"), so it counts only when the words before it in the same utterance
+ * were themselves an attempt at a date: then the date after it is the
+ * correction. With nothing date-like before it, it is an apology.
+ */
+const SELF_CORRECTION_CUES = ['sorry', 'perdon', 'i mean', 'mejor dicho'];
+
 function textAfterLastCorrection(uttered: string): string | undefined {
   const folded = fold(uttered);
   let best = -1;
@@ -277,6 +351,16 @@ function textAfterLastCorrection(uttered: string): string | undefined {
       cueLen = cue.length;
     }
   }
+  const padded = ` ${folded} `;
+  for (const cue of SELF_CORRECTION_CUES) {
+    const at = padded.lastIndexOf(` ${cue} `);
+    if (at < 0) continue;
+    const idx = at; // padded index of the space before the cue == folded index of the cue
+    if (idx <= best) continue;
+    if (!looksLikeDobAttempt(folded.slice(0, idx))) continue;
+    best = idx;
+    cueLen = cue.length;
+  }
   if (best < 0) return undefined;
   const after = folded.slice(best + cueLen).trim();
   return after || undefined;
@@ -286,6 +370,26 @@ function isoFromParts(parts: { year: string; month: string; day: string }): stri
   return `${parts.year}-${parts.month}-${parts.day}`;
 }
 
+/**
+ * ONE SENTENCE THAT IS A DATE, WHEN THE WHOLE TURN IS NOT ONE (v199).
+ *
+ * CAb6183fa70bab1e1575b9bcf867ad01e5, in shape: "Date of birth? <a remark>.
+ * June 3, 1944. 82 years old." The whole turn reads as four numbers and a
+ * month, which is not one date, so it was refused. Read sentence by sentence
+ * it is one date and an age. Taken only when every sentence that reads as a
+ * date reads as the SAME date; two different dates in one turn stay refused.
+ */
+function isoFromSentences(text: string): string | undefined {
+  const sentences = text.split(/(?<=[.!?])\s+/).filter((x) => x.trim());
+  if (sentences.length < 2) return undefined;
+  const dates = new Set<string>();
+  for (const sentence of sentences) {
+    const parts = readDobQuietly(sentence);
+    if (parts) dates.add(isoFromParts(parts));
+  }
+  return dates.size === 1 ? [...dates][0] : undefined;
+}
+
 function isoFromUtterance(uttered: string): string | undefined {
   const after = textAfterLastCorrection(uttered);
   if (after) {
@@ -293,7 +397,8 @@ function isoFromUtterance(uttered: string): string | undefined {
     if (corrected) return isoFromParts(corrected);
   }
   const parts = readDobQuietly(uttered);
-  return parts ? isoFromParts(parts) : undefined;
+  if (parts) return isoFromParts(parts);
+  return isoFromSentences(uttered);
 }
 
 /**
@@ -336,7 +441,7 @@ const CALLER_PREFIX = 'CALLER: ';
 
 type WindowRead =
   | { kind: 'date'; iso: string }
-  | { kind: 'refused' }
+  | { kind: 'refused'; attempts: string[] }
   | { kind: 'empty' };
 
 type TranscriptRead =
@@ -346,7 +451,7 @@ type TranscriptRead =
 
 function readWindow(lines: readonly string[], from: number): WindowRead {
   let found: string | undefined;
-  let refused = false;
+  const attempts: string[] = [];
   for (let j = from; j < lines.length; j += 1) {
     const next = lines[j] ?? '';
     if (!next.startsWith(CALLER_PREFIX)) break;
@@ -358,22 +463,119 @@ function readWindow(lines: readonly string[], from: number): WindowRead {
       }
       continue;
     }
-    if (found === undefined && looksLikeDobAttempt(uttered)) refused = true;
+    if (found === undefined && looksLikeDobAttempt(uttered)) attempts.push(uttered);
   }
   if (found !== undefined) return { kind: 'date', iso: found };
-  if (refused) return { kind: 'refused' };
+  if (attempts.length) return { kind: 'refused', attempts };
   return { kind: 'empty' };
+}
+
+/** The numbers an utterance holds, number words included. */
+function numbersIn(uttered: string): number[] {
+  const text = numberWordsToDigits(uttered) ?? fold(uttered);
+  return text.split(' ').filter((w) => /^\d+$/.test(w)).map((w) => Number(w));
+}
+
+/**
+ * A MONTH AND A DAY THAT AGREE WITH THE DATE ALREADY GIVEN DO NOT CLEAR IT
+ * (v199).
+ *
+ * CA8ab4aaa6917b6ca300cb0d4ef2a8fc66: the caller gave a date (in shape "Junio 14, 52.") when
+ * first asked, the agent asked again, and the caller said "Junio 14." — the
+ * same month and day, no year. That is a partial answer that AGREES, and it
+ * used to clear the date the caller had given as a refused attempt. A partial
+ * that disagrees still clears it, as any refused attempt does.
+ */
+function agreeingPartial(uttered: string, iso: string): boolean {
+  const [, mm, dd] = iso.split('-');
+  const month = Number(mm);
+  const day = Number(dd);
+  const text = numberWordsToDigits(uttered) ?? fold(uttered);
+  const words = text.split(' ').filter(Boolean);
+  const nums = words.filter((w) => /^\d+$/.test(w)).map(Number);
+  const named = words.map((w) => monthNumberFromWord(w)).filter((m): m is string => Boolean(m));
+  if (named.length === 1 && nums.length === 1) return Number(named[0]) === month && nums[0] === day;
+  if (named.length === 0 && nums.length === 2) return nums[0] === month && nums[1] === day;
+  return false;
+}
+
+/**
+ * THE AGENT READ THE DATE BACK, AND THE CALLER DID NOT SAY NO (v199).
+ *
+ * The voice model hears the caller's audio, and the transcriber does not
+ * always write what it heard: answers shaped like "6 3 12 del 49." and "4, 1952." are the
+ * transcripts of answers the agent then read back correctly in its very next
+ * line (in shape "nacida el tres de junio de mil novecientos cuarenta y nueve.
+ * ¿Es correcto?" / "April fourth, nineteen fifty-two."), on
+ * CA2c5949f3178f9e88f08a413b1accb606 and CAe89c5fec082bbaf2c9c58da4fdcd6f41.
+ *
+ * Taken only from the FIRST agent line after a window whose answer was an
+ * attempted date the parser refused; only when exactly one date reads out of
+ * that line and it is not an example ("por ejemplo", "for example"); only
+ * when the year it reads agrees with the last number the caller said (the
+ * whole year or its last two digits); and only when the caller's next line
+ * is not a "no".
+ */
+const EXAMPLE_CUES = ['por ejemplo', 'for example', 'for instance', 'such as', 'like this'];
+const DENIAL_FIRST_WORDS = new Set(['no', 'nope', 'nah', 'incorrect', 'wrong', 'negative']);
+const DENIAL_PHRASES = ['not right', 'not correct', 'thats wrong', 'that s wrong', 'no es', 'incorrecto', 'equivocad'];
+
+function isDenial(uttered: string): boolean {
+  const folded = fold(uttered);
+  const first = folded.split(' ')[0] ?? '';
+  return DENIAL_FIRST_WORDS.has(first) || DENIAL_PHRASES.some((p) => ` ${folded} `.includes(` ${p}`));
+}
+
+function readBack(lines: readonly string[], at: number, attempts: readonly string[]): string | undefined {
+  const agentLine = (lines[at] ?? '').slice(AGENT_PREFIX.length);
+  const folded = fold(agentLine);
+  if (EXAMPLE_CUES.some((c) => folded.includes(c))) return undefined;
+  const dates = new Set<string>();
+  for (const sentence of agentLine.split(/(?<=[.!?])\s+/)) {
+    const parts = readDobQuietly(sentence);
+    if (parts) dates.add(isoFromParts(parts));
+  }
+  if (dates.size !== 1) return undefined;
+  const iso = [...dates][0]!;
+  const year = Number(iso.slice(0, 4));
+  // The year sits last in what the caller said ("6 3 12 del 49", "4, 1952").
+  const lastSaid = attempts.map((a) => numbersIn(a).slice(-1)[0]).filter((n): n is number => n !== undefined);
+  if (!lastSaid.some((n) => n === year || n === year % 100)) return undefined;
+  for (let j = at + 1; j < lines.length; j += 1) {
+    const next = lines[j] ?? '';
+    if (!next.startsWith(CALLER_PREFIX)) continue;
+    if (isDenial(next.slice(CALLER_PREFIX.length))) return undefined;
+    break;
+  }
+  return iso;
 }
 
 function readCallerAnswer(lines: readonly string[]): TranscriptRead {
   let latest: TranscriptRead = { kind: 'none' };
+  let dobAskedBefore = false;
+  let previousAgentLine: string | undefined;
+  let refusedAttempts: string[] | undefined;
   for (let i = 0; i < lines.length; i += 1) {
     const line = lines[i] ?? '';
     if (!line.startsWith(AGENT_PREFIX)) continue;
-    if (!opensDobWindow(line.slice(AGENT_PREFIX.length))) continue;
+    const said = line.slice(AGENT_PREFIX.length);
+    if (refusedAttempts) {
+      const back = readBack(lines, i, refusedAttempts);
+      if (back) latest = { kind: 'date', iso: back };
+      refusedAttempts = undefined;
+    }
+    const opens = opensDobWindow(said, { dobAskedBefore, previousAgentLine });
+    if (mentionsDobTopic(fold(said))) dobAskedBefore = true;
+    previousAgentLine = said;
+    if (!opens) continue;
     const window = readWindow(lines, i + 1);
     if (window.kind === 'date') latest = { kind: 'date', iso: window.iso };
-    else if (window.kind === 'refused') latest = { kind: 'cleared' };
+    else if (window.kind === 'refused') {
+      const held = latest.kind === 'date' ? latest.iso : undefined;
+      if (held && window.attempts.every((a) => agreeingPartial(a, held))) continue;
+      latest = { kind: 'cleared' };
+      refusedAttempts = window.attempts;
+    }
     // empty: confirmation / "sure." — leave the earlier answer standing.
   }
   return latest;
@@ -415,9 +617,11 @@ function readCallerAnswer(lines: readonly string[]): TranscriptRead {
  *
  * AN ATTEMPTED DATE THE PARSER REFUSED CLEARS THE ANSWER. That is P1a.
  * "Yes that is correct" is not an attempt and leaves the earlier date
- * standing. "No, zero three twenty two of fifty" is an attempt, the parser
- * refuses it by design, and the function returns undefined rather than the
- * value the caller has just rejected.
+ * standing. "No, zero three thirty two of fifty" is an attempt, the parser
+ * refuses it (there is no March 32nd), and the function returns undefined
+ * rather than the value the caller has just rejected — unless the agent's
+ * next line reads a date back that the caller does not deny (v199, see
+ * `readBack`).
  *
  * Parsed QUIETLY. This runs over caller lines to find out whether any of them
  * is a date, so most of what it parses is not one, and every failure would

@@ -172,6 +172,21 @@ describe('which agent lines open a window — Codex P1b / P1a', () => {
   });
 
   it('P1a — a later unparseable correction clears the earlier date', () => {
+    // March the 32nd: an attempt at a date that is not one. (Until v199 this
+    // was "zero three twenty two of fifty", which the parser could not read
+    // because it was in words; it now reads, so the fixture needs a date
+    // that is refused for being no date at all.)
+    expect(
+      dobFromCallerAnswer([
+        ASK,
+        C('01 04 58'),
+        A('I have January 4th 1958 - is that your date of birth?'),
+        C('No, zero three thirty two of fifty'),
+      ]),
+    ).toBeUndefined();
+  });
+
+  it('v199 — the same correction said in words now lands', () => {
     expect(
       dobFromCallerAnswer([
         ASK,
@@ -179,7 +194,7 @@ describe('which agent lines open a window — Codex P1b / P1a', () => {
         A('I have January 4th 1958 - is that your date of birth?'),
         C('No, zero three twenty two of fifty'),
       ]),
-    ).toBeUndefined();
+    ).toBe('1950-03-22');
   });
 
   it('a real correction still wins', () => {
@@ -422,7 +437,7 @@ describe('the per-call store', () => {
       'AGENT: May I have your date of birth, starting with the month, then the day, then the year?',
       'CALLER: 01 04 58',
       'AGENT: I have January 4th 1958 - is that your date of birth?',
-      'CALLER: No, zero three twenty two of fifty',
+      'CALLER: No, zero three thirty two of fifty',
     ]);
     expect(spokenDobFor(SID)).toBeUndefined();
   });
