@@ -1434,6 +1434,17 @@ import { callEnvironment } from "./callRecord";
  * No migration.
  */
 /**
+ * v196 — BEAUMONT AND FULLERTON ARE OUR OFFICES (2026-11-10). Support Desk:
+ * on 2026-11-09 the records agent told a caller Beaumont "doesn't match any
+ * of our locations" (CA1169700883a2a647582fe0cd44b097ba) after
+ * resolve_location had verified it, because the office list every lane
+ * knows by heart (AZUL_VISION_LOCATIONS) held 31 offices against the
+ * Console's 33 active clinics. Beaumont and Fullerton are added from the
+ * Console's own rows, a missing fax reads "not on file", and a test pins
+ * the Console's active-clinic list one for one. Above main's v195 (#442,
+ * `e190383a`), which it contains. No migration.
+ */
+/**
  * v198 — EACH FILING TOOL RECORDS THE FIELD NAMES IT RECEIVED (2026-11-10).
  * Operator, on PCP-82755: a daily review of every ticket, to understand why
  * fields are not populated. A field the caller gave and the ticket lacks has
@@ -1441,8 +1452,9 @@ import { callEnvironment } from "./callRecord";
  * the queue lanes' registry path recorded that. `tool_timeline` now carries
  * `supplied`, the argument NAMES (never a value) on every filing tool:
  * create_ticket, the PCP filing tools, escalate_to_human and file_*_ticket.
- * Logging only. Above main's v195 (#442, `e190383a`), which it contains; v196
- * is #444 and v197 is #445 on their open branches. No migration.
+ * Logging only. Above main's v196 (#444, `fe330544`), which it contains along
+ * with v195 (#442, `e190383a`); v197 is #445 on its open branch. No
+ * migration.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
   "voice-runtime-v198-filing-tools-record-what-they-received-20261110";

@@ -36,10 +36,12 @@ export function currentClinicName(value: string | null | undefined): string | nu
 
 export const AZUL_VISION_LOCATIONS: Location[] = [
   { name: "Anaheim", address: "947 S. Anaheim Boulevard, Suite #120", city: "Anaheim", state: "CA", zip: "92805", phone: "(714) 991-4100", fax: "(714) 533-6800", hours: "Mon-Fri 8am-5pm, closed 12pm-1pm" },
+  { name: "Beaumont", address: "831 N. Highland Springs Avenue", city: "Beaumont", state: "CA", zip: "92223", phone: "(951) 821-5196", fax: "", hours: "Mon-Fri 8am-5pm, closed 12pm-1pm" },
   { name: "Covina", address: "420 W. Rowland Street", city: "Covina", state: "CA", zip: "91723", phone: "(626) 224-9980", fax: "(626) 470-4550", hours: "Mon-Fri 8am-5pm, closed 12pm-1pm" },
   { name: "Downey", address: "8028 3rd Street", city: "Downey", state: "CA", zip: "90241", phone: "(562) 622-8700", fax: "(562) 622-1800", hours: "Mon-Fri 8am-5pm, closed 12pm-1pm" },
   { name: "Eastvale", address: "12442 Limonite Avenue, Suite #203", city: "Eastvale", state: "CA", zip: "91752", phone: "(951) 821-5188", fax: "(951) 542-1538", hours: "Mon-Fri 8am-5pm, closed 12pm-1pm" },
   { name: "Encinitas", address: "700 Garden View Court, Unit 100", city: "Encinitas", state: "CA", zip: "92024", phone: "(760) 452-4270", fax: "(760) 452-5328", hours: "Mon-Fri 8am-5pm, closed 12pm-1pm" },
+  { name: "Fullerton", address: "333 W. Bastanchury Road, Suite 110", city: "Fullerton", state: "CA", zip: "92835", phone: "(714) 591-8132", fax: "", hours: "Mon-Fri 8am-5pm, closed 12pm-1pm" },
   { name: "Glendale", address: "1025 N. Brand Boulevard, Suite #200", city: "Glendale", state: "CA", zip: "91202", phone: "(818) 583-9933", fax: "(818) 583-9935", hours: "Mon-Fri 8am-5pm, closed 12pm-1pm" },
   { name: "Glendora", address: "150 S. Grand Avenue, Suite J", city: "Glendora", state: "CA", zip: "91741", phone: "(626) 335-2114", fax: "(626) 963-6497", hours: "Mon-Fri 8am-5pm, closed 12pm-1pm" },
   { name: "Huntington Beach", address: "7677 Center Avenue, Suite #301", city: "Huntington Beach", state: "CA", zip: "92647", phone: "(714) 901-2007", fax: "(714) 901-2003", hours: "Mon-Fri 8am-5pm, closed 12pm-1pm" },
