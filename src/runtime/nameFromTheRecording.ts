@@ -166,13 +166,21 @@ function spots(line: string): Spot[] {
   return out;
 }
 
-/** Where `seq` (a name half, word by word) ends if it starts at place `i`, else -1. */
+/**
+ * Where `seq` (a name half, word by word) ends if it starts at place `i`, else -1.
+ *
+ * v195: a full stop BETWEEN THE WORDS OF ONE HALF is an abbreviation ("Mary
+ * St. John"), skipped as on main (Codex review of fb01a2e: 1 verified caller
+ * in 6,559, 2026-10-10..11-09). Only the boundary between the two halves
+ * reads a bare full stop (`saidTogether`).
+ */
 function matchAt(sp: Spot[], i: number, seq: string[]): number {
   if (i >= sp.length) return -1;
   if (seq.length > 1 && sp[i].words.has(seq.join(""))) return i + 1; // a multi-word half spelled out
   let j = i;
-  for (const w of seq) {
-    if (j >= sp.length || !sp[j].words.has(w)) return -1;
+  for (let n = 0; n < seq.length; n++) {
+    if (n > 0) while (j < sp.length && sp[j].stop) j += 1;
+    if (j >= sp.length || !sp[j].words.has(seq[n])) return -1;
     j += 1;
   }
   return j;

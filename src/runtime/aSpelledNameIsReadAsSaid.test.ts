@@ -131,6 +131,15 @@ describe('a bare full stop between two whole words ends a name (finding 2)', () 
     expect(said('CALLER: My name is Testa. L A K E.', 'Testa', 'Lake')).toBe(true);
     expect(said('CALLER: T E S T A. Lake is my last name.', 'Testa', 'Lake')).toBe(true);
   });
+  it('a full stop inside one half is an abbreviation, as on main (Codex review of fb01a2e; 1 verified caller in 6,559 over 2026-10-10..11-09)', () => {
+    expect(said('CALLER: My name is Mary St. John, please call me about my surgery.', 'Mary', 'St. John')).toBe(true);
+    expect(said('CALLER: My name is Mary St. John, please call me about my surgery.', 'Mary', 'St John')).toBe(true);
+    expect(said('CALLER: This is Testa St. Clair calling about my drops.', 'Testa', 'St. Clair')).toBe(true);
+    expect(said('CALLER: St. John, Mary, calling about my surgery.', 'Mary', 'St. John')).toBe(true);
+  });
+  it('a bare full stop between the two halves still ends the name, with a two-word half', () => {
+    expect(said('CALLER: Hi, this is about Mary. St. John Pharmacy here, calling for a refill.', 'Mary', 'St. John')).toBe(false);
+  });
   it('a middle initial with its full stop and a comma are unchanged', () => {
     expect(said('CALLER: My name is Testa M. Lake, call me.', 'Testa', 'Lake')).toBe(true);
     expect(said('CALLER: The patient is Lake, Testa.', 'Testa', 'Lake')).toBe(true);
