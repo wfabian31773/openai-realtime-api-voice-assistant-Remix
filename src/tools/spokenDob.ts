@@ -511,6 +511,9 @@ function numbersIn(uttered: string): number[] {
  * that disagrees still clears it, as any refused attempt does.
  */
 function agreeingPartial(uttered: string, iso: string): boolean {
+  // "No, not June 3" names the held month and day to reject them (Codex P1 on
+  // #447, head d0aefbb5).
+  if (rejectsADate(uttered)) return false;
   const [, mm, dd] = iso.split('-');
   const month = Number(mm);
   const day = Number(dd);
@@ -538,7 +541,8 @@ function agreeingPartial(uttered: string, iso: string): boolean {
  * that line and it is not an example ("por ejemplo", "for example"); only
  * when the year it reads agrees with the last number the caller said (the
  * whole year or its last two digits); and only when nothing the caller says
- * back, up to the agent's next line, is a "no".
+ * back, up to the agent's next line, is a "no", a correction, or a different
+ * date.
  */
 const EXAMPLE_CUES = ['por ejemplo', 'for example', 'for instance', 'such as', 'like this'];
 /**
@@ -556,6 +560,24 @@ function isDenial(uttered: string): boolean {
   if (words.some((w) => DENIAL_WORDS.has(w))) return true;
   const padded = ` ${words.join(' ')} `;
   return DENIAL_PHRASES.some((p) => padded.includes(` ${p}`));
+}
+
+/**
+ * A denial, or a correction word anywhere ("Actually, April fifth"), in what
+ * the caller says about a date already held or read back (Codex P1 on #447,
+ * head d0aefbb5). Either one means that date is not the caller's answer.
+ */
+const CORRECTION_WORDS = /(^| )(actually|sorry|wait|i mean|i meant|perdon|mejor dicho|en realidad)( |$)/;
+
+function rejectsADate(uttered: string): boolean {
+  return isDenial(uttered) || CORRECTION_WORDS.test(fold(uttered));
+}
+
+/** What the caller said agrees with `iso`: the same full date, or its month and day. */
+function confirmsTheDate(uttered: string, iso: string): boolean {
+  const whole = readDobQuietly(uttered);
+  if (whole) return isoFromParts(whole) === iso;
+  return agreeingPartial(uttered, iso);
 }
 
 function readBack(lines: readonly string[], at: number, attempts: readonly string[]): string | undefined {
@@ -584,7 +606,10 @@ function readBack(lines: readonly string[], at: number, attempts: readonly strin
       continue;
     }
     answered = true;
-    if (isDenial(next.slice(CALLER_PREFIX.length))) return undefined;
+    const said = next.slice(CALLER_PREFIX.length);
+    if (rejectsADate(said)) return undefined;
+    // A date of their own that is not the one read back is a correction too.
+    if (looksLikeDobAttempt(said) && !confirmsTheDate(said, iso)) return undefined;
   }
   return iso;
 }

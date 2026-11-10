@@ -307,6 +307,9 @@ describe('the other rules hold their lines', () => {
     expect(
       dobFromCallerAnswer([ASK_EN, C('4, 1952.'), A('April fourth, nineteen fifty-two. Is that right?'), C('Actually, no.')]),
     ).toBeUndefined();
+    expect(
+      dobFromCallerAnswer([ASK_EN, C('4, 1952.'), A('April fourth, nineteen fifty-two. Is that right?'), C('Hmm, no.')]),
+    ).toBeUndefined();
   });
 
   it('a "no" on the caller\'s second line denies the readback', () => {
@@ -315,6 +318,29 @@ describe('the other rules hold their lines', () => {
         ASK_EN, C('4, 1952.'), A('April fourth, nineteen fifty-two. Is that right?'), C('Hmm.'), C('No.'),
       ]),
     ).toBeUndefined();
+  });
+
+  // Codex P1 on #447 (head d0aefbb5): a denial or a correction that names the held date.
+  it('a partial that names the held month and day to deny them clears the date', () => {
+    expect(
+      dobFromCallerAnswer([ASK_EN, C('June 3, 1944.'), A('Your date of birth, month, day and year?'), C('No, not June 3.')]),
+    ).toBeUndefined();
+    expect(
+      dobFromCallerAnswer([ASK_EN, C('June 3, 1944.'), A('Your date of birth, month, day and year?'), C('Actually, June 3.')]),
+    ).toBeUndefined();
+  });
+
+  it('a correction or a different date after a readback is not a yes', () => {
+    const RB = A('April fourth, nineteen fifty-two. Is that correct?');
+    expect(dobFromCallerAnswer([ASK_EN, C('4, 1952.'), RB, C('Actually, April fifth.')])).toBeUndefined();
+    expect(dobFromCallerAnswer([ASK_EN, C('4, 1952.'), RB, C('April fifth.')])).toBeUndefined();
+    expect(dobFromCallerAnswer([ASK_EN, C('4, 1952.'), RB, C('Wait, let me check my card.')])).toBeUndefined();
+  });
+
+  it('a caller who repeats the read-back date confirms it', () => {
+    const RB = A('April fourth, nineteen fifty-two. Is that correct?');
+    expect(dobFromCallerAnswer([ASK_EN, C('4, 1952.'), RB, C('Yes, April fourth.')])).toBe('1952-04-04');
+    expect(dobFromCallerAnswer([ASK_EN, C('4, 1952.'), RB, C('Yes, April 4th, 1952.')])).toBe('1952-04-04');
   });
 
   it('a "no" after the agent\'s next line is an answer to that line, not to the readback', () => {
