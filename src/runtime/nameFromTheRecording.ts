@@ -103,6 +103,10 @@ const BETWEEN_ONE_NAME = new Set(NAME_SCAFFOLDING);
 interface Spot {
   words: Set<string>;
   between: boolean;
+  /** Spelled letters or an initial, not a word the caller said whole. */
+  spelled?: true;
+  /** v195: a full stop outside a spelled run — a sentence ended here. */
+  stop?: true;
 }
 
 /**
@@ -111,6 +115,18 @@ interface Spot {
  * ends a word, so "L A K E. I need" stands for "lake" as well as "lakei"
  * (Codex P2 on #431), while "L. A. K. E." still reads "lake". A single letter
  * alone is an initial. Spelled letters and initials may sit inside a name.
+ *
+ * v195 (review of #431): a full stop outside a run is kept as a place of its
+ * own, so a sentence break between two whole words can end a name (see
+ * `saidTogether`). A run with no full stop after its last letter is NOT also
+ * read without that letter: "L A K E, I need" stays "lakei", because reading
+ * "V O R L I" as "vorl" too would validate a surname the caller never spelled
+ * (Codex P2 on #442), and the shape refused no measured correct name.
+ *
+ * A run is never read as both halves at once ("T E S T A L A K E" is not
+ * "Testa Lake"): every reading of it tried on #442 accepted a name the caller
+ * did not spell, across six review rounds, and it would have rescued 10
+ * correct names in about 750. So it stays refused, as on main.
  */
 function spots(line: string): Spot[] {
   const raw = line
@@ -125,17 +141,18 @@ function spots(line: string): Spot[] {
   let letters: string[] = [];
   const flush = () => {
     const only = letters.filter((l) => l !== ".");
-    if (only.length === 1) out.push({ words: new Set(only), between: true });
+    if (only.length === 1) out.push({ words: new Set(only), between: true, spelled: true });
     else if (only.length >= 2) {
       const words = new Set([only.join("")]);
       for (const part of letters.join("").split(".")) if (part.length >= 2) words.add(part);
-      out.push({ words, between: true });
+      out.push({ words, between: true, spelled: true });
     }
     letters = [];
   };
   for (const t of raw) {
     if (t === ".") {
       if (letters.length) letters.push(".");
+      else out.push({ words: new Set(), between: true, stop: true });
       continue;
     }
     if (t.length === 1) {
@@ -149,26 +166,49 @@ function spots(line: string): Spot[] {
   return out;
 }
 
-/** Where `seq` (a name half, word by word) ends if it starts at place `i`, else -1. */
+/**
+ * Where `seq` (a name half, word by word) ends if it starts at place `i`, else -1.
+ *
+ * v195: a full stop BETWEEN THE WORDS OF ONE HALF is an abbreviation ("Mary
+ * St. John"), skipped as on main (Codex review of fb01a2e: 1 verified caller
+ * in 6,559, 2026-10-10..11-09). Only the boundary between the two halves
+ * reads a bare full stop (`saidTogether`).
+ */
 function matchAt(sp: Spot[], i: number, seq: string[]): number {
   if (i >= sp.length) return -1;
   if (seq.length > 1 && sp[i].words.has(seq.join(""))) return i + 1; // a multi-word half spelled out
   let j = i;
-  for (const w of seq) {
-    if (j >= sp.length || !sp[j].words.has(w)) return -1;
+  for (let n = 0; n < seq.length; n++) {
+    if (n > 0) while (j < sp.length && sp[j].stop) j += 1;
+    if (j >= sp.length || !sp[j].words.has(seq[n])) return -1;
     j += 1;
   }
   return j;
 }
 
-/** `a` then `b` in this turn, with only what may sit inside one name between them. */
+/**
+ * `a` then `b` in this turn, with only what may sit inside one name between them.
+ *
+ * v195: NOT A BARE FULL STOP BETWEEN TWO WHOLE WORDS. "about Testa. Lake
+ * Pharmacy here" is two sentences, not the name Testa Lake (review of #431).
+ * A full stop followed by "my last name is" or by a spelling is still one
+ * person giving one name: measured on verified callers 2026-10-10..11-09,
+ * 28 of 728 said their own name across a full stop, and only 1 of them said
+ * it no other way than across a bare one. A spelled half on either side is
+ * unchanged.
+ */
 function saidTogether(sp: Spot[], a: string[], b: string[]): boolean {
   for (let i = 0; i < sp.length; i++) {
     const end = matchAt(sp, i, a);
     if (end < 0) continue;
+    let onlyStops = true;
     for (let k = end; k < sp.length; k++) {
-      if (matchAt(sp, k, b) >= 0) return true;
+      if (matchAt(sp, k, b) >= 0) {
+        const bareStop = k > end && onlyStops && !sp[end - 1].spelled && !sp[k].spelled;
+        if (!bareStop) return true;
+      }
       if (!sp[k].between) break;
+      if (!sp[k].stop) onlyStops = false;
     }
   }
   return false;

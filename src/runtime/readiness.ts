@@ -1419,8 +1419,22 @@ import { callEnvironment } from "./callRecord";
  * both (`RECORD_HOLDS_THE_IDENTITY_FIX`); create_ticket and the prompt agree.
  * Above main's v192 (#439, `aab80916`) and open #442's v193. No migration.
  */
+/**
+ * v195 — A BARE FULL STOP ENDS A HEARD NAME (2026-11-10; v192 and v193
+ * while #442 was open). The review of #431 (v180), measured first. The heard-
+ * name check refuses a bare full stop between two whole words, so "about
+ * Testa. Lake Pharmacy here" is not the name Testa Lake (1 correct name of
+ * 728 refused, against 25 for the review's own fix). The other three
+ * findings are measured and NOT fixed: each fix tried let a ticket file that
+ * main refuses (six Codex review rounds on #442), against a measured cost of
+ * 0 requests (finding 1), 0 names (finding 3) and 10 names in about 750
+ * (finding 4). Tests pin each as main's behaviour. Above main's v194 (#443,
+ * `a51a6c64`), which it contains along with v192 (#439, `aab80916`), v191
+ * (#440, `41a6854a`), v190 (#441, `ce0bee67`) and v188 (#438, `fca1e6f3`).
+ * No migration.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v194-a-confirmed-caller-is-not-asked-again-20261110";
+  "voice-runtime-v195-a-bare-full-stop-ends-a-heard-name-20261110";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can
