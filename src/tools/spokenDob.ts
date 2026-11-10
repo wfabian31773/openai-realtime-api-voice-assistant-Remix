@@ -104,7 +104,7 @@
  */
 
 import { isTwilioCallSid } from './callSid';
-import { dobShape, monthNumberFromWord, numberWordsToDigits, readDobQuietly } from './dobParts';
+import { dobShape, monthNumberFromWord, numberWordsToDigits, readDobQuietly, rejectsADate } from './dobParts';
 
 // ── Reading the answer out of the record ────────────────────────────────────
 
@@ -476,28 +476,6 @@ function agreeingPartial(uttered: string, iso: string): boolean {
   if (named.length === 1 && nums.length === 1) return Number(named[0]) === month && nums[0] === day;
   if (named.length === 0 && nums.length === 2) return nums[0] === month && nums[1] === day;
   return false;
-}
-
-/**
- * A DENIAL OR A CORRECTION ABOUT A HELD DATE (Codex P1 on #447). "No, not
- * June 3" names the held month and day to reject them, and "Actually, June 4"
- * corrects them; neither is a partial answer that agrees. A "no" anywhere
- * counts, not only the first word. Reading a stray "no" as a denial only
- * clears the held date, which leaves the ticket where it was before v199.
- */
-const DENIAL_WORDS = new Set(['no', 'nope', 'nah', 'incorrect', 'wrong', 'negative', 'incorrecto', 'incorrecta']);
-const DENIAL_PHRASES = ['not right', 'not correct', 'not it', 'not my', 'thats not', 'that s not', 'equivocad'];
-const CORRECTION_WORDS = /(^| )(actually|sorry|wait|i mean|i meant|perdon|mejor dicho|en realidad)( |$)/;
-
-function isDenial(uttered: string): boolean {
-  const words = fold(uttered).split(' ').filter(Boolean);
-  if (words.some((w) => DENIAL_WORDS.has(w))) return true;
-  const padded = ` ${words.join(' ')} `;
-  return DENIAL_PHRASES.some((p) => padded.includes(` ${p}`));
-}
-
-function rejectsADate(uttered: string): boolean {
-  return isDenial(uttered) || CORRECTION_WORDS.test(fold(uttered));
 }
 
 function readCallerAnswer(lines: readonly string[]): TranscriptRead {

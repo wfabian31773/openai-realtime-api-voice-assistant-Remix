@@ -519,6 +519,34 @@ describe('a date of birth said in words', () => {
   });
 });
 
+describe('a worded date the caller then rejects (Codex P1 on #447)', () => {
+  const iso = (spoken: string) => {
+    const p = normalizeDobParts(spoken);
+    return p ? `${p.year}-${p.month}-${p.day}` : null;
+  };
+
+  it('a rejection after a worded date: no date', () => {
+    expect(iso('June third nineteen forty-four. That is wrong.')).toBeNull();
+    expect(iso('June third nineteen forty-four, no, sorry.')).toBeNull();
+    expect(iso("March seventeenth nineteen seventy three. That's not right.")).toBeNull();
+    expect(iso('tres de junio de mil novecientos cuarenta y cuatro. Está equivocado.')).toBeNull();
+    expect(iso('tres de junio de mil novecientos cuarenta y cuatro, perdón')).toBeNull();
+  });
+
+  it('a rejection before a worded date is the caller correcting something earlier: the date stands', () => {
+    expect(iso('No, June fourth nineteen forty-four.')).toBe('1944-06-04');
+    expect(iso('No, junio cuatro de mil novecientos cuarenta y cuatro.')).toBe('1944-06-04');
+  });
+
+  it('only what follows the whole date counts: a pause inside it is not a rejection', () => {
+    expect(iso('June third, wait, nineteen forty-four.')).toBe('1944-06-03');
+  });
+
+  it('the digit form reads as it does on main', () => {
+    expect(iso('June 3, 1944. That is wrong.')).toBe('1944-06-03');
+  });
+});
+
 describe('digit forms read since v199', () => {
   const reads: Array<[string, string]> = [
     ['0 3 14, 1949.', '1949-03-14'],

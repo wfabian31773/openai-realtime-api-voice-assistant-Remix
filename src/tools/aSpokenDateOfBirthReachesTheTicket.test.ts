@@ -231,6 +231,13 @@ describe('the 2026-11-07..10 corpus: each call reads its date of birth, or is le
  * three corpus calls they rescued (above) are the cost, 12 of the 17 down to
  * 9. Every case below read a date on the round-3 build.
  */
+describe('a worded answer the caller rejects in the same line reads nothing', () => {
+  it('after a date-of-birth ask', () => {
+    expect(dobFromCallerAnswer([ASK_EN, C('June third nineteen forty-four. That is wrong.')])).toBeUndefined();
+    expect(dobFromCallerAnswer([ASK_EN, C('No, June fourth nineteen forty-four.')])).toBe('1944-06-04');
+  });
+});
+
 describe('shapes E and H are withdrawn: a longer line or a readback reads nothing', () => {
   it('a date with an age or a remark beside it (shape E)', () => {
     expect(dobFromCallerAnswer([ASK_EN, C('Hmm. June 3, 1944. 82 years old.')])).toBeUndefined();

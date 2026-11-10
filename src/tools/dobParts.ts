@@ -44,6 +44,48 @@ export function readDobQuietly(
   return parse(spoken, SILENT);
 }
 
+/**
+ * A DENIAL OR A CORRECTION OF A DATE (Codex P1 on #447). One copy, read by
+ * the worded fallback below and by spokenDob's transcript reader. "No, not
+ * June 3" and "Actually, June 4" both reject a date; a "no" anywhere counts.
+ */
+const DENIAL_WORDS = new Set(['no', 'nope', 'nah', 'incorrect', 'wrong', 'negative', 'incorrecto', 'incorrecta']);
+const DENIAL_PHRASES = ['not right', 'not correct', 'not it', 'not my', 'thats not', 'that s not', 'equivocad'];
+const CORRECTION_WORDS = /(^| )(actually|sorry|wait|i mean|i meant|perdon|mejor dicho|en realidad)( |$)/;
+
+function foldForRejection(text: string): string {
+  return String(text ?? '')
+    .normalize('NFD')
+    .replace(/\p{M}/gu, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+}
+
+export function rejectsADate(uttered: string): boolean {
+  const folded = foldForRejection(uttered);
+  const words = folded.split(' ').filter(Boolean);
+  if (words.some((w) => DENIAL_WORDS.has(w))) return true;
+  const padded = ` ${words.join(' ')} `;
+  if (DENIAL_PHRASES.some((p) => padded.includes(` ${p}`))) return true;
+  return CORRECTION_WORDS.test(folded);
+}
+
+/**
+ * A WORDED DATE THE CALLER THEN REJECTS (Codex P1 on #447, rounds 4 and 5).
+ * "June third nineteen forty-four. That is wrong." converts to "june 3 19 44
+ * that is wrong"; anything after the last digit that rejects a date means the
+ * worded reading is not taken. A rejection BEFORE the date ("No, June fourth
+ * nineteen forty-four.") is the caller correcting something earlier, and the
+ * date stands. Only the worded fallback is guarded: the digit parse is
+ * unchanged from main.
+ */
+function rejectedAfterTheDate(worded: string): boolean {
+  const lastDigit = worded.search(/\d(?!.*\d)/);
+  if (lastDigit < 0) return false;
+  return rejectsADate(worded.slice(lastDigit + 1));
+}
+
 /** Where a parser's log lines go. See readDobQuietly. */
 type Announce = (line: string) => void;
 const SAY: Announce = (line) => console.info(line);
@@ -67,7 +109,7 @@ function parse(
    */
   if (!/^\d{4}-\d{2}-\d{2}$/.test(iso)) {
     const worded = numberWordsToDigits(spoken);
-    if (worded !== null) {
+    if (worded !== null && !rejectedAfterTheDate(worded)) {
       const again = normalize(worded, SILENT);
       if (/^\d{4}-\d{2}-\d{2}$/.test(again)) {
         iso = again;
