@@ -72,18 +72,19 @@ export function rejectsADate(uttered: string): boolean {
 }
 
 /**
- * A WORDED DATE THE CALLER THEN REJECTS (Codex P1 on #447, rounds 4 and 5).
- * "June third nineteen forty-four. That is wrong." converts to "june 3 19 44
- * that is wrong"; anything after the last digit that rejects a date means the
- * worded reading is not taken. A rejection BEFORE the date ("No, June fourth
- * nineteen forty-four.") is the caller correcting something earlier, and the
- * date stands. Only the worded fallback is guarded: the digit parse is
- * unchanged from main.
+ * A WORDED ANSWER THAT NEGATES, DENIES OR CORRECTS (Codex P1 on #447, rounds
+ * 4 to 6). The worded fallback is new in v199, so it reads only an answer
+ * that is a date and nothing against it: any "not", "never", "-n't", denial
+ * or correction word anywhere in the line means no date. The one exception is
+ * a leading "No," (or "Nope,"), set off by punctuation, which corrects what
+ * came before ("No, June fourth nineteen forty-four."). Without the comma it
+ * is a negation ("No es el tres de junio…"), and that reads nothing. The
+ * digit parse is unchanged from main.
  */
-function rejectedAfterTheDate(worded: string): boolean {
-  const lastDigit = worded.search(/\d(?!.*\d)/);
-  if (lastDigit < 0) return false;
-  return rejectsADate(worded.slice(lastDigit + 1));
+function wordedAnswerIsRejected(raw: string): boolean {
+  const rest = String(raw ?? '').replace(/^\s*(no|nope|nah)\s*[,.!;:]+\s*/i, '');
+  if (rejectsADate(rest)) return true;
+  return /(^| )(not|never|nunca|jamas)( |$)|n t( |$)/.test(foldForRejection(rest));
 }
 
 /** Where a parser's log lines go. See readDobQuietly. */
@@ -109,7 +110,7 @@ function parse(
    */
   if (!/^\d{4}-\d{2}-\d{2}$/.test(iso)) {
     const worded = numberWordsToDigits(spoken);
-    if (worded !== null && !rejectedAfterTheDate(worded)) {
+    if (worded !== null && !wordedAnswerIsRejected(spoken)) {
       const again = normalize(worded, SILENT);
       if (/^\d{4}-\d{2}-\d{2}$/.test(again)) {
         iso = again;

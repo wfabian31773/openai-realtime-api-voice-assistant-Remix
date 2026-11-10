@@ -519,7 +519,7 @@ describe('a date of birth said in words', () => {
   });
 });
 
-describe('a worded date the caller then rejects (Codex P1 on #447)', () => {
+describe('a worded answer that negates, denies or corrects reads nothing (Codex P1 on #447)', () => {
   const iso = (spoken: string) => {
     const p = normalizeDobParts(spoken);
     return p ? `${p.year}-${p.month}-${p.day}` : null;
@@ -533,13 +533,22 @@ describe('a worded date the caller then rejects (Codex P1 on #447)', () => {
     expect(iso('tres de junio de mil novecientos cuarenta y cuatro, perdón')).toBeNull();
   });
 
-  it('a rejection before a worded date is the caller correcting something earlier: the date stands', () => {
-    expect(iso('No, June fourth nineteen forty-four.')).toBe('1944-06-04');
-    expect(iso('No, junio cuatro de mil novecientos cuarenta y cuatro.')).toBe('1944-06-04');
+  it('a negation anywhere: no date', () => {
+    expect(iso('It is not June third nineteen forty-four.')).toBeNull();
+    expect(iso("I don't think it's June third nineteen forty-four.")).toBeNull();
+    expect(iso('It was never June third nineteen forty-four.')).toBeNull();
+    expect(iso('No es el tres de junio de mil novecientos cuarenta y cuatro.')).toBeNull();
+    expect(iso('No June third nineteen forty-four.')).toBeNull();
   });
 
-  it('only what follows the whole date counts: a pause inside it is not a rejection', () => {
-    expect(iso('June third, wait, nineteen forty-four.')).toBe('1944-06-03');
+  it('a correction word inside a worded answer: no date (spokenDob reads what follows the correction)', () => {
+    expect(iso('June third, wait, nineteen forty-four.')).toBeNull();
+  });
+
+  it('a leading "No," set off by punctuation corrects what came before: the date stands', () => {
+    expect(iso('No, June fourth nineteen forty-four.')).toBe('1944-06-04');
+    expect(iso('Nope. June fourth nineteen forty-four.')).toBe('1944-06-04');
+    expect(iso('No, junio cuatro de mil novecientos cuarenta y cuatro.')).toBe('1944-06-04');
   });
 
   it('the digit form reads as it does on main', () => {
