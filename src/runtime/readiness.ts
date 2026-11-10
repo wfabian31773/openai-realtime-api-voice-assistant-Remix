@@ -1410,8 +1410,18 @@ import { callEnvironment } from "./callRecord";
  * v191 (#440, `41a6854a`), which it contains. No migration.
  */
 /**
- * v193 — A NAME AS THE CALLER SAID IT, AND A REQUEST AS THEY MADE IT
- * (2026-11-09; v192 while #442 was open). Review of #431 (v180), measured first. The words around a
+ * v194 — A CONFIRMED AFTER-HOURS CALLER IS NOT ASKED AGAIN (2026-11-10). v172
+ * made the yes to the greeting confirm the record, and the ticket inherits its
+ * last name and date of birth, but the confirmed lookup_schedule said nothing
+ * of it while create_ticket's description said to collect every field first:
+ * 66 of 149 no-ivr callers who said yes (2026-11-05..09) were then asked their
+ * last name or date of birth. The confirmed result now says the record holds
+ * both (`RECORD_HOLDS_THE_IDENTITY_FIX`); create_ticket and the prompt agree.
+ * Above main's v192 (#439, `aab80916`) and open #442's v193. No migration.
+ */
+/**
+ * v195 — A NAME AS THE CALLER SAID IT, AND A REQUEST AS THEY MADE IT
+ * (2026-11-10; v192 and v193 while #442 was open). Review of #431 (v180), measured first. The words around a
  * name ("his", "last", "patient", "su") count as identity only when they are
  * all that is left of a turn, so a short request in answer to a name question
  * is no longer cut down to a name and skipped (0 of 12,044 calls changed yet,
@@ -1419,12 +1429,12 @@ import { callEnvironment } from "./callRecord";
  * two whole words (1 correct name of 728 refused, against 25 for the review's
  * fix) and reads both halves spelled in one run (10 of about 750 verified
  * callers' names came out whole only that way); a spelled half run into "I"
- * or "a" stays refused (Codex P2 on #442). Above main's v192 (#439, `aab80916`), which it contains
- * along with v191 (#440, `41a6854a`), v190 (#441, `ce0bee67`) and v188 (#438,
- * `fca1e6f3`). No migration.
+ * or "a" stays refused (Codex P2 on #442). Above main's v194 (#443, `a51a6c64`), which it contains
+ * along with v192 (#439, `aab80916`), v191 (#440, `41a6854a`), v190 (#441,
+ * `ce0bee67`) and v188 (#438, `fca1e6f3`). No migration.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v193-a-name-as-said-and-a-request-as-made-20261109";
+  "voice-runtime-v195-a-name-as-said-and-a-request-as-made-20261110";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

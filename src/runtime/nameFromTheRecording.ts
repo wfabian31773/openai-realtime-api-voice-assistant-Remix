@@ -105,11 +105,11 @@ interface Spot {
   between: boolean;
   /** Spelled letters or an initial, not a word the caller said whole. */
   spelled?: true;
-  /** v193: a spelled run's pieces between full stops, in order ("T E S T A. L A K E." -> testa, lake). */
+  /** v195: a spelled run's pieces between full stops, in order ("T E S T A. L A K E." -> testa, lake). */
   parts?: string[];
-  /** v193: a full stop outside a spelled run — a sentence ended here. */
+  /** v195: a full stop outside a spelled run — a sentence ended here. */
   stop?: true;
-  /** v193: what a spelled run reads as when it is the whole name (Codex round 5 on #442). */
+  /** v195: what a spelled run reads as when it is the whole name (Codex round 5 on #442). */
   runs?: string[];
 }
 
@@ -120,7 +120,7 @@ interface Spot {
  * (Codex P2 on #431), while "L. A. K. E." still reads "lake". A single letter
  * alone is an initial. Spelled letters and initials may sit inside a name.
  *
- * v193 (review of #431): a full stop outside a run is kept as a place of its
+ * v195 (review of #431): a full stop outside a run is kept as a place of its
  * own, so a sentence break between two whole words can end a name (see
  * `saidTogether`). A run with no full stop after its last letter is NOT also
  * read without that letter: "L A K E, I need" stays "lakei", because reading
@@ -192,7 +192,7 @@ function matchAt(sp: Spot[], i: number, seq: string[]): number {
 /**
  * `a` then `b` in this turn, with only what may sit inside one name between them.
  *
- * v193: NOT A BARE FULL STOP BETWEEN TWO WHOLE WORDS. "about Testa. Lake
+ * v195: NOT A BARE FULL STOP BETWEEN TWO WHOLE WORDS. "about Testa. Lake
  * Pharmacy here" is two sentences, not the name Testa Lake (review of #431).
  * A full stop followed by "my last name is" or by a spelling is still one
  * person giving one name: measured on verified callers 2026-10-10..11-09,
@@ -218,7 +218,7 @@ function saidTogether(sp: Spot[], a: string[], b: string[]): boolean {
 }
 
 /**
- * v193: both halves spelled in one run ("T E S T A L A K E") are one place
+ * v195: both halves spelled in one run ("T E S T A L A K E") are one place
  * standing for the whole name, which matches neither half alone (review of
  * #431: 10 of about 750 verified callers' names came out whole only this way,
  * 2026-10-10..11-09, every one plain letters with no full stop anywhere

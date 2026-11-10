@@ -272,7 +272,7 @@ export function saidMoreThanTheirOwnIdentity(
     );
     if (leftover.length === 0) continue;
     /**
-     * v193: THE WORDS AROUND A NAME ARE IDENTITY ONLY WHEN NOTHING ELSE IS LEFT.
+     * v195: THE WORDS AROUND A NAME ARE IDENTITY ONLY WHEN NOTHING ELSE IS LEFT.
      *
      * v180 put `NAME_SCAFFOLDING` ("his", "her", "last", "patient", "su",
      * "se", ...) into IDENTITY_WORDS, so it was subtracted from every turn
@@ -317,7 +317,7 @@ export function saidMoreThanTheirOwnIdentity(
      * the PCP sweep, and on this lane it costs a clerk a cancellation.
      */
     /**
-     * v193, Codex round 4 on #442: AN INTRODUCTION IS COUNTED WITHOUT ITS
+     * v195, Codex round 4 on #442: AN INTRODUCTION IS COUNTED WITHOUT ITS
      * SCAFFOLDING. With no name held, "Her first name is Mary and her last
      * name is Smith" keeps "her her last" beside the name and is five words,
      * so the records sweep filed it with no request in it; `main` skipped it.
@@ -383,7 +383,7 @@ const IDENTITY_WORDS = new Set([
 /**
  * The words the name extractor accepts around a name ("last name", "mi
  * apellido es"). Not identity words: a turn made of nothing else is identity,
- * but they are never subtracted from a turn that says more (v193).
+ * but they are never subtracted from a turn that says more (v195).
  */
 const NAME_SCAFFOLDING_WORDS: ReadonlySet<string> = new Set(NAME_SCAFFOLDING);
 /** The words that make a turn an introduction (Codex round 4 on #442). */
