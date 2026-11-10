@@ -1450,12 +1450,13 @@ import { callEnvironment } from "./callRecord";
  * Queue-lane calls since about 11-07 whose caller answered a date-of-birth
  * ask: 161; 25 took a date-of-birth refusal and 17 of those filed with none.
  * The spoken-DOB reader now opens a window on a line that is only the format,
- * takes a bare "sorry" correction, one date across sentences, an agreeing
- * partial, and the agent's readback when the caller does not deny it; the
- * parser reads dates said in words, commas between digit groups, a repeated
- * century and a year said digit by digit; and a certain name-and-date-of-
- * birth match keeps the caller's spelling of the first name (`heardAs`) when
- * it shares the chart name's opening. 12 of the 17 now carry a date of birth.
+ * takes a bare "sorry" correction and an agreeing partial the caller does
+ * not deny; the parser reads dates said in words, commas between digit
+ * groups, a repeated century and a year said digit by digit; and a certain
+ * name-and-date-of-birth match keeps the caller's spelling of the first name
+ * (`heardAs`) when it shares the chart name's opening. Reading one date
+ * across sentences and the agent's readback were withdrawn at round 4 of the
+ * Codex review. 9 of the 17 now carry a date of birth.
  * Above main's v196 (#444, `fe330544`), which it contains along with v195
  * (#442, `e190383a`); v197 is #445 and v198 is #446 on their open branches.
  * No migration.

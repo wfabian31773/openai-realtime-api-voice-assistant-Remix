@@ -370,66 +370,6 @@ function isoFromParts(parts: { year: string; month: string; day: string }): stri
   return `${parts.year}-${parts.month}-${parts.day}`;
 }
 
-/**
- * ONE SENTENCE THAT IS A DATE, WHEN THE WHOLE TURN IS NOT ONE (v199).
- *
- * CAb6183fa70bab1e1575b9bcf867ad01e5, in shape: "Date of birth? <a remark>.
- * June 3, 1944. 82 years old." The whole turn reads as four numbers and a
- * month, which is not one date, so it was refused. Read sentence by sentence
- * it is one date and an age. Taken only when every sentence that reads as a
- * date reads as the SAME date; two different dates in one turn stay refused.
- */
-function isoFromSentences(text: string): string | undefined {
-  if (sentencesOf(text).length < 2) return undefined;
-  return oneDateIn(text);
-}
-
-function sentencesOf(text: string): string[] {
-  return text.split(/(?<=[.!?])\s+/).filter((x) => x.trim());
-}
-
-/**
- * THE ONE DATE IN A LINE READ SENTENCE BY SENTENCE (Codex rounds 1-3 on #447).
- *
- * Both places that take a date from one sentence of a longer line use this:
- * the caller's turn (shape E) and the agent's readback (shape H). The line
- * gives a date only when every sentence that reads as a date reads as the
- * same one, and no other sentence could be a second date or a rejection (see
- * `competesWithADate`). Anything else gives no date. A sentence that reads as
- * a date is the date, even with a "no" in it: "No, June 3, 1944." is a caller
- * giving the date, not rejecting it.
- */
-function oneDateIn(text: string): string | undefined {
-  const dates = new Set<string>();
-  for (const sentence of sentencesOf(text)) {
-    const parts = readDobQuietly(sentence);
-    if (parts) dates.add(isoFromParts(parts));
-    else if (competesWithADate(sentence)) return undefined;
-  }
-  return dates.size === 1 ? [...dates][0] : undefined;
-}
-
-/**
- * A SENTENCE THAT MAY CORRECT THE DATE BESIDE IT REFUSES THE LINE (Codex P1 on
- * #447). "June 3, 1944. No, June 4." is a caller correcting the day, and the
- * correction does not read as a date on its own (no year). Taking the one
- * sentence that does read would file the date the caller has just rejected.
- * So a sentence that does not read as a date, but opens with a correction,
- * holds a denial or correction word anywhere ("That's wrong."), names a month,
- * or carries two or more numbers, makes the line more than one date, and it
- * is refused. An age ("82 years old.") and a remark
- * carry none of those and stand aside, which is the shape E case this exists
- * for.
- */
-const OPENS_A_CORRECTION = /^(no|nope|nah|not|sorry|actually|wait|i mean|i meant|perdon|mejor dicho)\b/;
-
-function competesWithADate(sentence: string): boolean {
-  const folded = fold(sentence);
-  if (OPENS_A_CORRECTION.test(folded) || rejectsADate(sentence)) return true;
-  if (folded.split(' ').some((w) => monthNumberFromWord(w))) return true;
-  return numbersIn(sentence).length >= 2;
-}
-
 function isoFromUtterance(uttered: string): string | undefined {
   const after = textAfterLastCorrection(uttered);
   if (after) {
@@ -440,8 +380,7 @@ function isoFromUtterance(uttered: string): string | undefined {
     return undefined;
   }
   const parts = readDobQuietly(uttered);
-  if (parts) return isoFromParts(parts);
-  return isoFromSentences(uttered);
+  return parts ? isoFromParts(parts) : undefined;
 }
 
 /**
@@ -513,12 +452,6 @@ function readWindow(lines: readonly string[], from: number): WindowRead {
   return { kind: 'empty' };
 }
 
-/** The numbers an utterance holds, number words included. */
-function numbersIn(uttered: string): number[] {
-  const text = numberWordsToDigits(uttered) ?? fold(uttered);
-  return text.split(' ').filter((w) => /^\d+$/.test(w)).map((w) => Number(w));
-}
-
 /**
  * A MONTH AND A DAY THAT AGREE WITH THE DATE ALREADY GIVEN DO NOT CLEAR IT
  * (v199).
@@ -546,33 +479,15 @@ function agreeingPartial(uttered: string, iso: string): boolean {
 }
 
 /**
- * THE AGENT READ THE DATE BACK, AND THE CALLER DID NOT SAY NO (v199).
- *
- * The voice model hears the caller's audio, and the transcriber does not
- * always write what it heard: answers shaped like "6 3 12 del 49." and "4, 1952." are the
- * transcripts of answers the agent then read back correctly in its very next
- * line (in shape "nacida el tres de junio de mil novecientos cuarenta y nueve.
- * ¿Es correcto?" / "April fourth, nineteen fifty-two."), on
- * CA2c5949f3178f9e88f08a413b1accb606 and CAe89c5fec082bbaf2c9c58da4fdcd6f41.
- *
- * Taken only from the FIRST agent line after a window whose answer was an
- * attempted date the parser refused; only when exactly one date reads out of
- * that line and it is not an example ("por ejemplo", "for example"); only
- * when the year it reads agrees with the last number the caller said (the
- * whole year or its last two digits); and only when nothing the caller says
- * back, up to the agent's next line, is a "no", a correction, or a different
- * date.
- */
-const EXAMPLE_CUES = ['por ejemplo', 'for example', 'for instance', 'such as', 'like this'];
-/**
- * A "NO" ANYWHERE IN THE CALLER'S ANSWER IS A NO (Codex P1 on #447).
- * "Actually, no." starts with another word, so reading only the first word
- * missed it. The error this guards against is a date the caller rejected
- * reaching the ticket; reading a stray "no" as a denial only costs the
- * readback, which leaves the ticket where it was before v199.
+ * A DENIAL OR A CORRECTION ABOUT A HELD DATE (Codex P1 on #447). "No, not
+ * June 3" names the held month and day to reject them, and "Actually, June 4"
+ * corrects them; neither is a partial answer that agrees. A "no" anywhere
+ * counts, not only the first word. Reading a stray "no" as a denial only
+ * clears the held date, which leaves the ticket where it was before v199.
  */
 const DENIAL_WORDS = new Set(['no', 'nope', 'nah', 'incorrect', 'wrong', 'negative', 'incorrecto', 'incorrecta']);
 const DENIAL_PHRASES = ['not right', 'not correct', 'not it', 'not my', 'thats not', 'that s not', 'equivocad'];
+const CORRECTION_WORDS = /(^| )(actually|sorry|wait|i mean|i meant|perdon|mejor dicho|en realidad)( |$)/;
 
 function isDenial(uttered: string): boolean {
   const words = fold(uttered).split(' ').filter(Boolean);
@@ -581,68 +496,18 @@ function isDenial(uttered: string): boolean {
   return DENIAL_PHRASES.some((p) => padded.includes(` ${p}`));
 }
 
-/**
- * A denial, or a correction word anywhere ("Actually, April fifth"), in what
- * the caller says about a date already held or read back (Codex P1 on #447,
- * head d0aefbb5). Either one means that date is not the caller's answer.
- */
-const CORRECTION_WORDS = /(^| )(actually|sorry|wait|i mean|i meant|perdon|mejor dicho|en realidad)( |$)/;
-
 function rejectsADate(uttered: string): boolean {
   return isDenial(uttered) || CORRECTION_WORDS.test(fold(uttered));
-}
-
-/** What the caller said agrees with `iso`: the same full date, or its month and day. */
-function confirmsTheDate(uttered: string, iso: string): boolean {
-  const whole = readDobQuietly(uttered);
-  if (whole) return isoFromParts(whole) === iso;
-  return agreeingPartial(uttered, iso);
-}
-
-function readBack(lines: readonly string[], at: number, attempts: readonly string[]): string | undefined {
-  const agentLine = (lines[at] ?? '').slice(AGENT_PREFIX.length);
-  const folded = fold(agentLine);
-  if (EXAMPLE_CUES.some((c) => folded.includes(c))) return undefined;
-  // One date, and nothing in the line that corrects it ("Sorry, April fifth").
-  const iso = oneDateIn(agentLine);
-  if (!iso) return undefined;
-  const year = Number(iso.slice(0, 4));
-  // The year sits last in what the caller said ("6 3 12 del 49", "4, 1952").
-  const lastSaid = attempts.map((a) => numbersIn(a).slice(-1)[0]).filter((n): n is number => n !== undefined);
-  if (!lastSaid.some((n) => n === year || n === year % 100)) return undefined;
-  // The caller's whole answer to the readback: every caller line up to the
-  // agent's next line. A "no" on the second line counts as much as on the
-  // first (Codex P1 on #447).
-  let answered = false;
-  for (let j = at + 1; j < lines.length; j += 1) {
-    const next = lines[j] ?? '';
-    if (!next.startsWith(CALLER_PREFIX)) {
-      if (answered) break;
-      continue;
-    }
-    answered = true;
-    const said = next.slice(CALLER_PREFIX.length);
-    if (rejectsADate(said)) return undefined;
-    // A date of their own that is not the one read back is a correction too.
-    if (looksLikeDobAttempt(said) && !confirmsTheDate(said, iso)) return undefined;
-  }
-  return iso;
 }
 
 function readCallerAnswer(lines: readonly string[]): TranscriptRead {
   let latest: TranscriptRead = { kind: 'none' };
   let dobAskedBefore = false;
   let previousAgentLine: string | undefined;
-  let refusedAttempts: string[] | undefined;
   for (let i = 0; i < lines.length; i += 1) {
     const line = lines[i] ?? '';
     if (!line.startsWith(AGENT_PREFIX)) continue;
     const said = line.slice(AGENT_PREFIX.length);
-    if (refusedAttempts) {
-      const back = readBack(lines, i, refusedAttempts);
-      if (back) latest = { kind: 'date', iso: back };
-      refusedAttempts = undefined;
-    }
     const opens = opensDobWindow(said, { dobAskedBefore, previousAgentLine });
     if (mentionsDobTopic(fold(said))) dobAskedBefore = true;
     previousAgentLine = said;
@@ -653,7 +518,6 @@ function readCallerAnswer(lines: readonly string[]): TranscriptRead {
       const held = latest.kind === 'date' ? latest.iso : undefined;
       if (held && window.attempts.every((a) => agreeingPartial(a, held))) continue;
       latest = { kind: 'cleared' };
-      refusedAttempts = window.attempts;
     }
     // empty: confirmation / "sure." — leave the earlier answer standing.
   }
@@ -698,9 +562,7 @@ function readCallerAnswer(lines: readonly string[]): TranscriptRead {
  * "Yes that is correct" is not an attempt and leaves the earlier date
  * standing. "No, zero three thirty two of fifty" is an attempt, the parser
  * refuses it (there is no March 32nd), and the function returns undefined
- * rather than the value the caller has just rejected — unless the agent's
- * next line reads a date back that the caller does not deny (v199, see
- * `readBack`).
+ * rather than the value the caller has just rejected.
  *
  * Parsed QUIETLY. This runs over caller lines to find out whether any of them
  * is a date, so most of what it parses is not one, and every failure would

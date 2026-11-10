@@ -26,12 +26,14 @@
  *   I  a certain name-and-date-of-birth match, then a filing under the
  *      caller's spelling of the first name: `carry: name_mismatch`
  *
- * 14 of the 17 opened a question window; this build reads 11 of them and
- * leaves 3 unread, because reading them would be a guess. Of the other 3, one
- * is I and is rescued, and two callers volunteered the date before anyone
- * asked, which nothing here reads. I covers three calls in all: two rescued
- * (one of them also reads from its window) and one not, whose first name has
- * a different opening. So 12 of the 17 now carry a date of birth.
+ * 14 of the 17 opened a question window; this build reads 8 of them and
+ * leaves 6 unread: 3 because reading them would be a guess, and 3 that only
+ * shapes E and H read, which were withdrawn at round 4 of the Codex review
+ * (see the describe block below). Of the other 3, one is I and is rescued,
+ * and two callers volunteered the date before anyone asked, which nothing
+ * here reads. I covers three calls in all: two rescued (one of them also
+ * reads from its window) and one not, whose first name has a different
+ * opening. So 9 of the 17 now carry a date of birth.
  *
  * PHI: the SIDs are real; every name and date below is SYNTHETIC, chosen to
  * reproduce each real shape. The real lines were run separately, off the
@@ -79,18 +81,18 @@ interface Case {
 const CORPUS: Case[] = [
   {
     sid: 'CAb6183fa70bab1e1575b9bcf867ad01e5',
-    shape: 'A + E: the format finished in its own line; a date and an age in one turn',
+    shape: 'unread since round 4 of the #447 review: a date and an age in one turn (shape E withdrawn)',
     lines: [
       ASK_EN, C('Yes.'),
       A('with the month, then the day, then the year. [interrupted]'),
       C('Their birth?'),
       C("Date of birth? I'm retired, dear. June 3, 1944. 82 years old."),
     ],
-    want: '1944-06-03',
+    want: undefined,
   },
   {
     sid: 'CA2c5949f3178f9e88f08a413b1accb606',
-    shape: 'A + H: Spanish format line; the transcript is nonsense and the readback is in words',
+    shape: 'unread since round 4 of the #447 review: the date is only in the agent\'s readback (shape H withdrawn)',
     lines: [
       ASK_ES, C('Lopez'), ASK_ES, C('Sí.'),
       A('con el mes, luego el día y después el año.'),
@@ -98,7 +100,7 @@ const CORPUS: Case[] = [
       A('Gracias. Solo para confirmar, usted es Ana Lopez, nacida el tres de marzo de mil novecientos cuarenta y ocho. ¿Es correcto? [interrupted]'),
       C('Sí.'),
     ],
-    want: '1948-03-03',
+    want: undefined,
   },
   {
     sid: 'CA855265389fad269027dddc8b4b84e597',
@@ -138,14 +140,14 @@ const CORPUS: Case[] = [
   },
   {
     sid: 'CAe89c5fec082bbaf2c9c58da4fdcd6f41',
-    shape: 'H: the caller is heard as "4, 1952." and the agent reads the date back in words',
+    shape: 'unread since round 4 of the #447 review: the caller is heard as "4, 1952." and only the readback has the date (shape H withdrawn)',
     lines: [
       A('Glaucoma operation. And may I please have your date of birth, starting with the month, then the day, then the year?'),
       C('4'), C('4, 1952.'),
       A('April fourth, nineteen fifty-two.'),
       A('Let me get this logged for you — one moment.'),
     ],
-    want: '1952-04-04',
+    want: undefined,
   },
   {
     sid: 'CA5839c1001d626c79524c020609999c16',
@@ -219,6 +221,41 @@ describe('the 2026-11-07..10 corpus: each call reads its date of birth, or is le
       expect(dobFromCallerAnswer(c.lines)).toBe(c.want);
     });
   }
+});
+
+/**
+ * SHAPES E AND H ARE WITHDRAWN (round 4 of the Codex review of #447). Each
+ * round found another way a date the caller rejected could be read out of a
+ * longer line (E) or out of the agent's readback (H). Rather than patch a
+ * fifth time, both shapes are taken out: they read nothing, as on main. The
+ * three corpus calls they rescued (above) are the cost, 12 of the 17 down to
+ * 9. Every case below read a date on the round-3 build.
+ */
+describe('shapes E and H are withdrawn: a longer line or a readback reads nothing', () => {
+  it('a date with an age or a remark beside it (shape E)', () => {
+    expect(dobFromCallerAnswer([ASK_EN, C('Hmm. June 3, 1944. 82 years old.')])).toBeUndefined();
+    expect(dobFromCallerAnswer([ASK_EN, C('Hmm. No, June 3, 1944. 82 years old.')])).toBeUndefined();
+  });
+
+  it('a readback the caller says yes to (shape H), in English and Spanish', () => {
+    expect(
+      dobFromCallerAnswer([ASK_EN, C('4, 1952.'), A('April fourth, nineteen fifty-two. Is that right?'), C('Yes.')]),
+    ).toBeUndefined();
+    expect(
+      dobFromCallerAnswer([
+        ASK_EN, C('4, 1952.'), A('Nacida el cuatro de abril de mil novecientos cincuenta y dos. ¿Es correcto?'), C('Sí.'),
+      ]),
+    ).toBeUndefined();
+    const RB = A('April fourth, nineteen fifty-two. Is that correct?');
+    expect(dobFromCallerAnswer([ASK_EN, C('4, 1952.'), RB, C('Yes, April fourth.')])).toBeUndefined();
+  });
+
+  // The two round-4 findings, both now unread.
+  it('a readback corrected by a single ordinal', () => {
+    expect(
+      dobFromCallerAnswer([ASK_EN, C('4, 1952.'), A('April fourth, nineteen fifty-two. Is that correct?'), C('It should be the fifth.')]),
+    ).toBeUndefined();
+  });
 });
 
 describe('the format line opens a window only when it can be nothing else', () => {
@@ -300,10 +337,6 @@ describe('the other rules hold their lines', () => {
     expect(dobFromCallerAnswer([ASK_EN, C('June 3, 1944. Not the third. 82 years old.')])).toBeUndefined();
   });
 
-  it('an age or a remark beside the date still stands aside (shape E)', () => {
-    expect(dobFromCallerAnswer([ASK_EN, C('Hmm. June 3, 1944. 82 years old.')])).toBe('1944-06-03');
-  });
-
   // Codex P1 on #447 (head 7feecac0): the whole answer to the readback is read.
   it('a "no" that is not the first word denies the readback', () => {
     expect(
@@ -344,42 +377,12 @@ describe('the other rules hold their lines', () => {
     expect(dobFromCallerAnswer([ASK_EN, C("June 3, 1944. That's wrong. I'm 82.")])).toBeUndefined();
   });
 
-  it('a sentence that IS the date stands even with a "no" in it', () => {
-    expect(dobFromCallerAnswer([ASK_EN, C('Hmm. No, June 3, 1944. 82 years old.')])).toBe('1944-06-03');
-  });
-
   it('a readback the agent corrects inside the same line is not a readback', () => {
     expect(
       dobFromCallerAnswer([
         ASK_EN, C('4, 1952.'), A('April fourth, nineteen fifty-two. Sorry, April fifth. Is that right?'), C('Yes.'),
       ]),
     ).toBeUndefined();
-  });
-
-  it('a readback with nothing else in it still stands (Spanish too)', () => {
-    expect(
-      dobFromCallerAnswer([ASK_EN, C('4, 1952.'), A('April fourth, nineteen fifty-two. Is that right?'), C('Yes.')]),
-    ).toBe('1952-04-04');
-    expect(
-      dobFromCallerAnswer([
-        ASK_EN, C('4, 1952.'), A('Nacida el cuatro de abril de mil novecientos cincuenta y dos. ¿Es correcto?'), C('Sí.'),
-      ]),
-    ).toBe('1952-04-04');
-  });
-
-  it('a caller who repeats the read-back date confirms it', () => {
-    const RB = A('April fourth, nineteen fifty-two. Is that correct?');
-    expect(dobFromCallerAnswer([ASK_EN, C('4, 1952.'), RB, C('Yes, April fourth.')])).toBe('1952-04-04');
-    expect(dobFromCallerAnswer([ASK_EN, C('4, 1952.'), RB, C('Yes, April 4th, 1952.')])).toBe('1952-04-04');
-  });
-
-  it('a "no" after the agent\'s next line is an answer to that line, not to the readback', () => {
-    expect(
-      dobFromCallerAnswer([
-        ASK_EN, C('4, 1952.'), A('April fourth, nineteen fifty-two. Is that right?'), C('Yes.'),
-        A('Thank you. Is there anything else?'), C('No, that is all.'),
-      ]),
-    ).toBe('1952-04-04');
   });
 
   it('a readback after an answer that DID read is not needed and changes nothing', () => {
