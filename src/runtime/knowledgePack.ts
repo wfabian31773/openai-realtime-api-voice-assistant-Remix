@@ -90,7 +90,7 @@ function buildLocationBlock(): string {
   return AZUL_VISION_LOCATIONS.map(
     (loc) =>
       `${loc.name}: ${loc.address}, ${loc.city}, ${loc.state} ${loc.zip} | ` +
-      `phone ${loc.phone} | fax ${loc.fax} | ${loc.hours}`,
+      `phone ${loc.phone} | fax ${loc.fax || 'not on file'} | ${loc.hours}`,
   ).join("\n");
 }
 
