@@ -284,6 +284,48 @@ describe('the other rules hold their lines', () => {
     ).toBeUndefined();
   });
 
+  // Codex P1 on #447 (head 7feecac0): a correction the reader cannot read.
+  it('a correction that does not read refuses the turn; the date it corrected is not kept', () => {
+    expect(dobFromCallerAnswer([ASK_EN, C('June 3, 1944. No, June 4.')])).toBeUndefined();
+    expect(dobFromCallerAnswer([ASK_EN, C('June 3, 1944. Sorry, the 4th.')])).toBeUndefined();
+    expect(dobFromCallerAnswer([ASK_EN, C('June 3, 1944. Actually, June 4.')])).toBeUndefined();
+    expect(dobFromCallerAnswer([ASK_EN, C('June 3, 1944. I meant the fourth.')])).toBeUndefined();
+    // No cue at all: a second month, or a second run of numbers, is a second date.
+    expect(dobFromCallerAnswer([ASK_EN, C('June 3, 1944. June 4.')])).toBeUndefined();
+    expect(dobFromCallerAnswer([ASK_EN, C('6 3 1944. 6 4.')])).toBeUndefined();
+    // Shape E with a correction in it: the whole turn does not read, and the
+    // correction carries no month and one number, so only its opening word marks it.
+    expect(dobFromCallerAnswer([ASK_EN, C('June 3, 1944. Wait, the fourth. 82 years old.')])).toBeUndefined();
+  });
+
+  it('an age or a remark beside the date still stands aside (shape E)', () => {
+    expect(dobFromCallerAnswer([ASK_EN, C('Hmm. June 3, 1944. 82 years old.')])).toBe('1944-06-03');
+  });
+
+  // Codex P1 on #447 (head 7feecac0): the whole answer to the readback is read.
+  it('a "no" that is not the first word denies the readback', () => {
+    expect(
+      dobFromCallerAnswer([ASK_EN, C('4, 1952.'), A('April fourth, nineteen fifty-two. Is that right?'), C('Actually, no.')]),
+    ).toBeUndefined();
+  });
+
+  it('a "no" on the caller\'s second line denies the readback', () => {
+    expect(
+      dobFromCallerAnswer([
+        ASK_EN, C('4, 1952.'), A('April fourth, nineteen fifty-two. Is that right?'), C('Hmm.'), C('No.'),
+      ]),
+    ).toBeUndefined();
+  });
+
+  it('a "no" after the agent\'s next line is an answer to that line, not to the readback', () => {
+    expect(
+      dobFromCallerAnswer([
+        ASK_EN, C('4, 1952.'), A('April fourth, nineteen fifty-two. Is that right?'), C('Yes.'),
+        A('Thank you. Is there anything else?'), C('No, that is all.'),
+      ]),
+    ).toBe('1952-04-04');
+  });
+
   it('a readback after an answer that DID read is not needed and changes nothing', () => {
     expect(
       dobFromCallerAnswer([ASK_EN, C('April 4th, 1952.'), A('April fifth, nineteen fifty-two.')]),

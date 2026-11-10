@@ -386,8 +386,29 @@ function isoFromSentences(text: string): string | undefined {
   for (const sentence of sentences) {
     const parts = readDobQuietly(sentence);
     if (parts) dates.add(isoFromParts(parts));
+    else if (competesWithADate(sentence)) return undefined;
   }
   return dates.size === 1 ? [...dates][0] : undefined;
+}
+
+/**
+ * A SENTENCE THAT MAY CORRECT THE DATE BESIDE IT REFUSES THE TURN (Codex P1 on
+ * #447). "June 3, 1944. No, June 4." is a caller correcting the day, and the
+ * correction does not read as a date on its own (no year). Taking the one
+ * sentence that does read would file the date the caller has just rejected.
+ * So a sentence that does not read as a date, but opens with a correction or
+ * a denial, names a month, or carries two or more numbers, makes the turn
+ * more than one date, and it is refused. An age ("82 years old.") and a remark
+ * carry none of those and stand aside, which is the shape E case this exists
+ * for.
+ */
+const OPENS_A_CORRECTION = /^(no|nope|nah|not|sorry|actually|wait|i mean|i meant|perdon|mejor dicho)\b/;
+
+function competesWithADate(sentence: string): boolean {
+  const folded = fold(sentence);
+  if (OPENS_A_CORRECTION.test(folded)) return true;
+  if (folded.split(' ').some((w) => monthNumberFromWord(w))) return true;
+  return numbersIn(sentence).length >= 2;
 }
 
 function isoFromUtterance(uttered: string): string | undefined {
@@ -395,6 +416,9 @@ function isoFromUtterance(uttered: string): string | undefined {
   if (after) {
     const corrected = readDobQuietly(after);
     if (corrected) return isoFromParts(corrected);
+    // A correction the reader cannot read never falls back to the date it
+    // corrected (Codex P1 on #447).
+    return undefined;
   }
   const parts = readDobQuietly(uttered);
   if (parts) return isoFromParts(parts);
@@ -513,17 +537,25 @@ function agreeingPartial(uttered: string, iso: string): boolean {
  * attempted date the parser refused; only when exactly one date reads out of
  * that line and it is not an example ("por ejemplo", "for example"); only
  * when the year it reads agrees with the last number the caller said (the
- * whole year or its last two digits); and only when the caller's next line
- * is not a "no".
+ * whole year or its last two digits); and only when nothing the caller says
+ * back, up to the agent's next line, is a "no".
  */
 const EXAMPLE_CUES = ['por ejemplo', 'for example', 'for instance', 'such as', 'like this'];
-const DENIAL_FIRST_WORDS = new Set(['no', 'nope', 'nah', 'incorrect', 'wrong', 'negative']);
-const DENIAL_PHRASES = ['not right', 'not correct', 'thats wrong', 'that s wrong', 'no es', 'incorrecto', 'equivocad'];
+/**
+ * A "NO" ANYWHERE IN THE CALLER'S ANSWER IS A NO (Codex P1 on #447).
+ * "Actually, no." starts with another word, so reading only the first word
+ * missed it. The error this guards against is a date the caller rejected
+ * reaching the ticket; reading a stray "no" as a denial only costs the
+ * readback, which leaves the ticket where it was before v199.
+ */
+const DENIAL_WORDS = new Set(['no', 'nope', 'nah', 'incorrect', 'wrong', 'negative', 'incorrecto', 'incorrecta']);
+const DENIAL_PHRASES = ['not right', 'not correct', 'not it', 'not my', 'thats not', 'that s not', 'equivocad'];
 
 function isDenial(uttered: string): boolean {
-  const folded = fold(uttered);
-  const first = folded.split(' ')[0] ?? '';
-  return DENIAL_FIRST_WORDS.has(first) || DENIAL_PHRASES.some((p) => ` ${folded} `.includes(` ${p}`));
+  const words = fold(uttered).split(' ').filter(Boolean);
+  if (words.some((w) => DENIAL_WORDS.has(w))) return true;
+  const padded = ` ${words.join(' ')} `;
+  return DENIAL_PHRASES.some((p) => padded.includes(` ${p}`));
 }
 
 function readBack(lines: readonly string[], at: number, attempts: readonly string[]): string | undefined {
@@ -541,11 +573,18 @@ function readBack(lines: readonly string[], at: number, attempts: readonly strin
   // The year sits last in what the caller said ("6 3 12 del 49", "4, 1952").
   const lastSaid = attempts.map((a) => numbersIn(a).slice(-1)[0]).filter((n): n is number => n !== undefined);
   if (!lastSaid.some((n) => n === year || n === year % 100)) return undefined;
+  // The caller's whole answer to the readback: every caller line up to the
+  // agent's next line. A "no" on the second line counts as much as on the
+  // first (Codex P1 on #447).
+  let answered = false;
   for (let j = at + 1; j < lines.length; j += 1) {
     const next = lines[j] ?? '';
-    if (!next.startsWith(CALLER_PREFIX)) continue;
+    if (!next.startsWith(CALLER_PREFIX)) {
+      if (answered) break;
+      continue;
+    }
+    answered = true;
     if (isDenial(next.slice(CALLER_PREFIX.length))) return undefined;
-    break;
   }
   return iso;
 }
