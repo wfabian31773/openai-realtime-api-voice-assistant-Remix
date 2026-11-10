@@ -39,7 +39,7 @@
  * below: the bounded budget, and a refusal that hands the agent the question to
  * ask (src/pcp/refusals.ts).
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 const filed: any[] = [];
 
@@ -98,6 +98,10 @@ const build = (callId: string, callerPhone?: string) =>
 async function fileAfterAsking(agent: any, tool: string, args: unknown): Promise<string[]> {
   const asked: string[] = [];
   for (let attempt = 0; attempt < 6; attempt++) {
+    // A caller's turn takes longer than the records gate's batch window
+    // (RECORDS_ASK_BATCH_MS): back-to-back calls with no time between them
+    // are the model's own batch, which is asked the same question again.
+    if (attempt > 0) vi.setSystemTime(new Date(Date.now() + 3_000));
     const raw = await call(agent, tool, args);
     const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
     const result = parsed?.result ?? parsed;
@@ -109,6 +113,11 @@ async function fileAfterAsking(agent: any, tool: string, args: unknown): Promise
 
 beforeEach(() => {
   filed.length = 0;
+  vi.useFakeTimers({ toFake: ['Date'] });
+});
+
+afterEach(() => {
+  vi.useRealTimers();
 });
 
 describe('a records request survives an incomplete intake', () => {
