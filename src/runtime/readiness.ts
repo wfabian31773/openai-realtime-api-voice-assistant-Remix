@@ -1433,8 +1433,19 @@ import { callEnvironment } from "./callRecord";
  * (#440, `41a6854a`), v190 (#441, `ce0bee67`) and v188 (#438, `fca1e6f3`).
  * No migration.
  */
+/**
+ * v196 — BEAUMONT AND FULLERTON ARE OUR OFFICES (2026-11-10). Support Desk:
+ * on 2026-11-09 the records agent told a caller Beaumont "doesn't match any
+ * of our locations" (CA1169700883a2a647582fe0cd44b097ba) after
+ * resolve_location had verified it, because the office list every lane
+ * knows by heart (AZUL_VISION_LOCATIONS) held 31 offices against the
+ * Console's 33 active clinics. Beaumont and Fullerton are added from the
+ * Console's own rows, a missing fax reads "not on file", and a test pins
+ * the Console's active-clinic list one for one. Above main's v195 (#442,
+ * `e190383a`), which it contains. No migration.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v195-a-bare-full-stop-ends-a-heard-name-20261110";
+  "voice-runtime-v196-beaumont-and-fullerton-are-our-offices-20261110";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can
