@@ -105,12 +105,8 @@ interface Spot {
   between: boolean;
   /** Spelled letters or an initial, not a word the caller said whole. */
   spelled?: true;
-  /** v195: a spelled run's pieces between full stops, in order ("T E S T A. L A K E." -> testa, lake). */
-  parts?: string[];
   /** v195: a full stop outside a spelled run — a sentence ended here. */
   stop?: true;
-  /** v195: what a spelled run reads as when it is the whole name (Codex round 5 on #442). */
-  runs?: string[];
 }
 
 /**
@@ -126,10 +122,12 @@ interface Spot {
  * read without that letter: "L A K E, I need" stays "lakei", because reading
  * "V O R L I" as "vorl" too would validate a surname the caller never spelled
  * (Codex P2 on #442), and the shape refused no measured correct name.
+ *
+ * A run is never read as both halves at once ("T E S T A L A K E" is not
+ * "Testa Lake"): every reading of it tried on #442 accepted a name the caller
+ * did not spell, across six review rounds, and it would have rescued 10
+ * correct names in about 750. So it stays refused, as on main.
  */
-/** One-letter words a sentence can start with straight after a spelled run ("… L A K E. I need"). */
-const SENTENCE_START: ReadonlySet<string> = new Set(["i", "a", "y"]);
-
 function spots(line: string): Spot[] {
   const raw = line
     .normalize("NFD")
@@ -146,17 +144,8 @@ function spots(line: string): Spot[] {
     if (only.length === 1) out.push({ words: new Set(only), between: true, spelled: true });
     else if (only.length >= 2) {
       const words = new Set([only.join("")]);
-      const parts = letters.join("").split(".").filter(Boolean);
-      for (const part of parts) if (part.length >= 2) words.add(part);
-      // The readings of the run as ONE whole name: every letter, or every
-      // letter but a one-letter word that starts the next sentence straight
-      // after a piece of two letters or more ("… L A K E. I need").
-      const runs = [only.join("")];
-      const tail = parts[parts.length - 1];
-      if (parts.length >= 2 && tail.length === 1 && SENTENCE_START.has(tail) && parts[parts.length - 2].length >= 2) {
-        runs.push(parts.slice(0, -1).join(""));
-      }
-      out.push({ words, between: true, spelled: true, parts, runs });
+      for (const part of letters.join("").split(".")) if (part.length >= 2) words.add(part);
+      out.push({ words, between: true, spelled: true });
     }
     letters = [];
   };
@@ -218,36 +207,6 @@ function saidTogether(sp: Spot[], a: string[], b: string[]): boolean {
 }
 
 /**
- * v195: both halves spelled in one run ("T E S T A L A K E") are one place
- * standing for the whole name, which matches neither half alone (review of
- * #431: 10 of about 750 verified callers' names came out whole only this way,
- * 2026-10-10..11-09, every one plain letters with no full stop anywhere
- * inside). The model's name must be every letter of the run, in order, and
- * nothing else — no letter dropped or added (that is what refusing the i/a
- * strip keeps true, Codex P2 on #442). Where the first name ends and the last
- * begins is the model's reading.
- *
- * A run with a full stop between two pieces of two letters or more ("T E S T
- * A. L A K E.", "… L A K E. S M I T H.") is NEVER read as a whole name: the
- * stop is a boundary the transcriber wrote, any reading of the pieces either
- * crosses it or leaves a piece out (three Codex P2s on #442), and none of the
- * 10 was that shape. One-letter pieces ("T. E. S. T. A.") mark no boundary.
- *
- * The match is against the WHOLE run, never one of its pieces (Codex round 5
- * on #442: "T E S T A L A K E. S. M. I. T. H." validated "Testa Lake" while
- * the caller spelled more). The one exception is a one-letter word starting
- * the next sentence straight after the run (`runs` in `spots`).
- */
-function spelledWhole(sp: Spot[], a: string[], b: string[]): boolean {
-  const whole = a.join("") + b.join("");
-  return sp.some((s) => {
-    if (s.spelled !== true) return false;
-    const bounded = (s.parts ?? []).filter((p) => p.length >= 2).length >= 2;
-    return !bounded && (s.runs ?? []).includes(whole);
-  });
-}
-
-/**
  * The caller said this as ONE name, in one of their own turns: first and last
  * together, either order ("Jones, Mary"). Each word appearing somewhere in the
  * caller's lines is not enough (Codex P1 on #431): a clinic caller who gives
@@ -263,13 +222,7 @@ export function nameWasSaidByTheCaller(transcript: string, name: HeardName): boo
     .split(/\r?\n/)
     .filter((l) => /^\s*CALLER\s*:/i.test(l))
     .map((l) => spots(l.replace(/^\s*CALLER\s*:/i, "")))
-    .some(
-      (sp) =>
-        saidTogether(sp, first, last) ||
-        saidTogether(sp, last, first) ||
-        spelledWhole(sp, first, last) ||
-        spelledWhole(sp, last, first),
-    );
+    .some((sp) => saidTogether(sp, first, last) || saidTogether(sp, last, first));
 }
 
 function usable(part: string | null | undefined): string | undefined {
