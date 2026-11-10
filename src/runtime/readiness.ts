@@ -1434,6 +1434,17 @@ import { callEnvironment } from "./callRecord";
  * No migration.
  */
 /**
+ * v196 — BEAUMONT AND FULLERTON ARE OUR OFFICES (2026-11-10). Support Desk:
+ * on 2026-11-09 the records agent told a caller Beaumont "doesn't match any
+ * of our locations" (CA1169700883a2a647582fe0cd44b097ba) after
+ * resolve_location had verified it, because the office list every lane
+ * knows by heart (AZUL_VISION_LOCATIONS) held 31 offices against the
+ * Console's 33 active clinics. Beaumont and Fullerton are added from the
+ * Console's own rows, a missing fax reads "not on file", and a test pins
+ * the Console's active-clinic list one for one. Above main's v195 (#442,
+ * `e190383a`), which it contains. No migration.
+ */
+/**
  * v199 — A DATE OF BIRTH THE CALLER GAVE REACHES THE TICKET (2026-11-10).
  * Operator, on PCP-82755: understand why ticket fields are not populated.
  * Queue-lane calls since about 11-07 whose caller answered a date-of-birth
@@ -1442,11 +1453,12 @@ import { callEnvironment } from "./callRecord";
  * takes a bare "sorry" correction, one date across sentences, an agreeing
  * partial, and the agent's readback when the caller does not deny it; the
  * parser reads dates said in words, commas between digit groups, a repeated
- * century and a year said digit by digit; and a certain name-and-date-of-birth
- * match keeps the caller's spelling of the first name (`heardAs`) when it
- * shares the chart name's opening. 12 of the 17 now carry a date of birth.
- * Above main's v195 (#442, `e190383a`), which it contains; v196 is #444, v197
- * is #445 and v198 is #446 on their open branches. No migration.
+ * century and a year said digit by digit; and a certain name-and-date-of-
+ * birth match keeps the caller's spelling of the first name (`heardAs`) when
+ * it shares the chart name's opening. 12 of the 17 now carry a date of birth.
+ * Above main's v196 (#444, `fe330544`), which it contains along with v195
+ * (#442, `e190383a`); v197 is #445 and v198 is #446 on their open branches.
+ * No migration.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
   "voice-runtime-v199-a-spoken-date-of-birth-reaches-the-ticket-20261110";
