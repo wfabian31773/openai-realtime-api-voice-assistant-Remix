@@ -65,7 +65,9 @@ async function call(agent: any, name: string, args: Record<string, unknown> = {}
 /** Synthetic. The real calls had a dialable caller ID, which seeds the callback number. */
 const CALLER_PHONE = '+19515550123';
 const CALLER = { callerName: 'Sam Example', callerOrganization: 'Example Medical Group' };
-const PATIENT = { patientFirstName: 'Pat', patientLastName: 'Sample' };
+// The date of birth too: since v200 a scheduling intake asks it before it
+// runs out of questions (`schedulingAsksWhoItIsAbout.test.ts`).
+const PATIENT = { patientFirstName: 'Pat', patientLastName: 'Sample', patientDob: '1950-01-01' };
 
 function agentFor(callId: string) {
   return createPcpAgent((async () => ({ ok: true })) as never, { callId, callerPhone: CALLER_PHONE } as never);
@@ -183,7 +185,7 @@ describe('a transfer the director would refuse is never offered (Codex P2 on #42
 
   it('at lunch, a caller who asked for a person is filed through create_pcp_task, not handoff_to_pcp', async () => {
     vi.setSystemTime(LUNCH);
-    const { done } = await intakeToTheEnd('CAlu00000000000000000000000000001', 'schedule_appointment');
+    const { done } = await intakeToTheEnd('CAlu00000000000000000000000000001', 'schedule_appointment', true);
     vi.setSystemTime(NOT_LUNCH);
     expect(done.transferOnAsk).toBe(false);
     expect(done.nextStep).toBe('connect_answer_or_file');
@@ -204,7 +206,7 @@ describe('a transfer the director would refuse is never offered (Codex P2 on #42
   });
 
   it('outside lunch the same scheduling call is offered the transfer', async () => {
-    const { done } = await intakeToTheEnd('CAnl00000000000000000000000000001', 'schedule_appointment');
+    const { done } = await intakeToTheEnd('CAnl00000000000000000000000000001', 'schedule_appointment', true);
     expect(done.transferOnAsk).toBe(true);
     expect(done.guidance).toContain('If the caller asked to speak to a person, call handoff_to_pcp now');
   });

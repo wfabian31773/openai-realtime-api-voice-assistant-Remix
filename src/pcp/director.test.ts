@@ -137,10 +137,21 @@ describe('PcpDirector', () => {
    * rather than the default, precisely so that flipping the default above did
    * not quietly add four questions to a live call.
    */
-  it('still asks a scheduling caller nothing beyond professional identity', () => {
+  it('asks a scheduling caller who the request is about, and nothing else beyond professional identity', () => {
+    // v200 (2026-11-11): the HVA Hub sent back 284 of 287 PCP scheduling
+    // tickets that named no patient, so the patient's name and date of birth
+    // are asked before filing. Still never a relationship, facility type,
+    // title or email before the ticket exists.
     const director = new PcpDirector({ lunchClosure: () => false });
     director.update('sched-minimal', { ...professional, callPurpose: 'schedule_appointment' });
-    expect(director.next('sched-minimal').nextQuestion).toBeUndefined();
+    const asked: string[] = [];
+    for (let i = 0; i < 6; i++) {
+      const q = director.next('sched-minimal').nextQuestion;
+      if (!q) break;
+      asked.push(String(q.field));
+      director.update('sched-minimal', { [q.field]: q.field === 'patientDob' ? '1950-01-01' : 'x' } as never);
+    }
+    expect(asked).toEqual(['patientFirstName', 'patientLastName', 'patientDob']);
   });
 
   /**

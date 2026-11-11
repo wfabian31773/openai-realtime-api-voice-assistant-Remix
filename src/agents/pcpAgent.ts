@@ -1379,9 +1379,10 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
             callId, metadata, state, narrative, disposition, urgency, missing, transferAwaitingTicket,
           );
       if (toSchedulingHub.filed) return toSchedulingHub.filed as never;
-      // Only ever set when the Hub's answer was AMBIGUOUS — see the note on
-      // that branch. A proven 4xx carries nothing, because warning a staffer
-      // about a duplicate that cannot exist is noise.
+      // Set when the Hub's answer was AMBIGUOUS — see the note on that branch;
+      // a proven 4xx carries nothing, because warning a staffer about a
+      // duplicate that cannot exist is noise — and, since v200, when the
+      // request was kept here because no patient was named.
       if (toSchedulingHub.pcpNote) narrative = `${narrative}\n\n${toSchedulingHub.pcpNote}`;
 
       if (isRecordsRequest(state, recordsByNarrative)) narrative = `${narrative}${ticketDeliveryNote(state)}`;
@@ -2558,6 +2559,19 @@ function alreadyFiledOnThisCall(callId: string, ticketNumber: string | undefined
  * narrow case it could is a success carrying no ticket number, and a possible
  * duplicate the hub can close beats a request nobody holds.
  */
+/** What a scheduling ticket kept in PCP Support says about why. v200. */
+export const SCHEDULING_KEPT_FOR_NO_PATIENT_NOTE =
+  '[Scheduling request kept in PCP Support: no patient name was captured on the call, and the '
+  + 'HVA Hub cannot book without one. Get the patient\'s name and date of birth from the '
+  + 'requesting office, then move this to the HVA Hub.]';
+
+/** A YYYY-MM-DD date of birth as the create-ticket birth columns, or nothing. */
+export function dobColumns(dob: unknown): { patientBirthMonth?: string; patientBirthDay?: string; patientBirthYear?: string } {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(dob ?? '').trim());
+  if (!m) return {};
+  return { patientBirthYear: m[1], patientBirthMonth: m[2], patientBirthDay: m[3] };
+}
+
 const STATED_SCHEDULING_INTENT: Partial<Record<PcpCallPurposeSlug, StatedSchedulingIntent>> = {
   schedule_appointment: 'new',
   reschedule_appointment: 'reschedule',
@@ -2648,6 +2662,24 @@ async function fileSchedulingToHub(
   if (!redirect) return { filed: null };
 
   /**
+   * NO PATIENT, NO HUB. v200, 2026-11-11.
+   *
+   * Over the 21 days to 2026-11-11 the HVA Hub sent back 284 of the 287 PCP
+   * scheduling tickets that named no patient, every one to PCP Support, where
+   * a person then rang the office for the name. `next()` now asks who the
+   * request is about before it files; when the call still ends without a
+   * name, the ticket files in PCP Support directly, with a line saying why,
+   * instead of making the trip to the Hub and back.
+   */
+  const patientNamed = Boolean(
+    String(state.patientFirstName ?? '').trim() || String(state.patientLastName ?? '').trim(),
+  );
+  if (!patientNamed) {
+    console.info('[PCP] scheduling request with no patient name — kept in PCP Support, not sent to the HVA Hub');
+    return { filed: null, pcpNote: SCHEDULING_KEPT_FOR_NO_PATIENT_NOTE };
+  }
+
+  /**
    * WHOSE NUMBER GOES ON THE TICKET, and why it is the caller's.
    *
    * `CreateTicketParams` has one phone field. On this lane the person the hub
@@ -2726,6 +2758,10 @@ async function fileSchedulingToHub(
     requestReasonId: redirect.requestReasonId,
     patientFirstName: String(state.patientFirstName ?? '').trim() || 'Unknown',
     patientLastName: String(state.patientLastName ?? '').trim() || 'Patient',
+    // The date of birth the caller gave (YYYY-MM-DD, record_pcp_intake's
+    // shape). The Hub finds the chart by it; without these columns it reached
+    // the Hub only in prose, if at all.
+    ...dobColumns(state.patientDob),
     patientPhone: callback,
     preferredContactMethod: 'phone',
     description: body,

@@ -571,6 +571,27 @@ export const PATIENT_FIELDS: Array<keyof PcpConversationState> = ['patientFirstN
  */
 export const PATIENT_INTAKE_ORDER: Array<keyof PcpConversationState> = ['callPurpose', 'callerName', 'callbackNumber'];
 /**
+ * THE PURPOSES A PERSON IN THE HVA HUB WORKS FROM THE TICKET ALONE, and so the
+ * ones where who the call is about is asked before the request files. v200,
+ * 2026-11-11.
+ *
+ * Operator, 2026-11-11: "Staff are working too hard chasing down the right
+ * person for the tickets and without the proper information on the tickets,
+ * it makes it that much harder." Measured over the 21 days to 2026-11-11, PCP
+ * tickets the agent filed to the HVA Hub, by what the ticket carried: no
+ * patient name, 284 of 287 sent back to PCP Support; a name, 29 of 83; a name
+ * and a date of birth, 6 of 24. The Hub cannot book a patient it cannot find.
+ *
+ * These three allow HAND_OFF, which is why `connectsToHuman` skipped the
+ * patient block on them since v17. The exemption was for a caller headed for
+ * a PERSON, and it still holds for one (`headedForAPerson` in `next()`); a
+ * caller whose request is going to be filed now gets the patient's name and
+ * date of birth asked first.
+ */
+export const SCHEDULING_PURPOSES: ReadonlySet<string> = new Set([
+  'schedule_appointment', 'reschedule_appointment', 'cancel_appointment',
+]);
+/**
  * RULE ZERO 2b/2c — THE FORMAT GOES IN THE QUESTION.
  *
  *   "Everything else that we need, we create a funnel towards — in the
@@ -1164,6 +1185,26 @@ export class PcpDirector {
     // change is in policy.ts and is stated there.
     const connectsToHuman = Boolean(purpose?.allowedDispositions.includes('HAND_OFF'));
     /**
+     * A SCHEDULING REQUEST THAT IS GOING TO BE FILED ASKS WHO IT IS ABOUT.
+     * v200. See `SCHEDULING_PURPOSES` for the measurement.
+     *
+     * `connectsToHuman` kept the patient block off these purposes so a caller
+     * headed for a person is never held on a date of birth. That still holds,
+     * read the same way the transfer grant below reads it: the caller asked for
+     * a person, has not declined the queue, and a transfer could be granted
+     * (not after a failed one, not at lunch). Every other scheduling call ends
+     * in a ticket the HVA Hub works from, and a ticket with no patient on it
+     * comes back. A patient calling about themselves is never asked: their own
+     * name is the caller's name.
+     */
+    const handoffFailedEarly = Boolean(state.handoffStatus && state.handoffStatus !== 'CONNECTED');
+    const lunchClosureNow = this.options.lunchClosure?.() ?? isLunchClosure();
+    const headedForAPerson = Boolean(state.callerRequestedHuman)
+      && !state.callerDeclinedTheQueue && !handoffFailedEarly && !lunchClosureNow;
+    const schedulingNeedsThePatient = !isPatient
+      && Boolean(state.callPurpose && SCHEDULING_PURPOSES.has(state.callPurpose))
+      && !headedForAPerson;
+    /**
      * AND NOT TO A PATIENT, EITHER.
      *
      * PATIENT_FIELDS is `statedRelationship, patientFirstName, patientLastName,
@@ -1177,7 +1218,13 @@ export class PcpDirector {
      * walked straight into it. Caught on the third review pass by running the
      * director rather than reading it, 2026-08-17.
      */
-    if (!isPatient && purpose?.patientContextRequired && !connectsToHuman) required.push(...PATIENT_FIELDS);
+    if (!isPatient && purpose?.patientContextRequired && (!connectsToHuman || schedulingNeedsThePatient)) {
+      required.push(...PATIENT_FIELDS);
+    }
+    // The date of birth is what lets the Hub find the chart: 6 of 24 named
+    // tickets carrying one were sent back, against 29 of 83 without. Asked in
+    // parts (PROMPTS.patientDob), after the name, within the ask budget.
+    if (schedulingNeedsThePatient) required.push('patientDob');
     /**
      * A RECORDS REQUEST IS NOT COMPLETE UNTIL WE KNOW WHERE IT GOES.
      *
@@ -1305,7 +1352,7 @@ export class PcpDirector {
     //
     // Administrative PCP traffic only. The clinical/urgent path does not pass
     // through this director and is deliberately never gated on lunch.
-    const lunchClosure = this.options.lunchClosure?.() ?? isLunchClosure();
+    const lunchClosure = lunchClosureNow;
     if (lunchClosure && disposition === 'HAND_OFF') disposition = 'CREATE_TASK';
 
     const phiDisclosureAllowed = Boolean(purpose && (!purpose.containsPhi || state.verificationStatus !== 'failed'));

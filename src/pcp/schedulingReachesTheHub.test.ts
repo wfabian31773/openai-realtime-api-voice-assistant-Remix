@@ -191,10 +191,16 @@ describe('the intake did not lengthen when the default moved', () => {
   });
 
   it('a scheduling caller is never asked their professional relationship to the patient', () => {
+    // v200 asks a scheduling caller the patient's date of birth before filing
+    // (`schedulingAsksWhoItIsAbout.test.ts`), so the one question left for
+    // this fixture is that, and never the relationship this test exists for.
     const callId = 'CAschedintake1';
     pcpDirector.update(callId, { ...COORDINATOR, verificationStatus: 'pending' });
     const next = pcpDirector.next(callId);
-    expect(next.nextQuestion, `still asking: ${JSON.stringify(next.nextQuestion)}`).toBeUndefined();
+    expect(next.nextQuestion?.field).not.toBe('statedRelationship');
+    expect(next.nextQuestion?.field).toBe('patientDob');
+    pcpDirector.update(callId, { patientDob: '1950-01-01' });
+    expect(pcpDirector.next(callId).nextQuestion, 'still asking').toBeUndefined();
   });
 });
 

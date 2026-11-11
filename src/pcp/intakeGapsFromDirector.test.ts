@@ -21,8 +21,14 @@ const fresh = () => new PcpDirector({ lunchClosure: () => false });
 describe('intakeMissing comes from the director, per call reason', () => {
   it('a professional handoff-capable purpose with name and organization is complete', () => {
     const d = fresh();
-    d.update('a', { callPurpose: 'schedule_appointment', callerName: 'Alex', callerOrganization: 'Clinic' });
+    d.update('a', { callPurpose: 'peer_to_peer', callerName: 'Alex', callerOrganization: 'Clinic' });
     expect(d.next('a').intakeMissing).toEqual([]);
+  });
+
+  it('a professional scheduling request names the patient it is still missing (v200)', () => {
+    const d = fresh();
+    d.update('a2', { callPurpose: 'schedule_appointment', callerName: 'Alex', callerOrganization: 'Clinic' });
+    expect(d.next('a2').intakeMissing).toEqual(['patientFirstName', 'patientLastName', 'patientDob']);
   });
 
   it('never reports a field the director no longer asks', () => {
@@ -30,7 +36,11 @@ describe('intakeMissing comes from the director, per call reason', () => {
       const d = fresh();
       d.update('b', { callPurpose: purpose });
       const missing = d.next('b').intakeMissing;
-      for (const field of NEVER_ASKED) expect(missing, `${purpose} -> ${field}`).not.toContain(field);
+      // v200 asks a scheduling request the patient's date of birth.
+      const neverAsked = purpose === 'schedule_appointment'
+        ? NEVER_ASKED.filter((f) => f !== 'patientDob')
+        : NEVER_ASKED;
+      for (const field of neverAsked) expect(missing, `${purpose} -> ${field}`).not.toContain(field);
     }
   });
 
