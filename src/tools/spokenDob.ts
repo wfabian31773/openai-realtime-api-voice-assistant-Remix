@@ -500,7 +500,8 @@ function aboutTheBirthday(uttered: string, dateBefore = false): { text: string; 
   let kept: string[] = [];
   let withdrew = false;
   for (const sentence of uttered.split(/(?<=[.!?])\s+/)) {
-    if (deniesTheBirthday(sentence) && looksLikeDobAttempt(kept.join(' '))) {
+    const denial = birthdayDenial(sentence);
+    if (denial && looksLikeDobAttempt([...kept, denial.before].join(' '))) {
       kept = [];
       withdrew = true;
       continue;
@@ -576,19 +577,44 @@ function carriesADate(sentence: string): boolean {
  * round 5). "June third nineteen forty-four. That is not my birthday, it is my
  * surgery date." read June 3rd, 1944: the denial names the surgery, so the
  * other-date filter dropped it, and it opens with no correction cue. v205 and
- * v206 read none for the worded year and June 3rd for the digits. A sentence
- * with no date of its own that says the date is not the birthday ("That is
- * not my birthday", "It isn't my date of birth", "No es mi cumpleaños")
- * takes back the date before it in the window, whatever else it names, and
- * in a later caller line clears the held date. Over the 14 days to
- * 2026-11-11 no runtime caller line carried the denial, so it costs nothing
- * measured; clearing is the safe side, the date is asked again.
+ * v206 read none for the worded year and June 3rd for the digits.
+ *
+ * A denial ("not my birthday", "isn't my date of birth", "no es mi
+ * cumpleaños") whose subject is a pronoun or nothing ("That is not my
+ * birthday", "It isn't my date of birth", "June 3, 1944, that is not my
+ * birthday") is about the date said before it: it takes back a date said
+ * earlier in the same turn, the same sentence included, and in a later caller
+ * line clears the held date, even when it goes on to give another one
+ * ("That's not my birthday, my birthday is June 4, 1944."). A denial whose
+ * subject is a date ("December 5 is not my birthday, that is my surgery date")
+ * is about that date and is left to the rules for a named date (Codex P2 on
+ * #457). The subject is the clause before the denial, from the last comma,
+ * semicolon, colon or dash. Over the 14 days to 2026-11-11 no runtime caller
+ * line carried the denial, so it costs nothing measured; clearing is the safe
+ * side, the date is asked again.
  */
 const DENIES_THE_BIRTHDAY =
-  /(?:^| )(?:not|isn t|wasn t|no es|no era|no fue)(?: (?:really|even|actually|realmente))? (?:my|mi|the|la|el|su|her|his) (?:birthday|birthdate|birth date|date of birth|dob|d o b|cumpleanos|fecha de nacimiento)(?: |$)/;
+  /(?:^|[^a-z])(?:not|isn'?t|wasn'?t|no es|no era|no fue)(?: (?:really|even|actually|realmente))? (?:my|mi|the|la|el|su|her|his) (?:birthday|birthdate|birth date|date of birth|dob|d\.? ?o\.? ?b\.?|cumpleanos|fecha de nacimiento)(?![a-z])/;
 
-function deniesTheBirthday(sentence: string): boolean {
-  return DENIES_THE_BIRTHDAY.test(fold(sentence));
+/** Lower case, accents dropped, punctuation kept, curly apostrophes straight. */
+function lowerKeepingPunctuation(text: string): string {
+  return text.normalize('NFD').replace(/\p{Diacritic}/gu, '').toLowerCase().replace(/[\u2018\u2019]/g, "'").replace(/\s+/g, ' ');
+}
+
+/**
+ * The denial of the birthday in a sentence, when its subject is not a date of
+ * its own: `before` is the sentence's text before the denial's clause, which
+ * may hold the date being denied. `undefined` when there is no such denial.
+ */
+function birthdayDenial(sentence: string): { before: string } | undefined {
+  const text = lowerKeepingPunctuation(sentence);
+  const m = DENIES_THE_BIRTHDAY.exec(text);
+  if (!m) return undefined;
+  const prefix = text.slice(0, m.index + 1);
+  const cut = Math.max(...[',', ';', ':', ' - ', '\u2014', '\u2013'].map((c) => prefix.lastIndexOf(c)));
+  const subject = cut >= 0 ? prefix.slice(cut + 1) : prefix;
+  if (carriesADate(subject)) return undefined;
+  return { before: cut >= 0 ? prefix.slice(0, cut) : '' };
 }
 
 const CALLER_BIRTHDAY_WORDS = /(^| )(born|birthday|birth|naci|nacio|nacimiento|cumpleanos)( |$)/;
@@ -681,7 +707,7 @@ function rejectsTheHeldDate(uttered: string, iso: string): boolean {
   const sentences = uttered.split(/(?<=[.!?])\s+/);
   for (let i = 0; i < sentences.length; i += 1) {
     const sentence = sentences[i]!;
-    if (deniesTheBirthday(sentence)) return true;
+    if (birthdayDenial(sentence)) return true;
     if (!mayRejectTheBirthday(sentence) || !namesTheHeldDate(sentence, iso)) continue;
     if (negatesADate(sentence)) return true;
     const next = sentences[i + 1];
