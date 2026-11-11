@@ -38,10 +38,10 @@
  *      (REQUEST_FROM_RECORDING_DISABLED=1) answers null, and the sweep files
  *      exactly what it filed before.
  *
- * It never sets a request reason. On Medical Records the sentence goes in the
- * staff note only and the description stays the placeholder, because a records
- * description opens a case on a pathway the app picks and a swept ticket
- * states no requester (`RECORDS_KEEP_THE_PLACEHOLDER` in `requestSweep.ts`).
+ * It never sets a request reason. On Medical Records it is the description
+ * too since v203 (operator, 2026-11-11): a records request opens a case on
+ * pathway review, because a swept ticket states no requester; see the note
+ * above `REQUEST_FROM_RECORDING_NOTE` in `requestSweep.ts`.
  *
  * NOT CAUGHT, stated: a person's name the call does not hold, said with no
  * title ("Wants records for Maria sent over"). The description is staff-facing

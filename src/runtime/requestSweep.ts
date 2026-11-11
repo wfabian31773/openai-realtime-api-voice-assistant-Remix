@@ -777,25 +777,31 @@ export function looksInfoOnly(input: Pick<SweepInput, "transcript" | "toolEvents
 export const REQUEST_FROM_RECORDING_NOTE =
   "REQUEST READ FROM THE RECORDING — the agent did not write this request down; a model read it from the call after the caller hung up. Check the recording before acting:";
 
-const RECORDS_DEPARTMENT_ID = 16;
-
 /**
- * v201: ON MEDICAL RECORDS THE SENTENCE GOES ON THE STAFF SIDE ONLY. The
- * description stays what `main` sends, and so does the reason.
+ * v203: A SWEPT RECORDS REQUEST CARRIES WHAT WAS ASKED, AND OPENS A CASE ON
+ * PATHWAY REVIEW. Operator, 2026-11-11: "yes ... open it on pathway review."
  *
- * Measured 2026-11-11, agent tickets in department 16 over 14 days: the 64
- * with the placeholder description opened NO records case; 231 of the 244
- * with a real description opened one, on a pathway the ticketing app picks
- * from what the ticket says. A swept ticket states no requester, and a
- * sentence read from the recording ("Wants medical records sent to a new eye
- * doctor out of state", said by a spouse) would open a case on a guessed
- * pathway, on the statutory clock — the #73052 shape. Whether a swept
- * records request should open a case is the operator's (standing
- * instruction 1); until he says so, staff read what was asked in the staff
- * note and nothing opens on a guess. The one-line change is to drop the
- * department check in `buildSweptTicket`.
+ * v201 kept the placeholder description on Medical Records because a real
+ * description opens a records case and a swept ticket states no requester.
+ * Measured, department 16, 2026-10-30..11-10: 64 swept records tickets
+ * carried the placeholder and opened no case (the app's no-captured-reason
+ * rule). Now the sentence read from the recording is the description on
+ * Medical Records too, and the ticketing app decides the rest:
+ *
+ *   - a records request (its `recordsLinePurpose` reads 'records') opens a
+ *     case. The swept ticket sends no requestorType, requestPathway or
+ *     capClockApplies, so `decidePathway` falls to its text-only steps,
+ *     every one of which sets needsReview: the case opens on
+ *     `pathway_review`, and its clock runs from receipt until a person
+ *     confirms who asked (the app's rule for any request with no stated
+ *     requester, SOP §4.2);
+ *   - a sentence about something else (an appointment, a question) is
+ *     re-routed by the app's records-line classifier; a named one reaches
+ *     the department that works it, and a nameless one is refused (only
+ *     Medical Records files without a name), so the default filer files it
+ *     again with the placeholder, which is exactly what `main` filed.
  */
-export const RECORDS_KEEP_THE_PLACEHOLDER = true;
+
 
 export const INFO_ONLY_NOTE =
   "POSSIBLY INFO-ONLY (info_only): the agent gave a phone/fax number and the caller ended with thanks; no request tool ran. Close if no follow-up is needed.";
@@ -882,10 +888,7 @@ export function buildSweptTicket(
   const callerSaid = decision.callerSaid;
   const readFromRecording =
     !input.draftedRequest?.trim() && input.requestFromRecording?.trim() ? input.requestFromRecording.trim() : undefined;
-  const sentenceDescribes =
-    readFromRecording && !(RECORDS_KEEP_THE_PLACEHOLDER && departmentId === RECORDS_DEPARTMENT_ID)
-      ? readFromRecording
-      : undefined;
+  const sentenceDescribes = readFromRecording;
   const reason = resolveSweepReason({
     departmentId,
     capturedReason: input.capturedReason,
