@@ -215,6 +215,9 @@ describe('an appointment request that is not about today', () => {
     'reschedule my post op appointment',
     'reschedule my pre op appointment',
     'move my post operative visit',
+    // Codex on #450 (5302a5bc): a named procedure is an operation too.
+    'reschedule my vitrectomy next week',
+    'move my blepharoplasty appointment',
   ]) {
     it(`leaves "${text}" to the app`, () => {
       expect(routeAfterHoursTicket({ appointmentIntent: true, text, now: MORNING }).kind).not.toBe('scheduling');

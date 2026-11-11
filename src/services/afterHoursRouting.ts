@@ -51,6 +51,7 @@ import { MEDICAL_RECORDS_DEPARTMENT_ID } from '../tools/medicalRecordsTaxonomy';
 import { OPTICAL_DEPARTMENT_ID } from '../tools/opticalTaxonomy';
 import { HUB_DEPARTMENT_ID } from '../tools/hubTaxonomy';
 import { namesAnOperation } from '../tools/queueRouting';
+import { isSurgeryRequest } from '../tools/requestClassification';
 
 /** The Support Center's own pair for a post-op question in department 8. */
 export const POST_PROCEDURE_REQUEST = {
@@ -254,9 +255,17 @@ export function routeAfterHoursTicket(input: {
    * 7, Technicians 1) and staff moved 24 of them to the Hub, left 8 and moved
    * 5 elsewhere. The category is the model's (`request_category`), so this
    * reads no words to decide WHAT the call is about, only whether an
-   * operation is named, which keeps the surgery-date exception.
+   * operation is named, which keeps the surgery-date exception. A named
+   * procedure counts as well as the word (`isSurgeryRequest` reads the surgery
+   * taxonomy's own procedures, so a vitrectomy or a blepharoplasty is one too;
+   * Codex on #450, 5302a5bc).
    */
-  if (input.appointmentIntent === true && input.urgent !== true && !namesAnOperation(input.text)) {
+  if (
+    input.appointmentIntent === true &&
+    input.urgent !== true &&
+    !namesAnOperation(input.text) &&
+    !isSurgeryRequest(input.text)
+  ) {
     return { kind: 'scheduling', departmentId: HUB_DEPARTMENT_ID };
   }
   return { kind: 'default' };
