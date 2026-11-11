@@ -363,6 +363,20 @@ describe('Box Codex review of 7c8df0ca (#445)', () => {
     });
   }
 
+  it('a caller who states they are the patient and names a workplace stays on the clock', async () => {
+    const { agent } = build('CA29957eba32773563e1d4919e9f83dc6a');
+    await call(agent, 'record_pcp_intake', {
+      callerName: 'Testpatient Example', callerOrganization: 'Example Medical Group', statedRelationship: 'the patient themselves',
+      ...PATIENT, patientDob: '1950-01-02', ...FAX,
+    });
+    const filed = await call(agent, RECORDS, { narrative: NARRATIVE });
+    expect(filed.success, JSON.stringify(filed)).not.toBe(false);
+    const p = (ticketing.createTicket.mock.calls as unknown as unknown[][])[0]?.[0] as Record<string, unknown>;
+    expect(p, 'the records library filed it').toBeTruthy();
+    expect(p.departmentId).toBe(16);
+    expect(p.capClockApplies).not.toBe(false);
+  });
+
   it('an office that states a professional relationship still files off the clock', async () => {
     const { agent } = build('CA5df1d4e8dfc3084326b1059f68521b17');
     await call(agent, 'record_pcp_intake', {
