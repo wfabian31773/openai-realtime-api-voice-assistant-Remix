@@ -52,6 +52,7 @@ import {
   ticketDeliveryNote,
 } from '../pcp/recordsDelivery';
 import { ticketReadiness, nextRequiredAsk, annotationFor, MAX_BLOCKS } from '../pcp/ticketRequirements';
+import { recordsAskFor, recordsAskGuidance, recordsIdentityGaps } from '../pcp/recordsIntakeGate';
 import { namesAPatient, submitPcpTicket, submitPcpWithdrawal, type PcpTicketPayload } from '../pcp/pcpTicketing';
 import { toldTheCallerItWasRecorded } from '../pcp/toldItWasRecorded';
 import { intakeReplyForTheModel } from '../pcp/intakeNextStep';
@@ -653,6 +654,47 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
    * Per call, so it cannot leak between callers.
    */
   let ticketBlocksUsed = 0;
+  /**
+   * WHEN EACH RECORDS QUESTION WAS FIRST ASKED ON THIS CALL (v197).
+   *
+   * A field asked and not answered is not asked again, and a second call
+   * inside the batch window is the model's own batch, not an answer
+   * (recordsIntakeGate). Per call, like every budget here.
+   */
+  const recordsAsked = new Map<string, number>();
+  /**
+   * THE RECORDS TOOL'S OWN ANSWERS, written where every other reader looks.
+   *
+   * The same three moves record_pcp_intake makes, for the same reasons: a
+   * changed delivery method clears the old destination unless the same call
+   * carries a new one (Codex round 4 on #273); a stated callback number is no
+   * longer caller ID only; and the legacy ledger hears about it before the
+   * next tool runs.
+   */
+  const applyRecordsAnswers = async (
+    id: string,
+    stated: {
+      callerName?: string;
+      callerOrganization?: string;
+      callerIsThePatient?: boolean;
+      patientFirstName?: string;
+      patientLastName?: string;
+      callbackNumber?: string;
+      recordsDeliveryMethod?: (typeof PCP_RECORDS_DELIVERY_METHODS)[number];
+      recordsDeliveryDestination?: string;
+    },
+  ): Promise<void> => {
+    const facts = Object.fromEntries(
+      Object.entries(stated).filter(([, v]) => v !== undefined),
+    ) as typeof stated;
+    if (Object.keys(facts).length === 0) return;
+    const prior = pcpDirector.get(id).recordsDeliveryMethod;
+    if (facts.recordsDeliveryMethod && facts.recordsDeliveryMethod !== prior && !facts.recordsDeliveryDestination) {
+      pcpDirector.clearRecordsDestination(id);
+    }
+    pcpDirector.update(id, facts.callbackNumber ? { ...facts, callbackFromCallerIdOnly: false } : facts);
+    await syncDirectorFactsToLedger(id, pcpDirector.get(id));
+  };
   /**
    * THE ONE ROUND OF INTAKE A TRANSFER MAY COST, per call.
    *
@@ -2165,9 +2207,35 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
 
   const patientMedicalRecordsIntake = recordedTool({
     name: 'handle_patient_medical_records_request',
-    description: 'Create an isolated PCP manual-review task only for an explicit request for copies or release of a patient medical record. Never use for peer-to-peer or medical-group requests.',
-    parameters: z.object({ narrative: z.string().min(1).max(12000) }),
-    execute: async ({ narrative }) => {
+    description: 'Create an isolated PCP manual-review task only for an explicit request for copies or release of a patient medical record. Never use for peer-to-peer or medical-group requests. Put each answer it asks for in its own field.',
+    /**
+     * EVERY FIELD THIS TOOL ASKS FOR IS ONE OF ITS OWN ARGUMENTS (v197).
+     *
+     * It used to take a narrative and nothing else, while asking "by fax, by
+     * email, or by mail?". The answer had nowhere to go: the field lived on
+     * record_pcp_intake, which this tool's refusal never named. On
+     * CAcb222de3b32c7449aa01c3188adc5b6d the caller said "Fax." and the model
+     * called this tool three more times with fax in the narrative; the ticket
+     * (PCP-82755) said both "fax" and "Delivery method NOT captured". 15 of 15
+     * such PCP records tickets in 2026-10-27..11-10 had the same shape.
+     *
+     * The descriptions are short on purpose: each refusal names the field to
+     * fill (recordsAskGuidance), and the lane's tool definitions are held to a
+     * ceiling (toolFieldDescriptionsReachTheWire.test.ts).
+     */
+    parameters: z.object({
+      narrative: z.string().min(1).max(12000),
+      callerName: z.string().min(1).optional(),
+      callerOrganization: z.string().min(1).optional(),
+      callerIsThePatient: z.boolean().optional().describe('True only when the caller is the patient asking for their own records.'),
+      patientFirstName: z.string().min(1).optional(),
+      patientLastName: z.string().min(1).optional(),
+      callbackNumber: z.string().min(7).optional(),
+      recordsDeliveryMethod: z.enum(PCP_RECORDS_DELIVERY_METHODS).optional().describe("'unspecified' if they do not know."),
+      recordsDeliveryDestination: z.string().min(3).optional().describe('The fax number, email address or mailing address they gave.'),
+    }),
+    execute: async ({ narrative, ...stated }) => {
+      await applyRecordsAnswers(callId, stated);
       /**
        * ONE CALL, ONE TICKET — the same rule as create_pcp_task, read first,
        * before this tool reclassifies anything. A request already filed through
@@ -2199,55 +2267,42 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
        * request is still not discardable for want of a job title — it is just
        * no longer filed before we know whose records they are.
        */
-      {
-        const { state: preState } = ticketState(callId);
-        const readiness = ticketReadiness(preState, ticketBlocksUsed);
-        const ask = nextRequiredAsk(readiness);
-        if (ask) {
-          ticketBlocksUsed += 1;
-          return refusePcp(`missing_required_field:${ask.field}`, {
-            say: ask.prompt,
-            guidance:
-              'NOT AN ERROR — say nothing about a system or a problem. A records request cannot be filed until we know ' +
-              `whose records these are and how to reach the requester. Ask: "${ask.prompt}" then call this tool again.`,
-          });
-        }
-        const gapNote = annotationFor(readiness.annotate);
-        if (gapNote) narrative = `${narrative}\n\n${gapNote}`;
-      }
       /**
-       * DELIVERY IS GATED HERE, NOT ONLY IN THE DIRECTOR. Codex round 4.
+       * THE RECORDS GATE (v197): who is calling, whose records, how, where —
+       * in that order, one question at a time, each asked ONCE.
        *
-       * Two holes this closes, and both were real:
+       * Operator, 2026-09-16, opening every other PCP gate: "The only thing
+       * that we are gating is if it's medical records." This tool's identity
+       * check still read `ticketReadiness` with the module default, which that
+       * same day made "never hold", so whose records they were was never
+       * asked: 23 of 171 PCP records tickets in 2026-10-27..11-10 named no
+       * patient, and on 18 of those nobody asked. Operator, 2026-11-10, on
+       * PCP-82755: "what good does it do us if we create a ticket that leads
+       * us to more work than had we taken the call ourselves."
        *
-       *   1. THE PATIENT PATH SKIPPED IT ENTIRELY. A patient or family member
-       *      is stored as `patient_caller`, so the director's records branch —
-       *      which keys on `patient_medical_records_request` — never fired.
-       *      This tool then set that purpose ITSELF and filed immediately, so
-       *      the destination-less request the change exists to prevent still
-       *      went through.
-       *   2. NOTHING FORCED THE PROFESSIONAL PATH BACK THROUGH INTAKE either.
-       *      The director only shapes what `record_pcp_intake` returns; it
-       *      cannot stop this tool being called straight out.
-       *
-       * And it shares `ticketBlocksUsed`, which is what my own commit message
-       * claimed and was not true: MAX_BLOCKS only ever counted fields inside
-       * `ticketReadiness`, so a caller who declined the delivery question was
-       * asked it forever. Bounded here, by the budget that already exists.
+       * A field asked and not answered is not asked again (recordsIntakeGate),
+       * so a caller who will not say files with the gap written on it — the
+       * 2026-08-06 floor, no request lost. A caller who hangs up or chooses
+       * the queue before it files leaves no ticket (the v87 and v100 rulings).
+       * `ticketBlocksUsed` still advances on every ask so the Medical Records
+       * route's own floor keeps its meaning.
        */
       {
-        const { state: deliveryState } = ticketState(callId);
-        const deliveryAsk = deliveryAskFor(deliveryState);
-        if (deliveryAsk && ticketBlocksUsed < MAX_BLOCKS) {
-          ticketBlocksUsed += 1;
-          return refusePcp(`missing_required_field:${deliveryAsk.field}`, {
-            say: deliveryAsk.prompt,
-            guidance:
-              'NOT AN ERROR — say nothing about a system or a problem. We cannot send records without knowing ' +
-              `where they go. Ask: "${deliveryAsk.prompt}" then call this tool again. If the caller does not know ` +
-              "or will not say, record recordsDeliveryMethod as 'unspecified' and file — the ticket will say so.",
+        const { state: gateState } = ticketState(callId);
+        const now = Date.now();
+        const ask = recordsAskFor(gateState, recordsAsked, now);
+        if (ask) {
+          if (ask.spends) {
+            recordsAsked.set(ask.key, now);
+            ticketBlocksUsed += 1;
+          }
+          return refusePcp(`missing_required_field:${ask.field}`, {
+            say: ask.prompt,
+            guidance: recordsAskGuidance(ask),
           });
         }
+        const gapNote = annotationFor(recordsIdentityGaps(gateState));
+        if (gapNote) narrative = `${narrative}\n\n${gapNote}`;
       }
       const { state, missing } = ticketState(callId);
       /**
@@ -2285,10 +2340,52 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
        * routing change must not cost a filing, and a request in the wrong
        * department is recoverable while a request nowhere is not.
        */
+      /**
+       * AN OFFICE IS NOT THE PATIENT (v197).
+       *
+       * This tool always took the patient route, which names the requester
+       * "the patient themselves" and opens the case on the patient's own
+       * 15-day clock unless a relationship was stated. In 2026-10-27..11-10, 2
+       * of the 13 PCP records cases opened on that clock were a doctor's office
+       * (CA29957eba32773563e1d4919e9f83dc6a, CA5df1d4e8dfc3084326b1059f68521b17)
+       * — the #73052 defect. Now that the first question is "who am I speaking
+       * with, and where are you calling from?", a caller who names where they
+       * are calling from and has not said they are the patient takes the
+       * professional route, the one create_pcp_task's professional path uses:
+       * off the clock when the office can be classified (operator, 2026-09-14),
+       * PCP Support for a person to route when it cannot.
+       */
+      /**
+       * A STATED PERSONAL TIE WINS OVER A WORKPLACE (Box Codex review of
+       * 7c8df0ca, P1). A daughter who works at a medical group and says she is
+       * calling for her mother is her mother's personal representative, on the
+       * patient's clock (operator, 2026-09-13: "personal rep stands in for the
+       * patient"). The relationship she stated is read before the organisation
+       * she named, so where she works cannot take her request off the clock.
+       *
+       * And a relationship the classifier does not recognise ("daughter",
+       * "sister") is kept on the patient route too (Codex review of ccd2ebd6,
+       * P2): only a stated relationship with professional words in it
+       * (provider, health plan, legal) lets the workplace choose the
+       * professional route. The error this leaves is a professional who
+       * describes themselves in words no list holds being filed on the clock,
+       * which costs a clerk a re-label; the other error would switch a
+       * patient's own deadline off.
+       */
+      const { normalizeRequesterType } = await import('../tools/medicalRecordsTaxonomy');
+      const statedRelationship = String(state.statedRelationship ?? '').trim();
+      const statedTie = statedRelationship ? normalizeRequesterType(statedRelationship) : undefined;
+      const professionalWords = statedTie === 'provider' || statedTie === 'health_plan' || statedTie === 'legal';
+      const recordsRoute: 'patient' | 'professional' =
+        state.callerIsThePatient !== true
+        && String(state.callerOrganization ?? '').trim()
+        && (!statedRelationship || professionalWords)
+          ? 'professional'
+          : 'patient';
       const toMedicalRecords = enrichingTheTicket
         ? null
         : await fileToMedicalRecords(callId, metadata, state, narrative, {
-            route: 'patient',
+            route: recordsRoute,
             floorReached: ticketBlocksUsed >= MAX_BLOCKS,
             spendBlock: () => (ticketBlocksUsed += 1),
           });

@@ -1445,6 +1445,20 @@ import { callEnvironment } from "./callRecord";
  * `e190383a`), which it contains. No migration.
  */
 /**
+ * v197 — A PCP RECORDS REQUEST ASKS WHO, WHOSE, HOW AND WHERE (2026-11-10).
+ * Operator, on PCP-82755: "what good does it do us if we create a ticket that
+ * leads us to more work than had we taken the call ourselves." Of 171 PCP
+ * records tickets in 2026-10-27..11-10, 23 named no patient (18 never asked)
+ * and 15 said "Delivery method NOT captured" after the caller had answered.
+ * handle_patient_medical_records_request now asks who is calling, whose
+ * records, how and where, one at a time and each once, takes every answer as
+ * its own argument, and files with the gaps written when an answer does not
+ * come. A caller who names where they call from and is not the patient takes
+ * the professional records route (2 of 13 patient-clock cases in the window
+ * were an office). Above main's v196 (#444, `fe330544`), which it contains.
+ * No migration.
+ */
+/**
  * v198 — EACH FILING TOOL RECORDS THE FIELD NAMES IT RECEIVED (2026-11-10).
  * Operator, on PCP-82755: a daily review of every ticket, to understand why
  * fields are not populated. A field the caller gave and the ticket lacks has
@@ -1452,9 +1466,8 @@ import { callEnvironment } from "./callRecord";
  * the queue lanes' registry path recorded that. `tool_timeline` now carries
  * `supplied`, the argument NAMES (never a value) on every filing tool:
  * create_ticket, the PCP filing tools, escalate_to_human and file_*_ticket.
- * Logging only. Above main's v196 (#444, `fe330544`), which it contains along
- * with v195 (#442, `e190383a`); v197 is #445 on its open branch. No
- * migration.
+ * Logging only. Above main's v197 (#445, `ec3af3fd`), which it contains along
+ * with v196 (#444, `fe330544`). No migration.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
   "voice-runtime-v198-filing-tools-record-what-they-received-20261110";
