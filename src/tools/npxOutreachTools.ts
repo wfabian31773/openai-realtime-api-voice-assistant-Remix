@@ -221,11 +221,11 @@ export async function simulatedDemoTicket(params: CreateTicketParams): Promise<C
 
 /** What a session's call may reach: the demo NPX and the simulations on a
  * demo call, the live dependencies on any other. */
-function npxFor(s: OutreachSession): NpxOutreachClient {
-  return s.demo ? live().npxDemo : live().npx;
+function npxFor(demo: boolean): NpxOutreachClient {
+  return demo ? live().npxDemo : live().npx;
 }
-function cancelFor(s: OutreachSession): Deps['cancel'] {
-  return s.demo ? simulatedDemoCancel : live().cancel;
+function cancelFor(demo: boolean): Deps['cancel'] {
+  return demo ? simulatedDemoCancel : live().cancel;
 }
 function ticketFor(s: OutreachSession): Deps['fileTicket'] {
   return s.demo ? simulatedDemoTicket : live().fileTicket;
@@ -1111,7 +1111,7 @@ export async function bookOutreachSlot(args: {
   if (!personId || !appointmentId || !dob || !contact.firstName || !contact.lastName) {
     return { ok: false, error: 'record_incomplete' };
   }
-  const npx = demo ? live().npxDemo : live().npx;
+  const npx = npxFor(demo);
   const book = await npx.book({
     slotId: slot.slotId,
     medicalGroupName: field(contact, 'medical_group'),
@@ -1137,7 +1137,7 @@ export async function bookOutreachSlot(args: {
   // Booked. Now the Azul appointment, then tell NPX how that went. A cancel
   // that does not land is still safe: NPX lists the booking for CEC after
   // 15 minutes with no `cancelled` report.
-  const cancel = await (demo ? simulatedDemoCancel : live().cancel)({
+  const cancel = await cancelFor(demo)({
     appointmentId,
     personId,
     appointmentDate: field(contact, 'appointment_date'),
