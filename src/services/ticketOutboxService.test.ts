@@ -65,7 +65,12 @@ function chain(next: () => unknown) {
 
 vi.mock('../../server/db', () => ({
   db: {
-    update: () => chain(() => updateResults.shift()),
+    // A queued function is evaluated when its statement runs, so a test can
+    // answer a later claim with the payload an earlier write stored.
+    update: () => chain(() => {
+      const next = updateResults.shift();
+      return typeof next === 'function' ? (next as () => unknown)() : next;
+    }),
     select: () => chain(() => selectResults.shift() ?? []),
     insert: () => chain(() => insertResults.shift() ?? []),
   },
@@ -86,7 +91,7 @@ vi.mock('../../server/services/ticketingApiClient', () => ({
     r?.outcome === 'unavailable' || r?.success === false,
 }));
 
-const { TicketOutboxService, wrapCreateTicketPayload } = await import('./ticketOutboxService');
+const { TicketOutboxService, wrapCreateTicketPayload, afterRefusal } = await import('./ticketOutboxService');
 
 describe('checking whether an outbox payload was refused', () => {
   it.each([
@@ -645,5 +650,129 @@ it('returns the immediate filing response including the records form result', as
   createTicket.mockResolvedValueOnce({ success: true, ticketNumber: 'VA-TEST', form: { requested: true, sent: true, channel: 'sms' } });
   expect(await TicketOutboxService.attemptSend('ob-1', { liveCaller: true })).toMatchObject({
     success: true, ticketNumber: 'VA-TEST', form: { requested: true, sent: true, channel: 'sms' },
+  });
+});
+
+
+/**
+ * v205: A HELD REQUEST WITH A FALLBACK IS NOT DEAD-LETTERED ON ITS FIRST REFUSAL.
+ *
+ * The teardown sweep files a request in the words read from the recording and,
+ * when the app refuses those, files it again with the placeholder. That second
+ * try ran only when the refusal came back on the sweep's own POST. In an outage
+ * the POST is held here, the recovered app refuses the replay, and the row used
+ * to dead-letter: a nameless records-line appointment request was never filed.
+ * The payload now carries the description its filer would have tried next.
+ */
+const PLACEHOLDER = 'Callback request taken during your call. A team member will follow up with you.';
+const NAMELESS_RECORDS = {
+  departmentId: 16,
+  requestTypeId: 70,
+  requestReasonId: 540,
+  patientPhone: '5555550100',
+  description: 'Wants to change an upcoming appointment.',
+  priority: 'high' as const,
+  callData: { agentUsed: 'records', callSid: 'CA0001', transcript: 'Recovered at teardown — the agent did not file this request.' },
+  idempotencyKey: 'call-CA0001',
+};
+const ROUTED_AWAY_400 = {
+  success: false,
+  statusCode: 400,
+  error: 'Missing required information: patientFirstName, patientLastName (only a Medical Records request may file without a patient name)',
+};
+
+describe('v205: a refused replay sends its fallback once before dead-lettering', () => {
+  const held = () => wrapCreateTicketPayload(NAMELESS_RECORDS as never, { description: PLACEHOLDER });
+  const storedPayload = () => setPayloads.find((p) => p.status === 'pending' && 'payload' in p)?.payload;
+
+  it('files the request with the placeholder on the same key', async () => {
+    createTicket
+      .mockResolvedValueOnce(ROUTED_AWAY_400)
+      .mockResolvedValueOnce({ success: true, ticketNumber: 'VA-90001', ticketId: 1 });
+    updateResults.push(entry(held()), [{ id: 'ob-1' }], () => entry(storedPayload()), undefined);
+
+    const res = await TicketOutboxService.attemptSend('ob-1');
+
+    expect(res.success).toBe(true);
+    expect(res.ticketNumber).toBe('VA-90001');
+    expect(createTicket).toHaveBeenCalledTimes(2);
+    const [first, second] = createTicket.mock.calls.map((c) => c[0]);
+    expect(first.description).toBe(NAMELESS_RECORDS.description);
+    expect(second.description).toBe(PLACEHOLDER);
+    expect(second.idempotencyKey).toBe(first.idempotencyKey);
+    // The fallback rides in the envelope, never on the wire.
+    expect(first).not.toHaveProperty('refusalFallback');
+    expect(second).not.toHaveProperty('refusalFallback');
+    expect(setPayloads.some((p) => p.status === 'dead_letter')).toBe(false);
+    expect(setPayloads.find((p) => p.status === 'sent')?.ticketNumber).toBe('VA-90001');
+  });
+
+  it('stores the fallback payload under the claim it holds, and drops the fallback from it', async () => {
+    createTicket.mockResolvedValueOnce(ROUTED_AWAY_400).mockResolvedValueOnce({ success: true, ticketNumber: 'VA-90002' });
+    updateResults.push(entry(held()), [{ id: 'ob-1' }], () => entry(storedPayload()), undefined);
+
+    await TicketOutboxService.attemptSend('ob-1');
+
+    const reopen = setPayloads.find((p) => p.status === 'pending' && 'payload' in p)!;
+    expect(reopen.payload).toEqual({ kind: 'create_ticket_v1', params: { ...NAMELESS_RECORDS, description: PLACEHOLDER } });
+    expect(reopen.nextRetryAt).toBeNull();
+    // Statement order: claim, then the reopen. The reopen is keyed on the id
+    // AND the 'sending' status, so it cannot reopen a row another worker took.
+    expect(whereCols[1]).toEqual(expect.arrayContaining(['id', 'status']));
+  });
+
+  it('a fallback refused too is a dead letter, after exactly two POSTs', async () => {
+    createTicket.mockResolvedValue({ success: false, statusCode: 400, error: 'Missing required information: somethingElse' });
+    updateResults.push(entry(held()), [{ id: 'ob-1' }], () => entry(storedPayload()), undefined);
+
+    const res = await TicketOutboxService.attemptSend('ob-1');
+
+    expect(createTicket).toHaveBeenCalledTimes(2);
+    expect(res.terminal).toBe(true);
+    const dead = setPayloads.find((p) => p.status === 'dead_letter');
+    expect(dead?.refusalStatusCode).toBe(400);
+  });
+
+  it('a transport failure on the fallback leaves the fallback held for the worker', async () => {
+    createTicket.mockResolvedValueOnce(ROUTED_AWAY_400).mockResolvedValueOnce({ success: false, error: 'upstream 503' });
+    updateResults.push(entry(held()), [{ id: 'ob-1' }], () => entry(storedPayload()), undefined);
+
+    const res = await TicketOutboxService.attemptSend('ob-1');
+
+    expect(res.success).toBe(false);
+    expect(res.terminal).toBeUndefined();
+    expect(setPayloads.at(-1)?.status).toBe('failed');
+    expect((storedPayload() as { params: { description: string } }).params.description).toBe(PLACEHOLDER);
+  });
+
+  it('a reopen that lost the claim dead-letters without a second POST', async () => {
+    createTicket.mockResolvedValueOnce(ROUTED_AWAY_400);
+    updateResults.push(entry(held()), [], undefined);
+
+    const res = await TicketOutboxService.attemptSend('ob-1');
+
+    expect(createTicket).toHaveBeenCalledOnce();
+    expect(res.terminal).toBe(true);
+  });
+
+  it('a payload with no fallback dead-letters on its first refusal, as before', async () => {
+    createTicket.mockResolvedValueOnce(ROUTED_AWAY_400);
+    updateResults.push(entry(wrapCreateTicketPayload(NAMELESS_RECORDS as never)), undefined);
+
+    await TicketOutboxService.attemptSend('ob-1');
+
+    expect(createTicket).toHaveBeenCalledOnce();
+    expect(setPayloads.find((p) => p.status === 'dead_letter')?.refusalStatusCode).toBe(400);
+  });
+
+  it('a fallback the same as the description, or blank, is never stored', () => {
+    expect(wrapCreateTicketPayload(NAMELESS_RECORDS as never, { description: NAMELESS_RECORDS.description }))
+      .not.toHaveProperty('refusalFallback');
+    expect(wrapCreateTicketPayload(NAMELESS_RECORDS as never, { description: '  ' })).not.toHaveProperty('refusalFallback');
+    expect(wrapCreateTicketPayload(NAMELESS_RECORDS as never, { description: PLACEHOLDER }).params)
+      .not.toHaveProperty('refusalFallback');
+    expect(afterRefusal({ kind: 'create_ticket_v1', params: NAMELESS_RECORDS, refusalFallback: { description: NAMELESS_RECORDS.description } }))
+      .toBeUndefined();
+    expect(afterRefusal({ ...NAMELESS_RECORDS })).toBeUndefined();
   });
 });

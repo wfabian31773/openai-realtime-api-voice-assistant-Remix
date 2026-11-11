@@ -1526,7 +1526,7 @@ registerTool({
        */
       const known = verifiedIdentityFor(callSid);
       const requestText = sanitizeForSms(description).value.trim();
-      const recoveryWith = (recoveryDescription: string) => createTicketDurable({
+      const recoveryWith = (recoveryDescription: string, refusalFallbackDescription?: string) => createTicketDurable({
         departmentId: MEDICAL_RECORDS_DEPARTMENT_ID,
         requestTypeId: other.requestTypeId,
         requestReasonId: other.requestReasonId,
@@ -1568,8 +1568,13 @@ registerTool({
         // stores a key only once a ticket exists, so the refusal left none,
         // and the sweep collapses onto this ticket instead of opening another.
         ...(isTwilioCallSid(callSid) ? { idempotencyKey: `call-${callSid}${scope}` } : {}),
-      });
-      let recovery = await recoveryWith(requestText || SWEPT_TICKET_DESCRIPTION);
+      // Held with the outbox row too, so a recovery queued in an outage and
+      // refused on its replay still files with the placeholder (v205).
+      }, ...(refusalFallbackDescription ? [{ refusalFallbackDescription }] : []));
+      let recovery = await recoveryWith(
+        requestText || SWEPT_TICKET_DESCRIPTION,
+        requestText ? SWEPT_TICKET_DESCRIPTION : undefined,
+      );
       if (requestText && !recovery.success && !(recovery as { queued?: boolean }).queued && recovery.terminal) {
         console.warn(
           `[records] the recovery with the request text was refused too — retrying with the placeholder ` +

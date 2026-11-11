@@ -51,15 +51,51 @@ import { isTerminalRefusal } from './terminalRefusal';
 
 export const CREATE_TICKET_PAYLOAD_KIND = 'create_ticket_v1';
 
+/**
+ * A DESCRIPTION TO SEND INSTEAD WHEN THE FAR SIDE REFUSES THE FIRST ONE.
+ *
+ * The teardown sweep files a request in the words read from the recording, and
+ * when the app refuses that (a nameless records-line request whose sentence
+ * reads as an appointment is routed out of Medical Records, and only Medical
+ * Records takes a nameless request) the sweep files once more with the
+ * placeholder, which the app never re-routes or re-refuses. That second try
+ * runs only when the refusal comes back on the call's own POST. During an
+ * outage the POST is held here instead, the recovered app refuses the replay,
+ * and the row dead-lettered: the request was never filed (v205). So the
+ * payload carries the description its filer would have tried next, and the
+ * worker sends it once, on the same key, before giving up.
+ *
+ * It lives in the jsonb envelope, beside `params` and never inside it, so it
+ * never reaches the wire and no migration stands between it and a deploy.
+ */
+export interface RefusalFallback {
+  description: string;
+}
+
 export interface CreateTicketOutboxPayload {
   kind: typeof CREATE_TICKET_PAYLOAD_KIND;
   params: CreateTicketParams;
+  refusalFallback?: RefusalFallback;
 }
 
 export type OutboxPayload = SyncAgentTicketParams | CreateTicketOutboxPayload;
 
-export function wrapCreateTicketPayload(params: CreateTicketParams): CreateTicketOutboxPayload {
-  return { kind: CREATE_TICKET_PAYLOAD_KIND, params };
+export function wrapCreateTicketPayload(
+  params: CreateTicketParams,
+  refusalFallback?: RefusalFallback,
+): CreateTicketOutboxPayload {
+  const fallback = refusalFallback?.description?.trim() && refusalFallback.description !== params.description
+    ? { refusalFallback: { description: refusalFallback.description } }
+    : {};
+  return { kind: CREATE_TICKET_PAYLOAD_KIND, params, ...fallback };
+}
+
+/** The payload to send after a refusal, when this one carries a fallback. */
+export function afterRefusal(payload: unknown): CreateTicketOutboxPayload | undefined {
+  if (!isCreateTicketPayload(payload)) return undefined;
+  const description = payload.refusalFallback?.description;
+  if (!description?.trim() || description === payload.params.description) return undefined;
+  return { kind: CREATE_TICKET_PAYLOAD_KIND, params: { ...payload.params, description } };
 }
 
 export function isCreateTicketPayload(payload: unknown): payload is CreateTicketOutboxPayload {
@@ -411,6 +447,28 @@ export class TicketOutboxService {
        * arrives after the outage it was built to catch.
        */
       if (isTerminalRefusal(response.statusCode)) {
+        /**
+         * ONE MORE TRY WITH THE FALLBACK, THEN THE DEAD LETTER (v205).
+         *
+         * Not a retry of the same bytes: the payload's own filer named the
+         * description to send after a refusal (`RefusalFallback`). It replaces
+         * the stored payload, which drops the fallback, so a second refusal
+         * dead-letters as before. Guarded on `sending`, the claim this send
+         * holds. Same idempotency key: the refusal stored none on the far side.
+         */
+        const next = afterRefusal(stored);
+        if (next) {
+          console.warn(
+            `[TICKET OUTBOX] ↻ REFUSED (HTTP ${response.statusCode}) — ${outboxId} carries a fallback ` +
+              'description; sending it once with that before dead-lettering',
+          );
+          const reopened = await db
+            .update(ticketOutbox)
+            .set({ payload: next as any, status: 'pending', nextRetryAt: null, lastError: error, updatedAt: new Date() })
+            .where(and(eq(ticketOutbox.id, outboxId), eq(ticketOutbox.status, 'sending')))
+            .returning({ id: ticketOutbox.id });
+          if (reopened.length > 0) return await TicketOutboxService.attemptSend(outboxId, options);
+        }
         console.error(
           `[TICKET OUTBOX] ☠ REFUSED (HTTP ${response.statusCode}) — dead-lettering ${outboxId} ` +
             `without retrying: ${loggableTicketingError(error, response.statusCode)}`,
