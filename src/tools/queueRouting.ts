@@ -306,10 +306,12 @@ const CONTACT_LENS = /\b(?:contacts|contact[- ]lens(?:es)?|lentes de contacto)\b
  * pain, redness and blur; a lens wearer's complaint is usually an allergy, an
  * itch, an irritation or an infection. Those keep the request clinical, on the
  * medication line, before the lens sends it to Optical. A scratched LENS is
- * the lens, so `scratch` is read only as a feeling or an abrasion.
+ * the lens, so `scratch` is read only as a feeling or an abrasion, and a lens
+ * that keeps tearing is a damaged lens: `tearing` counts only with an eye as
+ * its subject or as "tearing up" (Codex P2 on #453).
  */
 const LENS_SYMPTOM =
-  /\b(?:allerg\w*|reactions?|itch\w*|irritat\w*|infect\w*|inflam\w*|sore(?:ness)?|scratchy|(?:corneal )?abrasion|sting(?:s|ing)?|watery|watering|tearing|gritty|foreign (?:body|object)|something (?:stuck )?in (?:my|her|his|their|the) eyes?|alergi\w*|picaz\w*|picor|comezon|irritad\w*|irritacion|infeccion|ardor|lagrime\w*)\b/;
+  /\b(?:allerg\w*|reactions?|itch\w*|irritat\w*|infect\w*|inflam\w*|sore(?:ness)?|scratchy|(?:corneal )?abrasion|sting(?:s|ing)?|watery|watering|eyes?\s+(?:(?:is|are|keeps?|ha(?:s|ve) been|been|started)\s+)?tearing|tearing\s+(?:up|eyes?)|gritty|foreign (?:body|object)|something (?:stuck )?in (?:my|her|his|their|the) eyes?|alergi\w*|picaz\w*|picor|comezon|irritad\w*|irritacion|infeccion|ardor|lagrime\w*)\b/;
 /**
  * v205 — A DRUG NAMED BESIDE THE LENSES. "Lost his contacts and needs a refill
  * of his eye drops" asks for the drops. `refill` and `pharmacy` are not read

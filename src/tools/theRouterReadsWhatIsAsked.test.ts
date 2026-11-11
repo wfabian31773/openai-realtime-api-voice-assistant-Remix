@@ -90,6 +90,19 @@ describe('2. a contact-lens symptom stays clinical on the medication line', () =
   it('a scratched LENS is the lens, and goes to Optical', () => {
     expect(departmentFor('My contact lens is scratched and I need a replacement.', TECH)).toBe(OPTICAL);
   });
+
+  it('a lens that keeps tearing is a damaged lens, and goes to Optical (Codex P2 on #453)', () => {
+    expect(departmentFor('My contact lenses keep tearing and I need replacements.', TECH)).toBe(OPTICAL);
+    expect(departmentFor('Her contacts are tearing at the edge; she needs a new box.', TECH)).toBe(OPTICAL);
+  });
+
+  it.each([
+    'My eyes keep tearing since I started the new contacts.',
+    'Her eye is tearing with the contact lenses in.',
+    'Patient is tearing up with her contacts in.',
+  ])('an eye that tears is a symptom and stays on tech: %s', (text) => {
+    expect(departmentFor(text, TECH)).toBe(TECH);
+  });
 });
 
 describe('5. a drug named beside the lenses stays on the medication line', () => {
