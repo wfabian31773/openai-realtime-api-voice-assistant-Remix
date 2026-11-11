@@ -1598,8 +1598,26 @@ import { callEnvironment } from "./callRecord";
  * main's v207 (#454, `b7f2b58e`), which it contains along with v208 (#455,
  * `9ee3b954`). v209 is #457 on its open branch. No migration.
  */
+/**
+ * v211 — THE NPX OUTREACH TEXT AND ITS FOUR-STEP BOOKING LINK (2026-11-11).
+ * Operator: "i want them all to receive a text message as well", "a
+ * customized link that lets them book in 4 easy steps", from the number NPX
+ * already uses, in the approved wording. One text per NPX outreach contact
+ * from NPX_OUTREACH_CALLER_ID, inside the calling window, never to a
+ * do-not-contact number or a contact who booked, declined, opted out or is a
+ * wrong number; the text's state lives in `custom_data.outreach_text`, which
+ * the source refresh now carries over instead of overwriting. The link is a
+ * random 256-bit token (the row holds its SHA-256) to /book/<token>: the date
+ * of birth (two tries per link, then locked), a day and city, a time, then
+ * confirm, booking through the call's own bookOutreachSlot. STOP to the
+ * number writes `sms_stop` (POST /voice/outbound/<slug>/sms). Dark: nobody is
+ * texted until NPX_OUTREACH_TEXTS=1, on top of every call switch. Above
+ * main's v210 (#456, `c9bb40fd`), which it contains along with v207 (#454,
+ * `b7f2b58e`) and v208 (#455, `9ee3b954`); v212 is #457 on its open
+ * branch. No migration.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v210-npx-calls-on-open-holidays-20261111";
+  "voice-runtime-v211-npx-text-and-booking-link-20261111";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

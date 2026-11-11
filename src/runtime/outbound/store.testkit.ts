@@ -10,6 +10,8 @@ import {
   CALLBACK_ATTEMPT_NUMBER,
   DIALABLE_STATUSES,
   NOT_PLACED,
+  OUTREACH_TEXT_KEY,
+  TEXTABLE_STATUSES,
   dncKey,
   type AttemptFinish,
   type ContactRow,
@@ -21,6 +23,7 @@ import {
 } from "./store";
 import type { SourceContact } from "./campaign";
 import { ChannelDoNotContact, SMS_DNC_SOURCE } from "./channelDnc";
+import type { OutreachTextRecord } from "./outreachText";
 
 export interface FakeAttempt {
   id: string;
@@ -327,7 +330,9 @@ export class FakeOutboundStore implements OutboundStore {
         existing.phone = s.phone;
         existing.firstName = s.firstName;
         existing.lastName = s.lastName;
-        existing.customData = s.data;
+        // Same rule as the SQL: the outreach text's state is the row's (v211).
+        const held = existing.customData[OUTREACH_TEXT_KEY];
+        existing.customData = held === undefined ? s.data : { ...s.data, [OUTREACH_TEXT_KEY]: held };
       } else {
         const id = `src-${++this.seq}`;
         this.addContact({
@@ -364,5 +369,80 @@ export class FakeOutboundStore implements OutboundStore {
   async updateContactPhone(contactId: string, phone: string): Promise<void> {
     const c = this.contacts.get(contactId);
     if (c) c.phone = phone;
+  }
+
+  // ── The outreach text and its booking page (v211). Same rules as the SQL. ──
+
+  /** The campaign key contactByTextToken answers with (`campaignKey` when set). */
+  textCampaignKey = "npx-outreach";
+
+  private textOf(c: ContactRow): OutreachTextRecord | null {
+    const raw = c.customData[OUTREACH_TEXT_KEY];
+    return raw && typeof raw === "object" ? (raw as OutreachTextRecord) : null;
+  }
+
+  private textDue(c: ContactRow, now: Date): boolean {
+    if (!(TEXTABLE_STATUSES as readonly string[]).includes(c.status)) return false;
+    if (c.customData.plugin_live === true || c.customData.plugin_live === "true") return false;
+    const t = this.textOf(c);
+    if (!t) return true;
+    return t.state === "retry" && !!t.retry_after && new Date(t.retry_after).getTime() <= now.getTime();
+  }
+
+  async textableContacts(campaignId: string, now: Date, limit: number): Promise<ContactRow[]> {
+    return [...this.contacts.values()]
+      .filter((c) => c.campaignId === campaignId && this.textDue(c, now))
+      .slice(0, limit)
+      .map((c) => ({ ...c, customData: { ...c.customData } }));
+  }
+
+  /** How many claims landed, for the "never texted twice" tests. */
+  textClaims = 0;
+
+  async claimText(contactId: string, now: Date, record: OutreachTextRecord): Promise<ContactRow | null> {
+    const c = this.contacts.get(contactId);
+    if (!c || !this.textDue(c, now)) return null;
+    c.customData = { ...c.customData, [OUTREACH_TEXT_KEY]: { ...record } };
+    this.textClaims += 1;
+    return { ...c, customData: { ...c.customData } };
+  }
+
+  async patchText(contactId: string, patch: Partial<OutreachTextRecord>): Promise<void> {
+    const c = this.contacts.get(contactId);
+    const t = c ? this.textOf(c) : null;
+    if (!c || !t) return;
+    // JSON's own rule: an undefined field is not written.
+    const defined = Object.fromEntries(Object.entries(patch).filter(([, v]) => v !== undefined));
+    c.customData = { ...c.customData, [OUTREACH_TEXT_KEY]: { ...t, ...defined } };
+  }
+
+  async contactByTextToken(tokenHash: string): Promise<{ contact: ContactRow; campaignKey: string } | null> {
+    const found = [...this.contacts.values()].filter((c) => this.textOf(c)?.token_hash === tokenHash);
+    if (found.length !== 1) return null;
+    return { contact: { ...found[0], customData: { ...found[0].customData } }, campaignKey: this.campaignKey ?? this.textCampaignKey };
+  }
+
+  async spendDobTry(contactId: string, tokenHash: string, limit: number): Promise<number | null> {
+    const c = this.contacts.get(contactId);
+    const t = c ? this.textOf(c) : null;
+    if (!c || !t || t.token_hash !== tokenHash) return null;
+    const tries = t.dob_tries ?? 0;
+    if (tries >= limit) return null;
+    c.customData = { ...c.customData, [OUTREACH_TEXT_KEY]: { ...t, dob_tries: tries + 1 } };
+    return tries + 1;
+  }
+
+  async claimLinkBooking(contactId: string, tokenHash: string, now: Date, staleBefore: Date): Promise<boolean> {
+    const c = this.contacts.get(contactId);
+    const t = c ? this.textOf(c) : null;
+    if (!c || !t || t.token_hash !== tokenHash || t.booked_at) return false;
+    if (t.booking_started_at && new Date(t.booking_started_at).getTime() >= staleBefore.getTime()) return false;
+    c.customData = { ...c.customData, [OUTREACH_TEXT_KEY]: { ...t, booking_started_at: now.toISOString() } };
+    return true;
+  }
+
+  async clearSmsStop(phone: string): Promise<void> {
+    const key = dncKey(phone);
+    if (key) this.channelDnc.setSms(key, false);
   }
 }

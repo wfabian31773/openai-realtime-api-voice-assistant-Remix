@@ -30,6 +30,8 @@ import type { OutboundLanePolicy } from "./campaign";
 import { computeRuntimeReadiness } from "../readiness";
 import { campaignEnabled, outboundDialingEnabled } from "./campaign";
 import { runCampaignTick, type DialerDeps, type TickResult } from "./dialer";
+import { runTextTick } from "./outreachText";
+import type { SmsSender } from "../../plugin/sms";
 
 export const OUTBOUND_TICK_MS = 60 * 1000;
 export const OUTBOUND_LOCK_NAME = "runtime-outbound-dialer";
@@ -47,6 +49,9 @@ export interface SchedulerDeps extends Omit<DialerDeps, "store" | "twilio"> {
   lock: DialerLock;
   /** The slugs of the registry's outbound lanes (agentRegistry.getOutboundAgents). */
   slugs: () => Promise<string[]>;
+  /** The SMS sender for a campaign that texts (v211). Absent, or null, and
+   * nobody is texted: the text tick says why and sends nothing. */
+  sms?: () => Promise<SmsSender | null>;
 }
 
 /** Why this process must not dial at all, or null when it may. Names
@@ -89,7 +94,21 @@ export async function runOutboundTick(deps: SchedulerDeps): Promise<TickResult[]
     const [store, twilio] = await Promise.all([deps.store(), deps.twilio()]);
     const results: TickResult[] = [];
     for (const { slug, policy } of campaigns) {
-      results.push(await runCampaignTick(slug, policy, { ...deps, store, twilio }));
+      const tick = await runCampaignTick(slug, policy, { ...deps, store, twilio });
+      // The campaign's texts, on the same tick and under the same lock, after
+      // its calls (v211). Never throws; off unless its own switch is "1".
+      if (policy.textOutreach) {
+        const texts = await runTextTick(slug, policy, {
+          store,
+          env: deps.env,
+          host: deps.host,
+          sms: deps.sms ?? (async () => null),
+          now: deps.now,
+          log: deps.log,
+        });
+        tick.texts = { sent: texts.sent, held: texts.held, ...(texts.skipped ? { skipped: texts.skipped } : {}) };
+      }
+      results.push(tick);
     }
     return results;
   } catch (error) {
