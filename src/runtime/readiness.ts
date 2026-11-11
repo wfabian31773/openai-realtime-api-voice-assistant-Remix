@@ -1563,6 +1563,16 @@ import { callEnvironment } from "./callRecord";
  * contains. No migration.
  */
 /**
+ * v208 — THE RUNTIME RUNS ON NODE 22 (2026-11-11). Node published a HIGH-rated
+ * security release today (22.23.5, 24.22.3, 26.13.1). Node 20 is end of life
+ * and gets no fix. CI already ran Node 22; Replit still loaded the
+ * `nodejs-20` module, which is the runtime the live voice line uses.
+ * `.replit` now loads `nodejs-22`, and `package.json` declares
+ * `engines.node` `22.x`. `replit.nix` did not pin `nodejs_20`. On main
+ * since #455 (`9ee3b954`). Above main's v206 (#447, `6e96e6fe`), which it
+ * contains. No app-code change. No migration.
+ */
+/**
  * v207 — A WRONG BIRTHDAY IS NOT READ FROM THE TRANSCRIPT (2026-11-11). The
  * operator's post-merge review sweep of #447 found five ways the v206 reader
  * could put a wrong date of birth on a ticket: "It is not June third." kept
@@ -1574,7 +1584,8 @@ import { callEnvironment } from "./callRecord";
  * no date; a caller sentence naming another date is not read for the
  * birthday; and the format opens a window only when the date last asked about
  * is the birthday, with a line that asks for both unable to replace a held
- * date. Above main's v206 (#447, `6e96e6fe`). No migration.
+ * date. Above main's v208 (#455, `9ee3b954`), which it contains along with
+ * v206 (#447, `6e96e6fe`). No migration.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
   "voice-runtime-v207-a-wrong-birthday-is-not-read-20261111";

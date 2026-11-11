@@ -12,8 +12,8 @@
  * 2026-09-24). The tools read them back through `await import(...)`: the four
  * filing tools for the date of birth, `lookup_patient` for the new-or-existing
  * answer. On Node 22 that is one module and one Map. On Node 20, which Replit
- * runs (`.replit`: `nodejs-20`), the dynamic import evaluates the module a
- * SECOND time, with an empty Map. So both readers have answered "nothing heard"
+ * ran until v208 (`.replit` was `nodejs-20`), the dynamic import evaluates
+ * the module a SECOND time, with an empty Map. So both readers have answered "nothing heard"
  * on every production call since they shipped, while every test and every CI
  * run (Node 22) saw them work. `probes/perCallStoresReachTheTools.probe.ts`,
  * run on `main` under Node 20: the filing tool refuses for a date of birth the

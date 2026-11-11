@@ -55,7 +55,7 @@ import { OPERATOR_SLUG, isOperatorOwner, type OperatorCallPayload } from "../plu
  *
  * v77 imported these two lazily inside `runtimeOwnedTools` (`await import(…)`)
  * "so a health check does not pull the tool library into the process". On
- * Node 20 — the version Replit runs — that dynamic import evaluated
+ * Node 20 — the version Replit ran until v208 — that dynamic import evaluated
  * `languageTools.ts` a SECOND time in a process that had already loaded it
  * through `src/tools/server.ts`'s static import, and the module's top-level
  * `registerTool` threw `[TOOLS] duplicate tool name: set_spoken_language`
