@@ -50,6 +50,7 @@ describe('1. a visit named only as a document\'s source stays on the surgery lin
     'Patient needs a copy of the visit summary.',
     'Patient wants the notes from her last appointment.',
     'Patient needs the office visit notes sent to her primary doctor.',
+    'Her visit appointment notes were never sent to her doctor.',
   ])('stays home: %s', (text) => {
     expect(asksAboutARoutineVisit(text)).toBe(false);
     expect(departmentFor(text, SURGERY)).toBe(SURGERY);
@@ -59,6 +60,7 @@ describe('1. a visit named only as a document\'s source stays on the surgery lin
     expect(departmentFor('Patient wants the visit notes and needs to book a new appointment.', SURGERY)).toBe(HUB);
     expect(departmentFor('Patient needs the visit notes and wants to set up a follow-up visit.', SURGERY)).toBe(HUB);
     expect(departmentFor('Patient wants the visit notes and needs to schedule a follow-up.', SURGERY)).toBe(HUB);
+    expect(departmentFor('Patient wants the visit notes and a new appointment.', SURGERY)).toBe(HUB);
   });
 
   it('CA643d797c4828b526435323ffbba61055: a new patient with a referral note still reaches the Hub (staff moved it there)', () => {
@@ -120,6 +122,14 @@ describe('3. "needs scheduling" for an eye exam reaches the Hub from the surgery
   ])('reaches the Hub: %s', (text) => {
     expect(namesAProcedure(text)).toBe(false);
     expect(departmentFor(text, SURGERY)).toBe(HUB);
+  });
+
+  it.each([
+    ['Patient needs scheduling for an eye exam today.', 'Patient needs to schedule an eye exam today.'],
+    ['Patient needs scheduling for an eye exam with her surgeon.', 'Patient needs to schedule an eye exam with her surgeon.'],
+  ])('"needs scheduling" routes like its rephrasing (v202 sent it home): %s', (phrase, rephrased) => {
+    expect(departmentFor(phrase, SURGERY)).toBe(departmentFor(rephrased, SURGERY));
+    expect(departmentFor(phrase, SURGERY)).toBe(HUB);
   });
 
   it.each([
