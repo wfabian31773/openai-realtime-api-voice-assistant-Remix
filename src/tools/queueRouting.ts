@@ -1,5 +1,6 @@
 import { correctSurgeryIntake, hasClinicalComplaint, isSurgeryRequest } from './requestClassification';
 import { SCHEDULING } from '../../shared/scheduling-cues';
+import { SURGERY_SCHEDULING_CUES } from './surgeryTaxonomy';
 
 export { SCHEDULING, type SchedulingCue } from '../../shared/scheduling-cues';
 
@@ -215,13 +216,110 @@ const BIOPSY_OR_OPERATIVE = /\b(?:biops(?:y|ies)|preoperative|postoperative|pre-
 export function asksAboutARoutineVisit(text: string): boolean {
   const t = fold(text).replace(NO_SURGEON, ' ');
   if (!VISIT_WORD.test(t)) return false;
-  if (namesAnOperation(text) || isSurgeryRequest(text) || BIOPSY_OR_OPERATIVE.test(t)) return false;
+  if (namesAProcedure(text) || BIOPSY_OR_OPERATIVE.test(t)) return false;
   if (/\bsurgeons?\b/.test(t) || hasClinicalComplaint(text)) return false;
+  // v205: "a copy of the visit notes", "the report from her last eye visit".
+  // The visit is where a document came from, not a visit being asked about
+  // (Codex P2 on #450, round 3, now taken).
+  if (everyVisitIsADocumentsSource(t)) return false;
   return !SAME_DAY_WORDS.test(t);
+}
+
+/**
+ * v205 — EVERY VISIT THE REQUEST NAMES IS WHERE A DOCUMENT CAME FROM.
+ *
+ * Operator, 2026-11-11: "a request for visit notes moves from Surgery to the
+ * HVA Hub." The visit word fired the routine-visit rule above while nothing
+ * asked for a visit. The records-line hold already reads this binding (v152,
+ * `BOUND_AFTER` / `BOUND_BEFORE`): a visit word counts as the document's only
+ * when a document word sits right after it ("visit NOTES", "visit SUMMARY") or
+ * names it as its source ("the REPORT FROM her last eye visit", "a COPY OF the
+ * visit notes"), and an ask for a visit in any other words ("and needs to book
+ * an appointment") still sends the request to the Hub. A kind of visit ("eye",
+ * "follow-up", "office") between the two still binds.
+ */
+const VISIT_WORD_G = new RegExp(VISIT_WORD.source, 'g');
+const VISIT_KIND = /(?:\b(?:new|routine|follow[ -]?up|return|office|clinic|eye|annual|yearly|dilated|last|recent)\s+)+$/;
+
+// Called only once `VISIT_WORD` has matched, so the loop runs at least once.
+function everyVisitIsADocumentsSource(folded: string): boolean {
+  for (const visit of folded.matchAll(VISIT_WORD_G)) {
+    const before = folded.slice(0, visit.index!).replace(VISIT_KIND, '');
+    const after = folded.slice(visit.index! + visit[0].length).replace(THEN_APPOINTMENT_NOUN, '');
+    if (!BOUND_AFTER.test(after) && !BOUND_BEFORE.test(before)) return false;
+  }
+  return !hasSeparateAppointmentAsk(folded);
+}
+
+/**
+ * v205 — WHAT IS BEING SCHEDULED. The surgery taxonomy reads a few scheduling
+ * phrases that name no operation ("needs scheduling", "has not been
+ * scheduled") as surgery scheduling, which is right on its own: on the surgery
+ * line those words mean the operation. Operator, 2026-11-11: "'Needs
+ * scheduling for an eye exam' stays in Surgery." When the request names an
+ * exam to book (an exam name not in the past, "after her eye exam" is
+ * history), that exam is what is scheduled, so those phrases stop counting as
+ * an operation; a named operation or procedure still does. The phrases are
+ * GENERATED from the taxonomy's own list, never a second one, and on first
+ * use: `surgeryTaxonomy` reaches this module through `cueMatch`, so the list
+ * is not defined yet while this module loads.
+ */
+let operationFree: readonly string[] | undefined;
+function operationFreeScheduling(): readonly string[] {
+  return (operationFree ??= SURGERY_SCHEDULING_CUES
+    .map(fold)
+    .filter((c) => !namesAnOperation(c) && !/\bsx\b/.test(c)));
+}
+
+function namesAnExamToBook(folded: string): boolean {
+  for (const name of EXAM_NAME_CUES.map(fold)) {
+    let at = folded.indexOf(name);
+    while (at !== -1) {
+      if (!EXAM_IN_THE_PAST.test(folded.slice(0, at))) return true;
+      at = folded.indexOf(name, at + name.length);
+    }
+  }
+  return false;
+}
+
+/**
+ * Does the request name an operation or a procedure? `namesAnOperation`, or
+ * the surgery taxonomy's own boxes (`isSurgeryRequest`), with the
+ * operation-free scheduling phrases left out when an exam is what is being
+ * booked. Read on the surgery line and by the after-hours scheduling rule.
+ */
+export function namesAProcedure(text: string): boolean {
+  if (namesAnOperation(text)) return true;
+  const t = fold(text);
+  if (!namesAnExamToBook(t)) return isSurgeryRequest(text);
+  let without = t;
+  for (const phrase of operationFreeScheduling()) without = without.split(phrase).join(' ');
+  return isSurgeryRequest(without);
 }
 
 /** Contact lenses as a product: Optical's, on every measured tech-line ticket. */
 const CONTACT_LENS = /\b(?:contacts|contact[- ]lens(?:es)?|lentes de contacto)\b/;
+/**
+ * v205 — A SYMPTOM THE CONTACT-LENS RULE DID NOT KNOW. Operator, 2026-11-11:
+ * "A contact lens allergic reaction goes to Optical even though it's a
+ * symptom." `hasClinicalComplaint` is shared with the ticketing app and reads
+ * pain, redness and blur; a lens wearer's complaint is usually an allergy, an
+ * itch, an irritation or an infection. Those keep the request clinical, on the
+ * medication line, before the lens sends it to Optical. A scratched LENS is
+ * the lens, so `scratch` is read only as a feeling or an abrasion.
+ */
+const LENS_SYMPTOM =
+  /\b(?:allerg\w*|reactions?|itch\w*|irritat\w*|infect\w*|inflam\w*|sore(?:ness)?|scratchy|(?:corneal )?abrasion|sting(?:s|ing)?|watery|watering|tearing|gritty|foreign (?:body|object)|something (?:stuck )?in (?:my|her|his|their|the) eyes?|alergi\w*|picaz\w*|picor|comezon|irritad\w*|irritacion|infeccion|ardor|lagrime\w*)\b/;
+/**
+ * v205 — A DRUG NAMED BESIDE THE LENSES. "Lost his contacts and needs a refill
+ * of his eye drops" asks for the drops. `refill` and `pharmacy` are not read
+ * here: lens wearers refill lenses at pharmacies, and all 11 tech-line lens
+ * tickets in the 14 days to 2026-11-10 that said so were moved to Optical by
+ * staff. Drops made for the lens (rewetting, lens or comfort drops) are the
+ * lens's.
+ */
+const LENS_DRUG =
+  /\b(?:eye ?drops?|(?<!(?:rewetting|lens|comfort|lubricating) )drops|medications?|medicines?|ointments?|antibiotics?|steroids?|gotas|medicamentos?|medicinas?)\b/;
 /** Eyewear by name, for the exam-already-happened rule and the optical-line guard. */
 const EYEWEAR = /\b(?:glasses|eyeglass(?:es)?|spectacles|frames?|lens|lenses|contacts|lentes|gafas)\b/;
 
@@ -567,7 +665,7 @@ export function detectCrossQueue(text: string, homeDepartmentId: number): QueueR
   // Surgery (rule 3), and a past surgery named beside a symptom on the tech
   // line is a clinical question, not coordinator work.
   const mentionsSurgery = homeDepartmentId === SURGERY
-    ? namesAnOperation(text) || isSurgeryRequest(text)
+    ? namesAProcedure(text)
     : hit(t, SURGERY_CUES);
   const mentionsOptical = hit(t, OPTICAL_CUES);
   const mentionsMedication = hit(t, TECH_CUES);
@@ -625,7 +723,10 @@ export function detectCrossQueue(text: string, homeDepartmentId: number): QueueR
   // v202 (3): contact lenses on the medication line are Optical's — every one
   // of the 11 in the 14 days to 2026-11-10 was moved there by staff, the
   // lens-prescription renewals included. A symptom stays clinical.
-  if (homeDepartmentId === TECH && CONTACT_LENS.test(t) && !hasClinicalComplaint(text)) {
+  if (
+    homeDepartmentId === TECH && CONTACT_LENS.test(t) &&
+    !hasClinicalComplaint(text) && !LENS_SYMPTOM.test(t) && !LENS_DRUG.test(t)
+  ) {
     return {
       departmentId: OPTICAL,
       departmentName: 'Optical Support',
