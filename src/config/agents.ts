@@ -1,3 +1,4 @@
+import type { TeardownContext } from '../runtime/pcpFloor';
 import type { OutboundLanePolicy } from '../runtime/outbound/campaign';
 import { createOperatorLineAgent, operatorLinePolicy } from '../agents/operatorLineAgent';
 import { OPERATOR_SLUG } from '../plugin/operatorLine';
@@ -43,7 +44,7 @@ export interface AgentConfig {
    * per-call state the factory wrote is the state the sweep reads. See
    * src/runtime/pcpFloor.ts for the Node 20 double evaluation this prevents.
    */
-  teardownSweep?: (callId: string, ctx?: { outcome?: string; transcript?: string }) => Promise<void>;
+  teardownSweep?: (callId: string, ctx?: TeardownContext) => Promise<void>;
   /**
    * On an `agentType: 'outbound'` lane the voice runtime DIALS: its calling
    * window, caps, caller ID, greeting and voicemail (src/runtime/outbound/).
