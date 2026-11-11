@@ -179,6 +179,8 @@ export interface PcpConversationState {
    */
   requestNotStatedAskedAt?: number;
   requestNotStatedSpent?: boolean;
+  /** The purpose held when the no-request ask was made; a different one recorded later answers it. */
+  requestNotStatedPurpose?: PcpCallPurposeSlug;
   /**
    * THIS CALL ALREADY HAS ITS TICKET, AND THIS IS THE DOOR IT WENT THROUGH.
    *
@@ -918,6 +920,25 @@ export class PcpDirector {
      */
     const switching = switchesPatient(state, patch);
     if (switching) forgetThePreviousPatient(state, patch);
+    /**
+     * v204: a purpose recorded after the no-request ask, and different from
+     * the one held when it was asked, is the caller saying what the call is
+     * about. The ask is answered, so the teardown floor's ordinary rules
+     * apply again (Codex P2 on #452, the intake half). A name alone does not
+     * clear it (on a patient's call that is only their own name), and neither
+     * does a FIRST purpose recorded after the ask, which can be the catch-all
+     * these calls carry (`service_inquiry` on 16 of the 18 of 2026-11-10); a
+     * request stated that way still clears it through `noteRequestStated`.
+     */
+    if (
+      state.requestNotStatedAskedAt !== undefined &&
+      state.requestNotStatedPurpose !== undefined &&
+      patch.callPurpose !== undefined &&
+      patch.callPurpose !== state.requestNotStatedPurpose
+    ) {
+      state.requestNotStatedAskedAt = undefined;
+      state.requestNotStatedSpent = undefined;
+    }
     Object.assign(state, patch);
     if (!switching) {
       refreshFiledIdentity(state);
@@ -1027,6 +1048,7 @@ export class PcpDirector {
     const askedAt = state.requestNotStatedAskedAt;
     if (askedAt === undefined) {
       state.requestNotStatedAskedAt = now;
+      state.requestNotStatedPurpose = state.callPurpose;
       return 'ask';
     }
     if (now - askedAt < NO_REQUEST_BATCH_WINDOW_MS) return 'ask';

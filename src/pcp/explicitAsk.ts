@@ -180,7 +180,11 @@ const CONNECT_TO = new RegExp(
     // THE INFLECTED FORMS REQUIRE REQUEST SYNTAX. See the comment above.
     REQUEST_LEAD + '[^.]{0,20}\\bconnect(?:ed|ing)' +
     '|' +
-    'transfer|put\\s+(?:me|them|us|him|her)\\s+through|put\\s+(?:me|them|us|him|her)|get\\s+(?:me|them|us)' +
+    // `transfer` counts only when the CALLER is what moves: "transfer me to",
+    // "transfer the call over to", "transfer to". "Transfer records to the
+    // provider" moves a document and is not an ask (Codex P2 on #452; v204's
+    // `provider` made it reachable, and `office` already was).
+    'transfer(?=\\s+(?:(?:me|them|us|him|her|the\\s+call(?:er)?|this\\s+call|my\\s+call)\\s+)?(?:(?:directly|straight|right|over)\\s+)?(?:to|for)\\b)|put\\s+(?:me|them|us|him|her)\\s+through|put\\s+(?:me|them|us|him|her)|get\\s+(?:me|them|us)' +
     ')\\b' +
     `[^.]{0,25}\\b${HUMAN_NOUNS}\\b`,
   'ig',

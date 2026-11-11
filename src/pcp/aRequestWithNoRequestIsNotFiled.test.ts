@@ -301,6 +301,33 @@ describe('what stays as it was', () => {
     pcpDirector.clear(lunch.sid);
   });
 
+  it('a new purpose recorded after the ask is the caller answering it: the floor files', async () => {
+    const { agent } = setUp(lunch);
+    await call(agent, 'record_pcp_intake', { ...OFFICE, callPurpose: 'service_inquiry' });
+    await call(agent, 'handoff_to_pcp', { narrative: 'Caller asked for the staff.', callerStatedARequest: false });
+    await call(agent, 'record_pcp_intake', { callPurpose: 'outside_referral_status', patientFirstName: 'Test', patientLastName: 'Patient' });
+    await sweepPcpUnfiledCall(lunch.sid, { outcome: 'dead_air' } as never);
+    expect(ticketing.createPcpTicket, 'what they said after the ask is a request').toHaveBeenCalledTimes(1);
+  });
+
+  it('the same purpose, or only a name, recorded after the ask does not answer it', async () => {
+    const { agent } = setUp(lunch);
+    await call(agent, 'record_pcp_intake', { ...OFFICE, callPurpose: 'service_inquiry' });
+    await call(agent, 'handoff_to_pcp', { narrative: 'Caller asked for the staff.', callerStatedARequest: false });
+    await call(agent, 'record_pcp_intake', { callPurpose: 'service_inquiry', patientFirstName: 'Test', patientLastName: 'Patient' });
+    await sweepPcpUnfiledCall(lunch.sid, { outcome: 'dead_air' } as never);
+    expect(ticketing.createPcpTicket).not.toHaveBeenCalled();
+  });
+
+  it('a first purpose recorded after the ask does not answer it (it can be the catch-all)', async () => {
+    const { agent } = setUp(lunch);
+    await call(agent, 'record_pcp_intake', { ...OFFICE });
+    await call(agent, 'create_pcp_task', { narrative: 'Caller asked for the staff.', callerStatedARequest: false });
+    await call(agent, 'record_pcp_intake', { callPurpose: 'service_inquiry' });
+    await sweepPcpUnfiledCall(lunch.sid, { outcome: 'dead_air' } as never);
+    expect(ticketing.createPcpTicket).not.toHaveBeenCalled();
+  });
+
   it('the floor still files a caller who gave their name and purpose and was cut off by us', async () => {
     const { agent } = setUp(lunch);
     await call(agent, 'record_pcp_intake', { ...OFFICE, callPurpose: 'service_inquiry' });
@@ -340,6 +367,9 @@ describe('the words offices use for a person', () => {
     'Caller is requesting customer service.',
     'Caller asked for the doctor.',
     'Caller asked to speak with a medical assistant.',
+    'Caller asked to transfer to the nurse.',
+    'Caller asked to transfer the call over to the front desk.',
+    'Caller wants us to transfer her directly to the provider.',
   ])('"%s" is an ask', (words) => {
     expect(asksForAPerson(words)).toBe(true);
   });
@@ -352,6 +382,10 @@ describe('the words offices use for a person', () => {
     'Caller requesting provider notes.',
     'Third-party request (provider).',
     'Patient needs to see an eye doctor.',
+    // Codex P2 on #452: a document being moved is not the caller being moved.
+    'Caller requested to transfer records to the provider.',
+    'Caller asked to transfer her records to the doctor.',
+    'Caller requested to transfer records to the office.',
   ])('"%s" is not', (words) => {
     expect(asksForAPerson(words)).toBe(false);
   });
