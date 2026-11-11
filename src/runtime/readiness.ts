@@ -1481,8 +1481,23 @@ import { callEnvironment } from "./callRecord";
  * main's v198 (#446, `ff996d58`), which it contains along with v197 (#445,
  * `ec3af3fd`); v199 is #447 on its open branch. No migration.
  */
+/**
+ * v202 — REQUESTS FILE WHERE STAFF WORK THEM (2026-11-11). Operator: "We're
+ * doing more transferring of tickets than anything else." On 2026-11-10 staff
+ * moved 121 of 551 agent tickets. The queue-lane router (`detectCrossQueue`),
+ * measured over 14 days of optical/surgery/tech tickets against where staff
+ * moved them: on the surgery line the operation WORD keeps a request home and
+ * a routine-visit question goes to the HVA Hub; on the tech line contact
+ * lenses go to Optical; an exam that already happened no longer reads as a
+ * booking; on the optical line a message about an operation with no eyewear
+ * goes to Surgery. 125 tickets re-routed, 79 to where staff moved them, 34
+ * that staff left, 12 elsewhere. After hours, an appointment request that is
+ * not about today, not urgent and names no operation files to the HVA Hub
+ * (37 landed elsewhere in the window, staff moved 24 to the Hub). Above
+ * main's v200 (#448, `65080651`), which it contains. No migration.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v200-pcp-scheduling-asks-the-patient-20261111";
+  "voice-runtime-v202-requests-file-where-staff-work-them-20261111";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can
