@@ -538,6 +538,22 @@ function namesTheHeldDate(uttered: string, iso: string): boolean {
 }
 
 /**
+ * THE SENTENCES A REJECTION IS READ FROM (v207, Codex P2 on #454). A sentence
+ * about another date ("My surgery is not June third.") is not about the
+ * birthday and does not clear it. A sentence that names the birthday as well
+ * ("My birthday is not June third, my surgery is.") is kept, the other way
+ * round from `aboutTheBirthday`: reading a date from a sentence that mixes
+ * two dates could take the wrong one, while clearing on one only loses a date
+ * that is asked again, which is the safe side.
+ */
+function aboutTheBirthdayForARejection(uttered: string): string {
+  return uttered
+    .split(/(?<=[.!?])\s+/)
+    .filter((sentence) => !namesAnotherDate(fold(sentence)) || callerNamesTheBirthday(sentence))
+    .join(' ');
+}
+
+/**
  * "IT IS NOT JUNE THIRD" CLEARS JUNE THIRD, WHEREVER IT IS SAID (v207).
  *
  * The rejection was read only as a refused attempt in a LATER ask window, and
@@ -545,10 +561,15 @@ function namesTheHeldDate(uttered: string, iso: string): boolean {
  * "June 3, 1944." then "It is not June third." kept June 3rd (Codex
  * post-merge sweep of #447). It was not read at all in the same turn, or after
  * a line that asks nothing. Any caller line after the one the date came from
- * that negates and names the held month and day clears it.
+ * that negates and names the held month and day clears it, read from the
+ * sentences that are about the birthday. Which date the agent last asked
+ * about is not read here: "It's not June third." after a surgery question
+ * still clears, because the caller may be correcting the birthday, and a held
+ * date that may be wrong is not kept.
  */
 function rejectsTheHeldDate(uttered: string, iso: string): boolean {
-  return negatesADate(uttered) && namesTheHeldDate(uttered, iso);
+  const about = aboutTheBirthdayForARejection(uttered);
+  return negatesADate(about) && namesTheHeldDate(about, iso);
 }
 
 type TranscriptRead =

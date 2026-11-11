@@ -80,6 +80,33 @@ describe('1. a date of birth the caller says is not theirs is cleared', () => {
     expect(dobFromCallerAnswer([ASK, C("June 3, 1944, isn't it?")])).toBe('1944-06-03');
   });
 
+  it('a rejection of another date does not clear the birthday (Codex P2 on #454)', () => {
+    expect(
+      dobFromCallerAnswer([ASK, C('June 3, 1944.'), A('And what date is your surgery?'), C('My surgery is not June third.')]),
+    ).toBe('1944-06-03');
+    expect(
+      dobFromCallerAnswer([ASK, C('June 3, 1944.'), A('Thank you.'), C('The appointment is not June third, it is the fifth.')]),
+    ).toBe('1944-06-03');
+    expect(
+      dobFromCallerAnswer([ASK, C('June 3, 1944.'), A('Gracias.'), C('Mi cirugía no es el tres de junio.')]),
+    ).toBe('1944-06-03');
+  });
+
+  it('but a sentence that names the birthday, or names no other date, still clears it', () => {
+    // Names the birthday beside the surgery: cleared, the safe side.
+    expect(
+      dobFromCallerAnswer([ASK, C('June 3, 1944.'), A('Thank you.'), C('My birthday is not June third, my surgery is.')]),
+    ).toBeUndefined();
+    // The surgery in one sentence, the rejection in the next: the rejection stands on its own.
+    expect(
+      dobFromCallerAnswer([ASK, C('June 3, 1944.'), A('Thank you.'), C('My surgery is next week. It is not June third.')]),
+    ).toBeUndefined();
+    // After a surgery question with no date named: the caller may mean the birthday, so it clears.
+    expect(
+      dobFromCallerAnswer([ASK, C('June 3, 1944.'), A('And what date is your surgery?'), C("It's not June third.")]),
+    ).toBeUndefined();
+  });
+
   it('negatesADate: a denial, a "not", but not a leading "No." or a correction word', () => {
     expect(negatesADate('It is not June third.')).toBe(true);
     expect(negatesADate("It isn't June 3")).toBe(true);
