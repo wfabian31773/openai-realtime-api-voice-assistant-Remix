@@ -1035,6 +1035,20 @@ export class PcpDirector {
   }
 
   /**
+   * v204: a filing tool was told the caller HAS stated a request. Whatever
+   * the no-request ask did earlier on the call, the caller answered it, so
+   * the teardown floor's ordinary rules apply again (a filing that fails, or
+   * a gate that asks a question the caller never answers, must still leave
+   * the floor its chance), and the call may not end on a spent ask before
+   * the request is on record. Codex P2 on #452.
+   */
+  noteRequestStated(callId: string): void {
+    const state = this.get(callId);
+    state.requestNotStatedAskedAt = undefined;
+    state.requestNotStatedSpent = undefined;
+  }
+
+  /**
    * Record that this call's request is filed, and through which door.
    * First write wins — see `ticketFiled`.
    */

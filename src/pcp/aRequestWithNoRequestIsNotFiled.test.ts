@@ -266,6 +266,41 @@ describe('what stays as it was', () => {
     pcpDirector.clear(lunch.sid);
   });
 
+  // Codex P2 on #452: the ask must not outlive the caller's answer to it.
+  it('a request stated after the ask is still the floor\'s to file when its filing fails', async () => {
+    const { agent } = setUp(lunch);
+    await call(agent, 'record_pcp_intake', { ...OFFICE, callPurpose: 'service_inquiry' });
+    const asked = await call(agent, 'handoff_to_pcp', { narrative: 'Caller asked for the staff.', callerStatedARequest: false });
+    expect(asked.noRequestAsk).toBe('ask');
+    vi.setSystemTime(new Date(at(lunch.pt).getTime() + NO_REQUEST_BATCH_WINDOW_MS + 5_000));
+    ticketing.createPcpTicket.mockResolvedValueOnce({ success: false, error: 'upstream 500' });
+    await call(agent, 'create_pcp_task', {
+      narrative: 'Caller asked about a referral status for a mutual patient.',
+      callerStatedARequest: true,
+    });
+    expect(ticketing.createPcpTicket).toHaveBeenCalledTimes(1);
+    expect(pcpDirector.next(lunch.sid).mayTerminate, 'a stated request is not a spent ask').toBe(false);
+    await sweepPcpUnfiledCall(lunch.sid, { outcome: 'dead_air' } as never);
+    expect(ticketing.createPcpTicket, 'the floor files what the caller said after the ask').toHaveBeenCalledTimes(2);
+  });
+
+  it('a stated request after a spent ask means the call may not end until it is filed', async () => {
+    const { agent } = setUp(lunch);
+    await call(agent, 'record_pcp_intake', { ...OFFICE, callPurpose: 'service_inquiry' });
+    await call(agent, 'create_pcp_task', { narrative: 'Caller asked for the staff.', callerStatedARequest: false });
+    vi.setSystemTime(new Date(at(lunch.pt).getTime() + NO_REQUEST_BATCH_WINDOW_MS + 5_000));
+    const spent = await call(agent, 'create_pcp_task', { narrative: 'Caller asked for the staff.', callerStatedARequest: false });
+    expect(spent.noRequestAsk).toBe('spent');
+    expect(pcpDirector.next(lunch.sid).mayTerminate).toBe(true);
+    ticketing.createPcpTicket.mockResolvedValueOnce({ success: false, error: 'upstream 500' });
+    await call(agent, 'handoff_to_pcp', {
+      narrative: 'Caller asked to speak with the staff about a referral status.',
+      callerStatedARequest: true,
+    });
+    expect(pcpDirector.next(lunch.sid).mayTerminate).toBe(false);
+    pcpDirector.clear(lunch.sid);
+  });
+
   it('the floor still files a caller who gave their name and purpose and was cut off by us', async () => {
     const { agent } = setUp(lunch);
     await call(agent, 'record_pcp_intake', { ...OFFICE, callPurpose: 'service_inquiry' });

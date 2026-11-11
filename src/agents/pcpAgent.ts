@@ -1064,6 +1064,7 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
       // A REQUEST WITH NO REQUEST IN IT IS NOT FILED (v204, operator
       // 2026-11-11). Before the purpose check, because the caller who asked
       // only for a person is exactly the one with no purpose to record.
+      if (callerStatedARequest === true) pcpDirector.noteRequestStated(callId);
       if (callerStatedARequest === false && nothingOnRecordForThisRequest(callId)) {
         // An organisation that asked for a person, outside lunch and with no
         // failed transfer, is owed the transfer (operator, 2026-09-04), not a
@@ -1522,6 +1523,8 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
       callerStatedARequest: CALLER_STATED_A_REQUEST,
     }),
     execute: async ({ narrative, urgency, callerAcceptedQueue, callerStatedARequest }) => {
+      // v204: a stated request clears the no-request ask (Codex P2 on #452).
+      if (callerStatedARequest === true) pcpDirector.noteRequestStated(callId);
       const { state, missing } = ticketState(callId);
       // An explicit request to be CONNECTED to a person. Deliberately narrow:
       // "caller from the front desk asking about a referral" is not a request
