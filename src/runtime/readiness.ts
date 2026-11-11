@@ -1515,8 +1515,17 @@ import { callEnvironment } from "./callRecord";
  * main's v201 (#449, `c99abcb6`), which it contains along with v200 (#448,
  * `65080651`). No migration.
  */
+/**
+ * v203 — A SWEPT RECORDS REQUEST OPENS A CASE ON PATHWAY REVIEW (2026-11-11).
+ * Operator: "yes ... open it on pathway review." The sentence the sweep reads
+ * from the recording is now the description on Medical Records too; the app
+ * opens a case only on a records request, and with no requester stated it
+ * opens it on pathway review. 64 swept records tickets in department 16,
+ * 2026-10-30..11-10, opened none. Above main's v202 (#450, `3569adba`), which
+ * it contains along with v201 (#449, `c99abcb6`). No migration.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v202-requests-file-where-staff-work-them-20261111";
+  "voice-runtime-v203-a-swept-records-request-opens-a-case-20261111";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can
