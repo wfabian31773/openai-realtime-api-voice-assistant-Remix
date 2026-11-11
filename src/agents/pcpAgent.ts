@@ -1068,8 +1068,14 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
       if (callerStatedARequest === false && nothingOnRecordForThisRequest(callId)) {
         // An organisation that asked for a person, outside lunch and with no
         // failed transfer, is owed the transfer (operator, 2026-09-04), not a
-        // question. Asking spends nothing; the transfer tool decides.
-        if (pcpDirector.next(callId).transferOnAsk && !state.handoffRefusedAsIneligible) {
+        // question. Asking spends nothing; the transfer tool decides. Not
+        // once they declined the queue: they chose a message, and sending
+        // them back to the transfer loops (Codex P1 on #452).
+        if (
+          pcpDirector.next(callId).transferOnAsk &&
+          !state.handoffRefusedAsIneligible &&
+          !state.callerDeclinedTheQueue
+        ) {
           console.info(`[PCP] ${callId}: create_pcp_task — only a person was asked for; sent to handoff_to_pcp, nothing filed`);
           return refusePcp('no_request_try_handoff', { refused: 'no_request_stated', noRequestAsk: 'handoff' });
         }

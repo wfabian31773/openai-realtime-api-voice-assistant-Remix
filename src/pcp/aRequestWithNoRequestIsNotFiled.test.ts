@@ -210,6 +210,28 @@ describe('the corpus: an office outside lunch that asked for a person is put thr
     expect(ticketing.createPcpTicket, 'no refused-transfer fallback was filed').not.toHaveBeenCalled();
     pcpDirector.clear(row.sid);
   });
+
+  // Codex P1 on #452: a caller who declines the queue chose a message, so the
+  // filing asks what it is about instead of sending them back to the transfer.
+  it('an office that declines the queue is asked what it needs, not sent back to the transfer', async () => {
+    const row = offices[0];
+    const { agent, fields } = setUp(row);
+    await call(agent, 'record_pcp_intake', { ...fields, callPurpose: row.purpose });
+    const offered = await call(agent, 'handoff_to_pcp', { narrative: PERSON_WORDS[0], callerStatedARequest: false });
+    expect(offered.error).toBe('queue_choice');
+    const declined = await call(agent, 'handoff_to_pcp', {
+      narrative: PERSON_WORDS[0],
+      callerAcceptedQueue: false,
+      callerStatedARequest: false,
+    });
+    expect(declined.error).toBe('queue_choice_declined');
+    const filing = await call(agent, 'create_pcp_task', { narrative: PERSON_WORDS[0], callerStatedARequest: false });
+    expect(filing.error, 'not sent back to handoff_to_pcp').not.toBe('no_request_try_handoff');
+    expect(filing.refused).toBe('no_request_stated');
+    expect(filing.noRequestAsk).toBe('ask');
+    expect(ticketing.createPcpTicket).not.toHaveBeenCalled();
+    pcpDirector.clear(row.sid);
+  });
 });
 
 describe('what stays as it was', () => {
