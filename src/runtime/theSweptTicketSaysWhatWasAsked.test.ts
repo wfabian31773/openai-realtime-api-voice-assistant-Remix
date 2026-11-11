@@ -51,7 +51,7 @@ import { resetStatedNames } from '../tools/statedName';
 import { resetVerifiedIdentities, rememberVerifiedIdentity } from '../tools/verifiedIdentity';
 import { resetDraftedRequests, noteDraftedRequestFromArgs } from '../tools/draftedRequest';
 import { runRequestSweep, type SweepFiler, type NumberLookup } from './sweepRunner';
-import { SWEPT_TICKET_DESCRIPTION, REQUEST_FROM_RECORDING_NOTE } from './requestSweep';
+import { SWEPT_TICKET_DESCRIPTION, REQUEST_FROM_RECORDING_NOTE, RECORDS_KEEP_THE_PLACEHOLDER } from './requestSweep';
 import {
   requestFromTheRecording,
   usableRequest,
@@ -59,7 +59,6 @@ import {
   REQUEST_MAX_CHARS,
   type RequestAsker,
 } from './requestFromTheRecording';
-import { otherReasonFor } from '../tools/otherReason';
 import type { VoiceCallRecord } from './mediaStreamBridge';
 import { readFileSync } from 'node:fs';
 
@@ -243,13 +242,26 @@ describe('the corpus: the swept "reason not captured" tickets of 2026-11-10', ()
     expect(new Set([...SWEPT, ...ORIGINS, NOTHING_SAID].map((r) => r.sid)).size).toBe(35);
   });
 
-  it.each(SPECIFIC)('$sid ($lane) — the description is what the caller asked for', async (row) => {
+  it.each(SPECIFIC.filter((r) => r.lane !== 'records'))('$sid ($lane) — the description is what the caller asked for', async (row) => {
     const { out, f } = await sweep(row);
     expect(out.filed).toBe(true);
     expect(f.calls).toHaveLength(1);
     const t = f.calls[0];
     expect(t.description).toBe(row.reads);
     expect(t.description).not.toBe(SWEPT_TICKET_DESCRIPTION);
+    expect(String(t.staffNote)).toContain(REQUEST_FROM_RECORDING_NOTE);
+    expect(String(t.staffNote)).toContain(String(row.reads));
+  });
+
+  // Medical Records: a placeholder description opens no records case; a real
+  // one opens a case on a pathway the app picks from what the ticket says
+  // (64 against 231 of 244, department 16, 14 days to 2026-11-11). A swept
+  // ticket states no requester, so the sentence goes to staff only.
+  it.each(SPECIFIC.filter((r) => r.lane === 'records'))('$sid (records) — staff read what was asked; the description stays the placeholder', async (row) => {
+    const { out, f } = await sweep(row);
+    expect(out.filed).toBe(true);
+    const t = f.calls[0];
+    expect(t.description).toBe(SWEPT_TICKET_DESCRIPTION);
     expect(String(t.staffNote)).toContain(REQUEST_FROM_RECORDING_NOTE);
     expect(String(t.staffNote)).toContain(String(row.reads));
   });
@@ -389,14 +401,21 @@ describe('a sentence that fails a check is dropped, never trimmed into shape', (
   });
 });
 
-describe('Medical Records: the sentence never brings a reason with it', () => {
-  it('a records description read from the recording travels with the catch-all reason', async () => {
+describe('Medical Records: the sentence never opens a case', () => {
+  it('a records call keeps the description and reason main sends, with the sentence on the staff side', async () => {
     const row = SWEPT.find((r) => r.sid === 'CAc7e03692de805890935841eaceebe36f')!;
+    const main = filer();
+    await runRequestSweep(record(row.sid, row.lane, row.says, row.tools), main, noName, onePerson);
     const { f } = await sweep(row);
-    const other = otherReasonFor(16)!;
-    expect(f.calls[0].description).toBe(row.reads);
-    expect(f.calls[0].requestTypeId).toBe(other.requestTypeId);
-    expect(f.calls[0].requestReasonId).toBe(other.requestReasonId);
+    expect(f.calls[0].description).toBe(SWEPT_TICKET_DESCRIPTION);
+    expect(f.calls[0].description).toBe(main.calls[0].description);
+    expect(f.calls[0].requestTypeId).toBe(main.calls[0].requestTypeId);
+    expect(f.calls[0].requestReasonId).toBe(main.calls[0].requestReasonId);
+    expect(String(f.calls[0].staffNote)).toContain(`${REQUEST_FROM_RECORDING_NOTE} ${row.reads}`);
+  });
+
+  it('the hold is one switch, and it is on', () => {
+    expect(RECORDS_KEEP_THE_PLACEHOLDER).toBe(true);
   });
 
   it('a records call where nothing is read keeps the reason main sends', async () => {
@@ -407,6 +426,7 @@ describe('Medical Records: the sentence never brings a reason with it', () => {
     await runRequestSweep(record(row.sid, row.lane, row.says, row.tools), now, noName, onePerson, async () => null);
     expect(now.calls[0].requestReasonId).toBe(main.calls[0].requestReasonId);
     expect(now.calls[0].description).toBe(SWEPT_TICKET_DESCRIPTION);
+    expect(String(now.calls[0].staffNote)).not.toContain(REQUEST_FROM_RECORDING_NOTE);
   });
 
   it('off records, the reason main classifies is unchanged by the sentence', async () => {
@@ -436,8 +456,9 @@ describe('the records lane gets the heard name (v180) too', () => {
     expect(f.calls[0]).not.toHaveProperty('patientBirthYear');
     expect(f.calls[0]).not.toHaveProperty('locationOfLastVisit');
     expect(f.calls[0]).not.toHaveProperty('validatedPatient');
-    // And the sentence is still the description.
-    expect(f.calls[0].description).toBe('Wants medical records sent to a new eye doctor out of state.');
+    // The sentence reaches staff; the description stays the placeholder.
+    expect(f.calls[0].description).toBe(SWEPT_TICKET_DESCRIPTION);
+    expect(String(f.calls[0].staffNote)).toContain('Wants medical records sent to a new eye doctor out of state.');
   });
 
   it('a name the caller did not say files nameless, as main does', async () => {

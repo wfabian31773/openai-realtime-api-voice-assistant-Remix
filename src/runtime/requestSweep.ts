@@ -780,22 +780,22 @@ export const REQUEST_FROM_RECORDING_NOTE =
 const RECORDS_DEPARTMENT_ID = 16;
 
 /**
- * v201: ON MEDICAL RECORDS, A DESCRIPTION READ FROM THE RECORDING TRAVELS WITH
- * THE DEPARTMENT'S CATCH-ALL REASON, NEVER A CLASSIFIED ONE.
+ * v201: ON MEDICAL RECORDS THE SENTENCE GOES ON THE STAFF SIDE ONLY. The
+ * description stays what `main` sends, and so does the reason.
  *
- * The ticketing app nulls the request type and reason of a records ticket
- * whose description is the placeholder (`records-intake.ts`,
- * `hasNoCapturedReason`), so today a regex reason the sweep sends on records
- * never lands. Once the description is a real sentence the app keeps what we
- * send — so the sweep sends "Other - See Description" and lets the app's own
- * records classifier read the sentence, exactly as it reads every other voice
- * records description. No records reason id is set from model text, or from a
- * regex over the transcript, on this path.
+ * Measured 2026-11-11, agent tickets in department 16 over 14 days: the 64
+ * with the placeholder description opened NO records case; 231 of the 244
+ * with a real description opened one, on a pathway the ticketing app picks
+ * from what the ticket says. A swept ticket states no requester, and a
+ * sentence read from the recording ("Wants medical records sent to a new eye
+ * doctor out of state", said by a spouse) would open a case on a guessed
+ * pathway, on the statutory clock — the #73052 shape. Whether a swept
+ * records request should open a case is the operator's (standing
+ * instruction 1); until he says so, staff read what was asked in the staff
+ * note and nothing opens on a guess. The one-line change is to drop the
+ * department check in `buildSweptTicket`.
  */
-function recordsCatchAll(): SweepReason {
-  const other = otherReasonFor(RECORDS_DEPARTMENT_ID)!;
-  return { requestTypeId: other.requestTypeId, requestReasonId: other.requestReasonId, source: "placeholder" };
-}
+export const RECORDS_KEEP_THE_PLACEHOLDER = true;
 
 export const INFO_ONLY_NOTE =
   "POSSIBLY INFO-ONLY (info_only): the agent gave a phone/fax number and the caller ended with thanks; no request tool ran. Close if no follow-up is needed.";
@@ -882,17 +882,18 @@ export function buildSweptTicket(
   const callerSaid = decision.callerSaid;
   const readFromRecording =
     !input.draftedRequest?.trim() && input.requestFromRecording?.trim() ? input.requestFromRecording.trim() : undefined;
-  const reason =
-    readFromRecording && departmentId === RECORDS_DEPARTMENT_ID
-      ? recordsCatchAll()
-      : resolveSweepReason({
-          departmentId,
-          capturedReason: input.capturedReason,
-          summary: input.summary,
-          callerSaid,
-          draftedRequest: input.draftedRequest,
-          toolEvents: input.toolEvents,
-        });
+  const sentenceDescribes =
+    readFromRecording && !(RECORDS_KEEP_THE_PLACEHOLDER && departmentId === RECORDS_DEPARTMENT_ID)
+      ? readFromRecording
+      : undefined;
+  const reason = resolveSweepReason({
+    departmentId,
+    capturedReason: input.capturedReason,
+    summary: input.summary,
+    callerSaid,
+    draftedRequest: input.draftedRequest,
+    toolEvents: input.toolEvents,
+  });
   const infoOnly = looksInfoOnly(input);
   return {
     slug: input.slug,
@@ -931,7 +932,7 @@ export function buildSweptTicket(
     // v166: the model's drafted request, else a classified reason's name off
     // Medical Records, else the placeholder — see sweptTicketDescription.
     // Still never the caller's raw words.
-    description: sweptTicketDescription(departmentId, reason, input.draftedRequest, readFromRecording),
+    description: sweptTicketDescription(departmentId, reason, input.draftedRequest, sentenceDescribes),
     /**
      * The staff side. `callData` maps to the ticket's own call-metadata
      * columns and is not part of any message to the patient, so the
