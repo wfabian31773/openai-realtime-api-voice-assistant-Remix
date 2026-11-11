@@ -94,8 +94,24 @@
  * of one day's sample: nobody introduces themselves as "the operator" to an
  * answering line. It is a role you ask FOR, never one you claim.
  */
+/*
+ * v204: THE WORDS OFFICES ACTUALLY USE. Measured 2026-10-28..11-10, PCP ticket
+ * narratives (the model's own summary): 33 offices whose narrative says they
+ * asked to "speak with staff", "a staff member", "a provider", "a nurse",
+ * "a doctor", "a medical assistant", "customer service" or "a department"
+ * were refused a transfer outside the lunch hour, because none of those words
+ * was here. The operator's 2026-09-04 rule entitles an office that asks for a
+ * person to one, and on 2026-11-10 each of them left a ticket saying only that
+ * they wanted a person, which is the ticket the 2026-11-11 ruling forbids.
+ *
+ * Every branch still needs a verb of asking or connecting in front of the noun
+ * (the safety property, see above), so a caller who says they ARE staff or a
+ * nurse latches nothing. `coordinator` and `supervisor` stay out: v20 measured
+ * them as role statements far more often than asks.
+ */
 const HUMAN_NOUNS =
-  '(?:person|human|someone|somebody|rep|representative|agent|front desk|receptionist|office|team|operator)';
+  '(?:person|human|someone|somebody|rep|representative|agent|front desk|receptionist|office|team|operator' +
+  '|staff|department|provider|doctor|physician|nurse|customer service|medical assistant)';
 
 /** Asking to be connected: "can I speak to the team", "talk with someone". */
 const SPEAK_TO = new RegExp(`\\b(?:speak|talk)\\b\\s+(?:to|with)\\b[^.]{0,25}\\b${HUMAN_NOUNS}\\b`, 'ig');
@@ -164,7 +180,11 @@ const CONNECT_TO = new RegExp(
     // THE INFLECTED FORMS REQUIRE REQUEST SYNTAX. See the comment above.
     REQUEST_LEAD + '[^.]{0,20}\\bconnect(?:ed|ing)' +
     '|' +
-    'transfer|put\\s+(?:me|them|us|him|her)\\s+through|put\\s+(?:me|them|us|him|her)|get\\s+(?:me|them|us)' +
+    // `transfer` counts only when the CALLER is what moves: "transfer me to",
+    // "transfer the call over to", "transfer to". "Transfer records to the
+    // provider" moves a document and is not an ask (Codex P2 on #452; v204's
+    // `provider` made it reachable, and `office` already was).
+    'transfer(?=\\s+(?:(?:me|them|us|him|her|the\\s+call(?:er)?|this\\s+call|my\\s+call)\\s+)?(?:(?:directly|straight|right|over|back)\\s+){0,3}(?:to|for)\\b)|put\\s+(?:me|them|us|him|her)\\s+through|put\\s+(?:me|them|us|him|her)|get\\s+(?:me|them|us)' +
     ')\\b' +
     `[^.]{0,25}\\b${HUMAN_NOUNS}\\b`,
   'ig',

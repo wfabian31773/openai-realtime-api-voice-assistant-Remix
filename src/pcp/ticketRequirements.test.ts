@@ -335,7 +335,9 @@ describe('the tools actually enforce it', () => {
 
   it('create_pcp_task blocks and counts strikes', () => {
     const at = src.indexOf("name: 'create_pcp_task'");
-    const block = src.slice(at, at + 3000);
+    // 4,500: v204 put the no-request check (about 1,100 characters) ahead of
+    // the strike gate in the same tool.
+    const block = src.slice(at, at + 4500);
     expect(block).toMatch(/ticketReadiness\(state, ticketBlocksUsed\)/);
     expect(block).toMatch(/ticketBlocksUsed \+= 1/);
     expect(block).toMatch(/missing_required_field:\$\{ask\.field\}/);

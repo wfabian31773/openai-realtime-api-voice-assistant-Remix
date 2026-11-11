@@ -1524,8 +1524,19 @@ import { callEnvironment } from "./callRecord";
  * 2026-10-30..11-10, opened none. Above main's v202 (#450, `3569adba`), which
  * it contains along with v201 (#449, `c99abcb6`). No migration.
  */
+/**
+ * v204 — A PCP REQUEST WITH NO REQUEST IN IT IS NOT FILED (2026-11-11).
+ * Operator: "tickets that are incomplete should not be filed." 18 PCP tickets
+ * of 2026-11-10 said only that the caller wanted a person. A filing the model
+ * marks `callerStatedARequest: false` files nothing; the agent asks once what
+ * they need, and a call that still says nothing may end with no ticket. An
+ * office outside lunch is sent to the transfer instead, and the ask detector
+ * learns the words offices use (staff, provider, nurse, doctor, department,
+ * customer service, medical assistant). The floor's person-only admission (v18)
+ * is gone. Above main's v203 (#451, `25e356ba`). No migration.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v203-a-swept-records-request-opens-a-case-20261111";
+  "voice-runtime-v204-a-request-with-no-request-is-not-filed-20261111";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

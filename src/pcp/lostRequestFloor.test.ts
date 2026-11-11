@@ -182,14 +182,25 @@ describe('the words: a failed filing is never reported as a filed one', () => {
   });
 });
 
-describe('the floor: an unhonoured ask for a person always leaves a record', () => {
-  it('the teardown sweep files for a caller who asked and gave no name', async () => {
+/**
+ * THE FLOOR, REWRITTEN TO v204 (operator, 2026-11-11: "tickets that are
+ * incomplete should not be filed").
+ *
+ * The two tests that stood here asserted the v18 admission: a caller whose only
+ * request was for a person, who gave no name, was filed by the floor with the
+ * headline "asked to speak to a person and was not connected … they gave no
+ * further detail". That is the ticket the ruling forbids, so the assertion is
+ * reversed rather than loosened: the same call, the same recovered app, and
+ * NOTHING files. The honesty half survives above — the refusal still does not
+ * claim the request was taken down.
+ */
+describe('the floor: an ask for a person and nothing else files nothing (v204)', () => {
+  it('the teardown sweep does not file for a caller who asked only for a person and gave no name', async () => {
     const { agent, callId } = patientAskingForAPerson();
     await reachTheLiveState(agent);
     await call(agent, 'handoff_to_pcp', { narrative: THE_ASK });
     expect(ticketing.createPcpTicket, 'the in-call attempt was refused 400').toHaveBeenCalled();
 
-    // The ticketing app recovers (#267 is deployed) before teardown runs.
     ticketing.createPcpTicket.mockImplementation(async () => ({
       success: true,
       ticketNumber: 'PCP-RECOVERED',
@@ -199,23 +210,26 @@ describe('the floor: an unhonoured ask for a person always leaves a record', () 
     await sweepPcpUnfiledCall(callId);
     expect(
       ticketing.createPcpTicket,
-      'all 17 were skipped here: "no purpose or no identity"',
-    ).toHaveBeenCalledTimes(1);
+      'a ticket that says only "they wanted a person" is the one the ruling forbids',
+    ).not.toHaveBeenCalled();
   });
 
-  it('the filed record carries the ask and the number to call back', async () => {
+  it('a caller who asked for a person AND was recorded with a name still files from the floor', async () => {
+    // The admission that stays: purpose and identity recorded, the call ended
+    // by something we caused. That is the v18 "hung up before the request was
+    // complete" ticket, not a person-only one.
     const { agent, callId } = patientAskingForAPerson();
     await reachTheLiveState(agent);
     await call(agent, 'handoff_to_pcp', { narrative: THE_ASK });
+    const { pcpDirector } = await import('./director');
+    pcpDirector.update(callId, { callerName: 'Dana Example' } as never);
     ticketing.createPcpTicket.mockImplementation(async () => ({ success: true, ticketNumber: 'PCP-R2' }));
     ticketing.createPcpTicket.mockClear();
 
     await sweepPcpUnfiledCall(callId);
-    const [payload] = (ticketing.createPcpTicket.mock.calls[0] ?? []) as any[];
-    expect(payload, 'nothing was filed').toBeTruthy();
-    expect(payload.callerCallbackNumber, 'we are ON THE PHONE with them').toBe('+16265550142');
-    expect(String(payload.narrative)).toMatch(/asked to speak to a (person|representative)/i);
-    expect(payload.urgency, 'a person asked for a person and did not get one').toMatch(/high|urgent/);
+    expect(ticketing.createPcpTicket).toHaveBeenCalledTimes(1);
+    const [payload] = ticketing.createPcpTicket.mock.calls[0] as any[];
+    expect(String(payload.narrative)).not.toMatch(/WAS NOT CONNECTED/);
   });
 
   /** The narrow gate. A call where nobody asked for anything must stay out of

@@ -8,7 +8,7 @@ import { pcpSafetyGuardrails } from '../guardrails/pcpSafety';
 import { escalationDetailsMap } from '../services/escalationStore';
 import { markCallConcluded } from '../services/callConclusion';
 import { recordingExecute } from '../services/toolTimeline';
-import { keepFieldDescriptions } from '../services/toolFieldDescriptions';
+import { keepFieldDescriptions, requireOnTheWire } from '../services/toolFieldDescriptions';
 import { refuseInvalidInputByName } from '../services/toolInputRefusal';
 import { EMAIL_CONFIRMATION_DESCRIPTION, LAST_NAME_FIELD_DESCRIPTION } from '../tools/contactCaptureGuidance';
 import { withToolDirection } from '../services/toolDirection';
@@ -1057,9 +1057,30 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
       urgency: z.enum(['routine', 'normal', 'high', 'urgent']).default('normal'),
       disposition: z.enum(['CREATE_TASK', 'HAND_OFF']).default('CREATE_TASK'),
       failureInformation: z.string().max(2000).optional(),
+      callerStatedARequest: CALLER_STATED_A_REQUEST,
     }),
-    execute: async ({ narrative, urgency, disposition, failureInformation }) => {
+    execute: async ({ narrative, urgency, disposition, failureInformation, callerStatedARequest }) => {
       const { state, missing } = ticketState(callId);
+      // A REQUEST WITH NO REQUEST IN IT IS NOT FILED (v204, operator
+      // 2026-11-11). Before the purpose check, because the caller who asked
+      // only for a person is exactly the one with no purpose to record.
+      if (callerStatedARequest === true) pcpDirector.noteRequestStated(callId);
+      if (callerStatedARequest === false && nothingOnRecordForThisRequest(callId)) {
+        // An organisation that asked for a person, outside lunch and with no
+        // failed transfer, is owed the transfer (operator, 2026-09-04), not a
+        // question. Asking spends nothing; the transfer tool decides. Not
+        // once they declined the queue: they chose a message, and sending
+        // them back to the transfer loops (Codex P1 on #452).
+        if (
+          pcpDirector.next(callId).transferOnAsk &&
+          !state.handoffRefusedAsIneligible &&
+          !state.callerDeclinedTheQueue
+        ) {
+          console.info(`[PCP] ${callId}: create_pcp_task — only a person was asked for; sent to handoff_to_pcp, nothing filed`);
+          return refusePcp('no_request_try_handoff', { refused: 'no_request_stated', noRequestAsk: 'handoff' });
+        }
+        return refuseNoRequest(callId, 'create_pcp_task', 'no_request_stated');
+      }
       // The purpose is the one thing a ticket cannot be filed without — it is
       // what routes the request to the right desk. Everything else degrades.
       if (!state.callPurpose) return refusePcp('call_purpose_required');
@@ -1505,8 +1526,11 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
        * first attempt and will not read this field then.
        */
       callerAcceptedQueue: z.boolean().optional(),
+      callerStatedARequest: CALLER_STATED_A_REQUEST,
     }),
-    execute: async ({ narrative, urgency, callerAcceptedQueue }) => {
+    execute: async ({ narrative, urgency, callerAcceptedQueue, callerStatedARequest }) => {
+      // v204: a stated request clears the no-request ask (Codex P2 on #452).
+      if (callerStatedARequest === true) pcpDirector.noteRequestStated(callId);
       const { state, missing } = ticketState(callId);
       // An explicit request to be CONNECTED to a person. Deliberately narrow:
       // "caller from the front desk asking about a referral" is not a request
@@ -1556,6 +1580,16 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
         // and it has to survive onto a ticket `create_pcp_task` may file several
         // turns later — see handoffNotAttempted.ts.
         pcpDirector.markHandoffRefusedAsIneligible(callId);
+        // A REFUSED TRANSFER WITH NO REQUEST BEHIND IT FILES NOTHING (v204).
+        // 16 of the 18 person-only PCP tickets of 2026-11-10 were this
+        // fallback: the caller said they wanted a person, the transfer was
+        // refused, and the ticket said only that. Ask once what they need.
+        if (callerStatedARequest === false && nothingOnRecordForThisRequest(callId)) {
+          return refuseNoRequest(callId, 'handoff_to_pcp', 'handoff_not_eligible_no_request', {
+            handoffStatus: 'HANDOFF_UNAVAILABLE',
+            askLatched: askedForAPerson,
+          });
+        }
         const fallback = await submitPcpTicket(
           buildPayload(metadata, state, 'CREATE_TASK', narrative, urgency, undefined, 'handoff_not_eligible', missing),
         );
@@ -1576,6 +1610,7 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
           handoffStatus: 'HANDOFF_UNAVAILABLE',
           ticketNumber: fallback.ticketNumber,
           fallbackRecorded: fallback.success,
+          askLatched: askedForAPerson,
         });
       }
       /**
@@ -2453,7 +2488,19 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
     name: pcpAgentConfig.name,
     handoffDescription: pcpAgentConfig.description,
     instructions: buildPcpPrompt(metadata),
-    tools: [recordIntake, publicKnowledge, appointmentLookup, createTask, recordAutomated, handoff, patientMedicalRecordsIntake, terminate],
+    // v204: `callerStatedARequest` is optional in the zod (an older caller that
+    // omits it files as before) and required on the wire, so the model always
+    // says whether the caller stated a request (`requireOnTheWire`).
+    tools: [
+      recordIntake,
+      publicKnowledge,
+      appointmentLookup,
+      requireOnTheWire(createTask, ['callerStatedARequest']),
+      recordAutomated,
+      requireOnTheWire(handoff, ['callerStatedARequest']),
+      patientMedicalRecordsIntake,
+      terminate,
+    ],
   });
   agent.outputGuardrails = pcpSafetyGuardrails;
   return agent;
@@ -2499,6 +2546,51 @@ const PCP_DEPARTMENT_ID = 18;
  * would send it round again. `alreadyFiled` reaches the timeline so the guard
  * firing is a count rather than a console line.
  */
+/**
+ * WHETHER THE CALLER SAID WHAT THEY NEED — v204, operator 2026-11-11: "tickets
+ * that are incomplete should not be filed."
+ *
+ * The model answers it, because telling "I need to speak with the staff" from
+ * "I need to speak with the staff about a referral" is extraction (standing
+ * instruction 3). Optional in the zod so a caller that omits it files as
+ * before; required on the wire (`wireRequired`) so the model is always asked.
+ */
+const CALLER_STATED_A_REQUEST = z
+  .boolean()
+  .optional()
+  .describe(
+    'false only when all the caller has asked for is a person; otherwise true.',
+  );
+
+/**
+ * Nothing filed for the request the call is on: no ticket for this patient and
+ * no disposition recorded. An enrichment re-file (v37) is never refused.
+ */
+function nothingOnRecordForThisRequest(callId: string): boolean {
+  return !pcpDirector.filedForCurrentPatient(callId) && !pcpDirector.get(callId).dispositionRecorded;
+}
+
+/**
+ * Refuse a filing that carries no request: ask once (`ask`), then, on a later
+ * attempt still carrying none, say nothing is filed (`spent`), which also
+ * lets the call end (director `mayTerminate`). Two calls inside the batch
+ * window are one ask (`noteNoRequestStated`).
+ */
+function refuseNoRequest(
+  callId: string,
+  tool: string,
+  askSlug: 'no_request_stated' | 'handoff_not_eligible_no_request',
+  extra: Record<string, unknown> = {},
+): Record<string, unknown> {
+  const step = pcpDirector.noteNoRequestStated(callId);
+  console.info(`[PCP] ${callId}: ${tool} — the caller asked only for a person; nothing filed (${step})`);
+  return refusePcp(step === 'ask' ? askSlug : 'no_request_stated_spent', {
+    refused: 'no_request_stated',
+    noRequestAsk: step,
+    ...extra,
+  });
+}
+
 function alreadyFiledOnThisCall(callId: string, ticketNumber: string | undefined): Record<string, unknown> {
   console.info(`[PCP] one call, one ticket — already filed as ${ticketNumber ?? '(number not returned)'}, nothing new created (${callId})`);
   return {
@@ -3472,56 +3564,27 @@ export async function sweepPcpUnfiledCall(callId: string, ctx: PcpTeardownContex
         (state.callerName || state.patientFirstName || state.patientLastName || state.statedRelationship),
     );
     /**
-     * AN UNHONOURED ASK FOR A PERSON IS A REQUEST, even with no name attached.
+     * AN ASK FOR A PERSON, AND NOTHING ELSE, IS NOT FILED (v204).
      *
-     * The identity rule above selects against exactly the population it exists
-     * to serve, and 2026-09-14 is the measurement that finally says so: all 17
-     * callers whose requests were lost that day reached this line and were
-     * turned away by it. Each had said one thing — "speak to a
-     * representative" — refused to give a name when asked, and been told, in
-     * words, that we had taken it down. `callPurpose` was `patient_caller` on
-     * every one of them, so the first clause held; none of the four identity
-     * fields did, so `toldUsSomething` was false and the safety net skipped
-     * them. CLAUDE.md carries this as an open question ("no name, no ticket",
-     * 47 of 53 skipped). For this one shape it is answerable.
+     * Operator, 2026-11-11: "tickets that are incomplete should not be filed."
+     * From 2026-09-15 (v18) to v204 this floor admitted a caller whose only
+     * request was for a person ("CALLER ASKED TO SPEAK TO A PERSON AND WAS NOT
+     * CONNECTED … They gave no further detail"), because on 2026-09-14 17 such
+     * callers had been told their request was taken down and had no ticket.
+     * Both halves of that are gone: the refused transfer no longer says it took
+     * anything down when nothing was stated (`handoff_not_eligible_no_request`),
+     * and the ruling now says a ticket that says only "they wanted a person"
+     * is not filed. A staffer cannot work it; they ring the caller to find out
+     * what it was about.
      *
-     * WHY THIS CASE AND NOT THE GENERAL ONE. `callerRequestedHuman` is a
-     * latched, explicit ask for a person that we did not honour — not an
-     * absence of information but a request in its own right, and the only one
-     * a caller can make without volunteering anything about themselves. The
-     * two exits above have already removed the callers who DID get a person
-     * (`CONNECTED`) and the ones who chose the queue and accepted the cost
-     * (operator, 2026-09-13), so what is left here asked and was refused.
-     *
-     * AND WE USUALLY HAVE A CALLBACK NUMBER: caller ID seeds it at the top of
-     * `createPcpAgent`, so "this number asked for a person and did not get
-     * one" is normally a complete, workable ticket rather than a stub.
-     *
-     * NOT ALWAYS, and this comment said "never short of" until the withheld-ANI
-     * fork in `refusals.ts` proved otherwise (Cursor, #300). The seeding regex
-     * correctly rejects a non-E.164 ANI — "anonymous", blocked, restricted —
-     * so a caller who withholds their number AND hangs up before giving one
-     * leaves a ticket with no way to reach them. That is still better than
-     * silence: a staffer sees the request and the timestamp rather than
-     * nothing at all. Closing it properly means either declining to file or
-     * inventing a placeholder, and both are routing decisions rather than code
-     * ones — OPEN FOR WAYNE (standing instruction 1).
-     *
-     * THE NARROWNESS IS THE POINT. Filing on every unidentified call would
-     * recreate azul's 2026-07-28 sweep, where 9 of 12 spurious tickets were
-     * callbacks for patients who had already been helped.
-     *
-     * STILL GATED ON `callPurpose`, deliberately. `buildPayload` reads
-     * `state.callPurpose!` and the payload schema takes an enum, so filing
-     * without one is refused before it reaches the wire — a silent loss of
-     * exactly the kind this block is closing. Picking a slug to stand in would
-     * be choosing a department for the request, which is a routing rule and
-     * the operator's to make (standing instruction 1). All 17 carried a
-     * purpose, so this covers them; a caller who asks for a person with no
-     * purpose recorded at all is a narrower residual gap, and it is noted for
-     * Wayne rather than papered over here.
+     * And when the agent asked the caller what they need (the v204 ask) and
+     * nothing was filed after it, they did not say: nothing files here either,
+     * whatever identity was recorded.
      */
-    const askedForAPersonAndDidNotGetOne = Boolean(state.callPurpose && state.callerRequestedHuman);
+    if (state.requestNotStatedAskedAt !== undefined) {
+      console.info(`[PCP] SWEEP: ${callId} — the caller asked only for a person and said nothing more when asked; no ticket, by the operator's rule`);
+      return;
+    }
     /**
      * A CALL NOBODY CLASSIFIED IS STILL A CALL SOMEBODY MADE.
      *
@@ -3593,7 +3656,7 @@ export async function sweepPcpUnfiledCall(callId: string, ctx: PcpTeardownContex
       lastName: state.patientLastName,
     });
     const unclassified = !state.callPurpose && spokeBeyondTheirOwnIdentity;
-    if (!toldUsSomething && !askedForAPersonAndDidNotGetOne && !unclassified) {
+    if (!toldUsSomething && !unclassified) {
       console.info(`[PCP] SWEEP: ${callId} ended with nothing to file (no purpose or no identity) — no ticket`);
       return;
     }
@@ -3607,14 +3670,12 @@ export async function sweepPcpUnfiledCall(callId: string, ctx: PcpTeardownContex
     const gaps = annotationFor([...readiness.blocking, ...readiness.annotate]);
     /**
      * Two different calls reach this point and a staffer must be able to tell
-     * them apart from the ticket alone. One drifted off mid-intake; the other
-     * asked for a person, was refused, and was left holding nothing — which is
-     * a worse experience and a more urgent callback.
+     * them apart from the ticket alone: one drifted off mid-intake, the other
+     * was never classified. (A third, the caller who asked only for a person,
+     * no longer files at all — v204, above.)
      */
     const headline = unclassified
       ? 'THIS CALL WAS NOT CLASSIFIED AND NEEDS ROUTING BY HAND. The caller spoke but the agent never established what the call was about, so nothing here has been routed to a department — please read what they said below and send it where it belongs.'
-      : askedForAPersonAndDidNotGetOne && !toldUsSomething
-      ? 'CALLER ASKED TO SPEAK TO A PERSON AND WAS NOT CONNECTED, and the request was not captured on the call. Filed so it is not lost. They gave no further detail.'
       : 'CALLER HUNG UP BEFORE THE REQUEST WAS COMPLETE. Filed from what was gathered on the call so it is not lost.';
     /**
      * THE CALLER'S OWN WORDS ARE THE ROUTING INSTRUCTION on this arm, so they
