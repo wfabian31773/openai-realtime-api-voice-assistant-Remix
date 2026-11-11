@@ -29,6 +29,14 @@ export interface CallingWindow {
   days: readonly number[];
   /** Skip federal holidays and the practice's own closures. */
   skipHolidays: boolean;
+  /**
+   * Still call on the federal holidays the practice keeps open
+   * (`practiceOpenHolidaysFor`). Off unless a campaign asks for it. The NPX
+   * outreach campaign does (operator, 2026-11-11, on Veterans Day: "we should
+   * be heavily outreaching today, all possible candidates are liable to be
+   * home today").
+   */
+  dialOnOpenHolidays?: boolean;
 }
 
 export interface AttemptCaps {
@@ -144,8 +152,26 @@ export function holidaysFor(year: number): string[] {
   ].filter((d) => d.startsWith(`${year}-`));
 }
 
+/**
+ * The federal holidays the practice keeps its offices open, read from the
+ * queue lanes' own calls against the same weekday a week before: Columbus
+ * Day 2026-10-12 took 136 queue calls against 126, Veterans Day 2026-11-11
+ * took 772 against 685, and Labor Day 2026-09-07 took 0 against 104. The
+ * other holidays predate the queue lanes, so nothing says the practice is
+ * open on them and they stay closed. A day the practice closes after all
+ * goes in PRACTICE_CLOSURES, which still wins.
+ */
+export function practiceOpenHolidaysFor(year: number): string[] {
+  return [nthWeekday(year, 10, 1, 2), observed(year, 11, 11)];
+}
+
 /** One-off practice closures, YYYY-MM-DD. Human-edited on purpose. */
 export const PRACTICE_CLOSURES: readonly string[] = [];
+
+function openHolidayToCall(window: CallingWindow, pacificDate: string): boolean {
+  if (!window.dialOnOpenHolidays) return false;
+  return practiceOpenHolidaysFor(parseInt(pacificDate.slice(0, 4), 10)).includes(pacificDate);
+}
 
 export function isHoliday(pacificDate: string): boolean {
   const year = parseInt(pacificDate.slice(0, 4), 10);
@@ -189,7 +215,9 @@ export function mayDialNow(
   const p = pacificParts(now);
   if (!window.days.includes(p.weekday)) return { ok: false, reason: "closed_day" };
   if (window.skipHolidays && PRACTICE_CLOSURES.includes(p.date)) return { ok: false, reason: "closed_day" };
-  if (window.skipHolidays && isHoliday(p.date)) return { ok: false, reason: "holiday" };
+  if (window.skipHolidays && isHoliday(p.date) && !openHolidayToCall(window, p.date)) {
+    return { ok: false, reason: "holiday" };
+  }
   if (p.hour < window.startHour || p.hour >= window.endHour) {
     return { ok: false, reason: "outside_hours" };
   }
