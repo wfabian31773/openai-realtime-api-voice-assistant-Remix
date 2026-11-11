@@ -41,7 +41,7 @@ export function normalizeDobParts(
 export function readDobQuietly(
   spoken: string,
 ): { month: string; day: string; year: string } | null {
-  // A turn that states an age gives no date (v207); see statesAnAge.
+  // A turn that states an age gives no date (v209); see statesAnAge.
   if (statesAnAge(spoken)) return null;
   return parse(spoken, SILENT);
 }
@@ -96,7 +96,7 @@ function withoutALeadingNo(raw: string): string {
 }
 
 /**
- * A LINE THAT SAYS A DATE IS NOT SO (v207). "It is not June third.", "That's
+ * A LINE THAT SAYS A DATE IS NOT SO (v209). "It is not June third.", "That's
  * wrong.", "No, not June third." A leading "No," set off by punctuation is an
  * answer to the question before it, not a negation of what follows ("No. My
  * birthday is June third."), as in the worded fallback above. The correction
@@ -114,7 +114,7 @@ export function negatesADate(uttered: string): boolean {
 }
 
 /**
- * AN AGE IS NOT A YEAR (v207).
+ * AN AGE IS NOT A YEAR (v209).
  *
  * "June third, I'm seventy years old." read as June 3rd, 1970 (Codex
  * post-merge sweep of #447), and "June 3, I'm 70 years old." has read that
@@ -548,7 +548,7 @@ export function numberWordsToDigits(raw: string): string | null {
     return false;
   };
   /**
-   * A RUN OF "ONE"s IS ANCHORED BY THE NUMBER IT RUNS INTO (v207).
+   * A RUN OF "ONE"s IS ANCHORED BY THE NUMBER IT RUNS INTO (v209).
    *
    * "One one nineteen fifty-one" is January 1st. Each "one" was tested on its
    * own, and an ambiguous neighbour never anchors, so the first "one" (beside

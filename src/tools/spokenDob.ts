@@ -80,7 +80,7 @@
  *
  *  - An agent line that asks for a date of birth AND some other date in the
  *    same breath ("not your date of birth — the date of your surgery") opens a
- *    window that the wrong answer can land in. Since v207 such a window can
+ *    window that the wrong answer can land in. Since v209 such a window can
  *    give a date of birth when none is held but cannot replace one unless the
  *    caller's own words call it their birthday; a different date in it clears
  *    the held one instead (see `DateSubject`).
@@ -308,7 +308,7 @@ function sentenceIsTheFormat(sentence: string): boolean {
 }
 
 /**
- * WHAT THE AGENT LAST ASKED A DATE ABOUT (v207).
+ * WHAT THE AGENT LAST ASKED A DATE ABOUT (v209).
  *
  * The format said on its own opens a window only when the date the agent was
  * last asking about is the date of birth. v199 read only the agent line just
@@ -482,7 +482,7 @@ type WindowRead =
 
 /**
  * A CALLER SENTENCE ABOUT ANOTHER DATE IS NOT AN ANSWER ABOUT THE BIRTHDAY
- * (v207).
+ * (v209).
  *
  * "June 3, 1944. I mean the surgery was December 5, 2025." read the "I mean"
  * as a correction and filed the surgery date as the date of birth (Codex
@@ -514,7 +514,7 @@ function aboutTheBirthday(uttered: string, dateBefore = false): { text: string; 
 }
 
 /**
- * A SENTENCE ABOUT ANOTHER DATE THAT TAKES BACK THE DATE BEFORE IT (v207,
+ * A SENTENCE ABOUT ANOTHER DATE THAT TAKES BACK THE DATE BEFORE IT (v209,
  * Codex P1 on #454, round 3). "June 3, 1944. Sorry, that is my surgery date."
  * read June 3rd, 1944, because the sentence that withdrew it names the
  * surgery and was dropped with its "sorry"; v206 read no date. After a date in
@@ -569,7 +569,7 @@ function callerNamesTheBirthday(about: string): boolean {
 }
 
 /**
- * THE HELD MONTH AND DAY, NAMED (v207). "June third", "the third of June",
+ * THE HELD MONTH AND DAY, NAMED (v209). "June third", "the third of June",
  * "6 3", "3 de junio". Ordinal suffixes are read as the number they are.
  */
 function namesTheHeldDate(uttered: string, iso: string): boolean {
@@ -596,7 +596,7 @@ function namesTheHeldDate(uttered: string, iso: string): boolean {
 }
 
 /**
- * A SENTENCE A REJECTION MAY BE READ FROM (v207, Codex P2 on #454, round 1).
+ * A SENTENCE A REJECTION MAY BE READ FROM (v209, Codex P2 on #454, round 1).
  * A sentence about another date ("My surgery is not June third.") is not
  * about the birthday and does not clear it. A sentence that names the
  * birthday as well ("My birthday is not June third, my surgery is.") is kept,
@@ -609,7 +609,7 @@ function mayRejectTheBirthday(sentence: string): boolean {
 }
 
 /**
- * A SENTENCE THAT IS NOTHING BUT A DENIAL (v207, round 2): "That's wrong.",
+ * A SENTENCE THAT IS NOTHING BUT A DENIAL (v209, round 2): "That's wrong.",
  * "No.", "That's not right.", "That's not my birthday.", "No es correcto."
  * Only such a sentence, or one after a date the caller asked back as a
  * question, is read against the date in the sentence before it. A word not in
@@ -630,7 +630,7 @@ function isABareDenial(sentence: string): boolean {
 }
 
 /**
- * "IT IS NOT JUNE THIRD" CLEARS JUNE THIRD, WHEREVER IT IS SAID (v207).
+ * "IT IS NOT JUNE THIRD" CLEARS JUNE THIRD, WHEREVER IT IS SAID (v209).
  *
  * The rejection was read only as a refused attempt in a LATER ask window, and
  * there a partial that names the held month and day reads as agreeing, so
@@ -711,7 +711,7 @@ function readWindow(lines: readonly string[], from: number): WindowRead {
  */
 function agreeingPartial(uttered: string, iso: string): boolean {
   // "No, not June 3" names the held month and day to reject them (Codex P1 on
-  // #447, head d0aefbb5), and so does "It is not June third." (v207).
+  // #447, head d0aefbb5), and so does "It is not June third." (v209).
   if (rejectsADate(uttered) || negatesADate(uttered)) return false;
   const [, mm, dd] = iso.split('-');
   const month = Number(mm);
