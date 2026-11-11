@@ -1492,14 +1492,31 @@ import { callEnvironment } from "./callRecord";
  * nothing down, the sweep now asks a model (requestFromTheRecording.ts,
  * gpt-4o-mini) for one short sentence of what the caller asked, checked in
  * code for numbers, dates, addresses and held names, and files it as the
- * description; on Medical Records with the catch-all reason. The records lane
+ * description; on Medical Records it goes in the staff note only (a records
+ * description opens a case on a pathway the app picks). The records lane
  * also gets v180's heard name (64 of 65 nameless records tickets were the
  * sweep's). Off switch REQUEST_FROM_RECORDING_DISABLED=1. Above main's v200
  * (#448, `65080651`), which it contains along with v198 (#446, `ff996d58`);
  * v199 is #447 on its open branch. No migration.
  */
+/**
+ * v202 — REQUESTS FILE WHERE STAFF WORK THEM (2026-11-11). Operator: "We're
+ * doing more transferring of tickets than anything else." On 2026-11-10 staff
+ * moved 121 of 551 agent tickets. The queue-lane router (`detectCrossQueue`),
+ * measured over 14 days of optical/surgery/tech tickets against where staff
+ * moved them: on the surgery line the operation WORD keeps a request home and
+ * a routine-visit question goes to the HVA Hub; on the tech line contact
+ * lenses go to Optical; an exam that already happened no longer reads as a
+ * booking; on the optical line a message about an operation with no eyewear
+ * goes to Surgery. 125 tickets re-routed, 79 to where staff moved them, 34
+ * that staff left, 12 elsewhere. After hours, an appointment request that is
+ * not about today, not urgent and names no operation files to the HVA Hub
+ * (37 landed elsewhere in the window, staff moved 24 to the Hub). Above
+ * main's v201 (#449, `c99abcb6`), which it contains along with v200 (#448,
+ * `65080651`). No migration.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v201-the-swept-ticket-says-what-was-asked-20261111";
+  "voice-runtime-v202-requests-file-where-staff-work-them-20261111";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

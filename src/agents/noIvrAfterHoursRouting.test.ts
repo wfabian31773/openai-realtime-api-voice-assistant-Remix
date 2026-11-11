@@ -269,7 +269,9 @@ describe('a same-day request files to After Hours', () => {
       request_category: 'reschedule_appointment',
       request_summary: 'Wants to move her appointment',
     });
-    expect(lastSubmit().departmentId).toBeUndefined();
+    // Not same-day, so not After Hours. Since v202 an appointment request that
+    // is not about today goes to the HVA Hub (standing instruction 10).
+    expect(lastSubmit().departmentId).toBe(9);
   });
 
   it('not after the office day has ended', async () => {
@@ -281,7 +283,9 @@ describe('a same-day request files to After Hours', () => {
       request_summary: 'About the appointment today',
       appointment_today: true,
     });
-    expect(lastSubmit().departmentId).toBeUndefined();
+    // After 5 PM "today" is over, so not After Hours; since v202 the
+    // appointment request goes to the HVA Hub.
+    expect(lastSubmit().departmentId).toBe(9);
   });
 });
 

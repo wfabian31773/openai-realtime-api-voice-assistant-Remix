@@ -208,10 +208,13 @@ describe('it stays silent when the line that rang is already right', () => {
     expect(detectCrossQueue('what time should I arrive for my surgery', SURGERY)).toBeNull();
   });
 
-  it('keeps a contact lens PRESCRIPTION with Tech Support', () => {
-    // 157 is a Tech Support reason. The eyewear itself is Optical; the
-    // prescription for it is not.
-    expect(detectCrossQueue('I need to renew my contact lens prescription', TECH)).toBeNull();
+  it('sends a contact lens PRESCRIPTION on the medication line to Optical (v202)', () => {
+    // 157 is a Tech Support reason, and this test used to keep a renewal on
+    // the medication line for that reason. Measured 2026-10-28..11-10: staff
+    // moved all 11 tech-line contact-lens tickets to Optical, the 3 renewals
+    // of the lens prescription among them, so the request goes where it is
+    // worked.
+    expect(detectCrossQueue('I need to renew my contact lens prescription', TECH)?.departmentId).toBe(1);
   });
 
   it('says nothing about an empty or unremarkable request', () => {
