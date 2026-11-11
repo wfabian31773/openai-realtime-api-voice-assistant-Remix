@@ -1458,8 +1458,19 @@ import { callEnvironment } from "./callRecord";
  * were an office). Above main's v196 (#444, `fe330544`), which it contains.
  * No migration.
  */
+/**
+ * v198 — EACH FILING TOOL RECORDS THE FIELD NAMES IT RECEIVED (2026-11-10).
+ * Operator, on PCP-82755: a daily review of every ticket, to understand why
+ * fields are not populated. A field the caller gave and the ticket lacks has
+ * different causes depending on whether the filing tool received it, and only
+ * the queue lanes' registry path recorded that. `tool_timeline` now carries
+ * `supplied`, the argument NAMES (never a value) on every filing tool:
+ * create_ticket, the PCP filing tools, escalate_to_human and file_*_ticket.
+ * Logging only. Above main's v197 (#445, `ec3af3fd`), which it contains along
+ * with v196 (#444, `fe330544`). No migration.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v197-a-records-request-asks-who-and-whose-20261110";
+  "voice-runtime-v198-filing-tools-record-what-they-received-20261110";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can
