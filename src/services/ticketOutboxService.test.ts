@@ -682,6 +682,12 @@ const ROUTED_AWAY_400 = {
 };
 
 describe('v205: a refused replay sends its fallback once before dead-lettering', () => {
+  // Queued answers are per test: an answer a failing test never consumed must
+  // not leak into the next one.
+  beforeEach(() => {
+    createTicket.mockReset();
+    createTicket.mockResolvedValue({ success: true, ticketNumber: 'VA-52100', ticketId: 9001 });
+  });
   const held = () => wrapCreateTicketPayload(NAMELESS_RECORDS as never, { description: PLACEHOLDER });
   const storedPayload = () => setPayloads.find((p) => p.status === 'pending' && 'payload' in p)?.payload;
 
