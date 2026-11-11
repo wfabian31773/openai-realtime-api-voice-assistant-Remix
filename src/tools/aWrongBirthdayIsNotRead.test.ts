@@ -221,6 +221,8 @@ describe('4. a sentence about another date is not an answer about the birthday',
     expect(dobFromCallerAnswer([ASK, C('June 3, 1944.'), A('Thank you.'), C("That's not my birthday, my birthday is June 4, 1944.")])).toBeUndefined();
     // The date and the denial in one sentence (Codex P1 on #457).
     expect(dobFromCallerAnswer([ASK, C('June 3, 1944, that is not my birthday.')])).toBeUndefined();
+    expect(dobFromCallerAnswer([ASK, C('June 3, 1944, not my birthday.')])).toBeUndefined();
+    expect(dobFromCallerAnswer([ASK, C('June 3, 1944.'), A('Thank you.'), C('June third, not my birthday.')])).toBeUndefined();
     expect(dobFromCallerAnswer([ASK, C('June third nineteen forty-four, that is not my birthday, it is my surgery date.')])).toBeUndefined();
     // A later date the caller gives as the birthday is still read.
     expect(dobFromCallerAnswer([ASK, C('June 3, 1944. That is not my birthday, it is my surgery date.'), REASK, C('June 4, 1944.')])).toBe('1944-06-04');
@@ -232,6 +234,13 @@ describe('4. a sentence about another date is not an answer about the birthday',
     expect(dobFromCallerAnswer([ASK, C('June 3, 1944. December 5 is not my birthday, that is my surgery date.')])).toBe('1944-06-03');
     expect(dobFromCallerAnswer([ASK, C('June 3, 1944.'), A('Thank you.'), C('December 5 is not my birthday, that is my surgery date.')])).toBe('1944-06-03');
     expect(dobFromCallerAnswer([ASK, C('June 3, 1944.'), A('Thank you.'), C("December fifth isn't my date of birth.")])).toBe('1944-06-03');
+    // Nor does any subject but a pronoun (Codex P2 on #457, round 2).
+    expect(dobFromCallerAnswer([ASK, C('June 3, 1944.'), A('And when is your appointment?'), C('My appointment is tomorrow, not my birthday.')])).toBe('1944-06-03');
+    expect(dobFromCallerAnswer([ASK, C('June 3, 1944. My appointment is tomorrow, not my birthday.')])).toBe('1944-06-03');
+    expect(dobFromCallerAnswer([ASK, C('June 3, 1944.'), A('Thank you.'), C('June 4, 1944, not my birthday.')])).toBe('1944-06-03');
+    expect(dobFromCallerAnswer([ASK, C('June 3, 1944. My surgery is December 5, not my birthday.')])).toBe('1944-06-03');
+    // A filler before the pronoun is still a pronoun subject.
+    expect(dobFromCallerAnswer([ASK, C('June 3, 1944.'), A('Thank you.'), C("No, that's not my birthday.")])).toBeUndefined();
     expect(dobFromCallerAnswer([ASK, C('June 3, 1944. That is my birthday, not my surgery date.')])).toBe('1944-06-03');
     expect(dobFromCallerAnswer([ASK, C('June 3, 1944.'), A('Thank you.'), C('Yes, and it is not my surgery, just a checkup.')])).toBe('1944-06-03');
     expect(dobFromCallerAnswer([ASK, C('June 3, 1944.'), A('Thank you.'), C("I don't know my surgery date.")])).toBe('1944-06-03');
