@@ -351,14 +351,14 @@ async function sessionFor(input: Record<string, unknown>): Promise<{ sid: string
 
 // ── The patient's partner availability ─────────────────────────────────────
 
-interface Availability {
+export interface Availability {
   slots: NpxSlot[];
   truncated: boolean;
   /** `offer`: an NPX without the availability endpoint; at most two slots. */
   from: 'availability' | 'offer';
   fetchedAtMs: number;
 }
-type AvailabilityLoad = Availability | { error: string };
+export type AvailabilityLoad = Availability | { error: string };
 
 /** Keyed on the contact and the mode, so the agent factory can warm it before
  * any tool has opened a session. Holds no patient data: slots only. */
@@ -367,7 +367,7 @@ const MAX_AVAILABILITY_ENTRIES = 200;
 
 const availabilityKey = (c: OutboundContact, demo: boolean) => `${demo ? 'demo' : 'live'}:${c.contactId}`;
 
-function offerAsk(c: OutboundContact): { medicalGroupName: string; partnerNames: string[]; replacedAppointmentDate: string } | null {
+export function offerAsk(c: OutboundContact): { medicalGroupName: string; partnerNames: string[]; replacedAppointmentDate: string } | null {
   const medicalGroupName = field(c, 'medical_group');
   const partnerNames = Array.isArray(c.data.partners) ? (c.data.partners as unknown[]).map(String) : [];
   const replacedAppointmentDate = field(c, 'appointment_date');
@@ -385,7 +385,7 @@ function readLimit(deadlineAt: number | undefined): NpxReadOptions | undefined |
   return left >= MIN_NPX_READ_MS ? { timeoutMs: left } : null;
 }
 
-async function readAvailability(
+export async function readAvailability(
   c: OutboundContact,
   demo: boolean,
   range?: { fromDay?: string; toDay?: string },
@@ -409,7 +409,7 @@ async function readAvailability(
 
 /** The contact's availability: the cached read while it is fresh, else a new
  * one, bounded by `deadlineAt` when a search started it. */
-function loadAvailability(c: OutboundContact, demo: boolean, fresh = false, deadlineAt?: number): Promise<AvailabilityLoad> {
+export function loadAvailability(c: OutboundContact, demo: boolean, fresh = false, deadlineAt?: number): Promise<AvailabilityLoad> {
   const key = availabilityKey(c, demo);
   const now = Date.now();
   const hit = availabilityCache.get(key);
@@ -481,7 +481,7 @@ export function resetOutreachAvailabilityForTests(): void {
 
 // ── What the record says, in words ──────────────────────────────────────────
 
-const field = (c: OutboundContact, k: string): string => (typeof c.data[k] === 'string' ? (c.data[k] as string) : '');
+export const field = (c: OutboundContact, k: string): string => (typeof c.data[k] === 'string' ? (c.data[k] as string) : '');
 
 /** "Monday, December 7" — a YYYY-MM-DD read as a calendar day, never shifted by a time zone. */
 export function spokenDay(ymd: string): string {
@@ -542,7 +542,7 @@ function briefAppointment(c: OutboundContact): string {
 }
 
 /** After it: the time and the office as well. */
-function currentAppointment(c: OutboundContact): string {
+export function currentAppointment(c: OutboundContact): string {
   const clock = spokenClock(field(c, 'begin_time'));
   const office = field(c, 'office');
   return `${briefAppointment(c)}${clock ? ` at ${clock}` : ''}${office ? ` at our ${office} office` : ''}`;
@@ -980,7 +980,7 @@ async function within<T>(p: Promise<T>, ms: number, fallback: T): Promise<T> {
   }
 }
 
-function confirmation(slot: NpxSlot, cancel: AzulCancelResult, currentDay: string): string {
+export function confirmation(slot: NpxSlot, cancel: AzulCancelResult, currentDay: string): string {
   const booked = `You're booked for ${spokenSlot(slot)}. Their phone number is ${slot.phone}.`;
   return cancel.cancelled
     ? `${booked} I've also cancelled your appointment with us on ${currentDay}, so there's nothing else you need to do.`
@@ -1042,35 +1042,18 @@ async function bookChosen(
     };
     return r;
   }
-  const personId = field(s.contact, 'person_id');
-  const appointmentId = field(s.contact, 'appointment_id');
-  const dob = dobOnFile(s.contact);
-  if (!personId || !appointmentId || !dob || !s.contact.firstName || !s.contact.lastName) {
-    const r: Refusal = {
-      success: false,
-      error: 'record_incomplete',
-      fix: 'This record cannot be booked over the phone. Tell them their current appointment stays as it is, call record_call_outcome with done, say goodbye and call end_call.',
-    };
-    return r;
-  }
-  const book = await npxFor(s).book({
-    slotId: slot.slotId,
-    medicalGroupName: field(s.contact, 'medical_group'),
-    minDaysSooner: MIN_DAYS_SOONER,
-    patient: {
-      firstName: s.contact.firstName,
-      lastName: s.contact.lastName,
-      dateOfBirth: `${dob.year}-${dob.month}-${dob.day}`,
-      ngePersonId: personId,
-      phone: s.contact.phone,
-    },
-    replacedAppointment: { ngeAppointmentId: appointmentId, date: field(s.contact, 'appointment_date') },
-    callRef: sid,
-  });
-  if (!book.ok) {
-    if (book.next === 'offer_again') {
+  const booked = await bookOutreachSlot({ contact: s.contact, demo: s.demo, slot, callRef: sid, deadline });
+  if (!booked.ok) {
+    if (booked.error === 'record_incomplete') {
+      const r: Refusal = {
+        success: false,
+        error: 'record_incomplete',
+        fix: 'This record cannot be booked over the phone. Tell them their current appointment stays as it is, call record_call_outcome with done, say goodbye and call end_call.',
+      };
+      return r;
+    }
+    if (booked.error === 'slot_unavailable') {
       s.slots = [];
-      forgetSlot(s.contact, s.demo, slot.slotId);
       const r: Refusal = {
         success: false,
         error: 'slot_unavailable',
@@ -1081,34 +1064,92 @@ async function bookChosen(
     }
     const r: Refusal = {
       success: false,
-      error: book.error,
+      error: booked.error,
       fix:
         'It could not be booked over the phone. Do not say anything failed and do not promise a call. Tell them their current appointment stays exactly as it is, ' +
         'call record_call_outcome with done, say goodbye and call end_call.',
     };
     return r;
   }
+  s.booking = { bookingId: booked.bookingId, slot: booked.slot, cancel: booked.cancel };
+  return {
+    success: true,
+    booked: true,
+    say: confirmation(s.booking.slot, booked.cancel, currentDay),
+    fix: 'Say the confirmation as given, ask if there is anything else, then say goodbye and call end_call. The outcome is already recorded.',
+  };
+}
+
+/** What booking one opening came to (v211): the call and the text's booking
+ * page both book through bookOutreachSlot, so the two cannot differ. */
+export type OutreachBooking =
+  | { ok: true; bookingId: string; slot: NpxSlot; cancel: AzulCancelResult }
+  | { ok: false; error: string };
+
+/**
+ * BOOK ONE OPENING, THE ONE WAY (v211). Book it in NPX, cancel the Azul
+ * appointment it replaces, report the cancel to NPX, and settle the contact
+ * `completed` with `npx_booking:<id>`. Shared by book_sooner_exam (the call)
+ * and the text's booking page, so the sequence, the deadline and the demo
+ * swaps are one copy. `slot_unavailable` is a slot NPX says was just taken,
+ * already forgotten; `record_incomplete` is a record nothing can be booked
+ * from. Any other error is NPX's own.
+ */
+export async function bookOutreachSlot(args: {
+  contact: OutboundContact;
+  demo: boolean;
+  slot: NpxSlot;
+  /** For tracing in NPX: the CallSid on a call, the link's own ref on the page. */
+  callRef: string;
+  /** The whole sequence answers inside this (BOOK_SEQUENCE_BUDGET_MS). */
+  deadline: number;
+}): Promise<OutreachBooking> {
+  const { contact, demo, slot, callRef, deadline } = args;
+  const personId = field(contact, 'person_id');
+  const appointmentId = field(contact, 'appointment_id');
+  const dob = dobOnFile(contact);
+  if (!personId || !appointmentId || !dob || !contact.firstName || !contact.lastName) {
+    return { ok: false, error: 'record_incomplete' };
+  }
+  const npx = demo ? live().npxDemo : live().npx;
+  const book = await npx.book({
+    slotId: slot.slotId,
+    medicalGroupName: field(contact, 'medical_group'),
+    minDaysSooner: MIN_DAYS_SOONER,
+    patient: {
+      firstName: contact.firstName,
+      lastName: contact.lastName,
+      dateOfBirth: `${dob.year}-${dob.month}-${dob.day}`,
+      ngePersonId: personId,
+      phone: contact.phone,
+    },
+    replacedAppointment: { ngeAppointmentId: appointmentId, date: field(contact, 'appointment_date') },
+    callRef,
+  });
+  if (!book.ok) {
+    if (book.next === 'offer_again') {
+      forgetSlot(contact, demo, slot.slotId);
+      return { ok: false, error: 'slot_unavailable' };
+    }
+    return { ok: false, error: book.error };
+  }
 
   // Booked. Now the Azul appointment, then tell NPX how that went. A cancel
   // that does not land is still safe: NPX lists the booking for CEC after
   // 15 minutes with no `cancelled` report.
-  const cancel = await cancelFor(s)({
+  const cancel = await (demo ? simulatedDemoCancel : live().cancel)({
     appointmentId,
     personId,
-    appointmentDate: field(s.contact, 'appointment_date'),
+    appointmentDate: field(contact, 'appointment_date'),
     comment: `Moved to an NPX partner practice by the Azul outreach call (NPX booking ${book.bookingId}).`,
     deadlineAt: deadline - NPX_TIMEOUT_MS.report - SETTLE_BUDGET_MS,
   });
-  const report = await npxFor(s).reportCancel(
-    book.bookingId,
-    cancel.cancelled ? 'cancelled' : { failed: cancel.reason },
-  );
+  const report = await npx.reportCancel(book.bookingId, cancel.cancelled ? 'cancelled' : { failed: cancel.reason });
   if (!report.ok) {
     console.warn(`[NPX OUTREACH] booking ${book.bookingId}: the cancel report did not land (${report.error}); CEC's backup list will show it`);
   }
-  s.booking = { bookingId: book.bookingId, slot: book.slot ?? slot, cancel };
   const settle = (async () => {
-    await (await live().store()).settleContact(s.contact.contactId, 'completed', {
+    await (await live().store()).settleContact(contact.contactId, 'completed', {
       notes: `npx_booking:${book.bookingId}`,
       exceptStatus: ['do_not_call'],
     });
@@ -1120,12 +1161,7 @@ async function bookChosen(
   if (!(await within(settle, Math.min(SETTLE_BUDGET_MS, deadline - Date.now()), false))) {
     console.warn(`[NPX OUTREACH] booking ${book.bookingId}: the contact is not settled yet; the booking stands`);
   }
-  return {
-    success: true,
-    booked: true,
-    say: confirmation(s.booking.slot, cancel, currentDay),
-    fix: 'Say the confirmation as given, ask if there is anything else, then say goodbye and call end_call. The outcome is already recorded.',
-  };
+  return { ok: true, bookingId: book.bookingId, slot: book.slot ?? slot, cancel };
 }
 
 // ── request_staff_callback ──────────────────────────────────────────────────
