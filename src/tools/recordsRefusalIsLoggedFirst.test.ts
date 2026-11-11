@@ -221,6 +221,19 @@ describe('a refusal the caller cannot fix is logged before anyone is told it is'
     expect(r.fix).toBe(RECOVERED_AFTER_REFUSAL_FIX);
   });
 
+  it('a recovery the outbox holds carries the placeholder for a refused replay (v205)', async () => {
+    await app(UNASKABLE_400, OUTAGE);
+    await runTool('file_records_ticket', THIRD_PARTY);
+    expect(writeToOutbox).toHaveBeenCalledTimes(2);
+    // The refused filing carries none; the recovery carries the placeholder
+    // beside the request text, so a replay the recovered app refuses still
+    // files instead of dead-lettering.
+    expect(writeToOutbox.mock.calls[0][0]).not.toHaveProperty('refusalFallback');
+    const held = writeToOutbox.mock.calls[1][0] as { params: Params; refusalFallback?: { description: string } };
+    expect(held.params.description).toBe('requesting a copy of the chart notes from the last visit');
+    expect(held.refusalFallback).toEqual({ description: SWEPT_TICKET_DESCRIPTION });
+  });
+
   it('a recovery refused with the request text retries once with the placeholder (v166)', async () => {
     const { posts } = await app(UNASKABLE_400, UNASKABLE_400, FILED('VA-RECOVERED-8'));
     const r = (await runTool('file_records_ticket', THIRD_PARTY)) as Out;

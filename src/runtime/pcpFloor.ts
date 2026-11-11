@@ -68,6 +68,13 @@
  */
 import type { VoiceCallRecord } from "./mediaStreamBridge";
 import type { LaneSource } from "./laneRegistry";
+import type { TeardownTurn } from "../pcp/answerToTheAsk";
+
+/**
+ * What a lane's teardown filer is handed: how the call ended, what was said,
+ * and (v205) the timed turns the PCP floor reads the answer to its ask from.
+ */
+export type TeardownContext = { outcome?: string; transcript?: string; turns?: ReadonlyArray<TeardownTurn> };
 
 /** Only this lane has a PCP director, PCP metadata and a PCP endpoint. */
 export const PCP_FLOOR_LANE = "pcp";
@@ -85,7 +92,7 @@ export const PCP_FLOOR_LANE = "pcp";
 export const PCP_FLOOR_BUDGET_MS = 25_000;
 
 /** The floor's one dependency: the lane's own teardown filer. */
-type PcpSweep = (callId: string, ctx?: { outcome?: string; transcript?: string }) => Promise<void>;
+type PcpSweep = (callId: string, ctx?: TeardownContext) => Promise<void>;
 
 interface PcpFloorOptions {
   /** Injected for tests. Defaults to the lane's own `teardownSweep`. */
@@ -125,7 +132,7 @@ export async function runPcpFloor(
 
 /** v129: share PCP's v90 registration lookup and teardown bound with after-hours. */
 export async function runLaneTeardownFloor(
-  record: Pick<VoiceCallRecord, 'slug' | 'callSid'> & { outcome?: string; transcript?: string },
+  record: Pick<VoiceCallRecord, 'slug' | 'callSid'> & TeardownContext,
   options: PcpFloorOptions = {},
 ): Promise<void> {
   const budgetMs = options.budgetMs ?? PCP_FLOOR_BUDGET_MS;
@@ -147,7 +154,9 @@ export async function runLaneTeardownFloor(
       // nothing and withdraws what names no patient (operator, 2026-10-19).
       // The transcript travels too: a caller who hung up after being told the
       // request is recorded keeps it (v102, toldItWasRecorded.ts).
-      sweep(record.callSid, { outcome: record.outcome, transcript: record.transcript }),
+      // The turns travel too: the PCP floor reads the caller's answer to the
+      // v204 ask from them (v205, answerToTheAsk.ts).
+      sweep(record.callSid, { outcome: record.outcome, transcript: record.transcript, turns: record.turns }),
       new Promise<void>((resolve) => {
         timer = setTimeout(resolve, budgetMs);
         (timer as unknown as { unref?: () => void }).unref?.();

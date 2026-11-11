@@ -1535,8 +1535,19 @@ import { callEnvironment } from "./callRecord";
  * customer service, medical assistant). The floor's person-only admission (v18)
  * is gone. Above main's v203 (#451, `25e356ba`). No migration.
  */
+/**
+ * v205 — THE REVIEW FOLLOW-UPS ON v201 TO v204 (2026-11-11). Operator, the same
+ * morning, listing the review findings that matter most. The PCP floor files
+ * the answer a caller gives to the v204 ask when the call then ends on our
+ * side, and "get them the provider notes" is not an ask for a person; the
+ * v202 routing rules stop five misses; the swept sentence holds back
+ * apostrophe names, spoken dates and longer addresses; and a swept records
+ * request the outbox replays after an outage falls back to the placeholder
+ * instead of dead-lettering. Above main's v204 (#452, `caffbeb4`). No
+ * migration.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v204-a-request-with-no-request-is-not-filed-20261111";
+  "voice-runtime-v205-the-review-follow-ups-20261111";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

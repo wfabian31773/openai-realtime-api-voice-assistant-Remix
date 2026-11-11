@@ -57,6 +57,21 @@ describe("the PCP floor runs for the PCP lane and no other", () => {
   });
 
   /**
+   * AND THE TIMED TURNS (v205). The PCP floor reads the caller's answer to the
+   * v204 "what can I help you with?" ask from them; a sweep handed the
+   * transcript alone could not tell which caller line came after the ask.
+   */
+  it("hands the sweep the call's timed turns", async () => {
+    const sweep = vi.fn(async () => undefined);
+    const turns = [
+      { role: "agent" as const, text: "What can I help you with today?", atMs: 1_000 },
+      { role: "caller" as const, text: "A referral status.", atMs: 2_000 },
+    ];
+    await runPcpFloor(record({ outcome: "dead_air", turns } as Partial<VoiceCallRecord>), { sweep });
+    expect(sweep).toHaveBeenCalledWith("CA0000000000000000000000000000ab01", { outcome: "dead_air", transcript: "", turns });
+  });
+
+  /**
    * THE ENDING TRAVELS WITH THE KEY (operator, 2026-10-19). A caller who hangs
    * up or goes to the queue gets nothing filed behind them, and only the
    * record knows which ending this was — a sweep handed the SID alone would

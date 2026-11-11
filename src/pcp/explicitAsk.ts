@@ -113,6 +113,16 @@ const HUMAN_NOUNS =
   '(?:person|human|someone|somebody|rep|representative|agent|front desk|receptionist|office|team|operator' +
   '|staff|department|provider|doctor|physician|nurse|customer service|medical assistant)';
 
+/**
+ * Every word in the person nouns, for code that must tell an answer that only
+ * asks for a person from one that says what the call is about (the v204 ask's
+ * answer at teardown, `answerToTheAsk.ts`). Derived from `HUMAN_NOUNS` so the
+ * two cannot drift apart.
+ */
+export const PERSON_NOUN_WORDS: ReadonlySet<string> = new Set(
+  HUMAN_NOUNS.replace(/[()?:]/g, ' ').split(/[|\s]+/).filter(Boolean),
+);
+
 /** Asking to be connected: "can I speak to the team", "talk with someone". */
 const SPEAK_TO = new RegExp(`\\b(?:speak|talk)\\b\\s+(?:to|with)\\b[^.]{0,25}\\b${HUMAN_NOUNS}\\b`, 'ig');
 
@@ -184,9 +194,46 @@ const CONNECT_TO = new RegExp(
     // "transfer the call over to", "transfer to". "Transfer records to the
     // provider" moves a document and is not an ask (Codex P2 on #452; v204's
     // `provider` made it reachable, and `office` already was).
-    'transfer(?=\\s+(?:(?:me|them|us|him|her|the\\s+call(?:er)?|this\\s+call|my\\s+call)\\s+)?(?:(?:directly|straight|right|over|back)\\s+){0,3}(?:to|for)\\b)|put\\s+(?:me|them|us|him|her)\\s+through|put\\s+(?:me|them|us|him|her)|get\\s+(?:me|them|us)' +
+    'transfer(?=\\s+(?:(?:me|them|us|him|her|the\\s+call(?:er)?|this\\s+call|my\\s+call)\\s+)?(?:(?:directly|straight|right|over|back)\\s+){0,3}(?:to|for)\\b)|put\\s+(?:me|them|us|him|her)\\s+through|put\\s+(?:me|them|us|him|her)' +
     ')\\b' +
     `[^.]{0,25}\\b${HUMAN_NOUNS}\\b`,
+  'ig',
+);
+
+/**
+ * WHAT A CALLER OR AN OFFICE ASKS US TO GET THEM, WHEN IT IS A DOCUMENT.
+ *
+ * "Get me a rep" asks for a person. "Get them the provider notes", "get me
+ * the doctor's note" and "get us the office fax number" ask for a document
+ * or a number, and `get` was the one verb in `CONNECT_TO` that takes either
+ * as its object. v204 added `provider`, `doctor` and `nurse` to the nouns, so
+ * those sentences started to read as an ask for a person. Wayne, 2026-11-11.
+ *
+ * So `get` has its own branch, and the noun it reaches must not OWN anything:
+ * not followed by a possessive, and not followed by one of the documents and
+ * details a caller asks to be sent. "Get me the doctor's office" still
+ * matches, on `office`. Measured, PCP, the 30 days to 2026-11-11: 0 of 4,392
+ * transcripts and 0 of 2,737 agent tickets had `get me|them|us` followed by a
+ * person word and a document word. The other branches keep no such check:
+ * `speak with the office referral coordinator` is an ask for a person, and it
+ * is the one shape of a person word before a document word those 30 days
+ * held (1 ticket).
+ */
+const DOCUMENT_WORDS =
+  '(?:notes?|reports?|records?|letters?|orders?|charts?|summary|summaries|referrals?|forms?|fax(?:es)?|numbers?|info|information|schedules?|address(?:es)?|phone|documents?|paperwork|results|email)';
+const DOCUMENT_AFTER_THE_NOUN = `(?!['\u2019]s\\b|s'|\\s+${DOCUMENT_WORDS}\\b)`;
+/**
+ * The words between `get me` and the noun may not hold a person noun that
+ * owns a document. Without this the regex backtracks past a rejected noun to
+ * a later one: "get me the provider notes from the office" refused
+ * `provider` and then matched `office` (Codex P2 on #453). "Get me the
+ * doctor's office" still matches, because `doctor's` owns an office, not a
+ * document.
+ */
+const NO_DOCUMENT_OWNER = `(?!\\b${HUMAN_NOUNS}(?:['\u2019]s|s')?\\s+${DOCUMENT_WORDS}\\b)`;
+
+const GET_A_PERSON = new RegExp(
+  `\\bget\\s+(?:me|them|us)\\b(?:${NO_DOCUMENT_OWNER}[^.]){0,25}\\b${HUMAN_NOUNS}\\b${DOCUMENT_AFTER_THE_NOUN}`,
   'ig',
 );
 
@@ -345,6 +392,7 @@ export function asksForAPerson(narrative: string): boolean {
   return (
     matchesUnnegated(SPEAK_TO, narrative) ||
     matchesUnnegated(CONNECT_TO, narrative) ||
+    matchesUnnegated(GET_A_PERSON, narrative) ||
     matchesUnnegated(ASKED_FOR, narrative) ||
     A_REAL_PERSON.test(narrative)
   );

@@ -55,6 +55,7 @@ import { ticketReadiness, nextRequiredAsk, annotationFor, MAX_BLOCKS } from '../
 import { recordsAskFor, recordsAskGuidance, recordsIdentityGaps } from '../pcp/recordsIntakeGate';
 import { namesAPatient, submitPcpTicket, submitPcpWithdrawal, type PcpTicketPayload } from '../pcp/pcpTicketing';
 import { toldTheCallerItWasRecorded } from '../pcp/toldItWasRecorded';
+import { answerToTheNoRequestAsk, type TeardownTurn } from '../pcp/answerToTheAsk';
 import { intakeReplyForTheModel } from '../pcp/intakeNextStep';
 import { getPacificTimeContext, formatPhoneForSpeech, formatPhoneLast4 } from '../utils/timeAware';
 // STATIC, NOT `await import(…)` — the v78 rule. A dynamic import of a module
@@ -3441,7 +3442,12 @@ async function settleWithin(pending: Promise<unknown>[], ms: number): Promise<vo
  * How the call ended, and what was said on it, from the runtime's record. The
  * old core calls the sweep with no context and keeps its behaviour exactly.
  */
-export type PcpTeardownContext = { outcome?: string; transcript?: string };
+export type PcpTeardownContext = {
+  outcome?: string;
+  transcript?: string;
+  /** The call's timed turns (v205): where the answer to the v204 ask is read. */
+  turns?: ReadonlyArray<TeardownTurn>;
+};
 
 export async function sweepPcpUnfiledCall(callId: string, ctx: PcpTeardownContext = {}): Promise<void> {
   const metadata = pcpCallMetadata.get(callId);
@@ -3581,9 +3587,31 @@ export async function sweepPcpUnfiledCall(callId: string, ctx: PcpTeardownContex
      * nothing was filed after it, they did not say: nothing files here either,
      * whatever identity was recorded.
      */
+    /**
+     * UNLESS THEY ANSWERED IT AND THE CALL ENDED BEFORE IT WAS FILED (v205).
+     * Wayne, 2026-11-11: a caller who answers the ask and then hears nothing
+     * (the agent stalls, the watchdog or the silence ladder ends the call)
+     * lost the request, because this exit read the ask and not the answer.
+     * The answer is read from the call's timed turns, in the window the ask
+     * opened (`answerToTheAsk.ts`), and only on an ending WE caused: a caller
+     * who hung up or went to the queue never reaches this line (above). An
+     * answer that only asks for a person again, or only gives who they are,
+     * is still not a request, and nothing files.
+     */
+    let answerToTheAsk: string[] = [];
     if (state.requestNotStatedAskedAt !== undefined) {
-      console.info(`[PCP] SWEEP: ${callId} — the caller asked only for a person and said nothing more when asked; no ticket, by the operator's rule`);
-      return;
+      answerToTheAsk = answerToTheNoRequestAsk(ctx.turns, state.requestNotStatedAskedAt, [
+        state.callerName,
+        state.callerOrganization,
+        state.callerRole,
+        state.patientFirstName,
+        state.patientLastName,
+      ]);
+      if (answerToTheAsk.length === 0) {
+        console.info(`[PCP] SWEEP: ${callId} — the caller asked only for a person and said nothing more when asked; no ticket, by the operator's rule`);
+        return;
+      }
+      console.warn(`[PCP] SWEEP: ${callId} — the caller answered the ask and the call ended (${ctx.outcome ?? 'unknown'}) before it was filed; filing their answer for a person to route`);
     }
     /**
      * A CALL NOBODY CLASSIFIED IS STILL A CALL SOMEBODY MADE.
@@ -3656,7 +3684,8 @@ export async function sweepPcpUnfiledCall(callId: string, ctx: PcpTeardownContex
       lastName: state.patientLastName,
     });
     const unclassified = !state.callPurpose && spokeBeyondTheirOwnIdentity;
-    if (!toldUsSomething && !unclassified) {
+    const answeredTheAsk = answerToTheAsk.length > 0;
+    if (!toldUsSomething && !unclassified && !answeredTheAsk) {
       console.info(`[PCP] SWEEP: ${callId} ended with nothing to file (no purpose or no identity) — no ticket`);
       return;
     }
@@ -3674,7 +3703,9 @@ export async function sweepPcpUnfiledCall(callId: string, ctx: PcpTeardownContex
      * was never classified. (A third, the caller who asked only for a person,
      * no longer files at all — v204, above.)
      */
-    const headline = unclassified
+    const headline = answeredTheAsk
+      ? 'THE CALLER SAID WHAT THEY NEED, BUT THE CALL ENDED BEFORE IT WAS FILED. They first asked for a person; asked what it was about, they said what is below. Nothing here has been routed to a department — please read it and send it where it belongs.'
+      : unclassified
       ? 'THIS CALL WAS NOT CLASSIFIED AND NEEDS ROUTING BY HAND. The caller spoke but the agent never established what the call was about, so nothing here has been routed to a department — please read what they said below and send it where it belongs.'
       : 'CALLER HUNG UP BEFORE THE REQUEST WAS COMPLETE. Filed from what was gathered on the call so it is not lost.';
     /**
@@ -3692,9 +3723,13 @@ export async function sweepPcpUnfiledCall(callId: string, ctx: PcpTeardownContex
      * because the annotation is appended afterwards and the call site cannot
      * see the string that is actually validated.
      */
-    const theirWords = unclassified
+    const theirWords = answeredTheAsk
+      ? `What the caller said when asked what they need:\n${answerToTheAsk.map((l) => `  - ${l}`).join('\n')}`
+      : unclassified
       ? `What the caller said:\n${callerLines(transcript).map((l) => `  - ${l}`).join('\n')}`
       : '';
+    /** An answer we read is routed by a person, as an unclassified call is. */
+    const routeByHand = unclassified || answeredTheAsk;
     const narrative = [
       headline,
       theirWords,
@@ -3706,7 +3741,7 @@ export async function sweepPcpUnfiledCall(callId: string, ctx: PcpTeardownContex
 
     console.warn(
       `[PCP] SWEEP: ${callId} ended with no disposition — filing what we have` +
-        (unclassified ? ' as unclassified_call, for a person to route' : ''),
+        (routeByHand ? ' as unclassified_call, for a person to route' : ''),
     );
     /**
      * `unclassified_call` is the ticketing app's slug for exactly this, added
@@ -3715,11 +3750,11 @@ export async function sweepPcpUnfiledCall(callId: string, ctx: PcpTeardownContex
      * proves live — and is CREATE_TASK only, because a call we could not
      * classify is certainly not one we can establish asked for a person.
      */
-    const sweptState = unclassified
+    const sweptState = routeByHand
       ? { ...state, callPurpose: 'unclassified_call' as const }
       : state;
     const response = await submitPcpTicket(
-      buildPayload(metadata, sweptState, 'CREATE_TASK', narrative, 'high', undefined, unclassified ? 'call_not_classified' : 'caller_hung_up_before_completion', missing),
+      buildPayload(metadata, sweptState, 'CREATE_TASK', narrative, 'high', undefined, routeByHand ? 'call_not_classified' : 'caller_hung_up_before_completion', missing),
     );
     if (response.success) {
       pcpDirector.recordDisposition(callId, 'CREATE_TASK');

@@ -35,6 +35,7 @@ import {
   decideSweep,
   buildSweptTicket,
   sweepMarker,
+  SWEPT_TICKET_DESCRIPTION,
   type SweepInput,
   type SweepSkipReason,
 } from "./requestSweep";
@@ -145,7 +146,15 @@ const fileOnce: SweepFiler = async (ticket) => {
     // app refuses a swept request for an office or a surgeon nobody is left
     // to give — 87 of 92 on those two queues, 2026-09-28..10-08.
     ...(ticket.routingAskExhausted ? { routingAskExhausted: true } : {}),
-  });
+  },
+  /**
+   * The placeholder the default filer would send after a refusal goes into the
+   * outbox beside a drafted description, so a refusal that arrives on the
+   * worker's replay after an outage files it too, instead of dead-lettering
+   * the request (v205). A placeholder description carries none: the outbox
+   * stores a fallback only when it differs from the description.
+   */
+  { refusalFallbackDescription: SWEPT_TICKET_DESCRIPTION });
   /**
    * A QUEUED REQUEST IS A RECOVERED REQUEST.
    *
@@ -179,7 +188,6 @@ const fileOnce: SweepFiler = async (ticket) => {
 const defaultFiler: SweepFiler = async (ticket) => {
   const first = await fileOnce(ticket);
   if (first.success || first.queued) return first;
-  const { SWEPT_TICKET_DESCRIPTION } = await import("./requestSweep");
   if (ticket.description === SWEPT_TICKET_DESCRIPTION) return first;
   return fileOnce({
     ...ticket,
