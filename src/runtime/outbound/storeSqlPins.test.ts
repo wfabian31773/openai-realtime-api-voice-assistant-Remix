@@ -267,6 +267,68 @@ describe("a queue fed live from a source (v107)", () => {
   });
 });
 
+describe("the outreach text and its booking page (v211)", () => {
+  it("a source refresh carries the text's state over instead of overwriting it", () => {
+    const up = method("upsertSourceContacts");
+    expect(up).toContain("WHEN campaign_contacts.custom_data -> ${OUTREACH_TEXT_KEY}::text IS NOT NULL");
+    expect(up).toContain("|| jsonb_build_object(${OUTREACH_TEXT_KEY}::text,");
+    expect(up).toContain("campaign_contacts.custom_data -> ${OUTREACH_TEXT_KEY}::text)");
+    expect(up).toContain("ELSE EXCLUDED.custom_data");
+  });
+
+  it("claims a row's text in one statement, only while it is textable and none is held or a retry is due", () => {
+    for (const name of ["claimText", "textableContacts"]) {
+      const m = method(name);
+      expect(m).toContain("outreach_status::text = ANY (string_to_array(${TEXTABLE_STATUSES.join(\",\")}::text, ','))");
+      expect(m).toContain("COALESCE(custom_data->>'plugin_live', 'false') <> 'true'");
+      expect(m).toContain("custom_data -> ${OUTREACH_TEXT_KEY}::text IS NULL");
+      expect(m).toContain("->> 'state' = 'retry'");
+      expect(m).toContain("<= ${now.toISOString()}::timestamptz");
+    }
+    expect(method("claimText")).toContain("RETURNING *");
+  });
+
+  it("never moves updated_at, which the stale-claim reaper reads as a call's claim", () => {
+    for (const name of ["claimText", "patchText", "spendDobTry", "claimLinkBooking"]) {
+      expect(method(name)).not.toMatch(/updated_at\s*=/);
+    }
+  });
+
+  it("merges a patch into the held record and nothing else", () => {
+    const m = method("patchText");
+    expect(m).toContain("(custom_data -> ${OUTREACH_TEXT_KEY}::text) || ${JSON.stringify(patch)}::jsonb");
+    expect(m).toContain("jsonb_typeof(custom_data -> ${OUTREACH_TEXT_KEY}::text) = 'object'");
+  });
+
+  it("finds a link by its hash, among runtime campaigns, and refuses anything but one row", () => {
+    const m = method("contactByTextToken");
+    expect(m).toContain("->> 'token_hash' = ${tokenHash}::text");
+    expect(m).toContain("k.campaign_type = ${RUNTIME_OUTBOUND_CAMPAIGN_TYPE}::varchar");
+    expect(m).toContain("LIMIT 2");
+    expect(m).toContain("if (found.length !== 1) return null;");
+  });
+
+  it("spends a date-of-birth try only while one is left, and only on the link's own row", () => {
+    const m = method("spendDobTry");
+    expect(m).toContain("->> 'token_hash' = ${tokenHash}::text");
+    expect(m).toContain("->> 'dob_tries')::int, 0) < ${limit}::int");
+    expect(m).toContain("RETURNING");
+  });
+
+  it("holds a booking one at a time, never on a link that has booked", () => {
+    const m = method("claimLinkBooking");
+    expect(m).toContain("->> 'booked_at' IS NULL");
+    expect(m).toContain("->> 'booking_started_at' IS NULL");
+    expect(m).toContain("< ${staleBefore.toISOString()}::timestamptz");
+  });
+
+  it("START deletes only the sms_stop row", () => {
+    expect(method("clearSmsStop")).toContain(
+      "DELETE FROM do_not_contact WHERE phone_key = ${key}::varchar AND source = ${SMS_DNC_SOURCE}::varchar",
+    );
+  });
+});
+
 describe("a caller ringing from another phone, whose surname begins with an accent (Codex P2, #358)", () => {
   it("is prefiltered on the surname initial FOLDED in SQL, the way the code folds it", () => {
     expect(method("contactsByName")).toContain(
