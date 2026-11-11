@@ -45,7 +45,7 @@ let lane: BookingPageLane & {
   book: ReturnType<typeof vi.fn>;
   isDemo: ReturnType<typeof vi.fn>;
 };
-let recheck: ReturnType<typeof vi.fn>;
+let recheck: ReturnType<typeof vi.fn<(externalRef: string, now: Date) => Promise<SourceRecheck>>>;
 let policy: OutboundLanePolicy;
 let now: Date;
 let deps: BookingPageDeps;
