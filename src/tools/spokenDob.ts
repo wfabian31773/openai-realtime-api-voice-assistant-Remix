@@ -500,6 +500,11 @@ function aboutTheBirthday(uttered: string, dateBefore = false): { text: string; 
   let kept: string[] = [];
   let withdrew = false;
   for (const sentence of uttered.split(/(?<=[.!?])\s+/)) {
+    if (deniesTheBirthday(sentence) && looksLikeDobAttempt(kept.join(' '))) {
+      kept = [];
+      withdrew = true;
+      continue;
+    }
     if (!namesAnotherDate(fold(sentence))) {
       kept.push(sentence);
       continue;
@@ -547,8 +552,7 @@ const WHAT_THE_DATE_WAS = new Set([
  * also takes back a date from an earlier turn of the same ask.
  */
 function withdrawsTheDateBefore(sentence: string, dateInTurn: boolean): boolean {
-  const digits = numberWordsToDigits(sentence) ?? fold(sentence);
-  if (/\d/.test(digits) || digits.split(' ').some((w) => monthNumberFromWord(w))) return false;
+  if (carriesADate(sentence)) return false;
   const opened = fold(sentence).replace(LEADING_FILLERS, '');
   const weak = WEAK_CUES.test(opened);
   if (weak && dateInTurn) return true;
@@ -559,6 +563,32 @@ function withdrawsTheDateBefore(sentence: string, dateInTurn: boolean): boolean 
   const words = rest.slice(pointed[0].length).split(' ').filter(Boolean);
   return words.length > 0 && words.every((w) => WHAT_THE_DATE_WAS.has(w) || OTHER_DATE_SUBJECTS.has(w))
     && words.some((w) => OTHER_DATE_SUBJECTS.has(w));
+}
+
+/** A digit, a number said in words, or a month: the sentence says a date of its own. */
+function carriesADate(sentence: string): boolean {
+  const digits = numberWordsToDigits(sentence) ?? fold(sentence);
+  return /\d/.test(digits) || digits.split(' ').some((w) => monthNumberFromWord(w));
+}
+
+/**
+ * "THAT IS NOT MY BIRTHDAY" TAKES THE DATE BACK (v209, Codex P1 on #454,
+ * round 5). "June third nineteen forty-four. That is not my birthday, it is my
+ * surgery date." read June 3rd, 1944: the denial names the surgery, so the
+ * other-date filter dropped it, and it opens with no correction cue. v205 and
+ * v206 read none for the worded year and June 3rd for the digits. A sentence
+ * with no date of its own that says the date is not the birthday ("That is
+ * not my birthday", "It isn't my date of birth", "No es mi cumpleaños")
+ * takes back the date before it in the window, whatever else it names, and
+ * in a later caller line clears the held date. Over the 14 days to
+ * 2026-11-11 no runtime caller line carried the denial, so it costs nothing
+ * measured; clearing is the safe side, the date is asked again.
+ */
+const DENIES_THE_BIRTHDAY =
+  /(?:^| )(?:not|isn t|wasn t|no es|no era|no fue)(?: (?:really|even|actually|realmente))? (?:my|mi|the|la|el|su|her|his) (?:birthday|birthdate|birth date|date of birth|dob|d o b|cumpleanos|fecha de nacimiento)(?: |$)/;
+
+function deniesTheBirthday(sentence: string): boolean {
+  return DENIES_THE_BIRTHDAY.test(fold(sentence));
 }
 
 const CALLER_BIRTHDAY_WORDS = /(^| )(born|birthday|birth|naci|nacio|nacimiento|cumpleanos)( |$)/;
@@ -651,6 +681,7 @@ function rejectsTheHeldDate(uttered: string, iso: string): boolean {
   const sentences = uttered.split(/(?<=[.!?])\s+/);
   for (let i = 0; i < sentences.length; i += 1) {
     const sentence = sentences[i]!;
+    if (deniesTheBirthday(sentence)) return true;
     if (!mayRejectTheBirthday(sentence) || !namesTheHeldDate(sentence, iso)) continue;
     if (negatesADate(sentence)) return true;
     const next = sentences[i + 1];
