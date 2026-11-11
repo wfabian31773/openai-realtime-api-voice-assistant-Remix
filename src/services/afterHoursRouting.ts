@@ -49,6 +49,8 @@
 import { AFTER_HOURS_DEPARTMENT_ID } from '../tools/afterHoursTaxonomy';
 import { MEDICAL_RECORDS_DEPARTMENT_ID } from '../tools/medicalRecordsTaxonomy';
 import { OPTICAL_DEPARTMENT_ID } from '../tools/opticalTaxonomy';
+import { HUB_DEPARTMENT_ID } from '../tools/hubTaxonomy';
+import { namesAnOperation } from '../tools/queueRouting';
 
 /** The Support Center's own pair for a post-op question in department 8. */
 export const POST_PROCEDURE_REQUEST = {
@@ -62,6 +64,7 @@ export type AfterHoursRoute =
   | { kind: 'same_day'; departmentId: number }
   | { kind: 'optical'; departmentId: number }
   | { kind: 'medical_records'; departmentId: number }
+  | { kind: 'scheduling'; departmentId: number }
   | { kind: 'default' };
 
 const fold = (s: string) =>
@@ -196,6 +199,12 @@ export function routeAfterHoursTicket(input: {
    * Records (operator, 2026-11-09: records requests never ring the on-call).
    */
   recordsRequest?: boolean;
+  /**
+   * v202: the after-hours taxonomy read the request as URGENT (a symptom, an
+   * injury). An urgent appointment request keeps the app's routing and its
+   * urgent hint rather than going to the Hub as a routine booking.
+   */
+  urgent?: boolean;
   now?: Date;
 }): AfterHoursRoute {
   const now = input.now ?? new Date();
@@ -216,18 +225,39 @@ export function routeAfterHoursTicket(input: {
   if (input.opticalRequest === true) {
     return { kind: 'optical', departmentId: OPTICAL_DEPARTMENT_ID };
   }
-  if (pacificNow(now).minutes >= OFFICE_DAY_ENDS_AT) return { kind: 'default' };
-  // The record says WHEN the caller is due, never WHAT they are calling about:
-  // a refill or a billing question from a patient who happens to be due this
-  // afternoon is not a same-day ticket (Codex P2, #345). So the record only
-  // backs up a request that is already about an appointment.
-  const aboutAnAppointment = input.appointmentIntent === true || soundsAboutAnAppointment(input.text);
-  if (
-    input.appointmentToday === true ||
-    soundsSameDay(input.text) ||
-    (aboutAnAppointment && recordHasAppointmentLaterToday(input.confirmedUpcoming, now))
-  ) {
-    return { kind: 'same_day', departmentId: AFTER_HOURS_DEPARTMENT_ID };
+  if (pacificNow(now).minutes < OFFICE_DAY_ENDS_AT) {
+    // The record says WHEN the caller is due, never WHAT they are calling about:
+    // a refill or a billing question from a patient who happens to be due this
+    // afternoon is not a same-day ticket (Codex P2, #345). So the record only
+    // backs up a request that is already about an appointment.
+    const aboutAnAppointment = input.appointmentIntent === true || soundsAboutAnAppointment(input.text);
+    if (
+      input.appointmentToday === true ||
+      soundsSameDay(input.text) ||
+      (aboutAnAppointment && recordHasAppointmentLaterToday(input.confirmedUpcoming, now))
+    ) {
+      return { kind: 'same_day', departmentId: AFTER_HOURS_DEPARTMENT_ID };
+    }
+  }
+  /**
+   * v202: AN APPOINTMENT REQUEST THAT IS NOT ABOUT TODAY GOES TO THE HVA HUB,
+   * where staff were moving it by hand. Standing instruction 10: anything
+   * schedule-related goes to the Hub from every queue, except a surgery date.
+   *
+   * The app decided these until now, and a department-8 HINT decided the app:
+   * a request summary carrying "callback" matched the after-hours taxonomy's
+   * Callback Request (department 8), so "new patient wants an appointment,
+   * prefers a phone callback" filed in After Hours. Measured over the fourteen
+   * Pacific days 2026-10-28..11-10, no-IVR tickets whose category is
+   * Appointment Request, not same-day and naming no operation: 68 landed in
+   * the Hub and 66 stayed there; 37 landed elsewhere (After Hours 29, Surgery
+   * 7, Technicians 1) and staff moved 24 of them to the Hub, left 8 and moved
+   * 5 elsewhere. The category is the model's (`request_category`), so this
+   * reads no words to decide WHAT the call is about, only whether an
+   * operation is named, which keeps the surgery-date exception.
+   */
+  if (input.appointmentIntent === true && input.urgent !== true && !namesAnOperation(input.text)) {
+    return { kind: 'scheduling', departmentId: HUB_DEPARTMENT_ID };
   }
   return { kind: 'default' };
 }
@@ -312,6 +342,8 @@ export function afterHoursRouteNote(kind: AfterHoursRoute['kind']): string | nul
       return 'OPTICAL: the model classified this as glasses, frames, lenses or contacts (order, status, pickup or repair). Filed to Optical Support; the ticketing app assigns by location.';
     case 'medical_records':
       return 'MEDICAL RECORDS: an after-hours records request. Filed to Medical Records; records requests never ring the on-call (operator ruling 2026-11-09).';
+    case 'scheduling':
+      return 'SCHEDULING: an appointment request that is not about today. Filed to the HVA Hub, who schedule.';
     default:
       return null;
   }

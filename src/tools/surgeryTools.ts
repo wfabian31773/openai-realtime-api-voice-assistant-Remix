@@ -83,6 +83,24 @@ registerTool({
       str(input.request_description),
     );
 
+    // v202: the classification agrees with where file_surgery_ticket will
+    // file. A request the router sends to another team (a routine visit to
+    // the HVA Hub, eyewear to Optical) is said so here, so the model does not
+    // ask for a surgery date or a surgeon the receiving team never reads. An
+    // urgent classification keeps its 911 direction and is never answered
+    // here.
+    if (!classification.urgent) {
+      const { detectCrossQueue } = await import('./queueRouting');
+      const routed = detectCrossQueue(str(input.request_description), SURGERY_DEPARTMENT_ID);
+      if (routed && routed.departmentId !== SURGERY_DEPARTMENT_ID) {
+        return { success: true, classified: true,
+          department_id: routed.departmentId,
+          request_type_id: routed.requestTypeId,
+          request_reason_id: routed.requestReasonId,
+          fix: 'File this request with file_surgery_ticket. Do not ask for a surgery date or surgeon for this request.' };
+      }
+    }
+
     return {
       success: true,
       // Always true now. Before request type 65 existed this said false for
