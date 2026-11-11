@@ -500,6 +500,12 @@ function aboutTheBirthday(uttered: string, dateBefore = false): { text: string; 
   let kept: string[] = [];
   let withdrew = false;
   for (const sentence of uttered.split(/(?<=[.!?])\s+/)) {
+    const denial = birthdayDenial(sentence);
+    if (denial && looksLikeDobAttempt([...kept, denial.before].join(' '))) {
+      kept = [];
+      withdrew = true;
+      continue;
+    }
     if (!namesAnotherDate(fold(sentence))) {
       kept.push(sentence);
       continue;
@@ -547,8 +553,7 @@ const WHAT_THE_DATE_WAS = new Set([
  * also takes back a date from an earlier turn of the same ask.
  */
 function withdrawsTheDateBefore(sentence: string, dateInTurn: boolean): boolean {
-  const digits = numberWordsToDigits(sentence) ?? fold(sentence);
-  if (/\d/.test(digits) || digits.split(' ').some((w) => monthNumberFromWord(w))) return false;
+  if (carriesADate(sentence)) return false;
   const opened = fold(sentence).replace(LEADING_FILLERS, '');
   const weak = WEAK_CUES.test(opened);
   if (weak && dateInTurn) return true;
@@ -559,6 +564,76 @@ function withdrawsTheDateBefore(sentence: string, dateInTurn: boolean): boolean 
   const words = rest.slice(pointed[0].length).split(' ').filter(Boolean);
   return words.length > 0 && words.every((w) => WHAT_THE_DATE_WAS.has(w) || OTHER_DATE_SUBJECTS.has(w))
     && words.some((w) => OTHER_DATE_SUBJECTS.has(w));
+}
+
+/** A digit, a number said in words, or a month: the sentence says a date of its own. */
+function carriesADate(sentence: string): boolean {
+  const digits = numberWordsToDigits(sentence) ?? fold(sentence);
+  return /\d/.test(digits) || digits.split(' ').some((w) => monthNumberFromWord(w));
+}
+
+/**
+ * "THAT IS NOT MY BIRTHDAY" TAKES THE DATE BACK (v209, Codex P1 on #454,
+ * round 5). "June third nineteen forty-four. That is not my birthday, it is my
+ * surgery date." read June 3rd, 1944: the denial names the surgery, so the
+ * other-date filter dropped it, and it opens with no correction cue. v205 and
+ * v206 read none for the worded year and June 3rd for the digits.
+ *
+ * A denial ("not my birthday", "isn't my date of birth", "no es mi
+ * cumpleaños") whose subject is a pronoun or nothing ("That is not my
+ * birthday", "It isn't my date of birth", "June 3, 1944, that is not my
+ * birthday") is about the date said before it: it takes back a date said
+ * earlier in the same turn, the same sentence included, and in a later caller
+ * line clears the held date, even when it goes on to give another one
+ * ("That's not my birthday, my birthday is June 4, 1944."). A denial whose
+ * subject is a date ("December 5 is not my birthday, that is my surgery date")
+ * is about that date and is left to the rules for a named date, and so is
+ * any other subject ("My appointment is tomorrow, not my birthday"; Codex P2
+ * on #457, rounds 1 and 2). The subject is the clause before the denial, from
+ * the last comma, semicolon, colon or dash. Over the 14 days to 2026-11-11 no runtime caller
+ * line carried the denial, so it costs nothing measured; clearing is the safe
+ * side, the date is asked again.
+ */
+const DENIES_THE_BIRTHDAY =
+  /(?<![a-z])(?:not|isn'?t|wasn'?t|no es|no era|no fue)(?: (?:really|even|actually|realmente))? (?:my|mi|the|la|el|su|her|his) (?:birthday|birthdate|birth date|date of birth|dob|d\.? ?o\.? ?b\.?|cumpleanos|fecha de nacimiento)(?![a-z])/;
+
+/**
+ * The subject a denial of the birthday may have and still be about the date
+ * before it: a pronoun ("that", "it", "this", "eso") or nothing, after
+ * fillers. Anything else ("My appointment is tomorrow, not my birthday",
+ * "December 5 is not my birthday") is about something else and clears
+ * nothing (Codex P2 on #457, rounds 1 and 2).
+ */
+const PRONOUN_OR_NO_SUBJECT =
+  /^(?:(?:no|yes|yeah|well|so|and|but|oh|uh|um|sorry|wait|actually|bueno|pero|y)\s+)*(?:(?:that|this|it|eso|esa|esto|esta|ese|este)(?:'s|s| is| was)?)?$/;
+/** The fillers `PRONOUN_OR_NO_SUBJECT` allows before a pronoun or nothing. */
+const PRONOUN_FILLERS = /\b(?:no|yes|yeah|well|so|and|but|oh|uh|um|sorry|wait|actually|bueno|pero|y)\b/g;
+
+/** Lower case, accents dropped, punctuation kept, curly apostrophes straight. */
+function lowerKeepingPunctuation(text: string): string {
+  return text.normalize('NFD').replace(/\p{Diacritic}/gu, '').toLowerCase().replace(/[\u2018\u2019]/g, "'").replace(/\s+/g, ' ');
+}
+
+/**
+ * The denial of the birthday in a sentence, when its subject is not a date of
+ * its own: `before` is the sentence's text before the denial's clause, which
+ * may hold the date being denied. `undefined` when there is no such denial.
+ */
+function birthdayDenial(sentence: string): { before: string } | undefined {
+  const text = lowerKeepingPunctuation(sentence);
+  const m = DENIES_THE_BIRTHDAY.exec(text);
+  if (!m) return undefined;
+  const prefix = text.slice(0, m.index);
+  const cut = Math.max(...[',', ';', ':', ' - ', '\u2014', '\u2013'].map((c) => prefix.lastIndexOf(c)));
+  const subject = (cut >= 0 ? prefix.slice(cut + 1) : prefix).replace(/[^a-z' ]/g, ' ').trim();
+  if (!PRONOUN_OR_NO_SUBJECT.test(subject)) return undefined;
+  const before = cut >= 0 ? prefix.slice(0, cut) : '';
+  // No subject after a comma ("…, not my birthday") is about the clause before
+  // it: a date said there, or nothing ("My appointment is tomorrow, not my
+  // birthday" is about the appointment; Codex P2 on #457, round 3).
+  const bareAfterAClause = cut >= 0 && !/[a-z]/.test(subject.replace(PRONOUN_FILLERS, '')) && /[a-z0-9]/.test(before);
+  if (bareAfterAClause && (!looksLikeDobAttempt(before) || namesAnotherDate(fold(before)))) return undefined;
+  return { before };
 }
 
 const CALLER_BIRTHDAY_WORDS = /(^| )(born|birthday|birth|naci|nacio|nacimiento|cumpleanos)( |$)/;
@@ -651,6 +726,10 @@ function rejectsTheHeldDate(uttered: string, iso: string): boolean {
   const sentences = uttered.split(/(?<=[.!?])\s+/);
   for (let i = 0; i < sentences.length; i += 1) {
     const sentence = sentences[i]!;
+    // A denial in a later line clears the held date, unless the date it is
+    // about, said before it in the same sentence, is another date.
+    const denial = birthdayDenial(sentence);
+    if (denial && (!carriesADate(denial.before) || namesTheHeldDate(denial.before, iso))) return true;
     if (!mayRejectTheBirthday(sentence) || !namesTheHeldDate(sentence, iso)) continue;
     if (negatesADate(sentence)) return true;
     const next = sentences[i + 1];

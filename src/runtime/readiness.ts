@@ -1616,8 +1616,25 @@ import { callEnvironment } from "./callRecord";
  * `b7f2b58e`) and v208 (#455, `9ee3b954`); v212 is #457 on its open
  * branch. No migration.
  */
+/**
+ * v209 — "THAT IS NOT MY BIRTHDAY" TAKES THE DATE BACK, AND THE MARKER IS
+ * ABOVE v208 AGAIN (2026-11-11). #454 merged as v207 (`b7f2b58e`) after main
+ * had moved to v208 (#455), so main's marker read v207 below the v208 it
+ * contains. This build carries the Codex round-5 fix that landed on #454's
+ * branch after the merge: a sentence saying the date is not the birthday
+ * takes back a date said before it in the same turn and clears the held date
+ * in any later caller line. Above main's v207 (#454, `b7f2b58e`), which it
+ * contains along with v208 (#455, `9ee3b954`). No migration.
+ */
+/**
+ * v212 — v209's fix on top of v211 (2026-11-11). #456 (v210) and #458
+ * (v211) merged while #457 (v209) was open, so v209 fell below main and this
+ * build takes v212. Contains v211 (#458, `9dd94486`), v210 (#456,
+ * `c9bb40fd`), v207 (#454, `b7f2b58e`) and v208 (#455, `9ee3b954`). No
+ * migration.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v211-npx-text-and-booking-link-20261111";
+  "voice-runtime-v212-not-my-birthday-takes-the-date-back-20261111";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can
