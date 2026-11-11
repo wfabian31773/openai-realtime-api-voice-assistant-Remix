@@ -392,6 +392,10 @@ describe('the words offices use for a person', () => {
     'Caller asked to transfer to the nurse.',
     'Caller asked to transfer the call over to the front desk.',
     'Caller wants us to transfer her directly to the provider.',
+    // Codex P2 on #452: the round-2 lookahead dropped these.
+    'Caller asked to transfer me back to the nurse.',
+    'Caller asked us to transfer the call back to the front desk.',
+    'Caller asked us to transfer him right back to the office.',
   ])('"%s" is an ask', (words) => {
     expect(asksForAPerson(words)).toBe(true);
   });
