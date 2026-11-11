@@ -1573,7 +1573,8 @@ import { callEnvironment } from "./callRecord";
  * contains. No app-code change. No migration.
  */
 /**
- * v207 — A WRONG BIRTHDAY IS NOT READ FROM THE TRANSCRIPT (2026-11-11). The
+ * v209 — A WRONG BIRTHDAY IS NOT READ FROM THE TRANSCRIPT (2026-11-11; v207 while
+ * #454 was open, renumbered when #455 took v208 on main). The
  * operator's post-merge review sweep of #447 found five ways the v206 reader
  * could put a wrong date of birth on a ticket: "It is not June third." kept
  * June 3rd; "One one nineteen fifty-one" read as January 19th; "June third,
@@ -1588,7 +1589,7 @@ import { callEnvironment } from "./callRecord";
  * v206 (#447, `6e96e6fe`). No migration.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v207-a-wrong-birthday-is-not-read-20261111";
+  "voice-runtime-v209-a-wrong-birthday-is-not-read-20261111";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can
