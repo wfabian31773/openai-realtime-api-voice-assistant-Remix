@@ -279,8 +279,10 @@ describe("the outreach text and its booking page (v211)", () => {
   it("claims a row's text in one statement, only while it is textable and none is held or a retry is due", () => {
     for (const name of ["claimText", "textableContacts"]) {
       const m = method(name);
-      expect(m).toContain("outreach_status::text = ANY (string_to_array(${TEXTABLE_STATUSES.join(\",\")}::text, ','))");
-      expect(m).toContain("COALESCE(custom_data->>'plugin_live', 'false') <> 'true'");
+      expect(m).toContain("AND outreach_status::text = ANY (string_to_array(${TEXTABLE_STATUSES.join(\",\")}::text, ','))");
+      expect(m).toContain("AND COALESCE(custom_data->>'plugin_live', 'false') <> 'true'");
+      // Every predicate is ANDed: an OR at the top level would let any row in.
+      expect(m.replace(/\(custom_data -> \$\{OUTREACH_TEXT_KEY\}::text IS NULL[\s\S]*?::timestamptz\)\)/, "")).not.toMatch(/\bOR\b/);
       expect(m).toContain("custom_data -> ${OUTREACH_TEXT_KEY}::text IS NULL");
       expect(m).toContain("->> 'state' = 'retry'");
       expect(m).toContain("<= ${now.toISOString()}::timestamptz");

@@ -351,11 +351,11 @@ describe("the source is asked first, as the dialler asks it", () => {
     expect(sent).toEqual([]);
     expect(record(store, "c1")).toMatchObject({ state: "retry", reason: "off_list" });
     expect(record(store, "c2")).toMatchObject({ state: "retry", reason: "source_unavailable" });
-    // Not before the retry is due ...
+    // Not before the retry is due, even with the source answering ...
+    answer = async () => CURRENT();
     await runTextTick("test-lane", p, { ...deps, now: () => new Date(NOW.getTime() + TEXT_RETRY_MS - 1000) });
     expect(sent).toEqual([]);
     // ... and then once each.
-    answer = async () => CURRENT();
     const later = new Date(NOW.getTime() + TEXT_RETRY_MS + 1000);
     await runTextTick("test-lane", p, { ...deps, now: () => later });
     expect(sent).toHaveLength(2);

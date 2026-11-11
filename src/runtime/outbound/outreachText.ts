@@ -226,7 +226,6 @@ async function textOne(
   deps: TextDeps,
   source: ContactSource | null,
 ): Promise<string | null> {
-  if (candidate.customData.plugin_live === true) return "live_call";
   // A row the source never wrote has nothing to re-check against.
   if (source && !candidate.externalRef) return "not_from_source";
   const { token, hash } = newBookingToken();

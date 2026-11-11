@@ -238,6 +238,20 @@ describe("step 1: the date of birth", () => {
     expect(rec().verified_at).toBeUndefined();
   });
 
+  it("spends the last try once, even when two answers race for it", async () => {
+    seed({ dob_tries: 1 });
+    // Both requests read the link before either has spent its try: the
+    // store's own limit is what stops the second, a right date included.
+    const [wrong, right] = await Promise.all([
+      step("verify", { month: "3", day: "4", year: "1960" }),
+      step("verify", DOB),
+    ]);
+    expect(wrong.json).toEqual({ ok: false, error: "locked" });
+    expect(right.json).toEqual({ ok: false, error: "locked" });
+    expect(rec().dob_tries).toBe(2);
+    expect(rec().session_hash).toBeUndefined();
+  });
+
   it("keeps the lock on a link that had verified once", async () => {
     seed();
     await verified();
@@ -305,6 +319,20 @@ describe("steps 2 and 3: a day and a city, then a time", () => {
     expect(lane.openings).toHaveBeenCalledWith(expect.anything(), true);
   });
 
+  it("takes no session but the one its own date of birth opened", async () => {
+    seed();
+    await verified();
+    const other = newBookingToken().token;
+    for (const action of ["days", "times", "book"]) {
+      expect((await step(action, { session: other, day: "2041-02-04", city: "Testville", id: "slot-a" })).json).toEqual({
+        ok: false,
+        error: "session",
+      });
+    }
+    expect(lane.openings).not.toHaveBeenCalled();
+    expect(lane.book).not.toHaveBeenCalled();
+  });
+
   it("asks for the date of birth again once the session is old", async () => {
     seed();
     const session = await verified();
@@ -337,6 +365,15 @@ describe("step 4: booking", () => {
     seed();
     const session = await verified();
     recheck.mockResolvedValueOnce({ state: "gone" });
+    expect((await step("book", { session, id: "slot-a" })).json).toEqual({ ok: false, error: "appointment_changed" });
+    expect(lane.book).not.toHaveBeenCalled();
+    expect(rec().booking_started_at).toBeNull();
+  });
+
+  it("never books for an appointment that has left the list", async () => {
+    seed();
+    const session = await verified();
+    recheck.mockResolvedValueOnce({ state: "off_list" });
     expect((await step("book", { session, id: "slot-a" })).json).toEqual({ ok: false, error: "appointment_changed" });
     expect(lane.book).not.toHaveBeenCalled();
     expect(rec().booking_started_at).toBeNull();
