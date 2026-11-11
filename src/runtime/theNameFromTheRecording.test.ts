@@ -302,7 +302,7 @@ describe('the production wiring', () => {
     const runtime = readFileSync(new URL('./voiceRuntime.ts', import.meta.url), 'utf8');
     expect(runtime).toMatch(/options\.sweepCall \?\? runProductionSweep/);
     const runner = readFileSync(new URL('./sweepRunner.ts', import.meta.url), 'utf8');
-    expect(runner).toMatch(/runRequestSweep\(record, defaultFiler, askModelForThePatientName, lookUpTheCallingNumber\)/);
+    expect(runner).toMatch(/runRequestSweep\(record, defaultFiler, askModelForThePatientName, lookUpTheCallingNumber, askModelForTheRequest\)/);
   });
   it('the model is told to take the patient, from the caller, and not to guess', () => {
     expect(NAME_INSTRUCTIONS).toMatch(/PATIENT/);

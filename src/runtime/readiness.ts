@@ -1482,6 +1482,24 @@ import { callEnvironment } from "./callRecord";
  * `ec3af3fd`); v199 is #447 on its open branch. No migration.
  */
 /**
+ * v201 — THE SWEPT TICKET SAYS WHAT WAS ASKED (2026-11-11). Operator: tickets
+ * that say "reason not captured" leave staff calling back just to find out
+ * what the call was about. 14 days to 2026-11-10: 290 agent tickets on
+ * optical, surgery, tech and records carried that subject (surgery 88,
+ * optical 77, records 65, tech 60), every one traced to the teardown sweep's
+ * placeholder description (263 with no filing tool on the call; the rest a
+ * later call consolidated onto an earlier swept ticket). Where the model wrote
+ * nothing down, the sweep now asks a model (requestFromTheRecording.ts,
+ * gpt-4o-mini) for one short sentence of what the caller asked, checked in
+ * code for numbers, dates, addresses and held names, and files it as the
+ * description; on Medical Records it goes in the staff note only (a records
+ * description opens a case on a pathway the app picks). The records lane
+ * also gets v180's heard name (64 of 65 nameless records tickets were the
+ * sweep's). Off switch REQUEST_FROM_RECORDING_DISABLED=1. Above main's v200
+ * (#448, `65080651`), which it contains along with v198 (#446, `ff996d58`);
+ * v199 is #447 on its open branch. No migration.
+ */
+/**
  * v202 — REQUESTS FILE WHERE STAFF WORK THEM (2026-11-11). Operator: "We're
  * doing more transferring of tickets than anything else." On 2026-11-10 staff
  * moved 121 of 551 agent tickets. The queue-lane router (`detectCrossQueue`),
@@ -1494,7 +1512,8 @@ import { callEnvironment } from "./callRecord";
  * that staff left, 12 elsewhere. After hours, an appointment request that is
  * not about today, not urgent and names no operation files to the HVA Hub
  * (37 landed elsewhere in the window, staff moved 24 to the Hub). Above
- * main's v200 (#448, `65080651`), which it contains. No migration.
+ * main's v201 (#449, `c99abcb6`), which it contains along with v200 (#448,
+ * `65080651`). No migration.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
   "voice-runtime-v202-requests-file-where-staff-work-them-20261111";

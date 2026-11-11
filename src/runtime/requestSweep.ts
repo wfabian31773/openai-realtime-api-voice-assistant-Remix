@@ -142,6 +142,13 @@ export interface SweepInput {
    * its description, so unlike the transcript it may go in the description.
    */
   draftedRequest?: string;
+  /**
+   * v201: what the caller asked for, read from the recording by a model AFTER
+   * the call, when nothing was drafted (`requestFromTheRecording.ts`). Already
+   * checked and GSM-7 sanitised there. It goes in the description and the
+   * staff note; it never feeds a request reason.
+   */
+  requestFromRecording?: string;
 }
 
 export type SweepDecision =
@@ -708,9 +715,11 @@ export function reasonLabelFor(departmentId: number, reasonId: number): string |
  *
  *   1. the request as the MODEL wrote it (`draftedRequest`) — the text every
  *      ordinary filing sends as its description, GSM-7 sanitised;
- *   2. on queues other than Medical Records, a specific reason the sweep
+ *   2. v201: what the caller asked for, read from the recording by a model
+ *      after the call (`requestFromTheRecording.ts`), checked in code;
+ *   3. on queues other than Medical Records, a specific reason the sweep
  *      classified, by the taxonomy's own NAME (never the caller's words);
- *   3. the placeholder.
+ *   4. the placeholder.
  *
  * NOT 2 ON MEDICAL RECORDS: a records ticket with a reason opens an access
  * case and can start the CAP clock, and a regex reading of the transcript is
@@ -721,9 +730,14 @@ export function sweptTicketDescription(
   departmentId: number,
   reason: SweepReason,
   draftedRequest: string | undefined,
+  requestFromRecording?: string,
 ): string {
   const drafted = draftedRequest ? sanitizeForSms(draftedRequest).value.replace(/\s+/g, " ").trim() : "";
   if (drafted) return drafted;
+  // v201: what the caller asked for, read from the recording after the call
+  // and checked in `usableRequest` — a sentence beats a taxonomy label.
+  const heard = requestFromRecording ? sanitizeForSms(requestFromRecording).value.replace(/\s+/g, " ").trim() : "";
+  if (heard) return heard;
   if (departmentId !== 16 && reason.source !== "placeholder" && !isCatchAll(departmentId, reason.requestReasonId)) {
     const label = reasonLabelFor(departmentId, reason.requestReasonId);
     if (label) return `Callback request about: ${sanitizeForSms(label).value}. A team member will follow up with you.`;
@@ -754,6 +768,34 @@ export function looksInfoOnly(input: Pick<SweepInput, "transcript" | "toolEvents
   const last = (said[said.length - 1] ?? "").toLowerCase().replace(/[.,!?¿¡]/g, "").trim();
   return /\b(thank you|thanks|thank|bye|goodbye|gracias|adios|that's all|that is all|perfect)\b/.test(last);
 }
+
+/**
+ * v201: THE STAFF NOTE WHEN THE DESCRIPTION WAS READ FROM THE RECORDING.
+ * The agent did not write the request down; a model read it from the call
+ * after the caller hung up. Exported so the test reads the same words.
+ */
+export const REQUEST_FROM_RECORDING_NOTE =
+  "REQUEST READ FROM THE RECORDING — the agent did not write this request down; a model read it from the call after the caller hung up. Check the recording before acting:";
+
+const RECORDS_DEPARTMENT_ID = 16;
+
+/**
+ * v201: ON MEDICAL RECORDS THE SENTENCE GOES ON THE STAFF SIDE ONLY. The
+ * description stays what `main` sends, and so does the reason.
+ *
+ * Measured 2026-11-11, agent tickets in department 16 over 14 days: the 64
+ * with the placeholder description opened NO records case; 231 of the 244
+ * with a real description opened one, on a pathway the ticketing app picks
+ * from what the ticket says. A swept ticket states no requester, and a
+ * sentence read from the recording ("Wants medical records sent to a new eye
+ * doctor out of state", said by a spouse) would open a case on a guessed
+ * pathway, on the statutory clock — the #73052 shape. Whether a swept
+ * records request should open a case is the operator's (standing
+ * instruction 1); until he says so, staff read what was asked in the staff
+ * note and nothing opens on a guess. The one-line change is to drop the
+ * department check in `buildSweptTicket`.
+ */
+export const RECORDS_KEEP_THE_PLACEHOLDER = true;
 
 export const INFO_ONLY_NOTE =
   "POSSIBLY INFO-ONLY (info_only): the agent gave a phone/fax number and the caller ended with thanks; no request tool ran. Close if no follow-up is needed.";
@@ -838,6 +880,12 @@ export function buildSweptTicket(
 ): SweptTicket {
   const departmentId = DEPARTMENT_BY_SLUG[input.slug]!;
   const callerSaid = decision.callerSaid;
+  const readFromRecording =
+    !input.draftedRequest?.trim() && input.requestFromRecording?.trim() ? input.requestFromRecording.trim() : undefined;
+  const sentenceDescribes =
+    readFromRecording && !(RECORDS_KEEP_THE_PLACEHOLDER && departmentId === RECORDS_DEPARTMENT_ID)
+      ? readFromRecording
+      : undefined;
   const reason = resolveSweepReason({
     departmentId,
     capturedReason: input.capturedReason,
@@ -884,7 +932,7 @@ export function buildSweptTicket(
     // v166: the model's drafted request, else a classified reason's name off
     // Medical Records, else the placeholder — see sweptTicketDescription.
     // Still never the caller's raw words.
-    description: sweptTicketDescription(departmentId, reason, input.draftedRequest),
+    description: sweptTicketDescription(departmentId, reason, input.draftedRequest, sentenceDescribes),
     /**
      * The staff side. `callData` maps to the ticket's own call-metadata
      * columns and is not part of any message to the patient, so the
@@ -906,6 +954,7 @@ export function buildSweptTicket(
                 ? `${NUMBER_RECORD_NOTE}\n`
                 : ""
         : `PATIENT NAME NOT CAPTURED — nobody was identified on this call; take the name from the recording before matching this to a chart.\n`) +
+      (readFromRecording ? `${REQUEST_FROM_RECORDING_NOTE} ${readFromRecording}\n` : "") +
       (infoOnly ? `${INFO_ONLY_NOTE}\n` : "") +
       `Call back on ${input.callerPhone}. Call reference ${input.callSid}.\n` +
       `What the caller said: ${callerSaid}`,
