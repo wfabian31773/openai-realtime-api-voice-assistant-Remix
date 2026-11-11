@@ -80,8 +80,10 @@
  *
  *  - An agent line that asks for a date of birth AND some other date in the
  *    same breath ("not your date of birth — the date of your surgery") opens a
- *    window that the wrong answer can land in. Tightening that further means
- *    inventing a rule, and no such line has been seen in a transcript yet.
+ *    window that the wrong answer can land in. Since v207 such a window can
+ *    give a date of birth when none is held but cannot replace one unless the
+ *    caller's own words call it their birthday; a different date in it clears
+ *    the held one instead (see `DateSubject`).
  *  - The question is recognised in ENGLISH and SPANISH only. The runtime's own
  *    language table also carries Tagalog, Korean, Armenian, Farsi,
  *    Vietnamese, Russian and Arabic, and a caller asked in any of those gets
@@ -104,7 +106,15 @@
  */
 
 import { isTwilioCallSid } from './callSid';
-import { dobShape, monthNumberFromWord, numberWordsToDigits, readDobQuietly, rejectsADate } from './dobParts';
+import {
+  dobShape,
+  monthNumberFromWord,
+  negatesADate,
+  numberWordsToDigits,
+  readDobQuietly,
+  rejectsADate,
+  withoutAnAge,
+} from './dobParts';
 
 // ── Reading the answer out of the record ────────────────────────────────────
 
@@ -280,8 +290,9 @@ const FORMAT_FILLERS = new Set([
   'en', 'orden', 'otra', 'vez', 'favor', 'su', 'solo', 'okey', 'perdon', 'e', 'al', 'final',
 ]);
 const OTHER_DATE_SUBJECTS = new Set([
-  'surgery', 'surgeries', 'procedure', 'operation', 'appointment', 'appointments', 'appt', 'visit',
-  'exam', 'cirugia', 'operacion', 'procedimiento', 'cita', 'citas', 'consulta', 'visita', 'examen',
+  'surgery', 'surgeries', 'procedure', 'procedures', 'operation', 'operations', 'appointment',
+  'appointments', 'appt', 'visit', 'visits', 'exam', 'exams', 'cirugia', 'cirugias', 'operacion',
+  'procedimiento', 'cita', 'citas', 'consulta', 'visita', 'examen',
 ]);
 
 function namesAnotherDate(folded: string): boolean {
@@ -296,23 +307,65 @@ function sentenceIsTheFormat(sentence: string): boolean {
   return words.every((w) => list.includes(w) || FORMAT_FILLERS.has(w));
 }
 
+/**
+ * WHAT THE AGENT LAST ASKED A DATE ABOUT (v207).
+ *
+ * The format said on its own opens a window only when the date the agent was
+ * last asking about is the date of birth. v199 read only the agent line just
+ * before it, and a caller's "Could you repeat that?" puts a line between: the
+ * agent asks for a surgery date, the caller asks it to repeat, the agent says
+ * "Sure." and then "The month, day, and year.", and the surgery date was read
+ * as the birthday (Codex post-merge sweep of #447). The subject now carries
+ * from line to line until an agent line names another one.
+ *
+ * `mixed` is a line that asks for the date of birth and names another date in
+ * the same breath ("Could you repeat the date of birth and the date of your
+ * procedure?", the after-hours read-back "I have …, date of birth …, and you
+ * need to reschedule your appointment, is that right?"). Its window can give a
+ * date of birth when none is held, but a date in it that differs from the one
+ * held does not replace it unless the caller's own words say it is their
+ * birthday: it may be the other date. It clears the held date instead, since
+ * which one it is cannot be told.
+ */
+type DateSubject = 'dob' | 'mixed' | 'other';
+
 interface WindowContext {
   /** Some earlier agent line on this call mentioned a date of birth. */
   dobAskedBefore: boolean;
-  /** The agent line before this one, for the other-date check. */
-  previousAgentLine?: string;
+  /** What the agent last asked a date about, carried across agent lines. */
+  lastSubject?: DateSubject;
 }
 
-function opensDobWindow(agentLine: string, context: WindowContext): boolean {
+interface WindowOpening {
+  mixed: boolean;
+}
+
+function asksForTheBirthday(agentLine: string): boolean {
   const sentences = agentLine.split(/(?<=[.!?])\s+/);
   if (sentences.some(sentenceOpensDobWindow)) return true;
   const folded = fold(agentLine);
-  if (mentionsDobTopic(folded) && LINE_REASK_CUES.some((c) => folded.includes(c))) return true;
-  if (!sentences.some(sentenceIsTheFormat)) return false;
-  if (namesAnotherDate(folded)) return false;
-  if (mentionsDobTopic(folded)) return true;
-  if (!context.dobAskedBefore) return false;
-  return !namesAnotherDate(fold(context.previousAgentLine ?? ''));
+  return mentionsDobTopic(folded) && LINE_REASK_CUES.some((c) => folded.includes(c));
+}
+
+function opensDobWindow(agentLine: string, context: WindowContext): WindowOpening | null {
+  const folded = fold(agentLine);
+  const other = namesAnotherDate(folded);
+  if (asksForTheBirthday(agentLine)) return { mixed: other };
+  const sentences = agentLine.split(/(?<=[.!?])\s+/);
+  if (!sentences.some(sentenceIsTheFormat)) return null;
+  if (other) return null;
+  if (mentionsDobTopic(folded)) return { mixed: false };
+  if (!context.dobAskedBefore) return null;
+  if (context.lastSubject === 'dob') return { mixed: false };
+  if (context.lastSubject === 'mixed') return { mixed: true };
+  return null;
+}
+
+function subjectOf(agentLine: string, before: DateSubject | undefined): DateSubject | undefined {
+  const folded = fold(agentLine);
+  if (namesAnotherDate(folded)) return asksForTheBirthday(agentLine) ? 'mixed' : 'other';
+  if (mentionsDobTopic(folded)) return 'dob';
+  return before;
 }
 
 /**
@@ -422,32 +475,226 @@ const AGENT_PREFIX = 'AGENT: ';
 const CALLER_PREFIX = 'CALLER: ';
 
 type WindowRead =
-  | { kind: 'date'; iso: string }
+  /** `at`: the line the date came from. `namesTheBirthday`: that line's own words say it is. */
+  | { kind: 'date'; iso: string; at: number; namesTheBirthday: boolean }
   | { kind: 'refused'; attempts: string[] }
   | { kind: 'empty' };
+
+/**
+ * A CALLER SENTENCE ABOUT ANOTHER DATE IS NOT AN ANSWER ABOUT THE BIRTHDAY
+ * (v207).
+ *
+ * "June 3, 1944. I mean the surgery was December 5, 2025." read the "I mean"
+ * as a correction and filed the surgery date as the date of birth (Codex
+ * post-merge sweep of #447); "My surgery is December 5, 2025." in answer to a
+ * second ask did the same. A sentence that names a surgery, an appointment, a
+ * visit or an exam is taken out before the turn is read for a date of birth,
+ * for a correction, or for an attempt that would clear one. A birthday said in
+ * the same sentence as another date ("June 3, 1944, and my surgery is
+ * December 5") is lost with it, which is the safe side: on the 14 days to
+ * 2026-11-11, 30 caller lines carried a year and another date's name, and
+ * every one that answered a date-of-birth question said the birthday in a
+ * sentence of its own.
+ */
+function aboutTheBirthday(uttered: string, dateBefore = false): { text: string; withdrew: boolean } {
+  let kept: string[] = [];
+  let withdrew = false;
+  for (const sentence of uttered.split(/(?<=[.!?])\s+/)) {
+    if (!namesAnotherDate(fold(sentence))) {
+      kept.push(sentence);
+      continue;
+    }
+    const dateInTurn = looksLikeDobAttempt(kept.join(' '));
+    if ((dateInTurn || dateBefore) && withdrawsTheDateBefore(sentence, dateInTurn)) {
+      kept = [];
+      withdrew = true;
+    }
+  }
+  return { text: kept.join(' '), withdrew };
+}
+
+/**
+ * A SENTENCE ABOUT ANOTHER DATE THAT TAKES BACK THE DATE BEFORE IT (v207,
+ * Codex P1 on #454, round 3). "June 3, 1944. Sorry, that is my surgery date."
+ * read June 3rd, 1944, because the sentence that withdrew it names the
+ * surgery and was dropped with its "sorry"; v206 read no date. After a date in
+ * the same turn, or earlier in the same window, a sentence that names another
+ * date and carries no date of its own withdraws it when it opens with a
+ * correction ("Sorry, I meant the surgery.", "Perdón, la cirugía.", v206's own
+ * correction cues), or says the date was the other one and nothing else
+ * ("That is my surgery date.", "Esa es la fecha de mi cirugía."). A sentence
+ * that only mentions the other date is not a withdrawal ("This is about my
+ * surgery.", "It's for my appointment.", "Yeah, so I'm sorry, but I can't go
+ * today to my appointment."), and a sentence with a date of its own corrects
+ * nothing about the birthday ("I mean the surgery was December 5, 2025.", the
+ * operator's case 4). Over the 14 days to 2026-11-11, 9 of 2,052 caller lines
+ * with a date had a later sentence naming another date beside a pointer or a
+ * correction word; none of them took a birthday back.
+ */
+const LEADING_FILLERS = /^(?:(?:uh|um|oh|so|and|well|okay|ok|no|bueno|o sea)\s+)*/;
+const WEAK_CUES = /^(?:(?:sorry|oops|actually|wait|perdon)\s+)+/;
+const STRONG_CUE = /^(?:i mean|i meant|mejor dicho|queria decir|en realidad)( |$)/;
+const POINTER = /^(?:that|this|it|ese|esa|eso|esta|este|esto) (?:s|is|was|es|era|fue)( |$)/;
+const WHAT_THE_DATE_WAS = new Set([
+  'my', 'the', 'her', 'his', 'our', 'a', 'of', 'date', 'day', 'mi', 'la', 'el', 'su', 'sus', 'de', 'del',
+  'fecha', 'dia',
+]);
+
+/**
+ * `dateInTurn`: a date was said earlier in this same turn. Only then does a
+ * bare "sorry" or "perdón" take it back, which is v206's own rule for a bare
+ * "sorry" (`SELF_CORRECTION_CUES`); a strong cue or "that is my surgery date"
+ * also takes back a date from an earlier turn of the same ask.
+ */
+function withdrawsTheDateBefore(sentence: string, dateInTurn: boolean): boolean {
+  const digits = numberWordsToDigits(sentence) ?? fold(sentence);
+  if (/\d/.test(digits) || digits.split(' ').some((w) => monthNumberFromWord(w))) return false;
+  const opened = fold(sentence).replace(LEADING_FILLERS, '');
+  const weak = WEAK_CUES.test(opened);
+  if (weak && dateInTurn) return true;
+  const rest = opened.replace(WEAK_CUES, '').replace(LEADING_FILLERS, '');
+  if (STRONG_CUE.test(rest)) return true;
+  const pointed = POINTER.exec(rest);
+  if (!pointed) return false;
+  const words = rest.slice(pointed[0].length).split(' ').filter(Boolean);
+  return words.length > 0 && words.every((w) => WHAT_THE_DATE_WAS.has(w) || OTHER_DATE_SUBJECTS.has(w))
+    && words.some((w) => OTHER_DATE_SUBJECTS.has(w));
+}
+
+const CALLER_BIRTHDAY_WORDS = /(^| )(born|birthday|birth|naci|nacio|nacimiento|cumpleanos)( |$)/;
+
+function callerNamesTheBirthday(about: string): boolean {
+  const folded = fold(about);
+  return mentionsDobTopic(folded) || CALLER_BIRTHDAY_WORDS.test(folded);
+}
+
+/**
+ * THE HELD MONTH AND DAY, NAMED (v207). "June third", "the third of June",
+ * "6 3", "3 de junio". Ordinal suffixes are read as the number they are.
+ */
+function namesTheHeldDate(uttered: string, iso: string): boolean {
+  const [, mm, dd] = iso.split('-');
+  const month = Number(mm);
+  const day = Number(dd);
+  const text = numberWordsToDigits(withoutAnAge(uttered)) ?? fold(withoutAnAge(uttered));
+  const words = text.split(' ').filter(Boolean);
+  const numberAt = (j: number): number | undefined => {
+    const m = /^(\d+)(?:st|nd|rd|th)?$/.exec(words[j] ?? '');
+    return m ? Number(m[1]) : undefined;
+  };
+  for (let i = 0; i < words.length; i += 1) {
+    const named = monthNumberFromWord(words[i]!);
+    if (named && Number(named) === month) {
+      for (const j of [i + 1, i - 1, i + 2, i - 2]) {
+        if (Math.abs(j - i) === 2 && !['of', 'de', 'del', 'the'].includes(words[(i + j) / 2]!)) continue;
+        if (numberAt(j) === day) return true;
+      }
+    }
+    if (numberAt(i) === month && numberAt(i + 1) === day) return true;
+  }
+  return false;
+}
+
+/**
+ * A SENTENCE A REJECTION MAY BE READ FROM (v207, Codex P2 on #454, round 1).
+ * A sentence about another date ("My surgery is not June third.") is not
+ * about the birthday and does not clear it. A sentence that names the
+ * birthday as well ("My birthday is not June third, my surgery is.") is kept,
+ * the other way round from `aboutTheBirthday`: reading a date from a sentence
+ * that mixes two dates could take the wrong one, while clearing on one only
+ * loses a date that is asked again, which is the safe side.
+ */
+function mayRejectTheBirthday(sentence: string): boolean {
+  return !namesAnotherDate(fold(sentence)) || callerNamesTheBirthday(sentence);
+}
+
+/**
+ * A SENTENCE THAT IS NOTHING BUT A DENIAL (v207, round 2): "That's wrong.",
+ * "No.", "That's not right.", "That's not my birthday.", "No es correcto."
+ * Only such a sentence, or one after a date the caller asked back as a
+ * question, is read against the date in the sentence before it. A word not in
+ * this list makes the sentence about something else ("I do not need anything
+ * else."), so a missing word keeps the held date only where a statement of
+ * the date is followed by a denial worded some other way.
+ */
+const BARE_DENIAL_WORDS = new Set([
+  'no', 'nope', 'nah', 'not', 'wrong', 'incorrect', 'right', 'correct', 'that', 'thats', 's', 'is', 'it',
+  'its', 'isn', 't', 'my', 'mine', 'birthday', 'date', 'of', 'birth', 'the', 'one', 'uh', 'um', 'oh',
+  'es', 'eso', 'esa', 'correcto', 'correcta', 'incorrecto', 'incorrecta', 'equivocado', 'equivocada',
+  'mi', 'cumpleanos', 'fecha', 'de', 'nacimiento', 'esta', 'mal',
+]);
+
+function isABareDenial(sentence: string): boolean {
+  const words = fold(sentence).split(' ').filter(Boolean);
+  return words.length > 0 && words.every((w) => BARE_DENIAL_WORDS.has(w)) && (rejectsADate(sentence) || negatesADate(sentence));
+}
+
+/**
+ * "IT IS NOT JUNE THIRD" CLEARS JUNE THIRD, WHEREVER IT IS SAID (v207).
+ *
+ * The rejection was read only as a refused attempt in a LATER ask window, and
+ * there a partial that names the held month and day reads as agreeing, so
+ * "June 3, 1944." then "It is not June third." kept June 3rd (Codex
+ * post-merge sweep of #447). It was not read at all in the same turn, or after
+ * a line that asks nothing. Any caller line after the one the date came from
+ * clears it when a sentence names the held month and day and negates it, or
+ * when the sentence after one that names it is a bare denial, or denies a
+ * date the caller asked back ("June third? That's not my birthday, I don't
+ * know where that came from."). A negation in another sentence does not reach
+ * the date ("June third is correct. I do not need anything else.", Codex P2
+ * on #454, round 2). Which date the agent last asked about is not read here:
+ * "It's not June third." after a surgery question still clears, because the
+ * caller may be correcting the birthday, and a held date that may be wrong is
+ * not kept.
+ */
+function rejectsTheHeldDate(uttered: string, iso: string): boolean {
+  const sentences = uttered.split(/(?<=[.!?])\s+/);
+  for (let i = 0; i < sentences.length; i += 1) {
+    const sentence = sentences[i]!;
+    if (!mayRejectTheBirthday(sentence) || !namesTheHeldDate(sentence, iso)) continue;
+    if (negatesADate(sentence)) return true;
+    const next = sentences[i + 1];
+    if (next === undefined || !mayRejectTheBirthday(next)) continue;
+    const askedBack = /\?\s*$/.test(sentence);
+    if (isABareDenial(next)) return true;
+    if (askedBack && (rejectsADate(next) || negatesADate(next))) return true;
+  }
+  return false;
+}
 
 type TranscriptRead =
   | { kind: 'date'; iso: string }
   | { kind: 'cleared' }
   | { kind: 'none' };
 
+/** An attempt no held date can agree with: a date taken back in the window. */
+const WITHDRAWN = 'withdrawn';
+
 function readWindow(lines: readonly string[], from: number): WindowRead {
-  let found: string | undefined;
+  let found: { iso: string; at: number; namesTheBirthday: boolean } | undefined;
   const attempts: string[] = [];
+  let withdrawnAt = -1;
   for (let j = from; j < lines.length; j += 1) {
     const next = lines[j] ?? '';
     if (!next.startsWith(CALLER_PREFIX)) break;
-    const uttered = next.slice(CALLER_PREFIX.length);
-    const iso = isoFromUtterance(uttered);
+    const { text: about, withdrew } = aboutTheBirthday(next.slice(CALLER_PREFIX.length), found !== undefined);
+    if (withdrew) {
+      // A date taken back, in this turn or an earlier turn of this window.
+      found = undefined;
+      withdrawnAt = j;
+    }
+    const iso = isoFromUtterance(about);
     if (iso) {
-      if (found === undefined || textAfterLastCorrection(uttered)) {
-        found = iso;
+      if (found === undefined || textAfterLastCorrection(about)) {
+        found = { iso, at: j, namesTheBirthday: callerNamesTheBirthday(about) };
       }
       continue;
     }
-    if (found === undefined && looksLikeDobAttempt(uttered)) attempts.push(uttered);
+    if (found === undefined && looksLikeDobAttempt(about)) attempts.push(about);
   }
-  if (found !== undefined) return { kind: 'date', iso: found };
+  if (found !== undefined) return { kind: 'date', ...found };
+  // A withdrawn date leaves nothing standing, here or from an earlier ask.
+  if (withdrawnAt >= 0) return { kind: 'refused', attempts: [...attempts, WITHDRAWN] };
   if (attempts.length) return { kind: 'refused', attempts };
   return { kind: 'empty' };
 }
@@ -464,12 +711,12 @@ function readWindow(lines: readonly string[], from: number): WindowRead {
  */
 function agreeingPartial(uttered: string, iso: string): boolean {
   // "No, not June 3" names the held month and day to reject them (Codex P1 on
-  // #447, head d0aefbb5).
-  if (rejectsADate(uttered)) return false;
+  // #447, head d0aefbb5), and so does "It is not June third." (v207).
+  if (rejectsADate(uttered) || negatesADate(uttered)) return false;
   const [, mm, dd] = iso.split('-');
   const month = Number(mm);
   const day = Number(dd);
-  const text = numberWordsToDigits(uttered) ?? fold(uttered);
+  const text = numberWordsToDigits(withoutAnAge(uttered)) ?? fold(withoutAnAge(uttered));
   const words = text.split(' ').filter(Boolean);
   const nums = words.filter((w) => /^\d+$/.test(w)).map(Number);
   const named = words.map((w) => monthNumberFromWord(w)).filter((m): m is string => Boolean(m));
@@ -480,22 +727,39 @@ function agreeingPartial(uttered: string, iso: string): boolean {
 
 function readCallerAnswer(lines: readonly string[]): TranscriptRead {
   let latest: TranscriptRead = { kind: 'none' };
+  // The line the held date came from; a rejection after it clears it.
+  let heldAt = -1;
   let dobAskedBefore = false;
-  let previousAgentLine: string | undefined;
+  let lastSubject: DateSubject | undefined;
   for (let i = 0; i < lines.length; i += 1) {
     const line = lines[i] ?? '';
+    if (line.startsWith(CALLER_PREFIX)) {
+      if (latest.kind === 'date' && i > heldAt && rejectsTheHeldDate(line.slice(CALLER_PREFIX.length), latest.iso)) {
+        latest = { kind: 'cleared' };
+        heldAt = -1;
+      }
+      continue;
+    }
     if (!line.startsWith(AGENT_PREFIX)) continue;
     const said = line.slice(AGENT_PREFIX.length);
-    const opens = opensDobWindow(said, { dobAskedBefore, previousAgentLine });
+    const opening = opensDobWindow(said, { dobAskedBefore, lastSubject });
     if (mentionsDobTopic(fold(said))) dobAskedBefore = true;
-    previousAgentLine = said;
-    if (!opens) continue;
+    lastSubject = subjectOf(said, lastSubject);
+    if (!opening) continue;
     const window = readWindow(lines, i + 1);
-    if (window.kind === 'date') latest = { kind: 'date', iso: window.iso };
-    else if (window.kind === 'refused') {
-      const held = latest.kind === 'date' ? latest.iso : undefined;
+    const held = latest.kind === 'date' ? latest.iso : undefined;
+    if (window.kind === 'date') {
+      if (opening.mixed && held && window.iso !== held && !window.namesTheBirthday) {
+        latest = { kind: 'cleared' };
+        heldAt = -1;
+      } else {
+        latest = { kind: 'date', iso: window.iso };
+        heldAt = window.at;
+      }
+    } else if (window.kind === 'refused') {
       if (held && window.attempts.every((a) => agreeingPartial(a, held))) continue;
       latest = { kind: 'cleared' };
+      heldAt = -1;
     }
     // empty: confirmation / "sure." — leave the earlier answer standing.
   }
