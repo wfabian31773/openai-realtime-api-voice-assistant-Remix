@@ -205,6 +205,31 @@ describe('4. a sentence about another date is not an answer about the birthday',
     ).toBe('1950-05-01');
   });
 
+  it('a sentence saying the date is not the birthday takes it back (Codex P1 on #454, round 5)', () => {
+    // Worded year: v205 and v206 read none, the round-4 head read June 3rd, 1944.
+    expect(dobFromCallerAnswer([ASK, C('June third nineteen forty-four. That is not my birthday, it is my surgery date.')])).toBeUndefined();
+    // Digits: every version before this read June 3rd, 1944.
+    expect(dobFromCallerAnswer([ASK, C('June 3, 1944. That is not my birthday, it is my surgery date.')])).toBeUndefined();
+    expect(dobFromCallerAnswer([ASK, C('June 3, 1944. That is not my date of birth, that was my surgery.')])).toBeUndefined();
+    expect(dobFromCallerAnswer([ASK, C('June 3, 1944. That is not my birthday.')])).toBeUndefined();
+    expect(dobFromCallerAnswer([ASK, C('3 de junio de 1944. No es mi cumpleaños, es la fecha de mi cirugía.')])).toBeUndefined();
+    // In a later caller line it clears the held date.
+    expect(dobFromCallerAnswer([ASK, C('June 3, 1944.'), A('Thank you.'), C("That's not my date of birth, it is my surgery date.")])).toBeUndefined();
+    expect(dobFromCallerAnswer([ASK, C('June 3, 1944.'), A('Thank you.'), C("It isn't my birthday.")])).toBeUndefined();
+    expect(dobFromCallerAnswer([ASK, C('June 3, 1944.'), C('That is not my birthday, it is my surgery date.')])).toBeUndefined();
+    // Even when it gives another date: the held one is not kept.
+    expect(dobFromCallerAnswer([ASK, C('June 3, 1944.'), A('Thank you.'), C("That's not my birthday, my birthday is June 4, 1944.")])).toBeUndefined();
+    // A later date the caller gives as the birthday is still read.
+    expect(dobFromCallerAnswer([ASK, C('June 3, 1944. That is not my birthday, it is my surgery date.'), REASK, C('June 4, 1944.')])).toBe('1944-06-04');
+  });
+
+  it('controls: a negation that is not a denial of the birthday takes nothing back', () => {
+    expect(dobFromCallerAnswer([ASK, C("June 3, 1944. I'm not sure of my birthday year though.")])).toBe('1944-06-03');
+    expect(dobFromCallerAnswer([ASK, C('June 3, 1944. That is my birthday, not my surgery date.')])).toBe('1944-06-03');
+    expect(dobFromCallerAnswer([ASK, C('June 3, 1944.'), A('Thank you.'), C('Yes, and it is not my surgery, just a checkup.')])).toBe('1944-06-03');
+    expect(dobFromCallerAnswer([ASK, C('June 3, 1944.'), A('Thank you.'), C("I don't know my surgery date.")])).toBe('1944-06-03');
+  });
+
   it('controls: a sentence that only mentions the other date takes nothing back', () => {
     expect(dobFromCallerAnswer([ASK, C('June 3, 1944. This is about my surgery.')])).toBe('1944-06-03');
     expect(dobFromCallerAnswer([ASK, C("June 3, 1944. It's for my appointment.")])).toBe('1944-06-03');
