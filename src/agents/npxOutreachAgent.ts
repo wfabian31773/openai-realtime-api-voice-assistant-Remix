@@ -50,9 +50,11 @@ import {
   NPX_OUTREACH_LIVE_CAMPAIGN_KEY,
   NPX_OUTREACH_TOOLS,
   STAFF_CALLBACK_TOOL_NAME,
+  npxBookingPageLane,
   npxOutreachMode,
   warmOutreachAvailability,
 } from '../tools/npxOutreachTools';
+import type { OutboundTextPolicy } from '../runtime/outbound/outreachText';
 import { NPX_OUTREACH_DEMO_CAPS, npxOutreachDemoSource } from './npxOutreachDemo';
 
 export const npxOutreachAgentConfig = {
@@ -141,6 +143,30 @@ export async function npxOutreachSource(
   return live ? pilotSource(live, env) : null;
 }
 
+/** The text's own switch (v211): nobody is texted until it is "1". */
+export const NPX_OUTREACH_TEXTS_ENV = 'NPX_OUTREACH_TEXTS';
+
+/**
+ * THE OUTREACH TEXT, IN THE OPERATOR'S APPROVED WORDS (2026-11-11: "wording
+ * is fine"). It names no one and no visit: whoever reads the phone learns only
+ * that Azul Vision has sooner openings. GSM-7 throughout, so it is never sent
+ * as UCS-2; with the link it runs to two segments.
+ */
+export function npxOutreachTextBody(link: string): string {
+  return `Azul Vision: we have openings sooner than your upcoming eye appointment at a partner office near you. Book in 4 steps: ${link}. Reply STOP to opt out.`;
+}
+
+/** Texts a minute: 10 live (the 61 textable contacts of 2026-11-11 in about
+ * seven ticks), 2 on the demo's test numbers. */
+export const npxOutreachText: OutboundTextPolicy = {
+  enableEnv: NPX_OUTREACH_TEXTS_ENV,
+  get perTick(): number {
+    return npxOutreachMode() === 'live' ? 10 : 2;
+  },
+  body: npxOutreachTextBody,
+  page: npxBookingPageLane,
+};
+
 /**
  * One policy for both modes. The fields the mode moves are getters, read by
  * the dialler, the answer webhook and the runtime at the moment they act, so
@@ -171,6 +197,7 @@ export const npxOutreachPolicy: OutboundLanePolicy = {
   source: () => (npxOutreachMode() === 'live' ? npxOutreachSource() : npxOutreachDemoSource()),
   tools: NPX_OUTREACH_TOOLS,
   mode: (env) => npxOutreachMode(env),
+  textOutreach: npxOutreachText,
 };
 
 /**

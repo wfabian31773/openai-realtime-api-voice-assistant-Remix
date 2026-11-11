@@ -92,11 +92,15 @@ import {
   searchSlots,
   type SlotPreference,
   spokenAddress,
+  spokenSlotDay,
+  spokenSlotTime,
   spokenWhen,
+  localParts,
   type Relaxed,
 } from './npxAvailabilitySearch';
 import { sanitizeForSms } from '../services/gsm7';
 import type { CreateTicketParams, CreateTicketResponse } from '../../server/services/ticketingApiClient';
+import type { BookingOpening, BookingPageLane } from '../runtime/outbound/bookingPage';
 
 export const DESCRIBE_TOOL_NAME = 'describe_upcoming_appointment';
 export const CONFIRM_DOB_TOOL_NAME = 'confirm_patient_birthdate';
@@ -1163,6 +1167,48 @@ export async function bookOutreachSlot(args: {
   }
   return { ok: true, bookingId: book.bookingId, slot: book.slot ?? slot, cancel };
 }
+
+// ── The text's booking page (v211) ──────────────────────────────────────────
+
+/** One NPX opening as the booking page shows it: when, where, with whom. */
+export function bookingOpening(slot: NpxSlot): BookingOpening {
+  return {
+    id: slot.slotId,
+    day: localParts(slot).day,
+    dayLabel: spokenSlotDay(slot),
+    timeLabel: spokenSlotTime(slot),
+    city: cityOf(slot),
+    place: [slot.partnerName, spokenAddress(slot)].filter(Boolean).join(', '),
+    provider: slot.providerName || 'a doctor',
+  };
+}
+
+/**
+ * THE BOOKING PAGE'S NPX HALF (v211): the same availability find_sooner_exam
+ * searches and the same bookOutreachSlot book_sooner_exam books through, so
+ * a text link and a call cannot offer or book differently. Demo is decided
+ * the call's way, by isDemoNpxCall.
+ */
+export const npxBookingPageLane: BookingPageLane = {
+  isDemo: (contact, campaignKey) => isDemoNpxCall(contact, campaignKey),
+  currentAppointment: (contact) => currentAppointment(contact),
+  async openings(contact, demo) {
+    const read = await loadAvailability(contact, demo);
+    if ('error' in read) return { error: read.error };
+    return { openings: read.slots.map(bookingOpening) };
+  },
+  async book({ contact, demo, openingId, callRef, deadline }) {
+    const read = await loadAvailability(contact, demo);
+    if ('error' in read) return { ok: false, error: read.error };
+    const slot = read.slots.find((x) => x.slotId === openingId);
+    // Only an opening this person's availability holds is ever booked.
+    if (!slot) return { ok: false, error: 'slot_unavailable' };
+    const booked = await bookOutreachSlot({ contact, demo, slot, callRef, deadline });
+    if (!booked.ok) return booked;
+    const currentDay = spokenDay(field(contact, 'appointment_date'));
+    return { ok: true, bookingId: booked.bookingId, confirmation: confirmation(booked.slot, booked.cancel, currentDay) };
+  },
+};
 
 // ── request_staff_callback ──────────────────────────────────────────────────
 

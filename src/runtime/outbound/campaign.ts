@@ -20,6 +20,7 @@
  */
 
 import type { AttemptCaps, CallingWindow } from "./callingWindow";
+import type { OutboundTextPolicy } from "./outreachText";
 
 /** The `campaigns.campaign_type` this layer writes. The old core's executor
  * refuses it, so a press of "start" in the old admin screen can never dial
@@ -138,6 +139,13 @@ export interface OutboundLanePolicy {
     contact: { id: string; customData: Record<string, unknown> },
     reason: NotPlacedReason,
   ) => Promise<void>;
+  /**
+   * One text per contact with a link to the campaign's booking page (v211),
+   * sent from the campaign's caller-ID number inside its calling window.
+   * Off until its own `enableEnv` is "1", on top of the call switches. See
+   * ./outreachText.ts. Optional: a campaign with no page leaves it out.
+   */
+  textOutreach?: OutboundTextPolicy;
 }
 
 /** Why the dialler settled a row without ever dialling it (v115). */

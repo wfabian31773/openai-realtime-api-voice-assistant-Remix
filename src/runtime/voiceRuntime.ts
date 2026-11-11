@@ -334,6 +334,9 @@ import {
   type OutboundWebhookDeps,
 } from "./outbound/outboundWebhook";
 import { startOutboundScheduler, type DialerLock } from "./outbound/scheduler";
+import { BOOKING_PATH_PREFIX, handleBookingPage, handleBookingStep, type PageResponse } from "./outbound/bookingPage";
+import { handleTextReply, textReplyPath } from "./outbound/textReplies";
+import { createTwilioSmsSender, type SmsSender } from "../plugin/sms";
 import { defaultDialerLock } from "./outbound/defaultLock";
 
 /**
@@ -483,6 +486,9 @@ export interface VoiceRuntimeOptions {
   outboundTwilio?: () => Promise<OutboundTwilio>;
   /** The fleet-wide dialler lock. Injected for tests. */
   outboundLock?: DialerLock;
+  /** Sends a campaign's outreach texts (v211). Injected for tests; production
+   * builds the Twilio sender, which is null without Twilio credentials. */
+  outboundSms?: () => Promise<SmsSender | null>;
   /**
    * Writes the call's timed turns to `call_turns` — telemetry, after the row
    * and after the sweep, never awaited by teardown. Injected for tests.
@@ -887,6 +893,39 @@ export function mountVoiceRuntime(
     operatorStore: () => options.operatorInboundStore ?? boundPluginStore(),
     liveCalls,
   });
+  /**
+   * THE OUTREACH TEXT'S TWO SURFACES (v211). What a person texts back to a
+   * campaign's number (STOP writes an `sms_stop` do-not-contact row), and the
+   * booking page the text links to. Both answer whatever happens: a failure
+   * is an empty 200 to Twilio, or the page's own "try again" answer.
+   */
+  app.post(textReplyPath(OUTBOUND_PATH_PREFIX, ":slug"), async (req: Request, res: Response) => {
+    try {
+      send(
+        res,
+        await handleTextReply(String(req.params.slug ?? ""), toWebhookRequest(req), {
+          env,
+          store: outboundStore,
+          policyFor: outboundPolicyFor,
+        }),
+      );
+    } catch (error) {
+      console.error("[outbound] text reply webhook failed:", error instanceof Error ? error.message : error);
+      res.status(200).type("text/xml").send("<Response/>");
+    }
+  });
+  const sendPage = (res: Response, out: PageResponse): void => {
+    res.status(out.status).set(out.headers).type(out.contentType).send(out.body);
+  };
+  const bookingDeps = { store: outboundStore, policyFor: outboundPolicyFor };
+  app.get(`${BOOKING_PATH_PREFIX}/:token`, async (req: Request, res: Response) => {
+    sendPage(res, await handleBookingPage(String(req.params.token ?? ""), bookingDeps));
+  });
+  app.post(`${BOOKING_PATH_PREFIX}/:token/:step`, async (req: Request, res: Response) => {
+    const body = req.body && typeof req.body === "object" ? (req.body as Record<string, unknown>) : {};
+    sendPage(res, await handleBookingStep(String(req.params.token ?? ""), String(req.params.step ?? ""), body, bookingDeps));
+  });
+
   app.post(`${OUTBOUND_PATH_PREFIX}/:slug/status`, async (req: Request, res: Response) => {
     try {
       send(res, await handleOutboundStatus(String(req.params.slug ?? ""), toWebhookRequest(req), await outboundDeps()));
@@ -935,6 +974,9 @@ export function mountVoiceRuntime(
         };
       }),
     lock: options.outboundLock ?? defaultDialerLock,
+    // A campaign's texts (v211). The sender is null without Twilio credentials,
+    // and the text tick then sends nothing and says so.
+    sms: options.outboundSms ?? (async () => createTwilioSmsSender(env)),
   });
 
   app.post("/voice/:slug/after", (req: Request, res: Response) => {

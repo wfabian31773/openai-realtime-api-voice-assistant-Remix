@@ -63,7 +63,7 @@ import {
   resolvedMaxConsecutiveInfraRetries,
 } from "./campaign";
 import { mayDialNow, pacificParts } from "./callingWindow";
-import { NOT_PLACED, dncKey, type ContactRow, type OutboundStore } from "./store";
+import { NOT_PLACED, OUTREACH_TEXT_KEY, dncKey, type ContactRow, type OutboundStore } from "./store";
 import { VOICE_PATH_PREFIX } from "../voiceWebhook";
 
 export const OUTBOUND_PATH_PREFIX = "/voice/outbound";
@@ -182,6 +182,8 @@ export interface TickResult {
   held: Record<string, number>;
   /** A source refresh this tick: rows written and rows parked. */
   refreshed?: { written: number; parked: number; listed: number };
+  /** The campaign's texts this tick (v211), when it texts. */
+  texts?: { sent: number; held: Record<string, number>; skipped?: string };
 }
 
 /** Where Twilio posts when the call is answered. */
@@ -334,9 +336,15 @@ export async function runCampaignTick(
   return result;
 }
 
-/** The fields a refresh compares, in a fixed key order. */
-function sourceKey(c: { phone: string | null; firstName: string | null; lastName: string | null; data: Record<string, unknown> }): string {
-  const ordered = Object.fromEntries(Object.entries(c.data).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)));
+/** The fields a refresh compares, in a fixed key order. The outreach text's
+ * state is the row's own, never the source's, so it is not compared (v211):
+ * otherwise every texted row would read as changed on every refresh. */
+export function sourceKey(c: { phone: string | null; firstName: string | null; lastName: string | null; data: Record<string, unknown> }): string {
+  const ordered = Object.fromEntries(
+    Object.entries(c.data)
+      .filter(([k]) => k !== OUTREACH_TEXT_KEY)
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)),
+  );
   return JSON.stringify([dncKey(c.phone ?? ""), c.firstName ?? "", c.lastName ?? "", ordered]);
 }
 
