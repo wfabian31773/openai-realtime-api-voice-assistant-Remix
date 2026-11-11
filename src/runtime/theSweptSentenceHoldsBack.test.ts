@@ -105,7 +105,8 @@ describe('a longer address is caught', () => {
     ['an office by its street', 'Wants records from the Main Street office sent over.'],
     ['a count and a lowercase way', 'Wants 3 pairs shipped the fastest way.'],
     ['a count and the lowercase dr', 'Wants 2 copies sent to the dr today.'],
-    ['a capitalised word first in the sentence', 'Wants Court papers faxed to the lawyer.'],
+    ['a capitalised word first in the sentence', 'Needs Court documents mailed to her lawyer.'],
+    ['a unit and an article', 'Wants to know which unit a doctor is in.'],
     ['a hospital unit', 'Wants to know if the surgery unit is open.'],
     ['an apartment complex', 'Asking about the apartment complex shuttle to the office.'],
   ])('kept: %s', (_what, sentence) => {
