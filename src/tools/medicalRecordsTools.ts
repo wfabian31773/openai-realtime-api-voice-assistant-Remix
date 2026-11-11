@@ -1568,7 +1568,10 @@ registerTool({
         // stores a key only once a ticket exists, so the refusal left none,
         // and the sweep collapses onto this ticket instead of opening another.
         ...(isTwilioCallSid(callSid) ? { idempotencyKey: `call-${callSid}${scope}` } : {}),
-      });
+      // Held with the outbox row too, so a recovery queued in an outage and
+      // refused on its replay still files with the placeholder (v205). The
+      // outbox stores it only beside a description it differs from.
+      }, { refusalFallbackDescription: SWEPT_TICKET_DESCRIPTION });
       let recovery = await recoveryWith(requestText || SWEPT_TICKET_DESCRIPTION);
       if (requestText && !recovery.success && !(recovery as { queued?: boolean }).queued && recovery.terminal) {
         console.warn(

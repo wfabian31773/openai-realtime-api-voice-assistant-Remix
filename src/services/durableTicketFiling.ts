@@ -283,7 +283,22 @@ function repeatFilingCopy(res: DurableCreateResult): Record<string, unknown> {
  * whole point of this function is to be the thing that does not lose the
  * request.
  */
-export async function createTicketDurable(params: CreateTicketParams): Promise<DurableCreateResult> {
+export interface DurableFilingOptions {
+  /**
+   * The description this filer would send after a refusal (the teardown
+   * sweep's placeholder). Held with the outbox row, never sent with `params`,
+   * so a payload refused on its replay after an outage still files (v205).
+   */
+  refusalFallbackDescription?: string;
+}
+
+export async function createTicketDurable(
+  params: CreateTicketParams,
+  options: DurableFilingOptions = {},
+): Promise<DurableCreateResult> {
+  const fallback = options.refusalFallbackDescription
+    ? { description: options.refusalFallbackDescription }
+    : undefined;
   const sid = params.callData?.callSid;
   const key = params.idempotencyKey;
   const scoped = sid && key && new RegExp(`^call-${sid}-p\\d{1,3}$`).test(key);
@@ -291,7 +306,7 @@ export async function createTicketDurable(params: CreateTicketParams): Promise<D
     let outboxId: string | undefined;
     try {
       const { TicketOutboxService, wrapCreateTicketPayload } = await import('./ticketOutboxService');
-      const write = await TicketOutboxService.writeToOutbox(wrapCreateTicketPayload(params), key.slice(5));
+      const write = await TicketOutboxService.writeToOutbox(wrapCreateTicketPayload(params, fallback), key.slice(5));
       outboxId = write.outboxId;
       if (write.alreadyExists && write.status === 'sent' && write.ticketNumber) {
         const addition = await forwardRepeatFiling(params, key.slice(5), write.outboxId);
@@ -368,7 +383,7 @@ export async function createTicketDurable(params: CreateTicketParams): Promise<D
     // outbox pulls in the database. Tests that never fail a POST must not need
     // a DATABASE_URL to file a ticket.
     const { TicketOutboxService, wrapCreateTicketPayload } = await import('./ticketOutboxService');
-    const write = await TicketOutboxService.writeToOutbox(wrapCreateTicketPayload(params), keyedCallSid);
+    const write = await TicketOutboxService.writeToOutbox(wrapCreateTicketPayload(params, fallback), keyedCallSid);
 
     // An earlier attempt on this same call may already have gone out — the
     // worker retries every 60s, and a caller repeating themselves can drive a
