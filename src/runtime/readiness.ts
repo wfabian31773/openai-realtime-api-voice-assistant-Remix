@@ -1445,24 +1445,125 @@ import { callEnvironment } from "./callRecord";
  * `e190383a`), which it contains. No migration.
  */
 /**
- * v199 — A DATE OF BIRTH THE CALLER GAVE REACHES THE TICKET (2026-11-10).
- * Operator, on PCP-82755: understand why ticket fields are not populated.
- * Queue-lane calls since about 11-07 whose caller answered a date-of-birth
- * ask: 161; 25 took a date-of-birth refusal and 17 of those filed with none.
- * The spoken-DOB reader now opens a window on a line that is only the format,
- * takes a bare "sorry" correction and an agreeing partial the caller does
- * not deny; the parser reads dates said in words, commas between digit
- * groups, a repeated century and a year said digit by digit; and a certain
- * name-and-date-of-birth match keeps the caller's spelling of the first name
- * (`heardAs`) when it shares the chart name's opening. Reading one date
- * across sentences and the agent's readback were withdrawn at round 4 of the
- * Codex review. 9 of the 17 now carry a date of birth.
- * Above main's v196 (#444, `fe330544`), which it contains along with v195
- * (#442, `e190383a`); v197 is #445 and v198 is #446 on their open branches.
+ * v197 — A PCP RECORDS REQUEST ASKS WHO, WHOSE, HOW AND WHERE (2026-11-10).
+ * Operator, on PCP-82755: "what good does it do us if we create a ticket that
+ * leads us to more work than had we taken the call ourselves." Of 171 PCP
+ * records tickets in 2026-10-27..11-10, 23 named no patient (18 never asked)
+ * and 15 said "Delivery method NOT captured" after the caller had answered.
+ * handle_patient_medical_records_request now asks who is calling, whose
+ * records, how and where, one at a time and each once, takes every answer as
+ * its own argument, and files with the gaps written when an answer does not
+ * come. A caller who names where they call from and is not the patient takes
+ * the professional records route (2 of 13 patient-clock cases in the window
+ * were an office). Above main's v196 (#444, `fe330544`), which it contains.
  * No migration.
  */
+/**
+ * v198 — EACH FILING TOOL RECORDS THE FIELD NAMES IT RECEIVED (2026-11-10).
+ * Operator, on PCP-82755: a daily review of every ticket, to understand why
+ * fields are not populated. A field the caller gave and the ticket lacks has
+ * different causes depending on whether the filing tool received it, and only
+ * the queue lanes' registry path recorded that. `tool_timeline` now carries
+ * `supplied`, the argument NAMES (never a value) on every filing tool:
+ * create_ticket, the PCP filing tools, escalate_to_human and file_*_ticket.
+ * Logging only. Above main's v197 (#445, `ec3af3fd`), which it contains along
+ * with v196 (#444, `fe330544`). No migration.
+ */
+/**
+ * v200 — A PCP SCHEDULING REQUEST ASKS WHO IT IS ABOUT (2026-11-11).
+ * Operator: staff are chasing down the right person because tickets lack it.
+ * 21 days to 2026-11-11, PCP tickets filed to the HVA Hub: no patient name,
+ * 284 of 287 sent back; a name, 29 of 83; a name and a date of birth, 6 of 24.
+ * The director now asks a professional caller the patient's name and date of
+ * birth before a scheduling request files (not while they are headed for a
+ * person); a request still naming no patient files in PCP Support with a line
+ * saying why; the date of birth reaches the Hub ticket's birth columns. Above
+ * main's v198 (#446, `ff996d58`), which it contains along with v197 (#445,
+ * `ec3af3fd`); v199 is #447 on its open branch. No migration.
+ */
+/**
+ * v201 — THE SWEPT TICKET SAYS WHAT WAS ASKED (2026-11-11). Operator: tickets
+ * that say "reason not captured" leave staff calling back just to find out
+ * what the call was about. 14 days to 2026-11-10: 290 agent tickets on
+ * optical, surgery, tech and records carried that subject (surgery 88,
+ * optical 77, records 65, tech 60), every one traced to the teardown sweep's
+ * placeholder description (263 with no filing tool on the call; the rest a
+ * later call consolidated onto an earlier swept ticket). Where the model wrote
+ * nothing down, the sweep now asks a model (requestFromTheRecording.ts,
+ * gpt-4o-mini) for one short sentence of what the caller asked, checked in
+ * code for numbers, dates, addresses and held names, and files it as the
+ * description; on Medical Records it goes in the staff note only (a records
+ * description opens a case on a pathway the app picks). The records lane
+ * also gets v180's heard name (64 of 65 nameless records tickets were the
+ * sweep's). Off switch REQUEST_FROM_RECORDING_DISABLED=1. Above main's v200
+ * (#448, `65080651`), which it contains along with v198 (#446, `ff996d58`);
+ * v199 is #447 on its open branch. No migration.
+ */
+/**
+ * v202 — REQUESTS FILE WHERE STAFF WORK THEM (2026-11-11). Operator: "We're
+ * doing more transferring of tickets than anything else." On 2026-11-10 staff
+ * moved 121 of 551 agent tickets. The queue-lane router (`detectCrossQueue`),
+ * measured over 14 days of optical/surgery/tech tickets against where staff
+ * moved them: on the surgery line the operation WORD keeps a request home and
+ * a routine-visit question goes to the HVA Hub; on the tech line contact
+ * lenses go to Optical; an exam that already happened no longer reads as a
+ * booking; on the optical line a message about an operation with no eyewear
+ * goes to Surgery. 125 tickets re-routed, 79 to where staff moved them, 34
+ * that staff left, 12 elsewhere. After hours, an appointment request that is
+ * not about today, not urgent and names no operation files to the HVA Hub
+ * (37 landed elsewhere in the window, staff moved 24 to the Hub). Above
+ * main's v201 (#449, `c99abcb6`), which it contains along with v200 (#448,
+ * `65080651`). No migration.
+ */
+/**
+ * v203 — A SWEPT RECORDS REQUEST OPENS A CASE ON PATHWAY REVIEW (2026-11-11).
+ * Operator: "yes ... open it on pathway review." The sentence the sweep reads
+ * from the recording is now the description on Medical Records too; the app
+ * opens a case only on a records request, and with no requester stated it
+ * opens it on pathway review. 64 swept records tickets in department 16,
+ * 2026-10-30..11-10, opened none. Above main's v202 (#450, `3569adba`), which
+ * it contains along with v201 (#449, `c99abcb6`). No migration.
+ */
+/**
+ * v204 — A PCP REQUEST WITH NO REQUEST IN IT IS NOT FILED (2026-11-11).
+ * Operator: "tickets that are incomplete should not be filed." 18 PCP tickets
+ * of 2026-11-10 said only that the caller wanted a person. A filing the model
+ * marks `callerStatedARequest: false` files nothing; the agent asks once what
+ * they need, and a call that still says nothing may end with no ticket. An
+ * office outside lunch is sent to the transfer instead, and the ask detector
+ * learns the words offices use (staff, provider, nurse, doctor, department,
+ * customer service, medical assistant). The floor's person-only admission (v18)
+ * is gone. Above main's v203 (#451, `25e356ba`). No migration.
+ */
+/**
+ * v205 — THE REVIEW FOLLOW-UPS ON v201 TO v204 (2026-11-11). Operator, the same
+ * morning, listing the review findings that matter most. The PCP floor files
+ * the answer a caller gives to the v204 ask when the call then ends on our
+ * side, and "get them the provider notes" is not an ask for a person; the
+ * v202 routing rules stop five misses; the swept sentence holds back
+ * apostrophe names, spoken dates and longer addresses; and a swept records
+ * request the outbox replays after an outage falls back to the placeholder
+ * instead of dead-lettering. Above main's v204 (#452, `caffbeb4`). No
+ * migration.
+ */
+/**
+ * v206 — A DATE OF BIRTH THE CALLER GAVE REACHES THE TICKET (2026-11-11;
+ * v199 while #447 was open, renumbered when main moved to v205). Operator, on
+ * PCP-82755: understand why ticket fields are not populated. Queue-lane calls
+ * since about 11-07 whose caller answered a date-of-birth ask: 161; 25 took a
+ * date-of-birth refusal and 17 of those filed with none. The spoken-DOB reader
+ * now opens a window on a line that is only the format, takes a bare "sorry"
+ * correction and an agreeing partial the caller does not deny; the parser
+ * reads dates said in words, commas between digit groups, a repeated century
+ * and a year said digit by digit; and a certain name-and-date-of-birth match
+ * keeps the caller's spelling of the first name (`heardAs`) when it shares the
+ * chart name's opening. Reading one date across sentences and the agent's
+ * readback were withdrawn at round 4 of the Codex review. 9 of the 17 now
+ * carry a date of birth. Above main's v205 (#453, `e8619cbf`), which it
+ * contains. No migration.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v199-a-spoken-date-of-birth-reaches-the-ticket-20261110";
+  "voice-runtime-v206-a-spoken-date-of-birth-reaches-the-ticket-20261111";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

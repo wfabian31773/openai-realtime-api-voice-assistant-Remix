@@ -23,6 +23,13 @@ export type FiledTicket = {
   disposition?: PcpDisposition;
 };
 
+/**
+ * v204: two filing calls this close together are one response's batch, not a
+ * second answer from the caller (the records lane's 2 s, measured on
+ * 2026-09-28: sibling calls 3–1,178 ms apart, the first genuine re-ask 4.8 s).
+ */
+export const NO_REQUEST_BATCH_WINDOW_MS = 2_000;
+
 export interface PcpConversationState {
   callerName?: string;
   callerRole?: string;
@@ -156,6 +163,24 @@ export interface PcpConversationState {
    * several turns later by `create_pcp_task`, on state that has moved.
    */
   handoffRefusedAsIneligible?: boolean;
+  /**
+   * v204: THE CALLER ASKED ONLY FOR A PERSON, AND SAID NOTHING ABOUT WHAT THEY
+   * NEED. Operator, 2026-11-11: "tickets that are incomplete should not be
+   * filed." On 2026-11-10, 18 PCP tickets said only that the caller wanted a
+   * person; a staffer cannot work one except by ringing back to ask what it
+   * was about.
+   *
+   * `create_pcp_task` and `handoff_to_pcp` refuse to file when the model says
+   * `callerStatedARequest: false`. The first refusal asks the caller what they
+   * need (`requestNotStatedAskedAt`); a later one, outside the batch window,
+   * spends the ask (`requestNotStatedSpent`), files nothing, and lets the call
+   * end (`mayTerminate`). Per call, not per patient: a patient switch means a
+   * patient was named, and the model then reports a request.
+   */
+  requestNotStatedAskedAt?: number;
+  requestNotStatedSpent?: boolean;
+  /** The purpose held when the no-request ask was made; a different one recorded later answers it. */
+  requestNotStatedPurpose?: PcpCallPurposeSlug;
   /**
    * THIS CALL ALREADY HAS ITS TICKET, AND THIS IS THE DOOR IT WENT THROUGH.
    *
@@ -571,6 +596,27 @@ export const PATIENT_FIELDS: Array<keyof PcpConversationState> = ['patientFirstN
  */
 export const PATIENT_INTAKE_ORDER: Array<keyof PcpConversationState> = ['callPurpose', 'callerName', 'callbackNumber'];
 /**
+ * THE PURPOSES A PERSON IN THE HVA HUB WORKS FROM THE TICKET ALONE, and so the
+ * ones where who the call is about is asked before the request files. v200,
+ * 2026-11-11.
+ *
+ * Operator, 2026-11-11: "Staff are working too hard chasing down the right
+ * person for the tickets and without the proper information on the tickets,
+ * it makes it that much harder." Measured over the 21 days to 2026-11-11, PCP
+ * tickets the agent filed to the HVA Hub, by what the ticket carried: no
+ * patient name, 284 of 287 sent back to PCP Support; a name, 29 of 83; a name
+ * and a date of birth, 6 of 24. The Hub cannot book a patient it cannot find.
+ *
+ * These three allow HAND_OFF, which is why `connectsToHuman` skipped the
+ * patient block on them since v17. The exemption was for a caller headed for
+ * a PERSON, and it still holds for one (`headedForAPerson` in `next()`); a
+ * caller whose request is going to be filed now gets the patient's name and
+ * date of birth asked first.
+ */
+export const SCHEDULING_PURPOSES: ReadonlySet<string> = new Set([
+  'schedule_appointment', 'reschedule_appointment', 'cancel_appointment',
+]);
+/**
  * RULE ZERO 2b/2c — THE FORMAT GOES IN THE QUESTION.
  *
  *   "Everything else that we need, we create a funnel towards — in the
@@ -874,6 +920,25 @@ export class PcpDirector {
      */
     const switching = switchesPatient(state, patch);
     if (switching) forgetThePreviousPatient(state, patch);
+    /**
+     * v204: a purpose recorded after the no-request ask, and different from
+     * the one held when it was asked, is the caller saying what the call is
+     * about. The ask is answered, so the teardown floor's ordinary rules
+     * apply again (Codex P2 on #452, the intake half). A name alone does not
+     * clear it (on a patient's call that is only their own name), and neither
+     * does a FIRST purpose recorded after the ask, which can be the catch-all
+     * these calls carry (`service_inquiry` on 16 of the 18 of 2026-11-10); a
+     * request stated that way still clears it through `noteRequestStated`.
+     */
+    if (
+      state.requestNotStatedAskedAt !== undefined &&
+      state.requestNotStatedPurpose !== undefined &&
+      patch.callPurpose !== undefined &&
+      patch.callPurpose !== state.requestNotStatedPurpose
+    ) {
+      state.requestNotStatedAskedAt = undefined;
+      state.requestNotStatedSpent = undefined;
+    }
     Object.assign(state, patch);
     if (!switching) {
       refreshFiledIdentity(state);
@@ -969,6 +1034,40 @@ export class PcpDirector {
   /** Record that a handoff was asked for in code and refused as ineligible. */
   markHandoffRefusedAsIneligible(callId: string): void {
     this.get(callId).handoffRefusedAsIneligible = true;
+  }
+
+  /**
+   * v204: a filing tool was told the caller has stated no request. The first
+   * time it is the one question, "what can I help you with?"; a second call
+   * inside `NO_REQUEST_BATCH_WINDOW_MS` is the model's own batch and is the
+   * same ask (the v79 rule); after that the ask is spent and nothing is filed.
+   */
+  noteNoRequestStated(callId: string, now: number = Date.now()): 'ask' | 'spent' {
+    const state = this.get(callId);
+    if (state.requestNotStatedSpent) return 'spent';
+    const askedAt = state.requestNotStatedAskedAt;
+    if (askedAt === undefined) {
+      state.requestNotStatedAskedAt = now;
+      state.requestNotStatedPurpose = state.callPurpose;
+      return 'ask';
+    }
+    if (now - askedAt < NO_REQUEST_BATCH_WINDOW_MS) return 'ask';
+    state.requestNotStatedSpent = true;
+    return 'spent';
+  }
+
+  /**
+   * v204: a filing tool was told the caller HAS stated a request. Whatever
+   * the no-request ask did earlier on the call, the caller answered it, so
+   * the teardown floor's ordinary rules apply again (a filing that fails, or
+   * a gate that asks a question the caller never answers, must still leave
+   * the floor its chance), and the call may not end on a spent ask before
+   * the request is on record. Codex P2 on #452.
+   */
+  noteRequestStated(callId: string): void {
+    const state = this.get(callId);
+    state.requestNotStatedAskedAt = undefined;
+    state.requestNotStatedSpent = undefined;
   }
 
   /**
@@ -1164,6 +1263,26 @@ export class PcpDirector {
     // change is in policy.ts and is stated there.
     const connectsToHuman = Boolean(purpose?.allowedDispositions.includes('HAND_OFF'));
     /**
+     * A SCHEDULING REQUEST THAT IS GOING TO BE FILED ASKS WHO IT IS ABOUT.
+     * v200. See `SCHEDULING_PURPOSES` for the measurement.
+     *
+     * `connectsToHuman` kept the patient block off these purposes so a caller
+     * headed for a person is never held on a date of birth. That still holds,
+     * read the same way the transfer grant below reads it: the caller asked for
+     * a person, has not declined the queue, and a transfer could be granted
+     * (not after a failed one, not at lunch). Every other scheduling call ends
+     * in a ticket the HVA Hub works from, and a ticket with no patient on it
+     * comes back. A patient calling about themselves is never asked: their own
+     * name is the caller's name.
+     */
+    const handoffFailedEarly = Boolean(state.handoffStatus && state.handoffStatus !== 'CONNECTED');
+    const lunchClosureNow = this.options.lunchClosure?.() ?? isLunchClosure();
+    const headedForAPerson = Boolean(state.callerRequestedHuman)
+      && !state.callerDeclinedTheQueue && !handoffFailedEarly && !lunchClosureNow;
+    const schedulingNeedsThePatient = !isPatient
+      && Boolean(state.callPurpose && SCHEDULING_PURPOSES.has(state.callPurpose))
+      && !headedForAPerson;
+    /**
      * AND NOT TO A PATIENT, EITHER.
      *
      * PATIENT_FIELDS is `statedRelationship, patientFirstName, patientLastName,
@@ -1177,7 +1296,13 @@ export class PcpDirector {
      * walked straight into it. Caught on the third review pass by running the
      * director rather than reading it, 2026-08-17.
      */
-    if (!isPatient && purpose?.patientContextRequired && !connectsToHuman) required.push(...PATIENT_FIELDS);
+    if (!isPatient && purpose?.patientContextRequired && (!connectsToHuman || schedulingNeedsThePatient)) {
+      required.push(...PATIENT_FIELDS);
+    }
+    // The date of birth is what lets the Hub find the chart: 6 of 24 named
+    // tickets carrying one were sent back, against 29 of 83 without. Asked in
+    // parts (PROMPTS.patientDob), after the name, within the ask budget.
+    if (schedulingNeedsThePatient) required.push('patientDob');
     /**
      * A RECORDS REQUEST IS NOT COMPLETE UNTIL WE KNOW WHERE IT GOES.
      *
@@ -1305,7 +1430,7 @@ export class PcpDirector {
     //
     // Administrative PCP traffic only. The clinical/urgent path does not pass
     // through this director and is deliberately never gated on lunch.
-    const lunchClosure = this.options.lunchClosure?.() ?? isLunchClosure();
+    const lunchClosure = lunchClosureNow;
     if (lunchClosure && disposition === 'HAND_OFF') disposition = 'CREATE_TASK';
 
     const phiDisclosureAllowed = Boolean(purpose && (!purpose.containsPhi || state.verificationStatus !== 'failed'));
@@ -1416,7 +1541,9 @@ export class PcpDirector {
        * fix above: that one stops the mismatch arising, this one stops any
        * future mismatch trapping a live caller.
        */
-      mayTerminate: Boolean(state.dispositionRecorded),
+      // v204: a caller who was asked what they need and still stated no
+      // request may be let go with nothing filed, by ruling.
+      mayTerminate: Boolean(state.dispositionRecorded) || Boolean(state.requestNotStatedSpent),
     };
   }
 }

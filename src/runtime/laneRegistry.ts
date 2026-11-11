@@ -39,6 +39,7 @@
  * ─────────────────────────────────────────────────────────────────────────────
  */
 
+import type { TeardownContext } from './pcpFloor';
 import { bindAgent, type BorrowableAgent, type BoundAgent } from "./agentBinding";
 import { buildKnowledgePack } from "./knowledgePack";
 import {
@@ -111,7 +112,7 @@ export interface LaneConfig {
   greeting?: string;
   /** The lane's teardown filer (PCP and after-hours floors), from the same module as
    * `factory`. See src/runtime/pcpFloor.ts. */
-  teardownSweep?: (callId: string, ctx?: { outcome?: string; transcript?: string }) => Promise<void>;
+  teardownSweep?: (callId: string, ctx?: TeardownContext) => Promise<void>;
 }
 
 /**

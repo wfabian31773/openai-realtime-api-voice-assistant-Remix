@@ -1,0 +1,123 @@
+/**
+ * WHAT A PCP RECORDS REQUEST ASKS BEFORE IT FILES — and where the answers go.
+ *
+ * Operator, 2026-11-10, on PCP-82755 and the tickets like it: "what good does
+ * it do us if we create a ticket that leads us to more work than had we taken
+ * the call ourselves." And on 2026-09-16, opening every other PCP gate: "The
+ * only thing that we are gating is if it's medical records."
+ *
+ * MEASURED, PCP records tickets 2026-10-27..11-10 (171): 23 named no patient,
+ * and on 18 of those the agent never asked whose records they were; 15 said
+ * "Delivery method NOT captured", and on all 15 the caller had answered "by
+ * fax, by email, or by mail?". Two causes, both in code:
+ *
+ *   1. The records tool held only for the delivery method. Its patient check
+ *      went through `ticketReadiness` with the module default, and
+ *      `FILING_MAY_BE_HELD` has been false since 2026-09-16, so whose records
+ *      they were was never asked on the one path that ruling kept gated.
+ *   2. The tool asked for the method and had nowhere to put the answer: its
+ *      only argument was a narrative, and the field lived on
+ *      `record_pcp_intake`, which its refusal never named. On
+ *      CAcb222de3b32c7449aa01c3188adc5b6d the caller said "Fax." and the model
+ *      called the records tool three more times with "fax" in the narrative;
+ *      the strike budget ran out and the ticket said both "fax" and "NOT
+ *      captured".
+ *
+ * So the gate asks, in the order the operator's interview runs (who is
+ * calling and from where, who it is about, how to send, where to send), ONE
+ * field at a time, and EACH FIELD ONCE. The records tool takes every field it
+ * asks for, so the answer lands in the tool that asked. A field asked and not
+ * answered is not asked again; when nothing is left to ask, the request files
+ * with what is missing written on it, as every PCP filing does.
+ *
+ * A second call inside `RECORDS_ASK_BATCH_MS` of an ask is the model's own
+ * batch, not the caller's answer: it gets the same question and spends
+ * nothing (the v79 rule).
+ */
+import type { PcpConversationState } from './director';
+import { deliveryAskFor } from './recordsDelivery';
+import { REQUIRED_PROMPTS, ticketReadiness, MAX_BLOCKS, type RequiredField } from './ticketRequirements';
+
+export const RECORDS_ASK_BATCH_MS = 2_000;
+
+export type RecordsAskField = RequiredField | 'recordsDeliveryMethod' | 'recordsDeliveryDestination';
+
+/** The records tool's own arguments that answer each question. */
+export const ANSWERED_BY: Record<RecordsAskField, string> = {
+  callerName: 'callerName (and callerOrganization)',
+  patientName: 'patientFirstName and patientLastName (or callerIsThePatient: true when the caller is the patient)',
+  callbackNumber: 'callbackNumber',
+  recordsDeliveryMethod: "recordsDeliveryMethod ('fax', 'email', 'mail', or 'unspecified' if they do not know)",
+  recordsDeliveryDestination: 'recordsDeliveryDestination (the fax number, email address or mailing address)',
+};
+
+export interface RecordsAsk {
+  field: RecordsAskField;
+  /** What `asked` is keyed on: the field, or the destination for one method. */
+  key: string;
+  prompt: string;
+  /** False when this is a sibling inside the batch window: same question, nothing spent. */
+  spends: boolean;
+}
+
+/** Every field still missing, in the order they are asked. */
+export function recordsFieldsMissing(state: PcpConversationState): Array<{ field: RecordsAskField; prompt: string }> {
+  const missing: Array<{ field: RecordsAskField; prompt: string }> = [];
+  for (const field of ticketReadiness(state, 0, true).blocking) {
+    missing.push({ field, prompt: REQUIRED_PROMPTS[field] ?? `Please provide ${field}.` });
+  }
+  // The delivery ask is sequential (method, then the destination it needs),
+  // so only its next field is known at a time.
+  const delivery = deliveryAskFor(state);
+  if (delivery) missing.push({ field: delivery.field, prompt: delivery.prompt });
+  return missing;
+}
+
+/**
+ * What an ask is remembered by. The destination is asked per method (Box
+ * Codex review of 7c8df0ca, P2): a fax number asked and then a switch to email
+ * clears the destination, and the email address is a different question that
+ * has not been asked. A caller switching back to a method already asked is not
+ * asked again.
+ */
+export function recordsAskKey(field: RecordsAskField, state: PcpConversationState): string {
+  return field === 'recordsDeliveryDestination' ? `${field}:${state.recordsDeliveryMethod ?? ''}` : field;
+}
+
+/**
+ * The next question, or null when the request may file.
+ *
+ * `asked` maps an ask's key (`recordsAskKey`) to when it was first asked on
+ * this call. The caller stamps `ask.key` when `spends` is true.
+ */
+export function recordsAskFor(
+  state: PcpConversationState,
+  asked: ReadonlyMap<string, number>,
+  now: number,
+): RecordsAsk | null {
+  for (const { field, prompt } of recordsFieldsMissing(state)) {
+    const key = recordsAskKey(field, state);
+    const at = asked.get(key);
+    if (at === undefined) return { field, key, prompt, spends: true };
+    if (now - at < RECORDS_ASK_BATCH_MS) return { field, key, prompt, spends: false };
+    // Asked and not answered: not asked again.
+  }
+  return null;
+}
+
+/** The identity fields still missing once the asking is over, for the ticket's gap note. */
+export function recordsIdentityGaps(state: PcpConversationState): RequiredField[] {
+  return ticketReadiness(state, MAX_BLOCKS, true).annotate;
+}
+
+/** What the model is told with each ask. Never spoken. */
+export function recordsAskGuidance(ask: RecordsAsk): string {
+  return (
+    'NOT AN ERROR — say nothing about a system or a problem. A records request cannot be worked until we know ' +
+    `who is asking, whose records they are and how to send them. Ask: "${ask.prompt}" and stop talking. When ` +
+    'the caller answers, call handle_patient_medical_records_request again with the same narrative and ' +
+    `${ANSWERED_BY[ask.field]} set to what they said, in their own words. Do not put the answer only in the ` +
+    'narrative: the ticket reads the field. Each question is asked once; if they do not answer, call the tool ' +
+    'again without it and the request files with the gap written on it.'
+  );
+}

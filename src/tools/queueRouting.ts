@@ -1,5 +1,6 @@
-import { correctSurgeryIntake, hasClinicalComplaint } from './requestClassification';
+import { correctSurgeryIntake, hasClinicalComplaint, isSurgeryRequest } from './requestClassification';
 import { SCHEDULING } from '../../shared/scheduling-cues';
+import { SURGERY_SCHEDULING_CUES } from './surgeryTaxonomy';
 
 export { SCHEDULING, type SchedulingCue } from '../../shared/scheduling-cues';
 
@@ -98,8 +99,10 @@ export const SPECIALIST_CUES = [
  * Optical, which is glasses and contacts as OBJECTS — the frames, the lenses,
  * the prescription for them, collecting them.
  *
- * Deliberately narrow. "Contact lens prescription renewal" is a Tech Support
- * reason (157) and stays there; this is about the eyewear itself.
+ * Deliberately narrow; this is about the eyewear itself. "Contact lens
+ * prescription renewal" is a Tech Support reason (157) and stays there on every
+ * line but the medication line, where v202's contact-lens rule below sends it to
+ * Optical (staff moved all 11 such tech-line tickets there in 14 days).
  */
 const OPTICAL_CUES = [
   'glasses', 'eyeglass', 'eye glasses', 'spectacles', 'frames', 'frame',
@@ -141,6 +144,223 @@ const TECH_CUES_STRONG = [
 ];
 const TECH_CUES_AMBIGUOUS = ['prescription', 'receta', 'rx'];
 const TECH_CUES = [...TECH_CUES_STRONG, ...TECH_CUES_AMBIGUOUS];
+
+/**
+ * v202 — REQUESTS FILE WHERE STAFF WORK THEM. Operator, 2026-11-11: "We're
+ * doing more transferring of tickets than anything else … Staff are working
+ * too hard chasing down the right person for the tickets." Measured over the
+ * fourteen Pacific days 2026-10-28..11-10, agent tickets on the queue lanes,
+ * the router below run over each ticket's own description and checked
+ * against where staff moved it. Four gaps, each fixed where its decision is
+ * made:
+ *
+ *   1. THE OPERATION WORD ON THE SURGERY LINE (`namesAnOperation`).
+ *      `SURGERY_CUES` lists phrases ("my surgery", "the surgery") and not the
+ *      word, so "Patient's surgery is Monday … the drops have not arrived" and
+ *      "Surgery was cancelled, when will it be rescheduled" matched nothing:
+ *      the first went to Technicians as a medication request and the second
+ *      to the HVA Hub as a reschedule, against this file's own rule that a
+ *      request naming its home subject stays home and the operator's
+ *      "surgery is an exception to that hva hub rule". 42 such tickets in 14
+ *      days; staff moved 24 back to Surgery Coordination.
+ *   2. A ROUTINE VISIT ASKED ABOUT ON THE SURGERY LINE (`asksAboutARoutineVisit`).
+ *      "Will my eyes be dilated at tomorrow's appointment", "what is the visit
+ *      tomorrow for", "new patient wants an appointment": no operation, no
+ *      scheduling cue, so the surgery coordinators got them and moved 160 of
+ *      839 surgery-line tickets to the Hub in the window.
+ *   3. CONTACT LENSES ON THE MEDICATION LINE (`CONTACT_LENS`). Staff moved
+ *      every one of the 11 tech-line contact-lens tickets in the window to
+ *      Optical, renewals of the lens prescription included.
+ *   4. AN EYE EXAM THAT ALREADY HAPPENED (`examAlreadyHappened`). "A copy of
+ *      my glasses prescription from my eye exam" fired the `eye exam`
+ *      scheduling cue and went to the Hub; it is an optical request.
+ *
+ * Each is gated on the line that took the call, so PCP (department 18), the
+ * records line and the HVA Hub read this file exactly as before.
+ */
+const SURGERY_DENIAL =
+  /\b(?:not|no)\s+(?:(?:about|for|a|an|the|my|any|need|want|planning|to|have|having|undergo|cataract|eye|specific|scheduled)\s+)*(?:surgery|surgeries|surgical|operations?|procedures?)\b/g;
+const OPERATION_WORD =
+  /\b(?:surgery|surgeries|surgical|operations?|lasik|prk|pre[-\s]?op(?:erative)?|post[-\s]?op(?:erative)?|procedures?|cirugias?|operacion(?:es)?)\b/;
+
+/**
+ * Does the request name an operation — the WORD, not a phrase, and not in a
+ * denial ("no surgery date", "not about surgery")? Read on the surgery line
+ * to keep a request HOME, and on the optical line only alongside its own
+ * guards; never to send a tech-line request anywhere.
+ */
+export function namesAnOperation(text: string): boolean {
+  return OPERATION_WORD.test(fold(text).replace(SURGERY_DENIAL, ' '));
+}
+
+/** A visit, an appointment or an exam, by name. */
+const VISIT_WORD =
+  /\b(?:appointments?|appts?|visits?|check[- ]?ups?|exams?|examinations?|new patient|first[- ]time patient|citas?)\b/;
+/**
+ * TODAY'S visit stays where it lands. On the surgery line staff left 7 of the
+ * 10 same-day visit questions in Surgery Coordination (running late, cancel
+ * this afternoon's, what is today's for), so the rule leaves them alone; the
+ * after-hours line has its own same-day ruling.
+ */
+const SAME_DAY_WORDS =
+  /\b(?:today|tonight|this morning|this afternoon|hoy|esta manana)\b|\b(?:running late|run late|be late|late for|arrived late|on (?:my|our|his|her|their) way|outside the (?:office|building|clinic))\b/;
+const NO_SURGEON = /\b(?:no|not|without)\s+(?:(?:a|any|specific|particular|preferred)\s+)*surgeons?\b/g;
+const BIOPSY_OR_OPERATIVE = /\b(?:biops(?:y|ies)|preoperative|postoperative|pre-operative|post-operative)\b/;
+
+/**
+ * A question about a routine visit, taken on the surgery line: names a visit,
+ * names no operation (the denial-aware word above AND the surgery taxonomy's
+ * own procedure boxes, so "cataract" and a named procedure still stay), no
+ * surgeon the caller named, no clinical complaint, and not today's visit.
+ */
+export function asksAboutARoutineVisit(text: string): boolean {
+  const t = fold(text).replace(NO_SURGEON, ' ');
+  if (!VISIT_WORD.test(t)) return false;
+  if (namesAProcedure(text) || BIOPSY_OR_OPERATIVE.test(t)) return false;
+  if (/\bsurgeons?\b/.test(t) || hasClinicalComplaint(text)) return false;
+  // v205: "a copy of the visit notes", "the report from her last eye visit".
+  // The visit is where a document came from, not a visit being asked about
+  // (Codex P2 on #450, round 3, now taken).
+  if (everyVisitIsADocumentsSource(t)) return false;
+  return !SAME_DAY_WORDS.test(t);
+}
+
+/**
+ * v205 — EVERY VISIT THE REQUEST NAMES IS WHERE A DOCUMENT CAME FROM.
+ *
+ * Operator, 2026-11-11: "a request for visit notes moves from Surgery to the
+ * HVA Hub." The visit word fired the routine-visit rule above while nothing
+ * asked for a visit. The records-line hold already reads this binding (v152,
+ * `BOUND_AFTER` / `BOUND_BEFORE`): a visit word counts as the document's only
+ * when a document word sits right after it ("visit NOTES", "visit SUMMARY") or
+ * names it as its source ("the REPORT FROM her last eye visit", "a COPY OF the
+ * visit notes"), and an ask for a visit in any other words ("and needs to book
+ * an appointment") still sends the request to the Hub. A kind of visit ("eye",
+ * "follow-up", "office") between the two still binds.
+ */
+const VISIT_WORD_G = new RegExp(VISIT_WORD.source, 'g');
+const VISIT_KIND = /(?:\b(?:new|routine|follow[ -]?up|return|office|clinic|eye|annual|yearly|dilated|last|recent)\s+)+$/;
+
+// Called only once `VISIT_WORD` has matched, so the loop runs at least once.
+function everyVisitIsADocumentsSource(folded: string): boolean {
+  for (const visit of folded.matchAll(VISIT_WORD_G)) {
+    const before = folded.slice(0, visit.index!).replace(VISIT_KIND, '');
+    const after = folded.slice(visit.index! + visit[0].length).replace(THEN_APPOINTMENT_NOUN, '');
+    if (!BOUND_AFTER.test(after) && !BOUND_BEFORE.test(before)) return false;
+  }
+  return !hasSeparateAppointmentAsk(folded);
+}
+
+/**
+ * v205 — WHAT IS BEING SCHEDULED. The surgery taxonomy reads a few scheduling
+ * phrases that name no operation ("needs scheduling", "has not been
+ * scheduled") as surgery scheduling, which is right on its own: on the surgery
+ * line those words mean the operation. Operator, 2026-11-11: "'Needs
+ * scheduling for an eye exam' stays in Surgery." When the request names an
+ * exam to book (an exam name not in the past, "after her eye exam" is
+ * history), that exam is what is scheduled, so those phrases stop counting as
+ * an operation; a named operation or procedure still does. The phrases are
+ * GENERATED from the taxonomy's own list, never a second one, and on first
+ * use: `surgeryTaxonomy` reaches this module through `cueMatch`, so the list
+ * is not defined yet while this module loads.
+ */
+let operationFree: readonly string[] | undefined;
+function operationFreeScheduling(): readonly string[] {
+  return (operationFree ??= SURGERY_SCHEDULING_CUES
+    .map(fold)
+    .filter((c) => !namesAnOperation(c) && !/\bsx\b/.test(c)));
+}
+
+function namesAnExamToBook(folded: string): boolean {
+  for (const name of EXAM_NAME_CUES.map(fold)) {
+    let at = folded.indexOf(name);
+    while (at !== -1) {
+      if (!EXAM_IN_THE_PAST.test(folded.slice(0, at))) return true;
+      at = folded.indexOf(name, at + name.length);
+    }
+  }
+  return false;
+}
+
+/**
+ * Does the request name an operation or a procedure? `namesAnOperation`, or
+ * the surgery taxonomy's own boxes (`isSurgeryRequest`), with the
+ * operation-free scheduling phrases left out when an exam is what is being
+ * booked. Read on the surgery line and by the after-hours scheduling rule.
+ */
+export function namesAProcedure(text: string): boolean {
+  if (namesAnOperation(text)) return true;
+  const t = fold(text);
+  if (!namesAnExamToBook(t)) return isSurgeryRequest(text);
+  let without = t;
+  for (const phrase of operationFreeScheduling()) without = without.split(phrase).join(' ');
+  return isSurgeryRequest(without);
+}
+
+/** Contact lenses as a product: Optical's, on every measured tech-line ticket. */
+const CONTACT_LENS = /\b(?:contacts|contact[- ]lens(?:es)?|lentes de contacto)\b/;
+/**
+ * v205 — A SYMPTOM THE CONTACT-LENS RULE DID NOT KNOW. Operator, 2026-11-11:
+ * "A contact lens allergic reaction goes to Optical even though it's a
+ * symptom." `hasClinicalComplaint` is shared with the ticketing app and reads
+ * pain, redness and blur; a lens wearer's complaint is usually an allergy, an
+ * itch, an irritation or an infection. Those keep the request clinical, on the
+ * medication line, before the lens sends it to Optical. A scratched LENS is
+ * the lens, so `scratch` is read only as a feeling or an abrasion, and a lens
+ * that keeps tearing is a damaged lens: `tearing` counts only with an eye as
+ * its subject or as "tearing up" (Codex P2 on #453).
+ */
+const LENS_SYMPTOM =
+  /\b(?:allerg\w*|reactions?|itch\w*|irritat\w*|infect\w*|inflam\w*|sore(?:ness)?|scratchy|(?:corneal )?abrasion|sting(?:s|ing)?|watery|watering|eyes?\s+(?:(?:is|are|keeps?|ha(?:s|ve) been|been|started)\s+)?tearing|tearing\s+(?:up|eyes?)|gritty|foreign (?:body|object)|something (?:stuck )?in (?:my|her|his|their|the) eyes?|alergi\w*|picaz\w*|picor|comezon|irritad\w*|irritacion|infeccion|ardor|lagrime\w*)\b/;
+/**
+ * v205 — A DRUG NAMED BESIDE THE LENSES. "Lost his contacts and needs a refill
+ * of his eye drops" asks for the drops. `refill` and `pharmacy` are not read
+ * here: lens wearers refill lenses at pharmacies, and all 11 tech-line lens
+ * tickets in the 14 days to 2026-11-10 that said so were moved to Optical by
+ * staff. Drops made for the lens (rewetting, lens, comfort or lubricating
+ * drops, "eye drops" among them) are the lens's (Codex P2 on #453).
+ */
+const LENS_DRUG =
+  /\b(?:(?<!(?:rewetting|lens|comfort|lubricating|contact) )(?:eye ?drops?|(?<!eye )drops)|medications?|medicines?|ointments?|antibiotics?|steroids?|gotas|medicamentos?|medicinas?)\b/;
+/** Eyewear by name, for the exam-already-happened rule and the optical-line guard. */
+const EYEWEAR = /\b(?:glasses|eyeglass(?:es)?|spectacles|frames?|lens|lenses|contacts|lentes|gafas)\b/;
+
+/**
+ * Every exam the request names already happened ("had an eye exam", "after
+ * their eye exam", "from her last eye exam"), the request is about eyewear,
+ * and nothing asks for a new visit. Then the exam name is history, not a
+ * booking, and the scheduling step stands aside.
+ */
+const EXAM_IN_THE_PAST =
+  /\b(?:had|after|from|since|following|during|at)\s+(?:(?:an?|the|my|her|his|their|your|last|recent|most|previous|prior|latest|recently)\s+){0,3}$/;
+const ASKS_FOR_A_VISIT =
+  /\b(?:wants?|needs?|would like|requesting|requests?|book|schedul\w*|set up|make|get)\s+(?:(?:an?|another|new|the|my|her|his|their|eye|a new|routine|annual)\s+){0,3}(?:eye exam|exam|appointment|appt|visit|check[- ]?up)\b/;
+
+export function examAlreadyHappened(text: string): boolean {
+  const t = fold(text);
+  if (!EYEWEAR.test(t) || ASKS_FOR_A_VISIT.test(t)) return false;
+  const names = EXAM_NAME_CUES.map(fold);
+  const fired = SCHEDULING.flatMap((s) => s.cues).map(fold).filter((c) => t.includes(c));
+  if (!fired.length || !fired.every((c) => names.includes(c))) return false;
+  for (const name of names) {
+    let at = t.indexOf(name);
+    while (at !== -1) {
+      if (!EXAM_IN_THE_PAST.test(t.slice(0, at))) return false;
+      at = t.indexOf(name, at + name.length);
+    }
+  }
+  return true;
+}
+
+/** The (department 1) pair for a contact-lens request, the same split `classifyNonSurgicalRequest` makes. */
+function contactLensPair(t: string): { requestTypeId: number; requestReasonId: number } {
+  // Status of an order already placed, then a new order, then a pickup: "reorder
+  // the same ones and pick them up at the office" is an order.
+  if (/\b(?:status|ready|arriv\w*|estado|listos)\b/.test(t)) return { requestTypeId: 5, requestReasonId: 21 };
+  if (/\b(?:order\w*|reorder\w*|refill\w*|replacement|buy|purchase|box|ordenar)\b/.test(t)) return { requestTypeId: 3, requestReasonId: 11 };
+  if (/\b(?:pickup|pick up|recoger)\b/.test(t)) return { requestTypeId: 5, requestReasonId: 21 };
+  return { requestTypeId: 66, requestReasonId: 536 };
+}
 
 /**
  * Lowercase and strip diacritics, so "Cancelación" and "cancelacion" are the
@@ -441,7 +661,14 @@ export function detectCrossQueue(text: string, homeDepartmentId: number): QueueR
       note: 'Request taken on another line and routed by its subject.' };
   }
 
-  const mentionsSurgery = hit(t, SURGERY_CUES);
+  // v202 (1): on the surgery line the operation WORD keeps a request home —
+  // "Patient's surgery is Monday", "Surgery was cancelled" — where the phrase
+  // list saw nothing. Only on that line: elsewhere this flag SENDS requests to
+  // Surgery (rule 3), and a past surgery named beside a symptom on the tech
+  // line is a clinical question, not coordinator work.
+  const mentionsSurgery = homeDepartmentId === SURGERY
+    ? namesAProcedure(text)
+    : hit(t, SURGERY_CUES);
   const mentionsOptical = hit(t, OPTICAL_CUES);
   const mentionsMedication = hit(t, TECH_CUES);
   // Only an unambiguous drug signal keeps a call on the medication line against
@@ -471,7 +698,9 @@ export function detectCrossQueue(text: string, homeDepartmentId: number): QueueR
   // between the queue that took the call and the team that works it, so the
   // reason has to be right or the scheduling team gets an undifferentiated pile
   // instead of a sorted queue.
-  if (!mentionsSurgery) {
+  // v202 (4): an exam that already happened is history, not a booking —
+  // "a copy of my glasses prescription from my eye exam" is Optical's.
+  if (!mentionsSurgery && !examAlreadyHappened(text)) {
     for (const s of SCHEDULING) {
       if (hit(t, s.cues)) {
         if (homeDepartmentId === HVA_HUB) return null;
@@ -491,6 +720,22 @@ export function detectCrossQueue(text: string, homeDepartmentId: number): QueueR
         };
       }
     }
+  }
+
+  // v202 (3): contact lenses on the medication line are Optical's — every one
+  // of the 11 in the 14 days to 2026-11-10 was moved there by staff, the
+  // lens-prescription renewals included. A symptom stays clinical.
+  if (
+    homeDepartmentId === TECH && CONTACT_LENS.test(t) &&
+    !hasClinicalComplaint(text) && !LENS_SYMPTOM.test(t) && !LENS_DRUG.test(t)
+  ) {
+    return {
+      departmentId: OPTICAL,
+      departmentName: 'Optical Support',
+      ...contactLensPair(t),
+      requestReason: 'Contact lens request',
+      note: 'Optical request — taken on another line and routed here.',
+    };
   }
 
   // 2. Optical, when it is about eyewear and NOT about this queue's own subject.
@@ -518,10 +763,16 @@ export function detectCrossQueue(text: string, homeDepartmentId: number): QueueR
     };
   }
 
-  // 3. Surgery, when it is unmistakably about an operation.
+  // 3. Surgery, when it is unmistakably about an operation. v202: on the
+  // optical line the operation WORD counts too, when nothing in the request
+  // is eyewear or a symptom — "urgent message for the surgical coordinator
+  // about eye surgery" (2 of 2 in the window moved to Surgery by staff).
+  const opticalLineOperation =
+    homeDepartmentId === OPTICAL && namesAnOperation(text) && !EYEWEAR.test(t) &&
+    !hit(t, TECH_CUES_STRONG) && !hasClinicalComplaint(text);
   if (
     homeDepartmentId !== SURGERY &&
-    mentionsSurgery &&
+    (mentionsSurgery || opticalLineOperation) &&
     !holdsOnRecordsLine &&
     !(homeDepartmentId === TECH && mentionsMedicationClearly)
   ) {
@@ -550,6 +801,25 @@ export function detectCrossQueue(text: string, homeDepartmentId: number): QueueR
       requestReasonId: 542,
       requestReason: 'Other - See Description',
       note: 'Medication request — taken on another line and routed here.',
+    };
+  }
+
+  // 5. v202 (2): a question about a routine visit, on the surgery line, is the
+  // HVA Hub's — the operator's "anything that's schedule related … should go
+  // to the HVA hub", applied to the visits the scheduling cues do not name.
+  if (homeDepartmentId === SURGERY && asksAboutARoutineVisit(text)) {
+    const cued = SCHEDULING.find((s) => hit(t, s.cues));
+    const newPatient = /\b(?:new patient|first[- ]time patient)\b/.test(t);
+    const pair = cued
+      ? { requestTypeId: 32, requestReasonId: cued.reasonId, requestReason: cued.reason }
+      : newPatient
+        ? { requestTypeId: 32, requestReasonId: 146, requestReason: 'New Appointment Request' }
+        : { requestTypeId: 69, requestReasonId: 539, requestReason: 'Other - See Description' };
+    return {
+      departmentId: HVA_HUB,
+      departmentName: 'HVA Hub',
+      ...pair,
+      note: 'Scheduling request — taken on another line and routed here.',
     };
   }
 

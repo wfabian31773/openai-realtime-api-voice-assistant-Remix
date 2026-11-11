@@ -2317,6 +2317,7 @@ The ticket will include schedule context (last appointment info) automatically.`
         text: [params.request_summary, params.appointment_time].filter(Boolean).join(' '),
         confirmedUpcoming: recordConfirmed ? enrichedContext?.upcomingAppointments : undefined,
         appointmentIntent: CATEGORY_TO_REQUEST_TYPE[params.request_category] === 'Appointment Request',
+        urgent: Boolean(ahHint.classification.urgent),
       });
       if (route.kind !== 'default') {
         console.info(`[AFTER-HOURS ROUTE] ${route.kind} -> department ${route.departmentId} on ${metadata.callSid}`);
@@ -2406,7 +2407,7 @@ The ticket will include schedule context (last appointment info) automatically.`
                 suggestedRequestReasonId: opticalHint.requestReasonId,
                 suggestedRequestReason: opticalHint.requestReason,
               }
-          : ahHint.isCatchAll || route.kind === 'medical_records'
+          : ahHint.isCatchAll || route.kind === 'medical_records' || route.kind === 'scheduling'
             ? {}
             : {
                 suggestedRequestTypeId: ahHint.classification.requestTypeId,

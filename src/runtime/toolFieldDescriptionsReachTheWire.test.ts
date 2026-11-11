@@ -82,6 +82,9 @@ const LANES = {
 } as const;
 type Slug = keyof typeof LANES;
 
+/** The PCP tools whose wire schema requires `callerStatedARequest` (v204). */
+const WIRE_REQUIRED_PCP = new Set(['create_pcp_task', 'handoff_to_pcp']);
+
 const built = new Map<Slug, { lane: Lane; declared: Map<string, { zod: unknown; sdkSchema: unknown }> }>();
 
 async function bind(slug: Slug) {
@@ -180,7 +183,14 @@ describe.each(Object.keys(LANES) as Slug[])('%s, bound for the runtime', (slug) 
     const { declared } = built.get(slug)!;
     for (const [name, { sdkSchema }] of declared) {
       const wire = wireTool(slug, name)!.parameters;
-      expect(withoutDescriptions(wire), `${slug}/${name}`).toEqual(withoutDescriptions(sdkSchema));
+      // v204 adds ONE thing on purpose: `callerStatedARequest` is required on
+      // the wire for the two PCP filing tools while the zod keeps it optional
+      // (`requireOnTheWire`). Everything else must still be the SDK's own.
+      const expected = withoutDescriptions(sdkSchema) as Schema & { required?: string[] };
+      if (slug === 'pcp' && WIRE_REQUIRED_PCP.has(name)) {
+        expected.required = [...(expected.required ?? []), 'callerStatedARequest'];
+      }
+      expect(withoutDescriptions(wire), `${slug}/${name}`).toEqual(expected);
     }
   });
 });
@@ -214,8 +224,9 @@ describe('the rulings the finding named are among them', () => {
   it("pcp's defaulted fields stay required, as the SDK made them", () => {
     // zod-to-json-schema would take these OUT of `required` (they carry
     // `.default()`), which is why the fix copies words instead of converting.
-    expect((wireTool('pcp', 'create_pcp_task')!.parameters as Schema).required).toEqual(['narrative', 'urgency', 'disposition']);
-    expect((wireTool('pcp', 'handoff_to_pcp')!.parameters as Schema).required).toEqual(['narrative', 'urgency']);
+    // v204 adds callerStatedARequest to both, after the SDK's own list.
+    expect((wireTool('pcp', 'create_pcp_task')!.parameters as Schema).required).toEqual(['narrative', 'urgency', 'disposition', 'callerStatedARequest']);
+    expect((wireTool('pcp', 'handoff_to_pcp')!.parameters as Schema).required).toEqual(['narrative', 'urgency', 'callerStatedARequest']);
   });
 });
 
@@ -274,7 +285,16 @@ describe('what the descriptions cost on the wire', () => {
     // records never ring the on-call; who asked has to reach Medical Records).
     // Measured 13,569 after trimming the new descriptions to one line each.
     ['no-ivr', 13_650],
-    ['pcp', 7_000],
+    // v197 RAISED pcp once, 7,000 -> 7,500: handle_patient_medical_records_request
+    // gained the eight fields it asks for (operator, 2026-11-10, on PCP-82755:
+    // the answers had nowhere to land). Measured 7,422 after cutting every new
+    // description but three to nothing; the field skeletons are most of it.
+    // v204 RAISED pcp once, 7,500 -> 7,800: create_pcp_task and handoff_to_pcp
+    // gained callerStatedARequest (operator, 2026-11-11: "tickets that are
+    // incomplete should not be filed"), required on the wire so the model
+    // always says whether the caller stated a request. Measured 7,732 after
+    // cutting its description to one short sentence.
+    ['pcp', 7_800],
   ] as const)('%s stays under %i characters', (slug, ceiling) => {
     expect(JSON.stringify(built.get(slug)!.lane.agent.tools).length).toBeLessThan(ceiling);
   });

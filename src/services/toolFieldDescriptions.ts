@@ -127,3 +127,22 @@ export function withFieldDescriptions(parameters: unknown, zod: unknown): unknow
 export function keepFieldDescriptions<T extends { parameters?: unknown }>(built: T, zod: unknown): T {
   return { ...built, parameters: withFieldDescriptions(built.parameters, zod) };
 }
+
+/**
+ * `built`, its wire schema listing `names` as required, on a copy.
+ *
+ * For a field the model must always answer while the zod keeps it optional,
+ * so an older caller that omits it keeps the old behaviour instead of being
+ * refused (v204's `callerStatedARequest`: the model is asked to say whether
+ * the caller stated a request; a filing without the answer files as before).
+ * A name the schema does not declare is not added.
+ */
+export function requireOnTheWire<T extends { parameters?: unknown }>(built: T, names: readonly string[]): T {
+  if (!names.length || !isSchema(built.parameters)) return built;
+  const copy = JSON.parse(JSON.stringify(built.parameters)) as JsonSchema & { required?: string[]; properties?: Record<string, unknown> };
+  const declared = Object.keys(copy.properties ?? {});
+  const required = new Set(copy.required ?? []);
+  for (const name of names) if (declared.includes(name)) required.add(name);
+  copy.required = [...required];
+  return { ...built, parameters: copy };
+}

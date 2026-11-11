@@ -57,7 +57,12 @@ const INJECTED = new Set(['call_sid', 'caller_phone', 'dialed_number', 'queue', 
 
 const SAFE_NAME = /^[a-z][a-z0-9_]{0,40}$/i;
 
-function argNames(input: Record<string, unknown>): string[] {
+/**
+ * The names of the arguments the model supplied with a value, injected keys
+ * left out. NAMES only. Shared with `toolTimeline`'s `supplied` key (v198), so
+ * the two records cannot disagree about what counts as supplied.
+ */
+export function suppliedArgNames(input: Record<string, unknown>): string[] {
   return Object.keys(input)
     .filter((k) => !INJECTED.has(k) && SAFE_NAME.test(k))
     .filter((k) => {
@@ -105,7 +110,7 @@ export function noteTicketToolOutcome(
       tool,
       verdict,
       ...(fields ? { fields } : {}),
-      args: argNames(input),
+      args: suppliedArgNames(input),
       ticket: Boolean(r.ticket_number || r.ticketNumber),
       ...(r.recovered_after_refusal === true ? { recovered: true as const } : {}),
       at: new Date(now).toISOString(),

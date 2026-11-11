@@ -8,7 +8,7 @@ import { pcpSafetyGuardrails } from '../guardrails/pcpSafety';
 import { escalationDetailsMap } from '../services/escalationStore';
 import { markCallConcluded } from '../services/callConclusion';
 import { recordingExecute } from '../services/toolTimeline';
-import { keepFieldDescriptions } from '../services/toolFieldDescriptions';
+import { keepFieldDescriptions, requireOnTheWire } from '../services/toolFieldDescriptions';
 import { refuseInvalidInputByName } from '../services/toolInputRefusal';
 import { EMAIL_CONFIRMATION_DESCRIPTION, LAST_NAME_FIELD_DESCRIPTION } from '../tools/contactCaptureGuidance';
 import { withToolDirection } from '../services/toolDirection';
@@ -52,8 +52,10 @@ import {
   ticketDeliveryNote,
 } from '../pcp/recordsDelivery';
 import { ticketReadiness, nextRequiredAsk, annotationFor, MAX_BLOCKS } from '../pcp/ticketRequirements';
+import { recordsAskFor, recordsAskGuidance, recordsIdentityGaps } from '../pcp/recordsIntakeGate';
 import { namesAPatient, submitPcpTicket, submitPcpWithdrawal, type PcpTicketPayload } from '../pcp/pcpTicketing';
 import { toldTheCallerItWasRecorded } from '../pcp/toldItWasRecorded';
+import { answerToTheNoRequestAsk, type TeardownTurn } from '../pcp/answerToTheAsk';
 import { intakeReplyForTheModel } from '../pcp/intakeNextStep';
 import { getPacificTimeContext, formatPhoneForSpeech, formatPhoneLast4 } from '../utils/timeAware';
 // STATIC, NOT `await import(…)` — the v78 rule. A dynamic import of a module
@@ -654,6 +656,47 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
    */
   let ticketBlocksUsed = 0;
   /**
+   * WHEN EACH RECORDS QUESTION WAS FIRST ASKED ON THIS CALL (v197).
+   *
+   * A field asked and not answered is not asked again, and a second call
+   * inside the batch window is the model's own batch, not an answer
+   * (recordsIntakeGate). Per call, like every budget here.
+   */
+  const recordsAsked = new Map<string, number>();
+  /**
+   * THE RECORDS TOOL'S OWN ANSWERS, written where every other reader looks.
+   *
+   * The same three moves record_pcp_intake makes, for the same reasons: a
+   * changed delivery method clears the old destination unless the same call
+   * carries a new one (Codex round 4 on #273); a stated callback number is no
+   * longer caller ID only; and the legacy ledger hears about it before the
+   * next tool runs.
+   */
+  const applyRecordsAnswers = async (
+    id: string,
+    stated: {
+      callerName?: string;
+      callerOrganization?: string;
+      callerIsThePatient?: boolean;
+      patientFirstName?: string;
+      patientLastName?: string;
+      callbackNumber?: string;
+      recordsDeliveryMethod?: (typeof PCP_RECORDS_DELIVERY_METHODS)[number];
+      recordsDeliveryDestination?: string;
+    },
+  ): Promise<void> => {
+    const facts = Object.fromEntries(
+      Object.entries(stated).filter(([, v]) => v !== undefined),
+    ) as typeof stated;
+    if (Object.keys(facts).length === 0) return;
+    const prior = pcpDirector.get(id).recordsDeliveryMethod;
+    if (facts.recordsDeliveryMethod && facts.recordsDeliveryMethod !== prior && !facts.recordsDeliveryDestination) {
+      pcpDirector.clearRecordsDestination(id);
+    }
+    pcpDirector.update(id, facts.callbackNumber ? { ...facts, callbackFromCallerIdOnly: false } : facts);
+    await syncDirectorFactsToLedger(id, pcpDirector.get(id));
+  };
+  /**
    * THE ONE ROUND OF INTAKE A TRANSFER MAY COST, per call.
    *
    * Deliberately NOT `ticketBlocksUsed`. That budget is three, shared across
@@ -1015,9 +1058,30 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
       urgency: z.enum(['routine', 'normal', 'high', 'urgent']).default('normal'),
       disposition: z.enum(['CREATE_TASK', 'HAND_OFF']).default('CREATE_TASK'),
       failureInformation: z.string().max(2000).optional(),
+      callerStatedARequest: CALLER_STATED_A_REQUEST,
     }),
-    execute: async ({ narrative, urgency, disposition, failureInformation }) => {
+    execute: async ({ narrative, urgency, disposition, failureInformation, callerStatedARequest }) => {
       const { state, missing } = ticketState(callId);
+      // A REQUEST WITH NO REQUEST IN IT IS NOT FILED (v204, operator
+      // 2026-11-11). Before the purpose check, because the caller who asked
+      // only for a person is exactly the one with no purpose to record.
+      if (callerStatedARequest === true) pcpDirector.noteRequestStated(callId);
+      if (callerStatedARequest === false && nothingOnRecordForThisRequest(callId)) {
+        // An organisation that asked for a person, outside lunch and with no
+        // failed transfer, is owed the transfer (operator, 2026-09-04), not a
+        // question. Asking spends nothing; the transfer tool decides. Not
+        // once they declined the queue: they chose a message, and sending
+        // them back to the transfer loops (Codex P1 on #452).
+        if (
+          pcpDirector.next(callId).transferOnAsk &&
+          !state.handoffRefusedAsIneligible &&
+          !state.callerDeclinedTheQueue
+        ) {
+          console.info(`[PCP] ${callId}: create_pcp_task — only a person was asked for; sent to handoff_to_pcp, nothing filed`);
+          return refusePcp('no_request_try_handoff', { refused: 'no_request_stated', noRequestAsk: 'handoff' });
+        }
+        return refuseNoRequest(callId, 'create_pcp_task', 'no_request_stated');
+      }
       // The purpose is the one thing a ticket cannot be filed without — it is
       // what routes the request to the right desk. Everything else degrades.
       if (!state.callPurpose) return refusePcp('call_purpose_required');
@@ -1337,9 +1401,10 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
             callId, metadata, state, narrative, disposition, urgency, missing, transferAwaitingTicket,
           );
       if (toSchedulingHub.filed) return toSchedulingHub.filed as never;
-      // Only ever set when the Hub's answer was AMBIGUOUS — see the note on
-      // that branch. A proven 4xx carries nothing, because warning a staffer
-      // about a duplicate that cannot exist is noise.
+      // Set when the Hub's answer was AMBIGUOUS — see the note on that branch;
+      // a proven 4xx carries nothing, because warning a staffer about a
+      // duplicate that cannot exist is noise — and, since v200, when the
+      // request was kept here because no patient was named.
       if (toSchedulingHub.pcpNote) narrative = `${narrative}\n\n${toSchedulingHub.pcpNote}`;
 
       if (isRecordsRequest(state, recordsByNarrative)) narrative = `${narrative}${ticketDeliveryNote(state)}`;
@@ -1462,8 +1527,11 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
        * first attempt and will not read this field then.
        */
       callerAcceptedQueue: z.boolean().optional(),
+      callerStatedARequest: CALLER_STATED_A_REQUEST,
     }),
-    execute: async ({ narrative, urgency, callerAcceptedQueue }) => {
+    execute: async ({ narrative, urgency, callerAcceptedQueue, callerStatedARequest }) => {
+      // v204: a stated request clears the no-request ask (Codex P2 on #452).
+      if (callerStatedARequest === true) pcpDirector.noteRequestStated(callId);
       const { state, missing } = ticketState(callId);
       // An explicit request to be CONNECTED to a person. Deliberately narrow:
       // "caller from the front desk asking about a referral" is not a request
@@ -1513,6 +1581,16 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
         // and it has to survive onto a ticket `create_pcp_task` may file several
         // turns later — see handoffNotAttempted.ts.
         pcpDirector.markHandoffRefusedAsIneligible(callId);
+        // A REFUSED TRANSFER WITH NO REQUEST BEHIND IT FILES NOTHING (v204).
+        // 16 of the 18 person-only PCP tickets of 2026-11-10 were this
+        // fallback: the caller said they wanted a person, the transfer was
+        // refused, and the ticket said only that. Ask once what they need.
+        if (callerStatedARequest === false && nothingOnRecordForThisRequest(callId)) {
+          return refuseNoRequest(callId, 'handoff_to_pcp', 'handoff_not_eligible_no_request', {
+            handoffStatus: 'HANDOFF_UNAVAILABLE',
+            askLatched: askedForAPerson,
+          });
+        }
         const fallback = await submitPcpTicket(
           buildPayload(metadata, state, 'CREATE_TASK', narrative, urgency, undefined, 'handoff_not_eligible', missing),
         );
@@ -1533,6 +1611,7 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
           handoffStatus: 'HANDOFF_UNAVAILABLE',
           ticketNumber: fallback.ticketNumber,
           fallbackRecorded: fallback.success,
+          askLatched: askedForAPerson,
         });
       }
       /**
@@ -2165,9 +2244,35 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
 
   const patientMedicalRecordsIntake = recordedTool({
     name: 'handle_patient_medical_records_request',
-    description: 'Create an isolated PCP manual-review task only for an explicit request for copies or release of a patient medical record. Never use for peer-to-peer or medical-group requests.',
-    parameters: z.object({ narrative: z.string().min(1).max(12000) }),
-    execute: async ({ narrative }) => {
+    description: 'Create an isolated PCP manual-review task only for an explicit request for copies or release of a patient medical record. Never use for peer-to-peer or medical-group requests. Put each answer it asks for in its own field.',
+    /**
+     * EVERY FIELD THIS TOOL ASKS FOR IS ONE OF ITS OWN ARGUMENTS (v197).
+     *
+     * It used to take a narrative and nothing else, while asking "by fax, by
+     * email, or by mail?". The answer had nowhere to go: the field lived on
+     * record_pcp_intake, which this tool's refusal never named. On
+     * CAcb222de3b32c7449aa01c3188adc5b6d the caller said "Fax." and the model
+     * called this tool three more times with fax in the narrative; the ticket
+     * (PCP-82755) said both "fax" and "Delivery method NOT captured". 15 of 15
+     * such PCP records tickets in 2026-10-27..11-10 had the same shape.
+     *
+     * The descriptions are short on purpose: each refusal names the field to
+     * fill (recordsAskGuidance), and the lane's tool definitions are held to a
+     * ceiling (toolFieldDescriptionsReachTheWire.test.ts).
+     */
+    parameters: z.object({
+      narrative: z.string().min(1).max(12000),
+      callerName: z.string().min(1).optional(),
+      callerOrganization: z.string().min(1).optional(),
+      callerIsThePatient: z.boolean().optional().describe('True only when the caller is the patient asking for their own records.'),
+      patientFirstName: z.string().min(1).optional(),
+      patientLastName: z.string().min(1).optional(),
+      callbackNumber: z.string().min(7).optional(),
+      recordsDeliveryMethod: z.enum(PCP_RECORDS_DELIVERY_METHODS).optional().describe("'unspecified' if they do not know."),
+      recordsDeliveryDestination: z.string().min(3).optional().describe('The fax number, email address or mailing address they gave.'),
+    }),
+    execute: async ({ narrative, ...stated }) => {
+      await applyRecordsAnswers(callId, stated);
       /**
        * ONE CALL, ONE TICKET — the same rule as create_pcp_task, read first,
        * before this tool reclassifies anything. A request already filed through
@@ -2199,55 +2304,42 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
        * request is still not discardable for want of a job title — it is just
        * no longer filed before we know whose records they are.
        */
-      {
-        const { state: preState } = ticketState(callId);
-        const readiness = ticketReadiness(preState, ticketBlocksUsed);
-        const ask = nextRequiredAsk(readiness);
-        if (ask) {
-          ticketBlocksUsed += 1;
-          return refusePcp(`missing_required_field:${ask.field}`, {
-            say: ask.prompt,
-            guidance:
-              'NOT AN ERROR — say nothing about a system or a problem. A records request cannot be filed until we know ' +
-              `whose records these are and how to reach the requester. Ask: "${ask.prompt}" then call this tool again.`,
-          });
-        }
-        const gapNote = annotationFor(readiness.annotate);
-        if (gapNote) narrative = `${narrative}\n\n${gapNote}`;
-      }
       /**
-       * DELIVERY IS GATED HERE, NOT ONLY IN THE DIRECTOR. Codex round 4.
+       * THE RECORDS GATE (v197): who is calling, whose records, how, where —
+       * in that order, one question at a time, each asked ONCE.
        *
-       * Two holes this closes, and both were real:
+       * Operator, 2026-09-16, opening every other PCP gate: "The only thing
+       * that we are gating is if it's medical records." This tool's identity
+       * check still read `ticketReadiness` with the module default, which that
+       * same day made "never hold", so whose records they were was never
+       * asked: 23 of 171 PCP records tickets in 2026-10-27..11-10 named no
+       * patient, and on 18 of those nobody asked. Operator, 2026-11-10, on
+       * PCP-82755: "what good does it do us if we create a ticket that leads
+       * us to more work than had we taken the call ourselves."
        *
-       *   1. THE PATIENT PATH SKIPPED IT ENTIRELY. A patient or family member
-       *      is stored as `patient_caller`, so the director's records branch —
-       *      which keys on `patient_medical_records_request` — never fired.
-       *      This tool then set that purpose ITSELF and filed immediately, so
-       *      the destination-less request the change exists to prevent still
-       *      went through.
-       *   2. NOTHING FORCED THE PROFESSIONAL PATH BACK THROUGH INTAKE either.
-       *      The director only shapes what `record_pcp_intake` returns; it
-       *      cannot stop this tool being called straight out.
-       *
-       * And it shares `ticketBlocksUsed`, which is what my own commit message
-       * claimed and was not true: MAX_BLOCKS only ever counted fields inside
-       * `ticketReadiness`, so a caller who declined the delivery question was
-       * asked it forever. Bounded here, by the budget that already exists.
+       * A field asked and not answered is not asked again (recordsIntakeGate),
+       * so a caller who will not say files with the gap written on it — the
+       * 2026-08-06 floor, no request lost. A caller who hangs up or chooses
+       * the queue before it files leaves no ticket (the v87 and v100 rulings).
+       * `ticketBlocksUsed` still advances on every ask so the Medical Records
+       * route's own floor keeps its meaning.
        */
       {
-        const { state: deliveryState } = ticketState(callId);
-        const deliveryAsk = deliveryAskFor(deliveryState);
-        if (deliveryAsk && ticketBlocksUsed < MAX_BLOCKS) {
-          ticketBlocksUsed += 1;
-          return refusePcp(`missing_required_field:${deliveryAsk.field}`, {
-            say: deliveryAsk.prompt,
-            guidance:
-              'NOT AN ERROR — say nothing about a system or a problem. We cannot send records without knowing ' +
-              `where they go. Ask: "${deliveryAsk.prompt}" then call this tool again. If the caller does not know ` +
-              "or will not say, record recordsDeliveryMethod as 'unspecified' and file — the ticket will say so.",
+        const { state: gateState } = ticketState(callId);
+        const now = Date.now();
+        const ask = recordsAskFor(gateState, recordsAsked, now);
+        if (ask) {
+          if (ask.spends) {
+            recordsAsked.set(ask.key, now);
+            ticketBlocksUsed += 1;
+          }
+          return refusePcp(`missing_required_field:${ask.field}`, {
+            say: ask.prompt,
+            guidance: recordsAskGuidance(ask),
           });
         }
+        const gapNote = annotationFor(recordsIdentityGaps(gateState));
+        if (gapNote) narrative = `${narrative}\n\n${gapNote}`;
       }
       const { state, missing } = ticketState(callId);
       /**
@@ -2285,10 +2377,52 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
        * routing change must not cost a filing, and a request in the wrong
        * department is recoverable while a request nowhere is not.
        */
+      /**
+       * AN OFFICE IS NOT THE PATIENT (v197).
+       *
+       * This tool always took the patient route, which names the requester
+       * "the patient themselves" and opens the case on the patient's own
+       * 15-day clock unless a relationship was stated. In 2026-10-27..11-10, 2
+       * of the 13 PCP records cases opened on that clock were a doctor's office
+       * (CA29957eba32773563e1d4919e9f83dc6a, CA5df1d4e8dfc3084326b1059f68521b17)
+       * — the #73052 defect. Now that the first question is "who am I speaking
+       * with, and where are you calling from?", a caller who names where they
+       * are calling from and has not said they are the patient takes the
+       * professional route, the one create_pcp_task's professional path uses:
+       * off the clock when the office can be classified (operator, 2026-09-14),
+       * PCP Support for a person to route when it cannot.
+       */
+      /**
+       * A STATED PERSONAL TIE WINS OVER A WORKPLACE (Box Codex review of
+       * 7c8df0ca, P1). A daughter who works at a medical group and says she is
+       * calling for her mother is her mother's personal representative, on the
+       * patient's clock (operator, 2026-09-13: "personal rep stands in for the
+       * patient"). The relationship she stated is read before the organisation
+       * she named, so where she works cannot take her request off the clock.
+       *
+       * And a relationship the classifier does not recognise ("daughter",
+       * "sister") is kept on the patient route too (Codex review of ccd2ebd6,
+       * P2): only a stated relationship with professional words in it
+       * (provider, health plan, legal) lets the workplace choose the
+       * professional route. The error this leaves is a professional who
+       * describes themselves in words no list holds being filed on the clock,
+       * which costs a clerk a re-label; the other error would switch a
+       * patient's own deadline off.
+       */
+      const { normalizeRequesterType } = await import('../tools/medicalRecordsTaxonomy');
+      const statedRelationship = String(state.statedRelationship ?? '').trim();
+      const statedTie = statedRelationship ? normalizeRequesterType(statedRelationship) : undefined;
+      const professionalWords = statedTie === 'provider' || statedTie === 'health_plan' || statedTie === 'legal';
+      const recordsRoute: 'patient' | 'professional' =
+        state.callerIsThePatient !== true
+        && String(state.callerOrganization ?? '').trim()
+        && (!statedRelationship || professionalWords)
+          ? 'professional'
+          : 'patient';
       const toMedicalRecords = enrichingTheTicket
         ? null
         : await fileToMedicalRecords(callId, metadata, state, narrative, {
-            route: 'patient',
+            route: recordsRoute,
             floorReached: ticketBlocksUsed >= MAX_BLOCKS,
             spendBlock: () => (ticketBlocksUsed += 1),
           });
@@ -2355,7 +2489,19 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
     name: pcpAgentConfig.name,
     handoffDescription: pcpAgentConfig.description,
     instructions: buildPcpPrompt(metadata),
-    tools: [recordIntake, publicKnowledge, appointmentLookup, createTask, recordAutomated, handoff, patientMedicalRecordsIntake, terminate],
+    // v204: `callerStatedARequest` is optional in the zod (an older caller that
+    // omits it files as before) and required on the wire, so the model always
+    // says whether the caller stated a request (`requireOnTheWire`).
+    tools: [
+      recordIntake,
+      publicKnowledge,
+      appointmentLookup,
+      requireOnTheWire(createTask, ['callerStatedARequest']),
+      recordAutomated,
+      requireOnTheWire(handoff, ['callerStatedARequest']),
+      patientMedicalRecordsIntake,
+      terminate,
+    ],
   });
   agent.outputGuardrails = pcpSafetyGuardrails;
   return agent;
@@ -2401,6 +2547,51 @@ const PCP_DEPARTMENT_ID = 18;
  * would send it round again. `alreadyFiled` reaches the timeline so the guard
  * firing is a count rather than a console line.
  */
+/**
+ * WHETHER THE CALLER SAID WHAT THEY NEED — v204, operator 2026-11-11: "tickets
+ * that are incomplete should not be filed."
+ *
+ * The model answers it, because telling "I need to speak with the staff" from
+ * "I need to speak with the staff about a referral" is extraction (standing
+ * instruction 3). Optional in the zod so a caller that omits it files as
+ * before; required on the wire (`wireRequired`) so the model is always asked.
+ */
+const CALLER_STATED_A_REQUEST = z
+  .boolean()
+  .optional()
+  .describe(
+    'false only when all the caller has asked for is a person; otherwise true.',
+  );
+
+/**
+ * Nothing filed for the request the call is on: no ticket for this patient and
+ * no disposition recorded. An enrichment re-file (v37) is never refused.
+ */
+function nothingOnRecordForThisRequest(callId: string): boolean {
+  return !pcpDirector.filedForCurrentPatient(callId) && !pcpDirector.get(callId).dispositionRecorded;
+}
+
+/**
+ * Refuse a filing that carries no request: ask once (`ask`), then, on a later
+ * attempt still carrying none, say nothing is filed (`spent`), which also
+ * lets the call end (director `mayTerminate`). Two calls inside the batch
+ * window are one ask (`noteNoRequestStated`).
+ */
+function refuseNoRequest(
+  callId: string,
+  tool: string,
+  askSlug: 'no_request_stated' | 'handoff_not_eligible_no_request',
+  extra: Record<string, unknown> = {},
+): Record<string, unknown> {
+  const step = pcpDirector.noteNoRequestStated(callId);
+  console.info(`[PCP] ${callId}: ${tool} — the caller asked only for a person; nothing filed (${step})`);
+  return refusePcp(step === 'ask' ? askSlug : 'no_request_stated_spent', {
+    refused: 'no_request_stated',
+    noRequestAsk: step,
+    ...extra,
+  });
+}
+
 function alreadyFiledOnThisCall(callId: string, ticketNumber: string | undefined): Record<string, unknown> {
   console.info(`[PCP] one call, one ticket — already filed as ${ticketNumber ?? '(number not returned)'}, nothing new created (${callId})`);
   return {
@@ -2461,6 +2652,19 @@ function alreadyFiledOnThisCall(callId: string, ticketNumber: string | undefined
  * narrow case it could is a success carrying no ticket number, and a possible
  * duplicate the hub can close beats a request nobody holds.
  */
+/** What a scheduling ticket kept in PCP Support says about why. v200. */
+export const SCHEDULING_KEPT_FOR_NO_PATIENT_NOTE =
+  '[Scheduling request kept in PCP Support: no patient name was captured on the call, and the '
+  + 'HVA Hub cannot book without one. Get the patient\'s name and date of birth from the '
+  + 'requesting office, then move this to the HVA Hub.]';
+
+/** A YYYY-MM-DD date of birth as the create-ticket birth columns, or nothing. */
+export function dobColumns(dob: unknown): { patientBirthMonth?: string; patientBirthDay?: string; patientBirthYear?: string } {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(dob ?? '').trim());
+  if (!m) return {};
+  return { patientBirthYear: m[1], patientBirthMonth: m[2], patientBirthDay: m[3] };
+}
+
 const STATED_SCHEDULING_INTENT: Partial<Record<PcpCallPurposeSlug, StatedSchedulingIntent>> = {
   schedule_appointment: 'new',
   reschedule_appointment: 'reschedule',
@@ -2551,6 +2755,24 @@ async function fileSchedulingToHub(
   if (!redirect) return { filed: null };
 
   /**
+   * NO PATIENT, NO HUB. v200, 2026-11-11.
+   *
+   * Over the 21 days to 2026-11-11 the HVA Hub sent back 284 of the 287 PCP
+   * scheduling tickets that named no patient, every one to PCP Support, where
+   * a person then rang the office for the name. `next()` now asks who the
+   * request is about before it files; when the call still ends without a
+   * name, the ticket files in PCP Support directly, with a line saying why,
+   * instead of making the trip to the Hub and back.
+   */
+  const patientNamed = Boolean(
+    String(state.patientFirstName ?? '').trim() || String(state.patientLastName ?? '').trim(),
+  );
+  if (!patientNamed) {
+    console.info('[PCP] scheduling request with no patient name — kept in PCP Support, not sent to the HVA Hub');
+    return { filed: null, pcpNote: SCHEDULING_KEPT_FOR_NO_PATIENT_NOTE };
+  }
+
+  /**
    * WHOSE NUMBER GOES ON THE TICKET, and why it is the caller's.
    *
    * `CreateTicketParams` has one phone field. On this lane the person the hub
@@ -2629,6 +2851,10 @@ async function fileSchedulingToHub(
     requestReasonId: redirect.requestReasonId,
     patientFirstName: String(state.patientFirstName ?? '').trim() || 'Unknown',
     patientLastName: String(state.patientLastName ?? '').trim() || 'Patient',
+    // The date of birth the caller gave (YYYY-MM-DD, record_pcp_intake's
+    // shape). The Hub finds the chart by it; without these columns it reached
+    // the Hub only in prose, if at all.
+    ...dobColumns(state.patientDob),
     patientPhone: callback,
     preferredContactMethod: 'phone',
     description: body,
@@ -3216,7 +3442,12 @@ async function settleWithin(pending: Promise<unknown>[], ms: number): Promise<vo
  * How the call ended, and what was said on it, from the runtime's record. The
  * old core calls the sweep with no context and keeps its behaviour exactly.
  */
-export type PcpTeardownContext = { outcome?: string; transcript?: string };
+export type PcpTeardownContext = {
+  outcome?: string;
+  transcript?: string;
+  /** The call's timed turns (v205): where the answer to the v204 ask is read. */
+  turns?: ReadonlyArray<TeardownTurn>;
+};
 
 export async function sweepPcpUnfiledCall(callId: string, ctx: PcpTeardownContext = {}): Promise<void> {
   const metadata = pcpCallMetadata.get(callId);
@@ -3339,56 +3570,49 @@ export async function sweepPcpUnfiledCall(callId: string, ctx: PcpTeardownContex
         (state.callerName || state.patientFirstName || state.patientLastName || state.statedRelationship),
     );
     /**
-     * AN UNHONOURED ASK FOR A PERSON IS A REQUEST, even with no name attached.
+     * AN ASK FOR A PERSON, AND NOTHING ELSE, IS NOT FILED (v204).
      *
-     * The identity rule above selects against exactly the population it exists
-     * to serve, and 2026-09-14 is the measurement that finally says so: all 17
-     * callers whose requests were lost that day reached this line and were
-     * turned away by it. Each had said one thing — "speak to a
-     * representative" — refused to give a name when asked, and been told, in
-     * words, that we had taken it down. `callPurpose` was `patient_caller` on
-     * every one of them, so the first clause held; none of the four identity
-     * fields did, so `toldUsSomething` was false and the safety net skipped
-     * them. CLAUDE.md carries this as an open question ("no name, no ticket",
-     * 47 of 53 skipped). For this one shape it is answerable.
+     * Operator, 2026-11-11: "tickets that are incomplete should not be filed."
+     * From 2026-09-15 (v18) to v204 this floor admitted a caller whose only
+     * request was for a person ("CALLER ASKED TO SPEAK TO A PERSON AND WAS NOT
+     * CONNECTED … They gave no further detail"), because on 2026-09-14 17 such
+     * callers had been told their request was taken down and had no ticket.
+     * Both halves of that are gone: the refused transfer no longer says it took
+     * anything down when nothing was stated (`handoff_not_eligible_no_request`),
+     * and the ruling now says a ticket that says only "they wanted a person"
+     * is not filed. A staffer cannot work it; they ring the caller to find out
+     * what it was about.
      *
-     * WHY THIS CASE AND NOT THE GENERAL ONE. `callerRequestedHuman` is a
-     * latched, explicit ask for a person that we did not honour — not an
-     * absence of information but a request in its own right, and the only one
-     * a caller can make without volunteering anything about themselves. The
-     * two exits above have already removed the callers who DID get a person
-     * (`CONNECTED`) and the ones who chose the queue and accepted the cost
-     * (operator, 2026-09-13), so what is left here asked and was refused.
-     *
-     * AND WE USUALLY HAVE A CALLBACK NUMBER: caller ID seeds it at the top of
-     * `createPcpAgent`, so "this number asked for a person and did not get
-     * one" is normally a complete, workable ticket rather than a stub.
-     *
-     * NOT ALWAYS, and this comment said "never short of" until the withheld-ANI
-     * fork in `refusals.ts` proved otherwise (Cursor, #300). The seeding regex
-     * correctly rejects a non-E.164 ANI — "anonymous", blocked, restricted —
-     * so a caller who withholds their number AND hangs up before giving one
-     * leaves a ticket with no way to reach them. That is still better than
-     * silence: a staffer sees the request and the timestamp rather than
-     * nothing at all. Closing it properly means either declining to file or
-     * inventing a placeholder, and both are routing decisions rather than code
-     * ones — OPEN FOR WAYNE (standing instruction 1).
-     *
-     * THE NARROWNESS IS THE POINT. Filing on every unidentified call would
-     * recreate azul's 2026-07-28 sweep, where 9 of 12 spurious tickets were
-     * callbacks for patients who had already been helped.
-     *
-     * STILL GATED ON `callPurpose`, deliberately. `buildPayload` reads
-     * `state.callPurpose!` and the payload schema takes an enum, so filing
-     * without one is refused before it reaches the wire — a silent loss of
-     * exactly the kind this block is closing. Picking a slug to stand in would
-     * be choosing a department for the request, which is a routing rule and
-     * the operator's to make (standing instruction 1). All 17 carried a
-     * purpose, so this covers them; a caller who asks for a person with no
-     * purpose recorded at all is a narrower residual gap, and it is noted for
-     * Wayne rather than papered over here.
+     * And when the agent asked the caller what they need (the v204 ask) and
+     * nothing was filed after it, they did not say: nothing files here either,
+     * whatever identity was recorded.
      */
-    const askedForAPersonAndDidNotGetOne = Boolean(state.callPurpose && state.callerRequestedHuman);
+    /**
+     * UNLESS THEY ANSWERED IT AND THE CALL ENDED BEFORE IT WAS FILED (v205).
+     * Wayne, 2026-11-11: a caller who answers the ask and then hears nothing
+     * (the agent stalls, the watchdog or the silence ladder ends the call)
+     * lost the request, because this exit read the ask and not the answer.
+     * The answer is read from the call's timed turns, in the window the ask
+     * opened (`answerToTheAsk.ts`), and only on an ending WE caused: a caller
+     * who hung up or went to the queue never reaches this line (above). An
+     * answer that only asks for a person again, or only gives who they are,
+     * is still not a request, and nothing files.
+     */
+    let answerToTheAsk: string[] = [];
+    if (state.requestNotStatedAskedAt !== undefined) {
+      answerToTheAsk = answerToTheNoRequestAsk(ctx.turns, state.requestNotStatedAskedAt, [
+        state.callerName,
+        state.callerOrganization,
+        state.callerRole,
+        state.patientFirstName,
+        state.patientLastName,
+      ]);
+      if (answerToTheAsk.length === 0) {
+        console.info(`[PCP] SWEEP: ${callId} — the caller asked only for a person and said nothing more when asked; no ticket, by the operator's rule`);
+        return;
+      }
+      console.warn(`[PCP] SWEEP: ${callId} — the caller answered the ask and the call ended (${ctx.outcome ?? 'unknown'}) before it was filed; filing their answer for a person to route`);
+    }
     /**
      * A CALL NOBODY CLASSIFIED IS STILL A CALL SOMEBODY MADE.
      *
@@ -3460,7 +3684,8 @@ export async function sweepPcpUnfiledCall(callId: string, ctx: PcpTeardownContex
       lastName: state.patientLastName,
     });
     const unclassified = !state.callPurpose && spokeBeyondTheirOwnIdentity;
-    if (!toldUsSomething && !askedForAPersonAndDidNotGetOne && !unclassified) {
+    const answeredTheAsk = answerToTheAsk.length > 0;
+    if (!toldUsSomething && !unclassified && !answeredTheAsk) {
       console.info(`[PCP] SWEEP: ${callId} ended with nothing to file (no purpose or no identity) — no ticket`);
       return;
     }
@@ -3474,14 +3699,14 @@ export async function sweepPcpUnfiledCall(callId: string, ctx: PcpTeardownContex
     const gaps = annotationFor([...readiness.blocking, ...readiness.annotate]);
     /**
      * Two different calls reach this point and a staffer must be able to tell
-     * them apart from the ticket alone. One drifted off mid-intake; the other
-     * asked for a person, was refused, and was left holding nothing — which is
-     * a worse experience and a more urgent callback.
+     * them apart from the ticket alone: one drifted off mid-intake, the other
+     * was never classified. (A third, the caller who asked only for a person,
+     * no longer files at all — v204, above.)
      */
-    const headline = unclassified
+    const headline = answeredTheAsk
+      ? 'THE CALLER SAID WHAT THEY NEED, BUT THE CALL ENDED BEFORE IT WAS FILED. They first asked for a person; asked what it was about, they said what is below. Nothing here has been routed to a department — please read it and send it where it belongs.'
+      : unclassified
       ? 'THIS CALL WAS NOT CLASSIFIED AND NEEDS ROUTING BY HAND. The caller spoke but the agent never established what the call was about, so nothing here has been routed to a department — please read what they said below and send it where it belongs.'
-      : askedForAPersonAndDidNotGetOne && !toldUsSomething
-      ? 'CALLER ASKED TO SPEAK TO A PERSON AND WAS NOT CONNECTED, and the request was not captured on the call. Filed so it is not lost. They gave no further detail.'
       : 'CALLER HUNG UP BEFORE THE REQUEST WAS COMPLETE. Filed from what was gathered on the call so it is not lost.';
     /**
      * THE CALLER'S OWN WORDS ARE THE ROUTING INSTRUCTION on this arm, so they
@@ -3498,9 +3723,13 @@ export async function sweepPcpUnfiledCall(callId: string, ctx: PcpTeardownContex
      * because the annotation is appended afterwards and the call site cannot
      * see the string that is actually validated.
      */
-    const theirWords = unclassified
+    const theirWords = answeredTheAsk
+      ? `What the caller said when asked what they need:\n${answerToTheAsk.map((l) => `  - ${l}`).join('\n')}`
+      : unclassified
       ? `What the caller said:\n${callerLines(transcript).map((l) => `  - ${l}`).join('\n')}`
       : '';
+    /** An answer we read is routed by a person, as an unclassified call is. */
+    const routeByHand = unclassified || answeredTheAsk;
     const narrative = [
       headline,
       theirWords,
@@ -3512,7 +3741,7 @@ export async function sweepPcpUnfiledCall(callId: string, ctx: PcpTeardownContex
 
     console.warn(
       `[PCP] SWEEP: ${callId} ended with no disposition — filing what we have` +
-        (unclassified ? ' as unclassified_call, for a person to route' : ''),
+        (routeByHand ? ' as unclassified_call, for a person to route' : ''),
     );
     /**
      * `unclassified_call` is the ticketing app's slug for exactly this, added
@@ -3521,11 +3750,11 @@ export async function sweepPcpUnfiledCall(callId: string, ctx: PcpTeardownContex
      * proves live — and is CREATE_TASK only, because a call we could not
      * classify is certainly not one we can establish asked for a person.
      */
-    const sweptState = unclassified
+    const sweptState = routeByHand
       ? { ...state, callPurpose: 'unclassified_call' as const }
       : state;
     const response = await submitPcpTicket(
-      buildPayload(metadata, sweptState, 'CREATE_TASK', narrative, 'high', undefined, unclassified ? 'call_not_classified' : 'caller_hung_up_before_completion', missing),
+      buildPayload(metadata, sweptState, 'CREATE_TASK', narrative, 'high', undefined, routeByHand ? 'call_not_classified' : 'caller_hung_up_before_completion', missing),
     );
     if (response.success) {
       pcpDirector.recordDisposition(callId, 'CREATE_TASK');

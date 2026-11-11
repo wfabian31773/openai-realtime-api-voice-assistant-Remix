@@ -238,7 +238,11 @@ describe('what does NOT change', () => {
     const sent = h.submitSimplifiedTicket.mock.calls[0]![0];
     expect(sent.preferredContactMethod).toBe('phone');
     expect(sent.patientEmail).toBeUndefined();
-    expect(sent.additionalDetails).toBeUndefined();
+    // No contact-preference note. (The fixture is a reschedule request, which
+    // v202 files to the HVA Hub with its own route note, so additionalDetails
+    // is no longer empty; the property here is the note this file is about.)
+    expect(sent.additionalDetails ?? '').not.toMatch(/CONTACT PREFERENCE/);
+    expect(sent.additionalDetails ?? '').not.toContain(EMAIL_ESCAPE_NOTE);
   });
 
   it('a text preference with no email files on the first attempt, as sms', async () => {

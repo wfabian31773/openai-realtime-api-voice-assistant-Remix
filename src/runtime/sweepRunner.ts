@@ -35,6 +35,7 @@ import {
   decideSweep,
   buildSweptTicket,
   sweepMarker,
+  SWEPT_TICKET_DESCRIPTION,
   type SweepInput,
   type SweepSkipReason,
 } from "./requestSweep";
@@ -45,8 +46,12 @@ import { callerSaidTheName } from "./callerSaidTheName";
 import { statedNameFor } from "../tools/statedName";
 import { askModelForThePatientName, nameFromTheRecording, type NameAsker } from "./nameFromTheRecording";
 
+import { askModelForTheRequest, requestFromTheRecording, type RequestAsker } from "./requestFromTheRecording";
+
 /** Reads nothing — the default for any caller that did not choose the model. */
 const noNameFromTheRecording: NameAsker = async () => null;
+/** v201: reads nothing — the default, so no test that calls `runRequestSweep` directly reaches the network. */
+const noRequestFromTheRecording: RequestAsker = async () => null;
 import { draftedRequestFor } from "../tools/draftedRequest";
 import { findByPhone } from "../services/patientVerification";
 
@@ -141,7 +146,15 @@ const fileOnce: SweepFiler = async (ticket) => {
     // app refuses a swept request for an office or a surgeon nobody is left
     // to give — 87 of 92 on those two queues, 2026-09-28..10-08.
     ...(ticket.routingAskExhausted ? { routingAskExhausted: true } : {}),
-  });
+  },
+  /**
+   * The placeholder the default filer would send after a refusal goes into the
+   * outbox beside a drafted description, so a refusal that arrives on the
+   * worker's replay after an outage files it too, instead of dead-lettering
+   * the request (v205). A placeholder description carries none: the outbox
+   * stores a fallback only when it differs from the description.
+   */
+  { refusalFallbackDescription: SWEPT_TICKET_DESCRIPTION });
   /**
    * A QUEUED REQUEST IS A RECOVERED REQUEST.
    *
@@ -175,7 +188,6 @@ const fileOnce: SweepFiler = async (ticket) => {
 const defaultFiler: SweepFiler = async (ticket) => {
   const first = await fileOnce(ticket);
   if (first.success || first.queued) return first;
-  const { SWEPT_TICKET_DESCRIPTION } = await import("./requestSweep");
   if (ticket.description === SWEPT_TICKET_DESCRIPTION) return first;
   return fileOnce({
     ...ticket,
@@ -206,6 +218,12 @@ export async function runRequestSweep(
   askName: NameAsker = noNameFromTheRecording,
   /** v182: who the calling number belongs to. The default reads nothing. */
   lookupNumber: NumberLookup = noNumberLookup,
+  /**
+   * v201: who reads what the caller asked for out of the transcript, when the
+   * model wrote nothing down. The default reads nothing; production passes
+   * the model through `runProductionSweep`.
+   */
+  askRequest: RequestAsker = noRequestFromTheRecording,
 ): Promise<SweepOutcome> {
   try {
     const identity = verifiedIdentityFor(record.callSid);
@@ -304,6 +322,32 @@ export async function runRequestSweep(
         }
       }
     }
+    /**
+     * v201: THE RECORDS LANE GETS THE HEARD NAME TOO. That lane files without a
+     * name (operator, 2026-09-27), so it never skips as `no-name` and the v180
+     * reader above never ran for it: of 65 nameless high-priority Medical
+     * Records tickets in the 14 days to 2026-11-10, 64 were this sweep's. Same
+     * reader, same same-turn check, same staff note, no date of birth, office
+     * or validated patient. Only where nobody established a name on the call
+     * (no certain match, no tool-received or spoken name). A re-decision that
+     * would NOT file (the caller said only that name) keeps the nameless
+     * filing: a name must never cost a records request its ticket.
+     */
+    if (decision.file && !decision.firstName && !decision.lastName && !input.verifiedName) {
+      const heard = await nameFromTheRecording(record.transcript, askName);
+      if (heard) {
+        const named: SweepInput = { ...input, verifiedName: heard, nameSource: "heard" };
+        const redecided = decideSweep(named);
+        if (redecided.file) {
+          input = named;
+          decision = redecided;
+          console.info(
+            `[REQUEST SWEEP] ${record.slug}: no name was captured on the call — filing under the ` +
+              `patient name the caller said, read from the recording (${record.callSid})`,
+          );
+        }
+      }
+    }
     if (!decision.file) {
       /**
        * A SKIP IS LOGGED TOO, and only "no-name" loudly.
@@ -325,6 +369,32 @@ export async function runRequestSweep(
         );
       }
       return { filed: false, reason: decision.reason };
+    }
+
+    /**
+     * v201: NOTHING WAS WRITTEN DOWN, SO READ WHAT THE CALLER ASKED FOR.
+     * Operator, 2026-11-11: a ticket that says "reason not captured" leaves
+     * staff calling back just to find out what the call was about. Only when
+     * the model drafted nothing on the call — its own words win — and only once
+     * the decision is to file. The sentence is checked against every patient
+     * name this call holds, so none of them can reach the description.
+     */
+    if (!input.draftedRequest?.trim()) {
+      const candidate = unconfirmedCandidateFor(record.callSid);
+      const held = [
+        decision.firstName, decision.lastName,
+        identity?.firstName, identity?.lastName,
+        stated?.firstName, stated?.lastName,
+        candidate?.firstName, candidate?.lastName,
+      ].filter((n): n is string => typeof n === "string" && n.trim().length > 0);
+      const asked = await requestFromTheRecording(record.transcript, askRequest, held);
+      if (asked) {
+        input = { ...input, requestFromRecording: asked };
+        console.info(
+          `[REQUEST SWEEP] ${record.slug}: the model wrote no request down — the description is ` +
+            `the request read from the recording (${record.callSid})`,
+        );
+      }
     }
 
     console.info(sweepMarker(record.slug, record.callSid));
@@ -375,11 +445,12 @@ export async function runRequestSweep(
 }
 
 /**
- * THE SWEEP THE RUNTIME RUNS (v180, v182): the real filer, the model that
+ * THE SWEEP THE RUNTIME RUNS (v180, v182, v201): the real filer, the model that
  * reads the patient's name out of the transcript when the call captured none,
- * and the person-base lookup of who the calling number belongs to.
+ * the person-base lookup of who the calling number belongs to, and the model
+ * that reads what the caller asked for when nothing was written down.
  * `voiceRuntime` uses this as its default; `sweepRunner.wiring` pins it.
  */
 export function runProductionSweep(record: VoiceCallRecord): Promise<SweepOutcome> {
-  return runRequestSweep(record, defaultFiler, askModelForThePatientName, lookUpTheCallingNumber);
+  return runRequestSweep(record, defaultFiler, askModelForThePatientName, lookUpTheCallingNumber, askModelForTheRequest);
 }

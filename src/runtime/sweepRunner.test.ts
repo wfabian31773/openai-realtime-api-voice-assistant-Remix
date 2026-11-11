@@ -5,6 +5,7 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { runRequestSweep, type SweepFiler } from "./sweepRunner";
+import { SWEPT_TICKET_DESCRIPTION } from "./requestSweep";
 import type { VoiceCallRecord, ToolEvent } from "./mediaStreamBridge";
 import { rememberVerifiedIdentity, resetVerifiedIdentities } from "../tools/verifiedIdentity";
 import * as directory from '../services/consoleDirectory';
@@ -87,7 +88,8 @@ describe("recovering a request the agent did not file", () => {
     expect(durableFile).toHaveBeenCalledWith(expect.objectContaining({
       patientBirthYear: '1950', patientBirthMonth: '01', patientBirthDay: '02', locationOfLastVisit: 'Synthetic Clinic', locationSource: 'history',
       validatedPatient: expect.objectContaining({ status: 'validated', callSid: SID, personId: '00000000-0000-4000-8000-000000000001' }),
-    }));
+    // v205: the placeholder rides beside a drafted description, for a refused replay.
+    }), { refusalFallbackDescription: SWEPT_TICKET_DESCRIPTION });
   });
 
   it.each([
@@ -127,7 +129,7 @@ describe("recovering a request the agent did not file", () => {
 
     expect(durableFile).toHaveBeenCalledWith(expect.objectContaining({
       validatedPatient: expect.objectContaining({ nextAppointment }), locationOfLastVisit: 'Synthetic Usual Clinic',
-    }));
+    }), { refusalFallbackDescription: SWEPT_TICKET_DESCRIPTION });
     expect(directory.lookupLocation).not.toHaveBeenCalled();
   });
 
