@@ -274,7 +274,11 @@ describe('what the descriptions cost on the wire', () => {
     // records never ring the on-call; who asked has to reach Medical Records).
     // Measured 13,569 after trimming the new descriptions to one line each.
     ['no-ivr', 13_650],
-    ['pcp', 7_000],
+    // v197 RAISED pcp once, 7,000 -> 7,500: handle_patient_medical_records_request
+    // gained the eight fields it asks for (operator, 2026-11-10, on PCP-82755:
+    // the answers had nowhere to land). Measured 7,422 after cutting every new
+    // description but three to nothing; the field skeletons are most of it.
+    ['pcp', 7_500],
   ] as const)('%s stays under %i characters', (slug, ceiling) => {
     expect(JSON.stringify(built.get(slug)!.lane.agent.tools).length).toBeLessThan(ceiling);
   });

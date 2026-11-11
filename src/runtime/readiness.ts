@@ -1444,8 +1444,22 @@ import { callEnvironment } from "./callRecord";
  * the Console's active-clinic list one for one. Above main's v195 (#442,
  * `e190383a`), which it contains. No migration.
  */
+/**
+ * v197 — A PCP RECORDS REQUEST ASKS WHO, WHOSE, HOW AND WHERE (2026-11-10).
+ * Operator, on PCP-82755: "what good does it do us if we create a ticket that
+ * leads us to more work than had we taken the call ourselves." Of 171 PCP
+ * records tickets in 2026-10-27..11-10, 23 named no patient (18 never asked)
+ * and 15 said "Delivery method NOT captured" after the caller had answered.
+ * handle_patient_medical_records_request now asks who is calling, whose
+ * records, how and where, one at a time and each once, takes every answer as
+ * its own argument, and files with the gaps written when an answer does not
+ * come. A caller who names where they call from and is not the patient takes
+ * the professional records route (2 of 13 patient-clock cases in the window
+ * were an office). Above main's v196 (#444, `fe330544`), which it contains.
+ * No migration.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v196-beaumont-and-fullerton-are-our-offices-20261110";
+  "voice-runtime-v197-a-records-request-asks-who-and-whose-20261110";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can
