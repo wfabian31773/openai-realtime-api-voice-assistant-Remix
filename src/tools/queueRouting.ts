@@ -260,11 +260,16 @@ function everyVisitIsADocumentsSource(folded: string): boolean {
  * exam to book (an exam name not in the past, "after her eye exam" is
  * history), that exam is what is scheduled, so those phrases stop counting as
  * an operation; a named operation or procedure still does. The phrases are
- * GENERATED from the taxonomy's own list, never a second one.
+ * GENERATED from the taxonomy's own list, never a second one, and on first
+ * use: `surgeryTaxonomy` reaches this module through `cueMatch`, so the list
+ * is not defined yet while this module loads.
  */
-const OPERATION_FREE_SCHEDULING: readonly string[] = SURGERY_SCHEDULING_CUES
-  .map(fold)
-  .filter((c) => !namesAnOperation(c) && !/\bsx\b/.test(c));
+let operationFree: readonly string[] | undefined;
+function operationFreeScheduling(): readonly string[] {
+  return (operationFree ??= SURGERY_SCHEDULING_CUES
+    .map(fold)
+    .filter((c) => !namesAnOperation(c) && !/\bsx\b/.test(c)));
+}
 
 function namesAnExamToBook(folded: string): boolean {
   for (const name of EXAM_NAME_CUES.map(fold)) {
@@ -288,7 +293,7 @@ export function namesAProcedure(text: string): boolean {
   const t = fold(text);
   if (!namesAnExamToBook(t)) return isSurgeryRequest(text);
   let without = t;
-  for (const phrase of OPERATION_FREE_SCHEDULING) without = without.split(phrase).join(' ');
+  for (const phrase of operationFreeScheduling()) without = without.split(phrase).join(' ');
   return isSurgeryRequest(without);
 }
 
