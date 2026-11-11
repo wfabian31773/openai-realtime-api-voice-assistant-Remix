@@ -149,13 +149,12 @@ const fileOnce: SweepFiler = async (ticket) => {
   },
   /**
    * The placeholder the default filer would send after a refusal goes into the
-   * outbox with a drafted description, so a refusal that arrives on the
+   * outbox beside a drafted description, so a refusal that arrives on the
    * worker's replay after an outage files it too, instead of dead-lettering
-   * the request (v205).
+   * the request (v205). A placeholder description carries none: the outbox
+   * stores a fallback only when it differs from the description.
    */
-  ...(ticket.description === SWEPT_TICKET_DESCRIPTION
-    ? []
-    : [{ refusalFallbackDescription: SWEPT_TICKET_DESCRIPTION }]));
+  { refusalFallbackDescription: SWEPT_TICKET_DESCRIPTION });
   /**
    * A QUEUED REQUEST IS A RECOVERED REQUEST.
    *

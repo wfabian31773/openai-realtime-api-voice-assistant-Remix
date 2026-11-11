@@ -747,7 +747,7 @@ describe('v205: a refused replay sends its fallback once before dead-lettering',
 
     expect(res.success).toBe(false);
     expect(res.terminal).toBeUndefined();
-    expect(setPayloads.at(-1)?.status).toBe('failed');
+    expect(setPayloads[setPayloads.length - 1]?.status).toBe('failed');
     expect((storedPayload() as { params: { description: string } }).params.description).toBe(PLACEHOLDER);
   });
 
