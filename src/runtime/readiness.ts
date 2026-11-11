@@ -1588,6 +1588,17 @@ import { callEnvironment } from "./callRecord";
  * v206 (#447, `6e96e6fe`). No migration.
  */
 /**
+ * v210 — THE NPX OUTREACH CAMPAIGN CALLS ON THE HOLIDAYS THE PRACTICE KEEPS
+ * OPEN (2026-11-11). Operator, on Veterans Day: "we should be heavily
+ * outreaching today, all possible candidates are liable to be home today."
+ * The dialler held every NPX call that day for `holiday` while the queue
+ * lanes took 772 calls. `CallingWindow.dialOnOpenHolidays` lets a campaign
+ * call on `practiceOpenHolidaysFor` (Columbus Day and Veterans Day, read from
+ * the queue lanes' own call counts); only the NPX window sets it. Above
+ * main's v207 (#454, `b7f2b58e`), which it contains along with v208 (#455,
+ * `9ee3b954`). v209 is #457 on its open branch. No migration.
+ */
+/**
  * v211 — THE NPX OUTREACH TEXT AND ITS FOUR-STEP BOOKING LINK (2026-11-11).
  * Operator: "i want them all to receive a text message as well", "a
  * customized link that lets them book in 4 easy steps", from the number NPX
@@ -1601,9 +1612,9 @@ import { callEnvironment } from "./callRecord";
  * confirm, booking through the call's own bookOutreachSlot. STOP to the
  * number writes `sms_stop` (POST /voice/outbound/<slug>/sms). Dark: nobody is
  * texted until NPX_OUTREACH_TEXTS=1, on top of every call switch. Above
- * main's v207 (#454, `b7f2b58e`), which it contains along with v208 (#455,
- * `9ee3b954`); v209 (#457) and v210 (#456) are on their open branches. No
- * migration.
+ * main's v210 (#456, `c9bb40fd`), which it contains along with v207 (#454,
+ * `b7f2b58e`) and v208 (#455, `9ee3b954`); v209 (#457) is on its open
+ * branch. No migration.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
   "voice-runtime-v211-npx-text-and-booking-link-20261111";
