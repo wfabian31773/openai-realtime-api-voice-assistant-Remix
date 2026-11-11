@@ -1562,8 +1562,22 @@ import { callEnvironment } from "./callRecord";
  * carry a date of birth. Above main's v205 (#453, `e8619cbf`), which it
  * contains. No migration.
  */
+/**
+ * v207 — A WRONG BIRTHDAY IS NOT READ FROM THE TRANSCRIPT (2026-11-11). The
+ * operator's post-merge review sweep of #447 found five ways the v206 reader
+ * could put a wrong date of birth on a ticket: "It is not June third." kept
+ * June 3rd; "One one nineteen fifty-one" read as January 19th; "June third,
+ * I'm seventy years old" read as 1970; "I mean the surgery was December 5"
+ * took the surgery date; and a "Sure." between a surgery question and the
+ * format let the surgery date in. A caller line that negates the held month
+ * and day clears it; a run of "one"s chains; a turn that states an age gives
+ * no date; a caller sentence naming another date is not read for the
+ * birthday; and the format opens a window only when the date last asked about
+ * is the birthday, with a line that asks for both unable to replace a held
+ * date. Above main's v206 (#447, `6e96e6fe`). No migration.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v206-a-spoken-date-of-birth-reaches-the-ticket-20261111";
+  "voice-runtime-v207-a-wrong-birthday-is-not-read-20261111";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

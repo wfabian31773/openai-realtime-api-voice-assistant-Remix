@@ -41,6 +41,8 @@ export function normalizeDobParts(
 export function readDobQuietly(
   spoken: string,
 ): { month: string; day: string; year: string } | null {
+  // A turn that states an age gives no date (v207); see statesAnAge.
+  if (statesAnAge(spoken)) return null;
   return parse(spoken, SILENT);
 }
 
@@ -82,9 +84,92 @@ export function rejectsADate(uttered: string): boolean {
  * digit parse is unchanged from main.
  */
 function wordedAnswerIsRejected(raw: string): boolean {
-  const rest = String(raw ?? '').replace(/^\s*(no|nope|nah)\s*[,.!;:]+\s*/i, '');
+  const rest = withoutALeadingNo(raw);
   if (rejectsADate(rest)) return true;
-  return /(^| )(not|never|nunca|jamas)( |$)|n t( |$)/.test(foldForRejection(rest));
+  return NEGATION.test(foldForRejection(rest));
+}
+
+const NEGATION = /(^| )(not|never|nunca|jamas)( |$)|n t( |$)/;
+
+function withoutALeadingNo(raw: string): string {
+  return String(raw ?? '').replace(/^\s*(no|nope|nah)\s*[,.!;:]+\s*/i, '');
+}
+
+/**
+ * A LINE THAT SAYS A DATE IS NOT SO (v207). "It is not June third.", "That's
+ * wrong.", "No, not June third." A leading "No," set off by punctuation is an
+ * answer to the question before it, not a negation of what follows ("No. My
+ * birthday is June third."), as in the worded fallback above. The correction
+ * words ("sorry", "actually") are not here: "Sorry, June third, 1944." said
+ * again is not a denial. spokenDob reads this to clear a date of birth the
+ * caller has just said is not theirs.
+ */
+export function negatesADate(uttered: string): boolean {
+  const folded = foldForRejection(withoutALeadingNo(uttered));
+  const words = folded.split(' ').filter(Boolean);
+  if (words.some((w) => DENIAL_WORDS.has(w))) return true;
+  const padded = ` ${words.join(' ')} `;
+  if (DENIAL_PHRASES.some((p) => padded.includes(` ${p}`))) return true;
+  return NEGATION.test(folded);
+}
+
+/**
+ * AN AGE IS NOT A YEAR (v207).
+ *
+ * "June third, I'm seventy years old." read as June 3rd, 1970 (Codex
+ * post-merge sweep of #447), and "June 3, I'm 70 years old." has read that
+ * way since before v199. The transcript reader (readDobQuietly) reads no date
+ * from a turn that states an age, as shape E has been since round 4 of the
+ * #447 review: "June 3, 1944. I'm 82." stays unread too, because taking the
+ * age out and reading the rest would read past a "That's wrong." the digit
+ * parse does not see. Only an age said as one counts ("I'm seventy", "seventy
+ * years old", "tengo setenta años"); a number not stated as an age does not.
+ * The filing tools' own parse (normalizeDobParts) is unchanged.
+ * withoutAnAge is what spokenDob compares a partial answer with.
+ */
+const AGE_UNIT = 'one|two|three|four|five|six|seven|eight|nine';
+const AGE_WORD =
+  `(?:(?:twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)(?:[\\s-]+(?:${AGE_UNIT}))?` +
+  `|(?:a|one)\\s+hundred(?:\\s+(?:and\\s+)?(?:${AGE_UNIT}))?` +
+  `|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|${AGE_UNIT})`;
+const AGE = `(?:\\d{1,3}|${AGE_WORD})`;
+// "I am nineteen forty-four" is a year said after "I am", not an age: an age
+// is never followed by another number.
+const NO_NUMBER_AFTER =
+  '(?![\\s-]+(?:\\d|(?:zero|oh|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred)(?![\\p{L}])))';
+const AGE_UNIT_ES = 'uno|un|una|dos|tres|cuatro|cinco|seis|siete|ocho|nueve';
+const AGE_ES =
+  `(?:\\d{1,3}|(?:veinte|treinta|cuarenta|cincuenta|sesenta|setenta|ochenta|noventa)(?:\\s+y\\s+(?:${AGE_UNIT_ES}))?` +
+  `|veinti\\p{L}+|cien|ciento(?:\\s+\\p{L}+)?|diez|once|doce|trece|catorce|quince|dieci\\p{L}+|${AGE_UNIT_ES})`;
+// A bare age ("I'm seventy") is two digits or a tens, teens or hundred word,
+// and is not followed by a unit: "I'm one of your patients" and "I'm 30
+// minutes late" are not ages.
+const BARE_AGE =
+  `(?:[1-9]\\d|1[01]\\d|(?:twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)(?:[\\s-]+(?:${AGE_UNIT}))?` +
+  `|(?:a|one)\\s+hundred(?:\\s+(?:and\\s+)?(?:${AGE_UNIT}))?` +
+  `|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen)`;
+const NOT_A_UNIT_AFTER =
+  '(?![\\s-]+(?:of|minutes?|mins?|hours?|hrs?|days?|weeks?|months?|percent|times?|miles?|more|o\\s*clock|am|pm|a\\s*m|p\\s*m)(?![\\p{L}]))';
+const SUBJECT_IS = `\\b(?:i|she|he|they|we)\\s*(?:['\u2019]\\s*(?:m|s|re)|\\s+(?:am|is|are)|m)\\s+(?:about\\s+|almost\\s+|nearly\\s+|turning\\s+)?`;
+const AGE_STATEMENTS: RegExp[] = [
+  // "I'm seventy years old", "she's 82 years", "he is turning 80 years old"
+  new RegExp(`${SUBJECT_IS}${AGE}\\s+(?:years?|yrs?)(?:\\s+old)?(?![\\p{L}\\d])`, 'giu'),
+  // "I'm seventy", "I am 82", "she's ninety-one"
+  new RegExp(`${SUBJECT_IS}${BARE_AGE}(?![\\p{L}\\d])${NO_NUMBER_AFTER}${NOT_A_UNIT_AFTER}`, 'giu'),
+  // "seventy years old", "70 years of age"
+  new RegExp(`\\b${AGE}\\s+(?:years?|yrs?)\\s+(?:old|of\\s+age)(?![\\p{L}\\d])`, 'giu'),
+  // "tengo setenta años", "setenta años de edad"
+  new RegExp(`(?<![\\p{L}\\d])(?:tengo\\s+|tiene\\s+)?${AGE_ES}\\s+a(?:ñ|n)os(?:\\s+de\\s+edad)?(?![\\p{L}\\d])`, 'giu'),
+];
+
+export function statesAnAge(spoken: string): boolean {
+  return withoutAnAge(spoken) !== String(spoken ?? '');
+}
+
+export function withoutAnAge(spoken: string): string {
+  let out = String(spoken ?? '');
+  for (const re of AGE_STATEMENTS) out = out.replace(re, ' ');
+  return out;
 }
 
 /** Where a parser's log lines go. See readDobQuietly. */
@@ -416,6 +501,8 @@ const AMBIGUOUS_NUMBER_WORDS = new Set([
   'oh', 'one', 'once', 'un', 'una', 'uno', 'first', 'second', 'primer', 'primero',
 ]);
 const BRIDGE_WORDS = new Set(['y', 'and', 'de', 'del', 'of']);
+/** The ambiguous words that are a digit, and so may run on from one another. */
+const CHAINING_NUMBER_WORDS = new Set(['one', 'uno', 'una', 'oh']);
 
 type WordKind = 'zero' | 'unit' | 'teen' | 'tens' | 'compound' | 'ordinal' | 'hundreds' | 'hundred' | 'thousand' | 'digit' | 'month' | 'other';
 
@@ -460,8 +547,33 @@ export function numberWordsToDigits(raw: string): string | null {
     }
     return false;
   };
+  /**
+   * A RUN OF "ONE"s IS ANCHORED BY THE NUMBER IT RUNS INTO (v207).
+   *
+   * "One one nineteen fifty-one" is January 1st. Each "one" was tested on its
+   * own, and an ambiguous neighbour never anchors, so the first "one" (beside
+   * only another "one") was dropped as a word and the date read as January
+   * 19th, 1951: a wrong birthday (Codex post-merge sweep of #447). A "one"
+   * beside a "one" that is itself anchored is a number too. Only the digit
+   * words chain; "first", "second" and "once" still need a number or a month
+   * of their own, so "that's the first one, nineteen fifty-one" is unchanged.
+   */
+  const anchoredAt = new Set<number>();
   for (let i = 0; i < words.length; i += 1) {
-    if (AMBIGUOUS_NUMBER_WORDS.has(words[i]!) && !anchored(i)) toks[i] = { kind: 'other', value: 0 };
+    if (AMBIGUOUS_NUMBER_WORDS.has(words[i]!) && anchored(i)) anchoredAt.add(i);
+  }
+  for (let grew = true; grew; ) {
+    grew = false;
+    for (let i = 0; i < words.length; i += 1) {
+      if (anchoredAt.has(i) || !CHAINING_NUMBER_WORDS.has(words[i]!)) continue;
+      if ([i - 1, i + 1].some((j) => anchoredAt.has(j) && CHAINING_NUMBER_WORDS.has(words[j]!))) {
+        anchoredAt.add(i);
+        grew = true;
+      }
+    }
+  }
+  for (let i = 0; i < words.length; i += 1) {
+    if (AMBIGUOUS_NUMBER_WORDS.has(words[i]!) && !anchoredAt.has(i)) toks[i] = { kind: 'other', value: 0 };
   }
 
   const isWordNumber = (i: number) => {
