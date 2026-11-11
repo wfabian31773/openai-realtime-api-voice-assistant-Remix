@@ -58,6 +58,7 @@ describe('1. a visit named only as a document\'s source stays on the surgery lin
   it('a document and an ask for a visit still reach the Hub', () => {
     expect(departmentFor('Patient wants the visit notes and needs to book a new appointment.', SURGERY)).toBe(HUB);
     expect(departmentFor('Patient needs the visit notes and wants to set up a follow-up visit.', SURGERY)).toBe(HUB);
+    expect(departmentFor('Patient wants the visit notes and needs to schedule a follow-up.', SURGERY)).toBe(HUB);
   });
 
   it('CA643d797c4828b526435323ffbba61055: a new patient with a referral note still reaches the Hub (staff moved it there)', () => {
@@ -128,6 +129,7 @@ describe('3. "needs scheduling" for an eye exam reaches the Hub from the surgery
     'Patient needs to reschedule her surgery.',
     'Needs scheduling for an eye exam before her cataract surgery.',
     'Needs scheduling for a vitrectomy and an eye exam.',
+    'Needs scheduling for an eye exam and her sx date.',
   ])('the surgery-date exception holds, stays home: %s', (text) => {
     expect(departmentFor(text, SURGERY)).toBe(SURGERY);
   });

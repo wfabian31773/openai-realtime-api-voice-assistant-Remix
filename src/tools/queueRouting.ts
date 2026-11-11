@@ -241,15 +241,14 @@ export function asksAboutARoutineVisit(text: string): boolean {
 const VISIT_WORD_G = new RegExp(VISIT_WORD.source, 'g');
 const VISIT_KIND = /(?:\b(?:new|routine|follow[ -]?up|return|office|clinic|eye|annual|yearly|dilated|last|recent)\s+)+$/;
 
+// Called only once `VISIT_WORD` has matched, so the loop runs at least once.
 function everyVisitIsADocumentsSource(folded: string): boolean {
-  let named = false;
   for (const visit of folded.matchAll(VISIT_WORD_G)) {
-    named = true;
     const before = folded.slice(0, visit.index!).replace(VISIT_KIND, '');
     const after = folded.slice(visit.index! + visit[0].length).replace(THEN_APPOINTMENT_NOUN, '');
     if (!BOUND_AFTER.test(after) && !BOUND_BEFORE.test(before)) return false;
   }
-  return named && !hasSeparateAppointmentAsk(folded);
+  return !hasSeparateAppointmentAsk(folded);
 }
 
 /**
