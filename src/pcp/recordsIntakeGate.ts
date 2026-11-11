@@ -53,6 +53,8 @@ export const ANSWERED_BY: Record<RecordsAskField, string> = {
 
 export interface RecordsAsk {
   field: RecordsAskField;
+  /** What `asked` is keyed on: the field, or the destination for one method. */
+  key: string;
   prompt: string;
   /** False when this is a sibling inside the batch window: same question, nothing spent. */
   spends: boolean;
@@ -72,20 +74,32 @@ export function recordsFieldsMissing(state: PcpConversationState): Array<{ field
 }
 
 /**
+ * What an ask is remembered by. The destination is asked per method (Box
+ * Codex review of 7c8df0ca, P2): a fax number asked and then a switch to email
+ * clears the destination, and the email address is a different question that
+ * has not been asked. A caller switching back to a method already asked is not
+ * asked again.
+ */
+export function recordsAskKey(field: RecordsAskField, state: PcpConversationState): string {
+  return field === 'recordsDeliveryDestination' ? `${field}:${state.recordsDeliveryMethod ?? ''}` : field;
+}
+
+/**
  * The next question, or null when the request may file.
  *
- * `asked` maps a field to when it was first asked on this call. The caller
- * stamps it when `spends` is true.
+ * `asked` maps an ask's key (`recordsAskKey`) to when it was first asked on
+ * this call. The caller stamps `ask.key` when `spends` is true.
  */
 export function recordsAskFor(
   state: PcpConversationState,
-  asked: ReadonlyMap<RecordsAskField, number>,
+  asked: ReadonlyMap<string, number>,
   now: number,
 ): RecordsAsk | null {
   for (const { field, prompt } of recordsFieldsMissing(state)) {
-    const at = asked.get(field);
-    if (at === undefined) return { field, prompt, spends: true };
-    if (now - at < RECORDS_ASK_BATCH_MS) return { field, prompt, spends: false };
+    const key = recordsAskKey(field, state);
+    const at = asked.get(key);
+    if (at === undefined) return { field, key, prompt, spends: true };
+    if (now - at < RECORDS_ASK_BATCH_MS) return { field, key, prompt, spends: false };
     // Asked and not answered: not asked again.
   }
   return null;

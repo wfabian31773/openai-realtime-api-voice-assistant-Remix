@@ -52,7 +52,7 @@ import {
   ticketDeliveryNote,
 } from '../pcp/recordsDelivery';
 import { ticketReadiness, nextRequiredAsk, annotationFor, MAX_BLOCKS } from '../pcp/ticketRequirements';
-import { recordsAskFor, recordsAskGuidance, recordsIdentityGaps, type RecordsAskField } from '../pcp/recordsIntakeGate';
+import { recordsAskFor, recordsAskGuidance, recordsIdentityGaps } from '../pcp/recordsIntakeGate';
 import { namesAPatient, submitPcpTicket, submitPcpWithdrawal, type PcpTicketPayload } from '../pcp/pcpTicketing';
 import { toldTheCallerItWasRecorded } from '../pcp/toldItWasRecorded';
 import { intakeReplyForTheModel } from '../pcp/intakeNextStep';
@@ -661,7 +661,7 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
    * inside the batch window is the model's own batch, not an answer
    * (recordsIntakeGate). Per call, like every budget here.
    */
-  const recordsAsked = new Map<RecordsAskField, number>();
+  const recordsAsked = new Map<string, number>();
   /**
    * THE RECORDS TOOL'S OWN ANSWERS, written where every other reader looks.
    *
@@ -2293,7 +2293,7 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
         const ask = recordsAskFor(gateState, recordsAsked, now);
         if (ask) {
           if (ask.spends) {
-            recordsAsked.set(ask.field, now);
+            recordsAsked.set(ask.key, now);
             ticketBlocksUsed += 1;
           }
           return refusePcp(`missing_required_field:${ask.field}`, {
@@ -2355,10 +2355,23 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
        * off the clock when the office can be classified (operator, 2026-09-14),
        * PCP Support for a person to route when it cannot.
        */
+      /**
+       * A STATED PERSONAL TIE WINS OVER A WORKPLACE (Box Codex review of
+       * 7c8df0ca, P1). A daughter who works at a medical group and says she is
+       * calling for her mother is her mother's personal representative, on the
+       * patient's clock (operator, 2026-09-13: "personal rep stands in for the
+       * patient"). The relationship she stated is read before the organisation
+       * she named, so where she works cannot take her request off the clock.
+       */
+      const { classifyRequester } = await import('../tools/medicalRecordsTaxonomy');
+      const statedTie = classifyRequester(String(state.statedRelationship ?? ''));
       const recordsRoute: 'patient' | 'professional' =
-        state.callerIsThePatient !== true && String(state.callerOrganization ?? '').trim()
-          ? 'professional'
-          : 'patient';
+        state.callerIsThePatient === true
+        || statedTie === 'personal_representative'
+        || statedTie === 'patient'
+        || !String(state.callerOrganization ?? '').trim()
+          ? 'patient'
+          : 'professional';
       const toMedicalRecords = enrichingTheTicket
         ? null
         : await fileToMedicalRecords(callId, metadata, state, narrative, {

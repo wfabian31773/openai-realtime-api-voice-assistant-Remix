@@ -338,3 +338,75 @@ describe('an office is not the patient: the case never opens on the patient\'s c
     expect(p.requestorType).toBe('patient');
   });
 });
+
+describe('Box Codex review of 7c8df0ca (#445)', () => {
+  /**
+   * P1: a personal representative who also names a medical workplace was
+   * routed as a professional, because the route read only callerIsThePatient
+   * and callerOrganization. A relationship the caller stated is the stronger
+   * evidence, and it puts the request on the patient's clock.
+   */
+  for (const relationship of ['personal representative', 'my mother', 'legal guardian']) {
+    it(`a caller who says "${relationship}" and names a medical workplace takes the patient route`, async () => {
+      const { agent } = build('CA29957eba32773563e1d4919e9f83dc6a');
+      await call(agent, 'record_pcp_intake', {
+        callerName: 'Testa Caller', callerOrganization: 'Example Medical Group', statedRelationship: relationship,
+        ...PATIENT, patientDob: '1950-01-02', ...FAX,
+      });
+      const filed = await call(agent, RECORDS, { narrative: NARRATIVE });
+      expect(filed.success, JSON.stringify(filed)).not.toBe(false);
+      const p = (ticketing.createTicket.mock.calls as unknown as unknown[][])[0]?.[0] as Record<string, unknown>;
+      expect(p, 'the records library filed it').toBeTruthy();
+      expect(p.departmentId).toBe(16);
+      expect(p.requestorType).toBe('personal_representative');
+      expect(p.capClockApplies).not.toBe(false);
+    });
+  }
+
+  it('an office that states a professional relationship still files off the clock', async () => {
+    const { agent } = build('CA5df1d4e8dfc3084326b1059f68521b17');
+    await call(agent, 'record_pcp_intake', {
+      callerName: 'Testa Caller', callerOrganization: 'Example Medical Group', statedRelationship: 'referring provider',
+      ...PATIENT, patientDob: '1950-01-02', ...FAX,
+    });
+    const filed = await call(agent, RECORDS, { narrative: NARRATIVE });
+    expect(filed.success, JSON.stringify(filed)).not.toBe(false);
+    const p = (ticketing.createTicket.mock.calls as unknown as unknown[][])[0]?.[0] as Record<string, unknown>;
+    expect(p, 'the records library filed it').toBeTruthy();
+    expect(p.requestorType).toBe('provider');
+    expect(p.capClockApplies).toBe(false);
+  });
+
+  /**
+   * P2: the destination ask was keyed by field only, so after the fax-number
+   * ask a switch to email cleared the destination and the spent ask let the
+   * request file without ever asking for the email address.
+   */
+  it('a switch from fax to email after the fax-number ask is asked for the email address once', async () => {
+    const { agent } = build(DELIVERY_LOST_ONLY[2]);
+    await call(agent, 'record_pcp_intake', { ...OFFICE, ...PATIENT, recordsDeliveryMethod: 'fax' });
+    const r1 = await call(agent, RECORDS, { narrative: NARRATIVE });
+    expect(r1.say).toMatch(/fax/i);
+    callerAnswers();
+    const r2 = await call(agent, RECORDS, { narrative: NARRATIVE, recordsDeliveryMethod: 'email' });
+    expect(r2.say, JSON.stringify(r2)).toMatch(/email/i);
+    expect(ticketing.createTicket).not.toHaveBeenCalled();
+    expect(ticketing.createPcpTicket).not.toHaveBeenCalled();
+    callerAnswers();
+    // The email ask is spent too: the next call files, with the gap written on it.
+    const r3 = await call(agent, RECORDS, { narrative: NARRATIVE });
+    expect(r3.say ?? '').not.toMatch(/email address/i);
+    const p = filedPayload();
+    expect(p, 'it filed').toBeTruthy();
+  });
+
+  it('the same method is not asked for its destination twice', async () => {
+    const { agent } = build(DELIVERY_LOST_ONLY[3]);
+    await call(agent, 'record_pcp_intake', { ...OFFICE, ...PATIENT, recordsDeliveryMethod: 'fax' });
+    const r1 = await call(agent, RECORDS, { narrative: NARRATIVE });
+    expect(r1.say).toMatch(/fax/i);
+    callerAnswers();
+    await call(agent, RECORDS, { narrative: NARRATIVE });
+    expect(filedPayload(), 'it filed after one fax-number ask').toBeTruthy();
+  });
+});
