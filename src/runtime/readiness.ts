@@ -1587,8 +1587,19 @@ import { callEnvironment } from "./callRecord";
  * date. Above main's v208 (#455, `9ee3b954`), which it contains along with
  * v206 (#447, `6e96e6fe`). No migration.
  */
+/**
+ * v210 — THE NPX OUTREACH CAMPAIGN CALLS ON THE HOLIDAYS THE PRACTICE KEEPS
+ * OPEN (2026-11-11). Operator, on Veterans Day: "we should be heavily
+ * outreaching today, all possible candidates are liable to be home today."
+ * The dialler held every NPX call that day for `holiday` while the queue
+ * lanes took 772 calls. `CallingWindow.dialOnOpenHolidays` lets a campaign
+ * call on `practiceOpenHolidaysFor` (Columbus Day and Veterans Day, read from
+ * the queue lanes' own call counts); only the NPX window sets it. Above
+ * main's v207 (#454, `b7f2b58e`), which it contains along with v208 (#455,
+ * `9ee3b954`). v209 is #457 on its open branch. No migration.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v207-a-wrong-birthday-is-not-read-20261111";
+  "voice-runtime-v210-npx-calls-on-open-holidays-20261111";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can
