@@ -1573,8 +1573,7 @@ import { callEnvironment } from "./callRecord";
  * contains. No app-code change. No migration.
  */
 /**
- * v209 — A WRONG BIRTHDAY IS NOT READ FROM THE TRANSCRIPT (2026-11-11; v207 while
- * #454 was open, renumbered when #455 took v208 on main). The
+ * v207 — A WRONG BIRTHDAY IS NOT READ FROM THE TRANSCRIPT (2026-11-11). The
  * operator's post-merge review sweep of #447 found five ways the v206 reader
  * could put a wrong date of birth on a ticket: "It is not June third." kept
  * June 3rd; "One one nineteen fifty-one" read as January 19th; "June third,
@@ -1588,8 +1587,18 @@ import { callEnvironment } from "./callRecord";
  * date. Above main's v208 (#455, `9ee3b954`), which it contains along with
  * v206 (#447, `6e96e6fe`). No migration.
  */
+/**
+ * v209 — "THAT IS NOT MY BIRTHDAY" TAKES THE DATE BACK, AND THE MARKER IS
+ * ABOVE v208 AGAIN (2026-11-11). #454 merged as v207 (`b7f2b58e`) after main
+ * had moved to v208 (#455), so main's marker read v207 below the v208 it
+ * contains. This build carries the Codex round-5 fix that landed on #454's
+ * branch after the merge: a sentence saying the date is not the birthday
+ * takes back a date said before it in the same turn and clears the held date
+ * in any later caller line. Above main's v207 (#454, `b7f2b58e`), which it
+ * contains along with v208 (#455, `9ee3b954`). No migration.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v209-a-wrong-birthday-is-not-read-20261111";
+  "voice-runtime-v209-not-my-birthday-takes-the-date-back-20261111";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can
