@@ -236,6 +236,15 @@ describe('what stays as it was', () => {
     pcpDirector.clear(lunch.sid);
   });
 
+  it('a create_pcp_task that does not answer the question files as before', async () => {
+    const { agent } = setUp(lunch);
+    await call(agent, 'record_pcp_intake', { ...OFFICE, callPurpose: 'service_inquiry' });
+    const r = await call(agent, 'create_pcp_task', { narrative: 'Caller asked about a referral status.' });
+    expect(r.refused).not.toBe('no_request_stated');
+    expect(ticketing.createPcpTicket).toHaveBeenCalledTimes(1);
+    pcpDirector.clear(lunch.sid);
+  });
+
   it('a call that already filed is not blocked by a later false (the enrichment re-file)', async () => {
     const { agent } = setUp(lunch);
     await call(agent, 'record_pcp_intake', { ...OFFICE, callPurpose: 'service_inquiry' });
