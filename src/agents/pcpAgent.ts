@@ -2550,7 +2550,7 @@ const CALLER_STATED_A_REQUEST = z
   .boolean()
   .optional()
   .describe(
-    'true when the caller has said what they need (anything beyond asking for a person); false when all they have asked for is a person, a representative or a department.',
+    'false only when all the caller has asked for is a person; otherwise true.',
   );
 
 /**
