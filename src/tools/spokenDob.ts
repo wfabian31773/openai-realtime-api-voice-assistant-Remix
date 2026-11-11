@@ -538,19 +538,37 @@ function namesTheHeldDate(uttered: string, iso: string): boolean {
 }
 
 /**
- * THE SENTENCES A REJECTION IS READ FROM (v207, Codex P2 on #454). A sentence
- * about another date ("My surgery is not June third.") is not about the
- * birthday and does not clear it. A sentence that names the birthday as well
- * ("My birthday is not June third, my surgery is.") is kept, the other way
- * round from `aboutTheBirthday`: reading a date from a sentence that mixes
- * two dates could take the wrong one, while clearing on one only loses a date
- * that is asked again, which is the safe side.
+ * A SENTENCE A REJECTION MAY BE READ FROM (v207, Codex P2 on #454, round 1).
+ * A sentence about another date ("My surgery is not June third.") is not
+ * about the birthday and does not clear it. A sentence that names the
+ * birthday as well ("My birthday is not June third, my surgery is.") is kept,
+ * the other way round from `aboutTheBirthday`: reading a date from a sentence
+ * that mixes two dates could take the wrong one, while clearing on one only
+ * loses a date that is asked again, which is the safe side.
  */
-function aboutTheBirthdayForARejection(uttered: string): string {
-  return uttered
-    .split(/(?<=[.!?])\s+/)
-    .filter((sentence) => !namesAnotherDate(fold(sentence)) || callerNamesTheBirthday(sentence))
-    .join(' ');
+function mayRejectTheBirthday(sentence: string): boolean {
+  return !namesAnotherDate(fold(sentence)) || callerNamesTheBirthday(sentence);
+}
+
+/**
+ * A SENTENCE THAT IS NOTHING BUT A DENIAL (v207, round 2): "That's wrong.",
+ * "No.", "That's not right.", "That's not my birthday.", "No es correcto."
+ * Only such a sentence, or one after a date the caller asked back as a
+ * question, is read against the date in the sentence before it. A word not in
+ * this list makes the sentence about something else ("I do not need anything
+ * else."), so a missing word keeps the held date only where a statement of
+ * the date is followed by a denial worded some other way.
+ */
+const BARE_DENIAL_WORDS = new Set([
+  'no', 'nope', 'nah', 'not', 'wrong', 'incorrect', 'right', 'correct', 'that', 'thats', 's', 'is', 'it',
+  'its', 'isn', 't', 'my', 'mine', 'birthday', 'date', 'of', 'birth', 'the', 'one', 'uh', 'um', 'oh',
+  'es', 'eso', 'esa', 'correcto', 'correcta', 'incorrecto', 'incorrecta', 'equivocado', 'equivocada',
+  'mi', 'cumpleanos', 'fecha', 'de', 'nacimiento', 'esta', 'mal',
+]);
+
+function isABareDenial(sentence: string): boolean {
+  const words = fold(sentence).split(' ').filter(Boolean);
+  return words.length > 0 && words.every((w) => BARE_DENIAL_WORDS.has(w)) && (rejectsADate(sentence) || negatesADate(sentence));
 }
 
 /**
@@ -561,15 +579,29 @@ function aboutTheBirthdayForARejection(uttered: string): string {
  * "June 3, 1944." then "It is not June third." kept June 3rd (Codex
  * post-merge sweep of #447). It was not read at all in the same turn, or after
  * a line that asks nothing. Any caller line after the one the date came from
- * that negates and names the held month and day clears it, read from the
- * sentences that are about the birthday. Which date the agent last asked
- * about is not read here: "It's not June third." after a surgery question
- * still clears, because the caller may be correcting the birthday, and a held
- * date that may be wrong is not kept.
+ * clears it when a sentence names the held month and day and negates it, or
+ * when the sentence after one that names it is a bare denial, or denies a
+ * date the caller asked back ("June third? That's not my birthday, I don't
+ * know where that came from."). A negation in another sentence does not reach
+ * the date ("June third is correct. I do not need anything else.", Codex P2
+ * on #454, round 2). Which date the agent last asked about is not read here:
+ * "It's not June third." after a surgery question still clears, because the
+ * caller may be correcting the birthday, and a held date that may be wrong is
+ * not kept.
  */
 function rejectsTheHeldDate(uttered: string, iso: string): boolean {
-  const about = aboutTheBirthdayForARejection(uttered);
-  return negatesADate(about) && namesTheHeldDate(about, iso);
+  const sentences = uttered.split(/(?<=[.!?])\s+/);
+  for (let i = 0; i < sentences.length; i += 1) {
+    const sentence = sentences[i]!;
+    if (!mayRejectTheBirthday(sentence) || !namesTheHeldDate(sentence, iso)) continue;
+    if (negatesADate(sentence)) return true;
+    const next = sentences[i + 1];
+    if (next === undefined || !mayRejectTheBirthday(next)) continue;
+    const askedBack = /\?\s*$/.test(sentence);
+    if (isABareDenial(next)) return true;
+    if (askedBack && (rejectsADate(next) || negatesADate(next))) return true;
+  }
+  return false;
 }
 
 type TranscriptRead =

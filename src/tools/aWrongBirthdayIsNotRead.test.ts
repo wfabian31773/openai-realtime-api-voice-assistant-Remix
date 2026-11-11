@@ -107,6 +107,23 @@ describe('1. a date of birth the caller says is not theirs is cleared', () => {
     ).toBeUndefined();
   });
 
+  it('a negation in another sentence does not reach the date (Codex P2 on #454, round 2)', () => {
+    const after = (line: string) => dobFromCallerAnswer([ASK, C('June 3, 1944.'), A('Is there anything else?'), C(line)]);
+    expect(after('June third is correct. I do not need anything else.')).toBe('1944-06-03');
+    expect(after("Yes, June third. No, that's all.")).toBe('1944-06-03');
+    expect(after("June third. I don't have my card with me.")).toBe('1944-06-03');
+    expect(after('June third. Is that right?')).toBe('1944-06-03');
+  });
+
+  it('but a bare denial after the date, or a denial after the date asked back, still clears it', () => {
+    const after = (line: string) => dobFromCallerAnswer([ASK, C('June 3, 1944.'), A('Thank you.'), C(line)]);
+    expect(after("June third. That's wrong.")).toBeUndefined();
+    expect(after("June third. That's not my birthday.")).toBeUndefined();
+    expect(after('June third. No.')).toBeUndefined();
+    expect(after('Tres de junio. No es correcto.')).toBeUndefined();
+    expect(after("June third? I don't know where that came from.")).toBeUndefined();
+  });
+
   it('negatesADate: a denial, a "not", but not a leading "No." or a correction word', () => {
     expect(negatesADate('It is not June third.')).toBe(true);
     expect(negatesADate("It isn't June 3")).toBe(true);
