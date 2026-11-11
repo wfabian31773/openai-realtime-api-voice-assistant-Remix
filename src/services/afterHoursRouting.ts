@@ -50,8 +50,7 @@ import { AFTER_HOURS_DEPARTMENT_ID } from '../tools/afterHoursTaxonomy';
 import { MEDICAL_RECORDS_DEPARTMENT_ID } from '../tools/medicalRecordsTaxonomy';
 import { OPTICAL_DEPARTMENT_ID } from '../tools/opticalTaxonomy';
 import { HUB_DEPARTMENT_ID } from '../tools/hubTaxonomy';
-import { namesAnOperation } from '../tools/queueRouting';
-import { isSurgeryRequest } from '../tools/requestClassification';
+import { namesAProcedure } from '../tools/queueRouting';
 
 /** The Support Center's own pair for a post-op question in department 8. */
 export const POST_PROCEDURE_REQUEST = {
@@ -258,13 +257,13 @@ export function routeAfterHoursTicket(input: {
    * operation is named, which keeps the surgery-date exception. A named
    * procedure counts as well as the word (`isSurgeryRequest` reads the surgery
    * taxonomy's own procedures, so a vitrectomy or a blepharoplasty is one too;
-   * Codex on #450, 5302a5bc).
+   * Codex on #450, 5302a5bc). v205: "needs scheduling for an eye exam" names
+   * the exam, not an operation (`namesAProcedure`), so it reaches the Hub.
    */
   if (
     input.appointmentIntent === true &&
     input.urgent !== true &&
-    !namesAnOperation(input.text) &&
-    !isSurgeryRequest(input.text)
+    !namesAProcedure(input.text)
   ) {
     return { kind: 'scheduling', departmentId: HUB_DEPARTMENT_ID };
   }
