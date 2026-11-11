@@ -219,11 +219,21 @@ const CONNECT_TO = new RegExp(
  * is the one shape of a person word before a document word those 30 days
  * held (1 ticket).
  */
-const DOCUMENT_AFTER_THE_NOUN =
-  "(?!['\u2019]s\\b|s'|\\s+(?:notes?|reports?|records?|letters?|orders?|charts?|summary|summaries|referrals?|forms?|fax(?:es)?|numbers?|info|information|schedules?|address(?:es)?|phone|documents?|paperwork|results|email)\\b)";
+const DOCUMENT_WORDS =
+  '(?:notes?|reports?|records?|letters?|orders?|charts?|summary|summaries|referrals?|forms?|fax(?:es)?|numbers?|info|information|schedules?|address(?:es)?|phone|documents?|paperwork|results|email)';
+const DOCUMENT_AFTER_THE_NOUN = `(?!['\u2019]s\\b|s'|\\s+${DOCUMENT_WORDS}\\b)`;
+/**
+ * The words between `get me` and the noun may not hold a person noun that
+ * owns a document. Without this the regex backtracks past a rejected noun to
+ * a later one: "get me the provider notes from the office" refused
+ * `provider` and then matched `office` (Codex P2 on #453). "Get me the
+ * doctor's office" still matches, because `doctor's` owns an office, not a
+ * document.
+ */
+const NO_DOCUMENT_OWNER = `(?!\\b${HUMAN_NOUNS}(?:['\u2019]s|s')?\\s+${DOCUMENT_WORDS}\\b)`;
 
 const GET_A_PERSON = new RegExp(
-  `\\bget\\s+(?:me|them|us)\\b[^.]{0,25}\\b${HUMAN_NOUNS}\\b${DOCUMENT_AFTER_THE_NOUN}`,
+  `\\bget\\s+(?:me|them|us)\\b(?:${NO_DOCUMENT_OWNER}[^.]){0,25}\\b${HUMAN_NOUNS}\\b${DOCUMENT_AFTER_THE_NOUN}`,
   'ig',
 );
 

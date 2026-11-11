@@ -317,11 +317,11 @@ const LENS_SYMPTOM =
  * of his eye drops" asks for the drops. `refill` and `pharmacy` are not read
  * here: lens wearers refill lenses at pharmacies, and all 11 tech-line lens
  * tickets in the 14 days to 2026-11-10 that said so were moved to Optical by
- * staff. Drops made for the lens (rewetting, lens or comfort drops) are the
- * lens's.
+ * staff. Drops made for the lens (rewetting, lens, comfort or lubricating
+ * drops, "eye drops" among them) are the lens's (Codex P2 on #453).
  */
 const LENS_DRUG =
-  /\b(?:eye ?drops?|(?<!(?:rewetting|lens|comfort|lubricating) )drops|medications?|medicines?|ointments?|antibiotics?|steroids?|gotas|medicamentos?|medicinas?)\b/;
+  /\b(?:(?<!(?:rewetting|lens|comfort|lubricating|contact) )(?:eye ?drops?|(?<!eye )drops)|medications?|medicines?|ointments?|antibiotics?|steroids?|gotas|medicamentos?|medicinas?)\b/;
 /** Eyewear by name, for the exam-already-happened rule and the optical-line guard. */
 const EYEWEAR = /\b(?:glasses|eyeglass(?:es)?|spectacles|frames?|lens|lenses|contacts|lentes|gafas)\b/;
 

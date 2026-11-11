@@ -125,6 +125,15 @@ describe('5. a drug named beside the lenses stays on the medication line', () =>
   it('drops made for the lens are the lens\'s', () => {
     expect(departmentFor('Needs rewetting drops for her contacts.', TECH)).toBe(OPTICAL);
   });
+
+  it.each([
+    'Wears contacts and needs rewetting eye drops.',
+    'Patient needs more contact lens eye drops.',
+    'Needs lubricating eye drops for her contacts.',
+    'Wears contacts and wants comfort drops.',
+  ])('drops made for the lens go to Optical (Codex P2 on #453): %s', (text) => {
+    expect(departmentFor(text, TECH)).toBe(OPTICAL);
+  });
 });
 
 describe('3. "needs scheduling" for an eye exam reaches the Hub from the surgery line', () => {
