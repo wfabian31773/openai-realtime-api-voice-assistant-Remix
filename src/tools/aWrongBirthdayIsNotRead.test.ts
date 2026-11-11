@@ -189,6 +189,34 @@ describe('4. a sentence about another date is not an answer about the birthday',
     expect(dobFromCallerAnswer([ASK, C('June 3, 1944.'), REASK, C('The appointment is December 5.')])).toBe('1944-06-03');
   });
 
+  it('a sentence that takes the date back as the other date leaves no birthday (Codex P1 on #454, round 3)', () => {
+    expect(dobFromCallerAnswer([ASK, C('June 3, 1944. Sorry, that is my surgery date.')])).toBeUndefined();
+    expect(dobFromCallerAnswer([ASK, C('June 3, 1944. That is my surgery date.')])).toBeUndefined();
+    expect(dobFromCallerAnswer([ASK, C('June 3, 1944. Sorry, I meant the surgery.')])).toBeUndefined();
+    expect(dobFromCallerAnswer([ASK, C('3 de junio de 1944. Perdón, la cirugía.')])).toBeUndefined();
+    expect(dobFromCallerAnswer([ASK, C('3 de junio de 1944. Esa es la fecha de mi cirugía.')])).toBeUndefined();
+    // In a later turn of the same ask.
+    expect(dobFromCallerAnswer([ASK, C('June 3, 1944.'), C('Sorry, that is my surgery date.')])).toBeUndefined();
+    // And it does not leave an earlier answer standing either.
+    expect(dobFromCallerAnswer([ASK, C('May 1, 1950.'), REASK, C('June 3, 1944. Sorry, that is my surgery date.')])).toBeUndefined();
+    // A birthday said after the withdrawal still reads.
+    expect(
+      dobFromCallerAnswer([ASK, C('June 3, 1944. Sorry, that is my surgery date. My birthday is May 1, 1950.')]),
+    ).toBe('1950-05-01');
+  });
+
+  it('controls: a sentence that only mentions the other date takes nothing back', () => {
+    expect(dobFromCallerAnswer([ASK, C('June 3, 1944. This is about my surgery.')])).toBe('1944-06-03');
+    expect(dobFromCallerAnswer([ASK, C("June 3, 1944. It's for my appointment.")])).toBe('1944-06-03');
+    // A bare "sorry" takes back only a date said before it in the same turn, as on v206.
+    expect(dobFromCallerAnswer([ASK, C('June 3, 1944.'), C("Sorry, I can't make my appointment.")])).toBe('1944-06-03');
+    expect(dobFromCallerAnswer([ASK, C("June 3, 1944. Sorry, I can't make my appointment.")])).toBeUndefined();
+    // But a strong cue does, from an earlier turn of the same ask.
+    expect(dobFromCallerAnswer([ASK, C('June 3, 1944.'), C('I meant the surgery.')])).toBeUndefined();
+    // With no date before it in the ask, a pointer has nothing to take back here.
+    expect(dobFromCallerAnswer([ASK, C('That is my surgery date.')])).toBeUndefined();
+  });
+
   it('controls: the birthday in its own sentence still reads (the measured shape)', () => {
     expect(dobFromCallerAnswer([ASK, C('July 22nd, 1960. I want to confirm my appointment on Friday.')])).toBe('1960-07-22');
     expect(

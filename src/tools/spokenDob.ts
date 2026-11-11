@@ -496,11 +496,69 @@ type WindowRead =
  * every one that answered a date-of-birth question said the birthday in a
  * sentence of its own.
  */
-function aboutTheBirthday(uttered: string): string {
-  return uttered
-    .split(/(?<=[.!?])\s+/)
-    .filter((sentence) => !namesAnotherDate(fold(sentence)))
-    .join(' ');
+function aboutTheBirthday(uttered: string, dateBefore = false): { text: string; withdrew: boolean } {
+  let kept: string[] = [];
+  let withdrew = false;
+  for (const sentence of uttered.split(/(?<=[.!?])\s+/)) {
+    if (!namesAnotherDate(fold(sentence))) {
+      kept.push(sentence);
+      continue;
+    }
+    const dateInTurn = looksLikeDobAttempt(kept.join(' '));
+    if ((dateInTurn || dateBefore) && withdrawsTheDateBefore(sentence, dateInTurn)) {
+      kept = [];
+      withdrew = true;
+    }
+  }
+  return { text: kept.join(' '), withdrew };
+}
+
+/**
+ * A SENTENCE ABOUT ANOTHER DATE THAT TAKES BACK THE DATE BEFORE IT (v207,
+ * Codex P1 on #454, round 3). "June 3, 1944. Sorry, that is my surgery date."
+ * read June 3rd, 1944, because the sentence that withdrew it names the
+ * surgery and was dropped with its "sorry"; v206 read no date. After a date in
+ * the same turn, or earlier in the same window, a sentence that names another
+ * date and carries no date of its own withdraws it when it opens with a
+ * correction ("Sorry, I meant the surgery.", "Perdón, la cirugía.", v206's own
+ * correction cues), or says the date was the other one and nothing else
+ * ("That is my surgery date.", "Esa es la fecha de mi cirugía."). A sentence
+ * that only mentions the other date is not a withdrawal ("This is about my
+ * surgery.", "It's for my appointment.", "Yeah, so I'm sorry, but I can't go
+ * today to my appointment."), and a sentence with a date of its own corrects
+ * nothing about the birthday ("I mean the surgery was December 5, 2025.", the
+ * operator's case 4). Over the 14 days to 2026-11-11, 9 of 2,052 caller lines
+ * with a date had a later sentence naming another date beside a pointer or a
+ * correction word; none of them took a birthday back.
+ */
+const LEADING_FILLERS = /^(?:(?:uh|um|oh|so|and|well|okay|ok|no|bueno|o sea)\s+)*/;
+const WEAK_CUES = /^(?:(?:sorry|oops|actually|wait|perdon)\s+)+/;
+const STRONG_CUE = /^(?:i mean|i meant|mejor dicho|queria decir|en realidad)( |$)/;
+const POINTER = /^(?:that|this|it|ese|esa|eso|esta|este|esto) (?:s|is|was|es|era|fue)( |$)/;
+const WHAT_THE_DATE_WAS = new Set([
+  'my', 'the', 'her', 'his', 'our', 'a', 'of', 'date', 'day', 'mi', 'la', 'el', 'su', 'sus', 'de', 'del',
+  'fecha', 'dia',
+]);
+
+/**
+ * `dateInTurn`: a date was said earlier in this same turn. Only then does a
+ * bare "sorry" or "perdón" take it back, which is v206's own rule for a bare
+ * "sorry" (`SELF_CORRECTION_CUES`); a strong cue or "that is my surgery date"
+ * also takes back a date from an earlier turn of the same ask.
+ */
+function withdrawsTheDateBefore(sentence: string, dateInTurn: boolean): boolean {
+  const digits = numberWordsToDigits(sentence) ?? fold(sentence);
+  if (/\d/.test(digits) || digits.split(' ').some((w) => monthNumberFromWord(w))) return false;
+  const opened = fold(sentence).replace(LEADING_FILLERS, '');
+  const weak = WEAK_CUES.test(opened);
+  if (weak && dateInTurn) return true;
+  const rest = opened.replace(WEAK_CUES, '').replace(LEADING_FILLERS, '');
+  if (STRONG_CUE.test(rest)) return true;
+  const pointed = POINTER.exec(rest);
+  if (!pointed) return false;
+  const words = rest.slice(pointed[0].length).split(' ').filter(Boolean);
+  return words.length > 0 && words.every((w) => WHAT_THE_DATE_WAS.has(w) || OTHER_DATE_SUBJECTS.has(w))
+    && words.some((w) => OTHER_DATE_SUBJECTS.has(w));
 }
 
 const CALLER_BIRTHDAY_WORDS = /(^| )(born|birthday|birth|naci|nacio|nacimiento|cumpleanos)( |$)/;
@@ -609,13 +667,22 @@ type TranscriptRead =
   | { kind: 'cleared' }
   | { kind: 'none' };
 
+/** An attempt no held date can agree with: a date taken back in the window. */
+const WITHDRAWN = 'withdrawn';
+
 function readWindow(lines: readonly string[], from: number): WindowRead {
   let found: { iso: string; at: number; namesTheBirthday: boolean } | undefined;
   const attempts: string[] = [];
+  let withdrawnAt = -1;
   for (let j = from; j < lines.length; j += 1) {
     const next = lines[j] ?? '';
     if (!next.startsWith(CALLER_PREFIX)) break;
-    const about = aboutTheBirthday(next.slice(CALLER_PREFIX.length));
+    const { text: about, withdrew } = aboutTheBirthday(next.slice(CALLER_PREFIX.length), found !== undefined);
+    if (withdrew) {
+      // A date taken back, in this turn or an earlier turn of this window.
+      found = undefined;
+      withdrawnAt = j;
+    }
     const iso = isoFromUtterance(about);
     if (iso) {
       if (found === undefined || textAfterLastCorrection(about)) {
@@ -626,6 +693,8 @@ function readWindow(lines: readonly string[], from: number): WindowRead {
     if (found === undefined && looksLikeDobAttempt(about)) attempts.push(about);
   }
   if (found !== undefined) return { kind: 'date', ...found };
+  // A withdrawn date leaves nothing standing, here or from an earlier ask.
+  if (withdrawnAt >= 0) return { kind: 'refused', attempts: [...attempts, WITHDRAWN] };
   if (attempts.length) return { kind: 'refused', attempts };
   return { kind: 'empty' };
 }
