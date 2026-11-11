@@ -1481,8 +1481,25 @@ import { callEnvironment } from "./callRecord";
  * main's v198 (#446, `ff996d58`), which it contains along with v197 (#445,
  * `ec3af3fd`); v199 is #447 on its open branch. No migration.
  */
+/**
+ * v201 — THE SWEPT TICKET SAYS WHAT WAS ASKED (2026-11-11). Operator: tickets
+ * that say "reason not captured" leave staff calling back just to find out
+ * what the call was about. 14 days to 2026-11-10: 290 agent tickets on
+ * optical, surgery, tech and records carried that subject (surgery 88,
+ * optical 77, records 65, tech 60), every one traced to the teardown sweep's
+ * placeholder description (263 with no filing tool on the call; the rest a
+ * later call consolidated onto an earlier swept ticket). Where the model wrote
+ * nothing down, the sweep now asks a model (requestFromTheRecording.ts,
+ * gpt-4o-mini) for one short sentence of what the caller asked, checked in
+ * code for numbers, dates, addresses and held names, and files it as the
+ * description; on Medical Records with the catch-all reason. The records lane
+ * also gets v180's heard name (64 of 65 nameless records tickets were the
+ * sweep's). Off switch REQUEST_FROM_RECORDING_DISABLED=1. Above main's v200
+ * (#448, `65080651`), which it contains along with v198 (#446, `ff996d58`);
+ * v199 is #447 on its open branch. No migration.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v200-pcp-scheduling-asks-the-patient-20261111";
+  "voice-runtime-v201-the-swept-ticket-says-what-was-asked-20261111";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

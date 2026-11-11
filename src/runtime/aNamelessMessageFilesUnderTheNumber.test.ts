@@ -275,7 +275,7 @@ describe('the production lookup', () => {
 
   it('the runtime sweep passes it', () => {
     const runner = readFileSync(new URL('./sweepRunner.ts', import.meta.url), 'utf8');
-    expect(runner).toMatch(/runRequestSweep\(record, defaultFiler, askModelForThePatientName, lookUpTheCallingNumber\)/);
+    expect(runner).toMatch(/runRequestSweep\(record, defaultFiler, askModelForThePatientName, lookUpTheCallingNumber, askModelForTheRequest\)/);
     const runtime = readFileSync(new URL('./voiceRuntime.ts', import.meta.url), 'utf8');
     expect(runtime).toMatch(/options\.sweepCall \?\? runProductionSweep/);
   });
