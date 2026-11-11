@@ -1546,8 +1546,24 @@ import { callEnvironment } from "./callRecord";
  * instead of dead-lettering. Above main's v204 (#452, `caffbeb4`). No
  * migration.
  */
+/**
+ * v206 — A DATE OF BIRTH THE CALLER GAVE REACHES THE TICKET (2026-11-11;
+ * v199 while #447 was open, renumbered when main moved to v205). Operator, on
+ * PCP-82755: understand why ticket fields are not populated. Queue-lane calls
+ * since about 11-07 whose caller answered a date-of-birth ask: 161; 25 took a
+ * date-of-birth refusal and 17 of those filed with none. The spoken-DOB reader
+ * now opens a window on a line that is only the format, takes a bare "sorry"
+ * correction and an agreeing partial the caller does not deny; the parser
+ * reads dates said in words, commas between digit groups, a repeated century
+ * and a year said digit by digit; and a certain name-and-date-of-birth match
+ * keeps the caller's spelling of the first name (`heardAs`) when it shares the
+ * chart name's opening. Reading one date across sentences and the agent's
+ * readback were withdrawn at round 4 of the Codex review. 9 of the 17 now
+ * carry a date of birth. Above main's v205 (#453, `e8619cbf`), which it
+ * contains. No migration.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v205-the-review-follow-ups-20261111";
+  "voice-runtime-v206-a-spoken-date-of-birth-reaches-the-ticket-20261111";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

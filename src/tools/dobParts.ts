@@ -44,6 +44,49 @@ export function readDobQuietly(
   return parse(spoken, SILENT);
 }
 
+/**
+ * A DENIAL OR A CORRECTION OF A DATE (Codex P1 on #447). One copy, read by
+ * the worded fallback below and by spokenDob's transcript reader. "No, not
+ * June 3" and "Actually, June 4" both reject a date; a "no" anywhere counts.
+ */
+const DENIAL_WORDS = new Set(['no', 'nope', 'nah', 'incorrect', 'wrong', 'negative', 'incorrecto', 'incorrecta']);
+const DENIAL_PHRASES = ['not right', 'not correct', 'not it', 'not my', 'thats not', 'that s not', 'equivocad'];
+const CORRECTION_WORDS = /(^| )(actually|sorry|wait|i mean|i meant|perdon|mejor dicho|en realidad)( |$)/;
+
+function foldForRejection(text: string): string {
+  return String(text ?? '')
+    .normalize('NFD')
+    .replace(/\p{M}/gu, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+}
+
+export function rejectsADate(uttered: string): boolean {
+  const folded = foldForRejection(uttered);
+  const words = folded.split(' ').filter(Boolean);
+  if (words.some((w) => DENIAL_WORDS.has(w))) return true;
+  const padded = ` ${words.join(' ')} `;
+  if (DENIAL_PHRASES.some((p) => padded.includes(` ${p}`))) return true;
+  return CORRECTION_WORDS.test(folded);
+}
+
+/**
+ * A WORDED ANSWER THAT NEGATES, DENIES OR CORRECTS (Codex P1 on #447, rounds
+ * 4 to 6). The worded fallback is new in v199, so it reads only an answer
+ * that is a date and nothing against it: any "not", "never", "-n't", denial
+ * or correction word anywhere in the line means no date. The one exception is
+ * a leading "No," (or "Nope,"), set off by punctuation, which corrects what
+ * came before ("No, June fourth nineteen forty-four."). Without the comma it
+ * is a negation ("No es el tres de junio…"), and that reads nothing. The
+ * digit parse is unchanged from main.
+ */
+function wordedAnswerIsRejected(raw: string): boolean {
+  const rest = String(raw ?? '').replace(/^\s*(no|nope|nah)\s*[,.!;:]+\s*/i, '');
+  if (rejectsADate(rest)) return true;
+  return /(^| )(not|never|nunca|jamas)( |$)|n t( |$)/.test(foldForRejection(rest));
+}
+
 /** Where a parser's log lines go. See readDobQuietly. */
 type Announce = (line: string) => void;
 const SAY: Announce = (line) => console.info(line);
@@ -53,7 +96,28 @@ function parse(
   spoken: string,
   announce: Announce,
 ): { month: string; day: string; year: string } | null {
-  const iso = normalize(spoken, announce);
+  let iso = normalize(spoken, announce);
+  /**
+   * A DATE SAID IN WORDS, read only when the digits could not be (v199).
+   *
+   * On grok-voice-3.0 the transcriber writes a year the way it was spoken:
+   * "nineteen fifty-one", "mil novecientos cincuenta y seis", "zero five".
+   * On 2026-11-07..10, of the queue-lane calls whose caller gave a date of
+   * birth when asked, the agent's own readback or the caller's answer was in
+   * words on several, and nothing read it. This runs ONLY after the parse
+   * above refused, so by construction it changes no answer the parser gave
+   * before; it turns the words into digits and asks the same parser again.
+   */
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(iso)) {
+    const worded = numberWordsToDigits(spoken);
+    if (worded !== null && !wordedAnswerIsRejected(spoken)) {
+      const again = normalize(worded, SILENT);
+      if (/^\d{4}-\d{2}-\d{2}$/.test(again)) {
+        iso = again;
+        announce('[DOB] read a date of birth said in words');
+      }
+    }
+  }
   const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso);
   if (!m) {
     /**
@@ -272,7 +336,9 @@ function normalize(spoken: string, announce: Announce): string {
 function readDigitStringDate(raw: string, announce: Announce): string {
   const tokens = String(raw ?? '')
     .trim()
-    .split(/[\s\/\-.]+/)
+    // A comma separates as a space does (v199): "0 4 18, 1946." is a
+    // caller reading their birthday out digit by digit with one pause in it.
+    .split(/[\s\/\-.,]+/)
     .filter(Boolean);
   if (tokens.length === 0) return '';
   if (!tokens.every((t) => /^\d+$/.test(t))) return '';
@@ -291,6 +357,189 @@ function readDigitStringDate(raw: string, announce: Announce): string {
   if (!valid(y, mo, d)) return '';
   announce('[DOB] read a date of birth the caller said one digit at a time');
   return `${y}-${mo}-${d}`;
+}
+
+/**
+ * NUMBER WORDS TO DIGITS, English and Spanish (v199).
+ *
+ * Returns the utterance folded (lower case, accents and punctuation gone) with
+ * every number phrase replaced by its digits, or null when it holds no number
+ * word at all. It reads, and nothing more is claimed for it:
+ *
+ *   units, teens and tens        "seven" "nineteen" "fifty" "cincuenta"
+ *   tens and a unit              "fifty-one" "cincuenta y seis" "twenty first"
+ *   Spanish 21..29 in one word   "veintidos"
+ *   ordinals                     "seventh" "twentieth" "primero"
+ *   hundreds and thousands       "nineteen hundred fifty five" "mil novecientos
+ *                                cincuenta y seis" "two thousand eleven"
+ *   a zero before a unit         "zero five" "oh five" "cero tres" -> 05, 03
+ *
+ * A TEEN THEN A TENS STARTS A NEW NUMBER: "nineteen fifty-one" is "19 51", the
+ * two halves of a year, which `readDateFromAnything` already joins. A unit
+ * then a unit is two numbers ("one nine five five" is "1 9 5 5").
+ *
+ * WORDS THAT ARE ALSO ORDINARY WORDS ("oh", "one", "once", "un", "una", "uno",
+ * "first", "second", "primer", "primero") count only beside another number or
+ * a month, with at most one of y / and / de / del / of between, so "oh, it's
+ * March" and "just a second" stay words.
+ */
+const UNIT_WORDS: Record<string, number> = {
+  one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9,
+  un: 1, uno: 1, una: 1, dos: 2, tres: 3, cuatro: 4, cinco: 5, seis: 6, siete: 7, ocho: 8, nueve: 9,
+};
+const TEEN_WORDS: Record<string, number> = {
+  ten: 10, eleven: 11, twelve: 12, thirteen: 13, fourteen: 14, fifteen: 15,
+  sixteen: 16, seventeen: 17, eighteen: 18, nineteen: 19,
+  diez: 10, once: 11, doce: 12, trece: 13, catorce: 14, quince: 15,
+  dieciseis: 16, diecisiete: 17, dieciocho: 18, diecinueve: 19,
+};
+const TENS_WORDS: Record<string, number> = {
+  twenty: 20, thirty: 30, forty: 40, fourty: 40, fifty: 50, sixty: 60, seventy: 70, eighty: 80, ninety: 90,
+  veinte: 20, treinta: 30, cuarenta: 40, cincuenta: 50, sesenta: 60, setenta: 70, ochenta: 80, noventa: 90,
+};
+const COMPOUND_WORDS: Record<string, number> = {
+  veintiun: 21, veintiuno: 21, veintiuna: 21, veintidos: 22, veintitres: 23, veinticuatro: 24,
+  veinticinco: 25, veintiseis: 26, veintisiete: 27, veintiocho: 28, veintinueve: 29,
+};
+const ORDINAL_WORDS: Record<string, number> = {
+  first: 1, second: 2, third: 3, fourth: 4, fifth: 5, sixth: 6, seventh: 7, eighth: 8, ninth: 9,
+  tenth: 10, eleventh: 11, twelfth: 12, thirteenth: 13, fourteenth: 14, fifteenth: 15,
+  sixteenth: 16, seventeenth: 17, eighteenth: 18, nineteenth: 19, twentieth: 20, thirtieth: 30,
+  primer: 1, primero: 1,
+};
+const SPANISH_HUNDREDS: Record<string, number> = {
+  cien: 100, ciento: 100, doscientos: 200, trescientos: 300, cuatrocientos: 400, quinientos: 500,
+  seiscientos: 600, setecientos: 700, ochocientos: 800, novecientos: 900,
+};
+const ZERO_WORDS = new Set(['zero', 'oh', 'cero']);
+const AMBIGUOUS_NUMBER_WORDS = new Set([
+  'oh', 'one', 'once', 'un', 'una', 'uno', 'first', 'second', 'primer', 'primero',
+]);
+const BRIDGE_WORDS = new Set(['y', 'and', 'de', 'del', 'of']);
+
+type WordKind = 'zero' | 'unit' | 'teen' | 'tens' | 'compound' | 'ordinal' | 'hundreds' | 'hundred' | 'thousand' | 'digit' | 'month' | 'other';
+
+function kindOfWord(w: string): { kind: WordKind; value: number } {
+  if (/^\d+(st|nd|rd|th)?$/.test(w)) return { kind: 'digit', value: Number.parseInt(w, 10) };
+  if (ZERO_WORDS.has(w)) return { kind: 'zero', value: 0 };
+  if (w in UNIT_WORDS) return { kind: 'unit', value: UNIT_WORDS[w]! };
+  if (w in TEEN_WORDS) return { kind: 'teen', value: TEEN_WORDS[w]! };
+  if (w in TENS_WORDS) return { kind: 'tens', value: TENS_WORDS[w]! };
+  if (w in COMPOUND_WORDS) return { kind: 'compound', value: COMPOUND_WORDS[w]! };
+  if (w in ORDINAL_WORDS) return { kind: 'ordinal', value: ORDINAL_WORDS[w]! };
+  if (w in SPANISH_HUNDREDS) return { kind: 'hundreds', value: SPANISH_HUNDREDS[w]! };
+  if (w === 'hundred') return { kind: 'hundred', value: 100 };
+  if (w === 'thousand' || w === 'mil') return { kind: 'thousand', value: 1000 };
+  if (monthNumberFromWord(w)) return { kind: 'month', value: 0 };
+  return { kind: 'other', value: 0 };
+}
+
+const NUMERIC_KINDS = new Set<WordKind>(['zero', 'unit', 'teen', 'tens', 'compound', 'ordinal', 'hundreds', 'hundred', 'thousand', 'digit']);
+
+export function numberWordsToDigits(raw: string): string | null {
+  const words = String(raw ?? '')
+    .normalize('NFD')
+    .replace(/\p{M}/gu, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim()
+    .split(' ')
+    .filter(Boolean);
+  if (words.length === 0) return null;
+  const toks = words.map(kindOfWord);
+
+  // An ambiguous word is a number only beside a number or a month.
+  const anchored = (i: number): boolean => {
+    for (const step of [-1, 1]) {
+      let j = i + step;
+      if (j >= 0 && j < words.length && BRIDGE_WORDS.has(words[j]!)) j += step;
+      if (j < 0 || j >= words.length) continue;
+      if (AMBIGUOUS_NUMBER_WORDS.has(words[j]!)) continue;
+      const k = toks[j]!.kind;
+      if (k === 'month' || NUMERIC_KINDS.has(k)) return true;
+    }
+    return false;
+  };
+  for (let i = 0; i < words.length; i += 1) {
+    if (AMBIGUOUS_NUMBER_WORDS.has(words[i]!) && !anchored(i)) toks[i] = { kind: 'other', value: 0 };
+  }
+
+  const isWordNumber = (i: number) => {
+    const k = toks[i]?.kind;
+    return k !== undefined && k !== 'digit' && k !== 'month' && k !== 'other';
+  };
+  if (!toks.some((_, i) => isWordNumber(i))) return null;
+
+  const kindAt = (i: number) => toks[i]?.kind;
+  const belowHundred = (i: number): { value: number; next: number } | null => {
+    const t = toks[i];
+    if (!t) return null;
+    if (t.kind === 'tens') {
+      let k = i + 1;
+      if (words[k] === 'y' || words[k] === 'and') k += 1;
+      const u = toks[k];
+      if (u && (u.kind === 'unit' || (u.kind === 'ordinal' && u.value < 10))) {
+        return { value: t.value + u.value, next: k + 1 };
+      }
+      return { value: t.value, next: i + 1 };
+    }
+    if (t.kind === 'unit' || t.kind === 'teen' || t.kind === 'compound' || t.kind === 'ordinal') {
+      return { value: t.value, next: i + 1 };
+    }
+    return null;
+  };
+  const afterAnd = (i: number) => (words[i] === 'and' || words[i] === 'y' ? i + 1 : i);
+  const number = (i: number): { text: string; next: number } | null => {
+    const t = toks[i];
+    if (!t) return null;
+    if (t.kind === 'zero') {
+      const u = toks[i + 1];
+      if (u && u.kind === 'unit') return { text: `0${u.value}`, next: i + 2 };
+      return { text: '0', next: i + 1 };
+    }
+    let total = 0;
+    const lead = belowHundred(i);
+    let k = lead ? lead.next : i;
+    if (kindAt(k) === 'thousand') {
+      total = (lead ? lead.value : 1) * 1000;
+      k = afterAnd(k + 1);
+      if (kindAt(k) === 'hundreds') { total += toks[k]!.value; k = afterAnd(k + 1); }
+      else {
+        const h = belowHundred(k);
+        if (h && kindAt(h.next) === 'hundred') { total += h.value * 100; k = afterAnd(h.next + 1); }
+      }
+      const tail = belowHundred(k);
+      if (tail) { total += tail.value; k = tail.next; }
+      return { text: String(total), next: k };
+    }
+    if (lead && kindAt(k) === 'hundred') {
+      total = lead.value * 100;
+      k = afterAnd(k + 1);
+      const tail = belowHundred(k);
+      if (tail) { total += tail.value; k = tail.next; }
+      return { text: String(total), next: k };
+    }
+    if (!lead && kindAt(i) === 'hundreds') {
+      total = t.value;
+      k = afterAnd(i + 1);
+      const tail = belowHundred(k);
+      if (tail) { total += tail.value; k = tail.next; }
+      return { text: String(total), next: k };
+    }
+    if (lead) return { text: String(lead.value), next: lead.next };
+    return null;
+  };
+
+  const out: string[] = [];
+  for (let i = 0; i < words.length; ) {
+    if (isWordNumber(i)) {
+      const n = number(i);
+      if (n) { out.push(n.text); i = n.next; continue; }
+    }
+    out.push(words[i]!);
+    i += 1;
+  }
+  return out.join(' ');
 }
 
 /** Ordinals, separators and punctuation gone; month names left in place. */
@@ -456,9 +705,22 @@ function readDateFromAnything(raw: string, announce: Announce): string {
     // "7 26 19 29" — month, day, and a year in two halves.
     month = nums[0]!.value;
     day = nums[1]!.value;
-    const joined = joinSplitYear(nums[2]!.value, nums[3]!.value);
-    if (joined === null) return '';
-    year = joined;
+    const hi = nums[2]!;
+    const lo = nums[3]!;
+    if (hi.digits === 2 && lo.digits === 4 && Math.floor(lo.value / 100) === hi.value) {
+      // "6, 2, 19, 1947" (v199, the shape of CAa8d85ddac206c530e6a42ffe2957a158): the transcriber wrote the
+      // century it heard first and then the whole year. The repeated century
+      // is the same "19", so the year is the four digits.
+      year = lo.value;
+    } else if (hi.digits === 1 && lo.digits === 1) {
+      // "10 21 del 4 7" (v199, the shape of CAbeb9401a11b651bbaa7a0a7c5efdfef1): a two-digit year said one digit
+      // at a time. Two single digits are a two-digit year, never a century.
+      year = hi.value * 10 + lo.value;
+    } else {
+      const joined = joinSplitYear(hi.value, lo.value);
+      if (joined === null) return '';
+      year = joined;
+    }
   } else {
     // Anything else is not one date. Six numeric groups is a phone number and
     // assembles into nothing, which is the honest reason to refuse it.
