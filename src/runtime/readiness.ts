@@ -1599,6 +1599,24 @@ import { callEnvironment } from "./callRecord";
  * `9ee3b954`). v209 is #457 on its open branch. No migration.
  */
 /**
+ * v211 — THE NPX OUTREACH TEXT AND ITS FOUR-STEP BOOKING LINK (2026-11-11).
+ * Operator: "i want them all to receive a text message as well", "a
+ * customized link that lets them book in 4 easy steps", from the number NPX
+ * already uses, in the approved wording. One text per NPX outreach contact
+ * from NPX_OUTREACH_CALLER_ID, inside the calling window, never to a
+ * do-not-contact number or a contact who booked, declined, opted out or is a
+ * wrong number; the text's state lives in `custom_data.outreach_text`, which
+ * the source refresh now carries over instead of overwriting. The link is a
+ * random 256-bit token (the row holds its SHA-256) to /book/<token>: the date
+ * of birth (two tries per link, then locked), a day and city, a time, then
+ * confirm, booking through the call's own bookOutreachSlot. STOP to the
+ * number writes `sms_stop` (POST /voice/outbound/<slug>/sms). Dark: nobody is
+ * texted until NPX_OUTREACH_TEXTS=1, on top of every call switch. Above
+ * main's v210 (#456, `c9bb40fd`), which it contains along with v207 (#454,
+ * `b7f2b58e`) and v208 (#455, `9ee3b954`); v212 is #457 on its open
+ * branch. No migration.
+ */
+/**
  * v209 — "THAT IS NOT MY BIRTHDAY" TAKES THE DATE BACK, AND THE MARKER IS
  * ABOVE v208 AGAIN (2026-11-11). #454 merged as v207 (`b7f2b58e`) after main
  * had moved to v208 (#455), so main's marker read v207 below the v208 it
@@ -1609,11 +1627,11 @@ import { callEnvironment } from "./callRecord";
  * contains along with v208 (#455, `9ee3b954`). No migration.
  */
 /**
- * v212 — v209's fix on top of v210 (2026-11-11). #456 (v210) merged while
- * #457 (v209) was open, so v209 fell below main and this build takes v212;
- * v211 is the NPX outreach text and booking link on its own open branch.
- * Contains v210 (#456, `c9bb40fd`), v207 (#454, `b7f2b58e`) and v208 (#455,
- * `9ee3b954`). No migration.
+ * v212 — v209's fix on top of v211 (2026-11-11). #456 (v210) and #458
+ * (v211) merged while #457 (v209) was open, so v209 fell below main and this
+ * build takes v212. Contains v211 (#458, `9dd94486`), v210 (#456,
+ * `c9bb40fd`), v207 (#454, `b7f2b58e`) and v208 (#455, `9ee3b954`). No
+ * migration.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
   "voice-runtime-v212-not-my-birthday-takes-the-date-back-20261111";

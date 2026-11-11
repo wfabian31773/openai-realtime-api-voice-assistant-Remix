@@ -70,6 +70,37 @@ describe("the outbound scheduler", () => {
     expect(lock.release).toHaveBeenCalledTimes(1);
   });
 
+  it("runs a texting campaign's texts on the same tick, after its calls (v211)", async () => {
+    const send = vi.fn(async () => ({ sid: "SM1" }));
+    const page = { isDemo: () => true, currentAppointment: () => "", openings: async () => ({ openings: [] }), book: async () => ({ ok: false as const, error: "x" }) };
+    const texting = { ...policy, textOutreach: { enableEnv: "TEST_TEXTS", perTick: 5, body: (l: string) => l, page } };
+    const { d, store } = deps({ ...ON, TEST_TEXTS: "1" }, {
+      laneSource: async () => source([{ id: "test-lane", enabled: true, agentType: "outbound", outbound: texting, factory: () => undefined }]),
+      slugs: async () => ["test-lane"],
+      sms: async () => ({ send }),
+    });
+    store.addContact({ id: "c2", phone: "+15555550112" });
+    const [tick] = await runOutboundTick(d);
+    // c1 was claimed by the call this tick, so only c2 is textable.
+    expect(tick.dialled).toBe(1);
+    expect(tick.texts).toEqual({ sent: 1, held: {} });
+    expect(send).toHaveBeenCalledWith(expect.objectContaining({ to: "+15555550112", from: "+15555550100" }));
+  });
+
+  it("texts nobody for a campaign that does not text, or without a sender", async () => {
+    const { d } = deps(ON);
+    const [tick] = await runOutboundTick(d);
+    expect(tick.texts).toBeUndefined();
+    const page = { isDemo: () => true, currentAppointment: () => "", openings: async () => ({ openings: [] }), book: async () => ({ ok: false as const, error: "x" }) };
+    const texting = { ...policy, textOutreach: { enableEnv: "TEST_TEXTS", perTick: 5, body: (l: string) => l, page } };
+    const { d: d2 } = deps({ ...ON, TEST_TEXTS: "1" }, {
+      laneSource: async () => source([{ id: "test-lane", enabled: true, agentType: "outbound", outbound: texting, factory: () => undefined }]),
+      slugs: async () => ["test-lane"],
+    });
+    const [tick2] = await runOutboundTick(d2);
+    expect(tick2.texts).toEqual({ sent: 0, held: {}, skipped: "no sms sender" });
+  });
+
   it("does nothing at all with the fleet switch off — not even the lock", async () => {
     const { d, createCall, lock } = deps({ ...ON, RUNTIME_OUTBOUND_DIALING: "" });
     expect(await runOutboundTick(d)).toEqual([]);

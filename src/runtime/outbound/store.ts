@@ -38,6 +38,8 @@
 import type { OutboundContact, SourceContact } from "./campaign";
 import { RUNTIME_OUTBOUND_CAMPAIGN_TYPE } from "./campaign";
 import type { CallbackCandidate } from "./callback";
+import type { OutreachTextRecord } from "./outreachText";
+import { SMS_DNC_SOURCE } from "./channelDnc";
 import { nameKey } from "../../tools/verifiedIdentity";
 
 /** Statuses a contact may be dialled from. Everything else is either in
@@ -59,6 +61,31 @@ export type ContactStatus =
   | "do_not_call"
   | "max_attempts"
   | "completed";
+
+/**
+ * The reserved `custom_data` key the outreach text and its booking page keep
+ * their state under (v211, ./outreachText.ts). A source refresh neither
+ * compares it nor overwrites it (dialer.sourceKey, upsertSourceContacts), so
+ * a row's fields following the Console never wipe "this person was texted".
+ */
+export const OUTREACH_TEXT_KEY = "outreach_text";
+
+/**
+ * Who may be texted (v211): everyone the campaign is still working on, and
+ * everyone it rang and did not reach. Not a person who booked, declined, said
+ * it was a wrong number or asked not to be contacted (`do_not_call`), not a
+ * row whose appointment is over (`rescheduled`), and not one on a call right
+ * now (`calling`), who is looked at again on the next tick. The booking page
+ * books only from these statuses too.
+ */
+export const TEXTABLE_STATUSES = [
+  "pending",
+  "no_answer",
+  "voicemail",
+  "callback_scheduled",
+  "answered",
+  "max_attempts",
+] as const;
 
 export interface ContactRow {
   id: string;
@@ -238,6 +265,30 @@ export interface OutboundStore {
   parkContacts(campaignId: string, externalRefs: string[], until: Date): Promise<number>;
   /** The number the source holds for this person today. */
   updateContactPhone(contactId: string, phone: string): Promise<void>;
+
+  // ── The outreach text and its booking page (v211, ./outreachText.ts) ──
+  /** Rows on this campaign whose text is due: a textable status, no text
+   * held or a retry due, never a live SI approval. Oldest first. */
+  textableContacts(campaignId: string, now: Date, limit: number): Promise<ContactRow[]>;
+  /** Claim a row's text in one statement: `record` replaces the held one
+   * only while the row is textable and no text is held, or a retry is due.
+   * Two ticks or two processes can never both get it. The row, or null. */
+  claimText(contactId: string, now: Date, record: OutreachTextRecord): Promise<ContactRow | null>;
+  /** Merge fields into the row's held text record; nothing else changes. */
+  patchText(contactId: string, patch: Partial<OutreachTextRecord>): Promise<void>;
+  /** The row whose text carries this token's hash, with its campaign's key.
+   * Null when none, or (never expected) more than one. */
+  contactByTextToken(tokenHash: string): Promise<{ contact: ContactRow; campaignKey: string } | null>;
+  /** Spend one date-of-birth try on the booking page, atomically, while
+   * fewer than `limit` are spent and the row still holds this token. The
+   * tries spent after it, or null when none was left. */
+  spendDobTry(contactId: string, tokenHash: string, limit: number): Promise<number | null>;
+  /** Hold the page's booking, one at a time per link: true when held. A
+   * hold older than `staleBefore` is taken over; a link that has booked is
+   * never held again. */
+  claimLinkBooking(contactId: string, tokenHash: string, now: Date, staleBefore: Date): Promise<boolean>;
+  /** An SMS START: delete only the `sms_stop` row, never a voice opt-out. */
+  clearSmsStop(phone: string): Promise<void>;
 }
 
 /**
@@ -744,7 +795,16 @@ export async function createDbOutboundStore(): Promise<OutboundStore> {
           DO UPDATE SET phone_number = EXCLUDED.phone_number,
                         first_name = EXCLUDED.first_name,
                         last_name = EXCLUDED.last_name,
-                        custom_data = EXCLUDED.custom_data,
+                        -- The outreach text's state is the row's, not the
+                        -- source's (v211): carried over, or the person is
+                        -- texted again after every change to their fields.
+                        custom_data = CASE
+                          WHEN campaign_contacts.custom_data -> ${OUTREACH_TEXT_KEY}::text IS NOT NULL
+                          THEN COALESCE(EXCLUDED.custom_data, '{}'::jsonb)
+                               || jsonb_build_object(${OUTREACH_TEXT_KEY}::text,
+                                                     campaign_contacts.custom_data -> ${OUTREACH_TEXT_KEY}::text)
+                          ELSE EXCLUDED.custom_data
+                        END,
                         updated_at = NOW()
           RETURNING id`),
       );
@@ -770,6 +830,106 @@ export async function createDbOutboundStore(): Promise<OutboundStore> {
       await db.execute(sql`
         UPDATE campaign_contacts SET phone_number = ${phone}::varchar, updated_at = NOW()
          WHERE id = ${contactId}::varchar`);
+    },
+
+    async textableContacts(campaignId, now, limit) {
+      await ensureSchema();
+      return rows(
+        await db.execute(sql`
+          SELECT * FROM campaign_contacts
+           WHERE campaign_id = ${campaignId}::varchar
+             AND outreach_status::text = ANY (string_to_array(${TEXTABLE_STATUSES.join(",")}::text, ','))
+             AND COALESCE(custom_data->>'plugin_live', 'false') <> 'true'
+             AND (custom_data -> ${OUTREACH_TEXT_KEY}::text IS NULL
+                  OR (custom_data -> ${OUTREACH_TEXT_KEY}::text ->> 'state' = 'retry'
+                      AND (custom_data -> ${OUTREACH_TEXT_KEY}::text ->> 'retry_after')::timestamptz
+                          <= ${now.toISOString()}::timestamptz))
+           ORDER BY created_at, id
+           LIMIT ${limit}::int`),
+      ).map(rowToContact);
+    },
+
+    async claimText(contactId, now, record) {
+      // The text's own writes leave updated_at alone: reapStaleClaims reads
+      // it as the moment a CALL claimed the row.
+      const claimed = rows(
+        await db.execute(sql`
+          UPDATE campaign_contacts
+             SET custom_data = jsonb_set(COALESCE(custom_data, '{}'::jsonb), ARRAY[${OUTREACH_TEXT_KEY}::text],
+                                         ${JSON.stringify(record)}::jsonb, true)
+           WHERE id = ${contactId}::varchar
+             AND outreach_status::text = ANY (string_to_array(${TEXTABLE_STATUSES.join(",")}::text, ','))
+             AND COALESCE(custom_data->>'plugin_live', 'false') <> 'true'
+             AND (custom_data -> ${OUTREACH_TEXT_KEY}::text IS NULL
+                  OR (custom_data -> ${OUTREACH_TEXT_KEY}::text ->> 'state' = 'retry'
+                      AND (custom_data -> ${OUTREACH_TEXT_KEY}::text ->> 'retry_after')::timestamptz
+                          <= ${now.toISOString()}::timestamptz))
+          RETURNING *`),
+      );
+      return claimed[0] ? rowToContact(claimed[0]) : null;
+    },
+
+    async patchText(contactId, patch) {
+      await db.execute(sql`
+        UPDATE campaign_contacts
+           SET custom_data = jsonb_set(custom_data, ARRAY[${OUTREACH_TEXT_KEY}::text],
+                                       (custom_data -> ${OUTREACH_TEXT_KEY}::text) || ${JSON.stringify(patch)}::jsonb, true)
+         WHERE id = ${contactId}::varchar
+           AND jsonb_typeof(custom_data -> ${OUTREACH_TEXT_KEY}::text) = 'object'`);
+    },
+
+    async contactByTextToken(tokenHash) {
+      const found = rows(
+        await db.execute(sql`
+          SELECT c.*, k.name AS campaign_key
+            FROM campaign_contacts c
+            JOIN campaigns k ON k.id = c.campaign_id
+           WHERE c.custom_data -> ${OUTREACH_TEXT_KEY}::text ->> 'token_hash' = ${tokenHash}::text
+             AND k.campaign_type = ${RUNTIME_OUTBOUND_CAMPAIGN_TYPE}::varchar
+             AND k.deleted_at IS NULL
+           LIMIT 2`),
+      );
+      if (found.length !== 1) return null;
+      return { contact: rowToContact(found[0]), campaignKey: String(found[0].campaign_key) };
+    },
+
+    async spendDobTry(contactId, tokenHash, limit) {
+      const spent = rows(
+        await db.execute(sql`
+          UPDATE campaign_contacts
+             SET custom_data = jsonb_set(custom_data, ARRAY[${OUTREACH_TEXT_KEY}::text, 'dob_tries'],
+                   to_jsonb(COALESCE((custom_data -> ${OUTREACH_TEXT_KEY}::text ->> 'dob_tries')::int, 0) + 1), true)
+           WHERE id = ${contactId}::varchar
+             AND custom_data -> ${OUTREACH_TEXT_KEY}::text ->> 'token_hash' = ${tokenHash}::text
+             AND COALESCE((custom_data -> ${OUTREACH_TEXT_KEY}::text ->> 'dob_tries')::int, 0) < ${limit}::int
+          RETURNING (custom_data -> ${OUTREACH_TEXT_KEY}::text ->> 'dob_tries')::int AS tries`),
+      );
+      return spent[0] ? Number(spent[0].tries) : null;
+    },
+
+    async claimLinkBooking(contactId, tokenHash, now, staleBefore) {
+      const held = rows(
+        await db.execute(sql`
+          UPDATE campaign_contacts
+             SET custom_data = jsonb_set(custom_data, ARRAY[${OUTREACH_TEXT_KEY}::text, 'booking_started_at'],
+                                         to_jsonb(${now.toISOString()}::text), true)
+           WHERE id = ${contactId}::varchar
+             AND custom_data -> ${OUTREACH_TEXT_KEY}::text ->> 'token_hash' = ${tokenHash}::text
+             AND custom_data -> ${OUTREACH_TEXT_KEY}::text ->> 'booked_at' IS NULL
+             AND (custom_data -> ${OUTREACH_TEXT_KEY}::text ->> 'booking_started_at' IS NULL
+                  OR (custom_data -> ${OUTREACH_TEXT_KEY}::text ->> 'booking_started_at')::timestamptz
+                     < ${staleBefore.toISOString()}::timestamptz)
+          RETURNING id`),
+      );
+      return held.length > 0;
+    },
+
+    async clearSmsStop(phone) {
+      const key = dncKey(phone);
+      if (!key) return;
+      await ensureSchema();
+      await db.execute(sql`
+        DELETE FROM do_not_contact WHERE phone_key = ${key}::varchar AND source = ${SMS_DNC_SOURCE}::varchar`);
     },
 
     async stampDoNotContact(phone, source) {
