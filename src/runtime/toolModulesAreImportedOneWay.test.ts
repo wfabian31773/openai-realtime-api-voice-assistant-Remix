@@ -13,7 +13,7 @@
  * level. The API process (server/index.ts, which serves `/voice/*`) had already
  * loaded that module through `src/tools/server.ts`'s static import; v77's
  * `runtimeOwnedTools` then did `await import("../tools/languageTools")` inside
- * `resolveLane`, and on Node 20 — the version Replit runs — that dynamic import
+ * `resolveLane`, and on Node 20 — the version Replit ran until v208 — that dynamic import
  * evaluated the module a SECOND time. Reproduced here with the API process's
  * exact boot shape (the runtime and the tool surface both dynamically imported,
  * then a lane resolved): Node 20 throws, Node 22 does not. Every test and every
