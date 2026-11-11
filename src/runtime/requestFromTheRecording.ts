@@ -49,6 +49,7 @@
  */
 import OpenAI from "openai";
 import { sanitizeForSms } from "../services/gsm7";
+import { nameKey } from "../tools/verifiedIdentity";
 
 /** What the model was asked, answered as it answered. Injected in tests. */
 export type RequestAsker = (transcript: string) => Promise<{ request?: string | null } | null>;
@@ -96,7 +97,28 @@ export const askModelForTheRequest: RequestAsker = async (transcript) => {
 
 const MONTH =
   "(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sept?(?:ember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)";
+/** The same months, every one but May, which is also an ordinary word ("she may first need…"). */
+const MONTH_NOT_MAY =
+  "(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|june?|july?|aug(?:ust)?|sept?(?:ember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)";
+/** Spanish months, read on an accent-folded copy. */
+const MONTH_ES =
+  "(?:enero|febrero|marzo|abril|mayo|junio|julio|agosto|se?tiembre|septiembre|octubre|noviembre|diciembre)";
 const DIGIT_WORD = "(?:zero|oh|one|two|three|four|five|six|seven|eight|nine)";
+/** A day of the month spoken as a word, ordinal: first … thirty-first. */
+const DAY_ORDINAL =
+  "(?:(?:twenty|thirty)[\\s-]+(?:first|second|third|fourth|fifth|sixth|seventh|eighth|ninth)|first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|eleventh|twelfth|thirteenth|fourteenth|fifteenth|sixteenth|seventeenth|eighteenth|nineteenth|twentieth|thirtieth)";
+/** A day of the month spoken as a word, cardinal: one … thirty-one. */
+const DAY_CARDINAL =
+  "(?:(?:twenty|thirty)(?:[\\s-]+(?:one|two|three|four|five|six|seven|eight|nine))?|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen)";
+/** A Spanish day of the month: uno … treinta y uno, primero. */
+const DAY_ES =
+  "(?:primero|uno|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|once|doce|trece|catorce|quince|dieci(?:seis|siete|ocho|nueve)|veinte|veinti(?:uno|dos|tres|cuatro|cinco|seis|siete|ocho|nueve)|treinta(?:\\s+y\\s+uno)?)";
+/** A number spoken as words, for a house number read out ("twelve thirty four"). */
+const NUMBER_WORD =
+  "(?:zero|oh|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred)";
+/** Street words, full and abbreviated, capitalised as a street name is. */
+const STREET_WORD_CAPITALISED =
+  "(?:Street|St|Avenue|Ave|Road|Rd|Boulevard|Blvd|Drive|Dr|Lane|Ln|Way|Court|Ct|Place|Pl|Circle|Cir|Parkway|Pkwy|Highway|Hwy|Terrace|Ter|Trail|Trl|Plaza|Square|Sq|Loop|Crescent|Alley)";
 
 /**
  * Shapes that must never reach a description. Each is a reason to DROP the
@@ -112,8 +134,18 @@ const NEVER_IN_A_DESCRIPTION: readonly RegExp[] = [
   // A month with a day number, either order: "March 3", "3rd of March".
   new RegExp(`\\b${MONTH}\\.?\\s+\\d{1,2}(?:st|nd|rd|th)?\\b`, "i"),
   new RegExp(`\\b\\d{1,2}(?:st|nd|rd|th)?\\s+(?:of\\s+)?${MONTH}\\b`, "i"),
+  // v205: the same dates SPOKEN AS WORDS, either order: "March third",
+  // "June twenty first", "the twenty-first of June", "third of March". May
+  // before a day counts only as the capitalised month before an ordinal
+  // ("May fifth"): "she may first need a referral" is English.
+  new RegExp(`\\b${MONTH_NOT_MAY}\\.?\\s+(?:the\\s+)?${DAY_ORDINAL}\\b`, "i"),
+  new RegExp(`\\bMay\\s+(?:the\\s+)?${DAY_ORDINAL}\\b`),
+  new RegExp(`\\b${MONTH_NOT_MAY}\\.?\\s+${DAY_CARDINAL}\\b`, "i"),
+  new RegExp(`\\b(?:${DAY_ORDINAL}|${DAY_CARDINAL})\\s+of\\s+${MONTH}\\b`, "i"),
   // A spelled-out year or four spelled digits in a row (a number read out).
   /\b(?:nineteen|twenty)[\s-]+(?:oh|hundred|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)\b/i,
+  // v205: a year from 2000 on, read out ("two thousand five").
+  /\btwo[\s-]+thousand\b/i,
   new RegExp(`\\b${DIGIT_WORD}(?:[\\s,-]+${DIGIT_WORD}\\b){3,}`, "i"),
   // Date-of-birth words.
   /\b(?:born|birth\s*date|date\s+of\s+birth|birthday|dob|d\.o\.b)\b/i,
@@ -121,9 +153,51 @@ const NEVER_IN_A_DESCRIPTION: readonly RegExp[] = [
   /@|https?:|\bwww\.|\.(?:com|net|org)\b/i,
   // A street address: a house number, a word or two, a street word.
   /\b\d{1,5}\s+[a-z]+(?:\s+[a-z]+)?\s+(?:street|st|avenue|ave|road|rd|boulevard|blvd|drive|dr|lane|ln|way|court|ct|place|pl)\b/i,
+  // v205: a longer one, as the model writes a street name, capitalised: a
+  // house number (digits, or read out as words), up to four capitalised words,
+  // a capitalised street word: "12 Old Mill Creek Road", "1234 N Main St",
+  // "twelve thirty four Main Street". Capitalised because "3 pairs shipped the
+  // fastest way" is not an address. Each word starts with a capital and ends
+  // at required whitespace, so nothing here can backtrack without end.
+  new RegExp(`\\b(?:\\d{1,6}|${NUMBER_WORD}(?:[\\s-]+${NUMBER_WORD}){0,3})\\s+(?:[A-Z][a-z]*\\.?\\s+){1,4}${STREET_WORD_CAPITALISED}\\b`),
+  // v205: the rest of an address: a suite, unit or apartment number, a PO box.
+  /\b(?:[Ss]uite|[Ss]te|[Aa]pt|[Aa]partment|[Uu]nit)\.?\s*#?\s*(?:\d|[A-Z]\b)/,
+  /#\s*\d/,
+  /\bp\.?\s*o\.?\s*box\b|\bpost\s+office\s+box\b/i,
   // A title followed by a capitalised word: a person named.
   /\b(?:[Dd]r|[Dd]octor|[Mm]rs?|[Mm]s|[Mm]iss|[Nn]urse)\.?\s+[A-Z][a-z]/,
 ];
+
+/**
+ * v205: a named street with no house number is a place, not an address
+ * ("the CVS on Foothill Boulevard" tells staff which pharmacy), so it is
+ * refused only beside a word that makes it somebody's home or mailing
+ * address ("mailed to West Foothill Boulevard"). Measured over 14 Pacific
+ * days of agent ticket text on optical, surgery, tech and records
+ * (2026-10-28..11-10, 10,601 request-sized sentences): a bare named street
+ * appears in 485, 449 of them a pharmacy on the tech line; with a home or
+ * mailing word, 2, neither a pharmacy. Capitalised, and not the sentence's
+ * first word ("Wants Court papers" is not a street).
+ */
+const NAMED_STREET =
+  /(?<=\s)(?:[A-Z][a-z]+\s+){1,4}(?:Street|Avenue|Road|Boulevard|Drive|Lane|Way|Court|Place|Circle|Parkway|Highway|Terrace|Trail|Plaza)\b/;
+const HOME_OR_MAILING = /\b(?:mail|mailed|mailing|home|lives?|living|resides?|address)\b/i;
+
+/**
+ * v205: Spanish dates and years, read on an accent-folded, lower-cased copy
+ * ("tres de marzo", "3 de marzo", "marzo 3", "dos mil cinco"). The model is
+ * asked for English, and does not always answer in it.
+ */
+const NEVER_IN_A_DESCRIPTION_ES: readonly RegExp[] = [
+  new RegExp(`\\b(?:${DAY_ES}|\\d{1,2})\\s+de\\s+${MONTH_ES}\\b`),
+  new RegExp(`\\b${MONTH_ES}\\s+\\d{1,2}\\b`),
+  /\b(?:dos\s+mil|mil\s+novecientos)\b/,
+];
+
+/** Lower-cased, accents removed: what the Spanish shapes are read against. */
+function folded(s: string): string {
+  return s.normalize("NFD").replace(/\p{M}/gu, "").toLowerCase();
+}
 
 /** The model telling us it found nothing. */
 const SAYS_NOTHING_WAS_ASKED =
@@ -157,14 +231,35 @@ function foldWords(s: string): string[] {
     .filter(Boolean);
 }
 
+/**
+ * A name broken into words the way the identity store folds a name
+ * (`nameKey`: accents gone, an apostrophe, hyphen or full stop a space), then
+ * anything else that is not a letter a space too. Both sides go through it, so
+ * "O'Brien", "O’Brien", "OBrien", "O Brien" and the possessive "O'Brien's"
+ * meet on the same words. v205: the sentence used to keep the apostrophe in
+ * the word and the held name did not, so "Lake's" and "O’Brien" got through.
+ */
+function nameWords(s: string): string[] {
+  return nameKey(s)
+    .replace(/[^a-z ]+/g, " ")
+    .split(/\s+/)
+    .filter(Boolean);
+}
+
 /** True when a name half we already hold for this call appears in the sentence as words. */
 function namesAHeldName(sentence: string, heldNames: readonly string[]): boolean {
-  const words = foldWords(sentence).map((w) => w.replace(/'/g, ""));
+  const words = nameWords(sentence);
   const joined = ` ${words.join(" ")} `;
+  // A name the model ran together or split ("OBrien" / "O Brien"): every
+  // word, and every two neighbouring words written as one.
+  const solid = new Set(words);
+  for (let i = 0; i + 1 < words.length; i++) solid.add(words[i] + words[i + 1]);
   for (const raw of heldNames) {
-    const half = foldWords(raw ?? "").map((w) => w.replace(/'/g, "")).filter(Boolean);
+    const half = nameWords(raw ?? "");
     if (!half.length) continue;
-    if (half.join("").length >= 2 && joined.includes(` ${half.join(" ")} `)) return true;
+    const compact = half.join("");
+    if (compact.length >= 2 && joined.includes(` ${half.join(" ")} `)) return true;
+    if (compact.length >= 3 && solid.has(compact)) return true;
     for (const w of half) if (w.length >= 3 && words.includes(w)) return true;
   }
   return false;
@@ -181,6 +276,9 @@ export function usableRequest(raw: string | null | undefined, heldNames: readonl
   if (s.length < REQUEST_MIN_CHARS || s.length > REQUEST_MAX_CHARS) return undefined;
   if (s.split(" ").length < 3) return undefined;
   if (NEVER_IN_A_DESCRIPTION.some((re) => re.test(s))) return undefined;
+  if (NAMED_STREET.test(s) && HOME_OR_MAILING.test(s)) return undefined;
+  const plain = folded(s);
+  if (NEVER_IN_A_DESCRIPTION_ES.some((re) => re.test(plain))) return undefined;
   if (SAYS_NOTHING_WAS_ASKED.test(s)) return undefined;
   if (/callback request taken/i.test(s)) return undefined;
   if (foldWords(s).every((w) => CARRIES_NO_TOPIC.has(w))) return undefined;
