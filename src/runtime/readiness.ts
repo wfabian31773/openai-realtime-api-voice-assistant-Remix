@@ -1568,11 +1568,24 @@ import { callEnvironment } from "./callRecord";
  * and gets no fix. CI already ran Node 22; Replit still loaded the
  * `nodejs-20` module, which is the runtime the live voice line uses.
  * `.replit` now loads `nodejs-22`, and `package.json` declares
- * `engines.node` `22.x`. `replit.nix` did not pin `nodejs_20`. v207 is #454
- * on its open branch, so this takes the next free number. A republish after
- * merge is required to pick up 22.23.5, and waits for the operator's OK.
- * Above main's v206 (#447, `6e96e6fe`), which it contains. No app-code
- * change. No migration.
+ * `engines.node` `22.x`. `replit.nix` did not pin `nodejs_20`. On main
+ * since #455 (`9ee3b954`). Above main's v206 (#447, `6e96e6fe`), which it
+ * contains. No app-code change. No migration.
+ */
+/**
+ * v207 — A WRONG BIRTHDAY IS NOT READ FROM THE TRANSCRIPT (2026-11-11). The
+ * operator's post-merge review sweep of #447 found five ways the v206 reader
+ * could put a wrong date of birth on a ticket: "It is not June third." kept
+ * June 3rd; "One one nineteen fifty-one" read as January 19th; "June third,
+ * I'm seventy years old" read as 1970; "I mean the surgery was December 5"
+ * took the surgery date; and a "Sure." between a surgery question and the
+ * format let the surgery date in. A caller line that negates the held month
+ * and day clears it; a run of "one"s chains; a turn that states an age gives
+ * no date; a caller sentence naming another date is not read for the
+ * birthday; and the format opens a window only when the date last asked about
+ * is the birthday, with a line that asks for both unable to replace a held
+ * date. Above main's v208 (#455, `9ee3b954`), which it contains along with
+ * v206 (#447, `6e96e6fe`). No migration.
  */
 /**
  * v210 — THE NPX OUTREACH CAMPAIGN CALLS ON THE HOLIDAYS THE PRACTICE KEEPS
@@ -1582,8 +1595,8 @@ import { callEnvironment } from "./callRecord";
  * lanes took 772 calls. `CallingWindow.dialOnOpenHolidays` lets a campaign
  * call on `practiceOpenHolidaysFor` (Columbus Day and Veterans Day, read from
  * the queue lanes' own call counts); only the NPX window sets it. Above
- * main's v208 (#455, `9ee3b954`), which it contains. v207 is #454 on its
- * open branch. No migration.
+ * main's v207 (#454, `b7f2b58e`), which it contains along with v208 (#455,
+ * `9ee3b954`). v209 is #457 on its open branch. No migration.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
   "voice-runtime-v210-npx-calls-on-open-holidays-20261111";
