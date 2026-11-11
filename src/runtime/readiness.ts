@@ -1562,8 +1562,20 @@ import { callEnvironment } from "./callRecord";
  * carry a date of birth. Above main's v205 (#453, `e8619cbf`), which it
  * contains. No migration.
  */
+/**
+ * v208 — THE RUNTIME RUNS ON NODE 22 (2026-11-11). Node published a HIGH-rated
+ * security release today (22.23.5, 24.22.3, 26.13.1). Node 20 is end of life
+ * and gets no fix. CI already ran Node 22; Replit still loaded the
+ * `nodejs-20` module, which is the runtime the live voice line uses.
+ * `.replit` now loads `nodejs-22`, and `package.json` declares
+ * `engines.node` `22.x`. `replit.nix` did not pin `nodejs_20`. v207 is #454
+ * on its open branch, so this takes the next free number. A republish after
+ * merge is required to pick up 22.23.5, and waits for the operator's OK.
+ * Above main's v206 (#447, `6e96e6fe`), which it contains. No app-code
+ * change. No migration.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v206-a-spoken-date-of-birth-reaches-the-ticket-20261111";
+  "voice-runtime-v208-the-runtime-runs-on-node-22-20261111";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can
