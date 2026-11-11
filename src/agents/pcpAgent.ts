@@ -2362,16 +2362,26 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
        * patient's clock (operator, 2026-09-13: "personal rep stands in for the
        * patient"). The relationship she stated is read before the organisation
        * she named, so where she works cannot take her request off the clock.
+       *
+       * And a relationship the classifier does not recognise ("daughter",
+       * "sister") is kept on the patient route too (Codex review of ccd2ebd6,
+       * P2): only a stated relationship with professional words in it
+       * (provider, health plan, legal) lets the workplace choose the
+       * professional route. The error this leaves is a professional who
+       * describes themselves in words no list holds being filed on the clock,
+       * which costs a clerk a re-label; the other error would switch a
+       * patient's own deadline off.
        */
-      const { classifyRequester } = await import('../tools/medicalRecordsTaxonomy');
-      const statedTie = classifyRequester(String(state.statedRelationship ?? ''));
+      const { normalizeRequesterType } = await import('../tools/medicalRecordsTaxonomy');
+      const statedRelationship = String(state.statedRelationship ?? '').trim();
+      const statedTie = statedRelationship ? normalizeRequesterType(statedRelationship) : undefined;
+      const professionalWords = statedTie === 'provider' || statedTie === 'health_plan' || statedTie === 'legal';
       const recordsRoute: 'patient' | 'professional' =
-        state.callerIsThePatient === true
-        || statedTie === 'personal_representative'
-        || statedTie === 'patient'
-        || !String(state.callerOrganization ?? '').trim()
-          ? 'patient'
-          : 'professional';
+        state.callerIsThePatient !== true
+        && String(state.callerOrganization ?? '').trim()
+        && (!statedRelationship || professionalWords)
+          ? 'professional'
+          : 'patient';
       const toMedicalRecords = enrichingTheTicket
         ? null
         : await fileToMedicalRecords(callId, metadata, state, narrative, {

@@ -377,6 +377,42 @@ describe('Box Codex review of 7c8df0ca (#445)', () => {
     expect(p.capClockApplies).not.toBe(false);
   });
 
+  /**
+   * Codex review of ccd2ebd6 (P2): "daughter" and "sister" are personal
+   * relationships the requester classifier does not recognise. A stated
+   * relationship with no professional words in it keeps the patient route.
+   */
+  for (const relationship of ['daughter', 'sister', 'niece']) {
+    it(`a caller who says "${relationship}" and names a medical workplace stays on the clock`, async () => {
+      const { agent } = build('CA29957eba32773563e1d4919e9f83dc6a');
+      await call(agent, 'record_pcp_intake', {
+        callerName: 'Testa Caller', callerOrganization: 'Example Medical Group', statedRelationship: relationship,
+        ...PATIENT, patientDob: '1950-01-02', ...FAX,
+      });
+      const filed = await call(agent, RECORDS, { narrative: NARRATIVE });
+      expect(filed.success, JSON.stringify(filed)).not.toBe(false);
+      const p = (ticketing.createTicket.mock.calls as unknown as unknown[][])[0]?.[0] as Record<string, unknown>;
+      expect(p, 'the records library filed it').toBeTruthy();
+      expect(p.departmentId).toBe(16);
+      expect(p.requestorType).toBe('personal_representative');
+      expect(p.capClockApplies).not.toBe(false);
+    });
+  }
+
+  it('an office that names a professional role in its relationship still files off the clock', async () => {
+    const { agent } = build('CA5df1d4e8dfc3084326b1059f68521b17');
+    await call(agent, 'record_pcp_intake', {
+      callerName: 'Testa Caller', callerOrganization: 'Example Medical Group', statedRelationship: 'office manager',
+      ...PATIENT, patientDob: '1950-01-02', ...FAX,
+    });
+    const filed = await call(agent, RECORDS, { narrative: NARRATIVE });
+    expect(filed.success, JSON.stringify(filed)).not.toBe(false);
+    const p = (ticketing.createTicket.mock.calls as unknown as unknown[][])[0]?.[0] as Record<string, unknown>;
+    expect(p, 'the records library filed it').toBeTruthy();
+    expect(p.requestorType).toBe('provider');
+    expect(p.capClockApplies).toBe(false);
+  });
+
   it('an office that states a professional relationship still files off the clock', async () => {
     const { agent } = build('CA5df1d4e8dfc3084326b1059f68521b17');
     await call(agent, 'record_pcp_intake', {
