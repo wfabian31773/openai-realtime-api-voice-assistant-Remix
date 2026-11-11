@@ -180,7 +180,7 @@ const TECH_CUES = [...TECH_CUES_STRONG, ...TECH_CUES_AMBIGUOUS];
 const SURGERY_DENIAL =
   /\b(?:not|no)\s+(?:(?:about|for|a|an|the|my|any|need|want|planning|to|have|having|undergo|cataract|eye|specific|scheduled)\s+)*(?:surgery|surgeries|surgical|operations?|procedures?)\b/g;
 const OPERATION_WORD =
-  /\b(?:surgery|surgeries|surgical|operations?|lasik|prk|pre-?op|post-?op|pre-?operative|post-?operative|procedures?|cirugias?|operacion(?:es)?)\b/;
+  /\b(?:surgery|surgeries|surgical|operations?|lasik|prk|pre[-\s]?op(?:erative)?|post[-\s]?op(?:erative)?|procedures?|cirugias?|operacion(?:es)?)\b/;
 
 /**
  * Does the request name an operation — the WORD, not a phrase, and not in a

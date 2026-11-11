@@ -277,6 +277,15 @@ describe('the helpers, directly', () => {
   it('namesAnOperation reads the word and not a denial', () => {
     expect(namesAnOperation("Patient's surgery is Monday")).toBe(true);
     expect(namesAnOperation('post-operative visit next week')).toBe(true);
+    // Codex on #450 (38890aea): the spaced forms are an operation too.
+    expect(namesAnOperation('reschedule my post op appointment')).toBe(true);
+    expect(namesAnOperation('reschedule my pre op appointment')).toBe(true);
+    expect(namesAnOperation('the post operative visit')).toBe(true);
+    expect(namesAnOperation('Post Op check on Monday')).toBe(true);
+    expect(namesAnOperation('a postop visit')).toBe(true);
+    // "op" alone, or a word that only starts with it, is not.
+    expect(namesAnOperation('my post office box changed')).toBe(false);
+    expect(namesAnOperation('the optical order')).toBe(false);
     expect(namesAnOperation('no surgery date')).toBe(false);
     expect(namesAnOperation('No specific surgery mentioned')).toBe(false);
   });

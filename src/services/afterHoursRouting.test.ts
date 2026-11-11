@@ -203,6 +203,25 @@ describe('the clock is the practice\'s', () => {
   });
 });
 
+describe('an appointment request that is not about today', () => {
+  it('files to the HVA Hub when it names no operation', () => {
+    expect(
+      routeAfterHoursTicket({ appointmentIntent: true, text: 'reschedule my eye exam next week', now: MORNING }),
+    ).toEqual({ kind: 'scheduling', departmentId: 9 });
+  });
+  // Codex on #450 (38890aea): a spaced "post op" or "pre op" is an operation,
+  // so the surgery-date exception keeps it out of the Hub.
+  for (const text of [
+    'reschedule my post op appointment',
+    'reschedule my pre op appointment',
+    'move my post operative visit',
+  ]) {
+    it(`leaves "${text}" to the app`, () => {
+      expect(routeAfterHoursTicket({ appointmentIntent: true, text, now: MORNING }).kind).not.toBe('scheduling');
+    });
+  }
+});
+
 describe('the staff note', () => {
   it('says what was routed and why, and never carries the caller\'s words', () => {
     expect(afterHoursRouteNote('post_op_medication')).toMatch(/URGENT/);
