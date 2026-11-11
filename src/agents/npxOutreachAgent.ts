@@ -38,7 +38,7 @@
 import { RealtimeAgent } from '@openai/agents/realtime';
 import type { ContactSource, OutboundContact, OutboundLanePolicy, SourceContact } from '../runtime/outbound/campaign';
 import { OUTBOUND_RECORDING_CLAUSE } from '../runtime/outbound/campaign';
-import { DEFAULT_ATTEMPT_CAPS, DEFAULT_CALLING_WINDOW, type AttemptCaps } from '../runtime/outbound/callingWindow';
+import { DEFAULT_ATTEMPT_CAPS, DEFAULT_CALLING_WINDOW, type AttemptCaps, type CallingWindow } from '../runtime/outbound/callingWindow';
 import { consoleMovableContactSource } from '../runtime/outbound/consoleMovable';
 import { createNpxOutreachClient } from '../services/npxOutreachClient';
 import {
@@ -149,6 +149,17 @@ export async function npxOutreachSource(
  * attempts or counts, and a test number is never a candidate when a patient
  * rings back in live mode.
  */
+/**
+ * The default window, plus the federal holidays the practice keeps open
+ * (operator, 2026-11-11, on Veterans Day: "we should be heavily outreaching
+ * today, all possible candidates are liable to be home today"). The other
+ * outbound lanes keep the default.
+ */
+export const NPX_OUTREACH_WINDOW: Readonly<CallingWindow> = Object.freeze({
+  ...DEFAULT_CALLING_WINDOW,
+  dialOnOpenHolidays: true,
+});
+
 export const npxOutreachPolicy: OutboundLanePolicy = {
   get campaignKey(): string {
     return npxOutreachMode() === 'live' ? NPX_OUTREACH_LIVE_CAMPAIGN_KEY : NPX_OUTREACH_DEMO_CAMPAIGN_KEY;
@@ -158,7 +169,7 @@ export const npxOutreachPolicy: OutboundLanePolicy = {
   // number they ring back, and its Voice URL can point at one lane only. The
   // same number in both modes, so going live needs no Twilio change.
   callerIdEnv: 'NPX_OUTREACH_CALLER_ID',
-  window: DEFAULT_CALLING_WINDOW,
+  window: NPX_OUTREACH_WINDOW,
   get caps(): AttemptCaps {
     return npxOutreachMode() === 'live' ? DEFAULT_ATTEMPT_CAPS : NPX_OUTREACH_DEMO_CAPS;
   },

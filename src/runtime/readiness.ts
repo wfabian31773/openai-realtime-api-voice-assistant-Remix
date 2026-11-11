@@ -1588,6 +1588,17 @@ import { callEnvironment } from "./callRecord";
  * v206 (#447, `6e96e6fe`). No migration.
  */
 /**
+ * v210 — THE NPX OUTREACH CAMPAIGN CALLS ON THE HOLIDAYS THE PRACTICE KEEPS
+ * OPEN (2026-11-11). Operator, on Veterans Day: "we should be heavily
+ * outreaching today, all possible candidates are liable to be home today."
+ * The dialler held every NPX call that day for `holiday` while the queue
+ * lanes took 772 calls. `CallingWindow.dialOnOpenHolidays` lets a campaign
+ * call on `practiceOpenHolidaysFor` (Columbus Day and Veterans Day, read from
+ * the queue lanes' own call counts); only the NPX window sets it. Above
+ * main's v207 (#454, `b7f2b58e`), which it contains along with v208 (#455,
+ * `9ee3b954`). v209 is #457 on its open branch. No migration.
+ */
+/**
  * v209 — "THAT IS NOT MY BIRTHDAY" TAKES THE DATE BACK, AND THE MARKER IS
  * ABOVE v208 AGAIN (2026-11-11). #454 merged as v207 (`b7f2b58e`) after main
  * had moved to v208 (#455), so main's marker read v207 below the v208 it
@@ -1597,8 +1608,15 @@ import { callEnvironment } from "./callRecord";
  * in any later caller line. Above main's v207 (#454, `b7f2b58e`), which it
  * contains along with v208 (#455, `9ee3b954`). No migration.
  */
+/**
+ * v212 — v209's fix on top of v210 (2026-11-11). #456 (v210) merged while
+ * #457 (v209) was open, so v209 fell below main and this build takes v212;
+ * v211 is the NPX outreach text and booking link on its own open branch.
+ * Contains v210 (#456, `c9bb40fd`), v207 (#454, `b7f2b58e`) and v208 (#455,
+ * `9ee3b954`). No migration.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v209-not-my-birthday-takes-the-date-back-20261111";
+  "voice-runtime-v212-not-my-birthday-takes-the-date-back-20261111";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can
