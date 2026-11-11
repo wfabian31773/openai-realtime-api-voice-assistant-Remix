@@ -277,8 +277,8 @@ describe('a document is not a person (the get branch)', () => {
     'get us the office fax number',
     'get me the provider referral form',
     'Caller asked to get me the provider notes from office',
-    'get them the doctor\'s notes from the front desk',
-    'get us the nurse report from the office',
+    'get me the nurse\'s notes from office',
+    'get us the nurse report from office',
   ])('"%s" is not an ask for a person', (narrative) => {
     expect(asksForAPerson(narrative)).toBe(false);
   });
