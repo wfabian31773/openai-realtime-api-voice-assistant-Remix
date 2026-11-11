@@ -401,15 +401,23 @@ describe('the same 17, with the ticketing app refusing', () => {
     'CAdbd769dff7c58d16ecc5819fdb101c8d',
   ]);
 
+  /**
+   * v204 REVERSES THIS ARM, ON THE OPERATOR'S RULING (2026-11-11: "tickets
+   * that are incomplete should not be filed"). These 15 said one thing — that
+   * they wanted a person — and gave nothing else, so the floor's v18 admission
+   * filed a ticket saying exactly that and no more. That is the ticket the
+   * ruling forbids. What stays is the half above: none of them is told their
+   * request was taken down, because none was.
+   */
   for (const c of THE_SEVENTEEN.filter((x) => !NOT_AN_ASK_FOR_A_PERSON.has(x.sid))) {
-    it(`${c.sid.slice(0, 12)} still reaches the teardown floor`, async () => {
+    it(`${c.sid.slice(0, 12)} is not filed from the floor: it asked only for a person (v204)`, async () => {
       await replayAsItHappened(c.sid, c.said);
       const before = ticketing.createPcpTicket.mock.calls.length;
       await sweepPcpUnfiledCall(c.sid);
       expect(
         ticketing.createPcpTicket.mock.calls.length,
-        'the sweep did not even try — the request is gone',
-      ).toBeGreaterThan(before);
+        'a ticket saying only that the caller wanted a person',
+      ).toBe(before);
     });
   }
 

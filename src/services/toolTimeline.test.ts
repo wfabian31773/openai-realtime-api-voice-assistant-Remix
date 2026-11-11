@@ -140,6 +140,25 @@ describe('PHI discipline — the allow-list is the safety mechanism', () => {
   });
 
   /**
+   * v204: a PCP filing refused because the caller asked only for a person is
+   * countable — which step it was, and whether the ask had latched.
+   */
+  it('keeps noRequestAsk and askLatched on a refused PCP filing, and still nothing about who', () => {
+    const callId = freshCall();
+    recordToolEvent(
+      callId,
+      'handoff_to_pcp',
+      { narrative: 'Caller Paula Kolterman asked to speak with the staff.' },
+      JSON.stringify({ success: false, error: 'handoff_not_eligible_no_request', refused: 'no_request_stated', noRequestAsk: 'ask', askLatched: false }),
+      5,
+      { agentSlug: 'pcp' },
+    );
+    const [ev] = getAzulTimeline(callId)!;
+    expect(ev.outcome).toMatchObject({ refused: 'no_request_stated', noRequestAsk: 'ask', askLatched: false });
+    expect(JSON.stringify(ev)).not.toContain('Kolterman');
+  });
+
+  /**
    * v103: a records filing routed out of Medical Records is countable. Without
    * the key the only trace is a transcript line naming another team.
    */

@@ -94,8 +94,24 @@
  * of one day's sample: nobody introduces themselves as "the operator" to an
  * answering line. It is a role you ask FOR, never one you claim.
  */
+/*
+ * v204: THE WORDS OFFICES ACTUALLY USE. Measured 2026-10-28..11-10, PCP ticket
+ * narratives (the model's own summary): 33 offices whose narrative says they
+ * asked to "speak with staff", "a staff member", "a provider", "a nurse",
+ * "a doctor", "a medical assistant", "customer service" or "a department"
+ * were refused a transfer outside the lunch hour, because none of those words
+ * was here. The operator's 2026-09-04 rule entitles an office that asks for a
+ * person to one, and on 2026-11-10 each of them left a ticket saying only that
+ * they wanted a person, which is the ticket the 2026-11-11 ruling forbids.
+ *
+ * Every branch still needs a verb of asking or connecting in front of the noun
+ * (the safety property, see above), so a caller who says they ARE staff or a
+ * nurse latches nothing. `coordinator` and `supervisor` stay out: v20 measured
+ * them as role statements far more often than asks.
+ */
 const HUMAN_NOUNS =
-  '(?:person|human|someone|somebody|rep|representative|agent|front desk|receptionist|office|team|operator)';
+  '(?:person|human|someone|somebody|rep|representative|agent|front desk|receptionist|office|team|operator' +
+  '|staff|department|provider|doctor|physician|nurse|customer service|medical assistant)';
 
 /** Asking to be connected: "can I speak to the team", "talk with someone". */
 const SPEAK_TO = new RegExp(`\\b(?:speak|talk)\\b\\s+(?:to|with)\\b[^.]{0,25}\\b${HUMAN_NOUNS}\\b`, 'ig');

@@ -186,6 +186,58 @@ export const PCP_REFUSALS: Record<string, RefusalCopy> = {
   },
 
   /**
+   * A REQUEST WITH NO REQUEST IN IT IS NOT FILED. Operator, 2026-11-11:
+   * "tickets that are incomplete should not be filed."
+   *
+   * Measured on 2026-11-10: 18 PCP tickets said nothing but that the caller
+   * wanted a person. 16 were the refused-transfer fallback above, filed by
+   * `handoff_to_pcp` the moment the transfer was refused; 2 were
+   * `create_pcp_task` with only "asked to speak with someone" in the
+   * narrative. A staffer cannot work a ticket that does not say what it is
+   * about; they ring the caller back to find out.
+   *
+   * So when the caller has asked only for a person, nothing is filed and the
+   * agent asks once what they need. The model says whether a request was
+   * stated (`callerStatedARequest`), which is extraction and the model's job
+   * (standing instruction 3); the tool does the counting.
+   *
+   * Three copies because there are three moments. The first two are the ask,
+   * one after a refused transfer (the caller has just been told we cannot put
+   * them through) and one where no transfer was tried. The third is the ask
+   * spent: still nothing stated, so the call may end with no ticket. None of
+   * them says the request was taken down — it was not — and none tells the
+   * caller to call back (standing instruction 10).
+   */
+  handoff_not_eligible_no_request: {
+    say: "I'm not able to put you through from this line, but I can take a message for the team. What can I help you with today?",
+    guidance:
+      'NOTHING HAS BEEN FILED, and nothing will be until the caller says what they need. Say the line above once. ' +
+      'If they say what it is about, call create_pcp_task with it and callerStatedARequest: true. ' +
+      'Never file a request that only says they wanted a person, never say it was taken down, and never tell them to call back.',
+  },
+  no_request_stated: {
+    say: 'I can take a message for the team. What can I help you with today?',
+    guidance:
+      'NOTHING HAS BEEN FILED: the caller has only asked for a person. If they are calling from an office, clinic, hospital, plan or other ' +
+      'organisation and you have not called handoff_to_pcp yet, call handoff_to_pcp with their words instead of saying anything. ' +
+      'Otherwise say the line above once. If they say what it is about, call create_pcp_task with it and callerStatedARequest: true. ' +
+      'Never file a request that only says they wanted a person, never say it was taken down, and never tell them to call back.',
+  },
+  no_request_try_handoff: {
+    guidance:
+      'NOT AN ERROR — say nothing about it. NOTHING HAS BEEN FILED: the caller has only asked for a person, and they can be put through. ' +
+      'Call handoff_to_pcp now with their words and callerStatedARequest: false. ' +
+      'Never call create_pcp_task with a request that only says they wanted a person.',
+  },
+  no_request_stated_spent: {
+    say: "I'm sorry I wasn't able to connect you from this line. Thank you for calling Azul Vision.",
+    guidance:
+      'NOTHING IS FILED, by the operator\'s rule: a request that names only a person is not a ticket. Do not ask again, and do not ' +
+      'say anyone will follow up. If the caller now says what they need, call create_pcp_task with it and callerStatedARequest: true. ' +
+      'Otherwise say the line above and call terminate_call with reason caller_declined.',
+  },
+
+  /**
    * WE DIALLED AND NOBODY PICKED UP. CAa2a3a1c1, 2026-09-08 12:28.
    *
    * This is the one the whole module was written for and the one call site it

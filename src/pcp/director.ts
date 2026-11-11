@@ -23,6 +23,13 @@ export type FiledTicket = {
   disposition?: PcpDisposition;
 };
 
+/**
+ * v204: two filing calls this close together are one response's batch, not a
+ * second answer from the caller (the records lane's 2 s, measured on
+ * 2026-09-28: sibling calls 3–1,178 ms apart, the first genuine re-ask 4.8 s).
+ */
+export const NO_REQUEST_BATCH_WINDOW_MS = 2_000;
+
 export interface PcpConversationState {
   callerName?: string;
   callerRole?: string;
@@ -156,6 +163,22 @@ export interface PcpConversationState {
    * several turns later by `create_pcp_task`, on state that has moved.
    */
   handoffRefusedAsIneligible?: boolean;
+  /**
+   * v204: THE CALLER ASKED ONLY FOR A PERSON, AND SAID NOTHING ABOUT WHAT THEY
+   * NEED. Operator, 2026-11-11: "tickets that are incomplete should not be
+   * filed." On 2026-11-10, 18 PCP tickets said only that the caller wanted a
+   * person; a staffer cannot work one except by ringing back to ask what it
+   * was about.
+   *
+   * `create_pcp_task` and `handoff_to_pcp` refuse to file when the model says
+   * `callerStatedARequest: false`. The first refusal asks the caller what they
+   * need (`requestNotStatedAskedAt`); a later one, outside the batch window,
+   * spends the ask (`requestNotStatedSpent`), files nothing, and lets the call
+   * end (`mayTerminate`). Per call, not per patient: a patient switch means a
+   * patient was named, and the model then reports a request.
+   */
+  requestNotStatedAskedAt?: number;
+  requestNotStatedSpent?: boolean;
   /**
    * THIS CALL ALREADY HAS ITS TICKET, AND THIS IS THE DOOR IT WENT THROUGH.
    *
@@ -993,6 +1016,25 @@ export class PcpDirector {
   }
 
   /**
+   * v204: a filing tool was told the caller has stated no request. The first
+   * time it is the one question, "what can I help you with?"; a second call
+   * inside `NO_REQUEST_BATCH_WINDOW_MS` is the model's own batch and is the
+   * same ask (the v79 rule); after that the ask is spent and nothing is filed.
+   */
+  noteNoRequestStated(callId: string, now: number = Date.now()): 'ask' | 'spent' {
+    const state = this.get(callId);
+    if (state.requestNotStatedSpent) return 'spent';
+    const askedAt = state.requestNotStatedAskedAt;
+    if (askedAt === undefined) {
+      state.requestNotStatedAskedAt = now;
+      return 'ask';
+    }
+    if (now - askedAt < NO_REQUEST_BATCH_WINDOW_MS) return 'ask';
+    state.requestNotStatedSpent = true;
+    return 'spent';
+  }
+
+  /**
    * Record that this call's request is filed, and through which door.
    * First write wins — see `ticketFiled`.
    */
@@ -1463,7 +1505,9 @@ export class PcpDirector {
        * fix above: that one stops the mismatch arising, this one stops any
        * future mismatch trapping a live caller.
        */
-      mayTerminate: Boolean(state.dispositionRecorded),
+      // v204: a caller who was asked what they need and still stated no
+      // request may be let go with nothing filed, by ruling.
+      mayTerminate: Boolean(state.dispositionRecorded) || Boolean(state.requestNotStatedSpent),
     };
   }
 }

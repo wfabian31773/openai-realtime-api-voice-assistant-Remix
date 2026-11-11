@@ -372,6 +372,18 @@ function summarizeResult(tool: string, resultJson: string): Record<string, unkno
      */
     'alreadyFiled',
     /**
+     * A PCP REQUEST WITH NO REQUEST IN IT IS NOT FILED (operator, 2026-11-11:
+     * "tickets that are incomplete should not be filed"). `noRequestAsk` is
+     * `ask` (nothing filed, the caller is asked once what they need) or
+     * `spent` (still nothing, so nothing files and the call may end);
+     * `askLatched` says whether the caller's ask for a person had latched
+     * when a transfer was refused. A fixed word and a boolean, no PHI: they
+     * make "person-only tickets stopped" and "the transfer was refused
+     * because the ask never latched" counts rather than transcript reads.
+     */
+    'noRequestAsk',
+    'askLatched',
+    /**
      * WHAT THE IDENTITY CARRY-FORWARD WRITE DID: `stored` | `merged` |
      * `refused_sid` | `refused_name`, absent when the branch was not reached.
      *
