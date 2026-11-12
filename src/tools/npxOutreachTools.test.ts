@@ -304,7 +304,8 @@ describe('confirm_patient_birthdate', () => {
     expect(Object.keys(getTool(FIND_SOONER_TOOL_NAME)!.input_schema.properties)).toEqual([
       'on_date', 'from_date', 'to_date', 'weekdays', 'time_of_day', 'earliest_time', 'latest_time', 'city',
     ]);
-    expect(Object.keys(getTool(BOOK_SOONER_TOOL_NAME)!.input_schema.properties)).toEqual(['option']);
+    // v218: the choice the agent said back, by its date, time and city.
+    expect(Object.keys(getTool(BOOK_SOONER_TOOL_NAME)!.input_schema.properties)).toEqual(['date', 'time', 'city', 'option']);
   });
 });
 

@@ -1681,8 +1681,20 @@ import { callEnvironment } from "./callRecord";
  * `8795a067`), which it contains along with v215 (#461, `84246a37`), v214
  * (#460, `af248eb3`) and v213 (#459, `9221d1ea`). No migration.
  */
+/**
+ * v218 — A BOOKING BOOKS THE SLOT THE CALLER CONFIRMED (2026-11-12). On
+ * CA93903cf32d7636e047cbb5b9a9b109f6 two find_sooner_exam lists were read as
+ * one, the caller confirmed a 10:00 AM slot from the first, and option 2 of
+ * the last list (9:20 AM, eight days later) was booked. book_sooner_exam now
+ * takes the date and time the agent said back, from every list read on the
+ * call; an option number alone books only when it means one slot in every
+ * list. 1 of 34 live NPX bookings 2026-10-29..11-12. Above main's v217 (#463,
+ * `4464c80a`), which it contains along with v216 (#462, `8795a067`), v215
+ * (#461, `84246a37`), v214 (#460, `af248eb3`) and v213 (#459, `9221d1ea`).
+ * No migration.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v217-a-goodbye-is-the-last-word-20261112";
+  "voice-runtime-v218-a-booking-books-the-confirmed-slot-20261112";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

@@ -96,6 +96,8 @@ import {
   spokenSlotTime,
   spokenWhen,
   localParts,
+  minutesOf,
+  slotDateTime,
   type Relaxed,
 } from './npxAvailabilitySearch';
 import { sanitizeForSms } from '../services/gsm7';
@@ -246,8 +248,11 @@ interface OutreachSession {
   verified: boolean;
   dobTries: number;
   searches: number;
-  /** The choices last read to the caller: book_sooner_exam's option numbers. */
-  slots: NpxSlot[];
+  /** Every list of choices read to the caller on this call, in order (v218).
+   * book_sooner_exam books from these and nothing else: an option number
+   * only when it means one slot in every list, otherwise the date and time
+   * the agent said back to them. */
+  offers: NpxSlot[][];
   booking: { bookingId: string; slot: NpxSlot; cancel: AzulCancelResult } | null;
   /** A book_sooner_exam still running: a second call waits for it rather
    * than booking twice. */
@@ -342,7 +347,7 @@ async function sessionFor(input: Record<string, unknown>): Promise<{ sid: string
         verified: false,
         dobTries: 0,
         searches: 0,
-        slots: [],
+        offers: [],
         booking: null,
         bookingInFlight: null,
         staffTicket: null,
@@ -930,12 +935,13 @@ registerTool({
         ({ picked, relaxed } = searchSlots(pool, pref, OPTIONS_PER_SEARCH));
       }
     }
-    s.slots = picked;
+    if (picked.length) s.offers.push(picked);
     return {
       success: true,
       exact: relaxed === null,
       options: picked.map((slot, i) => ({
         option: i + 1,
+        ...slotDateTime(slot),
         when: spokenWhen(slot),
         city: cityOf(slot),
         provider: slot.providerName,
@@ -949,7 +955,7 @@ registerTool({
         'Say the choices as the say line does: the day, date, time and city — not the street address. ' +
         'If they want a different day or time, call this again with what they now say. If they ask what is open, use the overview. ' +
         'When they pick one, say it back with the doctor and the city, say that booking it cancels their current appointment with us, ' +
-        'and ask them to confirm; on a yes, call book_sooner_exam with that option number.',
+        'and ask them to confirm; on a yes, call book_sooner_exam with that choice\'s date and time (and its city).',
     };
   },
 });
@@ -996,19 +1002,31 @@ registerTool({
   layer: 'agent',
   timeoutMs: BOOK_TOOL_TIMEOUT_MS,
   description:
-    'Book the sooner exam the person chose and confirmed, by its option number from find_sooner_exam. ' +
+    'Book the sooner exam the person chose and confirmed: pass the date and time of the choice you said back to them, ' +
+    'as find_sooner_exam gave it, and its city. Only a choice read to them on this call can be booked. ' +
     'This also cancels their current appointment with us, so call it only after they have said yes to that.',
   input_schema: {
     type: 'object',
     properties: {
+      date: {
+        type: 'string',
+        description: "The date of the choice they confirmed, YYYY-MM-DD, as the choice's date in find_sooner_exam's answer.",
+      },
+      time: {
+        type: 'string',
+        description: "The time of the choice they confirmed, 24-hour HH:MM, as the choice's time in find_sooner_exam's answer.",
+      },
+      city: {
+        type: 'string',
+        description: 'The city of the choice they confirmed, as find_sooner_exam named it.',
+      },
       option: {
         type: 'string',
         enum: ['1', '2', '3'],
-        description: 'The option number they chose, from the last find_sooner_exam answer.',
-        askAs: 'Which of those would you like?',
+        description: 'The option number in the find_sooner_exam answer it came from. The date and time decide; this only helps when two choices share them.',
       },
     },
-    required: ['option'],
+    required: [],
   },
   handler: async (input): Promise<ToolResult> => {
     const deadline = Date.now() + BOOK_SEQUENCE_BUDGET_MS;
@@ -1029,6 +1047,115 @@ registerTool({
   },
 });
 
+/**
+ * WHICH SLOT THE CALLER CONFIRMED (v218). The agent says a choice back with
+ * its day, time, doctor and city and asks for a yes; that is what the caller
+ * agreed to, so the booking takes the date and time it said, not a position
+ * in a list.
+ *
+ * WHY NOT THE OPTION NUMBER. On CA93903cf32d7636e047cbb5b9a9b109f6
+ * (2026-11-12) two find_sooner_exam answers arrived 1.8 s apart in one turn;
+ * the agent read both lists as one, the caller chose December 1 at 10:00 AM,
+ * the agent said that slot back, and option 2 resolved against the SECOND
+ * list: December 9 at 9:20 AM was booked and the January appointment
+ * cancelled. A number means one slot only while one list has been read.
+ *
+ * So, from every list read to the caller on this call and nothing else:
+ *  - a date and time match the slots offered at that minute; one is booked,
+ *    and when two share it (two doctors, two cities) the city, then the
+ *    option, settles it, or the agent is asked which;
+ *  - an option number alone books only when it is the same slot in every
+ *    list read on the call;
+ *  - nothing offered at that date and time books nothing.
+ * Every refusal speaks through `fix` (v43): nothing for the caller to hear.
+ */
+export function chosenSlot(
+  offers: NpxSlot[][],
+  input: Record<string, unknown>,
+): { slot: NpxSlot; by: 'date_time' | 'option'; optionDisagreed?: boolean } | { refusal: Refusal } {
+  const seen = new Set<string>();
+  const offered: NpxSlot[] = [];
+  for (const list of offers) for (const x of list) if (!seen.has(x.slotId)) (seen.add(x.slotId), offered.push(x));
+  const optionText = typeof input.option === 'string' || typeof input.option === 'number' ? String(input.option).trim() : '';
+  const index = /^[1-9]$/.test(optionText) ? Number(optionText) - 1 : -1;
+  const byOption = new Map<string, NpxSlot>();
+  if (index >= 0) for (const list of offers) if (list[index]) byOption.set(list[index].slotId, list[index]);
+  const date = typeof input.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(input.date.trim()) ? input.date.trim() : '';
+  const minutes = typeof input.time === 'string' ? minutesOf(input.time) : null;
+
+  if (date && minutes !== null) {
+    let atThatTime = offered.filter((x) => {
+      const p = localParts(x);
+      return p.day === date && p.minutes === minutes;
+    });
+    if (atThatTime.length === 0) {
+      return {
+        refusal: {
+          success: false,
+          error: 'not_offered',
+          fix:
+            'Nothing was booked: no choice read to them on this call is at that date and time. Book only a choice you read to them and they confirmed, ' +
+            "passing that choice's date and time from find_sooner_exam's answer. If they want a time you have not read them, call find_sooner_exam for that day first.",
+        },
+      };
+    }
+    const city = typeof input.city === 'string' ? fold(input.city) : '';
+    if (atThatTime.length > 1 && city) {
+      const inCity = atThatTime.filter((x) => fold(cityOf(x)) === city);
+      if (inCity.length) atThatTime = inCity;
+    }
+    if (atThatTime.length > 1 && byOption.size) {
+      const both = atThatTime.filter((x) => byOption.has(x.slotId));
+      if (both.length) atThatTime = both;
+    }
+    if (atThatTime.length > 1) {
+      const where = joinWords([...new Set(atThatTime.map((x) => `${x.providerName || 'the provider'} in ${cityOf(x) || 'the partner office'}`))], 'or');
+      return {
+        refusal: {
+          success: false,
+          error: 'which_one',
+          fix: `Nothing was booked: two choices read to them are at that date and time (${where}). Ask which one they want, then call again with its city.`,
+        },
+      };
+    }
+    const slot = atThatTime[0];
+    // What the pre-v218 rule would have booked: the option in the last list.
+    const last = offers[offers.length - 1];
+    const oldRule = index >= 0 && last ? last[index] : undefined;
+    return { slot, by: 'date_time', ...(oldRule && oldRule.slotId !== slot.slotId ? { optionDisagreed: true } : {}) };
+  }
+
+  if (index >= 0) {
+    if (byOption.size === 1) return { slot: [...byOption.values()][0], by: 'option' };
+    if (byOption.size === 0) {
+      return {
+        refusal: {
+          success: false,
+          error: 'no_such_option',
+          fix: 'That option was not offered. Call find_sooner_exam with what they want, offer its choices, and book only one they chose.',
+        },
+      };
+    }
+    return {
+      refusal: {
+        success: false,
+        error: 'which_list',
+        fix:
+          'Nothing was booked: more than one list of choices was read on this call, so an option number is not one time. ' +
+          "Call book_sooner_exam again with the date and time of the choice you said back to them, from find_sooner_exam's answer.",
+      },
+    };
+  }
+
+  return {
+    refusal: {
+      success: false,
+      error: 'no_choice',
+      fix: "Nothing was booked. Call book_sooner_exam with the date and time of the choice they confirmed, from find_sooner_exam's answer.",
+    },
+  };
+}
+
 async function bookChosen(
   input: Record<string, unknown>,
   sid: string,
@@ -1036,15 +1163,11 @@ async function bookChosen(
   currentDay: string,
   deadline: number,
 ): Promise<ToolResult> {
-  const index = Number(input.option) - 1;
-  const slot = s.slots[index];
-  if (!slot) {
-    const r: Refusal = {
-      success: false,
-      error: 'no_such_option',
-      fix: 'That option was not offered. Call find_sooner_exam with what they want, offer its choices, and book only one they chose.',
-    };
-    return r;
+  const chosen = chosenSlot(s.offers, input);
+  if ('refusal' in chosen) return chosen.refusal;
+  const { slot } = chosen;
+  if (chosen.optionDisagreed) {
+    console.warn(`[NPX OUTREACH] ${sid}: option ${String(input.option)} in the last list read is not the date and time confirmed; booking the date and time`);
   }
   const booked = await bookOutreachSlot({ contact: s.contact, demo: s.demo, slot, callRef: sid, deadline });
   if (!booked.ok) {
@@ -1057,7 +1180,7 @@ async function bookChosen(
       return r;
     }
     if (booked.error === 'slot_unavailable') {
-      s.slots = [];
+      s.offers = [];
       const r: Refusal = {
         success: false,
         error: 'slot_unavailable',
@@ -1079,6 +1202,8 @@ async function bookChosen(
   return {
     success: true,
     booked: true,
+    booked_by: chosen.by,
+    ...(chosen.optionDisagreed ? { option_disagreed: true } : {}),
     say: confirmation(s.booking.slot, booked.cancel, currentDay),
     fix: 'Say the confirmation as given, ask if there is anything else, then say goodbye and call end_call. The outcome is already recorded.',
   };

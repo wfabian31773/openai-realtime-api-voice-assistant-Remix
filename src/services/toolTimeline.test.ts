@@ -216,6 +216,25 @@ describe('PHI discipline — the allow-list is the safety mechanism', () => {
   });
 
   /**
+   * v218: how a booking picked its slot, and whether the pre-v218 rule (the
+   * option in the last list) would have booked another, are countable.
+   */
+  it('keeps booked_by and option_disagreed on a booking, and still nothing about who', () => {
+    const callId = freshCall();
+    recordToolEvent(
+      callId,
+      'book_sooner_exam',
+      { date: '2041-02-05', time: '10:00', option: '2' },
+      JSON.stringify({ success: true, booked: true, booked_by: 'date_time', option_disagreed: true, patient: 'Paula Kolterman' }),
+      5,
+      { agentSlug: 'npx-outreach' },
+    );
+    const [ev] = getAzulTimeline(callId)!;
+    expect(ev.outcome).toMatchObject({ booked_by: 'date_time', option_disagreed: true });
+    expect(JSON.stringify(ev)).not.toContain('Kolterman');
+  });
+
+  /**
    * v75: WHICH language a switch went TO is countable. 574 switch events in
    * the fourteen days to 2026-09-27 and not one said; 76 of them were on
    * calls with no Spanish cue — the worst filing arm — and nothing could say

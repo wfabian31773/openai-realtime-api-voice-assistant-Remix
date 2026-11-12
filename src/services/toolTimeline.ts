@@ -355,6 +355,12 @@ function summarizeResult(tool: string, resultJson: string): Record<string, unkno
     // (Codex P2 on #376). A boolean, no PHI — "how often does the app refuse
     // a records filing outright" is a count, not a log search.
     'recovered_after_refusal',
+    // v218: how book_sooner_exam picked the slot it booked ('date_time' or
+    // 'option'), and whether the option number the model also sent, read in
+    // the last list as before v218, is another slot. No PHI: the count of
+    // bookings the old option-only rule would have put on the wrong slot.
+    'booked_by',
+    'option_disagreed',
     /**
      * WHY escalate_to_human was refused (one of the gate's three codes) and
      * whether the refusal FILED the ticket (2026-09-29). Both PHI-free. Until
