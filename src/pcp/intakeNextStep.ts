@@ -44,6 +44,7 @@
  * follow and never read out.
  */
 import { getPcpCallPurpose } from './policy';
+import { NO_TRANSFER_ASK_LINE } from './refusals';
 import type { PcpConversationState, PcpDirectorDecision } from './director';
 
 /** A short code for the timeline: which next step the reply named. No caller data. */
@@ -102,7 +103,12 @@ export function nextStepWhenIntakeIsDone(
    */
   const personStep = decision.transferOnAsk === true
     ? 'If the caller asked to speak to a person, call handoff_to_pcp now, with their words in the narrative.'
-    : `No one can be put through right now, so do not call handoff_to_pcp. If the caller asked to speak to a person, say "${NO_TRANSFER_LINE}" and call create_pcp_task.`;
+    : // v215: the promise only once there is something to file. A caller
+      // who asked only for a person has stated no request, and v204 files
+      // nothing for them, so "I'll take this down" would be false.
+      'No one can be put through right now, so do not call handoff_to_pcp. ' +
+      `If the caller asked to speak to a person and has said what they need, say "${NO_TRANSFER_LINE}" and call create_pcp_task with callerStatedARequest: true. ` +
+      `If they have asked only for a person, say "${NO_TRANSFER_ASK_LINE}" and wait for their answer: nothing is filed until they say what they need, so do not say it was taken down.`;
 
   const steps = [
     personStep,

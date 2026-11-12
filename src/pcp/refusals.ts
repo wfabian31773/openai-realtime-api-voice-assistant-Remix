@@ -51,6 +51,15 @@ interface RefusalCopy {
 
 const FILE_IT = 'file it with create_pcp_task';
 
+/**
+ * The line for a caller who asked only for a person and cannot be put
+ * through: it says so and asks what they need, and claims nothing was taken
+ * down, because nothing has been (v204). One copy, read by the refusals
+ * below and by the done-intake guidance (`intakeNextStep.ts`, v215).
+ */
+export const NO_TRANSFER_ASK_LINE =
+  "I'm not able to put you through from this line, but I can take a message for the team. What can I help you with today?";
+
 export const PCP_REFUSALS: Record<string, RefusalCopy> = {
   /**
    * The one that dominated. 180 occurrences on 2026-08-07 alone.
@@ -209,7 +218,7 @@ export const PCP_REFUSALS: Record<string, RefusalCopy> = {
    * caller to call back (standing instruction 10).
    */
   handoff_not_eligible_no_request: {
-    say: "I'm not able to put you through from this line, but I can take a message for the team. What can I help you with today?",
+    say: NO_TRANSFER_ASK_LINE,
     guidance:
       'NOTHING HAS BEEN FILED, and nothing will be until the caller says what they need. Say the line above once. ' +
       'If they say what it is about, call create_pcp_task with it and callerStatedARequest: true. ' +
@@ -221,6 +230,21 @@ export const PCP_REFUSALS: Record<string, RefusalCopy> = {
       'NOTHING HAS BEEN FILED: the caller has only asked for a person. If they are calling from an office, clinic, hospital, plan or other ' +
       'organisation and you have not called handoff_to_pcp yet, call handoff_to_pcp with their words instead of saying anything. ' +
       'Otherwise say the line above once. If they say what it is about, call create_pcp_task with it and callerStatedARequest: true. ' +
+      'Never file a request that only says they wanted a person, never say it was taken down, and never tell them to call back.',
+  },
+  /**
+   * v215: the same ask when no one can be put through right now (the lunch
+   * closure, or a transfer already failed on this call). `no_request_stated`
+   * tells the model to try `handoff_to_pcp` for an office, which here can
+   * only refuse again; a second refusal outside the batch window spends the
+   * ask and ends the call with the caller never asked what they need
+   * (CAc976c6fb800635db975cdecbeff3d44b, 2026-11-11 12:51 Pacific).
+   */
+  no_request_stated_no_transfer: {
+    say: NO_TRANSFER_ASK_LINE,
+    guidance:
+      'NOTHING HAS BEEN FILED: the caller has only asked for a person, and no one can be put through right now, so do not call handoff_to_pcp. ' +
+      'Say the line above once. If they say what it is about, call create_pcp_task with it and callerStatedARequest: true. ' +
       'Never file a request that only says they wanted a person, never say it was taken down, and never tell them to call back.',
   },
   no_request_try_handoff: {

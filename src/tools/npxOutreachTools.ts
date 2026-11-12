@@ -1318,7 +1318,12 @@ registerTool({
     s.staffTicket = result.ticketNumber;
     try {
       await (await live().store()).settleContact(s.contact.contactId, 'completed', {
-        notes: `staff_callback:${result.ticketNumber}`,
+        // v216: a booking on this call keeps its marker, first, so a count of
+        // `agent_notes LIKE 'npx_booking:%'` still finds it. Before, the staff
+        // note replaced it: 4 of 21 bookings to 2026-11-12 read as no booking.
+        notes: s.booking
+          ? `npx_booking:${s.booking.bookingId}; staff_callback:${result.ticketNumber}`
+          : `staff_callback:${result.ticketNumber}`,
         exceptStatus: ['do_not_call'],
       });
     } catch (e) {
