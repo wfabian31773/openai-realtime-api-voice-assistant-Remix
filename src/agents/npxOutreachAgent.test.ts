@@ -19,6 +19,7 @@ import type { CallbackContext } from '../runtime/outbound/callback';
 import { FakeOutboundStore } from '../runtime/outbound/store.testkit';
 import {
   NPX_OUTREACH_TOOLS,
+  BOOK_SOONER_TOOL_NAME,
   CONFIRM_DOB_TOOL_NAME,
   DESCRIBE_TOOL_NAME,
   FIND_SOONER_TOOL_NAME,
@@ -146,6 +147,9 @@ describe('the lane as the runtime resolves it', () => {
       // A request for a person is a ticket; this call never transfers.
       expect(prompt).toContain(`call ${STAFF_CALLBACK_TOOL_NAME}`);
       expect(prompt).toContain('You cannot transfer calls.');
+      // v218: the booking takes the choice said back, by its date and time.
+      expect(prompt).toContain(`call ${BOOK_SOONER_TOOL_NAME} with the date, time and city of that choice`);
+      expect(prompt).not.toContain('with that option number');
     }
   });
 

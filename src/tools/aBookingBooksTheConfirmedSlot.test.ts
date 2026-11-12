@@ -236,6 +236,14 @@ describe('two choices at the confirmed minute', () => {
     expect(book.mock.calls[0][0]).toMatchObject({ slotId: FEB5_1000_FONTANA.slotId });
   });
 
+  it('with no city, the option number settles which when it points at one of them', async () => {
+    await run(CONFIRM_DOB_TOOL_NAME, { date_of_birth: 'January 2nd, 1950' });
+    await run(FIND_SOONER_TOOL_NAME, { on_date: '2041-02-05', city: 'Fontana' });
+    const r = await run(BOOK_SOONER_TOOL_NAME, { date: '2041-02-05', time: '10:00', option: '1' });
+    expect(r).toMatchObject({ success: true, booked_by: 'date_time' });
+    expect(book.mock.calls[0][0]).toMatchObject({ slotId: FEB5_1000_FONTANA.slotId });
+  });
+
   it('with no city and no option to settle it, the agent is asked which, and nothing is booked', async () => {
     await run(CONFIRM_DOB_TOOL_NAME, { date_of_birth: 'January 2nd, 1950' });
     await run(FIND_SOONER_TOOL_NAME, { on_date: '2041-02-05', city: 'Rancho Cucamonga' });
@@ -244,6 +252,16 @@ describe('two choices at the confirmed minute', () => {
     expect(r).toMatchObject({ success: false, error: 'which_one' });
     expect(String(r.fix)).toMatch(/Fontana/);
     expect(book).not.toHaveBeenCalled();
+  });
+});
+
+describe('a slot taken while the caller decided', () => {
+  it('is forgotten with every list read: the same date and time is not booked again', async () => {
+    await twoListsRead();
+    book.mockResolvedValueOnce({ ok: false, error: 'slot_unavailable', next: 'offer_again' });
+    expect(await run(BOOK_SOONER_TOOL_NAME, { date: '2041-02-05', time: '10:00' })).toMatchObject({ error: 'slot_unavailable' });
+    expect(await run(BOOK_SOONER_TOOL_NAME, { date: '2041-02-05', time: '10:00' })).toMatchObject({ error: 'not_offered' });
+    expect(book).toHaveBeenCalledTimes(1);
   });
 });
 
