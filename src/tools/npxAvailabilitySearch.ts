@@ -269,6 +269,15 @@ export function spokenWhen(s: NpxSlot): string {
   return `${spokenSlotDay(s)} at ${spokenSlotTime(s)}`;
 }
 
+/** The slot's date and 24-hour time in the clinic's own time zone
+ * ("2026-12-01", "10:00"): what book_sooner_exam is called with (v218). */
+export function slotDateTime(s: NpxSlot): { date: string; time: string } {
+  const { day, minutes } = localParts(s);
+  const hh = String(Math.floor(minutes / 60)).padStart(2, '0');
+  const mm = String(minutes % 60).padStart(2, '0');
+  return { date: day, time: `${hh}:${mm}` };
+}
+
 /** "Fontana", "Fontana and Rancho Cucamonga", "Fontana, Chino Hills and Claremont". */
 export function joinWords(words: string[], conj = 'and'): string {
   if (words.length <= 1) return words[0] ?? '';
