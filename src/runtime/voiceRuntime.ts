@@ -331,6 +331,8 @@ import {
   OUTBOUND_UNAVAILABLE_LINE,
   handleOutboundAnswer,
   handleOutboundStatus,
+  settleUnheardPickup,
+  unheardPickupToSettle,
   type OutboundWebhookDeps,
 } from "./outbound/outboundWebhook";
 import { startOutboundScheduler, type DialerLock } from "./outbound/scheduler";
@@ -1849,6 +1851,29 @@ export function mountVoiceRuntime(
             void closeCallbackSession(record.callSid, {
               durationSeconds: Math.max(0, Math.round((record.endedAtMs - record.startedAtMs) / 1000)),
             });
+            // A DIALLED call on which the caller never said a word is not an
+            // answer (v213): the contact goes back to no_answer so the
+            // dialler tries again on the policy's gap, instead of the
+            // `answered` Twilio's `completed` would write. Never awaited and
+            // never throws: the campaign's ledger, not the call's record.
+            const unheard = unheardPickupToSettle({
+              slug: entry.slug,
+              outbound: entry.outbound,
+              liveCall: isLiveCall,
+              transcript: record.transcript,
+              callerAudio: callerAudio.counts(),
+            });
+            if (unheard) {
+              const { contactId, attemptId } = unheard;
+              void outboundStore()
+                .then((store) => settleUnheardPickup(entry.slug, contactId, attemptId, { store, policyFor: outboundPolicyFor }))
+                .then((settled) => {
+                  if (settled) console.log(`[outbound] ${entry.slug}: ${record.callSid} connected and the caller never spoke — settled as no answer`);
+                })
+                .catch((error) =>
+                  console.warn(`[outbound] ${entry.slug}: could not settle unheard pickup ${record.callSid}:`, error instanceof Error ? error.message : error),
+                );
+            }
             /**
              * BOUNDED, because an unbounded await here throws the request
              * away. `persistCall` is a database upsert, and a wedged pool
