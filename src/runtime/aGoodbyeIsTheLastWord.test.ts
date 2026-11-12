@@ -93,7 +93,7 @@ function harness() {
     active = false; handlers.onResponseDone();
     bridge.handleTwilioFrame({ event: "mark", streamSid: "MZ-test", mark: { name: mark } } as never);
   };
-  const caller = (text: string) => handlers.onCallerTranscript(text);
+  const caller = (text: string, itemId?: string) => handlers.onCallerTranscript(text, itemId);
   const toolNameById = new Map<string, string>();
   /** One response that carries these tool calls and no words. */
   const tools = async (...calls: Array<[name: string, args?: Record<string, unknown>]>) => {
@@ -181,6 +181,40 @@ describe("CORPUS: the agent said goodbye, recorded the outcome and ended the cal
     vi.advanceTimersByTime(10_000);
     await h.flush();
     expect(h.outcomes).toEqual(["agent_ended"]);
+  });
+});
+
+describe("a re-emitted caller transcript is not a new turn (Codex P1 on #463)", () => {
+  // Grok re-emits a caller item's cumulative transcript, and the bridge's
+  // goodbye tests already drive one arriving after the agent's reply has
+  // played. The agent has answered that turn; the re-emission must not make
+  // it read as unanswered and hold the hangup again.
+  it("the declining line re-emitted after the goodbye played: the hangup is still not held", async () => {
+    const [, outcome, , goodbye] = CORPUS[1];
+    const h = harness();
+    h.say("Hello, this is an automated assistant calling for Azul Vision. This call is recorded. May I speak with the patient?");
+    h.caller("Yes.", "item-yes");
+    h.say("We'd like to offer you a sooner appointment. Does that interest you?");
+    h.caller("Uh, no", "item-decline");
+    h.say(goodbye);
+    h.caller("Uh, no thank you.", "item-decline");
+    await h.tools([RECORD_OUTCOME_TOOL_NAME, { outcome }], [END_CALL_TOOL_NAME, { reason: "completed" }]);
+    expect(h.sent(END_CALL_TOOL_NAME)).not.toMatchObject({ error: "unvoiced_tool_result" });
+    vi.advanceTimersByTime(10_000);
+    await h.flush();
+    expect(h.outcomes).toEqual(["agent_ended"]);
+    expect(h.records[0].hangupsHeld).toBe(0);
+  });
+
+  it("a NEW caller turn after the goodbye has had no reply, so the hangup is held", async () => {
+    const h = harness();
+    h.say("We'd like to offer you a sooner appointment. Does that interest you?");
+    h.caller("No.", "item-decline");
+    h.say("Thank you for your time. Goodbye.");
+    h.caller("Wait, one more thing.", "item-more");
+    await h.tools([RECORD_OUTCOME_TOOL_NAME, { outcome: "not_interested" }], [END_CALL_TOOL_NAME, { reason: "completed" }]);
+    expect(h.sent(END_CALL_TOOL_NAME)).toMatchObject({ error: "unvoiced_tool_result" });
+    expect(h.outcomes).toEqual([]);
   });
 });
 

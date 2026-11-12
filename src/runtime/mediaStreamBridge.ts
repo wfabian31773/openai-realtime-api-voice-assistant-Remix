@@ -1256,9 +1256,6 @@ export class VoiceCallBridge {
         // latch the operator's 2026-09-26 ruling turns on; see the field.
         if (text.trim()) {
           this.callerEverHeard = true;
-          // v217: the agent's line count when the caller last spoke, so a
-          // bookkeeping answer can tell whether they have had a reply yet.
-          this.agentLineSeqAtCallerLine = this.agentLineSeq;
           // v183: the caller spoke, so the silence a filed call ends on is over.
           this.lastCallerHeardAtMs = Date.now();
           this.clearFiledSilence();
@@ -1302,6 +1299,12 @@ export class VoiceCallBridge {
             ? itemId === this.lastCallerItemId
             : turn >= 0 && turn === turnBefore;
           if (itemId) this.lastCallerItemId = itemId;
+          // v217: the agent's line count when the caller last TOOK A TURN, so a
+          // bookkeeping answer can tell whether they have had a reply yet. Only
+          // a new turn moves it: Grok re-emits a caller item's cumulative
+          // transcript, sometimes after the agent's reply has played, and a
+          // re-emission is not the caller speaking again (Codex P1 on #463).
+          if (!sameTurn) this.agentLineSeqAtCallerLine = this.agentLineSeq;
           const retained = turn >= 0 ? this.transcriptLog.lines[turn].slice(8) : text;
           this.callerClosing = this.callerClosingFromLog(text);
           const late = this.goodbyeResponse;
