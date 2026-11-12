@@ -218,6 +218,53 @@ describe("a re-emitted caller transcript is not a new turn (Codex P1 on #463)", 
   });
 });
 
+describe("a caller who speaks between the outcome and the hangup (the review of #463)", () => {
+  it("goodbye, the outcome, then \"Wait, one more thing\", then end_call in a later response: the hangup is held", async () => {
+    const h = harness();
+    await declinedThenGoodbye(h, "No.", "Thank you for your time. Goodbye.");
+    await h.tools([RECORD_OUTCOME_TOOL_NAME, { outcome: "not_interested" }]);
+    h.caller("Wait, one more thing.", "item-more");
+    await h.tools([END_CALL_TOOL_NAME, { reason: "completed" }]);
+    expect(h.sent(END_CALL_TOOL_NAME)).toMatchObject({ error: "unvoiced_tool_result" });
+    expect(h.outcomes).toEqual([]);
+  });
+
+  it("the same caller answered by the agent first: the hangup goes through", async () => {
+    const h = harness();
+    await declinedThenGoodbye(h, "No.", "Thank you for your time. Goodbye.");
+    await h.tools([RECORD_OUTCOME_TOOL_NAME, { outcome: "not_interested" }]);
+    h.caller("Wait, one more thing.", "item-more");
+    h.say("Of course. Our team will follow up with you. Goodbye.");
+    await h.tools([END_CALL_TOOL_NAME, { reason: "completed" }]);
+    expect(h.sent(END_CALL_TOOL_NAME)).not.toMatchObject({ error: "unvoiced_tool_result" });
+    vi.advanceTimersByTime(10_000);
+    await h.flush();
+    expect(h.outcomes).toEqual(["agent_ended"]);
+  });
+
+  it("the agent spoke past the outcome, then the caller said goodbye: the hangup goes through, as on main", async () => {
+    const h = harness();
+    h.say("We'd like to offer you a sooner appointment. Does that interest you?");
+    h.caller("No.", "item-decline");
+    await h.tools([RECORD_OUTCOME_TOOL_NAME, { outcome: "not_interested" }]);
+    h.say("Understood. Thank you for your time. Goodbye.");
+    h.caller("Bye.", "item-bye");
+    await h.tools([END_CALL_TOOL_NAME, { reason: "completed" }]);
+    expect(h.sent(END_CALL_TOOL_NAME)).not.toMatchObject({ error: "unvoiced_tool_result" });
+  });
+
+  it("a re-emission of the declining line after the outcome is not a new turn: the hangup goes through", async () => {
+    const h = harness();
+    h.say("We'd like to offer you a sooner appointment. Does that interest you?");
+    h.caller("No", "item-decline");
+    h.say("Thank you for your time. Goodbye.");
+    await h.tools([RECORD_OUTCOME_TOOL_NAME, { outcome: "not_interested" }]);
+    h.caller("No thank you.", "item-decline");
+    await h.tools([END_CALL_TOOL_NAME, { reason: "completed" }]);
+    expect(h.sent(END_CALL_TOOL_NAME)).not.toMatchObject({ error: "unvoiced_tool_result" });
+  });
+});
+
 describe("CONTROLS: what v56 still holds", () => {
   it("no goodbye: the caller's last words have had no reply, so the hangup is held and the model must speak", async () => {
     const h = harness();

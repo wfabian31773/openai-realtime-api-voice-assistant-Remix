@@ -1304,7 +1304,16 @@ export class VoiceCallBridge {
           // a new turn moves it: Grok re-emits a caller item's cumulative
           // transcript, sometimes after the agent's reply has played, and a
           // re-emission is not the caller speaking again (Codex P1 on #463).
-          if (!sameTurn) this.agentLineSeqAtCallerLine = this.agentLineSeq;
+          if (!sameTurn) {
+            this.agentLineSeqAtCallerLine = this.agentLineSeq;
+            // A new caller turn after a tool answer, with no agent line since:
+            // the caller is owed a reply, so a later end-call is held exactly
+            // as v56 holds it. For most answers the hold is already set; this
+            // restores it after a `nothing_to_say` answer the guard let
+            // through (the review of #463, on a caller who says "Wait, one more
+            // thing" between `record_call_outcome` and `end_call`).
+            if (this.toolAnswerSeq === this.agentLineSeq) this.unvoicedToolAnswerSeq = this.agentLineSeq;
+          }
           const retained = turn >= 0 ? this.transcriptLog.lines[turn].slice(8) : text;
           this.callerClosing = this.callerClosingFromLog(text);
           const late = this.goodbyeResponse;
@@ -2525,6 +2534,10 @@ export class VoiceCallBridge {
    * are still equal (nothing has been said since). */
   private agentLineSeq = 0;
   private unvoicedToolAnswerSeq: number | null = null;
+  /** v217: the agent's line count when the last tool answer settled. A new
+   * caller turn while it still equals `agentLineSeq` holds the hangup, as v56
+   * does, even after a `nothing_to_say` answer the guard let through. */
+  private toolAnswerSeq: number | null = null;
   /** v217 — `agentLineSeq` when the caller was last heard; null until then. */
   private agentLineSeqAtCallerLine: number | null = null;
   private hangupHoldsSinceLastLine = 0;
@@ -2977,6 +2990,9 @@ export class VoiceCallBridge {
       // v217: a bookkeeping answer (`nothing_to_say`) leaves nothing to put
       // into words — but the caller's own last words may still be owed a
       // reply, and then the hangup is held exactly as before.
+      // Remembered so a caller who speaks AFTER this answer, before the agent
+      // has said anything, gets v56's hold back (see onCallerTranscript).
+      this.toolAnswerSeq = this.agentLineSeq;
       this.toolCallSettled(true, !declaresNothingToSay(output) || this.callerAwaitsAReply());
       } finally {
         // Whichever way this dispatch ended, an end-call waiting on it may
