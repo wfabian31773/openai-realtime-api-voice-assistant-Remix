@@ -1634,12 +1634,21 @@ import { callEnvironment } from "./callRecord";
  * migration.
  */
 /**
+ * v213 — a dialled pickup where the caller never spoke is no answer
+ * (2026-11-12, operator: "if they dont answer, send them a text"). The NPX
+ * campaign's first two connected calls were a silent line settled
+ * `answered`, which is never dialled again; the runtime now settles such a
+ * call `no_answer` at teardown (`settleUnheardPickup`), so the dialler tries
+ * again on the policy's gap. Above main's v212 (#457, `384b6c7c`). No
+ * migration.
+ */
+/**
  * v216 — A BOOKING KEEPS ITS MARKER WHEN THE CALLER THEN ASKS FOR STAFF
  * (2026-11-12). `request_staff_callback` settled the NPX contact with
  * `staff_callback:<ticket>` alone and so replaced `npx_booking:<id>`; 4 of the
- * campaign's 21 bookings to 2026-11-12 read as no booking. Above main's v212
- * (#457, `384b6c7c`); v213, v214 and v215 are #459, #460 and #461 on their
- * open branches. No migration.
+ * campaign's 21 bookings to 2026-11-12 read as no booking. Above main's v213 (#459,
+ * `9221d1ea`), which it contains along with v212 (#457, `384b6c7c`); v214
+ * and v215 are #460 and #461 on their open branches. No migration.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
   "voice-runtime-v216-a-booking-keeps-its-marker-20261112";

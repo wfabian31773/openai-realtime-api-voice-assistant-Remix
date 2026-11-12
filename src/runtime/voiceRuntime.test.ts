@@ -2619,6 +2619,62 @@ describe("a call the runtime dialled (src/runtime/outbound/)", () => {
   });
 
   /**
+   * A PICKUP WHERE THE CALLER NEVER SPOKE IS NOT AN ANSWER (v213, operator
+   * 2026-11-12). The corpus: CA2c6daf4be55fdeff507d87a7a46475a6 and
+   * CAbd9602be8a7b0ac08de364a89e39917f, the NPX campaign's first two
+   * connected calls, both a silent line cut by the silence ladder and both
+   * settled `answered`, so neither would be dialled again.
+   */
+  async function dialledCall(store: FakeOutboundStore, callSid: string) {
+    const attemptId = await dialled(store);
+    const h = await harness({ laneSource: outboundLane(), outboundStore: store });
+    const answered = await answer(h, "test-lane", attemptId, callSid);
+    const { ws } = await openStream(h, callSid, tokenFrom(answered.text));
+    await waitFor(() => h.transports.length === 1, "the provider transport");
+    await settle(4);
+    h.transports[0].emit({ type: "session.updated" } as GrokServerEvent);
+    await settle(4);
+    return { h, ws, attemptId };
+  }
+
+  it("puts a dialled call the caller never spoke on back in the queue as no answer (v213)", async () => {
+    const store = new FakeOutboundStore();
+    const { h, ws } = await dialledCall(store, "CA2c6daf4be55fdeff507d87a7a46475a6");
+    ws.close();
+    await waitFor(() => h.persisted.length === 1, "the call record");
+    await waitFor(() => store.contacts.get("c1")!.status === "no_answer", "the contact settled");
+    expect(store.contacts.get("c1")!.nextAttemptAt).not.toBeNull();
+  });
+
+  it("leaves a dialled call whose caller audio was voiced, though nothing was transcribed (v213, Codex P1 on #459)", async () => {
+    const store = new FakeOutboundStore();
+    const { h, ws } = await dialledCall(store, "CAbd9602be8a7b0ac08de364a89e39917f");
+    // 160 mu-law bytes at the loudest sample there is: the socket meter calls it voiced.
+    const loud = Buffer.from(new Uint8Array(160).fill(0x00)).toString("base64");
+    ws.send(JSON.stringify({ event: "media", media: { payload: loud } }));
+    await settle(4);
+    ws.close();
+    await waitFor(() => h.persisted.length === 1, "the call record");
+    await settle(8);
+    expect(store.contacts.get("c1")!.status).toBe("calling");
+  });
+
+  it("leaves a dialled call the caller spoke on for the status webhook to settle (v213)", async () => {
+    const store = new FakeOutboundStore();
+    const { h, ws } = await dialledCall(store, "CAbd9602be8a7b0ac08de364a89e39917f");
+    h.transports[0].emit({
+      type: "conversation.item.input_audio_transcription.completed",
+      item_id: "caller-one",
+      transcript: "Yes, this is she.",
+    } as GrokServerEvent);
+    await settle(4);
+    ws.close();
+    await waitFor(() => h.persisted.length === 1, "the call record");
+    await settle(8);
+    expect(store.contacts.get("c1")!.status).toBe("calling");
+  });
+
+  /**
    * A RETURNED CALL IS ANSWERED BY THE SAME LANE (v106). v105 refused this
    * call and the person heard "unavailable"; the operator's rule is that the
    * agent handles it and knows who is on the line and why (outbound/callback.ts).
