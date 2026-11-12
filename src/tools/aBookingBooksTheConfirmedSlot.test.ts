@@ -238,6 +238,8 @@ describe('two choices at the confirmed minute', () => {
 
   it('with no city, the option number settles which when it points at one of them', async () => {
     await run(CONFIRM_DOB_TOOL_NAME, { date_of_birth: 'January 2nd, 1950' });
+    await run(FIND_SOONER_TOOL_NAME, { on_date: '2041-02-05', city: 'Rancho Cucamonga' });
+    // Option 1 here is the Fontana 10:00; option 1 above is 9:00, not this minute.
     await run(FIND_SOONER_TOOL_NAME, { on_date: '2041-02-05', city: 'Fontana' });
     const r = await run(BOOK_SOONER_TOOL_NAME, { date: '2041-02-05', time: '10:00', option: '1' });
     expect(r).toMatchObject({ success: true, booked_by: 'date_time' });
