@@ -1643,17 +1643,22 @@ import { callEnvironment } from "./callRecord";
  * migration.
  */
 /**
- * v214 — a booking made through the NPX outreach text's link reaches NPX
- * (2026-11-12). NPX refused every link booking with HTTP 400 because the
- * page's booking reference `text-link:<contact>` breaks NPX's `callRef` rule
- * (letters, digits, - and _ only): 32 people confirmed their date of birth on
- * the link on the first evening and 0 booked. The link sends
- * `text-link-<contact>`, and the NPX client leaves off any reference NPX would
- * refuse. Above main's v213 (#459, `9221d1ea`), which it contains along with
- * v212 (#457, `384b6c7c`). No migration.
+ * v214 — a booking made through the text link reaches NPX (2026-11-12, #460,
+ * `af248eb3`, on main). No migration.
+ */
+/**
+ * v215 — when no one can be put through, a PCP caller who asked only for a
+ * person is asked what they need, not told it was taken down (2026-11-12).
+ * 3 of 171 substantive PCP calls since v205 heard "I'll take this down" at
+ * lunch and left with no ticket: v204 files nothing for a request that is only
+ * an ask for a person. The done-intake reply now gives that caller the ask
+ * line, and create_pcp_task's ask no longer sends the model to handoff_to_pcp
+ * when that tool can only refuse (the lunch closure, or a failed transfer).
+ * Above main's v213 (#459, `9221d1ea`), which it contains along with v212
+ * (#457, `384b6c7c`); v214 is #460 on its open branch. No migration.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v214-the-text-link-books-20261112";
+  "voice-runtime-v215-a-lunch-ask-promises-nothing-20261112";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can
