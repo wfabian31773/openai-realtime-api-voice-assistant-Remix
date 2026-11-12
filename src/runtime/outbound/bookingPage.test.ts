@@ -352,7 +352,7 @@ describe("step 4: booking", () => {
       expect.objectContaining({
         demo: true,
         openingId: "slot-a",
-        callRef: "text-link:c1",
+        callRef: "text-link-c1",
         // Today's number from the source, as the dialler uses.
         contact: expect.objectContaining({ contactId: "c1", phone: "+15555550199" }),
       }),

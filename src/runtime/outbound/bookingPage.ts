@@ -561,7 +561,7 @@ export async function handleBookingStep(
         contact: bookFor,
         demo,
         openingId,
-        callRef: `text-link:${contact.contactId}`,
+        callRef: textLinkCallRef(contact.contactId),
         deadline: Date.now() + LINK_BOOK_BUDGET_MS,
       });
       if (!booked.ok) {
@@ -581,6 +581,16 @@ export async function handleBookingStep(
     log(`[booking page] a step failed — ${error instanceof Error ? error.message : String(error)}`);
     return json(200, { ok: false, error: "busy" });
   }
+}
+
+/**
+ * The booking reference a link booking carries to NPX, for tracing. Only
+ * letters, digits, hyphens and underscores (NPX_CALL_REF): v211 sent
+ * `text-link:<contact>`, and NPX refused every link booking for the colon.
+ * A contact id is a uuid, so the reference is 46 characters, inside NPX's 64.
+ */
+export function textLinkCallRef(contactId: string): string {
+  return `text-link-${contactId}`;
 }
 
 export { BOOKING_PATH_PREFIX };
