@@ -2646,6 +2646,19 @@ describe("a call the runtime dialled (src/runtime/outbound/)", () => {
     expect(store.contacts.get("c1")!.nextAttemptAt).not.toBeNull();
   });
 
+  it("leaves a dialled call whose caller audio was voiced, though nothing was transcribed (v213, Codex P1 on #459)", async () => {
+    const store = new FakeOutboundStore();
+    const { h, ws } = await dialledCall(store, "CAbd9602be8a7b0ac08de364a89e39917f");
+    // 160 mu-law bytes at the loudest sample there is: the socket meter calls it voiced.
+    const loud = Buffer.from(new Uint8Array(160).fill(0x00)).toString("base64");
+    ws.send(JSON.stringify({ event: "media", media: { payload: loud } }));
+    await settle(4);
+    ws.close();
+    await waitFor(() => h.persisted.length === 1, "the call record");
+    await settle(8);
+    expect(store.contacts.get("c1")!.status).toBe("calling");
+  });
+
   it("leaves a dialled call the caller spoke on for the status webhook to settle (v213)", async () => {
     const store = new FakeOutboundStore();
     const { h, ws } = await dialledCall(store, "CAbd9602be8a7b0ac08de364a89e39917f");

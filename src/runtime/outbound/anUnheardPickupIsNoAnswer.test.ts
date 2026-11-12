@@ -148,27 +148,83 @@ describe("a pickup where the caller never spoke", () => {
 
 describe("which teardown settles one", () => {
   const outbound = { contactId: "c1", attemptId: "a1" };
+  /** The corpus calls' meter: a whole call of frames, nothing voiced. */
+  const SILENT = { frames: 2_500, voiced: 0 };
 
-  it("a dialled call with no caller line", () => {
-    expect(unheardPickupToSettle({ slug: "npx-outreach", outbound, liveCall: false, transcript: SILENT_LINE })).toEqual(outbound);
+  it("a dialled call with no caller line and a silent line", () => {
+    expect(
+      unheardPickupToSettle({ slug: "npx-outreach", outbound, liveCall: false, transcript: SILENT_LINE, callerAudio: SILENT }),
+    ).toEqual(outbound);
+  });
+
+  it("a dialled call whose caller audio never arrived at all", () => {
+    expect(
+      unheardPickupToSettle({
+        slug: "npx-outreach",
+        outbound,
+        liveCall: false,
+        transcript: SILENT_LINE,
+        callerAudio: { frames: 0, voiced: 0 },
+      }),
+    ).toEqual(outbound);
+  });
+
+  // Codex P1 on #459: a missing transcript is not silence. 11 of the 25 NPX
+  // pickups with no caller line since 2026-11-07 carried voiced audio (3 at
+  // 5% or more), a person who spoke and was not transcribed, or who hung up
+  // before the transcript landed. Those are not rung again.
+  it("not a dialled call whose caller audio was voiced, though nothing was transcribed", () => {
+    expect(
+      unheardPickupToSettle({
+        slug: "npx-outreach",
+        outbound,
+        liveCall: false,
+        transcript: SILENT_LINE,
+        callerAudio: { frames: 1_400, voiced: 70 },
+      }),
+    ).toBeNull();
+    // One voiced frame is enough: the meter's own verdict, not a threshold of ours.
+    expect(
+      unheardPickupToSettle({
+        slug: "npx-outreach",
+        outbound,
+        liveCall: false,
+        transcript: SILENT_LINE,
+        callerAudio: { frames: 1_400, voiced: 1 },
+      }),
+    ).toBeNull();
   });
 
   it("not a dialled call the caller spoke on", () => {
-    expect(unheardPickupToSettle({ slug: "npx-outreach", outbound, liveCall: false, transcript: `${SILENT_LINE}\nCALLER: Yes.` })).toBeNull();
+    expect(
+      unheardPickupToSettle({
+        slug: "npx-outreach",
+        outbound,
+        liveCall: false,
+        transcript: `${SILENT_LINE}\nCALLER: Yes.`,
+        callerAudio: SILENT,
+      }),
+    ).toBeNull();
   });
 
   it("not a live call, whose transcript is blanked before teardown", () => {
-    expect(unheardPickupToSettle({ slug: "si-assistant", outbound, liveCall: true, transcript: "" })).toBeNull();
+    expect(
+      unheardPickupToSettle({ slug: "si-assistant", outbound, liveCall: true, transcript: "", callerAudio: SILENT }),
+    ).toBeNull();
   });
 
   it("not the operator line, and not a call we did not dial", () => {
-    expect(unheardPickupToSettle({ slug: OPERATOR_SLUG, outbound, liveCall: false, transcript: "" })).toBeNull();
-    expect(unheardPickupToSettle({ slug: "optical", liveCall: false, transcript: "" })).toBeNull();
+    expect(
+      unheardPickupToSettle({ slug: OPERATOR_SLUG, outbound, liveCall: false, transcript: "", callerAudio: SILENT }),
+    ).toBeNull();
+    expect(unheardPickupToSettle({ slug: "optical", liveCall: false, transcript: "", callerAudio: SILENT })).toBeNull();
   });
 
-  it("the runtime hands it the live flag it blanks the transcript on", () => {
+  it("the runtime hands it the live flag it blanks the transcript on, and the socket meter's counts", () => {
     const src = readFileSync(new URL("../voiceRuntime.ts", import.meta.url), "utf8");
-    expect(src).toMatch(/unheardPickupToSettle\(\{[^}]*liveCall: isLiveCall,[^}]*transcript: record\.transcript,/s);
+    expect(src).toMatch(
+      /unheardPickupToSettle\(\{[^}]*liveCall: isLiveCall,[^}]*transcript: record\.transcript,[^}]*callerAudio: callerAudio\.counts\(\),/s,
+    );
     expect(src).toContain("if (isLiveCall) record = { ...record, transcript: \"\", turns: [], toolEvents: [] };");
   });
 });

@@ -1861,6 +1861,7 @@ export function mountVoiceRuntime(
               outbound: entry.outbound,
               liveCall: isLiveCall,
               transcript: record.transcript,
+              callerAudio: callerAudio.counts(),
             });
             if (unheard) {
               const { contactId, attemptId } = unheard;

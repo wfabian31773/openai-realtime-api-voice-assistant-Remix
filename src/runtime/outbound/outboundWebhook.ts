@@ -54,6 +54,7 @@ import {
 import type { OutboundLanePolicy } from "./campaign";
 import { nextLookAt } from "./dialer";
 import type { OutboundStore } from "./store";
+import { callerAudioVerdict } from "../callerAudioTelemetry";
 
 /** Spoken to a person who answers when this process cannot run the call.
  * It names the practice — they did not call us, so they need to know who
@@ -247,15 +248,26 @@ export function callerWasHeard(transcript: string): boolean {
  * (an SI Assistant or operator session): the runtime blanks a live call's
  * transcript before teardown, so its emptiness says nothing about whether the
  * person spoke, and re-queueing a call somebody answered would ring them again.
+ *
+ * Null too when the caller's audio was VOICED (Codex P1 on #459): a missing
+ * transcript is not silence. The socket meter (`CallerAudioMeter`) counts
+ * speech-loud frames whether or not the transcriber wrote anything, and a
+ * voiced pickup may be a person who answered and was not transcribed, or who
+ * hung up before the transcript landed. Measured, NPX outbound calls
+ * 2026-11-07..12 with no caller line: 25; 14 a silent line (0% voiced), 11
+ * voiced (3 at 5% or more). Only the silent ones are settled; a voiced pickup
+ * stays `answered`, as before v213, and is still texted.
  */
 export function unheardPickupToSettle(call: {
   slug: string;
   outbound?: { contactId: string; attemptId: string };
   liveCall: boolean;
   transcript: string;
+  callerAudio: { frames: number; voiced: number };
 }): { contactId: string; attemptId: string } | null {
   if (!call.outbound || call.liveCall || call.slug === OPERATOR_SLUG) return null;
   if (callerWasHeard(call.transcript)) return null;
+  if (callerAudioVerdict(call.callerAudio) === "voiced") return null;
   return { contactId: call.outbound.contactId, attemptId: call.outbound.attemptId };
 }
 
