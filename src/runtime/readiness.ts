@@ -1635,7 +1635,12 @@ import { callEnvironment } from "./callRecord";
  */
 /**
  * v213 — a dialled pickup where the caller never spoke is no answer
- * (2026-11-12, #459, `9221d1ea`, on main). No migration.
+ * (2026-11-12, operator: "if they dont answer, send them a text"). The NPX
+ * campaign's first two connected calls were a silent line settled
+ * `answered`, which is never dialled again; the runtime now settles such a
+ * call `no_answer` at teardown (`settleUnheardPickup`), so the dialler tries
+ * again on the policy's gap. Above main's v212 (#457, `384b6c7c`). No
+ * migration.
  */
 /**
  * v214 — a booking made through the NPX outreach text's link reaches NPX
@@ -1644,8 +1649,8 @@ import { callEnvironment } from "./callRecord";
  * (letters, digits, - and _ only): 32 people confirmed their date of birth on
  * the link on the first evening and 0 booked. The link sends
  * `text-link-<contact>`, and the NPX client leaves off any reference NPX would
- * refuse. Above main's v212 (#457, `384b6c7c`); v213 is #459 on its open
- * branch. No migration.
+ * refuse. Above main's v213 (#459, `9221d1ea`), which it contains along with
+ * v212 (#457, `384b6c7c`). No migration.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
   "voice-runtime-v214-the-text-link-books-20261112";
