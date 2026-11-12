@@ -1643,6 +1643,10 @@ import { callEnvironment } from "./callRecord";
  * migration.
  */
 /**
+ * v215 — a lunch ask promises nothing (2026-11-12, #461, `84246a37`, on main).
+ * No migration.
+ */
+/**
  * v216 — A BOOKING KEEPS ITS MARKER WHEN THE CALLER THEN ASKS FOR STAFF
  * (2026-11-12). `request_staff_callback` settled the NPX contact with
  * `staff_callback:<ticket>` alone and so replaced `npx_booking:<id>`; 4 of the
