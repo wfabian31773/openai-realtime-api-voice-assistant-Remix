@@ -1634,28 +1634,21 @@ import { callEnvironment } from "./callRecord";
  * migration.
  */
 /**
- * v213 — a dialled pickup where the caller never spoke is no answer
- * (2026-11-12, operator: "if they dont answer, send them a text"). The NPX
- * campaign's first two connected calls were a silent line settled
- * `answered`, which is never dialled again; the runtime now settles such a
- * call `no_answer` at teardown (`settleUnheardPickup`), so the dialler tries
- * again on the policy's gap. Above main's v212 (#457, `384b6c7c`). No
- * migration.
- */
-/**
- * v215 — a lunch ask promises nothing (2026-11-12, #461, `84246a37`, on main).
+ * v216 — an NPX booking keeps its marker (2026-11-12, #462, `8795a067`, on main).
  * No migration.
  */
 /**
- * v216 — A BOOKING KEEPS ITS MARKER WHEN THE CALLER THEN ASKS FOR STAFF
- * (2026-11-12). `request_staff_callback` settled the NPX contact with
- * `staff_callback:<ticket>` alone and so replaced `npx_booking:<id>`; 4 of the
- * campaign's 21 bookings to 2026-11-12 read as no booking. Above main's v213 (#459,
- * `9221d1ea`), which it contains along with v212 (#457, `384b6c7c`); v214
- * and v215 are #460 and #461 on their open branches. No migration.
+ * v217 — A GOODBYE IS THE LAST WORD (2026-11-12). On 8 of 98 heard NPX
+ * outreach calls the agent said goodbye, recorded the outcome and ended the
+ * call; v56's guard held the hangup for the outcome's answer and the agent
+ * then asked "Is there anything else…?". `record_call_outcome` answers declare
+ * `nothing_to_say: true`, and the bridge holds no hangup after one unless the
+ * caller's last words have had no reply. Above main's v212 (#457,
+ * `384b6c7c`); v213 to v216 are #459 to #462 on their open branches. No
+ * migration.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v216-a-booking-keeps-its-marker-20261112";
+  "voice-runtime-v217-a-goodbye-is-the-last-word-20261112";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can
