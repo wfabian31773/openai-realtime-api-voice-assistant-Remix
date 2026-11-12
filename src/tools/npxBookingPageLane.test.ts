@@ -119,7 +119,7 @@ describe('the openings the page shows', () => {
 
 describe('booking from the page', () => {
   const book = (openingId: string, demo = false) =>
-    npxBookingPageLane.book({ contact: CONTACT, demo, openingId, callRef: 'text-link:c1', deadline: Date.now() + 36_000 });
+    npxBookingPageLane.book({ contact: CONTACT, demo, openingId, callRef: 'text-link-c1', deadline: Date.now() + 36_000 });
 
   it('books through the call\'s sequence: NPX, the Azul cancel, the report, the contact settled', async () => {
     const r = await book('slot-a');
@@ -129,7 +129,7 @@ describe('booking from the page', () => {
     expect(npx.book).toHaveBeenCalledWith(
       expect.objectContaining({
         slotId: 'slot-a',
-        callRef: 'text-link:c1',
+        callRef: 'text-link-c1',
         patient: expect.objectContaining({ dateOfBirth: '1950-01-02', ngePersonId: 'person-0001' }),
         replacedAppointment: { ngeAppointmentId: 'appt-0001', date: '2041-03-20' },
       }),

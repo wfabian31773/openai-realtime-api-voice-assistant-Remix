@@ -1642,8 +1642,18 @@ import { callEnvironment } from "./callRecord";
  * again on the policy's gap. Above main's v212 (#457, `384b6c7c`). No
  * migration.
  */
+/**
+ * v214 — a booking made through the NPX outreach text's link reaches NPX
+ * (2026-11-12). NPX refused every link booking with HTTP 400 because the
+ * page's booking reference `text-link:<contact>` breaks NPX's `callRef` rule
+ * (letters, digits, - and _ only): 32 people confirmed their date of birth on
+ * the link on the first evening and 0 booked. The link sends
+ * `text-link-<contact>`, and the NPX client leaves off any reference NPX would
+ * refuse. Above main's v213 (#459, `9221d1ea`), which it contains along with
+ * v212 (#457, `384b6c7c`). No migration.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v213-an-unheard-pickup-is-no-answer-20261112";
+  "voice-runtime-v214-the-text-link-books-20261112";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

@@ -89,7 +89,7 @@ export interface NpxBookRequest {
   };
   replacedAppointment: { ngeAppointmentId: string; date: string };
   spokenLanguage?: 'en' | 'es';
-  /** The CallSid, for tracing. */
+  /** The CallSid, or the text link's reference, for tracing (NPX_CALL_REF). */
   callRef?: string;
 }
 
@@ -134,6 +134,16 @@ const NPX_CODES = new Set<NpxError>([
 
 /** The failure-report reason NPX accepts: a short code, never free text. */
 export const NPX_REASON_CODE = /^[a-z0-9_]{1,64}$/;
+
+/**
+ * The booking reference NPX accepts (`callRef`): 1 to 64 letters, digits,
+ * hyphens or underscores. A pinned copy of NPX's own schema
+ * (apps/npx/src/lib/outreach.ts, outreachBookingSchema), which refuses the
+ * whole booking with HTTP 400 when the reference breaks it. v214: the text
+ * link sent `text-link:<contact>` and every link booking of 2026-11-12 was
+ * refused for the colon.
+ */
+export const NPX_CALL_REF = /^[A-Za-z0-9_-]{1,64}$/;
 
 type Fetch = typeof fetch;
 
@@ -255,7 +265,14 @@ export function createNpxOutreachClient(
     },
 
     async book(req) {
-      const reply = await send('POST', '/api/exchange/outreach/bookings', req, NPX_TIMEOUT_MS.book);
+      // The reference is for tracing only: one NPX would refuse is left off,
+      // so it can never cost a patient the booking.
+      const { callRef, ...rest } = req;
+      const refFits = callRef === undefined || NPX_CALL_REF.test(callRef);
+      if (!refFits) {
+        console.warn("[NPX OUTREACH] book: the booking reference is not one NPX accepts (letters, digits, - and _ only), so it is left off; the booking still goes");
+      }
+      const reply = await send('POST', '/api/exchange/outreach/bookings', refFits ? req : rest, NPX_TIMEOUT_MS.book);
       if (typeof reply !== 'string' && (reply.status === 200 || reply.status === 201) && reply.body?.ok === true) {
         return {
           ok: true,
