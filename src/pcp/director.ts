@@ -295,6 +295,14 @@ export interface PcpDirectorDecision {
    * and skip `create_pcp_task`'s routing (Codex P2 on #427).
    */
   transferOnAsk?: boolean;
+  /**
+   * No one can be put through on this call right now, whoever is calling:
+   * the lunch closure, or a transfer already failed on it. v215: with nothing
+   * stated beyond an ask for a person, `create_pcp_task` then asks what the
+   * caller needs and does not send the model to `handoff_to_pcp`, which could
+   * only refuse again and spend the one ask (CAc976c6fb, 2026-11-11 12:51).
+   */
+  transferClosed?: boolean;
 }
 
 /**
@@ -1521,6 +1529,7 @@ export class PcpDirector {
       handoffEligible,
       mustCreateFallbackTicket: Boolean(handoffFailed),
       transferOnAsk,
+      transferClosed: Boolean(handoffFailed) || lunchClosure,
       /**
        * A RECORDED DISPOSITION IS ENOUGH. It no longer has to be the one the
        * director happens to compute at this instant.

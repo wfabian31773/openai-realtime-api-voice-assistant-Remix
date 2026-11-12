@@ -1080,7 +1080,7 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
           console.info(`[PCP] ${callId}: create_pcp_task — only a person was asked for; sent to handoff_to_pcp, nothing filed`);
           return refusePcp('no_request_try_handoff', { refused: 'no_request_stated', noRequestAsk: 'handoff' });
         }
-        return refuseNoRequest(callId, 'create_pcp_task', 'no_request_stated');
+        return refuseNoRequest(callId, 'create_pcp_task', noRequestAskFor(callId));
       }
       // The purpose is the one thing a ticket cannot be filed without — it is
       // what routes the request to the right desk. Everything else degrades.
@@ -2572,6 +2572,17 @@ function nothingOnRecordForThisRequest(callId: string): boolean {
 }
 
 /**
+ * v215: which ask `create_pcp_task` gives a caller who asked only for a
+ * person. When no one can be put through right now (the lunch closure, or a
+ * transfer already failed on this call), the ask must not send the model to
+ * `handoff_to_pcp`: that tool can only refuse again, and a second refusal
+ * outside the batch window spends the one ask (CAc976c6fb, 2026-11-11).
+ */
+function noRequestAskFor(callId: string): 'no_request_stated' | 'no_request_stated_no_transfer' {
+  return pcpDirector.next(callId).transferClosed ? 'no_request_stated_no_transfer' : 'no_request_stated';
+}
+
+/**
  * Refuse a filing that carries no request: ask once (`ask`), then, on a later
  * attempt still carrying none, say nothing is filed (`spent`), which also
  * lets the call end (director `mayTerminate`). Two calls inside the batch
@@ -2580,7 +2591,7 @@ function nothingOnRecordForThisRequest(callId: string): boolean {
 function refuseNoRequest(
   callId: string,
   tool: string,
-  askSlug: 'no_request_stated' | 'handoff_not_eligible_no_request',
+  askSlug: 'no_request_stated' | 'no_request_stated_no_transfer' | 'handoff_not_eligible_no_request',
   extra: Record<string, unknown> = {},
 ): Record<string, unknown> {
   const step = pcpDirector.noteNoRequestStated(callId);

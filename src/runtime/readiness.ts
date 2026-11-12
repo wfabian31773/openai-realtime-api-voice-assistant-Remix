@@ -1633,8 +1633,19 @@ import { callEnvironment } from "./callRecord";
  * `c9bb40fd`), v207 (#454, `b7f2b58e`) and v208 (#455, `9ee3b954`). No
  * migration.
  */
+/**
+ * v215 — when no one can be put through, a PCP caller who asked only for a
+ * person is asked what they need, not told it was taken down (2026-11-12).
+ * 3 of 171 substantive PCP calls since v205 heard "I'll take this down" at
+ * lunch and left with no ticket: v204 files nothing for a request that is only
+ * an ask for a person. The done-intake reply now gives that caller the ask
+ * line, and create_pcp_task's ask no longer sends the model to handoff_to_pcp
+ * when that tool can only refuse (the lunch closure, or a failed transfer).
+ * Above main's v212 (#457, `384b6c7c`); v213 is #459 and v214 is #460 on
+ * their open branches. No migration.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v212-not-my-birthday-takes-the-date-back-20261111";
+  "voice-runtime-v215-a-lunch-ask-promises-nothing-20261112";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can
