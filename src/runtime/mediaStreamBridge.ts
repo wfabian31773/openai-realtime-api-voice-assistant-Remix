@@ -224,6 +224,26 @@ export function unvoicedToolResultRefusal(name: string): Record<string, unknown>
   };
 }
 
+/**
+ * v217: a tool answer the caller is not waiting on.
+ *
+ * A bookkeeping tool (recording how a call ended) answers with
+ * `nothing_to_say: true`. The model still gets its turn after it, but there
+ * is nothing in it to put into words, so a hangup after it is not silencing
+ * an answer. Without this the guard above held the end_call the agent made
+ * straight after saying goodbye, and its refusal sent the model back to ask
+ * "Is there anything else…?" after the goodbye (8 of 98 heard NPX outreach
+ * calls, 2026-11-12). Read from the tool's own declared field, never from its
+ * name, like every other result field the bridge reads.
+ */
+export function declaresNothingToSay(output: unknown): boolean {
+  return (
+    output !== null &&
+    typeof output === "object" &&
+    (output as Record<string, unknown>).nothing_to_say === true
+  );
+}
+
 /** PHI-free; one line per held hangup. */
 export function hangupHeldMarker(name: string, held: number): string {
   return `[HANGUP HELD] ${name} not dispatched — the model has not spoken since its last tool answer (hold ${held} of ${HANGUP_HOLD_LIMIT}); refused with the instruction to speak first`;
@@ -1236,6 +1256,9 @@ export class VoiceCallBridge {
         // latch the operator's 2026-09-26 ruling turns on; see the field.
         if (text.trim()) {
           this.callerEverHeard = true;
+          // v217: the agent's line count when the caller last spoke, so a
+          // bookkeeping answer can tell whether they have had a reply yet.
+          this.agentLineSeqAtCallerLine = this.agentLineSeq;
           // v183: the caller spoke, so the silence a filed call ends on is over.
           this.lastCallerHeardAtMs = Date.now();
           this.clearFiledSilence();
@@ -1921,6 +1944,11 @@ export class VoiceCallBridge {
     this.hangupHoldsSinceLastLine = 0;
   }
 
+  /** v217: the caller has spoken and the agent has said nothing since. */
+  private callerAwaitsAReply(): boolean {
+    return this.agentLineSeqAtCallerLine !== null && this.agentLineSeqAtCallerLine === this.agentLineSeq;
+  }
+
   /** v56: the model holds a tool answer it has not put into words, nothing
    * is being said right now, and the hold budget for that answer is not
    * spent. See HANGUP_HOLD_LIMIT. */
@@ -2494,6 +2522,8 @@ export class VoiceCallBridge {
    * are still equal (nothing has been said since). */
   private agentLineSeq = 0;
   private unvoicedToolAnswerSeq: number | null = null;
+  /** v217 — `agentLineSeq` when the caller was last heard; null until then. */
+  private agentLineSeqAtCallerLine: number | null = null;
   private hangupHoldsSinceLastLine = 0;
   private hangupsHeld = 0;
   /** Round 12: the non-end-call dispatches still in flight, by call id, and
@@ -2509,14 +2539,16 @@ export class VoiceCallBridge {
   /** One tool answered. Records what is owed; the request itself fires
    * only when the LAST outstanding tool has settled AND the carrying
    * response has finished delivering. */
-  private toolCallSettled(owesFollowUp: boolean): void {
+  private toolCallSettled(owesFollowUp: boolean, leavesAnAnswer = owesFollowUp): void {
     this.pendingToolCalls = Math.max(0, this.pendingToolCalls - 1);
     if (owesFollowUp) {
       this.followUpOwed = true;
       this.followUps.owed += 1;
-      // The model owes the caller words for this answer (v56).
-      this.unvoicedToolAnswerSeq = this.agentLineSeq;
     }
+    // The model owes the caller words for this answer (v56) — unless the
+    // tool said there is nothing in it to say (v217). An earlier sibling's
+    // unvoiced answer is left as it was: this only declines to set it.
+    if (leavesAnAnswer) this.unvoicedToolAnswerSeq = this.agentLineSeq;
     this.maybeRequestFollowUp();
   }
 
@@ -2939,7 +2971,10 @@ export class VoiceCallBridge {
       // response-gated, so it is released only once the tool-carrying
       // response finishes — and coalesced above, so it fires once however
       // many tools that response carried.
-      this.toolCallSettled(true);
+      // v217: a bookkeeping answer (`nothing_to_say`) leaves nothing to put
+      // into words — but the caller's own last words may still be owed a
+      // reply, and then the hangup is held exactly as before.
+      this.toolCallSettled(true, !declaresNothingToSay(output) || this.callerAwaitsAReply());
       } finally {
         // Whichever way this dispatch ended, an end-call waiting on it may
         // now decide — after `toolCallSettled` above, so the guard it runs

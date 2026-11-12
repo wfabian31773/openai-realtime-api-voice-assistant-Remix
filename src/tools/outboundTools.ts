@@ -70,6 +70,8 @@ function injected(input: Record<string, unknown>): Injected | null {
  * channel, never spoken (v43). */
 interface OutboundRefusal extends ToolFailure {
   fix: string;
+  /** v217: a bookkeeping refusal with nothing for the caller to hear. */
+  nothing_to_say?: true;
 }
 
 const NOT_AN_OUTBOUND_CALL: OutboundRefusal = {
@@ -266,6 +268,28 @@ registerTool({
   },
 });
 
+/**
+ * v217: what `record_call_outcome` answers once the outcome is on record.
+ *
+ * It is bookkeeping: the caller is not waiting on it, so it says
+ * `nothing_to_say: true` and the bridge does not hold a hangup after it for
+ * the model to "voice" it. On 8 of 98 heard NPX outreach calls (2026-11-12)
+ * the agent said goodbye, recorded the outcome and called end_call; the
+ * bridge held the hangup, and the agent then asked "Is there anything else…?"
+ * after its own goodbye. The caller's own last words still hold the hangup
+ * (the bridge reads that, not this flag).
+ */
+export function recordedOutcome(outcome: string): ToolResult {
+  return {
+    success: true,
+    recorded: outcome,
+    nothing_to_say: true,
+    fix:
+      'Recorded. If you have already said goodbye, call end_call now and say nothing more; ' +
+      'otherwise say goodbye first, then call end_call.',
+  };
+}
+
 /** What the model may report, and what the campaign queue records for it. */
 export const CALL_OUTCOMES: Record<string, ContactStatus> = {
   wrong_person: 'wrong_number',
@@ -312,6 +336,7 @@ registerTool({
       const refusal: OutboundRefusal = {
         success: false,
         error: 'unknown_outcome',
+        nothing_to_say: true,
         fix: `outcome must be one of ${Object.keys(CALL_OUTCOMES).join(', ')}.`,
       };
       return refusal;
@@ -327,6 +352,7 @@ registerTool({
         const refusal: OutboundRefusal = {
           success: false,
           error: 'caller_not_identified',
+          nothing_to_say: true,
           fix: 'Nobody on this call has been identified, so there is no outcome to record. Do not call it again.',
         };
         return refusal;
@@ -335,6 +361,7 @@ registerTool({
         const refusal: OutboundRefusal = {
           success: false,
           error: 'not_on_a_returned_call',
+          nothing_to_say: true,
           fix: 'They rang us and they are identified, so wrong_person does not apply. Record another outcome, or none.',
         };
         return refusal;
@@ -343,6 +370,7 @@ registerTool({
         return {
           success: true,
           recorded: 'already_settled',
+          nothing_to_say: true,
           fix: "This call's outcome is already on record. Do not record it again; say goodbye.",
         };
       }
@@ -354,7 +382,7 @@ registerTool({
         exceptStatus: ['do_not_call'],
       });
       session.outcomeRecorded = true;
-      return { success: true, recorded: outcome };
+      return recordedOutcome(outcome);
     }
     if (!who) return NOT_AN_OUTBOUND_CALL;
     const store = await outboundStore();
@@ -369,10 +397,11 @@ registerTool({
       return {
         success: true,
         recorded: 'already_settled',
+          nothing_to_say: true,
         fix: "This call's outcome is already on record. Do not record it again; say goodbye.",
       };
     }
-    return { success: true, recorded: outcome };
+    return recordedOutcome(outcome);
   },
 });
 

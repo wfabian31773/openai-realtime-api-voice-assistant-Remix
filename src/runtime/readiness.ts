@@ -1633,8 +1633,18 @@ import { callEnvironment } from "./callRecord";
  * `c9bb40fd`), v207 (#454, `b7f2b58e`) and v208 (#455, `9ee3b954`). No
  * migration.
  */
+/**
+ * v217 — A GOODBYE IS THE LAST WORD (2026-11-12). On 8 of 98 heard NPX
+ * outreach calls the agent said goodbye, recorded the outcome and ended the
+ * call; v56's guard held the hangup for the outcome's answer and the agent
+ * then asked "Is there anything else…?". `record_call_outcome` answers declare
+ * `nothing_to_say: true`, and the bridge holds no hangup after one unless the
+ * caller's last words have had no reply. Above main's v212 (#457,
+ * `384b6c7c`); v213 to v216 are #459 to #462 on their open branches. No
+ * migration.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v212-not-my-birthday-takes-the-date-back-20261111";
+  "voice-runtime-v217-a-goodbye-is-the-last-word-20261112";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can
