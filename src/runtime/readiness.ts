@@ -1633,8 +1633,17 @@ import { callEnvironment } from "./callRecord";
  * `c9bb40fd`), v207 (#454, `b7f2b58e`) and v208 (#455, `9ee3b954`). No
  * migration.
  */
+/**
+ * v213 — a dialled pickup where the caller never spoke is no answer
+ * (2026-11-12, operator: "if they dont answer, send them a text"). The NPX
+ * campaign's first two connected calls were a silent line settled
+ * `answered`, which is never dialled again; the runtime now settles such a
+ * call `no_answer` at teardown (`settleUnheardPickup`), so the dialler tries
+ * again on the policy's gap. Above main's v212 (#457, `384b6c7c`). No
+ * migration.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v212-not-my-birthday-takes-the-date-back-20261111";
+  "voice-runtime-v213-an-unheard-pickup-is-no-answer-20261112";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

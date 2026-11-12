@@ -236,6 +236,69 @@ export async function handleOutboundStatus(
   return ok;
 }
 
+/** True when the transcript holds a line the caller actually said. */
+export function callerWasHeard(transcript: string): boolean {
+  return /^CALLER:[ \t]*\S/m.test(transcript);
+}
+
+/**
+ * Which dialled call, if any, a teardown should settle as an unheard pickup.
+ * Null for a call we did not dial, for the operator line, and for a LIVE call
+ * (an SI Assistant or operator session): the runtime blanks a live call's
+ * transcript before teardown, so its emptiness says nothing about whether the
+ * person spoke, and re-queueing a call somebody answered would ring them again.
+ */
+export function unheardPickupToSettle(call: {
+  slug: string;
+  outbound?: { contactId: string; attemptId: string };
+  liveCall: boolean;
+  transcript: string;
+}): { contactId: string; attemptId: string } | null {
+  if (!call.outbound || call.liveCall || call.slug === OPERATOR_SLUG) return null;
+  if (callerWasHeard(call.transcript)) return null;
+  return { contactId: call.outbound.contactId, attemptId: call.outbound.attemptId };
+}
+
+/**
+ * A DIALLED CALL THAT CONNECTED AND ON WHICH THE CALLER NEVER SAID A WORD is
+ * not an answer (v213, operator 2026-11-12: "if they dont answer, send them a
+ * text"). Twilio reports it `completed`, and the status webhook above would
+ * mark the contact `answered`, which is never dialled again. On the
+ * campaign's first evening, 2 of 2 connected NPX calls (2026-11-12 00:33 and
+ * 00:37 UTC) were a silent line, 0% of the caller's audio voiced, cut by the
+ * silence ladder after three prompts. This settles such a call the way the
+ * webhook settles a ring-out: `no_answer` with the next look at the policy's
+ * gap, or `max_attempts` once the caps are spent. The text is unchanged: both
+ * statuses are textable.
+ *
+ * The runtime calls it at teardown, which is before Twilio's terminal status
+ * on this path (the sign-off TwiML still has to play). It also replaces an
+ * `answered` the status webhook may have written first, and nothing else: a
+ * voicemail, an opt-out, a booking or any outcome the call recorded stands.
+ * Only the attempt this call was is settled (`onlyIfCurrentAttempt`).
+ */
+export async function settleUnheardPickup(
+  slug: string,
+  contactId: string,
+  attemptId: string,
+  deps: Pick<OutboundWebhookDeps, "store" | "policyFor" | "now">,
+): Promise<boolean> {
+  if (slug === OPERATOR_SLUG) return false;
+  const policy = await deps.policyFor(slug);
+  if (!policy) return false;
+  const now = (deps.now ?? (() => new Date()))();
+  const prior = await deps.store.priorAttempts(contactId);
+  return deps.store.settleContact(
+    contactId,
+    prior.length >= policy.caps.total ? "max_attempts" : "no_answer",
+    {
+      onlyIfStatusIn: ["calling", "answered"],
+      onlyIfCurrentAttempt: attemptId,
+      nextAttemptAt: nextLookAt(now, "too_soon", policy),
+    },
+  );
+}
+
 /** Called only after signature verification; the URL binds all three ids. */
 function liveSessionFor(slug: string, req: WebhookRequest, deps: OutboundWebhookDeps) {
   const id = new URL(req.originalUrl, "https://x.invalid").searchParams.get("liveSession");
