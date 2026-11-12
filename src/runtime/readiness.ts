@@ -1634,6 +1634,10 @@ import { callEnvironment } from "./callRecord";
  * migration.
  */
 /**
+ * v213 — a dialled pickup where the caller never spoke is no answer
+ * (2026-11-12, #459, `9221d1ea`, on main). No migration.
+ */
+/**
  * v214 — a booking made through the NPX outreach text's link reaches NPX
  * (2026-11-12). NPX refused every link booking with HTTP 400 because the
  * page's booking reference `text-link:<contact>` breaks NPX's `callRef` rule
