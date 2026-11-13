@@ -509,7 +509,12 @@ export class FakeOutboundStore implements OutboundStore {
   async holdConfirmation(contactId: string, bookingId: string, reason: string): Promise<boolean> {
     const c = this.contacts.get(contactId);
     const r = c ? this.confirmationOf(c) : null;
-    if (!c || !r || r.booking_id !== bookingId || (r.state !== "due" && r.state !== "retry" && r.state !== "claimed")) return false;
+    if (!c) return false;
+    if (!r || r.booking_id !== bookingId) {
+      this.writeConfirmation(c, { booking_id: bookingId, state: "held", reason } as BookingConfirmationRecord);
+      return true;
+    }
+    if (r.state !== "due" && r.state !== "retry" && r.state !== "claimed") return false;
     this.writeConfirmation(c, { ...r, state: "held", reason });
     return true;
   }

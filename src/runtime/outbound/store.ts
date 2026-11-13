@@ -1019,16 +1019,29 @@ export async function createDbOutboundStore(): Promise<OutboundStore> {
     },
 
     async holdConfirmation(contactId, bookingId, reason) {
+      // With no confirmation for this booking yet (its queue is still on its
+      // way, after the booking tool's settle budget ran out), the hold is
+      // written as a placeholder for the booking; queueConfirmation never
+      // replaces a confirmation for the same booking, so it cannot undo the
+      // hold when it lands (Codex P2 on #470).
       const held = rows(
         await db.execute(sql`
           UPDATE campaign_contacts
-             SET custom_data = jsonb_set(custom_data, ARRAY[${OUTREACH_TEXT_KEY}::text, ${CONFIRMATION_FIELD}::text],
-                   (custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text)
-                     || jsonb_build_object('state', 'held', 'reason', ${reason}::text),
+             SET custom_data = jsonb_set(
+                   COALESCE(custom_data, '{}'::jsonb), ARRAY[${OUTREACH_TEXT_KEY}::text],
+                   CASE WHEN jsonb_typeof(custom_data -> ${OUTREACH_TEXT_KEY}::text) = 'object'
+                        THEN custom_data -> ${OUTREACH_TEXT_KEY}::text ELSE '{}'::jsonb END
+                     || jsonb_build_object(${CONFIRMATION_FIELD}::text,
+                          CASE WHEN custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text ->> 'booking_id' = ${bookingId}::text
+                               THEN (custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text)
+                                      || jsonb_build_object('state', 'held', 'reason', ${reason}::text)
+                               ELSE jsonb_build_object('booking_id', ${bookingId}::text, 'state', 'held', 'reason', ${reason}::text)
+                          END),
                    true)
            WHERE id = ${contactId}::varchar
-             AND custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text ->> 'booking_id' = ${bookingId}::text
-             AND custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text ->> 'state' IN ('due', 'retry', 'claimed')
+             AND (custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text ->> 'booking_id'
+                    IS DISTINCT FROM ${bookingId}::text
+                  OR custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text ->> 'state' IN ('due', 'retry', 'claimed'))
           RETURNING id`),
       );
       return held.length > 0;

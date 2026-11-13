@@ -160,23 +160,41 @@ async function confirmOne(candidate: ContactRow, from: string, now: Date, deps: 
   if (!record) return "claimed_elsewhere";
   const soon = (ms: number) => new Date(now.getTime() + ms).toISOString();
 
-  // A booking made on a call is confirmed after the call: a person still on
-  // the line with us (the call, or a call back) waits a minute.
-  if (await deps.store.callOpenOnPhone(claimed.id, new Date(now.getTime() - OPEN_CALL_WINDOW_MS))) {
-    await deps.store.patchConfirmation(claimed.id, { state: "retry", retry_after: soon(CALL_OPEN_RETRY_MS), reason: "call_open" });
-    return "call_open";
-  }
+  // Nothing has been sent before the send itself, so a failure in these
+  // checks puts the claim back to retry (Codex P2 on #470). Left `claimed`,
+  // no later tick would ever select it again.
+  let key: string | null;
+  let sender: Awaited<ReturnType<TextDeps["sms"]>>;
+  try {
+    // A booking made on a call is confirmed after the call: a person still
+    // on the line with us (the call, or a call back) waits a minute.
+    if (await deps.store.callOpenOnPhone(claimed.id, new Date(now.getTime() - OPEN_CALL_WINDOW_MS))) {
+      await deps.store.patchConfirmation(claimed.id, { state: "retry", retry_after: soon(CALL_OPEN_RETRY_MS), reason: "call_open" });
+      return "call_open";
+    }
 
-  const key = dncKey(claimed.phone);
-  if (!key || (await deps.store.isDoNotContact(claimed.phone))) {
-    await deps.store.patchConfirmation(claimed.id, { state: "skipped", reason: "do_not_contact" });
-    return "do_not_contact";
-  }
+    key = dncKey(claimed.phone);
+    if (!key || (await deps.store.isDoNotContact(claimed.phone))) {
+      await deps.store.patchConfirmation(claimed.id, { state: "skipped", reason: "do_not_contact" });
+      return "do_not_contact";
+    }
 
-  const sender = await deps.sms();
-  if (!sender) {
-    await deps.store.patchConfirmation(claimed.id, { state: "retry", retry_after: soon(CONFIRMATION_RETRY_MS), reason: "no_sms_sender" });
-    return "no_sms_sender";
+    sender = await deps.sms();
+    if (!sender) {
+      await deps.store.patchConfirmation(claimed.id, { state: "retry", retry_after: soon(CONFIRMATION_RETRY_MS), reason: "no_sms_sender" });
+      return "no_sms_sender";
+    }
+  } catch {
+    const tries = (record.tries ?? 0) + 1;
+    await deps.store
+      .patchConfirmation(
+        claimed.id,
+        tries >= MAX_CONFIRMATION_TRIES
+          ? { state: "failed", reason: "check_failed", tries }
+          : { state: "retry", retry_after: soon(CONFIRMATION_RETRY_MS), reason: "check_failed", tries },
+      )
+      .catch(() => undefined);
+    return "check_failed";
   }
   try {
     const sent = await sender.send({ to: `+1${key}`, from, body: confirmationBody(record) });

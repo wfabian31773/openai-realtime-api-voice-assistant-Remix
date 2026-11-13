@@ -458,6 +458,51 @@ describe('a booking change that lands while the scheduler holds the claim', () =
   });
 });
 
+// Codex P2 on #470 (head 58128f6): the queue runs inside the booking tool's
+// settle budget, so a slow store can answer the caller before the
+// confirmation exists. A booking change then found nothing to hold, and the
+// queue, landing later, wrote the confirmation as due.
+describe('a booking change that lands before its confirmation is queued', () => {
+  const sid = 'CA00000000000000000000000000000231';
+  it('is held, and the late queue does not undo it', async () => {
+    const queue = store.queueConfirmation.bind(store);
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    let queued: Promise<boolean> | undefined;
+    store.queueConfirmation = (contactId, record) => {
+      queued = gate.then(() => queue(contactId, record));
+      return queued;
+    };
+    await bookOn(sid);
+    expect(confirmation()).toBeNull();
+    await runOn(sid, STAFF_CALLBACK_TOOL_NAME, { request: 'Cancel the new appointment', changes_booking: true });
+    expect(confirmation()).toMatchObject({ state: 'held', reason: 'staff_change', booking_id: 'booking-1' });
+    release();
+    expect(await queued).toBe(false);
+    expect(confirmation()).toMatchObject({ state: 'held', booking_id: 'booking-1' });
+    await hangUp();
+    expect((await tick({ now: () => new Date(NOW.getTime() + 10 * 60_000) })).sent).toBe(0);
+    expect(sent).toEqual([]);
+  }, 10_000);
+});
+
+// Codex P2 on #470 (head 58128f6): a check before the send that throws used
+// to leave the confirmation `claimed`, which no later tick selects.
+describe('a check before the send that fails', () => {
+  it('puts the claim back to retry, and a later tick sends it', async () => {
+    await bookOn('CA00000000000000000000000000000232');
+    await hangUp();
+    const dnc = store.isDoNotContact.bind(store);
+    store.isDoNotContact = async () => { throw new Error('connection reset'); };
+    const first = await tick({ now: () => new Date(NOW.getTime() + 2 * 60_000) });
+    expect(first).toMatchObject({ sent: 0, held: { check_failed: 1 } });
+    expect(confirmation()).toMatchObject({ state: 'retry', reason: 'check_failed', tries: 1 });
+    store.isDoNotContact = dnc;
+    expect((await tick({ now: () => new Date(NOW.getTime() + 60 * 60_000) })).sent).toBe(1);
+    expect(sent).toHaveLength(1);
+  });
+});
+
 describe('changes_booking with nothing booked', () => {
   it('is an ordinary staff callback', async () => {
     await runOn('CA00000000000000000000000000000227', STAFF_CALLBACK_TOOL_NAME, { request: 'Cancel my appointment', changes_booking: true });

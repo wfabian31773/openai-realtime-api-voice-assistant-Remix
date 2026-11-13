@@ -378,6 +378,9 @@ describe("the booking confirmation (v222)", () => {
     const m = method("holdConfirmation");
     expect(m).toContain("->> 'booking_id' = ${bookingId}::text");
     expect(m).toContain("->> 'state' IN ('due', 'retry', 'claimed')");
+    // No confirmation for this booking yet: the hold is written as a placeholder.
+    expect(m).toContain("IS DISTINCT FROM ${bookingId}::text");
+    expect(m).toContain("ELSE jsonb_build_object('booking_id', ${bookingId}::text, 'state', 'held'");
   });
 
   it("puts a claimed confirmation back only while it is still claimed, and always records a send", () => {
