@@ -158,6 +158,15 @@ export interface SettleOptions {
   exceptStatus?: readonly ContactStatus[];
   /** A no-op unless the row is in one of these statuses. */
   onlyIfStatusIn?: readonly ContactStatus[];
+  /**
+   * A no-op unless this booking still owns the contact (v228): the contact's
+   * held Azul cancel is absent, is this booking's and not dropped, or is an
+   * OLDER booking's. So a booking's settle that lands late never writes over
+   * the caller's undo (which drops the held cancel, writing it if absent) or
+   * a later booking (whose held cancel is newer). `heldAt` is the booking's
+   * own held_at, toISOString, so the text order is the time order.
+   */
+  onlyWhileBookingHolds?: { bookingId: string; heldAt: string };
   notes?: string;
 }
 
@@ -707,6 +716,17 @@ export async function createDbOutboundStore(): Promise<OutboundStore> {
                         WHERE x.contact_id = campaign_contacts.id AND x.direction = 'outbound'
                         ORDER BY x.attempted_at DESC, x.id DESC
                         LIMIT 1))
+             -- v228: only while this booking still owns the contact.
+             AND (${opts.onlyWhileBookingHolds?.bookingId ?? null}::text IS NULL
+                  OR custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${HELD_CANCEL_FIELD}::text IS NULL
+                  OR (custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${HELD_CANCEL_FIELD}::text ->> 'booking_id'
+                        = ${opts.onlyWhileBookingHolds?.bookingId ?? null}::text
+                      AND custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${HELD_CANCEL_FIELD}::text ->> 'state'
+                        IS DISTINCT FROM 'dropped')
+                  OR (custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${HELD_CANCEL_FIELD}::text ->> 'booking_id'
+                        IS DISTINCT FROM ${opts.onlyWhileBookingHolds?.bookingId ?? null}::text
+                      AND COALESCE(custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${HELD_CANCEL_FIELD}::text ->> 'held_at', '')
+                        < ${opts.onlyWhileBookingHolds?.heldAt ?? null}::text))
           RETURNING id`),
       );
       return settled.length > 0;

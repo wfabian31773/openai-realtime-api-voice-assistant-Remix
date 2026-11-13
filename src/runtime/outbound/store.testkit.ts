@@ -207,6 +207,16 @@ export class FakeOutboundStore implements OutboundStore {
       const mine = this.attempts.filter((a) => a.contactId === contactId && (a.direction ?? "outbound") === "outbound");
       if (mine[mine.length - 1]?.id !== opts.onlyIfCurrentAttempt) return false;
     }
+    if (opts.onlyWhileBookingHolds) {
+      // Same rule as the SQL (v228): absent, this booking's and not dropped,
+      // or an older booking's.
+      const { bookingId, heldAt } = opts.onlyWhileBookingHolds;
+      const held = this.heldCancelOf(c);
+      const holds =
+        !held ||
+        (held.booking_id === bookingId ? held.state !== "dropped" : (held.held_at ?? "") < heldAt);
+      if (!holds) return false;
+    }
     c.status = status;
     c.nextAttemptAt = opts.nextAttemptAt ?? null;
     if (opts.notes) c.notes = opts.notes;

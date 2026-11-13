@@ -791,5 +791,98 @@ describe('a booking whose writes outlast the tool never lands over its undo or a
     expect(held()).toMatchObject({ booking_id: 'booking-2', state: 'cancelled' });
     expect(await store.queueHeldCancel('c1', stale)).toBe(false);
     expect(held()).toMatchObject({ booking_id: 'booking-2', state: 'cancelled' });
+  });});
+
+describe('a booking whose own settle outlasts the undo never lands over it (v228, the ownership guard)', () => {
+  const sid = CORPUS[0];
+  /** The booking's settle (the first settleContact on the call) hangs until released, past the undo's 3 s wait. */
+  const holdTheBookingSettle = () => {
+    const settle = store.settleContact.bind(store);
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    let landed: Promise<boolean> | null = null;
+    let first = true;
+    store.settleContact = (...a) => {
+      if (first) {
+        first = false;
+        landed = gate.then(() => settle(...a));
+        return landed;
+      }
+      return settle(...a);
+    };
+    return { release: () => release(), landed: () => landed! };
+  };
+
+  it('the undo goes ahead after its wait, and the late settle leaves the contact declined', async () => {
+    const late = holdTheBookingSettle();
+    await bookOn(sid);
+    expect(await undo(sid)).toMatchObject({ booking_undone: true, azul_kept: true });
+    expect(store.contacts.get('c1')!).toMatchObject({ status: 'declined', notes: 'npx_booking_undone:booking-1' });
+    late.release();
+    expect(await late.landed()).toBe(false);
+    expect(store.contacts.get('c1')!).toMatchObject({ status: 'declined', notes: 'npx_booking_undone:booking-1' });
+    expect(held()).toMatchObject({ booking_id: 'booking-1', state: 'dropped' });
+    await hangUp();
+    later(30 * 60_000);
+    expect((await textTick()).sent).toBe(0);
+    expect(cancel).not.toHaveBeenCalled();
+  }, 20_000);
+
+  it('after a rebook, the undone booking\'s late settle leaves the new booking on the contact', async () => {
+    const late = holdTheBookingSettle();
+    await bookOn(sid);
+    expect(await undo(sid)).toMatchObject({ booking_undone: true });
+    later(60_000);
+    await runOn(sid, FIND_SOONER_TOOL_NAME);
+    expect(await runOn(sid, BOOK_SOONER_TOOL_NAME, { date: '2041-02-06', time: '14:30', city: 'Testville' })).toMatchObject({ booked: true });
+    expect(store.contacts.get('c1')!).toMatchObject({ status: 'completed', notes: 'npx_booking:booking-2' });
+    late.release();
+    expect(await late.landed()).toBe(false);
+    expect(store.contacts.get('c1')!).toMatchObject({ status: 'completed', notes: 'npx_booking:booking-2' });
+    await hangUp();
+    expect(cancel).toHaveBeenCalledTimes(1);
+    expect(npx.reportCancel).toHaveBeenCalledWith('booking-2', 'cancelled');
+  }, 20_000);
+
+  it("the booking's own settle still lands when nothing took the contact over", async () => {
+    const late = holdTheBookingSettle();
+    await bookOn(sid);
+    late.release();
+    expect(await late.landed()).toBe(true);
+    expect(store.contacts.get('c1')!).toMatchObject({ status: 'completed', notes: 'npx_booking:booking-1' });
+  }, 20_000);
+});
+
+describe('the ownership guard itself (v228, the store\'s rule)', () => {
+  const guard = (bookingId: string, heldAt: string) => ({ notes: `npx_booking:${bookingId}`, onlyWhileBookingHolds: { bookingId, heldAt } });
+  const setHeld = (record: Record<string, unknown> | null) => {
+    const c = store.contacts.get('c1')!;
+    const t = { ...((c.customData.outreach_text as Record<string, unknown>) ?? {}) };
+    if (record) t.held_cancel = record; else delete t.held_cancel;
+    c.customData = { ...c.customData, outreach_text: t };
+  };
+
+  it('lands with no held cancel on the contact', async () => {
+    setHeld(null);
+    expect(await store.settleContact('c1', 'completed', guard('booking-1', '2041-03-05T18:00:00.000Z'))).toBe(true);
+  });
+
+  it("lands on the booking's own held cancel, held or finished", async () => {
+    for (const state of ['held', 'claimed', 'cancelled', 'not_cancelled']) {
+      setHeld({ booking_id: 'booking-1', state, held_at: '2041-03-05T18:00:00.000Z' });
+      expect(await store.settleContact('c1', 'completed', guard('booking-1', '2041-03-05T18:00:00.000Z')), state).toBe(true);
+    }
+  });
+
+  it("is refused once the booking's held cancel is dropped (the undo)", async () => {
+    setHeld({ booking_id: 'booking-1', state: 'dropped', held_at: '2041-03-05T18:00:00.000Z' });
+    expect(await store.settleContact('c1', 'completed', guard('booking-1', '2041-03-05T18:00:00.000Z'))).toBe(false);
+  });
+
+  it("is refused under a newer booking's held cancel, and lands over an older one's", async () => {
+    setHeld({ booking_id: 'booking-2', state: 'held', held_at: '2041-03-05T18:05:00.000Z' });
+    expect(await store.settleContact('c1', 'completed', guard('booking-1', '2041-03-05T18:00:00.000Z'))).toBe(false);
+    setHeld({ booking_id: 'booking-0', state: 'dropped', held_at: '2041-03-05T17:55:00.000Z' });
+    expect(await store.settleContact('c1', 'completed', guard('booking-1', '2041-03-05T18:00:00.000Z'))).toBe(true);
   });
 });
