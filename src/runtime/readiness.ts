@@ -1700,7 +1700,9 @@ import { callEnvironment } from "./callRecord";
  * re-classifier reads "glasses" as Optical. Measured to 2026-11-13: 6 of 29
  * NPX staff-callback tickets created in Optical, every one a Refraction Only.
  * The description now names NextGen's own event (`staffAppointment`); the
- * caller still hears the plain-words visit. Above main's v218 (#465,
+ * caller still hears the plain-words visit. A live event name the same
+ * classifier would route out of the Hub is written as "An appointment"
+ * (Codex P2 on #467). Above main's v218 (#465,
  * `0c324a9c`), which it contains, and above v219 (#466, open), which it
  * does not.
  * No migration.
