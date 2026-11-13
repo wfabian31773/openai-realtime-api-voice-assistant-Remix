@@ -253,7 +253,8 @@ describe.each(CORPUS)('%s: booked, then changed their mind before hanging up', (
     expect(params.description).toContain('was kept (the call did not cancel it)');
     // NPX's backup list must ask CEC to cancel the NPX booking, not the Azul one.
     expect(npx.reportCancel).toHaveBeenCalledWith('booking-1', { failed: 'caller_kept_appointment' });
-    expect(confirmation()).toMatchObject({ state: 'held', reason: 'staff_change' });
+    // Held by the undo before NPX was asked (Codex P2 on #474); the staff hold finds it held.
+    expect(confirmation()).toMatchObject({ state: 'held', reason: 'booking_undo' });
     expect(store.contacts.get('c1')!.notes).toBe('npx_booking:booking-1; staff_callback:VA-90001');
 
     await hangUp();
@@ -561,5 +562,95 @@ describe('an undo that lands before the confirmation is queued (the hold\'s rule
     expect(await store.skipConfirmation('c1', 'booking-1', 'booking_undone')).toBe(true);
     await store.patchConfirmation('c1', { state: 'retry', reason: 'call_open' } as never);
     expect(confirmation()).toMatchObject({ state: 'skipped', reason: 'booking_undone' });
+  });
+});
+
+describe('the hang-up releases before the confirmation is queued (Codex P2 on #474)', () => {
+  const sid = CORPUS[2];
+  /** The booking tool's queue is still on its way when the call ends. */
+  const holdTheQueue = () => {
+    const queue = store.queueConfirmation.bind(store);
+    let lateQueue: (() => Promise<boolean>) | null = null;
+    store.queueConfirmation = async (...a) => { lateQueue = () => queue(...a); return true; };
+    return () => lateQueue!();
+  };
+
+  it('the late queue takes the release over: the text goes after the hang-up and says the appointment is cancelled', async () => {
+    const lateQueue = holdTheQueue();
+    await bookOn(sid);
+    later(60_000);
+    await hangUp();
+    expect(confirmation()).toMatchObject({ booking_id: 'booking-1', state: 'released', cancel: 'cancelled' });
+    // A released placeholder is never sent on its own.
+    later(30 * 60_000);
+    expect((await textTick()).sent).toBe(0);
+    expect(await lateQueue()).toBe(true);
+    expect(confirmation()).toMatchObject({ booking_id: 'booking-1', by: 'call', state: 'due', cancel: 'cancelled', due_at: new Date(NOW.getTime() + 60_000).toISOString() });
+    expect((await textTick()).sent).toBe(1);
+    expect(sent[0].body).toContain('Your Mar 20 appointment with us is cancelled.');
+    expect(sent[0].body).not.toContain('Our team will cancel');
+  });
+
+  it('a cancel that did not land is released as pending, and the text says our team will cancel', async () => {
+    cancel.mockResolvedValueOnce({ cancelled: false, reason: 'nextgen_cancel_failed' });
+    const lateQueue = holdTheQueue();
+    await bookOn(sid);
+    await hangUp();
+    expect(confirmation()).toMatchObject({ state: 'released', cancel: 'pending' });
+    expect(await lateQueue()).toBe(true);
+    expect(confirmation()).toMatchObject({ state: 'due', cancel: 'pending' });
+    later(3 * 60_000);
+    expect((await textTick()).sent).toBe(1);
+    expect(sent[0].body).toContain('Our team will cancel your Mar 20 appointment with us.');
+  });
+
+  it('a queue that lands first is released as before, and a second queue never replaces it', async () => {
+    await bookOn(sid);
+    await hangUp();
+    expect(confirmation()).toMatchObject({ state: 'due', cancel: 'cancelled' });
+    expect(await store.queueConfirmation('c1', { ...confirmation()!, state: 'awaiting_cancel', cancel: 'pending' })).toBe(false);
+    expect(confirmation()).toMatchObject({ state: 'due', cancel: 'cancelled' });
+  });
+});
+
+describe('the undo holds the confirmation before NPX cancels the booking (Codex P2 on #474)', () => {
+  const sid = CORPUS[0];
+
+  it('a skip that throws after NPX cancelled the booking leaves the confirmation held: nothing confirms a cancelled booking', async () => {
+    await bookOn(sid);
+    store.skipConfirmation = async () => { throw new Error('store blip on the skip'); };
+    const r = await undo(sid);
+    expect(r).toMatchObject({ success: true, booking_undone: true, npx_cancel: 'cancelled', azul_kept: true });
+    expect(confirmation()).toMatchObject({ booking_id: 'booking-1', state: 'held', reason: 'booking_undo' });
+    await hangUp();
+    later(30 * 60_000);
+    expect((await textTick()).sent).toBe(0);
+    expect((await fallbackTick()).ran).toBe(0);
+    expect(cancel).not.toHaveBeenCalled();
+  });
+
+  it('the hold lands before NPX is asked', async () => {
+    await bookOn(sid);
+    const order: string[] = [];
+    const hold = store.holdConfirmation.bind(store);
+    store.holdConfirmation = async (...a) => { order.push('hold'); return hold(...a); };
+    npx.cancelBooking.mockImplementationOnce(async () => { order.push('npx_cancel'); return { ok: true, outcome: 'cancelled' }; });
+    await undo(sid);
+    expect(order).toEqual(['hold', 'npx_cancel']);
+    expect(confirmation()).toMatchObject({ state: 'skipped', reason: 'booking_undone' });
+  });
+
+  it('a hold that cannot be written: NPX is not cancelled, NPX is told the Azul appointment is kept, and staff are asked', async () => {
+    await bookOn(sid);
+    store.holdConfirmation = async () => { throw new Error('store blip on the hold'); };
+    const r = await undo(sid);
+    expect(npx.cancelBooking).not.toHaveBeenCalled();
+    expect(npx.reportCancel).toHaveBeenCalledWith('booking-1', { failed: 'caller_kept_appointment' });
+    expect(r).toMatchObject({ success: true, booking_undone: false, npx_cancel: 'confirmation_not_held', azul_kept: true, ticket_number: 'VA-90001' });
+    expect(fileTicket.mock.calls[0][0].priority).toBe('urgent');
+    expect(held()).toMatchObject({ state: 'dropped' });
+    await hangUp();
+    later(30 * 60_000);
+    expect(cancel).not.toHaveBeenCalled();
   });
 });

@@ -1961,7 +1961,29 @@ async function undoBooking(sid: string, s: OutreachSession, currentDay: string, 
   const kept = b.azul.kind === 'held' ? await keepAzulAppointment(s, 'booking_undone') : b.azul.kind === 'dropped' && b.azul.kept === 'yes' ? 'dropped' : 'not_dropped';
 
   let npxCancel: string = 'not_tried';
-  if (kept === 'dropped') {
+  // The confirmation is held BEFORE NPX is asked to cancel (Codex P2 on #474):
+  // a held confirmation is never sent, so once the booking is gone nothing can
+  // text the caller about it, whatever happens to the skip below. A hold that
+  // cannot be written means the booking is not cancelled here; staff do it.
+  const held =
+    kept === 'dropped'
+      ? await within(
+          live()
+            .store()
+            .then((st) => st.holdConfirmation(s.contact.contactId, bookingId, 'booking_undo'))
+            .then(() => true)
+            .catch((e) => {
+              console.warn(`[NPX OUTREACH] booking ${bookingId}: the confirmation could not be held before the undo —`, e instanceof Error ? e.message : e);
+              return false;
+            }),
+          STORE_STEP_MS,
+          false,
+        )
+      : false;
+  if (kept === 'dropped' && !held) {
+    npxCancel = 'confirmation_not_held';
+    await reportAzulKept(s.demo, bookingId);
+  } else if (kept === 'dropped') {
     const cancelled = await within(
       npxFor(s.demo).cancelBooking(bookingId, { callRef: sid, reason: NPX_UNDO_REASON }).catch(() => ({ ok: false as const, error: 'unavailable' as const })),
       Math.min(NPX_TIMEOUT_MS.cancel + 1_000, deadline - Date.now()),

@@ -62,8 +62,11 @@ export const OPEN_CALL_WINDOW_MS = 30 * 60 * 1000;
 export interface BookingConfirmationRecord {
   /** awaiting_cancel (v224): a call booking's confirmation waits for the
    * held Azul cancel to run at hang-up, which releases it with the real
-   * result; one nobody releases goes at `due_at` saying our team will cancel. */
-  state: "due" | "awaiting_cancel" | "held" | "claimed" | "sent" | "unknown" | "failed" | "skipped" | "retry";
+   * result; one nobody releases goes at `due_at` saying our team will cancel.
+   * released (v224, Codex P2 on #474): the hang-up ran the cancel before the
+   * booking's confirmation was queued; this placeholder holds what the cancel
+   * came to, and the late queue takes it over as due. Never sent itself. */
+  state: "due" | "awaiting_cancel" | "held" | "claimed" | "sent" | "unknown" | "failed" | "skipped" | "retry" | "released";
   booking_id: string;
   /** Booked on a call, or on the text's booking page. */
   by: "call" | "link";
@@ -80,6 +83,8 @@ export interface BookingConfirmationRecord {
   /** Whether the Azul cancel landed: when it was booked on the text link, or,
    * on a call, when the held cancel ran at hang-up (v224). */
   cancel: "cancelled" | "pending";
+  /** On a `released` placeholder: when the hang-up released it. */
+  released_at?: string;
   queued_at: string;
   /** Not sent before this. */
   due_at: string;

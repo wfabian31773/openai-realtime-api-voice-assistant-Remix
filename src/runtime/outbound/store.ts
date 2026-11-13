@@ -298,7 +298,8 @@ export interface OutboundStore {
 
   // ── The booking confirmation text (v222, ./bookingConfirmation.ts) ──
   /** Queue a booking's confirmation on the contact, inside outreach_text.
-   * A no-op when this booking's confirmation is already queued or sent.
+   * A no-op when this booking's confirmation is already queued or sent; over
+   * a `released` placeholder it is written as due with the cancel's result.
    * True when it was written. */
   queueConfirmation(contactId: string, record: BookingConfirmationRecord): Promise<boolean>;
   /** Rows on this campaign whose confirmation is due or a retry is due. */
@@ -313,8 +314,9 @@ export interface OutboundStore {
   /**
    * The held Azul cancel has run (v224): write what it came to on this
    * booking's confirmation, and let one that was waiting for it go now. A
-   * confirmation already claimed, sent or of unknown fate is left alone. True
-   * when it was written.
+   * confirmation already claimed, sent or of unknown fate is left alone. With
+   * none queued for this booking yet, a `released` placeholder the late queue
+   * takes over as due. True when it was written.
    */
   releaseConfirmation(contactId: string, bookingId: string, cancel: "cancelled" | "pending", now: Date): Promise<boolean>;
   /** The caller undid this booking on the call (v224): its confirmation is
@@ -991,6 +993,11 @@ export async function createDbOutboundStore(): Promise<OutboundStore> {
     },
 
     async queueConfirmation(contactId, record) {
+      // A `released` placeholder for this booking means the hang-up ran the
+      // held cancel before this queue landed (Codex P2 on #474): the record is
+      // written over it as due, carrying the cancel's result and the release
+      // time, so the text says what the cancel came to. Any other
+      // confirmation for this booking is never replaced.
       const written = rows(
         await db.execute(sql`
           UPDATE campaign_contacts
@@ -998,12 +1005,24 @@ export async function createDbOutboundStore(): Promise<OutboundStore> {
                    COALESCE(custom_data, '{}'::jsonb), ARRAY[${OUTREACH_TEXT_KEY}::text],
                    CASE WHEN jsonb_typeof(custom_data -> ${OUTREACH_TEXT_KEY}::text) = 'object'
                         THEN custom_data -> ${OUTREACH_TEXT_KEY}::text ELSE '{}'::jsonb END
-                     || jsonb_build_object(${CONFIRMATION_FIELD}::text, ${JSON.stringify(record)}::jsonb),
+                     || jsonb_build_object(${CONFIRMATION_FIELD}::text,
+                          CASE WHEN custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text ->> 'booking_id' = ${record.booking_id}::text
+                                AND custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text ->> 'state' = 'released'
+                               THEN ${JSON.stringify(record)}::jsonb
+                                      || jsonb_build_object(
+                                           'state', 'due',
+                                           'cancel', COALESCE(custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text -> 'cancel',
+                                                              to_jsonb(${record.cancel}::text)),
+                                           'due_at', COALESCE(custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text ->> 'released_at',
+                                                              ${record.due_at}::text))
+                               ELSE ${JSON.stringify(record)}::jsonb
+                          END),
                    true)
            WHERE id = ${contactId}::varchar
              AND (custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text IS NULL
                   OR custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text ->> 'booking_id'
-                     IS DISTINCT FROM ${record.booking_id}::text)
+                     IS DISTINCT FROM ${record.booking_id}::text
+                  OR custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text ->> 'state' = 'released')
           RETURNING id`),
       );
       return written.length > 0;
@@ -1088,19 +1107,34 @@ export async function createDbOutboundStore(): Promise<OutboundStore> {
     },
 
     async releaseConfirmation(contactId, bookingId, cancel, now) {
+      // With no confirmation for this booking yet (its queue is still on its
+      // way, after the booking tool's settle budget ran out, and the caller
+      // hung up first), a `released` placeholder keeps what the cancel came
+      // to; the late queue takes it over as due (Codex P2 on #474). Without
+      // it the late queue would wait as awaiting_cancel and go at 20 minutes
+      // saying our team will cancel an appointment already cancelled.
       const released = rows(
         await db.execute(sql`
           UPDATE campaign_contacts
-             SET custom_data = jsonb_set(custom_data, ARRAY[${OUTREACH_TEXT_KEY}::text, ${CONFIRMATION_FIELD}::text],
-                   (custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text)
-                     || jsonb_build_object('cancel', ${cancel}::text)
-                     || CASE WHEN custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text ->> 'state' = 'awaiting_cancel'
-                             THEN jsonb_build_object('state', 'due', 'due_at', ${now.toISOString()}::text)
-                             ELSE '{}'::jsonb END,
+             SET custom_data = jsonb_set(
+                   COALESCE(custom_data, '{}'::jsonb), ARRAY[${OUTREACH_TEXT_KEY}::text],
+                   CASE WHEN jsonb_typeof(custom_data -> ${OUTREACH_TEXT_KEY}::text) = 'object'
+                        THEN custom_data -> ${OUTREACH_TEXT_KEY}::text ELSE '{}'::jsonb END
+                     || jsonb_build_object(${CONFIRMATION_FIELD}::text,
+                          CASE WHEN custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text ->> 'booking_id' = ${bookingId}::text
+                               THEN (custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text)
+                                      || jsonb_build_object('cancel', ${cancel}::text)
+                                      || CASE WHEN custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text ->> 'state' = 'awaiting_cancel'
+                                              THEN jsonb_build_object('state', 'due', 'due_at', ${now.toISOString()}::text)
+                                              ELSE '{}'::jsonb END
+                               ELSE jsonb_build_object('booking_id', ${bookingId}::text, 'state', 'released',
+                                                       'cancel', ${cancel}::text, 'released_at', ${now.toISOString()}::text)
+                          END),
                    true)
            WHERE id = ${contactId}::varchar
-             AND custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text ->> 'booking_id' = ${bookingId}::text
-             AND custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text ->> 'state' NOT IN ('claimed', 'sent', 'unknown')
+             AND (custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text ->> 'booking_id'
+                    IS DISTINCT FROM ${bookingId}::text
+                  OR custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text ->> 'state' NOT IN ('claimed', 'sent', 'unknown'))
           RETURNING id`),
       );
       return released.length > 0;

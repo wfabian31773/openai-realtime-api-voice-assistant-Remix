@@ -478,7 +478,16 @@ export class FakeOutboundStore implements OutboundStore {
     const c = this.contacts.get(contactId);
     if (!c) return false;
     const held = this.confirmationOf(c);
-    if (held && held.booking_id === record.booking_id) return false;
+    if (held && held.booking_id === record.booking_id) {
+      if (held.state !== "released") return false;
+      this.writeConfirmation(c, {
+        ...record,
+        state: "due",
+        cancel: held.cancel ?? record.cancel,
+        due_at: held.released_at ?? record.due_at,
+      });
+      return true;
+    }
     this.writeConfirmation(c, { ...record });
     return true;
   }
@@ -524,7 +533,17 @@ export class FakeOutboundStore implements OutboundStore {
   async releaseConfirmation(contactId: string, bookingId: string, cancel: "cancelled" | "pending", now: Date): Promise<boolean> {
     const c = this.contacts.get(contactId);
     const r = c ? this.confirmationOf(c) : null;
-    if (!c || !r || r.booking_id !== bookingId || ["claimed", "sent", "unknown"].includes(r.state)) return false;
+    if (!c) return false;
+    if (!r || r.booking_id !== bookingId) {
+      this.writeConfirmation(c, {
+        booking_id: bookingId,
+        state: "released",
+        cancel,
+        released_at: now.toISOString(),
+      } as BookingConfirmationRecord);
+      return true;
+    }
+    if (["claimed", "sent", "unknown"].includes(r.state)) return false;
     this.writeConfirmation(c, {
       ...r,
       cancel,
