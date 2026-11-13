@@ -1218,10 +1218,12 @@ registerTool({
  *  - nothing offered at that date and time books nothing.
  * Every refusal speaks through `fix` (v43): nothing for the caller to hear.
  *
- * v229: a date sent as words or numbers ("November 18", "11/18") is read
- * against the days offered (readChosenDate), and every refusal carries the
- * choices read on the call with the exact date and time to send back
- * (withChoices); `which_list` names the slots the option points at.
+ * v229: every refusal carries the choices read on the call with the exact
+ * date and time to send back (withChoices), and `which_list` names the slots
+ * the option points at. The date is read only as YYYY-MM-DD, as
+ * find_sooner_exam writes it, and the time as v218 read it (operator,
+ * 2026-11-13, after six review rounds on a wider reader); anything else is
+ * named as unreadable and books nothing.
  */
 export function chosenSlot(
   offers: NpxSlot[][],
@@ -1234,34 +1236,10 @@ export function chosenSlot(
   const index = /^[1-9]$/.test(optionText) ? Number(optionText) - 1 : -1;
   const byOption = new Map<string, NpxSlot>();
   if (index >= 0) for (const list of offers) if (list[index]) byOption.set(list[index].slotId, list[index]);
-  const dateRead = readChosenDate(input.date, offered);
-  const timeRead = readChosenTime(input.time, input.date);
+  const dateRead = readChosenDate(input.date);
+  const timeRead = readChosenTime(input.time);
   const date = 'day' in dateRead ? dateRead.day : '';
   const minutes = 'minutes' in timeRead ? timeRead.minutes : null;
-
-  // The date and the time are each read once and must name ONE moment (Codex
-  // P1 on #476): a time sent as a date-time on another day, or a date sent
-  // as a date-time at another hour than the time beside it, is never
-  // stitched into a third moment the model did not send.
-  const dateAsDateTime = typeof input.date === 'string' ? readIsoDateTime(input.date) : null;
-  const timeAsDateTime = typeof input.time === 'string' ? readIsoDateTime(input.time) : null;
-  const conflict =
-    (timeAsDateTime && typeof timeAsDateTime === 'object' && date && timeAsDateTime.day !== date) ||
-    (dateAsDateTime && typeof dateAsDateTime === 'object' && minutes !== null && dateAsDateTime.minutes !== minutes);
-  if (conflict) {
-    return {
-      refusal: withChoices(
-        {
-          success: false,
-          error: 'date_time_disagree',
-          fix:
-            'Nothing was booked: the date and the time you sent name different days or hours. ' +
-            'Call book_sooner_exam with the date and time, exactly as written here, of the choice they confirmed.',
-        },
-        offered,
-      ),
-    };
-  }
 
   if (date && minutes !== null) {
     let atThatTime = offered.filter((x) => {
@@ -1354,7 +1332,7 @@ export function chosenSlot(
         error: 'no_choice',
         fix:
           'Nothing was booked. ' +
-          (unreadable.length ? `${joinWords(unreadable)} could not be read. ` : '') +
+          (unreadable.length ? `${joinWords(unreadable)} could not be read: send the date as YYYY-MM-DD and the time as 24-hour HH:MM. ` : '') +
           'Call book_sooner_exam with the date and time, exactly as written here, of the choice they confirmed.',
       },
       offered,
@@ -1386,213 +1364,40 @@ function withChoices(r: Refusal, slots: NpxSlot[]): Refusal {
   } as Refusal;
 }
 
-const MONTH_NAMES = [
-  'january', 'february', 'march', 'april', 'may', 'june',
-  'july', 'august', 'september', 'october', 'november', 'december',
-];
-
-/** "nov" / "november" -> 11, "sept" -> 9; anything else -> 0. */
-function monthOf(word: string): number {
-  const w = word.toLowerCase().replace(/\.$/, '');
-  if (w.length < 3) return 0;
-  const i = MONTH_NAMES.findIndex((m) => m.startsWith(w));
-  return i + 1;
-}
-
-const pad2 = (n: number) => String(n).padStart(2, '0');
-
-/** Words a date in words may carry besides its month, day and year. */
-const DATE_FILLER_WORDS = new Set(['of', 'the', 'on']);
-const WEEKDAY_WORDS = new Set([
-  'monday', 'mon', 'tuesday', 'tue', 'tues', 'wednesday', 'wed', 'thursday', 'thu', 'thur', 'thurs',
-  'friday', 'fri', 'saturday', 'sat', 'sunday', 'sun',
-]);
-
-/** The clock every slot is offered on and every choice is written in. */
-const PRACTICE_TIME_ZONE = 'America/Los_Angeles';
-
-/** "2041-02-13T09:00" or "2041-02-13 09:00", then the rest of the string. */
-const ISO_DATE_TIME = /^(\d{4})-(\d{2})-(\d{2})[T\s](\d{2}):(\d{2})(?::(\d{2})(?:\.\d+)?)?(.*)$/i;
-
 /**
- * A DATE-TIME SENT AS ISO 8601, ON THE PRACTICE'S CLOCK (v229, Codex P2 on
- * #476). A choice is written as a Pacific date and time, so a date-time with
- * no zone ("2041-02-13T09:00") is read as written. One with an offset
- * ("2041-02-13T17:00:00Z", "...-08:00") is a moment, and is turned into the
- * Pacific day and minute it names: 17:00Z is 09:00 in Los Angeles, and
- * reading its 17:00 against the slots would refuse the slot the caller chose
- * or book another one at 17:00. A Pacific zone name ("PST", "PT") is read as
- * written; any other zone word cannot be placed and is unreadable, so the
- * refusal names the choices. Null when the string is not an ISO date-time.
- */
-export function readIsoDateTime(raw: string): { day: string; minutes: number } | 'unreadable' | null {
-  const m = ISO_DATE_TIME.exec(raw.trim());
-  if (!m) return null;
-  const [, y, mo, d, hh, mi, ss, rest] = m;
-  if (Number(hh) > 23 || Number(mi) > 59) return 'unreadable';
-  // A day the calendar does not have is unreadable, never rolled over:
-  // JavaScript reads 2041-02-30T17:00Z as March 2 (Codex P1 on #476).
-  const calendar = new Date(Date.UTC(Number(y), Number(mo) - 1, Number(d)));
-  if (calendar.getUTCFullYear() !== Number(y) || calendar.getUTCMonth() !== Number(mo) - 1 || calendar.getUTCDate() !== Number(d)) {
-    return 'unreadable';
-  }
-  const tail = rest.trim();
-  if (!tail || /^(?:pst|pdt|pt|pacific(?: time)?)$/i.test(tail)) {
-    return { day: `${y}-${mo}-${d}`, minutes: Number(hh) * 60 + Number(mi) };
-  }
-  const ampm = /^([ap])\.?\s?m\.?$/i.exec(tail);
-  if (ampm) {
-    const minutes = minutesOf(`${hh}:${mi} ${ampm[1]}m`);
-    return minutes === null ? 'unreadable' : { day: `${y}-${mo}-${d}`, minutes };
-  }
-  let offset: string;
-  if (/^(?:z|utc|gmt)$/i.test(tail)) {
-    offset = 'Z';
-  } else {
-    const o = /^(?:utc|gmt)?\s*([+-])(\d{2})(?::?(\d{2}))?$/i.exec(tail);
-    if (!o || Number(o[2]) > 14 || Number(o[3] ?? 0) > 59) return 'unreadable';
-    offset = `${o[1]}${o[2]}:${o[3] ?? '00'}`;
-  }
-  const instant = new Date(`${y}-${mo}-${d}T${hh}:${mi}:${ss ?? '00'}${offset}`);
-  if (Number.isNaN(instant.getTime())) return 'unreadable';
-  const parts = new Intl.DateTimeFormat('en-CA', {
-    timeZone: PRACTICE_TIME_ZONE,
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    hourCycle: 'h23',
-  }).formatToParts(instant);
-  const part = (t: string) => parts.find((p) => p.type === t)?.value ?? '';
-  return {
-    day: `${part('year')}-${part('month')}-${part('day')}`,
-    minutes: Number(part('hour')) * 60 + Number(part('minute')),
-  };
-}
-
-/**
- * THE DATE THE MODEL SENT, READ AGAINST THE DAYS OFFERED (v229).
+ * THE DATE THE MODEL SENT (v229): exactly YYYY-MM-DD, the form
+ * find_sooner_exam writes each choice's date in and every refusal writes the
+ * choices in. v218 read only this form too, and took anything else as no
+ * date at all, which fell to the option number and, with two lists read, to
+ * `which_list` every time (CA3eec4f155e08f15868b34008bd15d988 lost the slot
+ * the caller chose). Now anything else is named as unreadable and the
+ * refusal hands back the choices to send.
  *
- * v218 took only YYYY-MM-DD and read anything else as no date at all, so a
- * date sent as "November 18" or "11/18" fell through to the option number
- * and, with two lists read, was refused `which_list` every time: 2 of the 4
- * NPX calls since v218 that tried to book hit it, and
- * CA3eec4f155e08f15868b34008bd15d988 lost the slot the caller chose. Now a
- * month and day in words or numbers are read too, and only ever to a day
- * that a choice read on the call is on, so nothing is invented: a month and
- * day no choice is on is a day not offered, and refused as one.
+ * A wider reader (words, numbers, time zones, a date-time) was built and then
+ * withdrawn on the operator's ruling of 2026-11-13: six review rounds each
+ * found another way it could read a date the model did not send, and a date
+ * read wrong can book the wrong slot and cancel the caller's appointment. A
+ * refusal costs one more try with the choices written out.
  */
-export function readChosenDate(
-  raw: unknown,
-  offered: NpxSlot[],
-): { day: string; form: 'iso' | 'words' } | { form: 'unreadable' | 'none' } {
+export function readChosenDate(raw: unknown): { day: string; form: 'iso' } | { form: 'unreadable' | 'none' } {
   if (typeof raw !== 'string' || !raw.trim()) return { form: 'none' };
-  const text = raw.trim();
-  const dateTime = readIsoDateTime(text);
-  if (dateTime === 'unreadable') return { form: 'unreadable' };
-  if (dateTime) return { day: dateTime.day, form: 'iso' };
-  // Punctuation that ends a sentence or a list item is not part of a date:
-  // "2/13/2042." and "February 13, 2042." carry their year (Codex P1 on
-  // #476: the year with a full stop after it was dropped, and the date was
-  // read to the offered February 13 a year earlier).
-  const bare = text.replace(/[\s.,;:!?)\]]+$/, '');
-  // A date written YYYY-MM-DD is read only when it is the whole answer
-  // (Codex P1 on #476: "2041-02-13 or 2041-02-14" was read as the 13th,
-  // the rest dropped). A date-time was read above; anything else that starts
-  // with an ISO date reaches the closed word set below, which refuses it.
-  const iso = /^(\d{4})-(\d{2})-(\d{2})$/.exec(bare);
-  if (iso) return { day: `${iso[1]}-${iso[2]}-${iso[3]}`, form: 'iso' };
-
-  let month = 0;
-  let dayOfMonth = 0;
-  let year = 0;
-  const numeric = /^(\d{1,2})[/.-](\d{1,2})(?:[/.-](\d{2}|\d{4}))?$/.exec(bare);
-  if (numeric) {
-    month = Number(numeric[1]);
-    dayOfMonth = Number(numeric[2]);
-    if (numeric[3]) year = numeric[3].length === 2 ? 2000 + Number(numeric[3]) : Number(numeric[3]);
-  } else {
-    const words = bare
-      .toLowerCase()
-      .split(/[\s,]+/)
-      .map((w) => w.replace(/^[(\[]+/, '').replace(/[.;:!?)\]]+$/, ''))
-      .filter(Boolean);
-    // A CLOSED SET OF WORDS (Codex on #476, three rounds on this reader: a
-    // year with a full stop after it, a two-digit year, a second date). Every
-    // word must be a month, a day, a year, a weekday or "of" / "the" / "on";
-    // anything else makes the date unreadable, so nothing the model added is
-    // dropped and read past. A refusal costs one more try with the choices
-    // written out; a date read past its words can book the wrong slot and
-    // cancel the caller's appointment.
-    for (const w of words) {
-      if (DATE_FILLER_WORDS.has(w) || WEEKDAY_WORDS.has(w)) continue;
-      const m = monthOf(w);
-      if (m) {
-        if (month) return { form: 'unreadable' };
-        month = m;
-        continue;
-      }
-      const d = /^(\d{1,2})(st|nd|rd|th)?$/.exec(w);
-      if (d) {
-        if (!dayOfMonth) {
-          dayOfMonth = Number(d[1]);
-          continue;
-        }
-        // A bare two-digit number after the day is its year, read the way
-        // "2-13-42" is: "February 13, 42" is 2042, never the offered 2041.
-        if (!d[2] && d[1].length === 2 && !year) {
-          year = 2000 + Number(d[1]);
-          continue;
-        }
-        return { form: 'unreadable' };
-      }
-      const y = /^\d{4}$/.test(w) ? Number(w) : /^['\u2019]\d{2}$/.test(w) ? 2000 + Number(w.slice(1)) : 0;
-      if (y && !year) {
-        year = y;
-        continue;
-      }
-      return { form: 'unreadable' };
-    }
-  }
-  if (!(month >= 1 && month <= 12 && dayOfMonth >= 1 && dayOfMonth <= 31)) return { form: 'unreadable' };
-
-  const suffix = `-${pad2(month)}-${pad2(dayOfMonth)}`;
-  const days = [...new Set(offered.map((x) => localParts(x).day))];
-  const matching = days.filter((d) => d.endsWith(suffix) && (!year || d.startsWith(`${year}-`)));
-  if (matching.length === 1) return { day: matching[0], form: 'words' };
-  if (matching.length > 1) return { form: 'unreadable' };
-  // A month and day no choice is on: read as that day in the year of the
-  // first choice (or the year given), so it is refused as not offered.
-  const y = year || Number((days[0] ?? '').slice(0, 4)) || new Date().getUTCFullYear();
-  return { day: `${y}${suffix}`, form: 'words' };
+  const iso = /^(\d{4})-(\d{2})-(\d{2})$/.exec(raw.trim());
+  return iso ? { day: `${iso[1]}-${iso[2]}-${iso[3]}`, form: 'iso' } : { form: 'unreadable' };
 }
 
 /**
- * The time the model sent: "11:00", "11 AM", "11:00 a.m.", "11:00:00", a
- * whole date-time, or, when no time was sent, the time of a date sent as
- * "2026-11-18T11:00". A date-time with a UTC offset is read on the
- * practice's clock (`readIsoDateTime`); a bare time with an offset
- * ("17:00Z") cannot be placed on a day and is unreadable.
+ * The time the model sent, read as v218 read it (`minutesOf`, the parser
+ * find_sooner_exam's own time preferences use): 24-hour HH:MM as
+ * find_sooner_exam writes each choice's time ("09:00"), or an hour with AM or
+ * PM ("10 AM", "9:00 a.m."). v229 widened this to seconds, zones and
+ * date-times and the widening was withdrawn with the date reader's (operator,
+ * 2026-11-13); what v218 accepted, and is live, stays. Anything else is
+ * unreadable.
  */
-export function readChosenTime(
-  raw: unknown,
-  dateRaw?: unknown,
-): { minutes: number; form: 'read' } | { form: 'unreadable' | 'none' } {
-  if (typeof raw === 'string' && raw.trim()) {
-    const dateTime = readIsoDateTime(raw);
-    if (dateTime === 'unreadable') return { form: 'unreadable' };
-    if (dateTime) return { minutes: dateTime.minutes, form: 'read' };
-    const text = raw.trim().replace(/^(\d{1,2}:\d{2}):\d{2}/, '$1').replace(/\b([ap])\.?\s?m\.?$/i, '$1m');
-    const m = minutesOf(text);
-    return m === null ? { form: 'unreadable' } : { minutes: m, form: 'read' };
-  }
-  if (typeof dateRaw === 'string') {
-    const dateTime = readIsoDateTime(dateRaw);
-    if (dateTime === 'unreadable') return { form: 'unreadable' };
-    if (dateTime) return { minutes: dateTime.minutes, form: 'read' };
-  }
-  return { form: 'none' };
+export function readChosenTime(raw: unknown): { minutes: number; form: 'read' } | { form: 'unreadable' | 'none' } {
+  if (typeof raw !== 'string' || !raw.trim()) return { form: 'none' };
+  const minutes = minutesOf(raw);
+  return minutes === null ? { form: 'unreadable' } : { minutes, form: 'read' };
 }
 
 /**
@@ -1602,16 +1407,15 @@ export function readChosenTime(
  * booking's arguments, so "did the model send the date at all?" could not be
  * answered for the 7 refusals of 2026-11-13.
  */
-export function bookingArgsReceived(input: Record<string, unknown>, offers: NpxSlot[][]): {
-  received_date: 'iso' | 'words' | 'unreadable' | 'none';
+export function bookingArgsReceived(input: Record<string, unknown>): {
+  received_date: 'iso' | 'unreadable' | 'none';
   received_time: 'read' | 'unreadable' | 'none';
   received_option: boolean;
 } {
-  const offered = offers.flat();
   const optionText = typeof input.option === 'string' || typeof input.option === 'number' ? String(input.option).trim() : '';
   return {
-    received_date: readChosenDate(input.date, offered).form,
-    received_time: readChosenTime(input.time, input.date).form,
+    received_date: readChosenDate(input.date).form,
+    received_time: readChosenTime(input.time).form,
     received_option: optionText !== '',
   };
 }
@@ -1623,8 +1427,7 @@ async function bookChosen(
   currentDay: string,
   deadline: number,
 ): Promise<ToolResult> {
-  // Read before booking: a slot taken on the way empties s.offers.
-  const received = bookingArgsReceived(input, s.offers);
+  const received = bookingArgsReceived(input);
   const result = await bookChosenSlot(input, sid, s, currentDay, deadline);
   return { ...result, ...received } as ToolResult;
 }

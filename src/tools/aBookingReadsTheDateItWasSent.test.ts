@@ -14,10 +14,17 @@
  *
  * 2 of the 4 NPX calls since v218 that tried to book hit `which_list`. The
  * timeline kept none of the booking's arguments, so whether the model sent
- * the option alone or the date in words is not recoverable; v218 read only
- * YYYY-MM-DD and treated any other date as no date at all, which falls to the
- * option number and, with two lists read, to `which_list` every time. Both
- * shapes are covered here, and the arguments' form is recorded from now on.
+ * the option alone or the date in another form is not recoverable; v218 read
+ * only YYYY-MM-DD and treated any other date as no date at all, which falls to
+ * the option number and, with two lists read, to `which_list` every time.
+ *
+ * The fix is the refusal, not the reader (operator, 2026-11-13, after six
+ * review rounds on a reader that took words, numbers and time zones): the
+ * date is still read only as YYYY-MM-DD, exactly as find_sooner_exam writes
+ * each choice, the time as v218 read it, and every refusal now hands
+ * back the choices in that form, `which_list` naming the slots the option
+ * points at. Any other form is named as unreadable and books nothing. The
+ * arguments' form is recorded from now on.
  *
  * Synthetic patient, practices and slots only; the transcripts stay in
  * `call_logs`.
@@ -32,7 +39,6 @@ import {
   chosenSlot,
   readChosenDate,
   readChosenTime,
-  readIsoDateTime,
   resetOutreachAvailabilityForTests,
   resetOutreachSessionsForTests,
   setNpxOutreachDepsForTests,
@@ -181,18 +187,27 @@ for (const callSid of CORPUS) {
       expect(book.mock.calls[0][0]).toMatchObject({ slotId: FEB13_0900.slotId });
     });
 
-    it('the date in words, with the option beside it, books the slot said back and is not refused which_list', async () => {
+    it('a date or time in another form, with the option beside it, is refused which_list with the slots named, then the written form books', async () => {
       await twoListsRead();
       const r = await run(BOOK_SOONER_TOOL_NAME, { date: 'February 13', time: '9:00 AM', option: '1', city: 'Beaumont' });
-      expect(r).toMatchObject({ success: true, booked_by: 'date_time', received_date: 'words', received_time: 'read', received_option: true });
+      expect(r).toMatchObject({
+        success: false,
+        error: 'which_list',
+        received_date: 'unreadable',
+        received_time: 'read',
+        received_option: true,
+      });
+      expect(String(r.fix)).toContain('(date 2041-02-13, time 09:00)');
+      expect(book).not.toHaveBeenCalled();
+      const booked = await run(BOOK_SOONER_TOOL_NAME, { date: '2041-02-13', time: '09:00', city: 'Beaumont' });
+      expect(booked).toMatchObject({ success: true, booked_by: 'date_time' });
       expect(book.mock.calls[0][0]).toMatchObject({ slotId: FEB13_0900.slotId });
     });
   });
 }
 
-describe('every way the date of an offered choice can arrive is read to that day', () => {
+describe('only the date as written, and the time as v218 read it, are read; any other form books nothing and hands back the choices', () => {
   for (const date of [
-    '2041-02-13',
     'February 13',
     'Feb 13',
     'Feb. 13th',
@@ -202,159 +217,116 @@ describe('every way the date of an offered choice can arrive is read to that day
     '02/13/2041',
     '2-13-41',
     '13 February',
+    '2041-02-13.',
+    ' 2041-02-13 or 2041-02-14',
+    '2041-02-13 garbage',
+    '2041-02-13T09:00',
+    '2041-02-13T17:00:00Z',
+    'next Thursday',
   ]) {
-    it(`"${date}" with 9 AM books the February 13 choice`, async () => {
+    it(`date "${date}" is unreadable and books nothing`, async () => {
       await twoListsRead();
-      const r = await run(BOOK_SOONER_TOOL_NAME, { date, time: '9 AM' });
-      expect(r).toMatchObject({ success: true, booked_by: 'date_time' });
-      expect(book.mock.calls[0][0]).toMatchObject({ slotId: FEB13_0900.slotId });
+      const r = await run(BOOK_SOONER_TOOL_NAME, { date, time: '09:00' });
+      expect(r).toMatchObject({ success: false, error: 'no_choice', received_date: 'unreadable', received_time: 'read' });
+      expect(String(r.fix)).toMatch(/the date could not be read: send the date as YYYY-MM-DD and the time as 24-hour HH:MM/);
+      expect(r.choices).toEqual(expect.arrayContaining([expect.objectContaining({ date: '2041-02-13', time: '09:00', city: 'Beaumont' })]));
+      expect((r.choices as unknown[]).length).toBe(6);
+      expect(book).not.toHaveBeenCalled();
     });
   }
 
-  it('a date and time sent together as one ISO string books with no time argument', async () => {
+  for (const time of ['09:00:00', '09:00:99', '0900', '17:00Z', '2041-02-13T09:00', '9 a. m.', 'nine']) {
+    it(`time "${time}" is unreadable and books nothing`, async () => {
+      await twoListsRead();
+      const r = await run(BOOK_SOONER_TOOL_NAME, { date: '2041-02-13', time });
+      expect(r).toMatchObject({ success: false, error: 'no_choice', received_date: 'iso', received_time: 'unreadable' });
+      expect(String(r.fix)).toMatch(/the time could not be read/);
+      expect(book).not.toHaveBeenCalled();
+    });
+  }
+
+  it('a date sent as a date-time with no time beside it gives no time', async () => {
     await twoListsRead();
     const r = await run(BOOK_SOONER_TOOL_NAME, { date: '2041-02-13T09:00' });
-    expect(r).toMatchObject({ success: true, booked_by: 'date_time' });
-    expect(book.mock.calls[0][0]).toMatchObject({ slotId: FEB13_0900.slotId });
-  });
-
-  it('a time with seconds or written "a.m." is read', () => {
-    expect(readChosenTime('09:00:00')).toEqual({ minutes: 540, form: 'read' });
-    expect(readChosenTime('9:00 a.m.')).toEqual({ minutes: 540, form: 'read' });
-    expect(readChosenTime('9 a. m.')).toEqual({ minutes: 540, form: 'read' });
-    expect(readChosenTime('2:30 p.m.')).toEqual({ minutes: 870, form: 'read' });
-  });
-});
-
-// Codex P2 on #476 (head 7838fcc): a date-time carrying a UTC offset kept its
-// clock and dropped its offset, so 17:00Z (09:00 in Los Angeles) was read as
-// 17:00 against slots written in Pacific time.
-describe('a date-time with a time zone is read on the practice clock', () => {
-  it('17:00Z is 09:00 in Los Angeles and books the February 13 9:00 AM choice', async () => {
-    await twoListsRead();
-    const r = await run(BOOK_SOONER_TOOL_NAME, { date: '2041-02-13T17:00:00Z' });
-    expect(r).toMatchObject({ success: true, booked_by: 'date_time', received_date: 'iso', received_time: 'read' });
-    expect(book.mock.calls[0][0]).toMatchObject({ slotId: FEB13_0900.slotId });
-  });
-
-  it('a Pacific offset books the same choice', async () => {
-    await twoListsRead();
-    const r = await run(BOOK_SOONER_TOOL_NAME, { date: '2041-02-13T09:00:00-08:00' });
-    expect(r).toMatchObject({ success: true, booked_by: 'date_time' });
-    expect(book.mock.calls[0][0]).toMatchObject({ slotId: FEB13_0900.slotId });
-  });
-
-  it('an offset that moves the day is read to the Pacific day', async () => {
-    await twoListsRead();
-    // 08:00 on the 16th at +14:00 is 10:00 on the 15th in Los Angeles.
-    const r = await run(BOOK_SOONER_TOOL_NAME, { date: '2041-02-16T08:00:00+14:00' });
-    expect(r).toMatchObject({ success: true, booked_by: 'date_time' });
-    expect(book.mock.calls[0][0]).toMatchObject({ slotId: FEB15_1000.slotId });
-  });
-
-  it('a whole date-time in the time field is read on the practice clock too', async () => {
-    await twoListsRead();
-    const r = await run(BOOK_SOONER_TOOL_NAME, { date: '2041-02-13', time: '2041-02-13T17:00:00Z' });
-    expect(r).toMatchObject({ success: true, booked_by: 'date_time' });
-    expect(book.mock.calls[0][0]).toMatchObject({ slotId: FEB13_0900.slotId });
-  });
-
-  it('a zone that cannot be placed books nothing and the refusal names the choices', async () => {
-    await twoListsRead();
-    const r = await run(BOOK_SOONER_TOOL_NAME, { date: '2041-02-13T12:00 EST' });
-    expect(r).toMatchObject({ success: false, received_date: 'unreadable', received_time: 'unreadable' });
-    expect(r.choices).toEqual(expect.arrayContaining([expect.objectContaining({ date: '2041-02-13', time: '09:00' })]));
+    expect(r).toMatchObject({ success: false, error: 'no_choice', received_date: 'unreadable', received_time: 'none' });
     expect(book).not.toHaveBeenCalled();
   });
 
-  it('a bare time with an offset cannot be placed on a day and books nothing', async () => {
-    await twoListsRead();
-    const r = await run(BOOK_SOONER_TOOL_NAME, { date: '2041-02-13', time: '17:00Z' });
-    expect(r).toMatchObject({ success: false, received_time: 'unreadable' });
-    expect(book).not.toHaveBeenCalled();
+  it('readChosenDate reads YYYY-MM-DD and nothing else', () => {
+    expect(readChosenDate('2041-02-13')).toEqual({ day: '2041-02-13', form: 'iso' });
+    expect(readChosenDate(' 2041-02-13 ')).toEqual({ day: '2041-02-13', form: 'iso' });
+    expect(readChosenDate('2041-02-13.')).toEqual({ form: 'unreadable' });
+    expect(readChosenDate('2041-2-13')).toEqual({ form: 'unreadable' });
+    expect(readChosenDate('Feb 13')).toEqual({ form: 'unreadable' });
+    expect(readChosenDate('2041-02-13T09:00')).toEqual({ form: 'unreadable' });
+    expect(readChosenDate('')).toEqual({ form: 'none' });
+    expect(readChosenDate(undefined)).toEqual({ form: 'none' });
   });
 
-  it('readIsoDateTime converts an offset and reads a Pacific or zoneless time as written', () => {
-    expect(readIsoDateTime('2041-02-13T17:00:00Z')).toEqual({ day: '2041-02-13', minutes: 540 });
-    expect(readIsoDateTime('2041-02-13T17:00:00.000Z')).toEqual({ day: '2041-02-13', minutes: 540 });
-    expect(readIsoDateTime('2041-02-13 17:00 UTC')).toEqual({ day: '2041-02-13', minutes: 540 });
-    expect(readIsoDateTime('2041-02-13T22:30+0530')).toEqual({ day: '2041-02-13', minutes: 540 });
-    expect(readIsoDateTime('2041-02-13T12:00-05')).toEqual({ day: '2041-02-13', minutes: 540 });
-    // Summer: Los Angeles is UTC-7.
-    expect(readIsoDateTime('2041-07-01T16:00:00Z')).toEqual({ day: '2041-07-01', minutes: 540 });
-    expect(readIsoDateTime('2041-02-13T09:00')).toEqual({ day: '2041-02-13', minutes: 540 });
-    expect(readIsoDateTime('2041-02-13T09:00 PST')).toEqual({ day: '2041-02-13', minutes: 540 });
-    expect(readIsoDateTime('2041-02-13 2:00 pm')).toBeNull();
-    expect(readIsoDateTime('2041-02-13 02:00 pm')).toEqual({ day: '2041-02-13', minutes: 840 });
-    expect(readIsoDateTime('2041-02-13T09:00 EST')).toBe('unreadable');
-    expect(readIsoDateTime('2041-02-13T09:00+25:00')).toBe('unreadable');
-    expect(readIsoDateTime('2041-02-13T24:00')).toBe('unreadable');
-    expect(readIsoDateTime('2041-02-13')).toBeNull();
-    expect(readIsoDateTime('February 13')).toBeNull();
-  });
-});
-
-// Codex P1s on #476 (head 6ae4bb4b): a day the calendar does not have was
-// rolled over (2041-02-30T17:00Z read as March 2), and a date and a time that
-// named different moments were stitched into a third.
-describe('a date-time names one real moment or books nothing', () => {
-  it('a day the calendar does not have is unreadable, never rolled over', () => {
-    expect(readIsoDateTime('2041-02-30T17:00:00Z')).toBe('unreadable');
-    expect(readIsoDateTime('2041-02-29T09:00')).toBe('unreadable');
-    expect(readIsoDateTime('2041-13-01T09:00')).toBe('unreadable');
-    expect(readIsoDateTime('2040-02-29T09:00')).toEqual({ day: '2040-02-29', minutes: 540 });
-  });
-
-  it('February 30 at 17:00Z does not book a slot on another day', async () => {
-    await twoListsRead();
-    const r = await run(BOOK_SOONER_TOOL_NAME, { date: '2041-02-30T17:00:00Z' });
-    expect(r).toMatchObject({ success: false, received_date: 'unreadable' });
-    expect(book).not.toHaveBeenCalled();
-  });
-
-  it('a time that is a date-time on another day than the date books nothing', async () => {
-    await twoListsRead();
-    const r = await run(BOOK_SOONER_TOOL_NAME, { date: '2041-02-13', time: '2041-02-05T17:00:00Z' });
-    expect(r).toMatchObject({ success: false, error: 'date_time_disagree' });
-    // github-actions review of 1d8b956: a +14:00 time converts to the day before.
-    const r2 = await run(BOOK_SOONER_TOOL_NAME, { date: '2041-02-16', time: '2041-02-16T08:00:00+14:00' });
-    expect(r2).toMatchObject({ success: false, error: 'date_time_disagree' });
-    expect(r.choices).toEqual(expect.arrayContaining([expect.objectContaining({ date: '2041-02-13', time: '09:00' })]));
-    expect(book).not.toHaveBeenCalled();
-  });
-
-  it('a date-time beside a time at another hour books nothing', async () => {
-    await twoListsRead();
-    const r = await run(BOOK_SOONER_TOOL_NAME, { date: '2041-02-05T09:00', time: '10:00' });
-    expect(r).toMatchObject({ success: false, error: 'date_time_disagree' });
-    expect(book).not.toHaveBeenCalled();
-  });
-
-  it('a date written YYYY-MM-DD with anything after it is unreadable, never its first date', async () => {
-    await twoListsRead();
-    for (const date of ['2041-02-13 or 2041-02-14', '2041-02-13 garbage', '2041-02-13, 2041-02-14']) {
+  it('a time in the forms v218 read books, as it does on main', async () => {
+    for (const time of ['09:00', '9:00', '9 AM', '9:00 AM', '9:00 a.m.']) {
       book.mockClear();
-      const r = await run(BOOK_SOONER_TOOL_NAME, { date, time: '09:00' });
-      expect(r).toMatchObject({ success: false, received_date: 'unreadable' });
+      resetOutreachSessionsForTests();
+      await twoListsRead();
+      const r = await run(BOOK_SOONER_TOOL_NAME, { date: '2041-02-13', time });
+      expect(r).toMatchObject({ success: true, booked_by: 'date_time', received_time: 'read' });
+      expect(book.mock.calls[0][0]).toMatchObject({ slotId: FEB13_0900.slotId });
+    }
+  });
+
+  it('readChosenTime reads what v218 read and nothing else', () => {
+    expect(readChosenTime('09:00')).toEqual({ minutes: 540, form: 'read' });
+    expect(readChosenTime('14:30')).toEqual({ minutes: 870, form: 'read' });
+    expect(readChosenTime('2:30 PM')).toEqual({ minutes: 870, form: 'read' });
+    expect(readChosenTime('00:00')).toEqual({ minutes: 0, form: 'read' });
+    expect(readChosenTime(' 09:00 ')).toEqual({ minutes: 540, form: 'read' });
+    expect(readChosenTime('24:00')).toEqual({ form: 'unreadable' });
+    expect(readChosenTime('09:60')).toEqual({ form: 'unreadable' });
+    expect(readChosenTime('09:00:00')).toEqual({ form: 'unreadable' });
+    expect(readChosenTime('09:00Z')).toEqual({ form: 'unreadable' });
+    expect(readChosenTime('')).toEqual({ form: 'none' });
+    expect(readChosenTime(undefined)).toEqual({ form: 'none' });
+  });
+});
+
+// Every shape the review rounds on #476 found in the wider reader (a zone, a
+// rolled-over day, two moments stitched into a third, a trailing second date,
+// seconds out of range, a weekday that contradicts the date) is now a form
+// this reads as unreadable or as a day no choice is on, so none can book.
+describe('the shapes the review rounds found book nothing', () => {
+  for (const [label, args] of [
+    ['a UTC date-time', { date: '2041-02-13T17:00:00Z' }],
+    ['a day the calendar does not have', { date: '2041-02-30T17:00:00Z' }],
+    ['a time on another day than the date', { date: '2041-02-13', time: '2041-02-05T17:00:00Z' }],
+    ['a +14:00 time that converts to the day before', { date: '2041-02-16', time: '2041-02-16T08:00:00+14:00' }],
+    ['a date-time beside a time at another hour', { date: '2041-02-05T09:00', time: '10:00' }],
+    ['a second date after the first', { date: '2041-02-13 or 2041-02-14', time: '09:00' }],
+    ['seconds out of range', { date: '2041-02-13', time: '09:00:99' }],
+    ['a weekday that contradicts the date', { date: 'Thursday, February 13, 2041', time: '09:00' }],
+    ['a year with a full stop', { date: 'February 13, 2042.', time: '09:00' }],
+    ['a two-digit year', { date: 'February 13, 42', time: '09:00' }],
+  ] as const) {
+    it(`${label}`, async () => {
+      await twoListsRead();
+      const r = await run(BOOK_SOONER_TOOL_NAME, { ...args });
+      expect(r).toMatchObject({ success: false });
       expect(r.choices).toEqual(expect.arrayContaining([expect.objectContaining({ date: '2041-02-13', time: '09:00' })]));
       expect(book).not.toHaveBeenCalled();
-    }
-    expect(readChosenDate('2041-02-13.', [])).toEqual({ day: '2041-02-13', form: 'iso' });
-    expect(readChosenDate('2041-02-13 or 2041-02-14', [])).toEqual({ form: 'unreadable' });
-  });
+    });
+  }
 
-  it('a date-time and a time that agree book, whichever field carries the zone', async () => {
+  it('a day the calendar does not have, written as a date, is a day no choice is on', async () => {
     await twoListsRead();
-    const r = await run(BOOK_SOONER_TOOL_NAME, { date: '2041-02-13T17:00:00Z', time: '9:00 AM' });
-    expect(r).toMatchObject({ success: true, booked_by: 'date_time' });
-    expect(book.mock.calls[0][0]).toMatchObject({ slotId: FEB13_0900.slotId });
+    const r = await run(BOOK_SOONER_TOOL_NAME, { date: '2041-02-30', time: '09:00' });
+    expect(r).toMatchObject({ success: false, error: 'not_offered', received_date: 'iso' });
+    expect(book).not.toHaveBeenCalled();
   });
 });
 
-describe('nothing is invented: a date read in words lands only on a day a choice is on', () => {
-  it('a month and day no choice is on is refused as not offered, with the choices written out', async () => {
+describe('nothing is invented: the date and time as written must be a choice read on the call', () => {
+  it('a day no choice is on is refused as not offered, with the choices written out', async () => {
     await twoListsRead();
-    const r = await run(BOOK_SOONER_TOOL_NAME, { date: 'February 20', time: '9:00 AM' });
+    const r = await run(BOOK_SOONER_TOOL_NAME, { date: '2041-02-20', time: '09:00' });
     expect(r).toMatchObject({ success: false, error: 'not_offered' });
     expect((r.choices as unknown[]).length).toBe(6);
     expect(book).not.toHaveBeenCalled();
@@ -362,104 +334,16 @@ describe('nothing is invented: a date read in words lands only on a day a choice
 
   it('the right month and day in another year is not the offered day', async () => {
     await twoListsRead();
-    const r = await run(BOOK_SOONER_TOOL_NAME, { date: 'February 13, 2042', time: '9:00 AM' });
+    const r = await run(BOOK_SOONER_TOOL_NAME, { date: '2042-02-13', time: '09:00' });
     expect(r).toMatchObject({ success: false, error: 'not_offered' });
     expect(book).not.toHaveBeenCalled();
   });
 
   it('the right day at a time not offered books nothing', async () => {
     await twoListsRead();
-    const r = await run(BOOK_SOONER_TOOL_NAME, { date: 'February 13', time: '10:00 AM' });
+    const r = await run(BOOK_SOONER_TOOL_NAME, { date: '2041-02-13', time: '10:00' });
     expect(r).toMatchObject({ success: false, error: 'not_offered' });
     expect(book).not.toHaveBeenCalled();
-  });
-
-  it('a date that is not a date is named as unreadable and books nothing', async () => {
-    await twoListsRead();
-    const r = await run(BOOK_SOONER_TOOL_NAME, { date: 'next Thursday', time: '9:00 AM' });
-    expect(r).toMatchObject({ success: false, error: 'no_choice', received_date: 'unreadable', received_time: 'read' });
-    expect(String(r.fix)).toMatch(/the date could not be read/i);
-    expect((r.choices as unknown[]).length).toBe(6);
-    expect(book).not.toHaveBeenCalled();
-  });
-
-  it('readChosenDate reads only to an offered day, and says how it read it', () => {
-    const offered = [FEB5_0900, FEB13_0900];
-    expect(readChosenDate('2041-02-13', offered)).toEqual({ day: '2041-02-13', form: 'iso' });
-    expect(readChosenDate('Feb 13', offered)).toEqual({ day: '2041-02-13', form: 'words' });
-    expect(readChosenDate('Feb 20', offered)).toEqual({ day: '2041-02-20', form: 'words' });
-    expect(readChosenDate('13/02', offered)).toEqual({ form: 'unreadable' });
-    expect(readChosenDate('tomorrow', offered)).toEqual({ form: 'unreadable' });
-    // A word under three letters is never a month: "de" is not December.
-    expect(readChosenDate('13 de febrero', offered)).toEqual({ form: 'unreadable' });
-    expect(readChosenDate('', offered)).toEqual({ form: 'none' });
-    expect(readChosenDate(undefined, offered)).toEqual({ form: 'none' });
-  });
-
-  // Codex P1 on #476 (head 7838fcc): "2042." failed the four-digit year test,
-  // the year fell back to the offered February 13 in 2041, and that slot booked.
-  it('a year with punctuation after it is read, so the wrong year is never booked', async () => {
-    await twoListsRead();
-    const r = await run(BOOK_SOONER_TOOL_NAME, { date: 'February 13, 2042.', time: '9:00 AM' });
-    expect(r).toMatchObject({ success: false, error: 'not_offered' });
-    expect(book).not.toHaveBeenCalled();
-  });
-
-  it('readChosenDate keeps a year however it is punctuated or abbreviated, and refuses one it cannot read', () => {
-    const offered = [FEB5_0900, FEB13_0900];
-    expect(readChosenDate('February 13, 2042.', offered)).toEqual({ day: '2042-02-13', form: 'words' });
-    expect(readChosenDate('February 13, 2041.', offered)).toEqual({ day: '2041-02-13', form: 'words' });
-    expect(readChosenDate('Wednesday, February 13th, 2041!', offered)).toEqual({ day: '2041-02-13', form: 'words' });
-    expect(readChosenDate('(Feb. 13, 2042)', offered)).toEqual({ day: '2042-02-13', form: 'words' });
-    expect(readChosenDate('2/13/2042.', offered)).toEqual({ day: '2042-02-13', form: 'words' });
-    expect(readChosenDate("Feb 13 '42", offered)).toEqual({ day: '2042-02-13', form: 'words' });
-    expect(readChosenDate('Feb 13 \u201941', offered)).toEqual({ day: '2041-02-13', form: 'words' });
-    expect(readChosenDate('February 13, 2041 2042', offered)).toEqual({ form: 'unreadable' });
-    expect(readChosenDate('February 13, 20422', offered)).toEqual({ form: 'unreadable' });
-    expect(readChosenDate('February 13, 204', offered)).toEqual({ form: 'unreadable' });
-  });
-
-  // Codex P2 on #476 (head fd296ed4): words the reader did not use were
-  // dropped, so "February 13, 42" read as the offered 2041 and "February 13
-  // or February 14" as the 13th. Every word is now a month, a day, a year, a
-  // weekday or "of" / "the" / "on", or the date is unreadable.
-  it('a two-digit year after the day is the year, and the 2041 slot is not booked for it', async () => {
-    await twoListsRead();
-    const r = await run(BOOK_SOONER_TOOL_NAME, { date: 'February 13, 42', time: '09:00' });
-    expect(r).toMatchObject({ success: false, error: 'not_offered' });
-    expect(book).not.toHaveBeenCalled();
-  });
-
-  it('two dates, or a date with anything else in it, books nothing', async () => {
-    await twoListsRead();
-    const r = await run(BOOK_SOONER_TOOL_NAME, { date: 'February 13 or February 14', time: '09:00' });
-    expect(r).toMatchObject({ success: false, received_date: 'unreadable' });
-    expect(book).not.toHaveBeenCalled();
-  });
-
-  it('readChosenDate uses every word or reads nothing', () => {
-    const offered = [FEB5_0900, FEB13_0900];
-    expect(readChosenDate('February 13, 42', offered)).toEqual({ day: '2042-02-13', form: 'words' });
-    expect(readChosenDate('Feb 13 14', offered)).toEqual({ day: '2014-02-13', form: 'words' });
-    expect(readChosenDate('the 13th of February', offered)).toEqual({ day: '2041-02-13', form: 'words' });
-    expect(readChosenDate('on Wednesday, February 13', offered)).toEqual({ day: '2041-02-13', form: 'words' });
-    expect(readChosenDate('Wed Feb 13 2041', offered)).toEqual({ day: '2041-02-13', form: 'words' });
-    expect(readChosenDate('February 13 or February 14', offered)).toEqual({ form: 'unreadable' });
-    expect(readChosenDate('February 13 and 14', offered)).toEqual({ form: 'unreadable' });
-    // Two months and nothing else: never read as the first one.
-    expect(readChosenDate('February 13, March 2041', offered)).toEqual({ form: 'unreadable' });
-    expect(readChosenDate('February 13 at 9 AM', offered)).toEqual({ form: 'unreadable' });
-    expect(readChosenDate('February 13, 2041, 2042', offered)).toEqual({ form: 'unreadable' });
-    expect(readChosenDate('February 13th 14th', offered)).toEqual({ form: 'unreadable' });
-    expect(readChosenDate('February 13 4', offered)).toEqual({ form: 'unreadable' });
-    expect(readChosenDate('next February 13', offered)).toEqual({ form: 'unreadable' });
-  });
-
-  it('a month and day two offered days share is not read to either', () => {
-    const nextYear = slot('feb13-2042', '2042-02-13T17:00:00.000Z', 'Beaumont');
-    expect(readChosenDate('Feb 13', [FEB13_0900, nextYear])).toEqual({ form: 'unreadable' });
-    expect(readChosenDate('Feb 13, 2042', [FEB13_0900, nextYear])).toEqual({ day: '2042-02-13', form: 'words' });
-    expect(readChosenDate('Sept 3', [slot('sep3', '2041-09-03T16:00:00.000Z', 'Beaumont')])).toEqual({ day: '2041-09-03', form: 'words' });
   });
 
   it('a lone option number with one list read still books, as before v229', () => {
@@ -478,10 +362,15 @@ describe('what the booking received is recorded, never the values', () => {
   });
 
   it('bookingArgsReceived names forms only', () => {
-    expect(bookingArgsReceived({ date: 'Feb 13', time: 'nine', option: 2 }, [[FEB13_0900]])).toEqual({
-      received_date: 'words',
+    expect(bookingArgsReceived({ date: 'Feb 13', time: 'nine', option: 2 })).toEqual({
+      received_date: 'unreadable',
       received_time: 'unreadable',
       received_option: true,
+    });
+    expect(bookingArgsReceived({ date: '2041-02-13', time: '09:00' })).toEqual({
+      received_date: 'iso',
+      received_time: 'read',
+      received_option: false,
     });
   });
 });

@@ -367,7 +367,7 @@ function summarizeResult(tool: string, resultJson: string): Record<string, unkno
     'booked_by',
     'option_disagreed',
     // v229: what book_sooner_exam received, as fixed words: the date's form
-    // ('iso' | 'words' | 'unreadable' | 'none'), the time's ('read' |
+    // ('iso' | 'unreadable' | 'none'), the time's ('read' |
     // 'unreadable' | 'none') and whether an option number came. Never the
     // values: "did the model send the date at all?" becomes a count.
     'received_date',
