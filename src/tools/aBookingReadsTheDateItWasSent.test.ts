@@ -316,6 +316,9 @@ describe('a date-time names one real moment or books nothing', () => {
     await twoListsRead();
     const r = await run(BOOK_SOONER_TOOL_NAME, { date: '2041-02-13', time: '2041-02-05T17:00:00Z' });
     expect(r).toMatchObject({ success: false, error: 'date_time_disagree' });
+    // github-actions review of 1d8b956: a +14:00 time converts to the day before.
+    const r2 = await run(BOOK_SOONER_TOOL_NAME, { date: '2041-02-16', time: '2041-02-16T08:00:00+14:00' });
+    expect(r2).toMatchObject({ success: false, error: 'date_time_disagree' });
     expect(r.choices).toEqual(expect.arrayContaining([expect.objectContaining({ date: '2041-02-13', time: '09:00' })]));
     expect(book).not.toHaveBeenCalled();
   });
