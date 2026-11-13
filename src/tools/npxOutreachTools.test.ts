@@ -16,6 +16,7 @@ import {
   HVA_HUB_SCHEDULING_REQUEST_TYPE_ID,
   MIN_DAYS_SOONER,
   NPX_OUTREACH_TOOLS,
+  NPX_RECALL_FIRST_LINE,
   STAFF_CALLBACK_TOOL_NAME,
   outreachSessionFor,
   resetOutreachAvailabilityForTests,
@@ -189,6 +190,8 @@ describe('request_staff_callback (operator, 2026-10-21: a request for a person i
       idempotencyKey: `${SID}-outreach-staff`,
       callData: { agentUsed: 'npx-outreach', callSid: SID },
     });
+    expect(params.description.split('\n')[0]).toBe(NPX_RECALL_FIRST_LINE);
+    expect(params.description).toMatch(/^NPX Recall: /);
     expect(params.description).toContain('The patient asked to speak with a person.');
     expect(params.description).toContain('What they asked: I want to cancel my appointment');
     expect(params.description).toContain('Date of birth confirmed on the call: no.');
