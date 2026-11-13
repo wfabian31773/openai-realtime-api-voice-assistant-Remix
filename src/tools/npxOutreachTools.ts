@@ -300,6 +300,10 @@ export interface CallBooking {
   bookingId: string;
   slot: NpxSlot;
   azul: AzulCancelState;
+  /** The booking's store writes (held cancel, settle, confirmation), which
+   * can outlast the tool's settle budget; an undo waits for them before it
+   * writes anything (Codex P2 on #474). */
+  writes?: Promise<unknown>;
 }
 
 interface OutreachSession {
@@ -1314,7 +1318,9 @@ async function bookChosen(
   if (chosen.optionDisagreed) {
     console.warn(`[NPX OUTREACH] ${sid}: option ${String(input.option)} in the last list read is not the date and time confirmed; booking the date and time`);
   }
-  const booked = await bookOutreachSlot({ contact: s.contact, demo: s.demo, slot, callRef: sid, deadline });
+  const booked = await bookOutreachSlot({
+    contact: s.contact, demo: s.demo, slot, callRef: sid, deadline, superseded: (id) => s.undone.includes(id),
+  });
   if (!booked.ok) {
     if (booked.error === 'record_incomplete') {
       const r: Refusal = {
@@ -1343,7 +1349,7 @@ async function bookChosen(
     };
     return r;
   }
-  s.booking = { bookingId: booked.bookingId, slot: booked.slot, azul: booked.azul };
+  s.booking = { bookingId: booked.bookingId, slot: booked.slot, azul: booked.azul, writes: booked.writes };
   return {
     success: true,
     booked: true,
@@ -1425,7 +1431,7 @@ export function confirmationRecordFor(args: {
 /** What booking one opening came to (v211): the call and the text's booking
  * page both book through bookOutreachSlot, so the two cannot differ. */
 export type OutreachBooking =
-  | { ok: true; bookingId: string; slot: NpxSlot; azul: AzulCancelState }
+  | { ok: true; bookingId: string; slot: NpxSlot; azul: AzulCancelState; writes?: Promise<unknown> }
   | { ok: false; error: string };
 
 /**
@@ -1452,6 +1458,11 @@ export async function bookOutreachSlot(args: {
   callRef: string;
   /** The whole sequence answers inside this (BOOK_SEQUENCE_BUDGET_MS). */
   deadline: number;
+  /** On a call: true once the caller has undone this booking. The booking's
+   * own writes that are still running after the tool has answered stop
+   * there, so a late settle or confirmation never lands over the undo or a
+   * later booking (Codex P2 on #474). */
+  superseded?: (bookingId: string) => boolean;
 }): Promise<OutreachBooking> {
   const { contact, demo, slot, callRef, deadline } = args;
   const personId = field(contact, 'person_id');
@@ -1546,8 +1557,11 @@ export async function bookOutreachSlot(args: {
       azul.stored = 'no';
       console.warn(`[NPX OUTREACH] booking ${book.bookingId}: could not hold the Azul cancel on the contact — the hang-up runs it from the call —`, e instanceof Error ? e.message : e);
     }
+    // Undone while this was still running: the undo has the contact now.
+    if (args.superseded?.(book.bookingId)) return false;
     // Independent of the confirmation, as on the text link (Codex P1 on #470).
     const settled = await settleBooked(st, contact.contactId, book.bookingId);
+    if (args.superseded?.(book.bookingId)) return false;
     await st.queueConfirmation(contact.contactId, confirmationRecordFor({
       contact, slot: bookedSlot, bookingId: book.bookingId, callRef, cancelled: false, awaitCancel: true, now: heldAt,
     }));
@@ -1560,7 +1574,7 @@ export async function bookOutreachSlot(args: {
     console.warn(`[NPX OUTREACH] booking ${book.bookingId}: the contact is not settled yet; the booking stands`);
   }
   console.info(`[NPX OUTREACH] booking ${book.bookingId}: the Azul cancel is held until the call ends (stored: ${azul.stored})`);
-  return { ok: true, bookingId: book.bookingId, slot: bookedSlot, azul };
+  return { ok: true, bookingId: book.bookingId, slot: bookedSlot, azul, writes: settle };
 }
 
 /**
@@ -1987,6 +2001,9 @@ async function undoBooking(sid: string, s: OutreachSession, currentDay: string, 
   const deadline = Date.now() + UNDO_SEQUENCE_BUDGET_MS;
   const b = s.booking!;
   const bookingId = b.bookingId;
+  // The booking's own writes first, so the undo's land after them (Codex P2
+  // on #474). Past the step they stop themselves once the undo is recorded.
+  if (b.writes) await within(b.writes.then(() => undefined, () => undefined), STORE_STEP_MS, undefined);
   const kept = b.azul.kind === 'held' ? await keepAzulAppointment(s, 'booking_undone') : b.azul.kind === 'dropped' && b.azul.kept === 'yes' ? 'dropped' : 'not_dropped';
 
   let npxCancel: string = 'not_tried';
@@ -2020,10 +2037,12 @@ async function undoBooking(sid: string, s: OutreachSession, currentDay: string, 
     );
     if (cancelled.ok) {
       npxCancel = cancelled.outcome;
+      // Marked undone before anything is written, so the booking's late
+      // writes stop rather than land over the undo.
+      s.undone.push(bookingId);
       if (!(await recordUndone(s, bookingId))) {
         (s.undoCleanupPending ??= []).push(bookingId);
       }
-      s.undone.push(bookingId);
       s.booking = null;
       s.offers = [];
       console.info(`[NPX OUTREACH] booking ${bookingId}: undone on the call (${cancelled.outcome}); the Azul appointment is kept`);

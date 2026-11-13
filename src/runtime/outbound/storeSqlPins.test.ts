@@ -364,12 +364,18 @@ describe("the booking confirmation (v222)", () => {
   it("takes a released placeholder over as due, with the cancel's result and the release time (Codex P2 on #474)", () => {
     const m = method("queueConfirmation");
     // The same booking is written over only while it is the hang-up's placeholder.
-    expect(m).toContain("OR custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text ->> 'state' = 'released')");
+    expect(m).toContain("AND custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text ->> 'state' = 'released'))");
     expect(m).toContain("AND custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text ->> 'state' = 'released'");
     expect(m).toContain("'state', 'due',");
     expect(m).toContain("-> ${CONFIRMATION_FIELD}::text -> 'cancel',");
     expect(m).toContain("->> 'released_at',");
     expect(m).toContain("ELSE ${JSON.stringify(record)}::jsonb");
+  });
+
+  it("never lets an older booking's confirmation replace a newer one's (Codex P2 on #474)", () => {
+    const m = method("queueConfirmation");
+    expect(m).toContain("->> 'queued_at', '')");
+    expect(m).toContain("<= ${record.queued_at}::text)");
   });
 
   it("claims and lists only a due confirmation, or a retry whose time has come", () => {
@@ -453,6 +459,9 @@ describe("the held Azul cancel (v224)", () => {
     expect(m).toContain("NOT IN ('held', 'claimed')");
     expect(m).toContain("jsonb_typeof(custom_data -> ${OUTREACH_TEXT_KEY}::text) = 'object'");
     expect(m).toContain("RETURNING id");
+    // Only a newer booking's replaces another booking's (Codex P2 on #474).
+    expect(m).toContain("->> 'held_at', '')");
+    expect(m).toContain("<= ${record.held_at}::text))");
   });
 
   it("the fallback lists a held cancel past its run_after, or a claim gone stale, on this campaign", () => {

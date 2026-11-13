@@ -692,3 +692,85 @@ describe('an undo whose record did not land on the call is written at hang-up (C
     expect(cancel).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('a booking whose writes outlast the tool never lands over its undo or a later booking (Codex P2 on #474)', () => {
+  const sid = CORPUS[0];
+  const settled = () => new Promise((r) => setTimeout(r, 50));
+  /** The first held-cancel write hangs until released: the booking tool answers after its settle budget with it still running. */
+  const holdTheFirstHeldWrite = () => {
+    const write = store.queueHeldCancel.bind(store);
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    let first = true;
+    store.queueHeldCancel = async (...a) => {
+      if (first) { first = false; await gate; }
+      return write(...a);
+    };
+    return () => release();
+  };
+
+  it('a late settle after the undo: the contact stays declined, and the undone booking is never confirmed', async () => {
+    const release = holdTheFirstHeldWrite();
+    await bookOn(sid);
+    const r = await undo(sid);
+    expect(r).toMatchObject({ booking_undone: true, azul_kept: true });
+    release();
+    await settled();
+    expect(store.contacts.get('c1')!).toMatchObject({ status: 'declined', notes: 'npx_booking_undone:booking-1' });
+    expect(confirmation()).toMatchObject({ booking_id: 'booking-1', state: 'skipped', reason: 'booking_undone' });
+    expect(held()).toMatchObject({ booking_id: 'booking-1', state: 'dropped' });
+    await hangUp();
+    later(30 * 60_000);
+    expect((await textTick()).sent).toBe(0);
+    expect(cancel).not.toHaveBeenCalled();
+  }, 20_000);
+
+  it('a late settle after a rebook: the new booking keeps the contact, its confirmation and its held cancel', async () => {
+    const release = holdTheFirstHeldWrite();
+    await bookOn(sid);
+    expect(await undo(sid)).toMatchObject({ booking_undone: true });
+    later(60_000);
+    await runOn(sid, FIND_SOONER_TOOL_NAME);
+    expect(await runOn(sid, BOOK_SOONER_TOOL_NAME, { date: '2041-02-06', time: '14:30', city: 'Testville' })).toMatchObject({ booked: true });
+    release();
+    await settled();
+    expect(store.contacts.get('c1')!).toMatchObject({ status: 'completed', notes: 'npx_booking:booking-2' });
+    expect(confirmation()).toMatchObject({ booking_id: 'booking-2', state: 'awaiting_cancel' });
+    expect(held()).toMatchObject({ booking_id: 'booking-2', state: 'held' });
+    await hangUp();
+    expect(cancel).toHaveBeenCalledTimes(1);
+    expect(npx.reportCancel).toHaveBeenCalledWith('booking-2', 'cancelled');
+    expect(confirmation()).toMatchObject({ booking_id: 'booking-2', state: 'due', cancel: 'cancelled' });
+  }, 20_000);
+
+  it("a late confirmation from the undone booking never replaces the new booking's (the store's rule)", async () => {
+    const queue = store.queueConfirmation.bind(store);
+    let lateQueue: (() => Promise<boolean>) | null = null;
+    let first = true;
+    store.queueConfirmation = async (...a) => {
+      if (first) { first = false; lateQueue = () => queue(...a); return true; }
+      return queue(...a);
+    };
+    await bookOn(sid);
+    expect(await undo(sid)).toMatchObject({ booking_undone: true });
+    later(60_000);
+    await runOn(sid, FIND_SOONER_TOOL_NAME);
+    expect(await runOn(sid, BOOK_SOONER_TOOL_NAME, { date: '2041-02-06', time: '14:30', city: 'Testville' })).toMatchObject({ booked: true });
+    expect(confirmation()).toMatchObject({ booking_id: 'booking-2' });
+    expect(await lateQueue!()).toBe(false);
+    expect(confirmation()).toMatchObject({ booking_id: 'booking-2', state: 'awaiting_cancel' });
+  });
+
+  it("a late held-cancel write from the undone booking never re-arms over the new booking's finished cancel (the store's rule)", async () => {
+    await bookOn(sid);
+    const stale = { ...held()! };
+    expect(await undo(sid)).toMatchObject({ booking_undone: true });
+    later(60_000);
+    await runOn(sid, FIND_SOONER_TOOL_NAME);
+    await runOn(sid, BOOK_SOONER_TOOL_NAME, { date: '2041-02-06', time: '14:30', city: 'Testville' });
+    await hangUp();
+    expect(held()).toMatchObject({ booking_id: 'booking-2', state: 'cancelled' });
+    expect(await store.queueHeldCancel('c1', stale)).toBe(false);
+    expect(held()).toMatchObject({ booking_id: 'booking-2', state: 'cancelled' });
+  });
+});

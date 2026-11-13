@@ -488,6 +488,8 @@ export class FakeOutboundStore implements OutboundStore {
       });
       return true;
     }
+    // Another booking's: replaced only by a newer booking (Codex P2 on #474).
+    if (held && (held.queued_at ?? "") > record.queued_at) return false;
     this.writeConfirmation(c, { ...record });
     return true;
   }
@@ -596,6 +598,8 @@ export class FakeOutboundStore implements OutboundStore {
     if (!c) return false;
     const held = this.heldCancelOf(c);
     if (held && (held.booking_id === record.booking_id || held.state === "held" || held.state === "claimed")) return false;
+    // Only a newer booking's replaces another booking's (Codex P2 on #474).
+    if (held && (held.held_at ?? "") > record.held_at) return false;
     this.writeHeldCancel(c, { ...record });
     return true;
   }

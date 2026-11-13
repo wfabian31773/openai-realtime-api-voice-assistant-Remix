@@ -1020,9 +1020,16 @@ export async function createDbOutboundStore(): Promise<OutboundStore> {
                    true)
            WHERE id = ${contactId}::varchar
              AND (custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text IS NULL
-                  OR custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text ->> 'booking_id'
-                     IS DISTINCT FROM ${record.booking_id}::text
-                  OR custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text ->> 'state' = 'released')
+                  -- Another booking's: replaced only by a newer booking, so a
+                  -- late write from a booking the caller undid never lands over
+                  -- the one they booked after it (Codex P2 on #474). queued_at
+                  -- is always toISOString, so the text order is the time order.
+                  OR (custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text ->> 'booking_id'
+                        IS DISTINCT FROM ${record.booking_id}::text
+                      AND COALESCE(custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text ->> 'queued_at', '')
+                        <= ${record.queued_at}::text)
+                  OR (custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text ->> 'booking_id' = ${record.booking_id}::text
+                      AND custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text ->> 'state' = 'released'))
           RETURNING id`),
       );
       return written.length > 0;
@@ -1183,7 +1190,13 @@ export async function createDbOutboundStore(): Promise<OutboundStore> {
                   OR (custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${HELD_CANCEL_FIELD}::text ->> 'booking_id'
                         IS DISTINCT FROM ${record.booking_id}::text
                       AND custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${HELD_CANCEL_FIELD}::text ->> 'state'
-                        NOT IN ('held', 'claimed')))
+                        NOT IN ('held', 'claimed')
+                      -- Only a newer booking's: a late write from a booking
+                      -- the caller undid never re-arms over a later one's
+                      -- finished cancel (Codex P2 on #474). held_at is
+                      -- toISOString, so the text order is the time order.
+                      AND COALESCE(custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${HELD_CANCEL_FIELD}::text ->> 'held_at', '')
+                        <= ${record.held_at}::text))
           RETURNING id`),
       );
       return written.length > 0;
