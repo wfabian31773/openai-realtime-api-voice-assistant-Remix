@@ -389,6 +389,8 @@ describe('nothing is invented: a date read in words lands only on a day a choice
     expect(readChosenDate('Wed Feb 13 2041', offered)).toEqual({ day: '2041-02-13', form: 'words' });
     expect(readChosenDate('February 13 or February 14', offered)).toEqual({ form: 'unreadable' });
     expect(readChosenDate('February 13 and 14', offered)).toEqual({ form: 'unreadable' });
+    // Two months and nothing else: never read as the first one.
+    expect(readChosenDate('February 13, March 2041', offered)).toEqual({ form: 'unreadable' });
     expect(readChosenDate('February 13 at 9 AM', offered)).toEqual({ form: 'unreadable' });
     expect(readChosenDate('February 13, 2041, 2042', offered)).toEqual({ form: 'unreadable' });
     expect(readChosenDate('February 13th 14th', offered)).toEqual({ form: 'unreadable' });
