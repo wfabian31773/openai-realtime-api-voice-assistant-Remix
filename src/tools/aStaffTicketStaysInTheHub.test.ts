@@ -140,6 +140,20 @@ describe('every visit on the campaign stays in the Hub', () => {
     },
   );
 
+  // Codex P2 on #467, round 2: the body is SMS-normalised before it is sent,
+  // so the name is checked after the same normalisation.
+  it.each(['Contact\u2011Lens Fitting', 'Contact\u00a0Lens Fitting', 'Contact\u2010Lens Fit'])(
+    'a name that routes out only after SMS normalisation (%j) is written as an appointment',
+    async (event) => {
+      expect(landsIn({ departmentId: 9, description: event })).toBe(9);
+      await setUp(event);
+      await run('CA00000000000000000000000000000006', STAFF_CALLBACK_TOOL_NAME, { request: 'wants to reschedule' });
+      const payload = fileTicket.mock.calls[0][0] as { departmentId: number; description: string };
+      expect(payload.description).toContain('Their appointment: An appointment on ');
+      expect(landsIn(payload)).toBe(9);
+    },
+  );
+
   it('an event name the classifier keeps in the Hub is written as it is', async () => {
     expect(landsIn({ departmentId: 9, description: 'Eye Exam' })).toBe(9);
     await setUp('Eye Exam');

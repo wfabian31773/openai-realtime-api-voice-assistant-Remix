@@ -582,7 +582,10 @@ export function currentAppointment(c: OutboundContact): string {
  * is.
  */
 export function staffAppointment(c: OutboundContact): string {
-  const named = field(c, 'event_name').trim();
+  // Checked as it will be sent: the ticket body is SMS-normalised, so a
+  // non-breaking hyphen or space becomes ASCII before the app reads it
+  // (Codex P2 on #467, round 2).
+  const named = sanitizeForSms(field(c, 'event_name')).value.trim();
   const event = named && staysInTheHub(named) ? named : 'An appointment';
   const clock = spokenClock(field(c, 'begin_time'));
   const office = field(c, 'office');
