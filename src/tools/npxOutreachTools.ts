@@ -1377,6 +1377,13 @@ function monthOf(word: string): number {
 
 const pad2 = (n: number) => String(n).padStart(2, '0');
 
+/** Words a date in words may carry besides its month, day and year. */
+const DATE_FILLER_WORDS = new Set(['of', 'the', 'on']);
+const WEEKDAY_WORDS = new Set([
+  'monday', 'mon', 'tuesday', 'tue', 'tues', 'wednesday', 'wed', 'thursday', 'thu', 'thur', 'thurs',
+  'friday', 'fri', 'saturday', 'sat', 'sunday', 'sun',
+]);
+
 /** The clock every slot is offered on and every choice is written in. */
 const PRACTICE_TIME_ZONE = 'America/Los_Angeles';
 
@@ -1477,26 +1484,41 @@ export function readChosenDate(
       .split(/[\s,]+/)
       .map((w) => w.replace(/^[(\[]+/, '').replace(/[.;:!?)\]]+$/, ''))
       .filter(Boolean);
+    // A CLOSED SET OF WORDS (Codex on #476, three rounds on this reader: a
+    // year with a full stop after it, a two-digit year, a second date). Every
+    // word must be a month, a day, a year, a weekday or "of" / "the" / "on";
+    // anything else makes the date unreadable, so nothing the model added is
+    // dropped and read past. A refusal costs one more try with the choices
+    // written out; a date read past its words can book the wrong slot and
+    // cancel the caller's appointment.
     for (const w of words) {
+      if (DATE_FILLER_WORDS.has(w) || WEEKDAY_WORDS.has(w)) continue;
       const m = monthOf(w);
-      if (m && !month) {
+      if (m) {
+        if (month) return { form: 'unreadable' };
         month = m;
         continue;
       }
-      const d = /^(\d{1,2})(?:st|nd|rd|th)?$/.exec(w);
-      if (d && !dayOfMonth) {
-        dayOfMonth = Number(d[1]);
+      const d = /^(\d{1,2})(st|nd|rd|th)?$/.exec(w);
+      if (d) {
+        if (!dayOfMonth) {
+          dayOfMonth = Number(d[1]);
+          continue;
+        }
+        // A bare two-digit number after the day is its year, read the way
+        // "2-13-42" is: "February 13, 42" is 2042, never the offered 2041.
+        if (!d[2] && d[1].length === 2 && !year) {
+          year = 2000 + Number(d[1]);
+          continue;
+        }
+        return { form: 'unreadable' };
+      }
+      const y = /^\d{4}$/.test(w) ? Number(w) : /^['\u2019]\d{2}$/.test(w) ? 2000 + Number(w.slice(1)) : 0;
+      if (y && !year) {
+        year = y;
         continue;
       }
-      // A year is read or the date is not: a year that cannot be read is
-      // never replaced by the year of a choice on offer.
-      const y4 = /^\d{4}$/.test(w) ? Number(w) : /^['\u2019]\d{2}$/.test(w) ? 2000 + Number(w.slice(1)) : 0;
-      if (y4) {
-        if (year && year !== y4) return { form: 'unreadable' };
-        year = y4;
-        continue;
-      }
-      if (/^\d{3}$|^\d{5,}$/.test(w)) return { form: 'unreadable' };
+      return { form: 'unreadable' };
     }
   }
   if (!(month >= 1 && month <= 12 && dayOfMonth >= 1 && dayOfMonth <= 31)) return { form: 'unreadable' };

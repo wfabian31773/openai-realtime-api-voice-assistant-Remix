@@ -362,6 +362,40 @@ describe('nothing is invented: a date read in words lands only on a day a choice
     expect(readChosenDate('February 13, 204', offered)).toEqual({ form: 'unreadable' });
   });
 
+  // Codex P2 on #476 (head fd296ed4): words the reader did not use were
+  // dropped, so "February 13, 42" read as the offered 2041 and "February 13
+  // or February 14" as the 13th. Every word is now a month, a day, a year, a
+  // weekday or "of" / "the" / "on", or the date is unreadable.
+  it('a two-digit year after the day is the year, and the 2041 slot is not booked for it', async () => {
+    await twoListsRead();
+    const r = await run(BOOK_SOONER_TOOL_NAME, { date: 'February 13, 42', time: '09:00' });
+    expect(r).toMatchObject({ success: false, error: 'not_offered' });
+    expect(book).not.toHaveBeenCalled();
+  });
+
+  it('two dates, or a date with anything else in it, books nothing', async () => {
+    await twoListsRead();
+    const r = await run(BOOK_SOONER_TOOL_NAME, { date: 'February 13 or February 14', time: '09:00' });
+    expect(r).toMatchObject({ success: false, received_date: 'unreadable' });
+    expect(book).not.toHaveBeenCalled();
+  });
+
+  it('readChosenDate uses every word or reads nothing', () => {
+    const offered = [FEB5_0900, FEB13_0900];
+    expect(readChosenDate('February 13, 42', offered)).toEqual({ day: '2042-02-13', form: 'words' });
+    expect(readChosenDate('Feb 13 14', offered)).toEqual({ day: '2014-02-13', form: 'words' });
+    expect(readChosenDate('the 13th of February', offered)).toEqual({ day: '2041-02-13', form: 'words' });
+    expect(readChosenDate('on Wednesday, February 13', offered)).toEqual({ day: '2041-02-13', form: 'words' });
+    expect(readChosenDate('Wed Feb 13 2041', offered)).toEqual({ day: '2041-02-13', form: 'words' });
+    expect(readChosenDate('February 13 or February 14', offered)).toEqual({ form: 'unreadable' });
+    expect(readChosenDate('February 13 and 14', offered)).toEqual({ form: 'unreadable' });
+    expect(readChosenDate('February 13 at 9 AM', offered)).toEqual({ form: 'unreadable' });
+    expect(readChosenDate('February 13, 2041, 2042', offered)).toEqual({ form: 'unreadable' });
+    expect(readChosenDate('February 13th 14th', offered)).toEqual({ form: 'unreadable' });
+    expect(readChosenDate('February 13 4', offered)).toEqual({ form: 'unreadable' });
+    expect(readChosenDate('next February 13', offered)).toEqual({ form: 'unreadable' });
+  });
+
   it('a month and day two offered days share is not read to either', () => {
     const nextYear = slot('feb13-2042', '2042-02-13T17:00:00.000Z', 'Beaumont');
     expect(readChosenDate('Feb 13', [FEB13_0900, nextYear])).toEqual({ form: 'unreadable' });
