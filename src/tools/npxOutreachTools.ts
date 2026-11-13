@@ -590,7 +590,7 @@ export function staffAppointmentLine(c: OutboundContact): string {
   const office = field(c, 'office');
   const when = `on ${spokenDay(field(c, 'appointment_date'))}${clock ? ` at ${clock}` : ''}${office ? ` at our ${office} office` : ''}`;
   const line = (event: string) => sanitizeForSms(`Their appointment: ${event} ${when}.`).value;
-  const named = sanitizeForSms(field(c, 'event_name')).value.trim();
+  const named = field(c, 'event_name').trim();
   const asNamed = named ? line(named) : '';
   return asNamed && staysInTheHub(asNamed) ? asNamed : line('An appointment');
 }
