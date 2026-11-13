@@ -1719,6 +1719,21 @@ import { callEnvironment } from "./callRecord";
  * staff ticket files urgent. Same switch as the texts (NPX_OUTREACH_TEXTS).
  * Above v220 (#467, merged `e9a2443e`), which it contains. v221 is #469 on its open branch, which this
  * does not contain. No migration.
+ */
+/**
+ * v223 — EVERY TICKET A CALL CREATED IS ON THE CALL LOG (2026-11-13). Operator:
+ * "ensure any call on the observatory log has its corresponding ticket number
+ * if one was created." `call_logs.ticket_number` holds one number; 15 calls in
+ * the 14 days to 2026-11-13 had two tickets and the log showed one. The
+ * call-log API now answers `ticketNumbers` (the row's own first, then every
+ * ticket number a filing reported on the tool timeline, server/
+ * callTicketNumbers.ts); the call log, the urgent list and the call page show
+ * them all; a ticket-number search also finds a call by its second ticket; and
+ * a ticket filed with `secondTicketOnThisCall` (the after-hours urgent records,
+ * 3 of the 15) puts a `second_ticket_filed` event on the call's timeline,
+ * appended, never replacing it. Above main's v222 (#470, `951dd0ba`), which it
+ * contains along with v220 (#467, `e9a2443e`) and v218 (#465, `0c324a9c`). No
+ * migration.
  *
  * v224 — THE CALLER WHO BACKS OUT KEEPS THEIR APPOINTMENT (2026-11-13). Wayne:
  * "Hold the cancel until hang-up: the Azul cancel runs only when the call
@@ -1730,9 +1745,9 @@ import { callEnvironment } from "./callRecord";
  * waits for it (`awaiting_cancel`). `cancel_sooner_booking` drops the held
  * cancel and then cancels the NPX booking through NPX's new outreach
  * booking-cancel endpoint (EPC #329); when either cannot be done it files the
- * urgent staff ticket and the Azul appointment is still kept. Above v222
- * (#470, merged `951dd0ba`), which it contains; v223 is #473 on its open
- * branch. No migration.
+ * urgent staff ticket and the Azul appointment is still kept. Above v223
+ * (#473, merged `25bbbbad`), which it contains along with v222 (#470,
+ * `951dd0ba`). No migration.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
   "voice-runtime-v224-a-caller-who-backs-out-keeps-their-appointment-20261113";

@@ -14,6 +14,7 @@ import { AcceptInvitePage } from '@/pages/AcceptInvitePage'
 import { Dashboard } from '@/pages/Dashboard'
 import { AgentsPage } from '@/pages/AgentsPage'
 import { CampaignsPage } from '@/pages/CampaignsPage'
+import { NpxOutreachPage } from '@/pages/NpxOutreachPage'
 import { CallLogsPage } from '@/pages/CallLogsPage'
 import { CallDetailsPage } from '@/pages/CallDetailsPage'
 import { SmsLogsPage } from '@/pages/SmsLogsPage'
@@ -134,6 +135,7 @@ function AppRoutes() {
         <Route path="/" element={<Dashboard />} />
         <Route path="/agents" element={<AgentsPage />} />
         <Route path="/campaigns" element={<CampaignsPage />} />
+        <Route path="/npx-outreach" element={<NpxOutreachPage />} />
         <Route path="/call-logs" element={<CallLogsPage />} />
         <Route path="/call-logs/:id" element={<CallDetailsPage />} />
         <Route path="/urgent-calls" element={<UrgentCallsPage />} />

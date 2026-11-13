@@ -18,6 +18,7 @@ import {
 } from '@/components/ui/table'
 import { AlertTriangle, Phone, Eye, Clock, User, Copy, Check, X, ExternalLink, Link2, Save, CalendarRange, Download } from 'lucide-react'
 import type { CallLog } from '@/types'
+import { ticketNumbersOf } from '@/lib/callTickets'
 
 function toDateInputValue(date: Date): string {
   return date.toISOString().slice(0, 10)
@@ -371,16 +372,20 @@ export function UrgentCallsPage() {
                 {urgentCalls.map((call) => {
                   const escalationReason = getEscalationReason(call)
                   const noAnswer = isNoAnswerTransfer(call)
-                  const ticketHref = (() => {
-                    if (!call.ticketNumber || !ticketPortalUrl) return null
+                  // Every ticket the call created (v223). An urgent after-hours call is
+                  // the one that most often has two: the caller's request, and the
+                  // urgent transfer record filed beside it, which the row never held.
+                  const tickets = ticketNumbersOf(call)
+                  const ticketHref = (ticketNumber: string) => {
+                    if (!ticketPortalUrl) return null
                     try {
                       const base = new URL(ticketPortalUrl.replace(/\/$/, ''))
                       if (base.protocol !== 'https:' && base.protocol !== 'http:') return null
-                      return `${base.origin}${base.pathname}/tickets/${encodeURIComponent(call.ticketNumber)}`
+                      return `${base.origin}${base.pathname}/tickets/${encodeURIComponent(ticketNumber)}`
                     } catch {
                       return null
                     }
-                  })()
+                  }
 
                   return (
                     <TableRow
@@ -432,31 +437,38 @@ export function UrgentCallsPage() {
                         </div>
                       </TableCell>
                       <TableCell>
-                        {call.ticketNumber ? (
-                          ticketHref ? (
-                            <a
-                              href={ticketHref}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              onClick={(e) => e.stopPropagation()}
-                              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs font-medium bg-blue-100 text-blue-800 border border-blue-200 hover:bg-blue-200 transition-colors"
-                            >
-                              <ExternalLink className="h-3 w-3" />
-                              {call.ticketNumber}
-                            </a>
-                          ) : (
-                            <button
-                              onClick={(e) => {
-                                e.stopPropagation()
-                                navigate(`/call-logs/${call.id}`)
-                              }}
-                              title="View call details and ticket"
-                              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs font-medium bg-blue-100 text-blue-800 border border-blue-200 hover:bg-blue-200 transition-colors cursor-pointer"
-                            >
-                              <ExternalLink className="h-3 w-3" />
-                              {call.ticketNumber}
-                            </button>
-                          )
+                        {tickets.length > 0 ? (
+                          <div className="flex flex-col gap-1">
+                            {tickets.map((ticketNumber) => {
+                              const href = ticketHref(ticketNumber)
+                              return href ? (
+                                <a
+                                  key={ticketNumber}
+                                  href={href}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  onClick={(e) => e.stopPropagation()}
+                                  className="inline-flex w-fit items-center gap-1 px-2 py-0.5 rounded-md text-xs font-medium bg-blue-100 text-blue-800 border border-blue-200 hover:bg-blue-200 transition-colors"
+                                >
+                                  <ExternalLink className="h-3 w-3" />
+                                  {ticketNumber}
+                                </a>
+                              ) : (
+                                <button
+                                  key={ticketNumber}
+                                  onClick={(e) => {
+                                    e.stopPropagation()
+                                    navigate(`/call-logs/${call.id}`)
+                                  }}
+                                  title="View call details and ticket"
+                                  className="inline-flex w-fit items-center gap-1 px-2 py-0.5 rounded-md text-xs font-medium bg-blue-100 text-blue-800 border border-blue-200 hover:bg-blue-200 transition-colors cursor-pointer"
+                                >
+                                  <ExternalLink className="h-3 w-3" />
+                                  {ticketNumber}
+                                </button>
+                              )
+                            })}
+                          </div>
                         ) : (
                           <span className="text-sm text-muted-foreground">—</span>
                         )}

@@ -24,6 +24,7 @@ import { useParams, useNavigate } from 'react-router-dom'
 import { useEffect, useMemo, useRef, useState, useCallback } from 'react'
 import apiClient from '@/lib/apiClient'
 import { toolChipsFrom, interleave, type TimedTurn } from '../lib/transcriptTimeline'
+import { ticketNumbersOf } from '../lib/callTickets'
 import {
   ArrowLeft, Copy, Link as LinkIcon, Download, Play, Pause, Check,
   MessageSquare, ListOrdered, LineChart, Braces, Code2, CircleDollarSign, Gauge,
@@ -388,6 +389,7 @@ export function CallDetailsPage() {
 
   const callStart = turns[0]?.at ?? log?.startTime ?? log?.createdAt
   const costCents = log?.totalCostCents ?? (log?.twilioCostCents ?? 0) + (log?.openaiCostCents ?? 0)
+  const tickets = ticketNumbersOf(log)
   const endedBy =
     log?.whoHungUp === 'caller' ? 'Customer' : log?.whoHungUp === 'agent' ? 'Assistant' : log?.whoHungUp ?? 'Unknown'
   const startedLabel = log?.startTime
@@ -443,6 +445,22 @@ export function CallDetailsPage() {
               </div>
               <div>
                 <span className="text-zinc-500">Ended:</span> <span className="text-zinc-300">{endedBy}</span>
+              </div>
+              {/* Every ticket the call created (v223), the row's own first. Until
+                  v223 a second ticket was visible only inside the Structured tab's
+                  JSON, and an after-hours transfer record not even there. */}
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="text-zinc-500">{tickets.length > 1 ? 'Tickets:' : 'Ticket:'}</span>
+                {tickets.length === 0 ? (
+                  <span className="text-zinc-500">none</span>
+                ) : (
+                  tickets.map((t) => (
+                    <span key={t} className="inline-flex items-center gap-1">
+                      <span className="font-mono text-purple-300">{t}</span>
+                      <CopyBtn text={t} />
+                    </span>
+                  ))
+                )}
               </div>
             </div>
           </div>
@@ -853,6 +871,7 @@ function StructuredTab({ data }: { data: DetailPayload }) {
       value: {
         outcome: log.agentOutcome ?? null,
         ticketNumber: log.ticketNumber ?? null,
+        ticketNumbers: ticketNumbersOf(log),
         transferredToHuman: log.transferredToHuman ?? false,
         endedBy: log.whoHungUp ?? null,
       },
