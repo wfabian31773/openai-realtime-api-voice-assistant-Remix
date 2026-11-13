@@ -378,6 +378,47 @@ describe.each([
   });
 });
 
+// Codex P2 on #470: a call that booked, filed a staff ticket for something
+// else, then asked to undo the booking. The undo needs its own urgent ticket
+// and a held text; the one-ticket-per-call return used to answer it first.
+describe('a booking change asked after another staff ticket on the call', () => {
+  const sid = 'CA00000000000000000000000000000229';
+  it('files its own urgent ticket naming the first, holds the text, and lists both tickets', async () => {
+    await bookOn(sid);
+    await runOn(sid, STAFF_CALLBACK_TOOL_NAME, { request: 'Does my insurance cover it', changes_booking: false });
+    expect(fileTicket.mock.calls[0][0]).toMatchObject({ priority: 'medium', idempotencyKey: `${sid}-outreach-staff` });
+    fileTicket.mockResolvedValueOnce({ success: true, ticketNumber: 'VA-90002' });
+    const r = (await runOn(sid, STAFF_CALLBACK_TOOL_NAME, { request: 'Cancel the new appointment', changes_booking: true })) as Record<string, unknown>;
+    expect(fileTicket).toHaveBeenCalledTimes(2);
+    const second = fileTicket.mock.calls[1][0];
+    expect(second.priority).toBe('urgent');
+    expect(second.idempotencyKey).toBe(`${sid}-outreach-staff-change`);
+    expect(second.description).toContain('URGENT: they asked to cancel or change the NPX booking booking-1.');
+    expect(second.description).toContain('This adds to VA-90001, filed earlier on this call.');
+    expect(r.ticket_number).toBe('VA-90002');
+    expect(String(r.say)).toContain("I've asked our scheduling team to call you back to change that.");
+    expect(confirmation()).toMatchObject({ state: 'held', reason: 'staff_change' });
+    expect(store.contacts.get('c1')!.notes).toBe('npx_booking:booking-1; staff_callback:VA-90001; staff_callback:VA-90002');
+    // A third ask, change or not, files nothing more.
+    await runOn(sid, STAFF_CALLBACK_TOOL_NAME, { request: 'Cancel it please', changes_booking: true });
+    await runOn(sid, STAFF_CALLBACK_TOOL_NAME, { request: 'One more question', changes_booking: false });
+    expect(fileTicket).toHaveBeenCalledTimes(2);
+    await hangUp();
+    expect((await tick()).sent).toBe(0);
+    expect(sent).toEqual([]);
+  });
+
+  it('a second request that does not change the booking still files nothing', async () => {
+    await bookOn(sid);
+    await runOn(sid, STAFF_CALLBACK_TOOL_NAME, { request: 'Does my insurance cover it', changes_booking: false });
+    const r = (await runOn(sid, STAFF_CALLBACK_TOOL_NAME, { request: 'And the parking', changes_booking: false })) as Record<string, unknown>;
+    expect(fileTicket).toHaveBeenCalledTimes(1);
+    expect(r.ticket_number).toBe('VA-90001');
+    await hangUp();
+    expect((await tick()).sent).toBe(1);
+  });
+});
+
 describe('changes_booking with nothing booked', () => {
   it('is an ordinary staff callback', async () => {
     await runOn('CA00000000000000000000000000000227', STAFF_CALLBACK_TOOL_NAME, { request: 'Cancel my appointment', changes_booking: true });
