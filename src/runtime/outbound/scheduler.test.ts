@@ -106,6 +106,37 @@ describe("the outbound scheduler", () => {
     expect(send).toHaveBeenCalledWith(expect.objectContaining({ to: "+15555550113", body: expect.stringContaining("you're booked for Mon, Feb 4") }));
   });
 
+  it("runs a campaign's after-call work on the same tick, with its store and clock, texts off or on (v226)", async () => {
+    const afterCalls = vi.fn(async () => ({ held_cancels_run: 2 }));
+    const withAfter = { ...policy, afterCalls };
+    const { d, store } = deps(ON, {
+      laneSource: async () => source([{ id: "test-lane", enabled: true, agentType: "outbound", outbound: withAfter, factory: () => undefined }]),
+      slugs: async () => ["test-lane"],
+    });
+    const [tick] = await runOutboundTick(d);
+    expect(afterCalls).toHaveBeenCalledTimes(1);
+    const ctx = (afterCalls.mock.calls[0] as unknown as [{ slug: string; store: unknown; now: () => Date }])[0];
+    expect(ctx.slug).toBe("test-lane");
+    expect(ctx.store).toBe(store);
+    expect(ctx.now()).toEqual(NOW);
+    expect(tick.afterCalls).toEqual({ held_cancels_run: 2 });
+  });
+
+  it("an after-call step that throws costs the tick nothing", async () => {
+    const lines: string[] = [];
+    const withAfter = { ...policy, afterCalls: async () => { throw new Error("boom"); } };
+    const { d, lock } = deps(ON, {
+      laneSource: async () => source([{ id: "test-lane", enabled: true, agentType: "outbound", outbound: withAfter, factory: () => undefined }]),
+      slugs: async () => ["test-lane"],
+      log: (l) => lines.push(l),
+    });
+    const [tick] = await runOutboundTick(d);
+    expect(tick.dialled).toBe(1);
+    expect(tick.afterCalls).toEqual({});
+    expect(lines.join(" ")).toMatch(/after-call work failed — boom/);
+    expect(lock.release).toHaveBeenCalledTimes(1);
+  });
+
   it("texts nobody for a campaign that does not text, or without a sender", async () => {
     const { d } = deps(ON);
     const [tick] = await runOutboundTick(d);

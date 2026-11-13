@@ -23,9 +23,15 @@
  *                              weeks sooner — read once per call (warmed when
  *                              the call starts) and searched in memory, so
  *                              "what about next week?" answers at once.
- *   book_sooner_exam           books the one they chose in NPX, cancels the
- *                              Azul appointment it replaces, reports the
- *                              cancel to NPX, and says only what happened.
+ *   book_sooner_exam           books the one they chose in NPX and HOLDS the
+ *                              Azul cancel until the call ends (v226: the
+ *                              hang-up runs it, then reports it to NPX), and
+ *                              says only what happened.
+ *   cancel_sooner_booking      the caller changed their mind before hanging
+ *                              up (v226): the held Azul cancel is dropped, so
+ *                              their Azul appointment is kept, and the NPX
+ *                              booking is cancelled; staff are asked when NPX
+ *                              cannot cancel it.
  *   request_staff_callback     a person who asks for a person gets a ticket
  *                              for the HVA Hub's schedulers (operator,
  *                              2026-10-21: "if they ask for a person, we'll
@@ -71,7 +77,9 @@ import type { OutboundStore } from '../runtime/outbound/store';
 import {
   createNpxOutreachClient,
   createNpxOutreachDemoClient,
+  NPX_CALLER_KEPT_AZUL_REASON,
   NPX_TIMEOUT_MS,
+  NPX_UNDO_REASON,
   type NpxOutreachClient,
   type NpxReadOptions,
   type NpxSlot,
@@ -105,18 +113,33 @@ import {
 import { sanitizeForSms } from '../services/gsm7';
 import type { CreateTicketParams, CreateTicketResponse } from '../../server/services/ticketingApiClient';
 import type { BookingOpening, BookingPageLane } from '../runtime/outbound/bookingPage';
-import { CALL_CONFIRMATION_DELAY_MS, type BookingConfirmationRecord } from '../runtime/outbound/bookingConfirmation';
+import {
+  CALL_AWAIT_CANCEL_MAX_MS,
+  CALL_CONFIRMATION_DELAY_MS,
+  type BookingConfirmationRecord,
+} from '../runtime/outbound/bookingConfirmation';
+import {
+  HELD_CANCEL_BUDGET_MS,
+  HELD_CANCEL_FALLBACK_MS,
+  HELD_CANCEL_STALE_MS,
+  heldCancelOf,
+  runHeldCancelTick,
+  type HeldAzulCancelRecord,
+} from '../runtime/outbound/heldAzulCancel';
+import type { AfterCallsContext } from '../runtime/outbound/campaign';
 
 export const DESCRIBE_TOOL_NAME = 'describe_upcoming_appointment';
 export const CONFIRM_DOB_TOOL_NAME = 'confirm_patient_birthdate';
 export const FIND_SOONER_TOOL_NAME = 'find_sooner_exam';
 export const BOOK_SOONER_TOOL_NAME = 'book_sooner_exam';
 export const STAFF_CALLBACK_TOOL_NAME = 'request_staff_callback';
+export const CANCEL_BOOKING_TOOL_NAME = 'cancel_sooner_booking';
 export const NPX_OUTREACH_TOOLS = [
   DESCRIBE_TOOL_NAME,
   CONFIRM_DOB_TOOL_NAME,
   FIND_SOONER_TOOL_NAME,
   BOOK_SOONER_TOOL_NAME,
+  CANCEL_BOOKING_TOOL_NAME,
   STAFF_CALLBACK_TOOL_NAME,
 ] as const;
 
@@ -242,6 +265,47 @@ function ticketFor(s: OutreachSession): Deps['fileTicket'] {
 
 // ── The per-call session ────────────────────────────────────────────────────
 
+/**
+ * WHAT HAPPENED TO THE AZUL APPOINTMENT A BOOKING REPLACES.
+ *  - done: the cancel ran when it was booked (the text link) or at hang-up.
+ *  - held (v226): a call booking; nothing cancelled yet, the hang-up runs it.
+ *    `stored` says whether the held record reached the store: `yes`, `no` (the
+ *    write failed) or `unknown` (it did not answer in time).
+ *  - dropped (v226): the caller kept their Azul appointment; nothing will be
+ *    cancelled. `storeDropPending` when the store could not be told yet.
+ */
+export type AzulCancelState =
+  | { kind: 'done'; result: AzulCancelResult }
+  | { kind: 'held'; record: HeldAzulCancelRecord; stored: 'yes' | 'no' | 'unknown' }
+  | {
+      kind: 'dropped';
+      record: HeldAzulCancelRecord;
+      /** `yes`: the store says dropped, so nothing will cancel it.
+       * `unconfirmed`: the store could not say so (it was down, or the
+       * cancel had already been started), so staff must check NextGen. */
+      kept: 'yes' | 'unconfirmed';
+      storeDropPending: boolean;
+    };
+
+/** What a booking did to the Azul appointment it replaces, as the caller
+ * and the staff ticket are told it. */
+export type AzulStatus = 'cancelled' | 'not_cancelled' | 'held' | 'kept' | 'kept_unconfirmed';
+export function azulStatusOf(azul: AzulCancelState): AzulStatus {
+  if (azul.kind === 'done') return azul.result.cancelled ? 'cancelled' : 'not_cancelled';
+  if (azul.kind === 'held') return 'held';
+  return azul.kept === 'yes' ? 'kept' : 'kept_unconfirmed';
+}
+
+export interface CallBooking {
+  bookingId: string;
+  slot: NpxSlot;
+  azul: AzulCancelState;
+  /** The booking's store writes (held cancel, settle, confirmation), which
+   * can outlast the tool's settle budget; an undo waits for them before it
+   * writes anything (Codex P2 on #474). */
+  writes?: Promise<unknown>;
+}
+
 interface OutreachSession {
   contact: OutboundContact;
   /** A demo call: demo NPX, simulated cancel and ticket. */
@@ -256,10 +320,17 @@ interface OutreachSession {
    * only when it means one slot in every list, otherwise the date and time
    * the agent said back to them. */
   offers: NpxSlot[][];
-  booking: { bookingId: string; slot: NpxSlot; cancel: AzulCancelResult } | null;
+  booking: CallBooking | null;
   /** A book_sooner_exam still running: a second call waits for it rather
    * than booking twice. */
   bookingInFlight: Promise<ToolResult> | null;
+  /** NPX bookings the caller undid on this call (v226), oldest first. */
+  undone: string[];
+  /** Undone bookings whose skip or settle did not land on the call; the
+   * hang-up tries them again (Codex P1 on #474). */
+  undoCleanupPending?: string[];
+  /** A cancel_sooner_booking still running: a second call waits for it. */
+  undoInFlight: Promise<ToolResult> | null;
   /** The HVA Hub ticket filed when they asked for a person. */
   staffTicket: string | null;
   /** The caller asked staff to cancel or change what was booked on this call (v222). */
@@ -275,6 +346,8 @@ const SESSION_TTL_MS = 2 * 60 * 60 * 1000;
 export function outreachSessionFor(callSid: string): OutreachSession | undefined {
   return sessions.get(callSid);
 }
+/** Drop a call's session and run nothing. Tests only: a real call ends through
+ * endOutreachSession, which runs the held Azul cancel. */
 export function closeOutreachSession(callSid: string): void {
   sessions.delete(callSid);
 }
@@ -355,6 +428,8 @@ async function sessionFor(input: Record<string, unknown>): Promise<{ sid: string
         offers: [],
         booking: null,
         bookingInFlight: null,
+        undone: [],
+        undoInFlight: null,
         staffTicket: null,
         openedAtMs: now,
       },
@@ -1027,6 +1102,9 @@ registerTool({
 export const BOOK_SEQUENCE_BUDGET_MS = 36_000;
 export const BOOK_TOOL_TIMEOUT_MS = 40_000;
 const SETTLE_BUDGET_MS = 2_000;
+/** A call booking writes three things on the contact (the held cancel, the
+ * settle, the confirmation) and cancels nothing, so it has longer for them. */
+const HOLD_SETTLE_BUDGET_MS = 5_000;
 
 /** `p`, or `fallback` once `ms` has passed — never later. */
 async function within<T>(p: Promise<T>, ms: number, fallback: T): Promise<T> {
@@ -1038,11 +1116,26 @@ async function within<T>(p: Promise<T>, ms: number, fallback: T): Promise<T> {
   }
 }
 
-export function confirmation(slot: NpxSlot, cancel: AzulCancelResult, currentDay: string): string {
+/**
+ * The booking said back once. On a call the Azul cancel is held until the
+ * call ends (v226), so the caller is told it will be cancelled once we hang
+ * up, never that it already has been.
+ */
+export function confirmation(slot: NpxSlot, cancel: AzulCancelResult | 'held', currentDay: string): string {
   const booked = `You're booked for ${spokenSlot(slot)}. Their phone number is ${slot.phone}.`;
+  if (cancel === 'held') {
+    return `${booked} Your appointment with us on ${currentDay} will be cancelled once we hang up, so there's nothing else you need to do.`;
+  }
   return cancel.cancelled
     ? `${booked} I've also cancelled your appointment with us on ${currentDay}, so there's nothing else you need to do.`
     : `${booked} Our team will cancel your appointment with us on ${currentDay}; you don't need to do anything.`;
+}
+
+/** The cancel a booking's confirmation speaks of. */
+function spokenCancelOf(azul: AzulCancelState): AzulCancelResult | 'held' {
+  if (azul.kind === 'done') return azul.result;
+  if (azul.kind === 'held') return 'held';
+  return { cancelled: false, reason: 'nextgen_cancel_failed' };
 }
 
 registerTool({
@@ -1052,7 +1145,7 @@ registerTool({
   description:
     'Book the sooner exam the person chose and confirmed: pass the date and time of the choice you said back to them, ' +
     'as find_sooner_exam gave it, and its city. Only a choice read to them on this call can be booked. ' +
-    'This also cancels their current appointment with us, so call it only after they have said yes to that.',
+    'Their current appointment with us is cancelled once the call ends, so call it only after they have said yes to that.',
   input_schema: {
     type: 'object',
     properties: {
@@ -1084,7 +1177,15 @@ registerTool({
     if (!s.verified) return notVerified();
     const currentDay = spokenDay(field(s.contact, 'appointment_date'));
     if (s.booking) {
-      return { success: true, booked: true, say: confirmation(s.booking.slot, s.booking.cancel, currentDay) };
+      if (s.booking.azul.kind === 'dropped') {
+        const r: Refusal = {
+          success: false,
+          error: 'booking_being_changed',
+          fix: 'Our scheduling team is already calling them back about the booking made on this call. Do not book again; tell them the team will call.',
+        };
+        return r;
+      }
+      return { success: true, booked: true, say: confirmation(s.booking.slot, spokenCancelOf(s.booking.azul), currentDay) };
     }
     if (s.bookingInFlight) return s.bookingInFlight;
     const run = bookChosen(input, sid, s, currentDay, deadline).finally(() => {
@@ -1217,7 +1318,9 @@ async function bookChosen(
   if (chosen.optionDisagreed) {
     console.warn(`[NPX OUTREACH] ${sid}: option ${String(input.option)} in the last list read is not the date and time confirmed; booking the date and time`);
   }
-  const booked = await bookOutreachSlot({ contact: s.contact, demo: s.demo, slot, callRef: sid, deadline });
+  const booked = await bookOutreachSlot({
+    contact: s.contact, demo: s.demo, slot, callRef: sid, deadline, superseded: (id) => s.undone.includes(id),
+  });
   if (!booked.ok) {
     if (booked.error === 'record_incomplete') {
       const r: Refusal = {
@@ -1246,18 +1349,21 @@ async function bookChosen(
     };
     return r;
   }
-  s.booking = { bookingId: booked.bookingId, slot: booked.slot, cancel: booked.cancel };
+  s.booking = { bookingId: booked.bookingId, slot: booked.slot, azul: booked.azul, writes: booked.writes };
   return {
     success: true,
     booked: true,
     booked_by: chosen.by,
     ...(chosen.optionDisagreed ? { option_disagreed: true } : {}),
-    // v222: whether the Azul appointment was cancelled, as a fixed code the
-    // timeline keeps (Wayne, 2026-11-13: record it). Before this the Observatory
-    // read it from the words the agent was given to say.
-    ...azulCancelOutcome(booked.cancel),
-    say: confirmation(s.booking.slot, booked.cancel, currentDay),
-    fix: 'Say the confirmation as given, ask if there is anything else, then say goodbye and call end_call. The outcome is already recorded.',
+    // v222: what happened to the Azul appointment, as a fixed code the
+    // timeline keeps (Wayne, 2026-11-13: record it). v226: on a call it is
+    // `held`, because nothing is cancelled until the call ends.
+    ...azulCancelOutcomeFor(booked.azul),
+    say: confirmation(booked.slot, spokenCancelOf(booked.azul), currentDay),
+    fix:
+      'Say the confirmation as given and ask if there is anything else. If they change their mind before hanging up and want to keep ' +
+      `their appointment with us, call ${CANCEL_BOOKING_TOOL_NAME}; for a different time, call it first, then find and book the new one. ` +
+      'Otherwise say goodbye and call end_call. The outcome is already recorded.',
   };
 }
 
@@ -1268,6 +1374,12 @@ async function bookChosen(
  */
 export function azulCancelOutcome(cancel: AzulCancelResult): { azul_cancel: 'cancelled' | 'not_cancelled'; azul_cancel_reason?: string } {
   return cancel.cancelled ? { azul_cancel: 'cancelled' } : { azul_cancel: 'not_cancelled', azul_cancel_reason: cancel.reason };
+}
+
+/** v226: a call booking's Azul cancel is `held` until the call ends; what it
+ * came to is written on the contact at hang-up (held_cancel, confirmation). */
+export function azulCancelOutcomeFor(azul: AzulCancelState): { azul_cancel: 'cancelled' | 'not_cancelled' | 'held'; azul_cancel_reason?: string } {
+  return azul.kind === 'done' ? azulCancelOutcome(azul.result) : { azul_cancel: 'held' };
 }
 
 /** The text's booking reference prefix (bookingPage.textLinkCallRef). */
@@ -1288,12 +1400,16 @@ export function confirmationRecordFor(args: {
   bookingId: string;
   callRef: string;
   cancelled: boolean;
+  /** v226: a call booking's Azul cancel is held until the call ends, so its
+   * confirmation waits for the hang-up to release it with the real result. */
+  awaitCancel?: boolean;
   now?: Date;
 }): BookingConfirmationRecord {
   const now = args.now ?? new Date();
   const byLink = args.callRef.startsWith(TEXT_LINK_CALL_REF_PREFIX);
+  const awaiting = !byLink && args.awaitCancel === true;
   return {
-    state: 'due',
+    state: awaiting ? 'awaiting_cancel' : 'due',
     booking_id: args.bookingId,
     by: byLink ? 'link' : 'call',
     ...(byLink ? {} : { call_sid: args.callRef }),
@@ -1301,25 +1417,36 @@ export function confirmationRecordFor(args: {
     place: [args.slot.partnerName, spokenAddress(args.slot)].filter(Boolean).join(', '),
     phone: args.slot.phone ?? '',
     replaced_day: textedDay(field(args.contact, 'appointment_date')),
-    cancel: args.cancelled ? 'cancelled' : 'pending',
+    cancel: !awaiting && args.cancelled ? 'cancelled' : 'pending',
     queued_at: now.toISOString(),
-    // A call's confirmation waits for the call to end; a link's goes now.
-    due_at: new Date(now.getTime() + (byLink ? 0 : CALL_CONFIRMATION_DELAY_MS)).toISOString(),
+    // A call's confirmation waits for the call to end; a link's goes now. One
+    // waiting for its held cancel goes at the latest after
+    // CALL_AWAIT_CANCEL_MAX_MS, saying our team will cancel.
+    due_at: new Date(
+      now.getTime() + (byLink ? 0 : awaiting ? CALL_AWAIT_CANCEL_MAX_MS : CALL_CONFIRMATION_DELAY_MS),
+    ).toISOString(),
   };
 }
 
 /** What booking one opening came to (v211): the call and the text's booking
  * page both book through bookOutreachSlot, so the two cannot differ. */
 export type OutreachBooking =
-  | { ok: true; bookingId: string; slot: NpxSlot; cancel: AzulCancelResult }
+  | { ok: true; bookingId: string; slot: NpxSlot; azul: AzulCancelState; writes?: Promise<unknown> }
   | { ok: false; error: string };
 
 /**
- * BOOK ONE OPENING, THE ONE WAY (v211). Book it in NPX, cancel the Azul
- * appointment it replaces, report the cancel to NPX, and settle the contact
- * `completed` with `npx_booking:<id>`. Shared by book_sooner_exam (the call)
- * and the text's booking page, so the sequence, the deadline and the demo
- * swaps are one copy. `slot_unavailable` is a slot NPX says was just taken,
+ * BOOK ONE OPENING, THE ONE WAY (v211). Book it in NPX, then the Azul
+ * appointment it replaces, and settle the contact `completed` with
+ * `npx_booking:<id>`. Shared by book_sooner_exam (the call) and the text's
+ * booking page, so the sequence, the deadline and the demo swaps are one copy.
+ *
+ * THE AZUL CANCEL (v226, Wayne 2026-11-13: "Hold the cancel until hang-up").
+ * On the text link it runs here and is reported to NPX, as before. On a call
+ * it is HELD: nothing is cancelled now; the held record is written on the
+ * contact (heldAzulCancel.ts), the confirmation text waits for it, and the
+ * call's teardown runs it (endOutreachSession), or the scheduler's fallback
+ * if the process died. A caller who backs out before hanging up keeps the
+ * Azul appointment (cancel_sooner_booking). `slot_unavailable` is a slot NPX says was just taken,
  * already forgotten; `record_incomplete` is a record nothing can be booked
  * from. Any other error is NPX's own.
  */
@@ -1331,6 +1458,11 @@ export async function bookOutreachSlot(args: {
   callRef: string;
   /** The whole sequence answers inside this (BOOK_SEQUENCE_BUDGET_MS). */
   deadline: number;
+  /** On a call: true once the caller has undone this booking. The booking's
+   * own writes that are still running after the tool has answered stop
+   * there, so a late settle or confirmation never lands over the undo or a
+   * later booking (Codex P2 on #474). */
+  superseded?: (bookingId: string) => boolean;
 }): Promise<OutreachBooking> {
   const { contact, demo, slot, callRef, deadline } = args;
   const personId = field(contact, 'person_id');
@@ -1362,41 +1494,107 @@ export async function bookOutreachSlot(args: {
     return { ok: false, error: book.error };
   }
 
-  // Booked. Now the Azul appointment, then tell NPX how that went. A cancel
-  // that does not land is still safe: NPX lists the booking for CEC after
-  // 15 minutes with no `cancelled` report.
-  const cancel = await cancelFor(demo)({
-    appointmentId,
-    personId,
-    appointmentDate: field(contact, 'appointment_date'),
-    comment: `Moved to an NPX partner practice by the Azul outreach call (NPX booking ${book.bookingId}).`,
-    deadlineAt: deadline - NPX_TIMEOUT_MS.report - SETTLE_BUDGET_MS,
-  });
-  const report = await npx.reportCancel(book.bookingId, cancel.cancelled ? 'cancelled' : { failed: cancel.reason });
-  if (!report.ok) {
-    console.warn(`[NPX OUTREACH] booking ${book.bookingId}: the cancel report did not land (${report.error}); CEC's backup list will show it`);
-  }
   const bookedSlot = book.slot ?? slot;
-  const settle = (async () => {
-    const store = await live().store();
-    await store.settleContact(contact.contactId, 'completed', {
-      notes: `npx_booking:${book.bookingId}`,
-      exceptStatus: ['do_not_call'],
+  const store = async () => live().store();
+
+  if (callRef.startsWith(TEXT_LINK_CALL_REF_PREFIX)) {
+    // The text link: nobody is on the phone to change their mind, so the Azul
+    // appointment is cancelled now and NPX told how that went. A cancel that
+    // does not land is still safe: NPX lists the booking for CEC after
+    // 15 minutes with no `cancelled` report.
+    const cancel = await cancelFor(demo)({
+      appointmentId,
+      personId,
+      appointmentDate: field(contact, 'appointment_date'),
+      comment: `Moved to an NPX partner practice by the Azul outreach call (NPX booking ${book.bookingId}).`,
+      deadlineAt: deadline - NPX_TIMEOUT_MS.report - SETTLE_BUDGET_MS,
     });
-    // v222: the confirmation text, sent by the scheduler once the call has
-    // ended (./runtime/outbound/bookingConfirmation.ts).
-    await store.queueConfirmation(contact.contactId, confirmationRecordFor({
-      contact, slot: bookedSlot, bookingId: book.bookingId, callRef, cancelled: cancel.cancelled,
+    const report = await npx.reportCancel(book.bookingId, cancel.cancelled ? 'cancelled' : { failed: cancel.reason });
+    if (!report.ok) {
+      console.warn(`[NPX OUTREACH] booking ${book.bookingId}: the cancel report did not land (${report.error}); CEC's backup list will show it`);
+    }
+    const settle = (async () => {
+      const st = await store();
+      // The settle and the confirmation are independent: a settle that
+      // throws must not cost the booking its confirmation (Codex P1 on #470).
+      const settled = await settleBooked(st, contact.contactId, book.bookingId);
+      // v222: the confirmation text, sent by the scheduler
+      // (./runtime/outbound/bookingConfirmation.ts).
+      await st.queueConfirmation(contact.contactId, confirmationRecordFor({
+        contact, slot: bookedSlot, bookingId: book.bookingId, callRef, cancelled: cancel.cancelled,
+      }));
+      return settled;
+    })().catch((e) => {
+      console.warn(`[NPX OUTREACH] booking ${book.bookingId}: could not settle the contact —`, e instanceof Error ? e.message : e);
+      return false;
+    });
+    if (!(await within(settle, Math.min(SETTLE_BUDGET_MS, deadline - Date.now()), false))) {
+      console.warn(`[NPX OUTREACH] booking ${book.bookingId}: the contact is not settled yet; the booking stands`);
+    }
+    return { ok: true, bookingId: book.bookingId, slot: bookedSlot, azul: { kind: 'done', result: cancel } };
+  }
+
+  // A call (v226): hold the cancel until the call ends. The record is written
+  // first, so the fallback knows of it before anything else can go wrong.
+  const heldAt = new Date();
+  const record: HeldAzulCancelRecord = {
+    state: 'held',
+    booking_id: book.bookingId,
+    call_sid: callRef,
+    demo,
+    appointment_id: appointmentId,
+    appointment_date: field(contact, 'appointment_date'),
+    person_id: personId,
+    held_at: heldAt.toISOString(),
+    run_after: new Date(heldAt.getTime() + HELD_CANCEL_FALLBACK_MS).toISOString(),
+  };
+  const azul: Extract<AzulCancelState, { kind: 'held' }> = { kind: 'held', record, stored: 'unknown' };
+  const settle = (async () => {
+    const st = await store();
+    try {
+      azul.stored = (await st.queueHeldCancel(contact.contactId, record)) ? 'yes' : 'no';
+    } catch (e) {
+      azul.stored = 'no';
+      console.warn(`[NPX OUTREACH] booking ${book.bookingId}: could not hold the Azul cancel on the contact — the hang-up runs it from the call —`, e instanceof Error ? e.message : e);
+    }
+    // Undone while this was still running: the undo has the contact now.
+    if (args.superseded?.(book.bookingId)) return false;
+    // Independent of the confirmation, as on the text link (Codex P1 on #470).
+    // The confirmation needs no check of its own: an undo holds it before
+    // NPX cancels the booking, and the store refuses this booking's queue
+    // over that hold, as it refuses an older booking's over a newer one's.
+    const settled = await settleBooked(st, contact.contactId, book.bookingId);
+    await st.queueConfirmation(contact.contactId, confirmationRecordFor({
+      contact, slot: bookedSlot, bookingId: book.bookingId, callRef, cancelled: false, awaitCancel: true, now: heldAt,
     }));
-    return true;
+    return settled;
   })().catch((e) => {
     console.warn(`[NPX OUTREACH] booking ${book.bookingId}: could not settle the contact —`, e instanceof Error ? e.message : e);
     return false;
   });
-  if (!(await within(settle, Math.min(SETTLE_BUDGET_MS, deadline - Date.now()), false))) {
+  if (!(await within(settle, Math.min(HOLD_SETTLE_BUDGET_MS, deadline - Date.now()), false))) {
     console.warn(`[NPX OUTREACH] booking ${book.bookingId}: the contact is not settled yet; the booking stands`);
   }
-  return { ok: true, bookingId: book.bookingId, slot: bookedSlot, cancel };
+  console.info(`[NPX OUTREACH] booking ${book.bookingId}: the Azul cancel is held until the call ends (stored: ${azul.stored})`);
+  return { ok: true, bookingId: book.bookingId, slot: bookedSlot, azul, writes: settle };
+}
+
+/**
+ * Settle a booked contact `completed` with its booking marker. A settle that
+ * throws is logged and answers false, never thrown, so the confirmation that
+ * follows it is queued whatever the settle did (Codex P1 on #470).
+ */
+async function settleBooked(st: OutboundStore, contactId: string, bookingId: string): Promise<boolean> {
+  try {
+    await st.settleContact(contactId, 'completed', {
+      notes: `npx_booking:${bookingId}`,
+      exceptStatus: ['do_not_call'],
+    });
+    return true;
+  } catch (e) {
+    console.warn(`[NPX OUTREACH] booking ${bookingId}: could not settle the contact; the confirmation is still queued —`, e instanceof Error ? e.message : e);
+    return false;
+  }
 }
 
 // ── The text's booking page (v211) ──────────────────────────────────────────
@@ -1437,7 +1635,7 @@ export const npxBookingPageLane: BookingPageLane = {
     const booked = await bookOutreachSlot({ contact, demo, slot, callRef, deadline });
     if (!booked.ok) return booked;
     const currentDay = spokenDay(field(contact, 'appointment_date'));
-    return { ok: true, bookingId: booked.bookingId, confirmation: confirmation(booked.slot, booked.cancel, currentDay) };
+    return { ok: true, bookingId: booked.bookingId, confirmation: confirmation(booked.slot, spokenCancelOf(booked.azul), currentDay) };
   },
 };
 
@@ -1456,25 +1654,51 @@ export const NPX_RECALL_FIRST_LINE =
  */
 export function appointmentStateLine(booking: OutreachSession['booking']): string {
   if (!booking) return 'Your current appointment stays exactly as it is.';
-  return booking.cancel.cancelled
-    ? 'Your new appointment stays booked, and your old one with us is cancelled.'
-    : 'Your new appointment stays booked, and our team will cancel your old one with us.';
+  switch (azulStatusOf(booking.azul)) {
+    case 'cancelled':
+      return 'Your new appointment stays booked, and your old one with us is cancelled.';
+    case 'held':
+      return 'Your new appointment stays booked, and your old one with us will be cancelled once we hang up.';
+    case 'kept':
+    case 'kept_unconfirmed':
+      return 'Your appointment with us is kept, and our team will call you about the new one.';
+    default:
+      return 'Your new appointment stays booked, and our team will cancel your old one with us.';
+  }
 }
 
 /** What the caller hears when they asked to change what was just booked (v222). */
 export function bookingChangeStateLine(booking: NonNullable<OutreachSession['booking']>): string {
-  return booking.cancel.cancelled
-    ? 'Until they call, the new appointment is still booked, and your old one with us has been cancelled.'
-    : 'Until they call, the new appointment is still booked, and your appointment with us is still on file.';
+  switch (azulStatusOf(booking.azul)) {
+    case 'cancelled':
+      return 'Until they call, the new appointment is still booked, and your old one with us has been cancelled.';
+    case 'held':
+      return 'Until they call, the new appointment is still booked, and your old one with us will be cancelled once we hang up.';
+    case 'kept_unconfirmed':
+      return 'Until they call, the new appointment is still booked, and they will make sure your appointment with us is still on file.';
+    default:
+      return 'Until they call, the new appointment is still booked, and your appointment with us is still on file.';
+  }
 }
 
 /** The ticket line that tells staff what to do when the caller asked to change
- * the booking made on the call (v222). */
+ * the booking made on the call (v222, v226). */
 export function bookingChangeLine(contact: OutboundContact, booking: NonNullable<OutreachSession['booking']>): string {
   const day = spokenDay(field(contact, 'appointment_date'));
-  return booking.cancel.cancelled
-    ? `URGENT: they asked to cancel or change the NPX booking ${booking.bookingId}. Their Azul appointment on ${day} was cancelled on this call: rebook it if they want it back, and cancel or move the NPX booking in NPX. No confirmation text was sent.`
-    : `URGENT: they asked to cancel or change the NPX booking ${booking.bookingId}. Their Azul appointment on ${day} is still on file: do not cancel it, and cancel or move the NPX booking in NPX. No confirmation text was sent.`;
+  const asked = `URGENT: they asked to cancel or change the NPX booking ${booking.bookingId}.`;
+  const tail = 'No confirmation text was sent.';
+  switch (azulStatusOf(booking.azul)) {
+    case 'cancelled':
+      return `${asked} Their Azul appointment on ${day} was cancelled on this call: rebook it if they want it back, and cancel or move the NPX booking in NPX. ${tail}`;
+    case 'held':
+      return `${asked} Their Azul appointment on ${day} will be cancelled when this call ends: rebook it if they want it back, and cancel or move the NPX booking in NPX. ${tail}`;
+    case 'kept':
+      return `${asked} Their Azul appointment on ${day} was kept (the call did not cancel it): do not cancel it unless they still want the move, and cancel or move the NPX booking in NPX. ${tail}`;
+    case 'kept_unconfirmed':
+      return `${asked} Their Azul appointment on ${day} was meant to be kept, but the call could not confirm it: check NextGen that it is still booked and rebook it if not, and cancel or move the NPX booking in NPX. ${tail}`;
+    default:
+      return `${asked} Their Azul appointment on ${day} is still on file: do not cancel it, and cancel or move the NPX booking in NPX. ${tail}`;
+  }
 }
 
 export function staffReasonFor(request: string): number {
@@ -1483,6 +1707,100 @@ export function staffReasonFor(request: string): number {
     if (cue.cues.some((c) => text.includes(fold(c)))) return cue.reasonId;
   }
   return DEFAULT_STAFF_REASON_ID;
+}
+
+/**
+ * File the HVA Hub staff ticket for this call, hold the confirmation text of
+ * a booking they asked to change, and settle the contact. Shared by
+ * request_staff_callback and cancel_sooner_booking's fallback, so the ticket
+ * and the settle are one copy. Idempotent on the call: one ticket per call.
+ */
+async function fileStaffCallback(
+  sid: string,
+  s: OutreachSession,
+  args: { request: string; changesBooking: boolean; callbackSid: string },
+): Promise<{ ok: true; ticketNumber: string } | { ok: false; error: string }> {
+  const { request, changesBooking, callbackSid } = args;
+  // One ticket per call, except a booking change asked after another
+  // request was already filed (an insurance question, then "cancel it"):
+  // that change still needs its own urgent ticket and a held text, or the
+  // confirmation goes out and staff never see the undo (Codex P2, #470).
+  const earlierTicket = s.staffTicket;
+  const changeAfterTicket = !!earlierTicket && changesBooking && !!s.booking && !s.bookingChangeAsked;
+  if (earlierTicket && !changeAfterTicket) return { ok: true, ticketNumber: earlierTicket };
+  const calledFrom = callbackSid ? callbackSessionFor(callbackSid)?.callerPhone ?? '' : '';
+  const dob = dobOnFile(s.contact);
+  const body = sanitizeForSms(
+    [
+      // Operator, 2026-11-13: the person working the ticket must see what it is
+      // about before opening it. The ticketing app also starts the subject
+      // "NPX Recall -" for this agent (ticketing-app #454).
+      NPX_RECALL_FIRST_LINE,
+      'The patient asked to speak with a person.',
+      request ? `What they asked: ${request}` : null,
+      staffAppointmentLine(s.contact),
+      `Date of birth confirmed on the call: ${s.verified ? 'yes' : 'no'}.`,
+      callbackSid ? 'They called us back.' : 'We called them.',
+      calledFrom && calledFrom !== s.contact.phone
+        ? `They called from ${calledFrom}; the number on file is ${s.contact.phone}.`
+        : null,
+      s.booking
+        ? `A sooner exam was booked on this call (NPX booking ${s.booking.bookingId}).`
+        : s.undone.length
+          ? `A sooner exam was booked on this call and cancelled again before they hung up (NPX booking ${s.undone[s.undone.length - 1]}); their appointment with us was kept.`
+          : 'Their appointment has not been changed.',
+      changesBooking && s.booking ? bookingChangeLine(s.contact, s.booking) : null,
+      changeAfterTicket ? `This adds to ${earlierTicket}, filed earlier on this call.` : null,
+    ]
+      .filter((l) => l !== null)
+      .join('\n'),
+  ).value;
+
+  const result = await ticketFor(s)({
+    departmentId: HVA_HUB_DEPARTMENT_ID,
+    requestTypeId: HVA_HUB_SCHEDULING_REQUEST_TYPE_ID,
+    requestReasonId: staffReasonFor(request),
+    patientFirstName: s.contact.firstName?.trim() || undefined,
+    patientLastName: s.contact.lastName?.trim() || undefined,
+    patientPhone: s.contact.phone,
+    preferredContactMethod: 'phone',
+    ...(dob ? { patientBirthMonth: dob.month, patientBirthDay: dob.day, patientBirthYear: dob.year } : {}),
+    description: body,
+    priority: changesBooking ? 'urgent' : 'medium',
+    idempotencyKey: changeAfterTicket ? `${sid}-outreach-staff-change` : `${sid}-outreach-staff`,
+    callData: { agentUsed: 'npx-outreach', callSid: sid },
+  });
+  if (!result.success || !result.ticketNumber) {
+    console.warn(`[NPX OUTREACH] staff callback ticket not filed (${result.error ?? 'no ticket number'})`);
+    return { ok: false, error: result.error ?? 'no_ticket_number' };
+  }
+  s.staffTicket = result.ticketNumber;
+  if (changesBooking && s.booking) {
+    s.bookingChangeAsked = true;
+    try {
+      await (await live().store()).holdConfirmation(s.contact.contactId, s.booking.bookingId, 'staff_change');
+    } catch (e) {
+      console.warn(`[NPX OUTREACH] staff callback ${result.ticketNumber}: could not hold the confirmation text —`, e instanceof Error ? e.message : e);
+    }
+  }
+  try {
+    await (await live().store()).settleContact(s.contact.contactId, 'completed', {
+      // v216: a booking on this call keeps its marker, first, so a count of
+      // `agent_notes LIKE 'npx_booking:%'` still finds it. Before, the staff
+      // note replaced it: 4 of 21 bookings to 2026-11-12 read as no booking.
+      notes: [
+        s.booking ? `npx_booking:${s.booking.bookingId}` : null,
+        earlierTicket ? `staff_callback:${earlierTicket}` : null,
+        `staff_callback:${result.ticketNumber}`,
+      ]
+        .filter(Boolean)
+        .join('; '),
+      exceptStatus: ['do_not_call'],
+    });
+  } catch (e) {
+    console.warn(`[NPX OUTREACH] staff callback ${result.ticketNumber}: could not settle the contact —`, e instanceof Error ? e.message : e);
+  }
+  return { ok: true, ticketNumber: result.ticketNumber };
 }
 
 registerTool({
@@ -1527,55 +1845,21 @@ registerTool({
     // text for a booking they asked to change.
     const changesBooking = !!s.booking && input.changes_booking === true;
     // One ticket per call, except a booking change asked after another
-    // request was already filed (an insurance question, then "cancel it"):
-    // that change still needs its own urgent ticket and a held text, or the
-    // confirmation goes out and staff never see the undo (Codex P2, #470).
-    const earlierTicket = s.staffTicket;
-    const changeAfterTicket = !!earlierTicket && changesBooking && !s.bookingChangeAsked;
-    if (earlierTicket && !changeAfterTicket) return already(earlierTicket);
+    // request was already filed: fileStaffCallback files that one beside the
+    // first (Codex P2, #470).
+    if (s.staffTicket && !(changesBooking && !s.bookingChangeAsked)) return already(s.staffTicket);
+    // v226: and, before the call ends, their Azul appointment is kept: the
+    // held cancel is dropped, so staff are not asked to rebook what the
+    // caller wanted back.
+    if (changesBooking && s.booking?.azul.kind === 'held') {
+      const kept = await keepAzulAppointment(s, 'staff_change');
+      // The NPX booking stays for staff: NPX's backup list must ask CEC to
+      // cancel it, not the Azul appointment the caller kept.
+      if (kept === 'dropped' || kept === 'store_down') await reportAzulKept(s.demo, s.booking.bookingId);
+    }
     const callbackSid = typeof input.outbound_callback_sid === 'string' ? input.outbound_callback_sid : '';
-    const calledFrom = callbackSid ? callbackSessionFor(callbackSid)?.callerPhone ?? '' : '';
-    const dob = dobOnFile(s.contact);
-    const body = sanitizeForSms(
-      [
-        // Operator, 2026-11-13: the person working the ticket must see what it is
-        // about before opening it. The ticketing app also starts the subject
-        // "NPX Recall -" for this agent (ticketing-app #454).
-        NPX_RECALL_FIRST_LINE,
-        'The patient asked to speak with a person.',
-        request ? `What they asked: ${request}` : null,
-        staffAppointmentLine(s.contact),
-        `Date of birth confirmed on the call: ${s.verified ? 'yes' : 'no'}.`,
-        callbackSid ? 'They called us back.' : 'We called them.',
-        calledFrom && calledFrom !== s.contact.phone
-          ? `They called from ${calledFrom}; the number on file is ${s.contact.phone}.`
-          : null,
-        s.booking
-          ? `A sooner exam was booked on this call (NPX booking ${s.booking.bookingId}).`
-          : 'Their appointment has not been changed.',
-        changesBooking && s.booking ? bookingChangeLine(s.contact, s.booking) : null,
-        changeAfterTicket ? `This adds to ${earlierTicket}, filed earlier on this call.` : null,
-      ]
-        .filter((l) => l !== null)
-        .join('\n'),
-    ).value;
-
-    const result = await ticketFor(s)({
-      departmentId: HVA_HUB_DEPARTMENT_ID,
-      requestTypeId: HVA_HUB_SCHEDULING_REQUEST_TYPE_ID,
-      requestReasonId: staffReasonFor(request),
-      patientFirstName: s.contact.firstName?.trim() || undefined,
-      patientLastName: s.contact.lastName?.trim() || undefined,
-      patientPhone: s.contact.phone,
-      preferredContactMethod: 'phone',
-      ...(dob ? { patientBirthMonth: dob.month, patientBirthDay: dob.day, patientBirthYear: dob.year } : {}),
-      description: body,
-      priority: changesBooking ? 'urgent' : 'medium',
-      idempotencyKey: changeAfterTicket ? `${sid}-outreach-staff-change` : `${sid}-outreach-staff`,
-      callData: { agentUsed: 'npx-outreach', callSid: sid },
-    });
-    if (!result.success || !result.ticketNumber) {
-      console.warn(`[NPX OUTREACH] staff callback ticket not filed (${result.error ?? 'no ticket number'})`);
+    const filed = await fileStaffCallback(sid, s, { request, changesBooking, callbackSid });
+    if (!filed.ok) {
       const r: Refusal = {
         success: false,
         error: 'ticket_not_filed',
@@ -1588,32 +1872,354 @@ registerTool({
       };
       return r;
     }
-    s.staffTicket = result.ticketNumber;
-    if (changesBooking && s.booking) {
-      s.bookingChangeAsked = true;
-      try {
-        await (await live().store()).holdConfirmation(s.contact.contactId, s.booking.bookingId, 'staff_change');
-      } catch (e) {
-        console.warn(`[NPX OUTREACH] staff callback ${result.ticketNumber}: could not hold the confirmation text —`, e instanceof Error ? e.message : e);
-      }
-    }
-    try {
-      await (await live().store()).settleContact(s.contact.contactId, 'completed', {
-        // v216: a booking on this call keeps its marker, first, so a count of
-        // `agent_notes LIKE 'npx_booking:%'` still finds it. Before, the staff
-        // note replaced it: 4 of 21 bookings to 2026-11-12 read as no booking.
-        notes: [
-          s.booking ? `npx_booking:${s.booking.bookingId}` : null,
-          earlierTicket ? `staff_callback:${earlierTicket}` : null,
-          `staff_callback:${result.ticketNumber}`,
-        ]
-          .filter(Boolean)
-          .join('; '),
-        exceptStatus: ['do_not_call'],
-      });
-    } catch (e) {
-      console.warn(`[NPX OUTREACH] staff callback ${result.ticketNumber}: could not settle the contact —`, e instanceof Error ? e.message : e);
-    }
-    return already(result.ticketNumber);
+    return already(filed.ticketNumber);
   },
 });
+
+// ── cancel_sooner_booking (v226) ────────────────────────────────────────────
+
+/** The undo's whole sequence answers inside this, under its tool timeout,
+ * which sits under the bridge's tool-dispatch watchdog (45 s). */
+export const UNDO_SEQUENCE_BUDGET_MS = 30_000;
+export const UNDO_TOOL_TIMEOUT_MS = 36_000;
+/** One store step of the undo or the hang-up: never longer than this. */
+const STORE_STEP_MS = 3_000;
+
+/**
+ * KEEP THE AZUL APPOINTMENT (v226). The caller changed their mind before
+ * hanging up: the held cancel is dropped in the store, in one statement, so
+ * neither the hang-up nor the fallback can run it. Returns what the store
+ * said: `dropped` (provable), `not_dropped` (the cancel had already been
+ * started, or another booking's is held there) or `store_down`. NPX is told
+ * the patient kept their Azul appointment, so its backup list asks CEC to
+ * cancel the NPX booking and not the Azul one, unless the call cancels the
+ * NPX booking itself.
+ */
+async function keepAzulAppointment(s: OutreachSession, reason: string): Promise<'dropped' | 'not_dropped' | 'store_down' | 'not_held'> {
+  const b = s.booking;
+  if (!b || b.azul.kind !== 'held') return 'not_held';
+  const record = b.azul.record;
+  const said = await within(
+    (async () => {
+      const st = await live().store();
+      return (await st.dropHeldCancel(s.contact.contactId, record, reason, new Date())) ? ('dropped' as const) : ('not_dropped' as const);
+    })().catch(() => 'store_down' as const),
+    STORE_STEP_MS,
+    'store_down' as const,
+  );
+  b.azul = { kind: 'dropped', record, kept: said === 'dropped' ? 'yes' : 'unconfirmed', storeDropPending: said === 'store_down' };
+  console.info(`[NPX OUTREACH] booking ${b.bookingId}: the caller kept their Azul appointment (${reason}); the held cancel is ${said}`);
+  return said;
+}
+
+/** NPX is told the patient kept their Azul appointment, so the backup list
+ * says to cancel the NPX booking, not the Azul one. Never throws. */
+async function reportAzulKept(demo: boolean, bookingId: string): Promise<void> {
+  const report = await within(
+    npxFor(demo).reportCancel(bookingId, { failed: NPX_CALLER_KEPT_AZUL_REASON }).catch(() => ({ ok: false as const, error: 'threw' })),
+    NPX_TIMEOUT_MS.report,
+    { ok: false as const, error: 'timeout' },
+  );
+  if (!report.ok) {
+    console.warn(`[NPX OUTREACH] booking ${bookingId}: could not tell NPX the patient kept their Azul appointment (${'error' in report ? String(report.error) : 'failed'})`);
+  }
+}
+
+registerTool({
+  name: CANCEL_BOOKING_TOOL_NAME,
+  layer: 'agent',
+  timeoutMs: UNDO_TOOL_TIMEOUT_MS,
+  description:
+    'When the person changes their mind before hanging up about the sooner exam booked on this call and wants to keep ' +
+    'their appointment with us, cancel the new booking. Their appointment with us is then kept. Call it only after they ' +
+    'have said that is what they want. Say what it tells you.',
+  input_schema: { type: 'object', properties: {}, required: [] },
+  handler: async (input): Promise<ToolResult> => {
+    const found = await sessionFor(input);
+    if ('success' in found) return found;
+    const { sid, s } = found;
+    if (s.bookingInFlight) await within(s.bookingInFlight.then(() => undefined, () => undefined), BOOK_TOOL_TIMEOUT_MS, undefined);
+    if (s.undoInFlight) return s.undoInFlight;
+    const currentDay = spokenDay(field(s.contact, 'appointment_date'));
+    if (!s.booking) {
+      if (s.undone.length) {
+        return {
+          success: true,
+          booking_undone: true,
+          say: `The new booking is cancelled. Your appointment with us on ${currentDay} stays as it is.`,
+          fix: 'Say that and ask if there is anything else. The outcome is already recorded.',
+        };
+      }
+      const r: Refusal = {
+        success: false,
+        error: 'nothing_booked',
+        fix: 'Nothing was booked on this call, so there is nothing to cancel. Tell them their appointment with us stays as it is.',
+      };
+      return r;
+    }
+    const callbackSid = typeof input.outbound_callback_sid === 'string' ? input.outbound_callback_sid : '';
+    const run = undoBooking(sid, s, currentDay, callbackSid).finally(() => {
+      s.undoInFlight = null;
+    });
+    s.undoInFlight = run;
+    return run;
+  },
+});
+
+/**
+ * UNDO THE BOOKING (v226). The order is the safety property: the NPX
+ * booking is cancelled only once the store says the held Azul cancel is
+ * dropped, so a patient can never be left with neither appointment. When the
+ * store cannot say so, or NPX will not cancel, the booking is left for staff
+ * on an urgent ticket and the Azul appointment is still kept.
+ */
+/**
+ * AN UNDONE BOOKING ON THE RECORD: its confirmation skipped (it is already
+ * held, so this only names why) and the contact settled declined with
+ * `npx_booking_undone:<id>`. True when both landed inside the store step.
+ * Run on the call, and again at hang-up for one that did not land, unless a
+ * later booking on the call has taken the contact over (Codex P1 on #474).
+ */
+async function recordUndone(s: OutreachSession, bookingId: string): Promise<boolean> {
+  return within(
+    (async () => {
+      const st = await live().store();
+      await st.skipConfirmation(s.contact.contactId, bookingId, 'booking_undone');
+      await st.settleContact(s.contact.contactId, 'declined', {
+        notes: `npx_booking_undone:${bookingId}`,
+        exceptStatus: ['do_not_call'],
+      });
+      return true;
+    })().catch((e) => {
+      console.warn(`[NPX OUTREACH] booking ${bookingId}: undone, but the contact could not be settled —`, e instanceof Error ? e.message : e);
+      return false;
+    }),
+    STORE_STEP_MS,
+    false,
+  );
+}
+
+async function undoBooking(sid: string, s: OutreachSession, currentDay: string, callbackSid: string): Promise<ToolResult> {
+  const deadline = Date.now() + UNDO_SEQUENCE_BUDGET_MS;
+  const b = s.booking!;
+  const bookingId = b.bookingId;
+  // The booking's own writes first, so the undo's land after them (Codex P2
+  // on #474). Past the step they stop themselves once the undo is recorded.
+  if (b.writes) await within(b.writes.then(() => undefined, () => undefined), STORE_STEP_MS, undefined);
+  const kept = b.azul.kind === 'held' ? await keepAzulAppointment(s, 'booking_undone') : b.azul.kind === 'dropped' && b.azul.kept === 'yes' ? 'dropped' : 'not_dropped';
+
+  let npxCancel: string = 'not_tried';
+  // The confirmation is held BEFORE NPX is asked to cancel (Codex P2 on #474):
+  // a held confirmation is never sent, so once the booking is gone nothing can
+  // text the caller about it, whatever happens to the skip below. A hold that
+  // cannot be written means the booking is not cancelled here; staff do it.
+  const held =
+    kept === 'dropped'
+      ? await within(
+          live()
+            .store()
+            .then((st) => st.holdConfirmation(s.contact.contactId, bookingId, 'booking_undo'))
+            .then(() => true)
+            .catch((e) => {
+              console.warn(`[NPX OUTREACH] booking ${bookingId}: the confirmation could not be held before the undo —`, e instanceof Error ? e.message : e);
+              return false;
+            }),
+          STORE_STEP_MS,
+          false,
+        )
+      : false;
+  if (kept === 'dropped' && !held) {
+    npxCancel = 'confirmation_not_held';
+    await reportAzulKept(s.demo, bookingId);
+  } else if (kept === 'dropped') {
+    const cancelled = await within(
+      npxFor(s.demo).cancelBooking(bookingId, { callRef: sid, reason: NPX_UNDO_REASON }).catch(() => ({ ok: false as const, error: 'unavailable' as const })),
+      Math.min(NPX_TIMEOUT_MS.cancel + 1_000, deadline - Date.now()),
+      { ok: false as const, error: 'timeout' as const },
+    );
+    if (cancelled.ok) {
+      npxCancel = cancelled.outcome;
+      // Marked undone before anything is written, so the booking's late
+      // writes stop rather than land over the undo.
+      s.undone.push(bookingId);
+      if (!(await recordUndone(s, bookingId))) {
+        (s.undoCleanupPending ??= []).push(bookingId);
+      }
+      s.booking = null;
+      s.offers = [];
+      console.info(`[NPX OUTREACH] booking ${bookingId}: undone on the call (${cancelled.outcome}); the Azul appointment is kept`);
+      return {
+        success: true,
+        booking_undone: true,
+        npx_cancel: cancelled.outcome,
+        azul_kept: true,
+        say: `I've cancelled the new booking. Your appointment with us on ${currentDay} stays as it is.`,
+        fix:
+          'Say that and ask if there is anything else. If they want a different time instead, call find_sooner_exam and book again; ' +
+          'otherwise say goodbye and call end_call. The outcome is already recorded.',
+      };
+    }
+    npxCancel = cancelled.error;
+    // The Azul appointment is kept; NPX is told so, and staff cancel the NPX booking.
+    await reportAzulKept(s.demo, bookingId);
+  } else if (kept === 'store_down') {
+    await reportAzulKept(s.demo, bookingId);
+  }
+
+  console.warn(`[NPX OUTREACH] booking ${bookingId}: could not be undone on the call (held cancel ${kept}, NPX ${npxCancel}); asking staff`);
+  const filed = await within(
+    fileStaffCallback(sid, s, { request: 'Cancel the sooner exam booked on this call and keep my appointment with Azul.', changesBooking: true, callbackSid }),
+    Math.max(0, deadline - Date.now()),
+    { ok: false as const, error: 'timeout' },
+  );
+  const keptLine =
+    s.booking && azulStatusOf(s.booking.azul) === 'kept'
+      ? `Your appointment with us on ${currentDay} is kept.`
+      : `They'll make sure your appointment with us on ${currentDay} is still booked.`;
+  if (!filed.ok) {
+    return {
+      success: false,
+      error: 'not_undone',
+      npx_cancel: npxCancel,
+      fix:
+        'The new booking could not be cancelled and the team could not be reached just now. Do not say anyone will call. Say: ' +
+        `"I wasn't able to cancel the new booking myself just now. ${keptLine}" Then say goodbye and call end_call.`,
+    } as Refusal;
+  }
+  return {
+    success: true,
+    booking_undone: false,
+    npx_cancel: npxCancel,
+    azul_kept: kept === 'dropped',
+    ticket_number: filed.ticketNumber,
+    say: `I wasn't able to cancel the new booking myself, so I've asked our scheduling team to call you back. ${keptLine}`,
+    fix: 'Say that, ask if there is anything else, then say goodbye and call end_call. The outcome is already recorded.',
+  };
+}
+
+// ── The call ends: run the held Azul cancel (v226) ─────────────────────────
+
+/**
+ * RUN ONE HELD AZUL CANCEL: the cancel, the report to NPX, the record, then
+ * the confirmation text released with what it came to. Used by the hang-up
+ * and by the scheduler's fallback. Never throws.
+ */
+export async function runHeldAzulCancel(
+  contactId: string,
+  record: HeldAzulCancelRecord,
+  by: 'hang_up' | 'fallback',
+): Promise<AzulCancelResult> {
+  const deadline = Date.now() + HELD_CANCEL_BUDGET_MS;
+  let cancel: AzulCancelResult;
+  try {
+    cancel = await cancelFor(record.demo)({
+      appointmentId: record.appointment_id,
+      personId: record.person_id,
+      appointmentDate: record.appointment_date,
+      comment: `Moved to an NPX partner practice by the Azul outreach call (NPX booking ${record.booking_id}).`,
+      deadlineAt: deadline - NPX_TIMEOUT_MS.report - STORE_STEP_MS,
+    });
+  } catch (e) {
+    console.warn(`[NPX OUTREACH] booking ${record.booking_id}: the held Azul cancel threw —`, e instanceof Error ? e.message : e);
+    cancel = { cancelled: false, reason: 'nextgen_cancel_failed' };
+  }
+  const report = await npxFor(record.demo)
+    .reportCancel(record.booking_id, cancel.cancelled ? 'cancelled' : { failed: cancel.reason })
+    .catch(() => ({ ok: false as const, error: 'threw' }));
+  if (!report.ok) {
+    console.warn(`[NPX OUTREACH] booking ${record.booking_id}: the cancel report did not land; CEC's backup list will show it`);
+  }
+  await within(
+    (async () => {
+      const st = await live().store();
+      await st.patchHeldCancel(contactId, record.booking_id, {
+        state: cancel.cancelled ? 'cancelled' : 'not_cancelled',
+        done_at: new Date().toISOString(),
+        by,
+        ...(cancel.cancelled ? {} : { reason: cancel.reason }),
+      });
+      await st.releaseConfirmation(contactId, record.booking_id, cancel.cancelled ? 'cancelled' : 'pending', new Date());
+    })().catch((e) => {
+      console.warn(`[NPX OUTREACH] booking ${record.booking_id}: could not record the held Azul cancel —`, e instanceof Error ? e.message : e);
+    }),
+    STORE_STEP_MS * 2,
+    undefined,
+  );
+  console.info(
+    `[NPX OUTREACH] booking ${record.booking_id}: held Azul cancel run at ${by === 'hang_up' ? 'hang-up' : 'the fallback'} — ` +
+      (cancel.cancelled ? 'cancelled' : `not cancelled (${cancel.reason})`),
+  );
+  return cancel;
+}
+
+/**
+ * THE CALL HAS ENDED (v226). Called from the runtime's teardown for every
+ * call: drops the session, and on an outreach call whose booking holds its
+ * Azul cancel, runs it now. One claim in the store decides who runs it, so
+ * the fallback never runs it twice; when the held record never reached the
+ * store, the call's own copy is run. A booking the caller undid retries the
+ * drop if the store was down. Never throws.
+ */
+export async function endOutreachSession(callSid: string): Promise<void> {
+  const s = sessions.get(callSid);
+  sessions.delete(callSid);
+  if (!s) return;
+  try {
+    if (s.bookingInFlight) await within(s.bookingInFlight.then(() => undefined, () => undefined), BOOK_TOOL_TIMEOUT_MS, undefined);
+    if (s.undoInFlight) await within(s.undoInFlight.then(() => undefined, () => undefined), UNDO_TOOL_TIMEOUT_MS, undefined);
+    // An undo whose record did not land on the call is written now (Codex P1
+    // on #474). After a later booking on the call there is nothing to write:
+    // the undone booking's confirmation was held before NPX cancelled it, the
+    // later booking's queue has replaced it, and its settle is the contact's.
+    // A skip for the undone booking then would overwrite the later booking's
+    // confirmation with a placeholder.
+    for (const undoneId of s.undoCleanupPending ?? []) {
+      if (s.booking) {
+        console.info(`[NPX OUTREACH] booking ${undoneId}: undone, then a later booking on the call settled the contact; nothing to record at hang-up`);
+        continue;
+      }
+      const landed = await recordUndone(s, undoneId);
+      console.info(`[NPX OUTREACH] booking ${undoneId}: the undo ${landed ? 'is now recorded' : 'could still not be recorded'} at hang-up`);
+    }
+    const b = s.booking;
+    if (!b) return;
+    const st = await live().store();
+    if (b.azul.kind === 'dropped') {
+      if (b.azul.storeDropPending) {
+        const again = await within(st.dropHeldCancel(s.contact.contactId, b.azul.record, 'booking_undone', new Date()).catch(() => false), STORE_STEP_MS, false);
+        console.info(`[NPX OUTREACH] booking ${b.bookingId}: the dropped Azul cancel ${again ? 'is now recorded' : 'could still not be recorded'} at hang-up`);
+      }
+      return;
+    }
+    if (b.azul.kind !== 'held') return;
+    const held = b.azul;
+    const now = new Date();
+    // A claim the store could not answer (down, or slower than a step) runs
+    // the call's own copy: a second run is safe, because the cancel reads the
+    // appointment back first. Only a store that answered "not yours" stops it.
+    const claim = await within(
+      st
+        .claimHeldCancel(s.contact.contactId, held.record.booking_id, now, new Date(now.getTime() - HELD_CANCEL_STALE_MS))
+        .then((row) => ({ row }), () => 'unanswered' as const),
+      STORE_STEP_MS,
+      'unanswered' as const,
+    );
+    if (claim !== 'unanswered' && !claim.row && held.stored === 'yes') {
+      // The store holds it and someone else has it, or it was dropped.
+      console.info(`[NPX OUTREACH] booking ${b.bookingId}: the held Azul cancel is not ours to run at hang-up`);
+      return;
+    }
+    const record = (claim !== 'unanswered' && claim.row ? heldCancelOf(claim.row.customData) : null) ?? held.record;
+    await runHeldAzulCancel(s.contact.contactId, record, 'hang_up');
+  } catch (e) {
+    console.warn(`[NPX OUTREACH] ${callSid}: the end-of-call step failed —`, e instanceof Error ? e.message : e);
+  }
+}
+
+/** The NPX lane's after-calls step (v226): the held Azul cancels a call's
+ * teardown did not run, once the call is over. The scheduler calls it each
+ * tick (OutboundLanePolicy.afterCalls). */
+export async function npxOutreachAfterCalls(ctx: AfterCallsContext, campaignKey: string): Promise<Record<string, number>> {
+  const r = await runHeldCancelTick(ctx.slug, { campaignKey }, { store: ctx.store, run: runHeldAzulCancel, now: ctx.now, log: ctx.log });
+  return { held_cancels_run: r.ran, ...r.held };
+}

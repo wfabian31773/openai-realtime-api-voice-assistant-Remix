@@ -1750,6 +1750,21 @@ import { callEnvironment } from "./callRecord";
  * which it contains along with v222 (#470, `951dd0ba`), v220 (#467,
  * `e9a2443e`) and v218 (#465, `0c324a9c`); v219 (#466) and v224 (#474) are
  * claimed on open branches. No migration.
+ *
+ * v226 — THE CALLER WHO BACKS OUT KEEPS THEIR APPOINTMENT (2026-11-13; v224
+ * while #474 was open, renumbered when #469 took v225 on `main`). Wayne:
+ * "Hold the cancel until hang-up: the Azul cancel runs only when the call
+ * ends. If the caller backs out on the call, their Azul appointment is kept."
+ * A booking on a call now cancels nothing: the Azul cancel is held on the
+ * contact (`outreach_text.held_cancel`) and the call's teardown runs it
+ * (endOutreachSession), or the scheduler's fallback after 11 minutes when the
+ * process died first; one claim decides who runs it. The confirmation text
+ * waits for it (`awaiting_cancel`). `cancel_sooner_booking` drops the held
+ * cancel and then cancels the NPX booking through NPX's new outreach
+ * booking-cancel endpoint (EPC #329); when either cannot be done it files the
+ * urgent staff ticket and the Azul appointment is still kept. Above v225
+ * (#469, merged `ffa68479`), which it contains along with v223 (#473,
+ * `25bbbbad`) and v222 (#470, `951dd0ba`). No migration.
  */
 /**
  * v227 — A BLANK FIELD IS A FIELD NOT GIVEN (2026-11-13; v219 while #466 was
@@ -1759,9 +1774,9 @@ import { callEnvironment } from "./callRecord";
  * and every fact sent beside the blanks is dropped. 92 of 1,093 substantive
  * PCP calls 2026-11-05..12 took 204 such refusals; on 28 the last intake
  * attempt was refused and never repeated. A blank key the schema refused is
- * now left out and the rest checked again. Above main's v225 (#469,
- * `ffa68479`), which it contains along with v223 (#473, `25bbbbad`), v222
- * (#470, `951dd0ba`), v220 (#467, `e9a2443e`) and v218 (#465, `0c324a9c`).
+ * now left out and the rest checked again. Above main's v226 (#474,
+ * `159a85b6`), which it contains along with v225 (#469, `ffa68479`), v223
+ * (#473, `25bbbbad`) and v222 (#470, `951dd0ba`).
  * No migration.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =

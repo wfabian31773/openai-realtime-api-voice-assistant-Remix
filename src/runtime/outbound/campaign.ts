@@ -21,6 +21,7 @@
 
 import type { AttemptCaps, CallingWindow } from "./callingWindow";
 import type { OutboundTextPolicy } from "./outreachText";
+import type { OutboundStore } from "./store";
 
 /** The `campaigns.campaign_type` this layer writes. The old core's executor
  * refuses it, so a press of "start" in the old admin screen can never dial
@@ -146,6 +147,22 @@ export interface OutboundLanePolicy {
    * ./outreachText.ts. Optional: a campaign with no page leaves it out.
    */
   textOutreach?: OutboundTextPolicy;
+  /**
+   * The campaign's own work after its calls, once a scheduler tick (v226):
+   * for the NPX outreach call, an Azul cancel held until hang-up whose call
+   * ended without running it (./heldAzulCancel.ts). Runs whether or not the
+   * campaign texts. Never throws; its counts go on the tick's result.
+   * Optional: a campaign with nothing held leaves it out.
+   */
+  afterCalls?: (ctx: AfterCallsContext) => Promise<Record<string, number>>;
+}
+
+/** What a campaign's `afterCalls` is handed by the scheduler (v226). */
+export interface AfterCallsContext {
+  slug: string;
+  store: OutboundStore;
+  now: () => Date;
+  log: (line: string) => void;
 }
 
 /** Why the dialler settled a row without ever dialling it (v115). */

@@ -36,6 +36,7 @@ import {
   NPX_OUTREACH_LIVE_CAMPAIGN_KEY,
   NPX_OUTREACH_TOOLS,
   STAFF_CALLBACK_TOOL_NAME,
+  endOutreachSession,
   resetOutreachAvailabilityForTests,
   resetOutreachSessionsForTests,
   setNpxOutreachDepsForTests,
@@ -215,12 +216,15 @@ async function bookThrough(campaign: string) {
 }
 
 describe('a demo call books in the demo NPX and touches nothing live', () => {
-  it('offers and books through the demo NPX, simulates the Azul cancel, and reports it to the demo NPX', async () => {
+  it('offers and books through the demo NPX, simulates the Azul cancel at hang-up, and reports it to the demo NPX', async () => {
     const info = vi.spyOn(console, 'info').mockImplementation(() => {});
     const r = await bookThrough(NPX_OUTREACH_DEMO_CAMPAIGN_KEY);
-    expect(r).toMatchObject({ success: true, booked: true });
+    expect(r).toMatchObject({ success: true, booked: true, azul_cancel: 'held' });
     expect(demo.availability).toHaveBeenCalledTimes(1);
     expect(demo.book).toHaveBeenCalledTimes(1);
+    // v226: the held cancel runs when the call ends, on the demo's own side too.
+    expect(demo.reportCancel).not.toHaveBeenCalled();
+    await endOutreachSession(SID);
     expect(demo.reportCancel).toHaveBeenCalledWith('booking-1', 'cancelled');
     expect(demo.availability.mock.calls[0]).toEqual([
       expect.objectContaining({ medicalGroupName: DEMO_PATIENTS[0].medicalGroup, partnerNames: [DEMO_PARTNER] }),
@@ -262,7 +266,9 @@ describe('a demo call books in the demo NPX and touches nothing live', () => {
     expect(demo.book).toHaveBeenCalledTimes(1);
     expect(live.availability).not.toHaveBeenCalled();
     expect(live.book).not.toHaveBeenCalled();
+    await endOutreachSession(SID);
     expect(cancel).not.toHaveBeenCalled();
+    expect(live.reportCancel).not.toHaveBeenCalled();
     await run(campaign, STAFF_CALLBACK_TOOL_NAME, { request: 'a person please' });
     expect(fileTicket).not.toHaveBeenCalled();
   });
@@ -273,11 +279,14 @@ describe('a demo call books in the demo NPX and touches nothing live', () => {
     attemptId = await store.startAttempt('c1', store.campaignId, 1);
     await bookThrough(NPX_OUTREACH_LIVE_CAMPAIGN_KEY);
     expect(live.book).toHaveBeenCalledTimes(1);
+    expect(cancel).not.toHaveBeenCalled();
+    await run(NPX_OUTREACH_LIVE_CAMPAIGN_KEY, STAFF_CALLBACK_TOOL_NAME, { request: 'a person please' });
+    expect(fileTicket).toHaveBeenCalledTimes(1);
+    await endOutreachSession(SID);
     expect(cancel).toHaveBeenCalledTimes(1);
     expect(demo.availability).not.toHaveBeenCalled();
     expect(demo.book).not.toHaveBeenCalled();
-    await run(NPX_OUTREACH_LIVE_CAMPAIGN_KEY, STAFF_CALLBACK_TOOL_NAME, { request: 'a person please' });
-    expect(fileTicket).toHaveBeenCalledTimes(1);
+    expect(demo.reportCancel).not.toHaveBeenCalled();
   });
 });
 
