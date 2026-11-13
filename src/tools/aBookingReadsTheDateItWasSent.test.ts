@@ -390,7 +390,7 @@ describe('every answer carries what that call received, and which_one carries th
     await twoListsRead();
     let release!: () => void;
     const gate = new Promise<void>((resolve) => (release = resolve));
-    const original = book.getMockImplementation()!;
+    const original = book.getMockImplementation() as (req: { slotId: string }) => Promise<unknown>;
     book.mockImplementationOnce(async (req: { slotId: string }) => {
       await gate;
       return original(req);
@@ -409,7 +409,7 @@ describe('every answer carries what that call received, and which_one carries th
     const otherCity = slot('feb13-0900-mv', '2041-02-13T17:00:00.000Z', 'Moreno Valley');
     const r = chosenSlot([[FEB13_0900, otherCity]], { date: '2041-02-13', time: '09:00' });
     expect(r).toMatchObject({ refusal: { error: 'which_one' } });
-    expect((r as { refusal: { choices: unknown[] } }).refusal.choices).toEqual([
+    expect((r as unknown as { refusal: { choices: unknown[] } }).refusal.choices).toEqual([
       expect.objectContaining({ date: '2041-02-13', time: '09:00', city: 'Beaumont' }),
       expect.objectContaining({ date: '2041-02-13', time: '09:00', city: 'Moreno Valley' }),
     ]);
