@@ -206,7 +206,7 @@ function refusal(lines: Array<{ field: string; line: string }>): ToolInputRefusa
  * `.optional()` field with a minimum length or a format, zod refuses that, and
  * the refusal throws away EVERY fact on the call, the good ones included.
  *
- * MEASURED, PCP runtime, 2026-11-05..12, `duration >= 30`: 92 of 1,065
+ * MEASURED, PCP runtime, 2026-11-05..12, `duration >= 30`: 92 of 1,093
  * substantive calls took 204 `record_pcp_intake` refusals. Read from the
  * timeline (`recorded` lists the non-blank keys, the refusal names the
  * refused ones): on 2026-11-12, 98 of 99 refusals named only fields the model
@@ -256,7 +256,6 @@ export function withoutRefusedBlankFields(
       .map((issue) => String(issue.path[0])),
   );
   const dropped = Object.keys(args).filter((k) => refusedKeys.has(k) && isBlank(args[k])).sort();
-  if (dropped.length === 0) return null;
   const cleaned = Object.fromEntries(Object.entries(args).filter(([k]) => !dropped.includes(k)));
   if (!schema.safeParse(cleaned).success) return null;
   return { input: JSON.stringify(cleaned), dropped };

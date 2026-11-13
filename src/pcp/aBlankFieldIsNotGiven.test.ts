@@ -108,7 +108,7 @@ describe('the corpus: the last intake attempt of 28 calls, refused for blank fie
     const out = asObject(await invoke(agent, 'record_pcp_intake', JSON.stringify(argsFor(blank, filled))));
     expect(out.refused).toBeUndefined();
     expect(out.success).not.toBe(false);
-    const state = pcpDirector.get(callId) as Record<string, unknown>;
+    const state = pcpDirector.get(callId) as unknown as Record<string, unknown>;
     for (const f of filled) expect(state[f]).toEqual(FILLED[f]);
     // A blank never lands as a value.
     for (const f of blank) expect(state[f] ?? undefined).toBeUndefined();
