@@ -654,3 +654,41 @@ describe('the undo holds the confirmation before NPX cancels the booking (Codex 
     expect(cancel).not.toHaveBeenCalled();
   });
 });
+
+describe('an undo whose record did not land on the call is written at hang-up (Codex P1 on #474)', () => {
+  const sid = CORPUS[1];
+  const settleThrowsOnce = () => {
+    const settle = store.settleContact.bind(store);
+    let thrown = false;
+    store.settleContact = async (...a) => {
+      if (!thrown) { thrown = true; throw new Error('store blip on the settle'); }
+      return settle(...a);
+    };
+  };
+
+  it('the contact is settled declined at hang-up, and the text stays unsent', async () => {
+    await bookOn(sid);
+    settleThrowsOnce();
+    const r = await undo(sid);
+    expect(r).toMatchObject({ booking_undone: true, azul_kept: true });
+    expect(store.contacts.get('c1')!).toMatchObject({ status: 'completed', notes: 'npx_booking:booking-1' });
+    await hangUp();
+    expect(store.contacts.get('c1')!).toMatchObject({ status: 'declined', notes: 'npx_booking_undone:booking-1' });
+    expect(confirmation()).toMatchObject({ booking_id: 'booking-1', state: 'skipped', reason: 'booking_undone' });
+    later(30 * 60_000);
+    expect((await textTick()).sent).toBe(0);
+    expect(cancel).not.toHaveBeenCalled();
+  });
+
+  it('a booking made after the undo keeps its own settle: the hang-up does not mark the contact declined', async () => {
+    await bookOn(sid);
+    settleThrowsOnce();
+    expect(await undo(sid)).toMatchObject({ booking_undone: true });
+    await runOn(sid, FIND_SOONER_TOOL_NAME);
+    expect(await runOn(sid, BOOK_SOONER_TOOL_NAME, { date: '2041-02-06', time: '14:30', city: 'Testville' })).toMatchObject({ booked: true });
+    await hangUp();
+    expect(store.contacts.get('c1')!).toMatchObject({ status: 'completed', notes: 'npx_booking:booking-2' });
+    expect(confirmation()).toMatchObject({ booking_id: 'booking-2', state: 'due', cancel: 'cancelled' });
+    expect(cancel).toHaveBeenCalledTimes(1);
+  });
+});

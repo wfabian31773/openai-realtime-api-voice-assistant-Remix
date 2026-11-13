@@ -322,6 +322,9 @@ interface OutreachSession {
   bookingInFlight: Promise<ToolResult> | null;
   /** NPX bookings the caller undid on this call (v224), oldest first. */
   undone: string[];
+  /** Undone bookings whose skip or settle did not land on the call; the
+   * hang-up tries them again (Codex P1 on #474). */
+  undoCleanupPending?: string[];
   /** A cancel_sooner_booking still running: a second call waits for it. */
   undoInFlight: Promise<ToolResult> | null;
   /** The HVA Hub ticket filed when they asked for a person. */
@@ -1954,6 +1957,32 @@ registerTool({
  * store cannot say so, or NPX will not cancel, the booking is left for staff
  * on an urgent ticket and the Azul appointment is still kept.
  */
+/**
+ * AN UNDONE BOOKING ON THE RECORD: its confirmation skipped (it is already
+ * held, so this only names why) and the contact settled declined with
+ * `npx_booking_undone:<id>`. True when both landed inside the store step.
+ * Run on the call, and again at hang-up for one that did not land, unless a
+ * later booking on the call has taken the contact over (Codex P1 on #474).
+ */
+async function recordUndone(s: OutreachSession, bookingId: string): Promise<boolean> {
+  return within(
+    (async () => {
+      const st = await live().store();
+      await st.skipConfirmation(s.contact.contactId, bookingId, 'booking_undone');
+      await st.settleContact(s.contact.contactId, 'declined', {
+        notes: `npx_booking_undone:${bookingId}`,
+        exceptStatus: ['do_not_call'],
+      });
+      return true;
+    })().catch((e) => {
+      console.warn(`[NPX OUTREACH] booking ${bookingId}: undone, but the contact could not be settled —`, e instanceof Error ? e.message : e);
+      return false;
+    }),
+    STORE_STEP_MS,
+    false,
+  );
+}
+
 async function undoBooking(sid: string, s: OutreachSession, currentDay: string, callbackSid: string): Promise<ToolResult> {
   const deadline = Date.now() + UNDO_SEQUENCE_BUDGET_MS;
   const b = s.booking!;
@@ -1991,20 +2020,9 @@ async function undoBooking(sid: string, s: OutreachSession, currentDay: string, 
     );
     if (cancelled.ok) {
       npxCancel = cancelled.outcome;
-      const st = await live().store();
-      await within(
-        (async () => {
-          await st.skipConfirmation(s.contact.contactId, bookingId, 'booking_undone');
-          await st.settleContact(s.contact.contactId, 'declined', {
-            notes: `npx_booking_undone:${bookingId}`,
-            exceptStatus: ['do_not_call'],
-          });
-        })().catch((e) => {
-          console.warn(`[NPX OUTREACH] booking ${bookingId}: undone, but the contact could not be settled —`, e instanceof Error ? e.message : e);
-        }),
-        STORE_STEP_MS,
-        undefined,
-      );
+      if (!(await recordUndone(s, bookingId))) {
+        (s.undoCleanupPending ??= []).push(bookingId);
+      }
       s.undone.push(bookingId);
       s.booking = null;
       s.offers = [];
@@ -2128,6 +2146,20 @@ export async function endOutreachSession(callSid: string): Promise<void> {
   try {
     if (s.bookingInFlight) await within(s.bookingInFlight.then(() => undefined, () => undefined), BOOK_TOOL_TIMEOUT_MS, undefined);
     if (s.undoInFlight) await within(s.undoInFlight.then(() => undefined, () => undefined), UNDO_TOOL_TIMEOUT_MS, undefined);
+    // An undo whose record did not land on the call is written now (Codex P1
+    // on #474). After a later booking on the call there is nothing to write:
+    // the undone booking's confirmation was held before NPX cancelled it, the
+    // later booking's queue has replaced it, and its settle is the contact's.
+    // A skip for the undone booking then would overwrite the later booking's
+    // confirmation with a placeholder.
+    for (const undoneId of s.undoCleanupPending ?? []) {
+      if (s.booking) {
+        console.info(`[NPX OUTREACH] booking ${undoneId}: undone, then a later booking on the call settled the contact; nothing to record at hang-up`);
+        continue;
+      }
+      const landed = await recordUndone(s, undoneId);
+      console.info(`[NPX OUTREACH] booking ${undoneId}: the undo ${landed ? 'is now recorded' : 'could still not be recorded'} at hang-up`);
+    }
     const b = s.booking;
     if (!b) return;
     const st = await live().store();
