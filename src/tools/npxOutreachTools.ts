@@ -1560,8 +1560,10 @@ export async function bookOutreachSlot(args: {
     // Undone while this was still running: the undo has the contact now.
     if (args.superseded?.(book.bookingId)) return false;
     // Independent of the confirmation, as on the text link (Codex P1 on #470).
+    // The confirmation needs no check of its own: an undo holds it before
+    // NPX cancels the booking, and the store refuses this booking's queue
+    // over that hold, as it refuses an older booking's over a newer one's.
     const settled = await settleBooked(st, contact.contactId, book.bookingId);
-    if (args.superseded?.(book.bookingId)) return false;
     await st.queueConfirmation(contact.contactId, confirmationRecordFor({
       contact, slot: bookedSlot, bookingId: book.bookingId, callRef, cancelled: false, awaitCancel: true, now: heldAt,
     }));

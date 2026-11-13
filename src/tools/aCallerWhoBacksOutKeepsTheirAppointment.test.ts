@@ -743,6 +743,23 @@ describe('a booking whose writes outlast the tool never lands over its undo or a
     expect(confirmation()).toMatchObject({ booking_id: 'booking-2', state: 'due', cancel: 'cancelled' });
   }, 20_000);
 
+  it('a settle already running when the undo starts lands before the undo writes: the contact ends declined', async () => {
+    const settle = store.settleContact.bind(store);
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    let first = true;
+    store.settleContact = async (...a) => {
+      if (first) { first = false; await gate; }
+      return settle(...a);
+    };
+    await bookOn(sid);
+    const undoing = undo(sid);
+    setTimeout(release, 100);
+    expect(await undoing).toMatchObject({ booking_undone: true });
+    await settled();
+    expect(store.contacts.get('c1')!).toMatchObject({ status: 'declined', notes: 'npx_booking_undone:booking-1' });
+  }, 20_000);
+
   it("a late confirmation from the undone booking never replaces the new booking's (the store's rule)", async () => {
     const queue = store.queueConfirmation.bind(store);
     let lateQueue: (() => Promise<boolean>) | null = null;
