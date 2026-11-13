@@ -24,6 +24,10 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
+// v223: syncAgentService imports the tool timeline, which opens the database
+// at import (server/db). Nothing in this file reaches the database.
+vi.mock('../../server/db', () => ({ db: {} }));
+
 const h = vi.hoisted(() => ({
   claimTicketCreation: vi.fn(),
   releaseTicketCreationLock: vi.fn(),

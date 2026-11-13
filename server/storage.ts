@@ -3,6 +3,7 @@
 
 import { withRetry } from './services/dbResilience';
 import { buildPreservedCostSet } from './preservedCostSet';
+import { timelineHoldsTicket } from './callTicketSearch';
 import {
   users,
   agents,
@@ -630,13 +631,18 @@ export class DatabaseStorage implements IStorage {
 
     if (options?.search) {
       const searchPattern = `%${options.search}%`;
+      // v223: a whole ticket number also finds the call whose SECOND ticket it
+      // is, from the tool timeline. Only for a ticket-shaped term, so every
+      // other search is the query it was (callTicketSearch.ts).
+      const secondTicket = timelineHoldsTicket(options.search);
       conditions.push(
         or(
           ilike(callLogs.from, searchPattern),
           ilike(callLogs.to, searchPattern),
           ilike(callLogs.callerName, searchPattern),
           ilike(callLogs.patientName, searchPattern),
-          ilike(callLogs.ticketNumber, searchPattern)
+          ilike(callLogs.ticketNumber, searchPattern),
+          ...(secondTicket ? [secondTicket] : []),
         )
       );
     }
