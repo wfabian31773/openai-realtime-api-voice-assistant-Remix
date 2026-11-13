@@ -1766,8 +1766,21 @@ import { callEnvironment } from "./callRecord";
  * (#469, merged `ffa68479`), which it contains along with v223 (#473,
  * `25bbbbad`) and v222 (#470, `951dd0ba`). No migration.
  */
+/**
+ * v227 — A BLANK FIELD IS A FIELD NOT GIVEN (2026-11-13; v219 while #466 was
+ * open, renumbered when #469 took v225 on `main` and #474 claimed v226; v219
+ * is retired). The model sends ""
+ * or null for a PCP intake fact it does not have, zod refuses the whole call,
+ * and every fact sent beside the blanks is dropped. 92 of 1,093 substantive
+ * PCP calls 2026-11-05..12 took 204 such refusals; on 28 the last intake
+ * attempt was refused and never repeated. A blank key the schema refused is
+ * now left out and the rest checked again. Above main's v226 (#474,
+ * `159a85b6`), which it contains along with v225 (#469, `ffa68479`), v223
+ * (#473, `25bbbbad`) and v222 (#470, `951dd0ba`).
+ * No migration.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v226-a-caller-who-backs-out-keeps-their-appointment-20261113";
+  "voice-runtime-v227-a-blank-field-is-not-given-20261113";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

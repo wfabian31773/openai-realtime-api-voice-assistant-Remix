@@ -198,6 +198,69 @@ function refusal(lines: Array<{ field: string; line: string }>): ToolInputRefusa
   };
 }
 
+/**
+ * A BLANK FIELD IS A FIELD THE MODEL DID NOT FILL (v227).
+ *
+ * The model fills every key it is shown, and for a fact it does not have it
+ * often sends `""` (or `null`) instead of leaving the key out. On an
+ * `.optional()` field with a minimum length or a format, zod refuses that, and
+ * the refusal throws away EVERY fact on the call, the good ones included.
+ *
+ * MEASURED, PCP runtime, 2026-11-05..12, `duration >= 30`: 92 of 1,093
+ * substantive calls took 204 `record_pcp_intake` refusals. Read from the
+ * timeline (`recorded` lists the non-blank keys, the refusal names the
+ * refused ones): on 2026-11-12, 98 of 99 refusals named only fields the model
+ * had sent blank (the guidance reads "too short (at least 1 characters)" and
+ * the date-of-birth format, the shapes of `""`), and one named a date of birth
+ * in the wrong form. On 28 calls the LAST intake attempt was refused this way
+ * and not repeated; 14 of those carried facts beside the blanks, and these
+ * never reached the director on any other attempt: whether the caller is the
+ * patient (10 calls), the facility type, which routes a professional's records
+ * request (9), the patient's last name (3), the caller's name and organisation
+ * (2 each), the call's purpose (1).
+ *
+ * So a key whose value is blank (null, or a string of nothing but spaces) AND
+ * which the schema refused is dropped, and the rest is checked again. When
+ * that passes, the tool runs on what the model did fill, which is exactly what
+ * a call that left the key out would have done; the field reads as not given,
+ * and nothing held earlier is overwritten by an empty value (RULE ZERO step
+ * 5). When it still fails, the refusal is the one the original arguments got,
+ * unchanged. A blank the schema ACCEPTS (a nullable field, a string with no
+ * minimum) is not touched, and a REQUIRED field sent blank is still refused.
+ * Top-level keys only: every hand-built tool here takes a flat object.
+ *
+ * Not touched: a placeholder word ("unknown", "N/A"). It is not blank, the
+ * measurement found none, and reading one as absent would be a guess.
+ */
+function isBlank(v: unknown): boolean {
+  return v === null || (typeof v === 'string' && v.trim() === '');
+}
+
+export function withoutRefusedBlankFields(
+  schema: ZodLike,
+  raw: string,
+): { input: string; dropped: string[] } | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+  const result = schema.safeParse(parsed);
+  if (result.success) return null;
+  const args = parsed as Record<string, unknown>;
+  const refusedKeys = new Set(
+    result.error.issues
+      .filter((issue) => issue.path.length === 1)
+      .map((issue) => String(issue.path[0])),
+  );
+  const dropped = Object.keys(args).filter((k) => refusedKeys.has(k) && isBlank(args[k])).sort();
+  const cleaned = Object.fromEntries(Object.entries(args).filter(([k]) => !dropped.includes(k)));
+  if (!schema.safeParse(cleaned).success) return null;
+  return { input: JSON.stringify(cleaned), dropped };
+}
+
 type Invoke = (ctx: unknown, input: string, details?: unknown) => Promise<unknown>;
 
 /**
@@ -214,9 +277,19 @@ export function refuseInvalidInputByName<T extends { invoke?: (...args: any[]) =
   const original = built.invoke as Invoke | undefined;
   const zod = schema as ZodLike | undefined;
   if (typeof original !== 'function' || typeof zod?.safeParse !== 'function') return built;
+  const toolName = (built as { name?: unknown }).name;
   const invoke: Invoke = async (ctx, input, details) => {
     const verdict = inputRefusalFor(zod, input);
     if (!verdict) return original.call(built, ctx, input, details);
+    const filled = withoutRefusedBlankFields(zod, input);
+    if (filled) {
+      // Field NAMES only — the count of these lines is the after-number.
+      console.info(
+        `[TOOL INPUT] ${typeof toolName === 'string' ? toolName : 'tool'}: ran without `
+        + `${filled.dropped.length} blank field(s) the schema refused: ${filled.dropped.join(', ')}`,
+      );
+      return original.call(built, ctx, filled.input, details);
+    }
     try {
       await onRefusal?.(verdict.args, verdict.refusal);
     } catch { /* telemetry must never change the answer */ }
