@@ -1239,6 +1239,30 @@ export function chosenSlot(
   const date = 'day' in dateRead ? dateRead.day : '';
   const minutes = 'minutes' in timeRead ? timeRead.minutes : null;
 
+  // The date and the time are each read once and must name ONE moment (Codex
+  // P1 on #476): a time sent as a date-time on another day, or a date sent
+  // as a date-time at another hour than the time beside it, is never
+  // stitched into a third moment the model did not send.
+  const dateAsDateTime = typeof input.date === 'string' ? readIsoDateTime(input.date) : null;
+  const timeAsDateTime = typeof input.time === 'string' ? readIsoDateTime(input.time) : null;
+  const conflict =
+    (timeAsDateTime && typeof timeAsDateTime === 'object' && date && timeAsDateTime.day !== date) ||
+    (dateAsDateTime && typeof dateAsDateTime === 'object' && minutes !== null && dateAsDateTime.minutes !== minutes);
+  if (conflict) {
+    return {
+      refusal: withChoices(
+        {
+          success: false,
+          error: 'date_time_disagree',
+          fix:
+            'Nothing was booked: the date and the time you sent name different days or hours. ' +
+            'Call book_sooner_exam with the date and time, exactly as written here, of the choice they confirmed.',
+        },
+        offered,
+      ),
+    };
+  }
+
   if (date && minutes !== null) {
     let atThatTime = offered.filter((x) => {
       const p = localParts(x);
@@ -1406,6 +1430,12 @@ export function readIsoDateTime(raw: string): { day: string; minutes: number } |
   if (!m) return null;
   const [, y, mo, d, hh, mi, ss, rest] = m;
   if (Number(hh) > 23 || Number(mi) > 59) return 'unreadable';
+  // A day the calendar does not have is unreadable, never rolled over:
+  // JavaScript reads 2041-02-30T17:00Z as March 2 (Codex P1 on #476).
+  const calendar = new Date(Date.UTC(Number(y), Number(mo) - 1, Number(d)));
+  if (calendar.getUTCFullYear() !== Number(y) || calendar.getUTCMonth() !== Number(mo) - 1 || calendar.getUTCDate() !== Number(d)) {
+    return 'unreadable';
+  }
   const tail = rest.trim();
   if (!tail || /^(?:pst|pdt|pt|pacific(?: time)?)$/i.test(tail)) {
     return { day: `${y}-${mo}-${d}`, minutes: Number(hh) * 60 + Number(mi) };

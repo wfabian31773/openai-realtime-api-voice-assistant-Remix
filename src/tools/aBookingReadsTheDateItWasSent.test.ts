@@ -294,6 +294,47 @@ describe('a date-time with a time zone is read on the practice clock', () => {
   });
 });
 
+// Codex P1s on #476 (head 6ae4bb4b): a day the calendar does not have was
+// rolled over (2041-02-30T17:00Z read as March 2), and a date and a time that
+// named different moments were stitched into a third.
+describe('a date-time names one real moment or books nothing', () => {
+  it('a day the calendar does not have is unreadable, never rolled over', () => {
+    expect(readIsoDateTime('2041-02-30T17:00:00Z')).toBe('unreadable');
+    expect(readIsoDateTime('2041-02-29T09:00')).toBe('unreadable');
+    expect(readIsoDateTime('2041-13-01T09:00')).toBe('unreadable');
+    expect(readIsoDateTime('2040-02-29T09:00')).toEqual({ day: '2040-02-29', minutes: 540 });
+  });
+
+  it('February 30 at 17:00Z does not book a slot on another day', async () => {
+    await twoListsRead();
+    const r = await run(BOOK_SOONER_TOOL_NAME, { date: '2041-02-30T17:00:00Z' });
+    expect(r).toMatchObject({ success: false, received_date: 'unreadable' });
+    expect(book).not.toHaveBeenCalled();
+  });
+
+  it('a time that is a date-time on another day than the date books nothing', async () => {
+    await twoListsRead();
+    const r = await run(BOOK_SOONER_TOOL_NAME, { date: '2041-02-13', time: '2041-02-05T17:00:00Z' });
+    expect(r).toMatchObject({ success: false, error: 'date_time_disagree' });
+    expect(r.choices).toEqual(expect.arrayContaining([expect.objectContaining({ date: '2041-02-13', time: '09:00' })]));
+    expect(book).not.toHaveBeenCalled();
+  });
+
+  it('a date-time beside a time at another hour books nothing', async () => {
+    await twoListsRead();
+    const r = await run(BOOK_SOONER_TOOL_NAME, { date: '2041-02-05T09:00', time: '10:00' });
+    expect(r).toMatchObject({ success: false, error: 'date_time_disagree' });
+    expect(book).not.toHaveBeenCalled();
+  });
+
+  it('a date-time and a time that agree book, whichever field carries the zone', async () => {
+    await twoListsRead();
+    const r = await run(BOOK_SOONER_TOOL_NAME, { date: '2041-02-13T17:00:00Z', time: '9:00 AM' });
+    expect(r).toMatchObject({ success: true, booked_by: 'date_time' });
+    expect(book.mock.calls[0][0]).toMatchObject({ slotId: FEB13_0900.slotId });
+  });
+});
+
 describe('nothing is invented: a date read in words lands only on a day a choice is on', () => {
   it('a month and day no choice is on is refused as not offered, with the choices written out', async () => {
     await twoListsRead();
