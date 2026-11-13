@@ -1779,8 +1779,21 @@ import { callEnvironment } from "./callRecord";
  * (#473, `25bbbbad`) and v222 (#470, `951dd0ba`).
  * No migration.
  */
+/**
+ * v228 — AN NPX TICKET BELONGS TO ITS PATIENT (2026-11-13). Two parts.
+ * (1) The post-call sync stamped `call.from` as every ticket's caller phone,
+ * and on a call we placed `from` is our own number, so every NPX outreach
+ * ticket in the HVA Hub carried the same caller phone and the ticketing app's
+ * duplicate finder listed every other NPX ticket as a duplicate (operator, on
+ * VA-84157). On an outbound call the person is `to` and our line is `from`
+ * (ticketPhonesFor), in the sync and in the old core's push. (2) The follow-up
+ * #474 took on merge: a booking's own settle that lands after the caller's
+ * undo, or after a later booking, changes nothing (`onlyWhileBookingHolds`).
+ * Above main's v227 (#466, `45c2fb67`), which it contains along with v226
+ * (#474, `159a85b6`). No migration.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v227-a-blank-field-is-not-given-20261113";
+  "voice-runtime-v228-npx-tickets-belong-to-their-patient-20261113";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can
