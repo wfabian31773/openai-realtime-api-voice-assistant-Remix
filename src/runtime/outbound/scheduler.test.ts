@@ -87,6 +87,25 @@ describe("the outbound scheduler", () => {
     expect(send).toHaveBeenCalledWith(expect.objectContaining({ to: "+15555550112", from: "+15555550100" }));
   });
 
+  it("sends a booked contact's confirmation on the same tick, after the texts (v221)", async () => {
+    const send = vi.fn(async () => ({ sid: "SM1" }));
+    const page = { isDemo: () => true, currentAppointment: () => "", openings: async () => ({ openings: [] }), book: async () => ({ ok: false as const, error: "x" }) };
+    const texting = { ...policy, textOutreach: { enableEnv: "TEST_TEXTS", perTick: 5, body: (l: string) => l, page } };
+    const { d, store } = deps({ ...ON, TEST_TEXTS: "1" }, {
+      laneSource: async () => source([{ id: "test-lane", enabled: true, agentType: "outbound", outbound: texting, factory: () => undefined }]),
+      slugs: async () => ["test-lane"],
+      sms: async () => ({ send }),
+    });
+    store.addContact({ id: "c3", phone: "+15555550113", status: "completed", customData: { outreach_text: { state: "sent" } } });
+    await store.queueConfirmation("c3", {
+      state: "due", booking_id: "b1", by: "link", when: "Mon, Feb 4 at 9:00 AM", place: "Partner One Optometry, 1 Test St, Testville",
+      phone: "555-010-0000", replaced_day: "Mar 20", cancel: "cancelled", queued_at: NOW.toISOString(), due_at: NOW.toISOString(),
+    });
+    const [tick] = await runOutboundTick(d);
+    expect(tick.confirmations).toEqual({ sent: 1, held: {} });
+    expect(send).toHaveBeenCalledWith(expect.objectContaining({ to: "+15555550113", body: expect.stringContaining("you're booked for Mon, Feb 4") }));
+  });
+
   it("texts nobody for a campaign that does not text, or without a sender", async () => {
     const { d } = deps(ON);
     const [tick] = await runOutboundTick(d);
