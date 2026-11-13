@@ -316,6 +316,35 @@ describe('a booking', () => {
   });
 });
 
+// Codex P2 on #471: the staff time kept only the newest ticket, so a contact
+// who asked for staff yesterday and again today dropped out of yesterday.
+describe('staff tickets on more than one day', () => {
+  const twoDays = {
+    contacts: [contact({ id: 'c1', agentNotes: 'staff_callback:VA-11; staff_callback:VA-12' })],
+    attempts: [
+      attempt({ contactId: 'c1', status: 'completed', callerSpoke: true, attemptedAt: YESTERDAY_9AM, staffAt: YESTERDAY_9AM, staffTicket: 'VA-11' }),
+      attempt({ contactId: 'c1', status: 'completed', callerSpoke: true, attemptedAt: TODAY_9AM, staffAt: TODAY_9AM, staffTicket: 'VA-12' }),
+    ],
+  };
+
+  it('counts the contact on each day it asked for staff', () => {
+    expect(buildTracking(twoDays, { day: 'yesterday', now: NOW }).totals.staffTickets).toBe(1);
+    expect(buildTracking(twoDays, { day: 'today', now: NOW }).totals.staffTickets).toBe(1);
+    expect(buildTracking(twoDays, { day: 'all', now: NOW }).totals.staffTickets).toBe(1);
+  });
+
+  it('a ticket on the note with no call carrying its time counts for all time and no single day', () => {
+    const noTime = { contacts: [contact({ id: 'c2', agentNotes: 'staff_callback:VA-13' })], attempts: [] };
+    expect(buildTracking(noTime, { day: 'all', now: NOW }).totals.staffTickets).toBe(1);
+    expect(buildTracking(noTime, { day: 'today', now: NOW }).totals.staffTickets).toBe(0);
+  });
+
+  it('the needs-a-person item is dated by the newest ticket', () => {
+    const item = buildTracking(twoDays, { day: 'all', now: NOW }).needsPerson[0];
+    expect(item.at).toBe(TODAY_9AM);
+  });
+});
+
 describe('opt-outs', () => {
   it('reads SMS STOP and a voice opt-out apart', () => {
     const t = buildTracking(

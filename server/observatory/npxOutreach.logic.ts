@@ -499,7 +499,8 @@ interface ContactTimes {
   textUnknown: string | null;
   verified: string | null;
   booked: string | null;
-  staff: string | null;
+  /** Every staff ticket's time: a contact can ask for staff on more than one call, on more than one day. */
+  staff: string[];
   smsStop: string | null;
   voiceOptOut: string | null;
   /** The newest placed or returned call: the time a status-only outcome
@@ -510,7 +511,10 @@ interface ContactTimes {
 function timesOf(raw: RawContact, attempts: RawAttempt[], view: ContactView): ContactTimes {
   const out = attempts.filter((a) => a.direction !== 'inbound' && a.status !== 'not_placed');
   const at = (a: RawAttempt) => iso(a.attemptedAt);
-  const staffEventAt = newest(...attempts.filter((a) => a.staffTicket).map((a) => iso(a.staffAt)));
+  const staffTimes = attempts
+    .filter((a) => a.staffTicket)
+    .map((a) => iso(a.staffAt))
+    .filter((t): t is string => Boolean(t));
   const latestCall = newest(...attempts.filter((a) => a.status !== 'not_placed').map(at));
   return {
     called: out.map(at).filter((t): t is string => Boolean(t)),
@@ -521,7 +525,8 @@ function timesOf(raw: RawContact, attempts: RawAttempt[], view: ContactView): Co
     textUnknown: raw.textState === 'unknown' ? iso(raw.textClaimedAt) ?? '' : null,
     verified: view.link.verifiedAt,
     booked: view.booking ? view.booking.at ?? '' : null,
-    staff: view.staffTickets.length > 0 ? staffEventAt ?? '' : null,
+    // A ticket on the note with no call carrying its time: happened, time not recorded.
+    staff: view.staffTickets.length === 0 ? [] : staffTimes.length > 0 ? staffTimes : [''],
     smsStop: view.optOut.sms ? view.optOut.smsAt ?? '' : null,
     voiceOptOut: view.optOut.voice ? view.optOut.voiceAt ?? latestCall ?? '' : null,
     latestCall,
@@ -548,7 +553,8 @@ function activeOn(t: ContactTimes, date: string | null): boolean {
   return (
     anyIn(t.called, date) ||
     anyIn(t.returned, date) ||
-    [t.textSent, t.textUnknown, t.verified, t.booked, t.staff, t.smsStop, t.voiceOptOut].some((x) => happened(x, date))
+    anyIn(t.staff, date) ||
+    [t.textSent, t.textUnknown, t.verified, t.booked, t.smsStop, t.voiceOptOut].some((x) => happened(x, date))
   );
 }
 
@@ -611,7 +617,7 @@ export function buildTracking(
       else if (view.booking.cancel === 'not_landed') totals.cancelNotLanded++;
       else totals.cancelNotRecorded++;
     }
-    if (happened(t.staff, date)) totals.staffTickets++;
+    if (anyIn(t.staff, date)) totals.staffTickets++;
     const voiceOut = happened(t.voiceOptOut, date);
     const smsOut = happened(t.smsStop, date);
     if (voiceOut) totals.optedOutVoice++;
@@ -637,7 +643,7 @@ export function buildTracking(
         staffTickets: view.staffTickets,
         bookingId: view.booking?.id ?? null,
         bookedBy: view.booking?.by ?? null,
-        at: newest(t.staff || null, t.booked || null),
+        at: newest(...t.staff, t.booked || null),
       });
     }
   }
