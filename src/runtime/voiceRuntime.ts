@@ -1807,7 +1807,7 @@ export function mountVoiceRuntime(
             releaseCallerSpeech(entry.callSid);
             // And an outreach call's session (v110): it holds the patient's
             // record and their offered slots, and must not outlive the call.
-            // v224: ending it runs the Azul cancel a booking on the call held
+            // v226: ending it runs the Azul cancel a booking on the call held
             // until hang-up. Not awaited; it never throws.
             void endOutreachSession(entry.callSid);
             // The call is over, whatever ended it: any office leg still

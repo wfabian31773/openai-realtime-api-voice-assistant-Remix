@@ -99,7 +99,7 @@ export type NpxBookResult =
 
 export type NpxReportResult = { ok: true } | { ok: false; error: NpxError };
 
-/** What undoing a booking on the call came to (v224, NPX migration 0194):
+/** What undoing a booking on the call came to (v226, NPX migration 0194):
  * `cancelled`, or `already_cancelled` on a repeat. */
 export type NpxCancelBookingResult =
   | { ok: true; outcome: 'cancelled' | 'already_cancelled' }
@@ -137,7 +137,7 @@ export type NpxError =
   | 'held_by_other_practice'
   | 'patient_record_retired'
   | 'not_an_outreach_booking'
-  // The booking-cancel refusals (v224, NPX migration 0194): another call made
+  // The booking-cancel refusals (v226, NPX migration 0194): another call made
   // it, it is no longer scheduled, its visit has started, or its Azul
   // appointment is already gone. Each is a person's to handle.
   | 'call_ref_mismatch'
@@ -193,7 +193,7 @@ export interface NpxOutreachClient {
   book(req: NpxBookRequest): Promise<NpxBookResult>;
   reportCancel(bookingId: string, outcome: 'cancelled' | { failed: string }): Promise<NpxReportResult>;
   /**
-   * Undo a booking this call made (v224): `POST
+   * Undo a booking this call made (v226): `POST
    * /api/exchange/outreach/bookings/:id/cancel`. Only the call that booked it
    * may (`callRef` is the CallSid it was booked with). An NPX without the
    * endpoint answers `server`, and the caller falls back to staff.

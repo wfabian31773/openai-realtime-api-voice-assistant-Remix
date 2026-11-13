@@ -186,7 +186,7 @@ export interface TickResult {
   texts?: { sent: number; held: Record<string, number>; skipped?: string };
   /** The booking confirmations sent on this tick (v222, ./bookingConfirmation.ts). */
   confirmations?: { sent: number; held: Record<string, number>; skipped?: string };
-  /** The campaign's own after-call work this tick (v224: held Azul cancels run). */
+  /** The campaign's own after-call work this tick (v226: held Azul cancels run). */
   afterCalls?: Record<string, number>;
 }
 

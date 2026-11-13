@@ -148,7 +148,7 @@ export interface OutboundLanePolicy {
    */
   textOutreach?: OutboundTextPolicy;
   /**
-   * The campaign's own work after its calls, once a scheduler tick (v224):
+   * The campaign's own work after its calls, once a scheduler tick (v226):
    * for the NPX outreach call, an Azul cancel held until hang-up whose call
    * ended without running it (./heldAzulCancel.ts). Runs whether or not the
    * campaign texts. Never throws; its counts go on the tick's result.
@@ -157,7 +157,7 @@ export interface OutboundLanePolicy {
   afterCalls?: (ctx: AfterCallsContext) => Promise<Record<string, number>>;
 }
 
-/** What a campaign's `afterCalls` is handed by the scheduler (v224). */
+/** What a campaign's `afterCalls` is handed by the scheduler (v226). */
 export interface AfterCallsContext {
   slug: string;
   store: OutboundStore;

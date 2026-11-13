@@ -162,7 +162,7 @@ async function bookOn(sid: string) {
   expect(r).toMatchObject({ success: true, booked: true });
 }
 /** The call ends: Twilio's status closes the attempt, and the runtime's
- * teardown ends the session, which runs the held Azul cancel (v224). */
+ * teardown ends the session, which runs the held Azul cancel (v226). */
 const hangUp = async () => {
   await store.finishAttempt(attemptId, { status: 'completed' } as never);
   if (onCall) await endOutreachSession(onCall);
@@ -199,7 +199,7 @@ describe('the text', () => {
     const call = confirmationRecordFor({ contact, slot: SLOT_A, bookingId: 'b', callRef: 'CA1', cancelled: true, now: NOW });
     expect(call).toMatchObject({ by: 'call', call_sid: 'CA1', state: 'due' });
     expect(new Date(call.due_at).getTime() - NOW.getTime()).toBe(CALL_CONFIRMATION_DELAY_MS);
-    // v224: a call booking whose Azul cancel is held waits for the hang-up to
+    // v226: a call booking whose Azul cancel is held waits for the hang-up to
     // release it, and goes anyway, saying our team will cancel, after 20 minutes.
     const held = confirmationRecordFor({ contact, slot: SLOT_A, bookingId: 'b', callRef: 'CA1', cancelled: true, awaitCancel: true, now: NOW });
     expect(held).toMatchObject({ state: 'awaiting_cancel', cancel: 'pending' });
@@ -231,7 +231,7 @@ describe('the Azul cancel is recorded on the booking (v222)', () => {
     return (await runOn(sid, BOOK_SOONER_TOOL_NAME, { date: '2041-02-04', time: '09:00', city: 'Testville' })) as Record<string, unknown>;
   };
 
-  it('a call booking is azul_cancel held, kept by the timeline; the hang-up writes what it came to on the contact (v224)', async () => {
+  it('a call booking is azul_cancel held, kept by the timeline; the hang-up writes what it came to on the contact (v226)', async () => {
     const r = await book('CA00000000000000000000000000000231');
     expect(r).toMatchObject({ success: true, azul_cancel: 'held' });
     expect(r).not.toHaveProperty('azul_cancel_reason');
@@ -267,7 +267,7 @@ describe('a booking on a call', () => {
     // The booking reads the clock the tick does, as one process does.
     vi.useFakeTimers({ toFake: ['Date'], now: NOW });
     await bookOn('CA00000000000000000000000000000221');
-    // v224: it waits for the held Azul cancel, which runs at hang-up.
+    // v226: it waits for the held Azul cancel, which runs at hang-up.
     expect(confirmation()).toMatchObject({ state: 'awaiting_cancel', by: 'call', booking_id: 'booking-1', cancel: 'pending' });
 
     // Still on the phone with us: it waits.
@@ -406,7 +406,7 @@ describe.each([
     const params = fileTicket.mock.calls[0][0];
     expect(params.priority).toBe('urgent');
     expect(params.description).toContain('URGENT: they asked to cancel or change the NPX booking booking-1.');
-    // v224: the cancel was held, so asking staff to change it keeps the Azul
+    // v226: the cancel was held, so asking staff to change it keeps the Azul
     // appointment: the held cancel is dropped and staff are told not to cancel it.
     expect(params.description).toContain('was kept (the call did not cancel it): do not cancel it unless they still want the move');
     expect(params.description).not.toContain('rebook it');

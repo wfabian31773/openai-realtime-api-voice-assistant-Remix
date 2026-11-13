@@ -211,7 +211,7 @@ export const npxOutreachPolicy: OutboundLanePolicy = {
   tools: NPX_OUTREACH_TOOLS,
   mode: (env) => npxOutreachMode(env),
   textOutreach: npxOutreachText,
-  // v224: the held Azul cancels a call's teardown did not run (the process
+  // v226: the held Azul cancels a call's teardown did not run (the process
   // died first), run once the call is over. The hang-up runs the rest.
   afterCalls: (ctx) => npxOutreachAfterCalls(ctx, npxOutreachPolicy.campaignKey),
 };

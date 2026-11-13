@@ -112,7 +112,7 @@ const DIALLED = () => ({
 });
 const run = (name: string, args: Record<string, unknown> = {}) => getTool(name)!.handler({ ...DIALLED(), ...args });
 const verify = () => run(CONFIRM_DOB_TOOL_NAME, { date_of_birth: 'January 2nd, 1950' });
-/** The call ends (v224): the runtime's teardown runs the held Azul cancel. */
+/** The call ends (v226): the runtime's teardown runs the held Azul cancel. */
 const hangUp = () => endOutreachSession(SID);
 
 describe('describe_upcoming_appointment (operator, 2026-10-21 and 2026-11-08: the visit and its date, then where the openings are and what works best)', () => {
@@ -247,7 +247,7 @@ describe('request_staff_callback (operator, 2026-10-21: a request for a person i
     it('says the new appointment stands and the old one will be cancelled once we hang up — never that it "stays exactly as it is"', async () => {
       await booked();
       const r = (await run(STAFF_CALLBACK_TOOL_NAME, { request: 'a person please' })) as Record<string, unknown>;
-      // v224: nothing is cancelled until the call ends.
+      // v226: nothing is cancelled until the call ends.
       expect(r.say).toBe("I've asked our scheduling team to call you back. Your new appointment stays booked, and your old one with us will be cancelled once we hang up.");
       expect(JSON.stringify(r)).not.toContain('stays exactly as it is');
       expect(cancel).not.toHaveBeenCalled();
@@ -379,7 +379,7 @@ describe('book_sooner_exam', () => {
     await run(FIND_SOONER_TOOL_NAME);
   }
 
-  it('books the chosen slot with the record\'s identity, settles the contact, and holds the Azul cancel until the call ends (v224)', async () => {
+  it('books the chosen slot with the record\'s identity, settles the contact, and holds the Azul cancel until the call ends (v226)', async () => {
     await offered();
     const r = (await run(BOOK_SOONER_TOOL_NAME, { option: '1' })) as Record<string, unknown>;
     expect(npx.book).toHaveBeenCalledWith(expect.objectContaining({

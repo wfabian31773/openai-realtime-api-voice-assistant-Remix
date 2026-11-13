@@ -106,7 +106,7 @@ describe("the outbound scheduler", () => {
     expect(send).toHaveBeenCalledWith(expect.objectContaining({ to: "+15555550113", body: expect.stringContaining("you're booked for Mon, Feb 4") }));
   });
 
-  it("runs a campaign's after-call work on the same tick, with its store and clock, texts off or on (v224)", async () => {
+  it("runs a campaign's after-call work on the same tick, with its store and clock, texts off or on (v226)", async () => {
     const afterCalls = vi.fn(async () => ({ held_cancels_run: 2 }));
     const withAfter = { ...policy, afterCalls };
     const { d, store } = deps(ON, {

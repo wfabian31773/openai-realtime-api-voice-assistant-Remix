@@ -381,7 +381,7 @@ describe("the booking confirmation (v222)", () => {
   it("claims and lists only a due confirmation, or a retry whose time has come", () => {
     for (const name of ["claimConfirmation", "confirmationsDue"]) {
       const m = method(name);
-      // v224: awaiting_cancel goes at its due_at too, if the hang-up never released it.
+      // v226: awaiting_cancel goes at its due_at too, if the hang-up never released it.
       expect(m).toContain("->> 'state' IN ('due', 'retry', 'awaiting_cancel')");
       expect(m).toContain("->> 'retry_after',");
       expect(m).toContain("->> 'due_at')::timestamptz");
@@ -418,7 +418,7 @@ describe("the booking confirmation (v222)", () => {
     }
   });
 
-  it("releases this booking's confirmation with the real cancel, never one already claimed or sent (v224)", () => {
+  it("releases this booking's confirmation with the real cancel, never one already claimed or sent (v226)", () => {
     const m = method("releaseConfirmation");
     expect(m).toContain("->> 'booking_id' = ${bookingId}::text");
     expect(m).toContain("->> 'state' NOT IN ('claimed', 'sent', 'unknown')");
@@ -439,7 +439,7 @@ describe("the booking confirmation (v222)", () => {
     for (const name of ["claimConfirmation", "confirmationsDue"]) expect(method(name)).not.toContain("'released'");
   });
 
-  it("skips an undone booking's confirmation before it is sent, and writes a placeholder when none is queued yet (v224)", () => {
+  it("skips an undone booking's confirmation before it is sent, and writes a placeholder when none is queued yet (v226)", () => {
     const m = method("skipConfirmation");
     expect(m).toContain("->> 'booking_id' = ${bookingId}::text");
     expect(m).toContain("->> 'state' IN ('due', 'retry', 'awaiting_cancel', 'held', 'claimed')");
@@ -451,7 +451,7 @@ describe("the booking confirmation (v222)", () => {
   });
 });
 
-describe("the held Azul cancel (v224)", () => {
+describe("the held Azul cancel (v226)", () => {
   it("is written only where no cancel is still held or running", () => {
     const m = method("queueHeldCancel");
     expect(m).toContain("-> ${HELD_CANCEL_FIELD}::text IS NULL");

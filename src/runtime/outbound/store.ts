@@ -73,7 +73,7 @@ export type ContactStatus =
 export const OUTREACH_TEXT_KEY = "outreach_text";
 /** Inside OUTREACH_TEXT_KEY: the booking confirmation text (v222, ./bookingConfirmation.ts). */
 export const CONFIRMATION_FIELD = "confirmation";
-/** Inside OUTREACH_TEXT_KEY: a call booking's Azul cancel, held until the call ends (v224, ./heldAzulCancel.ts). */
+/** Inside OUTREACH_TEXT_KEY: a call booking's Azul cancel, held until the call ends (v226, ./heldAzulCancel.ts). */
 export const HELD_CANCEL_FIELD = "held_cancel";
 
 /**
@@ -312,20 +312,20 @@ export interface OutboundStore {
    * while it is still waiting to go. True when it was held. */
   holdConfirmation(contactId: string, bookingId: string, reason: string): Promise<boolean>;
   /**
-   * The held Azul cancel has run (v224): write what it came to on this
+   * The held Azul cancel has run (v226): write what it came to on this
    * booking's confirmation, and let one that was waiting for it go now. A
    * confirmation already claimed, sent or of unknown fate is left alone. With
    * none queued for this booking yet, a `released` placeholder the late queue
    * takes over as due. True when it was written.
    */
   releaseConfirmation(contactId: string, bookingId: string, cancel: "cancelled" | "pending", now: Date): Promise<boolean>;
-  /** The caller undid this booking on the call (v224): its confirmation is
+  /** The caller undid this booking on the call (v226): its confirmation is
    * never sent. One not yet sent or of unknown fate (a claimed one included,
    * so a put-back cannot revive it); with none queued for this booking yet, a
    * skipped placeholder the late queue cannot replace. True when written. */
   skipConfirmation(contactId: string, bookingId: string, reason: string): Promise<boolean>;
 
-  // ── The held Azul cancel (v224, ./heldAzulCancel.ts) ──
+  // ── The held Azul cancel (v226, ./heldAzulCancel.ts) ──
   /** Hold a call booking's Azul cancel on the contact, inside outreach_text:
    * written when there is none, or only another booking's that has finished
    * (never over a cancel still held or running). True when it was written. */

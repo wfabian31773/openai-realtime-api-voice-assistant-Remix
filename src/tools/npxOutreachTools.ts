@@ -24,11 +24,11 @@
  *                              the call starts) and searched in memory, so
  *                              "what about next week?" answers at once.
  *   book_sooner_exam           books the one they chose in NPX and HOLDS the
- *                              Azul cancel until the call ends (v224: the
+ *                              Azul cancel until the call ends (v226: the
  *                              hang-up runs it, then reports it to NPX), and
  *                              says only what happened.
  *   cancel_sooner_booking      the caller changed their mind before hanging
- *                              up (v224): the held Azul cancel is dropped, so
+ *                              up (v226): the held Azul cancel is dropped, so
  *                              their Azul appointment is kept, and the NPX
  *                              booking is cancelled; staff are asked when NPX
  *                              cannot cancel it.
@@ -268,10 +268,10 @@ function ticketFor(s: OutreachSession): Deps['fileTicket'] {
 /**
  * WHAT HAPPENED TO THE AZUL APPOINTMENT A BOOKING REPLACES.
  *  - done: the cancel ran when it was booked (the text link) or at hang-up.
- *  - held (v224): a call booking; nothing cancelled yet, the hang-up runs it.
+ *  - held (v226): a call booking; nothing cancelled yet, the hang-up runs it.
  *    `stored` says whether the held record reached the store: `yes`, `no` (the
  *    write failed) or `unknown` (it did not answer in time).
- *  - dropped (v224): the caller kept their Azul appointment; nothing will be
+ *  - dropped (v226): the caller kept their Azul appointment; nothing will be
  *    cancelled. `storeDropPending` when the store could not be told yet.
  */
 export type AzulCancelState =
@@ -324,7 +324,7 @@ interface OutreachSession {
   /** A book_sooner_exam still running: a second call waits for it rather
    * than booking twice. */
   bookingInFlight: Promise<ToolResult> | null;
-  /** NPX bookings the caller undid on this call (v224), oldest first. */
+  /** NPX bookings the caller undid on this call (v226), oldest first. */
   undone: string[];
   /** Undone bookings whose skip or settle did not land on the call; the
    * hang-up tries them again (Codex P1 on #474). */
@@ -1118,7 +1118,7 @@ async function within<T>(p: Promise<T>, ms: number, fallback: T): Promise<T> {
 
 /**
  * The booking said back once. On a call the Azul cancel is held until the
- * call ends (v224), so the caller is told it will be cancelled once we hang
+ * call ends (v226), so the caller is told it will be cancelled once we hang
  * up, never that it already has been.
  */
 export function confirmation(slot: NpxSlot, cancel: AzulCancelResult | 'held', currentDay: string): string {
@@ -1356,7 +1356,7 @@ async function bookChosen(
     booked_by: chosen.by,
     ...(chosen.optionDisagreed ? { option_disagreed: true } : {}),
     // v222: what happened to the Azul appointment, as a fixed code the
-    // timeline keeps (Wayne, 2026-11-13: record it). v224: on a call it is
+    // timeline keeps (Wayne, 2026-11-13: record it). v226: on a call it is
     // `held`, because nothing is cancelled until the call ends.
     ...azulCancelOutcomeFor(booked.azul),
     say: confirmation(booked.slot, spokenCancelOf(booked.azul), currentDay),
@@ -1376,7 +1376,7 @@ export function azulCancelOutcome(cancel: AzulCancelResult): { azul_cancel: 'can
   return cancel.cancelled ? { azul_cancel: 'cancelled' } : { azul_cancel: 'not_cancelled', azul_cancel_reason: cancel.reason };
 }
 
-/** v224: a call booking's Azul cancel is `held` until the call ends; what it
+/** v226: a call booking's Azul cancel is `held` until the call ends; what it
  * came to is written on the contact at hang-up (held_cancel, confirmation). */
 export function azulCancelOutcomeFor(azul: AzulCancelState): { azul_cancel: 'cancelled' | 'not_cancelled' | 'held'; azul_cancel_reason?: string } {
   return azul.kind === 'done' ? azulCancelOutcome(azul.result) : { azul_cancel: 'held' };
@@ -1400,7 +1400,7 @@ export function confirmationRecordFor(args: {
   bookingId: string;
   callRef: string;
   cancelled: boolean;
-  /** v224: a call booking's Azul cancel is held until the call ends, so its
+  /** v226: a call booking's Azul cancel is held until the call ends, so its
    * confirmation waits for the hang-up to release it with the real result. */
   awaitCancel?: boolean;
   now?: Date;
@@ -1440,7 +1440,7 @@ export type OutreachBooking =
  * `npx_booking:<id>`. Shared by book_sooner_exam (the call) and the text's
  * booking page, so the sequence, the deadline and the demo swaps are one copy.
  *
- * THE AZUL CANCEL (v224, Wayne 2026-11-13: "Hold the cancel until hang-up").
+ * THE AZUL CANCEL (v226, Wayne 2026-11-13: "Hold the cancel until hang-up").
  * On the text link it runs here and is reported to NPX, as before. On a call
  * it is HELD: nothing is cancelled now; the held record is written on the
  * contact (heldAzulCancel.ts), the confirmation text waits for it, and the
@@ -1534,7 +1534,7 @@ export async function bookOutreachSlot(args: {
     return { ok: true, bookingId: book.bookingId, slot: bookedSlot, azul: { kind: 'done', result: cancel } };
   }
 
-  // A call (v224): hold the cancel until the call ends. The record is written
+  // A call (v226): hold the cancel until the call ends. The record is written
   // first, so the fallback knows of it before anything else can go wrong.
   const heldAt = new Date();
   const record: HeldAzulCancelRecord = {
@@ -1682,7 +1682,7 @@ export function bookingChangeStateLine(booking: NonNullable<OutreachSession['boo
 }
 
 /** The ticket line that tells staff what to do when the caller asked to change
- * the booking made on the call (v222, v224). */
+ * the booking made on the call (v222, v226). */
 export function bookingChangeLine(contact: OutboundContact, booking: NonNullable<OutreachSession['booking']>): string {
   const day = spokenDay(field(contact, 'appointment_date'));
   const asked = `URGENT: they asked to cancel or change the NPX booking ${booking.bookingId}.`;
@@ -1848,7 +1848,7 @@ registerTool({
     // request was already filed: fileStaffCallback files that one beside the
     // first (Codex P2, #470).
     if (s.staffTicket && !(changesBooking && !s.bookingChangeAsked)) return already(s.staffTicket);
-    // v224: and, before the call ends, their Azul appointment is kept: the
+    // v226: and, before the call ends, their Azul appointment is kept: the
     // held cancel is dropped, so staff are not asked to rebook what the
     // caller wanted back.
     if (changesBooking && s.booking?.azul.kind === 'held') {
@@ -1876,7 +1876,7 @@ registerTool({
   },
 });
 
-// ── cancel_sooner_booking (v224) ────────────────────────────────────────────
+// ── cancel_sooner_booking (v226) ────────────────────────────────────────────
 
 /** The undo's whole sequence answers inside this, under its tool timeout,
  * which sits under the bridge's tool-dispatch watchdog (45 s). */
@@ -1886,7 +1886,7 @@ export const UNDO_TOOL_TIMEOUT_MS = 36_000;
 const STORE_STEP_MS = 3_000;
 
 /**
- * KEEP THE AZUL APPOINTMENT (v224). The caller changed their mind before
+ * KEEP THE AZUL APPOINTMENT (v226). The caller changed their mind before
  * hanging up: the held cancel is dropped in the store, in one statement, so
  * neither the hang-up nor the fallback can run it. Returns what the store
  * said: `dropped` (provable), `not_dropped` (the cancel had already been
@@ -1967,7 +1967,7 @@ registerTool({
 });
 
 /**
- * UNDO THE BOOKING (v224). The order is the safety property: the NPX
+ * UNDO THE BOOKING (v226). The order is the safety property: the NPX
  * booking is cancelled only once the store says the held Azul cancel is
  * dropped, so a patient can never be left with neither appointment. When the
  * store cannot say so, or NPX will not cancel, the booking is left for staff
@@ -2097,7 +2097,7 @@ async function undoBooking(sid: string, s: OutreachSession, currentDay: string, 
   };
 }
 
-// ── The call ends: run the held Azul cancel (v224) ─────────────────────────
+// ── The call ends: run the held Azul cancel (v226) ─────────────────────────
 
 /**
  * RUN ONE HELD AZUL CANCEL: the cancel, the report to NPX, the record, then
@@ -2153,7 +2153,7 @@ export async function runHeldAzulCancel(
 }
 
 /**
- * THE CALL HAS ENDED (v224). Called from the runtime's teardown for every
+ * THE CALL HAS ENDED (v226). Called from the runtime's teardown for every
  * call: drops the session, and on an outreach call whose booking holds its
  * Azul cancel, runs it now. One claim in the store decides who runs it, so
  * the fallback never runs it twice; when the held record never reached the
@@ -2216,7 +2216,7 @@ export async function endOutreachSession(callSid: string): Promise<void> {
   }
 }
 
-/** The NPX lane's after-calls step (v224): the held Azul cancels a call's
+/** The NPX lane's after-calls step (v226): the held Azul cancels a call's
  * teardown did not run, once the call is over. The scheduler calls it each
  * tick (OutboundLanePolicy.afterCalls). */
 export async function npxOutreachAfterCalls(ctx: AfterCallsContext, campaignKey: string): Promise<Record<string, number>> {

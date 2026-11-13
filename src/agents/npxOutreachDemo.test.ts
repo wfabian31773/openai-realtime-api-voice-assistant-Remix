@@ -222,7 +222,7 @@ describe('a demo call books in the demo NPX and touches nothing live', () => {
     expect(r).toMatchObject({ success: true, booked: true, azul_cancel: 'held' });
     expect(demo.availability).toHaveBeenCalledTimes(1);
     expect(demo.book).toHaveBeenCalledTimes(1);
-    // v224: the held cancel runs when the call ends, on the demo's own side too.
+    // v226: the held cancel runs when the call ends, on the demo's own side too.
     expect(demo.reportCancel).not.toHaveBeenCalled();
     await endOutreachSession(SID);
     expect(demo.reportCancel).toHaveBeenCalledWith('booking-1', 'cancelled');

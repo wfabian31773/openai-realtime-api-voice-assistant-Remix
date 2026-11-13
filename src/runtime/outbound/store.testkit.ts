@@ -567,7 +567,7 @@ export class FakeOutboundStore implements OutboundStore {
     return true;
   }
 
-  // ── The held Azul cancel (v224) ──
+  // ── The held Azul cancel (v226) ──
   heldCancelOf(c: ContactRow): HeldAzulCancelRecord | null {
     const t = c.customData[OUTREACH_TEXT_KEY];
     if (!t || typeof t !== "object") return null;
