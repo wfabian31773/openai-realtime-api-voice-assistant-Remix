@@ -1563,7 +1563,12 @@ export async function bookOutreachSlot(args: {
     // The confirmation needs no check of its own: an undo holds it before
     // NPX cancels the booking, and the store refuses this booking's queue
     // over that hold, as it refuses an older booking's over a newer one's.
-    const settled = await settleBooked(st, contact.contactId, book.bookingId);
+    // v228: and the store lands it only while this booking still owns the
+    // contact, so a settle that started before the undo, or before a later
+    // booking, and lands after it changes nothing.
+    const settled = await settleBooked(st, contact.contactId, book.bookingId, {
+      bookingId: book.bookingId, heldAt: record.held_at,
+    });
     await st.queueConfirmation(contact.contactId, confirmationRecordFor({
       contact, slot: bookedSlot, bookingId: book.bookingId, callRef, cancelled: false, awaitCancel: true, now: heldAt,
     }));
@@ -1584,12 +1589,22 @@ export async function bookOutreachSlot(args: {
  * throws is logged and answers false, never thrown, so the confirmation that
  * follows it is queued whatever the settle did (Codex P1 on #470).
  */
-async function settleBooked(st: OutboundStore, contactId: string, bookingId: string): Promise<boolean> {
+async function settleBooked(
+  st: OutboundStore,
+  contactId: string,
+  bookingId: string,
+  holds?: { bookingId: string; heldAt: string },
+): Promise<boolean> {
   try {
-    await st.settleContact(contactId, 'completed', {
+    const landed = await st.settleContact(contactId, 'completed', {
       notes: `npx_booking:${bookingId}`,
       exceptStatus: ['do_not_call'],
+      ...(holds ? { onlyWhileBookingHolds: holds } : {}),
     });
+    if (holds && !landed) {
+      console.info(`[NPX OUTREACH] booking ${bookingId}: not settled — the caller undid it, or a later booking has the contact`);
+      return false;
+    }
     return true;
   } catch (e) {
     console.warn(`[NPX OUTREACH] booking ${bookingId}: could not settle the contact; the confirmation is still queued —`, e instanceof Error ? e.message : e);

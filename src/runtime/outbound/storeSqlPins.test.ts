@@ -48,6 +48,20 @@ describe("the claim is the only door to a dial", () => {
     expect(settle).toContain("LIMIT 1))");
   });
 
+  it("lets a booking's settle land only while that booking still owns the contact (v228)", () => {
+    const settle = method("settleContact");
+    const guard = settle.slice(settle.indexOf("-- v228"), settle.indexOf("RETURNING id"));
+    expect(guard).toContain("${opts.onlyWhileBookingHolds?.bookingId ?? null}::text IS NULL");
+    // No held cancel at all: nothing has taken the contact over.
+    expect(guard).toContain("-> ${HELD_CANCEL_FIELD}::text IS NULL");
+    // This booking's own, unless the undo dropped it.
+    expect(guard).toContain("= ${opts.onlyWhileBookingHolds?.bookingId ?? null}::text");
+    expect(guard).toContain("->> 'state'\n                        IS DISTINCT FROM 'dropped')");
+    // Another booking's only when it is older; a newer booking keeps the contact.
+    expect(guard).toContain("IS DISTINCT FROM ${opts.onlyWhileBookingHolds?.bookingId ?? null}::text");
+    expect(guard).toContain("->> 'held_at', '')\n                        < ${opts.onlyWhileBookingHolds?.heldAt ?? null}::text))");
+  });
+
   it("reaps only rows stuck in 'calling' since before the cut-off", () => {
     const reap = method("reapStaleClaims");
     expect(reap).toContain("outreach_status = 'calling'");

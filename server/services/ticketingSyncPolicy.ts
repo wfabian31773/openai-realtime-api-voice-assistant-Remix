@@ -23,3 +23,28 @@ export function classifyNoTicketOutcome(
   if (!callEndedAt) return "terminal";
   return now - callEndedAt.getTime() > NO_TICKET_GRACE_MS ? "terminal" : "grace";
 }
+
+/**
+ * The two phones the post-call sync stamps on a ticket (v228).
+ *
+ * `callerPhone` is the other party, the person the call was with, and
+ * `dialedNumber` is our line. On an inbound call that is `from` and `to`, as
+ * Twilio writes them. On a call we placed (an outbound campaign, the SI
+ * Assistant, the operator line) Twilio writes our number as `from` and the
+ * person's as `to`, so the sync stamped OUR number as every ticket's caller
+ * phone. The ticketing app's duplicate finder matches on caller phone, so
+ * every NPX outreach ticket in the HVA Hub listed every other one as a
+ * duplicate (operator, 2026-11-13, on VA-84157). On an outbound call the two
+ * are read the other way round.
+ */
+export function ticketPhonesFor(call: {
+  direction?: string | null;
+  from?: string | null;
+  to?: string | null;
+}): { callerPhone: string | undefined; dialedNumber: string | undefined } {
+  const outbound = call.direction === "outbound";
+  return {
+    callerPhone: (outbound ? call.to : call.from) || undefined,
+    dialedNumber: (outbound ? call.from : call.to) || undefined,
+  };
+}
