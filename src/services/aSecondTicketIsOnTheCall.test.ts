@@ -309,7 +309,7 @@ describe('a second ticket held in memory is not reported until it is on the row 
     expect(how).toBe('appended');
     expect(waits).toEqual([5, 7]);
     expect(getAzulTimeline(callId)?.filter((e) => e.tool === SECOND_TICKET_TOOL)).toHaveLength(1);
-    expect(lastTimelineWritten()?.events.filter((e: { tool: string }) => e.tool === SECOND_TICKET_TOOL)).toHaveLength(1);
+    expect(lastTimelineWritten()?.events.filter((e) => e.tool === SECOND_TICKET_TOOL)).toHaveLength(1);
     // Now on the row, a repeat is already there and writes nothing more.
     const before = h.sets.length;
     expect(await recordSecondTicketOnTheCall({ callSid, ticketNumber: 'VA-79093', kind: 'urgent-ringout' })).toBe('already_there');
