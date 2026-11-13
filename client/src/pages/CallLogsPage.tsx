@@ -17,6 +17,7 @@ import {
 } from '@/components/ui/table'
 import { Phone, Search, Eye, X, ChevronLeft, ChevronRight, Ticket, UserCheck, ArrowDownLeft, ArrowUpRight, FileText, Mic } from 'lucide-react'
 import type { CallLog } from '@/types'
+import { ticketNumbersOf } from '@/lib/callTickets'
 
 interface CallLogsResponse {
   data: CallLog[]
@@ -380,10 +381,17 @@ export function CallLogsPage() {
                           </div>
                         </TableCell>
                         <TableCell>
-                          {(log as any).ticketNumber ? (
-                            <div className="flex items-center gap-1 text-sm">
-                              <Ticket className="h-3 w-3 text-purple-500" />
-                              <span className="text-purple-500">{(log as any).ticketNumber}</span>
+                          {/* Every ticket the call created (v223): one column on the row
+                              held one number, and a call with a second ticket showed only
+                              the first. */}
+                          {ticketNumbersOf(log).length > 0 ? (
+                            <div className="flex flex-col gap-0.5">
+                              {ticketNumbersOf(log).map((t) => (
+                                <div key={t} className="flex items-center gap-1 text-sm">
+                                  <Ticket className="h-3 w-3 text-purple-500" />
+                                  <span className="text-purple-500">{t}</span>
+                                </div>
+                              ))}
                             </div>
                           ) : (
                             <span className="text-muted-foreground">-</span>

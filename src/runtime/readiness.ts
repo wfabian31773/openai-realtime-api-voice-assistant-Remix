@@ -1693,8 +1693,22 @@ import { callEnvironment } from "./callRecord";
  * (#461, `84246a37`), v214 (#460, `af248eb3`) and v213 (#459, `9221d1ea`).
  * No migration.
  */
+/**
+ * v223 — EVERY TICKET A CALL CREATED IS ON THE CALL LOG (2026-11-13). Operator:
+ * "ensure any call on the observatory log has its corresponding ticket number
+ * if one was created." `call_logs.ticket_number` holds one number; 15 calls in
+ * the 14 days to 2026-11-13 had two tickets and the log showed one. The
+ * call-log API now answers `ticketNumbers` (the row's own first, then every
+ * ticket number a filing reported on the tool timeline, server/
+ * callTicketNumbers.ts); the call log, the urgent list and the call page show
+ * them all; a ticket-number search also finds a call by its second ticket; and
+ * a ticket filed with `secondTicketOnThisCall` (the after-hours urgent records,
+ * 3 of the 15) puts a `second_ticket_filed` event on the call's timeline,
+ * appended, never replacing it. Above main's v218 (#465, `0c324a9c`), which it
+ * contains along with v217 (#463, `4464c80a`). No migration.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v218-a-booking-books-the-confirmed-slot-20261112";
+  "voice-runtime-v223-every-ticket-on-the-call-log-20261113";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can
