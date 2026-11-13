@@ -423,6 +423,131 @@ describe.each([
   });
 });
 
+// Codex P2 on #470: a call that booked, filed a staff ticket for something
+// else, then asked to undo the booking. The undo needs its own urgent ticket
+// and a held text; the one-ticket-per-call return used to answer it first.
+describe('a booking change asked after another staff ticket on the call', () => {
+  const sid = 'CA00000000000000000000000000000229';
+  it('files its own urgent ticket naming the first, holds the text, and lists both tickets', async () => {
+    await bookOn(sid);
+    await runOn(sid, STAFF_CALLBACK_TOOL_NAME, { request: 'Does my insurance cover it', changes_booking: false });
+    expect(fileTicket.mock.calls[0][0]).toMatchObject({ priority: 'medium', idempotencyKey: `${sid}-outreach-staff` });
+    fileTicket.mockResolvedValueOnce({ success: true, ticketNumber: 'VA-90002' });
+    const r = (await runOn(sid, STAFF_CALLBACK_TOOL_NAME, { request: 'Cancel the new appointment', changes_booking: true })) as Record<string, unknown>;
+    expect(fileTicket).toHaveBeenCalledTimes(2);
+    const second = fileTicket.mock.calls[1][0];
+    expect(second.priority).toBe('urgent');
+    expect(second.idempotencyKey).toBe(`${sid}-outreach-staff-change`);
+    expect(second.description).toContain('URGENT: they asked to cancel or change the NPX booking booking-1.');
+    expect(second.description).toContain('This adds to VA-90001, filed earlier on this call.');
+    expect(r.ticket_number).toBe('VA-90002');
+    expect(String(r.say)).toContain("I've asked our scheduling team to call you back to change that.");
+    expect(confirmation()).toMatchObject({ state: 'held', reason: 'staff_change' });
+    expect(store.contacts.get('c1')!.notes).toBe('npx_booking:booking-1; staff_callback:VA-90001; staff_callback:VA-90002');
+    // A third ask, change or not, files nothing more.
+    await runOn(sid, STAFF_CALLBACK_TOOL_NAME, { request: 'Cancel it please', changes_booking: true });
+    await runOn(sid, STAFF_CALLBACK_TOOL_NAME, { request: 'One more question', changes_booking: false });
+    expect(fileTicket).toHaveBeenCalledTimes(2);
+    await hangUp();
+    expect((await tick()).sent).toBe(0);
+    expect(sent).toEqual([]);
+  });
+
+  it('a second request that does not change the booking still files nothing', async () => {
+    await bookOn(sid);
+    await runOn(sid, STAFF_CALLBACK_TOOL_NAME, { request: 'Does my insurance cover it', changes_booking: false });
+    const r = (await runOn(sid, STAFF_CALLBACK_TOOL_NAME, { request: 'And the parking', changes_booking: false })) as Record<string, unknown>;
+    expect(fileTicket).toHaveBeenCalledTimes(1);
+    expect(r.ticket_number).toBe('VA-90001');
+    await hangUp();
+    expect((await tick()).sent).toBe(1);
+  });
+});
+
+// Codex P2 on #470 (head b3337a4): the scheduler claims a confirmation, then
+// asks whether the call is open. A staff change that lands in that gap found
+// the row `claimed`, could not hold it, and the scheduler's release put it
+// back to `retry`, so the text went out after the call.
+describe('a booking change that lands while the scheduler holds the claim', () => {
+  const sid = 'CA00000000000000000000000000000230';
+  it('is held, and the release does not undo it', async () => {
+    await bookOn(sid);
+    const open = store.callOpenOnPhone.bind(store);
+    let changed = false;
+    store.callOpenOnPhone = async (contactId, since) => {
+      if (!changed) {
+        changed = true;
+        expect(confirmation()).toMatchObject({ state: 'claimed' });
+        await runOn(sid, STAFF_CALLBACK_TOOL_NAME, { request: 'Cancel the new appointment', changes_booking: true });
+      }
+      return open(contactId, since);
+    };
+    expect((await tick()).sent).toBe(0);
+    expect(changed).toBe(true);
+    expect(confirmation()).toMatchObject({ state: 'held', reason: 'staff_change' });
+    await hangUp();
+    expect((await tick({ now: () => new Date(NOW.getTime() + 10 * 60_000) })).sent).toBe(0);
+    expect(sent).toEqual([]);
+  });
+
+  it('a send is still recorded as sent', async () => {
+    await bookOn(sid);
+    await hangUp();
+    const claimed = await store.claimConfirmation('c1', NOW);
+    expect(claimed).not.toBeNull();
+    await store.holdConfirmation('c1', 'booking-1', 'staff_change');
+    await store.patchConfirmation('c1', { state: 'sent', sent_at: NOW.toISOString(), message_sid: 'SM1' });
+    expect(confirmation()).toMatchObject({ state: 'sent', message_sid: 'SM1' });
+    await store.patchConfirmation('c1', { state: 'retry', reason: 'call_open' });
+    expect(confirmation()).toMatchObject({ state: 'sent' });
+  });
+});
+
+// Codex P2 on #470 (head 58128f6): the queue runs inside the booking tool's
+// settle budget, so a slow store can answer the caller before the
+// confirmation exists. A booking change then found nothing to hold, and the
+// queue, landing later, wrote the confirmation as due.
+describe('a booking change that lands before its confirmation is queued', () => {
+  const sid = 'CA00000000000000000000000000000231';
+  it('is held, and the late queue does not undo it', async () => {
+    const queue = store.queueConfirmation.bind(store);
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    let queued: Promise<boolean> | undefined;
+    store.queueConfirmation = (contactId, record) => {
+      queued = gate.then(() => queue(contactId, record));
+      return queued;
+    };
+    await bookOn(sid);
+    expect(confirmation()).toBeNull();
+    await runOn(sid, STAFF_CALLBACK_TOOL_NAME, { request: 'Cancel the new appointment', changes_booking: true });
+    expect(confirmation()).toMatchObject({ state: 'held', reason: 'staff_change', booking_id: 'booking-1' });
+    release();
+    expect(await queued).toBe(false);
+    expect(confirmation()).toMatchObject({ state: 'held', booking_id: 'booking-1' });
+    await hangUp();
+    expect((await tick({ now: () => new Date(NOW.getTime() + 10 * 60_000) })).sent).toBe(0);
+    expect(sent).toEqual([]);
+  }, 10_000);
+});
+
+// Codex P2 on #470 (head 58128f6): a check before the send that throws used
+// to leave the confirmation `claimed`, which no later tick selects.
+describe('a check before the send that fails', () => {
+  it('puts the claim back to retry, and a later tick sends it', async () => {
+    await bookOn('CA00000000000000000000000000000232');
+    await hangUp();
+    const dnc = store.isDoNotContact.bind(store);
+    store.isDoNotContact = async () => { throw new Error('connection reset'); };
+    const first = await tick({ now: () => new Date(NOW.getTime() + 2 * 60_000) });
+    expect(first).toMatchObject({ sent: 0, held: { check_failed: 1 } });
+    expect(confirmation()).toMatchObject({ state: 'retry', reason: 'check_failed', tries: 1 });
+    store.isDoNotContact = dnc;
+    expect((await tick({ now: () => new Date(NOW.getTime() + 60 * 60_000) })).sent).toBe(1);
+    expect(sent).toHaveLength(1);
+  });
+});
+
 describe('changes_booking with nothing booked', () => {
   it('is an ordinary staff callback', async () => {
     await runOn('CA00000000000000000000000000000227', STAFF_CALLBACK_TOOL_NAME, { request: 'Cancel my appointment', changes_booking: true });

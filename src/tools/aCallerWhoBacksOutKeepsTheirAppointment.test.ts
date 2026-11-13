@@ -509,3 +509,57 @@ describe('the text link is unchanged', () => {
     expect(confirmation()).toMatchObject({ by: 'link', state: 'due', cancel: 'cancelled' });
   });
 });
+
+describe('a settle that throws does not cost the booking its confirmation (Codex P1 on #470)', () => {
+  const settleThrows = () => {
+    store.settleContact = async () => { throw new Error('store blip on the settle'); };
+  };
+
+  it('on a call: the confirmation is queued, waiting for the cancel, and goes after the hang-up', async () => {
+    settleThrows();
+    await bookOn(CORPUS[0]);
+    expect(confirmation()).toMatchObject({ booking_id: 'booking-1', by: 'call', state: 'awaiting_cancel' });
+    await hangUp();
+    expect(confirmation()).toMatchObject({ state: 'due', cancel: 'cancelled' });
+    later(10 * 60_000);
+    expect((await textTick()).sent).toBe(1);
+  });
+
+  it('on the text link: the confirmation is queued due, with the cancel it came to', async () => {
+    settleThrows();
+    await store.finishAttempt(attemptId, { status: 'completed' } as never);
+    const contact = (await store.loadCallContact('c1', attemptId))!;
+    const r = await npxBookingPageLane.book({ contact, demo: false, openingId: 'slot-a', callRef: 'text-link-c1', deadline: Date.now() + 36_000 });
+    expect(r).toMatchObject({ ok: true, bookingId: 'booking-1' });
+    expect(confirmation()).toMatchObject({ booking_id: 'booking-1', by: 'link', state: 'due', cancel: 'cancelled' });
+  });
+});
+
+describe('an undo that lands before the confirmation is queued (the hold\'s rule, Codex P2 on #470)', () => {
+  it('the undo writes a skipped placeholder, and the late queue cannot replace it', async () => {
+    // The booking tool's queue is still on its way when the undo runs.
+    const queue = store.queueConfirmation.bind(store);
+    let lateQueue: (() => Promise<boolean>) | null = null;
+    store.queueConfirmation = async (...a) => { lateQueue = () => queue(...a); return true; };
+    await bookOn(CORPUS[1]);
+    expect(confirmation()).toBeNull();
+    const r = await undo(CORPUS[1]);
+    expect(r).toMatchObject({ booking_undone: true });
+    expect(confirmation()).toMatchObject({ booking_id: 'booking-1', state: 'skipped', reason: 'booking_undone' });
+    expect(await lateQueue!()).toBe(false);
+    expect(confirmation()).toMatchObject({ state: 'skipped' });
+    await hangUp();
+    later(30 * 60_000);
+    expect((await textTick()).sent).toBe(0);
+  });
+
+  it('a confirmation the scheduler holds a claim on is skipped too, so its put-back cannot revive it', async () => {
+    await bookOn(CORPUS[2]);
+    const c = store.contacts.get('c1')!;
+    const t = c.customData.outreach_text as Record<string, unknown>;
+    t.confirmation = { ...(t.confirmation as object), state: 'claimed', claimed_at: new Date().toISOString() };
+    expect(await store.skipConfirmation('c1', 'booking-1', 'booking_undone')).toBe(true);
+    await store.patchConfirmation('c1', { state: 'retry', reason: 'call_open' } as never);
+    expect(confirmation()).toMatchObject({ state: 'skipped', reason: 'booking_undone' });
+  });
+});

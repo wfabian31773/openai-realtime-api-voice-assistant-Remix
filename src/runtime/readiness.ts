@@ -1717,7 +1717,7 @@ import { callEnvironment } from "./callRecord";
  * after the call has ended, never to a number on do_not_contact. A caller who
  * asks staff on the call to cancel or change the booking holds it, and that
  * staff ticket files urgent. Same switch as the texts (NPX_OUTREACH_TEXTS).
- * Stacked on v220 (#467, open). v221 is #469 on its open branch, which this
+ * Above v220 (#467, merged `e9a2443e`), which it contains. v221 is #469 on its open branch, which this
  * does not contain. No migration.
  *
  * v224 — THE CALLER WHO BACKS OUT KEEPS THEIR APPOINTMENT (2026-11-13). Wayne:
@@ -1730,8 +1730,9 @@ import { callEnvironment } from "./callRecord";
  * waits for it (`awaiting_cancel`). `cancel_sooner_booking` drops the held
  * cancel and then cancels the NPX booking through NPX's new outreach
  * booking-cancel endpoint (EPC #329); when either cannot be done it files the
- * urgent staff ticket and the Azul appointment is still kept. Stacked on v222
- * (#470, open); v223 is taken. No migration.
+ * urgent staff ticket and the Azul appointment is still kept. Above v222
+ * (#470, merged `951dd0ba`), which it contains; v223 is #473 on its open
+ * branch. No migration.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
   "voice-runtime-v224-a-caller-who-backs-out-keeps-their-appointment-20261113";

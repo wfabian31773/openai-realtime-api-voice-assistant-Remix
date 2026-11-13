@@ -502,6 +502,8 @@ export class FakeOutboundStore implements OutboundStore {
     const c = this.contacts.get(contactId);
     const r = c ? this.confirmationOf(c) : null;
     if (!c || !r) return;
+    const recordsASend = patch.state === "sent" || patch.state === "unknown";
+    if (!recordsASend && r.state !== "claimed") return;
     const defined = Object.fromEntries(Object.entries(patch).filter(([, v]) => v !== undefined));
     this.writeConfirmation(c, { ...r, ...defined } as BookingConfirmationRecord);
   }
@@ -509,7 +511,12 @@ export class FakeOutboundStore implements OutboundStore {
   async holdConfirmation(contactId: string, bookingId: string, reason: string): Promise<boolean> {
     const c = this.contacts.get(contactId);
     const r = c ? this.confirmationOf(c) : null;
-    if (!c || !r || r.booking_id !== bookingId || !["due", "retry", "awaiting_cancel"].includes(r.state)) return false;
+    if (!c) return false;
+    if (!r || r.booking_id !== bookingId) {
+      this.writeConfirmation(c, { booking_id: bookingId, state: "held", reason } as BookingConfirmationRecord);
+      return true;
+    }
+    if (!["due", "retry", "awaiting_cancel", "claimed"].includes(r.state)) return false;
     this.writeConfirmation(c, { ...r, state: "held", reason });
     return true;
   }
@@ -529,7 +536,12 @@ export class FakeOutboundStore implements OutboundStore {
   async skipConfirmation(contactId: string, bookingId: string, reason: string): Promise<boolean> {
     const c = this.contacts.get(contactId);
     const r = c ? this.confirmationOf(c) : null;
-    if (!c || !r || r.booking_id !== bookingId || !["due", "retry", "awaiting_cancel", "held"].includes(r.state)) return false;
+    if (!c) return false;
+    if (!r || r.booking_id !== bookingId) {
+      this.writeConfirmation(c, { booking_id: bookingId, state: "skipped", reason } as BookingConfirmationRecord);
+      return true;
+    }
+    if (!["due", "retry", "awaiting_cancel", "held", "claimed"].includes(r.state)) return false;
     this.writeConfirmation(c, { ...r, state: "skipped", reason });
     return true;
   }

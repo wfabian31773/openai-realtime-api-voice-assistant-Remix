@@ -318,7 +318,9 @@ export interface OutboundStore {
    */
   releaseConfirmation(contactId: string, bookingId: string, cancel: "cancelled" | "pending", now: Date): Promise<boolean>;
   /** The caller undid this booking on the call (v224): its confirmation is
-   * never sent. Only one not yet claimed or sent. True when it was skipped. */
+   * never sent. One not yet sent or of unknown fate (a claimed one included,
+   * so a put-back cannot revive it); with none queued for this booking yet, a
+   * skipped placeholder the late queue cannot replace. True when written. */
   skipConfirmation(contactId: string, bookingId: string, reason: string): Promise<boolean>;
 
   // ── The held Azul cancel (v224, ./heldAzulCancel.ts) ──
@@ -1040,26 +1042,46 @@ export async function createDbOutboundStore(): Promise<OutboundStore> {
     },
 
     async patchConfirmation(contactId, patch) {
+      // A text that may be on their phone is recorded whatever happened
+      // meanwhile; anything else lands only while the row is still the
+      // scheduler's claim, so it never undoes a hold a call wrote during the
+      // claim (Codex P2 on #470).
+      const recordsASend = patch.state === "sent" || patch.state === "unknown";
       await db.execute(sql`
         UPDATE campaign_contacts
            SET custom_data = jsonb_set(custom_data, ARRAY[${OUTREACH_TEXT_KEY}::text, ${CONFIRMATION_FIELD}::text],
                  (custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text) || ${JSON.stringify(patch)}::jsonb,
                  true)
          WHERE id = ${contactId}::varchar
-           AND jsonb_typeof(custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text) = 'object'`);
+           AND jsonb_typeof(custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text) = 'object'
+           AND (${recordsASend}::boolean
+                OR custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text ->> 'state' = 'claimed')`);
     },
 
     async holdConfirmation(contactId, bookingId, reason) {
+      // With no confirmation for this booking yet (its queue is still on its
+      // way, after the booking tool's settle budget ran out), the hold is
+      // written as a placeholder for the booking; queueConfirmation never
+      // replaces a confirmation for the same booking, so it cannot undo the
+      // hold when it lands (Codex P2 on #470).
       const held = rows(
         await db.execute(sql`
           UPDATE campaign_contacts
-             SET custom_data = jsonb_set(custom_data, ARRAY[${OUTREACH_TEXT_KEY}::text, ${CONFIRMATION_FIELD}::text],
-                   (custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text)
-                     || jsonb_build_object('state', 'held', 'reason', ${reason}::text),
+             SET custom_data = jsonb_set(
+                   COALESCE(custom_data, '{}'::jsonb), ARRAY[${OUTREACH_TEXT_KEY}::text],
+                   CASE WHEN jsonb_typeof(custom_data -> ${OUTREACH_TEXT_KEY}::text) = 'object'
+                        THEN custom_data -> ${OUTREACH_TEXT_KEY}::text ELSE '{}'::jsonb END
+                     || jsonb_build_object(${CONFIRMATION_FIELD}::text,
+                          CASE WHEN custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text ->> 'booking_id' = ${bookingId}::text
+                               THEN (custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text)
+                                      || jsonb_build_object('state', 'held', 'reason', ${reason}::text)
+                               ELSE jsonb_build_object('booking_id', ${bookingId}::text, 'state', 'held', 'reason', ${reason}::text)
+                          END),
                    true)
            WHERE id = ${contactId}::varchar
-             AND custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text ->> 'booking_id' = ${bookingId}::text
-             AND custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text ->> 'state' IN ('due', 'retry', 'awaiting_cancel')
+             AND (custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text ->> 'booking_id'
+                    IS DISTINCT FROM ${bookingId}::text
+                  OR custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text ->> 'state' IN ('due', 'retry', 'awaiting_cancel', 'claimed'))
           RETURNING id`),
       );
       return held.length > 0;
@@ -1085,16 +1107,28 @@ export async function createDbOutboundStore(): Promise<OutboundStore> {
     },
 
     async skipConfirmation(contactId, bookingId, reason) {
+      // The hold's shape (Codex P2 on #470): a claimed row is skipped too, so a
+      // put-back cannot revive it, and with no confirmation for this booking
+      // yet a skipped placeholder is written, which queueConfirmation cannot
+      // replace when it lands late.
       const skipped = rows(
         await db.execute(sql`
           UPDATE campaign_contacts
-             SET custom_data = jsonb_set(custom_data, ARRAY[${OUTREACH_TEXT_KEY}::text, ${CONFIRMATION_FIELD}::text],
-                   (custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text)
-                     || jsonb_build_object('state', 'skipped', 'reason', ${reason}::text),
+             SET custom_data = jsonb_set(
+                   COALESCE(custom_data, '{}'::jsonb), ARRAY[${OUTREACH_TEXT_KEY}::text],
+                   CASE WHEN jsonb_typeof(custom_data -> ${OUTREACH_TEXT_KEY}::text) = 'object'
+                        THEN custom_data -> ${OUTREACH_TEXT_KEY}::text ELSE '{}'::jsonb END
+                     || jsonb_build_object(${CONFIRMATION_FIELD}::text,
+                          CASE WHEN custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text ->> 'booking_id' = ${bookingId}::text
+                               THEN (custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text)
+                                      || jsonb_build_object('state', 'skipped', 'reason', ${reason}::text)
+                               ELSE jsonb_build_object('booking_id', ${bookingId}::text, 'state', 'skipped', 'reason', ${reason}::text)
+                          END),
                    true)
            WHERE id = ${contactId}::varchar
-             AND custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text ->> 'booking_id' = ${bookingId}::text
-             AND custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text ->> 'state' IN ('due', 'retry', 'awaiting_cancel', 'held')
+             AND (custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text ->> 'booking_id'
+                    IS DISTINCT FROM ${bookingId}::text
+                  OR custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text ->> 'state' IN ('due', 'retry', 'awaiting_cancel', 'held', 'claimed'))
           RETURNING id`),
       );
       return skipped.length > 0;

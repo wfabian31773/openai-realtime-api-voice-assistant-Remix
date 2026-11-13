@@ -1501,16 +1501,15 @@ export async function bookOutreachSlot(args: {
     }
     const settle = (async () => {
       const st = await store();
-      await st.settleContact(contact.contactId, 'completed', {
-        notes: `npx_booking:${book.bookingId}`,
-        exceptStatus: ['do_not_call'],
-      });
+      // The settle and the confirmation are independent: a settle that
+      // throws must not cost the booking its confirmation (Codex P1 on #470).
+      const settled = await settleBooked(st, contact.contactId, book.bookingId);
       // v222: the confirmation text, sent by the scheduler
       // (./runtime/outbound/bookingConfirmation.ts).
       await st.queueConfirmation(contact.contactId, confirmationRecordFor({
         contact, slot: bookedSlot, bookingId: book.bookingId, callRef, cancelled: cancel.cancelled,
       }));
-      return true;
+      return settled;
     })().catch((e) => {
       console.warn(`[NPX OUTREACH] booking ${book.bookingId}: could not settle the contact —`, e instanceof Error ? e.message : e);
       return false;
@@ -1544,14 +1543,12 @@ export async function bookOutreachSlot(args: {
       azul.stored = 'no';
       console.warn(`[NPX OUTREACH] booking ${book.bookingId}: could not hold the Azul cancel on the contact — the hang-up runs it from the call —`, e instanceof Error ? e.message : e);
     }
-    await st.settleContact(contact.contactId, 'completed', {
-      notes: `npx_booking:${book.bookingId}`,
-      exceptStatus: ['do_not_call'],
-    });
+    // Independent of the confirmation, as on the text link (Codex P1 on #470).
+    const settled = await settleBooked(st, contact.contactId, book.bookingId);
     await st.queueConfirmation(contact.contactId, confirmationRecordFor({
       contact, slot: bookedSlot, bookingId: book.bookingId, callRef, cancelled: false, awaitCancel: true, now: heldAt,
     }));
-    return true;
+    return settled;
   })().catch((e) => {
     console.warn(`[NPX OUTREACH] booking ${book.bookingId}: could not settle the contact —`, e instanceof Error ? e.message : e);
     return false;
@@ -1561,6 +1558,24 @@ export async function bookOutreachSlot(args: {
   }
   console.info(`[NPX OUTREACH] booking ${book.bookingId}: the Azul cancel is held until the call ends (stored: ${azul.stored})`);
   return { ok: true, bookingId: book.bookingId, slot: bookedSlot, azul };
+}
+
+/**
+ * Settle a booked contact `completed` with its booking marker. A settle that
+ * throws is logged and answers false, never thrown, so the confirmation that
+ * follows it is queued whatever the settle did (Codex P1 on #470).
+ */
+async function settleBooked(st: OutboundStore, contactId: string, bookingId: string): Promise<boolean> {
+  try {
+    await st.settleContact(contactId, 'completed', {
+      notes: `npx_booking:${bookingId}`,
+      exceptStatus: ['do_not_call'],
+    });
+    return true;
+  } catch (e) {
+    console.warn(`[NPX OUTREACH] booking ${bookingId}: could not settle the contact; the confirmation is still queued —`, e instanceof Error ? e.message : e);
+    return false;
+  }
 }
 
 // ── The text's booking page (v211) ──────────────────────────────────────────
@@ -1686,8 +1701,14 @@ async function fileStaffCallback(
   s: OutreachSession,
   args: { request: string; changesBooking: boolean; callbackSid: string },
 ): Promise<{ ok: true; ticketNumber: string } | { ok: false; error: string }> {
-  if (s.staffTicket) return { ok: true, ticketNumber: s.staffTicket };
   const { request, changesBooking, callbackSid } = args;
+  // One ticket per call, except a booking change asked after another
+  // request was already filed (an insurance question, then "cancel it"):
+  // that change still needs its own urgent ticket and a held text, or the
+  // confirmation goes out and staff never see the undo (Codex P2, #470).
+  const earlierTicket = s.staffTicket;
+  const changeAfterTicket = !!earlierTicket && changesBooking && !!s.booking && !s.bookingChangeAsked;
+  if (earlierTicket && !changeAfterTicket) return { ok: true, ticketNumber: earlierTicket };
   const calledFrom = callbackSid ? callbackSessionFor(callbackSid)?.callerPhone ?? '' : '';
   const dob = dobOnFile(s.contact);
   const body = sanitizeForSms(
@@ -1710,6 +1731,7 @@ async function fileStaffCallback(
           ? `A sooner exam was booked on this call and cancelled again before they hung up (NPX booking ${s.undone[s.undone.length - 1]}); their appointment with us was kept.`
           : 'Their appointment has not been changed.',
       changesBooking && s.booking ? bookingChangeLine(s.contact, s.booking) : null,
+      changeAfterTicket ? `This adds to ${earlierTicket}, filed earlier on this call.` : null,
     ]
       .filter((l) => l !== null)
       .join('\n'),
@@ -1726,7 +1748,7 @@ async function fileStaffCallback(
     ...(dob ? { patientBirthMonth: dob.month, patientBirthDay: dob.day, patientBirthYear: dob.year } : {}),
     description: body,
     priority: changesBooking ? 'urgent' : 'medium',
-    idempotencyKey: `${sid}-outreach-staff`,
+    idempotencyKey: changeAfterTicket ? `${sid}-outreach-staff-change` : `${sid}-outreach-staff`,
     callData: { agentUsed: 'npx-outreach', callSid: sid },
   });
   if (!result.success || !result.ticketNumber) {
@@ -1747,9 +1769,13 @@ async function fileStaffCallback(
       // v216: a booking on this call keeps its marker, first, so a count of
       // `agent_notes LIKE 'npx_booking:%'` still finds it. Before, the staff
       // note replaced it: 4 of 21 bookings to 2026-11-12 read as no booking.
-      notes: s.booking
-        ? `npx_booking:${s.booking.bookingId}; staff_callback:${result.ticketNumber}`
-        : `staff_callback:${result.ticketNumber}`,
+      notes: [
+        s.booking ? `npx_booking:${s.booking.bookingId}` : null,
+        earlierTicket ? `staff_callback:${earlierTicket}` : null,
+        `staff_callback:${result.ticketNumber}`,
+      ]
+        .filter(Boolean)
+        .join('; '),
       exceptStatus: ['do_not_call'],
     });
   } catch (e) {
@@ -1794,13 +1820,15 @@ registerTool({
         : `I've asked our scheduling team to call you back. ${appointmentStateLine(s.booking)}`,
       fix: 'Say that, ask if there is anything else, then say goodbye and call end_call. The outcome is already recorded.',
     });
-    if (s.staffTicket) return already(s.staffTicket);
-
     const request = String(input.request ?? '').trim();
     // v222: a caller who asks to undo or move what was just booked gets an
     // urgent ticket saying exactly what staff must do, and no confirmation
     // text for a booking they asked to change.
     const changesBooking = !!s.booking && input.changes_booking === true;
+    // One ticket per call, except a booking change asked after another
+    // request was already filed: fileStaffCallback files that one beside the
+    // first (Codex P2, #470).
+    if (s.staffTicket && !(changesBooking && !s.bookingChangeAsked)) return already(s.staffTicket);
     // v224: and, before the call ends, their Azul appointment is kept: the
     // held cancel is dropped, so staff are not asked to rebook what the
     // caller wanted back.

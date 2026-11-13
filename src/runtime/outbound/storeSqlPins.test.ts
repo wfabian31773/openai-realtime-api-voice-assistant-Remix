@@ -375,10 +375,20 @@ describe("the booking confirmation (v222)", () => {
     expect(method("claimConfirmation")).toContain("RETURNING *");
   });
 
-  it("holds only this booking's confirmation, and only before it is claimed", () => {
+  it("holds only this booking's confirmation, including one the scheduler has claimed", () => {
     const m = method("holdConfirmation");
     expect(m).toContain("->> 'booking_id' = ${bookingId}::text");
-    expect(m).toContain("->> 'state' IN ('due', 'retry', 'awaiting_cancel')");
+    expect(m).toContain("->> 'state' IN ('due', 'retry', 'awaiting_cancel', 'claimed')");
+    // No confirmation for this booking yet: the hold is written as a placeholder.
+    expect(m).toContain("IS DISTINCT FROM ${bookingId}::text");
+    expect(m).toContain("ELSE jsonb_build_object('booking_id', ${bookingId}::text, 'state', 'held'");
+  });
+
+  it("puts a claimed confirmation back only while it is still claimed, and always records a send", () => {
+    const m = method("patchConfirmation");
+    expect(m).toContain("->> 'state' = 'claimed')");
+    expect(m).toContain('patch.state === "sent" || patch.state === "unknown"');
+    expect(m).toContain("${recordsASend}::boolean");
   });
 
   it("never moves updated_at, which the stale-claim reaper reads as a call's claim", () => {
@@ -402,11 +412,15 @@ describe("the booking confirmation (v222)", () => {
     expect(m).toContain("RETURNING id");
   });
 
-  it("skips an undone booking's confirmation only before it is claimed (v224)", () => {
+  it("skips an undone booking's confirmation before it is sent, and writes a placeholder when none is queued yet (v224)", () => {
     const m = method("skipConfirmation");
     expect(m).toContain("->> 'booking_id' = ${bookingId}::text");
-    expect(m).toContain("->> 'state' IN ('due', 'retry', 'awaiting_cancel', 'held')");
+    expect(m).toContain("->> 'state' IN ('due', 'retry', 'awaiting_cancel', 'held', 'claimed')");
     expect(m).toContain("jsonb_build_object('state', 'skipped', 'reason', ${reason}::text)");
+    // No confirmation for this booking yet: a skipped placeholder the late queue cannot replace.
+    expect(m).toContain("IS DISTINCT FROM ${bookingId}::text");
+    expect(m).toContain("ELSE jsonb_build_object('booking_id', ${bookingId}::text, 'state', 'skipped', 'reason', ${reason}::text)");
+    expect(m).toContain("COALESCE(custom_data, '{}'::jsonb)");
   });
 });
 

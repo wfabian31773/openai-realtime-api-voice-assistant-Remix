@@ -17,7 +17,8 @@ jobs:
       github.event.pull_request.draft == false &&
       github.event.pull_request.head.repo.full_name == github.repository &&
       github.actor != 'dependabot[bot]'
-    runs-on: ubuntu-latest
+    # Pin to ubuntu-24.04; ubuntu-latest is now 26.04, which breaks openai/codex-action drop-sudo (openai/codex-action#188).
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
       contents: read
@@ -60,7 +61,8 @@ jobs:
             - Last line exactly "VERDICT: CLEAN" if there are no P1 or P2 findings, otherwise "VERDICT: CHANGES".
 
   post_feedback:
-    runs-on: ubuntu-latest
+    # Pin to ubuntu-24.04; ubuntu-latest is now 26.04, which breaks openai/codex-action drop-sudo (openai/codex-action#188).
+    runs-on: ubuntu-24.04
     needs: codex
     if: needs.codex.outputs.final_message != ''
     timeout-minutes: 5
