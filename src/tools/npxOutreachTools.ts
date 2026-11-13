@@ -576,25 +576,28 @@ export function currentAppointment(c: OutboundContact): string {
  *
  * The event name comes from the live movable list, so a name NextGen adds
  * later could carry a word the classifier routes on (a "Glasses Check", a
- * "CL Fit"). The name is checked with the same classifier, and one that would
- * take the ticket out of the Hub is written as "An appointment" (Codex P2 on
- * #467). A name the classifier keeps in the Hub ("Eye Exam") is written as it
- * is.
+ * "CL Fit", a field-style "Department: Glasses"). So the line is checked with
+ * the same classifier exactly as it is sent: the whole "Their appointment:"
+ * line, after the SMS normalisation the body goes through. A line that would
+ * take the ticket out of the Hub names the visit "An appointment" instead
+ * (Codex P2 on #467, three rounds: the name alone, then before normalisation,
+ * then outside its line). A name the classifier keeps in the Hub ("Eye Exam")
+ * is written as it is. What the caller's own words do to the routing is the
+ * ticketing app's decision and is not checked here.
  */
-export function staffAppointment(c: OutboundContact): string {
-  // Checked as it will be sent: the ticket body is SMS-normalised, so a
-  // non-breaking hyphen or space becomes ASCII before the app reads it
-  // (Codex P2 on #467, round 2).
-  const named = sanitizeForSms(field(c, 'event_name')).value.trim();
-  const event = named && staysInTheHub(named) ? named : 'An appointment';
+export function staffAppointmentLine(c: OutboundContact): string {
   const clock = spokenClock(field(c, 'begin_time'));
   const office = field(c, 'office');
-  return `${event} on ${spokenDay(field(c, 'appointment_date'))}${clock ? ` at ${clock}` : ''}${office ? ` at our ${office} office` : ''}`;
+  const when = `on ${spokenDay(field(c, 'appointment_date'))}${clock ? ` at ${clock}` : ''}${office ? ` at our ${office} office` : ''}`;
+  const line = (event: string) => sanitizeForSms(`Their appointment: ${event} ${when}.`).value;
+  const named = sanitizeForSms(field(c, 'event_name')).value.trim();
+  const asNamed = named ? line(named) : '';
+  return asNamed && staysInTheHub(asNamed) ? asNamed : line('An appointment');
 }
 
-/** Whether a NextGen event name, read alone, keeps a department-9 ticket in the Hub. */
-function staysInTheHub(eventName: string): boolean {
-  const routed = correctSurgeryIntake(eventName, HVA_HUB_DEPARTMENT_ID);
+/** Whether this text, read as the ticketing app reads a department-9 ticket, keeps it in the Hub. */
+function staysInTheHub(text: string): boolean {
+  const routed = correctSurgeryIntake(text, HVA_HUB_DEPARTMENT_ID);
   return !routed || routed.departmentId === HVA_HUB_DEPARTMENT_ID;
 }
 
@@ -1439,7 +1442,7 @@ registerTool({
         'Azul outreach call: an offer of a sooner appointment at an NPX partner practice.',
         'The patient asked to speak with a person.',
         request ? `What they asked: ${request}` : null,
-        `Their appointment: ${staffAppointment(s.contact)}.`,
+        staffAppointmentLine(s.contact),
         `Date of birth confirmed on the call: ${s.verified ? 'yes' : 'no'}.`,
         callbackSid ? 'They called us back.' : 'We called them.',
         calledFrom && calledFrom !== s.contact.phone

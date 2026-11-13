@@ -154,6 +154,22 @@ describe('every visit on the campaign stays in the Hub', () => {
     },
   );
 
+  // Codex P2 on #467, round 3: a field-style name passes on its own, because
+  // the classifier strips field prefixes at the start of a line, and routes
+  // out once it sits inside the appointment line. The line is checked as sent.
+  it.each(['Department: Glasses', 'Request Type: Contact Lens Fitting'])(
+    'a field-style name that routes out only inside the line (%j) is written as an appointment',
+    async (event) => {
+      expect(landsIn({ departmentId: 9, description: event })).toBe(9);
+      await setUp(event);
+      await run('CA00000000000000000000000000000007', STAFF_CALLBACK_TOOL_NAME, { request: 'wants to reschedule' });
+      const payload = fileTicket.mock.calls[0][0] as { departmentId: number; description: string };
+      expect(payload.description).toContain('Their appointment: An appointment on ');
+      expect(payload.description).not.toContain(event);
+      expect(landsIn(payload)).toBe(9);
+    },
+  );
+
   it('an event name the classifier keeps in the Hub is written as it is', async () => {
     expect(landsIn({ departmentId: 9, description: 'Eye Exam' })).toBe(9);
     await setUp('Eye Exam');
