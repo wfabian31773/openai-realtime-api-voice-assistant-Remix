@@ -1717,7 +1717,7 @@ import { callEnvironment } from "./callRecord";
  * after the call has ended, never to a number on do_not_contact. A caller who
  * asks staff on the call to cancel or change the booking holds it, and that
  * staff ticket files urgent. Same switch as the texts (NPX_OUTREACH_TEXTS).
- * Stacked on v220 (#467, open). v221 is #469 on its open branch, which this
+ * Above v220 (#467, merged `e9a2443e`), which it contains. v221 is #469 on its open branch, which this
  * does not contain. No migration.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
