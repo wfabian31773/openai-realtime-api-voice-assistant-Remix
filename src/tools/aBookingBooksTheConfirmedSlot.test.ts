@@ -279,8 +279,12 @@ describe('chosenSlot', () => {
     expect(chosenSlot([[FEB5_0900, FEB5_1000]], { option: 2 })).toEqual({ slot: FEB5_1000, by: 'option' });
   });
 
-  it('a malformed date or time is not read as a choice', () => {
-    expect(chosenSlot(offers, { date: 'Feb 5', time: '10:00' })).toMatchObject({ refusal: { error: 'no_choice' } });
+  // v229: "Feb 5" is read to the offered February 5 (it was refused under
+  // v218, which is how CA3eec4f155e08f15868b34008bd15d988 lost its slot);
+  // what is not a date or a time is still not read as a choice.
+  it('a date in words is read to the offered day; what is not a date or time is not a choice', () => {
+    expect(chosenSlot(offers, { date: 'Feb 5', time: '10:00' })).toEqual({ slot: FEB5_1000, by: 'date_time' });
+    expect(chosenSlot(offers, { date: 'tomorrow', time: '10:00' })).toMatchObject({ refusal: { error: 'no_choice' } });
     expect(chosenSlot(offers, { date: '2041-02-05', time: 'morning' })).toMatchObject({ refusal: { error: 'no_choice' } });
   });
 });

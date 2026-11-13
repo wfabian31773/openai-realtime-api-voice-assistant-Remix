@@ -1217,6 +1217,11 @@ registerTool({
  *    list read on the call;
  *  - nothing offered at that date and time books nothing.
  * Every refusal speaks through `fix` (v43): nothing for the caller to hear.
+ *
+ * v229: a date sent as words or numbers ("November 18", "11/18") is read
+ * against the days offered (readChosenDate), and every refusal carries the
+ * choices read on the call with the exact date and time to send back
+ * (withChoices); `which_list` names the slots the option points at.
  */
 export function chosenSlot(
   offers: NpxSlot[][],
@@ -1229,8 +1234,10 @@ export function chosenSlot(
   const index = /^[1-9]$/.test(optionText) ? Number(optionText) - 1 : -1;
   const byOption = new Map<string, NpxSlot>();
   if (index >= 0) for (const list of offers) if (list[index]) byOption.set(list[index].slotId, list[index]);
-  const date = typeof input.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(input.date.trim()) ? input.date.trim() : '';
-  const minutes = typeof input.time === 'string' ? minutesOf(input.time) : null;
+  const dateRead = readChosenDate(input.date, offered);
+  const timeRead = readChosenTime(input.time, input.date);
+  const date = 'day' in dateRead ? dateRead.day : '';
+  const minutes = 'minutes' in timeRead ? timeRead.minutes : null;
 
   if (date && minutes !== null) {
     let atThatTime = offered.filter((x) => {
@@ -1239,13 +1246,16 @@ export function chosenSlot(
     });
     if (atThatTime.length === 0) {
       return {
-        refusal: {
-          success: false,
-          error: 'not_offered',
-          fix:
-            'Nothing was booked: no choice read to them on this call is at that date and time. Book only a choice you read to them and they confirmed, ' +
-            "passing that choice's date and time from find_sooner_exam's answer. If they want a time you have not read them, call find_sooner_exam for that day first.",
-        },
+        refusal: withChoices(
+          {
+            success: false,
+            error: 'not_offered',
+            fix:
+              'Nothing was booked: no choice read to them on this call is at that date and time. Book only a choice you read to them and they confirmed. ' +
+              'If they want a time you have not read them, call find_sooner_exam for that day first.',
+          },
+          offered,
+        ),
       };
     }
     const city = typeof input.city === 'string' ? fold(input.city) : '';
@@ -1278,34 +1288,211 @@ export function chosenSlot(
     if (byOption.size === 1) return { slot: [...byOption.values()][0], by: 'option' };
     if (byOption.size === 0) {
       return {
-        refusal: {
-          success: false,
-          error: 'no_such_option',
-          fix: 'That option was not offered. Call find_sooner_exam with what they want, offer its choices, and book only one they chose.',
-        },
+        refusal: withChoices(
+          {
+            success: false,
+            error: 'no_such_option',
+            fix: 'That option was not offered. Book only a choice you read to them and they confirmed.',
+          },
+          offered,
+        ),
       };
     }
+    // v229: name the slots the number points at, with the exact date and
+    // time to send back, instead of telling the model to find them (it did
+    // not, four times running, on CA3eec4f155e08f15868b34008bd15d988).
+    const candidates = [...byOption.values()];
     return {
-      refusal: {
-        success: false,
-        error: 'which_list',
-        fix:
-          'Nothing was booked: more than one list of choices was read on this call, so an option number is not one time. ' +
-          "Call book_sooner_exam again with the date and time of the choice you said back to them, from find_sooner_exam's answer.",
-      },
+      refusal: withChoices(
+        {
+          success: false,
+          error: 'which_list',
+          fix:
+            `Nothing was booked: more than one list of choices was read on this call, so option ${index + 1} is more than one time: ` +
+            `${joinWords(candidates.map(choiceWords), 'or')}. ` +
+            'Call book_sooner_exam again with the date and time, exactly as written here, of the one you said back to them and they confirmed.',
+        },
+        candidates,
+      ),
     };
   }
 
+  // v229: a date or time that arrived in a form this cannot read is named,
+  // so the model sends it again in the form it can.
+  const unreadable = [
+    ...(dateRead.form === 'unreadable' ? ['the date'] : []),
+    ...(timeRead.form === 'unreadable' ? ['the time'] : []),
+  ];
   return {
-    refusal: {
-      success: false,
-      error: 'no_choice',
-      fix: "Nothing was booked. Call book_sooner_exam with the date and time of the choice they confirmed, from find_sooner_exam's answer.",
-    },
+    refusal: withChoices(
+      {
+        success: false,
+        error: 'no_choice',
+        fix:
+          'Nothing was booked. ' +
+          (unreadable.length ? `${joinWords(unreadable)} could not be read. ` : '') +
+          'Call book_sooner_exam with the date and time, exactly as written here, of the choice they confirmed.',
+      },
+      offered,
+    ),
+  };
+}
+
+/** "Wednesday, November 18 at 11:00 AM in Beaumont (date 2026-11-18, time 11:00)". */
+function choiceWords(s: NpxSlot): string {
+  const { date, time } = slotDateTime(s);
+  const city = cityOf(s);
+  return `${spokenWhen(s)}${city ? ` in ${city}` : ''} (date ${date}, time ${time})`;
+}
+
+/** At most this many choices are written into a refusal. */
+const CHOICES_IN_A_REFUSAL = 9;
+
+/**
+ * v229: a booking refusal carries the choices read on the call, each with the
+ * exact date and time to send back, so the model can book one without going
+ * back to find_sooner_exam's answer. Slot times and cities only, no PHI.
+ */
+function withChoices(r: Refusal, slots: NpxSlot[]): Refusal {
+  const listed = slots.slice(0, CHOICES_IN_A_REFUSAL);
+  if (!listed.length) return r;
+  return {
+    ...r,
+    choices: listed.map((s) => ({ ...slotDateTime(s), when: spokenWhen(s), city: cityOf(s) })),
+  } as Refusal;
+}
+
+const MONTH_NAMES = [
+  'january', 'february', 'march', 'april', 'may', 'june',
+  'july', 'august', 'september', 'october', 'november', 'december',
+];
+
+/** "nov" / "november" -> 11, "sept" -> 9; anything else -> 0. */
+function monthOf(word: string): number {
+  const w = word.toLowerCase().replace(/\.$/, '');
+  if (w.length < 3) return 0;
+  const i = MONTH_NAMES.findIndex((m) => m.startsWith(w));
+  return i + 1;
+}
+
+const pad2 = (n: number) => String(n).padStart(2, '0');
+
+/**
+ * THE DATE THE MODEL SENT, READ AGAINST THE DAYS OFFERED (v229).
+ *
+ * v218 took only YYYY-MM-DD and read anything else as no date at all, so a
+ * date sent as "November 18" or "11/18" fell through to the option number
+ * and, with two lists read, was refused `which_list` every time: 2 of the 4
+ * NPX calls since v218 that tried to book hit it, and
+ * CA3eec4f155e08f15868b34008bd15d988 lost the slot the caller chose. Now a
+ * month and day in words or numbers are read too, and only ever to a day
+ * that a choice read on the call is on, so nothing is invented: a month and
+ * day no choice is on is a day not offered, and refused as one.
+ */
+export function readChosenDate(
+  raw: unknown,
+  offered: NpxSlot[],
+): { day: string; form: 'iso' | 'words' } | { form: 'unreadable' | 'none' } {
+  if (typeof raw !== 'string' || !raw.trim()) return { form: 'none' };
+  const text = raw.trim();
+  const iso = /^(\d{4})-(\d{2})-(\d{2})(?:$|[T\s])/.exec(text);
+  if (iso) return { day: `${iso[1]}-${iso[2]}-${iso[3]}`, form: 'iso' };
+
+  let month = 0;
+  let dayOfMonth = 0;
+  let year = 0;
+  const numeric = /^(\d{1,2})[/.-](\d{1,2})(?:[/.-](\d{2}|\d{4}))?$/.exec(text);
+  if (numeric) {
+    month = Number(numeric[1]);
+    dayOfMonth = Number(numeric[2]);
+    if (numeric[3]) year = numeric[3].length === 2 ? 2000 + Number(numeric[3]) : Number(numeric[3]);
+  } else {
+    const words = text.toLowerCase().replace(/,/g, ' ').split(/\s+/).filter(Boolean);
+    for (const w of words) {
+      const m = monthOf(w);
+      if (m && !month) {
+        month = m;
+        continue;
+      }
+      const d = /^(\d{1,2})(?:st|nd|rd|th)?$/.exec(w);
+      if (d && !dayOfMonth) {
+        dayOfMonth = Number(d[1]);
+        continue;
+      }
+      if (/^\d{4}$/.test(w) && !year) year = Number(w);
+    }
+  }
+  if (!(month >= 1 && month <= 12 && dayOfMonth >= 1 && dayOfMonth <= 31)) return { form: 'unreadable' };
+
+  const suffix = `-${pad2(month)}-${pad2(dayOfMonth)}`;
+  const days = [...new Set(offered.map((x) => localParts(x).day))];
+  const matching = days.filter((d) => d.endsWith(suffix) && (!year || d.startsWith(`${year}-`)));
+  if (matching.length === 1) return { day: matching[0], form: 'words' };
+  if (matching.length > 1) return { form: 'unreadable' };
+  // A month and day no choice is on: read as that day in the year of the
+  // first choice (or the year given), so it is refused as not offered.
+  const y = year || Number((days[0] ?? '').slice(0, 4)) || new Date().getUTCFullYear();
+  return { day: `${y}${suffix}`, form: 'words' };
+}
+
+/**
+ * The time the model sent: "11:00", "11 AM", "11:00 a.m.", "11:00:00", or,
+ * when no time was sent, the time of a date sent as "2026-11-18T11:00".
+ */
+export function readChosenTime(
+  raw: unknown,
+  dateRaw?: unknown,
+): { minutes: number; form: 'read' } | { form: 'unreadable' | 'none' } {
+  if (typeof raw === 'string' && raw.trim()) {
+    const text = raw.trim().replace(/^(\d{1,2}:\d{2}):\d{2}/, '$1').replace(/\b([ap])\.?\s?m\.?$/i, '$1m');
+    const m = minutesOf(text);
+    return m === null ? { form: 'unreadable' } : { minutes: m, form: 'read' };
+  }
+  if (typeof dateRaw === 'string') {
+    const t = /^\d{4}-\d{2}-\d{2}[T\s](\d{2}:\d{2})/.exec(dateRaw.trim());
+    if (t) {
+      const m = minutesOf(t[1]);
+      if (m !== null) return { minutes: m, form: 'read' };
+    }
+  }
+  return { form: 'none' };
+}
+
+/**
+ * WHAT book_sooner_exam RECEIVED (v229), as fixed words for the timeline:
+ * whether a date and a time arrived and in what form, and whether an option
+ * number did. Never the values. Until now the timeline kept nothing of the
+ * booking's arguments, so "did the model send the date at all?" could not be
+ * answered for the 7 refusals of 2026-11-13.
+ */
+export function bookingArgsReceived(input: Record<string, unknown>, offers: NpxSlot[][]): {
+  received_date: 'iso' | 'words' | 'unreadable' | 'none';
+  received_time: 'read' | 'unreadable' | 'none';
+  received_option: boolean;
+} {
+  const offered = offers.flat();
+  const optionText = typeof input.option === 'string' || typeof input.option === 'number' ? String(input.option).trim() : '';
+  return {
+    received_date: readChosenDate(input.date, offered).form,
+    received_time: readChosenTime(input.time, input.date).form,
+    received_option: optionText !== '',
   };
 }
 
 async function bookChosen(
+  input: Record<string, unknown>,
+  sid: string,
+  s: OutreachSession,
+  currentDay: string,
+  deadline: number,
+): Promise<ToolResult> {
+  // Read before booking: a slot taken on the way empties s.offers.
+  const received = bookingArgsReceived(input, s.offers);
+  const result = await bookChosenSlot(input, sid, s, currentDay, deadline);
+  return { ...result, ...received } as ToolResult;
+}
+
+async function bookChosenSlot(
   input: Record<string, unknown>,
   sid: string,
   s: OutreachSession,

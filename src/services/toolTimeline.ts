@@ -366,6 +366,13 @@ function summarizeResult(tool: string, resultJson: string): Record<string, unkno
     // bookings the old option-only rule would have put on the wrong slot.
     'booked_by',
     'option_disagreed',
+    // v229: what book_sooner_exam received, as fixed words: the date's form
+    // ('iso' | 'words' | 'unreadable' | 'none'), the time's ('read' |
+    // 'unreadable' | 'none') and whether an option number came. Never the
+    // values: "did the model send the date at all?" becomes a count.
+    'received_date',
+    'received_time',
+    'received_option',
     // v222: whether the booking's Azul appointment was cancelled
     // ('cancelled' | 'not_cancelled') and, when not, the cancel's own
     // refusal code (outreachAzulCancel.ts). Fixed codes, no PHI.
