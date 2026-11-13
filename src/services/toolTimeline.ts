@@ -361,6 +361,11 @@ function summarizeResult(tool: string, resultJson: string): Record<string, unkno
     // bookings the old option-only rule would have put on the wrong slot.
     'booked_by',
     'option_disagreed',
+    // v222: whether the booking's Azul appointment was cancelled
+    // ('cancelled' | 'not_cancelled') and, when not, the cancel's own
+    // refusal code (outreachAzulCancel.ts). Fixed codes, no PHI.
+    'azul_cancel',
+    'azul_cancel_reason',
     /**
      * WHY escalate_to_human was refused (one of the gate's three codes) and
      * whether the refusal FILED the ticket (2026-09-29). Both PHI-free. Until

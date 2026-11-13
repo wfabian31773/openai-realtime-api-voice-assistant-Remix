@@ -42,6 +42,11 @@ import type { OutboundLanePolicy } from '../runtime/outbound/campaign';
 import type { SmsSender } from '../plugin/sms';
 import { SendOutcomeError } from '../plugin/sendFailure';
 import { nonGsm7Characters } from '../services/gsm7';
+import { getAzulTimeline, recordToolEvent } from '../services/toolTimeline';
+
+// The timeline module opens server/db at load for its flush path; these tests
+// read only what it records in memory.
+vi.mock('../../server/db', () => ({ db: {} }));
 
 // Tuesday 10 AM Pacific: inside the calling window.
 const NOW = new Date('2041-03-05T18:00:00Z');
@@ -191,6 +196,34 @@ describe('the text', () => {
   it('reads the Azul date as a calendar day', () => {
     expect(textedDay('2041-03-20')).toBe('Mar 20');
     expect(textedDay('2041-01-05')).toBe('Jan 5');
+  });
+});
+
+describe('the Azul cancel is recorded on the booking (v222)', () => {
+  /** What the tool timeline keeps of the result, through its own allow-list. */
+  const kept = (sid: string, r: Record<string, unknown>) => {
+    recordToolEvent(`timeline-${sid}`, BOOK_SOONER_TOOL_NAME, {}, JSON.stringify(r), 1, { callSid: sid });
+    const events = getAzulTimeline(`timeline-${sid}`) ?? [];
+    return events[events.length - 1]?.outcome as Record<string, unknown>;
+  };
+  const book = async (sid: string) => {
+    await runOn(sid, CONFIRM_DOB_TOOL_NAME, { date_of_birth: 'January 2nd, 1950' });
+    await runOn(sid, FIND_SOONER_TOOL_NAME);
+    return (await runOn(sid, BOOK_SOONER_TOOL_NAME, { date: '2041-02-04', time: '09:00', city: 'Testville' })) as Record<string, unknown>;
+  };
+
+  it('a cancel that landed is azul_cancel cancelled, kept by the timeline', async () => {
+    const r = await book('CA00000000000000000000000000000231');
+    expect(r).toMatchObject({ success: true, azul_cancel: 'cancelled' });
+    expect(r).not.toHaveProperty('azul_cancel_reason');
+    expect(kept('CA00000000000000000000000000000231', r)).toMatchObject({ azul_cancel: 'cancelled' });
+  });
+
+  it('a cancel that did not land is not_cancelled with its own code, kept by the timeline', async () => {
+    cancel.mockResolvedValueOnce({ cancelled: false, reason: 'nextgen_timeout' } as AzulCancelResult);
+    const r = await book('CA00000000000000000000000000000232');
+    expect(r).toMatchObject({ success: true, azul_cancel: 'not_cancelled', azul_cancel_reason: 'nextgen_timeout' });
+    expect(kept('CA00000000000000000000000000000232', r)).toMatchObject({ azul_cancel: 'not_cancelled', azul_cancel_reason: 'nextgen_timeout' });
   });
 });
 

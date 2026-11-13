@@ -1252,9 +1252,22 @@ async function bookChosen(
     booked: true,
     booked_by: chosen.by,
     ...(chosen.optionDisagreed ? { option_disagreed: true } : {}),
+    // v222: whether the Azul appointment was cancelled, as a fixed code the
+    // timeline keeps (Wayne, 2026-11-13: record it). Before this the Observatory
+    // read it from the words the agent was given to say.
+    ...azulCancelOutcome(booked.cancel),
     say: confirmation(s.booking.slot, booked.cancel, currentDay),
     fix: 'Say the confirmation as given, ask if there is anything else, then say goodbye and call end_call. The outcome is already recorded.',
   };
+}
+
+/**
+ * The Azul cancel as the timeline records it (v222): `cancelled`, or
+ * `not_cancelled` with the cancel's own refusal code. Codes only, no patient
+ * details; `toolTimeline` keeps both keys.
+ */
+export function azulCancelOutcome(cancel: AzulCancelResult): { azul_cancel: 'cancelled' | 'not_cancelled'; azul_cancel_reason?: string } {
+  return cancel.cancelled ? { azul_cancel: 'cancelled' } : { azul_cancel: 'not_cancelled', azul_cancel_reason: cancel.reason };
 }
 
 /** The text's booking reference prefix (bookingPage.textLinkCallRef). */
