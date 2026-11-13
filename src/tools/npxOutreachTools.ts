@@ -78,6 +78,7 @@ import {
 } from '../services/npxOutreachClient';
 import { cancelAzulAppointment, type AzulCancelRequest, type AzulCancelResult } from '../services/outreachAzulCancel';
 import { fold, SCHEDULING } from './queueRouting';
+import { correctSurgeryIntake } from './requestClassification';
 import {
   OPTIONS_PER_SEARCH,
   WEEKDAYS,
@@ -555,6 +556,49 @@ export function currentAppointment(c: OutboundContact): string {
   const clock = spokenClock(field(c, 'begin_time'));
   const office = field(c, 'office');
   return `${briefAppointment(c)}${clock ? ` at ${clock}` : ''}${office ? ` at our ${office} office` : ''}`;
+}
+
+/**
+ * THE APPOINTMENT AS STAFF READ IT: NextGen's own event name (v220).
+ *
+ * The staff-callback ticket went to the HVA Hub (department 9) with the visit
+ * as the caller hears it, and for a Refraction Only that is "a vision test for
+ * glasses". The ticketing app re-classifies a Hub request by its words
+ * (`correctSurgeryIntake`, mirrored in `requestClassification.ts`), and
+ * "glasses" with no medication word is an Optical request (1/66/536), so the
+ * ticket was created in Optical Support. Measured, every NPX staff-callback
+ * ticket to 2026-11-13: 6 of 29 created in Optical, every one a Refraction
+ * Only, every one with "glasses" only in this line; Refraction Only is 128 of
+ * the campaign's 603 contacts. NextGen's event names (Dilated Exam, Refraction
+ * Only, Consult, New Patient Exam, Ref+DFE, Diabetic Exam, GLE) carry no word
+ * the classifier routes on, and they are what a scheduler sees in NextGen. The
+ * caller still hears `spokenVisit`; only the ticket changes.
+ *
+ * The event name comes from the live movable list, so a name NextGen adds
+ * later could carry a word the classifier routes on (a "Glasses Check", a
+ * "CL Fit", a field-style "Department: Glasses"). So the line is checked with
+ * the same classifier exactly as it is sent: the whole "Their appointment:"
+ * line, after the SMS normalisation the body goes through. A line that would
+ * take the ticket out of the Hub names the visit "An appointment" instead
+ * (Codex P2 on #467, three rounds: the name alone, then before normalisation,
+ * then outside its line). A name the classifier keeps in the Hub ("Eye Exam")
+ * is written as it is. What the caller's own words do to the routing is the
+ * ticketing app's decision and is not checked here.
+ */
+export function staffAppointmentLine(c: OutboundContact): string {
+  const clock = spokenClock(field(c, 'begin_time'));
+  const office = field(c, 'office');
+  const when = `on ${spokenDay(field(c, 'appointment_date'))}${clock ? ` at ${clock}` : ''}${office ? ` at our ${office} office` : ''}`;
+  const line = (event: string) => sanitizeForSms(`Their appointment: ${event} ${when}.`).value;
+  const named = field(c, 'event_name').trim();
+  const asNamed = named ? line(named) : '';
+  return asNamed && staysInTheHub(asNamed) ? asNamed : line('An appointment');
+}
+
+/** Whether this text, read as the ticketing app reads a department-9 ticket, keeps it in the Hub. */
+function staysInTheHub(text: string): boolean {
+  const routed = correctSurgeryIntake(text, HVA_HUB_DEPARTMENT_ID);
+  return !routed || routed.departmentId === HVA_HUB_DEPARTMENT_ID;
 }
 
 const DOB_ASK = 'Can I please have your date of birth, starting with the month, then the day, then the year?';
@@ -1339,6 +1383,10 @@ export const npxBookingPageLane: BookingPageLane = {
 
 /** The Hub's own reason for what they asked, by the cues the queue lanes
  * already route on; "reschedule" when their words name none. */
+/** The first line of every NPX outreach staff ticket. */
+export const NPX_RECALL_FIRST_LINE =
+  'NPX Recall: an Azul outreach call offering a sooner appointment at an NPX partner practice.';
+
 /**
  * Where their appointments stand, said after a staff callback is asked for.
  * A caller who booked on this call and then asked for a person must not be
@@ -1395,10 +1443,13 @@ registerTool({
     const dob = dobOnFile(s.contact);
     const body = sanitizeForSms(
       [
-        'Azul outreach call: an offer of a sooner appointment at an NPX partner practice.',
+        // Operator, 2026-11-13: the person working the ticket must see what it is
+        // about before opening it. The ticketing app also starts the subject
+        // "NPX Recall -" for this agent (ticketing-app #454).
+        NPX_RECALL_FIRST_LINE,
         'The patient asked to speak with a person.',
         request ? `What they asked: ${request}` : null,
-        `Their appointment: ${currentAppointment(s.contact)}.`,
+        staffAppointmentLine(s.contact),
         `Date of birth confirmed on the call: ${s.verified ? 'yes' : 'no'}.`,
         callbackSid ? 'They called us back.' : 'We called them.',
         calledFrom && calledFrom !== s.contact.phone

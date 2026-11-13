@@ -1692,6 +1692,20 @@ import { callEnvironment } from "./callRecord";
  * `4464c80a`), which it contains along with v216 (#462, `8795a067`), v215
  * (#461, `84246a37`), v214 (#460, `af248eb3`) and v213 (#459, `9221d1ea`).
  * No migration.
+ *
+ * v220 — THE STAFF TICKET STAYS IN THE HUB (2026-11-13). The NPX staff
+ * callback (`request_staff_callback`) files to the HVA Hub, and its
+ * description named the visit as the caller hears it; for a Refraction Only
+ * that is "a vision test for glasses", and the ticketing app's Hub
+ * re-classifier reads "glasses" as Optical. Measured to 2026-11-13: 6 of 29
+ * NPX staff-callback tickets created in Optical, every one a Refraction Only.
+ * The description now names NextGen's own event (`staffAppointmentLine`); the
+ * caller still hears the plain-words visit. A line the same classifier
+ * would route out of the Hub, read as it is sent, names the visit "An
+ * appointment" (Codex P2 on #467, three rounds). Above main's v218 (#465,
+ * `0c324a9c`), which it contains, and above v219 (#466, open), which it
+ * does not.
+ * No migration.
  */
 /**
  * v223 — EVERY TICKET A CALL CREATED IS ON THE CALL LOG (2026-11-13). Operator:
@@ -1704,8 +1718,8 @@ import { callEnvironment } from "./callRecord";
  * them all; a ticket-number search also finds a call by its second ticket; and
  * a ticket filed with `secondTicketOnThisCall` (the after-hours urgent records,
  * 3 of the 15) puts a `second_ticket_filed` event on the call's timeline,
- * appended, never replacing it. Above main's v218 (#465, `0c324a9c`), which it
- * contains along with v217 (#463, `4464c80a`). No migration.
+ * appended, never replacing it. Above main's v220 (#467, `e9a2443e`), which it
+ * contains along with v218 (#465, `0c324a9c`). No migration.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
   "voice-runtime-v223-every-ticket-on-the-call-log-20261113";
