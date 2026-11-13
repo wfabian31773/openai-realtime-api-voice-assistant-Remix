@@ -96,6 +96,7 @@ import {
   spokenSlotDay,
   spokenSlotTime,
   spokenWhen,
+  textedWhen,
   localParts,
   minutesOf,
   slotDateTime,
@@ -104,6 +105,7 @@ import {
 import { sanitizeForSms } from '../services/gsm7';
 import type { CreateTicketParams, CreateTicketResponse } from '../../server/services/ticketingApiClient';
 import type { BookingOpening, BookingPageLane } from '../runtime/outbound/bookingPage';
+import { CALL_CONFIRMATION_DELAY_MS, type BookingConfirmationRecord } from '../runtime/outbound/bookingConfirmation';
 
 export const DESCRIBE_TOOL_NAME = 'describe_upcoming_appointment';
 export const CONFIRM_DOB_TOOL_NAME = 'confirm_patient_birthdate';
@@ -260,6 +262,8 @@ interface OutreachSession {
   bookingInFlight: Promise<ToolResult> | null;
   /** The HVA Hub ticket filed when they asked for a person. */
   staffTicket: string | null;
+  /** The caller asked staff to cancel or change what was booked on this call (v222). */
+  bookingChangeAsked?: boolean;
   openedAtMs: number;
 }
 
@@ -1248,8 +1252,59 @@ async function bookChosen(
     booked: true,
     booked_by: chosen.by,
     ...(chosen.optionDisagreed ? { option_disagreed: true } : {}),
+    // v222: whether the Azul appointment was cancelled, as a fixed code the
+    // timeline keeps (Wayne, 2026-11-13: record it). Before this the Observatory
+    // read it from the words the agent was given to say.
+    ...azulCancelOutcome(booked.cancel),
     say: confirmation(s.booking.slot, booked.cancel, currentDay),
     fix: 'Say the confirmation as given, ask if there is anything else, then say goodbye and call end_call. The outcome is already recorded.',
+  };
+}
+
+/**
+ * The Azul cancel as the timeline records it (v222): `cancelled`, or
+ * `not_cancelled` with the cancel's own refusal code. Codes only, no patient
+ * details; `toolTimeline` keeps both keys.
+ */
+export function azulCancelOutcome(cancel: AzulCancelResult): { azul_cancel: 'cancelled' | 'not_cancelled'; azul_cancel_reason?: string } {
+  return cancel.cancelled ? { azul_cancel: 'cancelled' } : { azul_cancel: 'not_cancelled', azul_cancel_reason: cancel.reason };
+}
+
+/** The text's booking reference prefix (bookingPage.textLinkCallRef). */
+const TEXT_LINK_CALL_REF_PREFIX = 'text-link-';
+
+/** "Jan 6": the Azul appointment a text names, read as a calendar day. */
+export function textedDay(ymd: string): string {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(ymd);
+  if (!m) return 'current';
+  const d = new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]), 12));
+  return d.toLocaleDateString('en-US', { timeZone: 'UTC', month: 'short', day: 'numeric' });
+}
+
+/** What a booking's confirmation text will say, rendered when it is booked (v222). */
+export function confirmationRecordFor(args: {
+  contact: OutboundContact;
+  slot: NpxSlot;
+  bookingId: string;
+  callRef: string;
+  cancelled: boolean;
+  now?: Date;
+}): BookingConfirmationRecord {
+  const now = args.now ?? new Date();
+  const byLink = args.callRef.startsWith(TEXT_LINK_CALL_REF_PREFIX);
+  return {
+    state: 'due',
+    booking_id: args.bookingId,
+    by: byLink ? 'link' : 'call',
+    ...(byLink ? {} : { call_sid: args.callRef }),
+    when: textedWhen(args.slot),
+    place: [args.slot.partnerName, spokenAddress(args.slot)].filter(Boolean).join(', '),
+    phone: args.slot.phone ?? '',
+    replaced_day: textedDay(field(args.contact, 'appointment_date')),
+    cancel: args.cancelled ? 'cancelled' : 'pending',
+    queued_at: now.toISOString(),
+    // A call's confirmation waits for the call to end; a link's goes now.
+    due_at: new Date(now.getTime() + (byLink ? 0 : CALL_CONFIRMATION_DELAY_MS)).toISOString(),
   };
 }
 
@@ -1321,11 +1376,18 @@ export async function bookOutreachSlot(args: {
   if (!report.ok) {
     console.warn(`[NPX OUTREACH] booking ${book.bookingId}: the cancel report did not land (${report.error}); CEC's backup list will show it`);
   }
+  const bookedSlot = book.slot ?? slot;
   const settle = (async () => {
-    await (await live().store()).settleContact(contact.contactId, 'completed', {
+    const store = await live().store();
+    await store.settleContact(contact.contactId, 'completed', {
       notes: `npx_booking:${book.bookingId}`,
       exceptStatus: ['do_not_call'],
     });
+    // v222: the confirmation text, sent by the scheduler once the call has
+    // ended (./runtime/outbound/bookingConfirmation.ts).
+    await store.queueConfirmation(contact.contactId, confirmationRecordFor({
+      contact, slot: bookedSlot, bookingId: book.bookingId, callRef, cancelled: cancel.cancelled,
+    }));
     return true;
   })().catch((e) => {
     console.warn(`[NPX OUTREACH] booking ${book.bookingId}: could not settle the contact —`, e instanceof Error ? e.message : e);
@@ -1334,7 +1396,7 @@ export async function bookOutreachSlot(args: {
   if (!(await within(settle, Math.min(SETTLE_BUDGET_MS, deadline - Date.now()), false))) {
     console.warn(`[NPX OUTREACH] booking ${book.bookingId}: the contact is not settled yet; the booking stands`);
   }
-  return { ok: true, bookingId: book.bookingId, slot: book.slot ?? slot, cancel };
+  return { ok: true, bookingId: book.bookingId, slot: bookedSlot, cancel };
 }
 
 // ── The text's booking page (v211) ──────────────────────────────────────────
@@ -1399,6 +1461,22 @@ export function appointmentStateLine(booking: OutreachSession['booking']): strin
     : 'Your new appointment stays booked, and our team will cancel your old one with us.';
 }
 
+/** What the caller hears when they asked to change what was just booked (v222). */
+export function bookingChangeStateLine(booking: NonNullable<OutreachSession['booking']>): string {
+  return booking.cancel.cancelled
+    ? 'Until they call, the new appointment is still booked, and your old one with us has been cancelled.'
+    : 'Until they call, the new appointment is still booked, and your appointment with us is still on file.';
+}
+
+/** The ticket line that tells staff what to do when the caller asked to change
+ * the booking made on the call (v222). */
+export function bookingChangeLine(contact: OutboundContact, booking: NonNullable<OutreachSession['booking']>): string {
+  const day = spokenDay(field(contact, 'appointment_date'));
+  return booking.cancel.cancelled
+    ? `URGENT: they asked to cancel or change the NPX booking ${booking.bookingId}. Their Azul appointment on ${day} was cancelled on this call: rebook it if they want it back, and cancel or move the NPX booking in NPX. No confirmation text was sent.`
+    : `URGENT: they asked to cancel or change the NPX booking ${booking.bookingId}. Their Azul appointment on ${day} is still on file: do not cancel it, and cancel or move the NPX booking in NPX. No confirmation text was sent.`;
+}
+
 export function staffReasonFor(request: string): number {
   const text = fold(request);
   for (const cue of SCHEDULING) {
@@ -1422,6 +1500,12 @@ registerTool({
         description: 'What they want, in a few words of their own.',
         askAs: 'What would you like our team to help you with?',
       },
+      changes_booking: {
+        type: 'boolean',
+        description:
+          'True when they want the sooner exam booked on this call cancelled or moved, or their old appointment with us back. ' +
+          'False or left out for anything else, such as an insurance question or wanting the details by text.',
+      },
     },
     required: ['request'],
   },
@@ -1432,12 +1516,23 @@ registerTool({
     const already = (ticket: string): ToolResult => ({
       success: true,
       ticket_number: ticket,
-      say: `I've asked our scheduling team to call you back. ${appointmentStateLine(s.booking)}`,
+      say: s.bookingChangeAsked && s.booking
+        ? `I've asked our scheduling team to call you back to change that. ${bookingChangeStateLine(s.booking)}`
+        : `I've asked our scheduling team to call you back. ${appointmentStateLine(s.booking)}`,
       fix: 'Say that, ask if there is anything else, then say goodbye and call end_call. The outcome is already recorded.',
     });
-    if (s.staffTicket) return already(s.staffTicket);
-
     const request = String(input.request ?? '').trim();
+    // v222: a caller who asks to undo or move what was just booked gets an
+    // urgent ticket saying exactly what staff must do, and no confirmation
+    // text for a booking they asked to change.
+    const changesBooking = !!s.booking && input.changes_booking === true;
+    // One ticket per call, except a booking change asked after another
+    // request was already filed (an insurance question, then "cancel it"):
+    // that change still needs its own urgent ticket and a held text, or the
+    // confirmation goes out and staff never see the undo (Codex P2, #470).
+    const earlierTicket = s.staffTicket;
+    const changeAfterTicket = !!earlierTicket && changesBooking && !s.bookingChangeAsked;
+    if (earlierTicket && !changeAfterTicket) return already(earlierTicket);
     const callbackSid = typeof input.outbound_callback_sid === 'string' ? input.outbound_callback_sid : '';
     const calledFrom = callbackSid ? callbackSessionFor(callbackSid)?.callerPhone ?? '' : '';
     const dob = dobOnFile(s.contact);
@@ -1458,6 +1553,8 @@ registerTool({
         s.booking
           ? `A sooner exam was booked on this call (NPX booking ${s.booking.bookingId}).`
           : 'Their appointment has not been changed.',
+        changesBooking && s.booking ? bookingChangeLine(s.contact, s.booking) : null,
+        changeAfterTicket ? `This adds to ${earlierTicket}, filed earlier on this call.` : null,
       ]
         .filter((l) => l !== null)
         .join('\n'),
@@ -1473,8 +1570,8 @@ registerTool({
       preferredContactMethod: 'phone',
       ...(dob ? { patientBirthMonth: dob.month, patientBirthDay: dob.day, patientBirthYear: dob.year } : {}),
       description: body,
-      priority: 'medium',
-      idempotencyKey: `${sid}-outreach-staff`,
+      priority: changesBooking ? 'urgent' : 'medium',
+      idempotencyKey: changeAfterTicket ? `${sid}-outreach-staff-change` : `${sid}-outreach-staff`,
       callData: { agentUsed: 'npx-outreach', callSid: sid },
     });
     if (!result.success || !result.ticketNumber) {
@@ -1492,14 +1589,26 @@ registerTool({
       return r;
     }
     s.staffTicket = result.ticketNumber;
+    if (changesBooking && s.booking) {
+      s.bookingChangeAsked = true;
+      try {
+        await (await live().store()).holdConfirmation(s.contact.contactId, s.booking.bookingId, 'staff_change');
+      } catch (e) {
+        console.warn(`[NPX OUTREACH] staff callback ${result.ticketNumber}: could not hold the confirmation text —`, e instanceof Error ? e.message : e);
+      }
+    }
     try {
       await (await live().store()).settleContact(s.contact.contactId, 'completed', {
         // v216: a booking on this call keeps its marker, first, so a count of
         // `agent_notes LIKE 'npx_booking:%'` still finds it. Before, the staff
         // note replaced it: 4 of 21 bookings to 2026-11-12 read as no booking.
-        notes: s.booking
-          ? `npx_booking:${s.booking.bookingId}; staff_callback:${result.ticketNumber}`
-          : `staff_callback:${result.ticketNumber}`,
+        notes: [
+          s.booking ? `npx_booking:${s.booking.bookingId}` : null,
+          earlierTicket ? `staff_callback:${earlierTicket}` : null,
+          `staff_callback:${result.ticketNumber}`,
+        ]
+          .filter(Boolean)
+          .join('; '),
         exceptStatus: ['do_not_call'],
       });
     } catch (e) {

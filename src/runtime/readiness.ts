@@ -1706,9 +1706,22 @@ import { callEnvironment } from "./callRecord";
  * `0c324a9c`), which it contains, and above v219 (#466, open), which it
  * does not.
  * No migration.
+ *
+ * v222 — A BOOKING IS CONFIRMED BY TEXT (2026-11-13). Operator: "Anything
+ * booked on the calls or by sms has to have some message confirming with the
+ * appointment details." No NPX outreach booking was ever confirmed in
+ * writing; three of the 46 bookings to 2026-11-12 rang back to ask for the
+ * details by text. bookOutreachSlot now queues a confirmation on the contact
+ * (inside `outreach_text`, so the source refresh keeps it), and the scheduler
+ * sends it once, from the campaign's caller ID, inside its calling window,
+ * after the call has ended, never to a number on do_not_contact. A caller who
+ * asks staff on the call to cancel or change the booking holds it, and that
+ * staff ticket files urgent. Same switch as the texts (NPX_OUTREACH_TEXTS).
+ * Above v220 (#467, merged `e9a2443e`), which it contains. v221 is #469 on its open branch, which this
+ * does not contain. No migration.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v220-the-staff-ticket-stays-in-the-hub-20261113";
+  "voice-runtime-v222-a-booking-is-confirmed-by-text-20261113";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

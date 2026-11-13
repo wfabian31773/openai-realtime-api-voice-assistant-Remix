@@ -31,6 +31,7 @@ import { computeRuntimeReadiness } from "../readiness";
 import { campaignEnabled, outboundDialingEnabled } from "./campaign";
 import { runCampaignTick, type DialerDeps, type TickResult } from "./dialer";
 import { runTextTick } from "./outreachText";
+import { runConfirmationTick } from "./bookingConfirmation";
 import type { SmsSender } from "../../plugin/sms";
 
 export const OUTBOUND_TICK_MS = 60 * 1000;
@@ -107,6 +108,20 @@ export async function runOutboundTick(deps: SchedulerDeps): Promise<TickResult[]
           log: deps.log,
         });
         tick.texts = { sent: texts.sent, held: texts.held, ...(texts.skipped ? { skipped: texts.skipped } : {}) };
+        // The booking confirmations (v222): the same switch, number and window.
+        const confirmations = await runConfirmationTick(slug, policy, {
+          store,
+          env: deps.env,
+          host: deps.host,
+          sms: deps.sms ?? (async () => null),
+          now: deps.now,
+          log: deps.log,
+        });
+        tick.confirmations = {
+          sent: confirmations.sent,
+          held: confirmations.held,
+          ...(confirmations.skipped ? { skipped: confirmations.skipped } : {}),
+        };
       }
       results.push(tick);
     }

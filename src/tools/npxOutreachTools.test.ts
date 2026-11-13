@@ -268,7 +268,9 @@ describe('request_staff_callback (operator, 2026-10-21: a request for a person i
 
   it('is one of the lane\'s tools', () => {
     expect(NPX_OUTREACH_TOOLS).toEqual([DESCRIBE_TOOL_NAME, CONFIRM_DOB_TOOL_NAME, FIND_SOONER_TOOL_NAME, BOOK_SOONER_TOOL_NAME, STAFF_CALLBACK_TOOL_NAME]);
-    expect(Object.keys(getTool(STAFF_CALLBACK_TOOL_NAME)!.input_schema.properties)).toEqual(['request']);
+    expect(Object.keys(getTool(STAFF_CALLBACK_TOOL_NAME)!.input_schema.properties)).toEqual(['request', 'changes_booking']);
+    // v222: whether they want the booking undone is optional; the request is not.
+    expect(getTool(STAFF_CALLBACK_TOOL_NAME)!.input_schema.required).toEqual(['request']);
   });
 });
 
