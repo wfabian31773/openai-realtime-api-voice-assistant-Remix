@@ -1692,9 +1692,21 @@ import { callEnvironment } from "./callRecord";
  * `4464c80a`), which it contains along with v216 (#462, `8795a067`), v215
  * (#461, `84246a37`), v214 (#460, `af248eb3`) and v213 (#459, `9221d1ea`).
  * No migration.
+ *
+ * v220 — THE STAFF TICKET STAYS IN THE HUB (2026-11-13). The NPX staff
+ * callback (`request_staff_callback`) files to the HVA Hub, and its
+ * description named the visit as the caller hears it; for a Refraction Only
+ * that is "a vision test for glasses", and the ticketing app's Hub
+ * re-classifier reads "glasses" as Optical. Measured to 2026-11-13: 6 of 29
+ * NPX staff-callback tickets created in Optical, every one a Refraction Only.
+ * The description now names NextGen's own event (`staffAppointment`); the
+ * caller still hears the plain-words visit. Above main's v218 (#465,
+ * `0c324a9c`), which it contains, and above v219 (#466, open), which it
+ * does not.
+ * No migration.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v218-a-booking-books-the-confirmed-slot-20261112";
+  "voice-runtime-v220-the-staff-ticket-stays-in-the-hub-20261113";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can
