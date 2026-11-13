@@ -361,6 +361,17 @@ describe("the booking confirmation (v222)", () => {
     expect(m).toContain("RETURNING id");
   });
 
+  it("takes a released placeholder over as due, with the cancel's result and the release time (Codex P2 on #474)", () => {
+    const m = method("queueConfirmation");
+    // The same booking is written over only while it is the hang-up's placeholder.
+    expect(m).toContain("OR custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text ->> 'state' = 'released')");
+    expect(m).toContain("AND custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text ->> 'state' = 'released'");
+    expect(m).toContain("'state', 'due',");
+    expect(m).toContain("-> ${CONFIRMATION_FIELD}::text -> 'cancel',");
+    expect(m).toContain("->> 'released_at',");
+    expect(m).toContain("ELSE ${JSON.stringify(record)}::jsonb");
+  });
+
   it("claims and lists only a due confirmation, or a retry whose time has come", () => {
     for (const name of ["claimConfirmation", "confirmationsDue"]) {
       const m = method(name);
@@ -410,6 +421,16 @@ describe("the booking confirmation (v222)", () => {
     expect(m).toContain("->> 'state' = 'awaiting_cancel'");
     expect(m).toContain("jsonb_build_object('state', 'due', 'due_at', ${now.toISOString()}::text)");
     expect(m).toContain("RETURNING id");
+  });
+
+  it("writes a released placeholder when the queue has not landed yet, never a sendable state (Codex P2 on #474)", () => {
+    const m = method("releaseConfirmation");
+    expect(m).toContain("IS DISTINCT FROM ${bookingId}::text");
+    expect(m).toContain("ELSE jsonb_build_object('booking_id', ${bookingId}::text, 'state', 'released',");
+    expect(m).toContain("'cancel', ${cancel}::text, 'released_at', ${now.toISOString()}::text)");
+    expect(m).toContain("COALESCE(custom_data, '{}'::jsonb)");
+    // A placeholder is never in a state the scheduler sends.
+    for (const name of ["claimConfirmation", "confirmationsDue"]) expect(method(name)).not.toContain("'released'");
   });
 
   it("skips an undone booking's confirmation before it is sent, and writes a placeholder when none is queued yet (v224)", () => {
