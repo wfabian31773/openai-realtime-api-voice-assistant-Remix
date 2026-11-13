@@ -1726,3 +1726,50 @@ DB writes, commit, push, PR or deploy. Next: owner reviews and measures producti
 impact; the reported 43 recognised callers among 118 misses was supplied by the
 owner and was not independently replayed in this session. Shared bridge notes
 are outside this worktree; this is the local handoff.
+
+---
+
+## 20. NPX outreach tracking screen — 2026-11-13
+
+Operator, 2026-11-13: "We need to create a screen ... where we track what we
+are doing, who we outreached, the result, if they opted out, etc... we can't be
+flying blind here. I also need to know who booked so I can check NPX."
+
+**Built (branch `claude/npx-outreach-tracking-screen`, a draft PR):** the
+Observatory page `/npx-outreach` ("NPX Outreach" in the nav, beside Campaigns),
+behind the existing login, and one read-only route,
+`GET /api/npx-outreach/tracking?campaign=live|demo&day=all|today|yesterday`
+(`server/observatory/npxOutreach.ts`, the numbers decided by the pure
+`npxOutreach.logic.ts`). Top-row totals with a Pacific day filter, a
+needs-a-person list (staff tickets, bookings whose Azul cancel did not land or
+is not recorded, calls that booked and then asked for staff), and one row per
+contact, filterable and searchable, expanding to every call attempt with a link
+to its call page. Phones show as their last four digits; no date of birth is
+selected or shown.
+
+**Where each number comes from:** contacts, attempts and the outreach-text
+record on `campaign_contacts` / `campaign_contact_attempts`; "answered by a
+person" is a `CALLER:` line in the call's transcript (AMD says human on silent
+lines too); a phone booking is a successful `book_sooner_exam` event in the
+call's `tool_timeline`, its Azul cancel read from the confirmation sentence the
+caller heard (`say`), the only place a phone booking's cancel result is kept;
+staff tickets from the `staff_callback:` note and the `request_staff_callback`
+event; opt-outs from `do_not_contact`.
+
+**Found while building it (Hub, 2026-11-13, counts only):** 45 contacts have a
+successful `book_sooner_exam` on a call, and 12 of them no longer carry the
+`npx_booking:` note (a later `staff_callback:` note replaced it, the v216
+shape), so a count of the note reads 34 bookings where the calls show 46
+(45 by phone, 1 by link). The screen counts the timeline, and shows "id not in
+the Hub" for those 12; the staff ticket's description carries the NPX id.
+
+**Not shown, and why:** NPX's own booking table (another database; the page
+shows the NPX booking id to look up there); the Azul cancel on a LINK booking
+(the booking page records no cancel result in the Hub, so it reads "not
+recorded"); whether a staff ticket has been worked (the Support Center); a
+date-of-birth try on the link carries no time, so it counts for all time only.
+
+No migration, no index (602 live contacts and 864 attempts are read in one
+pass), no voice-runtime change, no marker. Tests:
+`server/observatory/npxOutreach.logic.test.ts`,
+`server/observatory/npxOutreach.test.ts`, `client/src/lib/npxOutreachView.test.ts`.
