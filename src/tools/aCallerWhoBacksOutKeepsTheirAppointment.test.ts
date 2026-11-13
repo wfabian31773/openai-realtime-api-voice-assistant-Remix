@@ -754,8 +754,10 @@ describe('a booking whose writes outlast the tool never lands over its undo or a
     };
     await bookOn(sid);
     const undoing = undo(sid);
-    setTimeout(release, 100);
+    const released = new Promise<void>((r) => setTimeout(() => { release(); r(); }, 100));
     expect(await undoing).toMatchObject({ booking_undone: true });
+    // Look only once the booking's own settle has been let go and has landed.
+    await released;
     await settled();
     expect(store.contacts.get('c1')!).toMatchObject({ status: 'declined', notes: 'npx_booking_undone:booking-1' });
   }, 20_000);
