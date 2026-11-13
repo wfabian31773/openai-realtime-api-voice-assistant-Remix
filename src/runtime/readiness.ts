@@ -1706,6 +1706,19 @@ import { callEnvironment } from "./callRecord";
  * `0c324a9c`), which it contains, and above v219 (#466, open), which it
  * does not.
  * No migration.
+ *
+ * v222 — A BOOKING IS CONFIRMED BY TEXT (2026-11-13). Operator: "Anything
+ * booked on the calls or by sms has to have some message confirming with the
+ * appointment details." No NPX outreach booking was ever confirmed in
+ * writing; three of the 46 bookings to 2026-11-12 rang back to ask for the
+ * details by text. bookOutreachSlot now queues a confirmation on the contact
+ * (inside `outreach_text`, so the source refresh keeps it), and the scheduler
+ * sends it once, from the campaign's caller ID, inside its calling window,
+ * after the call has ended, never to a number on do_not_contact. A caller who
+ * asks staff on the call to cancel or change the booking holds it, and that
+ * staff ticket files urgent. Same switch as the texts (NPX_OUTREACH_TEXTS).
+ * Above v220 (#467, merged `e9a2443e`), which it contains. v221 is #469 on its open branch, which this
+ * does not contain. No migration.
  */
 /**
  * v223 — EVERY TICKET A CALL CREATED IS ON THE CALL LOG (2026-11-13). Operator:
@@ -1718,8 +1731,9 @@ import { callEnvironment } from "./callRecord";
  * them all; a ticket-number search also finds a call by its second ticket; and
  * a ticket filed with `secondTicketOnThisCall` (the after-hours urgent records,
  * 3 of the 15) puts a `second_ticket_filed` event on the call's timeline,
- * appended, never replacing it. Above main's v220 (#467, `e9a2443e`), which it
- * contains along with v218 (#465, `0c324a9c`). No migration.
+ * appended, never replacing it. Above main's v222 (#470, `951dd0ba`), which it
+ * contains along with v220 (#467, `e9a2443e`) and v218 (#465, `0c324a9c`). No
+ * migration.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
   "voice-runtime-v223-every-ticket-on-the-call-log-20261113";

@@ -10,6 +10,7 @@ import {
   CALLBACK_ATTEMPT_NUMBER,
   DIALABLE_STATUSES,
   NOT_PLACED,
+  CONFIRMATION_FIELD,
   OUTREACH_TEXT_KEY,
   TEXTABLE_STATUSES,
   dncKey,
@@ -24,6 +25,7 @@ import {
 import type { SourceContact } from "./campaign";
 import { ChannelDoNotContact, SMS_DNC_SOURCE } from "./channelDnc";
 import type { OutreachTextRecord } from "./outreachText";
+import type { BookingConfirmationRecord } from "./bookingConfirmation";
 
 export interface FakeAttempt {
   id: string;
@@ -444,5 +446,76 @@ export class FakeOutboundStore implements OutboundStore {
   async clearSmsStop(phone: string): Promise<void> {
     const key = dncKey(phone);
     if (key) this.channelDnc.setSms(key, false);
+  }
+
+  // ── The booking confirmation (v222) ──
+  private confirmationOf(c: ContactRow): BookingConfirmationRecord | null {
+    const t = c.customData[OUTREACH_TEXT_KEY];
+    if (!t || typeof t !== "object") return null;
+    const r = (t as Record<string, unknown>)[CONFIRMATION_FIELD];
+    return r && typeof r === "object" ? (r as BookingConfirmationRecord) : null;
+  }
+
+  private writeConfirmation(c: ContactRow, record: BookingConfirmationRecord): void {
+    const t = c.customData[OUTREACH_TEXT_KEY];
+    const base = t && typeof t === "object" ? (t as Record<string, unknown>) : {};
+    c.customData = { ...c.customData, [OUTREACH_TEXT_KEY]: { ...base, [CONFIRMATION_FIELD]: record } };
+  }
+
+  private confirmationDue(c: ContactRow, now: Date): boolean {
+    const r = this.confirmationOf(c);
+    if (!r || (r.state !== "due" && r.state !== "retry")) return false;
+    const at = r.retry_after ?? r.due_at;
+    return !!at && new Date(at).getTime() <= now.getTime();
+  }
+
+  /** How many confirmation claims landed, for the "never twice" tests. */
+  confirmationClaims = 0;
+
+  async queueConfirmation(contactId: string, record: BookingConfirmationRecord): Promise<boolean> {
+    const c = this.contacts.get(contactId);
+    if (!c) return false;
+    const held = this.confirmationOf(c);
+    if (held && held.booking_id === record.booking_id) return false;
+    this.writeConfirmation(c, { ...record });
+    return true;
+  }
+
+  async confirmationsDue(campaignId: string, now: Date, limit: number): Promise<ContactRow[]> {
+    return [...this.contacts.values()]
+      .filter((c) => c.campaignId === campaignId && this.confirmationDue(c, now))
+      .slice(0, limit)
+      .map((c) => ({ ...c, customData: { ...c.customData } }));
+  }
+
+  async claimConfirmation(contactId: string, now: Date): Promise<ContactRow | null> {
+    const c = this.contacts.get(contactId);
+    if (!c || !this.confirmationDue(c, now)) return null;
+    this.writeConfirmation(c, { ...this.confirmationOf(c)!, state: "claimed", claimed_at: now.toISOString() });
+    this.confirmationClaims += 1;
+    return { ...c, customData: { ...c.customData } };
+  }
+
+  async patchConfirmation(contactId: string, patch: Partial<BookingConfirmationRecord>): Promise<void> {
+    const c = this.contacts.get(contactId);
+    const r = c ? this.confirmationOf(c) : null;
+    if (!c || !r) return;
+    const recordsASend = patch.state === "sent" || patch.state === "unknown";
+    if (!recordsASend && r.state !== "claimed") return;
+    const defined = Object.fromEntries(Object.entries(patch).filter(([, v]) => v !== undefined));
+    this.writeConfirmation(c, { ...r, ...defined } as BookingConfirmationRecord);
+  }
+
+  async holdConfirmation(contactId: string, bookingId: string, reason: string): Promise<boolean> {
+    const c = this.contacts.get(contactId);
+    const r = c ? this.confirmationOf(c) : null;
+    if (!c) return false;
+    if (!r || r.booking_id !== bookingId) {
+      this.writeConfirmation(c, { booking_id: bookingId, state: "held", reason } as BookingConfirmationRecord);
+      return true;
+    }
+    if (r.state !== "due" && r.state !== "retry" && r.state !== "claimed") return false;
+    this.writeConfirmation(c, { ...r, state: "held", reason });
+    return true;
   }
 }

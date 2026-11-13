@@ -12,6 +12,7 @@ import { parse } from "csv-parse/sync";
 import { getTwilioClient, getTwilioFromPhoneNumber } from "../src/lib/twilioClient";
 import { priceVoiceCall } from '../src/services/callCostService';
 import { mountOperatorLineSettings } from './operatorLineSettings';
+import { mountNpxOutreachTracking } from './observatory/npxOutreach';
 import { boundPluginStore } from '../src/plugin/bindings';
 import { normalizeCallLog } from './callLogShape';
 
@@ -45,6 +46,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   mountOperatorLineSettings(app, { authenticate: isAuthenticated, admin: requireRole('admin'),
     store: boundPluginStore, env: process.env });
+
+  // NPX outreach tracking screen (operator, 2026-11-13: "we can't be flying
+  // blind here"). Read only: who was outreached, the result, the booking and
+  // its Azul cancel, staff tickets and opt-outs. server/observatory/npxOutreach.ts.
+  mountNpxOutreachTracking(app, { authenticate: isAuthenticated });
 
   // ==================== Observatory (docs/observatory/) ====================
   // OBS-0 health: proves both data planes before any widget ships — this

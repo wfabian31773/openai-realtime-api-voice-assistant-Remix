@@ -201,21 +201,50 @@ describe("direct open-line calls", () => {
     expect(h.sender.createCall).not.toHaveBeenCalled();
   });
 
-  it("masks phone numbers and redacts PHI before truncating the audit purpose", async () => {
-    const h = await boot(); const bot = h.store.mint(["calls:direct"]);
+  // tokenJti is 32 random hex characters, so an all-hex secret below ("1950",
+  // "555555") can turn up inside it by chance: 29 x 16^-4, about 0.04% of runs,
+  // for the year alone (CI run 43053202049 on #447, tokenJti
+  // 7fa8afeff1bc601950ba6ca855849ff9).
+  // Every other field is scanned; tokenJti is pinned to the token's own id
+  // instead, so leaving it out of the scan cannot hide a leak in it.
+  async function expectDirectCallAuditRedacted(h: Awaited<ReturnType<typeof boot>>, bot: ReturnType<MemoryPluginStore["mint"]>) {
     const purpose = `Call Private Recipient at ${PHONE}; DOB 1950-03-17; secret@example.com cataract. ${"Ask about office hours. ".repeat(30)}`;
     expect((await h.request("/calls/direct", { ...input, purpose }, bot)).status).toBe(200);
     const entries = await h.store.listAudit();
     expect(entries[0]).toMatchObject({ tokenJti: bot.jti, createdAt: h.clock.at, tool: "direct_call", outcome: "committed",
       details: { maskedNumber: "***0111", reason: "placed" } });
+    for (const entry of entries) expect(entry.tokenJti).toBe(bot.jti);
     expect(entries[0].details!.purpose!.length).toBeLessThanOrEqual(160);
+    const scanned = JSON.stringify(entries.map(({ tokenJti, ...rest }) => rest));
     for (const secret of [PHONE, "555555", "Private", "Recipient", "1950", "secret@example.com", "cataract"]) {
-      expect(JSON.stringify(entries)).not.toContain(secret);
+      expect(scanned).not.toContain(secret);
     }
     const exec = vi.fn().mockResolvedValue([]);
     await createSqlPluginStore(exec).writeAudit(entries[0]);
     expect(exec.mock.calls[0][0]).toContain("details, created_at");
     expect(JSON.stringify(exec.mock.calls)).not.toContain(PHONE);
+    return entries;
+  }
+
+  it("masks phone numbers and redacts PHI before truncating the audit purpose", async () => {
+    const h = await boot();
+    await expectDirectCallAuditRedacted(h, h.store.mint(["calls:direct"]));
+  });
+
+  it.each([
+    ["7fa8afeff1bc601950ba6ca855849ff9", "1950"], // the CI run's token id
+    ["0123456789abcdef555555fedcba9876", "555555"],
+  ])("does not read token id %s, which contains %s, as leaked PHI", async (jti, secret) => {
+    const h = await boot();
+    const minted = h.store.mint(["calls:direct"]);
+    const row = h.store.tokens.get(minted.jti)!;
+    h.store.tokens.delete(minted.jti);
+    h.store.tokens.set(jti, { ...row, jti });
+    const bot = { ...minted, jti, plaintext: minted.plaintext.replace(`.${minted.jti}.`, `.${jti}.`) };
+    const entries = await expectDirectCallAuditRedacted(h, bot);
+    // The secret is in the entry, inside tokenJti only: scanning the whole
+    // entry, as this test once did, fails here.
+    expect(JSON.stringify(entries)).toContain(secret);
   });
 
   it("honors the write switch and audits that refusal", async () => {
