@@ -269,6 +269,12 @@ export function spokenWhen(s: NpxSlot): string {
   return `${spokenSlotDay(s)} at ${spokenSlotTime(s)}`;
 }
 
+/** "Tue, Nov 17 at 9:20 AM": the new visit as a text says it (v221). */
+export function textedWhen(s: NpxSlot): string {
+  const day = new Date(s.startAt).toLocaleDateString('en-US', { timeZone: tz(s), weekday: 'short', month: 'short', day: 'numeric' });
+  return `${day} at ${spokenSlotTime(s)}`;
+}
+
 /** The slot's date and 24-hour time in the clinic's own time zone
  * ("2026-12-01", "10:00"): what book_sooner_exam is called with (v218). */
 export function slotDateTime(s: NpxSlot): { date: string; time: string } {

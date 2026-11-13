@@ -39,6 +39,7 @@ import type { OutboundContact, SourceContact } from "./campaign";
 import { RUNTIME_OUTBOUND_CAMPAIGN_TYPE } from "./campaign";
 import type { CallbackCandidate } from "./callback";
 import type { OutreachTextRecord } from "./outreachText";
+import type { BookingConfirmationRecord } from "./bookingConfirmation";
 import { SMS_DNC_SOURCE } from "./channelDnc";
 import { nameKey } from "../../tools/verifiedIdentity";
 
@@ -69,6 +70,8 @@ export type ContactStatus =
  * a row's fields following the Console never wipe "this person was texted".
  */
 export const OUTREACH_TEXT_KEY = "outreach_text";
+/** Inside OUTREACH_TEXT_KEY: the booking confirmation text (v221, ./bookingConfirmation.ts). */
+export const CONFIRMATION_FIELD = "confirmation";
 
 /**
  * Who may be texted (v211): everyone the campaign is still working on, and
@@ -289,6 +292,21 @@ export interface OutboundStore {
   claimLinkBooking(contactId: string, tokenHash: string, now: Date, staleBefore: Date): Promise<boolean>;
   /** An SMS START: delete only the `sms_stop` row, never a voice opt-out. */
   clearSmsStop(phone: string): Promise<void>;
+
+  // ── The booking confirmation text (v221, ./bookingConfirmation.ts) ──
+  /** Queue a booking's confirmation on the contact, inside outreach_text.
+   * A no-op when this booking's confirmation is already queued or sent.
+   * True when it was written. */
+  queueConfirmation(contactId: string, record: BookingConfirmationRecord): Promise<boolean>;
+  /** Rows on this campaign whose confirmation is due or a retry is due. */
+  confirmationsDue(campaignId: string, now: Date, limit: number): Promise<ContactRow[]>;
+  /** Claim a due confirmation in one statement: the row, or null. */
+  claimConfirmation(contactId: string, now: Date): Promise<ContactRow | null>;
+  /** Merge fields into the row's confirmation; nothing else changes. */
+  patchConfirmation(contactId: string, patch: Partial<BookingConfirmationRecord>): Promise<void>;
+  /** Hold this booking's confirmation (the caller asked staff to change it),
+   * while it is still waiting to go. True when it was held. */
+  holdConfirmation(contactId: string, bookingId: string, reason: string): Promise<boolean>;
 }
 
 /**
@@ -930,6 +948,83 @@ export async function createDbOutboundStore(): Promise<OutboundStore> {
       await ensureSchema();
       await db.execute(sql`
         DELETE FROM do_not_contact WHERE phone_key = ${key}::varchar AND source = ${SMS_DNC_SOURCE}::varchar`);
+    },
+
+    async queueConfirmation(contactId, record) {
+      const written = rows(
+        await db.execute(sql`
+          UPDATE campaign_contacts
+             SET custom_data = jsonb_set(
+                   COALESCE(custom_data, '{}'::jsonb), ARRAY[${OUTREACH_TEXT_KEY}::text],
+                   CASE WHEN jsonb_typeof(custom_data -> ${OUTREACH_TEXT_KEY}::text) = 'object'
+                        THEN custom_data -> ${OUTREACH_TEXT_KEY}::text ELSE '{}'::jsonb END
+                     || jsonb_build_object(${CONFIRMATION_FIELD}::text, ${JSON.stringify(record)}::jsonb),
+                   true)
+           WHERE id = ${contactId}::varchar
+             AND (custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text IS NULL
+                  OR custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text ->> 'booking_id'
+                     IS DISTINCT FROM ${record.booking_id}::text)
+          RETURNING id`),
+      );
+      return written.length > 0;
+    },
+
+    async confirmationsDue(campaignId, now, limit) {
+      return rows(
+        await db.execute(sql`
+          SELECT * FROM campaign_contacts
+           WHERE campaign_id = ${campaignId}::varchar
+             AND custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text ->> 'state' IN ('due', 'retry')
+             AND COALESCE(custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text ->> 'retry_after',
+                          custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text ->> 'due_at')::timestamptz
+                 <= ${now.toISOString()}::timestamptz
+           ORDER BY custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text ->> 'queued_at', id
+           LIMIT ${limit}::int`),
+      ).map(rowToContact);
+    },
+
+    async claimConfirmation(contactId, now) {
+      const claimed = rows(
+        await db.execute(sql`
+          UPDATE campaign_contacts
+             SET custom_data = jsonb_set(custom_data, ARRAY[${OUTREACH_TEXT_KEY}::text, ${CONFIRMATION_FIELD}::text],
+                   (custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text)
+                     || jsonb_build_object('state', 'claimed', 'claimed_at', ${now.toISOString()}::text),
+                   true)
+           WHERE id = ${contactId}::varchar
+             AND custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text ->> 'state' IN ('due', 'retry')
+             AND COALESCE(custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text ->> 'retry_after',
+                          custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text ->> 'due_at')::timestamptz
+                 <= ${now.toISOString()}::timestamptz
+          RETURNING *`),
+      );
+      return claimed[0] ? rowToContact(claimed[0]) : null;
+    },
+
+    async patchConfirmation(contactId, patch) {
+      await db.execute(sql`
+        UPDATE campaign_contacts
+           SET custom_data = jsonb_set(custom_data, ARRAY[${OUTREACH_TEXT_KEY}::text, ${CONFIRMATION_FIELD}::text],
+                 (custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text) || ${JSON.stringify(patch)}::jsonb,
+                 true)
+         WHERE id = ${contactId}::varchar
+           AND jsonb_typeof(custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text) = 'object'`);
+    },
+
+    async holdConfirmation(contactId, bookingId, reason) {
+      const held = rows(
+        await db.execute(sql`
+          UPDATE campaign_contacts
+             SET custom_data = jsonb_set(custom_data, ARRAY[${OUTREACH_TEXT_KEY}::text, ${CONFIRMATION_FIELD}::text],
+                   (custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text)
+                     || jsonb_build_object('state', 'held', 'reason', ${reason}::text),
+                   true)
+           WHERE id = ${contactId}::varchar
+             AND custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text ->> 'booking_id' = ${bookingId}::text
+             AND custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text ->> 'state' IN ('due', 'retry')
+          RETURNING id`),
+      );
+      return held.length > 0;
     },
 
     async stampDoNotContact(phone, source) {
