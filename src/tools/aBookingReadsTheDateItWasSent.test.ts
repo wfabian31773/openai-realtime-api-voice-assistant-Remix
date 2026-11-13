@@ -339,6 +339,29 @@ describe('nothing is invented: a date read in words lands only on a day a choice
     expect(readChosenDate(undefined, offered)).toEqual({ form: 'none' });
   });
 
+  // Codex P1 on #476 (head 7838fcc): "2042." failed the four-digit year test,
+  // the year fell back to the offered February 13 in 2041, and that slot booked.
+  it('a year with punctuation after it is read, so the wrong year is never booked', async () => {
+    await twoListsRead();
+    const r = await run(BOOK_SOONER_TOOL_NAME, { date: 'February 13, 2042.', time: '9:00 AM' });
+    expect(r).toMatchObject({ success: false, error: 'not_offered' });
+    expect(book).not.toHaveBeenCalled();
+  });
+
+  it('readChosenDate keeps a year however it is punctuated or abbreviated, and refuses one it cannot read', () => {
+    const offered = [FEB5_0900, FEB13_0900];
+    expect(readChosenDate('February 13, 2042.', offered)).toEqual({ day: '2042-02-13', form: 'words' });
+    expect(readChosenDate('February 13, 2041.', offered)).toEqual({ day: '2041-02-13', form: 'words' });
+    expect(readChosenDate('Wednesday, February 13th, 2041!', offered)).toEqual({ day: '2041-02-13', form: 'words' });
+    expect(readChosenDate('(Feb. 13, 2042)', offered)).toEqual({ day: '2042-02-13', form: 'words' });
+    expect(readChosenDate('2/13/2042.', offered)).toEqual({ day: '2042-02-13', form: 'words' });
+    expect(readChosenDate("Feb 13 '42", offered)).toEqual({ day: '2042-02-13', form: 'words' });
+    expect(readChosenDate('Feb 13 \u201941', offered)).toEqual({ day: '2041-02-13', form: 'words' });
+    expect(readChosenDate('February 13, 2041 2042', offered)).toEqual({ form: 'unreadable' });
+    expect(readChosenDate('February 13, 20422', offered)).toEqual({ form: 'unreadable' });
+    expect(readChosenDate('February 13, 204', offered)).toEqual({ form: 'unreadable' });
+  });
+
   it('a month and day two offered days share is not read to either', () => {
     const nextYear = slot('feb13-2042', '2042-02-13T17:00:00.000Z', 'Beaumont');
     expect(readChosenDate('Feb 13', [FEB13_0900, nextYear])).toEqual({ form: 'unreadable' });

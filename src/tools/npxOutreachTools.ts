@@ -1461,13 +1461,22 @@ export function readChosenDate(
   let month = 0;
   let dayOfMonth = 0;
   let year = 0;
-  const numeric = /^(\d{1,2})[/.-](\d{1,2})(?:[/.-](\d{2}|\d{4}))?$/.exec(text);
+  // Punctuation that ends a sentence or a list item is not part of a date:
+  // "2/13/2042." and "February 13, 2042." carry their year (Codex P1 on
+  // #476: the year with a full stop after it was dropped, and the date was
+  // read to the offered February 13 a year earlier).
+  const bare = text.replace(/[\s.,;:!?)\]]+$/, '');
+  const numeric = /^(\d{1,2})[/.-](\d{1,2})(?:[/.-](\d{2}|\d{4}))?$/.exec(bare);
   if (numeric) {
     month = Number(numeric[1]);
     dayOfMonth = Number(numeric[2]);
     if (numeric[3]) year = numeric[3].length === 2 ? 2000 + Number(numeric[3]) : Number(numeric[3]);
   } else {
-    const words = text.toLowerCase().replace(/,/g, ' ').split(/\s+/).filter(Boolean);
+    const words = bare
+      .toLowerCase()
+      .split(/[\s,]+/)
+      .map((w) => w.replace(/^[(\[]+/, '').replace(/[.;:!?)\]]+$/, ''))
+      .filter(Boolean);
     for (const w of words) {
       const m = monthOf(w);
       if (m && !month) {
@@ -1479,7 +1488,15 @@ export function readChosenDate(
         dayOfMonth = Number(d[1]);
         continue;
       }
-      if (/^\d{4}$/.test(w) && !year) year = Number(w);
+      // A year is read or the date is not: a year that cannot be read is
+      // never replaced by the year of a choice on offer.
+      const y4 = /^\d{4}$/.test(w) ? Number(w) : /^['’]\d{2}$/.test(w) ? 2000 + Number(w.slice(1)) : 0;
+      if (y4) {
+        if (year && year !== y4) return { form: 'unreadable' };
+        year = y4;
+        continue;
+      }
+      if (/^\d{3}$|^\d{5,}$/.test(w)) return { form: 'unreadable' };
     }
   }
   if (!(month >= 1 && month <= 12 && dayOfMonth >= 1 && dayOfMonth <= 31)) return { form: 'unreadable' };
