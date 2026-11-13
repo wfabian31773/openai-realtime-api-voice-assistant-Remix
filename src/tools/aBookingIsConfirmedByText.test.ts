@@ -419,6 +419,45 @@ describe('a booking change asked after another staff ticket on the call', () => 
   });
 });
 
+// Codex P2 on #470 (head b3337a4): the scheduler claims a confirmation, then
+// asks whether the call is open. A staff change that lands in that gap found
+// the row `claimed`, could not hold it, and the scheduler's release put it
+// back to `retry`, so the text went out after the call.
+describe('a booking change that lands while the scheduler holds the claim', () => {
+  const sid = 'CA00000000000000000000000000000230';
+  it('is held, and the release does not undo it', async () => {
+    await bookOn(sid);
+    const open = store.callOpenOnPhone.bind(store);
+    let changed = false;
+    store.callOpenOnPhone = async (contactId, since) => {
+      if (!changed) {
+        changed = true;
+        expect(confirmation()).toMatchObject({ state: 'claimed' });
+        await runOn(sid, STAFF_CALLBACK_TOOL_NAME, { request: 'Cancel the new appointment', changes_booking: true });
+      }
+      return open(contactId, since);
+    };
+    expect((await tick()).sent).toBe(0);
+    expect(changed).toBe(true);
+    expect(confirmation()).toMatchObject({ state: 'held', reason: 'staff_change' });
+    await hangUp();
+    expect((await tick({ now: () => new Date(NOW.getTime() + 10 * 60_000) })).sent).toBe(0);
+    expect(sent).toEqual([]);
+  });
+
+  it('a send is still recorded as sent', async () => {
+    await bookOn(sid);
+    await hangUp();
+    const claimed = await store.claimConfirmation('c1', NOW);
+    expect(claimed).not.toBeNull();
+    await store.holdConfirmation('c1', 'booking-1', 'staff_change');
+    await store.patchConfirmation('c1', { state: 'sent', sent_at: NOW.toISOString(), message_sid: 'SM1' });
+    expect(confirmation()).toMatchObject({ state: 'sent', message_sid: 'SM1' });
+    await store.patchConfirmation('c1', { state: 'retry', reason: 'call_open' });
+    expect(confirmation()).toMatchObject({ state: 'sent' });
+  });
+});
+
 describe('changes_booking with nothing booked', () => {
   it('is an ordinary staff callback', async () => {
     await runOn('CA00000000000000000000000000000227', STAFF_CALLBACK_TOOL_NAME, { request: 'Cancel my appointment', changes_booking: true });

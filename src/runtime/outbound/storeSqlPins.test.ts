@@ -374,10 +374,17 @@ describe("the booking confirmation (v222)", () => {
     expect(method("claimConfirmation")).toContain("RETURNING *");
   });
 
-  it("holds only this booking's confirmation, and only before it is claimed", () => {
+  it("holds only this booking's confirmation, including one the scheduler has claimed", () => {
     const m = method("holdConfirmation");
     expect(m).toContain("->> 'booking_id' = ${bookingId}::text");
-    expect(m).toContain("->> 'state' IN ('due', 'retry')");
+    expect(m).toContain("->> 'state' IN ('due', 'retry', 'claimed')");
+  });
+
+  it("puts a claimed confirmation back only while it is still claimed, and always records a send", () => {
+    const m = method("patchConfirmation");
+    expect(m).toContain("->> 'state' = 'claimed')");
+    expect(m).toContain('patch.state === "sent" || patch.state === "unknown"');
+    expect(m).toContain("${recordsASend}::boolean");
   });
 
   it("never moves updated_at, which the stale-claim reaper reads as a call's claim", () => {

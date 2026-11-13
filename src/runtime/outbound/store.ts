@@ -1002,13 +1002,20 @@ export async function createDbOutboundStore(): Promise<OutboundStore> {
     },
 
     async patchConfirmation(contactId, patch) {
+      // A text that may be on their phone is recorded whatever happened
+      // meanwhile; anything else lands only while the row is still the
+      // scheduler's claim, so it never undoes a hold a call wrote during the
+      // claim (Codex P2 on #470).
+      const recordsASend = patch.state === "sent" || patch.state === "unknown";
       await db.execute(sql`
         UPDATE campaign_contacts
            SET custom_data = jsonb_set(custom_data, ARRAY[${OUTREACH_TEXT_KEY}::text, ${CONFIRMATION_FIELD}::text],
                  (custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text) || ${JSON.stringify(patch)}::jsonb,
                  true)
          WHERE id = ${contactId}::varchar
-           AND jsonb_typeof(custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text) = 'object'`);
+           AND jsonb_typeof(custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text) = 'object'
+           AND (${recordsASend}::boolean
+                OR custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text ->> 'state' = 'claimed')`);
     },
 
     async holdConfirmation(contactId, bookingId, reason) {
@@ -1021,7 +1028,7 @@ export async function createDbOutboundStore(): Promise<OutboundStore> {
                    true)
            WHERE id = ${contactId}::varchar
              AND custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text ->> 'booking_id' = ${bookingId}::text
-             AND custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text ->> 'state' IN ('due', 'retry')
+             AND custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text ->> 'state' IN ('due', 'retry', 'claimed')
           RETURNING id`),
       );
       return held.length > 0;
