@@ -114,6 +114,16 @@ describe('the corpus: Refraction Only staff callbacks created in Optical (6 SIDs
     expect(payload.description).not.toMatch(/glasses/i);
     expect(landsIn(payload)).toBe(9);
   });
+
+  // Operator, 2026-11-13: every NPX staff ticket says what it is on its first
+  // line, and the words do not move it out of the Hub.
+  it.each(CORPUS)('%s: the first line says NPX Recall', async (sid, request) => {
+    await setUp('Refraction Only');
+    await run(sid, STAFF_CALLBACK_TOOL_NAME, { request });
+    const payload = fileTicket.mock.calls[0][0] as { departmentId: number; description: string };
+    expect(payload.description.split('\n')[0]).toMatch(/^NPX Recall: /);
+    expect(landsIn({ departmentId: 9, description: payload.description.split('\n')[0] })).toBe(9);
+  });
 });
 
 describe('every visit on the campaign stays in the Hub', () => {

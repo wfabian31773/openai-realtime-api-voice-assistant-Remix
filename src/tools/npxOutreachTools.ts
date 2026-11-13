@@ -1383,6 +1383,10 @@ export const npxBookingPageLane: BookingPageLane = {
 
 /** The Hub's own reason for what they asked, by the cues the queue lanes
  * already route on; "reschedule" when their words name none. */
+/** The first line of every NPX outreach staff ticket. */
+export const NPX_RECALL_FIRST_LINE =
+  'NPX Recall: an Azul outreach call offering a sooner appointment at an NPX partner practice.';
+
 /**
  * Where their appointments stand, said after a staff callback is asked for.
  * A caller who booked on this call and then asked for a person must not be
@@ -1439,7 +1443,10 @@ registerTool({
     const dob = dobOnFile(s.contact);
     const body = sanitizeForSms(
       [
-        'Azul outreach call: an offer of a sooner appointment at an NPX partner practice.',
+        // Operator, 2026-11-13: the person working the ticket must see what it is
+        // about before opening it. The ticketing app also starts the subject
+        // "NPX Recall -" for this agent (ticketing-app #454).
+        NPX_RECALL_FIRST_LINE,
         'The patient asked to speak with a person.',
         request ? `What they asked: ${request}` : null,
         staffAppointmentLine(s.contact),
