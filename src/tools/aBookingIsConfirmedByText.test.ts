@@ -216,6 +216,24 @@ describe('a booking on a call', () => {
     expect(sent).toHaveLength(1);
   });
 
+  it('the same booking queued again is not sent again; a different booking is', async () => {
+    await bookOn('CA00000000000000000000000000000229');
+    await hangUp();
+    await tick({ now: () => new Date(NOW.getTime() + 2 * 60_000) });
+    expect(sent).toHaveLength(1);
+    const record = confirmation()!;
+
+    // A retried booking that NPX answers with the same booking id.
+    expect(await store.queueConfirmation('c1', { ...record, state: 'due' })).toBe(false);
+    await tick({ now: () => new Date(NOW.getTime() + 20 * 60_000) });
+    expect(sent).toHaveLength(1);
+
+    // A new booking on the contact gets its own text.
+    expect(await store.queueConfirmation('c1', { ...record, state: 'due', booking_id: 'booking-2' })).toBe(true);
+    await tick({ now: () => new Date(NOW.getTime() + 30 * 60_000) });
+    expect(sent).toHaveLength(2);
+  });
+
   it('says our team will cancel when the Azul cancel failed', async () => {
     cancel.mockResolvedValueOnce({ cancelled: false, reason: 'nextgen_timeout' } as AzulCancelResult);
     await bookOn('CA00000000000000000000000000000222');
