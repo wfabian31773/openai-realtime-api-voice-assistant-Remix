@@ -1,5 +1,7 @@
 import { ticketIdentityFields } from './ticketIdentity';
-import { recordsLinePurpose, recordsRequestText, recordsLineRedirect } from '../../shared/records-request-intent';
+import {
+  recordsLinePurpose, recordsRequestText, recordsLineRedirect, recordsWorkNotAccess, type RecordsWorkNotAccess,
+} from '../../shared/records-request-intent';
 import { callerUtterances } from '../services/symptomCorroboration';
 /**
  * The tools a Medical Records agent needs, and nothing else.
@@ -398,6 +400,42 @@ export function keptForNoNameNote(redirect: { departmentName: string; requestRea
  * email hears where to find the form. One constant, so the spoken domain can
  * be corrected in one place.
  */
+/**
+ * A CORRECTION, OR WITHDRAWING A REQUEST, IS NOT A REQUEST FOR COPIES — v221.
+ *
+ * The ticketing app files both on the records line under their own reasons
+ * ('Records Amendment', 'Records Request Cancellation') and strips every
+ * access field from them: no pathway, no CAP clock, no signing form
+ * (`lib/voice-agent/records-intake.ts`, #406). Until v221 this repo's copy of
+ * the classifier did not know either, read "I need to correct my medical
+ * records" as an access request, and the tool asked for a signing-link
+ * channel, how and where to send records and which dates, and stated
+ * `roa_patient` on the clock for it.
+ *
+ * The header line starts `Request Type:`, which both copies of
+ * `recordsRequestText` strip, so it is never read as the caller's words.
+ */
+export const NOT_ACCESS_HEADER: Record<RecordsWorkNotAccess, string> = {
+  amendment: 'Request Type: Records Amendment — a correction to the records, not a request for copies. NOT on the records clock.',
+  cancellation: 'Request Type: Records Request Cancellation — withdrawing a records request, not a new one. NOT on the records clock.',
+};
+const NOT_ACCESS_WORK: Record<RecordsWorkNotAccess, string> = {
+  amendment: 'a correction to the records',
+  cancellation: 'withdrawing a records request',
+};
+/** For the model (`fix`, never `message`, v43). */
+export function notAccessFix(work: RecordsWorkNotAccess, filed: boolean): string {
+  return (
+    `This is ${NOT_ACCESS_WORK[work]}: Medical Records work, but not a request for copies, so no signing ` +
+    'form applies and it is not on the records clock. Do not offer a link, do not ask text or email, do ' +
+    'not call send_records_form, and do not ask how or where records should be sent or which dates. ' +
+    (filed
+      ? 'If you already offered a link, tell the caller no form is needed for this request and that the ' +
+        'Medical Records team will follow up.'
+      : "File it with file_records_ticket, with the caller's own words in the description.")
+  );
+}
+
 export const WEBSITE_DIRECTIONS =
   'go to azul vision dot com, click Useful Links, then Medical Records, and fill out the request form there';
 export type FormChannel = 'sms' | 'email' | 'verbal' | 'declined';
@@ -437,7 +475,7 @@ registerTool({
     required: ['request_description'],
   },
   handler: async (input): Promise<ToolResult> => {
-    const { classifyRecordsRequest, MEDICAL_RECORDS_DEPARTMENT_ID } = await import(
+    const { classifyRecordsRequest, MEDICAL_RECORDS_DEPARTMENT_ID, RECORDS_CATCHALL } = await import(
       './medicalRecordsTaxonomy'
     );
     const description = requestDescription(input);
@@ -447,6 +485,18 @@ registerTool({
       department_id: redirect.departmentId, request_type_id: redirect.requestTypeId,
       request_reason_id: redirect.requestReasonId, request_reason: redirect.requestReason,
       fix: 'This is not a records request. Take the callback request with file_records_ticket; do not offer a records form or ask for delivery details. Preserve the caller request in the description.',
+    };
+    // v221: Medical Records work that is not access. It stays here, under the
+    // department's own catch-all (this side holds no amendment reason; the app
+    // files it under its own), and `form_applies: false` is what tells the
+    // model the prompt's "offer the link" step does not apply.
+    const purpose = recordsLinePurpose(description);
+    if (recordsWorkNotAccess(purpose)) return {
+      success: true, classified: true, is_records_request: true, records_work: purpose, form_applies: false,
+      department_id: MEDICAL_RECORDS_DEPARTMENT_ID,
+      request_type: RECORDS_CATCHALL.requestType, request_type_id: RECORDS_CATCHALL.requestTypeId,
+      request_reason: RECORDS_CATCHALL.requestReason, request_reason_id: RECORDS_CATCHALL.requestReasonId,
+      fix: notAccessFix(purpose, false),
     };
     const { classification, isCatchAll } = classifyRecordsRequest(description);
 
@@ -638,6 +688,11 @@ registerTool({
     // name may still be kept in Medical Records below — `redirect` is the
     // decision after those holds.
     const lineRedirect = recordsLineRedirect(description);
+    // v221: a correction, or withdrawing a request, on the same words. Never a
+    // redirect (`recordsLineRedirect` is null for both), and never access: see
+    // NOT_ACCESS_HEADER for everything below that stands down for it.
+    const linePurpose = recordsLinePurpose(description);
+    const notAccess: RecordsWorkNotAccess | null = recordsWorkNotAccess(linePurpose) ? linePurpose : null;
 
     /**
      * THE NAME: the record first, one ask second, the request regardless.
@@ -726,7 +781,7 @@ registerTool({
       );
     }
 
-    const { MEDICAL_RECORDS_DEPARTMENT_ID, recordsReasonById, classifyRecordsRequest,
+    const { MEDICAL_RECORDS_DEPARTMENT_ID, RECORDS_CATCHALL, recordsReasonById, classifyRecordsRequest,
             classifyRequester, determineCapClock, resolveRequesterType,
             normalizeRequesterType, requesterProseFor } = await import('./medicalRecordsTaxonomy');
 
@@ -754,7 +809,14 @@ registerTool({
       );
     }
     const requesterType = resolveRequesterType(statedRequesterType, classifyRequester(requesterRaw));
-    const cap = determineCapClock(requesterType);
+    // Who is asking is still asked and still sent: the app keeps the requester
+    // on a correction or a cancellation. The CLOCK is what stands down. With
+    // `onClock` false, the signing-link ask, the link, the spoken directions
+    // and the destination-and-dates gate all stay off, and the payload below
+    // states no pathway (v221).
+    const cap = notAccess
+      ? { ...determineCapClock(requesterType), onClock: false }
+      : determineCapClock(requesterType);
 
     // A CALLER WHO PRESSED THE WRONG OPTION IS NOT SENT AWAY — and is not
     // offered a records form either. Decided above, before the channel ask,
@@ -949,7 +1011,9 @@ registerTool({
      */
     let deliveryMethod = normalizeDeliveryMethod(input.delivery_method);
     const formCollectsDelivery = Boolean(formChannel) && !redirect;
-    const deliveryAsked = !redirect && !formCollectsDelivery && !askExhausted;
+    // Nothing is being sent on a correction or a cancellation, so how and
+    // where are not asked (v221).
+    const deliveryAsked = !redirect && !notAccess && !formCollectsDelivery && !askExhausted;
     // `formAskOutcome`, not a bare count: a batched sibling inside
     // ASK_BATCH_WINDOW_MS gets the same question and spends nothing, so two
     // filing calls in one response cannot file with the method NOT CAPTURED
@@ -1101,9 +1165,13 @@ registerTool({
 
     // The reason must be one of THIS department's, whatever we were handed.
     const named = input.request_reason_id ? Number(input.request_reason_id) : NaN;
-    const cls =
-      (Number.isFinite(named) ? recordsReasonById(named) : null) ??
-      classifyRecordsRequest(description).classification;
+    // A correction or a cancellation never files under an access reason
+    // ("Copies of Records"), whatever the model names: this side holds no
+    // reason for either, so it is the department's own catch-all (v221).
+    const cls = notAccess
+      ? RECORDS_CATCHALL
+      : (Number.isFinite(named) ? recordsReasonById(named) : null) ??
+        classifyRecordsRequest(description).classification;
 
     // Who is asking and where it goes are the two facts this queue turns on.
     // On their own lines so a records clerk reads them rather than hunting
@@ -1112,7 +1180,13 @@ registerTool({
     const dateRange = str(input.date_range);
     // The clock line goes FIRST. A records clerk opening this ticket should not
     // have to read to the bottom to learn whether it is CAP-reportable.
-    const body = redirect ? description : [
+    const body = redirect ? description : notAccess ? [
+      // v221: no clock line, no delivery lines. Nothing is being sent, so a
+      // "Send to: NOT CAPTURED" line would be a chase for a clerk to drop.
+      NOT_ACCESS_HEADER[notAccess],
+      `\n\n${description}`,
+      `\n\nRequested by: ${requesterRaw} [${requesterType}]`,
+    ].join('') : [
       `${cap.note}`,
       `\n\n${description}`,
       `\n\nRequested by: ${requesterRaw} [${requesterType}]`,
@@ -1433,6 +1507,13 @@ registerTool({
         : {
             ...(heldForNoName && cap.onClock
               ? {}
+              : notAccess
+              // v221: who asked, and nothing that states a pathway or a
+              // clock: what the app's intake keeps for a correction or a
+              // cancellation. A stated pathway is the one field `decidePathway`
+              // takes without review, so it is never sent for a request that
+              // is not access.
+              ? { requestorType: cap.requesterType }
               : {
                   requestorType: cap.requesterType,
                   // LOGGED, CLOCK NOT STARTED when the link goes out: the signed form is
@@ -1450,7 +1531,7 @@ registerTool({
             // fallback, so a value outside CASE_DELIVERY_METHODS is a 400:
             // caseDeliveryMethod only ever returns one of four values in it.
             // An app without #443 strips the field (its schema is not strict).
-            ...(caseDeliveryMethod(deliveryMethod)
+            ...(caseDeliveryMethod(deliveryMethod) && !notAccess
               ? { deliveryMethodRequested: caseDeliveryMethod(deliveryMethod) }
               : {}),
             // A NAME, not a description. The ticketing agent, 2026-08-13: "Send
@@ -1624,9 +1705,14 @@ registerTool({
     // carries no form — so it gets its own fact and the re-send refuses it;
     // so does one kept here for want of a name, which reads as another
     // team's and was never offered a form.
+    // A correction or a cancellation carries no form either (v221), so the
+    // re-send refuses it the same way: "there is no form to sign for this
+    // request".
     noteCallFact(
       callSid,
-      routedAway ? RECORDS_ROUTED_AWAY_FACT : heldForNoName ? RECORDS_HELD_NO_FORM_FACT : RECORDS_FILED_FACT,
+      routedAway
+        ? RECORDS_ROUTED_AWAY_FACT
+        : heldForNoName || notAccess ? RECORDS_HELD_NO_FORM_FACT : RECORDS_FILED_FACT,
     );
 
     const sendForm = Boolean(formChannel) && !redirect;
@@ -1685,7 +1771,10 @@ registerTool({
       cap_clock_applies: !redirect && cap.onClock,
       // Not on a routed-away ticket: there is no records destination to ask
       // for, and the note would contradict the `fix` below (Codex P2 on #356).
-      ...(deliverTo || redirect ? {} : { note_destination: 'No destination captured — ask where these should be sent.' }),
+      ...(deliverTo || redirect || notAccess ? {} : { note_destination: 'No destination captured — ask where these should be sent.' }),
+      // v221: closed set, no PHI, on the timeline allow-list: how many
+      // records-line filings were a correction or a cancellation is a count.
+      ...(notAccess ? { records_work: notAccess } : {}),
       ...(routedAway
         ? {
             routed_to: routedAway.departmentName,
@@ -1707,7 +1796,9 @@ registerTool({
                 'link, do not ask text or email, and do not call send_records_form. If you already offered ' +
                 'a link, tell the caller no form is needed for this request and that the team will follow up.',
             }
-          : {}),
+          : notAccess
+            ? { form_applies: false, fix: notAccessFix(notAccess, true) }
+            : {}),
       message: routedAway
         ? `Filed as ${res.ticketNumber} with our ${routedAway.departmentName} team. Read the ticket number back and say that team will follow up.`
         : formMessage ??

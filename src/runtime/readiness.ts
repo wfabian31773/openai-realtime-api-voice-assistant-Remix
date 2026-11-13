@@ -1693,8 +1693,21 @@ import { callEnvironment } from "./callRecord";
  * (#461, `84246a37`), v214 (#460, `af248eb3`) and v213 (#459, `9221d1ea`).
  * No migration.
  */
+/**
+ * v221 — A RECORDS CORRECTION IS NOT AN ACCESS REQUEST (2026-11-13). The
+ * ticketing app's copy of the records-line classifier has read `amendment`
+ * (correcting the records) and `cancellation` (withdrawing a records request)
+ * as Medical Records work off the CAP clock since #406; this copy read both as
+ * access, so the records tool asked for a signing-link channel, delivery and
+ * dates, and stated `roa_patient` on the clock. The purpose list is now the
+ * app's (pinned by `recordsPurposesAgreeWithTheApp.test.ts`), both purposes
+ * read as the app reads them, and the tool files them in Medical Records with
+ * no pathway, clock, form or delivery question. Above main's v218 (#465,
+ * `0c324a9c`); v219 (#466) and v220 (#467) are claimed on open branches.
+ * No migration.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v218-a-booking-books-the-confirmed-slot-20261112";
+  "voice-runtime-v221-a-records-correction-is-not-an-access-request-20261113";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

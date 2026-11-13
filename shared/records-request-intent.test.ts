@@ -651,3 +651,48 @@ describe('records line: Codex round on 88122c5', () => {
     expect(recordsLineRedirect("I can't make my appointment tomorrow")).toMatchObject({ requestReasonId: 148 });
   });
 });
+
+// v221: the app's three amendment/cancellation describes, transcribed verbatim
+// from ticketing-app `shared/records-request-intent.test.ts` (2026-11-13), so
+// the same cases are pinned in both repos. The wider precedence table and the
+// purpose-list guard are in `recordsPurposesAgreeWithTheApp.test.ts`.
+describe('review: amendment and cancellation are not access requests', () => {
+  it('classifies a records correction as amendment, not access', () => {
+    expect(recordsLinePurpose('I need to correct my medical records')).toBe('amendment');
+    expect(recordsLineRedirect('I need to correct my medical records')).toBeNull();
+  });
+
+  it('classifies withdrawal of a records request as cancellation, not access', () => {
+    expect(recordsLinePurpose('Please cancel my records request')).toBe('cancellation');
+    expect(recordsLineRedirect('Please cancel my records request')).toBeNull();
+  });
+
+  it('keeps an explicit document delivery as access beside a cancellation', () => {
+    expect(recordsLinePurpose('Please cancel my records request; please fax my chart')).toBe('records');
+  });
+});
+
+describe('review regression (2026-10-29): amendment/cancellation intent wins over delivery wording', () => {
+  it.each([
+    'Please correct my medical records and send me the corrected copy',
+    'I need a correction to my records, please fax it to my doctor',
+    'Can you email me after you amend my records',
+    'Please mail me confirmation once you correct my medical record',
+    'Please correct the records you emailed me',
+    'I need to amend the medical records sent last week',
+  ])('amendment: %s', (text) => expect(recordsLinePurpose(text)).toBe('amendment'));
+  it.each([
+    'Please cancel my records request, do not send anything',
+    'Cancel my medical records request and email me a confirmation',
+  ])('cancellation: %s', (text) => expect(recordsLinePurpose(text)).toBe('cancellation'));
+  it('a plain delivery request is still records', () => expect(recordsLinePurpose('Please send my records to my new doctor')).toBe('records'));
+});
+
+describe('review regression (2026-10-29): amendment beside a separate access request', () => {
+  it('a separate document request in the same call is still access', () => {
+    expect(recordsLinePurpose('Please correct the spelling in my medical records. Separately, please send my OCT images to my new doctor')).toBe('records');
+  });
+  it.each(['Please correct the records you emailed me', 'I need to correct my medical records'])('pure amendment stays amendment: %s', (t) => {
+    expect(recordsLinePurpose(t)).toBe('amendment');
+  });
+});
