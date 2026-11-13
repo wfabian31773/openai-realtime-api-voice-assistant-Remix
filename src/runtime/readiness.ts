@@ -1692,22 +1692,67 @@ import { callEnvironment } from "./callRecord";
  * `4464c80a`), which it contains along with v216 (#462, `8795a067`), v215
  * (#461, `84246a37`), v214 (#460, `af248eb3`) and v213 (#459, `9221d1ea`).
  * No migration.
+ *
+ * v220 — THE STAFF TICKET STAYS IN THE HUB (2026-11-13). The NPX staff
+ * callback (`request_staff_callback`) files to the HVA Hub, and its
+ * description named the visit as the caller hears it; for a Refraction Only
+ * that is "a vision test for glasses", and the ticketing app's Hub
+ * re-classifier reads "glasses" as Optical. Measured to 2026-11-13: 6 of 29
+ * NPX staff-callback tickets created in Optical, every one a Refraction Only.
+ * The description now names NextGen's own event (`staffAppointmentLine`); the
+ * caller still hears the plain-words visit. A line the same classifier
+ * would route out of the Hub, read as it is sent, names the visit "An
+ * appointment" (Codex P2 on #467, three rounds). Above main's v218 (#465,
+ * `0c324a9c`), which it contains, and above v219 (#466, open), which it
+ * does not.
+ * No migration.
+ *
+ * v222 — A BOOKING IS CONFIRMED BY TEXT (2026-11-13). Operator: "Anything
+ * booked on the calls or by sms has to have some message confirming with the
+ * appointment details." No NPX outreach booking was ever confirmed in
+ * writing; three of the 46 bookings to 2026-11-12 rang back to ask for the
+ * details by text. bookOutreachSlot now queues a confirmation on the contact
+ * (inside `outreach_text`, so the source refresh keeps it), and the scheduler
+ * sends it once, from the campaign's caller ID, inside its calling window,
+ * after the call has ended, never to a number on do_not_contact. A caller who
+ * asks staff on the call to cancel or change the booking holds it, and that
+ * staff ticket files urgent. Same switch as the texts (NPX_OUTREACH_TEXTS).
+ * Above v220 (#467, merged `e9a2443e`), which it contains. v221 is #469 on its open branch, which this
+ * does not contain. No migration.
  */
 /**
- * v221 — A RECORDS CORRECTION IS NOT AN ACCESS REQUEST (2026-11-13). The
- * ticketing app's copy of the records-line classifier has read `amendment`
- * (correcting the records) and `cancellation` (withdrawing a records request)
- * as Medical Records work off the CAP clock since #406; this copy read both as
- * access, so the records tool asked for a signing-link channel, delivery and
- * dates, and stated `roa_patient` on the clock. The purpose list is now the
- * app's (pinned by `recordsPurposesAgreeWithTheApp.test.ts`), both purposes
- * read as the app reads them, and the tool files them in Medical Records with
- * no pathway, clock, form or delivery question. Above main's v218 (#465,
- * `0c324a9c`); v219 (#466) and v220 (#467) are claimed on open branches.
- * No migration.
+ * v223 — EVERY TICKET A CALL CREATED IS ON THE CALL LOG (2026-11-13). Operator:
+ * "ensure any call on the observatory log has its corresponding ticket number
+ * if one was created." `call_logs.ticket_number` holds one number; 15 calls in
+ * the 14 days to 2026-11-13 had two tickets and the log showed one. The
+ * call-log API now answers `ticketNumbers` (the row's own first, then every
+ * ticket number a filing reported on the tool timeline, server/
+ * callTicketNumbers.ts); the call log, the urgent list and the call page show
+ * them all; a ticket-number search also finds a call by its second ticket; and
+ * a ticket filed with `secondTicketOnThisCall` (the after-hours urgent records,
+ * 3 of the 15) puts a `second_ticket_filed` event on the call's timeline,
+ * appended, never replacing it. Above main's v222 (#470, `951dd0ba`), which it
+ * contains along with v220 (#467, `e9a2443e`) and v218 (#465, `0c324a9c`). No
+ * migration.
+ */
+/**
+ * v225 — A RECORDS CORRECTION IS NOT AN ACCESS REQUEST (2026-11-13; v221
+ * while #469 was open, renumbered when #473 took v223 on `main` and #474
+ * claimed v224). The ticketing app's copy of the records-line classifier has
+ * read `amendment` (correcting the records) and `cancellation` (withdrawing a
+ * records request) as Medical Records work off the CAP clock since #406; this
+ * copy read both as access, so the records tool asked for a signing-link
+ * channel, delivery and dates, and stated `roa_patient` on the clock. The
+ * purpose list is now the app's (pinned by
+ * `recordsPurposesAgreeWithTheApp.test.ts`), both purposes read as the app
+ * reads them, and the tool files them in Medical Records with no pathway,
+ * clock, form or delivery question. Above main's v223 (#473, `25bbbbad`),
+ * which it contains along with v222 (#470, `951dd0ba`), v220 (#467,
+ * `e9a2443e`) and v218 (#465, `0c324a9c`); v219 (#466) and v224 (#474) are
+ * claimed on open branches. No migration.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v221-a-records-correction-is-not-an-access-request-20261113";
+  "voice-runtime-v225-a-records-correction-is-not-an-access-request-20261113";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

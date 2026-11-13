@@ -253,7 +253,16 @@ describe('wiring, read from the source', () => {
   const read = (p: string) => readFileSync(path.resolve(__dirname, p), 'utf8');
 
   it('the recorder flushes on BOTH exits, each after its own record', () => {
-    const src = codeOnly(read('./toolTimeline.ts'));
+    // Read recordingExecute's own body. The whole file was read until v223,
+    // when the second-ticket recorder below it added a `recordToolEvent(` of
+    // its own and moved `lastIndexOf` off this function; the property is the
+    // recorder's, so the slice is the recorder.
+    const file = codeOnly(read('./toolTimeline.ts'));
+    const src = file.slice(
+      file.indexOf('export function recordingExecute'),
+      file.indexOf('async function flushAfterRecording'),
+    );
+    expect(src.length, 'recordingExecute was not found in toolTimeline.ts').toBeGreaterThan(200);
     // Two exits: the tool threw, and the tool returned. A tool that threw is
     // still a tool that ran, and its event is the one a reader most wants
     // (Codex P2, #320) — before this it depended on the 2h reaper.

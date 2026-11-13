@@ -349,3 +349,50 @@ describe("a caller ringing from another phone, whose surname begins with an acce
     expect(to[from.indexOf(sqlInitial)]).toBe(nameKey("Álvarez").charAt(0));
   });
 });
+
+describe("the booking confirmation (v222)", () => {
+  it("queues a booking's confirmation once: never over the same booking's", () => {
+    const m = method("queueConfirmation");
+    expect(m).toContain("->> 'booking_id'");
+    expect(m).toContain("IS DISTINCT FROM ${record.booking_id}::text");
+    expect(m).toContain("-> ${CONFIRMATION_FIELD}::text IS NULL");
+    // An outreach_text that is not an object is replaced, never concatenated.
+    expect(m).toContain("jsonb_typeof(custom_data -> ${OUTREACH_TEXT_KEY}::text) = 'object'");
+    expect(m).toContain("RETURNING id");
+  });
+
+  it("claims and lists only a due confirmation, or a retry whose time has come", () => {
+    for (const name of ["claimConfirmation", "confirmationsDue"]) {
+      const m = method(name);
+      expect(m).toContain("->> 'state' IN ('due', 'retry')");
+      expect(m).toContain("->> 'retry_after',");
+      expect(m).toContain("->> 'due_at')::timestamptz");
+      expect(m).toContain("<= ${now.toISOString()}::timestamptz");
+    }
+    expect(method("confirmationsDue")).toContain("campaign_id = ${campaignId}::varchar");
+    expect(method("claimConfirmation")).toContain("jsonb_build_object('state', 'claimed'");
+    expect(method("claimConfirmation")).toContain("RETURNING *");
+  });
+
+  it("holds only this booking's confirmation, including one the scheduler has claimed", () => {
+    const m = method("holdConfirmation");
+    expect(m).toContain("->> 'booking_id' = ${bookingId}::text");
+    expect(m).toContain("->> 'state' IN ('due', 'retry', 'claimed')");
+    // No confirmation for this booking yet: the hold is written as a placeholder.
+    expect(m).toContain("IS DISTINCT FROM ${bookingId}::text");
+    expect(m).toContain("ELSE jsonb_build_object('booking_id', ${bookingId}::text, 'state', 'held'");
+  });
+
+  it("puts a claimed confirmation back only while it is still claimed, and always records a send", () => {
+    const m = method("patchConfirmation");
+    expect(m).toContain("->> 'state' = 'claimed')");
+    expect(m).toContain('patch.state === "sent" || patch.state === "unknown"');
+    expect(m).toContain("${recordsASend}::boolean");
+  });
+
+  it("never moves updated_at, which the stale-claim reaper reads as a call's claim", () => {
+    for (const name of ["queueConfirmation", "claimConfirmation", "patchConfirmation", "holdConfirmation"]) {
+      expect(method(name)).not.toMatch(/updated_at\s*=/);
+    }
+  });
+});

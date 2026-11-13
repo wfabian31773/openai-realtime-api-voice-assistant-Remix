@@ -16,6 +16,7 @@ import {
   HVA_HUB_SCHEDULING_REQUEST_TYPE_ID,
   MIN_DAYS_SOONER,
   NPX_OUTREACH_TOOLS,
+  NPX_RECALL_FIRST_LINE,
   STAFF_CALLBACK_TOOL_NAME,
   outreachSessionFor,
   resetOutreachAvailabilityForTests,
@@ -189,6 +190,8 @@ describe('request_staff_callback (operator, 2026-10-21: a request for a person i
       idempotencyKey: `${SID}-outreach-staff`,
       callData: { agentUsed: 'npx-outreach', callSid: SID },
     });
+    expect(params.description.split('\n')[0]).toBe(NPX_RECALL_FIRST_LINE);
+    expect(params.description).toMatch(/^NPX Recall: /);
     expect(params.description).toContain('The patient asked to speak with a person.');
     expect(params.description).toContain('What they asked: I want to cancel my appointment');
     expect(params.description).toContain('Date of birth confirmed on the call: no.');
@@ -265,7 +268,9 @@ describe('request_staff_callback (operator, 2026-10-21: a request for a person i
 
   it('is one of the lane\'s tools', () => {
     expect(NPX_OUTREACH_TOOLS).toEqual([DESCRIBE_TOOL_NAME, CONFIRM_DOB_TOOL_NAME, FIND_SOONER_TOOL_NAME, BOOK_SOONER_TOOL_NAME, STAFF_CALLBACK_TOOL_NAME]);
-    expect(Object.keys(getTool(STAFF_CALLBACK_TOOL_NAME)!.input_schema.properties)).toEqual(['request']);
+    expect(Object.keys(getTool(STAFF_CALLBACK_TOOL_NAME)!.input_schema.properties)).toEqual(['request', 'changes_booking']);
+    // v222: whether they want the booking undone is optional; the request is not.
+    expect(getTool(STAFF_CALLBACK_TOOL_NAME)!.input_schema.required).toEqual(['request']);
   });
 });
 

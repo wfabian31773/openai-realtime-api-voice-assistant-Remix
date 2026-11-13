@@ -652,7 +652,7 @@ describe('records line: Codex round on 88122c5', () => {
   });
 });
 
-// v221: the app's three amendment/cancellation describes, transcribed verbatim
+// v225: the app's three amendment/cancellation describes, transcribed verbatim
 // from ticketing-app `shared/records-request-intent.test.ts` (2026-11-13), so
 // the same cases are pinned in both repos. The wider precedence table and the
 // purpose-list guard are in `recordsPurposesAgreeWithTheApp.test.ts`.

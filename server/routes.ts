@@ -12,7 +12,9 @@ import { parse } from "csv-parse/sync";
 import { getTwilioClient, getTwilioFromPhoneNumber } from "../src/lib/twilioClient";
 import { priceVoiceCall } from '../src/services/callCostService';
 import { mountOperatorLineSettings } from './operatorLineSettings';
+import { mountNpxOutreachTracking } from './observatory/npxOutreach';
 import { boundPluginStore } from '../src/plugin/bindings';
+import { normalizeCallLog } from './callLogShape';
 
 // Hybrid authentication middleware - supports both Replit Auth and custom auth
 const isAuthenticated = (req: Request, res: Response, next: NextFunction) => {
@@ -27,31 +29,8 @@ const isAuthenticated = (req: Request, res: Response, next: NextFunction) => {
 // Configure multer for CSV uploads
 const upload = multer({ storage: multer.memoryStorage() });
 
-// Helper to normalize call log fields to camelCase for frontend compatibility
-function normalizeCallLog(log: any) {
-  return {
-    ...log,
-    transferredToHuman: log.transferredToHuman ?? log.transferred_to_human ?? false,
-    transcript: log.transcript ?? log.transcript_text ?? null,
-    recordingUrl: log.recordingUrl ?? log.recording_url ?? null,
-    callerName: log.callerName ?? log.caller_name ?? null,
-    patientName: log.patientName ?? log.patient_name ?? null,
-    ticketNumber: log.ticketNumber ?? log.ticket_number ?? null,
-    createdAt: log.createdAt ?? log.created_at,
-    updatedAt: log.updatedAt ?? log.updated_at,
-    fromCarrier: log.fromCarrier ?? log.from_carrier ?? null,
-    toCarrier: log.toCarrier ?? log.to_carrier ?? null,
-    fromConnectionType: log.fromConnectionType ?? log.from_connection_type ?? null,
-    toConnectionType: log.toConnectionType ?? log.to_connection_type ?? null,
-    fromCountry: log.fromCountry ?? log.from_country ?? null,
-    toCountry: log.toCountry ?? log.to_country ?? null,
-    whoHungUp: log.whoHungUp ?? log.who_hung_up ?? null,
-    postDialDelayMs: log.postDialDelayMs ?? log.post_dial_delay_ms ?? null,
-    lastSipResponse: log.lastSipResponse ?? log.last_sip_response ?? null,
-    edgeLocation: log.edgeLocation ?? log.edge_location ?? null,
-    twilioInsightsFetchedAt: log.twilioInsightsFetchedAt ?? log.twilio_insights_fetched_at ?? null,
-  };
-}
+// The call-log shape every call-log route returns lives in callLogShape.ts
+// (v223), so it can be tested without loading this file.
 
 // Rate limiting map for test calls (in-memory for MVP)
 const testCallRateLimit = new Map<string, { count: number; resetTime: number }>();
@@ -67,6 +46,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   mountOperatorLineSettings(app, { authenticate: isAuthenticated, admin: requireRole('admin'),
     store: boundPluginStore, env: process.env });
+
+  // NPX outreach tracking screen (operator, 2026-11-13: "we can't be flying
+  // blind here"). Read only: who was outreached, the result, the booking and
+  // its Azul cancel, staff tickets and opt-outs. server/observatory/npxOutreach.ts.
+  mountNpxOutreachTracking(app, { authenticate: isAuthenticated });
 
   // ==================== Observatory (docs/observatory/) ====================
   // OBS-0 health: proves both data planes before any widget ships — this
@@ -1820,7 +1804,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
         csvEscape(formatDurationCsv(call.duration)),
         csvEscape(getEscalationReasonCsv(call)),
         csvEscape(call.agentId || 'Greeter'),
-        csvEscape(call.ticketNumber),
+        // v223: every ticket the call created, the row's own first.
+        csvEscape(call.ticketNumbers.join('; ')),
       ]);
 
       const csvLines = [headers.join(','), ...rows.map((r) => r.join(','))];

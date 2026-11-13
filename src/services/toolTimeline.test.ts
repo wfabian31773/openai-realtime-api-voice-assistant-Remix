@@ -234,7 +234,7 @@ describe('PHI discipline — the allow-list is the safety mechanism', () => {
     expect(JSON.stringify(ev)).not.toContain('Kolterman');
   });
 
-  it('keeps records_work on a records filing (v221), and still nothing about who', () => {
+  it('keeps records_work on a records filing (v225), and still nothing about who', () => {
     const callId = freshCall();
     recordToolEvent(
       callId,

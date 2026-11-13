@@ -15,16 +15,16 @@
  * where to send the records and which dates, and stated `roa_patient` on the
  * clock for it.
  *
- * MEASURED 2026-11-13, before v221, over the 1,268 distinct sentences the two
+ * MEASURED 2026-11-13, before v225, over the 1,268 distinct sentences the two
  * repos' own suites put through the classifier (each suite run with a shim
  * that recorded every input, and both copies run on the union):
  *
- *   purpose differs               563   (553 after v221)
- *   keep-in-Medical-Records flips 356   (356 after v221: amendment and
+ *   purpose differs               563   (553 after v225)
+ *   keep-in-Medical-Records flips 356   (356 after v225: amendment and
  *                                        cancellation are kept, like records)
- *   amendment / cancellation       10   (0 after v221)
+ *   amendment / cancellation       10   (0 after v225)
  *
- * v221 moved exactly those 10 sentences, every one to the app's answer, and no
+ * v225 moved exactly those 10 sentences, every one to the app's answer, and no
  * other. Also 57 of 57 synthetic correction/cancellation sentences (precedence
  * against access, scheduling, surgery, optical and billing, and refusals beside
  * them) read the same in both copies. The other 553 are NOT this test's subject: each side has rulings
@@ -167,7 +167,7 @@ describe('the amendment and cancellation patterns are the app\'s, verbatim', () 
  * The app's copy run on each sentence, 2026-11-13. The first twelve are the
  * app's own test sentences (its `records-request-intent.test.ts`, the three
  * amendment/cancellation describes); the rest are synthetic precedence cases
- * written for v221, each read by the app's copy rather than by hand. Some of the
+ * written for v225, each read by the app's copy rather than by hand. Some of the
  * app's answers are questionable ("I need my records corrected" is records,
  * "Please cancel my records request for my surgery" is surgery), and they are
  * pinned anyway: this side follows the app, and a better reading belongs in

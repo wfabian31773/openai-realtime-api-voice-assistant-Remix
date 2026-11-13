@@ -603,7 +603,7 @@ Ticketing's Support Desk bot classification still takes effect immediately.
 
 The pure policy in `shared/records-request-intent.ts` has a copy in Ticketing,
 which owns the final decision on both voice creation endpoints and the case
-sweep. **The copies are not identical** (v221, 2026-11-13): the purpose list,
+sweep. **The copies are not identical** (v225, 2026-11-13): the purpose list,
 the `amendment`/`cancellation` patterns and their precedence are the app's and
 are pinned by `shared/recordsPurposesAgreeWithTheApp.test.ts`, but the rest of
 the sentence reading is each repo's own: 553 of the 1,268 sentences both

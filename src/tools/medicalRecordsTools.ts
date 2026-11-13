@@ -401,12 +401,12 @@ export function keptForNoNameNote(redirect: { departmentName: string; requestRea
  * be corrected in one place.
  */
 /**
- * A CORRECTION, OR WITHDRAWING A REQUEST, IS NOT A REQUEST FOR COPIES — v221.
+ * A CORRECTION, OR WITHDRAWING A REQUEST, IS NOT A REQUEST FOR COPIES — v225.
  *
  * The ticketing app files both on the records line under their own reasons
  * ('Records Amendment', 'Records Request Cancellation') and strips every
  * access field from them: no pathway, no CAP clock, no signing form
- * (`lib/voice-agent/records-intake.ts`, #406). Until v221 this repo's copy of
+ * (`lib/voice-agent/records-intake.ts`, #406). Until v225 this repo's copy of
  * the classifier did not know either, read "I need to correct my medical
  * records" as an access request, and the tool asked for a signing-link
  * channel, how and where to send records and which dates, and stated
@@ -486,7 +486,7 @@ registerTool({
       request_reason_id: redirect.requestReasonId, request_reason: redirect.requestReason,
       fix: 'This is not a records request. Take the callback request with file_records_ticket; do not offer a records form or ask for delivery details. Preserve the caller request in the description.',
     };
-    // v221: Medical Records work that is not access. It stays here, under the
+    // v225: Medical Records work that is not access. It stays here, under the
     // department's own catch-all (this side holds no amendment reason; the app
     // files it under its own), and `form_applies: false` is what tells the
     // model the prompt's "offer the link" step does not apply.
@@ -688,7 +688,7 @@ registerTool({
     // name may still be kept in Medical Records below — `redirect` is the
     // decision after those holds.
     const lineRedirect = recordsLineRedirect(description);
-    // v221: a correction, or withdrawing a request, on the same words. Never a
+    // v225: a correction, or withdrawing a request, on the same words. Never a
     // redirect (`recordsLineRedirect` is null for both), and never access: see
     // NOT_ACCESS_HEADER for everything below that stands down for it.
     const linePurpose = recordsLinePurpose(description);
@@ -813,7 +813,7 @@ registerTool({
     // on a correction or a cancellation. The CLOCK is what stands down. With
     // `onClock` false, the signing-link ask, the link, the spoken directions
     // and the destination-and-dates gate all stay off, and the payload below
-    // states no pathway (v221).
+    // states no pathway (v225).
     const cap = notAccess
       ? { ...determineCapClock(requesterType), onClock: false }
       : determineCapClock(requesterType);
@@ -1012,7 +1012,7 @@ registerTool({
     let deliveryMethod = normalizeDeliveryMethod(input.delivery_method);
     const formCollectsDelivery = Boolean(formChannel) && !redirect;
     // Nothing is being sent on a correction or a cancellation, so how and
-    // where are not asked (v221).
+    // where are not asked (v225).
     const deliveryAsked = !redirect && !notAccess && !formCollectsDelivery && !askExhausted;
     // `formAskOutcome`, not a bare count: a batched sibling inside
     // ASK_BATCH_WINDOW_MS gets the same question and spends nothing, so two
@@ -1167,7 +1167,7 @@ registerTool({
     const named = input.request_reason_id ? Number(input.request_reason_id) : NaN;
     // A correction or a cancellation never files under an access reason
     // ("Copies of Records"), whatever the model names: this side holds no
-    // reason for either, so it is the department's own catch-all (v221).
+    // reason for either, so it is the department's own catch-all (v225).
     const cls = notAccess
       ? RECORDS_CATCHALL
       : (Number.isFinite(named) ? recordsReasonById(named) : null) ??
@@ -1181,7 +1181,7 @@ registerTool({
     // The clock line goes FIRST. A records clerk opening this ticket should not
     // have to read to the bottom to learn whether it is CAP-reportable.
     const body = redirect ? description : notAccess ? [
-      // v221: no clock line, no delivery lines. Nothing is being sent, so a
+      // v225: no clock line, no delivery lines. Nothing is being sent, so a
       // "Send to: NOT CAPTURED" line would be a chase for a clerk to drop.
       NOT_ACCESS_HEADER[notAccess],
       `\n\n${description}`,
@@ -1508,7 +1508,7 @@ registerTool({
             ...(heldForNoName && cap.onClock
               ? {}
               : notAccess
-              // v221: who asked, and nothing that states a pathway or a
+              // v225: who asked, and nothing that states a pathway or a
               // clock: what the app's intake keeps for a correction or a
               // cancellation. A stated pathway is the one field `decidePathway`
               // takes without review, so it is never sent for a request that
@@ -1705,7 +1705,7 @@ registerTool({
     // carries no form — so it gets its own fact and the re-send refuses it;
     // so does one kept here for want of a name, which reads as another
     // team's and was never offered a form.
-    // A correction or a cancellation carries no form either (v221), so the
+    // A correction or a cancellation carries no form either (v225), so the
     // re-send refuses it the same way: "there is no form to sign for this
     // request".
     noteCallFact(
@@ -1772,7 +1772,7 @@ registerTool({
       // Not on a routed-away ticket: there is no records destination to ask
       // for, and the note would contradict the `fix` below (Codex P2 on #356).
       ...(deliverTo || redirect || notAccess ? {} : { note_destination: 'No destination captured — ask where these should be sent.' }),
-      // v221: closed set, no PHI, on the timeline allow-list: how many
+      // v225: closed set, no PHI, on the timeline allow-list: how many
       // records-line filings were a correction or a cancellation is a count.
       ...(notAccess ? { records_work: notAccess } : {}),
       ...(routedAway

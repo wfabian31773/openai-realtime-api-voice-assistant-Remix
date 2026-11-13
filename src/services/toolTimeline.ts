@@ -23,7 +23,7 @@
 
 import { db } from '../../server/db';
 import { callLogs } from '../../shared/schema';
-import { eq } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import { shadowTap } from '../shadow/tap'; // observation-only tap; no-op unless SHADOW_MODE_ENABLED
 import { callMetadataForDB } from './callMetadataStore';
 import type { DirectorAction } from '../director/director';
@@ -355,7 +355,7 @@ function summarizeResult(tool: string, resultJson: string): Record<string, unkno
     // (Codex P2 on #376). A boolean, no PHI — "how often does the app refuse
     // a records filing outright" is a count, not a log search.
     'recovered_after_refusal',
-    // v221: a records filing or classification that is a correction to the
+    // v225: a records filing or classification that is a correction to the
     // records or withdrawing a records request ('amendment' | 'cancellation',
     // a closed set, no PHI). Medical Records work off the CAP clock, so how
     // many there are is a count, not a transcript read.
@@ -366,6 +366,11 @@ function summarizeResult(tool: string, resultJson: string): Record<string, unkno
     // bookings the old option-only rule would have put on the wrong slot.
     'booked_by',
     'option_disagreed',
+    // v222: whether the booking's Azul appointment was cancelled
+    // ('cancelled' | 'not_cancelled') and, when not, the cancel's own
+    // refusal code (outreachAzulCancel.ts). Fixed codes, no PHI.
+    'azul_cancel',
+    'azul_cancel_reason',
     /**
      * WHY escalate_to_human was refused (one of the gate's three codes) and
      * whether the refusal FILED the ticket (2026-09-29). Both PHI-free. Until
@@ -955,6 +960,141 @@ async function writeTimeline(callIdOrSid: string): Promise<void> {
     }
   } catch (err) {
     console.error('[AZUL-TIMELINE] Flush failed:', err);
+  }
+}
+
+/**
+ * v223 — A SECOND TICKET IS ON THE CALL'S TIMELINE.
+ *
+ * `submitSimplifiedTicket` with `secondTicketOnThisCall` files a ticket BESIDE
+ * the one the call already holds (the urgent transfer record and the urgent
+ * ring-out record, both after-hours) and deliberately never writes it back
+ * to `call_logs.ticket_number`, so the caller's request stays the call's
+ * ticket for the post-call sync. That filing is not a tool, so until v223 the
+ * second number was nowhere on the call row and the Observatory could not
+ * show it. This puts one PHI-free event on the timeline:
+ * `{ tool: 'second_ticket_filed', args: { reason: <key suffix> },
+ *    outcome: { success: true, ticket_number } }`, which the call-log API
+ * reads back (server/callTicketNumbers.ts). `reason`, `success` and
+ * `ticket_number` are all on the allow-lists above; nothing else is written.
+ *
+ * IT NEVER OPENS A NEW ENTRY, and that is the safety property. A flush writes
+ * an entry's events as the WHOLE timeline, so an entry opened here, keyed on
+ * the CallSid while the agent's events sit under another key, would replace
+ * the call's real timeline with this one event: the 2026-07-28 gutting (17 of
+ * 51 timelines) by a new door. So:
+ *
+ *   1. the call's EXISTING entry, found by call id, CallSid or row id, gets
+ *      the event and is flushed through its own serialised chain;
+ *   2. with no entry in this process (a restart since the call's tools ran),
+ *      the event is APPENDED to the row in SQL, and only where the row does
+ *      not already hold it — the row's other events are never rewritten.
+ *
+ * Never throws: it answers what it did, and the filing it reports on has
+ * already succeeded whatever happens here.
+ */
+export const SECOND_TICKET_TOOL = 'second_ticket_filed';
+
+export type SecondTicketRecord = 'appended' | 'appended_to_row' | 'already_there' | 'no_row' | 'failed';
+
+/** The key of the call's existing entry, by call id, CallSid or row id. */
+function existingKeyFor(callIdOrSid: string): string | undefined {
+  if (timelines.has(callIdOrSid)) return callIdOrSid;
+  for (const [k, v] of timelines.entries()) {
+    if (v.callSid === callIdOrSid || v.callLogId === callIdOrSid) return k;
+  }
+  return undefined;
+}
+
+/**
+ * How long to keep trying when the call's row is not there yet (Codex P2 on
+ * #473). The caller fires this and forgets it, so a `no_row` answered once
+ * would leave a ticket that exists off the call log for good. The row is opened
+ * at call setup and written again at teardown; about two minutes covers a
+ * setup write that has not landed. Each try is guarded so it appends once.
+ */
+export const SECOND_TICKET_RETRY_MS = [1_000, 3_000, 10_000, 30_000, 90_000];
+
+export async function recordSecondTicketOnTheCall(
+  input: {
+    callSid: string;
+    ticketNumber: string;
+    /** Which second ticket: the filing's idempotency-key suffix ('urgent-transfer', 'urgent-ringout'). */
+    kind: string;
+  },
+  opts: { retryDelaysMs?: readonly number[]; sleep?: (ms: number) => Promise<void> } = {},
+): Promise<SecondTicketRecord> {
+  const delays = opts.retryDelaysMs ?? SECOND_TICKET_RETRY_MS;
+  const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  let result = await recordSecondTicketOnce(input);
+  for (const ms of delays) {
+    if (result !== 'no_row') break;
+    await sleep(ms);
+    result = await recordSecondTicketOnce(input);
+  }
+  if (result === 'no_row') {
+    console.warn(`[TOOL-TIMELINE] second ticket ${input.ticketNumber} not on the call log: not written to the row for ${input.callSid} after ${delays.length + 1} tries (the ticket stands; an in-memory event is left for the reaper)`);
+  }
+  return result;
+}
+
+async function recordSecondTicketOnce(input: {
+  callSid: string;
+  ticketNumber: string;
+  kind: string;
+}): Promise<SecondTicketRecord> {
+  try {
+    const { callSid, ticketNumber, kind } = input;
+    if (!callSid || !ticketNumber) return 'failed';
+    const resultJson = JSON.stringify({ success: true, ticket_number: ticketNumber });
+    const key = existingKeyFor(callSid);
+    if (key) {
+      const entry = timelines.get(key)!;
+      // Is the event on the row, not only in memory? A flush that touched no
+      // row, or hit a database error, leaves flushedCount where it was, so the
+      // event sits past it. Answering `appended` then would skip the retry and
+      // leave the ticket off the call log until the 2h reaper, or for good on
+      // a restart (Codex P2 on #473). So the answer is read from flushedCount,
+      // and an event already held but not yet written is flushed again rather
+      // than recorded twice.
+      const onTheRow = (index: number) => (entry.flushedCount ?? 0) > index;
+      let index = entry.events.findIndex(
+        (e) => e.tool === SECOND_TICKET_TOOL && e.outcome.ticket_number === ticketNumber,
+      );
+      if (index >= 0 && onTheRow(index)) return 'already_there';
+      if (index < 0) {
+        // No agentSlug: the entry's own slug picks its classifier and must not move.
+        recordToolEvent(key, SECOND_TICKET_TOOL, { reason: kind }, resultJson, 0, { callSid });
+        index = entry.events.length - 1;
+      }
+      await flushAzulTimeline(key);
+      return onTheRow(index) ? 'appended' : 'no_row';
+    }
+    const event: AzulToolEvent = {
+      at: new Date().toISOString(),
+      tool: SECOND_TICKET_TOOL,
+      args: redactArgs(SECOND_TICKET_TOOL, { reason: kind }),
+      outcome: summarizeResult(SECOND_TICKET_TOOL, resultJson),
+      ms: 0,
+    };
+    const already = JSON.stringify([{ tool: SECOND_TICKET_TOOL, outcome: { ticket_number: ticketNumber } }]);
+    const touched = await db
+      .update(callLogs)
+      .set({
+        toolTimeline: sql`jsonb_set(COALESCE(${callLogs.toolTimeline}, '{}'::jsonb), '{events}', COALESCE(${callLogs.toolTimeline} -> 'events', '[]'::jsonb) || ${JSON.stringify([event])}::jsonb)`,
+        toolCallCount: sql`COALESCE(${callLogs.toolCallCount}, 0) + 1`,
+      })
+      .where(
+        and(
+          eq(callLogs.callSid, callSid),
+          sql`NOT (COALESCE(${callLogs.toolTimeline} -> 'events', '[]'::jsonb) @> ${already}::jsonb)`,
+        ),
+      )
+      .returning({ id: callLogs.id });
+    return touched.length > 0 ? 'appended_to_row' : 'no_row';
+  } catch (err) {
+    console.warn('[TOOL-TIMELINE] second ticket not recorded on the timeline (the ticket stands):', err);
+    return 'failed';
   }
 }
 
