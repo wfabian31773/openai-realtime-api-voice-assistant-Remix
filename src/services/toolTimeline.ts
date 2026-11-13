@@ -1028,7 +1028,7 @@ export async function recordSecondTicketOnTheCall(
     result = await recordSecondTicketOnce(input);
   }
   if (result === 'no_row') {
-    console.warn(`[TOOL-TIMELINE] second ticket ${input.ticketNumber} not on the call log: no row for ${input.callSid} after ${delays.length + 1} tries (the ticket stands)`);
+    console.warn(`[TOOL-TIMELINE] second ticket ${input.ticketNumber} not on the call log: not written to the row for ${input.callSid} after ${delays.length + 1} tries (the ticket stands; an in-memory event is left for the reaper)`);
   }
   return result;
 }
@@ -1045,14 +1045,25 @@ async function recordSecondTicketOnce(input: {
     const key = existingKeyFor(callSid);
     if (key) {
       const entry = timelines.get(key)!;
-      const there = entry.events.some(
+      // Is the event on the row, not only in memory? A flush that touched no
+      // row, or hit a database error, leaves flushedCount where it was, so the
+      // event sits past it. Answering `appended` then would skip the retry and
+      // leave the ticket off the call log until the 2h reaper, or for good on
+      // a restart (Codex P2 on #473). So the answer is read from flushedCount,
+      // and an event already held but not yet written is flushed again rather
+      // than recorded twice.
+      const onTheRow = (index: number) => (entry.flushedCount ?? 0) > index;
+      let index = entry.events.findIndex(
         (e) => e.tool === SECOND_TICKET_TOOL && e.outcome.ticket_number === ticketNumber,
       );
-      if (there) return 'already_there';
-      // No agentSlug: the entry's own slug picks its classifier and must not move.
-      recordToolEvent(key, SECOND_TICKET_TOOL, { reason: kind }, resultJson, 0, { callSid });
+      if (index >= 0 && onTheRow(index)) return 'already_there';
+      if (index < 0) {
+        // No agentSlug: the entry's own slug picks its classifier and must not move.
+        recordToolEvent(key, SECOND_TICKET_TOOL, { reason: kind }, resultJson, 0, { callSid });
+        index = entry.events.length - 1;
+      }
       await flushAzulTimeline(key);
-      return 'appended';
+      return onTheRow(index) ? 'appended' : 'no_row';
     }
     const event: AzulToolEvent = {
       at: new Date().toISOString(),

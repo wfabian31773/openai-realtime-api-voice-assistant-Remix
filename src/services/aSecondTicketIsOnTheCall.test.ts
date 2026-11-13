@@ -289,6 +289,57 @@ describe('it can never replace the call timeline', () => {
   });
 });
 
+describe('a second ticket held in memory is not reported until it is on the row (Codex P2 on #473)', () => {
+  it('a flush that touched no row answers no_row, is tried again, and lands once with the row open', async () => {
+    const callId = `openai-call-${n}`;
+    const callSid = `CA${'5'.repeat(28)}${String(1000 + n)}`;
+    seedAgentTimeline(callId, callSid);
+    h.rows = 0;
+    const waits: number[] = [];
+    const how = await recordSecondTicketOnTheCall(
+      { callSid, ticketNumber: 'VA-79093', kind: 'urgent-ringout' },
+      {
+        retryDelaysMs: [5, 7, 11],
+        sleep: async (ms) => {
+          waits.push(ms);
+          if (waits.length === 2) h.rows = 1; // the row opens during the second wait
+        },
+      },
+    );
+    expect(how).toBe('appended');
+    expect(waits).toEqual([5, 7]);
+    expect(getAzulTimeline(callId)?.filter((e) => e.tool === SECOND_TICKET_TOOL)).toHaveLength(1);
+    expect(lastTimelineWritten()?.events.filter((e: { tool: string }) => e.tool === SECOND_TICKET_TOOL)).toHaveLength(1);
+    // Now on the row, a repeat is already there and writes nothing more.
+    const before = h.sets.length;
+    expect(await recordSecondTicketOnTheCall({ callSid, ticketNumber: 'VA-79093', kind: 'urgent-ringout' })).toBe('already_there');
+    expect(h.sets.length).toBe(before);
+  });
+
+  it('a database that throws on the flush is not reported as appended, and the event is held once', async () => {
+    const callId = `openai-call-${n}`;
+    const callSid = `CA${'6'.repeat(28)}${String(1000 + n)}`;
+    seedAgentTimeline(callId, callSid);
+    h.updateThrows = true;
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const waits: number[] = [];
+    const how = await recordSecondTicketOnTheCall(
+      { callSid, ticketNumber: 'VA-79094', kind: 'urgent-ringout' },
+      { retryDelaysMs: [1, 2], sleep: async (ms) => void waits.push(ms) },
+    );
+    expect(how).toBe('no_row');
+    expect(waits).toEqual([1, 2]);
+    expect(getAzulTimeline(callId)?.filter((e) => e.tool === SECOND_TICKET_TOOL)).toHaveLength(1);
+    // The database recovers: a later try writes it, still once.
+    h.updateThrows = false;
+    expect(await recordSecondTicketOnTheCall({ callSid, ticketNumber: 'VA-79094', kind: 'urgent-ringout' }, { retryDelaysMs: [] })).toBe('appended');
+    expect(getAzulTimeline(callId)?.filter((e) => e.tool === SECOND_TICKET_TOOL)).toHaveLength(1);
+    err.mockRestore();
+    warn.mockRestore();
+  });
+});
+
 describe('it never costs the filing anything', () => {
   it('a database that throws still leaves the second ticket filed and reported', async () => {
     h.updateThrows = true;
