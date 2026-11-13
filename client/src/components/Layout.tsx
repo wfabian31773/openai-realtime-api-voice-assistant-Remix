@@ -24,6 +24,7 @@ import {
   Settings2,
   Target,
   Telescope,
+  CalendarCheck,
 } from 'lucide-react'
 import { useState } from 'react'
 
@@ -35,6 +36,7 @@ const navigation = [
   { name: 'SD Pilot', href: '/sd-pilot', icon: Target },
   { name: 'Agents', href: '/agents', icon: Bot },
   { name: 'Campaigns', href: '/campaigns', icon: Megaphone },
+  { name: 'NPX Outreach', href: '/npx-outreach', icon: CalendarCheck },
   { name: 'Scheduling Monitor', href: '/scheduling-monitor', icon: Calendar },
   { name: 'Cost Dashboard', href: '/cost-dashboard', icon: DollarSign },
   { name: 'Call Logs', href: '/call-logs', icon: Phone },

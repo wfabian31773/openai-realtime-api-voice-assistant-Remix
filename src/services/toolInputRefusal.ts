@@ -199,7 +199,7 @@ function refusal(lines: Array<{ field: string; line: string }>): ToolInputRefusa
 }
 
 /**
- * A BLANK FIELD IS A FIELD THE MODEL DID NOT FILL (v219).
+ * A BLANK FIELD IS A FIELD THE MODEL DID NOT FILL (v227).
  *
  * The model fills every key it is shown, and for a fact it does not have it
  * often sends `""` (or `null`) instead of leaving the key out. On an

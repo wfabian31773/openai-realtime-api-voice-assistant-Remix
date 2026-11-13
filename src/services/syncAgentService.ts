@@ -2,6 +2,7 @@ import { ticketingApiClient } from '../../server/services/ticketingApiClient';
 import type { TicketLocationSource, ValidatedPatient } from '../tools/ticketIdentity';
 import { missingFieldsFromRefusal, spokenMissingFields } from './missingFieldsRefusal';
 import { loggableLookupError } from './loggableTicketingError';
+import { recordSecondTicketOnTheCall } from './toolTimeline';
 import { storage } from '../../server/storage';
 import { 
   AFTER_HOURS_DEPARTMENT_ID, 
@@ -864,6 +865,22 @@ export class SyncAgentService {
           } catch (e) {
             console.error(`[SYNC AGENT] ✗ Failed to update ticketing_synced for ${callSid}:`, e);
           }
+        }
+
+        // v223: a second ticket is never written back (above), so it would be
+        // nowhere on the call row. Put it on the call's tool timeline, where
+        // the Observatory's call log reads every ticket a call created.
+        // Fire-and-forget and never throws: the ticket is filed whatever this
+        // does, and nothing on the call waits on telemetry.
+        if (callSid && params.secondTicketOnThisCall) {
+          const ticketNumber = response.ticketNumber;
+          void recordSecondTicketOnTheCall({
+            callSid,
+            ticketNumber,
+            kind: params.secondTicketOnThisCall.keySuffix,
+          })
+            .then((how) => console.info(`[SYNC AGENT] second ticket ${ticketNumber} on the call's timeline: ${how}`))
+            .catch(() => {});
         }
 
         return {

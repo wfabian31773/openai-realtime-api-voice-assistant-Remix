@@ -168,6 +168,8 @@ export interface CallLog {
 
   // Ticketing
   ticketNumber?: string
+  /** v223: every ticket the call created, the row's own first (server/callTicketNumbers.ts). */
+  ticketNumbers?: string[]
   ticketingSynced?: boolean
 
   // Escalation
