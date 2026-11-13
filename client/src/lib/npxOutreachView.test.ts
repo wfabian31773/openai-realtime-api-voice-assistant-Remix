@@ -143,6 +143,8 @@ describe('the page can read everything the server builds', () => {
     verifiedAt: null,
     linkBookedAt: null,
     linkBookingId: null,
+    confirmationBookingId: null,
+    confirmationCancel: null,
     smsStopAt: null,
     voiceOptOutAt: null,
   }
@@ -160,8 +162,10 @@ describe('the page can read everything the server builds', () => {
     callerSpoke: false,
     bookingAt: null,
     bookingSay: null,
+    bookingAzulCancel: null,
     staffAt: null,
     staffTicket: null,
+    tickets: [],
     ...over,
   })
 

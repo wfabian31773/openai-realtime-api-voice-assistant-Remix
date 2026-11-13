@@ -274,6 +274,21 @@ describe('the row mapping', () => {
     expect(toRawAttempt({ id: 'a', contact_id: 'c', caller_spoke: false }).callerSpoke).toBe(false);
   });
 
+  it('reads the recorded Azul cancel, the confirmation and every ticket on the call', () => {
+    const a = toRawAttempt({ id: 'a', contact_id: 'c', booking_azul_cancel: 'not_cancelled', call_ticket: 'VA-1', call_tickets: ['PCP-2', 'VA-1'] });
+    expect(a).toMatchObject({ bookingAzulCancel: 'not_cancelled', tickets: ['VA-1', 'PCP-2'] });
+    expect(toRawAttempt({ id: 'a', contact_id: 'c' }).tickets).toEqual([]);
+    const c = toRawContact({ id: 7, confirmation_booking_id: 'npx-1', confirmation_cancel: 'pending' });
+    expect(c).toMatchObject({ confirmationBookingId: 'npx-1', confirmationCancel: 'pending' });
+  });
+
+  it('the attempts read pulls the call log ticket and every ticket number in the timeline', () => {
+    expect(ATTEMPTS_SQL).toContain('cl.ticket_number AS call_ticket');
+    expect(ATTEMPTS_SQL).toContain('AS tickets');
+    expect(ATTEMPTS_SQL).toContain("e->'outcome'->>'azul_cancel'");
+    expect(CONTACTS_SQL).toContain("->'confirmation'->>'cancel' AS confirmation_cancel");
+  });
+
   it('reads the query strictly', () => {
     expect(readTrackingQuery({})).toEqual({ campaign: 'live', day: 'all' });
     expect(readTrackingQuery({ campaign: 'demo', day: 'today' })).toEqual({ campaign: 'demo', day: 'today' });

@@ -30,6 +30,7 @@ import {
   NPX_CAMPAIGN_NAMES,
   STAFF_TOOL,
   buildTracking,
+  ticketsOnCall,
   type DayKey,
   type NpxCampaignKey,
   type RawAttempt,
@@ -76,6 +77,8 @@ SELECT c.id,
        c.custom_data->'outreach_text'->>'verified_at' AS verified_at,
        c.custom_data->'outreach_text'->>'booked_at' AS link_booked_at,
        c.custom_data->'outreach_text'->>'booking_id' AS link_booking_id,
+       c.custom_data->'outreach_text'->'confirmation'->>'booking_id' AS confirmation_booking_id,
+       c.custom_data->'outreach_text'->'confirmation'->>'cancel' AS confirmation_cancel,
        dnc.sms_stop_at,
        dnc.voice_opt_out_at
   FROM campaign_contacts c
@@ -107,14 +110,22 @@ SELECT a.id,
        (position('CALLER:' in coalesce(cl.transcript, '')) > 0) AS caller_spoke,
        ev.booking_at,
        ev.booking_say,
+       ev.booking_azul_cancel,
        ev.staff_at,
-       ev.staff_ticket
+       ev.staff_ticket,
+       cl.ticket_number AS call_ticket,
+       ev.tickets AS call_tickets
   FROM campaign_contact_attempts a
   LEFT JOIN call_logs cl ON cl.call_sid = a.call_sid
   LEFT JOIN LATERAL (
     SELECT max(e->>'at') FILTER (WHERE e->>'tool' = $2::text AND e->'outcome'->>'success' = 'true') AS booking_at,
            (array_agg(e->'outcome'->>'say' ORDER BY e->>'at' DESC)
               FILTER (WHERE e->>'tool' = $2::text AND e->'outcome'->>'success' = 'true'))[1] AS booking_say,
+           (array_agg(e->'outcome'->>'azul_cancel' ORDER BY e->>'at' DESC)
+              FILTER (WHERE e->>'tool' = $2::text AND e->'outcome'->>'success' = 'true'))[1] AS booking_azul_cancel,
+           array_remove(array_agg(DISTINCT coalesce(e->'outcome'->>'ticket_number', e->'outcome'->>'ticketNumber'))
+              FILTER (WHERE coalesce(e->'outcome'->>'ticket_number', e->'outcome'->>'ticketNumber') ~ '^[A-Z]+-[0-9]+$'
+                        AND coalesce(e->'outcome'->>'success', 'true') <> 'false'), NULL) AS tickets,
            max(e->>'at') FILTER (WHERE e->>'tool' = $3::text AND e->'outcome'->>'success' = 'true'
                                    AND coalesce(e->'outcome'->>'ticket_number', e->'outcome'->>'ticketNumber') IS NOT NULL) AS staff_at,
            (array_agg(coalesce(e->'outcome'->>'ticket_number', e->'outcome'->>'ticketNumber') ORDER BY e->>'at' DESC)
@@ -161,6 +172,8 @@ export function toRawContact(r: Record<string, unknown>): RawContact {
     verifiedAt: instant(r.verified_at),
     linkBookedAt: instant(r.link_booked_at),
     linkBookingId: str(r.link_booking_id),
+    confirmationBookingId: str(r.confirmation_booking_id),
+    confirmationCancel: str(r.confirmation_cancel),
     smsStopAt: instant(r.sms_stop_at),
     voiceOptOutAt: instant(r.voice_opt_out_at),
   };
@@ -182,8 +195,10 @@ export function toRawAttempt(r: Record<string, unknown>): RawAttempt {
     callerSpoke: r.caller_spoke === true || r.caller_spoke === 't',
     bookingAt: instant(r.booking_at),
     bookingSay: str(r.booking_say),
+    bookingAzulCancel: str(r.booking_azul_cancel),
     staffAt: instant(r.staff_at),
     staffTicket: str(r.staff_ticket),
+    tickets: ticketsOnCall(str(r.call_ticket), r.call_tickets),
   };
 }
 

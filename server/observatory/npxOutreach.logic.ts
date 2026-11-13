@@ -31,14 +31,21 @@
  *                       45 phone-booked contacts had lost it to a later
  *                       `staff_callback:` note (the v216 shape), so the
  *                       timeline, not the note, decides THAT they booked.
- *   Azul cancel         the booking event's `say`: the spoken confirmation is
+ *   Azul cancel         first the booking's recorded result: v222's
+ *                       `azul_cancel` on the booking event, or the v222
+ *                       confirmation on the contact for that booking id
+ *                       (`cancel`: cancelled | pending), which is also how a
+ *                       link booking's cancel is read. Before v222 neither
+ *                       exists, so a phone booking falls back to its `say`:
  *                       one of two fixed sentences (npxOutreachTools
- *                       `confirmation`), and that is the only place the
- *                       cancel's result is recorded on a phone booking. The
- *                       link page records no cancel result in the Hub.
+ *                       `confirmation`). A link booking made before v222
+ *                       has no cancel result in the Hub.
  *   staff ticket        `staff_callback:<ticket>` on the contact, and the
  *                       ticket_number of a successful request_staff_callback
  *                       event in the call's timeline
+ *   tickets on a call   the call log's ticket_number, then every other
+ *                       ticket number its timeline recorded (Wayne,
+ *                       2026-11-13: every call shows its ticket)
  *   opted out           do_not_contact by phone (sms_stop = SMS STOP, any
  *                       other source = a voice opt-out), and the contact's
  *                       own `do_not_call` status when no STOP explains it
@@ -93,6 +100,12 @@ export interface RawContact {
   verifiedAt: string | null;
   linkBookedAt: string | null;
   linkBookingId: string | null;
+  /**
+   * The v222 booking confirmation on the contact: which booking it is for and
+   * what it says about the Azul cancel (`cancelled` | `pending`).
+   */
+  confirmationBookingId: string | null;
+  confirmationCancel: string | null;
   /** do_not_contact rows on this contact's ten digits. */
   smsStopAt: string | null;
   voiceOptOutAt: string | null;
@@ -114,9 +127,13 @@ export interface RawAttempt {
   /** The newest successful book_sooner_exam on the call: when, and its say. */
   bookingAt: string | null;
   bookingSay: string | null;
+  /** v222: the same booking's recorded Azul cancel (`cancelled` | `not_cancelled`). */
+  bookingAzulCancel: string | null;
   /** The newest successful request_staff_callback on the call. */
   staffAt: string | null;
   staffTicket: string | null;
+  /** Every ticket the call created: its call_logs ticket, then any other in its timeline. */
+  tickets: string[];
 }
 
 // ── What the page receives ───────────────────────────────────────────────────
@@ -152,6 +169,8 @@ export interface AttemptView {
   callerSpoke: boolean;
   booked: boolean;
   staffTicket: string | null;
+  /** Every ticket the call created (the call log's, then its timeline's). */
+  tickets: string[];
 }
 
 export interface BookingView {
@@ -271,6 +290,39 @@ export function staffTicketsFromNotes(notes: string | null): string[] {
   return [...(notes ?? '').matchAll(/staff_callback:([^;\s]+)/g)].map((m) => m[1]);
 }
 
+/**
+ * Every ticket a call created: the call log's own ticket first, then any other
+ * ticket number its timeline recorded, once each. Pure.
+ */
+export function ticketsOnCall(callTicket: string | null, timelineTickets: unknown): string[] {
+  const out: string[] = [];
+  const add = (t: unknown) => {
+    if (typeof t !== 'string') return;
+    const v = t.trim();
+    if (/^[A-Z]+-\d+$/.test(v) && !out.includes(v)) out.push(v);
+  };
+  add(callTicket);
+  if (Array.isArray(timelineTickets)) for (const t of [...timelineTickets].sort()) add(t);
+  return out;
+}
+
+/**
+ * The Azul cancel of a booking, from the best record there is: the booking's
+ * own recorded result (v222 `azul_cancel` on the timeline, or the v222
+ * confirmation for that booking), else what the agent was given to say.
+ */
+export function cancelOf(args: {
+  azulCancel?: string | null;
+  confirmationCancel?: string | null;
+  say?: string | null;
+}): CancelState {
+  if (args.azulCancel === 'cancelled') return 'landed';
+  if (args.azulCancel === 'not_cancelled') return 'not_landed';
+  if (args.confirmationCancel === 'cancelled') return 'landed';
+  if (args.confirmationCancel === 'pending') return 'not_landed';
+  return cancelFromSay(args.say ?? null);
+}
+
 /** What the booking confirmation said about the Azul cancel. */
 export function cancelFromSay(say: string | null): CancelState {
   if (!say) return 'not_recorded';
@@ -356,6 +408,7 @@ export function buildContact(raw: RawContact, attempts: RawAttempt[]): ContactVi
     callerSpoke: a.callerSpoke,
     booked: Boolean(a.bookingAt),
     staffTicket: a.staffTicket,
+    tickets: [...new Set([...(a.tickets ?? []), ...(a.staffTicket ? [a.staffTicket] : [])])],
   }));
   const placed = sorted.filter((a) => a.direction !== 'inbound' && a.status !== 'not_placed');
   const returned = sorted.filter((a) => a.direction === 'inbound');
@@ -367,20 +420,34 @@ export function buildContact(raw: RawContact, attempts: RawAttempt[]): ContactVi
   const noteId = bookingIdFromNotes(raw.agentNotes);
   const phoneEvent = [...sorted].reverse().find((a) => a.bookingAt) ?? null;
   let booking: BookingView | null = null;
+  // The v222 confirmation speaks for the booking it names, and only that one.
+  const confirmationFor = (id: string | null) =>
+    id && raw.confirmationBookingId === id ? raw.confirmationCancel : null;
   if (phoneEvent) {
+    const id = noteId && noteId !== raw.linkBookingId ? noteId : null;
     booking = {
-      id: noteId && noteId !== raw.linkBookingId ? noteId : null,
+      id,
       by: 'phone',
       at: iso(phoneEvent.bookingAt),
-      cancel: cancelFromSay(phoneEvent.bookingSay),
+      cancel: cancelOf({
+        azulCancel: phoneEvent.bookingAzulCancel,
+        confirmationCancel: confirmationFor(id),
+        say: phoneEvent.bookingSay,
+      }),
       callLogId: phoneEvent.callLogId,
     };
   } else if (raw.linkBookingId) {
-    booking = { id: raw.linkBookingId, by: 'link', at: iso(raw.linkBookedAt), cancel: 'not_recorded', callLogId: null };
+    booking = {
+      id: raw.linkBookingId,
+      by: 'link',
+      at: iso(raw.linkBookedAt),
+      cancel: cancelOf({ confirmationCancel: confirmationFor(raw.linkBookingId) }),
+      callLogId: null,
+    };
   } else if (noteId) {
     // The note says booked and no call on the Hub shows it: the booking stands,
-    // its time and its cancel are not recorded here.
-    booking = { id: noteId, by: 'phone', at: null, cancel: 'not_recorded', callLogId: null };
+    // its time is not recorded here, and its cancel only if a confirmation was.
+    booking = { id: noteId, by: 'phone', at: null, cancel: cancelOf({ confirmationCancel: confirmationFor(noteId) }), callLogId: null };
   }
 
   const staffTickets = [...new Set([...staffTicketsFromNotes(raw.agentNotes), ...sorted.map((a) => a.staffTicket).filter((t): t is string => Boolean(t))])];

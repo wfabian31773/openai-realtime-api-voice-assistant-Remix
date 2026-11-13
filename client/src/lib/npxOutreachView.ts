@@ -35,6 +35,8 @@ export interface AttemptView {
   callerSpoke: boolean
   booked: boolean
   staffTicket: string | null
+  /** Every ticket the call created: the call log's, then any other its timeline recorded. */
+  tickets?: string[]
 }
 
 export interface BookingView {

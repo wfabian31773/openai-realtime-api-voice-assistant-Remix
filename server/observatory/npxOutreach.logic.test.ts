@@ -25,6 +25,7 @@ import {
   inDay,
   pacificDay,
   staffTicketsFromNotes,
+  ticketsOnCall,
   type RawAttempt,
   type RawContact,
 } from './npxOutreach.logic';
@@ -58,6 +59,8 @@ function contact(over: Partial<RawContact> = {}): RawContact {
     verifiedAt: null,
     linkBookedAt: null,
     linkBookingId: null,
+    confirmationBookingId: null,
+    confirmationCancel: null,
     smsStopAt: null,
     voiceOptOutAt: null,
     ...over,
@@ -81,8 +84,10 @@ function attempt(over: Partial<RawAttempt> = {}): RawAttempt {
     callerSpoke: false,
     bookingAt: null,
     bookingSay: null,
+    bookingAzulCancel: null,
     staffAt: null,
     staffTicket: null,
+    tickets: [],
     ...over,
   };
 }
@@ -264,6 +269,38 @@ describe('a booking', () => {
     expect(t.totals.linkDobConfirmed).toBe(1);
     expect(t.totals.linkDobTried).toBe(1);
     expect(t.needsPerson[0].reasons).toEqual(['cancel_not_recorded']);
+  });
+
+  it('the recorded Azul cancel wins over the spoken words (v222)', () => {
+    const landed = buildContact(contact({ agentNotes: 'npx_booking:npx-1' }), [
+      attempt({ status: 'completed', callerSpoke: true, bookingAt: TODAY_9AM, bookingSay: notLandedSay, bookingAzulCancel: 'cancelled' }),
+    ]);
+    expect(landed.booking?.cancel).toBe('landed');
+    const notLanded = buildContact(contact({ agentNotes: 'npx_booking:npx-2' }), [
+      attempt({ status: 'completed', callerSpoke: true, bookingAt: TODAY_9AM, bookingSay: landedSay, bookingAzulCancel: 'not_cancelled' }),
+    ]);
+    expect(notLanded.booking?.cancel).toBe('not_landed');
+  });
+
+  it('a link booking reads its cancel from the confirmation for that booking only', () => {
+    const base = { status: 'completed', agentNotes: 'npx_booking:npx-link-1', linkBookedAt: TODAY_9AM, linkBookingId: 'npx-link-1' };
+    expect(buildContact(contact({ ...base, confirmationBookingId: 'npx-link-1', confirmationCancel: 'cancelled' }), []).booking?.cancel).toBe('landed');
+    expect(buildContact(contact({ ...base, confirmationBookingId: 'npx-link-1', confirmationCancel: 'pending' }), []).booking?.cancel).toBe('not_landed');
+    expect(buildContact(contact({ ...base, confirmationBookingId: 'npx-other', confirmationCancel: 'cancelled' }), []).booking?.cancel).toBe('not_recorded');
+  });
+
+  it('every call shows every ticket it created: the call log ticket, the timeline tickets and the staff ticket', () => {
+    const c = buildContact(contact(), [
+      attempt({ status: 'completed', callerSpoke: true, tickets: ['VA-1001', 'VA-1002'], staffTicket: 'VA-1002' }),
+      attempt({ status: 'completed', callerSpoke: true, tickets: [], staffTicket: 'VA-1003' }),
+      attempt({ status: 'no-answer' }),
+    ]);
+    expect(c.attempts.map((a) => a.tickets)).toEqual([['VA-1001', 'VA-1002'], ['VA-1003'], []]);
+  });
+
+  it('ticketsOnCall puts the call log ticket first and keeps each ticket number once', () => {
+    expect(ticketsOnCall('VA-9', ['PCP-8', 'VA-9', 'not-a-ticket', null])).toEqual(['VA-9', 'PCP-8']);
+    expect(ticketsOnCall(null, null)).toEqual([]);
   });
 
   it('a note with no call behind it is still a booking, its cancel not recorded', () => {

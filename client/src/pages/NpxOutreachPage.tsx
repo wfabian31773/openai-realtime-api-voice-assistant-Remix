@@ -105,7 +105,9 @@ function Attempts({ contact }: { contact: ContactView }) {
             <TableCell>{a.runtimeOutcome ?? (a.callLogId ? '-' : 'no call log')}</TableCell>
             <TableCell className="space-x-1">
               {a.booked ? <Badge variant="success">Booked</Badge> : null}
-              {a.staffTicket ? <Badge variant="info">{a.staffTicket}</Badge> : null}
+              {(a.tickets && a.tickets.length > 0 ? a.tickets : a.staffTicket ? [a.staffTicket] : []).map((t) => (
+                <Badge key={t} variant="info">{t}</Badge>
+              ))}
             </TableCell>
             <TableCell className="font-mono text-xs">
               <CallLink callLogId={a.callLogId}>{a.callSid ?? '-'}</CallLink>
