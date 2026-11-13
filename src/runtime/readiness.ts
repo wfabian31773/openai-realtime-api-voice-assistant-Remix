@@ -1707,7 +1707,7 @@ import { callEnvironment } from "./callRecord";
  * does not.
  * No migration.
  *
- * v221 — A BOOKING IS CONFIRMED BY TEXT (2026-11-13). Operator: "Anything
+ * v222 — A BOOKING IS CONFIRMED BY TEXT (2026-11-13). Operator: "Anything
  * booked on the calls or by sms has to have some message confirming with the
  * appointment details." No NPX outreach booking was ever confirmed in
  * writing; three of the 46 bookings to 2026-11-12 rang back to ask for the
@@ -1717,10 +1717,11 @@ import { callEnvironment } from "./callRecord";
  * after the call has ended, never to a number on do_not_contact. A caller who
  * asks staff on the call to cancel or change the booking holds it, and that
  * staff ticket files urgent. Same switch as the texts (NPX_OUTREACH_TEXTS).
- * Stacked on v220 (#467, open). No migration.
+ * Stacked on v220 (#467, open). v221 is #469 on its open branch, which this
+ * does not contain. No migration.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v221-a-booking-is-confirmed-by-text-20261113";
+  "voice-runtime-v222-a-booking-is-confirmed-by-text-20261113";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

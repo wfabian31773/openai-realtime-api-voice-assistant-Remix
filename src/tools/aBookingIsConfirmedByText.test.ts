@@ -1,5 +1,5 @@
 /**
- * v221: every NPX outreach booking, on a call or on the text's booking page,
+ * v222: every NPX outreach booking, on a call or on the text's booking page,
  * is confirmed by a text with the appointment details. Operator, 2026-11-13:
  * "Anything booked on the calls or by sms has to have some message confirming
  * with the appointment details."

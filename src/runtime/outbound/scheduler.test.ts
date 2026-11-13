@@ -87,7 +87,7 @@ describe("the outbound scheduler", () => {
     expect(send).toHaveBeenCalledWith(expect.objectContaining({ to: "+15555550112", from: "+15555550100" }));
   });
 
-  it("sends a booked contact's confirmation on the same tick, after the texts (v221)", async () => {
+  it("sends a booked contact's confirmation on the same tick, after the texts (v222)", async () => {
     const send = vi.fn(async () => ({ sid: "SM1" }));
     const page = { isDemo: () => true, currentAppointment: () => "", openings: async () => ({ openings: [] }), book: async () => ({ ok: false as const, error: "x" }) };
     const texting = { ...policy, textOutreach: { enableEnv: "TEST_TEXTS", perTick: 5, body: (l: string) => l, page } };

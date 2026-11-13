@@ -70,7 +70,7 @@ export type ContactStatus =
  * a row's fields following the Console never wipe "this person was texted".
  */
 export const OUTREACH_TEXT_KEY = "outreach_text";
-/** Inside OUTREACH_TEXT_KEY: the booking confirmation text (v221, ./bookingConfirmation.ts). */
+/** Inside OUTREACH_TEXT_KEY: the booking confirmation text (v222, ./bookingConfirmation.ts). */
 export const CONFIRMATION_FIELD = "confirmation";
 
 /**
@@ -293,7 +293,7 @@ export interface OutboundStore {
   /** An SMS START: delete only the `sms_stop` row, never a voice opt-out. */
   clearSmsStop(phone: string): Promise<void>;
 
-  // ── The booking confirmation text (v221, ./bookingConfirmation.ts) ──
+  // ── The booking confirmation text (v222, ./bookingConfirmation.ts) ──
   /** Queue a booking's confirmation on the contact, inside outreach_text.
    * A no-op when this booking's confirmation is already queued or sent.
    * True when it was written. */

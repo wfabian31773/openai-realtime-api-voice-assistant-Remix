@@ -1,5 +1,5 @@
 /**
- * THE BOOKING CONFIRMATION TEXT (v221).
+ * THE BOOKING CONFIRMATION TEXT (v222).
  *
  * Operator, 2026-11-13: "Anything booked on the calls or by sms has to have
  * some message confirming with the appointment details." Before this build a

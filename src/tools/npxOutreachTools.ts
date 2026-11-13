@@ -262,7 +262,7 @@ interface OutreachSession {
   bookingInFlight: Promise<ToolResult> | null;
   /** The HVA Hub ticket filed when they asked for a person. */
   staffTicket: string | null;
-  /** The caller asked staff to cancel or change what was booked on this call (v221). */
+  /** The caller asked staff to cancel or change what was booked on this call (v222). */
   bookingChangeAsked?: boolean;
   openedAtMs: number;
 }
@@ -1268,7 +1268,7 @@ export function textedDay(ymd: string): string {
   return d.toLocaleDateString('en-US', { timeZone: 'UTC', month: 'short', day: 'numeric' });
 }
 
-/** What a booking's confirmation text will say, rendered when it is booked (v221). */
+/** What a booking's confirmation text will say, rendered when it is booked (v222). */
 export function confirmationRecordFor(args: {
   contact: OutboundContact;
   slot: NpxSlot;
@@ -1370,7 +1370,7 @@ export async function bookOutreachSlot(args: {
       notes: `npx_booking:${book.bookingId}`,
       exceptStatus: ['do_not_call'],
     });
-    // v221: the confirmation text, sent by the scheduler once the call has
+    // v222: the confirmation text, sent by the scheduler once the call has
     // ended (./runtime/outbound/bookingConfirmation.ts).
     await store.queueConfirmation(contact.contactId, confirmationRecordFor({
       contact, slot: bookedSlot, bookingId: book.bookingId, callRef, cancelled: cancel.cancelled,
@@ -1448,7 +1448,7 @@ export function appointmentStateLine(booking: OutreachSession['booking']): strin
     : 'Your new appointment stays booked, and our team will cancel your old one with us.';
 }
 
-/** What the caller hears when they asked to change what was just booked (v221). */
+/** What the caller hears when they asked to change what was just booked (v222). */
 export function bookingChangeStateLine(booking: NonNullable<OutreachSession['booking']>): string {
   return booking.cancel.cancelled
     ? 'Until they call, the new appointment is still booked, and your old one with us has been cancelled.'
@@ -1456,7 +1456,7 @@ export function bookingChangeStateLine(booking: NonNullable<OutreachSession['boo
 }
 
 /** The ticket line that tells staff what to do when the caller asked to change
- * the booking made on the call (v221). */
+ * the booking made on the call (v222). */
 export function bookingChangeLine(contact: OutboundContact, booking: NonNullable<OutreachSession['booking']>): string {
   const day = spokenDay(field(contact, 'appointment_date'));
   return booking.cancel.cancelled
@@ -1511,7 +1511,7 @@ registerTool({
     if (s.staffTicket) return already(s.staffTicket);
 
     const request = String(input.request ?? '').trim();
-    // v221: a caller who asks to undo or move what was just booked gets an
+    // v222: a caller who asks to undo or move what was just booked gets an
     // urgent ticket saying exactly what staff must do, and no confirmation
     // text for a booking they asked to change.
     const changesBooking = !!s.booking && input.changes_booking === true;

@@ -184,7 +184,7 @@ export interface TickResult {
   refreshed?: { written: number; parked: number; listed: number };
   /** The campaign's texts this tick (v211), when it texts. */
   texts?: { sent: number; held: Record<string, number>; skipped?: string };
-  /** The booking confirmations sent on this tick (v221, ./bookingConfirmation.ts). */
+  /** The booking confirmations sent on this tick (v222, ./bookingConfirmation.ts). */
   confirmations?: { sent: number; held: Record<string, number>; skipped?: string };
 }
 

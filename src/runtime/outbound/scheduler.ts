@@ -108,7 +108,7 @@ export async function runOutboundTick(deps: SchedulerDeps): Promise<TickResult[]
           log: deps.log,
         });
         tick.texts = { sent: texts.sent, held: texts.held, ...(texts.skipped ? { skipped: texts.skipped } : {}) };
-        // The booking confirmations (v221): the same switch, number and window.
+        // The booking confirmations (v222): the same switch, number and window.
         const confirmations = await runConfirmationTick(slug, policy, {
           store,
           env: deps.env,

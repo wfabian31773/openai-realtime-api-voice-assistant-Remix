@@ -448,7 +448,7 @@ export class FakeOutboundStore implements OutboundStore {
     if (key) this.channelDnc.setSms(key, false);
   }
 
-  // ── The booking confirmation (v221) ──
+  // ── The booking confirmation (v222) ──
   private confirmationOf(c: ContactRow): BookingConfirmationRecord | null {
     const t = c.customData[OUTREACH_TEXT_KEY];
     if (!t || typeof t !== "object") return null;

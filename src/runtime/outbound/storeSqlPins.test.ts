@@ -350,7 +350,7 @@ describe("a caller ringing from another phone, whose surname begins with an acce
   });
 });
 
-describe("the booking confirmation (v221)", () => {
+describe("the booking confirmation (v222)", () => {
   it("queues a booking's confirmation once: never over the same booking's", () => {
     const m = method("queueConfirmation");
     expect(m).toContain("->> 'booking_id'");
