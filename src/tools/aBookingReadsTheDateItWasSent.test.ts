@@ -374,3 +374,44 @@ describe('what the booking received is recorded, never the values', () => {
     });
   });
 });
+
+// Codex P2s on #476 (head 8ece0df7): the received_* words were added only on
+// the booking path, so an early answer carried none and a second call that
+// joined a booking in flight carried the first call's; and `which_one` was the
+// one booking refusal with no choices.
+describe('every answer carries what that call received, and which_one carries the choices', () => {
+  it('a booking before the date of birth is confirmed carries its own received_* words', async () => {
+    const r = await run(BOOK_SOONER_TOOL_NAME, { date: '2041-02-13', time: '09:00' });
+    expect(r).toMatchObject({ success: false, received_date: 'iso', received_time: 'read', received_option: false });
+    expect(book).not.toHaveBeenCalled();
+  });
+
+  it('a second call that joins a booking in flight records its own arguments, not the first call’s', async () => {
+    await twoListsRead();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const original = book.getMockImplementation()!;
+    book.mockImplementationOnce(async (req: { slotId: string }) => {
+      await gate;
+      return original(req);
+    });
+    const first = run(BOOK_SOONER_TOOL_NAME, { date: '2041-02-13', time: '09:00' });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    const second = run(BOOK_SOONER_TOOL_NAME, { option: '2' });
+    release();
+    const [a, b] = await Promise.all([first, second]);
+    expect(a).toMatchObject({ success: true, received_date: 'iso', received_time: 'read', received_option: false });
+    expect(b).toMatchObject({ success: true, received_date: 'none', received_time: 'none', received_option: true });
+    expect(book).toHaveBeenCalledTimes(1);
+  });
+
+  it('two choices at one date and time are refused which_one with both written out', () => {
+    const otherCity = slot('feb13-0900-mv', '2041-02-13T17:00:00.000Z', 'Moreno Valley');
+    const r = chosenSlot([[FEB13_0900, otherCity]], { date: '2041-02-13', time: '09:00' });
+    expect(r).toMatchObject({ refusal: { error: 'which_one' } });
+    expect((r as { refusal: { choices: unknown[] } }).refusal.choices).toEqual([
+      expect.objectContaining({ date: '2041-02-13', time: '09:00', city: 'Beaumont' }),
+      expect.objectContaining({ date: '2041-02-13', time: '09:00', city: 'Moreno Valley' }),
+    ]);
+  });
+});

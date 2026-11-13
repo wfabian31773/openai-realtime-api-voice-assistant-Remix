@@ -1169,32 +1169,39 @@ registerTool({
     },
     required: [],
   },
+  // What this invocation received rides on every answer it gets, the early
+  // returns and a shared in-flight booking included (Codex P2 on #476).
   handler: async (input): Promise<ToolResult> => {
-    const deadline = Date.now() + BOOK_SEQUENCE_BUDGET_MS;
-    const found = await sessionFor(input);
-    if ('success' in found) return found;
-    const { sid, s } = found;
-    if (!s.verified) return notVerified();
-    const currentDay = spokenDay(field(s.contact, 'appointment_date'));
-    if (s.booking) {
-      if (s.booking.azul.kind === 'dropped') {
-        const r: Refusal = {
-          success: false,
-          error: 'booking_being_changed',
-          fix: 'Our scheduling team is already calling them back about the booking made on this call. Do not book again; tell them the team will call.',
-        };
-        return r;
-      }
-      return { success: true, booked: true, say: confirmation(s.booking.slot, spokenCancelOf(s.booking.azul), currentDay) };
-    }
-    if (s.bookingInFlight) return s.bookingInFlight;
-    const run = bookChosen(input, sid, s, currentDay, deadline).finally(() => {
-      s.bookingInFlight = null;
-    });
-    s.bookingInFlight = run;
-    return run;
+    const received = bookingArgsReceived(input);
+    return { ...(await bookSooner(input)), ...received } as ToolResult;
   },
 });
+
+async function bookSooner(input: Record<string, unknown>): Promise<ToolResult> {
+  const deadline = Date.now() + BOOK_SEQUENCE_BUDGET_MS;
+  const found = await sessionFor(input);
+  if ('success' in found) return found;
+  const { sid, s } = found;
+  if (!s.verified) return notVerified();
+  const currentDay = spokenDay(field(s.contact, 'appointment_date'));
+  if (s.booking) {
+    if (s.booking.azul.kind === 'dropped') {
+      const r: Refusal = {
+        success: false,
+        error: 'booking_being_changed',
+        fix: 'Our scheduling team is already calling them back about the booking made on this call. Do not book again; tell them the team will call.',
+      };
+      return r;
+    }
+    return { success: true, booked: true, say: confirmation(s.booking.slot, spokenCancelOf(s.booking.azul), currentDay) };
+  }
+  if (s.bookingInFlight) return s.bookingInFlight;
+  const run = bookChosenSlot(input, sid, s, currentDay, deadline).finally(() => {
+    s.bookingInFlight = null;
+  });
+  s.bookingInFlight = run;
+  return run;
+}
 
 /**
  * WHICH SLOT THE CALLER CONFIRMED (v218). The agent says a choice back with
@@ -1272,11 +1279,14 @@ export function chosenSlot(
     if (atThatTime.length > 1) {
       const where = joinWords([...new Set(atThatTime.map((x) => `${x.providerName || 'the provider'} in ${cityOf(x) || 'the partner office'}`))], 'or');
       return {
-        refusal: {
-          success: false,
-          error: 'which_one',
-          fix: `Nothing was booked: two choices read to them are at that date and time (${where}). Ask which one they want, then call again with its city.`,
-        },
+        refusal: withChoices(
+          {
+            success: false,
+            error: 'which_one',
+            fix: `Nothing was booked: two choices read to them are at that date and time (${where}). Ask which one they want, then call again with its city.`,
+          },
+          atThatTime,
+        ),
       };
     }
     const slot = atThatTime[0];
@@ -1418,18 +1428,6 @@ export function bookingArgsReceived(input: Record<string, unknown>): {
     received_time: readChosenTime(input.time).form,
     received_option: optionText !== '',
   };
-}
-
-async function bookChosen(
-  input: Record<string, unknown>,
-  sid: string,
-  s: OutreachSession,
-  currentDay: string,
-  deadline: number,
-): Promise<ToolResult> {
-  const received = bookingArgsReceived(input);
-  const result = await bookChosenSlot(input, sid, s, currentDay, deadline);
-  return { ...result, ...received } as ToolResult;
 }
 
 async function bookChosenSlot(
