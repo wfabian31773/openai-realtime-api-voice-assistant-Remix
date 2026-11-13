@@ -557,6 +557,29 @@ export function currentAppointment(c: OutboundContact): string {
   return `${briefAppointment(c)}${clock ? ` at ${clock}` : ''}${office ? ` at our ${office} office` : ''}`;
 }
 
+/**
+ * THE APPOINTMENT AS STAFF READ IT: NextGen's own event name (v220).
+ *
+ * The staff-callback ticket went to the HVA Hub (department 9) with the visit
+ * as the caller hears it, and for a Refraction Only that is "a vision test for
+ * glasses". The ticketing app re-classifies a Hub request by its words
+ * (`correctSurgeryIntake`, mirrored in `requestClassification.ts`), and
+ * "glasses" with no medication word is an Optical request (1/66/536), so the
+ * ticket was created in Optical Support. Measured, every NPX staff-callback
+ * ticket to 2026-11-13: 6 of 29 created in Optical, every one a Refraction
+ * Only, every one with "glasses" only in this line; Refraction Only is 128 of
+ * the campaign's 603 contacts. NextGen's event names (Dilated Exam, Refraction
+ * Only, Consult, New Patient Exam, Ref+DFE, Diabetic Exam, GLE) carry no word
+ * the classifier routes on, and they are what a scheduler sees in NextGen. The
+ * caller still hears `spokenVisit`; only the ticket changes.
+ */
+export function staffAppointment(c: OutboundContact): string {
+  const event = field(c, 'event_name').trim() || 'An appointment';
+  const clock = spokenClock(field(c, 'begin_time'));
+  const office = field(c, 'office');
+  return `${event} on ${spokenDay(field(c, 'appointment_date'))}${clock ? ` at ${clock}` : ''}${office ? ` at our ${office} office` : ''}`;
+}
+
 const DOB_ASK = 'Can I please have your date of birth, starting with the month, then the day, then the year?';
 const WHEN_ASK = 'What day and time work best for you?';
 
@@ -1398,7 +1421,7 @@ registerTool({
         'Azul outreach call: an offer of a sooner appointment at an NPX partner practice.',
         'The patient asked to speak with a person.',
         request ? `What they asked: ${request}` : null,
-        `Their appointment: ${currentAppointment(s.contact)}.`,
+        `Their appointment: ${staffAppointment(s.contact)}.`,
         `Date of birth confirmed on the call: ${s.verified ? 'yes' : 'no'}.`,
         callbackSid ? 'They called us back.' : 'We called them.',
         calledFrom && calledFrom !== s.contact.phone
