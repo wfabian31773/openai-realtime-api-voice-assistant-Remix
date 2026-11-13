@@ -1490,7 +1490,7 @@ export function readChosenDate(
       }
       // A year is read or the date is not: a year that cannot be read is
       // never replaced by the year of a choice on offer.
-      const y4 = /^\d{4}$/.test(w) ? Number(w) : /^['’]\d{2}$/.test(w) ? 2000 + Number(w.slice(1)) : 0;
+      const y4 = /^\d{4}$/.test(w) ? Number(w) : /^['\u2019]\d{2}$/.test(w) ? 2000 + Number(w.slice(1)) : 0;
       if (y4) {
         if (year && year !== y4) return { form: 'unreadable' };
         year = y4;
