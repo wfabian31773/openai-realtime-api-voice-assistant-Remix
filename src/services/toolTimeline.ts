@@ -355,6 +355,11 @@ function summarizeResult(tool: string, resultJson: string): Record<string, unkno
     // (Codex P2 on #376). A boolean, no PHI — "how often does the app refuse
     // a records filing outright" is a count, not a log search.
     'recovered_after_refusal',
+    // v225: a records filing or classification that is a correction to the
+    // records or withdrawing a records request ('amendment' | 'cancellation',
+    // a closed set, no PHI). Medical Records work off the CAP clock, so how
+    // many there are is a count, not a transcript read.
+    'records_work',
     // v218: how book_sooner_exam picked the slot it booked ('date_time' or
     // 'option'), and whether the option number the model also sent, read in
     // the last list as before v218, is another slot. No PHI: the count of

@@ -1,12 +1,80 @@
 /**
  * Item #8. Request evidence, never a phone line, template, requester or type id.
- * Kept identical in ticketing-app and voice-remix: independently deployed repos.
- * Ticketing owns the final taxonomy and case creation; voice uses this only to
- * avoid interviewing a scheduling caller about records delivery/signatures.
+ * Ticketing owns the final taxonomy and case creation, and re-reads every
+ * records-line ticket with its own copy of this file before it is stored. Voice
+ * uses this to decide whether a caller is interviewed about records delivery
+ * and signatures, and where the request files.
+ *
+ * THE TWO COPIES ARE NOT IDENTICAL, and this header used to say they were.
+ * Both were written on 2026-10-29 (voice #381, ticketing-app #406) and differed
+ * from the first commit. What is shared now is the PURPOSE LIST: the app's,
+ * in the app's order, pinned by `recordsPurposesAgreeWithTheApp.test.ts`.
+ * The sentence-level reading is still each repo's own. Measured 2026-11-13 over
+ * the 1,268 distinct sentences the two repos' suites put through it, the
+ * copies return a different purpose for 563 (on 356 of them, one keeps the request
+ * in Medical Records and the other does not). Read that test's header before
+ * saying the two copies agree.
  */
 import { SCHEDULING } from './scheduling-cues';
 
-export type RecordsLinePurpose = 'records' | 'surgery' | 'scheduling' | 'referral' | 'professional' | 'optical' | 'clinical' | 'billing' | 'unknown';
+/** ticketing-app `shared/records-request-intent.ts`'s `RecordsLinePurpose`, in its order. */
+export const RECORDS_LINE_PURPOSES = [
+  'records', 'amendment', 'cancellation', 'surgery', 'scheduling', 'referral',
+  'professional', 'optical', 'clinical', 'billing', 'unknown',
+] as const;
+export type RecordsLinePurpose = typeof RECORDS_LINE_PURPOSES[number];
+
+/**
+ * Medical Records work that is NOT an access request (the app's ruling, #406):
+ * a correction to the records, or withdrawing a records request. It stays on
+ * the records line, under its own reason, and never starts the CAP clock, so
+ * nobody is offered a signing link or asked where records go or which dates.
+ */
+export type RecordsWorkNotAccess = Extract<RecordsLinePurpose, 'amendment' | 'cancellation'>;
+export function recordsWorkNotAccess(purpose: RecordsLinePurpose): purpose is RecordsWorkNotAccess {
+  return purpose === 'amendment' || purpose === 'cancellation';
+}
+
+// Transcribed verbatim from the app's copy, 2026-11-13. Correction/amendment
+// and withdrawal of a records request are Medical Records work, but they are
+// not a new access request and must not start the CAP clock.
+export const RECORDS_AMENDMENT = /\b(?:correct|amend)\w*\b[^.!?]{0,50}\b(?:(?:medical|patient|health)\s+)?records?\b/;
+export const RECORDS_CANCELLATION = /\bcancel\w*\b[^.!?]{0,50}\b(?:(?:my|the|this|our)\s+)?(?:medical\s+)?records?\s+request\b/;
+/**
+ * WHERE A CORRECTION OR A CANCELLATION ENDS: the app's own clause boundary
+ * (`ACTION_BOUNDARY`), transcribed 2026-11-13 with the app's delivery verbs.
+ * Read ONLY to decide amendment and cancellation, and to cut a correction out
+ * of a clause before the access scan. Nothing else in this file reads it.
+ *
+ * Two reasons this copy's own clauses will not do:
+ *  - The app sets aside the clause the correction sits in, not the sentence,
+ *    so "correct my records and get a copy of my chart" is still access there.
+ *    This copy's clauses are longer ("and get" does not split them).
+ *  - This copy drops a whole clause that refuses documents, so "please correct
+ *    my records, don't fax my chart" lost its correction and read as unknown.
+ *    The app splits first and drops only the refused part.
+ * `WANT` is the same in both copies.
+ */
+const APP_DELIVERY = String.raw`get|copy|copies|fax(?:ed|ing)?|send|sent|transfer(?:red|ring)?|email(?:ed)?|mail(?:ed)?|forward|release|obtain|retrieve|provide|inspect|inspection|pick(?:ing)? up|collect(?:ed|ing|ion)?|copia|copias|envi\w*|mand\w*`;
+const APP_WANT = String.raw`need|want|request(?:ing|s|ed)?|would like|asking for|necesit\w*|solicit\w*|quiero`;
+export const APP_ACTION_BOUNDARY = new RegExp(
+  String.raw`[.!?;\n]+|\bbut\b|,\s*(?=(?:please|just|only)\b)`
+  + String.raw`|(?:,\s*|\band\s+)(?=(?:(?:please|just|only)\s+)?(?:(?:i|we|he|she|they)\s+)?(?:do not|don't|does not|doesn't|no longer (?:need|want)|not requesting|not asking for|no need to|\b(?:${APP_WANT})\b|\b(?:${APP_DELIVERY})\b|reschedul\w*|schedul\w*|cancel\w*|confirm\w*|book\w*)\b)`
+  + String.raw`|\s+(?=(?:(?:i|we|he|she|they)\s+)?(?:do not|don't|does not|doesn't|no longer (?:need|want)|not requesting|not asking for|no need to)\b)`,
+);
+/**
+ * The app's refusal (`NEGATED_RECORDS`), its own refusal words narrowed to the
+ * one document word every correction and cancellation names: "records". So "I
+ * no longer need to correct my records" is not a correction in either copy.
+ * This copy's own refusal has no "no longer".
+ */
+export const APP_REFUSED_RECORDS = new RegExp(
+  String.raw`\b(?:(?:don't|do not|doesn't|does not) (?:need|want|request|${APP_DELIVERY})|no longer (?:need|want)|not (?:requesting|asking for|about|a request for)|no (?:need to|necesito|quiero))\b[^.!?;]{0,50}\brecords?\b|\bno records (?:needed|required|requested)\b`,
+);
+/** The app's parts of a sentence that ask for `pattern`, refused parts left out. */
+function appParts(text: string, pattern: RegExp): boolean {
+  return fold(text).split(APP_ACTION_BOUNDARY).some(part => pattern.test(part) && !APP_REFUSED_RECORDS.test(part));
+}
 
 /** Remove only known generated metadata; never use it as caller evidence. */
 export function recordsRequestText(text: string): string {
@@ -130,7 +198,24 @@ export function recordsLinePurpose(text: string): RecordsLinePurpose {
   // An actual delivery/access request wins even if its purpose is an upcoming
   // appointment, operation, referral or payer audit. The requester never vetoes it.
   const clauses = requestClauses(text);
-  if (clauses.some(clause => {
+  // THE APP'S PRECEDENCE (#406). A correction wins over delivery wording
+  // ("correct my records and send me the corrected copy"): it is not a new
+  // access request. Whether there IS one is read on the app's parts of the
+  // sentence (APP_ACTION_BOUNDARY, APP_REFUSED_RECORDS). In this copy's
+  // clauses, the parts that correct are left out of the access scan, so their
+  // delivery words never count, but a separate access request elsewhere on
+  // the call still does. A clause with no correction in it is read exactly
+  // as before. (No refusal test on the parts: `requestClauses` has already
+  // removed every refusal, and a part is a piece of its clause.)
+  const amending = (part: string) => RECORDS_AMENDMENT.test(part);
+  const amends = appParts(text, RECORDS_AMENDMENT);
+  const scan = amends
+    ? clauses.flatMap(clause => {
+      const clauseParts = clause.split(APP_ACTION_BOUNDARY);
+      return clauseParts.some(amending) ? clauseParts.filter(part => !amending(part)) : [clause];
+    })
+    : clauses;
+  if (scan.some(clause => {
     // Keep interpretation clinical unless the caller also requests delivery.
     const interpretation = clause.search(INTERPRETATION);
     const c = interpretation < 0 ? clause : clause.slice(0, interpretation);
@@ -147,6 +232,10 @@ export function recordsLinePurpose(text: string): RecordsLinePurpose {
     if ((document || prescription || /\b(?:notes?|reports?|results?|imaging)\b/.test(c)) && documentDelivery(c)
       && (schedulingStart < 0 || (DOC.test(beforeScheduling) && documentDelivery(beforeScheduling)) || documentDelivery(c.slice(schedulingStart)))) return true;
     if (RECORDS_WORKFLOW.test(c)) return true;
+    // Amendment and cancellation name records, but they are not access. As in
+    // the app, only the explicit delivery and workflow evidence above outranks
+    // them ("cancel my records request; please fax my chart" is access).
+    if (RECORDS_AMENDMENT.test(c) || RECORDS_CANCELLATION.test(c)) return false;
     const independentlyRequestedDocument = schedulingStart < 0 || ((DOC.test(beforeScheduling) || /\b(?:prescription|receta)\b/.test(beforeScheduling)) && WANT.test(beforeScheduling))
       || c.slice(schedulingStart).split(/\band\s+(?=(?:(?:i|we)\s+)?(?:need|want|request|would like)\b)/).slice(1).some(part => WANT.test(part) && DOC.test(part));
     // The records office can be where the caller wants documents from; it
@@ -157,6 +246,8 @@ export function recordsLinePurpose(text: string): RecordsLinePurpose {
     return document && !SCHEDULE_ACTION.test(c) && !/\b(?:records? (?:line|department|office)|on (?:my |the )?record|note (?:that|my)|eligibility|claim|vendor)\b/.test(c)
       && /\b(?:my|her|his|their|our|medical|patient|some|the|for|from|review|status|follow.up|not received|has not|haven't)\b/.test(c);
   })) return 'records';
+  // The app decides an amendment here, ahead of every other team's purpose.
+  if (amends) return 'amendment';
   // Refused documents are not evidence for the fallback queue either.
   const request = clauses.join('; ');
   // A surgery center can be the caller's employer, not the requested work.
@@ -171,14 +262,22 @@ export function recordsLinePurpose(text: string): RecordsLinePurpose {
   if (MEDICATION.test(request) || /\b(?:prescription|receta|results?)\b/.test(request)) return 'clinical';
   if (BILLING.test(request)) return 'billing';
   if (/\b(?:surgery|surgical) cent(?:er|re)s?\b/.test(request)) return 'surgery';
+  // The app decides a cancellation last, after every other team's purpose:
+  // "cancel my records request for my surgery" reads as surgery there too.
+  if (appParts(text, RECORDS_CANCELLATION)) return 'cancellation';
   return 'unknown';
 }
 
 /** Legacy transport adapter. Ticketing re-evaluates this before persistence. */
 export function recordsLineRedirect(text: string) {
   const purpose = recordsLinePurpose(text);
-  if (purpose === 'records') return null;
+  // Amendment and cancellation are Medical Records work, not a redirect (the
+  // app returns null for them too). They are not access either: see
+  // `recordsWorkNotAccess` for what the records tool withholds from them.
+  if (purpose === 'records' || recordsWorkNotAccess(purpose)) return null;
   const t = requestClauses(text).join('; ');
+  // Every other purpose names a target. `satisfies` makes a purpose added to
+  // RECORDS_LINE_PURPOSES a build error here until somebody decides where it goes.
   const targets = {
     surgery: [2, 'Surgery Coordination', 65, 535],
     referral: [18, 'PCP Support', 80, 550],
@@ -188,7 +287,7 @@ export function recordsLineRedirect(text: string) {
     billing: [4, 'Billing', 78, 548],
     unknown: [9, 'HVA Hub', 69, 539],
     scheduling: [9, 'HVA Hub', 69, 539],
-  } as const;
+  } as const satisfies Record<Exclude<RecordsLinePurpose, 'records' | RecordsWorkNotAccess>, readonly [number, string, number, number]>;
   const [departmentId, departmentName, defaultRequestTypeId, defaultRequestReasonId] = targets[purpose];
   let requestTypeId: number = defaultRequestTypeId;
   let requestReasonId: number = defaultRequestReasonId;

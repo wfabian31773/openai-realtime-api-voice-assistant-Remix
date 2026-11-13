@@ -234,6 +234,21 @@ describe('PHI discipline — the allow-list is the safety mechanism', () => {
     expect(JSON.stringify(ev)).not.toContain('Kolterman');
   });
 
+  it('keeps records_work on a records filing (v225), and still nothing about who', () => {
+    const callId = freshCall();
+    recordToolEvent(
+      callId,
+      'file_records_ticket',
+      { request_description: 'I need to correct my medical records', first_name: 'Testpatient', last_name: 'Example' },
+      JSON.stringify({ success: true, ticket_number: 'VA-1', records_work: 'amendment', form_applies: false, patient: 'Testpatient Example' }),
+      5,
+      { agentSlug: 'records' },
+    );
+    const [ev] = getAzulTimeline(callId)!;
+    expect(ev.outcome).toMatchObject({ records_work: 'amendment', form_applies: false });
+    expect(JSON.stringify(ev)).not.toContain('Testpatient');
+  });
+
   /**
    * v75: WHICH language a switch went TO is countable. 574 switch events in
    * the fourteen days to 2026-09-27 and not one said; 76 of them were on

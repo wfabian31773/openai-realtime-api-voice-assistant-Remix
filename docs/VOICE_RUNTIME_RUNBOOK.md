@@ -601,9 +601,13 @@ and the patient pending-authorization/signature flow are unchanged. The nearby
 PR #376 behavior is protected without edits to PCP routing or queueRouting.ts.
 Ticketing's Support Desk bot classification still takes effect immediately.
 
-The pure policy in `shared/records-request-intent.ts` is mirrored in Ticketing,
+The pure policy in `shared/records-request-intent.ts` has a copy in Ticketing,
 which owns the final decision on both voice creation endpoints and the case
-sweep. Keep the two copies and their shared policy tests aligned. Ship Ticketing
+sweep. **The copies are not identical** (v225, 2026-11-13): the purpose list,
+the `amendment`/`cancellation` patterns and their precedence are the app's and
+are pinned by `shared/recordsPurposesAgreeWithTheApp.test.ts`, but the rest of
+the sentence reading is each repo's own: 553 of the 1,268 sentences both
+suites use read differently. Read that test's header before claiming they agree. Ship Ticketing
 first to protect older voice payloads; then voice stops offering the wrong form.
 No database/schema change or historical cleanup is included.
 The 2026-10-28 follow-up fixes are local to this voice worktree; align Ticketing's
@@ -612,7 +616,7 @@ policy copy before deployment.
 Offline regression commands (external services mocked):
 
 ```sh
-npx vitest run shared/records-request-intent.test.ts src/tools/recordsPurpose.item8.test.ts src/tools/medicalRecordsTools.test.ts src/tools/recordsFormAtCallTime.test.ts src/tools/recordsFilesWithoutAName.test.ts src/pcp/professionalRecordsReachMedicalRecords.test.ts
+npx vitest run shared/records-request-intent.test.ts shared/recordsPurposesAgreeWithTheApp.test.ts src/tools/aCorrectionIsNotAnAccessRequest.test.ts src/tools/recordsPurpose.item8.test.ts src/tools/medicalRecordsTools.test.ts src/tools/recordsFormAtCallTime.test.ts src/tools/recordsFilesWithoutAName.test.ts src/pcp/professionalRecordsReachMedicalRecords.test.ts
 npx tsc --noEmit -p .
 ```
 
