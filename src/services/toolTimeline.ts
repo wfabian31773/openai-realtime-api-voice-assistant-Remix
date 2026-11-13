@@ -996,10 +996,41 @@ function existingKeyFor(callIdOrSid: string): string | undefined {
   return undefined;
 }
 
-export async function recordSecondTicketOnTheCall(input: {
+/**
+ * How long to keep trying when the call's row is not there yet (Codex P2 on
+ * #473). The caller fires this and forgets it, so a `no_row` answered once
+ * would leave a ticket that exists off the call log for good. The row is opened
+ * at call setup and written again at teardown; about two minutes covers a
+ * setup write that has not landed. Each try is guarded so it appends once.
+ */
+export const SECOND_TICKET_RETRY_MS = [1_000, 3_000, 10_000, 30_000, 90_000];
+
+export async function recordSecondTicketOnTheCall(
+  input: {
+    callSid: string;
+    ticketNumber: string;
+    /** Which second ticket: the filing's idempotency-key suffix ('urgent-transfer', 'urgent-ringout'). */
+    kind: string;
+  },
+  opts: { retryDelaysMs?: readonly number[]; sleep?: (ms: number) => Promise<void> } = {},
+): Promise<SecondTicketRecord> {
+  const delays = opts.retryDelaysMs ?? SECOND_TICKET_RETRY_MS;
+  const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  let result = await recordSecondTicketOnce(input);
+  for (const ms of delays) {
+    if (result !== 'no_row') break;
+    await sleep(ms);
+    result = await recordSecondTicketOnce(input);
+  }
+  if (result === 'no_row') {
+    console.warn(`[TOOL-TIMELINE] second ticket ${input.ticketNumber} not on the call log: no row for ${input.callSid} after ${delays.length + 1} tries (the ticket stands)`);
+  }
+  return result;
+}
+
+async function recordSecondTicketOnce(input: {
   callSid: string;
   ticketNumber: string;
-  /** Which second ticket: the filing's idempotency-key suffix ('urgent-transfer', 'urgent-ringout'). */
   kind: string;
 }): Promise<SecondTicketRecord> {
   try {

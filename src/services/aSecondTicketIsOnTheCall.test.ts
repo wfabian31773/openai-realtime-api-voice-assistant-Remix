@@ -85,6 +85,7 @@ import {
   recordToolEvent,
   getAzulTimeline,
   recordSecondTicketOnTheCall,
+  SECOND_TICKET_RETRY_MS,
   SECOND_TICKET_TOOL,
 } from './toolTimeline';
 import { ticketNumbersForCall } from '../../server/callTicketNumbers';
@@ -235,7 +236,56 @@ describe('it can never replace the call timeline', () => {
   it('a row that already holds it, or is not open, answers no_row and writes nothing else', async () => {
     h.rows = 0;
     const callSid = `CA${'f'.repeat(28)}${String(1000 + n)}`;
-    expect(await recordSecondTicketOnTheCall({ callSid, ticketNumber: 'VA-79088', kind: 'urgent-ringout' })).toBe('no_row');
+    expect(await recordSecondTicketOnTheCall({ callSid, ticketNumber: 'VA-79088', kind: 'urgent-ringout' }, { retryDelaysMs: [] })).toBe('no_row');
+  });
+
+  // Codex P2 on #473: the filing fires this and forgets it, so a row not open
+  // yet lost the only copy of the event. It now tries again while the row opens.
+  it('a row that is not open yet is tried again, and the event lands once it opens', async () => {
+    h.rows = 0;
+    const callSid = `CA${'2'.repeat(28)}${String(1000 + n)}`;
+    const waits: number[] = [];
+    const before = h.sets.length;
+    const how = await recordSecondTicketOnTheCall(
+      { callSid, ticketNumber: 'VA-79090', kind: 'urgent-transfer' },
+      {
+        retryDelaysMs: [5, 7, 11],
+        sleep: async (ms) => {
+          waits.push(ms);
+          if (waits.length === 2) h.rows = 1; // the row opens during the second wait
+        },
+      },
+    );
+    expect(how).toBe('appended_to_row');
+    expect(waits).toEqual([5, 7]);
+    expect(h.sets.length - before).toBe(3);
+  });
+
+  it('stops trying after the last wait and says the event is not on the log', async () => {
+    h.rows = 0;
+    const callSid = `CA${'3'.repeat(28)}${String(1000 + n)}`;
+    const waits: number[] = [];
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const how = await recordSecondTicketOnTheCall(
+      { callSid, ticketNumber: 'VA-79091', kind: 'urgent-ringout' },
+      { retryDelaysMs: [1, 2], sleep: async (ms) => void waits.push(ms) },
+    );
+    expect(how).toBe('no_row');
+    expect(waits).toEqual([1, 2]);
+    expect(warn.mock.calls.some((c) => String(c[0]).includes('not on the call log'))).toBe(true);
+    warn.mockRestore();
+  });
+
+  it('the retry covers about two minutes, and a recorded event is never retried', async () => {
+    expect(SECOND_TICKET_RETRY_MS.reduce((a, b) => a + b, 0)).toBeGreaterThanOrEqual(120_000);
+    const callSid = `CA${'4'.repeat(28)}${String(1000 + n)}`;
+    const waits: number[] = [];
+    const how = await recordSecondTicketOnTheCall(
+      { callSid, ticketNumber: 'VA-79092', kind: 'urgent-ringout' },
+      { sleep: async (ms) => void waits.push(ms) },
+    );
+    expect(how).toBe('appended_to_row');
+    expect(waits).toEqual([]);
   });
 });
 
