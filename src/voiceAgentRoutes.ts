@@ -35,6 +35,7 @@ import { seedLedger, renderKnownFacts, releaseLedger, harvestCallerLine } from '
 import { startRamp, onCallerUtterance, rampActive, releaseRamp } from './services/rampEngine';
 import { getLedger as getCallFacts } from './services/callFactsLedger';
 import { storage } from '../server/storage';
+import { ticketPhonesFor } from '../server/services/ticketingSyncPolicy';
 import { registerTicketingSyncRoutes } from './voiceAgent';
 import './services/azulRegressionWatch'; // Phase 7: daily grade-regression check (side-effect timers)
 import { shadowTap } from './shadow/tap'; // observation-only tap; no-op unless SHADOW_MODE_ENABLED
@@ -8043,8 +8044,8 @@ export function setupVoiceAgentRoutes(app: Express): void {
           const ticketUpdateResult = await ticketingApiClient.updateTicketCallData({
             callSid: effectiveTwilioCallSid,
             transcript: (transcript || '') || undefined,
-            callerPhone: callLog?.from || undefined,
-            dialedNumber: callLog?.to || undefined,
+            // v228: the person and our line, the right way round on a call we placed.
+            ...ticketPhonesFor(callLog ?? {}),
             agentUsed: agentSlug || undefined,
             callStartTime: callLog?.startTime?.toISOString(),
             callEndTime: callLog?.endTime?.toISOString(),

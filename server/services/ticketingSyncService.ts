@@ -6,6 +6,7 @@ import {
   isNoTicketError,
   classifyNoTicketOutcome,
   NO_TICKET_TERMINAL_PREFIX,
+  ticketPhonesFor,
 } from "./ticketingSyncPolicy";
 import { callCostService } from "../../src/services/callCostService";
 import { callGradingService } from "../../src/services/callGradingService";
@@ -160,7 +161,9 @@ export class TicketingSyncService {
     try {
       // VALIDATION FIX: Sanitize dialedNumber - must be <=20 chars and look like a phone number
       // SIP project IDs like "proj_fsAu2Z4CM7BLIN66diBekWsa" will fail ticketing validation
-      let sanitizedDialedNumber = call.to;
+      // v228: the person and our line, the right way round on a call we placed.
+      const phones = ticketPhonesFor(call);
+      let sanitizedDialedNumber = phones.dialedNumber;
       if (sanitizedDialedNumber) {
         // Check if it looks like a SIP project ID or is too long
         if (sanitizedDialedNumber.startsWith('proj_') || sanitizedDialedNumber.length > 20) {
@@ -174,7 +177,7 @@ export class TicketingSyncService {
         ticketNumber: call.ticketNumber || undefined,
         recordingUrl: call.recordingUrl || undefined,
         transcript: call.transcript || undefined,
-        callerPhone: call.from,
+        callerPhone: phones.callerPhone,
         dialedNumber: sanitizedDialedNumber,
         /**
          * THE LANE SLUG, NEVER THE AGENTS-TABLE UUID — AND NEVER "unknown".

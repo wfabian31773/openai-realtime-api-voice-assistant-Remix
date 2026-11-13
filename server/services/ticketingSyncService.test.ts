@@ -3,6 +3,7 @@ import {
   isNoTicketError,
   classifyNoTicketOutcome,
   NO_TICKET_TERMINAL_PREFIX,
+  ticketPhonesFor,
 } from "./ticketingSyncPolicy";
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -307,5 +308,41 @@ describe('the sync carries the lane slug onto the ticket, not the agents-table i
     // The two branches of the old line, each of which stamped tickets.
     expect(SRC).not.toMatch(/agentUsed:\s*call\.agentId/);
     expect(SRC).not.toMatch(/agentUsed:[^\n]*"unknown"/);
+  });
+});
+
+describe('the ticket gets the person and our line the right way round (v228)', () => {
+  // Synthetic numbers. On an outbound call Twilio writes OUR number as `from`.
+  const OUR_LINE = '+15555550100';
+  const PERSON = '+15555550111';
+
+  it('an inbound call: the caller is `from`, the line they dialled is `to`', () => {
+    expect(ticketPhonesFor({ direction: 'inbound', from: PERSON, to: OUR_LINE })).toEqual({ callerPhone: PERSON, dialedNumber: OUR_LINE });
+  });
+
+  it('a call we placed: the person is `to`, our line is `from` (every NPX ticket read our number as its caller, VA-84157)', () => {
+    expect(ticketPhonesFor({ direction: 'outbound', from: OUR_LINE, to: PERSON })).toEqual({ callerPhone: PERSON, dialedNumber: OUR_LINE });
+  });
+
+  it('two calls we placed to two people never share a caller phone', () => {
+    const a = ticketPhonesFor({ direction: 'outbound', from: OUR_LINE, to: '+15555550112' });
+    const b = ticketPhonesFor({ direction: 'outbound', from: OUR_LINE, to: '+15555550113' });
+    expect(a.callerPhone).not.toEqual(b.callerPhone);
+  });
+
+  it('a missing direction reads as inbound, and blanks are left out', () => {
+    expect(ticketPhonesFor({ from: PERSON, to: OUR_LINE })).toEqual({ callerPhone: PERSON, dialedNumber: OUR_LINE });
+    expect(ticketPhonesFor({ direction: 'outbound', from: '', to: null })).toEqual({ callerPhone: undefined, dialedNumber: undefined });
+  });
+
+  it('the post-call sync and the old core both stamp the phones through it, never `from` and `to` directly', () => {
+    const sync = readFileSync(join(__dirname, 'ticketingSyncService.ts'), 'utf8');
+    expect(sync).toContain('const phones = ticketPhonesFor(call);');
+    expect(sync).toContain('callerPhone: phones.callerPhone,');
+    expect(sync).toContain('let sanitizedDialedNumber = phones.dialedNumber;');
+    expect(sync).not.toContain('callerPhone: call.from');
+    const core = readFileSync(join(__dirname, '../../src/voiceAgentRoutes.ts'), 'utf8');
+    expect(core).toContain('...ticketPhonesFor(callLog ?? {}),');
+    expect(core).not.toContain('callerPhone: callLog?.from');
   });
 });
