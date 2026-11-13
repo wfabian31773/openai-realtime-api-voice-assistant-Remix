@@ -19,6 +19,7 @@ import {
   formatApptTime,
   formatDuration,
   formatPacific,
+  jumpStep,
   maskedPhone,
   matchesFilter,
   matchesSearch,
@@ -204,5 +205,44 @@ describe('the page can read everything the server builds', () => {
     for (const c of t.contacts as ContactView[]) {
       expect(CONTACT_FILTERS.some((f) => f.key !== 'all' && matchesFilter(c, f.key))).toBe(true)
     }
+  })
+})
+
+// Codex P2 on #471: a contact picked from the all-time needs-a-person list,
+// while the table shows another day, was paged by its index in THAT day's data
+// (-1), so past the first page it was never rendered and the scroll did
+// nothing. The jump now waits for the all-time rows and reads its index there.
+describe('bringing a needs-a-person contact into view', () => {
+  const many = Array.from({ length: 250 }, (_, i) => view({ id: `c${i}` }))
+
+  it('waits while the all-time rows are still loading', () => {
+    expect(jumpStep({ rows: [], id: 'c180', shown: 100, pageSize: 100, ready: false, allTime: true })).toEqual({ kind: 'wait' })
+  })
+
+  it('pages far enough to render a contact past the first page, then scrolls', () => {
+    const first = jumpStep({ rows: many, id: 'c180', shown: 100, pageSize: 100, ready: true, allTime: true })
+    expect(first).toEqual({ kind: 'show', shown: 181 })
+    expect(jumpStep({ rows: many, id: 'c180', shown: 181, pageSize: 100, ready: true, allTime: true })).toEqual({ kind: 'scroll' })
+  })
+
+  it('scrolls straight away to a contact already on the page', () => {
+    expect(jumpStep({ rows: many, id: 'c5', shown: 100, pageSize: 100, ready: true, allTime: false })).toEqual({ kind: 'scroll' })
+  })
+
+  it('keeps waiting while the table is still on another day', () => {
+    expect(jumpStep({ rows: many.slice(0, 3), id: 'c180', shown: 100, pageSize: 100, ready: true, allTime: false })).toEqual({ kind: 'wait' })
+  })
+
+  it('gives up when the contact is not in the all-time rows either', () => {
+    expect(jumpStep({ rows: many, id: 'gone', shown: 100, pageSize: 100, ready: true, allTime: true })).toEqual({ kind: 'give_up' })
+  })
+})
+
+describe('the page resolves the jump through jumpStep', () => {
+  it('reads the rows it renders, not the index it had when the contact was picked', async () => {
+    const { readFileSync } = await import('node:fs')
+    const page = readFileSync(new URL('../pages/NpxOutreachPage.tsx', import.meta.url), 'utf8')
+    expect(page).toContain('jumpStep({ rows, id: jumpTo')
+    expect(page).not.toMatch(/setTimeout\(\(\) => document\.getElementById\(`npx-contact-/)
   })
 })

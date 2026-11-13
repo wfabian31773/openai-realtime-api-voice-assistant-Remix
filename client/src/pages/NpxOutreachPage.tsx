@@ -1,4 +1,4 @@
-import { Fragment, useMemo, useState } from 'react'
+import { Fragment, useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import apiClient from '@/lib/apiClient'
@@ -20,6 +20,7 @@ import {
   formatApptTime,
   formatDuration,
   formatPacific,
+  jumpStep,
   maskedPhone,
   type CampaignKey,
   type CancelState,
@@ -246,16 +247,27 @@ export function NpxOutreachPage() {
     })
 
   // The needs-a-person list is all time; the table follows the day filter. A
-  // contact not in view brings the table back to all time to show it.
+  // contact not in view brings the table back to all time, and the jump waits
+  // for those rows before it pages and scrolls (`jumpStep`).
+  const [jumpTo, setJumpTo] = useState<string | null>(null)
   const showContact = (id: string) => {
-    const index = contacts.findIndex((c) => c.id === id)
-    if (index < 0) setDay('all')
+    if (!contacts.some((c) => c.id === id)) setDay('all')
     setFilter('all')
     setQuery('')
-    setShown((n) => Math.max(n, index + 1, PAGE_SIZE))
     setOpenIds((prev) => new Set(prev).add(id))
-    setTimeout(() => document.getElementById(`npx-contact-${id}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' }), index < 0 ? 800 : 50)
+    setJumpTo(id)
   }
+  const jumpReady = !!data && !isFetching && filter === 'all' && query === ''
+  useEffect(() => {
+    if (!jumpTo) return
+    const step = jumpStep({ rows, id: jumpTo, shown, pageSize: PAGE_SIZE, ready: jumpReady, allTime: day === 'all' })
+    if (step.kind === 'show') setShown(step.shown)
+    else if (step.kind === 'give_up') setJumpTo(null)
+    else if (step.kind === 'scroll') {
+      document.getElementById(`npx-contact-${jumpTo}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+      setJumpTo(null)
+    }
+  }, [jumpTo, rows, shown, jumpReady, day])
 
   const t = data?.totals
   const dayLabel = DAY_OPTIONS.find((d) => d.key === day)?.label ?? 'All time'

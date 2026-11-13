@@ -186,6 +186,25 @@ export function filterContacts(contacts: ContactView[], filter: ContactFilter, q
   return contacts.filter((c) => matchesFilter(c, filter) && matchesSearch(c, query))
 }
 
+/** What the table does next to bring one contact into view. */
+export type JumpStep = { kind: 'wait' } | { kind: 'show'; shown: number } | { kind: 'scroll' } | { kind: 'give_up' }
+
+/**
+ * The needs-a-person list is all time while the table follows the day filter,
+ * so a contact picked there may be in the rows only once the all-time data has
+ * loaded. Its position is read from the rows the table renders, never from the
+ * data on screen when it was picked: that data may be another day's, where the
+ * contact is not, and the table would page to the wrong place (Codex P2 on
+ * #471). `ready` is the all-time data loaded with no filter or search on.
+ */
+export function jumpStep(o: { rows: ContactView[]; id: string; shown: number; pageSize: number; ready: boolean; allTime: boolean }): JumpStep {
+  if (!o.ready) return { kind: 'wait' }
+  const index = o.rows.findIndex((c) => c.id === o.id)
+  if (index < 0) return o.allTime ? { kind: 'give_up' } : { kind: 'wait' }
+  const need = Math.max(o.shown, o.pageSize, index + 1)
+  return need > o.shown ? { kind: 'show', shown: need } : { kind: 'scroll' }
+}
+
 export function countByFilter(contacts: ContactView[], query: string): Record<ContactFilter, number> {
   const out = {} as Record<ContactFilter, number>
   for (const f of CONTACT_FILTERS) out[f.key] = 0
