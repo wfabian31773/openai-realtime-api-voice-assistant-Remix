@@ -234,6 +234,32 @@ describe('PHI discipline — the allow-list is the safety mechanism', () => {
     expect(JSON.stringify(ev)).not.toContain('Kolterman');
   });
 
+  /**
+   * v229: what book_sooner_exam received is countable (fixed words, never
+   * the values), and the choices a refusal writes out are not kept.
+   */
+  it('keeps the received_* words on a booking refusal, and not the choices it wrote out', () => {
+    const callId = freshCall();
+    recordToolEvent(
+      callId,
+      'book_sooner_exam',
+      { option: '1' },
+      JSON.stringify({
+        success: false,
+        error: 'which_list',
+        received_date: 'none',
+        received_time: 'none',
+        received_option: true,
+        choices: [{ date: '2041-02-13', time: '09:00', city: 'Beaumont' }],
+      }),
+      5,
+      { agentSlug: 'npx-outreach' },
+    );
+    const [ev] = getAzulTimeline(callId)!;
+    expect(ev.outcome).toMatchObject({ error: 'which_list', received_date: 'none', received_time: 'none', received_option: true });
+    expect(ev.outcome).not.toHaveProperty('choices');
+  });
+
   it('keeps records_work on a records filing (v225), and still nothing about who', () => {
     const callId = freshCall();
     recordToolEvent(

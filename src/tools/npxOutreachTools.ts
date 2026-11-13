@@ -1169,32 +1169,39 @@ registerTool({
     },
     required: [],
   },
+  // What this invocation received rides on every answer it gets, the early
+  // returns and a shared in-flight booking included (Codex P2 on #476).
   handler: async (input): Promise<ToolResult> => {
-    const deadline = Date.now() + BOOK_SEQUENCE_BUDGET_MS;
-    const found = await sessionFor(input);
-    if ('success' in found) return found;
-    const { sid, s } = found;
-    if (!s.verified) return notVerified();
-    const currentDay = spokenDay(field(s.contact, 'appointment_date'));
-    if (s.booking) {
-      if (s.booking.azul.kind === 'dropped') {
-        const r: Refusal = {
-          success: false,
-          error: 'booking_being_changed',
-          fix: 'Our scheduling team is already calling them back about the booking made on this call. Do not book again; tell them the team will call.',
-        };
-        return r;
-      }
-      return { success: true, booked: true, say: confirmation(s.booking.slot, spokenCancelOf(s.booking.azul), currentDay) };
-    }
-    if (s.bookingInFlight) return s.bookingInFlight;
-    const run = bookChosen(input, sid, s, currentDay, deadline).finally(() => {
-      s.bookingInFlight = null;
-    });
-    s.bookingInFlight = run;
-    return run;
+    const received = bookingArgsReceived(input);
+    return { ...(await bookSooner(input)), ...received } as ToolResult;
   },
 });
+
+async function bookSooner(input: Record<string, unknown>): Promise<ToolResult> {
+  const deadline = Date.now() + BOOK_SEQUENCE_BUDGET_MS;
+  const found = await sessionFor(input);
+  if ('success' in found) return found;
+  const { sid, s } = found;
+  if (!s.verified) return notVerified();
+  const currentDay = spokenDay(field(s.contact, 'appointment_date'));
+  if (s.booking) {
+    if (s.booking.azul.kind === 'dropped') {
+      const r: Refusal = {
+        success: false,
+        error: 'booking_being_changed',
+        fix: 'Our scheduling team is already calling them back about the booking made on this call. Do not book again; tell them the team will call.',
+      };
+      return r;
+    }
+    return { success: true, booked: true, say: confirmation(s.booking.slot, spokenCancelOf(s.booking.azul), currentDay) };
+  }
+  if (s.bookingInFlight) return s.bookingInFlight;
+  const run = bookChosenSlot(input, sid, s, currentDay, deadline).finally(() => {
+    s.bookingInFlight = null;
+  });
+  s.bookingInFlight = run;
+  return run;
+}
 
 /**
  * WHICH SLOT THE CALLER CONFIRMED (v218). The agent says a choice back with
@@ -1217,6 +1224,13 @@ registerTool({
  *    list read on the call;
  *  - nothing offered at that date and time books nothing.
  * Every refusal speaks through `fix` (v43): nothing for the caller to hear.
+ *
+ * v229: every refusal carries the choices read on the call with the exact
+ * date and time to send back (withChoices), and `which_list` names the slots
+ * the option points at. The date is read only as YYYY-MM-DD, as
+ * find_sooner_exam writes it, and the time as v218 read it (operator,
+ * 2026-11-13, after six review rounds on a wider reader); anything else is
+ * named as unreadable and books nothing.
  */
 export function chosenSlot(
   offers: NpxSlot[][],
@@ -1229,8 +1243,10 @@ export function chosenSlot(
   const index = /^[1-9]$/.test(optionText) ? Number(optionText) - 1 : -1;
   const byOption = new Map<string, NpxSlot>();
   if (index >= 0) for (const list of offers) if (list[index]) byOption.set(list[index].slotId, list[index]);
-  const date = typeof input.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(input.date.trim()) ? input.date.trim() : '';
-  const minutes = typeof input.time === 'string' ? minutesOf(input.time) : null;
+  const dateRead = readChosenDate(input.date);
+  const timeRead = readChosenTime(input.time);
+  const date = 'day' in dateRead ? dateRead.day : '';
+  const minutes = 'minutes' in timeRead ? timeRead.minutes : null;
 
   if (date && minutes !== null) {
     let atThatTime = offered.filter((x) => {
@@ -1239,13 +1255,16 @@ export function chosenSlot(
     });
     if (atThatTime.length === 0) {
       return {
-        refusal: {
-          success: false,
-          error: 'not_offered',
-          fix:
-            'Nothing was booked: no choice read to them on this call is at that date and time. Book only a choice you read to them and they confirmed, ' +
-            "passing that choice's date and time from find_sooner_exam's answer. If they want a time you have not read them, call find_sooner_exam for that day first.",
-        },
+        refusal: withChoices(
+          {
+            success: false,
+            error: 'not_offered',
+            fix:
+              'Nothing was booked: no choice read to them on this call is at that date and time. Book only a choice you read to them and they confirmed. ' +
+              'If they want a time you have not read them, call find_sooner_exam for that day first.',
+          },
+          offered,
+        ),
       };
     }
     const city = typeof input.city === 'string' ? fold(input.city) : '';
@@ -1260,11 +1279,14 @@ export function chosenSlot(
     if (atThatTime.length > 1) {
       const where = joinWords([...new Set(atThatTime.map((x) => `${x.providerName || 'the provider'} in ${cityOf(x) || 'the partner office'}`))], 'or');
       return {
-        refusal: {
-          success: false,
-          error: 'which_one',
-          fix: `Nothing was booked: two choices read to them are at that date and time (${where}). Ask which one they want, then call again with its city.`,
-        },
+        refusal: withChoices(
+          {
+            success: false,
+            error: 'which_one',
+            fix: `Nothing was booked: two choices read to them are at that date and time (${where}). Ask which one they want, then call again with its city.`,
+          },
+          atThatTime,
+        ),
       };
     }
     const slot = atThatTime[0];
@@ -1278,34 +1300,137 @@ export function chosenSlot(
     if (byOption.size === 1) return { slot: [...byOption.values()][0], by: 'option' };
     if (byOption.size === 0) {
       return {
-        refusal: {
-          success: false,
-          error: 'no_such_option',
-          fix: 'That option was not offered. Call find_sooner_exam with what they want, offer its choices, and book only one they chose.',
-        },
+        refusal: withChoices(
+          {
+            success: false,
+            error: 'no_such_option',
+            fix: 'That option was not offered. Book only a choice you read to them and they confirmed.',
+          },
+          offered,
+        ),
       };
     }
+    // v229: name the slots the number points at, with the exact date and
+    // time to send back, instead of telling the model to find them (it did
+    // not, four times running, on CA3eec4f155e08f15868b34008bd15d988).
+    const candidates = [...byOption.values()];
     return {
-      refusal: {
-        success: false,
-        error: 'which_list',
-        fix:
-          'Nothing was booked: more than one list of choices was read on this call, so an option number is not one time. ' +
-          "Call book_sooner_exam again with the date and time of the choice you said back to them, from find_sooner_exam's answer.",
-      },
+      refusal: withChoices(
+        {
+          success: false,
+          error: 'which_list',
+          fix:
+            `Nothing was booked: more than one list of choices was read on this call, so option ${index + 1} is more than one time: ` +
+            `${joinWords(candidates.map(choiceWords), 'or')}. ` +
+            'Call book_sooner_exam again with the date and time, exactly as written here, of the one you said back to them and they confirmed.',
+        },
+        candidates,
+      ),
     };
   }
 
+  // v229: a date or time that arrived in a form this cannot read is named,
+  // so the model sends it again in the form it can.
+  const unreadable = [
+    ...(dateRead.form === 'unreadable' ? ['the date'] : []),
+    ...(timeRead.form === 'unreadable' ? ['the time'] : []),
+  ];
   return {
-    refusal: {
-      success: false,
-      error: 'no_choice',
-      fix: "Nothing was booked. Call book_sooner_exam with the date and time of the choice they confirmed, from find_sooner_exam's answer.",
-    },
+    refusal: withChoices(
+      {
+        success: false,
+        error: 'no_choice',
+        fix:
+          'Nothing was booked. ' +
+          (unreadable.length ? `${joinWords(unreadable)} could not be read: send the date as YYYY-MM-DD and the time as 24-hour HH:MM. ` : '') +
+          'Call book_sooner_exam with the date and time, exactly as written here, of the choice they confirmed.',
+      },
+      offered,
+    ),
   };
 }
 
-async function bookChosen(
+/** "Wednesday, November 18 at 11:00 AM in Beaumont (date 2026-11-18, time 11:00)". */
+function choiceWords(s: NpxSlot): string {
+  const { date, time } = slotDateTime(s);
+  const city = cityOf(s);
+  return `${spokenWhen(s)}${city ? ` in ${city}` : ''} (date ${date}, time ${time})`;
+}
+
+/** At most this many choices are written into a refusal. */
+const CHOICES_IN_A_REFUSAL = 9;
+
+/**
+ * v229: a booking refusal carries the choices read on the call, each with the
+ * exact date and time to send back, so the model can book one without going
+ * back to find_sooner_exam's answer. Slot times and cities only, no PHI.
+ */
+function withChoices(r: Refusal, slots: NpxSlot[]): Refusal {
+  const listed = slots.slice(0, CHOICES_IN_A_REFUSAL);
+  if (!listed.length) return r;
+  return {
+    ...r,
+    choices: listed.map((s) => ({ ...slotDateTime(s), when: spokenWhen(s), city: cityOf(s) })),
+  } as Refusal;
+}
+
+/**
+ * THE DATE THE MODEL SENT (v229): exactly YYYY-MM-DD, the form
+ * find_sooner_exam writes each choice's date in and every refusal writes the
+ * choices in. v218 read only this form too, and took anything else as no
+ * date at all, which fell to the option number and, with two lists read, to
+ * `which_list` every time (CA3eec4f155e08f15868b34008bd15d988 lost the slot
+ * the caller chose). Now anything else is named as unreadable and the
+ * refusal hands back the choices to send.
+ *
+ * A wider reader (words, numbers, time zones, a date-time) was built and then
+ * withdrawn on the operator's ruling of 2026-11-13: six review rounds each
+ * found another way it could read a date the model did not send, and a date
+ * read wrong can book the wrong slot and cancel the caller's appointment. A
+ * refusal costs one more try with the choices written out.
+ */
+export function readChosenDate(raw: unknown): { day: string; form: 'iso' } | { form: 'unreadable' | 'none' } {
+  if (typeof raw !== 'string' || !raw.trim()) return { form: 'none' };
+  const iso = /^(\d{4})-(\d{2})-(\d{2})$/.exec(raw.trim());
+  return iso ? { day: `${iso[1]}-${iso[2]}-${iso[3]}`, form: 'iso' } : { form: 'unreadable' };
+}
+
+/**
+ * The time the model sent, read as v218 read it (`minutesOf`, the parser
+ * find_sooner_exam's own time preferences use): 24-hour HH:MM as
+ * find_sooner_exam writes each choice's time ("09:00"), or an hour with AM or
+ * PM ("10 AM", "9:00 a.m."). v229 widened this to seconds, zones and
+ * date-times and the widening was withdrawn with the date reader's (operator,
+ * 2026-11-13); what v218 accepted, and is live, stays. Anything else is
+ * unreadable.
+ */
+export function readChosenTime(raw: unknown): { minutes: number; form: 'read' } | { form: 'unreadable' | 'none' } {
+  if (typeof raw !== 'string' || !raw.trim()) return { form: 'none' };
+  const minutes = minutesOf(raw);
+  return minutes === null ? { form: 'unreadable' } : { minutes, form: 'read' };
+}
+
+/**
+ * WHAT book_sooner_exam RECEIVED (v229), as fixed words for the timeline:
+ * whether a date and a time arrived and in what form, and whether an option
+ * number did. Never the values. Until now the timeline kept nothing of the
+ * booking's arguments, so "did the model send the date at all?" could not be
+ * answered for the 7 refusals of 2026-11-13.
+ */
+export function bookingArgsReceived(input: Record<string, unknown>): {
+  received_date: 'iso' | 'unreadable' | 'none';
+  received_time: 'read' | 'unreadable' | 'none';
+  received_option: boolean;
+} {
+  const optionText = typeof input.option === 'string' || typeof input.option === 'number' ? String(input.option).trim() : '';
+  return {
+    received_date: readChosenDate(input.date).form,
+    received_time: readChosenTime(input.time).form,
+    received_option: optionText !== '',
+  };
+}
+
+async function bookChosenSlot(
   input: Record<string, unknown>,
   sid: string,
   s: OutreachSession,
