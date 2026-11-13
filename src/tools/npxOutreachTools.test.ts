@@ -9,6 +9,7 @@ import {
   BOOK_SEQUENCE_BUDGET_MS,
   BOOK_SOONER_TOOL_NAME,
   BOOK_TOOL_TIMEOUT_MS,
+  CANCEL_BOOKING_TOOL_NAME,
   CONFIRM_DOB_TOOL_NAME,
   DESCRIBE_TOOL_NAME,
   FIND_SOONER_TOOL_NAME,
@@ -18,6 +19,8 @@ import {
   NPX_OUTREACH_TOOLS,
   NPX_RECALL_FIRST_LINE,
   STAFF_CALLBACK_TOOL_NAME,
+  appointmentStateLine,
+  endOutreachSession,
   outreachSessionFor,
   resetOutreachAvailabilityForTests,
   resetOutreachSessionsForTests,
@@ -31,6 +34,8 @@ import { callbackSessionFor, openCallbackSession } from './outboundTools';
 import { FakeOutboundStore } from '../runtime/outbound/store.testkit';
 import { NPX_TIMEOUT_MS, type NpxOutreachClient, type NpxSlot } from '../services/npxOutreachClient';
 import { AZUL_CANCEL_MIN_STEP_MS, type AzulCancelResult } from '../services/outreachAzulCancel';
+import { HELD_CANCEL_BUDGET_MS } from '../runtime/outbound/heldAzulCancel';
+import { confirmationOf } from '../runtime/outbound/bookingConfirmation';
 import { DEFAULT_DEAD_AIR_MS, TOOL_DISPATCH_GRACE_MS } from '../runtime/mediaStreamBridge';
 
 const SID = 'CA00000000000000000000000000000109';
@@ -61,6 +66,7 @@ let npx: {
   offer: ReturnType<typeof vi.fn>;
   book: ReturnType<typeof vi.fn>;
   reportCancel: ReturnType<typeof vi.fn>;
+  cancelBooking: ReturnType<typeof vi.fn>;
 };
 let cancel: ReturnType<typeof vi.fn>;
 let fileTicket: ReturnType<typeof vi.fn>;
@@ -80,6 +86,7 @@ beforeEach(async () => {
     offer: vi.fn(async () => ({ ok: true, latestDay: '2041-02-27', slots: [SLOT_A, SLOT_B] })),
     book: vi.fn(async () => ({ ok: true, bookingId: 'booking-1', alreadyBooked: false, recordGroupDiffers: false, slot: SLOT_A })),
     reportCancel: vi.fn(async () => ({ ok: true })),
+    cancelBooking: vi.fn(async () => ({ ok: true, outcome: 'cancelled' })),
   };
   cancel = vi.fn(async (): Promise<AzulCancelResult> => ({ cancelled: true, alreadyCancelled: false }));
   fileTicket = vi.fn(async () => ({ success: true, ticketNumber: 'VA-90001' }));
@@ -105,6 +112,8 @@ const DIALLED = () => ({
 });
 const run = (name: string, args: Record<string, unknown> = {}) => getTool(name)!.handler({ ...DIALLED(), ...args });
 const verify = () => run(CONFIRM_DOB_TOOL_NAME, { date_of_birth: 'January 2nd, 1950' });
+/** The call ends (v226): the runtime's teardown runs the held Azul cancel. */
+const hangUp = () => endOutreachSession(SID);
 
 describe('describe_upcoming_appointment (operator, 2026-10-21 and 2026-11-08: the visit and its date, then where the openings are and what works best)', () => {
   it('says the kind of visit and its date, where the sooner openings are, and asks what day and time work best — not the time, the office or the doctor', async () => {
@@ -235,18 +244,21 @@ describe('request_staff_callback (operator, 2026-10-21: a request for a person i
       await run(BOOK_SOONER_TOOL_NAME, { option: '1' });
     }
 
-    it('says the new appointment stands and the old one is cancelled — never that it "stays exactly as it is"', async () => {
+    it('says the new appointment stands and the old one will be cancelled once we hang up — never that it "stays exactly as it is"', async () => {
       await booked();
       const r = (await run(STAFF_CALLBACK_TOOL_NAME, { request: 'a person please' })) as Record<string, unknown>;
-      expect(r.say).toBe("I've asked our scheduling team to call you back. Your new appointment stays booked, and your old one with us is cancelled.");
+      // v226: nothing is cancelled until the call ends.
+      expect(r.say).toBe("I've asked our scheduling team to call you back. Your new appointment stays booked, and your old one with us will be cancelled once we hang up.");
       expect(JSON.stringify(r)).not.toContain('stays exactly as it is');
+      expect(cancel).not.toHaveBeenCalled();
     });
 
-    it('when the cancel did not land, says our team will cancel the old one', async () => {
-      cancel.mockResolvedValueOnce({ cancelled: false, reason: 'nextgen_timeout' });
-      await booked();
-      const r = (await run(STAFF_CALLBACK_TOOL_NAME, { request: 'a person please' })) as Record<string, unknown>;
-      expect(r.say).toBe("I've asked our scheduling team to call you back. Your new appointment stays booked, and our team will cancel your old one with us.");
+    it('says each state of the Azul appointment as it is', () => {
+      const slot = SLOT_A;
+      const done = (result: AzulCancelResult) => ({ bookingId: 'b', slot, azul: { kind: 'done' as const, result } });
+      expect(appointmentStateLine(done({ cancelled: true, alreadyCancelled: false }))).toBe('Your new appointment stays booked, and your old one with us is cancelled.');
+      expect(appointmentStateLine(done({ cancelled: false, reason: 'nextgen_timeout' }))).toBe('Your new appointment stays booked, and our team will cancel your old one with us.');
+      expect(appointmentStateLine(null)).toBe('Your current appointment stays exactly as it is.');
     });
 
     it('a ticket that did not file says the same, and does not record call back later over the booking', async () => {
@@ -267,7 +279,7 @@ describe('request_staff_callback (operator, 2026-10-21: a request for a person i
   });
 
   it('is one of the lane\'s tools', () => {
-    expect(NPX_OUTREACH_TOOLS).toEqual([DESCRIBE_TOOL_NAME, CONFIRM_DOB_TOOL_NAME, FIND_SOONER_TOOL_NAME, BOOK_SOONER_TOOL_NAME, STAFF_CALLBACK_TOOL_NAME]);
+    expect(NPX_OUTREACH_TOOLS).toEqual([DESCRIBE_TOOL_NAME, CONFIRM_DOB_TOOL_NAME, FIND_SOONER_TOOL_NAME, BOOK_SOONER_TOOL_NAME, CANCEL_BOOKING_TOOL_NAME, STAFF_CALLBACK_TOOL_NAME]);
     expect(Object.keys(getTool(STAFF_CALLBACK_TOOL_NAME)!.input_schema.properties)).toEqual(['request', 'changes_booking']);
     // v222: whether they want the booking undone is optional; the request is not.
     expect(getTool(STAFF_CALLBACK_TOOL_NAME)!.input_schema.required).toEqual(['request']);
@@ -367,7 +379,7 @@ describe('book_sooner_exam', () => {
     await run(FIND_SOONER_TOOL_NAME);
   }
 
-  it('books the chosen slot with the record\'s identity, cancels the Azul appointment, reports it, settles the contact', async () => {
+  it('books the chosen slot with the record\'s identity, settles the contact, and holds the Azul cancel until the call ends (v226)', async () => {
     await offered();
     const r = (await run(BOOK_SOONER_TOOL_NAME, { option: '1' })) as Record<string, unknown>;
     expect(npx.book).toHaveBeenCalledWith(expect.objectContaining({
@@ -377,33 +389,50 @@ describe('book_sooner_exam', () => {
       replacedAppointment: { ngeAppointmentId: 'appt-0001', date: '2041-03-20' },
       callRef: SID,
     }));
-    expect(cancel).toHaveBeenCalledWith(expect.objectContaining({ appointmentId: 'appt-0001', personId: 'person-0001', appointmentDate: '2041-03-20' }));
-    expect(npx.reportCancel).toHaveBeenCalledWith('booking-1', 'cancelled');
+    // Nothing cancelled, nothing reported, while the caller is on the line.
+    expect(cancel).not.toHaveBeenCalled();
+    expect(npx.reportCancel).not.toHaveBeenCalled();
+    expect(r).toMatchObject({ azul_cancel: 'held' });
+    expect(store.heldCancelOf(store.contacts.get('c1')!)).toMatchObject({
+      state: 'held', booking_id: 'booking-1', call_sid: SID, demo: false,
+      appointment_id: 'appt-0001', person_id: 'person-0001', appointment_date: '2041-03-20',
+    });
     expect(store.contacts.get('c1')!.status).toBe('completed');
     expect(store.contacts.get('c1')!.notes).toBe('npx_booking:booking-1');
     // Said once, after booking: when, with whom, and the street address without the state and ZIP.
     expect(String(r.say)).toMatch(/^You're booked for Monday, February 4 at 9:00 AM with Dr Test, at Partner One Optometry, 1 Test St, Testville\. /);
     expect(String(r.say)).not.toContain('CA 90000');
-    expect(String(r.say)).toMatch(/I've also cancelled your appointment with us on Wednesday, March 20/);
+    expect(String(r.say)).toMatch(/Your appointment with us on Wednesday, March 20 will be cancelled once we hang up/);
+    expect(String(r.say)).not.toMatch(/I've also cancelled/);
+
+    await hangUp();
+    expect(cancel).toHaveBeenCalledWith(expect.objectContaining({ appointmentId: 'appt-0001', personId: 'person-0001', appointmentDate: '2041-03-20' }));
+    expect(npx.reportCancel).toHaveBeenCalledWith('booking-1', 'cancelled');
+    expect(store.heldCancelOf(store.contacts.get('c1')!)).toMatchObject({ state: 'cancelled', by: 'hang_up' });
+    expect(confirmationOf(store.contacts.get('c1')!.customData)).toMatchObject({ state: 'due', cancel: 'cancelled' });
   });
 
-  it('cancels only after NPX has booked', async () => {
+  it('cancels only after NPX has booked, and only once the call has ended', async () => {
     await offered();
     const order: string[] = [];
     npx.book.mockImplementationOnce(async () => { order.push('book'); return { ok: true, bookingId: 'booking-1', alreadyBooked: false, recordGroupDiffers: false, slot: SLOT_A }; });
     cancel.mockImplementationOnce(async () => { order.push('cancel'); return { cancelled: true, alreadyCancelled: false }; });
     npx.reportCancel.mockImplementationOnce(async () => { order.push('report'); return { ok: true }; });
     await run(BOOK_SOONER_TOOL_NAME, { option: '1' });
-    expect(order).toEqual(['book', 'cancel', 'report']);
+    order.push('hang up');
+    await hangUp();
+    expect(order).toEqual(['book', 'hang up', 'cancel', 'report']);
   });
 
-  it('a cancel that did not land is reported as failed, and the patient is not told it was cancelled', async () => {
+  it('a cancel that did not land at hang-up is reported as failed, and the text says our team will cancel', async () => {
     await offered();
     cancel.mockResolvedValueOnce({ cancelled: false, reason: 'person_mismatch' });
     const r = (await run(BOOK_SOONER_TOOL_NAME, { option: '2' })) as Record<string, unknown>;
-    expect(npx.reportCancel).toHaveBeenCalledWith('booking-1', { failed: 'person_mismatch' });
     expect(String(r.say)).not.toMatch(/I've also cancelled/);
-    expect(String(r.say)).toMatch(/Our team will cancel your appointment with us/);
+    await hangUp();
+    expect(npx.reportCancel).toHaveBeenCalledWith('booking-1', { failed: 'person_mismatch' });
+    expect(store.heldCancelOf(store.contacts.get('c1')!)).toMatchObject({ state: 'not_cancelled', reason: 'person_mismatch', by: 'hang_up' });
+    expect(confirmationOf(store.contacts.get('c1')!.customData)).toMatchObject({ state: 'due', cancel: 'pending' });
   });
 
   it('a slot taken in the meantime touches nothing and sends the agent back to look again', async () => {
@@ -426,12 +455,15 @@ describe('book_sooner_exam', () => {
     expect(cancel).not.toHaveBeenCalled();
   });
 
-  it('books once: asking again on the same call repeats the confirmation', async () => {
+  it('books once: asking again on the same call repeats the confirmation, and the hang-up cancels once', async () => {
     await offered();
     await run(BOOK_SOONER_TOOL_NAME, { option: '1' });
     const again = await run(BOOK_SOONER_TOOL_NAME, { option: '2' });
     expect(again).toMatchObject({ success: true, booked: true });
     expect(npx.book).toHaveBeenCalledTimes(1);
+    expect(cancel).not.toHaveBeenCalled();
+    await hangUp();
+    await hangUp();
     expect(cancel).toHaveBeenCalledTimes(1);
   });
 
@@ -448,13 +480,14 @@ describe('book_sooner_exam', () => {
       expect(forCancel).toBeGreaterThanOrEqual(AZUL_CANCEL_MIN_STEP_MS);
     });
 
-    it('hands the cancel a deadline that leaves the report and the settle their time', async () => {
+    it('at hang-up, hands the held cancel a deadline that leaves the report and the record their time', async () => {
       await offered();
-      const before = Date.now();
       await run(BOOK_SOONER_TOOL_NAME, { option: '1' });
+      const before = Date.now();
+      await hangUp();
       const { deadlineAt } = cancel.mock.calls[0][0] as { deadlineAt: number };
       expect(deadlineAt).toBeGreaterThan(before);
-      expect(deadlineAt).toBeLessThanOrEqual(Date.now() + BOOK_SEQUENCE_BUDGET_MS - NPX_TIMEOUT_MS.report - 2_000);
+      expect(deadlineAt).toBeLessThanOrEqual(Date.now() + HELD_CANCEL_BUDGET_MS - NPX_TIMEOUT_MS.report);
     });
 
     it('a settle that hangs does not hold the caller\'s answer', async () => {
@@ -462,7 +495,7 @@ describe('book_sooner_exam', () => {
       vi.useFakeTimers();
       store.settleContact = (() => new Promise(() => {})) as never;
       const pending = run(BOOK_SOONER_TOOL_NAME, { option: '1' });
-      await vi.advanceTimersByTimeAsync(2_000);
+      await vi.advanceTimersByTimeAsync(5_000);
       expect(await pending).toMatchObject({ success: true, booked: true });
     });
 
@@ -481,7 +514,7 @@ describe('book_sooner_exam', () => {
       expect(await first).toMatchObject({ success: true, booked: true });
       expect(await second).toMatchObject({ success: true, booked: true });
       expect(npx.book).toHaveBeenCalledTimes(1);
-      expect(cancel).toHaveBeenCalledTimes(1);
+      expect(cancel).not.toHaveBeenCalled();
     });
 
     it('a booking that failed frees the next try', async () => {

@@ -40,6 +40,7 @@ import { RUNTIME_OUTBOUND_CAMPAIGN_TYPE } from "./campaign";
 import type { CallbackCandidate } from "./callback";
 import type { OutreachTextRecord } from "./outreachText";
 import type { BookingConfirmationRecord } from "./bookingConfirmation";
+import type { HeldAzulCancelRecord } from "./heldAzulCancel";
 import { SMS_DNC_SOURCE } from "./channelDnc";
 import { nameKey } from "../../tools/verifiedIdentity";
 
@@ -72,6 +73,8 @@ export type ContactStatus =
 export const OUTREACH_TEXT_KEY = "outreach_text";
 /** Inside OUTREACH_TEXT_KEY: the booking confirmation text (v222, ./bookingConfirmation.ts). */
 export const CONFIRMATION_FIELD = "confirmation";
+/** Inside OUTREACH_TEXT_KEY: a call booking's Azul cancel, held until the call ends (v226, ./heldAzulCancel.ts). */
+export const HELD_CANCEL_FIELD = "held_cancel";
 
 /**
  * Who may be texted (v211): everyone the campaign is still working on, and
@@ -295,7 +298,8 @@ export interface OutboundStore {
 
   // ── The booking confirmation text (v222, ./bookingConfirmation.ts) ──
   /** Queue a booking's confirmation on the contact, inside outreach_text.
-   * A no-op when this booking's confirmation is already queued or sent.
+   * A no-op when this booking's confirmation is already queued or sent; over
+   * a `released` placeholder it is written as due with the cancel's result.
    * True when it was written. */
   queueConfirmation(contactId: string, record: BookingConfirmationRecord): Promise<boolean>;
   /** Rows on this campaign whose confirmation is due or a retry is due. */
@@ -307,6 +311,44 @@ export interface OutboundStore {
   /** Hold this booking's confirmation (the caller asked staff to change it),
    * while it is still waiting to go. True when it was held. */
   holdConfirmation(contactId: string, bookingId: string, reason: string): Promise<boolean>;
+  /**
+   * The held Azul cancel has run (v226): write what it came to on this
+   * booking's confirmation, and let one that was waiting for it go now. A
+   * confirmation already claimed, sent or of unknown fate is left alone. With
+   * none queued for this booking yet, a `released` placeholder the late queue
+   * takes over as due. True when it was written.
+   */
+  releaseConfirmation(contactId: string, bookingId: string, cancel: "cancelled" | "pending", now: Date): Promise<boolean>;
+  /** The caller undid this booking on the call (v226): its confirmation is
+   * never sent. One not yet sent or of unknown fate (a claimed one included,
+   * so a put-back cannot revive it); with none queued for this booking yet, a
+   * skipped placeholder the late queue cannot replace. True when written. */
+  skipConfirmation(contactId: string, bookingId: string, reason: string): Promise<boolean>;
+
+  // ── The held Azul cancel (v226, ./heldAzulCancel.ts) ──
+  /** Hold a call booking's Azul cancel on the contact, inside outreach_text:
+   * written when there is none, or only another booking's that has finished
+   * (never over a cancel still held or running). True when it was written. */
+  queueHeldCancel(contactId: string, record: HeldAzulCancelRecord): Promise<boolean>;
+  /** Rows on this campaign whose held cancel the fallback should run: held
+   * past its `run_after`, or claimed before `staleBefore` (a run that died). */
+  heldCancelsDue(campaignId: string, now: Date, staleBefore: Date, limit: number): Promise<ContactRow[]>;
+  /** Claim this booking's held cancel in one statement: a held one, or a
+   * claim older than `staleBefore`. The row, or null when anyone else has it
+   * or it is not held. */
+  claimHeldCancel(contactId: string, bookingId: string, now: Date, staleBefore: Date): Promise<ContactRow | null>;
+  /** Merge fields into this booking's held cancel; nothing else changes. */
+  patchHeldCancel(contactId: string, bookingId: string, patch: Partial<HeldAzulCancelRecord>): Promise<void>;
+  /**
+   * The caller kept their Azul appointment: this booking's held cancel is
+   * marked dropped, in one statement. It moves this booking's held record to
+   * dropped, or, when the held record never reached the store, writes the
+   * booking's record as dropped, so a held write that lands late changes
+   * nothing (queueHeldCancel never writes over it). True only when the store
+   * now says dropped for this booking; false when its cancel has run or is
+   * running, or another booking's cancel is still held there.
+   */
+  dropHeldCancel(contactId: string, record: HeldAzulCancelRecord, reason: string, now: Date): Promise<boolean>;
 }
 
 /**
@@ -951,6 +993,11 @@ export async function createDbOutboundStore(): Promise<OutboundStore> {
     },
 
     async queueConfirmation(contactId, record) {
+      // A `released` placeholder for this booking means the hang-up ran the
+      // held cancel before this queue landed (Codex P2 on #474): the record is
+      // written over it as due, carrying the cancel's result and the release
+      // time, so the text says what the cancel came to. Any other
+      // confirmation for this booking is never replaced.
       const written = rows(
         await db.execute(sql`
           UPDATE campaign_contacts
@@ -958,12 +1005,31 @@ export async function createDbOutboundStore(): Promise<OutboundStore> {
                    COALESCE(custom_data, '{}'::jsonb), ARRAY[${OUTREACH_TEXT_KEY}::text],
                    CASE WHEN jsonb_typeof(custom_data -> ${OUTREACH_TEXT_KEY}::text) = 'object'
                         THEN custom_data -> ${OUTREACH_TEXT_KEY}::text ELSE '{}'::jsonb END
-                     || jsonb_build_object(${CONFIRMATION_FIELD}::text, ${JSON.stringify(record)}::jsonb),
+                     || jsonb_build_object(${CONFIRMATION_FIELD}::text,
+                          CASE WHEN custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text ->> 'booking_id' = ${record.booking_id}::text
+                                AND custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text ->> 'state' = 'released'
+                               THEN ${JSON.stringify(record)}::jsonb
+                                      || jsonb_build_object(
+                                           'state', 'due',
+                                           'cancel', COALESCE(custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text -> 'cancel',
+                                                              to_jsonb(${record.cancel}::text)),
+                                           'due_at', COALESCE(custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text ->> 'released_at',
+                                                              ${record.due_at}::text))
+                               ELSE ${JSON.stringify(record)}::jsonb
+                          END),
                    true)
            WHERE id = ${contactId}::varchar
              AND (custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text IS NULL
-                  OR custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text ->> 'booking_id'
-                     IS DISTINCT FROM ${record.booking_id}::text)
+                  -- Another booking's: replaced only by a newer booking, so a
+                  -- late write from a booking the caller undid never lands over
+                  -- the one they booked after it (Codex P2 on #474). queued_at
+                  -- is always toISOString, so the text order is the time order.
+                  OR (custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text ->> 'booking_id'
+                        IS DISTINCT FROM ${record.booking_id}::text
+                      AND COALESCE(custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text ->> 'queued_at', '')
+                        <= ${record.queued_at}::text)
+                  OR (custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text ->> 'booking_id' = ${record.booking_id}::text
+                      AND custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text ->> 'state' = 'released'))
           RETURNING id`),
       );
       return written.length > 0;
@@ -974,7 +1040,7 @@ export async function createDbOutboundStore(): Promise<OutboundStore> {
         await db.execute(sql`
           SELECT * FROM campaign_contacts
            WHERE campaign_id = ${campaignId}::varchar
-             AND custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text ->> 'state' IN ('due', 'retry')
+             AND custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text ->> 'state' IN ('due', 'retry', 'awaiting_cancel')
              AND COALESCE(custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text ->> 'retry_after',
                           custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text ->> 'due_at')::timestamptz
                  <= ${now.toISOString()}::timestamptz
@@ -992,7 +1058,7 @@ export async function createDbOutboundStore(): Promise<OutboundStore> {
                      || jsonb_build_object('state', 'claimed', 'claimed_at', ${now.toISOString()}::text),
                    true)
            WHERE id = ${contactId}::varchar
-             AND custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text ->> 'state' IN ('due', 'retry')
+             AND custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text ->> 'state' IN ('due', 'retry', 'awaiting_cancel')
              AND COALESCE(custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text ->> 'retry_after',
                           custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text ->> 'due_at')::timestamptz
                  <= ${now.toISOString()}::timestamptz
@@ -1041,10 +1107,172 @@ export async function createDbOutboundStore(): Promise<OutboundStore> {
            WHERE id = ${contactId}::varchar
              AND (custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text ->> 'booking_id'
                     IS DISTINCT FROM ${bookingId}::text
-                  OR custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text ->> 'state' IN ('due', 'retry', 'claimed'))
+                  OR custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text ->> 'state' IN ('due', 'retry', 'awaiting_cancel', 'claimed'))
           RETURNING id`),
       );
       return held.length > 0;
+    },
+
+    async releaseConfirmation(contactId, bookingId, cancel, now) {
+      // With no confirmation for this booking yet (its queue is still on its
+      // way, after the booking tool's settle budget ran out, and the caller
+      // hung up first), a `released` placeholder keeps what the cancel came
+      // to; the late queue takes it over as due (Codex P2 on #474). Without
+      // it the late queue would wait as awaiting_cancel and go at 20 minutes
+      // saying our team will cancel an appointment already cancelled.
+      const released = rows(
+        await db.execute(sql`
+          UPDATE campaign_contacts
+             SET custom_data = jsonb_set(
+                   COALESCE(custom_data, '{}'::jsonb), ARRAY[${OUTREACH_TEXT_KEY}::text],
+                   CASE WHEN jsonb_typeof(custom_data -> ${OUTREACH_TEXT_KEY}::text) = 'object'
+                        THEN custom_data -> ${OUTREACH_TEXT_KEY}::text ELSE '{}'::jsonb END
+                     || jsonb_build_object(${CONFIRMATION_FIELD}::text,
+                          CASE WHEN custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text ->> 'booking_id' = ${bookingId}::text
+                               THEN (custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text)
+                                      || jsonb_build_object('cancel', ${cancel}::text)
+                                      || CASE WHEN custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text ->> 'state' = 'awaiting_cancel'
+                                              THEN jsonb_build_object('state', 'due', 'due_at', ${now.toISOString()}::text)
+                                              ELSE '{}'::jsonb END
+                               ELSE jsonb_build_object('booking_id', ${bookingId}::text, 'state', 'released',
+                                                       'cancel', ${cancel}::text, 'released_at', ${now.toISOString()}::text)
+                          END),
+                   true)
+           WHERE id = ${contactId}::varchar
+             AND (custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text ->> 'booking_id'
+                    IS DISTINCT FROM ${bookingId}::text
+                  OR custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text ->> 'state' NOT IN ('claimed', 'sent', 'unknown'))
+          RETURNING id`),
+      );
+      return released.length > 0;
+    },
+
+    async skipConfirmation(contactId, bookingId, reason) {
+      // The hold's shape (Codex P2 on #470): a claimed row is skipped too, so a
+      // put-back cannot revive it, and with no confirmation for this booking
+      // yet a skipped placeholder is written, which queueConfirmation cannot
+      // replace when it lands late.
+      const skipped = rows(
+        await db.execute(sql`
+          UPDATE campaign_contacts
+             SET custom_data = jsonb_set(
+                   COALESCE(custom_data, '{}'::jsonb), ARRAY[${OUTREACH_TEXT_KEY}::text],
+                   CASE WHEN jsonb_typeof(custom_data -> ${OUTREACH_TEXT_KEY}::text) = 'object'
+                        THEN custom_data -> ${OUTREACH_TEXT_KEY}::text ELSE '{}'::jsonb END
+                     || jsonb_build_object(${CONFIRMATION_FIELD}::text,
+                          CASE WHEN custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text ->> 'booking_id' = ${bookingId}::text
+                               THEN (custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text)
+                                      || jsonb_build_object('state', 'skipped', 'reason', ${reason}::text)
+                               ELSE jsonb_build_object('booking_id', ${bookingId}::text, 'state', 'skipped', 'reason', ${reason}::text)
+                          END),
+                   true)
+           WHERE id = ${contactId}::varchar
+             AND (custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text ->> 'booking_id'
+                    IS DISTINCT FROM ${bookingId}::text
+                  OR custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text ->> 'state' IN ('due', 'retry', 'awaiting_cancel', 'held', 'claimed'))
+          RETURNING id`),
+      );
+      return skipped.length > 0;
+    },
+
+    async queueHeldCancel(contactId, record) {
+      const written = rows(
+        await db.execute(sql`
+          UPDATE campaign_contacts
+             SET custom_data = jsonb_set(
+                   COALESCE(custom_data, '{}'::jsonb), ARRAY[${OUTREACH_TEXT_KEY}::text],
+                   CASE WHEN jsonb_typeof(custom_data -> ${OUTREACH_TEXT_KEY}::text) = 'object'
+                        THEN custom_data -> ${OUTREACH_TEXT_KEY}::text ELSE '{}'::jsonb END
+                     || jsonb_build_object(${HELD_CANCEL_FIELD}::text, ${JSON.stringify(record)}::jsonb),
+                   true)
+           WHERE id = ${contactId}::varchar
+             AND (custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${HELD_CANCEL_FIELD}::text IS NULL
+                  OR (custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${HELD_CANCEL_FIELD}::text ->> 'booking_id'
+                        IS DISTINCT FROM ${record.booking_id}::text
+                      AND custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${HELD_CANCEL_FIELD}::text ->> 'state'
+                        NOT IN ('held', 'claimed')
+                      -- Only a newer booking's: a late write from a booking
+                      -- the caller undid never re-arms over a later one's
+                      -- finished cancel (Codex P2 on #474). held_at is
+                      -- toISOString, so the text order is the time order.
+                      AND COALESCE(custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${HELD_CANCEL_FIELD}::text ->> 'held_at', '')
+                        <= ${record.held_at}::text))
+          RETURNING id`),
+      );
+      return written.length > 0;
+    },
+
+    async heldCancelsDue(campaignId, now, staleBefore, limit) {
+      return rows(
+        await db.execute(sql`
+          SELECT * FROM campaign_contacts
+           WHERE campaign_id = ${campaignId}::varchar
+             AND ((custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${HELD_CANCEL_FIELD}::text ->> 'state' = 'held'
+                   AND (custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${HELD_CANCEL_FIELD}::text ->> 'run_after')::timestamptz
+                       <= ${now.toISOString()}::timestamptz)
+                  OR (custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${HELD_CANCEL_FIELD}::text ->> 'state' = 'claimed'
+                      AND (custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${HELD_CANCEL_FIELD}::text ->> 'claimed_at')::timestamptz
+                          <= ${staleBefore.toISOString()}::timestamptz))
+           ORDER BY custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${HELD_CANCEL_FIELD}::text ->> 'held_at', id
+           LIMIT ${limit}::int`),
+      ).map(rowToContact);
+    },
+
+    async claimHeldCancel(contactId, bookingId, now, staleBefore) {
+      const claimed = rows(
+        await db.execute(sql`
+          UPDATE campaign_contacts
+             SET custom_data = jsonb_set(custom_data, ARRAY[${OUTREACH_TEXT_KEY}::text, ${HELD_CANCEL_FIELD}::text],
+                   (custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${HELD_CANCEL_FIELD}::text)
+                     || jsonb_build_object('state', 'claimed', 'claimed_at', ${now.toISOString()}::text),
+                   true)
+           WHERE id = ${contactId}::varchar
+             AND custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${HELD_CANCEL_FIELD}::text ->> 'booking_id' = ${bookingId}::text
+             AND (custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${HELD_CANCEL_FIELD}::text ->> 'state' = 'held'
+                  OR (custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${HELD_CANCEL_FIELD}::text ->> 'state' = 'claimed'
+                      AND (custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${HELD_CANCEL_FIELD}::text ->> 'claimed_at')::timestamptz
+                          <= ${staleBefore.toISOString()}::timestamptz))
+          RETURNING *`),
+      );
+      return claimed[0] ? rowToContact(claimed[0]) : null;
+    },
+
+    async patchHeldCancel(contactId, bookingId, patch) {
+      await db.execute(sql`
+        UPDATE campaign_contacts
+           SET custom_data = jsonb_set(custom_data, ARRAY[${OUTREACH_TEXT_KEY}::text, ${HELD_CANCEL_FIELD}::text],
+                 (custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${HELD_CANCEL_FIELD}::text) || ${JSON.stringify(patch)}::jsonb,
+                 true)
+         WHERE id = ${contactId}::varchar
+           AND custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${HELD_CANCEL_FIELD}::text ->> 'booking_id' = ${bookingId}::text`);
+    },
+
+    async dropHeldCancel(contactId, record, reason, now) {
+      const dropped = rows(
+        await db.execute(sql`
+          UPDATE campaign_contacts
+             SET custom_data = jsonb_set(
+                   COALESCE(custom_data, '{}'::jsonb), ARRAY[${OUTREACH_TEXT_KEY}::text],
+                   CASE WHEN jsonb_typeof(custom_data -> ${OUTREACH_TEXT_KEY}::text) = 'object'
+                        THEN custom_data -> ${OUTREACH_TEXT_KEY}::text ELSE '{}'::jsonb END
+                     || jsonb_build_object(${HELD_CANCEL_FIELD}::text,
+                          CASE WHEN custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${HELD_CANCEL_FIELD}::text ->> 'booking_id'
+                                    = ${record.booking_id}::text
+                               THEN custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${HELD_CANCEL_FIELD}::text
+                               ELSE ${JSON.stringify(record)}::jsonb END
+                            || jsonb_build_object('state', 'dropped', 'reason', ${reason}::text, 'done_at', ${now.toISOString()}::text)),
+                   true)
+           WHERE id = ${contactId}::varchar
+             AND (custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${HELD_CANCEL_FIELD}::text IS NULL
+                  OR (custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${HELD_CANCEL_FIELD}::text ->> 'booking_id' = ${record.booking_id}::text
+                      AND custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${HELD_CANCEL_FIELD}::text ->> 'state' = 'held')
+                  OR (custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${HELD_CANCEL_FIELD}::text ->> 'booking_id'
+                        IS DISTINCT FROM ${record.booking_id}::text
+                      AND custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${HELD_CANCEL_FIELD}::text ->> 'state'
+                        NOT IN ('held', 'claimed')))
+          RETURNING id`),
+      );
+      return dropped.length > 0;
     },
 
     async stampDoNotContact(phone, source) {

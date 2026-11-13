@@ -123,6 +123,17 @@ export async function runOutboundTick(deps: SchedulerDeps): Promise<TickResult[]
           ...(confirmations.skipped ? { skipped: confirmations.skipped } : {}),
         };
       }
+      // The campaign's own work after its calls (v226): for NPX outreach, an
+      // Azul cancel held until hang-up whose call ended without running it.
+      if (policy.afterCalls) {
+        const log = deps.log ?? ((line: string) => console.log(line));
+        tick.afterCalls = await policy
+          .afterCalls({ slug, store, now: deps.now ?? (() => new Date()), log })
+          .catch((error: unknown) => {
+            log(`[outbound] ${policy.campaignKey}: after-call work failed — ${error instanceof Error ? error.message : String(error)}`);
+            return {};
+          });
+      }
       results.push(tick);
     }
     return results;
