@@ -256,7 +256,8 @@ describe('it never costs the filing anything', () => {
     h.claimTicketCreation.mockResolvedValue({ claimed: true });
     h.submitTicket.mockResolvedValue({ success: true, ticketNumber: 'VA-79083' });
     const { secondTicketOnThisCall: _drop, ...ordinary } = besideParams(callSid);
-    await SyncAgentService.submitSimplifiedTicket(ordinary);
+    const r = await SyncAgentService.submitSimplifiedTicket(ordinary);
+    expect(r).toMatchObject({ success: true, ticketNumber: 'VA-79083' });
     await new Promise((r) => setTimeout(r, 10));
     expect(getAzulTimeline(callId)?.some((e) => e.tool === SECOND_TICKET_TOOL)).toBe(false);
     expect(h.sets).toHaveLength(0);

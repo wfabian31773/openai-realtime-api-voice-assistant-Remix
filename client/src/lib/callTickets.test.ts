@@ -45,8 +45,16 @@ describe('the pages read it', () => {
     }
   })
 
+  it('each page renders one entry per ticket from that list', () => {
+    expect(page('CallLogsPage.tsx')).toContain('ticketNumbersOf(log).map((t) => (')
+    expect(page('UrgentCallsPage.tsx')).toContain('const tickets = ticketNumbersOf(call)')
+    expect(page('UrgentCallsPage.tsx')).toMatch(/tickets\.map\(\(\w+\) =>/)
+    expect(page('CallDetailsPage.tsx')).toContain('const tickets = ticketNumbersOf(log)')
+    expect(page('CallDetailsPage.tsx')).toMatch(/tickets\.map\(\(\w+\) =>/)
+  })
+
   it('no page renders the single column as the whole answer any more', () => {
-    expect(page('CallLogsPage.tsx')).not.toContain('{(log as any).ticketNumber}')
+    expect(page('CallLogsPage.tsx')).not.toMatch(/ticketNumber\b(?!s)/)
     expect(page('UrgentCallsPage.tsx')).not.toContain('{call.ticketNumber}')
   })
 })
