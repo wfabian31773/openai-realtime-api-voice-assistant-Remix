@@ -1377,6 +1377,63 @@ function monthOf(word: string): number {
 
 const pad2 = (n: number) => String(n).padStart(2, '0');
 
+/** The clock every slot is offered on and every choice is written in. */
+const PRACTICE_TIME_ZONE = 'America/Los_Angeles';
+
+/** "2041-02-13T09:00" or "2041-02-13 09:00", then the rest of the string. */
+const ISO_DATE_TIME = /^(\d{4})-(\d{2})-(\d{2})[T\s](\d{2}):(\d{2})(?::(\d{2})(?:\.\d+)?)?(.*)$/i;
+
+/**
+ * A DATE-TIME SENT AS ISO 8601, ON THE PRACTICE'S CLOCK (v229, Codex P2 on
+ * #476). A choice is written as a Pacific date and time, so a date-time with
+ * no zone ("2041-02-13T09:00") is read as written. One with an offset
+ * ("2041-02-13T17:00:00Z", "...-08:00") is a moment, and is turned into the
+ * Pacific day and minute it names: 17:00Z is 09:00 in Los Angeles, and
+ * reading its 17:00 against the slots would refuse the slot the caller chose
+ * or book another one at 17:00. A Pacific zone name ("PST", "PT") is read as
+ * written; any other zone word cannot be placed and is unreadable, so the
+ * refusal names the choices. Null when the string is not an ISO date-time.
+ */
+export function readIsoDateTime(raw: string): { day: string; minutes: number } | 'unreadable' | null {
+  const m = ISO_DATE_TIME.exec(raw.trim());
+  if (!m) return null;
+  const [, y, mo, d, hh, mi, ss, rest] = m;
+  if (Number(hh) > 23 || Number(mi) > 59) return 'unreadable';
+  const tail = rest.trim();
+  if (!tail || /^(?:pst|pdt|pt|pacific(?: time)?)$/i.test(tail)) {
+    return { day: `${y}-${mo}-${d}`, minutes: Number(hh) * 60 + Number(mi) };
+  }
+  const ampm = /^([ap])\.?\s?m\.?$/i.exec(tail);
+  if (ampm) {
+    const minutes = minutesOf(`${hh}:${mi} ${ampm[1]}m`);
+    return minutes === null ? 'unreadable' : { day: `${y}-${mo}-${d}`, minutes };
+  }
+  let offset: string;
+  if (/^(?:z|utc|gmt)$/i.test(tail)) {
+    offset = 'Z';
+  } else {
+    const o = /^(?:utc|gmt)?\s*([+-])(\d{2})(?::?(\d{2}))?$/i.exec(tail);
+    if (!o || Number(o[2]) > 14 || Number(o[3] ?? 0) > 59) return 'unreadable';
+    offset = `${o[1]}${o[2]}:${o[3] ?? '00'}`;
+  }
+  const instant = new Date(`${y}-${mo}-${d}T${hh}:${mi}:${ss ?? '00'}${offset}`);
+  if (Number.isNaN(instant.getTime())) return 'unreadable';
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: PRACTICE_TIME_ZONE,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23',
+  }).formatToParts(instant);
+  const part = (t: string) => parts.find((p) => p.type === t)?.value ?? '';
+  return {
+    day: `${part('year')}-${part('month')}-${part('day')}`,
+    minutes: Number(part('hour')) * 60 + Number(part('minute')),
+  };
+}
+
 /**
  * THE DATE THE MODEL SENT, READ AGAINST THE DAYS OFFERED (v229).
  *
@@ -1395,6 +1452,9 @@ export function readChosenDate(
 ): { day: string; form: 'iso' | 'words' } | { form: 'unreadable' | 'none' } {
   if (typeof raw !== 'string' || !raw.trim()) return { form: 'none' };
   const text = raw.trim();
+  const dateTime = readIsoDateTime(text);
+  if (dateTime === 'unreadable') return { form: 'unreadable' };
+  if (dateTime) return { day: dateTime.day, form: 'iso' };
   const iso = /^(\d{4})-(\d{2})-(\d{2})(?:$|[T\s])/.exec(text);
   if (iso) return { day: `${iso[1]}-${iso[2]}-${iso[3]}`, form: 'iso' };
 
@@ -1436,24 +1496,28 @@ export function readChosenDate(
 }
 
 /**
- * The time the model sent: "11:00", "11 AM", "11:00 a.m.", "11:00:00", or,
- * when no time was sent, the time of a date sent as "2026-11-18T11:00".
+ * The time the model sent: "11:00", "11 AM", "11:00 a.m.", "11:00:00", a
+ * whole date-time, or, when no time was sent, the time of a date sent as
+ * "2026-11-18T11:00". A date-time with a UTC offset is read on the
+ * practice's clock (`readIsoDateTime`); a bare time with an offset
+ * ("17:00Z") cannot be placed on a day and is unreadable.
  */
 export function readChosenTime(
   raw: unknown,
   dateRaw?: unknown,
 ): { minutes: number; form: 'read' } | { form: 'unreadable' | 'none' } {
   if (typeof raw === 'string' && raw.trim()) {
+    const dateTime = readIsoDateTime(raw);
+    if (dateTime === 'unreadable') return { form: 'unreadable' };
+    if (dateTime) return { minutes: dateTime.minutes, form: 'read' };
     const text = raw.trim().replace(/^(\d{1,2}:\d{2}):\d{2}/, '$1').replace(/\b([ap])\.?\s?m\.?$/i, '$1m');
     const m = minutesOf(text);
     return m === null ? { form: 'unreadable' } : { minutes: m, form: 'read' };
   }
   if (typeof dateRaw === 'string') {
-    const t = /^\d{4}-\d{2}-\d{2}[T\s](\d{2}:\d{2})/.exec(dateRaw.trim());
-    if (t) {
-      const m = minutesOf(t[1]);
-      if (m !== null) return { minutes: m, form: 'read' };
-    }
+    const dateTime = readIsoDateTime(dateRaw);
+    if (dateTime === 'unreadable') return { form: 'unreadable' };
+    if (dateTime) return { minutes: dateTime.minutes, form: 'read' };
   }
   return { form: 'none' };
 }

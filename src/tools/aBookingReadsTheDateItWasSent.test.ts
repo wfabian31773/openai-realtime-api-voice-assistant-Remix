@@ -32,6 +32,7 @@ import {
   chosenSlot,
   readChosenDate,
   readChosenTime,
+  readIsoDateTime,
   resetOutreachAvailabilityForTests,
   resetOutreachSessionsForTests,
   setNpxOutreachDepsForTests,
@@ -222,6 +223,74 @@ describe('every way the date of an offered choice can arrive is read to that day
     expect(readChosenTime('9:00 a.m.')).toEqual({ minutes: 540, form: 'read' });
     expect(readChosenTime('9 a. m.')).toEqual({ minutes: 540, form: 'read' });
     expect(readChosenTime('2:30 p.m.')).toEqual({ minutes: 870, form: 'read' });
+  });
+});
+
+// Codex P2 on #476 (head 7838fcc): a date-time carrying a UTC offset kept its
+// clock and dropped its offset, so 17:00Z (09:00 in Los Angeles) was read as
+// 17:00 against slots written in Pacific time.
+describe('a date-time with a time zone is read on the practice clock', () => {
+  it('17:00Z is 09:00 in Los Angeles and books the February 13 9:00 AM choice', async () => {
+    await twoListsRead();
+    const r = await run(BOOK_SOONER_TOOL_NAME, { date: '2041-02-13T17:00:00Z' });
+    expect(r).toMatchObject({ success: true, booked_by: 'date_time', received_date: 'iso', received_time: 'read' });
+    expect(book.mock.calls[0][0]).toMatchObject({ slotId: FEB13_0900.slotId });
+  });
+
+  it('a Pacific offset books the same choice', async () => {
+    await twoListsRead();
+    const r = await run(BOOK_SOONER_TOOL_NAME, { date: '2041-02-13T09:00:00-08:00' });
+    expect(r).toMatchObject({ success: true, booked_by: 'date_time' });
+    expect(book.mock.calls[0][0]).toMatchObject({ slotId: FEB13_0900.slotId });
+  });
+
+  it('an offset that moves the day is read to the Pacific day', async () => {
+    await twoListsRead();
+    // 08:00 on the 16th at +14:00 is 10:00 on the 15th in Los Angeles.
+    const r = await run(BOOK_SOONER_TOOL_NAME, { date: '2041-02-16T08:00:00+14:00' });
+    expect(r).toMatchObject({ success: true, booked_by: 'date_time' });
+    expect(book.mock.calls[0][0]).toMatchObject({ slotId: FEB15_1000.slotId });
+  });
+
+  it('a whole date-time in the time field is read on the practice clock too', async () => {
+    await twoListsRead();
+    const r = await run(BOOK_SOONER_TOOL_NAME, { date: '2041-02-13', time: '2041-02-13T17:00:00Z' });
+    expect(r).toMatchObject({ success: true, booked_by: 'date_time' });
+    expect(book.mock.calls[0][0]).toMatchObject({ slotId: FEB13_0900.slotId });
+  });
+
+  it('a zone that cannot be placed books nothing and the refusal names the choices', async () => {
+    await twoListsRead();
+    const r = await run(BOOK_SOONER_TOOL_NAME, { date: '2041-02-13T12:00 EST' });
+    expect(r).toMatchObject({ success: false, received_date: 'unreadable', received_time: 'unreadable' });
+    expect(r.choices).toEqual(expect.arrayContaining([expect.objectContaining({ date: '2041-02-13', time: '09:00' })]));
+    expect(book).not.toHaveBeenCalled();
+  });
+
+  it('a bare time with an offset cannot be placed on a day and books nothing', async () => {
+    await twoListsRead();
+    const r = await run(BOOK_SOONER_TOOL_NAME, { date: '2041-02-13', time: '17:00Z' });
+    expect(r).toMatchObject({ success: false, received_time: 'unreadable' });
+    expect(book).not.toHaveBeenCalled();
+  });
+
+  it('readIsoDateTime converts an offset and reads a Pacific or zoneless time as written', () => {
+    expect(readIsoDateTime('2041-02-13T17:00:00Z')).toEqual({ day: '2041-02-13', minutes: 540 });
+    expect(readIsoDateTime('2041-02-13T17:00:00.000Z')).toEqual({ day: '2041-02-13', minutes: 540 });
+    expect(readIsoDateTime('2041-02-13 17:00 UTC')).toEqual({ day: '2041-02-13', minutes: 540 });
+    expect(readIsoDateTime('2041-02-13T22:30+0530')).toEqual({ day: '2041-02-13', minutes: 540 });
+    expect(readIsoDateTime('2041-02-13T12:00-05')).toEqual({ day: '2041-02-13', minutes: 540 });
+    // Summer: Los Angeles is UTC-7.
+    expect(readIsoDateTime('2041-07-01T16:00:00Z')).toEqual({ day: '2041-07-01', minutes: 540 });
+    expect(readIsoDateTime('2041-02-13T09:00')).toEqual({ day: '2041-02-13', minutes: 540 });
+    expect(readIsoDateTime('2041-02-13T09:00 PST')).toEqual({ day: '2041-02-13', minutes: 540 });
+    expect(readIsoDateTime('2041-02-13 2:00 pm')).toBeNull();
+    expect(readIsoDateTime('2041-02-13 02:00 pm')).toEqual({ day: '2041-02-13', minutes: 840 });
+    expect(readIsoDateTime('2041-02-13T09:00 EST')).toBe('unreadable');
+    expect(readIsoDateTime('2041-02-13T09:00+25:00')).toBe('unreadable');
+    expect(readIsoDateTime('2041-02-13T24:00')).toBe('unreadable');
+    expect(readIsoDateTime('2041-02-13')).toBeNull();
+    expect(readIsoDateTime('February 13')).toBeNull();
   });
 });
 
