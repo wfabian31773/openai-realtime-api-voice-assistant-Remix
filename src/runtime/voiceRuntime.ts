@@ -310,7 +310,7 @@ import {
   type CallbackContext,
 } from "./outbound/callback";
 import { callbackSessionFor, closeCallbackSession, openCallbackSession } from "../tools/outboundTools";
-import { closeOutreachSession } from "../tools/npxOutreachTools";
+import { endOutreachSession } from "../tools/npxOutreachTools";
 import { reportSiAssistantCall, shouldReportSiAssistantCall } from "../plugin/callbackReport";
 import { attachmentForSiAssistant } from "../plugin/returnedCaller";
 import { reattachTakenMessages } from "../plugin/messageOutbox";
@@ -1807,7 +1807,9 @@ export function mountVoiceRuntime(
             releaseCallerSpeech(entry.callSid);
             // And an outreach call's session (v110): it holds the patient's
             // record and their offered slots, and must not outlive the call.
-            closeOutreachSession(entry.callSid);
+            // v224: ending it runs the Azul cancel a booking on the call held
+            // until hang-up. Not awaited; it never throws.
+            void endOutreachSession(entry.callSid);
             // The call is over, whatever ended it: any office leg still
             // ringing for this caller is abandoned NOW, not after the
             // accept window — the staffer must not keep ringing toward,

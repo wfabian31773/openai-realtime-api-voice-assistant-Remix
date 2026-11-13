@@ -1719,9 +1719,22 @@ import { callEnvironment } from "./callRecord";
  * staff ticket files urgent. Same switch as the texts (NPX_OUTREACH_TEXTS).
  * Stacked on v220 (#467, open). v221 is #469 on its open branch, which this
  * does not contain. No migration.
+ *
+ * v224 — THE CALLER WHO BACKS OUT KEEPS THEIR APPOINTMENT (2026-11-13). Wayne:
+ * "Hold the cancel until hang-up: the Azul cancel runs only when the call
+ * ends. If the caller backs out on the call, their Azul appointment is kept."
+ * A booking on a call now cancels nothing: the Azul cancel is held on the
+ * contact (`outreach_text.held_cancel`) and the call's teardown runs it
+ * (endOutreachSession), or the scheduler's fallback after 11 minutes when the
+ * process died first; one claim decides who runs it. The confirmation text
+ * waits for it (`awaiting_cancel`). `cancel_sooner_booking` drops the held
+ * cancel and then cancels the NPX booking through NPX's new outreach
+ * booking-cancel endpoint (EPC #329); when either cannot be done it files the
+ * urgent staff ticket and the Azul appointment is still kept. Stacked on v222
+ * (#470, open); v223 is taken. No migration.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v222-a-booking-is-confirmed-by-text-20261113";
+  "voice-runtime-v224-a-caller-who-backs-out-keeps-their-appointment-20261113";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

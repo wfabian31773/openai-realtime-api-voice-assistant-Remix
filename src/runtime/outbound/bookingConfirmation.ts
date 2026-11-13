@@ -21,6 +21,11 @@
  * A caller who asks staff on the same call to cancel or change the booking
  * holds the text (`held`). Nothing confirms a booking they have asked to undo.
  *
+ * v224: a call booking holds its Azul cancel until hang-up, so its
+ * confirmation is queued `awaiting_cancel` and released (`due`, with the real
+ * cancel result) once the held cancel runs; a booking the caller undid on the
+ * call is `skipped` with reason `booking_undone`.
+ *
  * The record lives inside `outreach_text` so the source refresh carries it
  * over (it preserves that key, v211) and a booked contact is never sent the
  * outreach text after it.
@@ -39,6 +44,11 @@ export { CONFIRMATION_FIELD };
  * status callback has closed the call's attempt. */
 export const CALL_CONFIRMATION_DELAY_MS = 2 * 60 * 1000;
 
+/** A call booking's confirmation waits this long for the held Azul cancel
+ * (v224) before it goes anyway, saying our team will cancel: past the
+ * cancel's fallback (heldAzulCancel.HELD_CANCEL_FALLBACK_MS). */
+export const CALL_AWAIT_CANCEL_MAX_MS = 20 * 60 * 1000;
+
 /** How long a confirmation waits when the person is still on the phone with us. */
 export const CALL_OPEN_RETRY_MS = 60 * 1000;
 
@@ -50,7 +60,10 @@ export const MAX_CONFIRMATION_TRIES = 3;
 export const OPEN_CALL_WINDOW_MS = 30 * 60 * 1000;
 
 export interface BookingConfirmationRecord {
-  state: "due" | "held" | "claimed" | "sent" | "unknown" | "failed" | "skipped" | "retry";
+  /** awaiting_cancel (v224): a call booking's confirmation waits for the
+   * held Azul cancel to run at hang-up, which releases it with the real
+   * result; one nobody releases goes at `due_at` saying our team will cancel. */
+  state: "due" | "awaiting_cancel" | "held" | "claimed" | "sent" | "unknown" | "failed" | "skipped" | "retry";
   booking_id: string;
   /** Booked on a call, or on the text's booking page. */
   by: "call" | "link";
@@ -64,7 +77,8 @@ export interface BookingConfirmationRecord {
   phone: string;
   /** "Jan 6": the Azul appointment it replaced. */
   replaced_day: string;
-  /** Whether the Azul cancel landed when it was booked. */
+  /** Whether the Azul cancel landed: when it was booked on the text link, or,
+   * on a call, when the held cancel ran at hang-up (v224). */
   cancel: "cancelled" | "pending";
   queued_at: string;
   /** Not sent before this. */

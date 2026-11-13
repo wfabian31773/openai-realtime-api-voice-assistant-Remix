@@ -366,6 +366,13 @@ function summarizeResult(tool: string, resultJson: string): Record<string, unkno
     // refusal code (outreachAzulCancel.ts). Fixed codes, no PHI.
     'azul_cancel',
     'azul_cancel_reason',
+    // v224: cancel_sooner_booking. Whether the booking was undone on the
+    // call, NPX's own outcome code, and whether the Azul appointment was
+    // provably kept. Fixed codes and booleans, no PHI. azul_cancel may now
+    // also read 'held': a call booking cancels nothing until the call ends.
+    'booking_undone',
+    'npx_cancel',
+    'azul_kept',
     /**
      * WHY escalate_to_human was refused (one of the gate's three codes) and
      * whether the refusal FILED the ticket (2026-09-29). Both PHI-free. Until

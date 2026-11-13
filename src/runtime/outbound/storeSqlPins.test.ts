@@ -364,7 +364,8 @@ describe("the booking confirmation (v222)", () => {
   it("claims and lists only a due confirmation, or a retry whose time has come", () => {
     for (const name of ["claimConfirmation", "confirmationsDue"]) {
       const m = method(name);
-      expect(m).toContain("->> 'state' IN ('due', 'retry')");
+      // v224: awaiting_cancel goes at its due_at too, if the hang-up never released it.
+      expect(m).toContain("->> 'state' IN ('due', 'retry', 'awaiting_cancel')");
       expect(m).toContain("->> 'retry_after',");
       expect(m).toContain("->> 'due_at')::timestamptz");
       expect(m).toContain("<= ${now.toISOString()}::timestamptz");
@@ -377,12 +378,80 @@ describe("the booking confirmation (v222)", () => {
   it("holds only this booking's confirmation, and only before it is claimed", () => {
     const m = method("holdConfirmation");
     expect(m).toContain("->> 'booking_id' = ${bookingId}::text");
-    expect(m).toContain("->> 'state' IN ('due', 'retry')");
+    expect(m).toContain("->> 'state' IN ('due', 'retry', 'awaiting_cancel')");
   });
 
   it("never moves updated_at, which the stale-claim reaper reads as a call's claim", () => {
-    for (const name of ["queueConfirmation", "claimConfirmation", "patchConfirmation", "holdConfirmation"]) {
+    for (const name of [
+      "queueConfirmation", "claimConfirmation", "patchConfirmation", "holdConfirmation",
+      "releaseConfirmation", "skipConfirmation",
+      "queueHeldCancel", "claimHeldCancel", "patchHeldCancel", "dropHeldCancel",
+    ]) {
       expect(method(name)).not.toMatch(/updated_at\s*=/);
     }
+  });
+
+  it("releases this booking's confirmation with the real cancel, never one already claimed or sent (v224)", () => {
+    const m = method("releaseConfirmation");
+    expect(m).toContain("->> 'booking_id' = ${bookingId}::text");
+    expect(m).toContain("->> 'state' NOT IN ('claimed', 'sent', 'unknown')");
+    expect(m).toContain("jsonb_build_object('cancel', ${cancel}::text)");
+    // Only one waiting for its cancel is made due now.
+    expect(m).toContain("->> 'state' = 'awaiting_cancel'");
+    expect(m).toContain("jsonb_build_object('state', 'due', 'due_at', ${now.toISOString()}::text)");
+    expect(m).toContain("RETURNING id");
+  });
+
+  it("skips an undone booking's confirmation only before it is claimed (v224)", () => {
+    const m = method("skipConfirmation");
+    expect(m).toContain("->> 'booking_id' = ${bookingId}::text");
+    expect(m).toContain("->> 'state' IN ('due', 'retry', 'awaiting_cancel', 'held')");
+    expect(m).toContain("jsonb_build_object('state', 'skipped', 'reason', ${reason}::text)");
+  });
+});
+
+describe("the held Azul cancel (v224)", () => {
+  it("is written only where no cancel is still held or running", () => {
+    const m = method("queueHeldCancel");
+    expect(m).toContain("-> ${HELD_CANCEL_FIELD}::text IS NULL");
+    expect(m).toContain("IS DISTINCT FROM ${record.booking_id}::text");
+    expect(m).toContain("NOT IN ('held', 'claimed')");
+    expect(m).toContain("jsonb_typeof(custom_data -> ${OUTREACH_TEXT_KEY}::text) = 'object'");
+    expect(m).toContain("RETURNING id");
+  });
+
+  it("the fallback lists a held cancel past its run_after, or a claim gone stale, on this campaign", () => {
+    const m = method("heldCancelsDue");
+    expect(m).toContain("campaign_id = ${campaignId}::varchar");
+    expect(m).toContain("->> 'state' = 'held'");
+    expect(m).toContain("->> 'run_after')::timestamptz");
+    expect(m).toContain("<= ${now.toISOString()}::timestamptz");
+    expect(m).toContain("->> 'state' = 'claimed'");
+    expect(m).toContain("<= ${staleBefore.toISOString()}::timestamptz");
+    expect(m).toContain("LIMIT ${limit}::int");
+  });
+
+  it("is claimed in one statement: this booking's, held or stale", () => {
+    const m = method("claimHeldCancel");
+    expect(m).toContain("->> 'booking_id' = ${bookingId}::text");
+    expect(m).toContain("->> 'state' = 'held'");
+    expect(m).toContain("->> 'claimed_at')::timestamptz");
+    expect(m).toContain("<= ${staleBefore.toISOString()}::timestamptz");
+    expect(m).toContain("jsonb_build_object('state', 'claimed', 'claimed_at', ${now.toISOString()}::text)");
+    expect(m).toContain("RETURNING *");
+  });
+
+  it("is patched only for its own booking", () => {
+    expect(method("patchHeldCancel")).toContain("->> 'booking_id' = ${bookingId}::text");
+  });
+
+  it("is dropped only while held, or written dropped where it never landed, and never over a cancel running", () => {
+    const m = method("dropHeldCancel");
+    expect(m).toContain("-> ${HELD_CANCEL_FIELD}::text IS NULL");
+    expect(m).toContain("->> 'booking_id' = ${record.booking_id}::text");
+    expect(m).toContain("->> 'state' = 'held'");
+    expect(m).toContain("NOT IN ('held', 'claimed')");
+    expect(m).toContain("jsonb_build_object('state', 'dropped', 'reason', ${reason}::text, 'done_at', ${now.toISOString()}::text)");
+    expect(m).toContain("RETURNING id");
   });
 });

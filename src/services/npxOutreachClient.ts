@@ -29,7 +29,7 @@ export const NPX_OUTREACH_DEMO_DEFAULT_BASE_URL = 'https://cec-npx-demo.vercel.a
 /** Per-call budgets. The booking runs a transaction under a lock on NPX's
  * side, so it gets the longest; all three sit well inside the bridge's
  * tool-dispatch watchdog. */
-export const NPX_TIMEOUT_MS = { availability: 10_000, offer: 8_000, book: 12_000, report: 8_000 } as const;
+export const NPX_TIMEOUT_MS = { availability: 10_000, offer: 8_000, book: 12_000, report: 8_000, cancel: 8_000 } as const;
 
 export interface NpxSlot {
   slotId: string;
@@ -99,6 +99,22 @@ export type NpxBookResult =
 
 export type NpxReportResult = { ok: true } | { ok: false; error: NpxError };
 
+/** What undoing a booking on the call came to (v224, NPX migration 0194):
+ * `cancelled`, or `already_cancelled` on a repeat. */
+export type NpxCancelBookingResult =
+  | { ok: true; outcome: 'cancelled' | 'already_cancelled' }
+  | { ok: false; error: NpxError };
+
+/** The reason the call gives NPX when the caller changed their mind (NPX's
+ * own default, OUTREACH_UNDO_REASON). */
+export const NPX_UNDO_REASON = 'caller_changed_mind';
+
+/** The failed-cancel reason the call reports when the caller kept their Azul
+ * appointment but the NPX booking could not be cancelled: NPX's backup list
+ * then tells CEC to cancel the NPX booking, not the Azul one
+ * (OUTREACH_CALLER_KEPT_AZUL_REASON). */
+export const NPX_CALLER_KEPT_AZUL_REASON = 'caller_kept_appointment';
+
 /**
  * Every failure, named. The NPX codes are passed through; the rest are this
  * side's: `not_configured` (no key), `timeout`, `network`, `unauthorized`
@@ -120,7 +136,14 @@ export type NpxError =
   | 'slot_unavailable'
   | 'held_by_other_practice'
   | 'patient_record_retired'
-  | 'not_an_outreach_booking';
+  | 'not_an_outreach_booking'
+  // The booking-cancel refusals (v224, NPX migration 0194): another call made
+  // it, it is no longer scheduled, its visit has started, or its Azul
+  // appointment is already gone. Each is a person's to handle.
+  | 'call_ref_mismatch'
+  | 'not_active'
+  | 'appointment_past'
+  | 'replaced_already_cancelled';
 
 const NPX_CODES = new Set<NpxError>([
   'unknown_medical_group',
@@ -130,6 +153,10 @@ const NPX_CODES = new Set<NpxError>([
   'held_by_other_practice',
   'patient_record_retired',
   'not_an_outreach_booking',
+  'call_ref_mismatch',
+  'not_active',
+  'appointment_past',
+  'replaced_already_cancelled',
 ]);
 
 /** The failure-report reason NPX accepts: a short code, never free text. */
@@ -165,6 +192,13 @@ export interface NpxOutreachClient {
   offer(req: NpxOfferRequest, opts?: NpxReadOptions): Promise<NpxOfferResult>;
   book(req: NpxBookRequest): Promise<NpxBookResult>;
   reportCancel(bookingId: string, outcome: 'cancelled' | { failed: string }): Promise<NpxReportResult>;
+  /**
+   * Undo a booking this call made (v224): `POST
+   * /api/exchange/outreach/bookings/:id/cancel`. Only the call that booked it
+   * may (`callRef` is the CallSid it was booked with). An NPX without the
+   * endpoint answers `server`, and the caller falls back to staff.
+   */
+  cancelBooking(bookingId: string, req: { callRef: string; reason?: string }): Promise<NpxCancelBookingResult>;
 }
 
 interface Reply {
@@ -303,6 +337,24 @@ export function createNpxOutreachClient(
       );
       if (typeof reply !== 'string' && reply.status === 200 && reply.body?.ok === true) return { ok: true };
       return { ok: false, error: failure(reply, 'cancel report') };
+    },
+
+    async cancelBooking(bookingId, req) {
+      // Only the reference the booking was made with can undo it, so one NPX
+      // would refuse is not sent: it could never match.
+      if (!NPX_CALL_REF.test(req.callRef)) return { ok: false, error: 'bad_request' };
+      const reason = req.reason && NPX_REASON_CODE.test(req.reason) ? req.reason : NPX_UNDO_REASON;
+      const reply = await send(
+        'POST',
+        `/api/exchange/outreach/bookings/${encodeURIComponent(bookingId)}/cancel`,
+        { callRef: req.callRef, reason },
+        NPX_TIMEOUT_MS.cancel,
+      );
+      if (typeof reply !== 'string' && reply.status === 200 && reply.body?.ok === true) {
+        const outcome = reply.body.outcome === 'already_cancelled' ? 'already_cancelled' : 'cancelled';
+        return { ok: true, outcome };
+      }
+      return { ok: false, error: failure(reply, 'booking cancel') };
     },
   };
 }

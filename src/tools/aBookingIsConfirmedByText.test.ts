@@ -20,7 +20,9 @@ import {
   CONFIRM_DOB_TOOL_NAME,
   FIND_SOONER_TOOL_NAME,
   STAFF_CALLBACK_TOOL_NAME,
+  bookingChangeLine,
   confirmationRecordFor,
+  endOutreachSession,
   npxBookingPageLane,
   resetOutreachAvailabilityForTests,
   resetOutreachSessionsForTests,
@@ -31,6 +33,7 @@ import { FakeOutboundStore } from '../runtime/outbound/store.testkit';
 import type { NpxOutreachClient, NpxSlot } from '../services/npxOutreachClient';
 import type { AzulCancelResult } from '../services/outreachAzulCancel';
 import {
+  CALL_AWAIT_CANCEL_MAX_MS,
   CALL_CONFIRMATION_DELAY_MS,
   confirmationBody,
   confirmationOf,
@@ -126,6 +129,7 @@ beforeEach(async () => {
 afterEach(() => {
   setNpxOutreachDepsForTests(null);
   vi.unstubAllEnvs();
+  vi.useRealTimers();
 });
 
 const deps = (over: Partial<TextDeps> = {}): TextDeps => ({
@@ -139,15 +143,17 @@ const deps = (over: Partial<TextDeps> = {}): TextDeps => ({
 });
 const tick = (over: Partial<TextDeps> = {}) => runConfirmationTick('npx-outreach', policy, deps(over));
 
+/** The call the tests are on, so the hang-up ends the right session. */
+let onCall = '';
 const runOn = (sid: string, name: string, args: Record<string, unknown> = {}) =>
-  getTool(name)!.handler({
+  (onCall = sid, getTool(name)!.handler({
     outbound_contact_id: 'c1',
     outbound_attempt_id: attemptId,
     outbound_phone: PHONE,
     outbound_campaign: 'npx-outreach',
     outbound_call_sid: sid,
     ...args,
-  });
+  }));
 
 async function bookOn(sid: string) {
   await runOn(sid, CONFIRM_DOB_TOOL_NAME, { date_of_birth: 'January 2nd, 1950' });
@@ -155,7 +161,12 @@ async function bookOn(sid: string) {
   const r = (await runOn(sid, BOOK_SOONER_TOOL_NAME, { date: '2041-02-04', time: '09:00', city: 'Testville' })) as Record<string, unknown>;
   expect(r).toMatchObject({ success: true, booked: true });
 }
-const hangUp = () => store.finishAttempt(attemptId, { status: 'completed' } as never);
+/** The call ends: Twilio's status closes the attempt, and the runtime's
+ * teardown ends the session, which runs the held Azul cancel (v224). */
+const hangUp = async () => {
+  await store.finishAttempt(attemptId, { status: 'completed' } as never);
+  if (onCall) await endOutreachSession(onCall);
+};
 const confirmation = () => confirmationOf(store.contacts.get('c1')!.customData);
 
 const BOOKED_BODY =
@@ -188,6 +199,14 @@ describe('the text', () => {
     const call = confirmationRecordFor({ contact, slot: SLOT_A, bookingId: 'b', callRef: 'CA1', cancelled: true, now: NOW });
     expect(call).toMatchObject({ by: 'call', call_sid: 'CA1', state: 'due' });
     expect(new Date(call.due_at).getTime() - NOW.getTime()).toBe(CALL_CONFIRMATION_DELAY_MS);
+    // v224: a call booking whose Azul cancel is held waits for the hang-up to
+    // release it, and goes anyway, saying our team will cancel, after 20 minutes.
+    const held = confirmationRecordFor({ contact, slot: SLOT_A, bookingId: 'b', callRef: 'CA1', cancelled: true, awaitCancel: true, now: NOW });
+    expect(held).toMatchObject({ state: 'awaiting_cancel', cancel: 'pending' });
+    expect(new Date(held.due_at).getTime() - NOW.getTime()).toBe(CALL_AWAIT_CANCEL_MAX_MS);
+    // A link booking never waits for a hang-up.
+    expect(confirmationRecordFor({ contact, slot: SLOT_A, bookingId: 'b', callRef: 'text-link-c1', cancelled: true, awaitCancel: true, now: NOW }))
+      .toMatchObject({ state: 'due', cancel: 'cancelled' });
     const link = confirmationRecordFor({ contact, slot: SLOT_A, bookingId: 'b', callRef: 'text-link-c1', cancelled: true, now: NOW });
     expect(link).toMatchObject({ by: 'link', state: 'due', due_at: NOW.toISOString() });
     expect(link.call_sid).toBeUndefined();
@@ -212,33 +231,53 @@ describe('the Azul cancel is recorded on the booking (v222)', () => {
     return (await runOn(sid, BOOK_SOONER_TOOL_NAME, { date: '2041-02-04', time: '09:00', city: 'Testville' })) as Record<string, unknown>;
   };
 
-  it('a cancel that landed is azul_cancel cancelled, kept by the timeline', async () => {
+  it('a call booking is azul_cancel held, kept by the timeline; the hang-up writes what it came to on the contact (v224)', async () => {
     const r = await book('CA00000000000000000000000000000231');
-    expect(r).toMatchObject({ success: true, azul_cancel: 'cancelled' });
+    expect(r).toMatchObject({ success: true, azul_cancel: 'held' });
     expect(r).not.toHaveProperty('azul_cancel_reason');
-    expect(kept('CA00000000000000000000000000000231', r)).toMatchObject({ azul_cancel: 'cancelled' });
+    expect(kept('CA00000000000000000000000000000231', r)).toMatchObject({ azul_cancel: 'held' });
+    expect(cancel).not.toHaveBeenCalled();
+    await hangUp();
+    expect(store.heldCancelOf(store.contacts.get('c1')!)).toMatchObject({ state: 'cancelled', booking_id: 'booking-1', by: 'hang_up' });
+    expect(confirmation()).toMatchObject({ booking_id: 'booking-1', state: 'due', cancel: 'cancelled' });
   });
 
-  it('a cancel that did not land is not_cancelled with its own code, kept by the timeline', async () => {
+  it('a cancel that did not land at hang-up is not_cancelled with its own code on the contact, and the text is pending', async () => {
     cancel.mockResolvedValueOnce({ cancelled: false, reason: 'nextgen_timeout' } as AzulCancelResult);
     const r = await book('CA00000000000000000000000000000232');
-    expect(r).toMatchObject({ success: true, azul_cancel: 'not_cancelled', azul_cancel_reason: 'nextgen_timeout' });
-    expect(kept('CA00000000000000000000000000000232', r)).toMatchObject({ azul_cancel: 'not_cancelled', azul_cancel_reason: 'nextgen_timeout' });
+    expect(r).toMatchObject({ success: true, azul_cancel: 'held' });
+    await hangUp();
+    expect(store.heldCancelOf(store.contacts.get('c1')!)).toMatchObject({ state: 'not_cancelled', reason: 'nextgen_timeout' });
+    expect(confirmation()).toMatchObject({ state: 'due', cancel: 'pending' });
+  });
+
+  it('a link booking still cancels at once and is cancelled or not_cancelled', async () => {
+    await store.finishAttempt(attemptId, { status: 'completed' } as never);
+    const contact = (await store.loadCallContact('c1', attemptId))!;
+    const r = await npxBookingPageLane.book({ contact, demo: false, openingId: 'slot-a', callRef: 'text-link-c1', deadline: Date.now() + 36_000 });
+    expect(r).toMatchObject({ ok: true });
+    expect(cancel).toHaveBeenCalledTimes(1);
+    expect(store.heldCancelOf(store.contacts.get('c1')!)).toBeNull();
+    expect(confirmation()).toMatchObject({ by: 'link', state: 'due', cancel: 'cancelled' });
   });
 });
 
 describe('a booking on a call', () => {
   it('queues one confirmation, sends it once the call has ended, and never twice', async () => {
+    // The booking reads the clock the tick does, as one process does.
+    vi.useFakeTimers({ toFake: ['Date'], now: NOW });
     await bookOn('CA00000000000000000000000000000221');
-    expect(confirmation()).toMatchObject({ state: 'due', by: 'call', booking_id: 'booking-1', cancel: 'cancelled' });
+    // v224: it waits for the held Azul cancel, which runs at hang-up.
+    expect(confirmation()).toMatchObject({ state: 'awaiting_cancel', by: 'call', booking_id: 'booking-1', cancel: 'pending' });
 
     // Still on the phone with us: it waits.
     const during = await tick();
     expect(during.sent).toBe(0);
     expect(sent).toEqual([]);
-    expect(confirmation()).toMatchObject({ state: 'retry', reason: 'call_open' });
+    expect(confirmation()).toMatchObject({ state: 'awaiting_cancel' });
 
     await hangUp();
+    expect(confirmation()).toMatchObject({ state: 'due', cancel: 'cancelled' });
     const after = await tick({ now: () => new Date(NOW.getTime() + 2 * 60_000) });
     expect(after.sent).toBe(1);
     expect(sent).toEqual([{ to: PHONE, from: FROM, body: BOOKED_BODY }]);
@@ -247,6 +286,7 @@ describe('a booking on a call', () => {
     const again = await tick({ now: () => new Date(NOW.getTime() + 10 * 60_000) });
     expect(again.sent).toBe(0);
     expect(sent).toHaveLength(1);
+    vi.useRealTimers();
   });
 
   it('the same booking queued again is not sent again; a different booking is', async () => {
@@ -366,13 +406,18 @@ describe.each([
     const params = fileTicket.mock.calls[0][0];
     expect(params.priority).toBe('urgent');
     expect(params.description).toContain('URGENT: they asked to cancel or change the NPX booking booking-1.');
-    expect(params.description).toContain('was cancelled on this call: rebook it if they want it back');
+    // v224: the cancel was held, so asking staff to change it keeps the Azul
+    // appointment: the held cancel is dropped and staff are told not to cancel it.
+    expect(params.description).toContain('was kept (the call did not cancel it): do not cancel it unless they still want the move');
+    expect(params.description).not.toContain('rebook it');
     expect(params.description).toMatch(/^NPX Recall: /);
     expect(String(r.say)).toBe(
-      "I've asked our scheduling team to call you back to change that. Until they call, the new appointment is still booked, and your old one with us has been cancelled.",
+      "I've asked our scheduling team to call you back to change that. Until they call, the new appointment is still booked, and your appointment with us is still on file.",
     );
     expect(confirmation()).toMatchObject({ state: 'held', reason: 'staff_change' });
+    expect(store.heldCancelOf(store.contacts.get('c1')!)).toMatchObject({ state: 'dropped', reason: 'staff_change' });
     await hangUp();
+    expect(cancel).not.toHaveBeenCalled();
     expect((await tick()).sent).toBe(0);
     expect(sent).toEqual([]);
   });
@@ -386,13 +431,15 @@ describe('changes_booking with nothing booked', () => {
   });
 });
 
-describe('the undo line when the Azul cancel did not land', () => {
-  it('tells staff not to cancel the Azul appointment', async () => {
-    cancel.mockResolvedValueOnce({ cancelled: false, reason: 'nextgen_timeout' } as AzulCancelResult);
-    const sid = 'CA00000000000000000000000000000228';
-    await bookOn(sid);
-    const r = (await runOn(sid, STAFF_CALLBACK_TOOL_NAME, { request: 'Keep my old appointment', changes_booking: true })) as Record<string, unknown>;
-    expect(fileTicket.mock.calls[0][0].description).toContain('is still on file: do not cancel it');
-    expect(String(r.say)).toContain('your appointment with us is still on file');
+describe('the undo line for each state of the Azul appointment', () => {
+  const contact = { contactId: 'c1', phone: PHONE, data: DATA } as never;
+  const record = { state: 'held', booking_id: 'b', call_sid: 'CA1', demo: false, appointment_id: 'a', appointment_date: '2041-03-20', person_id: 'p', held_at: '', run_after: '' } as const;
+  it('tells staff not to cancel an Azul appointment the cancel did not reach', () => {
+    const line = bookingChangeLine(contact, { bookingId: 'b', slot: SLOT_A, azul: { kind: 'done', result: { cancelled: false, reason: 'nextgen_timeout' } } });
+    expect(line).toContain('is still on file: do not cancel it');
+  });
+  it('tells staff to check NextGen when the call could not confirm the Azul appointment was kept', () => {
+    const line = bookingChangeLine(contact, { bookingId: 'b', slot: SLOT_A, azul: { kind: 'dropped', record: { ...record }, kept: 'unconfirmed', storeDropPending: true } });
+    expect(line).toContain('was meant to be kept, but the call could not confirm it: check NextGen');
   });
 });

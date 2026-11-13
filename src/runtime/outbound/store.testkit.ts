@@ -11,6 +11,7 @@ import {
   DIALABLE_STATUSES,
   NOT_PLACED,
   CONFIRMATION_FIELD,
+  HELD_CANCEL_FIELD,
   OUTREACH_TEXT_KEY,
   TEXTABLE_STATUSES,
   dncKey,
@@ -26,6 +27,7 @@ import type { SourceContact } from "./campaign";
 import { ChannelDoNotContact, SMS_DNC_SOURCE } from "./channelDnc";
 import type { OutreachTextRecord } from "./outreachText";
 import type { BookingConfirmationRecord } from "./bookingConfirmation";
+import type { HeldAzulCancelRecord } from "./heldAzulCancel";
 
 export interface FakeAttempt {
   id: string;
@@ -464,7 +466,7 @@ export class FakeOutboundStore implements OutboundStore {
 
   private confirmationDue(c: ContactRow, now: Date): boolean {
     const r = this.confirmationOf(c);
-    if (!r || (r.state !== "due" && r.state !== "retry")) return false;
+    if (!r || (r.state !== "due" && r.state !== "retry" && r.state !== "awaiting_cancel")) return false;
     const at = r.retry_after ?? r.due_at;
     return !!at && new Date(at).getTime() <= now.getTime();
   }
@@ -507,8 +509,108 @@ export class FakeOutboundStore implements OutboundStore {
   async holdConfirmation(contactId: string, bookingId: string, reason: string): Promise<boolean> {
     const c = this.contacts.get(contactId);
     const r = c ? this.confirmationOf(c) : null;
-    if (!c || !r || r.booking_id !== bookingId || (r.state !== "due" && r.state !== "retry")) return false;
+    if (!c || !r || r.booking_id !== bookingId || !["due", "retry", "awaiting_cancel"].includes(r.state)) return false;
     this.writeConfirmation(c, { ...r, state: "held", reason });
+    return true;
+  }
+
+  async releaseConfirmation(contactId: string, bookingId: string, cancel: "cancelled" | "pending", now: Date): Promise<boolean> {
+    const c = this.contacts.get(contactId);
+    const r = c ? this.confirmationOf(c) : null;
+    if (!c || !r || r.booking_id !== bookingId || ["claimed", "sent", "unknown"].includes(r.state)) return false;
+    this.writeConfirmation(c, {
+      ...r,
+      cancel,
+      ...(r.state === "awaiting_cancel" ? { state: "due" as const, due_at: now.toISOString() } : {}),
+    });
+    return true;
+  }
+
+  async skipConfirmation(contactId: string, bookingId: string, reason: string): Promise<boolean> {
+    const c = this.contacts.get(contactId);
+    const r = c ? this.confirmationOf(c) : null;
+    if (!c || !r || r.booking_id !== bookingId || !["due", "retry", "awaiting_cancel", "held"].includes(r.state)) return false;
+    this.writeConfirmation(c, { ...r, state: "skipped", reason });
+    return true;
+  }
+
+  // ── The held Azul cancel (v224) ──
+  heldCancelOf(c: ContactRow): HeldAzulCancelRecord | null {
+    const t = c.customData[OUTREACH_TEXT_KEY];
+    if (!t || typeof t !== "object") return null;
+    const r = (t as Record<string, unknown>)[HELD_CANCEL_FIELD];
+    return r && typeof r === "object" ? (r as HeldAzulCancelRecord) : null;
+  }
+
+  private writeHeldCancel(c: ContactRow, record: HeldAzulCancelRecord): void {
+    const t = c.customData[OUTREACH_TEXT_KEY];
+    const base = t && typeof t === "object" ? (t as Record<string, unknown>) : {};
+    c.customData = { ...c.customData, [OUTREACH_TEXT_KEY]: { ...base, [HELD_CANCEL_FIELD]: record } };
+  }
+
+  /** Set to make every held-cancel method throw, as a Hub outage would. */
+  heldCancelStoreDown = false;
+  /** How many held-cancel claims landed, for the "only one runs it" tests. */
+  heldCancelClaims = 0;
+
+  private heldCancelClaimable(r: HeldAzulCancelRecord | null, staleBefore: Date): boolean {
+    if (!r) return false;
+    if (r.state === "held") return true;
+    return r.state === "claimed" && !!r.claimed_at && new Date(r.claimed_at).getTime() <= staleBefore.getTime();
+  }
+
+  async queueHeldCancel(contactId: string, record: HeldAzulCancelRecord): Promise<boolean> {
+    if (this.heldCancelStoreDown) throw new Error("hub unreachable");
+    const c = this.contacts.get(contactId);
+    if (!c) return false;
+    const held = this.heldCancelOf(c);
+    if (held && (held.booking_id === record.booking_id || held.state === "held" || held.state === "claimed")) return false;
+    this.writeHeldCancel(c, { ...record });
+    return true;
+  }
+
+  async heldCancelsDue(campaignId: string, now: Date, staleBefore: Date, limit: number): Promise<ContactRow[]> {
+    if (this.heldCancelStoreDown) throw new Error("hub unreachable");
+    return [...this.contacts.values()]
+      .filter((c) => {
+        if (c.campaignId !== campaignId) return false;
+        const r = this.heldCancelOf(c);
+        if (!r) return false;
+        if (r.state === "held") return new Date(r.run_after).getTime() <= now.getTime();
+        return this.heldCancelClaimable(r, staleBefore);
+      })
+      .slice(0, limit)
+      .map((c) => ({ ...c, customData: { ...c.customData } }));
+  }
+
+  async claimHeldCancel(contactId: string, bookingId: string, now: Date, staleBefore: Date): Promise<ContactRow | null> {
+    if (this.heldCancelStoreDown) throw new Error("hub unreachable");
+    const c = this.contacts.get(contactId);
+    const r = c ? this.heldCancelOf(c) : null;
+    if (!c || !r || r.booking_id !== bookingId || !this.heldCancelClaimable(r, staleBefore)) return null;
+    this.writeHeldCancel(c, { ...r, state: "claimed", claimed_at: now.toISOString() });
+    this.heldCancelClaims += 1;
+    return { ...c, customData: { ...c.customData } };
+  }
+
+  async patchHeldCancel(contactId: string, bookingId: string, patch: Partial<HeldAzulCancelRecord>): Promise<void> {
+    if (this.heldCancelStoreDown) throw new Error("hub unreachable");
+    const c = this.contacts.get(contactId);
+    const r = c ? this.heldCancelOf(c) : null;
+    if (!c || !r || r.booking_id !== bookingId) return;
+    const defined = Object.fromEntries(Object.entries(patch).filter(([, v]) => v !== undefined));
+    this.writeHeldCancel(c, { ...r, ...defined } as HeldAzulCancelRecord);
+  }
+
+  async dropHeldCancel(contactId: string, record: HeldAzulCancelRecord, reason: string, now: Date): Promise<boolean> {
+    if (this.heldCancelStoreDown) throw new Error("hub unreachable");
+    const c = this.contacts.get(contactId);
+    if (!c) return false;
+    const r = this.heldCancelOf(c);
+    const mine = !!r && r.booking_id === record.booking_id;
+    if (mine && r!.state !== "held") return false;
+    if (r && !mine && (r.state === "held" || r.state === "claimed")) return false;
+    this.writeHeldCancel(c, { ...(mine ? r! : record), state: "dropped", reason, done_at: now.toISOString() });
     return true;
   }
 }
