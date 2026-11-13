@@ -340,6 +340,25 @@ describe('opt-outs', () => {
     expect(c.optOut).toMatchObject({ sms: true, voice: false });
     expect(c.result).toBe('opted_out');
   });
+
+  // Codex P2 on #471: a phone can carry a voice and an sms_stop row, and the
+  // headline summed the two channels, so one contact read as 2 opted out.
+  it('counts a contact opted out on both channels once in the headline', () => {
+    const t = buildTracking(
+      {
+        contacts: [
+          contact({ id: 'c1', smsStopAt: TODAY_9AM, voiceOptOutAt: TODAY_9AM, status: 'do_not_call' }),
+          contact({ id: 'c2', smsStopAt: TODAY_9AM }),
+          contact({ id: 'c3' }),
+        ],
+        attempts: [],
+      },
+      { day: 'all', now: NOW },
+    );
+    expect(t.totals.optedOutVoice).toBe(1);
+    expect(t.totals.optedOutSms).toBe(2);
+    expect(t.totals.optedOut).toBe(2);
+  });
 });
 
 describe('the headline result', () => {

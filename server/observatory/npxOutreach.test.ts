@@ -184,6 +184,7 @@ describe('the tracking route', () => {
       linkDobTried: 1,
       bookedByPhone: 1,
       cancelLanded: 1,
+      optedOut: 1,
       optedOutSms: 1,
       // c2 is do_not_call because of its STOP, not a voice opt-out
       optedOutVoice: 0,

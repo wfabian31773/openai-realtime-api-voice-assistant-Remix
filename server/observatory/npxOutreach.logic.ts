@@ -234,6 +234,8 @@ export interface Totals {
   cancelNotLanded: number;
   cancelNotRecorded: number;
   staffTickets: number;
+  /** Contacts that opted out on either channel: one contact with a voice and an SMS STOP row counts once. */
+  optedOut: number;
   optedOutVoice: number;
   optedOutSms: number;
   declined: number;
@@ -580,6 +582,7 @@ export function buildTracking(
     cancelNotLanded: 0,
     cancelNotRecorded: 0,
     staffTickets: 0,
+    optedOut: 0,
     optedOutVoice: 0,
     optedOutSms: 0,
     declined: 0,
@@ -609,8 +612,11 @@ export function buildTracking(
       else totals.cancelNotRecorded++;
     }
     if (happened(t.staff, date)) totals.staffTickets++;
-    if (happened(t.voiceOptOut, date)) totals.optedOutVoice++;
-    if (happened(t.smsStop, date)) totals.optedOutSms++;
+    const voiceOut = happened(t.voiceOptOut, date);
+    const smsOut = happened(t.smsStop, date);
+    if (voiceOut) totals.optedOutVoice++;
+    if (smsOut) totals.optedOutSms++;
+    if (voiceOut || smsOut) totals.optedOut++;
     if (view.status === 'declined' && happened(t.latestCall ?? '', date)) totals.declined++;
     if (view.status === 'wrong_number' && happened(t.latestCall ?? '', date)) totals.wrongNumber++;
 

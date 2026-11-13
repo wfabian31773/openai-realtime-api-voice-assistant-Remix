@@ -94,6 +94,7 @@ export interface Totals {
   cancelNotLanded: number
   cancelNotRecorded: number
   staffTickets: number
+  optedOut: number
   optedOutVoice: number
   optedOutSms: number
   declined: number

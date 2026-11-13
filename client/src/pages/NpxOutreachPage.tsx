@@ -346,7 +346,7 @@ export function NpxOutreachPage() {
               sub={`not landed ${t.cancelNotLanded}, not recorded ${t.cancelNotRecorded}`}
             />
             <Stat label="Staff tickets" value={t.staffTickets} />
-            <Stat label="Opted out" value={t.optedOutVoice + t.optedOutSms} sub={`voice ${t.optedOutVoice}, SMS STOP ${t.optedOutSms}`} />
+            <Stat label="Opted out" value={t.optedOut} sub={`voice ${t.optedOutVoice}, SMS STOP ${t.optedOutSms}`} />
             <Stat label="Declined" value={t.declined} />
             <Stat label="Wrong number" value={t.wrongNumber} />
           </div>

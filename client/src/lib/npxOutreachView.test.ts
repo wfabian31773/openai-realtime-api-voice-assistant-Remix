@@ -246,3 +246,12 @@ describe('the page resolves the jump through jumpStep', () => {
     expect(page).not.toMatch(/setTimeout\(\(\) => document\.getElementById\(`npx-contact-/)
   })
 })
+
+describe('the opted-out headline', () => {
+  it('reads the server\'s count of contacts, not the sum of the two channels', async () => {
+    const { readFileSync } = await import('node:fs')
+    const page = readFileSync(new URL('../pages/NpxOutreachPage.tsx', import.meta.url), 'utf8')
+    expect(page).toContain('label="Opted out" value={t.optedOut}')
+    expect(page).not.toContain('t.optedOutVoice + t.optedOutSms')
+  })
+})
