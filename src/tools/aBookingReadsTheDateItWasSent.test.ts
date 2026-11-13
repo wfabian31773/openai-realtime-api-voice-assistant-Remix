@@ -327,6 +327,19 @@ describe('a date-time names one real moment or books nothing', () => {
     expect(book).not.toHaveBeenCalled();
   });
 
+  it('a date written YYYY-MM-DD with anything after it is unreadable, never its first date', async () => {
+    await twoListsRead();
+    for (const date of ['2041-02-13 or 2041-02-14', '2041-02-13 garbage', '2041-02-13, 2041-02-14']) {
+      book.mockClear();
+      const r = await run(BOOK_SOONER_TOOL_NAME, { date, time: '09:00' });
+      expect(r).toMatchObject({ success: false, received_date: 'unreadable' });
+      expect(r.choices).toEqual(expect.arrayContaining([expect.objectContaining({ date: '2041-02-13', time: '09:00' })]));
+      expect(book).not.toHaveBeenCalled();
+    }
+    expect(readChosenDate('2041-02-13.', [])).toEqual({ day: '2041-02-13', form: 'iso' });
+    expect(readChosenDate('2041-02-13 or 2041-02-14', [])).toEqual({ form: 'unreadable' });
+  });
+
   it('a date-time and a time that agree book, whichever field carries the zone', async () => {
     await twoListsRead();
     const r = await run(BOOK_SOONER_TOOL_NAME, { date: '2041-02-13T17:00:00Z', time: '9:00 AM' });

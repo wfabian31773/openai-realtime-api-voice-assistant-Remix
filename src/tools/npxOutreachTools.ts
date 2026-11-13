@@ -1492,17 +1492,23 @@ export function readChosenDate(
   const dateTime = readIsoDateTime(text);
   if (dateTime === 'unreadable') return { form: 'unreadable' };
   if (dateTime) return { day: dateTime.day, form: 'iso' };
-  const iso = /^(\d{4})-(\d{2})-(\d{2})(?:$|[T\s])/.exec(text);
-  if (iso) return { day: `${iso[1]}-${iso[2]}-${iso[3]}`, form: 'iso' };
-
-  let month = 0;
-  let dayOfMonth = 0;
-  let year = 0;
   // Punctuation that ends a sentence or a list item is not part of a date:
   // "2/13/2042." and "February 13, 2042." carry their year (Codex P1 on
   // #476: the year with a full stop after it was dropped, and the date was
   // read to the offered February 13 a year earlier).
   const bare = text.replace(/[\s.,;:!?)\]]+$/, '');
+  // A date written YYYY-MM-DD is read only when it is the whole answer
+  // (Codex P1 on #476: "2041-02-13 or 2041-02-14" was read as the 13th,
+  // the rest dropped). A date-time was read above; anything else that starts
+  // with an ISO date is unreadable, the closed-set rule the words follow.
+  if (/^\d{4}-\d{2}-\d{2}/.test(bare)) {
+    const iso = /^(\d{4})-(\d{2})-(\d{2})$/.exec(bare);
+    return iso ? { day: `${iso[1]}-${iso[2]}-${iso[3]}`, form: 'iso' } : { form: 'unreadable' };
+  }
+
+  let month = 0;
+  let dayOfMonth = 0;
+  let year = 0;
   const numeric = /^(\d{1,2})[/.-](\d{1,2})(?:[/.-](\d{2}|\d{4}))?$/.exec(bare);
   if (numeric) {
     month = Number(numeric[1]);
