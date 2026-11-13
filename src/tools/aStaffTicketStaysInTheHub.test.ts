@@ -125,6 +125,30 @@ describe('every visit on the campaign stays in the Hub', () => {
     expect(landsIn(payload)).toBe(9);
   });
 
+  // Codex P2 on #467: the event name is a live database value, so a name
+  // NextGen adds later is checked with the same classifier.
+  it.each(['Glasses Check', 'CL Fit', 'Contact Lens Fitting', 'Frame Selection', 'Optical Pickup'])(
+    'a future event name the classifier would route out of the Hub (%s) is written as an appointment',
+    async (event) => {
+      expect(landsIn({ departmentId: 9, description: event })).not.toBe(9);
+      await setUp(event);
+      await run('CA00000000000000000000000000000004', STAFF_CALLBACK_TOOL_NAME, { request: 'wants to reschedule' });
+      const payload = fileTicket.mock.calls[0][0] as { departmentId: number; description: string };
+      expect(payload.description).toContain('Their appointment: An appointment on ');
+      expect(payload.description).not.toContain(event);
+      expect(landsIn(payload)).toBe(9);
+    },
+  );
+
+  it('an event name the classifier keeps in the Hub is written as it is', async () => {
+    expect(landsIn({ departmentId: 9, description: 'Eye Exam' })).toBe(9);
+    await setUp('Eye Exam');
+    await run('CA00000000000000000000000000000005', STAFF_CALLBACK_TOOL_NAME, { request: 'wants to reschedule' });
+    const payload = fileTicket.mock.calls[0][0] as { departmentId: number; description: string };
+    expect(payload.description).toContain('Their appointment: Eye Exam on ');
+    expect(landsIn(payload)).toBe(9);
+  });
+
   it('a contact with no event name still reads as an appointment, with its day, time and office', async () => {
     await setUp('');
     await run('CA00000000000000000000000000000002', STAFF_CALLBACK_TOOL_NAME, { request: 'wants to reschedule' });

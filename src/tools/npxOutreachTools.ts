@@ -78,6 +78,7 @@ import {
 } from '../services/npxOutreachClient';
 import { cancelAzulAppointment, type AzulCancelRequest, type AzulCancelResult } from '../services/outreachAzulCancel';
 import { fold, SCHEDULING } from './queueRouting';
+import { correctSurgeryIntake } from './requestClassification';
 import {
   OPTIONS_PER_SEARCH,
   WEEKDAYS,
@@ -572,12 +573,26 @@ export function currentAppointment(c: OutboundContact): string {
  * Only, Consult, New Patient Exam, Ref+DFE, Diabetic Exam, GLE) carry no word
  * the classifier routes on, and they are what a scheduler sees in NextGen. The
  * caller still hears `spokenVisit`; only the ticket changes.
+ *
+ * The event name comes from the live movable list, so a name NextGen adds
+ * later could carry a word the classifier routes on (a "Glasses Check", a
+ * "CL Fit"). The name is checked with the same classifier, and one that would
+ * take the ticket out of the Hub is written as "An appointment" (Codex P2 on
+ * #467). A name the classifier keeps in the Hub ("Eye Exam") is written as it
+ * is.
  */
 export function staffAppointment(c: OutboundContact): string {
-  const event = field(c, 'event_name').trim() || 'An appointment';
+  const named = field(c, 'event_name').trim();
+  const event = named && staysInTheHub(named) ? named : 'An appointment';
   const clock = spokenClock(field(c, 'begin_time'));
   const office = field(c, 'office');
   return `${event} on ${spokenDay(field(c, 'appointment_date'))}${clock ? ` at ${clock}` : ''}${office ? ` at our ${office} office` : ''}`;
+}
+
+/** Whether a NextGen event name, read alone, keeps a department-9 ticket in the Hub. */
+function staysInTheHub(eventName: string): boolean {
+  const routed = correctSurgeryIntake(eventName, HVA_HUB_DEPARTMENT_ID);
+  return !routed || routed.departmentId === HVA_HUB_DEPARTMENT_ID;
 }
 
 const DOB_ASK = 'Can I please have your date of birth, starting with the month, then the day, then the year?';
