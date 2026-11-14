@@ -397,6 +397,32 @@ describe('one date-of-birth ask per call, whichever tool makes it (Codex P2 on #
     pcpDirector.clear(callId);
   });
 
+  it("PCP-84408: a second patient's records on the same call are asked their own date of birth (Codex P2 on #479, round 3)", async () => {
+    const { agent, callId } = agentFor(B_RECORDS_TOOL[0][1]);
+    ticketing.createTicket.mockClear();
+    ticketing.createPcpTicket.mockClear();
+    await call(agent, tool, { narrative, ...OFFICE });
+    callerAnswers();
+    let r = await call(agent, tool, { narrative, ...PATIENT });
+    expect(r.say).toMatch(/date of birth/i);
+    // The office does not have the first patient's date of birth; the first request files with the gap.
+    callerAnswers();
+    r = await call(agent, tool, { narrative });
+    expect(r.say).toMatch(/fax.*email.*mail/i);
+    callerAnswers();
+    await call(agent, tool, { narrative, recordsDeliveryMethod: 'fax' });
+    callerAnswers();
+    await call(agent, tool, { narrative, recordsDeliveryDestination: '202-555-0199' });
+    const filings = ticketing.createTicket.mock.calls.length + ticketing.createPcpTicket.mock.calls.length;
+    expect(filings, 'the first patient filed').toBeGreaterThan(0);
+    // Then a second patient, same office, same delivery.
+    callerAnswers();
+    r = await call(agent, tool, { narrative, patientFirstName: 'Other', patientLastName: 'Person' });
+    expect(r.say, "the second patient's date of birth is asked").toMatch(/date of birth/i);
+    expect(ticketing.createTicket.mock.calls.length + ticketing.createPcpTicket.mock.calls.length).toBe(filings);
+    pcpDirector.clear(callId);
+  });
+
   it('a sibling inside the batch window does not move on to the delivery question or spend it', async () => {
     const { agent, callId } = agentFor(B_RECORDS_TOOL[4][1]);
     await call(agent, tool, { narrative, ...OFFICE });
