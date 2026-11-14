@@ -195,6 +195,16 @@ describe("recording an outcome on a returned call", () => {
     });
     expect(store.contacts.get("c1")!.status).toBe("voicemail");
   });
+
+  it("refuses voicemail (v230): somebody rang us, so no recording answered", async () => {
+    const { store, call } = await session([{ id: "c1", phone: CALLER, firstName: "Testa", status: "no_answer" }]);
+    await call(IDENTIFY_CALLBACK_TOOL_NAME, { first_name: "Testa" });
+    expect(await call(RECORD_OUTCOME_TOOL_NAME, { outcome: "voicemail" })).toMatchObject({
+      success: false,
+      error: "not_on_a_returned_call",
+    });
+    expect(store.contacts.get("c1")!.status).toBe("no_answer");
+  });
 });
 
 describe("opting out on a returned call", () => {
@@ -220,7 +230,7 @@ describe("opting out on a returned call", () => {
 describe("hanging up a returned call", () => {
   it("is allowed", async () => {
     const { call } = await session([]);
-    expect(await call(END_CALL_TOOL_NAME)).toMatchObject({ success: true, ended: true });
+    expect(await call(END_CALL_TOOL_NAME)).toMatchObject({ success: true, hanging_up: true });
   });
 });
 

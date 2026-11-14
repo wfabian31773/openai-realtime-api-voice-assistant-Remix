@@ -551,6 +551,14 @@ function outboundRuntimeTools(
     ) as unknown as LiveTool[];
   }
   if (!metadata.outbound) return [];
+  // v230: when answering-machine detection misses a voicemail, the agent is
+  // the one talking to it. record_call_outcome's `voicemail` then hands it the
+  // campaign's own approved line and settles the row the way the answer
+  // webhook does: after the policy's gap, or max_attempts once the caps are
+  // spent. An operator call is never re-dialled (the webhook's own rule), so
+  // it carries the line and nothing to schedule.
+  const policy = config.outbound;
+  const operator = Boolean(metadata.operatorCall) || slug === OPERATOR_SLUG;
   return realtimeToolsFor(
     [...RUNTIME_OUTBOUND_TOOLS, ...laneTools],
     {
@@ -559,6 +567,9 @@ function outboundRuntimeTools(
       outbound_campaign: metadata.outbound.campaignKey,
       outbound_attempt_id: metadata.outbound.attemptId,
       outbound_call_sid: metadata.callSid,
+      outbound_voicemail_line: policy.voicemail(),
+      outbound_retry_hours: operator ? undefined : policy.caps.minHoursBetween,
+      outbound_total_cap: operator ? undefined : policy.caps.total,
     },
     telemetry,
   ) as unknown as LiveTool[];
