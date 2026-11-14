@@ -714,6 +714,60 @@ export function greetingConfirmedFirstName(
 }
 
 /**
+ * v234: THE ESCALATION CARRIES THE RECORD THIS CALL CONFIRMED.
+ *
+ * RULE ZERO step 5: once a match is validated, the joined record is carried
+ * into every tool and onto the ticket, and nothing re-asks a field it holds.
+ * `create_ticket` does that through `prepareTicketIdentity`. `escalate_to_human`
+ * never did: its refused-escalation ticket (v80), its urgent transfer record
+ * (v93), the on-call text and the ring-out fallback ticket (both read
+ * `escalationDetailsMap`) took the patient's name and date of birth only from
+ * the model's own arguments, and the identity ask before a transfer (VA-76222)
+ * asked the caller for a last name and date of birth the record held.
+ *
+ * Measured 2026-11-14, no-ivr, the 14 days before, agent tickets on calls whose
+ * `lookup_schedule` came back CONFIRMED: every create_ticket filing (26) and
+ * every after-hours floor ticket (21) carried the record's date of birth, and 5
+ * of the 6 tickets the escalation paths filed carried neither the last name nor
+ * the date of birth (VA-84772, VA-82180, VA-82153 and VA-82158 refused;
+ * VA-82110 the transfer record). The model passed the first name the caller
+ * said yes to and nothing else, because v194 tells it the record holds the
+ * rest.
+ *
+ * The rule is `prepareTicketIdentity`'s, one step narrower: the model must NAME
+ * the confirmed person (their first name, or the first word of a compound first
+ * name the greeting's yes confirmed). An escalation that names nobody is left as
+ * it was, so the identity ask still fires for a caller who may be calling about
+ * someone else, and a different first name, a surname or a date of birth that
+ * disagrees with the record carries nothing (`validatedPatientFor`). A stated
+ * date the record agrees with is kept as stated.
+ */
+export function escalationWithConfirmedRecord<
+  P extends { patient_first_name?: string; patient_last_name?: string; patient_dob?: string },
+>(callSid: string | undefined, confirmed: PatientScheduleContext | undefined, params: P): P {
+  const named = params.patient_first_name?.trim();
+  if (!named) return params;
+  const first =
+    greetingConfirmedFirstName(confirmed, { first_name: named, last_name: params.patient_last_name }) ?? named;
+  const held = validatedPatientFor(callSid, first, params.patient_last_name, params.patient_dob);
+  if (!held) return params;
+  const stated = params.patient_dob?.trim();
+  const statedReads = Boolean(stated && readDobQuietly(stated));
+  const last = params.patient_last_name?.trim() || held.lastName;
+  const dob = statedReads ? stated : isoDobToUs(held.dateOfBirth) ?? params.patient_dob;
+  const carried = [
+    last !== (params.patient_last_name?.trim() || undefined) ? 'last name' : null,
+    dob !== params.patient_dob ? 'date of birth' : null,
+  ].filter(Boolean);
+  if (carried.length > 0) {
+    console.info(
+      `[HANDOFF] the escalation carries the record this call confirmed (${carried.join(', ')}) on ${callSid ?? 'unknown'}`,
+    );
+  }
+  return { ...params, patient_first_name: first, patient_last_name: last, patient_dob: dob };
+}
+
+/**
  * v194: what a CONFIRMED lookup_schedule tells the model, in the model channel.
  *
  * v172 made the caller's yes to the greeting confirm the record, and
@@ -2867,6 +2921,10 @@ PREREQUISITE: one quick ask for name and DOB; transfer even if unavailable. Clin
             'paged again. If there is more to record, call create_ticket. Otherwise stay with the caller.',
         };
       }
+
+      // v234: the record this call confirmed rides on every ticket, text and
+      // identity ask below, as it does on create_ticket.
+      params = escalationWithConfirmedRecord(metadata.callSid, greetingConfirmed, params);
 
       /**
        * THE THREE CASES, ENFORCED SERVER-SIDE.
