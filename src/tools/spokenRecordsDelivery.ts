@@ -39,9 +39,12 @@
  *     the answer, is the method. "Through our portal or through fax" is fax:
  *     portal is not a method, fax is the one they offered that is. Two methods
  *     ("fax or email is fine"), or any "no / not / don't", reads nothing. A
- *     later "Actually, email it instead" outside the question forgets the
- *     method rather than reading the new one, so a switch never leaves the
- *     old method on the ticket and nothing is read outside a window.
+ *     later turn that names the method beside a negation or a correction
+ *     ("Actually, do not fax the records") forgets it, and so does a switch
+ *     said outside the question ("Actually, email it instead"): neither
+ *     reads a new method, so a retraction or a switch never leaves the old
+ *     method on the ticket and nothing is read outside a window. Both err
+ *     toward forgetting; a forgotten method files NOT CAPTURED, as on main.
  *  2. THAT A DESTINATION WAS GIVEN, AND FOR WHICH METHOD. An agent line asking
  *     where to send them, answered in the shape it asked for: a number of
  *     seven digits or more for a fax, an email address for an email, a
@@ -223,13 +226,16 @@ function destinationIn(answer: string, asked: RecordsDeliveryMethod | undefined)
 
 // ------------------------------------------------------------------ the reader
 
+/** A correction: with the stored method named beside it, the method is taken back. */
+const RETRACTS = /\b(actually|rather|change|changed|wrong|mistake|scratch that|never ?mind)\b/;
 /** The caller changing how the records go, outside the method question. */
 const SWITCH = /\b(actually|instead|rather|change|switch|prefer|better)\b|\b(send|email|mail|fax) (it|them|those|these|the records)\b|\bby (email|mail|fax|post)\b/;
 
 /**
  * Everything the record says about how, and whether a destination was given,
- * read in call order. The latest readable method wins, a switch outside the
- * question forgets it, and a destination once given stays given.
+ * read in call order. The latest readable method wins, a retraction or a
+ * switch outside the question forgets it, and a destination once given stays
+ * given.
  */
 export function readRecordsDelivery(lines: readonly string[]): HeardDelivery {
   const turns = parse(lines);
@@ -239,10 +245,15 @@ export function readRecordsDelivery(lines: readonly string[]): HeardDelivery {
   for (let i = 0; i < turns.length; i++) {
     const t = turns[i];
     if (t.role === 'caller') {
+      const named = methodsNamed(t.text);
+      // "Actually, do not fax the records." The stored method named beside a
+      // negation or a correction is forgotten, whatever the caller meant by
+      // it: a method the caller may have taken back is never filed.
+      if (method && named.has(method) && (NEGATION.test(t.text) || RETRACTS.test(t.text))) method = undefined;
       // "Actually, can you email it instead?" Forgotten, not read: the model's
       // own argument decides it. Inside the method question's window the
       // answer has already set the method, so this changes nothing there.
-      if (SWITCH.test(t.text) && [...methodsNamed(t.text)].some((m) => m !== method)) method = undefined;
+      if (SWITCH.test(t.text) && [...named].some((m) => m !== method)) method = undefined;
       continue;
     }
 

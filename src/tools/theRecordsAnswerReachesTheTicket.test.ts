@@ -496,13 +496,19 @@ describe('a destination is never read from the transcript', () => {
     expect(answers[0].send_to_heard).toBe('stated');
   });
 
-  it('the round-3 shape: "Yes, actually that fax number is wrong" files the pointer, never a number', async () => {
-    const { payload } = await replay('CA' + 'd2'.repeat(16), 'VA-232-21', [
+  it('the round-3 shape: "Yes, actually that fax number is wrong" never files a number, and takes the method back too', async () => {
+    const { answers, payload } = await replay('CA' + 'd2'.repeat(16), 'VA-232-21', [
       [...READ_BACK, 'CALLER: Yes, actually that fax number is wrong, the last digit is two.'],
       'file',
+      'file',
     ]);
-    expect(description(payload)).toContain('Send to: given by the caller on the call');
-    for (const n of NUMBER) expect(JSON.stringify(payload), n).not.toContain(n);
+    expect(answers[0].missingFields).toEqual(['delivery_method']);
+    expect(answers[1].success, JSON.stringify(answers[1])).toBe(true);
+    expect(description(payload)).toContain('Delivery: NOT CAPTURED');
+    for (const n of NUMBER) {
+      expect(JSON.stringify(payload), n).not.toContain(n);
+      expect(JSON.stringify(answers), n).not.toContain(n);
+    }
   });
 
   it('the store holds a method and a list of method names, never a destination', () => {
@@ -528,7 +534,8 @@ describe('a method switch outside the question forgets the method', () => {
     expect(answers[1].success, JSON.stringify(answers[1])).toBe(true);
     expect(answers[1].method_heard).toBeUndefined();
     expect(description(payload)).toContain('Delivery: NOT CAPTURED');
-    // A correction word beside the stored method clears it too, whatever it meant: errors land toward clearing.
+    // A negation alone clears it, and so does a correction word, whatever it meant: errors land toward clearing.
+    expect(readRecordsDelivery([METHOD_Q, 'CALLER: Fax.', 'AGENT: Okay.', "CALLER: Please don't fax them, we no longer have one."]).method).toBeUndefined();
     expect(readRecordsDelivery([METHOD_Q, 'CALLER: Fax.', 'AGENT: Okay.', 'CALLER: Actually, fax is fine.']).method).toBeUndefined();
   });
 
@@ -536,6 +543,7 @@ describe('a method switch outside the question forgets the method', () => {
     expect(readRecordsDelivery([METHOD_Q, 'CALLER: Fax.', METHOD_Q, 'CALLER: Fax.']).method).toBe('fax');
     expect(readRecordsDelivery([METHOD_Q, 'CALLER: Fax.', 'AGENT: Okay.', 'CALLER: Fax.']).method).toBe('fax');
     expect(readRecordsDelivery([METHOD_Q, 'CALLER: Fax.', 'AGENT: Okay.', "CALLER: I'd prefer fax, that's better."]).method).toBe('fax');
+    expect(readRecordsDelivery([METHOD_Q, 'CALLER: Fax.', 'AGENT: Anything else?', "CALLER: No, that's all, thank you."]).method).toBe('fax');
   });
 
   it('naming the same method again, or answering the question again, is not a switch away', () => {
