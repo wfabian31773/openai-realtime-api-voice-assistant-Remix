@@ -1815,8 +1815,21 @@ import { callEnvironment } from "./callRecord";
  * to where staff had moved them. Above main's v232 (#482, `cbe56a92`), which
  * it contains along with v230 (#477, `664357cd`). No migration.
  */
+/**
+ * v234 — AN ESCALATION CARRIES THE CONFIRMED RECORD (2026-11-14). On the
+ * after-hours line `escalate_to_human` took the patient's name and date of
+ * birth from the model alone, and the model passes only the first name the
+ * caller said yes to, so the refused-escalation ticket, the urgent transfer
+ * record, the on-call text and the identity ask missed the last name and date
+ * of birth the confirmed record holds (RULE ZERO step 5). 5 of the 6 tickets
+ * the escalation paths filed on confirmed calls in 14 days carried neither.
+ * An escalation that names the confirmed person now takes the record's last
+ * name and date of birth (`escalationWithConfirmedRecord`). Above main's v233
+ * (#481, `0c8b9b77`), which it contains along with v232 (#482, `cbe56a92`)
+ * and v230 (#477, `664357cd`). No migration.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v233-a-visit-that-happened-is-not-a-booking-20261114";
+  "voice-runtime-v234-an-escalation-carries-the-confirmed-record-20261114";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can
