@@ -491,6 +491,56 @@ describe('a later destination replaces a confirmed fax', () => {
   });
 });
 
+describe('each replacement rule on its own', () => {
+  const CONFIRMED_OLD = [
+    METHOD_Q, 'CALLER: Fax.', "AGENT: What's the fax number?", 'CALLER: 2 0 2 5 5 5 0 1 8 3.',
+    'AGENT: Two zero two, five five five, zero one eight three. Did I get that right?', 'CALLER: Yes.',
+  ];
+
+  it('a different number read back and not confirmed, given in pieces too short to read: cleared by the readback alone', () => {
+    const h = readRecordsDelivery([
+      ...CONFIRMED_OLD, 'AGENT: What fax number should we use instead?',
+      'CALLER: 2 0 2.', 'CALLER: 5 5 5.', 'CALLER: 0 1 9 6.',
+      'AGENT: Two zero two, five five five, zero one nine six. Did I get that right?', 'CALLER: One second.',
+    ]);
+    expect(h.fax).toBeUndefined();
+  });
+
+  it('the yes that confirms is not read as a correction, however it is worded', () => {
+    expect(readRecordsDelivery([
+      METHOD_Q, 'CALLER: Fax.', "AGENT: What's the fax number?", 'CALLER: 2 0 2 5 5 5 0 1 8 3.',
+      'AGENT: Two zero two, five five five, zero one eight three. Did I get that right?',
+      "CALLER: Yes, that's the right fax, not the old one.",
+    ]).fax).toBe('2025550183');
+  });
+
+  it('answering the method question again with fax keeps it; a contact email is not a switch', () => {
+    expect(readRecordsDelivery([...CONFIRMED_OLD, METHOD_Q, 'CALLER: Fax, please.']).fax).toBe('2025550183');
+    const h = readRecordsDelivery([...CONFIRMED_OLD,
+      'AGENT: Is there an email we can reach you at?', 'CALLER: My email is T E S T at example dot com.']);
+    expect(h.fax).toBe('2025550183');
+    expect(h.method).toBe('fax');
+  });
+
+  it('a switch with no fax held still forgets the method the caller chose', () => {
+    const h = readRecordsDelivery([METHOD_Q, 'CALLER: Fax.', 'AGENT: Okay.', 'CALLER: Actually, mail them instead.']);
+    expect(h.method).toBeUndefined();
+    expect(readRecordsDelivery([METHOD_Q, 'CALLER: Fax.', 'AGENT: Okay.', 'CALLER: Actually, fax is fine.']).method).toBe('fax');
+  });
+
+  it('a corrected date of birth and a new callback number are not a new fax', () => {
+    expect(readRecordsDelivery([...CONFIRMED_OLD,
+      'AGENT: And the date of birth, starting with the month?', 'CALLER: Actually, 0 1 0 3 1 9 5 0.']).fax).toBe('2025550183');
+    expect(readRecordsDelivery([...CONFIRMED_OLD,
+      'AGENT: Anything else?', 'CALLER: Actually, my cell is 2 0 2 5 5 5 0 1 4 3.']).fax).toBe('2025550183');
+  });
+
+  it('the last seven digits of the same number are the same number; a correction word clears it anyway (the safe direction)', () => {
+    expect(readRecordsDelivery([...CONFIRMED_OLD, 'CALLER: The fax ending 5 5 5 0 1 8 3.']).fax).toBe('2025550183');
+    expect(readRecordsDelivery([...CONFIRMED_OLD, "CALLER: Actually that's fax 5 5 5 0 1 8 3."]).fax).toBeUndefined();
+  });
+});
+
 describe('a caller who switches method after confirming a fax', () => {
   const CONFIRMED = [
     METHOD_Q, 'CALLER: Fax.', "AGENT: What's the fax number?", 'CALLER: 2 0 2 5 5 5 0 1 8 2.',

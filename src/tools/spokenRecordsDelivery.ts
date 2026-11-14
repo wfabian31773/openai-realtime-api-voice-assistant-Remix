@@ -58,6 +58,20 @@
  *     second time, and the ticket points the clerk at the call transcript
  *     instead of "NOT CAPTURED — confirm". Kept per method, so an email
  *     address given for a callback never stands in for a fax number.
+ *  4. A CONFIRMED FAX IS ONLY GOOD UNTIL THE CALLER REPLACES IT (Codex P2 on
+ *     #482). Anything later that puts it in question clears it, and the
+ *     ticket falls back to the transcript pointer until a new number is read
+ *     back and confirmed: a caller turn with a different number in a fax
+ *     context (it names the fax or a correction, or answers a fax or
+ *     destination question; never a callback or date-of-birth answer), a
+ *     caller turn naming the fax with a correction or a negation ("that fax
+ *     number is wrong"), a readback of a different number the caller does not
+ *     confirm, and a switch of method, inside the method question ("Email.")
+ *     or outside it ("Actually, can you email it instead?"). A switch outside
+ *     the question also forgets the method, because nothing is read outside an
+ *     answer window: the model's own argument decides it. Clearing costs a
+ *     confirmed number on the ticket; keeping a replaced one sends a chart to
+ *     the wrong place, so every rule errs toward clearing.
  *
  * PHI: the store holds a method word, ten digits and a method list per call, for
  * 30 minutes, the same lifetime as the date of birth beside it. Nothing here
@@ -196,6 +210,19 @@ const CALLBACK_CONTEXT = /\b(call ?back|callback|reach you|phone number|best num
 const AFFIRMS = /^(?:(?:uh|um|oh|okay|ok|so)\b[\s,.]*)*(yes|yeah|yep|yup|correct|right|exactly|that's (right|correct|it)|that is (right|correct)|si|uh huh|mm hmm)\b/;
 const DENIES = /^(?:(?:uh|um|oh)\b[\s,.]*)*(no|nope|not|wrong|incorrect|that's not|that is not)\b/;
 
+/** A word that takes back or replaces what was said before. */
+const CORRECTION = /\b(actually|instead|rather|different|another|wrong|incorrect|change|changed|correction|update|updated|mistake|scratch that|never ?mind)\b/;
+/** A date of birth asked or given: its digits are not a fax number. */
+const BIRTH_CONTEXT = /\b(date of birth|birth ?date|birthday|born|dob)\b/;
+/** The caller changing how the records go, outside the method question. */
+const SWITCH = /\b(actually|instead|rather|change|switch|prefer|better)\b|\b(send|email|mail|fax) (it|them|those|these|the records)\b|\bby (email|mail|fax|post)\b/;
+
+/** The confirmed fax said again: the same ten digits, or its last seven to nine. */
+function sameNumber(run: string, fax: string): boolean {
+  if (tenDigits(run) === fax) return true;
+  return run.length < 10 && fax.endsWith(run);
+}
+
 // ------------------------------------------------------------- the destination
 
 /**
@@ -267,8 +294,9 @@ function nearestCue(turns: Line[], i: number): RecordsDeliveryMethod | 'callback
 
 /**
  * Everything the record says about how and where, read in call order. The
- * latest readable method wins; the latest confirmed fax wins and a denied fax
- * readback clears it; a destination once given stays given.
+ * latest readable method wins; the latest confirmed fax wins, and anything
+ * later that replaces, corrects or switches away from it clears it (point 4
+ * above); a destination once given stays given.
  */
 export function readRecordsDelivery(lines: readonly string[]): HeardDelivery {
   const turns = parse(lines);
@@ -276,9 +304,35 @@ export function readRecordsDelivery(lines: readonly string[]): HeardDelivery {
   let fax: string | undefined;
   const given = new Set<RecordsDeliveryMethod>();
 
+  // The agent line the current caller turn answers, and the readback that set the fax.
+  let answering = -1;
+  let faxSetBy = -1;
+
   for (let i = 0; i < turns.length; i++) {
     const t = turns[i];
-    if (t.role !== 'agent') continue;
+    if (t.role === 'caller') {
+      const asked = answering >= 0 ? turns[answering].text : '';
+      // A different number where a fax number could be meant replaces the confirmed one.
+      if (fax && !CALLBACK_CONTEXT.test(asked) && !BIRTH_CONTEXT.test(asked) && !BIRTH_CONTEXT.test(t.text)
+        && !(CALLBACK_CONTEXT.test(t.text) && !FAX.test(t.text))) {
+        const replaced = digitRuns(t.text).some((r) => r.length >= 7 && !sameNumber(r, fax!));
+        const faxContext = FAX.test(t.text) || CORRECTION.test(t.text) || FAX.test(asked)
+          || (asksForTheDestination(asked) && destinationAskedFor(asked) !== 'email' && destinationAskedFor(asked) !== 'mail');
+        if (replaced && faxContext) fax = undefined;
+      }
+      // "That fax number is wrong." The yes that confirmed it is not read this way.
+      if (fax && i !== faxSetBy + 1 && FAX.test(t.text) && (CORRECTION.test(t.text) || NEGATION.test(t.text))) {
+        fax = undefined;
+      }
+      // "Actually, can you email it instead?" The method question's own answer is read below.
+      if (!asksForTheMethod(asked) && SWITCH.test(t.text)) {
+        const named = methodsNamed(t.text);
+        if ([...named].some((m) => m !== method)) method = undefined;
+        if ([...named].some((m) => m !== 'fax')) fax = undefined;
+      }
+      continue;
+    }
+    answering = i;
 
     // The caller's turns that answer this agent line, up to the next agent line.
     const answers: string[] = [];
@@ -290,6 +344,8 @@ export function readRecordsDelivery(lines: readonly string[]): HeardDelivery {
       const m = methodInAnswer(answer);
       if (m) method = m;
       else if (m === null) method = undefined;
+      // Any answer to the method question but fax: a fax confirmed earlier is not this method's.
+      if (m !== undefined && m !== 'fax') fax = undefined;
       // "We need them faxed to …": the method and its destination in one answer.
       if (m && destinationIn(answer, m)) given.add(m);
     }
@@ -313,9 +369,13 @@ export function readRecordsDelivery(lines: readonly string[]): HeardDelivery {
         if (EMAIL_SHAPE.test(t.text)) given.add('email');
         else if (number && cue === 'fax') {
           fax = number;
+          faxSetBy = i;
           given.add('fax');
         }
       } else if (DENIES.test(first) && number && cue === 'fax') {
+        fax = undefined;
+      } else if (fax && number && cue === 'fax' && number !== fax) {
+        // A different number read back and not confirmed: neither is safe to file.
         fax = undefined;
       }
     }
