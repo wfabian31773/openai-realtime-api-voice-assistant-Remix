@@ -81,9 +81,10 @@ export function rejectsADate(uttered: string): boolean {
  * a leading "No," (or "Nope,"), set off by punctuation, which corrects what
  * came before ("No, June fourth nineteen forty-four."). Without the comma it
  * is a negation ("No es el tres de junio…"), and that reads nothing. The
- * digit parse is unchanged from main.
+ * digit parse is unchanged from main. The teardown sweep reads the caller's
+ * answering turn with this same rule before it carries a spoken date (v237).
  */
-function wordedAnswerIsRejected(raw: string): boolean {
+export function wordedAnswerIsRejected(raw: string): boolean {
   const rest = withoutALeadingNo(raw);
   if (rejectsADate(rest)) return true;
   return NEGATION.test(foldForRejection(rest));

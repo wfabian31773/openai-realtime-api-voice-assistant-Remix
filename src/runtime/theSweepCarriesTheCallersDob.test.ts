@@ -215,7 +215,8 @@ describe('a date of birth the caller volunteered with no ask is not carried', ()
  * github-actions P2 on #480, head 18c99236). The reader keeps a date the
  * caller rejects with no new one ("That's wrong." after the agent's
  * readback), and the sweep would have filed it where main filed none. Any
- * denial or correction in a caller line after the answering turn now drops
+ * denial or correction in a caller line after the answering turn, or anywhere
+ * in the answering turn but a leading "No," (v206's worded rule), now drops
  * it. Every date here is synthetic.
  */
 describe('a date the caller takes back after answering is not carried', () => {
@@ -249,14 +250,7 @@ describe('a date the caller takes back after answering is not carried', () => {
     expect(callerDobToCarry([...denied, ASK, C('March 4, 1950.')])).toBe('1950-03-04');
   });
 
-  it('a correction inside the answering turn is the answer, not a taking back', () => {
-    expect(callerDobToCarry([GREETING, REQUEST, ASK, C('March 3, 1950. Sorry, I meant March 4, 1950.')])).toBe('1950-03-04');
-    expect(
-      callerDobToCarry([GREETING, REQUEST, ASK, C('March 3, 1950.'), A('Could you give me your date of birth once more?'), C('No, it is March 4, 1950.')]),
-    ).toBe('1950-03-04');
-  });
-
-  it('a denial or a correction in the answering turn, after the date (github-actions P2 on a8cd12a0)', async () => {
+  it('a denial or a correction anywhere in the answering turn (github-actions reviews of a8cd12a0 and 74e5e3dd)', async () => {
     const lines = [GREETING, REQUEST, ASK, C("March 3, 1950. That's wrong, let me check.")];
     expect(dobFromCallerAnswer(lines)).toBe('1950-03-03'); // what the reader alone keeps
     expect(callerDobToCarry(lines)).toBeUndefined();
@@ -268,22 +262,30 @@ describe('a date the caller takes back after answering is not carried', () => {
     expect(String(file.calls[0].staffNote)).not.toContain(CALLER_DOB_NOTE);
 
     const turn = (said: string) => callerDobToCarry([GREETING, REQUEST, ASK, C(said)]);
+    expect(turn("March 3, 1950 but that's wrong.")).toBeUndefined(); // one clause (the review of 74e5e3dd)
     expect(turn("March 3, 1950, that's wrong.")).toBeUndefined();
     expect(turn('March 3, 1950. Wait, let me look at my card.')).toBeUndefined();
     expect(turn("March third, nineteen fifty. No, that isn't it.")).toBeUndefined();
     expect(turn('Marzo 3 de 1950. No, perdón, déjeme ver.')).toBeUndefined();
   });
 
-  it('what the answering turn may say after the date and still carry', () => {
+  it('a correction in the answering turn carries nothing either, the safe side', () => {
+    const turn = (said: string) => callerDobToCarry([GREETING, REQUEST, ASK, C(said)]);
+    expect(turn('March 3, 1950. Sorry, I meant March 4, 1950.')).toBeUndefined();
+    expect(turn('Sorry, I meant March 4, 1950.')).toBeUndefined();
+    expect(turn('March 3, 1950. Sorry, March 3, 1950.')).toBeUndefined();
+    const reAsked = [GREETING, REQUEST, ASK, C('March 3, 1950.'), A('Could you give me your date of birth once more?')];
+    expect(callerDobToCarry([...reAsked, C("No it's March 4 1950.")])).toBeUndefined(); // no punctuation after the "No"
+  });
+
+  it('what the answering turn may say and still carry, a leading "No," included', () => {
     const turn = (said: string) => callerDobToCarry([GREETING, REQUEST, ASK, C(said)]);
     expect(turn('March 3, 1950.')).toBe('1950-03-03');
     expect(turn('March 3, 1950. Thank you.')).toBe('1950-03-03');
     expect(turn('March 3, 1950, and I need a refill.')).toBe('1950-03-03');
     expect(turn('No. My birthday is March 3, 1950.')).toBe('1950-03-03');
-    expect(turn('March 3, 1950. Sorry, March 3, 1950.')).toBe('1950-03-03'); // the date said again ends the turn
-    expect(
-      callerDobToCarry([GREETING, REQUEST, ASK, C('March 3, 1950.'), A('Could you give me your date of birth once more?'), C("No it's March 4 1950.")]),
-    ).toBe('1950-03-04');
+    const reAsked = [GREETING, REQUEST, ASK, C('March 3, 1950.'), A('Could you give me your date of birth once more?')];
+    expect(callerDobToCarry([...reAsked, C('No, it is March 4, 1950.')])).toBe('1950-03-04');
   });
 
   it('what is not a taking back: a denial before the answer, and the agent\'s own words', () => {

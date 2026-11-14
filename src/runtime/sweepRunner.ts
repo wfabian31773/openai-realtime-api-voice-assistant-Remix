@@ -1,5 +1,5 @@
 import { ticketIdentityFields } from '../tools/ticketIdentity';
-import { negatesADate, readDobQuietly, rejectsADate } from '../tools/dobParts';
+import { negatesADate, readDobQuietly, rejectsADate, wordedAnswerIsRejected } from '../tools/dobParts';
 /**
  * RUNNING THE SWEEP AT TEARDOWN — the last thing that happens to a call.
  *
@@ -64,9 +64,9 @@ const CALLER_LINE = "CALLER: ";
  * reads it (`dobFromCallerAnswer`), and nothing when the caller denies or
  * corrects it afterwards (`rejectsADate`, `negatesADate`: "That's wrong.",
  * "No, that is wrong, let me check.", "Sorry, I meant…", "It's not…"),
- * either later in the answering turn (`takenBackAfterTheDate`, github-actions
- * P2 on #480, head `a8cd12a0`) or in any later caller line (github-actions P2
- * on #480, head `18c99236`). The reader keeps a date the caller rejects with
+ * either anywhere in the answering turn (`theAnsweringTurnTakesItBack`,
+ * github-actions reviews of #480, heads `a8cd12a0` and `74e5e3dd`) or in any
+ * later caller line (github-actions P2 on #480, head `18c99236`). The reader keeps a date the caller rejects with
  * no new one; the sweep would then file a date the caller said was wrong
  * where `main` filed none. The guard is coarse on purpose: over the 14 days to
  * 2026-11-14, 43 swept no-date-of-birth calls had an answer to the ask, none
@@ -93,7 +93,7 @@ export function callerDobToCarry(lines: readonly string[]): string | undefined {
     }
     before = now;
   });
-  if (takenBackAfterTheDate((lines[answeredAt] ?? "").slice(CALLER_LINE.length), said)) return undefined;
+  if (theAnsweringTurnTakesItBack((lines[answeredAt] ?? "").slice(CALLER_LINE.length))) return undefined;
   const takenBack = lines.slice(answeredAt + 1).some((line) => {
     if (!line.startsWith(CALLER_LINE)) return false;
     return deniesOrCorrects(line.slice(CALLER_LINE.length));
@@ -105,46 +105,21 @@ function deniesOrCorrects(uttered: string): boolean {
   return rejectsADate(uttered) || negatesADate(uttered);
 }
 
-/** A clause ends at a full stop, a question mark, an exclamation, a comma or a semicolon. */
-const CLAUSE_END = /(?<=[.!?,;])\s+/;
-/** The most clauses one spoken date is read across ("March 3," "1950,"). */
-const DATE_CLAUSES = 4;
-
 /**
- * v237: A DENIAL IN THE ANSWERING TURN, AFTER THE DATE (github-actions P2 on
- * #480, head `a8cd12a0`). "March 3, 1950. That's wrong, let me check." is one
- * caller turn, and the reader keeps the date. The turn is cut into clauses,
- * and any denial, negation or correction after the clause where the date
- * ends takes it back. The date ends at the last clause its reading needs: a
- * run of clauses ending there reads as the date and the same run without it
- * does not. The digit parse reads a date out of a longer run whatever follows
- * it, so the last run that still reads is not the place. A correction BEFORE
- * the date is the answer ("Sorry, I meant March 4, 1950.", "No, it is March
- * 4, 1950."), as the reader decides. When no run reads as the date (the
- * reader put it together another way), the whole turn is read, which can
- * only carry less.
+ * v237: ANY DENIAL IN THE ANSWERING TURN (github-actions reviews of #480,
+ * heads `a8cd12a0` and `74e5e3dd`). "March 3, 1950. That's wrong, let me
+ * check." and "March 3, 1950 but that's wrong." are one caller turn each, and
+ * the reader keeps the date. The answering turn is read with the rule v206's
+ * worded parser already uses (`wordedAnswerIsRejected`): any rejection,
+ * negation or correction word anywhere in it takes the date back, and the one
+ * exception is a leading "No," set off by punctuation, which answers the
+ * question before it ("No, it is March 4, 1950."). So "Sorry, I meant March
+ * 4, 1950." carries nothing either, which is the safe side: over the 14 days
+ * to 2026-11-14, 2 of the 43 answering turns carried such a word, both
+ * already taken back by a later line, and none of the 6 corpus rescues did.
  */
-function takenBackAfterTheDate(uttered: string, said: string): boolean {
-  const clauses = uttered.split(CLAUSE_END);
-  const readsAs = (start: number, end: number): boolean => {
-    if (end < start) return false;
-    const read = readDobQuietly(clauses.slice(start, end + 1).join(" "));
-    return !!read && `${read.year}-${read.month}-${read.day}` === said;
-  };
-  // The date ends at a clause the reading needs: the run up to it reads as
-  // the date and the same run without it does not. A run that reads only
-  // because it still holds the date ("March 3, 1950. That's wrong,") is not
-  // where the date ends.
-  let dateEnds = -1;
-  clauses.forEach((_, end) => {
-    for (let start = end; start >= Math.max(0, end - DATE_CLAUSES + 1); start--) {
-      if (readsAs(start, end) && !readsAs(start, end - 1)) {
-        dateEnds = end;
-        return;
-      }
-    }
-  });
-  return clauses.slice(dateEnds + 1).some(deniesOrCorrects);
+function theAnsweringTurnTakesItBack(uttered: string): boolean {
+  return wordedAnswerIsRejected(uttered);
 }
 import { findByPhone } from "../services/patientVerification";
 
