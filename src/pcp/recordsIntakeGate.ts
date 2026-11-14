@@ -151,14 +151,12 @@ export function dobAskSpentByTheIntake(state: PcpConversationState): boolean {
 }
 
 /**
- * The date of birth, when it was asked of this patient and not given — for the
- * ticket's gap note (v235). Either tool's ask is on the director's count (the
- * gate's through `noteDobAskedByTheRecordsGate`), and a new patient resets it.
+ * The date of birth missing when the request files — for the ticket's gap note
+ * (v235). The gate asks it of every patient before it lets a request file, so
+ * reaching the filing without one means it was asked and not given.
  */
 export function recordsDobGap(state: PcpConversationState): string | undefined {
-  return !state.patientDob && dobAskSpentByTheIntake(state)
-    ? "NOT CAPTURED ON THE CALL: the patient's date of birth."
-    : undefined;
+  return state.patientDob ? undefined : "NOT CAPTURED ON THE CALL: the patient's date of birth.";
 }
 
 /** The identity fields still missing once the asking is over, for the ticket's gap note. */
