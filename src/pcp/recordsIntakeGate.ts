@@ -61,8 +61,16 @@ export interface RecordsAsk {
   spends: boolean;
 }
 
-/** Every field still missing, in the order they are asked. */
-export function recordsFieldsMissing(state: PcpConversationState): Array<{ field: RecordsAskField; prompt: string }> {
+/**
+ * Every field still missing, in the order they are asked. `asked` is this
+ * gate's own asks on the call: a date of birth this gate asked is decided by
+ * them (the same question inside the batch window, not asked again after it),
+ * never as an ask the intake spent.
+ */
+export function recordsFieldsMissing(
+  state: PcpConversationState,
+  asked: ReadonlyMap<string, number> = new Map(),
+): Array<{ field: RecordsAskField; prompt: string }> {
   const missing: Array<{ field: RecordsAskField; prompt: string }> = [];
   for (const field of ticketReadiness(state, 0, true).blocking) {
     missing.push({ field, prompt: REQUIRED_PROMPTS[field] ?? `Please provide ${field}.` });
@@ -74,7 +82,7 @@ export function recordsFieldsMissing(state: PcpConversationState): Array<{ field
    * birth nobody asked for. Asked once, like every field here, and of the
    * patient themselves in their own words.
    */
-  if (!state.patientDob && !dobAskSpentByTheIntake(state)) {
+  if (!state.patientDob && (asked.has('patientDob') || !dobAskSpentByTheIntake(state))) {
     missing.push({ field: 'patientDob', prompt: state.callerIsThePatient ? OWN_DOB_PROMPT : PROMPTS.patientDob! });
   }
   // The delivery ask is sequential (method, then the destination it needs),
@@ -106,7 +114,7 @@ export function recordsAskFor(
   asked: ReadonlyMap<string, number>,
   now: number,
 ): RecordsAsk | null {
-  for (const { field, prompt } of recordsFieldsMissing(state)) {
+  for (const { field, prompt } of recordsFieldsMissing(state, asked)) {
     const key = recordsAskKey(field, state);
     const at = asked.get(key);
     if (at === undefined) return { field, key, prompt, spends: true };
@@ -122,7 +130,11 @@ export function recordsAskFor(
  * (`record_pcp_intake`) and this gate are two places that can ask it. When the
  * intake has spent the ask and the caller could not give it, this gate does
  * not ask again; and the gate's own ask is charged to the intake's count by
- * the records tool, so the intake does not ask after it either.
+ * the records tool, so the intake does not ask after it either. That charge
+ * does not make the gate's own ask read as the intake's: a date of birth this
+ * gate asked is decided by its own `asked` map, so a sibling call inside the
+ * batch window gets the same question and spends nothing (Codex P2 on #479,
+ * round 2).
  */
 export function dobAskSpentByTheIntake(state: PcpConversationState): boolean {
   return (state.askCounts?.patientDob ?? 0) >= askBudgetFor('patientDob');

@@ -375,6 +375,42 @@ describe('one date-of-birth ask per call, whichever tool makes it (Codex P2 on #
     expect(intake.nextQuestion?.field).not.toBe('patientDob');
     pcpDirector.clear(callId);
   });
+
+  it('PCP-84763: a sibling call inside the batch window gets the same date-of-birth question and files nothing (Codex P2 on #479, round 2)', async () => {
+    const { agent, callId } = agentFor(B_RECORDS_TOOL[4][1]);
+    ticketing.createTicket.mockClear();
+    ticketing.createPcpTicket.mockClear();
+    await call(agent, tool, { narrative, ...OFFICE });
+    callerAnswers();
+    const first = await call(agent, tool, { narrative, ...PATIENT });
+    expect(first.say).toMatch(/date of birth/i);
+    // The model's own batch, no caller turn between: everything else complete.
+    const sibling = await call(agent, tool, {
+      narrative,
+      recordsDeliveryMethod: 'fax',
+      recordsDeliveryDestination: '202-555-0199',
+    });
+    expect(sibling.say).toBe(first.say);
+    expect(ticketing.createTicket).not.toHaveBeenCalled();
+    expect(ticketing.createPcpTicket).not.toHaveBeenCalled();
+    pcpDirector.clear(callId);
+  });
+
+  it('a sibling inside the batch window does not move on to the delivery question or spend it', async () => {
+    const { agent, callId } = agentFor(B_RECORDS_TOOL[4][1]);
+    await call(agent, tool, { narrative, ...OFFICE });
+    callerAnswers();
+    const first = await call(agent, tool, { narrative, ...PATIENT });
+    expect(first.say).toMatch(/date of birth/i);
+    const sibling = await call(agent, tool, { narrative });
+    expect(sibling.say).toBe(first.say);
+    expect(sibling.say).not.toMatch(/fax.*email.*mail/i);
+    // The caller cannot give it. The delivery question is asked now, once, not spent by the sibling.
+    callerAnswers();
+    const next = await call(agent, tool, { narrative });
+    expect(next.say).toMatch(/fax.*email.*mail/i);
+    pcpDirector.clear(callId);
+  });
 });
 
 describe('C: a purpose that may transfer asks only when the caller is not headed for a person', () => {
