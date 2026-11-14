@@ -172,3 +172,52 @@ describe('CONTROLS — each part of the rule', () => {
     expect(schedulingWordsReportAVisit('Needs a refill of her drops.', TECH)).toBe(false);
   });
 });
+
+describe('Codex P2 on #481 — a visit that did NOT happen is not a report, and a new date is an ask', () => {
+  // Synthetic. On head 094ca19 each of these stayed in Technicians or Optical.
+  const STILL_THE_HUB: Array<[string, number]> = [
+    ['Her appointment has not been rescheduled. She is out of drops and is calling to get a new date.', TECH],
+    ["Her appointment hasn't been rescheduled yet and she is out of her drops.", TECH],
+    ["She wasn't seen today and her drops are not at the pharmacy.", TECH],
+    ['She was not seen today and needs a refill of her drops.', TECH],
+    ['Her glasses are not ready and she never had an eye exam.', OPTICAL],
+    ['She did not have an eye exam and wants to know about her glasses.', OPTICAL],
+  ];
+  for (const [words, line] of STILL_THE_HUB) {
+    it(`files to the Hub: ${words}`, () => {
+      expect(filedIn(words, line)).toBe(HUB);
+    });
+  }
+  it('"get a new date" and "a new appointment date" ask for a visit', () => {
+    expect(filedIn('Her visit was rescheduled, she is out of her drops and wants to get a new date.', TECH)).toBe(HUB);
+    expect(filedIn('Her visit was rescheduled; she needs a new appointment date and a refill of her drops.', TECH)).toBe(HUB);
+  });
+  it('a negation in an earlier sentence does not reach the cue', () => {
+    expect(filedIn('She does not remember the drug name. She was seen today and the drops are not at the pharmacy.', TECH)).toBe(TECH);
+    expect(filedIn('Did not get them. She was seen today and the drops are not at the pharmacy.', TECH)).toBe(TECH);
+  });
+});
+
+describe('Codex P2 on #481 (inline) — a completed reschedule followed by an ask to act on the visit again', () => {
+  // Synthetic. On head 094ca19 each of these stayed in Technicians or Optical.
+  const ASKS_AGAIN: Array<[string, number]> = [
+    ['Her appointment was rescheduled, but she wants it moved again and also needs drops.', TECH],
+    ['Her appointment was rescheduled and she needs to reschedule it; she also needs a refill of her drops.', TECH],
+    ['Her visit was rescheduled, she wants to cancel that, and her drops are not at the pharmacy.', TECH],
+    ['Her appointment was rescheduled and she wants it changed; she is also out of her drops.', TECH],
+    ['Her visit was rescheduled and she wants to confirm it. Her glasses are not ready.', OPTICAL],
+    ['Her visit was rescheduled; she needs a new appointment and her drops are not at the pharmacy.', TECH],
+    // Only "again" asks here.
+    ['Her visit was rescheduled and she wants to come in again; she is also out of her drops.', TECH],
+    // Only "new appointment" asks here.
+    ['Her visit was rescheduled and she is asking about the new appointment; her drops are not at the pharmacy.', TECH],
+  ];
+  for (const [words, line] of ASKS_AGAIN) {
+    it(`files to the Hub: ${words}`, () => {
+      expect(filedIn(words, line)).toBe(HUB);
+    });
+  }
+  it('a pronoun that is not about a visit does not keep the Hub', () => {
+    expect(filedIn('Her visit was rescheduled and she needs a refill of her drops; the pharmacy has it on hold.', TECH)).toBe(TECH);
+  });
+});

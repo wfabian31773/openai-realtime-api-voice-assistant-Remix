@@ -333,6 +333,15 @@ const EYEWEAR = /\b(?:glasses|eyeglass(?:es)?|spectacles|frames?|lens|lenses|con
  */
 const EXAM_IN_THE_PAST =
   /\b(?:had|after|from|since|following|during|at)\s+(?:(?:an?|the|my|her|his|their|your|last|recent|most|previous|prior|latest|recently)\s+){0,3}$/;
+/**
+ * Codex P2 on #481. A negation within four words before a visit cue, in the
+ * same clause ("never had an eye exam", "has not been rescheduled", "wasn't
+ * seen today"), says the visit did NOT happen, so it reports nothing and the
+ * scheduling redirect stands. Read by `examAlreadyHappened` and by
+ * `schedulingWordsReportAVisit`. A negation that is not about the visit errs
+ * toward the Hub, which is where `main` sends these.
+ */
+const NEGATED_BEFORE = /(?:\b(?:not|never|no)|n['\u2019]t)(?:\s+[^\s.,;:!?]+){0,4}\s+$/;
 const ASKS_FOR_A_VISIT =
   /\b(?:wants?|needs?|would like|requesting|requests?|book|schedul\w*|set up|make|get)\s+(?:(?:an?|another|new|the|my|her|his|their|eye|a new|routine|annual)\s+){0,3}(?:eye exam|exam|appointment|appt|visit|check[- ]?up)\b/;
 
@@ -345,7 +354,8 @@ export function examAlreadyHappened(text: string): boolean {
   for (const name of names) {
     let at = t.indexOf(name);
     while (at !== -1) {
-      if (!EXAM_IN_THE_PAST.test(t.slice(0, at))) return false;
+      const before = t.slice(0, at);
+      if (!EXAM_IN_THE_PAST.test(before) || NEGATED_BEFORE.test(before)) return false;
       at = t.indexOf(name, at + name.length);
     }
   }
@@ -388,8 +398,25 @@ const THEN_A_CALLBACK = /^\s*(?:call[- ]?backs?|calls?|phone calls?|return calls
 const THEN_EYEWEAR = /^\s*(?:glasses|eyeglass(?:es)?|lenses|prescriptions?|rx)\b/;
 /** A drug by its kind, where the request names no brand the cue lists know ("her drops"). */
 const A_DRUG = /\b(?:drops|ointments?|antibiotics?|steroids?|gotas)\b/;
+/**
+ * Codex P2s on #481. A visit that did NOT happen is not a report
+ * (`NEGATED_BEFORE`, read first in `reportsAVisit`). And an ask to act on a
+ * visit again or anew, in words neither visit-ask pattern lists, keeps the Hub: "again" anywhere, a visit verb on a pronoun
+ * ("wants it moved", "reschedule it", "cancel that"), or a new date, time or
+ * appointment ("get a new date"). When in doubt the Hub stands, as on `main`.
+ */
+const ACTS_ON_A_VISIT_AGAIN = new RegExp(
+  [
+    '\\bagain\\b',
+    '\\b(?:move[ds]?|moving|change[ds]?|changing|reschedul\\w*|cancel\\w*|confirm\\w*|postpon\\w*|push(?:ed|es|ing)?|book\\w*|schedul\\w*)\\s+(?:it|them|that)\\b',
+    '\\b(?:it|them|that)\\s+(?:moved|changed|rescheduled|cancell?ed|confirmed|postponed|pushed back|booked)\\b',
+    '\\bnew\\s+(?:(?:appointment|appt|visit|exam|follow[- ]?up)\\s+)?(?:dates?|times?|days?)\\b',
+    '\\bnew\\s+(?:appointments?|appts?|visits?)\\b',
+  ].join('|'),
+);
 
 function reportsAVisit(cue: string, before: string, after: string): boolean {
+  if (NEGATED_BEFORE.test(before)) return false;
   if (EXAM_NAME_CUES.map(fold).includes(cue)) return EXAM_IN_THE_PAST.test(before) || THEN_EYEWEAR.test(after);
   if (cue === 'seen today') return SEEN_IN_THE_PAST.test(before);
   if (cue === 'same day' || cue === 'same-day') return THEN_A_CALLBACK.test(after);
@@ -401,7 +428,7 @@ export function schedulingWordsReportAVisit(text: string, homeDepartmentId: numb
   if (homeDepartmentId !== OPTICAL && homeDepartmentId !== TECH) return false;
   const t = fold(text);
   if (!EYEWEAR.test(t) && !hit(t, TECH_CUES) && !A_DRUG.test(t)) return false;
-  if (ASKS_FOR_A_VISIT.test(t) || hasSeparateAppointmentAsk(t)) return false;
+  if (ASKS_FOR_A_VISIT.test(t) || hasSeparateAppointmentAsk(t) || ACTS_ON_A_VISIT_AGAIN.test(t)) return false;
   const fired = SCHEDULING.flatMap((s) => s.cues).map(fold).filter((c) => t.includes(c));
   if (!fired.length) return false;
   for (const cue of fired) {
