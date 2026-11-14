@@ -709,21 +709,6 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
    */
   let preTransferAskUsed = false;
   /**
-   * A TRANSFER IS WAITING FOR A DURABLE TICKET SO IT CAN DIAL.
-   *
-   * Server-owned, per call, and the model can neither set nor clear it — which
-   * is the whole reason it exists rather than a read of `create_pcp_task`'s
-   * `disposition` argument (Codex P1, PR #298; the long note on
-   * `fileSchedulingToHub`'s parameter has the chain).
-   *
-   * Set when `handoff_to_pcp` refuses `durable_ticket_required_before_handoff`
-   * because its OWN ticket write failed with nothing yet on record — the one
-   * refusal that tells the model to file and come back. Cleared the moment the
-   * caller declines the queue, because then no dial is coming and their
-   * scheduling request is an ordinary filing again.
-   */
-  let transferAwaitingTicket = false;
-  /**
    * THE QUEUE CHOICE HAS BEEN PUT TO THIS CALLER, once, in words.
    *
    * A latch and not a parameter read, because it is what makes an acceptance
@@ -1212,8 +1197,10 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
         if (toMedicalRecords) return toMedicalRecords as never;
 
         // A patient can retain a scheduling purpose alongside the patient
-        // latch. Honor that stated intent just as the professional Hub route
-        // does, before eyewear cues in the summary; keep the surgery exception.
+        // latch. Honor that stated intent (v128) before eyewear cues in the
+        // summary; keep the surgery exception. The HVA Hub keeps these: of 57
+        // in the 14 days to 2026-11-14 it moved 4, 1 of them to PCP Support.
+        // Only the professional route stays in PCP Support (v236).
         const schedulingIntent = STATED_SCHEDULING_INTENT[state.callPurpose];
         const redirect = (schedulingIntent
           ? schedulingRedirectForStatedIntent(schedulingIntent, narrative, PCP_DEPARTMENT_ID)
@@ -1398,26 +1385,23 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
       if (toMedicalRecords) return toMedicalRecords as never;
 
       /**
-       * AFTER RECORDS, BEFORE THE PCP TICKET. Both halves of that are chosen.
+       * PCP-LINE SCHEDULING STAYS IN PCP SUPPORT. v236, operator 2026-11-14:
+       * "Keep in PCP Support." A professional's schedule, reschedule or
+       * cancel request files here, on the PCP endpoint, like every other
+       * request from an office. Since v17 it had gone to the HVA Hub
+       * (department 9), and over the 14 days to 2026-11-14 the Hub sent 200
+       * of the 202 back to PCP Support, every move by a staffer.
        *
-       * Records first because it is the narrower claim — a chart request that
-       * happens to mention an appointment is still a chart request, and
-       * Medical Records is a statutory destination where the Hub is an
-       * operational one. Before `submitPcpTicket` because that is the floor
-       * this route falls back to; see `fileSchedulingToHub`.
+       * The line those tickets carried about whose callback number it is
+       * (v67) comes with them, so a staffer still knows when the number is
+       * only the office's caller ID. It goes on every filing, a re-file
+       * included, as the delivery and gap notes do, and reads the number as
+       * it stands now.
        */
-      const toSchedulingHub: HubRouteOutcome = enrichingTheTicket
-        ? { filed: null }
-        : await fileSchedulingToHub(
-            callId, metadata, state, narrative, disposition, urgency, missing, transferAwaitingTicket,
-          );
-      if (toSchedulingHub.filed) return toSchedulingHub.filed as never;
-      // Set when the Hub's answer was AMBIGUOUS — see the note on that branch;
-      // a proven 4xx carries nothing, because warning a staffer about a
-      // duplicate that cannot exist is noise — and, since v200, when the
-      // request was kept here because no patient was named.
-      if (toSchedulingHub.pcpNote) narrative = `${narrative}\n\n${toSchedulingHub.pcpNote}`;
-
+      if (state.callPurpose && STATED_SCHEDULING_INTENT[state.callPurpose]) {
+        const provenance = callbackProvenanceNote(state, metadata.callerPhone);
+        if (provenance) narrative = `${narrative}\n\n${provenance}`;
+      }
       if (isRecordsRequest(state, recordsByNarrative)) narrative = `${narrative}${ticketDeliveryNote(state)}`;
       const response = await submitPcpTicket(
         buildPayload(metadata, state, disposition, narrative, urgency, undefined, failureInformation, missing),
@@ -1691,9 +1675,6 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
         return refusePcp('queue_choice', { say: QUEUE_CHOICE_WARNING });
       }
       if (choice === 'declined') {
-        // No dial is coming. Their request is an ordinary filing again, so it
-        // may route like one.
-        transferAwaitingTicket = false;
         // A LATCH, not `setCallerChoseTheQueue(false)`. That one is reversible
         // because it is withdrawn when a dial fails; this records that the
         // caller said no, which does not stop being true. It is what puts
@@ -1878,10 +1859,8 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
         return refusePcp('durable_ticket_required_before_handoff');
       }
       if (initial && !initial.success && !requestIsOnRecord) {
-        // The dial is coming back the moment something durable exists, so the
-        // filing the model is about to make belongs on the PCP endpoint with
-        // the handoff columns — not routed to another department's queue.
-        transferAwaitingTicket = true;
+        // The dial is coming back the moment something durable exists; the
+        // filing the model makes next lands on the PCP endpoint.
         return refusePcp('durable_ticket_required_before_handoff');
       }
       if (initial && !initial.success) {
@@ -2640,50 +2619,32 @@ function alreadyFiledOnThisCall(callId: string, ticketNumber: string | undefined
 }
 
 /**
- * A SCHEDULING REQUEST REACHES THE TEAM THAT SCHEDULES — standing instruction
- * 10, 2026-08-13: "anything that's schedule related that comes through any of
- * these should go to the HVA hub."
+ * WHOSE CALLBACK NUMBER, AND WHETHER ANYBODY VOUCHED FOR IT (v67), for a
+ * scheduling request kept in PCP Support (v236).
  *
- * PCP was the one queue it had never come through. The four lane agents route
- * on `detectCrossQueue`, and on this line that call sits inside
- * `create_pcp_task`'s `patient_caller || callerIsThePatient` branch, so a
- * PROFESSIONAL's scheduling request never passed it. Everything else files
- * through `/api/voice-agent/pcp-ticket`, which is pinned to department 18
- * server-side.
+ * On 2026-09-17 a staffer rang the number on one of these tickets and closed
+ * it "Processed callback but line is unavailable... little to no information
+ * provided": the number was the caller's ANI, which on a clinic PBX is a
+ * trunk, and nothing on the ticket said it was unverified.
  *
- * MEASURED BEFORE THIS, over all 217 PCP tickets on 2026-09-14: **75 carry one
- * of the three scheduling slugs and ZERO have ever reached department 9.** 56
- * of them attempted a transfer instead and 10 connected — so the request was
- * neither scheduled by a human nor filed with the schedulers.
- *
- * IT ROUTES ON THE STATED SLUG, NOT THE PROSE, and that is deliberate twice
- * over:
- *
- *   IT SEES MORE. 25 of the 75 contain no scheduling cue at all — the intake
- *   captured the purpose as an enum and the narrative summarised around it.
- *   Prose alone leaves a third of them behind.
- *
- *   IT CANNOT FIRE ON AN EMPLOYER. `detectCrossQueue` is NOT called here, and
- *   that is a guard rather than an omission: `'surgery center'` in its cue
- *   list routed a Loma Linda Surgery Center caller's ticket to department 2 on
- *   2026-09-08 (CAbf717457), which is still open. Running the full classifier
- *   over a professional's narrative would adopt that defect on this lane for
- *   subjects nobody asked me to reroute. The narrative is read for ONE thing —
- *   the surgery exception — inside `schedulingRedirectForStatedIntent`.
- *
- * THE PCP TICKET IS THE FLOOR. A declined route, a refused POST, anything but
- * a ticket number back, and this returns null so `submitPcpTicket` files as it
- * always did. Losing the request is the one outcome this must never produce —
- * the guard on this change is that PCP requests filing NOWHERE must not rise.
- * A failed POST creates nothing, so falling through cannot duplicate; the one
- * narrow case it could is a success carrying no ticket number, and a possible
- * duplicate the hub can close beats a request nobody holds.
+ * The value and its label are resolved together (Codex P2 on #326): a caller
+ * ID that is the word "anonymous" is never taken as a number, and a fallback
+ * to caller ID is caller ID whatever the seed flag says.
  */
-/** What a scheduling ticket kept in PCP Support says about why. v200. */
-export const SCHEDULING_KEPT_FOR_NO_PATIENT_NOTE =
-  '[Scheduling request kept in PCP Support: no patient name was captured on the call, and the '
-  + 'HVA Hub cannot book without one. Get the patient\'s name and date of birth from the '
-  + 'requesting office, then move this to the HVA Hub.]';
+export function callbackProvenanceNote(state: PcpConversationState, callerPhone: string | undefined): string | null {
+  const statedCallback = String(state.callbackNumber ?? '').trim();
+  const callback = statedCallback || (isDialableAni(callerPhone) ? callerPhone! : '');
+  if (!callback) return null;
+  // Falling back to the ANI IS caller ID and nothing more. Only a number that
+  // reached `state.callbackNumber` can have been vouched for, and there the
+  // flag is the honest answer.
+  const callbackIsCallerIdOnly = statedCallback ? state.callbackFromCallerIdOnly === true : true;
+  return `Callback ${callback} reaches the requesting office, not the patient.`
+    + (callbackIsCallerIdOnly
+      ? ' UNVERIFIED — this is the inbound caller ID, not a number the caller gave;'
+        + ' if it does not answer, ask them for a direct line.'
+      : ' Given by the caller.');
+}
 
 /** A YYYY-MM-DD date of birth as the create-ticket birth columns, or nothing. */
 export function dobColumns(dob: unknown): { patientBirthMonth?: string; patientBirthDay?: string; patientBirthYear?: string } {
@@ -2692,274 +2653,12 @@ export function dobColumns(dob: unknown): { patientBirthMonth?: string; patientB
   return { patientBirthYear: m[1], patientBirthMonth: m[2], patientBirthDay: m[3] };
 }
 
+/** The scheduling purposes: a patient's routes to the HVA Hub on it (v128); a professional's stays in PCP Support and carries the callback note (v236). */
 const STATED_SCHEDULING_INTENT: Partial<Record<PcpCallPurposeSlug, StatedSchedulingIntent>> = {
   schedule_appointment: 'new',
   reschedule_appointment: 'reschedule',
   cancel_appointment: 'cancel',
 };
-
-/**
- * What the route did. `filed` is the tool result when the Hub took it;
- * otherwise the PCP ticket files and `pcpNote`, when present, is appended to
- * its narrative.
- *
- * A plain `null` was not enough once an AMBIGUOUS Hub failure had to be told
- * apart from a declined route: the caller has to be able to write something on
- * the PCP ticket, and returning the note is the only way out of this function.
- */
-type HubRouteOutcome =
-  | { filed: Record<string, unknown> }
-  | { filed: null; pcpNote?: string };
-
-async function fileSchedulingToHub(
-  callId: string,
-  metadata: PcpAgentMetadata,
-  state: PcpConversationState,
-  narrative: string,
-  disposition: PcpDisposition,
-  urgency: 'routine' | 'normal' | 'high' | 'urgent',
-  missing: string[],
-  /**
-   * SERVER-OWNED, and that is the whole point — Codex P1, PR #298.
-   *
-   * True while `handoff_to_pcp` is waiting for a durable ticket so it can
-   * retry the dial. Set by that tool when its own write failed and nothing was
-   * on record; cleared when the caller declines the queue.
-   *
-   * The guard below used to read `disposition`, which is a MODEL argument with
-   * `.default('CREATE_TASK')`. So the filing a mid-transfer caller's model is
-   * TOLD to make — by `durable_ticket_required_before_handoff`, in those words
-   * — arrived here indistinguishable from an ordinary one. It routed to the
-   * Hub, `recordDisposition('CREATE_TASK')` satisfied `requestIsOnRecord`, and
-   * the retried dial then rested on a department-9 scheduling ticket carrying
-   * none of the `pcp_handoff_*` columns and no `dispositionGrantedByExplicitAsk`
-   * — the field whose absence is what killed this transfer on 2026-08-27.
-   *
-   * The dial is not new: before this change the same fallback filed a PCP
-   * ticket and recorded the same disposition. What moved is WHERE the durable
-   * record lives, and a transfer must not rest on a ticket filed into another
-   * department's queue.
-   */
-  transferAwaitingTicket: boolean,
-): Promise<HubRouteOutcome> {
-  const intent = state.callPurpose ? STATED_SCHEDULING_INTENT[state.callPurpose] : undefined;
-  if (!intent) return { filed: null };
-  if (transferAwaitingTicket) return { filed: null };
-  /**
-   * A TRANSFER IN FLIGHT KEEPS ITS OWN TICKET.
-   *
-   * HAND_OFF here means the director granted it on the caller's explicit ask,
-   * and that ticket is the durable record the dial is gated on: it carries
-   * `dispositionGrantedByExplicitAsk`, the `pcp_handoff_*` columns and the
-   * transfer telemetry, none of which exist on a generic create-ticket
-   * payload. Under the v14 queue choice an accepted queue files nothing at
-   * all. Routing that ticket elsewhere would take the sanction off the
-   * transfer — which is how the transfer died once already, on 2026-08-27.
-   *
-   * 14 of the 75 measured tickets carry HAND_OFF, so this is a real branch and
-   * not a theoretical one.
-   */
-  if (disposition !== 'CREATE_TASK') return { filed: null };
-
-  const [{ schedulingRedirectForStatedIntent }, { ticketingApiClient }, { sanitizeForSms }] =
-    await Promise.all([
-      import('../tools/queueRouting'),
-      import('../../server/services/ticketingApiClient'),
-      import('../services/gsm7'),
-    ]);
-
-  const redirect = schedulingRedirectForStatedIntent(intent, narrative, PCP_DEPARTMENT_ID, [
-    // The caller's own organisation and role, so the surgery exception reads
-    // the REQUEST and not the letterhead — Codex round 3, PR #298. On this
-    // line the intake records both, so they are available as stated values
-    // rather than having to be found in the prose.
-    String(state.callerOrganization ?? ''),
-    String(state.callerRole ?? ''),
-  ]);
-  // Null is the surgery exception: "surgery is an exception to that hva hub
-  // rule" (operator, 2026-08-13). It stays on the PCP ticket for a coordinator
-  // rather than being guessed into another department.
-  if (!redirect) return { filed: null };
-
-  /**
-   * NO PATIENT, NO HUB. v200, 2026-11-11.
-   *
-   * Over the 21 days to 2026-11-11 the HVA Hub sent back 284 of the 287 PCP
-   * scheduling tickets that named no patient, every one to PCP Support, where
-   * a person then rang the office for the name. `next()` now asks who the
-   * request is about before it files; when the call still ends without a
-   * name, the ticket files in PCP Support directly, with a line saying why,
-   * instead of making the trip to the Hub and back.
-   */
-  const patientNamed = Boolean(
-    String(state.patientFirstName ?? '').trim() || String(state.patientLastName ?? '').trim(),
-  );
-  if (!patientNamed) {
-    console.info('[PCP] scheduling request with no patient name — kept in PCP Support, not sent to the HVA Hub');
-    return { filed: null, pcpNote: SCHEDULING_KEPT_FOR_NO_PATIENT_NOTE };
-  }
-
-  /**
-   * WHOSE NUMBER GOES ON THE TICKET, and why it is the caller's.
-   *
-   * `CreateTicketParams` has one phone field. On this lane the person the hub
-   * has to ring is the REQUESTING OFFICE, not the patient — measured over the
-   * 75: every one carries a caller callback number and only 35 carry a real
-   * patient first name. So the callback number goes in the field and the
-   * description says plainly whose it is, rather than the hub dialling a
-   * number that was never the patient's.
-   *
-   * The patient name is NOT asked for to fill this. These purposes take the
-   * short intake (`connectsToHuman`), and adding a blocking field to a filing
-   * path is the 2026-08-06 failure that lost 21 records requests in a day.
-   * `annotateGaps` already writes what was not captured onto the ticket.
-   */
-  /**
-   * WHOSE NUMBER, AND WHO VOUCHED FOR IT — RESOLVED TOGETHER.
-   *
-   * Codex P2 on #326, and it inverted the one case this change exists for.
-   * `state.callbackFromCallerIdOnly` is set only when the SEED ran, and the
-   * seed cannot run on a non-E.164 ANI — so with `anonymous` on the wire the
-   * flag is unset, the fallback below still took `metadata.callerPhone`, and
-   * this line printed "Given by the caller." for a value nobody gave us, with
-   * the word "anonymous" standing where a phone number should be.
-   *
-   * So the label is derived from the source actually SELECTED rather than from
-   * a flag that only one of the two sources sets.
-   */
-  const statedCallback = String(state.callbackNumber ?? '').trim();
-  const callback = statedCallback
-    || (isDialableAni(metadata.callerPhone) ? metadata.callerPhone! : '');
-  // Falling back to the ANI IS caller ID and nothing more. Only a number that
-  // reached `state.callbackNumber` can have been vouched for, and there the
-  // flag is the honest answer.
-  const callbackIsCallerIdOnly = statedCallback
-    ? state.callbackFromCallerIdOnly === true
-    : true;
-  const who = [state.callerName, state.callerRole, state.callerOrganization]
-    .map((v) => String(v ?? '').trim())
-    .filter((v) => v.length > 0 && !/^not /i.test(v))
-    .join(', ');
-  const body = sanitizeForSms(
-    [
-      'Taken on the PCP Support line.',
-      redirect.note,
-      who ? `Requested by ${who}.` : null,
-      /**
-       * WHOSE NUMBER, AND WHETHER ANYBODY VOUCHED FOR IT.
-       *
-       * "reaches the requesting office, not the patient" was true and was not
-       * enough. On 2026-09-17 a staffer rang the number on one of these
-       * tickets and closed it "Processed callback but line is unavailable...
-       * little to no information provided" — the number was the caller's ANI,
-       * which on a clinic PBX is a trunk and not a desk, and nothing on the
-       * ticket said it was unverified. Saying so is what turns a dead callback
-       * into "ask this office for a direct line".
-       */
-      callback
-        ? `Callback ${callback} reaches the requesting office, not the patient.`
-          + (callbackIsCallerIdOnly
-            ? ' UNVERIFIED — this is the inbound caller ID, not a number the caller gave;'
-              + ' if it does not answer, ask them for a direct line.'
-            : ' Given by the caller.')
-        : null,
-      '',
-      // The same gap annotation `buildPayload` puts on a PCP ticket. Routing a
-      // request to another department must not quietly drop the note saying
-      // what the intake did not capture — the hub is the team that has to ask
-      // for it, so it is the team that most needs to know.
-      annotateGaps(narrative, missing, metadata.callerPhone),
-    ].filter((l) => l !== null).join('\n'),
-  ).value;
-
-  const result = await ticketingApiClient.createTicket({
-    departmentId: redirect.departmentId,
-    requestTypeId: redirect.requestTypeId,
-    requestReasonId: redirect.requestReasonId,
-    patientFirstName: String(state.patientFirstName ?? '').trim() || 'Unknown',
-    patientLastName: String(state.patientLastName ?? '').trim() || 'Patient',
-    // The date of birth the caller gave (YYYY-MM-DD, record_pcp_intake's
-    // shape). The Hub finds the chart by it; without these columns it reached
-    // the Hub only in prose, if at all.
-    ...dobColumns(state.patientDob),
-    patientPhone: callback,
-    preferredContactMethod: 'phone',
-    description: body,
-    /**
-     * THE TOOL'S OWN URGENCY, mapped exactly as the patient branch maps it —
-     * Codex P2, PR #298. This was hardcoded `medium`, so a `create_pcp_task`
-     * called with `high` or `urgent` reached the Hub deprioritised, where
-     * before the change `buildPayload` carried it onto the PCP ticket. A
-     * routing change must not quietly reorder somebody's queue.
-     */
-    priority: urgency === 'urgent' || urgency === 'high' ? 'high' : 'medium',
-    /**
-     * ONE HUB TICKET PER CALL. `create_pcp_task` is a tool the model can call
-     * more than once — the refusal paths above it exist precisely to send it
-     * back — and without a key each attempt opens another department-9 ticket.
-     * CLAUDE.md measured the keyed duplicate rate at 3 calls in 2,086 (0.14%).
-     */
-    // Per patient, not per call: a second patient's booking must not come back
-    // as the first patient's ticket. See `patientOrdinal`. Codex P1, #351.
-    idempotencyKey: `${metadata.callSid || callId}-scheduling-hub${pcpDirector.patientKeySuffix(callId)}`,
-    callData: { agentUsed: 'pcp', ...(metadata.callSid ? { callSid: metadata.callSid } : {}) },
-  });
-
-  if (!result.success || !result.ticketNumber) {
-    /**
-     * A STATUSLESS FAILURE IS NOT A PROVEN REFUSAL — Codex P2, PR #298, and it
-     * corrects a claim this PR made out loud: "a failed POST creates nothing,
-     * so falling through cannot duplicate."
-     *
-     * `CreateTicketResponse.statusCode` exists for exactly this distinction:
-     * it is set when the server answered and said no, and ABSENT for a
-     * timeout, a DNS failure or a socket reset — where the POST may have
-     * landed and committed before the answer was lost. A `success: true`
-     * carrying no ticket number is ambiguous in the same way.
-     *
-     * The floor does not move: a request must never file NOWHERE, so the PCP
-     * ticket still goes. What changes is that a possible duplicate stops being
-     * SILENT. An idempotency key cannot help here — the second write is to a
-     * different endpoint — so the answer is to write it on the ticket a person
-     * will read, and let them close one.
-     */
-    const provenRefusal = typeof result.statusCode === 'number'
-      && result.statusCode >= 400 && result.statusCode < 500;
-    console.warn(
-      `[PCP] scheduling route to the HVA Hub declined (${result.error ?? 'no ticket number'}` +
-        `${provenRefusal ? `, HTTP ${result.statusCode}` : ', no HTTP status — outcome unknown'}) — ` +
-        'filing the PCP ticket instead',
-    );
-    return {
-      filed: null,
-      ...(provenRefusal
-        ? {}
-        : {
-            pcpNote:
-              '[The scheduling hub may already hold a scheduling ticket for this call — the '
-              + 'request to it did not come back with an answer, so it may have been recorded '
-              + 'there as well. Check before acting, and close whichever is the duplicate.]',
-          }),
-    };
-  }
-
-  pcpDirector.recordDisposition(callId, 'CREATE_TASK');
-  pcpDirector.markTicketFiled(callId, 'create_ticket', result.ticketNumber);
-  console.info(
-    `[PCP] ${intent} appointment filed to the HVA Hub (dept ${redirect.departmentId}, ` +
-      `reason ${redirect.requestReasonId}) as ${result.ticketNumber}`,
-  );
-  return {
-    filed: {
-      success: true,
-      ticketNumber: result.ticketNumber,
-      routed_to: redirect.departmentName,
-      message:
-        `Filed as ${result.ticketNumber} with our scheduling team. Read the ticket number back and say ` +
-        'the scheduling team will follow up. Do NOT offer to transfer or connect them.',
-    },
-  };
-}
 
 async function fileToMedicalRecords(
   callId: string,

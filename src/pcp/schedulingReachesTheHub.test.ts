@@ -24,6 +24,15 @@
  * relationship to this patient?" — the bd89b226 interrogation, arriving as a
  * side effect of a routing change.
  *
+ * AND THE DESTINATION HALF WAS REVERSED ON 2026-11-14 (v236). Operator:
+ * "Keep in PCP Support." Over the 14 days to 2026-11-14 the HVA Hub sent 200
+ * of the 202 professional scheduling tickets from this line back to PCP
+ * Support, every move by a staffer, so a professional's schedule, reschedule
+ * or cancel request now files in PCP Support on the PCP endpoint. The dial
+ * half stands: these purposes still default to a task and a caller who asks
+ * for a person is still put through. A PATIENT's scheduling request on this
+ * line still reaches the Hub (v128), which kept 53 of its 57.
+ *
  * FIXTURES ARE SYNTHETIC. No real patient, clinic, number or date of birth —
  * see task #106.
  */
@@ -71,7 +80,7 @@ vi.mock('../../server/services/ticketingApiClient', () => ({
   lookupWasUnavailable: () => false,
 }));
 
-const { createPcpAgent } = await import('../agents/pcpAgent');
+const { createPcpAgent, callbackProvenanceNote } = await import('../agents/pcpAgent');
 const { pcpDirector } = await import('./director');
 const { PCP_CALL_PURPOSES, getPcpCallPurpose } = await import('./policy');
 const { schedulingRedirectForStatedIntent, OPERATION_CUES } = await import('../tools/queueRouting');
@@ -128,6 +137,7 @@ beforeEach(() => {
 });
 
 const hubPayload = () => (ticketing.createTicket.mock.calls as any[])[0][0];
+const pcpPayload = () => (ticketing.createPcpTicket.mock.calls as any[])[0][0];
 
 describe('the policy no longer defaults these purposes to a transfer', () => {
   it.each([...SCHEDULING_SLUGS, 'grievance_follow_up' as const])(
@@ -264,21 +274,20 @@ describe('schedulingRedirectForStatedIntent', () => {
   });
 });
 
-describe('create_pcp_task routes a professional scheduling request to the Hub', () => {
-  it('files to department 9 and not into PCP Support', async () => {
+describe('create_pcp_task keeps a professional scheduling request in PCP Support (v236)', () => {
+  it.each(SCHEDULING_SLUGS)('%s files into PCP Support and never to the HVA Hub', async (slug) => {
     const { agent } = freshCall();
-    await call(agent, 'record_pcp_intake', COORDINATOR);
+    await call(agent, 'record_pcp_intake', { ...COORDINATOR, callPurpose: slug, patientDob: '1950-01-01' });
 
     const filed = await call(agent, 'create_pcp_task', {
       narrative: 'Referral coordinator asking to get their patient booked in.',
     });
 
     expect(filed.success, `must file: ${JSON.stringify(filed)}`).toBe(true);
-    expect(filed.routed_to).toBe('HVA Hub');
-    const payload = hubPayload();
-    expect(payload.departmentId).toBe(9);
-    expect(payload.requestReasonId).toBe(146);
-    expect(ticketing.createPcpTicket, 'and does not also sit in PCP Support').not.toHaveBeenCalled();
+    expect(filed.routed_to).toBeUndefined();
+    expect(ticketing.createTicket, 'the HVA Hub is not where these are worked').not.toHaveBeenCalled();
+    expect(ticketing.createPcpTicket).toHaveBeenCalledTimes(1);
+    expect(pcpPayload().callPurpose).toBe(slug);
   });
 
   it("carries the requesting office's callback number and says whose it is", async () => {
@@ -286,13 +295,36 @@ describe('create_pcp_task routes a professional scheduling request to the Hub', 
     await call(agent, 'record_pcp_intake', COORDINATOR);
     await call(agent, 'create_pcp_task', { narrative: 'Wants their patient booked in.' });
 
-    const payload = hubPayload();
-    // Measured: all 75 carry a caller callback number, only 35 a real patient
-    // first name. The Hub rings the office, so the field has to hold the
-    // office's line and the description has to say so.
-    expect(payload.patientPhone).toBe('5005550006');
-    expect(payload.description).toMatch(/reaches the requesting office, not the patient/i);
-    expect(payload.description).toContain('Example Family Practice');
+    const payload = pcpPayload();
+    // The office's line, and the ticket says so (v67), as it did in the Hub.
+    expect(payload.callerCallbackNumber).toBe('5005550006');
+    expect(payload.narrative).toMatch(/Callback 5005550006 reaches the requesting office, not the patient\. Given by the caller\./);
+  });
+
+  it('says UNVERIFIED when the only number is the caller ID', async () => {
+    const { agent } = freshCall();
+    const { callbackNumber: _omit, ...noNumber } = COORDINATOR;
+    await call(agent, 'record_pcp_intake', noNumber);
+    await call(agent, 'create_pcp_task', { narrative: 'Wants their patient booked in.' });
+    expect(pcpPayload().narrative).toMatch(/reaches the requesting office, not the patient\. UNVERIFIED/);
+  });
+
+  it.each([
+    ['a withheld caller ID and no number given', {}, 'anonymous', null],
+    ['only the caller ID', {}, '+15005550006', /^Callback \+15005550006 reaches the requesting office, not the patient\. UNVERIFIED/],
+    ['a number seeded from the caller ID', { callbackNumber: '5005550006', callbackFromCallerIdOnly: true }, '+15005550006', /UNVERIFIED/],
+    ['a number the caller gave', { callbackNumber: '5005550007', callbackFromCallerIdOnly: false }, 'anonymous', /^Callback 5005550007 .* Given by the caller\.$/],
+  ] as const)('the callback line for %s', (_label, state, ani, expected) => {
+    const line = callbackProvenanceNote(state as never, ani);
+    if (expected === null) expect(line).toBeNull();
+    else expect(line).toMatch(expected);
+  });
+
+  it('a request that is not scheduling carries no such line', async () => {
+    const { agent } = freshCall();
+    await call(agent, 'record_pcp_intake', { ...COORDINATOR, callPurpose: 'outside_referral_status', patientDob: '1950-01-01' });
+    await call(agent, 'create_pcp_task', { narrative: 'Checking on an outside referral.' });
+    expect(pcpPayload().narrative).not.toMatch(/reaches the requesting office/);
   });
 
   it('a surgery date is NOT routed — it stays on the PCP ticket', async () => {
@@ -333,19 +365,7 @@ describe('create_pcp_task routes a professional scheduling request to the Hub', 
     expect((ticketing.createPcpTicket.mock.calls as any[])[0][0].disposition).toBe('HAND_OFF');
   });
 
-  it('THE FLOOR: a refused Hub POST files the PCP ticket rather than losing the request', async () => {
-    ticketing.createTicket.mockResolvedValue({ success: false, error: 'Validation failed', statusCode: 400 } satisfies TicketResult);
-    const { agent } = freshCall();
-    await call(agent, 'record_pcp_intake', COORDINATOR);
-
-    const filed = await call(agent, 'create_pcp_task', { narrative: 'Wants their patient booked in.' });
-
-    expect(ticketing.createTicket).toHaveBeenCalled();
-    expect(ticketing.createPcpTicket, 'the request must still land somewhere').toHaveBeenCalled();
-    expect(filed.success, `must file: ${JSON.stringify(filed)}`).toBe(true);
-  });
-
-  it('a patient on this line is untouched — they route through detectCrossQueue as before', async () => {
+  it('a patient on this line still reaches the Hub, through detectCrossQueue as before (v128)', async () => {
     const { agent } = freshCall();
     await call(agent, 'record_pcp_intake', {
       callPurpose: 'patient_caller',
@@ -400,6 +420,10 @@ describe('Codex #298 — the surgery exception must not fire on an employer', ()
 
 describe('Codex #298 — a transfer in flight keeps its ticket on the PCP endpoint', () => {
   /**
+   * SINCE v236 THIS HOLDS BY CONSTRUCTION: every professional scheduling
+   * filing lands on the PCP endpoint, so the latch described below is gone.
+   * Both tests stay, as the guard that a Hub route never comes back here.
+   *
    * THE P1, AND MY GUARD READ THE WRONG THING.
    *
    * `create_pcp_task`'s `disposition` is a MODEL argument with
@@ -445,7 +469,7 @@ describe('Codex #298 — a transfer in flight keeps its ticket on the PCP endpoi
     expect(ticketing.createPcpTicket).toHaveBeenCalled();
   });
 
-  it('but routes normally once the caller DECLINES the queue — they chose the ticket', async () => {
+  it('and stays in PCP Support once the caller DECLINES the queue — they chose the ticket', async () => {
     const { agent } = freshCall();
     await call(agent, 'record_pcp_intake', COORDINATOR);
 
@@ -462,69 +486,8 @@ describe('Codex #298 — a transfer in flight keeps its ticket on the PCP endpoi
     expect(declined.success).toBe(false);
 
     await call(agent, 'create_pcp_task', { narrative: 'Wants their patient booked in.' });
-    expect(ticketing.createTicket, 'a declined queue is an ordinary filing').toHaveBeenCalled();
-    expect(hubPayload().departmentId).toBe(9);
-  });
-});
-
-describe('Codex #298 — urgency and an ambiguous Hub response', () => {
-  it.each([
-    ['urgent', 'high'],
-    ['high', 'high'],
-    ['normal', 'medium'],
-    ['routine', 'medium'],
-  ] as const)('carries urgency %s to the Hub as priority %s', async (urgency, priority) => {
-    const { agent } = freshCall();
-    await call(agent, 'record_pcp_intake', COORDINATOR);
-    await call(agent, 'create_pcp_task', { narrative: 'Wants their patient booked in.', urgency });
-    // Before this, the Hub ticket was hardcoded `medium`, so rerouting
-    // silently deprioritised a time-sensitive request that `buildPayload`
-    // would have carried through.
-    expect(hubPayload().priority).toBe(priority);
-  });
-
-  it('sends an idempotency key, so a second invocation cannot open a second Hub ticket', async () => {
-    const { agent } = freshCall();
-    await call(agent, 'record_pcp_intake', COORDINATOR);
-    await call(agent, 'create_pcp_task', { narrative: 'Wants their patient booked in.' });
-    expect(hubPayload().idempotencyKey).toBeTruthy();
-  });
-
-  /**
-   * A STATUSLESS FAILURE IS NOT A PROVEN REFUSAL. `createTicket` reports a
-   * timeout, a DNS failure or a socket reset with no `statusCode` — the
-   * distinction `CreateTicketResponse.statusCode` was added to carry. So the
-   * POST may well have landed and committed.
-   *
-   * The floor does not change: the request must never file NOWHERE, so the
-   * PCP ticket still goes. What changes is that the possible duplicate stops
-   * being SILENT — the PCP ticket says so, and a staffer can close one. The
-   * PR body claimed "a failed POST creates nothing, so falling through cannot
-   * duplicate", and that is false for exactly this case.
-   */
-  it('files the PCP ticket on an ambiguous failure AND says the Hub may hold one too', async () => {
-    ticketing.createTicket.mockResolvedValue({ success: false, error: 'network timeout' });
-    const { agent } = freshCall();
-    await call(agent, 'record_pcp_intake', COORDINATOR);
-
-    const filed = await call(agent, 'create_pcp_task', { narrative: 'Wants their patient booked in.' });
-
-    expect(filed.success, 'the request must still land somewhere').toBe(true);
-    const pcp = (ticketing.createPcpTicket.mock.calls as any[])[0][0];
-    expect(pcp.narrative).toMatch(/may already hold a scheduling ticket/i);
-  });
-
-  it('says nothing of the sort when the Hub gave a PROVEN refusal', async () => {
-    ticketing.createTicket.mockResolvedValue({ success: false, error: 'Validation failed', statusCode: 400 });
-    const { agent } = freshCall();
-    await call(agent, 'record_pcp_intake', COORDINATOR);
-
-    await call(agent, 'create_pcp_task', { narrative: 'Wants their patient booked in.' });
-
-    const pcp = (ticketing.createPcpTicket.mock.calls as any[])[0][0];
-    // A 4xx is proof the server rejected it before committing, so warning a
-    // staffer about a duplicate that cannot exist is noise.
-    expect(pcp.narrative).not.toMatch(/may already hold a scheduling ticket/i);
+    expect(ticketing.createTicket, 'a declined queue is an ordinary PCP filing').not.toHaveBeenCalled();
+    expect(ticketing.createPcpTicket).toHaveBeenCalled();
   });
 });
 
@@ -581,94 +544,15 @@ describe('Codex #298 round 2 — substring cues reading the caller, not the requ
   });
 });
 
-/**
- * CODEX ROUND 3, PR #298 — and the last round spent on this cue.
- *
- * The finding arrived a third time in a third shape: `lasik` in "Coordinator at
- * Example LASIK Clinic" withholds the Hub route from a routine booking. Word
- * boundaries cannot help, because the employer token and the procedure token
- * are the same token.
- *
- * MEASURED before deciding what to do, over all 217 PCP tickets: SEVEN have an
- * organisation name containing an operation cue, and **TWO of the 75 scheduling
- * tickets** are the shape this finding describes. A false positive costs
- * nothing against today — the request stays in department 18, which is where
- * all 75 sit now — while loosening the guard risks routing a real surgery date
- * to the Hub against the operator's explicit exception.
- *
- * So rather than a fourth patch to the cue list, this takes Codex's own framing
- * — "request-scoped evidence rather than matching the whole narrative" — and
- * makes it literal: the caller's OWN organisation and role are removed from the
- * text before the guard reads it. That closes all three rounds at one point
- * instead of chasing the next token.
- */
-describe('Codex #298 round 3 — the guard reads the request, not the caller', () => {
-  it.each([
-    ['Example LASIK Clinic', 'Coordinator at Example LASIK Clinic calling to book a routine exam.'],
-    ['Example Surgery Center', 'Referral coordinator at Example Surgery Center, booking an eye exam.'],
-    ['Example Cataract Institute', 'Scheduler at Example Cataract Institute wants the patient seen.'],
-  ])('routes a booking when the cue is only in the employer name: %s', (org, prose) => {
-    expect(
-      schedulingRedirectForStatedIntent('new', prose, 18, [org])?.departmentId,
-      'the employer is not the subject of the request',
-    ).toBe(9);
-  });
-
-  it('STILL withholds when the procedure is named outside the employer', () => {
-    // The guard that stops this becoming "never withhold": the org is removed,
-    // and what remains still names an operation.
-    expect(schedulingRedirectForStatedIntent(
-      'reschedule',
-      'Coordinator at Example LASIK Clinic — needs to move the surgery date.',
-      18, ['Example LASIK Clinic'],
-    )).toBeNull();
-  });
-
-  it('STILL withholds when the procedure IS the request and shares the employer word', () => {
-    // org is "Example LASIK Clinic"; the request says "her LASIK". The org
-    // string does not occur in that phrase, so nothing is stripped from it and
-    // the cue stands.
-    expect(schedulingRedirectForStatedIntent(
-      'new', 'Booking her LASIK.', 18, ['Example LASIK Clinic'],
-    )).toBeNull();
-  });
-
-  it('is unchanged when no caller metadata is supplied', () => {
-    expect(schedulingRedirectForStatedIntent('new', 'book an eye exam', 18)?.departmentId).toBe(9);
-    expect(schedulingRedirectForStatedIntent('reschedule', 'move the surgery date', 18)).toBeNull();
-  });
-
+describe('Codex #298 round 3 — an employer that names an operation', () => {
   /**
-   * AN EMPTY ORGANISATION MUST NOT BLANK THE TEXT, and this is the one the
-   * mutation run caught rather than I did.
-   *
-   * `state.callerOrganization` is routinely absent — 4 of the 75 measured
-   * tickets carry no organisation at all — so `''` reaches this function as a
-   * matter of course. Without the length guard, `t.split('').join(' ')`
-   * separates every character and NO cue can ever match again: the surgery
-   * exception would be silently dead for every call, which is the failure
-   * direction that actually matters (a real surgery date routed to the Hub
-   * against the operator's explicit exception).
+   * Round 3 stripped the caller's own organisation and role before the
+   * surgery guard read the narrative, so an employer like "Example LASIK
+   * Clinic" could not keep a routine booking out of the Hub. With no Hub
+   * route on this path (v236) there is nothing to strip, and both shapes file
+   * in PCP Support.
    */
-  it.each([[['']], [['ab']], [['', 'Example Family Practice']]])(
-    'a short or empty metadata entry cannot disarm the exception: %j',
-    (meta) => {
-      expect(
-        schedulingRedirectForStatedIntent('reschedule', 'move the surgery date', 18, meta),
-        'the exception must still fire',
-      ).toBeNull();
-    },
-  );
-});
-
-describe('Codex #298 round 3 — the call site actually passes the caller metadata', () => {
-  /**
-   * THE SINK-NOT-THE-SOURCE TEST, made real. Every other test above calls
-   * `schedulingRedirectForStatedIntent` directly, so deleting the argument at
-   * the `create_pcp_task` call site failed nothing — the fix could have been
-   * wired to nothing and the suite stayed green.
-   */
-  it('routes end to end when the operation cue is only in the caller organisation', async () => {
+  it('a routine booking from such a caller files in PCP Support', async () => {
     const { agent } = freshCall();
     await call(agent, 'record_pcp_intake', {
       ...COORDINATOR,
@@ -680,8 +564,8 @@ describe('Codex #298 round 3 — the call site actually passes the caller metada
     });
 
     expect(filed.success, `must file: ${JSON.stringify(filed)}`).toBe(true);
-    expect(filed.routed_to, 'the employer is not the subject of the request').toBe('HVA Hub');
-    expect(hubPayload().departmentId).toBe(9);
+    expect(ticketing.createTicket).not.toHaveBeenCalled();
+    expect(ticketing.createPcpTicket).toHaveBeenCalled();
   });
 
   it('but a real surgery date from that same caller still stays in PCP', async () => {

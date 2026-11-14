@@ -230,16 +230,20 @@ describe('every create-ticket door latches, and the first door wins', () => {
   };
 
   /** The HVA Hub is a create-ticket door too. */
-  it('a Hub filing is handed back, not filed twice', async () => {
+  /**
+   * v236: a professional's scheduling request files on the PCP endpoint (it
+   * went to the HVA Hub from v17), so its second filing enriches the same row.
+   */
+  it('a scheduling filing is a PCP filing, and its second filing enriches the same row', async () => {
     const { agent } = freshCall();
     await call(agent, 'record_pcp_intake', COORDINATOR);
     const first = await call(agent, 'create_pcp_task', { narrative: 'Coordinator wants their patient booked in.' });
-    expect(first.routed_to).toBe('HVA Hub');
+    expect(first.routed_to).toBeUndefined();
 
-    const second = await call(agent, 'create_pcp_task', { narrative: 'Coordinator wants their patient booked in.' });
+    await call(agent, 'create_pcp_task', { narrative: 'Coordinator wants their patient booked in.' });
 
-    expect(ticketing.createTicket).toHaveBeenCalledTimes(1);
-    expect(second.alreadyFiled).toBe(true);
+    expect(ticketing.createTicket, 'no Hub ticket').not.toHaveBeenCalled();
+    expect(ticketing.createPcpTicket).toHaveBeenCalledTimes(2);
   });
 
   /** And a PCP filing is not joined by a Hub ticket when the purpose moves later. */
