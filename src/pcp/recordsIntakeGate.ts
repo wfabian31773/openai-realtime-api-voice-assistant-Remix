@@ -34,7 +34,7 @@
  * batch, not the caller's answer: it gets the same question and spends
  * nothing (the v79 rule).
  */
-import { OWN_DOB_PROMPT, PROMPTS, type PcpConversationState } from './director';
+import { OWN_DOB_PROMPT, PROMPTS, askBudgetFor, type PcpConversationState } from './director';
 import { deliveryAskFor } from './recordsDelivery';
 import { REQUIRED_PROMPTS, ticketReadiness, MAX_BLOCKS, type RequiredField } from './ticketRequirements';
 
@@ -74,7 +74,7 @@ export function recordsFieldsMissing(state: PcpConversationState): Array<{ field
    * birth nobody asked for. Asked once, like every field here, and of the
    * patient themselves in their own words.
    */
-  if (!state.patientDob) {
+  if (!state.patientDob && !dobAskSpentByTheIntake(state)) {
     missing.push({ field: 'patientDob', prompt: state.callerIsThePatient ? OWN_DOB_PROMPT : PROMPTS.patientDob! });
   }
   // The delivery ask is sequential (method, then the destination it needs),
@@ -116,9 +116,21 @@ export function recordsAskFor(
   return null;
 }
 
+/**
+ * ONE DATE-OF-BIRTH ASK PER CALL, WHICHEVER TOOL MADE IT (v235, Codex P2 on
+ * #479). The date of birth is asked once (`ASKS_FOR_FIELD`), and the intake
+ * (`record_pcp_intake`) and this gate are two places that can ask it. When the
+ * intake has spent the ask and the caller could not give it, this gate does
+ * not ask again; and the gate's own ask is charged to the intake's count by
+ * the records tool, so the intake does not ask after it either.
+ */
+export function dobAskSpentByTheIntake(state: PcpConversationState): boolean {
+  return (state.askCounts?.patientDob ?? 0) >= askBudgetFor('patientDob');
+}
+
 /** The date of birth, when it was asked and not given — for the ticket's gap note (v235). */
 export function recordsDobGap(state: PcpConversationState, asked: ReadonlyMap<string, number>): string | undefined {
-  return !state.patientDob && asked.has('patientDob')
+  return !state.patientDob && (asked.has('patientDob') || dobAskSpentByTheIntake(state))
     ? "NOT CAPTURED ON THE CALL: the patient's date of birth."
     : undefined;
 }

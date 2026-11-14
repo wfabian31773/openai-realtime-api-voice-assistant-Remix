@@ -338,6 +338,45 @@ describe('B: the records tool asks whose records, then their date of birth', () 
   });
 });
 
+describe('one date-of-birth ask per call, whichever tool makes it (Codex P2 on #479)', () => {
+  const callerAnswers = () => vi.setSystemTime(new Date(Date.now() + RECORDS_ASK_BATCH_MS + 1_000));
+  afterAll(() => vi.setSystemTime(NOT_LUNCH));
+  const tool = 'handle_patient_medical_records_request';
+  const narrative = "Caller is requesting a copy of a patient's medical records.";
+
+  it('PCP-84726: the intake spent the ask, so the records tool does not ask again and writes the gap', async () => {
+    const { agent, callId } = agentFor(B_RECORDS_TOOL[2][1]);
+    await call(agent, 'record_pcp_intake', { ...OFFICE, callPurpose: 'patient_medical_records_request' });
+    const asked = await call(agent, 'record_pcp_intake', PATIENT);
+    expect(asked.nextQuestion?.field).toBe('patientDob');
+    callerAnswers();
+    // The caller does not have it. The records tool goes straight to how to send them.
+    let r = await call(agent, tool, { narrative });
+    expect(r.say).not.toMatch(/date of birth/i);
+    expect(r.say).toMatch(/fax.*email.*mail/i);
+    callerAnswers();
+    r = await call(agent, tool, { narrative, recordsDeliveryMethod: 'fax' });
+    callerAnswers();
+    await call(agent, tool, { narrative, recordsDeliveryDestination: '202-555-0199' });
+    const filed = lastPayload(ticketing.createTicket) ?? lastPayload(ticketing.createPcpTicket);
+    expect(filed, 'it filed').toBeTruthy();
+    expect(JSON.stringify(filed)).toContain("NOT CAPTURED ON THE CALL: the patient's date of birth");
+    pcpDirector.clear(callId);
+  });
+
+  it('PCP-84736: the records tool spent the ask, so the intake does not ask again', async () => {
+    const { agent, callId } = agentFor(B_RECORDS_TOOL[3][1]);
+    await call(agent, tool, { narrative, ...OFFICE });
+    callerAnswers();
+    const r = await call(agent, tool, { narrative, ...PATIENT });
+    expect(r.say).toMatch(/date of birth/i);
+    callerAnswers();
+    const intake = await call(agent, 'record_pcp_intake', { callPurpose: 'patient_medical_records_request' });
+    expect(intake.nextQuestion?.field).not.toBe('patientDob');
+    pcpDirector.clear(callId);
+  });
+});
+
 describe('C: a purpose that may transfer asks only when the caller is not headed for a person', () => {
   it('PCP-85264 (CA81089d2f2de68f76f33d907a3414fc56): a grievance filed as a task asks who, then the date of birth', () => {
     const { callId } = agentFor('CA81089d2f2de68f76f33d907a3414fc56');
