@@ -53,6 +53,7 @@ const noNameFromTheRecording: NameAsker = async () => null;
 /** v201: reads nothing — the default, so no test that calls `runRequestSweep` directly reaches the network. */
 const noRequestFromTheRecording: RequestAsker = async () => null;
 import { draftedRequestFor } from "../tools/draftedRequest";
+import { dobFromCallerAnswer } from "../tools/spokenDob";
 import { findByPhone } from "../services/patientVerification";
 
 /**
@@ -202,7 +203,8 @@ const defaultFiler: SweepFiler = async (ticket) => {
  * Traced 2026-09-03: `/api/voice-agent/create-ticket` validates
  * `patientBirthMonth/Day/Year` as OPTIONAL. Every `missingFields:
  * ["date_of_birth"]` refusal in that day's logs came from OUR OWN tools.
- * A captured validated DOB is carried when held. A swept ticket still files
+ * A certain identity's chart date of birth is carried when held, and
+ * otherwise the date the caller said (v231). A swept ticket still files
  * without one, and the request survives
  * a gate that was never the server's — which is the single largest reason
  * these requests were lost.
@@ -397,6 +399,16 @@ export async function runRequestSweep(
       }
     }
 
+    /**
+     * v231: THE DATE OF BIRTH THE CALLER GAVE, read from the whole call by the
+     * same reader the filing tools use (the answer to a date-of-birth ask, or a
+     * date the caller called the date of birth). `buildSweptTicket` carries it
+     * only under a name the caller gave (`stated`, `spoken`, `heard`), with a
+     * staff note that it is not matched; a certain identity has no such source
+     * and carries the chart's date below, which always wins (RULE ZERO step 5).
+     */
+    const said = dobFromCallerAnswer(record.transcript.split("\n"));
+    if (said) input = { ...input, callerDob: said };
     console.info(sweepMarker(record.slug, record.callSid));
     const ticket: SweepTicket = buildSweptTicket(input, decision);
     if (identity) {

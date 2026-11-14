@@ -149,6 +149,17 @@ export interface SweepInput {
    * staff note; it never feeds a request reason.
    */
   requestFromRecording?: string;
+  /**
+   * v231: THE DATE OF BIRTH THE CALLER GAVE ON THIS CALL, `YYYY-MM-DD`, as the
+   * spoken-DOB reader reads it (`spokenDob.ts`: the answer to a date-of-birth
+   * ask, or a date the caller called the date of birth). The runner sets it
+   * only when no certain identity holds a chart date, which always wins
+   * (RULE ZERO step 5). It reaches the ticket only under a name the caller
+   * gave (`stated`, `spoken`, `heard`): a date with no name, or under the
+   * calling number's owner when nobody said a patient name, is not carried.
+   * See `CALLER_DOB_NOTE`.
+   */
+  callerDob?: string;
 }
 
 export type SweepDecision =
@@ -858,6 +869,36 @@ export interface SweptTicket {
    * ask that did not happen.
    */
   routingAskExhausted?: true;
+  /** v231: the date of birth the caller gave, only under a name the caller gave. */
+  patientBirthYear?: string;
+  patientBirthMonth?: string;
+  patientBirthDay?: string;
+}
+
+/**
+ * v231: THE STAFF NOTE WHEN THE DATE OF BIRTH IS THE ONE THE CALLER SAID.
+ *
+ * Measured over the 14 days to 2026-11-14, optical, surgery and tech: 119
+ * tickets this sweep filed with no date of birth, 48 of them on a call whose
+ * caller had said one (39 in answer to the agent's ask, 8 labelled "date of
+ * birth" unasked, 1 both). The sweep carried a date of birth only from a
+ * certain lookup, so a caller who answered the question and then hung up
+ * before any filing tool ran left a ticket without it. Not matched to a
+ * record, and the note says so. Exported so the test reads the same words.
+ */
+export const CALLER_DOB_NOTE =
+  `DATE OF BIRTH AS THE CALLER SAID IT on the call — not matched to a patient record; confirm it against the chart before acting.`;
+
+/** The names a caller gave on the call, under which their date of birth is carried. */
+const CALLER_NAMED: ReadonlySet<NonNullable<SweepInput["nameSource"]>> = new Set(["stated", "spoken", "heard"]);
+
+function callerDobFields(
+  input: SweepInput,
+): { patientBirthYear: string; patientBirthMonth: string; patientBirthDay: string } | undefined {
+  // A caller-given name always reaches the decision with both halves.
+  if (!input.callerDob || !input.nameSource || !CALLER_NAMED.has(input.nameSource)) return undefined;
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(input.callerDob);
+  return m ? { patientBirthYear: m[1]!, patientBirthMonth: m[2]!, patientBirthDay: m[3]! } : undefined;
 }
 
 /**
@@ -898,7 +939,9 @@ export function buildSweptTicket(
     toolEvents: input.toolEvents,
   });
   const infoOnly = looksInfoOnly(input);
+  const callerDob = callerDobFields(input);
   return {
+    ...(callerDob ?? {}),
     slug: input.slug,
     departmentId,
     requestTypeId: reason.requestTypeId,
@@ -957,6 +1000,7 @@ export function buildSweptTicket(
                 ? `${NUMBER_RECORD_NOTE}\n`
                 : ""
         : `PATIENT NAME NOT CAPTURED — nobody was identified on this call; take the name from the recording before matching this to a chart.\n`) +
+      (callerDob ? `${CALLER_DOB_NOTE}\n` : "") +
       (readFromRecording ? `${REQUEST_FROM_RECORDING_NOTE} ${readFromRecording}\n` : "") +
       (infoOnly ? `${INFO_ONLY_NOTE}\n` : "") +
       `Call back on ${input.callerPhone}. Call reference ${input.callSid}.\n` +

@@ -804,24 +804,95 @@ function agreeingPartial(uttered: string, iso: string): boolean {
   return false;
 }
 
+/**
+ * A DATE THE CALLER CALLS THE DATE OF BIRTH, ASKED OR NOT (v231).
+ *
+ * A caller leaving a message often says the patient's name and "date of
+ * birth" before anyone asks: "this is for <name>, date of birth <date>",
+ * "patient <name>, date of birth <date>, says that…". No agent line asked, so
+ * no window opened and nothing read it: on 2026-11-12/13, 4 queue-lane
+ * tickets went out with no date of birth after the caller had said one this
+ * way (VA-84249, VA-84692, VA-84628 by the teardown sweep, VA-84757 in the
+ * call), and over the 14 days to 2026-11-14, 9 of 119 swept queue-lane
+ * tickets with no date of birth had a caller line of this shape.
+ *
+ * The caller's own label is the evidence the window stands in for, so it is
+ * read narrowly: the date must come straight after the label ("date of birth
+ * <date>", "her date of birth is <date>", "DOB <date>", "fecha de nacimiento
+ * <date>"), in the same sentence,
+ * with nothing about another date (a surgery, an appointment) and no denial
+ * or correction after the label. A label followed by anything else ("date of
+ * birth, and the surgery is <date>", "her date of birth is not <date>") reads
+ * nothing, and so does a date with no label: "I was born <date>" said before
+ * any ask stays unread, as it always has (a birth is not always the
+ * patient's). Two different dates labelled this way on one call (two patients,
+ * or a correction) read as neither. Only outside an ask window: inside one,
+ * the window's own reading already decides.
+ */
+const CALLER_DOB_LABEL =
+  /(?:^| )(?:date of birth|birth date|birthdate|dob|d o b|fecha de nacimiento)(?: (?:is|was|es|era))?(?= |$)/g;
+
+/** The first word after a label must be where a date starts. */
+function startsADate(folded: string): boolean {
+  const first = folded.split(' ').find(Boolean) ?? '';
+  return /^\d/.test(first) || Boolean(monthNumberFromWord(first)) || NUMBER_WORDS.has(first) || /^veinti/.test(first);
+}
+
+function labelledDates(uttered: string): string[] {
+  const out: string[] = [];
+  for (const sentence of uttered.split(/(?<=[.!?])\s+/)) {
+    const folded = fold(sentence);
+    const labels = [...folded.matchAll(CALLER_DOB_LABEL)];
+    labels.forEach((m, k) => {
+      const from = (m.index ?? 0) + m[0].length;
+      const to = labels[k + 1]?.index ?? folded.length;
+      const rest = folded.slice(from, to).trim();
+      if (!rest || !startsADate(rest)) return;
+      if (namesAnotherDate(rest) || rejectsADate(rest) || negatesADate(rest)) return;
+      const parts = readDobQuietly(rest);
+      if (parts) out.push(isoFromParts(parts));
+    });
+  }
+  return out;
+}
+
 function readCallerAnswer(lines: readonly string[]): TranscriptRead {
   let latest: TranscriptRead = { kind: 'none' };
   // The line the held date came from; a rejection after it clears it.
   let heldAt = -1;
   let dobAskedBefore = false;
   let lastSubject: DateSubject | undefined;
+  // Whether the last agent line opened an ask window (its caller lines are the window's).
+  let inWindow = false;
+  // v231: the dates the caller labelled as the date of birth outside a window.
+  const labelled = new Set<string>();
   for (let i = 0; i < lines.length; i += 1) {
     const line = lines[i] ?? '';
     if (line.startsWith(CALLER_PREFIX)) {
-      if (latest.kind === 'date' && i > heldAt && rejectsTheHeldDate(line.slice(CALLER_PREFIX.length), latest.iso)) {
+      const uttered = line.slice(CALLER_PREFIX.length);
+      if (latest.kind === 'date' && i > heldAt && rejectsTheHeldDate(uttered, latest.iso)) {
         latest = { kind: 'cleared' };
         heldAt = -1;
+      }
+      const said = inWindow ? [] : labelledDates(uttered);
+      if (said.length) {
+        for (const iso of said) labelled.add(iso);
+        const [only] = labelled;
+        if (labelled.size > 1 || (latest.kind === 'date' && latest.iso !== only)) {
+          // Two dates of birth on one call: which is this patient's cannot be told.
+          latest = { kind: 'cleared' };
+          heldAt = -1;
+        } else if (only && latest.kind !== 'date') {
+          latest = { kind: 'date', iso: only };
+          heldAt = i;
+        }
       }
       continue;
     }
     if (!line.startsWith(AGENT_PREFIX)) continue;
     const said = line.slice(AGENT_PREFIX.length);
     const opening = opensDobWindow(said, { dobAskedBefore, lastSubject });
+    inWindow = Boolean(opening);
     if (mentionsDobTopic(fold(said))) dobAskedBefore = true;
     lastSubject = subjectOf(said, lastSubject);
     if (!opening) continue;
