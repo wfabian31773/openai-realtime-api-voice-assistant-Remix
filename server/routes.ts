@@ -6,6 +6,7 @@ import { createServer, type Server } from "http";
 import { storage } from "./storage";
 import { setupAuth, isAuthenticated as isReplitAuthenticated } from "./replitAuth";
 import { authRouter, requireRole, requireManager } from "./auth";
+import { toolPayloadsForCall } from "./toolPayloadsRead";
 import { agentPromptWriteRefusal, AGENT_PROMPT_WRITE_STATUS } from "./agentPromptSurface";
 import multer from "multer";
 import { parse } from "csv-parse/sync";
@@ -2160,6 +2161,30 @@ export async function registerRoutes(app: Express): Promise<Server> {
     } catch (error) {
       console.error('Error building call detail:', error);
       res.status(500).json({ message: 'Failed to build call detail' });
+    }
+  });
+
+  /**
+   * THE FULL TOOL ARGUMENTS AND RESULTS FOR ONE CALL (v238), for the call
+   * page's Tool calls tab. ADMIN-ONLY: this is the one place the store is
+   * read, and it holds what the caller said as the tools received it
+   * (operator, 2026-11-14: 30 days, admins only). The detail route above
+   * keeps serving the PHI-free timeline to everyone who can see the call.
+   */
+  app.get('/api/call-logs/:id/tool-payloads', isAuthenticated, requireRole('admin'), async (req, res) => {
+    try {
+      const callLog: any = await storage.getCallLog(req.params.id);
+      if (!callLog) return res.status(404).json({ message: 'Call log not found' });
+      const { db } = await import('./db');
+      const out = await toolPayloadsForCall((q) => db.execute(q), {
+        logId: String(callLog.id),
+        callSid: callLog.callSid ?? callLog.call_sid ?? null,
+      });
+      res.setHeader('Cache-Control', 'no-store');
+      res.json(out);
+    } catch (error) {
+      console.error('Error reading tool payloads:', error);
+      res.status(500).json({ message: 'Failed to read tool payloads' });
     }
   });
 

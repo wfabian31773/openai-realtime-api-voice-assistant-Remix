@@ -28,8 +28,9 @@ import { ticketNumbersOf } from '../lib/callTickets'
 import {
   ArrowLeft, Copy, Link as LinkIcon, Download, Play, Pause, Check,
   MessageSquare, ListOrdered, LineChart, Braces, Code2, CircleDollarSign, Gauge,
-  Search, X,
+  Search, X, Wrench,
 } from 'lucide-react'
+import { payloadVerdict, prettyJson, matchesFilter, emptyLabel, type ToolPayloadView } from '../lib/toolPayloads'
 
 // ---------------------------------------------------------------------------
 // Types for the consolidated payload
@@ -90,6 +91,7 @@ interface DetailPayload {
 const TABS = [
   { key: 'transcripts', label: 'Transcripts', icon: MessageSquare },
   { key: 'logs', label: 'Logs', icon: ListOrdered },
+  { key: 'tools', label: 'Tool Calls', icon: Wrench },
   { key: 'analysis', label: 'Analysis', icon: LineChart },
   { key: 'structured', label: 'Structured Outputs', icon: Braces },
   { key: 'messages', label: 'Messages', icon: Code2 },
@@ -548,6 +550,7 @@ export function CallDetailsPage() {
         <div className="py-5">
           {tab === 'transcripts' && <TranscriptsTab turns={turns} log={log} callStart={callStart} toolTimeline={data?.toolTimeline ?? null} />}
           {tab === 'logs' && <LogsTab events={events} toolTimeline={data?.toolTimeline ?? null} />}
+          {tab === 'tools' && id && <ToolCallsTab callLogId={id} />}
           {tab === 'analysis' && (
             <AnalysisTab checks={checks} summary={(data?.graderResults as any)?.summary} log={log} />
           )}
@@ -792,6 +795,96 @@ function LogsTab({ events, toolTimeline }: { events: EventRow[]; toolTimeline: D
           </table>
         </div>
       )}
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Tool calls (v238): the full arguments and result of every tool call,
+// admin-only, kept 30 days. The Logs tab keeps showing the PHI-free timeline.
+// ---------------------------------------------------------------------------
+
+const VERDICT_STYLE: Record<string, string> = {
+  ok: 'bg-emerald-500/10 text-emerald-300 border-emerald-500/30',
+  refused: 'bg-amber-500/10 text-amber-300 border-amber-500/30',
+  error: 'bg-rose-500/10 text-rose-300 border-rose-500/30',
+  unknown: 'bg-zinc-500/10 text-zinc-400 border-zinc-600/40',
+}
+
+function ToolCallsTab({ callLogId }: { callLogId: string }) {
+  const [q, setQ] = useState('')
+  const [open, setOpen] = useState<Record<number, boolean>>({})
+  const { data, error, isLoading } = useQuery<{ payloads: ToolPayloadView[]; retentionDays: number }>({
+    queryKey: ['call-tool-payloads', callLogId],
+    queryFn: async () => (await apiClient.get(`/call-logs/${callLogId}/tool-payloads`)).data,
+    retry: false,
+  })
+
+  if (isLoading) return <Empty label="Loading tool calls…" />
+  const status = (error as any)?.response?.status
+  if (error) return <Empty label={emptyLabel(status === 403 ? 'forbidden' : 'error', 30)} />
+  const payloads = data?.payloads ?? []
+  if (payloads.length === 0) return <Empty label={emptyLabel('none', data?.retentionDays ?? 30)} />
+  const shown = payloads.filter((p) => matchesFilter(p, q))
+
+  return (
+    <div>
+      <div className="flex items-center gap-3 mb-3">
+        <div className="relative flex-1 max-w-md">
+          <Search className="w-4 h-4 absolute left-3 top-2.5 text-zinc-500" />
+          <input
+            id="tool-calls-search"
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+            placeholder="Search tool names, arguments and results"
+            className="w-full h-9 pl-9 pr-8 rounded-md bg-[#14171c] border border-zinc-800 text-sm text-zinc-200 placeholder-zinc-500 focus:outline-none focus:border-teal-500/50"
+          />
+        </div>
+        <span className="ml-auto text-sm text-zinc-400">
+          <b className="text-zinc-200">{shown.length}</b> of {payloads.length} tool calls · admins only · kept {data?.retentionDays ?? 30} days
+        </span>
+      </div>
+      <div className="rounded-md border border-zinc-800/80 divide-y divide-zinc-800/60">
+        {shown.map((p) => {
+          const verdict = payloadVerdict(p.result)
+          const isOpen = open[p.seq] ?? false
+          return (
+            <div key={`${p.seq}-${p.eventAt}`}>
+              <button
+                onClick={() => setOpen((o) => ({ ...o, [p.seq]: !isOpen }))}
+                className="w-full flex items-center gap-3 px-4 py-2.5 text-left hover:bg-zinc-900/60 focus:outline-none focus-visible:ring-1 focus-visible:ring-teal-500/60"
+              >
+                <span className="font-mono text-[12px] text-zinc-500 w-28 tabular-nums">
+                  {new Date(p.eventAt).toLocaleTimeString('en-US', { hour12: false })}
+                </span>
+                <span className="font-mono text-sm text-zinc-200 flex-1">{p.tool}</span>
+                <Chip text={verdict} styleMap={VERDICT_STYLE} />
+                <span className="font-mono text-[12px] text-zinc-500 w-16 text-right tabular-nums">{fmtMs(p.ms)}</span>
+              </button>
+              {isOpen && (
+                <div className="grid gap-3 px-4 pb-4 md:grid-cols-2">
+                  {(['args', 'result'] as const).map((half) => {
+                    const text = prettyJson(p[half])
+                    return (
+                      <div key={half} className="min-w-0">
+                        <div className="flex items-center justify-between mb-1">
+                          <span className="text-[11px] uppercase tracking-wide text-zinc-500">
+                            {half === 'args' ? 'Arguments sent' : 'Result returned'}
+                          </span>
+                          <CopyBtn text={text} />
+                        </div>
+                        <pre className="text-[12px] leading-relaxed font-mono text-zinc-300 bg-[#0f1216] border border-zinc-800 rounded-md p-3 overflow-x-auto max-h-96 whitespace-pre-wrap break-words">
+                          {text}
+                        </pre>
+                      </div>
+                    )
+                  })}
+                </div>
+              )}
+            </div>
+          )
+        })}
+      </div>
     </div>
   )
 }
