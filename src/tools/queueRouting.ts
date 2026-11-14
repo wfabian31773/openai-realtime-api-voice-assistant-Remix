@@ -352,6 +352,68 @@ export function examAlreadyHappened(text: string): boolean {
   return true;
 }
 
+/**
+ * v233 — A SCHEDULING WORD THAT REPORTS A VISIT IS NOT A BOOKING.
+ *
+ * The scheduling step reads its cues as substrings, so a request about drops
+ * or glasses went to the HVA Hub because the caller said when they had been
+ * in: "she was seen today and the drops are not at the pharmacy", "out of her
+ * drops, requesting a same-day callback", "her check was rescheduled, should
+ * she keep using the drops", "given drops after an eye exam", "are their eye
+ * exam glasses ready". Measured over the 14 days 2026-10-31..11-13, every
+ * optical, surgery and tech agent ticket carrying a scheduling cue and a drug,
+ * drop or eyewear word (427, run through this router as it was on `main` and
+ * as it is now): 6 change department, and staff had moved all 6 out of the Hub
+ * to the department this rule now picks (5 to Technicians, 1 to Optical).
+ *
+ * `examAlreadyHappened`'s rule, widened by one subject and three cues: the
+ * request names eyewear, a drug (`TECH_CUES`) or a kind of drug (`A_DRUG`),
+ * nothing asks for a visit, and every scheduling cue the request fired, at
+ * every place it fired, reports a visit rather than asking for one:
+ *   - an exam name after a past marker ("after an eye exam", the existing
+ *     rule) or naming the eyewear it produced ("eye exam glasses");
+ *   - "seen today" after was/were/got/been ("she was seen today");
+ *   - "same day" or "same-day" naming a callback ("same-day callback");
+ *   - "rescheduled", past tense, after was/were/but/and/a subject ("her
+ *     check was rescheduled", "but rescheduled").
+ * Any other cue, any other place a cue fires, or an ask for a visit anywhere
+ * ("wants to be seen today", "needs to be rescheduled", "schedule an
+ * appointment") keeps the Hub. Gated on the optical and tech lines, where the
+ * measurement is; surgery (0 of 427 changed), PCP, the records line and the
+ * Hub read this as before.
+ */
+const SEEN_IN_THE_PAST = /\b(?:was|were|got|been)\s+(?:just\s+|already\s+)?$/;
+const RESCHEDULED_IN_THE_PAST = /\b(?:was|were|been|got|already|but|and|she|he|they|we|i|who|patient)\s+$/;
+const THEN_A_CALLBACK = /^\s*(?:call[- ]?backs?|calls?|phone calls?|return calls?|responses?|replies)\b/;
+const THEN_EYEWEAR = /^\s*(?:glasses|eyeglass(?:es)?|lenses|prescriptions?|rx)\b/;
+/** A drug by its kind, where the request names no brand the cue lists know ("her drops"). */
+const A_DRUG = /\b(?:drops|ointments?|antibiotics?|steroids?|gotas)\b/;
+
+function reportsAVisit(cue: string, before: string, after: string): boolean {
+  if (EXAM_NAME_CUES.map(fold).includes(cue)) return EXAM_IN_THE_PAST.test(before) || THEN_EYEWEAR.test(after);
+  if (cue === 'seen today') return SEEN_IN_THE_PAST.test(before);
+  if (cue === 'same day' || cue === 'same-day') return THEN_A_CALLBACK.test(after);
+  if (cue === 'reschedule') return after.startsWith('d') && RESCHEDULED_IN_THE_PAST.test(before);
+  return false;
+}
+
+export function schedulingWordsReportAVisit(text: string, homeDepartmentId: number): boolean {
+  if (homeDepartmentId !== OPTICAL && homeDepartmentId !== TECH) return false;
+  const t = fold(text);
+  if (!EYEWEAR.test(t) && !hit(t, TECH_CUES) && !A_DRUG.test(t)) return false;
+  if (ASKS_FOR_A_VISIT.test(t) || hasSeparateAppointmentAsk(t)) return false;
+  const fired = SCHEDULING.flatMap((s) => s.cues).map(fold).filter((c) => t.includes(c));
+  if (!fired.length) return false;
+  for (const cue of fired) {
+    let at = t.indexOf(cue);
+    while (at !== -1) {
+      if (!reportsAVisit(cue, t.slice(0, at), t.slice(at + cue.length))) return false;
+      at = t.indexOf(cue, at + cue.length);
+    }
+  }
+  return true;
+}
+
 /** The (department 1) pair for a contact-lens request, the same split `classifyNonSurgicalRequest` makes. */
 function contactLensPair(t: string): { requestTypeId: number; requestReasonId: number } {
   // Status of an order already placed, then a new order, then a pickup: "reorder
@@ -700,7 +762,9 @@ export function detectCrossQueue(text: string, homeDepartmentId: number): QueueR
   // instead of a sorted queue.
   // v202 (4): an exam that already happened is history, not a booking —
   // "a copy of my glasses prescription from my eye exam" is Optical's.
-  if (!mentionsSurgery && !examAlreadyHappened(text)) {
+  // v233: and no scheduling word that only reports a visit ("she was seen
+  // today", "same-day callback") sends a drug or eyewear request there.
+  if (!mentionsSurgery && !examAlreadyHappened(text) && !schedulingWordsReportAVisit(text, homeDepartmentId)) {
     for (const s of SCHEDULING) {
       if (hit(t, s.cues)) {
         if (homeDepartmentId === HVA_HUB) return null;
