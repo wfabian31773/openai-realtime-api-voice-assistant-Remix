@@ -2354,7 +2354,7 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
         }
         const gapNote = annotationFor(recordsIdentityGaps(gateState));
         if (gapNote) narrative = `${narrative}\n\n${gapNote}`;
-        const dobGap = recordsDobGap(gateState, recordsAsked);
+        const dobGap = recordsDobGap(gateState);
         if (dobGap) narrative = `${narrative}\n\n${dobGap}`;
       }
       const { state, missing } = ticketState(callId);

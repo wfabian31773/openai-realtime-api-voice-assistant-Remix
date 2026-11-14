@@ -150,9 +150,13 @@ export function dobAskSpentByTheIntake(state: PcpConversationState): boolean {
   return (state.askCounts?.patientDob ?? 0) >= askBudgetFor('patientDob');
 }
 
-/** The date of birth, when it was asked and not given — for the ticket's gap note (v235). */
-export function recordsDobGap(state: PcpConversationState, asked: ReadonlyMap<string, number>): string | undefined {
-  return !state.patientDob && (asked.has(recordsAskKey('patientDob', state)) || dobAskSpentByTheIntake(state))
+/**
+ * The date of birth, when it was asked of this patient and not given — for the
+ * ticket's gap note (v235). Either tool's ask is on the director's count (the
+ * gate's through `noteDobAskedByTheRecordsGate`), and a new patient resets it.
+ */
+export function recordsDobGap(state: PcpConversationState): string | undefined {
+  return !state.patientDob && dobAskSpentByTheIntake(state)
     ? "NOT CAPTURED ON THE CALL: the patient's date of birth."
     : undefined;
 }
