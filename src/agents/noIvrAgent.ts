@@ -758,8 +758,10 @@ export function greetingConfirmedFirstName(
  *   leaves the greeting's record where it was; a first name the greeting's
  *   person answers to (whole, or the first word of a compound first name) is
  *   then ambiguous between two confirmed people, and carries nothing, unless
- *   the model also passed a surname that is not the greeting person's
- *   (`validatedPatientFor` then checks it against the held person). It is
+ *   the model also passed a surname that is not the greeting person's, or a
+ *   readable date of birth that is the held person's and not the greeting
+ *   person's (`validatedPatientFor` then checks either against the held
+ *   person). A stale greeting record rewrites no compound first name. It is
  *   compared by person, not by object, so a later lookup that re-reads the
  *   same person's schedule does not make the greeting stale.
  */
@@ -775,11 +777,22 @@ export function escalationWithConfirmedRecord<
   const stated = params.patient_dob?.trim();
   const statedReads = Boolean(stated && readDobQuietly(stated));
   if (stated && !statedReads && hasUsableOnCallDob(stated)) return params;
-  const greetingIsStale = confirmed !== undefined &&
-    !greetingConfirmedMatches(confirmed, confirmed, validatedPatientFor(callSid));
-  if (greetingIsStale && answersToTheGreetingPerson(confirmed, named, params.patient_last_name)) return params;
-  const first =
-    greetingConfirmedFirstName(confirmed, { first_name: named, last_name: params.patient_last_name }) ?? named;
+  const heldNow = validatedPatientFor(callSid);
+  const greetingIsStale = confirmed !== undefined && !greetingConfirmedMatches(confirmed, confirmed, heldNow);
+  if (greetingIsStale && answersToTheGreetingPerson(confirmed, named, params.patient_last_name)) {
+    // A readable date that is the held person's and not the greeting
+    // person's says which, as a surname does (Codex P2 on #478). Absent, a
+    // placeholder, both people's date or neither's: nothing carries.
+    const statedIso = isoOfDob(stated);
+    const dateSaysWhich = statedIso !== undefined && statedIso === isoOfDob(heldNow?.dateOfBirth) &&
+      statedIso !== isoOfDob(confirmed.patientData?.dateOfBirth);
+    if (!dateSaysWhich) return params;
+  }
+  // A stale greeting record rewrites nothing: its compound first name is no
+  // longer the person held.
+  const first = greetingIsStale
+    ? named
+    : greetingConfirmedFirstName(confirmed, { first_name: named, last_name: params.patient_last_name }) ?? named;
   const held = validatedPatientFor(callSid, first, params.patient_last_name, params.patient_dob);
   if (!held) return params;
   const last = params.patient_last_name?.trim() || held.lastName;
@@ -794,6 +807,12 @@ export function escalationWithConfirmedRecord<
     );
   }
   return { ...params, patient_first_name: first, patient_last_name: last, patient_dob: dob };
+}
+
+/** A date of birth as YYYY-MM-DD, read the way `validatedPatientFor` reads it, or undefined. */
+function isoOfDob(value: string | undefined): string | undefined {
+  const d = value ? readDobQuietly(value) : null;
+  return d ? `${d.year}-${d.month}-${d.day}` : undefined;
 }
 
 /**

@@ -88,7 +88,7 @@ vi.mock('../services/callerMemoryService', () => ({
 }));
 
 const { createNoIvrAgent, escalationWithConfirmedRecord } = await import('./noIvrAgent');
-const { resetVerifiedIdentities } = await import('../tools/verifiedIdentity');
+const { resetVerifiedIdentities, rememberVerifiedIdentity } = await import('../tools/verifiedIdentity');
 const { resetGateAttempts } = await import('../tools/gateAttempts');
 const { noteCallerTranscript, releaseCallerSpeech } = await import('../services/symptomCorroboration');
 const { escalationDetailsMap } = await import('../services/escalationStore');
@@ -385,11 +385,13 @@ describe("a family member verified after the greeting does not lend the greeting
     totalAppointmentsFound: 0,
   });
 
+  const usDate = (iso: string) => { const [y, m, d] = iso.split('-'); return `${m}/${d}/${y}`; };
+
   async function thenAFamilyMemberIsFiled(sid: string, patient: typeof RIVERS) {
     const { agent, handoff } = await confirmed(sid);
     h.lookupByNameAndDOB.mockResolvedValueOnce(familyMember(patient) as any);
     const t = await call(agent, 'create_ticket', {
-      first_name: patient.firstName, last_name: patient.lastName, date_of_birth: '03/15/1990',
+      first_name: patient.firstName, last_name: patient.lastName, date_of_birth: usDate(patient.dateOfBirth),
       callback_number: '5551234567', request_category: 'cancel_appointment',
       request_summary: 'Cancel the appointment for a family member.',
     });
@@ -429,6 +431,65 @@ describe("a family member verified after the greeting does not lend the greeting
     await call(agent, 'escalate_to_human', { ...ADMINISTRATIVE, patient_first_name: 'Zelda', patient_last_name: 'Quixote' });
     const t = await ticketAt(1);
     expect(t.patientDOB).toBe('Unknown');
+  });
+
+  /**
+   * Codex P2 on #478 (comment 4571051512): a readable date of birth that is
+   * the held family member's and not the greeting person's says which, the
+   * way a surname does.
+   */
+  it("the family member's date of birth with no surname carries the family member's surname", async () => {
+    const { agent } = await thenAFamilyMemberIsFiled('CA' + '0'.repeat(31) + '4', RIVERS);
+    await call(agent, 'escalate_to_human', { ...ADMINISTRATIVE, patient_first_name: 'Zelda', patient_dob: '03/15/1990' });
+    const t = await ticketAt(1);
+    expect(t.patientFullName).toBe('Zelda Rivers');
+    expect(t.patientDOB).toBe('03/15/1990');
+  });
+
+  it("a date both people share says nothing: neither is carried", async () => {
+    const { agent } = await thenAFamilyMemberIsFiled('CA' + '0'.repeat(31) + '5', { ...RIVERS, dateOfBirth: ZELDA.dateOfBirth });
+    await call(agent, 'escalate_to_human', { ...ADMINISTRATIVE, patient_first_name: 'Zelda', patient_dob: '01/04/1958' });
+    const t = await ticketAt(1);
+    expect(t.patientFullName).not.toMatch(/Rivers|Quixote/);
+  });
+
+  for (const [i, why, said] of [
+    [1, "the greeting person's date", '01/04/1958'],
+    [2, "neither person's date", '07/07/1970'],
+    [3, 'a placeholder', 'unknown'],
+  ] as const) {
+    it(`${why} with no surname: neither is carried`, async () => {
+      const { agent } = await thenAFamilyMemberIsFiled('CA' + '0'.repeat(30) + '6' + String(i), RIVERS);
+      await call(agent, 'escalate_to_human', { ...ADMINISTRATIVE, patient_first_name: 'Zelda', patient_dob: said });
+      const t = await ticketAt(1);
+      expect(t.patientFullName).not.toMatch(/Rivers|Quixote/);
+      expect(t.patientDOB).not.toBe('03/15/1990');
+    });
+  }
+
+  it("a compound first name the model shortened, with the family member's date: the stale greeting rewrites nothing", async () => {
+    const MAE = { ...ZELDA, firstName: 'Zelda Mae' };
+    h.lookupByPhone.mockResolvedValue({ ...ONE_PERSON_ON_THE_NUMBER, patientName: 'Zelda Mae Quixote', patientData: MAE,
+      identity: { unique: true, candidateCount: 1, candidates: [{ ...MAE, appointmentCount: 1 }] } } as any);
+    const { agent } = await thenAFamilyMemberIsFiled('CA' + '0'.repeat(31) + '7', RIVERS);
+    await call(agent, 'escalate_to_human', { ...ADMINISTRATIVE, patient_first_name: 'Zelda', patient_dob: '03/15/1990' });
+    const t = await ticketAt(1);
+    expect(t.patientFullName).toBe('Zelda Rivers');
+    expect(t.patientDOB).toBe('03/15/1990');
+  });
+
+  it("a date that is not the held person's says nothing, even when the held record has no date", async () => {
+    const sid = 'CA' + '0'.repeat(31) + '8';
+    const greeting = { ...ONE_PERSON_ON_THE_NUMBER, matchedBy: 'name_and_dob' } as any;
+    rememberVerifiedIdentity(sid, { firstName: 'Zelda', lastName: 'Rivers', certain: true } as any);
+    const args: { patient_first_name?: string; patient_last_name?: string; patient_dob?: string } =
+      { patient_first_name: 'Zelda', patient_dob: '07/07/1970' };
+    const p = escalationWithConfirmedRecord(sid, greeting, args);
+    expect(p.patient_last_name).toBeUndefined();
+    // And no date at all says nothing either, though the held record has none to compare.
+    const none = escalationWithConfirmedRecord(sid, greeting,
+      { patient_first_name: 'Zelda' } as { patient_first_name?: string; patient_last_name?: string; patient_dob?: string });
+    expect(none.patient_last_name).toBeUndefined();
   });
 
   it('the greeting person filed again by name and date of birth is not stale', async () => {
