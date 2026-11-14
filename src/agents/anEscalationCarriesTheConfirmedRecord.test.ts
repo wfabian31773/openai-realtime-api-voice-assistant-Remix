@@ -87,7 +87,7 @@ vi.mock('../services/callerMemoryService', () => ({
   callerMemoryService: { getCallerMemory: async () => null, buildContextForPrompt: () => '' },
 }));
 
-const { createNoIvrAgent, escalationWithConfirmedRecord } = await import('./noIvrAgent');
+const { createNoIvrAgent, escalationWithConfirmedRecord, saysTheDobIsUnavailable } = await import('./noIvrAgent');
 const { resetVerifiedIdentities, rememberVerifiedIdentity } = await import('../tools/verifiedIdentity');
 const { resetGateAttempts } = await import('../tools/gateAttempts');
 const { noteCallerTranscript, releaseCallerSpeech } = await import('../services/symptomCorroboration');
@@ -364,6 +364,38 @@ describe('a stated date of birth that does not read blocks the carry', () => {
       expectTheRecord(await ticketAt(0));
     });
   }
+
+  /**
+   * Codex P2 on #478 (comment 4571107465): the forms create_ticket has always
+   * read as no date (the Grok body's own "DOB not available — B2B inquiry",
+   * v190's "not provided - caller provider's office") are placeholders, not a
+   * date that does not read, so they do not block the carry either.
+   */
+  for (const placeholder of [
+    'DOB not available',
+    'DOB not available — B2B inquiry from the office',
+    "not provided - caller provider's office",
+    'caller declined',
+    "caller doesn't know",
+  ]) {
+    it(`the unavailable form "${placeholder}" is replaced by the record's date`, async () => {
+      const { agent } = await confirmed('CA' + '9'.repeat(32));
+      await call(agent, 'escalate_to_human', { ...ADMINISTRATIVE, patient_first_name: 'Zelda', patient_dob: placeholder });
+      expectTheRecord(await ticketAt(0));
+    });
+  }
+});
+
+describe('saysTheDobIsUnavailable is the one copy of the no-date forms', () => {
+  it('reads the forms create_ticket has accepted as no date, and nothing else', () => {
+    for (const s of ['unknown', 'N/A', 'none', 'unavailable', 'DOB not available', 'B2B',
+      "not provided - caller provider's office", 'not given', 'declined', 'refused', "can't say", 'does not know']) {
+      expect(saysTheDobIsUnavailable(s)).toBe(true);
+    }
+    for (const s of ['', '   ', undefined, 'February 30, 1960', '13/45/1960', '01/04/1958']) {
+      expect(saysTheDobIsUnavailable(s)).toBe(false);
+    }
+  });
 });
 
 /**

@@ -747,7 +747,9 @@ export function greetingConfirmedFirstName(
  *
  * - A stated date of birth is replaced only when it is absent or an explicit
  *   placeholder ("unknown", "n/a", "none", "unavailable", the identity ask's own
- *   list, `hasUsableOnCallDob`). A date that is there and does not read
+ *   list, `hasUsableOnCallDob`; and every form `create_ticket` reads as no date,
+ *   `saysTheDobIsUnavailable`: "DOB not available — B2B inquiry", "not provided
+ *   - caller provider's office", Codex P2 on #478). A date that is there and does not read
  *   ("February 30, 1960") carries nothing: `validatedPatientFor` cannot see a
  *   conflict in it, so carrying would put the record's date over whatever the
  *   caller actually said.
@@ -765,6 +767,29 @@ export function greetingConfirmedFirstName(
  *   compared by person, not by object, so a later lookup that re-reads the
  *   same person's schedule does not make the greeting stale.
  */
+/**
+ * The model's words for "there is no date of birth": the forms `create_ticket`
+ * has accepted as no date since the B2B path (`DOB not available — B2B inquiry
+ * from ...`, the Grok body's own instruction) and v190 (`not provided - caller
+ * provider's office`, `declined`, `doesn't know`). One copy, read by
+ * `create_ticket` and by `escalationWithConfirmedRecord`, so a placeholder the
+ * filing tool reads as no date is never read as a date that blocks the carry
+ * (Codex P2 on #478, comment 4571107465). A blank is not one of them: the
+ * caller of this decides what a blank means.
+ */
+export function saysTheDobIsUnavailable(dob: string | undefined): boolean {
+  const t = (dob ?? '').toLowerCase();
+  if (!t.trim()) return false;
+  return t.includes('not available') || t.includes('n/a') ||
+    t.includes('unknown') || t.includes('b2b') ||
+    t.includes('unavailable') || t.includes('none') ||
+    // v190: the model's own words for "the caller cannot give it" — on
+    // CAbccc433f0627622f50d32ff4abd7cec8 it wrote "not provided - caller
+    // provider's office", none of the words above matched, and the
+    // refusal that followed was spoken as a technical issue.
+    /\b(not (provided|given|known)|declined|refused|cannot|can't|doesn't know|does not know|don't know|do not know)\b/.test(t);
+}
+
 export function escalationWithConfirmedRecord<
   P extends { patient_first_name?: string; patient_last_name?: string; patient_dob?: string },
 >(
@@ -776,7 +801,7 @@ export function escalationWithConfirmedRecord<
   if (!named) return params;
   const stated = params.patient_dob?.trim();
   const statedReads = Boolean(stated && readDobQuietly(stated));
-  if (stated && !statedReads && hasUsableOnCallDob(stated)) return params;
+  if (stated && !statedReads && hasUsableOnCallDob(stated) && !saysTheDobIsUnavailable(stated)) return params;
   const heldNow = validatedPatientFor(callSid);
   const greetingIsStale = confirmed !== undefined && !greetingConfirmedMatches(confirmed, confirmed, heldNow);
   if (greetingIsStale && answersToTheGreetingPerson(confirmed, named, params.patient_last_name)) {
@@ -2199,15 +2224,7 @@ The ticket will include schedule context (last appointment info) automatically.`
 
       // B2B callers may not have patient DOB — accept placeholder values and skip validation
       const dobLower = params.date_of_birth?.toLowerCase() || '';
-      const isB2bNoDob = dobLower.includes('not available') || dobLower.includes('n/a') || 
-                         dobLower.includes('unknown') || dobLower.includes('b2b') ||
-                         dobLower.includes('unavailable') || dobLower.includes('none') ||
-                         dobLower === '' ||
-                         // v190: the model's own words for "the caller cannot give it" — on
-                         // CAbccc433f0627622f50d32ff4abd7cec8 it wrote "not provided - caller
-                         // provider's office", none of the words above matched, and the
-                         // refusal that followed was spoken as a technical issue.
-                         /\b(not (provided|given|known)|declined|refused|cannot|can't|doesn't know|does not know|don't know|do not know)\b/.test(dobLower);
+      const isB2bNoDob = dobLower === '' || saysTheDobIsUnavailable(params.date_of_birth);
       
       let parsedDOB = isB2bNoDob ? null : parseDateOfBirth(params.date_of_birth);
       // ASK ONCE, THEN FILE ANYWAY. Until 2026-09-17 this refusal had no
