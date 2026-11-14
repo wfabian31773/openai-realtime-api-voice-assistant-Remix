@@ -1792,6 +1792,18 @@ import { callEnvironment } from "./callRecord";
  * Above main's v227 (#466, `45c2fb67`), which it contains along with v226
  * (#474, `159a85b6`). No migration.
  */
+/*
+ * v232 (2026-11-14): the records caller's answer reaches the ticket.
+ * `file_records_ticket` asks how and where once each (v188), and the model
+ * re-sends its first arguments after the caller answers, so the spent ask
+ * filed "Delivery: NOT CAPTURED" on requests whose caller had said "By fax."
+ * The bridge keeps, per call, the method the caller named in answer to the
+ * method question and which destinations were given (method names only;
+ * spokenRecordsDelivery.ts); the tool uses them only to fill a gap the model
+ * left. A destination is never read from the transcript: the fax readback
+ * reader drew three review rounds on #482 and was withdrawn (the #476
+ * ruling). Above main's v230 (#477, `664357cd`). No migration.
+ */
 /**
  * v233 — A SCHEDULING WORD THAT REPORTS A VISIT IS NOT A BOOKING (2026-11-14).
  * On the optical and tech lines a request about drops or glasses went to the
@@ -1799,9 +1811,9 @@ import { callEnvironment } from "./callRecord";
  * asked for a same-day callback, said a visit was rescheduled, or named the
  * exam the glasses came from (`schedulingWordsReportAVisit`). Over the 14 days
  * 2026-10-31..11-13, 427 optical, surgery and tech agent tickets carried a
- * scheduling cue and a drug, drop or eyewear word; 6 change department, all 6
- * to where staff had moved them. Above main's v230 (#477, `664357cd`), which
- * it contains. No migration.
+ * scheduling cue and a drug, drop or eyewear word; 4 change department, all 4
+ * to where staff had moved them. Above main's v232 (#482, `cbe56a92`), which
+ * it contains along with v230 (#477, `664357cd`). No migration.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
   "voice-runtime-v233-a-visit-that-happened-is-not-a-booking-20261114";
