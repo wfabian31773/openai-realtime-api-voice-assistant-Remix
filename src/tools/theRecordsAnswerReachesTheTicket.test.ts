@@ -154,6 +154,8 @@ describe('the corpus: twelve records tickets whose caller said how, 2026-11-12/1
     expect(description(payload)).toContain('Send to: given by the caller on the call, in the call transcript on this ticket');
     expect(description(payload)).not.toContain('Send to: NOT CAPTURED');
     expect(answers[1]).toMatchObject({ method_heard: true, send_to_heard: 'stated' });
+    // The model is not told to ask where again: the caller already said.
+    expect(answers[1].note_destination).toBeUndefined();
   });
 
   it('VA-84499 (CAe82269913472022d8aa00edc85f0c87f): fax, the number, read back, yes', async () => {
@@ -365,6 +367,24 @@ describe('what the model sends still wins, and only an answer to the question co
     expect(answers[0].missingFields).toEqual(['date_range']);
   });
 
+  it('on the clock, a destination given but not read whole is not asked again either: only the dates are', async () => {
+    const { answers } = await replay('CA' + 'a9'.repeat(16), 'VA-232-9', [
+      [METHOD_Q, 'CALLER: By email.', `AGENT: ${DELIVERY_DESTINATION_QUESTION.email}`, 'CALLER: Test at example dot com.'],
+      'file',
+    ], PATIENT_NO_LINK);
+    expect(answers[0].success).toBe(false);
+    expect(answers[0].missingFields).toEqual(['date_range']);
+  });
+
+  it('a readback that names the callback is not the fax, however the agent got there', async () => {
+    const { answers } = await replay('CA' + 'aa'.repeat(16), 'VA-232-10', [
+      [METHOD_Q, 'CALLER: Fax.', "AGENT: What's the fax number?", 'CALLER: Hold on.',
+        'AGENT: I have your callback as 2 0 2 5 5 5 0 1 7 5. Did I get that right?', 'CALLER: Yes.'],
+      'file',
+    ]);
+    expect(answers[0].message).toBe(DELIVERY_DESTINATION_QUESTION.fax);
+  });
+
   it('a request whose signing link collects delivery never reads the transcript', async () => {
     const sid = 'CA' + 'a8'.repeat(16);
     noteRecordsDelivery(sid, [METHOD_Q, 'CALLER: Fax.']);
@@ -402,6 +422,16 @@ describe('the store', () => {
     ]);
     expect(h.fax).toBeUndefined();
     expect(h.given).toContain('fax');
+  });
+
+  it('a number read back after the caller chose email is not a fax number', () => {
+    const h = readRecordsDelivery([
+      METHOD_Q, 'CALLER: Email.', 'CALLER: 2 0 2 5 5 5 0 1 7 6.',
+      'AGENT: Two zero two, five five five, zero one seven six. Did I get that right?', 'CALLER: Yes.',
+    ]);
+    expect(h.method).toBe('email');
+    expect(h.fax).toBeUndefined();
+    expect(h.given).not.toContain('fax');
   });
 
   it('expires with the call', () => {
