@@ -52,7 +52,7 @@ import { otherReasonFor } from './otherReason';
 import { loggableLookupError } from '../services/loggableTicketingError';
 import { verifiedDobFor, verifiedIdentityFor } from './verifiedIdentity';
 import { spokenDobFor } from './spokenDob';
-import { recordsDeliveryHeard, formatFax } from './spokenRecordsDelivery';
+import { recordsDeliveryHeard } from './spokenRecordsDelivery';
 import {
   DELIVERY_METHOD_QUESTION,
   DELIVERY_DESTINATION_QUESTION,
@@ -1023,11 +1023,12 @@ registerTool({
      * WHAT THE CALLER SAID, WHEN THE MODEL DID NOT PASS IT ON (v232). After
      * the method ask the model mostly calls this tool again with its first
      * arguments, word for word, so the caller's "By fax." never arrived and
-     * the spent ask filed "Delivery: NOT CAPTURED". The bridge keeps what the
-     * caller answered to the method question, and to the destination
+     * the spent ask filed "Delivery: NOT CAPTURED". The bridge keeps the
+     * method the caller answered, and whether they answered the destination
      * question, per call (spokenRecordsDelivery.ts). An argument the model
-     * DID send always wins; the transcript only fills a gap, and only on a
-     * request this tool would have asked.
+     * DID send always wins; the transcript only fills a method the model
+     * omitted, and only on a request this tool would have asked. No
+     * destination is ever read from it: the one on the ticket is the model's.
      */
     const heard = deliveryAsked ? recordsDeliveryHeard(callSid) : undefined;
     let methodHeard = false;
@@ -1055,21 +1056,15 @@ registerTool({
     // A pickup needs no destination, and an email address the caller already
     // spelled for the form is the destination for an email of the records.
     const statedDeliverTo = str(input.deliver_to);
-    // A fax number the agent read back and the caller confirmed (v232). The
-    // agent's own words, not a transcription, and the caller said yes to them.
-    const heardFax =
-      deliveryMethod === 'fax' && heard?.fax
-        ? `fax ${formatFax(heard.fax)} (read back to the caller and confirmed on the call)`
-        : '';
     const effectiveDeliverTo =
       statedDeliverTo ||
       (deliveryMethod === 'pickup' ? 'pick up at the office' : '') ||
-      (deliveryMethod === 'email' && str(input.email) ? str(input.email) : '') ||
-      heardFax;
-    // The caller answered the destination question, but nothing here can read
-    // the answer whole (an email address, a mailing address, a number the
-    // agent did not read back). They are not asked again, and the ticket
-    // points the clerk at the transcript it carries (v232).
+      (deliveryMethod === 'email' && str(input.email) ? str(input.email) : '');
+    // The caller answered the destination question, and the model did not
+    // pass it on. The destination is never read from the transcript (a fax
+    // number read back and confirmed was, and was withdrawn after three review
+    // rounds on #482, the #476 ruling): the caller is not asked again, and the
+    // ticket points the clerk at the recording (v232).
     const destinationHeard =
       deliveryAsked && !effectiveDeliverTo && Boolean(deliveryMethod && deliveryMethod !== 'unspecified' && heard?.given.includes(deliveryMethod));
     const destinationQuestion =
@@ -1807,7 +1802,7 @@ registerTool({
       // v232: closed set, no PHI, on the timeline allow-list. How often the
       // transcript, not the model, carried the method or the destination.
       ...(methodHeard ? { method_heard: true } : {}),
-      ...(heardFax && deliverTo === heardFax ? { send_to_heard: 'fax' } : destinationHeard ? { send_to_heard: 'stated' } : {}),
+      ...(destinationHeard ? { send_to_heard: 'stated' } : {}),
       // v225: closed set, no PHI, on the timeline allow-list: how many
       // records-line filings were a correction or a cancellation is a count.
       ...(notAccess ? { records_work: notAccess } : {}),

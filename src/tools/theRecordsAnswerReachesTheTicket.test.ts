@@ -20,13 +20,19 @@
  *
  * The result, per ticket: the method now reaches the ticket on 11 of 12 (the
  * twelfth answered "Via portal", which is not a method, and still files NOT
- * CAPTURED). On 7 the destination was said before the model filed: a fax
- * number the agent read back and the caller confirmed lands on 5, and on 2
- * (a garbled readback, an email address) the ticket points the clerk at the
- * call transcript instead of saying NOT CAPTURED. On 4 the model filed before
- * the destination was said, so the tool now asks for it once; on 3 of those
- * the caller gave it later in the same call, modelled here after the ask, and
- * on 1 never.
+ * CAPTURED). On 7 the destination was said before the model filed, and the
+ * ticket points the clerk at the recording instead of saying NOT CAPTURED. On
+ * 4 the model filed before the destination was said, so the tool now asks for
+ * it once; on 3 of those the caller gave it later in the same call, modelled
+ * here after the ask, and on 1 never.
+ *
+ * NO DESTINATION IS READ FROM THE TRANSCRIPT. The first version wrote a fax
+ * number the agent read back and the caller confirmed on 6 of these tickets
+ * (VA-84258, VA-84499, VA-84715, VA-84721, VA-84999, VA-85175). It drew three
+ * review rounds on #482, each a way to file a number the caller had taken
+ * back, and was withdrawn on the #476 ruling ("Shrink the reader"). Those 6
+ * now carry the pointer, and every case below asserts no number from the
+ * transcript reaches the ticket.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { readFileSync } from 'node:fs';
@@ -125,7 +131,7 @@ async function replay(
 const description = (p: Record<string, unknown> | undefined) => String(p?.description ?? '');
 
 describe('the corpus: twelve records tickets whose caller said how, 2026-11-12/13', () => {
-  it('VA-84258 (CA28c8fd1a64c9d0d32c1e6a200f06da08): the method and the fax number in one answer, read back and confirmed', async () => {
+  it('VA-84258 (CA28c8fd1a64c9d0d32c1e6a200f06da08): the method and the fax number in one answer: the ticket points at the recording', async () => {
     const { answers, payload } = await replay('CA28c8fd1a64c9d0d32c1e6a200f06da08', 'VA-84258', [
       'file',
       [METHOD_Q, 'CALLER: Hello? Are you still there?', `AGENT: Yes, I'm still here. ${DELIVERY_METHOD_QUESTION}`,
@@ -138,8 +144,10 @@ describe('the corpus: twelve records tickets whose caller said how, 2026-11-12/1
     expect(answers[1].success, JSON.stringify(answers[1])).toBe(true);
     expect(payload?.deliveryMethodRequested).toBe('fax');
     expect(description(payload)).toContain('Delivery: by fax');
-    expect(description(payload)).toContain('Send to: fax 202-555-0161 (read back to the caller and confirmed on the call)');
-    expect(answers[1]).toMatchObject({ method_heard: true, send_to_heard: 'fax' });
+    expect(description(payload)).toContain('Send to: given by the caller on the call');
+    expect(JSON.stringify(payload)).not.toContain('202-555-0161');
+    expect(JSON.stringify(payload)).not.toContain('2025550161');
+    expect(answers[1]).toMatchObject({ method_heard: true, send_to_heard: 'stated' });
     expect(answers[1].note_destination).toBeUndefined();
   });
 
@@ -159,7 +167,7 @@ describe('the corpus: twelve records tickets whose caller said how, 2026-11-12/1
     expect(answers[1].note_destination).toBeUndefined();
   });
 
-  it('VA-84499 (CAe82269913472022d8aa00edc85f0c87f): fax, the number, read back, yes', async () => {
+  it('VA-84499 (CAe82269913472022d8aa00edc85f0c87f): fax, the number, read back, yes: the method, the pointer, no number', async () => {
     const { answers, payload } = await replay('CAe82269913472022d8aa00edc85f0c87f', 'VA-84499', [
       'file',
       [METHOD_Q, 'CALLER: Fax.', "AGENT: Fax it is. What's the fax number?", 'CALLER: 2 0 2 5 5 5 0 1 6 3.',
@@ -167,7 +175,9 @@ describe('the corpus: twelve records tickets whose caller said how, 2026-11-12/1
       'file',
     ]);
     expect(answers[1].success).toBe(true);
-    expect(description(payload)).toContain('Send to: fax 202-555-0163 (read back to the caller and confirmed on the call)');
+    expect(description(payload)).toContain('Send to: given by the caller on the call');
+    expect(JSON.stringify(payload)).not.toContain('202-555-0163');
+    expect(JSON.stringify(payload)).not.toContain('2025550163');
   });
 
   it('VA-84599 (CAeaec9cf1b705afc2b630a35d011d30bf): an email address spelled and confirmed earlier, then "Oh, by email."', async () => {
@@ -215,7 +225,7 @@ describe('the corpus: twelve records tickets whose caller said how, 2026-11-12/1
     expect(description(payload)).not.toContain('202-555-0164');
   });
 
-  it('VA-84715 (CAa974773f87a9643247a7dbbb0ac7c417): fax, the number in digits, read back in digits, yes', async () => {
+  it('VA-84715 (CAa974773f87a9643247a7dbbb0ac7c417): fax, the number in digits, read back in digits, yes: the pointer, no number', async () => {
     const { answers, payload } = await replay('CAa974773f87a9643247a7dbbb0ac7c417', 'VA-84715', [
       'file',
       [METHOD_Q, 'CALLER: By fax.', "AGENT: Fax is fine. What's the fax number?", 'CALLER: 2 0 2 5 5 5 oh 1 6 5.',
@@ -223,10 +233,12 @@ describe('the corpus: twelve records tickets whose caller said how, 2026-11-12/1
       'file',
     ]);
     expect(answers[1].success).toBe(true);
-    expect(description(payload)).toContain('Send to: fax 202-555-0165 (read back to the caller and confirmed on the call)');
+    expect(description(payload)).toContain('Send to: given by the caller on the call');
+    expect(JSON.stringify(payload)).not.toContain('202-555-0165');
+    expect(JSON.stringify(payload)).not.toContain('2025550165');
   });
 
-  it('VA-84721 (CA1e8801491c999837badfcbbae8fc7993): "Fax" — the tool asks the number, the caller confirms it', async () => {
+  it('VA-84721 (CA1e8801491c999837badfcbbae8fc7993): "Fax" — the tool asks the number once, the caller gives it: the pointer, no number', async () => {
     const { answers, payload } = await replay('CA1e8801491c999837badfcbbae8fc7993', 'VA-84721', [
       'file',
       [`${METHOD_Q} [interrupted]`, 'CALLER: Fax'],
@@ -237,10 +249,12 @@ describe('the corpus: twelve records tickets whose caller said how, 2026-11-12/1
     ]);
     expect(answers[1].missingFields).toEqual(['deliver_to']);
     expect(answers[2].success, JSON.stringify(answers[2])).toBe(true);
-    expect(description(payload)).toContain('Send to: fax 202-555-0166 (read back to the caller and confirmed on the call)');
+    expect(description(payload)).toContain('Send to: given by the caller on the call');
+    expect(JSON.stringify(payload)).not.toContain('202-555-0166');
+    expect(JSON.stringify(payload)).not.toContain('2025550166');
   });
 
-  it('VA-84999 (CA1d0b53c198254b1a7d989ab5d3a14e5a): a fax number given in pieces with a correction, then read back and confirmed', async () => {
+  it('VA-84999 (CA1d0b53c198254b1a7d989ab5d3a14e5a): a fax number given in pieces with a correction, then read back: the pointer, no number', async () => {
     const { answers, payload } = await replay('CA1d0b53c198254b1a7d989ab5d3a14e5a', 'VA-84999', [
       'file',
       [METHOD_Q, 'CALLER: By fax.', "AGENT: Fax is good. What's the fax number?", 'CALLER: 2 0 2.', 'CALLER: 2 0 2 5 5 4.',
@@ -250,7 +264,9 @@ describe('the corpus: twelve records tickets whose caller said how, 2026-11-12/1
       'file',
     ]);
     expect(answers[1].success).toBe(true);
-    expect(description(payload)).toContain('Send to: fax 202-555-0167 (read back to the caller and confirmed on the call)');
+    expect(description(payload)).toContain('Send to: given by the caller on the call');
+    expect(JSON.stringify(payload)).not.toContain('202-555-0167');
+    expect(JSON.stringify(payload)).not.toContain('2025550167');
   });
 
   it('VA-85051 (CA9e9a07435f452151aae1560ac5cb736a): "By, via fax." and nothing more — the method reaches the ticket, the number is asked once', async () => {
@@ -267,7 +283,7 @@ describe('the corpus: twelve records tickets whose caller said how, 2026-11-12/1
     expect(description(payload)).toContain('Send to: NOT CAPTURED');
   });
 
-  it('VA-85175 (CA39d5c02e4266a28f9f29a530d361603b): "Through our portal or through fax." is fax', async () => {
+  it('VA-85175 (CA39d5c02e4266a28f9f29a530d361603b): "Through our portal or through fax." is fax, and the number is not read', async () => {
     const { answers, payload } = await replay('CA39d5c02e4266a28f9f29a530d361603b', 'VA-85175', [
       'file',
       [METHOD_Q, 'CALLER: Through our portal or through fax.',
@@ -278,7 +294,9 @@ describe('the corpus: twelve records tickets whose caller said how, 2026-11-12/1
     ]);
     expect(answers[1].success).toBe(true);
     expect(description(payload)).toContain('Delivery: by fax');
-    expect(description(payload)).toContain('Send to: fax 202-555-0168 (read back to the caller and confirmed on the call)');
+    expect(description(payload)).toContain('Send to: given by the caller on the call');
+    expect(JSON.stringify(payload)).not.toContain('202-555-0168');
+    expect(JSON.stringify(payload)).not.toContain('2025550168');
   });
 
   it('VA-85323 (CAb69247af316295214ea9617c27863649): "Email." — the tool asks the address, the caller gives it and confirms the readback', async () => {
@@ -308,7 +326,7 @@ describe('what the model sends still wins, and only an answer to the question co
     expect(description(payload)).toContain('Send to: 1 Example Way, Testville');
   });
 
-  it('a destination the model sent beats a confirmed fax readback', async () => {
+  it('a destination the model sent is the one on the ticket, whatever was read back on the call', async () => {
     const { answers, payload } = await replay('CA' + 'a2'.repeat(16), 'VA-232-2', [
       [METHOD_Q, 'CALLER: Fax.', "AGENT: What's the fax number?", 'CALLER: 2 0 2 5 5 5 0 1 7 0.',
         'AGENT: Two zero two, five five five, zero one seven zero. Did I get that right?', 'CALLER: Yes.'],
@@ -358,7 +376,7 @@ describe('what the model sends still wins, and only an answer to the question co
     expect(answers[0].missingFields).toEqual(['delivery_method']);
   });
 
-  it('on the clock, a confirmed fax number satisfies the destination: only the dates are asked', async () => {
+  it('on the clock, a fax number given to the fax question is not asked again: only the dates are', async () => {
     const { answers } = await replay('CA' + 'a7'.repeat(16), 'VA-232-7', [
       [METHOD_Q, 'CALLER: Fax.', "AGENT: What's the fax number?", 'CALLER: 2 0 2 5 5 5 0 1 7 3.',
         'AGENT: Two zero two, five five five, zero one seven three. Did I get that right?', 'CALLER: Yes.'],
@@ -377,7 +395,7 @@ describe('what the model sends still wins, and only an answer to the question co
     expect(answers[0].missingFields).toEqual(['date_range']);
   });
 
-  it('a readback that names the callback is not the fax, however the agent got there', async () => {
+  it('a readback that names the callback is not a destination given: the tool still asks for the fax', async () => {
     const { answers } = await replay('CA' + 'aa'.repeat(16), 'VA-232-10', [
       [METHOD_Q, 'CALLER: Fax.', "AGENT: What's the fax number?", 'CALLER: Hold on.',
         'AGENT: I have your callback as 2 0 2 5 5 5 0 1 7 5. Did I get that right?', 'CALLER: Yes.'],
@@ -395,6 +413,22 @@ describe('what the model sends still wins, and only an answer to the question co
     expect(description(payload)).toContain('Send to: given by the caller on the call');
   });
 
+  it('a callback question that mentions the fax is not a destination question: the tool still asks for the fax', async () => {
+    const { answers } = await replay('CA' + 'ae'.repeat(16), 'VA-232-14', [
+      [METHOD_Q, 'CALLER: Fax.', 'AGENT: And a callback number, in case the fax does not go through?', 'CALLER: 2 0 2 5 5 5 0 1 4 2.'],
+      'file',
+    ]);
+    expect(answers[0].message).toBe(DELIVERY_DESTINATION_QUESTION.fax);
+  });
+
+  it('a destination answer that opens with a denial is not a destination given', async () => {
+    const { answers } = await replay('CA' + 'af'.repeat(16), 'VA-232-15', [
+      [METHOD_Q, 'CALLER: Fax.', "AGENT: What's the fax number?", 'CALLER: No, not 2 0 2 5 5 5 0 1 9 0, I need to find the right one.'],
+      'file',
+    ]);
+    expect(answers[0].message).toBe(DELIVERY_DESTINATION_QUESTION.fax);
+  });
+
   it('a number given to the email question is not a fax destination', async () => {
     const { answers } = await replay('CA' + 'ac'.repeat(16), 'VA-232-12', [
       [`AGENT: ${DELIVERY_DESTINATION_QUESTION.email}`, 'CALLER: 2 0 2 5 5 5 0 1 7 8.'],
@@ -404,7 +438,7 @@ describe('what the model sends still wins, and only an answer to the question co
     expect(answers[0].message).toBe(DELIVERY_DESTINATION_QUESTION.fax);
   });
 
-  it('when the signing form collects delivery, a fax read back on the call does not replace it', async () => {
+  it('when the signing form collects delivery, nothing read back on the call is used', async () => {
     const sid = 'CA' + 'ad'.repeat(16);
     noteRecordsDelivery(sid, [METHOD_Q, 'CALLER: Fax.', "AGENT: What's the fax number?", 'CALLER: 2 0 2 5 5 5 0 1 7 9.',
       'AGENT: Two zero two, five five five, zero one seven nine. Did I get that right?', 'CALLER: Yes.']);
@@ -434,161 +468,63 @@ describe('what the model sends still wins, and only an answer to the question co
 });
 
 /**
- * A CONFIRMED FAX IS ONLY GOOD UNTIL THE CALLER REPLACES IT (Codex P2 on #482,
- * head d776a6d). A confirmed number written onto a records ticket as
- * "confirmed" after the caller gave another one sends a chart to the wrong
- * place. Anything later that puts the fax in question clears it, and the
- * ticket falls back to the transcript pointer until a new number is read back
- * and confirmed.
+ * THE RULE THIS FILE PINS (withdrawn on #482, the #476 ruling): a number the
+ * agent read back and the caller confirmed is NOT put on the ticket. The
+ * destination on a records ticket is the model's `deliver_to`, as on `main`;
+ * when the model omits it and the caller gave one, the ticket points the clerk
+ * at the recording. Three review rounds found three ways a transcript-read
+ * number could be one the caller had taken back.
  */
-describe('a later destination replaces a confirmed fax', () => {
-  const CONFIRMED_OLD = [
+describe('a destination is never read from the transcript', () => {
+  const READ_BACK = [
     METHOD_Q, 'CALLER: Fax.', "AGENT: What's the fax number?", 'CALLER: 2 0 2 5 5 5 0 1 8 1.',
-    'AGENT: Two zero two, five five five, zero one eight one. Did I get that right?', 'CALLER: Yes.',
+    'AGENT: Two zero two, five five five, zero one eight one. Did I get that right?',
   ];
+  const NUMBER = ['202-555-0181', '2025550181', '555-0181'];
 
-  it('a new fax number given after the confirmation is never filed as the old one', async () => {
+  it('a confirmed readback does not put the number on the ticket, and the pointer does', async () => {
     const { answers, payload } = await replay('CA' + 'd1'.repeat(16), 'VA-232-20', [
-      [...CONFIRMED_OLD, 'AGENT: Is there anything else?',
-        'CALLER: Actually, can you send it to a different fax? 2 0 2 5 5 5 0 1 9 9.', 'AGENT: Sure.'],
+      [...READ_BACK, 'CALLER: Yes.'],
       'file',
     ]);
     expect(answers[0].success, JSON.stringify(answers[0])).toBe(true);
-    expect(description(payload)).not.toContain('202-555-0181');
-    expect(description(payload)).toContain('Send to: given by the caller on the call');
+    expect(description(payload)).toContain('Send to: given by the caller on the call, in the call transcript on this ticket');
+    for (const n of NUMBER) {
+      expect(JSON.stringify(payload), n).not.toContain(n);
+      expect(JSON.stringify(answers[0]), n).not.toContain(n);
+    }
+    expect(answers[0].send_to_heard).toBe('stated');
   });
 
-  it('the new number, once read back and confirmed, is the one on the ticket', async () => {
+  it('the round-3 shape: "Yes, actually that fax number is wrong" files the pointer, never a number', async () => {
     const { payload } = await replay('CA' + 'd2'.repeat(16), 'VA-232-21', [
-      [...CONFIRMED_OLD, 'CALLER: Wait, that is the old fax. Use 2 0 2 5 5 5 0 1 9 8.',
-        'AGENT: Two zero two, five five five, zero one nine eight. Did I get that right?', 'CALLER: Yes.'],
+      [...READ_BACK, 'CALLER: Yes, actually that fax number is wrong, the last digit is two.'],
       'file',
     ]);
-    expect(description(payload)).toContain('Send to: fax 202-555-0198 (read back to the caller and confirmed on the call)');
-    expect(description(payload)).not.toContain('202-555-0181');
+    expect(description(payload)).toContain('Send to: given by the caller on the call');
+    for (const n of NUMBER) expect(JSON.stringify(payload), n).not.toContain(n);
   });
 
-  it('a different number read back and not confirmed clears the old one', () => {
-    const h = readRecordsDelivery([
-      ...CONFIRMED_OLD, "AGENT: What's the fax number?", 'CALLER: 2 0 2 5 5 5 0 1 9 7.',
-      'AGENT: Two zero two, five five five, zero one nine seven. Did I get that right?', 'CALLER: Hold on.',
-    ]);
-    expect(h.fax).toBeUndefined();
-    expect(h.given).toContain('fax');
-  });
-
-  it('a correction with no number clears it too', () => {
-    expect(readRecordsDelivery([...CONFIRMED_OLD, 'CALLER: Sorry, that fax number is wrong.']).fax).toBeUndefined();
-  });
-
-  it('what does not put the fax in question leaves it: the same number again, a date of birth, a callback number', () => {
-    expect(readRecordsDelivery([...CONFIRMED_OLD, 'CALLER: Yes, 2 0 2 5 5 5 0 1 8 1.']).fax).toBe('2025550181');
-    expect(readRecordsDelivery([...CONFIRMED_OLD,
-      'AGENT: May I please have the date of birth, starting with the month, then the day, then the year?',
-      'CALLER: 0 1 0 2 1 9 5 0.']).fax).toBe('2025550181');
-    expect(readRecordsDelivery([...CONFIRMED_OLD,
-      "AGENT: And what's the best number to reach you?", 'CALLER: 2 0 2 5 5 5 0 1 4 2.']).fax).toBe('2025550181');
+  it('the store holds a method and a list of method names, never a destination', () => {
+    const h = readRecordsDelivery([...READ_BACK, 'CALLER: Yes.']);
+    expect(Object.keys(h).sort()).toEqual(['given', 'method']);
+    expect(h).toEqual({ method: 'fax', given: ['fax'] });
   });
 });
 
-describe('each replacement rule on its own', () => {
-  const CONFIRMED_OLD = [
-    METHOD_Q, 'CALLER: Fax.', "AGENT: What's the fax number?", 'CALLER: 2 0 2 5 5 5 0 1 8 3.',
-    'AGENT: Two zero two, five five five, zero one eight three. Did I get that right?', 'CALLER: Yes.',
-  ];
-
-  it('a different number read back and not confirmed, given in pieces too short to read: cleared by the readback alone', () => {
-    const h = readRecordsDelivery([
-      ...CONFIRMED_OLD, 'AGENT: What fax number should we use instead?',
-      'CALLER: 2 0 2.', 'CALLER: 5 5 5.', 'CALLER: 0 1 9 6.',
-      'AGENT: Two zero two, five five five, zero one nine six. Did I get that right?', 'CALLER: One second.',
-    ]);
-    expect(h.fax).toBeUndefined();
+describe('a method switch outside the question forgets the method', () => {
+  it('"Actually, can you email it instead?" leaves no method: the tool asks it, never files fax', async () => {
+    const lines = [METHOD_Q, 'CALLER: Fax.', 'AGENT: Okay.', 'CALLER: Actually, can you email it instead?'];
+    expect(readRecordsDelivery(lines).method).toBeUndefined();
+    const { answers } = await replay('CA' + 'e1'.repeat(16), 'VA-232-30', [lines, 'file']);
+    expect(answers[0].missingFields).toEqual(['delivery_method']);
   });
 
-  it('the yes that confirms is not read as a correction, however it is worded', () => {
-    expect(readRecordsDelivery([
-      METHOD_Q, 'CALLER: Fax.', "AGENT: What's the fax number?", 'CALLER: 2 0 2 5 5 5 0 1 8 3.',
-      'AGENT: Two zero two, five five five, zero one eight three. Did I get that right?',
-      "CALLER: Yes, that's the right fax, not the old one.",
-    ]).fax).toBe('2025550183');
-  });
-
-  it('answering the method question again with fax keeps it; a contact email is not a switch', () => {
-    expect(readRecordsDelivery([...CONFIRMED_OLD, METHOD_Q, 'CALLER: Fax, please.']).fax).toBe('2025550183');
-    const h = readRecordsDelivery([...CONFIRMED_OLD,
-      'AGENT: Is there an email we can reach you at?', 'CALLER: My email is T E S T at example dot com.']);
-    expect(h.fax).toBe('2025550183');
-    expect(h.method).toBe('fax');
-  });
-
-  it('a switch with no fax held still forgets the method the caller chose', () => {
-    const h = readRecordsDelivery([METHOD_Q, 'CALLER: Fax.', 'AGENT: Okay.', 'CALLER: Actually, mail them instead.']);
-    expect(h.method).toBeUndefined();
+  it('naming the same method again, or answering the question again, is not a switch away', () => {
     expect(readRecordsDelivery([METHOD_Q, 'CALLER: Fax.', 'AGENT: Okay.', 'CALLER: Actually, fax is fine.']).method).toBe('fax');
-  });
-
-  it('a corrected date of birth and a new callback number are not a new fax', () => {
-    expect(readRecordsDelivery([...CONFIRMED_OLD,
-      'AGENT: And the date of birth, starting with the month?', 'CALLER: Actually, 0 1 0 3 1 9 5 0.']).fax).toBe('2025550183');
-    expect(readRecordsDelivery([...CONFIRMED_OLD,
-      'AGENT: Anything else?', 'CALLER: Actually, my cell is 2 0 2 5 5 5 0 1 4 3.']).fax).toBe('2025550183');
-  });
-
-  it('a different number given where a fax is meant clears it, with no fax or correction word in the answer', () => {
-    expect(readRecordsDelivery([...CONFIRMED_OLD,
-      'AGENT: Is there a fax number for the other office?', 'CALLER: 2 0 2 5 5 5 0 1 9 5.']).fax).toBeUndefined();
-    expect(readRecordsDelivery([...CONFIRMED_OLD,
-      'AGENT: Anything else?', 'CALLER: Their fax is 2 0 2 5 5 5 0 1 9 4.']).fax).toBeUndefined();
-    expect(readRecordsDelivery([...CONFIRMED_OLD,
-      'AGENT: Anything else?', 'CALLER: Please send it to 2 0 2 5 5 5 0 1 9 3.']).fax).toBeUndefined();
-  });
-
-  it('a number said as something else keeps it: a member ID, a corrected callback number, the same number read back again', () => {
-    expect(readRecordsDelivery([...CONFIRMED_OLD,
-      'AGENT: Anything else?', 'CALLER: Her member ID is 2 0 2 5 5 5 0 1 7 7.']).fax).toBe('2025550183');
-    expect(readRecordsDelivery([...CONFIRMED_OLD,
-      "AGENT: What's the best number to reach you?", "CALLER: Actually, it's 2 0 2 5 5 5 0 1 4 4."]).fax).toBe('2025550183');
-    expect(readRecordsDelivery([...CONFIRMED_OLD,
-      'AGENT: So that is two zero two, five five five, zero one eight three, right?', 'CALLER: One moment.']).fax).toBe('2025550183');
-  });
-
-  it('the last seven digits of the same number are the same number; a correction word clears it anyway (the safe direction)', () => {
-    expect(readRecordsDelivery([...CONFIRMED_OLD, 'CALLER: The fax ending 5 5 5 0 1 8 3.']).fax).toBe('2025550183');
-    expect(readRecordsDelivery([...CONFIRMED_OLD, "CALLER: Actually that's fax 5 5 5 0 1 8 3."]).fax).toBeUndefined();
-  });
-});
-
-describe('a caller who switches method after confirming a fax', () => {
-  const CONFIRMED = [
-    METHOD_Q, 'CALLER: Fax.', "AGENT: What's the fax number?", 'CALLER: 2 0 2 5 5 5 0 1 8 2.',
-    'AGENT: Two zero two, five five five, zero one eight two. Did I get that right?', 'CALLER: Yes.',
-  ];
-
-  it('answering the method question again with email: the fax is not used, even if the model still sends fax', async () => {
-    for (const [i, method] of [undefined, 'fax'].entries()) {
-      resetGateAttempts();
-      const { payload } = await replay('CA' + `e${i}`.repeat(16), `VA-232-3${i}`, [
-        [...CONFIRMED, METHOD_Q, 'CALLER: Email, please.'],
-        'file',
-      ], method ? { ...PROVIDER, delivery_method: method } : PROVIDER);
-      expect(description(payload), String(method)).not.toContain('202-555-0182');
-    }
-  });
-
-  it('"Actually, email it instead." with no question: the fax is not used, and the store no longer says fax', async () => {
-    const lines = [...CONFIRMED, 'AGENT: Is there anything else?', 'CALLER: Actually, can you email it instead?'];
-    const h = readRecordsDelivery(lines);
-    expect(h.fax).toBeUndefined();
-    expect(h.method).toBeUndefined();
-    for (const [i, method] of [undefined, 'fax', 'email'].entries()) {
-      resetGateAttempts();
-      const { answers, payload } = await replay('CA' + `f${i}`.repeat(16), `VA-232-4${i}`, [
-        lines,
-        'file',
-      ], method ? { ...PROVIDER, delivery_method: method } : PROVIDER);
-      expect(JSON.stringify(answers[0]) + description(payload), String(method)).not.toContain('202-555-0182');
-    }
+    expect(readRecordsDelivery([METHOD_Q, 'CALLER: Fax.', METHOD_Q, 'CALLER: Email, please.']).method).toBe('email');
+    expect(readRecordsDelivery([METHOD_Q, 'CALLER: Fax.', 'AGENT: Is there an email we can reach you at?',
+      'CALLER: My email is T E S T at example dot com.']).method).toBe('fax');
   });
 });
 
@@ -604,35 +540,6 @@ describe('the store', () => {
     expect(recordsDeliveryHeard(sid)?.method).toBe('fax');
     noteRecordsDelivery(sid, [METHOD_Q, 'CALLER: Fax.', METHOD_Q, 'CALLER: Fax or email, either.']);
     expect(recordsDeliveryHeard(sid)).toBeUndefined();
-  });
-
-  it('a denied fax readback clears a fax confirmed before it', () => {
-    const h = readRecordsDelivery([
-      METHOD_Q, 'CALLER: Fax.', "AGENT: What's the fax number?", 'CALLER: 2 0 2 5 5 5 0 1 7 4.',
-      'AGENT: Two zero two, five five five, zero one seven four. Did I get that right?', 'CALLER: Yes.',
-      'AGENT: Two zero two, five five five, zero one seven four. Is that the one?', 'CALLER: No, that is wrong.',
-    ]);
-    expect(h.fax).toBeUndefined();
-    expect(h.given).toContain('fax');
-  });
-
-  it('a number read back after the caller chose email is not a fax number', () => {
-    const h = readRecordsDelivery([
-      METHOD_Q, 'CALLER: Email.', 'CALLER: 2 0 2 5 5 5 0 1 7 6.',
-      'AGENT: Two zero two, five five five, zero one seven six. Did I get that right?', 'CALLER: Yes.',
-    ]);
-    expect(h.method).toBe('email');
-    expect(h.fax).toBeUndefined();
-    expect(h.given).not.toContain('fax');
-  });
-
-  it('a readback of eleven digits is a fax number only when the first is the country code', () => {
-    const lines = (spoken: string) => [
-      METHOD_Q, 'CALLER: Fax.', "AGENT: What's the fax number?", 'CALLER: Here it is.',
-      `AGENT: ${spoken}. Did I get that right?`, 'CALLER: Yes.',
-    ];
-    expect(readRecordsDelivery(lines('One, two zero two, five five five, zero one eight zero')).fax).toBe('2025550180');
-    expect(readRecordsDelivery(lines('Two zero two, five five five, zero one eight zero one')).fax).toBeUndefined();
   });
 
   it('expires with the call', () => {
@@ -654,7 +561,7 @@ describe('the wiring', () => {
 
   it('the records tool reads it through a static import (the Node 20 rule)', () => {
     const tool = src('./medicalRecordsTools.ts');
-    expect(tool).toMatch(/^import \{ recordsDeliveryHeard, formatFax \} from '\.\/spokenRecordsDelivery';$/m);
+    expect(tool).toMatch(/^import \{ recordsDeliveryHeard \} from '\.\/spokenRecordsDelivery';$/m);
     expect(tool).not.toMatch(/import\(['"]\.\/spokenRecordsDelivery['"]\)/);
   });
 });

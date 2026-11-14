@@ -172,12 +172,12 @@ describe('PHI discipline — the allow-list is the safety mechanism', () => {
       callId,
       'file_records_ticket',
       { description: 'Paula Kolterman wants her chart faxed.' },
-      JSON.stringify({ success: true, ticket_number: 'VA-1', method_heard: true, send_to_heard: 'fax' }),
+      JSON.stringify({ success: true, ticket_number: 'VA-1', method_heard: true, send_to_heard: 'stated' }),
       5,
       { agentSlug: 'records' },
     );
     const [ev] = getAzulTimeline(callId)!;
-    expect(ev.outcome).toMatchObject({ method_heard: true, send_to_heard: 'fax' });
+    expect(ev.outcome).toMatchObject({ method_heard: true, send_to_heard: 'stated' });
     expect(JSON.stringify(ev)).not.toContain('Kolterman');
   });
 

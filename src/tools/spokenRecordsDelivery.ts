@@ -1,5 +1,5 @@
 /**
- * HOW AND WHERE THE CALLER SAID THE RECORDS SHOULD GO, READ FROM THE CALL — v232.
+ * HOW THE CALLER SAID THE RECORDS SHOULD GO, READ FROM THE CALL — v232.
  *
  * v188 (operator, 2026-11-08) made `file_records_ticket` ask how the requester
  * wants the records, then where, each ONCE, and file with the gap written on
@@ -31,51 +31,38 @@
  * working, not a parser guessing at free speech (standing instruction 3 is
  * about names; no name is read here).
  *
- * THREE THINGS ARE READ, and each fails toward what the tool did before:
+ * TWO THINGS ARE READ, and neither is a destination:
  *
  *  1. THE METHOD. An agent line that offers at least two of fax, email and
  *     mail, as a question, opens a window; the caller's turns until the next
  *     agent line are the answer. Exactly one method named, and no negation in
  *     the answer, is the method. "Through our portal or through fax" is fax:
  *     portal is not a method, fax is the one they offered that is. Two methods
- *     ("fax or email is fine"), or any "no / not / don't", reads nothing.
- *  2. A FAX NUMBER THE CALLER CONFIRMED. An agent line that reads ONE
- *     ten-digit number back as a question ("… Did I get that right?"), in a
- *     fax context (the line or the caller turn it reads back names fax, or
- *     the nearest earlier agent line that names a destination named the fax,
- *     or the caller chose fax), never in a callback context, and the caller's
- *     next turn says yes. The number is the agent's own words — the
- *     model's text, not a transcription — and the caller heard it and agreed.
- *     A "no" to a fax readback clears any number held. The ticket labels it as
- *     read back and confirmed on the call.
- *  3. THAT A DESTINATION WAS GIVEN, AND FOR WHICH METHOD. An agent line asking
- *     where to send them (a fax number, an email or mailing address, "where
- *     should these be sent"), answered in the shape it asked for: a number of
+ *     ("fax or email is fine"), or any "no / not / don't", reads nothing. A
+ *     later "Actually, email it instead" outside the question forgets the
+ *     method rather than reading the new one, so a switch never leaves the
+ *     old method on the ticket and nothing is read outside a window.
+ *  2. THAT A DESTINATION WAS GIVEN, AND FOR WHICH METHOD. An agent line asking
+ *     where to send them, answered in the shape it asked for: a number of
  *     seven digits or more for a fax, an email address for an email, a
- *     street number and words for a mailing address — or a destination the
- *     agent read back and the caller affirmed. It does not say WHAT was given
- *     (only the fax reader does): it says the tool must not ask the caller a
- *     second time, and the ticket points the clerk at the call transcript
- *     instead of "NOT CAPTURED — confirm". Kept per method, so an email
- *     address given for a callback never stands in for a fax number.
- *  4. A CONFIRMED FAX IS ONLY GOOD UNTIL THE CALLER REPLACES IT (Codex P2 on
- *     #482). Anything later that puts it in question clears it, and the
- *     ticket falls back to the transcript pointer until a new number is read
- *     back and confirmed: a caller turn with a different number in a fax
- *     context (it names the fax or a correction, or answers a fax or
- *     destination question; never a callback or date-of-birth answer), a
- *     caller turn naming the fax with a correction or a negation ("that fax
- *     number is wrong"), a readback of a different number the caller does not
- *     confirm, and a switch of method, inside the method question ("Email.")
- *     or outside it ("Actually, can you email it instead?"). A switch outside
- *     the question also forgets the method, because nothing is read outside an
- *     answer window: the model's own argument decides it. Clearing costs a
- *     confirmed number on the ticket; keeping a replaced one sends a chart to
- *     the wrong place, so every rule errs toward clearing.
+ *     street number and words for a mailing address. It is a list of method
+ *     names and never the destination: the tool does not ask the caller a
+ *     second time, and the ticket points the clerk at the recording instead
+ *     of "NOT CAPTURED". Kept per method, so an email address given as a
+ *     contact never stands in for a fax number.
  *
- * PHI: the store holds a method word, ten digits and a method list per call, for
- * 30 minutes, the same lifetime as the date of birth beside it. Nothing here
- * logs a value.
+ * A DESTINATION IS NEVER READ FROM THE TRANSCRIPT. The first version also read
+ * a fax number the agent read back and the caller confirmed, and wrote it on
+ * the ticket as "read back and confirmed". It drew three review rounds on #482
+ * (a replacement number, then a method switch, then "Yes, actually that fax
+ * number is wrong" read as a yes), each a way to put a number the caller had
+ * taken back on a records ticket, which faxes a patient's chart to the wrong
+ * place. Withdrawn on the #476 ruling ("Shrink the reader", operator,
+ * 2026-11-13): a destination on the ticket is the one the MODEL sent, as on
+ * `main`, and otherwise the clerk reads it from the recording.
+ *
+ * PHI: the store holds a method word and a method list per call, for 30
+ * minutes. Nothing here logs a value.
  */
 import { isTwilioCallSid } from './callSid';
 import type { RecordsDeliveryMethod } from './recordsDeliveryMethod';
@@ -83,13 +70,11 @@ import type { RecordsDeliveryMethod } from './recordsDeliveryMethod';
 export interface HeardDelivery {
   /** The method the caller named in answer to the method question. */
   method?: RecordsDeliveryMethod;
-  /** Ten digits the agent read back as the fax number and the caller confirmed. */
-  fax?: string;
   /**
-   * The methods the caller gave a destination FOR: a fax number, an email
-   * address or a mailing address, in answer to the question that asked for
-   * it. Per method, so an email address given as a contact never stands in
-   * for the fax number a fax request needs.
+   * The methods the caller gave a destination FOR, in answer to the question
+   * that asked for it. Method names only, never the destination itself. Per
+   * method, so an email address given as a contact never stands in for the
+   * fax number a fax request needs.
    */
   given: RecordsDeliveryMethod[];
 }
@@ -163,7 +148,7 @@ function methodInAnswer(answer: string): RecordsDeliveryMethod | null | undefine
   return [...named][0];
 }
 
-// -------------------------------------------------------------- the fax number
+// ------------------------------------------------------------ digit runs
 
 const DIGIT_WORDS: Record<string, string> = {
   zero: '0', oh: '0', one: '1', two: '2', three: '3', four: '4',
@@ -190,43 +175,10 @@ export function digitRuns(text: string): string[] {
   return runs;
 }
 
-/** A US ten-digit number, an eleven-digit one with the leading 1 dropped. */
-function tenDigits(run: string): string | undefined {
-  if (run.length === 10) return run;
-  if (run.length === 11 && run.startsWith('1')) return run.slice(1);
-  return undefined;
-}
+// ------------------------------------------------------------- the destination
 
-/** The one ten-digit number in a line, if exactly one number of seven digits or more is there. */
-function onlyPhoneShapedNumber(text: string): string | undefined {
-  const long = digitRuns(text).filter((r) => r.length >= 7);
-  if (long.length !== 1) return undefined;
-  return tenDigits(long[0]);
-}
-
-const CONFIRMING = /\b(did i get that (right|correct)|is that (right|correct|the one|the number|it|where)|got that right|correct\?|right\?)/;
 /** A callback or a phone number for the caller is not where the records go. */
 const CALLBACK_CONTEXT = /\b(call ?back|callback|reach you|phone number|best number|cell|mobile|text)/;
-const AFFIRMS = /^(?:(?:uh|um|oh|okay|ok|so)\b[\s,.]*)*(yes|yeah|yep|yup|correct|right|exactly|that's (right|correct|it)|that is (right|correct)|si|uh huh|mm hmm)\b/;
-const DENIES = /^(?:(?:uh|um|oh)\b[\s,.]*)*(no|nope|not|wrong|incorrect|that's not|that is not)\b/;
-
-/** A word that takes back or replaces what was said before. */
-const CORRECTION = /\b(actually|instead|rather|different|another|wrong|incorrect|change|changed|correction|update|updated|mistake|scratch that|never ?mind)\b/;
-/** A date of birth asked or given: its digits are not a fax number. */
-const BIRTH_CONTEXT = /\b(date of birth|birth ?date|birthday|born|dob)\b/;
-/** The caller changing how the records go, outside the method question. */
-const SWITCH = /\b(actually|instead|rather|change|switch|prefer|better)\b|\b(send|email|mail|fax) (it|them|those|these|the records)\b|\bby (email|mail|fax|post)\b/;
-
-/** "Send it to …", "use …": a number said as where the records go. */
-const SEND_TO = /\b(send|sent|use|going to|go to)\b/;
-
-/** The confirmed fax said again: the same ten digits, or its last seven to nine. */
-function sameNumber(run: string, fax: string): boolean {
-  if (tenDigits(run) === fax) return true;
-  return run.length < 10 && fax.endsWith(run);
-}
-
-// ------------------------------------------------------------- the destination
 
 /**
  * The agent asking where the records go. A method question is not one (it
@@ -269,74 +221,30 @@ function destinationIn(answer: string, asked: RecordsDeliveryMethod | undefined)
   return undefined;
 }
 
-/**
- * What the agent was last asking about before a readback: the nearest earlier
- * agent line that names a callback or a phone number, a fax, an email or a
- * mailing address. A number read back while the agent was collecting the fax
- * number ("What's the fax number?" … "What are the last four?" … "Did I get
- * that right?") is the fax number; one read back after "What's the best number
- * to reach you?" is not. The method question names all three and is skipped:
- * the method the caller CHOSE is the cue, and the caller's answer carries it.
- */
-function nearestCue(turns: Line[], i: number): RecordsDeliveryMethod | 'callback' | undefined {
-  let seen = 0;
-  for (let q = i - 1; q >= 0 && seen < 8; q--) {
-    const t = turns[q];
-    if (t.role !== 'agent') continue;
-    seen++;
-    if (asksForTheMethod(t.text)) continue;
-    if (CALLBACK_CONTEXT.test(t.text)) return 'callback';
-    if (FAX.test(t.text)) return 'fax';
-    if (EMAIL.test(t.text)) return 'email';
-    if (/\b(mailing address|mail(ed|ing)?)\b/.test(t.text)) return 'mail';
-  }
-  return undefined;
-}
-
 // ------------------------------------------------------------------ the reader
 
+/** The caller changing how the records go, outside the method question. */
+const SWITCH = /\b(actually|instead|rather|change|switch|prefer|better)\b|\b(send|email|mail|fax) (it|them|those|these|the records)\b|\bby (email|mail|fax|post)\b/;
+
 /**
- * Everything the record says about how and where, read in call order. The
- * latest readable method wins; the latest confirmed fax wins, and anything
- * later that replaces, corrects or switches away from it clears it (point 4
- * above); a destination once given stays given.
+ * Everything the record says about how, and whether a destination was given,
+ * read in call order. The latest readable method wins, a switch outside the
+ * question forgets it, and a destination once given stays given.
  */
 export function readRecordsDelivery(lines: readonly string[]): HeardDelivery {
   const turns = parse(lines);
   let method: RecordsDeliveryMethod | undefined;
-  let fax: string | undefined;
   const given = new Set<RecordsDeliveryMethod>();
-
-  // The agent line the current caller turn answers, and the readback that set the fax.
-  let answering = -1;
-  let faxSetBy = -1;
 
   for (let i = 0; i < turns.length; i++) {
     const t = turns[i];
     if (t.role === 'caller') {
-      const asked = answering >= 0 ? turns[answering].text : '';
-      // A different number where a fax number could be meant replaces the confirmed one.
-      if (fax && !CALLBACK_CONTEXT.test(asked) && !BIRTH_CONTEXT.test(asked) && !BIRTH_CONTEXT.test(t.text)
-        && !(CALLBACK_CONTEXT.test(t.text) && !FAX.test(t.text))) {
-        const replaced = digitRuns(t.text).some((r) => r.length >= 7 && !sameNumber(r, fax!));
-        const faxContext = FAX.test(t.text) || CORRECTION.test(t.text) || SEND_TO.test(t.text) || FAX.test(asked)
-          || (asksForTheDestination(asked) && destinationAskedFor(asked) !== 'email' && destinationAskedFor(asked) !== 'mail');
-        if (replaced && faxContext) fax = undefined;
-      }
-      // "That fax number is wrong." The yes that confirmed it is not read this way.
-      if (fax && i !== faxSetBy + 1 && FAX.test(t.text) && (CORRECTION.test(t.text) || NEGATION.test(t.text))) {
-        fax = undefined;
-      }
-      // "Actually, can you email it instead?" Inside the method question's window
-      // the answer has already set the method, so this changes nothing there.
-      if (SWITCH.test(t.text)) {
-        const named = methodsNamed(t.text);
-        if ([...named].some((m) => m !== method)) method = undefined;
-        if ([...named].some((m) => m !== 'fax')) fax = undefined;
-      }
+      // "Actually, can you email it instead?" Forgotten, not read: the model's
+      // own argument decides it. Inside the method question's window the
+      // answer has already set the method, so this changes nothing there.
+      if (SWITCH.test(t.text) && [...methodsNamed(t.text)].some((m) => m !== method)) method = undefined;
       continue;
     }
-    answering = i;
 
     // The caller's turns that answer this agent line, up to the next agent line.
     const answers: string[] = [];
@@ -348,8 +256,6 @@ export function readRecordsDelivery(lines: readonly string[]): HeardDelivery {
       const m = methodInAnswer(answer);
       if (m) method = m;
       else if (m === null) method = undefined;
-      // Any answer to the method question but fax: a fax confirmed earlier is not this method's.
-      if (m !== undefined && m !== 'fax') fax = undefined;
       // "We need them faxed to …": the method and its destination in one answer.
       if (m && destinationIn(answer, m)) given.add(m);
     }
@@ -358,33 +264,8 @@ export function readRecordsDelivery(lines: readonly string[]): HeardDelivery {
       const kind = destinationIn(answer, destinationAskedFor(t.text));
       if (kind) given.add(kind);
     }
-
-    // A readback of a destination, asked as a confirming question.
-    if (t.text.includes('?') && CONFIRMING.test(t.text) && (hasLongNumber(t.text) || EMAIL_SHAPE.test(t.text))) {
-      // The caller turn it reads back.
-      let k = i - 1;
-      while (k >= 0 && turns[k].role === 'caller' && !hasLongNumber(turns[k].text) && !EMAIL_SHAPE.test(turns[k].text)) k--;
-      const readFrom = k >= 0 && turns[k].role === 'caller' ? turns[k].text : '';
-      if (CALLBACK_CONTEXT.test(t.text) || CALLBACK_CONTEXT.test(readFrom)) continue;
-      const cue = FAX.test(t.text) || FAX.test(readFrom) ? 'fax' : (nearestCue(turns, i) ?? method);
-      if (cue === 'callback') continue;
-      const number = onlyPhoneShapedNumber(t.text);
-      if (AFFIRMS.test(first)) {
-        if (EMAIL_SHAPE.test(t.text)) given.add('email');
-        else if (number && cue === 'fax') {
-          fax = number;
-          faxSetBy = i;
-          given.add('fax');
-        }
-      } else if (DENIES.test(first) && number && cue === 'fax') {
-        fax = undefined;
-      } else if (fax && number && cue === 'fax' && number !== fax) {
-        // A different number read back and not confirmed: neither is safe to file.
-        fax = undefined;
-      }
-    }
   }
-  return { ...(method ? { method } : {}), ...(fax ? { fax } : {}), given: [...given] };
+  return { ...(method ? { method } : {}), given: [...given] };
 }
 
 // ------------------------------------------------------------------ the store
@@ -414,7 +295,7 @@ function sweep(now: number): void {
 }
 
 function isEmpty(h: HeardDelivery): boolean {
-  return !h.method && !h.fax && h.given.length === 0;
+  return !h.method && h.given.length === 0;
 }
 
 /**
@@ -442,11 +323,6 @@ export function recordsDeliveryHeard(callSid: string | undefined): HeardDelivery
   if (!entry) return undefined;
   if (Date.now() - entry.at > TTL_MS) return undefined;
   return { ...entry.heard, given: [...entry.heard.given] };
-}
-
-/** "2025550199" as "202-555-0199": how a clerk reads a fax number. */
-export function formatFax(tenDigitNumber: string): string {
-  return `${tenDigitNumber.slice(0, 3)}-${tenDigitNumber.slice(3, 6)}-${tenDigitNumber.slice(6)}`;
 }
 
 /** Tests only. */
