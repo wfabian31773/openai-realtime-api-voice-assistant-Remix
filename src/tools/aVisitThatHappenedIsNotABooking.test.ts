@@ -133,7 +133,7 @@ describe('CONTROLS — each part of the rule', () => {
   it('"to be rescheduled" and "reschedule" ask; "was rescheduled" reports', () => {
     expect(filedIn('Her appointment needs to be rescheduled, and she needs a refill of her drops.', TECH)).toBe(HUB);
     expect(filedIn('Wants to cancel and reschedule; also needs a refill of her drops.', TECH)).toBe(HUB);
-    expect(filedIn('Her visit was rescheduled and she needs a refill of her drops.', TECH)).toBe(TECH);
+    expect(filedIn('Her check was rescheduled and she needs a refill of her drops.', TECH)).toBe(TECH);
   });
   it('an exam named any other way still goes to the Hub, as on main', () => {
     expect(filedIn('Needs a refill of her drops before her eye exam next month.', TECH)).toBe(HUB);
@@ -210,7 +210,7 @@ describe('Codex P2 on #481 (inline) — a completed reschedule followed by an as
     });
   }
   it('a pronoun that is not about a visit does not keep the Hub', () => {
-    expect(filedIn('Her visit was rescheduled and she needs a refill of her drops; the pharmacy has it on hold.', TECH)).toBe(TECH);
+    expect(filedIn('Her check was rescheduled and she needs a refill of her drops; the pharmacy has it on hold.', TECH)).toBe(TECH);
   });
 });
 
@@ -279,3 +279,26 @@ describe('Codex round 2 on #481 — any forward-looking visit language keeps the
     expect(filedIn('She was seen today at the Example office and the drops are not at the pharmacy.', TECH)).toBe(TECH);
   });
 });
+
+describe('Codex round 3 on #481 — an appointment or a visit named anywhere keeps the Hub', () => {
+  // Synthetic. On head 1f283c53 the first stayed in Technicians; the base
+  // routes it to the HVA Hub. An ask phrased in words no family lists ("asking
+  // for another appointment") cannot be told from a report, so any
+  // appointment or visit noun keeps the Hub. None of the 4 rescued corpus
+  // tickets (VA-79611, VA-83745, VA-85227, VA-85131) names one, measured on
+  // the Support Center 2026-11-14.
+  it('the review example files to the Hub', () => {
+    expect(filedIn('She was seen today and her drops are not helping; she is asking for another appointment.', TECH)).toBe(HUB);
+  });
+  it('a visit noun beside a reported cue keeps the Hub', () => {
+    expect(filedIn('She was seen today; she would love a visit soon, her drops are not helping.', TECH)).toBe(HUB);
+    expect(filedIn('Her eye exam glasses are not ready and she mentioned her appt.', OPTICAL)).toBe(HUB);
+  });
+  it('THE COST: a reported visit that names the visit goes to the Hub, as on main', () => {
+    expect(filedIn('Her visit was rescheduled and she needs a refill of her drops.', TECH)).toBe(HUB);
+  });
+  it('the rescue shape without an appointment noun still stands aside', () => {
+    expect(filedIn('She was seen today and her drops are not at the pharmacy.', TECH)).toBe(TECH);
+  });
+});
+

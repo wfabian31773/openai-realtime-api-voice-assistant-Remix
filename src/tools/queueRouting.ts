@@ -415,7 +415,9 @@ const A_DRUG = /\b(?:drops|ointments?|antibiotics?|steroids?|gotas)\b/;
  *     appointment for", "schedule";
  *   - an ask to act on a visit again or anew: "again", a visit verb on a
  *     pronoun ("reschedule it", "cancel that"), a pronoun with a participle
- *     ("wants it moved"), or a new appointment, date or time.
+ *     ("wants it moved"), or a new appointment, date or time;
+ *   - an appointment or a visit named anywhere (round 3: "asking for another
+ *     appointment").
  * And a visit that did NOT happen reports nothing (`NEGATED_BEFORE`, read
  * first in `reportsAVisit`). These are families, not a phrase list to grow:
  * a description the rule cannot read as history goes to the Hub, because the
@@ -454,6 +456,13 @@ const LOOKS_AHEAD_TO_A_VISIT = new RegExp(
     '\\b(?:it|them|that)\\s+(?:moved|changed|rescheduled|cancell?ed|confirmed|postponed|pushed back|booked)\\b',
     '\\bnew\\s+(?:(?:appointment|appt|visit|exam|follow[- ]?up)\\s+)?(?:dates?|times?|days?)\\b',
     '\\bnew\\s+(?:appointments?|appts?|visits?)\\b',
+    // Codex round 3 on #481: an appointment or a visit named anywhere. The
+    // cues this suppression reads ("seen today", an exam name, "same-day
+    // callback", "rescheduled") are what a report of a visit says; a
+    // description that also names an appointment may be asking for one in
+    // words no family here lists ("asking for another appointment"), so it
+    // keeps the Hub, as on main. 0 of the 4 rescued corpus tickets names one.
+    '\\b(?:appointments?|appts?|visits?|citas?|consultas?)\\b',
   ].join('|'),
 );
 
