@@ -813,8 +813,8 @@ function agreeingPartial(uttered: string, iso: string): boolean {
  * no window opened and nothing read it: on 2026-11-12/13, 4 queue-lane
  * tickets went out with no date of birth after the caller had said one this
  * way (VA-84249, VA-84692, VA-84628 by the teardown sweep, VA-84757 in the
- * call), and over the 14 days to 2026-11-14, 9 of 119 swept queue-lane
- * tickets with no date of birth had a caller line of this shape.
+ * call), and over the 14 days to 2026-11-14 a transcript pattern finds this
+ * shape on 9 of the 119 swept queue-lane tickets with no date of birth.
  *
  * The caller's own label is the evidence the window stands in for, so it is
  * read narrowly: the date must come straight after the label ("date of birth

@@ -129,21 +129,21 @@ const ANSWERED_THE_ASK: Swept[] = [
     lines: [GREETING, C('Calling back about the eye drops for my mother, she ran out.'), A("That's fine. May I please have her date of birth, starting with the month, then the day, then the year?"), C('3 18, 1946.'), A('Checking that now.')] },
   { ticket: 'VA-85094', sid: 'CA76ac3f4ac1246f91129f74c031c1c93d', slug: 'surgery', name: ['Ana', 'Ruiz'], source: 'stated', dob: '1950-07-12',
     lines: [GREETING, C('Quiero saber la fecha de mi cirugía, por favor.'), A('Ana Ruiz. ¿Y me puede dar su fecha de nacimiento, empezando por el mes, luego el día y luego el año?'), C('Julio 12 de 1950.'), A('No la encuentro con esos datos. ¿Podría repetírmela, por favor?'), C('Julio 12, 1950.')] },
-  { ticket: 'VA-85244', sid: 'CA9712d588018b434f15fbc05c68bebaf4', slug: 'tech', name: ['Petra', 'Vale'], source: 'stated', dob: '1970-10-14',
-    lines: [GREETING, C('I have a question about my eye drops, they burn.'), A('Petra. And may I please have your date of birth, starting with the month, then the day, then the year?'), C('October 14'), C('October 14, 1970.'), A('Checking that for you.')] },
-  { ticket: 'VA-85245', sid: 'CAfbf212203b932a5e914673348d7c3b0e', slug: 'tech', name: ['Dina', 'Fern'], source: 'stated', dob: '1972-06-21',
-    lines: [GREETING, C('My eye has been red since yesterday and I need someone to call me.'), A('Dina Fern. And may I please have your date of birth, starting with the month, then the day, then the year?'), C('June 21st, 1972.'), A('Looking that up.')] },
-  { ticket: 'VA-84530', sid: 'CAc9a3cca2379bfb98fd73df6542a38cff', slug: 'surgery', name: ['Mara', 'Tamm'], source: 'stated', dob: '1986-03-26',
+  { ticket: 'VA-85244', sid: 'CA9712d588018b434f15fbc05c68bebaf4', slug: 'tech', name: ['Lena', 'Vale'], source: 'stated', dob: '1970-10-14',
+    lines: [GREETING, C('I have a question about my eye drops, they burn.'), A('Lena. And may I please have your date of birth, starting with the month, then the day, then the year?'), C('October 14'), C('October 14, 1970.'), A('Checking that for you.')] },
+  { ticket: 'VA-85245', sid: 'CAfbf212203b932a5e914673348d7c3b0e', slug: 'tech', name: ['Ivy', 'Fern'], source: 'stated', dob: '1972-06-21',
+    lines: [GREETING, C('My eye has been red since yesterday and I need someone to call me.'), A('Ivy Fern. And may I please have your date of birth, starting with the month, then the day, then the year?'), C('June 21st, 1972.'), A('Looking that up.')] },
+  { ticket: 'VA-84530', sid: 'CAc9a3cca2379bfb98fd73df6542a38cff', slug: 'surgery', name: ['Mara', 'Bell'], source: 'stated', dob: '1986-03-26',
     lines: [GREETING, C('I need to know when my surgery is scheduled.'), ASK, C('March 26, 1986.'), A("I still can't lock that down. Could you say your date of birth one more time for me?"), C('March 26, 1986.'), A("I'm not able to match that to one record. How can I help you today?")] },
 ];
 
 const SAID_UNASKED: Swept[] = [
-  { ticket: 'VA-84249', sid: 'CA0ae7b0b0184c3dbdc4ca7867d91897e0', slug: 'surgery', name: ['Lucy', 'Arden'], source: 'heard', dob: '1945-03-21',
-    lines: [GREETING, C('Uh, yes, this is for Lucy Arden. She had surgery on Tuesday and we are confused about when to start the eye drops. Please give me a call at 5 5 5 5 5 5 0 1 0 0, and this is for Lucy Arden, date of birth March 21, 1945. Thank you.')] },
-  { ticket: 'VA-84692', sid: 'CA1f32004624cf617a49e117ab488e3cdb', slug: 'optical', name: ['Mia', 'Gale'], source: 'heard', dob: '2011-07-04',
-    lines: [GREETING, C('Hi, I would like to decline the special glasses for Mia Gale, date of birth 7 4 11. She just wants her regular glasses, so maybe you can put in the order as is.')] },
-  { ticket: 'VA-84628', sid: 'CAee0c403d87b3404aa046f70543d4625d', slug: 'tech', name: ['Carla', 'Dorn'], source: 'stated', dob: '1943-02-18',
-    lines: [GREETING, C('Prescription refill request for Carla Dorn, date of birth February 18, 1943, for latanoprost eye drops. We are requesting a 90-day supply. Please follow up. Thank you so much.')] },
+  { ticket: 'VA-84249', sid: 'CA0ae7b0b0184c3dbdc4ca7867d91897e0', slug: 'surgery', name: ['Testa', 'Arden'], source: 'heard', dob: '1945-03-21',
+    lines: [GREETING, C('Uh, yes, this is for Testa Arden. She had surgery on Tuesday and we are confused about when to start the eye drops. Please give me a call at 5 5 5 5 5 5 0 1 0 0, and this is for Testa Arden, date of birth March 21, 1945. Thank you.')] },
+  { ticket: 'VA-84692', sid: 'CA1f32004624cf617a49e117ab488e3cdb', slug: 'optical', name: ['Nora', 'Gale'], source: 'heard', dob: '2011-07-04',
+    lines: [GREETING, C('Hi, I would like to decline the special glasses for Nora Gale, date of birth 7 4 11. She just wants her regular glasses, so maybe you can put in the order as is.')] },
+  { ticket: 'VA-84628', sid: 'CAee0c403d87b3404aa046f70543d4625d', slug: 'tech', name: ['Vera', 'Dorn'], source: 'stated', dob: '1943-02-18',
+    lines: [GREETING, C('Prescription refill request for Vera Dorn, date of birth February 18, 1943, for latanoprost eye drops. We are requesting a 90-day supply. Please follow up. Thank you so much.')] },
 ];
 
 describe('the corpus: a date of birth the caller gave reaches the swept ticket', () => {
@@ -278,7 +278,7 @@ describe('a date the caller calls the date of birth: what it is not', () => {
 
 describe('the sweep carries it only under a name the caller gave', () => {
   const sid = 'CA0ae7b0b0184c3dbdc4ca7867d91897e0';
-  const message = [GREETING, C('This is for Lucy Arden. She had surgery on Tuesday and we are confused about the drops. Date of birth March 21, 1945. Please call back.')];
+  const message = [GREETING, C('This is for Testa Arden. She had surgery on Tuesday and we are confused about the drops. Date of birth March 21, 1945. Please call back.')];
 
   it('not under the calling number\'s owner, when nobody said a patient name', async () => {
     const lines = [GREETING, C('Calling about my mother, she had surgery Tuesday and the drops are confusing. Date of birth March 21, 1945. Please call back.')];
@@ -292,7 +292,7 @@ describe('the sweep carries it only under a name the caller gave', () => {
   });
 
   it('a certain identity files the chart date, never the spoken one', async () => {
-    rememberVerifiedIdentity(sid, { firstName: 'Lucy', lastName: 'Arden', dateOfBirth: '1945-03-12', certain: true });
+    rememberVerifiedIdentity(sid, { firstName: 'Testa', lastName: 'Arden', dateOfBirth: '1945-03-12', certain: true });
     const file = filer();
     await runRequestSweep(record(sid, 'surgery', message), file, noName);
     expect(birth(file.calls[0])).toBe('1945-03-12');
@@ -300,8 +300,8 @@ describe('the sweep carries it only under a name the caller gave', () => {
   });
 
   it('a name the caller said on the number\'s record (spoken) carries it', async () => {
-    rememberVerifiedIdentity(sid, { firstName: 'Lucy', lastName: 'Arden', dateOfBirth: '1945-03-12', certain: false });
-    const lines = [GREETING, C('Hi, my name is Lucy Arden. I had surgery on Tuesday and the drops are confusing. Date of birth March 21, 1945. Please call back.')];
+    rememberVerifiedIdentity(sid, { firstName: 'Testa', lastName: 'Arden', dateOfBirth: '1945-03-12', certain: false });
+    const lines = [GREETING, C('Hi, my name is Testa Arden. I had surgery on Tuesday and the drops are confusing. Date of birth March 21, 1945. Please call back.')];
     const file = filer();
     await runRequestSweep(record(sid, 'surgery', lines), file, noName);
     expect(file.calls[0].patientLastName).toBe('Arden');
@@ -318,8 +318,8 @@ describe('the sweep carries it only under a name the caller gave', () => {
   });
 
   it('no date said, no date filed, no note', async () => {
-    stated(sid, 'Lucy', 'Arden');
-    const lines = [GREETING, C('This is for Lucy Arden, she had surgery Tuesday and the drops are confusing. Please call back.')];
+    stated(sid, 'Testa', 'Arden');
+    const lines = [GREETING, C('This is for Testa Arden, she had surgery Tuesday and the drops are confusing. Please call back.')];
     const file = filer();
     await runRequestSweep(record(sid, 'surgery', lines), file, noName);
     expect(birth(file.calls[0])).toBeUndefined();

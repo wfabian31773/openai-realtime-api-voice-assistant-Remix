@@ -878,13 +878,14 @@ export interface SweptTicket {
 /**
  * v231: THE STAFF NOTE WHEN THE DATE OF BIRTH IS THE ONE THE CALLER SAID.
  *
- * Measured over the 14 days to 2026-11-14, optical, surgery and tech: 119
- * tickets this sweep filed with no date of birth, 48 of them on a call whose
- * caller had said one (39 in answer to the agent's ask, 8 labelled "date of
- * birth" unasked, 1 both). The sweep carried a date of birth only from a
- * certain lookup, so a caller who answered the question and then hung up
- * before any filing tool ran left a ticket without it. Not matched to a
- * record, and the note says so. Exported so the test reads the same words.
+ * Measured over the 14 days to 2026-11-14 (01:00 UTC), optical, surgery and
+ * tech: 119 tickets this sweep filed with no date of birth; a transcript
+ * pattern finds a date the caller gave on 48 of them (39 answering the ask, 8
+ * labelled "date of birth" unasked, 1 both), and on the 2026-11-12/13 corpus
+ * that pattern over-counts by about 1 in 10. The sweep carried a date of birth
+ * only from a certain lookup, so a caller who answered the question and then
+ * hung up before any filing tool ran left a ticket without it. Not matched to
+ * a record, and the note says so. Exported so the test reads the same words.
  */
 export const CALLER_DOB_NOTE =
   `DATE OF BIRTH AS THE CALLER SAID IT on the call — not matched to a patient record; confirm it against the chart before acting.`;
