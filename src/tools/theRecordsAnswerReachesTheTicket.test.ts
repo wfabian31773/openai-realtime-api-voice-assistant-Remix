@@ -20,12 +20,13 @@
  *
  * The result, per ticket: the method now reaches the ticket on 11 of 12 (the
  * twelfth answered "Via portal", which is not a method, and still files NOT
- * CAPTURED); a fax number the agent read back and the caller confirmed is on
- * the ticket on 6; on 4 the caller gave a destination nothing here reads whole
- * (an email address, a number the readback garbled or the caller disputed),
- * and the ticket points the clerk at the call transcript instead of saying
- * NOT CAPTURED; on 1 the method was all the caller had said when the model
- * filed, so the tool now asks for the fax number, once.
+ * CAPTURED). On 7 the destination was said before the model filed: a fax
+ * number the agent read back and the caller confirmed lands on 5, and on 2
+ * (a garbled readback, an email address) the ticket points the clerk at the
+ * call transcript instead of saying NOT CAPTURED. On 4 the model filed before
+ * the destination was said, so the tool now asks for it once; on 3 of those
+ * the caller gave it later in the same call, modelled here after the ask, and
+ * on 1 never.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { readFileSync } from 'node:fs';
