@@ -329,3 +329,116 @@ describe('what the carry does not do', () => {
     expect(t.patientDOB).toBe('01/04/1958');
   });
 });
+
+/**
+ * Codex P1 on #478 (comment 4570996648): a date of birth that is there and
+ * does not read is not a missing one. `validatedPatientFor` cannot see a
+ * conflict in "February 30, 1960", so carrying would put the record's date
+ * over whatever the caller said. Only an absent value or an explicit
+ * placeholder ("unknown", "n/a", "none", "unavailable") is replaced.
+ */
+describe('a stated date of birth that does not read blocks the carry', () => {
+  for (const said of ['February 30, 1960', '13/45/1960']) {
+    it(`"${said}" on the refused escalation of the VA-84772 shape: no part of the record is filed`, async () => {
+      const { agent } = await confirmed('CA' + '6'.repeat(32));
+      await call(agent, 'escalate_to_human', { ...ADMINISTRATIVE, patient_first_name: 'Zelda', patient_dob: said });
+      const t = await ticketAt(0);
+      expect(t.patientFullName).not.toMatch(/Quixote/);
+      expect(t.patientDOB).not.toBe('01/04/1958');
+    });
+  }
+
+  it('on a sanctioned escalation the identity ask still fires instead of carrying the record', async () => {
+    const { agent, handoff } = await confirmed('CA' + '7'.repeat(32));
+    const r = await call(agent, 'escalate_to_human', {
+      ...NOT_AN_EMERGENCY_WORD, patient_first_name: 'Zelda', patient_dob: 'February 30, 1960',
+    });
+    expect(r.need_identity).toBe(true);
+    expect(handoff).not.toHaveBeenCalled();
+  });
+
+  for (const placeholder of ['unknown', 'N/A', 'none', 'unavailable']) {
+    it(`the placeholder "${placeholder}" is still replaced by the record's date`, async () => {
+      const { agent } = await confirmed('CA' + '8'.repeat(32));
+      await call(agent, 'escalate_to_human', { ...ADMINISTRATIVE, patient_first_name: 'Zelda', patient_dob: placeholder });
+      expectTheRecord(await ticketAt(0));
+    });
+  }
+});
+
+/**
+ * Codex P1 on #478 (comment 4570996644): create_ticket replaces the held
+ * identity and the schedule when it verifies a different family member, and
+ * leaves the greeting's record where it was. A first name both people answer
+ * to must not carry the other person's surname and date of birth.
+ */
+describe("a family member verified after the greeting does not lend the greeting's name", () => {
+  const RIVERS = { firstName: 'Zelda', lastName: 'Rivers', dateOfBirth: '1990-03-15', personId: 'p-synthetic-2' };
+  const familyMember = (patient: typeof RIVERS) => ({
+    patientFound: true,
+    patientName: `${patient.firstName} ${patient.lastName}`,
+    matchedBy: 'name_and_dob' as const,
+    identity: { unique: true, candidateCount: 1, candidates: [{ ...patient, appointmentCount: 0 }] },
+    patientData: patient,
+    upcomingAppointments: [],
+    pastAppointments: [],
+    totalAppointmentsFound: 0,
+  });
+
+  async function thenAFamilyMemberIsFiled(sid: string, patient: typeof RIVERS) {
+    const { agent, handoff } = await confirmed(sid);
+    h.lookupByNameAndDOB.mockResolvedValueOnce(familyMember(patient) as any);
+    const t = await call(agent, 'create_ticket', {
+      first_name: patient.firstName, last_name: patient.lastName, date_of_birth: '03/15/1990',
+      callback_number: '5551234567', request_category: 'cancel_appointment',
+      request_summary: 'Cancel the appointment for a family member.',
+    });
+    expect(t.success).toBe(true);
+    return { agent, handoff };
+  }
+
+  it('the same first name: the escalation carries neither person', async () => {
+    const { agent } = await thenAFamilyMemberIsFiled('CA' + '9'.repeat(32), RIVERS);
+    await call(agent, 'escalate_to_human', { ...ADMINISTRATIVE, patient_first_name: 'Zelda' });
+    const t = await ticketAt(1);
+    expect(t.patientFullName).not.toMatch(/Rivers|Quixote/);
+    expect(t.patientDOB).toBe('Unknown');
+  });
+
+  it('a compound first name the model shortened: the stale greeting does not rewrite it', async () => {
+    const MAE = { ...ZELDA, firstName: 'Zelda Mae' };
+    h.lookupByPhone.mockResolvedValue({ ...ONE_PERSON_ON_THE_NUMBER, patientName: 'Zelda Mae Quixote', patientData: MAE,
+      identity: { unique: true, candidateCount: 1, candidates: [{ ...MAE, appointmentCount: 1 }] } } as any);
+    const { agent } = await thenAFamilyMemberIsFiled('CA' + 'a'.repeat(32), { ...RIVERS, firstName: 'Zelda Mae' });
+    await call(agent, 'escalate_to_human', { ...ADMINISTRATIVE, patient_first_name: 'Zelda' });
+    const t = await ticketAt(1);
+    expect(t.patientFullName).not.toMatch(/Rivers|Quixote/);
+    expect(t.patientDOB).toBe('Unknown');
+  });
+
+  it('a surname that names the family member carries that person\'s date of birth', async () => {
+    const { agent } = await thenAFamilyMemberIsFiled('CA' + '0'.repeat(31) + '1', RIVERS);
+    await call(agent, 'escalate_to_human', { ...ADMINISTRATIVE, patient_first_name: 'Zelda', patient_last_name: 'Rivers' });
+    const t = await ticketAt(1);
+    expect(t.patientFullName).toBe('Zelda Rivers');
+    expect(t.patientDOB).toBe('03/15/1990');
+  });
+
+  it('a family member with the same first name and surname: the surname does not say which, nothing carries', async () => {
+    const { agent } = await thenAFamilyMemberIsFiled('CA' + '0'.repeat(31) + '3', { ...RIVERS, lastName: 'Quixote' });
+    await call(agent, 'escalate_to_human', { ...ADMINISTRATIVE, patient_first_name: 'Zelda', patient_last_name: 'Quixote' });
+    const t = await ticketAt(1);
+    expect(t.patientDOB).toBe('Unknown');
+  });
+
+  it('the greeting person filed again by name and date of birth is not stale', async () => {
+    const { agent } = await confirmed('CA' + '0'.repeat(31) + '2');
+    const t = await call(agent, 'create_ticket', {
+      first_name: 'Zelda', last_name: 'Quixote', date_of_birth: '01/04/1958',
+      callback_number: '5551234567', request_category: 'cancel_appointment', request_summary: 'Cancel the appointment.',
+    });
+    expect(t.success).toBe(true);
+    await call(agent, 'escalate_to_human', { ...ADMINISTRATIVE, patient_first_name: 'Zelda' });
+    expectTheRecord(await ticketAt(1));
+  });
+});

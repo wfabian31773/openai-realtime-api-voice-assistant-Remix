@@ -54,6 +54,7 @@ import { otherReasonFor } from "../tools/otherReason";
 import { nameOrStandIn, STAND_IN_NAME_NOTE } from "../services/standInName";
 import {
   decideOnCallIdentityAsk,
+  hasUsableOnCallDob,
   onCallCallbackNumber,
 } from "../services/onCallIdentityBeforeTransfer";
 import {
@@ -741,18 +742,46 @@ export function greetingConfirmedFirstName(
  * someone else, and a different first name, a surname or a date of birth that
  * disagrees with the record carries nothing (`validatedPatientFor`). A stated
  * date the record agrees with is kept as stated.
+ *
+ * Two more refusals (Codex P1s on #478):
+ *
+ * - A stated date of birth is replaced only when it is absent or an explicit
+ *   placeholder ("unknown", "n/a", "none", "unavailable", the identity ask's own
+ *   list, `hasUsableOnCallDob`). A date that is there and does not read
+ *   ("February 30, 1960") carries nothing: `validatedPatientFor` cannot see a
+ *   conflict in it, so carrying would put the record's date over whatever the
+ *   caller actually said.
+ * - The greeting's record (`confirmed`) counts only while it is still the
+ *   person this call holds (`greetingConfirmedMatches`: the same name, person
+ *   and date of birth as the held identity). `create_ticket` replaces the held
+ *   identity and the schedule when it verifies a different family member and
+ *   leaves the greeting's record where it was; a first name the greeting's
+ *   person answers to (whole, or the first word of a compound first name) is
+ *   then ambiguous between two confirmed people, and carries nothing, unless
+ *   the model also passed a surname that is not the greeting person's
+ *   (`validatedPatientFor` then checks it against the held person). It is
+ *   compared by person, not by object, so a later lookup that re-reads the
+ *   same person's schedule does not make the greeting stale.
  */
 export function escalationWithConfirmedRecord<
   P extends { patient_first_name?: string; patient_last_name?: string; patient_dob?: string },
->(callSid: string | undefined, confirmed: PatientScheduleContext | undefined, params: P): P {
+>(
+  callSid: string | undefined,
+  confirmed: PatientScheduleContext | undefined,
+  params: P,
+): P {
   const named = params.patient_first_name?.trim();
   if (!named) return params;
+  const stated = params.patient_dob?.trim();
+  const statedReads = Boolean(stated && readDobQuietly(stated));
+  if (stated && !statedReads && hasUsableOnCallDob(stated)) return params;
+  const greetingIsStale = confirmed !== undefined &&
+    !greetingConfirmedMatches(confirmed, confirmed, validatedPatientFor(callSid));
+  if (greetingIsStale && answersToTheGreetingPerson(confirmed, named, params.patient_last_name)) return params;
   const first =
     greetingConfirmedFirstName(confirmed, { first_name: named, last_name: params.patient_last_name }) ?? named;
   const held = validatedPatientFor(callSid, first, params.patient_last_name, params.patient_dob);
   if (!held) return params;
-  const stated = params.patient_dob?.trim();
-  const statedReads = Boolean(stated && readDobQuietly(stated));
   const last = params.patient_last_name?.trim() || held.lastName;
   const dob = statedReads ? stated : isoDobToUs(held.dateOfBirth) ?? params.patient_dob;
   const carried = [
@@ -765,6 +794,21 @@ export function escalationWithConfirmedRecord<
     );
   }
   return { ...params, patient_first_name: first, patient_last_name: last, patient_dob: dob };
+}
+
+/**
+ * Whether the name the model passed is one the greeting's person answers to:
+ * the record's whole first name or its first word, and no surname or the
+ * record's surname. Once a different person is held, such a name could be
+ * either of them (a parent and a child named alike).
+ */
+function answersToTheGreetingPerson(confirmed: PatientScheduleContext, named: string, last: string | undefined): boolean {
+  const chart = confirmed.patientData;
+  const chartFirst = nameKey(chart?.firstName);
+  if (!chartFirst) return false;
+  const said = nameKey(named);
+  if (said !== chartFirst && said !== chartFirst.split(' ')[0]) return false;
+  return !last?.trim() || nameKey(last) === nameKey(chart?.lastName);
 }
 
 /**
