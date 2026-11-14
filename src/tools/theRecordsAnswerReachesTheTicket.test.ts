@@ -368,6 +368,17 @@ describe('what the model sends still wins, and only an answer to the question co
     }
   });
 
+  it('only the delivery question opens a window: "Did you send the authorization by fax or email?" answered "Fax." is not a method', async () => {
+    const lines = ['AGENT: Did you send the authorization by fax or email?', 'CALLER: Fax.'];
+    expect(readRecordsDelivery(lines).method).toBeUndefined();
+    const { answers } = await replay('CA' + 'b7'.repeat(16), 'VA-232-16', [lines, 'file']);
+    expect(answers[0].missingFields).toEqual(['delivery_method']);
+    // The funnel's own wording, and a question naming the records, copies or the chart, still open one.
+    expect(readRecordsDelivery([METHOD_Q, 'CALLER: Fax.']).method).toBe('fax');
+    expect(readRecordsDelivery(['AGENT: Should we send the copies by fax or by email?', 'CALLER: Email.']).method).toBe('email');
+    expect(readRecordsDelivery(['AGENT: Would you like the chart by fax, email, or mail?', 'CALLER: Mail.']).method).toBe('mail');
+  });
+
   it('a method volunteered before anyone asked is not read: the tool asks the question first', async () => {
     const { answers } = await replay('CA' + 'a6'.repeat(16), 'VA-232-6', [
       ['CALLER: Can you fax them over to our office?'],
