@@ -1866,8 +1866,9 @@ import { callEnvironment } from "./callRecord";
  * "Dont' you think we should be tracking the tools arguments?", approved the
  * same day with 30 days' retention and admins only. Every tool call's full
  * arguments and result, scrubbed of credentials and capped, go to the Hub's
- * `tool_call_payloads` (created lazily, row-level security on), read only by
- * the admin route behind the call page's Tool Calls tab. The timeline is
+ * `tool_call_payloads` (created lazily, row-level security on, purged after
+ * 30 days on its own hourly clock), read only by the admin route behind the
+ * call page's Tool Calls tab. The timeline is
  * unchanged. Above main's v237 (#480, `96966220`), which it contains along
  * with v236 (#483, `82487a55`). No migration.
  */
