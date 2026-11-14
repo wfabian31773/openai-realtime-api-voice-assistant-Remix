@@ -1861,8 +1861,19 @@ import { callEnvironment } from "./callRecord";
  * `0febb870`), v234 (#478, `d98da542`), v233 (#481, `0c8b9b77`), v232 (#482,
  * `cbe56a92`) and v230 (#477, `664357cd`). No migration.
  */
+/**
+ * v238 — THE TOOL ARGUMENTS ARE KEPT (2026-11-14). Operator, 2026-11-14:
+ * "Dont' you think we should be tracking the tools arguments?", approved the
+ * same day with 30 days' retention and admins only. Every tool call's full
+ * arguments and result, scrubbed of credentials and capped, go to the Hub's
+ * `tool_call_payloads` (created lazily, row-level security on, purged after
+ * 30 days on its own hourly clock), read only by the admin route behind the
+ * call page's Tool Calls tab. The timeline is
+ * unchanged. Above main's v237 (#480, `96966220`), which it contains along
+ * with v236 (#483, `82487a55`). No migration.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v237-the-sweep-carries-the-callers-dob-20261114";
+  "voice-runtime-v238-the-tool-arguments-are-kept-20261114";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

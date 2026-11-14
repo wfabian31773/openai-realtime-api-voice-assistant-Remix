@@ -30,6 +30,8 @@ import type { DirectorAction } from '../director/director';
 import { dobShape } from '../tools/dobParts';
 import { suppliedArgNames } from '../tools/ticketToolOutcomes';
 import { answeredWithoutTicket } from './answeredCallDisposition';
+import { recordToolPayload, payloadFor } from './toolPayloads';
+import { isTwilioCallSid } from '../tools/callSid';
 
 export interface AzulToolEvent {
   at: string;               // ISO timestamp
@@ -578,6 +580,32 @@ export function recordAzulToolEvent(
     { tool, args: recorded.args, outcome: recorded.outcome, ms },
     { sensitive: true, component: 'toolTimeline' },
   );
+
+  /**
+   * THE FULL ARGUMENTS AND RESULT, IN THEIR OWN STORE (v238). The event above
+   * keeps the allow-listed subset every report reads; this keeps what the
+   * tool was actually given and what it answered, scrubbed of credentials,
+   * admin-only and kept 30 days (`toolPayloads.ts`). Fired and forgotten, so a
+   * failure here costs a record and never a call.
+   */
+  try {
+    const meta = callMetadataForDB.get(callId);
+    const callSid =
+      ids?.callSid ?? entry.callSid ?? meta?.twilioCallSid ?? (isTwilioCallSid(callId) ? callId : null);
+    recordToolPayload({
+      callId,
+      callSid: callSid ?? null,
+      callLogId: ids?.callLogId ?? entry.callLogId ?? meta?.dbCallLogId ?? null,
+      agentSlug: ids?.agentSlug ?? entry.agentSlug ?? meta?.agentSlug ?? null,
+      seq: entry.events.length - 1,
+      tool,
+      eventAt: recorded.at,
+      ms: Number.isFinite(ms) ? Math.round(ms) : null,
+      ...payloadFor({ args, resultJson }),
+    });
+  } catch {
+    /* telemetry must never reach a patient's call */
+  }
 }
 
 /** Fleet-neutral alias. New call sites should use this name; the azul-prefixed

@@ -495,6 +495,11 @@ async function startServer() {
     const { startStaleCallSweeper } = await import('./services/staleCallSweeper');
     startStaleCallSweeper();
 
+    // v238: the stored tool arguments and results are deleted after 30 days
+    // on their own hourly clock, whether or not anything is being written.
+    const { startToolPayloadRetention } = await import('../src/services/toolPayloads');
+    startToolPayloadRetention();
+
     // Backfill any missing reconciliation days (non-blocking)
     backfillMissingReconciliations().catch(err => {
       console.error('[STARTUP] Backfill reconciliation error:', err);
