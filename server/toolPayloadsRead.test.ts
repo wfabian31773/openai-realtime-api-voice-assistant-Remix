@@ -32,12 +32,26 @@ describe('toolPayloadsForCall', () => {
     expect(seen[0].sql).toContain('call_log_id = $1::text');
     expect(seen[0].sql).toContain('call_sid = $3::text');
     expect(seen[0].sql).toContain('ORDER BY at ASC, seq ASC, id ASC');
-    expect(seen[0].params).toEqual(['row-1', 'CA00000000000000000000000000000b01', 'CA00000000000000000000000000000b01']);
+    expect(seen[0].params).toEqual(['row-1', 'CA00000000000000000000000000000b01', 'CA00000000000000000000000000000b01', 30]);
     expect(out.retentionDays).toBe(30);
     expect(out.payloads).toEqual([
       { seq: 0, tool: 'lookup_patient', eventAt: '2026-11-14T10:00:00.000Z', ms: 120, args: { a: 1 }, result: { success: true } },
       { seq: 1, tool: 'end_call', eventAt: '2026-11-14T10:01:00.000Z', ms: null, args: null, result: null },
     ]);
+  });
+
+  it('never serves a row past the 30-day window, even before the purge reaches it (github-actions review of #484)', async () => {
+    const seen: string[] = [];
+    await toolPayloadsForCall(
+      async (q: SQL) => {
+        seen.push(dialect.sqlToQuery(q).sql);
+        return { rows: [] };
+      },
+      { logId: 'row-1', callSid: null },
+    );
+    expect(seen[0]).toContain('AND created_at >= now() - make_interval(days => $4::integer)');
+    // the window applies to both ways of finding the call, not only the second
+    expect(seen[0]).toMatch(/WHERE \(call_log_id = \$1::text\s+OR \(/);
   });
 
   it('a table that does not exist yet reads as nothing stored, not an error', async () => {

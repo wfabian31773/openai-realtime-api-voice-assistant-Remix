@@ -409,6 +409,70 @@ describe('the writer never reaches the call', () => {
   });
 });
 
+describe('the purge runs on its own clock (github-actions review of #484)', () => {
+  const quiet = { info: () => {}, warn: () => {} };
+
+  it('purges at start and then every interval, with nothing being written', async () => {
+    vi.useFakeTimers();
+    try {
+      const cutoffs: string[] = [];
+      const t = Date.parse('2026-11-14T15:00:00.000Z');
+      const stop = payloads.startToolPayloadRetention({
+        store: { purge: async (c: string) => void cutoffs.push(c) },
+        now: () => t,
+        everyMs: 1000,
+        log: quiet,
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(cutoffs).toEqual(['2026-10-15T15:00:00.000Z']);
+      await vi.advanceTimersByTimeAsync(3000);
+      expect(cutoffs).toHaveLength(4);
+      stop();
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(cutoffs).toHaveLength(4);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps purging when the writer is switched off', () => {
+    const src = readFileSync(new URL('./toolPayloads.ts', import.meta.url), 'utf8');
+    const body = src.slice(src.indexOf('export function startToolPayloadRetention'));
+    expect(body.slice(0, body.indexOf('\n}\n'))).not.toContain('payloadsDisabled');
+  });
+
+  it('says nothing when the table does not exist yet, and names any other failure by its code', async () => {
+    vi.useFakeTimers();
+    try {
+      const warn = vi.fn();
+      let code = '42P01';
+      const stop = payloads.startToolPayloadRetention({
+        store: {
+          purge: async () => {
+            throw Object.assign(new Error('relation does not exist'), { code });
+          },
+        },
+        everyMs: 1000,
+        log: { info: () => {}, warn },
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(warn).not.toHaveBeenCalled();
+      code = '57P01';
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn.mock.calls[0][0]).toContain('code 57P01');
+      stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('the API server starts it at boot', () => {
+    const src = readFileSync(new URL('../../server/index.ts', import.meta.url), 'utf8');
+    expect(src).toContain('startToolPayloadRetention();');
+  });
+});
+
 describe('the table', () => {
   it('is created with row-level security on, and indexed for the call page and the purge', async () => {
     h.queries.length = 0;

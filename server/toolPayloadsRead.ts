@@ -34,8 +34,10 @@ export async function toolPayloadsForCall(
     const r: any = await execute(sql`
       SELECT seq, tool, event_at, ms, args, result
       FROM tool_call_payloads
-      WHERE call_log_id = ${call.logId}::text
-         OR (${call.callSid}::text IS NOT NULL AND call_sid = ${call.callSid}::text)
+      WHERE (call_log_id = ${call.logId}::text
+             OR (${call.callSid}::text IS NOT NULL AND call_sid = ${call.callSid}::text))
+        -- Never serve a row past the window, even before the purge reaches it.
+        AND created_at >= now() - make_interval(days => ${TOOL_PAYLOAD_RETENTION_DAYS}::integer)
       ORDER BY at ASC, seq ASC, id ASC
     `);
     rows = r?.rows ?? r ?? [];

@@ -31,8 +31,11 @@
  *     link or a credential;
  *   - each half is capped (16 KB arguments, 32 KB result) so one oversized
  *     lookup cannot grow a row without bound;
- *   - rows older than `TOOL_PAYLOAD_RETENTION_DAYS` (30) are deleted, at most
- *     once an hour, by the writer itself;
+ *   - rows older than `TOOL_PAYLOAD_RETENTION_DAYS` (30) are deleted by a
+ *     purge on its own hourly timer from server start
+ *     (`startToolPayloadRetention`), which runs whether or not anything is
+ *     being written and with the writer switched off, and the reader never
+ *     serves a row past the window even before the purge reaches it;
  *   - the table has row-level security on and no policy, so only the server's
  *     own role reads it, and the one route that serves it is admin-only
  *     (`/api/call-logs/:id/tool-payloads`).
@@ -187,6 +190,11 @@ export interface ToolPayloadStore {
   purge(cutoffIso: string): Promise<void>;
 }
 
+/** The instant before which a row is past the retention window. */
+export function retentionCutoff(nowMs: number): string {
+  return new Date(nowMs - TOOL_PAYLOAD_RETENTION_DAYS * 24 * 60 * 60 * 1000).toISOString();
+}
+
 /** A failure named by its code or class, never by its message. */
 export function errorCode(e: unknown): string {
   const code = (e as { code?: unknown } | null)?.code;
@@ -234,8 +242,7 @@ export function createToolPayloadWriter(
     const t = now();
     if (t - lastPurgeAt >= PURGE_EVERY_MS) {
       lastPurgeAt = t;
-      const cutoff = new Date(t - TOOL_PAYLOAD_RETENTION_DAYS * 24 * 60 * 60 * 1000).toISOString();
-      await store.purge(cutoff);
+      await store.purge(retentionCutoff(t));
     }
   }
 
@@ -298,6 +305,43 @@ export const hubToolPayloadStore: ToolPayloadStore = {
 };
 
 const productionWriter = createToolPayloadWriter(hubToolPayloadStore);
+
+/**
+ * THE PURGE ON ITS OWN CLOCK (github-actions review of #484, P2). The writer's
+ * purge runs only after a successful insert, so switching the writer off, a
+ * stretch with no tool calls or a run of failed inserts would have left
+ * patient payloads past their 30 days. This runs once at start and then every
+ * `PURGE_EVERY_MS`, independent of writes and of `TOOL_PAYLOADS_DISABLED`
+ * (switching off what is written never switches off what is deleted). A table
+ * that does not exist yet is nothing to purge and says nothing. Returns a stop
+ * function; the timers never hold the process open.
+ */
+export function startToolPayloadRetention(
+  opts: {
+    store?: Pick<ToolPayloadStore, 'purge'>;
+    now?: () => number;
+    everyMs?: number;
+    log?: Pick<Console, 'info' | 'warn'>;
+  } = {},
+): () => void {
+  const store = opts.store ?? hubToolPayloadStore;
+  const now = opts.now ?? Date.now;
+  const log = opts.log ?? console;
+  const run = (): Promise<void> =>
+    store.purge(retentionCutoff(now())).catch((e) => {
+      if ((e as { code?: unknown } | null)?.code === '42P01') return; // no table yet
+      log.warn(`[TOOL PAYLOADS] retention purge failed (will retry): ${errorCode(e)}`);
+    });
+  const first = setTimeout(() => void run(), 0);
+  const timer = setInterval(() => void run(), opts.everyMs ?? PURGE_EVERY_MS);
+  first.unref?.();
+  timer.unref?.();
+  log.info(`[TOOL PAYLOADS] retention purge scheduled: rows older than ${TOOL_PAYLOAD_RETENTION_DAYS} days are deleted every hour`);
+  return () => {
+    clearTimeout(first);
+    clearInterval(timer);
+  };
+}
 
 /** What `recordToolEvent` calls. Never throws, never blocks. */
 export function recordToolPayload(row: ToolPayloadRow): void {
