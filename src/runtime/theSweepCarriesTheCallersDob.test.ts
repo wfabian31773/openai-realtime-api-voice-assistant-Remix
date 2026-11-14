@@ -256,6 +256,36 @@ describe('a date the caller takes back after answering is not carried', () => {
     ).toBe('1950-03-04');
   });
 
+  it('a denial or a correction in the answering turn, after the date (github-actions P2 on a8cd12a0)', async () => {
+    const lines = [GREETING, REQUEST, ASK, C("March 3, 1950. That's wrong, let me check.")];
+    expect(dobFromCallerAnswer(lines)).toBe('1950-03-03'); // what the reader alone keeps
+    expect(callerDobToCarry(lines)).toBeUndefined();
+    const sid = 'CA82b14ab39eb7122bf204eaed753fb61b';
+    stated(sid, 'Testa', 'Lake');
+    const file = filer();
+    await runRequestSweep(record(sid, 'tech', lines), file, noName);
+    expect(birth(file.calls[0])).toBeUndefined();
+    expect(String(file.calls[0].staffNote)).not.toContain(CALLER_DOB_NOTE);
+
+    const turn = (said: string) => callerDobToCarry([GREETING, REQUEST, ASK, C(said)]);
+    expect(turn("March 3, 1950, that's wrong.")).toBeUndefined();
+    expect(turn('March 3, 1950. Wait, let me look at my card.')).toBeUndefined();
+    expect(turn("March third, nineteen fifty. No, that isn't it.")).toBeUndefined();
+    expect(turn('Marzo 3 de 1950. No, perdón, déjeme ver.')).toBeUndefined();
+  });
+
+  it('what the answering turn may say after the date and still carry', () => {
+    const turn = (said: string) => callerDobToCarry([GREETING, REQUEST, ASK, C(said)]);
+    expect(turn('March 3, 1950.')).toBe('1950-03-03');
+    expect(turn('March 3, 1950. Thank you.')).toBe('1950-03-03');
+    expect(turn('March 3, 1950, and I need a refill.')).toBe('1950-03-03');
+    expect(turn('No. My birthday is March 3, 1950.')).toBe('1950-03-03');
+    expect(turn('March 3, 1950. Sorry, March 3, 1950.')).toBe('1950-03-03'); // the date said again ends the turn
+    expect(
+      callerDobToCarry([GREETING, REQUEST, ASK, C('March 3, 1950.'), A('Could you give me your date of birth once more?'), C("No it's March 4 1950.")]),
+    ).toBe('1950-03-04');
+  });
+
   it('what is not a taking back: a denial before the answer, and the agent\'s own words', () => {
     expect(callerDobToCarry([GREETING, C("No, I don't have an appointment, I need a refill."), ASK, C('March 3, 1950.')])).toBe('1950-03-03');
     expect(callerDobToCarry([GREETING, REQUEST, ASK, C('March 3, 1950.'), A("I'm not able to match that. How can I help?"), C('A refill, please.')])).toBe('1950-03-03');
