@@ -1851,8 +1851,18 @@ import { callEnvironment } from "./callRecord";
  * v233 (#481, `0c8b9b77`), v232 (#482, `cbe56a92`) and v230 (#477,
  * `664357cd`). No migration.
  */
+/**
+ * v237 — THE SWEEP CARRIES THE DATE OF BIRTH THE CALLER GAVE (2026-11-14;
+ * v231 while #480 was open, renumbered because v232 to v236 merged before it;
+ * v231 is retired). The teardown sweep files the date of birth the caller gave
+ * in answer to the date-of-birth ask, unless the caller took it back; a reader
+ * for a date the caller volunteered with no ask was built and withdrawn. Above
+ * main's v236 (#483, `82487a55`), which it contains along with v235 (#479,
+ * `0febb870`), v234 (#478, `d98da542`), v233 (#481, `0c8b9b77`), v232 (#482,
+ * `cbe56a92`) and v230 (#477, `664357cd`). No migration.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v236-pcp-scheduling-stays-in-pcp-support-20261114";
+  "voice-runtime-v237-the-sweep-carries-the-callers-dob-20261114";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

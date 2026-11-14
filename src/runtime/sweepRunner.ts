@@ -1,5 +1,5 @@
 import { ticketIdentityFields } from '../tools/ticketIdentity';
-import { readDobQuietly } from '../tools/dobParts';
+import { negatesADate, readDobQuietly, rejectsADate, wordedAnswerIsRejected } from '../tools/dobParts';
 /**
  * RUNNING THE SWEEP AT TEARDOWN — the last thing that happens to a call.
  *
@@ -53,6 +53,74 @@ const noNameFromTheRecording: NameAsker = async () => null;
 /** v201: reads nothing — the default, so no test that calls `runRequestSweep` directly reaches the network. */
 const noRequestFromTheRecording: RequestAsker = async () => null;
 import { draftedRequestFor } from "../tools/draftedRequest";
+import { dobFromCallerAnswer } from "../tools/spokenDob";
+
+const CALLER_LINE = "CALLER: ";
+
+/**
+ * v237: THE DATE OF BIRTH THE CALLER GAVE, UNLESS THEY TOOK IT BACK.
+ *
+ * The caller's answer to a date-of-birth ask, as the filing tools' reader
+ * reads it (`dobFromCallerAnswer`), and nothing when the caller denies or
+ * corrects it afterwards (`rejectsADate`, `negatesADate`: "That's wrong.",
+ * "No, that is wrong, let me check.", "Sorry, I meant…", "It's not…"),
+ * either anywhere in the answering turn (`theAnsweringTurnTakesItBack`,
+ * github-actions reviews of #480, heads `a8cd12a0` and `74e5e3dd`) or in any
+ * later caller line (github-actions P2 on #480, head `18c99236`). The reader keeps a date the caller rejects with
+ * no new one; the sweep would then file a date the caller said was wrong
+ * where `main` filed none. The guard is coarse on purpose: over the 14 days to
+ * 2026-11-14, 43 swept no-date-of-birth calls had an answer to the ask, none
+ * of them had the caller reject the date afterwards, and 14 or 15 had a "no"
+ * or a "not" about something else (another name, a spelling, the doctor, "for
+ * someone else?"), which now carry no date either. Reading nothing is the
+ * safe side; none of the 6 corpus rescues is lost.
+ *
+ * The answering turn is the last caller line at which the reader's answer
+ * became this date, or whose own words read as it (a caller asked again who
+ * gives the same date has answered again). The reader's answer changes only
+ * at a caller line, so a date it reads always has one.
+ */
+export function callerDobToCarry(lines: readonly string[]): string | undefined {
+  const said = dobFromCallerAnswer(lines);
+  if (!said) return undefined;
+  let answeredAt = -1;
+  let before: string | undefined;
+  lines.forEach((line, k) => {
+    const now = dobFromCallerAnswer(lines.slice(0, k + 1));
+    if (line.startsWith(CALLER_LINE) && now === said) {
+      const own = readDobQuietly(line.slice(CALLER_LINE.length));
+      if (before !== said || (own && `${own.year}-${own.month}-${own.day}` === said)) answeredAt = k;
+    }
+    before = now;
+  });
+  if (theAnsweringTurnTakesItBack((lines[answeredAt] ?? "").slice(CALLER_LINE.length))) return undefined;
+  const takenBack = lines.slice(answeredAt + 1).some((line) => {
+    if (!line.startsWith(CALLER_LINE)) return false;
+    return deniesOrCorrects(line.slice(CALLER_LINE.length));
+  });
+  return takenBack ? undefined : said;
+}
+
+function deniesOrCorrects(uttered: string): boolean {
+  return rejectsADate(uttered) || negatesADate(uttered);
+}
+
+/**
+ * v237: ANY DENIAL IN THE ANSWERING TURN (github-actions reviews of #480,
+ * heads `a8cd12a0` and `74e5e3dd`). "March 3, 1950. That's wrong, let me
+ * check." and "March 3, 1950 but that's wrong." are one caller turn each, and
+ * the reader keeps the date. The answering turn is read with the rule v206's
+ * worded parser already uses (`wordedAnswerIsRejected`): any rejection,
+ * negation or correction word anywhere in it takes the date back, and the one
+ * exception is a leading "No," set off by punctuation, which answers the
+ * question before it ("No, it is March 4, 1950."). So "Sorry, I meant March
+ * 4, 1950." carries nothing either, which is the safe side: over the 14 days
+ * to 2026-11-14, 2 of the 43 answering turns carried such a word, both
+ * already taken back by a later line, and none of the 6 corpus rescues did.
+ */
+function theAnsweringTurnTakesItBack(uttered: string): boolean {
+  return wordedAnswerIsRejected(uttered);
+}
 import { findByPhone } from "../services/patientVerification";
 
 /**
@@ -202,7 +270,8 @@ const defaultFiler: SweepFiler = async (ticket) => {
  * Traced 2026-09-03: `/api/voice-agent/create-ticket` validates
  * `patientBirthMonth/Day/Year` as OPTIONAL. Every `missingFields:
  * ["date_of_birth"]` refusal in that day's logs came from OUR OWN tools.
- * A captured validated DOB is carried when held. A swept ticket still files
+ * A certain identity's chart date of birth is carried when held, and
+ * otherwise the date the caller said (v237). A swept ticket still files
  * without one, and the request survives
  * a gate that was never the server's — which is the single largest reason
  * these requests were lost.
@@ -397,6 +466,18 @@ export async function runRequestSweep(
       }
     }
 
+    /**
+     * v237: THE DATE OF BIRTH THE CALLER GAVE, read from the whole call by the
+     * same reader the filing tools use (the caller's answer to a date-of-birth
+     * ask; a date volunteered with no ask is not read), and dropped when the
+     * caller denies or corrects anything after answering (`callerDobToCarry`).
+     * `buildSweptTicket` carries it only under a name the caller gave
+     * (`stated`, `spoken`, `heard`), with a staff note that it is not matched;
+     * a certain identity has no such source and carries the chart's date
+     * below, which always wins (RULE ZERO step 5).
+     */
+    const said = callerDobToCarry(record.transcript.split("\n"));
+    if (said) input = { ...input, callerDob: said };
     console.info(sweepMarker(record.slug, record.callSid));
     const ticket: SweepTicket = buildSweptTicket(input, decision);
     if (identity) {
