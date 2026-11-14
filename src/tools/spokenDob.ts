@@ -882,7 +882,7 @@ function readCallerAnswer(lines: readonly string[]): TranscriptRead {
           // Two dates of birth on one call: which is this patient's cannot be told.
           latest = { kind: 'cleared' };
           heldAt = -1;
-        } else if (only && latest.kind !== 'date') {
+        } else if (only) {
           latest = { kind: 'date', iso: only };
           heldAt = i;
         }

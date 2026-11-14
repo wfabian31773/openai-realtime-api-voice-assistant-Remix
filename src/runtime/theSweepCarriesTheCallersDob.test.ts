@@ -206,6 +206,12 @@ describe('a date the caller calls the date of birth: what it is not', () => {
 
   it('a label whose date is then taken back reads nothing', () => {
     expect(dobFromCallerAnswer([GREETING, C('Refill for Testa Lake, date of birth March 3, 1950, no, that is wrong, let me check.')])).toBeUndefined();
+    expect(dobFromCallerAnswer([GREETING, C('Refill for Testa Lake, date of birth March 3, 1950, actually let me check.')])).toBeUndefined();
+    expect(dobFromCallerAnswer([GREETING, C('Refill for Testa Lake, date of birth March 3, 1950, never mind, I will call back.')])).toBeUndefined();
+  });
+
+  it('inside an ask window the window decides: a second person\'s labelled date does not stand in for a refused answer', () => {
+    expect(dobFromCallerAnswer([GREETING, ASK, C("March 3, 1950. Her husband's date of birth is April 9, 1948.")])).toBeUndefined();
   });
 
   it('a label not followed by a date reads nothing, whatever date comes later in the sentence', () => {
