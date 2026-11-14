@@ -391,6 +391,7 @@ describe('one date-of-birth ask per call, whichever tool makes it (Codex P2 on #
       recordsDeliveryDestination: '202-555-0199',
     });
     expect(sibling.say).toBe(first.say);
+    expect(pcpDirector.get(callId).askCounts?.patientDob, 'the sibling spends nothing').toBe(askBudgetFor('patientDob'));
     expect(ticketing.createTicket).not.toHaveBeenCalled();
     expect(ticketing.createPcpTicket).not.toHaveBeenCalled();
     pcpDirector.clear(callId);
