@@ -2345,7 +2345,7 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
             recordsAsked.set(ask.key, now);
             ticketBlocksUsed += 1;
             // One date-of-birth ask per call: the intake does not ask it again.
-            if (ask.field === 'patientDob') pcpDirector.noteAsked(callId, 'patientDob');
+            if (ask.field === 'patientDob') pcpDirector.noteDobAskedByTheRecordsGate(callId);
           }
           return refusePcp(`missing_required_field:${ask.field}`, {
             say: ask.prompt,
