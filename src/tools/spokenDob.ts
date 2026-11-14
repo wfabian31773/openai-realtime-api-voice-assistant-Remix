@@ -817,20 +817,60 @@ function agreeingPartial(uttered: string, iso: string): boolean {
  * shape on 9 of the 119 swept queue-lane tickets with no date of birth.
  *
  * The caller's own label is the evidence the window stands in for, so it is
- * read narrowly: the date must come straight after the label ("date of birth
- * <date>", "her date of birth is <date>", "DOB <date>", "fecha de nacimiento
- * <date>"), in the same sentence,
- * with nothing about another date (a surgery, an appointment) and no denial
- * or correction after the label. A label followed by anything else ("date of
- * birth, and the surgery is <date>", "her date of birth is not <date>") reads
- * nothing, and so does a date with no label: "I was born <date>" said before
- * any ask stays unread, as it always has (a birth is not always the
- * patient's). Two different dates labelled this way on one call (two patients,
- * or a correction) read as neither. Only outside an ask window: inside one,
- * the window's own reading already decides.
+ * read narrowly, and anything that casts doubt on the date reads nothing:
+ *
+ * - The date must come straight after the label ("date of birth <date>",
+ *   "her date of birth is <date>", "DOB <date>", "fecha de nacimiento
+ *   <date>"), in the same sentence, with nothing about another date (a
+ *   surgery, an appointment) after it. A label followed by anything else
+ *   ("date of birth, and the surgery is <date>") reads nothing, and so does a
+ *   date with no label: "I was born <date>" said before any ask stays unread,
+ *   as it always has (a birth is not always the patient's).
+ * - The WHOLE sentence the label is in, before the label as well as after it,
+ *   and every later sentence the caller says before the agent next speaks
+ *   (the rest of that line and any caller lines straight after it), must
+ *   carry no denial, negation, correction or withdrawal (`rejectsADate`,
+ *   `negatesADate`, `withdrawsTheDateBefore`, the rules the ask window uses)
+ *   and no doubt ("maybe", "I think", "probably", `UNSURE_OF_THE_DATE`). "That
+ *   is not her date of birth, <date>", "I don't know her date of birth,
+ *   <date> maybe" and "date of birth <date>. Sorry, I meant <date>." read
+ *   nothing (connector P1 and Codex P2 on #480). A correction blocks the
+ *   label rather than replacing it: reading nothing is the safe side.
+ * - A later caller line, after the agent has spoken, that corrects or denies a
+ *   date ("Sorry, I meant <date>.") or takes the date back ("That was her
+ *   surgery date.") clears a date read from a label, even inside an ask window
+ *   that read nothing else.
+ * - Two different dates labelled this way on one call (two patients, or a
+ *   correction) read as neither. Only outside an ask window: inside one, the
+ *   window's own reading already decides.
  */
 const CALLER_DOB_LABEL =
   /(?:^| )(?:date of birth|birth date|birthdate|dob|d o b|fecha de nacimiento)(?: (?:is|was|es|era))?(?= |$)/g;
+
+/**
+ * Words that say the caller is not sure of what they said. A negated doubt
+ * ("not sure", "don't know", "no estoy segura") is `negatesADate`'s.
+ */
+const UNSURE_OF_THE_DATE =
+  /(?:^| )(?:maybe|probably|perhaps|possibly|i think|i believe|i guess|i suppose|unsure|if i remember|if i recall|creo|tal vez|quizas|quiza|a lo mejor)(?= |$)/;
+
+/** A sentence that denies, corrects, takes back or doubts a date. */
+function doubtsADate(sentence: string): boolean {
+  return rejectsADate(sentence) || negatesADate(sentence) || UNSURE_OF_THE_DATE.test(fold(sentence))
+    || withdrawsTheDateBefore(sentence, true);
+}
+
+/**
+ * A later caller line, after the agent spoke, that takes back a date read from
+ * a label: a correction or a denial that gives a date ("Sorry, I meant
+ * <date>.", "No, it is <date>."), or a withdrawal ("That was her surgery
+ * date.", `withdrawsTheDateBefore` with no date in the turn).
+ */
+function takesALabelledDateBack(uttered: string): boolean {
+  return uttered.split(/(?<=[.!?])\s+/).some((sentence) =>
+    (carriesADate(sentence) && (rejectsADate(sentence) || negatesADate(sentence)))
+    || withdrawsTheDateBefore(sentence, false));
+}
 
 /** The first word after a label must be where a date starts. */
 function startsADate(folded: string): boolean {
@@ -838,20 +878,38 @@ function startsADate(folded: string): boolean {
   return /^\d/.test(first) || Boolean(monthNumberFromWord(first)) || NUMBER_WORDS.has(first) || /^veinti/.test(first);
 }
 
-function labelledDates(uttered: string): string[] {
+/**
+ * The dates labelled as the date of birth in `uttered`. `afterwards`: what the
+ * caller said after this line before the agent next spoke.
+ */
+function labelledDates(uttered: string, afterwards: readonly string[]): string[] {
   const out: string[] = [];
-  for (const sentence of uttered.split(/(?<=[.!?])\s+/)) {
+  const sentences = uttered.split(/(?<=[.!?])\s+/);
+  const later = afterwards.flatMap((line) => line.split(/(?<=[.!?])\s+/));
+  sentences.forEach((sentence, s) => {
     const folded = fold(sentence);
     const labels = [...folded.matchAll(CALLER_DOB_LABEL)];
+    if (!labels.length) return;
+    if ([sentence, ...sentences.slice(s + 1), ...later].some(doubtsADate)) return;
     labels.forEach((m, k) => {
       const from = (m.index ?? 0) + m[0].length;
       const to = labels[k + 1]?.index ?? folded.length;
       const rest = folded.slice(from, to).trim();
-      if (!rest || !startsADate(rest)) return;
-      if (namesAnotherDate(rest) || rejectsADate(rest) || negatesADate(rest)) return;
+      if (!rest || !startsADate(rest) || namesAnotherDate(rest)) return;
       const parts = readDobQuietly(rest);
       if (parts) out.push(isoFromParts(parts));
     });
+  });
+  return out;
+}
+
+/** The caller lines straight after `i`, up to the next agent line. */
+function callerLinesAfter(lines: readonly string[], i: number): string[] {
+  const out: string[] = [];
+  for (let j = i + 1; j < lines.length; j += 1) {
+    const line = lines[j] ?? '';
+    if (!line.startsWith(CALLER_PREFIX)) break;
+    out.push(line.slice(CALLER_PREFIX.length));
   }
   return out;
 }
@@ -866,6 +924,10 @@ function readCallerAnswer(lines: readonly string[]): TranscriptRead {
   let inWindow = false;
   // v231: the dates the caller labelled as the date of birth outside a window.
   const labelled = new Set<string>();
+  // v231: the held date came from a label, so a later line may still take it
+  // back. It matters only while a date is held: a clear needs no reset, and a
+  // date an ask window reads resets it.
+  let heldFromALabel = false;
   for (let i = 0; i < lines.length; i += 1) {
     const line = lines[i] ?? '';
     if (line.startsWith(CALLER_PREFIX)) {
@@ -874,7 +936,12 @@ function readCallerAnswer(lines: readonly string[]): TranscriptRead {
         latest = { kind: 'cleared' };
         heldAt = -1;
       }
-      const said = inWindow ? [] : labelledDates(uttered);
+      if (heldFromALabel && takesALabelledDateBack(uttered)) {
+        latest = { kind: 'cleared' };
+        heldAt = -1;
+      }
+      const afterwards = inWindow ? [] : callerLinesAfter(lines, i);
+      const said = inWindow ? [] : labelledDates(uttered, afterwards);
       if (said.length) {
         for (const iso of said) labelled.add(iso);
         const [only] = labelled;
@@ -885,6 +952,7 @@ function readCallerAnswer(lines: readonly string[]): TranscriptRead {
         } else if (only) {
           latest = { kind: 'date', iso: only };
           heldAt = i;
+          heldFromALabel = true;
         }
       }
       continue;
@@ -906,6 +974,7 @@ function readCallerAnswer(lines: readonly string[]): TranscriptRead {
         latest = { kind: 'date', iso: window.iso };
         heldAt = window.at;
       }
+      heldFromALabel = false;
     } else if (window.kind === 'refused') {
       if (held && window.attempts.every((a) => agreeingPartial(a, held))) continue;
       latest = { kind: 'cleared' };
