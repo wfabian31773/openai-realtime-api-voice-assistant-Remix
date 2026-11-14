@@ -498,7 +498,8 @@ export const END_CALL_RESULT: ToolResult = {
   hanging_up: true,
   fix:
     'The line closes once your last words have played. If they speak before it does, the call is ' +
-    'still on: answer them, then call end_call again. Never say that the call has ended.',
+    'still on: reply to what they said, out loud, and only then call end_call again. ' +
+    'Never say that the call has ended.',
 };
 
 /**
