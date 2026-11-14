@@ -377,6 +377,8 @@ describe('what the model sends still wins, and only an answer to the question co
     expect(readRecordsDelivery([METHOD_Q, 'CALLER: Fax.']).method).toBe('fax');
     expect(readRecordsDelivery(['AGENT: Should we send the copies by fax or by email?', 'CALLER: Email.']).method).toBe('email');
     expect(readRecordsDelivery(['AGENT: Would you like the chart by fax, email, or mail?', 'CALLER: Mail.']).method).toBe('mail');
+    expect(readRecordsDelivery(['AGENT: How would you like to receive those, by fax, by email, or by mail?', 'CALLER: Fax.']).method).toBe('fax');
+    expect(readRecordsDelivery(['AGENT: Should we send the records by fax or email?', 'CALLER: Fax.']).method).toBe('fax');
   });
 
   it('a method volunteered before anyone asked is not read: the tool asks the question first', async () => {

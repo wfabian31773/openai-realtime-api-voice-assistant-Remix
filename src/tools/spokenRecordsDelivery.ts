@@ -133,17 +133,30 @@ function methodsNamed(text: string): Set<RecordsDeliveryMethod> {
 const NEGATION = /\b(no|nope|not|don't|dont|doesn't|doesnt|never|can't|cant|cannot|won't|wont|isn't|isnt|instead)\b/;
 
 /**
+ * The delivery question: it asks how they want to RECEIVE THE RECORDS (the
+ * funnel's own wording), or names the records, copies or the chart. A
+ * question naming two methods about something else ("Did you send the
+ * authorization by fax or email?", github-actions P2 on `0ce95d97`) opens no
+ * window, so its answer is never a delivery method.
+ */
+const ABOUT_RECEIVING_THE_RECORDS = /\b(receive|records?|copies|copy|chart)\b/;
+
+/**
  * The agent offering the methods: two or more of fax, email and mail, asked.
  * v188's own question ("How would you like to receive the records — by fax,
  * by email, or by mail?") and the model's paraphrases of it ("How would you
  * like to receive those — by fax, by email, or by mail?") both qualify; "Does
- * fax work?" (one method) and the signing-link question (texts or email) do
- * not.
+ * fax work?" (one method), the signing-link question (texts or email) and a
+ * two-method question about anything but receiving the records do not.
  */
 export function asksForTheMethod(agentText: string): boolean {
   const offered = methodsNamed(agentText);
   offered.delete('pickup');
-  return offered.size >= 2 && (agentText.includes('?') || /\bhow would you like\b/.test(agentText));
+  return (
+    offered.size >= 2 &&
+    (agentText.includes('?') || /\bhow would you like\b/.test(agentText)) &&
+    ABOUT_RECEIVING_THE_RECORDS.test(agentText)
+  );
 }
 
 /** The one method a window's answer names; none, several, or a negation is no method. */
