@@ -54,6 +54,7 @@ import { otherReasonFor } from "../tools/otherReason";
 import { nameOrStandIn, STAND_IN_NAME_NOTE } from "../services/standInName";
 import {
   decideOnCallIdentityAsk,
+  hasUsableOnCallDob,
   onCallCallbackNumber,
 } from "../services/onCallIdentityBeforeTransfer";
 import {
@@ -711,6 +712,147 @@ export function greetingConfirmedFirstName(
   if (saidKey === chartKey || saidKey !== chartKey.split(' ')[0]) return params.first_name;
   if (params.last_name?.trim() && nameKey(params.last_name) !== nameKey(chart.lastName)) return params.first_name;
   return chart.firstName;
+}
+
+/**
+ * v234: THE ESCALATION CARRIES THE RECORD THIS CALL CONFIRMED.
+ *
+ * RULE ZERO step 5: once a match is validated, the joined record is carried
+ * into every tool and onto the ticket, and nothing re-asks a field it holds.
+ * `create_ticket` does that through `prepareTicketIdentity`. `escalate_to_human`
+ * never did: its refused-escalation ticket (v80), its urgent transfer record
+ * (v93), the on-call text and the ring-out fallback ticket (both read
+ * `escalationDetailsMap`) took the patient's name and date of birth only from
+ * the model's own arguments, and the identity ask before a transfer (VA-76222)
+ * asked the caller for a last name and date of birth the record held.
+ *
+ * Measured 2026-11-14, no-ivr, the 14 days before, agent tickets on calls whose
+ * `lookup_schedule` came back CONFIRMED: every create_ticket filing (26) and
+ * every after-hours floor ticket (21) carried the record's date of birth, and 5
+ * of the 6 tickets the escalation paths filed carried neither the last name nor
+ * the date of birth (VA-84772, VA-82180, VA-82153 and VA-82158 refused;
+ * VA-82110 the transfer record). The model passed the first name the caller
+ * said yes to and nothing else, because v194 tells it the record holds the
+ * rest.
+ *
+ * The rule is `prepareTicketIdentity`'s, one step narrower: the model must NAME
+ * the confirmed person (their first name, or the first word of a compound first
+ * name the greeting's yes confirmed). An escalation that names nobody is left as
+ * it was, so the identity ask still fires for a caller who may be calling about
+ * someone else, and a different first name, a surname or a date of birth that
+ * disagrees with the record carries nothing (`validatedPatientFor`). A stated
+ * date the record agrees with is kept as stated.
+ *
+ * Two more refusals (Codex P1s on #478):
+ *
+ * - A stated date of birth is replaced only when it is absent or an explicit
+ *   placeholder ("unknown", "n/a", "none", "unavailable", the identity ask's own
+ *   list, `hasUsableOnCallDob`; and every form `create_ticket` reads as no date,
+ *   `saysTheDobIsUnavailable`: "DOB not available — B2B inquiry", "not provided
+ *   - caller provider's office", Codex P2 on #478). A date that is there and does not read
+ *   ("February 30, 1960") carries nothing: `validatedPatientFor` cannot see a
+ *   conflict in it, so carrying would put the record's date over whatever the
+ *   caller actually said.
+ * - The greeting's record (`confirmed`) counts only while it is still the
+ *   person this call holds (`greetingConfirmedMatches`: the same name, person
+ *   and date of birth as the held identity). `create_ticket` replaces the held
+ *   identity and the schedule when it verifies a different family member and
+ *   leaves the greeting's record where it was; a first name the greeting's
+ *   person answers to (whole, or the first word of a compound first name) is
+ *   then ambiguous between two confirmed people, and carries nothing, unless
+ *   the model also passed a surname that is not the greeting person's, or a
+ *   readable date of birth that is the held person's and not the greeting
+ *   person's (`validatedPatientFor` then checks either against the held
+ *   person). A stale greeting record rewrites no compound first name. It is
+ *   compared by person, not by object, so a later lookup that re-reads the
+ *   same person's schedule does not make the greeting stale.
+ */
+/**
+ * The model's words for "there is no date of birth": the forms `create_ticket`
+ * has accepted as no date since the B2B path (`DOB not available — B2B inquiry
+ * from ...`, the Grok body's own instruction) and v190 (`not provided - caller
+ * provider's office`, `declined`, `doesn't know`). One copy, read by
+ * `create_ticket` and by `escalationWithConfirmedRecord`, so a placeholder the
+ * filing tool reads as no date is never read as a date that blocks the carry
+ * (Codex P2 on #478, comment 4571107465). A blank is not one of them: the
+ * caller of this decides what a blank means.
+ */
+export function saysTheDobIsUnavailable(dob: string | undefined): boolean {
+  const t = (dob ?? '').toLowerCase();
+  if (!t.trim()) return false;
+  return t.includes('not available') || t.includes('n/a') ||
+    t.includes('unknown') || t.includes('b2b') ||
+    t.includes('unavailable') || t.includes('none') ||
+    // v190: the model's own words for "the caller cannot give it" — on
+    // CAbccc433f0627622f50d32ff4abd7cec8 it wrote "not provided - caller
+    // provider's office", none of the words above matched, and the
+    // refusal that followed was spoken as a technical issue.
+    /\b(not (provided|given|known)|declined|refused|cannot|can't|doesn't know|does not know|don't know|do not know)\b/.test(t);
+}
+
+export function escalationWithConfirmedRecord<
+  P extends { patient_first_name?: string; patient_last_name?: string; patient_dob?: string },
+>(
+  callSid: string | undefined,
+  confirmed: PatientScheduleContext | undefined,
+  params: P,
+): P {
+  const named = params.patient_first_name?.trim();
+  if (!named) return params;
+  const stated = params.patient_dob?.trim();
+  const statedReads = Boolean(stated && readDobQuietly(stated));
+  if (stated && !statedReads && hasUsableOnCallDob(stated) && !saysTheDobIsUnavailable(stated)) return params;
+  const heldNow = validatedPatientFor(callSid);
+  const greetingIsStale = confirmed !== undefined && !greetingConfirmedMatches(confirmed, confirmed, heldNow);
+  if (greetingIsStale && answersToTheGreetingPerson(confirmed, named, params.patient_last_name)) {
+    // A readable date that is the held person's and not the greeting
+    // person's says which, as a surname does (Codex P2 on #478). Absent, a
+    // placeholder, both people's date or neither's: nothing carries.
+    const statedIso = isoOfDob(stated);
+    const dateSaysWhich = statedIso !== undefined && statedIso === isoOfDob(heldNow?.dateOfBirth) &&
+      statedIso !== isoOfDob(confirmed.patientData?.dateOfBirth);
+    if (!dateSaysWhich) return params;
+  }
+  // A stale greeting record rewrites nothing: its compound first name is no
+  // longer the person held.
+  const first = greetingIsStale
+    ? named
+    : greetingConfirmedFirstName(confirmed, { first_name: named, last_name: params.patient_last_name }) ?? named;
+  const held = validatedPatientFor(callSid, first, params.patient_last_name, params.patient_dob);
+  if (!held) return params;
+  const last = params.patient_last_name?.trim() || held.lastName;
+  const dob = statedReads ? stated : isoDobToUs(held.dateOfBirth) ?? params.patient_dob;
+  const carried = [
+    last !== (params.patient_last_name?.trim() || undefined) ? 'last name' : null,
+    dob !== params.patient_dob ? 'date of birth' : null,
+  ].filter(Boolean);
+  if (carried.length > 0) {
+    console.info(
+      `[HANDOFF] the escalation carries the record this call confirmed (${carried.join(', ')}) on ${callSid ?? 'unknown'}`,
+    );
+  }
+  return { ...params, patient_first_name: first, patient_last_name: last, patient_dob: dob };
+}
+
+/** A date of birth as YYYY-MM-DD, read the way `validatedPatientFor` reads it, or undefined. */
+function isoOfDob(value: string | undefined): string | undefined {
+  const d = value ? readDobQuietly(value) : null;
+  return d ? `${d.year}-${d.month}-${d.day}` : undefined;
+}
+
+/**
+ * Whether the name the model passed is one the greeting's person answers to:
+ * the record's whole first name or its first word, and no surname or the
+ * record's surname. Once a different person is held, such a name could be
+ * either of them (a parent and a child named alike).
+ */
+function answersToTheGreetingPerson(confirmed: PatientScheduleContext, named: string, last: string | undefined): boolean {
+  const chart = confirmed.patientData;
+  const chartFirst = nameKey(chart?.firstName);
+  if (!chartFirst) return false;
+  const said = nameKey(named);
+  if (said !== chartFirst && said !== chartFirst.split(' ')[0]) return false;
+  return !last?.trim() || nameKey(last) === nameKey(chart?.lastName);
 }
 
 /**
@@ -2082,15 +2224,7 @@ The ticket will include schedule context (last appointment info) automatically.`
 
       // B2B callers may not have patient DOB — accept placeholder values and skip validation
       const dobLower = params.date_of_birth?.toLowerCase() || '';
-      const isB2bNoDob = dobLower.includes('not available') || dobLower.includes('n/a') || 
-                         dobLower.includes('unknown') || dobLower.includes('b2b') ||
-                         dobLower.includes('unavailable') || dobLower.includes('none') ||
-                         dobLower === '' ||
-                         // v190: the model's own words for "the caller cannot give it" — on
-                         // CAbccc433f0627622f50d32ff4abd7cec8 it wrote "not provided - caller
-                         // provider's office", none of the words above matched, and the
-                         // refusal that followed was spoken as a technical issue.
-                         /\b(not (provided|given|known)|declined|refused|cannot|can't|doesn't know|does not know|don't know|do not know)\b/.test(dobLower);
+      const isB2bNoDob = dobLower === '' || saysTheDobIsUnavailable(params.date_of_birth);
       
       let parsedDOB = isB2bNoDob ? null : parseDateOfBirth(params.date_of_birth);
       // ASK ONCE, THEN FILE ANYWAY. Until 2026-09-17 this refusal had no
@@ -2867,6 +3001,10 @@ PREREQUISITE: one quick ask for name and DOB; transfer even if unavailable. Clin
             'paged again. If there is more to record, call create_ticket. Otherwise stay with the caller.',
         };
       }
+
+      // v234: the record this call confirmed rides on every ticket, text and
+      // identity ask below, as it does on create_ticket.
+      params = escalationWithConfirmedRecord(metadata.callSid, greetingConfirmed, params);
 
       /**
        * THE THREE CASES, ENFORCED SERVER-SIDE.

@@ -1792,6 +1792,65 @@ import { callEnvironment } from "./callRecord";
  * Above main's v227 (#466, `45c2fb67`), which it contains along with v226
  * (#474, `159a85b6`). No migration.
  */
+/*
+ * v232 (2026-11-14): the records caller's answer reaches the ticket.
+ * `file_records_ticket` asks how and where once each (v188), and the model
+ * re-sends its first arguments after the caller answers, so the spent ask
+ * filed "Delivery: NOT CAPTURED" on requests whose caller had said "By fax."
+ * The bridge keeps, per call, the method the caller named in answer to the
+ * method question and which destinations were given (method names only;
+ * spokenRecordsDelivery.ts); the tool uses them only to fill a gap the model
+ * left. A destination is never read from the transcript: the fax readback
+ * reader drew three review rounds on #482 and was withdrawn (the #476
+ * ruling). Above main's v230 (#477, `664357cd`). No migration.
+ */
+/**
+ * v233 — A SCHEDULING WORD THAT REPORTS A VISIT IS NOT A BOOKING (2026-11-14).
+ * On the optical and tech lines a request about drops or glasses went to the
+ * HVA Hub because the caller said when they had been in ("was seen today"),
+ * asked for a same-day callback, said a visit was rescheduled, or named the
+ * exam the glasses came from (`schedulingWordsReportAVisit`). Over the 14 days
+ * 2026-10-31..11-13, 427 optical, surgery and tech agent tickets carried a
+ * scheduling cue and a drug, drop or eyewear word; 4 change department, all 4
+ * to where staff had moved them. Above main's v232 (#482, `cbe56a92`), which
+ * it contains along with v230 (#477, `664357cd`). No migration.
+ */
+/**
+ * v234 — AN ESCALATION CARRIES THE CONFIRMED RECORD (2026-11-14). On the
+ * after-hours line `escalate_to_human` took the patient's name and date of
+ * birth from the model alone, and the model passes only the first name the
+ * caller said yes to, so the refused-escalation ticket, the urgent transfer
+ * record, the on-call text and the identity ask missed the last name and date
+ * of birth the confirmed record holds (RULE ZERO step 5). 5 of the 6 tickets
+ * the escalation paths filed on confirmed calls in 14 days carried neither.
+ * An escalation that names the confirmed person now takes the record's last
+ * name and date of birth (`escalationWithConfirmedRecord`). Above main's v233
+ * (#481, `0c8b9b77`), which it contains along with v232 (#482, `cbe56a92`)
+ * and v230 (#477, `664357cd`). No migration.
+ */
+/**
+ * v235 — A PCP REQUEST ABOUT A PATIENT ASKS WHO BEFORE IT FILES (2026-11-14).
+ * Operator, 2026-11-14: "Ask before filing." The daily review of 2026-11-12/13
+ * found 101 PCP tickets with no date of birth and 30 with no patient name that
+ * nobody had asked for. A request about a patient now puts the patient's names
+ * and date of birth into the intake (the caller's own date of birth for a
+ * patient calling for themselves), asked once each, month then day then year;
+ * a caller headed for a person is not held. One date-of-birth ask per call
+ * across the intake and the records gate. Above main's v234 (#478,
+ * `d98da542`), which it contains along with v233 (#481, `0c8b9b77`), v232
+ * (#482, `cbe56a92`) and v230 (#477, `664357cd`). No migration.
+ */
+/**
+ * v236 — A PROFESSIONAL'S PCP SCHEDULING REQUEST STAYS IN PCP SUPPORT
+ * (2026-11-14). Operator, 2026-11-14: "Keep in PCP Support." The HVA Hub sent
+ * 200 of 202 professional-route PCP scheduling tickets back to PCP Support in
+ * 14 days. A schedule, reschedule or cancel request from an office now files
+ * on the PCP endpoint like every other request from an office; a patient's
+ * own scheduling request still reaches the Hub (v128). Above main's v235
+ * (#479, `0febb870`), which it contains along with v234 (#478, `d98da542`),
+ * v233 (#481, `0c8b9b77`), v232 (#482, `cbe56a92`) and v230 (#477,
+ * `664357cd`). No migration.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
   "voice-runtime-v236-pcp-scheduling-stays-in-pcp-support-20261114";
 
