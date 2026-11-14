@@ -296,7 +296,39 @@ export const CALL_OUTCOMES: Record<string, ContactStatus> = {
   call_back_later: 'callback_scheduled',
   not_interested: 'declined',
   done: 'completed',
+  voicemail: 'voicemail',
 };
+
+/**
+ * v230: what `record_call_outcome` answers when the agent reached a
+ * recording. Answering-machine detection sends a machine the campaign's own
+ * voicemail line before any agent exists (outboundWebhook.ts), and when it
+ * misses one the agent is talking to a voicemail greeting. Measured, every
+ * NPX outreach call to 2026-11-14: 9 such calls reached the agent; 4 were
+ * recorded as wrong_person (that patient is never called again), 4 as
+ * call_back_later, and on one the agent left a message of its own naming the
+ * patient and "your upcoming eye appointment", which the approved line exists
+ * not to say. So the result hands the agent the campaign's approved line, in
+ * the spoken channel (`message`, v43), and is NOT `nothing_to_say`: until it
+ * is said, the bridge holds end_call (v56), so the line is always left.
+ */
+export function voicemailOutcome(line: string | null): ToolResult {
+  return line
+    ? {
+        success: true,
+        recorded: 'voicemail',
+        message: line,
+        fix:
+          'This is a recording, not a person. Say the message once, word for word, then call end_call. ' +
+          'Say nothing else: not who you are calling for and not why.',
+      }
+    : {
+        success: true,
+        recorded: 'voicemail',
+        nothing_to_say: true,
+        fix: 'This is a recording, not a person. Leave no message: call end_call now and say nothing.',
+      };
+}
 
 registerTool({
   name: RECORD_OUTCOME_TOOL_NAME,
@@ -306,6 +338,8 @@ registerTool({
     "Record how this call ended, once, before you say goodbye. wrong_person: the person you are " +
     "calling for is not at this number. call_back_later: they asked to be called another time. " +
     'not_interested: they said no to what you offered. done: what this call was for is finished. ' +
+    'voicemail: you reached a recording, an answering machine or a phone menu, not a person; the ' +
+    'result gives you the only message to leave. ' +
     'If they asked not to be called at all, use opt_out_of_calls instead.',
   input_schema: {
     type: 'object',
@@ -357,12 +391,12 @@ registerTool({
         };
         return refusal;
       }
-      if (status === 'wrong_number') {
+      if (status === 'wrong_number' || status === 'voicemail') {
         const refusal: OutboundRefusal = {
           success: false,
           error: 'not_on_a_returned_call',
           nothing_to_say: true,
-          fix: 'They rang us and they are identified, so wrong_person does not apply. Record another outcome, or none.',
+          fix: `They rang us and they are identified, so ${outcome} does not apply. Record another outcome, or none.`,
         };
         return refusal;
       }
@@ -386,6 +420,7 @@ registerTool({
     }
     if (!who) return NOT_AN_OUTBOUND_CALL;
     const store = await outboundStore();
+    if (status === 'voicemail') return recordVoicemail(store, who, input);
     // Only while the call still holds the row: an opt-out recorded earlier on
     // this call settled it as do_not_call, and nothing the model says after
     // that may turn it back into something the queue would ring again.
@@ -405,7 +440,72 @@ registerTool({
   },
 });
 
+/**
+ * A voicemail the agent reached, settled the way the answer webhook settles
+ * one answering-machine detection caught (outboundWebhook.ts): the attempt
+ * reads voicemail, and the contact is looked at again after the policy's gap,
+ * or settled max_attempts once its caps are spent. The gap, the cap and the
+ * line are the policy's, injected by the runtime (laneRegistry.ts), never the
+ * model's. Only while the call still holds the row, so an outcome already on
+ * record (an opt-out) stands.
+ */
+async function recordVoicemail(
+  store: OutboundStore,
+  who: Injected,
+  input: Record<string, unknown>,
+): Promise<ToolResult> {
+  const line = typeof input.outbound_voicemail_line === 'string' && input.outbound_voicemail_line.trim()
+    ? input.outbound_voicemail_line.trim()
+    : null;
+  const attemptId = typeof input.outbound_attempt_id === 'string' && input.outbound_attempt_id
+    ? input.outbound_attempt_id
+    : null;
+  const retryHours = Number(input.outbound_retry_hours);
+  const totalCap = Number(input.outbound_total_cap);
+  const spent =
+    Number.isFinite(totalCap) && totalCap > 0 && (await store.priorAttempts(who.contactId)).length >= totalCap;
+  const settled = await store.settleContact(who.contactId, spent ? 'max_attempts' : 'voicemail', {
+    onlyIfCalling: true,
+    ...(attemptId ? { onlyIfCurrentAttempt: attemptId } : {}),
+    nextAttemptAt:
+      Number.isFinite(retryHours) && retryHours > 0 ? new Date(Date.now() + retryHours * 60 * 60 * 1000) : null,
+  });
+  if (!settled) {
+    return {
+      success: true,
+      recorded: 'already_settled',
+      nothing_to_say: true,
+      fix: "This call's outcome is already on record. Leave no message: call end_call now and say nothing.",
+    };
+  }
+  // Only once the row is ours to settle: the attempt's voicemail verdict
+  // outranks every later status (finishAttempt keeps it), and a returned call
+  // is told "we left a voicemail" from it, so it must not be written on a
+  // call whose outcome was already on record and left no message (Codex P2
+  // on #477).
+  if (attemptId) await store.finishAttempt(attemptId, { status: 'voicemail', ended: false });
+  return voicemailOutcome(line);
+}
+
 export const END_CALL_TOOL_NAME = 'end_call';
+
+/**
+ * v230: what end_call answers. It was `{ success: true, ended: true }`, and
+ * the call has not ended when it answers: the bridge hangs up once the last
+ * words have played, and a caller (or a voicemail system) who speaks first
+ * cancels the hangup and the call goes on. On 4 NPX outreach calls to
+ * 2026-11-14 the agent then told the line "The call has already ended." or
+ * "The call is over.", reading that result back. Success is unchanged, so the
+ * bridge's termination guard decides exactly as before.
+ */
+export const END_CALL_RESULT: ToolResult = {
+  success: true,
+  hanging_up: true,
+  fix:
+    'The line closes once your last words have played. If they speak before it does, the call is ' +
+    'still on: reply to what they said, out loud, and only then call end_call again. ' +
+    'Never say that the call has ended.',
+};
 
 /**
  * Hang up. The voice runtime intercepts this NAME (mediaStreamBridge.ts,
@@ -428,7 +528,7 @@ registerTool({
   input_schema: { type: 'object', properties: {} },
   handler: async (input): Promise<ToolResult> => {
     if (!injected(input) && !sessionFor(input)) return NOT_AN_OUTBOUND_CALL;
-    return { success: true, ended: true };
+    return END_CALL_RESULT;
   },
 });
 

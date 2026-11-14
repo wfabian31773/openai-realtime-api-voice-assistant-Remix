@@ -92,7 +92,8 @@ describe("record_call_outcome", () => {
 describe("end_call", () => {
   it("succeeds on a dialled call, which is what lets the bridge hang up", async () => {
     store();
-    expect(await getTool(END_CALL_TOOL_NAME)!.handler({ ...INJECTED })).toEqual({ success: true, ended: true });
+    // v230: success lets the bridge hang up; it no longer says the call ended.
+    expect(await getTool(END_CALL_TOOL_NAME)!.handler({ ...INJECTED })).toMatchObject({ success: true, hanging_up: true });
   });
 
   it("refuses on any other call", async () => {
