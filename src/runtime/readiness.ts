@@ -1792,8 +1792,19 @@ import { callEnvironment } from "./callRecord";
  * Above main's v227 (#466, `45c2fb67`), which it contains along with v226
  * (#474, `159a85b6`). No migration.
  */
+/**
+ * v233 — A SCHEDULING WORD THAT REPORTS A VISIT IS NOT A BOOKING (2026-11-14).
+ * On the optical and tech lines a request about drops or glasses went to the
+ * HVA Hub because the caller said when they had been in ("was seen today"),
+ * asked for a same-day callback, said a visit was rescheduled, or named the
+ * exam the glasses came from (`schedulingWordsReportAVisit`). Over the 14 days
+ * 2026-10-31..11-13, 427 optical, surgery and tech agent tickets carried a
+ * scheduling cue and a drug, drop or eyewear word; 6 change department, all 6
+ * to where staff had moved them. Above main's v230 (#477, `664357cd`), which
+ * it contains. No migration.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v230-npx-speaks-only-to-the-person-20261114";
+  "voice-runtime-v233-a-visit-that-happened-is-not-a-booking-20261114";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can
