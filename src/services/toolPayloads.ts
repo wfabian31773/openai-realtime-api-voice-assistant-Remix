@@ -187,6 +187,13 @@ export interface ToolPayloadStore {
   purge(cutoffIso: string): Promise<void>;
 }
 
+/** A failure named by its code or class, never by its message. */
+export function errorCode(e: unknown): string {
+  const code = (e as { code?: unknown } | null)?.code;
+  if (typeof code === 'string' && /^[A-Z0-9_]{1,12}$/i.test(code)) return `code ${code}`;
+  return e instanceof Error ? e.name : typeof e;
+}
+
 export function payloadsDisabled(env: NodeJS.ProcessEnv = process.env): boolean {
   return env.TOOL_PAYLOADS_DISABLED === '1';
 }
@@ -240,7 +247,9 @@ export function createToolPayloadWriter(
         failures += 1;
         if (failures === 1 || failures % 100 === 0) {
           log.warn(
-            `[TOOL PAYLOADS] write failed (${failures} so far; the call is unaffected): ${e instanceof Error ? e.message : String(e)}`,
+            // The code only: a database error's message can quote the value
+            // that failed, and the value is what the caller said.
+            `[TOOL PAYLOADS] write failed (${failures} so far; the call is unaffected): ${errorCode(e)}`,
           );
         }
       });

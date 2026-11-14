@@ -363,6 +363,18 @@ describe('the writer never reaches the call', () => {
     expect(warn).toHaveBeenCalledTimes(1);
   });
 
+  it('names a failure by its code, never by a message that could quote the value', async () => {
+    const store = fakeStore();
+    store.insert = async () => {
+      throw Object.assign(new Error('invalid input syntax for type json: "Testa Lake"'), { code: '22P02' });
+    };
+    const warn = vi.fn();
+    const w = payloads.createToolPayloadWriter(store, { log: { info: () => {}, warn }, env: {} });
+    await w.record(row(1));
+    expect(warn.mock.calls[0][0]).toContain('code 22P02');
+    expect(warn.mock.calls[0][0]).not.toContain('Testa');
+  });
+
   it('says it is storing, once, on the first write', async () => {
     const store = fakeStore();
     const info = vi.fn();
