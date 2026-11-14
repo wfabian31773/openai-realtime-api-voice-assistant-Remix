@@ -373,12 +373,31 @@ describe('what the model sends still wins, and only an answer to the question co
     expect(readRecordsDelivery(lines).method).toBeUndefined();
     const { answers } = await replay('CA' + 'b7'.repeat(16), 'VA-232-16', [lines, 'file']);
     expect(answers[0].missingFields).toEqual(['delivery_method']);
-    // The funnel's own wording, and a question naming the records, copies or the chart, still open one.
-    expect(readRecordsDelivery([METHOD_Q, 'CALLER: Fax.']).method).toBe('fax');
-    expect(readRecordsDelivery(['AGENT: Should we send the copies by fax or by email?', 'CALLER: Email.']).method).toBe('email');
-    expect(readRecordsDelivery(['AGENT: Would you like the chart by fax, email, or mail?', 'CALLER: Mail.']).method).toBe('mail');
-    expect(readRecordsDelivery(['AGENT: How would you like to receive those, by fax, by email, or by mail?', 'CALLER: Fax.']).method).toBe('fax');
-    expect(readRecordsDelivery(['AGENT: Should we send the records by fax or email?', 'CALLER: Fax.']).method).toBe('fax');
+  });
+
+  it('mentioning the records, a request or the form opens none: the github-actions sentence on ab9ff37e', () => {
+    for (const q of [
+      'Did you send the medical records request by fax or email?',
+      'Did you receive the records by fax or email?',
+      'Should we send the copies by fax or by email?',
+      'Would you like the chart by fax, email, or mail?',
+      'Is the form going out by fax or email?',
+    ]) {
+      expect(readRecordsDelivery([`AGENT: ${q}`, 'CALLER: Fax.']).method, q).toBeUndefined();
+    }
+  });
+
+  it('a line asking how they want to receive the records opens one: the funnel question, received, delivered, sent to them, to get them', () => {
+    for (const q of [
+      DELIVERY_METHOD_QUESTION,
+      'How would you like to receive those, by fax, by email, or by mail?',
+      'How would you like them delivered, fax, email, or mail?',
+      'How would you like the copies sent to you, by fax or email?',
+      'How do you want to get them, by fax or by email?',
+      'How would you prefer to have them received, fax or email?',
+    ]) {
+      expect(readRecordsDelivery([`AGENT: ${q}`, 'CALLER: Fax.']).method, q).toBe('fax');
+    }
   });
 
   it('a method volunteered before anyone asked is not read: the tool asks the question first', async () => {
