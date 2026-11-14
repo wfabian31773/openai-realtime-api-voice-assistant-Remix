@@ -151,8 +151,8 @@ export interface SweepInput {
   requestFromRecording?: string;
   /**
    * v231: THE DATE OF BIRTH THE CALLER GAVE ON THIS CALL, `YYYY-MM-DD`, as the
-   * spoken-DOB reader reads it (`spokenDob.ts`: the answer to a date-of-birth
-   * ask, or a date the caller called the date of birth). The runner sets it
+   * spoken-DOB reader reads it (`spokenDob.ts`: the caller's answer to a
+   * date-of-birth ask, the reader the filing tools use). The runner sets it
    * only when no certain identity holds a chart date, which always wins
    * (RULE ZERO step 5). It reaches the ticket only under a name the caller
    * gave (`stated`, `spoken`, `heard`): a date with no name, or under the
@@ -880,12 +880,14 @@ export interface SweptTicket {
  *
  * Measured over the 14 days to 2026-11-14 (01:00 UTC), optical, surgery and
  * tech: 119 tickets this sweep filed with no date of birth; a transcript
- * pattern finds a date the caller gave on 48 of them (39 answering the ask, 8
- * labelled "date of birth" unasked, 1 both), and on the 2026-11-12/13 corpus
- * that pattern over-counts by about 1 in 10. The sweep carried a date of birth
- * only from a certain lookup, so a caller who answered the question and then
- * hung up before any filing tool ran left a ticket without it. Not matched to
- * a record, and the note says so. Exported so the test reads the same words.
+ * pattern finds a date the caller gave in answer to the ask on 40 of them, and
+ * on the 2026-11-12/13 corpus that pattern over-counts by about 1 in 10. The
+ * sweep carried a date of birth only from a certain lookup, so a caller who
+ * answered the question and then hung up before any filing tool ran left a
+ * ticket without it. Only the answer to an ask is carried: a date the caller
+ * volunteered as "date of birth <date>" with nobody asking is not (the reader
+ * for it was built and withdrawn on #480). Not matched to a record, and the
+ * note says so. Exported so the test reads the same words.
  */
 export const CALLER_DOB_NOTE =
   `DATE OF BIRTH AS THE CALLER SAID IT on the call — not matched to a patient record; confirm it against the chart before acting.`;

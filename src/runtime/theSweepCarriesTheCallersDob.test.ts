@@ -6,10 +6,10 @@
  * call whose caller had said it. Each was read against its transcript and its
  * tool timeline; the failure, ticket by ticket:
  *
- * RESCUED BY THIS CHANGE (9)
+ * RESCUED BY THIS CHANGE (6)
  *   The teardown sweep filed the request and carried a date of birth only from
  *   a certain lookup, so the date the caller said in answer to the ask was
- *   dropped, though the reader already read it (6):
+ *   dropped, though the reader already read it:
  *     VA-84472  CA0a0f4707669d09852a48b0c62f3b8214  tech     digits, then a comma and the year
  *     VA-84514  CA82b14ab39eb7122bf204eaed753fb61b  tech     the same shape, for "her" date of birth
  *     VA-85094  CA76ac3f4ac1246f91129f74c031c1c93d  surgery  Spanish month and "de" year, asked twice
@@ -17,9 +17,15 @@
  *     VA-85245  CAfbf212203b932a5e914673348d7c3b0e  tech     month, ordinal day, year
  *     VA-84530  CAc9a3cca2379bfb98fd73df6542a38cff  surgery  the same date twice (the in-call filing
  *                                                             carried it and was refused for the surgeon)
- *   The caller said "date of birth <date>" before anyone asked, so no ask window
- *   opened and the reader read nothing (2 by the sweep, 1 in the call):
+ *
+ * NOT CARRIED: THE CALLER VOLUNTEERED IT, NOBODY ASKED (4, pinned below)
+ *   The caller said "date of birth <date>" before anyone asked, so no ask
+ *   window opened. A reader for that shape was built on #480 and withdrawn
+ *   after seven review findings in three rounds, one of them a volunteered
+ *   date filed under another patient's name; the operator's ruling on #476,
+ *   "Shrink the reader", applies: read only what can be bound to the patient.
  *     VA-84249  CA0ae7b0b0184c3dbdc4ca7867d91897e0  surgery  a one-breath message, the label at the end
+ *     VA-84692  CA1f32004624cf617a49e117ab488e3cdb  optical  the label after the patient's name, digits
  *     VA-84628  CAee0c403d87b3404aa046f70543d4625d  tech     a refill request, label then the drug
  *     VA-84757  CAf3c1bbe78c4f427364507b3cac0dd3d1  surgery  in the call: the filing tool found no date
  *
@@ -29,15 +35,12 @@
  *     VA-85064  CAd49ac5f736f80a367cffd991a90074e6  surgery  "Cero. Adelante." closed the window before the date
  *     VA-84505  CA892e7cab4059e0eab19feaacf1fc1739  optical  a Spanish restart, "7 21, 7 21 5 8"
  *
- * CORRECTLY REFUSED (6): the date is ambiguous, was corrected into a tangle, or doubted
+ * CORRECTLY REFUSED (5): the date is ambiguous or was corrected into a tangle
  *     VA-84416  CAa7cfbc6ec0a172aaab0c3edc2ba399f5  tech     "<m> <d> 19", a year that is not a year
  *     VA-85076  CA8c7d0b4d0d4fd3c1c9d72dfe7b875067  tech     the month said three times, then "del <yy>"
  *     VA-84440  CAcfbf4cb372706386e7a3313fabfb2c17  surgery  "<Month> <d>, 19, <year>"
  *     VA-84638  CAe5375a718ac89042446aea03031de618  optical  three corrections, none clean
  *     VA-84263  CAaec8ba53ab37f2419a65c2db7771c445  optical  month and day in one turn, the year two turns later
- *     VA-84692  CA1f32004624cf617a49e117ab488e3cdb  optical  "date of birth <digits>", then "maybe" and "I
- *                                                             believe" later in the same message: a label the
- *                                                             caller doubts reads nothing (connector P1 on #480)
  *
  * NOT THIS MECHANISM (1): VA-84834 (CAc7a24aeff2ec7f71932c8bbd1cf54971), the
  * model sent its own reading of a run of digits as the date of birth.
@@ -56,13 +59,12 @@ vi.hoisted(() => {
 vi.mock('../../server/db', () => ({ db: {} }));
 
 import { runRequestSweep, type SweepFiler, type NumberLookup } from './sweepRunner';
-import { CALLER_DOB_NOTE } from './requestSweep';
+import { CALLER_DOB_NOTE, buildSweptTicket, decideSweep, type SweepInput } from './requestSweep';
 import type { NameAsker } from './nameFromTheRecording';
 import type { VoiceCallRecord } from './mediaStreamBridge';
 import { noteStatedNameFromArgs, resetStatedNames } from '../tools/statedName';
 import { rememberVerifiedIdentity, resetVerifiedIdentities } from '../tools/verifiedIdentity';
-import { dobFromCallerAnswer, noteSpokenDob, resetSpokenDobs } from '../tools/spokenDob';
-import { prepareTicketIdentity } from '../tools/ticketIdentity';
+import { dobFromCallerAnswer, resetSpokenDobs } from '../tools/spokenDob';
 
 const A = (s: string) => `AGENT: ${s}`;
 const C = (s: string) => `CALLER: ${s}`;
@@ -139,15 +141,8 @@ const ANSWERED_THE_ASK: Swept[] = [
     lines: [GREETING, C('I need to know when my surgery is scheduled.'), ASK, C('March 26, 1986.'), A("I still can't lock that down. Could you say your date of birth one more time for me?"), C('March 26, 1986.'), A("I'm not able to match that to one record. How can I help you today?")] },
 ];
 
-const SAID_UNASKED: Swept[] = [
-  { ticket: 'VA-84249', sid: 'CA0ae7b0b0184c3dbdc4ca7867d91897e0', slug: 'surgery', name: ['Testa', 'Arden'], source: 'heard', dob: '1945-03-21',
-    lines: [GREETING, C('Uh, yes, this is for Testa Arden. She had surgery on Tuesday and we are confused about when to start the eye drops. Please give me a call at 5 5 5 5 5 5 0 1 0 0, and this is for Testa Arden, date of birth March 21, 1945. Thank you.')] },
-  { ticket: 'VA-84628', sid: 'CAee0c403d87b3404aa046f70543d4625d', slug: 'tech', name: ['Vera', 'Dorn'], source: 'stated', dob: '1943-02-18',
-    lines: [GREETING, C('Prescription refill request for Vera Dorn, date of birth February 18, 1943, for latanoprost eye drops. We are requesting a 90-day supply. Please follow up. Thank you so much.')] },
-];
-
-describe('the corpus: a date of birth the caller gave reaches the swept ticket', () => {
-  for (const row of [...ANSWERED_THE_ASK, ...SAID_UNASKED]) {
+describe('the corpus: a date of birth the caller gave in answer to the ask reaches the swept ticket', () => {
+  for (const row of ANSWERED_THE_ASK) {
     it(`${row.ticket} (${row.sid}, ${row.slug}) files with the date the caller said`, async () => {
       if (row.source === 'stated') stated(row.sid, row.name[0], row.name[1]);
       const file = filer();
@@ -162,17 +157,6 @@ describe('the corpus: a date of birth the caller gave reaches the swept ticket',
       expect(String(file.calls[0].staffNote)).toContain(CALLER_DOB_NOTE);
     });
   }
-
-  it('VA-84757 (CAf3c1bbe78c4f427364507b3cac0dd3d1, surgery): in the call, the filing tools find the date the caller labelled', () => {
-    const sid = 'CAf3c1bbe78c4f427364507b3cac0dd3d1';
-    noteSpokenDob(sid, [
-      GREETING,
-      C('Patient, Hal Stone, date of birth 10/25/1941, says that his drops irritate his eyes. He would like an alternative medication for dry eyes.'),
-    ]);
-    const out = prepareTicketIdentity({ call_sid: sid, first_name: 'Hal', last_name: 'Stone' });
-    expect(out.missing).toBeUndefined();
-    expect(out.input.date_of_birth).toBe('1941-10-25');
-  });
 });
 
 describe('the corpus: still fails, and correctly refused (the reader reads no date)', () => {
@@ -183,8 +167,6 @@ describe('the corpus: still fails, and correctly refused (the reader reads no da
       [A('Ana Ruiz. ¿Y me da su fecha de nacimiento, empezando por el mes, luego el día y luego el año? [interrupted]'), C('Se'), A('No la capté. ¿Podría repetirla, por favor? [interrupted]'), C('Cero'), A('Cero. Adelante.'), C('0 2 14 1952.')]],
     ['still fails: VA-84505, a Spanish restart', 'CA892e7cab4059e0eab19feaacf1fc1739',
       [A('Ana Ruiz. ¿Y su fecha de nacimiento, empezando por el mes, luego el día y luego el año? [interrupted]'), C('Sí.'), A('luego el día, y luego el año. [interrupted]'), C('7 21, 7 21 5 8.'), A('Siete, veintiuno, cinco ocho. ¿Es correcto? [interrupted]'), C('Sí. Sí.')]],
-    ['correctly refused: VA-84692, a later sentence of the same line says "maybe"', 'CA1f32004624cf617a49e117ab488e3cdb',
-      [GREETING, C('Hi, I would like to decline the special glasses for Nora Gale, date of birth 7 4 11. She just wants her regular glasses, so maybe you can put in the order as is.')]],
     ['correctly refused: VA-84416, a year that is not a year', 'CAa7cfbc6ec0a172aaab0c3edc2ba399f5',
       [A('Hal Stone. And may I please have his date of birth, starting with the month, then the day, then the year? [interrupted]'), C('Yes.'), A('I still need the date itself. For example, March seventeenth, nineteen seventy-three. [interrupted]'), C('8 17 19'), A('That came through as just the digits. Is that August seventeenth, nineteen nineteen? [interrupted]')]],
     ['correctly refused: VA-85076, the month three times then "del"', 'CA8c7d0b4d0d4fd3c1c9d72dfe7b875067',
@@ -197,171 +179,43 @@ describe('the corpus: still fails, and correctly refused (the reader reads no da
   }
 });
 
-describe('a date the caller calls the date of birth: what it is not', () => {
-  it('a label followed by another date reads nothing', () => {
-    expect(dobFromCallerAnswer([GREETING, C('This is for Testa Lake, date of birth, and her surgery is March 3, 2026. Please call.')])).toBeUndefined();
-  });
-
-  it('a label whose sentence names another date reads nothing', () => {
-    expect(dobFromCallerAnswer([GREETING, C('For Testa Lake, date of birth April 9, 2026 for the surgery, please confirm it.')])).toBeUndefined();
-  });
-
-  it('a label whose date is then taken back reads nothing', () => {
-    expect(dobFromCallerAnswer([GREETING, C('Refill for Testa Lake, date of birth March 3, 1950, no, that is wrong, let me check.')])).toBeUndefined();
-    expect(dobFromCallerAnswer([GREETING, C('Refill for Testa Lake, date of birth March 3, 1950, actually let me check.')])).toBeUndefined();
-    expect(dobFromCallerAnswer([GREETING, C('Refill for Testa Lake, date of birth March 3, 1950, never mind, I will call back.')])).toBeUndefined();
-  });
-
-  it('inside an ask window the window decides: a second person\'s labelled date does not stand in for a refused answer', () => {
-    expect(dobFromCallerAnswer([GREETING, ASK, C("March 3, 1950. Her husband's date of birth is April 9, 1948.")])).toBeUndefined();
-  });
-
-  it('a label not followed by a date reads nothing, whatever date comes later in the sentence', () => {
-    expect(dobFromCallerAnswer([GREETING, C('I do not know her date of birth, but my son has his birthday March 3, 1980, and he needs drops.')])).toBeUndefined();
-  });
-
-  it('"DOB" alone is a label', () => {
-    expect(dobFromCallerAnswer([GREETING, C('Refill request for Testa Lake, DOB 3/3/1950, for her drops.')])).toBe('1950-03-03');
-  });
-
-  it('a label followed by a denial reads nothing', () => {
-    expect(dobFromCallerAnswer([GREETING, C('Her date of birth is not March 3, 1950, the chart is wrong. Please call me.')])).toBeUndefined();
-  });
-
-  it('two different dates labelled on one call read as neither', () => {
-    expect(
-      dobFromCallerAnswer([
-        GREETING,
-        C('Refills for Testa Lake, date of birth March 3, 1950.'),
-        C('And for Hal Lake, date of birth April 9, 1948. Thank you.'),
-      ]),
-    ).toBeUndefined();
-  });
-
-  it('a birth with no label, said before any ask, stays unread', () => {
-    expect(dobFromCallerAnswer([GREETING, C('My name is Testa Lake and I was born March 17th, 1973.')])).toBeUndefined();
-  });
-
-  it('the same date labelled twice still reads', () => {
-    expect(
-      dobFromCallerAnswer([GREETING, C('For Testa Lake, date of birth March 3, 1950.'), C('Again, Testa Lake, DOB March 3, 1950.')]),
-    ).toBe('1950-03-03');
-  });
-
-  it('Spanish: "fecha de nacimiento" reads', () => {
-    expect(dobFromCallerAnswer([GREETING, C('Es para Ana Ruiz, fecha de nacimiento 3 de marzo de 1950. Gracias.')])).toBe('1950-03-03');
-  });
-
-  it('a later answer to the ask decides, over a labelled date', () => {
-    expect(
-      dobFromCallerAnswer([GREETING, C('This is for Testa Lake, date of birth March 3, 1950.'), ASK, C('April 9, 1951.')]),
-    ).toBe('1951-04-09');
-  });
-
-  it('a labelled date that disagrees with the answer already given clears it', () => {
-    expect(
-      dobFromCallerAnswer([GREETING, ASK, C('April 9, 1951.'), A('Thank you. What can I help with?'), C('Refills for Testa Lake, date of birth March 3, 1950.')]),
-    ).toBeUndefined();
-  });
-
-  it('a rejection after a labelled date clears it, and a later unrelated line does not bring it back', () => {
-    expect(
-      dobFromCallerAnswer([
-        GREETING,
-        C('This is for Testa Lake, date of birth March 3, 1950.'),
-        A('I have March third, nineteen fifty. Is that right?'),
-        C('No, it is not March 3rd.'),
-        A('Thank you. What can I help with?'),
-        C('She needs a refill on her drops.'),
-      ]),
-    ).toBeUndefined();
-  });
-});
-
 /**
- * A LABEL THE CALLER DOUBTS, DENIES OR TAKES BACK READS NOTHING (Codex P2 and
- * connector P1 on #480, head ad5b0caa). The label's date was read from the
- * text after the label alone, so a denial or a doubt before it ("That is not
- * her date of birth, <date>") and a correction in a later sentence ("…
- * Sorry, I meant <date>.") were not seen, and the date the caller had
- * rejected or was unsure of went on the ticket. Every date here is synthetic.
+ * A DATE THE CALLER VOLUNTEERED, WITH NO ASK, IS NOT CARRIED. The labelled
+ * reader that read these was withdrawn on #480 (see the header): nothing
+ * binds a volunteered "date of birth <date>" to the patient the ticket names,
+ * so a caller's own date could reach another patient's ticket.
  */
-describe('a label the caller doubts, denies or takes back reads nothing', () => {
-  const THANKS = A('Thank you. Is there anything else I can help with?');
-  const LABEL = C('Refill for Testa Lake, date of birth March 3, 1950.');
-
-  it('a correction in a later sentence of the same line (Codex P2)', () => {
-    expect(dobFromCallerAnswer([GREETING, C('Date of birth March 3, 1950. Sorry, I meant March 4, 1950.')])).toBeUndefined();
-    expect(dobFromCallerAnswer([GREETING, C('Date of birth March 3, 1950. No, that is wrong, let me check.')])).toBeUndefined();
-    expect(dobFromCallerAnswer([GREETING, C('Date of birth March 3, 1950. Wait, I have to look at her card.')])).toBeUndefined();
-  });
-
-  it('a later sentence that says the date was another date takes it back', () => {
-    expect(dobFromCallerAnswer([GREETING, C('Refill for Testa Lake, date of birth March 3, 1950. That is her surgery date.')])).toBeUndefined();
-  });
-
-  it('a correction in the caller\'s next line, before the agent speaks (Codex P2)', () => {
-    expect(dobFromCallerAnswer([GREETING, LABEL, C('Sorry, I meant March 4, 1950.')])).toBeUndefined();
-    expect(dobFromCallerAnswer([GREETING, LABEL, C('No, that is wrong, let me check.')])).toBeUndefined();
-  });
-
-  it('a correction or a withdrawal after the agent has spoken clears it', () => {
-    expect(dobFromCallerAnswer([GREETING, LABEL, THANKS, C('Oh, sorry, I meant March 4, 1950.')])).toBeUndefined();
-    expect(dobFromCallerAnswer([GREETING, LABEL, THANKS, C('No, it is April 3, 1950.')])).toBeUndefined();
-    expect(dobFromCallerAnswer([GREETING, LABEL, THANKS, C("It isn't that one, it's April 3, 1950.")])).toBeUndefined();
-    expect(dobFromCallerAnswer([GREETING, LABEL, THANKS, C('That was her surgery date.')])).toBeUndefined();
-  });
-
-  it('a denial before the label in the same sentence (connector P1)', () => {
-    expect(dobFromCallerAnswer([GREETING, C('That is not her date of birth, March 3, 1950.')])).toBeUndefined();
-    expect(dobFromCallerAnswer([GREETING, C('No es su fecha de nacimiento, 3 de marzo de 1950.')])).toBeUndefined();
-  });
-
-  it('a doubt anywhere in the sentence or after it (connector P1)', () => {
-    expect(dobFromCallerAnswer([GREETING, C("I don't know her date of birth, March 3, 1950 maybe.")])).toBeUndefined();
-    expect(dobFromCallerAnswer([GREETING, C('I think her date of birth is March 3, 1950.')])).toBeUndefined();
-    expect(dobFromCallerAnswer([GREETING, C('Her date of birth is March 3, 1950, I believe.')])).toBeUndefined();
-    expect(dobFromCallerAnswer([GREETING, C('Her date of birth is March 3, 1950, probably.')])).toBeUndefined();
-    expect(dobFromCallerAnswer([GREETING, C('Her date of birth is March 3, 1950. I am not sure.')])).toBeUndefined();
-    expect(dobFromCallerAnswer([GREETING, LABEL, C('If I remember right, anyway.')])).toBeUndefined();
-    expect(dobFromCallerAnswer([GREETING, C('Fecha de nacimiento 3 de marzo de 1950, creo.')])).toBeUndefined();
-    expect(dobFromCallerAnswer([GREETING, C('Fecha de nacimiento 3 de marzo de 1950, tal vez.')])).toBeUndefined();
-    expect(dobFromCallerAnswer([GREETING, C('Fecha de nacimiento 3 de marzo de 1950, no estoy segura.')])).toBeUndefined();
-  });
-
-  it('what is not a doubt: the label still reads', () => {
-    expect(dobFromCallerAnswer([GREETING, LABEL, C('Please call me back at 5 5 5 5 5 5 0 1 0 0. Thank you.')])).toBe('1950-03-03');
-    expect(dobFromCallerAnswer([GREETING, LABEL, THANKS, C('No, that is all, thank you.')])).toBe('1950-03-03');
-    expect(dobFromCallerAnswer([GREETING, LABEL, THANKS, C('Sorry, can you repeat that?')])).toBe('1950-03-03');
-    expect(dobFromCallerAnswer([GREETING, LABEL, THANKS, C('Her surgery was March 4, 2026.')])).toBe('1950-03-03');
-  });
-
-  it('once an ask window reads a date, a later line about another date does not clear it', () => {
-    expect(
-      dobFromCallerAnswer([GREETING, LABEL, ASK, C('April 9, 1951.'), THANKS, C('No, the surgery is on April 3, 2026.')]),
-    ).toBe('1951-04-09');
-  });
-
-  it('a corrected label does not reach the swept ticket', async () => {
-    const sid = 'CA0ae7b0b0184c3dbdc4ca7867d91897e0';
-    stated(sid, 'Testa', 'Lake');
-    const file = filer();
-    await runRequestSweep(
-      record(sid, 'tech', [GREETING, C('Refill for Testa Lake, date of birth March 3, 1950. Sorry, I meant March 4, 1950.')]),
-      file,
-      noName,
-    );
-    expect(birth(file.calls[0])).toBeUndefined();
-    expect(String(file.calls[0].staffNote)).not.toContain(CALLER_DOB_NOTE);
-  });
+describe('a date of birth the caller volunteered with no ask is not carried', () => {
+  const VOLUNTEERED: Array<[string, string, 'optical' | 'surgery' | 'tech', [string, string], string]> = [
+    ['VA-84249', 'CA0ae7b0b0184c3dbdc4ca7867d91897e0', 'surgery', ['Testa', 'Arden'],
+      'Uh, yes, this is for Testa Arden. She had surgery on Tuesday and we are confused about when to start the eye drops. Please give me a call at 5 5 5 5 5 5 0 1 0 0, and this is for Testa Arden, date of birth March 21, 1945. Thank you.'],
+    ['VA-84692', 'CA1f32004624cf617a49e117ab488e3cdb', 'optical', ['Nora', 'Gale'],
+      'Hi, I would like to decline the special glasses for Nora Gale, date of birth 7 4 11. She just wants her regular glasses, so please put in the order as is.'],
+    ['VA-84628', 'CAee0c403d87b3404aa046f70543d4625d', 'tech', ['Vera', 'Dorn'],
+      'Prescription refill request for Vera Dorn, date of birth February 18, 1943, for latanoprost eye drops. We are requesting a 90-day supply. Please follow up. Thank you so much.'],
+    ['VA-84757', 'CAf3c1bbe78c4f427364507b3cac0dd3d1', 'surgery', ['Hal', 'Stone'],
+      'Patient, Hal Stone, date of birth 10/25/1941, says that his drops irritate his eyes. He would like an alternative medication for dry eyes.'],
+  ];
+  for (const [ticket, sid, slug, name, said] of VOLUNTEERED) {
+    it(`${ticket} (${sid}, ${slug}): files with no date of birth and no note`, async () => {
+      const lines = [GREETING, C(said)];
+      expect(dobFromCallerAnswer(lines)).toBeUndefined();
+      stated(sid, name[0], name[1]);
+      const file = filer();
+      const out = await runRequestSweep(record(sid, slug, lines), file, noName);
+      expect(out.filed).toBe(true);
+      expect(birth(file.calls[0])).toBeUndefined();
+      expect(String(file.calls[0].staffNote)).not.toContain(CALLER_DOB_NOTE);
+    });
+  }
 });
 
 describe('the sweep carries it only under a name the caller gave', () => {
   const sid = 'CA0ae7b0b0184c3dbdc4ca7867d91897e0';
-  const message = [GREETING, C('This is for Testa Arden. She had surgery on Tuesday and we are confused about the drops. Date of birth March 21, 1945. Please call back.')];
+  const message = [GREETING, C('This is for Testa Arden. She had surgery on Tuesday and we are confused about the drops. Please call back.'), ASK, C('March 21, 1945.')];
 
   it('not under the calling number\'s owner, when nobody said a patient name', async () => {
-    const lines = [GREETING, C('Calling about my mother, she had surgery Tuesday and the drops are confusing. Date of birth March 21, 1945. Please call back.')];
+    const lines = [GREETING, C('Calling about my mother, she had surgery Tuesday and the drops are confusing. Please call back.'), ASK, C('March 21, 1945.')];
     const owner: NumberLookup = async () => ({ firstName: 'Owen', lastName: 'Arden' });
     const file = filer();
     const out = await runRequestSweep(record(sid, 'surgery', lines), file, noName, owner);
@@ -379,17 +233,32 @@ describe('the sweep carries it only under a name the caller gave', () => {
     expect(String(file.calls[0].staffNote)).not.toContain(CALLER_DOB_NOTE);
   });
 
-  it('a name the caller said on the number\'s record (spoken) carries it', async () => {
-    rememberVerifiedIdentity(sid, { firstName: 'Testa', lastName: 'Arden', dateOfBirth: '1945-03-12', certain: false });
-    const lines = [GREETING, C('Hi, my name is Testa Arden. I had surgery on Tuesday and the drops are confusing. Date of birth March 21, 1945. Please call back.')];
-    const file = filer();
-    await runRequestSweep(record(sid, 'surgery', lines), file, noName);
-    expect(file.calls[0].patientLastName).toBe('Arden');
-    expect(birth(file.calls[0])).toBe('1945-03-21');
+  it('carried under every name the caller gave (stated, spoken, heard), and under no other source', () => {
+    // A spoken name (v171) is read only from a one-turn message, so it cannot
+    // meet an ask answer end to end; the rule is checked on the ticket itself.
+    for (const nameSource of ['stated', 'spoken', 'heard', 'verified', 'number', undefined] as const) {
+      const input: SweepInput = {
+        callSid: sid,
+        slug: 'surgery',
+        callerPhone: '+15555550100',
+        transcript: message.join('\n'),
+        toolEvents: [],
+        ticketAlreadyFiled: false,
+        verifiedName: { firstName: 'Testa', lastName: 'Arden' },
+        nameSource,
+        callerDob: '1945-03-21',
+      };
+      const decision = decideSweep(input);
+      if (!decision.file) throw new Error('fixture must be fileable');
+      const ticket = buildSweptTicket(input, decision) as unknown as Record<string, unknown>;
+      const carried = nameSource === 'stated' || nameSource === 'spoken' || nameSource === 'heard';
+      expect(birth(ticket)).toBe(carried ? '1945-03-21' : undefined);
+      expect(String(ticket.staffNote).includes(CALLER_DOB_NOTE)).toBe(carried);
+    }
   });
 
   it('a nameless records request carries no date of birth', async () => {
-    const lines = [GREETING, C('I need copies of my mother\'s records sent to her new doctor. Date of birth March 21, 1945. Please call back.')];
+    const lines = [GREETING, C('I need copies of my mother\'s records sent to her new doctor. Please call back.'), ASK, C('March 21, 1945.')];
     const file = filer();
     const out = await runRequestSweep(record('CA1f32004624cf617a49e117ab488e3cdb', 'records', lines), file, noName);
     expect(out.filed).toBe(true);

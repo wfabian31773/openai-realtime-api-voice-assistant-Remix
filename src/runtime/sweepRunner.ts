@@ -401,8 +401,8 @@ export async function runRequestSweep(
 
     /**
      * v231: THE DATE OF BIRTH THE CALLER GAVE, read from the whole call by the
-     * same reader the filing tools use (the answer to a date-of-birth ask, or a
-     * date the caller called the date of birth). `buildSweptTicket` carries it
+     * same reader the filing tools use (the caller's answer to a date-of-birth
+     * ask; a date volunteered with no ask is not read). `buildSweptTicket` carries it
      * only under a name the caller gave (`stated`, `spoken`, `heard`), with a
      * staff note that it is not matched; a certain identity has no such source
      * and carries the chart's date below, which always wins (RULE ZERO step 5).
