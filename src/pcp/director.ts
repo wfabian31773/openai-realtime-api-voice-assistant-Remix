@@ -232,8 +232,8 @@ export interface PcpConversationState {
   /**
    * HOW MANY TIMES THE CALL HAS MOVED ON TO ANOTHER PATIENT. Codex P1, #351.
    *
-   * The create-ticket doors key their POSTs on the call: the Hub on
-   * `<sid>-scheduling-hub` and Medical Records on `call-<sid>`. With one
+   * The create-ticket doors key their POSTs on the call: the patient door on
+   * `<sid>-pcp-patient` and Medical Records on `call-<sid>`. With one
    * filing per patient, a second patient through the same door would send the
    * same key, and the app would hand back the first patient's ticket as a
    * retry. `patientKeySuffix` appends this count, so each patient gets their

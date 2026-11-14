@@ -110,7 +110,9 @@ describe('a caller ID nobody can ring is never labelled as given by the caller',
 
   it('only takes the ANI as a callback when it is dialable', () => {
     const line = src.slice(src.indexOf('const callback = statedCallback'));
-    expect(line.slice(0, 200)).toContain('isDialableAni(metadata.callerPhone)');
+    // v236 moved the line into `callbackProvenanceNote(state, callerPhone)`;
+    // `schedulingReachesTheHub.test.ts` drives it with a withheld caller ID.
+    expect(line.slice(0, 200)).toContain('isDialableAni(callerPhone)');
   });
 
   it('treats a fallback to caller ID as caller-ID-only whatever the flag says', () => {
