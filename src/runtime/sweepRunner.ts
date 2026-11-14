@@ -1,5 +1,5 @@
 import { ticketIdentityFields } from '../tools/ticketIdentity';
-import { readDobQuietly } from '../tools/dobParts';
+import { negatesADate, readDobQuietly, rejectsADate } from '../tools/dobParts';
 /**
  * RUNNING THE SWEEP AT TEARDOWN — the last thing that happens to a call.
  *
@@ -54,6 +54,51 @@ const noNameFromTheRecording: NameAsker = async () => null;
 const noRequestFromTheRecording: RequestAsker = async () => null;
 import { draftedRequestFor } from "../tools/draftedRequest";
 import { dobFromCallerAnswer } from "../tools/spokenDob";
+
+const CALLER_LINE = "CALLER: ";
+
+/**
+ * v237: THE DATE OF BIRTH THE CALLER GAVE, UNLESS THEY TOOK IT BACK.
+ *
+ * The caller's answer to a date-of-birth ask, as the filing tools' reader
+ * reads it (`dobFromCallerAnswer`), and nothing when any caller line after the
+ * answering turn carries a denial or a correction (`rejectsADate`,
+ * `negatesADate`: "That's wrong.", "No, that is wrong, let me check.",
+ * "Sorry, I meant…", "It's not…"). The reader keeps a date the caller
+ * rejects with no new one (github-actions P2 on #480, head `18c99236`); the
+ * sweep would then file a date the caller said was wrong where `main` filed
+ * none. The guard is coarse on purpose: over the 14 days to 2026-11-14, 43
+ * swept no-date-of-birth calls had an answer to the ask, none of them had the
+ * caller reject the date afterwards, and 14 or 15 had a "no" or a "not"
+ * about something else (another name, a spelling, the doctor, "for someone
+ * else?"), which now carry no date either. Reading nothing is the safe side; none of the 6
+ * corpus rescues is lost.
+ *
+ * The answering turn is the last caller line at which the reader's answer
+ * became this date, or whose own words read as it (a caller asked again who
+ * gives the same date has answered again). The reader's answer changes only
+ * at a caller line, so a date it reads always has one.
+ */
+export function callerDobToCarry(lines: readonly string[]): string | undefined {
+  const said = dobFromCallerAnswer(lines);
+  if (!said) return undefined;
+  let answeredAt = -1;
+  let before: string | undefined;
+  lines.forEach((line, k) => {
+    const now = dobFromCallerAnswer(lines.slice(0, k + 1));
+    if (line.startsWith(CALLER_LINE) && now === said) {
+      const own = readDobQuietly(line.slice(CALLER_LINE.length));
+      if (before !== said || (own && `${own.year}-${own.month}-${own.day}` === said)) answeredAt = k;
+    }
+    before = now;
+  });
+  const takenBack = lines.slice(answeredAt + 1).some((line) => {
+    if (!line.startsWith(CALLER_LINE)) return false;
+    const uttered = line.slice(CALLER_LINE.length);
+    return rejectsADate(uttered) || negatesADate(uttered);
+  });
+  return takenBack ? undefined : said;
+}
 import { findByPhone } from "../services/patientVerification";
 
 /**
@@ -204,7 +249,7 @@ const defaultFiler: SweepFiler = async (ticket) => {
  * `patientBirthMonth/Day/Year` as OPTIONAL. Every `missingFields:
  * ["date_of_birth"]` refusal in that day's logs came from OUR OWN tools.
  * A certain identity's chart date of birth is carried when held, and
- * otherwise the date the caller said (v231). A swept ticket still files
+ * otherwise the date the caller said (v237). A swept ticket still files
  * without one, and the request survives
  * a gate that was never the server's — which is the single largest reason
  * these requests were lost.
@@ -400,14 +445,16 @@ export async function runRequestSweep(
     }
 
     /**
-     * v231: THE DATE OF BIRTH THE CALLER GAVE, read from the whole call by the
+     * v237: THE DATE OF BIRTH THE CALLER GAVE, read from the whole call by the
      * same reader the filing tools use (the caller's answer to a date-of-birth
-     * ask; a date volunteered with no ask is not read). `buildSweptTicket` carries it
-     * only under a name the caller gave (`stated`, `spoken`, `heard`), with a
-     * staff note that it is not matched; a certain identity has no such source
-     * and carries the chart's date below, which always wins (RULE ZERO step 5).
+     * ask; a date volunteered with no ask is not read), and dropped when the
+     * caller denies or corrects anything after answering (`callerDobToCarry`).
+     * `buildSweptTicket` carries it only under a name the caller gave
+     * (`stated`, `spoken`, `heard`), with a staff note that it is not matched;
+     * a certain identity has no such source and carries the chart's date
+     * below, which always wins (RULE ZERO step 5).
      */
-    const said = dobFromCallerAnswer(record.transcript.split("\n"));
+    const said = callerDobToCarry(record.transcript.split("\n"));
     if (said) input = { ...input, callerDob: said };
     console.info(sweepMarker(record.slug, record.callSid));
     const ticket: SweepTicket = buildSweptTicket(input, decision);

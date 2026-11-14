@@ -1,5 +1,5 @@
 /**
- * A DATE OF BIRTH THE CALLER GAVE REACHES THE TICKET (v231).
+ * A DATE OF BIRTH THE CALLER GAVE REACHES THE TICKET (v237).
  *
  * The 2026-11-14 ticket-quality pass: on 2026-11-12/13, 20 queue-lane tickets
  * (optical, surgery, tech) went out with no date of birth, or a wrong one, on a
@@ -58,7 +58,7 @@ vi.hoisted(() => {
 });
 vi.mock('../../server/db', () => ({ db: {} }));
 
-import { runRequestSweep, type SweepFiler, type NumberLookup } from './sweepRunner';
+import { callerDobToCarry, runRequestSweep, type SweepFiler, type NumberLookup } from './sweepRunner';
 import { CALLER_DOB_NOTE, buildSweptTicket, decideSweep, type SweepInput } from './requestSweep';
 import type { NameAsker } from './nameFromTheRecording';
 import type { VoiceCallRecord } from './mediaStreamBridge';
@@ -208,6 +208,62 @@ describe('a date of birth the caller volunteered with no ask is not carried', ()
       expect(String(file.calls[0].staffNote)).not.toContain(CALLER_DOB_NOTE);
     });
   }
+});
+
+/**
+ * A DATE THE CALLER TAKES BACK AFTER ANSWERING IS NOT CARRIED (v237;
+ * github-actions P2 on #480, head 18c99236). The reader keeps a date the
+ * caller rejects with no new one ("That's wrong." after the agent's
+ * readback), and the sweep would have filed it where main filed none. Any
+ * denial or correction in a caller line after the answering turn now drops
+ * it. Every date here is synthetic.
+ */
+describe('a date the caller takes back after answering is not carried', () => {
+  const REQUEST = C('I need a refill on my eye drops, please.');
+  const READBACK = A('I have March third, nineteen fifty. Is that right?');
+  const THANKS = A('Thank you. What can I help you with?');
+
+  it('"That\'s wrong." after the readback (the review\'s shape)', async () => {
+    const lines = [GREETING, REQUEST, ASK, C('March 3, 1950.'), READBACK, C("That's wrong.")];
+    expect(dobFromCallerAnswer(lines)).toBe('1950-03-03'); // what the reader alone keeps
+    expect(callerDobToCarry(lines)).toBeUndefined();
+    const sid = 'CA0a0f4707669d09852a48b0c62f3b8214';
+    stated(sid, 'Testa', 'Lake');
+    const file = filer();
+    await runRequestSweep(record(sid, 'tech', lines), file, noName);
+    expect(birth(file.calls[0])).toBeUndefined();
+    expect(String(file.calls[0].staffNote)).not.toContain(CALLER_DOB_NOTE);
+  });
+
+  it('a denial or a correction in any later caller line', () => {
+    const answered = [GREETING, REQUEST, ASK, C('March 3, 1950.')];
+    expect(callerDobToCarry([...answered, READBACK, C('No, that is wrong, let me check.')])).toBeUndefined();
+    expect(callerDobToCarry([...answered, READBACK, C("That isn't right.")])).toBeUndefined();
+    expect(callerDobToCarry([...answered, THANKS, C('Sorry, I meant March 4, 1950.')])).toBeUndefined();
+    expect(callerDobToCarry([...answered, C('Wait, let me look at my card.')])).toBeUndefined();
+  });
+
+  it('a caller asked again who answers again is judged from the new answer', () => {
+    const denied = [GREETING, REQUEST, ASK, C('March 3, 1950.'), READBACK, C("No, that's wrong.")];
+    expect(callerDobToCarry([...denied, ASK, C('March 3, 1950.')])).toBe('1950-03-03');
+    expect(callerDobToCarry([...denied, ASK, C('March 4, 1950.')])).toBe('1950-03-04');
+  });
+
+  it('a correction inside the answering turn is the answer, not a taking back', () => {
+    expect(callerDobToCarry([GREETING, REQUEST, ASK, C('March 3, 1950. Sorry, I meant March 4, 1950.')])).toBe('1950-03-04');
+    expect(
+      callerDobToCarry([GREETING, REQUEST, ASK, C('March 3, 1950.'), A('Could you give me your date of birth once more?'), C('No, it is March 4, 1950.')]),
+    ).toBe('1950-03-04');
+  });
+
+  it('what is not a taking back: a denial before the answer, and the agent\'s own words', () => {
+    expect(callerDobToCarry([GREETING, C("No, I don't have an appointment, I need a refill."), ASK, C('March 3, 1950.')])).toBe('1950-03-03');
+    expect(callerDobToCarry([GREETING, REQUEST, ASK, C('March 3, 1950.'), A("I'm not able to match that. How can I help?"), C('A refill, please.')])).toBe('1950-03-03');
+  });
+
+  it('all 6 corpus rescues still carry', () => {
+    for (const row of ANSWERED_THE_ASK) expect(callerDobToCarry(row.lines), row.ticket).toBe(row.dob);
+  });
 });
 
 describe('the sweep carries it only under a name the caller gave', () => {

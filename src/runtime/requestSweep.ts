@@ -150,7 +150,7 @@ export interface SweepInput {
    */
   requestFromRecording?: string;
   /**
-   * v231: THE DATE OF BIRTH THE CALLER GAVE ON THIS CALL, `YYYY-MM-DD`, as the
+   * v237: THE DATE OF BIRTH THE CALLER GAVE ON THIS CALL, `YYYY-MM-DD`, as the
    * spoken-DOB reader reads it (`spokenDob.ts`: the caller's answer to a
    * date-of-birth ask, the reader the filing tools use). The runner sets it
    * only when no certain identity holds a chart date, which always wins
@@ -869,14 +869,14 @@ export interface SweptTicket {
    * ask that did not happen.
    */
   routingAskExhausted?: true;
-  /** v231: the date of birth the caller gave, only under a name the caller gave. */
+  /** v237: the date of birth the caller gave, only under a name the caller gave. */
   patientBirthYear?: string;
   patientBirthMonth?: string;
   patientBirthDay?: string;
 }
 
 /**
- * v231: THE STAFF NOTE WHEN THE DATE OF BIRTH IS THE ONE THE CALLER SAID.
+ * v237: THE STAFF NOTE WHEN THE DATE OF BIRTH IS THE ONE THE CALLER SAID.
  *
  * Measured over the 14 days to 2026-11-14 (01:00 UTC), optical, surgery and
  * tech: 119 tickets this sweep filed with no date of birth; a transcript
