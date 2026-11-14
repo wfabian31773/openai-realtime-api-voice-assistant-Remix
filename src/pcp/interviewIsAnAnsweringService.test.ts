@@ -38,7 +38,9 @@ describe('what the line no longer spends a turn on', () => {
     ['callerRole', '26 calls died here for 6 tickets'],
     ['callerFacilityType', 'an eight-value enum read to somebody who just named their organisation'],
     ['statedRelationship', 'drew the same answer as the role question'],
-    ['patientDob', '20 calls died here for 1 ticket'],
+    // `patientDob` was here: "20 calls died here for 1 ticket" (v34). The
+    // operator ruled on 2026-11-14 that it is asked before filing anyway,
+    // knowing a hang-up on it can cost the request (v235).
   ])('never asks for %s (%s)', (field) => {
     expect(PROFESSIONAL_FIELDS).not.toContain(field);
     expect(PATIENT_FIELDS).not.toContain(field);
@@ -159,7 +161,7 @@ describe('the questions do the extra work, so the turns do not', () => {
 });
 
 describe('the call a real caller gets', () => {
-  it('is three questions when they answer the way the transcripts show', () => {
+  it('is four questions when they answer the way the transcripts show (v235 adds the date of birth)', () => {
     const d = director();
     // Caller ID seeded the callback (pcpAgent.ts seeds it whenever the ANI is
     // E.164), and the greeting already asked the purpose.
@@ -174,10 +176,16 @@ describe('the call a real caller gets', () => {
     asked.push(String(decision.nextQuestion?.field));
     d.update('real', { patientFirstName: 'Sam', patientLastName: 'Rivera' });
 
-    // Two questions in, the REQUEST is complete: who, where from, which
-    // patient, and a callback the call itself supplied. What remains is the
-    // enrichment block, which cannot cost us the ticket.
-    expect(asked).toEqual(['callerName', 'patientFirstName']);
+    // v235: then the patient's date of birth, once, in parts.
+    decision = d.askNext('real');
+    asked.push(String(decision.nextQuestion?.field));
+    d.update('real', { patientDob: '1950-02-03' });
+
+    // Three questions in, the REQUEST is complete: who, where from, which
+    // patient and their date of birth, and a callback the call itself
+    // supplied. What remains is the enrichment block, which cannot cost us
+    // the ticket.
+    expect(asked).toEqual(['callerName', 'patientFirstName', 'patientDob']);
     // AND THE INTERVIEW STOPS THERE so the model files. It used to hand back
     // `callerRole` here, and then the email — which is where ten calls ended
     // on 2026-09-16 with no ticket at all.
@@ -206,6 +214,8 @@ describe('the call a real caller gets', () => {
     d.update('quit', { callerName: 'Karina', callerOrganization: 'Optum Medical Clinics' });
     d.askNext('quit');
     d.update('quit', { patientFirstName: 'Sam', patientLastName: 'Rivera' });
+    d.askNext('quit');
+    d.update('quit', { patientDob: '1950-02-03' });
     // THIS ASSERTION USED TO READ `toBe('callerRole')`, under the heading "a
     // caller who hangs up on the title question still leaves a filable
     // request". The request was filABLE and it did not FILE: the model files

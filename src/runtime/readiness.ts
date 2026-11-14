@@ -1828,8 +1828,20 @@ import { callEnvironment } from "./callRecord";
  * (#481, `0c8b9b77`), which it contains along with v232 (#482, `cbe56a92`)
  * and v230 (#477, `664357cd`). No migration.
  */
+/**
+ * v235 — A PCP REQUEST ABOUT A PATIENT ASKS WHO BEFORE IT FILES (2026-11-14).
+ * Operator, 2026-11-14: "Ask before filing." The daily review of 2026-11-12/13
+ * found 101 PCP tickets with no date of birth and 30 with no patient name that
+ * nobody had asked for. A request about a patient now puts the patient's names
+ * and date of birth into the intake (the caller's own date of birth for a
+ * patient calling for themselves), asked once each, month then day then year;
+ * a caller headed for a person is not held. One date-of-birth ask per call
+ * across the intake and the records gate. Above main's v234 (#478,
+ * `d98da542`), which it contains along with v233 (#481, `0c8b9b77`), v232
+ * (#482, `cbe56a92`) and v230 (#477, `664357cd`). No migration.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v234-an-escalation-carries-the-confirmed-record-20261114";
+  "voice-runtime-v235-pcp-asks-the-patient-before-filing-20261114";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

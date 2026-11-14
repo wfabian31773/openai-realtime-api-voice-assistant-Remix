@@ -109,11 +109,15 @@ describe('the corpus: a referring office booking a patient is asked who it is ab
     pcpDirector.clear(sid);
   });
 
-  it.each(PATIENT_SIDS)('%s, the patient calling for themselves, is not asked about a patient', (sid) => {
+  // v235, operator 2026-11-14: a patient calling for themselves is the
+  // patient, so their own date of birth is asked (in their words), and never
+  // "the patient's name".
+  it.each(PATIENT_SIDS)('%s, the patient calling for themselves, is asked their own date of birth only', (sid) => {
     pcpDirector.update(sid, { ...OFFICE, callerIsThePatient: true, callPurpose: 'schedule_appointment' });
     const next = pcpDirector.next(sid);
     expect(next.nextQuestion?.field).not.toBe('patientFirstName');
-    expect(next.nextQuestion?.field).not.toBe('patientDob');
+    expect(next.nextQuestion?.field).toBe('patientDob');
+    expect(next.nextQuestion?.prompt).toMatch(/your date of birth, starting with the month/);
     pcpDirector.clear(sid);
   });
 

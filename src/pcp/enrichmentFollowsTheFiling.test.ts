@@ -52,6 +52,8 @@ const requestComplete: Partial<PcpConversationState> = {
   callbackNumber: '+19095551234',
   patientFirstName: 'A',
   patientLastName: 'Patient',
+  // v235: a request about a patient is complete with their date of birth.
+  patientDob: '1950-02-03',
 };
 
 const source = (file: string) =>

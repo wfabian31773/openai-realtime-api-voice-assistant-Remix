@@ -52,7 +52,7 @@ import {
   ticketDeliveryNote,
 } from '../pcp/recordsDelivery';
 import { ticketReadiness, nextRequiredAsk, annotationFor, MAX_BLOCKS } from '../pcp/ticketRequirements';
-import { recordsAskFor, recordsAskGuidance, recordsIdentityGaps } from '../pcp/recordsIntakeGate';
+import { recordsAskFor, recordsAskGuidance, recordsDobGap, recordsIdentityGaps } from '../pcp/recordsIntakeGate';
 import { namesAPatient, submitPcpTicket, submitPcpWithdrawal, type PcpTicketPayload } from '../pcp/pcpTicketing';
 import { toldTheCallerItWasRecorded } from '../pcp/toldItWasRecorded';
 import { answerToTheNoRequestAsk, type TeardownTurn } from '../pcp/answerToTheAsk';
@@ -680,6 +680,7 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
       callerIsThePatient?: boolean;
       patientFirstName?: string;
       patientLastName?: string;
+      patientDob?: string;
       callbackNumber?: string;
       recordsDeliveryMethod?: (typeof PCP_RECORDS_DELIVERY_METHODS)[number];
       recordsDeliveryDestination?: string;
@@ -823,6 +824,14 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
         + 'a plan, a pharmacy — and also for a family member calling ABOUT a patient, because then the patient '
         + 'is someone else and we still need their name. Set this as soon as you know; it decides whether we '
         + 'ask "who is the call about".',
+      ),
+      /**
+       * v235. Whether the request is about one patient decides whether the
+       * patient's name and date of birth are asked before filing, and the
+       * purpose cannot say it (`requestConcernsAPatient` in director.ts).
+       */
+      requestIsAboutAPatient: z.boolean().optional().describe(
+        'TRUE when the request concerns one specific patient (a prescription, a referral), whatever the purpose.',
       ),
       patientFirstName: z.string().min(1).optional(),
       patientLastName: z.string().min(1).optional().describe(LAST_NAME_FIELD_DESCRIPTION),
@@ -1229,6 +1238,8 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
           requestReasonId: redirect?.requestReasonId ?? home!.requestReasonId,
           patientFirstName: nameParts[0] || 'Unknown',
           patientLastName: nameParts.slice(1).join(' ') || 'Caller',
+          // v235: the patient's own date of birth, asked before filing.
+          ...dobColumns(state.patientDob),
           patientPhone: String(state.callbackNumber ?? metadata.callerPhone ?? ''),
           preferredContactMethod: 'phone',
           description: body,
@@ -2267,6 +2278,7 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
       callerIsThePatient: z.boolean().optional().describe('True only when the caller is the patient asking for their own records.'),
       patientFirstName: z.string().min(1).optional(),
       patientLastName: z.string().min(1).optional(),
+      patientDob: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
       callbackNumber: z.string().min(7).optional(),
       recordsDeliveryMethod: z.enum(PCP_RECORDS_DELIVERY_METHODS).optional().describe("'unspecified' if they do not know."),
       recordsDeliveryDestination: z.string().min(3).optional().describe('The fax number, email address or mailing address they gave.'),
@@ -2332,6 +2344,8 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
           if (ask.spends) {
             recordsAsked.set(ask.key, now);
             ticketBlocksUsed += 1;
+            // One date-of-birth ask per call: the intake does not ask it again.
+            if (ask.field === 'patientDob') pcpDirector.noteDobAskedByTheRecordsGate(callId);
           }
           return refusePcp(`missing_required_field:${ask.field}`, {
             say: ask.prompt,
@@ -2340,6 +2354,8 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
         }
         const gapNote = annotationFor(recordsIdentityGaps(gateState));
         if (gapNote) narrative = `${narrative}\n\n${gapNote}`;
+        const dobGap = recordsDobGap(gateState);
+        if (dobGap) narrative = `${narrative}\n\n${dobGap}`;
       }
       const { state, missing } = ticketState(callId);
       /**

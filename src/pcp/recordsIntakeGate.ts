@@ -34,18 +34,19 @@
  * batch, not the caller's answer: it gets the same question and spends
  * nothing (the v79 rule).
  */
-import type { PcpConversationState } from './director';
+import { OWN_DOB_PROMPT, PROMPTS, askBudgetFor, type PcpConversationState } from './director';
 import { deliveryAskFor } from './recordsDelivery';
 import { REQUIRED_PROMPTS, ticketReadiness, MAX_BLOCKS, type RequiredField } from './ticketRequirements';
 
 export const RECORDS_ASK_BATCH_MS = 2_000;
 
-export type RecordsAskField = RequiredField | 'recordsDeliveryMethod' | 'recordsDeliveryDestination';
+export type RecordsAskField = RequiredField | 'patientDob' | 'recordsDeliveryMethod' | 'recordsDeliveryDestination';
 
 /** The records tool's own arguments that answer each question. */
 export const ANSWERED_BY: Record<RecordsAskField, string> = {
   callerName: 'callerName (and callerOrganization)',
   patientName: 'patientFirstName and patientLastName (or callerIsThePatient: true when the caller is the patient)',
+  patientDob: 'patientDob (YYYY-MM-DD)',
   callbackNumber: 'callbackNumber',
   recordsDeliveryMethod: "recordsDeliveryMethod ('fax', 'email', 'mail', or 'unspecified' if they do not know)",
   recordsDeliveryDestination: 'recordsDeliveryDestination (the fax number, email address or mailing address)',
@@ -60,11 +61,29 @@ export interface RecordsAsk {
   spends: boolean;
 }
 
-/** Every field still missing, in the order they are asked. */
-export function recordsFieldsMissing(state: PcpConversationState): Array<{ field: RecordsAskField; prompt: string }> {
+/**
+ * Every field still missing, in the order they are asked. `asked` is this
+ * gate's own asks on the call: a date of birth this gate asked is decided by
+ * them (the same question inside the batch window, not asked again after it),
+ * never as an ask the intake spent.
+ */
+export function recordsFieldsMissing(
+  state: PcpConversationState,
+  asked: ReadonlyMap<string, number> = new Map(),
+): Array<{ field: RecordsAskField; prompt: string }> {
   const missing: Array<{ field: RecordsAskField; prompt: string }> = [];
   for (const field of ticketReadiness(state, 0, true).blocking) {
     missing.push({ field, prompt: REQUIRED_PROMPTS[field] ?? `Please provide ${field}.` });
+  }
+  /**
+   * WHOSE RECORDS, THEN THEIR DATE OF BIRTH (v235, operator 2026-11-14: "Ask
+   * before filing"). Medical Records finds the chart by it, and 11 of the PCP
+   * records tickets of 2026-11-12/13 carried a patient name and no date of
+   * birth nobody asked for. Asked once, like every field here, and of the
+   * patient themselves in their own words.
+   */
+  if (!state.patientDob && (asked.has(recordsAskKey('patientDob', state)) || !dobAskSpentByTheIntake(state))) {
+    missing.push({ field: 'patientDob', prompt: state.callerIsThePatient ? OWN_DOB_PROMPT : PROMPTS.patientDob! });
   }
   // The delivery ask is sequential (method, then the destination it needs),
   // so only its next field is known at a time.
@@ -81,7 +100,17 @@ export function recordsFieldsMissing(state: PcpConversationState): Array<{ field
  * asked again.
  */
 export function recordsAskKey(field: RecordsAskField, state: PcpConversationState): string {
-  return field === 'recordsDeliveryDestination' ? `${field}:${state.recordsDeliveryMethod ?? ''}` : field;
+  if (field === 'recordsDeliveryDestination') return `${field}:${state.recordsDeliveryMethod ?? ''}`;
+  /**
+   * The date of birth is asked per PATIENT (Codex P2 on #479, round 3). A
+   * clinic asking for two patients' records on one call gets the second
+   * patient's date of birth asked too. The director decides when the patient
+   * changes and counts it (`patientOrdinal`, bumped by the same switch that
+   * clears the date of birth and its ask count), so this key follows it and
+   * nothing here decides what a new patient resets.
+   */
+  if (field === 'patientDob') return `${field}:${state.patientOrdinal ?? 0}`;
+  return field;
 }
 
 /**
@@ -95,7 +124,7 @@ export function recordsAskFor(
   asked: ReadonlyMap<string, number>,
   now: number,
 ): RecordsAsk | null {
-  for (const { field, prompt } of recordsFieldsMissing(state)) {
+  for (const { field, prompt } of recordsFieldsMissing(state, asked)) {
     const key = recordsAskKey(field, state);
     const at = asked.get(key);
     if (at === undefined) return { field, key, prompt, spends: true };
@@ -103,6 +132,31 @@ export function recordsAskFor(
     // Asked and not answered: not asked again.
   }
   return null;
+}
+
+/**
+ * ONE DATE-OF-BIRTH ASK PER CALL, WHICHEVER TOOL MADE IT (v235, Codex P2 on
+ * #479). The date of birth is asked once (`ASKS_FOR_FIELD`), and the intake
+ * (`record_pcp_intake`) and this gate are two places that can ask it. When the
+ * intake has spent the ask and the caller could not give it, this gate does
+ * not ask again; and the gate's own ask is charged to the intake's count by
+ * the records tool, so the intake does not ask after it either. That charge
+ * does not make the gate's own ask read as the intake's: a date of birth this
+ * gate asked is decided by its own `asked` map, so a sibling call inside the
+ * batch window gets the same question and spends nothing (Codex P2 on #479,
+ * round 2).
+ */
+export function dobAskSpentByTheIntake(state: PcpConversationState): boolean {
+  return (state.askCounts?.patientDob ?? 0) >= askBudgetFor('patientDob');
+}
+
+/**
+ * The date of birth missing when the request files — for the ticket's gap note
+ * (v235). The gate asks it of every patient before it lets a request file, so
+ * reaching the filing without one means it was asked and not given.
+ */
+export function recordsDobGap(state: PcpConversationState): string | undefined {
+  return state.patientDob ? undefined : "NOT CAPTURED ON THE CALL: the patient's date of birth.";
 }
 
 /** The identity fields still missing once the asking is over, for the ticket's gap note. */

@@ -294,7 +294,12 @@ describe('what the descriptions cost on the wire', () => {
     // incomplete should not be filed"), required on the wire so the model
     // always says whether the caller stated a request. Measured 7,732 after
     // cutting its description to one short sentence.
-    ['pcp', 7_800],
+    // v235 RAISED pcp once, 7,800 -> 8,000: record_pcp_intake gained
+    // requestIsAboutAPatient and handle_patient_medical_records_request gained
+    // patientDob (operator, 2026-11-14: ask the patient and the date of birth
+    // before filing). Measured 7,927 after cutting the new description to one
+    // sentence and giving patientDob none, as record_pcp_intake's has none.
+    ['pcp', 8_000],
   ] as const)('%s stays under %i characters', (slug, ceiling) => {
     expect(JSON.stringify(built.get(slug)!.lane.agent.tools).length).toBeLessThan(ceiling);
   });

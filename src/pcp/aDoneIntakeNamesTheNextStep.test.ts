@@ -164,7 +164,10 @@ describe('the next step fits the purpose', () => {
   it('a patient is told to file, never to try a transfer', async () => {
     const agent = agentFor('CApt00000000000000000000000000001');
     await call(agent, 'record_pcp_intake', { callPurpose: 'patient_caller' });
-    const done = await call(agent, 'record_pcp_intake', { callerName: 'Sam Example' });
+    // v235: the patient's own date of birth is asked before the intake is done.
+    const dobAsk = await call(agent, 'record_pcp_intake', { callerName: 'Sam Example' });
+    expect(dobAsk.nextQuestion?.field).toBe('patientDob');
+    const done = await call(agent, 'record_pcp_intake', { patientDob: '1950-02-03' });
     expect(done.nextQuestion).toBeUndefined();
     expect(done.nextStep).toBe('file');
     expect(done.guidance).toContain('call create_pcp_task');
