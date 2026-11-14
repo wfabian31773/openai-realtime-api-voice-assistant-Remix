@@ -382,6 +382,11 @@ describe('what the model sends still wins, and only an answer to the question co
       'Should we send the copies by fax or by email?',
       'Would you like the chart by fax, email, or mail?',
       'Is the form going out by fax or email?',
+      'Would you prefer to receive the request form by fax or email?',
+      'How did you receive the records, by fax or email?',
+      // One sentence decides: a "how" in one question and "would you like to
+      // receive" in another do not make a delivery question.
+      'How are you today? Do you like the new office? Did you receive the records by fax or email?',
     ]) {
       expect(readRecordsDelivery([`AGENT: ${q}`, 'CALLER: Fax.']).method, q).toBeUndefined();
     }

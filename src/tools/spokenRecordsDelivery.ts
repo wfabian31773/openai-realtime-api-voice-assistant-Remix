@@ -133,13 +133,18 @@ function methodsNamed(text: string): Set<RecordsDeliveryMethod> {
 const NEGATION = /\b(no|nope|not|don't|dont|doesn't|doesnt|never|can't|cant|cannot|won't|wont|isn't|isnt|instead)\b/;
 
 /**
- * The delivery question: it asks how they want to RECEIVE THE RECORDS (the
- * funnel's own wording), or names the records, copies or the chart. A
- * question naming two methods about something else ("Did you send the
- * authorization by fax or email?", github-actions P2 on `0ce95d97`) opens no
- * window, so its answer is never a delivery method.
+ * The delivery question: a line that asks how the caller wants to RECEIVE
+ * the records. The funnel's own question ("How would you like to receive
+ * the records — by fax, by email, or by mail?"), or "how … you … like /
+ * want / prefer" followed by received, delivered, sent to you, or to get
+ * them, all inside one sentence. Mentioning the records, a request, the form or an authorization
+ * never opens one: "Did you send the authorization by fax or email?"
+ * (github-actions P2 on `0ce95d97`) and "Did you send the medical records
+ * request by fax or email?" (on `ab9ff37e`) are not delivery questions, so
+ * their answers are never a delivery method.
  */
-const ABOUT_RECEIVING_THE_RECORDS = /\b(receive|records?|copies|copy|chart)\b/;
+const ASKS_HOW_THEY_WANT_THE_RECORDS =
+  /\bhow\b[^?.]*\byou\b[^?.]*\b(like|want|prefer)\b[^?.]*\b(receive|received|receiving|delivered|delivery|sent to you|get (them|those|these|it|the records|the copies|a copy|copies))\b/;
 
 /**
  * The agent offering the methods: two or more of fax, email and mail, asked.
@@ -147,7 +152,8 @@ const ABOUT_RECEIVING_THE_RECORDS = /\b(receive|records?|copies|copy|chart)\b/;
  * by email, or by mail?") and the model's paraphrases of it ("How would you
  * like to receive those — by fax, by email, or by mail?") both qualify; "Does
  * fax work?" (one method), the signing-link question (texts or email) and a
- * two-method question about anything but receiving the records do not.
+ * two-method question that does not ask how they want to receive the records
+ * do not.
  */
 export function asksForTheMethod(agentText: string): boolean {
   const offered = methodsNamed(agentText);
@@ -155,7 +161,7 @@ export function asksForTheMethod(agentText: string): boolean {
   return (
     offered.size >= 2 &&
     (agentText.includes('?') || /\bhow would you like\b/.test(agentText)) &&
-    ABOUT_RECEIVING_THE_RECORDS.test(agentText)
+    ASKS_HOW_THEY_WANT_THE_RECORDS.test(agentText)
   );
 }
 
