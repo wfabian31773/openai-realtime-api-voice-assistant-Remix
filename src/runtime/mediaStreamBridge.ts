@@ -110,6 +110,7 @@ import type { BoundAgent } from "./agentBinding";
 import { CallTranscriptLog, type TranscriptTurn } from "./transcriptLog";
 import { noteSpokenDob } from "../tools/spokenDob";
 import { notePatientStatus } from "../tools/spokenPatientStatus";
+import { noteRecordsDelivery } from "../tools/spokenRecordsDelivery";
 import { noteCallerTranscript } from "../services/symptomCorroboration";
 import { ghostCallRefusal } from "../services/ghostCallProtection";
 import { callerConclusion, completesGoodbye, type CallerConclusion } from "./goodbye";
@@ -1363,6 +1364,16 @@ export class VoiceCallBridge {
          * (2026-10-01). The whole record every time, like the two above.
          */
         noteCallerTranscript(this.deps.context.callSid, this.transcriptLog.lines);
+        /**
+         * HOW AND WHERE THE RECORDS GO, FOR `file_records_ticket` (v232). The
+         * tool asks the method and the destination once each, and the model
+         * re-sends its first arguments after the caller answers, so the
+         * answer never reached the ticket: 19 of the 25 records-lane tickets
+         * that said "Delivery: NOT CAPTURED" over 2026-11-09..13 were callers
+         * who had said one method. The whole record every time, like the
+         * three above; see spokenRecordsDelivery.ts for what is read.
+         */
+        noteRecordsDelivery(this.deps.context.callSid, this.transcriptLog.lines);
       },
       onError: (err) => this.handleSessionFailure(err),
       onClosed: () => this.handleSessionClosed(),

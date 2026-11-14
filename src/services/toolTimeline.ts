@@ -360,6 +360,13 @@ function summarizeResult(tool: string, resultJson: string): Record<string, unkno
     // a closed set, no PHI). Medical Records work off the CAP clock, so how
     // many there are is a count, not a transcript read.
     'records_work',
+    // v232: file_records_ticket read the delivery method (true) or the
+    // destination ('fax' read back and confirmed, 'stated' given but not
+    // read whole) from the call, because the model did not pass it on. A
+    // boolean and a closed set, no PHI: the count of answers the transcript
+    // carried to the ticket.
+    'method_heard',
+    'send_to_heard',
     // v218: how book_sooner_exam picked the slot it booked ('date_time' or
     // 'option'), and whether the option number the model also sent, read in
     // the last list as before v218, is another slot. No PHI: the count of
