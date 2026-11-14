@@ -184,6 +184,8 @@ const D_ABOUT_A_PATIENT: Array<[string, string, string]> = [
   ['PCP-84906', 'CAe39e4df61d97f399c28df27b57b47680', 'service_inquiry'],
   ['PCP-85115', 'CA01a2af532df941a4a1fe390afc680a12', 'service_inquiry'],
   ['PCP-85117', 'CA2ff23b5d472ea12fc9cb15a83485828f', 'service_inquiry'],
+  // Filed by the teardown floor as unclassified_call, which the model cannot
+  // record (v136); the model's nearest purpose stands in.
   ['PCP-84919', 'CA001d103f3b3d8364fb2513b5cef8abbe', 'service_inquiry'],
   ['PCP-84759', 'CAe9f551a31f47c52a22d65d0c95e390be', 'provider_information'],
   ['PCP-84405', 'CAff0267a223419ff36a18f886b0c19462', 'provider_information'],
@@ -198,6 +200,7 @@ const D_ABOUT_THE_PRACTICE: Array<[string, string, string]> = [
   ['PCP-84259', 'CA95726e7a6b4a77ecfdd24ce1f225f6dd', 'service_inquiry'],
   ['PCP-85025', 'CAf982806b240ff5d677696b0ea44d7910', 'service_inquiry'],
   ['PCP-85257', 'CA9bf5a97afdfe07a28d161e7669e26531', 'service_inquiry'],
+  // unclassified_call on the ticket (the floor's); see PCP-84919.
   ['PCP-84741', 'CA6c211412236664b31de6bd443c0e932b', 'service_inquiry'],
   ['PCP-84278', 'CA3b2d710938f62f2a57fa3ccd61ec84d2', 'provider_information'],
   ['PCP-84527', 'CAe6bf63067a46929d1018d17e59eca510', 'provider_information'],

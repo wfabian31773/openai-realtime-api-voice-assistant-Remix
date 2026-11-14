@@ -99,7 +99,7 @@ export interface PcpConversationState {
    * daily review flagged on a purpose whose policy row asks no patient
    * (service_inquiry 22, provider_information 5, pharmaceutical_representative
    * 4, plan_participation 2, unclassified_call 2, disability_accommodation 1),
-   * 26 were about one patient: a pharmacy's prescription, an authorization, a
+   * 25 were about one patient: a pharmacy's prescription, an authorization, a
    * pre-op question, a glasses order. Classification is the model's job
    * (standing instruction 3); see `requestConcernsAPatient`.
    */
@@ -658,9 +658,9 @@ export const SCHEDULING_PURPOSES: ReadonlySet<string> = new Set([
  *
  * WHAT NAMES NO PATIENT is a request about the practice itself, and the
  * corpus says the purpose cannot find it: of 36 professional tickets on a
- * purpose that asks no patient, 26 concerned one patient and 10 did not (a
- * provider-directory check, a plan the practice takes, a wheelchair question,
- * four callers who only asked for a named person). So the purpose alone never
+ * purpose that asks no patient, 25 concerned one patient and 11 did not
+ * (provider-directory checks, plans the practice takes, a wheelchair question,
+ * callers who asked only for a named person). So the purpose alone never
  * says no; without the model's flag or a name, those purposes still ask no
  * patient, exactly as before.
  */
