@@ -549,6 +549,8 @@ describe('a method switch outside the question forgets the method', () => {
     // None, several, or a negated one: no method either way.
     expect(readRecordsDelivery([METHOD_Q, 'CALLER: Fax.', METHOD_Q, 'CALLER: Hmm, let me check with the doctor.']).method).toBeUndefined();
     expect(readRecordsDelivery([METHOD_Q, 'CALLER: Fax.', METHOD_Q, 'CALLER: Fax or email, either works.']).method).toBeUndefined();
+    // The window is read whole: a negation in a later turn of the same answer takes the method back.
+    expect(readRecordsDelivery([METHOD_Q, 'CALLER: Fax.', 'CALLER: No, wait, let me check.']).method).toBeUndefined();
   });
 
   it('a single "Fax." fills the method; a second "Fax." to a repeated question does too; a repeat nobody answered changes nothing', () => {

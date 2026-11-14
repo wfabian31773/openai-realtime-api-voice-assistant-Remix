@@ -35,10 +35,13 @@
  *
  *  1. THE METHOD. An agent line that offers at least two of fax, email and
  *     mail, as a question, opens a window; the caller's turns until the next
- *     agent line are the answer. Exactly one method named, and no negation in
- *     the answer, is the method. "Through our portal or through fax" is fax:
+ *     agent line are the answer. The LATEST window the caller answered
+ *     decides it, wholly: exactly one method named, and no negation in the
+ *     answer, is the method. "Through our portal or through fax" is fax:
  *     portal is not a method, fax is the one they offered that is. Two methods
- *     ("fax or email is fine"), or any "no / not / don't", reads nothing. A
+ *     ("fax or email is fine"), any "no / not / don't", or none at all
+ *     ("Actually, I don't know") is no method, even if an earlier window named
+ *     one. A repeat of the question nobody answered changes nothing. A
  *     later turn that names the method beside a negation or a correction
  *     ("Actually, do not fax the records") forgets it, and so does a switch
  *     said outside the question ("Actually, email it instead"): neither
@@ -143,11 +146,10 @@ export function asksForTheMethod(agentText: string): boolean {
   return offered.size >= 2 && (agentText.includes('?') || /\bhow would you like\b/.test(agentText));
 }
 
-/** The one method a window's answer names, or undefined; `null` = named but unreadable. */
-function methodInAnswer(answer: string): RecordsDeliveryMethod | null | undefined {
+/** The one method a window's answer names; none, several, or a negation is no method. */
+function methodInAnswer(answer: string): RecordsDeliveryMethod | undefined {
   const named = methodsNamed(answer);
-  if (named.size === 0) return undefined;
-  if (named.size > 1 || NEGATION.test(answer)) return null;
+  if (named.size !== 1 || NEGATION.test(answer)) return undefined;
   return [...named][0];
 }
 
@@ -233,8 +235,8 @@ const SWITCH = /\b(actually|instead|rather|change|switch|prefer|better)\b|\b(sen
 
 /**
  * Everything the record says about how, and whether a destination was given,
- * read in call order. The latest readable method wins, a retraction or a
- * switch outside the question forgets it, and a destination once given stays
+ * read in call order. The latest answered method question decides the
+ * method, a retraction or a switch outside the question forgets it, and a destination once given stays
  * given.
  */
 export function readRecordsDelivery(lines: readonly string[]): HeardDelivery {
@@ -263,10 +265,13 @@ export function readRecordsDelivery(lines: readonly string[]): HeardDelivery {
     const answer = answers.join(' ');
     const first = answers[0] ?? '';
 
+    // The latest method question the caller answered decides the method,
+    // wholly: one method named with no negation is the method, and anything
+    // else ("Actually, I don't know", two methods, "not fax") is none. The
+    // `spokenPatientStatus.ts` rule, latest window wins.
     if (asksForTheMethod(t.text) && answer) {
       const m = methodInAnswer(answer);
-      if (m) method = m;
-      else if (m === null) method = undefined;
+      method = m;
       // "We need them faxed to …": the method and its destination in one answer.
       if (m && destinationIn(answer, m)) given.add(m);
     }
