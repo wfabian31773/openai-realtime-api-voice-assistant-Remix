@@ -539,6 +539,24 @@ describe('a method switch outside the question forgets the method', () => {
     expect(readRecordsDelivery([METHOD_Q, 'CALLER: Fax.', 'AGENT: Okay.', 'CALLER: Actually, fax is fine.']).method).toBeUndefined();
   });
 
+  it('the latest method question the caller answered decides it: "Actually, I don\'t know." leaves no method, and the ticket says NOT CAPTURED', async () => {
+    const lines = [METHOD_Q, 'CALLER: Fax.', METHOD_Q, "CALLER: Actually, I don't know."];
+    expect(readRecordsDelivery(lines).method).toBeUndefined();
+    const { answers, payload } = await replay('CA' + 'e3'.repeat(16), 'VA-232-32', [lines, 'file', 'file']);
+    expect(answers[0].missingFields).toEqual(['delivery_method']);
+    expect(answers[1].method_heard).toBeUndefined();
+    expect(description(payload)).toContain('Delivery: NOT CAPTURED');
+    // None, several, or a negated one: no method either way.
+    expect(readRecordsDelivery([METHOD_Q, 'CALLER: Fax.', METHOD_Q, 'CALLER: Hmm, let me check with the doctor.']).method).toBeUndefined();
+    expect(readRecordsDelivery([METHOD_Q, 'CALLER: Fax.', METHOD_Q, 'CALLER: Fax or email, either works.']).method).toBeUndefined();
+  });
+
+  it('a single "Fax." fills the method; a second "Fax." to a repeated question does too; a repeat nobody answered changes nothing', () => {
+    expect(readRecordsDelivery([METHOD_Q, 'CALLER: Fax.']).method).toBe('fax');
+    expect(readRecordsDelivery([METHOD_Q, 'CALLER: Email.', METHOD_Q, 'CALLER: Fax.']).method).toBe('fax');
+    expect(readRecordsDelivery([METHOD_Q, 'CALLER: Fax.', METHOD_Q, 'AGENT: Are you still there?']).method).toBe('fax');
+  });
+
   it('a plain re-answer of "Fax." keeps the method, and so does preferring the same method', () => {
     expect(readRecordsDelivery([METHOD_Q, 'CALLER: Fax.', METHOD_Q, 'CALLER: Fax.']).method).toBe('fax');
     expect(readRecordsDelivery([METHOD_Q, 'CALLER: Fax.', 'AGENT: Okay.', 'CALLER: Fax.']).method).toBe('fax');
