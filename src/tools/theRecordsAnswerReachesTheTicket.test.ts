@@ -520,8 +520,25 @@ describe('a method switch outside the question forgets the method', () => {
     expect(answers[0].missingFields).toEqual(['delivery_method']);
   });
 
+  it('a retraction of the stored method clears it: the method is not filled, and the ticket says NOT CAPTURED, as on main', async () => {
+    const lines = [METHOD_Q, 'CALLER: Fax.', 'AGENT: Okay.', 'CALLER: Actually, do not fax the records; we no longer have a fax.'];
+    expect(readRecordsDelivery(lines).method).toBeUndefined();
+    const { answers, payload } = await replay('CA' + 'e2'.repeat(16), 'VA-232-31', [lines, 'file', 'file']);
+    expect(answers[0].missingFields).toEqual(['delivery_method']);
+    expect(answers[1].success, JSON.stringify(answers[1])).toBe(true);
+    expect(answers[1].method_heard).toBeUndefined();
+    expect(description(payload)).toContain('Delivery: NOT CAPTURED');
+    // A correction word beside the stored method clears it too, whatever it meant: errors land toward clearing.
+    expect(readRecordsDelivery([METHOD_Q, 'CALLER: Fax.', 'AGENT: Okay.', 'CALLER: Actually, fax is fine.']).method).toBeUndefined();
+  });
+
+  it('a plain re-answer of "Fax." keeps the method, and so does preferring the same method', () => {
+    expect(readRecordsDelivery([METHOD_Q, 'CALLER: Fax.', METHOD_Q, 'CALLER: Fax.']).method).toBe('fax');
+    expect(readRecordsDelivery([METHOD_Q, 'CALLER: Fax.', 'AGENT: Okay.', 'CALLER: Fax.']).method).toBe('fax');
+    expect(readRecordsDelivery([METHOD_Q, 'CALLER: Fax.', 'AGENT: Okay.', "CALLER: I'd prefer fax, that's better."]).method).toBe('fax');
+  });
+
   it('naming the same method again, or answering the question again, is not a switch away', () => {
-    expect(readRecordsDelivery([METHOD_Q, 'CALLER: Fax.', 'AGENT: Okay.', 'CALLER: Actually, fax is fine.']).method).toBe('fax');
     expect(readRecordsDelivery([METHOD_Q, 'CALLER: Fax.', METHOD_Q, 'CALLER: Email, please.']).method).toBe('email');
     expect(readRecordsDelivery([METHOD_Q, 'CALLER: Fax.', 'AGENT: Is there an email we can reach you at?',
       'CALLER: My email is T E S T at example dot com.']).method).toBe('fax');
