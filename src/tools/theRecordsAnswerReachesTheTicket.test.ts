@@ -433,6 +433,97 @@ describe('what the model sends still wins, and only an answer to the question co
   });
 });
 
+/**
+ * A CONFIRMED FAX IS ONLY GOOD UNTIL THE CALLER REPLACES IT (Codex P2 on #482,
+ * head d776a6d). A confirmed number written onto a records ticket as
+ * "confirmed" after the caller gave another one sends a chart to the wrong
+ * place. Anything later that puts the fax in question clears it, and the
+ * ticket falls back to the transcript pointer until a new number is read back
+ * and confirmed.
+ */
+describe('a later destination replaces a confirmed fax', () => {
+  const CONFIRMED_OLD = [
+    METHOD_Q, 'CALLER: Fax.', "AGENT: What's the fax number?", 'CALLER: 2 0 2 5 5 5 0 1 8 1.',
+    'AGENT: Two zero two, five five five, zero one eight one. Did I get that right?', 'CALLER: Yes.',
+  ];
+
+  it('a new fax number given after the confirmation is never filed as the old one', async () => {
+    const { answers, payload } = await replay('CA' + 'd1'.repeat(16), 'VA-232-20', [
+      [...CONFIRMED_OLD, 'AGENT: Is there anything else?',
+        'CALLER: Actually, can you send it to a different fax? 2 0 2 5 5 5 0 1 9 9.', 'AGENT: Sure.'],
+      'file',
+    ]);
+    expect(answers[0].success, JSON.stringify(answers[0])).toBe(true);
+    expect(description(payload)).not.toContain('202-555-0181');
+    expect(description(payload)).toContain('Send to: given by the caller on the call');
+  });
+
+  it('the new number, once read back and confirmed, is the one on the ticket', async () => {
+    const { payload } = await replay('CA' + 'd2'.repeat(16), 'VA-232-21', [
+      [...CONFIRMED_OLD, 'CALLER: Wait, that is the old fax. Use 2 0 2 5 5 5 0 1 9 8.',
+        'AGENT: Two zero two, five five five, zero one nine eight. Did I get that right?', 'CALLER: Yes.'],
+      'file',
+    ]);
+    expect(description(payload)).toContain('Send to: fax 202-555-0198 (read back to the caller and confirmed on the call)');
+    expect(description(payload)).not.toContain('202-555-0181');
+  });
+
+  it('a different number read back and not confirmed clears the old one', () => {
+    const h = readRecordsDelivery([
+      ...CONFIRMED_OLD, "AGENT: What's the fax number?", 'CALLER: 2 0 2 5 5 5 0 1 9 7.',
+      'AGENT: Two zero two, five five five, zero one nine seven. Did I get that right?', 'CALLER: Hold on.',
+    ]);
+    expect(h.fax).toBeUndefined();
+    expect(h.given).toContain('fax');
+  });
+
+  it('a correction with no number clears it too', () => {
+    expect(readRecordsDelivery([...CONFIRMED_OLD, 'CALLER: Sorry, that fax number is wrong.']).fax).toBeUndefined();
+  });
+
+  it('what does not put the fax in question leaves it: the same number again, a date of birth, a callback number', () => {
+    expect(readRecordsDelivery([...CONFIRMED_OLD, 'CALLER: Yes, 2 0 2 5 5 5 0 1 8 1.']).fax).toBe('2025550181');
+    expect(readRecordsDelivery([...CONFIRMED_OLD,
+      'AGENT: May I please have the date of birth, starting with the month, then the day, then the year?',
+      'CALLER: 0 1 0 2 1 9 5 0.']).fax).toBe('2025550181');
+    expect(readRecordsDelivery([...CONFIRMED_OLD,
+      "AGENT: And what's the best number to reach you?", 'CALLER: 2 0 2 5 5 5 0 1 4 2.']).fax).toBe('2025550181');
+  });
+});
+
+describe('a caller who switches method after confirming a fax', () => {
+  const CONFIRMED = [
+    METHOD_Q, 'CALLER: Fax.', "AGENT: What's the fax number?", 'CALLER: 2 0 2 5 5 5 0 1 8 2.',
+    'AGENT: Two zero two, five five five, zero one eight two. Did I get that right?', 'CALLER: Yes.',
+  ];
+
+  it('answering the method question again with email: the fax is not used, even if the model still sends fax', async () => {
+    for (const [i, method] of [undefined, 'fax'].entries()) {
+      resetGateAttempts();
+      const { payload } = await replay('CA' + `e${i}`.repeat(16), `VA-232-3${i}`, [
+        [...CONFIRMED, METHOD_Q, 'CALLER: Email, please.'],
+        'file',
+      ], method ? { ...PROVIDER, delivery_method: method } : PROVIDER);
+      expect(description(payload), String(method)).not.toContain('202-555-0182');
+    }
+  });
+
+  it('"Actually, email it instead." with no question: the fax is not used, and the store no longer says fax', async () => {
+    const lines = [...CONFIRMED, 'AGENT: Is there anything else?', 'CALLER: Actually, can you email it instead?'];
+    const h = readRecordsDelivery(lines);
+    expect(h.fax).toBeUndefined();
+    expect(h.method).toBeUndefined();
+    for (const [i, method] of [undefined, 'fax', 'email'].entries()) {
+      resetGateAttempts();
+      const { answers, payload } = await replay('CA' + `f${i}`.repeat(16), `VA-232-4${i}`, [
+        lines,
+        'file',
+      ], method ? { ...PROVIDER, delivery_method: method } : PROVIDER);
+      expect(JSON.stringify(answers[0]) + description(payload), String(method)).not.toContain('202-555-0182');
+    }
+  });
+});
+
 describe('the store', () => {
   it('a sentinel CallSid stores nothing', () => {
     noteRecordsDelivery('unknown', [METHOD_Q, 'CALLER: Fax.']);
