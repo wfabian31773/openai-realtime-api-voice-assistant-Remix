@@ -385,6 +385,38 @@ describe('what the model sends still wins, and only an answer to the question co
     expect(answers[0].message).toBe(DELIVERY_DESTINATION_QUESTION.fax);
   });
 
+  it('a fax number given in the same breath as the method is not asked for again', async () => {
+    const { answers, payload } = await replay('CA' + 'ab'.repeat(16), 'VA-232-11', [
+      [METHOD_Q, 'CALLER: Fax, to 2 0 2 5 5 5 0 1 7 7.', 'AGENT: Thank you.'],
+      'file',
+    ]);
+    expect(answers[0].success, JSON.stringify(answers[0])).toBe(true);
+    expect(description(payload)).toContain('Send to: given by the caller on the call');
+  });
+
+  it('a number given to the email question is not a fax destination', async () => {
+    const { answers } = await replay('CA' + 'ac'.repeat(16), 'VA-232-12', [
+      [`AGENT: ${DELIVERY_DESTINATION_QUESTION.email}`, 'CALLER: 2 0 2 5 5 5 0 1 7 8.'],
+      [METHOD_Q, 'CALLER: Fax.'],
+      'file',
+    ]);
+    expect(answers[0].message).toBe(DELIVERY_DESTINATION_QUESTION.fax);
+  });
+
+  it('when the signing form collects delivery, a fax read back on the call does not replace it', async () => {
+    const sid = 'CA' + 'ad'.repeat(16);
+    noteRecordsDelivery(sid, [METHOD_Q, 'CALLER: Fax.', "AGENT: What's the fax number?", 'CALLER: 2 0 2 5 5 5 0 1 7 9.',
+      'AGENT: Two zero two, five five five, zero one seven nine. Did I get that right?', 'CALLER: Yes.']);
+    const create = vi.spyOn(await client(), 'createTicket').mockResolvedValue(filed('VA-232-13'));
+    const r = (await runTool('file_records_ticket', {
+      ...PATIENT_NO_LINK, form_channel: 'sms', delivery_method: 'fax', call_sid: sid,
+    })) as Out;
+    expect(r.success, JSON.stringify(r)).toBe(true);
+    const p = create.mock.calls[0][0] as unknown as Record<string, unknown>;
+    expect(description(p)).toContain('Send to: on the signed form');
+    expect(description(p)).not.toContain('202-555-0179');
+  });
+
   it('a request whose signing link collects delivery never reads the transcript', async () => {
     const sid = 'CA' + 'a8'.repeat(16);
     noteRecordsDelivery(sid, [METHOD_Q, 'CALLER: Fax.']);
@@ -432,6 +464,15 @@ describe('the store', () => {
     expect(h.method).toBe('email');
     expect(h.fax).toBeUndefined();
     expect(h.given).not.toContain('fax');
+  });
+
+  it('a readback of eleven digits is a fax number only when the first is the country code', () => {
+    const lines = (spoken: string) => [
+      METHOD_Q, 'CALLER: Fax.', "AGENT: What's the fax number?", 'CALLER: Here it is.',
+      `AGENT: ${spoken}. Did I get that right?`, 'CALLER: Yes.',
+    ];
+    expect(readRecordsDelivery(lines('One, two zero two, five five five, zero one eight zero')).fax).toBe('2025550180');
+    expect(readRecordsDelivery(lines('Two zero two, five five five, zero one eight zero one')).fax).toBeUndefined();
   });
 
   it('expires with the call', () => {
