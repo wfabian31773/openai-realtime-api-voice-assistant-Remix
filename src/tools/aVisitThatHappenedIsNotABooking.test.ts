@@ -49,14 +49,6 @@ describe('RESCUED — a drug or eyewear request stays where staff work it', () =
     ['CAf0a45d75a412d32f3bb0f662c9f1f857', 'VA-79611', TECH,
       'Patient was given lubricating drops for dry eyes after an eye exam about a week ago, but insurance does not cover them. Wants to switch to drops that insurance will cover. Pharmacy is the corner pharmacy.',
       TECH],
-    // "rescheduled", passive. The drug is named only as "drops".
-    ['CA1636b4d10c88cb9fecb39c59cc6530e3', 'VA-80971', TECH,
-      'Patient reports burning from her drops and wants to know if she should keep using them until her appointment. Her follow-up check was rescheduled from today to next month.',
-      TECH],
-    // "rescheduled", past tense after "but".
-    ['CA75f0e6c0b12f35b1b28f041e9c705fc7', 'VA-82854', TECH,
-      'Patient was told to keep using the eye drops twice a day. She was given a four-week appointment but rescheduled and now has one in January. Wants to know whether to continue the eye drops until then.',
-      TECH],
     // A same-day CALLBACK is not a same-day appointment.
     ['CAed9a8f5b2aaa82d004c9455d09355d9d', 'VA-83745', TECH,
       'Patient is out of her glaucoma drops and needs a refill sent to her pharmacy. Requesting same-day callback.',
@@ -219,5 +211,71 @@ describe('Codex P2 on #481 (inline) — a completed reschedule followed by an as
   }
   it('a pronoun that is not about a visit does not keep the Hub', () => {
     expect(filedIn('Her visit was rescheduled and she needs a refill of her drops; the pharmacy has it on hold.', TECH)).toBe(TECH);
+  });
+});
+
+describe('THE COST of the round-2 rule — a reported visit beside a time to come keeps the Hub', () => {
+  // Codex round 2 on #481, coordinator ruling 2026-11-14: the past-visit
+  // suppression applies only when the description holds no forward-looking
+  // visit language at all, and when that costs a rescue the stricter rule
+  // stands, because the failure it prevents is a lost appointment request.
+  // These two were rescued on 094ca19 and 28e0e33 and are filed in the Hub
+  // again, as on `main`: a calendar month (VA-80971), a month and a weekday
+  // (VA-82854). Staff moved both to Technicians.
+  const COST: Array<[string, string, string]> = [
+    ['CA1636b4d10c88cb9fecb39c59cc6530e3', 'VA-80971',
+      'Patient reports burning from her drops and wants to know if she should keep using them until her appointment. Her follow-up check was rescheduled from today to next month.'],
+    ['CA75f0e6c0b12f35b1b28f041e9c705fc7', 'VA-82854',
+      'Patient was told to keep using the eye drops twice a day. She was given a four-week appointment but rescheduled and now has one in January. Wants to know whether to continue the eye drops until then.'],
+  ];
+  for (const [sid, ticket, words] of COST) {
+    it(`${ticket} (${sid}) files to the Hub, as on main`, () => {
+      expect(filedIn(words, TECH)).toBe(HUB);
+    });
+  }
+});
+
+describe('Codex round 2 on #481 — any forward-looking visit language keeps the Hub', () => {
+  // Synthetic. On head 28e0e33 each of these stayed in Technicians or Optical.
+  const LOOKS_AHEAD: Array<[string, string, number]> = [
+    ['the round-2 example', 'She was seen today and was prescribed drops, but needs to be seen tomorrow because her symptoms are worse.', TECH],
+    ['tomorrow', 'She was seen today and the drops are not at the pharmacy; she is coming by tomorrow.', TECH],
+    ['next week', 'She was seen today and her drops are not at the pharmacy. Her follow-up is next week.', TECH],
+    ['a weekday', 'She was seen today, her drops are not at the pharmacy, and her check is Thursday.', TECH],
+    ['in N days', 'She was seen today and her drops are not at the pharmacy; her check is in 3 days.', TECH],
+    ['a calendar month', 'She was seen today and her drops are not at the pharmacy. Her check is in December.', TECH],
+    ['a numeric date', 'She was seen today and her drops are not at the pharmacy. Her check is 12/3.', TECH],
+    ['come in', 'She was seen today and her drops are not at the pharmacy, and she wants to come in.', TECH],
+    ['get in', 'She was seen today and the drops are not working; can she get in sooner.', TECH],
+    ['see the doctor', 'She was seen today and the drops burn; she wants to see the doctor.', TECH],
+    ['an appointment for', 'Her eye exam glasses are not ready and she has an appointment for her son.', OPTICAL],
+    ['a weekday on the optical line', 'Caller wants to know if their eye exam glasses are ready by Friday.', OPTICAL],
+    ['a month before a day', 'She was seen today and her drops are not at the pharmacy. Her check is May 3.', TECH],
+    ['an ordinal day', 'She was seen today and her drops are not at the pharmacy. Her check is on the 20th.', TECH],
+    ['a weekday, plural', 'She was seen today and her drops are not at the pharmacy. Her checks are on Tuesdays.', TECH],
+    ['be seen, alone', 'She was seen today and her drops burn; she needs to be seen.', TECH],
+    ['schedule, alone', 'She was seen today and her drops burn; she is calling to schedule.', TECH],
+    ['again, alone', 'Her appointment was rescheduled but it was changed again; she needs her drops.', TECH],
+    ['a new day', 'Her visit was rescheduled and she wants a new day; she needs her drops.', TECH],
+    // The connector's review of 28e0e33 (inline 4571106152): a question about when.
+    ['what time', 'Her appointment was rescheduled; she wants to know what time it is, and she needs a refill of her drops.', TECH],
+    ['the original date', 'Her appointment was rescheduled; she wants the original date, and she needs a refill of her drops.', TECH],
+    ['when', 'She was seen today and her drops are not at the pharmacy; she asks when her check is.', TECH],
+    ['which day', 'Her visit was rescheduled and she is out of her drops; she asks which day it moved to.', TECH],
+  ];
+  for (const [family, words, line] of LOOKS_AHEAD) {
+    it(`${family}: files to the Hub`, () => {
+      expect(filedIn(words, line)).toBe(HUB);
+    });
+  }
+  it('a reported visit with nothing ahead still stays on the line', () => {
+    expect(filedIn('She was seen today and her drops are not at the pharmacy.', TECH)).toBe(TECH);
+    expect(filedIn('Out of her drops, requesting a same-day callback.', TECH)).toBe(TECH);
+  });
+  it('a date of birth is not a visit\'s date', () => {
+    expect(filedIn('She was seen today and gave her date of birth; her drops are not at the pharmacy.', TECH)).toBe(TECH);
+  });
+  it('the word "today" alone is not a time to come', () => {
+    expect(filedIn('She was seen today at the Example office and the drops are not at the pharmacy.', TECH)).toBe(TECH);
   });
 });

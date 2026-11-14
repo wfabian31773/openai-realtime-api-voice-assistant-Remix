@@ -373,8 +373,11 @@ export function examAlreadyHappened(text: string): boolean {
  * exam glasses ready". Measured over the 14 days 2026-10-31..11-13, every
  * optical, surgery and tech agent ticket carrying a scheduling cue and a drug,
  * drop or eyewear word (427, run through this router as it was on `main` and
- * as it is now): 6 change department, and staff had moved all 6 out of the Hub
- * to the department this rule now picks (5 to Technicians, 1 to Optical).
+ * as it is now): 4 change department, and staff had moved all 4 out of the Hub
+ * to the department this rule now picks (3 to Technicians, 1 to Optical). Two
+ * more (VA-80971, VA-82854) were rescued until Codex round 2 and are back in
+ * the Hub, because their descriptions name a month or a weekday ahead
+ * (`LOOKS_AHEAD_TO_A_VISIT`); the stricter rule stands by ruling.
  *
  * `examAlreadyHappened`'s rule, widened by one subject and three cues: the
  * request names eyewear, a drug (`TECH_CUES`) or a kind of drug (`A_DRUG`),
@@ -399,14 +402,53 @@ const THEN_EYEWEAR = /^\s*(?:glasses|eyeglass(?:es)?|lenses|prescriptions?|rx)\b
 /** A drug by its kind, where the request names no brand the cue lists know ("her drops"). */
 const A_DRUG = /\b(?:drops|ointments?|antibiotics?|steroids?|gotas)\b/;
 /**
- * Codex P2s on #481. A visit that did NOT happen is not a report
- * (`NEGATED_BEFORE`, read first in `reportsAVisit`). And an ask to act on a
- * visit again or anew, in words neither visit-ask pattern lists, keeps the Hub: "again" anywhere, a visit verb on a pronoun
- * ("wants it moved", "reschedule it", "cancel that"), or a new date, time or
- * appointment ("get a new date"). When in doubt the Hub stands, as on `main`.
+ * Codex on #481, rounds 1 and 2. The suppression is for a description that
+ * only REPORTS a visit, so it applies only when the description holds no
+ * forward-looking visit language at all (`LOOKS_AHEAD_TO_A_VISIT`). Any one of
+ * these keeps the Hub, as on `main`:
+ *   - a time to come: tomorrow, tonight, later today, next week or month, a
+ *     weekday, "in N days", "upcoming", or any calendar date;
+ *   - a question about when: "when", "time", "date", "what day", "which day"
+ *     anywhere in the description ("what time it is", "the original date"),
+ *     a date of birth excepted;
+ *   - a visit to come: "be seen", "come in", "get in", "see the doctor", "an
+ *     appointment for", "schedule";
+ *   - an ask to act on a visit again or anew: "again", a visit verb on a
+ *     pronoun ("reschedule it", "cancel that"), a pronoun with a participle
+ *     ("wants it moved"), or a new appointment, date or time.
+ * And a visit that did NOT happen reports nothing (`NEGATED_BEFORE`, read
+ * first in `reportsAVisit`). These are families, not a phrase list to grow:
+ * a description the rule cannot read as history goes to the Hub, because the
+ * failure on that side is a lost appointment request.
  */
-const ACTS_ON_A_VISIT_AGAIN = new RegExp(
+const WEEKDAY = '(?:mon|tues|wednes|thurs|fri|satur|sun)days?';
+const MONTH =
+  '(?:january|february|march|april|june|july|august|september|october|november|december|' +
+  'enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|octubre|noviembre|diciembre)';
+const MONTH_BEFORE_A_DAY = '(?:may|jan|feb|mar|apr|jun|jul|aug|sept?|oct|nov|dec)\\.?\\s+\\d{1,2}\\b';
+const LOOKS_AHEAD_TO_A_VISIT = new RegExp(
   [
+    // A time to come.
+    '\\b(?:tomorrow|tmrw|tonight|manana|upcoming|later today|later this)\\b',
+    `\\bnext\\s+(?:week|month|year|time|day|visit|appointment|appt|available|${WEEKDAY})\\b`,
+    `\\b(?:${WEEKDAY}|lunes|martes|miercoles|jueves|viernes|sabado|domingo)\\b`,
+    '\\b(?:in|within)\\s+(?:\\d+|a|an|one|two|three|four|five|a few|a couple of)\\s+(?:more\\s+)?(?:days?|weeks?|months?)\\b',
+    `\\b${MONTH}\\b`,
+    `\\b${MONTH_BEFORE_A_DAY}`,
+    '\\b\\d{1,2}[/-]\\d{1,2}\\b',
+    '\\bthe\\s+\\d{1,2}(?:st|nd|rd|th)\\b',
+    // A question about when: "what time is it", "the original date", "which
+    // day". A date of birth is not a visit's date.
+    '\\b(?:when|cuando|times?|hora|what day|which day)\\b',
+    '\\b(?:dates?|fecha)\\b(?!\\s+(?:of\\s+birth|de\\s+nacimiento))',
+    // A visit to come.
+    '\\bbe(?:ing)?\\s+seen\\b',
+    '\\b(?:come|coming)\\s+(?:in|back)\\b',
+    '\\bget\\s+in\\b',
+    '\\bsee\\s+(?:(?:the|a|an|her|his|their|my|your)\\s+)?(?:doctor|dr|physician|provider|optometrist|ophthalmologist|surgeon|someone|somebody)\\b',
+    '\\b(?:appointments?|appts?)\\s+(?:for|on)\\b',
+    '\\bschedul\\w*',
+    // An ask to act on a visit again or anew.
     '\\bagain\\b',
     '\\b(?:move[ds]?|moving|change[ds]?|changing|reschedul\\w*|cancel\\w*|confirm\\w*|postpon\\w*|push(?:ed|es|ing)?|book\\w*|schedul\\w*)\\s+(?:it|them|that)\\b',
     '\\b(?:it|them|that)\\s+(?:moved|changed|rescheduled|cancell?ed|confirmed|postponed|pushed back|booked)\\b',
@@ -428,7 +470,7 @@ export function schedulingWordsReportAVisit(text: string, homeDepartmentId: numb
   if (homeDepartmentId !== OPTICAL && homeDepartmentId !== TECH) return false;
   const t = fold(text);
   if (!EYEWEAR.test(t) && !hit(t, TECH_CUES) && !A_DRUG.test(t)) return false;
-  if (ASKS_FOR_A_VISIT.test(t) || hasSeparateAppointmentAsk(t) || ACTS_ON_A_VISIT_AGAIN.test(t)) return false;
+  if (ASKS_FOR_A_VISIT.test(t) || hasSeparateAppointmentAsk(t) || LOOKS_AHEAD_TO_A_VISIT.test(t)) return false;
   const fired = SCHEDULING.flatMap((s) => s.cues).map(fold).filter((c) => t.includes(c));
   if (!fired.length) return false;
   for (const cue of fired) {
