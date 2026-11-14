@@ -333,6 +333,15 @@ const EYEWEAR = /\b(?:glasses|eyeglass(?:es)?|spectacles|frames?|lens|lenses|con
  */
 const EXAM_IN_THE_PAST =
   /\b(?:had|after|from|since|following|during|at)\s+(?:(?:an?|the|my|her|his|their|your|last|recent|most|previous|prior|latest|recently)\s+){0,3}$/;
+/**
+ * Codex P2 on #481. A negation within four words before a visit cue, in the
+ * same clause ("never had an eye exam", "has not been rescheduled", "wasn't
+ * seen today"), says the visit did NOT happen, so it reports nothing and the
+ * scheduling redirect stands. Read by `examAlreadyHappened` and by
+ * `schedulingWordsReportAVisit`. A negation that is not about the visit errs
+ * toward the Hub, which is where `main` sends these.
+ */
+const NEGATED_BEFORE = /(?:\b(?:not|never|no)|n['\u2019]t)(?:\s+[^\s.,;:!?]+){0,4}\s+$/;
 const ASKS_FOR_A_VISIT =
   /\b(?:wants?|needs?|would like|requesting|requests?|book|schedul\w*|set up|make|get)\s+(?:(?:an?|another|new|the|my|her|his|their|eye|a new|routine|annual)\s+){0,3}(?:eye exam|exam|appointment|appt|visit|check[- ]?up)\b/;
 
@@ -345,8 +354,139 @@ export function examAlreadyHappened(text: string): boolean {
   for (const name of names) {
     let at = t.indexOf(name);
     while (at !== -1) {
-      if (!EXAM_IN_THE_PAST.test(t.slice(0, at))) return false;
+      const before = t.slice(0, at);
+      if (!EXAM_IN_THE_PAST.test(before) || NEGATED_BEFORE.test(before)) return false;
       at = t.indexOf(name, at + name.length);
+    }
+  }
+  return true;
+}
+
+/**
+ * v233 — A SCHEDULING WORD THAT REPORTS A VISIT IS NOT A BOOKING.
+ *
+ * The scheduling step reads its cues as substrings, so a request about drops
+ * or glasses went to the HVA Hub because the caller said when they had been
+ * in: "she was seen today and the drops are not at the pharmacy", "out of her
+ * drops, requesting a same-day callback", "her check was rescheduled, should
+ * she keep using the drops", "given drops after an eye exam", "are their eye
+ * exam glasses ready". Measured over the 14 days 2026-10-31..11-13, every
+ * optical, surgery and tech agent ticket carrying a scheduling cue and a drug,
+ * drop or eyewear word (427, run through this router as it was on `main` and
+ * as it is now): 4 change department, and staff had moved all 4 out of the Hub
+ * to the department this rule now picks (3 to Technicians, 1 to Optical). Two
+ * more (VA-80971, VA-82854) were rescued until Codex round 2 and are back in
+ * the Hub, because their descriptions name a month or a weekday ahead
+ * (`LOOKS_AHEAD_TO_A_VISIT`); the stricter rule stands by ruling.
+ *
+ * `examAlreadyHappened`'s rule, widened by one subject and three cues: the
+ * request names eyewear, a drug (`TECH_CUES`) or a kind of drug (`A_DRUG`),
+ * nothing asks for a visit, and every scheduling cue the request fired, at
+ * every place it fired, reports a visit rather than asking for one:
+ *   - an exam name after a past marker ("after an eye exam", the existing
+ *     rule) or naming the eyewear it produced ("eye exam glasses");
+ *   - "seen today" after was/were/got/been ("she was seen today");
+ *   - "same day" or "same-day" naming a callback ("same-day callback");
+ *   - "rescheduled", past tense, after was/were/but/and/a subject ("her
+ *     check was rescheduled", "but rescheduled").
+ * Any other cue, any other place a cue fires, or an ask for a visit anywhere
+ * ("wants to be seen today", "needs to be rescheduled", "schedule an
+ * appointment") keeps the Hub. Gated on the optical and tech lines, where the
+ * measurement is; surgery (0 of 427 changed), PCP, the records line and the
+ * Hub read this as before.
+ */
+const SEEN_IN_THE_PAST = /\b(?:was|were|got|been)\s+(?:just\s+|already\s+)?$/;
+const RESCHEDULED_IN_THE_PAST = /\b(?:was|were|been|got|already|but|and|she|he|they|we|i|who|patient)\s+$/;
+const THEN_A_CALLBACK = /^\s*(?:call[- ]?backs?|calls?|phone calls?|return calls?|responses?|replies)\b/;
+const THEN_EYEWEAR = /^\s*(?:glasses|eyeglass(?:es)?|lenses|prescriptions?|rx)\b/;
+/** A drug by its kind, where the request names no brand the cue lists know ("her drops"). */
+const A_DRUG = /\b(?:drops|ointments?|antibiotics?|steroids?|gotas)\b/;
+/**
+ * Codex on #481, rounds 1 and 2. The suppression is for a description that
+ * only REPORTS a visit, so it applies only when the description holds no
+ * forward-looking visit language at all (`LOOKS_AHEAD_TO_A_VISIT`). Any one of
+ * these keeps the Hub, as on `main`:
+ *   - a time to come: tomorrow, tonight, later today, next week or month, a
+ *     weekday, "in N days", "upcoming", or any calendar date;
+ *   - a question about when: "when", "time", "date", "what day", "which day"
+ *     anywhere in the description ("what time it is", "the original date"),
+ *     a date of birth excepted;
+ *   - a visit to come: "be seen", "come in", "get in", "see the doctor", "an
+ *     appointment for", "schedule";
+ *   - an ask to act on a visit again or anew: "again", a visit verb on a
+ *     pronoun ("reschedule it", "cancel that"), a pronoun with a participle
+ *     ("wants it moved"), or a new appointment, date or time;
+ *   - an appointment or a visit named anywhere (round 3: "asking for another
+ *     appointment").
+ * And a visit that did NOT happen reports nothing (`NEGATED_BEFORE`, read
+ * first in `reportsAVisit`). These are families, not a phrase list to grow:
+ * a description the rule cannot read as history goes to the Hub, because the
+ * failure on that side is a lost appointment request.
+ */
+const WEEKDAY = '(?:mon|tues|wednes|thurs|fri|satur|sun)days?';
+const MONTH =
+  '(?:january|february|march|april|june|july|august|september|october|november|december|' +
+  'enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|octubre|noviembre|diciembre)';
+const MONTH_BEFORE_A_DAY = '(?:may|jan|feb|mar|apr|jun|jul|aug|sept?|oct|nov|dec)\\.?\\s+\\d{1,2}\\b';
+const LOOKS_AHEAD_TO_A_VISIT = new RegExp(
+  [
+    // A time to come.
+    '\\b(?:tomorrow|tmrw|tonight|manana|upcoming|later today|later this)\\b',
+    `\\bnext\\s+(?:week|month|year|time|day|visit|appointment|appt|available|${WEEKDAY})\\b`,
+    `\\b(?:${WEEKDAY}|lunes|martes|miercoles|jueves|viernes|sabado|domingo)\\b`,
+    '\\b(?:in|within)\\s+(?:\\d+|a|an|one|two|three|four|five|a few|a couple of)\\s+(?:more\\s+)?(?:days?|weeks?|months?)\\b',
+    `\\b${MONTH}\\b`,
+    `\\b${MONTH_BEFORE_A_DAY}`,
+    '\\b\\d{1,2}[/-]\\d{1,2}\\b',
+    '\\bthe\\s+\\d{1,2}(?:st|nd|rd|th)\\b',
+    // A question about when: "what time is it", "the original date", "which
+    // day". A date of birth is not a visit's date.
+    '\\b(?:when|cuando|times?|hora|what day|which day)\\b',
+    '\\b(?:dates?|fecha)\\b(?!\\s+(?:of\\s+birth|de\\s+nacimiento))',
+    // A visit to come.
+    '\\bbe(?:ing)?\\s+seen\\b',
+    '\\b(?:come|coming)\\s+(?:in|back)\\b',
+    '\\bget\\s+in\\b',
+    '\\bsee\\s+(?:(?:the|a|an|her|his|their|my|your)\\s+)?(?:doctor|dr|physician|provider|optometrist|ophthalmologist|surgeon|someone|somebody)\\b',
+    '\\b(?:appointments?|appts?)\\s+(?:for|on)\\b',
+    '\\bschedul\\w*',
+    // An ask to act on a visit again or anew.
+    '\\bagain\\b',
+    '\\b(?:move[ds]?|moving|change[ds]?|changing|reschedul\\w*|cancel\\w*|confirm\\w*|postpon\\w*|push(?:ed|es|ing)?|book\\w*|schedul\\w*)\\s+(?:it|them|that)\\b',
+    '\\b(?:it|them|that)\\s+(?:moved|changed|rescheduled|cancell?ed|confirmed|postponed|pushed back|booked)\\b',
+    '\\bnew\\s+(?:(?:appointment|appt|visit|exam|follow[- ]?up)\\s+)?(?:dates?|times?|days?)\\b',
+    '\\bnew\\s+(?:appointments?|appts?|visits?)\\b',
+    // Codex round 3 on #481: an appointment or a visit named anywhere. The
+    // cues this suppression reads ("seen today", an exam name, "same-day
+    // callback", "rescheduled") are what a report of a visit says; a
+    // description that also names an appointment may be asking for one in
+    // words no family here lists ("asking for another appointment"), so it
+    // keeps the Hub, as on main. 0 of the 4 rescued corpus tickets names one.
+    '\\b(?:appointments?|appts?|visits?|citas?|consultas?)\\b',
+  ].join('|'),
+);
+
+function reportsAVisit(cue: string, before: string, after: string): boolean {
+  if (NEGATED_BEFORE.test(before)) return false;
+  if (EXAM_NAME_CUES.map(fold).includes(cue)) return EXAM_IN_THE_PAST.test(before) || THEN_EYEWEAR.test(after);
+  if (cue === 'seen today') return SEEN_IN_THE_PAST.test(before);
+  if (cue === 'same day' || cue === 'same-day') return THEN_A_CALLBACK.test(after);
+  if (cue === 'reschedule') return after.startsWith('d') && RESCHEDULED_IN_THE_PAST.test(before);
+  return false;
+}
+
+export function schedulingWordsReportAVisit(text: string, homeDepartmentId: number): boolean {
+  if (homeDepartmentId !== OPTICAL && homeDepartmentId !== TECH) return false;
+  const t = fold(text);
+  if (!EYEWEAR.test(t) && !hit(t, TECH_CUES) && !A_DRUG.test(t)) return false;
+  if (ASKS_FOR_A_VISIT.test(t) || hasSeparateAppointmentAsk(t) || LOOKS_AHEAD_TO_A_VISIT.test(t)) return false;
+  const fired = SCHEDULING.flatMap((s) => s.cues).map(fold).filter((c) => t.includes(c));
+  if (!fired.length) return false;
+  for (const cue of fired) {
+    let at = t.indexOf(cue);
+    while (at !== -1) {
+      if (!reportsAVisit(cue, t.slice(0, at), t.slice(at + cue.length))) return false;
+      at = t.indexOf(cue, at + cue.length);
     }
   }
   return true;
@@ -700,7 +840,9 @@ export function detectCrossQueue(text: string, homeDepartmentId: number): QueueR
   // instead of a sorted queue.
   // v202 (4): an exam that already happened is history, not a booking —
   // "a copy of my glasses prescription from my eye exam" is Optical's.
-  if (!mentionsSurgery && !examAlreadyHappened(text)) {
+  // v233: and no scheduling word that only reports a visit ("she was seen
+  // today", "same-day callback") sends a drug or eyewear request there.
+  if (!mentionsSurgery && !examAlreadyHappened(text) && !schedulingWordsReportAVisit(text, homeDepartmentId)) {
     for (const s of SCHEDULING) {
       if (hit(t, s.cues)) {
         if (homeDepartmentId === HVA_HUB) return null;
@@ -829,6 +971,13 @@ export function detectCrossQueue(text: string, homeDepartmentId: number): QueueR
 /**
  * The three scheduling intents a caller can STATE rather than imply.
  *
+ * ONE CALLER SINCE v236: a PATIENT on the PCP line (v128). The professional
+ * route that also read it, and passed the caller's own organisation and role so
+ * an employer's name could not withhold the redirect (Codex round 3 on #298),
+ * was removed on 2026-11-14: PCP-line scheduling from a professional caller
+ * stays in PCP Support (operator: "Keep in PCP Support"). A patient's narrative
+ * is their own words, so that strip had nothing to do on this path.
+ *
  * WHY THIS EXISTS BESIDE `detectCrossQueue` RATHER THAN INSIDE IT.
  *
  * `detectCrossQueue` reads prose, which is the only evidence a queue lane has:
@@ -906,47 +1055,9 @@ export function schedulingRedirectForStatedIntent(
   intent: StatedSchedulingIntent,
   text: string,
   homeDepartmentId: number,
-  /**
-   * THE CALLER'S OWN METADATA, REMOVED BEFORE THE GUARD READS THE TEXT —
-   * Codex P2 round 3, PR #298, and the point where this stopped being a cue
-   * list problem.
-   *
-   * The same finding arrived three times in three shapes: `surgery center`,
-   * then `operation` inside `operations coordinator`, then `lasik` inside
-   * "Coordinator at Example LASIK Clinic". No edit to the cue list closes it,
-   * because in the last case the employer token and the procedure token are
-   * the SAME TOKEN — a word boundary cannot separate them and neither can a
-   * narrower list.
-   *
-   * What separates them is provenance, not spelling. Codex's own framing was
-   * "request-scoped evidence rather than matching the whole narrative", and
-   * this makes that literal: whatever the intake recorded as the caller's
-   * organisation and role is removed from the text, and the guard reads what
-   * is left. On the PCP line that metadata is a large share of the narrative
-   * by construction, which is why every one of these findings landed here.
-   *
-   * IT CANNOT LOOSEN THE EXCEPTION BEYOND ITS OWN STRING. Only exact
-   * occurrences of the supplied text are removed, so "Coordinator at Example
-   * LASIK Clinic — needs to move the surgery date" still withholds, and
-   * "Booking her LASIK" still withholds because "example lasik clinic" does
-   * not occur in it. Omitted entirely, the behaviour is exactly as before.
-   *
-   * MEASURED, all 217 PCP tickets: 7 organisations contain an operation cue,
-   * and 2 of the 75 scheduling tickets are this shape. Small — and the reason
-   * to fix it at the source anyway is that it closes all three rounds at one
-   * point rather than waiting for the fourth token.
-   */
-  callerMetadata: readonly string[] = [],
 ): QueueRedirect | null {
   if (homeDepartmentId === HVA_HUB) return null;
-  let t = fold(text);
-  for (const raw of callerMetadata) {
-    const m = fold(raw).trim();
-    // A one- or two-character fragment would blank half the narrative; a
-    // missing organisation arrives as '' and must not match everywhere.
-    if (m.length < 3) continue;
-    t = t.split(m).join(' ');
-  }
+  const t = fold(text);
   // The exception, before anything else. An operation is not front-desk
   // scheduling whatever the intake enum says — but a surgery CENTRE is an
   // employer, not an operation. See OPERATION_CUES.

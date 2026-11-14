@@ -13,6 +13,10 @@
  * 284 of 287 such tickets that named no patient, 29 of 83 that named one,
  * and 6 of 24 that also carried a date of birth.
  *
+ * v236 (operator, 2026-11-14: "Keep in PCP Support") keeps these requests in
+ * PCP Support instead of the Hub. The asks stay; the ticket tests below now
+ * read the PCP ticket.
+ *
  * Fixtures are synthetic. The SIDs are the real calls; nothing a caller said
  * is in this file.
  */
@@ -42,7 +46,7 @@ vi.mock('../../server/services/ticketingApiClient', () => ({
   lookupWasUnavailable: () => false,
 }));
 
-const { createPcpAgent, SCHEDULING_KEPT_FOR_NO_PATIENT_NOTE, dobColumns } = await import('../agents/pcpAgent');
+const { createPcpAgent, dobColumns } = await import('../agents/pcpAgent');
 const { pcpDirector, SCHEDULING_PURPOSES } = await import('./director');
 
 async function call(agent: any, name: string, args: Record<string, unknown> = {}) {
@@ -109,11 +113,15 @@ describe('the corpus: a referring office booking a patient is asked who it is ab
     pcpDirector.clear(sid);
   });
 
-  it.each(PATIENT_SIDS)('%s, the patient calling for themselves, is not asked about a patient', (sid) => {
+  // v235, operator 2026-11-14: a patient calling for themselves is the
+  // patient, so their own date of birth is asked (in their words), and never
+  // "the patient's name".
+  it.each(PATIENT_SIDS)('%s, the patient calling for themselves, is asked their own date of birth only', (sid) => {
     pcpDirector.update(sid, { ...OFFICE, callerIsThePatient: true, callPurpose: 'schedule_appointment' });
     const next = pcpDirector.next(sid);
     expect(next.nextQuestion?.field).not.toBe('patientFirstName');
-    expect(next.nextQuestion?.field).not.toBe('patientDob');
+    expect(next.nextQuestion?.field).toBe('patientDob');
+    expect(next.nextQuestion?.prompt).toMatch(/your date of birth, starting with the month/);
     pcpDirector.clear(sid);
   });
 
@@ -160,20 +168,18 @@ describe('a caller headed for a person is not held on the patient', () => {
 });
 
 describe('the ticket', () => {
-  it('a scheduling request that still names no patient stays in PCP Support, and says why', async () => {
+  it('a scheduling request that names no patient files in PCP Support', async () => {
     const sid = 'CAv200nameless1';
     const agent = agentFor(sid);
     await call(agent, 'record_pcp_intake', { ...OFFICE, callPurpose: 'reschedule_appointment' });
     const filed = await call(agent, 'create_pcp_task', { narrative: 'Wants the patient moved to next week.' });
-    expect(ticketing.createTicket, 'no Hub ticket for a request naming no patient').not.toHaveBeenCalled();
+    expect(ticketing.createTicket, 'no Hub ticket').not.toHaveBeenCalled();
     expect(ticketing.createPcpTicket).toHaveBeenCalledTimes(1);
-    const payload = (ticketing.createPcpTicket.mock.calls as any[])[0][0];
-    expect(JSON.stringify(payload)).toContain('kept in PCP Support');
     expect(filed.ticketNumber).toBe('PCP-90000');
     pcpDirector.clear(sid);
   });
 
-  it('a named request reaches the Hub with the date of birth in its own columns', async () => {
+  it('a named request files in PCP Support with the patient and the date of birth', async () => {
     const sid = 'CAv200named1';
     const agent = agentFor(sid);
     await call(agent, 'record_pcp_intake', {
@@ -181,30 +187,10 @@ describe('the ticket', () => {
       patientFirstName: 'Test', patientLastName: 'Patient', patientDob: '1950-02-03',
     });
     await call(agent, 'create_pcp_task', { narrative: 'Wants the patient booked in.' });
-    expect(ticketing.createTicket).toHaveBeenCalledTimes(1);
-    const hub = (ticketing.createTicket.mock.calls as any[])[0][0];
-    expect(hub.departmentId).toBe(9);
-    expect(hub.patientFirstName).toBe('Test');
-    expect(hub).toMatchObject({ patientBirthYear: '1950', patientBirthMonth: '02', patientBirthDay: '03' });
+    expect(ticketing.createTicket, 'no Hub ticket').not.toHaveBeenCalled();
+    const pcp = (ticketing.createPcpTicket.mock.calls as any[])[0][0];
+    expect(pcp).toMatchObject({ patientFirstName: 'Test', patientLastName: 'Patient', patientDob: '1950-02-03' });
     pcpDirector.clear(sid);
-  });
-
-  it('a named request with no date of birth still reaches the Hub, with no birth columns', async () => {
-    const sid = 'CAv200named2';
-    const agent = agentFor(sid);
-    await call(agent, 'record_pcp_intake', {
-      ...OFFICE, callPurpose: 'schedule_appointment', patientFirstName: 'Test', patientLastName: 'Patient',
-    });
-    await call(agent, 'create_pcp_task', { narrative: 'Wants the patient booked in.' });
-    const hub = (ticketing.createTicket.mock.calls as any[])[0][0];
-    expect(hub.departmentId).toBe(9);
-    expect(hub.patientBirthYear).toBeUndefined();
-    pcpDirector.clear(sid);
-  });
-
-  it('the note names what staff need from the office', () => {
-    expect(SCHEDULING_KEPT_FOR_NO_PATIENT_NOTE).toMatch(/no patient name/);
-    expect(SCHEDULING_KEPT_FOR_NO_PATIENT_NOTE).toMatch(/date of birth/);
   });
 
   it('reads only a whole YYYY-MM-DD date of birth', () => {

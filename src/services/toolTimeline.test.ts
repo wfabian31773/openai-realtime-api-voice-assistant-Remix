@@ -162,6 +162,25 @@ describe('PHI discipline — the allow-list is the safety mechanism', () => {
    * v103: a records filing routed out of Medical Records is countable. Without
    * the key the only trace is a transcript line naming another team.
    */
+  /**
+   * v232: how often the call's own words, not the model, carried the records
+   * method or destination to the ticket is a count, and nothing else rides.
+   */
+  it('keeps method_heard and send_to_heard on a records filing, and still nothing about who', () => {
+    const callId = freshCall();
+    recordToolEvent(
+      callId,
+      'file_records_ticket',
+      { description: 'Paula Kolterman wants her chart faxed.' },
+      JSON.stringify({ success: true, ticket_number: 'VA-1', method_heard: true, send_to_heard: 'stated' }),
+      5,
+      { agentSlug: 'records' },
+    );
+    const [ev] = getAzulTimeline(callId)!;
+    expect(ev.outcome).toMatchObject({ method_heard: true, send_to_heard: 'stated' });
+    expect(JSON.stringify(ev)).not.toContain('Kolterman');
+  });
+
   it('keeps form_applies on a records filing, and still nothing about who', () => {
     const callId = freshCall();
     recordToolEvent(

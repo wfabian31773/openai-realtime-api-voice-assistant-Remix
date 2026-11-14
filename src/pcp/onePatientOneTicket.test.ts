@@ -301,7 +301,7 @@ describe('each patient gets their own idempotency key — Codex P1, #351', () =>
     expect(second.ticketNumber).toBe('VA-70003');
   });
 
-  it('two patients’ bookings send two Hub keys', async () => {
+  it('two patients’ bookings file on the PCP endpoint, one per patient (v236)', async () => {
     const { agent } = freshCall();
     const coordinator = {
       callerName: 'Test Coordinator',
@@ -313,13 +313,14 @@ describe('each patient gets their own idempotency key — Codex P1, #351', () =>
     };
     await call(agent, 'record_pcp_intake', { ...coordinator, ...ANA });
     const first = await call(agent, 'create_pcp_task', { narrative: 'Coordinator wants their patient booked in.' });
-    expect(first.routed_to).toBe('HVA Hub');
+    expect(first.routed_to).toBeUndefined();
 
     await call(agent, 'record_pcp_intake', { patientFirstName: 'Bo', patientLastName: 'Kim' });
     await call(agent, 'create_pcp_task', { narrative: 'Coordinator wants a second patient booked in.' });
 
-    const keys = (ticketing.createTicket.mock.calls as any[]).map((c) => c[0].idempotencyKey);
-    expect(keys).toEqual([expect.stringMatching(/-scheduling-hub$/), expect.stringMatching(/-scheduling-hub-p1$/)]);
+    expect(ticketing.createTicket, 'no Hub ticket').not.toHaveBeenCalled();
+    const patients = (ticketing.createPcpTicket.mock.calls as any[]).map((c) => c[0].patientFirstName);
+    expect(patients).toEqual([ANA.patientFirstName, 'Bo']);
   });
 
   it('nothing but the count can reach a key', () => {

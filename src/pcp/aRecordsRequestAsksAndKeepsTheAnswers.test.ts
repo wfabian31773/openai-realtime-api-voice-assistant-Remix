@@ -100,7 +100,9 @@ const NO_PATIENT_ONLY = [
 
 /** Synthetic stand-ins. */
 const OFFICE = { callerName: 'Testa Caller', callerOrganization: 'Example Family Medicine' };
-const PATIENT = { patientFirstName: 'Testpatient', patientLastName: 'Example' };
+// v235: the patient's date of birth is asked once after whose records they are,
+// so a caller who names the patient here gives the date with it.
+const PATIENT = { patientFirstName: 'Testpatient', patientLastName: 'Example', patientDob: '1950-02-03' };
 const FAX = { recordsDeliveryMethod: 'fax', recordsDeliveryDestination: '202-555-0199' } as const;
 const NARRATIVE = "Caller is requesting a copy of a patient's medical records.";
 
@@ -231,9 +233,10 @@ describe(`${PCP_82755}: a model that never fills the fields still files, once ea
       says.push(r.say);
       callerAnswers();
     }
-    // callerName, patientName, recordsDeliveryMethod: the callback came from caller ID.
-    expect(says).toHaveLength(3);
-    expect(new Set(says).size, 'a question asked twice').toBe(3);
+    // callerName, patientName, the patient's date of birth (v235),
+    // recordsDeliveryMethod: the callback came from caller ID.
+    expect(says).toHaveLength(4);
+    expect(new Set(says).size, 'a question asked twice').toBe(4);
     const text = ticketText(filedPayload()!);
     expect(text).toMatch(/NOT CAPTURED ON THE CALL/);
     expect(text).toMatch(/Delivery method NOT captured/);
@@ -261,7 +264,11 @@ describe('the answers are stored the way record_pcp_intake stores them', () => {
     expect(r.say).toMatch(/who am I speaking with/i);
     callerAnswers();
     const r2 = await call(agent, RECORDS, { narrative: NARRATIVE, callerName: 'Testpatient Example', callerIsThePatient: true });
-    expect(r2.say).toMatch(/fax.*email.*mail/i);
+    // v235: their own date of birth, in their own words, before the method.
+    expect(r2.say).toMatch(/your date of birth, starting with the month/i);
+    callerAnswers();
+    const r3 = await call(agent, RECORDS, { narrative: NARRATIVE, patientDob: '1950-02-03' });
+    expect(r3.say).toMatch(/fax.*email.*mail/i);
   });
 
   it('a changed method drops the old destination', async () => {

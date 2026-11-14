@@ -92,6 +92,18 @@ export interface PcpConversationState {
   deliveryPreference?: string;
   statedRelationship?: string;
   callPurpose?: PcpCallPurposeSlug;
+  /**
+   * THE MODEL'S OWN READ OF WHETHER THE REQUEST IS ABOUT A SPECIFIC PATIENT.
+   * v235. The purpose cannot say it: `service_inquiry` is the catch-all the
+   * model reaches for, and of the 36 professional tickets of 2026-11-12/13 the
+   * daily review flagged on a purpose whose policy row asks no patient
+   * (service_inquiry 22, provider_information 5, pharmaceutical_representative
+   * 4, plan_participation 2, unclassified_call 2, disability_accommodation 1),
+   * 25 were about one patient: a pharmacy's prescription, an authorization, a
+   * pre-op question, a glasses order. Classification is the model's job
+   * (standing instruction 3); see `requestConcernsAPatient`.
+   */
+  requestIsAboutAPatient?: boolean;
   patientFirstName?: string;
   patientLastName?: string;
   patientDob?: string;
@@ -220,8 +232,8 @@ export interface PcpConversationState {
   /**
    * HOW MANY TIMES THE CALL HAS MOVED ON TO ANOTHER PATIENT. Codex P1, #351.
    *
-   * The create-ticket doors key their POSTs on the call: the Hub on
-   * `<sid>-scheduling-hub` and Medical Records on `call-<sid>`. With one
+   * The create-ticket doors key their POSTs on the call: the patient door on
+   * `<sid>-pcp-patient` and Medical Records on `call-<sid>`. With one
    * filing per patient, a second patient through the same door would send the
    * same key, and the app would hand back the first patient's ticket as a
    * retry. `patientKeySuffix` appends this count, so each patient gets their
@@ -412,6 +424,13 @@ export const MAX_ASKS_PER_FIELD = 2;
  */
 export const ASKS_FOR_FIELD: Partial<Record<keyof PcpConversationState, number>> = {
   callerEmail: 1,
+  /**
+   * The date of birth is asked ONCE (v235). The operator chose to ask it before
+   * the request files, knowing a hang-up on that question can cost the request
+   * (2026-11-14). A caller reading a chart either has the date or does not, so
+   * a second ask is a second chance to hang up, not a second chance to hear it.
+   */
+  patientDob: 1,
 };
 
 export function askBudgetFor(field: keyof PcpConversationState): number {
@@ -602,7 +621,7 @@ export const PATIENT_FIELDS: Array<keyof PcpConversationState> = ['patientFirstN
  * one order is the drift this file already warns about elsewhere; there is now
  * one.
  */
-export const PATIENT_INTAKE_ORDER: Array<keyof PcpConversationState> = ['callPurpose', 'callerName', 'callbackNumber'];
+export const PATIENT_INTAKE_ORDER: Array<keyof PcpConversationState> = ['callPurpose', 'callerName', 'patientDob', 'callbackNumber'];
 /**
  * THE PURPOSES A PERSON IN THE HVA HUB WORKS FROM THE TICKET ALONE, and so the
  * ones where who the call is about is asked before the request files. v200,
@@ -624,6 +643,34 @@ export const PATIENT_INTAKE_ORDER: Array<keyof PcpConversationState> = ['callPur
 export const SCHEDULING_PURPOSES: ReadonlySet<string> = new Set([
   'schedule_appointment', 'reschedule_appointment', 'cancel_appointment',
 ]);
+/**
+ * IS THIS REQUEST ABOUT A PATIENT? v235, operator 2026-11-14: for a PCP
+ * request about a patient, the patient's name and date of birth are asked
+ * before the request files ("Ask before filing").
+ *
+ * Any one of these says yes:
+ * - the purpose's policy row requires patient context (scheduling, referrals,
+ *   appointment checks, records, grievances, peer-to-peer, plan visits);
+ * - the caller is the patient on the patient purpose (`patient_caller`);
+ * - the model says the request is about a specific patient
+ *   (`requestIsAboutAPatient`), whatever purpose it chose;
+ * - a patient's name or date of birth is already on record.
+ *
+ * WHAT NAMES NO PATIENT is a request about the practice itself, and the
+ * corpus says the purpose cannot find it: of 36 professional tickets on a
+ * purpose that asks no patient, 25 concerned one patient and 11 did not
+ * (provider-directory checks, plans the practice takes, a wheelchair question,
+ * callers who asked only for a named person). So the purpose alone never
+ * says no; without the model's flag or a name, those purposes still ask no
+ * patient, exactly as before.
+ */
+export function requestConcernsAPatient(state: PcpConversationState): boolean {
+  const purpose = state.callPurpose ? getPcpCallPurpose(state.callPurpose) : undefined;
+  return Boolean(purpose?.patientContextRequired)
+    || state.callPurpose === 'patient_caller'
+    || state.requestIsAboutAPatient === true
+    || Boolean(state.patientFirstName || state.patientLastName || state.patientDob);
+}
 /**
  * RULE ZERO 2b/2c — THE FORMAT GOES IN THE QUESTION.
  *
@@ -747,6 +794,13 @@ export const DESTINATION_PROMPTS: Record<PcpRecordsDeliveryMethod, string> = {
   unspecified: '',
 };
 
+/**
+ * The same question, asked of a patient about themselves (v235). "The
+ * patient's date of birth" is the wrong sentence to a patient on the phone.
+ */
+export const OWN_DOB_PROMPT =
+  'And may I please have your date of birth, starting with the month, then the day, then the year?';
+
 /** A method that names no destination — the recorded form of "they didn't say". */
 export function deliveryDestinationNeeded(state: PcpConversationState): boolean {
   return Boolean(state.recordsDeliveryMethod) && state.recordsDeliveryMethod !== 'unspecified';
@@ -843,6 +897,8 @@ function forgetThePreviousPatient(state: PcpConversationState, patch: PatientPat
    *   them where it said; re-asking would cost a question per patient on the
    *   calls where questions cost requests. A different destination, once
    *   stated, replaces it.
+   * - `requestIsAboutAPatient`. The next patient named on the call is a
+   *   patient too.
    * - `callPurpose`. `lookup_patient_appointments` refuses without one, so
    *   clearing it would refuse every later patient's lookup on a clinic's
    *   confirmation list. The model restates it when the request changes.
@@ -1141,6 +1197,21 @@ export class PcpDirector {
    * calls this.
    */
   /**
+   * THE RECORDS GATE ASKED THE DATE OF BIRTH OUT LOUD (v235, Codex P2 on #479).
+   *
+   * The date of birth is asked once per call, and the records tool's gate is
+   * the second place that can ask it. Its ask was spoken (the tool returned
+   * it as `say`), so charging it here is the same thing `askNext` does for
+   * the intake: a question the caller heard. Without it the intake would ask
+   * again after the gate had. Not `noteAsked`, whose one caller is `askNext`.
+   */
+  noteDobAskedByTheRecordsGate(callId: string): void {
+    const state = this.get(callId);
+    const counts = state.askCounts ?? {};
+    state.askCounts = { ...counts, patientDob: (counts.patientDob ?? 0) + 1 };
+  }
+
+  /**
    * RETURNS whether this field is now SPENT — and that return value is the
    * whole point. Codex P2, #315.
    *
@@ -1236,8 +1307,12 @@ export class PcpDirector {
      * latch and then only read it in one of the three places that needed it.
      */
     const isPatient = state.callPurpose === 'patient_caller' || Boolean(state.callerIsThePatient);
+    // v235: a patient's own date of birth is asked when the request is about
+    // them (`requestConcernsAPatient`, always on `patient_caller`), and not on
+    // a question about the practice itself.
+    const aboutAPatient = requestConcernsAPatient(state);
     const required: Array<keyof PcpConversationState> = isPatient
-      ? [...PATIENT_INTAKE_ORDER]
+      ? PATIENT_INTAKE_ORDER.filter((field) => field !== 'patientDob' || aboutAPatient)
       : [...PROFESSIONAL_FIELDS];
 
     // Purposes whose destination is a live human do not gate the transfer on patient
@@ -1285,32 +1360,48 @@ export class PcpDirector {
      */
     const handoffFailedEarly = Boolean(state.handoffStatus && state.handoffStatus !== 'CONNECTED');
     const lunchClosureNow = this.options.lunchClosure?.() ?? isLunchClosure();
-    const headedForAPerson = Boolean(state.callerRequestedHuman)
-      && !state.callerDeclinedTheQueue && !handoffFailedEarly && !lunchClosureNow;
-    const schedulingNeedsThePatient = !isPatient
-      && Boolean(state.callPurpose && SCHEDULING_PURPOSES.has(state.callPurpose))
-      && !headedForAPerson;
     /**
-     * AND NOT TO A PATIENT, EITHER.
-     *
-     * PATIENT_FIELDS is `statedRelationship, patientFirstName, patientLastName,
-     * patientDob` — the block a PROFESSIONAL supplies about someone else. Asked
-     * of the patient themselves it opens with "What is your professional
-     * relationship to this patient?", which is the bd89b226 interrogation
-     * verbatim.
-     *
-     * The first two attempts at this fixed the BASE list and left this line
-     * alone, so a latched patient whose purpose had been reclassified still
-     * walked straight into it. Caught on the third review pass by running the
-     * director rather than reading it, 2026-08-17.
+     * HEADED FOR A PERSON: the caller asked for one, or the purpose itself
+     * defaults to a transfer (peer-to-peer, a plan's visit inquiry), and a
+     * transfer can still happen — not declined, not after a failed one, not
+     * at lunch. v200's rule, widened in v235 to the default-transfer purposes
+     * because `handoffEligible`'s intake arm reads `intakeIncomplete`: a date
+     * of birth the caller does not have would otherwise hold that dial for the
+     * rest of the call.
      */
-    if (!isPatient && purpose?.patientContextRequired && (!connectsToHuman || schedulingNeedsThePatient)) {
+    const defaultsToAPerson = purpose?.defaultDisposition === 'HAND_OFF'
+      || (state.callPurpose === 'pharmaceutical_representative' && Boolean(this.options.pharmaHandoffEnabled));
+    const headedForAPerson = (Boolean(state.callerRequestedHuman) || defaultsToAPerson)
+      && !state.callerDeclinedTheQueue && !handoffFailedEarly && !lunchClosureNow;
+    /**
+     * A REQUEST ABOUT A PATIENT ASKS WHO, THEN THE DATE OF BIRTH, BEFORE IT
+     * FILES. v235, operator 2026-11-14 ("Ask before filing"). v200 did this for
+     * the three scheduling purposes; this is every request about a patient.
+     *
+     * MEASURED, the daily review of 2026-11-12/13: 101 PCP-line tickets with no
+     * date of birth the caller was never asked for, and 30 with no patient
+     * name nobody asked for. Over the 14 days to 2026-11-14, 895 of 1,103 PCP
+     * agent tickets carried no patient date of birth.
+     *
+     * - A professional is asked the patient's first and last name, then the
+     *   date of birth, when the request concerns a patient
+     *   (`requestConcernsAPatient`). The names keep their old rule on a purpose
+     *   that cannot transfer (asked even of a caller who asked for a person, as
+     *   before); a caller headed for a person is never held on the date of
+     *   birth.
+     * - A patient calling for themselves is asked their own date of birth,
+     *   after their name, unless it is already on record (RULE ZERO step 5:
+     *   `answered` skips a field the state holds). Patients are never
+     *   transferred, so nothing here can hold a dial.
+     *
+     * Each is one question in the caller's turn, with the format in it (RULE
+     * ZERO 2b), and the date of birth is asked once (`ASKS_FOR_FIELD`). An
+     * answer that does not come files with the gap written on the ticket.
+     */
+    if (!isPatient && aboutAPatient && (!connectsToHuman || !headedForAPerson)) {
       required.push(...PATIENT_FIELDS);
     }
-    // The date of birth is what lets the Hub find the chart: 6 of 24 named
-    // tickets carrying one were sent back, against 29 of 83 without. Asked in
-    // parts (PROMPTS.patientDob), after the name, within the ask budget.
-    if (schedulingNeedsThePatient) required.push('patientDob');
+    if (!isPatient && aboutAPatient && !headedForAPerson) required.push('patientDob');
     /**
      * A RECORDS REQUEST IS NOT COMPLETE UNTIL WE KNOW WHERE IT GOES.
      *
@@ -1510,6 +1601,7 @@ export class PcpDirector {
               (missing === 'recordsDeliveryDestination' && state.recordsDeliveryMethod
                 ? DESTINATION_PROMPTS[state.recordsDeliveryMethod]
                 : undefined)
+              ?? (missing === 'patientDob' && isPatient ? OWN_DOB_PROMPT : undefined)
               ?? PROMPTS[missing]
               ?? `Please provide ${String(missing)}.`,
           }
