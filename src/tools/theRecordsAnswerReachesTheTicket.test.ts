@@ -535,6 +535,24 @@ describe('each replacement rule on its own', () => {
       'AGENT: Anything else?', 'CALLER: Actually, my cell is 2 0 2 5 5 5 0 1 4 3.']).fax).toBe('2025550183');
   });
 
+  it('a different number given where a fax is meant clears it, with no fax or correction word in the answer', () => {
+    expect(readRecordsDelivery([...CONFIRMED_OLD,
+      'AGENT: Is there a fax number for the other office?', 'CALLER: 2 0 2 5 5 5 0 1 9 5.']).fax).toBeUndefined();
+    expect(readRecordsDelivery([...CONFIRMED_OLD,
+      'AGENT: Anything else?', 'CALLER: Their fax is 2 0 2 5 5 5 0 1 9 4.']).fax).toBeUndefined();
+    expect(readRecordsDelivery([...CONFIRMED_OLD,
+      'AGENT: Anything else?', 'CALLER: Please send it to 2 0 2 5 5 5 0 1 9 3.']).fax).toBeUndefined();
+  });
+
+  it('a number said as something else keeps it: a member ID, a corrected callback number, the same number read back again', () => {
+    expect(readRecordsDelivery([...CONFIRMED_OLD,
+      'AGENT: Anything else?', 'CALLER: Her member ID is 2 0 2 5 5 5 0 1 7 7.']).fax).toBe('2025550183');
+    expect(readRecordsDelivery([...CONFIRMED_OLD,
+      "AGENT: What's the best number to reach you?", "CALLER: Actually, it's 2 0 2 5 5 5 0 1 4 4."]).fax).toBe('2025550183');
+    expect(readRecordsDelivery([...CONFIRMED_OLD,
+      'AGENT: So that is two zero two, five five five, zero one eight three, right?', 'CALLER: One moment.']).fax).toBe('2025550183');
+  });
+
   it('the last seven digits of the same number are the same number; a correction word clears it anyway (the safe direction)', () => {
     expect(readRecordsDelivery([...CONFIRMED_OLD, 'CALLER: The fax ending 5 5 5 0 1 8 3.']).fax).toBe('2025550183');
     expect(readRecordsDelivery([...CONFIRMED_OLD, "CALLER: Actually that's fax 5 5 5 0 1 8 3."]).fax).toBeUndefined();

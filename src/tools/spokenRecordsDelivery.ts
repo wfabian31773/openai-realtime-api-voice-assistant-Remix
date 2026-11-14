@@ -217,6 +217,9 @@ const BIRTH_CONTEXT = /\b(date of birth|birth ?date|birthday|born|dob)\b/;
 /** The caller changing how the records go, outside the method question. */
 const SWITCH = /\b(actually|instead|rather|change|switch|prefer|better)\b|\b(send|email|mail|fax) (it|them|those|these|the records)\b|\bby (email|mail|fax|post)\b/;
 
+/** "Send it to …", "use …": a number said as where the records go. */
+const SEND_TO = /\b(send|sent|use|going to|go to)\b/;
+
 /** The confirmed fax said again: the same ten digits, or its last seven to nine. */
 function sameNumber(run: string, fax: string): boolean {
   if (tenDigits(run) === fax) return true;
@@ -316,7 +319,7 @@ export function readRecordsDelivery(lines: readonly string[]): HeardDelivery {
       if (fax && !CALLBACK_CONTEXT.test(asked) && !BIRTH_CONTEXT.test(asked) && !BIRTH_CONTEXT.test(t.text)
         && !(CALLBACK_CONTEXT.test(t.text) && !FAX.test(t.text))) {
         const replaced = digitRuns(t.text).some((r) => r.length >= 7 && !sameNumber(r, fax!));
-        const faxContext = FAX.test(t.text) || CORRECTION.test(t.text) || FAX.test(asked)
+        const faxContext = FAX.test(t.text) || CORRECTION.test(t.text) || SEND_TO.test(t.text) || FAX.test(asked)
           || (asksForTheDestination(asked) && destinationAskedFor(asked) !== 'email' && destinationAskedFor(asked) !== 'mail');
         if (replaced && faxContext) fax = undefined;
       }
@@ -324,8 +327,9 @@ export function readRecordsDelivery(lines: readonly string[]): HeardDelivery {
       if (fax && i !== faxSetBy + 1 && FAX.test(t.text) && (CORRECTION.test(t.text) || NEGATION.test(t.text))) {
         fax = undefined;
       }
-      // "Actually, can you email it instead?" The method question's own answer is read below.
-      if (!asksForTheMethod(asked) && SWITCH.test(t.text)) {
+      // "Actually, can you email it instead?" Inside the method question's window
+      // the answer has already set the method, so this changes nothing there.
+      if (SWITCH.test(t.text)) {
         const named = methodsNamed(t.text);
         if ([...named].some((m) => m !== method)) method = undefined;
         if ([...named].some((m) => m !== 'fax')) fax = undefined;
