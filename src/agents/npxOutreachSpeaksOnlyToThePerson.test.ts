@@ -168,13 +168,18 @@ describe('a recording the agent reached gets the approved line, through the real
 
   it('an opt-out earlier on the call stands, and nothing more is said', async () => {
     const { store, attemptId } = freshStore();
-    const lane = await dialledLane(store, await attemptId);
+    const id = await attemptId;
+    const lane = await dialledLane(store, id);
     const agent = lane.agent as unknown as Dispatching;
     await agent.dispatch(OPT_OUT_TOOL_NAME, {});
     const out = JSON.parse((await agent.dispatch(RECORD_OUTCOME_TOOL_NAME, { outcome: 'voicemail' })).output);
     expect(out).toMatchObject({ success: true, recorded: 'already_settled', nothing_to_say: true });
     expect(out.message).toBeUndefined();
     expect(store.contacts.get('c1')!.status).toBe('do_not_call');
+    // No message was left, so the attempt must not say one was: its voicemail
+    // verdict outlives every later status and a returned call reads it (Codex
+    // P2 on #477).
+    expect(store.attempts.find((a) => a.id === id)!.finish?.status).not.toBe('voicemail');
   });
 
   it('a call with no line to leave leaves none', () => {

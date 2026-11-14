@@ -464,7 +464,6 @@ async function recordVoicemail(
   const totalCap = Number(input.outbound_total_cap);
   const spent =
     Number.isFinite(totalCap) && totalCap > 0 && (await store.priorAttempts(who.contactId)).length >= totalCap;
-  if (attemptId) await store.finishAttempt(attemptId, { status: 'voicemail', ended: false });
   const settled = await store.settleContact(who.contactId, spent ? 'max_attempts' : 'voicemail', {
     onlyIfCalling: true,
     ...(attemptId ? { onlyIfCurrentAttempt: attemptId } : {}),
@@ -479,6 +478,12 @@ async function recordVoicemail(
       fix: "This call's outcome is already on record. Leave no message: call end_call now and say nothing.",
     };
   }
+  // Only once the row is ours to settle: the attempt's voicemail verdict
+  // outranks every later status (finishAttempt keeps it), and a returned call
+  // is told "we left a voicemail" from it, so it must not be written on a
+  // call whose outcome was already on record and left no message (Codex P2
+  // on #477).
+  if (attemptId) await store.finishAttempt(attemptId, { status: 'voicemail', ended: false });
   return voicemailOutcome(line);
 }
 
