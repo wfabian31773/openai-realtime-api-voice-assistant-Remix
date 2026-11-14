@@ -1792,8 +1792,20 @@ import { callEnvironment } from "./callRecord";
  * Above main's v227 (#466, `45c2fb67`), which it contains along with v226
  * (#474, `159a85b6`). No migration.
  */
+/*
+ * v232 (2026-11-14): the records caller's answer reaches the ticket.
+ * `file_records_ticket` asks how and where once each (v188), and the model
+ * re-sends its first arguments after the caller answers, so the spent ask
+ * filed "Delivery: NOT CAPTURED" on requests whose caller had said "By fax."
+ * The bridge keeps, per call, the method the caller named in answer to the
+ * method question and which destinations were given (method names only;
+ * spokenRecordsDelivery.ts); the tool uses them only to fill a gap the model
+ * left. A destination is never read from the transcript: the fax readback
+ * reader drew three review rounds on #482 and was withdrawn (the #476
+ * ruling). Above main's v230 (#477, `664357cd`). No migration.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v230-npx-speaks-only-to-the-person-20261114";
+  "voice-runtime-v232-the-records-answer-reaches-the-ticket-20261114";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

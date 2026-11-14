@@ -144,7 +144,7 @@ describe('a per-call store the runtime writes is imported one way', () => {
   it('finds the stores it is guarding (the scan is not vacuous)', () => {
     const names = [...held].map((t) => basename(t));
     expect(names).toEqual(
-      expect.arrayContaining(['spokenDob', 'spokenPatientStatus', 'verifiedIdentity', 'symptomCorroboration']),
+      expect.arrayContaining(['spokenDob', 'spokenPatientStatus', 'spokenRecordsDelivery', 'verifiedIdentity', 'symptomCorroboration']),
     );
   });
 
