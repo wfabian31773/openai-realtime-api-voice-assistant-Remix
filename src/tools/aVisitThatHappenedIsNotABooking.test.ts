@@ -153,6 +153,8 @@ describe('CONTROLS — each part of the rule', () => {
   it('an ask for a visit in words no cue lists keeps the Hub', () => {
     expect(filedIn('She was seen today, her drops are not at the pharmacy, and she wants another appointment.', TECH)).toBe(HUB);
     expect(filedIn('She was seen today, her drops are not at the pharmacy, and she needs to move her appointment.', TECH)).toBe(HUB);
+    // An exam asked for by a verb no cue lists (the rule `examAlreadyHappened` already reads).
+    expect(filedIn('She was seen today, her drops are not at the pharmacy, and she wants an exam.', TECH)).toBe(HUB);
   });
   it('a request about neither a drug nor eyewear keeps the Hub', () => {
     expect(filedIn('Patient was seen today and asks what time her follow-up is.', TECH)).toBe(HUB);
