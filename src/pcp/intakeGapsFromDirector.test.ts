@@ -36,10 +36,12 @@ describe('intakeMissing comes from the director, per call reason', () => {
       const d = fresh();
       d.update('b', { callPurpose: purpose });
       const missing = d.next('b').intakeMissing;
-      // v200 asks a scheduling request the patient's date of birth.
-      const neverAsked = purpose === 'schedule_appointment'
-        ? NEVER_ASKED.filter((f) => f !== 'patientDob')
-        : NEVER_ASKED;
+      // v200 asked a scheduling request the patient's date of birth; v235 asks
+      // it of every request about a patient. A service inquiry naming no
+      // patient is still never reported missing one.
+      const neverAsked = purpose === 'service_inquiry'
+        ? NEVER_ASKED
+        : NEVER_ASKED.filter((f) => f !== 'patientDob');
       for (const field of neverAsked) expect(missing, `${purpose} -> ${field}`).not.toContain(field);
     }
   });

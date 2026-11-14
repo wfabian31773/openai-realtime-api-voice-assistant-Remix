@@ -87,7 +87,8 @@ describe('the ask budget', () => {
     d.recordDisposition(SEVEN_TIMES_CALL, 'CREATE_TASK');
     // The patient's name, then the enrichment block that follows it.
     // `callbackNumber` is seeded and so never offered.
-    const outstanding = ['patientFirstName', 'patientLastName', 'callerRole', 'callerEmail'];
+    // v235 adds the patient's date of birth after the name, asked once.
+    const outstanding = ['patientFirstName', 'patientLastName', 'patientDob', 'callerRole', 'callerEmail'];
 
     const asked: string[] = [];
     for (let turn = 0; turn < 20; turn++) {

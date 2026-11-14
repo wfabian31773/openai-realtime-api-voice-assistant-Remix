@@ -85,12 +85,16 @@ describe('a patient is not asked professional questions', () => {
     expect(asked).not.toContain('statedRelationship');
   });
 
-  it('asks only for a name, a number and what they need', () => {
+  it('asks only for a name, their date of birth, a number and what they need', () => {
     const d = new PcpDirector({ lunchClosure: noLunch });
     d.update('c4', { callPurpose: 'patient_caller' });
 
     expect(d.next('c4').nextQuestion?.field).toBe('callerName');
     d.update('c4', { callerName: 'Maria Lopez' });
+    // v235, operator 2026-11-14: the patient's own date of birth before filing.
+    expect(d.next('c4').nextQuestion?.field).toBe('patientDob');
+    expect(d.next('c4').nextQuestion?.prompt).toMatch(/your date of birth/);
+    d.update('c4', { patientDob: '1950-02-03' });
     expect(d.next('c4').nextQuestion?.field).toBe('callbackNumber');
     d.update('c4', { callbackNumber: '9095551234' });
     expect(d.next('c4').nextQuestion, 'still asking after name + number + purpose').toBeUndefined();

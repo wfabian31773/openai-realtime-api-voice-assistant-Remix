@@ -137,7 +137,8 @@ describe('a records request survives an incomplete intake', () => {
     expect(filed[0].disposition).toBe('CREATE_TASK');
     // It asked, but it did not interrogate.
     expect(asked.length).toBeGreaterThan(0);
-    expect(asked.length, 'this is the e0384db1 shape if it grows').toBeLessThanOrEqual(3);
+    // Four since v235: who, whose records, the patient's date of birth, how.
+    expect(asked.length, 'this is the e0384db1 shape if it grows').toBeLessThanOrEqual(4);
   });
 
   it('every question it asks is one a caller can answer out loud', async () => {
@@ -179,10 +180,12 @@ describe('a records request survives an incomplete intake', () => {
     for (const gap of ['patient first name', 'patient last name']) {
       expect(filed[0].narrative).toContain(gap);
     }
-    // DOB and relationship are no longer ASKED by the director (v34), so they
-    // are no longer reported as missing either: the gap list is the
-    // director's own required list (Support Desk intake, Oct 30).
-    for (const notAsked of ['patient date of birth', 'relationship to the patient', 'organization type']) {
+    // Relationship and organization type are no longer ASKED by the director
+    // (v34), so they are no longer reported as missing either: the gap list is
+    // the director's own required list (Support Desk intake, Oct 30). The date
+    // of birth is asked again since v235, so it is reported when it does not come.
+    expect(filed[0].narrative).toContain('patient date of birth');
+    for (const notAsked of ['relationship to the patient', 'organization type']) {
       expect(filed[0].narrative).not.toContain(notAsked);
     }
     // and it still files, which is the whole point

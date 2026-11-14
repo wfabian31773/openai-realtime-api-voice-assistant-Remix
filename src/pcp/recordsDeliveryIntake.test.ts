@@ -248,6 +248,8 @@ describe('the delivery gate cannot be walked around', () => {
       callPurpose: 'patient_caller',
       callerName: 'A Patient',
       callerIsThePatient: true,
+      // v235 asks a patient's own date of birth before the delivery method.
+      patientDob: '1950-02-03',
     });
 
     const r = await call(agent, 'handle_patient_medical_records_request', {
