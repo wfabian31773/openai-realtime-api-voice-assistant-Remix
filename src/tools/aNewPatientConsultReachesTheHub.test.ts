@@ -244,6 +244,32 @@ describe('REVIEW SHAPES — the ask must be affirmative, and three things veto i
     expect(newPatientAsksForAConsult('Her doctor scheduled the new patient for a consultation and she wants to know when.')).toBe(false);
     expect(newPatientAsksForAConsult('New patient wants to schedule a consultation.')).toBe(true);
   });
+  // Round 3 (review of bff6faad): an asking word that only asks ABOUT a visit,
+  // or a question about what it costs, is not a booking. The last fix on this
+  // class; a further reshape is declined with its number (1 pricing ticket in
+  // the 41, VA-85303, which stays in Surgery either way).
+  it('"wants to know" about a consultation is not an ask for one', () => {
+    for (const words of [
+      'New patient wants to know the cataract surgery consultation cost.',
+      'New patient wants to find out about a cataract consultation.',
+      'New patient would like to check whether a cataract consultation is needed.',
+      'Paciente nuevo quiere saber cuanto cuesta la consulta de cataratas.',
+    ]) {
+      expect(newPatientAsksForAConsult(words), words).toBe(false);
+      expect(detectCrossQueue(words, SURGERY), words).toBeNull();
+    }
+  });
+  it('a booking that also asks the price stays in Surgery, the accepted cost', () => {
+    expect(newPatientAsksForAConsult('New patient wants a cataract consultation and asked what the price is.')).toBe(false);
+  });
+  it('"does not know which surgeon" elsewhere in the request still routes (4 of the 19)', () => {
+    expect(newPatientAsksForAConsult('New patient would like to schedule a cataract consultation. Does not know which surgeon.')).toBe(true);
+    expect(newPatientAsksForAConsult('New patient requesting a laser surgery consult. Does not know which surgeon.')).toBe(true);
+  });
+  it('"ask for" is still an ask', () => {
+    expect(newPatientAsksForAConsult('New patient wants to ask for a cataract consultation appointment.')).toBe(true);
+    expect(newPatientAsksForAConsult('Paciente nuevo quiere una cita para consulta de cataratas.')).toBe(true);
+  });
 });
 
 describe('the surgery date the model sent', () => {

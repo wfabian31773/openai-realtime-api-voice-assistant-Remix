@@ -263,9 +263,16 @@ const NEW_PATIENT_DENIED =
 const NEW_PATIENT =
   /\b(?:new|first[- ]time)\s+patients?\b|\bpacientes?\s+nuev[oa]s?\b|\bnuev[oa]s?\s+pacientes?\b/;
 const A_VISIT = String.raw`(?:appointments?|appts?|consult(?:ation)?s?|evaluations?|exams?|visits?|citas?|consultas?|be\s+seen|be\s+evaluated)`;
+// An asking word that only asks ABOUT a visit (round 3 of the review of #486:
+// "wants to know the cataract surgery consultation cost") is not a booking.
+// The words are refused between the asking word and the visit noun, so "does
+// not know which surgeon" elsewhere in the request still routes (4 of the 19).
+const ONLY_ASKS_ABOUT = String.raw`(?:know|find|learn|ask|asking|wonder\w*|understand|check\w*|about|saber|preguntar)\b`;
+// A question about what a visit costs is not a request for one.
+const ASKS_ABOUT_COST = /\b(?:costs?|price[sd]?|pricing|how\s+much|fees?|cuanto\s+cuesta|precio)\b/;
 const ASKS_TO_BOOK = new RegExp(
   String.raw`\b(?:schedul(?:e|es|ing)|be\s+scheduled|get\s+scheduled|book(?:s|ing)?|set(?:s|ting)?\s+up|agendar|programar|sacar)\b`
-  + String.raw`|\b(?:wants?|wanting|needs?|needing|would\s+like|requests?|requesting|asking\s+for|looking\s+for|interested\s+in|make|making|get|quiere|necesita|solicita|pide)\s+(?:\S+\s+){0,5}?`
+  + String.raw`|\b(?:wants?|wanting|needs?|needing|would\s+like|requests?|requesting|asking\s+for|asks?\s+for|asked\s+for|looking\s+for|interested\s+in|make|making|get|quiere|necesita|solicita|pide)\s+(?:(?!${ONLY_ASKS_ABOUT})\S+\s+){0,5}?`
   + A_VISIT + String.raw`\b`,
 );
 // A surgery already set: pre-op and post-op visits, or an operation scheduled.
@@ -288,6 +295,7 @@ export function newPatientAsksForAConsult(text: string, surgeryDateGiven = false
   if (!ASKS_TO_BOOK.test(t)) return false;
   if (A_SURGERY_ALREADY_BOOKED.test(t) || A_SURGERY_IS_SET.test(t) || HOLDS_AN_APPOINTMENT.test(t)) return false;
   if (ACTS_ON_AN_APPOINTMENT.test(t)) return false;
+  if (ASKS_ABOUT_COST.test(t)) return false;
   if (SAME_DAY_WORDS.test(t) || hasClinicalComplaint(text)) return false;
   return !SCHEDULING.some((s) => EXISTING_APPOINTMENT_REASONS.has(s.reasonId) && hit(t, s.cues));
 }
