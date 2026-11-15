@@ -117,19 +117,13 @@ export const askModelForTheRequest: RequestAsker = async (transcript, retry) => 
     messages: requestMessages(transcript, retry),
   });
   const text = res.choices[0]?.message?.content ?? "";
-  const parsed = JSON.parse(text) as unknown;
-  // v242 (github-actions review of #488): only `{"request": string}` or
-  // `{"request": null}` is an answer. Any other shape is a format failure,
-  // thrown so the reader reads it as `failed` and the call keeps what main
-  // files, never as the model reading no request.
-  if (!parsed || typeof parsed !== "object" || !("request" in parsed)) {
-    throw new TypeError("the model's answer has no request field");
-  }
-  const request = (parsed as { request: unknown }).request;
-  if (request !== null && typeof request !== "string") {
-    throw new TypeError("the model's request is not a string or null");
-  }
-  return { request };
+  const parsed = JSON.parse(text) as { request?: unknown } | null;
+  // v242 (github-actions review of #488): the model's value is passed through
+  // as it came, never normalised to null. `askOnce` is the one place that
+  // decides what it is: an explicit null or a blank sentence is the model
+  // reading no request; a missing field, a number, an object or any other
+  // shape is a format failure, so the call keeps what main files.
+  return { request: parsed?.request as string | null | undefined };
 };
 
 /**

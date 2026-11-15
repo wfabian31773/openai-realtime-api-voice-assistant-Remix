@@ -300,6 +300,8 @@ describe('the reader says why it read nothing', () => {
     'Caller did not say which office, wants their glasses order status.',
     'Unclear whether the drops were sent to the pharmacy.',
     'Wants to reschedule; the date is not stated.',
+    // No says-nothing phrase at all: made only of conclusion words, still not one.
+    'The caller called about the request.',
   ])('"%s" carries a topic, so it is not a conclusion', (said) => {
     expect(concludesNothingWasAsked(said)).toBe(false);
   });
