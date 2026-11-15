@@ -42,6 +42,19 @@ import { spokenDobFor } from './spokenDob';
 /** This tool's own name, for the per-call gate counter. */
 const SURGERY_FILE_TOOL = 'file_surgery_ticket';
 
+/**
+ * v240: whether the model's `surgery_date` names a date at all. A blank or a
+ * placeholder ("unknown", "not yet", "TBD") names none, so it does not keep a
+ * new patient's consult request on the surgery line. A date has a digit, a
+ * month, a weekday or a relative day; anything else is not one.
+ */
+const NAMES_A_DAY =
+  /\b(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sept?(?:ember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?|(?:mon|tues?|wed(?:nes)?|thu(?:rs?)?|fri|sat(?:ur)?|sun)(?:day)?|tomorrow|next\s+(?:week|month)|enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|octubre|noviembre|diciembre|lunes|martes|miercoles|jueves|viernes|sabado|domingo|manana)\b/;
+export function namesADate(value: string): boolean {
+  const v = value.normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim().toLowerCase();
+  return /\d/.test(v) || NAMES_A_DAY.test(v);
+}
+
 // ---------------------------------------------------------------- what kind
 
 registerTool({
@@ -262,7 +275,12 @@ registerTool({
     // Lead with the bucket when there is no reason id to carry the meaning.
     // A coordinator scanning a queue reads the first three words.
     const { detectCrossQueue } = await import('./queueRouting');
-    const redirect = detectCrossQueue(description, SURGERY_DEPARTMENT_ID);
+    // v240: a surgery date the caller gave keeps a new patient's request
+    // home — it is a surgery being arranged, not a first consult. A
+    // placeholder ("unknown", "not yet") is not a date.
+    const redirect = detectCrossQueue(description, SURGERY_DEPARTMENT_ID, {
+      surgeryDateGiven: namesADate(str(input.surgery_date)),
+    });
     const filedDepartmentId = redirect?.departmentId ?? SURGERY_DEPARTMENT_ID;
     const filedOnSurgeryQueue = filedDepartmentId === SURGERY_DEPARTMENT_ID;
     // Logistics already recognized by this queue carry their surgery date.

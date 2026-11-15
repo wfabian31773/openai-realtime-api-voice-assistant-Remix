@@ -1878,8 +1878,17 @@ import { callEnvironment } from "./callRecord";
  * Caller". Above main's v238 (#484, `f0ecfef2`), which it contains. No
  * migration.
  */
+/**
+ * v240 — A NEW PATIENT'S CONSULT REACHES THE HUB (2026-11-15). On the surgery
+ * line a new patient asking for a consult or an appointment about an operation,
+ * with no surgery date, files to the HVA Hub (standing instruction 10: schedule-
+ * related goes to the Hub except a surgery date). 14 days to 2026-11-14: 19 of
+ * 41 new-patient surgery-line tickets change department, 13 to where staff moved
+ * them. Above main's v239 (#485, `c4526b35`), which it contains along with
+ * v238 (#484, `f0ecfef2`). No migration.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v239-the-after-hours-floor-names-the-patient-20261115";
+  "voice-runtime-v240-a-new-patient-consult-reaches-the-hub-20261115";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can
