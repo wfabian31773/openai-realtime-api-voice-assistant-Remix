@@ -437,7 +437,12 @@ async function askOnce(
     );
     return null;
   }
-  if (!answer || typeof answer.request !== "string" || !answer.request.trim()) return null;
+  if (!answer || typeof answer.request !== "string" || !answer.request.trim()) {
+    // v241: counted, so the calls where the model read no request can be read
+    // back by SID. Whether such a call should file at all is the operator's.
+    console.info(`[REQUEST FROM RECORDING] the model read no request${retry ? " on the second ask" : ""}${where}`);
+    return null;
+  }
   return answer.request;
 }
 

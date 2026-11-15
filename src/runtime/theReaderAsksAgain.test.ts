@@ -306,6 +306,15 @@ describe('what is asked again, and what is not', () => {
     expect(logged()).toContain('the model did not answer the second ask (Error) (CA0000)');
   });
 
+  it('a model that reads no request says so in the log, by SID, on either ask', async () => {
+    await expect(requestFromTheRecording('CALLER: synthetic.', model(null).ask, [], 'CA0001')).resolves.toBeNull();
+    expect(logged()).toContain('the model read no request (CA0001)');
+    await expect(
+      requestFromTheRecording('CALLER: synthetic.', model('Wants Dr. Quill to call.', null).ask, [], 'CA0002'),
+    ).resolves.toBeNull();
+    expect(logged()).toContain('the model read no request on the second ask (CA0002)');
+  });
+
   it('a clean first answer is used as it was, with no second ask', async () => {
     const m = model('Wants the glasses order status checked.');
     await expect(requestFromTheRecording('CALLER: synthetic.', m.ask, [], 'CA0000')).resolves.toBe(
