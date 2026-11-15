@@ -5,7 +5,8 @@
  * existing per-call lock and call-<sid> idempotency key.
  */
 import { storage } from '../../server/storage';
-import { callerLines, saidMoreThanTheirOwnIdentity } from '../runtime/requestSweep';
+import { callerLines, HEARD_NAME_NOTE, saidMoreThanTheirOwnIdentity } from '../runtime/requestSweep';
+import { askModelForThePatientName, nameFromTheRecording, type NameAsker } from '../runtime/nameFromTheRecording';
 import { confirmedClinicFor, verifiedIdentityFor } from '../tools/verifiedIdentity';
 import { dobTheCallerGave, floorRequestType, officeTheCallerGave } from './afterHoursCallFacts';
 import { AFTER_HOURS_DEPARTMENT_ID } from '../tools/afterHoursTaxonomy';
@@ -92,6 +93,30 @@ export async function officeFromCallerHistory(
   }
 }
 
+/**
+ * v239: THE PATIENT'S NAME THE CALLER SAID, WHEN NO LOOKUP MADE IT CERTAIN.
+ * The queue lanes' teardown sweep has read it since v180; the after-hours
+ * floor filed every one of these as "Unnamed Caller". The same reader with
+ * the same rule: the v180 model reads the PATIENT's name, and the name is
+ * kept only when the caller said both halves together in one of their own
+ * turns. A model that answers nothing, a half, or a name the caller did not
+ * say leaves the stand-in, exactly as before.
+ *
+ * Not v168's introduction rule: it reads only agent lines it recognises as a
+ * plain prompt, the after-hours greeting is not one of them, so on this line
+ * it can never fire. Not v182's calling-number owner: measured on the 26
+ * after-hours stand-in tickets of 2026-11-08..14 it names none of them (eight
+ * numbers are not on file, one carries two people), and on VA-84172 the
+ * caller had just said no to that person's name. Nothing here is an
+ * identity: the ticket says where the name came from.
+ */
+export async function nameForTheFloor(
+  transcript: string,
+  askName: NameAsker,
+): Promise<{ firstName: string; lastName: string } | undefined> {
+  return (await nameFromTheRecording(transcript, askName)) ?? undefined;
+}
+
 interface AfterHoursCall {
   callId: string;
   callSid?: string;
@@ -134,7 +159,12 @@ export function reserveAfterHoursTicketFiling(callId: string): (filed: boolean) 
 
 export async function sweepAfterHoursUnfiledCall(
   callId: string,
-  ctx: { outcome?: string; transcript?: string } = {},
+  ctx: {
+    outcome?: string;
+    transcript?: string;
+    /** v239 seam. Production asks the model; tests pass their own reader. */
+    askName?: NameAsker;
+  } = {},
 ): Promise<void> {
   const call = calls.get(callId);
   // Claim synchronously: concurrent/repeated teardown cannot file twice.
@@ -161,13 +191,24 @@ export async function sweepAfterHoursUnfiledCall(
     const row = await storage.getCallLogBySid(metadata.callSid);
     if (row?.ticketNumber) return;
 
-    const { fullName, standIn } = nameOrStandIn(identity?.firstName, identity?.lastName);
     const callerText = callerLines(transcript).join('\n');
     // v163: the date of birth the caller gave when asked (70150), the office
     // the caller confirmed or named when asked (no-IVR has no tool that fills
     // the confirmed store), and department 8's own request type — before this
     // the floor sent only a certain match's date, no office and no type.
     const spokenDob = identity?.dateOfBirth ? undefined : dobTheCallerGave(metadata.callSid, transcript);
+    // v239: with no certain identity, the patient's name as the caller said
+    // it, before the stand-in.
+    const found = identity
+      ? undefined
+      : await nameForTheFloor(transcript, ctx.askName ?? askModelForThePatientName);
+    if (found) {
+      console.info(`[AFTER-HOURS FLOOR] ${metadata.callSid}: named from the recording, unconfirmed`);
+    }
+    const { fullName, standIn } = nameOrStandIn(
+      identity?.firstName ?? found?.firstName,
+      identity?.lastName ?? found?.lastName,
+    );
     const named = confirmedClinicFor(metadata.callSid) ?? await officeTheCallerGave(transcript);
     // v184: with no office named, try the one patient on the caller's number,
     // then the office line that was dialled. The ticket API accepts only
@@ -209,6 +250,7 @@ export async function sweepAfterHoursUnfiledCall(
         fromDialed ? FLOOR_DIALED_LOCATION_NOTE : undefined,
         standIn ? FLOOR_MISSING_IDENTITY_NOTE : undefined,
         standIn ? STAND_IN_NAME_NOTE : undefined,
+        !standIn && found ? HEARD_NAME_NOTE : undefined,
         spokenDob ? 'DATE OF BIRTH as the caller gave it on the call — not matched to a patient record.' : undefined,
       ].filter(Boolean).join('\n'),
       callSid: metadata.callSid,

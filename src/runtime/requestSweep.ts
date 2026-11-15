@@ -919,6 +919,13 @@ export const NUMBER_RECORD_NOTE =
   `Not confirmed: the caller may be a relative or someone else calling about this patient, or about someone else. Check the recording and the chart before acting.`;
 
 /**
+ * v180's staff note, exported (v239) so the after-hours teardown floor
+ * carries the same words when it names a patient the same way.
+ */
+export const HEARD_NAME_NOTE =
+  `NAME TAKEN FROM THE RECORDING — the caller said this name on the call; it is not matched to a patient record. Confirm it against the chart before acting.`;
+
+/**
  * The payload. `idempotencyKey` is derived from the call sid so a retry, a
  * re-run of the backfill over the same call, and the live sweep racing the
  * backfill all collapse to one ticket — the key is what held duplicate filing
@@ -998,7 +1005,7 @@ export function buildSweptTicket(
           : input.nameSource === "spoken"
             ? `NAME FROM THE CALLING NUMBER'S PATIENT RECORD — the caller said this name on the call, but no date of birth was confirmed; check the chart before acting.\n`
             : input.nameSource === "heard"
-              ? `NAME TAKEN FROM THE RECORDING — the caller said this name on the call; it is not matched to a patient record. Confirm it against the chart before acting.\n`
+              ? `${HEARD_NAME_NOTE}\n`
               : input.nameSource === "number"
                 ? `${NUMBER_RECORD_NOTE}\n`
                 : ""
