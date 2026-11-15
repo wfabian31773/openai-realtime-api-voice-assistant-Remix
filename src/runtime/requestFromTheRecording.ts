@@ -117,8 +117,19 @@ export const askModelForTheRequest: RequestAsker = async (transcript, retry) => 
     messages: requestMessages(transcript, retry),
   });
   const text = res.choices[0]?.message?.content ?? "";
-  const parsed = JSON.parse(text) as { request?: unknown };
-  return { request: typeof parsed?.request === "string" ? parsed.request : null };
+  const parsed = JSON.parse(text) as unknown;
+  // v242 (github-actions review of #488): only `{"request": string}` or
+  // `{"request": null}` is an answer. Any other shape is a format failure,
+  // thrown so the reader reads it as `failed` and the call keeps what main
+  // files, never as the model reading no request.
+  if (!parsed || typeof parsed !== "object" || !("request" in parsed)) {
+    throw new TypeError("the model's answer has no request field");
+  }
+  const request = (parsed as { request: unknown }).request;
+  if (request !== null && typeof request !== "string") {
+    throw new TypeError("the model's request is not a string or null");
+  }
+  return { request };
 };
 
 /**
@@ -312,6 +323,35 @@ function folded(s: string): string {
 /** The model telling us it found nothing. */
 const SAYS_NOTHING_WAS_ASKED =
   /\b(?:no (?:clear |specific |actual )?(?:request|reason)|(?:did not|didn't|does not|doesn't) (?:say|state|specify|mention|give)|not (?:stated|said|clear|specified|provided|mentioned|given)|unclear|unknown|unspecified|nothing specific|n\/a)\b/i;
+const SAYS_NOTHING_WAS_ASKED_ALL = new RegExp(SAYS_NOTHING_WAS_ASKED.source, "gi");
+
+/**
+ * v242 (github-actions review of #488): the words a no-request conclusion is
+ * built from, beside the says-nothing phrase itself. "Caller did not state a
+ * specific request." is made of nothing else; "Wants clarification of unclear
+ * pre-surgery instructions" is not, because "clarification", "pre-surgery"
+ * and "instructions" are a topic.
+ */
+const NO_REQUEST_CONCLUSION_WORDS: ReadonlySet<string> = new Set([
+  "a", "an", "the", "any", "anything", "nothing", "no", "caller", "callers", "caller's", "patient", "patient's", "they", "he", "she", "it",
+  "their", "his", "her", "what", "why", "was", "were", "is", "are", "been", "be", "for", "of", "to", "about", "this",
+  "call", "calling", "called", "request", "requests", "reason", "reasons", "purpose", "specific", "clear", "actual",
+  "particular", "made", "given", "stated", "mentioned", "provided", "said", "asked", "wanted", "needed", "want", "need",
+  "on", "and", "or", "so", "yet", "there",
+]);
+
+/**
+ * True only when the whole sentence is a conclusion that nothing was asked:
+ * it says so, and once that phrase is taken out every word left is one a
+ * conclusion is built from. Anything with a topic in it is not a conclusion,
+ * so it is dropped as before and the call files the placeholder (main).
+ */
+export function concludesNothingWasAsked(raw: string): boolean {
+  const s = sanitizeForSms(String(raw ?? "")).value.replace(/\s+/g, " ").trim();
+  if (!SAYS_NOTHING_WAS_ASKED.test(s)) return false;
+  const rest = foldWords(s.replace(SAYS_NOTHING_WAS_ASKED_ALL, " "));
+  return rest.every((w) => NO_REQUEST_CONCLUSION_WORDS.has(w));
+}
 
 /**
  * Words that carry no request on their own. A sentence made only of these
@@ -449,14 +489,22 @@ async function askOnce(
     return { kind: "failed" };
   }
   if (!answer) return { kind: "not_asked" };
-  if (typeof answer.request !== "string" || !answer.request.trim()) {
+  // v242 (github-actions review of #488): a missing or non-string request is
+  // a malformed answer, not the model reading no request. Only an explicit
+  // null or a blank sentence is `none`.
+  const request: unknown = (answer as { request?: unknown }).request;
+  if (request !== null && typeof request !== "string") {
+    console.warn(`[REQUEST FROM RECORDING] the model's answer had no usable request field${retry ? " on the second ask" : ""}${where}`);
+    return { kind: "failed" };
+  }
+  if (request === null || !request.trim()) {
     // v241: counted, so the calls where the model read no request can be read
     // back by SID. v242 (held for the operator): on the queue lanes a first
     // ask that answers this files nothing.
     console.info(`[REQUEST FROM RECORDING] the model read no request${retry ? " on the second ask" : ""}${where}`);
     return { kind: "none" };
   }
-  return { kind: "answer", text: answer.request };
+  return { kind: "answer", text: request };
 }
 
 /**
@@ -496,7 +544,10 @@ export async function readTheRequest(
   // PHI-free: which kind of check, never what the sentence said.
   if (!RETRYABLE_KINDS.has(checked.kind)) {
     console.warn(`[REQUEST FROM RECORDING] the model's sentence failed a check (${checked.kind}) — not used${where}`);
-    if (checked.kind === "says_nothing") return { verdict: "nothing_asked" };
+    // v242 (github-actions review of #488): only a sentence that is wholly a
+    // no-request conclusion counts as the model reading nothing. A says-nothing
+    // word inside a real request ("unclear instructions") is dropped as before.
+    if (checked.kind === "says_nothing" && concludesNothingWasAsked(first.text)) return { verdict: "nothing_asked" };
     if (checked.kind === "no_topic") return { verdict: "person_only" };
     return { verdict: "dropped", kind: checked.kind };
   }

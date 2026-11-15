@@ -318,9 +318,13 @@ describe('main is unchanged where nothing is read', () => {
   });
 
   it('a model that answers with no request files nothing on a queue lane (v242)', async () => {
-    const { out, f } = await sweep(SPECIFIC[2], async () => ({}));
+    const { out, f } = await sweep(SPECIFIC[2], async () => ({ request: null }));
     expect(out).toEqual({ filed: false, reason: 'no-request-read' });
     expect(f.calls).toHaveLength(0);
+  });
+
+  it('an answer with no request field is a format failure and leaves the placeholder (review of #488)', async () => {
+    expect((await sweep(SPECIFIC[2], async () => ({}))).f.calls[0].description).toBe(SWEPT_TICKET_DESCRIPTION);
   });
 
   it('a refused sentence leaves exactly what main files, label included', async () => {

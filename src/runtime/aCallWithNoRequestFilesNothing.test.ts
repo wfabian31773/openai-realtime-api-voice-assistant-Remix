@@ -34,12 +34,19 @@
  * The model is faked with the answer a correct reading gives. The SIDs and
  * ticket numbers are real; every word below is synthetic.
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 vi.hoisted(() => {
   process.env.DATABASE_URL ||= 'postgresql://unused:unused@127.0.0.1:5432/unused';
 });
 vi.mock('../../server/db', () => ({ db: {} }));
+/** What the mocked model answers on the production asker's path (the review of #488). */
+const modelReply = vi.hoisted(() => ({ content: '{"request": null}' }));
+vi.mock('openai', () => ({
+  default: class {
+    chat = { completions: { create: async () => ({ choices: [{ message: { content: modelReply.content } }] }) } };
+  },
+}));
 
 import { readFileSync } from 'node:fs';
 import { resetStatedNames } from '../tools/statedName';
@@ -47,7 +54,7 @@ import { resetVerifiedIdentities } from '../tools/verifiedIdentity';
 import { resetDraftedRequests } from '../tools/draftedRequest';
 import { runRequestSweep, FILES_WHEN_NOTHING_WAS_READ, type SweepFiler, type NumberLookup } from './sweepRunner';
 import { SWEPT_TICKET_DESCRIPTION } from './requestSweep';
-import { readTheRequest, type RequestAsker } from './requestFromTheRecording';
+import { readTheRequest, askModelForTheRequest, concludesNothingWasAsked, type RequestAsker } from './requestFromTheRecording';
 import type { VoiceCallRecord } from './mediaStreamBridge';
 
 type Lane = 'optical' | 'surgery' | 'tech' | 'records';
@@ -199,11 +206,29 @@ describe('only the model saying "nothing" stops a filing', () => {
     expect(out.filed).toBe(true);
   });
 
-  it('a blank answer and an answer with no request field both read as nothing', async () => {
-    for (const a of [async () => ({ request: '   ' }), async () => ({})] as RequestAsker[]) {
+  it('a blank answer reads as nothing', async () => {
+    const { out, f } = await sweep(row, async () => ({ request: '   ' }));
+    expect(out).toEqual({ filed: false, reason: 'no-request-read' });
+    expect(f.calls).toHaveLength(0);
+  });
+
+  it('an answer with no request field, or a request that is not a string, is a format failure: it files the placeholder (review of #488)', async () => {
+    for (const a of [async () => ({}), async () => ({ request: 42 })] as unknown as RequestAsker[]) {
       const { out, f } = await sweep(row, a);
-      expect(out).toEqual({ filed: false, reason: 'no-request-read' });
-      expect(f.calls).toHaveLength(0);
+      expect(out.filed).toBe(true);
+      expect(f.calls[0].description).toBe(SWEPT_TICKET_DESCRIPTION);
+    }
+  });
+
+  it('a real request carrying a says-nothing word files as main does, never suppressed (review of #488)', async () => {
+    for (const said of [
+      'Wants clarification of unclear pre-surgery instructions.',
+      'Asking why the pharmacy says the prescription is unknown to them.',
+      'Caller did not say which office, wants their glasses order status.',
+    ]) {
+      const { out, f } = await sweep(row, answers(said));
+      expect(out.filed).toBe(true);
+      expect(f.calls).toHaveLength(1);
     }
   });
 
@@ -256,6 +281,67 @@ describe('the reader says why it read nothing', () => {
 
   it('only the records lane files when nothing was read', () => {
     expect([...FILES_WHEN_NOTHING_WAS_READ]).toEqual(['records']);
+  });
+
+  it.each([
+    'Caller did not state a specific request.',
+    'No request.',
+    'No clear reason for the call was given.',
+    "The caller's reason for calling is unclear.",
+    'Unknown.',
+    'Caller did not say what they wanted.',
+  ])('"%s" is a whole no-request conclusion', (said) => {
+    expect(concludesNothingWasAsked(said)).toBe(true);
+  });
+
+  it.each([
+    'Wants clarification of unclear pre-surgery instructions.',
+    'Asking why the pharmacy says the prescription is unknown to them.',
+    'Caller did not say which office, wants their glasses order status.',
+    'Unclear whether the drops were sent to the pharmacy.',
+    'Wants to reschedule; the date is not stated.',
+  ])('"%s" carries a topic, so it is not a conclusion', (said) => {
+    expect(concludesNothingWasAsked(said)).toBe(false);
+  });
+
+  it('a says-nothing word inside a request reads as dropped, not nothing asked', async () => {
+    const reading = await readTheRequest(t, answers('Wants clarification of unclear pre-surgery instructions.'));
+    expect(reading.verdict).toBe('dropped');
+  });
+});
+
+describe('the production asker reads only {"request": string | null} as an answer (review of #488)', () => {
+  const t = 'CALLER: Hello?';
+  const key = process.env.OPENAI_API_KEY;
+  beforeEach(() => {
+    process.env.OPENAI_API_KEY = 'sk-test-not-a-key';
+    delete process.env.REQUEST_FROM_RECORDING_DISABLED;
+  });
+  afterEach(() => {
+    if (key === undefined) delete process.env.OPENAI_API_KEY;
+    else process.env.OPENAI_API_KEY = key;
+  });
+
+  it.each([
+    ['{}', 'failed'],
+    ['{"request": 42}', 'failed'],
+    ['{"request": {"text": "x"}}', 'failed'],
+    ['["Asking about glasses."]', 'failed'],
+    ['null', 'failed'],
+    ['not json', 'failed'],
+    ['{"request": null}', 'nothing_asked'],
+    ['{"request": ""}', 'nothing_asked'],
+    ['{"request": "Asking whether contact lenses have arrived."}', 'read'],
+  ] as const)('%s reads as %s', async (content, verdict) => {
+    modelReply.content = content;
+    expect((await readTheRequest(t, askModelForTheRequest)).verdict).toBe(verdict);
+  });
+
+  it('a malformed answer on a queue lane files the placeholder', async () => {
+    modelReply.content = '{}';
+    const { out, f } = await sweep(NOTHING_ASKED[0], askModelForTheRequest);
+    expect(out.filed).toBe(true);
+    expect(f.calls[0].description).toBe(SWEPT_TICKET_DESCRIPTION);
   });
 
   it('the sweep reads the verdict, not just the sentence', () => {
