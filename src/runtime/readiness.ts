@@ -1888,7 +1888,7 @@ import { callEnvironment } from "./callRecord";
  * v238 (#484, `f0ecfef2`). No migration.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v241-the-reader-asks-again-20261115";
+  "voice-runtime-v242-a-call-with-no-request-files-nothing-20261115";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

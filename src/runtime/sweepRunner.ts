@@ -46,12 +46,28 @@ import { callerSaidTheName } from "./callerSaidTheName";
 import { statedNameFor } from "../tools/statedName";
 import { askModelForThePatientName, nameFromTheRecording, type NameAsker } from "./nameFromTheRecording";
 
-import { askModelForTheRequest, requestFromTheRecording, type RequestAsker } from "./requestFromTheRecording";
+import { askModelForTheRequest, readTheRequest, type RequestAsker } from "./requestFromTheRecording";
 
 /** Reads nothing — the default for any caller that did not choose the model. */
 const noNameFromTheRecording: NameAsker = async () => null;
 /** v201: reads nothing — the default, so no test that calls `runRequestSweep` directly reaches the network. */
 const noRequestFromTheRecording: RequestAsker = async () => null;
+
+/**
+ * v242 (HELD FOR THE OPERATOR): THE LANES THAT STILL FILE WHEN THE READER SAYS
+ * NOTHING WAS ASKED.
+ *
+ * On every other queue lane the sweep files nothing when `readTheRequest`
+ * answers `nothing_asked`: the model, reading the whole call, found no request
+ * (the placeholder corpus of 2026-11-12/13: wrong numbers, background speech,
+ * a robocall, silence). The records lane keeps filing: its department is under
+ * a Corrective Action Plan whose first rule is that every request is logged,
+ * and a reader that misses a real request there costs a CAP-reportable case,
+ * where on the other lanes it costs a callback ticket. A caller who only asked
+ * for a person (`person_only`) still files everywhere; whether that should
+ * stop too, as v204 stopped it on PCP, is the operator's.
+ */
+export const FILES_WHEN_NOTHING_WAS_READ: ReadonlySet<string> = new Set(["records"]);
 import { draftedRequestFor } from "../tools/draftedRequest";
 import { dobFromCallerAnswer } from "../tools/spokenDob";
 
@@ -159,7 +175,7 @@ export const lookUpTheCallingNumber: NumberLookup = async (phone) => {
 export interface SweepOutcome {
   filed: boolean;
   /** Present when nothing was filed — why, in the decision's own words. */
-  reason?: SweepSkipReason | "create-failed" | "threw";
+  reason?: SweepSkipReason | "no-request-read" | "create-failed" | "threw";
   ticketNumber?: string;
 }
 
@@ -456,7 +472,16 @@ export async function runRequestSweep(
         stated?.firstName, stated?.lastName,
         candidate?.firstName, candidate?.lastName,
       ].filter((n): n is string => typeof n === "string" && n.trim().length > 0);
-      const asked = await requestFromTheRecording(record.transcript, askRequest, held, record.callSid);
+      const reading = await readTheRequest(record.transcript, askRequest, held, record.callSid);
+      if (reading.verdict === "nothing_asked" && !FILES_WHEN_NOTHING_WAS_READ.has(record.slug)) {
+        // v242, held for the operator: the reader says the caller asked for
+        // nothing, so there is no request to recover and nothing is filed.
+        console.info(
+          `[REQUEST SWEEP] ${record.slug}: the model read no request — nothing filed (${record.callSid})`,
+        );
+        return { filed: false, reason: "no-request-read" };
+      }
+      const asked = reading.verdict === "read" ? reading.request : null;
       if (asked) {
         input = { ...input, requestFromRecording: asked };
         console.info(

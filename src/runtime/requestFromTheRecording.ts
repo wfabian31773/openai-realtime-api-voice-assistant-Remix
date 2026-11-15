@@ -420,13 +420,24 @@ export function whyUnusable(raw: string | null | undefined, heldNames: readonly 
   return "kind" in checked ? checked.kind : undefined;
 }
 
-/** The model's answer as a sentence to check, or null when it gave none. */
+/**
+ * One ask, as it came back. `none` is the MODEL saying the caller asked for
+ * nothing (`{"request": null}` or an empty sentence); `not_asked` is an asker
+ * that did not ask at all (no key, switched off, no transcript), which says
+ * nothing about the call; `failed` is a throw.
+ */
+type AskResult =
+  | { kind: "answer"; text: string }
+  | { kind: "none" }
+  | { kind: "not_asked" }
+  | { kind: "failed" };
+
 async function askOnce(
   ask: RequestAsker,
   transcript: string,
   retry: RequestRetry | undefined,
   where: string,
-): Promise<string | null> {
+): Promise<AskResult> {
   let answer: Awaited<ReturnType<RequestAsker>> = null;
   try {
     answer = await ask(transcript, retry);
@@ -435,48 +446,82 @@ async function askOnce(
     console.warn(
       `[REQUEST FROM RECORDING] the model did not answer${retry ? " the second ask" : ""} (${(e as Error)?.name ?? "error"})${where}`,
     );
-    return null;
+    return { kind: "failed" };
   }
-  if (!answer || typeof answer.request !== "string" || !answer.request.trim()) {
+  if (!answer) return { kind: "not_asked" };
+  if (typeof answer.request !== "string" || !answer.request.trim()) {
     // v241: counted, so the calls where the model read no request can be read
-    // back by SID. Whether such a call should file at all is the operator's.
+    // back by SID. v242 (held for the operator): on the queue lanes a first
+    // ask that answers this files nothing.
     console.info(`[REQUEST FROM RECORDING] the model read no request${retry ? " on the second ask" : ""}${where}`);
-    return null;
+    return { kind: "none" };
   }
-  return answer.request;
+  return { kind: "answer", text: answer.request };
 }
 
 /**
- * What the caller asked for, from the recording, or null. Never throws; the
- * caller of this is a teardown filer with nobody watching. v241: a sentence
- * that fails a content check is asked for once more, naming what to leave
- * out; the second answer is checked the same way. `callSid` only labels the
- * log lines.
+ * v242: WHAT THE READER CONCLUDED, not only the sentence. `nothing_asked` is
+ * the model's own answer on the FIRST ask: no request (`{"request": null}`),
+ * or a sentence saying nothing was asked. `person_only` is a sentence whose
+ * every word carries no topic ("Wants to speak with someone"). A sentence
+ * that failed a content check (after v241's second ask) is `dropped`; a throw,
+ * or an asker that never asked, is `failed`. Only `nothing_asked` changes what
+ * the sweep files, and only on the lanes `sweepRunner` names.
  */
+export type RequestReading =
+  | { verdict: "read"; request: string }
+  | { verdict: "nothing_asked" }
+  | { verdict: "person_only" }
+  | { verdict: "dropped"; kind: UnusableKind | "none_on_the_second_ask" }
+  | { verdict: "failed" };
+
+/**
+ * What the reader concluded about the call. Never throws; the caller of this
+ * is a teardown filer with nobody watching. v241: a sentence that fails a
+ * content check is asked for once more, naming what to leave out; the second
+ * answer is checked the same way. `callSid` only labels the log lines.
+ */
+export async function readTheRequest(
+  transcript: string,
+  ask: RequestAsker = askModelForTheRequest,
+  heldNames: readonly string[] = [],
+  callSid?: string,
+): Promise<RequestReading> {
+  const where = callSid ? ` (${callSid})` : "";
+  const first = await askOnce(ask, transcript, undefined, where);
+  if (first.kind === "none") return { verdict: "nothing_asked" };
+  if (first.kind !== "answer") return { verdict: "failed" };
+  const checked = checkRequest(first.text, heldNames);
+  if ("sentence" in checked) return { verdict: "read", request: checked.sentence };
+  // PHI-free: which kind of check, never what the sentence said.
+  if (!RETRYABLE_KINDS.has(checked.kind)) {
+    console.warn(`[REQUEST FROM RECORDING] the model's sentence failed a check (${checked.kind}) — not used${where}`);
+    if (checked.kind === "says_nothing") return { verdict: "nothing_asked" };
+    if (checked.kind === "no_topic") return { verdict: "person_only" };
+    return { verdict: "dropped", kind: checked.kind };
+  }
+  console.warn(`[REQUEST FROM RECORDING] the model's sentence failed a check (${checked.kind}) — asking once more${where}`);
+  const second = await askOnce(ask, transcript, { previous: first.text, leaveOut: LEAVE_OUT[checked.kind] }, where);
+  // The first answer held a sentence, so a second "none" is not the model
+  // reading no request; the call keeps what main files.
+  if (second.kind === "none") return { verdict: "dropped", kind: "none_on_the_second_ask" };
+  if (second.kind !== "answer") return { verdict: "dropped", kind: checked.kind };
+  const again = checkRequest(second.text, heldNames);
+  if ("sentence" in again) {
+    console.info(`[REQUEST FROM RECORDING] the second answer was used${where}`);
+    return { verdict: "read", request: again.sentence };
+  }
+  console.warn(`[REQUEST FROM RECORDING] the second answer failed a check too (${again.kind}) — not used${where}`);
+  return { verdict: "dropped", kind: again.kind };
+}
+
+/** What the caller asked for, from the recording, or null (v201's shape). */
 export async function requestFromTheRecording(
   transcript: string,
   ask: RequestAsker = askModelForTheRequest,
   heldNames: readonly string[] = [],
   callSid?: string,
 ): Promise<string | null> {
-  const where = callSid ? ` (${callSid})` : "";
-  const first = await askOnce(ask, transcript, undefined, where);
-  if (first === null) return null;
-  const checked = checkRequest(first, heldNames);
-  if ("sentence" in checked) return checked.sentence;
-  // PHI-free: which kind of check, never what the sentence said.
-  if (!RETRYABLE_KINDS.has(checked.kind)) {
-    console.warn(`[REQUEST FROM RECORDING] the model's sentence failed a check (${checked.kind}) — not used${where}`);
-    return null;
-  }
-  console.warn(`[REQUEST FROM RECORDING] the model's sentence failed a check (${checked.kind}) — asking once more${where}`);
-  const second = await askOnce(ask, transcript, { previous: first, leaveOut: LEAVE_OUT[checked.kind] }, where);
-  if (second === null) return null;
-  const again = checkRequest(second, heldNames);
-  if ("sentence" in again) {
-    console.info(`[REQUEST FROM RECORDING] the second answer was used${where}`);
-    return again.sentence;
-  }
-  console.warn(`[REQUEST FROM RECORDING] the second answer failed a check too (${again.kind}) — not used${where}`);
-  return null;
+  const reading = await readTheRequest(transcript, ask, heldNames, callSid);
+  return reading.verdict === "read" ? reading.request : null;
 }
