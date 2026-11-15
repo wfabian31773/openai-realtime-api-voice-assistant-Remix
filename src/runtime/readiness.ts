@@ -1871,6 +1871,12 @@ import { callEnvironment } from "./callRecord";
  * call page's Tool Calls tab. The timeline is
  * unchanged. Above main's v237 (#480, `96966220`), which it contains along
  * with v236 (#483, `82487a55`). No migration.
+ *
+ * v239 (2026-11-15): the after-hours teardown floor files a request under the
+ * patient's name the caller said, read by the v180 model and kept only when
+ * the caller said both halves together in one turn, instead of "Unnamed
+ * Caller". Above main's v238 (#484, `f0ecfef2`), which it contains. No
+ * migration.
  */
 /**
  * v240 — A NEW PATIENT'S CONSULT REACHES THE HUB (2026-11-15). On the surgery
@@ -1878,8 +1884,8 @@ import { callEnvironment } from "./callRecord";
  * with no surgery date, files to the HVA Hub (standing instruction 10: schedule-
  * related goes to the Hub except a surgery date). 14 days to 2026-11-14: 19 of
  * 41 new-patient surgery-line tickets change department, 13 to where staff moved
- * them. Above main's v238 (#484, `f0ecfef2`), which it contains; v239 is #485 on
- * its open branch, which it does not contain. No migration.
+ * them. Above main's v239 (#485, `c4526b35`), which it contains along with
+ * v238 (#484, `f0ecfef2`). No migration.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
   "voice-runtime-v240-a-new-patient-consult-reaches-the-hub-20261115";
