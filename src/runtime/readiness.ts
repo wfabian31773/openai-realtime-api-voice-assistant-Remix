@@ -1872,8 +1872,17 @@ import { callEnvironment } from "./callRecord";
  * unchanged. Above main's v237 (#480, `96966220`), which it contains along
  * with v236 (#483, `82487a55`). No migration.
  */
+/**
+ * v240 — A NEW PATIENT'S CONSULT REACHES THE HUB (2026-11-15). On the surgery
+ * line a new patient asking for a consult or an appointment about an operation,
+ * with no surgery date, files to the HVA Hub (standing instruction 10: schedule-
+ * related goes to the Hub except a surgery date). 14 days to 2026-11-14: 19 of
+ * 41 new-patient surgery-line tickets change department, 13 to where staff moved
+ * them. Above main's v238 (#484, `f0ecfef2`), which it contains; v239 is #485 on
+ * its open branch, which it does not contain. No migration.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v238-the-tool-arguments-are-kept-20261114";
+  "voice-runtime-v240-a-new-patient-consult-reaches-the-hub-20261115";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

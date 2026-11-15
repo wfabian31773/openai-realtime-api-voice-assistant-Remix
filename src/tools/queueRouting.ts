@@ -226,6 +226,49 @@ export function asksAboutARoutineVisit(text: string): boolean {
 }
 
 /**
+ * v240 — A NEW PATIENT ASKING FOR A CONSULT IS ASKING FOR AN APPOINTMENT.
+ *
+ * `asksAboutARoutineVisit` leaves any request that names an operation where it
+ * lands, which is right for a patient whose surgery is being arranged: that is
+ * coordinator work (standing instruction 10, "surgery is an exception to that
+ * hva hub rule"). A NEW patient has no surgery to arrange. "New patient wants
+ * an appointment for cataract surgery" is a first visit, a consult the HVA Hub
+ * books, and the surgery comes after it. Over the 14 days to 2026-11-14 staff
+ * moved 13 of the 18 surgery-line tickets of that shape to the Hub, 3 to
+ * Technicians and left 2 in Surgery; an existing patient scheduling surgery
+ * stayed in Surgery on 41 of 52.
+ *
+ * So, on the surgery line only: the request names a new or first-time patient
+ * (not denied), asks for a visit (an appointment, a consult, an evaluation, or
+ * to schedule, book or set one up), and names no booked surgery (no surgery
+ * date the caller gave, no appointment already held), nothing for today, no
+ * change to an existing appointment, and no clinical complaint. A request
+ * that only asks a price, an insurance or a status question is not this rule's.
+ */
+const NEW_PATIENT_DENIED =
+  /\b(?:not|no|never|isn['’]t|wasn['’]t)\s+(?:been\s+)?(?:an?\s+)?(?:new|first[- ]time)\s+patients?\b|\bno\s+(?:es|soy)\s+(?:una?\s+)?pacientes?\s+nuev[oa]s?\b/g;
+const NEW_PATIENT =
+  /\b(?:new|first[- ]time)\s+patients?\b|\bpacientes?\s+nuev[oa]s?\b|\bnuev[oa]s?\s+pacientes?\b/;
+const ASKS_FOR_A_CONSULT =
+  /\b(?:appointments?|appts?|consult(?:ation)?s?|evaluations?|evaluated|be seen|citas?|consultas?)\b|\b(?:schedul\w*|book(?:ing)?|set(?:ting)? up|agendar|programar)\b/;
+const A_SURGERY_ALREADY_BOOKED =
+  /\bsurgery date given by caller\b|\b(?:surgery|surgeries|operation|procedure|cirugia)\s+(?:is\s+|was\s+)?(?:on|this|next)\s+(?:the\s+)?(?:(?:mon|tues|wednes|thurs|fri|satur|sun)day|week|jan\w*|feb\w*|mar\w*|apr\w*|may|jun\w*|jul\w*|aug\w*|sep\w*|oct\w*|nov\w*|dec\w*|\d)/;
+const HOLDS_AN_APPOINTMENT =
+  /\b(?:has|have|had|with)\s+(?:an?\s+|(?:her|his|their|my)\s+)?(?:appointment|appt|consult(?:ation)?|surgery)\s+(?:on|for\s+(?:the\s+)?\d|at\s+\d|scheduled|booked|set)\b|\b(?:already|is|was)\s+(?:scheduled|booked)\b/;
+// The SCHEDULING reasons that act on an appointment the patient already holds.
+const EXISTING_APPOINTMENT_REASONS: ReadonlySet<number> = new Set([147, 148, 149, 151]);
+
+export function newPatientAsksForAConsult(text: string, surgeryDateGiven = false): boolean {
+  if (surgeryDateGiven) return false;
+  const t = fold(text);
+  if (!NEW_PATIENT.test(t.replace(NEW_PATIENT_DENIED, ' '))) return false;
+  if (!ASKS_FOR_A_CONSULT.test(t)) return false;
+  if (A_SURGERY_ALREADY_BOOKED.test(t) || HOLDS_AN_APPOINTMENT.test(t)) return false;
+  if (SAME_DAY_WORDS.test(t) || hasClinicalComplaint(text)) return false;
+  return !SCHEDULING.some((s) => EXISTING_APPOINTMENT_REASONS.has(s.reasonId) && hit(t, s.cues));
+}
+
+/**
  * v205 — EVERY VISIT THE REQUEST NAMES IS WHERE A DOCUMENT CAME FROM.
  *
  * Operator, 2026-11-11: "a request for visit notes moves from Surgery to the
@@ -788,7 +831,11 @@ function hitWord(text: string, cues: string[]): boolean {
  * medication line, not a surgery redirect — so a redirect requires the other
  * queue's language WITHOUT the home queue's.
  */
-export function detectCrossQueue(text: string, homeDepartmentId: number): QueueRedirect | null {
+export function detectCrossQueue(
+  text: string,
+  homeDepartmentId: number,
+  context: { surgeryDateGiven?: boolean } = {},
+): QueueRedirect | null {
   const t = fold(text);
   if (!t.trim()) return null;
 
@@ -962,6 +1009,23 @@ export function detectCrossQueue(text: string, homeDepartmentId: number): QueueR
       departmentName: 'HVA Hub',
       ...pair,
       note: 'Scheduling request — taken on another line and routed here.',
+    };
+  }
+
+  // 6. v240: a NEW patient asking for a consult about an operation, on the
+  // surgery line, is asking for a first visit, which the HVA Hub books. Rule 5
+  // leaves it because it names an operation; there is no surgery to arrange
+  // yet. A surgery date the caller gave (the model's `surgery_date`) keeps it
+  // home, as it keeps any surgery date home.
+  if (homeDepartmentId === SURGERY && newPatientAsksForAConsult(text, context.surgeryDateGiven)) {
+    const specialist = specialistReferral(t);
+    return {
+      departmentId: HVA_HUB,
+      departmentName: 'HVA Hub',
+      requestTypeId: 32,
+      requestReasonId: specialist ? 152 : 146,
+      requestReason: specialist ? 'Specialist Referral Appointment' : 'New Appointment Request',
+      note: 'New patient consult request — taken on another line and routed here.',
     };
   }
 
