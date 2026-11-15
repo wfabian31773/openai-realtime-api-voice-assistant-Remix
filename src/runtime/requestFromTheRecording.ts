@@ -46,13 +46,42 @@
  * NOT CAUGHT, stated: a person's name the call does not hold, said with no
  * title ("Wants records for Maria sent over"). The description is staff-facing
  * (the app does not text it), so that is a name on a ticket, not a disclosure.
+ *
+ * v241: A SENTENCE THAT FAILS A CONTENT CHECK GETS ONE MORE ASK. Measured in
+ * the deployment log, 2026-11-12..15: 75 sentences came back and 16 (21%)
+ * failed a check, and every one of the 16 left the ticket on the placeholder,
+ * with nothing asked again. On the placeholder corpus of 2026-11-12/13 (37
+ * tickets), at least 5 calls held a real request the caller said plainly (a
+ * doctor named, a visit date, a glasses order) that a sentence naming the
+ * doctor or the date would carry, and the checks were right to drop. So when
+ * the reason is the CONTENT (a number or date, an email or web address, a
+ * street address, a person's name or title, or the length) the model is told
+ * which kind of thing to leave out and asked once more; the second answer goes
+ * through the same checks, and a second failure files the placeholder as
+ * before. A sentence that says nothing was asked, the placeholder, or only
+ * words with no topic is a correct drop and is never asked again. The held
+ * names are never sent back to the model. Each failure is logged with its kind
+ * and the call's SID, never the sentence.
  */
 import OpenAI from "openai";
 import { sanitizeForSms } from "../services/gsm7";
 import { nameKey } from "../tools/verifiedIdentity";
 
+/**
+ * v241: the second ask. `previous` is the model's own first sentence, handed
+ * back so it can rewrite it; `leaveOut` says which kind of thing made it
+ * unusable. Never a held name.
+ */
+export interface RequestRetry {
+  previous: string;
+  leaveOut: string;
+}
+
 /** What the model was asked, answered as it answered. Injected in tests. */
-export type RequestAsker = (transcript: string) => Promise<{ request?: string | null } | null>;
+export type RequestAsker = (
+  transcript: string,
+  retry?: RequestRetry,
+) => Promise<{ request?: string | null } | null>;
 
 /** Teardown waits on this; the caller has already gone. */
 export const REQUEST_READ_TIMEOUT_MS = 6_000;
@@ -76,7 +105,7 @@ export const REQUEST_INSTRUCTIONS =
 let client: OpenAI | null = null;
 
 /** The production asker. Null when there is no key, when switched off, or on any failure. */
-export const askModelForTheRequest: RequestAsker = async (transcript) => {
+export const askModelForTheRequest: RequestAsker = async (transcript, retry) => {
   const key = process.env.OPENAI_API_KEY;
   if (process.env.REQUEST_FROM_RECORDING_DISABLED === "1") return null;
   if (!key || !transcript.trim()) return null;
@@ -85,15 +114,44 @@ export const askModelForTheRequest: RequestAsker = async (transcript) => {
     model: REQUEST_MODEL,
     temperature: 0,
     response_format: { type: "json_object" },
-    messages: [
-      { role: "system", content: REQUEST_INSTRUCTIONS },
-      { role: "user", content: transcript },
-    ],
+    messages: requestMessages(transcript, retry),
   });
   const text = res.choices[0]?.message?.content ?? "";
   const parsed = JSON.parse(text) as { request?: unknown };
   return { request: typeof parsed?.request === "string" ? parsed.request : null };
 };
+
+/**
+ * The messages the model is sent. On the second ask the conversation carries
+ * the model's own first answer and one correction naming what to leave out.
+ */
+export function requestMessages(
+  transcript: string,
+  retry?: RequestRetry,
+): { role: "system" | "user" | "assistant"; content: string }[] {
+  const messages: { role: "system" | "user" | "assistant"; content: string }[] = [
+    { role: "system", content: REQUEST_INSTRUCTIONS },
+    { role: "user", content: transcript },
+  ];
+  if (retry) {
+    messages.push({ role: "assistant", content: JSON.stringify({ request: retry.previous }) });
+    messages.push({ role: "user", content: retryCorrection(retry.leaveOut) });
+  }
+  return messages;
+}
+
+/** The correction for the second ask: what was wrong, then the rules again. */
+export function retryCorrection(leaveOut: string): string {
+  return (
+    `That sentence cannot go on the ticket: ${leaveOut} ` +
+    "Write it again as ONE short plain sentence of what the CALLER asked for, at most 20 words, " +
+    "starting with Wants, Asking, Needs or Requesting. " +
+    "Refer to people only by their role, such as the doctor, the patient, the pharmacy or a family member. " +
+    "Do not include any names, dates, times, numbers, email or web addresses, or street addresses. " +
+    "If the caller did not say what they wanted, return null. Do not guess. " +
+    'Answer with JSON only: {"request": string or null}.'
+  );
+}
 
 const MONTH =
   "(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sept?(?:ember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)";
@@ -121,51 +179,103 @@ const STREET_WORD_CAPITALISED =
   "(?:Street|St|Avenue|Ave|Road|Rd|Boulevard|Blvd|Drive|Dr|Lane|Ln|Way|Court|Ct|Place|Pl|Circle|Cir|Parkway|Pkwy|Highway|Hwy|Terrace|Ter|Trail|Trl|Plaza|Square|Sq|Loop|Crescent|Alley)";
 
 /**
- * Shapes that must never reach a description. Each is a reason to DROP the
- * answer; none of them edits it.
+ * v241: why a sentence was dropped. The content kinds are what a second ask
+ * can fix; the last three are the model telling us nothing was asked, and are
+ * never asked again.
  */
-const NEVER_IN_A_DESCRIPTION: readonly RegExp[] = [
+export type UnusableKind =
+  | "too_short"
+  | "too_long"
+  | "too_few_words"
+  | "number_or_date"
+  | "contact"
+  | "address"
+  | "person"
+  | "says_nothing"
+  | "placeholder"
+  | "no_topic";
+
+/** The kinds a second ask can fix. */
+export const RETRYABLE_KINDS: ReadonlySet<UnusableKind> = new Set<UnusableKind>([
+  "too_short",
+  "too_long",
+  "too_few_words",
+  "number_or_date",
+  "contact",
+  "address",
+  "person",
+]);
+
+/** What the second ask tells the model to leave out, by kind. */
+export const LEAVE_OUT: Readonly<Record<UnusableKind, string>> = {
+  too_short: "it was too short to act on; it must name what the caller wanted in at least three words.",
+  too_few_words: "it was too short to act on; it must name what the caller wanted in at least three words.",
+  too_long: "it was too long; it must be at most 20 words.",
+  number_or_date: "it contained a number, a date, a time, a year or a date of birth.",
+  contact: "it contained an email or web address.",
+  address: "it contained a street address, a suite or unit number, or a PO box.",
+  person: "it contained a person's name or title.",
+  says_nothing: "",
+  placeholder: "",
+  no_topic: "",
+};
+
+/**
+ * Shapes that must never reach a description. Each is a reason to DROP the
+ * answer; none of them edits it. v241: each carries the kind of thing it
+ * caught, which is what the second ask names.
+ */
+const NEVER_IN_A_DESCRIPTION: readonly { re: RegExp; kind: UnusableKind }[] = [
   // Seven or more digits, however they are separated: a phone or fax number.
-  /\d(?:[\s().\/-]*\d){6,}/,
+  { re: /\d(?:[\s().\/-]*\d){6,}/, kind: "number_or_date" },
   // Four digits in a row: a year, a ZIP code, a ticket or account number.
-  /\d{4,}/,
+  { re: /\d{4,}/, kind: "number_or_date" },
   // A numeric date: 1/2, 01-02-50, 3.14.
-  /\b\d{1,2}\s*[\/.-]\s*\d{1,2}\b/,
+  { re: /\b\d{1,2}\s*[\/.-]\s*\d{1,2}\b/, kind: "number_or_date" },
   // A month with a day number, either order: "March 3", "3rd of March".
-  new RegExp(`\\b${MONTH}\\.?\\s+\\d{1,2}(?:st|nd|rd|th)?\\b`, "i"),
-  new RegExp(`\\b\\d{1,2}(?:st|nd|rd|th)?\\s+(?:of\\s+)?${MONTH}\\b`, "i"),
+  { re: new RegExp(`\\b${MONTH}\\.?\\s+\\d{1,2}(?:st|nd|rd|th)?\\b`, "i"), kind: "number_or_date" },
+  { re: new RegExp(`\\b\\d{1,2}(?:st|nd|rd|th)?\\s+(?:of\\s+)?${MONTH}\\b`, "i"), kind: "number_or_date" },
   // v205: the same dates SPOKEN AS WORDS, either order: "March third",
   // "June twenty first", "the twenty-first of June", "third of March". May
   // before a day counts only as the capitalised month before an ordinal
   // ("May fifth"): "she may first need a referral" is English.
-  new RegExp(`\\b${MONTH_NOT_MAY}\\.?\\s+(?:the\\s+)?${DAY_ORDINAL}\\b`, "i"),
-  new RegExp(`\\bMay\\s+(?:the\\s+)?${DAY_ORDINAL}\\b`),
-  new RegExp(`\\b${MONTH_NOT_MAY}\\.?\\s+${DAY_CARDINAL}\\b`, "i"),
-  new RegExp(`\\b(?:${DAY_ORDINAL}|${DAY_CARDINAL})\\s+of\\s+${MONTH}\\b`, "i"),
+  { re: new RegExp(`\\b${MONTH_NOT_MAY}\\.?\\s+(?:the\\s+)?${DAY_ORDINAL}\\b`, "i"), kind: "number_or_date" },
+  { re: new RegExp(`\\bMay\\s+(?:the\\s+)?${DAY_ORDINAL}\\b`), kind: "number_or_date" },
+  { re: new RegExp(`\\b${MONTH_NOT_MAY}\\.?\\s+${DAY_CARDINAL}\\b`, "i"), kind: "number_or_date" },
+  { re: new RegExp(`\\b(?:${DAY_ORDINAL}|${DAY_CARDINAL})\\s+of\\s+${MONTH}\\b`, "i"), kind: "number_or_date" },
   // A spelled-out year or four spelled digits in a row (a number read out).
-  /\b(?:nineteen|twenty)[\s-]+(?:oh|hundred|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)\b/i,
+  {
+    re: /\b(?:nineteen|twenty)[\s-]+(?:oh|hundred|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)\b/i,
+    kind: "number_or_date",
+  },
   // v205: a year from 2000 on, read out ("two thousand five").
-  /\btwo[\s-]+thousand\b/i,
-  new RegExp(`\\b${DIGIT_WORD}(?:[\\s,-]+${DIGIT_WORD}\\b){3,}`, "i"),
+  { re: /\btwo[\s-]+thousand\b/i, kind: "number_or_date" },
+  { re: new RegExp(`\\b${DIGIT_WORD}(?:[\\s,-]+${DIGIT_WORD}\\b){3,}`, "i"), kind: "number_or_date" },
   // Date-of-birth words.
-  /\b(?:born|birth\s*date|date\s+of\s+birth|birthday|dob|d\.o\.b)\b/i,
+  { re: /\b(?:born|birth\s*date|date\s+of\s+birth|birthday|dob|d\.o\.b)\b/i, kind: "number_or_date" },
   // An email address or a web address.
-  /@|https?:|\bwww\.|\.(?:com|net|org)\b/i,
+  { re: /@|https?:|\bwww\.|\.(?:com|net|org)\b/i, kind: "contact" },
   // A street address: a house number, a word or two, a street word.
-  /\b\d{1,5}\s+[a-z]+(?:\s+[a-z]+)?\s+(?:street|st|avenue|ave|road|rd|boulevard|blvd|drive|dr|lane|ln|way|court|ct|place|pl)\b/i,
+  {
+    re: /\b\d{1,5}\s+[a-z]+(?:\s+[a-z]+)?\s+(?:street|st|avenue|ave|road|rd|boulevard|blvd|drive|dr|lane|ln|way|court|ct|place|pl)\b/i,
+    kind: "address",
+  },
   // v205: a longer one, as the model writes a street name, capitalised: a
   // house number (digits, or read out as words), up to four capitalised words,
   // a capitalised street word: "12 Old Mill Creek Road", "1234 N Main St",
   // "twelve thirty four Main Street". Capitalised because "3 pairs shipped the
   // fastest way" is not an address. Each word starts with a capital and ends
   // at required whitespace, so nothing here can backtrack without end.
-  new RegExp(`\\b(?:\\d{1,6}|${NUMBER_WORD}(?:[\\s-]+${NUMBER_WORD}){0,3})\\s+(?:[A-Z][a-z]*\\.?\\s+){1,4}${STREET_WORD_CAPITALISED}\\b`),
+  {
+    re: new RegExp(`\\b(?:\\d{1,6}|${NUMBER_WORD}(?:[\\s-]+${NUMBER_WORD}){0,3})\\s+(?:[A-Z][a-z]*\\.?\\s+){1,4}${STREET_WORD_CAPITALISED}\\b`),
+    kind: "address",
+  },
   // v205: the rest of an address: a suite, unit or apartment number, a PO box.
-  /\b(?:[Ss]uite|[Ss]te|[Aa]pt|[Aa]partment|[Uu]nit)\.?\s*#?\s*(?:\d|[A-Z]\b)/,
-  /#\s*\d/,
-  /\bp\.?\s*o\.?\s*box\b|\bpost\s+office\s+box\b/i,
+  { re: /\b(?:[Ss]uite|[Ss]te|[Aa]pt|[Aa]partment|[Uu]nit)\.?\s*#?\s*(?:\d|[A-Z]\b)/, kind: "address" },
+  { re: /#\s*\d/, kind: "address" },
+  { re: /\bp\.?\s*o\.?\s*box\b|\bpost\s+office\s+box\b/i, kind: "address" },
   // A title followed by a capitalised word: a person named.
-  /\b(?:[Dd]r|[Dd]octor|[Mm]rs?|[Mm]s|[Mm]iss|[Nn]urse)\.?\s+[A-Z][a-z]/,
+  { re: /\b(?:[Dd]r|[Dd]octor|[Mm]rs?|[Mm]s|[Mm]iss|[Nn]urse)\.?\s+[A-Z][a-z]/, kind: "person" },
 ];
 
 /**
@@ -266,49 +376,102 @@ function namesAHeldName(sentence: string, heldNames: readonly string[]): boolean
 }
 
 /**
+ * The sentence cleaned for a ticket description, or why it cannot be one.
+ * The checks that mean the model found nothing (it says so, it is the
+ * placeholder, or every word carries no topic) are read first, so a sentence
+ * that is both a no-topic line and carries a number ("Wants a call back at
+ * <number>") reads as no_topic and is not asked again. Whether a sentence is
+ * dropped does not depend on that order; only the kind does.
+ */
+export function checkRequest(
+  raw: string | null | undefined,
+  heldNames: readonly string[] = [],
+): { sentence: string } | { kind: UnusableKind } {
+  let s = sanitizeForSms(String(raw ?? "")).value.replace(/\s+/g, " ").trim();
+  s = s.replace(/^["']+|["']+$/g, "").trim();
+  if (SAYS_NOTHING_WAS_ASKED.test(s)) return { kind: "says_nothing" };
+  if (/callback request taken/i.test(s)) return { kind: "placeholder" };
+  if (foldWords(s).every((w) => CARRIES_NO_TOPIC.has(w))) return { kind: "no_topic" };
+  if (s.length < REQUEST_MIN_CHARS) return { kind: "too_short" };
+  if (s.length > REQUEST_MAX_CHARS) return { kind: "too_long" };
+  if (s.split(" ").length < 3) return { kind: "too_few_words" };
+  const hit = NEVER_IN_A_DESCRIPTION.find(({ re }) => re.test(s));
+  if (hit) return { kind: hit.kind };
+  if (NAMED_STREET.test(s) && HOME_OR_MAILING.test(s)) return { kind: "address" };
+  const plain = folded(s);
+  if (NEVER_IN_A_DESCRIPTION_ES.some((re) => re.test(plain))) return { kind: "number_or_date" };
+  if (namesAHeldName(s, heldNames)) return { kind: "person" };
+  return { sentence: /[.!?]$/.test(s) ? s : `${s}.` };
+}
+
+/**
  * The model's sentence, cleaned for a ticket description, or undefined.
  * `heldNames` is every patient name half this call holds (verified, stated,
  * heard, the calling number's record, the pre-context candidate).
  */
 export function usableRequest(raw: string | null | undefined, heldNames: readonly string[] = []): string | undefined {
-  let s = sanitizeForSms(String(raw ?? "")).value.replace(/\s+/g, " ").trim();
-  s = s.replace(/^["']+|["']+$/g, "").trim();
-  if (s.length < REQUEST_MIN_CHARS || s.length > REQUEST_MAX_CHARS) return undefined;
-  if (s.split(" ").length < 3) return undefined;
-  if (NEVER_IN_A_DESCRIPTION.some((re) => re.test(s))) return undefined;
-  if (NAMED_STREET.test(s) && HOME_OR_MAILING.test(s)) return undefined;
-  const plain = folded(s);
-  if (NEVER_IN_A_DESCRIPTION_ES.some((re) => re.test(plain))) return undefined;
-  if (SAYS_NOTHING_WAS_ASKED.test(s)) return undefined;
-  if (/callback request taken/i.test(s)) return undefined;
-  if (foldWords(s).every((w) => CARRIES_NO_TOPIC.has(w))) return undefined;
-  if (namesAHeldName(s, heldNames)) return undefined;
-  return /[.!?]$/.test(s) ? s : `${s}.`;
+  const checked = checkRequest(raw, heldNames);
+  return "sentence" in checked ? checked.sentence : undefined;
+}
+
+/** Why a sentence cannot be a description, or undefined when it can. */
+export function whyUnusable(raw: string | null | undefined, heldNames: readonly string[] = []): UnusableKind | undefined {
+  const checked = checkRequest(raw, heldNames);
+  return "kind" in checked ? checked.kind : undefined;
+}
+
+/** The model's answer as a sentence to check, or null when it gave none. */
+async function askOnce(
+  ask: RequestAsker,
+  transcript: string,
+  retry: RequestRetry | undefined,
+  where: string,
+): Promise<string | null> {
+  let answer: Awaited<ReturnType<RequestAsker>> = null;
+  try {
+    answer = await ask(transcript, retry);
+  } catch (e) {
+    // The error type only: an error body could carry the transcript.
+    console.warn(
+      `[REQUEST FROM RECORDING] the model did not answer${retry ? " the second ask" : ""} (${(e as Error)?.name ?? "error"})${where}`,
+    );
+    return null;
+  }
+  if (!answer || typeof answer.request !== "string" || !answer.request.trim()) return null;
+  return answer.request;
 }
 
 /**
  * What the caller asked for, from the recording, or null. Never throws; the
- * caller of this is a teardown filer with nobody watching.
+ * caller of this is a teardown filer with nobody watching. v241: a sentence
+ * that fails a content check is asked for once more, naming what to leave
+ * out; the second answer is checked the same way. `callSid` only labels the
+ * log lines.
  */
 export async function requestFromTheRecording(
   transcript: string,
   ask: RequestAsker = askModelForTheRequest,
   heldNames: readonly string[] = [],
+  callSid?: string,
 ): Promise<string | null> {
-  let answer: Awaited<ReturnType<RequestAsker>> = null;
-  try {
-    answer = await ask(transcript);
-  } catch (e) {
-    // The error type only: an error body could carry the transcript.
-    console.warn(`[REQUEST FROM RECORDING] the model did not answer (${(e as Error)?.name ?? "error"})`);
+  const where = callSid ? ` (${callSid})` : "";
+  const first = await askOnce(ask, transcript, undefined, where);
+  if (first === null) return null;
+  const checked = checkRequest(first, heldNames);
+  if ("sentence" in checked) return checked.sentence;
+  // PHI-free: which kind of check, never what the sentence said.
+  if (!RETRYABLE_KINDS.has(checked.kind)) {
+    console.warn(`[REQUEST FROM RECORDING] the model's sentence failed a check (${checked.kind}) — not used${where}`);
     return null;
   }
-  if (!answer || typeof answer.request !== "string" || !answer.request.trim()) return null;
-  const sentence = usableRequest(answer.request, heldNames);
-  if (!sentence) {
-    // PHI-free: that it happened, never what the sentence said.
-    console.warn("[REQUEST FROM RECORDING] the model's sentence failed a check — not used");
-    return null;
+  console.warn(`[REQUEST FROM RECORDING] the model's sentence failed a check (${checked.kind}) — asking once more${where}`);
+  const second = await askOnce(ask, transcript, { previous: first, leaveOut: LEAVE_OUT[checked.kind] }, where);
+  if (second === null) return null;
+  const again = checkRequest(second, heldNames);
+  if ("sentence" in again) {
+    console.info(`[REQUEST FROM RECORDING] the second answer was used${where}`);
+    return again.sentence;
   }
-  return sentence;
+  console.warn(`[REQUEST FROM RECORDING] the second answer failed a check too (${again.kind}) — not used${where}`);
+  return null;
 }
