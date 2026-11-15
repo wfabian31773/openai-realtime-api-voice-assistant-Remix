@@ -254,6 +254,8 @@ describe('REVIEW SHAPES — the ask must be affirmative, and three things veto i
       'New patient wants to find out about a cataract consultation.',
       'New patient would like to check whether a cataract consultation is needed.',
       'Paciente nuevo quiere saber cuanto cuesta la consulta de cataratas.',
+      'New patient wants to know if a cataract consultation is required.',
+      'Paciente nuevo quiere saber si la consulta de cataratas es obligatoria.',
     ]) {
       expect(newPatientAsksForAConsult(words), words).toBe(false);
       expect(detectCrossQueue(words, SURGERY), words).toBeNull();
