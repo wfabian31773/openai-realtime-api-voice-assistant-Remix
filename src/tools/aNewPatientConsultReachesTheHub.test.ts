@@ -201,6 +201,51 @@ describe('CONTROLS — the rule is about a NEW patient on the SURGERY line', () 
   });
 });
 
+describe('REVIEW SHAPES — the ask must be affirmative, and three things veto it (github-actions review of #486)', () => {
+  it('a price question names a consultation and asks for none: it stays in Surgery', () => {
+    const words = 'New patient asking how much a cataract surgery consultation costs.';
+    expect(newPatientAsksForAConsult(words)).toBe(false);
+    expect(detectCrossQueue(words, SURGERY)).toBeNull();
+  });
+  it('a pre-op visit for a surgery already scheduled stays in Surgery', () => {
+    const words = 'New patient calling about cataract surgery scheduled for Monday, wants to schedule a pre-op appointment.';
+    expect(newPatientAsksForAConsult(words)).toBe(false);
+    expect(detectCrossQueue(words, SURGERY)).toBeNull();
+  });
+  it('a post-op visit is coordinator work too', () => {
+    expect(newPatientAsksForAConsult('New patient wants to schedule a post op appointment after her LASIK.')).toBe(false);
+  });
+  it('an operation already booked, in any words, stays in Surgery', () => {
+    expect(newPatientAsksForAConsult('New patient whose cataract surgery is booked wants an appointment with the surgeon.')).toBe(false);
+    expect(newPatientAsksForAConsult('New patient, the procedure was set for next week, wants a consultation first.')).toBe(false);
+  });
+  it('a cancellation in the third person is not a booking', () => {
+    const words = 'New patient calling to cancel her cataract consultation.';
+    expect(newPatientAsksForAConsult(words)).toBe(false);
+    expect(detectCrossQueue(words, SURGERY)).toBeNull();
+  });
+  it('confirming or postponing a consultation is not a booking either', () => {
+    expect(newPatientAsksForAConsult('New patient wants to cancel her consultation appointment.')).toBe(false);
+    expect(newPatientAsksForAConsult('New patient wants to confirm her LASIK consultation appointment.')).toBe(false);
+    expect(newPatientAsksForAConsult('New patient needs to postpone the cataract consultation appointment.')).toBe(false);
+  });
+  it('the affirmative asks the corpus uses all still route', () => {
+    for (const words of [
+      'New patient wants an appointment for strabismus surgery.',
+      'New patient requesting a cataract surgery consultation at the office.',
+      'New patient would like to make an appointment for cataract surgery.',
+      'New patient wants to be seen at the office for a cataract evaluation.',
+      'New patient wants to set up a consultation for LASIK surgery.',
+      'New patient scheduling cataract surgery at the office.',
+      'New patient calling to make an appointment for cataract surgery.',
+    ]) expect(newPatientAsksForAConsult(words), words).toBe(true);
+  });
+  it('"scheduled" is not an ask, "schedule" is', () => {
+    expect(newPatientAsksForAConsult('Her doctor scheduled the new patient for a consultation and she wants to know when.')).toBe(false);
+    expect(newPatientAsksForAConsult('New patient wants to schedule a consultation.')).toBe(true);
+  });
+});
+
 describe('the surgery date the model sent', () => {
   it.each([
     ['', false], ['unknown', false], ['Unknown', false], ['not yet', false], ['N/A', false], ['TBD', false], ['none', false],

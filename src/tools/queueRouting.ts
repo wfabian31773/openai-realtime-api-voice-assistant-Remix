@@ -244,13 +244,36 @@ export function asksAboutARoutineVisit(text: string): boolean {
  * date the caller gave, no appointment already held), nothing for today, no
  * change to an existing appointment, and no clinical complaint. A request
  * that only asks a price, an insurance or a status question is not this rule's.
+ *
+ * The ask must be AFFIRMATIVE (github-actions review of #486, two rounds): a
+ * booking verb ("schedule", "book", "set up"), or an asking word followed
+ * closely by the visit ("wants an appointment", "requesting a consultation",
+ * "would like to make an appointment", "wants to be seen"). A visit noun alone
+ * is not an ask, so "asking how much a consultation costs" stays where it
+ * lands. Every one of the 19 tickets this rule moves in the corpus asks this
+ * way. And three things veto it outright, whatever else the request says: a
+ * pre-op or post-op visit (a surgery is already set), an operation already
+ * scheduled, booked or set ("surgery scheduled for Monday"), and any word that
+ * acts on an appointment already held (cancel, reschedule, postpone, confirm),
+ * because the shared SCHEDULING cues are first-person and miss "calling to
+ * cancel her consultation".
  */
 const NEW_PATIENT_DENIED =
   /\b(?:not|no|never|isn['’]t|wasn['’]t)\s+(?:been\s+)?(?:an?\s+)?(?:new|first[- ]time)\s+patients?\b|\bno\s+(?:es|soy)\s+(?:una?\s+)?pacientes?\s+nuev[oa]s?\b/g;
 const NEW_PATIENT =
   /\b(?:new|first[- ]time)\s+patients?\b|\bpacientes?\s+nuev[oa]s?\b|\bnuev[oa]s?\s+pacientes?\b/;
-const ASKS_FOR_A_CONSULT =
-  /\b(?:appointments?|appts?|consult(?:ation)?s?|evaluations?|evaluated|be seen|citas?|consultas?)\b|\b(?:schedul\w*|book(?:ing)?|set(?:ting)? up|agendar|programar)\b/;
+const A_VISIT = String.raw`(?:appointments?|appts?|consult(?:ation)?s?|evaluations?|exams?|visits?|citas?|consultas?|be\s+seen|be\s+evaluated)`;
+const ASKS_TO_BOOK = new RegExp(
+  String.raw`\b(?:schedul(?:e|es|ing)|be\s+scheduled|get\s+scheduled|book(?:s|ing)?|set(?:s|ting)?\s+up|agendar|programar|sacar)\b`
+  + String.raw`|\b(?:wants?|wanting|needs?|needing|would\s+like|requests?|requesting|asking\s+for|looking\s+for|interested\s+in|make|making|get|quiere|necesita|solicita|pide)\s+(?:\S+\s+){0,5}?`
+  + A_VISIT + String.raw`\b`,
+);
+// A surgery already set: pre-op and post-op visits, or an operation scheduled.
+const A_SURGERY_IS_SET =
+  /\bpre[- ]?op\b|\bpost[- ]?op\b|\b(?:surgery|surgeries|operation|procedure|cirugia)\s+(?:\S+\s+){0,2}?(?:scheduled|booked|set\s+for|programada)\b/;
+// Acting on an appointment already held, in any person.
+const ACTS_ON_AN_APPOINTMENT =
+  /\b(?:cancel\w*|reschedul\w*|re-schedul\w*|postpon\w*|confirm\w*|cancelar|reprogramar|confirmar)\b/;
 const A_SURGERY_ALREADY_BOOKED =
   /\bsurgery date given by caller\b|\b(?:surgery|surgeries|operation|procedure|cirugia)\s+(?:is\s+|was\s+)?(?:on|this|next)\s+(?:the\s+)?(?:(?:mon|tues|wednes|thurs|fri|satur|sun)day|week|jan\w*|feb\w*|mar\w*|apr\w*|may|jun\w*|jul\w*|aug\w*|sep\w*|oct\w*|nov\w*|dec\w*|\d)/;
 const HOLDS_AN_APPOINTMENT =
@@ -262,8 +285,9 @@ export function newPatientAsksForAConsult(text: string, surgeryDateGiven = false
   if (surgeryDateGiven) return false;
   const t = fold(text);
   if (!NEW_PATIENT.test(t.replace(NEW_PATIENT_DENIED, ' '))) return false;
-  if (!ASKS_FOR_A_CONSULT.test(t)) return false;
-  if (A_SURGERY_ALREADY_BOOKED.test(t) || HOLDS_AN_APPOINTMENT.test(t)) return false;
+  if (!ASKS_TO_BOOK.test(t)) return false;
+  if (A_SURGERY_ALREADY_BOOKED.test(t) || A_SURGERY_IS_SET.test(t) || HOLDS_AN_APPOINTMENT.test(t)) return false;
+  if (ACTS_ON_AN_APPOINTMENT.test(t)) return false;
   if (SAME_DAY_WORDS.test(t) || hasClinicalComplaint(text)) return false;
   return !SCHEDULING.some((s) => EXISTING_APPOINTMENT_REASONS.has(s.reasonId) && hit(t, s.cues));
 }
