@@ -456,7 +456,7 @@ export async function runRequestSweep(
         stated?.firstName, stated?.lastName,
         candidate?.firstName, candidate?.lastName,
       ].filter((n): n is string => typeof n === "string" && n.trim().length > 0);
-      const asked = await requestFromTheRecording(record.transcript, askRequest, held);
+      const asked = await requestFromTheRecording(record.transcript, askRequest, held, record.callSid);
       if (asked) {
         input = { ...input, requestFromRecording: asked };
         console.info(
