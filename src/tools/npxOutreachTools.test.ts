@@ -556,6 +556,22 @@ describe('a patient who rings the number back', () => {
   });
 
   it('once identified, still confirms the date of birth, then can be offered and booked like a dialled call', async () => {
+    // v246: a returned call is re-checked against the lane's source first, and
+    // only an appointment still on the movable list (New or Lapsed) is offered
+    // (aReturnedCallIsReCheckedForClass.test.ts has the refusals).
+    setNpxOutreachDepsForTests({
+      npx: { configured: true, ...npx } as unknown as NpxOutreachClient,
+      cancel: cancel as never,
+      store: async () => store,
+      fileTicket: fileTicket as never,
+      source: async () => ({
+        name: 'test movable list',
+        refreshEveryMs: 60_000,
+        parkMs: 60_000,
+        list: async () => [],
+        recheck: async () => ({ state: 'current', contact: { externalRef: 'appt-0001', phone: '+15555550111', firstName: 'Testa', lastName: 'Synthetic', data: { ...DATA } } }),
+      }),
+    });
     openReturnedCall();
     const inbound = await store.openCallbackAttempt('c1', store.campaignId, SID);
     const cb = callbackSessionFor(SID)!;

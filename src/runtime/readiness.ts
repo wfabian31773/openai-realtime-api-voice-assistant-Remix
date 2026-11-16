@@ -1917,8 +1917,11 @@ import { callEnvironment } from "./callRecord";
  * campaign read the Console's movable cache with no patient class and dialled
  * Existing patients (a kept visit in the last 15 months): 946 of the first
  * 1,215 contacts, 606 seen since 2026-09-01. `MOVABLE_SELECT` now keeps only
- * New and Lapsed rows, at the list and again at the dial. Above main's v244
- * (#490, `0048b2c`); v245 is #488 on its open branch. No migration.
+ * New and Lapsed rows, at the list and again at the dial. A RETURNED call is
+ * re-checked against the lane's own source before anything is offered
+ * (npxOutreachTools.ts, classGateFor): off the list, over, or a source that
+ * cannot answer offers and books nothing. Above main's v244 (#490,
+ * `0048b2c`); v245 is #488 on its open branch. No migration.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
   "voice-runtime-v246-npx-outreach-calls-new-and-lapsed-only-20261116";

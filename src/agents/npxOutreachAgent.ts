@@ -54,6 +54,7 @@ import {
   npxBookingPageLane,
   npxOutreachAfterCalls,
   npxOutreachMode,
+  useLaneSourceForReturnedCalls,
   warmOutreachAvailability,
 } from '../tools/npxOutreachTools';
 import type { OutboundTextPolicy } from '../runtime/outbound/outreachText';
@@ -215,6 +216,12 @@ export const npxOutreachPolicy: OutboundLanePolicy = {
   // died first), run once the call is over. The hang-up runs the rest.
   afterCalls: (ctx) => npxOutreachAfterCalls(ctx, npxOutreachPolicy.campaignKey),
 };
+
+// v246: a returned call is re-checked against this lane's own source, the
+// function the dialler re-checks each person with, before anything is offered
+// (npxOutreachTools.ts, recheckReturnedCaller). Registered rather than
+// imported by the tools, because this module imports them.
+useLaneSourceForReturnedCalls(() => npxOutreachPolicy.source?.() ?? Promise.resolve(null));
 
 /**
  * THE ORDER IS THE OPERATOR'S (2026-10-21), the same both ways: the patient is

@@ -72,7 +72,7 @@ import { readDobQuietly } from './dobParts';
 import { spokenDobFor } from './spokenDob';
 import { callbackSessionFor } from './outboundTools';
 import { dobOnFile } from '../runtime/outbound/callback';
-import type { OutboundContact } from '../runtime/outbound/campaign';
+import type { ContactSource, OutboundContact, SourceRecheck } from '../runtime/outbound/campaign';
 import type { OutboundStore } from '../runtime/outbound/store';
 import {
   createNpxOutreachClient,
@@ -210,6 +210,23 @@ interface Deps {
   cancel: (req: AzulCancelRequest) => Promise<AzulCancelResult>;
   store: () => Promise<OutboundStore>;
   fileTicket: (params: CreateTicketParams) => Promise<CreateTicketResponse>;
+  /** The lane's own contact source, the one the dialler re-checks each person
+   * against at the dial (v246): a returned call is re-checked against it
+   * before anything is offered. Null when it is not available here. */
+  source: () => Promise<ContactSource | null>;
+}
+
+/**
+ * THE LANE'S SOURCE, SET BY THE LANE (v246). npxOutreachAgent.ts registers
+ * `npxOutreachPolicy.source` here when it loads, so a returned call is
+ * re-checked by the very function the dialler, the text and the booking link
+ * use. Registered rather than imported: the agent imports this module, and
+ * the demo source does too. Nothing registered means nothing can be
+ * re-checked, and a returned call is then offered nothing.
+ */
+let laneSource: (() => Promise<ContactSource | null>) | null = null;
+export function useLaneSourceForReturnedCalls(fn: (() => Promise<ContactSource | null>) | null): void {
+  laneSource = fn;
 }
 
 let storePromise: Promise<OutboundStore> | null = null;
@@ -222,6 +239,7 @@ const defaultDeps = (): Deps => ({
   // environment at import.
   fileTicket: async (params) =>
     (await import('../../server/services/ticketingApiClient')).ticketingApiClient.createTicket(params),
+  source: () => (laneSource ? laneSource() : Promise.resolve(null)),
 });
 let deps: Deps | null = null;
 const live = (): Deps => (deps ??= defaultDeps());
@@ -310,6 +328,10 @@ interface OutreachSession {
   contact: OutboundContact;
   /** A demo call: demo NPX, simulated cancel and ticket. */
   demo: boolean;
+  /** A returned call: the patient rang the caller ID back (v106). */
+  returned: boolean;
+  /** v246: a returned call's re-check against the lane's source, run once. */
+  classGate?: Promise<ClassGate>;
   /** describe_upcoming_appointment has told them the visit and its date. */
   described: boolean;
   verified: boolean;
@@ -421,6 +443,7 @@ async function sessionFor(input: Record<string, unknown>): Promise<{ sid: string
       {
         contact,
         demo,
+        returned: Boolean(callbackSid),
         described: false,
         verified: false,
         dobTries: 0,
@@ -683,6 +706,87 @@ function staysInTheHub(text: string): boolean {
 const DOB_ASK = 'Can I please have your date of birth, starting with the month, then the day, then the year?';
 const WHEN_ASK = 'What day and time work best for you?';
 
+// ── Who a returned call may be offered a sooner exam (v246) ─────────────────
+
+/**
+ * ONLY NEW OR LAPSED PATIENTS ARE OFFERED A SOONER EXAM (operator, 2026-11-16).
+ *
+ * The movable list carries every movable appointment, Existing patients too,
+ * and until v246 nothing read its patient class: of the first 1,215 contacts
+ * dialled or texted (2026-11-07..16), 946 were Existing. v246 filters the list
+ * and the dial-time re-check (MOVABLE_SELECT), so dials, texts and the booking
+ * link stop. A RETURNED call did not go through either: identify_callback_caller
+ * finds the person among the campaign's rows, and those rows still hold every
+ * Existing patient already called or texted, so the tools offered and booked
+ * them (13 returned calls 19:44-23:00 UTC on 2026-11-16, 3 bookings, 2 of them
+ * Existing: CAc8f701da3610e1dab706c5cd143f3b33, CAebe21a2eb3aacc6ad53778814a073f2f).
+ *
+ * So a returned call is re-checked against the lane's own source, the
+ * function the dialler re-checks with, before anything about the visit or the
+ * offer is said: only `current` is offered. Off the list (Existing, or no
+ * longer movable), over (cancelled, moved or past), or a source that cannot
+ * answer in time: nothing is offered or booked, and describe, the date of
+ * birth, the search and the booking all refuse. It fails CLOSED, as the dial
+ * does: a list nobody can re-check is a list that may be stale.
+ *
+ * A dialled call is not re-checked here: the dial re-checked it seconds before
+ * it rang, and a second Console read would refuse a call that has just passed
+ * on a Console blip. A demo call is not either: its patients are synthetic,
+ * its NPX is the demo's and its cancel is simulated.
+ */
+export type ClassGate = 'at_dial' | 'demo' | SourceRecheck['state'] | 'unavailable';
+/** The re-check answers inside this, inside describe's own 6 seconds. */
+export const CLASS_GATE_BUDGET_MS = 4_000;
+
+function classGateFor(s: OutreachSession): Promise<ClassGate> {
+  if (!s.returned) return Promise.resolve('at_dial');
+  if (s.demo) return Promise.resolve('demo');
+  return (s.classGate ??= recheckReturnedCaller(s.contact));
+}
+
+const OFFERABLE: ReadonlySet<ClassGate> = new Set<ClassGate>(['at_dial', 'demo', 'current']);
+
+async function recheckReturnedCaller(contact: OutboundContact): Promise<ClassGate> {
+  const appointmentId = field(contact, 'appointment_id');
+  if (!appointmentId) return 'unavailable';
+  const deadline = Date.now() + CLASS_GATE_BUDGET_MS;
+  try {
+    const source = await soon(live().source(), CLASS_GATE_BUDGET_MS);
+    if (!source) return 'unavailable';
+    const r = await soon(source.recheck(appointmentId, new Date()), deadline - Date.now());
+    return r ? r.state : 'unavailable';
+  } catch {
+    return 'unavailable';
+  }
+}
+
+/**
+ * What a returned caller who may not be offered hears, and what the agent is
+ * told. The words are mine, the operator's to overrule: honest that the
+ * opening is not theirs, that nothing changes for them, and nothing about why.
+ */
+function notOfferedOnThisCall(gate: ClassGate): ToolResult {
+  const say =
+    gate === 'gone'
+      ? 'Thank you for calling us back. The sooner opening we called about is no longer available.'
+      : "Thank you for calling us back. The sooner opening we called about isn't one we can offer you after all, " +
+        "so your appointment with us stays just as it is. I'm sorry for the confusion.";
+  console.info(`[NPX OUTREACH] returned call: nothing offered — the appointment re-checked as ${gate}`);
+  return {
+    success: false,
+    error: 'not_offered',
+    class_gate: gate,
+    say,
+    fix:
+      'Say that, word for word. Offer nothing: do not search for or suggest another time, and do not call ' +
+      `${CONFIRM_DOB_TOOL_NAME}, ${FIND_SOONER_TOOL_NAME} or ${BOOK_SOONER_TOOL_NAME}. Say nothing about any ` +
+      "appointment's date, time, office or doctor. If they ask why, say only that it is not an opening we can offer " +
+      'them, and apologise for the confusion. Ask if there is anything else you can help with; if they want a person, ' +
+      `or to change or cancel an appointment, call ${STAFF_CALLBACK_TOOL_NAME}. Then call record_call_outcome with ` +
+      'done, say goodbye and call end_call.',
+  } as unknown as ToolResult;
+}
+
 // ── describe_upcoming_appointment ───────────────────────────────────────────
 
 registerTool({
@@ -698,6 +802,12 @@ registerTool({
     const found = await sessionFor(input);
     if ('success' in found) return found;
     const { s } = found;
+    const startedAt = Date.now();
+    // The availability read starts beside the re-check, so a returned call
+    // waits for the slower of the two, not both (it sends NPX no patient).
+    const availLoad = s.verified || !offerAsk(s.contact) ? null : loadAvailability(s.contact, s.demo);
+    const classGate = await classGateFor(s);
+    if (!OFFERABLE.has(classGate)) return notOfferedOnThisCall(classGate);
     if (!field(s.contact, 'appointment_date')) {
       const r: Refusal = {
         success: false,
@@ -713,6 +823,7 @@ registerTool({
       return {
         success: true,
         appointment,
+        class_gate: classGate,
         verified: true,
         today: today.words,
         today_date: today.date,
@@ -721,12 +832,16 @@ registerTool({
     }
     // The opening names where the openings are, when the availability warmed
     // at call start is in hand; it never waits long for it.
-    const avail = await soon(loadAvailability(s.contact, s.demo), DESCRIBE_AVAILABILITY_WAIT_MS);
+    const avail = await soon(
+      availLoad ?? loadAvailability(s.contact, s.demo),
+      Math.max(0, DESCRIBE_AVAILABILITY_WAIT_MS - (Date.now() - startedAt)),
+    );
     const known = avail && !('error' in avail) ? avail : null;
     if (known && known.slots.length === 0) {
       return {
         success: true,
         appointment,
+        class_gate: classGate,
         nothing_sooner: true,
         say:
           `Our records show you have ${appointment}. We were calling to offer you a sooner appointment, but nothing ` +
@@ -741,6 +856,7 @@ registerTool({
     return {
       success: true,
       appointment,
+      class_gate: classGate,
       today: today.words,
       today_date: today.date,
       say: `Our records show you have ${appointment}. We have availability sooner ${where}. ${WHEN_ASK}`,
@@ -778,6 +894,8 @@ registerTool({
     const found = await sessionFor(input);
     if ('success' in found) return found;
     const { sid, s } = found;
+    const classGate = await classGateFor(s);
+    if (!OFFERABLE.has(classGate)) return notOfferedOnThisCall(classGate);
     if (s.verified) return { success: true, verified: true, current_appointment: currentAppointment(s.contact), next: afterVerified(s) };
     // Spent tries stay spent: a third guess must not unlock what two wrong
     // dates closed, or the limit is one more call away from meaning nothing.
@@ -946,6 +1064,8 @@ registerTool({
     const found = await sessionFor(input);
     if ('success' in found) return found;
     const { s } = found;
+    const classGate = await classGateFor(s);
+    if (!OFFERABLE.has(classGate)) return notOfferedOnThisCall(classGate);
     if (!s.verified) return notVerified();
     if (s.booking) {
       return { success: true, already_booked: true, fix: 'The exam is already booked on this call. Do not look again; confirm the booking with them.' };
@@ -1182,6 +1302,8 @@ async function bookSooner(input: Record<string, unknown>): Promise<ToolResult> {
   const found = await sessionFor(input);
   if ('success' in found) return found;
   const { sid, s } = found;
+  const classGate = await classGateFor(s);
+  if (!OFFERABLE.has(classGate)) return notOfferedOnThisCall(classGate);
   if (!s.verified) return notVerified();
   const currentDay = spokenDay(field(s.contact, 'appointment_date'));
   if (s.booking) {
