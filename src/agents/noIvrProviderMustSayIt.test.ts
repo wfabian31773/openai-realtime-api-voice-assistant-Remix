@@ -46,6 +46,7 @@ vi.mock('../services/callerMemoryService', () => ({
 }));
 
 const { createNoIvrAgent } = await import('./noIvrAgent');
+const { pastTheIdentityAsk } = await import('./testSupport/pastTheIdentityAsk');
 const { resetGateAttempts } = await import('../tools/gateAttempts');
 const { noteCallerTranscript, releaseCallerSpeech } = await import('../services/symptomCorroboration');
 
@@ -89,13 +90,31 @@ describe('"Operator." is not a provider', () => {
     const { agent, handoff } = await runtimeAgent(sid);
     noteCallerTranscript(sid, [GREETING, 'CALLER: Operator.']);
 
-    const r = await call(agent, 'escalate_to_human', THE_CORPUS_ESCALATION);
-    expect(r.success).toBe(false);
-    expect(r.refused).toBe('provider_not_stated_by_caller');
+    // v244: the first refusal asks, and files nothing. It asks the facility
+    // question first, so a real clinician gets one question, not a goodbye.
+    const asked = await call(agent, 'escalate_to_human', THE_CORPUS_ESCALATION);
+    expect(asked.success).toBe(false);
+    expect(asked.refused).toBe('provider_not_stated_by_caller');
+    expect(asked.need_identity).toBe(true);
+    expect(asked.ticket_filed).toBe(false);
     expect(handoff).not.toHaveBeenCalled();
-    // It asks before it says the refusal line, so a real clinician gets one question, not a goodbye.
-    expect(r.message).toMatch(/BEFORE you say that line, ask ONE question/);
-    expect(r.message).toMatch(/doctor's office, a hospital, a clinic or a laboratory, and which one/);
+    expect(h.submitSimplifiedTicket).not.toHaveBeenCalled();
+    expect(asked.message).toMatch(/FIRST ask ONE question/);
+    expect(asked.message).toMatch(/doctor's office, a hospital, a clinic or a\s+laboratory, and which one/);
+
+    // The caller names no facility and gives no name: the next call files.
+    noteCallerTranscript(sid, [
+      GREETING,
+      'CALLER: Operator.',
+      "AGENT: Are you calling from a doctor's office, a hospital, a clinic or a laboratory, and which one?",
+      'CALLER: No. I just want somebody to call me back.',
+    ]);
+    const r = await pastTheIdentityAsk(() => call(agent, 'escalate_to_human', THE_CORPUS_ESCALATION));
+    expect(r.ticket_filed).toBe(true);
+    expect(handoff).not.toHaveBeenCalled();
+    // The facility question was asked with the identity; the filing does not ask it again.
+    expect(r.message).toMatch(/already been asked; do not ask it again/);
+    expect(r.message).not.toMatch(/BEFORE you say that line, ask ONE question/);
 
     expect(h.submitSimplifiedTicket).toHaveBeenCalledTimes(1);
     const ticket = h.submitSimplifiedTicket.mock.calls[0][0] as Record<string, string>;
@@ -106,13 +125,55 @@ describe('"Operator." is not a provider', () => {
     releaseCallerSpeech(sid);
   });
 
-  it('the same caller naming an ER on the next turn is connected, and the record supersedes the refusal ticket', async () => {
+  it('a refusal that files at once (a name and date of birth already given) still asks the facility question first', async () => {
+    const sid = freshSid();
+    const { agent } = await runtimeAgent(sid);
+    noteCallerTranscript(sid, [GREETING, 'CALLER: Operator.']);
+    const r = await call(agent, 'escalate_to_human', {
+      ...THE_CORPUS_ESCALATION,
+      patient_first_name: 'Dana',
+      patient_last_name: 'Example',
+      patient_dob: '01/04/1958',
+    });
+    expect(r.ticket_filed).toBe(true);
+    expect(r.message).toMatch(/BEFORE you say that line, ask ONE question/);
+    releaseCallerSpeech(sid);
+  });
+
+  it('the same caller naming an ER after the ask is connected, and nothing was filed before it', async () => {
+    const sid = freshSid();
+    const { agent, handoff } = await runtimeAgent(sid);
+    noteCallerTranscript(sid, [GREETING, 'CALLER: Operator.']);
+    const asked = await call(agent, 'escalate_to_human', THE_CORPUS_ESCALATION);
+    expect(asked.need_identity).toBe(true);
+
+    noteCallerTranscript(sid, [
+      GREETING,
+      'CALLER: Operator.',
+      "AGENT: Are you calling from a doctor's office, a hospital, a clinic or a laboratory, and which one?",
+      'CALLER: This is the emergency room at Westside Memorial calling about a patient.',
+    ]);
+    h.submitSimplifiedTicket.mockResolvedValueOnce({ success: true, ticketNumber: 'VA-RECORD', message: 'VA-RECORD' } as any);
+    const r = await call(agent, 'escalate_to_human', {
+      ...THE_CORPUS_ESCALATION,
+      reason: 'Emergency room at Westside Memorial calling about a patient',
+    });
+    expect(r.success).toBe(true);
+    expect(handoff).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() => expect(h.submitSimplifiedTicket).toHaveBeenCalledTimes(1));
+    const record = h.submitSimplifiedTicket.mock.calls[0][0] as Record<string, unknown>;
+    expect(record.secondTicketOnThisCall, 'no refusal ticket was filed, so the record is the call\'s own').toBeUndefined();
+    releaseCallerSpeech(sid);
+  });
+
+  it('after a refusal that DID file, a connected ER files its record beside it and supersedes it', async () => {
     const sid = freshSid();
     const { agent, handoff } = await runtimeAgent(sid);
     noteCallerTranscript(sid, [GREETING, 'CALLER: Operator.']);
     h.submitSimplifiedTicket.mockResolvedValueOnce({ success: true, ticketNumber: 'VA-EARLIER', message: 'VA-EARLIER' } as any);
-    const refused = await call(agent, 'escalate_to_human', THE_CORPUS_ESCALATION);
+    const refused = await pastTheIdentityAsk(() => call(agent, 'escalate_to_human', THE_CORPUS_ESCALATION));
     expect(refused.refused).toBe('provider_not_stated_by_caller');
+    expect(refused.ticket_filed).toBe(true);
 
     noteCallerTranscript(sid, [
       GREETING,

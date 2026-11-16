@@ -26,6 +26,7 @@
  * like a duplicate.
  */
 
+import { isTwilioCallSid } from "../tools/callSid";
 import { gateRefusalAgeMs, gateRefusalsSoFar, noteGateRefusal } from "../tools/gateAttempts";
 import { nameOrStandIn } from "./standInName";
 
@@ -96,7 +97,7 @@ export function hasUsableOnCallName(
 }
 
 /** Same window records uses: two tool calls in one response, not a later turn. */
-const ASK_BATCH_WINDOW_MS = 2_000;
+export const ASK_BATCH_WINDOW_MS = 2_000;
 
 export function hasUsableOnCallDob(dob: string | undefined): boolean {
   const t = (dob ?? "").trim();
@@ -158,4 +159,89 @@ export function onCallCallbackNumber(
   if (from) return from;
   const given = (collected ?? "").trim();
   return given || undefined;
+}
+
+/**
+ * A REFUSED ESCALATION ASKS WHO BEFORE IT FILES (overnight pass, 2026-11-16).
+ *
+ * v80 made a refused escalation file its own ticket at the refusal, so the
+ * request is never lost. It filed from whatever the model had sent, and the
+ * refusal comes early: measured over the no-ivr refused-escalation tickets of
+ * 2026-11-01..15 (Pacific), 13 of 16 carried no date of birth and 7 no first
+ * name, and on the 8 not already covered by v234's carry or v190's records
+ * rule, no date had been said before the refusal and the date of birth had
+ * been asked on one. The ticket filed, and the caller, still on the line, was
+ * never asked who it was about. The operator ruled the same shape on PCP the
+ * day before (2026-11-14, "Ask before filing", v235): the patient's name, then
+ * the date of birth, before the request files.
+ *
+ * So on the two codes the corpus carries (an administrative request, and a
+ * caller the model called a provider who never said so), the first refusal
+ * files nothing and asks, ONE field at a time, for what is missing; the next
+ * escalate_to_human files with the answers. Asked once per call: a call
+ * inside the 2 s batch window is a sibling of the same model turn and gets the
+ * same ask without spending it, and any later call files. A caller who hangs
+ * up on the question is filed by the after-hours teardown floor, which files
+ * whenever a caller said more than who they are and no ticket is on the call.
+ *
+ * NOT ASKED, filing at once as before: a post-op medication refusal (urgent,
+ * operator 2026-10-02), a communication failure (another round of questions is
+ * the thing that failed), a symptom the caller did not say (its own question
+ * comes first), a 911-level mention, a caller who declined, a call with no
+ * real CallSid (the ask could not be counted, so it would never file), and a
+ * call that already holds a usable name and date of birth.
+ */
+export const REFUSED_IDENTITY_FIELD = "refused_identity";
+
+/** The refusal codes on which the first refusal asks before it files. */
+export const ASKS_BEFORE_FILING_CODES: ReadonlySet<string> = new Set([
+  "administrative_request",
+  "provider_not_stated_by_caller",
+]);
+
+export type RefusedIdentityField = "name" | "dob";
+
+export type RefusedIdentityDecision =
+  | {
+      fileNow: true;
+      skipReason: "code" | "no_call_sid" | "911" | "declined" | "have_identity" | "already_asked";
+    }
+  | { fileNow: false; missing: RefusedIdentityField[] };
+
+export function decideRefusedEscalationIdentityAsk(input: {
+  callSid?: string;
+  code: string;
+  reason?: string;
+  symptomsSummary?: string;
+  firstName?: string;
+  lastName?: string;
+  dob?: string;
+  detailsDeclined?: boolean;
+}): RefusedIdentityDecision {
+  if (!ASKS_BEFORE_FILING_CODES.has(input.code)) return { fileNow: true, skipReason: "code" };
+  if (!isTwilioCallSid(input.callSid)) return { fileNow: true, skipReason: "no_call_sid" };
+  if (isNineOneOneLevel(input.reason) || isNineOneOneLevel(input.symptomsSummary)) {
+    return { fileNow: true, skipReason: "911" };
+  }
+  if (input.detailsDeclined) return { fileNow: true, skipReason: "declined" };
+  const missing: RefusedIdentityField[] = [];
+  if (!hasUsableOnCallName(input.firstName, input.lastName)) missing.push("name");
+  if (!hasUsableOnCallDob(input.dob)) missing.push("dob");
+  if (missing.length === 0) return { fileNow: true, skipReason: "have_identity" };
+  if (gateRefusalsSoFar(input.callSid, "escalate_to_human", REFUSED_IDENTITY_FIELD) >= 1) {
+    const age = gateRefusalAgeMs(input.callSid, "escalate_to_human", REFUSED_IDENTITY_FIELD);
+    if (age !== undefined && age < ASK_BATCH_WINDOW_MS) return { fileNow: false, missing };
+    return { fileNow: true, skipReason: "already_asked" };
+  }
+  noteGateRefusal(input.callSid, "escalate_to_human", REFUSED_IDENTITY_FIELD);
+  return { fileNow: false, missing };
+}
+
+/**
+ * Whether this call's refused escalation has already asked who the request is
+ * about. The filing that follows reads it so that the facility question an
+ * unstated provider was asked with the identity is not asked a second time.
+ */
+export function refusedIdentityAskSpent(callSid: string | undefined): boolean {
+  return gateRefusalsSoFar(callSid, "escalate_to_human", REFUSED_IDENTITY_FIELD) >= 1;
 }

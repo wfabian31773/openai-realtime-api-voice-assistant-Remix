@@ -21,6 +21,7 @@
  * Synthetic callers; nothing here is a real person.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { pastTheIdentityAsk } from './testSupport/pastTheIdentityAsk';
 
 process.env.DATABASE_URL ||= 'postgresql://unused:unused@127.0.0.1:5432/unused';
 process.env.OPENAI_API_KEY ||= 'test-unused';
@@ -60,7 +61,9 @@ const { AFTER_HOURS_DEPARTMENT_ID } = await import('../tools/afterHoursTaxonomy'
 async function call(agent: any, name: string, args: Record<string, unknown>) {
   const t = agent.tools.find((x: any) => x.name === name);
   expect(t, `${name} is not on the agent`).toBeTruthy();
-  const raw = await t.invoke({}, JSON.stringify(args));
+  // v244: a refused escalation with no name or date of birth asks first;
+  // this suite is about what it files, so it calls again past the ask.
+  const raw = await pastTheIdentityAsk(() => t.invoke({}, JSON.stringify(args)));
   return typeof raw === 'string' ? JSON.parse(raw) : raw;
 }
 

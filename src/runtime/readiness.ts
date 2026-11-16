@@ -1897,11 +1897,22 @@ import { callEnvironment } from "./callRecord";
  * now stands only when the model's own words do not name another day
  * (`appointmentTodayHolds`); words that name today, or no day, keep it. 15
  * days to 2026-11-15: 7 of 121 same-day after-hours tickets, 6 moved by staff.
- * Above main's v241 (#487, `267bf42`); v242 is #488 on its open branch. No
- * migration.
+ * On main since #489 (`b18b2e8`). No migration.
+ */
+/**
+ * v244 — A REFUSED ESCALATION ASKS WHO BEFORE IT FILES (2026-11-16). A refused
+ * after-hours escalation filed its own ticket at once from the model's
+ * arguments (v80), so an administrative request or an unstated provider was
+ * filed with no patient name or date of birth whenever the model had not yet
+ * asked. On those two refusal codes only, the first refusal now files nothing
+ * and asks, one field per question; the next call files with the answers or
+ * the stand-in (`decideRefusedEscalationIdentityAsk`). No-ivr, 2026-11-01..15:
+ * 13 of 16 refused-escalation tickets had no date of birth, 8 not reached by
+ * v234 or v190. Above main's v243 (#489, `b18b2e8`), which it contains along
+ * with v241 (#487); v242 (#488) is on its open branch. No migration.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v243-a-flag-on-another-day-is-not-same-day-20261116";
+  "voice-runtime-v244-a-refused-escalation-asks-who-before-filing-20261116";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

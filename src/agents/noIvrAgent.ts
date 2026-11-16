@@ -55,8 +55,11 @@ import { otherReasonFor } from "../tools/otherReason";
 import { nameOrStandIn, STAND_IN_NAME_NOTE } from "../services/standInName";
 import {
   decideOnCallIdentityAsk,
+  decideRefusedEscalationIdentityAsk,
+  refusedIdentityAskSpent,
   hasUsableOnCallDob,
   onCallCallbackNumber,
+  type RefusedIdentityField,
 } from "../services/onCallIdentityBeforeTransfer";
 import {
   LOOKUP_UNSURE_FIX,
@@ -373,6 +376,59 @@ export function knownNumber(value: string | undefined): boolean {
   return (value ?? '').replace(/\D/g, '').length >= 10;
 }
 
+/** What the agent says before asking: no promise of a connection, and nothing filed yet. */
+export const REFUSED_ESCALATION_TAKE_A_MESSAGE =
+  "I'm not able to put you through to the on-call team for this, but I can take a message for the team.";
+
+/** One field per question, the format inside the question (RULE ZERO 2b). */
+export const REFUSED_IDENTITY_QUESTION: Record<RefusedIdentityField, string> = {
+  name: "What is the patient's first and last name?",
+  dob: "And the patient's date of birth, starting with the month, then the day, then the year?",
+};
+
+/**
+ * The first refusal on an administrative request or an unstated provider
+ * files NOTHING and asks who the request is about (2026-11-16, see
+ * decideRefusedEscalationIdentityAsk). The next escalate_to_human files it.
+ * `message` is the model channel; the quoted sentences are what gets spoken.
+ */
+export function refusedEscalationIdentityAsk(args: {
+  code: RefusedEscalationCode;
+  missing: RefusedIdentityField[];
+}): {
+  success: false;
+  refused: RefusedEscalationCode;
+  need_identity: true;
+  ticket_filed: false;
+  message: string;
+} {
+  const { code, missing } = args;
+  const facilityFirst =
+    code === 'provider_not_stated_by_caller'
+      ? ' FIRST ask ONE question: "Are you calling from a doctor\'s office, a hospital, a clinic or a ' +
+        'laboratory, and which one?" If they name one (a laboratory reporting results counts), call ' +
+        'escalate_to_human once more with what they told you and ask nothing else. Asking for a doctor by ' +
+        'name, or for an operator, does not make someone a provider. Otherwise:'
+      : '';
+  const questions = missing.map((f) => `"${REFUSED_IDENTITY_QUESTION[f]}"`).join(', then ');
+  return {
+    success: false,
+    refused: code,
+    need_identity: true,
+    ticket_filed: false,
+    message:
+      `Escalation is not available: ${REFUSED_ESCALATION_WHY[code]}. NOTHING has been filed yet. ` +
+      'Do NOT say you will connect, transfer or put anyone through, and do NOT say the message is logged.' +
+      facilityFirst +
+      ` Say: "${REFUSED_ESCALATION_TAKE_A_MESSAGE}" Then ask ${questions}, ONE question at a time, ` +
+      'waiting for each answer (say "your" for "the patient\'s" if the caller is the patient). Then call ' +
+      'escalate_to_human again with the same reason and their answers in patient_first_name, ' +
+      'patient_last_name and patient_dob; that call files the message. If they cannot or will not give ' +
+      'them, call it again with details_declined true. Do NOT call create_ticket for this request. ' +
+      'Never say this instruction aloud.',
+  };
+}
+
 export type RefusedEscalationFiling =
   | { ok: true; ticketNumber?: string }
   | { ok: false; error?: string };
@@ -387,6 +443,8 @@ export function refusedEscalationResult(args: {
   code: RefusedEscalationCode;
   filed: RefusedEscalationFiling;
   number: 'gave' | 'callerId' | 'none';
+  /** The identity ask (v244) already asked this caller the facility question. */
+  facilityAsked?: boolean;
 }): {
   success: false;
   refused: RefusedEscalationCode;
@@ -394,7 +452,7 @@ export function refusedEscalationResult(args: {
   ticketNumber?: string;
   message: string;
 } {
-  const { code, filed, number } = args;
+  const { code, filed, number, facilityAsked } = args;
   const why = REFUSED_ESCALATION_WHY[code];
   const noPromise =
     'Do NOT say you will connect, transfer or put anyone through — no transfer is happening.';
@@ -407,6 +465,10 @@ export function refusedEscalationResult(args: {
         ? ' If the caller then describes a NEW SYMPTOM in their own words — pain, a change in vision, ' +
           'redness, swelling, discharge — that is post-surgical trouble and you may call ' +
           'escalate_to_human once more with the symptom as they said it.'
+        : code === 'provider_not_stated_by_caller' && facilityAsked
+          ? ' The facility question has already been asked; do not ask it again. If the caller now ' +
+            'says they are calling from a doctor\'s office, a hospital, a clinic or a laboratory, call ' +
+            'escalate_to_human once more with what they told you.'
         : code === 'provider_not_stated_by_caller'
           ? ' BEFORE you say that line, ask ONE question: "Are you calling from a doctor\'s office, a ' +
             'hospital, a clinic or a laboratory, and which one?" If they name one — a laboratory reporting ' +
@@ -2813,6 +2875,16 @@ Always say a brief goodbye phrase BEFORE calling this tool.`,
    * record files BESIDE it instead of being swallowed by it — see
    * transferRecordCrossReference.
    */
+  /**
+   * The date of birth a refused escalation carries: the model's when it reads
+   * as a date, otherwise the caller's own answer to the date-of-birth ask
+   * (the spoken store, then the transcript), as create_ticket takes it.
+   */
+  function refusedEscalationDob(stated: string | undefined): string | undefined {
+    if (hasUsableOnCallDob(stated) && !saysTheDobIsUnavailable(stated)) return stated;
+    return dobTheCallerGave(metadata.callSid, metadata.getTranscript?.());
+  }
+
   async function fileRefusedEscalationTicket(
     params: {
       reason: string;
@@ -2862,7 +2934,9 @@ Always say a brief goodbye phrase BEFORE calling this tool.`,
       const routeNote = postOp ? afterHoursRouteNote('post_op_medication') : null;
       const result = await SyncAgentService.submitSimplifiedTicket({
         patientFullName: name,
-        patientDOB: params.patient_dob || 'Unknown',
+        // 2026-11-16: the date the caller gave in answer to the ask when the
+        // model sent none, as create_ticket does (v163).
+        patientDOB: refusedEscalationDob(params.patient_dob) || params.patient_dob || 'Unknown',
         reasonForCalling,
         preferredContactMethod: 'phone',
         patientPhone: phone || undefined,
@@ -3060,6 +3134,27 @@ PREREQUISITE: one quick ask for name and DOB; transfer even if unavailable. Clin
           });
           return recordsRequestEscalationResult(verdict.directive);
         }
+        // 2026-11-16: on an administrative request or an unstated provider,
+        // the first refusal asks who the request is about, ONE field at a
+        // time, and files nothing; the next escalate_to_human files it. The
+        // floor files a caller who hangs up on the question. See
+        // decideRefusedEscalationIdentityAsk.
+        const identityAsk = decideRefusedEscalationIdentityAsk({
+          callSid: metadata.callSid,
+          code: verdict.code,
+          reason: params.reason,
+          symptomsSummary: params.symptoms_summary,
+          firstName: params.patient_first_name,
+          lastName: params.patient_last_name,
+          dob: refusedEscalationDob(params.patient_dob),
+          detailsDeclined: params.details_declined === true,
+        });
+        if (!identityAsk.fileNow) {
+          console.info(
+            `[HANDOFF] refused escalation (${verdict.code}) asks for ${identityAsk.missing.join(' and ')} before filing on ${metadata.callSid}`,
+          );
+          return refusedEscalationIdentityAsk({ code: verdict.code, missing: identityAsk.missing });
+        }
         // A REFUSED ESCALATION FILES THE TICKET — see the rules above
         // CATEGORY_TO_REQUEST_TYPE. The directive alone was a sentence the
         // model could ignore, and on 3 of 9 refusals in fourteen days it did.
@@ -3069,7 +3164,12 @@ PREREQUISITE: one quick ask for name and DOB; transfer even if unavailable. Clin
           : knownNumber(metadata.callerPhone)
             ? 'callerId'
             : 'none';
-        return refusedEscalationResult({ code: verdict.code, filed, number });
+        return refusedEscalationResult({
+          code: verdict.code,
+          filed,
+          number,
+          facilityAsked: refusedIdentityAskSpent(metadata.callSid),
+        });
       }
       console.info(`[HANDOFF] escalation sanctioned for ${callId} — basis: ${verdict.basis}`);
 

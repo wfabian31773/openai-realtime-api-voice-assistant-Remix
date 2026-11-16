@@ -25,6 +25,7 @@
  * Synthetic caller, synthetic numbers. Nothing here is a real person.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { pastTheIdentityAsk } from './testSupport/pastTheIdentityAsk';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -72,7 +73,9 @@ const { recordCallerSpeech, releaseCallerSpeech } = await import('../services/sy
 async function call(agent: any, name: string, args: Record<string, unknown>) {
   const t = agent.tools.find((x: any) => x.name === name);
   expect(t, `${name} is not on the agent`).toBeTruthy();
-  const raw = await t.invoke({}, JSON.stringify(args));
+  // v244: a refused escalation with no name or date of birth asks first;
+  // this suite is about what it files, so it calls again past the ask.
+  const raw = await pastTheIdentityAsk(() => t.invoke({}, JSON.stringify(args)));
   return typeof raw === 'string' ? JSON.parse(raw) : raw;
 }
 
