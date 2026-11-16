@@ -1908,11 +1908,18 @@ import { callEnvironment } from "./callRecord";
  * and asks, one field per question; the next call files with the answers or
  * the stand-in (`decideRefusedEscalationIdentityAsk`). No-ivr, 2026-11-01..15:
  * 13 of 16 refused-escalation tickets had no date of birth, 8 not reached by
- * v234 or v190. Above main's v243 (#489, `b18b2e8`), which it contains along
- * with v241 (#487); v242 (#488) is on its open branch. No migration.
+ * v234 or v190. On main since #490 (`0048b2c`). No migration.
+ */
+/**
+ * v245 — A CALL WITH NO REQUEST FILES NOTHING (2026-11-16; v242 until main moved
+ * past it). HELD FOR THE OPERATOR: a policy change, not to be merged without
+ * his word. When the teardown sweep's reader reads no request at all on a queue
+ * lane, nothing is filed; the records lane and a caller who asked only for a
+ * person still file. Above main's v244 (#490, `0048b2c`), which it contains
+ * along with v243 (#489, `b18b2e8`). No migration.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v244-a-refused-escalation-asks-who-before-filing-20261116";
+  "voice-runtime-v245-a-call-with-no-request-files-nothing-20261116";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

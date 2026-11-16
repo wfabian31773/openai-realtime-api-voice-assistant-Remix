@@ -225,9 +225,11 @@ describe('the corpus: placeholder tickets of 2026-11-12/13 whose caller asked fo
 
   it.each(CORPUS)('$ticket: a second answer that fails too files what main files', async (row) => {
     // What main files when the reader gives nothing usable: the taxonomy
-    // label where the lane classifies one, else the placeholder.
+    // label where the lane classifies one, else the placeholder. The baseline
+    // reader never asks (v245: a model that ANSWERS null now files nothing on
+    // these lanes, which is a different call from a sentence that failed).
     const baseline = filer();
-    await runRequestSweep(record(row.sid, row.lane, row.says), baseline, noName, onePerson, model(null).ask);
+    await runRequestSweep(record(row.sid, row.lane, row.says), baseline, noName, onePerson, async () => null);
     resetVerifiedIdentities();
     resetStatedNames();
     resetDraftedRequests();
@@ -362,6 +364,6 @@ describe('the second ask the model is sent', () => {
 
   it('the sweep hands the reader the call\'s SID for its log lines', () => {
     const runner = readFileSync(new URL('./sweepRunner.ts', import.meta.url), 'utf8');
-    expect(runner).toMatch(/requestFromTheRecording\(record\.transcript, askRequest, held, record\.callSid\)/);
+    expect(runner).toMatch(/readTheRequest\(record\.transcript, askRequest, held, record\.callSid\)/);
   });
 });

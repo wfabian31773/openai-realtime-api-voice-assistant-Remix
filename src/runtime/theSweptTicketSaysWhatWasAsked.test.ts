@@ -256,17 +256,27 @@ describe('the corpus: the swept "reason not captured" tickets of 2026-11-10', ()
     expect(String(t.staffNote)).toContain(String(row.reads));
   });
 
-  it.each(VAGUE)('$sid ($lane) — nothing specific was asked, so the placeholder stays', async (row) => {
+  it.each(VAGUE.filter((r) => r.reads !== null))('$sid ($lane) — nothing specific was asked, so the placeholder stays', async (row) => {
     const { out, f } = await sweep(row);
     expect(out.filed).toBe(true);
     expect(f.calls[0].description).toBe(SWEPT_TICKET_DESCRIPTION);
     expect(String(f.calls[0].staffNote)).not.toContain(REQUEST_FROM_RECORDING_NOTE);
   });
 
-  it(`${NOTHING_SAID.sid} — background noise: the placeholder stays`, async () => {
+  // v245 (held for the operator): where the model reads NO request at all, a
+  // queue lane files nothing. The placeholder was filed here before v245.
+  it.each(VAGUE.filter((r) => r.reads === null))('$sid ($lane) — the model read no request: nothing is filed (v245)', async (row) => {
+    const { out, f } = await sweep(row);
+    expect(out.filed).toBe(false);
+    expect(out.reason).toBe('no-request-read');
+    expect(f.calls).toHaveLength(0);
+  });
+
+  it(`${NOTHING_SAID.sid} — background noise: the model read no request, nothing is filed (v245)`, async () => {
     const { out, f } = await sweep(NOTHING_SAID);
-    expect(out.filed).toBe(true);
-    expect(f.calls[0].description).toBe(SWEPT_TICKET_DESCRIPTION);
+    expect(out.filed).toBe(false);
+    expect(out.reason).toBe('no-request-read');
+    expect(f.calls).toHaveLength(0);
   });
 });
 
@@ -303,8 +313,17 @@ describe('main is unchanged where nothing is read', () => {
     expect(f.calls[0].description).toBe(SWEPT_TICKET_DESCRIPTION);
   });
 
-  it('a model that answers null, or nothing, leaves the placeholder', async () => {
+  it('an asker that never asked (no key, switched off) leaves the placeholder', async () => {
     expect((await sweep(SPECIFIC[2], async () => null)).f.calls[0].description).toBe(SWEPT_TICKET_DESCRIPTION);
+  });
+
+  it('a model that answers with no request files nothing on a queue lane (v245)', async () => {
+    const { out, f } = await sweep(SPECIFIC[2], async () => ({ request: null }));
+    expect(out).toEqual({ filed: false, reason: 'no-request-read' });
+    expect(f.calls).toHaveLength(0);
+  });
+
+  it('an answer with no request field is a format failure and leaves the placeholder (review of #488)', async () => {
     expect((await sweep(SPECIFIC[2], async () => ({}))).f.calls[0].description).toBe(SWEPT_TICKET_DESCRIPTION);
   });
 
@@ -358,7 +377,6 @@ describe('a sentence that fails a check is dropped, never trimmed into shape', (
     ['an email address with @', 'Wants the records emailed to t@x.co for the new doctor.'],
     ['a street address', 'Asking whether the office at 123 Main Street is open.'],
     ['a titled name', 'Wants to know whether Dr. Quill will do the surgery.'],
-    ['the model saying nothing was asked', 'Caller did not state a specific request.'],
     ['a no-topic sentence', 'Requesting a call back from someone.'],
     ['the placeholder itself', 'Callback request taken during your call.'],
     ['too short', 'Needs a fix'],
@@ -368,6 +386,13 @@ describe('a sentence that fails a check is dropped, never trimmed into shape', (
     expect(usableRequest(sentence, ['Testa', 'Lake'])).toBeUndefined();
     const { f } = await sweep(row, answers(sentence));
     expect(f.calls[0].description).toBe(SWEPT_TICKET_DESCRIPTION);
+  });
+
+  it('the model saying nothing was asked files nothing on a queue lane (v245)', async () => {
+    expect(usableRequest('Caller did not state a specific request.', ['Testa', 'Lake'])).toBeUndefined();
+    const { out, f } = await sweep(row, answers('Caller did not state a specific request.'));
+    expect(out).toEqual({ filed: false, reason: 'no-request-read' });
+    expect(f.calls).toHaveLength(0);
   });
 
   it("a patient name this call holds is dropped — the number's record, a verified identity, the candidate", async () => {
