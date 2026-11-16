@@ -147,6 +147,7 @@ describe('a New or Lapsed patient who rings back is still offered and booked', (
     expect(await call(BOOK_SOONER_TOOL_NAME, { option: '1' })).toMatchObject({ success: true, booked: true });
     expect(npx.book).toHaveBeenCalledTimes(1);
     // One Console read for the whole call, against the appointment it is about.
+    expect(sourceFn).toHaveBeenCalledTimes(1);
     expect(recheck).toHaveBeenCalledTimes(1);
     expect(recheck.mock.calls[0][0]).toBe('appt-0246');
   });
@@ -184,6 +185,7 @@ describe('an Existing patient who rings back is offered nothing and booked nothi
     expect(outreachSessionFor(EXISTING_A)!.verified).toBe(false);
     expect(npx.book).not.toHaveBeenCalled();
     expect(cancel).not.toHaveBeenCalled();
+    expect(sourceFn).toHaveBeenCalledTimes(1);
     expect(recheck).toHaveBeenCalledTimes(1);
   });
 
