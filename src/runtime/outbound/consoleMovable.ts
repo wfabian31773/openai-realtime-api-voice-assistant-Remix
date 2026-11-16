@@ -110,6 +110,14 @@ export function rowToMovable(r: Record<string, unknown>): MovableAppointment {
  * The movable list's own query: the hourly cache joined to the live
  * appointment row and the live person row, exactly as the Console's
  * `capacity_movable_worklist` joins them (0132), in-reach only, from today.
+ *
+ * New and Lapsed patients only (v246). The cache holds every movable
+ * appointment, Existing patients included (a kept visit in the 15 months
+ * before, Console 0143), and the Console worklist shows all three classes.
+ * The campaign is for patients with no recent visit; it read the cache
+ * without the class and dialled Existing patients: 946 of the first 1,215
+ * contacts (2026-11-07..16), 606 of them seen since 2026-09-01. `current()`
+ * runs this same statement at the dial, so a queued Existing row is skipped.
  * One fixed statement with bound parameters, so it costs the Console one
  * plan and one `pg_stat_statements` entry however often it runs.
  *
@@ -129,6 +137,7 @@ export const MOVABLE_SELECT = `
     join public.si_appointment_facts f on f.appointment_id = r.appointment_id
     join public.patients_master pm on pm.person_id = r.person_id
    where r.in_reach
+     and r.patient_class in ('new', 'lapsed')
      and not coalesce(f.is_cancelled, false)
      and not coalesce(f.is_rescheduled, false)
      and f.appointment_date >= $1::date`;

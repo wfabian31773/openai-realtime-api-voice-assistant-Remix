@@ -87,6 +87,8 @@ describe("the read itself", () => {
     expect(MOVABLE_SELECT).toContain("not coalesce(f.is_cancelled, false)");
     expect(MOVABLE_SELECT).toContain("not coalesce(f.is_rescheduled, false)");
     expect(MOVABLE_SELECT).toContain("where r.in_reach");
+    // v246: the campaign never calls an Existing patient (seen in the last 15 months).
+    expect(MOVABLE_SELECT).toContain("and r.patient_class in ('new', 'lapsed')");
     expect(MOVABLE_SELECT).toContain("f.appointment_date >= $1::date");
   });
 
