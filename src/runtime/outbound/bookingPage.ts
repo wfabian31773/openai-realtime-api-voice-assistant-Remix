@@ -205,6 +205,33 @@ async function readLink(rawToken: string, deps: BookingPageDeps, now: Date): Pro
   return { ok: true, hash, contact, record, campaignKey, policy, page };
 }
 
+/**
+ * THE LINK'S RE-CHECK, the dialler's own (v246). The lane's source is asked
+ * about this appointment: only `current` may go on. Off the list (an Existing
+ * patient, or an appointment no longer movable) is `not_offered`; over
+ * (cancelled, moved or past) is `appointment_changed`; a source that cannot
+ * answer is `busy`. A lane with no source, or a contact with no appointment
+ * reference, has nothing to re-check and goes on as before.
+ */
+async function recheckLink(
+  link: Extract<Link, { ok: true }>,
+  now: Date,
+): Promise<{ ok: true; phone?: string } | { ok: false; error: "busy" | "not_offered" | "appointment_changed"; why: string }> {
+  if (!link.policy.source || !link.contact.externalRef) return { ok: true };
+  const source = await link.policy.source().catch(() => null);
+  if (!source) return { ok: false, error: "busy", why: "no source to re-check the appointment with" };
+  let live;
+  try {
+    live = await source.recheck(link.contact.externalRef, now);
+  } catch {
+    return { ok: false, error: "busy", why: "the source could not re-check the appointment" };
+  }
+  if (live.state === "current") return { ok: true, phone: live.contact.phone || undefined };
+  return live.state === "gone"
+    ? { ok: false, error: "appointment_changed", why: "the appointment is over" }
+    : { ok: false, error: "not_offered", why: "the appointment is off the list" };
+}
+
 function asContact(c: ContactRow): OutboundContact {
   return {
     contactId: c.id,
@@ -263,6 +290,12 @@ export const EXPIRED_PAGE = shell(
 const BUSY_PAGE = shell(
   "Please try again shortly",
   `<h1>Please try again in a few minutes</h1><p>This link can't be used right now. Nothing has been changed.</p>`,
+);
+/** v246: a link to a patient the list no longer offers (an Existing patient,
+ * or an appointment no longer movable). Says nothing from the record. */
+export const NOT_OFFERED_PAGE = shell(
+  "Not available",
+  `<h1>This offer isn't available</h1><p>This sooner opening isn't one we can offer you after all. Your appointment with us stays exactly as it is, and nothing has been changed by this link.</p>`,
 );
 const TOO_MANY_PAGE = shell(
   "Please wait",
@@ -348,6 +381,7 @@ const STEPS_SCRIPT = `
     busy: "This link can't be used right now. Please try again in a few minutes.",
     too_many: "This link has been used many times in a short while. Please try again in ten minutes.",
     appointment_changed: "Your appointment has changed since we texted you, so this link can't book. Nothing has been changed by this link.",
+    not_offered: "This sooner opening isn't one we can offer you after all, so this link can't book. Your appointment with us stays exactly as it is, and nothing has been changed by this link.",
     not_booked: "We couldn't book that online. Your current appointment stays exactly as it is.",
     no_openings: "There are no sooner openings right now. Your current appointment stays as it is."
   };
@@ -428,6 +462,17 @@ export async function handleBookingPage(token: string, deps: BookingPageDeps): P
       if (link.reason === "busy") return html(200, BUSY_PAGE);
       return html(200, EXPIRED_PAGE);
     }
+    // v246: re-checked BEFORE the date-of-birth form is shown, so a patient
+    // the list no longer offers is never asked for it (Codex P2 on #491). The
+    // pages say nothing from the record: an appointment that is over reads as
+    // an expired link. The verify and book steps re-check again.
+    const live = await recheckLink(link, now);
+    if (!live.ok) {
+      (deps.log ?? console.log)(`[booking page] ${link.policy.campaignKey}: link stopped before the form — ${live.why}`);
+      if (live.error === "not_offered") return html(200, NOT_OFFERED_PAGE);
+      if (live.error === "busy") return html(200, BUSY_PAGE);
+      return html(200, EXPIRED_PAGE);
+    }
     return html(200, STEPS_PAGE);
   } catch (error) {
     (deps.log ?? console.warn)(`[booking page] could not read a link — ${error instanceof Error ? error.message : String(error)}`);
@@ -465,6 +510,15 @@ export async function handleBookingStep(
     const tag = `[booking page] ${link.policy.campaignKey}`;
 
     if (action === "verify") {
+      // v246: the appointment is re-checked BEFORE the date of birth is asked
+      // for, so a patient the list no longer offers (an Existing patient, or
+      // an appointment that is over) is told so at the first step, spends no
+      // try, and is never shown an opening it cannot book.
+      const live = await recheckLink(link, now);
+      if (!live.ok) {
+        log(`${tag}: link stopped at the first step — ${live.why}`);
+        return json(200, { ok: false, error: live.error });
+      }
       const onFile = dobOnFile(contact);
       const said = { month: day2(body.month), day: day2(body.day), year: day2(body.year) };
       const matches =
@@ -534,29 +588,17 @@ export async function handleBookingStep(
       }
       const release = () => store.patchText(contact.contactId, { booking_started_at: null }).catch(() => undefined);
       // The dialler's rule at the dial: a cancelled or moved appointment is
-      // never the reason anything is booked, and a source that cannot answer
-      // books nothing.
+      // never the reason anything is booked, a patient off the list (v246:
+      // an Existing patient) is never offered one, and a source that cannot
+      // answer books nothing.
       let bookFor = contact;
-      if (link.policy.source && link.contact.externalRef) {
-        const source = await link.policy.source().catch(() => null);
-        if (!source) {
-          await release();
-          return json(200, { ok: false, error: "busy" });
-        }
-        let live;
-        try {
-          live = await source.recheck(link.contact.externalRef, now);
-        } catch {
-          await release();
-          return json(200, { ok: false, error: "busy" });
-        }
-        if (live.state !== "current") {
-          await release();
-          log(`${tag}: booking refused — the appointment is ${live.state === "gone" ? "over" : "off the list"}`);
-          return json(200, { ok: false, error: "appointment_changed" });
-        }
-        if (live.contact.phone) bookFor = { ...contact, phone: live.contact.phone };
+      const live = await recheckLink(link, now);
+      if (!live.ok) {
+        await release();
+        log(`${tag}: booking refused — ${live.why}`);
+        return json(200, { ok: false, error: live.error });
       }
+      if (live.phone) bookFor = { ...contact, phone: live.phone };
       const booked = await link.page.book({
         contact: bookFor,
         demo,

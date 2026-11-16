@@ -12,6 +12,7 @@ import type { ContactSource, OutboundLanePolicy, SourceRecheck } from "./campaig
 import { DEFAULT_ATTEMPT_CAPS, DEFAULT_CALLING_WINDOW } from "./callingWindow";
 import {
   EXPIRED_PAGE,
+  NOT_OFFERED_PAGE,
   LINK_DOB_TRIES,
   LINK_REQUEST_LIMIT,
   LINK_SESSION_MS,
@@ -341,6 +342,73 @@ describe("steps 2 and 3: a day and a city, then a time", () => {
   });
 });
 
+describe("v246: the link is re-checked before the date of birth is asked", () => {
+  it("an Existing patient (off the list) is never shown the date-of-birth form", async () => {
+    seed();
+    recheck.mockResolvedValueOnce({ state: "off_list" });
+    const r = await handleBookingPage(token, deps);
+    expect(r.status).toBe(200);
+    expect(r.body).toBe(NOT_OFFERED_PAGE);
+    expect(r.body).not.toContain("confirm your date of birth");
+    for (const word of RECORD_WORDS) expect(r.body).not.toContain(word);
+    expect(recheck).toHaveBeenCalledWith("ref-c1", NOW);
+  });
+
+  it("an appointment that is over reads as an expired link, with nothing from the record", async () => {
+    seed();
+    recheck.mockResolvedValueOnce({ state: "gone" });
+    expect((await handleBookingPage(token, deps)).body).toBe(EXPIRED_PAGE);
+  });
+
+  it("a source that cannot answer shows the try-again page, not the form", async () => {
+    seed();
+    recheck.mockRejectedValueOnce(new Error("console down"));
+    const r = await handleBookingPage(token, deps);
+    expect(r.body).not.toBe(STEPS_PAGE);
+    expect(r.body).toContain("try again in a few minutes");
+  });
+
+  // An Existing patient texted before v246 still holds a live link. The page
+  // must stop them at the first step with a true line, not walk them to the
+  // last and say their appointment changed.
+  it("stops an Existing patient (off the list) at the first step, spending no try", async () => {
+    seed();
+    recheck.mockResolvedValueOnce({ state: "off_list" });
+    expect((await step("verify", DOB)).json).toEqual({ ok: false, error: "not_offered" });
+    expect(recheck).toHaveBeenCalledWith("ref-c1", NOW);
+    expect(rec().dob_tries ?? 0).toBe(0);
+    expect(rec().verified_at).toBeUndefined();
+    expect(rec().session_hash).toBeUndefined();
+    expect(lane.openings).not.toHaveBeenCalled();
+  });
+
+  it("stops an appointment that is over at the first step", async () => {
+    seed();
+    recheck.mockResolvedValueOnce({ state: "gone" });
+    expect((await step("verify", DOB)).json).toEqual({ ok: false, error: "appointment_changed" });
+    expect(rec().dob_tries ?? 0).toBe(0);
+  });
+
+  it("asks nothing when the source cannot answer", async () => {
+    seed();
+    recheck.mockRejectedValueOnce(new Error("console down"));
+    expect((await step("verify", DOB)).json).toEqual({ ok: false, error: "busy" });
+    expect(rec().dob_tries ?? 0).toBe(0);
+  });
+
+  it("a wrong date of birth on a current appointment still spends a try", async () => {
+    seed();
+    expect((await step("verify", { ...DOB, year: "1999" })).json).toEqual({ ok: false, error: "mismatch" });
+    expect(rec().dob_tries).toBe(1);
+  });
+
+  it("the page says the opening is not theirs, and that nothing changed", () => {
+    expect(STEPS_PAGE).toContain(
+      "not_offered: \"This sooner opening isn't one we can offer you after all, so this link can't book. Your appointment with us stays exactly as it is, and nothing has been changed by this link.\"",
+    );
+  });
+});
+
 describe("step 4: booking", () => {
   it("re-checks the appointment, books it, and the link is used up", async () => {
     seed();
@@ -374,7 +442,7 @@ describe("step 4: booking", () => {
     seed();
     const session = await verified();
     recheck.mockResolvedValueOnce({ state: "off_list" });
-    expect((await step("book", { session, id: "slot-a" })).json).toEqual({ ok: false, error: "appointment_changed" });
+    expect((await step("book", { session, id: "slot-a" })).json).toEqual({ ok: false, error: "not_offered" });
     expect(lane.book).not.toHaveBeenCalled();
     expect(rec().booking_started_at).toBeNull();
   });

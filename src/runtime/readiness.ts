@@ -1910,9 +1910,23 @@ import { callEnvironment } from "./callRecord";
  * 13 of 16 refused-escalation tickets had no date of birth, 8 not reached by
  * v234 or v190. Above main's v243 (#489, `b18b2e8`), which it contains along
  * with v241 (#487); v242 (#488) is on its open branch. No migration.
+ * On main since #490 (`0048b2c`).
+ */
+/**
+ * v246 — NPX OUTREACH CALLS NEW AND LAPSED PATIENTS ONLY (2026-11-16). The
+ * campaign read the Console's movable cache with no patient class and dialled
+ * Existing patients (a kept visit in the last 15 months): 946 of the first
+ * 1,215 contacts, 606 seen since 2026-09-01. `MOVABLE_SELECT` now keeps only
+ * New and Lapsed rows, at the list and again at the dial. A RETURNED call is
+ * re-checked against the lane's own source before anything is offered
+ * (npxOutreachTools.ts, classGateFor): off the list, over, or a source that
+ * cannot answer offers and books nothing. The texted booking link re-checks
+ * the same way when the page loads, before the date-of-birth form (bookingPage.ts,
+ * recheckLink). Above main's v244 (#490,
+ * `0048b2c`); v245 is #488 on its open branch. No migration.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v244-a-refused-escalation-asks-who-before-filing-20261116";
+  "voice-runtime-v246-npx-outreach-calls-new-and-lapsed-only-20261116";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

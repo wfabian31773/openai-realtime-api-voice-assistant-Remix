@@ -181,6 +181,21 @@ describe('PHI discipline — the allow-list is the safety mechanism', () => {
     expect(JSON.stringify(ev)).not.toContain('Kolterman');
   });
 
+  it('keeps class_gate on an NPX returned call, and still nothing about who (v246)', () => {
+    const callId = freshCall();
+    recordToolEvent(
+      callId,
+      'describe_upcoming_appointment',
+      {},
+      JSON.stringify({ success: false, error: 'not_offered', class_gate: 'off_list', appointment: 'Paula Kolterman, March 20' }),
+      5,
+      { agentSlug: 'npx-outreach' },
+    );
+    const [ev] = getAzulTimeline(callId)!;
+    expect(ev.outcome).toMatchObject({ class_gate: 'off_list' });
+    expect(JSON.stringify(ev)).not.toContain('Kolterman');
+  });
+
   it('keeps form_applies on a records filing, and still nothing about who', () => {
     const callId = freshCall();
     recordToolEvent(

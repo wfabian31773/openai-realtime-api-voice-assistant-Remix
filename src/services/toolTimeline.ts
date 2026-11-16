@@ -352,6 +352,11 @@ function summarizeResult(tool: string, resultJson: string): Record<string, unkno
     // is a count.
     'already_filed',
     'details_added',
+    // v246: what a returned NPX outreach call's re-check against the movable
+    // list said (`current`, `off_list`, `gone`, `unavailable`, or `at_dial` /
+    // `demo` where none ran). One string from a closed set, no PHI: an
+    // Existing patient refused on a returned call is a count.
+    'class_gate',
     // v127: a records filing the ticketing app refused, logged instead as a
     // general Medical Records ticket BEFORE the caller was told it was taken
     // (Codex P2 on #376). A boolean, no PHI — "how often does the app refuse

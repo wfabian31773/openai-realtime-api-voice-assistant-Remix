@@ -398,7 +398,14 @@ describe("live calls", () => {
     expect(await h.outbound.priorAttempts(contact.id)).toHaveLength(1);
     expect((await h.request("/commit_call_live", { confirmToken: a.confirmToken })).status).toBe(409);
     expect(h.sender.createCall).toHaveBeenCalledTimes(1);
-    const audit = JSON.stringify(await h.store.listAudit());
+    // tokenJti and approvalId are 32 random hex characters, so the year can
+    // turn up inside one by chance (CI run 43971920776 on #491, approvalId
+    // 2d7d59ad401950e09d6e276b2366056f): both are pinned to their own values
+    // and every other field is scanned, the device expectDirectCallAuditRedacted
+    // uses for tokenJti.
+    const entries = await h.store.listAudit();
+    for (const entry of entries) expect([a.id, null]).toContain(entry.approvalId);
+    const audit = JSON.stringify(entries.map(({ tokenJti, approvalId, ...rest }) => rest));
     for (const secret of [PHONE, "Testa", "private context", a.confirmToken, "1950"]) expect(audit).not.toContain(secret);
     h.sessions.drop(result.body.sessionId);
   });
