@@ -1887,8 +1887,23 @@ import { callEnvironment } from "./callRecord";
  * them. Above main's v239 (#485, `c4526b35`), which it contains along with
  * v238 (#484, `f0ecfef2`). No migration.
  */
+/**
+ * v241 (2026-11-15): the teardown sweep's reader asks once more when its
+ * sentence fails a content check. Above main's v240 (#486, `3f0c23a7`).
+ *
+ * v244 — A REFUSED ESCALATION ASKS WHO BEFORE IT FILES (2026-11-16). A refused
+ * after-hours escalation filed its own ticket at once from the model's
+ * arguments (v80), so an administrative request or an unstated provider was
+ * filed with no patient name or date of birth whenever the model had not yet
+ * asked. On those two refusal codes only, the first refusal now files nothing
+ * and asks, one field per question; the next call files with the answers or
+ * the stand-in (`decideRefusedEscalationIdentityAsk`). No-ivr, 2026-11-01..15:
+ * 13 of 16 refused-escalation tickets had no date of birth, 8 not reached by
+ * v234 or v190. Above main's v241 (#487, `267bf42`); v242 (#488) and v243
+ * (#489) are on open branches. No migration.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v241-the-reader-asks-again-20261115";
+  "voice-runtime-v244-a-refused-escalation-asks-who-before-filing-20261116";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

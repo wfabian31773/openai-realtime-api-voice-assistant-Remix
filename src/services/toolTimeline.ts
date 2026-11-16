@@ -403,6 +403,10 @@ function summarizeResult(tool: string, resultJson: string): Record<string, unkno
      */
     'refused',
     'ticket_filed',
+    // escalate_to_human asked who the request is about before filing or
+    // dialling (VA-76222 on a sanctioned escalation; 2026-11-16 on a refused
+    // one). A boolean, no PHI: the asks become a count.
+    'need_identity',
     /**
      * ONE CALL, ONE TICKET (2026-10-01): a PCP filing tool called again on a
      * call whose request is already filed through create-ticket answers with
