@@ -176,6 +176,108 @@ export function recordHasAppointmentLaterToday(
 
 const OFFICE_DAY_ENDS_AT = 17 * 60;
 
+/**
+ * v243 — THE MODEL'S OWN WORDS NAME ANOTHER DAY.
+ *
+ * `appointment_today` is the model's reading, and on a Sunday or an early
+ * Monday morning it reads "today" into a call about tomorrow's appointment.
+ * Measured, after-hours tickets filed same-day over the Pacific days
+ * 2026-11-01..15: 121; on 7 the request named another day (a date, a weekday
+ * or "tomorrow") and nothing that is today, and staff moved 6 of the 7 out of
+ * After Hours (5 to the HVA Hub, 1 to Surgery). Every one of the 7 was a
+ * Sunday or Monday-morning call about the next day, and none said "today", so
+ * the flag was the only same-day arm that could have fired (VA-85446
+ * `CAdaa3dec3d92a4ec4eb3cd7b9e4376f35` and VA-85461
+ * `CA7d16143b97bf5f1ef0ff5c647221b7f1`, read from the stored arguments, both
+ * carry `appointment_today: true` beside "Monday, November 16").
+ *
+ * So the flag stands only when the words do not say otherwise: a request that
+ * names a day other than today, and no day that is today, is not a same-day
+ * request whatever the flag says. A date with a year outside this year and the
+ * next, or one straight after a birth word, is a date of birth and names no
+ * day. Anything the words leave open (no day named, or today named beside
+ * another) keeps the flag, so this can only ever take a ticket OUT of the
+ * same-day route, never put one in.
+ */
+const WEEKDAYS = [
+  ['sunday', 'domingo'],
+  ['monday', 'lunes'],
+  ['tuesday', 'martes'],
+  ['wednesday', 'miercoles'],
+  ['thursday', 'jueves'],
+  ['friday', 'viernes'],
+  ['saturday', 'sabado'],
+] as const;
+const MONTHS_EN = [
+  'january', 'february', 'march', 'april', 'may', 'june',
+  'july', 'august', 'september', 'october', 'november', 'december',
+];
+const MONTHS_ES = [
+  'enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio',
+  'julio', 'agosto', 'septiembre', 'octubre', 'noviembre', 'diciembre',
+];
+const SAYS_TODAY =
+  /\b(today|tonight|this (morning|afternoon|evening)|hoy|esta (manana|tarde|noche))\b/;
+/** "Mañana" is tomorrow unless it is "the morning": esta, la or las mañana ("8 de la mañana", "por la mañana"). */
+const SAYS_TOMORROW = /\btomorrow\b|(?<!\b(esta|la|las)\s)\bmanana\b/;
+const BIRTH_WORD = /\b(birth|born|dob|d\.o\.b|birthday|nacimiento|nacio|nacida|nacido|cumpleanos)\b[^.]{0,25}$/;
+const EN_DATE = new RegExp(
+  `\\b(${MONTHS_EN.join('|')})\\s+(\\d{1,2})(?:st|nd|rd|th)?\\b(?:,?\\s+(\\d{4}))?`,
+  'g',
+);
+const ES_DATE = new RegExp(
+  `\\b(\\d{1,2})\\s+de\\s+(${MONTHS_ES.join('|')}|setiembre)\\b(?:\\s+(?:de|del)\\s+(\\d{4}))?`,
+  'g',
+);
+
+const ISO_DATE = /\b(\d{4})-(\d{2})-(\d{2})\b/g;
+
+/** What the words say about the day: today, another day, both, or neither. */
+export function daysNamed(text: string, now: Date = new Date()): { today: boolean; other: boolean } {
+  const t = fold(text);
+  const { isoDate } = pacificNow(now);
+  const [year, month, day] = isoDate.split('-').map(Number);
+  const weekday = new Date(Date.UTC(year, month - 1, day)).getUTCDay();
+  let today = SAYS_TODAY.test(t);
+  let other = SAYS_TOMORROW.test(t);
+  WEEKDAYS.forEach((names, i) => {
+    if (names.some((n) => new RegExp(`\\b${n}\\b`).test(t))) {
+      if (i === weekday) today = true;
+      else other = true;
+    }
+  });
+  const date = (m: number, d: number, y: number | undefined, at: number) => {
+    if (y !== undefined && y !== year && y !== year + 1) return; // a date of birth
+    if (BIRTH_WORD.test(t.slice(0, at))) return;
+    // Today only in this year: next year's same month and day is another day
+    // (review of #489).
+    if (m === month && d === day && (y === undefined || y === year)) today = true;
+    else other = true;
+  };
+  for (const hit of t.matchAll(EN_DATE)) {
+    date(MONTHS_EN.indexOf(hit[1]) + 1, Number(hit[2]), hit[3] ? Number(hit[3]) : undefined, hit.index ?? 0);
+  }
+  for (const hit of t.matchAll(ISO_DATE)) {
+    date(Number(hit[2]), Number(hit[3]), Number(hit[1]), hit.index ?? 0);
+  }
+  for (const hit of t.matchAll(ES_DATE)) {
+    const m = hit[2] === 'setiembre' ? 9 : MONTHS_ES.indexOf(hit[2]) + 1;
+    date(m, Number(hit[1]), hit[3] ? Number(hit[3]) : undefined, hit.index ?? 0);
+  }
+  return { today, other };
+}
+
+/**
+ * The model's `appointment_today` stands unless its own words name only
+ * another day. Read by the route and by the v166 time-conflict check, so a
+ * vetoed flag can do neither.
+ */
+export function appointmentTodayHolds(flag: boolean | undefined, text: string, now: Date = new Date()): boolean {
+  if (flag !== true) return false;
+  const named = daysNamed(text, now);
+  return !(named.other && !named.today);
+}
+
 export function routeAfterHoursTicket(input: {
   /** The model's own reading — `post_op_prescription` on create_ticket. */
   postOpMedication?: boolean;
@@ -232,7 +334,7 @@ export function routeAfterHoursTicket(input: {
     // backs up a request that is already about an appointment.
     const aboutAnAppointment = input.appointmentIntent === true || soundsAboutAnAppointment(input.text);
     if (
-      input.appointmentToday === true ||
+      appointmentTodayHolds(input.appointmentToday, input.text, now) ||
       soundsSameDay(input.text) ||
       (aboutAnAppointment && recordHasAppointmentLaterToday(input.confirmedUpcoming, now))
     ) {
