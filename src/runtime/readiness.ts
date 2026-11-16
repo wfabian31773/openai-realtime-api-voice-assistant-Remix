@@ -1887,8 +1887,21 @@ import { callEnvironment } from "./callRecord";
  * them. Above main's v239 (#485, `c4526b35`), which it contains along with
  * v238 (#484, `f0ecfef2`). No migration.
  */
+/**
+ * v241 (2026-11-15): the teardown sweep's reader asks once more when its
+ * sentence fails a content check. Above main's v240 (#486, `3f0c23a7`).
+ *
+ * v243 — A FLAG ON ANOTHER DAY IS NOT SAME-DAY (2026-11-16). The after-hours
+ * route trusted the model's `appointment_today` flag on its own, so a Sunday
+ * call about Monday's appointment filed in After Hours as same-day. The flag
+ * now stands only when the model's own words do not name another day
+ * (`appointmentTodayHolds`); words that name today, or no day, keep it. 15
+ * days to 2026-11-15: 7 of 121 same-day after-hours tickets, 6 moved by staff.
+ * Above main's v241 (#487, `267bf42`); v242 is #488 on its open branch. No
+ * migration.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v241-the-reader-asks-again-20261115";
+  "voice-runtime-v243-a-flag-on-another-day-is-not-same-day-20261116";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can
