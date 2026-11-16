@@ -29,6 +29,8 @@ import {
   DESCRIBE_TOOL_NAME,
   FIND_SOONER_TOOL_NAME,
   STAFF_CALLBACK_TOOL_NAME,
+  bookedVisitDay,
+  confirmationRecordFor,
   priorBookingOf,
   resetOutreachAvailabilityForTests,
   resetOutreachSessionsForTests,
@@ -345,6 +347,69 @@ describe('what counts as already booked', () => {
   it('a link booking reads the same way', () => {
     const b = priorBookingOf(contactWith(bookedRecord({ confirmation: { by: 'link', call_sid: undefined }, held: null })));
     expect(b).toMatchObject({ bookingId: BOOKING, city: 'Sampletown', azul: 'cancelled' });
+  });
+});
+
+describe('a booking whose visit has passed is not read back (Codex P2 on #492)', () => {
+  // Booked 2026-10-01 for Oct 20, a day already past whenever this runs.
+  const PAST = { when: 'Tue, Oct 20 at 9:00 AM', queued_at: '2026-10-01T20:00:00.000Z', due_at: '2026-10-01T20:02:00.000Z' };
+  const PAST_HELD = { appointment_date: '2026-11-01', held_at: '2026-10-01T20:00:00.000Z', run_after: '2026-10-01T20:11:00.000Z' };
+
+  it('the visit day is the slot start, in Pacific time, when the record carries it', () => {
+    // 01:30 UTC on Feb 6 is 5:30 PM on Feb 5 in Pacific time.
+    expect(bookedVisitDay({ when: 'Tue, Feb 5 at 5:30 PM', queued_at: '2041-01-10T20:00:00.000Z', appointment_at: '2041-02-06T01:30:00.000Z' })).toBe('2041-02-05');
+    // The slot start wins over the text.
+    expect(bookedVisitDay({ when: 'Tue, Feb 5 at 9:00 AM', queued_at: '2041-01-10T20:00:00.000Z', appointment_at: '2041-03-01T17:00:00.000Z' })).toBe('2041-03-01');
+  });
+
+  it('a record written before v247 reads the day from the text, in the year after it was booked', () => {
+    expect(bookedVisitDay({ when: 'Tue, Feb 5 at 9:00 AM', queued_at: '2041-01-10T20:00:00.000Z' })).toBe('2041-02-05');
+    expect(bookedVisitDay({ when: 'Fri, Jan 8 at 9:00 AM', queued_at: '2040-12-20T20:00:00.000Z' })).toBe('2041-01-08');
+    // Booked on the day of the visit itself.
+    expect(bookedVisitDay({ when: 'Thu, Dec 20 at 4:00 PM', queued_at: '2040-12-20T17:00:00.000Z' })).toBe('2040-12-20');
+    expect(bookedVisitDay({ when: 'a day nobody wrote down', queued_at: '2040-12-20T20:00:00.000Z' })).toBeNull();
+    expect(bookedVisitDay({ when: 'Tue, Feb 5 at 9:00 AM', queued_at: '' })).toBeNull();
+  });
+
+  it('past: no booking; the visit day itself: still booked; a day that does not read: still booked', () => {
+    const rec = (c: Record<string, unknown>) => contactWith(bookedRecord({ confirmation: c }));
+    // Midnight Pacific on Feb 6 (PST) is 08:00 UTC.
+    expect(priorBookingOf(rec({}), new Date('2041-02-06T08:00:00.000Z'))).toBeNull();
+    expect(priorBookingOf(rec({}), new Date('2041-02-06T07:59:00.000Z'))).not.toBeNull();
+    expect(priorBookingOf(rec({ when: 'a day nobody wrote down' }), new Date('2041-06-01T00:00:00.000Z'))).not.toBeNull();
+  });
+
+  it('on a returned call the ordinary checks run, and nothing says they are booked', async () => {
+    withContact(bookedRecord({ confirmation: PAST, held: PAST_HELD }));
+    const call = await returnedCall(CORPUS[0]);
+    const r = await call(DESCRIBE_TOOL_NAME);
+    expect(r.already_booked).toBeUndefined();
+    expect(recheck).toHaveBeenCalled();
+    expect(JSON.stringify(r)).not.toMatch(/booked for a sooner appointment|Partner Two|Sampletown/);
+    expect(await call(FIND_SOONER_TOOL_NAME)).not.toMatchObject({ error: 'already_booked' });
+  });
+
+  it('the staff callback still keeps the booking marker first in the note', async () => {
+    withContact(bookedRecord({ confirmation: PAST, held: PAST_HELD }));
+    const call = await returnedCall(ASKED_FOR_THE_PHONE);
+    await call(DESCRIBE_TOOL_NAME);
+    const r = await call(STAFF_CALLBACK_TOOL_NAME, { request: 'a question about the visit' });
+    expect(r.success).toBe(true);
+    expect(String(r.say)).not.toMatch(/stays booked|still booked/);
+    expect(store.contacts.get('c1')!.notes).toBe(`npx_booking:${BOOKING}; staff_callback:VA-90247`);
+  });
+
+  it('a booking the caller undid leaves no marker in the note', async () => {
+    withContact(bookedRecord({ held: { state: 'dropped', reason: 'booking_undone' } }));
+    const call = await returnedCall(ASKED_FOR_THE_PHONE);
+    await call(DESCRIBE_TOOL_NAME);
+    await call(STAFF_CALLBACK_TOOL_NAME, { request: 'a question about the visit' });
+    expect(store.contacts.get('c1')!.notes).toBe('staff_callback:VA-90247');
+  });
+
+  it('a new confirmation carries the slot start', () => {
+    const r = confirmationRecordFor({ contact: contactWith({ ...APPOINTMENT }), slot: SLOT_A, bookingId: 'b', callRef: 'CA1', cancelled: true });
+    expect(r.appointment_at).toBe(SLOT_A.startAt);
   });
 });
 

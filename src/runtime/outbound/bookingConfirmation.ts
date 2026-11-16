@@ -74,6 +74,10 @@ export interface BookingConfirmationRecord {
   call_sid?: string;
   /** "Tue, Nov 24 at 9:00 AM": the new visit, in the practice's own time zone. */
   when: string;
+  /** v247 (Codex P2 on #492): the new visit's start, as the slot gave it, so a
+   * returned call can tell a booking still to come from one already past.
+   * Absent on a record written before v247, where the day is read from `when`. */
+  appointment_at?: string;
   /** "Chino Hills Eyecare Optometry, 4200 Chino Hills Pkwy, Chino Hills" */
   place: string;
   /** The partner practice's phone. */

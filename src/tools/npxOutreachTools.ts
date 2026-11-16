@@ -347,6 +347,9 @@ interface OutreachSession {
   /** v247: a booking this contact made on an EARLIER call or on the text's
    * link, read from the contact's record when the call opened. */
   priorBooking: PriorBooking | null;
+  /** The earlier booking's id even when its visit has passed, for the note's
+   * `npx_booking:` marker only. */
+  earlierBookingId: string | null;
   /** A book_sooner_exam still running: a second call waits for it rather
    * than booking twice. */
   bookingInFlight: Promise<ToolResult> | null;
@@ -455,6 +458,7 @@ async function sessionFor(input: Record<string, unknown>): Promise<{ sid: string
         offers: [],
         booking: null,
         priorBooking: priorBookingOf(contact),
+        earlierBookingId: earlierBookingIdOf(contact),
         bookingInFlight: null,
         undone: [],
         undoInFlight: null,
@@ -779,14 +783,64 @@ export function spokenPhone(phone: string): string {
   return digits.length === 10 ? `${digits.slice(0, 3)}, ${digits.slice(3, 6)}, ${digits.slice(6)}` : phone;
 }
 
-/** The booking this contact holds from an earlier call or the text's link, or null. */
-export function priorBookingOf(contact: OutboundContact): PriorBooking | null {
+/** The Pacific calendar day ("2041-02-05") an instant falls on. */
+function practiceDay(at: Date): string {
+  return at.toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' });
+}
+
+const TEXTED_MONTH_NUMBERS: Record<string, number> = {
+  Jan: 1, Feb: 2, Mar: 3, Apr: 4, May: 5, Jun: 6, Jul: 7, Aug: 8, Sep: 9, Oct: 10, Nov: 11, Dec: 12,
+};
+
+/**
+ * THE DAY THE BOOKED VISIT FALLS ON (v247, Codex P2 on #492: a booking whose
+ * visit has passed is not a booking to read back). From the slot's own start
+ * when the record carries it (`appointment_at`, written from v247 on); for a
+ * record written before that, read from the text's "Tue, Nov 24 at 9:00 AM",
+ * in the year that puts it on or after the day it was booked (a sooner opening
+ * is weeks out, never a year). null when neither reads.
+ */
+export function bookedVisitDay(conf: Pick<BookingConfirmationRecord, 'when' | 'queued_at' | 'appointment_at'>): string | null {
+  if (conf.appointment_at) {
+    const at = Date.parse(conf.appointment_at);
+    if (Number.isFinite(at)) return practiceDay(new Date(at));
+  }
+  const m = /\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\b\.? (\d{1,2})\b/.exec(conf.when ?? '');
+  const booked = Date.parse(conf.queued_at ?? '');
+  if (!m || !Number.isFinite(booked)) return null;
+  const bookedDay = practiceDay(new Date(booked));
+  const md = `${String(TEXTED_MONTH_NUMBERS[m[1]]).padStart(2, '0')}-${m[2].padStart(2, '0')}`;
+  const year = Number(bookedDay.slice(0, 4));
+  return `${year}-${md}` >= bookedDay ? `${year}-${md}` : `${year + 1}-${md}`;
+}
+
+/** The earlier booking still standing on the contact's record: its
+ * confirmation and held cancel, unless the caller undid it. */
+function standingBooking(contact: OutboundContact) {
   const conf = confirmationOf(contact.data);
   if (!conf?.booking_id || !conf.when) return null;
   if (conf.state === 'skipped' && conf.reason === 'booking_undone') return null;
   const held = heldCancelOf(contact.data);
   const sameBooking = held?.booking_id === conf.booking_id ? held : null;
   if (sameBooking?.state === 'dropped' && sameBooking.reason === 'booking_undone') return null;
+  return { conf, sameBooking };
+}
+
+/** The earlier booking's id, whether or not its visit has passed: what the
+ * staff callback keeps first in the contact's note (v216's marker). */
+export function earlierBookingIdOf(contact: OutboundContact): string | null {
+  return standingBooking(contact)?.conf.booking_id ?? null;
+}
+
+/** The booking this contact holds from an earlier call or the text's link,
+ * or null: none, undone, or its visit day already past (then the call runs
+ * the ordinary checks on the contact's own appointment). */
+export function priorBookingOf(contact: OutboundContact, now: Date = new Date()): PriorBooking | null {
+  const standing = standingBooking(contact);
+  if (!standing) return null;
+  const { conf, sameBooking } = standing;
+  const visitDay = bookedVisitDay(conf);
+  if (visitDay && visitDay < practiceDay(now)) return null;
   const azul: PriorBooking['azul'] =
     sameBooking?.state === 'dropped'
       ? 'kept'
@@ -1837,6 +1891,7 @@ export function confirmationRecordFor(args: {
     by: byLink ? 'link' : 'call',
     ...(byLink ? {} : { call_sid: args.callRef }),
     when: textedWhen(args.slot),
+    appointment_at: args.slot.startAt,
     place: [args.slot.partnerName, spokenAddress(args.slot)].filter(Boolean).join(', '),
     phone: args.slot.phone ?? '',
     replaced_day: textedDay(field(args.contact, 'appointment_date')),
@@ -2291,8 +2346,8 @@ async function fileStaffCallback(
       notes: [
         s.booking
           ? `npx_booking:${s.booking.bookingId}`
-          : s.priorBooking
-            ? `npx_booking:${s.priorBooking.bookingId}`
+          : s.earlierBookingId
+            ? `npx_booking:${s.earlierBookingId}`
             : null,
         earlierTicket ? `staff_callback:${earlierTicket}` : null,
         `staff_callback:${result.ticketNumber}`,
