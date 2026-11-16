@@ -249,7 +249,9 @@ export function daysNamed(text: string, now: Date = new Date()): { today: boolea
   const date = (m: number, d: number, y: number | undefined, at: number) => {
     if (y !== undefined && y !== year && y !== year + 1) return; // a date of birth
     if (BIRTH_WORD.test(t.slice(0, at))) return;
-    if (m === month && d === day) today = true;
+    // Today only in this year: next year's same month and day is another day
+    // (review of #489).
+    if (m === month && d === day && (y === undefined || y === year)) today = true;
     else other = true;
   };
   for (const hit of t.matchAll(EN_DATE)) {

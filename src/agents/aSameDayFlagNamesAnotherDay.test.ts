@@ -230,6 +230,22 @@ describe('another day, in the forms the model writes it', () => {
     expect(daysNamed('Appointment on January 5, 2027', dec30)).toEqual({ today: false, other: true });
   });
 
+  it("today's month and day in next year is another day (review of #489)", () => {
+    // SUNDAY is 2026-11-15 Pacific.
+    for (const text of [
+      'Reschedule appointment on 2027-11-15',
+      'Reschedule appointment on November 15, 2027',
+      'Cita el 15 de noviembre de 2027',
+    ]) {
+      expect(daysNamed(text, SUNDAY)).toEqual({ today: false, other: true });
+      expect(appointmentTodayHolds(true, text, SUNDAY)).toBe(false);
+    }
+    // This year's, or no year, is still today.
+    for (const text of ['Appointment on 2026-11-15', 'Appointment on November 15, 2026', 'Appointment on November 15']) {
+      expect(daysNamed(text, SUNDAY)).toEqual({ today: true, other: false });
+    }
+  });
+
   it('the veto only ever takes a flag away, never gives one', () => {
     expect(appointmentTodayHolds(false, 'Confirming today', SUNDAY)).toBe(false);
     expect(appointmentTodayHolds(undefined, 'Confirming today', SUNDAY)).toBe(false);
