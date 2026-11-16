@@ -12,6 +12,7 @@ import type { ContactSource, OutboundLanePolicy, SourceRecheck } from "./campaig
 import { DEFAULT_ATTEMPT_CAPS, DEFAULT_CALLING_WINDOW } from "./callingWindow";
 import {
   EXPIRED_PAGE,
+  NOT_OFFERED_PAGE,
   LINK_DOB_TRIES,
   LINK_REQUEST_LIMIT,
   LINK_SESSION_MS,
@@ -342,6 +343,31 @@ describe("steps 2 and 3: a day and a city, then a time", () => {
 });
 
 describe("v246: the link is re-checked before the date of birth is asked", () => {
+  it("an Existing patient (off the list) is never shown the date-of-birth form", async () => {
+    seed();
+    recheck.mockResolvedValueOnce({ state: "off_list" });
+    const r = await handleBookingPage(token, deps);
+    expect(r.status).toBe(200);
+    expect(r.body).toBe(NOT_OFFERED_PAGE);
+    expect(r.body).not.toContain("confirm your date of birth");
+    for (const word of RECORD_WORDS) expect(r.body).not.toContain(word);
+    expect(recheck).toHaveBeenCalledWith("ref-c1", NOW);
+  });
+
+  it("an appointment that is over reads as an expired link, with nothing from the record", async () => {
+    seed();
+    recheck.mockResolvedValueOnce({ state: "gone" });
+    expect((await handleBookingPage(token, deps)).body).toBe(EXPIRED_PAGE);
+  });
+
+  it("a source that cannot answer shows the try-again page, not the form", async () => {
+    seed();
+    recheck.mockRejectedValueOnce(new Error("console down"));
+    const r = await handleBookingPage(token, deps);
+    expect(r.body).not.toBe(STEPS_PAGE);
+    expect(r.body).toContain("try again in a few minutes");
+  });
+
   // An Existing patient texted before v246 still holds a live link. The page
   // must stop them at the first step with a true line, not walk them to the
   // last and say their appointment changed.

@@ -1921,7 +1921,7 @@ import { callEnvironment } from "./callRecord";
  * re-checked against the lane's own source before anything is offered
  * (npxOutreachTools.ts, classGateFor): off the list, over, or a source that
  * cannot answer offers and books nothing. The texted booking link re-checks
- * the same way before the date of birth is asked (bookingPage.ts,
+ * the same way when the page loads, before the date-of-birth form (bookingPage.ts,
  * recheckLink). Above main's v244 (#490,
  * `0048b2c`); v245 is #488 on its open branch. No migration.
  */

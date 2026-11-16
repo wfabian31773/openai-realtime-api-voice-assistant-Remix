@@ -291,6 +291,12 @@ const BUSY_PAGE = shell(
   "Please try again shortly",
   `<h1>Please try again in a few minutes</h1><p>This link can't be used right now. Nothing has been changed.</p>`,
 );
+/** v246: a link to a patient the list no longer offers (an Existing patient,
+ * or an appointment no longer movable). Says nothing from the record. */
+export const NOT_OFFERED_PAGE = shell(
+  "Not available",
+  `<h1>This offer isn't available</h1><p>This sooner opening isn't one we can offer you after all. Your appointment with us stays exactly as it is, and nothing has been changed by this link.</p>`,
+);
 const TOO_MANY_PAGE = shell(
   "Please wait",
   `<h1>Please wait a few minutes</h1><p>This link has been used many times in a short while. Try again in ten minutes.</p>`,
@@ -454,6 +460,17 @@ export async function handleBookingPage(token: string, deps: BookingPageDeps): P
     if (!link.ok) {
       if (link.reason === "too_many") return html(429, TOO_MANY_PAGE);
       if (link.reason === "busy") return html(200, BUSY_PAGE);
+      return html(200, EXPIRED_PAGE);
+    }
+    // v246: re-checked BEFORE the date-of-birth form is shown, so a patient
+    // the list no longer offers is never asked for it (Codex P2 on #491). The
+    // pages say nothing from the record: an appointment that is over reads as
+    // an expired link. The verify and book steps re-check again.
+    const live = await recheckLink(link, now);
+    if (!live.ok) {
+      (deps.log ?? console.log)(`[booking page] ${link.policy.campaignKey}: link stopped before the form — ${live.why}`);
+      if (live.error === "not_offered") return html(200, NOT_OFFERED_PAGE);
+      if (live.error === "busy") return html(200, BUSY_PAGE);
       return html(200, EXPIRED_PAGE);
     }
     return html(200, STEPS_PAGE);
