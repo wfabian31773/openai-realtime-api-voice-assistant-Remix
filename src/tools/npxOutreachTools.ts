@@ -116,6 +116,7 @@ import type { BookingOpening, BookingPageLane } from '../runtime/outbound/bookin
 import {
   CALL_AWAIT_CANCEL_MAX_MS,
   CALL_CONFIRMATION_DELAY_MS,
+  confirmationOf,
   type BookingConfirmationRecord,
 } from '../runtime/outbound/bookingConfirmation';
 import {
@@ -343,6 +344,9 @@ interface OutreachSession {
    * the agent said back to them. */
   offers: NpxSlot[][];
   booking: CallBooking | null;
+  /** v247: a booking this contact made on an EARLIER call or on the text's
+   * link, read from the contact's record when the call opened. */
+  priorBooking: PriorBooking | null;
   /** A book_sooner_exam still running: a second call waits for it rather
    * than booking twice. */
   bookingInFlight: Promise<ToolResult> | null;
@@ -450,6 +454,7 @@ async function sessionFor(input: Record<string, unknown>): Promise<{ sid: string
         searches: 0,
         offers: [],
         booking: null,
+        priorBooking: priorBookingOf(contact),
         bookingInFlight: null,
         undone: [],
         undoInFlight: null,
@@ -706,6 +711,158 @@ function staysInTheHub(text: string): boolean {
 const DOB_ASK = 'Can I please have your date of birth, starting with the month, then the day, then the year?';
 const WHEN_ASK = 'What day and time work best for you?';
 
+// ── A patient who has already booked (v247) ─────────────────────────────────
+
+/**
+ * A RETURNED CALL FROM A PATIENT WHO HAS ALREADY BOOKED HEARS THEIR BOOKING.
+ *
+ * The confirmation text says "Questions? Call this number", and a patient who
+ * booked calls it. Until v247 nothing read the booking they had made: the
+ * contact's record still holds the Azul appointment the booking replaced, so
+ * describe_upcoming_appointment read that cancelled appointment back as theirs
+ * and offered sooner times again. Measured, the 128 returned calls identified
+ * on npx-outreach to 2026-11-16: 9 came from 4 patients who had already booked,
+ * and all 9 were offered again. One patient rang six times in 72 minutes
+ * (CA386f88c848dcd4d74bf07d29c314fcc8 to CAd9744c26bc5cab62421b660cae8f9c53),
+ * asking each time for the partner office's phone number, and each time was
+ * told their cancelled appointment "stays exactly as it is"; one booked a
+ * second slot four minutes after the first and undid it
+ * (CA60cfd3d2f7cf38d0b292dd6554c19295). On v246 the same caller would hear
+ * that the opening "is no longer available", because the appointment the class
+ * gate re-checks is the one the booking cancelled.
+ *
+ * The booking is read from the contact's own record (the confirmation the
+ * booking queued, v222, and the held Azul cancel, v226), so the call path and
+ * the text's link are one source. A booking undone on the call reads as no
+ * booking. What the record cannot know: a booking a partner's staff later
+ * cancelled in NPX (8 of 109 NPX outreach bookings to 2026-11-16). So the
+ * words say "our records show", and a caller who says otherwise is sent to
+ * staff, never argued with.
+ */
+export interface PriorBooking {
+  bookingId: string;
+  /** "Tuesday, November 24 at 9:00 AM" */
+  when: string;
+  /** "Tuesday, November 24" */
+  day: string;
+  /** The partner practice and its street address. */
+  place: string;
+  /** The partner's city, the last part of the address. */
+  city: string;
+  phone: string;
+  /** The Azul appointment it replaced, "January 6". */
+  replacedDay: string;
+  /** What became of that Azul appointment. */
+  azul: 'cancelled' | 'cancelling' | 'staff_will_cancel' | 'kept';
+  /** They asked staff to change it, on an earlier call. */
+  changeRequested: boolean;
+}
+
+const TEXTED_WEEKDAYS: Record<string, string> = {
+  Mon: 'Monday', Tue: 'Tuesday', Wed: 'Wednesday', Thu: 'Thursday', Fri: 'Friday', Sat: 'Saturday', Sun: 'Sunday',
+};
+const TEXTED_MONTHS: Record<string, string> = {
+  Jan: 'January', Feb: 'February', Mar: 'March', Apr: 'April', May: 'May', Jun: 'June',
+  Jul: 'July', Aug: 'August', Sep: 'September', Oct: 'October', Nov: 'November', Dec: 'December',
+};
+
+/** "Tue, Nov 24 at 9:00 AM" (the text's form) said in full: "Tuesday, November 24 at 9:00 AM". */
+export function spokenFromTexted(texted: string): string {
+  return texted
+    .replace(/\b(Mon|Tue|Wed|Thu|Fri|Sat|Sun)\b/, (w) => TEXTED_WEEKDAYS[w] ?? w)
+    .replace(/\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\b/, (m) => TEXTED_MONTHS[m] ?? m);
+}
+
+/** A ten-digit phone said in three groups, so it can be written down: "909, 621, 0057". */
+export function spokenPhone(phone: string): string {
+  const digits = phone.replace(/\D/g, '').replace(/^1(?=\d{10}$)/, '');
+  return digits.length === 10 ? `${digits.slice(0, 3)}, ${digits.slice(3, 6)}, ${digits.slice(6)}` : phone;
+}
+
+/** The booking this contact holds from an earlier call or the text's link, or null. */
+export function priorBookingOf(contact: OutboundContact): PriorBooking | null {
+  const conf = confirmationOf(contact.data);
+  if (!conf?.booking_id || !conf.when) return null;
+  if (conf.state === 'skipped' && conf.reason === 'booking_undone') return null;
+  const held = heldCancelOf(contact.data);
+  const sameBooking = held?.booking_id === conf.booking_id ? held : null;
+  if (sameBooking?.state === 'dropped' && sameBooking.reason === 'booking_undone') return null;
+  const azul: PriorBooking['azul'] =
+    sameBooking?.state === 'dropped'
+      ? 'kept'
+      : sameBooking?.state === 'cancelled'
+        ? 'cancelled'
+        : sameBooking?.state === 'not_cancelled'
+          ? 'staff_will_cancel'
+          : sameBooking?.state === 'held' || sameBooking?.state === 'claimed'
+            ? 'cancelling'
+            : conf.cancel === 'cancelled'
+              ? 'cancelled'
+              : 'staff_will_cancel';
+  const when = spokenFromTexted(conf.when);
+  const parts = conf.place.split(',').map((p) => p.trim()).filter(Boolean);
+  return {
+    bookingId: conf.booking_id,
+    when,
+    day: when.split(' at ')[0],
+    place: conf.place,
+    city: parts.length > 1 ? parts[parts.length - 1] : '',
+    phone: conf.phone ?? '',
+    replacedDay: spokenFromTexted(conf.replaced_day ?? ''),
+    azul,
+    changeRequested: (conf.state === 'held' && conf.reason === 'staff_change') || sameBooking?.reason === 'staff_change',
+  };
+}
+
+/** What became of the Azul appointment, as the caller hears it. */
+function priorAzulLine(b: PriorBooking): string {
+  const old = b.replacedDay && b.replacedDay !== 'current' ? `Your appointment with us on ${b.replacedDay}` : 'Your appointment with us';
+  switch (b.azul) {
+    case 'cancelled':
+      return `${old} has been cancelled.`;
+    case 'cancelling':
+      return `${old} is being cancelled, so there's nothing you need to do.`;
+    case 'kept':
+      return `${old} is kept, and our scheduling team will call you about the new one.`;
+    default:
+      return `${old} will be cancelled by our team, so there's nothing you need to do.`;
+  }
+}
+
+/** The booking said before the date of birth: the day and the city, nothing more. */
+function priorBookingBrief(b: PriorBooking): string {
+  const where = b.city ? ` at our partner practice in ${b.city}` : ' at one of our partner practices';
+  return `Our records show you're booked for a sooner appointment on ${b.day}${where}. ${priorAzulLine(b)}` +
+    (b.changeRequested ? ' Our scheduling team will call you about the change you asked for.' : '');
+}
+
+/** The booking in full, said once the date of birth matches. */
+function priorBookingInFull(b: PriorBooking): string {
+  const phone = b.phone ? ` Their phone number is ${spokenPhone(b.phone)}.` : '';
+  return `You're booked for ${b.when} at ${b.place}.${phone} ${priorAzulLine(b)}`;
+}
+
+/** What the agent is told on a call from a patient who has already booked. */
+const PRIOR_BOOKING_FIX =
+  'They have already booked a sooner appointment. Say what this answer says, slowly. Offer no other time, and do not ' +
+  `call ${FIND_SOONER_TOOL_NAME} or ${BOOK_SOONER_TOOL_NAME}: this call cannot book a second appointment. If they ask ` +
+  `for the time, the address, the doctor or the phone number, ask for their date of birth and call ${CONFIRM_DOB_TOOL_NAME}; ` +
+  'its answer has them. If they say the booking was cancelled or is wrong, do not argue: call ' +
+  `${STAFF_CALLBACK_TOOL_NAME}. If they want to change or cancel it, call ${STAFF_CALLBACK_TOOL_NAME} with changes_booking ` +
+  `true. If they want a person, call ${STAFF_CALLBACK_TOOL_NAME}. Otherwise ask if there is anything else, call ` +
+  'record_call_outcome with done, say goodbye and call end_call.';
+
+function alreadyBookedEarlier(b: PriorBooking): Refusal {
+  return {
+    success: false,
+    error: 'already_booked',
+    fix:
+      'They already have a sooner appointment booked, from an earlier call. This call cannot book another. ' +
+      `If they want to change or cancel it, call ${STAFF_CALLBACK_TOOL_NAME} with changes_booking true; ` +
+      `otherwise tell them they are booked for ${b.day}.`,
+  };
+}
+
 // ── Who a returned call may be offered a sooner exam (v246) ─────────────────
 
 /**
@@ -802,6 +959,13 @@ registerTool({
     const found = await sessionFor(input);
     if ('success' in found) return found;
     const { s } = found;
+    // v247: a patient who has already booked hears their booking, before the
+    // class gate (the appointment it re-checks is the one the booking cancelled).
+    if (s.priorBooking && !s.booking) {
+      s.described = true;
+      console.info('[NPX OUTREACH] returned call from a patient who has already booked: the booking is read back');
+      return { success: true, already_booked: true, say: priorBookingBrief(s.priorBooking), fix: PRIOR_BOOKING_FIX };
+    }
     const startedAt = Date.now();
     // The availability read starts beside the re-check, so a returned call
     // waits for the slower of the two, not both (it sends NPX no patient).
@@ -894,9 +1058,18 @@ registerTool({
     const found = await sessionFor(input);
     if ('success' in found) return found;
     const { sid, s } = found;
-    const classGate = await classGateFor(s);
-    if (!OFFERABLE.has(classGate)) return notOfferedOnThisCall(classGate);
-    if (s.verified) return { success: true, verified: true, current_appointment: currentAppointment(s.contact), next: afterVerified(s) };
+    // v247: a patient who has already booked confirms who they are to hear it
+    // in full; nothing is offered, so the class gate does not apply.
+    const bookedEarlier = s.priorBooking && !s.booking ? s.priorBooking : null;
+    if (!bookedEarlier) {
+      const classGate = await classGateFor(s);
+      if (!OFFERABLE.has(classGate)) return notOfferedOnThisCall(classGate);
+    }
+    if (s.verified) {
+      return bookedEarlier
+        ? priorBookingVerified(bookedEarlier)
+        : { success: true, verified: true, current_appointment: currentAppointment(s.contact), next: afterVerified(s) };
+    }
     // Spent tries stay spent: a third guess must not unlock what two wrong
     // dates closed, or the limit is one more call away from meaning nothing.
     if (s.dobTries >= MAX_DOB_TRIES) return notConfirmed();
@@ -916,6 +1089,7 @@ registerTool({
       heard !== null && heard.year === onFile.year && heard.month === onFile.month && heard.day === onFile.day;
     if (match) {
       s.verified = true;
+      if (bookedEarlier) return priorBookingVerified(bookedEarlier);
       return {
         success: true,
         verified: true,
@@ -1064,6 +1238,7 @@ registerTool({
     const found = await sessionFor(input);
     if ('success' in found) return found;
     const { s } = found;
+    if (s.priorBooking && !s.booking) return alreadyBookedEarlier(s.priorBooking);
     const classGate = await classGateFor(s);
     if (!OFFERABLE.has(classGate)) return notOfferedOnThisCall(classGate);
     if (!s.verified) return notVerified();
@@ -1302,6 +1477,7 @@ async function bookSooner(input: Record<string, unknown>): Promise<ToolResult> {
   const found = await sessionFor(input);
   if ('success' in found) return found;
   const { sid, s } = found;
+  if (s.priorBooking && !s.booking) return alreadyBookedEarlier(s.priorBooking);
   const classGate = await classGateFor(s);
   if (!OFFERABLE.has(classGate)) return notOfferedOnThisCall(classGate);
   if (!s.verified) return notVerified();
@@ -1963,6 +2139,64 @@ export function bookingChangeLine(contact: OutboundContact, booking: NonNullable
   }
 }
 
+/** A patient who booked earlier, once their date of birth matches. */
+function priorBookingVerified(b: PriorBooking): ToolResult {
+  return {
+    success: true,
+    verified: true,
+    already_booked: true,
+    booked_appointment: priorBookingInFull(b),
+    say: priorBookingInFull(b),
+    fix:
+      'Say that slowly, and repeat any part they ask for, one piece at a time. Offer no other time. If they want to ' +
+      `change or cancel it, call ${STAFF_CALLBACK_TOOL_NAME} with changes_booking true. Otherwise ask if there is anything ` +
+      'else, call record_call_outcome with done, say goodbye and call end_call.',
+  } as unknown as ToolResult;
+}
+
+/** The ticket line for a booking made before this call (v247). */
+export function priorBookingStaffLine(b: PriorBooking, contact: OutboundContact): string {
+  const day = spokenDay(field(contact, 'appointment_date'));
+  const azul =
+    b.azul === 'cancelled'
+      ? `Their Azul appointment on ${day} was cancelled.`
+      : b.azul === 'cancelling'
+        ? `Their Azul appointment on ${day} is being cancelled.`
+        : b.azul === 'kept'
+          ? `Their Azul appointment on ${day} was kept.`
+          : `Their Azul appointment on ${day} may still be on file: the call could not confirm it was cancelled.`;
+  return `They booked a sooner exam before this call (NPX booking ${b.bookingId}): ${b.when} at ${b.place}. ${azul}`;
+}
+
+/** What staff must do when they asked to change a booking made before this call (v247). */
+export function priorBookingChangeLine(b: PriorBooking, contact: OutboundContact): string {
+  const day = spokenDay(field(contact, 'appointment_date'));
+  const asked = `URGENT: they asked to cancel or change the NPX booking ${b.bookingId}, made before this call.`;
+  switch (b.azul) {
+    case 'cancelled':
+      return `${asked} Their Azul appointment on ${day} was cancelled: rebook it if they want it back, and cancel or move the NPX booking in NPX.`;
+    case 'cancelling':
+      return `${asked} Their Azul appointment on ${day} is being cancelled: check NextGen, rebook it if they want it back, and cancel or move the NPX booking in NPX.`;
+    case 'kept':
+      return `${asked} Their Azul appointment on ${day} was kept: do not cancel it unless they still want the move, and cancel or move the NPX booking in NPX.`;
+    default:
+      return `${asked} Their Azul appointment on ${day} may still be on file: check NextGen, and cancel or move the NPX booking in NPX.`;
+  }
+}
+
+/** Where things stand, said after a staff callback, for every case on the call. */
+function staffStateLineFor(s: OutreachSession): string {
+  if (s.booking) {
+    return s.bookingChangeAsked ? bookingChangeStateLine(s.booking) : appointmentStateLine(s.booking);
+  }
+  if (s.priorBooking) {
+    return s.bookingChangeAsked
+      ? `Until they call, your sooner appointment on ${s.priorBooking.day} is still booked.`
+      : `Your sooner appointment on ${s.priorBooking.day} stays booked.`;
+  }
+  return appointmentStateLine(null);
+}
+
 export function staffReasonFor(request: string): number {
   const text = fold(request);
   for (const cue of SCHEDULING) {
@@ -1988,7 +2222,7 @@ async function fileStaffCallback(
   // that change still needs its own urgent ticket and a held text, or the
   // confirmation goes out and staff never see the undo (Codex P2, #470).
   const earlierTicket = s.staffTicket;
-  const changeAfterTicket = !!earlierTicket && changesBooking && !!s.booking && !s.bookingChangeAsked;
+  const changeAfterTicket = !!earlierTicket && changesBooking && !s.bookingChangeAsked;
   if (earlierTicket && !changeAfterTicket) return { ok: true, ticketNumber: earlierTicket };
   const calledFrom = callbackSid ? callbackSessionFor(callbackSid)?.callerPhone ?? '' : '';
   const dob = dobOnFile(s.contact);
@@ -2010,8 +2244,11 @@ async function fileStaffCallback(
         ? `A sooner exam was booked on this call (NPX booking ${s.booking.bookingId}).`
         : s.undone.length
           ? `A sooner exam was booked on this call and cancelled again before they hung up (NPX booking ${s.undone[s.undone.length - 1]}); their appointment with us was kept.`
-          : 'Their appointment has not been changed.',
+          : s.priorBooking
+            ? priorBookingStaffLine(s.priorBooking, s.contact)
+            : 'Their appointment has not been changed.',
       changesBooking && s.booking ? bookingChangeLine(s.contact, s.booking) : null,
+      changesBooking && !s.booking && s.priorBooking ? priorBookingChangeLine(s.priorBooking, s.contact) : null,
       changeAfterTicket ? `This adds to ${earlierTicket}, filed earlier on this call.` : null,
     ]
       .filter((l) => l !== null)
@@ -2037,10 +2274,11 @@ async function fileStaffCallback(
     return { ok: false, error: result.error ?? 'no_ticket_number' };
   }
   s.staffTicket = result.ticketNumber;
-  if (changesBooking && s.booking) {
+  const changed = s.booking ?? s.priorBooking;
+  if (changesBooking && changed) {
     s.bookingChangeAsked = true;
     try {
-      await (await live().store()).holdConfirmation(s.contact.contactId, s.booking.bookingId, 'staff_change');
+      await (await live().store()).holdConfirmation(s.contact.contactId, changed.bookingId, 'staff_change');
     } catch (e) {
       console.warn(`[NPX OUTREACH] staff callback ${result.ticketNumber}: could not hold the confirmation text —`, e instanceof Error ? e.message : e);
     }
@@ -2051,7 +2289,11 @@ async function fileStaffCallback(
       // `agent_notes LIKE 'npx_booking:%'` still finds it. Before, the staff
       // note replaced it: 4 of 21 bookings to 2026-11-12 read as no booking.
       notes: [
-        s.booking ? `npx_booking:${s.booking.bookingId}` : null,
+        s.booking
+          ? `npx_booking:${s.booking.bookingId}`
+          : s.priorBooking
+            ? `npx_booking:${s.priorBooking.bookingId}`
+            : null,
         earlierTicket ? `staff_callback:${earlierTicket}` : null,
         `staff_callback:${result.ticketNumber}`,
       ]
@@ -2083,7 +2325,7 @@ registerTool({
       changes_booking: {
         type: 'boolean',
         description:
-          'True when they want the sooner exam booked on this call cancelled or moved, or their old appointment with us back. ' +
+          'True when they want the sooner exam they booked (on this call or before it) cancelled or moved, or their old appointment with us back. ' +
           'False or left out for anything else, such as an insurance question or wanting the details by text.',
       },
     },
@@ -2096,16 +2338,16 @@ registerTool({
     const already = (ticket: string): ToolResult => ({
       success: true,
       ticket_number: ticket,
-      say: s.bookingChangeAsked && s.booking
-        ? `I've asked our scheduling team to call you back to change that. ${bookingChangeStateLine(s.booking)}`
-        : `I've asked our scheduling team to call you back. ${appointmentStateLine(s.booking)}`,
+      say: s.bookingChangeAsked && (s.booking || s.priorBooking)
+        ? `I've asked our scheduling team to call you back to change that. ${staffStateLineFor(s)}`
+        : `I've asked our scheduling team to call you back. ${staffStateLineFor(s)}`,
       fix: 'Say that, ask if there is anything else, then say goodbye and call end_call. The outcome is already recorded.',
     });
     const request = String(input.request ?? '').trim();
     // v222: a caller who asks to undo or move what was just booked gets an
     // urgent ticket saying exactly what staff must do, and no confirmation
     // text for a booking they asked to change.
-    const changesBooking = !!s.booking && input.changes_booking === true;
+    const changesBooking = (!!s.booking || !!s.priorBooking) && input.changes_booking === true;
     // One ticket per call, except a booking change asked after another
     // request was already filed: fileStaffCallback files that one beside the
     // first (Codex P2, #470).
@@ -2127,8 +2369,8 @@ registerTool({
         error: 'ticket_not_filed',
         fix:
           'The request could not be sent to the team just now. Do not say anyone will call. Say: "I wasn\'t able to ' +
-          `send that to our team just now. ${appointmentStateLine(s.booking)}" Then ` +
-          (s.booking
+          `send that to our team just now. ${staffStateLineFor(s)}" Then ` +
+          (s.booking || s.priorBooking
             ? 'say goodbye and call end_call. The booking is already recorded.'
             : 'call record_call_outcome with call_back_later, say goodbye and call end_call.'),
       };
