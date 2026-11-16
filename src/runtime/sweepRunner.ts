@@ -54,7 +54,7 @@ const noNameFromTheRecording: NameAsker = async () => null;
 const noRequestFromTheRecording: RequestAsker = async () => null;
 
 /**
- * v242 (HELD FOR THE OPERATOR): THE LANES THAT STILL FILE WHEN THE READER SAYS
+ * v245 (HELD FOR THE OPERATOR): THE LANES THAT STILL FILE WHEN THE READER SAYS
  * NOTHING WAS ASKED.
  *
  * On every other queue lane the sweep files nothing when `readTheRequest`
@@ -474,7 +474,7 @@ export async function runRequestSweep(
       ].filter((n): n is string => typeof n === "string" && n.trim().length > 0);
       const reading = await readTheRequest(record.transcript, askRequest, held, record.callSid);
       if (reading.verdict === "nothing_asked" && !FILES_WHEN_NOTHING_WAS_READ.has(record.slug)) {
-        // v242, held for the operator: the reader says the caller asked for
+        // v245, held for the operator: the reader says the caller asked for
         // nothing, so there is no request to recover and nothing is filed.
         console.info(
           `[REQUEST SWEEP] ${record.slug}: the model read no request — nothing filed (${record.callSid})`,

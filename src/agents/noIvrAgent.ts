@@ -42,6 +42,7 @@ import { escalationDetailsMap } from "../services/escalationStore";
 import { judgeEscalation } from "../services/afterHoursEscalationGate";
 import {
   afterHoursRouteNote,
+  appointmentTodayHolds,
   POST_PROCEDURE_REQUEST,
   routeAfterHoursTicket,
   sameDayTimeConflict,
@@ -2443,12 +2444,21 @@ The ticket will include schedule context (last appointment info) automatically.`
           )
         : undefined;
       if (recordsRequest) noteAfterHoursRecordsRequest(metadata.callSid, {});
+      const routeText = [params.request_summary, params.appointment_time].filter(Boolean).join(' ');
+      // v243: the flag stands only when the model's own words do not name
+      // another day (a Sunday call about Monday's appointment is not same-day).
+      const appointmentToday = appointmentTodayHolds(params.appointment_today, routeText);
+      if (params.appointment_today === true && !appointmentToday) {
+        console.info(
+          `[AFTER-HOURS ROUTE] appointment_today set, but the request names another day — not same-day on ${metadata.callSid}`,
+        );
+      }
       const route = routeAfterHoursTicket({
         postOpMedication: params.post_op_prescription,
         appointmentToday: params.appointment_today,
         recordsRequest,
         opticalRequest: params.request_category === 'optical_request',
-        text: [params.request_summary, params.appointment_time].filter(Boolean).join(' '),
+        text: routeText,
         confirmedUpcoming: recordConfirmed ? enrichedContext?.upcomingAppointments : undefined,
         appointmentIntent: CATEGORY_TO_REQUEST_TYPE[params.request_category] === 'Appointment Request',
         urgent: Boolean(ahHint.classification.urgent),
@@ -2461,7 +2471,7 @@ The ticket will include schedule context (last appointment info) automatically.`
       // confirmed record's. A disagreement is somebody about to miss a visit,
       // so the ticket goes HIGH (post-op stays urgent) with a conflict line.
       const timeConflict =
-        recordConfirmed && (route.kind === 'same_day' || params.appointment_today === true)
+        recordConfirmed && (route.kind === 'same_day' || appointmentToday)
           ? sameDayTimeConflict({
               callerTime: params.appointment_time,
               confirmedUpcoming: enrichedContext?.upcomingAppointments,

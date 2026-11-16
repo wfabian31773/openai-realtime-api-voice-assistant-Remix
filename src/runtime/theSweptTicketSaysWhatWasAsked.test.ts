@@ -263,16 +263,16 @@ describe('the corpus: the swept "reason not captured" tickets of 2026-11-10', ()
     expect(String(f.calls[0].staffNote)).not.toContain(REQUEST_FROM_RECORDING_NOTE);
   });
 
-  // v242 (held for the operator): where the model reads NO request at all, a
-  // queue lane files nothing. The placeholder was filed here before v242.
-  it.each(VAGUE.filter((r) => r.reads === null))('$sid ($lane) — the model read no request: nothing is filed (v242)', async (row) => {
+  // v245 (held for the operator): where the model reads NO request at all, a
+  // queue lane files nothing. The placeholder was filed here before v245.
+  it.each(VAGUE.filter((r) => r.reads === null))('$sid ($lane) — the model read no request: nothing is filed (v245)', async (row) => {
     const { out, f } = await sweep(row);
     expect(out.filed).toBe(false);
     expect(out.reason).toBe('no-request-read');
     expect(f.calls).toHaveLength(0);
   });
 
-  it(`${NOTHING_SAID.sid} — background noise: the model read no request, nothing is filed (v242)`, async () => {
+  it(`${NOTHING_SAID.sid} — background noise: the model read no request, nothing is filed (v245)`, async () => {
     const { out, f } = await sweep(NOTHING_SAID);
     expect(out.filed).toBe(false);
     expect(out.reason).toBe('no-request-read');
@@ -317,7 +317,7 @@ describe('main is unchanged where nothing is read', () => {
     expect((await sweep(SPECIFIC[2], async () => null)).f.calls[0].description).toBe(SWEPT_TICKET_DESCRIPTION);
   });
 
-  it('a model that answers with no request files nothing on a queue lane (v242)', async () => {
+  it('a model that answers with no request files nothing on a queue lane (v245)', async () => {
     const { out, f } = await sweep(SPECIFIC[2], async () => ({ request: null }));
     expect(out).toEqual({ filed: false, reason: 'no-request-read' });
     expect(f.calls).toHaveLength(0);
@@ -388,7 +388,7 @@ describe('a sentence that fails a check is dropped, never trimmed into shape', (
     expect(f.calls[0].description).toBe(SWEPT_TICKET_DESCRIPTION);
   });
 
-  it('the model saying nothing was asked files nothing on a queue lane (v242)', async () => {
+  it('the model saying nothing was asked files nothing on a queue lane (v245)', async () => {
     expect(usableRequest('Caller did not state a specific request.', ['Testa', 'Lake'])).toBeUndefined();
     const { out, f } = await sweep(row, answers('Caller did not state a specific request.'));
     expect(out).toEqual({ filed: false, reason: 'no-request-read' });

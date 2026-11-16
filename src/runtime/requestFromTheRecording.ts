@@ -118,7 +118,7 @@ export const askModelForTheRequest: RequestAsker = async (transcript, retry) => 
   });
   const text = res.choices[0]?.message?.content ?? "";
   const parsed = JSON.parse(text) as { request?: unknown } | null;
-  // v242 (github-actions review of #488): the model's value is passed through
+  // v245 (github-actions review of #488): the model's value is passed through
   // as it came, never normalised to null. `askOnce` is the one place that
   // decides what it is: an explicit null or a blank sentence is the model
   // reading no request; a missing field, a number, an object or any other
@@ -320,7 +320,7 @@ const SAYS_NOTHING_WAS_ASKED =
 const SAYS_NOTHING_WAS_ASKED_ALL = new RegExp(SAYS_NOTHING_WAS_ASKED.source, "gi");
 
 /**
- * v242 (github-actions review of #488): the words a no-request conclusion is
+ * v245 (github-actions review of #488): the words a no-request conclusion is
  * built from, beside the says-nothing phrase itself. "Caller did not state a
  * specific request." is made of nothing else; "Wants clarification of unclear
  * pre-surgery instructions" is not, because "clarification", "pre-surgery"
@@ -483,7 +483,7 @@ async function askOnce(
     return { kind: "failed" };
   }
   if (!answer) return { kind: "not_asked" };
-  // v242 (github-actions review of #488): a missing or non-string request is
+  // v245 (github-actions review of #488): a missing or non-string request is
   // a malformed answer, not the model reading no request. Only an explicit
   // null or a blank sentence is `none`.
   const request: unknown = (answer as { request?: unknown }).request;
@@ -493,7 +493,7 @@ async function askOnce(
   }
   if (request === null || !request.trim()) {
     // v241: counted, so the calls where the model read no request can be read
-    // back by SID. v242 (held for the operator): on the queue lanes a first
+    // back by SID. v245 (held for the operator): on the queue lanes a first
     // ask that answers this files nothing.
     console.info(`[REQUEST FROM RECORDING] the model read no request${retry ? " on the second ask" : ""}${where}`);
     return { kind: "none" };
@@ -502,7 +502,7 @@ async function askOnce(
 }
 
 /**
- * v242: WHAT THE READER CONCLUDED, not only the sentence. `nothing_asked` is
+ * v245: WHAT THE READER CONCLUDED, not only the sentence. `nothing_asked` is
  * the model's own answer on the FIRST ask: no request (`{"request": null}`),
  * or a sentence saying nothing was asked. `person_only` is a sentence whose
  * every word carries no topic ("Wants to speak with someone"). A sentence
@@ -538,7 +538,7 @@ export async function readTheRequest(
   // PHI-free: which kind of check, never what the sentence said.
   if (!RETRYABLE_KINDS.has(checked.kind)) {
     console.warn(`[REQUEST FROM RECORDING] the model's sentence failed a check (${checked.kind}) — not used${where}`);
-    // v242 (github-actions review of #488): only a sentence that is wholly a
+    // v245 (github-actions review of #488): only a sentence that is wholly a
     // no-request conclusion counts as the model reading nothing. A says-nothing
     // word inside a real request ("unclear instructions") is dropped as before.
     if (checked.kind === "says_nothing" && concludesNothingWasAsked(first.text)) return { verdict: "nothing_asked" };

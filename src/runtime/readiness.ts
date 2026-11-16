@@ -1887,8 +1887,28 @@ import { callEnvironment } from "./callRecord";
  * them. Above main's v239 (#485, `c4526b35`), which it contains along with
  * v238 (#484, `f0ecfef2`). No migration.
  */
+/**
+ * v241 (2026-11-15): the teardown sweep's reader asks once more when its
+ * sentence fails a content check. Above main's v240 (#486, `3f0c23a7`).
+ *
+ * v243 — A FLAG ON ANOTHER DAY IS NOT SAME-DAY (2026-11-16). The after-hours
+ * route trusted the model's `appointment_today` flag on its own, so a Sunday
+ * call about Monday's appointment filed in After Hours as same-day. The flag
+ * now stands only when the model's own words do not name another day
+ * (`appointmentTodayHolds`); words that name today, or no day, keep it. 15
+ * days to 2026-11-15: 7 of 121 same-day after-hours tickets, 6 moved by staff.
+ * On main since #489 (`b18b2e8`). No migration.
+ */
+/**
+ * v245 — A CALL WITH NO REQUEST FILES NOTHING (2026-11-16; v242 until main moved
+ * past it). HELD FOR THE OPERATOR: a policy change, not to be merged without
+ * his word. When the teardown sweep's reader reads no request at all on a queue
+ * lane, nothing is filed; the records lane and a caller who asked only for a
+ * person still file. Above main's v243 (#489, `b18b2e8`), which it contains
+ * along with v241 (#487); v244 is #490 on its open branch. No migration.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v242-a-call-with-no-request-files-nothing-20261115";
+  "voice-runtime-v245-a-call-with-no-request-files-nothing-20261116";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can
