@@ -1924,9 +1924,20 @@ import { callEnvironment } from "./callRecord";
  * the same way when the page loads, before the date-of-birth form (bookingPage.ts,
  * recheckLink). Above main's v244 (#490,
  * `0048b2c`); v245 is #488 on its open branch. No migration.
+ * On main since #491 (`aaa96c5`).
+ */
+/**
+ * v247 — A PATIENT WHO HAS ALREADY BOOKED HEARS THEIR BOOKING (2026-11-16). A
+ * booked patient who rang the caller ID back was read the Azul appointment the
+ * booking had cancelled and offered sooner times again: 9 of the 128 returned
+ * calls identified to 2026-11-16, from 4 patients, all 9 offered. The session
+ * reads the booking from the contact's record (priorBookingOf); describe reads
+ * it back, the date of birth gives it in full, find and book refuse, and the
+ * staff ticket keeps its marker. Above main's v246 (#491, `aaa96c5`); v245 is
+ * #488 on its open branch. No migration.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v246-npx-outreach-calls-new-and-lapsed-only-20261116";
+  "voice-runtime-v247-a-booked-caller-hears-their-booking-20261116";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

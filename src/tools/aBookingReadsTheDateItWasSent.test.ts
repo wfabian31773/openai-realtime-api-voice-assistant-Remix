@@ -267,6 +267,9 @@ describe('only the date as written, and the time as v218 read it, are read; any 
     for (const time of ['09:00', '9:00', '9 AM', '9:00 AM', '9:00 a.m.']) {
       book.mockClear();
       resetOutreachSessionsForTests();
+      // Each form is a fresh call on an unbooked contact: since v247 a contact
+      // that booked on an earlier call is read as booked and offered nothing.
+      store.contacts.get('c1')!.customData = { ...DATA };
       await twoListsRead();
       const r = await run(BOOK_SOONER_TOOL_NAME, { date: '2041-02-13', time });
       expect(r).toMatchObject({ success: true, booked_by: 'date_time', received_time: 'read' });
