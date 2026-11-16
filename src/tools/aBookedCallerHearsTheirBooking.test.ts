@@ -298,6 +298,12 @@ describe('what counts as already booked', () => {
     expect(priorBookingOf(contactWith(bookedRecord({ held: { state: 'dropped', reason: 'booking_undone' } })))).toBeNull();
   });
 
+  it('nor is a confirmation skipped as undone when the held cancel never reached the store', () => {
+    expect(priorBookingOf(contactWith(bookedRecord({ confirmation: { state: 'skipped', reason: 'booking_undone' }, held: null })))).toBeNull();
+    // A text skipped for another reason (the number opted out) leaves the booking standing.
+    expect(priorBookingOf(contactWith(bookedRecord({ confirmation: { state: 'skipped', reason: 'do_not_contact' }, held: null })))).not.toBeNull();
+  });
+
   it('a contact with no booking is not read as booked (the control)', async () => {
     recheckAnswer = 'current';
     withContact({ ...APPOINTMENT });
