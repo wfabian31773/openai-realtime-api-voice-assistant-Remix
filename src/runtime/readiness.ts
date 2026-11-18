@@ -1935,9 +1935,20 @@ import { callEnvironment } from "./callRecord";
  * it back, the date of birth gives it in full, find and book refuse, and the
  * staff ticket keeps its marker. Above main's v246 (#491, `aaa96c5`); v245 is
  * #488 on its open branch. No migration.
+ *
+ * v248 — AN ASK TO REACH SOMEONE IS NOT A REQUEST (2026-11-18). The v204 rule
+ * (operator, 2026-11-11: "tickets that are incomplete should not be filed")
+ * reads the model's `callerStatedARequest`, and on all nine PCP tickets of
+ * 2026-11-17 whose only content was that the caller wanted someone the model
+ * sent `true`. Its description now names the shapes it read as a request (a
+ * staff member by name, a doctor, a technician, a department, customer
+ * service), and the ask detector reads "Dr." as "doctor" after a verb of
+ * speaking or connecting, so an office asking for a doctor by name is offered
+ * the transfer v204 gives one asking for "a doctor". Above main's v247 (#492,
+ * `9d6bf87`); v245 is #488 on its open branch. No migration.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v247-a-booked-caller-hears-their-booking-20261116";
+  "voice-runtime-v248-an-ask-to-reach-someone-is-not-a-request-20261118";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

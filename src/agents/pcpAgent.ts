@@ -2550,12 +2550,19 @@ const PCP_DEPARTMENT_ID = 18;
  * "I need to speak with the staff about a referral" is extraction (standing
  * instruction 3). Optional in the zod so a caller that omits it files as
  * before; required on the wire (`wireRequired`) so the model is always asked.
+ *
+ * v248: the description names the shapes the model read as a request. All
+ * nine PCP tickets of 2026-11-17 whose only content was that the caller
+ * wanted someone carried `true`: a staff member asked for by name (four),
+ * "Dr. <name>", "the technician", "someone to talk to", a representative
+ * and customer service. "A person" was read as a generic person, not as a
+ * named one, a doctor or a department.
  */
 const CALLER_STATED_A_REQUEST = z
   .boolean()
   .optional()
   .describe(
-    'false only when all the caller has asked for is a person; otherwise true.',
+    'false when the caller has only asked to reach someone (a person, a staff member by name, a doctor, a technician, a department, customer service) and has not said what it is about; otherwise true.',
   );
 
 /**

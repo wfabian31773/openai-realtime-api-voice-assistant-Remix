@@ -383,17 +383,44 @@ const A_REAL_PERSON =
   /\b(?:(?:live|real|actual)\s+(?:person|human|representative|rep|agent|operator)|human being)\b/i;
 
 /**
+ * v248: "DR." IS "DOCTOR" AFTER A VERB OF SPEAKING OR CONNECTING.
+ *
+ * v204 added `doctor` to the nouns. The model writes the abbreviation when
+ * the caller names one: "asking to speak with Dr. <name>". `\bdoctor\b` does
+ * not match "Dr.", and the full stop also ends SPEAK_TO's `[^.]{0,25}` window,
+ * so an office that asked for a doctor by name was refused the transfer v204
+ * gives an office that asks for "a doctor". Measured, PCP agent tickets, the
+ * 30 days to 2026-11-18: 8 narratives asked to speak or talk with "Dr."
+ * and named no other person noun; 7 were not transferred (PCP-86641 among
+ * them, one of the nine person-only tickets of 2026-11-17).
+ *
+ * GET_A_PERSON KEEPS THE RAW TEXT. After `get me|them|us` the abbreviation
+ * can begin a document's owner ("get them Dr. <name>'s notes"), and the name
+ * between the noun and the possessive would slip past that branch's document
+ * check, which looks only at the word straight after the noun. The same 30
+ * days had 0 narratives with `get me|them|us` before "Dr.". ASKED_FOR reads
+ * the spelled text: its noun must end the phrase, so "requested Dr. <name>'s
+ * records" still fails it on the name, and "asked for the Dr." counts.
+ */
+const DOCTOR_ABBREVIATION = /\bdr\b\.?/gi;
+
+function withDoctorSpelledOut(narrative: string): string {
+  return narrative.replace(DOCTOR_ABBREVIATION, 'doctor');
+}
+
+/**
  * True when the narrative records an explicit request to be put through.
  *
  * Exported so the rule has one home and one test file. It is read by
  * `handoff_to_pcp`; the director's `eligibleByAsk` reads the flag this sets.
  */
 export function asksForAPerson(narrative: string): boolean {
+  const spelled = withDoctorSpelledOut(narrative);
   return (
-    matchesUnnegated(SPEAK_TO, narrative) ||
-    matchesUnnegated(CONNECT_TO, narrative) ||
+    matchesUnnegated(SPEAK_TO, spelled) ||
+    matchesUnnegated(CONNECT_TO, spelled) ||
     matchesUnnegated(GET_A_PERSON, narrative) ||
-    matchesUnnegated(ASKED_FOR, narrative) ||
+    matchesUnnegated(ASKED_FOR, spelled) ||
     A_REAL_PERSON.test(narrative)
   );
 }
