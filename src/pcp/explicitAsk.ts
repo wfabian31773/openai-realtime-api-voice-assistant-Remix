@@ -445,8 +445,13 @@ const DR_LEADS: ReadonlyArray<{ re: RegExp; name: boolean }> = [
   },
 ];
 
-/** Capitalised name words after the abbreviation, case-sensitive: "Amini", "O'Brien", "Amini-Lee". */
-const DR_NAME = /^(?:\s+[A-Z][A-Za-z-]*(?:['\u2019][A-Z][A-Za-z-]*)?){0,3}/;
+/**
+ * Capitalised name words after the abbreviation, case-sensitive: "Amini",
+ * "O'Brien", "Amini-Lee", and an initial with its full stop ("J."), which is
+ * read as part of the name so its full stop does not end the ask
+ * ("Dr. J. <name>'s voicemail", github-actions review of #494).
+ */
+const DR_NAME = /^(?:\s+(?:[A-Z]\.|[A-Z][A-Za-z-]*(?:['\u2019][A-Z][A-Za-z-]*)?)){0,3}/;
 
 /**
  * The doctor's own staff is still a person: "speak with Dr. <name>'s office",

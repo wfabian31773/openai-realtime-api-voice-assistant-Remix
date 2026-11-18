@@ -128,6 +128,8 @@ describe('"Dr." counts when the doctor is the person asked for', () => {
     "Caller asked to speak with Dr. Amini's medical assistant.",
     "Caller asked to speak with Dr. Amini's coordinator for cataract surgery.",
     "Caller asked to be connected to Dr. Tompkins' nurse.",
+    'Caller asked to speak with Dr. J. Smith.',
+    'Caller asked to be connected with Dr. Dwayne K.',
   ])('"%s" is an ask for a person', (n) => {
     expect(asksForAPerson(n)).toBe(true);
   });
@@ -148,6 +150,9 @@ describe('"Dr." counts when the doctor is the person asked for', () => {
     "Caller asked to speak with the pharmacy about Dr. Amini's prescription.",
     "Caller asked to be connected to Dr. Amini's voicemail.",
     'Caller asked to be connected to Dr. Amini voicemail.',
+    // An initial's full stop does not end the ask (github-actions on #494).
+    "Caller asked to be connected to Dr. J. Smith's voicemail.",
+    'Caller asked to speak with Dr. J. Smith voicemail.',
     "Caller asked to speak with Dr. Amini's office fax line.",
     // A provider choice is not an ask to be put through.
     'Patient requested Dr. Amini for the surgery.',
