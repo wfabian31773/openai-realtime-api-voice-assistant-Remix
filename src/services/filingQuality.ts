@@ -133,6 +133,22 @@ const PCP_RECORDS_ROUTED = new Set(["patient", "family_or_personal_representativ
 const PCP_PROFESSIONALS = new Set(["provider_office_or_facility", "health_plan", "pharmacy", "attorney_or_legal", "other_business"]);
 
 /**
+ * When v236 ("Keep in PCP Support", operator 2026-11-14) began to apply: the
+ * ruling's day, midnight Pacific. Measured 2026-11-18 on call_logs: the last PCP
+ * call on a pre-v236 build was 2026-11-14 00:57 UTC and the first on a v236 or
+ * later build 2026-11-16 16:12 UTC, with no PCP call between, so this boundary
+ * puts every PCP call under the rule it ran under.
+ */
+export const PCP_SCHEDULING_STAYS_IN_PCP_FROM = Date.parse("2026-11-14T08:00:00Z");
+
+/** True for a call that ran before v236. A call with no readable start time is judged by the current rule. */
+function beforePcpSchedulingStaysInPcp(callStartedAt: string | null | undefined): boolean {
+  if (!callStartedAt) return false;
+  const at = Date.parse(callStartedAt);
+  return Number.isFinite(at) && at < PCP_SCHEDULING_STAYS_IN_PCP_FROM;
+}
+
+/**
  * The department the rulings send this request to, or null when there is no
  * recorded ruling for it on this line, or when the code makes a judgement the
  * transcript cannot see. Encodes only:
@@ -140,9 +156,11 @@ const PCP_PROFESSIONALS = new Set(["provider_office_or_facility", "health_plan",
  *     v15/v16, v73; after hours v190, operator 2026-11-09). On PCP only for a
  *     patient, family, provider, plan or attorney: a pharmaceutical rep or a
  *     professional the agent cannot identify stays in PCP Support by design (v16);
- *   - PCP: scheduling goes to the HVA Hub (v17); a professional's other requests
- *     stay in PCP Support; a PATIENT's request is routed by topic like a queue
- *     call (glasses to Optical), and anything else from a patient has no rule;
+ *   - PCP: a professional's requests stay in PCP Support, scheduling included
+ *     (v236; a call before it is judged by v17, scheduling to the HVA Hub for
+ *     every caller); a PATIENT's scheduling goes to the HVA Hub (v128) and the rest is
+ *     routed by topic like a queue call (glasses to Optical); anything else from
+ *     a patient, or from a caller of unknown role, has no rule;
  *   - glasses, contacts and optical orders go to Optical on every line, after hours too (v161);
  *   - after hours: an urgent symptom's record is After Hours (v88, v93). Nothing
  *     else after hours has a rule here: a same-day request of any topic goes to
@@ -150,13 +168,28 @@ const PCP_PROFESSIONALS = new Set(["provider_office_or_facility", "health_plan",
  *   - surgery coordination goes to Surgery Coordination;
  *   - scheduling goes to the HVA Hub from every queue (standing instruction 10).
  */
-export function expectedDepartment(topic: Topic, lane: string, urgent: boolean, callerRole?: string): number | null {
+export function expectedDepartment(
+  topic: Topic,
+  lane: string,
+  urgent: boolean,
+  callerRole?: string,
+  callStartedAt?: string | null,
+): number | null {
   const afterHours = AFTER_HOURS_LANES.has(lane);
   if (lane === "pcp") {
     if (topic === "records") return callerRole && PCP_RECORDS_ROUTED.has(callerRole) ? DEPARTMENTS.medicalRecords : null;
-    if (topic === "scheduling_new_or_change_or_cancel_or_confirm") return DEPARTMENTS.hvaHub;
+    // Before v236 every PCP scheduling request went to the HVA Hub (v17), so an
+    // older call is judged by the rule it ran under.
+    if (topic === "scheduling_new_or_change_or_cancel_or_confirm" && beforePcpSchedulingStaysInPcp(callStartedAt)) {
+      return DEPARTMENTS.hvaHub;
+    }
+    // A professional's requests stay in PCP Support, scheduling included
+    // (v236, operator 2026-11-14: "Keep in PCP Support"; until then v17 sent
+    // a professional's scheduling to the HVA Hub).
     if (callerRole && PCP_PROFESSIONALS.has(callerRole)) return DEPARTMENTS.pcpSupport;
     if (callerRole === "patient" || callerRole === "family_or_personal_representative") {
+      // A patient's own scheduling still reaches the HVA Hub (v128).
+      if (topic === "scheduling_new_or_change_or_cancel_or_confirm") return DEPARTMENTS.hvaHub;
       return topic === "optical_order_or_glasses_or_contacts" ? DEPARTMENTS.optical : null;
     }
     return null;
@@ -400,7 +433,7 @@ export function compareFiling(row: ExpectationRow, tickets: TicketRow[]): Filing
   };
   const e = row.expectation;
   if (!e) return base;
-  base.expectedDepartment = expectedDepartment(e.topic, lane, e.urgent, e.callerRole);
+  base.expectedDepartment = expectedDepartment(e.topic, lane, e.urgent, e.callerRole, row.call_started_at);
   if (tickets.length === 0) {
     base.verdict = e.shouldFile ? (noTicketByRuling(lane, row.runtime_outcome) ? "no_ticket_by_ruling" : "missed_filing") : "correctly_not_filed";
     base.clean = !e.shouldFile || base.verdict === "no_ticket_by_ruling";
