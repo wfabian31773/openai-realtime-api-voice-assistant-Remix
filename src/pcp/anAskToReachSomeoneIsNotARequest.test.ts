@@ -26,10 +26,10 @@
  *      is the model's (standing instruction 3): this file pins what the model
  *      READS, and the offline A/B in the PR body measures what it sends.
  *
- *   2. "Dr." is "doctor" after a verb of speaking or connecting
- *      (`explicitAsk.ts`), so an office that asks to speak with a doctor by
- *      name is offered the transfer v204 gives an office that asks for "a
- *      doctor". That is the one corpus call a rule reaches on its own.
+ *   2. "Dr." counts as "doctor" when the doctor is the person the caller
+ *      asked to reach (`explicitAsk.ts`), so an office that asks to speak with
+ *      a doctor by name is offered the transfer v204 gives an office that asks
+ *      for "a doctor". That is the one corpus call a rule reaches on its own.
  *
  * Fixtures are synthetic. The SIDs are the real calls; nothing a caller said
  * is in this file.
@@ -111,7 +111,7 @@ beforeEach(() => {
   ticketing.createTicket.mockResolvedValue({ success: true, ticketNumber: 'VA-90480' });
 });
 
-describe('"Dr." is "doctor" after a verb of speaking or connecting', () => {
+describe('"Dr." counts when the doctor is the person asked for', () => {
   it.each([
     'Caller called asking to speak with Dr. Amini.',
     'Caller asked to talk to Dr Amini about it.',
@@ -119,6 +119,15 @@ describe('"Dr." is "doctor" after a verb of speaking or connecting', () => {
     'Caller asked us to transfer them to Dr. Amini.',
     'Caller asked to be connected to Dr. Amini, please.',
     'Caller asked for the Dr.',
+    'Caller asked to speak with Dr. Amini about the patient.',
+    "Caller asked to speak with Dr. O'Brien regarding a referral.",
+    'Caller wants to talk with a Dr., please.',
+    'Caller asked us to put them through to Dr. Amini-Lee.',
+    // The doctor's own staff is still a person.
+    "Caller asked to speak with Dr. Amini's office about the fax.",
+    "Caller asked to speak with Dr. Amini's medical assistant.",
+    "Caller asked to speak with Dr. Amini's coordinator for cataract surgery.",
+    "Caller asked to be connected to Dr. Tompkins' nurse.",
   ])('"%s" is an ask for a person', (n) => {
     expect(asksForAPerson(n)).toBe(true);
   });
@@ -135,6 +144,18 @@ describe('"Dr." is "doctor" after a verb of speaking or connecting', () => {
     'Caller did not ask to speak with Dr. Amini.',
     // `dr` inside a word is not the abbreviation.
     'Caller asked to talk with the pharmacy about the drops.',
+    // The doctor in the window is not the person asked for (Codex on #494).
+    "Caller asked to speak with the pharmacy about Dr. Amini's prescription.",
+    "Caller asked to be connected to Dr. Amini's voicemail.",
+    'Caller asked to be connected to Dr. Amini voicemail.',
+    "Caller asked to speak with Dr. Amini's office fax line.",
+    // A provider choice is not an ask to be put through.
+    'Patient requested Dr. Amini for the surgery.',
+    'Caller wants Dr. Amini to review the images.',
+    // After an asking verb the noun must end the phrase, as "asked for the
+    // doctor about the refill" already reads nothing.
+    'Caller asked for the Dr. about the refill.',
+    'Caller asked for the doctor about the refill.',
     // A mention is not an ask.
     'Caller is Dr. Amini from Example Eye.',
   ])('"%s" is not', (n) => {

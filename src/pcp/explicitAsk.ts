@@ -383,7 +383,7 @@ const A_REAL_PERSON =
   /\b(?:(?:live|real|actual)\s+(?:person|human|representative|rep|agent|operator)|human being)\b/i;
 
 /**
- * v248: "DR." IS "DOCTOR" AFTER A VERB OF SPEAKING OR CONNECTING.
+ * v248: "DR." COUNTS WHEN THE DOCTOR IS THE PERSON THE CALLER ASKED TO REACH.
  *
  * v204 added `doctor` to the nouns. The model writes the abbreviation when
  * the caller names one: "asking to speak with Dr. <name>". `\bdoctor\b` does
@@ -394,18 +394,92 @@ const A_REAL_PERSON =
  * and named no other person noun; 7 were not transferred (PCP-86641 among
  * them, one of the nine person-only tickets of 2026-11-17).
  *
- * GET_A_PERSON KEEPS THE RAW TEXT. After `get me|them|us` the abbreviation
- * can begin a document's owner ("get them Dr. <name>'s notes"), and the name
- * between the noun and the possessive would slip past that branch's document
- * check, which looks only at the word straight after the noun. The same 30
- * days had 0 narratives with `get me|them|us` before "Dr.". ASKED_FOR reads
- * the spelled text: its noun must end the phrase, so "requested Dr. <name>'s
- * records" still fails it on the name, and "asked for the Dr." counts.
+ * THE DOCTOR MUST BE THE OBJECT, NOT A WORD IN THE WINDOW. Reading "Dr." as
+ * "doctor" across the whole narrative (the first version of this) let the
+ * other branches' 25-character windows find it where somebody else was being
+ * asked for: "asked to speak with the pharmacy about Dr. <name>'s
+ * prescription" (Codex P1 on #494) and "asked to be connected to Dr. <name>'s
+ * voicemail" (P2 on #494) both latched an ask for a person. So the
+ * abbreviation is read only straight after the verb and its preposition
+ * (an article allowed), and what follows it must end the ask: up to three
+ * capitalised name words, then punctuation, the end, or a word that carries
+ * on the request ("about", "regarding", "please"), or the doctor's own staff
+ * ("<name>'s office", below). Any other possessive or word after the name
+ * ("<name>'s voicemail", "<name> voicemail") is not an ask for the doctor and
+ * reads nothing. The other branches read the narrative as written, as before
+ * v248.
+ *
+ * Not after `get me|them|us`: there the abbreviation can begin a document's
+ * owner ("get them Dr. <name>'s notes"); the same 30 days had 0 narratives
+ * with `get me|them|us` before "Dr.". And after an asking verb ("asked for",
+ * "requested", "wants") a NAME is never read: "requested Dr. <name> for the
+ * surgery" is a choice of provider, not an ask to be put through, so only
+ * "asked for the Dr." with nothing after it counts, the ask-for branch's own
+ * rule that the noun ends the phrase.
  */
-const DOCTOR_ABBREVIATION = /\bdr\b\.?/gi;
+const DR_ARTICLE = '(?:(?:the|a|an|another|any)\\s+)?';
+const DR_TOKEN = '\\bdr\\b\\.?';
 
-function withDoctorSpelledOut(narrative: string): string {
-  return narrative.replace(DOCTOR_ABBREVIATION, 'doctor');
+/** The verbs, each with its preposition, that may take the doctor as their object. */
+const DR_LEADS: ReadonlyArray<{ re: RegExp; name: boolean }> = [
+  { re: new RegExp(`\\b(?:speak|talk)\\s+(?:to|with)\\s+${DR_ARTICLE}${DR_TOKEN}`, 'gi'), name: true },
+  {
+    re: new RegExp(
+      '\\b(?:connect(?:\\s+(?:me|them|us|him|her))?' +
+        '|' + REQUEST_LEAD + '[^.]{0,20}\\bconnect(?:ed|ing)' +
+        '|transfer(?:\\s+(?:me|them|us|him|her|the\\s+call(?:er)?|this\\s+call|my\\s+call))?(?:\\s+(?:directly|straight|right|over|back)){0,3}' +
+        '|put\\s+(?:me|them|us|him|her)\\s+through' +
+        `)\\s+(?:to|with|for)\\s+${DR_ARTICLE}${DR_TOKEN}`,
+      'gi',
+    ),
+    name: true,
+  },
+  {
+    re: new RegExp(
+      '\\b(?:ask(?:ed|s|ing)?(?:\\s+(?:us|me|them|him|her))?\\s+for' +
+        '|(?:request(?:ed|s|ing)?|want(?:s|ed)?|would\\s+like)(?:\\s+(?:us|me|them|him|her))?(?:\\s+for)?' +
+        `)\\s+${DR_ARTICLE}(?:(?:live|real|actual|human)\\s+)?${DR_TOKEN}`,
+      'gi',
+    ),
+    name: false,
+  },
+];
+
+/** Capitalised name words after the abbreviation, case-sensitive: "Amini", "O'Brien", "Amini-Lee". */
+const DR_NAME = /^(?:\s+[A-Z][A-Za-z-]*(?:['\u2019][A-Z][A-Za-z-]*)?){0,3}/;
+
+/**
+ * The doctor's own staff is still a person: "speak with Dr. <name>'s office",
+ * "<name>'s medical assistant", "<name>'s coordinator for cataract surgery".
+ * In the same 30 days 3 narratives had that shape. A possessive followed by
+ * anything else ("<name>'s voicemail", "<name>'s prescription") reads
+ * nothing, and the staff word must end the ask the way the doctor must, so
+ * "<name>'s office fax number" reads nothing either.
+ */
+const DR_STAFF = new RegExp(
+  `^['\u2019]s?\\s+(?:${HUMAN_NOUNS}|(?:surgical\\s+|surgery\\s+)?coordinator|assistant|scheduler)\\b`,
+  'i',
+);
+
+/** What may follow the doctor when the doctor ends the ask. */
+const DR_ASK_ENDS = /^(?:\s*[,;!?:)]|\.(?:\s|$)|\s*$)/;
+const DR_ASK_CARRIES_ON =
+  /^\s+(?:about|regarding|re|concerning|for|on|at|from|please|today|now|directly|personally|asap|urgently|immediately|again|and|or|but|because|as|so|since|who|when|if|to|before|after|in)\b/i;
+
+/** True when a verb of speaking, connecting or asking has the doctor as its object. */
+function asksForTheDoctor(narrative: string): boolean {
+  for (const { re, name } of DR_LEADS) {
+    for (const m of narrative.matchAll(re)) {
+      if (NEGATOR_IMMEDIATELY_BEFORE.test(narrative.slice(0, m.index))) continue;
+      let tail = narrative.slice((m.index ?? 0) + m[0].length);
+      if (name) {
+        tail = tail.slice(DR_NAME.exec(tail)![0].length);
+        tail = tail.slice(DR_STAFF.exec(tail)?.[0].length ?? 0);
+      }
+      if (DR_ASK_ENDS.test(tail) || (name && DR_ASK_CARRIES_ON.test(tail))) return true;
+    }
+  }
+  return false;
 }
 
 /**
@@ -415,12 +489,12 @@ function withDoctorSpelledOut(narrative: string): string {
  * `handoff_to_pcp`; the director's `eligibleByAsk` reads the flag this sets.
  */
 export function asksForAPerson(narrative: string): boolean {
-  const spelled = withDoctorSpelledOut(narrative);
   return (
-    matchesUnnegated(SPEAK_TO, spelled) ||
-    matchesUnnegated(CONNECT_TO, spelled) ||
+    matchesUnnegated(SPEAK_TO, narrative) ||
+    matchesUnnegated(CONNECT_TO, narrative) ||
     matchesUnnegated(GET_A_PERSON, narrative) ||
-    matchesUnnegated(ASKED_FOR, spelled) ||
+    matchesUnnegated(ASKED_FOR, narrative) ||
+    asksForTheDoctor(narrative) ||
     A_REAL_PERSON.test(narrative)
   );
 }
