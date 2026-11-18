@@ -118,7 +118,14 @@ describe("where it went", () => {
     expect(expectedDepartment("records", "pcp", false, "patient")).toBe(DEPARTMENTS.medicalRecords);
     expect(expectedDepartment("records", "pcp", false, "pharmacy")).toBeNull();
     expect(expectedDepartment("records", "pcp", false, "unknown")).toBeNull();
-    expect(expectedDepartment("scheduling_new_or_change_or_cancel_or_confirm", "pcp", false, "provider_office_or_facility")).toBe(DEPARTMENTS.hvaHub);
+    // Scheduling from a professional stays in PCP Support (v236, 2026-11-14);
+    // a patient's own scheduling reaches the HVA Hub (v128); an unknown role has no rule.
+    expect(expectedDepartment("scheduling_new_or_change_or_cancel_or_confirm", "pcp", false, "provider_office_or_facility")).toBe(DEPARTMENTS.pcpSupport);
+    expect(expectedDepartment("scheduling_new_or_change_or_cancel_or_confirm", "pcp", false, "health_plan")).toBe(DEPARTMENTS.pcpSupport);
+    expect(expectedDepartment("scheduling_new_or_change_or_cancel_or_confirm", "pcp", false, "patient")).toBe(DEPARTMENTS.hvaHub);
+    expect(expectedDepartment("scheduling_new_or_change_or_cancel_or_confirm", "pcp", false, "family_or_personal_representative")).toBe(DEPARTMENTS.hvaHub);
+    expect(expectedDepartment("scheduling_new_or_change_or_cancel_or_confirm", "pcp", false, "unknown")).toBeNull();
+    expect(expectedDepartment("scheduling_new_or_change_or_cancel_or_confirm", "pcp", false)).toBeNull();
     // A professional's other requests stay in PCP Support.
     expect(expectedDepartment("surgery_date_or_surgery_coordination", "pcp", false, "provider_office_or_facility")).toBe(DEPARTMENTS.pcpSupport);
     expect(expectedDepartment("billing", "pcp", false, "health_plan")).toBe(DEPARTMENTS.pcpSupport);
@@ -337,6 +344,20 @@ describe("review of #440: correct filings are not charged", () => {
     const e = expectation({ topic: "scheduling_new_or_change_or_cancel_or_confirm", callerRole: "provider_office_or_facility", requesterName: "Pat Example" });
     const c = compareFiling(row(e, { agent_used: "pcp" }), [ticket({ filed_department_id: DEPARTMENTS.hvaHub, department_id: DEPARTMENTS.hvaHub })]);
     expect(c.fields.requester).toBeUndefined();
+    // Since v236 (2026-11-14) a professional's scheduling stays in PCP Support,
+    // so the HVA Hub is the wrong department for it.
+    expect(c.department).toBe("mismatch");
+  });
+
+  it("a professional's PCP scheduling request kept in PCP Support matches (v236)", () => {
+    const e = expectation({ topic: "scheduling_new_or_change_or_cancel_or_confirm", callerRole: "provider_office_or_facility" });
+    const c = compareFiling(row(e, { agent_used: "pcp" }), [ticket({ filed_department_id: DEPARTMENTS.pcpSupport, department_id: DEPARTMENTS.pcpSupport })]);
+    expect(c.department).toBe("match");
+  });
+
+  it("a patient's own PCP scheduling request in the HVA Hub matches (v128)", () => {
+    const e = expectation({ topic: "scheduling_new_or_change_or_cancel_or_confirm", callerRole: "patient" });
+    const c = compareFiling(row(e, { agent_used: "pcp" }), [ticket({ filed_department_id: DEPARTMENTS.hvaHub, department_id: DEPARTMENTS.hvaHub })]);
     expect(c.department).toBe("match");
   });
 
