@@ -366,7 +366,8 @@ describe('the model is asked, every time', () => {
       const t = agent.tools.find((x: any) => x.name === name);
       const params = t.parameters as { required?: string[]; properties: Record<string, any> };
       expect(params.required, name).toContain('callerStatedARequest');
-      expect(params.properties.callerStatedARequest.description).toMatch(/asked for is a person/);
+      // v248 reworded it to name the shapes (anAskToReachSomeoneIsNotARequest.test.ts).
+      expect(params.properties.callerStatedARequest.description).toMatch(/only asked to reach someone/);
     }
     pcpDirector.clear('CAwire204000000000000000000000000');
   });

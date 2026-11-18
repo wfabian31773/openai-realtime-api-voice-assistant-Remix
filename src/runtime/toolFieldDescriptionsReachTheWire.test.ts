@@ -299,7 +299,12 @@ describe('what the descriptions cost on the wire', () => {
     // patientDob (operator, 2026-11-14: ask the patient and the date of birth
     // before filing). Measured 7,927 after cutting the new description to one
     // sentence and giving patientDob none, as record_pcp_intake's has none.
-    ['pcp', 8_000],
+    // v248 RAISED pcp once, 8,000 -> 8,200: callerStatedARequest's description
+    // (on create_pcp_task and handoff_to_pcp) names the shapes the model read
+    // as a request on all nine person-only PCP tickets of 2026-11-17 (a staff
+    // member by name, a doctor, a technician, a department, customer service).
+    // Measured 8,171. The wording is the one the offline A/B measured.
+    ['pcp', 8_200],
   ] as const)('%s stays under %i characters', (slug, ceiling) => {
     expect(JSON.stringify(built.get(slug)!.lane.agent.tools).length).toBeLessThan(ceiling);
   });
