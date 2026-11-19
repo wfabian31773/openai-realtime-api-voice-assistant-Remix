@@ -1235,6 +1235,9 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
             'Patient called the PCP Support line.',
             // A relative's request is named for the patient; who rang goes here.
             patientName.calledBy ? `Caller: ${patientName.calledBy} (not the patient).` : null,
+            patientName.missing?.length
+              ? `NOT CAPTURED ON THE CALL: the patient's ${patientName.missing.length === 2 ? 'name' : patientName.missing[0]}.`
+              : null,
             redirect ? redirect.note : null,
             // The ask was spent and no date came: say so on a ticket whose
             // team needs one to find the chart.

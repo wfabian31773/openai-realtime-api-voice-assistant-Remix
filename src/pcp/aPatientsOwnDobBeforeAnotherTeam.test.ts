@@ -421,3 +421,68 @@ describe("review of #496, round 2: a relative's ticket is named for the patient"
     expect(patientNameOnTheTicket(base)).toEqual({ firstName: 'Unknown', lastName: 'Caller' });
   });
 });
+
+/**
+ * Review of #496, round 3: a caller who said they are not the patient and gave
+ * only part of the patient's name, or none, still filed under their own name
+ * beside the patient's date of birth. The ticket now carries what is known of
+ * the patient, `Unknown` for the rest, and the gap. Shape of
+ * CA82b0de8c57e28e3350df79890d070eb2 (VA-86328), had the caller not given the
+ * name when asked.
+ */
+describe("review of #496, round 3: a third-party caller's name never names the ticket", () => {
+  const RELATIVE = 'Maria Lopez';
+
+  async function fileAsThirdParty(patientFields: Record<string, unknown>) {
+    ticketing.createTicket.mockClear();
+    const { agent, callId } = agentFor('CA82b0de8c57e28e3350df79890d070eb2');
+    await call(agent, 'record_pcp_intake', { callPurpose: 'patient_caller', callerName: RELATIVE });
+    await call(agent, 'record_pcp_intake', { callerIsThePatient: false, patientDob: DOB, ...patientFields });
+    later(RECORDS_ASK_BATCH_MS + 1_000);
+    const filed = await call(agent, 'create_pcp_task', { narrative: TECH, callerStatedARequest: true });
+    expect(filed.success).toBe(true);
+    expect(ticketing.createTicket).toHaveBeenCalledTimes(1);
+    pcpDirector.clear(callId);
+    return (ticketing.createTicket.mock.calls as any[])[0][0];
+  }
+
+  it('only the first name given: the known half, Unknown for the rest, the gap and the caller written', async () => {
+    const payload = await fileAsThirdParty({ patientFirstName: 'Ana' });
+    expect(payload).toMatchObject({ patientFirstName: 'Ana', patientLastName: 'Unknown', patientBirthYear: '1950' });
+    expect(payload.description).toContain(`Caller: ${RELATIVE} (not the patient).`);
+    expect(payload.description).toContain("NOT CAPTURED ON THE CALL: the patient's last name.");
+  });
+
+  it('only the last name given', async () => {
+    const payload = await fileAsThirdParty({ patientLastName: 'Rivera' });
+    expect(payload).toMatchObject({ patientFirstName: 'Unknown', patientLastName: 'Rivera' });
+    expect(payload.description).toContain("NOT CAPTURED ON THE CALL: the patient's first name.");
+  });
+
+  it('no patient name given', async () => {
+    const payload = await fileAsThirdParty({});
+    expect(payload).toMatchObject({ patientFirstName: 'Unknown', patientLastName: 'Unknown', patientBirthYear: '1950' });
+    expect(payload.description).toContain(`Caller: ${RELATIVE} (not the patient).`);
+    expect(payload.description).toContain("NOT CAPTURED ON THE CALL: the patient's name.");
+  });
+
+  it('the full name given: no gap line', async () => {
+    const payload = await fileAsThirdParty({ patientFirstName: 'Ana', patientLastName: 'Rivera' });
+    expect(payload).toMatchObject({ patientFirstName: 'Ana', patientLastName: 'Rivera' });
+    expect(payload.description).not.toContain('NOT CAPTURED ON THE CALL: the patient');
+  });
+
+  it('the rule: only an explicit third party is kept off the patient fields', async () => {
+    const { patientNameOnTheTicket } = await import('./director');
+    const base = { callPurpose: 'patient_caller', callerName: RELATIVE } as any;
+    expect(patientNameOnTheTicket({ ...base, callerIsThePatient: false, patientFirstName: 'Ana' }))
+      .toEqual({ firstName: 'Ana', lastName: 'Unknown', calledBy: RELATIVE, missing: ['last name'] });
+    expect(patientNameOnTheTicket({ ...base, callerIsThePatient: false }))
+      .toEqual({ firstName: 'Unknown', lastName: 'Unknown', calledBy: RELATIVE, missing: ['first name', 'last name'] });
+    // Not flagged either way, half a name: the caller's name, as round 2 ruled.
+    expect(patientNameOnTheTicket({ ...base, patientFirstName: 'Ana' })).toEqual({ firstName: 'Maria', lastName: 'Lopez' });
+    // No caller name at all: no caller line.
+    expect(patientNameOnTheTicket({ callPurpose: 'patient_caller', callerIsThePatient: false } as any))
+      .toEqual({ firstName: 'Unknown', lastName: 'Unknown', missing: ['first name', 'last name'] });
+  });
+});

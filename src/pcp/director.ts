@@ -834,14 +834,30 @@ export function patientNameOnTheTicket(state: PcpConversationState): {
   firstName: string;
   lastName: string;
   calledBy?: string;
+  /** The patient's name halves not captured, for the ticket's gap line. */
+  missing?: Array<'first name' | 'last name'>;
 } {
   const first = state.patientFirstName?.trim();
   const last = state.patientLastName?.trim();
   const caller = state.callerName?.trim();
+  const fold = (s: string) => s.toLowerCase().replace(/[^a-z]+/g, ' ').trim();
+  const calledBy = (patient: string) =>
+    caller && !(fold(caller) === fold(patient)) ? { calledBy: caller } : {};
+  /**
+   * A caller who said they are NOT the patient never names the ticket (review
+   * of #496, round 3): with only part of the patient's name, or none, the
+   * ticket carries what is known and `Unknown` for the rest, the gap is
+   * written on it, and the caller goes on the staff side, so the patient's
+   * date of birth is never filed beside the caller's name.
+   */
+  if (state.callerIsThePatient === false && !(first && last)) {
+    const missing: Array<'first name' | 'last name'> = [];
+    if (!first) missing.push('first name');
+    if (!last) missing.push('last name');
+    return { firstName: first || 'Unknown', lastName: last || 'Unknown', ...calledBy(`${first ?? ''} ${last ?? ''}`), missing };
+  }
   if (state.callerIsThePatient !== true && first && last) {
-    const fold = (s: string) => s.toLowerCase().replace(/[^a-z]+/g, ' ').trim();
-    const sameAsCaller = caller !== undefined && fold(caller) === fold(`${first} ${last}`);
-    return { firstName: first, lastName: last, ...(caller && !sameAsCaller ? { calledBy: caller } : {}) };
+    return { firstName: first, lastName: last, ...calledBy(`${first} ${last}`) };
   }
   const parts = String(caller ?? '').split(/\s+/).filter(Boolean);
   return { firstName: parts[0] || 'Unknown', lastName: parts.slice(1).join(' ') || 'Caller' };
