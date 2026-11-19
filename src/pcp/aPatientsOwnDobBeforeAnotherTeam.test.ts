@@ -314,8 +314,9 @@ describe("review of #496: a relative is asked the patient's date of birth, never
  *   CA82b0de8c57e28e3350df79890d070eb2 (VA-86328)  the caller said they are
  *        not the patient; nobody asked the patient's name, and the ticket
  *        carried the caller's.
- *   CA07eaa2ca5111bf7ce07d85985c847ae2 (VA-86459)  already carried the
- *        patient's name; a control.
+ *   CA07eaa2ca5111bf7ce07d85985c847ae2 (VA-86459)  carried the patient's
+ *        name in production (its filing did not take this path); the same
+ *        shape through the patient path names the caller before this change.
  *
  * Synthetic names; the SIDs are the real calls.
  */
