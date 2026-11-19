@@ -25,7 +25,9 @@ import { DEFAULT_ATTEMPT_CAPS, DEFAULT_CALLING_WINDOW } from "./callingWindow";
 import { answerUrl, statusUrl } from "./dialer";
 import { CallSessionRegistry } from "../sessionRegistry";
 import {
-  MARK_STREAMED_BUDGET_MS,
+  STAMP_RETRY_MS,
+  STREAMED_KEEP_MS,
+  StreamedAttempts,
   handleOutboundAnswer,
   handleOutboundStatus,
   pickupNobodyHeard,
@@ -83,6 +85,8 @@ async function setup(attemptNumber = 1) {
     store,
     policyFor: async (slug: string) => (slug === "test-lane" || slug === SI_ASSISTANT_SLUG || slug === OPERATOR_SLUG ? policy : null),
     now: () => NOW,
+    // Each test is its own process: nothing carries over between them.
+    streamedHere: new StreamedAttempts(),
   };
   return { store, deps, attemptId };
 }
@@ -292,20 +296,90 @@ describe("the stream's own stamp, which does not wait on the call row (Codex P1 
     expect(r.body).toContain("<Connect>");
   });
 
-  it("a stamp that hangs holds the greeting no longer than its budget", async () => {
-    vi.useFakeTimers();
+  it("the stream's TwiML never waits on the stamp's write", async () => {
     const [callSid] = CORPUS[11];
     const { store, deps, attemptId } = await setup(1);
     store.markAttemptStreamed = () => new Promise<void>(() => {});
-    let done = false;
-    const pending = handleOutboundAnswer("test-lane", answer(attemptId, callSid), deps).then((r) => {
-      done = true;
-      return r;
-    });
-    await vi.advanceTimersByTimeAsync(MARK_STREAMED_BUDGET_MS - 1);
-    expect(done).toBe(false);
-    await vi.advanceTimersByTimeAsync(1);
-    expect((await pending).body).toContain("<Connect>");
+    const r = await handleOutboundAnswer("test-lane", answer(attemptId, callSid), deps);
+    expect(r.body).toContain("<Connect>");
+  });
+
+  it("a stamp whose write fails, on a call whose row is late, still stays answered (github-actions review of ac870ed)", async () => {
+    const [callSid, duration] = CORPUS[12];
+    const { store, deps, attemptId } = await setup(1);
+    store.markAttemptStreamed = async () => {
+      throw new Error("db down");
+    };
+    await handleOutboundAnswer("test-lane", answer(attemptId, callSid), deps);
+    expect(store.streamed.has(attemptId)).toBe(false);
+    expect(store.callRows.has(callSid)).toBe(false);
+    await handleOutboundStatus("test-lane", noVerdict(attemptId, callSid, duration), deps);
+    expect(store.contacts.get("c1")!.status).toBe("answered");
+  });
+
+  it("a stamp whose write fails is written once more", async () => {
+    vi.useFakeTimers();
+    const [callSid] = CORPUS[13];
+    const { store, deps, attemptId } = await setup(1);
+    const real = store.markAttemptStreamed.bind(store);
+    let tries = 0;
+    store.markAttemptStreamed = async (id: string) => {
+      tries++;
+      if (tries === 1) throw new Error("db blip");
+      return real(id);
+    };
+    await handleOutboundAnswer("test-lane", answer(attemptId, callSid), deps);
+    await vi.advanceTimersByTimeAsync(STAMP_RETRY_MS);
+    expect(tries).toBe(2);
+    expect(store.streamed.has(attemptId)).toBe(true);
+  });
+
+  it("a status that reaches another process reads the stamp on the attempt", async () => {
+    const [callSid, duration] = CORPUS[14];
+    const { store, deps, attemptId } = await setup(1);
+    await handleOutboundAnswer("test-lane", answer(attemptId, callSid), deps);
+    await Promise.resolve();
+    expect(store.streamed.has(attemptId)).toBe(true);
+    // A restart between the answer and the status: this process's record is gone.
+    await handleOutboundStatus("test-lane", noVerdict(attemptId, callSid, duration), { ...deps, streamedHere: new StreamedAttempts() });
+    expect(store.contacts.get("c1")!.status).toBe("answered");
+  });
+
+  it("the SI Assistant writes no stamp: its calls are not a campaign's retries", async () => {
+    const [callSid] = CORPUS[15];
+    const { store, deps, attemptId } = await setup(1);
+    const writes: string[] = [];
+    store.markAttemptStreamed = async (id: string) => {
+      writes.push(id);
+    };
+    const r = await handleOutboundAnswer(
+      SI_ASSISTANT_SLUG,
+      signed(answerUrl(HOST, SI_ASSISTANT_SLUG, "c1", attemptId), {
+        CallSid: callSid,
+        From: "+15555550100",
+        To: "+15555550111",
+        Direction: "outbound-api",
+        AnsweredBy: "human",
+      }),
+      deps,
+    );
+    expect(r.body).toContain("<Connect>");
+    expect(writes).toEqual([]);
+    expect(deps.streamedHere.has(attemptId)).toBe(false);
+  });
+
+  it("the in-process record keeps an attempt for hours and is bounded", () => {
+    let now = 0;
+    const kept = new StreamedAttempts(STREAMED_KEEP_MS, 3, () => now);
+    kept.note("a");
+    now = STREAMED_KEEP_MS;
+    expect(kept.has("a")).toBe(true);
+    now = STREAMED_KEEP_MS + 1;
+    expect(kept.has("a")).toBe(false);
+    now = 0;
+    const capped = new StreamedAttempts(STREAMED_KEEP_MS, 3, () => now);
+    for (const id of ["a", "b", "c", "d"]) capped.note(id);
+    expect(["a", "b", "c", "d"].map((id) => capped.has(id))).toEqual([false, true, true, true]);
   });
 
   it("the production store writes and reads the stamp on answered_at, by attempt id", () => {

@@ -72,6 +72,8 @@ export interface OutboundWebhookDeps {
   now?: () => Date;
   liveCalls?: LiveCallRegistry;
   operatorStore?: () => PluginStore | null;
+  /** The attempts this process handed to the stream (v249); the module's own by default. */
+  streamedHere?: StreamedAttempts;
 }
 
 function gate(req: WebhookRequest, env: Record<string, string | undefined>): WebhookResponse | null {
@@ -152,9 +154,10 @@ export async function handleOutboundAnswer(
     return twimlResponse(200, `<Say>${xmlEscape(OUTBOUND_UNAVAILABLE_LINE)}</Say><Hangup/>`);
   }
 
-  // Durable before a word is spoken: the status webhook reads it to tell a
+  // Noted before a word is spoken: the status webhook reads it to tell a
   // call somebody could hear from a pick-up that never reached us (v249).
-  await markStreamed(attemptId, deps);
+  // Nothing here waits on the database, so the greeting is never held.
+  markStreamed(slug, req, attemptId, deps);
   const entry = deps.registry.register({
     callSid,
     slug,
@@ -269,9 +272,14 @@ export async function handleOutboundStatus(
  * are approved one at a time and are not a campaign's retries.
  */
 export function pickupNobodyHeard(slug: string, req: WebhookRequest): boolean {
-  if (slug === OPERATOR_SLUG || slug === SI_ASSISTANT_SLUG) return false;
-  if (new URL(req.originalUrl, "https://x.invalid").searchParams.has("liveSession")) return false;
+  if (!campaignRetryApplies(slug, req)) return false;
   return (req.body.CallStatus ?? "") === "completed" && !(req.body.AnsweredBy ?? "").trim();
+}
+
+/** A campaign's dial, whose ring-out the dialler retries: not the operator line, the SI Assistant or a live session. */
+function campaignRetryApplies(slug: string, req: WebhookRequest): boolean {
+  if (slug === OPERATOR_SLUG || slug === SI_ASSISTANT_SLUG) return false;
+  return !new URL(req.originalUrl, "https://x.invalid").searchParams.has("liveSession");
 }
 
 /** Both signals: Twilio gave no verdict, and no stream opened (v249). */
@@ -280,19 +288,24 @@ async function nobodyHeardUs(slug: string, req: WebhookRequest, deps: OutboundWe
 }
 
 /**
- * The second signal, independent of Twilio's: the answer webhook stamped the
- * attempt before it handed the call to the stream (`markAttemptStreamed`), or
- * the call has a call_logs row. The stamp is the durable one: the call row
- * can be written as late as teardown when its opening insert misses its
- * deadline (Codex P1 on #495; measured, npx-outreach outbound calls of 15 s
- * or more in the 14 days to 2026-11-19, 0 of 325 had their row written only
- * at hangup, so the call row alone was never wrong there, but nothing made it
- * right). Either one means a person could have heard us. A read that fails
- * counts as opened, so a database blip keeps the old `answered` and never
- * rings a person again; a status with no CallSid is checked by its attempt.
+ * The second signal, independent of Twilio's: this process handed the
+ * attempt to the stream (`streamedHere`), the answer webhook's stamp on the
+ * attempt (`markAttemptStreamed`), or a call_logs row. The call row can be
+ * written as late as teardown when its opening insert misses its deadline
+ * (Codex P1 on #495; measured, npx-outreach outbound calls of 15 s or more in
+ * the 14 days to 2026-11-19, 0 of 325 had their row written only at hangup,
+ * so the call row alone was never wrong there, but nothing made it right).
+ * The in-process record is written before the stream's TwiML is returned, so
+ * it holds even when the stamp's write fails or the call row is late (the
+ * github-actions review of `ac870ed`); the stamp is for a status that reaches
+ * another process. Any one means a person could have heard us. A read that
+ * fails counts as opened, so a database blip keeps the old `answered` and
+ * never rings a person again; a status with no CallSid is checked by its
+ * attempt.
  */
 async function streamOpened(req: WebhookRequest, deps: OutboundWebhookDeps): Promise<boolean> {
   const { attemptId } = queryOf(req);
+  if (attemptId && (deps.streamedHere ?? streamedInThisProcess).has(attemptId)) return true;
   try {
     if (attemptId && (await deps.store.attemptWasStreamed(attemptId))) return true;
   } catch {
@@ -307,26 +320,64 @@ async function streamOpened(req: WebhookRequest, deps: OutboundWebhookDeps): Pro
   }
 }
 
-/** How long the answer webhook waits on the stamp before it streams anyway. */
-export const MARK_STREAMED_BUDGET_MS = 1_500;
+/**
+ * The attempts this process has handed to the stream, kept long enough for
+ * their terminal status to arrive (a call runs at most ten minutes) and
+ * bounded so a busy day cannot grow it.
+ */
+export class StreamedAttempts {
+  private readonly at = new Map<string, number>();
+  constructor(
+    private readonly keepMs = STREAMED_KEEP_MS,
+    private readonly cap = STREAMED_CAP,
+    private readonly clock: () => number = Date.now,
+  ) {}
+  note(attemptId: string): void {
+    const now = this.clock();
+    this.at.delete(attemptId);
+    this.at.set(attemptId, now);
+    for (const [id, t] of this.at) {
+      if (this.at.size <= this.cap && now - t <= this.keepMs) break;
+      this.at.delete(id);
+    }
+  }
+  has(attemptId: string): boolean {
+    const t = this.at.get(attemptId);
+    return t !== undefined && this.clock() - t <= this.keepMs;
+  }
+}
+
+/** Six hours: far past the ten-minute call ceiling and any late status. */
+export const STREAMED_KEEP_MS = 6 * 60 * 60 * 1000;
+export const STREAMED_CAP = 10_000;
+/** How long before the stamp's write is tried once more after a failure. */
+export const STAMP_RETRY_MS = 2_000;
+
+export const streamedInThisProcess = new StreamedAttempts();
 
 /**
- * Stamp the attempt, bounded: a slow or failing write must never hold up the
- * greeting, and the call row is the fallback signal when the stamp is lost.
+ * Record that the attempt reached the stream: in this process at once, and
+ * on the attempt in the database without waiting (so a slow write never holds
+ * the greeting), tried once more if it fails. Only a campaign's dial, the
+ * calls the status webhook classifies; the operator line, the SI Assistant
+ * and a live session are never retried by the dialler and write nothing.
  */
-async function markStreamed(attemptId: string, deps: OutboundWebhookDeps): Promise<void> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
+function markStreamed(slug: string, req: WebhookRequest, attemptId: string, deps: OutboundWebhookDeps): void {
+  if (!campaignRetryApplies(slug, req)) return;
+  (deps.streamedHere ?? streamedInThisProcess).note(attemptId);
+  void writeStamp(attemptId, deps, 1);
+}
+
+async function writeStamp(attemptId: string, deps: OutboundWebhookDeps, triesLeft: number): Promise<void> {
   try {
-    await Promise.race([
-      deps.store.markAttemptStreamed(attemptId),
-      new Promise<void>((resolve) => {
-        timer = setTimeout(resolve, MARK_STREAMED_BUDGET_MS);
-      }),
-    ]);
+    await deps.store.markAttemptStreamed(attemptId);
   } catch (err) {
+    if (triesLeft > 0) {
+      const t = setTimeout(() => void writeStamp(attemptId, deps, triesLeft - 1), STAMP_RETRY_MS);
+      (t as { unref?: () => void }).unref?.();
+      return;
+    }
     console.warn(`[outbound] could not stamp attempt ${attemptId} as streamed: ${(err as Error)?.message ?? err}`);
-  } finally {
-    if (timer) clearTimeout(timer);
   }
 }
 
