@@ -801,6 +801,20 @@ export const DESTINATION_PROMPTS: Record<PcpRecordsDeliveryMethod, string> = {
 export const OWN_DOB_PROMPT =
   'And may I please have your date of birth, starting with the month, then the day, then the year?';
 
+/**
+ * Whose date of birth the question names. The caller's own only when they
+ * said they are the patient (`callerIsThePatient`); otherwise the patient's.
+ * `patient_caller` covers a patient AND their family, so a relative asked
+ * "your date of birth" gives their own and it files as the patient's
+ * (`CA47ef77558cf9750f7cdb2999c9c7ddaa`, a patient's daughter, 2026-11-17;
+ * review of #496). A patient the model did not flag who is asked "the
+ * patient's date of birth" still gives their own, which is the right date.
+ * One rule for the intake, the records gate and the v250 gate.
+ */
+export function dobPromptFor(state: PcpConversationState): string {
+  return state.callerIsThePatient === true ? OWN_DOB_PROMPT : PROMPTS.patientDob!;
+}
+
 /** A method that names no destination — the recorded form of "they didn't say". */
 export function deliveryDestinationNeeded(state: PcpConversationState): boolean {
   return Boolean(state.recordsDeliveryMethod) && state.recordsDeliveryMethod !== 'unspecified';
@@ -1604,7 +1618,7 @@ export class PcpDirector {
               (missing === 'recordsDeliveryDestination' && state.recordsDeliveryMethod
                 ? DESTINATION_PROMPTS[state.recordsDeliveryMethod]
                 : undefined)
-              ?? (missing === 'patientDob' && isPatient ? OWN_DOB_PROMPT : undefined)
+              ?? (missing === 'patientDob' ? dobPromptFor(state) : undefined)
               ?? PROMPTS[missing]
               ?? `Please provide ${String(missing)}.`,
           }

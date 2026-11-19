@@ -1225,7 +1225,7 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
           }
           return refusePcp('missing_required_field:patientDob', {
             say: dobAsk.prompt,
-            guidance: ownDobAskGuidance(dobAsk.team),
+            guidance: ownDobAskGuidance(dobAsk.team, dobAsk.prompt),
           });
         }
         const body = sanitizeForSms(

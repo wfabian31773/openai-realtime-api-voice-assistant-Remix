@@ -34,7 +34,7 @@
  * batch, not the caller's answer: it gets the same question and spends
  * nothing (the v79 rule).
  */
-import { OWN_DOB_PROMPT, PROMPTS, askBudgetFor, type PcpConversationState } from './director';
+import { askBudgetFor, dobPromptFor, type PcpConversationState } from './director';
 import { deliveryAskFor } from './recordsDelivery';
 import { REQUIRED_PROMPTS, ticketReadiness, MAX_BLOCKS, type RequiredField } from './ticketRequirements';
 
@@ -83,7 +83,7 @@ export function recordsFieldsMissing(
    * patient themselves in their own words.
    */
   if (!state.patientDob && (asked.has(recordsAskKey('patientDob', state)) || !dobAskSpentByTheIntake(state))) {
-    missing.push({ field: 'patientDob', prompt: state.callerIsThePatient ? OWN_DOB_PROMPT : PROMPTS.patientDob! });
+    missing.push({ field: 'patientDob', prompt: dobPromptFor(state) });
   }
   // The delivery ask is sequential (method, then the destination it needs),
   // so only its next field is known at a time.

@@ -24,13 +24,16 @@
  * THE RULE, read at filing because only the router knows where the request
  * goes: a request leaving PCP Support with no date of birth, whose date-of-
  * birth ask is not spent, is asked it once (the same question and budget the
- * intake uses, `OWN_DOB_PROMPT`, `askBudgetFor('patientDob')`). A call inside
+ * intake uses, `dobPromptFor`, `askBudgetFor('patientDob')`). The question
+ * names the caller's own date of birth only when they said they are the
+ * patient; a relative on `patient_caller` is asked the patient's, so their
+ * own never reaches the ticket (review of #496). A call inside
  * the 2 s batch window of the ask is the model's own sibling and gets the
  * same question back, spending nothing (the records gate's rule). Past it,
  * the request files, with the gap written on it. A request staying in PCP
  * Support is never asked: the practice questions there need no chart.
  */
-import { askBudgetFor, OWN_DOB_PROMPT, type PcpConversationState } from './director';
+import { askBudgetFor, dobPromptFor, type PcpConversationState } from './director';
 import { RECORDS_ASK_BATCH_MS, recordsAskKey } from './recordsIntakeGate';
 
 export type OwnDobAsk =
@@ -49,19 +52,20 @@ export function ownDobBeforeAnotherTeam(
   // second patient on one call is a new ask, as the records gate keys it.
   const key = recordsAskKey('patientDob', state);
   const at = asked.get(key);
+  const prompt = dobPromptFor(state);
   if (at !== undefined && now - at < RECORDS_ASK_BATCH_MS) {
-    return { ask: true, spends: false, key, prompt: OWN_DOB_PROMPT, team };
+    return { ask: true, spends: false, key, prompt, team };
   }
   if ((state.askCounts?.patientDob ?? 0) >= askBudgetFor('patientDob')) return { ask: false };
-  return { ask: true, spends: true, key, prompt: OWN_DOB_PROMPT, team };
+  return { ask: true, spends: true, key, prompt, team };
 }
 
 /** What the model is told with the ask. Never spoken. */
-export function ownDobAskGuidance(departmentName: string): string {
+export function ownDobAskGuidance(departmentName: string, prompt: string): string {
   return (
     'NOT AN ERROR — say nothing about a system or a problem. This request goes to our ' +
-    `${departmentName} team, which works the patient's own chart and needs their date of birth to find it. ` +
-    `Ask: "${OWN_DOB_PROMPT}" and stop talking. When the caller answers, call record_pcp_intake with ` +
+    `${departmentName} team, which works the patient's own chart and needs the patient's date of birth to find it. ` +
+    `Ask: "${prompt}" and stop talking. When the caller answers, call record_pcp_intake with ` +
     'patientDob set to that date (YYYY-MM-DD), then call create_pcp_task again with the same narrative. ' +
     'It is asked once: if they do not give it, call create_pcp_task again and the request files with the gap ' +
     'written on it.'

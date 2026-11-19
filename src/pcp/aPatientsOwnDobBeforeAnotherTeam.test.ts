@@ -9,6 +9,10 @@
  *   rescued    VA-87036  service_inquiry, the caller is the patient, routed to
  *                        Optical; the intake asked no date of birth.
  *              VA-87143  the same shape, routed to Technicians.
+ *   relative   CA47ef77558cf9750f7cdb2999c9c7ddaa (VA-86107)  a patient's
+ *                        daughter on `patient_caller`, asked "your date of
+ *                        birth" by the v235 intake (review of #496). The
+ *                        question now names the patient's.
  *   controls   VA-85628, VA-85760  practice questions; stayed in PCP Support
  *                        with nothing asked, and need no chart.
  *              VA-85576  asked, not given; stayed in PCP Support.
@@ -45,7 +49,7 @@ vi.mock('../../server/services/ticketingApiClient', () => ({
 }));
 
 const { createPcpAgent } = await import('../agents/pcpAgent');
-const { pcpDirector, OWN_DOB_PROMPT } = await import('./director');
+const { pcpDirector, OWN_DOB_PROMPT, PROMPTS } = await import('./director');
 const { RECORDS_ASK_BATCH_MS } = await import('./recordsIntakeGate');
 const { ownDobBeforeAnotherTeam } = await import('./ownDobBeforeAnotherTeam');
 
@@ -241,5 +245,60 @@ describe('the rule', () => {
     const spent = { ...base, askCounts: { patientDob: 1 } };
     expect(ownDobBeforeAnotherTeam(spent, 'Optical Support', asked, 1_000 + RECORDS_ASK_BATCH_MS - 1)).toMatchObject({ ask: true, spends: false });
     expect(ownDobBeforeAnotherTeam(spent, 'Optical Support', asked, 1_000 + RECORDS_ASK_BATCH_MS)).toEqual({ ask: false });
+  });
+});
+
+describe("review of #496: a relative is asked the patient's date of birth, never their own", () => {
+  const PATIENTS_DOB = PROMPTS.patientDob!;
+
+  it("CA47ef77558cf9750f7cdb2999c9c7ddaa: the intake asks a patient_caller relative the patient's date of birth", async () => {
+    const { agent, callId } = agentFor('CA47ef77558cf9750f7cdb2999c9c7ddaa');
+    const asked = await call(agent, 'record_pcp_intake', { callPurpose: 'patient_caller', callerName: 'Test Relative' });
+    expect(asked.nextQuestion?.field).toBe('patientDob');
+    expect(asked.nextQuestion?.prompt).toBe(PATIENTS_DOB);
+    expect(asked.nextQuestion?.prompt).not.toBe(OWN_DOB_PROMPT);
+    pcpDirector.clear(callId);
+  });
+
+  it('a caller who said they are the patient is still asked their own', async () => {
+    const { agent, callId } = agentFor('CA47ef77558cf9750f7cdb2999c9c7ddaa');
+    const asked = await call(agent, 'record_pcp_intake', {
+      callPurpose: 'patient_caller', callerIsThePatient: true, callerName: 'Test Patient',
+    });
+    expect(asked.nextQuestion?.prompt).toBe(OWN_DOB_PROMPT);
+    pcpDirector.clear(callId);
+  });
+
+  it("the gate asks a relative whose request leaves PCP Support the patient's date of birth", async () => {
+    const { agent, callId } = agentFor('CA47ef77558cf9750f7cdb2999c9c7ddaa');
+    // The model files before the intake reaches the date of birth.
+    await call(agent, 'record_pcp_intake', { callPurpose: 'patient_caller' });
+    const asked = await call(agent, 'create_pcp_task', { narrative: OPTICAL, callerStatedARequest: true });
+    expect(asked.error).toBe('missing_required_field:patientDob');
+    expect(asked.say).toBe(PATIENTS_DOB);
+    expect(asked.guidance).toContain(PATIENTS_DOB);
+    expect(asked.guidance).not.toContain(OWN_DOB_PROMPT);
+    expect(ticketing.createTicket).not.toHaveBeenCalled();
+    pcpDirector.clear(callId);
+  });
+
+  it("the records gate asks a relative the patient's date of birth, and a patient their own", async () => {
+    const { recordsFieldsMissing } = await import('./recordsIntakeGate');
+    const relative = { callPurpose: 'patient_caller', patientFirstName: 'Test', patientLastName: 'Patient' } as any;
+    const forRelative = recordsFieldsMissing(relative).find((g) => g.field === 'patientDob');
+    expect(forRelative?.prompt).toBe(PATIENTS_DOB);
+    const forPatient = recordsFieldsMissing({ ...relative, callerIsThePatient: true }).find((g) => g.field === 'patientDob');
+    expect(forPatient?.prompt).toBe(OWN_DOB_PROMPT);
+  });
+
+  it('the rule names the caller only when they said they are the patient', () => {
+    const none = new Map<string, number>();
+    const relative = { callPurpose: 'patient_caller' } as any;
+    expect(ownDobBeforeAnotherTeam(relative, 'Optical Support', none, 0)).toMatchObject({ ask: true, prompt: PATIENTS_DOB });
+    expect(ownDobBeforeAnotherTeam({ ...relative, callerIsThePatient: false }, 'Optical Support', none, 0)).toMatchObject({ prompt: PATIENTS_DOB });
+    expect(ownDobBeforeAnotherTeam({ ...relative, callerIsThePatient: true }, 'Optical Support', none, 0)).toMatchObject({ prompt: OWN_DOB_PROMPT });
+    // Inside the batch window the sibling gets the same question.
+    const asked = new Map<string, number>([['patientDob:0', 1_000]]);
+    expect(ownDobBeforeAnotherTeam(relative, 'Optical Support', asked, 1_500)).toMatchObject({ spends: false, prompt: PATIENTS_DOB });
   });
 });
