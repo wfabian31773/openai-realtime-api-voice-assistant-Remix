@@ -302,3 +302,121 @@ describe("review of #496: a relative is asked the patient's date of birth, never
     expect(ownDobBeforeAnotherTeam(relative, 'Optical Support', asked, 1_500)).toMatchObject({ spends: false, prompt: PATIENTS_DOB });
   });
 });
+
+/**
+ * Review of #496, round 2: the patient path named every ticket from
+ * `callerName`, so a relative's ticket carried the relative's name beside the
+ * patient's date of birth. Measured on the 34 `patient_caller` calls that
+ * filed since v235:
+ *
+ *   CA47ef77558cf9750f7cdb2999c9c7ddaa (VA-86107)  the model recorded the
+ *        patient's first and last name; the ticket carried the caller's.
+ *   CA82b0de8c57e28e3350df79890d070eb2 (VA-86328)  the caller said they are
+ *        not the patient; nobody asked the patient's name, and the ticket
+ *        carried the caller's.
+ *   CA07eaa2ca5111bf7ce07d85985c847ae2 (VA-86459)  already carried the
+ *        patient's name; a control.
+ *
+ * Synthetic names; the SIDs are the real calls.
+ */
+describe("review of #496, round 2: a relative's ticket is named for the patient", () => {
+  const PATIENT = { patientFirstName: 'Ana', patientLastName: 'Rivera' };
+  const RELATIVE = 'Maria Lopez';
+
+  function filedPayload() {
+    expect(ticketing.createTicket).toHaveBeenCalledTimes(1);
+    return (ticketing.createTicket.mock.calls as any[])[0][0];
+  }
+
+  it.each([
+    ['VA-86107', 'CA47ef77558cf9750f7cdb2999c9c7ddaa'],
+    ['VA-86459', 'CA07eaa2ca5111bf7ce07d85985c847ae2'],
+  ])('%s (%s): the recorded patient name names the ticket, and the caller goes on the staff side', async (_t, sid) => {
+    const { agent, callId } = agentFor(sid);
+    await call(agent, 'record_pcp_intake', { callPurpose: 'patient_caller', requestIsAboutAPatient: true });
+    await call(agent, 'record_pcp_intake', PATIENT);
+    await call(agent, 'record_pcp_intake', { callerName: RELATIVE, statedRelationship: 'daughter' });
+    await call(agent, 'record_pcp_intake', { patientDob: DOB });
+    const filed = await call(agent, 'create_pcp_task', { narrative: TECH, callerStatedARequest: true });
+    expect(filed.success).toBe(true);
+    const payload = filedPayload();
+    expect(payload.departmentId).toBe(3);
+    expect(payload).toMatchObject({ patientFirstName: 'Ana', patientLastName: 'Rivera', patientBirthYear: '1950' });
+    expect(payload.description).toContain(`Caller: ${RELATIVE} (not the patient).`);
+    pcpDirector.clear(callId);
+  });
+
+  it("VA-86328 (CA82b0de8c57e28e3350df79890d070eb2): a caller who said they are not the patient is asked the patient's name before filing", async () => {
+    const { agent, callId } = agentFor('CA82b0de8c57e28e3350df79890d070eb2');
+    await call(agent, 'record_pcp_intake', { callPurpose: 'patient_caller' });
+    await call(agent, 'record_pcp_intake', { callerName: RELATIVE });
+    const afterDob = await call(agent, 'record_pcp_intake', {
+      callerIsThePatient: false, patientDob: DOB, requestIsAboutAPatient: true,
+    });
+    expect(afterDob.nextQuestion?.field).toBe('patientFirstName');
+    expect(afterDob.nextQuestion?.prompt).toBe(PROMPTS.patientFirstName);
+
+    await call(agent, 'record_pcp_intake', PATIENT);
+    const filed = await call(agent, 'create_pcp_task', { narrative: OPTICAL, callerStatedARequest: true });
+    expect(filed.success).toBe(true);
+    expect(filedPayload()).toMatchObject({ patientFirstName: 'Ana', patientLastName: 'Rivera' });
+    pcpDirector.clear(callId);
+  });
+
+  it("a relative is asked the patient's name before their date of birth", async () => {
+    const { agent, callId } = agentFor('CA82b0de8c57e28e3350df79890d070eb2');
+    await call(agent, 'record_pcp_intake', { callPurpose: 'patient_caller', callerIsThePatient: false });
+    const next = await call(agent, 'record_pcp_intake', { callerName: RELATIVE });
+    expect(next.nextQuestion?.field).toBe('patientFirstName');
+    const afterName = await call(agent, 'record_pcp_intake', PATIENT);
+    expect(afterName.nextQuestion?.field).toBe('patientDob');
+    expect(afterName.nextQuestion?.prompt).toBe(PROMPTS.patientDob);
+    pcpDirector.clear(callId);
+  });
+
+  it('controls: a patient, an unflagged caller with no patient name, and half a patient name keep the caller\'s name', async () => {
+    const cases: Array<[Record<string, unknown>, string, string, boolean]> = [
+      // The caller is the patient: their own name, even with patient fields recorded.
+      [{ callerIsThePatient: true, ...PATIENT, callerName: RELATIVE }, 'Maria', 'Lopez', false],
+      // Not flagged, no patient name: the caller's name, as before.
+      [{ callerName: 'Test Patient' }, 'Test', 'Patient', false],
+      // Half a patient name is not used: no mixed names.
+      [{ patientFirstName: 'Ana', callerName: RELATIVE }, 'Maria', 'Lopez', false],
+    ];
+    for (const [fields, first, last] of cases) {
+      ticketing.createTicket.mockClear();
+      const { agent, callId } = agentFor('CAd12f2d4bf5b151fc0a4508c0fa008963');
+      await call(agent, 'record_pcp_intake', { callPurpose: 'patient_caller', ...fields });
+      await call(agent, 'record_pcp_intake', { patientDob: DOB });
+      await call(agent, 'create_pcp_task', { narrative: TECH, callerStatedARequest: true });
+      const payload = filedPayload();
+      expect(payload).toMatchObject({ patientFirstName: first, patientLastName: last });
+      expect(payload.description).not.toContain('(not the patient)');
+      pcpDirector.clear(callId);
+    }
+  });
+
+  it("an unflagged patient_caller is not asked the patient's name", async () => {
+    const { agent, callId } = agentFor('CAd12f2d4bf5b151fc0a4508c0fa008963');
+    await call(agent, 'record_pcp_intake', { callPurpose: 'patient_caller' });
+    const next = await call(agent, 'record_pcp_intake', { callerName: 'Test Patient' });
+    expect(next.nextQuestion?.field).toBe('patientDob');
+    pcpDirector.clear(callId);
+  });
+
+  it('the rule, unit cases', async () => {
+    const { patientNameOnTheTicket } = await import('./director');
+    const base = { callPurpose: 'patient_caller' } as any;
+    expect(patientNameOnTheTicket({ ...base, ...PATIENT, callerName: RELATIVE }))
+      .toEqual({ firstName: 'Ana', lastName: 'Rivera', calledBy: RELATIVE });
+    // The patient's own name recorded in both places: no caller line.
+    expect(patientNameOnTheTicket({ ...base, ...PATIENT, callerName: 'ana  RIVERA' }))
+      .toEqual({ firstName: 'Ana', lastName: 'Rivera' });
+    // No caller name: the patient's name and no caller line.
+    expect(patientNameOnTheTicket({ ...base, ...PATIENT })).toEqual({ firstName: 'Ana', lastName: 'Rivera' });
+    expect(patientNameOnTheTicket({ ...base, ...PATIENT, callerIsThePatient: false, callerName: RELATIVE }).calledBy).toBe(RELATIVE);
+    expect(patientNameOnTheTicket({ ...base, patientLastName: 'Rivera', callerName: RELATIVE }))
+      .toEqual({ firstName: 'Maria', lastName: 'Lopez' });
+    expect(patientNameOnTheTicket(base)).toEqual({ firstName: 'Unknown', lastName: 'Caller' });
+  });
+});

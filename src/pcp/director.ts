@@ -815,6 +815,38 @@ export function dobPromptFor(state: PcpConversationState): string {
   return state.callerIsThePatient === true ? OWN_DOB_PROMPT : PROMPTS.patientDob!;
 }
 
+/**
+ * WHOSE NAME A PATIENT-PATH TICKET CARRIES (review of #496, round 2). The
+ * patient path named every ticket from `callerName`, so a relative's request
+ * reached the team under the relative's name, beside the patient's date of
+ * birth since `dobPromptFor`. Measured on the 34 `patient_caller` calls that
+ * filed since v235: on `CA47ef77558cf9750f7cdb2999c9c7ddaa` (VA-86107) the
+ * model recorded the patient's own first and last name and the ticket carried
+ * the caller's.
+ *
+ * The rule: when the caller has not said they are the patient and the intake
+ * holds the patient's first AND last name, the ticket is named for the
+ * patient, and the caller's name goes on the ticket's staff side; otherwise
+ * it is named from `callerName`, as before. Half a patient name is not used,
+ * so a ticket never mixes two people's names.
+ */
+export function patientNameOnTheTicket(state: PcpConversationState): {
+  firstName: string;
+  lastName: string;
+  calledBy?: string;
+} {
+  const first = state.patientFirstName?.trim();
+  const last = state.patientLastName?.trim();
+  const caller = state.callerName?.trim();
+  if (state.callerIsThePatient !== true && first && last) {
+    const fold = (s: string) => s.toLowerCase().replace(/[^a-z]+/g, ' ').trim();
+    const sameAsCaller = caller !== undefined && fold(caller) === fold(`${first} ${last}`);
+    return { firstName: first, lastName: last, ...(caller && !sameAsCaller ? { calledBy: caller } : {}) };
+  }
+  const parts = String(caller ?? '').split(/\s+/).filter(Boolean);
+  return { firstName: parts[0] || 'Unknown', lastName: parts.slice(1).join(' ') || 'Caller' };
+}
+
 /** A method that names no destination — the recorded form of "they didn't say". */
 export function deliveryDestinationNeeded(state: PcpConversationState): boolean {
   return Boolean(state.recordsDeliveryMethod) && state.recordsDeliveryMethod !== 'unspecified';
@@ -1328,8 +1360,16 @@ export class PcpDirector {
     // them (`requestConcernsAPatient`, always on `patient_caller`), and not on
     // a question about the practice itself.
     const aboutAPatient = requestConcernsAPatient(state);
+    // A caller who has said they are NOT the patient (a relative on
+    // `patient_caller`) is asked the patient's name before the date of birth,
+    // so the ticket names the patient whose chart it is (review of #496,
+    // round 2: `CA82b0de8c57e28e3350df79890d070eb2`, VA-86328).
     const required: Array<keyof PcpConversationState> = isPatient
-      ? PATIENT_INTAKE_ORDER.filter((field) => field !== 'patientDob' || aboutAPatient)
+      ? PATIENT_INTAKE_ORDER.flatMap((field): Array<keyof PcpConversationState> => {
+          if (field !== 'patientDob') return [field];
+          if (!aboutAPatient) return [];
+          return state.callerIsThePatient === false ? [...PATIENT_FIELDS, 'patientDob'] : ['patientDob'];
+        })
       : [...PROFESSIONAL_FIELDS];
 
     // Purposes whose destination is a live human do not gate the transfer on patient

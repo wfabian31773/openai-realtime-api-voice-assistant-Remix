@@ -23,6 +23,7 @@ import {
   PATIENT_INTAKE_ORDER,
   PCP_RECORDS_DELIVERY_METHODS,
   pcpDirector,
+  patientNameOnTheTicket,
   type PcpConversationState,
 } from '../pcp/director';
 import {
@@ -1228,9 +1229,12 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
             guidance: ownDobAskGuidance(dobAsk.team, dobAsk.prompt),
           });
         }
+        const patientName = patientNameOnTheTicket(state);
         const body = sanitizeForSms(
           [
             'Patient called the PCP Support line.',
+            // A relative's request is named for the patient; who rang goes here.
+            patientName.calledBy ? `Caller: ${patientName.calledBy} (not the patient).` : null,
             redirect ? redirect.note : null,
             // The ask was spent and no date came: say so on a ticket whose
             // team needs one to find the chart.
@@ -1240,13 +1244,12 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
           ].filter((l) => l !== null).join('\n'),
         ).value;
 
-        const nameParts = String(state.callerName ?? '').trim().split(/\s+/);
         const patientPayload: CreateTicketParams = {
           departmentId: redirect?.departmentId ?? PCP_DEPARTMENT_ID,
           requestTypeId: redirect?.requestTypeId ?? home!.requestTypeId,
           requestReasonId: redirect?.requestReasonId ?? home!.requestReasonId,
-          patientFirstName: nameParts[0] || 'Unknown',
-          patientLastName: nameParts.slice(1).join(' ') || 'Caller',
+          patientFirstName: patientName.firstName,
+          patientLastName: patientName.lastName,
           // v235: the patient's own date of birth, asked before filing.
           ...dobColumns(state.patientDob),
           patientPhone: String(state.callbackNumber ?? metadata.callerPhone ?? ''),
