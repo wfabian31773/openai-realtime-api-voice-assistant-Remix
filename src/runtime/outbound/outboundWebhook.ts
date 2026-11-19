@@ -152,6 +152,9 @@ export async function handleOutboundAnswer(
     return twimlResponse(200, `<Say>${xmlEscape(OUTBOUND_UNAVAILABLE_LINE)}</Say><Hangup/>`);
   }
 
+  // Durable before a word is spoken: the status webhook reads it to tell a
+  // call somebody could hear from a pick-up that never reached us (v249).
+  await markStreamed(attemptId, deps);
   const entry = deps.registry.register({
     callSid,
     slug,
@@ -253,8 +256,9 @@ export async function handleOutboundStatus(
  * carried no verdict and none of the 246 has a call row (0 to 30 s, median
  * 19); 368 carried one (human or unknown) and 365 of them have a call row. 233 of the 246 are still the contact's newest attempt
  * and still read `answered`. The status webhook asks for both signals, no
- * verdict here AND no call row (`streamOpened`), so a call that did stream is
- * never re-rung whatever Twilio sends. Such a call is settled as the ring-out branch
+ * verdict here AND no stream (`streamOpened`: the attempt's stamp, written by
+ * the answer webhook before it streams, or a call row), so a call that did
+ * stream is never re-rung whatever Twilio sends. Such a call is settled as the ring-out branch
  * below settles one: `no_answer` with the next look at the policy's gap, or
  * `max_attempts` once the caps are spent, only while the call still holds the
  * row (`onlyIfCalling`), only for its own attempt.
@@ -276,17 +280,53 @@ async function nobodyHeardUs(slug: string, req: WebhookRequest, deps: OutboundWe
 }
 
 /**
- * The second signal, independent of Twilio's: the call has a call_logs row,
- * which only a stream that opened writes. A read that fails counts as opened,
- * so a database blip keeps the old `answered` and never rings a person again.
+ * The second signal, independent of Twilio's: the answer webhook stamped the
+ * attempt before it handed the call to the stream (`markAttemptStreamed`), or
+ * the call has a call_logs row. The stamp is the durable one: the call row
+ * can be written as late as teardown when its opening insert misses its
+ * deadline (Codex P1 on #495; measured, npx-outreach outbound calls of 15 s
+ * or more in the 14 days to 2026-11-19, 0 of 325 had their row written only
+ * at hangup, so the call row alone was never wrong there, but nothing made it
+ * right). Either one means a person could have heard us. A read that fails
+ * counts as opened, so a database blip keeps the old `answered` and never
+ * rings a person again; a status with no CallSid is checked by its attempt.
  */
 async function streamOpened(req: WebhookRequest, deps: OutboundWebhookDeps): Promise<boolean> {
+  const { attemptId } = queryOf(req);
+  try {
+    if (attemptId && (await deps.store.attemptWasStreamed(attemptId))) return true;
+  } catch {
+    return true;
+  }
   const callSid = req.body.CallSid ?? "";
   if (!callSid) return true;
   try {
     return await deps.store.callRowExists(callSid);
   } catch {
     return true;
+  }
+}
+
+/** How long the answer webhook waits on the stamp before it streams anyway. */
+export const MARK_STREAMED_BUDGET_MS = 1_500;
+
+/**
+ * Stamp the attempt, bounded: a slow or failing write must never hold up the
+ * greeting, and the call row is the fallback signal when the stamp is lost.
+ */
+async function markStreamed(attemptId: string, deps: OutboundWebhookDeps): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      deps.store.markAttemptStreamed(attemptId),
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, MARK_STREAMED_BUDGET_MS);
+      }),
+    ]);
+  } catch (err) {
+    console.warn(`[outbound] could not stamp attempt ${attemptId} as streamed: ${(err as Error)?.message ?? err}`);
+  } finally {
+    if (timer) clearTimeout(timer);
   }
 }
 

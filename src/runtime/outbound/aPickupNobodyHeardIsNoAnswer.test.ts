@@ -16,21 +16,27 @@
  * duration and attempt number. Synthetic contacts stand in for the patients.
  */
 import { readFileSync } from "node:fs";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import twilio from "twilio";
 import { OPERATOR_SLUG } from "../../plugin/operatorLine";
 import { SI_ASSISTANT_SLUG } from "../../plugin/siAssistantConstants";
 import type { OutboundLanePolicy } from "./campaign";
 import { DEFAULT_ATTEMPT_CAPS, DEFAULT_CALLING_WINDOW } from "./callingWindow";
-import { statusUrl } from "./dialer";
-import { handleOutboundStatus, pickupNobodyHeard } from "./outboundWebhook";
+import { answerUrl, statusUrl } from "./dialer";
+import { CallSessionRegistry } from "../sessionRegistry";
+import {
+  MARK_STREAMED_BUDGET_MS,
+  handleOutboundAnswer,
+  handleOutboundStatus,
+  pickupNobodyHeard,
+} from "./outboundWebhook";
 import { FakeOutboundStore } from "./store.testkit";
 import type { WebhookRequest } from "../voiceWebhook";
 
 const NOW = new Date("2041-03-05T18:00:00Z");
 const AUTH_TOKEN = "test-auth-token";
 const HOST = "runtime.example.com";
-const ENV = { TWILIO_AUTH_TOKEN: AUTH_TOKEN };
+const ENV = { TWILIO_AUTH_TOKEN: AUTH_TOKEN, XAI_API_KEY: "k", DATABASE_URL: "postgres://x" };
 const policy: OutboundLanePolicy = {
   campaignKey: "test-campaign",
   enableEnv: "OUTBOUND_CAMPAIGN_TEST",
@@ -73,7 +79,7 @@ async function setup(attemptNumber = 1) {
   for (let n = 1; n <= attemptNumber; n++) attemptId = await store.startAttempt("c1", "campaign-1", n);
   const deps = {
     env: ENV,
-    registry: undefined as never,
+    registry: new CallSessionRegistry(),
     store,
     policyFor: async (slug: string) => (slug === "test-lane" || slug === SI_ASSISTANT_SLUG || slug === OPERATOR_SLUG ? policy : null),
     now: () => NOW,
@@ -224,5 +230,92 @@ describe("a status with no CallSid", () => {
     const req = signed(statusUrl(HOST, "test-lane", "c1", attemptId), { CallStatus: "completed", CallDuration: "12" });
     await handleOutboundStatus("test-lane", req, deps);
     expect(store.contacts.get("c1")!.status).toBe("answered");
+  });
+});
+
+describe("the stream's own stamp, which does not wait on the call row (Codex P1 on #495)", () => {
+  afterEach(() => vi.useRealTimers());
+
+  const answer = (attemptId: string, callSid: string) =>
+    signed(answerUrl(HOST, "test-lane", "c1", attemptId), {
+      CallSid: callSid,
+      From: "+15555550100",
+      To: "+15555550111",
+      Direction: "outbound-api",
+      AnsweredBy: "human",
+    });
+
+  it("the answer webhook stamps the attempt before it hands the call to the stream", async () => {
+    const [callSid] = CORPUS[6];
+    const { store, deps, attemptId } = await setup(1);
+    const r = await handleOutboundAnswer("test-lane", answer(attemptId, callSid), deps);
+    expect(r.body).toContain("<Connect>");
+    expect(store.streamed.has(attemptId)).toBe(true);
+  });
+
+  it("a streamed call whose row is not written yet and whose status carries no verdict stays answered", async () => {
+    const [callSid, duration] = CORPUS[7];
+    const { store, deps, attemptId } = await setup(1);
+    await handleOutboundAnswer("test-lane", answer(attemptId, callSid), deps);
+    // No call row: the opening insert missed its deadline and teardown has
+    // not written it yet. Twilio's status omits AnsweredBy.
+    expect(store.callRows.has(callSid)).toBe(false);
+    await handleOutboundStatus("test-lane", noVerdict(attemptId, callSid, duration), deps);
+    expect(store.contacts.get("c1")!.status).toBe("answered");
+  });
+
+  it("a stamp on another attempt does not count for this one", async () => {
+    const [callSid, duration] = CORPUS[8];
+    const { store, deps, attemptId } = await setup(1);
+    store.streamed.add("some-other-attempt");
+    await handleOutboundStatus("test-lane", noVerdict(attemptId, callSid, duration), deps);
+    expect(store.contacts.get("c1")!.status).toBe("no_answer");
+  });
+
+  it("a stamp read that fails counts as streamed", async () => {
+    const [callSid, duration] = CORPUS[9];
+    const { store, deps, attemptId } = await setup(1);
+    store.attemptWasStreamed = async () => {
+      throw new Error("db down");
+    };
+    await handleOutboundStatus("test-lane", noVerdict(attemptId, callSid, duration), deps);
+    expect(store.contacts.get("c1")!.status).toBe("answered");
+  });
+
+  it("a stamp that cannot be written never stops the call streaming", async () => {
+    const [callSid] = CORPUS[10];
+    const { store, deps, attemptId } = await setup(1);
+    store.markAttemptStreamed = async () => {
+      throw new Error("db down");
+    };
+    const r = await handleOutboundAnswer("test-lane", answer(attemptId, callSid), deps);
+    expect(r.body).toContain("<Connect>");
+  });
+
+  it("a stamp that hangs holds the greeting no longer than its budget", async () => {
+    vi.useFakeTimers();
+    const [callSid] = CORPUS[11];
+    const { store, deps, attemptId } = await setup(1);
+    store.markAttemptStreamed = () => new Promise<void>(() => {});
+    let done = false;
+    const pending = handleOutboundAnswer("test-lane", answer(attemptId, callSid), deps).then((r) => {
+      done = true;
+      return r;
+    });
+    await vi.advanceTimersByTimeAsync(MARK_STREAMED_BUDGET_MS - 1);
+    expect(done).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect((await pending).body).toContain("<Connect>");
+  });
+
+  it("the production store writes and reads the stamp on answered_at, by attempt id", () => {
+    const SRC = readFileSync("src/runtime/outbound/store.ts", "utf8");
+    const mark = SRC.slice(SRC.indexOf("async markAttemptStreamed("), SRC.indexOf("async attemptWasStreamed("));
+    expect(mark).toContain("UPDATE campaign_contact_attempts SET answered_at = COALESCE(answered_at, NOW())");
+    expect(mark).toContain("WHERE id = ${attemptId}::varchar");
+    const read = SRC.slice(SRC.indexOf("async attemptWasStreamed("));
+    expect(read.slice(0, read.indexOf("\n    async ", 1))).toContain(
+      "WHERE id = ${attemptId}::varchar AND answered_at IS NOT NULL) AS found",
+    );
   });
 });

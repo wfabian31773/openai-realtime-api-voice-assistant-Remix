@@ -153,6 +153,17 @@ export class FakeOutboundStore implements OutboundStore {
     return this.callRows.has(callSid);
   }
 
+  /** Attempts the answer webhook handed to the stream (v249). */
+  streamed = new Set<string>();
+
+  async markAttemptStreamed(attemptId: string): Promise<void> {
+    this.streamed.add(attemptId);
+  }
+
+  async attemptWasStreamed(attemptId: string): Promise<boolean> {
+    return this.streamed.has(attemptId);
+  }
+
   async callOpenOnPhone(contactId: string, since: Date): Promise<boolean> {
     // Same rule as the SQL: the phone in EVERY campaign, still on the line,
     // a dial or a returned call alike.
