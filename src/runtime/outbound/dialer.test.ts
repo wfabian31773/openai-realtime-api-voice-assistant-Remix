@@ -679,10 +679,14 @@ describe("an ambiguous createCall throw is not a refusal (stand-in review of 652
     expect((await runCampaignTick("test-lane", policy, deps)).held).toEqual({ twilio_uncertain: 1 });
     const attemptId = store.attempts[0]!.id;
     const url = statusUrl("voice.example.test", "test-lane", "c1", attemptId);
+    // An answered call: detection decided, so the status carries a verdict
+    // (since v249, a completed status with no verdict and no call row is a
+    // pick-up nobody heard, settled no_answer).
     const body = {
       CallSid: "CA00000000000000000000000000000001",
       CallStatus: "completed",
       CallDuration: "42",
+      AnsweredBy: "human",
     };
     await handleOutboundStatus("test-lane", signed(url, body), {
       env: LIVE,

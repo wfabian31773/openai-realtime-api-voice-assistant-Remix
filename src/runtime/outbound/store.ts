@@ -211,6 +211,12 @@ export interface OutboundStore {
    * status never arrived cannot hold the phone past the stale-claim window.
    */
   callOpenOnPhone(contactId: string, since: Date): Promise<boolean>;
+  /**
+   * Whether this CallSid has a call_logs row: the stream opened, so the
+   * person heard the greeting (v249). The status webhook reads it before
+   * settling a call with no answering-machine verdict as a ring-out.
+   */
+  callRowExists(callSid: string): Promise<boolean>;
   /** Write the attempt row. Does not increment the contact's counter or
    * mark them contacted — that waits until Twilio has accepted the call. */
   startAttempt(contactId: string, campaignId: string, attemptNumber: number): Promise<string>;
@@ -607,6 +613,14 @@ export async function createDbOutboundStore(): Promise<OutboundStore> {
              )`),
       );
       return Number(found[0]?.n ?? 0);
+    },
+
+    async callRowExists(callSid) {
+      const found = rows(
+        await db.execute(sql`
+          SELECT EXISTS (SELECT 1 FROM call_logs WHERE call_sid = ${callSid}::varchar) AS found`),
+      );
+      return found[0]?.found === true;
     },
 
     async callOpenOnPhone(contactId, since) {

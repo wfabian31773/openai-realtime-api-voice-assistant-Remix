@@ -146,6 +146,13 @@ export class FakeOutboundStore implements OutboundStore {
     return n;
   }
 
+  /** CallSids that have a call_logs row (the stream opened). */
+  callRows = new Set<string>();
+
+  async callRowExists(callSid: string): Promise<boolean> {
+    return this.callRows.has(callSid);
+  }
+
   async callOpenOnPhone(contactId: string, since: Date): Promise<boolean> {
     // Same rule as the SQL: the phone in EVERY campaign, still on the line,
     // a dial or a returned call alike.

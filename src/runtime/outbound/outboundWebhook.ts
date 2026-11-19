@@ -38,6 +38,7 @@ import { operatorLineEnabled } from "../../plugin/operatorLineSettings";
 import { boundPluginStore } from "../../plugin/bindings";
 import type { PluginStore } from "../../plugin/store";
 import { OPERATOR_SLUG } from "../../plugin/operatorLine";
+import { SI_ASSISTANT_SLUG } from "../../plugin/siAssistantConstants";
 import { computeRuntimeReadiness } from "../readiness";
 import type { CallSessionRegistry } from "../sessionRegistry";
 import {
@@ -216,7 +217,7 @@ export async function handleOutboundStatus(
     durationSeconds: Number.isFinite(duration) ? duration : null,
   });
 
-  if (status === "completed") {
+  if (status === "completed" && !(await nobodyHeardUs(slug, req, deps))) {
     // A person answered and the call ended without the agent settling the
     // contact. Not retried automatically: somebody heard us, and ringing
     // them again on a guess is how a campaign becomes a nuisance.
@@ -235,6 +236,58 @@ export async function handleOutboundStatus(
     { onlyIfCalling: true, onlyIfCurrentAttempt: attemptId, nextAttemptAt: nextLookAt(now, "too_soon", policy) },
   );
   return ok;
+}
+
+/**
+ * A DIALLED CALL TWILIO REPORTS `completed` WITH NO ANSWERING-MACHINE VERDICT
+ * IS A PICK-UP NOBODY HEARD (v249, operator 2026-11-18: "build the no-answer
+ * fix in tonight's pass"). The dialler asks for synchronous detection
+ * (`DetectMessageEnd`), and Twilio requests the answer URL only once detection
+ * has decided, so a call that ends before it decides never reaches the answer
+ * webhook: no greeting is played, no stream opens, no call row is written. The
+ * terminal status then arrives with no `AnsweredBy`, and the branch above it
+ * marked the contact `answered`, a status the dialler never rings again.
+ *
+ * Measured, npx-outreach, every outbound attempt Twilio reported `completed`
+ * to 2026-11-19 03:00 UTC: 246 carried no verdict and none of the 246 has a
+ * call row (0 to 30 s, median 19); 365 carried one (human or unknown) and all
+ * 365 have a call row. 233 of the 246 are still the contact's newest attempt
+ * and still read `answered`. The status webhook asks for both signals, no
+ * verdict here AND no call row (`streamOpened`), so a call that did stream is
+ * never re-rung whatever Twilio sends. Such a call is settled as the ring-out branch
+ * below settles one: `no_answer` with the next look at the policy's gap, or
+ * `max_attempts` once the caps are spent, only while the call still holds the
+ * row (`onlyIfCalling`), only for its own attempt.
+ *
+ * Not for a live call (the SI Assistant and the operator line carry a
+ * `liveSession`, and 13 SI Assistant attempts with no verdict on their status
+ * callback did have a call row) and not for the operator slug: their rings
+ * are approved one at a time and are not a campaign's retries.
+ */
+export function pickupNobodyHeard(slug: string, req: WebhookRequest): boolean {
+  if (slug === OPERATOR_SLUG || slug === SI_ASSISTANT_SLUG) return false;
+  if (new URL(req.originalUrl, "https://x.invalid").searchParams.has("liveSession")) return false;
+  return (req.body.CallStatus ?? "") === "completed" && !(req.body.AnsweredBy ?? "").trim();
+}
+
+/** Both signals: Twilio gave no verdict, and no stream opened (v249). */
+async function nobodyHeardUs(slug: string, req: WebhookRequest, deps: OutboundWebhookDeps): Promise<boolean> {
+  return pickupNobodyHeard(slug, req) && !(await streamOpened(req, deps));
+}
+
+/**
+ * The second signal, independent of Twilio's: the call has a call_logs row,
+ * which only a stream that opened writes. A read that fails counts as opened,
+ * so a database blip keeps the old `answered` and never rings a person again.
+ */
+async function streamOpened(req: WebhookRequest, deps: OutboundWebhookDeps): Promise<boolean> {
+  const callSid = req.body.CallSid ?? "";
+  if (!callSid) return true;
+  try {
+    return await deps.store.callRowExists(callSid);
+  } catch {
+    return true;
+  }
 }
 
 /** True when the transcript holds a line the caller actually said. */
