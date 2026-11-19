@@ -1957,9 +1957,21 @@ import { callEnvironment } from "./callRecord";
  * (no verdict, no call row) settle it as a ring-out: `no_answer`, or
  * `max_attempts` at the caps. Above main's v248 (#494, `eb4bab5`); v245 is
  * #488 on its open branch. No migration.
+ * On main since #495 (`cadcf4a`).
+ *
+ * v250 — A PATIENT'S REQUEST THAT LEAVES PCP SUPPORT ASKS THEIR DATE OF BIRTH
+ * (2026-11-19). v235's ruling ("Ask before filing") asked a patient their own
+ * date of birth when the request concerns a patient, and missed one shape:
+ * the caller is the patient on a purpose whose row needs none
+ * (`service_inquiry`), and the router sends the request to a team that works
+ * the chart. VA-87036 (Optical) and VA-87143 (Technicians), 2 of 42 PCP
+ * patient-path tickets since v235. `create_pcp_task` now asks it once before
+ * a request leaves PCP Support, on the intake's own budget, and files with the
+ * gap written when it does not come. Above main's v249 (#495, `cadcf4a`); v245
+ * is #488 on its open branch. No migration.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v249-a-pickup-nobody-heard-is-no-answer-20261119";
+  "voice-runtime-v250-a-patients-request-leaving-pcp-support-asks-their-dob-20261119";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

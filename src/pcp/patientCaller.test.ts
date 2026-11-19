@@ -91,8 +91,13 @@ describe('a patient is not asked professional questions', () => {
 
     expect(d.next('c4').nextQuestion?.field).toBe('callerName');
     d.update('c4', { callerName: 'Maria Lopez' });
-    // v235, operator 2026-11-14: the patient's own date of birth before filing.
+    // v235, operator 2026-11-14: the patient's date of birth before filing.
+    // `patient_caller` covers family too, so with nothing saying the caller IS
+    // the patient the question names the patient's (review of #496, v250); a
+    // caller who said so is asked their own (below).
     expect(d.next('c4').nextQuestion?.field).toBe('patientDob');
+    expect(d.next('c4').nextQuestion?.prompt).toMatch(/the patient's date of birth/);
+    d.update('c4', { callerIsThePatient: true });
     expect(d.next('c4').nextQuestion?.prompt).toMatch(/your date of birth/);
     d.update('c4', { patientDob: '1950-02-03' });
     expect(d.next('c4').nextQuestion?.field).toBe('callbackNumber');

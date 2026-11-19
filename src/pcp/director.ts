@@ -801,6 +801,68 @@ export const DESTINATION_PROMPTS: Record<PcpRecordsDeliveryMethod, string> = {
 export const OWN_DOB_PROMPT =
   'And may I please have your date of birth, starting with the month, then the day, then the year?';
 
+/**
+ * Whose date of birth the question names. The caller's own only when they
+ * said they are the patient (`callerIsThePatient`); otherwise the patient's.
+ * `patient_caller` covers a patient AND their family, so a relative asked
+ * "your date of birth" gives their own and it files as the patient's
+ * (`CA47ef77558cf9750f7cdb2999c9c7ddaa`, a patient's daughter, 2026-11-17;
+ * review of #496). A patient the model did not flag who is asked "the
+ * patient's date of birth" still gives their own, which is the right date.
+ * One rule for the intake, the records gate and the v250 gate.
+ */
+export function dobPromptFor(state: PcpConversationState): string {
+  return state.callerIsThePatient === true ? OWN_DOB_PROMPT : PROMPTS.patientDob!;
+}
+
+/**
+ * WHOSE NAME A PATIENT-PATH TICKET CARRIES (review of #496, round 2). The
+ * patient path named every ticket from `callerName`, so a relative's request
+ * reached the team under the relative's name, beside the patient's date of
+ * birth since `dobPromptFor`. Measured on the 34 `patient_caller` calls that
+ * filed since v235: on `CA47ef77558cf9750f7cdb2999c9c7ddaa` (VA-86107) the
+ * model recorded the patient's own first and last name and the ticket carried
+ * the caller's.
+ *
+ * The rule: when the caller has not said they are the patient and the intake
+ * holds the patient's first AND last name, the ticket is named for the
+ * patient, and the caller's name goes on the ticket's staff side; otherwise
+ * it is named from `callerName`, as before. Half a patient name is not used,
+ * so a ticket never mixes two people's names.
+ */
+export function patientNameOnTheTicket(state: PcpConversationState): {
+  firstName: string;
+  lastName: string;
+  calledBy?: string;
+  /** The patient's name halves not captured, for the ticket's gap line. */
+  missing?: Array<'first name' | 'last name'>;
+} {
+  const first = state.patientFirstName?.trim();
+  const last = state.patientLastName?.trim();
+  const caller = state.callerName?.trim();
+  const fold = (s: string) => s.toLowerCase().replace(/[^a-z]+/g, ' ').trim();
+  const calledBy = (patient: string) =>
+    caller && !(fold(caller) === fold(patient)) ? { calledBy: caller } : {};
+  /**
+   * A caller who said they are NOT the patient never names the ticket (review
+   * of #496, round 3): with only part of the patient's name, or none, the
+   * ticket carries what is known and `Unknown` for the rest, the gap is
+   * written on it, and the caller goes on the staff side, so the patient's
+   * date of birth is never filed beside the caller's name.
+   */
+  if (state.callerIsThePatient === false && !(first && last)) {
+    const missing: Array<'first name' | 'last name'> = [];
+    if (!first) missing.push('first name');
+    if (!last) missing.push('last name');
+    return { firstName: first || 'Unknown', lastName: last || 'Unknown', ...calledBy(`${first ?? ''} ${last ?? ''}`), missing };
+  }
+  if (state.callerIsThePatient !== true && first && last) {
+    return { firstName: first, lastName: last, ...calledBy(`${first} ${last}`) };
+  }
+  const parts = String(caller ?? '').split(/\s+/).filter(Boolean);
+  return { firstName: parts[0] || 'Unknown', lastName: parts.slice(1).join(' ') || 'Caller' };
+}
+
 /** A method that names no destination — the recorded form of "they didn't say". */
 export function deliveryDestinationNeeded(state: PcpConversationState): boolean {
   return Boolean(state.recordsDeliveryMethod) && state.recordsDeliveryMethod !== 'unspecified';
@@ -1197,15 +1259,18 @@ export class PcpDirector {
    * calls this.
    */
   /**
-   * THE RECORDS GATE ASKED THE DATE OF BIRTH OUT LOUD (v235, Codex P2 on #479).
+   * A FILING GATE ASKED THE DATE OF BIRTH OUT LOUD (v235, Codex P2 on #479;
+   * v250).
    *
-   * The date of birth is asked once per call, and the records tool's gate is
-   * the second place that can ask it. Its ask was spoken (the tool returned
-   * it as `say`), so charging it here is the same thing `askNext` does for
-   * the intake: a question the caller heard. Without it the intake would ask
+   * The date of birth is asked once per call, and two filing gates can ask
+   * it besides the intake: the records tool's (v235) and `create_pcp_task`'s
+   * when a patient's request leaves PCP Support (v250,
+   * `ownDobBeforeAnotherTeam.ts`). Each ask was spoken (the tool returned it
+   * as `say`), so charging it here is the same thing `askNext` does for the
+   * intake: a question the caller heard. Without it the intake would ask
    * again after the gate had. Not `noteAsked`, whose one caller is `askNext`.
    */
-  noteDobAskedByTheRecordsGate(callId: string): void {
+  noteDobAskedByAGate(callId: string): void {
     const state = this.get(callId);
     const counts = state.askCounts ?? {};
     state.askCounts = { ...counts, patientDob: (counts.patientDob ?? 0) + 1 };
@@ -1311,8 +1376,16 @@ export class PcpDirector {
     // them (`requestConcernsAPatient`, always on `patient_caller`), and not on
     // a question about the practice itself.
     const aboutAPatient = requestConcernsAPatient(state);
+    // A caller who has said they are NOT the patient (a relative on
+    // `patient_caller`) is asked the patient's name before the date of birth,
+    // so the ticket names the patient whose chart it is (review of #496,
+    // round 2: `CA82b0de8c57e28e3350df79890d070eb2`, VA-86328).
     const required: Array<keyof PcpConversationState> = isPatient
-      ? PATIENT_INTAKE_ORDER.filter((field) => field !== 'patientDob' || aboutAPatient)
+      ? PATIENT_INTAKE_ORDER.flatMap((field): Array<keyof PcpConversationState> => {
+          if (field !== 'patientDob') return [field];
+          if (!aboutAPatient) return [];
+          return state.callerIsThePatient === false ? [...PATIENT_FIELDS, 'patientDob'] : ['patientDob'];
+        })
       : [...PROFESSIONAL_FIELDS];
 
     // Purposes whose destination is a live human do not gate the transfer on patient
@@ -1601,7 +1674,7 @@ export class PcpDirector {
               (missing === 'recordsDeliveryDestination' && state.recordsDeliveryMethod
                 ? DESTINATION_PROMPTS[state.recordsDeliveryMethod]
                 : undefined)
-              ?? (missing === 'patientDob' && isPatient ? OWN_DOB_PROMPT : undefined)
+              ?? (missing === 'patientDob' ? dobPromptFor(state) : undefined)
               ?? PROMPTS[missing]
               ?? `Please provide ${String(missing)}.`,
           }

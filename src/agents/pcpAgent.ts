@@ -23,6 +23,7 @@ import {
   PATIENT_INTAKE_ORDER,
   PCP_RECORDS_DELIVERY_METHODS,
   pcpDirector,
+  patientNameOnTheTicket,
   type PcpConversationState,
 } from '../pcp/director';
 import {
@@ -53,6 +54,7 @@ import {
 } from '../pcp/recordsDelivery';
 import { ticketReadiness, nextRequiredAsk, annotationFor, MAX_BLOCKS } from '../pcp/ticketRequirements';
 import { recordsAskFor, recordsAskGuidance, recordsDobGap, recordsIdentityGaps } from '../pcp/recordsIntakeGate';
+import { ownDobAskGuidance, ownDobBeforeAnotherTeam } from '../pcp/ownDobBeforeAnotherTeam';
 import { namesAPatient, submitPcpTicket, submitPcpWithdrawal, type PcpTicketPayload } from '../pcp/pcpTicketing';
 import { toldTheCallerItWasRecorded } from '../pcp/toldItWasRecorded';
 import { answerToTheNoRequestAsk, type TeardownTurn } from '../pcp/answerToTheAsk';
@@ -663,6 +665,9 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
    * (recordsIntakeGate). Per call, like every budget here.
    */
   const recordsAsked = new Map<string, number>();
+  // v250: when `create_pcp_task` asked a patient their own date of birth
+  // before their request left PCP Support, by patient (`recordsAskKey`).
+  const ownDobAsked = new Map<string, number>();
   /**
    * THE RECORDS TOOL'S OWN ANSWERS, written where every other reader looks.
    *
@@ -1209,22 +1214,45 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
         // catch-all must not silently file into another department's Other.
         const home = otherReasonFor(PCP_DEPARTMENT_ID);
         if (!redirect && !home) return refusePcp('no_catchall_for_pcp');
+        // v250: a request leaving PCP Support goes to a team that works the
+        // patient's own chart. With no date of birth and the ask not spent,
+        // ask it once before filing (`ownDobBeforeAnotherTeam.ts`).
+        const now = Date.now();
+        const dobAsk = ownDobBeforeAnotherTeam(state, redirect?.departmentName, ownDobAsked, now);
+        if (dobAsk.ask) {
+          if (dobAsk.spends) {
+            ownDobAsked.set(dobAsk.key, now);
+            pcpDirector.noteDobAskedByAGate(callId);
+          }
+          return refusePcp('missing_required_field:patientDob', {
+            say: dobAsk.prompt,
+            guidance: ownDobAskGuidance(dobAsk.team, dobAsk.prompt),
+          });
+        }
+        const patientName = patientNameOnTheTicket(state);
         const body = sanitizeForSms(
           [
             'Patient called the PCP Support line.',
+            // A relative's request is named for the patient; who rang goes here.
+            patientName.calledBy ? `Caller: ${patientName.calledBy} (not the patient).` : null,
+            patientName.missing?.length
+              ? `NOT CAPTURED ON THE CALL: the patient's ${patientName.missing.length === 2 ? 'name' : patientName.missing[0]}.`
+              : null,
             redirect ? redirect.note : null,
+            // The ask was spent and no date came: say so on a ticket whose
+            // team needs one to find the chart.
+            redirect ? recordsDobGap(state) ?? null : null,
             '',
             narrative,
           ].filter((l) => l !== null).join('\n'),
         ).value;
 
-        const nameParts = String(state.callerName ?? '').trim().split(/\s+/);
         const patientPayload: CreateTicketParams = {
           departmentId: redirect?.departmentId ?? PCP_DEPARTMENT_ID,
           requestTypeId: redirect?.requestTypeId ?? home!.requestTypeId,
           requestReasonId: redirect?.requestReasonId ?? home!.requestReasonId,
-          patientFirstName: nameParts[0] || 'Unknown',
-          patientLastName: nameParts.slice(1).join(' ') || 'Caller',
+          patientFirstName: patientName.firstName,
+          patientLastName: patientName.lastName,
           // v235: the patient's own date of birth, asked before filing.
           ...dobColumns(state.patientDob),
           patientPhone: String(state.callbackNumber ?? metadata.callerPhone ?? ''),
@@ -2324,7 +2352,7 @@ export function createPcpAgent(handoffCallback: HandoffCallback, metadata: PcpAg
             recordsAsked.set(ask.key, now);
             ticketBlocksUsed += 1;
             // One date-of-birth ask per call: the intake does not ask it again.
-            if (ask.field === 'patientDob') pcpDirector.noteDobAskedByTheRecordsGate(callId);
+            if (ask.field === 'patientDob') pcpDirector.noteDobAskedByAGate(callId);
           }
           return refusePcp(`missing_required_field:${ask.field}`, {
             say: ask.prompt,
