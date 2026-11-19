@@ -10,8 +10,8 @@
  * webhook marked the contact `answered`, which the dialler never rings again.
  *
  * Measured, npx-outreach, every outbound attempt Twilio reported `completed`
- * to 2026-11-19 03:00 UTC: 246 with no verdict, none with a call row; 365
- * with a verdict, all with a call row. 233 of the 246 still read `answered`.
+ * to 2026-11-19 02:41 UTC (614): 246 with no verdict, none with a call row;
+ * 368 with a verdict, 365 of them with a call row. 233 of the 246 still read `answered`.
  * The corpus: the 18 of 2026-11-17..19 (Pacific), each with its real
  * duration and attempt number. Synthetic contacts stand in for the patients.
  */

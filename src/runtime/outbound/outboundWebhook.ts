@@ -249,9 +249,9 @@ export async function handleOutboundStatus(
  * marked the contact `answered`, a status the dialler never rings again.
  *
  * Measured, npx-outreach, every outbound attempt Twilio reported `completed`
- * to 2026-11-19 03:00 UTC: 246 carried no verdict and none of the 246 has a
- * call row (0 to 30 s, median 19); 365 carried one (human or unknown) and all
- * 365 have a call row. 233 of the 246 are still the contact's newest attempt
+ * to 2026-11-19 02:41 UTC (614; the newest dial 2026-11-18 17:01 UTC): 246
+ * carried no verdict and none of the 246 has a call row (0 to 30 s, median
+ * 19); 368 carried one (human or unknown) and 365 of them have a call row. 233 of the 246 are still the contact's newest attempt
  * and still read `answered`. The status webhook asks for both signals, no
  * verdict here AND no call row (`streamOpened`), so a call that did stream is
  * never re-rung whatever Twilio sends. Such a call is settled as the ring-out branch
