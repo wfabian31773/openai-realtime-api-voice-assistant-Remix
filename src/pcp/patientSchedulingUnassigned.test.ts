@@ -32,6 +32,10 @@ function patientCall() {
     callerIsThePatient: true,
     callerName: 'Synthetic Patient',
     callbackNumber: '5005550006',
+    // The intake asks a patient_caller their own date of birth (v235), and
+    // since v250 a request leaving PCP Support asks it before filing. This
+    // suite is about routing, so the caller has already given it.
+    patientDob: '1950-02-03',
   });
   const file = async (narrative: string, urgency = 'normal') => {
     const tool = agent.tools.find((candidate) => candidate.name === 'create_pcp_task')!;

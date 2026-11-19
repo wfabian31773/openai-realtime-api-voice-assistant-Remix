@@ -1197,15 +1197,18 @@ export class PcpDirector {
    * calls this.
    */
   /**
-   * THE RECORDS GATE ASKED THE DATE OF BIRTH OUT LOUD (v235, Codex P2 on #479).
+   * A FILING GATE ASKED THE DATE OF BIRTH OUT LOUD (v235, Codex P2 on #479;
+   * v250).
    *
-   * The date of birth is asked once per call, and the records tool's gate is
-   * the second place that can ask it. Its ask was spoken (the tool returned
-   * it as `say`), so charging it here is the same thing `askNext` does for
-   * the intake: a question the caller heard. Without it the intake would ask
+   * The date of birth is asked once per call, and two filing gates can ask
+   * it besides the intake: the records tool's (v235) and `create_pcp_task`'s
+   * when a patient's request leaves PCP Support (v250,
+   * `ownDobBeforeAnotherTeam.ts`). Each ask was spoken (the tool returned it
+   * as `say`), so charging it here is the same thing `askNext` does for the
+   * intake: a question the caller heard. Without it the intake would ask
    * again after the gate had. Not `noteAsked`, whose one caller is `askNext`.
    */
-  noteDobAskedByTheRecordsGate(callId: string): void {
+  noteDobAskedByAGate(callId: string): void {
     const state = this.get(callId);
     const counts = state.askCounts ?? {};
     state.askCounts = { ...counts, patientDob: (counts.patientDob ?? 0) + 1 };
