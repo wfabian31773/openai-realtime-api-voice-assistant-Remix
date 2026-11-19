@@ -1946,9 +1946,20 @@ import { callEnvironment } from "./callRecord";
  * speaking or connecting, so an office asking for a doctor by name is offered
  * the transfer v204 gives one asking for "a doctor". Above main's v247 (#492,
  * `9d6bf87`); v245 is #488 on its open branch. No migration.
+ * On main since #494 (`eb4bab5`).
+ *
+ * v249 — A PICK-UP NOBODY HEARD IS NO ANSWER (2026-11-19). Operator,
+ * 2026-11-18: "build the no-answer fix in tonight's pass." A dialled NPX call
+ * that ended before answering-machine detection decided reached no answer
+ * webhook, no stream and no call row, and the status webhook settled it
+ * `answered`, which the dialler never rings again: 246 such attempts to
+ * 2026-11-19, none with a call row, 233 still `answered`. Both signals now
+ * (no verdict, no call row) settle it as a ring-out: `no_answer`, or
+ * `max_attempts` at the caps. Above main's v248 (#494, `eb4bab5`); v245 is
+ * #488 on its open branch. No migration.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v248-an-ask-to-reach-someone-is-not-a-request-20261118";
+  "voice-runtime-v249-a-pickup-nobody-heard-is-no-answer-20261119";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

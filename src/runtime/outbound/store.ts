@@ -211,6 +211,23 @@ export interface OutboundStore {
    * status never arrived cannot hold the phone past the stale-claim window.
    */
   callOpenOnPhone(contactId: string, since: Date): Promise<boolean>;
+  /**
+   * Whether this CallSid has a call_logs row: the stream opened, so the
+   * person heard the greeting (v249). The status webhook reads it before
+   * settling a call with no answering-machine verdict as a ring-out.
+   */
+  callRowExists(callSid: string): Promise<boolean>;
+  /**
+   * Stamp the attempt as handed to the stream: the answer webhook calls it
+   * before it returns the stream's TwiML, so a call somebody could hear is
+   * recorded on the attempt before a word is spoken (v249, Codex P1 on #495:
+   * the call row can be written as late as teardown when its opening insert
+   * misses its deadline). Uses `answered_at`, which no dialled attempt set
+   * before; a returned call's attempt already carries it.
+   */
+  markAttemptStreamed(attemptId: string): Promise<void>;
+  /** Whether the answer webhook handed this attempt to the stream (v249). */
+  attemptWasStreamed(attemptId: string): Promise<boolean>;
   /** Write the attempt row. Does not increment the contact's counter or
    * mark them contacted — that waits until Twilio has accepted the call. */
   startAttempt(contactId: string, campaignId: string, attemptNumber: number): Promise<string>;
@@ -607,6 +624,29 @@ export async function createDbOutboundStore(): Promise<OutboundStore> {
              )`),
       );
       return Number(found[0]?.n ?? 0);
+    },
+
+    async callRowExists(callSid) {
+      const found = rows(
+        await db.execute(sql`
+          SELECT EXISTS (SELECT 1 FROM call_logs WHERE call_sid = ${callSid}::varchar) AS found`),
+      );
+      return found[0]?.found === true;
+    },
+
+    async markAttemptStreamed(attemptId) {
+      await db.execute(sql`
+        UPDATE campaign_contact_attempts SET answered_at = COALESCE(answered_at, NOW())
+         WHERE id = ${attemptId}::varchar`);
+    },
+
+    async attemptWasStreamed(attemptId) {
+      const found = rows(
+        await db.execute(sql`
+          SELECT EXISTS (SELECT 1 FROM campaign_contact_attempts
+                          WHERE id = ${attemptId}::varchar AND answered_at IS NOT NULL) AS found`),
+      );
+      return found[0]?.found === true;
     },
 
     async callOpenOnPhone(contactId, since) {
