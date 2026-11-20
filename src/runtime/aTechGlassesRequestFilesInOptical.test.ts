@@ -252,6 +252,8 @@ describe('sweptTechRequestForOptical', () => {
     expect(sweptTechRequestForOptical('tech', 'My glasses broke and I have eye pain.')).toBeNull();
     expect(sweptTechRequestForOptical('tech', 'Caller needs new glasses and reports blurry vision since yesterday.')).toBeNull();
     expect(sweptTechRequestForOptical('tech', 'Question about contact lenses; the eye is red and painful.')).toBeNull();
+    // Words only the shared complaint list knows, so neither arm stands in for the other.
+    expect(sweptTechRequestForOptical('tech', 'Needs new glasses and has light sensitivity since yesterday.')).toBeNull();
   });
 
   // github-actions on #499 (head cc93940), round 2, a P1: a sight change said
