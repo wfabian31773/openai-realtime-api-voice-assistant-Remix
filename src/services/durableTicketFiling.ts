@@ -35,6 +35,7 @@ import { loggableTicketingError } from './loggableTicketingError';
 // One-way edge: the registry does not import this module, the tools import both.
 import { getTool } from '../tools/registry';
 import { createHash } from 'node:crypto';
+import { higherPriority, type TicketPriority } from './ticketPriority';
 import type { CreateTicketParams, CreateTicketResponse } from '../../server/services/ticketingApiClient';
 
 export interface DurableCreateResult extends CreateTicketResponse {
@@ -53,6 +54,20 @@ export interface DurableCreateResult extends CreateTicketResponse {
   alreadyFiled?: boolean;
   /** What happened to what the repeat carried — see `forwardRepeatFiling`. */
   addition?: RepeatAddition;
+  /**
+   * The lowest priority the ticket is known to hold after this filing, read
+   * from the payload that was actually sent, never from the arguments of the
+   * call that asked (Codex P1 on #504). An outbox row still `pending`,
+   * `failed` or `sending` keeps its first payload, so a retry that asked for
+   * high can send the medium one the row holds. The ticketing app only ever
+   * raises a ticket's priority to an incoming one (`appendContactEntry`), so
+   * a payload that landed is a floor. Undefined when it is not known.
+   */
+  filedPriority?: TicketPriority;
+}
+
+function sentPriority(p: CreateTicketParams | undefined): TicketPriority | undefined {
+  return p?.priority;
 }
 
 /**
@@ -197,30 +212,60 @@ async function forwardRepeatFiling(
   params: CreateTicketParams,
   outboxKey: string,
   firstOutboxId: string,
-): Promise<RepeatAddition> {
+): Promise<{ addition: RepeatAddition; filedPriority?: TicketPriority }> {
+  // The first filing's payload landed, so its priority is a floor; an
+  // addition raises it only once the app confirms the addition reached the
+  // ticket (`detailsAdded`), and then to the addition's priority at most.
+  let firstPriority: TicketPriority | undefined;
   try {
     const { TicketOutboxService, wrapCreateTicketPayload } = await import('./ticketOutboxService');
     const first = await TicketOutboxService.storedCreateParams(firstOutboxId);
+    firstPriority = sentPriority(first);
     const fingerprint = filingFingerprint(params);
-    if (first && filingFingerprint(first) === fingerprint) return 'nothing_new';
+    if (first && filingFingerprint(first) === fingerprint) return { addition: 'nothing_new', filedPriority: firstPriority };
 
     const write = await TicketOutboxService.writeToOutbox(
       wrapCreateTicketPayload(params),
       `${outboxKey}-add-${fingerprint}`,
     );
-    if (write.alreadyExists && write.status === 'sent') return 'nothing_new';
+    if (write.alreadyExists && write.status === 'sent') return { addition: 'nothing_new', filedPriority: firstPriority };
 
     const sent = await TicketOutboxService.attemptSend(write.outboxId, { liveCaller: true });
-    if (sent.success && sent.detailsAdded === true) return 'added';
-    if (sent.success && sent.cached === true && sent.detailsAdded === false) return 'nothing_new';
+    if (sent.success && sent.detailsAdded === true) {
+      // The row is keyed on this payload's fingerprint, which carries its
+      // priority, so what it sent asked for `params.priority`.
+      return { addition: 'added', filedPriority: higherPriority(firstPriority, sentPriority(params)) };
+    }
+    if (sent.success && sent.cached === true && sent.detailsAdded === false) {
+      return { addition: 'nothing_new', filedPriority: firstPriority };
+    }
     console.info(
       `[TICKET OUTBOX] a later filing on this call was ${sent.success ? 'sent' : 'queued'} ` +
         'and the ticketing app did not confirm it reached the ticket',
     );
-    return 'not_confirmed';
+    return { addition: 'not_confirmed', filedPriority: firstPriority };
   } catch {
     console.error('[TICKET OUTBOX] a later filing on this call could not be persisted');
-    return 'not_confirmed';
+    return { addition: 'not_confirmed', filedPriority: firstPriority };
+  }
+}
+
+/**
+ * The priority of the payload an outbox row holds. A fresh row holds this
+ * filing's own; a row that already existed may keep the one it was first
+ * written with (the worker still owns it), and that is what `attemptSend`
+ * sends.
+ */
+async function heldPriority(
+  params: CreateTicketParams,
+  write: { outboxId: string; alreadyExists: boolean },
+): Promise<TicketPriority | undefined> {
+  if (!write.alreadyExists) return sentPriority(params);
+  try {
+    const { TicketOutboxService } = await import('./ticketOutboxService');
+    return sentPriority(await TicketOutboxService.storedCreateParams(write.outboxId));
+  } catch {
+    return undefined;
   }
 }
 
@@ -309,11 +354,11 @@ export async function createTicketDurable(
       const write = await TicketOutboxService.writeToOutbox(wrapCreateTicketPayload(params, fallback), key.slice(5));
       outboxId = write.outboxId;
       if (write.alreadyExists && write.status === 'sent' && write.ticketNumber) {
-        const addition = await forwardRepeatFiling(params, key.slice(5), write.outboxId);
-        return { success: true, ticketNumber: write.ticketNumber, alreadyFiled: true, addition };
+        const { addition, filedPriority } = await forwardRepeatFiling(params, key.slice(5), write.outboxId);
+        return { success: true, ticketNumber: write.ticketNumber, alreadyFiled: true, addition, filedPriority };
       }
       const sent = await TicketOutboxService.attemptSend(write.outboxId, { liveCaller: true });
-      if (sent.success && sent.ticketNumber) return sent;
+      if (sent.success && sent.ticketNumber) return { ...sent, filedPriority: await heldPriority(params, write) };
       if (sent.terminal) return { ...sent, queued: false, missingField: missingFieldFromError(sent.error) };
       console.error(
         `[TICKET OUTBOX] Immediate filing failed: ${loggableTicketingError(sent.error, sent.statusCode)} — ` +
@@ -332,7 +377,7 @@ export async function createTicketDurable(
   }
   const res = await ticketingApiClient.createTicket(params);
   if (res.success && res.ticketNumber) {
-    return res;
+    return { ...res, filedPriority: sentPriority(params) };
   }
 
   const agent = params.callData?.agentUsed ?? 'unknown';

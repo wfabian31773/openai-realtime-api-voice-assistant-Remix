@@ -33,6 +33,7 @@ import { str, isTwilioCallSid, normalizePhone } from './sharedPatientTools';
 import { splitCallbackExtension } from '../utils/phone';
 import { decideDobEscape, dobStatusNote, dobEscapeMarker, type DobStatus } from './dobEscape';
 import { createTicketDurable, postFailureToolResult, repeatFilingFields } from '../services/durableTicketFiling';
+import { higherPriority, type TicketPriority } from '../services/ticketPriority';
 import { loggableLookupError } from '../services/loggableTicketingError';
 import { verifiedDobFor } from './verifiedIdentity';
 import { spokenDobFor } from './spokenDob';
@@ -395,13 +396,6 @@ registerTool({
     // An outage raises it too, for the reason above — never for a name the
     // lookup ran and rejected, which is an ordinary fact about the call.
     const priority = cls.requestReasonId === GLAUCOMA_REFILL_REASON || lostToOutage ? 'high' : 'medium';
-    // The priority this call's ticket is filed at, kept for the call: a later
-    // filing on the same call adds to the ticket the first one made, and the
-    // ticketing app raises the ticket's priority only when that addition asks
-    // for a higher one and lands (repeat-filing.ts, `raisedPriority`). Noted
-    // before the POST so a filing whose answer is lost (and comes back on the
-    // retry as already filed) still has one.
-    if (callValue(callSid, FILED_PRIORITY) === undefined) noteCallValue(callSid, FILED_PRIORITY, priority);
 
     // ONE ENDPOINT, ALWAYS. create-ticket, with the department stated.
     // Never submit-ticket: it re-derives the DEPARTMENT server-side and
@@ -517,12 +511,19 @@ registerTool({
     // drop refills, post-op drops, prior authorizations and symptoms too: 24 of
     // 109 tech calls whose agent said "urgent" in the 14 days to 2026-11-20 got
     // only a medium ticket. The ticket's priority is this tool's to say.
-    // A later filing on the call is high only when it asked for high and the
-    // app confirmed it reached the ticket; one it did not confirm reports the
-    // priority the ticket is known to have, which errs toward not promising.
-    const raisedByAddition = res.alreadyFiled === true && res.addition === 'added' && priority === 'high';
-    if (!res.alreadyFiled || raisedByAddition) noteCallValue(callSid, FILED_PRIORITY, priority);
-    const filedPriority = res.alreadyFiled && !raisedByAddition ? callValue(callSid, FILED_PRIORITY) : priority;
+    // The priority is the one the filing layer says the ticket holds, read
+    // from the payload that was SENT (`filedPriority`), never from this
+    // call's arguments: an outbox row the worker still owns keeps its first
+    // payload, and a later filing raises the ticket only when the app
+    // confirms it landed (Codex P1 and the github-actions P1 on #504). The
+    // call keeps the highest priority confirmed so far, so a ticket an
+    // earlier addition raised is not later called normal. Nothing is noted
+    // before the POST: an unknown priority promises nothing.
+    const filedPriority = higherPriority(
+      callValue(callSid, FILED_PRIORITY) as TicketPriority | undefined,
+      res.filedPriority,
+    );
+    if (filedPriority) noteCallValue(callSid, FILED_PRIORITY, filedPriority);
     const markedUrgent = filedPriority === 'high';
     const urgencyFix = markedUrgent
       ? 'This request is filed at high priority. You may tell the caller it is marked urgent.'

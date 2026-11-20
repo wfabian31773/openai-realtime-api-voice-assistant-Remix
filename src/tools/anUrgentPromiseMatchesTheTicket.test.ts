@@ -59,7 +59,7 @@ vi.mock('../services/ticketOutboxService', () => ({
       }
       return { ...res, outboxId };
     }),
-    storedCreateParams: vi.fn(async (outboxId: string) => outbox.byId.get(outboxId)?.payload.params),
+    storedCreateParams: vi.fn(async (outboxId: string) => outbox.byId.get(outboxId)?.payload?.params),
   },
 }));
 
@@ -67,6 +67,7 @@ import { runTool } from './registry';
 import './sharedPatientTools';
 import './techTools';
 import { classifyTech, namesAGlaucomaDrug } from './techTaxonomy';
+import { resetGateAttempts } from './gateAttempts';
 import { buildTechPrompt } from '../agents/techAgent';
 
 type Result = Record<string, unknown>;
@@ -99,6 +100,9 @@ beforeEach(() => {
   vi.restoreAllMocks();
   outbox.byKey.clear();
   outbox.byId.clear();
+  // What a call has been told about its ticket's priority lives per call; two
+  // tests on one corpus SID are two calls.
+  resetGateAttempts();
 });
 
 describe('RESCUED — a glaucoma refill the ticket did not know was one', () => {
@@ -284,6 +288,104 @@ describe('CORRECTLY MEDIUM — the ticket stays medium, and the model is told no
     // The addition itself is medium; the ticket it reached is still high.
     expect(later.sent?.priority).toBe('medium');
     expect(later.result).toMatchObject({ already_filed: true, priority: 'high', marked_urgent: true });
+  });
+});
+
+describe('the priority said is the one SENT, not the one asked for (Codex P1 and github-actions P1 on #504)', () => {
+  const SID = 'CA0000000000000000000000000000c504';
+
+  it('a retry that asks for high while the outbox still holds the medium payload says medium', async () => {
+    // The first filing's POST does not land: its medium payload stays in the
+    // outbox for the worker, and the caller has been told nothing about urgency.
+    const first = await file(
+      { call_sid: SID, request_reason_id: 542, request_description: 'Caller wants to know what her prescription is.' },
+      { success: false, error: 'The ticketing system did not answer in time' },
+    );
+    expect(first.sent?.priority).toBe('medium');
+    expect(first.result).not.toHaveProperty('marked_urgent', true);
+    // The retry asks for high, and the row still holds the payload it was
+    // first written with, which is what goes out.
+    const retry = await file({
+      call_sid: SID,
+      request_reason_id: 542,
+      request_description: 'Caller is out of her latanoprost and needs a refill today.',
+    });
+    expect(retry.sent?.priority).toBe('medium');
+    expect(retry.result).toMatchObject({ success: true, priority: 'medium', marked_urgent: false });
+    expect(String(retry.result.fix)).toMatch(MUST_NOT);
+  });
+
+  it('a high filing on a ticket another process filed medium, with the addition unconfirmed, says medium', async () => {
+    // The ticket exists (the worker, or another process, sent it) and this
+    // process holds nothing about the call: no priority was ever noted here.
+    const row = {
+      id: 'row-elsewhere',
+      status: 'sent',
+      ticketNumber: 'VA-90002',
+      payload: { params: { priority: 'medium', description: 'Caller wants to know what her prescription is.' } },
+    };
+    outbox.byKey.set(`call-${SID}`, row);
+    outbox.byId.set(row.id, row);
+    const later = await file(
+      { call_sid: SID, request_reason_id: 542, request_description: 'Caller is out of her latanoprost and needs a refill today.' },
+      { success: true, ticketNumber: 'VA-90002', cached: true },
+    );
+    expect(later.sent?.priority).toBe('high');
+    expect(later.result).toMatchObject({ already_filed: true, details_added: false, priority: 'medium', marked_urgent: false });
+    expect(String(later.result.fix)).toMatch(MUST_NOT);
+  });
+
+  it('the same ticket, the addition confirmed: the app raised it, so it may be called urgent', async () => {
+    const row = {
+      id: 'row-elsewhere',
+      status: 'sent',
+      ticketNumber: 'VA-90002',
+      payload: { params: { priority: 'medium', description: 'Caller wants to know what her prescription is.' } },
+    };
+    outbox.byKey.set(`call-${SID}`, row);
+    outbox.byId.set(row.id, row);
+    const later = await file(
+      { call_sid: SID, request_reason_id: 542, request_description: 'Caller is out of her latanoprost and needs a refill today.' },
+      { success: true, ticketNumber: 'VA-90002', cached: true, detailsAdded: true },
+    );
+    expect(later.result).toMatchObject({ already_filed: true, details_added: true, priority: 'high', marked_urgent: true });
+    expect(String(later.result.fix)).toMatch(MAY_SAY);
+  });
+
+  it('a ticket an addition raised stays high when a later filing is not confirmed', async () => {
+    await file({ call_sid: SID, request_reason_id: 542, request_description: 'Caller wants to know what her prescription is.' });
+    const raised = await file(
+      { call_sid: SID, request_reason_id: 542, request_description: 'Caller is out of her latanoprost and needs a refill today.' },
+      { success: true, ticketNumber: 'VA-90001', cached: true, detailsAdded: true },
+    );
+    expect(raised.result).toMatchObject({ priority: 'high', marked_urgent: true });
+    // The outbox's first row still holds the medium payload; the call knows
+    // the app raised the ticket, so a third filing does not call it normal.
+    const third = await file(
+      { call_sid: SID, request_reason_id: 158, request_description: 'Caller also wants it sent to a different pharmacy.' },
+      { success: true, ticketNumber: 'VA-90001', cached: true },
+    );
+    expect(third.result).toMatchObject({ already_filed: true, details_added: false, priority: 'high', marked_urgent: true });
+  });
+
+  it('a call with no usable CallSid files unkeyed, and says the priority it sent', async () => {
+    const high = await file({ call_sid: 'unknown', request_reason_id: 155, request_description: 'Caller is out of her latanoprost.' });
+    expect(high.sent?.priority).toBe('high');
+    expect(high.result).toMatchObject({ success: true, priority: 'high', marked_urgent: true });
+    const medium = await file({ call_sid: 'unknown', request_reason_id: 542, request_description: 'Caller wants to know her prescription.' });
+    expect(medium.result).toMatchObject({ success: true, priority: 'medium', marked_urgent: false });
+  });
+
+  it('a ticket whose stored payload cannot be read is not called urgent', async () => {
+    const row = { id: 'row-unreadable', status: 'sent', ticketNumber: 'VA-90003', payload: undefined as never };
+    outbox.byKey.set(`call-${SID}`, row);
+    outbox.byId.set(row.id, row);
+    const later = await file(
+      { call_sid: SID, request_reason_id: 155, request_description: 'Caller is out of her latanoprost.' },
+      { success: true, ticketNumber: 'VA-90003', cached: true },
+    );
+    expect(later.result).toMatchObject({ already_filed: true, priority: 'unknown', marked_urgent: false });
+    expect(String(later.result.fix)).toMatch(MUST_NOT);
   });
 });
 
