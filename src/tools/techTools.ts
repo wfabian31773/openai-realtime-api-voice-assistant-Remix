@@ -36,6 +36,14 @@ import { createTicketDurable, postFailureToolResult, repeatFilingFields } from '
 import { loggableLookupError } from '../services/loggableTicketingError';
 import { verifiedDobFor } from './verifiedIdentity';
 import { spokenDobFor } from './spokenDob';
+import { callValue, noteCallValue } from './gateAttempts';
+
+/** Reason 155, Glaucoma Medication Refill: the one reason that files high. */
+const GLAUCOMA_REFILL_REASON = 155;
+/** Prescription Refill Request, Eye Drop Refill and department 3's catch-all. */
+const GENERIC_REFILL_REASONS = new Set([153, 154, 542]);
+/** The per-call value holding the priority this call's ticket was filed at. */
+const FILED_PRIORITY = 'tech_filed_priority';
 
 // ---------------------------------------------------------------- what kind
 
@@ -186,23 +194,33 @@ registerTool({
       );
     }
 
-    const { TECH_DEPARTMENT_ID, techReasonById, classifyTechRequest } = await import('./techTaxonomy');
+    const { TECH_DEPARTMENT_ID, techReasonById, classifyTechRequest, classifyTech } = await import('./techTaxonomy');
 
     // The reason must be one of THIS department's, whatever we were handed.
     // Department 3 is where reason 153 actually belongs, so the guard here is
     // not about keeping 153 out — it is about keeping Optical's and Surgery's
     // reasons out, and about never inventing one.
     const named = input.request_reason_id ? Number(input.request_reason_id) : NaN;
-    const cls =
-      (Number.isFinite(named) ? techReasonById(named) : null) ??
-      classifyTechRequest(description).classification;
-
     // The medication and the pharmacy are the two facts a refill cannot be
     // worked without, and both are routinely lost between the call and the
     // ticket. Putting them on their own lines means a technician reads them
     // rather than hunting for them in a paragraph.
     const medication = str(input.medication);
     const pharmacy = str(input.pharmacy);
+    let cls =
+      (Number.isFinite(named) ? techReasonById(named) : null) ??
+      classifyTechRequest(description).classification;
+    // A GLAUCOMA DRUG FILED AS AN ORDINARY REFILL (v256). The model passes the
+    // reason classify_tech_request gave it, and that tool read only the
+    // description, spelt right: "Lomigan" or "terzolamide", or a drug named only
+    // in the medication field, came back as an eye drop refill and filed at
+    // medium priority. Only the three generic refill reasons are read again,
+    // over the description and the medication together; a reason that says
+    // something more specific (a prior authorization, a pharmacy transfer)
+    // stands, as it does when the drug is spelt right.
+    if (GENERIC_REFILL_REASONS.has(cls.requestReasonId) && classifyTech(`${description}\n${medication}`)?.requestReasonId === GLAUCOMA_REFILL_REASON) {
+      cls = techReasonById(GLAUCOMA_REFILL_REASON) ?? cls;
+    }
     const body = [
       description,
       medication ? `\n\nMedication: ${medication}` : '',
@@ -376,7 +394,14 @@ registerTool({
     //
     // An outage raises it too, for the reason above — never for a name the
     // lookup ran and rejected, which is an ordinary fact about the call.
-    const priority = cls.requestReasonId === 155 || lostToOutage ? 'high' : 'medium';
+    const priority = cls.requestReasonId === GLAUCOMA_REFILL_REASON || lostToOutage ? 'high' : 'medium';
+    // The priority this call's ticket is filed at, kept for the call: a later
+    // filing on the same call adds to the ticket the first one made, and the
+    // ticketing app raises the ticket's priority only when that addition asks
+    // for a higher one and lands (repeat-filing.ts, `raisedPriority`). Noted
+    // before the POST so a filing whose answer is lost (and comes back on the
+    // retry as already filed) still has one.
+    if (callValue(callSid, FILED_PRIORITY) === undefined) noteCallValue(callSid, FILED_PRIORITY, priority);
 
     // ONE ENDPOINT, ALWAYS. create-ticket, with the department stated.
     // Never submit-ticket: it re-derives the DEPARTMENT server-side and
@@ -487,6 +512,22 @@ registerTool({
       return postFailureToolResult(res, 'file_tech_ticket');
     }
 
+    // WHAT THE AGENT MAY SAY ABOUT URGENCY (v256). The prompt told the model to
+    // say a glaucoma request was being marked urgent, and the model said it of
+    // drop refills, post-op drops, prior authorizations and symptoms too: 24 of
+    // 109 tech calls whose agent said "urgent" in the 14 days to 2026-11-20 got
+    // only a medium ticket. The ticket's priority is this tool's to say.
+    // A later filing on the call is high only when it asked for high and the
+    // app confirmed it reached the ticket; one it did not confirm reports the
+    // priority the ticket is known to have, which errs toward not promising.
+    const raisedByAddition = res.alreadyFiled === true && res.addition === 'added' && priority === 'high';
+    if (!res.alreadyFiled || raisedByAddition) noteCallValue(callSid, FILED_PRIORITY, priority);
+    const filedPriority = res.alreadyFiled && !raisedByAddition ? callValue(callSid, FILED_PRIORITY) : priority;
+    const markedUrgent = filedPriority === 'high';
+    const urgencyFix = markedUrgent
+      ? 'This request is filed at high priority. You may tell the caller it is marked urgent.'
+      : 'This request is filed at normal priority. Do not tell the caller it is urgent or marked urgent.';
+
     return {
       success: true,
       ticket_number: res.ticketNumber,
@@ -500,7 +541,9 @@ registerTool({
       // person will find.
       request_reason: redirect ? redirect.requestReason : cls.requestReason,
       request_reason_id: filedReasonId,
-      priority,
+      priority: filedPriority ?? 'unknown',
+      marked_urgent: markedUrgent,
+      fix: urgencyFix,
       provider_id: lookup.providerId ?? null,
       // Say plainly what is missing, so the agent can still ask before the call
       // ends rather than the technician chasing it tomorrow.
@@ -515,7 +558,7 @@ registerTool({
         ? `Filed as ${res.ticketNumber} with our ${redirect.departmentName} team. Read the ticket number back and say that team will follow up.`
         : `Filed as ${res.ticketNumber}. Read the ticket number back to the caller.`,
       // A repeat filing on this call answers for the ticket that exists, last.
-      ...repeatFilingFields(res),
+      ...repeatFilingFields(res, urgencyFix),
     };
   },
 });
