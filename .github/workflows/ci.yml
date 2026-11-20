@@ -57,11 +57,13 @@ jobs:
       # scripts/write-build-info.cjs reports no build SHA. Every publish from
       # v144 to v255 read buildSha null for this reason: package.json gained
       # `engines` (v208) without the lockfile, and the lockfile carried `libc`
-      # fields a newer npm wrote. This uses the runner's bundled npm, which is
-      # Node 22's, as Replit's is.
+      # fields a newer npm wrote. npm versions serialize the lockfile
+      # differently (`libc` above all), so the check runs Replit's own npm,
+      # pinned, not whichever npm the runner's Node 22 ships. If Replit's npm
+      # moves (its publish log prints the version), move this pin with it.
       - name: Lockfile is what npm install writes
         run: |
-          npm install --package-lock-only --ignore-scripts --no-audit --no-fund
+          npx -y npm@10.9.9 install --package-lock-only --ignore-scripts --no-audit --no-fund
           git diff --exit-code package-lock.json
 
       - name: Typecheck
